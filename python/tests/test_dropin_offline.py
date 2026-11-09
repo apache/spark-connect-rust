@@ -12907,6 +12907,732 @@ def test_numpy_longdouble_array_matches_dtype_and_element_checks_as_pyspark():
         assert error.value.getMessageParameters() == {"dtype": value.dtype.name}
 
 
+# --------------------------------------------------------------------------- coverage: UDFs, functions, SQLContext
+
+
+@pytest.mark.parametrize("args, kwargs, message", [
+    ((3, T.LongType()), {}, "Argument `func` should be callable, got int."),
+    ((lambda x: x, 3), {}, "Argument `returnType` should be DataType or str, got int."),
+    ((lambda x: x, T.LongType()), {"evalType": "x"}, "Argument `evalType` should be int, got str."),
+    ((lambda x: x, T.LongType()), {"evalType": None},
+     "Argument `evalType` should be int, got NoneType."),
+])
+def test_user_defined_function_constructor_checks_its_arguments_as_pyspark(args, kwargs, message):
+    from pyspark.errors import PySparkTypeError
+    from pyspark.sql.udf import UserDefinedFunction
+
+    with pytest.raises(PySparkTypeError, match=re.escape(message)) as error:
+        UserDefinedFunction(*args, **kwargs)
+    assert error.value.getCondition() == "NOT_EXPECTED_TYPE"
+
+
+def test_udf_register_takes_user_defined_functions_as_pyspark(mock_connect):
+    from pyspark.errors import PySparkTypeError
+    from pyspark.sql import functions as F
+    from pyspark.sql.functions import PandasUDFType
+
+    spark, service = mock_connect
+    plain = F.udf(lambda x: x + 1, T.IntegerType(), useArrow=False)
+    # The return type of a UDF is its own, so register rejects another one, before any request.
+    with pytest.raises(PySparkTypeError) as error:
+        spark.udf.register("f1", plain, T.IntegerType())
+    assert error.value.getCondition() == "CANNOT_SPECIFY_RETURN_TYPE_FOR_UDF"
+    assert error.value.getMessageParameters() == {
+        "arg_name": "f", "return_type": "IntegerType()"}
+    assert service.execute_requests == []
+    # Only the eval types that PySpark's register accepts: a grouped map UDF is not one.
+    grouped = F.pandas_udf(lambda df: df, "x long", functionType=PandasUDFType.GROUPED_MAP)
+    with pytest.raises(PySparkTypeError) as error:
+        spark.udf.register("f2", grouped)
+    assert error.value.getCondition() == "INVALID_UDF_EVAL_TYPE"
+    # A UDF registers under the name and is returned as it was given.
+    assert spark.udf.register("f3", plain) is plain
+    assert b"f3" in service.execute_requests[-1]
+
+
+@pytest.mark.parametrize("func, condition", [
+    (lambda a, b, c, d: a, "WRONG_NUM_ARGS_FOR_HIGHER_ORDER_FUNCTION"),
+    (lambda: 1, "WRONG_NUM_ARGS_FOR_HIGHER_ORDER_FUNCTION"),
+    (lambda *args: args[0], "UNSUPPORTED_PARAM_TYPE_FOR_HIGHER_ORDER_FUNCTION"),
+    (lambda a, *, b=1: a, "UNSUPPORTED_PARAM_TYPE_FOR_HIGHER_ORDER_FUNCTION"),
+])
+def test_higher_order_lambdas_check_their_parameters_as_pyspark(func, condition):
+    from pyspark.errors import PySparkValueError
+    from pyspark.sql import functions as F
+
+    with pytest.raises(PySparkValueError) as error:
+        F.transform(F.col("a"), func)
+    assert error.value.getCondition() == condition
+
+
+def test_deprecated_partitioning_functions_warn_and_delegate_as_pyspark():
+    from pyspark.sql import functions as F
+
+    partitioning = F.partitioning
+    for name in ("months", "days", "hours"):
+        with pytest.warns(FutureWarning, match=f"Deprecated in 4.0.0, use partitioning.{name} "):
+            column = getattr(F, name)(F.col("ts"))
+        assert repr(column) == f"Column<'{name}(ts)'>"
+        assert repr(column) == repr(getattr(partitioning, name)(F.col("ts")))
+
+
+def test_string_agg_distinct_and_reduce_build_the_expressions_of_pyspark():
+    from pyspark.sql import functions as F
+
+    assert repr(F.string_agg_distinct("c")) == "Column<'string_agg(distinct c)'>"
+    assert repr(F.string_agg_distinct("c", ",")) == "Column<'string_agg(distinct c, ,)'>"
+    # A finish function is the last argument of reduce, after the merge lambda.
+    reduced = F.reduce(F.col("a"), F.lit(0), lambda acc, x: acc + x, lambda a: a * 2)
+    # The ids of the lambda variables count the lambdas made so far in the process.
+    text = re.sub(r"[xy]_\d+", lambda m: m.group(0)[0] + "_N", repr(reduced))
+    assert text == ("Column<'reduce(a, 0, LambdaFunction(+(x_N, y_N), x_N, y_N), "
+                    "LambdaFunction(*(x_N, 2), x_N))'>")
+
+
+def test_broadcast_hints_dataframes_and_checks_its_argument_as_pyspark():
+    from pyspark.errors import PySparkTypeError
+    from pyspark.sql import functions as F
+
+    df = _offline_session().range(2)
+    hinted = F.broadcast(df)
+    assert hinted is not df and b"broadcast" in hinted._relation_bytes()
+    with pytest.raises(PySparkTypeError) as error:
+        F.broadcast(3)
+    assert error.value.getCondition() == "NOT_EXPECTED_TYPE"
+    assert "Argument `df` should be DataFrame, got int." in str(error.value)
+
+
+@pytest.mark.parametrize("call, condition, parameters", [
+    (lambda F: F.from_avro(3, "{}"), "INVALID_TYPE",
+     {"arg_name": "data", "arg_type": "pyspark.sql.Column or str"}),
+    (lambda F: F.from_avro("b", 3), "INVALID_TYPE",
+     {"arg_name": "jsonFormatSchema", "arg_type": "str"}),
+    (lambda F: F.from_avro("b", "{}", [("a", "b")]), "INVALID_TYPE",
+     {"arg_name": "options", "arg_type": "dict, optional"}),
+    (lambda F: F.to_avro("b", 3), "INVALID_TYPE",
+     {"arg_name": "jsonFormatSchema", "arg_type": "str"}),
+])
+def test_avro_functions_check_their_arguments_as_pyspark(call, condition, parameters):
+    from pyspark.errors import PySparkTypeError
+    from pyspark.sql.avro import functions as A
+
+    with pytest.raises(PySparkTypeError) as error:
+        call(A)
+    assert error.value.getCondition() == condition
+    assert error.value.getMessageParameters() == parameters
+
+
+def test_avro_and_protobuf_functions_build_their_expressions_as_pyspark():
+    from pyspark.sql.avro import functions as A
+    from pyspark.sql.protobuf import functions as P
+
+    assert repr(A.from_avro("b", "{}")) == "Column<'from_avro(b, {})'>"
+    assert repr(A.from_avro("b", "{}", {"mode": "PERMISSIVE", "x": 1})) == (
+        "Column<'from_avro(b, {}, map(mode, PERMISSIVE, x, 1))'>")
+    assert repr(A.to_avro("b")) == "Column<'to_avro(b)'>"
+    assert repr(A.to_avro("b", "{}")) == "Column<'to_avro(b, {})'>"
+    assert repr(P.from_protobuf("b", "M")) == "Column<'from_protobuf(b, M)'>"
+    assert repr(P.to_protobuf("b", "M")) == "Column<'to_protobuf(b, M)'>"
+    assert repr(P.from_protobuf("b", "M", None, {"mode": "FAILFAST"})) == (
+        "Column<'from_protobuf(b, M, map(mode, FAILFAST))'>")
+    assert repr(P.to_protobuf("b", "M", None, {"k": "v"})) == (
+        "Column<'to_protobuf(b, M, map(k, v))'>")
+
+
+def test_protobuf_options_must_be_a_map_as_pyspark():
+    from pyspark.sql import functions as F
+    from pyspark.sql.protobuf import functions as P
+
+    # Options are read through items(), as PySpark reads them, so a Column is rejected. The
+    # message names the class by its module path, a PyO3 class name (PySpark: 'Column').
+    message = r"'(pyspark\.sql\.connect\.column\.)?Column' object is not callable"
+    with pytest.raises(TypeError, match=message):
+        P.from_protobuf("b", "M", None, F.col("x"))
+    with pytest.raises(TypeError, match=message):
+        P.to_protobuf("b", "M", None, F.col("x"))
+
+
+def test_udtf_decorator_warns_without_pyarrow_as_pyspark(mock_connect, monkeypatch):
+    from pyspark.sql import functions as F
+    from pyspark.sql.pandas import utils as pandas_utils
+
+    spark, service = mock_connect
+
+    class Handler:
+        def eval(self, x):
+            yield (x,)
+
+    # The Arrow setting is read from the session, and the Arrow UDTF (301) is used when pandas
+    # and pyarrow import. Without them, PySpark warns and falls back to the regular UDTF (300).
+    service.confs = {"spark.sql.execution.pythonUDTF.arrow.enabled": "true"}
+    try:
+        assert F.udtf(Handler, returnType="x int").evalType == 301
+
+        def missing(*args, **kwargs):
+            raise ImportError("pyarrow is missing")
+
+        monkeypatch.setattr(pandas_utils, "require_minimum_pyarrow_version", missing)
+        with pytest.warns(UserWarning, match="Arrow optimization for Python UDTFs cannot be "
+                                              "enabled: pyarrow is missing"):
+            udtf_fallback = F.udtf(Handler, returnType="x int")
+        assert udtf_fallback.evalType == 300
+    finally:
+        service.confs = {}
+    # Without the setting, the regular UDTF is made, with no warning.
+    assert F.udtf(Handler, returnType="x int").evalType == 300
+
+
+def test_sql_context_delegates_to_its_session_as_pyspark(monkeypatch):
+    import warnings
+
+    from pyspark.sql.connect import context as cctx
+
+    log = []
+    session = _FakeSession(log)
+    monkeypatch.setattr(cctx.SQLContext, "_instantiatedContext", None)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        ctx = cctx.SQLContext(session)
+    assert any(issubclass(w.category, FutureWarning) for w in caught)
+    assert cctx.SQLContext._instantiatedContext is ctx
+    assert ctx.udf is session.udf and ctx.udtf is session.udtf
+    assert ctx.read is session.read and ctx.readStream is session.readStream
+    assert ctx.streams is session.streams
+
+    assert ctx.getConf("spark.a") == "spark.a=()"
+    assert ctx.getConf("spark.a", "d") == "spark.a=('d',)"
+    ctx.setConf("spark.b", 2)
+    assert ctx.range(3, None, 2, 4) == "range-df"
+    assert ctx.sql("select 1") == "sql-df"
+    assert ctx.table("t") == "table-df"
+    assert ctx.createDataFrame([(1,)], "a int", 0.5, True) == "df"
+    assert ctx.registerFunction("f", str, "string") == ("registered", "f", str, "string")
+    ctx.registerDataFrameAsTable(session.frame, "view")
+    ctx.dropTempTable("view")
+    ctx.cacheTable("t")
+    ctx.uncacheTable("t")
+    ctx.clearCache()
+    assert ctx.tableNames() == ["t", "v"]
+    assert ctx.tableNames("db") == ["t", "v"]
+    assert ctx.createExternalTable("e", "/p", "parquet", None, header="true") == "external"
+    assert log == [
+        ("session.conf.get", ("spark.a",), {}),
+        ("session.conf.get", ("spark.a", "d"), {}),
+        ("session.conf.set", ("spark.b", 2), {}),
+        ("session.range", (3, None, 2, 4), {}),
+        ("session.sql", ("select 1",), {}),
+        ("session.table", ("t",), {}),
+        ("session.createDataFrame", ([(1,)], "a int", 0.5, True), {}),
+        ("session.udf.register", ("f", str, "string"), {}),
+        ("frame.createOrReplaceTempView", ("view",), {}),
+        ("session.catalog.dropTempView", ("view",), {}),
+        ("session.catalog.cacheTable", ("t",), {}),
+        ("session.catalog.uncacheTable", ("t",), {}),
+        ("session.catalog.clearCache", (), {}),
+        ("session.catalog.listTables", (None,), {}),
+        ("session.catalog.listTables", ("db",), {}),
+        ("session.catalog.createExternalTable", ("e", "/p", "parquet", None), {"header": "true"}),
+    ]
+    # newSession wraps a new session, which the context does not hold.
+    child = ctx.newSession()
+    assert type(child) is cctx.SQLContext and child.sparkSession.name == "child"
+
+
+def test_sql_context_tables_lists_the_catalog_as_pyspark(monkeypatch):
+    from pyspark.sql import types as T
+    from pyspark.sql.connect import context as cctx
+
+    log = []
+    session = _FakeSession(log)
+    ctx = cctx.SQLContext._from_session(session)
+    assert ctx.tables() == "df"
+    # The rows are the catalog's tables: the namespace joined with dots, empty when absent.
+    (_, args, _), = [entry for entry in log if entry[0] == "session.createDataFrame"]
+    assert args[0] == [("a.b", "t", False), ("", "v", True)]
+    assert args[1] == T.StructType([
+        T.StructField("namespace", T.StringType(), nullable=True),
+        T.StructField("tableName", T.StringType(), nullable=True),
+        T.StructField("isTemporary", T.BooleanType(), nullable=False),
+    ])
+
+
+def test_sql_context_instance_and_session_identity_as_pyspark(monkeypatch):
+    from pyspark.sql.connect import context as cctx
+
+    log = []
+    session = _FakeSession(log)
+    first = cctx.SQLContext._from_session(session)
+    monkeypatch.setattr(cctx.SQLContext, "_instantiatedContext", first)
+    other = _FakeSession(log, "other")
+    # A context of another session replaces the cached one, which is kept for this session.
+    replaced = cctx.SQLContext._get_or_create_from_session(other)
+    assert replaced is not first and replaced.sparkSession is other
+    assert cctx.SQLContext._get_or_create_from_session(other) is replaced
+    # Sessions are the same when they are the same object, or report the same session id.
+    assert cctx._same_session(session, session)
+    assert cctx._same_session(_IdentifiedSession("id-1"), _IdentifiedSession("id-1"))
+    assert not cctx._same_session(_IdentifiedSession("id-1"), _IdentifiedSession("id-2"))
+    assert not cctx._same_session(object(), object())
+
+
+class _Recorder:
+    """Records each method call on `log` as (path, args, kwargs), and returns `results[name]`."""
+
+    def __init__(self, path, log, results=None):
+        self._path, self._log, self._results = path, log, results or {}
+
+    def __getattr__(self, name):
+        def call(*args, **kwargs):
+            self._log.append((f"{self._path}.{name}", args, kwargs))
+            result = self._results.get(name)
+            return result(*args, **kwargs) if callable(result) else result
+
+        return call
+
+
+class _IdentifiedSession:
+    def __init__(self, session_id):
+        self.session_id = session_id
+
+
+class _FakeSession:
+    """The session of a SQLContext: its calls are recorded, and what they return is set here."""
+
+    def __init__(self, log, name="session"):
+        self.log = log
+        self.name = name
+        self.frame = _Recorder("frame", log)
+        self.conf = _Recorder(f"{name}.conf", log, {"get": lambda *args: f"{args[0]}={args[1:]}"})
+        self.catalog = _Recorder(f"{name}.catalog", log, {
+            "listTables": lambda db=None: [
+                _Table(["a", "b"], "t", False), _Table([], "v", True)],
+            "createExternalTable": "external",
+        })
+        self.udf = _Recorder(f"{name}.udf", log, {
+            "register": lambda *args: ("registered",) + args})
+        self.udtf = _Recorder(f"{name}.udtf", log)
+        self.read = _Recorder(f"{name}.read", log)
+        self.readStream = _Recorder(f"{name}.readStream", log)
+        self.streams = _Recorder(f"{name}.streams", log)
+
+    def newSession(self):
+        return _FakeSession(self.log, "child")
+
+    def __getattr__(self, name):
+        # The session methods, which the context delegates to.
+        results = {"range": "range-df", "sql": "sql-df", "table": "table-df",
+                   "createDataFrame": "df"}
+        return getattr(_Recorder(self.name, self.log, results), name)
+
+
+class _Table:
+    def __init__(self, namespace, name, is_temporary):
+        self.namespace, self.name, self.isTemporary = namespace, name, is_temporary
+
+
+# --------------------------------------------------------------------------- coverage: literals, client, SQL formatting, dependencies
+
+
+@pytest.mark.parametrize("make, feature", [
+    (lambda F: F.udf(lambda x: x, T.CalendarIntervalType(), useArrow=True).returnType,
+     "Invalid return type with Arrow-optimized Python UDF: CalendarIntervalType() is not "
+     "implemented."),
+    (lambda F: F.pandas_udf(lambda s: s, T.CalendarIntervalType(),
+                            functionType=F.PandasUDFType.SCALAR).returnType,
+     "Invalid return type with scalar Pandas UDFs: CalendarIntervalType() is not implemented."),
+    (lambda F: F.arrow_udf(lambda a: a, T.CalendarIntervalType(),
+                           functionType=F.ArrowUDFType.SCALAR).returnType,
+     "Invalid return type with scalar Arrow UDFs: CalendarIntervalType() is not implemented."),
+    (lambda F: F.pandas_udf(lambda s: s, T.CalendarIntervalType(),
+                            functionType=F.PandasUDFType.GROUPED_AGG).returnType,
+     "Invalid return type with grouped aggregate Pandas UDFs: CalendarIntervalType() is not "
+     "implemented."),
+    (lambda F: F.arrow_udf(lambda a: a, T.CalendarIntervalType(),
+                           functionType=F.ArrowUDFType.GROUPED_AGG).returnType,
+     "Invalid return type with grouped aggregate Arrow UDFs: CalendarIntervalType() is not "
+     "implemented."),
+    (lambda F: F.pandas_udf(lambda s: s, T.StructType([T.StructField("a", T.CalendarIntervalType())]),
+                            functionType=F.PandasUDFType.GROUPED_MAP).returnType,
+     "Invalid return type with grouped map Pandas UDFs or at groupby.applyInPandas(WithState)"),
+    (lambda F: F.pandas_udf(lambda s: s, T.LongType(),
+                            functionType=F.PandasUDFType.GROUPED_MAP).returnType,
+     "Pandas UDF should return StructType for SQL_GROUPED_MAP_PANDAS_UDF"),
+])
+def test_udf_return_types_checked_per_eval_type_as_pyspark(make, feature):
+    from pyspark.errors import PySparkNotImplementedError, PySparkTypeError
+    from pyspark.sql import functions as F
+
+    # Each kind of UDF checks its return type when it is read, as PySpark does.
+    with pytest.raises((PySparkNotImplementedError, PySparkTypeError)) as error:
+        make(F)
+    assert feature in str(error.value)
+
+
+@pytest.mark.parametrize("missing, condition", [
+    ("grpc_status", "PACKAGE_NOT_INSTALLED"),
+    ("google.rpc", "PACKAGE_NOT_INSTALLED"),
+    ("zstandard", "PACKAGE_NOT_INSTALLED"),
+])
+def test_missing_client_packages_are_reported_as_pyspark(monkeypatch, missing, condition):
+    import sys
+
+    from pyspark.errors import PySparkImportError
+    from pyspark.sql.connect import utils
+
+    checks = {
+        "grpc_status": utils.require_minimum_grpcio_status_version,
+        "google.rpc": utils.require_minimum_googleapis_common_protos_version,
+        "zstandard": utils.require_minimum_zstandard_version,
+    }
+    # A None entry in sys.modules makes the import fail.
+    monkeypatch.setitem(sys.modules, missing, None)
+    with pytest.raises(PySparkImportError) as error:
+        checks[missing]()
+    assert error.value.getCondition() == condition
+    package = {"grpc_status": "grpcio-status", "google.rpc": "googleapis-common-protos",
+               "zstandard": "zstandard"}[missing]
+    assert package in str(error.value) and "must be installed" in str(error.value)
+
+
+def test_grpc_version_is_checked_as_pyspark(monkeypatch):
+    import grpc
+    from pyspark.errors import PySparkImportError
+    from pyspark.sql.connect import utils
+
+    utils.require_minimum_grpc_version()
+    monkeypatch.setattr(grpc, "__version__", "1.0.0")
+    with pytest.raises(PySparkImportError) as error:
+        utils.require_minimum_grpc_version()
+    assert error.value.getCondition() == "UNSUPPORTED_PACKAGE_VERSION"
+    assert error.value.getMessageParameters() == {
+        "package_name": "grpcio", "minimum_version": "1.48.1", "current_version": "1.0.0"}
+
+
+def test_connect_doctests_skip_without_connect_as_pyspark(monkeypatch, capsys):
+    import sys
+    from types import SimpleNamespace
+
+    from pyspark.sql.connect import utils
+    from pyspark.testing import connectutils
+
+    # The doctests run in a __main__ without a file, and skip when Connect cannot be tested.
+    monkeypatch.setitem(sys.modules, "__main__", SimpleNamespace(__spec__=None))
+    monkeypatch.setattr(connectutils, "should_test_connect", True)
+    utils.check_dependencies()
+    monkeypatch.setattr(connectutils, "should_test_connect", False)
+    with pytest.raises(SystemExit) as exit_info:
+        utils.check_dependencies()
+    assert exit_info.value.code == 0
+    assert "Skipping doctests:" in capsys.readouterr().err
+
+
+def test_observed_metrics_expose_their_name_metrics_and_keys_as_pyspark():
+    from pyspark.errors import PySparkTypeError
+    from pyspark.sql.connect.client import PlanObservedMetrics, _UnsupportedLiteral
+
+    metrics = PlanObservedMetrics("o", [1, 2], [])
+    # Without keys, each metric is named by its position, as the server names them.
+    assert repr(metrics) == "Plan observed(o=[1, 2])"
+    assert (metrics.name, metrics.metrics, metrics.keys) == (
+        "o", [1, 2], ["observed_metric_0", "observed_metric_1"])
+    assert metrics.pairs == {"observed_metric_0": 1, "observed_metric_1": 2}
+    assert metrics.to_dict() == {
+        "name": "o", "keys": ["observed_metric_0", "observed_metric_1"],
+        "pairs": {"observed_metric_0": 1, "observed_metric_1": 2}}
+    named = PlanObservedMetrics("p", [3], ["count"])
+    assert named.keys == ["count"] and named.pairs == {"count": 3}
+    # A literal that the transport could not decode is an error when the pairs are read.
+    unsupported = PlanObservedMetrics("u", [_UnsupportedLiteral("x"), 1], ["a", "b"])
+    assert repr(_UnsupportedLiteral("x")) == "_UnsupportedLiteral(x)"
+    with pytest.raises(PySparkTypeError) as error:
+        _ = unsupported.pairs
+    assert error.value.getCondition() == "UNSUPPORTED_LITERAL"
+    assert error.value.getMessageParameters() == {"literal": "x"}
+
+
+def test_to_pandas_attaches_the_metrics_of_an_execution_as_pyspark():
+    import pyarrow as pa
+    from pyspark.sql.connect.client import _to_pandas
+
+    table = pa.table({"a": pa.array([1, 2], type=pa.int64())})
+    options = {"timezone": "UTC", "struct_handling_mode": "legacy", "self_destruct": "false"}
+    frame = _to_pandas(table, None, [], [], **options)
+    assert list(frame["a"]) == [1, 2] and frame.attrs == {}
+    frame = _to_pandas(table, None, ["m"], ["o"], **options)
+    assert frame.attrs == {"metrics": ["m"], "observed_metrics": ["o"]}
+
+
+def test_client_configuration_reads_and_ml_cache_guards_as_pyspark(mock_connect, monkeypatch):
+    import threading
+    from types import SimpleNamespace
+
+    spark, service = mock_connect
+    service.confs = {"spark.a": "1", "spark.b": None}
+    client = spark.client
+    # The values of keys in one request, in order, and by key; None is an unset value.
+    assert client.get_configs("spark.a", "spark.b") == ("1", None)
+    assert client.get_config_dict("spark.a") == {"spark.a": "1"}
+    # A key that is not set takes its default, as the server reads it.
+    assert client.get_config_with_defaults(("spark.a", "x"), ("spark.c", "y")) == ("1", "y")
+    assert client.is_closed is False
+    assert client.global_user_context_extensions == []
+
+    # A re-entrant ML cache delete or cleanup, from the thread that is already in one,
+    # sends nothing and returns no ids.
+    service.reset()
+    client._ml_cache_rpc_thread = threading.get_ident()
+    try:
+        assert client._delete_ml_cache(["id-1"]) == []
+        client._cleanup_ml_cache()
+    finally:
+        client._ml_cache_rpc_thread = None
+    assert service.execute_requests == []
+    # The ids of a delete come from the server's ML result, as a comma-separated list.
+    response = SimpleNamespace(operator_info=SimpleNamespace(
+        obj_ref=SimpleNamespace(id="id-2,id-3")))
+    monkeypatch.setattr(client, "execute_command", lambda command: (
+        None, {"ml_command_result": response}, None))
+    assert client._delete_ml_cache(["id-1"]) == ["id-2", "id-3"]
+    assert client._delete_ml_cache([]) == []
+
+
+def test_literal_values_decode_from_their_protos_as_pyspark():
+    import datetime
+
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.sql import types as T
+    from pyspark.sql.connect.expressions import LiteralExpression as L
+
+    literal = pb2.Expression.Literal
+    assert L._to_value(literal(byte=3)) == 3
+    assert L._to_value(literal(byte=3), T.ByteType()) == 3
+    assert L._to_value(literal(short=4), T.ShortType()) == 4
+    assert L._to_value(literal(float=1.5), T.FloatType()) == 1.5
+    assert L._to_value(literal(binary=b"x"), T.BinaryType()) == b"x"
+    assert L._to_value(literal(null=pb2.DataType())) is None
+    # A timestamp is microseconds from the epoch, as a naive datetime of the session's zone.
+    assert L._to_value(literal(timestamp=1577934245000006), T.TimestampType()) == (
+        datetime.datetime(2020, 1, 2, 3, 4, 5, 6))
+    assert L._to_value(literal(timestamp=0)) == datetime.datetime(1970, 1, 1)
+    # A value of another type than the one given is an assertion, as in PySpark.
+    for value, data_type in ((literal(byte=3), T.LongType()),
+                             (literal(binary=b"x"), T.LongType()),
+                             (literal(timestamp=1), T.LongType())):
+        with pytest.raises(AssertionError):
+            L._to_value(value, data_type)
+
+
+@pytest.mark.parametrize("value, text", [
+    (datetime.datetime(2020, 1, 2, 3, 4, 5, 6), "2020-01-02 03:04:05.000006"),
+    (datetime.date(2020, 1, 2), "2020-01-02"),
+    (datetime.time(1, 2, 3), "01:02:03.000000"),
+    (datetime.timedelta(days=1, seconds=2), "P1DT0H0M2S"),
+])
+def test_literal_columns_render_their_values_as_pyspark(value, text):
+    from pyspark.sql import functions as F
+
+    assert repr(F.lit(value)) == f"Column<'{text}'>"
+
+
+def test_sql_formatter_substitutes_columns_strings_and_dataframes_as_pyspark():
+    import re
+
+    from pyspark.sql import functions as F
+    from pyspark.sql.connect.sql_formatter import SQLStringFormatter
+
+    formatter = SQLStringFormatter(None)
+    assert formatter.format("select {c}, {s}, {n}", c=F.col("a"), s="it's", n=3) == (
+        "select a, 'it\\'s', 3")
+    assert formatter.format("select {n}", n=None) == "select None"
+    # A value that is not a plain column reference is an error, as in PySpark.
+    from pyspark.errors import PySparkValueError
+
+    with pytest.raises(PySparkValueError, match="should be a plain column reference"):
+        formatter.format("select {c}", c=F.col("a") + 1)
+
+    # A DataFrame is registered as a temporary view under a unique name; the same DataFrame
+    # keeps its name in the same formatter, and clearing the formatter changes nothing.
+    spark = _offline_session()
+    left, right = spark.range(1), spark.range(2)
+    formatter = SQLStringFormatter(spark)
+    sql = formatter.format("select * from {a} join {b} on {a}.id = {b}.id, {a}", a=left, b=right)
+    names = re.findall(r"_pyspark_connect_temp_view_[0-9a-f]{32}", sql)
+    assert len(names) == 5
+    assert names[0] == names[2] == names[4] and names[1] == names[3] and names[0] != names[1]
+    formatter.clear()
+    assert formatter.format("{a}", a=left) == names[0]
+    # Another formatter registers its own view.
+    assert SQLStringFormatter(spark).format("{a}", a=left) != names[0]
+
+
+# --------------------------------------------------------------------------- coverage: pandas Arrow input
+
+
+def _pandas_local_table(mock_connect, frame, schema=None):
+    """The Arrow table that createDataFrame of a pandas frame sends in its local relation."""
+    import pyarrow as pa
+
+    spark, service = mock_connect
+    spark.createDataFrame(frame, schema).toArrow()
+    request = parse_message(service.execute_requests[-1])
+    relation = parse_message(parse_message(request[3][0])[1][0])
+    while 18 in relation:  # Relation.to_df -> ToDF.input.
+        relation = parse_message(parse_message(relation[18][0])[1][0])
+    local = parse_message(relation[11][0])
+    return pa.ipc.open_stream(local[1][0]).read_all()
+
+
+def test_customized_int64_frames_keep_their_values_as_pyspark(mock_connect):
+    pd = pytest.importorskip("pandas")
+    import pyarrow as pa
+
+    # A subclass takes the row path, which keeps every int64 value, beyond 2**53 as well.
+    values = [2**60 + i for i in range(1000)]
+    table = _pandas_local_table(mock_connect, _RowPathFrame(pd)({"v": values}))
+    assert table.schema.field(0).type == pa.int64()
+    assert table.column(0).to_pylist() == values
+
+
+def test_duplicate_struct_field_names_keep_int64_columns_as_pyspark(mock_connect):
+    pd = pytest.importorskip("pandas")
+    import numpy as np
+    from pyspark.sql import types as T
+
+    # PySpark accepts a struct of repeated field names: each column keeps its own values.
+    frame = pd.DataFrame({"a": np.arange(1000, dtype="int64"),
+                          "b": np.arange(1000, 2000, dtype="int64")})
+    schema = T.StructType([T.StructField("x", T.LongType()), T.StructField("x", T.LongType())])
+    table = _pandas_local_table(mock_connect, frame, schema)
+    assert table.num_columns == 2
+    assert table.column(0).to_pylist() == list(range(1000))
+    assert table.column(1).to_pylist() == list(range(1000, 2000))
+
+
+def test_null_timestamps_in_non_nullable_fields_raise_as_pyspark(mock_connect):
+    pd = pytest.importorskip("pandas")
+    from pyspark.sql import types as T
+
+    spark, _ = mock_connect
+    frame = pd.DataFrame({"t": pd.to_datetime(["2020-01-01 00:00:00", None])})
+    # Null values in a non-nullable timestamp field raise before any configuration request.
+    with pytest.raises(ValueError, match="Casting field 't' with null values to non-nullable"):
+        spark.createDataFrame(frame, T.StructType([T.StructField("t", T.TimestampType(), False)]))
+
+
+def test_submicrosecond_timestamps_raise_the_arrow_conversion_error_as_pyspark(mock_connect):
+    pd = pytest.importorskip("pandas")
+    from pyspark.errors import PySparkValueError
+
+    spark, _ = mock_connect
+    # Nanoseconds that a microsecond timestamp cannot hold are an unsafe Arrow conversion.
+    frame = pd.DataFrame({"t": pd.to_datetime(["2020-01-01 00:00:00.000000001"])})
+    with pytest.raises(PySparkValueError, match="It can be caused by overflows or other unsafe "
+                                                 "conversions warned by Arrow"):
+        spark.createDataFrame(frame, "t timestamp")
+
+
+@pytest.mark.parametrize("values, schema, error, message", [
+    (["1e40", "1"], "d decimal(38,0)", "PySparkValueError",
+     "converting pandas.Series (object) with name 'd' to Arrow Array (decimal128(38, 0))"),
+    (["1.5", 1.5], "d decimal(5,2)", "PySparkTypeError",
+     "converting pandas.Series (object) with name 'd' to Arrow Array (decimal128(5, 2))."),
+])
+def test_object_decimal_columns_raise_the_arrow_errors_as_pyspark(mock_connect, values, schema,
+                                                                  error, message):
+    import decimal
+
+    pd = pytest.importorskip("pandas")
+    from pyspark.errors import PySparkTypeError, PySparkValueError
+
+    spark, _ = mock_connect
+    cells = [decimal.Decimal(v) if isinstance(v, str) else v for v in values]
+    frame = pd.DataFrame({"d": pd.Series(cells, dtype=object)})
+    expected = PySparkTypeError if error == "PySparkTypeError" else PySparkValueError
+    with pytest.raises(expected, match=re.escape(message)):
+        spark.createDataFrame(frame, schema)
+
+
+@pytest.mark.parametrize("values", [["1.5", 1.5], ["1.5", "x"]])
+def test_decimal_and_other_values_without_a_schema_raise_as_pyspark(mock_connect, values):
+    import decimal
+
+    pd = pytest.importorskip("pandas")
+    from pyspark.errors import PySparkTypeError
+
+    spark, _ = mock_connect
+    cells = [decimal.Decimal(v) if isinstance(v, str) and v != "x" else v for v in values]
+    frame = pd.DataFrame({"d": pd.Series(cells, dtype=object)})
+    # Arrow types the column, which holds a float or a string beside the Decimals, and fails.
+    with pytest.raises(PySparkTypeError, match=re.escape(
+            "Exception thrown when converting pandas.Series (object) with name 'd' to Arrow "
+            "Array (None).")):
+        spark.createDataFrame(frame)
+
+
+def test_decimal_and_int_values_without_a_schema_widen_as_pyspark(mock_connect):
+    import decimal
+
+    pd = pytest.importorskip("pandas")
+
+    # Ints beside Decimals are Decimals, widened to the scale of the column, as PySpark does.
+    frame = pd.DataFrame({"d": pd.Series([decimal.Decimal("1.5"), 2], dtype=object)})
+    table = _pandas_local_table(mock_connect, frame)
+    assert table.column(0).type.scale == 1
+    assert table.column(0).to_pylist() == [decimal.Decimal("1.5"), decimal.Decimal("2.0")]
+
+
+def test_empty_dict_maps_cannot_infer_a_schema_as_pyspark(mock_connect):
+    pd = pytest.importorskip("pandas")
+    from pyspark.errors import PySparkValueError
+
+    spark, service = mock_connect
+    service.confs = {"spark.sql.execution.pandas.inferPandasDictAsMap": "true"}
+    try:
+        with pytest.raises(PySparkValueError) as error:
+            spark.createDataFrame(pd.DataFrame({"m": [{}]}))
+    finally:
+        service.confs = {}
+    assert error.value.getCondition() == "CANNOT_INFER_EMPTY_SCHEMA"
+
+
+# --------------------------------------------------------------------------- coverage: plans
+
+
+def test_plan_observations_come_from_the_plan_below_as_pyspark():
+    from pyspark.sql.connect.plan import LogicalPlan, SubqueryAlias
+
+    # A plan without a child has no observations, and a wrapper reads those of its child.
+    assert LogicalPlan(None).observations == {}
+    assert SubqueryAlias(LogicalPlan(None), "a").observations == {}
+
+
+def test_failed_release_of_a_cached_relation_is_logged_as_pyspark(monkeypatch):
+    from pyspark.sql.connect import plan as plan_module
+    from pyspark.sql.connect.plan import CachedRemoteRelation
+
+    class FailingSession:
+        class client:  # noqa: N801 - the session's client, as the finalizer reads it
+            is_closed = False
+
+        def _execute_command(self, command):
+            raise RuntimeError("boom")
+
+    # The finalizer releases the relation on the server, and only logs a failure, as PySpark.
+    # The connect logger is disabled unless configured, so the test records its warnings.
+    warnings_logged = []
+
+    class Recorder:
+        def warning(self, message):
+            warnings_logged.append(message)
+
+    monkeypatch.setattr(plan_module, "logger", Recorder())
+    relation = CachedRemoteRelation("relation-1", FailingSession())
+    relation.__del__()
+    # Collecting the relation runs its finalizer again, which must not log a second time.
+    relation._relation_id = None
+    assert warnings_logged == ["RemoveRemoteCachedRelation failed with exception: boom."]
+
+
 @pytest.mark.parametrize("name", [
     "byte", "short", "intc", "int_", "intp", "long", "longlong", "single", "double",
 ])
