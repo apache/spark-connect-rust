@@ -320,8 +320,10 @@ impl SparkConnectClient {
             // `with_native_roots()` is required: tonic >=0.11 does NOT load a trust store
             // from the `tls-native-roots` feature alone, so without this the TLS handshake
             // has no CA anchors, fails, and the retry policy masks it as a hang.
+            // The server name of an IPv6 host is its address without the brackets of the URL.
+            let domain = builder.host().trim_start_matches('[').trim_end_matches(']');
             let tls_config = ClientTlsConfig::new()
-                .domain_name(builder.host())
+                .domain_name(domain)
                 .with_native_roots();
 
             tonic::transport::Channel::from_shared(format!("https://{endpoint}"))
@@ -352,9 +354,9 @@ impl SparkConnectClient {
         // excluded from `metadata()`, so attach it explicitly here; this then propagates
         // to every request via `_attach_metadata` and the reattach stream.
         if let Some(tok) = builder.token() {
-            // The token is sent over TLS, or over plaintext only on a loopback host: the
-            // scheme above is `builder.secure()`, which is TLS for a token on any other
-            // host, as the reference client does.
+            // The token is sent over TLS, or over plaintext only on `localhost`: the scheme
+            // above is `builder.secure()`, which is TLS for a token on any other host, as
+            // the reference client does.
             metadata.push((AUTHORIZATION_HEADER.to_string(), format!("Bearer {}", tok)));
         }
 
@@ -2350,13 +2352,13 @@ mod tests {
     #[tokio::test]
     async fn test_token_without_ssl_to_localhost_is_allowed() {
         // Local development mirrors upstream's `local_channel_credentials()` exception:
-        // a token over plaintext loopback is permitted and the header is attached.
+        // a token over plaintext `localhost` is permitted and the header is attached.
         for url in [
             "sc://localhost/;token=SECRET",
-            "sc://127.0.0.1/;token=SECRET",
-            "sc://[::1]/;token=SECRET",
+            "sc://LOCALHOST/;token=SECRET",
         ] {
             let builder = ChannelBuilder::parse(url).unwrap();
+            assert!(!builder.secure(), "{url}");
             let client = SparkConnectClient::connect(&builder)
                 .await
                 .unwrap_or_else(|e| panic!("{url} should be allowed, got: {e}"));
@@ -2366,6 +2368,22 @@ mod tests {
                     .iter()
                     .any(|(k, v)| k == "authorization" && v == "Bearer SECRET"),
                 "{url}: expected the bearer header to be attached, got {:?}",
+                client.metadata
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_token_to_loopback_ip_literals_is_sent_over_tls() {
+        // Only `localhost` is exempt: the IPv4 and IPv6 loopback literals are TLS with a
+        // token, as in PySpark, so the channel is https and the header is still attached.
+        for url in ["sc://127.0.0.1/;token=SECRET", "sc://[::1]/;token=SECRET"] {
+            let builder = ChannelBuilder::parse(url).unwrap();
+            assert!(builder.secure(), "{url}");
+            let client = SparkConnectClient::connect(&builder).await.unwrap();
+            assert!(
+                has_bearer(&client, "SECRET"),
+                "{url}: {:?}",
                 client.metadata
             );
         }

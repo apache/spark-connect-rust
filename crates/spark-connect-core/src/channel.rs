@@ -157,23 +157,26 @@ impl ChannelBuilder {
     /// Whether the channel uses TLS, which is the scheme `SparkConnectClient::connect` dials.
     ///
     /// The reference client (`core.py` `ChannelBuilder.secure`) is TLS when `use_ssl` is set
-    /// or a token is present. A token on a loopback host stays plaintext here, as a
-    /// documented leniency for local development; the reference client uses local channel
-    /// credentials for `localhost` in that case. A token is therefore never sent in
-    /// cleartext to a remote host.
+    /// or a token is present, except for a token on `localhost`, which stays plaintext for
+    /// local development (`core.py` `toChannel` uses local channel credentials there). A
+    /// token is therefore never sent in cleartext to any other host, `127.0.0.1` and `[::1]`
+    /// included.
     pub fn secure(&self) -> bool {
-        self.use_ssl() || (self.token().is_some() && !self.is_loopback())
+        self.use_ssl() || (self.token().is_some() && !self.is_localhost())
     }
 
-    /// Whether the endpoint is a loopback address.
-    ///
-    /// The reference client (`core.py` `toChannel`) permits a token over an
-    /// unencrypted channel only for `host == "localhost"` (via
-    /// `grpc.local_channel_credentials()`); every other host is forced onto TLS.
-    /// We treat the IPv4/IPv6 loopback literals as equivalent to `localhost`, so
-    /// local development keeps working without `use_ssl=true`.
+    /// Whether the host is `localhost`. The reference client compares `localhost` after
+    /// `urllib` has lowercased the host (`core.py` `toChannel`), so the match is
+    /// case-insensitive. The IP loopback literals are not `localhost`, so they use TLS with
+    /// a token.
+    pub fn is_localhost(&self) -> bool {
+        self.host.eq_ignore_ascii_case("localhost")
+    }
+
+    /// Whether the endpoint is a loopback address: `localhost` or the IPv4/IPv6 loopback
+    /// literals. Only `localhost` keeps a token in plaintext; see [`Self::secure`].
     pub fn is_loopback(&self) -> bool {
-        matches!(self.host.as_str(), "localhost" | "127.0.0.1" | "[::1]")
+        self.is_localhost() || matches!(self.host.as_str(), "127.0.0.1" | "[::1]")
     }
 
     pub fn user_id(&self) -> Option<&str> {
@@ -438,9 +441,10 @@ mod tests {
     }
 
     #[test]
-    fn scheme_is_tls_for_a_token_on_a_remote_host() {
+    fn scheme_is_tls_for_a_token_on_any_host_but_localhost() {
         let _env = set_env(&[("SPARK_CONNECT_AUTHENTICATE_TOKEN", None)]);
-        // (url, TLS). A token goes over TLS to any host but a loopback one.
+        // (url, TLS). A token goes over TLS to any host but `localhost`, as PySpark does, so
+        // the loopback literals use TLS too. `use_ssl` is TLS for every host.
         for (url, tls) in [
             ("sc://example.com", false),
             ("sc://example.com/;use_ssl=true", true),
@@ -450,10 +454,13 @@ mod tests {
             ("sc://localhost/;token=T", false),
             ("sc://localhost/;use_ssl=true", true),
             ("sc://localhost/;use_ssl=true;token=T", true),
-            ("sc://127.0.0.1/;token=T", false),
+            ("sc://LOCALHOST/;token=T", false),
+            ("sc://127.0.0.1/;token=T", true),
             ("sc://127.0.0.1/;use_ssl=true", true),
-            ("sc://[::1]:15002/;token=T", false),
+            ("sc://127.0.0.1/", false),
+            ("sc://[::1]:15002/;token=T", true),
             ("sc://[::1]:15002/;use_ssl=true", true),
+            ("sc://[::1]:15002/", false),
         ] {
             let c = ChannelBuilder::parse(url).unwrap();
             assert_eq!(c.secure(), tls, "{url}");

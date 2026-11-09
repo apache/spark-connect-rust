@@ -71,7 +71,7 @@ let spark = SparkSessionBuilder::default()
     .get_or_create()?;
 ```
 
-Replace `spark.example.com`, the port, and authentication parameters as needed. As in PySpark, a token implies TLS, so this connects over TLS. A token of the `SPARK_CONNECT_AUTHENTICATE_TOKEN` environment variable does the same. Only to `localhost`, `127.0.0.1` and `[::1]` is a token sent without TLS, for local development. Without a token, `use_ssl=true` turns TLS on:
+Replace `spark.example.com`, the port, and authentication parameters as needed. As in PySpark, a token implies TLS, so this connects over TLS. A token of the `SPARK_CONNECT_AUTHENTICATE_TOKEN` environment variable does the same. Only to `localhost` is a token sent without TLS, for local development; to `127.0.0.1` and `[::1]` it is sent over TLS, as in PySpark. Without a token, `use_ssl=true` turns TLS on:
 
 ```rust
 use spark_connect::SparkSessionBuilder;
