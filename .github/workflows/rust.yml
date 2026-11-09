@@ -176,3 +176,28 @@ jobs:
 
       - name: WASM UDF runners (pyarrow batches, no server)
         run: cargo test --manifest-path tests/wasm-udf/Cargo.toml -- --ignored
+
+  msrv:
+    name: Minimum supported Rust
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the minimum supported Rust toolchain
+        # The `rust-version` of the published crates (the workspace Cargo.toml). rustup is
+        # preinstalled on the runner; use it directly, as the other jobs do.
+        run: rustup toolchain install 1.88 --profile minimal
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
+      - name: Cargo check the published crates with it
+        # Warnings of an older compiler are not errors here; this checks that the crates build.
+        env:
+          RUSTFLAGS: ""
+        run: |
+          cargo +1.88 check --locked -p apache-spark-connect -p apache-spark-connect-core \
+            -p apache-spark-connect-proto -p apache-spark-connect-macros -p apache-spark-connect-build \
+            --features apache-spark-connect/wasm-udf
