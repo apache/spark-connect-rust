@@ -141,6 +141,9 @@ enum RowSource {
     /// current batch's rows (`prefetchPartitions=True`).
     Prefetch {
         rx: tokio::sync::mpsc::Receiver<Result<Vec<Row>>>,
+        /// The task, to raise its panic (of a progress handler, say) in the caller once its
+        /// channel closes, as the on-demand source raises it, instead of ending early.
+        task: Option<tokio::task::JoinHandle<()>>,
     },
 }
 
@@ -153,8 +156,12 @@ impl LocalRowIterator {
     ) -> Self {
         let schema = SchemaSlot::default();
         let source = if prefetch_partitions {
-            RowSource::Prefetch {
-                rx: spawn_prefetch(session, stream, Arc::clone(&schema)),
+            {
+                let (rx, task) = spawn_prefetch(session, stream, Arc::clone(&schema));
+                RowSource::Prefetch {
+                    rx,
+                    task: Some(task),
+                }
             }
         } else {
             RowSource::OnDemand {
@@ -224,7 +231,22 @@ impl LocalRowIterator {
                     }
                 }
             },
-            RowSource::Prefetch { rx } => block_on(rx.recv()),
+            RowSource::Prefetch { rx, task } => {
+                let batch = block_on(rx.recv());
+                if batch.is_none() {
+                    // The channel closed: the task ended, or it panicked, which then drops its
+                    // sender without an error. Raise the panic here, so the rows are not cut
+                    // short silently.
+                    if let Some(task) = task.take() {
+                        if let Err(error) = block_on(task) {
+                            if error.is_panic() {
+                                std::panic::resume_unwind(error.into_panic());
+                            }
+                        }
+                    }
+                }
+                batch
+            }
         }
     }
 }
@@ -264,9 +286,12 @@ fn spawn_prefetch(
     session: SparkSession,
     mut stream: ExecutionStream,
     schema: SchemaSlot,
-) -> tokio::sync::mpsc::Receiver<Result<Vec<Row>>> {
+) -> (
+    tokio::sync::mpsc::Receiver<Result<Vec<Row>>>,
+    tokio::task::JoinHandle<()>,
+) {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Vec<Row>>>(1);
-    get_runtime().spawn(async move {
+    let task = get_runtime().spawn(async move {
         let mut execution_info = ExecutionInfo::default();
         loop {
             // Closing the consumer must release the execution even while the server has
@@ -313,7 +338,7 @@ fn spawn_prefetch(
         }
         session.record_execution(execution_info);
     });
-    rx
+    (rx, task)
 }
 
 impl DataFrame {

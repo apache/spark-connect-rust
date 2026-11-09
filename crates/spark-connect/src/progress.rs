@@ -110,9 +110,12 @@ impl ProgressTracker {
 }
 
 impl Drop for ProgressTracker {
-    /// As PySpark's `Progress.finish` when its execution ends, also of an error.
+    /// As PySpark's `Progress.finish` when its execution ends, also of an error. While a panic
+    /// unwinds, a handler is not called: one that panics again would abort the process.
     fn drop(&mut self) {
-        self.notify(true);
+        if !std::thread::panicking() {
+            self.notify(true);
+        }
     }
 }
 
@@ -205,6 +208,31 @@ mod tests {
                 done: false,
             }
         );
+        session.remove_progress_handler(id);
+    }
+
+    /// A handler that panics on every call, as a user's `unwrap` may: the panic of the update
+    /// unwinds out of the tracker, and its drop must not call the handler again while
+    /// unwinding, which would abort the process.
+    #[test]
+    fn a_handler_that_panics_does_not_abort_when_the_tracker_unwinds() {
+        let session = SparkSession::builder()
+            .remote("sc://localhost:15002")
+            .get_or_create()
+            .expect("session");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::clone(&calls);
+        let id = session.register_progress_handler(move |_| {
+            seen.fetch_add(1, Ordering::SeqCst);
+            panic!("handler panic");
+        });
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut tracker = ProgressTracker::new(&session, None);
+            tracker.update(&progress(&[(1, 1)], 0), "op");
+        }));
+        assert!(result.is_err());
+        // Only the update called the handler; the done call during unwinding is skipped.
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
         session.remove_progress_handler(id);
     }
 
