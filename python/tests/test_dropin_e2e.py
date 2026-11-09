@@ -935,6 +935,43 @@ ARROW_TABLE_ROWS = [
 ]
 
 
+def test_pickled_sort_columns_sort_on_the_server_as_pyspark(session, tmp_path):
+    # As PySpark's: a pickled sort Column is a sort order again, so orderBy, a window and
+    # repartitionByRange sort by it as by the Column built without the pickling, and a
+    # foreachBatch function that captures it sorts by it on the Python worker of the server.
+    import pickle
+
+    from pyspark.sql.window import Window
+
+    df = session.createDataFrame([(1, "a"), (3, "b"), (None, "c"), (2, "d")], "x int, y string")
+    for direct in (F.col("x").desc(), F.col("x").asc_nulls_last()):
+        copied = pickle.loads(pickle.dumps(direct))
+        assert df.orderBy(copied).collect() == df.orderBy(direct).collect()
+        ranked = df.select("y", F.row_number().over(Window.orderBy(copied)).alias("r"))
+        assert sorted(ranked.collect()) == sorted(
+            df.select("y", F.row_number().over(Window.orderBy(direct)).alias("r")).collect()
+        )
+        by_y = lambda row: row.y  # noqa: E731
+        assert sorted(df.repartitionByRange(2, copied).collect(), key=by_y) == sorted(
+            df.collect(), key=by_y)
+
+    (tmp_path / "input.txt").write_text("a\nc\nb\n")
+    captured = F.col("value").desc()
+    table = "foreach_batch_captured_sort"
+
+    def func(batch, batch_id):
+        batch.orderBy(captured).limit(1).write.mode("append").saveAsTable(table)
+
+    query = session.readStream.format("text").load(str(tmp_path)).writeStream.foreachBatch(func)
+    query = query.start()
+    try:
+        query.processAllAvailable()
+        assert [row.value for row in session.table(table).collect()] == ["c"]
+    finally:
+        query.stop()
+        session.sql(f"DROP TABLE IF EXISTS {table}").collect()
+
+
 def test_pickled_when_columns_chain_on_the_server_as_pyspark(session, tmp_path):
     # As PySpark's: a pickled when() Column keeps its CASE WHEN, so it collects as the chain
     # built without the pickling, and a foreachBatch function that captures it chains on it on

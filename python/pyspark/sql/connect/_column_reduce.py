@@ -29,13 +29,21 @@ def column_of(
     rendered: str,
     branches: Optional[List[Tuple[Any, Any]]] = None,
     else_value: Any = None,
+    sort: Optional[Tuple[Any, str]] = None,
 ) -> Any:
     """The Column of ``expression``, the bytes of a ``spark.connect.Expression``, and of its
     rendering ``rendered``, which sends the expression as it is: of the Rust client, or, on a
     Python worker of the server, PySpark Connect's Column of the expression, as PySpark Connect's
     Column of its expression unpickles there, so everything that it calls there is of PySpark.
     For a CASE WHEN, ``branches`` are the (condition, value) Columns of its branches and
-    ``else_value`` the Column of its else value, so that it is a CASE WHEN again."""
+    ``else_value`` the Column of its else value, so that it is a CASE WHEN again. For a sort
+    order, ``sort`` is its child Column and the name of its sort method, such as
+    ``desc_nulls_last``, so that it is a sort order again."""
+    if sort is not None:
+        # The child is a Column of the client, or PySpark Connect's on a worker, whose sort
+        # method gives back the sort order, as PySpark's SortOrder of its child.
+        child, method = sort
+        return getattr(child, method)()
     try:
         from pyspark import _pyspark
     except ImportError:

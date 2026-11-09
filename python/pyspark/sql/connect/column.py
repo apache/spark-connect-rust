@@ -31,12 +31,14 @@ def _reduce_column(
     rendered: str,
     branches: Optional[List[Tuple[Any, Any]]] = None,
     else_value: Any = None,
+    sort: Optional[Tuple[Any, str]] = None,
 ) -> Tuple[Callable[..., Any], Tuple[Any, ...]]:
     """The ``__reduce__`` of a Column of the bytes of its ``spark.connect.Expression`` and of its
     rendering, as PySpark Connect's Column pickles its expression: the function of
     ``pyspark.sql.connect._column_reduce``, which gives back the Column, which sends the
     expression as it is. A CASE WHEN gives its branches and else value too, as Columns, so the
-    Column gives back a CASE WHEN. cloudpickle pickles that function by value, also to a Python
-    worker of the server, where it gives back PySpark Connect's Column, and ``pickle`` by
+    Column gives back a CASE WHEN. A sort order gives its child Column and its sort method, so
+    the Column gives back a sort order. cloudpickle pickles that function by value, also to a
+    Python worker of the server, where it gives back PySpark Connect's Column, and ``pickle`` by
     reference."""
-    return _column_reduce.column_of, (expression, rendered, branches, else_value)
+    return _column_reduce.column_of, (expression, rendered, branches, else_value, sort)
