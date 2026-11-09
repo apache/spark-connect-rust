@@ -220,11 +220,27 @@ pub(crate) fn value_not_between(py: Python<'_>) -> PyErr {
     )
 }
 
+/// An int32 literal within its range, otherwise a long, as PySpark's `_infer_type`.
+fn integer_literal(value: i64) -> LiteralExpression {
+    if let Ok(value) = i32::try_from(value) {
+        LiteralExpression::int(value)
+    } else {
+        LiteralExpression::long(value)
+    }
+}
+
 /// Convert a Python object to a Rust Column (handles Column or scalars that become literals).
 pub fn to_column(obj: &Bound<'_, PyAny>) -> PyResult<Column> {
     // Try to get as PyColumn first
     if let Ok(col) = obj.extract::<Bound<'_, PyColumn>>() {
         return Ok(col.borrow().column.clone());
+    }
+    // Exact built-in ints need no Enum, NumPy or non-primitive scalar probing.
+    // Subclasses and out-of-range ints retain the generic conversion order below.
+    if let Ok(integer) = obj.cast_exact::<pyo3::types::PyInt>() {
+        if let Ok(value) = integer.extract::<i64>() {
+            return Ok(Column::new(Expression::literal(integer_literal(value))));
+        }
     }
     // An Enum is the literal of its value, as PySpark's.
     let obj = &enum_to_value(obj)?;
@@ -278,13 +294,7 @@ pub fn to_column(obj: &Bound<'_, PyAny>) -> PyResult<Column> {
     }
 
     if let Ok(i) = obj.extract::<i64>() {
-        return Ok(Column::new(Expression::literal(
-            if i32::try_from(i).is_ok() {
-                LiteralExpression::int(i as i32)
-            } else {
-                LiteralExpression::long(i)
-            },
-        )));
+        return Ok(Column::new(Expression::literal(integer_literal(i))));
     }
     // An int beyond a long is not a double, as PySpark's literal of it: it is an error.
     if obj.is_instance_of::<pyo3::types::PyInt>() {

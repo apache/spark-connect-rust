@@ -10,7 +10,7 @@ use spark_connect_core::runtime::{block_on, get_runtime};
 use spark_connect_proto as proto;
 
 use crate::column::Column;
-use crate::expression::{Expression, ExpressionNode};
+use crate::expression::{Expression, ExpressionNode, SortOrder};
 use crate::plan::{AggregateGroupType, JoinType, LogicalPlan, RelationOwner, SetOpType};
 use crate::progress::ExecutionStream;
 use crate::row::{Row, StructValue, Value};
@@ -1585,10 +1585,22 @@ impl DataFrame {
         num_partitions: Option<i32>,
         columns: Vec<Expression>,
     ) -> DataFrame {
+        // The server range-partitions only on sort orders, so a plain column is sorted
+        // ascending, nulls first, as PySpark's `repartitionByRange` does.
+        let partition_exprs = columns
+            .into_iter()
+            .map(|expr| {
+                if matches!(expr.node(), ExpressionNode::SortOrder(_)) {
+                    expr
+                } else {
+                    ExpressionNode::SortOrder(Box::new(SortOrder::asc_nulls_first(expr))).into()
+                }
+            })
+            .collect();
         let plan = LogicalPlan::RepartitionByRange {
             input: Arc::clone(&self.plan),
             num_partitions,
-            partition_exprs: columns,
+            partition_exprs,
         };
         self.with_cached_schema(plan)
     }
@@ -4908,6 +4920,41 @@ mod plan_construction_tests {
                 assert_eq!(replacements.len(), 1);
             }
             _ => panic!("expected NAReplace plan"),
+        }
+    }
+
+    /// Both range repartitions sort a plain column ascending, nulls first, and keep sort
+    /// orders as they are, as PySpark's `repartitionByRange` does.
+    #[test]
+    fn repartition_by_range_sorts_plain_columns_only() {
+        use crate::functions::col;
+
+        let spark = session();
+        let df = spark.range(5).unwrap();
+        let id = || col("id").expression().clone();
+        let inputs = vec![
+            id(),
+            col("id").desc_nulls_last().expression().clone(),
+            col("id").asc_nulls_last().expression().clone(),
+        ];
+        let expected = vec![
+            col("id").asc_nulls_first().expression().clone(),
+            col("id").desc_nulls_last().expression().clone(),
+            col("id").asc_nulls_last().expression().clone(),
+        ];
+        let outputs = [
+            df.repartition_by_range(3, inputs.clone()),
+            df.repartition_by_range_opt(None, inputs),
+        ];
+        for out in &outputs {
+            match out.plan.as_ref() {
+                LogicalPlan::RepartitionByRange {
+                    partition_exprs, ..
+                } => {
+                    assert_eq!(partition_exprs, &expected);
+                }
+                _ => panic!("expected RepartitionByRange plan"),
+            }
         }
     }
 
