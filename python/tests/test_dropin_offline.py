@@ -12323,6 +12323,23 @@ def test_numpy_scalars_of_other_types_are_unsupported_as_pyspark(mock_connect):
     assert error.value.getMessageParameters() == {"dtype": "uint8"}
 
 
+def test_map_with_user_defined_keys_is_built_from_the_deserialized_keys():
+    # The Rust client passes a map whose keys have a user-defined type as its (key, value) pairs,
+    # so that the converter deserializes the keys before it builds the dict, as PySpark does.
+    from pyspark.sql.types import _udt_field_converters
+
+    schema = T.StructType([
+        T.StructField("m", T.MapType(_DayPointUDT(), T.IntegerType())),
+        T.StructField("n", T.MapType(T.StringType(), _DayPointUDT())),
+    ])
+    m, n = _udt_field_converters(schema)
+    assert m([([1.0, 2.0], 1), ([3.0, 4.0], None)]) == {(1.0, 2.0): 1, (3.0, 4.0): None}
+    assert m(None) is None
+    assert m([]) == {}
+    assert n({"x": [1.0, 2.0]}) == {"x": (1.0, 2.0)}
+    assert n({}) == {}
+
+
 def test_numpy_longdouble_scalar_matches_dtype_and_class_checks_as_pyspark():
     np = pytest.importorskip("numpy")
     from pyspark.errors import PySparkTypeError

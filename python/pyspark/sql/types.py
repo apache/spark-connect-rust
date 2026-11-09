@@ -610,7 +610,16 @@ def _udt_converter(dataType):
             return None
         key = key or (lambda v: v)
         val = val or (lambda v: v)
-        return lambda value: None if value is None else {key(k): val(v) for k, v in value.items()}
+
+        def convert_map(value):
+            if value is None:
+                return None
+            # The Rust client passes a map whose keys have a user-defined type as its pairs,
+            # so that the keys are deserialized before the dict is built.
+            entries = value.items() if isinstance(value, dict) else value
+            return {key(k): val(v) for k, v in entries}
+
+        return convert_map
     if isinstance(dataType, StructType):
         fields = _udt_field_converters(dataType)
         if fields is None:

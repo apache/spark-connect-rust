@@ -4320,6 +4320,9 @@ fn rows_to_py(
     };
     let fields = PyList::new(py, first.fields())?;
     let mut nested_fields = NestedFieldNames::default();
+    if let Some(schema) = schema {
+        nested_fields.note_udt_key_maps(schema);
+    }
     rows.iter()
         .map(|row| {
             crate::row::row_values_to_py(
@@ -4397,6 +4400,7 @@ impl PyLocalRowIterator {
                 // The result is known once its first message arrives, possibly with no rows.
                 check_collectable(py, Some(&schema))?;
                 self.converters = Some(udt_field_converters(py, Some(&schema))?);
+                self.nested_fields.note_udt_key_maps(&schema);
             }
         }
         match next {
