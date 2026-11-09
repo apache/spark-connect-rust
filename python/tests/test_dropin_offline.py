@@ -1677,6 +1677,30 @@ def test_streaming_query_manager_wrapper_has_listener_api():
 
 # --------------------------------------------------------------------------- udf / udtf
 
+def test_parquet_sets_only_its_options_as_pyspark(mock_connect):
+    # As PySpark's DataFrameReader.parquet(*paths, **options): of the keyword options only
+    # mergeSchema, pathGlobFilter, recursiveFileLookup, modifiedBefore, modifiedAfter,
+    # datetimeRebaseMode and int96RebaseMode are set on the reader, and the others are ignored.
+    spark, _ = mock_connect
+    reader = spark.read
+    reader.option("keep", "1")
+    df = reader.parquet(
+        "/tmp/parquet",
+        mergeSchema=True,
+        ignoreCorruptFiles=True,
+        header=True,
+        datetimeRebaseMode="LEGACY",
+        pathGlobFilter=None,
+    )
+    assert df is not None
+    assert reader._format == "parquet"
+    assert reader._options == {"keep": "1", "mergeSchema": "true", "datetimeRebaseMode": "LEGACY"}
+
+    reader = spark.read
+    reader.parquet("/tmp/parquet", ignoreCorruptFiles=True)
+    assert reader._options == {}
+
+
 def test_udf_construction_and_call():
     from pyspark.sql import functions as F
     from pyspark.sql.udf import UserDefinedFunction

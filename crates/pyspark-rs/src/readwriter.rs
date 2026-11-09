@@ -30,12 +30,6 @@ impl PyDataFrameReader {
         PyDataFrameReader { inner: reader }
     }
 
-    /// A copy of the current reader with per-call `**options` applied (skipping
-    /// None, lowercasing bools), for a format-specific read.
-    fn with_opts(&self, options: Option<&Bound<'_, PyDict>>) -> PyResult<DataFrameReader> {
-        apply_options(self.inner.clone(), options, false)
-    }
-
     /// Keep the options of a format-specific read on this reader, as PySpark does
     /// (its `json`/`csv`/... set the options and the format on `self`, then `load`).
     /// Called only after every argument was validated, so a failed call leaves the
@@ -482,15 +476,29 @@ impl PyDataFrameReader {
         self.read_or_parse(r, "json", spark_connect::plan::ParseFormat::Json, path)
     }
 
-    /// Read Parquet file(s).
+    /// Read Parquet file(s). As PySpark's `parquet(*paths, **options)`, only the options
+    /// `mergeSchema`, `pathGlobFilter`, `recursiveFileLookup`, `modifiedBefore`,
+    /// `modifiedAfter`, `datetimeRebaseMode` and `int96RebaseMode` of `options` are set, and
+    /// the others are ignored.
     #[pyo3(signature = (*paths, **options))]
     fn parquet(
         &mut self,
         paths: Vec<Bound<'_, PyAny>>,
         options: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyDataFrame> {
-        // As PySpark's `parquet(*paths)`, of every path.
-        let r = self.with_opts(options)?;
+        let mut r = self.inner.clone();
+        for name in [
+            "mergeSchema",
+            "pathGlobFilter",
+            "recursiveFileLookup",
+            "modifiedBefore",
+            "modifiedAfter",
+            "datetimeRebaseMode",
+            "int96RebaseMode",
+        ] {
+            let value = options.map(|o| o.get_item(name)).transpose()?.flatten();
+            r = set_opt(r, name, value.as_ref())?;
+        }
         let paths = path_list(&paths)?;
         self.commit(&r, "parquet");
         Ok(PyDataFrame::new(r.format("parquet").load_paths(paths)))
