@@ -1167,6 +1167,10 @@ def test_progress_handler_that_runs_queries_without_end_raises_recursion_error()
     # runs. Past the bound of nested callbacks, the query fails with a RecursionError, which the
     # handler's exception goes out with, instead of the native stack overflowing and the process
     # crashing (SIGSEGV). The outer query returns its result, as the handler's exceptions do.
+    # The queries nest only when the server sends an in-progress update of each one. A query that
+    # is shorter than the report interval (2 s) gets one only when the server wakes for its result
+    # before the execution ends, which a fast runner may not do. With an interval of 10 ms, the
+    # server sends them while the job runs, and each of these shuffles runs for several intervals.
     import subprocess
     import sys
 
@@ -1177,12 +1181,14 @@ def test_progress_handler_that_runs_queries_without_end_raises_recursion_error()
 import sys
 from pyspark.sql import SparkSession
 spark = SparkSession.builder.remote(%r).getOrCreate()
-spark.registerProgressHandler(lambda **kw: spark.range(4).count() if not kw["done"] else None)
-print(spark.range(2000000).selectExpr("sum(id) as t").collect())
+spark.conf.set("spark.connect.progress.reportInterval", "10ms")
+spark.registerProgressHandler(
+    lambda **kw: spark.range(100).repartition(20).count() if not kw["done"] else None)
+print(spark.range(0, 2000, 1, 4).repartition(20).selectExpr("sum(id) as t").collect())
 """ % remote], env=dict(os.environ, TZ="UTC"), capture_output=True, text=True, timeout=300)
     assert result.returncode == 0, result.stderr
-    assert "[Row(t=1999999000000)]" in result.stdout
-    assert "RecursionError" in result.stderr
+    assert "[Row(t=1999000)]" in result.stdout, result.stdout
+    assert "RecursionError" in result.stderr, (result.stdout, result.stderr)
 
 
 def test_progress_handler_runs_a_query_of_its_own_as_pyspark(session):
