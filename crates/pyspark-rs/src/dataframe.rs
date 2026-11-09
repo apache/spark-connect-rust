@@ -2111,9 +2111,10 @@ impl PyDataFrame {
         Ok(slf)
     }
 
-    /// Column access by attribute (`df.colname` -> Column), mirroring reference pyspark: the
-    /// column of this DataFrame, by its plan ID. Names beginning with `_` raise
-    /// AttributeError so normal attribute lookup works.
+    /// Column access by attribute (`df.colname` -> Column), by this DataFrame's plan ID.
+    /// JVM attribute names raise JVM_ATTRIBUTE_NOT_SUPPORTED. Dunder names that are not
+    /// columns raise ATTRIBUTE_NOT_SUPPORTED; with PYSPARK_VALIDATE_COLUMN_NAME_LEGACY=1,
+    /// all non-column names do. Single-underscore names otherwise resolve to columns.
     fn __getattr__(&self, py: Python<'_>, name: &str) -> PyResult<PyColumn> {
         // As PySpark Connect's: the attributes of the JVM of a classic DataFrame are not
         // supported, and a name is validated as a column only for a dunder name, which Python
@@ -2136,6 +2137,13 @@ impl PyDataFrame {
             ));
         }
         Ok(PyColumn::new(self.dataframe.col(name)))
+    }
+
+    /// Private bridge used by pyspark.sql.dataframe.DataFrame.__getattr__ for
+    /// explicit column lookup. The __getattr__ special method itself is exposed
+    /// only as a slot; this ordinary method remains callable by the public base.
+    fn _get_column_by_attribute(&self, py: Python<'_>, name: &str) -> PyResult<PyColumn> {
+        self.__getattr__(py, name)
     }
 
     /// Class attributes and all column names, matching Python Connect.

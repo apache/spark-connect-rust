@@ -6982,16 +6982,24 @@ import inspect  # noqa: E402
 
 import pyspark  # noqa: E402
 from pyspark.sql import SparkSession as _SS, DataFrame as _DF, Column as _Col  # noqa: E402
+from pyspark.sql.connect.dataframe import DataFrame as _ConnectDF  # noqa: E402
 
 
 def test_dropin_version_is_spark_version():
     assert pyspark.__version__ == "4.3.0"
 
 
-@pytest.mark.parametrize("cls,name", [(_SS, "version"), (_DF, "dtypes"), (_DF, "executionInfo")])
-def test_property_not_method(cls, name):
-    # PySpark accesses these without parentheses; the Rust getter is a getset_descriptor.
-    assert type(inspect.getattr_static(cls, name)).__name__ == "getset_descriptor"
+@pytest.mark.parametrize("cls,name,descriptor", [
+    (_SS, "version", "getset_descriptor"),
+    (_ConnectDF, "dtypes", "getset_descriptor"),
+    (_ConnectDF, "executionInfo", "getset_descriptor"),
+    (_DF, "dtypes", "property"),
+    (_DF, "executionInfo", "property"),
+])
+def test_property_not_method(cls, name, descriptor):
+    # PySpark accesses these without parentheses. Concrete Rust getters remain
+    # getset descriptors; the Python public base exposes ordinary properties.
+    assert type(inspect.getattr_static(cls, name)).__name__ == descriptor
 
 
 def test_show_has_no_required_args_and_defaults_n_to_20():
@@ -7139,15 +7147,16 @@ def test_pandas_udf_eval_type_inferred_from_type_hints(mock_connect):
 # class itself unpicklable: pickle serializes a class BY REFERENCE, writing
 # __module__ + __qualname__ and re-importing on load, so "builtins.IntegerType" fails
 # the lookup. Every #[pyclass] therefore carries an explicit `module = "..."`.
-# NB: DataFrame/Column report the *connect* module: upstream pyspark.sql.{dataframe,
-# column} hold the abstract parent, while the concrete class a Connect session hands
-# out is pyspark.sql.connect.*.
+# The public DataFrame base reports pyspark.sql.dataframe, as in PySpark. Native
+# DataFrame/Column classes report the connect modules, which contain the concrete
+# classes returned by Connect sessions.
 
 
 @pytest.mark.parametrize(
     "cls,expected",
     [
-        (_DF, "pyspark.sql.connect.dataframe"),
+        (_DF, "pyspark.sql.dataframe"),
+        (_ConnectDF, "pyspark.sql.connect.dataframe"),
         (_Col, "pyspark.sql.connect.column"),
         (_SS, "pyspark.sql.session"),
         (T.DataType, "pyspark.sql.types"),
@@ -13201,13 +13210,16 @@ def test_positional_indexing_invalid_index_types_do_not_analyze(positional_index
 
 def test_positional_indexing_columns_filter_and_sequences_select(positional_indexing_analyzed):
     from pyspark.sql import DataFrame
+    from pyspark.sql.connect.dataframe import DataFrame as ConnectDataFrame
 
     # As PySpark: a Column filters the rows, and a list or tuple selects its columns,
     # without looking the schema up. The live tests check the rows.
     spark, service = positional_indexing_analyzed
     df = spark.range(10)
     for item in [df["id"] > 1, ["id"], ("id", "id"), [["id"]], []]:
-        assert type(df[item]) is DataFrame
+        selected = df[item]
+        assert type(selected) is ConnectDataFrame
+        assert isinstance(selected, DataFrame)
     assert service.calls == 0
 
 
