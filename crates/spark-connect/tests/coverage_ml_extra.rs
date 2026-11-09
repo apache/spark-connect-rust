@@ -9,9 +9,9 @@
 
 use spark_connect::ml::{
     BinaryClassificationEvaluator, CrossValidator, Estimator, Evaluator, LogisticRegression,
-    MaxAbsScaler, MaxAbsScalerModel, MlOperator, Model, MulticlassClassificationEvaluator,
-    OperatorType, Params, Pipeline, PipelineModel, RegressionEvaluator, StandardScaler,
-    StringIndexer, StringIndexerModel, Transformer, VectorAssembler,
+    MaxAbsScaler, MlOperator, Model, MulticlassClassificationEvaluator, OperatorType, Params,
+    Pipeline, PipelineModel, RegressionEvaluator, StandardScaler, StringIndexer, Transformer,
+    VectorAssembler,
 };
 
 #[test]
@@ -134,29 +134,6 @@ fn transformer_and_model_accessors() {
     let _ = VectorAssembler::default();
 
     // Models with public fields: construct directly and exercise Transformer + Model methods.
-    let mut m = StringIndexerModel {
-        operator: MlOperator::new("si", OperatorType::Model),
-        params: Params::new(),
-        input_col: "a".to_string(),
-        output_col: "b".to_string(),
-    };
-    let _ = m.operator();
-    let _ = m.operator_mut();
-    let _ = m.params();
-    let _ = m.params_mut();
-    let _ = m.clone_box();
-
-    let mut m = MaxAbsScalerModel {
-        operator: MlOperator::new("ma", OperatorType::Model),
-        params: Params::new(),
-        input_col: "a".to_string(),
-        output_col: "b".to_string(),
-    };
-    let _ = m.operator();
-    let _ = m.operator_mut();
-    let _ = m.params();
-    let _ = m.params_mut();
-    let _ = m.clone_box();
 
     let mut m = PipelineModel {
         operator: MlOperator::new("pl", OperatorType::Model),

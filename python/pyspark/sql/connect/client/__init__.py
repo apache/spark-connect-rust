@@ -293,6 +293,31 @@ class SparkConnectClient:
         except Exception:
             pass
 
+    def _get_ml_cache_info(self) -> List[str]:
+        """The cached ML objects of the session on the server, as SparkConnectClient's: their
+        JSON descriptions."""
+        import pyspark.sql.connect.proto as pb2
+
+        command = pb2.Command()
+        command.ml_command.get_cache_info.SetInParent()
+        _, properties, _ = self.execute_command(command)
+        if "ml_command_result" in properties:
+            ml_command_result = properties["ml_command_result"]
+            return [item.string for item in ml_command_result.param.array.elements]
+        return []
+
+    def _query_model_size(self, model_ref_id: str) -> int:
+        """The size of the cached model of ``model_ref_id`` on the server, as SparkConnectClient's:
+        in bytes."""
+        import pyspark.sql.connect.proto as pb2
+
+        command = pb2.Command()
+        command.ml_command.get_model_size.CopyFrom(
+            pb2.MlCommand.GetModelSize(model_ref=pb2.ObjectRef(id=model_ref_id))
+        )
+        _, properties, _ = self.execute_command(command)
+        return properties["ml_command_result"].param.long
+
 
 def _extensions_of(extensions: Any) -> List[Any]:
     # The user context extensions of the Rust transport, as SparkConnectClient keeps them: the

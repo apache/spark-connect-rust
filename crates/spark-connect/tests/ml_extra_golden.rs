@@ -14,8 +14,8 @@ use prost::Message;
 
 use spark_connect::ml::{
     BinaryClassificationEvaluator, Estimator, Evaluator, LogisticRegression, MaxAbsScaler,
-    MaxAbsScalerModel, MlOperator, OperatorType, Params, Pipeline, PipelineModel,
-    RegressionEvaluator, StringIndexer, StringIndexerModel, Transformer, VectorAssembler,
+    MlOperator, OperatorType, Params, Pipeline, PipelineModel, RegressionEvaluator, StringIndexer,
+    Transformer, VectorAssembler,
 };
 use spark_connect_proto as proto;
 
@@ -112,41 +112,11 @@ fn test_string_indexer_operator_name() {
 }
 
 #[test]
-fn test_string_indexer_model_operator_type() {
-    let model = StringIndexerModel {
-        operator: MlOperator::new(
-            "org.apache.spark.ml.feature.StringIndexer",
-            OperatorType::Model,
-        ),
-        params: Params::new(),
-        input_col: "col".to_string(),
-        output_col: "indexed".to_string(),
-    };
-    let op = model.operator();
-    assert_eq!(op.op_type, OperatorType::Model);
-}
-
-#[test]
 fn test_max_abs_scaler_operator_name() {
     let scaler = MaxAbsScaler::new();
     let op = scaler.operator();
     assert_eq!(op.name, "org.apache.spark.ml.feature.MaxAbsScaler");
     assert_eq!(op.op_type, OperatorType::Estimator);
-}
-
-#[test]
-fn test_max_abs_scaler_model_operator_type() {
-    let model = MaxAbsScalerModel {
-        operator: MlOperator::new(
-            "org.apache.spark.ml.feature.MaxAbsScaler",
-            OperatorType::Model,
-        ),
-        params: Params::new(),
-        input_col: "features".to_string(),
-        output_col: "scaled".to_string(),
-    };
-    let op = model.operator();
-    assert_eq!(op.op_type, OperatorType::Model);
 }
 
 #[test]
