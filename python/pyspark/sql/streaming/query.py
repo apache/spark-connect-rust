@@ -41,6 +41,8 @@ from pyspark._pyspark import (
     StreamingQuery as _StreamingQuery,
     StreamingQueryManager as _StreamingQueryManager,
 )
+from pyspark.errors import PySparkValueError
+
 # As PySpark's, the exception of a failed query is that of pyspark.errors.
 from pyspark.errors import StreamingQueryException  # noqa: F401
 
@@ -60,24 +62,40 @@ _QUERY_IDLE_EVENT = 3
 StreamingQuery = _StreamingQuery
 
 
-def _dispatch_listener_event(listener, event_type, event_json):
-    """Deserialize a listener event and invoke the matching callback on ``listener``.
+def _deserialize_listener_event(event_type, event_json, *, started=False):
+    """Decode a protocol event before entering callback exception isolation.
 
-    Called from the native (Rust) listener bus for each event. Mirrors the reference
-    ``StreamingQueryListenerBus.post_to_all``: build the typed event and route it to
-    onQueryStarted / onQueryProgress / onQueryIdle / onQueryTerminated. Callback exceptions
-    are surfaced as warnings, as PySpark's, so one listener cannot break the dispatch thread.
+    Started events belong to the synchronous start response, not the asynchronous
+    protocol enum. Malformed JSON and missing fields propagate to the caller, as in
+    reference PySpark's writer and listener-bus deserializers.
     """
+    if started and event_type == _QUERY_STARTED_EVENT:
+        return QueryStartedEvent.fromJson(json.loads(event_json))
+    if event_type == _QUERY_PROGRESS_EVENT:
+        return QueryProgressEvent.fromJson(json.loads(event_json))
+    if event_type == _QUERY_TERMINATED_EVENT:
+        return QueryTerminatedEvent.fromJson(json.loads(event_json))
+    if event_type == _QUERY_IDLE_EVENT:
+        return QueryIdleEvent.fromJson(json.loads(event_json))
+    raise PySparkValueError(
+        errorClass="UNKNOWN_VALUE_FOR",
+        messageParameters={"var": f"proto.StreamingQueryEventType: {event_type}"},
+    )
+
+
+def _dispatch_listener_event(listener, event):
+    """Warn on callback Exception; BaseException and warning-as-error escape to the bus."""
     try:
-        j = json.loads(event_json)
-        if event_type == _QUERY_STARTED_EVENT:
-            listener.onQueryStarted(QueryStartedEvent.fromJson(j))
-        elif event_type == _QUERY_PROGRESS_EVENT:
-            listener.onQueryProgress(QueryProgressEvent.fromJson(j))
-        elif event_type == _QUERY_IDLE_EVENT:
-            listener.onQueryIdle(QueryIdleEvent.fromJson(j))
-        elif event_type == _QUERY_TERMINATED_EVENT:
-            listener.onQueryTerminated(QueryTerminatedEvent.fromJson(j))
+        if isinstance(event, QueryStartedEvent):
+            listener.onQueryStarted(event)
+        elif isinstance(event, QueryProgressEvent):
+            listener.onQueryProgress(event)
+        elif isinstance(event, QueryIdleEvent):
+            listener.onQueryIdle(event)
+        elif isinstance(event, QueryTerminatedEvent):
+            listener.onQueryTerminated(event)
+        else:
+            warnings.warn(f"Unknown StreamingQueryListener event: {event}")
     except Exception as e:  # noqa: BLE001
         warnings.warn(f"Listener {str(listener)} threw an exception\n{e}")
 

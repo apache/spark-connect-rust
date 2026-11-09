@@ -793,7 +793,11 @@ class RemoteService:
         self.connection.recv()
 
     def listener_event(self, session_id, event_type, event_json):
-        self.connection.send(("listener_event", session_id, event_type, json.dumps(event_json)))
+        self.listener_event_json(session_id, event_type, json.dumps(event_json))
+
+    def listener_event_json(self, session_id, event_type, event_json):
+        """Send raw event JSON, including malformed payloads for protocol error tests."""
+        self.connection.send(("listener_event", session_id, event_type, event_json))
         assert self.connection.poll(10), "Mock server did not respond"
         self.connection.recv()
 

@@ -113,3 +113,32 @@ for q in spark.streams().active()? {
 
 !!! warning
     Checkpoints are mandatory for fault tolerance. Always set `checkpointLocation` for production queries.
+
+### Listener failures
+
+For native Rust listeners, a terminal stream end or error clears the subscription's
+registrations. The default `StreamingQueryListener::on_stream_error` hook is silent;
+override it to report failures, and re-add listeners to open a new subscription. A
+normal stream end clears registrations without calling the error hook. Adapters can
+return errors through `try_on_event` or provide shared asynchronous dispatch through
+`try_post_to_all`. Use `DataStreamWriter::start_with_event_handler` or
+`to_table_with_event_handler` for shared synchronous start-event decoding.
+
+`SparkSession::stop()` and `close()` cancel listener dispatch and clear registrations
+locally, without sending a listener-removal RPC or joining callbacks already running.
+Reference PySpark leaves listener-bus cleanup to its handler thread during session stop.
+
+The PySpark drop-in listener bus deserializes each event once before invoking callbacks and
+shares that event object across all listener registrations. A malformed start event
+raises from `start()` or `toTable()`, even when no listeners are registered. A
+transport failure, malformed asynchronous event or unknown event type warns and
+clears the subscription's listeners. Add the listeners again to open a subscription.
+A server-side end of the event stream also clears registrations without a warning;
+reference PySpark retains them after a normal stream end.
+
+Callback exceptions derived from `Exception` produce per-listener warnings and
+dispatch continues. An uncaught `BaseException`, or a callback warning promoted to
+an error by Python's warning filters, terminates the native subscription and clears
+its registrations. This cleanup is deliberate: reference PySpark can retain stale
+registrations when its handler exits through `BaseException`. The terminal handler
+warning is best effort when warning filters themselves raise errors.
