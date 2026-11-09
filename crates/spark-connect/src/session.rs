@@ -828,6 +828,33 @@ impl SparkSession {
                 )),
             })),
         };
+        self.execute_command_in_background(command);
+    }
+
+    /// Remove the cached remote relation `relation_id` on the server, as PySpark's
+    /// `CachedRemoteRelation.__del__` does when its DataFrame goes. Like `release_ml_objects`,
+    /// it does not wait for the server, and its errors are ignored. A stopped session is not
+    /// released: stopping it released its server state already, as PySpark skips a closed
+    /// client. Safe to call from `Drop`.
+    pub(crate) fn release_cached_remote_relation(&self, relation_id: String) {
+        if self.is_stopped() {
+            return;
+        }
+        let command = proto::Command {
+            command_type: Some(
+                proto::command::CommandType::RemoveCachedRemoteRelationCommand(
+                    proto::RemoveCachedRemoteRelationCommand {
+                        relation: Some(proto::CachedRemoteRelation { relation_id }),
+                    },
+                ),
+            ),
+        };
+        self.execute_command_in_background(command);
+    }
+
+    /// Execute `command` on the server without waiting for its responses, on the shared
+    /// runtime. Its errors are ignored; safe to call from `Drop`.
+    fn execute_command_in_background(&self, command: proto::Command) {
         let mut plan = proto::Plan::default();
         plan.op_type = Some(proto::plan::OpType::Command(command));
         let request = proto::ExecutePlanRequest {
@@ -864,6 +891,22 @@ impl SparkSession {
     /// Mirrors `pyspark.sql.SparkSession.session_id` / the connect client session id.
     pub fn session_id(&self) -> &str {
         self.client.session_id()
+    }
+
+    /// The display host of the endpoint of this session, as PySpark's `SparkConnectClient.host`.
+    pub fn host(&self) -> &str {
+        self.client.host()
+    }
+
+    /// The server-side session ID that the responses of this session carried, or None before the
+    /// first response, as PySpark's `SparkConnectClient._server_session_id`.
+    pub fn server_session_id(&self) -> Option<String> {
+        self.client.observed_server_session_id()
+    }
+
+    /// Set the server-side session ID that the requests of this session observe.
+    pub fn set_server_session_id(&self, id: Option<String>) {
+        self.client.set_observed_server_session_id(id);
     }
 
     /// Add `extension` to the user context of the requests that the current thread sends from
@@ -1553,17 +1596,28 @@ fn values_to_arrow(values: &[&Value], dt: &DataType) -> Result<Arc<dyn arrow::ar
 
     // Numeric encoders coerce across integer/float widths, so a value the schema-unaware
     // Python->Value conversion produced as a wider/narrower numeric (e.g. a nested-struct
-    // int arriving as Long) still matches its declared field type.
+    // int arriving as Long) still matches its declared field type. An integer that does
+    // not fit the declared type is an error, as PySpark's Arrow conversion raises for it.
     macro_rules! int_prim {
-        ($arr:ty, $t:ty) => {{
+        ($arr:ty, $t:ty, $sql:expr) => {{
+            let narrow = |x: i64| {
+                <$t>::try_from(x).map(Some).map_err(|_| {
+                    SparkError::value_msg(format!(
+                        "Value {x} does not fit the {} type of its column, whose range is {}..={}",
+                        $sql,
+                        <$t>::MIN,
+                        <$t>::MAX
+                    ))
+                })
+            };
             let vals: Result<Vec<_>> = values
                 .iter()
                 .map(|v| match *v {
                     Value::Null => Ok(None),
-                    Value::Byte(x) => Ok(Some(*x as $t)),
-                    Value::Short(x) => Ok(Some(*x as $t)),
-                    Value::Integer(x) => Ok(Some(*x as $t)),
-                    Value::Long(x) => Ok(Some(*x as $t)),
+                    Value::Byte(x) => narrow(*x as i64),
+                    Value::Short(x) => narrow(*x as i64),
+                    Value::Integer(x) => narrow(*x as i64),
+                    Value::Long(x) => narrow(*x),
                     _ => Err(SparkError::connect_msg("Type mismatch in row data")),
                 })
                 .collect();
@@ -1592,10 +1646,10 @@ fn values_to_arrow(values: &[&Value], dt: &DataType) -> Result<Arc<dyn arrow::ar
     match dt {
         DataType::Null => Ok(Arc::new(NullArray::new(values.len()))),
         DataType::Boolean => prim!(BooleanArray, Value::Bool),
-        DataType::Byte => int_prim!(Int8Array, i8),
-        DataType::Short => int_prim!(Int16Array, i16),
-        DataType::Integer => int_prim!(Int32Array, i32),
-        DataType::Long => int_prim!(Int64Array, i64),
+        DataType::Byte => int_prim!(Int8Array, i8, "TINYINT"),
+        DataType::Short => int_prim!(Int16Array, i16, "SMALLINT"),
+        DataType::Integer => int_prim!(Int32Array, i32, "INT"),
+        DataType::Long => int_prim!(Int64Array, i64, "BIGINT"),
         DataType::Float => float_prim!(Float32Array, f32),
         DataType::Double => float_prim!(Float64Array, f64),
         DataType::String { .. } | DataType::Char { .. } | DataType::Varchar { .. } => {
@@ -2940,14 +2994,12 @@ mod tests {
     fn version_cache_recovers_after_lookup_panics() {
         let spark = session();
         let handle = spark.clone();
-        // Like other synchronous RPC helpers, version() cannot run inside a current-thread
-        // Tokio runtime, which cannot block in place. That caller's panic must not
-        // permanently break this session's cache.
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .build()
-            .unwrap();
+        // A panic under the cache lock, as a panicking lookup leaves it, must not permanently
+        // break this session's cache.
+        let cache = std::sync::Arc::clone(&spark.server_version);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            runtime.block_on(async { spark.version() })
+            let _held = cache.lock().unwrap();
+            panic!("a lookup panics while the cache lock is held");
         }));
         assert!(result.is_err());
         assert!(spark.server_version.is_poisoned());
@@ -3028,6 +3080,84 @@ mod tests {
         assert_eq!(run(|spark| vec![ids(spark)]), vec![first[1].clone()]);
         assert_eq!(run(|spark| vec![ids(spark)]), vec![first[1].clone()]);
         assert_eq!(ids(&spark), vec![main, late]);
+    }
+
+    #[test]
+    fn integers_that_do_not_fit_the_declared_type_are_errors_not_wrapped() {
+        // PySpark's Arrow conversion raises for an integer outside the declared type's
+        // range, so the encoder must not wrap it with an `as` cast.
+        for (value, dt, sql_type) in [
+            (Value::Long(4_294_967_297), DataType::Integer, "INT"),
+            (Value::Long(-2_147_483_649), DataType::Integer, "INT"),
+            (Value::Long(300), DataType::Byte, "TINYINT"),
+            (Value::Integer(200), DataType::Byte, "TINYINT"),
+            (Value::Short(-129), DataType::Byte, "TINYINT"),
+            (Value::Integer(70_000), DataType::Short, "SMALLINT"),
+        ] {
+            let error = values_to_arrow(&[&value], &dt)
+                .map(|_| ())
+                .unwrap_err()
+                .to_string();
+            let number = match &value {
+                Value::Long(x) => x.to_string(),
+                Value::Integer(x) => x.to_string(),
+                Value::Short(x) => x.to_string(),
+                _ => unreachable!(),
+            };
+            assert!(error.contains(&number), "{error}");
+            assert!(error.contains(sql_type), "{error}");
+            // The batch-level path reports the same error.
+            let rows = [row(vec![value.clone()])];
+            assert!(rows_to_arrow_batch(&rows, &schema(vec![dt])).is_err());
+        }
+    }
+
+    #[test]
+    fn integers_that_fit_the_declared_type_still_narrow_and_widen() {
+        use arrow::array::{Int16Array, Int32Array, Int64Array, Int8Array};
+
+        let bytes = values_to_arrow(
+            &[&Value::Long(127), &Value::Integer(-128), &Value::Null],
+            &DataType::Byte,
+        )
+        .unwrap();
+        assert_eq!(
+            bytes.as_any().downcast_ref::<Int8Array>().unwrap(),
+            &Int8Array::from(vec![Some(127), Some(-128), None])
+        );
+        let shorts =
+            values_to_arrow(&[&Value::Byte(-5), &Value::Long(32_767)], &DataType::Short).unwrap();
+        assert_eq!(
+            shorts.as_any().downcast_ref::<Int16Array>().unwrap(),
+            &Int16Array::from(vec![-5, 32_767])
+        );
+        let ints = values_to_arrow(
+            &[&Value::Long(i32::MIN as i64), &Value::Long(i32::MAX as i64)],
+            &DataType::Integer,
+        )
+        .unwrap();
+        assert_eq!(
+            ints.as_any().downcast_ref::<Int32Array>().unwrap(),
+            &Int32Array::from(vec![i32::MIN, i32::MAX])
+        );
+        let longs = values_to_arrow(
+            &[&Value::Integer(-7), &Value::Long(i64::MAX)],
+            &DataType::Long,
+        )
+        .unwrap();
+        assert_eq!(
+            longs.as_any().downcast_ref::<Int64Array>().unwrap(),
+            &Int64Array::from(vec![-7, i64::MAX])
+        );
+    }
+
+    #[test]
+    fn a_double_beyond_the_float_range_is_infinite_as_in_pyspark() {
+        // PySpark's Arrow conversion does not reject a finite double beyond the float range
+        // (it becomes infinity), so the float encoder keeps that behavior.
+        let array = values_to_arrow(&[&Value::Double(1e300)], &DataType::Float).unwrap();
+        let floats = array.as_any().downcast_ref::<Float32Array>().unwrap();
+        assert!(floats.value(0).is_infinite());
     }
 
     #[test]
@@ -3791,5 +3921,21 @@ mod tests {
             "stop() does not release a closed client"
         );
         assert!(spark.stopped.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn host_and_server_session_id_are_the_clients_of_the_session() {
+        let spark = session();
+        assert_eq!(spark.host(), "localhost");
+        assert_eq!(spark.server_session_id(), None);
+        spark.set_server_session_id(Some("server-a".to_string()));
+        assert_eq!(spark.server_session_id().as_deref(), Some("server-a"));
+        // The session is a clone of the same client, which shares the observed ID.
+        assert_eq!(
+            spark.clone().server_session_id().as_deref(),
+            Some("server-a")
+        );
+        spark.set_server_session_id(None);
+        assert_eq!(spark.server_session_id(), None);
     }
 }

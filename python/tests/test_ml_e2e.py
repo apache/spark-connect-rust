@@ -55,6 +55,31 @@ def _labeled(session):
     return session.createDataFrame(rows, ["id", "label", "features"])
 
 
+def test_ml_connect_scalers_fit_and_transform_as_pyspark(session):
+    # pyspark.ml.connect's StandardScaler, MaxAbsScaler and StringIndexer: the server fits each one
+    # and caches the model, and the transform of the model gives the values of PySpark 4.3.0.
+    from pyspark.ml.connect.feature import MaxAbsScaler, StandardScaler, StringIndexer
+    from pyspark.ml.connect.functions import array_to_vector
+
+    rows = [(1, [2.0, 4.0], "a"), (2, [4.0, 2.0], "b"), (3, [6.0, 6.0], "a")]
+    df = session.createDataFrame(rows, "x int, f array<double>, s string")
+    df = df.withColumn("v", array_to_vector("f"))
+
+    def rows(frame, column):
+        return [row[column] for row in frame.orderBy("x").collect()]
+
+    scaled = StandardScaler(inputCol="v", outputCol="o").fit(df).transform(df)
+    values = [v.toArray().tolist() for v in rows(scaled, "o")]
+    assert values == [[1.0, 2.0], [2.0, 1.0], [3.0, 3.0]]
+
+    maxabs = MaxAbsScaler(inputCol="v", outputCol="o").fit(df).transform(df)
+    values = [v.toArray().tolist() for v in rows(maxabs, "o")]
+    assert values[0] == pytest.approx([1 / 3, 2 / 3]) and values[2] == [1.0, 1.0]
+
+    indexed = StringIndexer(inputCol="s", outputCol="o").fit(df).transform(df)
+    assert rows(indexed, "o") == [0.0, 1.0, 0.0]
+
+
 def test_ml_classifiers_fit_transform_and_summarize_as_pyspark(session):
     from pyspark.ml.classification import LogisticRegression, LogisticRegressionModel
 

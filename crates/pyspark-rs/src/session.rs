@@ -28,6 +28,9 @@ pub struct PySparkSessionBuilder {
     /// The hook factories of `_registerHook`, which a new session calls with itself, as
     /// PySpark's builder does.
     hook_factories: Vec<std::sync::Arc<Py<PyAny>>>,
+    /// The channel builder of `channelBuilder`, which the session connects with, instead of
+    /// `remote()`: PySpark's `_channel_builder`, which is not an option.
+    channel_builder: Option<std::sync::Arc<Py<PyAny>>>,
 }
 
 impl PySparkSessionBuilder {
@@ -36,6 +39,7 @@ impl PySparkSessionBuilder {
             remote_url: None,
             configs: Vec::new(),
             hook_factories: Vec::new(),
+            channel_builder: None,
         }
     }
 }
@@ -170,36 +174,10 @@ impl PySparkSessionBuilder {
         mut slf: PyRefMut<'py, Self>,
         channelBuilder: &Bound<'_, PyAny>,
     ) -> PyResult<PyRefMut<'py, Self>> {
-        // Endpoint: prefer the builder's host/port (DefaultChannelBuilder exposes both).
-        let host: String = channelBuilder
-            .getattr("host")
-            .and_then(|h| h.extract::<String>())
-            .map_err(|_| {
-                PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                    "channelBuilder must expose a `host` (e.g. DefaultChannelBuilder); \
-                     otherwise configure the endpoint via .remote(url)",
-                )
-            })?;
-        let port: i64 = channelBuilder
-            .getattr("port")
-            .and_then(|p| p.extract::<i64>())
-            .unwrap_or(15002);
-        let mut url = format!("sc://{host}:{port}");
-        // Preserve connection params (token/use_ssl/user_id/...) if present as `_params`.
-        if let Ok(params) = channelBuilder.getattr("_params") {
-            if let Ok(dict) = params.cast::<pyo3::types::PyDict>() {
-                if !dict.is_empty() {
-                    let mut parts: Vec<String> = Vec::new();
-                    for (k, v) in dict.iter() {
-                        parts.push(format!("{}={}", k.str()?, v.str()?));
-                    }
-                    url.push_str("/;");
-                    url.push_str(&parts.join(";"));
-                }
-            }
-        }
-        let py = slf.py();
-        slf.set_option(py, "spark.remote", url)?;
+        // A builder without an endpoint is an error here, not when the session is created; the
+        // URL itself is read then, with the parameters of the builder as they are by then.
+        url_of_channel_builder(channelBuilder)?;
+        slf.channel_builder = Some(std::sync::Arc::new(channelBuilder.clone().unbind()));
         Ok(slf)
     }
 
@@ -216,12 +194,12 @@ impl PySparkSessionBuilder {
     /// whatever its URL.
     #[pyo3(name = "getOrCreate")]
     fn get_or_create(&self, py: Python<'_>) -> PyResult<Py<PySparkSession>> {
-        let url = self.url(py)?;
         let (session, created) = {
             let _creating = session_lock();
             match active_session(py).or_else(|| default_session(py)) {
                 Some(session) => (session, false),
-                None => (new_session(py, &url)?, true),
+                // The URL is needed only to create a session, as PySpark's getOrCreate.
+                None => (new_session(py, &self.connection_url(py)?)?, true),
             }
         };
         if created {
@@ -235,7 +213,7 @@ impl PySparkSessionBuilder {
     /// `create()` - a new session, which is the default session, and the active one of this
     /// thread, only when they are not set. Mirrors PySpark's.
     fn create(&self, py: Python<'_>) -> PyResult<Py<PySparkSession>> {
-        let url = self.url(py)?;
+        let url = self.connection_url(py)?;
         let session = {
             let _creating = session_lock();
             new_session(py, &url)?
@@ -249,30 +227,30 @@ impl PySparkSessionBuilder {
 
 impl PySparkSessionBuilder {
     /// The hooks of the factories of `_registerHook` for `session`, a session that the builder
-    /// created, as PySpark's `SparkSession(hook_factories=...)` makes them: of each factory
-    /// called with the session, of whose `on_execute_plan` the session's executions send the
-    /// requests. The factories run after the lock of the creation of sessions is released, as
-    /// Python code may release the GIL that the lock is held with.
+    /// created, as PySpark's `SparkSession(hook_factories=...)` makes them.
     fn install_hooks(&self, py: Python<'_>, session: &Py<PySparkSession>) -> PyResult<()> {
-        if self.hook_factories.is_empty() {
-            return Ok(());
-        }
-        let hooks = self
+        let factories: Vec<Py<PyAny>> = self
             .hook_factories
             .iter()
-            .map(|factory| {
-                factory
-                    .bind(py)
-                    .call1((session.clone_ref(py),))
-                    .map(Bound::unbind)
-            })
-            .collect::<PyResult<Vec<_>>>()?;
-        let hook: spark_connect::ExecutePlanHook = std::sync::Arc::new(move |request| {
-            Python::attach(|py| call_execute_plan_hooks(py, &hooks, request))
-                .map_err(crate::errors::callback_error)
-        });
-        session.borrow(py).session.set_execute_plan_hook(Some(hook));
-        Ok(())
+            .map(|factory| factory.clone_ref(py))
+            .collect();
+        install_hook_factories(py, &factories, session)
+    }
+
+    /// The connection URL of the session that the builder creates: that of the channel builder
+    /// of `channelBuilder`, or else of `remote()` or `SPARK_REMOTE`. As PySpark's `create`, it
+    /// is an error to give both a channel builder and a URL.
+    fn connection_url(&self, py: Python<'_>) -> PyResult<String> {
+        match &self.channel_builder {
+            Some(_) if self.remote_url.is_some() => Err(crate::column::raise_pyspark(
+                py,
+                "PySparkValueError",
+                "SESSION_NEED_CONN_STR_OR_BUILDER",
+                &[],
+            )),
+            Some(channel_builder) => url_of_channel_builder(channel_builder.bind(py)),
+            None => self.url(py),
+        }
     }
 
     /// Set an option, capturing `spark.remote` as the endpoint, and validate the startup URLs
@@ -347,12 +325,7 @@ impl PySparkSessionBuilder {
             .or_else(|| std::env::var("SPARK_REMOTE").ok())
         {
             Some(url) => Ok(url),
-            None => Err(crate::column::raise_pyspark(
-                py,
-                "PySparkRuntimeError",
-                "CONNECT_URL_NOT_SET",
-                &[],
-            )),
+            None => Err(connect_url_not_set(py)),
         }
     }
 
@@ -386,12 +359,137 @@ impl PySparkSessionBuilder {
     }
 }
 
-/// The default session: the first session created, of every thread, until it stops. Mirrors
-/// `SparkSession._default_session`. The Python object, which `getOrCreate()` returns as it is.
-fn default_slot() -> &'static std::sync::Mutex<Option<Py<PySparkSession>>> {
-    static SLOT: std::sync::OnceLock<std::sync::Mutex<Option<Py<PySparkSession>>>> =
-        std::sync::OnceLock::new();
-    SLOT.get_or_init(|| std::sync::Mutex::new(None))
+/// The `sc://` URL of the channel builder `channel_builder`, which has the `host` and the `port`
+/// of its endpoint and the `_params` of its connection, as PySpark's `ChannelBuilder` does. Its
+/// parameters are percent-encoded, as the URL parser of the transport decodes them.
+pub(crate) fn url_of_channel_builder(channel_builder: &Bound<'_, PyAny>) -> PyResult<String> {
+    // Endpoint: the builder's host and port, which DefaultChannelBuilder exposes.
+    let host: String = channel_builder
+        .getattr("host")
+        .and_then(|h| h.extract::<String>())
+        .map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "channelBuilder must expose a `host` (e.g. DefaultChannelBuilder); \
+                 otherwise configure the endpoint via .remote(url)",
+            )
+        })?;
+    let port: i64 = channel_builder
+        .getattr("port")
+        .and_then(|p| p.extract::<i64>())
+        .unwrap_or(15002);
+    let mut url = format!("sc://{host}:{port}");
+    // Preserve connection params (token/use_ssl/user_id/...) if present as `_params`.
+    if let Ok(params) = channel_builder.getattr("_params") {
+        if let Ok(dict) = params.cast::<pyo3::types::PyDict>() {
+            if !dict.is_empty() {
+                let mut parts: Vec<String> = Vec::new();
+                for (k, v) in dict.iter() {
+                    parts.push(format!(
+                        "{}={}",
+                        k.str()?,
+                        quote_param(&v.str()?.to_string())
+                    ));
+                }
+                url.push_str("/;");
+                url.push_str(&parts.join(";"));
+            }
+        }
+    }
+    Ok(url)
+}
+
+/// `value`, percent-encoded outside the unreserved characters, so that it is one value of a
+/// `;`-separated URL parameter.
+fn quote_param(value: &str) -> String {
+    value
+        .bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
+                (b as char).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
+        })
+        .collect()
+}
+
+/// `url`, with the parameter `user_id` set to `user`, unless it has one, which takes precedence,
+/// as PySpark's `SparkSession(userId=...)` gives it to the connection.
+fn with_user_id(url: &str, user: &str) -> PyResult<String> {
+    if spark_connect_core::channel::ChannelBuilder::parse(url)
+        .to_pyerr()?
+        .get("user_id")
+        .is_some()
+    {
+        return Ok(url.to_string());
+    }
+    let param = format!("user_id={}", quote_param(user));
+    let base = url.trim_end_matches('/');
+    Ok(if base.contains(';') {
+        format!("{base};{param}")
+    } else {
+        format!("{base}/;{param}")
+    })
+}
+
+/// The `CONNECT_URL_NOT_SET` error of a builder without a URL: see `_ConnectUrlNotSetError`.
+fn connect_url_not_set(py: Python<'_>) -> PyErr {
+    let error = py
+        .import("pyspark.sql.connect.session")
+        .and_then(|module| module.getattr("_connect_url_not_set_error"))
+        .and_then(|make| make.call0());
+    match error {
+        Ok(error) => PyErr::from_value(error),
+        Err(error) => error,
+    }
+}
+
+/// Install on `session` the hooks that `factories` make of it, each called with the session, as
+/// PySpark's `SparkSession(hook_factories=...)`.
+fn install_hook_factories(
+    py: Python<'_>,
+    factories: &[Py<PyAny>],
+    session: &Py<PySparkSession>,
+) -> PyResult<()> {
+    if factories.is_empty() {
+        return Ok(());
+    }
+    let hooks = factories
+        .iter()
+        .map(|factory| {
+            factory
+                .bind(py)
+                .call1((session.clone_ref(py),))
+                .map(Bound::unbind)
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+    let hook: spark_connect::ExecutePlanHook = std::sync::Arc::new(move |request| {
+        Python::attach(|py| call_execute_plan_hooks(py, &hooks, request))
+            .map_err(crate::errors::callback_error)
+    });
+    session.borrow(py).session.set_execute_plan_hook(Some(hook));
+    Ok(())
+}
+
+/// The default session, which is the class attribute `_default_session` of `SparkSession`, as
+/// PySpark's: the first session created, of every thread, until it stops. The attribute is the
+/// one value, which the Python code may also set, as PySpark's tests do.
+fn default_slot(py: Python<'_>) -> Option<Py<PySparkSession>> {
+    let value = py
+        .get_type::<PySparkSession>()
+        .getattr("_default_session")
+        .ok()?;
+    if value.is_none() {
+        return None;
+    }
+    value.cast_into::<PySparkSession>().ok().map(Bound::unbind)
+}
+
+/// Set the default session, as the class attribute `_default_session`.
+fn set_default_slot(py: Python<'_>, session: Option<Py<PySparkSession>>) {
+    let _ = py
+        .get_type::<PySparkSession>()
+        .setattr("_default_session", session);
 }
 
 thread_local! {
@@ -459,11 +557,7 @@ fn active_session(py: Python<'_>) -> Option<Py<PySparkSession>> {
 
 /// The default session, unless it stopped.
 fn default_session(py: Python<'_>) -> Option<Py<PySparkSession>> {
-    default_slot()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .as_ref()
-        .and_then(|session| unless_stopped(py, session))
+    default_slot(py).and_then(|session| unless_stopped(py, &session))
 }
 
 /// A new session of `url`, which is the default session, and the active session of this
@@ -554,11 +648,8 @@ pub(crate) fn session_object(
 /// Make `session` the default session, and the active session of this thread, when they are
 /// not set, as PySpark's `SparkSession._set_default_and_active_session`.
 fn set_default_and_active(py: Python<'_>, session: &Py<PySparkSession>) {
-    {
-        let mut default = default_slot().lock().unwrap_or_else(|e| e.into_inner());
-        if default.is_none() {
-            *default = Some(session.clone_ref(py));
-        }
+    if default_slot(py).is_none() {
+        set_default_slot(py, Some(session.clone_ref(py)));
     }
     ACTIVE_SESSION.with(|active| {
         let mut active = active.borrow_mut();
@@ -594,6 +685,32 @@ fn log_client_banner(py: Python<'_>) {
             Ok(())
         })();
     });
+}
+
+/// The active session of the current thread, as PySpark's `SparkSession._active_session`, a
+/// thread-local whose `session` attribute is the session: the `ACTIVE_SESSION` of this thread.
+#[pyclass(name = "_ActiveSession", module = "pyspark.sql.session", frozen)]
+pub struct PyActiveSession;
+
+#[pymethods]
+impl PyActiveSession {
+    /// The active session of this thread, which may be stopped, as the attribute of the
+    /// thread-local of PySpark.
+    #[getter]
+    fn session(&self, py: Python<'_>) -> Option<Py<PySparkSession>> {
+        ACTIVE_SESSION.with(|active| {
+            active
+                .borrow()
+                .as_ref()
+                .map(|session| session.clone_ref(py))
+        })
+    }
+
+    /// Set the active session of this thread; None clears it.
+    #[setter]
+    fn set_session(&self, session: Option<Py<PySparkSession>>) {
+        ACTIVE_SESSION.with(|active| *active.borrow_mut() = session);
+    }
 }
 
 /// `SparkSession.Hook` - injects behavior around plan execution, as PySpark's
@@ -657,6 +774,9 @@ pub struct PySparkSession {
     pub(crate) session: SparkSession,
     /// The `StreamingQueryManager` of `spark.streams`, made at its first access.
     streams: std::sync::OnceLock<Py<PyStreamingQueryManager>>,
+    /// Whether `stop()` releases the session on the server, as PySpark's
+    /// `release_session_on_close`, which tests set to False to skip the release.
+    release_session_on_close: std::sync::atomic::AtomicBool,
 }
 
 struct PandasArrowColumn {
@@ -761,6 +881,7 @@ impl PySparkSession {
         PySparkSession {
             session,
             streams: std::sync::OnceLock::new(),
+            release_session_on_close: std::sync::atomic::AtomicBool::new(true),
         }
     }
 
@@ -2313,7 +2434,17 @@ impl PySparkSession {
     fn stop(&self, py: Python<'_>) -> PyResult<()> {
         crate::progress::forget_session(&self.session);
         crate::profiler::forget_session(&self.session);
-        if let Err(e) = py.detach(|| self.session.stop().map_err(Box::new)) {
+        let released = if self
+            .release_session_on_close
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            py.detach(|| self.session.stop().map_err(Box::new))
+        } else {
+            // As PySpark's stop: without the release, the client is closed all the same.
+            py.detach(|| self.session.close());
+            Ok(())
+        };
+        if let Err(e) = released {
             let logger = py
                 .import("logging")?
                 .call_method1("getLogger", ("pyspark",))?;
@@ -2328,11 +2459,8 @@ impl PySparkSession {
         // session of this thread.
         let sid = self.session.session_id();
         let is_this = |s: &Py<PySparkSession>| s.borrow(py).session.session_id() == sid;
-        {
-            let mut default = default_slot().lock().unwrap_or_else(|e| e.into_inner());
-            if default.as_ref().is_some_and(is_this) {
-                *default = None;
-            }
+        if default_slot(py).as_ref().is_some_and(is_this) {
+            set_default_slot(py, None);
         }
         ACTIVE_SESSION.with(|active| {
             let mut active = active.borrow_mut();
@@ -2609,12 +2737,114 @@ impl PySparkSession {
         self.session.is_stopped()
     }
 
+    /// `SparkSession(connection, userId=None, hook_factories=None)`, as PySpark Connect's: a
+    /// session of the URL or channel builder `connection`, which is neither the default nor the
+    /// active session, as PySpark's constructor does not make it either.
+    #[new]
+    #[pyo3(signature = (connection, userId=None, hook_factories=None))]
+    #[allow(non_snake_case)]
+    fn py_new(
+        py: Python<'_>,
+        connection: &Bound<'_, PyAny>,
+        userId: Option<String>,
+        hook_factories: Option<Bound<'_, PyAny>>,
+    ) -> PyResult<Py<Self>> {
+        let url = match connection.extract::<String>() {
+            Ok(url) => url,
+            Err(_) => url_of_channel_builder(connection)?,
+        };
+        let url = match userId {
+            Some(user) => with_user_id(&url, &user)?,
+            None => url,
+        };
+        let session = py
+            .detach(|| {
+                SparkSession::builder()
+                    .remote(&url)
+                    .get_or_create()
+                    .map_err(Box::new)
+            })
+            .to_pyerr()?;
+        let session = session_object(py, &session)?;
+        let factories = match hook_factories {
+            Some(factories) => factories
+                .try_iter()?
+                .map(|factory| factory.map(Bound::unbind))
+                .collect::<PyResult<Vec<_>>>()?,
+            None => Vec::new(),
+        };
+        install_hook_factories(py, &factories, &session)?;
+        log_client_banner(py);
+        Ok(session)
+    }
+
+    /// Whether `stop()` releases the session on the server, as PySpark's
+    /// `release_session_on_close`, which is True unless set otherwise.
+    #[getter]
+    fn release_session_on_close(&self) -> bool {
+        self.release_session_on_close
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    #[setter]
+    fn set_release_session_on_close(&self, value: bool) {
+        self.release_session_on_close
+            .store(value, std::sync::atomic::Ordering::SeqCst);
+    }
+
     /// The builder CLASS, reached as `SparkSession.Builder` (mirrors pyspark, which
     /// exposes the nested `Builder` type so `SparkSession.Builder()` works).
     #[classattr]
     #[allow(non_snake_case)]
     fn Builder(py: Python<'_>) -> Py<pyo3::types::PyType> {
         py.get_type::<PySparkSessionBuilder>().unbind()
+    }
+
+    /// The class attribute `_default_session`, the default session or None, as PySpark's:
+    /// `_get_default_session` reads it, and `stop()` clears it. It is set as a class attribute
+    /// (`set_default_slot`), so Python code that sets it changes the session that is default.
+    #[classattr]
+    fn _default_session(py: Python<'_>) -> Py<PyAny> {
+        py.None()
+    }
+
+    /// The class attribute `_active_session`, whose `session` is the active session of the
+    /// current thread, as PySpark's thread-local `SparkSession._active_session`.
+    #[classattr]
+    fn _active_session(py: Python<'_>) -> PyResult<Py<PyActiveSession>> {
+        Py::new(py, PyActiveSession)
+    }
+
+    /// The class attribute `_lock`, PySpark's `threading.RLock` of the session registry, for the
+    /// Python code that takes it. The drop-in serializes the creation of sessions with its own
+    /// lock, as `getOrCreate` does with `_lock`.
+    #[classattr]
+    fn _lock(py: Python<'_>) -> PyResult<Py<PyAny>> {
+        Ok(py.import("threading")?.call_method0("RLock")?.unbind())
+    }
+
+    /// The default session, unless it stopped, as PySpark's `_get_default_session`.
+    #[staticmethod]
+    #[pyo3(name = "_get_default_session")]
+    fn get_default_session(py: Python<'_>) -> Option<Py<PySparkSession>> {
+        default_session(py)
+    }
+
+    /// The host of the endpoint of the session, as PySpark's `SparkConnectClient.host`.
+    fn _endpoint_host(&self) -> String {
+        self.session.host().to_string()
+    }
+
+    /// The server-side session ID that the responses of the session carried, or None before the
+    /// first response, as PySpark's `SparkConnectClient._server_session_id`.
+    fn _observed_server_session_id(&self) -> Option<String> {
+        self.session.server_session_id()
+    }
+
+    /// Set the server-side session ID that the session observed, as PySpark's
+    /// `SparkConnectClient._server_session_id` is settable.
+    fn _set_observed_server_session_id(&self, id: Option<String>) {
+        self.session.set_server_session_id(id);
     }
 
     /// The execution hook base class, reached as `SparkSession.Hook` (mirrors pyspark).
@@ -3798,5 +4028,46 @@ mod decimal_text_tests {
             assert_eq!(decimal_text_digits(text), None, "{text}");
             assert_eq!(decimal_string_scale(text), None, "{text}");
         }
+    }
+}
+
+#[cfg(test)]
+mod connection_url_tests {
+    use super::{quote_param, with_user_id};
+
+    #[test]
+    fn a_parameter_value_is_percent_encoded_outside_the_unreserved_characters() {
+        assert_eq!(quote_param("a-b_c.d~e9"), "a-b_c.d~e9");
+        assert_eq!(quote_param("a b;c=d%"), "a%20b%3Bc%3Dd%25");
+    }
+
+    #[test]
+    fn user_id_is_added_to_the_url_unless_it_has_one() {
+        assert_eq!(
+            with_user_id("sc://h", "bob").unwrap(),
+            "sc://h/;user_id=bob"
+        );
+        assert_eq!(
+            with_user_id("sc://h/", "bob").unwrap(),
+            "sc://h/;user_id=bob"
+        );
+        assert_eq!(
+            with_user_id("sc://h/;token=t", "bob").unwrap(),
+            "sc://h/;token=t;user_id=bob"
+        );
+        // The user ID of the connection string takes precedence, as PySpark's does.
+        assert_eq!(
+            with_user_id("sc://h/;user_id=ann", "bob").unwrap(),
+            "sc://h/;user_id=ann"
+        );
+    }
+
+    #[test]
+    fn a_user_id_with_separators_reads_back_as_given() {
+        let url = with_user_id("sc://h:114", "a b;c=d").unwrap();
+        let parsed = spark_connect_core::channel::ChannelBuilder::parse(&url).unwrap();
+        assert_eq!(parsed.get("user_id"), Some("a b;c=d"));
+        assert_eq!(parsed.host(), "h");
+        assert_eq!(parsed.port(), 114);
     }
 }

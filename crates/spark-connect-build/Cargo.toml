@@ -19,6 +19,7 @@
 name = "apache-spark-connect-build"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 description = "build.rs helper that compiles Rust WASM UDFs for the Spark Connect client"
 

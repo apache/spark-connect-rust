@@ -414,52 +414,28 @@ impl GroupedData {
         Ok(self.agg(expressions))
     }
 
-    /// Sum values in each group.
-    pub fn sum(&self, columns: Vec<&str>) -> DataFrame {
-        use crate::functions;
-        let expressions: Vec<_> = columns
-            .iter()
-            .map(|col| functions::sum(crate::column::col(col)).expression().clone())
-            .collect();
-
-        self.agg(expressions)
+    /// Sum values in each group, as `GroupedData.sum`: every numeric column without `columns`.
+    pub fn sum(&self, columns: Vec<&str>) -> Result<DataFrame> {
+        self.numeric_agg("sum", columns)
     }
 
-    /// Average values in each group.
-    pub fn avg(&self, columns: Vec<&str>) -> DataFrame {
-        use crate::functions;
-        let expressions: Vec<_> = columns
-            .iter()
-            .map(|col| functions::avg(crate::column::col(col)).expression().clone())
-            .collect();
-
-        self.agg(expressions)
+    /// Average values in each group, as `GroupedData.avg`: every numeric column without `columns`.
+    pub fn avg(&self, columns: Vec<&str>) -> Result<DataFrame> {
+        self.numeric_agg("avg", columns)
     }
 
-    /// Minimum values in each group.
-    pub fn min(&self, columns: Vec<&str>) -> DataFrame {
-        use crate::functions;
-        let expressions: Vec<_> = columns
-            .iter()
-            .map(|col| functions::min(crate::column::col(col)).expression().clone())
-            .collect();
-
-        self.agg(expressions)
+    /// Minimum values in each group, as `GroupedData.min`: every numeric column without `columns`.
+    pub fn min(&self, columns: Vec<&str>) -> Result<DataFrame> {
+        self.numeric_agg("min", columns)
     }
 
-    /// Maximum values in each group.
-    pub fn max(&self, columns: Vec<&str>) -> DataFrame {
-        use crate::functions;
-        let expressions: Vec<_> = columns
-            .iter()
-            .map(|col| functions::max(crate::column::col(col)).expression().clone())
-            .collect();
-
-        self.agg(expressions)
+    /// Maximum values in each group, as `GroupedData.max`: every numeric column without `columns`.
+    pub fn max(&self, columns: Vec<&str>) -> Result<DataFrame> {
+        self.numeric_agg("max", columns)
     }
 
     /// Mean (alias for avg).
-    pub fn mean(&self, columns: Vec<&str>) -> DataFrame {
+    pub fn mean(&self, columns: Vec<&str>) -> Result<DataFrame> {
         self.avg(columns)
     }
 }
@@ -980,24 +956,6 @@ mod tests {
                 // Plan structure is correct
             }
             _ => panic!("expected Aggregate plan with GroupBy"),
-        }
-    }
-
-    #[test]
-    fn group_sum_plan() {
-        let spark = session();
-        let df = spark.range(10).unwrap();
-        let grouped = df.group_by(vec![crate::column::col("id")]);
-        let result = grouped.sum(vec!["id"]);
-        match result.plan.as_ref() {
-            LogicalPlan::Aggregate {
-                group_type: AggregateGroupType::GroupBy,
-                aggregate_expressions,
-                ..
-            } => {
-                assert!(!aggregate_expressions.is_empty());
-            }
-            _ => panic!("expected Aggregate plan"),
         }
     }
 

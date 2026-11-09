@@ -618,6 +618,41 @@ class TestStreamingListenerLifecycle:
             service.release_session_failure = False
             spark.streams.close()
 
+    def test_streaming_listener_stop_delivers_the_events_sent_while_releasing(self, mock_connect):
+        # As PySpark's stop(): the session is released before the listener bus is cancelled, so
+        # the terminated events that the server sends while it releases the session, of the
+        # queries still running, reach the listeners. The mock holds the release's response
+        # until the listener has the event; a bus cancelled before the release drops it.
+        spark, service = mock_connect
+        service.listener_bus_enabled = True
+        terminated = threading.Event()
+
+        class TerminatedListener(IdleListener):
+            def onQueryTerminated(self, event):
+                terminated.set()
+
+        spark.streams.addListener(TerminatedListener())
+        assert service.wait_listener_registration(1)
+        service.release_session_events = [(2, json.dumps({
+            "id": "00000000-0000-4000-8000-000000000001",
+            "runId": "00000000-0000-4000-8000-000000000002",
+            "exception": None,
+            "errorClassOnException": None,
+        }))]
+        service.release_session_blocked = True
+        stopper = threading.Thread(target=spark.stop, daemon=True)
+        stopper.start()
+        try:
+            assert terminated.wait(timeout=15)
+        finally:
+            service.release_session_release()
+            stopper.join(timeout=15)
+            service.release_session_blocked = False
+            service.release_session_events = []
+        assert not stopper.is_alive()
+        assert spark.is_stopped
+        assert service.release_session_calls == 1
+
     def test_streaming_listener_client_close_cancels_without_releasing(self, mock_connect):
         spark, service = mock_connect
         service.listener_bus_enabled = True

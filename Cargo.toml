@@ -53,7 +53,9 @@ default-members = [
 [workspace.package]
 version = "4.3.0"
 edition = "2021"
-rust-version = "1.82"
+# The minimum Rust that the dependencies of the published crates need: tonic, tonic-prost and
+# tonic-build 0.14 (and DataFusion 53 of the `datafusion` feature) declare 1.88. CI checks it.
+rust-version = "1.88"
 license = "Apache-2.0"
 repository = "https://github.com/apache/spark-connect-rust"
 homepage = "https://spark.apache.org/"

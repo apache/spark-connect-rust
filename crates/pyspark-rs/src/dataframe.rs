@@ -108,6 +108,7 @@ impl PyDataFrame {
         let (batches, schema) = py
             .detach(|| self.dataframe.collect_record_batches_with_schema())
             .to_pyerr()?;
+        check_nanosecond_timestamps(py, schema.as_ref())?;
         let table = crate::pyarrow_export::record_batches_to_pyarrow(py, batches)?;
         let schema = match &schema {
             Some(schema) => crate::types::data_type_to_py(py, schema)?,
@@ -2246,6 +2247,7 @@ impl PyDataFrame {
                     .map_err(Box::new)
             })
             .to_pyerr()?;
+        check_nanosecond_timestamps(py, schema.as_ref())?;
         let table = crate::pyarrow_export::record_batches_to_pyarrow(py, batches)?;
         let Some(schema) = schema else {
             return Ok(table);
@@ -4267,6 +4269,53 @@ fn check_arrow_schema(
     Ok(())
 }
 
+/// The proto text of the first nanosecond-precision timestamp of `data_type`, `TIMESTAMP_NTZ(p)`
+/// or `TIMESTAMP_LTZ(p)` with p > 6, in the order of PySpark's conversion of a schema from its
+/// proto: the message that PySpark's `proto_schema_to_pyspark_data_type` names when it fails.
+fn nanosecond_timestamp_text(data_type: &spark_connect::types::DataType) -> Option<String> {
+    use spark_connect::types::DataType;
+    match data_type {
+        DataType::TimestampNtzNanos { precision } => Some(format!(
+            "timestamp_ntz_nanos {{\n  precision: {precision}\n}}\n"
+        )),
+        DataType::TimestampLtzNanos { precision } => Some(format!(
+            "timestamp_ltz_nanos {{\n  precision: {precision}\n}}\n"
+        )),
+        DataType::Struct { fields } => fields
+            .iter()
+            .find_map(|field| nanosecond_timestamp_text(&field.data_type)),
+        DataType::Array { element_type, .. } => nanosecond_timestamp_text(element_type),
+        DataType::Map {
+            key_type,
+            value_type,
+            ..
+        } => nanosecond_timestamp_text(key_type).or_else(|| nanosecond_timestamp_text(value_type)),
+        DataType::Udt {
+            sql_type: Some(sql_type),
+            ..
+        } => nanosecond_timestamp_text(sql_type),
+        _ => None,
+    }
+}
+
+/// Raises as PySpark does for a result of `schema` with a nanosecond-precision timestamp, which
+/// PySpark cannot convert from the proto of the schema: the collecting APIs raise, though the
+/// Rust core collects these values in microseconds.
+fn check_nanosecond_timestamps(
+    py: Python<'_>,
+    schema: Option<&spark_connect::types::DataType>,
+) -> PyResult<()> {
+    if let Some(text) = schema.and_then(nanosecond_timestamp_text) {
+        return Err(crate::column::raise_pyspark(
+            py,
+            "PySparkValueError",
+            "UNSUPPORTED_OPERATION",
+            &[("operation", &format!("data type {text}"))],
+        ));
+    }
+    Ok(())
+}
+
 /// Raises as PySpark's Arrow conversion of the rows does for a result of `schema` with a
 /// year-month interval, which Spark Connect cannot collect: the error is raised even when the
 /// result has no rows.
@@ -4311,6 +4360,7 @@ fn rows_to_py(
     rows: &[spark_connect::row::Row],
     schema: Option<&spark_connect::types::DataType>,
 ) -> PyResult<Vec<Py<PyAny>>> {
+    check_nanosecond_timestamps(py, schema)?;
     check_arrow_schema(py, schema)?;
     let binary_as_bytes = read_binary_as_bytes(py, dataframe)?;
     check_collectable(py, schema)?;
@@ -4398,6 +4448,7 @@ impl PyLocalRowIterator {
         if self.converters.is_none() {
             if let Some(schema) = self.iterator.as_ref().and_then(LocalRowIterator::schema) {
                 // The result is known once its first message arrives, possibly with no rows.
+                check_nanosecond_timestamps(py, Some(&schema))?;
                 check_collectable(py, Some(&schema))?;
                 self.converters = Some(udt_field_converters(py, Some(&schema))?);
                 self.nested_fields.note_udt_key_maps(&schema);

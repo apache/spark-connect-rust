@@ -159,6 +159,50 @@ def _has_canonical_range_columns(columns, range_module):
     return type(vars(columns).get("_range")) is range
 
 
+def _has_canonical_structured_columns(columns, module, multi):
+    """Accept a plain MultiIndex or CategoricalIndex of column labels, as an Index is accepted.
+
+    The labels only name the columns, and the Arrow routes name them as PySpark does, by `str`.
+    The override rules of an Index apply: the exact class, no override of `__getattribute__`,
+    `__iter__` or `__len__` on the class or the instance, and pandas' own iteration and values.
+    The storage must be pandas' own too: the levels and codes of a MultiIndex, and the values
+    and categories of a CategoricalIndex. Each label container inside is checked as an Index.
+    """
+    import numpy as np
+    from pandas.core import base as base_module
+    from pandas.core.arrays import categorical as categorical_module
+    from pandas.core.indexes import base as index_module, frozen as frozen_module
+
+    cls = type(columns)
+    if (cls.__getattribute__ is not object.__getattribute__
+            or "__iter__" in vars(columns) or "__len__" in vars(columns)
+            or cls.__iter__ is not base_module.IndexOpsMixin.__iter__
+            or not _defined_in(base_module.IndexOpsMixin.__iter__, "__iter__", base_module)
+            or not _defined_in(cls.__len__, "__len__", module, index_module)):
+        return False
+    _, values = _raw_class_attribute(cls, "_values")
+    if not _defined_in(getattr(values, "fget", None), "_values", module, index_module,
+                       base_module):
+        return False
+
+    if multi:
+        levels = vars(columns).get("_levels")
+        codes = vars(columns).get("_codes")
+        if (type(levels) is not frozen_module.FrozenList
+                or type(codes) is not frozen_module.FrozenList):
+            return False
+        return (all(_has_canonical_columns(level) for level in list.__iter__(levels))
+                and all(type(code) is np.ndarray for code in list.__iter__(codes)))
+
+    data = vars(columns).get("_data")
+    categorical = categorical_module.Categorical
+    if (type(data) is not categorical or "__iter__" in vars(data)
+            or not _defined_in(categorical.__iter__, "__iter__", categorical_module)):
+        return False
+    # Read the categories through the pandas property, not an instance attribute.
+    return _has_canonical_columns(categorical.categories.__get__(data))
+
+
 def _has_canonical_columns(columns):
     """Decline label containers whose row-path iteration can run custom hooks."""
     import sys
@@ -167,11 +211,20 @@ def _has_canonical_columns(columns):
     import pandas as pd
     from pandas.core import base as base_module
     from pandas.core.indexes import base as index_module
+    from pandas.core.indexes import category as category_module, multi as multi_module
     from pandas.core.indexes import range as range_module
 
     # A default RangeIndex (pd.DataFrame of a list or ndarray) takes the Arrow routes too.
     if pd.RangeIndex is range_module.RangeIndex and type(columns) is pd.RangeIndex:
         return _has_canonical_range_columns(columns, range_module)
+
+    # Plain MultiIndex and CategoricalIndex labels (`pd.DataFrame` with tuples or categories)
+    # take the Arrow routes too: their labels are only names, as with a default RangeIndex.
+    if pd.MultiIndex is multi_module.MultiIndex and type(columns) is pd.MultiIndex:
+        return _has_canonical_structured_columns(columns, multi_module, True)
+    if (pd.CategoricalIndex is category_module.CategoricalIndex
+            and type(columns) is pd.CategoricalIndex):
+        return _has_canonical_structured_columns(columns, category_module, False)
 
     Index = index_module.Index
     if (pd.Index is not Index or type(columns) is not Index
@@ -1118,10 +1171,11 @@ def _canonical_struct(schema):
 def accepts_pandas_table(frame, schema):
     """Whether `prepare_pandas_table` may convert this frame under this schema.
 
-    Customized frames, column labels, schema classes and rebound type names keep the row
-    path, which reads them in its own order. Conversion-hook authentication covers Arrow
-    string storage, including inherited hooks. Other pandas arrays retain the existing
-    module-origin checks; rebinding their canonical classes' hooks is not covered here.
+    Customized frames, column labels that are not plain (see `_has_canonical_columns`),
+    schema classes and rebound type names keep the row path, which reads them in its own
+    order. Conversion-hook authentication covers Arrow string storage, including inherited
+    hooks. Other pandas arrays retain the existing module-origin checks; rebinding their
+    canonical classes' hooks is not covered here.
     The conversion and importer resolve type names by lookup, so each namespace must hold
     the native classes. The schema is the caller's object or a DDL string, which is parsed.
     """
@@ -1402,15 +1456,23 @@ def inferred_pandas_row_columns(rows, width, candidates=None):
 
     if any(type(row) is not list or len(row) != width for row in list.__iter__(rows)):
         return []
+    # Identities of the exact builtin scalar types. A column whose cells have only these
+    # types holds no Row, so its cells are not walked. Compare identities, not types:
+    # hashing a type could run a metaclass hook.
+    scalar_ids = frozenset(map(id, (type(None), bool, int, float, complex, str, bytes,
+                                    bytearray)))
     columns = []
     for index in range(width) if candidates is None else candidates:
+        cells = [row[index] for row in list.__iter__(rows)]
+        if set(map(id, map(type, cells))) <= scalar_ids:
+            continue
         values = None
         try:
-            for row_index, row in enumerate(list.__iter__(rows)):
-                converted = positional(row[index])
+            for row_index, cell in enumerate(cells):
+                converted = positional(cell)
                 if converted is not unchanged:
                     if values is None:
-                        values = [item[index] for item in list.__iter__(rows)]
+                        values = list(cells)
                     values[row_index] = converted
         except Exception as error:
             # Retain the column index so an earlier native failure still wins.

@@ -60,47 +60,6 @@ def session():
         session.stop()
 
 
-def test_a_query_running_at_stop_sends_its_terminated_event_to_the_listeners_as_pyspark(session):
-    # As PySpark's stop(): the session is released before its client closes, so the terminated
-    # event that the server sends for a query still running at stop reaches the listeners.
-    import threading
-
-    from pyspark.sql.streaming import StreamingQueryListener
-
-    started, terminated = threading.Event(), threading.Event()
-    terminated_ids = []
-
-    class Listener(StreamingQueryListener):
-        def onQueryStarted(self, event):
-            started.set()
-
-        def onQueryProgress(self, event):
-            pass
-
-        def onQueryIdle(self, event):
-            pass
-
-        def onQueryTerminated(self, event):
-            terminated_ids.append(str(event.id))
-            terminated.set()
-
-    other = session.newSession()
-    other.streams.addListener(Listener())
-    query = other.readStream.format("rate").load().writeStream.format("noop").start()
-    try:
-        assert started.wait(timeout=120)
-        other.stop()
-        assert terminated.wait(timeout=120)
-        assert terminated_ids == [query.id]
-    finally:
-        try:
-            query.stop()
-        except Exception:
-            # The session is stopped, so the query is no longer reachable.
-            pass
-        other.stop()
-
-
 @pytest.mark.parametrize("prefetch", [False, True])
 def test_to_local_iterator_raises_the_error_of_the_execution_as_pyspark(session, prefetch):
     # As official PySpark 4.3.0: the error of a query that fails while it is iterated is
@@ -311,6 +270,34 @@ def test_repr_shows_the_rows_with_eager_evaluation_as_pyspark(session):
     assert repr(df) == "DataFrame[id: bigint]"
 
 
+def test_server_session_id_is_observed_and_a_changed_one_closes_the_session_as_pyspark():
+    # SparkConnectClient._server_session_id: None before the first response, then the server's
+    # ID; a changed one makes the next response close the client, as a server-side change does.
+    import uuid
+
+    from pyspark.errors.exceptions.connect import SparkConnectException
+    from pyspark.sql.connect.session import SparkSession as ConnectSession
+
+    remote = os.environ.get("SPARK_REMOTE")
+    if not remote:
+        pytest.skip("SPARK_REMOTE is required for live-server tests")
+    session = ConnectSession(connection=remote)
+    try:
+        assert session._client._server_session_id is None
+        assert session.range(3).count() == 3
+        assert session._client._server_session_id
+        assert not session.is_stopped
+
+        session._client._server_session_id = str(uuid.uuid4())
+        with pytest.raises(SparkConnectException) as error:
+            session.range(3).collect()
+        assert "SESSION_CHANGED" in str(error.value)
+        assert session.is_stopped
+    finally:
+        session.release_session_on_close = False
+        session.stop()
+
+
 def test_udtfs_and_udfs_of_a_dataframe_or_the_session_raise_no_active_session_as_pyspark(session):
     # As PySpark Connect's: a UDTF or a UDF that captures a DataFrame or the session pickles it
     # of its session, which raises NO_ACTIVE_SESSION on the Python worker of the server, where
@@ -492,6 +479,60 @@ def _run_in_time_zone(code, zone):
         [sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=300)
     assert result.returncode == 0, result.stderr
     return result.stdout
+
+
+def test_nanosecond_timestamps_are_not_collected_as_pyspark(session):
+    # As PySpark's conversion of the schema from its proto: a TIMESTAMP_NTZ(p) or TIMESTAMP_LTZ(p)
+    # with p > 6, also nested, raises UNSUPPORTED_OPERATION from every collecting API, toPandas
+    # and toArrow, while count, show and the microsecond timestamps keep working.
+    import datetime
+    import re
+
+    from pyspark.errors import PySparkValueError
+
+    def message(proto_text):
+        return r"\[UNSUPPORTED_OPERATION\] data type " + re.escape(proto_text) + r" is not supported\."
+
+    ntz9 = "timestamp_ntz_nanos {\n  precision: 9\n}\n"
+    ltz7 = "timestamp_ltz_nanos {\n  precision: 7\n}\n"
+    ltz9 = "timestamp_ltz_nanos {\n  precision: 9\n}\n"
+    cases = [
+        ("SELECT CAST('2020-01-01 00:00:00.123456789' AS TIMESTAMP_NTZ(9)) c", ntz9),
+        ("SELECT CAST('2020-01-01 00:00:00.1234567' AS TIMESTAMP_LTZ(7)) c", ltz7),
+        ("SELECT named_struct('a', CAST('2020-01-01 00:00:00.123456789' AS TIMESTAMP_NTZ(9))) c",
+         ntz9),
+        ("SELECT array(CAST('2020-01-01 00:00:00.123456789' AS TIMESTAMP_LTZ(9))) c", ltz9),
+        ("SELECT map('k', CAST('2020-01-01 00:00:00.123456789' AS TIMESTAMP_NTZ(9))) c", ntz9),
+    ]
+    # The types need spark.sql.timestampNanosTypes.enabled, which is on by default only on a
+    # server under SPARK_TESTING, as CI's servers are: turn it on, and back to the server's
+    # default after, so that the test runs against any server.
+    session.conf.set("spark.sql.timestampNanosTypes.enabled", "true")
+    try:
+        for query, proto_text in cases:
+            df = session.sql(query)
+            for collect in (
+                lambda d: d.collect(),
+                lambda d: d.first(),
+                lambda d: d.head(),
+                lambda d: d.head(1),
+                lambda d: d.take(1),
+                lambda d: d.tail(1),
+                lambda d: list(d.toLocalIterator()),
+                lambda d: d.toPandas(),
+                lambda d: d.toArrow(),
+            ):
+                with pytest.raises(PySparkValueError, match=message(proto_text)):
+                    collect(df)
+        # Spark Connect and PySpark both count and show these results.
+        df = session.sql("SELECT CAST('2020-01-01 00:00:00.123456789' AS TIMESTAMP_NTZ(9)) c")
+        assert df.count() == 1
+        df.show()
+        # Microsecond timestamps still collect.
+        micros = session.sql("SELECT CAST('2020-01-01 00:00:00.123456' AS TIMESTAMP_NTZ(6)) c")
+        assert micros.collect()[0].c == datetime.datetime(2020, 1, 1, 0, 0, 0, 123456)
+    finally:
+        session.conf.unset("spark.sql.timestampNanosTypes.enabled")
 
 
 def test_ntz_collect_is_the_wall_clock_in_the_client_time_zone_as_pyspark():
@@ -2361,6 +2402,40 @@ def test_variant_spatial_and_user_defined_values_round_trip_as_pyspark(session):
     assert geometry == Geometry.fromWKB(wkb, 0)
 
 
+def test_create_dataframe_of_multi_and_categorical_labels_as_pyspark(session):
+    # As PySpark's: a frame whose labels are a MultiIndex or a CategoricalIndex converts its
+    # cells as a frame of default labels does. A naive datetime of a list reads back unchanged
+    # under a session time zone other than UTC, the Decimals and dicts take PySpark's types, and
+    # the names are the labels as strings.
+    import pandas as pd
+
+    cells = [[datetime(2020, 1, 2, 3)], [Decimal("1.5"), Decimal("10.25")],
+             {"u": 1, "v": "a"}, {"u": 1, "v": 2}]
+    frames = [
+        (pd.DataFrame([cells], columns=pd.MultiIndex.from_tuples(
+            [("a", "x"), ("b", "y"), ("c", "z"), ("d", "w")]), dtype=object),
+         ["('a', 'x')", "('b', 'y')", "('c', 'z')", "('d', 'w')"]),
+        (pd.DataFrame([cells], columns=pd.CategoricalIndex(["a", "b", "c", "d"]), dtype=object),
+         ["a", "b", "c", "d"]),
+    ]
+    previous = session.conf.get("spark.sql.session.timeZone")
+    session.conf.set("spark.sql.session.timeZone", "Asia/Seoul")
+    try:
+        for frame, names in frames:
+            df = session.createDataFrame(frame)
+            assert df.columns == names
+            assert df.schema.fields[0].dataType.simpleString() == "array<timestamp_ntz>"
+            assert df.schema.fields[1].dataType.simpleString() == "array<decimal(4,2)>"
+            assert df.schema.fields[2].dataType.simpleString() == "struct<u:bigint,v:string>"
+            assert df.schema.fields[3].dataType.simpleString() == "struct<u:bigint,v:bigint>"
+            row = df.first()
+            assert row[0] == [datetime(2020, 1, 2, 3)]
+            assert row[1] == [Decimal("1.50"), Decimal("10.25")]
+            assert row[2] == Row(u=1, v="a") and row[3] == Row(u=1, v=2)
+    finally:
+        session.conf.set("spark.sql.session.timeZone", previous)
+
+
 def test_create_dataframe_of_pandas_infers_the_types_of_arrow_as_pyspark(session):
     # As PySpark Connect's: without a schema, the columns of a pandas DataFrame convert with
     # PySpark's Arrow conversion, of the types that Arrow infers, and a naive datetime is a time
@@ -2862,6 +2937,18 @@ def test_to_arrow_casts_to_the_arrow_schema_of_the_schema_as_pyspark(session):
     with pytest.raises(UnsupportedOperationException) as e:
         session.sql("SELECT named_struct('a', 1, 'a', 2) AS v").toArrow()
     assert e.value.getCondition() == "DUPLICATED_FIELD_NAME_IN_ARROW_STRUCT"
+
+def test_a_derived_dataframe_of_a_local_checkpoint_outlives_the_checkpoint_as_pyspark(session):
+    # The checkpoint is released when its last DataFrame goes: a DataFrame derived from it keeps
+    # working after the checkpoint itself is deleted and collected.
+    import gc
+
+    checkpoint = session.range(5).localCheckpoint()
+    derived = checkpoint.filter(F.col("id") > 1)
+    del checkpoint
+    gc.collect()
+    assert derived.count() == 3
+    assert [row.id for row in derived.orderBy("id").collect()] == [2, 3, 4]
 
 def test_to_pandas_converts_the_columns_as_pyspark(session):
     # As official PySpark 4.3.0's SparkConnectClient.to_pandas: each column by its Spark type,

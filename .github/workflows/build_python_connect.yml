@@ -289,6 +289,163 @@ jobs:
           if-no-files-found: warn
 
   # ---------------------------------------------------------------------------
+  # Drop-in gate: the official connect suites run against OUR drop-in itself (the
+  # Rust-backed DataFrame, Column, functions, readers, ...), not through the transport.
+  # The parity gate above only exercises the transport under official PySpark classes,
+  # so without this job the drop-in's own classes are covered by our tests alone.
+  # Known by-design and environmental failures: scripts/dropin_known_failures.txt.
+  # ---------------------------------------------------------------------------
+  connect-dropin:
+    name: Connect drop-in (official suite against our drop-in)
+    runs-on: ubuntu-latest
+    # Serial, like connect-parity: sql, ml, errors and logger connect files, ~45-60 min.
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Cache cargo & target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-dropin-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-dropin-
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # Same environment as the parity gate (pandas 2.x; Spark 4.2+ is not compatible
+          # with pandas 3). torch and scikit-learn are NOT installed: the ML tests that need
+          # them skip themselves (pyspark.testing guards), and the torch-based pyspark.ml.connect
+          # files are by design (scripts/dropin_known_failures.txt).
+          python -m pip install pytest 'pandas>=2.2,<3.0' pyarrow numpy grpcio grpcio-status googleapis-common-protos cloudpickle zstandard py4j
+
+      - name: Build the Rust extension into the skin
+        run: |
+          cargo build -p pyspark-rs --release
+          cp target/release/lib_pyspark.so python/pyspark/_pyspark.so
+
+      - name: Cache Spark ${{ env.SPARK_VERSION }} distribution
+        uses: actions/cache@v4
+        with:
+          path: ~/spark-dist
+          key: spark-dist-${{ env.SPARK_VERSION }}-hadoop3
+
+      - name: Download Apache Spark ${{ env.SPARK_VERSION }} (Connect server)
+        id: spark-download
+        run: |
+          PKG="spark-${SPARK_VERSION}-bin-hadoop3-connect"
+          if [ ! -d "${HOME}/spark-dist/spark-4.3.0-bin-hadoop3"* ]; then
+            URL="https://archive.apache.org/dist/spark/spark-${SPARK_VERSION}/${PKG}.tgz"
+            mkdir -p "${HOME}/spark-dist"
+            echo "Downloading ${URL}"
+            wget -q -O "${HOME}/spark-dist/${PKG}.tgz" "${URL}"
+            tar -xzf "${HOME}/spark-dist/${PKG}.tgz" -C "${HOME}/spark-dist"
+            rm -f "${HOME}/spark-dist/${PKG}.tgz"
+          else
+            echo "Using cached Spark distribution."
+          fi
+          SPARK_HOME=$(find "${HOME}/spark-dist" -maxdepth 1 -type d -name 'spark-4.3.0-bin-hadoop3*' | head -1)
+          echo "SPARK_HOME=${SPARK_HOME}" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Spark ${{ env.SPARK_VERSION }} source (official test files)
+        uses: actions/cache@v4
+        with:
+          path: ~/spark-source
+          key: spark-source-${{ env.SPARK_VERSION }}
+
+      - name: Clone Apache Spark v${{ env.SPARK_VERSION }} (official test files)
+        id: spark-source
+        run: |
+          if [ ! -d "${HOME}/spark-source/python" ]; then
+            git clone --depth 1 --branch "v${SPARK_VERSION}" \
+              https://github.com/apache/spark.git "${HOME}/spark-source"
+          else
+            echo "Using cached Spark source."
+          fi
+          echo "SPARK_SOURCE=${HOME}/spark-source" >> "$GITHUB_OUTPUT"
+
+      - name: Start Spark Connect server
+        env:
+          PYSPARK_PYTHON: python
+          PYSPARK_DRIVER_PYTHON: python
+        run: |
+          SPARK_HOME="${{ steps.spark-download.outputs.SPARK_HOME }}"
+          echo "Starting Connect server on ${SPARK_CONNECT_TESTING_REMOTE}"
+          # The server resolves the relative data paths of the official tests (such as the
+          # data/mllib files of the ML tests) against its working directory, as Apache's CI,
+          # which starts it from SPARK_HOME.
+          cd "${SPARK_HOME}"
+          # Same server settings as the parity gate (see connect-parity).
+          "${SPARK_HOME}/sbin/start-connect-server.sh" \
+            --driver-memory 3g \
+            --conf spark.sql.session.localRelationSizeLimit=1073741824 \
+            > /tmp/connect-server.log 2>&1 &
+          for i in $(seq 1 90); do
+            if (echo > /dev/tcp/localhost/15002) 2>/dev/null; then
+              echo "Connect server is up (after ${i}s)."; break
+            fi
+            if [ "$i" -eq 90 ]; then echo "Server failed to start:"; cat /tmp/connect-server.log; exit 1; fi
+            sleep 1
+          done
+
+      - name: Drop-in - official connect suites against OUR drop-in
+        id: dropin
+        env:
+          PYTHONUNBUFFERED: "1"
+          RUST_PYSPARK_SO: ${{ github.workspace }}/python/pyspark/_pyspark.so
+          RUST_PARITY_LOG_DIR: /tmp/dropin-test-logs
+          TZ: UTC
+          SPARK_HOME: ${{ steps.spark-download.outputs.SPARK_HOME }}
+        run: |
+          # --dropin runs each official file with our pyspark (an overlay of python/ with the
+          # built extension and the official test files), so the failures that remain are the
+          # drop-in's own: the manifest scripts/dropin_known_failures.txt holds only the by-design
+          # and environmental ones, and everything else fails the gate. Serial (--jobs 1).
+          set -o pipefail
+          python scripts/run_official_tests.py \
+            --dropin \
+            --spark "${{ steps.spark-source.outputs.SPARK_SOURCE }}" \
+            --remote "${SPARK_CONNECT_TESTING_REMOTE}" \
+            --jobs 1 \
+            2>&1 | tee /tmp/dropin_official.log
+
+      - name: Upload drop-in logs + server log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dropin-official-py3.11
+          path: |
+            /tmp/dropin-test-logs/
+            /tmp/dropin_official.log
+            /tmp/connect-server.log
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
   # Behavioral e2e tests (Rust drop-in against a live 4.3.0 server), in their OWN job
   # with a separate Connect server so they never share server state with the
   # parity gate. The parity gate then starts against a server nothing else has

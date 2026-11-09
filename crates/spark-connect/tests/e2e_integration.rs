@@ -265,6 +265,117 @@ fn test_count() {
     assert_eq!(count, 100, "Expected count of 100");
 }
 
+/// The sync API inside a `current_thread` runtime, as the default `#[tokio::test]` is: it blocks
+/// the test thread, and the requests carry the tags and the user context extensions of that
+/// thread, as they do on a plain thread.
+#[tokio::test]
+async fn test_sync_api_inside_a_current_thread_runtime() {
+    if !should_run() {
+        println!(
+            "Skipping test_sync_api_inside_a_current_thread_runtime - set SPARK_REMOTE to run"
+        );
+        return;
+    }
+
+    let session = SparkSession::builder()
+        .remote(&remote_url())
+        .get_or_create()
+        .expect("Failed to create session");
+
+    // The requests as the client sends them: their tags and the types of their extensions.
+    type SentRequests = Vec<(Vec<String>, Vec<String>)>;
+    let sent: std::sync::Arc<std::sync::Mutex<SentRequests>> = Default::default();
+    let recorded = std::sync::Arc::clone(&sent);
+    session.set_execute_plan_hook(Some(std::sync::Arc::new(move |request| {
+        let extensions = request
+            .user_context
+            .iter()
+            .flat_map(|context| context.extensions.iter().map(|e| e.type_url.clone()))
+            .collect();
+        recorded
+            .lock()
+            .unwrap()
+            .push((request.tags.clone(), extensions));
+        Ok(request)
+    })));
+
+    let df = session.range(3).expect("Failed to create range DataFrame");
+    assert_eq!(df.count().expect("count"), 3);
+    assert_eq!(df.collect().expect("collect").len(), 3);
+    let rows = session
+        .sql("SELECT 1 AS x")
+        .and_then(|df| df.collect())
+        .expect("sql");
+    assert_eq!(rows.len(), 1);
+
+    // A tag and an extension of the test thread are on the operation that the test thread runs,
+    // which a thread that waits for the server to show it interrupts by the tag.
+    let tag = "s13-current-thread-tag";
+    let extension_type = "type.googleapis.com/s13.current_thread";
+    session.add_tag(tag).expect("add_tag");
+    assert_eq!(session.get_tags(), vec![tag.to_string()]);
+    session.add_threadlocal_user_context_extension(prost_types::Any {
+        type_url: extension_type.to_string(),
+        value: Vec::new(),
+    });
+    let running = std::sync::atomic::AtomicBool::new(true);
+    let interrupted = std::thread::scope(|scope| {
+        let interrupter = scope.spawn(|| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(60);
+            while running.load(std::sync::atomic::Ordering::SeqCst) {
+                let ids = session.interrupt_tag(tag).expect("interrupt_tag");
+                if !ids.is_empty() {
+                    return ids;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the operation never started"
+                );
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            Vec::new()
+        });
+        let outcome = session
+            .sql("SELECT reflect('java.lang.Thread', 'sleep', 60000L)")
+            .and_then(|df| df.collect());
+        running.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert!(outcome.is_err(), "the interrupted operation must fail");
+        interrupter.join().expect("interrupter")
+    });
+    assert_eq!(
+        interrupted.len(),
+        1,
+        "the tag of the test thread is on its operation"
+    );
+    {
+        let sent = sent.lock().unwrap();
+        assert!(
+            sent.iter().any(|(tags, exts)| tags == &[tag.to_string()]
+                && exts.iter().any(|e| e == extension_type)),
+            "the operation carries the tag and the extension of the test thread: {sent:?}"
+        );
+    }
+    session.set_execute_plan_hook(None);
+    session.remove_tag(tag);
+    assert!(session.get_tags().is_empty());
+
+    // stop() releases the session from this thread too; the stopped session then raises
+    // NO_ACTIVE_SESSION, and a new session works.
+    session.stop().expect("stop");
+    assert!(session.is_stopped());
+    let err = session
+        .range(1)
+        .and_then(|df| df.count())
+        .expect_err("a stopped session must not run");
+    assert_eq!(err.get_condition().as_deref(), Some("NO_ACTIVE_SESSION"));
+    let fresh = SparkSession::builder()
+        .remote(&remote_url())
+        .get_or_create()
+        .expect("Failed to create a new session");
+    assert_eq!(fresh.range(2).and_then(|df| df.count()).expect("count"), 2);
+    fresh.stop().expect("stop");
+}
+
 #[test]
 fn test_schema() {
     if !should_run() {
@@ -597,6 +708,45 @@ fn test_completed_execution_is_released() {
         while stream.message().await.expect("Failed to read").is_some() {}
         assert_released(&client, &operation_id).await;
     });
+}
+
+/// A progress handler that panics during an execution of a local iterator panics in the caller,
+/// with prefetching as without, instead of ending the rows early without an error.
+#[test]
+fn test_a_panicking_progress_handler_reaches_the_caller_of_a_local_iterator() {
+    if !should_run() {
+        return;
+    }
+    let spark = SparkSession::builder()
+        .remote(&remote_url())
+        .get_or_create()
+        .expect("session");
+    // Updates every 10 ms (2 s by default), so the tasks below report progress.
+    spark
+        .conf()
+        .set("spark.connect.progress.reportInterval", "10ms")
+        .expect("conf");
+    spark.register_progress_handler(|update| {
+        if !update.done {
+            panic!("a progress handler panics");
+        }
+    });
+    for prefetch in [true, false] {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            spark
+                .sql("SELECT id, reflect('java.lang.Thread', 'sleep', 500L) AS s FROM range(0, 4, 1, 4)")
+                .expect("sql")
+                .to_local_iterator(prefetch)
+                .expect("iterator")
+                .collect::<Result<Vec<_>, _>>()
+                .map(|rows| rows.len())
+        }));
+        assert!(
+            result.is_err(),
+            "prefetch={prefetch}: the panic of the handler must reach the caller, got {result:?}"
+        );
+    }
+    let _ = spark.stop();
 }
 
 /// A stream dropped before its result is complete releases its execution as well.

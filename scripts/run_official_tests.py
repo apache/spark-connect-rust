@@ -16,25 +16,63 @@ commit the update if it is environmental.
 Set ``RUST_PARITY_LOG_DIR`` to retain each pytest attempt (including tracebacks,
 retries, drift checks, and partial output on timeout). CI uploads these logs.
 
+Drop-in mode (``--dropin``) runs the same official files against OUR drop-in instead of
+through the transport: an overlay copy of our python/ tree (with the built extension) plus
+the official test packages that our tree lacks is put on PYTHONPATH, and the files run
+with our own ``pyspark`` classes (DataFrame, Column, functions, readers, ...). The local
+manifest is scripts/dropin_known_failures.txt. Discovery covers the Connect suites of sql,
+ml, errors and logger, minus the local-cluster-only files.
+
 Usage:
     RUST_PYSPARK_SO=/repo/python/pyspark/_pyspark.so \
     SPARK_CONNECT_TESTING_REMOTE=sc://localhost:15002 \
     python3 scripts/run_official_tests.py --spark ~/spark-source [--jobs 1]
+
+    RUST_PYSPARK_SO=/repo/python/pyspark/_pyspark.so \
+    SPARK_CONNECT_TESTING_REMOTE=sc://localhost:15002 \
+    python3 scripts/run_official_tests.py --dropin --spark ~/spark-source
 """
 
 from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import functools
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 DEFAULT_MANIFEST = REPO / "scripts" / "parity_known_failures.txt"
+DROPIN_MANIFEST = REPO / "scripts" / "dropin_known_failures.txt"
+
+# Drop-in mode: the official packages copied into the overlay (only the files our tree
+# lacks; ours are never overwritten), the Connect suites discovered, and the files that
+# need a real multi-executor cluster (run by the local-cluster phase, not here).
+DROPIN_TEST_PACKAGES = (
+    "pyspark/sql/tests",
+    "pyspark/ml/tests",
+    "pyspark/errors/tests",
+    "pyspark/logger/tests",
+    "pyspark/resource/tests",
+    "pyspark/tests",
+)
+DROPIN_SCOPE = (
+    "pyspark/sql/tests/connect/",
+    "pyspark/ml/tests/connect/",
+    "pyspark/errors/tests/connect/",
+    "pyspark/logger/tests/connect/",
+)
+DROPIN_LOCAL_CLUSTER_ONLY = {
+    "test_artifact.py",
+    "test_artifact_localcluster.py",
+    "test_parity_resources.py",
+}
 
 # The only files whose failures are genuinely event-timing-driven: they wait on
 # real server-pushed events (streaming query progress/listener callbacks, observed
@@ -84,6 +122,44 @@ def discover(spark_py: Path):
         if "/sql/tests/connect/" in str(p).replace(os.sep, "/"):
             out.append(p)
     return out
+
+
+def discover_dropin(spark_py: Path):
+    """The official Connect suites of sql, ml, errors and logger, for the drop-in run."""
+    out = []
+    for p in sorted(spark_py.rglob("test_*.py")):
+        rel = p.relative_to(spark_py).as_posix()
+        if not rel.startswith(DROPIN_SCOPE):
+            continue
+        if p.name in DROPIN_LOCAL_CLUSTER_ONLY:
+            continue
+        out.append(p)
+    return out
+
+
+def build_dropin_overlay(repo_python: Path, spark_py: Path, so: Path, root: Path) -> Path:
+    """Build ``root/python``: our python/ tree, the built extension, and the official test packages.
+
+    Official files are copied only where our tree has no file of that path, so none of our
+    own files are overwritten. Returns the overlay's ``python`` dir (the new spark_py).
+    """
+    dst = root / "python"
+    shutil.copytree(
+        repo_python,
+        dst,
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".pytest_cache"),
+    )
+    shutil.copy2(so, dst / "pyspark" / "_pyspark.so")
+    for pkg in DROPIN_TEST_PACKAGES:
+        for src in sorted((spark_py / pkg).rglob("*")):
+            if src.is_dir() or "__pycache__" in src.parts or src.suffix == ".pyc":
+                continue
+            target = dst / src.relative_to(spark_py)
+            if target.exists():
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, target)
+    return dst
 
 
 def resolve_only(spec: str, spark_py: Path):
@@ -156,14 +232,27 @@ def write_test_log(test_file: Path, spark_py: Path, text: str, select_only: bool
 
 
 def run_ours(
-    test_file: Path, spark_py: Path, remote: str, deselect, timeout: int, select_only=False
+    test_file: Path,
+    spark_py: Path,
+    remote: str,
+    deselect,
+    timeout: int,
+    select_only=False,
+    dropin=False,
 ):
     env = dict(os.environ)
     env["SPARK_CONNECT_TESTING_REMOTE"] = remote
     env["SPARK_TESTING"] = "1"
     env["SPARK_SKIP_CONNECT_COMPAT_TESTS"] = "1"
-    env["PYTHONPATH"] = os.pathsep.join([str(REPO / "scripts"), str(spark_py)])
-    env["RUST_PYSPARK_SO"] = os.environ["RUST_PYSPARK_SO"]
+    if dropin:
+        # The drop-in itself: no transport. scripts/ is on the path only for the deselect
+        # plugin; spark_py (the overlay) comes first, so our pyspark is the one imported.
+        env["PYTHONPATH"] = os.pathsep.join([str(spark_py), str(REPO / "scripts")])
+        plugin = "dropin_deselect_plugin"
+    else:
+        env["PYTHONPATH"] = os.pathsep.join([str(REPO / "scripts"), str(spark_py)])
+        env["RUST_PYSPARK_SO"] = os.environ["RUST_PYSPARK_SO"]
+        plugin = "rust_transport_plugin"
     # Deselection is done by the transport plugin (pytest_collection_modifyitems) via
     # this env var - matching node-id *suffixes* - rather than pytest's own --deselect.
     # --deselect compares against a node id relative to pytest's rootdir, which differs
@@ -185,7 +274,7 @@ def run_ours(
         "-p",
         "no:cacheprovider",
         "-p",
-        "rust_transport_plugin",
+        plugin,
     ]
     args.append(rel_file)
     try:
@@ -224,7 +313,15 @@ def main():
     ap.add_argument(
         "--remote", default=os.environ.get("SPARK_CONNECT_TESTING_REMOTE", "sc://localhost:15002")
     )
-    ap.add_argument("--manifest", default=str(DEFAULT_MANIFEST))
+    ap.add_argument(
+        "--dropin",
+        action="store_true",
+        help="Run the official Connect suites (sql, ml, errors, logger) against OUR drop-in "
+        "(an overlay of our python/ tree with the built extension and the official test "
+        "files) instead of through the Rust transport. Uses scripts/dropin_known_failures.txt "
+        "unless --manifest is given.",
+    )
+    ap.add_argument("--manifest", default=None)
     ap.add_argument("--jobs", type=int, default=1)
     ap.add_argument("--timeout", type=int, default=360)
     ap.add_argument(
@@ -266,13 +363,42 @@ def main():
     if not os.environ.get("RUST_PYSPARK_SO"):
         print("!! set RUST_PYSPARK_SO to the built extension")
         return 2
-    spark_py = Path(os.path.expanduser(args.spark)) / "python"
+    official_py = Path(os.path.expanduser(args.spark)) / "python"
+    manifest = (
+        Path(args.manifest)
+        if args.manifest
+        else (DROPIN_MANIFEST if args.dropin else DEFAULT_MANIFEST)
+    )
+    overlay = None
+    if args.dropin:
+        # The drop-in runs from an overlay (a scratch copy), so the repo tree is never
+        # touched by the official test files. Removed when the run ends.
+        overlay = Path(tempfile.mkdtemp(prefix="dropin-overlay-"))
+        spark_py = build_dropin_overlay(
+            REPO / "python", official_py, Path(os.environ["RUST_PYSPARK_SO"]), overlay
+        )
+        print(f"Drop-in overlay: {spark_py}", flush=True)
+    else:
+        spark_py = official_py
+    try:
+        return _run(args, spark_py, manifest)
+    finally:
+        if overlay is not None:
+            shutil.rmtree(overlay, ignore_errors=True)
+
+
+def _run(args, spark_py: Path, manifest: Path):
     if args.only:
         files = resolve_only(args.only, spark_py)
         missing = [f for f in files if not f.exists()]
         if missing:
             print("!! --only test file(s) not found:", *(str(m) for m in missing))
             return 2
+    elif args.dropin:
+        files = discover_dropin(spark_py)
+        if args.exclude:
+            drop = {x.strip() for x in args.exclude.split(",") if x.strip()}
+            files = [f for f in files if f.name not in drop]
     else:
         files = discover(spark_py)
         if args.exclude:
@@ -282,7 +408,10 @@ def main():
         print("!! no connect test files found under", spark_py)
         return 2
 
-    per_file, whole_file = load_manifest(Path(args.manifest))
+    # Every run (tests, retries, drift check) goes through the same runner, in the mode.
+    run = functools.partial(run_ours, dropin=args.dropin)
+
+    per_file, whole_file = load_manifest(manifest)
     n_skip = sum(len(v) for v in per_file.values())
     print(
         f"Discovered {len(files)} connect test files; manifest skips "
@@ -309,7 +438,7 @@ def main():
         # Slow-but-deterministic files get a larger per-file timeout (see
         # SLOW_FILE_TIMEOUTS); everything else uses the default cap.
         file_timeout = SLOW_FILE_TIMEOUTS.get(tf.name, args.timeout)
-        counts, failed_ids = run_ours(tf, spark_py, args.remote, deselect, file_timeout)
+        counts, failed_ids = run(tf, spark_py, args.remote, deselect, file_timeout)
         # Retry ONLY the event-timing-driven files (see FLAKY_FILES): for them a flake
         # clears on a fresh run while a genuine failure persists. Deterministic files
         # are NOT retried, so a non-deterministic bug there surfaces immediately rather
@@ -318,7 +447,7 @@ def main():
         attempts = 1
         while is_bad(counts) and attempts <= retries:
             attempts += 1
-            counts, failed_ids = run_ours(tf, spark_py, args.remote, deselect, file_timeout)
+            counts, failed_ids = run(tf, spark_py, args.remote, deselect, file_timeout)
         return tf.name, counts, failed_ids, False, attempts
 
     failures = []  # (file, [nodeids])
@@ -361,9 +490,7 @@ def main():
             tf = files_by_rel.get(rel)
             if tf is None:
                 continue
-            counts, _ = run_ours(
-                tf, spark_py, args.remote, suffixes, args.timeout, select_only=True
-            )
+            counts, _ = run(tf, spark_py, args.remote, suffixes, args.timeout, select_only=True)
             # All selected tests passed (some ran, and pytest exited clean).
             if counts.get("passed", 0) and not is_bad(counts):
                 now_passing.append((rel, counts.get("passed", 0), counts.get("skipped", 0)))

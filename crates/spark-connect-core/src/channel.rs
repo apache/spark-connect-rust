@@ -36,11 +36,45 @@ const GRPC_DEFAULT_KEEPALIVE_TIMEOUT_MS: i64 = 20 * 1000;
 const GRPC_DEFAULT_KEEPALIVE_WITHOUT_CALLS: bool = true;
 
 /// Parsed Spark Connect connection string plus channel parameters.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ChannelBuilder {
     params: BTreeMap<String, String>,
     host: String, // display host; IPv6 wrapped in [ ]
     port: u16,
+}
+
+/// The gRPC/HTTP2 keepalive of a channel: PINGs after `time` without activity, a connection that
+/// does not acknowledge one within `timeout` is dead, and `without_calls` sends them also when
+/// no call is in flight.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Keepalive {
+    pub time: std::time::Duration,
+    pub timeout: std::time::Duration,
+    pub without_calls: bool,
+}
+
+/// Shows the params with the values of the token and of an `authorization` header redacted:
+/// they are secrets, which a log of the builder must not hold.
+impl std::fmt::Debug for ChannelBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let params: BTreeMap<&str, &str> = self
+            .params
+            .iter()
+            .map(|(key, value)| {
+                let secret = key.eq_ignore_ascii_case(PARAM_TOKEN)
+                    || key.eq_ignore_ascii_case("authorization");
+                (
+                    key.as_str(),
+                    if secret { "<redacted>" } else { value.as_str() },
+                )
+            })
+            .collect();
+        f.debug_struct("ChannelBuilder")
+            .field("params", &params)
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .finish()
+    }
 }
 
 impl ChannelBuilder {
@@ -218,6 +252,23 @@ impl ChannelBuilder {
             PARAM_GRPC_KEEPALIVE_WITHOUT_CALLS,
             GRPC_DEFAULT_KEEPALIVE_WITHOUT_CALLS,
         )
+    }
+
+    /// The keepalive that the channel applies, as PySpark's `_effective_channel_options` sets
+    /// `grpc.keepalive_time_ms`, `grpc.keepalive_timeout_ms` and
+    /// `grpc.keepalive_permit_without_calls`: none when `grpc_keepalive_enabled` is false (or the
+    /// time is not positive, which no PING interval can be).
+    pub fn keepalive(&self) -> Option<Keepalive> {
+        let millis = |ms: i64| std::time::Duration::from_millis(u64::try_from(ms).unwrap_or(0));
+        let time = self.keepalive_time_ms();
+        if !self.keepalive_enabled() || time <= 0 {
+            return None;
+        }
+        Some(Keepalive {
+            time: millis(time),
+            timeout: millis(self.keepalive_timeout_ms()),
+            without_calls: self.keepalive_without_calls(),
+        })
     }
 
     /// The user-agent string, matching Python's format and 2048-char cap.
@@ -438,6 +489,56 @@ mod tests {
         assert_eq!(c.keepalive_time_ms(), 30000);
         assert_eq!(c.keepalive_timeout_ms(), 20000); // default
         assert!(c.keepalive_enabled());
+    }
+
+    #[test]
+    fn keepalive_is_that_of_the_channel_options_of_pyspark() {
+        use std::time::Duration;
+        // PySpark's defaults (SPARK-58094): a PING after 60 s, 20 s for its ack, also idle.
+        assert_eq!(
+            ChannelBuilder::parse("sc://localhost").unwrap().keepalive(),
+            Some(Keepalive {
+                time: Duration::from_secs(60),
+                timeout: Duration::from_secs(20),
+                without_calls: true,
+            })
+        );
+        let custom = ChannelBuilder::parse(
+            "sc://localhost/;grpc_keepalive_time_ms=30000;grpc_keepalive_timeout_ms=5000;\
+             grpc_keepalive_without_calls=false",
+        )
+        .unwrap();
+        assert_eq!(
+            custom.keepalive(),
+            Some(Keepalive {
+                time: Duration::from_secs(30),
+                timeout: Duration::from_secs(5),
+                without_calls: false,
+            })
+        );
+        // Turned off, as PySpark then adds none of the keepalive options.
+        let off = ChannelBuilder::parse("sc://localhost/;grpc_keepalive_enabled=FALSE").unwrap();
+        assert_eq!(off.keepalive(), None);
+        let zero = ChannelBuilder::parse("sc://localhost/;grpc_keepalive_time_ms=0").unwrap();
+        assert_eq!(zero.keepalive(), None);
+        // The keepalive params are channel options, not request metadata.
+        assert!(custom.metadata().is_empty());
+    }
+
+    #[test]
+    fn debug_of_a_builder_redacts_its_token() {
+        let c = ChannelBuilder::parse(
+            "sc://spark.example.com:443/;token=SECRET123;authorization=Bearer%20XYZ;x-custom=1",
+        )
+        .unwrap();
+        let shown = format!("{c:?}");
+        assert!(!shown.contains("SECRET123"), "{shown}");
+        assert!(!shown.contains("XYZ"), "{shown}");
+        assert!(shown.contains("<redacted>"), "{shown}");
+        assert!(shown.contains("x-custom"), "{shown}");
+        assert!(shown.contains("spark.example.com"), "{shown}");
+        // The token itself is unchanged.
+        assert_eq!(c.token().as_deref(), Some("SECRET123"));
     }
 
     #[test]

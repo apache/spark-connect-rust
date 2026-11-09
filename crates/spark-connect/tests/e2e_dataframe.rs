@@ -83,6 +83,175 @@ fn dataframe_transforms_and_setops() {
     assert_eq!(m.count().unwrap(), 4);
 }
 
+/// The column names of `df`, then its rows as display strings, sorted.
+fn named_rows(df: &DataFrame) -> (Vec<String>, Vec<Vec<String>>) {
+    let columns = df.columns().unwrap();
+    let mut rows: Vec<Vec<String>> = df
+        .collect()
+        .unwrap()
+        .iter()
+        .map(|row| {
+            (0..columns.len())
+                .map(|i| row.get(i).map_or_else(String::new, |v| v.to_string()))
+                .collect()
+        })
+        .collect();
+    rows.sort();
+    (columns, rows)
+}
+
+/// `GroupedData.sum`, `avg`, `mean`, `min` and `max` aggregate every numeric column without
+/// columns, and reject a given column that is not a numeric one, as PySpark's `_numeric_agg`
+/// does, for groupBy, rollup, cube, grouping sets and pivot.
+#[test]
+fn group_numeric_aggregates_follow_pyspark() {
+    use spark_connect::row::Value;
+    use spark_connect::SparkErrorKind;
+    if !should_run() {
+        return;
+    }
+    let s = session();
+    // k: grouping string; i int, l long, d double (NULL in group b), s string, p pivot string.
+    let df = s
+        .sql(
+            "SELECT * FROM VALUES ('a', 1, 10L, 1.5D, 'x', 'p'), ('a', 2, 20L, 2.5D, 'y', 'q'), \
+             ('b', 3, 30L, CAST(NULL AS DOUBLE), 'z', 'p') AS t(k, i, l, d, s, p)",
+        )
+        .unwrap();
+    let names = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<String>>();
+    let rows = |rows: &[&[&str]]| {
+        rows.iter()
+            .map(|r| r.iter().map(|v| v.to_string()).collect::<Vec<String>>())
+            .collect::<Vec<Vec<String>>>()
+    };
+
+    // Every numeric column, in schema order, with PySpark's names (`sum(i)`, ...).
+    let (cols, got) = named_rows(&df.group_by(vec![col("k")]).sum(vec![]).unwrap());
+    assert_eq!(cols, names(&["k", "sum(i)", "sum(l)", "sum(d)"]));
+    assert_eq!(
+        got,
+        rows(&[&["a", "3", "30", "4"], &["b", "3", "30", "NULL"]])
+    );
+    let (cols, got) = named_rows(&df.group_by(vec![col("k")]).avg(vec![]).unwrap());
+    assert_eq!(cols, names(&["k", "avg(i)", "avg(l)", "avg(d)"]));
+    assert_eq!(
+        got,
+        rows(&[&["a", "1.5", "15", "2"], &["b", "3", "30", "NULL"]])
+    );
+    let (cols, got) = named_rows(&df.group_by(vec![col("k")]).mean(vec![]).unwrap());
+    assert_eq!(cols, names(&["k", "avg(i)", "avg(l)", "avg(d)"]));
+    assert_eq!(
+        got,
+        rows(&[&["a", "1.5", "15", "2"], &["b", "3", "30", "NULL"]])
+    );
+    let (cols, got) = named_rows(&df.group_by(vec![col("k")]).min(vec![]).unwrap());
+    assert_eq!(cols, names(&["k", "min(i)", "min(l)", "min(d)"]));
+    assert_eq!(
+        got,
+        rows(&[&["a", "1", "10", "1.5"], &["b", "3", "30", "NULL"]])
+    );
+    let (cols, got) = named_rows(&df.group_by(vec![col("k")]).max(vec![]).unwrap());
+    assert_eq!(cols, names(&["k", "max(i)", "max(l)", "max(d)"]));
+    assert_eq!(
+        got,
+        rows(&[&["a", "2", "20", "2.5"], &["b", "3", "30", "NULL"]])
+    );
+
+    // A given numeric column only.
+    let (cols, got) = named_rows(&df.group_by(vec![col("k")]).sum(vec!["d", "i"]).unwrap());
+    assert_eq!(cols, names(&["k", "sum(d)", "sum(i)"]));
+    assert_eq!(got, rows(&[&["a", "4", "3"], &["b", "NULL", "3"]]));
+
+    // Rollup, cube and grouping sets (`GROUPING SETS ((k), ())` is `ROLLUP(k)`).
+    let (cols, got) = named_rows(&df.rollup(vec![col("k")]).sum(vec![]).unwrap());
+    assert_eq!(cols, names(&["k", "sum(i)", "sum(l)", "sum(d)"]));
+    assert_eq!(
+        got,
+        rows(&[
+            &["NULL", "6", "60", "4"],
+            &["a", "3", "30", "4"],
+            &["b", "3", "30", "NULL"]
+        ])
+    );
+    // With one grouping column, a cube is a rollup.
+    assert_eq!(
+        named_rows(&df.cube(vec![col("k")]).sum(vec![]).unwrap()),
+        named_rows(&df.rollup(vec![col("k")]).sum(vec![]).unwrap())
+    );
+    let grouping_sets = df
+        .grouping_sets(vec![vec![col("k")], vec![]])
+        .sum(vec![])
+        .unwrap();
+    assert_eq!(
+        named_rows(&grouping_sets).1,
+        named_rows(&df.rollup(vec![col("k")]).sum(vec![]).unwrap()).1
+    );
+
+    // Pivot: the numeric columns of each pivot value, or the given one.
+    let pivot = |grouped: spark_connect::group::GroupedData| {
+        grouped
+            .pivot(
+                col("p"),
+                Some(vec![Value::String("p".into()), Value::String("q".into())]),
+            )
+            .unwrap()
+    };
+    let (cols, got) = named_rows(&pivot(df.group_by(vec![col("k")])).sum(vec![]).unwrap());
+    assert_eq!(
+        cols,
+        names(&["k", "p_sum(i)", "p_sum(l)", "p_sum(d)", "q_sum(i)", "q_sum(l)", "q_sum(d)"])
+    );
+    assert_eq!(
+        got,
+        rows(&[
+            &["a", "1", "10", "1.5", "2", "20", "2.5"],
+            &["b", "3", "30", "NULL", "NULL", "NULL", "NULL"]
+        ])
+    );
+    let (cols, got) = named_rows(&pivot(df.group_by(vec![col("k")])).sum(vec!["i"]).unwrap());
+    assert_eq!(cols, names(&["k", "p", "q"]));
+    assert_eq!(got, rows(&[&["a", "1", "2"], &["b", "3", "NULL"]]));
+
+    // A column that is not numeric, or not in the schema, is NOT_NUMERIC_COLUMNS with the
+    // invalid columns in PySpark's order.
+    let check = |err: spark_connect::SparkError, invalid: &str| {
+        assert_eq!(err.kind, SparkErrorKind::TypeError);
+        assert_eq!(err.get_condition().as_deref(), Some("NOT_NUMERIC_COLUMNS"));
+        assert_eq!(
+            err.params.get("invalid_columns").map(String::as_str),
+            Some(invalid)
+        );
+    };
+    check(
+        df.group_by(vec![col("k")])
+            .sum(vec!["s"])
+            .err()
+            .expect("a string column"),
+        "['s']",
+    );
+    check(
+        df.group_by(vec![col("k")])
+            .min(vec!["i", "nope", "s"])
+            .err()
+            .expect("a missing and a string column"),
+        "['nope', 's']",
+    );
+    check(
+        pivot(df.group_by(vec![col("k")]))
+            .sum(vec!["s"])
+            .err()
+            .expect("a string column of a pivot"),
+        "['s']",
+    );
+    check(
+        df.rollup(vec![col("k")])
+            .avg(vec!["s"])
+            .err()
+            .expect("a string column of a rollup"),
+        "['s']",
+    );
+}
+
 #[test]
 fn dataframe_metadata_json_semantics() {
     if !should_run() {
@@ -257,6 +426,67 @@ fn int_pairs(df: &DataFrame) -> Vec<(i32, i32)> {
         .collect();
     pairs.sort();
     pairs
+}
+
+/// Reads `relation` as a DataFrame, polling until the server no longer has it, as a release
+/// sent without waiting takes effect. Returns the condition of the error the read fails with.
+fn wait_until_relation_is_released(s: &SparkSession, relation: &spark_connect_proto::Relation) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        if let Err(error) = DataFrame::from_sent_relation(s.clone(), relation.clone()).count() {
+            assert_eq!(
+                error.get_condition().as_deref(),
+                Some("CONNECT_INVALID_PLAN.DATAFRAME_NOT_FOUND"),
+                "the released relation is not found: {error}"
+            );
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the server still has the relation of the dropped checkpoint"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+}
+
+#[test]
+fn a_dropped_checkpoint_releases_its_relation_on_the_server() {
+    // As PySpark's CachedRemoteRelation.__del__: the last DataFrame of a checkpoint that is
+    // dropped removes the relation on the server, and only then is it gone.
+    if !should_run() {
+        return;
+    }
+    let s = session();
+    // checkpoint() needs a checkpoint directory, which the test server does not set.
+    let checkpoint = s.range(5).unwrap().local_checkpoint().unwrap();
+    let relation = checkpoint.to_relation();
+    assert_eq!(checkpoint.count().unwrap(), 5);
+    drop(checkpoint);
+    wait_until_relation_is_released(&s, &relation);
+}
+
+#[test]
+fn a_checkpoint_stays_while_a_dataframe_derived_from_it_is_alive() {
+    // The derived DataFrame keeps the checkpoint alive: it still counts after the checkpoint
+    // itself is dropped, and the relation is released only once the derived one is dropped.
+    if !should_run() {
+        return;
+    }
+    let s = session();
+    let checkpoint = s.range(5).unwrap().local_checkpoint().unwrap();
+    let relation = checkpoint.to_relation();
+    let derived = checkpoint.filter(col("id").gt(lit(1)));
+    drop(checkpoint);
+    assert_eq!(derived.count().unwrap(), 3);
+    assert_eq!(
+        DataFrame::from_sent_relation(s.clone(), relation.clone())
+            .count()
+            .unwrap(),
+        5,
+        "the relation is still on the server while the derived DataFrame lives"
+    );
+    drop(derived);
+    wait_until_relation_is_released(&s, &relation);
 }
 
 #[test]

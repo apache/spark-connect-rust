@@ -35,6 +35,7 @@ from typing import (
 
 import decimal
 import datetime
+from threading import Lock
 
 import numpy as np
 
@@ -454,3 +455,57 @@ class LiteralExpression(Expression):
                 # while Pandas applies all supported units.
                 return pd.Timedelta(delta).isoformat()
         return f"{self._value}"
+
+
+class UnresolvedNamedLambdaVariable(Expression):
+    """A variable of a lambda function, of the name parts of a column reference. The lambda
+    functions of ``pyspark.sql.functions`` name their variables with :meth:`fresh_var_name`."""
+
+    _lock: Lock = Lock()
+    _nextVarNameId: int = 0
+
+    def __init__(
+        self,
+        name_parts: Sequence[str],
+    ) -> None:
+        super().__init__()
+
+        assert (
+            isinstance(name_parts, list)
+            and len(name_parts) > 0
+            and all(isinstance(p, str) for p in name_parts)
+        )
+
+        self._name_parts = name_parts
+
+    def to_plan(self, session: Any) -> "proto.Expression":
+        expr = self._create_proto_expression()
+        expr.unresolved_named_lambda_variable.name_parts.extend(self._name_parts)
+        return expr
+
+    def __repr__(self) -> str:
+        return ", ".join(self._name_parts)
+
+    @staticmethod
+    def fresh_var_name(name: str) -> str:
+        assert isinstance(name, str) and name != ""
+
+        with UnresolvedNamedLambdaVariable._lock:
+            _id = UnresolvedNamedLambdaVariable._nextVarNameId
+            UnresolvedNamedLambdaVariable._nextVarNameId += 1
+
+        return f"{name}_{_id}"
+
+
+class DistributedSequenceID(Expression):
+    """The ``distributed_sequence_id()`` function, which the server evaluates."""
+
+    def to_plan(self, session: Any) -> "proto.Expression":
+        # As PySpark's UnresolvedFunction of no argument, which is not distinct.
+        expr = self._create_proto_expression()
+        expr.unresolved_function.function_name = "distributed_sequence_id"
+        expr.unresolved_function.is_distinct = False
+        return expr
+
+    def __repr__(self) -> str:
+        return "DistributedSequenceID()"

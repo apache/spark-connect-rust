@@ -297,8 +297,14 @@ pub enum LogicalPlan {
         data_hashes: Vec<String>,
         schema_hash: Option<String>,
     },
-    /// CachedRemoteRelation: a reference to a cached remote relation.
-    CachedRemoteRelation { relation_id: String },
+    /// CachedRemoteRelation: a reference to a cached remote relation, such as the result of
+    /// `checkpoint()`. The owner, if any, keeps the relation alive on the server while any
+    /// plan of it is alive, and removes it when the last one drops, as PySpark's
+    /// `CachedRemoteRelation.__del__` does.
+    CachedRemoteRelation {
+        relation_id: String,
+        owner: Option<RelationOwner>,
+    },
     /// A relation the server returned, such as the result of `SparkSession::sql`, sent back
     /// as is (pyspark's `CachedRelation`).
     CachedRelation { relation: Box<proto::Relation> },
@@ -1518,7 +1524,7 @@ impl LogicalPlan {
                 relation.rel_type = Some(proto::relation::RelType::LocalRelation(local));
             }
 
-            LogicalPlan::CachedRemoteRelation { relation_id } => {
+            LogicalPlan::CachedRemoteRelation { relation_id, .. } => {
                 let mut cached = proto::CachedRemoteRelation::default();
                 cached.relation_id = relation_id.clone();
                 relation.rel_type = Some(proto::relation::RelType::CachedRemoteRelation(cached));
@@ -2407,6 +2413,7 @@ pub fn local_relation(schema: DataType, data: Option<Vec<u8>>) -> LogicalPlan {
 pub fn cached_remote_relation(relation_id: impl Into<String>) -> LogicalPlan {
     LogicalPlan::CachedRemoteRelation {
         relation_id: relation_id.into(),
+        owner: None,
     }
 }
 

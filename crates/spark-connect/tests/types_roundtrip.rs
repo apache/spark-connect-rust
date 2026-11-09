@@ -389,6 +389,414 @@ fn from_ddl_full_grammar() {
     assert!(DataType::from_ddl("struct<a:>").is_err());
 }
 
+/// `from_ddl` reads the `NOT NULL` and `COMMENT` clauses of a field as Spark's grammar does,
+/// `colName dataType [NOT NULL] [COMMENT 'string']` (and `complexColType` for a struct field, whose
+/// colon is optional): keywords in any case, the comment's escapes, adjacent string literals, and
+/// backquoted names. The expected values are the server's `DataType.fromDDL` results.
+#[test]
+fn from_ddl_reads_not_null_and_comment_as_spark() {
+    fn field(
+        name: &str,
+        data_type: DataType,
+        nullable: bool,
+        comment: Option<&str>,
+    ) -> StructField {
+        let metadata = comment
+            .map(|c| {
+                BTreeMap::from([(
+                    "comment".to_string(),
+                    serde_json::Value::String(c.to_string()),
+                )])
+            })
+            .unwrap_or_default();
+        StructField {
+            name: name.to_string(),
+            data_type,
+            nullable,
+            metadata,
+        }
+    }
+    let struct_of = |fields: Vec<StructField>| DataType::Struct { fields };
+
+    // Top-level form, with and without a comma, in any keyword case.
+    assert_eq!(
+        DataType::from_ddl("x INT NOT NULL").unwrap(),
+        struct_of(vec![field("x", DataType::Integer, false, None)])
+    );
+    // A name of other letters than ASCII must be back quoted, as Spark's parser requires
+    // (INVALID_IDENTIFIER for `이름 INT`).
+    assert!(DataType::from_ddl("이름 INT NOT NULL").is_err());
+    assert_eq!(
+        DataType::from_ddl("`이름` INT NOT NULL, `café` INT COMMENT 'c'").unwrap(),
+        struct_of(vec![
+            field("이름", DataType::Integer, false, None),
+            field("café", DataType::Integer, true, Some("c")),
+        ])
+    );
+    assert_eq!(
+        DataType::from_ddl("a INT NOT NULL, b STRING").unwrap(),
+        struct_of(vec![
+            field("a", DataType::Integer, false, None),
+            field(
+                "b",
+                DataType::String {
+                    collation: "UTF8_BINARY".into()
+                },
+                true,
+                None
+            ),
+        ])
+    );
+    assert_eq!(
+        DataType::from_ddl("a INT, b STRING COMMENT 'x'").unwrap(),
+        struct_of(vec![
+            field("a", DataType::Integer, true, None),
+            field(
+                "b",
+                DataType::String {
+                    collation: "UTF8_BINARY".into()
+                },
+                true,
+                Some("x")
+            ),
+        ])
+    );
+    assert_eq!(
+        DataType::from_ddl("a INT not null, b string Comment 'hi'").unwrap(),
+        struct_of(vec![
+            field("a", DataType::Integer, false, None),
+            field(
+                "b",
+                DataType::String {
+                    collation: "UTF8_BINARY".into()
+                },
+                true,
+                Some("hi")
+            ),
+        ])
+    );
+    assert_eq!(
+        DataType::from_ddl("a INT NOT NULL COMMENT 'x', b STRING").unwrap(),
+        struct_of(vec![
+            field("a", DataType::Integer, false, Some("x")),
+            field(
+                "b",
+                DataType::String {
+                    collation: "UTF8_BINARY".into()
+                },
+                true,
+                None
+            ),
+        ])
+    );
+    assert_eq!(
+        DataType::from_ddl("a INT !NULL").unwrap(),
+        struct_of(vec![field("a", DataType::Integer, false, None)])
+    );
+    assert_eq!(
+        DataType::from_ddl("a decimal(10, 2) NOT NULL, b interval day to second").unwrap(),
+        struct_of(vec![
+            field(
+                "a",
+                DataType::Decimal {
+                    precision: 10,
+                    scale: 2
+                },
+                false,
+                None
+            ),
+            field(
+                "b",
+                DataType::DayTimeInterval {
+                    start_field: 0,
+                    end_field: 3
+                },
+                true,
+                None
+            ),
+        ])
+    );
+
+    // Nested form, with the optional colon and the same clauses.
+    assert_eq!(
+        DataType::from_ddl("struct<a: INT NOT NULL>").unwrap(),
+        struct_of(vec![field("a", DataType::Integer, false, None)])
+    );
+    assert_eq!(
+        DataType::from_ddl("STRUCT<a: INT NOT NULL COMMENT 'x', b: STRING>").unwrap(),
+        DataType::Struct {
+            fields: vec![
+                field("a", DataType::Integer, false, Some("x")),
+                field(
+                    "b",
+                    DataType::String {
+                        collation: "UTF8_BINARY".into()
+                    },
+                    true,
+                    None
+                ),
+            ]
+        }
+    );
+    assert_eq!(
+        DataType::from_ddl("struct<a int comment 'x,y<z'>").unwrap(),
+        struct_of(vec![field("a", DataType::Integer, true, Some("x,y<z"))])
+    );
+    assert_eq!(
+        DataType::from_ddl("array<struct<c: LONG NOT NULL COMMENT 'q'>>").unwrap(),
+        DataType::Array {
+            element_type: Box::new(struct_of(vec![field(
+                "c",
+                DataType::Long,
+                false,
+                Some("q")
+            )])),
+            contains_null: true,
+        }
+    );
+
+    // The escapes of the comment, as `unescapeSQLString` reads them.
+    for (ddl, comment) in [
+        (r"a INT COMMENT 'it\'s'", "it's"),
+        (r"a INT COMMENT 'it''s'", "it's"),
+        (r"a INT COMMENT 'a\\b'", r"a\b"),
+        (r"a INT COMMENT 'a\\'", r"a\"),
+        (r"a INT COMMENT '\''", "'"),
+        ("a INT COMMENT \"dq\"", "dq"),
+        (r"a INT COMMENT 'a' 'b'", "ab"),
+        (r"a INT COMMENT ''", ""),
+        (r"a INT COMMENT R'raw\x'", r"raw\x"),
+        (r"a INT COMMENT 'xA\101\n'", "xAA\n"),
+        (r"a INT COMMENT 'x\z\%\_'", r"xz\%\_"),
+        ("a INT COMMENT 'line\nbreak, comma'", "line\nbreak, comma"),
+    ] {
+        let parsed = DataType::from_ddl(ddl).unwrap_or_else(|e| panic!("{ddl}: {e:?}"));
+        assert_eq!(
+            parsed,
+            struct_of(vec![field("a", DataType::Integer, true, Some(comment))]),
+            "{ddl}"
+        );
+    }
+
+    // Backquoted names: the quotes go, the doubled backquote is one.
+    assert_eq!(
+        DataType::from_ddl("`a b` INT NOT NULL").unwrap(),
+        struct_of(vec![field("a b", DataType::Integer, false, None)])
+    );
+    assert_eq!(
+        DataType::from_ddl("`a``b` INT COMMENT 'c'").unwrap(),
+        struct_of(vec![field("a`b", DataType::Integer, true, Some("c"))])
+    );
+    assert_eq!(
+        DataType::from_ddl("`a,b` INT, `c:d` STRING").unwrap(),
+        struct_of(vec![
+            field("a,b", DataType::Integer, true, None),
+            field(
+                "c:d",
+                DataType::String {
+                    collation: "UTF8_BINARY".into()
+                },
+                true,
+                None
+            ),
+        ])
+    );
+    assert_eq!(
+        DataType::from_ddl("struct<`a b`: TIME(3) NOT NULL COMMENT 'x'>").unwrap(),
+        struct_of(vec![field(
+            "a b",
+            DataType::Time { precision: 3 },
+            false,
+            Some("x")
+        )])
+    );
+
+    // A clause out of order, repeated, unterminated or without a string is an error.
+    for ddl in [
+        "a INT COMMENT 'x' NOT NULL",
+        "a INT NOT NULL NOT NULL",
+        "a INT COMMENT 'x' COMMENT 'y'",
+        "a INT NOT",
+        "a INT NOTNULL",
+        "a INT COMMENT x",
+        "a INT COMMENT 'x",
+        "a INT COMMENT 'it's'",
+        "struct<a: INT COMMENT 'x>",
+    ] {
+        assert!(DataType::from_ddl(ddl).is_err(), "{ddl} must not parse");
+    }
+}
+
+/// `to_ddl` writes a non-nullable or commented field, at every nesting level, and `from_ddl` reads
+/// that back as the same type.
+#[test]
+fn to_ddl_of_non_nullable_and_commented_fields_round_trips() {
+    let comment = |c: &str| {
+        BTreeMap::from([(
+            "comment".to_string(),
+            serde_json::Value::String(c.to_string()),
+        )])
+    };
+    let schemas = [
+        DataType::Struct {
+            fields: vec![
+                StructField {
+                    name: "a".to_string(),
+                    data_type: DataType::Integer,
+                    nullable: false,
+                    metadata: BTreeMap::new(),
+                },
+                StructField {
+                    name: "b".to_string(),
+                    data_type: DataType::Double,
+                    nullable: true,
+                    metadata: comment("it's a \\ comment, <with> (parens)"),
+                },
+                StructField {
+                    name: "c".to_string(),
+                    data_type: DataType::Long,
+                    nullable: false,
+                    metadata: comment("ends with a backslash\\"),
+                },
+            ],
+        },
+        DataType::Struct {
+            fields: vec![
+                StructField {
+                    name: "outer".to_string(),
+                    data_type: DataType::Struct {
+                        fields: vec![StructField {
+                            name: "inner".to_string(),
+                            data_type: DataType::Struct {
+                                fields: vec![StructField {
+                                    name: "deep".to_string(),
+                                    data_type: DataType::Date,
+                                    nullable: false,
+                                    metadata: comment("deep \"quoted\" 'comment'\nline"),
+                                }],
+                            },
+                            nullable: false,
+                            metadata: comment("middle"),
+                        }],
+                    },
+                    nullable: true,
+                    metadata: BTreeMap::new(),
+                },
+                StructField {
+                    name: "arr".to_string(),
+                    data_type: DataType::Array {
+                        element_type: Box::new(DataType::Struct {
+                            fields: vec![StructField {
+                                name: "x".to_string(),
+                                data_type: DataType::Integer,
+                                nullable: false,
+                                metadata: comment("in an array"),
+                            }],
+                        }),
+                        contains_null: true,
+                    },
+                    nullable: false,
+                    metadata: BTreeMap::new(),
+                },
+                StructField {
+                    name: "m".to_string(),
+                    data_type: DataType::Map {
+                        key_type: Box::new(DataType::String {
+                            collation: "UTF8_BINARY".to_string(),
+                        }),
+                        value_type: Box::new(DataType::Struct {
+                            fields: vec![StructField {
+                                name: "v".to_string(),
+                                data_type: DataType::Integer,
+                                nullable: false,
+                                metadata: BTreeMap::new(),
+                            }],
+                        }),
+                        value_contains_null: true,
+                    },
+                    nullable: true,
+                    metadata: comment("a map"),
+                },
+                StructField {
+                    name: "a b`c".to_string(),
+                    data_type: DataType::Integer,
+                    nullable: false,
+                    metadata: BTreeMap::new(),
+                },
+            ],
+        },
+    ];
+    for schema in schemas {
+        let ddl = schema.to_ddl().unwrap();
+        assert_eq!(DataType::from_ddl(&ddl).unwrap(), schema, "{ddl}");
+    }
+}
+
+/// The type names of `DataType::type_name`, which mirror `DataType.typeName()`: a day-time and a
+/// year-month interval are not `interval`, and a UDT is its Python class name in lower case.
+#[test]
+fn type_name_of_intervals_and_udts_as_pyspark() {
+    let day_time = DataType::DayTimeInterval {
+        start_field: 0,
+        end_field: 3,
+    };
+    let year_month = DataType::YearMonthInterval {
+        start_field: 0,
+        end_field: 1,
+    };
+    assert_eq!(day_time.type_name(), "daytimeinterval");
+    assert_eq!(year_month.type_name(), "yearmonthinterval");
+    assert_eq!(DataType::CalendarInterval.type_name(), "interval");
+    let udt = |python_class: Option<&str>| DataType::Udt {
+        type_str: "point".to_string(),
+        jvm_class: None,
+        python_class: python_class.map(str::to_string),
+        serialized_python_class: None,
+        sql_type: None,
+    };
+    assert_eq!(udt(Some("mymod.PointUDT")).type_name(), "pointudt");
+    assert_eq!(udt(None).type_name(), "udt");
+}
+
+/// `from_ddl` agrees with the server's DDL parser on the `NOT NULL` and `COMMENT` clauses, the
+/// nested forms and the backquoted names. Runs only with `SPARK_REMOTE` set.
+#[test]
+fn from_ddl_not_null_and_comment_agree_with_the_server_parser() {
+    let Ok(url) = std::env::var("SPARK_REMOTE") else {
+        return;
+    };
+    let session = spark_connect::session::SparkSession::builder()
+        .remote(&url)
+        .get_or_create()
+        .expect("session");
+    for ddl in [
+        "x INT NOT NULL",
+        "`이름` INT NOT NULL, `café` STRING COMMENT 'c'",
+        "a INT NOT NULL, b BIGINT",
+        "a INT, b DOUBLE COMMENT 'x'",
+        "a INT not null, b int Comment 'hi, there'",
+        "a INT NOT NULL COMMENT 'x', b DATE",
+        "a INT COMMENT 'it\\'s', b INT COMMENT 'a\\\\b'",
+        "a INT COMMENT 'x' ''",
+        "`a b` INT NOT NULL",
+        "`a``b` INT COMMENT 'c'",
+        "struct<a: INT NOT NULL>",
+        "STRUCT<a: INT NOT NULL COMMENT 'x', b: STRING>",
+        "struct<a: int comment 'x,y<z'>",
+        "struct<`a b`: TIME(3) NOT NULL>",
+        "struct<a:int,b:array<struct<c: int NOT NULL COMMENT 'q'>>>",
+        "array<struct<a: INT COMMENT 'c'>>",
+        "map<string, struct<a: int not null>>",
+        "a decimal(10, 2) NOT NULL",
+        "a interval day to second NOT NULL",
+    ] {
+        let server = session
+            .parse_ddl(ddl)
+            .unwrap_or_else(|e| panic!("{ddl}: {e:?}"));
+        assert_eq!(DataType::from_ddl(ddl).unwrap(), server, "{ddl}");
+    }
+}
+
 #[test]
 fn timestamp_nanos_types() {
     use spark_connect_proto::data_type::{Kind, TimestampLtzNanos, TimestampNtzNanos};

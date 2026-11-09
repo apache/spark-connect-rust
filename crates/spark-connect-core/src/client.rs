@@ -35,6 +35,23 @@ use crate::thread_entries::forget_when_thread_ends;
 /// to a down server would hang forever instead of raising `UNAVAILABLE`.
 const READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// Apply the keepalive of the connection string, as PySpark's channel options do (SPARK-58094):
+/// HTTP2 PINGs detect a connection that a NAT gateway or load balancer dropped silently, so that
+/// a blocked call fails with `UNAVAILABLE`, which the client retries or reattaches, instead of
+/// waiting on the dead connection forever.
+fn with_keepalive(
+    endpoint: tonic::transport::Endpoint,
+    builder: &ChannelBuilder,
+) -> tonic::transport::Endpoint {
+    match builder.keepalive() {
+        Some(keepalive) => endpoint
+            .http2_keep_alive_interval(keepalive.time)
+            .keep_alive_timeout(keepalive.timeout)
+            .keep_alive_while_idle(keepalive.without_calls),
+        None => endpoint,
+    }
+}
+
 /// gRPC/HTTP header carrying the connection-string `token` as `Bearer <token>`.
 /// Named here (rather than as a string literal) so the key is written once.
 const AUTHORIZATION_HEADER: &str = "authorization";
@@ -248,6 +265,8 @@ pub type ExecutePlanHook =
 pub struct SparkConnectClient {
     /// The tonic gRPC channel.
     channel: Channel,
+    /// The display host of the endpoint of the channel, as `ChannelBuilder::host`.
+    host: String,
     /// The generated gRPC client stub.
     stub: SparkConnectServiceClient<Channel>,
     /// Session ID (UUID v4) identifying this session on the server.
@@ -346,18 +365,22 @@ impl SparkConnectClient {
                 .domain_name(domain)
                 .with_native_roots();
 
-            tonic::transport::Channel::from_shared(format!("https://{endpoint}"))
-                .map_err(|e| SparkError::connect_msg(format!("Invalid endpoint: {}", e)))?
-                .tls_config(tls_config)
-                .map_err(|e| SparkError::connect_msg(format!("Failed to configure TLS: {}", e)))?
-                .connect_timeout(READY_TIMEOUT)
-                .connect_lazy()
+            let tls_endpoint =
+                tonic::transport::Channel::from_shared(format!("https://{endpoint}"))
+                    .map_err(|e| SparkError::connect_msg(format!("Invalid endpoint: {}", e)))?
+                    .tls_config(tls_config)
+                    .map_err(|e| {
+                        SparkError::connect_msg(format!("Failed to configure TLS: {}", e))
+                    })?
+                    .connect_timeout(READY_TIMEOUT);
+            with_keepalive(tls_endpoint, builder).connect_lazy()
         } else {
             // Plaintext connection (for localhost development)
-            tonic::transport::Channel::from_shared(format!("http://{endpoint}"))
-                .map_err(|e| SparkError::connect_msg(format!("Invalid endpoint: {}", e)))?
-                .connect_timeout(READY_TIMEOUT)
-                .connect_lazy()
+            let plain_endpoint =
+                tonic::transport::Channel::from_shared(format!("http://{endpoint}"))
+                    .map_err(|e| SparkError::connect_msg(format!("Invalid endpoint: {}", e)))?
+                    .connect_timeout(READY_TIMEOUT);
+            with_keepalive(plain_endpoint, builder).connect_lazy()
         };
 
         // Raise the message-size cap from tonic's 4 MiB default (too small for real Arrow
@@ -382,6 +405,7 @@ impl SparkConnectClient {
 
         Ok(Self {
             channel,
+            host: builder.host().to_string(),
             stub,
             session_id,
             user_id: builder.user_id().map(String::from).or_else(default_user_id),
@@ -409,6 +433,7 @@ impl SparkConnectClient {
     pub fn with_new_session_id(&self) -> Self {
         SparkConnectClient {
             channel: self.channel.clone(),
+            host: self.host.clone(),
             stub: self.stub.clone(),
             session_id: Uuid::new_v4().to_string(),
             user_id: self.user_id.clone(),
@@ -450,9 +475,24 @@ impl SparkConnectClient {
         Ok(())
     }
 
-    /// The server-side session ID that the responses have carried, if one has.
-    fn observed_server_session_id(&self) -> Option<String> {
+    /// The server-side session ID that the responses have carried, if one has, as PySpark's
+    /// `_server_session_id`: None before the first response.
+    pub fn observed_server_session_id(&self) -> Option<String> {
         observed_of(&self.server_session_id)
+    }
+
+    /// Set the server-side session ID that the requests observe, as PySpark's
+    /// `_server_session_id` is settable: a response that carries another one closes the client.
+    pub fn set_observed_server_session_id(&self, id: Option<String>) {
+        *self
+            .server_session_id
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = id;
+    }
+
+    /// The display host of the endpoint of the channel, as PySpark's `SparkConnectClient.host`.
+    pub fn host(&self) -> &str {
+        &self.host
     }
 
     /// Sets the observed server-side session ID of a request, once a response has set it, as
@@ -674,9 +714,10 @@ impl SparkConnectClient {
             .user_context_extensions
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        // The thread that calls the API, also when this future is polled on another thread.
         let own = extensions
             .by_thread
-            .get(&std::thread::current().id())
+            .get(&crate::runtime::calling_thread_id())
             .map(|own| own.0.lock().unwrap_or_else(|e| e.into_inner()));
         if extensions.global.is_empty() && own.as_ref().is_none_or(|own| own.is_empty()) {
             return;
@@ -2648,5 +2689,25 @@ mod tests {
             vec![first[1].clone()]
         );
         assert_eq!(extension_ids(&client), vec![main, late]);
+    }
+
+    #[test]
+    fn host_and_observed_server_session_id_of_the_client() {
+        let client = connect_blocking("sc://Other:114");
+        assert_eq!(client.host(), "other");
+        assert_eq!(client.observed_server_session_id(), None);
+        client.set_observed_server_session_id(Some("server-a".to_string()));
+        assert_eq!(
+            client.observed_server_session_id().as_deref(),
+            Some("server-a")
+        );
+        // The clones of a client share its observed ID, and a client of a new session has none.
+        assert_eq!(
+            client.clone().observed_server_session_id().as_deref(),
+            Some("server-a")
+        );
+        let other = client.with_new_session_id();
+        assert_eq!(other.host(), "other");
+        assert_eq!(other.observed_server_session_id(), None);
     }
 }

@@ -161,26 +161,31 @@ fn aggregates_execute() {
     let _ = df
         .group_by(vec![col("id")])
         .sum(vec!["v"])
+        .unwrap()
         .collect()
         .unwrap();
     let _ = df
         .group_by(vec![col("id")])
         .avg(vec!["v"])
+        .unwrap()
         .collect()
         .unwrap();
     let _ = df
         .group_by(vec![col("id")])
         .min(vec!["v"])
+        .unwrap()
         .collect()
         .unwrap();
     let _ = df
         .group_by(vec![col("id")])
         .max(vec!["v"])
+        .unwrap()
         .collect()
         .unwrap();
     let _ = df
         .group_by(vec![col("id")])
         .mean(vec!["v"])
+        .unwrap()
         .collect()
         .unwrap();
     let _ = df.rollup(vec![col("id")]).count().collect().unwrap();

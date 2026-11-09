@@ -453,26 +453,31 @@ fn agg_na_stat_reshape_surface() {
     let _ = df
         .group_by(vec![col("id")])
         .sum(vec!["val"])
+        .unwrap()
         .collect()
         .unwrap();
     let _ = df
         .group_by(vec![col("id")])
         .avg(vec!["val"])
+        .unwrap()
         .collect()
         .unwrap();
     let _ = df
         .group_by(vec![col("id")])
         .min(vec!["val"])
+        .unwrap()
         .collect()
         .unwrap();
     let _ = df
         .group_by(vec![col("id")])
         .max(vec!["val"])
+        .unwrap()
         .collect()
         .unwrap();
     let _ = df
         .group_by(vec![col("id")])
         .mean(vec!["val"])
+        .unwrap()
         .collect()
         .unwrap();
     let _ = df.rollup(vec![col("id")]).count().collect().unwrap();
@@ -1199,25 +1204,30 @@ fn ml_estimators_and_transformers() {
         .set_output_col("assembled");
     let _ = va.transform(&df).and_then(|d| d.count());
 
-    // These estimator wrappers construct models locally; transform builds a relation.
+    // The server fits each scaler and indexer, and the transform of the model uses the cached
+    // model. The scalers take ML vector features.
+    let vectors = df.with_column(
+        "vfeatures",
+        spark_connect::Column::new(spark_connect::expression::Expression::function(
+            "array_to_vector",
+            vec![col("features").expression().clone()],
+        )),
+    );
     let mut ss = StandardScaler::new()
-        .set_input_col("features")
+        .set_input_col("vfeatures")
         .set_output_col("scaled");
-    if let Ok(mut m) = ss.fit(&df) {
-        let _ = m.transform(&df).and_then(|d| d.count());
-    }
+    let mut m = ss.fit(&vectors).expect("fit StandardScaler");
+    assert_eq!(m.transform(&vectors).unwrap().count().unwrap(), 20);
     let mut mas = MaxAbsScaler::new()
-        .set_input_col("features")
+        .set_input_col("vfeatures")
         .set_output_col("maxabs");
-    if let Ok(mut m) = mas.fit(&df) {
-        let _ = m.transform(&df).and_then(|d| d.count());
-    }
+    let mut m = mas.fit(&vectors).expect("fit MaxAbsScaler");
+    assert_eq!(m.transform(&vectors).unwrap().count().unwrap(), 20);
     let mut si = StringIndexer::new()
         .set_input_col("s")
         .set_output_col("s_idx");
-    if let Ok(mut m) = si.fit(&df) {
-        let _ = m.transform(&df).and_then(|d| d.count());
-    }
+    let mut m = si.fit(&df).expect("fit StringIndexer");
+    assert_eq!(m.transform(&df).unwrap().count().unwrap(), 20);
 
     // RegressionEvaluator.evaluate now sends a real MlCommand::Evaluate and reads
     // the metric back (previously a stub returning 0.0). With prediction == label

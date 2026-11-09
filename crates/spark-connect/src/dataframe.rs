@@ -11,12 +11,27 @@ use spark_connect_proto as proto;
 
 use crate::column::Column;
 use crate::expression::{Expression, ExpressionNode};
-use crate::plan::{AggregateGroupType, JoinType, LogicalPlan, SetOpType};
+use crate::plan::{AggregateGroupType, JoinType, LogicalPlan, RelationOwner, SetOpType};
 use crate::progress::ExecutionStream;
 use crate::row::{Row, StructValue, Value};
 use crate::session::{ExecutionInfo, SparkSession};
 use crate::types::DataType;
 use crate::udf::CommonInlineUserDefinedFunctionExpression;
+
+/// The server's checkpointed relation, shared by the plans of a checkpoint and of every DataFrame
+/// derived from it (through their [`RelationOwner`]). The last one to drop removes the relation
+/// on the server, as PySpark's `CachedRemoteRelation.__del__` does.
+struct CheckpointRef {
+    relation_id: String,
+    session: SparkSession,
+}
+
+impl Drop for CheckpointRef {
+    fn drop(&mut self) {
+        self.session
+            .release_cached_remote_relation(self.relation_id.clone());
+    }
+}
 
 /// A Spark DataFrame, lazily evaluated.
 ///
@@ -126,6 +141,9 @@ enum RowSource {
     /// current batch's rows (`prefetchPartitions=True`).
     Prefetch {
         rx: tokio::sync::mpsc::Receiver<Result<Vec<Row>>>,
+        /// The task, to raise its panic (of a progress handler, say) in the caller once its
+        /// channel closes, as the on-demand source raises it, instead of ending early.
+        task: Option<tokio::task::JoinHandle<()>>,
     },
 }
 
@@ -138,8 +156,12 @@ impl LocalRowIterator {
     ) -> Self {
         let schema = SchemaSlot::default();
         let source = if prefetch_partitions {
-            RowSource::Prefetch {
-                rx: spawn_prefetch(session, stream, Arc::clone(&schema)),
+            {
+                let (rx, task) = spawn_prefetch(session, stream, Arc::clone(&schema));
+                RowSource::Prefetch {
+                    rx,
+                    task: Some(task),
+                }
             }
         } else {
             RowSource::OnDemand {
@@ -209,7 +231,22 @@ impl LocalRowIterator {
                     }
                 }
             },
-            RowSource::Prefetch { rx } => block_on(rx.recv()),
+            RowSource::Prefetch { rx, task } => {
+                let batch = block_on(rx.recv());
+                if batch.is_none() {
+                    // The channel closed: the task ended, or it panicked, which then drops its
+                    // sender without an error. Raise the panic here, so the rows are not cut
+                    // short silently.
+                    if let Some(task) = task.take() {
+                        if let Err(error) = block_on(task) {
+                            if error.is_panic() {
+                                std::panic::resume_unwind(error.into_panic());
+                            }
+                        }
+                    }
+                }
+                batch
+            }
         }
     }
 }
@@ -249,9 +286,12 @@ fn spawn_prefetch(
     session: SparkSession,
     mut stream: ExecutionStream,
     schema: SchemaSlot,
-) -> tokio::sync::mpsc::Receiver<Result<Vec<Row>>> {
+) -> (
+    tokio::sync::mpsc::Receiver<Result<Vec<Row>>>,
+    tokio::task::JoinHandle<()>,
+) {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Vec<Row>>>(1);
-    get_runtime().spawn(async move {
+    let task = get_runtime().spawn(async move {
         let mut execution_info = ExecutionInfo::default();
         loop {
             // Closing the consumer must release the execution even while the server has
@@ -298,7 +338,7 @@ fn spawn_prefetch(
         }
         session.record_execution(execution_info);
     });
-    rx
+    (rx, task)
 }
 
 impl DataFrame {
@@ -870,7 +910,9 @@ impl DataFrame {
         crate::group::GroupedData::new(self.clone(), group_cols, AggregateGroupType::GroupBy)
     }
 
-    /// Collect all rows into memory.
+    /// Collect all rows into memory. A `TIMESTAMP(p)` or `TIMESTAMP_NTZ(p)` value with p > 6
+    /// is collected in microseconds, its sub-microsecond digits rounded down (`to_arrow` keeps
+    /// them); the Python client refuses to collect these types, as PySpark does.
     pub fn collect(&self) -> Result<Vec<Row>> {
         self.collect_with_schema().map(|(rows, _)| rows)
     }
@@ -1405,10 +1447,15 @@ impl DataFrame {
                 &resp.response_type
             {
                 if let Some(rel) = &res.relation {
+                    let checkpoint = CheckpointRef {
+                        relation_id: rel.relation_id.clone(),
+                        session: self.session.clone(),
+                    };
                     return Ok(DataFrame::new(
                         self.session.clone(),
                         LogicalPlan::CachedRemoteRelation {
                             relation_id: rel.relation_id.clone(),
+                            owner: Some(RelationOwner(Arc::new(checkpoint))),
                         },
                     ));
                 }
@@ -2997,8 +3044,10 @@ impl<'a> ArrowValueLayout<'a> {
                 arr.value(index) * 1_000,
                 arr.timezone().is_some(),
             )),
+            // Collect gives microseconds: floor, so a pre-1970 value keeps its sign and its
+            // sub-microsecond digits round down as Spark's micros do (`to_arrow` keeps nanos).
             ArrowValueDecoder::TimestampNanosecond(arr) => Ok(timestamp_value(
-                arr.value(index) / 1_000,
+                arr.value(index).div_euclid(1_000),
                 arr.timezone().is_some(),
             )),
             ArrowValueDecoder::Date64(arr) => {
@@ -3987,27 +4036,18 @@ mod cache_tests {
             .unwrap();
         let df = spark.range(3).unwrap();
         let cloned = df.clone();
-        // A current-thread runtime: the synchronous API cannot block in place in it.
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-
-        // Calling the synchronous API inside a runtime panics during analysis.
-        // A clone must still attempt analysis afterward, rather than returning
-        // a permanent cache-poisoning error.
-        for frame in [&df, &cloned] {
-            let result = runtime.block_on(async {
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| frame.schema()))
-            });
-            assert!(result.is_err());
-            // Poisoning proves the lock spans the analysis boundary without
-            // relying on thread scheduling to produce contended cache misses.
-            assert!(
-                frame.schema_cache.is_poisoned(),
-                "schema analysis must hold the shared cache lock"
-            );
-        }
+        // A panic under the cache lock, as a panicking analysis leaves it: the clones must still
+        // analyze afterward, rather than returning a permanent cache-poisoning error.
+        let cache = Arc::clone(&df.schema_cache);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _held = cache.lock().unwrap();
+            panic!("an analysis panics while the cache lock is held");
+        }));
+        assert!(result.is_err());
+        assert!(
+            df.schema_cache.is_poisoned(),
+            "the cache lock must be poisoned for this test"
+        );
         let mut cached = df.schema_cache.lock().unwrap_err().into_inner();
         assert!(cached.is_none());
         let schema = DataType::Struct { fields: vec![] };
@@ -5219,8 +5259,9 @@ mod arrow_value_tests {
                 Value::Timestamp(-1_000),
             ),
             (
+                // Collect floors nanoseconds to microseconds: -1.999 us is -2 us.
                 Arc::new(TimestampNanosecondArray::from(vec![-1999]).with_timezone_utc()),
-                Value::Timestamp(-1),
+                Value::Timestamp(-2),
             ),
             // Without a time zone, as TIMESTAMP_NTZ is declared.
             (
@@ -5442,6 +5483,54 @@ mod arrow_value_tests {
             arrow_value_at(&Date64Array::from(vec![86_400_000i64]), 0).unwrap(),
             Value::Date(_)
         ));
+    }
+
+    #[test]
+    fn nanosecond_timestamps_floor_to_micros_at_top_level_and_nested() {
+        use arrow::buffer::OffsetBuffer;
+        use arrow::datatypes::TimeUnit;
+
+        // Division toward zero put a pre-1970 value with sub-microsecond digits one microsecond
+        // too high; collect floors to micros instead, and keeps post-1970 values.
+        let times = [-876_543_300i64, -1, -1_000, 1_577_836_800_123_456_789];
+        let expected = [-876_544i64, -1, -1, 1_577_836_800_123_456];
+        for (index, micros) in expected.into_iter().enumerate() {
+            let array = TimestampNanosecondArray::from(times.to_vec());
+            assert_eq!(
+                arrow_value_at(&array, index).unwrap(),
+                Value::TimestampNtz(micros)
+            );
+            let zoned = TimestampNanosecondArray::from(times.to_vec()).with_timezone_utc();
+            assert_eq!(
+                arrow_value_at(&zoned, index).unwrap(),
+                Value::Timestamp(micros)
+            );
+        }
+
+        let nanos_type = ArrowDataType::Timestamp(TimeUnit::Nanosecond, None);
+        let field = Arc::new(Field::new("t", nanos_type.clone(), false));
+        let col: ArrayRef = Arc::new(TimestampNanosecondArray::from(vec![-876_543_300i64]));
+        let s = StructArray::from(vec![(field, col)]);
+        match arrow_value_at(&s, 0).unwrap() {
+            Value::Struct(row) => assert_eq!(row.values()[0], Value::TimestampNtz(-876_544)),
+            other => panic!("expected a struct, got {other:?}"),
+        }
+
+        let item = Arc::new(Field::new("item", nanos_type, true));
+        let values = TimestampNanosecondArray::from(vec![-1i64, 1_000_001]);
+        let list = ListArray::new(
+            item,
+            OffsetBuffer::from_lengths([2]),
+            Arc::new(values),
+            None,
+        );
+        match arrow_value_at(&list, 0).unwrap() {
+            Value::List(items) => assert_eq!(
+                items,
+                vec![Value::TimestampNtz(-1), Value::TimestampNtz(1_000)]
+            ),
+            other => panic!("expected a list, got {other:?}"),
+        }
     }
 
     #[test]
