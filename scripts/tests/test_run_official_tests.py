@@ -229,9 +229,18 @@ class DropinTests(unittest.TestCase):
             "test_connect_cache.py",
             "test_connect_model_offloading.py",
         )
-        listed = list(per_file) + list(whole_file)
+        # The one test of those files that is by design: the Rust core builds the plans.
+        by_design = {
+            "pyspark/sql/tests/connect/test_connect_error.py": [
+                "SparkConnectErrorTests::test_recursion_handling_for_plan_logging"
+            ],
+        }
         for name in gaps:
-            self.assertFalse(any(p.endswith(name) for p in listed), name)
+            self.assertFalse(any(p.endswith(name) for p in whole_file), name)
+            for path, tests in per_file.items():
+                if path.endswith(name):
+                    self.assertEqual(tests, by_design.get(path, []), path)
+        listed = list(per_file) + list(whole_file)
         self.assertTrue(all(p.startswith(runner.DROPIN_SCOPE) for p in listed))
 
 

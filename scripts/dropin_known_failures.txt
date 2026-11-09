@@ -6,10 +6,10 @@
 #
 # Only BY-DESIGN and ENVIRONMENTAL entries belong here. A real drop-in gap (a test the
 # official suite passes on PySpark 4.3.0 and our drop-in fails) must stay visible: the gate
-# then fails until it is fixed. Known open gaps at the time of writing (not listed on purpose):
-# test_connect_session.py, test_connect_context.py, test_connect_error.py,
-# test_connect_column.py (import), ml/tests/connect/test_connect_cache.py and
-# test_connect_model_offloading.py.
+# then fails until it is fixed (the gaps found first, in test_connect_session.py,
+# test_connect_context.py, test_connect_error.py, test_connect_column.py and the ML cache and
+# offloading tests, are fixed by SPARK-61235, SPARK-61238 and SPARK-61246). An entry that only
+# fails on a developer machine does not belong here either: CI's parity gate is the reference.
 
 # --- whole files: the gRPC client internals, which the Rust transport replaces by design ---
 pyspark/sql/tests/connect/client/test_client.py  # tests grpcio channel/stub internals; this client's transport is Rust (SPARK-61111 module audit)
@@ -33,5 +33,6 @@ pyspark/ml/tests/connect/test_legacy_mode_tuning.py  # legacy mode of the torch-
 # --- tests the reference client (official PySpark 4.3.0 over the same server) also fails here ---
 pyspark/sql/tests/connect/test_parity_dataframe.py::DataFrameParityTests::test_metadata_column  # requires InMemoryCatalog for 'testcat' - a test-only catalog class absent from the Spark distribution
 pyspark/sql/tests/connect/test_parity_window.py::DataFrameParityTests::test_metadata_column  # same test-only 'testcat' InMemoryCatalog as the DataFrame test; the reference fails it too
-pyspark/sql/tests/connect/test_parity_functions.py::FunctionsParityTests::test_enum_literals  # the reference client fails it on this machine too; the parity gate passes it in CI
-pyspark/sql/tests/connect/pandas/test_parity_pandas_udf_scalar.py::PandasUDFScalarParityTests::test_vectorized_udf_invalid_length  # the reference client fails it on this machine too; the parity gate passes it in CI
+
+# --- tests by design for the drop-in ---
+pyspark/sql/tests/connect/test_connect_error.py::SparkConnectErrorTests::test_recursion_handling_for_plan_logging  # logs the Python plan of a deep DataFrame; the Rust core builds plans, so DataFrame._plan has no Python proto (dev/parity/known-differences.md)
