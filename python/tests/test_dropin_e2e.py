@@ -2320,6 +2320,40 @@ def test_variant_spatial_and_user_defined_values_round_trip_as_pyspark(session):
     assert geometry == Geometry.fromWKB(wkb, 0)
 
 
+def test_create_dataframe_of_multi_and_categorical_labels_as_pyspark(session):
+    # As PySpark's: a frame whose labels are a MultiIndex or a CategoricalIndex converts its
+    # cells as a frame of default labels does. A naive datetime of a list reads back unchanged
+    # under a session time zone other than UTC, the Decimals and dicts take PySpark's types, and
+    # the names are the labels as strings.
+    import pandas as pd
+
+    cells = [[datetime(2020, 1, 2, 3)], [Decimal("1.5"), Decimal("10.25")],
+             {"u": 1, "v": "a"}, {"u": 1, "v": 2}]
+    frames = [
+        (pd.DataFrame([cells], columns=pd.MultiIndex.from_tuples(
+            [("a", "x"), ("b", "y"), ("c", "z"), ("d", "w")]), dtype=object),
+         ["('a', 'x')", "('b', 'y')", "('c', 'z')", "('d', 'w')"]),
+        (pd.DataFrame([cells], columns=pd.CategoricalIndex(["a", "b", "c", "d"]), dtype=object),
+         ["a", "b", "c", "d"]),
+    ]
+    previous = session.conf.get("spark.sql.session.timeZone")
+    session.conf.set("spark.sql.session.timeZone", "Asia/Seoul")
+    try:
+        for frame, names in frames:
+            df = session.createDataFrame(frame)
+            assert df.columns == names
+            assert df.schema.fields[0].dataType.simpleString() == "array<timestamp_ntz>"
+            assert df.schema.fields[1].dataType.simpleString() == "array<decimal(4,2)>"
+            assert df.schema.fields[2].dataType.simpleString() == "struct<u:bigint,v:string>"
+            assert df.schema.fields[3].dataType.simpleString() == "struct<u:bigint,v:bigint>"
+            row = df.first()
+            assert row[0] == [datetime(2020, 1, 2, 3)]
+            assert row[1] == [Decimal("1.50"), Decimal("10.25")]
+            assert row[2] == Row(u=1, v="a") and row[3] == Row(u=1, v=2)
+    finally:
+        session.conf.set("spark.sql.session.timeZone", previous)
+
+
 def test_create_dataframe_of_pandas_infers_the_types_of_arrow_as_pyspark(session):
     # As PySpark Connect's: without a schema, the columns of a pandas DataFrame convert with
     # PySpark's Arrow conversion, of the types that Arrow infers, and a naive datetime is a time
