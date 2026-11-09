@@ -248,8 +248,7 @@ def test_spatial_and_collated_json_forms_parse():
 
 def test_private_type_helpers_are_those_of_pyspark():
     # As PySpark's pyspark.sql.types: the inference, merging, conversion and verification of the
-    # types of Python objects, and their tables. They take the client's Row as PySpark's take
-    # theirs, a tuple.
+    # types of Python objects and their tables, including tuple-based Rows.
     from array import array
 
     from pyspark.errors import PySparkTypeError, PySparkValueError
@@ -358,8 +357,7 @@ def _type_verifier_cases():
 
 def test_type_verifiers_take_and_reject_the_values_of_pyspark():
     # As Apache Spark's DataTypeVerificationTests: _make_type_verifier takes the values of each
-    # type, of the client's Row too, and raises the errors of PySpark for the others, with the
-    # names of the fields.
+    # type, including Rows, and raises the errors of PySpark for the others with field names.
     from pyspark.errors import PySparkTypeError, PySparkValueError
     from pyspark.sql.types import _make_type_verifier
 
@@ -383,7 +381,7 @@ def test_type_verifiers_take_and_reject_the_values_of_pyspark():
 
 def test_types_of_python_objects_are_inferred_merged_and_converted_as_pyspark():
     # As PySpark's _infer_type, _infer_schema, _merge_type and _create_converter, of the
-    # values of each type, also nested, of the client's Row too.
+    # values of each type, including nested Rows.
     import datetime
     import decimal
 
@@ -4308,6 +4306,243 @@ def test_row_behaves_as_a_tuple_of_its_values():
     assert pickle.loads(pickle.dumps(Row(1, 2))) == (1, 2)
 
 
+def test_row_is_the_public_tuple_subclass():
+    from pyspark import Row as root_row
+    from pyspark._pyspark import Row as extension_row
+    from pyspark.sql import Row
+    from pyspark.sql.types import Row as types_row
+
+    assert root_row is extension_row is Row is types_row
+    assert Row.__module__ == "pyspark.sql.types"
+    assert Row.__bases__ == (tuple,)
+    row = Row(a=1, child=Row(b=2))
+    assert isinstance(row, tuple)
+    assert tuple.__getitem__(row, 0) == 1
+    assert json.loads(json.dumps(row)) == [1, [2]]
+
+    class DerivedRow(Row):
+        def total(self):
+            return sum(self)
+
+    derived = DerivedRow(a=1, b=2)
+    assert type(derived) is DerivedRow
+    assert isinstance(derived, Row) and isinstance(derived, tuple)
+    assert derived.total() == 3 and derived.asDict() == {"a": 1, "b": 2}
+
+
+def test_row_field_names_keep_their_identity_and_mutations():
+    from pyspark.errors import PySparkKeyError
+    from pyspark.sql import Row
+    from pyspark.sql.types import _create_row
+
+    row = Row(a=1, b=2)
+    fields = row.__fields__
+    assert row.__fields__ is fields
+    fields[0] = "renamed"
+    assert row.renamed == 1 and "a" not in row
+    assert row.asDict() == {"renamed": 1, "b": 2}
+    assert repr(row) == "Row(renamed=1, b=2)"
+    fields.append("missing")
+    assert len(row) == 2 and tuple(row) == (1, 2)
+    assert "missing" in row
+    with pytest.raises(PySparkKeyError):
+        row["missing"]
+
+    shared = ["x", "y"]
+    left = _create_row(shared, (1, 2))
+    right = _create_row(shared, (3, 4))
+    assert left.__fields__ is right.__fields__ is shared
+    shared[1] = "z"
+    assert (left.z, right.z) == (2, 4)
+    row.__fields__ = shared
+    assert row.__fields__ is shared and row.z == 2
+
+    factory = Row("first", "second")
+    made = factory(1)
+    assert made.__fields__ is factory
+    assert made.asDict() == {"first": 1}
+    assert repr(made) == "Row(first=1)"
+
+
+@pytest.mark.parametrize("serializer", ["pickle", "cloudpickle"])
+def test_row_serialization_preserves_public_type_and_shared_names(serializer):
+    from pyspark import cloudpickle
+    from pyspark.sql import Row
+    from pyspark.sql.types import _create_row
+
+    codec = pickle if serializer == "pickle" else cloudpickle
+    fields = ["value"]
+    rows = [_create_row(fields, (Row(child=1),)), _create_row(fields, (Row(child=2),))]
+    restored = codec.loads(codec.dumps(rows))
+    assert all(type(row) is Row and type(row.value) is Row for row in restored)
+    assert restored[0].__fields__ is restored[1].__fields__
+    restored[0].__fields__[0] = "renamed"
+    assert restored[1].renamed == Row(child=2)
+    unnamed = codec.loads(codec.dumps(Row(1, 2)))
+    assert type(unnamed) is Row and isinstance(unnamed, tuple)
+    assert not hasattr(unnamed, "__fields__")
+    assert codec.loads(codec.dumps(Row)) is Row
+
+
+def _tuple_row_results(mock_connect, table, schema, method):
+    import pyarrow as pa
+
+    spark, service = mock_connect
+    sink = pa.BufferOutputStream()
+    with pa.ipc.new_stream(sink, table.schema) as writer:
+        writer.write_table(table, max_chunksize=2)
+    service.execute_payload = message_field(7, schema) + message_field(
+        2, varint_field(1, table.num_rows) + message_field(2, sink.getvalue().to_pybytes()))
+    frame = spark.range(table.num_rows)
+    return frame.collect() if method == "collect" else list(
+        frame.toLocalIterator(method == "prefetch"))
+
+
+@pytest.mark.parametrize("method", ["collect", "iterator", "prefetch"])
+def test_collected_tuple_rows_share_names_by_schema_path(mock_connect, method):
+    import pyarrow as pa
+    from _mock_connect_server import data_type_proto
+
+    # PySpark keeps top-level names per collection or iterator batch, but nested
+    # names belong to the schema and span batches. Equal sibling names are independent.
+    child = pa.struct([("v", pa.int64())])
+    values = [{"v": index} for index in range(4)]
+    table = pa.table({
+        "left": pa.array(values, child),
+        "right": pa.array(values, child),
+        "items": pa.array([[value, value] for value in values], pa.list_(child)),
+        "lookup": pa.array([[('a', value), ('b', value)] for value in values],
+                           pa.map_(pa.string(), child)),
+        "struct_map": pa.array([[(value, value)] for value in values], pa.map_(child, child)),
+    })
+    rows = _tuple_row_results(mock_connect, table, data_type_proto(ddl_json(
+        "left struct<v:bigint>, right struct<v:bigint>, "
+        "items array<struct<v:bigint>>, lookup map<string,struct<v:bigint>>, "
+        "struct_map map<struct<v:bigint>,struct<v:bigint>>")), method)
+    assert len(rows) == 4
+    for index, row in enumerate(rows):
+        assert type(row) is Row and isinstance(row, tuple)
+        assert type(row.left) is Row and row.left == (index,)
+        assert type(row.items[0]) is Row and row.items == [(index,), (index,)]
+        assert type(row.lookup['a']) is Row and row.lookup == {'a': (index,), 'b': (index,)}
+        assert type(row.left.__fields__) is list
+        assert row.left.__fields__ is rows[0].left.__fields__
+        assert row.right.__fields__ is rows[0].right.__fields__
+        assert row.items[0].__fields__ is row.items[1].__fields__ is rows[0].items[0].__fields__
+        assert row.lookup['a'].__fields__ is row.lookup['b'].__fields__ is rows[0].lookup['a'].__fields__
+        key, value = next(iter(row.struct_map.items()))
+        assert type(key) is type(value) is Row and key == value == (index,)
+        first_key, first_value = next(iter(rows[0].struct_map.items()))
+        assert key.__fields__ is first_key.__fields__
+        assert value.__fields__ is first_value.__fields__
+        assert key.__fields__ is not value.__fields__
+    assert len({id(rows[0][index].__fields__) for index in (0, 1)}) == 2
+    assert rows[0].left.__fields__ is not rows[0].items[0].__fields__
+    assert rows[0].left.__fields__ is not rows[0].lookup['a'].__fields__
+
+    rows[0].left.__fields__[0] = "renamed"
+    rows[0].items[0].__fields__[0] = "array_value"
+    rows[0].lookup['a'].__fields__[0] = "map_value"
+    next(iter(rows[0].struct_map)).__fields__[0] = "map_key"
+    assert [row.left.renamed for row in rows] == list(range(4))
+    assert [row.right.v for row in rows] == list(range(4))
+    assert [row.items[1].array_value for row in rows] == list(range(4))
+    assert [row.lookup['b'].map_value for row in rows] == list(range(4))
+    assert [next(iter(row.struct_map)).map_key for row in rows] == list(range(4))
+
+    assert rows[0].__fields__ is rows[1].__fields__
+    assert rows[2].__fields__ is rows[3].__fields__
+    assert (rows[0].__fields__ is rows[2].__fields__) == (method == "collect")
+    rows[0].__fields__[0] = "renamed_left"
+    assert rows[1].renamed_left.renamed == 1
+    if method != "collect":
+        assert rows[2].left.renamed == 2
+
+
+class _TupleBinaryUDT(T.UserDefinedType):
+    @classmethod
+    def sqlType(cls):
+        return T.StructType([T.StructField("b", T.BinaryType())])
+
+    @classmethod
+    def module(cls):
+        return __name__
+
+    def deserialize(self, datum):
+        return datum, datum.__fields__
+
+
+def _tuple_row_type_proto(data_type):
+    from _mock_connect_server import data_type_proto
+
+    if isinstance(data_type, T.UserDefinedType):
+        value = data_type.jsonValue()
+        # DataType.udt=23: type=1, python_class=3, serialized_python_class=4, sql_type=5.
+        return message_field(23, message_field(1, "udt") + message_field(3, value["pyClass"])
+                             + message_field(4, value["serializedClass"])
+                             + message_field(5, _tuple_row_type_proto(data_type.sqlType())))
+    if isinstance(data_type, T.StructType):
+        return message_field(21, b"".join(message_field(
+            1, message_field(1, field.name) + message_field(2, _tuple_row_type_proto(field.dataType))
+            + varint_field(3, int(field.nullable))) for field in data_type.fields))
+    return data_type_proto(data_type.jsonValue())
+
+
+@pytest.mark.parametrize("method", ["collect", "iterator", "prefetch"])
+def test_tuple_rows_keep_configured_binary_and_udt_inputs(mock_connect, method):
+    import pyarrow as pa
+
+    _, service = mock_connect
+    service.confs = {"spark.sql.execution.pyspark.binaryAsBytes": "false"}
+    child = pa.struct([("b", pa.binary())])
+    converted = pa.struct([("b", pa.binary()), ("u", child)])
+    values = [{"b": bytes([index])} for index in range(4)]
+    table = pa.table({
+        "s": pa.array(values, child),
+        "converted": pa.array([{"b": value["b"], "u": value} for value in values], converted),
+    })
+    schema = T.StructType([
+        T.StructField("s", T.StructType([T.StructField("b", T.BinaryType())])),
+        T.StructField("converted", T.StructType([
+            T.StructField("b", T.BinaryType()), T.StructField("u", _TupleBinaryUDT()),
+        ])),
+    ])
+    rows = _tuple_row_results(mock_connect, table, _tuple_row_type_proto(schema), method)
+    assert len(rows) == 4
+    for index, row in enumerate(rows):
+        assert type(row) is Row and type(row.s) is Row and type(row.converted) is Row
+        assert type(row.s.b) is type(row.converted.b) is bytearray
+        assert row.s.b == row.converted.b == bytes([index])
+        udt_input, input_fields = row.converted.u
+        assert type(udt_input) is Row and isinstance(udt_input, tuple)
+        assert type(udt_input.b) is bytearray and udt_input.b == bytes([index])
+        assert input_fields is udt_input.__fields__ and type(input_fields) is list
+        assert row.converted.__fields__ is rows[0].converted.__fields__
+    assert type(rows[0].converted.__fields__) is list
+    rows[0].converted.__fields__[0] = "renamed_binary"
+    assert rows[-1].converted.renamed_binary == b"\x03"
+
+
+@pytest.mark.parametrize("spatial_type", [T.GeometryType, T.GeographyType])
+def test_tuple_struct_converter_keeps_spatial_payloads_and_mutable_names(spatial_type):
+    from pyspark.sql.types import _udt_field_converters
+
+    wkb = bytes.fromhex("0101000000000000000000f03f0000000000000040")
+    schema = T.StructType([T.StructField("s", T.StructType([
+        T.StructField("b", T.BinaryType()), T.StructField("g", spatial_type(4326)),
+    ]))])
+    convert = _udt_field_converters(schema)[0]
+    left = convert(Row(b=bytearray(b"x"), g=Row(wkb=wkb, srid=4326)))
+    right = convert(Row(b=bytearray(b"y"), g=Row(wkb=wkb, srid=4326)))
+    assert type(left) is Row and isinstance(left, tuple)
+    assert type(left.b) is bytearray and left.b == b"x"
+    assert type(left.g.wkb) is bytes and left.g.wkb == wkb
+    assert left.g == right.g
+    assert type(left.__fields__) is list and left.__fields__ is right.__fields__
+    left.__fields__[0] = "renamed_binary"
+    assert right.renamed_binary == b"y"
+
+
 def test_row_fields():
     from pyspark.errors import (
         PySparkAttributeError,
@@ -7710,9 +7945,9 @@ def test_create_dataframe_raises_recursion_error_for_a_value_that_contains_itsel
             _local_create_dataframe([(value,)])
 
 
-# py_to_value converts the cells of object-dtype pandas input, as well as the values of
-# fillna, pivot and Row conversion; local rows go through infer.convert instead, so the
-# "local" source is a control for values that the exact-number fast path must not change.
+# py_to_value converts object-dtype cells of customized pandas frames, plus fillna
+# and pivot values; local rows use infer.convert. The "local" source below is a
+# control for values that the exact-number fast path must not change.
 def _RowPathFrame(pd):
     """A subclass of pandas.DataFrame: createDataFrame converts a customized frame with its
     row path (py_to_value), where it converts a plain one with PySpark's Arrow conversion."""
@@ -7845,6 +8080,98 @@ def test_local_input_native_numbers_inside_nested_values(mock_connect):
     actual = _native_number_input_table(mock_connect, [Row(value=value)], source="pandas").column(0)[0].as_py()
     assert actual["items"] == [1, 2, None]
     assert dict(actual["mapping"]) == {"x": 2**63 - 1}
+
+
+@pytest.mark.parametrize("source", ["local", "pandas"])
+@pytest.mark.parametrize("make, expected", [
+    (lambda: Row(a=1, b="x"), {"a": 1, "b": "x"}),
+    (lambda: Row("a", "b")(1, "x"), {"a": 1, "b": "x"}),
+    (lambda: Row("a", "b")(1), {"a": 1}),
+])
+def test_tuple_rows_remain_named_structs_in_native_input(mock_connect, source, make, expected):
+    # A customized pandas subclass retains the native row path. Plain pandas
+    # frames take the separate Arrow path checked below.
+    value = make()
+    actual = _native_number_input_table(
+        mock_connect, [(value,)], source=source
+    ).column(0)[0].as_py()
+    assert actual == expected
+
+
+@pytest.mark.parametrize("source", ["local", "pandas"])
+def test_unnamed_nested_row_inference_matches_pyspark(mock_connect, source):
+    import pyarrow as pa
+
+    # Local inference makes positional structs; the customized pandas row path
+    # keeps unnamed tuple values as arrays.
+    column = _native_number_input_table(
+        mock_connect, [(Row(1, 2),)], source=source
+    ).column(0)
+    if source == "local":
+        assert column.type == pa.struct([pa.field("_1", pa.int64()), pa.field("_2", pa.int64())])
+        assert column[0].as_py() == {"_1": 1, "_2": 2}
+    else:
+        assert pa.types.is_list(column.type) or pa.types.is_large_list(column.type)
+        assert column.type.value_type == pa.int64()
+        assert column[0].as_py() == [1, 2]
+
+
+@pytest.mark.parametrize("value", [Row(1, 2), Row(a=1, b=2)])
+def test_plain_pandas_tuple_rows_keep_arrow_array_inference(mock_connect, value):
+    import pandas as pd
+    import pyarrow as pa
+
+    # The default branch preserves this plain frame and its Arrow conversion route.
+    table = _native_number_input_table(
+        mock_connect, pd.DataFrame({"value": [value]}, dtype=object))
+    table.validate(full=True)
+    assert (table.num_rows, table.num_columns) == (1, 1)
+    # IPC keeps temporary names; the enclosing ToDF applies the public label.
+    assert table.column_names == ["_0"]
+    _, service = mock_connect
+    request = parse_message(service.execute_requests[-1])
+    relation = parse_message(parse_message(request[3][0])[1][0])
+    rename = parse_message(relation[18][0])
+    assert [name.decode() for name in rename[2]] == ["value"]
+    column = table.column(0)
+    assert pa.types.is_list(column.type) or pa.types.is_large_list(column.type)
+    assert column.type.value_type == pa.int64()
+    assert column[0].as_py() == [1, 2]
+
+
+def test_customized_pandas_exact_nested_tuple_rows_remain_arrays(mock_connect):
+    import pyarrow as pa
+
+    values = [
+        ((1, None, -3), (), None, (2**63 - 1, -(2**63))),
+        (),
+        None,
+        ((4,), (5, 6)),
+    ]
+    table = _native_number_input_table(
+        mock_connect, [(value,) for value in values], source="pandas")
+    table.validate(full=True)
+    assert (table.num_rows, table.num_columns) == (4, 1)
+    assert table.column_names == ["value"]
+    assert table.column(0).type == pa.list_(pa.list_(pa.int64()))
+    assert table.column(0).to_pylist() == [
+        [[1, None, -3], [], None, [2**63 - 1, -(2**63)]],
+        [],
+        None,
+        [[4], [5, 6]],
+    ]
+
+
+def test_pandas_tuple_field_lookup_propagates_errors(mock_connect):
+    class InvalidFields(tuple):
+        @property
+        def __fields__(self):
+            raise RuntimeError("field lookup failed")
+
+    with pytest.raises(RuntimeError, match="^field lookup failed$"):
+        _native_number_input_table(
+            mock_connect, [(InvalidFields((1,)),)], source="pandas"
+        )
 
 
 # Exact list/tuple conversion and pandas input IPC regressions.

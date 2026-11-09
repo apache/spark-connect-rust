@@ -243,7 +243,9 @@ Vendor the ones we don't have a Rust implementation for.
   (the gRPC channel connects lazily, so proto/plan construction needs no server)
   and server-gated `tests/e2e_*.rs` (they check `std::env::var("SPARK_REMOTE")`).
 - **Python drop-in**: `python/.coveragerc` scopes to the hand-written shim
-  (omits vendored/generated/Rust-only). Run:
+  (omits vendored/generated/Rust-only). The embedded `crates/pyspark-rs/src/row.py`
+  runs as `pyspark/_row.py` without a file at that path and is explicitly omitted;
+  Row tests exercise its behavior and Ruff checks its source. Run:
   ```
   cd python && PYTHONPATH=$(pwd) python -m coverage run --rcfile=.coveragerc \
     -m pytest tests/test_dropin_offline.py && python -m coverage report --rcfile=.coveragerc
@@ -414,9 +416,15 @@ For every method matching a pyspark name:
   proto carrying the pickled object: `registerDataSource`, `GroupedData.transformWithState[InPandas]`,
   `createDataFrame(..., udf)`, etc. General rule: proto-building → Rust; cloudpickled Python code that
   runs server-side → vendored Python.
-- **Row materialization:** PyO3 cannot subclass `tuple`, so our `Row` is not a tuple subclass.
-  Some pandas-on-Spark code assumes a tuple-`Row` with mutable `__fields__`. Full fidelity
-  likely requires adopting the upstream Python tuple-`Row` at collect boundaries.
+- **Row materialization:** `crates/pyspark-rs/src/row.py` embeds PySpark's Python `Row(tuple)`
+  class, exported as `pyspark._pyspark.Row` and re-exported by `pyspark.sql.types`,
+  `pyspark.sql`, and `pyspark`. Embedding avoids importing the partially initialized
+  `pyspark.sql.types` shim while the extension loads. Rust eagerly builds tuple values
+  through `pyspark.sql.types._create_row`; collected rows share a mutable `__fields__`
+  list across the result, and iterator rows share top-level names within each Arrow
+  record batch. Nested names are shared by schema path across the execution, including
+  iterator batches, while distinct sibling paths keep separate lists.
+  Nested local-input Rows follow the tuple inference paths; named Rows expose `__fields__`.
 - **Streaming listeners and progress holders:** Keep progress holders (`StreamingQueryProgress`,
   `StateOperatorProgress`, etc.) as faithful pure-Python implementations parsed from server
   JSON, not Rust-backed. The listener bus (subscribe/dispatch) is genuinely Rust-backed;

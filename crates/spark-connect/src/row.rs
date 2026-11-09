@@ -428,6 +428,17 @@ impl Row {
         self.fields.as_slice()
     }
 
+    /// The immutable field-name allocation shared by rows of an Arrow record batch.
+    /// Language bindings use its identity to preserve per-batch field-name sharing.
+    /// Locally constructed rows may own their names instead.
+    #[doc(hidden)]
+    pub fn shared_fields(&self) -> Option<&Arc<[String]>> {
+        match &self.fields {
+            RowFields::Shared(fields) => Some(fields),
+            RowFields::Owned(_) => None,
+        }
+    }
+
     /// Get values.
     pub fn values(&self) -> &[Value] {
         &self.values
@@ -491,6 +502,18 @@ mod tests {
 
         assert!(std::ptr::eq(fields.as_ref(), row.fields()));
         assert!(std::ptr::eq(row.fields(), cloned.fields()));
+    }
+
+    #[test]
+    fn shared_fields_exposes_only_shared_name_storage() {
+        let fields: Arc<[String]> = vec!["id".to_string()].into();
+        let row = Row::with_shared_fields(Arc::clone(&fields), vec![Value::Long(1)]);
+        let cloned = row.clone();
+
+        assert!(Arc::ptr_eq(row.shared_fields().unwrap(), &fields));
+        assert!(Arc::ptr_eq(cloned.shared_fields().unwrap(), &fields));
+        let owned = Row::new(vec!["id".to_string()], vec![Value::Long(1)]);
+        assert!(owned.shared_fields().is_none());
     }
 
     #[test]

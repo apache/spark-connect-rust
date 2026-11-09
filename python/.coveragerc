@@ -3,6 +3,9 @@
 # the Python glue only, excluding vendored third-party code (cloudpickle), the
 # test-support utilities, pandas-on-spark, generated wrappers, and the compiled
 # extension itself.
+# The embedded crates/pyspark-rs/src/row.py runs as pyspark/_row.py.
+# That path has no file and is explicitly omitted. Row tests exercise its behavior;
+# Ruff checks the embedded source.
 [run]
 source = pyspark
 branch = True
@@ -62,7 +65,10 @@ omit =
     */pyspark/sql/connect/logging.py
     */pyspark/sql/connect/_typing.py
     */pyspark/sql/connect/conversion.py
+    # The native extension and its embedded Row source, which has a synthetic filename.
     */pyspark/_pyspark*
+    */pyspark/_row.py
+    # Test helpers.
     */tests/*
 
 [report]

@@ -717,8 +717,7 @@ impl PySparkSession {
         } else {
             // A VariantVal of PySpark has a `__dict__`, so that it is taken as a row, which
             // PySpark's `to_row` rejects, as `row_values` does.
-            !(first.is_instance_of::<crate::row::PyRow>()
-                || first.is_instance_of::<pyo3::types::PyTuple>()
+            !(first.is_instance_of::<pyo3::types::PyTuple>()
                 || first.is_instance_of::<PyList>()
                 || first.is_instance_of::<crate::values::PyVariantVal>()
                 || first.hasattr("__dict__")?)
@@ -3048,17 +3047,29 @@ pub(crate) fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
         return Ok(Value::List(items));
     }
     if let Ok(tuple) = obj.cast::<pyo3::types::PyTuple>() {
-        let mut items = Vec::with_capacity(tuple.len());
-        for item in tuple.iter() {
-            items.push(py_to_value(&item)?);
+        let mut items = tuple
+            .iter()
+            .map(|item| py_to_value(&item))
+            .collect::<PyResult<Vec<_>>>()?;
+        // Named Rows (tuple subclasses with `__fields__`) become structs on the generic
+        // object path, e.g. customized pandas object columns. Unnamed tuples stay arrays.
+        if !obj.is_exact_instance_of::<pyo3::types::PyTuple>() {
+            match obj.getattr(pyo3::intern!(obj.py(), "__fields__")) {
+                Ok(fields) => {
+                    let mut fields: Vec<String> = fields.extract()?;
+                    // Row factories may receive fewer values than names, and __fields__
+                    // is mutable. Pair them as schema inference does, without panicking
+                    // in the native Row constructor when their lengths differ.
+                    fields.truncate(items.len());
+                    items.truncate(fields.len());
+                    return Ok(Value::Struct(Row::new(fields, items).into()));
+                }
+                Err(error)
+                    if error.is_instance_of::<pyo3::exceptions::PyAttributeError>(obj.py()) => {}
+                Err(error) => return Err(error),
+            }
         }
         return Ok(Value::List(items));
-    }
-
-    // pyspark Row -> struct: its named fields (values already core Values), so a nested
-    // Row inside createDataFrame data (e.g. Row(s=Row(x=1))) converts recursively.
-    if let Ok(pyrow) = obj.extract::<PyRef<crate::row::PyRow>>() {
-        return Ok(Value::Struct(pyrow.to_row(obj.py())?.into()));
     }
 
     // dict -> map, its entries in order with keys and values of their own types

@@ -21,10 +21,11 @@ try:
         # Spark's nanosecond timestamp types (no PySpark 4.3.0 class; not in __all__).
         TimestampNTZNanosType, TimestampLTZNanosType,
     )
-    # Row lives in the Rust core; upstream code imports it from pyspark.sql.types too.
+    # The extension exports the same tuple-backed Row as the public Python imports.
     from pyspark._pyspark import Row
 except ImportError:  # pragma: no cover - defensive fallback when the extension is absent
-    # Fallback: define minimal stubs for testing purposes
+    # Minimal DataType stubs for import-only tests. Row and runtime conversion
+    # helpers require the compiled extension.
     class DataType:
         """Base class for all data types."""
         def __init__(self):
@@ -614,12 +615,12 @@ def _udt_converter(dataType):
         fields = _udt_field_converters(dataType)
         if fields is None:
             return None
-        row = Row(*dataType.names)
+        field_names = dataType.names
 
         def convert_struct(value):
             if value is None:
                 return None
-            return row(*[v if f is None else f(v) for f, v in zip(fields, value)])
+            return _create_row(field_names, [v if f is None else f(v) for f, v in zip(fields, value)])
 
         return convert_struct
     return None
@@ -710,7 +711,6 @@ def _struct_to_internal(dataType, obj):
     if isinstance(obj, VariantVal):
         raise PySparkValueError("Rows cannot be of type VariantVal")
     names, fields = dataType.names, dataType.fields
-    # A Row is a tuple in PySpark.
     if dataType._needSerializeAnyField:
         # Only calling toInternal function for fields that need conversion
         need = dataType._needConversion
@@ -719,7 +719,7 @@ def _struct_to_internal(dataType, obj):
                 f.toInternal(obj.get(n)) if c else obj.get(n)
                 for n, f, c in zip(names, fields, need)
             )
-        elif isinstance(obj, (tuple, list, Row)):
+        elif isinstance(obj, (tuple, list)):
             return tuple(f.toInternal(v) if c else v for f, v, c in zip(fields, obj, need))
         elif hasattr(obj, "__dict__"):
             d = obj.__dict__
@@ -729,7 +729,7 @@ def _struct_to_internal(dataType, obj):
     else:
         if isinstance(obj, dict):
             return tuple(obj.get(n) for n in names)
-        elif isinstance(obj, (list, tuple, Row)):
+        elif isinstance(obj, (list, tuple)):
             return tuple(obj)
         elif hasattr(obj, "__dict__"):
             d = obj.__dict__
@@ -822,8 +822,7 @@ def _from_internal(dataType, obj):
 # The private helpers of PySpark's pyspark.sql.types, as of Apache Spark v4.3.0: the inference,
 # merging, conversion and verification of the types of Python objects, and their tables, which
 # PySpark Connect's modules, Apache Spark's tests and libraries import. They are PySpark's, as
-# the client's types share the classes and the attributes of PySpark's; but the client's Row is
-# not a tuple, so where PySpark takes a tuple of a Row, they take the client's Row too.
+# the client's types share the classes and attributes of PySpark's, including its tuple Row.
 import ctypes  # noqa: E402
 import datetime  # noqa: E402
 import decimal  # noqa: E402
@@ -1158,7 +1157,7 @@ def _infer_schema(
     if isinstance(row, dict):
         items = sorted(row.items())
 
-    elif isinstance(row, (tuple, list, Row)):
+    elif isinstance(row, (tuple, list)):
         if hasattr(row, "__fields__"):  # Row
             items = zip(row.__fields__, tuple(row))
         elif hasattr(row, "_fields"):  # namedtuple
@@ -1369,7 +1368,7 @@ def _create_converter(dataType: DataType) -> Callable:
         if obj is None:
             return None
 
-        if isinstance(obj, (tuple, list, Row)):
+        if isinstance(obj, (tuple, list)):
             if convert_fields:
                 return tuple(conv(v) for v, conv in zip(obj, converters))
             else:
@@ -1413,7 +1412,7 @@ _acceptable_types = {
     DayTimeIntervalType: (datetime.timedelta,),
     ArrayType: (list, tuple, array),
     MapType: (dict,),
-    StructType: (tuple, list, dict, Row),
+    StructType: (tuple, list, dict),
     GeometryType: (Geometry,),
     GeographyType: (Geography,),
     VariantType: (
@@ -1428,7 +1427,6 @@ _acceptable_types = {
         datetime.datetime,
         datetime.timedelta,
         tuple,
-        Row,
         list,
         dict,
         array,
@@ -1714,7 +1712,7 @@ def _make_type_verifier(
             if isinstance(obj, dict):
                 for f, verifier in verifiers:
                     verifier(obj.get(f))
-            elif isinstance(obj, (tuple, list, Row)):
+            elif isinstance(obj, (tuple, list)):
                 if len(obj) != len(verifiers):
                     if name is not None:
                         raise PySparkValueError(

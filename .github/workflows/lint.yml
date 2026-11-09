@@ -66,7 +66,7 @@ jobs:
         run: python3 -m unittest discover -s scripts/tests
 
   python-ruff:
-    name: ruff (our scripts)
+    name: ruff (our scripts and embedded Row)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -76,6 +76,6 @@ jobs:
       - name: Install ruff
         run: python -m pip install "ruff==0.14.0"
       - name: ruff check - blocking
-        run: ruff check scripts/
+        run: ruff check scripts/ crates/pyspark-rs/src/row.py
       - name: ruff format (check) - blocking
-        run: ruff format --check scripts/
+        run: ruff format --check scripts/ crates/pyspark-rs/src/row.py
