@@ -1036,6 +1036,51 @@ def test_public_dataframe_extensions_reach_native_frames_and_restore(ml_mock, mo
     assert service.execute_requests == []
 
 
+def test_public_dataframe_wrappers_call_the_concrete_attributes_they_captured(
+    ml_mock, monkeypatch
+):
+    # A wrapper of a public-base attribute often calls the attribute it captured before
+    # the patch. That reaches the implementation that the wrapper replaced, as on master
+    # and in PySpark, and not the wrapper again, which recursed without end.
+    from pyspark.sql import DataFrame
+
+    spark, service = ml_mock
+    frame = spark.range(3)
+    original_limit = vars(DataFrame)["limit"]
+    original_session = vars(DataFrame)["sparkSession"]
+    original_getattr = vars(DataFrame)["__getattr__"]
+    calls = []
+
+    def limit(self, num):
+        calls.append(("limit", num))
+        return original_limit(self, num)
+
+    def get_attribute(self, name):
+        calls.append(("__getattr__", name))
+        return original_getattr(self, name)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(DataFrame, "limit", limit)
+        patch.setattr(
+            DataFrame,
+            "sparkSession",
+            property(lambda self: ("wrapped", original_session.fget(self))),
+        )
+        patch.setattr(DataFrame, "__getattr__", get_attribute)
+        assert isinstance(frame.limit(1), DataFrame)
+        assert frame.sparkSession == ("wrapped", spark)
+        assert repr(frame.missing_column) == repr(frame["missing_column"])
+        # A wrapper of a wrapper reaches the concrete method through both.
+        inner = DataFrame.limit
+        patch.setattr(DataFrame, "limit", lambda self, num: ("outer", inner(self, num)))
+        outer, limited = frame.limit(2)
+        assert outer == "outer" and isinstance(limited, DataFrame)
+        assert calls == [("limit", 1), ("__getattr__", "missing_column"), ("limit", 2)]
+    assert vars(DataFrame)["limit"] is original_limit
+    assert frame.sparkSession is spark
+    assert service.execute_requests == []
+
+
 def test_public_dataframe_attribute_dispatch_and_restore(ml_mock, monkeypatch):
     import inspect
 

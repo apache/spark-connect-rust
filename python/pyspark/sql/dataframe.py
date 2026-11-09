@@ -177,6 +177,24 @@ class _DataFrameMeta(ABCMeta):
         _native_overrides.pop(name, None)
 
 
+def _concrete_attribute(name, original):
+    # The concrete type's own implementation of a public-base attribute. A public-base
+    # override is forwarded to the concrete type, so that native frames see it; a wrapper
+    # often captures the public attribute and calls it from the override
+    # (orig = DataFrame.show; DataFrame.show = lambda self, *a: orig(self, *a)). The
+    # captured attribute then reaches the implementation that the override replaced, as
+    # in PySpark, where a public-base patch never reaches the concrete type. Resolving to
+    # the forwarded override itself would call the wrapper back without end.
+    current = vars(_NativeDataFrame).get(name, _missing)
+    override = _native_overrides.get(name)
+    if override is not None and current is override.forwarded:
+        current = override.previous_native
+    if current is _missing:
+        return original
+    get = getattr(type(current), "__get__", None)
+    return current if get is None else get(current, None, _NativeDataFrame)
+
+
 def _not_implemented(name):
     from pyspark.errors import PySparkNotImplementedError
 
@@ -205,7 +223,7 @@ def _dispatch_method(name, method):
                 signature(method).bind(self, *args, **kwargs)
                 return None
             raise _not_implemented(name)
-        implementation = getattr(_NativeDataFrame, name)
+        implementation = _concrete_attribute(name, method)
         if implementation is dispatched:
             implementation = method
         return implementation(self, *args, **kwargs)
@@ -221,7 +239,7 @@ def _dispatch_property(name, descriptor):
             # Official public-base properties have empty bodies. Independent
             # Python subclasses therefore read None unless they override them.
             return None
-        implementation = getattr(_NativeDataFrame, name)
+        implementation = _concrete_attribute(name, descriptor)
         if implementation is public_property:
             implementation = descriptor
         getter = getattr(implementation, "__get__", None)
@@ -252,8 +270,8 @@ class DataFrame(metaclass=_DataFrameMeta):
         # An explicit __getattr__ call resolves a column even when a regular
         # attribute has that name. PyO3's resolver has no class-dict entry until a
         # user overrides it, so use its ordinary native bridge as the default.
-        implementation = getattr(
-            _NativeDataFrame, "__getattr__", _NativeDataFrame._get_column_by_attribute
+        implementation = _concrete_attribute(
+            "__getattr__", _NativeDataFrame._get_column_by_attribute
         )
         if implementation is _initial_public_attributes["__getattr__"]:
             implementation = _NativeDataFrame._get_column_by_attribute
