@@ -24,8 +24,12 @@ use crate::types::DataType;
 /// execution ends. Mirrors `SparkSession.registerProgressHandler`.
 pub type ProgressHandler = Arc<dyn Fn(&ProgressUpdate) + Send + Sync>;
 
+/// A progress handler that may fail, as [`SparkSession::register_fallible_progress_handler`]
+/// registers: its error fails the execution that calls it.
+pub(crate) type FallibleProgressHandler = Arc<dyn Fn(&ProgressUpdate) -> Result<()> + Send + Sync>;
+
 /// The shared registry of progress handlers and their ids, without retaining a session.
-pub(crate) type ProgressHandlers = Arc<Mutex<Vec<(u64, ProgressHandler)>>>;
+pub(crate) type ProgressHandlers = Arc<Mutex<Vec<(u64, FallibleProgressHandler)>>>;
 
 /// Metrics captured from the last executed query. Mirrors the data behind
 /// `pyspark.sql.DataFrame.executionInfo` / `client.core.ExecutionInfo`.
@@ -248,6 +252,22 @@ impl SparkSession {
     pub fn register_progress_handler(
         &self,
         handler: impl Fn(&ProgressUpdate) + Send + Sync + 'static,
+    ) -> u64 {
+        self.register_fallible_progress_handler(move |update| {
+            handler(update);
+            Ok(())
+        })
+    }
+
+    /// Register a progress handler that may fail, otherwise as
+    /// [`SparkSession::register_progress_handler`]. An error it returns fails the execution
+    /// that calls it: the execution ends, the error goes to the caller of that execution, and
+    /// the handlers after it are not called for that update, as PySpark's client does when a
+    /// handler raises. The handler is still called as done when the execution ends. Used by
+    /// the Python drop-in to raise a handler's exception from the call that ran it.
+    pub fn register_fallible_progress_handler(
+        &self,
+        handler: impl Fn(&ProgressUpdate) -> Result<()> + Send + Sync + 'static,
     ) -> u64 {
         let id = self.progress_handler_id.fetch_add(1, Ordering::SeqCst);
         self.progress_handlers
