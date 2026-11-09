@@ -24,6 +24,7 @@ import os
 import time
 from collections import namedtuple
 from datetime import date, datetime
+from decimal import Decimal
 
 import pyarrow as pa
 import pytest
@@ -3699,6 +3700,33 @@ def test_create_dataframe_raises_merge_errors_as_pyspark(session):
             session.createDataFrame(data)
         assert error.value.getCondition() == condition, data
         assert error.value.getMessageParameters() == parameters, data
+
+
+@pytest.mark.parametrize("make, schema, expected_type, expected", [
+    (lambda pd, np: pd.DataFrame([[None], [3]]), "x int", "struct<x:int>", [(None,), (3,)]),
+    (lambda pd, np: pd.DataFrame(np.array([[1.0, np.nan], [2.0, 3.0]])), "a int, b int",
+     "struct<a:int,b:int>", [(1, None), (2, 3)]),
+    (lambda pd, np: pd.DataFrame([[Row(a=1, b=2)], [Row(a=3, b=4)]]), "x array<bigint>",
+     "struct<x:array<bigint>>", [([1, 2],), ([3, 4],)]),
+    (lambda pd, np: pd.DataFrame([[{"u": 1, "v": "a"}], [{"u": 2, "v": "b"}]]), None,
+     "struct<0:struct<u:bigint,v:string>>", [(Row(u=1, v="a"),), (Row(u=2, v="b"),)]),
+    (lambda pd, np: pd.DataFrame([[[datetime(2020, 1, 1, 12)]], [[datetime(2021, 1, 1)]]]), None,
+     "struct<0:array<timestamp_ntz>>", [([datetime(2020, 1, 1, 12)],), ([datetime(2021, 1, 1)],)]),
+    (lambda pd, np: pd.DataFrame([[[Decimal("1.5"), Decimal("10.25")]], [[Decimal("2")]]]), None,
+     "struct<0:array<decimal(4,2)>>",
+     [([Decimal("1.50"), Decimal("10.25")],), ([Decimal("2.00")],)]),
+])
+def test_default_range_index_pandas_frames_convert_as_pyspark(
+    session, make, schema, expected_type, expected
+):
+    # Plain frames with default (RangeIndex) labels convert with Arrow, and give the results
+    # of PySpark 4.3.0 for these frames.
+    pd = pytest.importorskip("pandas")
+    np = pytest.importorskip("numpy")
+    data = make(pd, np)
+    df = session.createDataFrame(data) if schema is None else session.createDataFrame(data, schema)
+    assert df.schema.simpleString() == expected_type
+    assert [tuple(row) for row in df.collect()] == expected
 
 
 def test_samples_and_splits_take_a_seed_of_the_client_as_pyspark(session):
