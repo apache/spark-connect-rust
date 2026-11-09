@@ -241,6 +241,12 @@ def run_ours(
     dropin=False,
 ):
     env = dict(os.environ)
+    # A fixed hash seed, as the default seed of a pyspark.ml estimator is
+    # hash(type(self).__name__) (HasSeed): with a random one, the random k-fold split of
+    # CrossValidator differs per run, and in about 7% of the runs the official
+    # test_crossvalidator_with_random_forest_classifier trains a fold on one label and fails,
+    # for the reference client as for ours.
+    env["PYTHONHASHSEED"] = "0"
     env["SPARK_CONNECT_TESTING_REMOTE"] = remote
     env["SPARK_TESTING"] = "1"
     env["SPARK_SKIP_CONNECT_COMPAT_TESTS"] = "1"
