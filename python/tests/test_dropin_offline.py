@@ -1136,6 +1136,49 @@ def test_collect_of_a_string_that_is_not_utf8_raises_as_pyspark(mock_connect):
     assert spark.range(1).collect() == [Row(s="a")]
     assert len(list(spark.range(1).toLocalIterator())) == 1
 
+def test_malformed_arrow_chunks_raise_spark_connect_exception_as_pyspark(mock_connect):
+    # As PySpark Connect's ExecuteAndFetchAsIterator: a chunk that is not the next one of its
+    # batch, or a batch that does not start where the rows before it end, raises a
+    # SparkConnectException of the message of the reference client, with no error class.
+    from pyspark.errors.exceptions.connect import SparkConnectException
+
+    spark, service = mock_connect
+
+    def batch(index, num_chunks, data, start_offset=None):
+        # ExecutePlanResponse.arrow_batch=2: ArrowBatch.row_count=1, data=2, start_offset=3,
+        # chunk_index=4, num_chunks_in_batch=5. A batch that is not chunked has no chunk fields.
+        fields = varint_field(1, 1) + message_field(2, data)
+        if start_offset is not None:
+            fields += varint_field(3, start_offset)
+        if num_chunks is not None:
+            fields += varint_field(4, index) + varint_field(5, num_chunks)
+        return message_field(2, fields)
+
+    cases = [
+        (
+            [batch(0, 3, b"a", start_offset=0), batch(2, 3, b"c")],
+            "Expected chunk index 1 of the arrow batch but got 2.",
+        ),
+        (
+            [batch(1, 2, b"b", start_offset=0)],
+            "Expected chunk index 0 of the next arrow batch but got 1.",
+        ),
+        (
+            [batch(0, None, b"a", start_offset=5)],
+            "Expected arrow batch to start at row offset 0 in results, but received arrow batch "
+            "starting at offset 5.",
+        ),
+    ]
+    for payloads, message in cases:
+        service.execute_payloads = payloads
+        with pytest.raises(SparkConnectException) as e:
+            spark.range(1).collect()
+        assert type(e.value) is SparkConnectException
+        assert str(e.value) == message
+        assert e.value.getCondition() is None
+    service.execute_payloads = None
+
+
 def test_tags_are_those_of_each_thread_as_pyspark(mock_connect):
     # As PySpark's: the tags of addTag are those of the current thread, of a set of getTags,
     # which the operations that the thread starts carry; a new thread starts without tags.

@@ -42,7 +42,7 @@ impl ArrowChunkAssembler {
             None | Some(0) => 1,
             Some(n) if n > 0 => n,
             Some(n) => {
-                return Err(SparkError::connect_msg(format!(
+                return Err(SparkError::connect_exception_msg(format!(
                     "Invalid number of chunks {n} in an arrow batch."
                 )))
             }
@@ -52,14 +52,14 @@ impl ArrowChunkAssembler {
             None => {
                 // As PySpark's: the offset of the next batch, then its first chunk.
                 if let Some(offset) = batch.start_offset.filter(|&o| o != self.num_records) {
-                    return Err(SparkError::connect_msg(format!(
+                    return Err(SparkError::connect_exception_msg(format!(
                         "Expected arrow batch to start at row offset {} in results, but received \
                          arrow batch starting at offset {offset}.",
                         self.num_records
                     )));
                 }
                 if index != 0 {
-                    return Err(SparkError::connect_msg(format!(
+                    return Err(SparkError::connect_exception_msg(format!(
                         "Expected chunk index 0 of the next arrow batch but got {index}."
                     )));
                 }
@@ -89,13 +89,13 @@ impl ArrowChunkAssembler {
             }
             Some(pending) => {
                 if index != pending.received {
-                    return Err(SparkError::connect_msg(format!(
+                    return Err(SparkError::connect_exception_msg(format!(
                         "Expected chunk index {} of the arrow batch but got {index}.",
                         pending.received
                     )));
                 }
                 if num_chunks != pending.num_chunks || batch.row_count != pending.row_count {
-                    return Err(SparkError::connect_msg(format!(
+                    return Err(SparkError::connect_exception_msg(format!(
                         "Chunk {index} of an arrow batch of {} rows in {} chunks does not match \
                          the batch of {} rows in {} chunks.",
                         batch.row_count, num_chunks, pending.row_count, pending.num_chunks
@@ -139,7 +139,7 @@ impl ArrowChunkAssembler {
             .into_iter()
             .fold(0i64, |rows, record_batch| rows.saturating_add(record_batch));
         if rows != batch.row_count {
-            return Err(SparkError::connect_msg(format!(
+            return Err(SparkError::connect_exception_msg(format!(
                 "Expected {} rows in arrow batch but got {rows}.",
                 batch.row_count
             )));
@@ -166,7 +166,7 @@ impl ArrowChunkAssembler {
     pub(crate) fn finish(&self) -> Result<()> {
         match &self.pending {
             None => Ok(()),
-            Some(pending) => Err(SparkError::connect_msg(format!(
+            Some(pending) => Err(SparkError::connect_exception_msg(format!(
                 "The execution ended after {} of {} chunks of an arrow batch.",
                 pending.received, pending.num_chunks
             ))),
@@ -214,6 +214,7 @@ fn record_batch_rows(data: &[u8]) -> Option<Vec<i64>> {
 mod tests {
     use super::*;
     use proto::execute_plan_response::{ArrowBatch, ResponseType};
+    use spark_connect_core::error::SparkErrorKind;
 
     fn chunk(index: i64, total: i64, rows: i64, data: &[u8]) -> proto::ExecutePlanResponse {
         proto::ExecutePlanResponse {
@@ -315,6 +316,8 @@ mod tests {
             error.message(),
             "Expected chunk index 1 of the arrow batch but got 2."
         );
+        // A SparkConnectException of a plain message, as PySpark raises it.
+        assert_eq!(error.kind, SparkErrorKind::ConnectMessage);
     }
 
     #[test]

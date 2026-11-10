@@ -50,6 +50,8 @@ fn kind_to_pyspark_class_name(kind: SparkErrorKind) -> &'static str {
         // so we fall back to PySparkRuntimeError. An error that the server raised is built by
         // `server_error_to_py` instead.
         SparkErrorKind::Connect => "PySparkRuntimeError",
+        // A `SparkConnectException` of a plain message: `spark_error_to_py_exception` raises it.
+        SparkErrorKind::ConnectMessage => "PySparkRuntimeError",
         SparkErrorKind::ConnectGrpc => "PySparkRuntimeError",
         SparkErrorKind::InvalidPlanInput => "PySparkRuntimeError",
         SparkErrorKind::Spark => "PySparkRuntimeError",
@@ -237,9 +239,11 @@ pub fn spark_error_to_py_exception(err: SparkError) -> PyErr {
             }
         };
 
-        // A classed Connect error, such as `NO_ACTIVE_SESSION`, is a `SparkConnectException`, as
-        // the reference client raises it.
-        let exc_class = if err.kind == SparkErrorKind::Connect && !err.error_class.is_empty() {
+        // A classed Connect error, such as `NO_ACTIVE_SESSION`, and a Connect error of a plain
+        // message are `SparkConnectException`s, as the reference client raises them.
+        let connect_class = err.kind == SparkErrorKind::ConnectMessage
+            || (err.kind == SparkErrorKind::Connect && !err.error_class.is_empty());
+        let exc_class = if connect_class {
             py.import("pyspark.errors.exceptions.connect")
                 .and_then(|module| module.getattr("SparkConnectException"))
         } else {
