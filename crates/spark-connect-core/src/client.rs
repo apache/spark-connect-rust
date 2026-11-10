@@ -1433,7 +1433,15 @@ impl SparkConnectClient {
             return error;
         };
         let details = match &server.error_id {
-            Some(error_id) => self.error_details(error_id).await,
+            Some(error_id) => {
+                // PySpark fetches the details through `_stub`, which raises NO_ACTIVE_SESSION
+                // once the client is closed, as a session change closes it; that replaces the
+                // error of the server.
+                if let Err(closed) = self.ensure_open() {
+                    return closed;
+                }
+                self.error_details(error_id).await
+            }
             None => None,
         };
         let display_stacktrace = self.display_server_stacktrace().await;

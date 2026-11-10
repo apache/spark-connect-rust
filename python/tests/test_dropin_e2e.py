@@ -308,7 +308,8 @@ def test_server_session_id_is_observed_and_a_changed_one_closes_the_session_as_p
         session._client._server_session_id = str(uuid.uuid4())
         with pytest.raises(SparkConnectException) as error:
             session.range(3).collect()
-        assert "SESSION_CHANGED" in str(error.value)
+        # The close by the session change makes the fetch of the error's details raise this.
+        assert "NO_ACTIVE_SESSION" in str(error.value)
         assert session.is_stopped
     finally:
         session.release_session_on_close = False
