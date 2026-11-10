@@ -103,6 +103,9 @@ FLAKY_FILES = {
 # earlier whole-file TIMEOUT (p=0) was this file exceeding the 360s default, not a hang.
 SLOW_FILE_TIMEOUTS = {
     "test_parity_arrow_python_udf.py": 1200,
+    # 387 tests, most with a Python worker on the server: 145-204 s on CI runners, 466 s on a
+    # loaded machine, so the 360 s default leaves little margin.
+    "test_parity_udtf.py": 1200,
 }
 
 _FAIL_RE = re.compile(r"^(?:FAILED|ERROR)\s+(\S+)")

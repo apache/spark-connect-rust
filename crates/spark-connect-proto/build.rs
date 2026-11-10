@@ -1,7 +1,11 @@
 use std::path::PathBuf;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let proto_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("proto");
+    // Read when the script runs, not baked in when it is compiled: a build dir shared by
+    // several checkouts can run a script compiled in another one, which may be gone.
+    let manifest_dir =
+        std::env::var_os("CARGO_MANIFEST_DIR").ok_or("CARGO_MANIFEST_DIR is not set")?;
+    let proto_root = PathBuf::from(manifest_dir).join("proto");
     let connect_dir = proto_root.join("spark").join("connect");
 
     // The vendored Spark Connect .proto files. Keep in sync with proto/PROTO_VERSION.txt.

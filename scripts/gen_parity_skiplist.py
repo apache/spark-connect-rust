@@ -57,6 +57,10 @@ def reference_failures(test_file: Path, spark_py: Path, remote: str, timeout: in
     so the manifest is independent of where the Spark source tree lives.
     """
     env = dict(os.environ)
+    # The fixed hash seed of run_official_tests.py (and of Apache's bin/pyspark): with a random
+    # one, about 7% of the runs of the official test_crossvalidator_with_random_forest_classifier
+    # train a fold on one label and fail, which would put a flake in the manifest.
+    env["PYTHONHASHSEED"] = "0"
     env["SPARK_CONNECT_TESTING_REMOTE"] = remote
     env["SPARK_TESTING"] = "1"
     env["SPARK_SKIP_CONNECT_COMPAT_TESTS"] = "1"
