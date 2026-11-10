@@ -109,6 +109,12 @@ def _commands(service):
     return [pb2.ExecutePlanRequest.FromString(r).plan.command for r in service.execute_requests]
 
 
+def _requests_but_deletes(service):
+    # The commands that the server received, but the Delete of a model that an earlier test
+    # released, which can reach the server during a check.
+    return sum(not command.ml_command.HasField("delete") for command in _commands(service))
+
+
 def _relation(df):
     # The relation of a DataFrame, as the core sends it: the relation that the plans of pyspark.ml
     # send in place of its placeholder, which the core replaces with it.
@@ -222,12 +228,7 @@ def test_ml_connect_setters_set_the_params_of_their_receiver_as_pyspark(ml_mock)
         elif hasattr(obj, "fit"):
             service.execute_payload = _operator_info("model-1")
             models.append(obj.fit(df))
-            if len(service.execute_requests) > sent:
-                params = _commands(service)[sent].ml_command.fit.params
-            else:
-                # Pipeline and CrossValidator fit no object of the server: the transform of their
-                # model sends the params.
-                params = _relation(models[-1].transform(df)).ml_relation.transform.params
+            params = _commands(service)[sent].ml_command.fit.params
         else:
             params = _relation(obj.transform(df)).ml_relation.transform.params
         return {name: value(literal) for name, literal in params.params.items()}
@@ -272,8 +273,6 @@ def test_ml_connect_setters_set_the_params_of_their_receiver_as_pyspark(ml_mock)
             MulticlassClassificationEvaluator,
             dict(labelCol="y", predictionCol="p", metricName="accuracy"),
         ),
-        (Pipeline, dict(stages=["a", "b"])),
-        (CrossValidator, dict(numFolds=5, parallelism=2, seed=7)),
     ]:
         setters = {"set" + name[0].upper() + name[1:]: name for name in values}
         # Every setter of the class is checked.
@@ -285,6 +284,37 @@ def test_ml_connect_setters_set_the_params_of_their_receiver_as_pyspark(ml_mock)
         params = sent_params(receiver)
         assert {name: params.get(name) for name in values} == values, cls
         assert params == sent_params(cls(**values)), cls
+
+
+def test_ml_pipeline_and_cross_validator_fit_is_not_implemented(ml_mock):
+    # The native Pipeline and CrossValidator keep their params as their setters set them, and
+    # their fit raises PySpark's NOT_IMPLEMENTED before any request: the server cannot fit the
+    # stage names, nor the estimator and evaluator that the CrossValidator does not hold, so no
+    # model is returned.
+    from pyspark.errors import PySparkNotImplementedError
+    from pyspark.ml.connect import CrossValidator, Pipeline
+
+    spark, service = ml_mock
+    df = spark.range(1)
+    pipeline = Pipeline()
+    assert pipeline.setStages(value=["a", "b"]) is pipeline
+    cv = CrossValidator()
+    assert cv.setNumFolds(value=5) is cv
+    assert cv.setParallelism(value=2) is cv
+    assert cv.setSeed(value=7) is cv
+    for estimator, feature in [
+        (pipeline, "Pipeline.fit"),
+        (cv, "CrossValidator.fit"),
+        (Pipeline(stages=["a"]), "Pipeline.fit"),
+        (CrossValidator(numFolds=2, seed=1), "CrossValidator.fit"),
+    ]:
+        sent = _requests_but_deletes(service)
+        with pytest.raises(PySparkNotImplementedError) as error:
+            estimator.fit(df)
+        assert error.value.getCondition() == "NOT_IMPLEMENTED"
+        assert error.value.getMessageParameters() == {"feature": feature}
+        assert str(error.value) == f"[NOT_IMPLEMENTED] {feature} is not implemented."
+        assert _requests_but_deletes(service) == sent
 
 
 # The params of the native pyspark.ml.connect classes, by the TypeConverters method of each
@@ -354,10 +384,14 @@ _NATIVE_REJECTED = {
 }
 
 
+# The native classes whose fit raises NOT_IMPLEMENTED without a request, so that no request
+# carries their params.
+_NOT_FITTABLE = ("Pipeline", "CrossValidator")
+
+
 def _native_request(spark, service, obj, models):
     # The MlOperator and the MlParams that the next evaluate, fit or transform of the native
-    # obj sends; Pipeline and CrossValidator fit no object of the server, so the transform of
-    # their model sends them. The models are kept in models, so that none is released.
+    # obj sends. The models are kept in models, so that none is released.
     df = spark.range(1)
     sent = len(service.execute_requests)
     if hasattr(obj, "evaluate"):
@@ -368,10 +402,8 @@ def _native_request(spark, service, obj, models):
     if hasattr(obj, "fit"):
         service.execute_payload = _operator_info("model-1")
         models.append(obj.fit(df))
-        if len(service.execute_requests) > sent:
-            fit = _commands(service)[sent].ml_command.fit
-            return fit.estimator, fit.params
-        obj = models[-1]
+        fit = _commands(service)[sent].ml_command.fit
+        return fit.estimator, fit.params
     transform = _relation(obj.transform(df)).ml_relation.transform
     return transform.transformer, transform.params
 
@@ -446,6 +478,8 @@ def test_ml_connect_params_convert_with_the_type_converters_of_pyspark(ml_mock):
                 if param != "thresholds":
                     made.append(cls(**{param: value}))
                 for obj in made:
+                    if name in _NOT_FITTABLE:
+                        continue  # Their params are sent by no request.
                     sent = _native_sent(spark, service, obj, models)
                     assert sent == {param: expected}, (name, param, value)
             for value, message in _NATIVE_REJECTED[kind]:
@@ -472,7 +506,8 @@ def test_ml_connect_constructors_send_only_the_params_they_are_given_as_pyspark(
     spark, service = ml_mock
     models = []
     for name in _NATIVE_PARAMS:
-        assert _native_sent(spark, service, getattr(connect, name)(), models) == {}, name
+        if name not in _NOT_FITTABLE:
+            assert _native_sent(spark, service, getattr(connect, name)(), models) == {}, name
     assert _native_sent(spark, service, connect.KMeans(k=3), models) == {"k": ("integer", 3)}
     forest = connect.RandomForestClassifier(numTrees=3, seed=2**33)
     assert _native_sent(spark, service, forest, models) == {
@@ -499,7 +534,7 @@ def test_ml_connect_unsendable_ints_none_and_uids_as_pyspark(ml_mock):
         connect.RandomForestClassifier().setNumTrees(2**70),
         connect.CrossValidator(numFolds=2**70),
     ]:
-        sent = len(service.execute_requests)
+        sent = _requests_but_deletes(service)
         with pytest.raises(PySparkValueError) as error:
             estimator.fit(spark.range(1))
         assert error.value.getCondition() == "VALUE_NOT_BETWEEN"
@@ -507,7 +542,7 @@ def test_ml_connect_unsendable_ints_none_and_uids_as_pyspark(ml_mock):
             "[VALUE_NOT_BETWEEN] Value for `value` must be between -9223372036854775808 and "
             "32767."
         )
-        assert len(service.execute_requests) == sent
+        assert _requests_but_deletes(service) == sent
     estimator = connect.KMeans(seed=2**64)
     assert estimator.setSeed(5) is estimator
     assert _native_sent(spark, service, estimator, models) == {"seed": ("integer", 5)}
@@ -515,6 +550,8 @@ def test_ml_connect_unsendable_ints_none_and_uids_as_pyspark(ml_mock):
                         models) == {"k": ("integer", 2)}
 
     for name, params in _NATIVE_PARAMS.items():
+        if name in _NOT_FITTABLE:
+            continue  # Their params and uids are sent by no request.
         cls = getattr(connect, name)
         for param, kind in params.items():
             setter = "set" + param[0].upper() + param[1:]
