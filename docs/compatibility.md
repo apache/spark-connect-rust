@@ -58,6 +58,13 @@ helpers accept `impl Into<Arc<LogicalPlan>>`, so they accept either an owned
 `LogicalPlan` or an existing `Arc<LogicalPlan>`. Serialization still produces the
 same protobuf tree; sharing does not deduplicate repeated relations on the wire.
 
+The random functions `rand`, `randn`, `uuid`, `shuffle`, `uniform`, `randstr` and
+`count_min_sketch` draw a new seed for each call, as PySpark and the Scala client do.
+Before, each sent the same fixed seed, so two `uuid()` columns, or the `uuid()` of
+two runs, were equal. For reproducible values, use the `_with_seed` variants
+(`rand_with_seed(42)`, `uuid_with_seed(lit(42))`, ...). `random` and
+`random_with_seed` are added as the aliases of `rand` that PySpark has.
+
 ## Native LogisticRegression
 
 The native `spark_connect::ml::LogisticRegression` fits Spark's JVM
