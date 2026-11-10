@@ -2587,6 +2587,22 @@ def test_variant_spatial_and_user_defined_values_round_trip_as_pyspark(session):
     assert geometry == Geometry.fromWKB(wkb, 0)
 
 
+def test_variant_val_subclass_round_trips_as_pyspark(session):
+    # As PySpark's: a subclass of VariantVal is createDataFrame's variant, and collects as a
+    # VariantVal.
+    from pyspark.sql.types import VariantVal
+
+    variant = session.sql("""SELECT parse_json('{"a": 1}') AS v""").first()[0]
+
+    class TaggedVariant(VariantVal):
+        pass
+
+    tagged = TaggedVariant(variant.value, variant.metadata)
+    collected = session.createDataFrame([(tagged,)], "v variant").first()[0]
+    assert type(collected) is VariantVal
+    assert str(collected) == collected.toJson() == '{"a":1}'
+
+
 def test_create_dataframe_of_multi_and_categorical_labels_as_pyspark(session):
     # As PySpark's: a frame whose labels are a MultiIndex or a CategoricalIndex converts its
     # cells as a frame of default labels does. A naive datetime of a list reads back unchanged

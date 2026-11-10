@@ -2,11 +2,17 @@
 //! mirroring `pyspark.sql.types.{VariantVal, Geometry, Geography}`.
 
 use pyo3::prelude::*;
-use pyo3::types::PyBytes;
+use pyo3::types::{PyBytes, PyDict, PyTuple};
 
 /// A Variant value (the `value`/`metadata` binary components). Mirrors
 /// `pyspark.sql.types.VariantVal`.
-#[pyclass(name = "VariantVal", module = "pyspark.sql.types", weakref, dict)]
+#[pyclass(
+    name = "VariantVal",
+    module = "pyspark.sql.types",
+    weakref,
+    dict,
+    subclass
+)]
 pub struct PyVariantVal {
     pub(crate) value: Vec<u8>,
     pub(crate) metadata: Vec<u8>,
@@ -21,25 +27,49 @@ impl PyVariantVal {
 
 #[pymethods]
 impl PyVariantVal {
+    /// Accepts any arguments, so that a subclass's `__init__` may take others; `__init__` sets
+    /// the value and metadata.
     #[new]
-    fn new(value: Vec<u8>, metadata: Vec<u8>) -> Self {
-        PyVariantVal { value, metadata }
+    #[pyo3(signature = (*_args, **_kwargs))]
+    fn new(_args: &Bound<'_, PyTuple>, _kwargs: Option<&Bound<'_, PyDict>>) -> Self {
+        PyVariantVal {
+            value: Vec::new(),
+            metadata: Vec::new(),
+        }
     }
-    /// Pickled as `VariantVal(value, metadata)`, which PySpark's own class also takes.
-    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, pyo3::types::PyTuple>> {
+    #[pyo3(signature = (value, metadata))]
+    fn __init__(&mut self, value: Vec<u8>, metadata: Vec<u8>) {
+        self.value = value;
+        self.metadata = metadata;
+    }
+    /// Pickled as a plain class instance is: its class is rebuilt without `__init__`, and its
+    /// value, metadata and instance attributes are restored by `__setstate__`.
+    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyTuple>> {
         let py = slf.py();
         let this = slf.borrow();
-        let args = (
-            PyBytes::new(py, &this.value),
-            PyBytes::new(py, &this.metadata),
-        );
-        pyo3::types::PyTuple::new(
+        let newobj = py.import("copyreg")?.getattr("__newobj__")?;
+        let args = PyTuple::new(py, [slf.get_type().into_any()])?;
+        let state = PyTuple::new(
             py,
             [
-                slf.get_type().into_any(),
-                args.into_pyobject(py)?.into_any(),
+                PyBytes::new(py, &this.value).into_any(),
+                PyBytes::new(py, &this.metadata).into_any(),
+                slf.getattr("__dict__")?,
             ],
-        )
+        )?;
+        PyTuple::new(py, [newobj, args.into_any(), state.into_any()])
+    }
+    fn __setstate__(slf: &Bound<'_, Self>, state: &Bound<'_, PyTuple>) -> PyResult<()> {
+        let (value, metadata, attributes): (Vec<u8>, Vec<u8>, Bound<'_, PyAny>) =
+            state.extract()?;
+        {
+            let mut this = slf.borrow_mut();
+            this.value = value;
+            this.metadata = metadata;
+        }
+        slf.getattr("__dict__")?
+            .call_method1("update", (attributes,))?;
+        Ok(())
     }
     #[getter]
     fn value<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
