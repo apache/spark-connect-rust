@@ -9332,6 +9332,68 @@ def test_datetimelike_labels_convert_cells_as_pyspark(
     assert table.column(0).to_pylist() == values
 
 
+@pytest.mark.parametrize("labels", [
+    "Int64", "Float64", "boolean", "int64[pyarrow]", "timestamp[pyarrow]", "multi_Int64",
+    "categorical_Int64"])
+@pytest.mark.parametrize("cells, arrow_type, values", [
+    ("int_float", lambda pa: pa.float64(), [1.0, 2.5]),
+    ("naive_list", lambda pa: pa.list_(pa.timestamp("us")),
+     [[datetime.datetime(2020, 1, 2, 3)], None]),
+    ("dict", lambda pa: pa.struct([("u", pa.int64()), ("v", pa.string())]),
+     [{"u": 1, "v": "a"}, None]),
+    ("nan_list", lambda pa: pa.list_(pa.float64()), [[1.0, None], None]),
+    ("np_int32", lambda pa: pa.int32(), [1, 2]),
+])
+def test_nullable_and_arrow_labels_convert_cells_as_pyspark(
+    mock_connect, labels, cells, arrow_type, values
+):
+    # A plain frame whose labels are an Index of pandas' nullable or Arrow dtypes (a pivot or `.T`
+    # of `convert_dtypes()` or Arrow-backed data), or a MultiIndex level or CategoricalIndex of
+    # them, converts with Arrow as one with default labels: its cells take the types that PySpark
+    # infers, as for the datetime-like labels above.
+    import numpy as np
+    import pyarrow as pa
+
+    pd = pytest.importorskip("pandas")
+    column = {
+        "int_float": [1, 2.5],
+        "naive_list": [[datetime.datetime(2020, 1, 2, 3)], None],
+        "dict": [{"u": 1, "v": "a"}, None],
+        "nan_list": [[1.0, float("nan")], None],
+        "np_int32": [np.int32(1), np.int32(2)],
+    }[cells]
+    columns = {
+        "Int64": pd.Index(pd.array([1], dtype="Int64")),
+        "Float64": pd.Index(pd.array([1.5], dtype="Float64")),
+        "boolean": pd.Index(pd.array([True], dtype="boolean")),
+        "int64[pyarrow]": pd.Index(pd.array([1], dtype="int64[pyarrow]")),
+        "timestamp[pyarrow]": pd.Index(pd.array([pd.Timestamp("2020-01-01")],
+                                                dtype="timestamp[us][pyarrow]")),
+        "multi_Int64": pd.MultiIndex.from_arrays([pd.array([1], dtype="Int64"), ["x"]]),
+        "categorical_Int64": pd.CategoricalIndex(pd.array([1], dtype="Int64")),
+    }[labels]
+    data = pd.DataFrame({0: pd.Series(column, dtype=object)})
+    data.columns = columns
+    table = _native_number_input_table(mock_connect, data)
+    assert table.num_columns == 1
+    assert table.schema.field(0).type == arrow_type(pa)
+    assert table.column(0).to_pylist() == values
+
+
+def test_label_arrays_with_a_hook_of_their_own_keep_the_row_path():
+    # The labels of the Arrow routes run no user code: a nullable or Arrow label array whose
+    # instance shadows a hook that reading the labels reaches keeps the native row path.
+    pd = pytest.importorskip("pandas")
+    pytest.importorskip("pyarrow")
+    from pyspark.sql._pandas_input import _has_canonical_columns
+
+    for dtype in ("Int64", "boolean", "int64[pyarrow]"):
+        index = pd.Index(pd.array([1, 0], dtype=dtype))
+        assert _has_canonical_columns(index), dtype
+        vars(index)["_data"].__dict__["__iter__"] = lambda: iter(["shadowed"])
+        assert not _has_canonical_columns(index), dtype
+
+
 def test_catalog_function_class_name_is_none_without_a_class_as_pyspark(mock_connect):
     import pyarrow as pa
 
