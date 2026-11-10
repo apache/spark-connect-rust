@@ -88,6 +88,7 @@ dependencies = [
  "futures",
  "h2",
  "hyper",
+ "hyper-util",
  "prost",
  "prost-types",
  "regex",

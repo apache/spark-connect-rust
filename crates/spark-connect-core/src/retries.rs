@@ -70,29 +70,42 @@ impl RetryPolicy {
     /// Mirrors `pyspark.sql.connect.client.retries.DefaultPolicy.can_retry`:
     /// retry transient `UNAVAILABLE`, and `INTERNAL` errors whose message carries
     /// `INVALID_CURSOR.DISCONNECTED` (a mid-stream cursor drop resumed via reattach).
-    /// A connection reset is `UNKNOWN` in tonic but `UNAVAILABLE` in grpc-python, so it
-    /// is retried too.
+    /// A connection that closes under a call is `UNAVAILABLE` in grpc-python, so it is retried
+    /// too: tonic reports a reset during a call as `UNKNOWN`, and a call queued on the
+    /// connection but not sent yet as `CANCELLED`.
     pub fn can_retry(&self, status: &tonic::Status) -> bool {
         match status.code() {
             tonic::Code::Unavailable => true,
             tonic::Code::Internal => status.message().contains("INVALID_CURSOR.DISCONNECTED"),
             tonic::Code::Unknown => is_transport_error(status),
+            tonic::Code::Cancelled => is_unsent_request(status),
             _ => false,
         }
     }
 }
 
-/// Whether tonic built the status from a transport error, which it keeps as the status's
-/// source. A status the server sent has no source.
+/// The errors that tonic keeps as the source of a status that it built from a transport error.
+/// A status the server sent has none.
+fn transport_errors(
+    status: &tonic::Status,
+) -> impl Iterator<Item = &(dyn std::error::Error + 'static)> + '_ {
+    std::iter::successors(std::error::Error::source(status), |error| error.source())
+}
+
+/// Whether tonic built the status from a transport error.
 fn is_transport_error(status: &tonic::Status) -> bool {
-    let mut source = std::error::Error::source(status);
-    while let Some(error) = source {
-        if error.is::<h2::Error>() || error.is::<hyper::Error>() {
-            return true;
-        }
-        source = error.source();
-    }
-    false
+    transport_errors(status).any(|error| error.is::<h2::Error>() || error.is::<hyper::Error>())
+}
+
+/// Whether tonic built the status from a request that hyper canceled, which hyper does only for
+/// a request that its connection closed before sending. Neither tonic's timeout of a request
+/// nor a cancellation that the server sent, both `CANCELLED` too, is one.
+fn is_unsent_request(status: &tonic::Status) -> bool {
+    transport_errors(status).any(|error| {
+        error
+            .downcast_ref::<hyper::Error>()
+            .is_some_and(hyper::Error::is_canceled)
+    })
 }
 
 /// Stateful retry attempt tracker.
@@ -537,5 +550,42 @@ mod tests {
         assert_eq!(status.code(), tonic::Code::Unknown);
         assert_eq!(status.message(), "boom");
         assert!(!RetryPolicy::default().can_retry(&status));
+    }
+
+    /// The error of a request queued on an HTTP/2 connection that closes before sending it, as
+    /// a request that a reset of the connection catches before it is sent.
+    async fn error_of_a_request_its_connection_closed_before_sending() -> hyper::Error {
+        let (io, _server) = tokio::io::duplex(1 << 16);
+        let (mut sender, connection) = hyper::client::conn::http2::handshake(
+            hyper_util::rt::TokioExecutor::new(),
+            hyper_util::rt::TokioIo::new(io),
+        )
+        .await
+        .unwrap();
+        let response = sender.send_request(tonic::codegen::http::Request::new(
+            tonic::body::Body::empty(),
+        ));
+        drop(connection);
+        response.await.expect_err("the connection closed")
+    }
+
+    #[tokio::test]
+    async fn test_can_retry_a_request_its_connection_closed_before_sending() {
+        let error = error_of_a_request_its_connection_closed_before_sending().await;
+        assert!(error.is_canceled(), "{error:?}");
+        // tonic reports it as CANCELLED, with hyper's error as its source.
+        let status = tonic::Status::from_error(Box::new(error));
+        assert_eq!(status.code(), tonic::Code::Cancelled);
+        assert!(RetryPolicy::default().can_retry(&status), "{status:?}");
+    }
+
+    #[test]
+    fn test_cannot_retry_a_cancellation_the_server_sent_or_a_timeout() {
+        let p = RetryPolicy::default();
+        assert!(!p.can_retry(&tonic::Status::cancelled("operation was canceled")));
+        // tonic's timeout of a request is CANCELLED too.
+        let timeout = tonic::Status::from_error(Box::new(tonic::TimeoutExpired(())));
+        assert_eq!(timeout.code(), tonic::Code::Cancelled);
+        assert!(!p.can_retry(&timeout));
     }
 }
