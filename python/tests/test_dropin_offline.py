@@ -5341,6 +5341,28 @@ def test_columns_have_the_python_2_operators_of_pyspark():
     assert [repr(e) for e in (column + 1).__getnewargs__()] == ["+(a, 1)"]
 
 
+def test_reflected_and_or_keep_the_column_as_the_left_operand_as_pyspark():
+    # As PySpark's Column: True & col is (col AND true), so the names of the columns match.
+    from pyspark.sql import functions as F
+
+    def operands(column):
+        function = column.to_plan(None).unresolved_function
+        return function.function_name, [
+            a.unresolved_attribute.unparsed_identifier
+            if a.HasField("unresolved_attribute")
+            else a.literal.boolean
+            for a in function.arguments
+        ]
+
+    column = F.col("b")
+    assert operands(True & column) == ("and", ["b", True])
+    assert operands(True | column) == ("or", ["b", True])
+    assert operands(False & column) == ("and", ["b", False])
+    assert operands(False | column) == ("or", ["b", False])
+    assert operands(column & True) == ("and", ["b", True])
+    assert operands(column | True) == ("or", ["b", True])
+
+
 def test_column_with_alias_chain():
     """Test chaining column methods."""
     from pyspark.sql import functions as F

@@ -325,6 +325,15 @@ def test_udtfs_and_udfs_of_a_dataframe_or_the_session_raise_no_active_session_as
 
 
 
+def test_reflected_and_or_name_the_column_first_as_pyspark(session):
+    # As PySpark's Column: True & col and True | col name (col AND true) and (col OR true).
+    df = session.range(2).select((F.col("id") > 0).alias("b"))
+    assert df.select(True & F.col("b"), True | F.col("b")).columns == [
+        "(b AND true)",
+        "(b OR true)",
+    ]
+
+
 def test_renames_are_applied_in_their_order_as_pyspark(session):
     # As PySpark's withColumnsRenamed of a dict, whose renames the server applies in their order.
     df = session.range(10)
