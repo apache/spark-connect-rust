@@ -1275,8 +1275,8 @@ def test_foreach_foreach_partition_and_to_json_as_pyspark(session):
 def test_progress_handler_that_runs_queries_without_end_raises_recursion_error():
     # The unguarded handler of SPARK-61153 runs a query for each progress of the queries it
     # runs. Past the bound of nested callbacks, the query fails with a RecursionError, which the
-    # handler's exception goes out with, instead of the native stack overflowing and the process
-    # crashing (SIGSEGV). The outer query returns its result, as the handler's exceptions do.
+    # handlers' exceptions carry out of each execution, as PySpark's result loop does, instead of
+    # the native stack overflowing and the process crashing (SIGSEGV). The outer query raises it.
     # The queries nest only when the server sends an in-progress update of each one. A query that
     # is shorter than the report interval (2 s) gets one only when the server wakes for its result
     # before the execution ends, which a fast runner may not do. With an interval of 10 ms, the
@@ -1294,11 +1294,13 @@ spark = SparkSession.builder.remote(%r).getOrCreate()
 spark.conf.set("spark.connect.progress.reportInterval", "10ms")
 spark.registerProgressHandler(
     lambda **kw: spark.range(100).repartition(20).count() if not kw["done"] else None)
-print(spark.range(0, 2000, 1, 4).repartition(20).selectExpr("sum(id) as t").collect())
+try:
+    print(spark.range(0, 2000, 1, 4).repartition(20).selectExpr("sum(id) as t").collect())
+except RecursionError as error:
+    print("raised RecursionError", error)
 """ % remote], env=dict(os.environ, TZ="UTC"), capture_output=True, text=True, timeout=300)
     assert result.returncode == 0, result.stderr
-    assert "[Row(t=1999000)]" in result.stdout, result.stdout
-    assert "RecursionError" in result.stderr, (result.stdout, result.stderr)
+    assert "raised RecursionError" in result.stdout, (result.stdout, result.stderr)
 
 
 def test_progress_handler_runs_a_query_of_its_own_as_pyspark(session):
@@ -2576,6 +2578,53 @@ def test_collected_rows_behave_as_pyspark_rows(session):
     duplicate = session.range(1).selectExpr("1 AS a", "2 AS a").first()
     assert repr(duplicate) == "Row(a=1, a=2)" and duplicate.asDict() == {"a": 2}
     assert repr(pickle.loads(pickle.dumps(duplicate))) == "Row(a=1, a=2)"
+
+
+def test_a_progress_handler_that_raises_fails_the_execution_as_pyspark(session):
+    # As PySpark Connect's: the progress of an execution calls the handlers from its result loop,
+    # so the exception of a handler goes out of collect(), toPandas() and count() as it is. The
+    # handler is still called as done, and a handler that does not raise, or the session after the
+    # failure, works as before.
+    def slow():
+        # 500 ms a task, so that the server reports its progress at each report interval.
+        return session.sql(
+            "SELECT id, reflect('java.lang.Thread', 'sleep', 500L) AS s FROM range(0, 4, 1, 4)")
+
+    error = ValueError("a handler raises")
+    calls = []
+
+    def failing(*, stages, inflight_tasks, operation_id, done):
+        calls.append(done)
+        if not done:
+            raise error
+
+    session.conf.set("spark.connect.progress.reportInterval", "10ms")
+    try:
+        session.registerProgressHandler(failing)
+        try:
+            for run in (lambda df: df.collect(), lambda df: df.toPandas(), lambda df: df.count()):
+                calls.clear()
+                with pytest.raises(ValueError) as raised:
+                    run(slow())
+                assert raised.value is error
+                assert calls[-1] is True and False in calls
+        finally:
+            session.removeProgressHandler(failing)
+
+        calls.clear()
+
+        def recording(*, stages, inflight_tasks, operation_id, done):
+            calls.append(done)
+
+        session.registerProgressHandler(recording)
+        try:
+            assert len(slow().collect()) == 4
+            assert calls[-1] is True and False in calls
+        finally:
+            session.removeProgressHandler(recording)
+    finally:
+        session.conf.unset("spark.connect.progress.reportInterval")
+    assert session.range(3).count() == 3
 
 
 def test_grouped_data_are_represented_as_pyspark(session):

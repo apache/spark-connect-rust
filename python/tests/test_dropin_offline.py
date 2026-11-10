@@ -1832,8 +1832,9 @@ def test_progress_handlers_are_called_with_the_progress_of_executions_as_pyspark
     # As PySpark Connect's: a handler is registered once, and called with the keyword arguments
     # of ProgressHandler, of the StageInfo of each stage, for each progress of an execution that
     # has tasks, and once more, as done, when it ends; removing a handler that is not registered
-    # raises a ValueError; an exception of a handler goes to sys.unraisablehook; and
-    # SPARK_CONNECT_PROGRESS_BAR_ENABLED prints the progress bar.
+    # raises a ValueError; an exception of a handler fails the execution (see the test below), and
+    # its done call goes to sys.unraisablehook; and SPARK_CONNECT_PROGRESS_BAR_ENABLED prints the
+    # progress bar.
     import sys
 
     from pyspark.sql.connect.shell.progress import StageInfo
@@ -1868,7 +1869,8 @@ def test_progress_handlers_are_called_with_the_progress_of_executions_as_pyspark
         raise ZeroDivisionError("handler")
 
     spark.registerProgressHandler(failing)
-    spark.range(1).collect()
+    with pytest.raises(ZeroDivisionError):
+        spark.range(1).collect()
     assert unraisable and isinstance(unraisable[0].exc_value, ZeroDivisionError)
     spark.removeProgressHandler(failing)
 
@@ -6207,6 +6209,50 @@ def test_nullable_types():
     s = T.StructType([T.StructField("x", T.IntegerType(), False)])
     s_nullable = s.toNullable()
     assert s_nullable.fields[0].nullable is True
+
+
+def test_a_progress_handler_that_raises_fails_the_execution_as_pyspark(mock_connect, monkeypatch):
+    # As PySpark Connect's: the progress of an execution calls the handlers from its result loop,
+    # so the exception of a handler goes out of collect() as it is, and the handlers are not
+    # called for the rest of the execution; the handler is still called as done, and the
+    # exception does not go to sys.unraisablehook. The session works afterwards.
+    import sys
+
+    spark, service = mock_connect
+    # ExecutePlanResponse.execution_progress=18 -> one stage with tasks, as the test above.
+    stage = (varint_field(1, 7) + varint_field(2, 4) + varint_field(3, 1)
+             + varint_field(4, 1024) + varint_field(5, 0))
+    service.execute_payload = message_field(18, message_field(1, stage) + varint_field(2, 3))
+    unraisable = []
+    monkeypatch.setattr(sys, "unraisablehook", unraisable.append)
+    error = ValueError("a handler raises")
+    calls = []
+
+    def failing(**kwargs):
+        calls.append(kwargs["done"])
+        if not kwargs["done"]:
+            raise error
+
+    later_calls = []
+
+    def later(**kwargs):
+        later_calls.append(kwargs["done"])
+
+    spark.registerProgressHandler(failing)
+    spark.registerProgressHandler(later)
+    try:
+        with pytest.raises(ValueError) as raised:
+            spark.range(1).collect()
+    finally:
+        spark.removeProgressHandler(failing)
+        spark.removeProgressHandler(later)
+    assert raised.value is error
+    assert calls == [False, True]
+    assert later_calls == [True]
+    assert unraisable == []
+
+    service.execute_payload = b""
+    assert spark.range(1).collect() == []
 
 
 def test_when_and_otherwise_conditions():
@@ -11847,8 +11893,8 @@ def test_udf_profiles_are_collected_from_the_python_accumulators_as_pyspark(
 def test_progress_handler_that_runs_queries_without_end_is_bounded(mock_connect, monkeypatch):
     # A handler that runs a query for each progress of an execution nests the executions past
     # the bound of nested callbacks: the query past it fails with a RecursionError, which the
-    # handler's exception goes to sys.unraisablehook with, instead of the native stack
-    # overflowing, and the outer query returns.
+    # handlers' exceptions carry out of each execution, as PySpark's result loop does, instead of
+    # the native stack overflowing. The outer query raises it.
     import sys
 
     spark, service = mock_connect
@@ -11867,11 +11913,12 @@ def test_progress_handler_that_runs_queries_without_end_is_bounded(mock_connect,
 
     spark.registerProgressHandler(handler)
     try:
-        spark.range(1).collect()
+        with pytest.raises(RecursionError):
+            spark.range(1).collect()
     finally:
         spark.removeProgressHandler(handler)
     assert calls == [False, False, True, True]
-    assert [type(error.exc_value) for error in unraisable] == [RecursionError]
+    assert unraisable == []
 
 
 def test_schema_cache_cold_children_keep_independent_caches(mock_connect):
