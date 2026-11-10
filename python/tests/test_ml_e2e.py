@@ -171,6 +171,54 @@ def test_session_clients_release_and_close_as_pyspark(session):
     assert client.is_closed and other.is_stopped
 
 
+def test_models_whose_summary_keeps_their_transform_are_released_as_pyspark(session):
+    # As PySpark: the summary of a KMeans, BisectingKMeans or GaussianMixture model keeps
+    # model.transform(dataset), whose plan keeps the model. Python's garbage collector frees that
+    # cycle, and the model is released on the server, once nothing else uses the model; a
+    # DataFrame that still uses it keeps it.
+    import gc
+    import time
+
+    from pyspark.ml.clustering import BisectingKMeans, GaussianMixture, KMeans
+    from pyspark.ml.linalg import Vectors
+
+    def cached(model):
+        return model._java_obj.ref_id in "\n".join(session.client._get_ml_cache_info())
+
+    def released(ref_id):
+        for _ in range(50):
+            gc.collect()
+            if ref_id not in "\n".join(session.client._get_ml_cache_info()):
+                return True
+            time.sleep(0.1)
+        return False
+
+    data = session.createDataFrame(
+        [(Vectors.dense(x, y),) for x, y in [(0, 0), (0.1, 0.2), (9, 9), (9.1, 9.2)]],
+        ["features"])
+    for estimator in [KMeans(k=2, seed=1), BisectingKMeans(k=2, seed=1),
+                      GaussianMixture(k=2, seed=1, maxIter=3)]:
+        model = estimator.fit(data)
+        ref_id = model._java_obj.ref_id
+        assert cached(model) and model.summary.k == 2
+        del model
+        assert released(ref_id), type(estimator).__name__
+
+    model = KMeans(k=2, seed=1).fit(data)
+    ref_id = model._java_obj.ref_id
+    transformed = model.transform(data)
+    derived = model.summary.predictions.select("prediction")
+    del model
+    gc.collect()
+    assert ref_id in "\n".join(session.client._get_ml_cache_info())
+    assert len(transformed.collect()) == 4 and len(derived.collect()) == 4
+    del transformed
+    gc.collect()
+    assert len(derived.collect()) == 4
+    del derived
+    assert released(ref_id)
+
+
 def test_ml_feature_transformers_as_pyspark(session):
     from pyspark.ml.feature import IDF, HashingTF, MinMaxScaler, Tokenizer
 

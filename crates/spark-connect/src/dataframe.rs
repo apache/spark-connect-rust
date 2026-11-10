@@ -1139,6 +1139,52 @@ impl DataFrame {
         Ok(DataFrame::from_raw_relation(session, relation, owner))
     }
 
+    /// The owners of the relations built outside the core (`from_relation`) that this DataFrame
+    /// alone keeps alive: every `Arc` from its plan down to such an owner is held once, by this
+    /// DataFrame. A Python wrapper reports them to Python's garbage collector, so that a
+    /// reference cycle through the wrapper can be freed, as through a DataFrame of PySpark
+    /// Connect, a Python object: a `pyspark.ml` model's summary keeps a DataFrame whose plan
+    /// keeps the model. An owner that another plan shares is not returned, so that the collector
+    /// does not count a reference twice. Not a stable API.
+    #[doc(hidden)]
+    pub fn exclusive_relation_owners(&self) -> Vec<&(dyn std::any::Any + Send + Sync)> {
+        let mut owners = Vec::new();
+        if Arc::strong_count(&self.plan) != 1 {
+            return owners;
+        }
+        let mut pending: Vec<&LogicalPlan> = vec![self.plan.as_ref()];
+        while let Some(plan) = pending.pop() {
+            if let LogicalPlan::Raw {
+                owner: Some(owner), ..
+            } = plan
+            {
+                if Arc::strong_count(&owner.0) == 1 {
+                    owners.push(owner.0.as_ref());
+                }
+            }
+            pending.extend(
+                plan.inputs()
+                    .into_iter()
+                    .filter(|input| Arc::strong_count(input) == 1)
+                    .map(|input| input.as_ref()),
+            );
+        }
+        owners
+    }
+
+    /// Drop the plan of this DataFrame, which becomes an empty relation of its session: the
+    /// garbage collector of a Python wrapper breaks a reference cycle through the wrapper this
+    /// way, as it clears the references of a Python object. Not a stable API.
+    #[doc(hidden)]
+    pub fn clear_plan(&mut self) {
+        self.plan = Arc::new(LogicalPlan::Range {
+            start: 0,
+            end: 0,
+            step: 1,
+            num_partitions: None,
+        });
+    }
+
     /// The DataFrame of `relation`, as `from_relation`, of a relation without placeholders.
     fn from_raw_relation(
         session: SparkSession,
@@ -4582,6 +4628,44 @@ mod plan_construction_tests {
                 "{error}"
             );
         }
+    }
+
+    /// The owners of the relations built outside the core that only one DataFrame keeps are the
+    /// ones that a Python wrapper reports to the garbage collector: a relation that two plans
+    /// share is reported by neither, and a cleared plan keeps none.
+    #[test]
+    fn exclusive_relation_owners_are_those_only_this_dataframe_keeps() {
+        let spark = session();
+        let relation = proto::Relation {
+            common: None,
+            rel_type: Some(proto::relation::RelType::Sql(proto::Sql {
+                query: "SELECT 1 AS a".to_string(),
+                ..Default::default()
+            })),
+        };
+        let df = DataFrame::from_relation(spark.clone(), relation, Some(Arc::new(7u8))).unwrap();
+        let owners = df.exclusive_relation_owners();
+        assert_eq!(owners.len(), 1);
+        assert_eq!(owners[0].downcast_ref::<u8>(), Some(&7));
+
+        let derived = df.filter(crate::functions::col("a").gt(crate::column::lit(0)));
+        assert!(df.exclusive_relation_owners().is_empty());
+        assert!(derived.exclusive_relation_owners().is_empty());
+        drop(df);
+        assert_eq!(derived.exclusive_relation_owners().len(), 1);
+
+        let copy = derived.clone();
+        assert!(derived.exclusive_relation_owners().is_empty());
+        drop(copy);
+        let mut derived = derived;
+        assert_eq!(derived.exclusive_relation_owners().len(), 1);
+        derived.clear_plan();
+        assert!(derived.exclusive_relation_owners().is_empty());
+        assert!(spark
+            .range(3)
+            .unwrap()
+            .exclusive_relation_owners()
+            .is_empty());
     }
 
     #[test]
