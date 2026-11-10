@@ -2341,7 +2341,7 @@ impl DataFrame {
         let request = self.analyze_request(proto::analyze_plan_request::Analyze::IsLocal(
             proto::analyze_plan_request::IsLocal {
                 plan: Some(proto::Plan {
-                    op_type: Some(proto::plan::OpType::Root(self.relation())),
+                    op_type: Some(proto::plan::OpType::Root(self.relation()?)),
                 }),
             },
         ));
