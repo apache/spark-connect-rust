@@ -16664,6 +16664,18 @@ def test_grpc_errors_without_details_are_spark_connect_grpc_exceptions(mock_conn
     assert error.value.operation_id == _request_operation_id(service.execute_requests[-1])
 
 
+def test_a_failure_with_retry_info_is_retried_after_the_delay_of_the_server(mock_connect):
+    # As PySpark's DefaultPolicy: a failure that carries a RetryInfo is retried whatever its
+    # code, after the retry delay that the server asks for (300 ms, above the 50 ms base wait).
+    spark, service = mock_connect
+    service.retry_info_failures = [("RESOURCE_EXHAUSTED", 300)]
+    start = time.monotonic()
+    spark.range(3).count()  # the mock returns no rows, so only the success of the call is checked
+    assert time.monotonic() - start >= 0.3
+    assert len(service.execute_requests) == 2
+    assert not service.retry_info_failures
+
+
 def test_analyze_errors_without_details_are_spark_connect_grpc_exceptions(mock_connect):
     from pyspark.errors.exceptions.connect import SparkConnectGrpcException, StatusCode
 
