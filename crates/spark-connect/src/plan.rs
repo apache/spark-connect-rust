@@ -798,8 +798,9 @@ const STACK_PER_PLAN_LEVEL: usize = if cfg!(debug_assertions) {
 };
 
 /// Serialize a shared plan node for a request: the node and every node below it carry
-/// their stable plan IDs. A plan deeper than [`MAX_PLAN_DEPTH`] is a `RecursionError`, as in
-/// PySpark, instead of a request that overflows the stack of the thread.
+/// their stable plan IDs. A plan deeper than [`MAX_PLAN_DEPTH`], or with an expression deeper
+/// than [`crate::expression::MAX_EXPRESSION_DEPTH`], is a `RecursionError`, as in PySpark,
+/// instead of a request that overflows the stack of the thread.
 pub(crate) fn relation_with_ids(node: &Arc<LogicalPlan>, ids: &PlanIds) -> Result<proto::Relation> {
     let depth = node.depth();
     if depth > MAX_PLAN_DEPTH {
@@ -808,17 +809,20 @@ pub(crate) fn relation_with_ids(node: &Arc<LogicalPlan>, ids: &PlanIds) -> Resul
              a plan may be at most {MAX_PLAN_DEPTH} levels deep"
         )));
     }
+    // The levels of the expressions are counted on the thread that serializes them.
+    let serialize =
+        || crate::expression::with_expression_depth_bound(|| relation_of(node, Some(ids)));
     if depth <= INLINE_PLAN_DEPTH {
-        return Ok(relation_of(node, Some(ids)));
+        return serialize();
     }
     std::thread::scope(|scope| {
         let serializing = std::thread::Builder::new()
             .name("spark-connect-plan".to_string())
             .stack_size((1 << 20) + depth * STACK_PER_PLAN_LEVEL)
-            .spawn_scoped(scope, || relation_of(node, Some(ids)))
+            .spawn_scoped(scope, serialize)
             .map_err(|e| SparkError::connect_msg(format!("cannot serialize the plan: {e}")))?;
         match serializing.join() {
-            Ok(relation) => Ok(relation),
+            Ok(relation) => relation,
             Err(panic) => std::panic::resume_unwind(panic),
         }
     })
@@ -3263,6 +3267,51 @@ mod deep_plan_tests {
                     .contains(&format!("a plan of {levels} levels")),
                 "{error}"
             );
+        }
+    }
+
+    /// A projection of `id + 1` chained `levels` times, over a plan of `plan_levels` levels.
+    fn projection_of_additions(plan_levels: usize, levels: usize) -> Arc<LogicalPlan> {
+        let mut expr = Expression::column("id");
+        for _ in 0..levels {
+            expr = Expression::function(
+                "+",
+                vec![
+                    expr,
+                    Expression::literal(crate::expression::LiteralExpression::Integer(1)),
+                ],
+            );
+        }
+        Arc::new(LogicalPlan::Project {
+            input: chain(plan_levels),
+            columns: vec![crate::column::Column::new(expr)],
+        })
+    }
+
+    /// An expression deeper than `MAX_EXPRESSION_DEPTH` is a `RecursionError`, as PySpark's
+    /// serializer raises it, whether the plan is serialized on the calling thread or on one of
+    /// its own, and an expression at the bound is serialized; neither overflows a small stack.
+    #[test]
+    fn an_expression_past_the_bound_is_a_recursion_error_as_in_pyspark() {
+        use crate::expression::MAX_EXPRESSION_DEPTH;
+        for plan_levels in [1, 100] {
+            let at_bound = projection_of_additions(plan_levels, MAX_EXPRESSION_DEPTH - 1);
+            on_a_small_stack(|| relation_with_ids(&at_bound, &PlanIds::new()).unwrap());
+            for levels in [MAX_EXPRESSION_DEPTH, 100_000] {
+                let plan = projection_of_additions(plan_levels, levels);
+                let error =
+                    on_a_small_stack(|| relation_with_ids(&plan, &PlanIds::new()).unwrap_err());
+                assert_eq!(
+                    error.kind,
+                    SparkErrorKind::RecursionError,
+                    "{levels}: {error}"
+                );
+                assert!(
+                    error.message().contains("an expression may be at most"),
+                    "{error}"
+                );
+                on_a_small_stack(move || std::mem::drop(plan));
+            }
         }
     }
 

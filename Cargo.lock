@@ -68,6 +68,7 @@ dependencies = [
  "prost",
  "prost-types",
  "serde_json",
+ "stacker",
  "thiserror",
  "tokio",
  "uuid",
