@@ -4565,10 +4565,7 @@ def test_logistic_regression_fits_the_data_and_predicts_on_new_rows(session):
     # The native estimator targets Spark's JVM LogisticRegression. Compare the same
     # behavior with that estimator in official PySpark, rather than its deprecated
     # torch-based pyspark.ml.connect.classification implementation.
-    try:
-        from pyspark._pyspark import LogisticRegression
-    except ImportError:
-        from pyspark.ml.classification import LogisticRegression
+    LogisticRegression = _native_ml("LogisticRegression", "pyspark.ml.classification")
     from pyspark.ml.connect.functions import array_to_vector
 
     training = session.sql(
@@ -4602,10 +4599,7 @@ def test_linear_svc_releases_its_cached_model_once_the_last_owner_is_gone(sessio
 
     import pyspark.sql.connect.proto as pb2
 
-    try:
-        from pyspark._pyspark import LinearSVC
-    except ImportError:
-        from pyspark.ml.classification import LinearSVC
+    LinearSVC = _native_ml("LinearSVC", "pyspark.ml.classification")
     from pyspark.ml.connect.functions import array_to_vector
 
     # A session of its own: the ML cache is per session, so the models of the other tests,
@@ -4660,10 +4654,7 @@ def test_linear_svc_releases_its_cached_model_once_the_last_owner_is_gone(sessio
 
 @pytest.mark.parametrize("use_setters", [False, True], ids=["constructor", "setters"])
 def test_linear_svc_fits_the_labels_and_predicts_on_new_rows(session, use_setters):
-    try:
-        from pyspark._pyspark import LinearSVC
-    except ImportError:
-        from pyspark.ml.classification import LinearSVC
+    LinearSVC = _native_ml("LinearSVC", "pyspark.ml.classification")
     from pyspark.ml.connect.functions import array_to_vector
 
     training = session.sql(
@@ -4705,11 +4696,7 @@ def test_linear_svc_fits_the_labels_and_predicts_on_new_rows(session, use_setter
 
 
 def _linear_regression():
-    try:
-        from pyspark._pyspark import LinearRegression
-    except ImportError:
-        from pyspark.ml.regression import LinearRegression
-    return LinearRegression
+    return _native_ml("LinearRegression", "pyspark.ml.regression")
 
 
 @pytest.mark.parametrize("use_setters", [False, True], ids=["constructor", "setters"])
@@ -4771,12 +4758,23 @@ def test_linear_regression_weights_and_iterative_losses(session):
     assert robust.transform(held_out).first().prediction == pytest.approx(7, abs=0.2)
 
 
-def _kmeans():
+def _native_ml(name, reference_module):
+    # The native pyspark.ml.connect class of this client, which these cases are of: one that is
+    # missing fails them, rather than running them with the vendored pyspark.ml class. The
+    # reference client, which has no pyspark._pyspark, runs them with its JVM-backed class.
+    import importlib
+
     try:
-        from pyspark._pyspark import KMeans
+        import pyspark._pyspark  # noqa: F401
     except ImportError:
-        from pyspark.ml.clustering import KMeans
-    return KMeans
+        return getattr(importlib.import_module(reference_module), name)
+    native = getattr(importlib.import_module("pyspark.ml.connect"), name)
+    assert native.__module__.startswith("pyspark.ml.connect"), native
+    return native
+
+
+def _kmeans():
+    return _native_ml("KMeans", "pyspark.ml.clustering")
 
 
 def _assert_cluster_partition(actual, expected):
@@ -4873,11 +4871,7 @@ def test_higher_order_functions_take_columns_and_reject_lists_as_pyspark(session
 
 # These cases run unchanged against the native binding and the official JVM-backed estimator.
 def _random_forest_classifier():
-    try:
-        from pyspark.ml.connect.classification import RandomForestClassifier
-    except ImportError:
-        from pyspark.ml.classification import RandomForestClassifier
-    return RandomForestClassifier
+    return _native_ml("RandomForestClassifier", "pyspark.ml.classification")
 
 
 def _forest_vectors(session, sql, column="features"):

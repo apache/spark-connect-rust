@@ -20,6 +20,30 @@ microseconds. Downstream exhaustive matches on these public enums must handle
 the new variant. Rust interval map keys are stringified as raw microseconds;
 Python `timedelta` map keys are not yet supported.
 
+`BinaryClassificationEvaluator::set_score_col` and `score_col`, and the Python
+`scoreCol=` argument and `setScoreCol` of v4.2.0 are removed, without an alias:
+Spark's evaluator has no `scoreCol` param, so no value of it worked on the server.
+Use `set_raw_prediction_col` and `raw_prediction_col` (Python `rawPredictionCol=` and
+`setRawPredictionCol`), the column of raw prediction vectors that the evaluator scores.
+
+The native ML classes take a JVM `Int` param as an `i32`: `LogisticRegression::set_max_iter`,
+`LinearSVC::set_max_iter` and `LinearSVC::set_aggregation_depth` take an `i32`, and
+`LogisticRegression::max_iter` returns one. Every native estimator has a getter of each
+of its params (`KMeans::k`, `RandomForestClassifier::num_trees`, ...), which reads its
+`Params`: the value that is set, else Spark's default (`None` for `seed`, `weight_col` and
+`thresholds`). The fields of `LogisticRegressionModel`, `StringIndexerModel` and
+`MaxAbsScalerModel` are private, as those of the other fitted models: use
+`Transformer::operator` and `Transformer::params`, and `LogisticRegressionModel::feature_col`,
+`label_col` and `prediction_col`. `VectorAssembler::input_cols` and `Pipeline::stages`
+return a `Vec<String>`.
+
+`Params::set_param_int32`, `set_param_int_narrow`, `set_param_string_array` and
+`set_param_double_array` are public, with the new `Params::clear_param`, and the evaluators
+have a `params_mut`, as estimators and transformers do. Seeds, `CrossValidator::set_seed`'s
+included, are sent as the narrowest integer literal that holds them, as PySpark sends a Python
+int. `MlOperator::new` makes a uid of the simple class name and 12 hex digits
+(`KMeans_1a2b3c4d5e6f`), as PySpark and Spark do, instead of a bare UUID.
+
 `DataFrame::fillna_value` and `DataFrame::fillna_map` return a `Result`, as
 `dropna` does. As PySpark's `fillna`, they take a bool, an integer, a float or a
 string (an integer is sent as a long, a float as a double), and reject other values
@@ -135,13 +159,31 @@ executed later. When the last of them is dropped, the cached model is deleted on
 server, as `pyspark.ml` does, without waiting for the server; a fit that is dropped
 at once leaves nothing cached.
 
+The Rust `transform` of a fitted model rejects a DataFrame of another session. In
+Python, as with PySpark, it returns a DataFrame whose analysis or execution fails
+on the server of that session with `CONNECT_ML.CACHE_INVALID`.
+
+The Python classes of the native estimators, transformers and evaluators of
+`pyspark.ml.connect` take their params as PySpark's do. The constructors are
+keyword-only, raising PySpark's `TypeError`, except `MulticlassClassificationEvaluator`,
+which takes `metricName`, `labelCol` and `predictionCol` by position as well, as
+PySpark's does. Each value is converted by the `TypeConverters` of its param in
+PySpark (an integral float for an int param, for example), and a value that the
+converter rejects raises its `TypeError`. A fit, transform or evaluate sends only the
+params that the constructor or a setter set, so the server applies its defaults to
+the others, as with PySpark. An int beyond a long raises PySpark's
+`VALUE_NOT_BETWEEN` at the next fit. `None` leaves a param unset, so the server's
+default applies; PySpark sends a null, which the server rejects.
+
 ## Native RandomForestClassifier
 
 `spark_connect::ml::RandomForestClassifier` trains Spark's JVM random forest
 classifier through Connect with ML vector features and contiguous numeric class
 labels starting at zero. Rust builder setters cover all 22 PySpark constructor
 parameters, including `pruneTree` (Spark 4.3.0), plus class thresholds. Unset
-parameters use Spark's defaults; set a seed for reproducible sampling.
+parameters use Spark's defaults. Without a seed, the sampling uses Spark's default
+seed (the hash of the class name), as with PySpark, so fits are reproducible either
+way.
 
 The native Python binding is available as
 `pyspark.ml.connect.classification.RandomForestClassifier` and
@@ -160,8 +202,9 @@ single-vector prediction and persistence are not exposed by this native addition
 `spark_connect::ml::KMeans` fits Spark's JVM K-means estimator with ML vector
 features through the Connect ML protocol. Rust builder setters cover all 12
 constructor parameters, including `set_k`, `set_seed`, `set_weight_col`,
-`set_distance_measure` and `set_solver`. Unset parameters use Spark's defaults;
-set a seed explicitly for reproducible initialization. Cluster numbers are
+`set_distance_measure` and `set_solver`. Unset parameters use Spark's defaults.
+Without a seed, the initialization uses Spark's default seed (the hash of the class
+name), as with PySpark, so fits are reproducible either way. Cluster numbers are
 arbitrary: compare membership rather than relying on particular numeric labels.
 
 The native Python binding is available as `pyspark.ml.connect.clustering.KMeans`

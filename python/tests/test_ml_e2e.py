@@ -219,6 +219,96 @@ def test_models_whose_summary_keeps_their_transform_are_released_as_pyspark(sess
     assert released(ref_id)
 
 
+def _native_estimators():
+    # Every native pyspark.ml.connect estimator, with the class of the model that the server
+    # caches for its fit, and data that it fits.
+    from pyspark.ml.connect import (
+        KMeans,
+        LinearRegression,
+        LinearSVC,
+        LogisticRegression,
+        MaxAbsScaler,
+        RandomForestClassifier,
+        StandardScaler,
+        StringIndexer,
+    )
+
+    ml = "org.apache.spark.ml."
+    return [
+        (KMeans(k=2, seed=1), ml + "clustering.KMeansModel"),
+        (LinearSVC(maxIter=2), ml + "classification.LinearSVCModel"),
+        (LinearRegression(maxIter=2), ml + "regression.LinearRegressionModel"),
+        (LogisticRegression(maxIter=2), ml + "classification.LogisticRegressionModel"),
+        (RandomForestClassifier(numTrees=2), ml + "classification.RandomForestClassificationModel"),
+        (StandardScaler(inputCol="features", outputCol="o"), ml + "feature.StandardScalerModel"),
+        (MaxAbsScaler(inputCol="features", outputCol="o"), ml + "feature.MaxAbsScalerModel"),
+        (StringIndexer(inputCol="s", outputCol="o"), ml + "feature.StringIndexerModel"),
+    ]
+
+
+def _native_training(session):
+    from pyspark.ml.linalg import Vectors
+
+    rows = [(float(i % 2), Vectors.dense([float(i), float(i % 3)]), "ab"[i % 2]) for i in range(8)]
+    return session.createDataFrame(rows, ["label", "features", "s"])
+
+
+def test_native_models_are_released_once_their_last_owner_is_gone_as_pyspark(session):
+    # As pyspark.ml's RemoteModelRef: the server caches the model of a fit of every native
+    # pyspark.ml.connect estimator while the model, or a DataFrame that it transformed, is
+    # alive, and deletes it once the last of them is gone.
+    import time
+
+    def cached(model_class):
+        infos = session.client._get_ml_cache_info()
+        return sum(f'"class":"{model_class}"' in info for info in infos)
+
+    def wait_for(model_class, expected):
+        # The release is sent without waiting for the server, so poll for it to land.
+        deadline = time.time() + 30
+        while cached(model_class) != expected and time.time() < deadline:
+            gc.collect()
+            time.sleep(0.05)
+        return cached(model_class)
+
+    data = _native_training(session)
+    for estimator, model_class in _native_estimators():
+        assert cached(model_class) == 0, model_class
+        model = estimator.fit(data)
+        assert cached(model_class) == 1, model_class
+        del model
+        assert wait_for(model_class, 0) == 0, model_class
+
+        model = estimator.fit(data)
+        lazy = model.transform(data)
+        del model
+        gc.collect()
+        assert cached(model_class) == 1, model_class
+        assert len(lazy.collect()) == 8
+        del lazy
+        assert wait_for(model_class, 0) == 0, model_class
+
+
+def test_native_models_transform_a_dataframe_of_another_session_as_pyspark(session):
+    # As PySpark: the transform of a DataFrame of another session is a DataFrame, whose
+    # analysis and execution fail on the server of that session, which caches no such model,
+    # with CONNECT_ML.CACHE_INVALID.
+    from pyspark.errors.exceptions.connect import SparkException
+
+    data = _native_training(session)
+    other = session.newSession()
+    try:
+        held_out = _native_training(other)
+        for estimator, model_class in _native_estimators():
+            transformed = estimator.fit(data).transform(held_out)
+            for run in (lambda: transformed.columns, transformed.collect):
+                with pytest.raises(SparkException) as error:
+                    run()
+                assert error.value.getCondition() == "CONNECT_ML.CACHE_INVALID", model_class
+    finally:
+        other.stop()
+
+
 def test_ml_feature_transformers_as_pyspark(session):
     from pyspark.ml.feature import IDF, HashingTF, MinMaxScaler, Tokenizer
 
