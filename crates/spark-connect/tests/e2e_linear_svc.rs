@@ -76,7 +76,7 @@ fn linear_svc_fits_separate_models_and_predicts_on_unseen_data() {
         .unwrap();
     let object_id = |model: &dyn spark_connect::ml::Model| {
         let spark_connect_proto::ml_relation::MlType::Transform(t) =
-            model.build_ml_relation(&held_out).ml_type.unwrap()
+            model.build_ml_relation(&held_out).unwrap().ml_type.unwrap()
         else {
             panic!("transform")
         };

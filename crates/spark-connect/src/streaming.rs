@@ -431,7 +431,7 @@ impl DataStreamWriter {
         write_op.input = Some(crate::plan::relation_with_ids(
             &self.plan,
             self.session.plan_ids(),
-        ));
+        )?);
 
         if let Some(fmt) = &self.format {
             write_op.format = fmt.clone();

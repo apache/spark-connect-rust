@@ -656,9 +656,10 @@ impl PyDataFrame {
     }
 
     /// The bytes of the relation of this DataFrame as it is sent, for the plan of `_plan`.
-    fn _relation_bytes<'py>(&self, py: Python<'py>) -> Bound<'py, pyo3::types::PyBytes> {
+    fn _relation_bytes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyBytes>> {
         use prost::Message;
-        pyo3::types::PyBytes::new(py, &self.dataframe.to_relation().encode_to_vec())
+        let relation = self.dataframe.to_relation().to_pyerr()?;
+        Ok(pyo3::types::PyBytes::new(py, &relation.encode_to_vec()))
     }
 
     /// The bytes of the placeholder of the relation of this DataFrame, which the plan of `_plan`
@@ -678,7 +679,7 @@ impl PyDataFrame {
         let this = slf.borrow();
         py.import("pyspark.sql.connect.dataframe")?
             .getattr("_reduce_dataframe")?
-            .call1((this.spark_session(py)?, this._relation_bytes(py)))
+            .call1((this.spark_session(py)?, this._relation_bytes(py)?))
     }
 
     /// The DataFrame of `relation`, the bytes of a relation of `session`, as a pickled DataFrame

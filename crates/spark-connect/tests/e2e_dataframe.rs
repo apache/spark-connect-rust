@@ -600,7 +600,7 @@ fn a_dropped_checkpoint_releases_its_relation_on_the_server() {
     let s = session();
     // checkpoint() needs a checkpoint directory, which the test server does not set.
     let checkpoint = s.range(5).unwrap().local_checkpoint().unwrap();
-    let relation = checkpoint.to_relation();
+    let relation = checkpoint.to_relation().unwrap();
     assert_eq!(checkpoint.count().unwrap(), 5);
     drop(checkpoint);
     wait_until_relation_is_released(&s, &relation);
@@ -615,7 +615,7 @@ fn a_checkpoint_stays_while_a_dataframe_derived_from_it_is_alive() {
     }
     let s = session();
     let checkpoint = s.range(5).unwrap().local_checkpoint().unwrap();
-    let relation = checkpoint.to_relation();
+    let relation = checkpoint.to_relation().unwrap();
     let derived = checkpoint.filter(col("id").gt(lit(1)));
     drop(checkpoint);
     assert_eq!(derived.count().unwrap(), 3);

@@ -310,17 +310,20 @@ pub trait Transformer: Send + Sync {
     }
 
     /// Build the MlRelation for this transformation.
-    fn build_ml_relation(&self, input: &DataFrame) -> proto::MlRelation {
+    fn build_ml_relation(
+        &self,
+        input: &DataFrame,
+    ) -> spark_connect_core::error::Result<proto::MlRelation> {
         let mut transform = proto::ml_relation::Transform::default();
         transform.operator = Some(proto::ml_relation::transform::Operator::Transformer(
             self.operator().to_proto(),
         ));
-        transform.input = Some(Box::new(input.relation()));
+        transform.input = Some(Box::new(input.relation()?));
         transform.params = Some(self.params().to_proto());
 
         let mut ml_relation = proto::MlRelation::default();
         ml_relation.ml_type = Some(proto::ml_relation::MlType::Transform(Box::new(transform)));
-        ml_relation
+        Ok(ml_relation)
     }
 }
 
@@ -357,7 +360,7 @@ fn evaluate_via_command(
     params: &Params,
     df: &DataFrame,
 ) -> spark_connect_core::error::Result<f64> {
-    let dataset = df.relation();
+    let dataset = df.relation()?;
     let evaluate = proto::ml_command::Evaluate {
         evaluator: Some(operator.to_proto()),
         params: Some(params.to_proto()),
@@ -511,7 +514,10 @@ impl Transformer for StandardScalerModel {
         &mut self.params
     }
 
-    fn build_ml_relation(&self, input: &DataFrame) -> proto::MlRelation {
+    fn build_ml_relation(
+        &self,
+        input: &DataFrame,
+    ) -> spark_connect_core::error::Result<proto::MlRelation> {
         self.cached.build_ml_relation(input, &self.params)
     }
 
@@ -595,7 +601,7 @@ impl Transformer for VectorAssembler {
     }
 
     fn transform_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<DataFrame> {
-        let ml_relation = self.build_ml_relation(df);
+        let ml_relation = self.build_ml_relation(df)?;
         let mut relation = proto::Relation::default();
         relation.common = Some(proto::RelationCommon::default());
         relation.rel_type = Some(proto::relation::RelType::MlRelation(Box::new(ml_relation)));
@@ -724,7 +730,10 @@ impl Transformer for StringIndexerModel {
         &mut self.params
     }
 
-    fn build_ml_relation(&self, input: &DataFrame) -> proto::MlRelation {
+    fn build_ml_relation(
+        &self,
+        input: &DataFrame,
+    ) -> spark_connect_core::error::Result<proto::MlRelation> {
         self.cached.build_ml_relation(input, &self.params)
     }
 
@@ -855,7 +864,10 @@ impl Transformer for MaxAbsScalerModel {
         &mut self.params
     }
 
-    fn build_ml_relation(&self, input: &DataFrame) -> proto::MlRelation {
+    fn build_ml_relation(
+        &self,
+        input: &DataFrame,
+    ) -> spark_connect_core::error::Result<proto::MlRelation> {
         self.cached.build_ml_relation(input, &self.params)
     }
 
@@ -880,7 +892,7 @@ fn fit_via_command(
         command: Some(proto::ml_command::Command::Fit(proto::ml_command::Fit {
             estimator: Some(operator.to_proto()),
             params: Some(params.to_proto()),
-            dataset: Some(df.relation()),
+            dataset: Some(df.relation()?),
         })),
     };
     let responses = crate::dataframe::execute_command_collect(
@@ -953,19 +965,23 @@ impl CachedModel {
         }
     }
 
-    fn build_ml_relation(&self, df: &DataFrame, params: &Params) -> proto::MlRelation {
-        proto::MlRelation {
+    fn build_ml_relation(
+        &self,
+        df: &DataFrame,
+        params: &Params,
+    ) -> spark_connect_core::error::Result<proto::MlRelation> {
+        Ok(proto::MlRelation {
             ml_type: Some(proto::ml_relation::MlType::Transform(Box::new(
                 proto::ml_relation::Transform {
                     operator: Some(proto::ml_relation::transform::Operator::ObjRef(
                         self.0.model_ref.clone(),
                     )),
-                    input: Some(Box::new(df.relation())),
+                    input: Some(Box::new(df.relation()?)),
                     params: Some(params.to_proto()),
                 },
             ))),
             ..Default::default()
-        }
+        })
     }
 
     fn transform(
@@ -980,7 +996,7 @@ impl CachedModel {
         }
         let relation = proto::Relation {
             rel_type: Some(proto::relation::RelType::MlRelation(Box::new(
-                self.build_ml_relation(df, params),
+                self.build_ml_relation(df, params)?,
             ))),
             ..Default::default()
         };
@@ -1145,7 +1161,10 @@ impl Transformer for LogisticRegressionModel {
         &mut self.params
     }
 
-    fn build_ml_relation(&self, input: &DataFrame) -> proto::MlRelation {
+    fn build_ml_relation(
+        &self,
+        input: &DataFrame,
+    ) -> spark_connect_core::error::Result<proto::MlRelation> {
         self.cached.build_ml_relation(input, &self.params)
     }
 
@@ -1328,7 +1347,10 @@ impl Transformer for LinearSVCModel {
         &mut self.params
     }
 
-    fn build_ml_relation(&self, input: &DataFrame) -> proto::MlRelation {
+    fn build_ml_relation(
+        &self,
+        input: &DataFrame,
+    ) -> spark_connect_core::error::Result<proto::MlRelation> {
         self.cached.build_ml_relation(input, &self.params)
     }
 
@@ -1522,7 +1544,10 @@ impl Transformer for LinearRegressionModel {
         &mut self.params
     }
 
-    fn build_ml_relation(&self, input: &DataFrame) -> proto::MlRelation {
+    fn build_ml_relation(
+        &self,
+        input: &DataFrame,
+    ) -> spark_connect_core::error::Result<proto::MlRelation> {
         self.cached.build_ml_relation(input, &self.params)
     }
 
@@ -1703,7 +1728,10 @@ impl Transformer for KMeansModel {
         &mut self.params
     }
 
-    fn build_ml_relation(&self, input: &DataFrame) -> proto::MlRelation {
+    fn build_ml_relation(
+        &self,
+        input: &DataFrame,
+    ) -> spark_connect_core::error::Result<proto::MlRelation> {
         self.cached.build_ml_relation(input, &self.params)
     }
 
@@ -1960,7 +1988,7 @@ impl Transformer for PipelineModel {
     }
 
     fn transform_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<DataFrame> {
-        let ml_relation = self.build_ml_relation(df);
+        let ml_relation = self.build_ml_relation(df)?;
         let mut relation = proto::Relation::default();
         relation.common = Some(proto::RelationCommon::default());
         relation.rel_type = Some(proto::relation::RelType::MlRelation(Box::new(ml_relation)));
@@ -2151,7 +2179,7 @@ impl Transformer for CrossValidatorModel {
         &mut self.params
     }
     fn transform_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<DataFrame> {
-        let ml_relation = self.build_ml_relation(df);
+        let ml_relation = self.build_ml_relation(df)?;
         let mut relation = proto::Relation::default();
         relation.common = Some(proto::RelationCommon::default());
         relation.rel_type = Some(proto::relation::RelType::MlRelation(Box::new(ml_relation)));
@@ -2687,7 +2715,7 @@ mod tests {
         assert_eq!(model.operator.op_type, OperatorType::Model);
         let data = session.range(3).unwrap();
         let transformed = model.transform(&data).unwrap();
-        let relation = transformed.relation();
+        let relation = transformed.relation().unwrap();
         let Some(proto::relation::RelType::MlRelation(ml)) = relation.rel_type else {
             panic!("expected an ML relation");
         };
@@ -2707,7 +2735,7 @@ mod tests {
             .unwrap()
             .params
             .contains_key("predictionCol"));
-        assert_eq!(*transform.input.unwrap(), data.relation());
+        assert_eq!(*transform.input.unwrap(), data.relation().unwrap());
         let _ = model.clone_box();
     }
 
@@ -2802,7 +2830,7 @@ mod tests {
         assert_eq!(model.operator().op_type, OperatorType::Model);
         let df = session.range(2).unwrap();
         let proto::ml_relation::MlType::Transform(transform) =
-            model.build_ml_relation(&df).ml_type.unwrap()
+            model.build_ml_relation(&df).unwrap().ml_type.unwrap()
         else {
             panic!("expected transform");
         };
@@ -2814,7 +2842,7 @@ mod tests {
                 },
             ))
         );
-        assert_eq!(*transform.input.unwrap(), df.relation());
+        assert_eq!(*transform.input.unwrap(), df.relation().unwrap());
         assert!(model
             .transform(&session.new_session().range(2).unwrap())
             .is_err());
@@ -2873,7 +2901,7 @@ mod tests {
         assert_eq!(model.operator().op_type, OperatorType::Model);
         let df = session.range(2).unwrap();
         let proto::ml_relation::MlType::Transform(t) =
-            model.build_ml_relation(&df).ml_type.unwrap()
+            model.build_ml_relation(&df).unwrap().ml_type.unwrap()
         else {
             panic!("transform")
         };
@@ -2885,7 +2913,7 @@ mod tests {
                 }
             ))
         );
-        assert_eq!(*t.input.unwrap(), df.relation());
+        assert_eq!(*t.input.unwrap(), df.relation().unwrap());
         assert!(t.params.unwrap().params.contains_key("predictionCol"));
         assert!(model
             .transform(&session.new_session().range(2).unwrap())
@@ -2943,7 +2971,7 @@ mod tests {
         assert_eq!(fallback.operator().uid, estimator.operator().uid);
         let df = session.range(2).unwrap();
         let proto::ml_relation::MlType::Transform(t) =
-            model.build_ml_relation(&df).ml_type.unwrap()
+            model.build_ml_relation(&df).unwrap().ml_type.unwrap()
         else {
             panic!("transform")
         };
@@ -2955,7 +2983,7 @@ mod tests {
                 }
             ))
         );
-        assert_eq!(*t.input.unwrap(), df.relation());
+        assert_eq!(*t.input.unwrap(), df.relation().unwrap());
         assert_eq!(t.params.unwrap(), estimator.params().to_proto());
         assert!(model
             .transform(&session.new_session().range(2).unwrap())
