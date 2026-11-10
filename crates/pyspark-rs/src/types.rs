@@ -2509,22 +2509,6 @@ impl PyStructType {
                 data_type.clone()
             };
             let dt = py_to_data_type(&type_object)?;
-            // As PySpark's `_parse_datatype_json_value`, a name of a type that has no JSON name in
-            // PySpark (a nanosecond timestamp) is not a data type.
-            if data_type.is_instance_of::<pyo3::types::PyString>()
-                && matches!(
-                    dt,
-                    DataType::TimestampNtzNanos { .. } | DataType::TimestampLtzNanos { .. }
-                )
-            {
-                let name: String = data_type.extract()?;
-                return Err(crate::column::raise_pyspark(
-                    py,
-                    "PySparkValueError",
-                    "CANNOT_PARSE_DATATYPE",
-                    &[("msg", &name)],
-                ));
-            }
             let md = match metadata {
                 Some(d) => py_metadata_to_map(py, d)?,
                 None => BTreeMap::new(),
@@ -2932,8 +2916,9 @@ impl PyTimeType {
 
 /// Spark's `TimestampNTZNanosType(precision)` (precision 7..=9; default 9). PySpark 4.3.0 has no
 /// Python class for the nanosecond timestamp types, but the server reports them in
-/// schemas, so they materialize as this class instead of being mapped to a lossy type.
-#[pyclass(name = "TimestampNTZNanosType", module = "pyspark.sql.types", extends = PyDatetimeType)]
+/// schemas, so they materialize as this class instead of being mapped to a lossy type. As
+/// PySpark has no such name, it is not one of `pyspark.sql.types`.
+#[pyclass(name = "TimestampNTZNanosType", module = "pyspark._pyspark", extends = PyDatetimeType)]
 pub struct PyTimestampNTZNanosType {
     pub precision: i32,
 }
@@ -3011,8 +2996,9 @@ impl PyTimestampNTZNanosType {
 
 /// Spark's `TimestampLTZNanosType(precision)` (precision 7..=9; default 9). PySpark 4.3.0 has no
 /// Python class for the nanosecond timestamp types, but the server reports them in
-/// schemas, so they materialize as this class instead of being mapped to a lossy type.
-#[pyclass(name = "TimestampLTZNanosType", module = "pyspark.sql.types", extends = PyDatetimeType)]
+/// schemas, so they materialize as this class instead of being mapped to a lossy type. As
+/// PySpark has no such name, it is not one of `pyspark.sql.types`.
+#[pyclass(name = "TimestampLTZNanosType", module = "pyspark._pyspark", extends = PyDatetimeType)]
 pub struct PyTimestampLTZNanosType {
     pub precision: i32,
 }
@@ -3572,11 +3558,18 @@ pub(crate) fn spatial_type_srid(srid: &Bound<'_, PyAny>, geographic: bool) -> Py
 /// `"geography(OGC:CRS84, SPHERICAL)"`, or a nested struct/array/map object) with the core
 /// grammar, into its concrete Python type object. `pyspark.sql.types._parse_datatype_json_value`
 /// delegates its atomic and parameterized string forms here, so the drop-in keeps one JSON
-/// grammar (the core's) instead of a second parser in Python.
+/// grammar (the core's) instead of a second parser in Python. A nanosecond timestamp
+/// (`timestamp_ntz(9)`) is not a JSON name of PySpark, whose parser has no such type: a
+/// `ValueError`, which the shim raises as `CANNOT_PARSE_DATATYPE`.
 #[pyfunction]
 pub fn parse_datatype_json(py: Python<'_>, json: &str) -> PyResult<Py<PyAny>> {
     let dt = DataType::from_json_str(json)
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+    if crate::dataframe::nanosecond_timestamp_text(&dt).is_some() {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            "not a data type of PySpark: {json}"
+        )));
+    }
     data_type_to_py(py, &dt)
 }
 

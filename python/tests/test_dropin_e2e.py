@@ -4323,6 +4323,51 @@ def test_samples_and_splits_take_a_seed_of_the_client_as_pyspark(session):
     assert df.withMetadata("id", metadata).schema["id"].metadata == metadata
 
 
+def test_answers_that_pyspark_keeps_are_asked_once_per_dataframe_as_pyspark(session):
+    # As PySpark's isStreaming (a cached_property), semanticHash, isEmpty and inputFiles
+    # (functools.cache): a DataFrame keeps the server's first answer, so a redefined view or a
+    # new row does not change it, and the answers stay after the session stopped.
+    table = f"cached_answers_{os.getpid()}"
+    session.sql(f"DROP TABLE IF EXISTS {table}")
+    session.sql(f"CREATE TABLE {table} (id BIGINT) USING parquet")
+    try:
+        rows = session.table(table)
+        assert rows.isEmpty() is True
+        session.sql(f"INSERT INTO {table} VALUES (1)")
+        assert rows.isEmpty() is True and session.table(table).isEmpty() is False
+    finally:
+        session.sql(f"DROP TABLE IF EXISTS {table}")
+    session.range(1).createOrReplaceTempView("cached_answers_view")
+    view = session.table("cached_answers_view")
+    is_streaming, semantic_hash, input_files = (
+        view.isStreaming, view.semanticHash(), view.inputFiles())
+    session.readStream.format("rate").load().createOrReplaceTempView("cached_answers_view")
+    assert session.table("cached_answers_view").isStreaming is True
+    assert (view.isStreaming, view.semanticHash(), view.inputFiles()) == (
+        False, semantic_hash, input_files)
+    session.catalog.dropTempView("cached_answers_view")
+    session.stop()
+    assert (view.isStreaming, view.semanticHash(), view.inputFiles()) == (
+        is_streaming, semantic_hash, input_files)
+
+
+def test_an_observation_of_a_year_month_interval_fails_the_action_as_pyspark(session):
+    # As PySpark's client, which converts the metrics of an Observation of the plan as they
+    # arrive: a year-month interval, which LiteralExpression._to_value does not convert, raises
+    # UNSUPPORTED_LITERAL from the action, and the Observation has no metrics.
+    from pyspark.errors import PySparkTypeError
+    from pyspark.sql import Observation
+
+    observation = Observation("year_month_interval_metric")
+    interval = F.make_ym_interval(F.lit(1), F.col("id").cast("int"))
+    df = session.range(3).observe(observation, F.max(interval).alias("m"))
+    with pytest.raises(PySparkTypeError) as error:
+        df.count()
+    assert error.value.getCondition() == "UNSUPPORTED_LITERAL"
+    assert error.value.getMessageParameters() == {"literal": "year_month_interval: 14\n"}
+    assert observation.get == {}
+
+
 def test_sample_split_and_sample_by_without_a_seed_follow_python_random_as_pyspark(
         session, tmp_path):
     # As PySpark's: without a seed, sample, randomSplit and sampleBy draw one from Python's

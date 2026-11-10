@@ -61,6 +61,26 @@ pub struct PyDataFrame {
     /// dictionary, which can start a collection, before PyO3 writes the value. Until then the
     /// memory is zeroed, so this flag is false and `__traverse__` reads nothing else.
     gc_ready: std::sync::atomic::AtomicBool,
+    /// The answers that PySpark keeps for each DataFrame once it has them, `isStreaming` (a
+    /// `cached_property`), `semanticHash`, `isEmpty` and `inputFiles` (`functools.cache`): later
+    /// calls do not ask again, also after the session stopped. (`isLocal` is cached in the core.)
+    is_streaming: std::sync::OnceLock<bool>,
+    semantic_hash: std::sync::OnceLock<i32>,
+    is_empty: std::sync::OnceLock<bool>,
+    input_files: std::sync::OnceLock<Vec<String>>,
+}
+
+/// The answer kept in `cell`, else that of `ask`, which is kept unless it fails, as
+/// `functools.cache` keeps the result of a call.
+fn cached<T: Clone>(
+    cell: &std::sync::OnceLock<T>,
+    ask: impl FnOnce() -> PyResult<T>,
+) -> PyResult<T> {
+    if let Some(value) = cell.get() {
+        return Ok(value.clone());
+    }
+    let value = ask()?;
+    Ok(cell.get_or_init(|| value).clone())
 }
 
 /// The settings of the eager evaluation of `__repr__` and `_repr_html_`.
@@ -216,6 +236,10 @@ impl PyDataFrame {
             dataframe,
             support_repr_html: std::sync::atomic::AtomicBool::new(false),
             gc_ready: std::sync::atomic::AtomicBool::new(true),
+            is_streaming: std::sync::OnceLock::new(),
+            semantic_hash: std::sync::OnceLock::new(),
+            is_empty: std::sync::OnceLock::new(),
+            input_files: std::sync::OnceLock::new(),
         }
     }
 
@@ -1488,11 +1512,13 @@ impl PyDataFrame {
             .to_pyerr()
     }
 
-    /// The server-side hash of this DataFrame's logical plan.
+    /// The server-side hash of this DataFrame's logical plan, asked once, as PySpark's.
     #[pyo3(name = "semanticHash")]
     fn semantic_hash(&self, py: Python<'_>) -> PyResult<i32> {
-        py.detach(|| self.dataframe.semantic_hash().map_err(Box::new))
-            .to_pyerr()
+        cached(&self.semantic_hash, || {
+            py.detach(|| self.dataframe.semantic_hash().map_err(Box::new))
+                .to_pyerr()
+        })
     }
 
     /// Sort within each partition.
@@ -1765,18 +1791,8 @@ impl PyDataFrame {
                 }
             }
         }
-        if let Ok(observation) =
-            observation.extract::<PyRef<'_, crate::observation::PyObservation>>()
-        {
-            let observation = &observation.inner;
-            return py
-                .detach(|| {
-                    self.dataframe
-                        .observe_with(observation, columns)
-                        .map_err(Box::new)
-                })
-                .to_pyerr()
-                .map(PyDataFrame::new);
+        if let Ok(observation) = observation.cast::<crate::observation::PyObservation>() {
+            return crate::observation::observe(py, &self.dataframe, observation, columns);
         }
         if observation.is_instance_of::<pyo3::types::PyString>() {
             let name: String = observation.extract()?;
@@ -2013,11 +2029,13 @@ impl PyDataFrame {
             .collect())
     }
 
-    /// The list of files that make up this DataFrame.
+    /// The list of files that make up this DataFrame, asked once, as PySpark's.
     #[pyo3(name = "inputFiles")]
     fn input_files(&self, py: Python<'_>) -> PyResult<Vec<String>> {
-        py.detach(|| self.dataframe.input_files().map_err(Box::new))
-            .to_pyerr()
+        cached(&self.input_files, || {
+            py.detach(|| self.dataframe.input_files().map_err(Box::new))
+                .to_pyerr()
+        })
     }
 
     /// Whether the server answers that this DataFrame is local (a local relation).
@@ -2035,12 +2053,15 @@ impl PyDataFrame {
             .to_pyerr()
     }
 
-    /// Whether this DataFrame contains one or more sources that continuously return data.
+    /// Whether this DataFrame contains one or more sources that continuously return data, asked
+    /// once, as PySpark's.
     #[pyo3(name = "isStreaming")]
     #[getter]
     fn is_streaming(&self, py: Python<'_>) -> PyResult<bool> {
-        py.detach(|| self.dataframe.is_streaming().map_err(Box::new))
-            .to_pyerr()
+        cached(&self.is_streaming, || {
+            py.detach(|| self.dataframe.is_streaming().map_err(Box::new))
+                .to_pyerr()
+        })
     }
 
     /// The storage level currently in use for this DataFrame.
@@ -2135,7 +2156,15 @@ impl PyDataFrame {
             call_args.push(a.unbind());
         }
         let tuple = PyTuple::new(py, call_args)?;
-        Ok(func.call(tuple, kwargs)?.unbind())
+        let result = func.call(tuple, kwargs)?;
+        // As PySpark's assert that the function returned a DataFrame.
+        if !result.is_instance_of::<PyDataFrame>() {
+            return Err(pyo3::exceptions::PyAssertionError::new_err(format!(
+                "Func returned an instance of type [{}], should have been DataFrame.",
+                result.get_type().repr()?
+            )));
+        }
+        Ok(result.unbind())
     }
 
     /// Unpivot (wide-to-long), as PySpark's `DataFrame.unpivot`: `ids` and `values` are each a
@@ -2299,11 +2328,14 @@ impl PyDataFrame {
     ///
     /// Mirrors `pyspark.sql.DataFrame.toLocalIterator(prefetchPartitions=False)`, a generator:
     /// the execution starts with the first row, and its errors are raised by the iteration.
-    /// Yields Row objects lazily as batches are fetched from the server.
+    /// Yields Row objects lazily as batches are fetched from the server. As PySpark Connect's,
+    /// which ignores `prefetchPartitions`, a batch is fetched when the iteration reaches it, so
+    /// the progress handlers of the execution are called by `next()`, on the iterating thread.
     #[pyo3(name = "toLocalIterator")]
     #[pyo3(signature = (prefetchPartitions=false))]
     fn to_local_iterator(&self, prefetchPartitions: bool) -> PyLocalRowIterator {
-        PyLocalRowIterator::new(self.dataframe.clone(), prefetchPartitions)
+        let _ = prefetchPartitions;
+        PyLocalRowIterator::new(self.dataframe.clone())
     }
 
     /// Collect the DataFrame into a `pyarrow.Table`.
@@ -2627,10 +2659,12 @@ impl PyDataFrame {
         )))
     }
 
-    /// Check if the DataFrame is empty.
+    /// Check if the DataFrame is empty, asked once, as PySpark's.
     fn isEmpty(&self, py: Python<'_>) -> PyResult<bool> {
-        interruptible(py, &self.dataframe.spark_session(), || {
-            self.dataframe.is_empty().map_err(Box::new)
+        cached(&self.is_empty, || {
+            interruptible(py, &self.dataframe.spark_session(), || {
+                self.dataframe.is_empty().map_err(Box::new)
+            })
         })
     }
 
@@ -4404,7 +4438,9 @@ fn check_arrow_schema(
 /// The proto text of the first nanosecond-precision timestamp of `data_type`, `TIMESTAMP_NTZ(p)`
 /// or `TIMESTAMP_LTZ(p)` with p > 6, in the order of PySpark's conversion of a schema from its
 /// proto: the message that PySpark's `proto_schema_to_pyspark_data_type` names when it fails.
-fn nanosecond_timestamp_text(data_type: &spark_connect::types::DataType) -> Option<String> {
+pub(crate) fn nanosecond_timestamp_text(
+    data_type: &spark_connect::types::DataType,
+) -> Option<String> {
     use spark_connect::types::DataType;
     match data_type {
         DataType::TimestampNtzNanos { precision } => Some(format!(
@@ -4535,7 +4571,6 @@ fn rows_to_py(
 #[pyclass(name = "LocalRowIterator", module = "pyspark.sql.dataframe")]
 pub struct PyLocalRowIterator {
     dataframe: DataFrame,
-    prefetch_partitions: bool,
     /// The rows of the execution, which the first row starts, as PySpark's generator does.
     iterator: Option<LocalRowIterator>,
     /// Whether the iteration ended, with its last row or an error, as a generator ends.
@@ -4549,26 +4584,29 @@ pub struct PyLocalRowIterator {
     fields: Option<(std::sync::Arc<[String]>, Py<PyList>)>,
     /// Nested names belong to schema paths and stay shared across iterator batches.
     nested_fields: NestedFieldNames,
+    /// The check of the metrics of Observations of the execution, made once at its end rather
+    /// than by each row, as the metrics come with the end of the result.
+    observed: Option<crate::observation::ObservedMetricsCheck>,
 }
 
 impl PyLocalRowIterator {
-    pub fn new(dataframe: DataFrame, prefetch_partitions: bool) -> Self {
+    pub fn new(dataframe: DataFrame) -> Self {
         PyLocalRowIterator {
             dataframe,
-            prefetch_partitions,
             iterator: None,
             finished: false,
             converters: None,
             binary_as_bytes: None,
             fields: None,
             nested_fields: NestedFieldNames::default(),
+            observed: None,
         }
     }
 
     /// The next row, starting the execution for the first.
     fn next_row(&mut self) -> Option<spark_connect_core::error::Result<spark_connect::row::Row>> {
         if self.iterator.is_none() {
-            match self.dataframe.to_local_iterator(self.prefetch_partitions) {
+            match self.dataframe.to_local_iterator(false) {
                 Ok(iterator) => self.iterator = Some(iterator),
                 Err(error) => return Some(Err(error)),
             }
@@ -4586,9 +4624,14 @@ impl PyLocalRowIterator {
                 value
             }
         };
-        let next = interruptible(py, &self.dataframe.spark_session(), || {
+        let session = self.dataframe.spark_session();
+        if self.iterator.is_none() {
+            self.observed = crate::observation::ObservedMetricsCheck::before(py, &session);
+        }
+        let next = crate::interrupt::interruptible_outcome(py, &session, || {
             Ok::<_, Box<spark_connect_core::error::SparkError>>(self.next_row())
-        })?;
+        })?
+        .to_pyerr()?;
         if self.converters.is_none() {
             if let Some(schema) = self.iterator.as_ref().and_then(LocalRowIterator::schema) {
                 // The result is known once its first message arrives, possibly with no rows.
@@ -4631,7 +4674,12 @@ impl PyLocalRowIterator {
                 .map(Some)
             }
             Some(Err(error)) => Err(crate::errors::spark_error_to_py_exception(error)),
-            None => Ok(None),
+            None => {
+                if let Some(observed) = self.observed.take() {
+                    observed.after(py, &session)?;
+                }
+                Ok(None)
+            }
         }
     }
 }
@@ -4852,7 +4900,63 @@ pub(crate) fn literal_to_py(
         Some(_) => py
             .import("pyspark.sql.connect.client")?
             .getattr("_UnsupportedLiteral")?
-            .call1((format!("{literal:?}"),))?
+            .call1((literal_text(py, literal),))?
             .unbind(),
     })
+}
+
+/// The first literal of `literal`, itself or an element, whose kind `literal_to_py` does not
+/// convert, in the order in which PySpark's `LiteralExpression._to_value` converts them: the
+/// literal that PySpark's `UNSUPPORTED_LITERAL` names.
+pub(crate) fn unsupported_literal(
+    literal: &spark_connect_proto::expression::Literal,
+) -> Option<&spark_connect_proto::expression::Literal> {
+    use spark_connect_proto::expression::literal::LiteralType;
+    match &literal.literal_type {
+        None
+        | Some(LiteralType::Null(_))
+        | Some(LiteralType::Boolean(_))
+        | Some(LiteralType::Byte(_))
+        | Some(LiteralType::Short(_))
+        | Some(LiteralType::Integer(_))
+        | Some(LiteralType::Long(_))
+        | Some(LiteralType::Float(_))
+        | Some(LiteralType::Double(_))
+        | Some(LiteralType::String(_))
+        | Some(LiteralType::Binary(_))
+        | Some(LiteralType::Decimal(_))
+        | Some(LiteralType::Date(_))
+        | Some(LiteralType::Time(_))
+        | Some(LiteralType::Timestamp(_))
+        | Some(LiteralType::TimestampNtz(_))
+        | Some(LiteralType::DayTimeInterval(_)) => None,
+        Some(LiteralType::Array(array)) => array.elements.iter().find_map(unsupported_literal),
+        // A key before its value, as a dict comprehension evaluates them.
+        Some(LiteralType::Map(map)) => map.keys.iter().zip(&map.values).find_map(|(key, value)| {
+            unsupported_literal(key).or_else(|| unsupported_literal(value))
+        }),
+        Some(LiteralType::Struct(fields)) => fields.elements.iter().find_map(unsupported_literal),
+        Some(_) => Some(literal),
+    }
+}
+
+/// The text of `literal` as PySpark's `str` of its protobuf message gives it, which its
+/// `UNSUPPORTED_LITERAL` shows; the Rust debug text of the message without `protobuf`.
+pub(crate) fn literal_text(
+    py: Python<'_>,
+    literal: &spark_connect_proto::expression::Literal,
+) -> String {
+    use prost::Message;
+    let text = || -> PyResult<String> {
+        py.import("pyspark.sql.connect.proto")?
+            .getattr("Expression")?
+            .getattr("Literal")?
+            .call_method1(
+                "FromString",
+                (pyo3::types::PyBytes::new(py, &literal.encode_to_vec()),),
+            )?
+            .str()?
+            .extract()
+    };
+    text().unwrap_or_else(|_| format!("{literal:?}"))
 }

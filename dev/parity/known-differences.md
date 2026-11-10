@@ -115,6 +115,13 @@ difference is intentional or tracked for a fix.
 
 ## `DataFrame`
 
+- **`toArrow` of a string that is not valid UTF-8** (intentional). PySpark's `toArrow`
+  returns a table whose string column holds the invalid bytes, which pyarrow's full
+  validation rejects. This client does not return invalid Arrow data: it raises the
+  `PySparkRuntimeError` of the Arrow decode, as its `toPandas` does (`collect` raises
+  PySpark's `UnicodeDecodeError`; the Rust API's `collect` returns
+  `SparkErrorKind::UnicodeDecode`).
+
 - **Public base and native MRO.** `pyspark.sql.DataFrame` is implemented as a
   Python base/factory, allowing subclasses such as
   `pyspark.testing.mlutils.MockDataset` to allocate their own Python state with

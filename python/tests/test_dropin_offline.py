@@ -225,7 +225,7 @@ EVERY_TYPE = [
     T.LongType(), T.FloatType(), T.DoubleType(), T.DecimalType(), T.DecimalType(38, 18),
     T.StringType(), T.StringType("UTF8_LCASE"), T.StringType("UNICODE_CI"),
     T.CharType(5), T.VarcharType(9), T.BinaryType(), T.DateType(), T.TimestampType(),
-    T.TimestampNTZType(), T.TimestampNTZNanosType(9), T.TimestampLTZNanosType(7),
+    T.TimestampNTZType(),
     T.TimeType(3), T.CalendarIntervalType(), T.YearMonthIntervalType(0, 1),
     T.YearMonthIntervalType(1, 1), T.DayTimeIntervalType(0, 3),
     T.DayTimeIntervalType(2, 2), T.VariantType(),
@@ -7053,13 +7053,14 @@ def test_struct_field_equality():
 
 
 def test_is_streaming_asks_the_server_as_pyspark(mock_connect):
-    # As PySpark's: isStreaming is the server's answer to an IsStreaming request of the plan.
+    # As PySpark's: isStreaming is the server's answer to an IsStreaming request of the plan,
+    # which a DataFrame asks once.
     spark, service = mock_connect
     df = spark.range(1).select("id")
     try:
         assert df.isStreaming is False
         service.streaming = True
-        assert df.isStreaming is True
+        assert spark.range(1).select("id").isStreaming is True
     finally:
         service.streaming = False
     # base.proto: AnalyzePlanRequest.is_streaming=8.
@@ -7971,6 +7972,276 @@ from pyspark.sql.connect.dataframe import DataFrame as _ConnectDF  # noqa: E402
 
 def test_dropin_version_is_spark_version():
     assert pyspark.__version__ == "4.3.0"
+
+
+def test_lit_takes_an_int_or_a_float_by_its_type_as_pyspark(mock_connect):
+    # As PySpark's LiteralExpression._infer_type, which takes an int or a float by isinstance: an
+    # object that only converts to one (__index__, __float__) is UNSUPPORTED_DATA_TYPE, while the
+    # subclasses of int and float, an IntEnum and the NumPy scalars are literals.
+    import enum
+
+    np = pytest.importorskip("numpy")
+    from pyspark.errors import PySparkTypeError
+    from pyspark.sql import functions as F
+
+    class Index:
+        def __index__(self):
+            return 7
+
+    class Floaty:
+        def __float__(self):
+            return 2.5
+
+    class Both(Index, Floaty):
+        pass
+
+    class MyInt(int):
+        pass
+
+    class MyFloat(float):
+        pass
+
+    class Small(enum.IntEnum):
+        A = 5
+
+    spark, _ = mock_connect
+    for value in (Index(), Floaty(), Both(), Fraction(1, 2)):
+        name = type(value).__name__
+        for build in (lambda v: F.lit(v), lambda v: F.col("id").isin(v),
+                      lambda v: F.when(F.col("id") == 0, v)):
+            with pytest.raises(PySparkTypeError) as error:
+                build(value)
+            assert error.value.getCondition() == "UNSUPPORTED_DATA_TYPE"
+            assert error.value.getMessageParameters() == {"data_type": name}
+        for args in ({"x": value}, [value]):
+            with pytest.raises(PySparkTypeError) as error:
+                spark.sql("SELECT :x" if isinstance(args, dict) else "SELECT ?", args=args)
+            assert error.value.getMessageParameters() == {"data_type": name}
+    for value, text in ((MyInt(5), "5"), (MyFloat(1.5), "1.5"), (Small.A, "5"),
+                        (np.int64(6), "6"), (np.float64(2.5), "2.5")):
+        assert repr(F.lit(value)) == f"Column<'{text}'>"
+
+
+def test_a_str_that_utf8_cannot_encode_is_the_value_error_of_protobuf_as_pyspark(mock_connect):
+    # As PySpark's, whose protobuf string field rejects a str with a lone surrogate: a ValueError
+    # of protobuf's message, of at most 1024 characters of the repr of the value, for a literal
+    # and the arguments of sql.
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+    value, long_value = "a\ud800b", "x" * 2000 + "\ud800"
+    message = "%.1024r isn't a valid unicode string and can't be encoded in UTF-8."
+    for build, text in ((lambda: F.lit(value), message % value),
+                        (lambda: F.col("id") == value, message % value),
+                        (lambda: F.lit([value]), message % value),
+                        (lambda: F.lit(long_value), message % long_value),
+                        (lambda: spark.sql("SELECT :x", args={"x": value}), message % value),
+                        (lambda: spark.sql("SELECT ?", args=[value]), message % value)):
+        with pytest.raises(ValueError) as error:
+            build()
+        assert type(error.value) is ValueError and str(error.value) == text
+    assert service.execute_requests == []
+
+
+def test_pandas_timestamp_literals_drop_their_nanoseconds_silently_as_pyspark(mock_connect):
+    # As PySpark's TimestampType.toInternal and TimestampNTZType.toInternal, which read the
+    # fields of a pandas Timestamp: its nanoseconds are dropped without the warning of
+    # Timestamp.to_pydatetime, and the literal is that of the datetime of its microseconds.
+    import warnings
+
+    pd = pytest.importorskip("pandas")
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+
+    def literal(column):
+        spark.range(1).select(column).collect()
+        # Project.expressions=3; Expression.literal=1; Literal.timestamp=17, timestamp_ntz=18.
+        plan = parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0]
+        expression = parse_message(parse_message(parse_message(plan)[3][0])[3][0])
+        return parse_message(expression[1][0])
+
+    seoul = datetime.timezone(datetime.timedelta(hours=9))
+    for timestamp_type in ("TIMESTAMP_LTZ", "TIMESTAMP_NTZ"):
+        service.confs = {"spark.sql.timestampType": timestamp_type}
+        for value in (pd.Timestamp("2020-01-01 00:00:00.123456789"),
+                      pd.Timestamp("2020-01-01 00:00:00.123456789", tz="Asia/Seoul")):
+            micros = value.to_pydatetime(warn=False)
+            with warnings.catch_warnings():
+                warnings.simplefilter("error")
+                column = F.lit(value)
+            assert literal(column) == literal(F.lit(micros))
+    assert literal(F.lit(pd.Timestamp("2020-01-01 09:00:00.5", tz=seoul))) == {
+        18: [1577869200500000]}
+
+
+def test_transform_asserts_that_the_function_returned_a_dataframe_as_pyspark(mock_connect):
+    # As PySpark's DataFrame.transform, which asserts that the function returned a DataFrame.
+    spark, _ = mock_connect
+    df = spark.range(1)
+    for result in (1, None, [df]):
+        with pytest.raises(AssertionError) as error:
+            df.transform(lambda frame, value=result: value)
+        assert str(error.value) == (
+            f"Func returned an instance of type [{type(result)!r}], should have been DataFrame.")
+    selected = df.select("id")
+    assert df.transform(lambda frame, other: other, selected) is selected
+
+
+def _collect_metrics_plan_ids(relation):
+    # Relation.common=1 (RelationCommon.plan_id=2), collect_metrics=29 (CollectMetrics.input=1,
+    # name=2): the plan ID of each CollectMetrics of the relation, by its name.
+    fields = parse_message(relation)
+    if 29 not in fields:
+        return {}
+    metrics = parse_message(fields[29][0])
+    ids = _collect_metrics_plan_ids(metrics[1][0])
+    ids[metrics[2][0].decode()] = parse_message(fields[1][0])[2][0]
+    return ids
+
+
+def test_metrics_that_pyspark_cannot_convert_fail_the_action_of_their_observation_as_pyspark(
+        mock_connect):
+    # As PySpark's client, which converts the metrics of the Observations of a plan as they
+    # arrive: the first one of a kind that LiteralExpression._to_value does not convert (a
+    # year-month interval) raises UNSUPPORTED_LITERAL, of the text of its literal, from the
+    # action, and neither its metrics nor those that come after it are set. Metrics observed by
+    # a name are not converted by the action.
+    import pyarrow as pa
+
+    from pyspark.errors import PySparkTypeError
+    from pyspark.sql import Observation
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+    first, second = Observation("first"), Observation("second")
+    df = (spark.range(3).observe(first, F.count(F.lit(1)).alias("c"))
+          .observe(second, F.max("id").alias("m")))
+    df.collect()
+    # ExecutePlanRequest.plan=3 -> Plan.root=1.
+    ids = _collect_metrics_plan_ids(
+        parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0])
+
+    def observed(name, literal, key):
+        # ExecutePlanResponse.observed_metrics=6 -> ObservedMetrics name=1, values=2, keys=3,
+        # plan_id=4.
+        return message_field(6, message_field(1, name) + message_field(2, literal)
+                             + message_field(3, key) + varint_field(4, ids[name]))
+
+    # Literal.long=7, year_month_interval=20.
+    count, interval = varint_field(7, 3), varint_field(20, 14)
+    # The rows of the result, for count: ExecutePlanResponse.arrow_batch=2 (ArrowBatch.row_count=1,
+    # data=2).
+    table = pa.table({"count(1)": pa.array([3], pa.int64())})
+    sink = pa.BufferOutputStream()
+    with pa.ipc.new_stream(sink, table.schema) as writer:
+        writer.write_table(table)
+    batch = message_field(2, varint_field(1, 1) + message_field(2, sink.getvalue().to_pybytes()))
+    for action in (df.collect, df.count, lambda: list(df.toLocalIterator())):
+        service.execute_payload = (batch + observed("second", interval, "m")
+                                   + observed("first", count, "c"))
+        with pytest.raises(PySparkTypeError) as error:
+            action()
+        assert error.value.getCondition() == "UNSUPPORTED_LITERAL"
+        assert error.value.getMessageParameters() == {"literal": "year_month_interval: 14\n"}
+        assert first.get == {} and second.get == {}
+    # The metrics that come before the first that is not converted are set.
+    service.execute_payload = observed("first", count, "c") + observed("second", interval, "m")
+    with pytest.raises(PySparkTypeError):
+        df.collect()
+    assert first.get == {"c": 3} and second.get == {}
+    service.execute_payload = message_field(6, message_field(1, "named")
+                                            + message_field(2, interval) + message_field(3, "m"))
+    named = spark.range(3).observe("named", F.max("id").alias("m"))
+    assert named.collect() == []
+    with pytest.raises(PySparkTypeError):
+        named.executionInfo.flows
+
+
+def test_json_names_of_nanosecond_timestamps_are_not_data_types_as_pyspark():
+    # As PySpark's, which has no nanosecond timestamp types: their JSON names do not parse
+    # (CANNOT_PARSE_DATATYPE), and pyspark.sql.types has no names of them.
+    from pyspark.errors import PySparkValueError
+
+    for name in ("timestamp_ntz(9)", "timestamp_ltz(7)"):
+        field = {"name": "t", "type": name, "nullable": True, "metadata": {}}
+        for parse in (lambda: T._parse_datatype_json_value(name),
+                      lambda: T._parse_datatype_json_string(json.dumps(name)),
+                      lambda: T.StructType.fromJson({"type": "struct", "fields": [field]}),
+                      lambda: T.StructField.fromJson(field),
+                      lambda: T.ArrayType.fromJson(
+                          {"type": "array", "elementType": name, "containsNull": True}),
+                      lambda: T.StructType().add("t", name)):
+            with pytest.raises(PySparkValueError) as error:
+                parse()
+            assert error.value.getCondition() == "CANNOT_PARSE_DATATYPE"
+            assert error.value.getMessageParameters() == {"msg": name}
+    assert T._parse_datatype_json_value("timestamp_ntz") == T.TimestampNTZType()
+    assert not hasattr(T, "TimestampNTZNanosType") and not hasattr(T, "TimestampLTZNanosType")
+
+
+def test_local_iterators_call_the_progress_handlers_in_next_whatever_the_prefetch_as_pyspark(
+        mock_connect):
+    # As PySpark Connect's toLocalIterator, which ignores prefetchPartitions: the progress of
+    # the execution reaches the handlers as next() reads it, on the iterating thread, so that
+    # the exception of a handler is raised by next().
+    import threading
+
+    spark, service = mock_connect
+    # ExecutePlanResponse.execution_progress=18 -> ExecutionProgress.stages=1 (StageInfo
+    # stage_id=1, num_tasks=2), num_inflight_tasks=2.
+    stage = varint_field(1, 7) + varint_field(2, 4)
+    service.execute_payload = message_field(18, message_field(1, stage) + varint_field(2, 3))
+    threads = []
+
+    def handler(**kwargs):
+        threads.append((threading.get_ident(), kwargs["done"]))
+
+    spark.registerProgressHandler(handler)
+    for prefetch in (False, True):
+        threads.clear()
+        assert list(spark.range(1).toLocalIterator(prefetch)) == []
+        assert threads == [(threading.get_ident(), False), (threading.get_ident(), True)]
+    spark.clearProgressHandlers()
+
+    def failing(**kwargs):
+        if not kwargs["done"]:
+            raise ZeroDivisionError("update")
+
+    spark.registerProgressHandler(failing)
+    with pytest.raises(ZeroDivisionError):
+        next(spark.range(1).toLocalIterator(prefetchPartitions=True))
+    spark.clearProgressHandlers()
+
+
+def test_is_streaming_is_empty_and_input_files_are_asked_once_per_dataframe_as_pyspark(
+        mock_connect):
+    # As PySpark's isStreaming (a cached_property), isEmpty and inputFiles (functools.cache): a
+    # DataFrame asks the server once, and keeps the answer after the session stopped.
+    import pyarrow as pa
+
+    spark, service = mock_connect
+    table = pa.table({"count(1)": pa.array([1], pa.int64())})
+    sink = pa.BufferOutputStream()
+    with pa.ipc.new_stream(sink, table.schema) as writer:
+        writer.write_table(table)
+    # ExecutePlanResponse.schema=7, arrow_batch=2 (ArrowBatch.row_count=1, data=2).
+    service.execute_payload = message_field(7, struct_schema("count(1)")) + message_field(
+        2, varint_field(1, 1) + message_field(2, sink.getvalue().to_pybytes()))
+    df = spark.range(1)
+    try:
+        assert df.isStreaming is False
+        service.streaming = True
+        assert df.isStreaming is False
+    finally:
+        service.streaming = False
+    assert df.isEmpty() is False and df.isEmpty() is False
+    assert df.inputFiles() == [] and df.inputFiles() == []
+    # base.proto: AnalyzePlanRequest.is_streaming=8, input_files=9.
+    asked = [field for request in service.analyze_requests for field in parse_message(request)]
+    assert (asked.count(8), asked.count(9), len(service.execute_requests)) == (1, 1, 1)
+    spark.stop()
+    assert df.isStreaming is False and df.isEmpty() is False and df.inputFiles() == []
 
 
 @pytest.mark.parametrize("cls,name,descriptor", [
@@ -14838,23 +15109,22 @@ def test_functions_are_of_the_builtin_module_and_pickle_by_reference_as_pyspark(
     assert CloudPickleSerializer().loads(payload)(None) == (sort, col, udf, F.abs)
 
 
-def test_timestamp_nanos_types_roundtrip_and_pickle():
+def test_timestamp_nanos_types_are_private_types_of_their_own():
     # Spark's TimestampNTZNanosType/TimestampLTZNanosType (precision 7..9) materialize as
-    # their own types, not as TimeType / a microsecond TimestampType.
-    for cls, name in ((T.TimestampNTZNanosType, "timestamp_ntz"),
-                      (T.TimestampLTZNanosType, "timestamp_ltz")):
+    # their own types, not as TimeType / a microsecond TimestampType. PySpark has no such
+    # classes, so they are not names of pyspark.sql.types.
+    from pyspark._pyspark import TimestampLTZNanosType, TimestampNTZNanosType
+
+    for cls, name in ((TimestampNTZNanosType, "timestamp_ntz"),
+                      (TimestampLTZNanosType, "timestamp_ltz")):
         t = cls(8)
         assert t.precision == 8
         assert t.simpleString() == t.typeName() == f"{name}(8)"
         assert t.json() == f'"{name}(8)"'
         assert cls().precision == 9
         assert isinstance(t, T.DatetimeType)
-        assert repr(pickle.loads(pickle.dumps(t))) == repr(t)
-        assert repr(T._parse_datatype_json_string(f'"{name}(7)"')) == repr(cls(7))
         with pytest.raises(ValueError):
             cls(6)
-    nested = T.StructType([T.StructField("a", T.ArrayType(T.TimestampLTZNanosType(9)))])
-    assert pickle.loads(pickle.dumps(nested)).simpleString() == "struct<a:array<timestamp_ltz(9)>>"
 
 
 @pytest.mark.parametrize("call,expected", [

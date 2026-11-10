@@ -3795,11 +3795,9 @@ pub(crate) fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
     if let Some(dt_mod) = &datetime_mod {
         if let Ok(datetime_cls) = dt_mod.getattr("datetime") {
             if obj.is_instance(&datetime_cls)? {
-                // A naive datetime represents session-local wall-clock; encode it via the
-                // POSIX instant (.timestamp() interprets a naive value in the local zone).
-                // A pandas Timestamp is a datetime subclass but its .timestamp() treats a
-                // naive value as UTC, which disagrees with datetime/`lit(..)`; normalize it
-                // to a pure datetime first so createDataFrame() and lit() encode identically.
+                // A naive datetime represents session-local wall-clock; encode it as the
+                // instant of that local time, a pandas Timestamp too (whose .timestamp() would
+                // take a naive value as UTC), so createDataFrame() and lit() encode identically.
                 let micros = datetime_to_micros(obj)?;
                 return Ok(Value::Timestamp(micros));
             }
@@ -3851,39 +3849,30 @@ pub(crate) fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
 /// Encode a Python `datetime.datetime` as microseconds since the Unix epoch (UTC),
 /// consistently for both plain `datetime` and `pandas.Timestamp`.
 ///
-/// `datetime.timestamp()` interprets a naive value in the local zone (the convention Spark
-/// uses for a naive value in a session-local TIMESTAMP, and the one `functions.lit(..)`
-/// follows). `pandas.Timestamp.timestamp()` instead treats a naive value as UTC, which would
-/// make `createDataFrame(pandas_df)` disagree with `lit(..)` by the local offset. To keep the
-/// two paths identical we first downcast a pandas Timestamp to a plain `datetime` via
-/// `to_pydatetime()`. Timezone-aware values are unaffected (both encode the same instant).
-///
 /// The seconds and the microseconds are integers, as `TimestampType.toInternal` takes them
 /// (`calendar.timegm` of the UTC tuple of an aware value, `time.mktime` of the local tuple of a
 /// naive one): a float of seconds loses the microseconds of the values far from the epoch, and
-/// `timestamp()` overflows for the latest datetimes of the year 9999.
+/// `timestamp()` overflows for the latest datetimes of the year 9999. A naive pandas Timestamp
+/// is so in the local zone too, which its own `timestamp()` would take as UTC. As PySpark's, the
+/// fields are read from the value itself, so the nanoseconds of a pandas Timestamp are dropped
+/// silently, where its `to_pydatetime()` warns that it discards them.
 pub(crate) fn datetime_to_micros(obj: &Bound<'_, PyAny>) -> PyResult<i64> {
     let py = obj.py();
-    let normalized = if obj.hasattr("to_pydatetime").unwrap_or(false) {
-        obj.call_method0("to_pydatetime")?
-    } else {
-        obj.clone()
-    };
-    let seconds: i64 = if normalized.getattr("tzinfo")?.is_none() {
+    let seconds: i64 = if obj.getattr("tzinfo")?.is_none() {
         // time.mktime returns a float of whole seconds; int() truncates it as `as` does.
-        let local = normalized.call_method0("timetuple")?;
+        let local = obj.call_method0("timetuple")?;
         let secs: f64 = py
             .import("time")?
             .call_method1("mktime", (local,))?
             .extract()?;
         secs as i64
     } else {
-        let utc = normalized.call_method0("utctimetuple")?;
+        let utc = obj.call_method0("utctimetuple")?;
         py.import("calendar")?
             .call_method1("timegm", (utc,))?
             .extract()?
     };
-    let micros: i64 = normalized.getattr("microsecond")?.extract()?;
+    let micros: i64 = obj.getattr("microsecond")?.extract()?;
     Ok(seconds * 1_000_000 + micros)
 }
 
