@@ -2918,6 +2918,7 @@ impl PySparkSession {
         let data_type = py
             .detach(|| self.session.parse_ddl(ddl).map_err(Box::new))
             .to_pyerr()?;
+        crate::dataframe::check_nanosecond_timestamps(py, Some(&data_type))?;
         crate::types::data_type_to_py(py, &data_type)
     }
 
