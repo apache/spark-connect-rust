@@ -165,7 +165,7 @@ pub struct SparkSession {
 
 impl SparkSession {
     /// Create a new SparkSession with a client.
-    fn new(client: SparkConnectClient) -> Self {
+    pub(crate) fn new(client: SparkConnectClient) -> Self {
         SparkSession {
             client: Arc::new(client),
             plan_ids: Arc::new(PlanIds::new()),
@@ -301,7 +301,25 @@ impl SparkSession {
     /// assigns before it sends the request, as PySpark's `Progress` of the request has it.
     pub(crate) fn execute_plan(
         &self,
+        request: proto::ExecutePlanRequest,
+    ) -> Result<ExecutionStream> {
+        self.execute_plan_with_handlers(request, self.progress_handlers())
+    }
+
+    /// As [`execute_plan`](Self::execute_plan), but the progress of the execution, and its done
+    /// notification, does not reach the progress handlers: PySpark's listener bus has no
+    /// `Progress`, so its long-running stream reports none.
+    pub(crate) fn execute_plan_unreported(
+        &self,
+        request: proto::ExecutePlanRequest,
+    ) -> Result<ExecutionStream> {
+        self.execute_plan_with_handlers(request, ProgressHandlers::default())
+    }
+
+    fn execute_plan_with_handlers(
+        &self,
         mut request: proto::ExecutePlanRequest,
+        handlers: ProgressHandlers,
     ) -> Result<ExecutionStream> {
         let operation_id = request
             .operation_id
@@ -309,7 +327,7 @@ impl SparkSession {
             .clone();
         // Before the request: an execution that fails to start ends, as done, too.
         check_callback_depth()?;
-        let progress = ProgressTracker::new(self, Some(operation_id));
+        let progress = ProgressTracker::with_handlers(handlers, Some(operation_id));
         let stream = block_on(self.client().execute_plan_reattachable(request))?;
         Ok(ExecutionStream::new(stream, progress))
     }

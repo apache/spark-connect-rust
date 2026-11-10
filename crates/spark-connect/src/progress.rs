@@ -9,7 +9,7 @@ use spark_connect_core::error::Result;
 use spark_connect_core::runtime::CallbackGuard;
 use spark_connect_proto as proto;
 
-use crate::session::{FallibleProgressHandler, ProgressHandlers, SparkSession};
+use crate::session::{FallibleProgressHandler, ProgressHandlers};
 
 /// The progress of a stage of an execution, as PySpark's `StageInfo`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,9 +54,18 @@ pub(crate) struct ProgressTracker {
 }
 
 impl ProgressTracker {
-    pub(crate) fn new(session: &SparkSession, operation_id: Option<String>) -> Self {
+    #[cfg(test)]
+    pub(crate) fn new(
+        session: &crate::session::SparkSession,
+        operation_id: Option<String>,
+    ) -> Self {
+        Self::with_handlers(session.progress_handlers(), operation_id)
+    }
+
+    /// A tracker that calls `handlers`, which is empty for an execution that reports no progress.
+    pub(crate) fn with_handlers(handlers: ProgressHandlers, operation_id: Option<String>) -> Self {
         ProgressTracker {
-            handlers: session.progress_handlers(),
+            handlers,
             operation_id,
             stages: Vec::new(),
             inflight_tasks: 0,
@@ -156,6 +165,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
+    use crate::session::SparkSession;
 
     fn progress(
         stages: &[(i64, i64)],
