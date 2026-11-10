@@ -220,8 +220,34 @@ impl ExecutionStream {
     /// last one has no batch.
     /// When the execution ends, of its result or of an error, the handlers get their done call,
     /// whose error is the error of the execution, as PySpark's `Progress.__exit__` raises it.
+    /// The handlers run on the thread that polls this; a synchronous caller uses
+    /// [`ExecutionStream::next_message`], which calls them on its own thread.
     pub(crate) async fn message(&mut self) -> Result<Option<proto::ExecutePlanResponse>> {
-        let response = match self.stream.message().await {
+        let response = self.stream.message().await;
+        self.handle(response)
+    }
+
+    /// As [`ExecutionStream::message`], waiting on the calling thread, which the handlers are
+    /// called on, as PySpark calls them on the thread that iterates the responses: also inside
+    /// a `current_thread` runtime, where the response is awaited on a thread of its own.
+    pub(crate) fn next_message(&mut self) -> Result<Option<proto::ExecutePlanResponse>> {
+        let response = spark_connect_core::runtime::block_on(self.stream.message());
+        // On a worker of a multi-thread runtime, the handlers block in place, as the wait did.
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+                tokio::task::block_in_place(|| self.handle(response))
+            }
+            _ => self.handle(response),
+        }
+    }
+
+    /// The response of the stream, `response`, after its progress has updated the handlers and
+    /// its chunk is joined into its batch.
+    fn handle(
+        &mut self,
+        response: Result<Option<proto::ExecutePlanResponse>>,
+    ) -> Result<Option<proto::ExecutePlanResponse>> {
+        let response = match response {
             Ok(response) => response,
             Err(error) => return Err(self.progress.finish_after(error)),
         };

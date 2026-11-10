@@ -119,6 +119,7 @@ fn stat_corr_cov_sample_by() {
     let sampled = df
         .stat()
         .sample_by("g", fractions, Some(42))
+        .expect("sample_by")
         .collect()
         .expect("sample_by collect");
     // Non-deterministic count, but the RPC must succeed and return rows-or-none.

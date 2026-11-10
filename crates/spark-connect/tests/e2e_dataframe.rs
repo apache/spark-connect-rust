@@ -74,6 +74,7 @@ fn dataframe_transforms_and_setops() {
     );
     assert_eq!(
         df.repartition_by_range(2, vec![col("id").expression().clone()])
+            .unwrap()
             .count()
             .unwrap(),
         4
@@ -445,6 +446,209 @@ fn pivot_values_of_dates_timestamps_and_decimals_match_discovered_pivots() {
     );
 }
 
+/// A pivot on the values collected from a float, tinyint, smallint or year-month interval column
+/// names its columns as the pivot without values, which the server computes, does: "1.1" for a
+/// float, as the Scala client's `lit` of it, and the SQL of an interval.
+#[test]
+fn pivot_values_of_floats_and_year_month_intervals_match_discovered_pivots() {
+    if !should_run() {
+        return;
+    }
+    use spark_connect::row::Value;
+    let s = session();
+    let df = s
+        .sql(
+            "SELECT * FROM VALUES (CAST(1.1 AS FLOAT), CAST(3 AS TINYINT), CAST(4 AS SMALLINT), \
+             INTERVAL '1-0' YEAR TO MONTH, 'a', 1), \
+             (CAST(-2.5 AS FLOAT), CAST(-3 AS TINYINT), CAST(-4 AS SMALLINT), \
+             INTERVAL '-0-1' YEAR TO MONTH, 'b', 2) AS t(f, b, sh, ym, k, v)",
+        )
+        .unwrap();
+    for column in ["f", "b", "sh", "ym"] {
+        // In the order of the pivot without values, which sorts them.
+        let values: Vec<Value> = df
+            .select(vec![col(column)])
+            .order_by(vec![col(column).expression().clone()])
+            .collect()
+            .unwrap()
+            .iter()
+            .map(|row| row.get(0).unwrap().clone())
+            .collect();
+        let pivot = |values: Option<Vec<Value>>| {
+            named_rows(
+                &df.group_by(vec![col("k")])
+                    .pivot(col(column), values)
+                    .unwrap()
+                    .sum(vec!["v"])
+                    .unwrap()
+                    .order_by(vec![col("k").expression().clone()]),
+            )
+        };
+        assert_eq!(pivot(Some(values)), pivot(None), "{column}");
+    }
+    let intervals: Vec<Value> = df
+        .select(vec![col("ym")])
+        .order_by(vec![col("v").expression().clone()])
+        .collect()
+        .unwrap()
+        .iter()
+        .map(|row| row.get(0).unwrap().clone())
+        .collect();
+    assert_eq!(
+        intervals,
+        vec![Value::YearMonthInterval(12), Value::YearMonthInterval(-1)]
+    );
+    let (columns, _) = named_rows(
+        &df.group_by(vec![col("k")])
+            .pivot(col("ym"), Some(intervals))
+            .unwrap()
+            .sum(vec!["v"])
+            .unwrap(),
+    );
+    assert_eq!(
+        columns,
+        vec![
+            "k".to_string(),
+            "INTERVAL '1-0' YEAR TO MONTH".to_string(),
+            "INTERVAL '-0-1' YEAR TO MONTH".to_string(),
+        ]
+    );
+}
+
+/// Year-month intervals are collected as their months, in nested values too, and local rows of
+/// them are sent as Spark's Arrow conversion sends them.
+#[test]
+fn year_month_interval_values_roundtrip() {
+    if !should_run() {
+        return;
+    }
+    use spark_connect::row::{Row, Value};
+    use spark_connect::types::{DataType, StructField};
+    let s = session();
+    let rows = s
+        .sql(
+            "SELECT INTERVAL '178956970-7' YEAR TO MONTH AS a, INTERVAL '-178956970-8' YEAR TO \
+             MONTH AS b, array(INTERVAL '2' YEAR) AS c, CAST(NULL AS INTERVAL MONTH) AS d",
+        )
+        .unwrap()
+        .collect()
+        .unwrap();
+    assert_eq!(rows[0].get(0), Some(&Value::YearMonthInterval(i32::MAX)));
+    assert_eq!(rows[0].get(1), Some(&Value::YearMonthInterval(i32::MIN)));
+    assert_eq!(
+        rows[0].get(2),
+        Some(&Value::List(vec![Value::YearMonthInterval(24)]))
+    );
+    assert_eq!(rows[0].get(3), Some(&Value::Null));
+
+    let interval = DataType::YearMonthInterval {
+        start_field: 0,
+        end_field: 1,
+    };
+    let schema = DataType::Struct {
+        fields: vec![StructField {
+            name: "i".to_string(),
+            data_type: interval,
+            nullable: true,
+            metadata: Default::default(),
+        }],
+    };
+    let input = vec![
+        Row::new(vec!["i".to_string()], vec![Value::YearMonthInterval(-13)]),
+        Row::new(vec!["i".to_string()], vec![Value::Null]),
+    ];
+    let df = s.create_dataframe(input, schema).unwrap();
+    let texts: Vec<Value> = df
+        .select_expr(vec!["CAST(i AS STRING)"])
+        .collect()
+        .unwrap()
+        .iter()
+        .map(|row| row.get(0).unwrap().clone())
+        .collect();
+    assert_eq!(
+        texts,
+        vec![
+            Value::String("INTERVAL '-1-1' YEAR TO MONTH".to_string()),
+            Value::Null
+        ]
+    );
+    let back: Vec<Value> = df
+        .collect()
+        .unwrap()
+        .iter()
+        .map(|row| row.get(0).unwrap().clone())
+        .collect();
+    assert_eq!(back, vec![Value::YearMonthInterval(-13), Value::Null]);
+}
+
+/// Collect a slow query and iterate it on demand, on this thread, which `caller` notes: the rows
+/// of each.
+fn run_slow_queries(
+    s: &SparkSession,
+    caller: &std::sync::Mutex<Option<std::thread::ThreadId>>,
+) -> (usize, usize) {
+    *caller.lock().unwrap() = Some(std::thread::current().id());
+    let slow = "SELECT id, reflect('java.lang.Thread', 'sleep', 300L) AS s FROM range(0, 4, 1, 4)";
+    let collected = s.sql(slow).unwrap().collect().unwrap().len();
+    let iterated = s
+        .sql(slow)
+        .unwrap()
+        .to_local_iterator(false)
+        .unwrap()
+        .count();
+    (collected, iterated)
+}
+
+/// As PySpark calls the progress handlers on the thread that runs the execution: also inside a
+/// `current_thread` runtime, where the responses are awaited on another thread, and on a worker
+/// of a multi-thread runtime, each update and the done call run on the caller's thread.
+#[test]
+fn progress_handlers_run_on_the_calling_thread_inside_a_tokio_runtime() {
+    if !should_run() {
+        return;
+    }
+    use std::sync::{Arc, Mutex};
+    let s = session().new_session();
+    s.conf()
+        .set("spark.connect.progress.reportInterval", "100ms")
+        .unwrap();
+    let caller: Arc<Mutex<Option<std::thread::ThreadId>>> = Arc::default();
+    let calls: Arc<Mutex<Vec<(bool, bool)>>> = Arc::default();
+    let (expected, seen) = (Arc::clone(&caller), Arc::clone(&calls));
+    let id = s.register_progress_handler(move |update| {
+        let on_caller = *expected.lock().unwrap() == Some(std::thread::current().id());
+        seen.lock().unwrap().push((update.done, on_caller));
+    });
+    let current = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    assert_eq!(
+        current.block_on(async { run_slow_queries(&s, &caller) }),
+        (4, 4)
+    );
+    let multi = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let (task_session, task_caller) = (s.clone(), Arc::clone(&caller));
+    let counts = multi.block_on(async move {
+        tokio::spawn(async move { run_slow_queries(&task_session, &task_caller) })
+            .await
+            .unwrap()
+    });
+    assert_eq!(counts, (4, 4));
+    s.remove_progress_handler(id);
+    let calls = calls.lock().unwrap();
+    assert!(calls.iter().any(|(done, _)| !done), "{calls:?}");
+    assert!(
+        calls.iter().filter(|(done, _)| *done).count() >= 4,
+        "{calls:?}"
+    );
+    assert!(calls.iter().all(|(_, on_caller)| *on_caller), "{calls:?}");
+}
+
 #[test]
 fn day_time_interval_input_roundtrips() {
     if !should_run() {
@@ -717,6 +921,7 @@ fn repartition_by_range_splits_into_contiguous_ranges() {
         .range(100)
         .unwrap()
         .repartition_by_range(4, vec![col("id").expression().clone()])
+        .unwrap()
         .with_column("p", f::spark_partition_id())
         .group_by(vec![col("p")])
         .agg(vec![

@@ -3550,6 +3550,11 @@ fn value_to_datatype(v: &Value) -> DataType {
             start_field: 0,
             end_field: 3,
         },
+        // Not of a Python value, which has no year-month interval type.
+        Value::YearMonthInterval(_) => DataType::YearMonthInterval {
+            start_field: 0,
+            end_field: 1,
+        },
         Value::Decimal {
             precision, scale, ..
         } => DataType::Decimal {

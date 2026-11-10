@@ -131,10 +131,13 @@ pub enum LogicalPlan {
     },
     /// A relation built outside the core, as the plans of `pyspark.ml` build theirs
     /// (`pyspark.ml.connect.proto.TransformerRelation`), sent as it is, with the plan ID of the
-    /// core, and the owner of the relation, if any, which the plan keeps alive.
+    /// core, and the owner of the relation, if any, which the plan keeps alive. `depth` is the
+    /// number of levels of the relation as a plan, with those of the plans of DataFrames that it
+    /// holds (1 for a relation without them), which count for [`MAX_PLAN_DEPTH`].
     Raw {
         relation: Box<proto::Relation>,
         owner: Option<RelationOwner>,
+        depth: usize,
     },
     /// Deduplicate: `df.distinct()` or `df.dropDuplicates()`.
     Deduplicate {
@@ -689,6 +692,20 @@ pub(crate) fn placeholder_relation(node: &Arc<LogicalPlan>, ids: &Arc<PlanIds>) 
 /// and fetched arguments). Each replacement is the relation of a DataFrame of the core, which has
 /// no placeholder.
 pub(crate) fn resolve_relation(relation: &mut proto::Relation) -> Result<()> {
+    resolve_relation_at(relation, 1).map(|_| ())
+}
+
+/// As [`resolve_relation`], and the levels of the relation as a plan of them, as PySpark's
+/// serializer counts the levels of a plan of `pyspark.ml`, which serializes the plans of its
+/// inputs within its own: one for the relation, one more for each relation that holds an input,
+/// and those of the plan of the DataFrame of each placeholder under them.
+pub(crate) fn resolve_relation_levels(relation: &mut proto::Relation) -> Result<usize> {
+    resolve_relation_at(relation, 1)
+}
+
+/// Resolve `relation`, which is at the level `level` of the relation being resolved, and the
+/// deepest level of its resolved relation.
+fn resolve_relation_at(relation: &mut proto::Relation, level: usize) -> Result<usize> {
     if let Some(proto::relation::RelType::Extension(any)) = &relation.rel_type {
         if any.type_url == PLACEHOLDER_TYPE_URL {
             let marker = i64::from_le_bytes(
@@ -700,36 +717,45 @@ pub(crate) fn resolve_relation(relation: &mut proto::Relation) -> Result<()> {
             let (node, ids) = placeholder_target(marker).ok_or_else(|| {
                 SparkError::value_msg("a placeholder of a DataFrame that no longer exists")
             })?;
-            *relation = relation_with_ids(&node, &ids)?;
-            return Ok(());
+            let (resolved, levels) = relation_with_ids_and_levels(&node, &ids)?;
+            *relation = resolved;
+            // The relation of the DataFrame takes the place of the placeholder, at its level.
+            return Ok(level - 1 + levels);
         }
     }
+    let mut deepest = level;
+    let mut below = |relation: &mut proto::Relation| -> Result<()> {
+        deepest = deepest.max(resolve_relation_at(relation, level + 1)?);
+        Ok(())
+    };
     match relation.rel_type.as_mut() {
         Some(proto::relation::RelType::MlRelation(ml)) => {
             if let Some(summary) = ml.model_summary_dataset.as_mut() {
-                resolve_relation(summary)?;
+                below(summary)?;
             }
             match ml.ml_type.as_mut() {
                 Some(proto::ml_relation::MlType::Transform(transform)) => {
                     if let Some(input) = transform.input.as_mut() {
-                        resolve_relation(input)?;
+                        below(input)?;
                     }
                 }
-                Some(proto::ml_relation::MlType::Fetch(fetch)) => resolve_fetch(fetch)?,
+                Some(proto::ml_relation::MlType::Fetch(fetch)) => {
+                    deepest = deepest.max(resolve_fetch_at(fetch, level + 1)?);
+                }
                 None => {}
             }
         }
         Some(proto::relation::RelType::WithRelations(with)) => {
             if let Some(root) = with.root.as_mut() {
-                resolve_relation(root)?;
+                below(root)?;
             }
             for reference in with.references.iter_mut() {
-                resolve_relation(reference)?;
+                below(reference)?;
             }
         }
         _ => {}
     }
-    Ok(())
+    Ok(deepest)
 }
 
 /// Replace the placeholders of the relations of the ML command `command`, as `resolve_relation`.
@@ -741,7 +767,9 @@ pub(crate) fn resolve_command(command: &mut proto::Command) -> Result<()> {
         Some(proto::ml_command::Command::Fit(fit)) => fit.dataset.as_mut(),
         Some(proto::ml_command::Command::Evaluate(evaluate)) => evaluate.dataset.as_mut(),
         Some(proto::ml_command::Command::CreateSummary(summary)) => summary.dataset.as_mut(),
-        Some(proto::ml_command::Command::Fetch(fetch)) => return resolve_fetch(fetch),
+        Some(proto::ml_command::Command::Fetch(fetch)) => {
+            return resolve_fetch_at(fetch, 1).map(|_| ())
+        }
         _ => None,
     };
     match dataset {
@@ -750,18 +778,20 @@ pub(crate) fn resolve_command(command: &mut proto::Command) -> Result<()> {
     }
 }
 
-/// Replace the placeholders of the relations that a fetch of `fetch` takes as arguments.
-fn resolve_fetch(fetch: &mut proto::Fetch) -> Result<()> {
+/// Replace the placeholders of the relations that a fetch of `fetch` takes as arguments, each at
+/// the level `level`, and the deepest level of them.
+fn resolve_fetch_at(fetch: &mut proto::Fetch, level: usize) -> Result<usize> {
+    let mut deepest = 0;
     for method in fetch.methods.iter_mut() {
         for args in method.args.iter_mut() {
             if let Some(proto::fetch::method::args::ArgsType::Input(input)) =
                 args.args_type.as_mut()
             {
-                resolve_relation(input)?;
+                deepest = deepest.max(resolve_relation_at(input, level)?);
             }
         }
     }
-    Ok(())
+    Ok(deepest)
 }
 
 /// Replace the placeholders of the relation or of the command of `request`, a request that a
@@ -783,6 +813,15 @@ pub fn resolve_request(request: &mut proto::ExecutePlanRequest) -> Result<()> {
 /// (its marshaller nests at most 1024 messages), with an error that gives no reason, so the plans
 /// between the two fail there, as they do for PySpark.
 pub const MAX_PLAN_DEPTH: usize = 746;
+
+/// The stack that the clone of a [`LogicalPlan::Raw`] relation takes for each of its levels:
+/// prost's `Clone` recurses for each, with frames of about 1 KiB in a release build and 4 KiB in a
+/// debug one, and this leaves as much again.
+const RAW_CLONE_STACK_PER_LEVEL: usize = if cfg!(debug_assertions) {
+    8 << 10
+} else {
+    2 << 10
+};
 
 thread_local! {
     /// The level of the plan that this thread serializes now, the plans of subqueries
@@ -817,8 +856,8 @@ impl Drop for PlanLevel {
 /// Run `serialize`, which serializes plans for a request, and fail as PySpark's serializer does
 /// if one of them, with the plans of its subqueries, is deeper than [`MAX_PLAN_DEPTH`]. Within
 /// it, a plan is serialized down to the bound only: its proto is dropped and encoded by
-/// recursing too, so it must not be deeper.
-fn with_plan_depth_bound<T>(serialize: impl FnOnce() -> T) -> Result<T> {
+/// recursing too, so it must not be deeper. Returns the levels that the plans reach.
+fn with_plan_depth_bound<T>(serialize: impl FnOnce() -> T) -> Result<(T, usize)> {
     struct Scope {
         outer_bounded: bool,
         outer_deepest: usize,
@@ -833,14 +872,24 @@ fn with_plan_depth_bound<T>(serialize: impl FnOnce() -> T) -> Result<T> {
         outer_bounded: PLAN_DEPTH_BOUNDED.with(|bounded| bounded.replace(true)),
         outer_deepest: DEEPEST_PLAN_LEVEL.with(|deepest| deepest.replace(0)),
     };
+    let base = PLAN_LEVEL.with(std::cell::Cell::get);
     let value = serialize();
-    if DEEPEST_PLAN_LEVEL.with(std::cell::Cell::get) > MAX_PLAN_DEPTH {
+    let deepest = DEEPEST_PLAN_LEVEL.with(std::cell::Cell::get);
+    if deepest > MAX_PLAN_DEPTH {
         return Err(SparkError::recursion_msg(format!(
             "maximum recursion depth exceeded while serializing a plan and the plans of its \
              subqueries; a plan may be at most {MAX_PLAN_DEPTH} levels deep"
         )));
     }
-    Ok(value)
+    Ok((value, deepest.saturating_sub(base)))
+}
+
+/// The `RecursionError` of a plan of `depth` levels, deeper than [`MAX_PLAN_DEPTH`].
+fn too_deep_a_plan(depth: usize) -> SparkError {
+    SparkError::recursion_msg(format!(
+        "maximum recursion depth exceeded while serializing a plan of {depth} levels; \
+         a plan may be at most {MAX_PLAN_DEPTH} levels deep"
+    ))
 }
 
 /// Serialize a shared plan node for a request: the node and every node below it carry
@@ -849,18 +898,25 @@ fn with_plan_depth_bound<T>(serialize: impl FnOnce() -> T) -> Result<T> {
 /// a `RecursionError`, as in PySpark. The plan is serialized on the calling thread, whose stack
 /// grows on demand for its levels.
 pub(crate) fn relation_with_ids(node: &Arc<LogicalPlan>, ids: &PlanIds) -> Result<proto::Relation> {
+    relation_with_ids_and_levels(node, ids).map(|(relation, _)| relation)
+}
+
+/// As [`relation_with_ids`], and the levels of the relation, those of the plans of its
+/// subqueries included.
+fn relation_with_ids_and_levels(
+    node: &Arc<LogicalPlan>,
+    ids: &PlanIds,
+) -> Result<(proto::Relation, usize)> {
     // The levels of the plan itself are known before it is serialized; those of the plans of
     // its subqueries are counted as they are serialized.
     let depth = node.depth();
     if depth > MAX_PLAN_DEPTH {
-        return Err(SparkError::recursion_msg(format!(
-            "maximum recursion depth exceeded while serializing a plan of {depth} levels; \
-             a plan may be at most {MAX_PLAN_DEPTH} levels deep"
-        )));
+        return Err(too_deep_a_plan(depth));
     }
-    with_plan_depth_bound(|| {
+    let (relation, levels) = with_plan_depth_bound(|| {
         crate::expression::with_expression_depth_bound(|| relation_of(node, Some(ids)))
-    })?
+    })?;
+    Ok((relation?, levels))
 }
 
 /// Serialize a child node, with its stable plan ID when `ids` is given.
@@ -930,7 +986,10 @@ fn relation_with_references(
     // a plan of many levels, and count them for `with_plan_depth_bound`.
     crate::expression::with_stack_for_a_level(|| {
         let level = PlanLevel::enter();
-        if level.0 > MAX_PLAN_DEPTH && PLAN_DEPTH_BOUNDED.with(std::cell::Cell::get) {
+        // A relation built outside the core counts its own levels below this one.
+        let deepest = level.0 + node.own_levels() - 1;
+        DEEPEST_PLAN_LEVEL.with(|levels| levels.set(levels.get().max(deepest)));
+        if deepest > MAX_PLAN_DEPTH && PLAN_DEPTH_BOUNDED.with(std::cell::Cell::get) {
             // The request fails with a `RecursionError`: stop here, so that the proto of the
             // plan is no deeper than the bound.
             return proto::Relation::default();
@@ -1101,8 +1160,18 @@ impl LogicalPlan {
         inputs_of!(self)
     }
 
-    /// The number of levels of this plan: one for a leaf, and one more than its deepest input
-    /// otherwise. Computed without recursing, and once for each node that several plans share.
+    /// The levels of this node itself, under which its inputs are: one, or those of the relation
+    /// of a [`LogicalPlan::Raw`], which holds the plans of its inputs.
+    fn own_levels(&self) -> usize {
+        match self {
+            LogicalPlan::Raw { depth, .. } => (*depth).max(1),
+            _ => 1,
+        }
+    }
+
+    /// The number of levels of this plan: one for a leaf (the levels of its relation for a
+    /// [`LogicalPlan::Raw`]), and one more than its deepest input otherwise. Computed without
+    /// recursing, and once for each node that several plans share.
     pub fn depth(&self) -> usize {
         let mut depths: HashMap<*const LogicalPlan, usize> = HashMap::new();
         let mut pending: Vec<(&LogicalPlan, bool)> = vec![(self, false)];
@@ -1118,7 +1187,7 @@ impl LogicalPlan {
                     .map(|input| depths[&Arc::as_ptr(input)])
                     .max()
                     .unwrap_or(0);
-                depths.insert(key, deepest + 1);
+                depths.insert(key, deepest + plan.own_levels());
             } else {
                 pending.push((plan, true));
                 pending.extend(
@@ -1133,8 +1202,27 @@ impl LogicalPlan {
     }
 
     /// Convert this logical plan to a `spark.connect.Relation` protobuf, without plan IDs.
+    ///
+    /// Any depth is serialized, on a stack that grows for its levels; but prost encodes and drops
+    /// a protobuf by recursing, so the proto of a plan of many thousands of levels can overflow a
+    /// small stack there (a request is bounded, see [`LogicalPlan::try_to_proto`]).
     pub fn to_proto(&self) -> proto::Relation {
         relation_with_references(self, None, None)
+    }
+
+    /// Convert this logical plan to a `spark.connect.Relation` protobuf, without plan IDs, as
+    /// a request serializes it: a plan deeper than [`MAX_PLAN_DEPTH`], with the plans of its
+    /// subqueries, or with an expression deeper than [`crate::expression::MAX_EXPRESSION_DEPTH`],
+    /// is a `RecursionError`, as PySpark's serializer raises it, and its proto is not built.
+    pub fn try_to_proto(&self) -> Result<proto::Relation> {
+        let depth = self.depth();
+        if depth > MAX_PLAN_DEPTH {
+            return Err(too_deep_a_plan(depth));
+        }
+        let (relation, _) = with_plan_depth_bound(|| {
+            crate::expression::with_expression_depth_bound(|| self.to_proto())
+        })?;
+        relation
     }
 
     fn to_proto_with(&self, plan_ids: Option<&PlanIds>) -> proto::Relation {
@@ -1391,8 +1479,16 @@ impl LogicalPlan {
                 relation.rel_type = Some(proto::relation::RelType::HtmlString(Box::new(html)));
             }
 
-            LogicalPlan::Raw { relation: raw, .. } => {
-                relation = raw.as_ref().clone();
+            LogicalPlan::Raw {
+                relation: raw,
+                depth,
+                ..
+            } => {
+                // The clone recurses for each level of the relation: grow the stack for them all.
+                let stack = depth
+                    .saturating_mul(RAW_CLONE_STACK_PER_LEVEL)
+                    .saturating_add(64 << 10);
+                relation = stacker::maybe_grow(stack, stack, || raw.as_ref().clone());
                 relation.common.get_or_insert_with(Default::default);
             }
 
@@ -2563,6 +2659,7 @@ fn value_to_proto_literal(v: &crate::row::Value) -> proto::expression::Literal {
         Value::Timestamp(t) => Some(LiteralType::Timestamp(*t)),
         Value::TimestampNtz(t) => Some(LiteralType::TimestampNtz(*t)),
         Value::DayTimeInterval(t) => Some(LiteralType::DayTimeInterval(*t)),
+        Value::YearMonthInterval(months) => Some(LiteralType::YearMonthInterval(*months)),
         Value::Decimal {
             value,
             precision,
@@ -3445,5 +3542,135 @@ mod deep_plan_tests {
         assert_eq!(other.depth(), 11);
         let relation = relation_with_ids(&other, &PlanIds::new()).unwrap();
         assert_eq!(nested_limits(&relation), 11);
+    }
+
+    /// Run `f` on a thread whose stack takes the comparisons and drops of deep protos, which
+    /// recurse, also in a debug build.
+    fn on_a_large_stack<T: Send>(f: impl FnOnce() -> T + Send) -> T {
+        std::thread::scope(|scope| {
+            std::thread::Builder::new()
+                .stack_size(64 << 20)
+                .spawn_scoped(scope, f)
+                .unwrap()
+                .join()
+                .unwrap()
+        })
+    }
+
+    /// A relation built outside the core over a DataFrame of `levels` levels, as `pyspark.ml`
+    /// builds a transform over the placeholder of its input, resolved as `from_relation` does.
+    fn transform_of_a_plan(levels: usize, ids: &Arc<PlanIds>) -> Arc<LogicalPlan> {
+        let input = chain(levels);
+        let mut relation = proto::Relation {
+            common: None,
+            rel_type: Some(proto::relation::RelType::MlRelation(Box::new(
+                proto::MlRelation {
+                    model_summary_dataset: None,
+                    ml_type: Some(proto::ml_relation::MlType::Transform(Box::new(
+                        proto::ml_relation::Transform {
+                            input: Some(Box::new(placeholder_relation(&input, ids))),
+                            params: None,
+                            operator: None,
+                        },
+                    ))),
+                },
+            ))),
+        };
+        let depth = resolve_relation_levels(&mut relation).unwrap();
+        Arc::new(LogicalPlan::Raw {
+            relation: Box::new(relation),
+            owner: None,
+            depth,
+        })
+    }
+
+    /// As PySpark serializes the plan of its input within that of a plan of `pyspark.ml`, the
+    /// levels of the DataFrame under a relation built outside the core count for the bound,
+    /// under the levels above that relation.
+    #[test]
+    fn the_levels_of_the_input_of_a_relation_built_outside_the_core_count_as_in_pyspark() {
+        on_a_large_stack(|| {
+            let ids = Arc::new(PlanIds::new());
+            let transform = transform_of_a_plan(400, &ids);
+            // The transform is a level over the 400 of its input.
+            assert_eq!(transform.depth(), 401);
+            let mut plan = Arc::clone(&transform);
+            for _ in 0..MAX_PLAN_DEPTH - 401 {
+                plan = Arc::new(limit(plan, 1));
+            }
+            assert_eq!(plan.depth(), MAX_PLAN_DEPTH);
+            relation_with_ids(&plan, &ids).unwrap();
+            let past = Arc::new(limit(plan, 1));
+            let error = relation_with_ids(&past, &ids).unwrap_err();
+            assert_eq!(error.kind, SparkErrorKind::RecursionError, "{error}");
+            assert!(
+                error
+                    .message()
+                    .contains(&format!("a plan of {} levels", MAX_PLAN_DEPTH + 1)),
+                "{error}"
+            );
+            assert!(past.try_to_proto().is_err());
+            // In a subquery, which the levels of the plan do not count, they count as serialized.
+            let subquery = crate::expression::SubqueryExpression::new(
+                transform_of_a_plan(MAX_PLAN_DEPTH - 2, &ids),
+                1,
+                crate::expression::SubqueryType::Exists,
+            );
+            let filter = Arc::new(LogicalPlan::Filter {
+                input: Arc::new(range(0, 10, 1)),
+                condition: crate::column::Column::new(Expression::new(ExpressionNode::Subquery(
+                    Box::new(subquery),
+                ))),
+            });
+            relation_with_ids(&filter, &ids).unwrap();
+            let error = relation_with_ids(&Arc::new(limit(filter, 1)), &ids).unwrap_err();
+            assert!(
+                error.message().contains("the plans of its subqueries"),
+                "{error}"
+            );
+        });
+    }
+
+    /// The relation of a plan of `pyspark.ml` at the bound, over a DataFrame of as many levels,
+    /// is copied into the request on a thread with a small stack, which grows for its levels.
+    #[test]
+    fn a_relation_built_outside_the_core_at_the_bound_is_serialized_on_a_small_stack() {
+        on_a_large_stack(|| {
+            let ids = Arc::new(PlanIds::new());
+            let transform = transform_of_a_plan(MAX_PLAN_DEPTH - 1, &ids);
+            assert_eq!(transform.depth(), MAX_PLAN_DEPTH);
+            let relation = on_a_small_stack(|| relation_with_ids(&transform, &ids).unwrap());
+            let Some(proto::relation::RelType::MlRelation(ml)) = &relation.rel_type else {
+                panic!("an ML relation");
+            };
+            let Some(proto::ml_relation::MlType::Transform(transform)) = &ml.ml_type else {
+                panic!("a transform");
+            };
+            assert_eq!(
+                nested_limits(transform.input.as_deref().unwrap()),
+                MAX_PLAN_DEPTH - 1
+            );
+        });
+    }
+
+    /// `try_to_proto` bounds a plan as a request does, and `to_proto` serializes one of any
+    /// depth, on a small stack.
+    #[test]
+    fn try_to_proto_bounds_the_plan_as_a_request_and_to_proto_serializes_any_depth() {
+        on_a_large_stack(|| {
+            let at_bound = chain(MAX_PLAN_DEPTH);
+            let relation = on_a_small_stack(|| at_bound.try_to_proto().unwrap());
+            assert_eq!(nested_limits(&relation), MAX_PLAN_DEPTH);
+            assert!(relation.common.unwrap().plan_id.is_none());
+            for levels in [MAX_PLAN_DEPTH + 1, 100_000] {
+                let plan = chain(levels);
+                let error = on_a_small_stack(|| plan.try_to_proto().unwrap_err());
+                assert_eq!(error.kind, SparkErrorKind::RecursionError, "{error}");
+                on_a_small_stack(move || std::mem::drop(plan));
+            }
+            let deep = chain(10_000);
+            let relation = on_a_small_stack(|| deep.to_proto());
+            assert_eq!(nested_limits(&relation), 10_000);
+        });
     }
 }

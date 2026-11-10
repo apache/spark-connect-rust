@@ -284,6 +284,19 @@ fn value_to_py<'py>(
                 remainder % 1_000_000,
             ))?
         }
+        // As PySpark's conversion of the rows, which cannot collect a year-month interval (the
+        // collects raise this already from the schema of the result).
+        Value::YearMonthInterval(_) => {
+            return Err(crate::column::raise_pyspark(
+                py,
+                "PySparkNotImplementedError",
+                "NOT_IMPLEMENTED",
+                &[(
+                    "feature",
+                    "Collecting a year-month interval value in Spark Connect",
+                )],
+            ))
+        }
         Value::Decimal { value, .. } => {
             // Convert to Python decimal.Decimal by instantiating the class
             let decimal_mod = py.import("decimal")?;

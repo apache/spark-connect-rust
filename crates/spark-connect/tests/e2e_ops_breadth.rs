@@ -83,6 +83,7 @@ fn transforms_execute() {
     let _ = df.coalesce(1).collect().unwrap();
     let _ = df
         .repartition_by_range(2, vec![expr(col("id"))])
+        .unwrap()
         .collect()
         .unwrap();
     let _ = df.repartition_by_id(2, col("id")).collect().unwrap();

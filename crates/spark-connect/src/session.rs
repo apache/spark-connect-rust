@@ -249,6 +249,11 @@ impl SparkSession {
     /// each progress of the server that has tasks, and once more, as done, when the execution
     /// ends, also of an error, as PySpark's `Progress` calls its handlers. Returns an id usable
     /// with [`SparkSession::remove_progress_handler`]. Mirrors `registerProgressHandler`.
+    ///
+    /// As PySpark's, the handlers are called on the thread that runs the execution (that calls
+    /// `collect`, `count`, or `next` of a local iterator), also inside a `current_thread` Tokio
+    /// runtime. The prefetching iterator of `to_local_iterator(true)` reads ahead on a thread of
+    /// the runtime, which calls them.
     pub fn register_progress_handler(
         &self,
         handler: impl Fn(&ProgressUpdate) + Send + Sync + 'static,
@@ -1304,8 +1309,17 @@ impl SparkSession {
     }
 
     /// Release the session on the server, as `SparkConnectClient.release_session`: its state
-    /// there, without stopping this session.
+    /// there, without stopping this session. After [`SparkSession::stop`] or
+    /// [`SparkSession::close`], it sends nothing and is the `NO_ACTIVE_SESSION` error, as the
+    /// `_stub` of PySpark's closed client raises it.
     pub fn release_session(&self) -> Result<()> {
+        if self.client.is_closed() {
+            return Err(SparkError::classed(
+                spark_connect_core::error::SparkErrorKind::Connect,
+                "NO_ACTIVE_SESSION",
+                &[],
+            ));
+        }
         block_on(self.client.release_session())
     }
 
@@ -1556,6 +1570,10 @@ fn datatype_to_arrow(dt: &DataType) -> Result<arrow::datatypes::DataType> {
         DataType::Time { .. } => A::Time64(TimeUnit::Nanosecond),
         // As Spark's Arrow conversion of DayTimeIntervalType.
         DataType::DayTimeInterval { .. } => A::Duration(TimeUnit::Microsecond),
+        // As Spark's Arrow conversion of YearMonthIntervalType, the months of each interval.
+        DataType::YearMonthInterval { .. } => {
+            A::Interval(arrow::datatypes::IntervalUnit::YearMonth)
+        }
         DataType::Decimal { precision, scale } => A::Decimal128(*precision as u8, *scale as i8),
         DataType::Array {
             element_type,
@@ -1750,6 +1768,9 @@ fn values_to_arrow(values: &[&Value], dt: &DataType) -> Result<Arc<dyn arrow::ar
         // As PySpark's `to_arrow_type`: nanoseconds since midnight, as `TimeType.toInternal`.
         DataType::Time { .. } => prim!(Time64NanosecondArray, Value::Time),
         DataType::DayTimeInterval { .. } => prim!(DurationMicrosecondArray, Value::DayTimeInterval),
+        DataType::YearMonthInterval { .. } => {
+            prim!(IntervalYearMonthArray, Value::YearMonthInterval)
+        }
         DataType::Timestamp | DataType::TimestampNtz => {
             let vals: Result<Vec<Option<i64>>> = values
                 .iter()
@@ -3039,6 +3060,32 @@ mod tests {
             .get("spark.sql.shuffle.partitions")
             .expect_err("a request of a stopped session must fail");
         assert_eq!(err.get_condition().as_deref(), Some("NO_ACTIVE_SESSION"));
+    }
+
+    /// As the `_stub` of PySpark's closed client: `release_session` after `stop()` or `close()`
+    /// raises `NO_ACTIVE_SESSION` and sends nothing.
+    #[test]
+    fn release_session_of_a_stopped_session_raises_no_active_session_as_pyspark() {
+        // No server and no retries: a release that reached the wire would fail at once, with
+        // another error.
+        let unreachable = || {
+            let builder = ChannelBuilder::parse("sc://127.0.0.1:1").expect("valid URL");
+            let mut client =
+                block_on(SparkConnectClient::connect(&builder)).expect("failed to build client");
+            client.set_retry_policy(spark_connect_core::retries::RetryPolicy::no_retries());
+            SparkSession::new(client)
+        };
+        let closed = unreachable();
+        closed.close();
+        let stopped = unreachable();
+        assert!(
+            stopped.stop().is_err(),
+            "the release of stop() reaches no server"
+        );
+        for spark in [closed, stopped] {
+            let err = spark.release_session().expect_err("a stopped session");
+            assert_eq!(err.get_condition().as_deref(), Some("NO_ACTIVE_SESSION"));
+        }
     }
 
     #[test]

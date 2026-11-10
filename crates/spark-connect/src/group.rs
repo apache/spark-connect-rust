@@ -14,19 +14,20 @@ use crate::types::DataType;
 use crate::udf::CommonInlineUserDefinedFunctionExpression;
 
 /// Convert a [`crate::row::Value`] into a literal [`Expression`] of a pivot value. Each value
-/// keeps its own type, as the literal of Spark's pivot, and a NULL is an error, as PySpark's
-/// `GroupedData.pivot` rejects a None.
+/// keeps its own type, as the literal of Spark's pivot (and of the Scala client's `lit`), so a
+/// float is named as the pivot without values names it ("1.1", not the text of its double), and
+/// a NULL is an error, as PySpark's `GroupedData.pivot` rejects a None.
 fn value_to_lit_expr(v: crate::row::Value) -> Result<Expression> {
     use crate::expression::LiteralExpression as L;
     use crate::row::Value;
     let lit = match v {
         Value::Null => return Err(not_a_pivot_value("NoneType")),
         Value::Bool(b) => L::boolean(b),
-        Value::Byte(x) => L::int(x as i32),
-        Value::Short(x) => L::int(x as i32),
+        Value::Byte(x) => L::Byte(i32::from(x)),
+        Value::Short(x) => L::Short(i32::from(x)),
         Value::Integer(x) => L::int(x),
         Value::Long(x) => L::long(x),
-        Value::Float(x) => L::double(x as f64),
+        Value::Float(x) => L::Float(x),
         Value::Double(x) => L::double(x),
         Value::String(s) => L::string(s),
         Value::Binary(b) => L::binary(b),
@@ -36,6 +37,7 @@ fn value_to_lit_expr(v: crate::row::Value) -> Result<Expression> {
         // `TimeType()` of PySpark has a precision of 6.
         Value::Time(nano) => L::Time { nano, precision: 6 },
         Value::DayTimeInterval(v) => L::DayTimeInterval(v),
+        Value::YearMonthInterval(months) => L::YearMonthInterval(months),
         Value::Decimal {
             value,
             precision,
@@ -60,19 +62,24 @@ fn value_to_lit_expr(v: crate::row::Value) -> Result<Expression> {
     Ok(Expression::literal(lit))
 }
 
-/// The `NOT_EXPECTED_TYPE` error of a pivot value of the type `arg_type`, which PySpark's
-/// `GroupedData.pivot` rejects (its values are bools, floats, ints and strs), named as Python names it.
+/// The `NOT_EXPECTED_TYPE` error of a pivot value of the type `arg_type`, named as Python names
+/// it, as PySpark's `GroupedData.pivot` raises it. The expected types are those of the values
+/// that the Rust API takes, which are more than PySpark's bools, floats, ints and strs.
 fn not_a_pivot_value(arg_type: &str) -> SparkError {
     SparkError::classed(
         SparkErrorKind::TypeError,
         "NOT_EXPECTED_TYPE",
         &[
             ("arg_name", "value"),
-            ("expected_type", "bool, float, int or str"),
+            ("expected_type", PIVOT_VALUE_TYPES),
             ("arg_type", arg_type),
         ],
     )
 }
+
+/// The kinds of the pivot values of the Rust API, as `NOT_EXPECTED_TYPE` names them.
+const PIVOT_VALUE_TYPES: &str =
+    "a bool, a number, a string, bytes, a date, a timestamp, a time or an interval";
 
 /// The precision and scale of a decimal text, such as `"1.50"` (3 and 2) or `"1E+3"` (1 and -3),
 /// as Java's `BigDecimal` of the text has them. Text that is not a decimal gives `(10, 0)`, and
@@ -685,20 +692,40 @@ impl StatFunctions {
             .unwrap_or(f64::NAN))
     }
 
-    /// Sample by values in a column.
+    /// Sample by values in a column, mirroring `DataFrameStatFunctions.sampleBy(col, fractions,
+    /// seed)`: each stratum of `fractions` is a literal, of any type, with its fraction. A
+    /// stratum that is not a literal, which the server cannot read, is a
+    /// `DISALLOWED_TYPE_FOR_CONTAINER` error, as PySpark raises for a key of another type.
     pub fn sample_by(
         &self,
         col: impl Into<Column>,
         fractions: Vec<(Expression, f64)>,
         seed: Option<i64>,
-    ) -> DataFrame {
+    ) -> Result<DataFrame> {
+        if fractions.iter().any(|(stratum, _)| {
+            !matches!(
+                stratum.node(),
+                crate::expression::ExpressionNode::Literal(_)
+            )
+        }) {
+            return Err(SparkError::classed(
+                SparkErrorKind::TypeError,
+                "DISALLOWED_TYPE_FOR_CONTAINER",
+                &[
+                    ("arg_name", "fractions"),
+                    ("arg_type", "dict"),
+                    ("allowed_types", "literal"),
+                    ("item_type", "Column"),
+                ],
+            ));
+        }
         let plan = LogicalPlan::StatSampleBy {
             input: Arc::clone(&self.dataframe.plan),
             col: col.into().expression().clone(),
             fractions,
             seed,
         };
-        DataFrame::new(self.dataframe.session.clone(), plan)
+        Ok(DataFrame::new(self.dataframe.session.clone(), plan))
     }
 }
 
@@ -1120,6 +1147,48 @@ mod tests {
         }
     }
 
+    /// As the literals of the Scala client's `lit` and of the pivot without values: a float, a
+    /// byte, a short and a year-month interval are sent in their own types, so that a float is
+    /// named "1.1" and not by the text of its double, and an interval by its SQL.
+    #[test]
+    fn pivot_floats_bytes_shorts_and_year_month_intervals_keep_their_types() {
+        use crate::row::Value;
+        use spark_connect_proto::{expression::literal::LiteralType, relation::RelType};
+        let frame = session().range(1).unwrap();
+        let pivot = frame
+            .group_by(vec![] as Vec<Column>)
+            .pivot(
+                crate::column::col("value"),
+                Some(vec![
+                    Value::Float(1.1),
+                    Value::Byte(-3),
+                    Value::Short(4),
+                    Value::YearMonthInterval(-13),
+                ]),
+            )
+            .unwrap()
+            .count();
+        let Some(RelType::Aggregate(aggregate)) = pivot.plan.to_proto().rel_type else {
+            panic!("expected Aggregate");
+        };
+        let literals: Vec<_> = aggregate
+            .pivot
+            .unwrap()
+            .values
+            .into_iter()
+            .map(|literal| literal.literal_type)
+            .collect();
+        assert_eq!(
+            literals,
+            vec![
+                Some(LiteralType::Float(1.1)),
+                Some(LiteralType::Byte(-3)),
+                Some(LiteralType::Short(4)),
+                Some(LiteralType::YearMonthInterval(-13)),
+            ]
+        );
+    }
+
     #[test]
     fn pivot_values_keep_their_types_as_literals() {
         use crate::row::Value;
@@ -1210,6 +1279,14 @@ mod tests {
             let parameters = err.get_message_parameters().unwrap();
             assert_eq!(parameters["arg_name"], "value");
             assert_eq!(parameters["arg_type"], arg_type);
+            // The types that the Rust API takes, which are more than those of PySpark's.
+            assert_eq!(
+                err.message(),
+                format!(
+                    "[NOT_EXPECTED_TYPE] Argument `value` should be a bool, a number, a string, \
+                     bytes, a date, a timestamp, a time or an interval, got {arg_type}."
+                )
+            );
         }
     }
 
@@ -1280,7 +1357,7 @@ mod tests {
                 0.3,
             ),
         ];
-        let result = stats.sample_by("category", fractions, Some(42));
+        let result = stats.sample_by("category", fractions, Some(42)).unwrap();
         match result.plan.as_ref() {
             LogicalPlan::StatSampleBy {
                 col,
@@ -1294,5 +1371,28 @@ mod tests {
             }
             _ => panic!("expected StatSampleBy plan"),
         }
+    }
+
+    /// As PySpark's `sampleBy` rejects a key that is not a float, an int or a str: a stratum
+    /// that is not a literal, which the server cannot read, is `DISALLOWED_TYPE_FOR_CONTAINER`.
+    #[test]
+    fn sample_by_rejects_a_stratum_that_is_not_a_literal_as_pyspark() {
+        let df = session().range(10).unwrap();
+        let literal = Expression::literal(crate::expression::LiteralExpression::Long(1));
+        let error = df
+            .stat()
+            .sample_by(
+                "id",
+                vec![(literal, 0.5), (Expression::column("id"), 0.5)],
+                Some(1),
+            )
+            .err()
+            .expect("an error");
+        assert_eq!(error.kind, SparkErrorKind::TypeError);
+        assert_eq!(
+            error.message(),
+            "[DISALLOWED_TYPE_FOR_CONTAINER] Argument `fractions`(type: dict) should only contain \
+             a type in [literal], got Column"
+        );
     }
 }

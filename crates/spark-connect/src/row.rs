@@ -44,6 +44,9 @@ pub enum Value {
     /// representable by Python's datetime.timedelta without nanosecond conversion.
     /// Display uses raw microseconds, like Date and Timestamp use their raw units.
     DayTimeInterval(i64),
+    /// Spark year-month interval, in signed months, as the Scala client's `java.time.Period`
+    /// of it has them. Display uses raw months, like DayTimeInterval its raw microseconds.
+    YearMonthInterval(i32),
     /// Decimal text in fixed-point or scientific notation, with optional precision and scale.
     /// Text passed to `create_dataframe` must fit the declared precision and scale exactly.
     /// Callers that rescale, such as Python local-row conversion, do so before building
@@ -85,6 +88,7 @@ impl fmt::Debug for Value {
             Self::TimestampNtz(v) => f.debug_tuple("TimestampNtz").field(v).finish(),
             Self::Time(v) => f.debug_tuple("Time").field(v).finish(),
             Self::DayTimeInterval(v) => f.debug_tuple("DayTimeInterval").field(v).finish(),
+            Self::YearMonthInterval(v) => f.debug_tuple("YearMonthInterval").field(v).finish(),
             Self::Decimal {
                 value,
                 precision,
@@ -189,6 +193,7 @@ impl fmt::Display for Value {
             Value::TimestampNtz(t) => write!(f, "{}", t),
             Value::Time(t) => write!(f, "{}", t),
             Value::DayTimeInterval(t) => write!(f, "{}", t),
+            Value::YearMonthInterval(months) => write!(f, "{}", months),
             Value::Decimal {
                 value,
                 precision,
@@ -789,6 +794,12 @@ mod tests {
         assert_eq!(Value::Timestamp(123).to_string(), "123");
         assert_eq!(Value::DayTimeInterval(-1).to_string(), "-1");
         assert_eq!(Value::DayTimeInterval(1).as_i64(), None);
+        assert_eq!(Value::YearMonthInterval(-13).to_string(), "-13");
+        assert_eq!(
+            format!("{:?}", Value::YearMonthInterval(12)),
+            "YearMonthInterval(12)"
+        );
+        assert_eq!(Value::YearMonthInterval(1).as_i64(), None);
         assert_eq!(
             Value::List(vec![Value::Integer(1), Value::Integer(2)]).to_string(),
             "[1, 2]"

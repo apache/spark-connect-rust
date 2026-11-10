@@ -476,6 +476,11 @@ fn literal_data_type(literal: &LiteralExpression) -> spark_connect::types::DataT
             start_field: 0,
             end_field: 3,
         },
+        // Not of a Python value, which has no year-month interval type.
+        LiteralExpression::YearMonthInterval(_) => DataType::YearMonthInterval {
+            start_field: 0,
+            end_field: 1,
+        },
         LiteralExpression::Time { precision, .. } => DataType::Time {
             precision: *precision,
         },
