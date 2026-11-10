@@ -13,8 +13,11 @@ use crate::plan::{AggregateGroupType, LogicalPlan};
 use crate::types::DataType;
 use crate::udf::CommonInlineUserDefinedFunctionExpression;
 
-/// Convert a [`crate::row::Value`] into a literal [`Expression`] (for pivot values).
-fn value_to_lit_expr(v: crate::row::Value) -> Expression {
+/// Convert a [`crate::row::Value`] into a typed literal [`Expression`] (for pivot values).
+///
+/// A null has no type of its own, and a nested value has no literal of its own, so both are
+/// an `UNSUPPORTED_OPERATION` error, as is a decimal without its precision and scale.
+fn value_to_lit_expr(v: crate::row::Value) -> Result<Expression> {
     use crate::expression::LiteralExpression as L;
     use crate::row::Value;
     let lit = match v {
@@ -26,10 +29,43 @@ fn value_to_lit_expr(v: crate::row::Value) -> Expression {
         Value::Float(x) => L::double(x as f64),
         Value::Double(x) => L::double(x),
         Value::String(s) => L::string(s),
+        Value::Binary(b) => L::binary(b),
+        Value::Date(days) => L::Date(days),
+        Value::Timestamp(micros) => L::Timestamp(micros),
+        Value::TimestampNtz(micros) => L::TimestampNtz(micros),
+        // TIME of the default precision, as PySpark's literal of a `datetime.time`.
+        Value::Time(nano) => L::Time { nano, precision: 6 },
         Value::DayTimeInterval(v) => L::DayTimeInterval(v),
-        other => L::string(format!("{:?}", other)),
+        Value::Decimal {
+            value,
+            precision: Some(precision),
+            scale: Some(scale),
+        } => L::Decimal {
+            value,
+            precision,
+            scale,
+        },
+        Value::Decimal { .. } => {
+            return Err(unsupported_pivot_value(
+                "a decimal without precision or scale",
+            ))
+        }
+        Value::Null => return Err(unsupported_pivot_value("a null value")),
+        Value::List(_) => return Err(unsupported_pivot_value("an array value")),
+        Value::Map(_) => return Err(unsupported_pivot_value("a map value")),
+        Value::Struct(_) => return Err(unsupported_pivot_value("a struct value")),
+        Value::Variant { .. } => return Err(unsupported_pivot_value("a variant value")),
     };
-    Expression::literal(lit)
+    Ok(Expression::literal(lit))
+}
+
+/// The `UNSUPPORTED_OPERATION` error of a pivot on a value of `kind`, which has no literal.
+fn unsupported_pivot_value(kind: &str) -> SparkError {
+    SparkError::classed(
+        SparkErrorKind::NotImplementedError,
+        "UNSUPPORTED_OPERATION",
+        &[("operation", &format!("Pivot on {kind}"))],
+    )
 }
 
 /// Grouped data for performing aggregations.
@@ -122,9 +158,11 @@ impl GroupedData {
     /// Pivot on a column, optionally with explicit values (`GroupedData.pivot`).
     ///
     /// Mirrors `df.groupBy(...).pivot(col, values)`. When `values` is `None` the
-    /// server computes the distinct values; when supplied they are serialized as
+    /// server computes the distinct values; when supplied they are serialized as typed
     /// pivot-value literals. As PySpark's, only the grouping of `group_by` pivots: that of
     /// a rollup, a cube, grouping sets or a pivot is the error of [`GroupedData::check_pivot`].
+    /// A null, a nested value, or a decimal without its precision and scale is an
+    /// `UNSUPPORTED_OPERATION` error.
     pub fn pivot(
         &self,
         pivot_col: Column,
@@ -135,7 +173,7 @@ impl GroupedData {
             .unwrap_or_default()
             .into_iter()
             .map(value_to_lit_expr)
-            .collect();
+            .collect::<Result<_>>()?;
         Ok(GroupedData {
             dataframe: self.dataframe.clone(),
             group_cols: self.group_cols.clone(),
@@ -1044,6 +1082,101 @@ mod tests {
             assert_eq!(
                 literal.literal_type,
                 Some(LiteralType::DayTimeInterval(micros))
+            );
+        }
+    }
+
+    #[test]
+    fn pivot_values_are_typed_literals() {
+        use crate::row::Value;
+        use spark_connect_proto::{expression::literal::LiteralType, relation::RelType};
+        let values = vec![
+            Value::Binary(vec![1, 2]),
+            Value::Date(19723),
+            Value::Timestamp(1_704_067_200_000_000),
+            Value::TimestampNtz(1_704_067_200_000_000),
+            Value::Time(3_600_000_000_000),
+            Value::Decimal {
+                value: "1.50".to_string(),
+                precision: Some(5),
+                scale: Some(2),
+            },
+        ];
+        let expected = vec![
+            LiteralType::Binary(vec![1, 2].into()),
+            LiteralType::Date(19723),
+            LiteralType::Timestamp(1_704_067_200_000_000),
+            LiteralType::TimestampNtz(1_704_067_200_000_000),
+            LiteralType::Time(spark_connect_proto::expression::literal::Time {
+                nano: 3_600_000_000_000,
+                precision: Some(6),
+            }),
+            LiteralType::Decimal(spark_connect_proto::expression::literal::Decimal {
+                value: "1.50".to_string(),
+                precision: Some(5),
+                scale: Some(2),
+            }),
+        ];
+        let frame = session().range(1).unwrap();
+        let pivot = frame
+            .group_by(vec![] as Vec<Column>)
+            .pivot(crate::column::col("value"), Some(values))
+            .unwrap()
+            .count();
+        let Some(RelType::Aggregate(aggregate)) = pivot.plan.to_proto().rel_type else {
+            panic!("expected Aggregate");
+        };
+        let literal_types: Vec<_> = aggregate
+            .pivot
+            .unwrap()
+            .values
+            .into_iter()
+            .map(|literal| literal.literal_type)
+            .collect();
+        assert_eq!(
+            literal_types,
+            expected.into_iter().map(Some).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn pivot_values_without_a_literal_are_unsupported() {
+        use crate::row::Value;
+        let frame = session().range(1).unwrap();
+        let cases = [
+            (Value::Null, "Pivot on a null value"),
+            (Value::List(vec![]), "Pivot on an array value"),
+            (Value::Map(vec![]), "Pivot on a map value"),
+            (
+                Value::Variant {
+                    value: vec![],
+                    metadata: vec![],
+                },
+                "Pivot on a variant value",
+            ),
+            (
+                Value::Decimal {
+                    value: "1.5".to_string(),
+                    precision: None,
+                    scale: Some(1),
+                },
+                "Pivot on a decimal without precision or scale",
+            ),
+        ];
+        for (value, operation) in cases {
+            let error = frame
+                .group_by(vec![] as Vec<Column>)
+                .pivot(crate::column::col("value"), Some(vec![value]))
+                .err()
+                .expect("an error");
+            assert_eq!(error.kind, SparkErrorKind::NotImplementedError);
+            assert_eq!(
+                error.get_condition().as_deref(),
+                Some("UNSUPPORTED_OPERATION")
+            );
+            assert_eq!(
+                error.get_message_parameters().unwrap()["operation"],
+                operation
             );
         }
     }

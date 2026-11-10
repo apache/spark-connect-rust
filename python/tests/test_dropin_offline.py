@@ -950,6 +950,8 @@ assert seen == {"active": None, "default": first, "got": first}, seen
 created = SparkSession.builder.remote("sc://localhost:1").create()
 assert created is not first and SparkSession.getActiveSession() is first
 
+# No server at localhost:1 to release on: a release would wait for the retries of a refused port.
+first.release_session_on_close = False
 first.stop()
 assert SparkSession.getActiveSession() is None
 assert condition(SparkSession.active) == "NO_ACTIVE_OR_DEFAULT_SESSION"
@@ -1832,8 +1834,9 @@ def test_progress_handlers_are_called_with_the_progress_of_executions_as_pyspark
     # As PySpark Connect's: a handler is registered once, and called with the keyword arguments
     # of ProgressHandler, of the StageInfo of each stage, for each progress of an execution that
     # has tasks, and once more, as done, when it ends; removing a handler that is not registered
-    # raises a ValueError; an exception of a handler goes to sys.unraisablehook; and
-    # SPARK_CONNECT_PROGRESS_BAR_ENABLED prints the progress bar.
+    # raises a ValueError; an exception of a handler fails the execution (see the test below), and
+    # its done call goes to sys.unraisablehook; and SPARK_CONNECT_PROGRESS_BAR_ENABLED prints the
+    # progress bar.
     import sys
 
     from pyspark.sql.connect.shell.progress import StageInfo
@@ -1868,7 +1871,8 @@ def test_progress_handlers_are_called_with_the_progress_of_executions_as_pyspark
         raise ZeroDivisionError("handler")
 
     spark.registerProgressHandler(failing)
-    spark.range(1).collect()
+    with pytest.raises(ZeroDivisionError):
+        spark.range(1).collect()
     assert unraisable and isinstance(unraisable[0].exc_value, ZeroDivisionError)
     spark.removeProgressHandler(failing)
 
@@ -2764,6 +2768,80 @@ def test_type_class_hierarchy():
     assert issubclass(T.IntegerType, T.NumericType)
     assert issubclass(T.NumericType, T.AtomicType)
     assert issubclass(T.AtomicType, T.DataType)
+
+
+def test_channel_builder_keepalive_and_user_agent_as_pyspark(monkeypatch):
+    # The keepalive properties, the user agent and the constants of PySpark's ChannelBuilder:
+    # the defaults of core.py, and the values of the parameters of the connection string.
+    import platform
+
+    from pyspark.errors.exceptions.connect import SparkConnectException
+    from pyspark.sql.connect.client import ChannelBuilder, DefaultChannelBuilder
+
+    monkeypatch.delenv("SPARK_CONNECT_USER_AGENT", raising=False)
+    assert ChannelBuilder.PARAM_USER_AGENT == "user_agent"
+    assert ChannelBuilder.PARAM_GRPC_KEEPALIVE_ENABLED == "grpc_keepalive_enabled"
+    assert ChannelBuilder.PARAM_GRPC_KEEPALIVE_TIME_MS == "grpc_keepalive_time_ms"
+    assert ChannelBuilder.PARAM_GRPC_KEEPALIVE_TIMEOUT_MS == "grpc_keepalive_timeout_ms"
+    assert ChannelBuilder.PARAM_GRPC_KEEPALIVE_WITHOUT_CALLS == "grpc_keepalive_without_calls"
+    assert ChannelBuilder.GRPC_DEFAULT_KEEPALIVE_ENABLED is True
+    assert ChannelBuilder.GRPC_DEFAULT_KEEPALIVE_TIME_MS == 60000
+    assert ChannelBuilder.GRPC_DEFAULT_KEEPALIVE_TIMEOUT_MS == 20000
+    assert ChannelBuilder.GRPC_DEFAULT_KEEPALIVE_WITHOUT_CALLS is True
+
+    default = DefaultChannelBuilder("sc://localhost")
+    assert default.keepalive_enabled is True
+    assert default.keepalive_time_ms == 60000
+    assert default.keepalive_timeout_ms == 20000
+    assert default.keepalive_without_calls is True
+    assert default.userAgent == (
+        f"_SPARK_CONNECT_PYTHON spark/4.3.0 os/{platform.uname().system.lower()} "
+        f"python/{platform.python_version()}"
+    )
+
+    tuned = DefaultChannelBuilder(
+        "sc://localhost/;grpc_keepalive_enabled=FALSE;grpc_keepalive_time_ms=30000"
+        ";grpc_keepalive_timeout_ms=5000;grpc_keepalive_without_calls=false"
+    )
+    assert tuned.keepalive_enabled is False
+    assert tuned.keepalive_time_ms == 30000
+    assert tuned.keepalive_timeout_ms == 5000
+    assert tuned.keepalive_without_calls is False
+    assert list(tuned.metadata()) == []  # the keepalive params are channel options, not metadata
+    # The gRPC options of the channel, as PySpark's: the keepalive of the defaults, and none
+    # of the keepalive when it is disabled.
+    message_lengths = [
+        ("grpc.max_send_message_length", 134217728),
+        ("grpc.max_receive_message_length", 134217728),
+    ]
+    assert default._effective_channel_options() == message_lengths + [
+        ("grpc.keepalive_time_ms", 60000),
+        ("grpc.keepalive_timeout_ms", 20000),
+        ("grpc.keepalive_permit_without_calls", 1),
+    ]
+    assert tuned._effective_channel_options() == message_lengths  # disabled: none of it
+    enabled = DefaultChannelBuilder(
+        "sc://localhost/;grpc_keepalive_time_ms=30000;grpc_keepalive_timeout_ms=5000"
+        ";grpc_keepalive_without_calls=false"
+    )
+    assert enabled._effective_channel_options() == message_lengths + [
+        ("grpc.keepalive_time_ms", 30000),
+        ("grpc.keepalive_timeout_ms", 5000),
+        ("grpc.keepalive_permit_without_calls", 0),
+    ]
+    with pytest.raises(ValueError):
+        DefaultChannelBuilder("sc://localhost/;grpc_keepalive_time_ms=abc").keepalive_time_ms
+
+    named = DefaultChannelBuilder("sc://localhost/;user_agent=abc")
+    assert named.userAgent == (
+        f"abc spark/4.3.0 os/{platform.uname().system.lower()} python/{platform.python_version()}"
+    )
+    monkeypatch.setenv("SPARK_CONNECT_USER_AGENT", "env-agent")
+    assert default.userAgent.startswith("env-agent spark/4.3.0 ")
+    too_long = DefaultChannelBuilder("sc://localhost")
+    too_long.set("user_agent", "a" * 2049)
+    with pytest.raises(SparkConnectException, match="should not exceed 2048 characters"):
+        too_long.userAgent
 
 
 @pytest.mark.parametrize("make, expected", [
@@ -6209,6 +6287,50 @@ def test_nullable_types():
     assert s_nullable.fields[0].nullable is True
 
 
+def test_a_progress_handler_that_raises_fails_the_execution_as_pyspark(mock_connect, monkeypatch):
+    # As PySpark Connect's: the progress of an execution calls the handlers from its result loop,
+    # so the exception of a handler goes out of collect() as it is, and the handlers are not
+    # called for the rest of the execution; the handler is still called as done, and the
+    # exception does not go to sys.unraisablehook. The session works afterwards.
+    import sys
+
+    spark, service = mock_connect
+    # ExecutePlanResponse.execution_progress=18 -> one stage with tasks, as the test above.
+    stage = (varint_field(1, 7) + varint_field(2, 4) + varint_field(3, 1)
+             + varint_field(4, 1024) + varint_field(5, 0))
+    service.execute_payload = message_field(18, message_field(1, stage) + varint_field(2, 3))
+    unraisable = []
+    monkeypatch.setattr(sys, "unraisablehook", unraisable.append)
+    error = ValueError("a handler raises")
+    calls = []
+
+    def failing(**kwargs):
+        calls.append(kwargs["done"])
+        if not kwargs["done"]:
+            raise error
+
+    later_calls = []
+
+    def later(**kwargs):
+        later_calls.append(kwargs["done"])
+
+    spark.registerProgressHandler(failing)
+    spark.registerProgressHandler(later)
+    try:
+        with pytest.raises(ValueError) as raised:
+            spark.range(1).collect()
+    finally:
+        spark.removeProgressHandler(failing)
+        spark.removeProgressHandler(later)
+    assert raised.value is error
+    assert calls == [False, True]
+    assert later_calls == [True]
+    assert unraisable == []
+
+    service.execute_payload = b""
+    assert spark.range(1).collect() == []
+
+
 def test_when_and_otherwise_conditions():
     """Test when/otherwise column expressions."""
     from pyspark.sql import functions as F
@@ -7580,6 +7702,33 @@ def test_nanosecond_timestamps_are_not_collected_as_pyspark(
     with pytest.raises(PySparkValueError, match=(
             r"\[UNSUPPORTED_OPERATION\] data type " + re.escape(proto_text) + r" is not supported\.")):
         collect(df)
+    # The schema surfaces raise as well, as PySpark's, which converts a schema from its proto: the
+    # analyzed schema of the frame and of a DDL string (the mock answers any DDL it does not parse
+    # with its data type) are the struct, and CANNOT_PARSE_DATATYPE for a name of the type.
+    from pyspark.sql import functions as F
+
+    service.data_type = struct
+    # repr reads the settings of the eager evaluation of the session, which the server has.
+    service.confs = {"spark.sql.repl.eagerEval.enabled": "false",
+                     "spark.sql.repl.eagerEval.maxNumRows": "20",
+                     "spark.sql.repl.eagerEval.truncate": "20"}
+    message = (r"\[UNSUPPORTED_OPERATION\] data type " + re.escape(proto_text) + r" is not supported\.")
+    for surface in (
+            lambda: df.schema,
+            lambda: df.columns,
+            lambda: df.dtypes,
+            lambda: df.printSchema(),
+            lambda: repr(df),
+            lambda: df.schema.json(),
+            lambda: spark.createDataFrame([(1,)], "a timestamp_ntz(9)"),
+            lambda: T.DataType.fromDDL("timestamp_ntz(9)"),
+            lambda: T.StructType.fromDDL("a timestamp_ntz(9)"),
+            lambda: spark.range(1).select(F.from_json(F.lit("{}"), "a timestamp_ntz(9)")).schema,
+    ):
+        with pytest.raises(PySparkValueError, match=message):
+            surface()
+    with pytest.raises(PySparkValueError, match=r"CANNOT_PARSE_DATATYPE.*timestamp_ntz\(9\)"):
+        T.StructType().add("t", "timestamp_ntz(9)")
 
 
 def test_udf_and_pandas_udf_decorator_forms(mock_connect):
@@ -8865,6 +9014,54 @@ def test_create_dataframe_of_a_numpy_array_as_pyspark(mock_connect):
     with pytest.raises(PySparkValueError) as e:
         spark.createDataFrame(np.array([]))
     assert e.value.getCondition() == "CANNOT_INFER_EMPTY_SCHEMA"
+
+
+@pytest.mark.parametrize(
+    "labels", ["datetime", "timedelta", "period", "interval", "multi_datetime"])
+@pytest.mark.parametrize("cells, arrow_type, values", [
+    # A mixed int and float column is a double, as PySpark infers it, not a row error.
+    ("int_float", lambda pa: pa.float64(), [1.0, 2.5]),
+    # A naive datetime of a list is a timestamp_ntz, not a time of the session time zone.
+    ("naive_list", lambda pa: pa.list_(pa.timestamp("us")),
+     [[datetime.datetime(2020, 1, 2, 3)], None]),
+    # A dict is a struct of the value types of its keys, mixed or not, and not a map.
+    ("dict", lambda pa: pa.struct([("u", pa.int64()), ("v", pa.string())]),
+     [{"u": 1, "v": "a"}, None]),
+    # A NaN in a list is a null, as PySpark has it.
+    ("nan_list", lambda pa: pa.list_(pa.float64()), [[1.0, None], None]),
+    # A NumPy int32 is an int, as PySpark infers it.
+    ("np_int32", lambda pa: pa.int32(), [1, 2]),
+])
+def test_datetimelike_labels_convert_cells_as_pyspark(
+    mock_connect, labels, cells, arrow_type, values
+):
+    # A plain frame whose labels are a DatetimeIndex, TimedeltaIndex, PeriodIndex or IntervalIndex
+    # (or a MultiIndex with a DatetimeIndex level) converts with Arrow, as one with default labels:
+    # its cells take the types that PySpark infers.
+    import numpy as np
+    import pyarrow as pa
+
+    pd = pytest.importorskip("pandas")
+    column = {
+        "int_float": [1, 2.5],
+        "naive_list": [[datetime.datetime(2020, 1, 2, 3)], None],
+        "dict": [{"u": 1, "v": "a"}, None],
+        "nan_list": [[1.0, float("nan")], None],
+        "np_int32": [np.int32(1), np.int32(2)],
+    }[cells]
+    columns = {
+        "datetime": pd.DatetimeIndex(["2020-01-01"]),
+        "timedelta": pd.TimedeltaIndex(["1s"]),
+        "period": pd.period_range("2020-01", periods=1, freq="M"),
+        "interval": pd.interval_range(0, 1),
+        "multi_datetime": pd.MultiIndex.from_tuples([(pd.Timestamp("2020-01-01"), "x")]),
+    }[labels]
+    data = pd.DataFrame({0: pd.Series(column, dtype=object)})
+    data.columns = columns
+    table = _native_number_input_table(mock_connect, data)
+    assert table.num_columns == 1
+    assert table.schema.field(0).type == arrow_type(pa)
+    assert table.column(0).to_pylist() == values
 
 
 def test_catalog_function_class_name_is_none_without_a_class_as_pyspark(mock_connect):
@@ -11568,6 +11765,9 @@ def _no_session_left_active():
 
     session = SparkSession.getActiveSession()
     if session is not None:
+        # The servers of these sessions are mocks or unreachable: a release would wait for the
+        # retries of a refused port, so the session is closed without it.
+        session.release_session_on_close = False
         session.stop()
 
 
@@ -11772,8 +11972,8 @@ def test_udf_profiles_are_collected_from_the_python_accumulators_as_pyspark(
 def test_progress_handler_that_runs_queries_without_end_is_bounded(mock_connect, monkeypatch):
     # A handler that runs a query for each progress of an execution nests the executions past
     # the bound of nested callbacks: the query past it fails with a RecursionError, which the
-    # handler's exception goes to sys.unraisablehook with, instead of the native stack
-    # overflowing, and the outer query returns.
+    # handlers' exceptions carry out of each execution, as PySpark's result loop does, instead of
+    # the native stack overflowing. The outer query raises it.
     import sys
 
     spark, service = mock_connect
@@ -11792,11 +11992,12 @@ def test_progress_handler_that_runs_queries_without_end_is_bounded(mock_connect,
 
     spark.registerProgressHandler(handler)
     try:
-        spark.range(1).collect()
+        with pytest.raises(RecursionError):
+            spark.range(1).collect()
     finally:
         spark.removeProgressHandler(handler)
     assert calls == [False, False, True, True]
-    assert [type(error.exc_value) for error in unraisable] == [RecursionError]
+    assert unraisable == []
 
 
 def test_schema_cache_cold_children_keep_independent_caches(mock_connect):
@@ -12715,6 +12916,76 @@ def completion_analyzed():
             process.join(10)
         parent.close()
         child.close()
+
+
+@pytest.mark.parametrize("value, wire_type", [
+    (-(2**63), "long"),
+    (-(2**31) - 1, "long"),
+    (-(2**31), "integer"),
+    (-1, "integer"),
+    (0, "integer"),
+    (2**31 - 1, "integer"),
+    (2**31, "long"),
+    (2**63 - 1, "long"),
+])
+def test_integer_literal_wire_boundaries(value, wire_type):
+    from enum import IntEnum
+
+    from pyspark.sql import functions as F
+    from pyspark.sql.connect import proto
+
+    class IntegerSubclass(int):
+        pass
+
+    class IntegerEnum(IntEnum):
+        VALUE = value
+
+    expected = proto.Expression.Literal()
+    setattr(expected, wire_type, value)
+    for scalar in (value, IntegerSubclass(value), IntegerEnum.VALUE):
+        literal = F.lit(scalar)._expr.to_plan(None).literal
+        compared = (F.col("id") == scalar)._expr.to_plan(None)
+        assert literal == expected
+        assert compared.unresolved_function.arguments[1].literal == expected
+
+
+def test_exact_integer_operators_skip_numpy_probes(monkeypatch):
+    import sys
+    from enum import IntEnum
+
+    from pyspark.sql import functions as F
+    from pyspark.sql.connect import proto
+
+    class IntegerSubclass(int):
+        pass
+
+    class IntegerEnum(IntEnum):
+        VALUE = 5
+
+    class ProbeSentinel:
+        @property
+        def ndarray(self):
+            raise RuntimeError("NumPy probe reached")
+
+    column = F.col("id")
+    with monkeypatch.context() as patch:
+        patch.setitem(sys.modules, "numpy", ProbeSentinel())
+        compared = (column == 5)._expr.to_plan(None)
+        assert compared.unresolved_function.arguments[1].literal == proto.Expression.Literal(integer=5)
+        for value in (IntegerSubclass(5), IntegerEnum.VALUE, True, 2**63):
+            with pytest.raises(RuntimeError, match="NumPy probe reached"):
+                column == value
+
+
+def test_boolean_literals_keep_their_wire_type():
+    from pyspark.sql import functions as F
+    from pyspark.sql.connect import proto
+
+    for value in (False, True):
+        expected = proto.Expression.Literal(boolean=value)
+        assert F.lit(value)._expr.to_plan(None).literal == expected
+        compared = (F.col("flag") == value)._expr.to_plan(None)
+        assert compared.unresolved_function.arguments[1].literal == expected
 
 
 def test_int_literals_beyond_a_long_raise_value_not_between_as_pyspark():
@@ -14259,6 +14530,51 @@ def test_lit_of_a_numpy_array_is_an_array_of_its_type_as_pyspark():
         assert repr(F.lit(value)).lower() == f"column<'{expected}'>"
 
 
+def test_datetime_literals_are_exact_micros_as_pyspark(mock_connect, monkeypatch):
+    # As PySpark's TimestampType.toInternal: the microseconds of a datetime are exact over the
+    # whole range (a float of seconds loses them after the year 2255), and a naive datetime is
+    # in the local time zone (the micros of year 1 of a naive datetime are platform-dependent).
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+
+    def micros(column):
+        spark.range(1).select(column).collect()
+        # Project.expressions=3; Expression.literal=1, Literal.timestamp=17 (an int64).
+        plan = parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0]
+        expression = parse_message(parse_message(parse_message(plan)[3][0])[3][0])
+        value = parse_message(expression[1][0])[17][0]
+        return value - (1 << 64) if value >= 1 << 63 else value
+
+    utc = datetime.timezone.utc
+    cases = [
+        (datetime.datetime(1, 1, 1, 0, 0, 0, 1, tzinfo=utc), -62135596799999999),
+        (datetime.datetime(1969, 12, 31, 23, 59, 59, 999999, tzinfo=utc), -1),
+        (datetime.datetime(2300, 1, 1, 0, 0, 0, 123457, tzinfo=utc), 10413792000123457),
+        (datetime.datetime(9999, 12, 31, 23, 59, 59, 999999, tzinfo=utc), 253402300799999999),
+    ]
+    for value, expected in cases:
+        assert micros(F.lit(value)) == expected
+    # The naive values of the same instants in a zone nine hours east of UTC, which has no DST.
+    if not hasattr(time, "tzset"):
+        pytest.skip("time.tzset is not available")
+    zone, offset = os.environ.get("TZ"), 9 * 3600 * 1_000_000
+    os.environ["TZ"] = "Etc/GMT-9"
+    time.tzset()
+    try:
+        assert micros(F.lit(datetime.datetime(1969, 12, 31, 23, 59, 59, 999999))) == -1 - offset
+        assert micros(F.lit(datetime.datetime(2300, 1, 1, 0, 0, 0, 123457))) == (
+            10413792000123457 - offset)
+        assert micros(F.lit(datetime.datetime(9999, 12, 31, 23, 59, 59, 999999))) == (
+            253402300799999999 - offset)
+    finally:
+        if zone is None:
+            del os.environ["TZ"]
+        else:
+            os.environ["TZ"] = zone
+        time.tzset()
+
+
 def test_lit_errors_as_pyspark():
     np = pytest.importorskip("numpy")
     from pyspark.errors import PySparkTypeError, PySparkValueError
@@ -14290,8 +14606,11 @@ def test_variant_delete_requires_paths():
 
 
 def _offline_session():
-    # Port 1: nothing listens; the channel is lazy, so the session builds offline.
-    return SparkSession.builder.remote("sc://localhost:1").getOrCreate()
+    # Port 1: nothing listens; the channel is lazy, so the session builds offline. Nothing is
+    # released on it: a release would wait for the retries of a refused port.
+    spark = SparkSession.builder.remote("sc://localhost:1").getOrCreate()
+    spark.release_session_on_close = False
+    return spark
 
 
 def test_nearest_by_join_checks_its_arguments_as_pyspark():
@@ -14455,8 +14774,7 @@ def test_session_context_manager_stops_session():
     with spark as s:
         assert s is spark
         assert not s.is_stopped
-    # __exit__ stops it; stop() is best-effort (the release RPC fails offline) and
-    # idempotent.
+    # __exit__ stops it, and stop() is idempotent.
     assert spark.is_stopped
     spark.stop()
     assert SparkSession.getActiveSession() is None
@@ -14495,6 +14813,7 @@ def test_sql_context_connect_backed():
         assert ctx.udf is not None and ctx.read is not None
         # Stopping a different session leaves the cache; stopping its own clears it.
         other = spark.newSession()
+        other.release_session_on_close = False  # no server to release on, as spark
         other.stop()
         assert cctx.SQLContext._instantiatedContext is ctx
         spark.stop()
@@ -15762,6 +16081,8 @@ def test_requests_of_a_stopped_session_raise_no_active_session_as_pyspark():
 
     spark = _offline_session()
     other = spark.newSession()
+    # No server to release on, as the sessions of _offline_session().
+    other.release_session_on_close = False
     other.stop()
     assert other.is_stopped
     requests = [
@@ -15841,6 +16162,46 @@ def test_join_types_are_sent_as_pyspark_join_types(mock_connect, how, join_type)
     # ExecutePlanRequest.plan=3, Plan.root=1, Relation.join=5, Join.join_type=4.
     plan = parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0]
     assert parse_message(parse_message(plan)[5][0])[4] == [join_type]
+
+
+def test_transform_passes_the_receiver_itself_as_pyspark(mock_connect):
+    # As PySpark's transform, which calls func with self: a DataFrame subclass keeps its methods
+    # in the callback, and the callback gets the receiver itself, not a plain DataFrame.
+    from pyspark.sql import functions as F
+    from pyspark.sql.connect.dataframe import DataFrame
+
+    spark, service = mock_connect
+
+    class MyDF(DataFrame):
+        def twice(self):
+            return self.select((F.col("id") * 2).alias("x"))
+
+    frame = MyDF(spark.range(3)._plan, spark)
+    seen = []
+    assert frame.transform(lambda d: seen.append(d) or d) is frame
+    assert seen[0] is frame
+    assert type(frame.transform(lambda d: d)) is MyDF
+    # ExecutePlanRequest.plan=3, Plan.root=1, Relation.project=3: the callback's twice() is a Project.
+    frame.transform(lambda d: d.twice()).collect()
+    plan = parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0]
+    assert 3 in parse_message(plan)
+
+
+def test_take_sends_its_count_as_a_limit_for_the_server_to_check(mock_connect):
+    # As PySpark's take, which is limit(num).collect(): a negative count is sent as the Limit
+    # of the plan, and the server raises its AnalysisException, not an overflow in the drop-in.
+    spark, service = mock_connect
+
+    def sent_limit():
+        # ExecutePlanRequest.plan=3, Plan.root=1, Relation.limit=8, Limit.limit=2 (an int32, a
+        # negative one as its ten-byte varint).
+        plan = parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0]
+        return parse_message(parse_message(plan)[8][0])[2][0]
+
+    spark.range(3).take(2)
+    assert sent_limit() == 2
+    spark.range(3).take(-1)
+    assert sent_limit() == 2**64 - 1
 
 
 def test_join_on_lists_join_on_their_conjunction_or_names_as_pyspark(mock_connect):

@@ -9,8 +9,7 @@ use spark_connect_core::error::Result;
 use spark_connect_core::runtime::CallbackGuard;
 use spark_connect_proto as proto;
 
-use crate::arrow_chunks::ArrowChunkAssembler;
-use crate::session::{ProgressHandler, ProgressHandlers, SparkSession};
+use crate::session::{FallibleProgressHandler, ProgressHandlers, SparkSession};
 
 /// The progress of a stage of an execution, as PySpark's `StageInfo`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,12 +65,13 @@ impl ProgressTracker {
 
     /// A progress of the server, as PySpark's `Progress.update_ticks`: the handlers are called
     /// only for one that has tasks, whose stages and running tasks the last call, of `done`,
-    /// has too.
+    /// has too. The error of a handler fails the execution, as the exception of a handler
+    /// propagates out of PySpark's result loop.
     pub(crate) fn update(
         &mut self,
         progress: &proto::execute_plan_response::ExecutionProgress,
         operation_id: &str,
-    ) {
+    ) -> Result<()> {
         if self.operation_id.as_deref().is_none_or(str::is_empty) {
             self.operation_id = Some(operation_id.to_string());
         }
@@ -79,13 +79,14 @@ impl ProgressTracker {
         if stages.iter().map(|stage| stage.num_tasks).sum::<i64>() > 0 {
             self.stages = stages;
             self.inflight_tasks = progress.num_inflight_tasks;
-            self.notify(false);
+            return self.notify(false);
         }
+        Ok(())
     }
 
-    fn notify(&self, done: bool) {
+    fn notify(&self, done: bool) -> Result<()> {
         // Clone handlers out of the registry lock so callbacks can add or remove handlers.
-        let handlers: Vec<ProgressHandler> = self
+        let handlers: Vec<FallibleProgressHandler> = self
             .handlers
             .lock()
             .unwrap()
@@ -93,7 +94,7 @@ impl ProgressTracker {
             .map(|(_, handler)| Arc::clone(handler))
             .collect();
         if handlers.is_empty() {
-            return;
+            return Ok(());
         }
         let update = ProgressUpdate {
             stages: self.stages.clone(),
@@ -105,17 +106,20 @@ impl ProgressTracker {
         // execution callback-depth guard without retaining the session or its listener bus.
         let _callback = CallbackGuard::enter();
         for handler in handlers {
-            handler(&update);
+            handler(&update)?;
         }
+        Ok(())
     }
 }
 
 impl Drop for ProgressTracker {
     /// As PySpark's `Progress.finish` when its execution ends, also of an error. While a panic
-    /// unwinds, a handler is not called: one that panics again would abort the process.
+    /// unwinds, a handler is not called: one that panics again would abort the process. An
+    /// error of the done call has no caller left to return to, so it is dropped here; the
+    /// handlers of the drop-in report theirs themselves.
     fn drop(&mut self) {
         if !std::thread::panicking() {
-            self.notify(true);
+            let _ = self.notify(true);
         }
     }
 }
@@ -125,7 +129,7 @@ impl Drop for ProgressTracker {
 pub(crate) struct ExecutionStream {
     stream: ReattachableResponseStream,
     progress: ProgressTracker,
-    chunks: ArrowChunkAssembler,
+    chunks: crate::arrow_chunks::ArrowChunkAssembler,
 }
 
 impl ExecutionStream {
@@ -133,7 +137,7 @@ impl ExecutionStream {
         ExecutionStream {
             stream,
             progress,
-            chunks: ArrowChunkAssembler::default(),
+            chunks: Default::default(),
         }
     }
 
@@ -141,17 +145,15 @@ impl ExecutionStream {
     /// chunks of an Arrow batch joined into the batch: the response of a chunk that is not the
     /// last one has no batch.
     pub(crate) async fn message(&mut self) -> Result<Option<proto::ExecutePlanResponse>> {
-        let Some(mut response) = self.stream.message().await? else {
-            self.chunks.finish()?;
-            return Ok(None);
-        };
-        if let Some(proto::execute_plan_response::ResponseType::ExecutionProgress(progress)) =
-            &response.response_type
-        {
-            self.progress.update(progress, &response.operation_id);
+        let response = self.stream.message().await?;
+        if let Some(response) = &response {
+            if let Some(proto::execute_plan_response::ResponseType::ExecutionProgress(progress)) =
+                &response.response_type
+            {
+                self.progress.update(progress, &response.operation_id)?;
+            }
         }
-        self.chunks.push(&mut response)?;
-        Ok(Some(response))
+        self.chunks.join(response)
     }
 }
 
@@ -199,8 +201,10 @@ mod tests {
         });
         {
             let mut tracker = ProgressTracker::new(&session, None);
-            tracker.update(&progress(&[(1, 0)], 0), "op");
-            tracker.update(&progress(&[(1, 4), (2, 2)], 3), "other");
+            tracker.update(&progress(&[(1, 0)], 0), "op").unwrap();
+            tracker
+                .update(&progress(&[(1, 4), (2, 2)], 3), "other")
+                .unwrap();
         }
         let updates = updates.lock().unwrap().clone();
         assert_eq!(updates.len(), 2);
@@ -238,12 +242,48 @@ mod tests {
         });
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut tracker = ProgressTracker::new(&session, None);
-            tracker.update(&progress(&[(1, 1)], 0), "op");
+            tracker.update(&progress(&[(1, 1)], 0), "op").unwrap();
         }));
         assert!(result.is_err());
         // Only the update called the handler; the done call during unwinding is skipped.
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         session.remove_progress_handler(id);
+    }
+
+    /// A handler that fails, as a Python handler that raises: the update returns its error, the
+    /// handlers after it are not called for that update, and the done call still reaches every
+    /// handler when the tracker ends.
+    #[test]
+    fn a_failing_handler_fails_the_update_and_is_still_called_as_done() {
+        let session = SparkSession::builder()
+            .remote("sc://localhost:15002")
+            .get_or_create()
+            .expect("session");
+        let later = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&later);
+        let failing = session.register_fallible_progress_handler(|update| {
+            if update.done {
+                Ok(())
+            } else {
+                Err(spark_connect_core::error::SparkError::connect_msg(
+                    "handler failed",
+                ))
+            }
+        });
+        let after = session.register_progress_handler(move |update| {
+            seen.lock().unwrap().push(update.done);
+        });
+        {
+            let mut tracker = ProgressTracker::new(&session, None);
+            let error = tracker
+                .update(&progress(&[(1, 1)], 0), "op")
+                .expect_err("the failing handler fails the update");
+            assert_eq!(error.message(), "handler failed");
+            assert!(later.lock().unwrap().is_empty());
+        }
+        assert_eq!(*later.lock().unwrap(), vec![true]);
+        session.remove_progress_handler(failing);
+        session.remove_progress_handler(after);
     }
 
     #[test]
@@ -280,12 +320,12 @@ mod tests {
                         stages: Vec::new(),
                         inflight_tasks: 0,
                     };
-                    nested.notify(false);
+                    nested.notify(false).unwrap();
                 }
             }
         });
         let tracker = ProgressTracker::new(&session, None);
-        tracker.notify(false);
+        tracker.notify(false).unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), MAX_CALLBACK_DEPTH);
         assert_eq!(failures.load(Ordering::SeqCst), 1);
         assert!(check_callback_depth().is_ok());

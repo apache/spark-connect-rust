@@ -252,6 +252,12 @@ fn retry_exception_bound_passed(
         .is_some_and(|ms| since.elapsed() >= Duration::from_millis(ms))
 }
 
+/// A hook of the executions of a client, as PySpark's `SparkSession.Hook.on_execute_plan`: it is
+/// called with each `ExecutePlanRequest` before the client sends it, and returns the request to
+/// send, which keeps the operation ID of the original.
+pub type ExecutePlanHook =
+    std::sync::Arc<dyn Fn(ExecutePlanRequest) -> Result<ExecutePlanRequest> + Send + Sync>;
+
 /// Let the server split the Arrow batches too large for one message into chunks, which the
 /// stream of the execution joins, as PySpark's client does, without a preferred chunk size.
 fn allow_arrow_batch_chunking(request: &mut ExecutePlanRequest) {
@@ -266,12 +272,6 @@ fn allow_arrow_batch_chunking(request: &mut ExecutePlanRequest) {
         )),
     });
 }
-
-/// A hook of the executions of a client, as PySpark's `SparkSession.Hook.on_execute_plan`: it is
-/// called with each `ExecutePlanRequest` before the client sends it, and returns the request to
-/// send, which keeps the operation ID of the original.
-pub type ExecutePlanHook =
-    std::sync::Arc<dyn Fn(ExecutePlanRequest) -> Result<ExecutePlanRequest> + Send + Sync>;
 
 /// A Spark Connect client for communicating with a remote Spark server.
 ///
@@ -788,10 +788,10 @@ impl SparkConnectClient {
         mut request: ExecutePlanRequest,
     ) -> Result<Streaming<ExecutePlanResponse>> {
         self.ensure_open()?;
+        allow_arrow_batch_chunking(&mut request);
         self.extend_user_context(&mut request.user_context);
         self.fill_user_context(&mut request.user_context);
         self.observe_on(&mut request.client_observed_server_side_session_id);
-        allow_arrow_batch_chunking(&mut request);
         let request = self.hooked(request)?;
         let mut req = Request::new(request);
         self._attach_metadata(&mut req);
@@ -982,13 +982,13 @@ impl SparkConnectClient {
         mut request: ExecutePlanRequest,
     ) -> Result<ReattachableResponseStream> {
         self.ensure_open()?;
+        allow_arrow_batch_chunking(&mut request);
         self.extend_user_context(&mut request.user_context);
         // Before the iterator: its ReattachExecute and ReleaseExecute requests take the
         // user context of this request, and the request of the hook, as PySpark's iterator
         // is of the request that the hooks return.
         self.fill_user_context(&mut request.user_context);
         self.observe_on(&mut request.client_observed_server_side_session_id);
-        allow_arrow_batch_chunking(&mut request);
         let request = self.hooked(request)?;
         let iter = ExecutePlanResponseReattachableIterator::new(request);
         let start = iter.request().clone();
@@ -1530,6 +1530,11 @@ impl SparkConnectClient {
         Ok(cloned)
     }
 
+    /// Release this session on the server.
+    ///
+    /// Mirrors `pyspark.sql.connect.client.core.SparkConnectClient.release_session`, which
+    /// retries it under the retry policy: a transient failure at stop does not leave the
+    /// session on the server until its timeout.
     pub async fn release_session(&self) -> Result<()> {
         let mut request = ReleaseSessionRequest::default();
         request.session_id = self.session_id.clone();
@@ -1538,16 +1543,20 @@ impl SparkConnectClient {
             ..Default::default()
         });
 
-        let deadline = self.rpc_deadlines.release_session;
-        let mut req = with_deadline(Request::new(request), deadline);
-        self._attach_metadata(&mut req);
-        match within_deadline(deadline, self.stub.clone().release_session(req)).await {
-            Ok(response) => {
-                let response = response.into_inner();
-                self.verify_response(&response.session_id, &response.server_side_session_id)
-            }
-            Err(status) => Err(self.error_from_status(status).await),
-        }
+        let response = self
+            .with_retry(|| {
+                let deadline = self.rpc_deadlines.release_session;
+                let mut req = with_deadline(Request::new(request.clone()), deadline);
+                self._attach_metadata(&mut req);
+                let mut stub = self.stub.clone();
+                async move {
+                    within_deadline(deadline, stub.release_session(req))
+                        .await
+                        .map(Response::into_inner)
+                }
+            })
+            .await?;
+        self.verify_response(&response.session_id, &response.server_side_session_id)
     }
 
     /// Add artifacts to this session.
@@ -2566,6 +2575,117 @@ mod tests {
 
         // Test that release_session can be called without panicking
         let _result = client.release_session();
+    }
+
+    /// A loopback service of ReleaseSession only: its first `unavailable` calls answer
+    /// UNAVAILABLE, the later ones succeed. `calls` counts every call.
+    struct ReleaseCalls {
+        calls: std::sync::atomic::AtomicUsize,
+        unavailable: usize,
+    }
+
+    #[derive(Clone)]
+    struct ReleaseService(std::sync::Arc<ReleaseCalls>);
+
+    impl tonic::server::NamedService for ReleaseService {
+        const NAME: &'static str = "spark.connect.SparkConnectService";
+    }
+
+    impl tonic::codegen::Service<tonic::codegen::http::Request<tonic::body::Body>> for ReleaseService {
+        type Response = tonic::codegen::http::Response<tonic::body::Body>;
+        type Error = std::convert::Infallible;
+        type Future = tonic::codegen::BoxFuture<Self::Response, Self::Error>;
+
+        fn poll_ready(
+            &mut self,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::result::Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn call(
+            &mut self,
+            request: tonic::codegen::http::Request<tonic::body::Body>,
+        ) -> Self::Future {
+            let state = self.0.clone();
+            Box::pin(async move {
+                if request.uri().path() == "/spark.connect.SparkConnectService/ReleaseSession" {
+                    let mut grpc = tonic::server::Grpc::new(tonic_prost::ProstCodec::default());
+                    return Ok(grpc.unary(ReleaseRpc(state), request).await);
+                }
+                Ok(tonic::codegen::http::Response::builder()
+                    .status(200)
+                    .header("grpc-status", "12")
+                    .header("content-type", "application/grpc")
+                    .body(tonic::body::Body::empty())
+                    .unwrap())
+            })
+        }
+    }
+
+    struct ReleaseRpc(std::sync::Arc<ReleaseCalls>);
+
+    impl tonic::server::UnaryService<ReleaseSessionRequest> for ReleaseRpc {
+        type Response = spark_connect_proto::ReleaseSessionResponse;
+        type Future = tonic::codegen::BoxFuture<tonic::Response<Self::Response>, tonic::Status>;
+
+        fn call(&mut self, request: tonic::Request<ReleaseSessionRequest>) -> Self::Future {
+            let state = self.0.clone();
+            let request = request.into_inner();
+            Box::pin(async move {
+                let call = state
+                    .calls
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if call < state.unavailable {
+                    return Err(tonic::Status::unavailable("the server is restarting"));
+                }
+                Ok(tonic::Response::new(
+                    spark_connect_proto::ReleaseSessionResponse {
+                        session_id: request.session_id,
+                        ..Default::default()
+                    },
+                ))
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn release_session_is_retried_on_unavailable_as_the_reference() {
+        // A transient UNAVAILABLE at stop is retried under the policy, so the server session is
+        // released by the second call; the reference's `release_session` runs in `Retrying`.
+        let calls = std::sync::Arc::new(ReleaseCalls {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            unavailable: 1,
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let incoming = futures::stream::unfold(listener, |listener| async {
+            Some((listener.accept().await.map(|(socket, _)| socket), listener))
+        });
+        let service = ReleaseService(calls.clone());
+        let server = tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(service)
+                .serve_with_incoming(incoming)
+                .await
+                .unwrap();
+        });
+        let builder = {
+            let _env = crate::channel::set_env(&[("SPARK_CONNECT_AUTHENTICATE_TOKEN", None)]);
+            ChannelBuilder::parse(&format!("sc://127.0.0.1:{}", address.port())).unwrap()
+        };
+        let mut client = SparkConnectClient::connect(&builder).await.unwrap();
+        client.set_retry_policy(RetryPolicy {
+            max_retries: Some(2),
+            initial_backoff_ms: 1,
+            max_backoff_ms: Some(2),
+            ..RetryPolicy::default()
+        });
+
+        let released = client.release_session().await;
+        server.abort();
+        released.unwrap();
+        assert_eq!(calls.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
     #[tokio::test]

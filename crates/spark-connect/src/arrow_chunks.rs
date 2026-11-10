@@ -100,6 +100,20 @@ impl ArrowChunkAssembler {
         Ok(())
     }
 
+    /// The next response of an execution as it is returned: `push` of a response, and `finish` at
+    /// the end of the stream, where `response` is `None`.
+    pub(crate) fn join(
+        &mut self,
+        response: Option<proto::ExecutePlanResponse>,
+    ) -> Result<Option<proto::ExecutePlanResponse>> {
+        let Some(mut response) = response else {
+            self.finish()?;
+            return Ok(None);
+        };
+        self.push(&mut response)?;
+        Ok(Some(response))
+    }
+
     /// Check that no batch is left incomplete, once the stream of the execution has ended.
     pub(crate) fn finish(&self) -> Result<()> {
         match &self.pending {

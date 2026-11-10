@@ -166,7 +166,8 @@ def _has_canonical_structured_columns(columns, module, multi):
     The override rules of an Index apply: the exact class, no override of `__getattribute__`,
     `__iter__` or `__len__` on the class or the instance, and pandas' own iteration and values.
     The storage must be pandas' own too: the levels and codes of a MultiIndex, and the values
-    and categories of a CategoricalIndex. Each label container inside is checked as an Index.
+    and categories of a CategoricalIndex. Each label container inside is checked as a label
+    index (see `_has_canonical_columns`), so a DatetimeIndex level is checked as one too.
     """
     import numpy as np
     from pandas.core import base as base_module
@@ -203,6 +204,101 @@ def _has_canonical_structured_columns(columns, module, multi):
     return _has_canonical_columns(categorical.categories.__get__(data))
 
 
+def _has_canonical_label_index(columns, array_check, array_module, array_name):
+    """Accept a plain DatetimeIndex, TimedeltaIndex, PeriodIndex or IntervalIndex of labels.
+
+    As for an Index, the labels only name the columns. The override rules of an Index apply:
+    the exact class, no override of `__getattribute__`, `__iter__` or `__len__` on the class
+    or the instance, pandas' own iteration and values, and no class in the MRO that defines
+    the `_data` storage. The storage must pass `array_check`, which takes the exact array
+    class `array_name` of `array_module`.
+    """
+    from pandas.core import base as base_module
+    from pandas.core.indexes import base as index_module
+
+    cls = type(columns)
+    if (cls.__getattribute__ is not object.__getattribute__
+            or "__iter__" in vars(columns) or "__len__" in vars(columns)
+            or cls.__iter__ is not base_module.IndexOpsMixin.__iter__
+            or not _defined_in(base_module.IndexOpsMixin.__iter__, "__iter__", base_module)
+            or not _defined_in(cls.__len__, "__len__", index_module)
+            or any("_data" in vars(base) for base in cls.__mro__)):
+        return False
+    _, values = _raw_class_attribute(cls, "_values")
+    if not _defined_in(getattr(values, "fget", None), "_values", index_module):
+        return False
+    return array_check(vars(columns).get("_data"), array_module, array_name)
+
+
+def _has_canonical_datetimelike_array(backing, module, name):
+    """Accept the exact DatetimeArray, TimedeltaArray or PeriodArray storage of a label index.
+
+    Iteration boxes the int64 `_ndarray` through pandas' own `__iter__` and `_box_func`, and
+    indexing goes through pandas' own `__getitem__`. No instance may shadow those hooks.
+    """
+    import numpy as np
+    from pandas._libs.arrays import NDArrayBacked
+    from pandas.core.arrays import _mixins as mixins_module
+    from pandas.core.arrays import datetimelike as datetimelike_module
+
+    cls = vars(module).get(name)
+    if type(backing) is not cls:
+        return False
+    if cls.__getattribute__ is not object.__getattribute__ or any(
+        hook in vars(backing) for hook in
+        ("__iter__", "__getitem__", "__len__", "__array__", "_box_func", "asi8", "_ndarray")
+    ):
+        return False
+    if (not _defined_in(_raw_class_attribute(cls, "__iter__")[1], "__iter__", module,
+                        datetimelike_module)
+            or not _defined_in(_raw_class_attribute(cls, "__getitem__")[1], "__getitem__",
+                               datetimelike_module, mixins_module)
+            or _raw_class_attribute(cls, "__len__")[1] is not NDArrayBacked.__len__
+            or not _defined_in(_raw_class_attribute(cls, "_box_func")[1], "_box_func", module)):
+        return False
+    try:
+        storage = object.__getattribute__(backing, "_ndarray")
+    except AttributeError:
+        return False
+    return type(storage) is np.ndarray
+
+
+def _has_canonical_interval_array(backing, module, name):
+    """Accept the exact IntervalArray storage of an IntervalIndex label.
+
+    Iteration boxes `_left` and `_right` through pandas' own `__array__`, `isna`, `closed` and
+    `__getitem__`. Each endpoint is a NumPy array or a canonical datetime-like array.
+    """
+    import numpy as np
+    from pandas.core.arrays import datetimes as datetimes_module
+    from pandas.core.arrays import timedeltas as timedeltas_module
+    from pandas.core.dtypes.dtypes import IntervalDtype
+
+    cls = vars(module).get(name)
+    if type(backing) is not cls:
+        return False
+    if cls.__getattribute__ is not object.__getattribute__ or any(
+        hook in vars(backing) for hook in
+        ("__iter__", "__len__", "__getitem__", "__array__", "isna", "closed", "dtype")
+    ):
+        return False
+    if (not all(_defined_in(_raw_class_attribute(cls, hook)[1], hook, module)
+                for hook in ("__iter__", "__len__", "__getitem__", "__array__", "isna"))
+            or not all(_defined_in(getattr(_raw_class_attribute(cls, hook)[1], "fget", None),
+                                   hook, module) for hook in ("closed", "dtype"))
+            or type(vars(backing).get("_dtype")) is not IntervalDtype):
+        return False
+    for side in ("_left", "_right"):
+        endpoint = vars(backing).get(side)
+        if type(endpoint) is np.ndarray:
+            continue
+        if not (_has_canonical_datetimelike_array(endpoint, datetimes_module, "DatetimeArray")
+                or _has_canonical_datetimelike_array(endpoint, timedeltas_module,
+                                                     "TimedeltaArray")):
+            return False
+    return True
+
+
 def _has_canonical_columns(columns):
     """Decline label containers whose row-path iteration can run custom hooks."""
     import sys
@@ -210,9 +306,18 @@ def _has_canonical_columns(columns):
     import numpy as np
     import pandas as pd
     from pandas.core import base as base_module
+    from pandas.core.arrays import datetimes as datetimes_array_module
+    from pandas.core.arrays import interval as interval_array_module
+    from pandas.core.arrays import period as period_array_module
+    from pandas.core.arrays import timedeltas as timedeltas_array_module
     from pandas.core.indexes import base as index_module
-    from pandas.core.indexes import category as category_module, multi as multi_module
+    from pandas.core.indexes import category as category_module
+    from pandas.core.indexes import datetimes as datetimes_module
+    from pandas.core.indexes import interval as interval_module
+    from pandas.core.indexes import multi as multi_module
+    from pandas.core.indexes import period as period_module
     from pandas.core.indexes import range as range_module
+    from pandas.core.indexes import timedeltas as timedeltas_module
 
     # A default RangeIndex (pd.DataFrame of a list or ndarray) takes the Arrow routes too.
     if pd.RangeIndex is range_module.RangeIndex and type(columns) is pd.RangeIndex:
@@ -225,6 +330,23 @@ def _has_canonical_columns(columns):
     if (pd.CategoricalIndex is category_module.CategoricalIndex
             and type(columns) is pd.CategoricalIndex):
         return _has_canonical_structured_columns(columns, category_module, False)
+
+    # Plain DatetimeIndex, TimedeltaIndex, PeriodIndex and IntervalIndex labels (`.T` of a
+    # time-indexed frame, a pivot of datetimes) take the Arrow routes too: their values are
+    # pandas' own and only name the columns.
+    if pd.DatetimeIndex is datetimes_module.DatetimeIndex and type(columns) is pd.DatetimeIndex:
+        return _has_canonical_label_index(
+            columns, _has_canonical_datetimelike_array, datetimes_array_module, "DatetimeArray")
+    if (pd.TimedeltaIndex is timedeltas_module.TimedeltaIndex
+            and type(columns) is pd.TimedeltaIndex):
+        return _has_canonical_label_index(
+            columns, _has_canonical_datetimelike_array, timedeltas_array_module, "TimedeltaArray")
+    if pd.PeriodIndex is period_module.PeriodIndex and type(columns) is pd.PeriodIndex:
+        return _has_canonical_label_index(
+            columns, _has_canonical_datetimelike_array, period_array_module, "PeriodArray")
+    if pd.IntervalIndex is interval_module.IntervalIndex and type(columns) is pd.IntervalIndex:
+        return _has_canonical_label_index(
+            columns, _has_canonical_interval_array, interval_array_module, "IntervalArray")
 
     Index = index_module.Index
     if (pd.Index is not Index or type(columns) is not Index
