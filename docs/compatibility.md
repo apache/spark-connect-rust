@@ -172,8 +172,11 @@ PySpark (an integral float for an int param, for example), and a value that the
 converter rejects raises its `TypeError`. A fit, transform or evaluate sends only the
 params that the constructor or a setter set, so the server applies its defaults to
 the others, as with PySpark. An int beyond a long raises PySpark's
-`VALUE_NOT_BETWEEN` at the next fit. `None` leaves a param unset, so the server's
-default applies; PySpark sends a null, which the server rejects.
+`VALUE_NOT_BETWEEN` at the next fit. `None` is sent as a null literal, as PySpark sends
+it: the server reads a null `bootstrap` as false and rejects the other nulls. A param that is
+not given is not sent, so the server's default applies. A list param without elements is
+accepted by its constructor and setters, and a fit, transform or evaluate raises PySpark's
+`CANNOT_INFER_ARRAY_ELEMENT_TYPE` for it, as PySpark's serialization does.
 
 ## Native RandomForestClassifier
 
