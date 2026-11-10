@@ -258,6 +258,21 @@ fn retry_exception_bound_passed(
 pub type ExecutePlanHook =
     std::sync::Arc<dyn Fn(ExecutePlanRequest) -> Result<ExecutePlanRequest> + Send + Sync>;
 
+/// Let the server split the Arrow batches too large for one message into chunks, which the
+/// stream of the execution joins, as PySpark's client does, without a preferred chunk size.
+fn allow_arrow_batch_chunking(request: &mut ExecutePlanRequest) {
+    use spark_connect_proto::execute_plan_request::request_option::RequestOption as Kind;
+    use spark_connect_proto::execute_plan_request::RequestOption;
+    request.request_options.push(RequestOption {
+        request_option: Some(Kind::ResultChunkingOptions(
+            spark_connect_proto::ResultChunkingOptions {
+                allow_arrow_batch_chunking: true,
+                preferred_arrow_chunk_size: None,
+            },
+        )),
+    });
+}
+
 /// A Spark Connect client for communicating with a remote Spark server.
 ///
 /// Mirrors `pyspark.sql.connect.client.core.SparkConnectClient`.
@@ -773,6 +788,7 @@ impl SparkConnectClient {
         mut request: ExecutePlanRequest,
     ) -> Result<Streaming<ExecutePlanResponse>> {
         self.ensure_open()?;
+        allow_arrow_batch_chunking(&mut request);
         self.extend_user_context(&mut request.user_context);
         self.fill_user_context(&mut request.user_context);
         self.observe_on(&mut request.client_observed_server_side_session_id);
@@ -966,6 +982,7 @@ impl SparkConnectClient {
         mut request: ExecutePlanRequest,
     ) -> Result<ReattachableResponseStream> {
         self.ensure_open()?;
+        allow_arrow_batch_chunking(&mut request);
         self.extend_user_context(&mut request.user_context);
         // Before the iterator: its ReattachExecute and ReleaseExecute requests take the
         // user context of this request, and the request of the hook, as PySpark's iterator

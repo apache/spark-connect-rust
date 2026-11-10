@@ -685,6 +685,26 @@ fn subqueries_return_the_rows_of_pyspark() {
     );
 }
 
+/// A value over the 128 MiB message limit arrives as the chunks of its Arrow batch, which
+/// `collect` joins.
+#[test]
+fn collect_joins_the_chunks_of_a_value_over_the_message_limit() {
+    if !should_run() {
+        return;
+    }
+    let s = session();
+    let len: i64 = 129 * 1024 * 1024;
+    let df = s.range(1).expect("range").select(vec![f::repeat(
+        spark_connect::column::lit_string("x"),
+        lit(len),
+    )]);
+    let rows = df.collect().unwrap();
+    assert_eq!(rows.len(), 1);
+    let value = rows[0].get(0).unwrap().as_str().unwrap();
+    assert_eq!(value.len(), len as usize);
+    assert!(value.bytes().all(|b| b == b'x'));
+}
+
 /// `repartition_by_range` splits the ids into contiguous ranges, as PySpark's
 /// `repartitionByRange` does; a hash split of the same column would not.
 #[test]

@@ -138,14 +138,21 @@ impl Drop for ProgressTracker {
 pub(crate) struct ExecutionStream {
     stream: ReattachableResponseStream,
     progress: ProgressTracker,
+    chunks: crate::arrow_chunks::ArrowChunkAssembler,
 }
 
 impl ExecutionStream {
     pub(crate) fn new(stream: ReattachableResponseStream, progress: ProgressTracker) -> Self {
-        ExecutionStream { stream, progress }
+        ExecutionStream {
+            stream,
+            progress,
+            chunks: Default::default(),
+        }
     }
 
-    /// The next response of the execution, as `ReattachableResponseStream::message`.
+    /// The next response of the execution, as `ReattachableResponseStream::message`, with the
+    /// chunks of an Arrow batch joined into the batch: the response of a chunk that is not the
+    /// last one has no batch.
     pub(crate) async fn message(&mut self) -> Result<Option<proto::ExecutePlanResponse>> {
         let response = self.stream.message().await?;
         if let Some(response) = &response {
@@ -155,7 +162,7 @@ impl ExecutionStream {
                 self.progress.update(progress, &response.operation_id)?;
             }
         }
-        Ok(response)
+        self.chunks.join(response)
     }
 }
 

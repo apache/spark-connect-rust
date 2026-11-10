@@ -503,3 +503,41 @@ async fn a_client_without_session_tracking_passes_the_ids_of_its_requests_throug
         );
     }
 }
+
+#[tokio::test]
+async fn executions_ask_the_server_to_chunk_arrow_batches() {
+    use spark_connect_proto::execute_plan_request::request_option::RequestOption;
+    use spark_connect_proto::ResultChunkingOptions;
+
+    let fixture = Fixture::start().await;
+    let client = fixture.client().await;
+
+    // A reattachable execution that drops after its first response, which is reattached, and a
+    // plain ExecutePlan. The reattach has no request options to carry the option in.
+    *fixture.state.drop_next_execute.lock().unwrap() = true;
+    run_execution(&client).await;
+    let mut stream = client.execute_plan(execute_request(&client)).await.unwrap();
+    while stream.message().await.unwrap().is_some() {}
+
+    let executes = fixture
+        .state
+        .requests_of::<ExecutePlanRequest>("ExecutePlan");
+    assert_eq!(executes.len(), 2);
+    for request in &executes {
+        let chunking: Vec<ResultChunkingOptions> = request
+            .request_options
+            .iter()
+            .filter_map(|option| match &option.request_option {
+                Some(RequestOption::ResultChunkingOptions(options)) => Some(*options),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            chunking,
+            [ResultChunkingOptions {
+                allow_arrow_batch_chunking: true,
+                preferred_arrow_chunk_size: None,
+            }]
+        );
+    }
+}
