@@ -44,7 +44,9 @@ impl SignalWatch {
                     let _ = session.interrupt_operation_async(&operation_id).await;
                 }))
             }
-            None => Watch::Continue,
+            // No execution to interrupt: a wait that can end before its future, such as the
+            // release of `stop()`, ends now; another keeps waiting.
+            None => Watch::Abort,
         }
     }
 }
@@ -56,7 +58,7 @@ impl SignalWatch {
 ///
 /// The execution is interrupted only when `f` has started one; a request that is still waiting
 /// for its response (such as an analysis) ends when the response arrives, and the exception is
-/// raised then.
+/// raised then. A wait of `block_on_abortable` (the release of `stop()`) ends at once instead.
 pub(crate) fn interruptible<T: Send, E: Send + Into<Box<SparkError>>>(
     py: Python<'_>,
     session: &SparkSession,

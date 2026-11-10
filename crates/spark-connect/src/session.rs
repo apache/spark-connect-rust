@@ -1273,7 +1273,18 @@ impl SparkSession {
         let released = if self.client.is_closed() {
             Ok(())
         } else {
-            block_on(self.client.release_session())
+            match spark_connect_core::runtime::block_on_abortable(self.client.release_session()) {
+                Some(released) => released,
+                // The wait was stopped, by a signal of the process in the Python client: as
+                // PySpark's `stop()`, which the exception of the signal leaves before it closes
+                // the client, the session stays open, and a later `stop()` releases it.
+                None => {
+                    self.stopped.store(false, Ordering::SeqCst);
+                    return Err(SparkError::connect_msg(
+                        "the release of the session was interrupted; the session is still open",
+                    ));
+                }
+            }
         };
         self.streams().cancel_listener_bus();
         // As PySpark's `stop()`, close the client even if server cleanup fails, so its

@@ -674,9 +674,9 @@ impl PyKMeans {
 
     fn fit(&self, py: Python<'_>, df: &PyDataFrame) -> PyResult<PyMLModel> {
         let mut estimator = self.inner.clone();
-        let model = py
-            .detach(|| estimator.fit(&df.dataframe).map_err(Box::new))
-            .to_pyerr()?;
+        let model = interruptible(py, &df.dataframe.spark_session(), || {
+            estimator.fit(&df.dataframe).map_err(Box::new)
+        })?;
         Ok(PyMLModel { model })
     }
 }

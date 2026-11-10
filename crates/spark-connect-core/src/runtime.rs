@@ -64,6 +64,10 @@ pub enum Watch {
     /// Interrupt the execution that the wait is for, by this future, which the wait drives to its
     /// end. The wait then ends with the server's cancellation of the execution.
     Interrupt(Pin<Box<dyn Future<Output = ()> + Send>>),
+    /// Stop waiting, when no execution is in flight to interrupt. A wait of
+    /// [`block_on_abortable`] ends at once, without the output of its future; any other wait
+    /// keeps waiting, as for [`Watch::Continue`].
+    Abort,
 }
 
 /// The poll of the signals of the process of a wait, which the wait calls every
@@ -95,6 +99,54 @@ pub fn with_wait_watch<R>(watch: Arc<WaitWatch>, f: impl FnOnce() -> R) -> R {
 
 /// How often a wait for the server polls its [`WaitWatch`].
 pub const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// As [`block_on`], but the wait ends at once, with `None`, when the [`WaitWatch`] of the thread
+/// returns [`Watch::Abort`]: the future is dropped, unfinished. For a wait that nothing on the
+/// server stands behind, such as the retries of a session release, which a signal of the
+/// process stops as it stops PySpark's sleep between the retries.
+pub fn block_on_abortable<F>(f: F) -> Option<F::Output>
+where
+    F: std::future::Future + Send,
+    F::Output: Send,
+{
+    let watch = WAIT_WATCH.with(|watch| watch.borrow().clone());
+    let drive = |f: F| match watch {
+        Some(watch) => get_runtime().block_on(watched_abortable(f, watch)),
+        None => Some(get_runtime().block_on(f)),
+    };
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(|| drive(f))
+        }
+        // The wait runs on another thread, which does not poll the watch (see `block_on`).
+        Ok(_) => Some(block_on_other_thread(f)),
+        _ => drive(f),
+    }
+}
+
+/// `f`, polled as it is, and `watch` called every [`POLL_INTERVAL`]: `None` at once when it
+/// returns [`Watch::Abort`], else the output of `f`. An interrupt is spawned once and awaited
+/// with `f`, as in [`watched`].
+async fn watched_abortable<F: Future>(f: F, watch: Arc<WaitWatch>) -> Option<F::Output> {
+    tokio::pin!(f);
+    let mut ticks = tokio::time::interval(POLL_INTERVAL);
+    let mut interrupt: Option<tokio::task::JoinHandle<()>> = None;
+    loop {
+        tokio::select! {
+            output = &mut f => {
+                if let Some(interrupt) = interrupt {
+                    let _ = interrupt.await;
+                }
+                return Some(output);
+            }
+            _ = ticks.tick(), if interrupt.is_none() => match watch() {
+                Watch::Abort => return None,
+                Watch::Interrupt(sent) => interrupt = Some(tokio::spawn(sent)),
+                Watch::Continue => {}
+            },
+        }
+    }
+}
 
 /// Drive `f` on the shared runtime, polling `watch` (if any) as the wait goes on.
 fn drive<F: Future>(f: F, watch: Option<Arc<WaitWatch>>) -> F::Output {
@@ -324,6 +376,32 @@ mod tests {
         });
         assert_eq!(output, 9);
         assert!(interrupted.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_an_abortable_wait_ends_when_its_watch_aborts_and_another_keeps_waiting() {
+        // A watch that aborts ends an abortable wait at once, without the output of its future.
+        let aborted = with_wait_watch(Arc::new(|| Watch::Abort), || {
+            block_on_abortable(std::future::pending::<u8>())
+        });
+        assert_eq!(aborted, None);
+        // Without an abort, an abortable wait gives the output of its future.
+        let ended = with_wait_watch(Arc::new(|| Watch::Continue), || {
+            block_on_abortable(async {
+                tokio::time::sleep(POLL_INTERVAL * 2).await;
+                7
+            })
+        });
+        assert_eq!(ended, Some(7));
+        assert_eq!(block_on_abortable(async { 8 }), Some(8));
+        // Any other wait keeps waiting for its future, whatever the watch returns.
+        let waited = with_wait_watch(Arc::new(|| Watch::Abort), || {
+            block_on(async {
+                tokio::time::sleep(POLL_INTERVAL * 2).await;
+                9
+            })
+        });
+        assert_eq!(waited, 9);
     }
 
     #[test]
