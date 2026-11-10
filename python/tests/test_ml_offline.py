@@ -181,6 +181,112 @@ def test_ml_connect_fitted_scalers_transform_the_cached_model(ml_mock):
         assert transform.params.params["outputCol"] == pb2.Expression.Literal(string="o")
 
 
+def test_ml_connect_setters_set_the_params_of_their_receiver_as_pyspark(ml_mock):
+    # As PySpark's Params._set: every setter of the native pyspark.ml.connect estimators,
+    # transformers and evaluators sets its param on the object itself and returns the object, so
+    # the next fit, transform or evaluate sends the value of a setter whose result is dropped,
+    # as the object of the constructor of the same params sends it.
+    from pyspark.ml.connect import (
+        BinaryClassificationEvaluator,
+        CrossValidator,
+        KMeans,
+        LinearRegression,
+        LinearSVC,
+        LogisticRegression,
+        MaxAbsScaler,
+        MulticlassClassificationEvaluator,
+        Pipeline,
+        RegressionEvaluator,
+        StandardScaler,
+        StringIndexer,
+        VectorAssembler,
+    )
+
+    spark, service = ml_mock
+    df = spark.range(1)
+    models = []  # Kept alive, so that no model is released during the checks.
+
+    def value(literal):
+        kind = literal.WhichOneof("literal_type")
+        if kind == "array":
+            return [value(element) for element in literal.array.elements]
+        return getattr(literal, kind)
+
+    def sent_params(obj):
+        # The values of the params that the next evaluate, fit or transform of obj sends.
+        sent = len(service.execute_requests)
+        if hasattr(obj, "evaluate"):
+            service.execute_payload = _ml_result(param=pb2.Expression.Literal(double=0.5))
+            assert obj.evaluate(df) == 0.5
+            params = _commands(service)[sent].ml_command.evaluate.params
+        elif hasattr(obj, "fit"):
+            service.execute_payload = _operator_info("model-1")
+            models.append(obj.fit(df))
+            if len(service.execute_requests) > sent:
+                params = _commands(service)[sent].ml_command.fit.params
+            else:
+                # Pipeline and CrossValidator fit no object of the server: the transform of their
+                # model sends the params.
+                params = _relation(models[-1].transform(df)).ml_relation.transform.params
+        else:
+            params = _relation(obj.transform(df)).ml_relation.transform.params
+        return {name: value(literal) for name, literal in params.params.items()}
+
+    for cls, values in [
+        (StandardScaler, dict(inputCol="in", outputCol="out")),
+        (MaxAbsScaler, dict(inputCol="in", outputCol="out")),
+        (StringIndexer, dict(inputCol="in", outputCol="out")),
+        (VectorAssembler, dict(inputCols=["a", "b"], outputCol="out")),
+        (LogisticRegression, dict(featuresCol="f", labelCol="y", predictionCol="p", maxIter=7)),
+        (
+            LinearSVC,
+            dict(
+                featuresCol="f", labelCol="y", predictionCol="p", maxIter=7, regParam=0.5,
+                tol=0.25, rawPredictionCol="r", fitIntercept=False, standardization=False,
+                threshold=0.5, weightCol="w", aggregationDepth=3, maxBlockSizeInMB=1.5,
+            ),
+        ),
+        (
+            LinearRegression,
+            dict(
+                featuresCol="f", labelCol="y", predictionCol="p", maxIter=7, regParam=0.5,
+                elasticNetParam=0.25, tol=0.125, fitIntercept=False, standardization=False,
+                solver="normal", weightCol="w", aggregationDepth=3, loss="huber", epsilon=1.5,
+                maxBlockSizeInMB=1.5,
+            ),
+        ),
+        (
+            KMeans,
+            dict(
+                featuresCol="f", predictionCol="p", k=3, initMode="random", initSteps=3,
+                tol=0.5, maxIter=7, seed=5, distanceMeasure="cosine", weightCol="w",
+                solver="row", maxBlockSizeInMB=1.5,
+            ),
+        ),
+        (RegressionEvaluator, dict(labelCol="y", predictionCol="p", metricName="r2")),
+        (
+            BinaryClassificationEvaluator,
+            dict(labelCol="y", rawPredictionCol="r", metricName="areaUnderPR"),
+        ),
+        (
+            MulticlassClassificationEvaluator,
+            dict(labelCol="y", predictionCol="p", metricName="accuracy"),
+        ),
+        (Pipeline, dict(stages=["a", "b"])),
+        (CrossValidator, dict(numFolds=5, parallelism=2, seed=7)),
+    ]:
+        setters = {"set" + name[0].upper() + name[1:]: name for name in values}
+        # Every setter of the class is checked.
+        assert sorted(n for n in dir(cls) if n.startswith("set")) == sorted(setters)
+        receiver = cls()
+        for setter, name in setters.items():
+            # By the name of the argument of PySpark's setters, value.
+            assert getattr(receiver, setter)(value=values[name]) is receiver, (cls, setter)
+        params = sent_params(receiver)
+        assert {name: params.get(name) for name in values} == values, cls
+        assert params == sent_params(cls(**values)), cls
+
+
 @pytest.mark.parametrize(
     "value, expected",
     [

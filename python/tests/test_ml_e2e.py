@@ -214,6 +214,61 @@ def test_ml_connect_vector_assembler_and_evaluator_as_pyspark(session):
     assert pr.evaluate(raw) == pytest.approx(0.7916666666666666)
 
 
+def test_ml_connect_setters_change_the_next_evaluate_and_fit_as_pyspark(session):
+    # As PySpark's Params._set: a setter of pyspark.ml.connect sets the param of the evaluator or
+    # estimator itself and returns it, so the next evaluate or fit uses the value of a setter whose
+    # result is dropped, with the values of PySpark 4.3.0.
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.ml.connect.classification import LogisticRegression
+    from pyspark.ml.connect.evaluation import (
+        BinaryClassificationEvaluator,
+        MulticlassClassificationEvaluator,
+        RegressionEvaluator,
+    )
+    from pyspark.ml.connect.pipeline import Pipeline
+    from pyspark.ml.linalg import Vectors
+
+    scored = session.createDataFrame(
+        [
+            (Vectors.dense([0.9, 0.1]), 0.0, 0.0),
+            (Vectors.dense([0.6, 0.4]), 0.0, 1.0),
+            (Vectors.dense([0.65, 0.35]), 1.0, 1.0),
+            (Vectors.dense([0.2, 0.8]), 1.0, 1.0),
+        ],
+        ["score", "label", "pred"],
+    )
+    regression = RegressionEvaluator(labelCol="label", predictionCol="pred")
+    assert regression.setMetricName("r2") is regression
+    assert regression.evaluate(scored) == pytest.approx(0.0, abs=1e-9)  # The rmse is 0.5.
+    multiclass = MulticlassClassificationEvaluator(predictionCol="pred")
+    assert multiclass.setMetricName("accuracy") is multiclass
+    assert multiclass.evaluate(scored) == 0.75  # The f1 is 0.733.
+    binary = BinaryClassificationEvaluator()
+    assert binary.setRawPredictionCol("score") is binary  # No rawPrediction column is there.
+    assert binary.evaluate(scored) == 0.75
+    assert binary.setMetricName("areaUnderPR") is binary
+    assert binary.evaluate(scored) == pytest.approx(0.7916666666666666)
+
+    features = [[0.0, 1.0], [1.0, 0.0], [2.0, 1.5], [0.5, 0.2]]
+    labels = [0.0, 1.0, 1.0, 0.0]
+    labeled = session.createDataFrame(
+        [(i, y, Vectors.dense(f)) for i, (y, f) in enumerate(zip(labels, features))],
+        ["id", "y", "features"],
+    )
+    estimator = LogisticRegression()
+    assert estimator.setLabelCol("y") is estimator  # No label column is there.
+    predictions = estimator.fit(labeled).transform(labeled).orderBy("id").collect()
+    assert [r.prediction for r in predictions] == labels
+
+    # The server transforms no native Pipeline of stage names: the stages of the setter are
+    # those that the transform of its model sends.
+    pipeline = Pipeline()
+    assert pipeline.setStages(["a", "b"]) is pipeline
+    relation = pb2.Relation.FromString(pipeline.fit(labeled).transform(labeled)._relation_bytes())
+    stages = relation.ml_relation.transform.params.params["stages"].array.elements
+    assert [stage.string for stage in stages] == ["a", "b"]
+
+
 def test_ml_statistics_as_pyspark(session):
     from pyspark.ml.stat import ChiSquareTest, Correlation, Summarizer
 
