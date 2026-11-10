@@ -3843,14 +3843,34 @@ pub(crate) fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
 /// make `createDataFrame(pandas_df)` disagree with `lit(..)` by the local offset. To keep the
 /// two paths identical we first downcast a pandas Timestamp to a plain `datetime` via
 /// `to_pydatetime()`. Timezone-aware values are unaffected (both encode the same instant).
+///
+/// The seconds and the microseconds are integers, as `TimestampType.toInternal` takes them
+/// (`calendar.timegm` of the UTC tuple of an aware value, `time.mktime` of the local tuple of a
+/// naive one): a float of seconds loses the microseconds of the values far from the epoch, and
+/// `timestamp()` overflows for the latest datetimes of the year 9999.
 pub(crate) fn datetime_to_micros(obj: &Bound<'_, PyAny>) -> PyResult<i64> {
+    let py = obj.py();
     let normalized = if obj.hasattr("to_pydatetime").unwrap_or(false) {
         obj.call_method0("to_pydatetime")?
     } else {
         obj.clone()
     };
-    let timestamp_f64: f64 = normalized.call_method0("timestamp")?.extract()?;
-    Ok((timestamp_f64 * 1_000_000.0).round() as i64)
+    let seconds: i64 = if normalized.getattr("tzinfo")?.is_none() {
+        // time.mktime returns a float of whole seconds; int() truncates it as `as` does.
+        let local = normalized.call_method0("timetuple")?;
+        let secs: f64 = py
+            .import("time")?
+            .call_method1("mktime", (local,))?
+            .extract()?;
+        secs as i64
+    } else {
+        let utc = normalized.call_method0("utctimetuple")?;
+        py.import("calendar")?
+            .call_method1("timegm", (utc,))?
+            .extract()?
+    };
+    let micros: i64 = normalized.getattr("microsecond")?.extract()?;
+    Ok(seconds * 1_000_000 + micros)
 }
 
 /// If `obj` is an instance of the cached Decimal class (C `_decimal.Decimal`, else the
