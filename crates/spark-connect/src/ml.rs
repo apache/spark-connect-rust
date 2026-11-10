@@ -1693,7 +1693,10 @@ impl Transformer for KMeansModel {
         &mut self.params
     }
 
-    fn build_ml_relation(&self, input: &DataFrame) -> proto::MlRelation {
+    fn build_ml_relation(
+        &self,
+        input: &DataFrame,
+    ) -> spark_connect_core::error::Result<proto::MlRelation> {
         self.cached.build_ml_relation(input, &self.params)
     }
 
@@ -2892,7 +2895,7 @@ mod tests {
         assert_eq!(fallback.operator().uid, estimator.operator().uid);
         let df = session.range(2).unwrap();
         let proto::ml_relation::MlType::Transform(t) =
-            model.build_ml_relation(&df).ml_type.unwrap()
+            model.build_ml_relation(&df).unwrap().ml_type.unwrap()
         else {
             panic!("transform")
         };
@@ -2904,7 +2907,7 @@ mod tests {
                 }
             ))
         );
-        assert_eq!(*t.input.unwrap(), df.relation());
+        assert_eq!(*t.input.unwrap(), df.relation().unwrap());
         assert_eq!(t.params.unwrap(), estimator.params().to_proto());
         assert!(model
             .transform(&session.new_session().range(2).unwrap())
