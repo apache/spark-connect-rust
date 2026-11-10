@@ -4813,6 +4813,91 @@ def test_row_construction_and_access():
     assert 1 in Row(1, 2) and 99 not in Row(1, 2)
 
 
+@pytest.mark.parametrize(
+    "rows, start_offset, message",
+    [
+        (4, 0, "Expected 4 rows in arrow batch but got 3."),
+        (
+            3,
+            2,
+            "Expected arrow batch to start at row offset 0 in results, but received arrow "
+            "batch starting at offset 2.",
+        ),
+        (3, 0, None),
+        (3, None, None),
+    ],
+)
+def test_collect_checks_the_rows_and_the_offset_of_each_arrow_batch_as_pyspark(
+    mock_connect, rows, start_offset, message
+):
+    # As PySpark's `_execute_and_fetch_as_iterator`: a batch must hold the rows that it counts,
+    # and start where the rows before it end, if it says where it starts.
+    pa = pytest.importorskip("pyarrow")
+    from pyspark.errors import PySparkException
+
+    spark, service = mock_connect
+    batch = pa.record_batch([pa.array([1, 2, 3])], names=["id"])
+    sink = pa.BufferOutputStream()
+    with pa.ipc.new_stream(sink, batch.schema) as writer:
+        writer.write_batch(batch)
+    # ExecutePlanResponse.arrow_batch=2: row_count=1, data=2, start_offset=3.
+    fields = varint_field(1, rows) + message_field(2, sink.getvalue().to_pybytes())
+    if start_offset is not None:
+        fields += varint_field(3, start_offset)
+    service.execute_payload = message_field(2, fields)
+    if message is None:
+        assert spark.range(3).collect() == [Row(id=1), Row(id=2), Row(id=3)]
+    else:
+        with pytest.raises(PySparkException, match=re.escape(message)):
+            spark.range(3).collect()
+
+
+def test_invalid_utf8_of_a_struct_column_is_raised_field_by_field_as_pyspark(mock_connect):
+    # PySpark converts a struct column in bulk, field by field: with an invalid `y` in row 0 and
+    # an invalid `x` in row 1, it raises for the `x` of row 1, the first invalid string of `x`.
+    pa = pytest.importorskip("pyarrow")
+    spark, service = mock_connect
+
+    def strings(*values):
+        offsets = [0]
+        for value in values:
+            offsets.append(offsets[-1] + len(value))
+        buffers = [None, pa.py_buffer(array.array("i", offsets)), pa.py_buffer(b"".join(values))]
+        return pa.Array.from_buffers(pa.string(), len(values), buffers)
+
+    column = pa.StructArray.from_arrays(
+        [strings(b"ok", b"\xc3"), strings(b"\x80", b"ok")], names=["x", "y"]
+    )
+    batch = pa.record_batch([column], names=["s"])
+    sink = pa.BufferOutputStream()
+    with pa.ipc.new_stream(sink, batch.schema) as writer:
+        writer.write_batch(batch)
+    # ExecutePlanResponse.arrow_batch=2: row_count=1, data=2.
+    service.execute_payload = message_field(
+        2, varint_field(1, 2) + message_field(2, sink.getvalue().to_pybytes())
+    )
+    with pytest.raises(UnicodeDecodeError) as raised:
+        spark.range(2).collect()
+    assert raised.value.object == b"\xc3"
+    assert "can't decode byte 0xc3 in position 0" in str(raised.value)
+
+
+def test_client_release_session_after_stop_raises_no_active_session_as_pyspark(mock_connect):
+    # As the `_stub` of PySpark's closed client: nothing is sent.
+    from pyspark.errors.exceptions.connect import SparkConnectException
+    from pyspark.sql.connect.session import SparkSession as ConnectSession
+
+    _, service = mock_connect
+    session = ConnectSession(connection=service.remote)
+    client = session.client
+    session.stop()
+    released = service.release_session_calls
+    with pytest.raises(SparkConnectException) as raised:
+        client.release_session()
+    assert raised.value.getCondition() == "NO_ACTIVE_SESSION"
+    assert service.release_session_calls == released
+
+
 def test_row_iteration():
     """Test iterating over Row values."""
     from pyspark.sql import Row

@@ -674,6 +674,9 @@ pub enum LiteralExpression {
     TimestampNtz(i64),
     /// Signed microseconds in a Spark day-time interval.
     DayTimeInterval(i64),
+    /// Signed months in a Spark year-month interval, which the server reads as an interval of
+    /// `YearMonthIntervalType()`, of years to months, as the Scala client sends a `Period`.
+    YearMonthInterval(i32),
     Time {
         nano: i64,
         precision: i32,
@@ -724,6 +727,9 @@ impl LiteralExpression {
             }
             LiteralExpression::DayTimeInterval(v) => {
                 proto::expression::literal::LiteralType::DayTimeInterval(*v)
+            }
+            LiteralExpression::YearMonthInterval(months) => {
+                proto::expression::literal::LiteralType::YearMonthInterval(*months)
             }
             LiteralExpression::Time { nano, precision } => {
                 let mut time = proto::expression::literal::Time::default();
@@ -787,6 +793,8 @@ impl LiteralExpression {
             LiteralExpression::Timestamp(v) => timestamp_repr(*v, true),
             LiteralExpression::TimestampNtz(v) => timestamp_repr(*v, false),
             LiteralExpression::DayTimeInterval(v) => iso_duration(*v),
+            // The value, as `f"{value}"` shows a value of a type that has no format of its own.
+            LiteralExpression::YearMonthInterval(months) => months.to_string(),
             LiteralExpression::Time { nano, .. } => time_repr(*nano),
             // A Python list, as `str(list)` shows its elements.
             LiteralExpression::Array { elements, .. } => {

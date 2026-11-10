@@ -204,7 +204,7 @@ impl LocalRowIterator {
                 execution_info,
                 execution_recorded,
             } => loop {
-                match block_on(stream.message()) {
+                match stream.next_message() {
                     Ok(Some(mut resp)) => {
                         capture_execution(&mut resp, execution_info, session);
                         if let Err(e) = keep_schema(&mut resp, &self.schema) {
@@ -933,7 +933,7 @@ impl DataFrame {
         let mut info = ExecutionInfo::default();
         let mut invalid_utf8: Option<SparkError> = None;
         loop {
-            let resp = block_on(stream.message())?;
+            let resp = stream.next_message()?;
             let Some(mut resp) = resp else {
                 break;
             };
@@ -1024,7 +1024,7 @@ impl DataFrame {
         let mut schema = None;
         let mut info = ExecutionInfo::default();
         loop {
-            let resp = block_on(stream.message())?;
+            let resp = stream.next_message()?;
             let Some(mut resp) = resp else {
                 break;
             };
@@ -1135,8 +1135,10 @@ impl DataFrame {
         mut relation: proto::Relation,
         owner: Option<Arc<dyn std::any::Any + Send + Sync>>,
     ) -> Result<DataFrame> {
-        crate::plan::resolve_relation(&mut relation)?;
-        Ok(DataFrame::from_raw_relation(session, relation, owner))
+        let depth = crate::plan::resolve_relation_levels(&mut relation)?;
+        Ok(DataFrame::from_raw_relation(
+            session, relation, owner, depth,
+        ))
     }
 
     /// The owners of the relations built outside the core (`from_relation`) that this DataFrame
@@ -1185,17 +1187,20 @@ impl DataFrame {
         });
     }
 
-    /// The DataFrame of `relation`, as `from_relation`, of a relation without placeholders.
+    /// The DataFrame of `relation`, as `from_relation`, of a relation without placeholders, of
+    /// `depth` levels.
     fn from_raw_relation(
         session: SparkSession,
         relation: proto::Relation,
         owner: Option<Arc<dyn std::any::Any + Send + Sync>>,
+        depth: usize,
     ) -> DataFrame {
         DataFrame::new(
             session,
             LogicalPlan::Raw {
                 relation: Box::new(relation),
                 owner: owner.map(crate::plan::RelationOwner),
+                depth,
             },
         )
     }
@@ -1207,7 +1212,8 @@ impl DataFrame {
     #[doc(hidden)]
     pub fn from_sent_relation(session: SparkSession, relation: proto::Relation) -> DataFrame {
         let plan_id = relation.common.as_ref().and_then(|common| common.plan_id);
-        let dataframe = DataFrame::from_raw_relation(session, relation, None);
+        // A relation decoded from bytes is shallow: prost decodes at most 100 nested messages.
+        let dataframe = DataFrame::from_raw_relation(session, relation, None, 1);
         if let Some(plan_id) = plan_id {
             dataframe
                 .session
@@ -1638,19 +1644,41 @@ impl DataFrame {
         DataFrame::new(self.session.clone(), plan)
     }
 
-    /// Repartition this DataFrame by range.
-    pub fn repartition_by_range(&self, num_partitions: i32, columns: Vec<Expression>) -> DataFrame {
+    /// Repartition this DataFrame by range of `columns` into `num_partitions` partitions.
+    /// Mirrors `DataFrame.repartitionByRange(numPartitions, *cols)`: as PySpark's, a count that
+    /// is not positive is a `VALUE_NOT_POSITIVE` error, and no columns a `CANNOT_BE_EMPTY` one
+    /// (the server would split the rows round-robin instead).
+    pub fn repartition_by_range(
+        &self,
+        num_partitions: i32,
+        columns: Vec<Expression>,
+    ) -> Result<DataFrame> {
         self.repartition_by_range_opt(Some(num_partitions), columns)
     }
 
     /// Repartition by range on the given columns, with the partition count optional: `None`
     /// sends no count, so the server picks it. Mirrors `DataFrame.repartitionByRange(col)`
     /// and `repartitionByRange(col, *cols)`, which PySpark sends with `numPartitions=None`.
+    /// The errors are those of [`DataFrame::repartition_by_range`].
     pub fn repartition_by_range_opt(
         &self,
         num_partitions: Option<i32>,
         columns: Vec<Expression>,
-    ) -> DataFrame {
+    ) -> Result<DataFrame> {
+        if let Some(n) = num_partitions.filter(|n| *n <= 0) {
+            return Err(SparkError::classed(
+                SparkErrorKind::ValueError,
+                "VALUE_NOT_POSITIVE",
+                &[("arg_name", "numPartitions"), ("arg_value", &n.to_string())],
+            ));
+        }
+        if columns.is_empty() {
+            return Err(SparkError::classed(
+                SparkErrorKind::ValueError,
+                "CANNOT_BE_EMPTY",
+                &[("item", "cols")],
+            ));
+        }
         // The server range-partitions only on sort orders, so a plain column is sorted
         // ascending, nulls first, as PySpark's `repartitionByRange` does.
         let partition_exprs = columns
@@ -1668,7 +1696,7 @@ impl DataFrame {
             num_partitions,
             partition_exprs,
         };
-        self.with_cached_schema(plan)
+        Ok(self.with_cached_schema(plan))
     }
 
     /// Repartition into `num_partitions` by hashing the given column expressions.
@@ -2346,12 +2374,16 @@ impl DataFrame {
         self.session.clone()
     }
 
-    /// Check if this DataFrame is local (collected).
+    /// Whether the plan of this DataFrame is a local relation, as the client sees it without
+    /// asking the server: a local relation itself, such as of local rows or of the result of a
+    /// command run by `SparkSession::sql`, which the server returned. A local relation under
+    /// another plan is not, as `toDF`, which Arrow input with inferred or listed column names
+    /// applies, and which the server resolves into a `Project`.
     ///
-    /// Mirrors the server's `Dataset.isLocal`: only a local relation itself is local. The
-    /// server resolves `toDF`, which Arrow input with inferred or listed column names
-    /// applies, into a `Project`, which is not. The result of a command run by
-    /// `SparkSession::sql` is the local relation the server returned.
+    /// This is a guess of the client, which can differ from the server's `Dataset.isLocal`:
+    /// the server resolves the plan first, so `spark.sql("VALUES (1)")`, a query that the
+    /// server resolves into a local relation, is local there and not here. PySpark's
+    /// `DataFrame.isLocal` asks the server, as [`DataFrame::is_local_on_server`] does.
     pub fn is_local(&self) -> bool {
         use proto::relation::RelType;
         match self.plan.as_ref() {
@@ -2652,7 +2684,7 @@ fn execute_command_reporting(
     // capturing any metrics/progress emitted along the way.
     let mut info = ExecutionInfo::default();
     let mut responses = Vec::new();
-    while let Some(mut resp) = block_on(stream.message())? {
+    while let Some(mut resp) = stream.next_message()? {
         capture_execution(&mut resp, &mut info, session);
         responses.push(resp);
     }
@@ -2735,6 +2767,8 @@ fn check_fill_value(value: &Value, arg_name: &str, expected_type: &str) -> Resul
         Value::Timestamp(_) | Value::TimestampNtz(_) => "datetime",
         Value::Time(_) => "time",
         Value::DayTimeInterval(_) => "timedelta",
+        // Python has no type of a year-month interval: its Spark type names it.
+        Value::YearMonthInterval(_) => "YearMonthInterval",
         Value::Decimal { .. } => "Decimal",
         Value::List(_) => "list",
         Value::Map(_) => "dict",
@@ -2852,16 +2886,16 @@ fn decode_error(data: &[u8], error: arrow::error::ArrowError) -> SparkError {
 }
 
 /// The first string of the Arrow IPC stream `data` that is not valid UTF-8, with its column and
-/// its bytes, in the order in which PySpark converts a result: column by column, then row by row.
+/// its bytes, in the order in which PySpark converts a result: column by column, each batch by
+/// batch, in the order of [`first_invalid_utf8_in`].
 fn first_invalid_utf8(data: &[u8]) -> Option<(usize, Vec<u8>)> {
     let batches = read_strings_as_binary(data)?;
     let columns = batches.first()?.num_columns();
     (0..columns).find_map(|column| {
-        batches.iter().find_map(|batch| {
-            (0..batch.num_rows()).find_map(|row| {
-                invalid_utf8_in(batch.column(column).as_ref(), row).map(|value| (column, value))
-            })
-        })
+        batches
+            .iter()
+            .find_map(|batch| first_invalid_utf8_in(batch.column(column).as_ref()))
+            .map(|value| (column, value))
     })
 }
 
@@ -2960,32 +2994,63 @@ fn binary_type(data_type: &arrow::datatypes::DataType) -> arrow::datatypes::Data
     }
 }
 
-/// The bytes of the binary value of `array` at `row`, if they are not valid UTF-8. A value nested
-/// in the row of a list, struct or map is searched in the order of its elements, and a null is
-/// valid.
-fn invalid_utf8_in(array: &dyn arrow::array::Array, row: usize) -> Option<Vec<u8>> {
+/// The bytes of the first binary value of `array` that are not valid UTF-8, in the order in which
+/// PySpark's `ArrowTableToRowsConversion._to_pylist` converts an array, in bulk: a list by the
+/// values of all its rows, a struct field by field, each over all its rows, and a map by the keys
+/// of all its rows, then their values. A null is valid.
+fn first_invalid_utf8_in(array: &dyn arrow::array::Array) -> Option<Vec<u8>> {
     use arrow::array::{Array, AsArray};
     use arrow::datatypes::DataType as ArrowDataType;
 
-    if array.is_null(row) {
-        return None;
-    }
-    let first_in = |values: &dyn Array| (0..values.len()).find_map(|i| invalid_utf8_in(values, i));
+    // The values of the rows of a list or a map, which its offsets delimit in its child.
+    let rows_of = |child: &dyn Array, start: usize, end: usize| {
+        first_invalid_utf8_in(child.slice(start, end - start).as_ref())
+    };
     match array.data_type() {
-        ArrowDataType::Binary => invalid_bytes(array.as_binary::<i32>().value(row)),
-        ArrowDataType::LargeBinary => invalid_bytes(array.as_binary::<i64>().value(row)),
-        ArrowDataType::BinaryView => invalid_bytes(array.as_binary_view().value(row)),
-        ArrowDataType::List(_) => first_in(array.as_list::<i32>().value(row).as_ref()),
-        ArrowDataType::LargeList(_) => first_in(array.as_list::<i64>().value(row).as_ref()),
-        ArrowDataType::FixedSizeList(_, _) => {
-            first_in(array.as_fixed_size_list().value(row).as_ref())
+        ArrowDataType::Binary => array
+            .as_binary::<i32>()
+            .iter()
+            .flatten()
+            .find_map(invalid_bytes),
+        ArrowDataType::LargeBinary => array
+            .as_binary::<i64>()
+            .iter()
+            .flatten()
+            .find_map(invalid_bytes),
+        ArrowDataType::BinaryView => array
+            .as_binary_view()
+            .iter()
+            .flatten()
+            .find_map(invalid_bytes),
+        ArrowDataType::List(_) => {
+            let list = array.as_list::<i32>();
+            let offsets = list.value_offsets();
+            let (start, end) = (offsets[0] as usize, offsets[list.len()] as usize);
+            rows_of(list.values().as_ref(), start, end)
         }
-        ArrowDataType::Map(_, _) => first_in(&array.as_map().value(row)),
+        ArrowDataType::LargeList(_) => {
+            let list = array.as_list::<i64>();
+            let offsets = list.value_offsets();
+            let (start, end) = (offsets[0] as usize, offsets[list.len()] as usize);
+            rows_of(list.values().as_ref(), start, end)
+        }
+        // A slice of a fixed-size list slices its values.
+        ArrowDataType::FixedSizeList(_, _) => {
+            first_invalid_utf8_in(array.as_fixed_size_list().values().as_ref())
+        }
+        ArrowDataType::Map(_, _) => {
+            let map = array.as_map();
+            let offsets = map.value_offsets();
+            let (start, end) = (offsets[0] as usize, offsets[map.len()] as usize);
+            rows_of(map.keys().as_ref(), start, end)
+                .or_else(|| rows_of(map.values().as_ref(), start, end))
+        }
+        // A slice of a struct slices its fields.
         ArrowDataType::Struct(_) => array
             .as_struct()
             .columns()
             .iter()
-            .find_map(|column| invalid_utf8_in(column.as_ref(), row)),
+            .find_map(|column| first_invalid_utf8_in(column.as_ref())),
         _ => None,
     }
 }
@@ -3425,15 +3490,11 @@ impl<'a> ArrowValueLayout<'a> {
             ArrowValueDecoder::Time32Second(arr) => {
                 Ok(Value::Time(arr.value(index) as i64 * 1_000_000_000))
             }
-            // Intervals likewise have no dedicated Value variant, so render as strings.
+            // A year-month interval, the months that the server sends of it.
             ArrowValueDecoder::IntervalYearMonth(arr) => {
-                // The sign goes on the years, as Spark's `toYearMonthIntervalString`
-                // does, so -1 month is "-0-1" and not "0-1".
-                let months = arr.value(index) as i64;
-                let sign = if months < 0 { "-" } else { "" };
-                let abs = months.abs();
-                Ok(Value::String(format!("{sign}{}-{}", abs / 12, abs % 12)))
+                Ok(Value::YearMonthInterval(arr.value(index)))
             }
+            // These intervals have no dedicated Value variant, so render as strings.
             ArrowValueDecoder::IntervalDayTime(arr) => {
                 let v = arr.value(index);
                 Ok(Value::String(format!(
@@ -3864,6 +3925,66 @@ mod nested_decode_tests {
         };
         assert_eq!(error.utf8_column(), Some(0));
         assert_eq!(error.invalid_utf8_value(), Some(vec![0xc3, 0x28]));
+    }
+
+    /// As PySpark's `_to_pylist` converts a column in bulk: the first invalid string of a struct
+    /// is that of its first field with one, over all the rows, and that of a map is of its keys
+    /// before its values; a list of structs is a struct of all its values. Rows of a slice only.
+    #[test]
+    fn invalid_utf8_of_a_nested_column_is_found_field_by_field_as_pyspark() {
+        let binary = |values: Vec<Option<&[u8]>>| Arc::new(BinaryArray::from(values)) as ArrayRef;
+        let ok: &[u8] = b"ok";
+        let two_rows = || {
+            StructArray::from(vec![
+                (
+                    Arc::new(Field::new("x", DataType::Binary, true)),
+                    binary(vec![Some(ok), Some(&[0xc3][..])]),
+                ),
+                (
+                    Arc::new(Field::new("y", DataType::Binary, true)),
+                    binary(vec![Some(&[0x80][..]), Some(ok)]),
+                ),
+            ])
+        };
+        // Row 0 has the invalid y, row 1 the invalid x: x is converted first.
+        assert_eq!(first_invalid_utf8_in(&two_rows()), Some(vec![0xc3]));
+        assert_eq!(
+            first_invalid_utf8_in(&two_rows().slice(0, 1)),
+            Some(vec![0x80])
+        );
+
+        let structs = Arc::new(two_rows()) as ArrayRef;
+        let item = Arc::new(Field::new("item", structs.data_type().clone(), true));
+        let lists = ListArray::new(item, OffsetBuffer::from_lengths([1, 1]), structs, None);
+        assert_eq!(first_invalid_utf8_in(&lists), Some(vec![0xc3]));
+        assert_eq!(first_invalid_utf8_in(&lists.slice(0, 1)), Some(vec![0x80]));
+
+        // Row 0 maps "k" to an invalid value, row 1 has an invalid key: the keys come first.
+        let entries = StructArray::from(vec![
+            (
+                Arc::new(Field::new("key", DataType::Binary, false)),
+                binary(vec![Some(&b"k"[..]), Some(&[0xc3][..])]),
+            ),
+            (
+                Arc::new(Field::new("value", DataType::Binary, true)),
+                binary(vec![Some(&[0xfe][..]), Some(&b"v"[..])]),
+            ),
+        ]);
+        let entry = Arc::new(Field::new("entries", entries.data_type().clone(), false));
+        let maps = MapArray::new(
+            entry,
+            OffsetBuffer::from_lengths([1, 1]),
+            entries,
+            None,
+            false,
+        );
+        assert_eq!(first_invalid_utf8_in(&maps), Some(vec![0xc3]));
+        assert_eq!(first_invalid_utf8_in(&maps.slice(0, 1)), Some(vec![0xfe]));
+        // A null is valid.
+        assert_eq!(
+            first_invalid_utf8_in(&BinaryArray::from(vec![None, Some(ok)])),
+            None
+        );
     }
 
     #[test]
@@ -5465,8 +5586,8 @@ mod plan_construction_tests {
             col("id").asc_nulls_last().expression().clone(),
         ];
         let outputs = [
-            df.repartition_by_range(3, inputs.clone()),
-            df.repartition_by_range_opt(None, inputs),
+            df.repartition_by_range(3, inputs.clone()).unwrap(),
+            df.repartition_by_range_opt(None, inputs).unwrap(),
         ];
         for out in &outputs {
             match out.plan.as_ref() {
@@ -5476,6 +5597,46 @@ mod plan_construction_tests {
                     assert_eq!(partition_exprs, &expected);
                 }
                 _ => panic!("expected RepartitionByRange plan"),
+            }
+        }
+    }
+
+    /// As PySpark's `repartitionByRange(numPartitions, *cols)`: a count that is not positive,
+    /// then no columns, are errors, where the server would split the rows round-robin.
+    #[test]
+    fn repartition_by_range_rejects_no_columns_and_a_count_that_is_not_positive_as_pyspark() {
+        use crate::functions::col;
+
+        let df = session().range(5).unwrap();
+        let id = || vec![col("id").expression().clone()];
+        let error = |result: Result<DataFrame>| result.err().expect("an error");
+        for empty in [
+            error(df.repartition_by_range(2, vec![])),
+            error(df.repartition_by_range_opt(None, vec![])),
+        ] {
+            assert_eq!(empty.kind, SparkErrorKind::ValueError);
+            assert_eq!(empty.get_condition().as_deref(), Some("CANNOT_BE_EMPTY"));
+            assert_eq!(
+                empty.message(),
+                "[CANNOT_BE_EMPTY] At least one cols must be specified."
+            );
+        }
+        for n in [0, -1] {
+            for result in [
+                df.repartition_by_range(n, id()),
+                df.repartition_by_range(n, vec![]),
+            ] {
+                let not_positive = error(result);
+                assert_eq!(
+                    not_positive.get_condition().as_deref(),
+                    Some("VALUE_NOT_POSITIVE")
+                );
+                assert_eq!(
+                    not_positive.message(),
+                    format!(
+                        "[VALUE_NOT_POSITIVE] Value for `numPartitions` must be positive, got '{n}'."
+                    )
+                );
             }
         }
     }
@@ -5519,7 +5680,7 @@ mod plan_construction_tests {
         ser(&df.except_all(&df2));
         ser(&df.repartition(4));
         ser(&df.coalesce(2));
-        ser(&df.repartition_by_range(3, vec![e()]));
+        ser(&df.repartition_by_range(3, vec![e()]).unwrap());
         ser(&df.hint("broadcast", Vec::<String>::new()));
         ser(&df.to_df(vec!["a"]));
         ser(&df.alias("t"));
@@ -6153,54 +6314,22 @@ mod arrow_value_tests {
     }
 
     #[test]
-    fn interval_types_render_as_string() {
-        assert!(matches!(
-            arrow_value_at(&IntervalYearMonthArray::from(vec![13i32]), 0).unwrap(),
-            Value::String(_)
-        ));
+    fn interval_types_without_a_value_variant_render_as_string() {
         let dt = IntervalDayTimeArray::from(vec![IntervalDayTime::new(1, 100)]);
         assert!(matches!(arrow_value_at(&dt, 0).unwrap(), Value::String(_)));
         let mdn = IntervalMonthDayNanoArray::from(vec![IntervalMonthDayNano::new(1, 2, 3)]);
         assert!(matches!(arrow_value_at(&mdn, 0).unwrap(), Value::String(_)));
     }
 
+    /// A year-month interval is the months of it, which a pivot sends back as the literal of the
+    /// interval, so that the column of the value is named as the pivot without values names it.
     #[test]
-    fn year_month_interval_keeps_sign() {
-        let months = [
-            0,
-            1,
-            -1,
-            11,
-            -11,
-            12,
-            -12,
-            13,
-            -13,
-            24,
-            -24,
-            i32::MAX,
-            i32::MIN,
-        ];
-        let expected = [
-            "0-0",
-            "0-1",
-            "-0-1",
-            "0-11",
-            "-0-11",
-            "1-0",
-            "-1-0",
-            "1-1",
-            "-1-1",
-            "2-0",
-            "-2-0",
-            "178956970-7",
-            "-178956970-8",
-        ];
-        for (m, want) in months.into_iter().zip(expected) {
+    fn year_month_interval_is_the_signed_months_of_it() {
+        for months in [0, 1, -1, 12, -13, i32::MAX, i32::MIN] {
             assert_eq!(
-                arrow_value_at(&IntervalYearMonthArray::from(vec![m]), 0).unwrap(),
-                Value::String(want.to_string()),
-                "months = {m}"
+                arrow_value_at(&IntervalYearMonthArray::from(vec![months]), 0).unwrap(),
+                Value::YearMonthInterval(months),
+                "months = {months}"
             );
         }
     }

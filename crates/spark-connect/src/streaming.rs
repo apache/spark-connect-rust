@@ -972,6 +972,9 @@ pub trait StreamingQueryListener: Send + Sync {
     /// Deserialize and dispatch an asynchronous event. An error is any failure the adapter
     /// does not isolate, including protocol/deserialization errors and adapter-defined
     /// unisolated callback failures. It terminates this subscription and clears its registrations.
+    /// A panic is isolated, as PySpark's `post_to_all` isolates the exception of a listener: it
+    /// is reported with a warning, and the other listeners still get the event, as for the
+    /// started event.
     fn try_on_event(&self, event: &StreamingQueryListenerEvent) -> Result<()> {
         self.on_event(event);
         Ok(())
@@ -1103,13 +1106,19 @@ impl ListenerBus {
             let posted =
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| listener.on_event(event)));
             if let Err(payload) = posted {
-                eprintln!(
-                    "WARNING: a streaming query listener threw an exception\n{}",
-                    panic_message(payload.as_ref())
-                );
+                warn_of_listener_panic(payload.as_ref());
             }
         }
     }
+}
+
+/// Report the panic of a native listener's callback, which is isolated as PySpark's
+/// `post_to_all` isolates the exception of a listener, with a warning.
+fn warn_of_listener_panic(payload: &(dyn std::any::Any + Send)) {
+    eprintln!(
+        "WARNING: a streaming query listener threw an exception\n{}",
+        panic_message(payload)
+    );
 }
 
 /// Ends the generation of a worker when its loop returns or unwinds, so the registrations
@@ -1191,18 +1200,27 @@ fn run_listener_event_loop(
             event_type,
             event_json,
         };
-        // A panic of a callback is a failure of the subscription, as a returned error is.
+        // As PySpark's `post_to_all` isolates the exception of a listener, the panic of one is
+        // reported, and the others still get the event: the subscription goes on. A returned
+        // error, such as of an event that cannot be read, fails the subscription, as does a
+        // panic of an adapter that dispatches the event to all of them.
         let dispatched = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             listeners
                 .iter()
                 .find_map(|listener| listener.try_post_to_all(&listeners, &event))
-                .unwrap_or_else(|| {
-                    listeners
-                        .iter()
-                        .try_for_each(|listener| listener.try_on_event(&event))
-                })
         }))
-        .unwrap_or_else(|payload| Err(listener_panic_error(payload.as_ref())));
+        .unwrap_or_else(|payload| Some(Err(listener_panic_error(payload.as_ref()))))
+        .unwrap_or_else(|| {
+            listeners.iter().try_for_each(|listener| {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    listener.try_on_event(&event)
+                }))
+                .unwrap_or_else(|payload| {
+                    warn_of_listener_panic(payload.as_ref());
+                    Ok(())
+                })
+            })
+        });
         if let Err(error) = dispatched {
             failure = Some((listeners, error, dispatch));
             break;
@@ -2226,20 +2244,24 @@ mod tests {
         worker.join().unwrap();
     }
 
-    /// A panic of a native listener's callback fails the subscription as a returned error does:
-    /// the listeners are told, the registrations are cleared, and no later event is read.
+    /// As PySpark's `post_to_all`, which isolates the exception of a listener for every event:
+    /// a panic of a native listener's callback on an event of the bus is reported, the listeners
+    /// after it still get the event, and the subscription goes on to the next events.
     #[test]
-    fn a_panicking_native_listener_fails_the_subscription_like_an_error() {
+    fn a_panicking_native_listener_on_an_event_of_the_bus_is_isolated_as_pyspark() {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         struct Listener {
+            panics: bool,
             events: AtomicUsize,
             errors: Mutex<Vec<String>>,
         }
         impl StreamingQueryListener for Listener {
             fn on_event(&self, _: &StreamingQueryListenerEvent) {
                 self.events.fetch_add(1, Ordering::SeqCst);
-                panic!("listener panic on event");
+                if self.panics {
+                    panic!("listener panic on event");
+                }
             }
 
             fn on_stream_error(&self, error: &SparkError) -> bool {
@@ -2248,34 +2270,81 @@ mod tests {
             }
         }
         let bus = Arc::new(ListenerBus::default());
-        let listener = Arc::new(Listener {
-            events: AtomicUsize::new(0),
-            errors: Mutex::new(vec![]),
-        });
+        let listener = |panics| {
+            Arc::new(Listener {
+                panics,
+                events: AtomicUsize::new(0),
+                errors: Mutex::new(vec![]),
+            })
+        };
+        let (panicking, after) = (listener(true), listener(false));
         {
             let mut state = bus.state.lock().unwrap();
             state.generation = 3;
             state
                 .listeners
-                .push(("first".to_string(), listener.clone()));
+                .push(("panicking".to_string(), panicking.clone()));
+            state.listeners.push(("after".to_string(), after.clone()));
         }
+        run_listener_event_loop(
+            vec![
+                Ok((QUERY_IDLE_EVENT, "first".to_string())),
+                Ok((QUERY_PROGRESS_EVENT, "second".to_string())),
+            ],
+            Arc::downgrade(&bus),
+            3,
+        );
+        for listener in [&panicking, &after] {
+            assert_eq!(listener.events.load(Ordering::SeqCst), 2);
+            assert!(listener.errors.lock().unwrap().is_empty());
+        }
+        let state = bus.state.lock().unwrap();
+        assert!(state.dispatching.is_none());
+        assert!(!state.server_registration_held);
+    }
+
+    /// An adapter that dispatches an event to all the listeners owns the isolation of their
+    /// failures: its panic fails the subscription, as a returned error does.
+    #[test]
+    fn a_panicking_adapter_fails_the_subscription_like_an_error() {
+        struct Adapter(Mutex<Vec<String>>);
+        impl StreamingQueryListener for Adapter {
+            fn on_event(&self, _: &StreamingQueryListenerEvent) {}
+
+            fn try_post_to_all(
+                &self,
+                _: &[Arc<dyn StreamingQueryListener>],
+                _: &StreamingQueryListenerEvent,
+            ) -> Option<Result<()>> {
+                panic!("adapter panic");
+            }
+
+            fn on_stream_error(&self, error: &SparkError) -> bool {
+                self.0.lock().unwrap().push(error.message());
+                true
+            }
+        }
+        let bus = Arc::new(ListenerBus::default());
+        let adapter = Arc::new(Adapter(Mutex::new(vec![])));
+        bus.state
+            .lock()
+            .unwrap()
+            .listeners
+            .push(("adapter".to_string(), adapter.clone()));
         run_listener_event_loop(
             vec![
                 Ok((QUERY_IDLE_EVENT, "panics".to_string())),
                 Ok((QUERY_IDLE_EVENT, "never read".to_string())),
             ],
             Arc::downgrade(&bus),
-            3,
+            0,
         );
-        assert_eq!(listener.events.load(Ordering::SeqCst), 1);
         assert_eq!(
-            *listener.errors.lock().unwrap(),
-            vec!["a streaming query listener panicked: listener panic on event".to_string()],
+            *adapter.0.lock().unwrap(),
+            vec!["a streaming query listener panicked: adapter panic".to_string()],
         );
         let state = bus.state.lock().unwrap();
         assert!(state.listeners.is_empty());
-        assert!(state.dispatching.is_none());
-        assert!(state.cancel.is_none());
         assert!(state.server_registration_held);
     }
 

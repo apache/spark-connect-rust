@@ -65,6 +65,45 @@ helpers accept `impl Into<Arc<LogicalPlan>>`, so they accept either an owned
 `LogicalPlan` or an existing `Arc<LogicalPlan>`. Serialization still produces the
 same protobuf tree; sharing does not deduplicate repeated relations on the wire.
 
+`LogicalPlan` implements `Drop`, so that a plan of many levels is dropped without
+recursing. A field can therefore not be moved out of an owned `LogicalPlan`:
+destructuring one by value is a compile error (E0509). Match on a reference instead
+(`match &plan`, or `match plan.as_ref()` of an `Arc<LogicalPlan>`) and clone the
+fields you need; the inputs are `Arc`s, so cloning them shares them.
+
+`LogicalPlan::Raw` adds a `depth` field: the levels of its relation as a plan, with
+those of the DataFrames that it holds, as `pyspark.ml` builds a relation over its
+input. They count for `MAX_PLAN_DEPTH`, as PySpark's serializer counts the plan of the
+input within its own. Code that constructs the variant directly sets it to 1 for a
+relation without nested plans. `LogicalPlan::try_to_proto` serializes a plan as a
+request does: a plan deeper than `MAX_PLAN_DEPTH`, or with an expression deeper than
+`MAX_EXPRESSION_DEPTH`, is a `RecursionError`. `to_proto` still serializes a plan of
+any depth, but prost encodes and drops a protobuf by recursing, so the proto of a plan
+of many thousands of levels can overflow a small stack.
+
+`Value` and `LiteralExpression` add a `YearMonthInterval(i32)` variant for signed
+months. Collect gives it for a year-month interval, where it gave the text of the
+interval (`Value::String("1-0")`), so that a pivot on collected values names its
+columns as the pivot without values does (`INTERVAL '1-0' YEAR TO MONTH`), and
+`create_dataframe` takes it for a year-month interval column. Downstream exhaustive
+matches on these enums must handle the new variant. The Python client still raises
+`NOT_IMPLEMENTED` when it collects a year-month interval, as PySpark does.
+
+`DataFrame::repartition_by_range` and `repartition_by_range_opt` return a `Result`.
+As PySpark's `repartitionByRange`, a partition count that is not positive is
+`VALUE_NOT_POSITIVE` and an empty column list `CANNOT_BE_EMPTY`. Before, the server
+split the rows round-robin for an empty column list. `StatFunctions::sample_by`
+returns a `Result` too: a stratum that is not a literal is
+`DISALLOWED_TYPE_FOR_CONTAINER`, as PySpark rejects a key that is not a float, an int
+or a str. Before, it was sent as an empty literal, which failed only when the
+DataFrame ran.
+
+A panic of a native `StreamingQueryListener` on an event of the listener bus is
+isolated, as on the started event and as PySpark isolates the exception of a listener:
+it is reported, the other listeners still get the event, and the subscription goes on.
+Before, it ended the subscription and removed every listener. An error that
+`try_on_event` returns still ends it.
+
 The random functions `rand`, `randn`, `uuid`, `shuffle`, `uniform`, `randstr` and
 `count_min_sketch` draw a new seed for each call, as PySpark and the Scala client do.
 Before, each sent the same fixed seed, so two `uuid()` columns, or the `uuid()` of

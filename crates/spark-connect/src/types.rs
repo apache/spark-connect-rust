@@ -164,10 +164,16 @@ impl DataType {
     /// This supports:
     /// - Primitive types: int, bigint, string, double, boolean, date, timestamp, binary,
     ///   tinyint, smallint, float, decimal(p,s), char(n), varchar(n), interval
-    /// - Complex types: array<...>, map<...,...>, struct<name:type,...>
+    /// - Complex types: array<...>, map<...,...>, struct<name:type,...>, with any whitespace
+    ///   between the tokens, as `ARRAY < INT >`, which Spark's parser takes too
     /// - Top-level struct can omit the "struct<>" wrapper for backward compatibility
     /// - DDL like "a INT, b STRING" is parsed as a struct
     /// - A field may end with `NOT NULL` and `COMMENT 'text'`, as `StructType.toDDL` writes them
+    ///
+    /// The parse is local, so `timestamp` is always [`DataType::Timestamp`] (TIMESTAMP_LTZ),
+    /// while the server's parser makes it TIMESTAMP_NTZ when `spark.sql.timestampType` is
+    /// `TIMESTAMP_NTZ`; [`crate::SparkSession::parse_ddl`] parses a DDL string as the server
+    /// does.
     ///
     /// Examples:
     /// ```ignore
@@ -1874,7 +1880,7 @@ fn parse_datatype_string(input: &str) -> Result<DataType> {
     // separating a field name from its type; fall back to single-type parsing if the
     // schema interpretation fails (e.g. a bare type that itself contains spaces such as
     // "interval day to second"). A top-level colon names a field too, as in "a:int".
-    if !trimmed.to_lowercase().starts_with("struct<")
+    if after_complex_keyword(trimmed, "struct").is_none()
         && (contains_top_level_comma(trimmed)
             || contains_top_level_whitespace(trimmed)
             || contains_top_level_colon(trimmed))
@@ -2265,18 +2271,38 @@ fn canonical_type_spelling(s: &str) -> String {
     format!("{head}{args}")
 }
 
+/// The text after the `<` of the complex type `keyword` that `input` starts with, in any case and
+/// with any whitespace before the `<`, as Spark's lexer reads `ARRAY <INT>`; `None` if `input`
+/// does not start with it.
+fn after_complex_keyword<'a>(input: &'a str, keyword: &str) -> Option<&'a str> {
+    let input = input.trim_start();
+    let head = input.get(..keyword.len())?;
+    if !head.eq_ignore_ascii_case(keyword) {
+        return None;
+    }
+    input[keyword.len()..].trim_start().strip_prefix('<')
+}
+
+/// The type parameters of the complex type `keyword` of `input`, the text between its angle
+/// brackets, or the `INVALID_DATATYPE_FORMAT` error of `detail`.
+fn complex_type_inner<'a>(input: &'a str, keyword: &str, detail: &str) -> Result<&'a str> {
+    after_complex_keyword(input, keyword)
+        .and_then(|rest| rest.trim_end().strip_suffix('>'))
+        .ok_or_else(|| SparkError::value("INVALID_DATATYPE_FORMAT", &[("detail", detail)]))
+}
+
 /// Parse a single type (primitive or complex)
 fn parse_single_type(input: &str) -> Result<DataType> {
     let trimmed = canonical_type_spelling(&input.trim().to_lowercase());
 
     // Complex types
-    if trimmed.starts_with("array<") {
+    if after_complex_keyword(input, "array").is_some() {
         return parse_array_type(input);
     }
-    if trimmed.starts_with("map<") {
+    if after_complex_keyword(input, "map").is_some() {
         return parse_map_type(input);
     }
-    if trimmed.starts_with("struct<") {
+    if after_complex_keyword(input, "struct").is_some() {
         return parse_struct_type(input);
     }
 
@@ -2347,15 +2373,7 @@ fn parse_single_type(input: &str) -> Result<DataType> {
 
 /// Parse array<elementType>
 fn parse_array_type(input: &str) -> Result<DataType> {
-    let trimmed = input.trim();
-    if !trimmed.to_lowercase().starts_with("array<") || !trimmed.ends_with('>') {
-        return Err(SparkError::value(
-            "INVALID_DATATYPE_FORMAT",
-            &[("detail", "Invalid array type format")],
-        ));
-    }
-
-    let inner = &trimmed[6..trimmed.len() - 1];
+    let inner = complex_type_inner(input, "array", "Invalid array type format")?;
     let element_type = parse_single_type(inner)?;
 
     Ok(DataType::Array {
@@ -2366,15 +2384,7 @@ fn parse_array_type(input: &str) -> Result<DataType> {
 
 /// Parse map<keyType,valueType>
 fn parse_map_type(input: &str) -> Result<DataType> {
-    let trimmed = input.trim();
-    if !trimmed.to_lowercase().starts_with("map<") || !trimmed.ends_with('>') {
-        return Err(SparkError::value(
-            "INVALID_DATATYPE_FORMAT",
-            &[("detail", "Invalid map type format")],
-        ));
-    }
-
-    let inner = &trimmed[4..trimmed.len() - 1];
+    let inner = complex_type_inner(input, "map", "Invalid map type format")?;
     let parts = split_map_parts(inner)?;
     if parts.len() != 2 {
         return Err(SparkError::value(
@@ -2403,15 +2413,7 @@ fn split_map_parts(s: &str) -> Result<Vec<&str>> {
 
 /// Parse struct<field1:type1,field2:type2,...>
 fn parse_struct_type(input: &str) -> Result<DataType> {
-    let trimmed = input.trim();
-    if !trimmed.to_lowercase().starts_with("struct<") || !trimmed.ends_with('>') {
-        return Err(SparkError::value(
-            "INVALID_DATATYPE_FORMAT",
-            &[("detail", "Invalid struct type format")],
-        ));
-    }
-
-    let inner = &trimmed[7..trimmed.len() - 1];
+    let inner = complex_type_inner(input, "struct", "Invalid struct type format")?;
     if inner.trim().is_empty() {
         return Ok(DataType::Struct { fields: vec![] });
     }
@@ -3106,6 +3108,47 @@ mod tests {
 
         let dt2 = DataType::from_ddl("struct<a:int,b:array<string>>").unwrap();
         assert_eq!(dt2.simple_string(), "struct<a:int,b:array<string>>");
+    }
+
+    /// Whitespace before and inside the angle brackets of a complex type, which the server's
+    /// parser takes (each type as the server's `DDLParse` gives it), and the malformed spellings
+    /// that it rejects.
+    #[test]
+    fn from_ddl_takes_whitespace_around_angle_brackets_as_the_server() {
+        for (ddl, server) in [
+            ("array <int>", "array<int>"),
+            ("STRUCT <a:int>", "struct<a:int>"),
+            ("map <string, int>", "map<string,int>"),
+            ("a array <int>", "struct<a:array<int>>"),
+            ("a: array <int>", "struct<a:array<int>>"),
+            (
+                "a ARRAY < INT >, b map < string , int >",
+                "struct<a:array<int>,b:map<string,int>>",
+            ),
+            ("array<struct <x: int>>", "array<struct<x:int>>"),
+            (
+                "struct < a : int , b : array < string > >",
+                "struct<a:int,b:array<string>>",
+            ),
+            ("struct <>", "struct<>"),
+            ("a struct <>", "struct<a:struct<>>"),
+        ] {
+            let parsed = DataType::from_ddl(ddl).unwrap_or_else(|e| panic!("{ddl}: {e}"));
+            assert_eq!(parsed.simple_string(), server, "{ddl}");
+        }
+        let DataType::Struct { fields } = DataType::from_ddl("a array <int> NOT NULL").unwrap()
+        else {
+            panic!("a struct");
+        };
+        assert!(!fields[0].nullable);
+        for rejected in [
+            "array <int> NOT NULL",
+            "array <>",
+            "array <int",
+            "map <int>",
+        ] {
+            assert!(DataType::from_ddl(rejected).is_err(), "{rejected}");
+        }
     }
 
     #[test]

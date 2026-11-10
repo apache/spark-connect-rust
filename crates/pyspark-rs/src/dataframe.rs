@@ -1223,7 +1223,8 @@ impl PyDataFrame {
             .collect();
         Ok(PyDataFrame::new(
             self.dataframe
-                .repartition_by_range_opt(num_partitions, exprs),
+                .repartition_by_range_opt(num_partitions, exprs)
+                .to_pyerr()?,
         ))
     }
 
@@ -1902,11 +1903,12 @@ impl PyDataFrame {
             Some(seed) => seed,
             None => python_random_seed(py)?,
         };
-        Ok(PyDataFrame::new(self.dataframe.stat().sample_by(
-            col,
-            fractions,
-            Some(seed),
-        )))
+        Ok(PyDataFrame::new(
+            self.dataframe
+                .stat()
+                .sample_by(col, fractions, Some(seed))
+                .to_pyerr()?,
+        ))
     }
 
     /// Replace values, as PySpark's `DataFrame.replace`: `to_replace` is a {old: new} dict, or

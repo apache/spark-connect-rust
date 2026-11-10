@@ -5,7 +5,6 @@
 use std::collections::HashMap;
 
 use spark_connect_core::error::{Result, SparkError};
-use spark_connect_core::runtime::block_on;
 use spark_connect_proto as proto;
 
 use crate::dataframe::{decode_arrow_batch, DataFrame};
@@ -1063,7 +1062,7 @@ impl Catalog {
         // error carries the operation id of the request.
         let mut stream = self.session.execute_plan(request)?;
         let mut rows = vec![];
-        while let Some(resp) = block_on(stream.message())? {
+        while let Some(resp) = stream.next_message()? {
             if let Some(proto::execute_plan_response::ResponseType::ArrowBatch(batch)) =
                 resp.response_type
             {

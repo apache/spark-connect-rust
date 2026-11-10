@@ -9,7 +9,6 @@
 use std::collections::HashMap;
 
 use spark_connect_core::error::{Result, SparkError};
-use spark_connect_core::runtime::block_on;
 use spark_connect_proto as proto;
 
 use crate::dataframe::{execute_command_collect, DataFrame};
@@ -244,7 +243,7 @@ impl PipelineRunStream {
             // `Progress`: the progress of the run does not reach the progress handlers.
             self.stream = Some(self.session.execute_plan_unreported(request)?);
         }
-        block_on(self.stream.as_mut().unwrap().message())
+        self.stream.as_mut().unwrap().next_message()
     }
 }
 
