@@ -21,6 +21,7 @@ from concurrent.futures import ThreadPoolExecutor
 from fractions import Fraction
 from threading import Barrier
 
+import numpy as np
 import pytest
 
 from _mock_connect_server import (
@@ -2243,6 +2244,141 @@ def test_functions_lit_of_a_list_stays_an_array_as_pyspark():
     assert when.arguments[1].unresolved_function.function_name == "array"
 
 
+@pytest.mark.parametrize("base, value, expected", [
+    # A NumPy float32 or a float in a float array, a float in a double array, and a datetime in a
+    # date array, which is its date.
+    (lambda F: F.array(F.lit(0.0).cast("float")), [np.float32(1.5), 2.0],
+     {"array": {"elementType": {"float": {}},
+                "elements": [{"float": 1.5}, {"float": 2.0}]}}),
+    (lambda F: F.array(F.lit(0.0)), [1.5, np.float32(2.0)],
+     {"array": {"elementType": {"double": {}},
+                "elements": [{"double": 1.5}, {"double": 2.0}]}}),
+    (lambda F: F.array(F.lit(datetime.date(2000, 1, 1))),
+     [datetime.date(2020, 1, 1), datetime.datetime(2020, 1, 2, 3)],
+     {"array": {"elementType": {"date": {}},
+                "elements": [{"date": 18262}, {"date": 18263}]}}),
+])
+def test_when_otherwise_takes_a_list_of_the_values_that_pyspark_accepts(base, value, expected):
+    # As PySpark's LiteralExpression of the list: its element type is that of the first element,
+    # and each other element must be accepted for that type, as the type says.
+    from google.protobuf.json_format import MessageToDict
+    from pyspark.sql import functions as F
+
+    when = F.when(F.lit(False), base(F)).otherwise(value)._expr.to_plan(None).unresolved_function
+    assert MessageToDict(when.arguments[2].literal) == expected
+
+
+@pytest.mark.parametrize("value, expected", [
+    # Each element is of the element type of the first, as PySpark's LiteralExpression makes it:
+    # a Python int is a byte, a short, an integer or a long that is in its range, a bool is an
+    # int, and a NumPy int is accepted for its own width and the wider ones.
+    ([np.int8(1), 2], {"elementType": {"byte": {}},
+                       "elements": [{"byte": 1}, {"byte": 2}]}),
+    ([np.int16(1), np.int8(2)], {"elementType": {"short": {}},
+                                 "elements": [{"short": 1}, {"short": 2}]}),
+    ([np.int32(1), np.int8(2)], {"elementType": {"integer": {}},
+                                 "elements": [{"integer": 1}, {"integer": 2}]}),
+    ([1, np.int8(2)], {"elementType": {"integer": {}},
+                       "elements": [{"integer": 1}, {"integer": 2}]}),
+    ([np.int64(1), 2], {"elementType": {"long": {}},
+                        "elements": [{"long": "1"}, {"long": "2"}]}),
+    ([np.float32(1.5), 2.0], {"elementType": {"float": {}},
+                              "elements": [{"float": 1.5}, {"float": 2.0}]}),
+    ([1.5, np.float64(2.0)], {"elementType": {"double": {}},
+                              "elements": [{"double": 1.5}, {"double": 2.0}]}),
+    ([datetime.date(2020, 1, 1), datetime.datetime(2020, 1, 2, 3)],
+     {"elementType": {"date": {}}, "elements": [{"date": 18262}, {"date": 18263}]}),
+    ([[datetime.date(2020, 1, 1)], [datetime.datetime(2020, 1, 2, 3)]], {
+        "elementType": {"array": {"elementType": {"date": {}}, "containsNull": True}},
+        "elements": [{"array": {"elementType": {"date": {}}, "elements": [{"date": 18262}]}},
+                     {"array": {"elementType": {"date": {}}, "elements": [{"date": 18263}]}}]}),
+    (["a", np.str_("b")], {"elementType": {"string": {"collation": "UTF8_BINARY"}},
+                           "elements": [{"string": "a"}, {"string": "b"}]}),
+    ([b"a", bytearray(b"b")], {"elementType": {"binary": {}},
+                               "elements": [{"binary": "YQ=="}, {"binary": "Yg=="}]}),
+    ([datetime.timedelta(1), datetime.timedelta(seconds=2)], {
+        "elementType": {"dayTimeInterval": {"startField": 0, "endField": 3}},
+        "elements": [{"dayTimeInterval": "86400000000"}, {"dayTimeInterval": "2000000"}]}),
+    ([datetime.time(1, 2, 3), datetime.time(4, 5, 6, 7)], {
+        "elementType": {"time": {"precision": 6}},
+        "elements": [{"time": {"nano": "3723000000000", "precision": 6}},
+                     {"time": {"nano": "14706000007000", "precision": 6}}]}),
+])
+def test_column_methods_take_the_list_of_values_that_pyspark_accepts(value, expected):
+    from google.protobuf.json_format import MessageToDict
+    from pyspark.sql import functions as F
+
+    extraction = F.col("a").getItem(value)._expr.to_plan(None).unresolved_extract_value.extraction
+    assert MessageToDict(extraction.literal) == {"array": expected}
+
+
+@pytest.mark.parametrize("value", [
+    [np.int8(1), 300],
+    [np.int8(1), 2 ** 40],
+    [np.int8(1), np.int16(2)],
+    [np.int8(1), np.int32(2)],
+    [np.int32(1), np.int64(2)],
+    [1, np.int64(2)],
+    [1, np.bool_(True)],
+    [1, 1.5],
+    [1.5, 2],
+    [datetime.datetime(2020, 1, 2, 3), datetime.date(2020, 1, 1)],
+    [decimal.Decimal("1.5"), 2],
+])
+def test_column_methods_reject_a_list_value_that_pyspark_rejects(value):
+    # As PySpark's asserts: another type than the element type's, or an int out of its range.
+    from pyspark.sql import functions as F
+
+    with pytest.raises(AssertionError):
+        F.col("a").getItem(value)._expr.to_plan(None)
+
+
+def _nested_list(depth):
+    value = 1.5
+    for _ in range(depth):
+        value = [value]
+    return value
+
+
+def test_column_methods_build_a_deep_list_and_raise_recursion_error_past_the_bound():
+    # As PySpark's LiteralExpression, which recurses for each level of a list, so a list nested
+    # about 1000 levels deep raises RecursionError. A list of 900 levels is built at once, as each
+    # level converts its elements once, where converting the first element twice took many seconds.
+    from pyspark.sql import functions as F
+
+    start = time.time()
+    F.col("a").getItem(_nested_list(900))
+    assert time.time() - start < 1.0
+    deep = _nested_list(2000)
+    for build in (
+        lambda: F.col("a").getItem(deep),
+        lambda: F.col("a").isin(deep),
+        lambda: F.when(F.lit(False), F.lit(0.0)).otherwise(deep),
+    ):
+        with pytest.raises(RecursionError):
+            build()
+
+
+def test_lit_of_a_timestamp_under_ntz_is_its_wall_clock_without_a_warning(mock_connect):
+    # As PySpark's TimestampNTZType.toInternal, which reads the fields of the value: the
+    # nanoseconds of a pandas Timestamp are dropped silently, where its to_pydatetime() warns,
+    # and an aware datetime is the wall clock that it shows.
+    import pandas as pd
+    import warnings
+    from pyspark.sql import functions as F
+
+    _, service = mock_connect
+    service.confs = {"spark.sql.timestampType": "TIMESTAMP_NTZ"}
+    aware = datetime.datetime(
+        2020, 1, 2, 3, 4, 5, tzinfo=datetime.timezone(datetime.timedelta(hours=5)))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        column = F.lit(pd.Timestamp("2020-06-01 12:00:00.000000123"))
+        aware_column = F.lit(aware)
+    assert column._expr.to_plan(None).literal.timestamp_ntz == 1591012800000000
+    assert aware_column._expr.to_plan(None).literal.timestamp_ntz == 1577934245000000
+
+
 
 
 def test_map_functions_send_their_resource_profile_as_pyspark(mock_connect):
@@ -3424,6 +3560,23 @@ def test_create_raises_for_a_keepalive_param_that_is_not_an_integer_as_pyspark()
     with pytest.raises(ValueError) as error:
         SparkSession.builder.remote("sc://localhost:1/;grpc_keepalive_time_ms=abc").create()
     assert str(error.value) == "invalid literal for int() with base 10: 'abc'"
+
+
+def test_create_raises_for_a_port_that_urllib_rejects_as_pyspark():
+    # As PySpark's channel builder, whose port (urllib's) raises a ValueError of the builtin
+    # when the session is made, with no URL and no token in the message.
+    from pyspark.sql import SparkSession
+
+    for url, message in [
+        ("sc://localhost:99999/;token=SECRET", "Port out of range 0-65535"),
+        ("sc://localhost:+80/;token=SECRET", "Port could not be cast to integer value as '+80'"),
+        ("sc://localhost:notaport/;token=SECRET",
+         "Port could not be cast to integer value as 'notaport'"),
+    ]:
+        with pytest.raises(ValueError) as error:
+            SparkSession.builder.remote(url).create()
+        assert type(error.value) is ValueError, url
+        assert str(error.value) == message, url
 
 
 def test_the_plan_of_a_dataframe_that_a_hook_puts_in_is_compressed_as_pyspark(mock_connect):
@@ -5054,6 +5207,39 @@ def test_invalid_utf8_of_a_struct_column_is_raised_field_by_field_as_pyspark(moc
         spark.range(2).collect()
     assert raised.value.object == b"\xc3"
     assert "can't decode byte 0xc3 in position 0" in str(raised.value)
+
+
+def test_invalid_utf8_after_binary_values_is_raised_for_the_string_as_pyspark(mock_connect):
+    # PySpark raises for the first invalid string of the result, not for a binary value that is
+    # not UTF-8, which is a value: here the binary column, flat or nested in an array, comes first.
+    pa = pytest.importorskip("pyarrow")
+    spark, service = mock_connect
+
+    def strings(*values):
+        offsets = [0]
+        for value in values:
+            offsets.append(offsets[-1] + len(value))
+        buffers = [None, pa.py_buffer(array.array("i", offsets)), pa.py_buffer(b"".join(values))]
+        return pa.Array.from_buffers(pa.string(), len(values), buffers)
+
+    binaries = [
+        pa.array([b"\xff", b"\xfe"], pa.binary()),
+        pa.array([[b"\xff"], [b"\xfe"]], pa.list_(pa.binary())),
+    ]
+    for binary in binaries:
+        batch = pa.record_batch([binary, strings(b"a", b"\xc3")], names=["b", "s"])
+        sink = pa.BufferOutputStream()
+        with pa.ipc.new_stream(sink, batch.schema) as writer:
+            writer.write_batch(batch)
+        # ExecutePlanResponse.arrow_batch=2: row_count=2, data=2.
+        service.execute_payload = message_field(
+            2, varint_field(1, 2) + message_field(2, sink.getvalue().to_pybytes())
+        )
+        with pytest.raises(UnicodeDecodeError) as raised:
+            spark.range(2).collect()
+        assert raised.value.object == b"\xc3"
+        assert str(raised.value) == (
+            "'utf-8' codec can't decode byte 0xc3 in position 0: unexpected end of data")
 
 
 def test_client_release_session_after_stop_raises_no_active_session_as_pyspark(mock_connect):
@@ -6711,6 +6897,106 @@ def test_variant_val_subclass_is_sent_as_its_variant(mock_connect):
     sent = local_table(spark.createDataFrame([(tagged,)], "v variant"))
     assert sent.to_pylist() == local_table(
         spark.createDataFrame([(T.VariantVal(value, metadata),)], "v variant")).to_pylist()
+
+
+
+class _SlottedVariant(T.VariantVal):
+    __slots__ = ("note",)
+
+
+class _TaggedGeometry(T.Geometry):
+    # Unpickling must not call this __init__, which needs the tag.
+    def __init__(self, wkb, srid, tag):
+        super().__init__(wkb, srid)
+        self.tag = tag
+
+
+class _TaggedGeography(T.Geography):
+    def __init__(self, wkb, srid, tag):
+        super().__init__(wkb, srid)
+        self.tag = tag
+
+
+def test_variant_and_spatial_values_pickle_as_pysparks_plain_classes_which_load_them(
+        monkeypatch):
+    # As PySpark's VariantVal, Geometry and Geography, plain classes without __setstate__: a
+    # value pickles as its class, rebuilt without __init__, with the dict of its attributes as
+    # the state, which PySpark's classes take, as the server's Python workers do for the values
+    # of a UDF. And PySpark's pickles of them load here.
+    import io
+    import pickle
+
+    class VariantVal:  # PySpark's, as far as pickling goes.
+        def __init__(self, value, metadata):
+            self.value, self.metadata = value, metadata
+
+    class Geometry:
+        def __init__(self, wkb, srid):
+            self.wkb, self.srid = wkb, srid
+
+    class Geography(Geometry):
+        pass
+
+    pyspark_classes = {"VariantVal": VariantVal, "Geometry": Geometry, "Geography": Geography}
+    for name, cls in pyspark_classes.items():
+        cls.__module__, cls.__qualname__ = "pyspark.sql.types", name
+
+    class PySparkUnpickler(pickle.Unpickler):
+        def find_class(self, module, name):
+            if module == "pyspark.sql.types" and name in pyspark_classes:
+                return pyspark_classes[name]
+            return super().find_class(module, name)
+
+    def pyspark_pickle(name, attributes, protocol):
+        # PySpark's pickle of its value of `attributes`, which refers to its class by name.
+        value = pyspark_classes[name].__new__(pyspark_classes[name])
+        vars(value).update(attributes)
+        with monkeypatch.context() as patched:
+            patched.setattr(T, name, pyspark_classes[name])
+            return pickle.dumps(value, protocol)
+
+    wkb = bytes.fromhex("0101000000000000000000F03F0000000000000040")
+    for value, fields in [
+        (T.VariantVal(b"\x0c\x01", b"\x01\x00\x00"),
+         {"value": b"\x0c\x01", "metadata": b"\x01\x00\x00"}),
+        (T.Geometry(wkb, 4326), {"wkb": wkb, "srid": 4326}),
+        (T.Geography(wkb, 4326), {"wkb": wkb, "srid": 4326}),
+    ]:
+        value.tag = "kept"
+        name = type(value).__name__
+        for protocol in range(2, pickle.HIGHEST_PROTOCOL + 1):
+            loaded = PySparkUnpickler(io.BytesIO(pickle.dumps(value, protocol))).load()
+            assert type(loaded) is pyspark_classes[name]
+            assert vars(loaded) == {"tag": "kept", **fields}
+            restored = pickle.loads(pyspark_pickle(name, {"tag": "x", **fields}, protocol))
+            assert type(restored) is type(value) and restored.tag == "x"
+            assert {field: getattr(restored, field) for field in fields} == fields
+
+
+def test_spatial_values_copy_pickle_and_are_subclassed_as_pyspark():
+    # As PySpark's Geometry and Geography, plain classes: they are copied and pickled, also in a
+    # Row, and subclassed, of an __init__ that unpickling does not run. And as of PySpark's
+    # VariantVal, the slots of a subclass are pickled.
+    import copy
+    import pickle
+
+    wkb = bytes.fromhex("0101000000000000000000F03F0000000000000040")
+    for cls, tagged in ((T.Geometry, _TaggedGeometry), (T.Geography, _TaggedGeography)):
+        value = cls(wkb, 4326)
+        for restored in (copy.copy(value), copy.deepcopy(value), pickle.loads(pickle.dumps(value))):
+            assert type(restored) is cls and restored == value
+            assert (restored.wkb, restored.getSrid()) == (wkb, 4326)
+        assert pickle.loads(pickle.dumps(T.Row(g=value))) == T.Row(g=value)
+        original = tagged(wkb, 3857, "x")
+        restored = pickle.loads(pickle.dumps(original))
+        assert (type(restored), restored.tag, restored.srid) == (tagged, "x", 3857)
+        assert restored == original and repr(restored) == repr(original)
+
+    slotted = _SlottedVariant(b"\x0c\x01", b"\x01\x00\x00")
+    slotted.note = "slot"
+    restored = pickle.loads(pickle.dumps(slotted))
+    assert (type(restored), restored.note) == (_SlottedVariant, "slot")
+    assert (restored.value, restored.metadata) == (b"\x0c\x01", b"\x01\x00\x00")
 
 
 def test_str_of_variant_values_is_their_json_and_they_are_no_rows_as_pyspark():
@@ -16590,6 +16876,18 @@ def test_grpc_errors_without_details_are_spark_connect_grpc_exceptions(mock_conn
     assert error.value.operation_id == _request_operation_id(service.execute_requests[-1])
 
 
+def test_a_failure_with_retry_info_is_retried_after_the_delay_of_the_server(mock_connect):
+    # As PySpark's DefaultPolicy: a failure that carries a RetryInfo is retried whatever its
+    # code, after the retry delay that the server asks for (300 ms, above the 50 ms base wait).
+    spark, service = mock_connect
+    service.retry_info_failures = [("RESOURCE_EXHAUSTED", 300)]
+    start = time.monotonic()
+    spark.range(3).count()  # the mock returns no rows, so only the success of the call is checked
+    assert time.monotonic() - start >= 0.3
+    assert len(service.execute_requests) == 2
+    assert not service.retry_info_failures
+
+
 def test_analyze_errors_without_details_are_spark_connect_grpc_exceptions(mock_connect):
     from pyspark.errors.exceptions.connect import SparkConnectGrpcException, StatusCode
 
@@ -17081,6 +17379,152 @@ def test_exception_of_a_signal_handler_is_raised_by_collect_as_pyspark(mock_conn
     finally:
         timer.cancel()
         signal.signal(signal.SIGINT, previous)
+    assert len(service.interrupt_requests) == 1
+
+
+def _two_row_range_results(service):
+    # The result of each range: two rows in one Arrow batch, which the iterators read from the
+    # buffer of the batch before they wait for the next response.
+    import pyarrow as pa
+
+    table = pa.table({"id": pa.array([0, 1], pa.int64())})
+    sink = pa.BufferOutputStream()
+    with pa.ipc.new_stream(sink, table.schema) as writer:
+        writer.write_table(table)
+    # ExecutePlanResponse.schema=7 and arrow_batch=2: ArrowBatch.row_count=1, data=2.
+    service.execute_payload = message_field(7, struct_schema("id")) + message_field(
+        2, varint_field(1, table.num_rows) + message_field(2, sink.getvalue().to_pybytes()))
+
+
+def test_sigint_interrupts_the_iterator_that_waits_and_not_a_held_one(mock_connect):
+    # As PySpark's: the signal interrupts the operation of the iterator whose next waits for the
+    # server, even though another iterator that was started after it is alive and half-consumed.
+    # That other iterator goes on, and the interrupted one raises KeyboardInterrupt at once.
+    import signal
+    import threading
+
+    spark, service = mock_connect
+    _two_row_range_results(service)
+    service.block_result_complete = True
+    waiting = spark.range(2).toLocalIterator()
+    assert next(waiting).id == 0
+    service.block_result_complete = False
+    held = spark.range(2).toLocalIterator()
+    assert next(held).id == 0
+    assert next(waiting).id == 1
+    timer = threading.Timer(0.3, os.kill, (os.getpid(), signal.SIGINT))
+    started = time.monotonic()
+    timer.start()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            next(waiting)
+    finally:
+        timer.cancel()
+        service.release_response()
+    assert time.monotonic() - started < 3
+    # ExecutePlanRequest.operation_id=6, of the execution of the waiting iterator, which is the
+    # last one that was started; InterruptRequest.operation_id=6.
+    operation_id = parse_message(service.execute_requests[-2]).get(6, [b""])[0]
+    [interrupt] = service.interrupt_requests
+    assert parse_message(interrupt)[6] == [operation_id]
+    # The held iterator still yields its next row.
+    assert next(held).id == 1
+
+
+def test_sigint_during_stop_with_an_unconsumed_iterator_raises_at_once(mock_connect):
+    # As PySpark's stop: the release of the session is a wait that no execution of the caller
+    # stands behind, so a signal ends it at once, though an iterator of the caller is alive and
+    # half-consumed. The iterator is not interrupted, and the session stays open.
+    import signal
+    import threading
+
+    spark, service = mock_connect
+    _two_row_range_results(service)
+    held = spark.range(2).toLocalIterator()
+    assert next(held).id == 0
+    service.release_session_blocked = True
+    timer = threading.Timer(0.3, os.kill, (os.getpid(), signal.SIGINT))
+    started = time.monotonic()
+    timer.start()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            spark.stop()
+    finally:
+        timer.cancel()
+    assert time.monotonic() - started < 3
+    assert not spark.is_stopped
+    assert service.interrupt_requests == []
+    service.release_session_blocked = False
+    service.release_session_release()
+    spark.stop()
+    assert spark.is_stopped
+    assert next(held).id == 1
+
+
+def test_sigint_during_stop_with_a_registered_listener_raises_at_once(mock_connect):
+    # As PySpark's stop, with a StreamingQueryListener registered from this thread: its
+    # subscription is an execution of the listener bus, which a wait of this thread does not wait
+    # for, so a signal ends the release of the session at once, and the session stays open.
+    import signal
+    import threading
+
+    from pyspark.sql.streaming.listener import StreamingQueryListener
+
+    class Listener(StreamingQueryListener):
+        def onQueryStarted(self, event):
+            pass
+
+        def onQueryProgress(self, event):
+            pass
+
+        def onQueryIdle(self, event):
+            pass
+
+        def onQueryTerminated(self, event):
+            pass
+
+    spark, service = mock_connect
+    service.listener_bus_enabled = True
+    spark.streams.addListener(Listener())
+    assert service.wait_listener_registration(1)
+    service.release_session_blocked = True
+    timer = threading.Timer(0.3, os.kill, (os.getpid(), signal.SIGINT))
+    started = time.monotonic()
+    timer.start()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            spark.stop()
+    finally:
+        timer.cancel()
+    assert time.monotonic() - started < 3
+    assert not spark.is_stopped
+    service.release_session_blocked = False
+    service.release_session_release()
+    spark.stop()
+    assert spark.is_stopped
+
+
+def test_sigint_during_the_plan_compression_lookup_interrupts_the_first_execution(mock_connect):
+    # As PySpark's, where a signal that arrives while the call waits for the plan compression
+    # lookup of its first plan is raised when the lookup returns, so no execution starts. Here
+    # the execution that the call starts after the lookup is interrupted at once instead: the
+    # signal is kept until an execution is in flight, and the call ends promptly.
+    import signal
+    import threading
+
+    spark, service = mock_connect
+    service.plan_compression_lookup_delay = 1.0
+    service.block_execute = True
+    timer = threading.Timer(0.3, os.kill, (os.getpid(), signal.SIGINT))
+    started = time.monotonic()
+    timer.start()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            spark.range(3).collect()
+    finally:
+        timer.cancel()
+        service.release_response()
+    assert time.monotonic() - started < 3
     assert len(service.interrupt_requests) == 1
 
 

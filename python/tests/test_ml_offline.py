@@ -287,6 +287,332 @@ def test_ml_connect_setters_set_the_params_of_their_receiver_as_pyspark(ml_mock)
         assert params == sent_params(cls(**values)), cls
 
 
+# The params of the native pyspark.ml.connect classes, by the TypeConverters method of each
+# param in PySpark. Their constructors take them all but thresholds, which PySpark's
+# RandomForestClassifier takes by its setter only.
+_NATIVE_PARAMS = {
+    "StandardScaler": dict(inputCol="str", outputCol="str"),
+    "MaxAbsScaler": dict(inputCol="str", outputCol="str"),
+    "StringIndexer": dict(inputCol="str", outputCol="str"),
+    "VectorAssembler": dict(inputCols="str_list", outputCol="str"),
+    "LogisticRegression": dict(
+        featuresCol="str", labelCol="str", predictionCol="str", maxIter="int"
+    ),
+    "LinearSVC": dict(
+        featuresCol="str", labelCol="str", predictionCol="str", maxIter="int", regParam="float",
+        tol="float", rawPredictionCol="str", fitIntercept="bool", standardization="bool",
+        threshold="float", weightCol="str", aggregationDepth="int", maxBlockSizeInMB="float",
+    ),
+    "LinearRegression": dict(
+        featuresCol="str", labelCol="str", predictionCol="str", maxIter="int", regParam="float",
+        elasticNetParam="float", tol="float", fitIntercept="bool", standardization="bool",
+        solver="str", weightCol="str", aggregationDepth="int", loss="str", epsilon="float",
+        maxBlockSizeInMB="float",
+    ),
+    "RandomForestClassifier": dict(
+        featuresCol="str", labelCol="str", predictionCol="str", probabilityCol="str",
+        rawPredictionCol="str", maxDepth="int", maxBins="int", minInstancesPerNode="int",
+        minInfoGain="float", pruneTree="bool", maxMemoryInMB="int", cacheNodeIds="bool",
+        checkpointInterval="int", impurity="str", numTrees="int", featureSubsetStrategy="str",
+        seed="int", subsamplingRate="float", leafCol="str", minWeightFractionPerNode="float",
+        weightCol="str", bootstrap="bool", thresholds="float_list",
+    ),
+    "KMeans": dict(
+        featuresCol="str", predictionCol="str", k="int", initMode="str", initSteps="int",
+        tol="float", maxIter="int", seed="int", distanceMeasure="str", weightCol="str",
+        solver="str", maxBlockSizeInMB="float",
+    ),
+    "RegressionEvaluator": dict(labelCol="str", predictionCol="str", metricName="str"),
+    "BinaryClassificationEvaluator": dict(labelCol="str", rawPredictionCol="str", metricName="str"),
+    "MulticlassClassificationEvaluator": dict(
+        metricName="str", labelCol="str", predictionCol="str"
+    ),
+    "Pipeline": dict(stages="str_list"),
+    "CrossValidator": dict(numFolds="int", parallelism="int", seed="int"),
+}
+
+# Of each kind, values that PySpark's converter takes, with the literal kind and value that
+# PySpark sends of them, and values that it rejects, with the end of PySpark's TypeError.
+_NATIVE_CONVERTED = {
+    "int": [(3.0, ("integer", 3)), (np.int64(4), ("integer", 4)),
+            (2**33 + 3, ("long", 8589934595))],
+    "float": [(1, ("double", 1.0)), (np.float64(0.5), ("double", 0.5))],
+    "str": [(np.str_("a"), ("string", "a"))],
+    "bool": [(True, ("boolean", True))],
+    "str_list": [(("a", "b"), ("array", ["a", "b"]))],
+    "float_list": [((1, 2.5), ("array", [1.0, 2.5]))],
+}
+_NATIVE_REJECTED = {
+    "int": [(3.5, "Could not convert 3.5 to int"), (True, "Could not convert True to int"),
+            (np.int32(3), "Could not convert 3 to int"), ("3", "Could not convert 3 to int")],
+    "float": [("1", "Could not convert 1 to float"), (True, "Could not convert True to float")],
+    "str": [(1, "Could not convert <class 'int'> to string type")],
+    "bool": [(1, "Boolean Param requires value of type bool. Found <class 'int'>.")],
+    "str_list": [([1], "Could not convert [1] to list of strings"),
+                 ("ab", "Could not convert ab to list of strings")],
+    "float_list": [(["a"], "Could not convert ['a'] to list of floats")],
+}
+
+
+def _native_request(spark, service, obj, models):
+    # The MlOperator and the MlParams that the next evaluate, fit or transform of the native
+    # obj sends; Pipeline and CrossValidator fit no object of the server, so the transform of
+    # their model sends them. The models are kept in models, so that none is released.
+    df = spark.range(1)
+    sent = len(service.execute_requests)
+    if hasattr(obj, "evaluate"):
+        service.execute_payload = _ml_result(param=pb2.Expression.Literal(double=0.5))
+        assert obj.evaluate(df) == 0.5
+        evaluate = _commands(service)[sent].ml_command.evaluate
+        return evaluate.evaluator, evaluate.params
+    if hasattr(obj, "fit"):
+        service.execute_payload = _operator_info("model-1")
+        models.append(obj.fit(df))
+        if len(service.execute_requests) > sent:
+            fit = _commands(service)[sent].ml_command.fit
+            return fit.estimator, fit.params
+        obj = models[-1]
+    transform = _relation(obj.transform(df)).ml_relation.transform
+    return transform.transformer, transform.params
+
+
+def _literal_value(literal):
+    kind = literal.WhichOneof("literal_type")
+    if kind == "array":
+        return kind, [_literal_value(element)[1] for element in literal.array.elements]
+    return kind, getattr(literal, kind)
+
+
+def _native_sent(spark, service, obj, models):
+    _, params = _native_request(spark, service, obj, models)
+    return {name: _literal_value(literal) for name, literal in params.params.items()}
+
+
+def test_ml_connect_constructors_are_keyword_only_as_pyspark(ml_mock):
+    # As PySpark's @keyword_only: the constructor of a native pyspark.ml.connect class raises
+    # its TypeError for a positional argument, except MulticlassClassificationEvaluator's, which
+    # is not keyword-only in PySpark and takes metricName, labelCol and predictionCol by
+    # position. A wrong argument raises Python's TypeError of PySpark's __init__.
+    import pyspark.ml.connect as connect
+
+    spark, service = ml_mock
+    models = []
+    for name in _NATIVE_PARAMS:
+        cls = getattr(connect, name)
+        with pytest.raises(TypeError) as error:
+            cls(bogus=1)
+        assert str(error.value) == f"{name}.__init__() got an unexpected keyword argument 'bogus'"
+        if name == "MulticlassClassificationEvaluator":
+            continue
+        for args in [("a",), (1, 2)]:
+            with pytest.raises(TypeError) as error:
+                cls(*args)
+            assert str(error.value) == "Method __init__ forces keyword arguments.", name
+    evaluator = connect.MulticlassClassificationEvaluator("accuracy", "y", predictionCol="p")
+    assert _native_sent(spark, service, evaluator, models) == {
+        "metricName": ("string", "accuracy"),
+        "labelCol": ("string", "y"),
+        "predictionCol": ("string", "p"),
+    }
+    with pytest.raises(TypeError) as error:
+        connect.MulticlassClassificationEvaluator("a", "b", "c", "d")
+    assert str(error.value) == (
+        "MulticlassClassificationEvaluator.__init__() takes from 1 to 4 positional arguments "
+        "but 5 were given"
+    )
+    with pytest.raises(TypeError) as error:
+        connect.MulticlassClassificationEvaluator("a", metricName="b")
+    assert str(error.value) == (
+        "MulticlassClassificationEvaluator.__init__() got multiple values for argument "
+        "'metricName'"
+    )
+
+
+def test_ml_connect_params_convert_with_the_type_converters_of_pyspark(ml_mock):
+    # As PySpark's Params._set with the TypeConverters of each param, in the constructor and
+    # the setter of every native class: a value that the converter takes is sent as PySpark
+    # sends what it converts it to (an integral float as an int, an int beyond 32 bits as a
+    # long), and one that it rejects raises PySpark's TypeError.
+    import pyspark.ml.connect as connect
+
+    spark, service = ml_mock
+    models = []
+    for name, params in _NATIVE_PARAMS.items():
+        cls = getattr(connect, name)
+        for param, kind in params.items():
+            setter = "set" + param[0].upper() + param[1:]
+            for value, expected in _NATIVE_CONVERTED[kind]:
+                made = [getattr(cls(), setter)(value)]
+                if param != "thresholds":
+                    made.append(cls(**{param: value}))
+                for obj in made:
+                    sent = _native_sent(spark, service, obj, models)
+                    assert sent == {param: expected}, (name, param, value)
+            for value, message in _NATIVE_REJECTED[kind]:
+                expected = f'Invalid param value given for param "{param}". {message}'
+                with pytest.raises(TypeError) as error:
+                    getattr(cls(), setter)(value)
+                assert str(error.value) == expected, (name, param, value)
+                if param != "thresholds":
+                    with pytest.raises(TypeError) as error:
+                        cls(**{param: value})
+                    assert str(error.value) == expected, (name, param, value)
+    with pytest.raises(TypeError) as error:
+        connect.RandomForestClassifier(thresholds=[0.5, 0.5])
+    assert str(error.value) == (
+        "RandomForestClassifier.__init__() got an unexpected keyword argument 'thresholds'"
+    )
+
+
+def test_ml_connect_constructors_send_only_the_params_they_are_given_as_pyspark(ml_mock):
+    # As PySpark, which sends the params of its _paramMap, those that the constructor and the
+    # setters set: a native class sends none of its defaults, which the server applies.
+    import pyspark.ml.connect as connect
+
+    spark, service = ml_mock
+    models = []
+    for name in _NATIVE_PARAMS:
+        assert _native_sent(spark, service, getattr(connect, name)(), models) == {}, name
+    assert _native_sent(spark, service, connect.KMeans(k=3), models) == {"k": ("integer", 3)}
+    forest = connect.RandomForestClassifier(numTrees=3, seed=2**33)
+    assert _native_sent(spark, service, forest, models) == {
+        "numTrees": ("integer", 3),
+        "seed": ("long", 2**33),
+    }
+
+
+def test_ml_connect_unsendable_ints_none_and_uids_as_pyspark(ml_mock):
+    # As PySpark: an int beyond a long is taken by the constructor and the setter, and the
+    # next fit raises the VALUE_NOT_BETWEEN of PySpark's serialization of the params, before
+    # any request, until the param is set again. None leaves a param unset, where PySpark
+    # sends a null that the server rejects (a NullPointerException for a number). The uid of
+    # every native class is the name of its class and 12 hex digits, as PySpark's.
+    import re
+
+    import pyspark.ml.connect as connect
+
+    spark, service = ml_mock
+    models = []
+    for estimator in [
+        connect.KMeans(seed=2**64),
+        connect.KMeans().setSeed(-(2**63) - 1),
+        connect.RandomForestClassifier().setNumTrees(2**70),
+        connect.CrossValidator(numFolds=2**70),
+    ]:
+        sent = len(service.execute_requests)
+        with pytest.raises(PySparkValueError) as error:
+            estimator.fit(spark.range(1))
+        assert error.value.getCondition() == "VALUE_NOT_BETWEEN"
+        assert str(error.value) == (
+            "[VALUE_NOT_BETWEEN] Value for `value` must be between -9223372036854775808 and "
+            "32767."
+        )
+        assert len(service.execute_requests) == sent
+    estimator = connect.KMeans(seed=2**64)
+    assert estimator.setSeed(5) is estimator
+    assert _native_sent(spark, service, estimator, models) == {"seed": ("integer", 5)}
+    assert _native_sent(spark, service, connect.KMeans(seed=2**64, k=2).setSeed(None),
+                        models) == {"k": ("integer", 2)}
+
+    for name, params in _NATIVE_PARAMS.items():
+        cls = getattr(connect, name)
+        for param, kind in params.items():
+            setter = "set" + param[0].upper() + param[1:]
+            value = _NATIVE_CONVERTED[kind][0][0]
+            obj = cls()
+            assert getattr(obj, setter)(value) is obj
+            assert getattr(obj, setter)(None) is obj
+            assert _native_sent(spark, service, obj, models) == {}, (name, param)
+            if param != "thresholds":
+                assert _native_sent(spark, service, cls(**{param: None}), models) == {}
+        operator, _ = _native_request(spark, service, cls(), models)
+        assert re.fullmatch(name + "_[0-9a-f]{12}", operator.uid), operator.uid
+
+
+def test_ml_connect_setters_run_while_a_fit_or_an_evaluate_waits_as_pyspark(ml_mock):
+    # As PySpark, whose fit and evaluate hold no lock of the estimator or the evaluator: a
+    # setter that another thread calls while a fit or an evaluate of the same native object
+    # waits for the server sets the param, and the waiting call sends the params of when it
+    # started. (Pipeline, CrossValidator and VectorAssembler send no request to wait for.)
+    import threading
+
+    import pyspark.ml.connect as connect
+
+    spark, service = ml_mock
+    df = spark.range(1)
+    # Kept alive, so that the release of no model reaches the server after a reset.
+    models = []
+    for name, params in _NATIVE_PARAMS.items():
+        if name in ("Pipeline", "CrossValidator", "VectorAssembler"):
+            continue
+        param = next(param for param, kind in params.items() if kind == "str")
+        setter = "set" + param[0].upper() + param[1:]
+        obj = getattr(connect, name)()
+        service.reset()
+        service.block_execute = True
+        if hasattr(obj, "evaluate"):
+            service.execute_payload = _ml_result(param=pb2.Expression.Literal(double=0.5))
+            call = obj.evaluate
+        else:
+            service.execute_payload = _operator_info("model-1")
+            call = obj.fit
+        outcome = []
+
+        def run():
+            try:
+                outcome.append(call(df))
+            except Exception as error:  # noqa: BLE001 - checked below
+                outcome.append(error)
+
+        waiting = threading.Thread(target=run)
+        waiting.start()
+        try:
+            assert service.wait_execute_started(1), name
+            assert getattr(obj, setter)("changed") is obj
+        finally:
+            service.release_response()
+            waiting.join(10)
+        models.append(outcome)
+        assert len(outcome) == 1 and not isinstance(outcome[0], Exception), (name, outcome)
+        (command,) = _commands(service)
+        held = command.ml_command.evaluate if hasattr(obj, "evaluate") else command.ml_command.fit
+        assert dict(held.params.params) == {}, name
+        assert _native_sent(spark, service, obj, models) == {param: ("string", "changed")}
+
+
+def test_native_models_released_while_their_session_stops_send_no_delete(ml_mock):
+    # As the release of a cached remote relation: a native model that goes once its session is
+    # stopped, here while its ReleaseSession waits for the server, sends no Delete, since
+    # stopping the session releases its ML cache on the server.
+    import threading
+    import time
+
+    from pyspark.ml.connect import KMeans
+
+    spark, service = ml_mock
+    service.execute_payload = _operator_info("model-1")
+    model = KMeans(k=2).fit(spark.range(1))
+    sent = len(service.execute_requests)
+    service.release_session_blocked = True
+    stopper = threading.Thread(target=spark.stop)
+    stopper.start()
+    try:
+        deadline = time.time() + 10
+        while service.release_session_calls == 0 and time.time() < deadline:
+            time.sleep(0.01)
+        assert service.release_session_calls == 1
+        del model
+        gc.collect()
+        # The release is sent without waiting for it: give one the time to arrive.
+        time.sleep(0.5)
+        commands = _commands(service)[sent:]
+        assert not [c for c in commands if c.ml_command.HasField("delete")]
+    finally:
+        service.release_session_release()
+        stopper.join(10)
+    assert spark.is_stopped
+
+
 @pytest.mark.parametrize(
     "value, expected",
     [

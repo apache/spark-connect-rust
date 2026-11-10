@@ -360,10 +360,63 @@ pub(crate) fn to_value_column(obj: &Bound<'_, PyAny>) -> PyResult<Column> {
     to_column(obj)
 }
 
+/// How deep the lists of a Column method may nest. PySpark's `LiteralExpression` recurses in
+/// Python for each level, so under Python's default recursion limit it raises `RecursionError`
+/// for a list nested about 990 levels deep (a little less below a deeper caller). A deeper list
+/// is a `RecursionError` here too, rather than a native stack overflow.
+const MAX_LIST_DEPTH: usize = 988;
+
+/// The stack that a level of nested lists keeps free before it goes down a level, and the size of
+/// a stack segment that it adds when less is left, as for the levels of an expression or a plan:
+/// a thread's stack may be smaller than the depth of a list needs, so a level grows it.
+const LIST_RED_ZONE: usize = if cfg!(debug_assertions) {
+    1 << 20
+} else {
+    128 << 10
+};
+const LIST_STACK_SEGMENT: usize = if cfg!(debug_assertions) {
+    16 << 20
+} else {
+    4 << 20
+};
+
+/// Run `f`, which goes down a level of nested lists, with at least [`LIST_RED_ZONE`] of stack left.
+fn with_stack_for_a_list_level<T>(f: impl FnOnce() -> T) -> T {
+    stacker::maybe_grow(LIST_RED_ZONE, LIST_STACK_SEGMENT, f)
+}
+
+thread_local! {
+    static LIST_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// One more level of nested lists for as long as it lives.
+struct ListLevel;
+
+impl ListLevel {
+    fn enter() -> PyResult<ListLevel> {
+        LIST_DEPTH.with(|depth| {
+            if depth.get() >= MAX_LIST_DEPTH {
+                return Err(pyo3::exceptions::PyRecursionError::new_err(
+                    "maximum recursion depth exceeded while converting a list to a literal",
+                ));
+            }
+            depth.set(depth.get() + 1);
+            Ok(ListLevel)
+        })
+    }
+}
+
+impl Drop for ListLevel {
+    fn drop(&mut self) {
+        LIST_DEPTH.with(|depth| depth.set(depth.get() - 1));
+    }
+}
+
 /// The array literal of a list, of the type of its first element, as PySpark's
-/// `LiteralExpression` infers it. Each element is then a literal of that type, as
-/// `literal_as` makes it.
+/// `LiteralExpression` infers it. The first element's literal gives that type, and each other
+/// element is converted to it once, by `literal_as`.
 fn typed_array_literal(list: &Bound<'_, pyo3::types::PyList>) -> PyResult<LiteralExpression> {
+    let _level = ListLevel::enter()?;
     let Some(first) = list.iter().next().filter(|first| !first.is_none()) else {
         return Err(crate::column::raise_pyspark(
             list.py(),
@@ -373,14 +426,14 @@ fn typed_array_literal(list: &Bound<'_, pyo3::types::PyList>) -> PyResult<Litera
         ));
     };
     let first = match first.cast::<pyo3::types::PyList>() {
-        Ok(inner) => typed_array_literal(inner)?,
+        Ok(inner) => with_stack_for_a_list_level(|| typed_array_literal(inner))?,
         Err(_) => scalar_literal_of(&first)?,
     };
     let element_type = literal_data_type(&first);
-    let elements = list
-        .iter()
-        .map(|item| literal_as(&item, &element_type))
-        .collect::<PyResult<Vec<_>>>()?;
+    let mut elements = vec![first];
+    for item in list.iter().skip(1) {
+        elements.push(literal_as(&item, &element_type)?);
+    }
     Ok(LiteralExpression::Array {
         element_type: Box::new(element_type),
         elements,
@@ -388,45 +441,182 @@ fn typed_array_literal(list: &Bound<'_, pyo3::types::PyList>) -> PyResult<Litera
 }
 
 /// The literal of `obj` as a value of `data_type`, as PySpark's `LiteralExpression(obj, type)`:
-/// None is a null, a list is an array of the element type, and another value must be of the
-/// type, else a bare AssertionError, as PySpark's asserts raise. As in Python, an int is a long
-/// and a bool is an int.
+/// None is a null, a list is an array of the element type, and another value must be accepted
+/// for the type, by the Python or NumPy classes that PySpark's asserts take, else it is a bare
+/// AssertionError. So an int is a byte, a short, an integer or a long only within its range,
+/// and a bool is an int, but a float is none of them.
 fn literal_as(
     obj: &Bound<'_, PyAny>,
     data_type: &spark_connect::types::DataType,
 ) -> PyResult<LiteralExpression> {
     use spark_connect::types::DataType;
+    let obj = &enum_to_value(obj)?;
     if obj.is_none() {
         return Ok(LiteralExpression::Null(data_type.clone()));
     }
     let assertion = || pyo3::exceptions::PyAssertionError::new_err(());
-    if let DataType::Array { element_type, .. } = data_type {
-        let list = obj.cast::<pyo3::types::PyList>().map_err(|_| assertion())?;
-        let elements = list
-            .iter()
-            .map(|item| literal_as(&item, element_type))
-            .collect::<PyResult<Vec<_>>>()?;
-        return Ok(LiteralExpression::Array {
-            element_type: element_type.clone(),
-            elements,
-        });
-    }
-    if obj.is_instance_of::<pyo3::types::PyList>() {
+    let literal = match data_type {
+        DataType::Array { element_type, .. } => {
+            let list = obj.cast::<pyo3::types::PyList>().map_err(|_| assertion())?;
+            let _level = ListLevel::enter()?;
+            let elements = with_stack_for_a_list_level(|| {
+                list.iter()
+                    .map(|item| literal_as(&item, element_type))
+                    .collect::<PyResult<Vec<_>>>()
+            })?;
+            LiteralExpression::Array {
+                element_type: element_type.clone(),
+                elements,
+            }
+        }
+        DataType::Boolean => {
+            if !(obj.is_instance_of::<pyo3::types::PyBool>() || is_numpy_scalar(obj, &["bool_"])?) {
+                return Err(assertion());
+            }
+            LiteralExpression::Boolean(obj.is_truthy()?)
+        }
+        DataType::Byte => {
+            LiteralExpression::Byte(
+                integral_value(obj, &["int8"], i8::MIN.into(), i8::MAX.into())? as i32,
+            )
+        }
+        DataType::Short => LiteralExpression::Short(integral_value(
+            obj,
+            &["int8", "int16"],
+            i16::MIN.into(),
+            i16::MAX.into(),
+        )? as i32),
+        DataType::Integer => LiteralExpression::Integer(integral_value(
+            obj,
+            &["int8", "int16", "int32"],
+            i32::MIN.into(),
+            i32::MAX.into(),
+        )? as i32),
+        DataType::Long => LiteralExpression::Long(integral_value(
+            obj,
+            &["int8", "int16", "int32", "int64"],
+            i64::MIN,
+            i64::MAX,
+        )?),
+        DataType::Float => {
+            if !(obj.is_instance_of::<pyo3::types::PyFloat>()
+                || is_numpy_scalar(obj, &["float32"])?)
+            {
+                return Err(assertion());
+            }
+            LiteralExpression::Float(obj.extract::<f64>()? as f32)
+        }
+        DataType::Double => {
+            if !(obj.is_instance_of::<pyo3::types::PyFloat>()
+                || is_numpy_scalar(obj, &["float32", "float64"])?)
+            {
+                return Err(assertion());
+            }
+            LiteralExpression::Double(obj.extract::<f64>()?)
+        }
+        DataType::Decimal { precision, scale } => {
+            if !is_instance_of_class(obj, "decimal", "Decimal")? {
+                return Err(assertion());
+            }
+            LiteralExpression::Decimal {
+                value: obj.str()?.extract()?,
+                precision: *precision,
+                scale: *scale,
+            }
+        }
+        DataType::String { .. } => {
+            if !obj.is_instance_of::<pyo3::types::PyString>() {
+                return Err(assertion());
+            }
+            match obj.extract::<String>() {
+                Ok(s) => LiteralExpression::String(s),
+                // A str that UTF-8 cannot encode, as in `to_column`.
+                Err(_) => return Err(not_utf8_string(obj)),
+            }
+        }
+        DataType::Binary => {
+            if !(obj.is_instance_of::<pyo3::types::PyBytes>()
+                || obj.is_instance_of::<pyo3::types::PyByteArray>())
+            {
+                return Err(assertion());
+            }
+            LiteralExpression::Binary(obj.extract::<Vec<u8>>()?)
+        }
+        DataType::Date => {
+            // A datetime is a date too, and its date is the one of the literal.
+            if !is_instance_of_class(obj, "datetime", "date")? {
+                return Err(assertion());
+            }
+            let ordinal: i64 = obj.call_method0("toordinal")?.extract()?;
+            // 719163 is the ordinal of 1970-01-01.
+            LiteralExpression::Date((ordinal - 719163i64) as i32)
+        }
+        DataType::Time { precision } => {
+            if !is_instance_of_class(obj, "datetime", "time")? {
+                return Err(assertion());
+            }
+            LiteralExpression::Time {
+                nano: crate::infer::time_nanos(obj)?,
+                precision: *precision,
+            }
+        }
+        DataType::Timestamp => {
+            if !is_instance_of_class(obj, "datetime", "datetime")? {
+                return Err(assertion());
+            }
+            LiteralExpression::Timestamp(crate::session::datetime_to_micros(obj)?)
+        }
+        DataType::TimestampNtz => {
+            if !is_instance_of_class(obj, "datetime", "datetime")? {
+                return Err(assertion());
+            }
+            LiteralExpression::TimestampNtz(crate::infer::wall_clock_micros(obj)?)
+        }
+        DataType::DayTimeInterval { .. } => {
+            if !is_instance_of_class(obj, "datetime", "timedelta")? {
+                return Err(assertion());
+            }
+            LiteralExpression::DayTimeInterval(crate::infer::timedelta_micros(obj)?)
+        }
+        // Another type is not a value of a list's elements, as PySpark's asserts take it.
+        _ => return Err(assertion()),
+    };
+    Ok(literal)
+}
+
+/// The value of `obj` as an integer within `min..=max`, for an integer type of PySpark's
+/// `LiteralExpression`: a Python int (a bool included), or a NumPy int of one of `numpy`.
+fn integral_value(obj: &Bound<'_, PyAny>, numpy: &[&str], min: i64, max: i64) -> PyResult<i64> {
+    let assertion = || pyo3::exceptions::PyAssertionError::new_err(());
+    if !(obj.is_instance_of::<pyo3::types::PyInt>() || is_numpy_scalar(obj, numpy)?) {
         return Err(assertion());
     }
-    match (scalar_literal_of(obj)?, data_type) {
-        (LiteralExpression::Integer(value), DataType::Long) => {
-            Ok(LiteralExpression::Long(i64::from(value)))
-        }
-        (LiteralExpression::Boolean(value), DataType::Integer) => {
-            Ok(LiteralExpression::Integer(i32::from(value)))
-        }
-        (LiteralExpression::Boolean(value), DataType::Long) => {
-            Ok(LiteralExpression::Long(i64::from(value)))
-        }
-        (literal, data_type) if literal_data_type(&literal) == *data_type => Ok(literal),
+    match obj.extract::<i64>() {
+        Ok(value) if (min..=max).contains(&value) => Ok(value),
         _ => Err(assertion()),
     }
+}
+
+/// Whether `obj` is an instance of the class `name` of the module `module`.
+fn is_instance_of_class(obj: &Bound<'_, PyAny>, module: &str, name: &str) -> PyResult<bool> {
+    let class = obj.py().import(module)?.getattr(name)?;
+    obj.is_instance(&class)
+}
+
+/// Whether `obj` is an instance of one of the NumPy scalar classes `classes`, such as `int8`.
+/// NumPy is looked up in `sys.modules`, as a NumPy scalar exists only when NumPy is imported.
+fn is_numpy_scalar(obj: &Bound<'_, PyAny>, classes: &[&str]) -> PyResult<bool> {
+    let modules = obj.py().import("sys")?.getattr("modules")?;
+    let numpy = match modules.cast::<pyo3::types::PyDict>()?.get_item("numpy")? {
+        Some(numpy) if !numpy.is_none() => numpy,
+        _ => return Ok(false),
+    };
+    for class in classes {
+        if obj.is_instance(&numpy.getattr(*class)?)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// The literal of a value that is not a list, as `to_column` builds it.
@@ -587,20 +777,6 @@ fn numpy_scalar_literal(obj: &Bound<'_, PyAny>) -> PyResult<Option<LiteralExpres
 /// `decimal.Decimal`, `bytes`/`bytearray`). Returns `None` if `obj` is not one of them,
 /// so the caller falls through to the primitive int/float/str/bool checks. Kept in sync
 /// with `session::py_to_value` so `lit(..)` and `createDataFrame(..)` encode identically.
-/// The microseconds of the wall clock of a datetime, naive or aware, as PySpark's
-/// `TimestampNTZType.toInternal` takes them: `calendar.timegm` of its own time tuple, whatever
-/// its zone. A pandas Timestamp's fields are read from it, as PySpark's, so its nanoseconds are
-/// dropped silently, as for a TIMESTAMP.
-fn wall_clock_micros(obj: &Bound<'_, PyAny>) -> PyResult<i64> {
-    let py = obj.py();
-    let seconds: i64 = py
-        .import("calendar")?
-        .call_method1("timegm", (obj.call_method0("timetuple")?,))?
-        .extract()?;
-    let micros: i64 = obj.getattr("microsecond")?.extract()?;
-    Ok(seconds * 1_000_000 + micros)
-}
-
 fn scalar_literal(obj: &Bound<'_, PyAny>) -> PyResult<Option<LiteralExpression>> {
     let py = obj.py();
 
@@ -632,9 +808,9 @@ fn scalar_literal(obj: &Bound<'_, PyAny>) -> PyResult<Option<LiteralExpression>>
                 .call_method0("is_timestamp_ntz_preferred")?
                 .is_truthy()?
             {
-                return Ok(Some(LiteralExpression::TimestampNtz(wall_clock_micros(
-                    obj,
-                )?)));
+                return Ok(Some(LiteralExpression::TimestampNtz(
+                    crate::infer::wall_clock_micros(obj)?,
+                )));
             }
             // Shared with session::py_to_value so lit() and createDataFrame() agree (a pandas
             // Timestamp's .timestamp() treats a naive value as UTC; normalize it first).

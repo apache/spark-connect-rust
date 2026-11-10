@@ -1137,14 +1137,21 @@ fn instant_micros(obj: &Bound<'_, PyAny>) -> PyResult<i64> {
     delta_micros(&aware.sub(epoch)?)
 }
 
-/// Microseconds since 1970-01-01 00:00 of the wall-clock time of a naive datetime, as
-/// PyArrow takes a TIMESTAMP_NTZ value.
-fn wall_clock_micros(obj: &Bound<'_, PyAny>) -> PyResult<i64> {
+/// The microseconds of the wall clock of a datetime, naive or aware, as PySpark's
+/// `TimestampNTZType.toInternal` takes them: `calendar.timegm` of its own time tuple, whatever
+/// its zone. The fields of a pandas Timestamp are read from it, as PySpark's, so its nanoseconds
+/// are dropped silently. The naive values are those of a TIMESTAMP_NTZ, as PyArrow takes them.
+pub(crate) fn wall_clock_micros(obj: &Bound<'_, PyAny>) -> PyResult<i64> {
     let py = obj.py();
-    let epoch = DATETIME
-        .import(py, "datetime", "datetime")?
-        .call1((1970, 1, 1))?;
-    delta_micros(&obj.sub(epoch)?)
+    let seconds: i64 = py
+        .import(intern!(py, "calendar"))?
+        .call_method1(
+            intern!(py, "timegm"),
+            (obj.call_method0(intern!(py, "timetuple"))?,),
+        )?
+        .extract()?;
+    let micros: i64 = obj.getattr(intern!(py, "microsecond"))?.extract()?;
+    Ok(seconds * 1_000_000 + micros)
 }
 
 /// A field value of `dt` from `obj`, as PySpark's converters and then PyArrow convert it.

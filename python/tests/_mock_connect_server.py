@@ -292,6 +292,7 @@ def serve(connection):
             self.execute_payloads = None
             self.execute_failure = None
             self.execute_error = None
+            self.retry_info_failures = []
             # The InterruptRequests of each Interrupt, and the operations that they interrupt.
             self.interrupt_requests = []
             self.interrupted_operations = set()
@@ -307,6 +308,7 @@ def serve(connection):
             self.plan_compression_lookups = 0
             self.config_failure = None
             self.block_config = False
+            self.plan_compression_lookup_delay = 0
             self.rpc_events = []
             self.set_confs = []
             self.clone_requests = []
@@ -427,6 +429,9 @@ def serve(connection):
         # server does for an error that it raised: INTERNAL, with a google.rpc.Status of an
         # ErrorInfo of `reason` and `metadata` in grpc-status-details-bin.
         execute_error = None
+        # Each (code name, delay in ms) of this list fails an ExecutePlan, once, as the server
+        # does for a failure with a google.rpc.RetryInfo that asks for the delay.
+        retry_info_failures = ()
         # FetchErrorDetails returns `error_details` (raw FetchErrorDetailsResponse fields)
         # and records the error id asked for. Config Get returns the values in `confs`, or
         # else those of `default_confs`, the defaults of SQL configs of the server, and
@@ -458,6 +463,8 @@ def serve(connection):
         plan_compression_lookups = 0
         config_failure = None
         block_config = False
+        # The seconds that the plan compression lookup of the first plan of a session takes.
+        plan_compression_lookup_delay = 0
         rpc_events = []
         set_confs = []
 
@@ -620,6 +627,24 @@ def serve(connection):
                         grpc.StatusCode.DEADLINE_EXCEEDED,
                         "Python thread could not run while the statement ran",
                     )
+            if self.retry_info_failures:
+                code, delay_ms = self.retry_info_failures.pop(0)
+                # google.rpc: Status.code=1, message=2, details=3; Any.type_url=1, value=2;
+                # RetryInfo.retry_delay=1; Duration.seconds=1, nanos=2.
+                delay = varint_field(1, delay_ms // 1000) + varint_field(
+                    2, (delay_ms % 1000) * 1_000_000
+                )
+                status = (
+                    varint_field(1, getattr(grpc.StatusCode, code).value[0])
+                    + message_field(2, "retry later")
+                    + message_field(
+                        3,
+                        message_field(1, "type.googleapis.com/google.rpc.RetryInfo")
+                        + message_field(2, message_field(1, delay)),
+                    )
+                )
+                context.set_trailing_metadata((("grpc-status-details-bin", status),))
+                context.abort(getattr(grpc.StatusCode, code), "retry later")
             if self.execute_failure:
                 code, message = (
                     self.execute_failure
@@ -657,11 +682,15 @@ def serve(connection):
             )
             for index, payload in enumerate(payloads, 1):
                 yield header + message_field(13, f"r{index}") + payload
-            if block_result_complete and not response_gate.wait(30):
-                context.abort(
-                    grpc.StatusCode.DEADLINE_EXCEEDED,
-                    "ResultComplete was not released by the test",
-                )
+            if block_result_complete:
+                released = self.wait_for_response(response_gate, operation_id, 30)
+                if released == "interrupted":
+                    context.abort(grpc.StatusCode.CANCELLED, "Operation has been canceled")
+                if not released:
+                    context.abort(
+                        grpc.StatusCode.DEADLINE_EXCEEDED,
+                        "ResultComplete was not released by the test",
+                    )
             result_complete_operations.append(operation_id)
             yield header + message_field(13, f"r{len(payloads) + 1}") + message_field(14, b"")
 
@@ -725,6 +754,10 @@ def serve(connection):
             if not lookup:
                 self.config_requests.append(request)
                 self.rpc_events.append("config")
+            if lookup and self.plan_compression_lookup_delay:
+                # The plan compression lookup that PySpark makes on the first plan, held for the
+                # seconds of the delay, as a slow server holds it.
+                time.sleep(self.plan_compression_lookup_delay)
             if not lookup and self.block_config and not self.response_gate.wait(5):
                 context.abort(
                     grpc.StatusCode.DEADLINE_EXCEEDED,

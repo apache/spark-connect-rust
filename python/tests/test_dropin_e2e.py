@@ -104,6 +104,23 @@ def test_udtfs_of_ddl_return_types_are_unparsed_as_pyspark(session):
 
 
 
+def test_list_values_of_column_methods_are_evaluated_by_the_server_as_pyspark(session):
+    # As PySpark's LiteralExpression of a list: each element is of the type that the first one
+    # gives the list, when the type accepts it, so the server evaluates the array of the value.
+    import numpy as np
+
+    df = session.range(1)
+    when = F.when(F.lit(False), F.array(F.lit(0.0).cast("float")))
+    assert df.select(when.otherwise([np.float32(1.5), 2.0]).alias("r")).collect() == [
+        Row(r=[1.5, 2.0])]
+    when = F.when(F.lit(False), F.array(F.lit(0.0)))
+    assert df.select(when.otherwise([1.5, np.float32(2.0)]).alias("r")).collect() == [
+        Row(r=[1.5, 2.0])]
+    when = F.when(F.lit(False), F.array(F.lit(date(2000, 1, 1))))
+    assert df.select(when.otherwise([date(2020, 1, 1), datetime(2020, 1, 2, 3)]).alias("r")
+                     ).collect() == [Row(r=[date(2020, 1, 1), date(2020, 1, 2)])]
+
+
 def test_udf_and_udtf_calls_take_named_arguments_as_pyspark(session):
     # As PySpark's: the keyword arguments of a UDF or UDTF call are its named arguments, and
     # a bare string is a column name.
@@ -2264,6 +2281,32 @@ def test_collect_of_a_string_that_is_not_utf8_raises_as_pyspark(session):
     assert session.sql("SELECT CAST(X'61' AS STRING) AS s").collect() == [Row(s="a")]
 
 
+def test_a_string_that_is_not_utf8_is_named_past_binary_values_as_pyspark(session):
+    # As PySpark's: the binary values before the string are values, not strings, so the error is
+    # that of the string, whether the binary value is a column or nested in an array, for each
+    # action that reads rows.
+    message = "'utf-8' codec can't decode byte 0xc3 in position 0: unexpected end of data"
+    for query in [
+        "SELECT X'FF' AS b, CAST(X'C3' AS STRING) AS s",
+        "SELECT ARRAY(X'FF') AS b, CAST(X'C3' AS STRING) AS s",
+    ]:
+        actions = [
+            lambda df: df.collect(),
+            lambda df: df.first(),
+            lambda df: df.head(),
+            lambda df: df.take(1),
+            lambda df: df.tail(1),
+            lambda df: list(df.toLocalIterator()),
+        ]
+        for action in actions:
+            with pytest.raises(UnicodeDecodeError) as e:
+                action(session.sql(query))
+            assert type(e.value) is UnicodeDecodeError
+            assert str(e.value) == message
+    # A binary value that is valid as a value still collects as bytes.
+    assert session.sql("SELECT X'FF' AS b, 'a' AS s").collect() == [Row(b=b"\xff", s="a")]
+
+
 def test_collect_reads_a_result_across_stream_ends(session):
     # Takes several response streams when the server's senderMaxStreamSize is small.
     n = 300_000
@@ -2601,6 +2644,24 @@ def test_variant_val_subclass_round_trips_as_pyspark(session):
     collected = session.createDataFrame([(tagged,)], "v variant").first()[0]
     assert type(collected) is VariantVal
     assert str(collected) == collected.toJson() == '{"a":1}'
+
+
+
+def test_udfs_that_refer_to_variant_and_spatial_values_run_on_the_server_as_pyspark(session):
+    # As PySpark's: the VariantVal, Geometry and Geography that a UDF refers to are pickled as
+    # PySpark's plain classes, which the server's Python workers, of PySpark, unpickle.
+    from pyspark.sql import functions as F
+    from pyspark.sql.types import Geography, Geometry
+
+    wkb = bytes.fromhex("0101000000000000000000F03F0000000000000040")
+    variant = session.sql("""SELECT parse_json('{"a": 1}') AS v""").first()[0]
+    geometry, geography = Geometry.fromWKB(wkb, 4326), Geography(wkb, 3857)
+
+    @F.udf("string")
+    def described(_):
+        return "%s %d %d" % (variant.toJson(), geometry.getSrid(), geography.getSrid())
+
+    assert session.range(1).select(described("id")).first()[0] == '{"a":1} 4326 3857'
 
 
 def test_create_dataframe_of_multi_and_categorical_labels_as_pyspark(session):
@@ -3859,6 +3920,46 @@ print("count", spark.range(3).count())
     assert lines[1:] == ["interrupted ids []", "count 3"], result.stdout
 
 
+def test_sigint_interrupts_the_iterator_that_waits_and_not_a_held_one_as_pyspark():
+    # As PySpark's: a SIGINT during the next of an iterator interrupts the operation that the next
+    # waits for, though another iterator that was started later is alive and half-consumed. The
+    # held iterator still yields its next row, and the waiting one is cancelled at once, not when
+    # its slow partitions end.
+    import subprocess
+    import sys
+
+    remote = os.environ.get("SPARK_REMOTE")
+    if not remote:
+        pytest.skip("SPARK_REMOTE is required for live-server tests")
+    result = subprocess.run([sys.executable, "-c", """
+import os, signal, threading, time
+from pyspark.sql import SparkSession, functions as F
+spark = SparkSession.builder.remote(%r).getOrCreate()
+# Partition 0 returns at once; partitions 1 and 2 sleep 20 s on the server.
+a = spark.range(0, 3, 1, 3).select(
+    F.expr("reflect('java.lang.Thread', 'sleep', case when id = 0 then 0L else 20000L end)")
+    .alias("x"), "id")
+ia = a.toLocalIterator()
+print("a", next(ia).id, flush=True)
+ib = spark.range(0, 5, 1, 1).toLocalIterator()
+print("b", next(ib).id, flush=True)
+threading.Timer(2.0, lambda: os.kill(os.getpid(), signal.SIGINT)).start()
+started = time.monotonic()
+try:
+    next(ia)
+    print("next returned", flush=True)
+except KeyboardInterrupt:
+    print("interrupted after %%.1f" %% (time.monotonic() - started), flush=True)
+print("b", next(ib).id, flush=True)
+""" % remote], env=dict(os.environ, TZ="UTC"), capture_output=True, text=True, timeout=120)
+    assert result.returncode == 0, result.stderr
+    lines = result.stdout.splitlines()
+    assert lines[:2] == ["a 0", "b 0"], result.stdout
+    assert lines[2].startswith("interrupted after "), result.stdout
+    assert 2.0 <= float(lines[2].rsplit(" ", 1)[1]) < 6.0, result.stdout
+    assert lines[3:] == ["b 1"], result.stdout
+
+
 def test_udfs_return_user_defined_types_of_main_as_pyspark():
     # As PySpark's: a UDT that __main__ defines, of parameters, is a UDF return type, as
     # cloudpickle sends its class by value and its state to the worker. In a new
@@ -4565,10 +4666,7 @@ def test_logistic_regression_fits_the_data_and_predicts_on_new_rows(session):
     # The native estimator targets Spark's JVM LogisticRegression. Compare the same
     # behavior with that estimator in official PySpark, rather than its deprecated
     # torch-based pyspark.ml.connect.classification implementation.
-    try:
-        from pyspark._pyspark import LogisticRegression
-    except ImportError:
-        from pyspark.ml.classification import LogisticRegression
+    LogisticRegression = _native_ml("LogisticRegression", "pyspark.ml.classification")
     from pyspark.ml.connect.functions import array_to_vector
 
     training = session.sql(
@@ -4602,10 +4700,7 @@ def test_linear_svc_releases_its_cached_model_once_the_last_owner_is_gone(sessio
 
     import pyspark.sql.connect.proto as pb2
 
-    try:
-        from pyspark._pyspark import LinearSVC
-    except ImportError:
-        from pyspark.ml.classification import LinearSVC
+    LinearSVC = _native_ml("LinearSVC", "pyspark.ml.classification")
     from pyspark.ml.connect.functions import array_to_vector
 
     # A session of its own: the ML cache is per session, so the models of the other tests,
@@ -4660,10 +4755,7 @@ def test_linear_svc_releases_its_cached_model_once_the_last_owner_is_gone(sessio
 
 @pytest.mark.parametrize("use_setters", [False, True], ids=["constructor", "setters"])
 def test_linear_svc_fits_the_labels_and_predicts_on_new_rows(session, use_setters):
-    try:
-        from pyspark._pyspark import LinearSVC
-    except ImportError:
-        from pyspark.ml.classification import LinearSVC
+    LinearSVC = _native_ml("LinearSVC", "pyspark.ml.classification")
     from pyspark.ml.connect.functions import array_to_vector
 
     training = session.sql(
@@ -4705,11 +4797,7 @@ def test_linear_svc_fits_the_labels_and_predicts_on_new_rows(session, use_setter
 
 
 def _linear_regression():
-    try:
-        from pyspark._pyspark import LinearRegression
-    except ImportError:
-        from pyspark.ml.regression import LinearRegression
-    return LinearRegression
+    return _native_ml("LinearRegression", "pyspark.ml.regression")
 
 
 @pytest.mark.parametrize("use_setters", [False, True], ids=["constructor", "setters"])
@@ -4771,12 +4859,23 @@ def test_linear_regression_weights_and_iterative_losses(session):
     assert robust.transform(held_out).first().prediction == pytest.approx(7, abs=0.2)
 
 
-def _kmeans():
+def _native_ml(name, reference_module):
+    # The native pyspark.ml.connect class of this client, which these cases are of: one that is
+    # missing fails them, rather than running them with the vendored pyspark.ml class. The
+    # reference client, which has no pyspark._pyspark, runs them with its JVM-backed class.
+    import importlib
+
     try:
-        from pyspark._pyspark import KMeans
+        import pyspark._pyspark  # noqa: F401
     except ImportError:
-        from pyspark.ml.clustering import KMeans
-    return KMeans
+        return getattr(importlib.import_module(reference_module), name)
+    native = getattr(importlib.import_module("pyspark.ml.connect"), name)
+    assert native.__module__.startswith("pyspark.ml.connect"), native
+    return native
+
+
+def _kmeans():
+    return _native_ml("KMeans", "pyspark.ml.clustering")
 
 
 def _assert_cluster_partition(actual, expected):
@@ -4873,11 +4972,7 @@ def test_higher_order_functions_take_columns_and_reject_lists_as_pyspark(session
 
 # These cases run unchanged against the native binding and the official JVM-backed estimator.
 def _random_forest_classifier():
-    try:
-        from pyspark.ml.connect.classification import RandomForestClassifier
-    except ImportError:
-        from pyspark.ml.classification import RandomForestClassifier
-    return RandomForestClassifier
+    return _native_ml("RandomForestClassifier", "pyspark.ml.classification")
 
 
 def _forest_vectors(session, sql, column="features"):

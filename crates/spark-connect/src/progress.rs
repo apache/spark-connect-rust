@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use spark_connect_core::client::ReattachableResponseStream;
+use spark_connect_core::client::{InflightHandle, ReattachableResponseStream};
 use spark_connect_core::error::{Result, SparkError};
 use spark_connect_core::runtime::CallbackGuard;
 use spark_connect_proto as proto;
@@ -213,6 +213,12 @@ impl ExecutionStream {
             progress,
             chunks: Default::default(),
         }
+    }
+
+    /// The handle of the execution, to mark the waits of its caller for it (see
+    /// [`ReattachableResponseStream::inflight_handle`]).
+    pub(crate) fn inflight_handle(&self) -> InflightHandle {
+        self.stream.inflight_handle()
     }
 
     /// The next response of the execution, as `ReattachableResponseStream::message`, with the

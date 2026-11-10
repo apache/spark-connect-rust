@@ -2,7 +2,74 @@
 //! mirroring `pyspark.sql.types.{VariantVal, Geometry, Geography}`.
 
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict, PyTuple};
+use pyo3::types::{PyBytes, PyDict, PyString, PyTuple};
+
+/// Pickle `slf` as PySpark pickles its plain class: rebuilt by `copyreg.__newobj__`, without
+/// `__init__`, with the state `object.__reduce_ex__` gives, the dict of its instance attributes
+/// and `fields`, or that dict and the values of its slots, `(dict, slots)`, for a subclass of
+/// slots. PySpark's class, which has no `__setstate__`, takes this state as its attributes, so
+/// a value pickled here loads in PySpark, as in the server's Python workers.
+fn reduce_as_a_plain_class<'py>(
+    slf: &Bound<'py, PyAny>,
+    fields: [(&str, Bound<'py, PyAny>); 2],
+) -> PyResult<Bound<'py, PyTuple>> {
+    let py = slf.py();
+    let copyreg = py.import("copyreg")?;
+    let attributes = slf.getattr("__dict__")?.cast::<PyDict>()?.copy()?;
+    for (name, value) in fields {
+        attributes.set_item(name, value)?;
+    }
+    let slots = PyDict::new(py);
+    for name in copyreg
+        .call_method1("_slotnames", (slf.get_type(),))?
+        .try_iter()?
+    {
+        let name = name?.cast_into::<PyString>()?;
+        // As `object.__getstate__`: the slots that have a value.
+        if let Ok(value) = slf.getattr(&name) {
+            slots.set_item(name, value)?;
+        }
+    }
+    let state = if slots.is_empty() {
+        attributes.into_any()
+    } else {
+        PyTuple::new(py, [attributes.into_any(), slots.into_any()])?.into_any()
+    };
+    let args = PyTuple::new(py, [slf.get_type().into_any()])?;
+    PyTuple::new(py, [copyreg.getattr("__newobj__")?, args.into_any(), state])
+}
+
+/// Restore on `slf` a state of [`reduce_as_a_plain_class`], or of PySpark's pickle of its plain
+/// class, as pickle's BUILD restores a plain class: its instance attributes, and its slots of a
+/// `(dict, slots)`. The values of `fields`, which are not instance attributes here, are returned.
+fn restore_plain_class_state<'py>(
+    slf: &Bound<'py, PyAny>,
+    state: &Bound<'py, PyAny>,
+    fields: [&str; 2],
+) -> PyResult<[Option<Bound<'py, PyAny>>; 2]> {
+    let (attributes, slots) = match state.cast::<PyTuple>() {
+        Ok(pair) if pair.len() == 2 => (pair.get_item(0)?, Some(pair.get_item(1)?)),
+        _ => (state.clone(), None),
+    };
+    let mut values = [None, None];
+    if !attributes.is_none() {
+        let attributes = attributes.cast::<PyDict>()?.copy()?;
+        for (value, name) in values.iter_mut().zip(fields) {
+            if let Some(field) = attributes.get_item(name)? {
+                attributes.del_item(name)?;
+                *value = Some(field);
+            }
+        }
+        slf.getattr("__dict__")?
+            .call_method1("update", (attributes,))?;
+    }
+    if let Some(slots) = slots.filter(|slots| !slots.is_none()) {
+        for (name, value) in slots.cast::<PyDict>()?.iter() {
+            slf.setattr(name.cast_into::<PyString>()?, value)?;
+        }
+    }
+    Ok(values)
+}
 
 /// A Variant value (the `value`/`metadata` binary components). Mirrors
 /// `pyspark.sql.types.VariantVal`.
@@ -42,33 +109,31 @@ impl PyVariantVal {
         self.value = value;
         self.metadata = metadata;
     }
-    /// Pickled as a plain class instance is: its class is rebuilt without `__init__`, and its
-    /// value, metadata and instance attributes are restored by `__setstate__`.
+    /// Pickled as PySpark's plain class is, with its value and metadata as attributes, so that
+    /// PySpark loads it, as PySpark's pickles of it load here.
     fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyTuple>> {
         let py = slf.py();
-        let this = slf.borrow();
-        let newobj = py.import("copyreg")?.getattr("__newobj__")?;
-        let args = PyTuple::new(py, [slf.get_type().into_any()])?;
-        let state = PyTuple::new(
-            py,
+        let fields = {
+            let this = slf.borrow();
             [
-                PyBytes::new(py, &this.value).into_any(),
-                PyBytes::new(py, &this.metadata).into_any(),
-                slf.getattr("__dict__")?,
-            ],
-        )?;
-        PyTuple::new(py, [newobj, args.into_any(), state.into_any()])
+                ("value", PyBytes::new(py, &this.value).into_any()),
+                ("metadata", PyBytes::new(py, &this.metadata).into_any()),
+            ]
+        };
+        reduce_as_a_plain_class(slf.as_any(), fields)
     }
-    fn __setstate__(slf: &Bound<'_, Self>, state: &Bound<'_, PyTuple>) -> PyResult<()> {
-        let (value, metadata, attributes): (Vec<u8>, Vec<u8>, Bound<'_, PyAny>) =
-            state.extract()?;
-        {
-            let mut this = slf.borrow_mut();
+    fn __setstate__(slf: &Bound<'_, Self>, state: &Bound<'_, PyAny>) -> PyResult<()> {
+        let [value, metadata] =
+            restore_plain_class_state(slf.as_any(), state, ["value", "metadata"])?;
+        let value: Option<Vec<u8>> = value.map(|v| v.extract()).transpose()?;
+        let metadata: Option<Vec<u8>> = metadata.map(|m| m.extract()).transpose()?;
+        let mut this = slf.borrow_mut();
+        if let Some(value) = value {
             this.value = value;
+        }
+        if let Some(metadata) = metadata {
             this.metadata = metadata;
         }
-        slf.getattr("__dict__")?
-            .call_method1("update", (attributes,))?;
         Ok(())
     }
     #[getter]
@@ -121,16 +186,59 @@ impl PyVariantVal {
 }
 
 /// A Geography value (WKB bytes + SRID). Mirrors `pyspark.sql.types.Geography`.
-#[pyclass(name = "Geography", module = "pyspark.sql.types", weakref, dict)]
+#[pyclass(
+    name = "Geography",
+    module = "pyspark.sql.types",
+    weakref,
+    dict,
+    subclass
+)]
 pub struct PyGeography {
     pub(crate) wkb: Vec<u8>,
     pub(crate) srid: i32,
 }
 #[pymethods]
 impl PyGeography {
+    /// Accepts any arguments, so that a subclass's `__init__` may take others, as of PySpark's
+    /// plain class; `__init__` sets the WKB and the SRID.
     #[new]
-    fn new(wkb: Vec<u8>, srid: i32) -> Self {
-        PyGeography { wkb, srid }
+    #[pyo3(signature = (*_args, **_kwargs))]
+    fn new(_args: &Bound<'_, PyTuple>, _kwargs: Option<&Bound<'_, PyDict>>) -> Self {
+        PyGeography {
+            wkb: Vec::new(),
+            srid: 0,
+        }
+    }
+    #[pyo3(signature = (wkb, srid))]
+    fn __init__(&mut self, wkb: Vec<u8>, srid: i32) {
+        self.wkb = wkb;
+        self.srid = srid;
+    }
+    /// Pickled as PySpark's plain class is, with its WKB and SRID as attributes, so that PySpark
+    /// loads it, as PySpark's pickles of it load here.
+    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyTuple>> {
+        let py = slf.py();
+        let fields = {
+            let this = slf.borrow();
+            [
+                ("wkb", PyBytes::new(py, &this.wkb).into_any()),
+                ("srid", this.srid.into_pyobject(py)?.into_any()),
+            ]
+        };
+        reduce_as_a_plain_class(slf.as_any(), fields)
+    }
+    fn __setstate__(slf: &Bound<'_, Self>, state: &Bound<'_, PyAny>) -> PyResult<()> {
+        let [wkb, srid] = restore_plain_class_state(slf.as_any(), state, ["wkb", "srid"])?;
+        let wkb: Option<Vec<u8>> = wkb.map(|w| w.extract()).transpose()?;
+        let srid: Option<i32> = srid.map(|s| s.extract()).transpose()?;
+        let mut this = slf.borrow_mut();
+        if let Some(wkb) = wkb {
+            this.wkb = wkb;
+        }
+        if let Some(srid) = srid {
+            this.srid = srid;
+        }
+        Ok(())
     }
     fn getSrid(&self) -> i32 {
         self.srid
@@ -165,16 +273,59 @@ impl PyGeography {
 }
 
 /// A Geometry value (WKB bytes + SRID). Mirrors `pyspark.sql.types.Geometry`.
-#[pyclass(name = "Geometry", module = "pyspark.sql.types", weakref, dict)]
+#[pyclass(
+    name = "Geometry",
+    module = "pyspark.sql.types",
+    weakref,
+    dict,
+    subclass
+)]
 pub struct PyGeometry {
     pub(crate) wkb: Vec<u8>,
     pub(crate) srid: i32,
 }
 #[pymethods]
 impl PyGeometry {
+    /// Accepts any arguments, so that a subclass's `__init__` may take others, as of PySpark's
+    /// plain class; `__init__` sets the WKB and the SRID.
     #[new]
-    fn new(wkb: Vec<u8>, srid: i32) -> Self {
-        PyGeometry { wkb, srid }
+    #[pyo3(signature = (*_args, **_kwargs))]
+    fn new(_args: &Bound<'_, PyTuple>, _kwargs: Option<&Bound<'_, PyDict>>) -> Self {
+        PyGeometry {
+            wkb: Vec::new(),
+            srid: 0,
+        }
+    }
+    #[pyo3(signature = (wkb, srid))]
+    fn __init__(&mut self, wkb: Vec<u8>, srid: i32) {
+        self.wkb = wkb;
+        self.srid = srid;
+    }
+    /// Pickled as PySpark's plain class is, with its WKB and SRID as attributes, so that PySpark
+    /// loads it, as PySpark's pickles of it load here.
+    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyTuple>> {
+        let py = slf.py();
+        let fields = {
+            let this = slf.borrow();
+            [
+                ("wkb", PyBytes::new(py, &this.wkb).into_any()),
+                ("srid", this.srid.into_pyobject(py)?.into_any()),
+            ]
+        };
+        reduce_as_a_plain_class(slf.as_any(), fields)
+    }
+    fn __setstate__(slf: &Bound<'_, Self>, state: &Bound<'_, PyAny>) -> PyResult<()> {
+        let [wkb, srid] = restore_plain_class_state(slf.as_any(), state, ["wkb", "srid"])?;
+        let wkb: Option<Vec<u8>> = wkb.map(|w| w.extract()).transpose()?;
+        let srid: Option<i32> = srid.map(|s| s.extract()).transpose()?;
+        let mut this = slf.borrow_mut();
+        if let Some(wkb) = wkb {
+            this.wkb = wkb;
+        }
+        if let Some(srid) = srid {
+            this.srid = srid;
+        }
+        Ok(())
     }
     fn getSrid(&self) -> i32 {
         self.srid
