@@ -2863,6 +2863,22 @@ def test_sql_runs_statements_eagerly(session):
     assert [tuple(r) for r in query.collect()] == [(1,)]
 
 
+@pytest.mark.parametrize(
+    "make, expected",
+    [
+        (lambda s: s.sql("VALUES (1)"), True),
+        (lambda s: s.sql("SHOW DATABASES"), True),
+        (lambda s: s.sql("SELECT 1"), False),
+        (lambda s: s.createDataFrame([(1,)], "a int"), True),
+        (lambda s: s.range(1), False),
+    ],
+)
+def test_is_local_is_the_servers_answer_as_pyspark(session, make, expected):
+    # As PySpark: isLocal asks the server about the plan, so a VALUES is local, though the
+    # client's own plan of it is not.
+    assert make(session).isLocal() is expected
+
+
 def test_struct_field_from_ddl_parses_as_data_type_from_ddl_as_pyspark(session):
     # As PySpark: StructField inherits DataType.fromDDL, so it parses a DDL string to the type
     # that DataType.fromDDL gives, with the same errors, and a StructType creates a DataFrame.

@@ -670,9 +670,15 @@ def _arrow_input_service(
             dict(name=name, data_type=ddl_type(kind), nullable=True) for name, kind in fields]))
 
     def analyze(raw, context):
-        # As the server, which parses the DDL schemas that the client sends (`_parse_ddl`);
-        # the tests ask for no other analysis.
+        # As the server, which parses the DDL schemas that the client sends (`_parse_ddl`) and
+        # answers whether a plan is local: a local relation, cached or chunked, is local.
         request = protocol("AnalyzePlanRequest").FromString(raw)
+        if request.WhichOneof("analyze") == "is_local":
+            local = request.is_local.plan.root.WhichOneof("rel_type") in (
+                "local_relation", "cached_local_relation", "chunked_cached_local_relation")
+            return protocol("AnalyzePlanResponse", session_id=request.session_id,
+                            server_side_session_id=server_id,
+                            is_local=dict(is_local=local)).SerializeToString()
         if request.WhichOneof("analyze") != "ddl_parse":
             context.abort(grpc.StatusCode.UNIMPLEMENTED, "Method not found!")
         state["ddl_strings"].append(request.ddl_parse.ddl_string)

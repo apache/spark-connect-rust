@@ -45,6 +45,9 @@ pub struct DataFrame {
     // resolved schema, but have their own cache for subsequent analysis.
     // The resolved value is immutable, so propagation need not copy wide schemas.
     schema_cache: Arc<Mutex<Option<Arc<DataType>>>>,
+    // The server's answer to `is_local_on_server`, cached like the schema: exact clones
+    // share it and a derived plan asks the server again.
+    is_local_cache: Arc<Mutex<Option<bool>>>,
     // The information of the last execution of this DataFrame, as PySpark's
     // `DataFrame._execution_info`: exact clones share it, and a derived DataFrame, of
     // another plan, has its own, which is empty until it executes.
@@ -371,6 +374,7 @@ impl DataFrame {
             session,
             plan: Arc::new(plan),
             schema_cache: Arc::new(Mutex::new(schema)),
+            is_local_cache: Arc::new(Mutex::new(None)),
             execution: Arc::new(Mutex::new(None)),
         }
     }
@@ -2315,6 +2319,40 @@ impl DataFrame {
             Some(proto::analyze_plan_response::Result::IsStreaming(r)) => Ok(r.is_streaming),
             _ => Err(SparkError::connect_msg(
                 "AnalyzePlan response did not contain an isStreaming result",
+            )),
+        }
+    }
+
+    /// Whether the server answers that this DataFrame is local, mirroring PySpark's
+    /// `DataFrame.isLocal`, which asks the server about the plan it analyzes. Unlike
+    /// [`DataFrame::is_local`], this sees the plan as the server resolves it.
+    ///
+    /// The answer is cached for this DataFrame and its exact clones; a failed request is
+    /// not cached.
+    pub fn is_local_on_server(&self) -> Result<bool> {
+        // As `schema`, hold the lock across the request so concurrent calls send one.
+        let mut cached = self.is_local_cache.lock().unwrap_or_else(|poisoned| {
+            self.is_local_cache.clear_poison();
+            poisoned.into_inner()
+        });
+        if let Some(is_local) = *cached {
+            return Ok(is_local);
+        }
+        let request = self.analyze_request(proto::analyze_plan_request::Analyze::IsLocal(
+            proto::analyze_plan_request::IsLocal {
+                plan: Some(proto::Plan {
+                    op_type: Some(proto::plan::OpType::Root(self.relation()?)),
+                }),
+            },
+        ));
+        let response = block_on(self.session.client().analyze_plan(request))?;
+        match response.result {
+            Some(proto::analyze_plan_response::Result::IsLocal(r)) => {
+                *cached = Some(r.is_local);
+                Ok(r.is_local)
+            }
+            _ => Err(SparkError::connect_msg(
+                "AnalyzePlan response did not contain an isLocal result",
             )),
         }
     }

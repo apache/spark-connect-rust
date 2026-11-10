@@ -6753,6 +6753,48 @@ def test_is_streaming_asks_the_server_as_pyspark(mock_connect):
     assert sum(8 in parse_message(request) for request in service.analyze_requests) == 2
 
 
+def _is_local_requests(service):
+    # base.proto: AnalyzePlanRequest.is_local=7.
+    return sum(7 in parse_message(request) for request in service.analyze_requests)
+
+
+def test_is_local_asks_the_server_once_per_dataframe(mock_connect):
+    # As PySpark's: isLocal is cached per DataFrame, so a second call sends no request.
+    spark, service = mock_connect
+    df = spark.createDataFrame([(1,)], "a int")
+    assert df.isLocal() is True
+    assert df.isLocal() is True
+    assert _is_local_requests(service) == 1
+    # A derived DataFrame analyzes its own plan.
+    assert df.select("a").isLocal() is False
+    assert _is_local_requests(service) == 2
+
+
+def test_is_local_returns_the_servers_answer(mock_connect):
+    spark, service = mock_connect
+    df = spark.createDataFrame([(1,)], "a int")
+    service.local = False
+    try:
+        assert df.isLocal() is False
+    finally:
+        service.local = None
+
+
+def test_is_local_failure_is_not_cached(mock_connect):
+    from pyspark.errors.exceptions.connect import SparkConnectGrpcException
+
+    spark, service = mock_connect
+    df = spark.createDataFrame([(1,)], "a int")
+    service.local_failure = True
+    try:
+        with pytest.raises(SparkConnectGrpcException, match="isLocal unavailable"):
+            df.isLocal()
+    finally:
+        service.local_failure = False
+    assert df.isLocal() is True
+    assert _is_local_requests(service) == 2
+
+
 def test_struct_type_field_access():
     """Test accessing StructType fields by index and name."""
     st = T.StructType([
@@ -8633,13 +8675,19 @@ def test_timedelta_values_convert_as_pyspark():
             _local_create_dataframe([(value,)], "d interval day to second")
 
 
-def _local_create_dataframe(*args):
+def _local_create_dataframe(*args, session=None):
     # The local relation and its toDF are built without a server; a DDL schema, which PySpark
     # asks the server to parse, is parsed as the server would.
     args = list(args)
     if len(args) > 1 and isinstance(args[1], str) and ddl_json(args[1]) is not None:
         args[1] = T._parse_datatype_json_string(json.dumps(ddl_json(args[1])))
-    return _offline_session().createDataFrame(*args)
+    return (_offline_session() if session is None else session).createDataFrame(*args)
+
+
+def _is_local_created(mock_connect, *args):
+    # isLocal is the server's answer, which the mock derives from the plan it receives.
+    spark, _ = mock_connect
+    return _local_create_dataframe(*args, session=spark).isLocal()
 
 
 @pytest.mark.parametrize("data,schema,expected", [
@@ -8657,8 +8705,8 @@ def _local_create_dataframe(*args):
     ([1, 2], T.LongType(), True),
     ([], "a long", True),
 ])
-def test_create_dataframe_rows_is_local_as_pyspark(data, schema, expected):
-    assert _local_create_dataframe(data, schema).isLocal() is expected
+def test_create_dataframe_rows_is_local_as_pyspark(mock_connect, data, schema, expected):
+    assert _is_local_created(mock_connect, data, schema) is expected
 
 
 @pytest.mark.parametrize("schema", [None, ["c", "d"], ["c"], "a long, b string",
@@ -8675,10 +8723,10 @@ def test_create_dataframe_pandas_is_not_local_as_pyspark(mock_connect, schema):
     assert 18 in parse_message(plan[1][0])
 
 
-def test_create_dataframe_empty_pandas_is_local_as_pyspark():
+def test_create_dataframe_empty_pandas_is_local_as_pyspark(mock_connect):
     pd = pytest.importorskip("pandas")
     # Empty input returns the relation of its schema, without toDF.
-    assert _local_create_dataframe(pd.DataFrame({"a": [], "b": []}), "a long, b string").isLocal()
+    assert _is_local_created(mock_connect, pd.DataFrame({"a": [], "b": []}), "a long, b string")
 
 
 _Pair = namedtuple("_Pair", ["x", "y"])
@@ -9200,15 +9248,16 @@ def test_create_dataframe_warns_of_the_arguments_that_connect_ignores():
         _local_create_dataframe([(1,)], None, None, True)
 
 
-def test_create_dataframe_converts_numpy_scalars_as_pyarrow():
+def test_create_dataframe_converts_numpy_scalars_as_pyarrow(mock_connect):
     import re
 
     np = pytest.importorskip("numpy")
     # As PySpark, where PyArrow takes a NumPy scalar as the Python value that it stands for:
     # an integer, a float (truncated for an integer type) and a bool (also for an integer).
-    assert _local_create_dataframe(
+    assert _is_local_created(
+        mock_connect,
         [(np.int64(1), np.float32(0.5), np.bool_(True), np.float32(1.5), np.bool_(True))],
-        "a bigint, b double, c boolean, d bigint, e bigint").isLocal()
+        "a bigint, b double, c boolean, d bigint, e bigint")
     for value, schema, message in [
         (np.bool_(True), "a double",
          r"Could not convert \S+ with type numpy\.bool_?: tried to convert to double"),
@@ -17380,12 +17429,12 @@ def test_catalog_warns_of_the_deprecated_db_name_as_pyspark(mock_connect, call, 
 @pytest.mark.parametrize("text", [
     "", "1.25", "-42", "NaN", "a\x00b", "é雪😀", "e\u0301", "\uffff",
 ])
-def test_exact_string_converts_as_text(text):
+def test_exact_string_converts_as_text(mock_connect, text):
     # A string, even when it reads as a number, is text: with a string or an integer in
     # another row, the column is a string column, as PySpark merges the types (the live
     # suite checks the values).
-    assert _local_create_dataframe([Row(value=text), Row(value="y")]).isLocal()
-    assert _local_create_dataframe([Row(value=text), Row(value=5)]).isLocal()
+    assert _is_local_created(mock_connect, [Row(value=text), Row(value="y")])
+    assert _is_local_created(mock_connect, [Row(value=text), Row(value=5)])
 
 
 @pytest.mark.parametrize("text", ["\ud800", "\udfff", "a\ud800b"])
@@ -17395,7 +17444,7 @@ def test_exact_string_surrogate_error_preserves_generic_fallback(text):
         _local_create_dataframe([Row(value=text)])
 
 
-def test_exact_string_subclass_uses_generic_conversion():
+def test_exact_string_subclass_uses_generic_conversion(mock_connect):
     from pyspark.errors import PySparkTypeError
 
     class IndexString(str):
@@ -17404,7 +17453,7 @@ def test_exact_string_subclass_uses_generic_conversion():
 
     # As in PySpark, which takes an instance of a subclass by its `__dict__`: an empty
     # struct, which merges with neither an integer nor a string.
-    assert _local_create_dataframe([Row(value=IndexString("x"))]).isLocal()
+    assert _is_local_created(mock_connect, [Row(value=IndexString("x"))])
     for other, data_type in [(5, "LongType"), ("y", "StringType")]:
         with pytest.raises(PySparkTypeError) as error:
             _local_create_dataframe([Row(value=IndexString("x")), Row(value=other)])

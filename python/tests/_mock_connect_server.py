@@ -282,6 +282,9 @@ def serve(connection):
             self.block_result_complete = False
             self.result_complete_operations = []
             self.analyze_requests = []
+            # The isLocal answer of a test, or None for the answer of the plan, and a failure.
+            self.local = None
+            self.local_failure = False
             self.execute_requests = []
             self.release_execute_requests = []
             self.execute_payload = b""
@@ -356,6 +359,21 @@ def serve(connection):
             if 8 in parse_message(request):
                 streaming = getattr(self, "streaming", False)
                 return message_field(6, varint_field(1, 1) if streaming else b"")
+            # base.proto: AnalyzePlanRequest.is_local=7 -> IsLocal.plan=1 -> Plan.root=1;
+            # AnalyzePlanResponse.is_local=5 -> IsLocal.is_local=1. A local relation is
+            # Relation.local_relation=11, cached_local_relation=36 or
+            # chunked_cached_local_relation=45.
+            # `local`, which a test may set, overrides the answer derived from the plan.
+            if 7 in parse_message(request):
+                if getattr(self, "local_failure", False):
+                    context.abort(grpc.StatusCode.INVALID_ARGUMENT, "isLocal unavailable")
+                local = getattr(self, "local", None)
+                if local is None:
+                    is_local = parse_message(parse_message(request)[7][0])
+                    plan = parse_message(is_local[1][0])
+                    relation = parse_message(plan[1][0])
+                    local = any(field in relation for field in (11, 36, 45))
+                return message_field(5, varint_field(1, 1) if local else b"")
             if blocked and not response_gate.wait(5):
                 context.abort(
                     grpc.StatusCode.DEADLINE_EXCEEDED,
