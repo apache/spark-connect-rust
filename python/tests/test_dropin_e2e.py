@@ -2264,6 +2264,32 @@ def test_collect_of_a_string_that_is_not_utf8_raises_as_pyspark(session):
     assert session.sql("SELECT CAST(X'61' AS STRING) AS s").collect() == [Row(s="a")]
 
 
+def test_a_string_that_is_not_utf8_is_named_past_binary_values_as_pyspark(session):
+    # As PySpark's: the binary values before the string are values, not strings, so the error is
+    # that of the string, whether the binary value is a column or nested in an array, for each
+    # action that reads rows.
+    message = "'utf-8' codec can't decode byte 0xc3 in position 0: unexpected end of data"
+    for query in [
+        "SELECT X'FF' AS b, CAST(X'C3' AS STRING) AS s",
+        "SELECT ARRAY(X'FF') AS b, CAST(X'C3' AS STRING) AS s",
+    ]:
+        actions = [
+            lambda df: df.collect(),
+            lambda df: df.first(),
+            lambda df: df.head(),
+            lambda df: df.take(1),
+            lambda df: df.tail(1),
+            lambda df: list(df.toLocalIterator()),
+        ]
+        for action in actions:
+            with pytest.raises(UnicodeDecodeError) as e:
+                action(session.sql(query))
+            assert type(e.value) is UnicodeDecodeError
+            assert str(e.value) == message
+    # A binary value that is valid as a value still collects as bytes.
+    assert session.sql("SELECT X'FF' AS b, 'a' AS s").collect() == [Row(b=b"\xff", s="a")]
+
+
 def test_collect_reads_a_result_across_stream_ends(session):
     # Takes several response streams when the server's senderMaxStreamSize is small.
     n = 300_000
