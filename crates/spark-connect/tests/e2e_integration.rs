@@ -821,3 +821,65 @@ fn test_day_time_interval_real_server() {
         assert_eq!(streamed, rows);
     }
 }
+
+#[test]
+#[allow(clippy::result_large_err)] // The hook returns the client's large SparkError.
+fn test_the_server_runs_the_compressed_plans_of_a_session_as_pyspark_sends_them() {
+    if !should_run() {
+        println!(
+            "Skipping test_the_server_runs_the_compressed_plans_of_a_session_as_pyspark_sends_them \
+             - set SPARK_REMOTE to run"
+        );
+        return;
+    }
+    use proto::plan::compressed_operation::OpType;
+
+    let session = SparkSession::builder()
+        .remote(&remote_url())
+        .get_or_create()
+        .expect("Failed to create session");
+    // Before the first plan of the session, with which the client reads the threshold once.
+    session
+        .conf()
+        .set("spark.connect.session.planCompression.threshold", "1000")
+        .expect("Failed to set the threshold");
+    // The kinds of the compressed operations of the executions, which a hook sees as sent.
+    let compressed: std::sync::Arc<std::sync::Mutex<Vec<i32>>> = Default::default();
+    let recorded = std::sync::Arc::clone(&compressed);
+    session.set_execute_plan_hook(Some(std::sync::Arc::new(move |request| {
+        let operation = request.plan.as_ref().and_then(|plan| plan.op_type.as_ref());
+        if let Some(proto::plan::OpType::CompressedOperation(operation)) = operation {
+            recorded.lock().unwrap().push(operation.op_type);
+        }
+        Ok(request)
+    })));
+
+    // A string literal of 12000 bytes makes each plan of it larger than the threshold.
+    let text = "Apache Spark".repeat(1000);
+    // A command, the statement.
+    let df = session
+        .sql(&format!("SELECT '{text}' AS s"))
+        .expect("Failed to run the statement");
+    // An analysis of the relation of the statement.
+    let schema = df.schema().expect("Failed to analyze");
+    assert_eq!(schema.field_names().expect("field names"), ["s"]);
+    // A query of it.
+    let rows = df.collect().expect("Failed to collect");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].get(0), Some(&Value::String(text.clone())));
+    // A command of it, which is not SQL.
+    df.create_or_replace_temp_view("compressed_plan_view")
+        .expect("Failed to create the view");
+    let view = session
+        .sql("SELECT * FROM compressed_plan_view WHERE length(s) = 12000")
+        .expect("Failed to query the view");
+    assert_eq!(view.count().expect("Failed to count the view"), 1);
+
+    let kinds = compressed.lock().unwrap().clone();
+    assert!(
+        kinds.contains(&(OpType::Command as i32)) && kinds.contains(&(OpType::Relation as i32)),
+        "the commands and the query over the threshold are sent compressed: {kinds:?}"
+    );
+    session.set_execute_plan_hook(None);
+    session.stop().expect("stop");
+}

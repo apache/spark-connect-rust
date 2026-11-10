@@ -21,7 +21,7 @@ use tokio::sync::Notify;
 
 use spark_connect_core::channel::ChannelBuilder;
 use spark_connect_core::client::SparkConnectClient;
-use spark_connect_core::retries::RetryPolicy;
+use spark_connect_core::retries::{grpc_python_code, RetryPolicy};
 use spark_connect_core::runtime::{block_on, POLL_INTERVAL};
 use spark_connect_proto as proto;
 
@@ -37,7 +37,8 @@ fn err<E: std::fmt::Display>(e: E) -> PyErr {
 fn spark_err_to_py(py: Python<'_>, e: spark_connect_core::error::SparkError) -> PyErr {
     // Any error that carries a gRPC status code (even a transport error like a DNS
     // failure, which has no status details) should become a RustRpcError so the
-    // reference client maps it to the right SparkConnectGrpcException with the code.
+    // reference client maps it to the right SparkConnectGrpcException with the code, which is
+    // the one grpc-python reports (`SparkError::from_grpc_status`).
     match e.grpc_code() {
         Some(code) => {
             let details = e.grpc_details().unwrap_or(&[]);
@@ -160,8 +161,10 @@ impl ResponseStream {
             Ok(Some(Err(status))) => {
                 // On error, also drop the stream.
                 self.stream = None;
+                // The code that grpc-python gives it, as the reference client retries and
+                // reattaches a dropped connection only as UNAVAILABLE.
                 Err(RustRpcError::new_err((
-                    status.code() as i32,
+                    grpc_python_code(&status) as i32,
                     PyBytes::new(py, status.details()).unbind(),
                     status.message().to_string(),
                 )))

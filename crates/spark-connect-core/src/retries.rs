@@ -67,20 +67,39 @@ impl RetryPolicy {
 
     /// Whether a failed RPC is retryable under this policy.
     ///
-    /// Mirrors `pyspark.sql.connect.client.retries.DefaultPolicy.can_retry`:
-    /// retry transient `UNAVAILABLE`, and `INTERNAL` errors whose message carries
-    /// `INVALID_CURSOR.DISCONNECTED` (a mid-stream cursor drop resumed via reattach).
-    /// A connection that closes under a call is `UNAVAILABLE` in grpc-python, so it is retried
-    /// too: tonic reports a reset during a call as `UNKNOWN`, and a call queued on the
-    /// connection but not sent yet as `CANCELLED`.
+    /// Mirrors `pyspark.sql.connect.client.retries.DefaultPolicy.can_retry`, on the code that
+    /// grpc-python gives the failure (see [`grpc_python_code`]): retry transient `UNAVAILABLE`,
+    /// and `INTERNAL` errors whose message carries `INVALID_CURSOR.DISCONNECTED` (a mid-stream
+    /// cursor drop resumed via reattach).
     pub fn can_retry(&self, status: &tonic::Status) -> bool {
-        match status.code() {
+        match grpc_python_code(status) {
             tonic::Code::Unavailable => true,
             tonic::Code::Internal => status.message().contains("INVALID_CURSOR.DISCONNECTED"),
-            tonic::Code::Unknown => is_transport_error(status),
-            tonic::Code::Cancelled => is_unsent_request(status),
             _ => false,
         }
+    }
+}
+
+/// The code of a failed RPC as grpc-python reports it, which PySpark's retries and errors see.
+/// A status that the server sent keeps its code. tonic gives some transport failures other
+/// codes: a connection that closes under a call is `UNAVAILABLE` in grpc-python (tonic:
+/// `UNKNOWN`), and so are a connection that the server ends with a GOAWAY (tonic: the code of
+/// its reason) and a call queued on the connection but not sent yet (tonic: `CANCELLED`). A
+/// stream that the server resets has the code of its reason in both, except for the reasons
+/// that tonic leaves `UNKNOWN`, such as `STREAM_CLOSED`, which grpc-python reports as `INTERNAL`.
+pub fn grpc_python_code(status: &tonic::Status) -> tonic::Code {
+    let code = status.code();
+    match transport_errors(status).find_map(|error| error.downcast_ref::<h2::Error>()) {
+        Some(error) if error.is_reset() => match code {
+            tonic::Code::Unknown => tonic::Code::Internal,
+            _ => code,
+        },
+        Some(error) if error.is_go_away() => tonic::Code::Unavailable,
+        _ => match code {
+            tonic::Code::Unknown if is_transport_error(status) => tonic::Code::Unavailable,
+            tonic::Code::Cancelled if is_unsent_request(status) => tonic::Code::Unavailable,
+            _ => code,
+        },
     }
 }
 
@@ -539,9 +558,13 @@ mod tests {
     #[tokio::test]
     async fn test_can_retry_a_connection_reset_during_a_response() {
         let status = status_of_first_response(serve_one_response(true).await).await;
-        // tonic reports the reset as UNKNOWN, with the transport error as its source.
+        // tonic reports the reset as UNKNOWN, with the transport error as its source, and
+        // grpc-python as UNAVAILABLE, which the error of the client reports too.
         assert_eq!(status.code(), tonic::Code::Unknown);
+        assert_eq!(grpc_python_code(&status), tonic::Code::Unavailable);
         assert!(RetryPolicy::default().can_retry(&status), "{status:?}");
+        let error = crate::error::SparkError::from_grpc_status(status);
+        assert_eq!(error.grpc_code(), Some(tonic::Code::Unavailable as i32));
     }
 
     #[tokio::test]
@@ -549,7 +572,11 @@ mod tests {
         let status = status_of_first_response(serve_one_response(false).await).await;
         assert_eq!(status.code(), tonic::Code::Unknown);
         assert_eq!(status.message(), "boom");
+        // A status that the server sent keeps its code.
+        assert_eq!(grpc_python_code(&status), tonic::Code::Unknown);
         assert!(!RetryPolicy::default().can_retry(&status));
+        let error = crate::error::SparkError::from_grpc_status(status);
+        assert_eq!(error.grpc_code(), Some(tonic::Code::Unknown as i32));
     }
 
     /// The error of a request queued on an HTTP/2 connection that closes before sending it, as
@@ -576,7 +603,146 @@ mod tests {
         // tonic reports it as CANCELLED, with hyper's error as its source.
         let status = tonic::Status::from_error(Box::new(error));
         assert_eq!(status.code(), tonic::Code::Cancelled);
+        assert_eq!(grpc_python_code(&status), tonic::Code::Unavailable);
         assert!(RetryPolicy::default().can_retry(&status), "{status:?}");
+    }
+
+    /// How a server answers the request headers of a call with one HTTP/2 frame.
+    #[derive(Clone, Copy, Debug)]
+    enum Answer {
+        /// A RST_STREAM of the stream of the call, of this error code.
+        Reset(h2::Reason),
+        /// A GOAWAY of this error code that processed no stream.
+        GoAway(h2::Reason),
+    }
+
+    /// Serves one connection in raw HTTP/2 frames, which answers the request of a call with
+    /// `answer`, and then reads the frames of the client until it closes the connection: the
+    /// frame, not the end of the connection, ends the call.
+    async fn serve_one_frame(answer: Answer) -> std::net::SocketAddr {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        fn frame(kind: u8, flags: u8, stream: u32, payload: &[u8]) -> Vec<u8> {
+            let length = (payload.len() as u32).to_be_bytes();
+            let mut frame = vec![length[1], length[2], length[3], kind, flags];
+            frame.extend_from_slice(&stream.to_be_bytes());
+            frame.extend_from_slice(payload);
+            frame
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut preface = [0; 24];
+            socket.read_exact(&mut preface).await.unwrap();
+            // SETTINGS.
+            socket.write_all(&frame(0x4, 0, 0, &[])).await.unwrap();
+            loop {
+                let mut head = [0; 9];
+                if socket.read_exact(&mut head).await.is_err() {
+                    return;
+                }
+                let mut payload =
+                    vec![0; u32::from_be_bytes([0, head[0], head[1], head[2]]) as usize];
+                if socket.read_exact(&mut payload).await.is_err() {
+                    return;
+                }
+                let stream = u32::from_be_bytes([head[5], head[6], head[7], head[8]]) & 0x7fff_ffff;
+                let reply = match (head[3], answer) {
+                    // The acknowledgement of the SETTINGS of the client.
+                    (0x4, _) if head[4] & 0x1 == 0 => frame(0x4, 0x1, 0, &[]),
+                    (0x1, Answer::Reset(reason)) => {
+                        frame(0x3, 0, stream, &u32::from(reason).to_be_bytes())
+                    }
+                    (0x1, Answer::GoAway(reason)) => {
+                        // Of last stream ID 0.
+                        let mut payload = vec![0; 4];
+                        payload.extend_from_slice(&u32::from(reason).to_be_bytes());
+                        frame(0x7, 0, 0, &payload)
+                    }
+                    _ => continue,
+                };
+                if socket.write_all(&reply).await.is_err() {
+                    return;
+                }
+            }
+        });
+        address
+    }
+
+    /// The status that ends a call to `address`, before or after its response headers.
+    async fn status_of_a_call(address: std::net::SocketAddr) -> tonic::Status {
+        let channel = tonic::transport::Endpoint::from_shared(format!("http://{address}"))
+            .unwrap()
+            .connect()
+            .await
+            .unwrap();
+        let mut stub =
+            spark_connect_proto::spark_connect_service_client::SparkConnectServiceClient::new(
+                channel,
+            );
+        match stub
+            .execute_plan(spark_connect_proto::ExecutePlanRequest::default())
+            .await
+        {
+            Err(status) => status,
+            Ok(response) => response
+                .into_inner()
+                .message()
+                .await
+                .expect_err("the response ends with an error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_cannot_retry_a_stream_the_server_resets_as_grpc_python() {
+        // The code of the reason, as grpc-python reports it: tonic leaves STREAM_CLOSED,
+        // FRAME_SIZE_ERROR and HTTP_1_1_REQUIRED UNKNOWN, which grpc-python reports as INTERNAL.
+        // A reset is the answer of the server about the call, not a failure of the connection.
+        for (reason, code) in [
+            (h2::Reason::NO_ERROR, tonic::Code::Internal),
+            (h2::Reason::PROTOCOL_ERROR, tonic::Code::Internal),
+            (h2::Reason::INTERNAL_ERROR, tonic::Code::Internal),
+            (h2::Reason::STREAM_CLOSED, tonic::Code::Internal),
+            (h2::Reason::FRAME_SIZE_ERROR, tonic::Code::Internal),
+            (h2::Reason::CANCEL, tonic::Code::Cancelled),
+            (h2::Reason::HTTP_1_1_REQUIRED, tonic::Code::Internal),
+        ] {
+            let status = status_of_a_call(serve_one_frame(Answer::Reset(reason)).await).await;
+            assert_eq!(grpc_python_code(&status), code, "{reason:?}: {status:?}");
+            assert!(
+                !RetryPolicy::default().can_retry(&status),
+                "{reason:?}: {status:?}"
+            );
+        }
+        // A stream that the server refused, which it did not process, is retried.
+        let refused = serve_one_frame(Answer::Reset(h2::Reason::REFUSED_STREAM)).await;
+        let status = status_of_a_call(refused).await;
+        assert_eq!(grpc_python_code(&status), tonic::Code::Unavailable);
+        assert!(RetryPolicy::default().can_retry(&status), "{status:?}");
+    }
+
+    #[tokio::test]
+    async fn test_can_retry_a_connection_the_server_ends_with_a_goaway_as_grpc_python() {
+        // grpc-python reports a call that a GOAWAY ends as UNAVAILABLE, whatever its reason:
+        // tonic gives it the code of the reason, such as INTERNAL for NO_ERROR.
+        for reason in [
+            h2::Reason::NO_ERROR,
+            h2::Reason::INTERNAL_ERROR,
+            h2::Reason::ENHANCE_YOUR_CALM,
+        ] {
+            let status = status_of_a_call(serve_one_frame(Answer::GoAway(reason)).await).await;
+            assert_eq!(
+                grpc_python_code(&status),
+                tonic::Code::Unavailable,
+                "{reason:?}: {status:?}"
+            );
+            assert!(
+                RetryPolicy::default().can_retry(&status),
+                "{reason:?}: {status:?}"
+            );
+            let error = crate::error::SparkError::from_grpc_status(status);
+            assert_eq!(error.grpc_code(), Some(tonic::Code::Unavailable as i32));
+        }
     }
 
     #[test]
@@ -586,6 +752,7 @@ mod tests {
         // tonic's timeout of a request is CANCELLED too.
         let timeout = tonic::Status::from_error(Box::new(tonic::TimeoutExpired(())));
         assert_eq!(timeout.code(), tonic::Code::Cancelled);
+        assert_eq!(grpc_python_code(&timeout), tonic::Code::Cancelled);
         assert!(!p.can_retry(&timeout));
     }
 }

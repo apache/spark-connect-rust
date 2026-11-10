@@ -254,7 +254,8 @@ fn assert_metadata(metadata: &MetadataMap) {
         metadata.get("authorization").unwrap(),
         "Bearer fixture-token"
     );
-    assert_eq!(metadata.get("user_id").unwrap(), "transport-user");
+    // As PySpark's, which sends the user ID in the user context only.
+    assert!(metadata.get("user_id").is_none());
     assert_eq!(metadata.get("x-cleanup").unwrap(), "fixture-value");
     assert!(metadata.get("user-agent").is_some());
 }
