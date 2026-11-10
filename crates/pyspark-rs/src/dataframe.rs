@@ -482,8 +482,17 @@ pub(crate) fn to_column_list(
             _args = only.try_iter()?.collect::<PyResult<Vec<_>>>()?;
         }
     }
+    to_columns_as_given(_args)
+}
+
+/// The columns of `args`, each a Column or a column name, else `NOT_EXPECTED_TYPE`, without
+/// unpacking a single list: as PySpark's `_to_cols(cols)` of the tuple of `*cols` itself, which
+/// `repartition` and `repartitionByRange` call, so that a list among their columns is an error.
+pub(crate) fn to_columns_as_given(
+    args: Vec<Bound<'_, PyAny>>,
+) -> PyResult<Vec<spark_connect::column::Column>> {
     let mut cols = vec![];
-    for arg in _args {
+    for arg in args {
         // Try as PyColumn first
         if let Ok(pycol) = arg.extract::<Bound<'_, PyColumn>>() {
             cols.push(pycol.borrow().column.clone());
@@ -1241,7 +1250,8 @@ impl PyDataFrame {
                 "Column, int or str",
             ));
         };
-        let exprs: Vec<_> = to_column_list(cols)?
+        // As PySpark's `_to_cols(cols, sort=True)`, which does not unpack a list among them.
+        let exprs: Vec<_> = to_columns_as_given(cols)?
             .into_iter()
             .map(|c| c.expression().clone())
             .collect();
@@ -1362,7 +1372,8 @@ impl PyDataFrame {
             if cols.is_empty() {
                 return Ok(PyDataFrame::new(self.dataframe.repartition(n)));
             }
-            let exprs: Vec<_> = to_column_list(cols)?
+            // As PySpark's `_to_cols(cols)`, which does not unpack a list among them.
+            let exprs: Vec<_> = to_columns_as_given(cols)?
                 .iter()
                 .map(|c| c.expression().clone())
                 .collect();
@@ -1381,7 +1392,7 @@ impl PyDataFrame {
         }
         let mut all = vec![numPartitions];
         all.extend(cols);
-        let exprs: Vec<_> = to_column_list(all)?
+        let exprs: Vec<_> = to_columns_as_given(all)?
             .iter()
             .map(|c| c.expression().clone())
             .collect();
