@@ -16213,6 +16213,55 @@ def test_sigint_while_the_transport_waits_raises_keyboard_interrupt(mock_connect
     assert time.monotonic() - started < 3
 
 
+def test_sigint_during_the_release_of_stop_raises_keyboard_interrupt_and_keeps_the_session(
+    mock_connect,
+):
+    # As PySpark's stop, whose wait for the release of the session (and the sleeps between its
+    # retries) a signal interrupts: KeyboardInterrupt is raised at once, it leaves the session
+    # open, and a later stop releases it.
+    import signal
+    import threading
+
+    spark, service = mock_connect
+    service.release_session_blocked = True
+    timer = threading.Timer(0.3, os.kill, (os.getpid(), signal.SIGINT))
+    started = time.monotonic()
+    timer.start()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            spark.stop()
+    finally:
+        timer.cancel()
+    assert time.monotonic() - started < 3
+    assert not spark.is_stopped
+    service.release_session_blocked = False
+    service.release_session_release()
+    spark.stop()
+    assert spark.is_stopped
+
+
+def test_sigint_during_a_native_kmeans_fit_raises_keyboard_interrupt(mock_connect):
+    # As the other native estimators of pyspark.ml.connect: the fit waits for the server as an
+    # execution, which a signal interrupts on the server.
+    import signal
+    import threading
+
+    from pyspark.ml.connect.clustering import KMeans
+
+    spark, service = mock_connect
+    service.block_execute = True
+    timer = threading.Timer(0.3, os.kill, (os.getpid(), signal.SIGINT))
+    started = time.monotonic()
+    timer.start()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            KMeans(k=2).fit(spark.range(3))
+    finally:
+        timer.cancel()
+    assert time.monotonic() - started < 3
+    assert len(service.interrupt_requests) == 1
+
+
 def test_exception_of_a_signal_handler_is_raised_by_collect_as_pyspark(mock_connect):
     # As PySpark's: an exception that the handler of the signal raises is the one that the
     # waiting call raises, and the operation is interrupted.

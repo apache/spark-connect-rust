@@ -2436,18 +2436,23 @@ impl PySparkSession {
     /// active session and the cached `SQLContext` if they belong to this session. Listener
     /// callbacks are not joined; the current event's listener snapshot may finish afterward.
     fn stop(&self, py: Python<'_>) -> PyResult<()> {
-        crate::progress::forget_session(&self.session);
-        crate::profiler::forget_session(&self.session);
         let released = if self
             .release_session_on_close
             .load(std::sync::atomic::Ordering::SeqCst)
         {
-            py.detach(|| self.session.stop().map_err(Box::new))
+            // As PySpark's stop, whose sleeps between the retries of the release a signal
+            // interrupts: the exception of the signal is raised at once, and leaves the session
+            // open, so nothing below runs.
+            crate::interrupt::interruptible_outcome(py, &self.session, || {
+                self.session.stop().map_err(Box::new)
+            })?
         } else {
             // As PySpark's stop: without the release, the client is closed all the same.
             py.detach(|| self.session.close());
             Ok(())
         };
+        crate::progress::forget_session(&self.session);
+        crate::profiler::forget_session(&self.session);
         if let Err(e) = released {
             let logger = py
                 .import("logging")?
