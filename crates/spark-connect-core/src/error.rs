@@ -277,6 +277,9 @@ pub enum SparkErrorKind {
     RecursionError,
     /// ``UnicodeDecodeError``, a Python builtin: a string of the result is not valid UTF-8.
     UnicodeDecode,
+    /// ``ValueError``, a Python builtin: a connection-string value that `int()` or `urllib`
+    /// rejects, which the reference client raises unwrapped rather than as a `PySparkValueError`.
+    BuiltinValueError,
     /// ``pyspark.errors.exceptions.base.SparkRuntimeException``
     SparkRuntime,
     /// ``pyspark.errors.exceptions.base.SparkUpgradeException``
@@ -348,6 +351,14 @@ impl SparkError {
             operation_id: None,
             server: None,
         }
+    }
+
+    /// Create a `BuiltinValueError`-kind error with a plain message: a `ValueError` of the Python
+    /// builtin, which is what `int()` and `urllib` raise, as the reference client lets them.
+    pub fn builtin_value_msg(message: impl Into<String>) -> Self {
+        let mut error = Self::value_msg(message);
+        error.kind = SparkErrorKind::BuiltinValueError;
+        error
     }
 
     /// Create a RecursionError-kind error with a plain message (no error class).

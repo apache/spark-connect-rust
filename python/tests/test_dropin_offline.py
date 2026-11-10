@@ -3383,6 +3383,23 @@ def test_create_raises_for_a_keepalive_param_that_is_not_an_integer_as_pyspark()
     assert str(error.value) == "invalid literal for int() with base 10: 'abc'"
 
 
+def test_create_raises_for_a_port_that_urllib_rejects_as_pyspark():
+    # As PySpark's channel builder, whose port (urllib's) raises a ValueError of the builtin
+    # when the session is made, with no URL and no token in the message.
+    from pyspark.sql import SparkSession
+
+    for url, message in [
+        ("sc://localhost:99999/;token=SECRET", "Port out of range 0-65535"),
+        ("sc://localhost:+80/;token=SECRET", "Port could not be cast to integer value as '+80'"),
+        ("sc://localhost:notaport/;token=SECRET",
+         "Port could not be cast to integer value as 'notaport'"),
+    ]:
+        with pytest.raises(ValueError) as error:
+            SparkSession.builder.remote(url).create()
+        assert type(error.value) is ValueError, url
+        assert str(error.value) == message, url
+
+
 def test_the_plan_of_a_dataframe_that_a_hook_puts_in_is_compressed_as_pyspark(mock_connect):
     # As PySpark's hook, which would put in the plan of `to_proto`, which compresses it: the plan
     # of a DataFrame that an on_execute_plan hook puts in is sent compressed over the threshold.
