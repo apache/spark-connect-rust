@@ -694,7 +694,7 @@ impl SparkConnectClient {
         self.closed.load(std::sync::atomic::Ordering::SeqCst)
     }
 
-    /// The operation ID of the innermost execution that the calling thread waits for now, if any:
+    /// The operation ID of the innermost execution that the calling thread is waiting for, if any:
     /// the one that a wait of the calling thread is for, as PySpark interrupts the operation of
     /// the iterator that is interrupted. An execution in flight that nothing waits for, such as
     /// an iterator that is not consumed, is not one.
