@@ -6670,6 +6670,106 @@ def test_variant_val_subclass_is_sent_as_its_variant(mock_connect):
         spark.createDataFrame([(T.VariantVal(value, metadata),)], "v variant")).to_pylist()
 
 
+
+class _SlottedVariant(T.VariantVal):
+    __slots__ = ("note",)
+
+
+class _TaggedGeometry(T.Geometry):
+    # Unpickling must not call this __init__, which needs the tag.
+    def __init__(self, wkb, srid, tag):
+        super().__init__(wkb, srid)
+        self.tag = tag
+
+
+class _TaggedGeography(T.Geography):
+    def __init__(self, wkb, srid, tag):
+        super().__init__(wkb, srid)
+        self.tag = tag
+
+
+def test_variant_and_spatial_values_pickle_as_pysparks_plain_classes_which_load_them(
+        monkeypatch):
+    # As PySpark's VariantVal, Geometry and Geography, plain classes without __setstate__: a
+    # value pickles as its class, rebuilt without __init__, with the dict of its attributes as
+    # the state, which PySpark's classes take, as the server's Python workers do for the values
+    # of a UDF. And PySpark's pickles of them load here.
+    import io
+    import pickle
+
+    class VariantVal:  # PySpark's, as far as pickling goes.
+        def __init__(self, value, metadata):
+            self.value, self.metadata = value, metadata
+
+    class Geometry:
+        def __init__(self, wkb, srid):
+            self.wkb, self.srid = wkb, srid
+
+    class Geography(Geometry):
+        pass
+
+    pyspark_classes = {"VariantVal": VariantVal, "Geometry": Geometry, "Geography": Geography}
+    for name, cls in pyspark_classes.items():
+        cls.__module__, cls.__qualname__ = "pyspark.sql.types", name
+
+    class PySparkUnpickler(pickle.Unpickler):
+        def find_class(self, module, name):
+            if module == "pyspark.sql.types" and name in pyspark_classes:
+                return pyspark_classes[name]
+            return super().find_class(module, name)
+
+    def pyspark_pickle(name, attributes, protocol):
+        # PySpark's pickle of its value of `attributes`, which refers to its class by name.
+        value = pyspark_classes[name].__new__(pyspark_classes[name])
+        vars(value).update(attributes)
+        with monkeypatch.context() as patched:
+            patched.setattr(T, name, pyspark_classes[name])
+            return pickle.dumps(value, protocol)
+
+    wkb = bytes.fromhex("0101000000000000000000F03F0000000000000040")
+    for value, fields in [
+        (T.VariantVal(b"\x0c\x01", b"\x01\x00\x00"),
+         {"value": b"\x0c\x01", "metadata": b"\x01\x00\x00"}),
+        (T.Geometry(wkb, 4326), {"wkb": wkb, "srid": 4326}),
+        (T.Geography(wkb, 4326), {"wkb": wkb, "srid": 4326}),
+    ]:
+        value.tag = "kept"
+        name = type(value).__name__
+        for protocol in range(2, pickle.HIGHEST_PROTOCOL + 1):
+            loaded = PySparkUnpickler(io.BytesIO(pickle.dumps(value, protocol))).load()
+            assert type(loaded) is pyspark_classes[name]
+            assert vars(loaded) == {"tag": "kept", **fields}
+            restored = pickle.loads(pyspark_pickle(name, {"tag": "x", **fields}, protocol))
+            assert type(restored) is type(value) and restored.tag == "x"
+            assert {field: getattr(restored, field) for field in fields} == fields
+
+
+def test_spatial_values_copy_pickle_and_are_subclassed_as_pyspark():
+    # As PySpark's Geometry and Geography, plain classes: they are copied and pickled, also in a
+    # Row, and subclassed, of an __init__ that unpickling does not run. And as of PySpark's
+    # VariantVal, the slots of a subclass are pickled.
+    import copy
+    import pickle
+
+    wkb = bytes.fromhex("0101000000000000000000F03F0000000000000040")
+    for cls, tagged in ((T.Geometry, _TaggedGeometry), (T.Geography, _TaggedGeography)):
+        value = cls(wkb, 4326)
+        for restored in (copy.copy(value), copy.deepcopy(value), pickle.loads(pickle.dumps(value))):
+            assert type(restored) is cls and restored == value
+            assert (restored.wkb, restored.getSrid()) == (wkb, 4326)
+        assert pickle.loads(pickle.dumps(T.Row(g=value))) == T.Row(g=value)
+        original = tagged(wkb, 3857, "x")
+        restored = pickle.loads(pickle.dumps(original))
+        assert (type(restored), restored.tag, restored.srid) == (tagged, "x", 3857)
+        assert restored == original and repr(restored) == repr(original)
+
+    slotted = _SlottedVariant(b"\x0c\x01", b"\x01\x00\x00")
+    slotted.note = "slot"
+    restored = pickle.loads(pickle.dumps(slotted))
+    assert (type(restored), restored.note) == (_SlottedVariant, "slot")
+    assert (restored.value, restored.metadata) == (b"\x0c\x01", b"\x01\x00\x00")
+
+
 def test_str_of_variant_values_is_their_json_and_they_are_no_rows_as_pyspark():
     # As PySpark's VariantVal: str is its JSON, in UTC, as toJson(); repr is of its bytes. And
     # as PySpark's createDataFrame, whose VariantVal has a __dict__, so that it is a row, which

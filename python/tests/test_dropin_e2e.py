@@ -2603,6 +2603,24 @@ def test_variant_val_subclass_round_trips_as_pyspark(session):
     assert str(collected) == collected.toJson() == '{"a":1}'
 
 
+
+def test_udfs_that_refer_to_variant_and_spatial_values_run_on_the_server_as_pyspark(session):
+    # As PySpark's: the VariantVal, Geometry and Geography that a UDF refers to are pickled as
+    # PySpark's plain classes, which the server's Python workers, of PySpark, unpickle.
+    from pyspark.sql import functions as F
+    from pyspark.sql.types import Geography, Geometry
+
+    wkb = bytes.fromhex("0101000000000000000000F03F0000000000000040")
+    variant = session.sql("""SELECT parse_json('{"a": 1}') AS v""").first()[0]
+    geometry, geography = Geometry.fromWKB(wkb, 4326), Geography(wkb, 3857)
+
+    @F.udf("string")
+    def described(_):
+        return "%s %d %d" % (variant.toJson(), geometry.getSrid(), geography.getSrid())
+
+    assert session.range(1).select(described("id")).first()[0] == '{"a":1} 4326 3857'
+
+
 def test_create_dataframe_of_multi_and_categorical_labels_as_pyspark(session):
     # As PySpark's: a frame whose labels are a MultiIndex or a CategoricalIndex converts its
     # cells as a frame of default labels does. A naive datetime of a list reads back unchanged
