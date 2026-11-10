@@ -549,7 +549,7 @@ def _create_lambda(f):
 
 
 def _invoke_higher_order_function(name, cols, funs):
-    _cols = [_to_col(c) for c in cols]
+    _cols = [_column_or_name(c) for c in cols]
     _funs = [_create_lambda(f) for f in funs]
     return _invoke_function(name, *_cols, *_funs)
 
