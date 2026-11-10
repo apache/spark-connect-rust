@@ -2,8 +2,9 @@
 //!
 //! The core estimators/transformers/evaluators use consuming builder setters and
 //! `&mut self` fit/transform; every concrete type is `Clone`, so each wrapper holds
-//! the value and clones it for the fluent setters and for fit/transform/evaluate,
-//! keeping the Python objects reusable.
+//! the value and clones it for fit/transform/evaluate, keeping the Python objects
+//! reusable. A setter replaces the value with the result of the core setter and
+//! returns the wrapper itself, as PySpark's `Params._set` does.
 
 use pyo3::prelude::*;
 use spark_connect::ml::{
@@ -56,16 +57,14 @@ impl PyStandardScaler {
         PyStandardScaler { inner: e }
     }
     #[pyo3(name = "setInputCol")]
-    fn set_input_col(&self, col: &str) -> Self {
-        PyStandardScaler {
-            inner: self.inner.clone().set_input_col(col),
-        }
+    fn set_input_col<'py>(mut slf: PyRefMut<'py, Self>, value: &str) -> PyRefMut<'py, Self> {
+        slf.inner = slf.inner.clone().set_input_col(value);
+        slf
     }
     #[pyo3(name = "setOutputCol")]
-    fn set_output_col(&self, col: &str) -> Self {
-        PyStandardScaler {
-            inner: self.inner.clone().set_output_col(col),
-        }
+    fn set_output_col<'py>(mut slf: PyRefMut<'py, Self>, value: &str) -> PyRefMut<'py, Self> {
+        slf.inner = slf.inner.clone().set_output_col(value);
+        slf
     }
     fn fit(&self, py: Python<'_>, df: &PyDataFrame) -> PyResult<PyMLModel> {
         let mut e = self.inner.clone();
@@ -98,16 +97,14 @@ impl PyMaxAbsScaler {
         PyMaxAbsScaler { inner: e }
     }
     #[pyo3(name = "setInputCol")]
-    fn set_input_col(&self, col: &str) -> Self {
-        PyMaxAbsScaler {
-            inner: self.inner.clone().set_input_col(col),
-        }
+    fn set_input_col<'py>(mut slf: PyRefMut<'py, Self>, value: &str) -> PyRefMut<'py, Self> {
+        slf.inner = slf.inner.clone().set_input_col(value);
+        slf
     }
     #[pyo3(name = "setOutputCol")]
-    fn set_output_col(&self, col: &str) -> Self {
-        PyMaxAbsScaler {
-            inner: self.inner.clone().set_output_col(col),
-        }
+    fn set_output_col<'py>(mut slf: PyRefMut<'py, Self>, value: &str) -> PyRefMut<'py, Self> {
+        slf.inner = slf.inner.clone().set_output_col(value);
+        slf
     }
     fn fit(&self, py: Python<'_>, df: &PyDataFrame) -> PyResult<PyMLModel> {
         let mut e = self.inner.clone();
@@ -140,16 +137,14 @@ impl PyStringIndexer {
         PyStringIndexer { inner: e }
     }
     #[pyo3(name = "setInputCol")]
-    fn set_input_col(&self, col: &str) -> Self {
-        PyStringIndexer {
-            inner: self.inner.clone().set_input_col(col),
-        }
+    fn set_input_col<'py>(mut slf: PyRefMut<'py, Self>, value: &str) -> PyRefMut<'py, Self> {
+        slf.inner = slf.inner.clone().set_input_col(value);
+        slf
     }
     #[pyo3(name = "setOutputCol")]
-    fn set_output_col(&self, col: &str) -> Self {
-        PyStringIndexer {
-            inner: self.inner.clone().set_output_col(col),
-        }
+    fn set_output_col<'py>(mut slf: PyRefMut<'py, Self>, value: &str) -> PyRefMut<'py, Self> {
+        slf.inner = slf.inner.clone().set_output_col(value);
+        slf
     }
     fn fit(&self, py: Python<'_>, df: &PyDataFrame) -> PyResult<PyMLModel> {
         let mut e = self.inner.clone();
@@ -183,17 +178,15 @@ impl PyVectorAssembler {
         PyVectorAssembler { inner: t }
     }
     #[pyo3(name = "setInputCols")]
-    fn set_input_cols(&self, cols: Vec<String>) -> Self {
-        let refs: Vec<&str> = cols.iter().map(|s| s.as_str()).collect();
-        PyVectorAssembler {
-            inner: self.inner.clone().set_input_cols(refs),
-        }
+    fn set_input_cols(mut slf: PyRefMut<'_, Self>, value: Vec<String>) -> PyRefMut<'_, Self> {
+        let refs: Vec<&str> = value.iter().map(|s| s.as_str()).collect();
+        slf.inner = slf.inner.clone().set_input_cols(refs);
+        slf
     }
     #[pyo3(name = "setOutputCol")]
-    fn set_output_col(&self, col: &str) -> Self {
-        PyVectorAssembler {
-            inner: self.inner.clone().set_output_col(col),
-        }
+    fn set_output_col<'py>(mut slf: PyRefMut<'py, Self>, value: &str) -> PyRefMut<'py, Self> {
+        slf.inner = slf.inner.clone().set_output_col(value);
+        slf
     }
     fn transform(&self, py: Python<'_>, df: &PyDataFrame) -> PyResult<PyDataFrame> {
         let mut t = self.inner.clone();
@@ -240,28 +233,24 @@ impl PyLogisticRegression {
         PyLogisticRegression { inner: e }
     }
     #[pyo3(name = "setFeaturesCol")]
-    fn set_features_col(&self, col: &str) -> Self {
-        PyLogisticRegression {
-            inner: self.inner.clone().set_feature_col(col),
-        }
+    fn set_features_col<'py>(mut slf: PyRefMut<'py, Self>, value: &str) -> PyRefMut<'py, Self> {
+        slf.inner = slf.inner.clone().set_feature_col(value);
+        slf
     }
     #[pyo3(name = "setLabelCol")]
-    fn set_label_col(&self, col: &str) -> Self {
-        PyLogisticRegression {
-            inner: self.inner.clone().set_label_col(col),
-        }
+    fn set_label_col<'py>(mut slf: PyRefMut<'py, Self>, value: &str) -> PyRefMut<'py, Self> {
+        slf.inner = slf.inner.clone().set_label_col(value);
+        slf
     }
     #[pyo3(name = "setPredictionCol")]
-    fn set_prediction_col(&self, col: &str) -> Self {
-        PyLogisticRegression {
-            inner: self.inner.clone().set_prediction_col(col),
-        }
+    fn set_prediction_col<'py>(mut slf: PyRefMut<'py, Self>, value: &str) -> PyRefMut<'py, Self> {
+        slf.inner = slf.inner.clone().set_prediction_col(value);
+        slf
     }
     #[pyo3(name = "setMaxIter")]
-    fn set_max_iter(&self, max_iter: i64) -> Self {
-        PyLogisticRegression {
-            inner: self.inner.clone().set_max_iter(max_iter),
-        }
+    fn set_max_iter(mut slf: PyRefMut<'_, Self>, value: i64) -> PyRefMut<'_, Self> {
+        slf.inner = slf.inner.clone().set_max_iter(value);
+        slf
     }
     fn fit(&self, py: Python<'_>, df: &PyDataFrame) -> PyResult<PyMLModel> {
         let mut e = self.inner.clone();
@@ -710,22 +699,19 @@ impl PyRegressionEvaluator {
         PyRegressionEvaluator { inner: e }
     }
     #[pyo3(name = "setLabelCol")]
-    fn set_label_col(&self, col: &str) -> Self {
-        PyRegressionEvaluator {
-            inner: self.inner.clone().set_label_col(col),
-        }
+    fn set_label_col<'py>(mut slf: PyRefMut<'py, Self>, value: &str) -> PyRefMut<'py, Self> {
+        slf.inner = slf.inner.clone().set_label_col(value);
+        slf
     }
     #[pyo3(name = "setPredictionCol")]
-    fn set_prediction_col(&self, col: &str) -> Self {
-        PyRegressionEvaluator {
-            inner: self.inner.clone().set_prediction_col(col),
-        }
+    fn set_prediction_col<'py>(mut slf: PyRefMut<'py, Self>, value: &str) -> PyRefMut<'py, Self> {
+        slf.inner = slf.inner.clone().set_prediction_col(value);
+        slf
     }
     #[pyo3(name = "setMetricName")]
-    fn set_metric_name(&self, metric: &str) -> Self {
-        PyRegressionEvaluator {
-            inner: self.inner.clone().set_metric_name(metric),
-        }
+    fn set_metric_name<'py>(mut slf: PyRefMut<'py, Self>, value: &str) -> PyRefMut<'py, Self> {
+        slf.inner = slf.inner.clone().set_metric_name(value);
+        slf
     }
     fn evaluate(&self, py: Python<'_>, df: &PyDataFrame) -> PyResult<f64> {
         interruptible(py, &df.dataframe.spark_session(), || {
@@ -766,22 +752,22 @@ impl PyBinaryClassificationEvaluator {
         PyBinaryClassificationEvaluator { inner: e }
     }
     #[pyo3(name = "setLabelCol")]
-    fn set_label_col(&self, col: &str) -> Self {
-        PyBinaryClassificationEvaluator {
-            inner: self.inner.clone().set_label_col(col),
-        }
+    fn set_label_col<'py>(mut slf: PyRefMut<'py, Self>, value: &str) -> PyRefMut<'py, Self> {
+        slf.inner = slf.inner.clone().set_label_col(value);
+        slf
     }
     #[pyo3(name = "setRawPredictionCol")]
-    fn set_raw_prediction_col(&self, col: &str) -> Self {
-        PyBinaryClassificationEvaluator {
-            inner: self.inner.clone().set_raw_prediction_col(col),
-        }
+    fn set_raw_prediction_col<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        value: &str,
+    ) -> PyRefMut<'py, Self> {
+        slf.inner = slf.inner.clone().set_raw_prediction_col(value);
+        slf
     }
     #[pyo3(name = "setMetricName")]
-    fn set_metric_name(&self, metric: &str) -> Self {
-        PyBinaryClassificationEvaluator {
-            inner: self.inner.clone().set_metric_name(metric),
-        }
+    fn set_metric_name<'py>(mut slf: PyRefMut<'py, Self>, value: &str) -> PyRefMut<'py, Self> {
+        slf.inner = slf.inner.clone().set_metric_name(value);
+        slf
     }
     fn evaluate(&self, py: Python<'_>, df: &PyDataFrame) -> PyResult<f64> {
         interruptible(py, &df.dataframe.spark_session(), || {
@@ -809,11 +795,10 @@ impl PyPipeline {
         PyPipeline { inner: p }
     }
     #[pyo3(name = "setStages")]
-    fn set_stages(&self, stages: Vec<String>) -> Self {
-        let refs: Vec<&str> = stages.iter().map(|x| x.as_str()).collect();
-        PyPipeline {
-            inner: self.inner.clone().set_stages(refs),
-        }
+    fn set_stages(mut slf: PyRefMut<'_, Self>, value: Vec<String>) -> PyRefMut<'_, Self> {
+        let refs: Vec<&str> = value.iter().map(|x| x.as_str()).collect();
+        slf.inner = slf.inner.clone().set_stages(refs);
+        slf
     }
     fn fit(&self, py: Python<'_>, df: &PyDataFrame) -> PyResult<PyMLModel> {
         let mut e = self.inner.clone();
@@ -856,22 +841,19 @@ impl PyMulticlassClassificationEvaluator {
         PyMulticlassClassificationEvaluator { inner: e }
     }
     #[pyo3(name = "setLabelCol")]
-    fn set_label_col(&self, col: &str) -> Self {
-        PyMulticlassClassificationEvaluator {
-            inner: self.inner.clone().set_label_col(col),
-        }
+    fn set_label_col<'py>(mut slf: PyRefMut<'py, Self>, value: &str) -> PyRefMut<'py, Self> {
+        slf.inner = slf.inner.clone().set_label_col(value);
+        slf
     }
     #[pyo3(name = "setPredictionCol")]
-    fn set_prediction_col(&self, col: &str) -> Self {
-        PyMulticlassClassificationEvaluator {
-            inner: self.inner.clone().set_prediction_col(col),
-        }
+    fn set_prediction_col<'py>(mut slf: PyRefMut<'py, Self>, value: &str) -> PyRefMut<'py, Self> {
+        slf.inner = slf.inner.clone().set_prediction_col(value);
+        slf
     }
     #[pyo3(name = "setMetricName")]
-    fn set_metric_name(&self, metric: &str) -> Self {
-        PyMulticlassClassificationEvaluator {
-            inner: self.inner.clone().set_metric_name(metric),
-        }
+    fn set_metric_name<'py>(mut slf: PyRefMut<'py, Self>, value: &str) -> PyRefMut<'py, Self> {
+        slf.inner = slf.inner.clone().set_metric_name(value);
+        slf
     }
     fn evaluate(&self, py: Python<'_>, df: &PyDataFrame) -> PyResult<f64> {
         interruptible(py, &df.dataframe.spark_session(), || {
@@ -905,22 +887,19 @@ impl PyCrossValidator {
         PyCrossValidator { inner: e }
     }
     #[pyo3(name = "setNumFolds")]
-    fn set_num_folds(&self, num_folds: i32) -> Self {
-        PyCrossValidator {
-            inner: self.inner.clone().set_num_folds(num_folds),
-        }
+    fn set_num_folds(mut slf: PyRefMut<'_, Self>, value: i32) -> PyRefMut<'_, Self> {
+        slf.inner = slf.inner.clone().set_num_folds(value);
+        slf
     }
     #[pyo3(name = "setParallelism")]
-    fn set_parallelism(&self, parallelism: i32) -> Self {
-        PyCrossValidator {
-            inner: self.inner.clone().set_parallelism(parallelism),
-        }
+    fn set_parallelism(mut slf: PyRefMut<'_, Self>, value: i32) -> PyRefMut<'_, Self> {
+        slf.inner = slf.inner.clone().set_parallelism(value);
+        slf
     }
     #[pyo3(name = "setSeed")]
-    fn set_seed(&self, seed: i64) -> Self {
-        PyCrossValidator {
-            inner: self.inner.clone().set_seed(seed),
-        }
+    fn set_seed(mut slf: PyRefMut<'_, Self>, value: i64) -> PyRefMut<'_, Self> {
+        slf.inner = slf.inner.clone().set_seed(value);
+        slf
     }
     fn fit(&self, py: Python<'_>, df: &PyDataFrame) -> PyResult<PyMLModel> {
         let mut e = self.inner.clone();
