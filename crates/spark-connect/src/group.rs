@@ -57,7 +57,7 @@ fn value_to_lit_expr(v: crate::row::Value) -> Result<Expression> {
         Value::List(_) => return Err(not_a_pivot_value("list")),
         Value::Map(_) => return Err(not_a_pivot_value("dict")),
         Value::Struct(_) => return Err(not_a_pivot_value("Row")),
-        Value::Variant { .. } => return Err(not_a_pivot_value("Variant")),
+        Value::Variant { .. } => return Err(not_a_pivot_value("VariantVal")),
     };
     Ok(Expression::literal(lit))
 }
@@ -82,8 +82,8 @@ const PIVOT_VALUE_TYPES: &str =
     "a bool, a number, a string, bytes, a date, a timestamp, a time or an interval";
 
 /// The precision and scale of a decimal text, such as `"1.50"` (3 and 2) or `"1E+3"` (1 and -3),
-/// as Java's `BigDecimal` of the text has them. Text that is not a decimal gives `(10, 0)`, and
-/// the server rejects it.
+/// as Java's `BigDecimal` of the text has them. Text that is not a decimal, or whose scale does
+/// not fit an int, gives `(10, 0)`, and the server rejects it.
 fn decimal_type_of_text(text: &str) -> (i32, i32) {
     let (mantissa, exponent) = match text.split_once(['e', 'E']) {
         Some((mantissa, exponent)) => (mantissa, exponent.parse::<i32>().ok()),
@@ -100,7 +100,10 @@ fn decimal_type_of_text(text: &str) -> (i32, i32) {
     }
     let unscaled = digits.trim_start_matches('0');
     let precision = unscaled.len().max(1) as i32;
-    (precision, frac_part.len() as i32 - exponent)
+    match (frac_part.len() as i32).checked_sub(exponent) {
+        Some(scale) => (precision, scale),
+        None => (10, 0),
+    }
 }
 
 /// Grouped data for performing aggregations.
@@ -1261,6 +1264,40 @@ mod tests {
     }
 
     #[test]
+    fn a_decimal_pivot_value_whose_scale_overflows_takes_the_default_type() {
+        use crate::row::Value;
+        use spark_connect_proto::{expression::literal::LiteralType, relation::RelType};
+        // The scale of each text, its fraction's digits less its exponent, is past the greatest
+        // int, so the text is not a decimal of an int scale, and takes the default type.
+        let values = ["1E-2147483648", "1.5E-2147483647"]
+            .into_iter()
+            .map(|value| Value::Decimal {
+                value: value.to_string(),
+                precision: None,
+                scale: None,
+            })
+            .collect();
+        let frame = session().range(1).unwrap();
+        let pivot = frame
+            .group_by(vec![] as Vec<Column>)
+            .pivot(crate::column::col("value"), Some(values))
+            .unwrap()
+            .count();
+        let Some(RelType::Aggregate(aggregate)) = pivot.plan.to_proto().rel_type else {
+            panic!("expected Aggregate");
+        };
+        let literals = aggregate.pivot.unwrap().values;
+        assert_eq!(literals.len(), 2);
+        for literal in literals {
+            assert!(matches!(
+                literal.literal_type,
+                Some(LiteralType::Decimal(ref decimal))
+                    if decimal.precision == Some(10) && decimal.scale == Some(0)
+            ));
+        }
+    }
+
+    #[test]
     fn a_null_or_a_nested_pivot_value_is_not_expected_type() {
         use crate::row::Value;
         let frame = session().range(1).unwrap();
@@ -1268,6 +1305,19 @@ mod tests {
             (Value::Null, "NoneType"),
             (Value::List(vec![]), "list"),
             (Value::Map(vec![]), "dict"),
+            (
+                Value::Struct(
+                    crate::row::Row::new(vec!["n".into()], vec![Value::Integer(1)]).into(),
+                ),
+                "Row",
+            ),
+            (
+                Value::Variant {
+                    value: vec![0x0c, 0x01],
+                    metadata: vec![0x01, 0x00, 0x00],
+                },
+                "VariantVal",
+            ),
         ] {
             let err = frame
                 .group_by(vec![] as Vec<Column>)

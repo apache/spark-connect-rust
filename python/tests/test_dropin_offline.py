@@ -3509,6 +3509,42 @@ def test_na_and_stat_functions_check_their_arguments_as_pyspark():
         assert error.value.getMessageParameters() == parameters
 
 
+def test_dropna_thresh_that_the_proto_refuses_is_refused_as_pyspark():
+    # As PySpark sends `thresh` as a proto int, after it checks `how` and `subset`: a bool, which
+    # is an int, is a TypeError, and an int out of the range of an int32 a ValueError.
+    from pyspark.errors import PySparkTypeError
+    from pyspark.sql import DataFrame
+
+    df = _offline_session().range(1)
+    cases = (
+        (lambda: df.dropna(thresh=True), TypeError,
+         "Cannot set spark.connect.NADrop.min_non_nulls to True: True has type <class 'bool'>, "
+         "but expected one of: (int)."),
+        (lambda: df.na.drop(thresh=False), TypeError,
+         "Cannot set spark.connect.NADrop.min_non_nulls to False: False has type <class 'bool'>, "
+         "but expected one of: (int)."),
+        (lambda: df.dropna(thresh=True, subset=["id"]), TypeError,
+         "Cannot set spark.connect.NADrop.min_non_nulls to True: True has type <class 'bool'>, "
+         "but expected one of: (int)."),
+        (lambda: df.dropna(thresh=2**40), ValueError, "Value out of range: 1099511627776"),
+        (lambda: df.na.drop(thresh=-(2**31) - 1), ValueError, "Value out of range: -2147483649"),
+        (lambda: df.dropna(how="all", thresh=2**40), ValueError,
+         "Value out of range: 1099511627776"),
+    )
+    for call, error_type, message in cases:
+        with pytest.raises(error_type) as error:
+            call()
+        assert type(error.value) is error_type
+        assert str(error.value) == message
+    # The `subset` is checked before the `thresh` is sent.
+    with pytest.raises(PySparkTypeError) as error:
+        df.dropna(thresh=True, subset=1)
+    assert error.value.getCondition() == "NOT_EXPECTED_TYPE"
+    # The bounds of an int32 are those of the proto.
+    assert isinstance(df.dropna(thresh=2**31 - 1), DataFrame)
+    assert isinstance(df.na.drop(thresh=-(2**31)), DataFrame)
+
+
 def test_avro_protobuf_partitioning_submodules():
     # The official import paths resolve (the implementations live in
     # pyspark.sql.functions and are re-exported here).
