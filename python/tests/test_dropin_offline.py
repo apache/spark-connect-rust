@@ -7,6 +7,7 @@ that require a live server live in test_dropin_e2e.py and are gated on SPARK_REM
 """
 
 import array
+import io
 import contextlib
 import datetime
 import os
@@ -15170,7 +15171,10 @@ def _repr_serve(connection):
         def config(self, request, context):
             # ConfigRequest.session_id=1, operation=3, Operation.get=2, Get.keys=1;
             # ConfigResponse.session_id=1, pairs=2, KeyValue.key=1, value=2.
+            request_bytes = request
             request = parse_message(request)
+            if b"spark.connect.session.planCompression.threshold" in request_bytes:
+                return _repr_message(1, request[1][0])
             keys = [key.decode() for key in
                     parse_message(parse_message(request[3][0])[2][0]).get(1, [])]
             self.config_keys = self.config_keys + [keys]
@@ -18203,3 +18207,126 @@ def test_functions_send_their_optional_arguments_as_pyspark(column, expected):
     from pyspark.sql import functions as F
 
     assert repr(column(F)) == f"Column<'{expected}'>"
+
+
+# --------------------------------------------------------------------------- plan compression
+
+PLAN_COMPRESSION_THRESHOLD = "spark.connect.session.planCompression.threshold"
+PLAN_COMPRESSION_ALGORITHM = "spark.connect.session.planCompression.defaultAlgorithm"
+
+
+def _plan_confs(threshold):
+    return {PLAN_COMPRESSION_THRESHOLD: threshold, PLAN_COMPRESSION_ALGORITHM: "ZSTD"}
+
+
+def _sent_plan(requests):
+    # ExecutePlanRequest.plan=3; Plan.root=1, or Plan.compressed_operation=3 whose data=1,
+    # op_type=2 (OP_TYPE_RELATION=1) and compression_codec=3 (COMPRESSION_CODEC_ZSTD=1).
+    return parse_message(parse_message(requests[-1])[3][0])
+
+
+def _collect_in_new_session(service, confs, make_df):
+    # The plan compression of a session is read once, so each threshold gets a session of its own.
+    from pyspark.sql import SparkSession
+
+    service.confs = confs
+    spark = SparkSession.builder.remote(service.remote).create()
+    try:
+        make_df(spark).collect()
+    finally:
+        spark.stop()
+    return _sent_plan(service.execute_requests)
+
+
+def _long_literal_frame(spark):
+    from pyspark.sql import functions as F
+
+    return spark.range(1).select(F.length(F.lit("x" * 4096)))
+
+
+def test_plans_over_the_server_threshold_are_sent_as_zstd_relations(mock_connect):
+    zstandard = pytest.importorskip("zstandard")
+
+    spark, service = mock_connect
+    service.confs = _plan_confs("1024")
+    _long_literal_frame(spark).collect()
+    plan = _sent_plan(service.execute_requests)
+    assert 1 not in plan
+    operation = parse_message(plan[3][0])
+    assert operation[2] == [1]
+    assert operation[3] == [1]
+    assert len(operation[1][0]) < 4096
+
+    # The same plan, sent uncompressed by a session whose threshold is above its size.
+    root = _collect_in_new_session(
+        service,
+        _plan_confs(str(1 << 30)),
+        _long_literal_frame,
+    )[1][0]
+    # The plan IDs of two DataFrames differ, so the relations are compared by their fields.
+    reader = zstandard.ZstdDecompressor().stream_reader(io.BytesIO(operation[1][0]))
+    relation = reader.read()
+    assert b"x" * 4096 in relation and len(relation) == len(root)
+    assert parse_message(relation).keys() == parse_message(root).keys()
+
+
+def test_plans_at_the_server_threshold_are_sent_as_they_are(mock_connect):
+    spark, service = mock_connect
+    size = len(_collect_in_new_session(
+        service, _plan_confs(str(1 << 30)), _long_literal_frame)[1][0])
+    at_threshold = _collect_in_new_session(
+        service, _plan_confs(str(size)), _long_literal_frame)
+    assert 3 not in at_threshold and len(at_threshold[1][0]) == size
+    over_threshold = _collect_in_new_session(
+        service, _plan_confs(str(size - 1)), _long_literal_frame)
+    assert 1 not in over_threshold and 3 in over_threshold
+
+
+def test_plan_compression_is_read_once_per_session(mock_connect):
+    spark, service = mock_connect
+    service.confs = _plan_confs("1024")
+    frame = _long_literal_frame(spark)
+    frame.collect()
+    frame.collect()
+    assert service.plan_compression_lookups == 1
+
+
+def test_plan_compression_is_disabled_for_a_session_whose_server_gives_no_threshold(mock_connect):
+    spark, service = mock_connect
+    plan = _collect_in_new_session(
+        service,
+        _plan_confs(None),
+        _long_literal_frame,
+    )
+    assert 3 not in plan and 1 in plan
+
+
+def test_a_cannot_parse_error_disables_the_plan_compression_of_the_session(mock_connect):
+    from pyspark.errors.exceptions import connect as C
+
+    spark, service = mock_connect
+    service.confs = _plan_confs("1024")
+    frame = _long_literal_frame(spark)
+    classes = ["org.apache.spark.sql.connect.common.InvalidPlanInput", "java.lang.Exception"]
+    service.execute_error = (
+        "[CONNECT_INVALID_PLAN.CANNOT_PARSE] The plan cannot be parsed.",
+        classes[0],
+        _error_info(classes, errorClass="CONNECT_INVALID_PLAN.CANNOT_PARSE"),
+    )
+    with pytest.raises(C.SparkConnectGrpcException):
+        frame.collect()
+    assert 3 in _sent_plan(service.execute_requests)
+
+    service.execute_error = None
+    frame.collect()
+    assert 3 not in _sent_plan(service.execute_requests)
+
+
+def test_schemas_of_plans_over_the_server_threshold_are_sent_compressed(mock_connect):
+    spark, service = mock_connect
+    service.confs = _plan_confs("1024")
+    _long_literal_frame(spark).schema
+    # AnalyzePlanRequest.schema=4, Schema.plan=1, compressed_operation=3 as above.
+    plan = parse_message(parse_message(service.analyze_requests[-1])[4][0])[1][0]
+    assert 1 not in parse_message(plan)
+    assert parse_message(parse_message(plan)[3][0])[3] == [1]

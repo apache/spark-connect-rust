@@ -101,6 +101,7 @@ dependencies = [
  "tonic-prost",
  "tracing",
  "uuid",
+ "zstd",
 ]
 
 [[package]]

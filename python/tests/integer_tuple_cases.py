@@ -90,8 +90,11 @@ class IntegerTupleTests(unittest.TestCase):
                    + _bytes(14, b""))
 
         def config(raw, context):
-            self.config_calls += 1
             request = _fields(raw)
+            if b"spark.connect.session.planCompression.threshold" in raw:
+                # The plan compression lookup, which is not counted: it has no value here.
+                return _bytes(1, request[1][0]) + _bytes(4, b"input-name-fixture")
+            self.config_calls += 1
             operation = _fields(request[3][0])
             if 2 in operation:  # ConfigRequest.Get.keys(1).
                 keys = _fields(operation[2][0])[1]
