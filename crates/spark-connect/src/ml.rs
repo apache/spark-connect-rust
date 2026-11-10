@@ -12,8 +12,10 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::dataframe::DataFrame;
+use crate::expression::LiteralExpression;
 use crate::plan::{LogicalPlan, RelationOwner};
 use crate::session::SparkSession;
+use crate::types::DataType;
 
 /// ML parameter handling: stores name -> literal value mappings.
 ///
@@ -48,6 +50,39 @@ impl Params {
             literal_type: Some(proto::expression::literal::LiteralType::Integer(value)),
             ..Default::default()
         };
+        self.params.insert(
+            name.to_string(),
+            proto::Expression {
+                expr_type: Some(proto::expression::ExprType::Literal(literal)),
+                ..Default::default()
+            },
+        );
+        self
+    }
+
+    /// Encode an ML parameter whose JVM type is `Int` from a 64-bit value: an `Integer` literal
+    /// when it fits 32 bits, as PySpark sends a Python int, else a `Long`.
+    fn set_param_int_narrow(self, name: &str, value: i64) -> Self {
+        match i32::try_from(value) {
+            Ok(value) => self.set_param_int32(name, value),
+            Err(_) => self.set_param_int(name, value),
+        }
+    }
+
+    /// Encode an ML parameter whose JVM type is `Array[String]` (such as `inputCols`), as PySpark
+    /// sends a list of strings: an array literal of `string` elements.
+    fn set_param_string_array(mut self, name: &str, values: &[String]) -> Self {
+        let elements = values
+            .iter()
+            .map(|v| LiteralExpression::String(v.clone()))
+            .collect();
+        let literal = LiteralExpression::Array {
+            element_type: Box::new(DataType::String {
+                collation: String::new(),
+            }),
+            elements,
+        }
+        .to_literal_proto();
         self.params.insert(
             name.to_string(),
             proto::Expression {
@@ -275,17 +310,20 @@ pub trait Transformer: Send + Sync {
     }
 
     /// Build the MlRelation for this transformation.
-    fn build_ml_relation(&self, input: &DataFrame) -> proto::MlRelation {
+    fn build_ml_relation(
+        &self,
+        input: &DataFrame,
+    ) -> spark_connect_core::error::Result<proto::MlRelation> {
         let mut transform = proto::ml_relation::Transform::default();
         transform.operator = Some(proto::ml_relation::transform::Operator::Transformer(
             self.operator().to_proto(),
         ));
-        transform.input = Some(Box::new(input.relation()));
+        transform.input = Some(Box::new(input.relation()?));
         transform.params = Some(self.params().to_proto());
 
         let mut ml_relation = proto::MlRelation::default();
         ml_relation.ml_type = Some(proto::ml_relation::MlType::Transform(Box::new(transform)));
-        ml_relation
+        Ok(ml_relation)
     }
 }
 
@@ -322,7 +360,7 @@ fn evaluate_via_command(
     params: &Params,
     df: &DataFrame,
 ) -> spark_connect_core::error::Result<f64> {
-    let dataset = df.relation();
+    let dataset = df.relation()?;
     let evaluate = proto::ml_command::Evaluate {
         evaluator: Some(operator.to_proto()),
         params: Some(params.to_proto()),
@@ -476,7 +514,10 @@ impl Transformer for StandardScalerModel {
         &mut self.params
     }
 
-    fn build_ml_relation(&self, input: &DataFrame) -> proto::MlRelation {
+    fn build_ml_relation(
+        &self,
+        input: &DataFrame,
+    ) -> spark_connect_core::error::Result<proto::MlRelation> {
         self.cached.build_ml_relation(input, &self.params)
     }
 
@@ -517,7 +558,7 @@ impl VectorAssembler {
         self.input_cols = cols.iter().map(|c| c.to_string()).collect();
         self.params = self
             .params
-            .set_param_string("inputCols", &format!("{:?}", self.input_cols));
+            .set_param_string_array("inputCols", &self.input_cols);
         self
     }
 
@@ -560,7 +601,7 @@ impl Transformer for VectorAssembler {
     }
 
     fn transform_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<DataFrame> {
-        let ml_relation = self.build_ml_relation(df);
+        let ml_relation = self.build_ml_relation(df)?;
         let mut relation = proto::Relation::default();
         relation.common = Some(proto::RelationCommon::default());
         relation.rel_type = Some(proto::relation::RelType::MlRelation(Box::new(ml_relation)));
@@ -689,7 +730,10 @@ impl Transformer for StringIndexerModel {
         &mut self.params
     }
 
-    fn build_ml_relation(&self, input: &DataFrame) -> proto::MlRelation {
+    fn build_ml_relation(
+        &self,
+        input: &DataFrame,
+    ) -> spark_connect_core::error::Result<proto::MlRelation> {
         self.cached.build_ml_relation(input, &self.params)
     }
 
@@ -820,7 +864,10 @@ impl Transformer for MaxAbsScalerModel {
         &mut self.params
     }
 
-    fn build_ml_relation(&self, input: &DataFrame) -> proto::MlRelation {
+    fn build_ml_relation(
+        &self,
+        input: &DataFrame,
+    ) -> spark_connect_core::error::Result<proto::MlRelation> {
         self.cached.build_ml_relation(input, &self.params)
     }
 
@@ -845,7 +892,7 @@ fn fit_via_command(
         command: Some(proto::ml_command::Command::Fit(proto::ml_command::Fit {
             estimator: Some(operator.to_proto()),
             params: Some(params.to_proto()),
-            dataset: Some(df.relation()),
+            dataset: Some(df.relation()?),
         })),
     };
     let responses = crate::dataframe::execute_command_collect(
@@ -918,19 +965,23 @@ impl CachedModel {
         }
     }
 
-    fn build_ml_relation(&self, df: &DataFrame, params: &Params) -> proto::MlRelation {
-        proto::MlRelation {
+    fn build_ml_relation(
+        &self,
+        df: &DataFrame,
+        params: &Params,
+    ) -> spark_connect_core::error::Result<proto::MlRelation> {
+        Ok(proto::MlRelation {
             ml_type: Some(proto::ml_relation::MlType::Transform(Box::new(
                 proto::ml_relation::Transform {
                     operator: Some(proto::ml_relation::transform::Operator::ObjRef(
                         self.0.model_ref.clone(),
                     )),
-                    input: Some(Box::new(df.relation())),
+                    input: Some(Box::new(df.relation()?)),
                     params: Some(params.to_proto()),
                 },
             ))),
             ..Default::default()
-        }
+        })
     }
 
     fn transform(
@@ -945,7 +996,7 @@ impl CachedModel {
         }
         let relation = proto::Relation {
             rel_type: Some(proto::relation::RelType::MlRelation(Box::new(
-                self.build_ml_relation(df, params),
+                self.build_ml_relation(df, params)?,
             ))),
             ..Default::default()
         };
@@ -1007,7 +1058,7 @@ impl LogisticRegression {
 
     pub fn set_max_iter(mut self, max_iter: i64) -> Self {
         self.max_iter = max_iter;
-        self.params = self.params.set_param_int("maxIter", max_iter);
+        self.params = self.params.set_param_int_narrow("maxIter", max_iter);
         self
     }
 
@@ -1110,7 +1161,10 @@ impl Transformer for LogisticRegressionModel {
         &mut self.params
     }
 
-    fn build_ml_relation(&self, input: &DataFrame) -> proto::MlRelation {
+    fn build_ml_relation(
+        &self,
+        input: &DataFrame,
+    ) -> spark_connect_core::error::Result<proto::MlRelation> {
         self.cached.build_ml_relation(input, &self.params)
     }
 
@@ -1173,7 +1227,7 @@ impl LinearSVC {
 
     /// Maximum number of optimizer iterations.
     pub fn set_max_iter(mut self, value: i64) -> Self {
-        self.params = self.params.set_param_int("maxIter", value);
+        self.params = self.params.set_param_int_narrow("maxIter", value);
         self
     }
 
@@ -1215,7 +1269,7 @@ impl LinearSVC {
 
     /// Tree aggregation depth.
     pub fn set_aggregation_depth(mut self, value: i64) -> Self {
-        self.params = self.params.set_param_int("aggregationDepth", value);
+        self.params = self.params.set_param_int_narrow("aggregationDepth", value);
         self
     }
 
@@ -1293,7 +1347,10 @@ impl Transformer for LinearSVCModel {
         &mut self.params
     }
 
-    fn build_ml_relation(&self, input: &DataFrame) -> proto::MlRelation {
+    fn build_ml_relation(
+        &self,
+        input: &DataFrame,
+    ) -> spark_connect_core::error::Result<proto::MlRelation> {
         self.cached.build_ml_relation(input, &self.params)
     }
 
@@ -1487,7 +1544,10 @@ impl Transformer for LinearRegressionModel {
         &mut self.params
     }
 
-    fn build_ml_relation(&self, input: &DataFrame) -> proto::MlRelation {
+    fn build_ml_relation(
+        &self,
+        input: &DataFrame,
+    ) -> spark_connect_core::error::Result<proto::MlRelation> {
         self.cached.build_ml_relation(input, &self.params)
     }
 
@@ -1497,6 +1557,190 @@ impl Transformer for LinearRegressionModel {
 }
 
 impl Model for LinearRegressionModel {
+    fn clone_box(&self) -> Box<dyn Model> {
+        Box::new(self.clone())
+    }
+}
+
+/// K-means clustering using Spark's JVM implementation and ML vector features.
+///
+/// Supports Euclidean and cosine distance. Unset parameters use Spark's defaults.
+/// Set a seed explicitly for reproducible initialization.
+#[derive(Debug, Clone)]
+pub struct KMeans {
+    operator: MlOperator,
+    params: Params,
+}
+
+impl KMeans {
+    pub fn new() -> Self {
+        Self {
+            operator: MlOperator::new(
+                "org.apache.spark.ml.clustering.KMeans",
+                OperatorType::Estimator,
+            ),
+            params: Params::new(),
+        }
+    }
+
+    /// Feature vector column.
+    pub fn set_feature_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("featuresCol", value);
+        self
+    }
+
+    /// Cluster assignment output column.
+    pub fn set_prediction_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("predictionCol", value);
+        self
+    }
+
+    /// Number of clusters; must be greater than 1.
+    pub fn set_k(mut self, value: i32) -> Self {
+        self.params = self.params.set_param_int32("k", value);
+        self
+    }
+
+    /// Initialization mode: random or k-means||.
+    pub fn set_init_mode(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("initMode", value);
+        self
+    }
+
+    /// Number of steps in k-means|| initialization.
+    pub fn set_init_steps(mut self, value: i32) -> Self {
+        self.params = self.params.set_param_int32("initSteps", value);
+        self
+    }
+
+    /// Convergence tolerance.
+    pub fn set_tol(mut self, value: f64) -> Self {
+        self.params = self.params.set_param_double("tol", value);
+        self
+    }
+
+    /// Maximum number of clustering iterations.
+    pub fn set_max_iter(mut self, value: i32) -> Self {
+        self.params = self.params.set_param_int32("maxIter", value);
+        self
+    }
+
+    /// Random seed for initialization.
+    pub fn set_seed(mut self, value: i64) -> Self {
+        // PySpark uses the narrowest integer literal that holds the seed.
+        self.params = match i32::try_from(value) {
+            Ok(value) => self.params.set_param_int32("seed", value),
+            Err(_) => self.params.set_param_int("seed", value),
+        };
+        self
+    }
+
+    /// Distance measure: euclidean or cosine.
+    pub fn set_distance_measure(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("distanceMeasure", value);
+        self
+    }
+
+    /// Optional instance weight column.
+    pub fn set_weight_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("weightCol", value);
+        self
+    }
+
+    /// Solver: auto, row or block.
+    pub fn set_solver(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("solver", value);
+        self
+    }
+
+    /// Maximum size in MB of stacked input blocks.
+    pub fn set_max_block_size_in_mb(mut self, value: f64) -> Self {
+        self.params = self.params.set_param_double("maxBlockSizeInMB", value);
+        self
+    }
+
+    fn model_from_info(
+        &self,
+        info: proto::ml_command_result::MlOperatorInfo,
+        session: &SparkSession,
+    ) -> spark_connect_core::error::Result<KMeansModel> {
+        let cached = CachedModel::from_info(&info, session, "KMeans")?;
+        Ok(KMeansModel {
+            operator: MlOperator::with_uid(
+                "org.apache.spark.ml.clustering.KMeansModel",
+                info.uid.as_deref().unwrap_or(&self.operator.uid),
+                OperatorType::Model,
+            ),
+            params: self.params.clone(),
+            cached,
+        })
+    }
+}
+
+impl Default for KMeans {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Estimator for KMeans {
+    fn operator(&self) -> &MlOperator {
+        &self.operator
+    }
+    fn operator_mut(&mut self) -> &mut MlOperator {
+        &mut self.operator
+    }
+    fn params(&self) -> &Params {
+        &self.params
+    }
+    fn params_mut(&mut self) -> &mut Params {
+        &mut self.params
+    }
+
+    fn fit_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<Box<dyn Model>> {
+        let info = fit_via_command(&self.operator, &self.params, df)?;
+        Ok(Box::new(self.model_from_info(info, &df.session)?))
+    }
+}
+
+/// A K-means model fitted by Spark Connect.
+///
+/// Obtain it through [`Estimator::fit`]. The model, its clones and transformed
+/// DataFrames retain the cached server model until the last owner is dropped.
+#[derive(Debug, Clone)]
+pub struct KMeansModel {
+    operator: MlOperator,
+    params: Params,
+    cached: CachedModel,
+}
+
+impl Transformer for KMeansModel {
+    fn operator(&self) -> &MlOperator {
+        &self.operator
+    }
+    fn operator_mut(&mut self) -> &mut MlOperator {
+        &mut self.operator
+    }
+    fn params(&self) -> &Params {
+        &self.params
+    }
+    fn params_mut(&mut self) -> &mut Params {
+        &mut self.params
+    }
+
+    fn build_ml_relation(
+        &self,
+        input: &DataFrame,
+    ) -> spark_connect_core::error::Result<proto::MlRelation> {
+        self.cached.build_ml_relation(input, &self.params)
+    }
+
+    fn transform_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<DataFrame> {
+        self.cached.transform(df, &self.params)
+    }
+}
+
+impl Model for KMeansModel {
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }
@@ -1583,7 +1827,7 @@ pub struct BinaryClassificationEvaluator {
     operator: MlOperator,
     params: Params,
     label_col: String,
-    score_col: String,
+    raw_prediction_col: String,
     metric_name: String,
 }
 
@@ -1596,7 +1840,7 @@ impl BinaryClassificationEvaluator {
             ),
             params: Params::new(),
             label_col: "label".to_string(),
-            score_col: "prediction".to_string(),
+            raw_prediction_col: "rawPrediction".to_string(),
             metric_name: "areaUnderROC".to_string(),
         }
     }
@@ -1607,9 +1851,10 @@ impl BinaryClassificationEvaluator {
         self
     }
 
-    pub fn set_score_col(mut self, col: &str) -> Self {
-        self.score_col = col.to_string();
-        self.params = self.params.set_param_string("scoreCol", col);
+    /// Set the column of the scores (a vector of raw predictions), the JVM `rawPredictionCol`.
+    pub fn set_raw_prediction_col(mut self, col: &str) -> Self {
+        self.raw_prediction_col = col.to_string();
+        self.params = self.params.set_param_string("rawPredictionCol", col);
         self
     }
 
@@ -1623,8 +1868,8 @@ impl BinaryClassificationEvaluator {
         &self.label_col
     }
 
-    pub fn score_col(&self) -> &str {
-        &self.score_col
+    pub fn raw_prediction_col(&self) -> &str {
+        &self.raw_prediction_col
     }
 
     pub fn metric_name(&self) -> &str {
@@ -1671,9 +1916,7 @@ impl Pipeline {
 
     pub fn set_stages(mut self, stage_names: Vec<&str>) -> Self {
         self.stages = stage_names.iter().map(|s| s.to_string()).collect();
-        self.params = self
-            .params
-            .set_param_string("stages", &format!("{:?}", self.stages));
+        self.params = self.params.set_param_string_array("stages", &self.stages);
         self
     }
 
@@ -1745,7 +1988,7 @@ impl Transformer for PipelineModel {
     }
 
     fn transform_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<DataFrame> {
-        let ml_relation = self.build_ml_relation(df);
+        let ml_relation = self.build_ml_relation(df)?;
         let mut relation = proto::Relation::default();
         relation.common = Some(proto::RelationCommon::default());
         relation.rel_type = Some(proto::relation::RelType::MlRelation(Box::new(ml_relation)));
@@ -1862,12 +2105,12 @@ impl CrossValidator {
     }
     pub fn set_num_folds(mut self, num_folds: i32) -> Self {
         self.num_folds = num_folds;
-        self.params = self.params.set_param_int("numFolds", num_folds as i64);
+        self.params = self.params.set_param_int32("numFolds", num_folds);
         self
     }
     pub fn set_parallelism(mut self, parallelism: i32) -> Self {
         self.parallelism = parallelism;
-        self.params = self.params.set_param_int("parallelism", parallelism as i64);
+        self.params = self.params.set_param_int32("parallelism", parallelism);
         self
     }
     pub fn set_seed(mut self, seed: i64) -> Self {
@@ -1936,7 +2179,7 @@ impl Transformer for CrossValidatorModel {
         &mut self.params
     }
     fn transform_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<DataFrame> {
-        let ml_relation = self.build_ml_relation(df);
+        let ml_relation = self.build_ml_relation(df)?;
         let mut relation = proto::Relation::default();
         relation.common = Some(proto::RelationCommon::default());
         relation.rel_type = Some(proto::relation::RelType::MlRelation(Box::new(ml_relation)));
@@ -2108,11 +2351,11 @@ mod tests {
     fn test_binary_classification_evaluator_creation() {
         let eval = BinaryClassificationEvaluator::new()
             .set_label_col("label")
-            .set_score_col("score")
+            .set_raw_prediction_col("score")
             .set_metric_name("areaUnderPR");
 
         assert_eq!(eval.label_col(), "label");
-        assert_eq!(eval.score_col(), "score");
+        assert_eq!(eval.raw_prediction_col(), "score");
         assert_eq!(eval.metric_name(), "areaUnderPR");
     }
 
@@ -2243,6 +2486,48 @@ mod tests {
             }
             other => panic!("expected the model reference, found {other:?}"),
         }
+    }
+
+    #[test]
+    fn list_and_int_params_use_the_jvm_literal_types() {
+        use proto::expression::literal::LiteralType as L;
+        // An Array[String] param (inputCols, Pipeline stages) is an array literal of string
+        // elements, as PySpark sends a list; the server rejects a string ("not an array").
+        let va = VectorAssembler::new().set_input_cols(vec!["a", "b"]);
+        let pipeline = Pipeline::new().set_stages(vec!["scaler", "lr"]);
+        for (name, params, expected) in [
+            ("inputCols", va.params(), vec!["a", "b"]),
+            ("stages", pipeline.params(), vec!["scaler", "lr"]),
+        ] {
+            let Some(L::Array(array)) = params.to_proto().params[name].literal_type.clone() else {
+                panic!("{name} is not an array literal");
+            };
+            #[allow(deprecated)]
+            let element_type = array.element_type.as_ref().and_then(|t| t.kind.clone());
+            assert!(
+                matches!(element_type, Some(proto::data_type::Kind::String(_))),
+                "{name} element type"
+            );
+            let elements: Vec<_> = array
+                .elements
+                .iter()
+                .map(|e| e.literal_type.clone())
+                .collect();
+            let expected: Vec<_> = expected
+                .iter()
+                .map(|s| Some(L::String(s.to_string())))
+                .collect();
+            assert_eq!(elements, expected, "{name}");
+        }
+
+        // Int params are Integer literals when the value fits 32 bits, as PySpark sends a Python
+        // int; the JVM param is an IntParam (maxIter, numFolds).
+        let lr = LogisticRegression::new().set_max_iter(5);
+        let params = lr.params().to_proto().params;
+        assert_eq!(params["maxIter"].literal_type, Some(L::Integer(5)));
+        let cv = CrossValidator::new().set_num_folds(3);
+        let params = cv.params().to_proto().params;
+        assert_eq!(params["numFolds"].literal_type, Some(L::Integer(3)));
     }
 
     #[test]
@@ -2430,7 +2715,7 @@ mod tests {
         assert_eq!(model.operator.op_type, OperatorType::Model);
         let data = session.range(3).unwrap();
         let transformed = model.transform(&data).unwrap();
-        let relation = transformed.relation();
+        let relation = transformed.relation().unwrap();
         let Some(proto::relation::RelType::MlRelation(ml)) = relation.rel_type else {
             panic!("expected an ML relation");
         };
@@ -2450,7 +2735,7 @@ mod tests {
             .unwrap()
             .params
             .contains_key("predictionCol"));
-        assert_eq!(*transform.input.unwrap(), data.relation());
+        assert_eq!(*transform.input.unwrap(), data.relation().unwrap());
         let _ = model.clone_box();
     }
 
@@ -2506,14 +2791,14 @@ mod tests {
             ("labelCol", L::String("target".into())),
             ("predictionCol", L::String("pred".into())),
             ("rawPredictionCol", L::String("margin".into())),
-            ("maxIter", L::Long(50)),
+            ("maxIter", L::Integer(50)),
             ("regParam", L::Double(0.1)),
             ("tol", L::Double(1e-5)),
             ("fitIntercept", L::Boolean(false)),
             ("standardization", L::Boolean(false)),
             ("threshold", L::Double(0.5)),
             ("weightCol", L::String("weight".into())),
-            ("aggregationDepth", L::Long(3)),
+            ("aggregationDepth", L::Integer(3)),
             ("maxBlockSizeInMB", L::Double(1.0)),
         ];
         assert_eq!(params.len(), expected.len());
@@ -2545,7 +2830,7 @@ mod tests {
         assert_eq!(model.operator().op_type, OperatorType::Model);
         let df = session.range(2).unwrap();
         let proto::ml_relation::MlType::Transform(transform) =
-            model.build_ml_relation(&df).ml_type.unwrap()
+            model.build_ml_relation(&df).unwrap().ml_type.unwrap()
         else {
             panic!("expected transform");
         };
@@ -2557,7 +2842,7 @@ mod tests {
                 },
             ))
         );
-        assert_eq!(*transform.input.unwrap(), df.relation());
+        assert_eq!(*transform.input.unwrap(), df.relation().unwrap());
         assert!(model
             .transform(&session.new_session().range(2).unwrap())
             .is_err());
@@ -2616,7 +2901,7 @@ mod tests {
         assert_eq!(model.operator().op_type, OperatorType::Model);
         let df = session.range(2).unwrap();
         let proto::ml_relation::MlType::Transform(t) =
-            model.build_ml_relation(&df).ml_type.unwrap()
+            model.build_ml_relation(&df).unwrap().ml_type.unwrap()
         else {
             panic!("transform")
         };
@@ -2628,8 +2913,78 @@ mod tests {
                 }
             ))
         );
-        assert_eq!(*t.input.unwrap(), df.relation());
+        assert_eq!(*t.input.unwrap(), df.relation().unwrap());
         assert!(t.params.unwrap().params.contains_key("predictionCol"));
+        assert!(model
+            .transform(&session.new_session().range(2).unwrap())
+            .is_err());
+        assert!(model.clone_box().transform(&df).is_ok());
+    }
+
+    #[test]
+    fn kmeans_validates_fitted_references_and_model_metadata() {
+        let session = offline_session();
+        let estimator = KMeans::default().set_prediction_col("cluster");
+        assert_eq!(
+            estimator.operator().name,
+            "org.apache.spark.ml.clustering.KMeans"
+        );
+        assert_eq!(estimator.operator().op_type, OperatorType::Estimator);
+        for kind in [
+            None,
+            Some(proto::ml_command_result::ml_operator_info::Type::Name(
+                "model".into(),
+            )),
+            Some(proto::ml_command_result::ml_operator_info::Type::ObjRef(
+                proto::ObjectRef::default(),
+            )),
+        ] {
+            assert!(estimator
+                .model_from_info(
+                    proto::ml_command_result::MlOperatorInfo {
+                        r#type: kind,
+                        ..Default::default()
+                    },
+                    &session
+                )
+                .is_err());
+        }
+        let info = |uid| proto::ml_command_result::MlOperatorInfo {
+            r#type: Some(proto::ml_command_result::ml_operator_info::Type::ObjRef(
+                proto::ObjectRef {
+                    id: "trained-kmeans".into(),
+                },
+            )),
+            uid,
+            ..Default::default()
+        };
+        let mut model = estimator
+            .model_from_info(info(Some("returned-uid".into())), &session)
+            .unwrap();
+        assert_eq!(model.operator().uid, "returned-uid");
+        assert_eq!(
+            model.operator().name,
+            "org.apache.spark.ml.clustering.KMeansModel"
+        );
+        assert_eq!(model.operator().op_type, OperatorType::Model);
+        let fallback = estimator.model_from_info(info(None), &session).unwrap();
+        assert_eq!(fallback.operator().uid, estimator.operator().uid);
+        let df = session.range(2).unwrap();
+        let proto::ml_relation::MlType::Transform(t) =
+            model.build_ml_relation(&df).unwrap().ml_type.unwrap()
+        else {
+            panic!("transform")
+        };
+        assert_eq!(
+            t.operator,
+            Some(proto::ml_relation::transform::Operator::ObjRef(
+                proto::ObjectRef {
+                    id: "trained-kmeans".into()
+                }
+            ))
+        );
+        assert_eq!(*t.input.unwrap(), df.relation().unwrap());
+        assert_eq!(t.params.unwrap(), estimator.params().to_proto());
         assert!(model
             .transform(&session.new_session().range(2).unwrap())
             .is_err());

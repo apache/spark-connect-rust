@@ -186,6 +186,34 @@ def test_ml_feature_transformers_as_pyspark(session):
     assert list(scaler.originalMin) == [0.0, 1.0] and list(scaler.originalMax) == [7.0, 1.0]
 
 
+def test_ml_connect_vector_assembler_and_evaluator_as_pyspark(session):
+    # pyspark.ml.connect's VectorAssembler sends inputCols as a list of strings, and the native
+    # BinaryClassificationEvaluator scores its rawPredictionCol (default rawPrediction), with
+    # the values of PySpark 4.3.0.
+    from pyspark.ml.connect.evaluation import BinaryClassificationEvaluator
+    from pyspark.ml.connect.feature import VectorAssembler
+    from pyspark.ml.functions import array_to_vector
+    from pyspark.sql import functions as F
+
+    df = session.createDataFrame([(1.0, 2.0, 3), (4.0, 5.0, 6)], "x double, y double, z int")
+    assembled = VectorAssembler(inputCols=["x", "y"], outputCol="v").transform(df)
+    assert [r.v.toArray().tolist() for r in assembled.orderBy("x").collect()] == [
+        [1.0, 2.0],
+        [4.0, 5.0],
+    ]
+
+    scores = [(0.0, 0.1), (0.0, 0.4), (1.0, 0.35), (1.0, 0.8)]
+    raw = session.createDataFrame(scores, "label double, score double").select(
+        "label",
+        array_to_vector(F.array(1.0 - F.col("score"), F.col("score"))).alias("rawPrediction"),
+    )
+    assert BinaryClassificationEvaluator().evaluate(raw) == 0.75
+    evaluator = BinaryClassificationEvaluator(rawPredictionCol="rawPrediction", labelCol="label")
+    assert evaluator.evaluate(raw) == 0.75
+    pr = BinaryClassificationEvaluator(metricName="areaUnderPR", rawPredictionCol="rawPrediction")
+    assert pr.evaluate(raw) == pytest.approx(0.7916666666666666)
+
+
 def test_ml_statistics_as_pyspark(session):
     from pyspark.ml.stat import ChiSquareTest, Correlation, Summarizer
 

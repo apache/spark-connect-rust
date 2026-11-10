@@ -72,7 +72,7 @@ fn sql_relation(query: &str) -> proto::Relation {
 #[test]
 fn raw_relations_are_sent_as_they_are_with_a_plan_id_of_the_session() {
     let df = DataFrame::from_relation(offline(), sql_relation("SELECT 1 AS a"), None).unwrap();
-    let relation = df.to_relation();
+    let relation = df.to_relation().unwrap();
     let Some(proto::relation::RelType::Sql(sql)) = &relation.rel_type else {
         panic!("expected the SQL relation, got {relation:?}");
     };
@@ -80,16 +80,17 @@ fn raw_relations_are_sent_as_they_are_with_a_plan_id_of_the_session() {
     let plan_id = relation.common.as_ref().and_then(|common| common.plan_id);
     assert!(plan_id.is_some());
     // The plan ID is that of the node, as the session gives it, the same each time.
-    assert_eq!(df.to_relation(), relation);
-    assert_eq!(df.clone().to_relation(), relation);
+    assert_eq!(df.to_relation().unwrap(), relation);
+    assert_eq!(df.clone().to_relation().unwrap(), relation);
 }
 
 #[test]
 fn transformations_of_raw_relations_take_them_as_input() {
     let df = DataFrame::from_relation(offline(), sql_relation("SELECT 1 AS a"), None).unwrap();
-    let relation = df.to_relation();
+    let relation = df.to_relation().unwrap();
     let filtered = df.filter(col("a").gt(lit(0)));
-    let Some(proto::relation::RelType::Filter(filter)) = filtered.to_relation().rel_type else {
+    let Some(proto::relation::RelType::Filter(filter)) = filtered.to_relation().unwrap().rel_type
+    else {
         panic!("expected a filter");
     };
     assert_eq!(filter.input.as_deref(), Some(&relation));
@@ -104,7 +105,7 @@ fn raw_relations_keep_their_owners_alive_while_a_dataframe_uses_them() {
     let derived = df.select([col("a")]);
     drop(df);
     assert!(alive.upgrade().is_some());
-    assert!(format!("{:?}", derived.to_relation()).contains("SELECT 1 AS a"));
+    assert!(format!("{:?}", derived.to_relation().unwrap()).contains("SELECT 1 AS a"));
     drop(derived);
     assert!(alive.upgrade().is_none());
 }
@@ -116,19 +117,20 @@ fn sent_relations_keep_the_plan_ids_of_the_dataframes_they_were_of() {
     // was of refer to it.
     let session = offline();
     let df = session.range(3).unwrap().select([col("id").alias("x")]);
-    let relation = df.to_relation();
+    let relation = df.to_relation().unwrap();
     let plan_id = relation.common.as_ref().and_then(|common| common.plan_id);
     let copy = DataFrame::from_sent_relation(session.clone(), relation.clone());
-    assert_eq!(copy.to_relation(), relation);
-    assert_eq!(copy.clone().to_relation(), relation);
+    assert_eq!(copy.to_relation().unwrap(), relation);
+    assert_eq!(copy.clone().to_relation().unwrap(), relation);
     let filtered = copy.filter(df.col("x").gt(lit(0)));
-    let Some(proto::relation::RelType::Filter(filter)) = filtered.to_relation().rel_type else {
+    let Some(proto::relation::RelType::Filter(filter)) = filtered.to_relation().unwrap().rel_type
+    else {
         panic!("expected a filter");
     };
     assert_eq!(filter.input.as_deref(), Some(&relation));
     assert!(format!("{:?}", filter.condition).contains(&format!("plan_id: {:?}", plan_id)));
     // The other plans of the session take other plan IDs.
-    let other = session.range(1).unwrap().to_relation();
+    let other = session.range(1).unwrap().to_relation().unwrap();
     assert_ne!(other.common.and_then(|common| common.plan_id), plan_id);
 }
 
@@ -159,21 +161,28 @@ fn placeholders_of_a_dataframe_are_replaced_by_its_relation() {
             None,
         )
         .unwrap();
-        let Some(proto::relation::RelType::WithRelations(with)) = input.to_relation().rel_type
+        let Some(proto::relation::RelType::WithRelations(with)) =
+            input.to_relation().unwrap().rel_type
         else {
             panic!("expected WithRelations");
         };
-        assert_eq!(with.root.as_deref(), Some(&df.to_relation()));
-        assert_eq!(with.references, vec![df.to_relation()]);
+        assert_eq!(with.root.as_deref(), Some(&df.to_relation().unwrap()));
+        assert_eq!(with.references, vec![df.to_relation().unwrap()]);
         // The same placeholder gives the same relation.
         assert_eq!(df.placeholder_relation(), placeholder);
         // The DataFrame of the placeholder is a node of its own, whose relation is that of `df`.
         let single = DataFrame::from_relation(session.clone(), placeholder.clone(), None).unwrap();
-        assert_eq!(single.to_relation().rel_type, df.to_relation().rel_type);
+        assert_eq!(
+            single.to_relation().unwrap().rel_type,
+            df.to_relation().unwrap().rel_type
+        );
         // A placeholder of a DataFrame of another session is the relation of that DataFrame too.
         let other = offline();
         let copy = DataFrame::from_relation(other, placeholder, None).unwrap();
-        assert_eq!(copy.to_relation().rel_type, df.to_relation().rel_type);
+        assert_eq!(
+            copy.to_relation().unwrap().rel_type,
+            df.to_relation().unwrap().rel_type
+        );
     });
 }
 

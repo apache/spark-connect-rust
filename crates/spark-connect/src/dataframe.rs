@@ -10,7 +10,7 @@ use spark_connect_core::runtime::{block_on, get_runtime};
 use spark_connect_proto as proto;
 
 use crate::column::Column;
-use crate::expression::{Expression, ExpressionNode};
+use crate::expression::{Expression, ExpressionNode, SortOrder};
 use crate::plan::{AggregateGroupType, JoinType, LogicalPlan, RelationOwner, SetOpType};
 use crate::progress::ExecutionStream;
 use crate::row::{Row, StructValue, Value};
@@ -931,6 +931,7 @@ impl DataFrame {
         let mut rows = vec![];
         let mut schema = None;
         let mut info = ExecutionInfo::default();
+        let mut invalid_utf8: Option<SparkError> = None;
         loop {
             let resp = block_on(stream.message())?;
             let Some(mut resp) = resp else {
@@ -943,9 +944,24 @@ impl DataFrame {
             if let Some(proto::execute_plan_response::ResponseType::ArrowBatch(batch)) =
                 resp.response_type
             {
-                let batch_rows = decode_arrow_batch_of(&batch, schema.as_ref())?;
-                rows.extend(batch_rows);
+                match decode_arrow_batch_of(&batch, schema.as_ref()) {
+                    Ok(batch_rows) => rows.extend(batch_rows),
+                    // PySpark converts the result column by column, so the error is that of the
+                    // first column with an invalid string: the rest of the stream is read for it.
+                    Err(error) if error.utf8_column().is_some() => {
+                        let first = invalid_utf8
+                            .as_ref()
+                            .is_some_and(|first| first.utf8_column() <= error.utf8_column());
+                        if !first {
+                            invalid_utf8 = Some(error);
+                        }
+                    }
+                    Err(error) => return Err(error),
+                }
             }
+        }
+        if let Some(error) = invalid_utf8 {
+            return Err(error);
         }
         self.record_execution(info);
 
@@ -1158,7 +1174,7 @@ impl DataFrame {
     /// The relation of this DataFrame as it is sent, with the plan IDs of its session, for a
     /// plan built outside the core over it, such as of `pyspark.ml`. Not a stable API.
     #[doc(hidden)]
-    pub fn to_relation(&self) -> proto::Relation {
+    pub fn to_relation(&self) -> Result<proto::Relation> {
         build_input_relation(&self.plan, &self.session)
     }
 
@@ -1264,13 +1280,13 @@ impl DataFrame {
 
     /// This DataFrame's relation for a request. Its plan nodes keep the same plan IDs each
     /// time, as in PySpark, so the server can reuse the plans it already resolved.
-    pub(crate) fn relation(&self) -> proto::Relation {
+    pub(crate) fn relation(&self) -> Result<proto::Relation> {
         crate::plan::relation_with_ids(&self.plan, self.session.plan_ids())
     }
 
     /// Build an ExecutePlanRequest from the logical plan.
     fn build_execute_request(&self) -> Result<proto::ExecutePlanRequest> {
-        let relation = self.relation();
+        let relation = self.relation()?;
 
         let mut request = proto::ExecutePlanRequest::default();
         request.session_id = self.session.client().session_id().to_string();
@@ -1286,7 +1302,7 @@ impl DataFrame {
 
     /// Build an AnalyzePlanRequest from the logical plan.
     fn build_analyze_request(&self) -> Result<proto::AnalyzePlanRequest> {
-        let relation = self.relation();
+        let relation = self.relation()?;
 
         let mut plan = proto::Plan::default();
         plan.op_type = Some(proto::plan::OpType::Root(relation));
@@ -1380,7 +1396,7 @@ impl DataFrame {
     /// Mirrors `pyspark.sql.DataFrame.persist(storageLevel)`.
     pub fn persist(&self, storage_level: proto::StorageLevel) -> Result<DataFrame> {
         let persist = proto::analyze_plan_request::Persist {
-            relation: Some(self.relation()),
+            relation: Some(self.relation()?),
             storage_level: Some(storage_level),
         };
         let request = self.analyze_request(proto::analyze_plan_request::Analyze::Persist(persist));
@@ -1391,7 +1407,7 @@ impl DataFrame {
     /// Remove this DataFrame from cache. Mirrors `DataFrame.unpersist(blocking)`.
     pub fn unpersist(&self, blocking: bool) -> Result<DataFrame> {
         let unpersist = proto::analyze_plan_request::Unpersist {
-            relation: Some(self.relation()),
+            relation: Some(self.relation()?),
             blocking: Some(blocking),
         };
         let request =
@@ -1437,7 +1453,7 @@ impl DataFrame {
         storage_level: Option<proto::StorageLevel>,
     ) -> Result<DataFrame> {
         let mut cmd = proto::CheckpointCommand::default();
-        cmd.relation = Some(self.relation());
+        cmd.relation = Some(self.relation()?);
         cmd.local = local;
         cmd.eager = eager;
         cmd.storage_level = storage_level;
@@ -1493,7 +1509,7 @@ impl DataFrame {
     /// Build + execute a real `CreateDataFrameViewCommand` (was previously a
     /// silent no-op that passed the query relation through and never created a view).
     fn create_view(&self, name: &str, replace: bool, global: bool) -> Result<()> {
-        let input = self.relation();
+        let input = self.relation()?;
         let mut cmd = proto::CreateDataFrameViewCommand::default();
         cmd.input = Some(input);
         cmd.name = name.to_string();
@@ -1544,7 +1560,7 @@ impl DataFrame {
             }
         };
         let plan = proto::Plan {
-            op_type: Some(proto::plan::OpType::Root(self.relation())),
+            op_type: Some(proto::plan::OpType::Root(self.relation()?)),
         };
         let request = proto::AnalyzePlanRequest {
             session_id: self.session.client().session_id().to_string(),
@@ -1589,10 +1605,22 @@ impl DataFrame {
         num_partitions: Option<i32>,
         columns: Vec<Expression>,
     ) -> DataFrame {
+        // The server range-partitions only on sort orders, so a plain column is sorted
+        // ascending, nulls first, as PySpark's `repartitionByRange` does.
+        let partition_exprs = columns
+            .into_iter()
+            .map(|expr| {
+                if matches!(expr.node(), ExpressionNode::SortOrder(_)) {
+                    expr
+                } else {
+                    ExpressionNode::SortOrder(Box::new(SortOrder::asc_nulls_first(expr))).into()
+                }
+            })
+            .collect();
         let plan = LogicalPlan::RepartitionByRange {
             input: Arc::clone(&self.plan),
             num_partitions,
-            partition_exprs: columns,
+            partition_exprs,
         };
         self.with_cached_schema(plan)
     }
@@ -1642,7 +1670,7 @@ impl DataFrame {
 
     /// Get the input files for this DataFrame. Mirrors `pyspark.sql.DataFrame.inputFiles`.
     pub fn input_files(&self) -> Result<Vec<String>> {
-        let relation = self.relation();
+        let relation = self.relation()?;
         let mut plan = proto::Plan::default();
         plan.op_type = Some(proto::plan::OpType::Root(relation));
         let mut inp = proto::analyze_plan_request::InputFiles::default();
@@ -1792,14 +1820,24 @@ impl DataFrame {
         DataFrame::new(self.session.clone(), plan)
     }
 
-    /// Drop NA values.
+    /// Drop NA values. Mirrors `DataFrame.dropna`: `how` is "any" (the default) or "all", else
+    /// a `VALUE_NOT_ALLOWED` error, as PySpark's; `thresh` overrides it.
     pub fn dropna(
         &self,
         how: Option<&str>,
         thresh: Option<i32>,
         subset: Option<Vec<&str>>,
-    ) -> DataFrame {
-        let how_str = how.unwrap_or("any").to_string();
+    ) -> Result<DataFrame> {
+        let how_str = match how {
+            None | Some("any") => "any",
+            Some("all") => "all",
+            Some(_) => {
+                return Err(SparkError::value(
+                    "VALUE_NOT_ALLOWED",
+                    &[("arg_name", "how"), ("allowed_values", "['any', 'all']")],
+                ))
+            }
+        };
         let columns = subset
             .map(|v| v.iter().map(|s| s.to_string()).collect())
             .unwrap_or_default();
@@ -1807,11 +1845,11 @@ impl DataFrame {
         // and `thresh` in `NADrop::to_proto` (mirrors pyspark's translation).
         let plan = LogicalPlan::NADrop {
             input: Arc::clone(&self.plan),
-            how: how_str,
+            how: how_str.to_string(),
             min_non_null: thresh,
             columns,
         };
-        DataFrame::new(self.session.clone(), plan)
+        Ok(DataFrame::new(self.session.clone(), plan))
     }
 
     /// Replace values, each given as a string: a numeric-looking string is a double, otherwise
@@ -2050,7 +2088,7 @@ impl DataFrame {
     /// Get the storage level of this DataFrame. Mirrors `DataFrame.storageLevel`.
     pub fn storage_level(&self) -> Result<proto::StorageLevel> {
         let get = proto::analyze_plan_request::GetStorageLevel {
-            relation: Some(self.relation()),
+            relation: Some(self.relation()?),
         };
         let request =
             self.analyze_request(proto::analyze_plan_request::Analyze::GetStorageLevel(get));
@@ -2086,7 +2124,7 @@ impl DataFrame {
     /// Compute the server-side semantic hash of this DataFrame's logical plan,
     /// mirroring `DataFrame.semanticHash()` (an AnalyzePlan request).
     pub fn semantic_hash(&self) -> Result<i32> {
-        let relation = self.relation();
+        let relation = self.relation()?;
         let mut plan = proto::Plan::default();
         plan.op_type = Some(proto::plan::OpType::Root(relation));
         let mut request = proto::AnalyzePlanRequest::default();
@@ -2107,8 +2145,8 @@ impl DataFrame {
     /// Whether two DataFrames have the same semantics, mirroring
     /// `DataFrame.sameSemantics(other)` (a server-side AnalyzePlan comparison).
     pub fn same_semantics(&self, other: &DataFrame) -> Result<bool> {
-        let self_rel = self.relation();
-        let other_rel = other.relation();
+        let self_rel = self.relation()?;
+        let other_rel = other.relation()?;
         let mut target_plan = proto::Plan::default();
         target_plan.op_type = Some(proto::plan::OpType::Root(self_rel));
         let mut other_plan = proto::Plan::default();
@@ -2270,7 +2308,7 @@ impl DataFrame {
             analyze: Some(proto::analyze_plan_request::Analyze::IsStreaming(
                 proto::analyze_plan_request::IsStreaming {
                     plan: Some(proto::Plan {
-                        op_type: Some(proto::plan::OpType::Root(self.relation())),
+                        op_type: Some(proto::plan::OpType::Root(self.relation()?)),
                     }),
                 },
             )),
@@ -2482,7 +2520,7 @@ impl DataFrame {
 pub(crate) fn build_input_relation(
     plan: &Arc<LogicalPlan>,
     session: &SparkSession,
-) -> proto::Relation {
+) -> Result<proto::Relation> {
     crate::plan::relation_with_ids(plan, session.plan_ids())
 }
 
@@ -2641,7 +2679,7 @@ pub(crate) fn decode_arrow_batch_of(
     while let Some(record_batch) = reader
         .next()
         .transpose()
-        .map_err(|e| SparkError::connect_msg(format!("Failed to decode Arrow batch: {}", e)))?
+        .map_err(|e| decode_error(&batch.data, e))?
     {
         let schema = record_batch.schema();
         let num_rows = record_batch.num_rows();
@@ -2678,6 +2716,163 @@ pub(crate) fn decode_arrow_batch_of(
     }
 
     Ok(rows)
+}
+
+/// The error of an Arrow IPC stream `data` that arrow-rs fails with `error`. A string that is not
+/// valid UTF-8 is an error of its own, with its bytes, which the Python client raises as the
+/// reference client does.
+fn decode_error(data: &[u8], error: arrow::error::ArrowError) -> SparkError {
+    let message = error.to_string();
+    if message.contains("UTF8 sequence") || message.contains("utf-8 byte sequence") {
+        if let Some((column, value)) = first_invalid_utf8(data) {
+            return SparkError::invalid_utf8(column, &value);
+        }
+    }
+    SparkError::connect_msg(format!("Failed to decode Arrow batch: {}", error))
+}
+
+/// The first string of the Arrow IPC stream `data` that is not valid UTF-8, with its column and
+/// its bytes, in the order in which PySpark converts a result: column by column, then row by row.
+fn first_invalid_utf8(data: &[u8]) -> Option<(usize, Vec<u8>)> {
+    let batches = read_strings_as_binary(data)?;
+    let columns = batches.first()?.num_columns();
+    (0..columns).find_map(|column| {
+        batches.iter().find_map(|batch| {
+            (0..batch.num_rows()).find_map(|row| {
+                invalid_utf8_in(batch.column(column).as_ref(), row).map(|value| (column, value))
+            })
+        })
+    })
+}
+
+/// The record batches of the Arrow IPC stream `data`, with its string types read as binary types
+/// of the same layout. arrow-rs still checks the offsets and lengths of these batches, but not
+/// their UTF-8. The messages are split here because arrow-rs's stream reader cannot take a schema
+/// of its own. None for a stream with a message that is not a schema or a record batch, such as a
+/// dictionary, or one that does not read.
+fn read_strings_as_binary(data: &[u8]) -> Option<Vec<arrow::record_batch::RecordBatch>> {
+    use arrow::buffer::Buffer;
+    use arrow::ipc::convert::fb_to_schema;
+    use arrow::ipc::reader::read_record_batch;
+    use arrow::ipc::{root_as_message, MessageHeader};
+    use std::collections::HashMap;
+
+    fn take<'a>(rest: &mut &'a [u8], len: usize) -> Option<&'a [u8]> {
+        let (head, tail) = rest.split_at_checked(len)?;
+        *rest = tail;
+        Some(head)
+    }
+
+    let mut rest = data;
+    let mut schema = None;
+    let mut batches = vec![];
+    loop {
+        let mut prefix = take(&mut rest, 4)?;
+        if prefix == [0xff; 4] {
+            prefix = take(&mut rest, 4)?;
+        }
+        let meta_len = u32::from_le_bytes(prefix.try_into().ok()?) as usize;
+        if meta_len == 0 {
+            break;
+        }
+        let message = root_as_message(take(&mut rest, meta_len)?).ok()?;
+        let body = take(&mut rest, usize::try_from(message.bodyLength()).ok()?)?;
+        match message.header_type() {
+            MessageHeader::Schema => {
+                let fields = fb_to_schema(message.header_as_schema()?);
+                schema = Some(Arc::new(binary_schema(&fields)));
+            }
+            MessageHeader::RecordBatch => {
+                let batch = read_record_batch(
+                    &Buffer::from(body.to_vec()),
+                    message.header_as_record_batch()?,
+                    schema.clone()?,
+                    &HashMap::new(),
+                    None,
+                    &message.version(),
+                )
+                .ok()?;
+                batches.push(batch);
+            }
+            _ => return None,
+        }
+    }
+    Some(batches)
+}
+
+/// The schema `schema`, with each string type of it, at any depth, as the binary type of the same
+/// layout: Utf8 as Binary, LargeUtf8 as LargeBinary and Utf8View as BinaryView.
+fn binary_schema(schema: &arrow::datatypes::Schema) -> arrow::datatypes::Schema {
+    let fields: Vec<arrow::datatypes::Field> = schema
+        .fields()
+        .iter()
+        .map(|field| binary_field(field))
+        .collect();
+    arrow::datatypes::Schema::new_with_metadata(fields, schema.metadata().clone())
+}
+
+fn binary_field(field: &arrow::datatypes::Field) -> arrow::datatypes::Field {
+    field.clone().with_data_type(binary_type(field.data_type()))
+}
+
+fn binary_type(data_type: &arrow::datatypes::DataType) -> arrow::datatypes::DataType {
+    use arrow::datatypes::DataType as ArrowDataType;
+
+    match data_type {
+        ArrowDataType::Utf8 => ArrowDataType::Binary,
+        ArrowDataType::LargeUtf8 => ArrowDataType::LargeBinary,
+        ArrowDataType::Utf8View => ArrowDataType::BinaryView,
+        ArrowDataType::List(field) => ArrowDataType::List(Arc::new(binary_field(field))),
+        ArrowDataType::LargeList(field) => ArrowDataType::LargeList(Arc::new(binary_field(field))),
+        ArrowDataType::FixedSizeList(field, size) => {
+            ArrowDataType::FixedSizeList(Arc::new(binary_field(field)), *size)
+        }
+        ArrowDataType::Map(field, sorted) => {
+            ArrowDataType::Map(Arc::new(binary_field(field)), *sorted)
+        }
+        ArrowDataType::Struct(fields) => ArrowDataType::Struct(
+            fields
+                .iter()
+                .map(|field| Arc::new(binary_field(field)))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+/// The bytes of the binary value of `array` at `row`, if they are not valid UTF-8. A value nested
+/// in the row of a list, struct or map is searched in the order of its elements, and a null is
+/// valid.
+fn invalid_utf8_in(array: &dyn arrow::array::Array, row: usize) -> Option<Vec<u8>> {
+    use arrow::array::{Array, AsArray};
+    use arrow::datatypes::DataType as ArrowDataType;
+
+    if array.is_null(row) {
+        return None;
+    }
+    let first_in = |values: &dyn Array| (0..values.len()).find_map(|i| invalid_utf8_in(values, i));
+    match array.data_type() {
+        ArrowDataType::Binary => invalid_bytes(array.as_binary::<i32>().value(row)),
+        ArrowDataType::LargeBinary => invalid_bytes(array.as_binary::<i64>().value(row)),
+        ArrowDataType::BinaryView => invalid_bytes(array.as_binary_view().value(row)),
+        ArrowDataType::List(_) => first_in(array.as_list::<i32>().value(row).as_ref()),
+        ArrowDataType::LargeList(_) => first_in(array.as_list::<i64>().value(row).as_ref()),
+        ArrowDataType::FixedSizeList(_, _) => {
+            first_in(array.as_fixed_size_list().value(row).as_ref())
+        }
+        ArrowDataType::Map(_, _) => first_in(&array.as_map().value(row)),
+        ArrowDataType::Struct(_) => array
+            .as_struct()
+            .columns()
+            .iter()
+            .find_map(|column| invalid_utf8_in(column.as_ref(), row)),
+        _ => None,
+    }
+}
+
+/// The bytes, if they are not valid UTF-8.
+fn invalid_bytes(bytes: &[u8]) -> Option<Vec<u8>> {
+    std::str::from_utf8(bytes).is_err().then(|| bytes.to_vec())
 }
 
 /// Decode Arrow IPC stream into RecordBatches without converting to Rows.
@@ -3500,6 +3695,58 @@ mod nested_decode_tests {
     }
 
     #[test]
+    fn invalid_utf8_names_the_first_column_with_it_and_its_bytes() {
+        // The marker is one of the encoded strings; its bytes are replaced by bytes that are not
+        // UTF-8, of the same length, so that the stream is only invalid in its values.
+        let marker = "\u{1f}\u{1e}";
+        let corrupt = |mut batch: proto::execute_plan_response::ArrowBatch| {
+            let mut data = batch.data.to_vec();
+            let at = data
+                .windows(marker.len())
+                .position(|window| window == marker.as_bytes())
+                .unwrap();
+            data[at..at + 2].copy_from_slice(&[0xc3, 0x28]);
+            batch.data = data.into();
+            batch
+        };
+        let nested = |values: Vec<&str>| {
+            let items = StringArray::from(values);
+            let offsets = OffsetBuffer::from_lengths([1, 1]);
+            let field = Arc::new(Field::new("item", DataType::Utf8, true));
+            Arc::new(ListArray::new(field, offsets, Arc::new(items), None)) as ArrayRef
+        };
+        let strings = |values: Vec<&str>| Arc::new(StringArray::from(values)) as ArrayRef;
+
+        let nested_batch = corrupt(encoded_batches(
+            vec![
+                ("a", strings(vec!["x", "y"])),
+                ("n", nested(vec!["x", marker])),
+            ],
+            1,
+            false,
+        ));
+        let Err(error) = decode_arrow_batch_of(&nested_batch, None) else {
+            panic!("the invalid string of the list must not decode");
+        };
+        assert_eq!(error.utf8_column(), Some(1));
+        assert_eq!(error.invalid_utf8_value(), Some(vec![0xc3, 0x28]));
+
+        let top_batch = corrupt(encoded_batches(
+            vec![
+                ("a", strings(vec!["x", marker])),
+                ("n", nested(vec!["x", "y"])),
+            ],
+            1,
+            false,
+        ));
+        let Err(error) = decode_arrow_batch_of(&top_batch, None) else {
+            panic!("the invalid string of the first column must not decode");
+        };
+        assert_eq!(error.utf8_column(), Some(0));
+        assert_eq!(error.invalid_utf8_value(), Some(vec![0xc3, 0x28]));
+    }
+
+    #[test]
     fn unsupported_children_remain_lazy_under_nulls_empty_containers_and_variants() {
         let null_duration = DurationSecondArray::from(vec![None]);
         assert_eq!(arrow_value_at(&null_duration, 0).unwrap(), Value::Null);
@@ -4315,6 +4562,29 @@ mod plan_construction_tests {
     }
 
     #[test]
+    fn actions_of_a_plan_past_the_depth_bound_are_recursion_errors_without_a_request() {
+        // Offline: the plan is refused before any request, so no server is needed.
+        let spark = session();
+        let mut df = spark.range(10).unwrap();
+        for _ in 0..10_000 {
+            df = df.filter(crate::functions::col("id").gt(crate::column::lit(0)));
+        }
+        let errors = [
+            df.count().unwrap_err(),
+            df.collect().unwrap_err(),
+            df.schema().unwrap_err(),
+            df.explain_string("simple").unwrap_err(),
+        ];
+        for error in errors {
+            assert_eq!(
+                error.kind,
+                spark_connect_core::error::SparkErrorKind::RecursionError,
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
     fn is_local_only_for_a_local_relation_itself() {
         let spark = session();
         let local = spark.empty_data_frame().unwrap();
@@ -4360,7 +4630,7 @@ mod plan_construction_tests {
             ..Default::default()
         }));
         assert!(!query.is_local());
-        let relation = build_input_relation(&query.plan, &spark);
+        let relation = build_input_relation(&query.plan, &spark).unwrap();
         match relation.rel_type {
             Some(RelType::Sql(sql)) => assert_eq!(sql.query, "SELECT 1"),
             other => panic!("expected the returned SQL relation, got {other:?}"),
@@ -4505,8 +4775,8 @@ mod plan_construction_tests {
 
         // As in PySpark, a shared node has one plan ID wherever it occurs, and serializing
         // the same plan again gives the same relation.
-        let first = build_input_relation(&joined.plan, &spark);
-        let second = build_input_relation(&joined.plan, &spark);
+        let first = build_input_relation(&joined.plan, &spark).unwrap();
+        let second = build_input_relation(&joined.plan, &spark).unwrap();
         assert_eq!(first, second);
         let ids = plan_ids_of(&first);
         assert_eq!(ids.len(), 5);
@@ -4672,18 +4942,21 @@ mod plan_construction_tests {
 
         let spark = session();
         let base = spark.range(3).unwrap().select(vec![col("id")]);
-        let base_relation = base.relation();
+        let base_relation = base.relation().unwrap();
         let derived = base.filter(col("id").gt(lit(1)));
-        let derived_relation = derived.relation();
+        let derived_relation = derived.relation().unwrap();
         let Some(proto::relation::RelType::Filter(filter)) = &derived_relation.rel_type else {
             panic!("expected filter");
         };
         assert_eq!(filter.input.as_deref(), Some(&base_relation));
-        assert_eq!(derived.relation(), derived_relation);
+        assert_eq!(derived.relation().unwrap(), derived_relation);
         // Separately built plans, even equal ones, are distinct nodes with distinct IDs.
         let other = spark.range(3).unwrap().select(vec![col("id")]);
         assert_eq!(other.plan.to_proto(), base.plan.to_proto());
-        let (mine, theirs) = (plan_ids_of(&base_relation), plan_ids_of(&other.relation()));
+        let (mine, theirs) = (
+            plan_ids_of(&base_relation),
+            plan_ids_of(&other.relation().unwrap()),
+        );
         assert!(mine.iter().all(|id| !theirs.contains(id)));
     }
 
@@ -4692,18 +4965,18 @@ mod plan_construction_tests {
         // A session of its own, so that other tests' plans do not change its entries.
         let spark = session().new_session();
         let kept = spark.range(1).unwrap();
-        let kept_ids = plan_ids_of(&kept.relation());
+        let kept_ids = plan_ids_of(&kept.relation().unwrap());
         let mut seen: std::collections::HashSet<i64> = kept_ids.iter().copied().collect();
         // Each plan is dropped at once, so pruning frees its allocation for a later plan to
         // reuse. A new node must still never get the ID of a dropped one.
         for end in 0..5000 {
-            for id in plan_ids_of(&spark.range(end).unwrap().relation()) {
+            for id in plan_ids_of(&spark.range(end).unwrap().relation().unwrap()) {
                 assert!(seen.insert(id), "plan ID {id} was assigned twice");
             }
             // With one live node, pruning keeps the map at most MIN_PRUNE_AT entries.
             assert!(spark.plan_ids().len() <= 1024, "{}", spark.plan_ids().len());
         }
-        assert_eq!(plan_ids_of(&kept.relation()), kept_ids);
+        assert_eq!(plan_ids_of(&kept.relation().unwrap()), kept_ids);
     }
 
     #[test]
@@ -4715,7 +4988,7 @@ mod plan_construction_tests {
         let mut seen = std::collections::HashSet::new();
         for end in 0..10 {
             for plans in [&one, &two] {
-                for id in plan_ids_of(&plans.range(end).unwrap().relation()) {
+                for id in plan_ids_of(&plans.range(end).unwrap().relation().unwrap()) {
                     assert!(seen.insert(id), "plan ID {id} was assigned twice");
                 }
             }
@@ -4842,7 +5115,7 @@ mod plan_construction_tests {
         let splits = df.random_split(vec![1.0, 0.0, 3.0], Some(42)).unwrap();
         assert_eq!(splits.len(), 3);
         for (split, (lower, upper)) in splits.iter().zip([(0.0, 0.25), (0.25, 0.25), (0.25, 1.0)]) {
-            let Some(RelType::Sample(sample)) = split.relation().rel_type else {
+            let Some(RelType::Sample(sample)) = split.relation().unwrap().rel_type else {
                 panic!("expected a serialized Sample relation");
             };
             assert_eq!(sample.lower_bound, lower);
@@ -4860,6 +5133,25 @@ mod plan_construction_tests {
         // Any server-side handling of those plans remains separate from client validation.
         for weights in [vec![f64::NAN], vec![f64::INFINITY]] {
             assert_eq!(df.random_split(weights, Some(42)).unwrap().len(), 1);
+        }
+    }
+
+    #[test]
+    fn dropna_takes_how_any_or_all_as_pyspark() {
+        let df = session().range(1).unwrap();
+        for how in [None, Some("any"), Some("all")] {
+            assert!(df.dropna(how, None, None).is_ok());
+            assert!(df.na().drop(how, Some(1), None).is_ok());
+        }
+        // A bad `how` is rejected even when `thresh` would override it, as PySpark's.
+        for how in ["ANY", "all ", "", "some"] {
+            for thresh in [None, Some(1)] {
+                let err = df.dropna(Some(how), thresh, None).err().expect("an error");
+                assert_eq!(err.get_condition().as_deref(), Some("VALUE_NOT_ALLOWED"));
+                let parameters = err.get_message_parameters().unwrap();
+                assert_eq!(parameters["arg_name"], "how");
+                assert_eq!(parameters["allowed_values"], "['any', 'all']");
+            }
         }
     }
 
@@ -4920,6 +5212,41 @@ mod plan_construction_tests {
         }
     }
 
+    /// Both range repartitions sort a plain column ascending, nulls first, and keep sort
+    /// orders as they are, as PySpark's `repartitionByRange` does.
+    #[test]
+    fn repartition_by_range_sorts_plain_columns_only() {
+        use crate::functions::col;
+
+        let spark = session();
+        let df = spark.range(5).unwrap();
+        let id = || col("id").expression().clone();
+        let inputs = vec![
+            id(),
+            col("id").desc_nulls_last().expression().clone(),
+            col("id").asc_nulls_last().expression().clone(),
+        ];
+        let expected = vec![
+            col("id").asc_nulls_first().expression().clone(),
+            col("id").desc_nulls_last().expression().clone(),
+            col("id").asc_nulls_last().expression().clone(),
+        ];
+        let outputs = [
+            df.repartition_by_range(3, inputs.clone()),
+            df.repartition_by_range_opt(None, inputs),
+        ];
+        for out in &outputs {
+            match out.plan.as_ref() {
+                LogicalPlan::RepartitionByRange {
+                    partition_exprs, ..
+                } => {
+                    assert_eq!(partition_exprs, &expected);
+                }
+                _ => panic!("expected RepartitionByRange plan"),
+            }
+        }
+    }
+
     /// Exercise every plan-building builder AND its `plan.to_proto()` arm offline
     /// (the gRPC channel connects lazily, so no server is contacted). This pins the
     /// large builder set in dataframe.rs and the matching to_proto arms in plan.rs.
@@ -4933,7 +5260,7 @@ mod plan_construction_tests {
         let df2 = spark.range(5).unwrap();
         let e = || col("id").expression().clone();
         let ser = |d: &DataFrame| {
-            build_input_relation(&d.plan, &spark);
+            build_input_relation(&d.plan, &spark).unwrap();
         };
 
         ser(&df.select(vec![col("id")]));
@@ -4999,7 +5326,7 @@ mod plan_construction_tests {
         use crate::streaming::Trigger;
         let spark = session();
         let ser = |d: &DataFrame| {
-            build_input_relation(&d.plan, &spark);
+            build_input_relation(&d.plan, &spark).unwrap();
         };
         ser(&spark
             .read_stream()
@@ -5104,7 +5431,7 @@ mod plan_construction_tests {
 
         let spark = session();
         let ser = |d: &DataFrame| {
-            build_input_relation(&d.plan, &spark);
+            build_input_relation(&d.plan, &spark).unwrap();
         };
         let df = spark.range(5).unwrap();
         let df2 = spark.range(5).unwrap();
@@ -5158,7 +5485,7 @@ mod plan_construction_tests {
                 PythonUDFPayload::new(DataType::Integer, 205, vec![1], "3.11".to_string()),
             )
         };
-        let sent = |mapped: DataFrame| match mapped.relation().rel_type {
+        let sent = |mapped: DataFrame| match mapped.relation().unwrap().rel_type {
             Some(RelType::MapPartitions(map)) => (map.profile_id, map.is_barrier),
             other => panic!("expected MapPartitions, got {other:?}"),
         };
@@ -5751,7 +6078,7 @@ mod plan_id_column_tests {
                 JoinType::Inner,
             )
             .select(vec![left.col("id"), right.star(), left.col_regex("`i.*`")]);
-        let relation = joined.relation();
+        let relation = joined.relation().unwrap();
         let Some(RelType::Project(project)) = &relation.rel_type else {
             panic!("expected Project: {relation:?}");
         };
@@ -5837,7 +6164,7 @@ mod subquery_tests {
             .unwrap()
             .select(vec![col("id"), inner.scalar().alias("m")]);
 
-        let relation = df.relation();
+        let relation = df.relation().unwrap();
         let (root, references) = with_relations(&relation);
         assert_eq!(plan_id(&relation), Some(spark.plan_ids().id_of(&df.plan)));
         assert!(plan_id(root).is_some() && plan_id(root) != plan_id(&relation));
@@ -5855,9 +6182,9 @@ mod subquery_tests {
         );
         assert_eq!(references.len(), 1);
         assert_eq!(plan_id(&references[0]), Some(scalar.plan_id));
-        assert_eq!(references[0], inner.relation());
+        assert_eq!(references[0], inner.relation().unwrap());
         // The plan IDs are stable, as PySpark's.
-        assert_eq!(df.relation(), relation);
+        assert_eq!(df.relation().unwrap(), relation);
         // Without plan IDs, the relation is sent the same way.
         let Some(RelType::WithRelations(with)) = df.plan.to_proto().rel_type else {
             panic!("expected WithRelations");
@@ -5865,7 +6192,7 @@ mod subquery_tests {
         assert_eq!(with.references.len(), 1);
         // A plan without subqueries is sent as it is.
         assert!(matches!(
-            inner.relation().rel_type,
+            inner.relation().unwrap().rel_type,
             Some(RelType::Project(_))
         ));
     }
@@ -5883,7 +6210,7 @@ mod subquery_tests {
             .filter(col("id").isin_subquery(&filtered))
             .filter(t2.exists());
 
-        let relation = df.relation();
+        let relation = df.relation().unwrap();
         let (root, references) = with_relations(&relation);
         let Some(RelType::Filter(outer)) = &root.rel_type else {
             panic!("expected Filter: {root:?}");
@@ -5913,7 +6240,7 @@ mod subquery_tests {
         assert!(matches!(filtered_root.rel_type, Some(RelType::Filter(_))));
         assert_eq!(
             filtered_references,
-            std::slice::from_ref(&smallest.relation())
+            std::slice::from_ref(&smallest.relation().unwrap())
         );
     }
 

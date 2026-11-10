@@ -131,7 +131,7 @@ fn default_arrow_maps_round_trip_inline_and_chunked() {
             .0
             .create_dataframe_from_arrow(vec![input.slice(0, 2), input.slice(2, 2)], None)
             .unwrap();
-        let relation = dataframe.to_relation();
+        let relation = dataframe.to_relation().unwrap();
         match (chunked, relation.rel_type) {
             (true, Some(RelType::ChunkedCachedLocalRelation(local))) => {
                 assert!(
@@ -173,7 +173,7 @@ fn zero_row_arrow_maps_keep_a_canonical_header_and_analyze_on_spark() {
         .0
         .create_dataframe_from_arrow(vec![input().slice(0, 0)], None)
         .unwrap();
-    let Some(RelType::LocalRelation(local)) = dataframe.to_relation().rel_type else {
+    let Some(RelType::LocalRelation(local)) = dataframe.to_relation().unwrap().rel_type else {
         panic!("zero rows must use an inline relation");
     };
     let reader = StreamReader::try_new(Cursor::new(local.data.unwrap()), None).unwrap();

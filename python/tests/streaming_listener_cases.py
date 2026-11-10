@@ -255,7 +255,9 @@ class TestStreamingListenerLifecycle:
             assert service.wait_listener_streams_finished(1)
             assert service.listener_removals == 0
 
+            # The failed stream leaves the server's registration held, so the add removes it first.
             manager.addListener(second)
+            assert service.listener_removals == 1
             assert service.listener_subscriptions == 2
             emit_idle(service, spark, "after-error")
             second.wait_for("after-error")
@@ -1139,8 +1141,12 @@ def ended_stream_case(termination):
             assert service.listener_removals == 0
 
             # Reuse the same manager and object: stale tokens must not match the new
-            # generation or prevent removal of its one active registration.
+            # generation or prevent removal of its one active registration. A failed stream
+            # leaves the server's registration held, so the add removes it first; a normal
+            # end leaves none.
+            removals = 1 if termination == "error" else 0
             manager.addListener(listener)
+            assert service.listener_removals == removals
             assert listener._rust_listener_ids[:-1] == stale_ids
             assert listener._rust_listener_ids[-1] not in stale_ids
             assert service.listener_subscriptions == 2
@@ -1151,11 +1157,11 @@ def ended_stream_case(termination):
             manager.removeListener(listener)
             assert manager._sqlb._listener_bus == []
             assert listener._rust_listener_ids == stale_ids
-            assert service.listener_removals == 1
+            assert service.listener_removals == removals + 1
             assert service.wait_listener_streams_finished(2)
             manager.removeListener(listener)
             assert listener._rust_listener_ids == stale_ids
-            assert service.listener_removals == 1
+            assert service.listener_removals == removals + 1
         finally:
             manager.close()
 

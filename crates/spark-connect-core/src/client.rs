@@ -10,13 +10,16 @@ use tonic::transport::{Channel, ClientTlsConfig};
 use tonic::{Request, Response, Streaming};
 use uuid::Uuid;
 
+use prost::Message;
+use spark_connect_proto::plan::compressed_operation::OpType as CompressedOpType;
+use spark_connect_proto::plan::{CompressedOperation, OpType as PlanOpType};
 use spark_connect_proto::spark_connect_service_client::SparkConnectServiceClient;
 use spark_connect_proto::{
-    AnalyzePlanRequest, AnalyzePlanResponse, ArtifactStatusesRequest, CloneSessionRequest,
-    ConfigRequest, ConfigResponse, ExecutePlanRequest, ExecutePlanResponse,
-    FetchErrorDetailsRequest, FetchErrorDetailsResponse, InterruptRequest, InterruptResponse,
-    ReattachExecuteRequest, ReleaseExecuteRequest, ReleaseExecuteResponse, ReleaseSessionRequest,
-    UserContext,
+    analyze_plan_request::Analyze, AnalyzePlanRequest, AnalyzePlanResponse,
+    ArtifactStatusesRequest, CloneSessionRequest, CompressionCodec, ConfigRequest, ConfigResponse,
+    ExecutePlanRequest, ExecutePlanResponse, FetchErrorDetailsRequest, FetchErrorDetailsResponse,
+    InterruptRequest, InterruptResponse, Plan, ReattachExecuteRequest, ReleaseExecuteRequest,
+    ReleaseExecuteResponse, ReleaseSessionRequest, UserContext,
 };
 
 use crate::artifact::{
@@ -252,11 +255,99 @@ fn retry_exception_bound_passed(
         .is_some_and(|ms| since.elapsed() >= Duration::from_millis(ms))
 }
 
+const PLAN_COMPRESSION_THRESHOLD_CONF: &str = "spark.connect.session.planCompression.threshold";
+const PLAN_COMPRESSION_ALGORITHM_CONF: &str =
+    "spark.connect.session.planCompression.defaultAlgorithm";
+
+/// How a client compresses its plans, as PySpark's client has it from the confs of the server.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum PlanCompression {
+    /// Not looked up yet.
+    #[default]
+    Unknown,
+    /// The plans are sent as they are.
+    Disabled,
+    /// The plans of more than `threshold` bytes are sent zstd-compressed.
+    Zstd { threshold: usize },
+}
+
+/// The plan compression of the confs of the server, as PySpark reads them: zstd above a threshold
+/// that is not negative. Any other algorithm, or a missing or invalid threshold, disables it.
+fn plan_compression_of(threshold: Option<&str>, algorithm: Option<&str>) -> PlanCompression {
+    let threshold = threshold
+        .filter(|threshold| !threshold.is_empty())
+        .and_then(|threshold| threshold.parse::<usize>().ok());
+    match (threshold, algorithm) {
+        (Some(threshold), Some("ZSTD")) => PlanCompression::Zstd { threshold },
+        _ => PlanCompression::Disabled,
+    }
+}
+
+/// Replace the relation or command of `plan` with its zstd-compressed operation, when it is over
+/// `threshold` bytes and compression makes it smaller, as PySpark's `_try_compress_and_set_plan`.
+fn compress_over_threshold(plan: &mut Plan, threshold: usize) {
+    let (op_type, message) = match &plan.op_type {
+        Some(PlanOpType::Root(relation)) => (CompressedOpType::Relation, relation.encode_to_vec()),
+        Some(PlanOpType::Command(command)) => (CompressedOpType::Command, command.encode_to_vec()),
+        _ => return,
+    };
+    if message.len() <= threshold {
+        return;
+    }
+    let Ok(data) = zstd::encode_all(message.as_slice(), zstd::DEFAULT_COMPRESSION_LEVEL) else {
+        return;
+    };
+    if data.len() >= message.len() {
+        return;
+    }
+    plan.op_type = Some(PlanOpType::CompressedOperation(CompressedOperation {
+        data: data.into(),
+        op_type: op_type as i32,
+        compression_codec: CompressionCodec::Zstd as i32,
+    }));
+}
+
+/// The plans of an analysis, which PySpark builds with its plan compression. The plans of
+/// the other analyses, as the relations of persist, are not compressed.
+fn analyze_plans(analyze: &mut Analyze) -> Vec<&mut Option<Plan>> {
+    match analyze {
+        Analyze::Schema(request) => vec![&mut request.plan],
+        Analyze::Explain(request) => vec![&mut request.plan],
+        Analyze::TreeString(request) => vec![&mut request.plan],
+        Analyze::IsLocal(request) => vec![&mut request.plan],
+        Analyze::IsStreaming(request) => vec![&mut request.plan],
+        Analyze::InputFiles(request) => vec![&mut request.plan],
+        Analyze::SemanticHash(request) => vec![&mut request.plan],
+        Analyze::SameSemantics(request) => vec![&mut request.target_plan, &mut request.other_plan],
+        Analyze::SparkVersion(_)
+        | Analyze::DdlParse(_)
+        | Analyze::Persist(_)
+        | Analyze::Unpersist(_)
+        | Analyze::GetStorageLevel(_)
+        | Analyze::JsonToDdl(_) => Vec::new(),
+    }
+}
+
 /// A hook of the executions of a client, as PySpark's `SparkSession.Hook.on_execute_plan`: it is
 /// called with each `ExecutePlanRequest` before the client sends it, and returns the request to
 /// send, which keeps the operation ID of the original.
 pub type ExecutePlanHook =
     std::sync::Arc<dyn Fn(ExecutePlanRequest) -> Result<ExecutePlanRequest> + Send + Sync>;
+
+/// Let the server split the Arrow batches too large for one message into chunks, which the
+/// stream of the execution joins, as PySpark's client does, without a preferred chunk size.
+fn allow_arrow_batch_chunking(request: &mut ExecutePlanRequest) {
+    use spark_connect_proto::execute_plan_request::request_option::RequestOption as Kind;
+    use spark_connect_proto::execute_plan_request::RequestOption;
+    request.request_options.push(RequestOption {
+        request_option: Some(Kind::ResultChunkingOptions(
+            spark_connect_proto::ResultChunkingOptions {
+                allow_arrow_batch_chunking: true,
+                preferred_arrow_chunk_size: None,
+            },
+        )),
+    });
+}
 
 /// A Spark Connect client for communicating with a remote Spark server.
 ///
@@ -297,6 +388,8 @@ pub struct SparkConnectClient {
     /// check of the IDs of its responses, and its close when the server reports that the session
     /// changed. See [`SparkConnectClient::set_session_tracking`].
     session_tracking: bool,
+    /// The plan compression of the client, shared by its clones, looked up on its first plan.
+    plan_compression: std::sync::Arc<std::sync::Mutex<PlanCompression>>,
 }
 
 /// The user context extensions of a client, as PySpark's `SparkConnectClient` keeps them: those
@@ -418,6 +511,7 @@ impl SparkConnectClient {
             closed: Default::default(),
             server_session_id: Default::default(),
             session_tracking: true,
+            plan_compression: Default::default(),
         })
     }
 
@@ -447,6 +541,7 @@ impl SparkConnectClient {
             closed: Default::default(),
             server_session_id: Default::default(),
             session_tracking: self.session_tracking,
+            plan_compression: Default::default(),
         }
     }
 
@@ -547,13 +642,19 @@ impl SparkConnectClient {
     }
 
     /// A gRPC failure as a [`SparkError`], which closes the client when the server reports that
-    /// the session changed, as PySpark's `_handle_rpc_error` does.
+    /// the session changed, and disables its plan compression when the server cannot parse a
+    /// plan, as PySpark's `_handle_rpc_error` does.
     fn grpc_error(&self, status: tonic::Status) -> SparkError {
         let error = SparkError::from_grpc_status(status);
-        if self.session_tracking
-            && error.get_condition().as_deref() == Some("INVALID_HANDLE.SESSION_CHANGED")
-        {
+        let condition = error.get_condition();
+        if self.session_tracking && condition.as_deref() == Some("INVALID_HANDLE.SESSION_CHANGED") {
             self.close();
+        }
+        if condition.as_deref() == Some("CONNECT_INVALID_PLAN.CANNOT_PARSE") {
+            *self
+                .plan_compression
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = PlanCompression::Disabled;
         }
         error
     }
@@ -765,6 +866,46 @@ impl SparkConnectClient {
         &self.rpc_deadlines
     }
 
+    /// The plan compression of this client. The server's confs are read on the first plan, with
+    /// one `Config` call, and kept for the client; a failed read disables the compression for it,
+    /// as PySpark's `_get_plan_compression_threshold_and_algorithm` does.
+    async fn plan_compression(&self) -> PlanCompression {
+        let known = *self
+            .plan_compression
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if known != PlanCompression::Unknown {
+            return known;
+        }
+        let looked_up = match self
+            .get_configs(&[
+                PLAN_COMPRESSION_THRESHOLD_CONF,
+                PLAN_COMPRESSION_ALGORITHM_CONF,
+            ])
+            .await
+        {
+            Ok(values) => match values.as_slice() {
+                [threshold, algorithm] => {
+                    plan_compression_of(threshold.as_deref(), algorithm.as_deref())
+                }
+                _ => PlanCompression::Disabled,
+            },
+            Err(_) => PlanCompression::Disabled,
+        };
+        *self
+            .plan_compression
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = looked_up;
+        looked_up
+    }
+
+    /// Compress `plan` as the plan compression of this client asks.
+    async fn compress_plan(&self, plan: &mut Plan) {
+        if let PlanCompression::Zstd { threshold } = self.plan_compression().await {
+            compress_over_threshold(plan, threshold);
+        }
+    }
+
     /// Execute a plan and return a stream of responses.
     ///
     /// Mirrors `pyspark.sql.connect.client.core.SparkConnectClient.execute_plan`.
@@ -773,9 +914,13 @@ impl SparkConnectClient {
         mut request: ExecutePlanRequest,
     ) -> Result<Streaming<ExecutePlanResponse>> {
         self.ensure_open()?;
+        allow_arrow_batch_chunking(&mut request);
         self.extend_user_context(&mut request.user_context);
         self.fill_user_context(&mut request.user_context);
         self.observe_on(&mut request.client_observed_server_side_session_id);
+        if let Some(plan) = request.plan.as_mut() {
+            self.compress_plan(plan).await;
+        }
         let request = self.hooked(request)?;
         let mut req = Request::new(request);
         self._attach_metadata(&mut req);
@@ -905,6 +1050,11 @@ impl SparkConnectClient {
         self.ensure_open()?;
         self.extend_user_context(&mut request.user_context);
         self.fill_user_context(&mut request.user_context);
+        if let Some(analyze) = request.analyze.as_mut() {
+            for plan in analyze_plans(analyze).into_iter().flatten() {
+                self.compress_plan(plan).await;
+            }
+        }
         let response = self
             .with_retry(|| {
                 let deadline = self.rpc_deadlines.analyze_plan;
@@ -966,12 +1116,16 @@ impl SparkConnectClient {
         mut request: ExecutePlanRequest,
     ) -> Result<ReattachableResponseStream> {
         self.ensure_open()?;
+        allow_arrow_batch_chunking(&mut request);
         self.extend_user_context(&mut request.user_context);
         // Before the iterator: its ReattachExecute and ReleaseExecute requests take the
         // user context of this request, and the request of the hook, as PySpark's iterator
         // is of the request that the hooks return.
         self.fill_user_context(&mut request.user_context);
         self.observe_on(&mut request.client_observed_server_side_session_id);
+        if let Some(plan) = request.plan.as_mut() {
+            self.compress_plan(plan).await;
+        }
         let request = self.hooked(request)?;
         let iter = ExecutePlanResponseReattachableIterator::new(request);
         let start = iter.request().clone();
@@ -1513,6 +1667,11 @@ impl SparkConnectClient {
         Ok(cloned)
     }
 
+    /// Release this session on the server.
+    ///
+    /// Mirrors `pyspark.sql.connect.client.core.SparkConnectClient.release_session`, which
+    /// retries it under the retry policy: a transient failure at stop does not leave the
+    /// session on the server until its timeout.
     pub async fn release_session(&self) -> Result<()> {
         let mut request = ReleaseSessionRequest::default();
         request.session_id = self.session_id.clone();
@@ -1521,16 +1680,20 @@ impl SparkConnectClient {
             ..Default::default()
         });
 
-        let deadline = self.rpc_deadlines.release_session;
-        let mut req = with_deadline(Request::new(request), deadline);
-        self._attach_metadata(&mut req);
-        match within_deadline(deadline, self.stub.clone().release_session(req)).await {
-            Ok(response) => {
-                let response = response.into_inner();
-                self.verify_response(&response.session_id, &response.server_side_session_id)
-            }
-            Err(status) => Err(self.error_from_status(status).await),
-        }
+        let response = self
+            .with_retry(|| {
+                let deadline = self.rpc_deadlines.release_session;
+                let mut req = with_deadline(Request::new(request.clone()), deadline);
+                self._attach_metadata(&mut req);
+                let mut stub = self.stub.clone();
+                async move {
+                    within_deadline(deadline, stub.release_session(req))
+                        .await
+                        .map(Response::into_inner)
+                }
+            })
+            .await?;
+        self.verify_response(&response.session_id, &response.server_side_session_id)
     }
 
     /// Add artifacts to this session.
@@ -2551,6 +2714,117 @@ mod tests {
         let _result = client.release_session();
     }
 
+    /// A loopback service of ReleaseSession only: its first `unavailable` calls answer
+    /// UNAVAILABLE, the later ones succeed. `calls` counts every call.
+    struct ReleaseCalls {
+        calls: std::sync::atomic::AtomicUsize,
+        unavailable: usize,
+    }
+
+    #[derive(Clone)]
+    struct ReleaseService(std::sync::Arc<ReleaseCalls>);
+
+    impl tonic::server::NamedService for ReleaseService {
+        const NAME: &'static str = "spark.connect.SparkConnectService";
+    }
+
+    impl tonic::codegen::Service<tonic::codegen::http::Request<tonic::body::Body>> for ReleaseService {
+        type Response = tonic::codegen::http::Response<tonic::body::Body>;
+        type Error = std::convert::Infallible;
+        type Future = tonic::codegen::BoxFuture<Self::Response, Self::Error>;
+
+        fn poll_ready(
+            &mut self,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::result::Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn call(
+            &mut self,
+            request: tonic::codegen::http::Request<tonic::body::Body>,
+        ) -> Self::Future {
+            let state = self.0.clone();
+            Box::pin(async move {
+                if request.uri().path() == "/spark.connect.SparkConnectService/ReleaseSession" {
+                    let mut grpc = tonic::server::Grpc::new(tonic_prost::ProstCodec::default());
+                    return Ok(grpc.unary(ReleaseRpc(state), request).await);
+                }
+                Ok(tonic::codegen::http::Response::builder()
+                    .status(200)
+                    .header("grpc-status", "12")
+                    .header("content-type", "application/grpc")
+                    .body(tonic::body::Body::empty())
+                    .unwrap())
+            })
+        }
+    }
+
+    struct ReleaseRpc(std::sync::Arc<ReleaseCalls>);
+
+    impl tonic::server::UnaryService<ReleaseSessionRequest> for ReleaseRpc {
+        type Response = spark_connect_proto::ReleaseSessionResponse;
+        type Future = tonic::codegen::BoxFuture<tonic::Response<Self::Response>, tonic::Status>;
+
+        fn call(&mut self, request: tonic::Request<ReleaseSessionRequest>) -> Self::Future {
+            let state = self.0.clone();
+            let request = request.into_inner();
+            Box::pin(async move {
+                let call = state
+                    .calls
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if call < state.unavailable {
+                    return Err(tonic::Status::unavailable("the server is restarting"));
+                }
+                Ok(tonic::Response::new(
+                    spark_connect_proto::ReleaseSessionResponse {
+                        session_id: request.session_id,
+                        ..Default::default()
+                    },
+                ))
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn release_session_is_retried_on_unavailable_as_the_reference() {
+        // A transient UNAVAILABLE at stop is retried under the policy, so the server session is
+        // released by the second call; the reference's `release_session` runs in `Retrying`.
+        let calls = std::sync::Arc::new(ReleaseCalls {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            unavailable: 1,
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let incoming = futures::stream::unfold(listener, |listener| async {
+            Some((listener.accept().await.map(|(socket, _)| socket), listener))
+        });
+        let service = ReleaseService(calls.clone());
+        let server = tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(service)
+                .serve_with_incoming(incoming)
+                .await
+                .unwrap();
+        });
+        let builder = {
+            let _env = crate::channel::set_env(&[("SPARK_CONNECT_AUTHENTICATE_TOKEN", None)]);
+            ChannelBuilder::parse(&format!("sc://127.0.0.1:{}", address.port())).unwrap()
+        };
+        let mut client = SparkConnectClient::connect(&builder).await.unwrap();
+        client.set_retry_policy(RetryPolicy {
+            max_retries: Some(2),
+            initial_backoff_ms: 1,
+            max_backoff_ms: Some(2),
+            ..RetryPolicy::default()
+        });
+
+        let released = client.release_session().await;
+        server.abort();
+        released.unwrap();
+        assert_eq!(calls.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
     #[tokio::test]
     async fn test_add_artifacts_request_structure() {
         let builder = ChannelBuilder::parse("sc://localhost").unwrap();
@@ -2709,5 +2983,139 @@ mod tests {
         let other = client.with_new_session_id();
         assert_eq!(other.host(), "other");
         assert_eq!(other.observed_server_session_id(), None);
+    }
+}
+
+#[cfg(test)]
+mod plan_compression_tests {
+    use super::*;
+    use spark_connect_proto::analyze_plan_request::{SameSemantics, Schema, SparkVersion};
+    use spark_connect_proto::command::CommandType;
+    use spark_connect_proto::relation::RelType;
+    use spark_connect_proto::{Command, LocalRelation, Relation};
+
+    const PAYLOAD: usize = 64 * 1024;
+
+    fn relation_with(data: Vec<u8>) -> Relation {
+        Relation {
+            rel_type: Some(RelType::LocalRelation(LocalRelation {
+                data: Some(data.into()),
+                ..Default::default()
+            })),
+            ..Default::default()
+        }
+    }
+
+    fn root(relation: &Relation) -> Plan {
+        Plan {
+            op_type: Some(PlanOpType::Root(relation.clone())),
+        }
+    }
+
+    /// Bytes of a xorshift sequence, which zstd does not compress.
+    fn incompressible(len: usize) -> Vec<u8> {
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        (0..len)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state as u8
+            })
+            .collect()
+    }
+
+    #[test]
+    fn plan_compression_is_zstd_above_the_threshold_of_the_confs() {
+        assert_eq!(
+            plan_compression_of(Some("10485760"), Some("ZSTD")),
+            PlanCompression::Zstd {
+                threshold: 10485760
+            }
+        );
+        assert_eq!(
+            plan_compression_of(Some("0"), Some("ZSTD")),
+            PlanCompression::Zstd { threshold: 0 }
+        );
+        for (threshold, algorithm) in [
+            (Some("-1"), Some("ZSTD")),
+            (None, Some("ZSTD")),
+            (Some(""), Some("ZSTD")),
+            (Some("ten"), Some("ZSTD")),
+            (Some("10"), Some("NONE")),
+            (Some("10"), Some("LZ4")),
+            (Some("10"), None),
+        ] {
+            assert_eq!(
+                plan_compression_of(threshold, algorithm),
+                PlanCompression::Disabled,
+                "threshold {threshold:?}, algorithm {algorithm:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_relation_over_the_threshold_is_sent_as_a_zstd_relation_operation() {
+        let relation = relation_with(vec![7; PAYLOAD]);
+        let encoded = relation.encode_to_vec();
+        let mut plan = root(&relation);
+        compress_over_threshold(&mut plan, encoded.len() - 1);
+        let Some(PlanOpType::CompressedOperation(operation)) = plan.op_type else {
+            panic!("the plan over the threshold was not compressed");
+        };
+        assert_eq!(operation.op_type, CompressedOpType::Relation as i32);
+        assert_eq!(operation.compression_codec, CompressionCodec::Zstd as i32);
+        assert_eq!(zstd::decode_all(&operation.data[..]).unwrap(), encoded);
+    }
+
+    #[test]
+    fn a_command_over_the_threshold_is_sent_as_a_zstd_command_operation() {
+        let command = Command {
+            command_type: Some(CommandType::Extension(prost_types::Any {
+                type_url: "example.org/command".into(),
+                value: vec![7; PAYLOAD],
+            })),
+        };
+        let encoded = command.encode_to_vec();
+        let mut plan = Plan {
+            op_type: Some(PlanOpType::Command(command)),
+        };
+        compress_over_threshold(&mut plan, encoded.len() / 2);
+        let Some(PlanOpType::CompressedOperation(operation)) = plan.op_type else {
+            panic!("the command over the threshold was not compressed");
+        };
+        assert_eq!(operation.op_type, CompressedOpType::Command as i32);
+        assert_eq!(zstd::decode_all(&operation.data[..]).unwrap(), encoded);
+    }
+
+    #[test]
+    fn a_plan_is_sent_as_it_is_unless_it_is_over_the_threshold_and_compression_shrinks_it() {
+        let relation = relation_with(vec![7; PAYLOAD]);
+        let size = relation.encode_to_vec().len();
+        let mut at_threshold = root(&relation);
+        compress_over_threshold(&mut at_threshold, size);
+        assert_eq!(at_threshold, root(&relation));
+
+        let random = relation_with(incompressible(PAYLOAD));
+        let mut not_smaller = root(&random);
+        compress_over_threshold(&mut not_smaller, 0);
+        assert_eq!(not_smaller, root(&random));
+    }
+
+    #[test]
+    fn the_plans_of_an_analysis_are_those_pyspark_compresses() {
+        let relation = relation_with(vec![7; 1]);
+        let mut schema = Analyze::Schema(Schema {
+            plan: Some(root(&relation)),
+        });
+        assert_eq!(analyze_plans(&mut schema).len(), 1);
+
+        let mut same_semantics = Analyze::SameSemantics(SameSemantics {
+            target_plan: Some(root(&relation)),
+            other_plan: Some(root(&relation)),
+        });
+        assert_eq!(analyze_plans(&mut same_semantics).len(), 2);
+
+        assert!(analyze_plans(&mut Analyze::SparkVersion(SparkVersion {})).is_empty());
     }
 }

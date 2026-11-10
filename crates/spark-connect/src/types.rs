@@ -1599,11 +1599,12 @@ fn parse_decimal(s: &str) -> Result<DataType> {
             )
         })?;
 
+    // A precision alone has scale 0, as Spark's `decimal(p)` does.
     let parts: Vec<&str> = inner.split(',').collect();
-    if parts.len() != 2 {
+    if parts.len() > 2 {
         return Err(SparkError::value(
             "INVALID_DATATYPE_FORMAT",
-            &[("detail", "Decimal requires precision and scale")],
+            &[("detail", "Decimal takes a precision and a scale")],
         ));
     }
 
@@ -1613,9 +1614,12 @@ fn parse_decimal(s: &str) -> Result<DataType> {
             &[("detail", "Invalid precision")],
         )
     })?;
-    let scale = parts[1].trim().parse::<i32>().map_err(|_| {
-        SparkError::value("INVALID_DATATYPE_FORMAT", &[("detail", "Invalid scale")])
-    })?;
+    let scale = match parts.get(1) {
+        Some(scale) => scale.trim().parse::<i32>().map_err(|_| {
+            SparkError::value("INVALID_DATATYPE_FORMAT", &[("detail", "Invalid scale")])
+        })?,
+        None => 0,
+    };
 
     Ok(DataType::Decimal { precision, scale })
 }
@@ -1713,64 +1717,69 @@ fn parse_timestamp_nanos(s: &str) -> Result<DataType> {
     })
 }
 
+/// Parses `interval`, `interval <field>` or `interval <field> to <field>`, as the grammar of
+/// Spark's parser does: a range is in one family (`year to month`, or `day` to `second`), and its
+/// end field is later than its start field. Anything else is an error, as the server's parser
+/// rejects it.
 fn parse_interval_string(s: &str) -> Result<DataType> {
-    if s == "interval" {
-        return Ok(DataType::CalendarInterval);
-    }
-
+    let invalid = || {
+        SparkError::value(
+            "INVALID_DATATYPE_FORMAT",
+            &[("detail", &format!("Invalid interval format: {s}"))],
+        )
+    };
     let parts: Vec<&str> = s.split_whitespace().collect();
-    if parts.len() < 2 {
-        return Ok(DataType::CalendarInterval);
-    }
-
-    if parts.len() == 2 {
-        // Single field like "interval day"
-        let field_name = parts[1];
-        for &(name, code) in YEAR_MONTH_FIELDS {
-            if name == field_name {
-                return Ok(DataType::YearMonthInterval {
+    match parts.as_slice() {
+        ["interval"] => Ok(DataType::CalendarInterval),
+        ["interval", field] => {
+            if let Some(code) = interval_field(field, YEAR_MONTH_FIELDS) {
+                Ok(DataType::YearMonthInterval {
                     start_field: code,
                     end_field: code,
-                });
-            }
-        }
-        for &(name, code) in DAY_TIME_FIELDS {
-            if name == field_name {
-                return Ok(DataType::DayTimeInterval {
+                })
+            } else if let Some(code) = interval_field(field, DAY_TIME_FIELDS) {
+                Ok(DataType::DayTimeInterval {
                     start_field: code,
                     end_field: code,
-                });
+                })
+            } else {
+                Err(invalid())
             }
         }
-    } else if parts.len() == 4 && parts[2] == "to" {
-        // Range like "interval day to second"
-        let start = parts[1];
-        let end = parts[3];
-
-        // Try year-month fields
-        if let (Some(&(_, start_code)), Some(&(_, end_code))) = (
-            YEAR_MONTH_FIELDS.iter().find(|(name, _)| *name == start),
-            YEAR_MONTH_FIELDS.iter().find(|(name, _)| *name == end),
-        ) {
-            return Ok(DataType::YearMonthInterval {
-                start_field: start_code,
-                end_field: end_code,
-            });
+        ["interval", start, "to", end] => {
+            if let (Some(start_field), Some(end_field)) = (
+                interval_field(start, YEAR_MONTH_FIELDS),
+                interval_field(end, YEAR_MONTH_FIELDS),
+            ) {
+                if start_field < end_field {
+                    return Ok(DataType::YearMonthInterval {
+                        start_field,
+                        end_field,
+                    });
+                }
+            } else if let (Some(start_field), Some(end_field)) = (
+                interval_field(start, DAY_TIME_FIELDS),
+                interval_field(end, DAY_TIME_FIELDS),
+            ) {
+                if start_field < end_field {
+                    return Ok(DataType::DayTimeInterval {
+                        start_field,
+                        end_field,
+                    });
+                }
+            }
+            Err(invalid())
         }
-
-        // Try day-time fields
-        if let (Some(&(_, start_code)), Some(&(_, end_code))) = (
-            DAY_TIME_FIELDS.iter().find(|(name, _)| *name == start),
-            DAY_TIME_FIELDS.iter().find(|(name, _)| *name == end),
-        ) {
-            return Ok(DataType::DayTimeInterval {
-                start_field: start_code,
-                end_field: end_code,
-            });
-        }
+        _ => Err(invalid()),
     }
+}
 
-    Ok(DataType::CalendarInterval)
+/// The code of an interval field name in `fields`, such as `second` in the day-time fields.
+fn interval_field(name: &str, fields: &[(&str, i32)]) -> Option<i32> {
+    fields
+        .iter()
+        .find(|(field, _)| *field == name)
+        .map(|&(_, code)| code)
 }
 
 fn parse_geometry(s: &str) -> Result<DataType> {
@@ -1864,9 +1873,11 @@ fn parse_datatype_string(input: &str) -> Result<DataType> {
     // _parse_datatype_string. Detect either a top-level comma or a top-level space
     // separating a field name from its type; fall back to single-type parsing if the
     // schema interpretation fails (e.g. a bare type that itself contains spaces such as
-    // "interval day to second").
+    // "interval day to second"). A top-level colon names a field too, as in "a:int".
     if !trimmed.to_lowercase().starts_with("struct<")
-        && (contains_top_level_comma(trimmed) || contains_top_level_whitespace(trimmed))
+        && (contains_top_level_comma(trimmed)
+            || contains_top_level_whitespace(trimmed)
+            || contains_top_level_colon(trimmed))
     {
         if let Ok(dt) = parse_top_level_schema(trimmed) {
             return Ok(dt);
@@ -1882,6 +1893,14 @@ fn contains_top_level_whitespace(s: &str) -> bool {
     top_level_positions(s)
         .into_iter()
         .any(|i| s[i..].chars().next().is_some_and(char::is_whitespace))
+}
+
+/// Whether `s` has a top-level colon, which names a field as in "a:int" (outside `<>`/`()` and
+/// quotes, so that "x:array<int>" is a field and "array<a:int>" is not).
+fn contains_top_level_colon(s: &str) -> bool {
+    top_level_positions(s)
+        .into_iter()
+        .any(|i| s.as_bytes()[i] == b':')
 }
 
 /// Check if a string contains a comma at the top level (not inside brackets/parens/quotes)
@@ -2207,9 +2226,48 @@ fn canonical_collation_name(name: &str) -> String {
         .join("_")
 }
 
+/// The spelling of a type under the name that [`parse_single_type`] takes, for the aliases of
+/// Spark's grammar: `dec` and `numeric` are `decimal`, `real` is `float` and `character` is `char`.
+/// A time zone clause names the timestamp type (`timestamp without time zone` is `timestamp_ntz`,
+/// `timestamp with local time zone` is `timestamp_ltz`), `timestamp(6)` is the microsecond
+/// timestamp and `timestamp(p)` the nanosecond one. Keywords may be separated by any whitespace.
+/// Any other spelling is returned as it is.
+fn canonical_type_spelling(s: &str) -> String {
+    let words = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let (base, zone) = if let Some(base) = words.strip_suffix(" without time zone") {
+        (base, Some("ntz"))
+    } else if let Some(base) = words.strip_suffix(" with local time zone") {
+        (base, Some("ltz"))
+    } else {
+        (words.as_str(), None)
+    };
+    let (head, args) = match base.find('(') {
+        Some(i) => base.split_at(i),
+        None => (base, ""),
+    };
+    let head = head.trim_end();
+    let args = if head.starts_with("timestamp") && args == "(6)" {
+        ""
+    } else {
+        args
+    };
+    let head = match (head, zone) {
+        ("timestamp", Some("ntz")) => "timestamp_ntz",
+        ("timestamp", Some("ltz")) => "timestamp_ltz",
+        ("time", Some("ntz")) => "time",
+        ("timestamp", None) if !args.is_empty() => "timestamp_ltz",
+        ("dec" | "numeric", None) => "decimal",
+        ("character", None) => "char",
+        ("real", None) => "float",
+        (_, Some(_)) => return s.to_string(),
+        (head, None) => head,
+    };
+    format!("{head}{args}")
+}
+
 /// Parse a single type (primitive or complex)
 fn parse_single_type(input: &str) -> Result<DataType> {
-    let trimmed = input.trim().to_lowercase();
+    let trimmed = canonical_type_spelling(&input.trim().to_lowercase());
 
     // Complex types
     if trimmed.starts_with("array<") {
@@ -2237,12 +2295,17 @@ fn parse_single_type(input: &str) -> Result<DataType> {
         }),
         "binary" => Ok(DataType::Binary),
         "date" => Ok(DataType::Date),
-        "timestamp" => Ok(DataType::Timestamp),
+        "timestamp" | "timestamp_ltz" => Ok(DataType::Timestamp),
         "timestamp_ntz" => Ok(DataType::TimestampNtz),
         // As Spark's `TIME`, of the default precision.
         "time" => Ok(DataType::Time { precision: 6 }),
         "interval" => Ok(DataType::CalendarInterval),
         "variant" => Ok(DataType::Variant),
+        // As Spark's `DECIMAL`, of the default precision and scale.
+        "decimal" => Ok(DataType::Decimal {
+            precision: 10,
+            scale: 0,
+        }),
         _ => {
             // Try complex parsing with already-lowercased trimmed version
             if trimmed.starts_with("decimal(") {

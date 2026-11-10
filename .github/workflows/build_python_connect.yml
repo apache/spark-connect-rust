@@ -42,7 +42,11 @@ env:
   RUST_PARITY_LOG_DIR: /tmp/parity-test-logs
   SPARK_CONNECT_TESTING_REMOTE: sc://localhost:15002
   SPARK_TESTING: "1"
-  SPARK_SKIP_CONNECT_COMPAT_TESTS: "1"   # force remote-only (pure connect, no local JVM)
+  # Read by the transport gate (run_official_tests.py sets it for its own runs: the official
+  # base classes need is_remote_only()) and by the Spark server started below, as Apache's CI
+  # sets it for its connect job. The drop-in runner removes it for its own runs, because the
+  # official Arrow UDTF suite skips itself when it is set (see run_ours).
+  SPARK_SKIP_CONNECT_COMPAT_TESTS: "1"
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -101,7 +105,10 @@ jobs:
           python -m pip install --upgrade pip
           # Match the supported pandas 2.x environment used by pandas-parity.yml.
           # Spark 4.2's tests and Python workers are not compatible with pandas 3.x.
-          python -m pip install pytest 'pandas>=2.2,<3.0' pyarrow numpy grpcio grpcio-status googleapis-common-protos cloudpickle zstandard py4j
+          # plotly and graphviz are the optional packages Apache's connect job installs (pins as
+          # in Apache's build_python_connect.yml). Without them the DataFrame.plot tests
+          # (sql/tests/connect/test_parity_frame_plot_plotly.py) and test_df_debug.py skip.
+          python -m pip install pytest 'pandas>=2.2,<3.0' pyarrow numpy grpcio grpcio-status googleapis-common-protos cloudpickle zstandard py4j 'plotly<6.0.0' graphviz==0.20.3
 
       - name: Build the Rust extension into the skin
         # The parity diff drives both clients via PYTHONPATH (our ./python for ours,
@@ -341,8 +348,9 @@ jobs:
           # Same environment as the parity gate (pandas 2.x; Spark 4.2+ is not compatible
           # with pandas 3). torch and scikit-learn are NOT installed: the ML tests that need
           # them skip themselves (pyspark.testing guards), and the torch-based pyspark.ml.connect
-          # files are by design (scripts/dropin_known_failures.txt).
-          python -m pip install pytest 'pandas>=2.2,<3.0' pyarrow numpy grpcio grpcio-status googleapis-common-protos cloudpickle zstandard py4j
+          # files are by design (scripts/dropin_known_failures.txt). plotly and graphviz are
+          # installed (pins as Apache's connect job): their tests run here, not skip.
+          python -m pip install pytest 'pandas>=2.2,<3.0' pyarrow numpy grpcio grpcio-status googleapis-common-protos cloudpickle zstandard py4j 'plotly<6.0.0' graphviz==0.20.3
 
       - name: Build the Rust extension into the skin
         run: |
@@ -548,9 +556,10 @@ jobs:
         run: |
           cargo test -p apache-spark-connect \
             --test e2e_functions --test e2e_columns --test e2e_dataframe \
-            --test e2e_coverage --test e2e_linear_svc --test e2e_linear_regression --test e2e_integration \
+            --test e2e_coverage --test e2e_linear_svc --test e2e_linear_regression --test e2e_kmeans --test e2e_integration \
             --test arrow_map_input --test array_literal --test execute_plan_hook --test raw_relation \
             --test types_roundtrip \
+            --test e2e_reattach_drop \
             -- --test-threads=1
 
       - name: Rust WASM UDF e2e test (against the live server)

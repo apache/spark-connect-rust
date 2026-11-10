@@ -11,6 +11,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use spark_connect::progress::ProgressUpdate;
 use spark_connect::SparkSession;
+use spark_connect_core::error::SparkError;
 
 /// The progress handlers of a session, and the progress bars of its executions.
 pub(crate) struct SessionProgress {
@@ -43,7 +44,7 @@ pub(crate) fn session_progress(py: Python<'_>, session: &SparkSession) -> Arc<Se
         count: AtomicUsize::new(0),
     });
     let shared = Arc::clone(&progress);
-    session.register_progress_handler(move |update| shared.notify(update));
+    session.register_fallible_progress_handler(move |update| shared.notify(update));
     registry.insert(id, Arc::clone(&progress));
     progress
 }
@@ -88,19 +89,23 @@ impl SessionProgress {
         Ok(())
     }
 
-    fn notify(&self, update: &ProgressUpdate) {
+    /// Call the handlers with `update`. The exception of a handler fails the execution that
+    /// called it, and is raised in its caller, as PySpark's result loop raises it. The done call
+    /// is the last of the execution, which has no caller left: its exception goes to
+    /// `sys.unraisablehook`.
+    fn notify(&self, update: &ProgressUpdate) -> Result<(), SparkError> {
         let bar = progress_bar_enabled();
         if self.count.load(Ordering::SeqCst) == 0 && !bar {
-            return;
+            return Ok(());
         }
-        Python::attach(|py| {
-            if let Err(error) = self.notify_python(py, update, bar) {
-                // The Rust transport calls the handlers from its execution, which their
-                // exceptions do not fail: as an exception of a callback, it goes to
-                // `sys.unraisablehook`.
+        Python::attach(|py| match self.notify_python(py, update, bar) {
+            Ok(()) => Ok(()),
+            Err(error) if update.done => {
                 error.write_unraisable(py, None);
+                Ok(())
             }
-        });
+            Err(error) => Err(crate::errors::callback_error(error)),
+        })
     }
 
     fn notify_python(&self, py: Python<'_>, update: &ProgressUpdate, bar: bool) -> PyResult<()> {

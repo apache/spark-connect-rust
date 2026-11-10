@@ -421,7 +421,7 @@ impl DataFrameWriter {
             ));
         }
         let mut op = proto::WriteOperation::default();
-        op.input = Some(build_input_relation(&self.input_plan, &self.session));
+        op.input = Some(build_input_relation(&self.input_plan, &self.session)?);
         op.source = self.format.clone();
         op.mode = self.mode.to_proto();
         op.sort_column_names = self.sort_cols.clone();
@@ -609,7 +609,7 @@ impl DataFrameWriterV2 {
         overwrite_condition: Option<proto::Expression>,
     ) -> Result<proto::WriteOperationV2> {
         let mut op = proto::WriteOperationV2::default();
-        op.input = Some(build_input_relation(&self.input_plan, &self.session));
+        op.input = Some(build_input_relation(&self.input_plan, &self.session)?);
         op.table_name = self.table_name.clone();
         op.provider = self.provider.clone();
         op.partitioning_columns = self.partition_cols.iter().map(|c| c.to_proto()).collect();
@@ -1000,6 +1000,7 @@ mod tests {
             .parse(format, &strings)
             .unwrap()
             .relation()
+            .unwrap()
             .rel_type
         {
             Some(RelType::Parse(parse)) => parse,
