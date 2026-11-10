@@ -25,6 +25,8 @@ members = [
     "crates/spark-connect-build",
     "crates/pyspark-rs",
     "examples",
+    "crates/spark-connect-server",
+    "crates/spark-connect-server/jni",
 ]
 exclude = [
     "examples/wasm-udfs",
@@ -39,9 +41,14 @@ exclude = [
 # The `examples/wasm-udfs`, `examples/wasm-udf-inline` and `tests/wasm-udf` crates
 # are excluded from the workspace entirely because they require the
 # `wasm32-unknown-unknown` target, which may not be installed on every machine
-# (so `cargo test --workspace` stays green without it). Build them explicitly with
+# (so workspace commands do not require that target). Build them explicitly with
 # `cargo build --manifest-path examples/wasm-udfs/Cargo.toml` (etc) in CI or when
 # the target is installed locally.
+# The experimental Rust server and JNI host are also opt-in. Build them with
+# `cargo build -p spark-connect-server` or `cargo build -p spark-connect-jni`;
+# workspace builds/tests/lint include the JNI host and need macOS/Linux with
+# JAVA_HOME pointing to a JDK 21 installation. On Windows or without a JDK,
+# use `--workspace --exclude spark-connect-jni`.
 default-members = [
     "crates/spark-connect-proto",
     "crates/spark-connect-core",
@@ -84,6 +91,7 @@ should_implement_trait = "allow"
 tonic = { version = "0.14" }
 tonic-prost = "0.14"
 tonic-prost-build = "0.14"
+tonic-build = "0.14"
 prost = "0.14"
 prost-types = "0.14"
 
@@ -91,6 +99,7 @@ prost-types = "0.14"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time"] }
 tokio-stream = "0.1"
 futures = "0.3"
+h2 = "0.4"
 
 # Arrow (result decoding).
 arrow = { version = "59", default-features = false, features = ["ipc", "ipc_compression", "prettyprint"] }
@@ -113,3 +122,5 @@ bytes = "1"
 thiserror = "2"
 uuid = { version = "1", features = ["v4"] }
 tracing = "0.1"
+libc = "0.2"
+cc = "1"

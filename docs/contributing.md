@@ -226,6 +226,16 @@ markers such as `TODO`, `FIXME`, `todo!()` or "for now" in `crates/*/src`
 (`bash scripts/audit_no_stubs.sh`). Match the surrounding code, keep changes focused,
 and add or update golden tests when you change plan or expression building.
 
+Workspace builds, tests and Clippy include the experimental JNI crate. It needs
+macOS or Linux and JDK 21 with `JAVA_HOME` set to its installation directory.
+On Windows, or to build/test/lint the other crates without a JDK, exclude it:
+
+```bash
+cargo build --workspace --exclude spark-connect-jni
+cargo test --workspace --exclude spark-connect-jni
+cargo clippy --workspace --all-targets --exclude spark-connect-jni -- -D warnings
+```
+
 Python is checked with ruff 0.14.0, the version CI pins, within the scope and excludes
 of `pyproject.toml`. Run it from the repository root without paths, as CI does:
 

@@ -39,6 +39,9 @@ __pycache__/
 /spark-warehouse
 /artifacts
 
+# Generated JNI/Java builds and local server acceptance artifacts.
+/crates/spark-connect-server/.build/
+
 # downloaded Spark distribution / pip package (never commit — CI downloads it)
 /pyspark-*.tar.gz
 /pyspark-[0-9]*/

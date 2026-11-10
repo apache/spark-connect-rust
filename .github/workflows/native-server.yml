@@ -1,0 +1,114 @@
+#
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+#
+
+name: Native JVM server CI
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+on:
+  push:
+    branches: [master, "branch-*"]
+    paths:
+      - ".github/workflows/native-server.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".cargo/**"
+      - "crates/spark-connect-server/**"
+      - "crates/spark-connect-proto/**"
+      - "crates/spark-connect-core/**"
+      - "crates/spark-connect/**"
+  pull_request:
+    branches: [master, "branch-*"]
+    paths:
+      - ".github/workflows/native-server.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".cargo/**"
+      - "crates/spark-connect-server/**"
+      - "crates/spark-connect-proto/**"
+      - "crates/spark-connect-core/**"
+      - "crates/spark-connect/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Bound parallel compilation and debug-artifact size on hosted runners.
+  CARGO_BUILD_JOBS: "2"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+
+jobs:
+  native-server:
+    name: Rust frontend and JNI ownership tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust MSRV
+        # Use runner-provided rustup to keep actions limited to actions/*.
+        run: |
+          rustup toolchain install 1.88.0 --profile minimal
+          rustup default 1.88.0
+          rustup component add clippy
+
+      - name: Set up JDK for JNI headers
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Cache cargo and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-jvm-server-1.88.0-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-jvm-server-1.88.0-
+
+      - name: Install protobuf compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
+      - name: Test frontend and JNI crates
+        # Deterministic engine fixtures; no Spark distribution is needed.
+        run: cargo test --locked -p spark-connect-server -p spark-connect-jni
+
+      - name: Strict Clippy for native crates
+        run: cargo clippy --locked -p spark-connect-server -p spark-connect-jni --all-targets --no-deps -- -D warnings
+
+      - name: Test acceptance runner guards
+        run: python3 -B crates/spark-connect-server/jvm/test_acceptance_guards.py
+
+      # Java compile/live acceptance requires the documented Spark development
+      # assembly and is validated locally with jvm/test-engine.sh.
+      - name: Test C ownership
+        run: crates/spark-connect-server/jni/test-c-export.sh
+
+      - name: Test C ownership with sanitizers
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1
+        run: crates/spark-connect-server/jni/test-c-export.sh --sanitize

@@ -4055,6 +4055,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "spark-connect-jni"
+version = "0.1.0"
+dependencies = [
+ "apache-spark-connect-proto",
+ "arrow",
+ "cc",
+ "futures",
+ "libc",
+ "prost",
+ "spark-connect-server",
+ "tokio",
+ "tonic",
+]
+
+[[package]]
+name = "spark-connect-server"
+version = "0.1.0"
+dependencies = [
+ "apache-spark-connect",
+ "apache-spark-connect-proto",
+ "arrow",
+ "futures",
+ "h2",
+ "prost",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tonic-build",
+ "tonic-prost",
+ "uuid",
+]
+
+[[package]]
 name = "sqlparser"
 version = "0.60.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

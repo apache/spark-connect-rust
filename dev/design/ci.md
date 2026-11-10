@@ -257,6 +257,27 @@ value.
 On a push to `master` the job also publishes both numbers to the `badges` branch, which
 the README badges read.
 
+## Experimental JVM server CI (`native-server.yml`)
+
+The WIP `spark-connect-server` and `spark-connect-jni` crates are optional
+workspace members, excluded from default Cargo builds. Their dedicated workflow
+runs on changes to these crates, their protocol/client dependencies, workspace
+dependencies and build configuration. Existing client workflows remain in place.
+
+The job installs Rust 1.88, JDK 21 and `protoc`, then runs the server and JNI Rust
+tests, strict Clippy for the new crates, the Python acceptance-runner guard tests,
+and the C Arrow ownership tests with and without sanitizers. The Rust tests use
+deterministic engine fixtures and do not require a Spark distribution. The JDK
+provides JNI headers for compiling the C adapter. Workspace-wide lint also sets
+up JDK 21 because its `--workspace` Clippy command includes the JNI crate.
+
+CI does not download a Spark snapshot, compile the Java adapter or run a live
+Spark JVM in this workflow. Those checks require the explicitly documented Spark
+assembly and are run locally with `jvm/test-engine.sh`. The
+[server guide](../../crates/spark-connect-server/README.md) records the tested
+assembly and reproducible local commands. A passing native CI job alone does not
+establish Spark-version compatibility or full protocol support.
+
 ## Continuous improvement
 
 The parity ledger (`dev/parity/inventory.csv`) is the source of truth. Its status values in use are:
