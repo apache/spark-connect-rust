@@ -201,8 +201,10 @@ difference is intentional or tracked for a fix.
   `DefaultChannelBuilder` parse the connection string and hold its parameters, `host`,
   `port`, `endpoint`, `get`, `set`, `userId`, `token`, `session_id`, `use_ssl`, `secure`
   and `metadata()`. The transport reads them as a `sc://` URL, so they apply. The gRPC
-  channel members do not: `toChannel`, `add_interceptor`, `setChannelOption`, the
-  keepalive properties and `userAgent`. A `channelOptions` argument raises
+  channel members do not: `toChannel`, `add_interceptor`, `setChannelOption`. The keepalive
+  properties and `userAgent` read the parameters as PySpark does, but `userAgent` reports
+  PySpark's `python/<version>` where the transport sends `python/rust` as the client type.
+  The Rust channel applies the keepalive from the same parameters. A `channelOptions` argument raises
   `NOT_IMPLEMENTED` instead of being ignored. A subclass that overrides `userId` or
   `token` is not read by the transport, which uses the parameters.
 - **Retry and reattach** (intentional; DESIGN). `RpcDeadlines`, `client.retries`

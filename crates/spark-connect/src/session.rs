@@ -2959,15 +2959,15 @@ mod tests {
 
     #[test]
     fn stop_is_idempotent_and_marks_stopped() {
-        // Port 1: nothing listens, so the ReleaseSession RPC fails fast. The session is
-        // still marked stopped (pyspark's stop() is best-effort) and a second stop() is a
-        // no-op that does not retry the release.
+        // Port 1: nothing listens, and a release there waits for the retry policy, as PySpark's
+        // does, so the session is closed without it: stop() then only marks it stopped, which
+        // is what a second stop() must find.
         let spark = SparkSession::builder()
             .remote("sc://localhost:1")
             .get_or_create()
             .expect("failed to build session");
         let other = spark.clone();
-        let _ = spark.stop();
+        spark.close();
         assert!(spark.is_stopped());
         assert!(other.is_stopped(), "stopped flag is shared across clones");
         assert!(spark.stop().is_ok());
@@ -2981,7 +2981,7 @@ mod tests {
             .remote("sc://localhost:1")
             .get_or_create()
             .expect("failed to build session");
-        let _ = spark.stop();
+        spark.close();
         let err = spark
             .conf()
             .get("spark.sql.shuffle.partitions")

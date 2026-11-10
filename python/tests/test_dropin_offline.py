@@ -950,6 +950,8 @@ assert seen == {"active": None, "default": first, "got": first}, seen
 created = SparkSession.builder.remote("sc://localhost:1").create()
 assert created is not first and SparkSession.getActiveSession() is first
 
+# No server at localhost:1 to release on: a release would wait for the retries of a refused port.
+first.release_session_on_close = False
 first.stop()
 assert SparkSession.getActiveSession() is None
 assert condition(SparkSession.active) == "NO_ACTIVE_OR_DEFAULT_SESSION"
@@ -2766,6 +2768,80 @@ def test_type_class_hierarchy():
     assert issubclass(T.IntegerType, T.NumericType)
     assert issubclass(T.NumericType, T.AtomicType)
     assert issubclass(T.AtomicType, T.DataType)
+
+
+def test_channel_builder_keepalive_and_user_agent_as_pyspark(monkeypatch):
+    # The keepalive properties, the user agent and the constants of PySpark's ChannelBuilder:
+    # the defaults of core.py, and the values of the parameters of the connection string.
+    import platform
+
+    from pyspark.errors.exceptions.connect import SparkConnectException
+    from pyspark.sql.connect.client import ChannelBuilder, DefaultChannelBuilder
+
+    monkeypatch.delenv("SPARK_CONNECT_USER_AGENT", raising=False)
+    assert ChannelBuilder.PARAM_USER_AGENT == "user_agent"
+    assert ChannelBuilder.PARAM_GRPC_KEEPALIVE_ENABLED == "grpc_keepalive_enabled"
+    assert ChannelBuilder.PARAM_GRPC_KEEPALIVE_TIME_MS == "grpc_keepalive_time_ms"
+    assert ChannelBuilder.PARAM_GRPC_KEEPALIVE_TIMEOUT_MS == "grpc_keepalive_timeout_ms"
+    assert ChannelBuilder.PARAM_GRPC_KEEPALIVE_WITHOUT_CALLS == "grpc_keepalive_without_calls"
+    assert ChannelBuilder.GRPC_DEFAULT_KEEPALIVE_ENABLED is True
+    assert ChannelBuilder.GRPC_DEFAULT_KEEPALIVE_TIME_MS == 60000
+    assert ChannelBuilder.GRPC_DEFAULT_KEEPALIVE_TIMEOUT_MS == 20000
+    assert ChannelBuilder.GRPC_DEFAULT_KEEPALIVE_WITHOUT_CALLS is True
+
+    default = DefaultChannelBuilder("sc://localhost")
+    assert default.keepalive_enabled is True
+    assert default.keepalive_time_ms == 60000
+    assert default.keepalive_timeout_ms == 20000
+    assert default.keepalive_without_calls is True
+    assert default.userAgent == (
+        f"_SPARK_CONNECT_PYTHON spark/4.3.0 os/{platform.uname().system.lower()} "
+        f"python/{platform.python_version()}"
+    )
+
+    tuned = DefaultChannelBuilder(
+        "sc://localhost/;grpc_keepalive_enabled=FALSE;grpc_keepalive_time_ms=30000"
+        ";grpc_keepalive_timeout_ms=5000;grpc_keepalive_without_calls=false"
+    )
+    assert tuned.keepalive_enabled is False
+    assert tuned.keepalive_time_ms == 30000
+    assert tuned.keepalive_timeout_ms == 5000
+    assert tuned.keepalive_without_calls is False
+    assert list(tuned.metadata()) == []  # the keepalive params are channel options, not metadata
+    # The gRPC options of the channel, as PySpark's: the keepalive of the defaults, and none
+    # of the keepalive when it is disabled.
+    message_lengths = [
+        ("grpc.max_send_message_length", 134217728),
+        ("grpc.max_receive_message_length", 134217728),
+    ]
+    assert default._effective_channel_options() == message_lengths + [
+        ("grpc.keepalive_time_ms", 60000),
+        ("grpc.keepalive_timeout_ms", 20000),
+        ("grpc.keepalive_permit_without_calls", 1),
+    ]
+    assert tuned._effective_channel_options() == message_lengths  # disabled: none of it
+    enabled = DefaultChannelBuilder(
+        "sc://localhost/;grpc_keepalive_time_ms=30000;grpc_keepalive_timeout_ms=5000"
+        ";grpc_keepalive_without_calls=false"
+    )
+    assert enabled._effective_channel_options() == message_lengths + [
+        ("grpc.keepalive_time_ms", 30000),
+        ("grpc.keepalive_timeout_ms", 5000),
+        ("grpc.keepalive_permit_without_calls", 0),
+    ]
+    with pytest.raises(ValueError):
+        DefaultChannelBuilder("sc://localhost/;grpc_keepalive_time_ms=abc").keepalive_time_ms
+
+    named = DefaultChannelBuilder("sc://localhost/;user_agent=abc")
+    assert named.userAgent == (
+        f"abc spark/4.3.0 os/{platform.uname().system.lower()} python/{platform.python_version()}"
+    )
+    monkeypatch.setenv("SPARK_CONNECT_USER_AGENT", "env-agent")
+    assert default.userAgent.startswith("env-agent spark/4.3.0 ")
+    too_long = DefaultChannelBuilder("sc://localhost")
+    too_long.set("user_agent", "a" * 2049)
+    with pytest.raises(SparkConnectException, match="should not exceed 2048 characters"):
+        too_long.userAgent
 
 
 @pytest.mark.parametrize("make, expected", [
@@ -11689,6 +11765,9 @@ def _no_session_left_active():
 
     session = SparkSession.getActiveSession()
     if session is not None:
+        # The servers of these sessions are mocks or unreachable: a release would wait for the
+        # retries of a refused port, so the session is closed without it.
+        session.release_session_on_close = False
         session.stop()
 
 
@@ -14527,8 +14606,11 @@ def test_variant_delete_requires_paths():
 
 
 def _offline_session():
-    # Port 1: nothing listens; the channel is lazy, so the session builds offline.
-    return SparkSession.builder.remote("sc://localhost:1").getOrCreate()
+    # Port 1: nothing listens; the channel is lazy, so the session builds offline. Nothing is
+    # released on it: a release would wait for the retries of a refused port.
+    spark = SparkSession.builder.remote("sc://localhost:1").getOrCreate()
+    spark.release_session_on_close = False
+    return spark
 
 
 def test_nearest_by_join_checks_its_arguments_as_pyspark():
@@ -14692,8 +14774,7 @@ def test_session_context_manager_stops_session():
     with spark as s:
         assert s is spark
         assert not s.is_stopped
-    # __exit__ stops it; stop() is best-effort (the release RPC fails offline) and
-    # idempotent.
+    # __exit__ stops it, and stop() is idempotent.
     assert spark.is_stopped
     spark.stop()
     assert SparkSession.getActiveSession() is None
@@ -14732,6 +14813,7 @@ def test_sql_context_connect_backed():
         assert ctx.udf is not None and ctx.read is not None
         # Stopping a different session leaves the cache; stopping its own clears it.
         other = spark.newSession()
+        other.release_session_on_close = False  # no server to release on, as spark
         other.stop()
         assert cctx.SQLContext._instantiatedContext is ctx
         spark.stop()
@@ -15999,6 +16081,8 @@ def test_requests_of_a_stopped_session_raise_no_active_session_as_pyspark():
 
     spark = _offline_session()
     other = spark.newSession()
+    # No server to release on, as the sessions of _offline_session().
+    other.release_session_on_close = False
     other.stop()
     assert other.is_stopped
     requests = [

@@ -15,7 +15,11 @@
 pyspark/sql/tests/connect/client/test_client.py  # tests grpcio channel/stub internals; this client's transport is Rust (SPARK-61111 module audit)
 pyspark/sql/tests/connect/client/test_client_retries.py  # tests the grpcio retry policy of the Python client; the Rust transport has its own
 pyspark/sql/tests/connect/client/test_client_call_stack_trace.py  # tests the Python client's call-stack trace plumbing, which the Rust transport replaces
-pyspark/sql/tests/connect/test_connect_channel.py  # tests the grpcio channel builder; ChannelBuilder is Rust-backed here
+# --- test_connect_channel.py runs against the drop-in; these four need a grpcio channel or a client built from a channel builder ---
+pyspark/sql/tests/connect/test_connect_channel.py::ChannelBuilderTests::test_channel_options  # passes channelOptions, which raises NOT_IMPLEMENTED by design (dev/parity/known-differences.md, custom gRPC channels)
+pyspark/sql/tests/connect/test_connect_channel.py::ChannelBuilderTests::test_keepalive_explicit_channel_option_wins  # passes channelOptions, as above
+pyspark/sql/tests/connect/test_connect_channel.py::ChannelBuilderTests::test_valid_channel_creation  # toChannel builds a grpcio channel; the gRPC channel is the Rust transport's, by design
+pyspark/sql/tests/connect/test_connect_channel.py::ChannelBuilderTests::test_metadata_with_session_id  # builds SparkConnectClient from a channel builder; ours is built from a session, which checks session_id when the session is built
 pyspark/sql/tests/connect/test_connect_retry.py  # tests the grpcio retry policy of the Python client; the Rust transport has its own
 pyspark/sql/tests/connect/test_connect_local_server.py  # starts a local grpcio server for the Python client; the Rust transport has no such server
 pyspark/sql/tests/connect/test_connect_plan.py  # tests the Python client's proto plan internals (LogicalPlan classes), built in Rust here
