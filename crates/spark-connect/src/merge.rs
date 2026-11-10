@@ -52,6 +52,11 @@ pub struct MergeIntoWriter {
 }
 
 impl MergeIntoWriter {
+    /// The session of this writer, whose executions it runs.
+    pub fn spark_session(&self) -> SparkSession {
+        self.session.clone()
+    }
+
     #[cfg(test)]
     pub(crate) fn plan(&self) -> &LogicalPlan {
         self.source_plan.as_ref()

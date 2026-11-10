@@ -302,6 +302,10 @@ pub struct DataFrameWriter {
 }
 
 impl DataFrameWriter {
+    /// The session of this writer, whose executions it runs.
+    pub fn spark_session(&self) -> SparkSession {
+        self.session.clone()
+    }
     #[cfg(test)]
     pub(crate) fn plan(&self) -> &LogicalPlan {
         self.input_plan.as_ref()
@@ -518,6 +522,10 @@ pub struct DataFrameWriterV2 {
 }
 
 impl DataFrameWriterV2 {
+    /// The session of this writer, whose executions it runs.
+    pub fn spark_session(&self) -> SparkSession {
+        self.session.clone()
+    }
     #[cfg(test)]
     pub(crate) fn plan(&self) -> &LogicalPlan {
         self.input_plan.as_ref()

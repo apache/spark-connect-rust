@@ -3680,6 +3680,64 @@ def test_udfs_of_types_with_user_defined_types_run_on_the_server_as_pyspark(sess
 
 
 
+def test_progress_handlers_run_on_the_thread_of_an_interruptible_collect_as_pyspark():
+    # As PySpark's: the handlers of an execution run in the thread that collects it, while the
+    # signals of the process are polled for that collect.
+    import subprocess
+    import sys
+
+    remote = os.environ.get("SPARK_REMOTE")
+    if not remote:
+        pytest.skip("SPARK_REMOTE is required for live-server tests")
+    result = subprocess.run([sys.executable, "-c", """
+import threading
+from pyspark.sql import SparkSession
+spark = SparkSession.builder.remote(%r).getOrCreate()
+spark.conf.set("spark.connect.progress.reportInterval", "10ms")
+main = threading.get_ident()
+threads = []
+spark.registerProgressHandler(lambda **kw: threads.append(threading.get_ident()))
+print(spark.range(0, 2000, 1, 4).repartition(20).selectExpr("sum(id) as t").collect())
+print("handler threads", len(threads), set(t == main for t in threads))
+""" % remote], env=dict(os.environ, TZ="UTC"), capture_output=True, text=True, timeout=300)
+    assert result.returncode == 0, result.stderr
+    lines = result.stdout.splitlines()
+    calls = int(lines[-1].split()[2])
+    assert calls >= 1, result.stdout
+    assert lines[-1] == "handler threads %d {True}" % calls, result.stdout
+
+
+def test_sigint_during_action_raises_keyboard_interrupt_and_the_session_works_as_pyspark():
+    # As PySpark's, from the issue: a SIGINT during a long action raises KeyboardInterrupt
+    # within a second or two, the operation is cancelled on the server, and the session goes on.
+    import subprocess
+    import sys
+
+    remote = os.environ.get("SPARK_REMOTE")
+    if not remote:
+        pytest.skip("SPARK_REMOTE is required for live-server tests")
+    result = subprocess.run([sys.executable, "-c", """
+import os, signal, threading, time
+from pyspark.sql import SparkSession, functions as F
+spark = SparkSession.builder.remote(%r).getOrCreate()
+slow = spark.range(0, 10**12, 1, 2).agg(F.sum(F.sqrt("id")))
+threading.Timer(3.0, lambda: os.kill(os.getpid(), signal.SIGINT)).start()
+started = time.monotonic()
+try:
+    slow.collect()
+    print("collect returned")
+except KeyboardInterrupt:
+    print("interrupted after %%.1f" %% (time.monotonic() - started))
+print("interrupted ids", spark.interruptAll())
+print("count", spark.range(3).count())
+""" % remote], env=dict(os.environ, TZ="UTC"), capture_output=True, text=True, timeout=120)
+    assert result.returncode == 0, result.stderr
+    lines = result.stdout.splitlines()
+    assert lines[0].startswith("interrupted after "), result.stdout
+    assert 3.0 <= float(lines[0].rsplit(" ", 1)[1]) < 5.0, result.stdout
+    assert lines[1:] == ["interrupted ids []", "count 3"], result.stdout
+
+
 def test_udfs_return_user_defined_types_of_main_as_pyspark():
     # As PySpark's: a UDT that __main__ defines, of parameters, is a UDF return type, as
     # cloudpickle sends its class by value and its state to the worker. In a new

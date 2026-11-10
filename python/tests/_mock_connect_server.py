@@ -19,6 +19,7 @@
 import json
 import multiprocessing
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from queue import Empty, Queue
@@ -290,6 +291,9 @@ def serve(connection):
             self.execute_payload = b""
             self.execute_failure = None
             self.execute_error = None
+            # The InterruptRequests of each Interrupt, and the operations that they interrupt.
+            self.interrupt_requests = []
+            self.interrupted_operations = set()
             self.error_details = b""
             self.fetched_error_ids = []
             # The warnings of each Set and Unset, as ConfigResponse.warnings=3, and the keys
@@ -598,7 +602,12 @@ def serve(connection):
                     if execute_epoch == self.listener_epoch:
                         self.execute_started += 1
                         self.listener_condition.notify_all()
-                if not response_gate.wait(5):
+                # ExecutePlanRequest.operation_id=6.
+                held_operation_id = parse_message(request).get(6, [b""])[0]
+                released = self.wait_for_response(response_gate, held_operation_id, 5)
+                if released == "interrupted":
+                    context.abort(grpc.StatusCode.CANCELLED, "Operation has been canceled")
+                if not released:
                     with self.listener_condition:
                         if execute_epoch == self.listener_epoch:
                             self.execute_gate_timeouts += 1
@@ -655,6 +664,28 @@ def serve(connection):
         def release_execute(self, request, context):
             self.release_execute_requests.append(request)
             return b""
+
+        def wait_for_response(self, gate, operation_id, timeout):
+            # Whether the gate is released, or "interrupted" once an Interrupt of the operation
+            # arrives, which ends the execution as the server cancels it.
+            deadline = time.monotonic() + timeout
+            while not gate.wait(0.01):
+                if operation_id in self.interrupted_operations:
+                    return "interrupted"
+                if time.monotonic() > deadline:
+                    return False
+            return True
+
+        def interrupt(self, request, context):
+            # InterruptRequest.session_id=1, interrupt_type=4, operation_id=6; InterruptResponse
+            # .session_id=1, interrupted_ids=2.
+            fields = parse_message(request)
+            self.interrupt_requests.append(request)
+            if fields.get(4, [0])[0] != 3:
+                context.abort(grpc.StatusCode.UNIMPLEMENTED, "only Interrupt of an operation")
+            operation_id = fields[6][0]
+            self.interrupted_operations.add(operation_id)
+            return message_field(1, fields[1][0]) + message_field(2, operation_id)
 
         def fetch_error_details(self, request, context):
             # FetchErrorDetailsRequest.error_id=3.
@@ -765,6 +796,7 @@ def serve(connection):
             "FetchErrorDetails": grpc.unary_unary_rpc_method_handler(service.fetch_error_details),
             "Config": grpc.unary_unary_rpc_method_handler(service.config),
             "CloneSession": grpc.unary_unary_rpc_method_handler(service.clone_session),
+            "Interrupt": grpc.unary_unary_rpc_method_handler(service.interrupt),
         }
         server.add_generic_rpc_handlers(
             (grpc.method_handlers_generic_handler("spark.connect.SparkConnectService", handlers),)

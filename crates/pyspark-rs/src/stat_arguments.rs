@@ -9,6 +9,7 @@ use spark_connect::group::StatFunctions;
 use crate::column::raise_pyspark;
 use crate::dataframe::PyDataFrame;
 use crate::errors::ResultExt;
+use crate::interrupt::interruptible;
 
 /// PySpark's `NOT_EXPECTED_TYPE` error of the argument `name`, `value`, which should be of
 /// the type `expected`.
@@ -222,8 +223,9 @@ pub(crate) fn cov(
         string_argument(col1, "col1")?,
         string_argument(col2, "col2")?,
     );
-    py.detach(|| stat.cov(&col1, &col2).map_err(Box::new))
-        .to_pyerr()
+    interruptible(py, &stat.spark_session(), || {
+        stat.cov(&col1, &col2).map_err(Box::new)
+    })
 }
 
 /// `df.corr(col1, col2, method)`, of two column names and the method "pearson", the default,
@@ -249,8 +251,9 @@ pub(crate) fn corr(
             ));
         }
     }
-    py.detach(|| stat.corr(&col1, &col2).map_err(Box::new))
-        .to_pyerr()
+    interruptible(py, &stat.spark_session(), || {
+        stat.corr(&col1, &col2).map_err(Box::new)
+    })
 }
 
 /// `df.crosstab(col1, col2)`, of two column names, as PySpark's.
@@ -363,7 +366,7 @@ pub(crate) fn approx_quantile(
     }
     let refs: Vec<&str> = columns.iter().map(String::as_str).collect();
     let df = stat.approx_quantile(refs, quantiles, error);
-    let rows = py.detach(|| df.collect().map_err(Box::new)).to_pyerr()?;
+    let rows = interruptible(py, &df.spark_session(), || df.collect().map_err(Box::new))?;
     // One row, of the array of the quantiles of each column.
     let per_column: Vec<Vec<f64>> = match rows.first().and_then(|row| row.get(0)) {
         Some(Value::List(columns)) => columns

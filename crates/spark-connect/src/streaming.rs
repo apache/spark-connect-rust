@@ -299,6 +299,10 @@ pub struct DataStreamWriter {
 }
 
 impl DataStreamWriter {
+    /// The session of this writer, whose executions it runs.
+    pub fn spark_session(&self) -> SparkSession {
+        self.session.clone()
+    }
     #[cfg(test)]
     pub(crate) fn plan(&self) -> &LogicalPlan {
         self.plan.as_ref()
@@ -554,6 +558,10 @@ pub struct StreamingQuery {
 }
 
 impl StreamingQuery {
+    /// The session of this query, whose executions it runs.
+    pub fn spark_session(&self) -> SparkSession {
+        self.session.clone()
+    }
     /// Get the query ID.
     pub fn id(&self) -> &str {
         &self.query_id
@@ -1234,6 +1242,10 @@ pub struct StreamingQueryManager {
 }
 
 impl StreamingQueryManager {
+    /// The session of this manager, whose executions it runs.
+    pub fn spark_session(&self) -> SparkSession {
+        self.session.clone()
+    }
     /// Create a handle to this session's shared StreamingQueryManager state.
     pub(crate) fn new(session: SparkSession) -> Self {
         let bus = session.listener_bus();

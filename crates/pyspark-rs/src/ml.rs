@@ -14,6 +14,7 @@ use spark_connect::ml::{
 
 use crate::dataframe::PyDataFrame;
 use crate::errors::ResultExt;
+use crate::interrupt::interruptible;
 
 /// A fitted ML model (result of `Estimator.fit`), wrapping a boxed core `Model`.
 #[pyclass(name = "MLModel", module = "pyspark.ml.connect")]
@@ -26,7 +27,9 @@ impl PyMLModel {
     /// Apply the model to a DataFrame.
     fn transform(&self, py: Python<'_>, df: &PyDataFrame) -> PyResult<PyDataFrame> {
         let mut m = self.model.clone_box();
-        let out = py.detach(|| m.transform(&df.dataframe)).to_pyerr()?;
+        let out = py
+            .detach(|| m.transform(&df.dataframe).map_err(Box::new))
+            .to_pyerr()?;
         Ok(PyDataFrame::new(out))
     }
 }
@@ -66,7 +69,9 @@ impl PyStandardScaler {
     }
     fn fit(&self, py: Python<'_>, df: &PyDataFrame) -> PyResult<PyMLModel> {
         let mut e = self.inner.clone();
-        let model = py.detach(|| e.fit(&df.dataframe)).to_pyerr()?;
+        let model = interruptible(py, &df.dataframe.spark_session(), || {
+            e.fit(&df.dataframe).map_err(Box::new)
+        })?;
         Ok(PyMLModel { model })
     }
 }
@@ -106,7 +111,9 @@ impl PyMaxAbsScaler {
     }
     fn fit(&self, py: Python<'_>, df: &PyDataFrame) -> PyResult<PyMLModel> {
         let mut e = self.inner.clone();
-        let model = py.detach(|| e.fit(&df.dataframe)).to_pyerr()?;
+        let model = interruptible(py, &df.dataframe.spark_session(), || {
+            e.fit(&df.dataframe).map_err(Box::new)
+        })?;
         Ok(PyMLModel { model })
     }
 }
@@ -146,7 +153,9 @@ impl PyStringIndexer {
     }
     fn fit(&self, py: Python<'_>, df: &PyDataFrame) -> PyResult<PyMLModel> {
         let mut e = self.inner.clone();
-        let model = py.detach(|| e.fit(&df.dataframe)).to_pyerr()?;
+        let model = interruptible(py, &df.dataframe.spark_session(), || {
+            e.fit(&df.dataframe).map_err(Box::new)
+        })?;
         Ok(PyMLModel { model })
     }
 }
@@ -188,7 +197,9 @@ impl PyVectorAssembler {
     }
     fn transform(&self, py: Python<'_>, df: &PyDataFrame) -> PyResult<PyDataFrame> {
         let mut t = self.inner.clone();
-        let out = py.detach(|| t.transform(&df.dataframe)).to_pyerr()?;
+        let out = py
+            .detach(|| t.transform(&df.dataframe).map_err(Box::new))
+            .to_pyerr()?;
         Ok(PyDataFrame::new(out))
     }
 }
@@ -254,7 +265,9 @@ impl PyLogisticRegression {
     }
     fn fit(&self, py: Python<'_>, df: &PyDataFrame) -> PyResult<PyMLModel> {
         let mut e = self.inner.clone();
-        let model = py.detach(|| e.fit(&df.dataframe)).to_pyerr()?;
+        let model = interruptible(py, &df.dataframe.spark_session(), || {
+            e.fit(&df.dataframe).map_err(Box::new)
+        })?;
         Ok(PyMLModel { model })
     }
 }
@@ -387,9 +400,9 @@ impl PyLinearSVC {
 
     fn fit(&self, py: Python<'_>, df: &PyDataFrame) -> PyResult<PyMLModel> {
         let mut estimator = self.inner.clone();
-        let model = py
-            .detach(|| estimator.fit(&df.dataframe).map_err(Box::new))
-            .to_pyerr()?;
+        let model = interruptible(py, &df.dataframe.spark_session(), || {
+            estimator.fit(&df.dataframe).map_err(Box::new)
+        })?;
         Ok(PyMLModel { model })
     }
 }
@@ -535,9 +548,9 @@ impl PyLinearRegression {
 
     fn fit(&self, py: Python<'_>, df: &PyDataFrame) -> PyResult<PyMLModel> {
         let mut estimator = self.inner.clone();
-        let model = py
-            .detach(|| estimator.fit(&df.dataframe).map_err(Box::new))
-            .to_pyerr()?;
+        let model = interruptible(py, &df.dataframe.spark_session(), || {
+            estimator.fit(&df.dataframe).map_err(Box::new)
+        })?;
         Ok(PyMLModel { model })
     }
 }
@@ -715,7 +728,9 @@ impl PyRegressionEvaluator {
         }
     }
     fn evaluate(&self, py: Python<'_>, df: &PyDataFrame) -> PyResult<f64> {
-        py.detach(|| self.inner.evaluate(&df.dataframe)).to_pyerr()
+        interruptible(py, &df.dataframe.spark_session(), || {
+            self.inner.evaluate(&df.dataframe).map_err(Box::new)
+        })
     }
 }
 
@@ -769,7 +784,9 @@ impl PyBinaryClassificationEvaluator {
         }
     }
     fn evaluate(&self, py: Python<'_>, df: &PyDataFrame) -> PyResult<f64> {
-        py.detach(|| self.inner.evaluate(&df.dataframe)).to_pyerr()
+        interruptible(py, &df.dataframe.spark_session(), || {
+            self.inner.evaluate(&df.dataframe).map_err(Box::new)
+        })
     }
 }
 
@@ -800,7 +817,9 @@ impl PyPipeline {
     }
     fn fit(&self, py: Python<'_>, df: &PyDataFrame) -> PyResult<PyMLModel> {
         let mut e = self.inner.clone();
-        let model = py.detach(|| e.fit(&df.dataframe)).to_pyerr()?;
+        let model = interruptible(py, &df.dataframe.spark_session(), || {
+            e.fit(&df.dataframe).map_err(Box::new)
+        })?;
         Ok(PyMLModel { model })
     }
 }
@@ -855,7 +874,9 @@ impl PyMulticlassClassificationEvaluator {
         }
     }
     fn evaluate(&self, py: Python<'_>, df: &PyDataFrame) -> PyResult<f64> {
-        py.detach(|| self.inner.evaluate(&df.dataframe)).to_pyerr()
+        interruptible(py, &df.dataframe.spark_session(), || {
+            self.inner.evaluate(&df.dataframe).map_err(Box::new)
+        })
     }
 }
 
@@ -903,7 +924,9 @@ impl PyCrossValidator {
     }
     fn fit(&self, py: Python<'_>, df: &PyDataFrame) -> PyResult<PyMLModel> {
         let mut e = self.inner.clone();
-        let model = py.detach(|| e.fit(&df.dataframe)).to_pyerr()?;
+        let model = interruptible(py, &df.dataframe.spark_session(), || {
+            e.fit(&df.dataframe).map_err(Box::new)
+        })?;
         Ok(PyMLModel { model })
     }
 }

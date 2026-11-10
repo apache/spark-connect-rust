@@ -10,6 +10,7 @@ use spark_connect_core::error::SparkError;
 
 use crate::dataframe::PyDataFrame;
 use crate::errors::ResultExt;
+use crate::interrupt::interruptible;
 
 /// PySpark's FutureWarning of the deprecated `dbName` of the catalog method `method`.
 fn warn_db_name(py: Python<'_>, method: &str, db_name: Option<&str>) -> PyResult<()> {
@@ -179,13 +180,13 @@ impl PyCatalog {
     }
 
     /// `f` of the catalog without the GIL, as PySpark's requests to the server release it
-    /// while they wait, so that other Python threads run.
+    /// while they wait, so that other Python threads run and a signal interrupts the wait.
     fn detached<T: Send>(
         &self,
         py: Python<'_>,
         f: impl FnOnce(&Catalog) -> Result<T, Box<SparkError>> + Send,
     ) -> PyResult<T> {
-        py.detach(|| f(&self.catalog)).to_pyerr()
+        interruptible(py, self.catalog.spark_session(), || f(&self.catalog))
     }
 }
 

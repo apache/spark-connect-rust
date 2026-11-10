@@ -1079,6 +1079,19 @@ impl SparkSession {
         block_on(self.client.interrupt_operation(operation_id))
     }
 
+    /// Interrupt the operation with the given operation id, as a future, for a wait that drives
+    /// it (see [`spark_connect_core::runtime::with_wait_watch`]).
+    pub async fn interrupt_operation_async(&self, operation_id: &str) -> Result<Vec<String>> {
+        self.client.interrupt_operation(operation_id).await
+    }
+
+    /// The operation ID of the innermost execution in flight that the calling thread started, if
+    /// any. A wait for an execution interrupts it with [`Self::interrupt_operation_async`] when a
+    /// signal of the process raises, as PySpark's `KeyboardInterrupt` does.
+    pub fn running_operation_id(&self) -> Option<String> {
+        self.client.running_operation_id()
+    }
+
     /// Add local files, or `file:` URIs, as artifacts of the session, mirroring
     /// `pyspark.sql.SparkSession.addArtifacts(*path)`: a `.jar` is added to the classpath and
     /// a `.class` to the classes (a Rust extension: PySpark does not upload class files); any

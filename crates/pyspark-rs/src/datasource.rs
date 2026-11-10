@@ -6,7 +6,7 @@ use spark_connect::datasource::{
 };
 
 use crate::dataframe::{py_cloudpickle, py_version};
-use crate::errors::ResultExt;
+use crate::interrupt::interruptible;
 use crate::session::PySparkSession;
 
 /// Python accessor for data source registration.
@@ -55,8 +55,9 @@ impl PyDataSourceRegistration {
 
         // Register with the session (release GIL during the RPC)
         let session = self.session.borrow(py).session.clone();
-        py.detach(|| session.register_data_source(expr))
-            .to_pyerr()?;
+        interruptible(py, &session, || {
+            session.register_data_source(expr).map_err(Box::new)
+        })?;
 
         Ok(())
     }

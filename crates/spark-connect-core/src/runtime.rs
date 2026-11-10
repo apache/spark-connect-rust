@@ -4,7 +4,10 @@
 //! and a `block_on` helper so that synchronous Python code can call async
 //! Rust functions at the PyO3 boundary.
 
-use std::sync::{Once, OnceLock};
+use std::cell::RefCell;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::{Arc, Once, OnceLock};
 use tokio::runtime::Runtime;
 
 static RUNTIME_INIT: Once = Once::new();
@@ -43,12 +46,85 @@ where
     F: std::future::Future + Send,
     F::Output: Send,
 {
+    let watch = WAIT_WATCH.with(|watch| watch.borrow().clone());
     match tokio::runtime::Handle::try_current() {
         Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
-            tokio::task::block_in_place(|| get_runtime().block_on(f))
+            tokio::task::block_in_place(|| drive(f, watch))
         }
         Ok(_) => block_on_other_thread(f),
-        _ => get_runtime().block_on(f),
+        _ => drive(f, watch),
+    }
+}
+
+/// What a wait for the server does at a poll of the signals of the process (see
+/// [`with_wait_watch`]).
+pub enum Watch {
+    /// Keep waiting for the server.
+    Continue,
+    /// Interrupt the execution that the wait is for, by this future, which the wait drives to its
+    /// end. The wait then ends with the server's cancellation of the execution.
+    Interrupt(Pin<Box<dyn Future<Output = ()> + Send>>),
+}
+
+/// The poll of the signals of the process of a wait, which the wait calls every
+/// [`POLL_INTERVAL`] on the thread that waits.
+pub type WaitWatch = dyn Fn() -> Watch + Send + Sync;
+
+thread_local! {
+    static WAIT_WATCH: RefCell<Option<Arc<WaitWatch>>> = const { RefCell::new(None) };
+}
+
+/// Run `f` on this thread, with `watch` called by the waits for the server that `f` makes on this
+/// thread, as [`block_on`] makes them: the waits poll `watch` every [`POLL_INTERVAL`] while the
+/// future of each waits. A wait on another thread (see [`block_on`]) does not poll it. The watch of
+/// `f` ends with it, and the watch of an enclosing call is restored.
+pub fn with_wait_watch<R>(watch: Arc<WaitWatch>, f: impl FnOnce() -> R) -> R {
+    struct Restore(Option<Arc<WaitWatch>>);
+
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let previous = self.0.take();
+            WAIT_WATCH.with(|current| *current.borrow_mut() = previous);
+        }
+    }
+
+    let previous = WAIT_WATCH.with(|current| current.replace(Some(watch)));
+    let _restore = Restore(previous);
+    f()
+}
+
+/// How often a wait for the server polls its [`WaitWatch`].
+pub const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// Drive `f` on the shared runtime, polling `watch` (if any) as the wait goes on.
+fn drive<F: Future>(f: F, watch: Option<Arc<WaitWatch>>) -> F::Output {
+    match watch {
+        Some(watch) => get_runtime().block_on(watched(f, watch)),
+        None => get_runtime().block_on(f),
+    }
+}
+
+/// `f`, polled as it is, and `watch` called every [`POLL_INTERVAL`] until it returns an interrupt,
+/// which is spawned once. `f` is driven to its end, and the interrupt is awaited with it, so that
+/// the cleanup of `f` runs as the server ends the execution.
+async fn watched<F: Future>(f: F, watch: Arc<WaitWatch>) -> F::Output {
+    tokio::pin!(f);
+    let mut ticks = tokio::time::interval(POLL_INTERVAL);
+    let mut interrupt: Option<tokio::task::JoinHandle<()>> = None;
+    loop {
+        tokio::select! {
+            output = &mut f => {
+                if let Some(interrupt) = interrupt {
+                    let _ = interrupt.await;
+                }
+                return output;
+            }
+            _ = ticks.tick(), if interrupt.is_none() => {
+                if let Watch::Interrupt(sent) = watch() {
+                    interrupt = Some(tokio::spawn(sent));
+                }
+            }
+        }
     }
 }
 
@@ -205,6 +281,61 @@ mod tests {
             x + y
         });
         assert_eq!(result, 30);
+    }
+
+    #[test]
+    fn test_watch_is_called_while_the_future_waits() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&calls);
+        let watch: Arc<WaitWatch> = Arc::new(move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+            Watch::Continue
+        });
+        let output = with_wait_watch(watch, || {
+            block_on(async {
+                tokio::time::sleep(POLL_INTERVAL * 5).await;
+                7
+            })
+        });
+        assert_eq!(output, 7);
+        assert!(calls.load(Ordering::SeqCst) >= 2);
+    }
+
+    #[test]
+    fn test_interrupt_of_a_watch_is_driven_to_the_end_of_the_wait() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let fired = AtomicBool::new(false);
+        let interrupted = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&interrupted);
+        let watch: Arc<WaitWatch> = Arc::new(move || {
+            if fired.swap(true, Ordering::SeqCst) {
+                Watch::Continue
+            } else {
+                let flag = Arc::clone(&flag);
+                Watch::Interrupt(Box::pin(async move { flag.store(true, Ordering::SeqCst) }))
+            }
+        });
+        let output = with_wait_watch(watch, || {
+            block_on(async {
+                tokio::time::sleep(POLL_INTERVAL * 5).await;
+                9
+            })
+        });
+        assert_eq!(output, 9);
+        assert!(interrupted.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_with_wait_watch_restores_the_enclosing_watch() {
+        let outer: Arc<WaitWatch> = Arc::new(|| Watch::Continue);
+        let is_outer =
+            |w: &Option<Arc<WaitWatch>>| w.as_ref().is_some_and(|w| Arc::ptr_eq(w, &outer));
+        with_wait_watch(Arc::clone(&outer), || {
+            with_wait_watch(Arc::new(|| Watch::Continue), || {});
+            assert!(WAIT_WATCH.with(|w| is_outer(&w.borrow())));
+        });
+        assert!(WAIT_WATCH.with(|w| w.borrow().is_none()));
     }
 
     fn current_thread_runtime() -> tokio::runtime::Runtime {
