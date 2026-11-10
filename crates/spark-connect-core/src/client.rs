@@ -29,7 +29,7 @@ use crate::artifact::{
 use crate::channel::{ChannelBuilder, GRPC_MAX_MESSAGE_LENGTH_DEFAULT};
 use crate::error::{Result, SparkError, SparkErrorKind};
 use crate::reattach::ExecutePlanResponseReattachableIterator;
-use crate::retries::{RetryPolicy, RetryPolicyState};
+use crate::retries::{retry_delay_ms, RetryPolicy, RetryPolicyState};
 use crate::thread_entries::forget_when_thread_ends;
 
 /// How long to wait for the lazy gRPC channel to become ready before surfacing a
@@ -1184,7 +1184,7 @@ impl SparkConnectClient {
                 Ok(v) => return Ok(v),
                 Err(status) => {
                     if self.retry_policy.can_retry(&status) {
-                        if let Some(wait_ms) = state.next_attempt(None) {
+                        if let Some(wait_ms) = state.next_attempt(retry_delay_ms(&status)) {
                             tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
                             // As the reference's `_stub`, through which each attempt goes: once
                             // the client is closed (its session stopped while the call waited),
@@ -1957,7 +1957,7 @@ impl SparkConnectClient {
                 }
                 Err(status) => {
                     if self.retry_policy.can_retry(&status) {
-                        if let Some(wait_ms) = state.next_attempt(None) {
+                        if let Some(wait_ms) = state.next_attempt(retry_delay_ms(&status)) {
                             tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
                             // As in `with_retry`: a closed client sends no more attempts.
                             self.ensure_open()?;
@@ -2139,7 +2139,7 @@ impl SparkConnectClient {
                     Ok(_) => return,
                     Err(status) => {
                         if policy.can_retry(&status) {
-                            if let Some(w) = state.next_attempt(None) {
+                            if let Some(w) = state.next_attempt(retry_delay_ms(&status)) {
                                 tokio::time::sleep(Duration::from_millis(w)).await;
                                 continue;
                             }
@@ -2321,7 +2321,7 @@ impl ReattachableResponseStream {
                 continue;
             }
             if self.retry_policy.can_retry(&status) {
-                if let Some(w) = retry_state.next_attempt(None) {
+                if let Some(w) = retry_state.next_attempt(retry_delay_ms(&status)) {
                     tokio::time::sleep(Duration::from_millis(w)).await;
                     continue;
                 }
