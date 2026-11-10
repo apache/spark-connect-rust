@@ -6130,6 +6130,66 @@ def test_variant_val_pickles_as_pyspark():
     assert (value.value, value.metadata) == (b"\x0c\x01", b"\x01\x00\x00")
 
 
+class _TaggedVariant(T.VariantVal):
+    # Unpickling must not call this __init__, which needs the tag.
+    def __init__(self, value, metadata, tag):
+        super().__init__(value, metadata)
+        self.tag = tag
+
+
+def test_variant_val_subclass_as_pyspark():
+    # As PySpark's VariantVal, which a subclass of it is: it is repr'd, str'd and typed as the
+    # class does, compares by identity, and pickles as its class with its attributes, without
+    # running its __init__.
+    import pickle
+
+    from pyspark.errors import PySparkValueError
+
+    class TaggedVariant(T.VariantVal):
+        pass
+
+    v = T.VariantVal.parseJson('{"a": 1}')
+    tagged = TaggedVariant(v.value, v.metadata)
+    assert repr(tagged) == repr(v) and str(tagged) == str(v) == '{"a":1}'
+    assert tagged.toJson() == v.toJson() and tagged.toPython() == {"a": 1}
+    assert tagged != TaggedVariant(v.value, v.metadata)
+
+    original = _TaggedVariant(v.value, v.metadata, "x")
+    original.extra = "kept"
+    restored = pickle.loads(pickle.dumps(original))
+    assert (type(restored), restored.tag, restored.extra) == (_TaggedVariant, "x", "kept")
+    assert (restored.value, restored.metadata) == (v.value, v.metadata)
+
+    assert T._infer_type(tagged) == T.VariantType()
+    struct = T.StructType([T.StructField("v", T.VariantType())])
+    with pytest.raises(PySparkValueError, match="Rows cannot be of type VariantVal"):
+        _offline_session().createDataFrame([tagged], struct)
+
+
+def test_variant_val_subclass_is_sent_as_its_variant(mock_connect):
+    # As PySpark's LocalDataToArrowConversion: a subclass of VariantVal is sent as the struct of
+    # its value and metadata, as the VariantVal of which it is a subclass is.
+    import pyarrow as pa
+
+    spark, service = mock_connect
+
+    def local_table(df):
+        df.toArrow()
+        request = parse_message(service.execute_requests[-1])
+        relation = parse_message(parse_message(request[3][0])[1][0])
+        while 18 in relation:  # Relation.to_df -> ToDF.input.
+            relation = parse_message(parse_message(relation[18][0])[1][0])
+        # Relation.local_relation=11 -> LocalRelation.data=1.
+        local = parse_message(relation[11][0])
+        return pa.ipc.open_stream(local[1][0]).read_all()
+
+    value, metadata = b"\x0c\x01", b"\x01\x00\x00"
+    tagged = _TaggedVariant(value, metadata, "x")
+    sent = local_table(spark.createDataFrame([(tagged,)], "v variant"))
+    assert sent.to_pylist() == local_table(
+        spark.createDataFrame([(T.VariantVal(value, metadata),)], "v variant")).to_pylist()
+
+
 def test_str_of_variant_values_is_their_json_and_they_are_no_rows_as_pyspark():
     # As PySpark's VariantVal: str is its JSON, in UTC, as toJson(); repr is of its bytes. And
     # as PySpark's createDataFrame, whose VariantVal has a __dict__, so that it is a row, which
