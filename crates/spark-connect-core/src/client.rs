@@ -297,6 +297,46 @@ pub struct SparkConnectClient {
     /// check of the IDs of its responses, and its close when the server reports that the session
     /// changed. See [`SparkConnectClient::set_session_tracking`].
     session_tracking: bool,
+    /// The executions in flight, shared by the clones of the client, each with the calling
+    /// thread that started it, in the order they started. See
+    /// [`SparkConnectClient::running_operation_id`].
+    inflight_operations: std::sync::Arc<std::sync::Mutex<Vec<InflightEntry>>>,
+}
+
+/// An execution in flight: the thread that started it, and its operation ID.
+#[derive(Debug, Clone, PartialEq)]
+struct InflightEntry {
+    thread: std::thread::ThreadId,
+    operation_id: String,
+}
+
+/// Keeps an execution in the registry of the in-flight executions of its client until it drops.
+struct InflightGuard {
+    registry: std::sync::Arc<std::sync::Mutex<Vec<InflightEntry>>>,
+    entry: InflightEntry,
+}
+
+impl InflightGuard {
+    /// Register `entry` in `registry` until the guard drops.
+    fn register(
+        registry: std::sync::Arc<std::sync::Mutex<Vec<InflightEntry>>>,
+        entry: InflightEntry,
+    ) -> Self {
+        registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(entry.clone());
+        InflightGuard { registry, entry }
+    }
+}
+
+impl Drop for InflightGuard {
+    fn drop(&mut self) {
+        let mut inflight = self.registry.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(position) = inflight.iter().rposition(|entry| *entry == self.entry) {
+            inflight.remove(position);
+        }
+    }
 }
 
 /// The user context extensions of a client, as PySpark's `SparkConnectClient` keeps them: those
@@ -418,6 +458,7 @@ impl SparkConnectClient {
             closed: Default::default(),
             server_session_id: Default::default(),
             session_tracking: true,
+            inflight_operations: Default::default(),
         })
     }
 
@@ -447,6 +488,7 @@ impl SparkConnectClient {
             closed: Default::default(),
             server_session_id: Default::default(),
             session_tracking: self.session_tracking,
+            inflight_operations: Default::default(),
         }
     }
 
@@ -460,6 +502,22 @@ impl SparkConnectClient {
     /// Whether the client is closed. See [`SparkConnectClient::close`].
     pub fn is_closed(&self) -> bool {
         self.closed.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// The operation ID of the innermost execution in flight that the calling thread started, if
+    /// any: the one that a wait of the calling thread is for, as PySpark interrupts the operation
+    /// of the iterator that is interrupted.
+    pub fn running_operation_id(&self) -> Option<String> {
+        let thread = crate::runtime::calling_thread_id();
+        let inflight = self
+            .inflight_operations
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        inflight
+            .iter()
+            .rev()
+            .find(|entry| entry.thread == thread)
+            .map(|entry| entry.operation_id.clone())
     }
 
     /// The error of an RPC of a closed client, as PySpark's `SparkConnectClient._stub` raises it.
@@ -974,6 +1032,14 @@ impl SparkConnectClient {
         self.observe_on(&mut request.client_observed_server_side_session_id);
         let request = self.hooked(request)?;
         let iter = ExecutePlanResponseReattachableIterator::new(request);
+        // Before the first RPC, so that an execution that waits for the server is in flight.
+        let inflight = InflightGuard::register(
+            std::sync::Arc::clone(&self.inflight_operations),
+            InflightEntry {
+                thread: crate::runtime::calling_thread_id(),
+                operation_id: iter.operation_id().to_string(),
+            },
+        );
         let start = iter.request().clone();
         let deadline = self.rpc_deadlines.reattachable_execute_plan;
         let mut stream_deadline = None;
@@ -1013,6 +1079,7 @@ impl SparkConnectClient {
             execute_again: false,
             done: false,
             released: false,
+            _inflight: inflight,
         })
     }
 
@@ -1810,6 +1877,8 @@ pub struct ReattachableResponseStream {
     done: bool,
     /// Whether `ReleaseAll` was sent, after which nothing else is released.
     released: bool,
+    /// The registration of the execution as in flight, which ends with the stream.
+    _inflight: InflightGuard,
 }
 
 /// The user ID of a connection string that does not set one: `SPARK_USER`, else `USER`, as
@@ -2352,6 +2421,46 @@ mod tests {
             "expected an `Authorization: Bearer` header on the request, got {:?}",
             req.metadata()
         );
+    }
+
+    #[test]
+    fn test_running_operation_id_is_the_innermost_execution_of_the_calling_thread() {
+        let client = connect_blocking("sc://example.com");
+        assert_eq!(client.running_operation_id(), None);
+        let entry = |thread, operation_id: &str| InflightEntry {
+            thread,
+            operation_id: operation_id.to_string(),
+        };
+        let caller = crate::runtime::calling_thread_id();
+        let outer = InflightGuard::register(
+            std::sync::Arc::clone(&client.inflight_operations),
+            entry(caller, "outer"),
+        );
+        let inner = InflightGuard::register(
+            std::sync::Arc::clone(&client.inflight_operations),
+            entry(caller, "inner"),
+        );
+        assert_eq!(client.running_operation_id().as_deref(), Some("inner"));
+        drop(inner);
+        assert_eq!(client.running_operation_id().as_deref(), Some("outer"));
+        // The executions of another thread are not those of the calling thread.
+        let other = std::thread::spawn({
+            let client = client.clone();
+            let registry = std::sync::Arc::clone(&client.inflight_operations);
+            move || {
+                let _guard = InflightGuard::register(
+                    registry,
+                    entry(crate::runtime::calling_thread_id(), "other"),
+                );
+                client.running_operation_id()
+            }
+        })
+        .join()
+        .unwrap();
+        assert_eq!(other.as_deref(), Some("other"));
+        assert_eq!(client.running_operation_id().as_deref(), Some("outer"));
+        drop(outer);
+        assert_eq!(client.running_operation_id(), None);
     }
 
     /// Connects a client on a runtime of its own, for the tests that set the environment.

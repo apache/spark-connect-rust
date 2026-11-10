@@ -540,6 +540,11 @@ pub struct StatFunctions {
 }
 
 impl StatFunctions {
+    /// The session of these statistics, whose executions they run.
+    pub fn spark_session(&self) -> crate::session::SparkSession {
+        self.dataframe.spark_session()
+    }
+
     /// Create a new StatFunctions.
     pub(crate) fn new(dataframe: DataFrame) -> Self {
         StatFunctions { dataframe }

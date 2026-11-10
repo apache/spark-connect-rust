@@ -15,6 +15,7 @@ use spark_connect_proto as proto;
 use crate::column::PyColumn;
 use crate::dataframe::PyDataFrame;
 use crate::errors::ResultExt;
+use crate::interrupt::interruptible;
 use crate::session::PySparkSession;
 use crate::types::py_to_data_type;
 
@@ -66,17 +67,15 @@ pub fn pipeline_create_dataflow_graph(
     sql_conf: Option<HashMap<String, String>>,
 ) -> PyResult<String> {
     let sess = session.session.clone();
-    session
-        .py()
-        .detach(|| {
-            pipelines::create_dataflow_graph(
-                &sess,
-                default_catalog,
-                default_database,
-                sql_conf.unwrap_or_default(),
-            )
-        })
-        .to_pyerr()
+    interruptible(session.py(), &sess, || {
+        pipelines::create_dataflow_graph(
+            &sess,
+            default_catalog,
+            default_database,
+            sql_conf.unwrap_or_default(),
+        )
+        .map_err(Box::new)
+    })
 }
 
 /// `PipelineCommand.DefineOutput`. `output_type` is the `spark.connect.OutputType` enum
@@ -141,10 +140,9 @@ pub fn pipeline_define_output(
     };
     let sess = session.session.clone();
     let gid = dataflow_graph_id.to_string();
-    session
-        .py()
-        .detach(|| pipelines::define_output(&sess, &gid, spec))
-        .to_pyerr()
+    interruptible(session.py(), &sess, || {
+        pipelines::define_output(&sess, &gid, spec).map_err(Box::new)
+    })
 }
 
 /// `PipelineCommand.DefineFlow` with a relation body (query-defined flow).
@@ -169,20 +167,18 @@ pub fn pipeline_define_flow(
         target.to_string(),
     );
     let scl = scl(scl_file, scl_line);
-    session
-        .py()
-        .detach(|| {
-            pipelines::define_flow(
-                &sess,
-                &gid,
-                &fname,
-                &tgt,
-                &df,
-                sql_conf.unwrap_or_default(),
-                scl,
-            )
-        })
-        .to_pyerr()
+    interruptible(session.py(), &sess, || {
+        pipelines::define_flow(
+            &sess,
+            &gid,
+            &fname,
+            &tgt,
+            &df,
+            sql_conf.unwrap_or_default(),
+            scl,
+        )
+        .map_err(Box::new)
+    })
 }
 
 /// `PipelineCommand.DefineFlow` carrying an Auto-CDC flow body. `stored_as_scd_type` is
@@ -243,20 +239,18 @@ pub fn pipeline_define_auto_cdc_flow(
         target.to_string(),
     );
     let scl = scl(scl_file, scl_line);
-    session
-        .py()
-        .detach(|| {
-            pipelines::define_auto_cdc_flow(
-                &sess,
-                &gid,
-                &fname,
-                &tgt,
-                details,
-                sql_conf.unwrap_or_default(),
-                scl,
-            )
-        })
-        .to_pyerr()
+    interruptible(session.py(), &sess, || {
+        pipelines::define_auto_cdc_flow(
+            &sess,
+            &gid,
+            &fname,
+            &tgt,
+            details,
+            sql_conf.unwrap_or_default(),
+            scl,
+        )
+        .map_err(Box::new)
+    })
 }
 
 /// `PipelineCommand.DefineSqlGraphElements`.
@@ -273,10 +267,9 @@ pub fn pipeline_define_sql_graph_elements(
         sql_text.to_string(),
         sql_file_path.to_string(),
     );
-    session
-        .py()
-        .detach(|| pipelines::define_sql_graph_elements(&sess, &gid, &text, &path))
-        .to_pyerr()
+    interruptible(session.py(), &sess, || {
+        pipelines::define_sql_graph_elements(&sess, &gid, &text, &path).map_err(Box::new)
+    })
 }
 
 /// A live, lazily-consumed stream of a pipeline run's events. Iterating yields
@@ -299,7 +292,9 @@ impl PyPipelineRunStream {
 
     fn __next__(&mut self, py: Python<'_>) -> PyResult<Option<(String, i64)>> {
         loop {
-            let resp = py.detach(|| self.inner.next_response()).to_pyerr()?;
+            let resp = py
+                .detach(|| self.inner.next_response().map_err(Box::new))
+                .to_pyerr()?;
             let Some(resp) = resp else {
                 return Ok(None); // stream complete -> StopIteration
             };
@@ -335,19 +330,17 @@ pub fn pipeline_start_run(
 ) -> PyResult<PyPipelineRunStream> {
     let sess = session.session.clone();
     let gid = dataflow_graph_id.to_string();
-    let inner = session
-        .py()
-        .detach(|| {
-            pipelines::start_run(
-                &sess,
-                &gid,
-                full_refresh.unwrap_or_default(),
-                full_refresh_all,
-                refresh.unwrap_or_default(),
-                dry,
-                storage,
-            )
-        })
-        .to_pyerr()?;
+    let inner = interruptible(session.py(), &sess, || {
+        pipelines::start_run(
+            &sess,
+            &gid,
+            full_refresh.unwrap_or_default(),
+            full_refresh_all,
+            refresh.unwrap_or_default(),
+            dry,
+            storage,
+        )
+        .map_err(Box::new)
+    })?;
     Ok(PyPipelineRunStream { inner })
 }

@@ -9,6 +9,7 @@ use spark_connect::udf::{eval_type, CommonInlineUserDefinedFunctionExpression, P
 use crate::column::PyColumn;
 use crate::errors::ResultExt;
 use crate::group::PyGroupedData;
+use crate::interrupt::interruptible;
 use crate::row::{FieldConverters, NestedFieldNames};
 use crate::streaming::PyDataStreamWriter;
 use crate::types::PyDataType;
@@ -98,16 +99,22 @@ impl PyDataFrame {
     ) -> PyResult<Py<PyAny>> {
         let settings = py
             .detach(|| {
-                self.dataframe.spark_session().conf().get_many(&[
-                    "spark.sql.session.timeZone",
-                    "spark.sql.execution.pandas.structHandlingMode",
-                    "spark.sql.execution.arrow.pyspark.selfDestruct.enabled",
-                ])
+                self.dataframe
+                    .spark_session()
+                    .conf()
+                    .get_many(&[
+                        "spark.sql.session.timeZone",
+                        "spark.sql.execution.pandas.structHandlingMode",
+                        "spark.sql.execution.arrow.pyspark.selfDestruct.enabled",
+                    ])
+                    .map_err(Box::new)
             })
             .to_pyerr()?;
-        let (batches, schema) = py
-            .detach(|| self.dataframe.collect_record_batches_with_schema())
-            .to_pyerr()?;
+        let (batches, schema) = interruptible(py, &self.dataframe.spark_session(), || {
+            self.dataframe
+                .collect_record_batches_with_schema()
+                .map_err(Box::new)
+        })?;
         check_nanosecond_timestamps(py, schema.as_ref())?;
         let table = crate::pyarrow_export::record_batches_to_pyarrow(py, batches)?;
         let schema = match &schema {
@@ -192,8 +199,11 @@ impl PyDataFrame {
                 }
             };
         let (n, vertical) = (n.extract::<i32>()?, vertical.extract::<bool>()?);
-        py.detach(|| self.dataframe.show_string(n, truncate, vertical))
-            .to_pyerr()
+        interruptible(py, &self.dataframe.spark_session(), || {
+            self.dataframe
+                .show_string(n, truncate, vertical)
+                .map_err(Box::new)
+        })
     }
 
     pub fn new(dataframe: DataFrame) -> Self {
@@ -207,7 +217,9 @@ impl PyDataFrame {
     /// each setting, if it is enabled.
     fn eager_eval(&self, py: Python<'_>) -> PyResult<Option<(i32, i32)>> {
         let conf = self.dataframe.spark_session().conf();
-        let values = py.detach(|| conf.get_many(&EAGER_EVAL)).to_pyerr()?;
+        let values = py
+            .detach(|| conf.get_many(&EAGER_EVAL).map_err(Box::new))
+            .to_pyerr()?;
         if values[0].as_deref() != Some("true") {
             return Ok(None);
         }
@@ -1450,7 +1462,8 @@ impl PyDataFrame {
     /// The server-side hash of this DataFrame's logical plan.
     #[pyo3(name = "semanticHash")]
     fn semantic_hash(&self, py: Python<'_>) -> PyResult<i32> {
-        py.detach(|| self.dataframe.semantic_hash()).to_pyerr()
+        py.detach(|| self.dataframe.semantic_hash().map_err(Box::new))
+            .to_pyerr()
     }
 
     /// Sort within each partition.
@@ -1603,15 +1616,22 @@ impl PyDataFrame {
                 ))
             }
         };
-        py.detach(|| self.dataframe.explain_string(&explain_mode))
-            .to_pyerr()
+        py.detach(|| {
+            self.dataframe
+                .explain_string(&explain_mode)
+                .map_err(Box::new)
+        })
+        .to_pyerr()
     }
 
     /// Register this DataFrame as a temporary view.
     #[pyo3(name = "createOrReplaceTempView")]
     fn create_or_replace_temp_view(&self, py: Python<'_>, name: &str) -> PyResult<()> {
-        py.detach(|| self.dataframe.create_or_replace_temp_view(name))
-            .to_pyerr()
+        interruptible(py, &self.dataframe.spark_session(), || {
+            self.dataframe
+                .create_or_replace_temp_view(name)
+                .map_err(Box::new)
+        })
     }
 
     /// Drop rows containing nulls, as PySpark's `DataFrame.dropna`.
@@ -1721,7 +1741,11 @@ impl PyDataFrame {
         {
             let observation = &observation.inner;
             return py
-                .detach(|| self.dataframe.observe_with(observation, columns))
+                .detach(|| {
+                    self.dataframe
+                        .observe_with(observation, columns)
+                        .map_err(Box::new)
+                })
                 .to_pyerr()
                 .map(PyDataFrame::new);
         }
@@ -1745,38 +1769,47 @@ impl PyDataFrame {
     /// Register as a temporary view (session-scoped).
     #[pyo3(name = "createTempView")]
     fn create_temp_view(&self, py: Python<'_>, name: &str) -> PyResult<()> {
-        py.detach(|| self.dataframe.create_temp_view(name))
-            .to_pyerr()
+        interruptible(py, &self.dataframe.spark_session(), || {
+            self.dataframe.create_temp_view(name).map_err(Box::new)
+        })
     }
 
     /// Register as a global temporary view.
     #[pyo3(name = "createGlobalTempView")]
     fn create_global_temp_view(&self, py: Python<'_>, name: &str) -> PyResult<()> {
-        py.detach(|| self.dataframe.create_global_temp_view(name))
-            .to_pyerr()
+        interruptible(py, &self.dataframe.spark_session(), || {
+            self.dataframe
+                .create_global_temp_view(name)
+                .map_err(Box::new)
+        })
     }
 
     /// Register as (or replace) a global temporary view.
     #[pyo3(name = "createOrReplaceGlobalTempView")]
     fn create_or_replace_global_temp_view(&self, py: Python<'_>, name: &str) -> PyResult<()> {
-        py.detach(|| self.dataframe.create_or_replace_global_temp_view(name))
-            .to_pyerr()
+        interruptible(py, &self.dataframe.spark_session(), || {
+            self.dataframe
+                .create_or_replace_global_temp_view(name)
+                .map_err(Box::new)
+        })
     }
 
     /// Deprecated alias for createOrReplaceTempView.
     #[pyo3(name = "registerTempTable")]
     fn register_temp_table(&self, py: Python<'_>, name: &str) -> PyResult<()> {
-        py.detach(|| self.dataframe.register_temp_table(name))
-            .to_pyerr()
+        interruptible(py, &self.dataframe.spark_session(), || {
+            self.dataframe.register_temp_table(name).map_err(Box::new)
+        })
     }
 
     /// Reliable checkpoint (materialize + truncate lineage), at once if `eager`, as PySpark's.
     #[pyo3(signature = (eager=true))]
     fn checkpoint(&self, py: Python<'_>, eager: bool) -> PyResult<PyDataFrame> {
-        Ok(PyDataFrame::new(
-            py.detach(|| self.dataframe.checkpoint_with(eager).map_err(Box::new))
-                .to_pyerr()?,
-        ))
+        Ok(PyDataFrame::new(interruptible(
+            py,
+            &self.dataframe.spark_session(),
+            || self.dataframe.checkpoint_with(eager).map_err(Box::new),
+        )?))
     }
 
     /// Local checkpoint, at once if `eager`, kept at `storageLevel`, else at the server's
@@ -1792,14 +1825,15 @@ impl PyDataFrame {
             .filter(|level| !level.is_none())
             .map(|level| crate::storagelevel::storage_level_proto(&level))
             .transpose()?;
-        Ok(PyDataFrame::new(
-            py.detach(|| {
+        Ok(PyDataFrame::new(interruptible(
+            py,
+            &self.dataframe.spark_session(),
+            || {
                 self.dataframe
                     .local_checkpoint_with(eager, level)
                     .map_err(Box::new)
-            })
-            .to_pyerr()?,
-        ))
+            },
+        )?))
     }
 
     /// Pearson correlation between two columns; PySpark's `method` is only "pearson".
@@ -1940,7 +1974,8 @@ impl PyDataFrame {
     /// The list of files that make up this DataFrame.
     #[pyo3(name = "inputFiles")]
     fn input_files(&self, py: Python<'_>) -> PyResult<Vec<String>> {
-        py.detach(|| self.dataframe.input_files()).to_pyerr()
+        py.detach(|| self.dataframe.input_files().map_err(Box::new))
+            .to_pyerr()
     }
 
     /// Whether collect/take can run without a Spark job (a local relation).
@@ -1953,7 +1988,8 @@ impl PyDataFrame {
     #[pyo3(name = "is_cached")]
     #[getter]
     fn is_cached(&self, py: Python<'_>) -> PyResult<bool> {
-        py.detach(|| self.dataframe.is_cached()).to_pyerr()
+        py.detach(|| self.dataframe.is_cached().map_err(Box::new))
+            .to_pyerr()
     }
 
     /// Whether this DataFrame contains one or more sources that continuously return data.
@@ -1968,7 +2004,9 @@ impl PyDataFrame {
     #[pyo3(name = "storageLevel")]
     #[getter]
     fn storage_level(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let sl = py.detach(|| self.dataframe.storage_level()).to_pyerr()?;
+        let sl = py
+            .detach(|| self.dataframe.storage_level().map_err(Box::new))
+            .to_pyerr()?;
         let cls = py.import("pyspark.storagelevel")?.getattr("StorageLevel")?;
         Ok(cls
             .call1((
@@ -2208,9 +2246,9 @@ impl PyDataFrame {
     /// Collect all rows into memory.
     fn collect(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
         // Release the GIL across the blocking RPC so other Python threads run.
-        let (rows, schema) = py
-            .detach(|| self.dataframe.collect_with_schema())
-            .to_pyerr()?;
+        let (rows, schema) = interruptible(py, &self.dataframe.spark_session(), || {
+            self.dataframe.collect_with_schema().map_err(Box::new)
+        })?;
         rows_to_py(py, &self.dataframe, &rows, schema.as_ref())
     }
 
@@ -2240,13 +2278,11 @@ impl PyDataFrame {
     /// alignment and schemas requiring the IPC compatibility fallback can still copy.
     #[pyo3(name = "toArrow")]
     fn to_arrow(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let (batches, schema) = py
-            .detach(|| {
-                self.dataframe
-                    .collect_record_batches_with_schema()
-                    .map_err(Box::new)
-            })
-            .to_pyerr()?;
+        let (batches, schema) = interruptible(py, &self.dataframe.spark_session(), || {
+            self.dataframe
+                .collect_record_batches_with_schema()
+                .map_err(Box::new)
+        })?;
         check_nanosecond_timestamps(py, schema.as_ref())?;
         let table = crate::pyarrow_export::record_batches_to_pyarrow(py, batches)?;
         let Some(schema) = schema else {
@@ -2315,7 +2351,9 @@ impl PyDataFrame {
 
     /// Get the count of rows.
     fn count(&self, py: Python<'_>) -> PyResult<i64> {
-        py.detach(|| self.dataframe.count()).to_pyerr()
+        interruptible(py, &self.dataframe.spark_session(), || {
+            self.dataframe.count().map_err(Box::new)
+        })
     }
 
     /// Print the first `n` rows as the server formats them. Mirrors `DataFrame.show`, which
@@ -2411,15 +2449,17 @@ impl PyDataFrame {
     /// `df.schema.fields`, `df.schema["c"]`, `df.schema.fieldNames()` all work.
     #[getter]
     fn schema(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let schema = py.detach(|| self.dataframe.schema()).to_pyerr()?;
+        let schema = py
+            .detach(|| self.dataframe.schema().map_err(Box::new))
+            .to_pyerr()?;
         crate::types::data_type_to_py(py, &schema)
     }
 
     /// Get the first row.
     fn first(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
-        let (row, schema) = py
-            .detach(|| self.dataframe.first_with_schema())
-            .to_pyerr()?;
+        let (row, schema) = interruptible(py, &self.dataframe.spark_session(), || {
+            self.dataframe.first_with_schema().map_err(Box::new)
+        })?;
         Ok(rows_to_py(py, &self.dataframe, row.as_slice(), schema.as_ref())?.pop())
     }
 
@@ -2432,9 +2472,12 @@ impl PyDataFrame {
             None => self.first(py)?.into_py_any(py),
             // head(n) -> a list of the first n Rows.
             Some(k) => {
-                let (rows, schema) = py
-                    .detach(|| self.dataframe.limit(k).collect_with_schema())
-                    .to_pyerr()?;
+                let (rows, schema) = interruptible(py, &self.dataframe.spark_session(), || {
+                    self.dataframe
+                        .limit(k)
+                        .collect_with_schema()
+                        .map_err(Box::new)
+                })?;
                 rows_to_py(py, &self.dataframe, &rows, schema.as_ref())?.into_py_any(py)
             }
         }
@@ -2442,9 +2485,9 @@ impl PyDataFrame {
 
     /// Get the first n rows.
     fn take(&self, py: Python<'_>, num: usize) -> PyResult<Vec<Py<PyAny>>> {
-        let (rows, schema) = py
-            .detach(|| self.dataframe.take_with_schema(num))
-            .to_pyerr()?;
+        let (rows, schema) = interruptible(py, &self.dataframe.spark_session(), || {
+            self.dataframe.take_with_schema(num).map_err(Box::new)
+        })?;
         rows_to_py(py, &self.dataframe, &rows, schema.as_ref())
     }
 
@@ -2456,9 +2499,12 @@ impl PyDataFrame {
 
     /// Get the last `num` rows as a list of Rows (eager, like pyspark `tail`).
     fn tail(&self, py: Python<'_>, num: i32) -> PyResult<Vec<Py<PyAny>>> {
-        let (rows, schema) = py
-            .detach(|| self.dataframe.tail(num).collect_with_schema())
-            .to_pyerr()?;
+        let (rows, schema) = interruptible(py, &self.dataframe.spark_session(), || {
+            self.dataframe
+                .tail(num)
+                .collect_with_schema()
+                .map_err(Box::new)
+        })?;
         rows_to_py(py, &self.dataframe, &rows, schema.as_ref())
     }
 
@@ -2526,7 +2572,9 @@ impl PyDataFrame {
 
     /// Check if the DataFrame is empty.
     fn isEmpty(&self, py: Python<'_>) -> PyResult<bool> {
-        detached(py, || self.dataframe.is_empty().map_err(Box::new))
+        interruptible(py, &self.dataframe.spark_session(), || {
+            self.dataframe.is_empty().map_err(Box::new)
+        })
     }
 
     /// Print the schema through Python stdout, honoring the maximum nesting depth.
@@ -2679,9 +2727,11 @@ impl PyDataFrame {
             .load(std::sync::atomic::Ordering::Relaxed)
         {
             if let Some((n, truncate)) = self.eager_eval(py)? {
-                return py
-                    .detach(|| self.dataframe.show_string(n, truncate, false))
-                    .to_pyerr();
+                return interruptible(py, &self.dataframe.spark_session(), || {
+                    self.dataframe
+                        .show_string(n, truncate, false)
+                        .map_err(Box::new)
+                });
             }
         }
         let fields = self
@@ -2701,10 +2751,10 @@ impl PyDataFrame {
         self.support_repr_html
             .store(true, std::sync::atomic::Ordering::Relaxed);
         match self.eager_eval(py)? {
-            Some((n, truncate)) => py
-                .detach(|| self.dataframe.html_string(n, truncate))
-                .to_pyerr()
-                .map(Some),
+            Some((n, truncate)) => interruptible(py, &self.dataframe.spark_session(), || {
+                self.dataframe.html_string(n, truncate).map_err(Box::new)
+            })
+            .map(Some),
             None => Ok(None),
         }
     }
@@ -2721,7 +2771,9 @@ impl PyDataFrame {
         profile: Option<Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
         validate_map_function(py, &func, eval_type::SQL_MAP_PANDAS_ITER_UDF)?;
-        let cols = py.detach(|| self.dataframe.columns()).to_pyerr()?;
+        let cols = py
+            .detach(|| self.dataframe.columns().map_err(Box::new))
+            .to_pyerr()?;
         let udf = build_map_udf(
             py,
             &self.dataframe.spark_session(),
@@ -2749,7 +2801,9 @@ impl PyDataFrame {
         profile: Option<Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
         validate_map_function(py, &func, eval_type::SQL_MAP_ARROW_ITER_UDF)?;
-        let cols = py.detach(|| self.dataframe.columns()).to_pyerr()?;
+        let cols = py
+            .detach(|| self.dataframe.columns().map_err(Box::new))
+            .to_pyerr()?;
         let udf = build_map_udf(
             py,
             &self.dataframe.spark_session(),
@@ -3237,7 +3291,9 @@ impl PyMergeIntoWriter {
 
     fn merge(&self, py: Python<'_>) -> PyResult<()> {
         let writer = self.inner.get();
-        detached(py, || writer.merge().map_err(Box::new))
+        interruptible(py, &writer.spark_session(), || {
+            writer.merge().map_err(Box::new)
+        })
     }
 }
 
@@ -3546,7 +3602,7 @@ impl PyDataFrameWriter {
         }
         w = w.option("url", url).option("dbtable", table);
         self.inner.set(w.clone());
-        detached(py, || w.save(None).map_err(Box::new))
+        interruptible(py, &w.spark_session(), || w.save(None).map_err(Box::new))
     }
 
     #[pyo3(signature = (path=None, format=None, mode=None, partitionBy=None, **options))]
@@ -3563,7 +3619,9 @@ impl PyDataFrameWriter {
         let w = apply_write_common(self.inner.get(), format, mode, partitionBy, options)?;
         // PySpark sets the inline format/mode/partitionBy/options on the writer itself.
         self.inner.set(w.clone());
-        detached(py, || w.save(path.as_deref()).map_err(Box::new))
+        interruptible(py, &w.spark_session(), || {
+            w.save(path.as_deref()).map_err(Box::new)
+        })
     }
 
     #[pyo3(name = "saveAsTable", signature = (name, format=None, mode=None, partitionBy=None, **options))]
@@ -3579,7 +3637,9 @@ impl PyDataFrameWriter {
     ) -> PyResult<()> {
         let w = apply_write_common(self.inner.get(), format, mode, partitionBy, options)?;
         self.inner.set(w.clone());
-        detached(py, || w.save_as_table(name).map_err(Box::new))
+        interruptible(py, &w.spark_session(), || {
+            w.save_as_table(name).map_err(Box::new)
+        })
     }
 
     /// Insert into an existing table. `overwrite` maps to overwrite/append mode,
@@ -3597,7 +3657,9 @@ impl PyDataFrameWriter {
         }
         // PySpark sets the overwrite/append mode on the writer itself.
         self.inner.set(w.clone());
-        detached(py, || w.insert_into(tableName).map_err(Box::new))
+        interruptible(py, &w.spark_session(), || {
+            w.insert_into(tableName).map_err(Box::new)
+        })
     }
 
     /// Write as PARQUET - full pyspark signature; each named option is
@@ -3627,7 +3689,7 @@ impl PyDataFrameWriter {
         w = wset_opt(w, "compression", compression)?;
         // PySpark sets the mode/options/format on the writer itself, then saves.
         self.inner.set(w.clone().format("parquet"));
-        detached(py, || w.parquet(path).map_err(Box::new))
+        interruptible(py, &w.spark_session(), || w.parquet(path).map_err(Box::new))
     }
 
     /// Write as JSON - full pyspark signature; each named option is
@@ -3658,7 +3720,7 @@ impl PyDataFrameWriter {
         w = wset_opt(w, "ignoreNullFields", ignoreNullFields)?;
         // PySpark sets the mode/options/format on the writer itself, then saves.
         self.inner.set(w.clone().format("json"));
-        detached(py, || w.json(path).map_err(Box::new))
+        interruptible(py, &w.spark_session(), || w.json(path).map_err(Box::new))
     }
 
     /// Write as CSV - full pyspark signature; each named option is
@@ -3709,7 +3771,7 @@ impl PyDataFrameWriter {
         w = wset_opt(w, "lineSep", lineSep)?;
         // PySpark sets the mode/options/format on the writer itself, then saves.
         self.inner.set(w.clone().format("csv"));
-        detached(py, || w.csv(path).map_err(Box::new))
+        interruptible(py, &w.spark_session(), || w.csv(path).map_err(Box::new))
     }
 
     /// Write as ORC - full pyspark signature; each named option is
@@ -3739,7 +3801,7 @@ impl PyDataFrameWriter {
         w = wset_opt(w, "compression", compression)?;
         // PySpark sets the mode/options/format on the writer itself, then saves.
         self.inner.set(w.clone().format("orc"));
-        detached(py, || w.orc(path).map_err(Box::new))
+        interruptible(py, &w.spark_session(), || w.orc(path).map_err(Box::new))
     }
 
     /// Write as TEXT - full pyspark signature; each named option is
@@ -3758,7 +3820,7 @@ impl PyDataFrameWriter {
         w = wset_opt(w, "lineSep", lineSep)?;
         // PySpark sets the mode/options/format on the writer itself, then saves.
         self.inner.set(w.clone().format("text"));
-        detached(py, || w.text(path).map_err(Box::new))
+        interruptible(py, &w.spark_session(), || w.text(path).map_err(Box::new))
     }
 
     /// Write as XML - full pyspark signature; each named option is
@@ -3801,7 +3863,7 @@ impl PyDataFrameWriter {
         w = wset_opt(w, "validateName", validateName)?;
         // PySpark sets the mode/options/format on the writer itself, then saves.
         self.inner.set(w.clone().format("xml"));
-        detached(py, || w.xml(path).map_err(Box::new))
+        interruptible(py, &w.spark_session(), || w.xml(path).map_err(Box::new))
     }
 }
 
@@ -3920,36 +3982,48 @@ impl PyDataFrameWriterV2 {
 
     fn create(&self, py: Python<'_>) -> PyResult<()> {
         let writer = self.inner.get();
-        detached(py, || writer.create().map_err(Box::new))
+        interruptible(py, &writer.spark_session(), || {
+            writer.create().map_err(Box::new)
+        })
     }
 
     fn replace(&self, py: Python<'_>) -> PyResult<()> {
         let writer = self.inner.get();
-        detached(py, || writer.replace().map_err(Box::new))
+        interruptible(py, &writer.spark_session(), || {
+            writer.replace().map_err(Box::new)
+        })
     }
 
     #[pyo3(name = "createOrReplace")]
     fn create_or_replace(&self, py: Python<'_>) -> PyResult<()> {
         let writer = self.inner.get();
-        detached(py, || writer.create_or_replace().map_err(Box::new))
+        interruptible(py, &writer.spark_session(), || {
+            writer.create_or_replace().map_err(Box::new)
+        })
     }
 
     fn append(&self, py: Python<'_>) -> PyResult<()> {
         let writer = self.inner.get();
-        detached(py, || writer.append().map_err(Box::new))
+        interruptible(py, &writer.spark_session(), || {
+            writer.append().map_err(Box::new)
+        })
     }
 
     /// Overwrite the rows of `condition`, a Column or a column name, as PySpark's `F._to_col`,
     /// else `NOT_EXPECTED_TYPE` of `col`.
     fn overwrite(&self, py: Python<'_>, condition: &Bound<'_, PyAny>) -> PyResult<()> {
         let (writer, condition) = (self.inner.get(), column_or_name(condition)?);
-        detached(py, || writer.overwrite(condition).map_err(Box::new))
+        interruptible(py, &writer.spark_session(), || {
+            writer.overwrite(condition).map_err(Box::new)
+        })
     }
 
     #[pyo3(name = "overwritePartitions")]
     fn overwrite_partitions(&self, py: Python<'_>) -> PyResult<()> {
         let writer = self.inner.get();
-        detached(py, || writer.overwrite_partitions().map_err(Box::new))
+        interruptible(py, &writer.spark_session(), || {
+            writer.overwrite_partitions().map_err(Box::new)
+        })
     }
 }
 
@@ -4444,7 +4518,9 @@ impl PyLocalRowIterator {
                 value
             }
         };
-        let next = py.detach(|| self.next_row());
+        let next = interruptible(py, &self.dataframe.spark_session(), || {
+            Ok::<_, Box<spark_connect_core::error::SparkError>>(self.next_row())
+        })?;
         if self.converters.is_none() {
             if let Some(schema) = self.iterator.as_ref().and_then(LocalRowIterator::schema) {
                 // The result is known once its first message arrives, possibly with no rows.

@@ -22,7 +22,7 @@ use tokio::sync::Notify;
 use spark_connect_core::channel::ChannelBuilder;
 use spark_connect_core::client::SparkConnectClient;
 use spark_connect_core::retries::RetryPolicy;
-use spark_connect_core::runtime::block_on;
+use spark_connect_core::runtime::{block_on, POLL_INTERVAL};
 use spark_connect_proto as proto;
 
 use crate::errors::ResultExt;
@@ -74,6 +74,34 @@ pub struct ResponseStream {
 // gRPC CANCELLED status code, surfaced when the client closes an in-flight stream.
 const GRPC_CANCELLED: i32 = 1;
 
+/// Wait for `future` on the runtime, without the GIL, until a signal handler of the process
+/// raises: then `future` is dropped, and the exception of the handler is returned. The calling
+/// thread checks the signals every [`POLL_INTERVAL`], as a handler runs only on the main thread,
+/// with the GIL.
+fn until_signal<T: Send>(
+    py: Python<'_>,
+    future: impl std::future::Future<Output = T> + Send,
+) -> Result<T, PyErr> {
+    py.detach(|| {
+        block_on(async {
+            let signal = async {
+                let mut ticks = tokio::time::interval(POLL_INTERVAL);
+                loop {
+                    ticks.tick().await;
+                    if let Err(error) = Python::attach(|py| py.check_signals()) {
+                        return error;
+                    }
+                }
+            };
+            tokio::select! {
+                biased;
+                output = future => Ok(output),
+                error = signal => Err(error),
+            }
+        })
+    })
+}
+
 fn cancelled_err(py: Python<'_>) -> PyErr {
     RustRpcError::new_err((
         GRPC_CANCELLED,
@@ -103,29 +131,33 @@ impl ResponseStream {
         // Release the GIL while blocking on the next message: a long-lived stream must not
         // hold the GIL while it waits, or it deadlocks other Python threads (including the
         // main one). Race the read against cancellation so close() can unblock it.
-        let outcome = py.detach(|| {
-            block_on(async {
-                tokio::select! {
-                    biased;
-                    _ = cancel.notified() => None,
-                    m = stream.message() => Some(m),
-                }
-            })
+        // A signal handler that raises ends the read as the reference iterator's
+        // KeyboardInterrupt does: the reference client then interrupts the operation.
+        let outcome = until_signal(py, async {
+            tokio::select! {
+                biased;
+                _ = cancel.notified() => None,
+                m = stream.message() => Some(m),
+            }
         });
         match outcome {
+            Err(signal) => {
+                self.stream = None;
+                Err(signal)
+            }
             // Cancelled by client close: drop the stream and surface CANCELLED so the
             // reference reattachable iterator errors out instead of re-attaching forever.
-            None => {
+            Ok(None) => {
                 self.stream = None;
                 Err(cancelled_err(py))
             }
-            Some(Ok(Some(bytes))) => Ok(Some(PyBytes::new(py, &bytes).unbind())),
-            Some(Ok(None)) => {
+            Ok(Some(Ok(Some(bytes)))) => Ok(Some(PyBytes::new(py, &bytes).unbind())),
+            Ok(Some(Ok(None))) => {
                 // Stream ended; drop it to release resources promptly.
                 self.stream = None;
                 Ok(None) // StopIteration
             }
-            Some(Err(status)) => {
+            Ok(Some(Err(status))) => {
                 // On error, also drop the stream.
                 self.stream = None;
                 Err(RustRpcError::new_err((
@@ -198,8 +230,7 @@ impl RustConnectStub {
         if self.closed.load(Ordering::SeqCst) {
             return Err(cancelled_err(py));
         }
-        let stream = py
-            .detach(|| block_on(self.client.execute_plan_raw(request.to_vec())))
+        let stream = until_signal(py, self.client.execute_plan_raw(request.to_vec()))?
             .map_err(|e| spark_err_to_py(py, e))?;
         Ok(ResponseStream {
             stream: Some(stream),
@@ -213,8 +244,7 @@ impl RustConnectStub {
         if self.closed.load(Ordering::SeqCst) {
             return Err(cancelled_err(py));
         }
-        let stream = py
-            .detach(|| block_on(self.client.reattach_execute_raw(request.to_vec())))
+        let stream = until_signal(py, self.client.reattach_execute_raw(request.to_vec()))?
             .map_err(|e| spark_err_to_py(py, e))?;
         Ok(ResponseStream {
             stream: Some(stream),

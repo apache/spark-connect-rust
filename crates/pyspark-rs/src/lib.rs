@@ -35,6 +35,7 @@ mod eval_type;
 mod functions;
 mod group;
 mod infer;
+mod interrupt;
 mod ml;
 mod observation;
 mod origin;

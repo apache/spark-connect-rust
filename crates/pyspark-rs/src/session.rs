@@ -12,6 +12,7 @@ use crate::catalog::PyCatalog;
 use crate::dataframe::PyDataFrame;
 use crate::datasource::PyDataSourceRegistration;
 use crate::errors::ResultExt;
+use crate::interrupt::interruptible;
 use crate::resource::PyResourceProfile;
 use crate::streaming::{PyDataStreamReader, PyStreamingQueryManager};
 
@@ -1080,6 +1081,7 @@ impl PySparkSession {
                 self.session
                     .conf()
                     .get("spark.sql.execution.pandas.convertToArrowArraySafely")
+                    .map_err(Box::new)
             })
             .to_pyerr()?
             .as_deref()
@@ -2055,13 +2057,11 @@ impl PySparkSession {
         }
         // The statement runs to completion at once, so other Python threads go on meanwhile,
         // to interrupt it for one.
-        let df = py
-            .detach(|| {
-                session
-                    .sql_with_references(&query, pos, named, references)
-                    .map_err(Box::new)
-            })
-            .to_pyerr()?;
+        let df = interruptible(py, &session, || {
+            session
+                .sql_with_references(&query, pos, named, references)
+                .map_err(Box::new)
+        })?;
         Ok(PyDataFrame::new(df))
     }
 
@@ -2373,8 +2373,12 @@ impl PySparkSession {
                 "destination FS path must be an absolute path.",
             ));
         }
-        py.detach(|| self.session.copy_from_local_to_fs(local_path, dest_path))
-            .to_pyerr()
+        py.detach(|| {
+            self.session
+                .copy_from_local_to_fs(local_path, dest_path)
+                .map_err(Box::new)
+        })
+        .to_pyerr()
     }
 
     /// As PySpark Connect's: the attributes of the JVM of a classic session raise
@@ -2536,12 +2540,11 @@ impl PySparkSession {
                 ))
             }
         };
-        py.detach(|| {
+        interruptible(py, &self.session, || {
             self.session
                 .register_java_function_with(name, java_class_name, return_type, aggregate)
                 .map_err(Box::new)
         })
-        .to_pyerr()
     }
 
     /// Register a Python UDF by name so it resolves in SQL (used by
@@ -2569,8 +2572,9 @@ impl PySparkSession {
             Vec::new(),
             payload,
         );
-        py.detach(|| self.session.register_function(udf_expr))
-            .to_pyerr()
+        interruptible(py, &self.session, || {
+            self.session.register_function(udf_expr).map_err(Box::new)
+        })
     }
 
     /// Register a Python UDTF by name so SQL calls it (used by `UDTFRegistration.register`).
@@ -2599,7 +2603,7 @@ impl PySparkSession {
                 Err(_) => crate::types::py_to_data_type(value),
             })
             .transpose()?;
-        py.detach(|| {
+        interruptible(py, &self.session, || {
             self.session.register_table_function(
                 name,
                 return_type.as_ref(),
@@ -2609,7 +2613,6 @@ impl PySparkSession {
                 deterministic,
             )
         })
-        .to_pyerr()
     }
 
     #[pyo3(name = "sessionId")]
@@ -2679,13 +2682,11 @@ impl PySparkSession {
         use prost::Message;
         let command = spark_connect_proto::Command::decode(command)
             .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
-        let responses = py
-            .detach(|| {
-                self.session
-                    .execute_command_proto(command)
-                    .map_err(Box::new)
-            })
-            .to_pyerr()?;
+        let responses = interruptible(py, &self.session, || {
+            self.session
+                .execute_command_proto(command)
+                .map_err(Box::new)
+        })?;
         Ok(responses
             .iter()
             .map(|response| pyo3::types::PyBytes::new(py, &response.encode_to_vec()))
@@ -2997,13 +2998,18 @@ impl PySparkSession {
     /// Returns the server-assigned profile ID that can be used with `DataFrame.withResources()`.
     #[pyo3(name = "buildResourceProfile")]
     fn build_resource_profile(&self, py: Python<'_>, profile: &PyResourceProfile) -> PyResult<i32> {
-        py.detach(|| self.session.build_resource_profile(&profile.inner))
-            .to_pyerr()
+        py.detach(|| {
+            self.session
+                .build_resource_profile(&profile.inner)
+                .map_err(Box::new)
+        })
+        .to_pyerr()
     }
 
     #[getter]
     fn version(&self, py: Python<'_>) -> PyResult<String> {
-        py.detach(|| self.session.version()).to_pyerr()
+        py.detach(|| self.session.version().map_err(Box::new))
+            .to_pyerr()
     }
 
     /// The DataFrame of a table, as PySpark Connect's: `NOT_EXPECTED_TYPE` for a name that is not
@@ -3043,12 +3049,14 @@ impl PySparkSession {
 
     #[pyo3(name = "interruptAll")]
     fn interrupt_all(&self, py: Python<'_>) -> PyResult<Vec<String>> {
-        py.detach(|| self.session.interrupt_all()).to_pyerr()
+        py.detach(|| self.session.interrupt_all().map_err(Box::new))
+            .to_pyerr()
     }
 
     #[pyo3(name = "interruptTag")]
     fn interrupt_tag(&self, py: Python<'_>, tag: &str) -> PyResult<Vec<String>> {
-        py.detach(|| self.session.interrupt_tag(tag)).to_pyerr()
+        py.detach(|| self.session.interrupt_tag(tag).map_err(Box::new))
+            .to_pyerr()
     }
 
     #[pyo3(name = "interruptOperation")]

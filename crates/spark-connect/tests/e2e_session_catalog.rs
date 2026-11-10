@@ -418,3 +418,61 @@ fn json_to_ddl_converts_on_the_server() {
     assert_eq!(ddl, "a INT,`b b` STRING NOT NULL,c BIGINT COMMENT 'the c'");
     let _ = spark.stop();
 }
+
+/// The execution that the calling thread waits for is the one that its wait interrupts, as
+/// PySpark's `KeyboardInterrupt` does: the wait ends with the server's cancellation, and the
+/// session goes on.
+#[test]
+fn interrupting_the_wait_cancels_the_execution_of_the_calling_thread() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use spark_connect_core::runtime::{with_wait_watch, WaitWatch, Watch};
+
+    if !should_run() {
+        return;
+    }
+    let spark = session();
+    let slow = spark
+        .sql("SELECT sum(sqrt(id)) FROM range(0, 1000000000000, 1, 2)")
+        .expect("sql");
+    let started = Instant::now();
+    let interrupted = Arc::new(AtomicBool::new(false));
+    let watch_session = spark.clone();
+    let watch_interrupted = Arc::clone(&interrupted);
+    let watch: Arc<WaitWatch> = Arc::new(move || {
+        if started.elapsed() < Duration::from_secs(2) || watch_interrupted.load(Ordering::SeqCst) {
+            return Watch::Continue;
+        }
+        match watch_session.running_operation_id() {
+            Some(operation_id) => {
+                watch_interrupted.store(true, Ordering::SeqCst);
+                let session = watch_session.clone();
+                Watch::Interrupt(Box::pin(async move {
+                    let _ = session.interrupt_operation_async(&operation_id).await;
+                }))
+            }
+            None => Watch::Continue,
+        }
+    });
+    let outcome = with_wait_watch(watch, || slow.collect().map_err(Box::new));
+    assert!(
+        outcome.is_err(),
+        "the cancelled execution returned a result"
+    );
+    assert!(
+        interrupted.load(Ordering::SeqCst),
+        "no execution was in flight"
+    );
+    assert_eq!(
+        spark.interrupt_all().expect("interrupt_all"),
+        Vec::<String>::new()
+    );
+    let count = spark
+        .sql("SELECT * FROM range(3)")
+        .map_err(Box::new)
+        .and_then(|df| df.count().map_err(Box::new))
+        .expect("count");
+    assert_eq!(count, 3);
+}

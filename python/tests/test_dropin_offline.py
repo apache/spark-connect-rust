@@ -15520,6 +15520,90 @@ def test_sql_runs_a_statement_without_holding_the_gil(mock_connect):
         statement.result(timeout=10)
 
 
+def test_sigint_during_collect_raises_keyboard_interrupt_and_interrupts_the_operation(mock_connect):
+    # As PySpark's: the signal raises KeyboardInterrupt while the execution waits for the server,
+    # which is then sent an Interrupt of the operation, and the server cancels the execution.
+    import signal
+    import threading
+
+    spark, service = mock_connect
+    service.block_execute = True
+    timer = threading.Timer(0.3, os.kill, (os.getpid(), signal.SIGINT))
+    started = time.monotonic()
+    timer.start()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            spark.range(3).collect()
+    finally:
+        timer.cancel()
+    assert time.monotonic() - started < 3
+    # ExecutePlanRequest.operation_id=6.
+    operation_id = parse_message(service.execute_requests[-1]).get(6, [b""])[0]
+    # InterruptRequest.interrupt_type=4 (INTERRUPT_TYPE_OPERATION_ID=3), operation_id=6.
+    [interrupt] = service.interrupt_requests
+    fields = parse_message(interrupt)
+    assert fields[4] == [3]
+    assert fields[6] == [operation_id]
+
+
+@pytest.mark.parametrize("hold", ["execute", "next"])
+def test_sigint_while_the_transport_waits_raises_keyboard_interrupt(mock_connect, hold):
+    # As PySpark's: the transport stub that the reference client drives raises KeyboardInterrupt
+    # from the call or the read that waits for the server, which the client then interrupts.
+    import signal
+    import threading
+
+    from pyspark import _pyspark
+    from pyspark.sql.connect.proto import base_pb2
+
+    spark, service = mock_connect
+    if hold == "execute":
+        service.block_execute = True
+    else:
+        service.block_result_complete = True
+    stub = _pyspark.RustConnectStub(service.remote)
+    request = base_pb2.ExecutePlanRequest(session_id=spark.session_id, operation_id="held")
+    timer = threading.Timer(0.3, os.kill, (os.getpid(), signal.SIGINT))
+    started = time.monotonic()
+    timer.start()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            responses = iter(stub.execute_plan(request.SerializeToString()))
+            if hold == "next":
+                next(responses)
+                next(responses)
+    finally:
+        timer.cancel()
+        service.release_response()
+    assert time.monotonic() - started < 3
+
+
+def test_exception_of_a_signal_handler_is_raised_by_collect_as_pyspark(mock_connect):
+    # As PySpark's: an exception that the handler of the signal raises is the one that the
+    # waiting call raises, and the operation is interrupted.
+    import signal
+    import threading
+
+    class Stop(Exception):
+        pass
+
+    def stop(signum, frame):
+        raise Stop()
+
+    spark, service = mock_connect
+    service.block_execute = True
+    previous = signal.signal(signal.SIGINT, stop)
+    timer = threading.Timer(0.3, os.kill, (os.getpid(), signal.SIGINT))
+    timer.start()
+    try:
+        with pytest.raises(Stop):
+            spark.range(3).count()
+    finally:
+        timer.cancel()
+        signal.signal(signal.SIGINT, previous)
+    assert len(service.interrupt_requests) == 1
+
+
 def test_connect_registry_sends_auto_cdc_define_flow(mock_connect):
     from pyspark import pipelines as dp
     from pyspark.pipelines.graph_element_registry import graph_element_registration_context
