@@ -782,14 +782,20 @@ pub fn resolve_request(request: &mut proto::ExecutePlanRequest) -> Result<()> {
 /// levels or more, with an error that gives no reason.
 pub const MAX_PLAN_DEPTH: usize = 256;
 
-/// Plans up to this deep are serialized on the calling thread. A level takes about 5 KiB of
-/// native stack, so these fit any thread; a deeper plan is serialized on a thread with a stack
-/// of its own, sized for it, as the calling thread may have as little as 512 KiB.
-const INLINE_PLAN_DEPTH: usize = 32;
+/// Plans up to this deep are serialized on the calling thread. A level takes about 6 KiB of
+/// native stack in a release build, and about 96 KiB in a debug build, whose frames are much
+/// larger, so these fit any thread; a deeper plan is serialized on a thread with a stack of its
+/// own, sized for it, as the calling thread may have as little as 512 KiB.
+const INLINE_PLAN_DEPTH: usize = if cfg!(debug_assertions) { 4 } else { 32 };
 
-/// Native stack for each level of a plan serialized on a thread of its own: three times what a
-/// level takes in a release build, for the larger frames of a debug build.
-const STACK_PER_PLAN_LEVEL: usize = 16 << 10;
+/// Native stack for each level of a plan serialized on a thread of its own: more than twice what
+/// a level takes, in a release build and in a debug build. The stack is reserved, so only the
+/// pages that the serialization uses take memory.
+const STACK_PER_PLAN_LEVEL: usize = if cfg!(debug_assertions) {
+    256 << 10
+} else {
+    16 << 10
+};
 
 /// Serialize a shared plan node for a request: the node and every node below it carry
 /// their stable plan IDs. A plan deeper than [`MAX_PLAN_DEPTH`] is a `RecursionError`, as in
