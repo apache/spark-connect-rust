@@ -775,33 +775,82 @@ pub fn resolve_request(request: &mut proto::ExecutePlanRequest) -> Result<()> {
     }
 }
 
-/// How many levels deep a plan may be to be sent. PySpark builds the proto of a plan by
-/// recursing in Python, so under Python's default recursion limit of 1000 it raises
-/// `RecursionError` for a plan of about 245 levels or more, before any request is sent. A plan
-/// deeper than this bound fails in the same way. The server itself rejects a plan of about 510
-/// levels or more, with an error that gives no reason.
-pub const MAX_PLAN_DEPTH: usize = 256;
+/// How many levels deep a plan may be to be sent, with the plans of its subqueries. PySpark
+/// builds the proto of a plan by recursing in Python, so under Python's default recursion limit
+/// its serializer raises `RecursionError` from about 747 levels (from 746 for a chain of filters,
+/// 747 of `withColumn`s or `select`s, and 748 of limits); a deeper plan fails in the same way
+/// here, before any request is sent. The server itself rejects a plan of about 510 levels or more
+/// (its marshaller nests at most 1024 messages), with an error that gives no reason, so the plans
+/// between the two fail there, as they do for PySpark.
+pub const MAX_PLAN_DEPTH: usize = 746;
 
-/// Plans up to this deep are serialized on the calling thread. A level takes about 6 KiB of
-/// native stack in a release build, and about 96 KiB in a debug build, whose frames are much
-/// larger, so these fit any thread; a deeper plan is serialized on a thread with a stack of its
-/// own, sized for it, as the calling thread may have as little as 512 KiB.
-const INLINE_PLAN_DEPTH: usize = if cfg!(debug_assertions) { 4 } else { 32 };
+thread_local! {
+    /// The level of the plan that this thread serializes now, the plans of subqueries
+    /// included, and the deepest one since the start of the innermost `with_plan_depth_bound`.
+    static PLAN_LEVEL: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static DEEPEST_PLAN_LEVEL: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Whether this thread serializes in a `with_plan_depth_bound`, which stops at the bound.
+    static PLAN_DEPTH_BOUNDED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 
-/// Native stack for each level of a plan serialized on a thread of its own: more than twice what
-/// a level takes, in a release build and in a debug build. The stack is reserved, so only the
-/// pages that the serialization uses take memory.
-const STACK_PER_PLAN_LEVEL: usize = if cfg!(debug_assertions) {
-    256 << 10
-} else {
-    16 << 10
-};
+/// One level of a plan that is being serialized, left when it is dropped (also on a panic).
+struct PlanLevel(usize);
+
+impl PlanLevel {
+    fn enter() -> Self {
+        let level = PLAN_LEVEL.with(|current| {
+            let level = current.get() + 1;
+            current.set(level);
+            level
+        });
+        DEEPEST_PLAN_LEVEL.with(|deepest| deepest.set(deepest.get().max(level)));
+        PlanLevel(level)
+    }
+}
+
+impl Drop for PlanLevel {
+    fn drop(&mut self) {
+        PLAN_LEVEL.with(|current| current.set(current.get() - 1));
+    }
+}
+
+/// Run `serialize`, which serializes plans for a request, and fail as PySpark's serializer does
+/// if one of them, with the plans of its subqueries, is deeper than [`MAX_PLAN_DEPTH`]. Within
+/// it, a plan is serialized down to the bound only: its proto is dropped and encoded by
+/// recursing too, so it must not be deeper.
+fn with_plan_depth_bound<T>(serialize: impl FnOnce() -> T) -> Result<T> {
+    struct Scope {
+        outer_bounded: bool,
+        outer_deepest: usize,
+    }
+    impl Drop for Scope {
+        fn drop(&mut self) {
+            PLAN_DEPTH_BOUNDED.with(|bounded| bounded.set(self.outer_bounded));
+            DEEPEST_PLAN_LEVEL.with(|deepest| deepest.set(deepest.get().max(self.outer_deepest)));
+        }
+    }
+    let _scope = Scope {
+        outer_bounded: PLAN_DEPTH_BOUNDED.with(|bounded| bounded.replace(true)),
+        outer_deepest: DEEPEST_PLAN_LEVEL.with(|deepest| deepest.replace(0)),
+    };
+    let value = serialize();
+    if DEEPEST_PLAN_LEVEL.with(std::cell::Cell::get) > MAX_PLAN_DEPTH {
+        return Err(SparkError::recursion_msg(format!(
+            "maximum recursion depth exceeded while serializing a plan and the plans of its \
+             subqueries; a plan may be at most {MAX_PLAN_DEPTH} levels deep"
+        )));
+    }
+    Ok(value)
+}
 
 /// Serialize a shared plan node for a request: the node and every node below it carry
-/// their stable plan IDs. A plan deeper than [`MAX_PLAN_DEPTH`], or with an expression deeper
-/// than [`crate::expression::MAX_EXPRESSION_DEPTH`], is a `RecursionError`, as in PySpark,
-/// instead of a request that overflows the stack of the thread.
+/// their stable plan IDs. A plan deeper than [`MAX_PLAN_DEPTH`], with the plans of its
+/// subqueries, or with an expression deeper than [`crate::expression::MAX_EXPRESSION_DEPTH`], is
+/// a `RecursionError`, as in PySpark. The plan is serialized on the calling thread, whose stack
+/// grows on demand for its levels.
 pub(crate) fn relation_with_ids(node: &Arc<LogicalPlan>, ids: &PlanIds) -> Result<proto::Relation> {
+    // The levels of the plan itself are known before it is serialized; those of the plans of
+    // its subqueries are counted as they are serialized.
     let depth = node.depth();
     if depth > MAX_PLAN_DEPTH {
         return Err(SparkError::recursion_msg(format!(
@@ -809,23 +858,9 @@ pub(crate) fn relation_with_ids(node: &Arc<LogicalPlan>, ids: &PlanIds) -> Resul
              a plan may be at most {MAX_PLAN_DEPTH} levels deep"
         )));
     }
-    // The levels of the expressions are counted on the thread that serializes them.
-    let serialize =
-        || crate::expression::with_expression_depth_bound(|| relation_of(node, Some(ids)));
-    if depth <= INLINE_PLAN_DEPTH {
-        return serialize();
-    }
-    std::thread::scope(|scope| {
-        let serializing = std::thread::Builder::new()
-            .name("spark-connect-plan".to_string())
-            .stack_size((1 << 20) + depth * STACK_PER_PLAN_LEVEL)
-            .spawn_scoped(scope, serialize)
-            .map_err(|e| SparkError::connect_msg(format!("cannot serialize the plan: {e}")))?;
-        match serializing.join() {
-            Ok(relation) => relation,
-            Err(panic) => std::panic::resume_unwind(panic),
-        }
-    })
+    with_plan_depth_bound(|| {
+        crate::expression::with_expression_depth_bound(|| relation_of(node, Some(ids)))
+    })?
 }
 
 /// Serialize a child node, with its stable plan ID when `ids` is given.
@@ -887,6 +922,24 @@ fn relation_and_references(
 ///     references: the relation of each plan [its plan ID]
 /// ```
 fn relation_with_references(
+    node: &LogicalPlan,
+    shared: Option<&Arc<LogicalPlan>>,
+    ids: Option<&PlanIds>,
+) -> proto::Relation {
+    // A level serializes the levels below it and the plans of its subqueries: grow the stack for
+    // a plan of many levels, and count them for `with_plan_depth_bound`.
+    crate::expression::with_stack_for_a_level(|| {
+        let level = PlanLevel::enter();
+        if level.0 > MAX_PLAN_DEPTH && PLAN_DEPTH_BOUNDED.with(std::cell::Cell::get) {
+            // The request fails with a `RecursionError`: stop here, so that the proto of the
+            // plan is no deeper than the bound.
+            return proto::Relation::default();
+        }
+        relation_with_references_of_a_level(node, shared, ids)
+    })
+}
+
+fn relation_with_references_of_a_level(
     node: &LogicalPlan,
     shared: Option<&Arc<LogicalPlan>>,
     ids: Option<&PlanIds>,
@@ -3313,6 +3366,64 @@ mod deep_plan_tests {
                 on_a_small_stack(move || std::mem::drop(plan));
             }
         }
+    }
+
+    /// `limits` limits over a filter whose condition is the EXISTS subquery of a plan of
+    /// `levels` levels.
+    fn limits_over_a_filter_of_a_subquery(limits: usize, levels: usize) -> Arc<LogicalPlan> {
+        let subquery = crate::expression::SubqueryExpression::new(
+            chain(levels),
+            1,
+            crate::expression::SubqueryType::Exists,
+        );
+        let mut plan = Arc::new(LogicalPlan::Filter {
+            input: Arc::new(range(0, 10, 1)),
+            condition: crate::column::Column::new(Expression::new(ExpressionNode::Subquery(
+                Box::new(subquery),
+            ))),
+        });
+        for _ in 0..limits {
+            plan = Arc::new(limit(plan, 1));
+        }
+        plan
+    }
+
+    /// The plan of a subquery is sent under the plan that has it, so its levels count for the
+    /// bound under the levels above it, and neither overflows a small stack.
+    #[test]
+    fn a_subquery_counts_for_the_bound_under_the_levels_above_it() {
+        for limits in [0, 33] {
+            // The filter is a level under the limits, and the subquery one under the filter.
+            let within = limits_over_a_filter_of_a_subquery(limits, MAX_PLAN_DEPTH - limits - 1);
+            on_a_small_stack(|| relation_with_ids(&within, &PlanIds::new()).unwrap());
+            let past = limits_over_a_filter_of_a_subquery(limits, MAX_PLAN_DEPTH - limits);
+            let error = on_a_small_stack(|| relation_with_ids(&past, &PlanIds::new()).unwrap_err());
+            assert_eq!(error.kind, SparkErrorKind::RecursionError, "{error}");
+            assert!(
+                error.message().contains("the plans of its subqueries"),
+                "{error}"
+            );
+        }
+        let deep = limits_over_a_filter_of_a_subquery(33, 100_000);
+        let error = on_a_small_stack(|| relation_with_ids(&deep, &PlanIds::new()).unwrap_err());
+        assert_eq!(error.kind, SparkErrorKind::RecursionError, "{error}");
+        on_a_small_stack(move || std::mem::drop(deep));
+    }
+
+    /// The proto of a plan at the bound is encoded and dropped by recursing, as the transport
+    /// encodes a request on a thread of the runtime, whose stack is 2 MiB.
+    #[test]
+    fn a_plan_at_the_bound_is_encoded_on_a_thread_of_the_runtime() {
+        use prost::Message;
+
+        let relation = relation_with_ids(&chain(MAX_PLAN_DEPTH), &PlanIds::new()).unwrap();
+        let encoded = std::thread::Builder::new()
+            .stack_size(2 << 20)
+            .spawn(move || relation.encode_to_vec().len())
+            .unwrap()
+            .join()
+            .unwrap();
+        assert!(encoded > MAX_PLAN_DEPTH);
     }
 
     #[test]
