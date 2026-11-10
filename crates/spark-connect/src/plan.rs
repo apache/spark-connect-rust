@@ -2541,44 +2541,48 @@ pub fn na_fill(
     }
 }
 
-/// Build a proto `Literal` from a [`crate::row::Value`] (used by NAFill).
+/// The proto `Literal` of a fill of NAFill, as PySpark's `NAFill._convert_value` sends it: a
+/// bool as a boolean, an integer as a long, a float as a double and a string as a string, the
+/// only types that the server's NAFill takes. `DataFrame::fillna_value` takes no other value. For
+/// one that a plan built directly holds, the literal is of its own type, or empty for a nested
+/// value, so that the server rejects it instead of filling a string column with a text of it.
 fn value_to_proto_literal(v: &crate::row::Value) -> proto::expression::Literal {
     use crate::row::Value;
     use proto::expression::literal::LiteralType;
-    let mut lit = proto::expression::Literal::default();
-    lit.literal_type = Some(match v {
-        Value::Bool(b) => LiteralType::Boolean(*b),
-        Value::Byte(x) => LiteralType::Byte(*x as i32),
-        Value::Short(x) => LiteralType::Short(*x as i32),
-        Value::Integer(x) => LiteralType::Integer(*x),
-        Value::Long(x) => LiteralType::Long(*x),
-        Value::Float(x) => LiteralType::Float(*x),
-        Value::Double(x) => LiteralType::Double(*x),
-        Value::String(s) => LiteralType::String(s.clone()),
-        Value::Date(d) => LiteralType::Date(*d),
-        Value::Timestamp(t) => LiteralType::Timestamp(*t),
-        Value::TimestampNtz(t) => LiteralType::TimestampNtz(*t),
-        // Spark rejects interval NA fills. Preserve the type so it errors instead
-        // of silently filling string columns with the Value's Debug text.
-        Value::DayTimeInterval(t) => LiteralType::DayTimeInterval(*t),
+    let literal_type = match v {
+        Value::Bool(b) => Some(LiteralType::Boolean(*b)),
+        Value::Byte(x) => Some(LiteralType::Long(i64::from(*x))),
+        Value::Short(x) => Some(LiteralType::Long(i64::from(*x))),
+        Value::Integer(x) => Some(LiteralType::Long(i64::from(*x))),
+        Value::Long(x) => Some(LiteralType::Long(*x)),
+        Value::Float(x) => Some(LiteralType::Double(f64::from(*x))),
+        Value::Double(x) => Some(LiteralType::Double(*x)),
+        Value::String(s) => Some(LiteralType::String(s.clone())),
+        Value::Binary(b) => Some(LiteralType::Binary(b.clone().into())),
+        Value::Date(d) => Some(LiteralType::Date(*d)),
+        Value::Timestamp(t) => Some(LiteralType::Timestamp(*t)),
+        Value::TimestampNtz(t) => Some(LiteralType::TimestampNtz(*t)),
+        Value::DayTimeInterval(t) => Some(LiteralType::DayTimeInterval(*t)),
         Value::Decimal {
             value,
             precision,
             scale,
-        } => {
-            let mut decimal = proto::expression::literal::Decimal::default();
-            decimal.value = value.clone();
-            if let Some(p) = precision {
-                decimal.precision = Some(*p);
-            }
-            if let Some(s) = scale {
-                decimal.scale = Some(*s);
-            }
-            LiteralType::Decimal(decimal)
-        }
-        other => LiteralType::String(format!("{:?}", other)),
-    });
-    lit
+        } => Some(LiteralType::Decimal(proto::expression::literal::Decimal {
+            value: value.clone(),
+            precision: *precision,
+            scale: *scale,
+        })),
+        Value::Null
+        | Value::Time(_)
+        | Value::List(_)
+        | Value::Map(_)
+        | Value::Struct(_)
+        | Value::Variant { .. } => None,
+    };
+    proto::expression::Literal {
+        literal_type,
+        ..Default::default()
+    }
 }
 
 /// The literal of a replacement given as a string: a double for a numeric-looking string,

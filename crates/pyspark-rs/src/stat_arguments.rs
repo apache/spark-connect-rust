@@ -157,10 +157,11 @@ pub(crate) fn fillna(
         for (column, fill) in dict.iter() {
             pairs.push((column.extract()?, fill_value(&fill)?));
         }
-        return Ok(PyDataFrame::new(df.fillna_map(pairs)));
+        return Ok(PyDataFrame::new(df.fillna_map(pairs).to_pyerr()?));
     }
     Ok(PyDataFrame::new(
-        df.fillna_value(fill_value(value)?, column_refs(&columns)),
+        df.fillna_value(fill_value(value)?, column_refs(&columns))
+            .to_pyerr()?,
     ))
 }
 

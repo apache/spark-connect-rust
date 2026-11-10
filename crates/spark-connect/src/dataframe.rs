@@ -1823,26 +1823,38 @@ impl DataFrame {
 
     /// Fill NA values with an integer.
     pub fn fillna(&self, value: i64, subset: Option<Vec<&str>>) -> DataFrame {
-        self.fillna_value(crate::row::Value::Long(value), subset)
+        self.fill_with(crate::row::Value::Long(value), subset)
     }
 
     /// Fill NA values with a double (e.g. a fractional fill into a double column).
     pub fn fillna_double(&self, value: f64, subset: Option<Vec<&str>>) -> DataFrame {
-        self.fillna_value(crate::row::Value::Double(value), subset)
+        self.fill_with(crate::row::Value::Double(value), subset)
     }
 
     /// Fill NA values with a string.
     pub fn fillna_string(&self, value: &str, subset: Option<Vec<&str>>) -> DataFrame {
-        self.fillna_value(crate::row::Value::String(value.to_string()), subset)
+        self.fill_with(crate::row::Value::String(value.to_string()), subset)
     }
 
     /// Fill NA values with a boolean.
     pub fn fillna_bool(&self, value: bool, subset: Option<Vec<&str>>) -> DataFrame {
-        self.fillna_value(crate::row::Value::Bool(value), subset)
+        self.fill_with(crate::row::Value::Bool(value), subset)
     }
 
-    /// Fill NA values with a typed [`crate::row::Value`] (Long/Double/String/Bool/...).
-    pub fn fillna_value(&self, value: crate::row::Value, subset: Option<Vec<&str>>) -> DataFrame {
+    /// Fill NA values with a [`crate::row::Value`]. Mirrors `DataFrame.fillna(value, subset)`:
+    /// the value is a bool, an integer (sent as a long), a float (sent as a double) or a string,
+    /// else a `NOT_EXPECTED_TYPE` error, as PySpark raises for a value of another type.
+    pub fn fillna_value(
+        &self,
+        value: crate::row::Value,
+        subset: Option<Vec<&str>>,
+    ) -> Result<DataFrame> {
+        check_fill_value(&value, "value", "bool, dict, float, int or str")?;
+        Ok(self.fill_with(value, subset))
+    }
+
+    /// The NAFill of `value`, a value that PySpark's `fillna` takes, over `subset`.
+    fn fill_with(&self, value: crate::row::Value, subset: Option<Vec<&str>>) -> DataFrame {
         let columns = subset
             .map(|v| v.iter().map(|s| s.to_string()).collect())
             .unwrap_or_default();
@@ -1854,16 +1866,27 @@ impl DataFrame {
         DataFrame::new(self.session.clone(), plan)
     }
 
-    /// Fill NA values per column from `(column, value)` pairs.
-    /// Mirrors `df.fillna({col: value, ...})`.
-    pub fn fillna_map(&self, pairs: Vec<(String, crate::row::Value)>) -> DataFrame {
+    /// Fill NA values per column from `(column, value)` pairs. Mirrors
+    /// `df.fillna({col: value, ...})`: the values are as those of [`DataFrame::fillna_value`],
+    /// and an empty map is a `CANNOT_BE_EMPTY` error, as PySpark raises.
+    pub fn fillna_map(&self, pairs: Vec<(String, crate::row::Value)>) -> Result<DataFrame> {
+        if pairs.is_empty() {
+            return Err(SparkError::classed(
+                SparkErrorKind::ValueError,
+                "CANNOT_BE_EMPTY",
+                &[("item", "value")],
+            ));
+        }
+        for (_, value) in &pairs {
+            check_fill_value(value, "value type of dict", "bool, float, int or str")?;
+        }
         let (cols, values): (Vec<String>, Vec<crate::row::Value>) = pairs.into_iter().unzip();
         let plan = LogicalPlan::NAFillColumns {
             input: Arc::clone(&self.plan),
             cols,
             values,
         };
-        DataFrame::new(self.session.clone(), plan)
+        Ok(DataFrame::new(self.session.clone(), plan))
     }
 
     /// Drop NA values. Mirrors `DataFrame.dropna`: `how` is "any" (the default) or "all", else
@@ -2691,6 +2714,42 @@ fn set_observations(
             None => observation.update(&observed.keys, &observed.values),
         }
     }
+}
+
+/// Whether `value` is a fill of PySpark's `fillna`: a bool, an integer, a float or a string. Any
+/// other value is the `NOT_EXPECTED_TYPE` error of PySpark, of `arg_name` and `expected_type`, with
+/// the Python name of the type that the value stands for.
+fn check_fill_value(value: &Value, arg_name: &str, expected_type: &str) -> Result<()> {
+    let arg_type = match value {
+        Value::Bool(_)
+        | Value::Byte(_)
+        | Value::Short(_)
+        | Value::Integer(_)
+        | Value::Long(_)
+        | Value::Float(_)
+        | Value::Double(_)
+        | Value::String(_) => return Ok(()),
+        Value::Null => "NoneType",
+        Value::Binary(_) => "bytes",
+        Value::Date(_) => "date",
+        Value::Timestamp(_) | Value::TimestampNtz(_) => "datetime",
+        Value::Time(_) => "time",
+        Value::DayTimeInterval(_) => "timedelta",
+        Value::Decimal { .. } => "Decimal",
+        Value::List(_) => "list",
+        Value::Map(_) => "dict",
+        Value::Struct(_) => "Row",
+        Value::Variant { .. } => "VariantVal",
+    };
+    Err(SparkError::classed(
+        SparkErrorKind::TypeError,
+        "NOT_EXPECTED_TYPE",
+        &[
+            ("arg_name", arg_name),
+            ("expected_type", expected_type),
+            ("arg_type", arg_type),
+        ],
+    ))
 }
 
 /// A random seed of a sample without one, as PySpark's `random.randint(0, sys.maxsize)`: the
@@ -4613,6 +4672,81 @@ mod plan_construction_tests {
         resp.operation_id = "op-2".to_string();
         capture_execution(&mut resp, &mut info, &spark);
         assert_eq!(info.operation_id.as_deref(), Some("op-1"));
+    }
+
+    /// As PySpark's `fillna`: a fill is a bool, an integer (sent as a long), a float (sent as a
+    /// double) or a string; any other value, and an empty map, is PySpark's error, instead of a
+    /// fill of the text of the value.
+    #[test]
+    fn fill_values_are_those_of_pyspark_and_sent_as_its_literals() {
+        use proto::expression::literal::LiteralType;
+        let spark = session();
+        let df = spark.range(1).unwrap();
+        let sent = |frame: DataFrame| -> Vec<Option<LiteralType>> {
+            match frame.to_relation().unwrap().rel_type {
+                Some(proto::relation::RelType::FillNa(fill)) => fill
+                    .values
+                    .into_iter()
+                    .map(|literal| literal.literal_type)
+                    .collect(),
+                other => panic!("expected a FillNa, got {other:?}"),
+            }
+        };
+        for (value, literal) in [
+            (Value::Byte(1), LiteralType::Long(1)),
+            (Value::Short(2), LiteralType::Long(2)),
+            (Value::Integer(5), LiteralType::Long(5)),
+            (Value::Long(6), LiteralType::Long(6)),
+            (Value::Float(1.5), LiteralType::Double(1.5)),
+            (Value::Double(2.5), LiteralType::Double(2.5)),
+            (Value::Bool(true), LiteralType::Boolean(true)),
+            (Value::String("x".into()), LiteralType::String("x".into())),
+        ] {
+            let filled = df.fillna_value(value.clone(), None).unwrap();
+            assert_eq!(sent(filled), vec![Some(literal.clone())], "{value:?}");
+            let mapped = df.fillna_map(vec![("id".into(), value)]).unwrap();
+            assert_eq!(sent(mapped), vec![Some(literal)]);
+        }
+        let condition = |error: SparkError| {
+            (
+                error.kind,
+                error.get_condition(),
+                error.params.get("arg_name").cloned(),
+                error.params.get("arg_type").cloned(),
+            )
+        };
+        for (value, arg_type) in [
+            (Value::Null, "NoneType"),
+            (Value::Binary(vec![1, 2]), "bytes"),
+            (Value::List(vec![]), "list"),
+            (Value::Date(0), "date"),
+        ] {
+            let Err(error) = df.fillna_value(value.clone(), None) else {
+                panic!("{value:?} must be rejected");
+            };
+            assert_eq!(
+                condition(error),
+                (
+                    SparkErrorKind::TypeError,
+                    Some("NOT_EXPECTED_TYPE".to_string()),
+                    Some("value".to_string()),
+                    Some(arg_type.to_string())
+                )
+            );
+            let Err(error) = df.fillna_map(vec![("id".into(), value)]) else {
+                panic!("{arg_type} must be rejected in a map");
+            };
+            assert_eq!(
+                condition(error).2.as_deref(),
+                Some("value type of dict"),
+                "{arg_type}"
+            );
+        }
+        let Err(empty) = df.fillna_map(vec![]) else {
+            panic!("an empty map must be rejected");
+        };
+        assert_eq!(empty.kind, SparkErrorKind::ValueError);
+        assert_eq!(empty.get_condition().as_deref(), Some("CANNOT_BE_EMPTY"));
     }
 
     fn session() -> SparkSession {

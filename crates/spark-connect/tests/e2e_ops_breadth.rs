@@ -200,6 +200,46 @@ fn aggregates_execute() {
     let _ = df.observe("obs", vec![expr(f::sum(col("v")))]).collect();
 }
 
+/// As PySpark's `fillna`, which sends an int as a long and a float as a double: the server's
+/// fill takes those, so an `Integer` and a `Float` fill their columns, where the server rejected
+/// the integer literal before; and a value PySpark does not take is an error, not a string fill.
+#[test]
+fn fill_values_are_sent_as_pyspark_sends_them() {
+    use spark_connect::row::Value;
+    if !should_run() {
+        return;
+    }
+    let s = session();
+    let df = s
+        .sql(
+            "SELECT CAST(NULL AS BIGINT) AS i, CAST(NULL AS DOUBLE) AS d, \
+             CAST(NULL AS STRING) AS n",
+        )
+        .unwrap();
+    let row = df
+        .fillna_value(Value::Integer(5), Some(vec!["i"]))
+        .unwrap()
+        .fillna_value(Value::Float(1.5), Some(vec!["d"]))
+        .unwrap()
+        .collect()
+        .unwrap()
+        .remove(0);
+    assert_eq!(row.get(0).and_then(|v| v.as_i64()), Some(5));
+    assert_eq!(row.get(1).and_then(|v| v.as_f64()), Some(1.5));
+    assert!(df.fillna_value(Value::Null, Some(vec!["n"])).is_err());
+    let mapped = df
+        .fillna_map(vec![
+            ("i".to_string(), Value::Short(7)),
+            ("n".to_string(), Value::String("x".to_string())),
+        ])
+        .unwrap()
+        .collect()
+        .unwrap()
+        .remove(0);
+    assert_eq!(mapped.get(0).and_then(|v| v.as_i64()), Some(7));
+    assert_eq!(mapped.get(2).and_then(|v| v.as_str()), Some("x"));
+}
+
 /// NA / stat / reshape / schema-shaping operations.
 #[test]
 fn na_reshape_execute() {
