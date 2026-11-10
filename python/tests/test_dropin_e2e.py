@@ -4323,6 +4323,21 @@ def test_samples_and_splits_take_a_seed_of_the_client_as_pyspark(session):
     assert df.withMetadata("id", metadata).schema["id"].metadata == metadata
 
 
+def test_random_split_seed_of_a_float_or_str_is_converted_with_int_as_pyspark(session):
+    # As PySpark's randomSplit: the seed goes through int(), so a float seed splits as its
+    # truncation and a str seed as its int, and a str that int() rejects raises its ValueError.
+    df = session.range(0, 2000, 1, 8)
+
+    def ids(part):
+        return sorted(row.id for row in part.collect())
+
+    expected = [ids(part) for part in df.randomSplit([0.5, 0.5], 3)]
+    assert [ids(part) for part in df.randomSplit([0.5, 0.5], 3.7)] == expected
+    assert [ids(part) for part in df.randomSplit([0.5, 0.5], "3")] == expected
+    with pytest.raises(ValueError, match="invalid literal for int"):
+        df.randomSplit([0.5, 0.5], "3.5")
+
+
 def test_answers_that_pyspark_keeps_are_asked_once_per_dataframe_as_pyspark(session):
     # As PySpark's isStreaming (a cached_property), semanticHash, isEmpty and inputFiles
     # (functools.cache): a DataFrame keeps the server's first answer, so a redefined view or a

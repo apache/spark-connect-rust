@@ -9599,6 +9599,32 @@ def test_sample_split_and_sample_by_draw_their_seed_from_python_random_as_pyspar
     assert seed_of(df.stat.sampleBy("id", {0: 1.0}, 7), 107) == 7
 
 
+def test_random_split_converts_its_seed_with_int_as_pyspark(mock_connect):
+    # As PySpark Connect's randomSplit: the seed goes through int() in each Sample, so a float
+    # is truncated and a str is parsed, and the splits are those of the int seed. A str that
+    # int() rejects raises its ValueError, after the weights are checked.
+    from pyspark.errors import PySparkValueError
+
+    spark, service = mock_connect
+    df = spark.range(10)
+
+    def sample_of(dataframe):
+        # The Sample relation (field 12) of the plan of the last request.
+        dataframe.collect()
+        plan = parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0]
+        return parse_message(plan)[12][0]
+
+    expected = [sample_of(split) for split in df.randomSplit([1.0, 1.0], 1)]
+    assert [sample_of(split) for split in df.randomSplit([1.0, 1.0], 1.5)] == expected
+    assert [sample_of(split) for split in df.randomSplit([1.0, 1.0], "1")] == expected
+    assert [parse_message(sample)[5][0] for sample in expected] == [1, 1]
+    with pytest.raises(ValueError, match="invalid literal for int"):
+        df.randomSplit([1.0, 1.0], "3.5")
+    with pytest.raises(PySparkValueError) as error:
+        df.randomSplit([0.0, 0.0], "3.5")
+    assert error.value.getCondition() == "VALUE_NOT_POSITIVE"
+
+
 def test_with_metadata_and_pivot_refer_to_their_column_through_the_dataframe_as_pyspark(
         mock_connect):
     # As PySpark's withMetadata (self[columnName]) and pivot (self._df[pivot_col]): the column
