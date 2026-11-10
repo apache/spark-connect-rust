@@ -1660,6 +1660,32 @@ def test_create_dataframe_of_datetime_labels_keeps_ntz_values_as_pyspark(session
         time.tzset()
 
 
+def test_create_dataframe_of_nullable_labels_keeps_ntz_values_as_pyspark(session):
+    # As PySpark's, as for the datetime labels above: a datetime64 column under an Int64 label (a
+    # pivot of `convert_dtypes()` data) reads back unchanged with an explicit timestamp_ntz, not
+    # shifted by the time zone of the session or of the client, set to Asia/Seoul here.
+    import pandas as pd
+
+    frame = pd.DataFrame({"x": pd.Series(pd.to_datetime(["2020-01-02 03:00", None]))})
+    frame.columns = pd.Index(pd.array([1], dtype="Int64"))
+    previous = session.conf.get("spark.sql.session.timeZone")
+    previous_local = os.environ.get("TZ")
+    session.conf.set("spark.sql.session.timeZone", "Asia/Seoul")
+    os.environ["TZ"] = "Asia/Seoul"
+    time.tzset()
+    try:
+        df = session.createDataFrame(frame, "p timestamp_ntz")
+        assert df.schema.simpleString() == "struct<p:timestamp_ntz>"
+        assert df.collect() == [Row(p=datetime(2020, 1, 2, 3)), Row(p=None)]
+    finally:
+        session.conf.set("spark.sql.session.timeZone", previous)
+        if previous_local is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous_local
+        time.tzset()
+
+
 def test_create_dataframe_from_empty_arrow_table(session):
     empty = pa.table({"a": pa.array([], pa.int64()), "b": pa.array([], pa.string())})
     df = session.createDataFrame(empty, "a long, b string")

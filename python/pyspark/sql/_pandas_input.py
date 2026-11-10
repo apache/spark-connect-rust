@@ -299,6 +299,62 @@ def _has_canonical_interval_array(backing, module, name):
     return True
 
 
+# The hooks of a label array that iterating, measuring and converting the labels of an Index
+# reach, in pandas 2 and 3.
+_LABEL_ARRAY_HOOKS = ("__iter__", "__getitem__", "__len__", "__array__", "__contains__",
+                      "to_numpy", "astype", "isna", "tolist", "fillna", "_hasna", "dtype")
+
+
+def _has_canonical_label_array(backing, pa):
+    """Accept the exact masked or Arrow storage of an Index of labels.
+
+    pandas' nullable labels (Int64, Float64 or boolean, as a pivot or `.T` of `convert_dtypes()`
+    data has them) are an IntegerArray, FloatingArray or BooleanArray over the ndarrays `_data`
+    and `_mask`, and Arrow-backed labels of any type (`dtype_backend="pyarrow"`) are an
+    ArrowExtensionArray over the ChunkedArray `_pa_array`. As for the string labels, the class
+    must be pandas' own, and every hook that reading the labels reaches must be a function (or
+    the getter of a property or a cached property) of pandas' own array modules, shadowed by no
+    instance attribute, so that reading the labels runs no user code.
+    """
+    import numpy as np
+
+    try:
+        from pandas.core.arrays import base as base_module, boolean as boolean_module
+        from pandas.core.arrays import floating as floating_module, integer as integer_module
+        from pandas.core.arrays import masked as masked_module, numeric as numeric_module
+        from pandas.core.arrays.arrow import array as arrow_module
+        from pandas._libs.properties import CachedProperty
+    except ImportError:
+        return False
+    cls = type(backing)
+    masked = (vars(integer_module).get("IntegerArray"), vars(floating_module).get("FloatingArray"),
+              vars(boolean_module).get("BooleanArray"))
+    if any(cls is candidate for candidate in masked if candidate is not None):
+        data, mask = vars(backing).get("_data"), vars(backing).get("_mask")
+        if (type(data) is not np.ndarray or type(mask) is not np.ndarray
+                or mask.dtype != np.bool_):
+            return False
+        modules = (masked_module, numeric_module, boolean_module, integer_module,
+                   floating_module, base_module)
+    elif pa is not None and cls is vars(arrow_module).get("ArrowExtensionArray"):
+        if type(vars(backing).get("_pa_array")) is not pa.ChunkedArray:
+            return False
+        modules = (arrow_module, base_module)
+    else:
+        return False
+    if _raw_class_attribute(cls, "__getattribute__")[1] is not object.__getattribute__:
+        return False
+    for name in _LABEL_ARRAY_HOOKS:
+        if name in vars(backing):
+            return False
+        hook = _raw_class_attribute(cls, name)[1]
+        if type(hook) is property or type(hook) is CachedProperty:
+            hook = hook.fget
+        if not _defined_in(hook, name, *modules):
+            return False
+    return True
+
+
 def _has_canonical_columns(columns):
     """Decline label containers whose row-path iteration can run custom hooks."""
     import sys
@@ -367,6 +423,9 @@ def _has_canonical_columns(columns):
         return False
     backing = vars(columns).get("_data")
     if type(backing) is np.ndarray:
+        return True
+    # Nullable and Arrow-backed labels of other types than strings take the Arrow routes too.
+    if _has_canonical_label_array(backing, sys.modules.get("pyarrow")):
         return True
 
     # Arrow-backed labels already hold PyArrow storage. Do not import optional
