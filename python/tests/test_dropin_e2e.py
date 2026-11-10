@@ -1348,6 +1348,35 @@ print(spark.range(3).count())
     ], result.stdout
 
 
+def test_the_exception_of_a_done_call_fails_the_execution_as_pyspark(session):
+    # As PySpark Connect's Progress.__exit__: the exception of a progress handler's done call goes
+    # out of the execution, and a registration of a function, which PySpark runs without a
+    # Progress, makes no call.
+    from pyspark.sql.functions import udf
+
+    error = ValueError("the done call raises")
+    calls = []
+
+    def failing(**kwargs):
+        calls.append(kwargs["done"])
+        if kwargs["done"]:
+            raise error
+
+    session.registerProgressHandler(failing)
+    try:
+        with pytest.raises(ValueError) as raised:
+            session.range(10).collect()
+        assert raised.value is error and calls[-1] is True
+        with pytest.raises(ValueError):
+            session.range(10).toPandas()
+        calls.clear()
+        session.udf.register("s16_f4_done_udf", udf(lambda: 1))
+        assert calls == []
+    finally:
+        session.removeProgressHandler(failing)
+    assert session.sql("SELECT s16_f4_done_udf()").collect()[0][0] == "1"
+
+
 def test_progress_handler_runs_a_query_of_its_own_as_pyspark(session):
     # As PySpark's: a handler runs while the execution runs, and a query of the handler runs
     # too, the progress of the execution having no effect on it.

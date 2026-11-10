@@ -2524,20 +2524,11 @@ pub(crate) fn build_input_relation(
     crate::plan::relation_with_ids(plan, session.plan_ids())
 }
 
-/// Execute a `Command` against the server and drain the response stream.
-///
-/// Writes (and other side-effecting operations) are modeled as commands rather
-/// than relations, so they are submitted through an `ExecutePlanRequest` whose
-/// plan carries a `Command` and produce no rows to collect.
-pub(crate) fn execute_command(
-    session: &SparkSession,
-    command_type: proto::command::CommandType,
-) -> Result<()> {
-    execute_command_collect(session, command_type).map(|_| ())
-}
-
-/// Like `execute_command`, but returns the collected responses so callers can read
-/// a command result (e.g. `CheckpointCommandResult`, `WriteStreamOperationStartResult`).
+/// Execute a `Command` against the server and drain the response stream, returning the
+/// collected responses so callers can read a command result (e.g. `CheckpointCommandResult`,
+/// `WriteStreamOperationStartResult`). Writes (and other side-effecting operations) are modeled
+/// as commands rather than relations, so they are submitted through an `ExecutePlanRequest`
+/// whose plan carries a `Command`.
 pub(crate) fn execute_command_collect(
     session: &SparkSession,
     command_type: proto::command::CommandType,
@@ -2545,11 +2536,31 @@ pub(crate) fn execute_command_collect(
     execute_command_with_info(session, command_type).map(|(responses, _)| responses)
 }
 
+/// Like `execute_command_collect`, for a command that PySpark runs without a `Progress` (its
+/// `_execute`, of the registrations of functions, table functions and data sources): the
+/// progress of its execution, and its done call, does not reach the progress handlers.
+pub(crate) fn execute_command_unreported(
+    session: &SparkSession,
+    command_type: proto::command::CommandType,
+) -> Result<()> {
+    execute_command_reporting(session, command_type, false).map(|_| ())
+}
+
 /// Like `execute_command_collect`, and also returns the information of the execution, which
 /// it records as the session's most recent one, for a DataFrame that keeps its own.
 pub(crate) fn execute_command_with_info(
     session: &SparkSession,
     command_type: proto::command::CommandType,
+) -> Result<(Vec<proto::ExecutePlanResponse>, ExecutionInfo)> {
+    execute_command_reporting(session, command_type, true)
+}
+
+/// The command `command_type`, executed with its progress for the progress handlers when
+/// `reported`.
+fn execute_command_reporting(
+    session: &SparkSession,
+    command_type: proto::command::CommandType,
+    reported: bool,
 ) -> Result<(Vec<proto::ExecutePlanResponse>, ExecutionInfo)> {
     let mut command = proto::Command::default();
     command.command_type = Some(command_type);
@@ -2563,7 +2574,11 @@ pub(crate) fn execute_command_with_info(
     request.tags = session.tags();
     request.plan = Some(plan);
 
-    let mut stream = session.execute_plan(request)?;
+    let mut stream = if reported {
+        session.execute_plan(request)?
+    } else {
+        session.execute_plan_unreported(request)?
+    };
     // Drain the response stream so the command runs to completion server-side,
     // capturing any metrics/progress emitted along the way.
     let mut info = ExecutionInfo::default();

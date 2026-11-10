@@ -1899,8 +1899,8 @@ def test_progress_handlers_are_called_with_the_progress_of_executions_as_pyspark
     # of ProgressHandler, of the StageInfo of each stage, for each progress of an execution that
     # has tasks, and once more, as done, when it ends; removing a handler that is not registered
     # raises a ValueError; an exception of a handler fails the execution (see the test below), and
-    # its done call goes to sys.unraisablehook; and SPARK_CONNECT_PROGRESS_BAR_ENABLED prints the
-    # progress bar.
+    # so does that of its done call, which replaces it, as PySpark's Progress.__exit__ raises it;
+    # and SPARK_CONNECT_PROGRESS_BAR_ENABLED prints the progress bar.
     import sys
 
     from pyspark.sql.connect.shell.progress import StageInfo
@@ -1937,7 +1937,7 @@ def test_progress_handlers_are_called_with_the_progress_of_executions_as_pyspark
     spark.registerProgressHandler(failing)
     with pytest.raises(ZeroDivisionError):
         spark.range(1).collect()
-    assert unraisable and isinstance(unraisable[0].exc_value, ZeroDivisionError)
+    assert unraisable == []
     spark.removeProgressHandler(failing)
 
     monkeypatch.setenv("SPARK_CONNECT_PROGRESS_BAR_ENABLED", "1")
@@ -12252,6 +12252,58 @@ def test_udf_profiles_are_collected_from_the_python_accumulators_as_pyspark(
     assert spark._profiler_collector._profile_results == {}
 
 
+
+
+def test_the_exception_of_a_done_call_fails_the_execution_as_pyspark(mock_connect, monkeypatch):
+    # As PySpark Connect's Progress.__exit__, which makes the done call when the execution ends:
+    # the exception of a handler's done call goes out of the execution as it is, not to
+    # sys.unraisablehook, and it replaces the error of an execution that fails, which PySpark
+    # keeps as its __context__. A registration of a function, which PySpark runs without a
+    # Progress, makes no call.
+    import sys
+
+    from pyspark.sql.functions import udf
+
+    spark, service = mock_connect
+    # ExecutePlanResponse.execution_progress=18 -> one stage with tasks, as the tests above.
+    stage = (varint_field(1, 7) + varint_field(2, 4) + varint_field(3, 1)
+             + varint_field(4, 1024) + varint_field(5, 0))
+    service.execute_payload = message_field(18, message_field(1, stage) + varint_field(2, 3))
+    unraisable = []
+    monkeypatch.setattr(sys, "unraisablehook", unraisable.append)
+    error = ValueError("the done call raises")
+    calls = []
+
+    def failing(**kwargs):
+        calls.append(kwargs["done"])
+        if kwargs["done"]:
+            raise error
+
+    spark.registerProgressHandler(failing)
+    try:
+        for action in [lambda: spark.range(1).collect(),
+                       lambda: list(spark.range(1).toLocalIterator()),
+                       lambda: list(spark.range(1).toLocalIterator(prefetchPartitions=True))]:
+            calls.clear()
+            with pytest.raises(ValueError) as raised:
+                action()
+            assert raised.value is error and calls == [False, True]
+        classes = ["org.apache.spark.sql.AnalysisException", "java.lang.Exception"]
+        service.execute_error = ("[TABLE_OR_VIEW_NOT_FOUND] t", classes[0],
+                                 _error_info(classes, errorClass="TABLE_OR_VIEW_NOT_FOUND"))
+        with pytest.raises(ValueError) as raised:
+            spark.range(1).collect()
+        assert raised.value is error
+        service.execute_error = None
+        calls.clear()
+        spark.udf.register("f", udf(lambda: 1))
+        assert calls == []
+    finally:
+        service.execute_error = None
+        spark.removeProgressHandler(failing)
+    assert unraisable == []
+    service.execute_payload = b""
+    assert spark.range(1).collect() == []
 
 
 def test_progress_handler_that_runs_queries_without_end_is_bounded(mock_connect, monkeypatch):
