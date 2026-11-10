@@ -1328,7 +1328,8 @@ impl DataFrame {
 
     /// Check if the DataFrame is empty.
     pub fn is_empty(&self) -> Result<bool> {
-        self.limit(1).count().map(|c| c == 0)
+        let no_columns: [Column; 0] = [];
+        self.select(no_columns).take(1).map(|rows| rows.is_empty())
     }
 
     /// Get column names.
