@@ -660,19 +660,20 @@ def serve(connection):
             # ConfigRequest.session_id=1, operation=3, Operation.get=2, Get.keys=1;
             # ConfigResponse.session_id=1, pairs=2, KeyValue.key=1, value=2.
             # The plan compression lookup of a client, which PySpark makes on its first plan, is
-            # not recorded, so that the tests of the other requests count only their own.
+            # not recorded, blocked or failed, so that the tests of the other requests count,
+            # block and fail only their own.
             lookup = PLAN_COMPRESSION_LOOKUP in request
             if lookup:
                 self.plan_compression_lookups += 1
             if not lookup:
                 self.config_requests.append(request)
                 self.rpc_events.append("config")
-            if self.block_config and not self.response_gate.wait(5):
+            if not lookup and self.block_config and not self.response_gate.wait(5):
                 context.abort(
                     grpc.StatusCode.DEADLINE_EXCEEDED,
                     "Python thread could not run while configuration lookup waited",
                 )
-            if self.config_failure:
+            if not lookup and self.config_failure:
                 context.abort(grpc.StatusCode.INVALID_ARGUMENT, self.config_failure)
             request = parse_message(request)
             operation = parse_message(request[3][0])
