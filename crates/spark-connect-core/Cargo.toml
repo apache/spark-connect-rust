@@ -39,5 +39,7 @@ hyper = "1"
 sha2 = { version = "0.10", features = ["asm"] }
 
 [dev-dependencies]
+# A hyper HTTP/2 client connection, for a request that its connection closed before sending.
+hyper-util = { version = "0.1", features = ["tokio"] }
 tempfile = "3"
 tonic-prost.workspace = true
