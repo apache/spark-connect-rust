@@ -811,12 +811,12 @@ impl PyColumn {
     fn __rand__(&self, py: Python<'_>, other: Py<PyAny>) -> PyResult<PyColumn> {
         let _origin = crate::origin::with_origin("__rand__");
         let o = to_column(&other.bind(py))?;
-        Ok(PyColumn::new(o.and(self.column.clone())))
+        Ok(PyColumn::new(self.column.clone().and(o)))
     }
     fn __ror__(&self, py: Python<'_>, other: Py<PyAny>) -> PyResult<PyColumn> {
         let _origin = crate::origin::with_origin("__ror__");
         let o = to_column(&other.bind(py))?;
-        Ok(PyColumn::new(o.or(self.column.clone())))
+        Ok(PyColumn::new(self.column.clone().or(o)))
     }
 
     /// `col ** other`. Mirrors `Column.__pow__` = `power(self, other)`.
