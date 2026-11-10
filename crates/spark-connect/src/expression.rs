@@ -2,9 +2,11 @@
 //!
 //! Defines the Expression hierarchy and conversion functions to Spark Connect protobufs.
 
+use std::cell::Cell;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
+use spark_connect_core::error::{Result, SparkError};
 use spark_connect_proto as proto;
 
 use crate::plan::LogicalPlan;
@@ -17,6 +19,111 @@ static LAMBDA_VAR_COUNTER: AtomicU32 = AtomicU32::new(0);
 /// Get the next unique lambda variable suffix.
 pub fn next_lambda_var_index() -> u32 {
     LAMBDA_VAR_COUNTER.fetch_add(1, Ordering::SeqCst)
+}
+
+/// The most levels of an expression that a plan of a request may carry. PySpark builds the proto
+/// of an expression by recursing in Python, so under Python's default recursion limit its
+/// serializer raises `RecursionError` for `select((col("id") + 1 + ... + 1).alias("x"))` from
+/// 744 additions, an expression of 746 levels with its alias and column, and serializes 745; a
+/// deeper expression is a `RecursionError` here too (see [`with_expression_depth_bound`]).
+pub const MAX_EXPRESSION_DEPTH: usize = 745;
+
+/// The stack that serializing or rendering an expression keeps free before it goes down a level,
+/// and the size of a stack segment that it adds when less is left: a level recurses once, so an
+/// expression of any number of levels grows the stack instead of overflowing it. A frame of a
+/// debug build is many times larger than one of a release build.
+const EXPRESSION_RED_ZONE: usize = if cfg!(debug_assertions) {
+    1 << 20
+} else {
+    128 << 10
+};
+const EXPRESSION_STACK_SEGMENT: usize = if cfg!(debug_assertions) {
+    16 << 20
+} else {
+    4 << 20
+};
+
+thread_local! {
+    /// The level of the expression that this thread serializes now, and the deepest one since
+    /// the start of the innermost [`with_expression_depth_bound`].
+    static EXPRESSION_LEVEL: Cell<usize> = const { Cell::new(0) };
+    static DEEPEST_EXPRESSION_LEVEL: Cell<usize> = const { Cell::new(0) };
+    /// Whether this thread serializes in a [`with_expression_depth_bound`], which stops at the
+    /// bound.
+    static EXPRESSION_DEPTH_BOUNDED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// One level of an expression that is being serialized, left when it is dropped (also on a
+/// panic, so that the level of the thread stays right).
+struct ExpressionLevel(usize);
+
+impl ExpressionLevel {
+    fn enter() -> Self {
+        let level = EXPRESSION_LEVEL.with(|current| {
+            let level = current.get() + 1;
+            current.set(level);
+            level
+        });
+        DEEPEST_EXPRESSION_LEVEL.with(|deepest| deepest.set(deepest.get().max(level)));
+        ExpressionLevel(level)
+    }
+}
+
+impl Drop for ExpressionLevel {
+    fn drop(&mut self) {
+        EXPRESSION_LEVEL.with(|current| current.set(current.get() - 1));
+    }
+}
+
+/// The [`with_expression_depth_bound`] of this thread, until it is dropped: the bound and the
+/// deepest level of the serialization that encloses it, if any, are restored.
+struct DepthBoundScope {
+    outer_bounded: bool,
+    outer_deepest: usize,
+}
+
+impl DepthBoundScope {
+    fn enter() -> Self {
+        DepthBoundScope {
+            outer_bounded: EXPRESSION_DEPTH_BOUNDED.with(|bounded| bounded.replace(true)),
+            outer_deepest: DEEPEST_EXPRESSION_LEVEL.with(|deepest| deepest.replace(0)),
+        }
+    }
+
+    /// The deepest level since the scope was entered.
+    fn deepest(&self) -> usize {
+        DEEPEST_EXPRESSION_LEVEL.with(Cell::get)
+    }
+}
+
+impl Drop for DepthBoundScope {
+    fn drop(&mut self) {
+        EXPRESSION_DEPTH_BOUNDED.with(|bounded| bounded.set(self.outer_bounded));
+        DEEPEST_EXPRESSION_LEVEL.with(|deepest| deepest.set(deepest.get().max(self.outer_deepest)));
+    }
+}
+
+/// Run `f`, which goes down a level of an expression, with at least [`EXPRESSION_RED_ZONE`] of
+/// stack left.
+fn with_stack_for_a_level<T>(f: impl FnOnce() -> T) -> T {
+    stacker::maybe_grow(EXPRESSION_RED_ZONE, EXPRESSION_STACK_SEGMENT, f)
+}
+
+/// Run `serialize`, which serializes expressions for a request, and fail as PySpark's serializer
+/// does if one of them is deeper than [`MAX_EXPRESSION_DEPTH`]: with a `RecursionError`, instead
+/// of a request that overflows the stack or that the server cannot parse. Within it, an
+/// expression is serialized down to the bound only: its proto is dropped and encoded by
+/// recursing too, so it must not be deeper.
+pub(crate) fn with_expression_depth_bound<T>(serialize: impl FnOnce() -> T) -> Result<T> {
+    let scope = DepthBoundScope::enter();
+    let value = serialize();
+    if scope.deepest() > MAX_EXPRESSION_DEPTH {
+        return Err(SparkError::recursion_msg(format!(
+            "maximum recursion depth exceeded while serializing an expression; an expression \
+             may be at most {MAX_EXPRESSION_DEPTH} levels deep"
+        )));
+    }
+    Ok(value)
 }
 
 /// An immutable, shared expression, mirroring PySpark's base Expression type.
@@ -34,14 +141,30 @@ pub struct Expression {
 
 impl std::fmt::Debug for Expression {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        std::fmt::Debug::fmt(self.node(), f)
+        with_stack_for_a_level(|| std::fmt::Debug::fmt(self.node(), f))
     }
 }
 
 impl PartialEq for Expression {
     fn eq(&self, other: &Self) -> bool {
         // Compare values even for the same allocation: NaN must remain unequal to itself.
-        self.node().eq(other.node())
+        with_stack_for_a_level(|| self.node().eq(other.node()))
+    }
+}
+
+/// The node that a dropped expression holds once its own node has gone, which has no levels
+/// below it.
+static DROPPED_NODE: std::sync::LazyLock<Arc<ExpressionNode>> =
+    std::sync::LazyLock::new(|| Arc::new(ExpressionNode::SQLExpression(String::new())));
+
+impl Drop for Expression {
+    /// The last owner of a node drops the levels below it, each in turn: give them the stack
+    /// that an expression of many levels needs, as for serializing it.
+    fn drop(&mut self) {
+        if Arc::strong_count(&self.node) == 1 {
+            let node = std::mem::replace(&mut self.node, Arc::clone(&DROPPED_NODE));
+            with_stack_for_a_level(move || drop(node));
+        }
     }
 }
 
@@ -346,6 +469,11 @@ impl Expression {
     /// decide column equality, so the rendering must be deterministic and mirror
     /// PySpark's format for the common operators.
     pub fn render(&self) -> String {
+        // A level renders the levels below it: grow the stack for an expression of many levels.
+        with_stack_for_a_level(|| self.render_node())
+    }
+
+    fn render_node(&self) -> String {
         match self.node() {
             ExpressionNode::Literal(lit) => lit.render(),
             ExpressionNode::ColumnReference(col_ref) => col_ref.name.clone(),
@@ -422,6 +550,20 @@ impl Expression {
     /// Converts the expression to a Spark Connect protobuf expression, with its origin, as
     /// PySpark's `Expression._create_proto_expression` sends it.
     pub fn to_proto(&self) -> proto::Expression {
+        // A level serializes the levels below it: grow the stack for an expression of many
+        // levels, and count them for `with_expression_depth_bound`.
+        with_stack_for_a_level(|| {
+            let level = ExpressionLevel::enter();
+            if level.0 > MAX_EXPRESSION_DEPTH && EXPRESSION_DEPTH_BOUNDED.with(Cell::get) {
+                // The request fails with a `RecursionError`: stop here, so that the proto of the
+                // expression is no deeper than the bound.
+                return proto::Expression::default();
+            }
+            self.to_proto_with_origin()
+        })
+    }
+
+    fn to_proto_with_origin(&self) -> proto::Expression {
         let mut expr = self.node_to_proto();
         if let Some(origin) = &self.origin {
             expr.common = Some(proto::ExpressionCommon {
@@ -1594,6 +1736,79 @@ mod tests {
         // (the property spark_column_equals relies on).
         assert_eq!(add.render(), add.render());
         assert_ne!(add.render(), eq.render());
+    }
+
+    /// `id + 1` chained `levels` times, as `col("id") + 1` in a loop of PySpark builds it.
+    fn chained_additions(levels: usize) -> Expression {
+        let mut expr = col("id");
+        for _ in 0..levels {
+            expr = Expression::function(
+                "+",
+                vec![expr, Expression::literal(LiteralExpression::Integer(1))],
+            );
+        }
+        expr
+    }
+
+    /// The levels of a serialized expression of `chained_additions`.
+    fn serialized_levels(expr: &proto::Expression) -> usize {
+        let mut levels = 1;
+        let mut expr = expr;
+        while let Some(proto::expression::ExprType::UnresolvedFunction(function)) = &expr.expr_type
+        {
+            expr = &function.arguments[0];
+            levels += 1;
+        }
+        levels
+    }
+
+    /// An expression of any number of levels is serialized, rendered, compared, formatted and
+    /// dropped on a small stack, which grows on demand; one deeper than `MAX_EXPRESSION_DEPTH`
+    /// is a `RecursionError`, as PySpark's serializer raises it.
+    #[test]
+    fn deep_expressions_do_not_overflow_a_small_stack() {
+        std::thread::Builder::new()
+            .stack_size(512 << 10)
+            .spawn(|| {
+                let at_bound = chained_additions(MAX_EXPRESSION_DEPTH - 1);
+                let proto =
+                    with_expression_depth_bound(|| at_bound.to_proto()).expect("at the bound");
+                assert_eq!(serialized_levels(&proto), MAX_EXPRESSION_DEPTH);
+
+                let deep = chained_additions(100_000);
+                let error = with_expression_depth_bound(|| deep.to_proto()).expect_err("deep");
+                assert_eq!(
+                    error.kind,
+                    spark_connect_core::error::SparkErrorKind::RecursionError
+                );
+                assert!(
+                    error.message().contains("maximum recursion depth"),
+                    "{error}"
+                );
+                // Out of a request, every level is serialized.
+                let full = deep.to_proto();
+                assert_eq!(serialized_levels(&full), 100_001);
+                // The caller drops it: a proto this deep needs the stack of a big thread.
+                std::thread::Builder::new()
+                    .stack_size(256 << 20)
+                    .spawn(move || std::mem::drop(full))
+                    .unwrap()
+                    .join()
+                    .unwrap();
+                let rendered = chained_additions(10_000).render();
+                assert!(rendered.starts_with("+(+(+(") && rendered.contains("+(id, 1), 1)"));
+                assert!(rendered.ends_with(", 1), 1), 1)"));
+                assert_eq!(rendered.len(), "id".len() + 10_000 * "+(, 1)".len());
+                assert!(deep == deep.clone());
+                assert!(format!("{deep:?}").starts_with("UnresolvedFunction("));
+                std::mem::drop(deep);
+
+                // The deepest level is counted again for each serialization.
+                assert!(with_expression_depth_bound(|| at_bound.to_proto()).is_ok());
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]

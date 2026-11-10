@@ -14439,6 +14439,34 @@ def test_column_reprs_as_pyspark(column, expected):
     assert repr(column(F)) == f"Column<'{expected}'>"
 
 
+def test_an_expression_too_deep_to_send_raises_recursion_error_without_a_request(mock_connect):
+    # As PySpark, whose client raises RecursionError while it builds the proto of an expression
+    # from 744 additions under an alias, before any request, rather than overflowing the native
+    # stack (which killed the process from about 30,000 levels); 743 are sent.
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+
+    def chained(additions):
+        c = F.col("id")
+        for _ in range(additions):
+            c = c + 1
+        return c.alias("x")
+
+    for additions in [744, 30_000, 100_000]:
+        deep = chained(additions)
+        for action in [spark.range(1).select(deep).collect, spark.range(1).withColumn("y", deep).count]:
+            with pytest.raises(RecursionError, match="an expression may be at most 745 levels"):
+                action()
+        if additions <= 30_000:
+            # Rendered on a stack that grows (PySpark raises RecursionError from ~1,000 levels).
+            assert repr(deep).startswith("Column<'+(+(")
+        del deep
+    assert service.execute_requests == []
+    spark.range(1).select(chained(743)).collect()
+    assert len(service.execute_requests) == 1
+
+
 def test_window_and_lambda_reprs_as_pyspark():
     import re
 

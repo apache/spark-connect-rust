@@ -26,6 +26,8 @@ serde_json = "1.0"
 # Local time for the reprs of timestamp literals, as Python's `datetime.fromtimestamp`.
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 uuid.workspace = true
+# Grows the stack on demand while an expression of many levels is serialized or rendered.
+stacker = "0.1"
 
 # Optional: only pulled in by the `wasm-udf` feature.
 base64 = { version = "0.21", optional = true }
