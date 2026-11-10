@@ -2983,6 +2983,48 @@ def test_higher_order_function_validation():
         F.transform("arr", lambda x: 123)
 
 
+def test_higher_order_functions_check_their_column_arguments_as_pyspark():
+    from pyspark.errors import PySparkTypeError
+    from pyspark.sql import functions as F
+
+    one = lambda x: x * 10  # noqa: E731
+    two = lambda x, y: x + y  # noqa: E731
+    three = lambda k, a, b: a  # noqa: E731
+    # Each builder takes the column argument in the position under test, and the name of
+    # the function that the Column it builds starts with.
+    cases = [
+        ("transform", lambda c: F.transform(c, one)),
+        ("exists", lambda c: F.exists(c, one)),
+        ("forall", lambda c: F.forall(c, one)),
+        ("filter", lambda c: F.filter(c, one)),
+        ("aggregate", lambda c: F.aggregate(c, F.lit(0), two)),
+        ("aggregate", lambda c: F.aggregate("a", c, two)),
+        ("reduce", lambda c: F.reduce(c, F.lit(0), two)),
+        ("reduce", lambda c: F.reduce("a", c, two)),
+        ("array_sort", lambda c: F.array_sort(c)),
+        ("array_sort", lambda c: F.array_sort(c, two)),
+        ("zip_with", lambda c: F.zip_with(c, "b", two)),
+        ("zip_with", lambda c: F.zip_with("a", c, two)),
+        ("transform_keys", lambda c: F.transform_keys(c, two)),
+        ("transform_values", lambda c: F.transform_values(c, two)),
+        ("map_filter", lambda c: F.map_filter(c, two)),
+        ("map_zip_with", lambda c: F.map_zip_with(c, "m2", three)),
+        ("map_zip_with", lambda c: F.map_zip_with("m1", c, three)),
+    ]
+    for name, make in cases:
+        # A list is not a column: PySpark names the argument `col` whatever its position.
+        with pytest.raises(PySparkTypeError) as error:
+            make([1, 2, 3])
+        assert error.value.getCondition() == "NOT_EXPECTED_TYPE", name
+        assert error.value.getMessageParameters() == {
+            "expected_type": "Column or str", "arg_name": "col", "arg_type": "list"}, name
+        # A Column and a column name are built as before.
+        for arg in (F.col("a"), "a"):
+            column = make(arg)
+            assert type(column).__name__ == "Column"
+            assert repr(column).startswith(f"Column<'{name}("), name
+
+
 def test_misc_functions():
     from pyspark.sql import functions as F
 

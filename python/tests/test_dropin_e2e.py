@@ -4259,3 +4259,21 @@ def test_linear_regression_weights_and_iterative_losses(session):
     ).withColumn("features", array_to_vector("xs"))
     robust = LinearRegression(loss="huber", solver="l-bfgs", maxIter=200, tol=1e-8).fit(robust_training)
     assert robust.transform(held_out).first().prediction == pytest.approx(7, abs=0.2)
+
+
+def test_higher_order_functions_take_columns_and_reject_lists_as_pyspark(session):
+    # As PySpark's, a Python list is not a column of a higher-order function, and an array
+    # column is one, and the rows of the lambdas of both are those of the reference.
+    from pyspark.errors import PySparkTypeError
+
+    for build in (lambda: F.transform([1, 2, 3], lambda x: x * 10),
+                  lambda: F.exists([1, 2], lambda x: x > 1)):
+        with pytest.raises(PySparkTypeError) as error:
+            session.range(1).select(build().alias("v")).collect()
+        assert error.value.getCondition() == "NOT_EXPECTED_TYPE"
+    array = F.array(F.lit(1), F.lit(2), F.lit(3))
+    assert session.range(1).select(
+        F.transform(array, lambda x: x * 10).alias("t")).collect() == [Row(t=[10, 20, 30])]
+    assert session.range(1).select(
+        F.exists(F.array(F.lit(1), F.lit(2)), lambda x: x > 1).alias("e")).collect() == [
+            Row(e=True)]
