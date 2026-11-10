@@ -11,7 +11,7 @@ from pyspark.ml.connect.feature import (
     StringIndexer,
     VectorAssembler,
 )
-from pyspark.ml.connect.classification import LinearSVC, LogisticRegression
+from pyspark.ml.connect.classification import LinearSVC, LogisticRegression, RandomForestClassifier
 from pyspark.ml.connect.regression import LinearRegression
 from pyspark.ml.connect.clustering import KMeans
 from pyspark.ml.connect.evaluation import (
@@ -46,6 +46,7 @@ __all__ = [
     "VectorAssembler",
     "LogisticRegression",
     "LinearSVC",
+    "RandomForestClassifier",
     "LinearRegression",
     "KMeans",
     "RegressionEvaluator",

@@ -93,6 +93,23 @@ impl Params {
         self
     }
 
+    /// Encode an ML parameter whose JVM type is `Array[Double]`, as PySpark sends thresholds.
+    fn set_param_double_array(mut self, name: &str, values: impl IntoIterator<Item = f64>) -> Self {
+        let literal = LiteralExpression::Array {
+            element_type: Box::new(DataType::Double),
+            elements: values.into_iter().map(LiteralExpression::Double).collect(),
+        }
+        .to_literal_proto();
+        self.params.insert(
+            name.to_string(),
+            proto::Expression {
+                expr_type: Some(proto::expression::ExprType::Literal(literal)),
+                ..Default::default()
+            },
+        );
+        self
+    }
+
     /// Set a parameter to a double value.
     pub fn set_param_double(mut self, name: &str, value: f64) -> Self {
         let mut literal = proto::Expression::default();
@@ -1562,6 +1579,255 @@ impl Model for LinearRegressionModel {
     }
 }
 
+/// Random forest classification using Spark's JVM implementation and ML vector features.
+///
+/// Supports binary and multiclass labels. Unset parameters use Spark's defaults.
+/// Set a seed explicitly for reproducible sampling.
+#[derive(Debug, Clone)]
+pub struct RandomForestClassifier {
+    operator: MlOperator,
+    params: Params,
+}
+
+impl RandomForestClassifier {
+    pub fn new() -> Self {
+        Self {
+            operator: MlOperator::new(
+                "org.apache.spark.ml.classification.RandomForestClassifier",
+                OperatorType::Estimator,
+            ),
+            params: Params::new(),
+        }
+    }
+
+    /// Feature vector column.
+    pub fn set_feature_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("featuresCol", value);
+        self
+    }
+
+    /// Numeric label column; labels must be contiguous class indices starting at zero.
+    pub fn set_label_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("labelCol", value);
+        self
+    }
+
+    /// Predicted class output column.
+    pub fn set_prediction_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("predictionCol", value);
+        self
+    }
+
+    /// Class probability output column.
+    pub fn set_probability_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("probabilityCol", value);
+        self
+    }
+
+    /// Raw class prediction output column.
+    pub fn set_raw_prediction_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("rawPredictionCol", value);
+        self
+    }
+
+    /// Maximum tree depth, from 0 to 30.
+    pub fn set_max_depth(mut self, value: i32) -> Self {
+        self.params = self.params.set_param_int32("maxDepth", value);
+        self
+    }
+
+    /// Maximum number of bins for discretizing continuous features.
+    pub fn set_max_bins(mut self, value: i32) -> Self {
+        self.params = self.params.set_param_int32("maxBins", value);
+        self
+    }
+
+    /// Minimum number of training instances in each child node.
+    pub fn set_min_instances_per_node(mut self, value: i32) -> Self {
+        self.params = self.params.set_param_int32("minInstancesPerNode", value);
+        self
+    }
+
+    /// Minimum information gain for a split.
+    pub fn set_min_info_gain(mut self, value: f64) -> Self {
+        self.params = self.params.set_param_double("minInfoGain", value);
+        self
+    }
+
+    /// Whether to prune redundant nodes, as supported by Spark 4.3.0.
+    pub fn set_prune_tree(mut self, value: bool) -> Self {
+        self.params = self.params.set_param_bool("pruneTree", value);
+        self
+    }
+
+    /// Maximum memory in MB for histogram aggregation.
+    pub fn set_max_memory_in_mb(mut self, value: i32) -> Self {
+        self.params = self.params.set_param_int32("maxMemoryInMB", value);
+        self
+    }
+
+    /// Whether to cache node IDs for training instances.
+    pub fn set_cache_node_ids(mut self, value: bool) -> Self {
+        self.params = self.params.set_param_bool("cacheNodeIds", value);
+        self
+    }
+
+    /// Node ID cache checkpoint interval; -1 disables checkpointing.
+    pub fn set_checkpoint_interval(mut self, value: i32) -> Self {
+        self.params = self.params.set_param_int32("checkpointInterval", value);
+        self
+    }
+
+    /// Impurity measure: gini or entropy.
+    pub fn set_impurity(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("impurity", value);
+        self
+    }
+
+    /// Number of trees in the forest; must be positive.
+    pub fn set_num_trees(mut self, value: i32) -> Self {
+        self.params = self.params.set_param_int32("numTrees", value);
+        self
+    }
+
+    /// Feature subset strategy: auto, all, onethird, sqrt, log2, or a numeric count/fraction.
+    pub fn set_feature_subset_strategy(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("featureSubsetStrategy", value);
+        self
+    }
+
+    /// Random seed for sampling.
+    pub fn set_seed(mut self, value: i64) -> Self {
+        self.params = self.params.set_param_int_narrow("seed", value);
+        self
+    }
+
+    /// Fraction of training data used to train each tree, in (0, 1].
+    pub fn set_subsampling_rate(mut self, value: f64) -> Self {
+        self.params = self.params.set_param_double("subsamplingRate", value);
+        self
+    }
+
+    /// Optional output vector of leaf indices, one per tree; empty disables it.
+    pub fn set_leaf_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("leafCol", value);
+        self
+    }
+
+    /// Minimum fraction of total weight in each child node, in [0, 0.5).
+    pub fn set_min_weight_fraction_per_node(mut self, value: f64) -> Self {
+        self.params = self
+            .params
+            .set_param_double("minWeightFractionPerNode", value);
+        self
+    }
+
+    /// Optional instance weight column.
+    pub fn set_weight_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("weightCol", value);
+        self
+    }
+
+    /// Whether each tree samples training instances with replacement.
+    pub fn set_bootstrap(mut self, value: bool) -> Self {
+        self.params = self.params.set_param_bool("bootstrap", value);
+        self
+    }
+
+    /// Per-class thresholds: predictions maximize probability divided by threshold.
+    /// Provide one nonnegative value per class, with at most one zero.
+    pub fn set_thresholds(mut self, values: impl IntoIterator<Item = f64>) -> Self {
+        self.params = self.params.set_param_double_array("thresholds", values);
+        self
+    }
+
+    fn model_from_info(
+        &self,
+        info: proto::ml_command_result::MlOperatorInfo,
+        session: &SparkSession,
+    ) -> spark_connect_core::error::Result<RandomForestClassificationModel> {
+        let cached = CachedModel::from_info(&info, session, "RandomForestClassifier")?;
+        Ok(RandomForestClassificationModel {
+            operator: MlOperator::with_uid(
+                "org.apache.spark.ml.classification.RandomForestClassificationModel",
+                info.uid.as_deref().unwrap_or(&self.operator.uid),
+                OperatorType::Model,
+            ),
+            params: self.params.clone(),
+            cached,
+        })
+    }
+}
+
+impl Default for RandomForestClassifier {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Estimator for RandomForestClassifier {
+    fn operator(&self) -> &MlOperator {
+        &self.operator
+    }
+    fn operator_mut(&mut self) -> &mut MlOperator {
+        &mut self.operator
+    }
+    fn params(&self) -> &Params {
+        &self.params
+    }
+    fn params_mut(&mut self) -> &mut Params {
+        &mut self.params
+    }
+
+    fn fit_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<Box<dyn Model>> {
+        let info = fit_via_command(&self.operator, &self.params, df)?;
+        Ok(Box::new(self.model_from_info(info, &df.session)?))
+    }
+}
+
+/// A random forest classification model fitted by Spark Connect.
+///
+/// Obtain it through [`Estimator::fit`]. The model, its clones and transformed
+/// DataFrames retain the cached server model until the last owner is dropped.
+#[derive(Debug, Clone)]
+pub struct RandomForestClassificationModel {
+    operator: MlOperator,
+    params: Params,
+    cached: CachedModel,
+}
+
+impl Transformer for RandomForestClassificationModel {
+    fn operator(&self) -> &MlOperator {
+        &self.operator
+    }
+    fn operator_mut(&mut self) -> &mut MlOperator {
+        &mut self.operator
+    }
+    fn params(&self) -> &Params {
+        &self.params
+    }
+    fn params_mut(&mut self) -> &mut Params {
+        &mut self.params
+    }
+
+    fn build_ml_relation(
+        &self,
+        input: &DataFrame,
+    ) -> spark_connect_core::error::Result<proto::MlRelation> {
+        self.cached.build_ml_relation(input, &self.params)
+    }
+
+    fn transform_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<DataFrame> {
+        self.cached.transform(df, &self.params)
+    }
+}
+
+impl Model for RandomForestClassificationModel {
+    fn clone_box(&self) -> Box<dyn Model> {
+        Box::new(self.clone())
+    }
+}
+
 /// K-means clustering using Spark's JVM implementation and ML vector features.
 ///
 /// Supports Euclidean and cosine distance. Unset parameters use Spark's defaults.
@@ -2980,6 +3246,75 @@ mod tests {
             Some(proto::ml_relation::transform::Operator::ObjRef(
                 proto::ObjectRef {
                     id: "trained-kmeans".into()
+                }
+            ))
+        );
+        assert_eq!(*t.input.unwrap(), df.relation().unwrap());
+        assert_eq!(t.params.unwrap(), estimator.params().to_proto());
+        assert!(model
+            .transform(&session.new_session().range(2).unwrap())
+            .is_err());
+        assert!(model.clone_box().transform(&df).is_ok());
+    }
+    #[test]
+    fn random_forest_validates_fitted_references_and_model_metadata() {
+        let session = offline_session();
+        let estimator = RandomForestClassifier::default().set_prediction_col("class");
+        assert_eq!(
+            estimator.operator().name,
+            "org.apache.spark.ml.classification.RandomForestClassifier"
+        );
+        assert_eq!(estimator.operator().op_type, OperatorType::Estimator);
+        for kind in [
+            None,
+            Some(proto::ml_command_result::ml_operator_info::Type::Name(
+                "model".into(),
+            )),
+            Some(proto::ml_command_result::ml_operator_info::Type::ObjRef(
+                proto::ObjectRef::default(),
+            )),
+        ] {
+            assert!(estimator
+                .model_from_info(
+                    proto::ml_command_result::MlOperatorInfo {
+                        r#type: kind,
+                        ..Default::default()
+                    },
+                    &session
+                )
+                .is_err());
+        }
+        let info = |uid| proto::ml_command_result::MlOperatorInfo {
+            r#type: Some(proto::ml_command_result::ml_operator_info::Type::ObjRef(
+                proto::ObjectRef {
+                    id: "trained-random-forest".into(),
+                },
+            )),
+            uid,
+            ..Default::default()
+        };
+        let mut model = estimator
+            .model_from_info(info(Some("returned-uid".into())), &session)
+            .unwrap();
+        assert_eq!(model.operator().uid, "returned-uid");
+        assert_eq!(
+            model.operator().name,
+            "org.apache.spark.ml.classification.RandomForestClassificationModel"
+        );
+        assert_eq!(model.operator().op_type, OperatorType::Model);
+        let fallback = estimator.model_from_info(info(None), &session).unwrap();
+        assert_eq!(fallback.operator().uid, estimator.operator().uid);
+        let df = session.range(2).unwrap();
+        let proto::ml_relation::MlType::Transform(t) =
+            model.build_ml_relation(&df).unwrap().ml_type.unwrap()
+        else {
+            panic!("transform")
+        };
+        assert_eq!(
+            t.operator,
+            Some(proto::ml_relation::transform::Operator::ObjRef(
+                proto::ObjectRef {
+                    id: "trained-random-forest".into()
                 }
             ))
         );
