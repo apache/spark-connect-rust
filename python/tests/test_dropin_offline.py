@@ -12771,6 +12771,53 @@ def test_ml_plans_send_a_deep_dataframe_without_parsing_it_as_pyspark(mock_conne
         DataFrame(Gone(None), spark)
 
 
+def test_cycles_through_a_dataframe_of_a_python_plan_are_collected_as_pyspark(mock_connect):
+    # As PySpark's DataFrame, a Python object: a cycle through a DataFrame of a Python plan, whose
+    # plan keeps an object that keeps the DataFrame (as a pyspark.ml model keeps its summary's
+    # model.transform(dataset)), is freed by the garbage collector, while a DataFrame derived from
+    # it keeps the plan alive. With a collection at every allocation, the collector also meets
+    # DataFrames that are still being created, before their value is written.
+    import gc
+    import weakref
+
+    from pyspark.sql.connect.dataframe import DataFrame
+    from pyspark.sql.connect.plan import LogicalPlan
+
+    spark, _ = mock_connect
+    source = spark.range(3)
+    relation = source._plan.plan(spark.client)
+
+    class Owner:
+        pass
+
+    class Plan(LogicalPlan):
+        def plan(self, session):
+            return relation
+
+    def cycle():
+        owner, plan = Owner(), Plan(None)
+        plan.owner = owner
+        owner.frame = DataFrame(plan, spark)
+        return weakref.ref(owner)
+
+    thresholds = gc.get_threshold()
+    gc.set_threshold(1, 1, 1)
+    try:
+        collected = [cycle() for _ in range(20)]
+        kept = cycle()
+        derived = kept().frame.select("id").filter("id > 0")
+        for _ in range(20):
+            spark.range(3).select("id").filter("id > 0")
+    finally:
+        gc.set_threshold(*thresholds)
+    gc.collect()
+    assert all(owner() is None for owner in collected)
+    assert kept() is not None
+    del derived
+    gc.collect()
+    assert kept() is None
+
+
 @pytest.mark.parametrize("schema", [
     T.StructType([]),
     T.StructType([T.StructField("x", T.LongType()), T.StructField("y", T.LongType())]),

@@ -56,6 +56,11 @@ pub struct PyDataFrame {
     /// Whether `_repr_html_` was called, as PySpark's `_support_repr_html`: then `__repr__` is
     /// the string of the schema, so that a notebook does not show the DataFrame twice.
     support_repr_html: std::sync::atomic::AtomicBool,
+    /// Set once the value is written. Python's garbage collector may traverse the object while it
+    /// is created: the allocation already tracks it, and `object.__new__` allocates the instance
+    /// dictionary, which can start a collection, before PyO3 writes the value. Until then the
+    /// memory is zeroed, so this flag is false and `__traverse__` reads nothing else.
+    gc_ready: std::sync::atomic::AtomicBool,
 }
 
 /// The settings of the eager evaluation of `__repr__` and `_repr_html_`.
@@ -210,6 +215,7 @@ impl PyDataFrame {
         PyDataFrame {
             dataframe,
             support_repr_html: std::sync::atomic::AtomicBool::new(false),
+            gc_ready: std::sync::atomic::AtomicBool::new(true),
         }
     }
 
@@ -665,6 +671,31 @@ impl PyDataFrame {
             DataFrame::from_relation(session.borrow().session.clone(), relation, Some(owner))
                 .to_pyerr()?,
         ))
+    }
+
+    /// As a DataFrame of PySpark Connect, a Python object whose plan Python's garbage collector
+    /// sees: the Python objects that only this DataFrame keeps alive, the plans of `pyspark.ml`
+    /// that `DataFrame(plan, session)` keeps, are reported to the collector. So a reference cycle
+    /// through this DataFrame is freed, as PySpark frees it: a `pyspark.ml` model whose summary
+    /// keeps `model.transform(dataset)`, whose plan keeps the model, is released then.
+    fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
+        if !self.gc_ready.load(std::sync::atomic::Ordering::Relaxed) {
+            return Ok(());
+        }
+        for owner in self.dataframe.exclusive_relation_owners() {
+            if let Some(object) = owner.downcast_ref::<Py<PyAny>>() {
+                visit.call(object)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Break a reference cycle that the garbage collector found unreachable: the DataFrame drops
+    /// its plan, and so the Python objects that `__traverse__` reported.
+    fn __clear__(&mut self) {
+        if self.gc_ready.load(std::sync::atomic::Ordering::Relaxed) {
+            self.dataframe.clear_plan();
+        }
     }
 
     /// The bytes of the relation of this DataFrame as it is sent, for the plan of `_plan`.

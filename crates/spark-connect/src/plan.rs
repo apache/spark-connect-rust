@@ -1044,7 +1044,7 @@ impl Drop for LogicalPlan {
 
 impl LogicalPlan {
     /// The plans that this one reads directly.
-    fn inputs(&self) -> Vec<&Arc<LogicalPlan>> {
+    pub(crate) fn inputs(&self) -> Vec<&Arc<LogicalPlan>> {
         inputs_of!(self)
     }
 
