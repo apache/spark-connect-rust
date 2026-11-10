@@ -603,7 +603,6 @@ def _arrow_input_service(
             "user_id": request.user_context.user_id,
             "user_name": request.user_context.user_name,
             "has_client_type": request.HasField("client_type"),
-            "client_type": request.client_type,
             "grpc_user_agent": grpc_user_agent,
         }
 
@@ -836,20 +835,18 @@ def _arrow_input_service(
 
 def _assert_artifact_contexts(contexts, *, session_id, user_id, user_agent):
     assert contexts
-    client_types = {context["client_type"] for context in contexts}
-    assert len(client_types) == 1
-    client_type = client_types.pop()
-    assert client_type
-    assert client_type.startswith(user_agent + " spark/")
+    # As PySpark's ArtifactManager, the requests carry the user agent in the gRPC header only,
+    # and no client type.
+    grpc_user_agents = {context["grpc_user_agent"] for context in contexts}
+    assert len(grpc_user_agents) == 1
+    assert grpc_user_agents.pop().startswith(user_agent + " spark/")
     for context in contexts:
-        grpc_user_agent = context["grpc_user_agent"]
-        assert grpc_user_agent == client_type or grpc_user_agent.startswith(client_type + " ")
         assert context["session_id"] == session_id
         # PySpark's ArtifactManager sends a present context even without a user ID.
         assert context["has_user_context"]
         assert context["user_id"] == user_id
         assert context["user_name"] == ""
-        assert context["has_client_type"]
+        assert not context["has_client_type"]
 
 
 @pytest.mark.parametrize("user_id,user_agent", [

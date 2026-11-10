@@ -1101,6 +1101,10 @@ impl SparkConnectClient {
         // server-side session ID, as PySpark builds the plan before the request.
         self.observe_on(&mut request.client_observed_server_side_session_id);
         let request = self.hooked_and_compressed(request).await?;
+        // As PySpark reads its `_stub` once the plan is built and the hooks ran: the lookup of
+        // the plan compression of the first plan closes the client when it sees that the server
+        // restarted, and then the execution raises NO_ACTIVE_SESSION and sends nothing.
+        self.ensure_open()?;
         let mut req = Request::new(request);
         self._attach_metadata(&mut req);
         match self.stub.clone().execute_plan(req).await {
@@ -1237,6 +1241,8 @@ impl SparkConnectClient {
                 self.compress_plan(plan).await;
             }
         }
+        // As in `execute_plan`: the lookup of the plan compression may have closed the client.
+        self.ensure_open()?;
         let response = self
             .with_retry(|| {
                 let deadline = self.rpc_deadlines.analyze_plan;
@@ -1312,6 +1318,9 @@ impl SparkConnectClient {
         // server-side session ID, as PySpark builds the plan before the request.
         self.observe_on(&mut request.client_observed_server_side_session_id);
         let request = self.hooked_and_compressed(request).await?;
+        // As in `execute_plan`: the lookup of the plan compression may have closed the client,
+        // and PySpark reads its `_stub` before it makes the iterator, so nothing is released.
+        self.ensure_open()?;
         let iter = ExecutePlanResponseReattachableIterator::new(request);
         // Before the first RPC, so that an execution that waits for the server is in flight.
         let inflight = InflightGuard::register(
@@ -1420,6 +1429,8 @@ impl SparkConnectClient {
             ..Default::default()
         };
         let mut request = request;
+        // As `_fetch_enriched_error`, whose request carries the user context extensions.
+        self.extend_user_context(&mut request.user_context);
         self.observe_on(&mut request.client_observed_server_side_session_id);
         let deadline = self.rpc_deadlines.fetch_error_details;
         let mut req = with_deadline(Request::new(request), deadline);
@@ -1469,6 +1480,9 @@ impl SparkConnectClient {
             ..Default::default()
         };
         let mut request = request;
+        // As the request of PySpark's `RuntimeConf.get`, which carries the user context
+        // extensions, as every Config request.
+        self.extend_user_context(&mut request.user_context);
         self.observe_on(&mut request.client_observed_server_side_session_id);
         let deadline = self.rpc_deadlines.config;
         let mut req = with_deadline(Request::new(request), deadline);
@@ -2058,18 +2072,16 @@ impl SparkConnectClient {
         }
     }
 
-    /// The AddArtifacts call of `requests`, once. Stamps user_context and client_type on
-    /// every frame as it is sent; all upload paths must go through here. As PySpark's
-    /// ArtifactManager, the frames carry no observed server-side session ID.
+    /// The AddArtifacts call of `requests`, once. Stamps user_context on every frame as it is
+    /// sent; all upload paths must go through here. As PySpark's ArtifactManager, the frames
+    /// carry no client type and no observed server-side session ID.
     async fn add_artifacts_rpc(
         &self,
         requests: impl Iterator<Item = spark_connect_proto::AddArtifactsRequest> + Send + 'static,
     ) -> std::result::Result<spark_connect_proto::AddArtifactsResponse, tonic::Status> {
         let user_context = self.new_user_context();
-        let client_type = self.user_agent.clone();
         let requests = requests.map(move |mut request| {
             request.user_context = Some(user_context.clone());
-            request.client_type = Some(client_type.clone());
             request
         });
         let deadline = self.rpc_deadlines.add_artifacts;
@@ -2103,7 +2115,8 @@ impl SparkConnectClient {
     }
 
     /// The ArtifactStatus call of `names`, once: the response, which says whether each artifact
-    /// exists. As PySpark's, the request carries no observed server-side session ID.
+    /// exists. As PySpark's, the request carries no client type and no observed server-side
+    /// session ID.
     async fn artifact_status_rpc(
         &self,
         names: &[String],
@@ -2111,7 +2124,6 @@ impl SparkConnectClient {
         let mut request = ArtifactStatusesRequest::default();
         request.session_id = self.session_id.clone();
         request.user_context = Some(self.new_user_context());
-        request.client_type = Some(self.user_agent.clone());
         request.names = names.to_vec();
 
         let deadline = self.rpc_deadlines.artifact_status;
@@ -2362,6 +2374,17 @@ impl ReattachableResponseStream {
                     // Only reattach a still-running execution on a retriable drop.
                     if self.iter.is_completed().await || !self.retry_policy.can_retry(&status) {
                         return Err(self.fail_with_status(status).await);
+                    }
+                    // As the reference's `_has_next`, which reads the stream and reattaches in
+                    // one attempt of its `Retrying`: a stream that fails, also one that a
+                    // reattach opened, is an attempt of the policy, which waits its backoff before
+                    // reattaching and is the error once the policy's retries are spent. Else a
+                    // connection that keeps failing after the headers of each reattach is
+                    // reattached at once, without end. As at the other retries, the server's
+                    // RetryInfo delay of the failure, if any, is the wait.
+                    match retry_state.next_attempt(retry_delay_ms(&status)) {
+                        Some(wait_ms) => tokio::time::sleep(Duration::from_millis(wait_ms)).await,
+                        None => return Err(self.fail_with_status(status).await),
                     }
                     self.reattach(&mut retry_state, &mut retry_exception_since)
                         .await?;
@@ -3570,14 +3593,19 @@ mod request_fields_tests {
         }
     }
 
-    /// The client type and the observed server-side session ID of a request of `method`.
-    fn fields_of(method: &str, bytes: &[u8]) -> (Option<String>, Option<String>) {
+    /// The client type, the observed server-side session ID and the user context extensions of
+    /// a request of `method`.
+    fn fields_of(
+        method: &str,
+        bytes: &[u8],
+    ) -> (Option<String>, Option<String>, Vec<prost_types::Any>) {
         macro_rules! fields {
             ($request:ty) => {{
                 let request = <$request>::decode(bytes).unwrap();
                 (
                     request.client_type,
                     request.client_observed_server_side_session_id,
+                    request.user_context.unwrap_or_default().extensions,
                 )
             }};
         }
@@ -3592,12 +3620,41 @@ mod request_fields_tests {
             "ArtifactStatus" => fields!(ArtifactStatusesRequest),
             "AddArtifacts" => fields!(spark_connect_proto::AddArtifactsRequest),
             // Of no observed server-side session ID.
-            "ReleaseSession" => (
-                ReleaseSessionRequest::decode(bytes).unwrap().client_type,
-                None,
-            ),
+            "ReleaseSession" => {
+                let request = ReleaseSessionRequest::decode(bytes).unwrap();
+                (
+                    request.client_type,
+                    None,
+                    request.user_context.unwrap_or_default().extensions,
+                )
+            }
             other => panic!("unexpected method {other}"),
         }
+    }
+
+    /// The status of an error that the server raised and keeps the details of under
+    /// `error_id`: a `google.rpc.Status` of an `ErrorInfo` of that `errorId`.
+    fn error_kept_under(error_id: &str) -> tonic::Status {
+        #[derive(Clone, PartialEq, prost::Message)]
+        struct ErrorInfo {
+            #[prost(map = "string, string", tag = "3")]
+            metadata: std::collections::HashMap<String, String>,
+        }
+        #[derive(Clone, PartialEq, prost::Message)]
+        struct RpcStatus {
+            #[prost(message, repeated, tag = "3")]
+            details: Vec<prost_types::Any>,
+        }
+        let info = ErrorInfo {
+            metadata: [("errorId".to_string(), error_id.to_string())].into(),
+        };
+        let status = RpcStatus {
+            details: vec![prost_types::Any {
+                type_url: "type.googleapis.com/google.rpc.ErrorInfo".into(),
+                value: info.encode_to_vec(),
+            }],
+        };
+        tonic::Status::with_details(tonic::Code::Internal, "boom", status.encode_to_vec().into())
     }
 
     /// As PySpark's hook, which would put in the plan of `to_proto`, which compresses it: the plan
@@ -3668,7 +3725,7 @@ mod request_fields_tests {
     }
 
     #[tokio::test]
-    async fn requests_carry_the_client_type_and_the_observed_session_of_pyspark() {
+    async fn requests_carry_the_client_type_extensions_and_observed_session_of_pyspark() {
         let received: Received = Default::default();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -3690,6 +3747,11 @@ mod request_fields_tests {
         };
         let client = SparkConnectClient::connect(&builder).await.unwrap();
         let session_id = client.session_id().to_string();
+        let extension = prost_types::Any {
+            type_url: "example.org/context".into(),
+            value: vec![1, 2, 3],
+        };
+        client.add_global_user_context_extension(extension.clone());
 
         // The first request reads the plan compression of the server for the plan of the
         // execution, and its response gives the server-side session ID, which the execution
@@ -3733,6 +3795,9 @@ mod request_fields_tests {
             })
             .await
             .unwrap();
+        // An error that the server keeps the details of: raising it fetches them, and reads the
+        // conf of the server's stack trace.
+        client.error_from_status(error_kept_under("error-1")).await;
         client.artifact_status(&["files/a.txt"]).await.unwrap();
         let file = tempfile::NamedTempFile::new().unwrap();
         client
@@ -3771,13 +3836,21 @@ mod request_fields_tests {
         ] {
             assert!(requests.iter().any(|(m, _)| m == method), "no {method}");
         }
+        // The lookup, the explicit Config and the stack trace conf of the error; the explicit
+        // FetchErrorDetails and that of the error.
+        let count = |method: &str| requests.iter().filter(|(m, _)| m == method).count();
+        assert_eq!((count("Config"), count("FetchErrorDetails")), (3, 2));
         for (index, (method, bytes)) in requests.iter().enumerate() {
-            // As PySpark: the user agent, but "python" for CloneSession, and the observed
-            // server-side session ID, once a response gave it, but on ReleaseExecute,
-            // ReleaseSession, CloneSession and the artifact requests.
+            // As PySpark: the user agent, but "python" for CloneSession and none for the requests
+            // of the ArtifactManager; the observed server-side session ID, once a response gave
+            // it, but on ReleaseExecute, ReleaseSession, CloneSession and the artifact requests;
+            // and the user context extensions on the requests of
+            // `_update_request_with_user_context_extensions`, those that an error sends too, and
+            // on the ReleaseExecute of the user context of the execution.
             let client_type = match method.as_str() {
-                "CloneSession" => "python",
-                _ => user_agent.as_str(),
+                "CloneSession" => Some("python".to_string()),
+                "ArtifactStatus" | "AddArtifacts" => None,
+                _ => Some(user_agent.clone()),
             };
             let observed = match method.as_str() {
                 _ if index == 0 => None,
@@ -3785,9 +3858,13 @@ mod request_fields_tests {
                 | "AddArtifacts" => None,
                 _ => Some(SERVER_ID.to_string()),
             };
+            let extensions = match method.as_str() {
+                "ReleaseSession" | "CloneSession" | "ArtifactStatus" | "AddArtifacts" => vec![],
+                _ => vec![extension.clone()],
+            };
             assert_eq!(
                 fields_of(method, bytes),
-                (Some(client_type.to_string()), observed),
+                (client_type, observed, extensions),
                 "{method}"
             );
         }

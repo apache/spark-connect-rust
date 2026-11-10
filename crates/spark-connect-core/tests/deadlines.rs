@@ -25,7 +25,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures::{stream, Stream};
 use spark_connect_core::{ChannelBuilder, RetryPolicy, RpcDeadlines, SparkConnectClient};
@@ -97,6 +97,8 @@ struct State {
     timeouts: Mutex<Vec<(&'static str, Option<String>)>>,
     executes: Mutex<usize>,
     reattaches: Mutex<Vec<ReattachExecuteRequest>>,
+    /// When each ReattachExecute call arrived, in order.
+    reattached_at: Mutex<Vec<Instant>>,
     releases: Mutex<Vec<CapturedRelease>>,
 }
 
@@ -109,6 +111,7 @@ impl State {
             timeouts: Mutex::new(Vec::new()),
             executes: Mutex::new(0),
             reattaches: Mutex::new(Vec::new()),
+            reattached_at: Mutex::new(Vec::new()),
             releases: Mutex::new(Vec::new()),
         }
     }
@@ -387,6 +390,61 @@ async fn reattach_past_its_deadline_is_the_error_once_the_bound_passes() {
         "{error:?}"
     );
     assert_eq!(fixture.state.reattaches.lock().unwrap().len(), 1);
+    fixture.assert_release_all_count(1).await;
+}
+
+#[tokio::test]
+async fn reattach_that_fails_after_it_opens_is_a_retry_of_the_policy_as_pyspark() {
+    // As PySpark's `_has_next`, which reads the stream and reattaches in one attempt of a
+    // `Retrying` of its own for each response: a stream that fails after it opened, also one of
+    // a reattach, is an attempt of the policy, after the policy's backoff, and its failure is
+    // the error once the retries are spent. A response read starts the attempts again.
+    let reset = || Err(Status::unavailable("connection reset"));
+    let fails_after_opening = || Step::Stream(vec![reset()]);
+    let fixture = Fixture::start(
+        vec![Step::Stream(vec![Ok(response("r1", false)), reset()])],
+        vec![
+            fails_after_opening(),
+            fails_after_opening(),
+            Step::Stream(vec![Ok(response("r2", false)), reset()]),
+            fails_after_opening(),
+            fails_after_opening(),
+            fails_after_opening(),
+            // Not reached: the retries are spent before.
+            streamed(vec![response("complete", true)]),
+        ],
+        RetryPolicy {
+            max_retries: Some(3),
+            initial_backoff_ms: 10,
+            max_backoff_ms: Some(40),
+            ..quick_retries()
+        },
+    )
+    .await;
+    let mut stream = bounded(fixture.client.execute_plan_reattachable(execute_request()))
+        .await
+        .unwrap();
+    let read = |response: Option<ExecutePlanResponse>| response.unwrap().response_id;
+    assert_eq!(read(bounded(stream.message()).await.unwrap()), "r1");
+    let first = Instant::now();
+    assert_eq!(read(bounded(stream.message()).await.unwrap()), "r2");
+    let second = Instant::now();
+    let error = bounded(stream.message()).await.unwrap_err();
+    assert_eq!(error.grpc_code, Some(Code::Unavailable as i32), "{error:?}");
+
+    // Three reattaches for each response, each after the backoff of its attempt: 10, 20 and
+    // 40 ms from the failure before it.
+    let at = fixture.state.reattached_at.lock().unwrap().clone();
+    assert_eq!(at.len(), 6, "{at:?}");
+    for (start, reattaches) in [(first, &at[..3]), (second, &at[3..])] {
+        let mut failed = start;
+        for (reattached, backoff) in reattaches.iter().zip([10, 20, 40]) {
+            let waited = reattached.duration_since(failed);
+            assert!(waited >= Duration::from_millis(backoff), "{waited:?}");
+            failed = *reattached;
+        }
+    }
+    assert_eq!(*fixture.state.executes.lock().unwrap(), 1);
     fixture.assert_release_all_count(1).await;
 }
 
@@ -742,6 +800,7 @@ impl ServerStreamingService<ReattachExecuteRequest> for Reattach {
         state.record_timeout("ReattachExecute", request.metadata());
         let request = request.into_inner();
         state.reattaches.lock().unwrap().push(request.clone());
+        state.reattached_at.lock().unwrap().push(Instant::now());
         let step = state
             .reattach_script
             .lock()
