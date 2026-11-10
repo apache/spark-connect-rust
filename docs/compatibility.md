@@ -90,6 +90,26 @@ executed later. When the last of them is dropped, the cached model is deleted on
 server, as `pyspark.ml` does, without waiting for the server; a fit that is dropped
 at once leaves nothing cached.
 
+## Native RandomForestClassifier
+
+`spark_connect::ml::RandomForestClassifier` trains Spark's JVM random forest
+classifier through Connect with ML vector features and contiguous numeric class
+labels starting at zero. Rust builder setters cover all 22 PySpark constructor
+parameters, including `pruneTree` (Spark 4.3.0), plus class thresholds. Unset
+parameters use Spark's defaults; set a seed for reproducible sampling.
+
+The native Python binding is available as
+`pyspark.ml.connect.classification.RandomForestClassifier` and
+`pyspark.ml.connect.RandomForestClassifier`. Its keyword-only constructor matches
+PySpark's parameter names and defaults, with mutating `setFeaturesCol`,
+`setNumTrees`, etc. methods and `setThresholds`.
+
+Fitted models expose DataFrame `transform`, including prediction, probability,
+raw prediction and optional per-tree leaf index columns. Models, clones and lazy
+transformed DataFrames retain the cached model in its fitting session until the
+last owner is dropped. Tree inspection, feature importances, training summaries,
+single-vector prediction and persistence are not exposed by this native addition.
+
 ## Native KMeans
 
 `spark_connect::ml::KMeans` fits Spark's JVM K-means estimator with ML vector

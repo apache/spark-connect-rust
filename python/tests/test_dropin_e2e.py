@@ -4808,3 +4808,138 @@ def test_higher_order_functions_take_columns_and_reject_lists_as_pyspark(session
     assert session.range(1).select(
         F.exists(F.array(F.lit(1), F.lit(2)), lambda x: x > 1).alias("e")).collect() == [
             Row(e=True)]
+
+
+# These cases run unchanged against the native binding and the official JVM-backed estimator.
+def _random_forest_classifier():
+    try:
+        from pyspark.ml.connect.classification import RandomForestClassifier
+    except ImportError:
+        from pyspark.ml.classification import RandomForestClassifier
+    return RandomForestClassifier
+
+
+def _forest_vectors(session, sql, column="features"):
+    from pyspark.ml.connect.functions import array_to_vector
+    return session.sql(sql).withColumn(column, array_to_vector("xs"))
+
+
+def _forest_predictions(model, frame, column="prediction"):
+    return [r[column] for r in model.transform(frame).orderBy("id").collect()]
+
+
+@pytest.mark.parametrize("use_setters", [False, True], ids=["constructor", "setters"])
+def test_random_forest_learns_nonlinear_labels_and_preserves_lazy_predictions(session, use_setters):
+    from pyspark.ml.connect.functions import vector_to_array
+    RandomForestClassifier = _random_forest_classifier()
+    training = _forest_vectors(session,
+        "SELECT array(CAST(x AS DOUBLE)) AS xs, CAST(y AS DOUBLE) AS target, 1.0D AS weight "
+        "FROM VALUES (-3,0),(-2,0),(-1,1),(0,1),(1,1),(2,0),(3,0) AS t(x,y)", "input")
+    held_out = _forest_vectors(session,
+        "SELECT id, array(CAST(x AS DOUBLE)) AS xs "
+        "FROM VALUES (0,-2.5),(1,-0.5),(2,0.5),(3,2.5) AS t(id,x)", "input")
+    kwargs = dict(featuresCol="input", labelCol="target", predictionCol="class",
+                  probabilityCol="probs", rawPredictionCol="votes", maxDepth=3,
+                  maxBins=16, minInstancesPerNode=1, minInfoGain=0.0, pruneTree=False,
+                  maxMemoryInMB=64, cacheNodeIds=True, checkpointInterval=-1,
+                  impurity="entropy", numTrees=3, featureSubsetStrategy="all", seed=42,
+                  subsamplingRate=1.0, leafCol="leaves", minWeightFractionPerNode=0.0,
+                  weightCol="weight", bootstrap=False)
+    if use_setters:
+        estimator = RandomForestClassifier()
+        for name, value in kwargs.items():
+            assert getattr(estimator, "set" + name[0].upper() + name[1:])(value) is estimator
+    else:
+        estimator = RandomForestClassifier(**kwargs)
+    model = estimator.fit(training)
+    other = estimator.fit(training.withColumn("target", 1.0 - F.col("target")))
+    delayed = model.transform(held_out).select("id", "class")
+    rows = model.transform(held_out).orderBy("id").select(
+        vector_to_array("probs").alias("p"), vector_to_array("votes").alias("v"),
+        vector_to_array("leaves").alias("l")).collect()
+    assert [r.p for r in rows] == [[1.0,0.0],[0.0,1.0],[0.0,1.0],[1.0,0.0]]
+    assert [r.v for r in rows] == [[3.0,0.0],[0.0,3.0],[0.0,3.0],[3.0,0.0]]
+    assert all(len(r.l) == 3 for r in rows)
+    assert _forest_predictions(model, held_out, "class") == [0.0,1.0,1.0,0.0]
+    assert _forest_predictions(estimator.fit(training), held_out, "class") == [0.0,1.0,1.0,0.0]
+    del model
+    import gc
+    gc.collect()
+    assert [r["class"] for r in delayed.orderBy("id").collect()] == [0.0,1.0,1.0,0.0]
+    assert _forest_predictions(other, held_out, "class") == [1.0,0.0,0.0,1.0]
+
+
+def test_random_forest_multiclass_probabilities_and_leaf_indices(session):
+    from pyspark.ml.connect.functions import vector_to_array
+    RandomForestClassifier = _random_forest_classifier()
+    training = _forest_vectors(session,
+        "SELECT array(CAST(x AS DOUBLE)) AS xs, CAST(y AS DOUBLE) AS label "
+        "FROM VALUES (-3,0),(-2,0),(-1,1),(0,1),(1,2),(2,2) AS t(x,y)")
+    held_out = _forest_vectors(session,
+        "SELECT id, array(CAST(x AS DOUBLE)) AS xs "
+        "FROM VALUES (0,-2.5),(1,-0.5),(2,1.5) AS t(id,x)")
+    model = RandomForestClassifier(seed=42, numTrees=3, maxDepth=3,
+                                   featureSubsetStrategy="all", bootstrap=False,
+                                   leafCol="leaves").fit(training)
+    assert _forest_predictions(model, held_out) == [0.0,1.0,2.0]
+    rows = model.transform(held_out).orderBy("id").select(
+        vector_to_array("probability").alias("p"),
+        vector_to_array("rawPrediction").alias("v"), vector_to_array("leaves").alias("l")).collect()
+    assert [r.p for r in rows] == [[1.0,0.0,0.0],[0.0,1.0,0.0],[0.0,0.0,1.0]]
+    assert [r.v for r in rows] == [[3.0,0.0,0.0],[0.0,3.0,0.0],[0.0,0.0,3.0]]
+    assert all(len(r.l)==3 for r in rows)
+
+
+def test_random_forest_weights_and_class_thresholds_change_predictions(session):
+    from pyspark.ml.connect.functions import vector_to_array
+    RandomForestClassifier = _random_forest_classifier()
+    training = _forest_vectors(session,
+        "SELECT array(0.0D) AS xs, CAST(y AS DOUBLE) AS label, CAST(w AS DOUBLE) AS weight "
+        "FROM VALUES (0,1),(0,1),(0,1),(1,9) AS t(y,w)")
+    held_out = _forest_vectors(session, "SELECT 0 AS id, array(0.0D) AS xs")
+    options = dict(seed=42, numTrees=3, maxDepth=0, featureSubsetStrategy="all", bootstrap=False)
+    plain = RandomForestClassifier(**options).fit(training)
+    weighted = RandomForestClassifier(**options, weightCol="weight").fit(training)
+    estimator = RandomForestClassifier(**options)
+    assert estimator.setThresholds([1.0,0.1]) is estimator
+    thresholded = estimator.fit(training)
+    assert _forest_predictions(plain, held_out) == [0.0]
+    assert _forest_predictions(weighted, held_out) == [1.0]
+    assert _forest_predictions(thresholded, held_out) == [1.0]
+    for model, expected in [(plain,[0.75,0.25]), (weighted,[0.25,0.75]), (thresholded,[0.75,0.25])]:
+        assert model.transform(held_out).select(vector_to_array("probability").alias("p")).first().p == expected
+
+
+def test_random_forest_bootstrap_sampling_is_reproducible(session):
+    RandomForestClassifier = _random_forest_classifier()
+    training = _forest_vectors(session,
+        "SELECT id, array(CAST(id AS DOUBLE),CAST(id % 3 AS DOUBLE)) AS xs, "
+        "CAST(CASE WHEN id < 20 THEN 0 ELSE 1 END AS DOUBLE) AS label FROM range(40)")
+    estimator = RandomForestClassifier(seed=2**33, numTrees=7, maxDepth=3,
+                                       bootstrap=True, subsamplingRate=0.8,
+                                       featureSubsetStrategy="sqrt")
+    first = _forest_predictions(estimator.fit(training), training)
+    assert first == _forest_predictions(estimator.fit(training), training)
+    assert first[:15] == [0.0]*15 and first[25:] == [1.0]*15
+
+
+def test_random_forest_rejects_invalid_parameters_and_training_data(session):
+    RandomForestClassifier = _random_forest_classifier()
+    training = _forest_vectors(session,
+        "SELECT array(CAST(x AS DOUBLE)) AS xs, CAST(y AS DOUBLE) AS label, 1.0D AS weight "
+        "FROM VALUES (-1,0),(1,1) AS t(x,y)")
+    for options in [dict(numTrees=0),dict(maxDepth=31),dict(maxBins=1),
+                    dict(minInstancesPerNode=0),dict(minInfoGain=-1.0),
+                    dict(maxMemoryInMB=-1),dict(checkpointInterval=0),
+                    dict(impurity="invalid"),dict(featureSubsetStrategy="invalid"),
+                    dict(subsamplingRate=0.0),dict(minWeightFractionPerNode=0.5)]:
+        with pytest.raises(Exception):
+            RandomForestClassifier(**options).fit(training)
+    with pytest.raises(Exception):
+        RandomForestClassifier().setThresholds([1.0,1.0,1.0]).fit(training)
+    with pytest.raises(Exception):
+        RandomForestClassifier().fit(training.drop("label"))
+    with pytest.raises(Exception):
+        RandomForestClassifier().fit(training.withColumn("label",F.lit(-1.0)))
+    with pytest.raises(Exception):
+        RandomForestClassifier(weightCol="weight").fit(training.withColumn("weight",F.lit(-1.0)))

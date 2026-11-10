@@ -10,7 +10,8 @@ use pyo3::prelude::*;
 use spark_connect::ml::{
     BinaryClassificationEvaluator, CrossValidator, Estimator, Evaluator, KMeans, LinearRegression,
     LinearSVC, LogisticRegression, MaxAbsScaler, Model, MulticlassClassificationEvaluator,
-    Pipeline, RegressionEvaluator, StandardScaler, StringIndexer, Transformer, VectorAssembler,
+    Pipeline, RandomForestClassifier, RegressionEvaluator, StandardScaler, StringIndexer,
+    Transformer, VectorAssembler,
 };
 
 use crate::dataframe::PyDataFrame;
@@ -545,6 +546,232 @@ impl PyLinearRegression {
 }
 
 /// K-means clustering backed by Spark Connect's JVM ML API.
+/// Random forest classifier fitted and cached by Spark Connect.
+#[pyclass(
+    name = "RandomForestClassifier",
+    module = "pyspark.ml.connect.classification"
+)]
+pub struct PyRandomForestClassifier {
+    inner: RandomForestClassifier,
+}
+
+#[pymethods]
+impl PyRandomForestClassifier {
+    #[new]
+    #[pyo3(signature = (*, featuresCol="features", labelCol="label", predictionCol="prediction", probabilityCol="probability", rawPredictionCol="rawPrediction", maxDepth=5, maxBins=32, minInstancesPerNode=1, minInfoGain=0.0, pruneTree=true, maxMemoryInMB=256, cacheNodeIds=false, checkpointInterval=10, impurity="gini", numTrees=20, featureSubsetStrategy="auto", seed=None, subsamplingRate=1.0, leafCol="", minWeightFractionPerNode=0.0, weightCol=None, bootstrap=true))]
+    #[allow(non_snake_case, clippy::too_many_arguments)]
+    fn new(
+        featuresCol: &str,
+        labelCol: &str,
+        predictionCol: &str,
+        probabilityCol: &str,
+        rawPredictionCol: &str,
+        maxDepth: i32,
+        maxBins: i32,
+        minInstancesPerNode: i32,
+        minInfoGain: f64,
+        pruneTree: bool,
+        maxMemoryInMB: i32,
+        cacheNodeIds: bool,
+        checkpointInterval: i32,
+        impurity: &str,
+        numTrees: i32,
+        featureSubsetStrategy: &str,
+        seed: Option<i64>,
+        subsamplingRate: f64,
+        leafCol: &str,
+        minWeightFractionPerNode: f64,
+        weightCol: Option<&str>,
+        bootstrap: Option<bool>,
+    ) -> Self {
+        let mut inner = RandomForestClassifier::new()
+            .set_feature_col(featuresCol)
+            .set_label_col(labelCol)
+            .set_prediction_col(predictionCol)
+            .set_probability_col(probabilityCol)
+            .set_raw_prediction_col(rawPredictionCol)
+            .set_max_depth(maxDepth)
+            .set_max_bins(maxBins)
+            .set_min_instances_per_node(minInstancesPerNode)
+            .set_min_info_gain(minInfoGain)
+            .set_prune_tree(pruneTree)
+            .set_max_memory_in_mb(maxMemoryInMB)
+            .set_cache_node_ids(cacheNodeIds)
+            .set_checkpoint_interval(checkpointInterval)
+            .set_impurity(impurity)
+            .set_num_trees(numTrees)
+            .set_feature_subset_strategy(featureSubsetStrategy)
+            .set_subsampling_rate(subsamplingRate)
+            .set_leaf_col(leafCol)
+            .set_min_weight_fraction_per_node(minWeightFractionPerNode);
+        if let Some(value) = seed {
+            inner = inner.set_seed(value);
+        }
+        if let Some(value) = weightCol {
+            inner = inner.set_weight_col(value);
+        }
+        if let Some(value) = bootstrap {
+            inner = inner.set_bootstrap(value);
+        }
+        Self { inner }
+    }
+
+    #[pyo3(name = "setFeaturesCol")]
+    fn set_feature_col<'py>(mut slf: PyRefMut<'py, Self>, value: &str) -> PyRefMut<'py, Self> {
+        slf.inner = slf.inner.clone().set_feature_col(value);
+        slf
+    }
+
+    #[pyo3(name = "setLabelCol")]
+    fn set_label_col<'py>(mut slf: PyRefMut<'py, Self>, value: &str) -> PyRefMut<'py, Self> {
+        slf.inner = slf.inner.clone().set_label_col(value);
+        slf
+    }
+
+    #[pyo3(name = "setPredictionCol")]
+    fn set_prediction_col<'py>(mut slf: PyRefMut<'py, Self>, value: &str) -> PyRefMut<'py, Self> {
+        slf.inner = slf.inner.clone().set_prediction_col(value);
+        slf
+    }
+
+    #[pyo3(name = "setProbabilityCol")]
+    fn set_probability_col<'py>(mut slf: PyRefMut<'py, Self>, value: &str) -> PyRefMut<'py, Self> {
+        slf.inner = slf.inner.clone().set_probability_col(value);
+        slf
+    }
+
+    #[pyo3(name = "setRawPredictionCol")]
+    fn set_raw_prediction_col<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        value: &str,
+    ) -> PyRefMut<'py, Self> {
+        slf.inner = slf.inner.clone().set_raw_prediction_col(value);
+        slf
+    }
+
+    #[pyo3(name = "setMaxDepth")]
+    fn set_max_depth(mut slf: PyRefMut<'_, Self>, value: i32) -> PyRefMut<'_, Self> {
+        slf.inner = slf.inner.clone().set_max_depth(value);
+        slf
+    }
+
+    #[pyo3(name = "setMaxBins")]
+    fn set_max_bins(mut slf: PyRefMut<'_, Self>, value: i32) -> PyRefMut<'_, Self> {
+        slf.inner = slf.inner.clone().set_max_bins(value);
+        slf
+    }
+
+    #[pyo3(name = "setMinInstancesPerNode")]
+    fn set_min_instances_per_node(mut slf: PyRefMut<'_, Self>, value: i32) -> PyRefMut<'_, Self> {
+        slf.inner = slf.inner.clone().set_min_instances_per_node(value);
+        slf
+    }
+
+    #[pyo3(name = "setMinInfoGain")]
+    fn set_min_info_gain(mut slf: PyRefMut<'_, Self>, value: f64) -> PyRefMut<'_, Self> {
+        slf.inner = slf.inner.clone().set_min_info_gain(value);
+        slf
+    }
+
+    #[pyo3(name = "setPruneTree")]
+    fn set_prune_tree(mut slf: PyRefMut<'_, Self>, value: bool) -> PyRefMut<'_, Self> {
+        slf.inner = slf.inner.clone().set_prune_tree(value);
+        slf
+    }
+
+    #[pyo3(name = "setMaxMemoryInMB")]
+    fn set_max_memory_in_mb(mut slf: PyRefMut<'_, Self>, value: i32) -> PyRefMut<'_, Self> {
+        slf.inner = slf.inner.clone().set_max_memory_in_mb(value);
+        slf
+    }
+
+    #[pyo3(name = "setCacheNodeIds")]
+    fn set_cache_node_ids(mut slf: PyRefMut<'_, Self>, value: bool) -> PyRefMut<'_, Self> {
+        slf.inner = slf.inner.clone().set_cache_node_ids(value);
+        slf
+    }
+
+    #[pyo3(name = "setCheckpointInterval")]
+    fn set_checkpoint_interval(mut slf: PyRefMut<'_, Self>, value: i32) -> PyRefMut<'_, Self> {
+        slf.inner = slf.inner.clone().set_checkpoint_interval(value);
+        slf
+    }
+
+    #[pyo3(name = "setImpurity")]
+    fn set_impurity<'py>(mut slf: PyRefMut<'py, Self>, value: &str) -> PyRefMut<'py, Self> {
+        slf.inner = slf.inner.clone().set_impurity(value);
+        slf
+    }
+
+    #[pyo3(name = "setNumTrees")]
+    fn set_num_trees(mut slf: PyRefMut<'_, Self>, value: i32) -> PyRefMut<'_, Self> {
+        slf.inner = slf.inner.clone().set_num_trees(value);
+        slf
+    }
+
+    #[pyo3(name = "setFeatureSubsetStrategy")]
+    fn set_feature_subset_strategy<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        value: &str,
+    ) -> PyRefMut<'py, Self> {
+        slf.inner = slf.inner.clone().set_feature_subset_strategy(value);
+        slf
+    }
+
+    #[pyo3(name = "setSeed")]
+    fn set_seed(mut slf: PyRefMut<'_, Self>, value: i64) -> PyRefMut<'_, Self> {
+        slf.inner = slf.inner.clone().set_seed(value);
+        slf
+    }
+
+    #[pyo3(name = "setSubsamplingRate")]
+    fn set_subsampling_rate(mut slf: PyRefMut<'_, Self>, value: f64) -> PyRefMut<'_, Self> {
+        slf.inner = slf.inner.clone().set_subsampling_rate(value);
+        slf
+    }
+
+    #[pyo3(name = "setLeafCol")]
+    fn set_leaf_col<'py>(mut slf: PyRefMut<'py, Self>, value: &str) -> PyRefMut<'py, Self> {
+        slf.inner = slf.inner.clone().set_leaf_col(value);
+        slf
+    }
+
+    #[pyo3(name = "setMinWeightFractionPerNode")]
+    fn set_min_weight_fraction_per_node(
+        mut slf: PyRefMut<'_, Self>,
+        value: f64,
+    ) -> PyRefMut<'_, Self> {
+        slf.inner = slf.inner.clone().set_min_weight_fraction_per_node(value);
+        slf
+    }
+
+    #[pyo3(name = "setWeightCol")]
+    fn set_weight_col<'py>(mut slf: PyRefMut<'py, Self>, value: &str) -> PyRefMut<'py, Self> {
+        slf.inner = slf.inner.clone().set_weight_col(value);
+        slf
+    }
+
+    #[pyo3(name = "setBootstrap")]
+    fn set_bootstrap(mut slf: PyRefMut<'_, Self>, value: bool) -> PyRefMut<'_, Self> {
+        slf.inner = slf.inner.clone().set_bootstrap(value);
+        slf
+    }
+
+    #[pyo3(name = "setThresholds")]
+    fn set_thresholds(mut slf: PyRefMut<'_, Self>, value: Vec<f64>) -> PyRefMut<'_, Self> {
+        slf.inner = slf.inner.clone().set_thresholds(value);
+        slf
+    }
+
+    fn fit(&self, py: Python<'_>, df: &PyDataFrame) -> PyResult<PyMLModel> {
+        let mut estimator = self.inner.clone();
+        let model = interruptible(py, &df.dataframe.spark_session(), || {
+            estimator.fit(&df.dataframe).map_err(Box::new)
+        })?;
+        Ok(PyMLModel { model })
+    }
+}
+
 #[pyclass(name = "KMeans", module = "pyspark.ml.connect.clustering")]
 pub struct PyKMeans {
     inner: KMeans,

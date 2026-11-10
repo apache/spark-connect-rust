@@ -18885,3 +18885,53 @@ def test_schemas_of_plans_over_the_server_threshold_are_sent_compressed(mock_con
     plan = parse_message(parse_message(service.analyze_requests[-1])[4][0])[1][0]
     assert 1 not in parse_message(plan)
     assert parse_message(parse_message(plan)[3][0])[3] == [1]
+
+
+@pytest.mark.parametrize("use_setters", [False, True], ids=["constructor", "setters"])
+def test_random_forest_native_binding_sends_reference_parameters(mock_connect, use_setters):
+    import base64
+    import inspect
+    from pathlib import Path
+
+    from pyspark.ml.connect import RandomForestClassifier as exported
+    from pyspark.ml.connect.classification import RandomForestClassifier
+    from pyspark.sql.connect import proto
+
+    assert exported is RandomForestClassifier
+    defaults = dict(featuresCol="features", labelCol="label", predictionCol="prediction",
+                    probabilityCol="probability", rawPredictionCol="rawPrediction",
+                    maxDepth=5, maxBins=32, minInstancesPerNode=1, minInfoGain=0.0,
+                    pruneTree=True, maxMemoryInMB=256, cacheNodeIds=False,
+                    checkpointInterval=10, impurity="gini", numTrees=20,
+                    featureSubsetStrategy="auto", seed=None, subsamplingRate=1.0,
+                    leafCol="", minWeightFractionPerNode=0.0, weightCol=None, bootstrap=True)
+    signature = inspect.signature(RandomForestClassifier)
+    assert list(signature.parameters) == list(defaults)
+    for name, default in defaults.items():
+        assert signature.parameters[name].kind == inspect.Parameter.KEYWORD_ONLY
+        assert signature.parameters[name].default == default
+    fixture = json.loads((Path(__file__).resolve().parents[2] / "tests/golden/random_forest.json").read_text())
+    spark, service = mock_connect
+    for case in fixture["cases"]:
+        values = dict(featuresCol="input", labelCol="target", predictionCol="class",
+                      probabilityCol="probs", rawPredictionCol="votes", maxDepth=3,
+                      maxBins=16, minInstancesPerNode=2, minInfoGain=0.01, pruneTree=False,
+                      maxMemoryInMB=64, cacheNodeIds=True, checkpointInterval=-1,
+                      impurity="entropy", numTrees=7, featureSubsetStrategy="all",
+                      seed=case["seed"], subsamplingRate=0.75, leafCol="leaves",
+                      minWeightFractionPerNode=0.1, weightCol="weight", bootstrap=False)
+        if use_setters:
+            estimator = RandomForestClassifier()
+            for name, value in values.items():
+                assert getattr(estimator, "set" + name[0].upper() + name[1:])(value) is estimator
+        else:
+            estimator = RandomForestClassifier(**values)
+        assert estimator.setThresholds([0.25, 0.75]) is estimator
+        # The fake service returns no fitted model. Inspect the real native fit request.
+        with pytest.raises(Exception, match="server returned no fitted model"):
+            estimator.fit(spark.range(3))
+        request = proto.ExecutePlanRequest.FromString(service.execute_requests[-1])
+        fit = request.plan.command.ml_command.fit
+        assert fit.estimator.name == "org.apache.spark.ml.classification.RandomForestClassifier"
+        expected = proto.MlParams.FromString(base64.b64decode(case["params_b64"]))
+        assert fit.params == expected
