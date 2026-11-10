@@ -11,6 +11,7 @@ fn kind_to_pyspark_class_name(kind: SparkErrorKind) -> &'static str {
     match kind {
         // PySpark builtin-like errors (these also subclass the Python builtins)
         SparkErrorKind::ValueError => "PySparkValueError",
+        SparkErrorKind::BuiltinValueError => "ValueError",
         SparkErrorKind::TypeError => "PySparkTypeError",
         SparkErrorKind::IndexError => "PySparkIndexError",
         SparkErrorKind::AttributeError => "PySparkAttributeError",
@@ -206,6 +207,10 @@ pub fn spark_error_to_py_exception(err: SparkError) -> PyErr {
     if err.kind == SparkErrorKind::RecursionError {
         // A builtin, as PySpark's recursion limit raises it.
         return pyo3::exceptions::PyRecursionError::new_err(err.message());
+    }
+    if err.kind == SparkErrorKind::BuiltinValueError {
+        // A builtin, as the `int()` or `urllib` of the connection string raises it.
+        return exceptions::PyValueError::new_err(err.message());
     }
     if let Some(value) = err.invalid_utf8_value() {
         return unicode_decode_error(&value, &err);

@@ -3678,7 +3678,7 @@ mod request_fields_tests {
             .await
             .err()
             .expect("a keepalive time that is not an integer must raise");
-        assert_eq!(error.kind, SparkErrorKind::ValueError);
+        assert_eq!(error.kind, SparkErrorKind::BuiltinValueError);
         assert_eq!(
             error.message(),
             "invalid literal for int() with base 10: 'abc'"
