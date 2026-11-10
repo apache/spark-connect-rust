@@ -834,6 +834,254 @@ fn timestamp_nanos_types() {
     );
 }
 
+/// `from_ddl` reads an interval as the server's parser does: `interval`, `interval <field>` and
+/// `interval <from> to <to>`, the end field later than the start field within one family. The
+/// other forms are errors. A top-level `name:type` names a field, as `name type` does.
+#[test]
+fn from_ddl_interval_ranges_and_colon_fields_as_spark() {
+    let field = |name: &str, data_type: DataType| DataType::Struct {
+        fields: vec![StructField {
+            name: name.to_string(),
+            data_type,
+            nullable: true,
+            metadata: BTreeMap::new(),
+        }],
+    };
+    let year_month = |start_field, end_field| DataType::YearMonthInterval {
+        start_field,
+        end_field,
+    };
+    let day_time = |start_field, end_field| DataType::DayTimeInterval {
+        start_field,
+        end_field,
+    };
+    for (ddl, expected) in [
+        ("interval", DataType::CalendarInterval),
+        ("interval year", year_month(0, 0)),
+        ("interval year to month", year_month(0, 1)),
+        ("interval day", day_time(0, 0)),
+        ("interval day to second", day_time(0, 3)),
+        ("interval hour to second", day_time(1, 3)),
+        ("INTERVAL  DAY   TO SECOND", day_time(0, 3)),
+        ("a:interval day to hour", field("a", day_time(0, 1))),
+        ("a:int", field("a", DataType::Integer)),
+        (
+            "x:array<int>",
+            field(
+                "x",
+                DataType::Array {
+                    element_type: Box::new(DataType::Integer),
+                    contains_null: true,
+                },
+            ),
+        ),
+        ("x:struct<a:int>", field("x", field("a", DataType::Integer))),
+        ("int:int", field("int", DataType::Integer)),
+        ("`a:b`:int", field("a:b", DataType::Integer)),
+    ] {
+        assert_eq!(DataType::from_ddl(ddl).unwrap(), expected, "{ddl}");
+    }
+    let string = DataType::String {
+        collation: "UTF8_BINARY".to_string(),
+    };
+    assert_eq!(
+        DataType::from_ddl("a:int, b:string").unwrap(),
+        DataType::Struct {
+            fields: vec![
+                StructField {
+                    name: "a".to_string(),
+                    data_type: DataType::Integer,
+                    nullable: true,
+                    metadata: BTreeMap::new(),
+                },
+                StructField {
+                    name: "b".to_string(),
+                    data_type: string,
+                    nullable: true,
+                    metadata: BTreeMap::new(),
+                },
+            ],
+        }
+    );
+    let comment = BTreeMap::from([(
+        "comment".to_string(),
+        serde_json::Value::String("x:y".to_string()),
+    )]);
+    assert_eq!(
+        DataType::from_ddl("a:int COMMENT 'x:y'").unwrap(),
+        DataType::Struct {
+            fields: vec![StructField {
+                name: "a".to_string(),
+                data_type: DataType::Integer,
+                nullable: true,
+                metadata: comment,
+            }],
+        }
+    );
+    for ddl in [
+        "interval year to second",
+        "interval day to second NOT NULL",
+        "interval day to second xyz",
+        "interval day to second foo",
+        "interval day to",
+        "interval foo",
+        "interval to second",
+        "interval day second",
+        "interval year month",
+        "interval day to second to hour",
+        "intervalday",
+        "interval year to year",
+        "interval day to day",
+        "interval hour to day",
+        "interval month to year",
+        "interval second to second",
+        "a interval year to second",
+        "a:'x:y' int",
+    ] {
+        assert!(DataType::from_ddl(ddl).is_err(), "{ddl}");
+    }
+}
+
+/// The spellings of Spark's grammar for the decimal, real, character, timestamp and time types:
+/// `dec` and `numeric` are decimal, a bare `decimal` is decimal(10,0), `real` is float, and the
+/// time zone clauses name the timestamp and time types, as the server's parser reads them.
+#[test]
+fn from_ddl_type_spellings_as_spark() {
+    let field = |name: &str, data_type: DataType| DataType::Struct {
+        fields: vec![StructField {
+            name: name.to_string(),
+            data_type,
+            nullable: true,
+            metadata: BTreeMap::new(),
+        }],
+    };
+    let decimal = |precision, scale| DataType::Decimal { precision, scale };
+    for (ddl, expected) in [
+        ("decimal", decimal(10, 0)),
+        ("decimal(10)", decimal(10, 0)),
+        ("decimal (10, 2)", decimal(10, 2)),
+        ("dec", decimal(10, 0)),
+        ("dec(5,1)", decimal(5, 1)),
+        ("dec(5)", decimal(5, 0)),
+        ("NUMERIC", decimal(10, 0)),
+        ("numeric(10,2)", decimal(10, 2)),
+        ("real", DataType::Float),
+        ("character(5)", DataType::Char { length: 5 }),
+        ("timestamp_ltz", DataType::Timestamp),
+        ("timestamp without time zone", DataType::TimestampNtz),
+        ("timestamp with local time zone", DataType::Timestamp),
+        ("Timestamp  With Local Time Zone", DataType::Timestamp),
+        ("timestamp(6)", DataType::Timestamp),
+        ("timestamp(6) without time zone", DataType::TimestampNtz),
+        ("timestamp_ntz(6)", DataType::TimestampNtz),
+        ("timestamp(9)", DataType::TimestampLtzNanos { precision: 9 }),
+        (
+            "timestamp(9) without time zone",
+            DataType::TimestampNtzNanos { precision: 9 },
+        ),
+        (
+            "timestamp_ltz(7)",
+            DataType::TimestampLtzNanos { precision: 7 },
+        ),
+        ("time without time zone", DataType::Time { precision: 6 }),
+        ("time(3) without time zone", DataType::Time { precision: 3 }),
+        ("a decimal", field("a", decimal(10, 0))),
+        ("a: numeric(10,2)", field("a", decimal(10, 2))),
+        ("a real", field("a", DataType::Float)),
+        (
+            "a timestamp without time zone",
+            field("a", DataType::TimestampNtz),
+        ),
+    ] {
+        assert_eq!(DataType::from_ddl(ddl).unwrap(), expected, "{ddl}");
+    }
+    for ddl in [
+        "character",
+        "char",
+        "varchar",
+        "timestamp(3)",
+        "timestamp with time zone",
+        "time with local time zone",
+        "timestamp_ltz(9) with local time zone",
+        "timestamp(9) with time zone",
+        "decimal()",
+        "decimal(10,2,3)",
+        "numeric(10,2,3)",
+    ] {
+        assert!(DataType::from_ddl(ddl).is_err(), "{ddl}");
+    }
+}
+
+/// `from_ddl` agrees with the server's parser on the interval ranges, the `name:type` fields and
+/// the type spellings above, valid and invalid. Runs only with `SPARK_REMOTE` set.
+#[test]
+fn from_ddl_interval_colon_and_spellings_agree_with_the_server_parser() {
+    let Ok(url) = std::env::var("SPARK_REMOTE") else {
+        return;
+    };
+    let session = spark_connect::session::SparkSession::builder()
+        .remote(&url)
+        .get_or_create()
+        .expect("session");
+    for ddl in [
+        "interval",
+        "interval year",
+        "interval year to month",
+        "interval hour to second",
+        "INTERVAL  DAY   TO SECOND",
+        "a:int",
+        "x:array<int>",
+        "x:struct<a:int>",
+        "int:int",
+        "a: int",
+        "a:int, b:string",
+        "`a:b`:int",
+        "a:int COMMENT 'x:y'",
+        "x:map<string,int>",
+        "a:decimal",
+        "decimal",
+        "decimal(10)",
+        "decimal (10,2)",
+        "dec(5,1)",
+        "numeric",
+        "numeric(10,2)",
+        "real",
+        "a real",
+        "character(5)",
+        "timestamp_ltz",
+        "timestamp without time zone",
+        "timestamp with local time zone",
+        "timestamp(6) with local time zone",
+        "timestamp(9)",
+        "timestamp(9) without time zone",
+        "time without time zone",
+        "a timestamp without time zone",
+        "a: timestamp with local time zone",
+    ] {
+        let server = session
+            .parse_ddl(ddl)
+            .unwrap_or_else(|e| panic!("{ddl}: {e:?}"));
+        assert_eq!(DataType::from_ddl(ddl).unwrap(), server, "{ddl}");
+    }
+    for ddl in [
+        "interval year to second",
+        "interval day to second xyz",
+        "interval day to",
+        "interval foo",
+        "interval hour to day",
+        "a interval year to second",
+        "a:'x:y' int",
+        "character",
+        "timestamp(3)",
+        "timestamp with time zone",
+        "time with local time zone",
+        "decimal()",
+    ] {
+        assert!(session.parse_ddl(ddl).is_err(), "{ddl}");
+        assert!(DataType::from_ddl(ddl).is_err(), "{ddl}");
+    }
+}
+
 /// Spatial types name their SRID by its CRS in JSON, as PySpark does, and read it back.
 #[test]
 fn spatial_json_names_the_crs_as_pyspark() {

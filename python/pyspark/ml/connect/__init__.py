@@ -13,6 +13,7 @@ from pyspark.ml.connect.feature import (
 )
 from pyspark.ml.connect.classification import LinearSVC, LogisticRegression
 from pyspark.ml.connect.regression import LinearRegression
+from pyspark.ml.connect.clustering import KMeans
 from pyspark.ml.connect.evaluation import (
     RegressionEvaluator,
     BinaryClassificationEvaluator,
@@ -46,6 +47,7 @@ __all__ = [
     "LogisticRegression",
     "LinearSVC",
     "LinearRegression",
+    "KMeans",
     "RegressionEvaluator",
     "BinaryClassificationEvaluator",
     "MulticlassClassificationEvaluator",
