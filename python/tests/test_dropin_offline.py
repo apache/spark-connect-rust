@@ -5166,6 +5166,39 @@ def test_invalid_utf8_of_a_struct_column_is_raised_field_by_field_as_pyspark(moc
     assert "can't decode byte 0xc3 in position 0" in str(raised.value)
 
 
+def test_invalid_utf8_after_binary_values_is_raised_for_the_string_as_pyspark(mock_connect):
+    # PySpark raises for the first invalid string of the result, not for a binary value that is
+    # not UTF-8, which is a value: here the binary column, flat or nested in an array, comes first.
+    pa = pytest.importorskip("pyarrow")
+    spark, service = mock_connect
+
+    def strings(*values):
+        offsets = [0]
+        for value in values:
+            offsets.append(offsets[-1] + len(value))
+        buffers = [None, pa.py_buffer(array.array("i", offsets)), pa.py_buffer(b"".join(values))]
+        return pa.Array.from_buffers(pa.string(), len(values), buffers)
+
+    binaries = [
+        pa.array([b"\xff", b"\xfe"], pa.binary()),
+        pa.array([[b"\xff"], [b"\xfe"]], pa.list_(pa.binary())),
+    ]
+    for binary in binaries:
+        batch = pa.record_batch([binary, strings(b"a", b"\xc3")], names=["b", "s"])
+        sink = pa.BufferOutputStream()
+        with pa.ipc.new_stream(sink, batch.schema) as writer:
+            writer.write_batch(batch)
+        # ExecutePlanResponse.arrow_batch=2: row_count=2, data=2.
+        service.execute_payload = message_field(
+            2, varint_field(1, 2) + message_field(2, sink.getvalue().to_pybytes())
+        )
+        with pytest.raises(UnicodeDecodeError) as raised:
+            spark.range(2).collect()
+        assert raised.value.object == b"\xc3"
+        assert str(raised.value) == (
+            "'utf-8' codec can't decode byte 0xc3 in position 0: unexpected end of data")
+
+
 def test_client_release_session_after_stop_raises_no_active_session_as_pyspark(mock_connect):
     # As the `_stub` of PySpark's closed client: nothing is sent.
     from pyspark.errors.exceptions.connect import SparkConnectException

@@ -2941,22 +2941,28 @@ fn decode_error(data: &[u8], error: arrow::error::ArrowError) -> SparkError {
 /// its bytes, in the order in which PySpark converts a result: column by column, each batch by
 /// batch, in the order of [`first_invalid_utf8_in`].
 fn first_invalid_utf8(data: &[u8]) -> Option<(usize, Vec<u8>)> {
-    let batches = read_strings_as_binary(data)?;
+    let (strings, batches) = read_strings_as_binary(data)?;
     let columns = batches.first()?.num_columns();
     (0..columns).find_map(|column| {
+        let data_type = strings.field(column).data_type();
         batches
             .iter()
-            .find_map(|batch| first_invalid_utf8_in(batch.column(column).as_ref()))
+            .find_map(|batch| first_invalid_utf8_in(batch.column(column).as_ref(), data_type))
             .map(|value| (column, value))
     })
 }
 
-/// The record batches of the Arrow IPC stream `data`, with its string types read as binary types
-/// of the same layout. arrow-rs still checks the offsets and lengths of these batches, but not
-/// their UTF-8. The messages are split here because arrow-rs's stream reader cannot take a schema
-/// of its own. None for a stream with a message that is not a schema or a record batch, such as a
-/// dictionary, or one that does not read.
-fn read_strings_as_binary(data: &[u8]) -> Option<Vec<arrow::record_batch::RecordBatch>> {
+/// The schema of the Arrow IPC stream `data`, as the server sends it, and its record batches, with
+/// its string types read as binary types of the same layout. arrow-rs still checks the offsets and
+/// lengths of these batches, but not their UTF-8. The messages are split here because arrow-rs's
+/// stream reader cannot take a schema of its own. None for a stream with a message that is not a
+/// schema or a record batch, such as a dictionary, or one that does not read.
+fn read_strings_as_binary(
+    data: &[u8],
+) -> Option<(
+    arrow::datatypes::Schema,
+    Vec<arrow::record_batch::RecordBatch>,
+)> {
     use arrow::buffer::Buffer;
     use arrow::ipc::convert::fb_to_schema;
     use arrow::ipc::reader::read_record_batch;
@@ -2971,6 +2977,7 @@ fn read_strings_as_binary(data: &[u8]) -> Option<Vec<arrow::record_batch::Record
 
     let mut rest = data;
     let mut schema = None;
+    let mut strings = None;
     let mut batches = vec![];
     loop {
         let mut prefix = take(&mut rest, 4)?;
@@ -2987,6 +2994,7 @@ fn read_strings_as_binary(data: &[u8]) -> Option<Vec<arrow::record_batch::Record
             MessageHeader::Schema => {
                 let fields = fb_to_schema(message.header_as_schema()?);
                 schema = Some(Arc::new(binary_schema(&fields)));
+                strings = Some(fields);
             }
             MessageHeader::RecordBatch => {
                 let batch = read_record_batch(
@@ -3003,7 +3011,7 @@ fn read_strings_as_binary(data: &[u8]) -> Option<Vec<arrow::record_batch::Record
             _ => return None,
         }
     }
-    Some(batches)
+    Some((strings?, batches))
 }
 
 /// The schema `schema`, with each string type of it, at any depth, as the binary type of the same
@@ -3046,18 +3054,70 @@ fn binary_type(data_type: &arrow::datatypes::DataType) -> arrow::datatypes::Data
     }
 }
 
-/// The bytes of the first binary value of `array` that are not valid UTF-8, in the order in which
+/// The bytes of the first string of `array` that is not valid UTF-8, in the order in which
 /// PySpark's `ArrowTableToRowsConversion._to_pylist` converts an array, in bulk: a list by the
 /// values of all its rows, a struct field by field, each over all its rows, and a map by the keys
-/// of all its rows, then their values. A null is valid.
-fn first_invalid_utf8_in(array: &dyn arrow::array::Array) -> Option<Vec<u8>> {
+/// of all its rows, then their values. A null is valid. `data_type` is the type of `array` as the
+/// server sends it, so that only its strings, at any depth, are checked: a binary value is not.
+fn first_invalid_utf8_in(
+    array: &dyn arrow::array::Array,
+    data_type: &arrow::datatypes::DataType,
+) -> Option<Vec<u8>> {
     use arrow::array::{Array, AsArray};
     use arrow::datatypes::DataType as ArrowDataType;
 
-    // The values of the rows of a list or a map, which its offsets delimit in its child.
-    let rows_of = |child: &dyn Array, start: usize, end: usize| {
-        first_invalid_utf8_in(child.slice(start, end - start).as_ref())
+    // The values of the rows of a list or a map, which its offsets delimit in its child, of the
+    // type `child_type`.
+    let rows_of = |child: &dyn Array, child_type: &ArrowDataType, start: usize, end: usize| {
+        first_invalid_utf8_in(child.slice(start, end - start).as_ref(), child_type)
     };
+    match data_type {
+        ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 | ArrowDataType::Utf8View => {
+            invalid_string_in(array)
+        }
+        ArrowDataType::List(field) => {
+            let list = array.as_list::<i32>();
+            let offsets = list.value_offsets();
+            let (start, end) = (offsets[0] as usize, offsets[list.len()] as usize);
+            rows_of(list.values().as_ref(), field.data_type(), start, end)
+        }
+        ArrowDataType::LargeList(field) => {
+            let list = array.as_list::<i64>();
+            let offsets = list.value_offsets();
+            let (start, end) = (offsets[0] as usize, offsets[list.len()] as usize);
+            rows_of(list.values().as_ref(), field.data_type(), start, end)
+        }
+        // A slice of a fixed-size list slices its values.
+        ArrowDataType::FixedSizeList(field, _) => first_invalid_utf8_in(
+            array.as_fixed_size_list().values().as_ref(),
+            field.data_type(),
+        ),
+        ArrowDataType::Map(entries, _) => {
+            let ArrowDataType::Struct(fields) = entries.data_type() else {
+                return None;
+            };
+            let map = array.as_map();
+            let offsets = map.value_offsets();
+            let (start, end) = (offsets[0] as usize, offsets[map.len()] as usize);
+            rows_of(map.keys().as_ref(), fields[0].data_type(), start, end)
+                .or_else(|| rows_of(map.values().as_ref(), fields[1].data_type(), start, end))
+        }
+        // A slice of a struct slices its fields.
+        ArrowDataType::Struct(fields) => array
+            .as_struct()
+            .columns()
+            .iter()
+            .zip(fields.iter())
+            .find_map(|(column, field)| first_invalid_utf8_in(column.as_ref(), field.data_type())),
+        _ => None,
+    }
+}
+
+/// The bytes of the first value of `array`, a string read as binary, that is not valid UTF-8.
+fn invalid_string_in(array: &dyn arrow::array::Array) -> Option<Vec<u8>> {
+    use arrow::array::AsArray;
+    use arrow::datatypes::DataType as ArrowDataType;
+
     match array.data_type() {
         ArrowDataType::Binary => array
             .as_binary::<i32>()
@@ -3074,35 +3134,6 @@ fn first_invalid_utf8_in(array: &dyn arrow::array::Array) -> Option<Vec<u8>> {
             .iter()
             .flatten()
             .find_map(invalid_bytes),
-        ArrowDataType::List(_) => {
-            let list = array.as_list::<i32>();
-            let offsets = list.value_offsets();
-            let (start, end) = (offsets[0] as usize, offsets[list.len()] as usize);
-            rows_of(list.values().as_ref(), start, end)
-        }
-        ArrowDataType::LargeList(_) => {
-            let list = array.as_list::<i64>();
-            let offsets = list.value_offsets();
-            let (start, end) = (offsets[0] as usize, offsets[list.len()] as usize);
-            rows_of(list.values().as_ref(), start, end)
-        }
-        // A slice of a fixed-size list slices its values.
-        ArrowDataType::FixedSizeList(_, _) => {
-            first_invalid_utf8_in(array.as_fixed_size_list().values().as_ref())
-        }
-        ArrowDataType::Map(_, _) => {
-            let map = array.as_map();
-            let offsets = map.value_offsets();
-            let (start, end) = (offsets[0] as usize, offsets[map.len()] as usize);
-            rows_of(map.keys().as_ref(), start, end)
-                .or_else(|| rows_of(map.values().as_ref(), start, end))
-        }
-        // A slice of a struct slices its fields.
-        ArrowDataType::Struct(_) => array
-            .as_struct()
-            .columns()
-            .iter()
-            .find_map(|column| first_invalid_utf8_in(column.as_ref())),
         _ => None,
     }
 }
@@ -3927,21 +3958,26 @@ mod nested_decode_tests {
         }
     }
 
+    /// The marker of the encoded strings, which `corrupt_marker` replaces.
+    const MARKER: &str = "\u{1f}\u{1e}";
+
+    /// The batch with its first marker replaced by bytes that are not UTF-8, of the same length,
+    /// so that the stream is only invalid in its values.
+    fn corrupt_marker(
+        mut batch: proto::execute_plan_response::ArrowBatch,
+    ) -> proto::execute_plan_response::ArrowBatch {
+        let mut data = batch.data.to_vec();
+        let at = data
+            .windows(MARKER.len())
+            .position(|window| window == MARKER.as_bytes())
+            .unwrap();
+        data[at..at + 2].copy_from_slice(&[0xc3, 0x28]);
+        batch.data = data.into();
+        batch
+    }
+
     #[test]
     fn invalid_utf8_names_the_first_column_with_it_and_its_bytes() {
-        // The marker is one of the encoded strings; its bytes are replaced by bytes that are not
-        // UTF-8, of the same length, so that the stream is only invalid in its values.
-        let marker = "\u{1f}\u{1e}";
-        let corrupt = |mut batch: proto::execute_plan_response::ArrowBatch| {
-            let mut data = batch.data.to_vec();
-            let at = data
-                .windows(marker.len())
-                .position(|window| window == marker.as_bytes())
-                .unwrap();
-            data[at..at + 2].copy_from_slice(&[0xc3, 0x28]);
-            batch.data = data.into();
-            batch
-        };
         let nested = |values: Vec<&str>| {
             let items = StringArray::from(values);
             let offsets = OffsetBuffer::from_lengths([1, 1]);
@@ -3950,10 +3986,10 @@ mod nested_decode_tests {
         };
         let strings = |values: Vec<&str>| Arc::new(StringArray::from(values)) as ArrayRef;
 
-        let nested_batch = corrupt(encoded_batches(
+        let nested_batch = corrupt_marker(encoded_batches(
             vec![
                 ("a", strings(vec!["x", "y"])),
-                ("n", nested(vec!["x", marker])),
+                ("n", nested(vec!["x", MARKER])),
             ],
             1,
             false,
@@ -3964,9 +4000,9 @@ mod nested_decode_tests {
         assert_eq!(error.utf8_column(), Some(1));
         assert_eq!(error.invalid_utf8_value(), Some(vec![0xc3, 0x28]));
 
-        let top_batch = corrupt(encoded_batches(
+        let top_batch = corrupt_marker(encoded_batches(
             vec![
-                ("a", strings(vec!["x", marker])),
+                ("a", strings(vec!["x", MARKER])),
                 ("n", nested(vec!["x", "y"])),
             ],
             1,
@@ -3976,6 +4012,45 @@ mod nested_decode_tests {
             panic!("the invalid string of the first column must not decode");
         };
         assert_eq!(error.utf8_column(), Some(0));
+        assert_eq!(error.invalid_utf8_value(), Some(vec![0xc3, 0x28]));
+    }
+
+    #[test]
+    fn invalid_utf8_skips_the_binary_values_before_it() {
+        // Binary values that are not UTF-8 are values, not strings: the invalid string after
+        // them is the one that is named, with its bytes.
+        let strings = |values: Vec<&str>| Arc::new(StringArray::from(values)) as ArrayRef;
+        let binaries = |values: Vec<&[u8]>| Arc::new(BinaryArray::from(values)) as ArrayRef;
+        let binary_list = Arc::new(ListArray::new(
+            Arc::new(Field::new("item", DataType::Binary, true)),
+            OffsetBuffer::from_lengths([1, 1]),
+            binaries(vec![&[0xff][..], &[0xfe][..]]),
+            None,
+        )) as ArrayRef;
+
+        let top_batch = corrupt_marker(encoded_batches(
+            vec![
+                ("b", binaries(vec![&[0xff][..], &[0xfe][..]])),
+                ("s", strings(vec!["x", MARKER])),
+            ],
+            1,
+            false,
+        ));
+        let Err(error) = decode_arrow_batch_of(&top_batch, None) else {
+            panic!("the invalid string after a binary column must not decode");
+        };
+        assert_eq!(error.utf8_column(), Some(1));
+        assert_eq!(error.invalid_utf8_value(), Some(vec![0xc3, 0x28]));
+
+        let nested_batch = corrupt_marker(encoded_batches(
+            vec![("l", binary_list), ("s", strings(vec!["x", MARKER]))],
+            1,
+            false,
+        ));
+        let Err(error) = decode_arrow_batch_of(&nested_batch, None) else {
+            panic!("the invalid string after a nested binary column must not decode");
+        };
+        assert_eq!(error.utf8_column(), Some(1));
         assert_eq!(error.invalid_utf8_value(), Some(vec![0xc3, 0x28]));
     }
 
@@ -3998,18 +4073,33 @@ mod nested_decode_tests {
                 ),
             ])
         };
+        // The types of the arrays as the server sends them: their binary values are strings.
+        let struct_type = DataType::Struct(
+            vec![
+                Field::new("x", DataType::Utf8, true),
+                Field::new("y", DataType::Utf8, true),
+            ]
+            .into(),
+        );
         // Row 0 has the invalid y, row 1 the invalid x: x is converted first.
-        assert_eq!(first_invalid_utf8_in(&two_rows()), Some(vec![0xc3]));
         assert_eq!(
-            first_invalid_utf8_in(&two_rows().slice(0, 1)),
+            first_invalid_utf8_in(&two_rows(), &struct_type),
+            Some(vec![0xc3])
+        );
+        assert_eq!(
+            first_invalid_utf8_in(&two_rows().slice(0, 1), &struct_type),
             Some(vec![0x80])
         );
 
         let structs = Arc::new(two_rows()) as ArrayRef;
         let item = Arc::new(Field::new("item", structs.data_type().clone(), true));
+        let list_type = DataType::List(Arc::new(Field::new("item", struct_type.clone(), true)));
         let lists = ListArray::new(item, OffsetBuffer::from_lengths([1, 1]), structs, None);
-        assert_eq!(first_invalid_utf8_in(&lists), Some(vec![0xc3]));
-        assert_eq!(first_invalid_utf8_in(&lists.slice(0, 1)), Some(vec![0x80]));
+        assert_eq!(first_invalid_utf8_in(&lists, &list_type), Some(vec![0xc3]));
+        assert_eq!(
+            first_invalid_utf8_in(&lists.slice(0, 1), &list_type),
+            Some(vec![0x80])
+        );
 
         // Row 0 maps "k" to an invalid value, row 1 has an invalid key: the keys come first.
         let entries = StructArray::from(vec![
@@ -4022,6 +4112,17 @@ mod nested_decode_tests {
                 binary(vec![Some(&[0xfe][..]), Some(&b"v"[..])]),
             ),
         ]);
+        let entries_type = DataType::Struct(
+            vec![
+                Field::new("key", DataType::Utf8, false),
+                Field::new("value", DataType::Utf8, true),
+            ]
+            .into(),
+        );
+        let map_type = DataType::Map(
+            Arc::new(Field::new("entries", entries_type.clone(), false)),
+            false,
+        );
         let entry = Arc::new(Field::new("entries", entries.data_type().clone(), false));
         let maps = MapArray::new(
             entry,
@@ -4030,11 +4131,31 @@ mod nested_decode_tests {
             None,
             false,
         );
-        assert_eq!(first_invalid_utf8_in(&maps), Some(vec![0xc3]));
-        assert_eq!(first_invalid_utf8_in(&maps.slice(0, 1)), Some(vec![0xfe]));
+        assert_eq!(first_invalid_utf8_in(&maps, &map_type), Some(vec![0xc3]));
+        assert_eq!(
+            first_invalid_utf8_in(&maps.slice(0, 1), &map_type),
+            Some(vec![0xfe])
+        );
         // A null is valid.
         assert_eq!(
-            first_invalid_utf8_in(&BinaryArray::from(vec![None, Some(ok)])),
+            first_invalid_utf8_in(&BinaryArray::from(vec![None, Some(ok)]), &DataType::Utf8),
+            None
+        );
+        // A binary value is not a string, however invalid its bytes.
+        assert_eq!(
+            first_invalid_utf8_in(&binary(vec![Some(&[0xff][..])]), &DataType::Binary),
+            None
+        );
+        assert_eq!(
+            first_invalid_utf8_in(
+                &ListArray::new(
+                    Arc::new(Field::new("item", DataType::Binary, true)),
+                    OffsetBuffer::from_lengths([1]),
+                    binary(vec![Some(&[0xff][..])]),
+                    None,
+                ),
+                &DataType::List(Arc::new(Field::new("item", DataType::Binary, true))),
+            ),
             None
         );
     }
