@@ -1146,8 +1146,8 @@ impl PyDataFrame {
         numPartitions: Bound<'_, PyAny>,
         cols: Vec<Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
-        // As PySpark's: a positive partition count and columns, or columns alone, each sorted
-        // ascending unless it is a sort order.
+        // As PySpark's: a positive partition count and columns, or columns alone. The columns
+        // are sorted ascending unless they are sort orders, by `repartition_by_range_opt`.
         let (num_partitions, cols) = if numPartitions.is_instance_of::<PyInt>() {
             let n = positive_partitions(py, numPartitions.extract()?)?;
             if cols.is_empty() {
@@ -1175,10 +1175,7 @@ impl PyDataFrame {
         };
         let exprs: Vec<_> = to_column_list(cols)?
             .into_iter()
-            .map(|c| match c.expression().node() {
-                spark_connect::expression::ExpressionNode::SortOrder(_) => c.expression().clone(),
-                _ => c.asc().expression().clone(),
-            })
+            .map(|c| c.expression().clone())
             .collect();
         Ok(PyDataFrame::new(
             self.dataframe
@@ -2042,14 +2039,14 @@ impl PyDataFrame {
     /// `df.transform(func, *args, **kwargs)` == `func(df, *args, **kwargs)`.
     #[pyo3(signature = (func, *args, **kwargs))]
     fn transform(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         func: &Bound<'_, PyAny>,
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        let this = Py::new(py, PyDataFrame::new(self.dataframe.clone()))?;
-        let mut call_args: Vec<Py<PyAny>> = vec![this.into_any()];
+        // As PySpark's, which passes `self`: a subclass of DataFrame keeps its methods and type.
+        let py = slf.py();
+        let mut call_args: Vec<Py<PyAny>> = vec![slf.clone().into_any().unbind()];
         for a in args.iter() {
             call_args.push(a.unbind());
         }
@@ -2412,6 +2409,7 @@ impl PyDataFrame {
     #[getter]
     fn schema(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let schema = py.detach(|| self.dataframe.schema()).to_pyerr()?;
+        check_nanosecond_timestamps(py, Some(&schema))?;
         crate::types::data_type_to_py(py, &schema)
     }
 
@@ -2440,10 +2438,11 @@ impl PyDataFrame {
         }
     }
 
-    /// Get the first n rows.
-    fn take(&self, py: Python<'_>, num: usize) -> PyResult<Vec<Py<PyAny>>> {
+    /// Get the first n rows, as PySpark's `DataFrame.take`, which is `limit(num).collect()`, so
+    /// the server checks `num`.
+    fn take(&self, py: Python<'_>, num: i32) -> PyResult<Vec<Py<PyAny>>> {
         let (rows, schema) = py
-            .detach(|| self.dataframe.take_with_schema(num))
+            .detach(|| self.dataframe.limit(num).collect_with_schema())
             .to_pyerr()?;
         rows_to_py(py, &self.dataframe, &rows, schema.as_ref())
     }
@@ -2451,6 +2450,9 @@ impl PyDataFrame {
     /// Column names (a property, mirroring `DataFrame.columns`).
     #[getter]
     fn columns(&self, py: Python<'_>) -> PyResult<Vec<String>> {
+        // The schema is cached, so the names come from it without another request.
+        let schema = py.detach(|| self.dataframe.schema()).to_pyerr()?;
+        check_nanosecond_timestamps(py, Some(&schema))?;
         py.detach(|| self.dataframe.columns().to_pyerr())
     }
 
@@ -2539,6 +2541,7 @@ impl PyDataFrame {
             _ => None,
         };
         let schema = py.detach(|| self.dataframe.schema().to_pyerr())?;
+        check_nanosecond_timestamps(py, Some(&schema))?;
         let depth = level
             .map(crate::types::normalize_tree_depth)
             .transpose()?
@@ -2551,9 +2554,9 @@ impl PyDataFrame {
     /// Get the schema as a list of (name, type) tuples.
     #[getter]
     fn dtypes(&self, py: Python<'_>) -> PyResult<Vec<(String, String)>> {
-        let spark_connect::types::DataType::Struct { fields } =
-            py.detach(|| self.dataframe.schema().to_pyerr())?
-        else {
+        let schema = py.detach(|| self.dataframe.schema().to_pyerr())?;
+        check_nanosecond_timestamps(py, Some(&schema))?;
+        let spark_connect::types::DataType::Struct { fields } = schema else {
             unreachable!("schema() validates struct responses")
         };
         // As PySpark, a user-defined type is named by its simpleString(), such as `vector`,
@@ -4298,10 +4301,11 @@ fn nanosecond_timestamp_text(data_type: &spark_connect::types::DataType) -> Opti
     }
 }
 
-/// Raises as PySpark does for a result of `schema` with a nanosecond-precision timestamp, which
-/// PySpark cannot convert from the proto of the schema: the collecting APIs raise, though the
-/// Rust core collects these values in microseconds.
-fn check_nanosecond_timestamps(
+/// Raises as PySpark does for a schema with a nanosecond-precision timestamp, which PySpark cannot
+/// convert from the proto of the schema: the collecting APIs and every schema surface raise (the
+/// schema, columns, dtypes, printSchema, a DDL string of a schema), though the Rust core keeps
+/// these values, and count, show and describe work.
+pub(crate) fn check_nanosecond_timestamps(
     py: Python<'_>,
     schema: Option<&spark_connect::types::DataType>,
 ) -> PyResult<()> {

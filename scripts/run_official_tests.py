@@ -243,13 +243,21 @@ def run_ours(
     env = dict(os.environ)
     env["SPARK_CONNECT_TESTING_REMOTE"] = remote
     env["SPARK_TESTING"] = "1"
-    env["SPARK_SKIP_CONNECT_COMPAT_TESTS"] = "1"
     if dropin:
         # The drop-in itself: no transport. scripts/ is on the path only for the deselect
         # plugin; spark_py (the overlay) comes first, so our pyspark is the one imported.
+        # The variable is removed, not set: the drop-in's is_remote_only() is True without
+        # it (python/pyspark/util.py), and the official test_parity_udtf.py skips its Arrow
+        # UDTF suite whenever it is set. The workflow sets it for the Spark server process.
+        env.pop("SPARK_SKIP_CONNECT_COMPAT_TESTS", None)
         env["PYTHONPATH"] = os.pathsep.join([str(spark_py), str(REPO / "scripts")])
         plugin = "dropin_deselect_plugin"
     else:
+        # Transport mode runs the reference pyspark (its tree has pyspark/core/). The base
+        # classes of the official connect tests (pyspark/testing/connectutils.py, setUpClass)
+        # build a classic session unless is_remote_only() is True, which this variable forces;
+        # without it they error at setup.
+        env["SPARK_SKIP_CONNECT_COMPAT_TESTS"] = "1"
         env["PYTHONPATH"] = os.pathsep.join([str(REPO / "scripts"), str(spark_py)])
         env["RUST_PYSPARK_SO"] = os.environ["RUST_PYSPARK_SO"]
         plugin = "rust_transport_plugin"

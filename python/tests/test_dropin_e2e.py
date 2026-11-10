@@ -484,11 +484,16 @@ def _run_in_time_zone(code, zone):
 def test_nanosecond_timestamps_are_not_collected_as_pyspark(session):
     # As PySpark's conversion of the schema from its proto: a TIMESTAMP_NTZ(p) or TIMESTAMP_LTZ(p)
     # with p > 6, also nested, raises UNSUPPORTED_OPERATION from every collecting API, toPandas
-    # and toArrow, while count, show and the microsecond timestamps keep working.
+    # and toArrow, and from every schema surface (the schema, columns, dtypes, printSchema, repr
+    # and json, and the DDL strings of the types), while count, show and the microsecond
+    # timestamps keep working.
     import datetime
     import re
 
     from pyspark.errors import PySparkValueError
+
+    from pyspark.sql.functions import from_json, lit
+    from pyspark.sql.types import DataType, StructType
 
     def message(proto_text):
         return r"\[UNSUPPORTED_OPERATION\] data type " + re.escape(proto_text) + r" is not supported\."
@@ -524,6 +529,27 @@ def test_nanosecond_timestamps_are_not_collected_as_pyspark(session):
             ):
                 with pytest.raises(PySparkValueError, match=message(proto_text)):
                     collect(df)
+            # The schema surfaces raise too: PySpark converts a schema from its proto, so the
+            # schema of the frame, its columns and types, and the schema of a DDL string do not.
+            for surface in (
+                lambda d: d.schema,
+                lambda d: d.columns,
+                lambda d: d.dtypes,
+                lambda d: d.printSchema(),
+                lambda d: repr(d),
+                lambda d: d.schema.json(),
+            ):
+                with pytest.raises(PySparkValueError, match=message(proto_text)):
+                    surface(df)
+        # The DDL strings of the types, as the server parses them.
+        for surface in (
+            lambda: session.createDataFrame([(1,)], "a timestamp_ntz(9)"),
+            lambda: DataType.fromDDL("timestamp_ntz(9)"),
+            lambda: StructType.fromDDL("a struct<x: timestamp_ntz(9)>"),
+            lambda: session.range(1).select(from_json(lit('{"a": 1}'), "a timestamp_ntz(9)")).schema,
+        ):
+            with pytest.raises(PySparkValueError, match=message(ntz9)):
+                surface()
         # Spark Connect and PySpark both count and show these results.
         df = session.sql("SELECT CAST('2020-01-01 00:00:00.123456789' AS TIMESTAMP_NTZ(9)) c")
         assert df.count() == 1
@@ -1249,8 +1275,8 @@ def test_foreach_foreach_partition_and_to_json_as_pyspark(session):
 def test_progress_handler_that_runs_queries_without_end_raises_recursion_error():
     # The unguarded handler of SPARK-61153 runs a query for each progress of the queries it
     # runs. Past the bound of nested callbacks, the query fails with a RecursionError, which the
-    # handler's exception goes out with, instead of the native stack overflowing and the process
-    # crashing (SIGSEGV). The outer query returns its result, as the handler's exceptions do.
+    # handlers' exceptions carry out of each execution, as PySpark's result loop does, instead of
+    # the native stack overflowing and the process crashing (SIGSEGV). The outer query raises it.
     # The queries nest only when the server sends an in-progress update of each one. A query that
     # is shorter than the report interval (2 s) gets one only when the server wakes for its result
     # before the execution ends, which a fast runner may not do. With an interval of 10 ms, the
@@ -1268,11 +1294,13 @@ spark = SparkSession.builder.remote(%r).getOrCreate()
 spark.conf.set("spark.connect.progress.reportInterval", "10ms")
 spark.registerProgressHandler(
     lambda **kw: spark.range(100).repartition(20).count() if not kw["done"] else None)
-print(spark.range(0, 2000, 1, 4).repartition(20).selectExpr("sum(id) as t").collect())
+try:
+    print(spark.range(0, 2000, 1, 4).repartition(20).selectExpr("sum(id) as t").collect())
+except RecursionError as error:
+    print("raised RecursionError", error)
 """ % remote], env=dict(os.environ, TZ="UTC"), capture_output=True, text=True, timeout=300)
     assert result.returncode == 0, result.stderr
-    assert "[Row(t=1999000)]" in result.stdout, result.stdout
-    assert "RecursionError" in result.stderr, (result.stdout, result.stderr)
+    assert "raised RecursionError" in result.stdout, (result.stdout, result.stderr)
 
 
 def test_progress_handler_runs_a_query_of_its_own_as_pyspark(session):
@@ -1511,6 +1539,33 @@ def test_create_dataframe_with_a_schema_edited_in_place(session):
     assert df.schema.simpleString() == "struct<a:bigint,b:string,c:double>"
     assert [f.nullable for f in df.schema.fields] == [False, False, False]
     assert df.collect() == [Row(a=1, b="x", c=2.0)]
+
+
+def test_create_dataframe_of_datetime_labels_keeps_ntz_values_as_pyspark(session):
+    # As PySpark's: a datetime64 column under a DatetimeIndex label (`.T` of a time-indexed
+    # frame) reads back unchanged with an explicit timestamp_ntz. The naive values are not
+    # shifted by a time zone, of the session or of the client's local time, which is set to
+    # Asia/Seoul here as well: a client in UTC does not show the shift.
+    import pandas as pd
+
+    frame = pd.DataFrame({"x": pd.Series(pd.to_datetime(["2020-01-02 03:00", None]))})
+    frame.columns = pd.DatetimeIndex(["2020-01-01"])
+    previous = session.conf.get("spark.sql.session.timeZone")
+    previous_local = os.environ.get("TZ")
+    session.conf.set("spark.sql.session.timeZone", "Asia/Seoul")
+    os.environ["TZ"] = "Asia/Seoul"
+    time.tzset()
+    try:
+        df = session.createDataFrame(frame, "p timestamp_ntz")
+        assert df.schema.simpleString() == "struct<p:timestamp_ntz>"
+        assert df.collect() == [Row(p=datetime(2020, 1, 2, 3)), Row(p=None)]
+    finally:
+        session.conf.set("spark.sql.session.timeZone", previous)
+        if previous_local is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous_local
+        time.tzset()
 
 
 def test_create_dataframe_from_empty_arrow_table(session):
@@ -2491,6 +2546,13 @@ def test_session_builders_keep_the_options_set_on_them_as_pyspark(session):
         session.conf.unset("spark.connect.rust.test.builder")
 
 
+def test_take_of_a_negative_count_raises_the_server_error_as_pyspark(session):
+    # As PySpark's take, which is limit(num).collect(): the server rejects a negative count with
+    # INVALID_LIMIT_LIKE_EXPRESSION.IS_NEGATIVE, as for head and limit.
+    with pytest.raises(AnalysisException) as error:
+        session.range(3).take(-1)
+    assert error.value.getCondition() == "INVALID_LIMIT_LIKE_EXPRESSION.IS_NEGATIVE"
+    assert len(session.range(3).take(2)) == 2
 
 
 def test_collected_rows_behave_as_pyspark_rows(session):
@@ -2516,6 +2578,53 @@ def test_collected_rows_behave_as_pyspark_rows(session):
     duplicate = session.range(1).selectExpr("1 AS a", "2 AS a").first()
     assert repr(duplicate) == "Row(a=1, a=2)" and duplicate.asDict() == {"a": 2}
     assert repr(pickle.loads(pickle.dumps(duplicate))) == "Row(a=1, a=2)"
+
+
+def test_a_progress_handler_that_raises_fails_the_execution_as_pyspark(session):
+    # As PySpark Connect's: the progress of an execution calls the handlers from its result loop,
+    # so the exception of a handler goes out of collect(), toPandas() and count() as it is. The
+    # handler is still called as done, and a handler that does not raise, or the session after the
+    # failure, works as before.
+    def slow():
+        # 500 ms a task, so that the server reports its progress at each report interval.
+        return session.sql(
+            "SELECT id, reflect('java.lang.Thread', 'sleep', 500L) AS s FROM range(0, 4, 1, 4)")
+
+    error = ValueError("a handler raises")
+    calls = []
+
+    def failing(*, stages, inflight_tasks, operation_id, done):
+        calls.append(done)
+        if not done:
+            raise error
+
+    session.conf.set("spark.connect.progress.reportInterval", "10ms")
+    try:
+        session.registerProgressHandler(failing)
+        try:
+            for run in (lambda df: df.collect(), lambda df: df.toPandas(), lambda df: df.count()):
+                calls.clear()
+                with pytest.raises(ValueError) as raised:
+                    run(slow())
+                assert raised.value is error
+                assert calls[-1] is True and False in calls
+        finally:
+            session.removeProgressHandler(failing)
+
+        calls.clear()
+
+        def recording(*, stages, inflight_tasks, operation_id, done):
+            calls.append(done)
+
+        session.registerProgressHandler(recording)
+        try:
+            assert len(slow().collect()) == 4
+            assert calls[-1] is True and False in calls
+        finally:
+            session.removeProgressHandler(recording)
+    finally:
+        session.conf.unset("spark.connect.progress.reportInterval")
+    assert session.range(3).count() == 3
 
 
 def test_grouped_data_are_represented_as_pyspark(session):
@@ -3153,6 +3262,45 @@ def test_functions_send_their_optional_arguments_as_pyspark(session):
     assert row.bround == 2.0
     nulls = session.sql("SELECT * FROM VALUES (1, NULL), (1, 5) AS t(g, v)")
     assert nulls.groupBy("g").agg(F.first("v", ignorenulls=True)).first()[1] == 5
+
+
+def test_datetime_literals_collect_the_exact_values_of_pyspark():
+    # As PySpark's TimestampType: a datetime literal is the instant of its micros, exact from year
+    # 1 to year 9999 (a float of seconds lost the micros after the year 2255), and a naive one is
+    # in the client's time zone. A TIMESTAMP that is past the year 9999 in the zone of the client
+    # (here nine hours ahead of UTC) raises OverflowError on collect, as PySpark does.
+    remote = os.environ.get("SPARK_REMOTE")
+    if not remote:
+        pytest.skip("SPARK_REMOTE is required for live-server tests")
+    out = _run_in_time_zone("""
+import datetime
+from pyspark.sql import SparkSession, functions as F
+spark = SparkSession.builder.remote(%r).getOrCreate()
+utc = datetime.timezone.utc
+values = [
+    ("aware_1", datetime.datetime(1, 1, 1, 0, 0, 0, 1, tzinfo=utc)),
+    ("aware_1969", datetime.datetime(1969, 12, 31, 23, 59, 59, 999999, tzinfo=utc)),
+    ("aware_2300", datetime.datetime(2300, 1, 1, 0, 0, 0, 123457, tzinfo=utc)),
+    ("aware_9999", datetime.datetime(9999, 12, 31, 23, 59, 59, 999999, tzinfo=utc)),
+    ("naive_1969", datetime.datetime(1969, 12, 31, 23, 59, 59, 999999)),
+    ("naive_2300", datetime.datetime(2300, 1, 1, 0, 0, 0, 123457)),
+    ("naive_9999", datetime.datetime(9999, 12, 31, 23, 59, 59, 999999)),
+]
+for name, value in values:
+    try:
+        print(name, repr(spark.range(1).select(F.lit(value).alias("v")).collect()[0][0]))
+    except Exception as error:
+        print(name, type(error).__name__)
+""" % remote, "Asia/Seoul")
+    assert out.splitlines() == [
+        "aware_1 datetime.datetime(1, 1, 1, 8, 27, 52, 1)",
+        "aware_1969 datetime.datetime(1970, 1, 1, 8, 59, 59, 999999)",
+        "aware_2300 datetime.datetime(2300, 1, 1, 9, 0, 0, 123457)",
+        "aware_9999 OverflowError",
+        "naive_1969 datetime.datetime(1969, 12, 31, 23, 59, 59, 999999)",
+        "naive_2300 datetime.datetime(2300, 1, 1, 0, 0, 0, 123457)",
+        "naive_9999 datetime.datetime(9999, 12, 31, 23, 59, 59, 999999)",
+    ]
 
 
 def test_window_frames_return_the_rows_of_pyspark(session):
