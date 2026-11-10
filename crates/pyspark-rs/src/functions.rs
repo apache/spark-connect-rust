@@ -317,6 +317,144 @@ pub fn to_column(obj: &Bound<'_, PyAny>) -> PyResult<Column> {
     ))
 }
 
+/// Convert a Python object that a Column method takes as a value, such as `when`, `otherwise`
+/// or `getItem`, to a Column. A list is a typed array literal, as PySpark's
+/// `LiteralExpression._from_value` makes it, so an empty list or one that starts with None is
+/// CANNOT_INFER_ARRAY_ELEMENT_TYPE. `to_column` builds a list as `lit` does, for the functions.
+pub(crate) fn to_value_column(obj: &Bound<'_, PyAny>) -> PyResult<Column> {
+    let obj = &enum_to_value(obj)?;
+    if let Ok(list) = obj.cast::<pyo3::types::PyList>() {
+        return Ok(Column::new(Expression::literal(typed_array_literal(list)?)));
+    }
+    to_column(obj)
+}
+
+/// The array literal of a list, of the type of its first element, as PySpark's
+/// `LiteralExpression` infers it. Each element is then a literal of that type, as
+/// `literal_as` makes it.
+fn typed_array_literal(list: &Bound<'_, pyo3::types::PyList>) -> PyResult<LiteralExpression> {
+    let Some(first) = list.iter().next().filter(|first| !first.is_none()) else {
+        return Err(crate::column::raise_pyspark(
+            list.py(),
+            "PySparkTypeError",
+            "CANNOT_INFER_ARRAY_ELEMENT_TYPE",
+            &[],
+        ));
+    };
+    let first = match first.cast::<pyo3::types::PyList>() {
+        Ok(inner) => typed_array_literal(inner)?,
+        Err(_) => scalar_literal_of(&first)?,
+    };
+    let element_type = literal_data_type(&first);
+    let elements = list
+        .iter()
+        .map(|item| literal_as(&item, &element_type))
+        .collect::<PyResult<Vec<_>>>()?;
+    Ok(LiteralExpression::Array {
+        element_type: Box::new(element_type),
+        elements,
+    })
+}
+
+/// The literal of `obj` as a value of `data_type`, as PySpark's `LiteralExpression(obj, type)`:
+/// None is a null, a list is an array of the element type, and another value must be of the
+/// type, else a bare AssertionError, as PySpark's asserts raise. As in Python, an int is a long
+/// and a bool is an int.
+fn literal_as(
+    obj: &Bound<'_, PyAny>,
+    data_type: &spark_connect::types::DataType,
+) -> PyResult<LiteralExpression> {
+    use spark_connect::types::DataType;
+    if obj.is_none() {
+        return Ok(LiteralExpression::Null(data_type.clone()));
+    }
+    let assertion = || pyo3::exceptions::PyAssertionError::new_err(());
+    if let DataType::Array { element_type, .. } = data_type {
+        let list = obj.cast::<pyo3::types::PyList>().map_err(|_| assertion())?;
+        let elements = list
+            .iter()
+            .map(|item| literal_as(&item, element_type))
+            .collect::<PyResult<Vec<_>>>()?;
+        return Ok(LiteralExpression::Array {
+            element_type: element_type.clone(),
+            elements,
+        });
+    }
+    if obj.is_instance_of::<pyo3::types::PyList>() {
+        return Err(assertion());
+    }
+    match (scalar_literal_of(obj)?, data_type) {
+        (LiteralExpression::Integer(value), DataType::Long) => {
+            Ok(LiteralExpression::Long(i64::from(value)))
+        }
+        (LiteralExpression::Boolean(value), DataType::Integer) => {
+            Ok(LiteralExpression::Integer(i32::from(value)))
+        }
+        (LiteralExpression::Boolean(value), DataType::Long) => {
+            Ok(LiteralExpression::Long(i64::from(value)))
+        }
+        (literal, data_type) if literal_data_type(&literal) == *data_type => Ok(literal),
+        _ => Err(assertion()),
+    }
+}
+
+/// The literal of a value that is not a list, as `to_column` builds it.
+fn scalar_literal_of(obj: &Bound<'_, PyAny>) -> PyResult<LiteralExpression> {
+    match to_column(obj)?.expression().node() {
+        ExpressionNode::Literal(literal) => Ok(literal.clone()),
+        _ => {
+            let type_name = obj
+                .get_type()
+                .name()
+                .map(|n| n.to_string())
+                .unwrap_or_else(|_| "<unknown>".to_string());
+            Err(crate::column::raise_pyspark(
+                obj.py(),
+                "PySparkTypeError",
+                "UNSUPPORTED_DATA_TYPE",
+                &[("data_type", &type_name)],
+            ))
+        }
+    }
+}
+
+/// The data type of a literal, as the type of PySpark's `LiteralExpression` of it.
+fn literal_data_type(literal: &LiteralExpression) -> spark_connect::types::DataType {
+    use spark_connect::types::DataType;
+    match literal {
+        LiteralExpression::Null(data_type) => data_type.clone(),
+        LiteralExpression::Boolean(_) => DataType::Boolean,
+        LiteralExpression::Byte(_) => DataType::Byte,
+        LiteralExpression::Short(_) => DataType::Short,
+        LiteralExpression::Integer(_) => DataType::Integer,
+        LiteralExpression::Long(_) => DataType::Long,
+        LiteralExpression::Float(_) => DataType::Float,
+        LiteralExpression::Double(_) => DataType::Double,
+        LiteralExpression::Decimal {
+            precision, scale, ..
+        } => DataType::Decimal {
+            precision: *precision,
+            scale: *scale,
+        },
+        LiteralExpression::String(_) => crate::infer::string_type(),
+        LiteralExpression::Binary(_) => DataType::Binary,
+        LiteralExpression::Date(_) => DataType::Date,
+        LiteralExpression::Timestamp(_) => DataType::Timestamp,
+        LiteralExpression::TimestampNtz(_) => DataType::TimestampNtz,
+        LiteralExpression::DayTimeInterval(_) => DataType::DayTimeInterval {
+            start_field: 0,
+            end_field: 3,
+        },
+        LiteralExpression::Time { precision, .. } => DataType::Time {
+            precision: *precision,
+        },
+        LiteralExpression::Array { element_type, .. } => DataType::Array {
+            element_type: element_type.clone(),
+            contains_null: true,
+        },
+    }
+}
+
 /// The number of dimensions of `obj` if it is a `numpy.ndarray`. NumPy is looked up in
 /// `sys.modules`, as an array exists only when it is imported, so this does not import it.
 fn numpy_ndarray_ndim(obj: &Bound<'_, PyAny>) -> PyResult<Option<usize>> {

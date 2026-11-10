@@ -3408,6 +3408,25 @@ def test_try_cast_and_isin_raise_the_errors_of_pyspark(session):
     assert df.where(F.col("id").isin([1, 2])).count() == 2
 
 
+def test_column_list_values_are_typed_array_literals_on_the_server_as_pyspark(session):
+    # As PySpark Connect's: a list that a Column method takes as a value is an array of its
+    # first element's type, so an empty one, or one that starts with None, is an error, while
+    # F.lit of a list is an array() whatever it holds.
+    from pyspark.errors import PySparkTypeError
+    from pyspark.sql import functions as F
+
+    df = session.range(2)
+    chosen = F.when(F.col("id") > 0, F.array(F.lit(1)))
+    for value in ([], [None, 2]):
+        with pytest.raises(PySparkTypeError) as e:
+            df.select(chosen.otherwise(value).alias("o"))
+        assert e.value.getCondition() == "CANNOT_INFER_ARRAY_ELEMENT_TYPE"
+    assert df.select(chosen.otherwise([1, 2]).alias("o")).collect() == [
+        Row(o=[1, 2]), Row(o=[1])]
+    assert session.range(1).select(F.when(F.lit(True), []).alias("w")).collect() == [
+        Row(w=[])]
+
+
 
 
 def test_ml_vector_functions_as_pyspark(session):

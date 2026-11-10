@@ -2074,6 +2074,64 @@ def test_try_cast_and_isin_take_their_arguments_as_pyspark():
     assert e.value.getMessageParameters() == {"data_type": "tuple"}
 
 
+@pytest.mark.parametrize("value", [[], [None, 2], [[], [1]]])
+def test_column_methods_cannot_infer_the_element_type_of_a_list_as_pyspark(value):
+    # As PySpark's LiteralExpression of a list: its element type is that of its first element,
+    # which an empty list, or one that starts with None, does not have.
+    from pyspark.errors import PySparkTypeError
+    from pyspark.sql import functions as F
+
+    column = F.col("a")
+    for build in (
+        lambda: F.when(F.lit(True), 1).otherwise(value),
+        lambda: column.getItem(value),
+        lambda: column[value],
+        lambda: column.isin([value]),
+    ):
+        with pytest.raises(PySparkTypeError) as e:
+            build()
+        assert e.value.getCondition() == "CANNOT_INFER_ARRAY_ELEMENT_TYPE"
+
+
+def test_column_methods_send_a_list_as_the_typed_array_literal_of_pyspark():
+    from google.protobuf.json_format import MessageToDict
+    from pyspark.sql import functions as F
+
+    def sent_literal(value):
+        plan = F.col("a").getItem(value)._expr.to_plan(None)
+        return MessageToDict(plan.unresolved_extract_value.extraction.literal)
+
+    assert sent_literal([1, None, 3]) == {"array": {
+        "elementType": {"integer": {}},
+        "elements": [{"integer": 1}, {"null": {"integer": {}}}, {"integer": 3}]}}
+    assert sent_literal([[1, 2], [None]]) == {"array": {
+        "elementType": {"array": {"containsNull": True, "elementType": {"integer": {}}}},
+        "elements": [
+            {"array": {"elementType": {"integer": {}},
+                       "elements": [{"integer": 1}, {"integer": 2}]}},
+            {"array": {"elementType": {"integer": {}}, "elements": [{"null": {"integer": {}}}]}}]}}
+    assert sent_literal([2 ** 40, 1]) == {"array": {
+        "elementType": {"long": {}}, "elements": [{"long": "1099511627776"}, {"long": "1"}]}}
+    # As in Python, a bool is an int, so [1, True] is [1, 1].
+    assert sent_literal([1, True]) == {"array": {
+        "elementType": {"integer": {}}, "elements": [{"integer": 1}, {"integer": 1}]}}
+    # An element of another type than the first's is an AssertionError, as PySpark's asserts.
+    for value in ([1, 2.5], [1.5, 2], [1, "a"], [1, 2 ** 40], [[1], [2.5]]):
+        with pytest.raises(AssertionError):
+            sent_literal(value)
+
+
+def test_functions_lit_of_a_list_stays_an_array_as_pyspark():
+    # As PySpark's functions: lit builds the array of a list, which F.when takes without an
+    # element type, so the empty list is an array() and not CANNOT_INFER_ARRAY_ELEMENT_TYPE.
+    from pyspark.sql import functions as F
+
+    assert F.lit([])._expr.to_plan(None).unresolved_function.function_name == "array"
+    when = F.when(F.lit(True), [])._expr.to_plan(None).unresolved_function
+    assert when.function_name == "when"
+    assert when.arguments[1].unresolved_function.function_name == "array"
+
+
 
 
 def test_map_functions_send_their_resource_profile_as_pyspark(mock_connect):
