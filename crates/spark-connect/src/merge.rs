@@ -126,7 +126,7 @@ impl MergeIntoWriter {
     pub fn merge(mut self) -> Result<()> {
         let cmd = proto::MergeIntoTableCommand {
             target_table_name: std::mem::take(&mut self.target_table),
-            source_table_plan: Some(build_input_relation(&self.source_plan, &self.session)),
+            source_table_plan: Some(build_input_relation(&self.source_plan, &self.session)?),
             merge_condition: Some(self.condition.to_proto()),
             match_actions: std::mem::take(&mut self.matched_actions),
             not_matched_actions: std::mem::take(&mut self.not_matched_actions),

@@ -23,6 +23,7 @@ __all__ = ["ChannelBuilder", "DefaultChannelBuilder", "SparkConnectClient"]
 
 import copy
 import os
+import platform
 import sys
 import urllib.parse
 import uuid
@@ -30,7 +31,9 @@ import weakref
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 from pyspark.errors import PySparkNotImplementedError, PySparkValueError
+from pyspark.errors.exceptions.connect import SparkConnectException
 from pyspark.sql.metrics import ObservedMetrics
+from pyspark.version import __version__
 
 
 class ChannelBuilder:
@@ -45,6 +48,23 @@ class ChannelBuilder:
     PARAM_TOKEN = "token"
     PARAM_USER_ID = "user_id"
     PARAM_SESSION_ID = "session_id"
+    PARAM_USER_AGENT = "user_agent"
+    PARAM_GRPC_KEEPALIVE_ENABLED = "grpc_keepalive_enabled"
+    PARAM_GRPC_KEEPALIVE_TIME_MS = "grpc_keepalive_time_ms"
+    PARAM_GRPC_KEEPALIVE_TIMEOUT_MS = "grpc_keepalive_timeout_ms"
+    PARAM_GRPC_KEEPALIVE_WITHOUT_CALLS = "grpc_keepalive_without_calls"
+
+    # The keepalive PINGs that detect a silently-dead connection, as PySpark's (SPARK-58094).
+    GRPC_DEFAULT_KEEPALIVE_ENABLED = True
+    GRPC_DEFAULT_KEEPALIVE_TIME_MS = 60 * 1000
+    GRPC_DEFAULT_KEEPALIVE_TIMEOUT_MS = 20 * 1000
+    GRPC_DEFAULT_KEEPALIVE_WITHOUT_CALLS = True
+
+    GRPC_MAX_MESSAGE_LENGTH_DEFAULT = 128 * 1024 * 1024
+    GRPC_DEFAULT_OPTIONS = [
+        ("grpc.max_send_message_length", GRPC_MAX_MESSAGE_LENGTH_DEFAULT),
+        ("grpc.max_receive_message_length", GRPC_MAX_MESSAGE_LENGTH_DEFAULT),
+    ]
 
     def __init__(
         self,
@@ -90,6 +110,63 @@ class ChannelBuilder:
         )
 
     @property
+    def keepalive_enabled(self) -> bool:
+        """Whether the client sends gRPC/HTTP2 keepalive PINGs to detect a silently-dead
+        connection. Enabled by default."""
+        return (
+            self.getDefault(
+                ChannelBuilder.PARAM_GRPC_KEEPALIVE_ENABLED,
+                str(ChannelBuilder.GRPC_DEFAULT_KEEPALIVE_ENABLED),
+            ).lower()
+            == "true"
+        )
+
+    @property
+    def keepalive_time_ms(self) -> int:
+        """Idle time (in milliseconds) before sending a gRPC/HTTP2 keepalive PING."""
+        return int(
+            self.getDefault(
+                ChannelBuilder.PARAM_GRPC_KEEPALIVE_TIME_MS,
+                ChannelBuilder.GRPC_DEFAULT_KEEPALIVE_TIME_MS,
+            )
+        )
+
+    @property
+    def keepalive_timeout_ms(self) -> int:
+        """Time (in milliseconds) to wait for a keepalive PING ack before failing."""
+        return int(
+            self.getDefault(
+                ChannelBuilder.PARAM_GRPC_KEEPALIVE_TIMEOUT_MS,
+                ChannelBuilder.GRPC_DEFAULT_KEEPALIVE_TIMEOUT_MS,
+            )
+        )
+
+    @property
+    def keepalive_without_calls(self) -> bool:
+        """Whether to keep sending keepalive PINGs when there are no in-flight RPCs."""
+        return (
+            self.getDefault(
+                ChannelBuilder.PARAM_GRPC_KEEPALIVE_WITHOUT_CALLS,
+                str(ChannelBuilder.GRPC_DEFAULT_KEEPALIVE_WITHOUT_CALLS),
+            ).lower()
+            == "true"
+        )
+
+    def _effective_channel_options(self) -> List[Tuple[str, Any]]:
+        """The gRPC options of the channel: the defaults, and the keepalive options unless the
+        keepalive is disabled. The Rust channel applies the same keepalive, from the same
+        parameters, and the same message lengths."""
+        options = list(ChannelBuilder.GRPC_DEFAULT_OPTIONS)
+        if not self.keepalive_enabled:
+            return options
+        options += [
+            ("grpc.keepalive_time_ms", self.keepalive_time_ms),
+            ("grpc.keepalive_timeout_ms", self.keepalive_timeout_ms),
+            ("grpc.keepalive_permit_without_calls", 1 if self.keepalive_without_calls else 0),
+        ]
+        return options
+
+    @property
     def session_id(self) -> Optional[str]:
         """The session_id of the parameters, or None if it is not set."""
         session_id = self._params.get(ChannelBuilder.PARAM_SESSION_ID, None)
@@ -103,18 +180,42 @@ class ChannelBuilder:
                 )
         return session_id
 
+    @property
+    def userAgent(self) -> str:
+        """The user agent: the ``user_agent`` parameter, else the environment variable
+        ``SPARK_CONNECT_USER_AGENT``, else ``_SPARK_CONNECT_PYTHON``, with the versions of
+        Spark, the operating system and Python. Its URL-escaped form is at most 2048 characters."""
+        user_agent = self._params.get(
+            ChannelBuilder.PARAM_USER_AGENT,
+            os.getenv("SPARK_CONNECT_USER_AGENT", "_SPARK_CONNECT_PYTHON"),
+        )
+        ua_len = len(urllib.parse.quote(user_agent))
+        if ua_len > 2048:
+            raise SparkConnectException(
+                f"'user_agent' parameter should not exceed 2048 characters after URL "
+                f"escaping, found {ua_len} characters."
+            )
+        return " ".join(
+            [
+                user_agent,
+                f"spark/{__version__}",
+                f"os/{platform.uname().system.lower()}",
+                f"python/{platform.python_version()}",
+            ]
+        )
+
     def metadata(self) -> Iterable[Tuple[str, str]]:
         """The parameters that are not used by the channel, as gRPC metadata of each request."""
         reserved = [
             ChannelBuilder.PARAM_TOKEN,
             ChannelBuilder.PARAM_USE_SSL,
             ChannelBuilder.PARAM_USER_ID,
-            "user_agent",
+            ChannelBuilder.PARAM_USER_AGENT,
             ChannelBuilder.PARAM_SESSION_ID,
-            "grpc_keepalive_enabled",
-            "grpc_keepalive_time_ms",
-            "grpc_keepalive_timeout_ms",
-            "grpc_keepalive_without_calls",
+            ChannelBuilder.PARAM_GRPC_KEEPALIVE_ENABLED,
+            ChannelBuilder.PARAM_GRPC_KEEPALIVE_TIME_MS,
+            ChannelBuilder.PARAM_GRPC_KEEPALIVE_TIMEOUT_MS,
+            ChannelBuilder.PARAM_GRPC_KEEPALIVE_WITHOUT_CALLS,
         ]
         return [(k, self._params[k]) for k in self._params if k not in reserved]
 

@@ -2509,6 +2509,22 @@ impl PyStructType {
                 data_type.clone()
             };
             let dt = py_to_data_type(&type_object)?;
+            // As PySpark's `_parse_datatype_json_value`, a name of a type that has no JSON name in
+            // PySpark (a nanosecond timestamp) is not a data type.
+            if data_type.is_instance_of::<pyo3::types::PyString>()
+                && matches!(
+                    dt,
+                    DataType::TimestampNtzNanos { .. } | DataType::TimestampLtzNanos { .. }
+                )
+            {
+                let name: String = data_type.extract()?;
+                return Err(crate::column::raise_pyspark(
+                    py,
+                    "PySparkValueError",
+                    "CANNOT_PARSE_DATATYPE",
+                    &[("msg", &name)],
+                ));
+            }
             let md = match metadata {
                 Some(d) => py_metadata_to_map(py, d)?,
                 None => BTreeMap::new(),
@@ -3880,9 +3896,12 @@ pub(crate) fn schema_data_type(
 ) -> PyResult<DataType> {
     if schema.is_instance_of::<pyo3::types::PyString>() {
         let ddl: String = schema.extract()?;
-        return crate::errors::ResultExt::to_pyerr(
+        let parsed = crate::errors::ResultExt::to_pyerr(
             py.detach(|| session.parse_ddl(&ddl).map_err(Box::new)),
-        );
+        )?;
+        // As PySpark converts the parsed type from its proto, which fails for a nanosecond timestamp.
+        crate::dataframe::check_nanosecond_timestamps(py, Some(&parsed))?;
+        return Ok(parsed);
     }
     py_to_data_type(schema)
 }

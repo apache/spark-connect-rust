@@ -88,6 +88,12 @@ def test_missing_protoc_fails_in_ci_and_skips_locally(monkeypatch, tmp_path_fact
         protocol.__wrapped__(tmp_path_factory)
 
 
+# The plan compression lookup that a client makes on its first plan. The fake servers answer
+# it with no value, so plans are not compressed, and do not count it, so the tests count only
+# their own Config requests.
+_PLAN_COMPRESSION_THRESHOLD = b"spark.connect.session.planCompression.threshold"
+
+
 @contextmanager
 def _dataframe(batches, *, protocol, payloads=None, calls=None):
     """Serve Arrow results using the repository's protobuf message definitions."""
@@ -130,6 +136,10 @@ def _dataframe(batches, *, protocol, payloads=None, calls=None):
         ).SerializeToString()
 
     def config(request, context):
+        if _PLAN_COMPRESSION_THRESHOLD in request:
+            return protocol("ConfigResponse",
+                            session_id=protocol("ConfigRequest").FromString(request).session_id,
+                            server_side_session_id=server_id).SerializeToString()
         # The settings that toPandas reads first, and the defaults that row collection reads.
         if calls is not None:
             calls["config"] = calls.get("config", 0) + 1
@@ -599,6 +609,8 @@ def _arrow_input_service(
 
     def configure(raw, context):
         request = protocol("ConfigRequest").FromString(raw)
+        if _PLAN_COMPRESSION_THRESHOLD in raw:
+            return protocol("ConfigResponse", session_id=request.session_id).SerializeToString()
         operation = request.operation.WhichOneof("op_type")
         defaults = None
         if operation == "get_with_default":
@@ -658,9 +670,15 @@ def _arrow_input_service(
             dict(name=name, data_type=ddl_type(kind), nullable=True) for name, kind in fields]))
 
     def analyze(raw, context):
-        # As the server, which parses the DDL schemas that the client sends (`_parse_ddl`);
-        # the tests ask for no other analysis.
+        # As the server, which parses the DDL schemas that the client sends (`_parse_ddl`) and
+        # answers whether a plan is local: a local relation, cached or chunked, is local.
         request = protocol("AnalyzePlanRequest").FromString(raw)
+        if request.WhichOneof("analyze") == "is_local":
+            local = request.is_local.plan.root.WhichOneof("rel_type") in (
+                "local_relation", "cached_local_relation", "chunked_cached_local_relation")
+            return protocol("AnalyzePlanResponse", session_id=request.session_id,
+                            server_side_session_id=server_id,
+                            is_local=dict(is_local=local)).SerializeToString()
         if request.WhichOneof("analyze") != "ddl_parse":
             context.abort(grpc.StatusCode.UNIMPLEMENTED, "Method not found!")
         state["ddl_strings"].append(request.ddl_parse.ddl_string)

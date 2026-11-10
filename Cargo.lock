@@ -85,6 +85,8 @@ dependencies = [
  "bytes",
  "crc32fast",
  "futures",
+ "h2",
+ "hyper",
  "prost",
  "prost-types",
  "regex",
@@ -99,6 +101,7 @@ dependencies = [
  "tonic-prost",
  "tracing",
  "uuid",
+ "zstd",
 ]
 
 [[package]]

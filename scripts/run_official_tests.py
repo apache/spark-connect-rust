@@ -241,15 +241,29 @@ def run_ours(
     dropin=False,
 ):
     env = dict(os.environ)
+    # A fixed hash seed, as the default seed of a pyspark.ml estimator is
+    # hash(type(self).__name__) (HasSeed): with a random one, the random k-fold split of
+    # CrossValidator differs per run, and in about 7% of the runs the official
+    # test_crossvalidator_with_random_forest_classifier trains a fold on one label and fails,
+    # for the reference client as for ours.
+    env["PYTHONHASHSEED"] = "0"
     env["SPARK_CONNECT_TESTING_REMOTE"] = remote
     env["SPARK_TESTING"] = "1"
-    env["SPARK_SKIP_CONNECT_COMPAT_TESTS"] = "1"
     if dropin:
         # The drop-in itself: no transport. scripts/ is on the path only for the deselect
         # plugin; spark_py (the overlay) comes first, so our pyspark is the one imported.
+        # The variable is removed, not set: the drop-in's is_remote_only() is True without
+        # it (python/pyspark/util.py), and the official test_parity_udtf.py skips its Arrow
+        # UDTF suite whenever it is set. The workflow sets it for the Spark server process.
+        env.pop("SPARK_SKIP_CONNECT_COMPAT_TESTS", None)
         env["PYTHONPATH"] = os.pathsep.join([str(spark_py), str(REPO / "scripts")])
         plugin = "dropin_deselect_plugin"
     else:
+        # Transport mode runs the reference pyspark (its tree has pyspark/core/). The base
+        # classes of the official connect tests (pyspark/testing/connectutils.py, setUpClass)
+        # build a classic session unless is_remote_only() is True, which this variable forces;
+        # without it they error at setup.
+        env["SPARK_SKIP_CONNECT_COMPAT_TESTS"] = "1"
         env["PYTHONPATH"] = os.pathsep.join([str(REPO / "scripts"), str(spark_py)])
         env["RUST_PYSPARK_SO"] = os.environ["RUST_PYSPARK_SO"]
         plugin = "rust_transport_plugin"

@@ -15,6 +15,7 @@
 
 #![allow(clippy::result_large_err)] // SparkError is large; changing the type would break the API
 
+mod arrow_chunks;
 mod arrow_input;
 pub mod catalog;
 pub mod column;

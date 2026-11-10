@@ -61,11 +61,13 @@ impl std::fmt::Debug for ChannelBuilder {
             .params
             .iter()
             .map(|(key, value)| {
-                let secret = key.eq_ignore_ascii_case(PARAM_TOKEN)
-                    || key.eq_ignore_ascii_case("authorization");
                 (
                     key.as_str(),
-                    if secret { "<redacted>" } else { value.as_str() },
+                    if is_secret_param(key) {
+                        "<redacted>"
+                    } else {
+                        value.as_str()
+                    },
                 )
             })
             .collect();
@@ -124,12 +126,14 @@ impl ChannelBuilder {
             for p in params_str.split(';') {
                 let kv: Vec<&str> = p.split('=').collect();
                 if kv.len() != 2 {
+                    // The key only: the value of a parameter may be the token.
+                    let key = p.split_once('=').map_or(p, |(key, _)| key);
                     return Err(SparkError::value(
                         "INVALID_CONNECT_URL",
                         &[(
                             "detail",
                             &format!(
-                                "Parameter '{p}' should be provided as a key-value pair \
+                                "Parameter '{key}' should be provided as a key-value pair \
                                  separated by an equal sign (=). Please update the parameter \
                                  to follow the correct format, e.g., 'key=value'."
                             ),
@@ -140,7 +144,7 @@ impl ChannelBuilder {
             }
         }
 
-        let (host_raw, port) = parse_authority(authority, url)?;
+        let (host_raw, port) = parse_authority(authority, &redact_url(url))?;
         // urllib lowercases the hostname.
         let hostname = host_raw.to_ascii_lowercase();
         let host = if hostname.contains(':') {
@@ -339,15 +343,35 @@ fn split_params(path: &str) -> (&str, &str) {
     }
 }
 
-/// Parse `host`, `host:port`, `[ipv6]`, or `[ipv6]:port` into (host, port).
-fn parse_authority(authority: &str, full_url: &str) -> Result<(String, u16)> {
+/// Whether a parameter is a secret: its value is shown redacted, and never in an error.
+fn is_secret_param(key: &str) -> bool {
+    key.eq_ignore_ascii_case(PARAM_TOKEN) || key.eq_ignore_ascii_case("authorization")
+}
+
+/// The URL with the value of each secret parameter replaced by `<redacted>`, for the error
+/// messages that quote the URL.
+fn redact_url(url: &str) -> String {
+    url.split(';')
+        .map(|part| match part.split_once('=') {
+            Some((key, _)) if is_secret_param(key.rsplit('/').next().unwrap_or(key)) => {
+                format!("{key}=<redacted>")
+            }
+            _ => part.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
+/// Parse `host`, `host:port`, `[ipv6]`, or `[ipv6]:port` into (host, port). `shown_url` is the
+/// URL for the messages, with its secrets redacted.
+fn parse_authority(authority: &str, shown_url: &str) -> Result<(String, u16)> {
     let missing_host = || {
         SparkError::value(
             "INVALID_CONNECT_URL",
             &[(
                 "detail",
                 &format!(
-                    "Hostname is missing in the URL: '{full_url}'. Please update the URL \
+                    "Hostname is missing in the URL: '{shown_url}'. Please update the URL \
                      to follow the correct format, e.g., 'sc://hostname:port'."
                 ),
             )],
@@ -373,12 +397,13 @@ fn parse_authority(authority: &str, full_url: &str) -> Result<(String, u16)> {
 
     let port = match port_str {
         None | Some("") => DEFAULT_PORT,
+        // As urllib's message (`Port could not be cast to integer value as '...'`), with no URL.
         Some(p) => p.parse::<u16>().map_err(|_| {
             SparkError::value(
                 "INVALID_CONNECT_URL",
                 &[(
                     "detail",
-                    &format!("Port '{p}' in URL '{full_url}' is not a valid integer."),
+                    &format!("Port could not be cast to integer value as '{p}'"),
                 )],
             )
         })?,
@@ -539,6 +564,38 @@ mod tests {
         assert!(shown.contains("spark.example.com"), "{shown}");
         // The token itself is unchanged.
         assert_eq!(c.token().as_deref(), Some("SECRET123"));
+    }
+
+    #[test]
+    fn parse_errors_do_not_echo_the_token() {
+        // A bad port names the port only, as PySpark's message does; the URL is not quoted.
+        let e = ChannelBuilder::parse("sc://localhost:notaport/;token=SECRET").unwrap_err();
+        assert_eq!(e.error_class, "INVALID_CONNECT_URL");
+        let shown = e.to_string();
+        assert!(
+            shown.contains("Port could not be cast to integer value as 'notaport'"),
+            "{shown}"
+        );
+        assert!(
+            !shown.contains("SECRET") && !shown.contains("localhost"),
+            "{shown}"
+        );
+        // A malformed parameter names its key only: its value may be the token.
+        let e = ChannelBuilder::parse("sc://localhost/;token=SE=CRET").unwrap_err();
+        let shown = e.to_string();
+        assert!(shown.contains("Parameter 'token' should be"), "{shown}");
+        assert!(
+            !shown.contains("SE=CRET") && !shown.contains("CRET"),
+            "{shown}"
+        );
+        // A missing host quotes the URL with the token value redacted, as the Debug does.
+        let e = ChannelBuilder::parse("sc://:15002/;token=SECRET;user_id=bob").unwrap_err();
+        let shown = e.to_string();
+        assert!(
+            shown.contains("sc://:15002/;token=<redacted>;user_id=bob"),
+            "{shown}"
+        );
+        assert!(!shown.contains("SECRET"), "{shown}");
     }
 
     #[test]

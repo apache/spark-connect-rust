@@ -24,8 +24,12 @@ use crate::types::DataType;
 /// execution ends. Mirrors `SparkSession.registerProgressHandler`.
 pub type ProgressHandler = Arc<dyn Fn(&ProgressUpdate) + Send + Sync>;
 
+/// A progress handler that may fail, as [`SparkSession::register_fallible_progress_handler`]
+/// registers: its error fails the execution that calls it.
+pub(crate) type FallibleProgressHandler = Arc<dyn Fn(&ProgressUpdate) -> Result<()> + Send + Sync>;
+
 /// The shared registry of progress handlers and their ids, without retaining a session.
-pub(crate) type ProgressHandlers = Arc<Mutex<Vec<(u64, ProgressHandler)>>>;
+pub(crate) type ProgressHandlers = Arc<Mutex<Vec<(u64, FallibleProgressHandler)>>>;
 
 /// Metrics captured from the last executed query. Mirrors the data behind
 /// `pyspark.sql.DataFrame.executionInfo` / `client.core.ExecutionInfo`.
@@ -161,7 +165,7 @@ pub struct SparkSession {
 
 impl SparkSession {
     /// Create a new SparkSession with a client.
-    fn new(client: SparkConnectClient) -> Self {
+    pub(crate) fn new(client: SparkConnectClient) -> Self {
         SparkSession {
             client: Arc::new(client),
             plan_ids: Arc::new(PlanIds::new()),
@@ -249,6 +253,22 @@ impl SparkSession {
         &self,
         handler: impl Fn(&ProgressUpdate) + Send + Sync + 'static,
     ) -> u64 {
+        self.register_fallible_progress_handler(move |update| {
+            handler(update);
+            Ok(())
+        })
+    }
+
+    /// Register a progress handler that may fail, otherwise as
+    /// [`SparkSession::register_progress_handler`]. An error it returns fails the execution
+    /// that calls it: the execution ends, the error goes to the caller of that execution, and
+    /// the handlers after it are not called for that update, as PySpark's client does when a
+    /// handler raises. The handler is still called as done when the execution ends. Used by
+    /// the Python drop-in to raise a handler's exception from the call that ran it.
+    pub fn register_fallible_progress_handler(
+        &self,
+        handler: impl Fn(&ProgressUpdate) -> Result<()> + Send + Sync + 'static,
+    ) -> u64 {
         let id = self.progress_handler_id.fetch_add(1, Ordering::SeqCst);
         self.progress_handlers
             .lock()
@@ -281,7 +301,25 @@ impl SparkSession {
     /// assigns before it sends the request, as PySpark's `Progress` of the request has it.
     pub(crate) fn execute_plan(
         &self,
+        request: proto::ExecutePlanRequest,
+    ) -> Result<ExecutionStream> {
+        self.execute_plan_with_handlers(request, self.progress_handlers())
+    }
+
+    /// As [`execute_plan`](Self::execute_plan), but the progress of the execution, and its done
+    /// notification, does not reach the progress handlers: PySpark's listener bus has no
+    /// `Progress`, so its long-running stream reports none.
+    pub(crate) fn execute_plan_unreported(
+        &self,
+        request: proto::ExecutePlanRequest,
+    ) -> Result<ExecutionStream> {
+        self.execute_plan_with_handlers(request, ProgressHandlers::default())
+    }
+
+    fn execute_plan_with_handlers(
+        &self,
         mut request: proto::ExecutePlanRequest,
+        handlers: ProgressHandlers,
     ) -> Result<ExecutionStream> {
         let operation_id = request
             .operation_id
@@ -289,7 +327,7 @@ impl SparkSession {
             .clone();
         // Before the request: an execution that fails to start ends, as done, too.
         check_callback_depth()?;
-        let progress = ProgressTracker::new(self, Some(operation_id));
+        let progress = ProgressTracker::with_handlers(handlers, Some(operation_id));
         let stream = block_on(self.client().execute_plan_reattachable(request))?;
         Ok(ExecutionStream::new(stream, progress))
     }
@@ -504,7 +542,7 @@ impl SparkSession {
         // returns a relation of its result; for a query it returns the query's relation, which
         // then runs at an action.
         let command = proto::SqlCommand {
-            input: Some(crate::dataframe::build_input_relation(&plan, self)),
+            input: Some(crate::dataframe::build_input_relation(&plan, self)?),
             ..Default::default()
         };
         let responses = crate::dataframe::execute_command_collect(
@@ -2939,15 +2977,15 @@ mod tests {
 
     #[test]
     fn stop_is_idempotent_and_marks_stopped() {
-        // Port 1: nothing listens, so the ReleaseSession RPC fails fast. The session is
-        // still marked stopped (pyspark's stop() is best-effort) and a second stop() is a
-        // no-op that does not retry the release.
+        // Port 1: nothing listens, and a release there waits for the retry policy, as PySpark's
+        // does, so the session is closed without it: stop() then only marks it stopped, which
+        // is what a second stop() must find.
         let spark = SparkSession::builder()
             .remote("sc://localhost:1")
             .get_or_create()
             .expect("failed to build session");
         let other = spark.clone();
-        let _ = spark.stop();
+        spark.close();
         assert!(spark.is_stopped());
         assert!(other.is_stopped(), "stopped flag is shared across clones");
         assert!(spark.stop().is_ok());
@@ -2961,7 +2999,7 @@ mod tests {
             .remote("sc://localhost:1")
             .get_or_create()
             .expect("failed to build session");
-        let _ = spark.stop();
+        spark.close();
         let err = spark
             .conf()
             .get("spark.sql.shuffle.partitions")

@@ -70,13 +70,29 @@ impl RetryPolicy {
     /// Mirrors `pyspark.sql.connect.client.retries.DefaultPolicy.can_retry`:
     /// retry transient `UNAVAILABLE`, and `INTERNAL` errors whose message carries
     /// `INVALID_CURSOR.DISCONNECTED` (a mid-stream cursor drop resumed via reattach).
+    /// A connection reset is `UNKNOWN` in tonic but `UNAVAILABLE` in grpc-python, so it
+    /// is retried too.
     pub fn can_retry(&self, status: &tonic::Status) -> bool {
         match status.code() {
             tonic::Code::Unavailable => true,
             tonic::Code::Internal => status.message().contains("INVALID_CURSOR.DISCONNECTED"),
+            tonic::Code::Unknown => is_transport_error(status),
             _ => false,
         }
     }
+}
+
+/// Whether tonic built the status from a transport error, which it keeps as the status's
+/// source. A status the server sent has no source.
+fn is_transport_error(status: &tonic::Status) -> bool {
+    let mut source = std::error::Error::source(status);
+    while let Some(error) = source {
+        if error.is::<h2::Error>() || error.is::<hyper::Error>() {
+            return true;
+        }
+        source = error.source();
+    }
+    false
 }
 
 /// Stateful retry attempt tracker.
@@ -446,5 +462,80 @@ mod tests {
         assert_eq!(state.next_attempt(None), Some(50));
         // max_retries exhausted
         assert_eq!(state.next_attempt(None), None);
+    }
+
+    /// Serves one response over HTTP/2, as a server does, and returns the address to call.
+    /// With `reset`, the response is cut off by a connection reset in the middle of a gRPC
+    /// message. Otherwise it ends with a status that the server sent: UNKNOWN "boom".
+    async fn serve_one_response(reset: bool) -> std::net::SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            if reset {
+                // Closing the socket now sends a RST instead of a FIN.
+                socket.set_zero_linger().unwrap();
+            }
+            let mut connection = h2::server::handshake(socket).await.unwrap();
+            let (_request, mut respond) = connection.accept().await.unwrap().unwrap();
+            let headers = tonic::codegen::http::Response::builder()
+                .header("content-type", "application/grpc")
+                .body(())
+                .unwrap();
+            let mut stream = respond.send_response(headers, false).unwrap();
+            if reset {
+                // The first 2 bytes of a 1000-byte gRPC message.
+                let partial = bytes::Bytes::from_static(&[0, 0, 0, 3, 232, 1, 2]);
+                stream.send_data(partial, false).unwrap();
+            } else {
+                let mut trailers = tonic::codegen::http::HeaderMap::new();
+                trailers.insert("grpc-status", "2".parse().unwrap());
+                trailers.insert("grpc-message", "boom".parse().unwrap());
+                stream.send_trailers(trailers).unwrap();
+            }
+            // Keep the connection driven until the frames are written, then drop it.
+            let _ =
+                tokio::time::timeout(std::time::Duration::from_millis(200), connection.accept())
+                    .await;
+        });
+        address
+    }
+
+    /// The status that ends the first response of a call to `address`.
+    async fn status_of_first_response(address: std::net::SocketAddr) -> tonic::Status {
+        let channel = tonic::transport::Endpoint::from_shared(format!("http://{address}"))
+            .unwrap()
+            .connect()
+            .await
+            .unwrap();
+        let mut stub =
+            spark_connect_proto::spark_connect_service_client::SparkConnectServiceClient::new(
+                channel,
+            );
+        let mut responses = stub
+            .execute_plan(spark_connect_proto::ExecutePlanRequest::default())
+            .await
+            .unwrap()
+            .into_inner();
+        responses
+            .message()
+            .await
+            .expect_err("the response ends with an error")
+    }
+
+    #[tokio::test]
+    async fn test_can_retry_a_connection_reset_during_a_response() {
+        let status = status_of_first_response(serve_one_response(true).await).await;
+        // tonic reports the reset as UNKNOWN, with the transport error as its source.
+        assert_eq!(status.code(), tonic::Code::Unknown);
+        assert!(RetryPolicy::default().can_retry(&status), "{status:?}");
+    }
+
+    #[tokio::test]
+    async fn test_cannot_retry_an_unknown_the_server_sent() {
+        let status = status_of_first_response(serve_one_response(false).await).await;
+        assert_eq!(status.code(), tonic::Code::Unknown);
+        assert_eq!(status.message(), "boom");
+        assert!(!RetryPolicy::default().can_retry(&status));
     }
 }

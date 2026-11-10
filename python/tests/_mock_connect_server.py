@@ -27,6 +27,10 @@ from threading import Condition, Event
 
 # The drop-in package does not ship generated service protobuf classes, so these
 # encoders provide just the messages needed by this test server.
+# The key that a client reads on its first plan, to compress the plans of the session.
+PLAN_COMPRESSION_LOOKUP = b"spark.connect.session.planCompression.threshold"
+
+
 def varint(value):
     result = bytearray()
     while value > 127:
@@ -278,6 +282,9 @@ def serve(connection):
             self.block_result_complete = False
             self.result_complete_operations = []
             self.analyze_requests = []
+            # The isLocal answer of a test, or None for the answer of the plan, and a failure.
+            self.local = None
+            self.local_failure = False
             self.execute_requests = []
             self.release_execute_requests = []
             self.execute_payload = b""
@@ -292,6 +299,7 @@ def serve(connection):
             self.confs = {}
             self.read_confs = []
             self.config_requests = []
+            self.plan_compression_lookups = 0
             self.config_failure = None
             self.block_config = False
             self.rpc_events = []
@@ -351,6 +359,21 @@ def serve(connection):
             if 8 in parse_message(request):
                 streaming = getattr(self, "streaming", False)
                 return message_field(6, varint_field(1, 1) if streaming else b"")
+            # base.proto: AnalyzePlanRequest.is_local=7 -> IsLocal.plan=1 -> Plan.root=1;
+            # AnalyzePlanResponse.is_local=5 -> IsLocal.is_local=1. A local relation is
+            # Relation.local_relation=11, cached_local_relation=36 or
+            # chunked_cached_local_relation=45.
+            # `local`, which a test may set, overrides the answer derived from the plan.
+            if 7 in parse_message(request):
+                if getattr(self, "local_failure", False):
+                    context.abort(grpc.StatusCode.INVALID_ARGUMENT, "isLocal unavailable")
+                local = getattr(self, "local", None)
+                if local is None:
+                    is_local = parse_message(parse_message(request)[7][0])
+                    plan = parse_message(is_local[1][0])
+                    relation = parse_message(plan[1][0])
+                    local = any(field in relation for field in (11, 36, 45))
+                return message_field(5, varint_field(1, 1) if local else b"")
             if blocked and not response_gate.wait(5):
                 context.abort(
                     grpc.StatusCode.DEADLINE_EXCEEDED,
@@ -424,6 +447,7 @@ def serve(connection):
         }
         read_confs = []
         config_requests = []
+        plan_compression_lookups = 0
         config_failure = None
         block_config = False
         rpc_events = []
@@ -653,14 +677,21 @@ def serve(connection):
         def config(self, request, context):
             # ConfigRequest.session_id=1, operation=3, Operation.get=2, Get.keys=1;
             # ConfigResponse.session_id=1, pairs=2, KeyValue.key=1, value=2.
-            self.config_requests.append(request)
-            self.rpc_events.append("config")
-            if self.block_config and not self.response_gate.wait(5):
+            # The plan compression lookup of a client, which PySpark makes on its first plan, is
+            # not recorded, blocked or failed, so that the tests of the other requests count,
+            # block and fail only their own.
+            lookup = PLAN_COMPRESSION_LOOKUP in request
+            if lookup:
+                self.plan_compression_lookups += 1
+            if not lookup:
+                self.config_requests.append(request)
+                self.rpc_events.append("config")
+            if not lookup and self.block_config and not self.response_gate.wait(5):
                 context.abort(
                     grpc.StatusCode.DEADLINE_EXCEEDED,
                     "Python thread could not run while configuration lookup waited",
                 )
-            if self.config_failure:
+            if not lookup and self.config_failure:
                 context.abort(grpc.StatusCode.INVALID_ARGUMENT, self.config_failure)
             request = parse_message(request)
             operation = parse_message(request[3][0])
@@ -704,7 +735,8 @@ def serve(connection):
                     "only Get, GetWithDefault, Set and Unset are served",
                 )
             keys = [key.decode() for key in parse_message(operation[2][0]).get(1, [])]
-            self.read_confs.extend(keys)
+            if not lookup:
+                self.read_confs.extend(keys)
             confs = {**self.default_confs, **self.confs}
             if any(key not in confs for key in keys):
                 context.abort(grpc.StatusCode.INTERNAL, "[SQL_CONF_NOT_FOUND]")
