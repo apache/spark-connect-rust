@@ -868,9 +868,13 @@ impl SparkSession {
 
     /// Delete the ML cached objects `refs` on the server, as PySpark's `RemoteModelRef` does
     /// when the last reference to a model goes. It does not wait for the server: the request
-    /// runs on the shared runtime, and its errors (a stopped session, a closed channel) are
-    /// ignored. Safe to call from `Drop`.
+    /// runs on the shared runtime, and its errors (a closed channel) are ignored. As
+    /// `release_cached_remote_relation`, a stopped session is not released: stopping it
+    /// released its server state, ML cache included. Safe to call from `Drop`.
     pub(crate) fn release_ml_objects(&self, refs: Vec<proto::ObjectRef>) {
+        if self.is_stopped() {
+            return;
+        }
         let command = proto::Command {
             command_type: Some(proto::command::CommandType::MlCommand(proto::MlCommand {
                 command: Some(proto::ml_command::Command::Delete(
