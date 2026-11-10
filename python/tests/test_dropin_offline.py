@@ -17163,16 +17163,14 @@ def test_sigint_during_stop_with_a_registered_listener_raises_at_once(mock_conne
     assert spark.is_stopped
 
 
-def test_sigint_during_the_plan_compression_lookup_interrupts_the_first_execution(mock_connect):
-    # As PySpark's, where a signal that arrives while the call waits for the plan compression
-    # lookup of its first plan is raised when the lookup returns, so no execution starts. Here
-    # the execution that the call starts after the lookup is interrupted at once instead: the
-    # signal is kept until an execution is in flight, and the call ends promptly.
+def test_sigint_during_the_plan_compression_lookup_raises_keyboard_interrupt_at_once(mock_connect):
+    # As PySpark's: the Config lookup of the plan compression of the first plan is a blocked call
+    # with no execution in flight, which a signal ends at once, so no execution is started.
     import signal
     import threading
 
     spark, service = mock_connect
-    service.plan_compression_lookup_delay = 1.0
+    service.plan_compression_lookup_delay = 2.0
     service.block_execute = True
     timer = threading.Timer(0.3, os.kill, (os.getpid(), signal.SIGINT))
     started = time.monotonic()
@@ -17183,8 +17181,118 @@ def test_sigint_during_the_plan_compression_lookup_interrupts_the_first_executio
     finally:
         timer.cancel()
         service.release_response()
+    assert time.monotonic() - started < 1.5
+    assert service.execute_requests == []
+    assert service.interrupt_requests == []
+
+
+def test_sigint_while_an_unavailable_execute_is_retried_raises_keyboard_interrupt(mock_connect):
+    # As PySpark's: the retry sleep of an ExecutePlan that the server answers UNAVAILABLE raises
+    # KeyboardInterrupt at the first signal, instead of the whole retry budget.
+    import signal
+    import threading
+
+    spark, service = mock_connect
+    service.execute_failure = ("UNAVAILABLE", "server is unavailable")
+    timer = threading.Timer(0.5, os.kill, (os.getpid(), signal.SIGINT))
+    started = time.monotonic()
+    timer.start()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            spark.range(3).collect()
+    finally:
+        timer.cancel()
+        service.execute_failure = None
     assert time.monotonic() - started < 3
-    assert len(service.interrupt_requests) == 1
+
+
+def test_second_sigint_ends_the_wait_for_an_interrupt_that_is_retried(mock_connect):
+    # As PySpark's: the first signal interrupts the operation, and the interrupt call is retried
+    # while the server is unavailable, so the call waits for it; a second signal raises
+    # KeyboardInterrupt out of that wait.
+    import signal
+    import threading
+
+    spark, service = mock_connect
+    service.block_execute = True
+    service.interrupt_failure = ("UNAVAILABLE", "server is unavailable")
+    first = threading.Timer(0.5, os.kill, (os.getpid(), signal.SIGINT))
+    second = threading.Timer(1.5, os.kill, (os.getpid(), signal.SIGINT))
+    started = time.monotonic()
+    first.start()
+    second.start()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            spark.range(3).collect()
+    finally:
+        first.cancel()
+        second.cancel()
+        service.interrupt_failure = None
+        service.release_response()
+    assert 1.5 <= time.monotonic() - started < 4
+    assert len(service.interrupt_requests) >= 1
+
+
+def test_sigint_raises_the_done_call_error_of_a_progress_handler_with_the_signal_as_context(
+    mock_connect,
+):
+    # As PySpark's: the progress handler's done call, made in the `except KeyboardInterrupt` of
+    # the execution, raises its own exception, which replaces the KeyboardInterrupt, with the
+    # KeyboardInterrupt as its context.
+    import signal
+    import threading
+
+    spark, service = mock_connect
+    stage = (varint_field(1, 7) + varint_field(2, 4) + varint_field(3, 1)
+             + varint_field(4, 1024) + varint_field(5, 0))
+    service.execute_payload = message_field(18, message_field(1, stage) + varint_field(2, 3))
+    service.block_result_complete = True
+
+    def handler(**kwargs):
+        if kwargs["done"]:
+            raise ValueError("done call failed")
+
+    spark.registerProgressHandler(handler)
+    timer = threading.Timer(0.5, os.kill, (os.getpid(), signal.SIGINT))
+    timer.start()
+    try:
+        with pytest.raises(ValueError, match="done call failed") as error:
+            spark.range(1).collect()
+    finally:
+        timer.cancel()
+        service.release_response()
+    assert isinstance(error.value.__context__, KeyboardInterrupt)
+
+
+def test_sigint_ends_a_call_to_an_unreachable_server_at_once_as_pyspark():
+    # As PySpark's: the Config lookup of the first plan of a session that no server answers is
+    # retried, and a signal raises KeyboardInterrupt from its retry sleep. No server is needed.
+    import subprocess
+    import sys
+
+    code = """
+import os, signal, threading, time
+from pyspark.sql import SparkSession
+spark = SparkSession.builder.remote("sc://127.0.0.1:1").getOrCreate()
+threading.Timer(2.0, lambda: os.kill(os.getpid(), signal.SIGINT)).start()
+started = time.monotonic()
+try:
+    spark.range(1).collect()
+    print("collect returned")
+except KeyboardInterrupt:
+    print("interrupted after", round(time.monotonic() - started, 1))
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        env=dict(os.environ, TZ="UTC"),
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    lines = result.stdout.splitlines()
+    assert lines[-1].startswith("interrupted after "), result.stdout
+    assert 2.0 <= float(lines[-1].rsplit(" ", 1)[1]) < 4.5, result.stdout
 
 
 def test_connect_registry_sends_auto_cdc_define_flow(mock_connect):

@@ -241,9 +241,18 @@ impl LocalRowIterator {
             },
             RowSource::Prefetch { rx, task, wait } => {
                 // The caller waits for the batch of the task, which is a wait for the execution.
+                // The task has no wait of its own that a signal aborts, so the caller ends its
+                // wait for the batch at the first signal, as PySpark's retry sleeps do, and
+                // dropping the receiver stops the task.
                 let batch = {
                     let _waiting = wait.waiting();
-                    block_on(rx.recv())
+                    block_on(spark_connect_core::runtime::until_abort(
+                        spark_connect_core::runtime::ABORT_RETRIES,
+                        rx.recv(),
+                    ))
+                };
+                let Some(batch) = batch else {
+                    return Some(Err(spark_connect_core::client::wait_aborted().into()));
                 };
                 if batch.is_none() {
                     // The channel closed: the task ended, or it panicked, which then drops its

@@ -525,6 +525,21 @@ fn set_waiter(
     }
 }
 
+/// The class of the error of a wait that a signal of the process ended (see
+/// [`crate::runtime::until_abort`]).
+const WAIT_ABORTED: &str = "WAIT_ABORTED";
+
+/// The error of a wait, of an RPC or a retry, that a signal of the process ended: the signal's own
+/// exception is what the call raises.
+pub fn wait_aborted() -> SparkError {
+    SparkError::classed(SparkErrorKind::Connect, WAIT_ABORTED, &[])
+}
+
+/// Whether `error` is the error of a wait that a signal of the process ended.
+pub fn is_wait_aborted(error: &SparkError) -> bool {
+    error.error_class == WAIT_ABORTED
+}
+
 /// The user context extensions of a client, as PySpark's `SparkConnectClient` keeps them: those
 /// of all the threads, and those of each thread, which the requests of a thread carry, of their
 /// IDs.
@@ -1066,7 +1081,14 @@ impl SparkConnectClient {
                 }
                 _ => PlanCompression::Disabled,
             },
-            Err(_) => PlanCompression::Disabled,
+            Err(error) => {
+                // An aborted lookup is not the answer of the server: nothing is kept, so the
+                // lookup is made again by the next plan.
+                if is_wait_aborted(&error) {
+                    return PlanCompression::Disabled;
+                }
+                PlanCompression::Disabled
+            }
         };
         *self
             .plan_compression
@@ -1268,12 +1290,27 @@ impl SparkConnectClient {
     {
         let mut state = RetryPolicyState::new(self.retry_policy.clone());
         loop {
-            match op().await {
+            // An attempt that is not answered ends with the signal that a wait of the caller
+            // takes, as PySpark's blocked call does.
+            let attempt =
+                match crate::runtime::until_abort(crate::runtime::ABORT_RETRIES, op()).await {
+                    Some(attempt) => attempt,
+                    None => return Err(wait_aborted()),
+                };
+            match attempt {
                 Ok(v) => return Ok(v),
                 Err(status) => {
                     if self.retry_policy.can_retry(&status) {
                         if let Some(wait_ms) = state.next_attempt(None) {
-                            tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+                            // The backoff ends with a signal, as PySpark's `Retrying` sleep does.
+                            let backoff =
+                                tokio::time::sleep(std::time::Duration::from_millis(wait_ms));
+                            if crate::runtime::until_abort(crate::runtime::ABORT_RETRIES, backoff)
+                                .await
+                                .is_none()
+                            {
+                                return Err(wait_aborted());
+                            }
                             // As the reference's `_stub`, through which each attempt goes: once
                             // the client is closed (its session stopped while the call waited),
                             // the retry raises NO_ACTIVE_SESSION and sends nothing.
@@ -2046,7 +2083,14 @@ impl SparkConnectClient {
                 Err(status) => {
                     if self.retry_policy.can_retry(&status) {
                         if let Some(wait_ms) = state.next_attempt(None) {
-                            tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+                            let backoff =
+                                tokio::time::sleep(std::time::Duration::from_millis(wait_ms));
+                            if crate::runtime::until_abort(crate::runtime::ABORT_RETRIES, backoff)
+                                .await
+                                .is_none()
+                            {
+                                return Err(wait_aborted());
+                            }
                             // As in `with_retry`: a closed client sends no more attempts.
                             self.ensure_open()?;
                             continue;
@@ -2298,11 +2342,20 @@ impl ReattachableResponseStream {
                     .await?;
                 continue;
             };
-            let next = match self.stream_deadline {
-                Some(deadline) => tokio::time::timeout_at(deadline, stream.message())
-                    .await
-                    .unwrap_or_else(|_| Err(tonic::Status::deadline_exceeded("Deadline Exceeded"))),
-                None => stream.message().await,
+            let deadline = self.stream_deadline;
+            let read = async {
+                match deadline {
+                    Some(deadline) => tokio::time::timeout_at(deadline, stream.message())
+                        .await
+                        .unwrap_or_else(|_| {
+                            Err(tonic::Status::deadline_exceeded("Deadline Exceeded"))
+                        }),
+                    None => stream.message().await,
+                }
+            };
+            let next = match crate::runtime::until_abort(crate::runtime::ABORT_ALL, read).await {
+                Some(next) => next,
+                None => return Err(self.fail(wait_aborted())),
             };
             match next {
                 Ok(Some(resp)) => {
@@ -2385,10 +2438,17 @@ impl ReattachableResponseStream {
             if let Err(error) = self.client.ensure_open() {
                 return Err(self.fail(error));
             }
-            let opened = if self.execute_again {
-                self.open_execute_plan_again().await
-            } else {
-                self.open_reattach().await
+            let opened = match crate::runtime::until_abort(crate::runtime::ABORT_RETRIES, async {
+                if self.execute_again {
+                    self.open_execute_plan_again().await
+                } else {
+                    self.open_reattach().await
+                }
+            })
+            .await
+            {
+                Some(opened) => opened,
+                None => return Err(self.fail(wait_aborted())),
             };
             let status = match opened {
                 Ok(stream) => {
@@ -2419,7 +2479,13 @@ impl ReattachableResponseStream {
             }
             if self.retry_policy.can_retry(&status) {
                 if let Some(w) = retry_state.next_attempt(None) {
-                    tokio::time::sleep(Duration::from_millis(w)).await;
+                    let backoff = tokio::time::sleep(Duration::from_millis(w));
+                    if crate::runtime::until_abort(crate::runtime::ABORT_RETRIES, backoff)
+                        .await
+                        .is_none()
+                    {
+                        return Err(self.fail(wait_aborted()));
+                    }
                     continue;
                 }
             }

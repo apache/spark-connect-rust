@@ -128,7 +128,11 @@ impl ProgressTracker {
         match self.finish() {
             Ok(()) => error,
             Err(done) => {
-                hand_over(UnreturnedError::Replaced(error));
+                // The error of a wait that a signal ended is not one that a caller returns: the
+                // signal's exception replaces it, so nothing is handed over.
+                if !spark_connect_core::client::is_wait_aborted(&error) {
+                    hand_over(UnreturnedError::Replaced(error));
+                }
                 done
             }
         }

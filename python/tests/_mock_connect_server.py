@@ -307,6 +307,7 @@ def serve(connection):
             self.config_failure = None
             self.block_config = False
             self.plan_compression_lookup_delay = 0
+            self.interrupt_failure = None
             self.rpc_events = []
             self.set_confs = []
             self.clone_requests = []
@@ -457,6 +458,8 @@ def serve(connection):
         block_config = False
         # The seconds that the plan compression lookup of the first plan of a session takes.
         plan_compression_lookup_delay = 0
+        # The (code, message) of each Interrupt, which the server fails with, or None.
+        interrupt_failure = None
         rpc_events = []
         set_confs = []
 
@@ -688,6 +691,9 @@ def serve(connection):
             # .session_id=1, interrupted_ids=2.
             fields = parse_message(request)
             self.interrupt_requests.append(request)
+            if self.interrupt_failure:
+                code, message = self.interrupt_failure
+                context.abort(getattr(grpc.StatusCode, code), message)
             if fields.get(4, [0])[0] != 3:
                 context.abort(grpc.StatusCode.UNIMPLEMENTED, "only Interrupt of an operation")
             operation_id = fields[6][0]
