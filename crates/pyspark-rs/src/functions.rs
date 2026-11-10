@@ -561,6 +561,24 @@ fn numpy_scalar_literal(obj: &Bound<'_, PyAny>) -> PyResult<Option<LiteralExpres
 /// `decimal.Decimal`, `bytes`/`bytearray`). Returns `None` if `obj` is not one of them,
 /// so the caller falls through to the primitive int/float/str/bool checks. Kept in sync
 /// with `session::py_to_value` so `lit(..)` and `createDataFrame(..)` encode identically.
+/// The microseconds of the wall clock of a datetime, naive or aware, as PySpark's
+/// `TimestampNTZType.toInternal` takes them: `calendar.timegm` of its own time tuple, whatever
+/// its zone. A pandas Timestamp is taken as the datetime it stands for, as for a TIMESTAMP.
+fn wall_clock_micros(obj: &Bound<'_, PyAny>) -> PyResult<i64> {
+    let py = obj.py();
+    let normalized = if obj.hasattr("to_pydatetime").unwrap_or(false) {
+        obj.call_method0("to_pydatetime")?
+    } else {
+        obj.clone()
+    };
+    let seconds: i64 = py
+        .import("calendar")?
+        .call_method1("timegm", (normalized.call_method0("timetuple")?,))?
+        .extract()?;
+    let micros: i64 = normalized.getattr("microsecond")?.extract()?;
+    Ok(seconds * 1_000_000 + micros)
+}
+
 fn scalar_literal(obj: &Bound<'_, PyAny>) -> PyResult<Option<LiteralExpression>> {
     let py = obj.py();
 
@@ -584,6 +602,18 @@ fn scalar_literal(obj: &Bound<'_, PyAny>) -> PyResult<Option<LiteralExpression>>
     if let Ok(dt_mod) = py.import("datetime") {
         let datetime_cls = dt_mod.getattr("datetime")?;
         if obj.is_instance(&datetime_cls)? {
+            // As PySpark's `LiteralExpression._infer_type`: a TIMESTAMP_NTZ of the wall clock
+            // when the active session prefers it (`spark.sql.timestampType`), which PySpark reads
+            // for each datetime literal, else a TIMESTAMP of the instant.
+            if py
+                .import("pyspark.sql.utils")?
+                .call_method0("is_timestamp_ntz_preferred")?
+                .is_truthy()?
+            {
+                return Ok(Some(LiteralExpression::TimestampNtz(wall_clock_micros(
+                    obj,
+                )?)));
+            }
             // Shared with session::py_to_value so lit() and createDataFrame() agree (a pandas
             // Timestamp's .timestamp() treats a naive value as UTC; normalize it first).
             let micros = crate::session::datetime_to_micros(obj)?;

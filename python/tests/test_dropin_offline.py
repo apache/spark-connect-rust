@@ -15005,6 +15005,34 @@ def test_datetime_literals_are_exact_micros_as_pyspark(mock_connect, monkeypatch
         time.tzset()
 
 
+def test_datetime_literals_follow_the_preferred_timestamp_type_as_pyspark(mock_connect):
+    # As PySpark's LiteralExpression._infer_type, which reads spark.sql.timestampType for each
+    # datetime literal: under TIMESTAMP_NTZ a datetime is a TIMESTAMP_NTZ of its wall clock (that
+    # of an aware datetime too, as TimestampNTZType.toInternal takes it), else a TIMESTAMP of the
+    # instant.
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+
+    def literal(column):
+        spark.range(1).select(column).collect()
+        # Project.expressions=3; Expression.literal=1; Literal.timestamp=17, timestamp_ntz=18.
+        plan = parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0]
+        expression = parse_message(parse_message(parse_message(plan)[3][0])[3][0])
+        return parse_message(expression[1][0])
+
+    seoul = datetime.timezone(datetime.timedelta(hours=9))
+    naive = datetime.datetime(2020, 6, 1, 12, 0, 0, 5)
+    aware = naive.replace(tzinfo=seoul)
+    wall = 1591012800000005
+    service.confs = {"spark.sql.timestampType": "TIMESTAMP_NTZ"}
+    assert literal(F.lit(naive)) == {18: [wall]}
+    assert literal(F.lit(aware)) == {18: [wall]}
+    service.confs = {"spark.sql.timestampType": "TIMESTAMP_LTZ"}
+    assert 17 in literal(F.lit(naive))
+    assert literal(F.lit(aware)) == {17: [wall - 9 * 3600 * 1_000_000]}
+
+
 def test_lit_errors_as_pyspark():
     np = pytest.importorskip("numpy")
     from pyspark.errors import PySparkTypeError, PySparkValueError

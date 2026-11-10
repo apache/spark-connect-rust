@@ -3423,6 +3423,38 @@ for name, value in values:
     ]
 
 
+def test_datetime_literals_follow_the_preferred_timestamp_type_as_pyspark(session):
+    # As PySpark under spark.sql.timestampType=TIMESTAMP_NTZ: a datetime literal is a
+    # TIMESTAMP_NTZ of its wall clock, so it matches the TIMESTAMP_NTZ values of createDataFrame,
+    # also when the zone of the client is not that of the session; else it is a TIMESTAMP.
+    if not hasattr(time, "tzset"):
+        pytest.skip("time.tzset is not available")
+    value = datetime(2020, 6, 1, 12)
+    zone = os.environ.get("TZ")
+    os.environ["TZ"] = "Asia/Seoul"
+    time.tzset()
+    session.conf.set("spark.sql.timestampType", "TIMESTAMP_NTZ")
+    try:
+        df = session.createDataFrame([(value,)], ["t"])
+        assert df.schema.simpleString() == "struct<t:timestamp_ntz>"
+        assert df.filter(F.col("t") == value).count() == 1
+        assert df.filter(F.col("t").isin(value)).count() == 1
+        assert session.sql(
+            "SELECT CAST(:t AS STRING) AS t", args={"t": value}).first().t == "2020-06-01 12:00:00"
+        assert session.range(1).select(
+            F.when(F.lit(True), value).alias("w"), F.lit([value]).alias("a"),
+        ).schema.simpleString() == "struct<w:timestamp_ntz,a:array<timestamp_ntz>>"
+    finally:
+        session.conf.unset("spark.sql.timestampType")
+        if zone is None:
+            del os.environ["TZ"]
+        else:
+            os.environ["TZ"] = zone
+        time.tzset()
+    assert session.range(1).select(F.lit(value).alias("t")).schema.simpleString() == (
+        "struct<t:timestamp>")
+
+
 def test_window_frames_return_the_rows_of_pyspark(session):
     # As PySpark's: a range frame of a boundary out of the range of an int, which was
     # truncated, and the frames of the bounds of -sys.maxsize and sys.maxsize, unbounded.
