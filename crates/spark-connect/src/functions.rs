@@ -47,6 +47,14 @@ fn lit_long(v: i64) -> Expression {
     Expression::literal(LiteralExpression::long(v))
 }
 
+/// The seed of a random function called without one: a new one for each call, as PySpark's
+/// `random.randint(0, sys.maxsize)` and the Scala client's `random.nextLong` draw it, so that
+/// two calls give different values and a call differs from one run to the next. Within a
+/// plan, the expression keeps its seed, so every execution of the plan gives the same values.
+fn random_seed_literal() -> Expression {
+    lit_long(crate::dataframe::random_seed())
+}
+
 /// A boolean-literal argument expression.
 fn lit_bool(b: bool) -> Expression {
     Expression::literal(LiteralExpression::boolean(b))
@@ -401,14 +409,34 @@ pub fn pi() -> Column {
     func("pi", vec![])
 }
 
-/// Mirrors `pyspark.sql.functions.rand`.
+/// Mirrors `pyspark.sql.functions.rand` without a seed: a new random seed for each call.
 pub fn rand() -> Column {
-    func("rand", vec![lit_long(2371029763967735218)])
+    func("rand", vec![random_seed_literal()])
 }
 
-/// Mirrors `pyspark.sql.functions.randn`.
+/// Mirrors `pyspark.sql.functions.rand(seed)`.
+pub fn rand_with_seed(seed: i64) -> Column {
+    func("rand", vec![lit_long(seed)])
+}
+
+/// Mirrors `pyspark.sql.functions.random`, an alias of `rand`: a new random seed for each call.
+pub fn random() -> Column {
+    rand()
+}
+
+/// Mirrors `pyspark.sql.functions.random(seed)`, an alias of `rand(seed)`.
+pub fn random_with_seed(seed: i64) -> Column {
+    rand_with_seed(seed)
+}
+
+/// Mirrors `pyspark.sql.functions.randn` without a seed: a new random seed for each call.
 pub fn randn() -> Column {
-    func("randn", vec![lit_long(2561831801369089374)])
+    func("randn", vec![random_seed_literal()])
+}
+
+/// Mirrors `pyspark.sql.functions.randn(seed)`.
+pub fn randn_with_seed(seed: i64) -> Column {
+    func("randn", vec![lit_long(seed)])
 }
 
 /// Mirrors `pyspark.sql.functions.rank`.
@@ -1338,11 +1366,19 @@ pub fn raise_error(col1: Column) -> Column {
     func("raise_error", vec![col1.expression().clone()])
 }
 
-/// Mirrors `pyspark.sql.functions.randstr`.
+/// Mirrors `pyspark.sql.functions.randstr` without a seed: a new random seed for each call.
 pub fn randstr(col1: Column) -> Column {
     func(
         "randstr",
-        vec![col1.expression().clone(), lit_long(1000462829105445681)],
+        vec![col1.expression().clone(), random_seed_literal()],
+    )
+}
+
+/// Mirrors `pyspark.sql.functions.randstr(length, seed)`.
+pub fn randstr_with_seed(col1: Column, seed: Column) -> Column {
+    func(
+        "randstr",
+        vec![col1.expression().clone(), seed.expression().clone()],
     )
 }
 
@@ -1435,11 +1471,19 @@ pub fn sha1(col1: Column) -> Column {
     func("sha1", vec![col1.expression().clone()])
 }
 
-/// Mirrors `pyspark.sql.functions.shuffle`.
+/// Mirrors `pyspark.sql.functions.shuffle` without a seed: a new random seed for each call.
 pub fn shuffle(col1: Column) -> Column {
     func(
         "shuffle",
-        vec![col1.expression().clone(), lit_long(1810822539051918711)],
+        vec![col1.expression().clone(), random_seed_literal()],
+    )
+}
+
+/// Mirrors `pyspark.sql.functions.shuffle(col, seed)`.
+pub fn shuffle_with_seed(col1: Column, seed: Column) -> Column {
+    func(
+        "shuffle",
+        vec![col1.expression().clone(), seed.expression().clone()],
     )
 }
 
@@ -2861,14 +2905,26 @@ pub fn try_to_number(col1: Column, col2: Column) -> Column {
     )
 }
 
-/// Mirrors `pyspark.sql.functions.uniform`.
+/// Mirrors `pyspark.sql.functions.uniform` without a seed: a new random seed for each call.
 pub fn uniform(col1: Column, col2: Column) -> Column {
     func(
         "uniform",
         vec![
             col1.expression().clone(),
             col2.expression().clone(),
-            lit_long(1779860837174053365),
+            random_seed_literal(),
+        ],
+    )
+}
+
+/// Mirrors `pyspark.sql.functions.uniform(min, max, seed)`.
+pub fn uniform_with_seed(col1: Column, col2: Column, seed: Column) -> Column {
+    func(
+        "uniform",
+        vec![
+            col1.expression().clone(),
+            col2.expression().clone(),
+            seed.expression().clone(),
         ],
     )
 }
@@ -2992,7 +3048,8 @@ pub fn convert_timezone(col1: Column, col2: Column, col3: Column) -> Column {
     )
 }
 
-/// Mirrors `pyspark.sql.functions.count_min_sketch`.
+/// Mirrors `pyspark.sql.functions.count_min_sketch` without a seed: a new random seed for each
+/// call.
 pub fn count_min_sketch(col1: Column, col2: Column, col3: Column) -> Column {
     func(
         "count_min_sketch",
@@ -3000,7 +3057,25 @@ pub fn count_min_sketch(col1: Column, col2: Column, col3: Column) -> Column {
             col1.expression().clone(),
             col2.expression().clone(),
             col3.expression().clone(),
-            lit_long(9151685696388386553),
+            random_seed_literal(),
+        ],
+    )
+}
+
+/// Mirrors `pyspark.sql.functions.count_min_sketch(col, eps, confidence, seed)`.
+pub fn count_min_sketch_with_seed(
+    col1: Column,
+    col2: Column,
+    col3: Column,
+    seed: Column,
+) -> Column {
+    func(
+        "count_min_sketch",
+        vec![
+            col1.expression().clone(),
+            col2.expression().clone(),
+            col3.expression().clone(),
+            seed.expression().clone(),
         ],
     )
 }
@@ -4194,14 +4269,16 @@ pub fn unix_nanos(col: Column) -> Column {
     func("unix_nanos", vec![col.expression().clone()])
 }
 
-/// Mirrors `pyspark.sql.functions.uuid`.
-///
-/// The reference client seeds the expression with a (random) `long` argument so
-/// the result is stable per query plan; we emit a fixed seed literal, matching
-/// the `rand`/`randn` builders. The seed is treated as run-to-run noise by the
-/// golden test (see `RANDOM_SEED_FUNCS`).
+/// Mirrors `pyspark.sql.functions.uuid` without a seed: a new random seed for each call, so
+/// that two calls, and two runs, give different UUIDs. Within a plan, the expression keeps its
+/// seed, so every execution of the plan gives the same UUIDs, as in PySpark.
 pub fn uuid() -> Column {
-    func("uuid", vec![lit_long(1214072022411175128)])
+    func("uuid", vec![random_seed_literal()])
+}
+
+/// Mirrors `pyspark.sql.functions.uuid(seed)`.
+pub fn uuid_with_seed(seed: Column) -> Column {
+    func("uuid", vec![seed.expression().clone()])
 }
 
 /// Mirrors `pyspark.sql.functions.variant_array_append`.
@@ -4566,6 +4643,88 @@ mod tests {
         for col in funcs {
             let _ = col.to_proto();
         }
+    }
+
+    /// The last argument of the function of `column`, which is the seed of a random function.
+    fn seed_argument(column: Column) -> spark_connect_proto::Expression {
+        use spark_connect_proto::expression::ExprType;
+        match column.to_proto().expr_type {
+            Some(ExprType::UnresolvedFunction(function)) => {
+                function.arguments.last().cloned().expect("a seed argument")
+            }
+            other => panic!("expected a function, got {other:?}"),
+        }
+    }
+
+    /// The long literal of a seed argument.
+    fn long_seed(column: Column) -> i64 {
+        use spark_connect_proto::expression::literal::LiteralType;
+        use spark_connect_proto::expression::ExprType;
+        match seed_argument(column).expr_type {
+            Some(ExprType::Literal(literal)) => match literal.literal_type {
+                Some(LiteralType::Long(seed)) => seed,
+                other => panic!("expected a long seed, got {other:?}"),
+            },
+            other => panic!("expected a literal seed, got {other:?}"),
+        }
+    }
+
+    /// As PySpark's `random.randint(0, sys.maxsize)`: a random function without a seed draws a
+    /// new, non-negative one for each call, so that two calls and two runs differ.
+    #[test]
+    fn random_functions_draw_a_new_seed_for_each_call_as_pyspark() {
+        type Call = fn() -> Column;
+        let calls: Vec<(&str, Call)> = vec![
+            ("rand", rand),
+            ("random", random),
+            ("randn", randn),
+            ("uuid", uuid),
+            ("randstr", || randstr(crate::column::lit(5))),
+            ("shuffle", || shuffle(col("a"))),
+            ("uniform", || {
+                uniform(crate::column::lit(0), crate::column::lit(10))
+            }),
+            ("count_min_sketch", || {
+                count_min_sketch(
+                    col("a"),
+                    crate::column::lit_double(0.5),
+                    crate::column::lit_double(0.5),
+                )
+            }),
+        ];
+        for (name, call) in calls {
+            let seeds: Vec<i64> = (0..4).map(|_| long_seed(call())).collect();
+            assert!(seeds.iter().all(|seed| *seed >= 0), "{name}: {seeds:?}");
+            let mut distinct = seeds.clone();
+            distinct.sort_unstable();
+            distinct.dedup();
+            assert_eq!(distinct.len(), seeds.len(), "{name}: {seeds:?}");
+        }
+    }
+
+    /// As PySpark's `rand(seed)` and the others with a seed: the seed is sent as given.
+    #[test]
+    fn random_functions_with_a_seed_send_it_as_pyspark() {
+        assert_eq!(long_seed(rand_with_seed(42)), 42);
+        assert_eq!(long_seed(random_with_seed(-7)), -7);
+        assert_eq!(long_seed(randn_with_seed(3)), 3);
+        let seed = crate::column::lit(11);
+        for column in [
+            uuid_with_seed(seed.clone()),
+            randstr_with_seed(crate::column::lit(5), seed.clone()),
+            shuffle_with_seed(col("a"), seed.clone()),
+            uniform_with_seed(crate::column::lit(0), crate::column::lit(10), seed.clone()),
+            count_min_sketch_with_seed(
+                col("a"),
+                crate::column::lit_double(0.5),
+                crate::column::lit_double(0.5),
+                seed.clone(),
+            ),
+        ] {
+            assert_eq!(seed_argument(column), seed.to_proto());
+        }
+        // The aliases are the same function as PySpark's `random = rand`.
+        assert_eq!(rand_with_seed(1).to_proto(), random_with_seed(1).to_proto());
     }
 
     #[test]

@@ -114,6 +114,46 @@ fn aggregate_functions() {
     assert_eq!(row.get_by_name("c").and_then(|v| v.as_i64()), Some(3));
 }
 
+/// As PySpark, whose random functions draw a seed for each call: two `uuid()` and two `rand()`
+/// columns differ, as do the `uuid()` of two queries, while a DataFrame keeps its seeds across
+/// executions and a given seed gives the same values in every query.
+#[test]
+fn random_functions_draw_a_seed_for_each_call_as_pyspark() {
+    if !should_run() {
+        return;
+    }
+    let s = session();
+    let df = s.range(3).unwrap();
+    let values = |frame: &DataFrame| -> Vec<String> {
+        frame
+            .collect()
+            .unwrap()
+            .iter()
+            .map(|row| format!("{:?}", (row.get(0), row.get(1))))
+            .collect()
+    };
+    let uuids = df.select(vec![f::uuid(), f::uuid()]);
+    for row in uuids.collect().unwrap() {
+        assert_ne!(row.get(0), row.get(1));
+    }
+    assert_eq!(values(&uuids), values(&uuids));
+    let one = df.select(vec![f::uuid(), lit(0)]);
+    let other = df.select(vec![f::uuid(), lit(0)]);
+    assert_ne!(values(&one), values(&other));
+    for row in df.select(vec![f::rand(), f::rand()]).collect().unwrap() {
+        assert_ne!(row.get(0), row.get(1));
+    }
+    let seeded = |seed: i64| df.select(vec![f::rand_with_seed(seed), f::randn_with_seed(seed)]);
+    assert_eq!(values(&seeded(7)), values(&seeded(7)));
+    assert_ne!(values(&seeded(7)), values(&seeded(8)));
+    let shuffled = |seed: i64| {
+        s.sql("SELECT sequence(1, 50) AS a")
+            .unwrap()
+            .select(vec![f::shuffle_with_seed(col("a"), lit(seed)), lit(0)])
+    };
+    assert_eq!(values(&shuffled(3)), values(&shuffled(3)));
+}
+
 #[test]
 fn optional_arg_function_variants() {
     if !should_run() {

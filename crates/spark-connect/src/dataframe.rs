@@ -2634,7 +2634,7 @@ fn set_observations(
 
 /// A random seed of a sample without one, as PySpark's `random.randint(0, sys.maxsize)`: the
 /// client chooses it, so that every execution of the sample returns the same rows.
-fn random_seed() -> i64 {
+pub(crate) fn random_seed() -> i64 {
     (uuid::Uuid::new_v4().as_u128() >> 65) as i64
 }
 
