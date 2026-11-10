@@ -4064,6 +4064,52 @@ def test_samples_and_splits_take_a_seed_of_the_client_as_pyspark(session):
     assert df.withMetadata("id", metadata).schema["id"].metadata == metadata
 
 
+def test_sample_split_and_sample_by_without_a_seed_follow_python_random_as_pyspark(
+        session, tmp_path):
+    # As PySpark's: without a seed, sample, randomSplit and sampleBy draw one from Python's
+    # random, so random.seed(42) gives the same rows in every process. The rows are those of
+    # the reference client for the same seed. The rows of a sample depend on the partitions,
+    # so the ranges have 4 of their own rather than the server's default parallelism.
+    import json
+    import subprocess
+    import sys
+
+    script = tmp_path / "seeded_rows.py"
+    script.write_text(
+        "import json, os, random\n"
+        "from pyspark.sql import SparkSession\n"
+        "spark = SparkSession.builder.remote(os.environ['SPARK_REMOTE']).getOrCreate()\n"
+        "df = spark.range(0, 40, 1, 4)\n"
+        "def ids(frame):\n"
+        "    return sorted(row.id for row in frame.collect())\n"
+        "random.seed(42)\n"
+        "sample = ids(df.sample(0.5))\n"
+        "random.seed(42)\n"
+        "splits = [ids(part) for part in df.randomSplit([0.5, 0.5])]\n"
+        "stratified = spark.range(0, 40, 1, 4).selectExpr('id', 'id % 3 AS k')\n"
+        "random.seed(42)\n"
+        "by = ids(stratified.sampleBy('k', {0: 0.5, 1: 0.5, 2: 0.5}))\n"
+        "print(json.dumps([sample, *splits, by]))\n"
+        "spark.stop()\n")
+
+    def rows():
+        result = subprocess.run(
+            [sys.executable, str(script)], env=os.environ, capture_output=True, text=True,
+            timeout=300)
+        assert result.returncode == 0, result.stderr
+        return json.loads(result.stdout.splitlines()[-1])
+
+    expected = [
+        [1, 2, 3, 8, 9, 10, 12, 13, 14, 16, 17, 19, 20, 21, 23, 25, 26, 32, 36, 37],
+        [1, 2, 3, 8, 9, 10, 12, 13, 14, 16, 17, 19, 20, 21, 23, 25, 26, 32, 36, 37],
+        [0, 4, 5, 6, 7, 11, 15, 18, 22, 24, 27, 28, 29, 30, 31, 33, 34, 35, 38, 39],
+        [1, 2, 3, 8, 9, 10, 12, 13, 14, 16, 17, 19, 20, 21, 23, 25, 26, 32, 36, 37],
+    ]
+    # Verified against the reference client 4.3.0 on the same server, with the same seeding.
+    assert rows() == expected
+    assert rows() == expected
+
+
 
 
 def test_persist_cache_and_unpersist_return_the_dataframe_itself_as_pyspark(session):

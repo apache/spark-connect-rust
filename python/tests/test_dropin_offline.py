@@ -8847,6 +8847,40 @@ def test_sample_sort_group_by_and_drop_take_their_arguments_as_pyspark(mock_conn
         assert error.value.getMessageParameters() == parameters
 
 
+def test_sample_split_and_sample_by_draw_their_seed_from_python_random_as_pyspark(mock_connect):
+    # As PySpark Connect's: without a seed, sample, randomSplit and sampleBy draw one with
+    # random.randint(0, sys.maxsize), so random.seed makes their rows repeat across processes.
+    # An explicit seed is sent as given and draws nothing. A sum of weights that is not
+    # positive raises after the draw, a negative weight before it.
+    import random
+    import sys
+
+    from pyspark.errors import PySparkValueError
+
+    spark, service = mock_connect
+    df = spark.range(10)
+
+    def seed_of(dataframe, field):
+        # Relation.sample=12 or Relation.sample_by=107, whose seed is StatSampleBy.seed=5.
+        dataframe.collect()
+        plan = parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0]
+        return parse_message(parse_message(plan)[field][0])[5][0]
+
+    random.seed(42)
+    draws = [random.randint(0, sys.maxsize) for _ in range(5)]
+    random.seed(42)
+    assert seed_of(df.sample(0.5, 7), 12) == 7
+    assert seed_of(df.sample(0.5), 12) == draws[0]
+    assert [seed_of(split, 12) for split in df.randomSplit([1.0, 2.0])] == [draws[1]] * 2
+    with pytest.raises(PySparkValueError):
+        df.randomSplit([0.0, 0.0])
+    with pytest.raises(PySparkValueError):
+        df.randomSplit([-1.0, 2.0])
+    assert seed_of(df.sampleBy("id", {0: 1.0}), 107) == draws[3]
+    assert seed_of(df.sample(fraction=0.5), 12) == draws[4]
+    assert seed_of(df.stat.sampleBy("id", {0: 1.0}, 7), 107) == 7
+
+
 def test_with_metadata_and_pivot_refer_to_their_column_through_the_dataframe_as_pyspark(
         mock_connect):
     # As PySpark's withMetadata (self[columnName]) and pivot (self._df[pivot_col]): the column
