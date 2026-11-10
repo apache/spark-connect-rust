@@ -490,7 +490,12 @@ fn agg_na_stat_reshape_surface() {
         .collect();
 
     // na
-    let _ = df.na().drop(Some("any"), None, None).collect().unwrap();
+    let _ = df
+        .na()
+        .drop(Some("any"), None, None)
+        .unwrap()
+        .collect()
+        .unwrap();
     let _ = df.na().fill(0, None).collect().unwrap();
     let _ = df
         .na()
@@ -500,6 +505,7 @@ fn agg_na_stat_reshape_surface() {
     let _ = df.fillna(0, Some(vec!["val"])).collect().unwrap();
     let _ = df
         .dropna(Some("all"), Some(1), Some(vec!["name"]))
+        .unwrap()
         .collect()
         .unwrap();
     let _ = df
