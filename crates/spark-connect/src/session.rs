@@ -263,7 +263,12 @@ impl SparkSession {
     /// [`SparkSession::register_progress_handler`]. An error it returns fails the execution
     /// that calls it: the execution ends, the error goes to the caller of that execution, and
     /// the handlers after it are not called for that update, as PySpark's client does when a
-    /// handler raises. The handler is still called as done when the execution ends. Used by
+    /// handler raises. The handler is still called as done when the execution ends, and an
+    /// error of that done call is the error of the execution, also replacing the execution's own
+    /// error, as the exception of PySpark's `Progress.__exit__` is. For an execution dropped
+    /// before its end, as an iterator that its caller stopped reading, the error of the done call
+    /// has no caller left: it goes to the handler of
+    /// [`set_unreturned_error_handler`](crate::progress::set_unreturned_error_handler). Used by
     /// the Python drop-in to raise a handler's exception from the call that ran it.
     pub fn register_fallible_progress_handler(
         &self,
@@ -327,8 +332,13 @@ impl SparkSession {
             .clone();
         // Before the request: an execution that fails to start ends, as done, too.
         check_callback_depth()?;
-        let progress = ProgressTracker::with_handlers(handlers, Some(operation_id));
-        let stream = block_on(self.client().execute_plan_reattachable(request))?;
+        let mut progress = ProgressTracker::with_handlers(handlers, Some(operation_id));
+        // An execution that fails to start ends too: the error of the done call is its error, as
+        // the `Progress` of PySpark wraps its request.
+        let stream = match block_on(self.client().execute_plan_reattachable(request)) {
+            Ok(stream) => stream,
+            Err(error) => return Err(progress.finish_after(error)),
+        };
         Ok(ExecutionStream::new(stream, progress))
     }
 
@@ -827,7 +837,7 @@ impl SparkSession {
         fun.deterministic = false;
         fun.function =
             Some(proto::common_inline_user_defined_function::Function::JavaUdf(java_udf));
-        crate::dataframe::execute_command_collect(
+        crate::dataframe::execute_command_unreported(
             self,
             proto::command::CommandType::RegisterFunction(fun),
         )?;
@@ -1154,7 +1164,7 @@ impl SparkSession {
         &self,
         udf: crate::udf::CommonInlineUserDefinedFunctionExpression,
     ) -> Result<()> {
-        crate::dataframe::execute_command(
+        crate::dataframe::execute_command_unreported(
             self,
             proto::command::CommandType::RegisterFunction(udf.to_proto()),
         )
@@ -1184,7 +1194,7 @@ impl SparkSession {
             command,
             python_ver,
         );
-        crate::dataframe::execute_command(
+        crate::dataframe::execute_command_unreported(
             self,
             proto::command::CommandType::RegisterTableFunction(function),
         )
@@ -1234,7 +1244,7 @@ impl SparkSession {
         &self,
         data_source: crate::datasource::CommonInlineUserDefinedDataSourceExpression,
     ) -> Result<()> {
-        crate::dataframe::execute_command(
+        crate::dataframe::execute_command_unreported(
             self,
             proto::command::CommandType::RegisterDataSource(data_source.to_proto()),
         )

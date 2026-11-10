@@ -1312,7 +1312,7 @@ impl StreamingQueryManager {
         drop(stale);
         Self::join_listener_thread(previous);
         if release_server {
-            if let Err(error) = self.remove_server_listener() {
+            if let Err(error) = self.remove_server_listener(false) {
                 // Without the removal, the server would answer the add below with no response,
                 // and the add would wait for ever. Keep the flag, so that a retry removes first.
                 let mut state = self.bus.state.lock().unwrap();
@@ -1442,7 +1442,7 @@ impl StreamingQueryManager {
         let worker = state.thread.take();
         drop(state);
         let removal = if had_listeners {
-            self.remove_server_listener()
+            self.remove_server_listener(true)
         } else {
             Ok(())
         };
@@ -1539,16 +1539,20 @@ impl StreamingQueryManager {
         }
     }
 
-    /// Send RemoveListenerBusListener so the server ends the event stream.
-    fn remove_server_listener(&self) -> Result<()> {
+    /// Send RemoveListenerBusListener so the server ends the event stream. Its progress reaches
+    /// the progress handlers when `reported`, as PySpark's removal of the last listener's does;
+    /// the removal before a new add, which PySpark does not send, reports none.
+    fn remove_server_listener(&self, reported: bool) -> Result<()> {
         let mut command = proto::StreamingQueryListenerBusCommand::default();
         command.command = Some(
             proto::streaming_query_listener_bus_command::Command::RemoveListenerBusListener(true),
         );
-        crate::dataframe::execute_command_collect(
-            &self.session,
-            proto::command::CommandType::StreamingQueryListenerBusCommand(command),
-        )?;
+        let command = proto::command::CommandType::StreamingQueryListenerBusCommand(command);
+        if reported {
+            crate::dataframe::execute_command_collect(&self.session, command)?;
+        } else {
+            crate::dataframe::execute_command_unreported(&self.session, command)?;
+        }
         Ok(())
     }
 

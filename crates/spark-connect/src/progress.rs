@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use spark_connect_core::client::ReattachableResponseStream;
-use spark_connect_core::error::Result;
+use spark_connect_core::error::{Result, SparkError};
 use spark_connect_core::runtime::CallbackGuard;
 use spark_connect_proto as proto;
 
@@ -45,12 +45,51 @@ pub struct ProgressUpdate {
     pub done: bool,
 }
 
+/// The error of a progress handler that no caller is left to return to.
+#[derive(Debug)]
+pub enum UnreturnedError {
+    /// The error of the done call of an execution dropped before its end, as an iterator that
+    /// its caller stopped reading: PySpark's generator reports the exception of its
+    /// `Progress.__exit__` as unraisable then.
+    DroppedDone(SparkError),
+    /// The error of an execution that the error of its done call replaced: as the exception of
+    /// PySpark's `Progress.__exit__` replaces that of the body of its `with`, which it keeps as
+    /// the `__context__` of the one it raises.
+    Replaced(SparkError),
+}
+
+type UnreturnedErrorHandler = Arc<dyn Fn(UnreturnedError) + Send + Sync>;
+
+static UNRETURNED_ERROR_HANDLER: std::sync::Mutex<Option<UnreturnedErrorHandler>> =
+    std::sync::Mutex::new(None);
+
+/// Set what becomes of the errors of progress handlers that no caller is left to return to (see
+/// [`UnreturnedError`]), for every session; by default they are dropped. The Python client
+/// reports a dropped execution's to `sys.unraisablehook`, as PySpark does.
+pub fn set_unreturned_error_handler(handler: impl Fn(UnreturnedError) + Send + Sync + 'static) {
+    *UNRETURNED_ERROR_HANDLER
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(handler));
+}
+
+fn hand_over(error: UnreturnedError) {
+    let handler = UNRETURNED_ERROR_HANDLER
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    if let Some(handler) = handler {
+        handler(error);
+    }
+}
+
 /// The progress of one execution, as PySpark's `Progress` of the execution of a request.
 pub(crate) struct ProgressTracker {
     handlers: ProgressHandlers,
     operation_id: Option<String>,
     stages: Vec<StageInfo>,
     inflight_tasks: i64,
+    /// Whether the done call was made.
+    finished: bool,
 }
 
 impl ProgressTracker {
@@ -69,6 +108,29 @@ impl ProgressTracker {
             operation_id,
             stages: Vec::new(),
             inflight_tasks: 0,
+            finished: false,
+        }
+    }
+
+    /// The done call of the handlers, as PySpark's `Progress.__exit__` makes it when its
+    /// execution ends, also of an error: made once. Its error is the error of the execution, as
+    /// the exception of `__exit__` is raised from the execution.
+    pub(crate) fn finish(&mut self) -> Result<()> {
+        if std::mem::replace(&mut self.finished, true) {
+            return Ok(());
+        }
+        self.notify(true)
+    }
+
+    /// The error of an execution that ends with `error`, after the done call: the error of the
+    /// done call replaces it, as the exception of PySpark's `Progress.__exit__` does.
+    pub(crate) fn finish_after(&mut self, error: SparkError) -> SparkError {
+        match self.finish() {
+            Ok(()) => error,
+            Err(done) => {
+                hand_over(UnreturnedError::Replaced(error));
+                done
+            }
         }
     }
 
@@ -122,13 +184,16 @@ impl ProgressTracker {
 }
 
 impl Drop for ProgressTracker {
-    /// As PySpark's `Progress.finish` when its execution ends, also of an error. While a panic
-    /// unwinds, a handler is not called: one that panics again would abort the process. An
-    /// error of the done call has no caller left to return to, so it is dropped here; the
-    /// handlers of the drop-in report theirs themselves.
+    /// The done call of an execution dropped before its end, as PySpark's `Progress.finish` of a
+    /// generator that its caller closed: an error of it has no caller left to return to, so it
+    /// is handed over as [`UnreturnedError::DroppedDone`]. While a panic unwinds, a handler is
+    /// not called: one that panics again would abort the process.
     fn drop(&mut self) {
-        if !std::thread::panicking() {
-            let _ = self.notify(true);
+        if !self.finished && !std::thread::panicking() {
+            self.finished = true;
+            if let Err(error) = self.notify(true) {
+                hand_over(UnreturnedError::DroppedDone(error));
+            }
         }
     }
 }
@@ -153,16 +218,30 @@ impl ExecutionStream {
     /// The next response of the execution, as `ReattachableResponseStream::message`, with the
     /// chunks of an Arrow batch joined into the batch: the response of a chunk that is not the
     /// last one has no batch.
+    /// When the execution ends, of its result or of an error, the handlers get their done call,
+    /// whose error is the error of the execution, as PySpark's `Progress.__exit__` raises it.
     pub(crate) async fn message(&mut self) -> Result<Option<proto::ExecutePlanResponse>> {
-        let response = self.stream.message().await?;
+        let response = match self.stream.message().await {
+            Ok(response) => response,
+            Err(error) => return Err(self.progress.finish_after(error)),
+        };
         if let Some(response) = &response {
             if let Some(proto::execute_plan_response::ResponseType::ExecutionProgress(progress)) =
                 &response.response_type
             {
-                self.progress.update(progress, &response.operation_id)?;
+                if let Err(error) = self.progress.update(progress, &response.operation_id) {
+                    return Err(self.progress.finish_after(error));
+                }
             }
         }
-        self.chunks.join(response)
+        match self.chunks.join(response) {
+            Ok(None) => {
+                self.progress.finish()?;
+                Ok(None)
+            }
+            Ok(Some(response)) => Ok(Some(response)),
+            Err(error) => Err(self.progress.finish_after(error)),
+        }
     }
 }
 
@@ -296,6 +375,57 @@ mod tests {
         session.remove_progress_handler(after);
     }
 
+    /// As PySpark's `Progress.__exit__`: the done call is made once and its error is the error
+    /// of the execution, replacing an error of the execution, which is handed over; a tracker
+    /// dropped before its end hands the error of its done call over.
+    #[test]
+    fn the_error_of_the_done_call_is_the_error_of_the_execution() {
+        let session = SparkSession::builder()
+            .remote("sc://localhost:15002")
+            .get_or_create()
+            .expect("session");
+        let done_calls = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::clone(&done_calls);
+        let id = session.register_fallible_progress_handler(move |update| {
+            if update.done {
+                seen.fetch_add(1, Ordering::SeqCst);
+                return Err(SparkError::connect_msg("s16 done failed"));
+            }
+            Ok(())
+        });
+        let handed = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&handed);
+        set_unreturned_error_handler(move |error| {
+            let (kind, error) = match error {
+                UnreturnedError::DroppedDone(error) => ("dropped", error),
+                UnreturnedError::Replaced(error) => ("replaced", error),
+            };
+            if error.message().starts_with("s16") {
+                sink.lock()
+                    .unwrap()
+                    .push(format!("{kind}: {}", error.message()));
+            }
+        });
+
+        let mut tracker = ProgressTracker::new(&session, None);
+        assert_eq!(tracker.finish().unwrap_err().message(), "s16 done failed");
+        assert!(tracker.finish().is_ok());
+        drop(tracker);
+        assert_eq!(done_calls.load(Ordering::SeqCst), 1);
+
+        let mut tracker = ProgressTracker::new(&session, None);
+        let error = tracker.finish_after(SparkError::connect_msg("s16 execution failed"));
+        assert_eq!(error.message(), "s16 done failed");
+        drop(tracker);
+        drop(ProgressTracker::new(&session, None));
+        assert_eq!(done_calls.load(Ordering::SeqCst), 3);
+        assert_eq!(
+            *handed.lock().unwrap(),
+            vec!["replaced: s16 execution failed", "dropped: s16 done failed"]
+        );
+        session.remove_progress_handler(id);
+    }
+
     #[test]
     fn detached_progress_registry_preserves_the_execution_recursion_bound() {
         use spark_connect_core::error::SparkErrorKind;
@@ -329,6 +459,7 @@ mod tests {
                         operation_id: Some("nested".to_string()),
                         stages: Vec::new(),
                         inflight_tasks: 0,
+                        finished: false,
                     };
                     nested.notify(false).unwrap();
                 }

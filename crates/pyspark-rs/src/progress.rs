@@ -45,8 +45,30 @@ pub(crate) fn session_progress(py: Python<'_>, session: &SparkSession) -> Arc<Se
     });
     let shared = Arc::clone(&progress);
     session.register_fallible_progress_handler(move |update| shared.notify(update));
+    install_unreturned_error_handler();
     registry.insert(id, Arc::clone(&progress));
     progress
+}
+
+/// Have the core hand over the exceptions of the handlers that no caller is left to raise: that
+/// of the done call of an execution dropped before its end goes to `sys.unraisablehook`, as
+/// PySpark's generator reports it, and that of an execution that the exception of its done call
+/// replaced, which PySpark keeps as the `__context__` of the one it raises, is released.
+fn install_unreturned_error_handler() {
+    static INSTALL: std::sync::Once = std::sync::Once::new();
+    INSTALL.call_once(|| {
+        spark_connect::progress::set_unreturned_error_handler(|error| {
+            use spark_connect::progress::UnreturnedError;
+            Python::attach(|py| match error {
+                UnreturnedError::DroppedDone(error) => {
+                    crate::errors::spark_error_to_py_exception(error).write_unraisable(py, None)
+                }
+                UnreturnedError::Replaced(error) => {
+                    drop(crate::errors::spark_error_to_py_exception(error))
+                }
+            })
+        });
+    });
 }
 
 /// Forget the progress of a stopped session.
@@ -90,21 +112,16 @@ impl SessionProgress {
     }
 
     /// Call the handlers with `update`. The exception of a handler fails the execution that
-    /// called it, and is raised in its caller, as PySpark's result loop raises it. The done call
-    /// is the last of the execution, which has no caller left: its exception goes to
-    /// `sys.unraisablehook`.
+    /// called it, and is raised in its caller, as PySpark's result loop raises it; that of the
+    /// done call too, as PySpark's `Progress.__exit__` raises it from the execution.
     fn notify(&self, update: &ProgressUpdate) -> Result<(), SparkError> {
         let bar = progress_bar_enabled();
         if self.count.load(Ordering::SeqCst) == 0 && !bar {
             return Ok(());
         }
-        Python::attach(|py| match self.notify_python(py, update, bar) {
-            Ok(()) => Ok(()),
-            Err(error) if update.done => {
-                error.write_unraisable(py, None);
-                Ok(())
-            }
-            Err(error) => Err(crate::errors::callback_error(error)),
+        Python::attach(|py| {
+            self.notify_python(py, update, bar)
+                .map_err(crate::errors::callback_error)
         })
     }
 
