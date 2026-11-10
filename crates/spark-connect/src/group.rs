@@ -693,29 +693,54 @@ impl StatFunctions {
     }
 
     /// Sample by values in a column, mirroring `DataFrameStatFunctions.sampleBy(col, fractions,
-    /// seed)`: each stratum of `fractions` is a literal, of any type, with its fraction. A
-    /// stratum that is not a literal, which the server cannot read, is a
+    /// seed)`: each stratum of `fractions` is a literal of a bool, an integer, a float or a
+    /// string, as PySpark's keys are a float, an int or a str, with its fraction. A stratum of
+    /// another type, which the server matches against no row, or that is not a literal, is a
     /// `DISALLOWED_TYPE_FOR_CONTAINER` error, as PySpark raises for a key of another type.
+    /// Without a seed, the client chooses one, as PySpark does, so that every execution of the
+    /// sample returns the same rows.
     pub fn sample_by(
         &self,
         col: impl Into<Column>,
         fractions: Vec<(Expression, f64)>,
         seed: Option<i64>,
     ) -> Result<DataFrame> {
-        if fractions.iter().any(|(stratum, _)| {
-            !matches!(
-                stratum.node(),
-                crate::expression::ExpressionNode::Literal(_)
-            )
-        }) {
+        use crate::expression::{ExpressionNode, LiteralExpression};
+        for (stratum, _) in &fractions {
+            // The Python name of the type of the value that a literal stands for.
+            let item_type = match stratum.node() {
+                ExpressionNode::Literal(literal) => match literal {
+                    LiteralExpression::Boolean(_)
+                    | LiteralExpression::Byte(_)
+                    | LiteralExpression::Short(_)
+                    | LiteralExpression::Integer(_)
+                    | LiteralExpression::Long(_)
+                    | LiteralExpression::Float(_)
+                    | LiteralExpression::Double(_)
+                    | LiteralExpression::String(_) => continue,
+                    LiteralExpression::Null(_) => "NoneType",
+                    LiteralExpression::Decimal { .. } => "Decimal",
+                    LiteralExpression::Binary(_) => "bytes",
+                    LiteralExpression::Date(_) => "date",
+                    LiteralExpression::Timestamp(_) | LiteralExpression::TimestampNtz(_) => {
+                        "datetime"
+                    }
+                    LiteralExpression::DayTimeInterval(_) => "timedelta",
+                    // Python has no type of a year-month interval: its Spark type names it.
+                    LiteralExpression::YearMonthInterval(_) => "YearMonthInterval",
+                    LiteralExpression::Time { .. } => "time",
+                    LiteralExpression::Array { .. } => "list",
+                },
+                _ => "Column",
+            };
             return Err(SparkError::classed(
                 SparkErrorKind::TypeError,
                 "DISALLOWED_TYPE_FOR_CONTAINER",
                 &[
                     ("arg_name", "fractions"),
                     ("arg_type", "dict"),
-                    ("allowed_types", "literal"),
-                    ("item_type", "Column"),
+                    ("allowed_types", "float, int, str"),
+                    ("item_type", item_type),
                 ],
             ));
         }
@@ -723,7 +748,7 @@ impl StatFunctions {
             input: Arc::clone(&self.dataframe.plan),
             col: col.into().expression().clone(),
             fractions,
-            seed,
+            seed: Some(seed.unwrap_or_else(crate::dataframe::random_seed)),
         };
         Ok(DataFrame::new(self.dataframe.session.clone(), plan))
     }
@@ -1373,6 +1398,98 @@ mod tests {
         }
     }
 
+    /// As PySpark's `sampleBy`, whose seed the client chooses when none is given, so that every
+    /// execution of the sample returns the same rows: the server draws one in each planning of a
+    /// relation without one.
+    #[test]
+    fn sample_by_takes_a_seed_of_the_client_without_one_as_pyspark() {
+        use crate::expression::LiteralExpression as L;
+        let df = session().range(10).unwrap();
+        let sampled = |seed| {
+            df.stat()
+                .sample_by("id", vec![(Expression::literal(L::Long(1)), 0.5)], seed)
+                .unwrap()
+        };
+        let sent_seed = |frame: DataFrame| match frame.to_relation().unwrap().rel_type {
+            Some(spark_connect_proto::relation::RelType::SampleBy(stat)) => stat.seed,
+            other => panic!("expected a StatSampleBy, got {other:?}"),
+        };
+        assert_eq!(sent_seed(sampled(Some(7))), Some(7));
+        let chosen = sent_seed(sampled(None));
+        assert!(chosen.is_some_and(|seed| seed >= 0), "{chosen:?}");
+        // The seed of a DataFrame is kept, as it is in its plan.
+        let frame = sampled(None);
+        assert_eq!(sent_seed(frame.clone()), sent_seed(frame));
+    }
+
+    /// As PySpark's `sampleBy`, whose keys are a float, an int (or a bool) or a str: a stratum of
+    /// another type, which the server matches against no row, is `DISALLOWED_TYPE_FOR_CONTAINER`,
+    /// of the Python name of its type.
+    #[test]
+    fn sample_by_takes_the_strata_types_of_pyspark() {
+        use crate::expression::LiteralExpression as L;
+        let df = session().range(10).unwrap();
+        for accepted in [
+            L::Boolean(true),
+            L::Byte(1),
+            L::Short(1),
+            L::Integer(1),
+            L::Long(1),
+            L::Float(0.5),
+            L::Double(0.5),
+            L::String("a".into()),
+        ] {
+            df.stat()
+                .sample_by(
+                    "id",
+                    vec![(Expression::literal(accepted.clone()), 0.5)],
+                    None,
+                )
+                .unwrap_or_else(|error| panic!("{accepted:?}: {error}"));
+        }
+        for (rejected, item_type) in [
+            (L::Null(DataType::Long), "NoneType"),
+            (
+                L::Decimal {
+                    value: "1.5".into(),
+                    precision: 2,
+                    scale: 1,
+                },
+                "Decimal",
+            ),
+            (L::Binary(vec![1]), "bytes"),
+            (L::Date(0), "date"),
+            (L::Timestamp(0), "datetime"),
+            (L::TimestampNtz(0), "datetime"),
+            (L::DayTimeInterval(0), "timedelta"),
+            (L::YearMonthInterval(0), "YearMonthInterval"),
+        ] {
+            let error = df
+                .stat()
+                .sample_by(
+                    "id",
+                    vec![(Expression::literal(rejected.clone()), 0.5)],
+                    None,
+                )
+                .err()
+                .unwrap_or_else(|| panic!("{rejected:?} must be rejected"));
+            assert_eq!(error.kind, SparkErrorKind::TypeError, "{rejected:?}");
+            assert_eq!(
+                error.get_condition().as_deref(),
+                Some("DISALLOWED_TYPE_FOR_CONTAINER")
+            );
+            assert_eq!(
+                error.params.get("item_type").map(String::as_str),
+                Some(item_type),
+                "{rejected:?}"
+            );
+            assert_eq!(
+                error.params.get("allowed_types").map(String::as_str),
+                Some("float, int, str")
+            );
+        }
+    }
+
     /// As PySpark's `sampleBy` rejects a key that is not a float, an int or a str: a stratum
     /// that is not a literal, which the server cannot read, is `DISALLOWED_TYPE_FOR_CONTAINER`.
     #[test]
@@ -1392,7 +1509,7 @@ mod tests {
         assert_eq!(
             error.message(),
             "[DISALLOWED_TYPE_FOR_CONTAINER] Argument `fractions`(type: dict) should only contain \
-             a type in [literal], got Column"
+             a type in [float, int, str], got Column"
         );
     }
 }

@@ -1871,14 +1871,46 @@ impl DataFrame {
 
     /// Fill NA values with a [`crate::row::Value`]. Mirrors `DataFrame.fillna(value, subset)`:
     /// the value is a bool, an integer (sent as a long), a float (sent as a double) or a string,
-    /// else a `NOT_EXPECTED_TYPE` error, as PySpark raises for a value of another type.
+    /// else a `NOT_EXPECTED_TYPE` error, as PySpark raises for a value of another type. A map,
+    /// as PySpark's dict, fills its columns, its string keys, with its values, as
+    /// [`DataFrame::fillna_map`], and `subset` is not used; a key that is not a string is a
+    /// `NOT_EXPECTED_TYPE` error, as PySpark raises.
     pub fn fillna_value(
         &self,
         value: crate::row::Value,
         subset: Option<Vec<&str>>,
     ) -> Result<DataFrame> {
-        check_fill_value(&value, "value", "bool, dict, float, int or str")?;
-        Ok(self.fill_with(value, subset))
+        let entries = match value {
+            Value::Map(entries) => entries,
+            value => {
+                check_fill_value(&value, "value", "bool, dict, float, int or str")?;
+                return Ok(self.fill_with(value, subset));
+            }
+        };
+        if entries.is_empty() {
+            return Err(SparkError::classed(
+                SparkErrorKind::ValueError,
+                "CANNOT_BE_EMPTY",
+                &[("item", "value")],
+            ));
+        }
+        let mut pairs = Vec::with_capacity(entries.len());
+        for (key, value) in entries {
+            let Value::String(column) = key else {
+                return Err(SparkError::classed(
+                    SparkErrorKind::TypeError,
+                    "NOT_EXPECTED_TYPE",
+                    &[
+                        ("arg_name", "key type of dict"),
+                        ("expected_type", "str"),
+                        ("arg_type", python_type_name(&key)),
+                    ],
+                ));
+            };
+            check_fill_value(&value, "value type of dict", "bool, float, int or str")?;
+            pairs.push((column, value));
+        }
+        self.fillna_map(pairs)
     }
 
     /// The NAFill of `value`, a value that PySpark's `fillna` takes, over `subset`.
@@ -2752,15 +2784,35 @@ fn set_observations(
 /// other value is the `NOT_EXPECTED_TYPE` error of PySpark, of `arg_name` and `expected_type`, with
 /// the Python name of the type that the value stands for.
 fn check_fill_value(value: &Value, arg_name: &str, expected_type: &str) -> Result<()> {
-    let arg_type = match value {
-        Value::Bool(_)
-        | Value::Byte(_)
-        | Value::Short(_)
-        | Value::Integer(_)
-        | Value::Long(_)
-        | Value::Float(_)
-        | Value::Double(_)
-        | Value::String(_) => return Ok(()),
+    if let Value::Bool(_)
+    | Value::Byte(_)
+    | Value::Short(_)
+    | Value::Integer(_)
+    | Value::Long(_)
+    | Value::Float(_)
+    | Value::Double(_)
+    | Value::String(_) = value
+    {
+        return Ok(());
+    }
+    Err(SparkError::classed(
+        SparkErrorKind::TypeError,
+        "NOT_EXPECTED_TYPE",
+        &[
+            ("arg_name", arg_name),
+            ("expected_type", expected_type),
+            ("arg_type", python_type_name(value)),
+        ],
+    ))
+}
+
+/// The Python name of the type of the value that `value` stands for, as PySpark's errors name it.
+fn python_type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Bool(_) => "bool",
+        Value::Byte(_) | Value::Short(_) | Value::Integer(_) | Value::Long(_) => "int",
+        Value::Float(_) | Value::Double(_) => "float",
+        Value::String(_) => "str",
         Value::Null => "NoneType",
         Value::Binary(_) => "bytes",
         Value::Date(_) => "date",
@@ -2774,16 +2826,7 @@ fn check_fill_value(value: &Value, arg_name: &str, expected_type: &str) -> Resul
         Value::Map(_) => "dict",
         Value::Struct(_) => "Row",
         Value::Variant { .. } => "VariantVal",
-    };
-    Err(SparkError::classed(
-        SparkErrorKind::TypeError,
-        "NOT_EXPECTED_TYPE",
-        &[
-            ("arg_name", arg_name),
-            ("expected_type", expected_type),
-            ("arg_type", arg_type),
-        ],
-    ))
+    }
 }
 
 /// A random seed of a sample without one, as PySpark's `random.randint(0, sys.maxsize)`: the
@@ -4868,6 +4911,49 @@ mod plan_construction_tests {
         };
         assert_eq!(empty.kind, SparkErrorKind::ValueError);
         assert_eq!(empty.get_condition().as_deref(), Some("CANNOT_BE_EMPTY"));
+    }
+
+    /// As PySpark's `fillna` of a dict: a map fills its columns, its keys, with its values, as
+    /// `fillna_map`, and `subset` is not used; a key that is not a string, a value of another type
+    /// and an empty map are the errors of PySpark.
+    #[test]
+    fn a_map_fill_value_fills_its_columns_as_pyspark() {
+        let df = session().range(1).unwrap();
+        let filled = df
+            .fillna_value(
+                Value::Map(vec![
+                    (Value::String("id".into()), Value::Long(1)),
+                    (Value::String("x".into()), Value::String("a".into())),
+                ]),
+                Some(vec!["unused"]),
+            )
+            .unwrap();
+        match filled.to_relation().unwrap().rel_type {
+            Some(proto::relation::RelType::FillNa(fill)) => {
+                assert_eq!(fill.cols, vec!["id".to_string(), "x".to_string()]);
+                assert_eq!(fill.values.len(), 2);
+            }
+            other => panic!("expected a FillNa, got {other:?}"),
+        }
+        let message = |entries| {
+            df.fillna_value(Value::Map(entries), None)
+                .err()
+                .expect("an error")
+                .message()
+        };
+        assert_eq!(
+            message(vec![(Value::Long(1), Value::Long(1))]),
+            "[NOT_EXPECTED_TYPE] Argument `key type of dict` should be str, got int."
+        );
+        assert_eq!(
+            message(vec![(Value::String("id".into()), Value::Date(0))]),
+            "[NOT_EXPECTED_TYPE] Argument `value type of dict` should be bool, float, int or str, \
+             got date."
+        );
+        assert_eq!(
+            message(vec![]),
+            "[CANNOT_BE_EMPTY] At least one value must be specified."
+        );
     }
 
     fn session() -> SparkSession {
