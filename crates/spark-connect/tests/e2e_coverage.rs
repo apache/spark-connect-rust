@@ -901,10 +901,12 @@ fn dataframe_extra_surface() {
     let _ = na_df.fillna_bool(false, Some(vec!["b"])).collect().unwrap();
     let _ = na_df
         .fillna_value(Value::Double(1.0), Some(vec!["d"]))
+        .unwrap()
         .collect()
         .unwrap();
     let _ = na_df
         .fillna_map(vec![("d".to_string(), Value::Double(9.0))])
+        .unwrap()
         .collect()
         .unwrap();
 

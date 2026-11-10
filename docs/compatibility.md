@@ -20,6 +20,13 @@ microseconds. Downstream exhaustive matches on these public enums must handle
 the new variant. Rust interval map keys are stringified as raw microseconds;
 Python `timedelta` map keys are not yet supported.
 
+`DataFrame::fillna_value` and `DataFrame::fillna_map` return a `Result`, as
+`dropna` does. As PySpark's `fillna`, they take a bool, an integer, a float or a
+string (an integer is sent as a long, a float as a double), and reject other values
+with `NOT_EXPECTED_TYPE` and an empty map with `CANNOT_BE_EMPTY`. Before, such a
+value filled string columns with its debug text. `fillna`, `fillna_double`,
+`fillna_string` and `fillna_bool` are unchanged.
+
 The 4.3 line changes the public Rust representation of expressions and logical
 plans to share immutable nodes. This is a breaking change for code that directly
 constructs or matches these representations. The `Column` and `DataFrame` APIs,
