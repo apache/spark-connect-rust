@@ -18,8 +18,6 @@ try:
         AnyTimeType, AnsiIntervalType, SpatialType,
         GeometryType, GeographyType,
         VariantVal, Geometry, Geography,
-        # Spark's nanosecond timestamp types (no PySpark 4.3.0 class; not in __all__).
-        TimestampNTZNanosType, TimestampLTZNanosType,
     )
     # The extension exports the same tuple-backed Row as the public Python imports.
     from pyspark._pyspark import Row

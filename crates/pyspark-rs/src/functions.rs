@@ -220,6 +220,20 @@ pub(crate) fn value_not_between(py: Python<'_>) -> PyErr {
     )
 }
 
+/// The `ValueError` of protobuf's Python string field for a str that is not encodable as UTF-8,
+/// with its message, which shows at most 1024 characters of the repr of the value.
+fn not_utf8_string(obj: &Bound<'_, PyAny>) -> PyErr {
+    let message = pyo3::types::PyString::new(
+        obj.py(),
+        "%.1024r isn't a valid unicode string and can't be encoded in UTF-8.",
+    )
+    .call_method1("__mod__", ((obj,),));
+    match message {
+        Ok(message) => pyo3::exceptions::PyValueError::new_err(message.unbind()),
+        Err(error) => error,
+    }
+}
+
 /// An int32 literal within its range, otherwise a long, as PySpark's `_infer_type`.
 fn integer_literal(value: i64) -> LiteralExpression {
     if let Ok(value) = i32::try_from(value) {
@@ -293,24 +307,31 @@ pub fn to_column(obj: &Bound<'_, PyAny>) -> PyResult<Column> {
         )));
     }
 
-    if let Ok(i) = obj.extract::<i64>() {
-        return Ok(Column::new(Expression::literal(integer_literal(i))));
-    }
-    // An int beyond a long is not a double, as PySpark's literal of it: it is an error.
+    // An int or a float by its type, as PySpark's `_infer_type` takes them: an object that
+    // only converts to one (`__index__`, `__float__`) is not a literal.
     if obj.is_instance_of::<pyo3::types::PyInt>() {
-        return Err(value_not_between(obj.py()));
+        return match obj.extract::<i64>() {
+            Ok(i) => Ok(Column::new(Expression::literal(integer_literal(i)))),
+            // An int beyond a long is not a double, as PySpark's literal of it: it is an error.
+            Err(_) => Err(value_not_between(obj.py())),
+        };
     }
 
-    if let Ok(f) = obj.extract::<f64>() {
+    if obj.is_instance_of::<pyo3::types::PyFloat>() {
         return Ok(Column::new(Expression::literal(LiteralExpression::double(
-            f,
+            obj.extract::<f64>()?,
         ))));
     }
 
-    if let Ok(s) = obj.extract::<String>() {
-        return Ok(Column::new(Expression::literal(LiteralExpression::string(
-            s,
-        ))));
+    if obj.is_instance_of::<pyo3::types::PyString>() {
+        return match obj.extract::<String>() {
+            Ok(s) => Ok(Column::new(Expression::literal(LiteralExpression::string(
+                s,
+            )))),
+            // A str that UTF-8 cannot encode (a lone surrogate), as protobuf's string field
+            // rejects it when PySpark sends the literal.
+            Err(_) => Err(not_utf8_string(obj)),
+        };
     }
 
     // As PySpark's literal conversion for a value of another type.
@@ -563,19 +584,15 @@ fn numpy_scalar_literal(obj: &Bound<'_, PyAny>) -> PyResult<Option<LiteralExpres
 /// with `session::py_to_value` so `lit(..)` and `createDataFrame(..)` encode identically.
 /// The microseconds of the wall clock of a datetime, naive or aware, as PySpark's
 /// `TimestampNTZType.toInternal` takes them: `calendar.timegm` of its own time tuple, whatever
-/// its zone. A pandas Timestamp is taken as the datetime it stands for, as for a TIMESTAMP.
+/// its zone. A pandas Timestamp's fields are read from it, as PySpark's, so its nanoseconds are
+/// dropped silently, as for a TIMESTAMP.
 fn wall_clock_micros(obj: &Bound<'_, PyAny>) -> PyResult<i64> {
     let py = obj.py();
-    let normalized = if obj.hasattr("to_pydatetime").unwrap_or(false) {
-        obj.call_method0("to_pydatetime")?
-    } else {
-        obj.clone()
-    };
     let seconds: i64 = py
         .import("calendar")?
-        .call_method1("timegm", (normalized.call_method0("timetuple")?,))?
+        .call_method1("timegm", (obj.call_method0("timetuple")?,))?
         .extract()?;
-    let micros: i64 = normalized.getattr("microsecond")?.extract()?;
+    let micros: i64 = obj.getattr("microsecond")?.extract()?;
     Ok(seconds * 1_000_000 + micros)
 }
 

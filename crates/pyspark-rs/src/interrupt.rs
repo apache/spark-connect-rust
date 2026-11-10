@@ -59,12 +59,20 @@ impl SignalWatch {
 /// The execution is interrupted only when `f` has started one; a request that is still waiting
 /// for its response (such as an analysis) ends when the response arrives, and the exception is
 /// raised then. A wait of `block_on_abortable` (the release of `stop()`) ends at once instead.
+///
+/// An execution that `f` ran then raises for the metrics of an Observation that PySpark does
+/// not convert, as PySpark's does (`ObservedMetricsCheck`).
 pub(crate) fn interruptible<T: Send, E: Send + Into<Box<SparkError>>>(
     py: Python<'_>,
     session: &SparkSession,
     f: impl FnOnce() -> Result<T, E> + Send,
 ) -> PyResult<T> {
-    interruptible_outcome(py, session, f)?.to_pyerr()
+    let observed = crate::observation::ObservedMetricsCheck::before(py, session);
+    let output = interruptible_outcome(py, session, f)?.to_pyerr()?;
+    if let Some(observed) = observed {
+        observed.after(py, session)?;
+    }
+    Ok(output)
 }
 
 /// As [`interruptible`], but a failure of `f` is the inner result, which the caller handles, as
