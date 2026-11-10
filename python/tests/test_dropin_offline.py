@@ -16033,6 +16033,46 @@ def test_join_types_are_sent_as_pyspark_join_types(mock_connect, how, join_type)
     assert parse_message(parse_message(plan)[5][0])[4] == [join_type]
 
 
+def test_transform_passes_the_receiver_itself_as_pyspark(mock_connect):
+    # As PySpark's transform, which calls func with self: a DataFrame subclass keeps its methods
+    # in the callback, and the callback gets the receiver itself, not a plain DataFrame.
+    from pyspark.sql import functions as F
+    from pyspark.sql.connect.dataframe import DataFrame
+
+    spark, service = mock_connect
+
+    class MyDF(DataFrame):
+        def twice(self):
+            return self.select((F.col("id") * 2).alias("x"))
+
+    frame = MyDF(spark.range(3)._plan, spark)
+    seen = []
+    assert frame.transform(lambda d: seen.append(d) or d) is frame
+    assert seen[0] is frame
+    assert type(frame.transform(lambda d: d)) is MyDF
+    # ExecutePlanRequest.plan=3, Plan.root=1, Relation.project=3: the callback's twice() is a Project.
+    frame.transform(lambda d: d.twice()).collect()
+    plan = parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0]
+    assert 3 in parse_message(plan)
+
+
+def test_take_sends_its_count_as_a_limit_for_the_server_to_check(mock_connect):
+    # As PySpark's take, which is limit(num).collect(): a negative count is sent as the Limit
+    # of the plan, and the server raises its AnalysisException, not an overflow in the drop-in.
+    spark, service = mock_connect
+
+    def sent_limit():
+        # ExecutePlanRequest.plan=3, Plan.root=1, Relation.limit=8, Limit.limit=2 (an int32, a
+        # negative one as its ten-byte varint).
+        plan = parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0]
+        return parse_message(parse_message(plan)[8][0])[2][0]
+
+    spark.range(3).take(2)
+    assert sent_limit() == 2
+    spark.range(3).take(-1)
+    assert sent_limit() == 2**64 - 1
+
+
 def test_join_on_lists_join_on_their_conjunction_or_names_as_pyspark(mock_connect):
     # As PySpark's plan.Join: a list of conditions joins on their conjunction, a list of names
     # is a using join, and an empty list is no condition at all.

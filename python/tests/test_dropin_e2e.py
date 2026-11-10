@@ -2544,6 +2544,13 @@ def test_session_builders_keep_the_options_set_on_them_as_pyspark(session):
         session.conf.unset("spark.connect.rust.test.builder")
 
 
+def test_take_of_a_negative_count_raises_the_server_error_as_pyspark(session):
+    # As PySpark's take, which is limit(num).collect(): the server rejects a negative count with
+    # INVALID_LIMIT_LIKE_EXPRESSION.IS_NEGATIVE, as for head and limit.
+    with pytest.raises(AnalysisException) as error:
+        session.range(3).take(-1)
+    assert error.value.getCondition() == "INVALID_LIMIT_LIKE_EXPRESSION.IS_NEGATIVE"
+    assert len(session.range(3).take(2)) == 2
 
 
 def test_collected_rows_behave_as_pyspark_rows(session):
