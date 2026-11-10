@@ -13,6 +13,8 @@ use spark_connect::progress::ProgressUpdate;
 use spark_connect::SparkSession;
 use spark_connect_core::error::SparkError;
 
+use crate::dataframe::PyLocalRowIterator;
+
 /// The progress handlers of a session, and the progress bars of its executions.
 pub(crate) struct SessionProgress {
     /// The handlers, as the `_progress_handlers` list of PySpark's client.
@@ -53,7 +55,7 @@ pub(crate) fn session_progress(py: Python<'_>, session: &SparkSession) -> Arc<Se
 /// Have the core hand over the exceptions of the handlers that no caller is left to raise: that
 /// of the done call of an execution dropped before its end goes to `sys.unraisablehook`, as
 /// PySpark's generator reports it, and that of an execution that the exception of its done call
-/// replaced, which PySpark keeps as the `__context__` of the one it raises, is released.
+/// replaced is the `__context__` of the one the done call raises, as PySpark's `__exit__` does.
 fn install_unreturned_error_handler() {
     static INSTALL: std::sync::Once = std::sync::Once::new();
     INSTALL.call_once(|| {
@@ -61,10 +63,16 @@ fn install_unreturned_error_handler() {
             use spark_connect::progress::UnreturnedError;
             Python::attach(|py| match error {
                 UnreturnedError::DroppedDone(error) => {
-                    crate::errors::spark_error_to_py_exception(error).write_unraisable(py, None)
+                    // The iterator may be freed by now, so no reference to it is left: its class
+                    // is the object of the hook. Only a LocalRowIterator drops an execution that
+                    // calls the handlers unfinished; the other iterators do not report progress.
+                    let iterator = py.get_type::<PyLocalRowIterator>();
+                    crate::errors::spark_error_to_py_exception(error)
+                        .write_unraisable(py, Some(iterator.as_any()))
                 }
-                UnreturnedError::Replaced(error) => {
-                    drop(crate::errors::spark_error_to_py_exception(error))
+                UnreturnedError::Replaced { error, done } => {
+                    let context = crate::errors::spark_error_to_py_exception(error);
+                    crate::errors::set_callback_context(py, done, context);
                 }
             })
         });
