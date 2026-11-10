@@ -7,7 +7,7 @@
 
 use pyo3::prelude::*;
 use spark_connect::ml::{
-    BinaryClassificationEvaluator, CrossValidator, Estimator, Evaluator, LinearRegression,
+    BinaryClassificationEvaluator, CrossValidator, Estimator, Evaluator, KMeans, LinearRegression,
     LinearSVC, LogisticRegression, MaxAbsScaler, Model, MulticlassClassificationEvaluator,
     Pipeline, RegressionEvaluator, StandardScaler, StringIndexer, Transformer, VectorAssembler,
 };
@@ -524,6 +524,132 @@ impl PyLinearRegression {
     #[pyo3(name = "setEpsilon")]
     fn set_epsilon(mut slf: PyRefMut<'_, Self>, value: f64) -> PyRefMut<'_, Self> {
         slf.inner = slf.inner.clone().set_epsilon(value);
+        slf
+    }
+
+    #[pyo3(name = "setMaxBlockSizeInMB")]
+    fn set_max_block_size_in_mb(mut slf: PyRefMut<'_, Self>, value: f64) -> PyRefMut<'_, Self> {
+        slf.inner = slf.inner.clone().set_max_block_size_in_mb(value);
+        slf
+    }
+
+    fn fit(&self, py: Python<'_>, df: &PyDataFrame) -> PyResult<PyMLModel> {
+        let mut estimator = self.inner.clone();
+        let model = py
+            .detach(|| estimator.fit(&df.dataframe).map_err(Box::new))
+            .to_pyerr()?;
+        Ok(PyMLModel { model })
+    }
+}
+
+/// K-means clustering backed by Spark Connect's JVM ML API.
+#[pyclass(name = "KMeans", module = "pyspark.ml.connect.clustering")]
+pub struct PyKMeans {
+    inner: KMeans,
+}
+
+#[pymethods]
+impl PyKMeans {
+    #[new]
+    #[pyo3(signature = (*, featuresCol="features", predictionCol="prediction", k=2, initMode="k-means||", initSteps=2, tol=1e-4, maxIter=20, seed=None, distanceMeasure="euclidean", weightCol=None, solver="auto", maxBlockSizeInMB=0.0))]
+    #[allow(non_snake_case, clippy::too_many_arguments)]
+    fn new(
+        featuresCol: &str,
+        predictionCol: &str,
+        k: i32,
+        initMode: &str,
+        initSteps: i32,
+        tol: f64,
+        maxIter: i32,
+        seed: Option<i64>,
+        distanceMeasure: &str,
+        weightCol: Option<&str>,
+        solver: &str,
+        maxBlockSizeInMB: f64,
+    ) -> Self {
+        let mut inner = KMeans::new()
+            .set_feature_col(featuresCol)
+            .set_prediction_col(predictionCol)
+            .set_k(k)
+            .set_init_mode(initMode)
+            .set_init_steps(initSteps)
+            .set_tol(tol)
+            .set_max_iter(maxIter)
+            .set_distance_measure(distanceMeasure)
+            .set_solver(solver)
+            .set_max_block_size_in_mb(maxBlockSizeInMB);
+        if let Some(seed) = seed {
+            inner = inner.set_seed(seed);
+        }
+        if let Some(col) = weightCol {
+            inner = inner.set_weight_col(col);
+        }
+        Self { inner }
+    }
+
+    #[pyo3(name = "setFeaturesCol")]
+    fn set_feature_col<'py>(mut slf: PyRefMut<'py, Self>, value: &str) -> PyRefMut<'py, Self> {
+        slf.inner = slf.inner.clone().set_feature_col(value);
+        slf
+    }
+
+    #[pyo3(name = "setPredictionCol")]
+    fn set_prediction_col<'py>(mut slf: PyRefMut<'py, Self>, value: &str) -> PyRefMut<'py, Self> {
+        slf.inner = slf.inner.clone().set_prediction_col(value);
+        slf
+    }
+
+    #[pyo3(name = "setK")]
+    fn set_k(mut slf: PyRefMut<'_, Self>, value: i32) -> PyRefMut<'_, Self> {
+        slf.inner = slf.inner.clone().set_k(value);
+        slf
+    }
+
+    #[pyo3(name = "setInitMode")]
+    fn set_init_mode<'py>(mut slf: PyRefMut<'py, Self>, value: &str) -> PyRefMut<'py, Self> {
+        slf.inner = slf.inner.clone().set_init_mode(value);
+        slf
+    }
+
+    #[pyo3(name = "setInitSteps")]
+    fn set_init_steps(mut slf: PyRefMut<'_, Self>, value: i32) -> PyRefMut<'_, Self> {
+        slf.inner = slf.inner.clone().set_init_steps(value);
+        slf
+    }
+
+    #[pyo3(name = "setTol")]
+    fn set_tol(mut slf: PyRefMut<'_, Self>, value: f64) -> PyRefMut<'_, Self> {
+        slf.inner = slf.inner.clone().set_tol(value);
+        slf
+    }
+
+    #[pyo3(name = "setMaxIter")]
+    fn set_max_iter(mut slf: PyRefMut<'_, Self>, value: i32) -> PyRefMut<'_, Self> {
+        slf.inner = slf.inner.clone().set_max_iter(value);
+        slf
+    }
+
+    #[pyo3(name = "setSeed")]
+    fn set_seed(mut slf: PyRefMut<'_, Self>, value: i64) -> PyRefMut<'_, Self> {
+        slf.inner = slf.inner.clone().set_seed(value);
+        slf
+    }
+
+    #[pyo3(name = "setDistanceMeasure")]
+    fn set_distance_measure<'py>(mut slf: PyRefMut<'py, Self>, value: &str) -> PyRefMut<'py, Self> {
+        slf.inner = slf.inner.clone().set_distance_measure(value);
+        slf
+    }
+
+    #[pyo3(name = "setWeightCol")]
+    fn set_weight_col<'py>(mut slf: PyRefMut<'py, Self>, value: &str) -> PyRefMut<'py, Self> {
+        slf.inner = slf.inner.clone().set_weight_col(value);
+        slf
+    }
+
+    #[pyo3(name = "setSolver")]
+    fn set_solver<'py>(mut slf: PyRefMut<'py, Self>, value: &str) -> PyRefMut<'py, Self> {
+        slf.inner = slf.inner.clone().set_solver(value);
         slf
     }
 

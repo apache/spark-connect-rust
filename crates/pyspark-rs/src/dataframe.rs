@@ -1146,8 +1146,8 @@ impl PyDataFrame {
         numPartitions: Bound<'_, PyAny>,
         cols: Vec<Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
-        // As PySpark's: a positive partition count and columns, or columns alone, each sorted
-        // ascending unless it is a sort order.
+        // As PySpark's: a positive partition count and columns, or columns alone. The columns
+        // are sorted ascending unless they are sort orders, by `repartition_by_range_opt`.
         let (num_partitions, cols) = if numPartitions.is_instance_of::<PyInt>() {
             let n = positive_partitions(py, numPartitions.extract()?)?;
             if cols.is_empty() {
@@ -1175,10 +1175,7 @@ impl PyDataFrame {
         };
         let exprs: Vec<_> = to_column_list(cols)?
             .into_iter()
-            .map(|c| match c.expression().node() {
-                spark_connect::expression::ExpressionNode::SortOrder(_) => c.expression().clone(),
-                _ => c.asc().expression().clone(),
-            })
+            .map(|c| c.expression().clone())
             .collect();
         Ok(PyDataFrame::new(
             self.dataframe

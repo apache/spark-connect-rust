@@ -252,6 +252,70 @@ fn group_numeric_aggregates_follow_pyspark() {
     );
 }
 
+/// A pivot on a date, timestamp or decimal column takes typed values. The counts match those
+/// of PySpark 4.3.0 pivoting the same column on the same values as strings, which the server
+/// casts to the column's type.
+#[test]
+fn pivot_on_typed_values_matches_pyspark() {
+    use spark_connect::row::Value;
+    if !should_run() {
+        return;
+    }
+    let s = session();
+    let names = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<String>>();
+    let rows = |rows: &[&[&str]]| {
+        rows.iter()
+            .map(|r| r.iter().map(|v| v.to_string()).collect::<Vec<String>>())
+            .collect::<Vec<Vec<String>>>()
+    };
+    let counted = |df: &DataFrame, column: &str, value: Value| {
+        named_rows(
+            &df.group_by(vec![col("k")])
+                .pivot(col(column), Some(vec![value]))
+                .unwrap()
+                .count(),
+        )
+    };
+
+    let dates = s
+        .sql(
+            "SELECT * FROM VALUES (1, DATE'2024-01-01'), (1, DATE'2024-01-02'), \
+             (2, DATE'2024-01-01') AS t(k, d)",
+        )
+        .unwrap();
+    let (cols, got) = counted(&dates, "d", Value::Date(19723));
+    assert_eq!(cols, names(&["k", "2024-01-01"]));
+    assert_eq!(got, rows(&[&["1", "1"], &["2", "1"]]));
+
+    // Epoch seconds, so that the instants do not depend on the session time zone.
+    let stamps = s
+        .sql(
+            "SELECT * FROM VALUES (1, CAST(1704067200 AS TIMESTAMP)), \
+             (1, CAST(1704153600 AS TIMESTAMP)), (2, CAST(1704067200 AS TIMESTAMP)) AS t(k, ts)",
+        )
+        .unwrap();
+    let (_, got) = counted(&stamps, "ts", Value::Timestamp(1_704_067_200_000_000));
+    assert_eq!(got, rows(&[&["1", "1"], &["2", "1"]]));
+
+    let decimals = s
+        .sql(
+            "SELECT * FROM VALUES (1, CAST(1.50 AS DECIMAL(5,2))), \
+             (1, CAST(2.25 AS DECIMAL(5,2))), (2, CAST(1.50 AS DECIMAL(5,2))) AS t(k, dec)",
+        )
+        .unwrap();
+    let (cols, got) = counted(
+        &decimals,
+        "dec",
+        Value::Decimal {
+            value: "1.50".to_string(),
+            precision: Some(5),
+            scale: Some(2),
+        },
+    );
+    assert_eq!(cols, names(&["k", "1.50"]));
+    assert_eq!(got, rows(&[&["1", "1"], &["2", "1"]]));
+}
+
 #[test]
 fn dataframe_metadata_json_semantics() {
     if !should_run() {
@@ -541,5 +605,40 @@ fn subqueries_return_the_rows_of_pyspark() {
     assert_eq!(
         int_pairs(&t1.filter(f::r#struct(vec![col("a"), col("b")]).isin_subquery(&pairs))),
         vec![(1, 2)]
+    );
+}
+
+/// `repartition_by_range` splits the ids into contiguous ranges, as PySpark's
+/// `repartitionByRange` does; a hash split of the same column would not.
+#[test]
+fn repartition_by_range_splits_into_contiguous_ranges() {
+    if !should_run() {
+        return;
+    }
+    let s = session();
+    let rows = s
+        .range(100)
+        .unwrap()
+        .repartition_by_range(4, vec![col("id").expression().clone()])
+        .with_column("p", f::spark_partition_id())
+        .group_by(vec![col("p")])
+        .agg(vec![
+            f::min(col("id")).alias("lo").expression().clone(),
+            f::max(col("id")).alias("hi").expression().clone(),
+            f::count(col("id")).alias("n").expression().clone(),
+        ])
+        .order_by(vec![col("p").expression().clone()])
+        .collect()
+        .unwrap();
+    let ranges: Vec<(i64, i64, i64)> = rows
+        .iter()
+        .map(|row| {
+            let get = |name: &str| row.get_by_name(name).and_then(|v| v.as_i64()).unwrap();
+            (get("lo"), get("hi"), get("n"))
+        })
+        .collect();
+    assert_eq!(
+        ranges,
+        vec![(0, 24, 25), (25, 49, 25), (50, 74, 25), (75, 99, 25)]
     );
 }

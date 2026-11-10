@@ -8901,6 +8901,54 @@ def test_create_dataframe_of_a_numpy_array_as_pyspark(mock_connect):
     assert e.value.getCondition() == "CANNOT_INFER_EMPTY_SCHEMA"
 
 
+@pytest.mark.parametrize(
+    "labels", ["datetime", "timedelta", "period", "interval", "multi_datetime"])
+@pytest.mark.parametrize("cells, arrow_type, values", [
+    # A mixed int and float column is a double, as PySpark infers it, not a row error.
+    ("int_float", lambda pa: pa.float64(), [1.0, 2.5]),
+    # A naive datetime of a list is a timestamp_ntz, not a time of the session time zone.
+    ("naive_list", lambda pa: pa.list_(pa.timestamp("us")),
+     [[datetime.datetime(2020, 1, 2, 3)], None]),
+    # A dict is a struct of the value types of its keys, mixed or not, and not a map.
+    ("dict", lambda pa: pa.struct([("u", pa.int64()), ("v", pa.string())]),
+     [{"u": 1, "v": "a"}, None]),
+    # A NaN in a list is a null, as PySpark has it.
+    ("nan_list", lambda pa: pa.list_(pa.float64()), [[1.0, None], None]),
+    # A NumPy int32 is an int, as PySpark infers it.
+    ("np_int32", lambda pa: pa.int32(), [1, 2]),
+])
+def test_datetimelike_labels_convert_cells_as_pyspark(
+    mock_connect, labels, cells, arrow_type, values
+):
+    # A plain frame whose labels are a DatetimeIndex, TimedeltaIndex, PeriodIndex or IntervalIndex
+    # (or a MultiIndex with a DatetimeIndex level) converts with Arrow, as one with default labels:
+    # its cells take the types that PySpark infers.
+    import numpy as np
+    import pyarrow as pa
+
+    pd = pytest.importorskip("pandas")
+    column = {
+        "int_float": [1, 2.5],
+        "naive_list": [[datetime.datetime(2020, 1, 2, 3)], None],
+        "dict": [{"u": 1, "v": "a"}, None],
+        "nan_list": [[1.0, float("nan")], None],
+        "np_int32": [np.int32(1), np.int32(2)],
+    }[cells]
+    columns = {
+        "datetime": pd.DatetimeIndex(["2020-01-01"]),
+        "timedelta": pd.TimedeltaIndex(["1s"]),
+        "period": pd.period_range("2020-01", periods=1, freq="M"),
+        "interval": pd.interval_range(0, 1),
+        "multi_datetime": pd.MultiIndex.from_tuples([(pd.Timestamp("2020-01-01"), "x")]),
+    }[labels]
+    data = pd.DataFrame({0: pd.Series(column, dtype=object)})
+    data.columns = columns
+    table = _native_number_input_table(mock_connect, data)
+    assert table.num_columns == 1
+    assert table.schema.field(0).type == arrow_type(pa)
+    assert table.column(0).to_pylist() == values
+
+
 def test_catalog_function_class_name_is_none_without_a_class_as_pyspark(mock_connect):
     import pyarrow as pa
 
@@ -12751,6 +12799,76 @@ def completion_analyzed():
         child.close()
 
 
+@pytest.mark.parametrize("value, wire_type", [
+    (-(2**63), "long"),
+    (-(2**31) - 1, "long"),
+    (-(2**31), "integer"),
+    (-1, "integer"),
+    (0, "integer"),
+    (2**31 - 1, "integer"),
+    (2**31, "long"),
+    (2**63 - 1, "long"),
+])
+def test_integer_literal_wire_boundaries(value, wire_type):
+    from enum import IntEnum
+
+    from pyspark.sql import functions as F
+    from pyspark.sql.connect import proto
+
+    class IntegerSubclass(int):
+        pass
+
+    class IntegerEnum(IntEnum):
+        VALUE = value
+
+    expected = proto.Expression.Literal()
+    setattr(expected, wire_type, value)
+    for scalar in (value, IntegerSubclass(value), IntegerEnum.VALUE):
+        literal = F.lit(scalar)._expr.to_plan(None).literal
+        compared = (F.col("id") == scalar)._expr.to_plan(None)
+        assert literal == expected
+        assert compared.unresolved_function.arguments[1].literal == expected
+
+
+def test_exact_integer_operators_skip_numpy_probes(monkeypatch):
+    import sys
+    from enum import IntEnum
+
+    from pyspark.sql import functions as F
+    from pyspark.sql.connect import proto
+
+    class IntegerSubclass(int):
+        pass
+
+    class IntegerEnum(IntEnum):
+        VALUE = 5
+
+    class ProbeSentinel:
+        @property
+        def ndarray(self):
+            raise RuntimeError("NumPy probe reached")
+
+    column = F.col("id")
+    with monkeypatch.context() as patch:
+        patch.setitem(sys.modules, "numpy", ProbeSentinel())
+        compared = (column == 5)._expr.to_plan(None)
+        assert compared.unresolved_function.arguments[1].literal == proto.Expression.Literal(integer=5)
+        for value in (IntegerSubclass(5), IntegerEnum.VALUE, True, 2**63):
+            with pytest.raises(RuntimeError, match="NumPy probe reached"):
+                column == value
+
+
+def test_boolean_literals_keep_their_wire_type():
+    from pyspark.sql import functions as F
+    from pyspark.sql.connect import proto
+
+    for value in (False, True):
+        expected = proto.Expression.Literal(boolean=value)
+        assert F.lit(value)._expr.to_plan(None).literal == expected
+        compared = (F.col("flag") == value)._expr.to_plan(None)
+        assert compared.unresolved_function.arguments[1].literal == expected
+
+
 def test_int_literals_beyond_a_long_raise_value_not_between_as_pyspark():
     # As PySpark's LiteralExpression._infer_type: an int beyond the range of a long is an error,
     # not a double, which would make `col == 2**63` match the rows of the longs next to it. The
@@ -14291,6 +14409,51 @@ def test_lit_of_a_numpy_array_is_an_array_of_its_type_as_pyspark():
         (np.array(["x"]), "cast(array(x) as array<string>)"),
     ):
         assert repr(F.lit(value)).lower() == f"column<'{expected}'>"
+
+
+def test_datetime_literals_are_exact_micros_as_pyspark(mock_connect, monkeypatch):
+    # As PySpark's TimestampType.toInternal: the microseconds of a datetime are exact over the
+    # whole range (a float of seconds loses them after the year 2255), and a naive datetime is
+    # in the local time zone (the micros of year 1 of a naive datetime are platform-dependent).
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+
+    def micros(column):
+        spark.range(1).select(column).collect()
+        # Project.expressions=3; Expression.literal=1, Literal.timestamp=17 (an int64).
+        plan = parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0]
+        expression = parse_message(parse_message(parse_message(plan)[3][0])[3][0])
+        value = parse_message(expression[1][0])[17][0]
+        return value - (1 << 64) if value >= 1 << 63 else value
+
+    utc = datetime.timezone.utc
+    cases = [
+        (datetime.datetime(1, 1, 1, 0, 0, 0, 1, tzinfo=utc), -62135596799999999),
+        (datetime.datetime(1969, 12, 31, 23, 59, 59, 999999, tzinfo=utc), -1),
+        (datetime.datetime(2300, 1, 1, 0, 0, 0, 123457, tzinfo=utc), 10413792000123457),
+        (datetime.datetime(9999, 12, 31, 23, 59, 59, 999999, tzinfo=utc), 253402300799999999),
+    ]
+    for value, expected in cases:
+        assert micros(F.lit(value)) == expected
+    # The naive values of the same instants in a zone nine hours east of UTC, which has no DST.
+    if not hasattr(time, "tzset"):
+        pytest.skip("time.tzset is not available")
+    zone, offset = os.environ.get("TZ"), 9 * 3600 * 1_000_000
+    os.environ["TZ"] = "Etc/GMT-9"
+    time.tzset()
+    try:
+        assert micros(F.lit(datetime.datetime(1969, 12, 31, 23, 59, 59, 999999))) == -1 - offset
+        assert micros(F.lit(datetime.datetime(2300, 1, 1, 0, 0, 0, 123457))) == (
+            10413792000123457 - offset)
+        assert micros(F.lit(datetime.datetime(9999, 12, 31, 23, 59, 59, 999999))) == (
+            253402300799999999 - offset)
+    finally:
+        if zone is None:
+            del os.environ["TZ"]
+        else:
+            os.environ["TZ"] = zone
+        time.tzset()
 
 
 def test_lit_errors_as_pyspark():
