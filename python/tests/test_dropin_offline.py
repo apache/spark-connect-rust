@@ -16536,6 +16536,56 @@ def test_local_iterator_close_ends_it_before_it_runs_as_pyspark(mock_connect):
     assert service.execute_requests == []
 
 
+def test_to_local_iterator_is_a_generator_as_pyspark(mock_connect):
+    # As PySpark's generator function, which sends nothing until its first row.
+    import inspect
+    import types
+
+    spark, service = mock_connect
+    rows = spark.range(3).toLocalIterator()
+    assert isinstance(rows, types.GeneratorType)
+    assert rows.__name__ == "toLocalIterator"
+    assert rows.__qualname__ == "DataFrame.toLocalIterator"
+    assert inspect.getgeneratorstate(rows) == inspect.GEN_CREATED
+    assert service.rpc_events == []
+
+
+@pytest.mark.parametrize("ending", ["close", "throw"])
+def test_to_local_iterator_ending_releases_the_execution_as_pyspark(mock_connect, ending):
+    # A close and a throw in the middle end the execution at once, also while the exception,
+    # with its traceback, is kept.
+    import pyarrow as pa
+    from _mock_connect_server import parse_message
+    from binary_configuration_cases import _results, _wait_for
+
+    spark, service = mock_connect
+    _results(service, pa.RecordBatch.from_arrays([pa.array([0, 1])], names=["id"]))
+    service.block_result_complete = True
+    try:
+        rows = spark.range(2).toLocalIterator()
+        assert next(rows).id == 0
+        operation_id = parse_message(service.execute_requests[0])[6][0]
+        kept = None
+        if ending == "close":
+            rows.close()
+        else:
+            with pytest.raises(ValueError, match="stop") as kept:
+                rows.throw(ValueError("stop"))
+
+        def released():
+            # ReleaseExecuteRequest.release_all=5 and operation_id=3.
+            return any(5 in fields and fields.get(3) == [operation_id]
+                       for fields in map(parse_message, service.release_execute_requests))
+
+        _wait_for(released)
+        assert released()
+        assert operation_id not in service.result_complete_operations
+        assert list(rows) == []
+        del kept
+    finally:
+        service.release_response()
+
+
 def test_dataframes_of_other_sessions_raise_session_not_same_as_pyspark():
     # As PySpark's `_check_same_session`, of the DataFrames that the methods take, before any
     # request: SESSION_NOT_SAME for a DataFrame of another session, and for what is not one.

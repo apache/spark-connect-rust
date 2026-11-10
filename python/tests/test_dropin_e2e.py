@@ -3382,6 +3382,34 @@ def test_local_iterator_closes_as_a_generator_as_pyspark(session):
     rows.close()
 
 
+def test_local_iterator_is_a_generator_as_pyspark(session):
+    # As PySpark's generator function: it yields the rows, and a close() or a throw() in the
+    # middle ends it.
+    import inspect
+    import types
+
+    df = session.range(1000, numPartitions=10)
+    rows = df.toLocalIterator()
+    assert isinstance(rows, types.GeneratorType)
+    assert [row.id for row in rows] == list(range(1000))
+    assert inspect.getgeneratorstate(rows) == inspect.GEN_CLOSED
+    assert next(rows, None) is None
+
+    rows = df.toLocalIterator()
+    assert next(rows).id == 0
+    assert inspect.getgeneratorstate(rows) == inspect.GEN_SUSPENDED
+    with pytest.raises(ValueError, match="stop"):
+        rows.throw(ValueError("stop"))
+    assert inspect.getgeneratorstate(rows) == inspect.GEN_CLOSED
+    assert list(rows) == []
+
+    rows = df.toLocalIterator()
+    next(rows)
+    rows.close()
+    assert inspect.getgeneratorstate(rows) == inspect.GEN_CLOSED
+    assert list(rows) == []
+
+
 def test_create_dataframe_takes_the_ddl_of_spark_as_pyspark(session):
     # As PySpark Connect's, which parses a DDL schema on the server: nested structs, arrays and
     # maps of them, backtick-quoted names, and NOT NULL and COMMENT clauses.

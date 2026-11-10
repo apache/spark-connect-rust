@@ -2296,9 +2296,16 @@ impl PyDataFrame {
     /// the progress handlers of the execution are called by `next()`, on the iterating thread.
     #[pyo3(name = "toLocalIterator")]
     #[pyo3(signature = (prefetchPartitions=false))]
-    fn to_local_iterator(&self, prefetchPartitions: bool) -> PyLocalRowIterator {
+    fn to_local_iterator<'py>(
+        &self,
+        py: Python<'py>,
+        prefetchPartitions: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let _ = prefetchPartitions;
-        PyLocalRowIterator::new(self.dataframe.clone())
+        let rows = PyLocalRowIterator::new(self.dataframe.clone());
+        py.import("pyspark.sql.connect.dataframe")?
+            .getattr("_local_rows")?
+            .call1((rows,))
     }
 
     /// Collect the DataFrame into a `pyarrow.Table`.
@@ -4538,9 +4545,8 @@ fn rows_to_py(
         .collect()
 }
 
-/// Python wrapper for LocalRowIterator yielding Row objects lazily.
-///
-/// Implements `__iter__` and `__next__` to make it a proper Python iterator.
+/// Python wrapper for LocalRowIterator yielding Row objects lazily: the rows that the generator
+/// of `toLocalIterator` yields from. Implements `__iter__`, `__next__` and `close`.
 #[pyclass(name = "LocalRowIterator", module = "pyspark.sql.dataframe")]
 pub struct PyLocalRowIterator {
     dataframe: DataFrame,

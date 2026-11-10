@@ -13,8 +13,6 @@ use spark_connect::progress::ProgressUpdate;
 use spark_connect::SparkSession;
 use spark_connect_core::error::SparkError;
 
-use crate::dataframe::PyLocalRowIterator;
-
 /// The progress handlers of a session, and the progress bars of its executions.
 pub(crate) struct SessionProgress {
     /// The handlers, as the `_progress_handlers` list of PySpark's client.
@@ -63,12 +61,15 @@ fn install_unreturned_error_handler() {
             use spark_connect::progress::UnreturnedError;
             Python::attach(|py| match error {
                 UnreturnedError::DroppedDone(error) => {
-                    // The iterator may be freed by now, so no reference to it is left: its class
-                    // is the object of the hook. Only a LocalRowIterator drops an execution that
-                    // calls the handlers unfinished; the other iterators do not report progress.
-                    let iterator = py.get_type::<PyLocalRowIterator>();
-                    crate::errors::spark_error_to_py_exception(error)
-                        .write_unraisable(py, Some(iterator.as_any()))
+                    // The generator of toLocalIterator may be freed by now, so no reference to it
+                    // is left: its type is the object of the hook. Only that generator drops an
+                    // execution that calls the handlers unfinished; the other iterators do not
+                    // report progress.
+                    let error = crate::errors::spark_error_to_py_exception(error);
+                    match py.import("types").and_then(|t| t.getattr("GeneratorType")) {
+                        Ok(generator) => error.write_unraisable(py, Some(&generator)),
+                        Err(_) => error.write_unraisable(py, None),
+                    }
                 }
                 UnreturnedError::Replaced { error, done } => {
                     let context = crate::errors::spark_error_to_py_exception(error);
