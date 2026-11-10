@@ -84,7 +84,7 @@ fn the_request_of_a_hook_is_sent_with_the_operation_id_of_the_original() {
     let Some(session) = live() else {
         return;
     };
-    let replacement = session.range(5).unwrap().to_relation();
+    let replacement = session.range(5).unwrap().to_relation().unwrap();
     let operation_ids: Arc<Mutex<Vec<Option<String>>>> = Arc::default();
     let seen = Arc::clone(&operation_ids);
     let hook: ExecutePlanHook = Arc::new(move |mut request| {

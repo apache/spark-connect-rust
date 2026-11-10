@@ -8,6 +8,7 @@ use spark_connect::group::StatFunctions;
 
 use crate::column::raise_pyspark;
 use crate::dataframe::PyDataFrame;
+use crate::errors::ResultExt;
 use crate::interrupt::interruptible;
 
 /// PySpark's `NOT_EXPECTED_TYPE` error of the argument `name`, `value`, which should be of
@@ -79,41 +80,38 @@ fn column_refs(columns: &[String]) -> Option<Vec<&str>> {
     (!columns.is_empty()).then(|| columns.iter().map(String::as_str).collect())
 }
 
-/// `df.dropna(how, thresh, subset)` and `df.na.drop`, as PySpark's: `how` is "any" or "all",
-/// else `VALUE_NOT_ALLOWED`, `thresh`, an int, overrides it, and `subset` is a column name,
-/// or a list or tuple of them.
+/// `df.dropna(how, thresh, subset)` and `df.na.drop`, as PySpark's: `how` is a str, which the core
+/// checks to be "any" or "all", else `VALUE_NOT_ALLOWED`, `thresh`, an int, overrides it, and
+/// `subset` is a column name, or a list or tuple of them.
 pub(crate) fn dropna(
     df: &DataFrame,
     how: Option<&Bound<'_, PyAny>>,
     thresh: Option<&Bound<'_, PyAny>>,
     subset: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<PyDataFrame> {
-    let mut how_name = "any";
-    if let Some(how) = how {
-        match string_argument(how, "how")?.as_str() {
-            "all" => how_name = "all",
-            "any" => {}
-            _ => {
-                return Err(raise_pyspark(
-                    how.py(),
-                    "PySparkValueError",
-                    "VALUE_NOT_ALLOWED",
-                    &[("arg_name", "how"), ("allowed_values", "['any', 'all']")],
-                ))
-            }
-        }
-    }
+    let how = how.map(|how| string_argument(how, "how")).transpose()?;
+    // PySpark checks `how` before `thresh` and `subset`, so the core's error of `how` comes first.
+    let parsed = dropna_thresh_and_subset(thresh, subset);
+    let (thresh, columns) = match &parsed {
+        Ok((thresh, columns)) => (*thresh, column_refs(columns)),
+        Err(_) => (None, None),
+    };
+    let dataframe = df.dropna(how.as_deref(), thresh, columns).to_pyerr()?;
+    parsed?;
+    Ok(PyDataFrame::new(dataframe))
+}
+
+/// The `thresh` and the `subset` of `dropna`, checked as PySpark's.
+fn dropna_thresh_and_subset(
+    thresh: Option<&Bound<'_, PyAny>>,
+    subset: Option<&Bound<'_, PyAny>>,
+) -> PyResult<(Option<i32>, Vec<String>)> {
     let thresh = match thresh {
         None => None,
         Some(thresh) if thresh.is_instance_of::<PyInt>() => Some(thresh.extract::<i32>()?),
         Some(thresh) => return Err(not_expected_type(thresh, "thresh", "int")),
     };
-    let columns = subset_columns(subset, "list, str or tuple")?;
-    Ok(PyDataFrame::new(df.dropna(
-        Some(how_name),
-        thresh,
-        column_refs(&columns),
-    )))
+    Ok((thresh, subset_columns(subset, "list, str or tuple")?))
 }
 
 /// `df.fillna(value, subset)` and `df.na.fill`, as PySpark's: `value` is a bool, an int, a

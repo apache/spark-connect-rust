@@ -7,7 +7,7 @@
 
 use pyo3::prelude::*;
 use spark_connect::ml::{
-    BinaryClassificationEvaluator, CrossValidator, Estimator, Evaluator, LinearRegression,
+    BinaryClassificationEvaluator, CrossValidator, Estimator, Evaluator, KMeans, LinearRegression,
     LinearSVC, LogisticRegression, MaxAbsScaler, Model, MulticlassClassificationEvaluator,
     Pipeline, RegressionEvaluator, StandardScaler, StringIndexer, Transformer, VectorAssembler,
 };
@@ -555,6 +555,132 @@ impl PyLinearRegression {
     }
 }
 
+/// K-means clustering backed by Spark Connect's JVM ML API.
+#[pyclass(name = "KMeans", module = "pyspark.ml.connect.clustering")]
+pub struct PyKMeans {
+    inner: KMeans,
+}
+
+#[pymethods]
+impl PyKMeans {
+    #[new]
+    #[pyo3(signature = (*, featuresCol="features", predictionCol="prediction", k=2, initMode="k-means||", initSteps=2, tol=1e-4, maxIter=20, seed=None, distanceMeasure="euclidean", weightCol=None, solver="auto", maxBlockSizeInMB=0.0))]
+    #[allow(non_snake_case, clippy::too_many_arguments)]
+    fn new(
+        featuresCol: &str,
+        predictionCol: &str,
+        k: i32,
+        initMode: &str,
+        initSteps: i32,
+        tol: f64,
+        maxIter: i32,
+        seed: Option<i64>,
+        distanceMeasure: &str,
+        weightCol: Option<&str>,
+        solver: &str,
+        maxBlockSizeInMB: f64,
+    ) -> Self {
+        let mut inner = KMeans::new()
+            .set_feature_col(featuresCol)
+            .set_prediction_col(predictionCol)
+            .set_k(k)
+            .set_init_mode(initMode)
+            .set_init_steps(initSteps)
+            .set_tol(tol)
+            .set_max_iter(maxIter)
+            .set_distance_measure(distanceMeasure)
+            .set_solver(solver)
+            .set_max_block_size_in_mb(maxBlockSizeInMB);
+        if let Some(seed) = seed {
+            inner = inner.set_seed(seed);
+        }
+        if let Some(col) = weightCol {
+            inner = inner.set_weight_col(col);
+        }
+        Self { inner }
+    }
+
+    #[pyo3(name = "setFeaturesCol")]
+    fn set_feature_col<'py>(mut slf: PyRefMut<'py, Self>, value: &str) -> PyRefMut<'py, Self> {
+        slf.inner = slf.inner.clone().set_feature_col(value);
+        slf
+    }
+
+    #[pyo3(name = "setPredictionCol")]
+    fn set_prediction_col<'py>(mut slf: PyRefMut<'py, Self>, value: &str) -> PyRefMut<'py, Self> {
+        slf.inner = slf.inner.clone().set_prediction_col(value);
+        slf
+    }
+
+    #[pyo3(name = "setK")]
+    fn set_k(mut slf: PyRefMut<'_, Self>, value: i32) -> PyRefMut<'_, Self> {
+        slf.inner = slf.inner.clone().set_k(value);
+        slf
+    }
+
+    #[pyo3(name = "setInitMode")]
+    fn set_init_mode<'py>(mut slf: PyRefMut<'py, Self>, value: &str) -> PyRefMut<'py, Self> {
+        slf.inner = slf.inner.clone().set_init_mode(value);
+        slf
+    }
+
+    #[pyo3(name = "setInitSteps")]
+    fn set_init_steps(mut slf: PyRefMut<'_, Self>, value: i32) -> PyRefMut<'_, Self> {
+        slf.inner = slf.inner.clone().set_init_steps(value);
+        slf
+    }
+
+    #[pyo3(name = "setTol")]
+    fn set_tol(mut slf: PyRefMut<'_, Self>, value: f64) -> PyRefMut<'_, Self> {
+        slf.inner = slf.inner.clone().set_tol(value);
+        slf
+    }
+
+    #[pyo3(name = "setMaxIter")]
+    fn set_max_iter(mut slf: PyRefMut<'_, Self>, value: i32) -> PyRefMut<'_, Self> {
+        slf.inner = slf.inner.clone().set_max_iter(value);
+        slf
+    }
+
+    #[pyo3(name = "setSeed")]
+    fn set_seed(mut slf: PyRefMut<'_, Self>, value: i64) -> PyRefMut<'_, Self> {
+        slf.inner = slf.inner.clone().set_seed(value);
+        slf
+    }
+
+    #[pyo3(name = "setDistanceMeasure")]
+    fn set_distance_measure<'py>(mut slf: PyRefMut<'py, Self>, value: &str) -> PyRefMut<'py, Self> {
+        slf.inner = slf.inner.clone().set_distance_measure(value);
+        slf
+    }
+
+    #[pyo3(name = "setWeightCol")]
+    fn set_weight_col<'py>(mut slf: PyRefMut<'py, Self>, value: &str) -> PyRefMut<'py, Self> {
+        slf.inner = slf.inner.clone().set_weight_col(value);
+        slf
+    }
+
+    #[pyo3(name = "setSolver")]
+    fn set_solver<'py>(mut slf: PyRefMut<'py, Self>, value: &str) -> PyRefMut<'py, Self> {
+        slf.inner = slf.inner.clone().set_solver(value);
+        slf
+    }
+
+    #[pyo3(name = "setMaxBlockSizeInMB")]
+    fn set_max_block_size_in_mb(mut slf: PyRefMut<'_, Self>, value: f64) -> PyRefMut<'_, Self> {
+        slf.inner = slf.inner.clone().set_max_block_size_in_mb(value);
+        slf
+    }
+
+    fn fit(&self, py: Python<'_>, df: &PyDataFrame) -> PyResult<PyMLModel> {
+        let mut estimator = self.inner.clone();
+        let model = py
+            .detach(|| estimator.fit(&df.dataframe).map_err(Box::new))
+            .to_pyerr()?;
+        Ok(PyMLModel { model })
+    }
+}
+
 /// RegressionEvaluator.
 #[pyclass(name = "RegressionEvaluator", module = "pyspark.ml.connect.evaluation")]
 pub struct PyRegressionEvaluator {
@@ -620,15 +746,19 @@ pub struct PyBinaryClassificationEvaluator {
 #[pymethods]
 impl PyBinaryClassificationEvaluator {
     #[new]
-    #[pyo3(signature = (labelCol=None, scoreCol=None, metricName=None))]
+    #[pyo3(signature = (labelCol=None, rawPredictionCol=None, metricName=None))]
     #[allow(non_snake_case)]
-    fn new(labelCol: Option<String>, scoreCol: Option<String>, metricName: Option<String>) -> Self {
+    fn new(
+        labelCol: Option<String>,
+        rawPredictionCol: Option<String>,
+        metricName: Option<String>,
+    ) -> Self {
         let mut e = BinaryClassificationEvaluator::new();
         if let Some(c) = labelCol {
             e = e.set_label_col(&c);
         }
-        if let Some(c) = scoreCol {
-            e = e.set_score_col(&c);
+        if let Some(c) = rawPredictionCol {
+            e = e.set_raw_prediction_col(&c);
         }
         if let Some(m) = metricName {
             e = e.set_metric_name(&m);
@@ -641,10 +771,10 @@ impl PyBinaryClassificationEvaluator {
             inner: self.inner.clone().set_label_col(col),
         }
     }
-    #[pyo3(name = "setScoreCol")]
-    fn set_score_col(&self, col: &str) -> Self {
+    #[pyo3(name = "setRawPredictionCol")]
+    fn set_raw_prediction_col(&self, col: &str) -> Self {
         PyBinaryClassificationEvaluator {
-            inner: self.inner.clone().set_score_col(col),
+            inner: self.inner.clone().set_raw_prediction_col(col),
         }
     }
     #[pyo3(name = "setMetricName")]

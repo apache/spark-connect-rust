@@ -84,7 +84,7 @@ fn linear_regression_fits_different_lines_and_keeps_lazy_predictions_alive() {
         .unwrap();
     let object_id = |model: &dyn spark_connect::ml::Model| {
         let spark_connect_proto::ml_relation::MlType::Transform(t) =
-            model.build_ml_relation(&held_out).ml_type.unwrap()
+            model.build_ml_relation(&held_out).unwrap().ml_type.unwrap()
         else {
             panic!("transform")
         };

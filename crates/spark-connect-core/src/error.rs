@@ -275,6 +275,8 @@ pub enum SparkErrorKind {
     Python,
     /// ``RecursionError``, a Python builtin: the executions nested in callbacks are too deep.
     RecursionError,
+    /// ``UnicodeDecodeError``, a Python builtin: a string of the result is not valid UTF-8.
+    UnicodeDecode,
     /// ``pyspark.errors.exceptions.base.SparkRuntimeException``
     SparkRuntime,
     /// ``pyspark.errors.exceptions.base.SparkUpgradeException``
@@ -289,6 +291,18 @@ pub enum SparkErrorKind {
     PickleException,
     /// ``pyspark.errors.exceptions.connect.SparkException``
     Spark,
+}
+
+/// The bytes as lowercase hex, to keep them in the string parameters of an error.
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn hex_decode(hex: &str) -> Option<Vec<u8>> {
+    hex.as_bytes()
+        .chunks(2)
+        .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok())
+        .collect()
 }
 
 impl SparkError {
@@ -351,6 +365,41 @@ impl SparkError {
             operation_id: None,
             server: None,
         }
+    }
+
+    /// Create an UnicodeDecode-kind error for the string `value` of the result column `column`,
+    /// which is not valid UTF-8. The bytes are kept, so that the Python client can raise the error
+    /// of Python's own decoder for them.
+    pub fn invalid_utf8(column: usize, value: &[u8]) -> Self {
+        let mut error = Self::classed(
+            SparkErrorKind::UnicodeDecode,
+            "",
+            &[
+                ("column", &column.to_string()),
+                ("value", &hex_encode(value)),
+            ],
+        );
+        let reason = std::str::from_utf8(value)
+            .err()
+            .map_or_else(String::new, |e| e.to_string());
+        error.message = format!("Invalid UTF-8 in column {column} of the result: {reason}");
+        error
+    }
+
+    /// The result column of the string of an error from `invalid_utf8`.
+    pub fn utf8_column(&self) -> Option<usize> {
+        if self.kind != SparkErrorKind::UnicodeDecode {
+            return None;
+        }
+        self.params.get("column")?.parse().ok()
+    }
+
+    /// The bytes of the string of an error from `invalid_utf8`.
+    pub fn invalid_utf8_value(&self) -> Option<Vec<u8>> {
+        if self.kind != SparkErrorKind::UnicodeDecode {
+            return None;
+        }
+        hex_decode(self.params.get("value")?)
     }
 
     /// Create an error of a specific kind with an error class and parameters.

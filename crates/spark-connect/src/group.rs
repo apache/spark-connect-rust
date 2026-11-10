@@ -13,11 +13,14 @@ use crate::plan::{AggregateGroupType, LogicalPlan};
 use crate::types::DataType;
 use crate::udf::CommonInlineUserDefinedFunctionExpression;
 
-/// Convert a [`crate::row::Value`] into a literal [`Expression`] (for pivot values).
-fn value_to_lit_expr(v: crate::row::Value) -> Expression {
+/// Convert a [`crate::row::Value`] into a literal [`Expression`] of a pivot value. Each value
+/// keeps its own type, as the literal of Spark's pivot, and a NULL is an error, as PySpark's
+/// `GroupedData.pivot` rejects a None.
+fn value_to_lit_expr(v: crate::row::Value) -> Result<Expression> {
     use crate::expression::LiteralExpression as L;
     use crate::row::Value;
     let lit = match v {
+        Value::Null => return Err(not_a_pivot_value("NoneType")),
         Value::Bool(b) => L::boolean(b),
         Value::Byte(x) => L::int(x as i32),
         Value::Short(x) => L::int(x as i32),
@@ -26,10 +29,71 @@ fn value_to_lit_expr(v: crate::row::Value) -> Expression {
         Value::Float(x) => L::double(x as f64),
         Value::Double(x) => L::double(x),
         Value::String(s) => L::string(s),
+        Value::Binary(b) => L::binary(b),
+        Value::Date(d) => L::Date(d),
+        Value::Timestamp(t) => L::Timestamp(t),
+        Value::TimestampNtz(t) => L::TimestampNtz(t),
+        // `TimeType()` of PySpark has a precision of 6.
+        Value::Time(nano) => L::Time { nano, precision: 6 },
         Value::DayTimeInterval(v) => L::DayTimeInterval(v),
-        other => L::string(format!("{:?}", other)),
+        Value::Decimal {
+            value,
+            precision,
+            scale,
+        } => {
+            let (precision, scale) = match (precision, scale) {
+                (Some(precision), Some(scale)) => (precision, scale),
+                // As a decimal of the text: its digits and fraction, as `Decimal(text)` of Spark.
+                _ => decimal_type_of_text(&value),
+            };
+            L::Decimal {
+                value,
+                precision,
+                scale,
+            }
+        }
+        Value::List(_) => return Err(not_a_pivot_value("list")),
+        Value::Map(_) => return Err(not_a_pivot_value("dict")),
+        Value::Struct(_) => return Err(not_a_pivot_value("Row")),
+        Value::Variant { .. } => return Err(not_a_pivot_value("Variant")),
     };
-    Expression::literal(lit)
+    Ok(Expression::literal(lit))
+}
+
+/// The `NOT_EXPECTED_TYPE` error of a pivot value of the type `arg_type`, which PySpark's
+/// `GroupedData.pivot` rejects (its values are bools, floats, ints and strs), named as Python names it.
+fn not_a_pivot_value(arg_type: &str) -> SparkError {
+    SparkError::classed(
+        SparkErrorKind::TypeError,
+        "NOT_EXPECTED_TYPE",
+        &[
+            ("arg_name", "value"),
+            ("expected_type", "bool, float, int or str"),
+            ("arg_type", arg_type),
+        ],
+    )
+}
+
+/// The precision and scale of a decimal text, such as `"1.50"` (3 and 2) or `"1E+3"` (1 and -3),
+/// as Java's `BigDecimal` of the text has them. Text that is not a decimal gives `(10, 0)`, and
+/// the server rejects it.
+fn decimal_type_of_text(text: &str) -> (i32, i32) {
+    let (mantissa, exponent) = match text.split_once(['e', 'E']) {
+        Some((mantissa, exponent)) => (mantissa, exponent.parse::<i32>().ok()),
+        None => (text, Some(0)),
+    };
+    let Some(exponent) = exponent else {
+        return (10, 0);
+    };
+    let unsigned = mantissa.trim_start_matches(['-', '+']);
+    let (int_part, frac_part) = unsigned.split_once('.').unwrap_or((unsigned, ""));
+    let digits = format!("{int_part}{frac_part}");
+    if !digits.bytes().all(|b| b.is_ascii_digit()) || digits.is_empty() {
+        return (10, 0);
+    }
+    let unscaled = digits.trim_start_matches('0');
+    let precision = unscaled.len().max(1) as i32;
+    (precision, frac_part.len() as i32 - exponent)
 }
 
 /// Grouped data for performing aggregations.
@@ -125,6 +189,8 @@ impl GroupedData {
     /// server computes the distinct values; when supplied they are serialized as
     /// pivot-value literals. As PySpark's, only the grouping of `group_by` pivots: that of
     /// a rollup, a cube, grouping sets or a pivot is the error of [`GroupedData::check_pivot`].
+    /// A value of the explicit `values` keeps its type as a literal. A NULL, or a list, map or
+    /// struct, is `NOT_EXPECTED_TYPE`, as PySpark rejects it.
     pub fn pivot(
         &self,
         pivot_col: Column,
@@ -135,7 +201,7 @@ impl GroupedData {
             .unwrap_or_default()
             .into_iter()
             .map(value_to_lit_expr)
-            .collect();
+            .collect::<Result<_>>()?;
         Ok(GroupedData {
             dataframe: self.dataframe.clone(),
             group_cols: self.group_cols.clone(),
@@ -649,13 +715,14 @@ impl NaFunctions {
         NaFunctions { dataframe }
     }
 
-    /// Drop rows containing null values. Mirrors `DataFrameNaFunctions.drop`.
+    /// Drop rows containing null values. Mirrors `DataFrameNaFunctions.drop`; see
+    /// [`DataFrame::dropna`] for `how`.
     pub fn drop(
         &self,
         how: Option<&str>,
         thresh: Option<i32>,
         subset: Option<Vec<&str>>,
-    ) -> DataFrame {
+    ) -> Result<DataFrame> {
         self.dataframe.dropna(how, thresh, subset)
     }
 
@@ -1050,6 +1117,99 @@ mod tests {
                 literal.literal_type,
                 Some(LiteralType::DayTimeInterval(micros))
             );
+        }
+    }
+
+    #[test]
+    fn pivot_values_keep_their_types_as_literals() {
+        use crate::row::Value;
+        use spark_connect_proto::{expression::literal::LiteralType, relation::RelType};
+        let values = vec![
+            Value::Date(18262),
+            Value::Timestamp(1_577_836_800_000_000),
+            Value::TimestampNtz(1_577_836_800_000_000),
+            Value::Time(3_600_000_000_000),
+            Value::Binary(vec![1, 2]),
+            Value::Decimal {
+                value: "1.50".to_string(),
+                precision: Some(5),
+                scale: Some(2),
+            },
+            // Without a precision and a scale, those of the text: as `BigDecimal` has them.
+            Value::Decimal {
+                value: "-0.05".to_string(),
+                precision: None,
+                scale: None,
+            },
+            Value::Decimal {
+                value: "1E+3".to_string(),
+                precision: None,
+                scale: None,
+            },
+        ];
+        let frame = session().range(1).unwrap();
+        let pivot = frame
+            .group_by(vec![] as Vec<Column>)
+            .pivot(crate::column::col("value"), Some(values))
+            .unwrap()
+            .count();
+        let Some(RelType::Aggregate(aggregate)) = pivot.plan.to_proto().rel_type else {
+            panic!("expected Aggregate");
+        };
+        let literals: Vec<_> = aggregate
+            .pivot
+            .unwrap()
+            .values
+            .into_iter()
+            .map(|literal| literal.literal_type)
+            .collect();
+        let decimal = |value: &str, precision, scale| {
+            Some(LiteralType::Decimal(
+                spark_connect_proto::expression::literal::Decimal {
+                    value: value.to_string(),
+                    precision: Some(precision),
+                    scale: Some(scale),
+                },
+            ))
+        };
+        assert_eq!(literals[0], Some(LiteralType::Date(18262)));
+        assert_eq!(
+            literals[1],
+            Some(LiteralType::Timestamp(1_577_836_800_000_000))
+        );
+        assert_eq!(
+            literals[2],
+            Some(LiteralType::TimestampNtz(1_577_836_800_000_000))
+        );
+        assert!(matches!(
+            literals[3],
+            Some(LiteralType::Time(ref time)) if time.nano == 3_600_000_000_000 && time.precision == Some(6)
+        ));
+        assert_eq!(literals[4], Some(LiteralType::Binary(vec![1, 2].into())));
+        assert_eq!(literals[5], decimal("1.50", 5, 2));
+        assert_eq!(literals[6], decimal("-0.05", 1, 2));
+        assert_eq!(literals[7], decimal("1E+3", 1, -3));
+    }
+
+    #[test]
+    fn a_null_or_a_nested_pivot_value_is_not_expected_type() {
+        use crate::row::Value;
+        let frame = session().range(1).unwrap();
+        for (value, arg_type) in [
+            (Value::Null, "NoneType"),
+            (Value::List(vec![]), "list"),
+            (Value::Map(vec![]), "dict"),
+        ] {
+            let err = frame
+                .group_by(vec![] as Vec<Column>)
+                .pivot(crate::column::col("value"), Some(vec![value]))
+                .err()
+                .expect("an error");
+            assert_eq!(err.kind, SparkErrorKind::TypeError);
+            assert_eq!(err.get_condition().as_deref(), Some("NOT_EXPECTED_TYPE"));
+            let parameters = err.get_message_parameters().unwrap();
+            assert_eq!(parameters["arg_name"], "value");
+            assert_eq!(parameters["arg_type"], arg_type);
         }
     }
 

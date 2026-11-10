@@ -435,7 +435,7 @@ impl DataStreamWriter {
         write_op.input = Some(crate::plan::relation_with_ids(
             &self.plan,
             self.session.plan_ids(),
-        ));
+        )?);
 
         if let Some(fmt) = &self.format {
             write_op.format = fmt.clone();
@@ -1017,9 +1017,9 @@ struct ListenerBusState {
     /// The threads delivering a synchronous started event in `start`/`toTable`, one entry
     /// per delivery. As with `dispatching`, a removal from another thread waits for them.
     started_dispatches: Vec<std::thread::ThreadId>,
-    /// Set when the worker of the current generation failed in a callback, so the server still
-    /// holds its listener: the server removes it only on REMOVE_LISTENER_BUS_LISTENER, and
-    /// refuses a new ADD_LISTENER_BUS_LISTENER until then. A new subscription removes it first.
+    /// Set when the worker of the current generation failed, so the server may still hold its
+    /// listener: the server removes it only on REMOVE_LISTENER_BUS_LISTENER, and answers a new
+    /// ADD_LISTENER_BUS_LISTENER for it with no response. A new subscription removes it first.
     server_registration_held: bool,
 }
 
@@ -1079,8 +1079,7 @@ impl ListenerBus {
         }
     }
 
-    /// Record that the server still holds the listener of `generation`, whose worker failed in
-    /// a callback or a decoder (not in the transport, which may have ended the server's side).
+    /// Record that the server may still hold the listener of `generation`, whose worker failed.
     fn mark_server_registration_held(&self, generation: u64) {
         let mut state = self.state.lock().unwrap();
         if state.generation == generation {
@@ -1088,7 +1087,9 @@ impl ListenerBus {
         }
     }
 
-    /// Post a synchronous start event without holding the state lock across callbacks.
+    /// Post a synchronous start event without holding the state lock across callbacks. A panic
+    /// of one listener is reported and isolated, as PySpark's `post_to_all` isolates an exception
+    /// of one listener: the query is still returned, and the other listeners still get the event.
     fn post_to_all(&self, event: &StreamingQueryListenerEvent) {
         let listeners: Vec<Arc<dyn StreamingQueryListener>> = self
             .state
@@ -1099,7 +1100,14 @@ impl ListenerBus {
             .map(|(_, listener)| Arc::clone(listener))
             .collect();
         for listener in listeners {
-            listener.on_event(event);
+            let posted =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| listener.on_event(event)));
+            if let Err(payload) = posted {
+                eprintln!(
+                    "WARNING: a streaming query listener threw an exception\n{}",
+                    panic_message(payload.as_ref())
+                );
+            }
         }
     }
 }
@@ -1122,12 +1130,19 @@ impl Drop for FinishGeneration {
 /// The error of a panic in a native listener's callback: a failure of that callback, as a
 /// returned error from it.
 fn listener_panic_error(payload: &(dyn std::any::Any + Send)) -> SparkError {
-    let message = payload
+    SparkError::connect_msg(format!(
+        "a streaming query listener panicked: {}",
+        panic_message(payload)
+    ))
+}
+
+/// The message of a panic payload, or a placeholder for a payload that is not a string.
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
+    payload
         .downcast_ref::<&str>()
         .copied()
         .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
-        .unwrap_or("a non-string payload");
-    SparkError::connect_msg(format!("a streaming query listener panicked: {message}"))
+        .unwrap_or("a non-string payload")
 }
 
 /// The worker retains neither the session nor its bus. The stream owns only transport
@@ -1189,15 +1204,18 @@ fn run_listener_event_loop(
         }))
         .unwrap_or_else(|payload| Err(listener_panic_error(payload.as_ref())));
         if let Err(error) = dispatched {
-            if let Some(owner) = bus.upgrade() {
-                owner.mark_server_registration_held(generation);
-            }
             failure = Some((listeners, error, dispatch));
             break;
         }
         drop(dispatch);
     }
     if let Some((listeners, error, dispatch)) = failure {
+        // Any failure of the subscription, transport included, may leave the server's
+        // listener registered: the server drops it only on a later failed event send or on
+        // REMOVE, so the next subscription removes it first.
+        if let Some(owner) = bus.upgrade() {
+            owner.mark_server_registration_held(generation);
+        }
         // A removal from another thread waits for this terminal notification, just
         // as it waits for an ordinary event. No state lock or strong bus owner is
         // held across either callback path; the worker can still remove itself.
@@ -1294,9 +1312,16 @@ impl StreamingQueryManager {
         drop(stale);
         Self::join_listener_thread(previous);
         if release_server {
-            // Best effort: the server's listener is gone if the removal fails, and then the
-            // add below reports it.
-            let _ = self.remove_server_listener();
+            if let Err(error) = self.remove_server_listener() {
+                // Without the removal, the server would answer the add below with no response,
+                // and the add would wait for ever. Keep the flag, so that a retry removes first.
+                let mut state = self.bus.state.lock().unwrap();
+                state.server_registration_held = true;
+                state.cancel.take();
+                state.phase = ListenerBusPhase::Idle;
+                self.bus.changed.notify_all();
+                return Err(error);
+            }
         }
         let stream = self.listener_event_stream().and_then(|mut stream| {
             // Cancel a pending acknowledgement once the RPC stream exists. Establishing
@@ -1355,40 +1380,62 @@ impl StreamingQueryManager {
     }
 
     fn remove_listeners(&self, id: Option<&str>) -> Result<bool> {
-        let Some(mut state) = self.idle_state(true)? else {
-            // Another caller waits for this callback. It owns the shutdown result; keep
-            // the registration token until that caller has actually removed the listener.
-            return Ok(false);
-        };
-        if let Some(id) = id {
-            let Some(index) = state
-                .listeners
-                .iter()
-                .position(|(listener_id, _)| listener_id == id)
-            else {
+        loop {
+            let Some(mut state) = self.idle_state(true)? else {
+                // Another caller waits for this callback. It owns the shutdown result; keep
+                // the registration token until that caller has actually removed the listener.
                 return Ok(false);
             };
-            if state.listeners.len() > 1 {
-                state.listeners.remove(index);
-                // As in PySpark's bus, a removal waits for delivery to the snapshot,
-                // including the removed listener, to finish. This also covers a
-                // terminal error notification. A callback of the bus does not wait,
-                // as it would wait for its own delivery.
-                let current = std::thread::current().id();
-                if state.worker_id != Some(current) {
-                    let generation = state.generation;
-                    while state.dispatching == Some(generation)
-                        || state
-                            .started_dispatches
-                            .iter()
-                            .any(|thread| *thread != current)
-                    {
-                        state = self.bus.changed.wait(state).unwrap();
+            if let Some(id) = id {
+                let Some(index) = state
+                    .listeners
+                    .iter()
+                    .position(|(listener_id, _)| listener_id == id)
+                else {
+                    return Ok(false);
+                };
+                if state.listeners.len() > 1 {
+                    state.listeners.remove(index);
+                    // As in PySpark's bus, a removal waits for delivery to the snapshot,
+                    // including the removed listener, to finish. This also covers a
+                    // terminal error notification. A callback of the bus does not wait,
+                    // as it would wait for its own delivery.
+                    let current = std::thread::current().id();
+                    if state.worker_id != Some(current) {
+                        let generation = state.generation;
+                        while state.dispatching == Some(generation)
+                            || state
+                                .started_dispatches
+                                .iter()
+                                .any(|thread| *thread != current)
+                        {
+                            state = self.bus.changed.wait(state).unwrap();
+                        }
                     }
+                    return Ok(true);
                 }
-                return Ok(true);
             }
+            // The removal of the last listener waits for a started event that another thread
+            // delivers, before it removes the server's listener, as PySpark's bus holds its lock
+            // for that delivery. A worker's own event is not awaited: its callbacks may remove
+            // or stop the bus while the removal is in flight. The lock is released while
+            // waiting, so the bus is checked again after it.
+            let current = std::thread::current().id();
+            if state.worker_id != Some(current)
+                && state
+                    .started_dispatches
+                    .iter()
+                    .any(|thread| *thread != current)
+            {
+                drop(self.bus.changed.wait(state).unwrap());
+                continue;
+            }
+            return self.stop_listener_bus(state);
         }
+    }
+
+    /// Remove the last listener of the bus: the server's listener, then the worker.
+    fn stop_listener_bus(&self, mut state: MutexGuard<'_, ListenerBusState>) -> Result<bool> {
         let had_listeners = !state.listeners.is_empty();
         let generation = state.generation;
         state.phase = ListenerBusPhase::Stopping;
@@ -1684,7 +1731,7 @@ impl StreamingQueryManager {
             ..Default::default()
         };
 
-        let response_stream = self.session.execute_plan(request)?;
+        let response_stream = self.session.execute_plan_unreported(request)?;
 
         Ok(ListenerEventStream {
             stream: response_stream,
@@ -1734,6 +1781,19 @@ mod tests {
             .remote("sc://localhost:15002")
             .get_or_create()
             .expect("failed to build session")
+    }
+
+    /// A session with no server behind it whose requests fail at once: the default retry policy
+    /// would retry them for a minute, so a test that needs a failing request uses this one.
+    fn unreachable_session_without_retries() -> SparkSession {
+        let builder = spark_connect_core::channel::ChannelBuilder::parse("sc://127.0.0.1:1")
+            .expect("valid URL");
+        let mut client = block_on(spark_connect_core::client::SparkConnectClient::connect(
+            &builder,
+        ))
+        .expect("failed to build client");
+        client.set_retry_policy(spark_connect_core::retries::RetryPolicy::no_retries());
+        SparkSession::new(client)
     }
 
     #[test]
@@ -2393,6 +2453,158 @@ mod tests {
         let writer = writer.format("parquet").output_mode("append");
         assert_eq!(writer.format, Some("parquet".to_string()));
         assert_eq!(writer.output_mode, Some("append".to_string()));
+    }
+
+    /// A panic of a native listener on the started event is reported and isolated, as PySpark's
+    /// `post_to_all` isolates an exception of one listener: the other listeners still get the
+    /// event, and `start` (which posts it) does not unwind, so it still returns the query.
+    #[test]
+    fn a_panicking_listener_on_the_started_event_does_not_unwind_the_start() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct Panicking;
+        impl StreamingQueryListener for Panicking {
+            fn on_event(&self, _: &StreamingQueryListenerEvent) {
+                panic!("started listener panic");
+            }
+        }
+        struct Counting(AtomicUsize);
+        impl StreamingQueryListener for Counting {
+            fn on_event(&self, _: &StreamingQueryListenerEvent) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let spark = session();
+        let manager = spark.streams();
+        let counting = Arc::new(Counting(AtomicUsize::new(0)));
+        {
+            let mut state = manager.bus.state.lock().unwrap();
+            state
+                .listeners
+                .push(("panicking".to_string(), Arc::new(Panicking)));
+            state
+                .listeners
+                .push(("counting".to_string(), counting.clone()));
+        }
+        manager.post_to_all(&StreamingQueryListenerEvent {
+            event_type: QUERY_STARTED_EVENT,
+            event_json: "{}".to_string(),
+        });
+        assert_eq!(counting.0.load(Ordering::SeqCst), 1);
+        assert_eq!(manager.listeners().len(), 2);
+    }
+
+    /// The removal of the last listener waits for a started event in delivery on another thread,
+    /// as the removal of a non-last listener does. It is checked with `close` on an empty bus,
+    /// which takes the same branch but sends no server request, so it returns at once.
+    #[test]
+    fn last_removal_waits_for_a_started_event_in_delivery_from_another_thread() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let spark = session();
+        let manager = spark.streams();
+        let dispatch = manager.started_dispatch();
+        let (closed, close) = mpsc::channel();
+        std::thread::scope(|scope| {
+            // Drop the delivery guard even if an assertion fails, so the scoped remover
+            // is released before the scope joins it.
+            let dispatch = dispatch;
+            let manager = &manager;
+            scope.spawn(move || {
+                closed.send(manager.close()).unwrap();
+            });
+            assert!(
+                matches!(
+                    close.recv_timeout(Duration::from_millis(300)),
+                    Err(mpsc::RecvTimeoutError::Timeout)
+                ),
+                "the removal of the last listener returned while a started event was in delivery"
+            );
+            drop(dispatch);
+            close
+                .recv_timeout(Duration::from_secs(5))
+                .expect("removal finishes once the started event is delivered")
+                .unwrap();
+        });
+        assert!(manager
+            .bus
+            .state
+            .lock()
+            .unwrap()
+            .started_dispatches
+            .is_empty());
+    }
+
+    /// A failed server removal before a new subscription keeps the registration marked as held,
+    /// and the add fails without sending its own request: the server would answer that request
+    /// with no response, so the add would wait for ever.
+    #[test]
+    fn a_failed_removal_before_a_new_subscription_keeps_the_registration_held() {
+        struct Listener;
+        impl StreamingQueryListener for Listener {
+            fn on_event(&self, _: &StreamingQueryListenerEvent) {}
+        }
+
+        let spark = unreachable_session_without_retries();
+        let manager = spark.streams();
+        manager.bus.state.lock().unwrap().server_registration_held = true;
+        // No server is reachable here, so the removal fails and the add reports it.
+        manager
+            .add_listener(Arc::new(Listener))
+            .expect_err("a failed removal fails the add");
+        assert!(manager.listeners().is_empty());
+        let state = manager.bus.state.lock().unwrap();
+        assert!(state.server_registration_held);
+        assert_eq!(state.phase, ListenerBusPhase::Idle);
+        assert!(state.cancel.is_none());
+    }
+
+    /// A transport failure of the listener stream marks the server registration as held, since
+    /// the server may still hold its listener until a REMOVE or a failed event send drops it.
+    #[test]
+    fn a_transport_failure_marks_the_server_registration_held() {
+        struct Listener;
+        impl StreamingQueryListener for Listener {
+            fn on_event(&self, _: &StreamingQueryListenerEvent) {}
+        }
+
+        let bus = Arc::new(ListenerBus::default());
+        {
+            let mut state = bus.state.lock().unwrap();
+            state.generation = 4;
+            state
+                .listeners
+                .push(("only".to_string(), Arc::new(Listener)));
+        }
+        run_listener_event_loop(
+            vec![Err(SparkError::connect_msg("transport failed"))],
+            Arc::downgrade(&bus),
+            4,
+        );
+        let state = bus.state.lock().unwrap();
+        assert!(state.listeners.is_empty());
+        assert!(state.server_registration_held);
+    }
+
+    /// The listener bus has no `Progress` in PySpark, so its stream never calls the progress
+    /// handlers of the session, not even with the done notification when the stream ends.
+    #[test]
+    fn the_listener_event_stream_reports_no_progress_to_the_handlers() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let spark = unreachable_session_without_retries();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&calls);
+        spark.register_progress_handler(move |_| {
+            counter.fetch_add(1, Ordering::SeqCst);
+        });
+        // No server is reachable here, so the stream does not start: an execution that fails
+        // to start used to end as done. A stream that starts ends with its drop, which is
+        // the same notification.
+        drop(spark.streams().listener_event_stream());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
     #[test]

@@ -2,7 +2,7 @@
 
 use pyo3::exceptions;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::{PyBytes, PyDict, PyList};
 use spark_connect_core::error::{ServerErrorInfo, SparkError, SparkErrorKind};
 
 /// Maps a SparkErrorKind to the corresponding pyspark.errors exception class name.
@@ -17,6 +17,7 @@ fn kind_to_pyspark_class_name(kind: SparkErrorKind) -> &'static str {
         SparkErrorKind::KeyError => "PySparkKeyError",
         SparkErrorKind::RuntimeError => "PySparkRuntimeError",
         SparkErrorKind::RecursionError => "RecursionError",
+        SparkErrorKind::UnicodeDecode => "UnicodeDecodeError",
         SparkErrorKind::NotImplementedError => "PySparkNotImplementedError",
         SparkErrorKind::AssertionError => "PySparkAssertionError",
         SparkErrorKind::PicklingError => "PySparkPicklingError",
@@ -185,6 +186,17 @@ fn callback_exception(err: &SparkError) -> Option<PyErr> {
         .remove(&id)
 }
 
+/// The UnicodeDecodeError of a string of the result that is not valid UTF-8, as PySpark raises
+/// it: the error of Python's own decoder of its bytes, so that the message is the same.
+fn unicode_decode_error(value: &[u8], err: &SparkError) -> PyErr {
+    Python::attach(
+        |py| match PyBytes::new(py, value).call_method1("decode", ("utf-8",)) {
+            Err(exception) => exception,
+            Ok(_) => exceptions::PyRuntimeError::new_err(err.message()),
+        },
+    )
+}
+
 /// Maps a SparkError to a Python exception, attempting to raise the correct typed
 /// exception based on the error kind. Falls back to PyRuntimeError if import fails.
 pub fn spark_error_to_py_exception(err: SparkError) -> PyErr {
@@ -194,6 +206,9 @@ pub fn spark_error_to_py_exception(err: SparkError) -> PyErr {
     if err.kind == SparkErrorKind::RecursionError {
         // A builtin, as PySpark's recursion limit raises it.
         return pyo3::exceptions::PyRecursionError::new_err(err.message());
+    }
+    if let Some(value) = err.invalid_utf8_value() {
+        return unicode_decode_error(&value, &err);
     }
     let msg = err.message();
     let operation_id = err.operation_id.clone();

@@ -240,6 +240,7 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ml::PyLogisticRegression>()?;
     m.add_class::<ml::PyLinearSVC>()?;
     m.add_class::<ml::PyLinearRegression>()?;
+    m.add_class::<ml::PyKMeans>()?;
     m.add_class::<ml::PyRegressionEvaluator>()?;
     m.add_class::<ml::PyBinaryClassificationEvaluator>()?;
     m.add_class::<ml::PyPipeline>()?;

@@ -148,7 +148,7 @@ pub fn define_flow(
     sql_conf: HashMap<String, String>,
     source_code_location: Option<proto::SourceCodeLocation>,
 ) -> Result<()> {
-    let relation = relation_df.relation();
+    let relation = relation_df.relation()?;
     let details =
         define_flow::Details::RelationFlowDetails(define_flow::WriteRelationFlowDetails {
             relation: Some(relation),

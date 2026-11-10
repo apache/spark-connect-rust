@@ -213,7 +213,11 @@ fn na_reshape_execute() {
     let _ = df.fillna(0, Some(vec!["id"])).collect().unwrap();
     let _ = df.fillna_double(0.0, Some(vec!["v"])).collect().unwrap();
     let _ = df.fillna_string("x", Some(vec!["name"])).collect().unwrap();
-    let _ = df.dropna(Some("any"), None, None).collect().unwrap();
+    let _ = df
+        .dropna(Some("any"), None, None)
+        .unwrap()
+        .collect()
+        .unwrap();
     let _ = df
         .replace(vec![("a".to_string(), "A".to_string())], Some(vec!["name"]))
         .collect()

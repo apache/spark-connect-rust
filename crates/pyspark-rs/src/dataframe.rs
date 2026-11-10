@@ -668,9 +668,10 @@ impl PyDataFrame {
     }
 
     /// The bytes of the relation of this DataFrame as it is sent, for the plan of `_plan`.
-    fn _relation_bytes<'py>(&self, py: Python<'py>) -> Bound<'py, pyo3::types::PyBytes> {
+    fn _relation_bytes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyBytes>> {
         use prost::Message;
-        pyo3::types::PyBytes::new(py, &self.dataframe.to_relation().encode_to_vec())
+        let relation = self.dataframe.to_relation().to_pyerr()?;
+        Ok(pyo3::types::PyBytes::new(py, &relation.encode_to_vec()))
     }
 
     /// The bytes of the placeholder of the relation of this DataFrame, which the plan of `_plan`
@@ -690,7 +691,7 @@ impl PyDataFrame {
         let this = slf.borrow();
         py.import("pyspark.sql.connect.dataframe")?
             .getattr("_reduce_dataframe")?
-            .call1((this.spark_session(py)?, this._relation_bytes(py)))
+            .call1((this.spark_session(py)?, this._relation_bytes(py)?))
     }
 
     /// The DataFrame of `relation`, the bytes of a relation of `session`, as a pickled DataFrame
@@ -1158,8 +1159,8 @@ impl PyDataFrame {
         numPartitions: Bound<'_, PyAny>,
         cols: Vec<Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
-        // As PySpark's: a positive partition count and columns, or columns alone, each sorted
-        // ascending unless it is a sort order.
+        // As PySpark's: a positive partition count and columns, or columns alone. The columns
+        // are sorted ascending unless they are sort orders, by `repartition_by_range_opt`.
         let (num_partitions, cols) = if numPartitions.is_instance_of::<PyInt>() {
             let n = positive_partitions(py, numPartitions.extract()?)?;
             if cols.is_empty() {
@@ -1187,10 +1188,7 @@ impl PyDataFrame {
         };
         let exprs: Vec<_> = to_column_list(cols)?
             .into_iter()
-            .map(|c| match c.expression().node() {
-                spark_connect::expression::ExpressionNode::SortOrder(_) => c.expression().clone(),
-                _ => c.asc().expression().clone(),
-            })
+            .map(|c| c.expression().clone())
             .collect();
         Ok(PyDataFrame::new(
             self.dataframe
@@ -1858,7 +1856,8 @@ impl PyDataFrame {
         crate::stat_arguments::cov(py, &self.dataframe.stat(), col1, col2)
     }
 
-    /// Stratified sample without replacement per key.
+    /// Stratified sample without replacement per key. Without a seed, the client draws one
+    /// from Python's `random`, as PySpark Connect's `sampleBy` does.
     #[pyo3(name = "sampleBy", signature = (col, fractions, seed=None))]
     fn sample_by(
         &self,
@@ -1866,10 +1865,17 @@ impl PyDataFrame {
         fractions: &Bound<'_, PyAny>,
         seed: Option<i64>,
     ) -> PyResult<PyDataFrame> {
+        let py = col.py();
         let (col, fractions) = crate::stat::sample_by_arguments(col, fractions)?;
-        Ok(PyDataFrame::new(
-            self.dataframe.stat().sample_by(col, fractions, seed),
-        ))
+        let seed = match seed {
+            Some(seed) => seed,
+            None => python_random_seed(py)?,
+        };
+        Ok(PyDataFrame::new(self.dataframe.stat().sample_by(
+            col,
+            fractions,
+            Some(seed),
+        )))
     }
 
     /// Replace values, as PySpark's `DataFrame.replace`: `to_replace` is a {old: new} dict, or
@@ -1957,6 +1963,11 @@ impl PyDataFrame {
                 return Err(not_positive("weights", &weight)?);
             }
         }
+        // Drawn before the sum is checked, as PySpark does, so that a failing sum uses one too.
+        let seed = match seed {
+            Some(seed) => seed,
+            None => python_random_seed(py)?,
+        };
         let total = py.import("builtins")?.call_method1("sum", (weights,))?;
         if total.le(0)? {
             return Err(not_positive("sum(weights)", &total)?);
@@ -1964,7 +1975,7 @@ impl PyDataFrame {
         let weights: Vec<f64> = weights.extract()?;
         Ok(self
             .dataframe
-            .random_split(weights, seed)
+            .random_split(weights, Some(seed))
             .to_pyerr()?
             .into_iter()
             .map(PyDataFrame::new)
@@ -1978,10 +1989,11 @@ impl PyDataFrame {
             .to_pyerr()
     }
 
-    /// Whether collect/take can run without a Spark job (a local relation).
+    /// Whether the server answers that this DataFrame is local (a local relation).
     #[pyo3(name = "isLocal")]
-    fn is_local(&self) -> bool {
-        self.dataframe.is_local()
+    fn is_local(&self, py: Python<'_>) -> PyResult<bool> {
+        py.detach(|| self.dataframe.is_local_on_server().map_err(Box::new))
+            .to_pyerr()
     }
 
     /// Whether this (cached) DataFrame is cached.
@@ -2080,14 +2092,14 @@ impl PyDataFrame {
     /// `df.transform(func, *args, **kwargs)` == `func(df, *args, **kwargs)`.
     #[pyo3(signature = (func, *args, **kwargs))]
     fn transform(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         func: &Bound<'_, PyAny>,
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        let this = Py::new(py, PyDataFrame::new(self.dataframe.clone()))?;
-        let mut call_args: Vec<Py<PyAny>> = vec![this.into_any()];
+        // As PySpark's, which passes `self`: a subclass of DataFrame keeps its methods and type.
+        let py = slf.py();
+        let mut call_args: Vec<Py<PyAny>> = vec![slf.clone().into_any().unbind()];
         for a in args.iter() {
             call_args.push(a.unbind());
         }
@@ -2452,6 +2464,7 @@ impl PyDataFrame {
         let schema = py
             .detach(|| self.dataframe.schema().map_err(Box::new))
             .to_pyerr()?;
+        check_nanosecond_timestamps(py, Some(&schema))?;
         crate::types::data_type_to_py(py, &schema)
     }
 
@@ -2483,10 +2496,14 @@ impl PyDataFrame {
         }
     }
 
-    /// Get the first n rows.
-    fn take(&self, py: Python<'_>, num: usize) -> PyResult<Vec<Py<PyAny>>> {
+    /// Get the first n rows, as PySpark's `DataFrame.take`, which is `limit(num).collect()`, so
+    /// the server checks `num`.
+    fn take(&self, py: Python<'_>, num: i32) -> PyResult<Vec<Py<PyAny>>> {
         let (rows, schema) = interruptible(py, &self.dataframe.spark_session(), || {
-            self.dataframe.take_with_schema(num).map_err(Box::new)
+            self.dataframe
+                .limit(num)
+                .collect_with_schema()
+                .map_err(Box::new)
         })?;
         rows_to_py(py, &self.dataframe, &rows, schema.as_ref())
     }
@@ -2494,6 +2511,9 @@ impl PyDataFrame {
     /// Column names (a property, mirroring `DataFrame.columns`).
     #[getter]
     fn columns(&self, py: Python<'_>) -> PyResult<Vec<String>> {
+        // The schema is cached, so the names come from it without another request.
+        let schema = py.detach(|| self.dataframe.schema()).to_pyerr()?;
+        check_nanosecond_timestamps(py, Some(&schema))?;
         py.detach(|| self.dataframe.columns().to_pyerr())
     }
 
@@ -2565,9 +2585,15 @@ impl PyDataFrame {
                 ));
             }
         };
-        Ok(PyDataFrame::new(
-            self.dataframe.sample_opt(frac, replace, seed),
-        ))
+        let seed = match seed {
+            Some(seed) => seed,
+            None => python_random_seed(py)?,
+        };
+        Ok(PyDataFrame::new(self.dataframe.sample_opt(
+            frac,
+            replace,
+            Some(seed),
+        )))
     }
 
     /// Check if the DataFrame is empty.
@@ -2587,6 +2613,7 @@ impl PyDataFrame {
             _ => None,
         };
         let schema = py.detach(|| self.dataframe.schema().to_pyerr())?;
+        check_nanosecond_timestamps(py, Some(&schema))?;
         let depth = level
             .map(crate::types::normalize_tree_depth)
             .transpose()?
@@ -2599,9 +2626,9 @@ impl PyDataFrame {
     /// Get the schema as a list of (name, type) tuples.
     #[getter]
     fn dtypes(&self, py: Python<'_>) -> PyResult<Vec<(String, String)>> {
-        let spark_connect::types::DataType::Struct { fields } =
-            py.detach(|| self.dataframe.schema().to_pyerr())?
-        else {
+        let schema = py.detach(|| self.dataframe.schema().to_pyerr())?;
+        check_nanosecond_timestamps(py, Some(&schema))?;
+        let spark_connect::types::DataType::Struct { fields } = schema else {
             unreachable!("schema() validates struct responses")
         };
         // As PySpark, a user-defined type is named by its simpleString(), such as `vector`,
@@ -4372,10 +4399,11 @@ fn nanosecond_timestamp_text(data_type: &spark_connect::types::DataType) -> Opti
     }
 }
 
-/// Raises as PySpark does for a result of `schema` with a nanosecond-precision timestamp, which
-/// PySpark cannot convert from the proto of the schema: the collecting APIs raise, though the
-/// Rust core collects these values in microseconds.
-fn check_nanosecond_timestamps(
+/// Raises as PySpark does for a schema with a nanosecond-precision timestamp, which PySpark cannot
+/// convert from the proto of the schema: the collecting APIs and every schema surface raise (the
+/// schema, columns, dtypes, printSchema, a DDL string of a schema), though the Rust core keeps
+/// these values, and count, show and describe work.
+pub(crate) fn check_nanosecond_timestamps(
     py: Python<'_>,
     schema: Option<&spark_connect::types::DataType>,
 ) -> PyResult<()> {
@@ -4423,6 +4451,15 @@ fn read_binary_as_bytes(py: Python<'_>, dataframe: &DataFrame) -> PyResult<bool>
             .map_err(Box::new)
     })?;
     Ok(value.is_some_and(|value| value.eq_ignore_ascii_case("true")))
+}
+
+/// The seed of a sample without one, drawn from Python's `random` as PySpark's
+/// `random.randint(0, sys.maxsize)`, so that `random.seed` makes the rows repeat.
+pub(crate) fn python_random_seed(py: Python<'_>) -> PyResult<i64> {
+    let max_size = py.import("sys")?.getattr("maxsize")?;
+    py.import("random")?
+        .call_method1("randint", (0, max_size))?
+        .extract()
 }
 
 /// The collected `rows` of a result of `schema`, with configured binary values and
