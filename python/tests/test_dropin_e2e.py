@@ -104,6 +104,23 @@ def test_udtfs_of_ddl_return_types_are_unparsed_as_pyspark(session):
 
 
 
+def test_list_values_of_column_methods_are_evaluated_by_the_server_as_pyspark(session):
+    # As PySpark's LiteralExpression of a list: each element is of the type that the first one
+    # gives the list, when the type accepts it, so the server evaluates the array of the value.
+    import numpy as np
+
+    df = session.range(1)
+    when = F.when(F.lit(False), F.array(F.lit(0.0).cast("float")))
+    assert df.select(when.otherwise([np.float32(1.5), 2.0]).alias("r")).collect() == [
+        Row(r=[1.5, 2.0])]
+    when = F.when(F.lit(False), F.array(F.lit(0.0)))
+    assert df.select(when.otherwise([1.5, np.float32(2.0)]).alias("r")).collect() == [
+        Row(r=[1.5, 2.0])]
+    when = F.when(F.lit(False), F.array(F.lit(date(2000, 1, 1))))
+    assert df.select(when.otherwise([date(2020, 1, 1), datetime(2020, 1, 2, 3)]).alias("r")
+                     ).collect() == [Row(r=[date(2020, 1, 1), date(2020, 1, 2)])]
+
+
 def test_udf_and_udtf_calls_take_named_arguments_as_pyspark(session):
     # As PySpark's: the keyword arguments of a UDF or UDTF call are its named arguments, and
     # a bare string is a column name.

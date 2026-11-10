@@ -21,6 +21,7 @@ from concurrent.futures import ThreadPoolExecutor
 from fractions import Fraction
 from threading import Barrier
 
+import numpy as np
 import pytest
 
 from _mock_connect_server import (
@@ -2198,6 +2199,141 @@ def test_functions_lit_of_a_list_stays_an_array_as_pyspark():
     when = F.when(F.lit(True), [])._expr.to_plan(None).unresolved_function
     assert when.function_name == "when"
     assert when.arguments[1].unresolved_function.function_name == "array"
+
+
+@pytest.mark.parametrize("base, value, expected", [
+    # A NumPy float32 or a float in a float array, a float in a double array, and a datetime in a
+    # date array, which is its date.
+    (lambda F: F.array(F.lit(0.0).cast("float")), [np.float32(1.5), 2.0],
+     {"array": {"elementType": {"float": {}},
+                "elements": [{"float": 1.5}, {"float": 2.0}]}}),
+    (lambda F: F.array(F.lit(0.0)), [1.5, np.float32(2.0)],
+     {"array": {"elementType": {"double": {}},
+                "elements": [{"double": 1.5}, {"double": 2.0}]}}),
+    (lambda F: F.array(F.lit(datetime.date(2000, 1, 1))),
+     [datetime.date(2020, 1, 1), datetime.datetime(2020, 1, 2, 3)],
+     {"array": {"elementType": {"date": {}},
+                "elements": [{"date": 18262}, {"date": 18263}]}}),
+])
+def test_when_otherwise_takes_a_list_of_the_values_that_pyspark_accepts(base, value, expected):
+    # As PySpark's LiteralExpression of the list: its element type is that of the first element,
+    # and each other element must be accepted for that type, as the type says.
+    from google.protobuf.json_format import MessageToDict
+    from pyspark.sql import functions as F
+
+    when = F.when(F.lit(False), base(F)).otherwise(value)._expr.to_plan(None).unresolved_function
+    assert MessageToDict(when.arguments[2].literal) == expected
+
+
+@pytest.mark.parametrize("value, expected", [
+    # Each element is of the element type of the first, as PySpark's LiteralExpression makes it:
+    # a Python int is a byte, a short, an integer or a long that is in its range, a bool is an
+    # int, and a NumPy int is accepted for its own width and the wider ones.
+    ([np.int8(1), 2], {"elementType": {"byte": {}},
+                       "elements": [{"byte": 1}, {"byte": 2}]}),
+    ([np.int16(1), np.int8(2)], {"elementType": {"short": {}},
+                                 "elements": [{"short": 1}, {"short": 2}]}),
+    ([np.int32(1), np.int8(2)], {"elementType": {"integer": {}},
+                                 "elements": [{"integer": 1}, {"integer": 2}]}),
+    ([1, np.int8(2)], {"elementType": {"integer": {}},
+                       "elements": [{"integer": 1}, {"integer": 2}]}),
+    ([np.int64(1), 2], {"elementType": {"long": {}},
+                        "elements": [{"long": "1"}, {"long": "2"}]}),
+    ([np.float32(1.5), 2.0], {"elementType": {"float": {}},
+                              "elements": [{"float": 1.5}, {"float": 2.0}]}),
+    ([1.5, np.float64(2.0)], {"elementType": {"double": {}},
+                              "elements": [{"double": 1.5}, {"double": 2.0}]}),
+    ([datetime.date(2020, 1, 1), datetime.datetime(2020, 1, 2, 3)],
+     {"elementType": {"date": {}}, "elements": [{"date": 18262}, {"date": 18263}]}),
+    ([[datetime.date(2020, 1, 1)], [datetime.datetime(2020, 1, 2, 3)]], {
+        "elementType": {"array": {"elementType": {"date": {}}, "containsNull": True}},
+        "elements": [{"array": {"elementType": {"date": {}}, "elements": [{"date": 18262}]}},
+                     {"array": {"elementType": {"date": {}}, "elements": [{"date": 18263}]}}]}),
+    (["a", np.str_("b")], {"elementType": {"string": {"collation": "UTF8_BINARY"}},
+                           "elements": [{"string": "a"}, {"string": "b"}]}),
+    ([b"a", bytearray(b"b")], {"elementType": {"binary": {}},
+                               "elements": [{"binary": "YQ=="}, {"binary": "Yg=="}]}),
+    ([datetime.timedelta(1), datetime.timedelta(seconds=2)], {
+        "elementType": {"dayTimeInterval": {"startField": 0, "endField": 3}},
+        "elements": [{"dayTimeInterval": "86400000000"}, {"dayTimeInterval": "2000000"}]}),
+    ([datetime.time(1, 2, 3), datetime.time(4, 5, 6, 7)], {
+        "elementType": {"time": {"precision": 6}},
+        "elements": [{"time": {"nano": "3723000000000", "precision": 6}},
+                     {"time": {"nano": "14706000007000", "precision": 6}}]}),
+])
+def test_column_methods_take_the_list_of_values_that_pyspark_accepts(value, expected):
+    from google.protobuf.json_format import MessageToDict
+    from pyspark.sql import functions as F
+
+    extraction = F.col("a").getItem(value)._expr.to_plan(None).unresolved_extract_value.extraction
+    assert MessageToDict(extraction.literal) == {"array": expected}
+
+
+@pytest.mark.parametrize("value", [
+    [np.int8(1), 300],
+    [np.int8(1), 2 ** 40],
+    [np.int8(1), np.int16(2)],
+    [np.int8(1), np.int32(2)],
+    [np.int32(1), np.int64(2)],
+    [1, np.int64(2)],
+    [1, np.bool_(True)],
+    [1, 1.5],
+    [1.5, 2],
+    [datetime.datetime(2020, 1, 2, 3), datetime.date(2020, 1, 1)],
+    [decimal.Decimal("1.5"), 2],
+])
+def test_column_methods_reject_a_list_value_that_pyspark_rejects(value):
+    # As PySpark's asserts: another type than the element type's, or an int out of its range.
+    from pyspark.sql import functions as F
+
+    with pytest.raises(AssertionError):
+        F.col("a").getItem(value)._expr.to_plan(None)
+
+
+def _nested_list(depth):
+    value = 1.5
+    for _ in range(depth):
+        value = [value]
+    return value
+
+
+def test_column_methods_build_a_deep_list_and_raise_recursion_error_past_the_bound():
+    # As PySpark's LiteralExpression, which recurses for each level of a list, so a list nested
+    # about 1000 levels deep raises RecursionError. A list of 900 levels is built at once, as each
+    # level converts its elements once, where converting the first element twice took many seconds.
+    from pyspark.sql import functions as F
+
+    start = time.time()
+    F.col("a").getItem(_nested_list(900))
+    assert time.time() - start < 1.0
+    deep = _nested_list(2000)
+    for build in (
+        lambda: F.col("a").getItem(deep),
+        lambda: F.col("a").isin(deep),
+        lambda: F.when(F.lit(False), F.lit(0.0)).otherwise(deep),
+    ):
+        with pytest.raises(RecursionError):
+            build()
+
+
+def test_lit_of_a_timestamp_under_ntz_is_its_wall_clock_without_a_warning(mock_connect):
+    # As PySpark's TimestampNTZType.toInternal, which reads the fields of the value: the
+    # nanoseconds of a pandas Timestamp are dropped silently, where its to_pydatetime() warns,
+    # and an aware datetime is the wall clock that it shows.
+    import pandas as pd
+    import warnings
+    from pyspark.sql import functions as F
+
+    _, service = mock_connect
+    service.confs = {"spark.sql.timestampType": "TIMESTAMP_NTZ"}
+    aware = datetime.datetime(
+        2020, 1, 2, 3, 4, 5, tzinfo=datetime.timezone(datetime.timedelta(hours=5)))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        column = F.lit(pd.Timestamp("2020-06-01 12:00:00.000000123"))
+        aware_column = F.lit(aware)
+    assert column._expr.to_plan(None).literal.timestamp_ntz == 1591012800000000
+    assert aware_column._expr.to_plan(None).literal.timestamp_ntz == 1577934245000000
 
 
 
