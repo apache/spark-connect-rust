@@ -394,47 +394,134 @@ pub struct SparkConnectClient {
     /// check of the IDs of its responses, and its close when the server reports that the session
     /// changed. See [`SparkConnectClient::set_session_tracking`].
     session_tracking: bool,
-    /// The executions in flight, shared by the clones of the client, each with the calling
-    /// thread that started it, in the order they started. See
+    /// The executions in flight, shared by the clones of the client, in the order they started,
+    /// each with the thread that waits for it now, if any. See
     /// [`SparkConnectClient::running_operation_id`].
     inflight_operations: std::sync::Arc<std::sync::Mutex<Vec<InflightEntry>>>,
     /// The plan compression of the client, shared by its clones, looked up on its first plan.
     plan_compression: std::sync::Arc<std::sync::Mutex<PlanCompression>>,
 }
 
-/// An execution in flight: the thread that started it, and its operation ID.
+/// An execution in flight: its operation ID, and the thread that waits for it now, if any.
 #[derive(Debug, Clone, PartialEq)]
 struct InflightEntry {
-    thread: std::thread::ThreadId,
     operation_id: String,
+    waiter: Option<std::thread::ThreadId>,
 }
 
 /// Keeps an execution in the registry of the in-flight executions of its client until it drops.
 struct InflightGuard {
     registry: std::sync::Arc<std::sync::Mutex<Vec<InflightEntry>>>,
-    entry: InflightEntry,
+    operation_id: String,
+    /// The thread that registered the execution, which is the caller that starts it.
+    registered_on: std::thread::ThreadId,
 }
 
 impl InflightGuard {
-    /// Register `entry` in `registry` until the guard drops.
+    /// Register the execution `operation_id` in `registry` until the guard drops.
     fn register(
         registry: std::sync::Arc<std::sync::Mutex<Vec<InflightEntry>>>,
-        entry: InflightEntry,
+        operation_id: String,
     ) -> Self {
         registry
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .push(entry.clone());
-        InflightGuard { registry, entry }
+            .push(InflightEntry {
+                operation_id: operation_id.clone(),
+                waiter: None,
+            });
+        InflightGuard {
+            registry,
+            operation_id,
+            registered_on: crate::runtime::calling_thread_id(),
+        }
+    }
+
+    /// The handle of the execution, which the caller that started it uses to mark its waits.
+    fn handle(&self) -> InflightHandle {
+        InflightHandle {
+            registry: std::sync::Arc::clone(&self.registry),
+            operation_id: self.operation_id.clone(),
+            registered_on: self.registered_on,
+        }
+    }
+
+    /// Marks the execution as waited for by the calling thread, until the returned guard drops.
+    fn waiting(&self) -> WaitingGuard {
+        self.handle().waiting()
+    }
+}
+
+/// A handle of an execution in flight, to mark the waits of its caller for it: see
+/// [`InflightHandle::waiting`]. The handle does not keep the execution in flight.
+#[derive(Clone)]
+pub struct InflightHandle {
+    registry: std::sync::Arc<std::sync::Mutex<Vec<InflightEntry>>>,
+    operation_id: String,
+    registered_on: std::thread::ThreadId,
+}
+
+impl InflightHandle {
+    /// Marks the execution as waited for by the calling thread, until the returned guard drops,
+    /// so that a signal that the wait polls interrupts it (see
+    /// [`SparkConnectClient::running_operation_id`]). Only a wait of the thread that started the
+    /// execution is marked: a wait of another thread, such as a background task that reads the
+    /// execution for its caller, is not the caller's, and the caller marks its own waits instead.
+    pub fn waiting(&self) -> WaitingGuard {
+        let caller = crate::runtime::calling_thread_id();
+        let marked = caller == self.registered_on;
+        if marked {
+            set_waiter(&self.registry, &self.operation_id, Some(caller));
+        }
+        WaitingGuard {
+            registry: std::sync::Arc::clone(&self.registry),
+            operation_id: self.operation_id.clone(),
+            marked,
+        }
     }
 }
 
 impl Drop for InflightGuard {
     fn drop(&mut self) {
         let mut inflight = self.registry.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(position) = inflight.iter().rposition(|entry| *entry == self.entry) {
+        if let Some(position) = inflight
+            .iter()
+            .rposition(|entry| entry.operation_id == self.operation_id)
+        {
             inflight.remove(position);
         }
+    }
+}
+
+/// Marks an execution as waited for by the calling thread, until it drops. See
+/// [`InflightHandle::waiting`].
+pub struct WaitingGuard {
+    registry: std::sync::Arc<std::sync::Mutex<Vec<InflightEntry>>>,
+    operation_id: String,
+    marked: bool,
+}
+
+impl Drop for WaitingGuard {
+    fn drop(&mut self) {
+        if self.marked {
+            set_waiter(&self.registry, &self.operation_id, None);
+        }
+    }
+}
+
+/// Sets the thread that waits for the execution `operation_id` in `registry`, if it is in flight.
+fn set_waiter(
+    registry: &std::sync::Mutex<Vec<InflightEntry>>,
+    operation_id: &str,
+    waiter: Option<std::thread::ThreadId>,
+) {
+    let mut inflight = registry.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(entry) = inflight
+        .iter_mut()
+        .rev()
+        .find(|entry| entry.operation_id == operation_id)
+    {
+        entry.waiter = waiter;
     }
 }
 
@@ -607,11 +694,12 @@ impl SparkConnectClient {
         self.closed.load(std::sync::atomic::Ordering::SeqCst)
     }
 
-    /// The operation ID of the innermost execution in flight that the calling thread started, if
-    /// any: the one that a wait of the calling thread is for, as PySpark interrupts the operation
-    /// of the iterator that is interrupted.
+    /// The operation ID of the innermost execution that the calling thread waits for now, if any:
+    /// the one that a wait of the calling thread is for, as PySpark interrupts the operation of
+    /// the iterator that is interrupted. An execution in flight that nothing waits for, such as
+    /// an iterator that is not consumed, is not one.
     pub fn running_operation_id(&self) -> Option<String> {
-        let thread = crate::runtime::calling_thread_id();
+        let caller = crate::runtime::calling_thread_id();
         let inflight = self
             .inflight_operations
             .lock()
@@ -619,7 +707,7 @@ impl SparkConnectClient {
         inflight
             .iter()
             .rev()
-            .find(|entry| entry.thread == thread)
+            .find(|entry| entry.waiter == Some(caller))
             .map(|entry| entry.operation_id.clone())
     }
 
@@ -1228,16 +1316,15 @@ impl SparkConnectClient {
         // Before the first RPC, so that an execution that waits for the server is in flight.
         let inflight = InflightGuard::register(
             std::sync::Arc::clone(&self.inflight_operations),
-            InflightEntry {
-                thread: crate::runtime::calling_thread_id(),
-                operation_id: iter.operation_id().to_string(),
-            },
+            iter.operation_id().to_string(),
         );
         let start = iter.request().clone();
         let deadline = self.rpc_deadlines.reattachable_execute_plan;
         let mut stream_deadline = None;
-        let stream = self
-            .with_retry(|| {
+        let stream = {
+            // The first RPC is a wait of the caller for the execution.
+            let _waiting = inflight.waiting();
+            self.with_retry(|| {
                 let mut req = with_deadline(Request::new(start.clone()), deadline);
                 self._attach_metadata(&mut req);
                 stream_deadline = deadline.map(|d| tokio::time::Instant::now() + d);
@@ -1248,7 +1335,8 @@ impl SparkConnectClient {
                         .map(Response::into_inner)
                 }
             })
-            .await;
+            .await
+        };
         let stream = match stream {
             Ok(stream) => Some(stream),
             // As the reference iterator, past its deadline an execution is resumed by
@@ -2164,6 +2252,13 @@ impl SparkConnectClient {
 }
 
 impl ReattachableResponseStream {
+    /// The handle of the execution of this stream, to mark the waits of the caller that starts it
+    /// for the execution while the caller reads its responses from another thread (see
+    /// [`InflightHandle::waiting`]).
+    pub fn inflight_handle(&self) -> InflightHandle {
+        self._inflight.handle()
+    }
+
     /// The gRPC metadata of every request about this execution.
     fn metadata_map(&self) -> MetadataMap {
         self.client.execution_metadata()
@@ -2179,6 +2274,8 @@ impl ReattachableResponseStream {
         if self.done {
             return Ok(None);
         }
+        // Each wait for the next response is a wait of the caller for the execution.
+        let _waiting = self._inflight.waiting();
         // As the reference iterator's `_has_next` retries with a `Retrying` of its own, the
         // reattaches of each response have the attempts and the elapsed time of the policy.
         let mut retry_state = RetryPolicyState::new(self.retry_policy.clone());
@@ -2628,42 +2725,81 @@ mod tests {
     }
 
     #[test]
-    fn test_running_operation_id_is_the_innermost_execution_of_the_calling_thread() {
+    fn test_running_operation_id_is_the_innermost_execution_the_calling_thread_waits_for() {
         let client = connect_blocking("sc://example.com");
         assert_eq!(client.running_operation_id(), None);
-        let entry = |thread, operation_id: &str| InflightEntry {
-            thread,
-            operation_id: operation_id.to_string(),
-        };
-        let caller = crate::runtime::calling_thread_id();
-        let outer = InflightGuard::register(
-            std::sync::Arc::clone(&client.inflight_operations),
-            entry(caller, "outer"),
-        );
-        let inner = InflightGuard::register(
-            std::sync::Arc::clone(&client.inflight_operations),
-            entry(caller, "inner"),
-        );
+        let registry = || std::sync::Arc::clone(&client.inflight_operations);
+        let outer = InflightGuard::register(registry(), "outer".to_string());
+        let inner = InflightGuard::register(registry(), "inner".to_string());
+        // In flight, but nothing waits for them: no execution is interrupted.
+        assert_eq!(client.running_operation_id(), None);
+        let wait_outer = outer.waiting();
+        assert_eq!(client.running_operation_id().as_deref(), Some("outer"));
+        let wait_inner = inner.waiting();
         assert_eq!(client.running_operation_id().as_deref(), Some("inner"));
-        drop(inner);
+        drop(wait_inner);
         assert_eq!(client.running_operation_id().as_deref(), Some("outer"));
-        // The executions of another thread are not those of the calling thread.
+        drop(wait_outer);
+        assert_eq!(client.running_operation_id(), None);
+        // The waits of another thread are not those of the calling thread.
+        let (waiting_tx, waiting_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
         let other = std::thread::spawn({
-            let client = client.clone();
-            let registry = std::sync::Arc::clone(&client.inflight_operations);
+            let registry = registry();
             move || {
-                let _guard = InflightGuard::register(
-                    registry,
-                    entry(crate::runtime::calling_thread_id(), "other"),
-                );
-                client.running_operation_id()
+                let guard = InflightGuard::register(registry, "other".to_string());
+                let _wait = guard.waiting();
+                waiting_tx.send(()).unwrap();
+                done_rx.recv().unwrap();
             }
-        })
-        .join()
-        .unwrap();
-        assert_eq!(other.as_deref(), Some("other"));
-        assert_eq!(client.running_operation_id().as_deref(), Some("outer"));
+        });
+        waiting_rx.recv().unwrap();
+        assert_eq!(client.running_operation_id(), None);
+        done_tx.send(()).unwrap();
+        other.join().unwrap();
+        // Once the registration of the execution drops, it is not in flight any more.
+        let wait_inner = inner.waiting();
+        drop(inner);
+        assert_eq!(client.running_operation_id(), None);
+        drop(wait_inner);
         drop(outer);
+        assert_eq!(client.running_operation_id(), None);
+    }
+
+    #[test]
+    fn test_an_inflight_handle_marks_only_the_waits_of_the_thread_that_started_it() {
+        // As a prefetching iterator: the execution is read by a task of its own, and its caller
+        // marks its wait for the batches through the handle.
+        let client = connect_blocking("sc://example.com");
+        let guard = InflightGuard::register(
+            std::sync::Arc::clone(&client.inflight_operations),
+            "prefetch".to_string(),
+        );
+        let handle = guard.handle();
+        // Not read: the execution is in flight, but no wait of the caller is for it.
+        assert_eq!(client.running_operation_id(), None);
+        {
+            let _waiting = handle.waiting();
+            assert_eq!(client.running_operation_id().as_deref(), Some("prefetch"));
+        }
+        assert_eq!(client.running_operation_id(), None);
+        // The reads of a task on another thread do not mark the execution for the caller: the
+        // task's wait is not the caller's.
+        let (waiting_tx, waiting_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        let task = std::thread::spawn({
+            let handle = handle.clone();
+            move || {
+                let _waiting = handle.waiting();
+                waiting_tx.send(()).unwrap();
+                done_rx.recv().unwrap();
+            }
+        });
+        waiting_rx.recv().unwrap();
+        assert_eq!(client.running_operation_id(), None);
+        done_tx.send(()).unwrap();
+        task.join().unwrap();
+        drop(guard);
         assert_eq!(client.running_operation_id(), None);
     }
 

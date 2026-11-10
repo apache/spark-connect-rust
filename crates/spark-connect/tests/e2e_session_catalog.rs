@@ -422,6 +422,65 @@ fn json_to_ddl_converts_on_the_server() {
 /// The execution that the calling thread waits for is the one that its wait interrupts, as
 /// PySpark's `KeyboardInterrupt` does: the wait ends with the server's cancellation, and the
 /// session goes on.
+/// A prefetching iterator is read by a task of its own, and its caller waits for the task's
+/// batches: a wait of the caller interrupts its execution, while an iterator that is not read is
+/// not the one a wait interrupts.
+#[test]
+fn interrupting_the_wait_of_a_prefetching_iterator_cancels_its_execution() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use spark_connect_core::runtime::{with_wait_watch, WaitWatch, Watch};
+
+    if !should_run() {
+        return;
+    }
+    let spark = session();
+    let slow = spark
+        .sql("SELECT sum(sqrt(id)) FROM range(0, 1000000000000, 1, 2)")
+        .expect("sql");
+    let mut rows = slow.to_local_iterator(true).expect("to_local_iterator");
+    // Not read yet: no wait of the caller is for the execution.
+    assert_eq!(spark.running_operation_id(), None);
+    let started = Instant::now();
+    let interrupted = Arc::new(AtomicBool::new(false));
+    let watch_session = spark.clone();
+    let watch_interrupted = Arc::clone(&interrupted);
+    let watch: Arc<WaitWatch> = Arc::new(move || {
+        if started.elapsed() < Duration::from_secs(2) || watch_interrupted.load(Ordering::SeqCst) {
+            return Watch::Continue;
+        }
+        match watch_session.running_operation_id() {
+            Some(operation_id) => {
+                watch_interrupted.store(true, Ordering::SeqCst);
+                let session = watch_session.clone();
+                Watch::Interrupt(Box::pin(async move {
+                    let _ = session.interrupt_operation_async(&operation_id).await;
+                }))
+            }
+            None => Watch::Continue,
+        }
+    });
+    let outcome = with_wait_watch(watch, || rows.next());
+    assert!(
+        matches!(outcome, Some(Err(_))),
+        "the cancelled execution returned a batch"
+    );
+    assert!(
+        interrupted.load(Ordering::SeqCst),
+        "the caller's wait was not for the execution"
+    );
+    assert!(started.elapsed() < Duration::from_secs(30));
+    drop(rows);
+    let count = spark
+        .sql("SELECT * FROM range(3)")
+        .map_err(Box::new)
+        .and_then(|df| df.count().map_err(Box::new))
+        .expect("count");
+    assert_eq!(count, 3);
+}
+
 #[test]
 fn interrupting_the_wait_cancels_the_execution_of_the_calling_thread() {
     use std::sync::atomic::{AtomicBool, Ordering};

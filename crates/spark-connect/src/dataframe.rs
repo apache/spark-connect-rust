@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use spark_connect_core::client::InflightHandle;
 use spark_connect_core::error::{Result, SparkError, SparkErrorKind};
 use spark_connect_core::runtime::{block_on, get_runtime};
 use spark_connect_proto as proto;
@@ -147,6 +148,8 @@ enum RowSource {
         /// The task, to raise its panic (of a progress handler, say) in the caller once its
         /// channel closes, as the on-demand source raises it, instead of ending early.
         task: Option<tokio::task::JoinHandle<()>>,
+        /// The execution, which the caller waits for while it waits for the task's batches.
+        wait: InflightHandle,
     },
 }
 
@@ -160,10 +163,12 @@ impl LocalRowIterator {
         let schema = SchemaSlot::default();
         let source = if prefetch_partitions {
             {
+                let wait = stream.inflight_handle();
                 let (rx, task) = spawn_prefetch(session, stream, Arc::clone(&schema));
                 RowSource::Prefetch {
                     rx,
                     task: Some(task),
+                    wait,
                 }
             }
         } else {
@@ -234,8 +239,12 @@ impl LocalRowIterator {
                     }
                 }
             },
-            RowSource::Prefetch { rx, task } => {
-                let batch = block_on(rx.recv());
+            RowSource::Prefetch { rx, task, wait } => {
+                // The caller waits for the batch of the task, which is a wait for the execution.
+                let batch = {
+                    let _waiting = wait.waiting();
+                    block_on(rx.recv())
+                };
                 if batch.is_none() {
                     // The channel closed: the task ended, or it panicked, which then drops its
                     // sender without an error. Raise the panic here, so the rows are not cut

@@ -3859,6 +3859,46 @@ print("count", spark.range(3).count())
     assert lines[1:] == ["interrupted ids []", "count 3"], result.stdout
 
 
+def test_sigint_interrupts_the_iterator_that_waits_and_not_a_held_one_as_pyspark():
+    # As PySpark's: a SIGINT during the next of an iterator interrupts the operation that the next
+    # waits for, though another iterator that was started later is alive and half-consumed. The
+    # held iterator still yields its next row, and the waiting one is cancelled at once, not when
+    # its slow partitions end.
+    import subprocess
+    import sys
+
+    remote = os.environ.get("SPARK_REMOTE")
+    if not remote:
+        pytest.skip("SPARK_REMOTE is required for live-server tests")
+    result = subprocess.run([sys.executable, "-c", """
+import os, signal, threading, time
+from pyspark.sql import SparkSession, functions as F
+spark = SparkSession.builder.remote(%r).getOrCreate()
+# Partition 0 returns at once; partitions 1 and 2 sleep 20 s on the server.
+a = spark.range(0, 3, 1, 3).select(
+    F.expr("reflect('java.lang.Thread', 'sleep', case when id = 0 then 0L else 20000L end)")
+    .alias("x"), "id")
+ia = a.toLocalIterator()
+print("a", next(ia).id, flush=True)
+ib = spark.range(0, 5, 1, 1).toLocalIterator()
+print("b", next(ib).id, flush=True)
+threading.Timer(2.0, lambda: os.kill(os.getpid(), signal.SIGINT)).start()
+started = time.monotonic()
+try:
+    next(ia)
+    print("next returned", flush=True)
+except KeyboardInterrupt:
+    print("interrupted after %%.1f" %% (time.monotonic() - started), flush=True)
+print("b", next(ib).id, flush=True)
+""" % remote], env=dict(os.environ, TZ="UTC"), capture_output=True, text=True, timeout=120)
+    assert result.returncode == 0, result.stderr
+    lines = result.stdout.splitlines()
+    assert lines[:2] == ["a 0", "b 0"], result.stdout
+    assert lines[2].startswith("interrupted after "), result.stdout
+    assert 2.0 <= float(lines[2].rsplit(" ", 1)[1]) < 6.0, result.stdout
+    assert lines[3:] == ["b 1"], result.stdout
+
+
 def test_udfs_return_user_defined_types_of_main_as_pyspark():
     # As PySpark's: a UDT that __main__ defines, of parameters, is a UDF return type, as
     # cloudpickle sends its class by value and its state to the worker. In a new
