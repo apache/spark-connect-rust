@@ -5,7 +5,7 @@ use pyo3::types::PyDict;
 use spark_connect::column::Column;
 use spark_connect::expression::{Alias, ExpressionNode, NullOrdering};
 
-use crate::functions::to_column;
+use crate::functions::{to_column, to_value_column};
 
 /// Raise a `pyspark.errors` exception (`class_name`) carrying the given `error_class`
 /// condition and message parameters, mirroring the reference Column guard-rails.
@@ -265,7 +265,7 @@ impl PyColumn {
     #[pyo3(name = "getItem")]
     fn get_item(&self, key: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
         let _origin = crate::origin::with_origin("getItem");
-        let key_col = py_obj_to_column(key)?;
+        let key_col = to_value_column(key)?;
         Ok(PyColumn::new(self.column.clone().get_item(key_col)))
     }
 
@@ -427,7 +427,7 @@ impl PyColumn {
                 ))
             }
         }
-        let val_col = py_obj_to_column(value)?;
+        let val_col = to_value_column(value)?;
         Ok(PyColumn::new(
             self.column.clone().when(condition.column.clone(), val_col),
         ))
@@ -452,7 +452,7 @@ impl PyColumn {
                 .call1((message,))?;
             return Err(PyErr::from_value(error));
         }
-        let val_col = py_obj_to_column(value)?;
+        let val_col = to_value_column(value)?;
         Ok(PyColumn::new(self.column.clone().otherwise(val_col)))
     }
 
@@ -471,7 +471,7 @@ impl PyColumn {
             }
             return self.substr(&key.getattr("start")?, &key.getattr("stop")?);
         }
-        let key_col = py_obj_to_column(key)?;
+        let key_col = to_value_column(key)?;
         Ok(PyColumn::new(self.column.clone().get_item(key_col)))
     }
 
@@ -962,7 +962,7 @@ impl PyColumn {
         }
         let mut vals = Vec::with_capacity(items.len());
         for c in &items {
-            vals.push(to_column(&c.bind(py))?);
+            vals.push(to_value_column(c.bind(py))?);
         }
         Ok(PyColumn::new(self.column.clone().isin(vals)))
     }
