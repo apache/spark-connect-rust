@@ -1303,6 +1303,24 @@ except RecursionError as error:
     assert "raised RecursionError" in result.stdout, (result.stdout, result.stderr)
 
 
+def test_plans_of_a_few_hundred_levels_are_sent_as_pyspark(session):
+    # As PySpark, which serializes plans up to about 746 levels, and the server runs them up to
+    # about 510: Apache's test_recursion_handling_for_plan_logging builds 400 withColumns, and a
+    # subquery of 300 levels under 33 more runs too. Both were a RecursionError, or a crash.
+    df = session.range(10)
+    for x in range(400):
+        df = df.withColumn(f"col{x}", F.lit(x))
+    assert len(df.schema.fields) == 401
+    assert df.count() == 10
+    sub = session.range(1)
+    for _ in range(300):
+        sub = sub.limit(100)
+    outer = session.range(10)
+    for _ in range(32):
+        outer = outer.limit(100)
+    assert outer.filter(sub.exists()).count() == 10
+
+
 def test_a_deep_plan_raises_recursion_error_as_pyspark():
     # As official PySpark 4.3.0, which raises RecursionError for each of these depths while it
     # builds the plan, before any request. The server rejected 1,000 and 1,500 levels without a

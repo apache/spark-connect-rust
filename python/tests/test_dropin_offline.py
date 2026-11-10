@@ -9276,6 +9276,24 @@ def test_create_dataframe_converts_numpy_scalars_as_pyarrow(mock_connect):
             _local_create_dataframe([(value,)], schema)
 
 
+def test_a_subquery_of_a_deep_plan_is_sent_or_raises_recursion_error_as_pyspark(mock_connect):
+    # As PySpark, which sends a subquery under the plan that has it, so that its levels add to
+    # those above it: one within the bound is sent (it overflowed the stack of the serializing
+    # thread before), and a deeper one raises RecursionError without a request.
+    spark, service = mock_connect
+
+    def limited(df, levels):
+        for _ in range(levels):
+            df = df.limit(100)
+        return df
+
+    limited(spark.range(10).filter(limited(spark.range(1), 300).exists()), 33).collect()
+    assert len(service.execute_requests) == 1
+    with pytest.raises(RecursionError, match="the plans of its subqueries"):
+        spark.range(10).filter(limited(spark.range(1), 800).exists()).collect()
+    assert len(service.execute_requests) == 1
+
+
 def test_a_plan_too_deep_to_send_raises_recursion_error_without_a_request(mock_connect):
     # As PySpark, whose client raises RecursionError while it builds the proto of a plan a few
     # hundred levels deep, before any request, rather than overflowing the native stack.

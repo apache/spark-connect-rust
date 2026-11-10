@@ -103,9 +103,9 @@ impl Drop for DepthBoundScope {
     }
 }
 
-/// Run `f`, which goes down a level of an expression, with at least [`EXPRESSION_RED_ZONE`] of
-/// stack left.
-fn with_stack_for_a_level<T>(f: impl FnOnce() -> T) -> T {
+/// Run `f`, which goes down a level of an expression or of a plan, with at least
+/// [`EXPRESSION_RED_ZONE`] of stack left.
+pub(crate) fn with_stack_for_a_level<T>(f: impl FnOnce() -> T) -> T {
     stacker::maybe_grow(EXPRESSION_RED_ZONE, EXPRESSION_STACK_SEGMENT, f)
 }
 
