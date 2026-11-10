@@ -17170,6 +17170,152 @@ def test_exception_of_a_signal_handler_is_raised_by_collect_as_pyspark(mock_conn
     assert len(service.interrupt_requests) == 1
 
 
+def _two_row_range_results(service):
+    # The result of each range: two rows in one Arrow batch, which the iterators read from the
+    # buffer of the batch before they wait for the next response.
+    import pyarrow as pa
+
+    table = pa.table({"id": pa.array([0, 1], pa.int64())})
+    sink = pa.BufferOutputStream()
+    with pa.ipc.new_stream(sink, table.schema) as writer:
+        writer.write_table(table)
+    # ExecutePlanResponse.schema=7 and arrow_batch=2: ArrowBatch.row_count=1, data=2.
+    service.execute_payload = message_field(7, struct_schema("id")) + message_field(
+        2, varint_field(1, table.num_rows) + message_field(2, sink.getvalue().to_pybytes()))
+
+
+def test_sigint_interrupts_the_iterator_that_waits_and_not_a_held_one(mock_connect):
+    # As PySpark's: the signal interrupts the operation of the iterator whose next waits for the
+    # server, even though another iterator that was started after it is alive and half-consumed.
+    # That other iterator goes on, and the interrupted one raises KeyboardInterrupt at once.
+    import signal
+    import threading
+
+    spark, service = mock_connect
+    _two_row_range_results(service)
+    service.block_result_complete = True
+    waiting = spark.range(2).toLocalIterator()
+    assert next(waiting).id == 0
+    service.block_result_complete = False
+    held = spark.range(2).toLocalIterator()
+    assert next(held).id == 0
+    assert next(waiting).id == 1
+    timer = threading.Timer(0.3, os.kill, (os.getpid(), signal.SIGINT))
+    started = time.monotonic()
+    timer.start()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            next(waiting)
+    finally:
+        timer.cancel()
+        service.release_response()
+    assert time.monotonic() - started < 3
+    # ExecutePlanRequest.operation_id=6, of the execution of the waiting iterator, which is the
+    # last one that was started; InterruptRequest.operation_id=6.
+    operation_id = parse_message(service.execute_requests[-2]).get(6, [b""])[0]
+    [interrupt] = service.interrupt_requests
+    assert parse_message(interrupt)[6] == [operation_id]
+    # The held iterator still yields its next row.
+    assert next(held).id == 1
+
+
+def test_sigint_during_stop_with_an_unconsumed_iterator_raises_at_once(mock_connect):
+    # As PySpark's stop: the release of the session is a wait that no execution of the caller
+    # stands behind, so a signal ends it at once, though an iterator of the caller is alive and
+    # half-consumed. The iterator is not interrupted, and the session stays open.
+    import signal
+    import threading
+
+    spark, service = mock_connect
+    _two_row_range_results(service)
+    held = spark.range(2).toLocalIterator()
+    assert next(held).id == 0
+    service.release_session_blocked = True
+    timer = threading.Timer(0.3, os.kill, (os.getpid(), signal.SIGINT))
+    started = time.monotonic()
+    timer.start()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            spark.stop()
+    finally:
+        timer.cancel()
+    assert time.monotonic() - started < 3
+    assert not spark.is_stopped
+    assert service.interrupt_requests == []
+    service.release_session_blocked = False
+    service.release_session_release()
+    spark.stop()
+    assert spark.is_stopped
+    assert next(held).id == 1
+
+
+def test_sigint_during_stop_with_a_registered_listener_raises_at_once(mock_connect):
+    # As PySpark's stop, with a StreamingQueryListener registered from this thread: its
+    # subscription is an execution of the listener bus, which a wait of this thread does not wait
+    # for, so a signal ends the release of the session at once, and the session stays open.
+    import signal
+    import threading
+
+    from pyspark.sql.streaming.listener import StreamingQueryListener
+
+    class Listener(StreamingQueryListener):
+        def onQueryStarted(self, event):
+            pass
+
+        def onQueryProgress(self, event):
+            pass
+
+        def onQueryIdle(self, event):
+            pass
+
+        def onQueryTerminated(self, event):
+            pass
+
+    spark, service = mock_connect
+    service.listener_bus_enabled = True
+    spark.streams.addListener(Listener())
+    assert service.wait_listener_registration(1)
+    service.release_session_blocked = True
+    timer = threading.Timer(0.3, os.kill, (os.getpid(), signal.SIGINT))
+    started = time.monotonic()
+    timer.start()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            spark.stop()
+    finally:
+        timer.cancel()
+    assert time.monotonic() - started < 3
+    assert not spark.is_stopped
+    service.release_session_blocked = False
+    service.release_session_release()
+    spark.stop()
+    assert spark.is_stopped
+
+
+def test_sigint_during_the_plan_compression_lookup_interrupts_the_first_execution(mock_connect):
+    # As PySpark's, where a signal that arrives while the call waits for the plan compression
+    # lookup of its first plan is raised when the lookup returns, so no execution starts. Here
+    # the execution that the call starts after the lookup is interrupted at once instead: the
+    # signal is kept until an execution is in flight, and the call ends promptly.
+    import signal
+    import threading
+
+    spark, service = mock_connect
+    service.plan_compression_lookup_delay = 1.0
+    service.block_execute = True
+    timer = threading.Timer(0.3, os.kill, (os.getpid(), signal.SIGINT))
+    started = time.monotonic()
+    timer.start()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            spark.range(3).collect()
+    finally:
+        timer.cancel()
+        service.release_response()
+    assert time.monotonic() - started < 3
+    assert len(service.interrupt_requests) == 1
+
+
 def test_connect_registry_sends_auto_cdc_define_flow(mock_connect):
     from pyspark import pipelines as dp
     from pyspark.pipelines.graph_element_registry import graph_element_registration_context

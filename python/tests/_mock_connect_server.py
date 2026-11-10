@@ -307,6 +307,7 @@ def serve(connection):
             self.plan_compression_lookups = 0
             self.config_failure = None
             self.block_config = False
+            self.plan_compression_lookup_delay = 0
             self.rpc_events = []
             self.set_confs = []
             self.clone_requests = []
@@ -458,6 +459,8 @@ def serve(connection):
         plan_compression_lookups = 0
         config_failure = None
         block_config = False
+        # The seconds that the plan compression lookup of the first plan of a session takes.
+        plan_compression_lookup_delay = 0
         rpc_events = []
         set_confs = []
 
@@ -671,11 +674,15 @@ def serve(connection):
                 12, operation_id
             )
             yield header + message_field(13, "r1") + self.execute_payload
-            if block_result_complete and not response_gate.wait(30):
-                context.abort(
-                    grpc.StatusCode.DEADLINE_EXCEEDED,
-                    "ResultComplete was not released by the test",
-                )
+            if block_result_complete:
+                released = self.wait_for_response(response_gate, operation_id, 30)
+                if released == "interrupted":
+                    context.abort(grpc.StatusCode.CANCELLED, "Operation has been canceled")
+                if not released:
+                    context.abort(
+                        grpc.StatusCode.DEADLINE_EXCEEDED,
+                        "ResultComplete was not released by the test",
+                    )
             result_complete_operations.append(operation_id)
             yield header + message_field(13, "r2") + message_field(14, b"")
 
@@ -739,6 +746,10 @@ def serve(connection):
             if not lookup:
                 self.config_requests.append(request)
                 self.rpc_events.append("config")
+            if lookup and self.plan_compression_lookup_delay:
+                # The plan compression lookup that PySpark makes on the first plan, held for the
+                # seconds of the delay, as a slow server holds it.
+                time.sleep(self.plan_compression_lookup_delay)
             if not lookup and self.block_config and not self.response_gate.wait(5):
                 context.abort(
                     grpc.StatusCode.DEADLINE_EXCEEDED,

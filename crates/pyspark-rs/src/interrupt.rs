@@ -19,25 +19,33 @@ use crate::errors::ResultExt;
 /// The poll of the signals of one wait.
 struct SignalWatch {
     session: SparkSession,
-    /// Whether a handler raised, once: after that, the wait only waits.
-    raised: AtomicBool,
-    /// The exception of the handler, which the wait raises once it has ended.
+    /// Whether the execution that the wait is for has been interrupted for the signal: after
+    /// that, the wait only waits.
+    interrupted: AtomicBool,
+    /// The exception of the first handler that raised, which the wait raises once it has ended.
     error: Mutex<Option<PyErr>>,
 }
 
 impl SignalWatch {
     fn poll(&self) -> Watch {
-        if self.raised.load(Ordering::SeqCst) {
+        if self.interrupted.load(Ordering::SeqCst) {
             return Watch::Continue;
         }
-        // Takes the GIL for the check only, as the wait runs without it.
-        let Err(error) = Python::attach(|py| py.check_signals()) else {
-            return Watch::Continue;
-        };
-        self.raised.store(true, Ordering::SeqCst);
-        *self.error.lock().unwrap_or_else(|e| e.into_inner()) = Some(error);
+        {
+            let mut error = self.error.lock().unwrap_or_else(|e| e.into_inner());
+            if error.is_none() {
+                // Takes the GIL for the check only, as the wait runs without it.
+                match Python::attach(|py| py.check_signals()) {
+                    Ok(()) => return Watch::Continue,
+                    Err(signal) => *error = Some(signal),
+                }
+            }
+        }
+        // The signal stays captured while no execution that the wait is for is in flight, so
+        // that the first one the call starts is interrupted.
         match self.session.running_operation_id() {
             Some(operation_id) => {
+                self.interrupted.store(true, Ordering::SeqCst);
                 let session = self.session.clone();
                 Watch::Interrupt(Box::pin(async move {
                     // A failed interrupt does not replace the exception of the signal.
@@ -52,13 +60,15 @@ impl SignalWatch {
 }
 
 /// Run `f` without the GIL, on the calling thread, as the signals of the process are polled while
-/// it waits for the server. When a handler raises, the execution in flight of the calling thread
+/// it waits for the server. When a handler raises, the execution that the calling thread waits for
 /// is interrupted, and the exception of the handler is raised once `f` has ended. Otherwise the
 /// result of `f` is returned.
 ///
-/// The execution is interrupted only when `f` has started one; a request that is still waiting
-/// for its response (such as an analysis) ends when the response arrives, and the exception is
-/// raised then. A wait of `block_on_abortable` (the release of `stop()`) ends at once instead.
+/// The execution is interrupted only when a wait of the calling thread is for one. A signal that
+/// arrives while none is (such as during the analysis of a plan, or the plan compression before
+/// an execution) is kept, and the first execution that `f` then waits for is interrupted; a
+/// request that never starts one ends when its response arrives, and the exception is raised
+/// then. A wait of `block_on_abortable` (the release of `stop()`) ends at once instead.
 ///
 /// An execution that `f` ran then raises for the metrics of an Observation that PySpark does
 /// not convert, as PySpark's does (`ObservedMetricsCheck`).
@@ -85,7 +95,7 @@ pub(crate) fn interruptible_outcome<T: Send, E: Send + Into<Box<SparkError>>>(
 ) -> PyResult<Result<T, Box<SparkError>>> {
     let watch = Arc::new(SignalWatch {
         session: session.clone(),
-        raised: AtomicBool::new(false),
+        interrupted: AtomicBool::new(false),
         error: Mutex::new(None),
     });
     let poll: Arc<WaitWatch> = {
