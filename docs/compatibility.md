@@ -27,6 +27,12 @@ with `NOT_EXPECTED_TYPE` and an empty map with `CANNOT_BE_EMPTY`. Before, such a
 value filled string columns with its debug text. `fillna`, `fillna_double`,
 `fillna_string` and `fillna_bool` are unchanged.
 
+A transport failure has the gRPC code that grpc-python gives it, which PySpark's errors and
+retries see. `SparkError::grpc_code` is `UNAVAILABLE` (14) for a connection that closes or is reset
+under a call, that the server ends with a GOAWAY, or that closes before sending a call, where it
+was `UNKNOWN` (2) or `CANCELLED` (1). It is `INTERNAL` (13) for a stream that the server resets with
+a reason that tonic leaves unmapped, such as `STREAM_CLOSED`, which is no longer retried.
+
 The 4.3 line changes the public Rust representation of expressions and logical
 plans to share immutable nodes. This is a breaking change for code that directly
 constructs or matches these representations. The `Column` and `DataFrame` APIs,

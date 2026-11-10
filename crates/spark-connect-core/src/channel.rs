@@ -275,6 +275,30 @@ impl ChannelBuilder {
         })
     }
 
+    /// The error of a keepalive parameter that is not an integer, as PySpark's client raises it
+    /// when it opens its channel: with the keepalive enabled, its channel options read the time
+    /// and then the timeout with `int()`, which raises `ValueError`.
+    pub(crate) fn check_keepalive(&self) -> Result<()> {
+        if !self.keepalive_enabled() {
+            return Ok(());
+        }
+        for key in [
+            PARAM_GRPC_KEEPALIVE_TIME_MS,
+            PARAM_GRPC_KEEPALIVE_TIMEOUT_MS,
+        ] {
+            match self.params.get(key) {
+                Some(value) if python_int(value).is_none() => {
+                    return Err(SparkError::value_msg(format!(
+                        "invalid literal for int() with base 10: {}",
+                        python_repr(value)
+                    )));
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
     /// The user-agent string, matching Python's format and 2048-char cap.
     pub fn user_agent(&self) -> Result<String> {
         let ua = self
@@ -290,8 +314,10 @@ impl ChannelBuilder {
                  escaping, found {ua_len} characters."
             )));
         }
-        let os = std::env::consts::OS.to_lowercase();
-        Ok(format!("{ua} spark/{SPARK_VERSION} os/{os} python/rust"))
+        Ok(format!(
+            "{ua} spark/{SPARK_VERSION} os/{} python/rust",
+            os_name(std::env::consts::OS)
+        ))
     }
 
     /// gRPC metadata: every param except the reserved channel-config keys.
@@ -324,9 +350,72 @@ impl ChannelBuilder {
     fn int_param(&self, key: &str, default: i64) -> i64 {
         self.params
             .get(key)
-            .and_then(|v| v.parse().ok())
+            .and_then(|v| python_int(v))
             .unwrap_or(default)
     }
+}
+
+/// The name of the operating system `os` (of `std::env::consts::OS`) as Python's
+/// `platform.uname().system.lower()` gives it, which PySpark's user agent carries.
+fn os_name(os: &str) -> &str {
+    match os {
+        "macos" => "darwin",
+        "solaris" | "illumos" => "sunos",
+        "hurd" => "gnu",
+        os => os,
+    }
+}
+
+/// `text` as Python's `int(text)` reads it: an optional sign and digits, which single
+/// underscores may separate, between whitespace. Python also takes the decimal digits of other
+/// scripts, which this does not. A value past the range of `i64` saturates.
+fn python_int(text: &str) -> Option<i64> {
+    let text = text.trim_matches(|c: char| c.is_whitespace() || ('\x1c'..='\x1f').contains(&c));
+    let (negative, digits) = match text.strip_prefix('-') {
+        Some(digits) => (true, digits),
+        None => (false, text.strip_prefix('+').unwrap_or(text)),
+    };
+    if digits.is_empty()
+        || digits.starts_with('_')
+        || digits.ends_with('_')
+        || digits.contains("__")
+    {
+        return None;
+    }
+    let mut value: i64 = 0;
+    for c in digits.chars().filter(|&c| c != '_') {
+        let digit = i64::from(c.to_digit(10)?);
+        value = value.saturating_mul(10).saturating_add(digit);
+    }
+    Some(if negative { -value } else { value })
+}
+
+/// `text` as Python's `repr` of a string shows it, as in the message of `int()`: quoted with
+/// `'`, or with `"` when it has a `'` and no `"`, and with its backslashes and control
+/// characters escaped.
+fn python_repr(text: &str) -> String {
+    let quote = if text.contains('\'') && !text.contains('"') {
+        '"'
+    } else {
+        '\''
+    };
+    let mut shown = String::from(quote);
+    for c in text.chars() {
+        match c {
+            '\\' => shown.push_str("\\\\"),
+            '\t' => shown.push_str("\\t"),
+            '\n' => shown.push_str("\\n"),
+            '\r' => shown.push_str("\\r"),
+            c if c == quote => {
+                shown.push('\\');
+                shown.push(c);
+            }
+            c if c.is_ascii_control() => shown.push_str(&format!("\\x{:02x}", c as u32)),
+            c => shown.push(c),
+        }
+    }
+    shown.push(quote);
+    shown
 }
 
 /// CPython `urllib.parse._splitparams`: params begin at the first `;` at or
@@ -548,6 +637,84 @@ mod tests {
         assert_eq!(zero.keepalive(), None);
         // The keepalive params are channel options, not request metadata.
         assert!(custom.metadata().is_empty());
+    }
+
+    #[test]
+    fn keepalive_params_are_read_with_python_int_as_pyspark() {
+        // As `int()` reads them: between whitespace, with a sign, and single underscores.
+        for (value, ms) in [
+            ("%2030000%20", 30000),
+            ("3_0000", 30000),
+            ("+30000", 30000),
+            ("-5", -5),
+            ("007", 7),
+        ] {
+            let url = format!("sc://localhost/;grpc_keepalive_time_ms={value}");
+            let c = ChannelBuilder::parse(&url).unwrap();
+            assert!(c.check_keepalive().is_ok(), "{value}");
+            assert_eq!(c.keepalive_time_ms(), ms, "{value}");
+        }
+        // The values that `int()` raises for, which PySpark's channel options read when the
+        // keepalive is enabled: the time, then the timeout.
+        for (params, shown) in [
+            ("grpc_keepalive_time_ms=abc", "'abc'"),
+            ("grpc_keepalive_timeout_ms=abc", "'abc'"),
+            (
+                "grpc_keepalive_time_ms=abc;grpc_keepalive_timeout_ms=xyz",
+                "'abc'",
+            ),
+            ("grpc_keepalive_time_ms=", "''"),
+            ("grpc_keepalive_time_ms=1.5", "'1.5'"),
+            ("grpc_keepalive_time_ms=1__0", "'1__0'"),
+            ("grpc_keepalive_time_ms=_10", "'_10'"),
+            ("grpc_keepalive_time_ms=%2B%201", "'+ 1'"),
+            ("grpc_keepalive_time_ms=a'b", "\"a'b\""),
+            ("grpc_keepalive_time_ms=a%5Cb", "'a\\\\b'"),
+            ("grpc_keepalive_time_ms=%09", "'\\t'"),
+        ] {
+            let c = ChannelBuilder::parse(&format!("sc://localhost/;{params}")).unwrap();
+            let error = c.check_keepalive().unwrap_err();
+            assert_eq!(
+                error.kind,
+                crate::error::SparkErrorKind::ValueError,
+                "{params}"
+            );
+            assert_eq!(
+                error.message(),
+                format!("invalid literal for int() with base 10: {shown}"),
+                "{params}"
+            );
+        }
+        // Neither is read when the keepalive is disabled.
+        for params in [
+            "grpc_keepalive_enabled=false;grpc_keepalive_time_ms=abc",
+            "grpc_keepalive_enabled=nope;grpc_keepalive_timeout_ms=abc",
+            "grpc_keepalive_without_calls=abc",
+        ] {
+            let c = ChannelBuilder::parse(&format!("sc://localhost/;{params}")).unwrap();
+            assert!(c.check_keepalive().is_ok(), "{params}");
+        }
+    }
+
+    #[test]
+    fn user_agent_names_the_os_as_pyspark() {
+        // As Python's `platform.uname().system.lower()`.
+        for (os, name) in [
+            ("macos", "darwin"),
+            ("linux", "linux"),
+            ("windows", "windows"),
+            ("freebsd", "freebsd"),
+            ("illumos", "sunos"),
+        ] {
+            assert_eq!(os_name(os), name, "{os}");
+        }
+        let _env = set_env(&[("SPARK_CONNECT_USER_AGENT", None)]);
+        let c = ChannelBuilder::parse("sc://localhost/;user_agent=abc").unwrap();
+        let shown = os_name(std::env::consts::OS);
+        assert_eq!(
+            c.user_agent().unwrap(),
+            format!("abc spark/4.3.0 os/{shown} python/rust")
+        );
     }
 
     #[test]

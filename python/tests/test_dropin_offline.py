@@ -3279,6 +3279,137 @@ def test_column_attributes_are_fields_and_slices_are_substrings_as_pyspark():
         c[:3]
 
 
+def _serve_one_raw_http2_call(answer):
+    """The URL of a server of one connection, in raw HTTP/2 frames, that answers the request of a
+    call with `answer`: "reset" sends the response headers and the start of a message, and then
+    resets the connection; "reset_at_once" resets the connection on the request; "status" ends the
+    response with the status UNKNOWN "boom" that the server sends."""
+    import socket
+    import struct
+    import threading
+
+    def frame(kind, flags, stream, payload=b""):
+        return struct.pack(">I", len(payload))[1:] + bytes([kind, flags]) + struct.pack(
+            ">I", stream) + payload
+
+    def read_exact(conn, size):
+        data = b""
+        while len(data) < size:
+            chunk = conn.recv(size - len(data))
+            if not chunk:
+                raise EOFError
+            data += chunk
+        return data
+
+    def reset(conn):
+        # Closing the socket now sends a RST instead of a FIN.
+        conn.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+        conn.close()
+
+    # HPACK: ":status: 200" (static entry 8), and "content-type: application/grpc", a literal of
+    # the static name 31.
+    headers = b"\x88\x0f\x10\x10application/grpc"
+    trailers = b"\x00\x0bgrpc-status\x012\x00\x0cgrpc-message\x04boom"
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(4)
+
+    def serve():
+        conn, _ = listener.accept()
+        try:
+            read_exact(conn, 24)
+            conn.sendall(frame(0x4, 0, 0))
+            while True:
+                head = read_exact(conn, 9)
+                read_exact(conn, int.from_bytes(head[:3], "big"))
+                kind, flags = head[3], head[4]
+                stream = int.from_bytes(head[5:9], "big") & 0x7FFFFFFF
+                if kind == 0x4 and not flags & 0x1:
+                    conn.sendall(frame(0x4, 0x1, 0))
+                elif kind == 0x1 and answer == "reset_at_once":
+                    return reset(conn)
+                elif kind == 0x1:
+                    conn.sendall(frame(0x1, 0x4, stream, headers))
+                    if answer == "status":
+                        conn.sendall(frame(0x1, 0x5, stream, trailers))
+                        continue
+                    # The first 2 bytes of a message of 1000 bytes.
+                    conn.sendall(frame(0x0, 0, stream, b"\x00\x00\x00\x03\xe8\x01\x02"))
+                    time.sleep(0.3)
+                    return reset(conn)
+        except (EOFError, OSError):
+            conn.close()
+        finally:
+            listener.close()
+
+    threading.Thread(target=serve, daemon=True).start()
+    return f"sc://127.0.0.1:{listener.getsockname()[1]}"
+
+
+@pytest.mark.parametrize("answer,call,code", [
+    ("reset", "next", 14),
+    ("reset_at_once", "execute_plan", 14),
+    ("reset_at_once", "config", 14),
+    ("status", "next", 2),
+    ("status", "config", 2),
+])
+def test_the_transport_reports_a_dropped_connection_as_unavailable_as_grpc_python(
+    answer, call, code
+):
+    # As grpc-python, the code of the errors of the stub that the reference client drives is
+    # UNAVAILABLE (14) for a connection that drops, which that client retries and reattaches,
+    # where tonic says UNKNOWN (2). A status that the server sends keeps its code.
+    from pyspark import _pyspark
+
+    stub = _pyspark.RustConnectStub(_serve_one_raw_http2_call(answer))
+    with pytest.raises(_pyspark.RustRpcError) as error:
+        if call == "config":
+            stub.config(b"")
+        else:
+            responses = stub.execute_plan(b"")
+            next(iter(responses))
+    assert error.value.args[0] == code, error.value.args
+    if answer == "status":
+        assert "boom" in error.value.args[2]
+
+
+def test_create_raises_for_a_keepalive_param_that_is_not_an_integer_as_pyspark():
+    # As PySpark's client, whose channel options read the keepalive time with int() as it opens
+    # its channel: the ValueError of int(), before a session is made.
+    from pyspark.sql import SparkSession
+
+    with pytest.raises(ValueError) as error:
+        SparkSession.builder.remote("sc://localhost:1/;grpc_keepalive_time_ms=abc").create()
+    assert str(error.value) == "invalid literal for int() with base 10: 'abc'"
+
+
+def test_the_plan_of_a_dataframe_that_a_hook_puts_in_is_compressed_as_pyspark(mock_connect):
+    # As PySpark's hook, which would put in the plan of `to_proto`, which compresses it: the plan
+    # of a DataFrame that an on_execute_plan hook puts in is sent compressed over the threshold.
+    pytest.importorskip("google.protobuf")
+    from pyspark.sql import SparkSession
+
+    _, service = mock_connect
+    service.confs = _plan_confs("1024")
+    frames = []
+
+    class PlanHook(SparkSession.Hook):
+        def on_execute_plan(self, request):
+            request.plan.root.CopyFrom(frames[0]._plan.plan(None))
+            return request
+
+    builder = SparkSession.builder.remote(service.remote)
+    builder._registerHook(lambda _: PlanHook())
+    spark = builder.create()
+    try:
+        frames.append(_long_literal_frame(spark))
+        spark.range(1).collect()
+    finally:
+        spark.stop()
+    plan = _sent_plan(service.execute_requests)
+    assert 1 not in plan and 3 in plan
+
+
 def test_broadcast_type_check():
     from pyspark.sql import functions as F
     from pyspark.errors import PySparkTypeError
@@ -17628,11 +17759,12 @@ def test_reader_schema_is_sent_as_pyspark_sends_it(mock_connect, read):
         "arg_name": "schema", "expected_type": "str or struct type", "arg_type": "LongType"}
 
 
-def _sent_relation(request, field):
-    """The relation `field` of the root of a captured AnalyzePlanRequest or ExecutePlanRequest:
-    AnalyzePlanRequest.schema=4 -> plan=1, or ExecutePlanRequest.plan=3; then Plan.root=1."""
+def _sent_relation(request, field, execute=False):
+    """The relation `field` of the root of a captured AnalyzePlanRequest, or ExecutePlanRequest with
+    `execute`: AnalyzePlanRequest.schema=4 -> plan=1, or ExecutePlanRequest.plan=3 (its field 4 is
+    the client type); then Plan.root=1."""
     message = parse_message(request)
-    plan = parse_message(message[4][0])[1][0] if 4 in message else message[3][0]
+    plan = message[3][0] if execute else parse_message(message[4][0])[1][0]
     root = parse_message(parse_message(plan)[1][0])
     assert field in root, sorted(root)
     return parse_message(root[field][0])
@@ -17847,7 +17979,7 @@ def test_writer_bucket_sort_and_cluster_columns_are_checked_as_pyspark(offline_s
 
 def _sent_catalog(request, field):
     # Relation.catalog=200 -> the Catalog operation `field`.
-    return parse_message(_sent_relation(request, 200)[field][0])
+    return parse_message(_sent_relation(request, 200, execute=True)[field][0])
 
 
 def test_catalog_creates_tables_eagerly_as_pyspark(mock_connect):

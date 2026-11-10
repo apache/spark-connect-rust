@@ -286,14 +286,20 @@ fn plan_compression_of(threshold: Option<&str>, algorithm: Option<&str>) -> Plan
 /// Replace the relation or command of `plan` with its zstd-compressed operation, when it is over
 /// `threshold` bytes and compression makes it smaller, as PySpark's `_try_compress_and_set_plan`.
 fn compress_over_threshold(plan: &mut Plan, threshold: usize) {
-    let (op_type, message) = match &plan.op_type {
-        Some(PlanOpType::Root(relation)) => (CompressedOpType::Relation, relation.encode_to_vec()),
-        Some(PlanOpType::Command(command)) => (CompressedOpType::Command, command.encode_to_vec()),
+    let (op_type, size) = match &plan.op_type {
+        Some(PlanOpType::Root(relation)) => (CompressedOpType::Relation, relation.encoded_len()),
+        Some(PlanOpType::Command(command)) => (CompressedOpType::Command, command.encoded_len()),
         _ => return,
     };
-    if message.len() <= threshold {
+    // The size of the encoding, without encoding the plans that are not over the threshold.
+    if size <= threshold {
         return;
     }
+    let message = match &plan.op_type {
+        Some(PlanOpType::Root(relation)) => relation.encode_to_vec(),
+        Some(PlanOpType::Command(command)) => command.encode_to_vec(),
+        _ => return,
+    };
     let Ok(data) = zstd::encode_all(message.as_slice(), zstd::DEFAULT_COMPRESSION_LEVEL) else {
         return;
     };
@@ -477,6 +483,8 @@ impl SparkConnectClient {
             Some(id) => id,
             None => Uuid::new_v4().to_string(),
         };
+        // As PySpark's client, whose channel options read the keepalive parameters next.
+        builder.check_keepalive()?;
 
         // Parse user-agent.
         let user_agent = builder.user_agent()?;
@@ -746,6 +754,28 @@ impl SparkConnectClient {
         Ok(request)
     }
 
+    /// `request` as the hook of the executions returns it, with its plan compressed again when a
+    /// hook ran: a hook may put in a plan, such as the drop-in's hook, which resolves the plan of
+    /// a DataFrame there, as PySpark's hook would put in the plan of `to_proto`, which compresses
+    /// it. A plan that is compressed already is kept.
+    async fn hooked_and_compressed(
+        &self,
+        request: ExecutePlanRequest,
+    ) -> Result<ExecutePlanRequest> {
+        let hook_set = self
+            .execute_plan_hook
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some();
+        let mut request = self.hooked(request)?;
+        if hook_set {
+            if let Some(plan) = request.plan.as_mut() {
+                self.compress_plan(plan).await;
+            }
+        }
+        Ok(request)
+    }
+
     /// Get the user ID, if set.
     pub fn user_id(&self) -> Option<&str> {
         self.user_id.as_deref()
@@ -975,11 +1005,14 @@ impl SparkConnectClient {
         allow_arrow_batch_chunking(&mut request);
         self.extend_user_context(&mut request.user_context);
         self.fill_user_context(&mut request.user_context);
-        self.observe_on(&mut request.client_observed_server_side_session_id);
+        self.fill_client_type(&mut request.client_type);
         if let Some(plan) = request.plan.as_mut() {
             self.compress_plan(plan).await;
         }
-        let request = self.hooked(request)?;
+        // After the lookup of the plan compression of the first plan, whose response gives the
+        // server-side session ID, as PySpark builds the plan before the request.
+        self.observe_on(&mut request.client_observed_server_side_session_id);
+        let request = self.hooked_and_compressed(request).await?;
         let mut req = Request::new(request);
         self._attach_metadata(&mut req);
         match self.stub.clone().execute_plan(req).await {
@@ -1039,6 +1072,7 @@ impl SparkConnectClient {
     ) -> Result<Streaming<ExecutePlanResponse>> {
         self.ensure_open()?;
         self.fill_user_context(&mut request.user_context);
+        self.fill_client_type(&mut request.client_type);
         self.observe_on(&mut request.client_observed_server_side_session_id);
         let mut req = Request::new(request);
         self._attach_metadata(&mut req);
@@ -1050,14 +1084,15 @@ impl SparkConnectClient {
 
     /// Release a (portion of a) running execution's response stream.
     ///
-    /// Mirrors the `ReleaseExecute` RPC used by the reattachable execute path.
+    /// Mirrors the `ReleaseExecute` RPC used by the reattachable execute path, whose requests
+    /// carry no observed server-side session ID in PySpark.
     pub async fn release_execute(
         &self,
         mut request: ReleaseExecuteRequest,
     ) -> Result<ReleaseExecuteResponse> {
         self.ensure_open()?;
         self.fill_user_context(&mut request.user_context);
-        self.observe_on(&mut request.client_observed_server_side_session_id);
+        self.fill_client_type(&mut request.client_type);
         let mut req = Request::new(request);
         self._attach_metadata(&mut req);
         match self.stub.clone().release_execute(req).await {
@@ -1108,6 +1143,7 @@ impl SparkConnectClient {
         self.ensure_open()?;
         self.extend_user_context(&mut request.user_context);
         self.fill_user_context(&mut request.user_context);
+        self.fill_client_type(&mut request.client_type);
         if let Some(analyze) = request.analyze.as_mut() {
             for plan in analyze_plans(analyze).into_iter().flatten() {
                 self.compress_plan(plan).await;
@@ -1177,14 +1213,17 @@ impl SparkConnectClient {
         allow_arrow_batch_chunking(&mut request);
         self.extend_user_context(&mut request.user_context);
         // Before the iterator: its ReattachExecute and ReleaseExecute requests take the
-        // user context of this request, and the request of the hook, as PySpark's iterator
-        // is of the request that the hooks return.
+        // user context and the client type of this request, and the request of the hook, as
+        // PySpark's iterator is of the request that the hooks return.
         self.fill_user_context(&mut request.user_context);
-        self.observe_on(&mut request.client_observed_server_side_session_id);
+        self.fill_client_type(&mut request.client_type);
         if let Some(plan) = request.plan.as_mut() {
             self.compress_plan(plan).await;
         }
-        let request = self.hooked(request)?;
+        // After the lookup of the plan compression of the first plan, whose response gives the
+        // server-side session ID, as PySpark builds the plan before the request.
+        self.observe_on(&mut request.client_observed_server_side_session_id);
+        let request = self.hooked_and_compressed(request).await?;
         let iter = ExecutePlanResponseReattachableIterator::new(request);
         // Before the first RPC, so that an execution that waits for the server is in flight.
         let inflight = InflightGuard::register(
@@ -1248,6 +1287,7 @@ impl SparkConnectClient {
         self.ensure_open()?;
         self.extend_user_context(&mut request.user_context);
         self.fill_user_context(&mut request.user_context);
+        self.fill_client_type(&mut request.client_type);
         self.observe_on(&mut request.client_observed_server_side_session_id);
         let deadline = self.rpc_deadlines.fetch_error_details;
         let mut req = with_deadline(Request::new(request), deadline);
@@ -1337,6 +1377,7 @@ impl SparkConnectClient {
                     keys: vec![key.to_string()],
                 })),
             }),
+            client_type: Some(self.user_agent.clone()),
             ..Default::default()
         };
         let mut request = request;
@@ -1360,6 +1401,7 @@ impl SparkConnectClient {
         self.ensure_open()?;
         self.extend_user_context(&mut request.user_context);
         self.fill_user_context(&mut request.user_context);
+        self.fill_client_type(&mut request.client_type);
         let response = self
             .with_retry(|| {
                 let deadline = self.rpc_deadlines.config;
@@ -1386,6 +1428,7 @@ impl SparkConnectClient {
         self.ensure_open()?;
         self.extend_user_context(&mut request.user_context);
         self.fill_user_context(&mut request.user_context);
+        self.fill_client_type(&mut request.client_type);
         let response = self
             .with_retry(|| {
                 let deadline = self.rpc_deadlines.interrupt;
@@ -1695,22 +1738,22 @@ impl SparkConnectClient {
     /// returned client, of the same channel, is of that session.
     pub async fn clone_session(&self, new_session_id: Option<&str>) -> Result<Self> {
         self.ensure_open()?;
+        // As PySpark's request: of the client type "python", not of the user agent, and with
+        // no observed server-side session ID.
         let request = CloneSessionRequest {
             session_id: self.session_id.clone(),
             user_context: Some(UserContext {
                 user_id: self.user_id.clone().unwrap_or_default(),
                 ..Default::default()
             }),
-            client_type: Some(self.user_agent.clone()),
+            client_type: Some("python".to_string()),
             new_session_id: new_session_id.map(str::to_string),
             ..Default::default()
         };
         let response = self
             .with_retry(|| {
                 let deadline = self.rpc_deadlines.clone_session;
-                let mut request = request.clone();
-                self.observe_on(&mut request.client_observed_server_side_session_id);
-                let mut req = with_deadline(Request::new(request), deadline);
+                let mut req = with_deadline(Request::new(request.clone()), deadline);
                 self._attach_metadata(&mut req);
                 let mut stub = self.stub.clone();
                 async move {
@@ -1746,6 +1789,7 @@ impl SparkConnectClient {
             user_id: self.user_id.clone().unwrap_or_default(),
             ..Default::default()
         });
+        request.client_type = Some(self.user_agent.clone());
 
         let response = self
             .with_retry(|| {
@@ -1876,6 +1920,14 @@ impl SparkConnectClient {
         }
     }
 
+    /// The client type of a typed request that the caller built: the user agent, unless it has
+    /// one, as PySpark's requests carry `client_type=self._builder.userAgent`.
+    fn fill_client_type(&self, client_type: &mut Option<String>) {
+        if client_type.is_none() {
+            *client_type = Some(self.user_agent.clone());
+        }
+    }
+
     /// Build a fresh request context, even when no user ID is configured.
     /// PySpark and Scala both send a present context on artifact requests.
     fn new_user_context(&self) -> UserContext {
@@ -1919,18 +1971,17 @@ impl SparkConnectClient {
     }
 
     /// The AddArtifacts call of `requests`, once. Stamps user_context and client_type on
-    /// every frame as it is sent; all upload paths must go through here.
+    /// every frame as it is sent; all upload paths must go through here. As PySpark's
+    /// ArtifactManager, the frames carry no observed server-side session ID.
     async fn add_artifacts_rpc(
         &self,
         requests: impl Iterator<Item = spark_connect_proto::AddArtifactsRequest> + Send + 'static,
     ) -> std::result::Result<spark_connect_proto::AddArtifactsResponse, tonic::Status> {
         let user_context = self.new_user_context();
         let client_type = self.user_agent.clone();
-        let observed = std::sync::Arc::clone(&self.server_session_id);
         let requests = requests.map(move |mut request| {
             request.user_context = Some(user_context.clone());
             request.client_type = Some(client_type.clone());
-            request.client_observed_server_side_session_id = observed_of(&observed);
             request
         });
         let deadline = self.rpc_deadlines.add_artifacts;
@@ -1964,7 +2015,7 @@ impl SparkConnectClient {
     }
 
     /// The ArtifactStatus call of `names`, once: the response, which says whether each artifact
-    /// exists.
+    /// exists. As PySpark's, the request carries no observed server-side session ID.
     async fn artifact_status_rpc(
         &self,
         names: &[String],
@@ -1974,7 +2025,6 @@ impl SparkConnectClient {
         request.user_context = Some(self.new_user_context());
         request.client_type = Some(self.user_agent.clone());
         request.names = names.to_vec();
-        self.observe_on(&mut request.client_observed_server_side_session_id);
 
         let deadline = self.rpc_deadlines.artifact_status;
         let mut req = with_deadline(Request::new(request), deadline);
@@ -1998,12 +2048,8 @@ impl SparkConnectClient {
         if let Ok(header_value) = MetadataValue::from_str(&self.user_agent) {
             let _ = metadata.insert("user-agent", header_value);
         }
-        // Add user_id if present
-        if let Some(user_id) = &self.user_id {
-            if let Ok(header_value) = MetadataValue::from_str(user_id) {
-                let _ = metadata.insert("user_id", header_value);
-            }
-        }
+        // No user_id header: as PySpark's `ChannelBuilder.metadata()`, which leaves the user ID
+        // to the user context of the requests.
         // Add custom metadata
         for (k, v) in &self.metadata {
             if let Ok(header_value) = MetadataValue::from_str(v) {
@@ -2066,11 +2112,6 @@ impl SparkConnectClient {
         if let Ok(v) = MetadataValue::from_str(&self.user_agent) {
             let _ = metadata.insert("user-agent", v);
         }
-        if let Some(user_id) = &self.user_id {
-            if let Ok(v) = MetadataValue::from_str(user_id) {
-                let _ = metadata.insert("user_id", v);
-            }
-        }
         for (k, v) in &self.metadata {
             if let Ok(v) = MetadataValue::from_str(v) {
                 if let Ok(key) = tonic::metadata::MetadataKey::from_bytes(k.as_bytes()) {
@@ -2084,9 +2125,9 @@ impl SparkConnectClient {
     /// Sends `request` in the background, so that reading is not delayed, retrying under the
     /// client's retry policy. Like the reference client, a failure is only logged: the server
     /// removes an execution that is never released once it has been detached for
-    /// `spark.connect.execute.manager.detachedTimeout`.
-    fn spawn_release(&self, metadata: MetadataMap, mut request: ReleaseExecuteRequest) {
-        self.observe_on(&mut request.client_observed_server_side_session_id);
+    /// `spark.connect.execute.manager.detachedTimeout`. As the reference's, the request carries
+    /// no observed server-side session ID.
+    fn spawn_release(&self, metadata: MetadataMap, request: ReleaseExecuteRequest) {
         let mut stub = self.stub.clone();
         let policy = self.retry_policy.clone();
         let release = async move {
@@ -3226,5 +3267,421 @@ mod plan_compression_tests {
         assert_eq!(analyze_plans(&mut same_semantics).len(), 2);
 
         assert!(analyze_plans(&mut Analyze::SparkVersion(SparkVersion {})).is_empty());
+    }
+}
+
+/// The fields of the requests of each RPC, which a server records.
+#[cfg(test)]
+mod request_fields_tests {
+    use super::*;
+    use crate::bytes_codec::BytesCodec;
+    use spark_connect_proto::execute_plan_response::{ResponseType, ResultComplete};
+    use tonic::codegen::{http, BoxFuture};
+    use tonic::server::{
+        ClientStreamingService, NamedService, ServerStreamingService, UnaryService,
+    };
+
+    const SERVER_ID: &str = "server-1";
+
+    /// The method and the bytes of each request that the server received, in order.
+    type Received = std::sync::Arc<std::sync::Mutex<Vec<(String, Vec<u8>)>>>;
+
+    #[derive(Clone)]
+    struct Recorder(Received);
+
+    impl NamedService for Recorder {
+        const NAME: &'static str = "spark.connect.SparkConnectService";
+    }
+
+    impl tonic::codegen::Service<http::Request<tonic::body::Body>> for Recorder {
+        type Response = http::Response<tonic::body::Body>;
+        type Error = std::convert::Infallible;
+        type Future = BoxFuture<Self::Response, Self::Error>;
+
+        fn poll_ready(
+            &mut self,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::result::Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, request: http::Request<tonic::body::Body>) -> Self::Future {
+            let method = request
+                .uri()
+                .path()
+                .trim_start_matches("/spark.connect.SparkConnectService/")
+                .to_string();
+            let rpc = Rpc(self.0.clone(), method.clone());
+            Box::pin(async move {
+                let mut grpc = tonic::server::Grpc::new(BytesCodec);
+                Ok(match method.as_str() {
+                    "ExecutePlan" => grpc.server_streaming(rpc, request).await,
+                    "AddArtifacts" => grpc.client_streaming(rpc, request).await,
+                    _ => grpc.unary(rpc, request).await,
+                })
+            })
+        }
+    }
+
+    /// The response of `method`, of the server-side session `SERVER_ID`.
+    fn response_of(method: &str) -> Vec<u8> {
+        let id = SERVER_ID.to_string();
+        match method {
+            "ExecutePlan" => ExecutePlanResponse {
+                server_side_session_id: id,
+                response_id: "complete".into(),
+                response_type: Some(ResponseType::ResultComplete(ResultComplete {})),
+                ..Default::default()
+            }
+            .encode_to_vec(),
+            "AnalyzePlan" => AnalyzePlanResponse {
+                server_side_session_id: id,
+                ..Default::default()
+            }
+            .encode_to_vec(),
+            "Config" => ConfigResponse {
+                server_side_session_id: id,
+                ..Default::default()
+            }
+            .encode_to_vec(),
+            "Interrupt" => InterruptResponse {
+                server_side_session_id: id,
+                ..Default::default()
+            }
+            .encode_to_vec(),
+            "FetchErrorDetails" => FetchErrorDetailsResponse {
+                server_side_session_id: id,
+                ..Default::default()
+            }
+            .encode_to_vec(),
+            "ReleaseExecute" => ReleaseExecuteResponse {
+                server_side_session_id: id,
+                ..Default::default()
+            }
+            .encode_to_vec(),
+            "ReleaseSession" => spark_connect_proto::ReleaseSessionResponse {
+                server_side_session_id: id,
+                ..Default::default()
+            }
+            .encode_to_vec(),
+            "CloneSession" => spark_connect_proto::CloneSessionResponse {
+                server_side_session_id: id,
+                ..Default::default()
+            }
+            .encode_to_vec(),
+            "ArtifactStatus" => spark_connect_proto::ArtifactStatusesResponse {
+                server_side_session_id: id,
+                ..Default::default()
+            }
+            .encode_to_vec(),
+            "AddArtifacts" => spark_connect_proto::AddArtifactsResponse {
+                server_side_session_id: id,
+                ..Default::default()
+            }
+            .encode_to_vec(),
+            other => panic!("unexpected method {other}"),
+        }
+    }
+
+    /// An RPC of the recorder, of a method.
+    struct Rpc(Received, String);
+
+    impl Rpc {
+        fn record(&self, bytes: Vec<u8>) {
+            self.0.lock().unwrap().push((self.1.clone(), bytes));
+        }
+    }
+
+    impl UnaryService<Vec<u8>> for Rpc {
+        type Response = Vec<u8>;
+        type Future = BoxFuture<tonic::Response<Vec<u8>>, tonic::Status>;
+
+        fn call(&mut self, request: tonic::Request<Vec<u8>>) -> Self::Future {
+            self.record(request.into_inner());
+            let response = response_of(&self.1);
+            Box::pin(async move { Ok(tonic::Response::new(response)) })
+        }
+    }
+
+    type Frames =
+        futures::stream::Iter<std::vec::IntoIter<std::result::Result<Vec<u8>, tonic::Status>>>;
+
+    impl ServerStreamingService<Vec<u8>> for Rpc {
+        type Response = Vec<u8>;
+        type ResponseStream = Frames;
+        type Future = BoxFuture<tonic::Response<Frames>, tonic::Status>;
+
+        fn call(&mut self, request: tonic::Request<Vec<u8>>) -> Self::Future {
+            self.record(request.into_inner());
+            let frames = futures::stream::iter(vec![Ok(response_of(&self.1))]);
+            Box::pin(async move { Ok(tonic::Response::new(frames)) })
+        }
+    }
+
+    impl ClientStreamingService<Vec<u8>> for Rpc {
+        type Response = Vec<u8>;
+        type Future = BoxFuture<tonic::Response<Vec<u8>>, tonic::Status>;
+
+        fn call(&mut self, request: tonic::Request<Streaming<Vec<u8>>>) -> Self::Future {
+            let rpc = Rpc(self.0.clone(), self.1.clone());
+            Box::pin(async move {
+                let mut frames = request.into_inner();
+                while let Some(frame) = frames.message().await? {
+                    rpc.record(frame);
+                }
+                Ok(tonic::Response::new(response_of(&rpc.1)))
+            })
+        }
+    }
+
+    /// The client type and the observed server-side session ID of a request of `method`.
+    fn fields_of(method: &str, bytes: &[u8]) -> (Option<String>, Option<String>) {
+        macro_rules! fields {
+            ($request:ty) => {{
+                let request = <$request>::decode(bytes).unwrap();
+                (
+                    request.client_type,
+                    request.client_observed_server_side_session_id,
+                )
+            }};
+        }
+        match method {
+            "ExecutePlan" => fields!(ExecutePlanRequest),
+            "AnalyzePlan" => fields!(AnalyzePlanRequest),
+            "Config" => fields!(ConfigRequest),
+            "Interrupt" => fields!(InterruptRequest),
+            "FetchErrorDetails" => fields!(FetchErrorDetailsRequest),
+            "ReleaseExecute" => fields!(ReleaseExecuteRequest),
+            "CloneSession" => fields!(CloneSessionRequest),
+            "ArtifactStatus" => fields!(ArtifactStatusesRequest),
+            "AddArtifacts" => fields!(spark_connect_proto::AddArtifactsRequest),
+            // Of no observed server-side session ID.
+            "ReleaseSession" => (
+                ReleaseSessionRequest::decode(bytes).unwrap().client_type,
+                None,
+            ),
+            other => panic!("unexpected method {other}"),
+        }
+    }
+
+    /// As PySpark's hook, which would put in the plan of `to_proto`, which compresses it: the plan
+    /// that a hook puts in is compressed, and one that the hook keeps compressed is kept.
+    #[tokio::test]
+    async fn the_plan_that_a_hook_puts_in_is_compressed_as_pyspark() {
+        let received: Received = Default::default();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let incoming = futures::stream::unfold(listener, |listener| async {
+            Some((listener.accept().await.map(|(socket, _)| socket), listener))
+        });
+        let service = Recorder(received.clone());
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(service)
+                .serve_with_incoming(incoming)
+                .await
+                .unwrap();
+        });
+        let builder = {
+            let _env = crate::channel::set_env(&[("SPARK_CONNECT_AUTHENTICATE_TOKEN", None)]);
+            ChannelBuilder::parse(&format!("sc://127.0.0.1:{}/", address.port())).unwrap()
+        };
+        let client = SparkConnectClient::connect(&builder).await.unwrap();
+        *client.plan_compression.lock().unwrap() = PlanCompression::Zstd { threshold: 1000 };
+        let large = spark_connect_proto::Relation {
+            rel_type: Some(spark_connect_proto::relation::RelType::LocalRelation(
+                spark_connect_proto::LocalRelation {
+                    data: Some(vec![0; 64 * 1024].into()),
+                    ..Default::default()
+                },
+            )),
+            ..Default::default()
+        };
+        client.set_execute_plan_hook(Some(std::sync::Arc::new(move |mut request| {
+            request.plan = Some(Plan {
+                op_type: Some(PlanOpType::Root(large.clone())),
+            });
+            Ok(request)
+        })));
+        let small = || ExecutePlanRequest {
+            session_id: client.session_id().to_string(),
+            plan: Some(Plan {
+                op_type: Some(PlanOpType::Root(Default::default())),
+            }),
+            ..Default::default()
+        };
+        let mut stream = client.execute_plan(small()).await.unwrap();
+        while stream.message().await.unwrap().is_some() {}
+        let mut stream = client.execute_plan_reattachable(small()).await.unwrap();
+        while stream.message().await.unwrap().is_some() {}
+        let executions: Vec<_> = received
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(method, _)| method == "ExecutePlan")
+            .map(|(_, bytes)| ExecutePlanRequest::decode(bytes.as_slice()).unwrap())
+            .collect();
+        assert_eq!(executions.len(), 2);
+        for request in executions {
+            let op_type = request.plan.and_then(|plan| plan.op_type);
+            assert!(
+                matches!(op_type, Some(PlanOpType::CompressedOperation(_))),
+                "{op_type:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn requests_carry_the_client_type_and_the_observed_session_of_pyspark() {
+        let received: Received = Default::default();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let incoming = futures::stream::unfold(listener, |listener| async {
+            Some((listener.accept().await.map(|(socket, _)| socket), listener))
+        });
+        let service = Recorder(received.clone());
+        let server = tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(service)
+                .serve_with_incoming(incoming)
+                .await
+                .unwrap();
+        });
+        let builder = {
+            let _env = crate::channel::set_env(&[("SPARK_CONNECT_AUTHENTICATE_TOKEN", None)]);
+            ChannelBuilder::parse(&format!("sc://127.0.0.1:{}/;user_id=u1", address.port()))
+                .unwrap()
+        };
+        let client = SparkConnectClient::connect(&builder).await.unwrap();
+        let session_id = client.session_id().to_string();
+
+        // The first request reads the plan compression of the server for the plan of the
+        // execution, and its response gives the server-side session ID, which the execution
+        // observes, as PySpark builds the plan before the request.
+        let mut stream = client
+            .execute_plan_reattachable(ExecutePlanRequest {
+                session_id: session_id.clone(),
+                plan: Some(Plan {
+                    op_type: Some(PlanOpType::Root(Default::default())),
+                }),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        while stream.message().await.unwrap().is_some() {}
+        client
+            .config(ConfigRequest {
+                session_id: session_id.clone(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        client
+            .analyze_plan(AnalyzePlanRequest {
+                session_id: session_id.clone(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        client
+            .interrupt(InterruptRequest {
+                session_id: session_id.clone(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        client
+            .fetch_error_details(FetchErrorDetailsRequest {
+                session_id: session_id.clone(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        client.artifact_status(&["files/a.txt"]).await.unwrap();
+        let file = tempfile::NamedTempFile::new().unwrap();
+        client
+            .add_named_artifact("files/a.txt", file.path().to_str().unwrap())
+            .await
+            .unwrap();
+        client.clone_session(None).await.unwrap();
+        client.release_session().await.unwrap();
+        // The release of the execution is sent in the background.
+        for _ in 0..200 {
+            if received
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(m, _)| m == "ReleaseExecute")
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        server.abort();
+
+        let requests = received.lock().unwrap().clone();
+        let user_agent = client.user_agent.clone();
+        for method in [
+            "Config",
+            "ExecutePlan",
+            "ReleaseExecute",
+            "AnalyzePlan",
+            "Interrupt",
+            "FetchErrorDetails",
+            "ArtifactStatus",
+            "AddArtifacts",
+            "CloneSession",
+            "ReleaseSession",
+        ] {
+            assert!(requests.iter().any(|(m, _)| m == method), "no {method}");
+        }
+        for (index, (method, bytes)) in requests.iter().enumerate() {
+            // As PySpark: the user agent, but "python" for CloneSession, and the observed
+            // server-side session ID, once a response gave it, but on ReleaseExecute,
+            // ReleaseSession, CloneSession and the artifact requests.
+            let client_type = match method.as_str() {
+                "CloneSession" => "python",
+                _ => user_agent.as_str(),
+            };
+            let observed = match method.as_str() {
+                _ if index == 0 => None,
+                "ReleaseExecute" | "ReleaseSession" | "CloneSession" | "ArtifactStatus"
+                | "AddArtifacts" => None,
+                _ => Some(SERVER_ID.to_string()),
+            };
+            assert_eq!(
+                fields_of(method, bytes),
+                (Some(client_type.to_string()), observed),
+                "{method}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn requests_carry_no_user_id_header_as_pyspark() {
+        // PySpark's `ChannelBuilder.metadata()` leaves the user_id parameter out: the user ID is
+        // in the user context of the requests.
+        let builder = ChannelBuilder::parse("sc://localhost/;user_id=u1;x-hdr=v").unwrap();
+        let client = SparkConnectClient::connect(&builder).await.unwrap();
+        let mut request = Request::new(());
+        client._attach_metadata(&mut request);
+        assert!(request.metadata().get("user_id").is_none());
+        assert_eq!(request.metadata().get("x-hdr").unwrap(), "v");
+        assert!(client.execution_metadata().get("user_id").is_none());
+    }
+
+    #[tokio::test]
+    async fn connect_raises_for_a_keepalive_param_that_is_not_an_integer_as_pyspark() {
+        // As PySpark's client, whose channel options read the parameter with `int()`.
+        let builder = ChannelBuilder::parse("sc://localhost/;grpc_keepalive_time_ms=abc").unwrap();
+        let error = SparkConnectClient::connect(&builder)
+            .await
+            .err()
+            .expect("a keepalive time that is not an integer must raise");
+        assert_eq!(error.kind, SparkErrorKind::ValueError);
+        assert_eq!(
+            error.message(),
+            "invalid literal for int() with base 10: 'abc'"
+        );
     }
 }

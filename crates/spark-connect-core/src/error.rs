@@ -465,12 +465,13 @@ impl SparkError {
     /// `pyspark.errors.exceptions.connect.convert_exception` does, its exception classes,
     /// condition, message parameters, SQL state and stack trace are read from the
     /// `ErrorInfo`, and its kind from the classes. [`SparkError::with_details`] completes it
-    /// with what `FetchErrorDetails` returns.
+    /// with what `FetchErrorDetails` returns. The code is the one grpc-python reports (see
+    /// [`crate::retries::grpc_python_code`]), so that a dropped connection is `UNAVAILABLE`.
     pub fn from_grpc_status(status: Status) -> Self {
         let message = status.message().to_string();
-        let code = status.code() as i32;
+        let code = crate::retries::grpc_python_code(&status);
         let details = status.details().to_vec();
-        let mut err = if status.code() == tonic::Code::DeadlineExceeded {
+        let mut err = if code == tonic::Code::DeadlineExceeded {
             // As `SparkConnectClient._handle_rpc_error`, which raises this for a call past its
             // per-RPC deadline before it reads the error of the status.
             Self::connect_msg(format!(
@@ -478,17 +479,16 @@ impl SparkError {
                  prevent silent hangs on broken connections. Deadlines can be configured via \
                  the rpc_deadlines parameter of SparkConnectClient. To disable all deadlines: \
                  SparkConnectClient(url, rpc_deadlines=RpcDeadlines.disabled()).",
-                status.code(),
-                message
+                code, message
             ))
         } else {
             match parse_error_info(&details) {
                 Some(info) => Self::from_error_info(info, message),
-                None => Self::connect_msg(format!("[{}] {}", status.code(), message)),
+                None => Self::connect_msg(format!("[{}] {}", code, message)),
             }
         };
         // Preserve the raw status so the PyO3 layer can rebuild the exact pyspark exception.
-        err.grpc_code = Some(code);
+        err.grpc_code = Some(code as i32);
         if !details.is_empty() {
             err.grpc_details = Some(details);
         }
