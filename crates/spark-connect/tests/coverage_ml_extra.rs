@@ -162,10 +162,10 @@ fn evaluator_builders_and_accessors() {
 
     let e = BinaryClassificationEvaluator::new()
         .set_label_col("l")
-        .set_score_col("s")
+        .set_raw_prediction_col("s")
         .set_metric_name("areaUnderPR");
     assert_eq!(e.label_col(), "l");
-    assert_eq!(e.score_col(), "s");
+    assert_eq!(e.raw_prediction_col(), "s");
     assert_eq!(e.metric_name(), "areaUnderPR");
     let _ = e.operator();
     let _ = e.params();

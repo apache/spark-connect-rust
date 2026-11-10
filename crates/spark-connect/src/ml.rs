@@ -12,8 +12,10 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::dataframe::DataFrame;
+use crate::expression::LiteralExpression;
 use crate::plan::{LogicalPlan, RelationOwner};
 use crate::session::SparkSession;
+use crate::types::DataType;
 
 /// ML parameter handling: stores name -> literal value mappings.
 ///
@@ -48,6 +50,39 @@ impl Params {
             literal_type: Some(proto::expression::literal::LiteralType::Integer(value)),
             ..Default::default()
         };
+        self.params.insert(
+            name.to_string(),
+            proto::Expression {
+                expr_type: Some(proto::expression::ExprType::Literal(literal)),
+                ..Default::default()
+            },
+        );
+        self
+    }
+
+    /// Encode an ML parameter whose JVM type is `Int` from a 64-bit value: an `Integer` literal
+    /// when it fits 32 bits, as PySpark sends a Python int, else a `Long`.
+    fn set_param_int_narrow(self, name: &str, value: i64) -> Self {
+        match i32::try_from(value) {
+            Ok(value) => self.set_param_int32(name, value),
+            Err(_) => self.set_param_int(name, value),
+        }
+    }
+
+    /// Encode an ML parameter whose JVM type is `Array[String]` (such as `inputCols`), as PySpark
+    /// sends a list of strings: an array literal of `string` elements.
+    fn set_param_string_array(mut self, name: &str, values: &[String]) -> Self {
+        let elements = values
+            .iter()
+            .map(|v| LiteralExpression::String(v.clone()))
+            .collect();
+        let literal = LiteralExpression::Array {
+            element_type: Box::new(DataType::String {
+                collation: String::new(),
+            }),
+            elements,
+        }
+        .to_literal_proto();
         self.params.insert(
             name.to_string(),
             proto::Expression {
@@ -517,7 +552,7 @@ impl VectorAssembler {
         self.input_cols = cols.iter().map(|c| c.to_string()).collect();
         self.params = self
             .params
-            .set_param_string("inputCols", &format!("{:?}", self.input_cols));
+            .set_param_string_array("inputCols", &self.input_cols);
         self
     }
 
@@ -1007,7 +1042,7 @@ impl LogisticRegression {
 
     pub fn set_max_iter(mut self, max_iter: i64) -> Self {
         self.max_iter = max_iter;
-        self.params = self.params.set_param_int("maxIter", max_iter);
+        self.params = self.params.set_param_int_narrow("maxIter", max_iter);
         self
     }
 
@@ -1173,7 +1208,7 @@ impl LinearSVC {
 
     /// Maximum number of optimizer iterations.
     pub fn set_max_iter(mut self, value: i64) -> Self {
-        self.params = self.params.set_param_int("maxIter", value);
+        self.params = self.params.set_param_int_narrow("maxIter", value);
         self
     }
 
@@ -1215,7 +1250,7 @@ impl LinearSVC {
 
     /// Tree aggregation depth.
     pub fn set_aggregation_depth(mut self, value: i64) -> Self {
-        self.params = self.params.set_param_int("aggregationDepth", value);
+        self.params = self.params.set_param_int_narrow("aggregationDepth", value);
         self
     }
 
@@ -1764,7 +1799,7 @@ pub struct BinaryClassificationEvaluator {
     operator: MlOperator,
     params: Params,
     label_col: String,
-    score_col: String,
+    raw_prediction_col: String,
     metric_name: String,
 }
 
@@ -1777,7 +1812,7 @@ impl BinaryClassificationEvaluator {
             ),
             params: Params::new(),
             label_col: "label".to_string(),
-            score_col: "prediction".to_string(),
+            raw_prediction_col: "rawPrediction".to_string(),
             metric_name: "areaUnderROC".to_string(),
         }
     }
@@ -1788,9 +1823,10 @@ impl BinaryClassificationEvaluator {
         self
     }
 
-    pub fn set_score_col(mut self, col: &str) -> Self {
-        self.score_col = col.to_string();
-        self.params = self.params.set_param_string("scoreCol", col);
+    /// Set the column of the scores (a vector of raw predictions), the JVM `rawPredictionCol`.
+    pub fn set_raw_prediction_col(mut self, col: &str) -> Self {
+        self.raw_prediction_col = col.to_string();
+        self.params = self.params.set_param_string("rawPredictionCol", col);
         self
     }
 
@@ -1804,8 +1840,8 @@ impl BinaryClassificationEvaluator {
         &self.label_col
     }
 
-    pub fn score_col(&self) -> &str {
-        &self.score_col
+    pub fn raw_prediction_col(&self) -> &str {
+        &self.raw_prediction_col
     }
 
     pub fn metric_name(&self) -> &str {
@@ -1852,9 +1888,7 @@ impl Pipeline {
 
     pub fn set_stages(mut self, stage_names: Vec<&str>) -> Self {
         self.stages = stage_names.iter().map(|s| s.to_string()).collect();
-        self.params = self
-            .params
-            .set_param_string("stages", &format!("{:?}", self.stages));
+        self.params = self.params.set_param_string_array("stages", &self.stages);
         self
     }
 
@@ -2043,12 +2077,12 @@ impl CrossValidator {
     }
     pub fn set_num_folds(mut self, num_folds: i32) -> Self {
         self.num_folds = num_folds;
-        self.params = self.params.set_param_int("numFolds", num_folds as i64);
+        self.params = self.params.set_param_int32("numFolds", num_folds);
         self
     }
     pub fn set_parallelism(mut self, parallelism: i32) -> Self {
         self.parallelism = parallelism;
-        self.params = self.params.set_param_int("parallelism", parallelism as i64);
+        self.params = self.params.set_param_int32("parallelism", parallelism);
         self
     }
     pub fn set_seed(mut self, seed: i64) -> Self {
@@ -2289,11 +2323,11 @@ mod tests {
     fn test_binary_classification_evaluator_creation() {
         let eval = BinaryClassificationEvaluator::new()
             .set_label_col("label")
-            .set_score_col("score")
+            .set_raw_prediction_col("score")
             .set_metric_name("areaUnderPR");
 
         assert_eq!(eval.label_col(), "label");
-        assert_eq!(eval.score_col(), "score");
+        assert_eq!(eval.raw_prediction_col(), "score");
         assert_eq!(eval.metric_name(), "areaUnderPR");
     }
 
@@ -2424,6 +2458,48 @@ mod tests {
             }
             other => panic!("expected the model reference, found {other:?}"),
         }
+    }
+
+    #[test]
+    fn list_and_int_params_use_the_jvm_literal_types() {
+        use proto::expression::literal::LiteralType as L;
+        // An Array[String] param (inputCols, Pipeline stages) is an array literal of string
+        // elements, as PySpark sends a list; the server rejects a string ("not an array").
+        let va = VectorAssembler::new().set_input_cols(vec!["a", "b"]);
+        let pipeline = Pipeline::new().set_stages(vec!["scaler", "lr"]);
+        for (name, params, expected) in [
+            ("inputCols", va.params(), vec!["a", "b"]),
+            ("stages", pipeline.params(), vec!["scaler", "lr"]),
+        ] {
+            let Some(L::Array(array)) = params.to_proto().params[name].literal_type.clone() else {
+                panic!("{name} is not an array literal");
+            };
+            #[allow(deprecated)]
+            let element_type = array.element_type.as_ref().and_then(|t| t.kind.clone());
+            assert!(
+                matches!(element_type, Some(proto::data_type::Kind::String(_))),
+                "{name} element type"
+            );
+            let elements: Vec<_> = array
+                .elements
+                .iter()
+                .map(|e| e.literal_type.clone())
+                .collect();
+            let expected: Vec<_> = expected
+                .iter()
+                .map(|s| Some(L::String(s.to_string())))
+                .collect();
+            assert_eq!(elements, expected, "{name}");
+        }
+
+        // Int params are Integer literals when the value fits 32 bits, as PySpark sends a Python
+        // int; the JVM param is an IntParam (maxIter, numFolds).
+        let lr = LogisticRegression::new().set_max_iter(5);
+        let params = lr.params().to_proto().params;
+        assert_eq!(params["maxIter"].literal_type, Some(L::Integer(5)));
+        let cv = CrossValidator::new().set_num_folds(3);
+        let params = cv.params().to_proto().params;
+        assert_eq!(params["numFolds"].literal_type, Some(L::Integer(3)));
     }
 
     #[test]
@@ -2687,14 +2763,14 @@ mod tests {
             ("labelCol", L::String("target".into())),
             ("predictionCol", L::String("pred".into())),
             ("rawPredictionCol", L::String("margin".into())),
-            ("maxIter", L::Long(50)),
+            ("maxIter", L::Integer(50)),
             ("regParam", L::Double(0.1)),
             ("tol", L::Double(1e-5)),
             ("fitIntercept", L::Boolean(false)),
             ("standardization", L::Boolean(false)),
             ("threshold", L::Double(0.5)),
             ("weightCol", L::String("weight".into())),
-            ("aggregationDepth", L::Long(3)),
+            ("aggregationDepth", L::Integer(3)),
             ("maxBlockSizeInMB", L::Double(1.0)),
         ];
         assert_eq!(params.len(), expected.len());
