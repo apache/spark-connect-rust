@@ -14508,6 +14508,54 @@ def test_values_of_local_rows_convert_and_raise_as_pyarrow(mock_connect):
         assert e.value.getCondition() == "UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION"
         assert e.value.getMessageParameters() == {"data_type": data_type}
 
+@pytest.mark.parametrize(
+    "rows,ddl,error,message",
+    [
+        # The converters of PySpark check every value before PyArrow builds any column.
+        ([(128, 0)], "a tinyint, b timestamp", AssertionError, ""),
+        ([(128, datetime.datetime(2020, 1, 1)), (1, 0)], "a tinyint, b timestamp",
+         AssertionError, ""),
+        ([(128, None)], "a tinyint, b int not null", "PySparkValueError",
+         "input for IntegerType() must not be None"),
+        ([("x", 0)], "a int, b binary", AssertionError, ""),
+        ([([128], "x")], "a array<tinyint>, b decimal(5,2)", AssertionError, ""),
+        ([((128, 0),)], "a struct<x:tinyint,y:timestamp>", AssertionError, ""),
+        ([({"k": 1}, 0)], "a array<int>, b timestamp", AssertionError, ""),
+        # A value that a map or a non-nullable column keeps for PyArrow, and a lone surrogate,
+        # which PyArrow cannot encode, wait behind the converters too.
+        ([({300: "x"}, 0)], "a map<tinyint,string>, b timestamp", AssertionError, ""),
+        ([(128, 0)], "a tinyint not null, b timestamp", AssertionError, ""),
+        ([("\ud800", 0)], "a string, b timestamp", AssertionError, ""),
+        # The parts of a VariantVal and of a Geometry are PyArrow's to convert.
+        ([(T.VariantVal(7, b""), 0)], "a variant, b timestamp", AssertionError, ""),
+        ([(T.Geometry(7, 4326), 0)], "a geometry(4326), b timestamp", AssertionError, ""),
+        ([(T.Geometry(b"\x00", "x"), 0)], "a geometry(4326), b timestamp", AssertionError, ""),
+        # PyArrow raises its own errors in the order of the columns.
+        ([(128, "\ud800")], "a tinyint, b string", "ArrowInvalid", "Value 128 too large"),
+        ([(128,)], "a tinyint not null", "ArrowInvalid", "Value 128 too large"),
+        ([(128, "x")], "a tinyint, b int", "ArrowInvalid", "Value 128 too large"),
+        ([("x", 300)], "a int, b tinyint", "ArrowInvalid", "Could not convert 'x'"),
+        # The error of the Arrow schema is before that of a value.
+        ([(128, None)], "a tinyint, b interval year to month", "PySparkTypeError",
+         "UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION"),
+        ([("\ud800",)], "a string", UnicodeEncodeError, "surrogates not allowed"),
+    ],
+)
+def test_local_rows_raise_the_error_of_a_converter_before_that_of_pyarrow(
+    mock_connect, rows, ddl, error, message
+):
+    import pyarrow as pa
+    import pyspark.errors as errors
+
+    error = {"ArrowInvalid": pa.ArrowInvalid, "PySparkValueError": errors.PySparkValueError,
+             "PySparkTypeError": errors.PySparkTypeError}.get(error, error)
+    spark, _ = mock_connect
+    with pytest.raises(error) as e:
+        spark.createDataFrame(rows, ddl)
+    assert type(e.value) is error
+    assert message in str(e.value)
+
+
 def test_nested_duplicate_field_names_are_deduplicated_in_the_arrow_schema(mock_connect):
     # As PySpark's _deduplicate_field_names: the Arrow schema of nested struct fields numbers
     # duplicate names, which the server cannot read, while the schema of the relation keeps
