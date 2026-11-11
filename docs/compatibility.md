@@ -48,8 +48,10 @@ int. `MlOperator::new` makes a uid of the simple class name and 12 hex digits
 `dropna` does. As PySpark's `fillna`, they take a bool, an integer, a float or a
 string (an integer is sent as a long, a float as a double), and reject other values
 with `NOT_EXPECTED_TYPE` and an empty map with `CANNOT_BE_EMPTY`. Before, such a
-value filled string columns with its debug text. `fillna`, `fillna_double`,
-`fillna_string` and `fillna_bool` are unchanged.
+value filled string columns with its debug text. A `Value::Map` given to
+`fillna_value` fills the columns of its keys, as PySpark's `fillna` of a dict, instead
+of being rejected. `fillna`, `fillna_double`, `fillna_string` and `fillna_bool` are
+unchanged.
 
 A transport failure has the gRPC code that grpc-python gives it, which PySpark's errors and
 retries see. `SparkError::grpc_code` is `UNAVAILABLE` (14) for a connection that closes or is reset
@@ -126,10 +128,12 @@ matches on these enums must handle the new variant. The Python client still rais
 As PySpark's `repartitionByRange`, a partition count that is not positive is
 `VALUE_NOT_POSITIVE` and an empty column list `CANNOT_BE_EMPTY`. Before, the server
 split the rows round-robin for an empty column list. `StatFunctions::sample_by`
-returns a `Result` too: a stratum that is not a literal is
-`DISALLOWED_TYPE_FOR_CONTAINER`, as PySpark rejects a key that is not a float, an int
-or a str. Before, it was sent as an empty literal, which failed only when the
-DataFrame ran.
+returns a `Result` too: a stratum that is not a literal of a bool, an integer, a float
+or a string (a null, a decimal, binary, a date, a timestamp, an interval or an array)
+is `DISALLOWED_TYPE_FOR_CONTAINER`, as PySpark rejects a key that is not a float, an
+int or a str. Before, it was sent as an empty literal, which failed only when the
+DataFrame ran, or as its own literal, which sampled no rows. Without a seed,
+`sample_by` sends one that the client draws, as `sample` and `random_split` do.
 
 A panic of a native `StreamingQueryListener` on an event of the listener bus is
 isolated, as on the started event and as PySpark isolates the exception of a listener:

@@ -2665,6 +2665,28 @@ def test_udfs_that_refer_to_variant_and_spatial_values_run_on_the_server_as_pysp
     assert session.range(1).select(described("id")).first()[0] == '{"a":1} 4326 3857'
 
 
+def test_udfs_of_methods_of_rows_and_values_run_on_the_server_as_pyspark(session):
+    # As PySpark's: a UDF that is, or captures, a method of Row, VariantVal, Geometry or Geography
+    # pickles it by reference to pyspark.sql.types, which the server's Python workers import.
+    from pyspark.sql import functions as F
+    from pyspark.sql.types import Geography, Row, VariantVal
+
+    geography = session.sql(
+        "SELECT st_geogfromwkb(X'0101000000000000000000F03F0000000000000040') AS g")
+    assert geography.select(F.udf(Geography.getSrid, "int")("g")).first()[0] == 4326
+    variant = session.sql("""SELECT parse_json('{"b": 2}') AS v""")
+    assert variant.select(F.udf(VariantVal.toJson, "string")("v")).first()[0] == '{"b":2}'
+    row = Row(a=1, b="x")
+    as_dict = Row.asDict
+
+    @F.udf("string")
+    def captured(_):
+        return str(as_dict(row))
+
+    assert session.range(1).select(captured("id")).first()[0] == "{'a': 1, 'b': 'x'}"
+
+
+
 def test_create_dataframe_of_multi_and_categorical_labels_as_pyspark(session):
     # As PySpark's: a frame whose labels are a MultiIndex or a CategoricalIndex converts its
     # cells as a frame of default labels does. A naive datetime of a list reads back unchanged

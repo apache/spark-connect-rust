@@ -7118,6 +7118,28 @@ def test_variant_and_spatial_values_pickle_as_pysparks_plain_classes_which_load_
             assert {field: getattr(restored, field) for field in fields} == fields
 
 
+def test_methods_of_rows_and_values_pickle_by_reference_to_pyspark_sql_types_as_pyspark():
+    # As PySpark's, whose methods are of pyspark.sql.types: a UDF that is, or captures, a method of
+    # Row, VariantVal, Geometry or Geography pickles it by reference to that module, which the
+    # server's Python workers import, where pyspark._values and pyspark._row are of the client only.
+    from pyspark import cloudpickle
+    from pyspark.sql.types import Geography, Geometry, Row, VariantVal
+
+    wkb = bytes.fromhex("0101000000000000000000F03F0000000000000040")
+    variant = VariantVal(b"\x0c\x01", b"\x01\x00\x00")
+    geography, geometry, row = Geography(wkb, 4326), Geometry(wkb, 0), Row(a=1)
+    # Their functions and bound methods; a classmethod pickles by value, as PySpark's does.
+    methods = [
+        VariantVal.toJson, variant.toJson, VariantVal.toPython,
+        Geography.getSrid, geography.getBytes, Geometry.getSrid, geometry.getBytes,
+        Row.asDict, row.asDict, Row.__repr__,
+    ]
+    for method in methods:
+        data = cloudpickle.dumps(method)
+        assert b"pyspark._values" not in data and b"pyspark._row" not in data, method
+        assert b"pyspark.sql.types" in data, method
+
+
 def test_spatial_values_copy_pickle_and_are_subclassed_as_pyspark():
     # As PySpark's Geometry and Geography, plain classes: they are copied and pickled, also in a
     # Row, and subclassed, of an __init__ that unpickling does not run. And as of PySpark's

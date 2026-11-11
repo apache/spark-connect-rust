@@ -3001,6 +3001,9 @@ fn read_strings_as_binary(
         let message = root_as_message(take(&mut rest, meta_len)?).ok()?;
         let body = take(&mut rest, usize::try_from(message.bodyLength()).ok()?)?;
         match message.header_type() {
+            // A stream has one schema: with another, its batches would not have the columns
+            // of the types read, so it does not read.
+            MessageHeader::Schema if strings.is_some() => return None,
             MessageHeader::Schema => {
                 let fields = fb_to_schema(message.header_as_schema()?);
                 schema = Some(Arc::new(binary_schema(&fields)));
@@ -4168,6 +4171,36 @@ mod nested_decode_tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn a_stream_of_two_schemas_has_no_invalid_utf8_to_report() {
+        // An IPC stream has one schema. With a second one of fewer columns, the scan, which took
+        // the columns of the first batch and the types of the last schema, indexed out of bounds.
+        use arrow::ipc::writer::StreamWriter;
+        let stream = |names: &[&str]| {
+            let fields: Vec<_> = names
+                .iter()
+                .map(|name| Field::new(*name, DataType::Utf8, true))
+                .collect();
+            let schema = Arc::new(arrow::datatypes::Schema::new(fields));
+            let columns = names
+                .iter()
+                .map(|_| Arc::new(arrow::array::StringArray::from(vec!["a"])) as ArrayRef)
+                .collect();
+            let batch = arrow::record_batch::RecordBatch::try_new(schema.clone(), columns).unwrap();
+            let mut data = vec![];
+            let mut writer = StreamWriter::try_new(&mut data, &schema).unwrap();
+            writer.write(&batch).unwrap();
+            writer.finish().unwrap();
+            drop(writer);
+            data
+        };
+        let mut data = stream(&["x", "y"]);
+        // Without its end of stream, so that the second stream's schema follows its batch.
+        data.truncate(data.len() - 8);
+        data.extend(stream(&["x"]));
+        assert_eq!(first_invalid_utf8(&data), None);
     }
 
     #[test]
