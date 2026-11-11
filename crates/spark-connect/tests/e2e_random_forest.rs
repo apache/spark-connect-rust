@@ -1,18 +1,11 @@
 //! Native random forest tests. Set SPARK_REMOTE to run against a live Connect server.
+mod common;
+
+use common::live_session;
 use spark_connect::column::{col, lit_double, lit_string};
 use spark_connect::expression::Expression;
 use spark_connect::ml::{Estimator, RandomForestClassifier};
 use spark_connect::{Column, DataFrame, SparkSession};
-
-fn session() -> Option<SparkSession> {
-    let remote = std::env::var("SPARK_REMOTE").ok()?;
-    Some(
-        SparkSession::builder()
-            .remote(&remote)
-            .get_or_create()
-            .unwrap(),
-    )
-}
 
 fn vectors(s: &SparkSession, sql: &str, name: &str) -> DataFrame {
     s.sql(sql).unwrap().with_column(
@@ -54,7 +47,7 @@ fn deterministic() -> RandomForestClassifier {
 
 #[test]
 fn random_forest_learns_nonlinear_labels_and_keeps_cached_models_alive() {
-    let Some(s) = session() else {
+    let Some(s) = live_session() else {
         return;
     };
     let training = vectors(
@@ -151,7 +144,7 @@ fn random_forest_learns_nonlinear_labels_and_keeps_cached_models_alive() {
 
 #[test]
 fn random_forest_supports_multiclass_probabilities_and_leaf_indices() {
-    let Some(s) = session() else {
+    let Some(s) = live_session() else {
         return;
     };
     let training = vectors(
@@ -204,7 +197,7 @@ fn random_forest_supports_multiclass_probabilities_and_leaf_indices() {
 
 #[test]
 fn random_forest_weights_and_class_thresholds_change_predictions() {
-    let Some(s) = session() else {
+    let Some(s) = live_session() else {
         return;
     };
     // No split: the class probability is the (weighted) label frequency.
@@ -243,7 +236,7 @@ fn random_forest_weights_and_class_thresholds_change_predictions() {
 
 #[test]
 fn random_forest_bootstrap_and_feature_sampling_train_reproducibly() {
-    let Some(s) = session() else {
+    let Some(s) = live_session() else {
         return;
     };
     let training = vectors(
@@ -273,7 +266,7 @@ fn random_forest_bootstrap_and_feature_sampling_train_reproducibly() {
 
 #[test]
 fn random_forest_rejects_invalid_parameters_and_data() {
-    let Some(s) = session() else {
+    let Some(s) = live_session() else {
         return;
     };
     let data = vectors(

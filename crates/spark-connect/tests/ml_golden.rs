@@ -5,6 +5,8 @@
 
 #![allow(dead_code)] // golden-test helpers are copy-shared across suites; each binary uses a subset
 
+mod common;
+
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -12,45 +14,16 @@ use std::io::{BufRead, BufReader};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use prost::Message;
 
+use common::normalize_relation;
 use spark_connect::ml::Estimator;
 use spark_connect::ml::{MlOperator, OperatorType, Params};
 use spark_connect_proto as proto;
-
-/// Recursively clear non-deterministic fields from protobuf messages.
-fn normalize_ml_operator(op: &mut proto::MlOperator) {
-    // Clear UID to normalize across runs (UIDs are instance identifiers)
-    op.uid.clear();
-}
 
 fn normalize_expression(e: &mut proto::Expression) {
     use proto::expression::ExprType as T;
     e.common = None;
     if let Some(t) = e.expr_type.as_mut() {
         if let T::Literal(_) = t {}
-    }
-}
-
-fn normalize_ml_params(_params: &mut proto::MlParams) {
-    // MlParams.params values are `Literal` (no plan_id/origin to clear here).
-}
-
-fn normalize_ml_relation(ml_rel: &mut proto::MlRelation) {
-    if let Some(proto::ml_relation::MlType::Transform(transform)) = ml_rel.ml_type.as_mut() {
-        if let Some(proto::ml_relation::transform::Operator::Transformer(op)) =
-            transform.operator.as_mut()
-        {
-            normalize_ml_operator(op);
-        }
-        if let Some(params) = transform.params.as_mut() {
-            normalize_ml_params(params);
-        }
-    }
-}
-
-fn normalize_relation(r: &mut proto::Relation) {
-    r.common = None;
-    if let Some(proto::relation::RelType::MlRelation(ml_rel)) = &mut r.rel_type {
-        normalize_ml_relation(ml_rel);
     }
 }
 

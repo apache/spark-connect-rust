@@ -6,8 +6,11 @@
 //! Run with: `SPARK_REMOTE=sc://localhost:15002 cargo test --test e2e_integration`
 //! Or simply skip with: `cargo test --test e2e_integration` (will skip all tests)
 
+mod common;
+
 use std::time::Duration;
 
+use common::should_run;
 use spark_connect::column::{col, lit};
 use spark_connect::row::Value;
 use spark_connect::session::SparkSession;
@@ -15,10 +18,6 @@ use spark_connect::types::DataType;
 use spark_connect_core::runtime::block_on;
 use spark_connect_core::{ChannelBuilder, SparkConnectClient};
 use spark_connect_proto as proto;
-
-fn should_run() -> bool {
-    std::env::var("SPARK_REMOTE").is_ok()
-}
 
 fn remote_url() -> String {
     std::env::var("SPARK_REMOTE").unwrap_or_else(|_| "sc://localhost:15002".to_string())

@@ -3,22 +3,15 @@
 //! surface of dataframe.rs (set ops, dedup, joins, reshape, metadata, JSON, temp
 //! views, semantics). Run with SPARK_REMOTE set.
 
+mod common;
+
+use common::{session, should_run};
 use spark_connect::column::{col, lit};
 use spark_connect::dataframe::DataFrame;
 use spark_connect::functions as f;
 use spark_connect::plan::JoinType;
 use spark_connect::session::SparkSession;
 
-fn should_run() -> bool {
-    std::env::var("SPARK_REMOTE").is_ok()
-}
-fn session() -> SparkSession {
-    let url = std::env::var("SPARK_REMOTE").unwrap_or_else(|_| "sc://localhost:15002".to_string());
-    SparkSession::builder()
-        .remote(&url)
-        .get_or_create()
-        .expect("session")
-}
 // 4 rows, with a duplicate (2,'b') for dedup/set-op assertions.
 fn df4(s: &SparkSession) -> DataFrame {
     s.sql("SELECT * FROM VALUES (1,'a'),(2,'b'),(2,'b'),(3,'c') AS t(id, name)")

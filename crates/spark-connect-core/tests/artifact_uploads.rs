@@ -19,13 +19,14 @@
 //! retries, against a loopback gRPC service that receives and acknowledges them; no Spark
 //! server required.
 
+mod common;
+
 use std::collections::VecDeque;
-use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll};
 use std::time::Duration;
 
-use futures::{stream, StreamExt};
+use common::{FakeServer, FakeService};
+use futures::StreamExt;
 use prost::Message;
 use spark_connect_core::bytes_codec::BytesCodec;
 use spark_connect_core::{
@@ -34,15 +35,11 @@ use spark_connect_core::{
 use spark_connect_proto::add_artifacts_request::Payload;
 use spark_connect_proto::add_artifacts_response::ArtifactSummary;
 use spark_connect_proto::{AddArtifactsRequest, AddArtifactsResponse};
-use tokio::net::TcpListener;
-use tonic::body::Body;
-use tonic::codegen::{http, BoxFuture, Service};
-use tonic::server::{ClientStreamingService, NamedService, UnaryService};
-use tonic::transport::Server;
+use tonic::codegen::BoxFuture;
+use tonic::server::{ClientStreamingService, UnaryService};
 use tonic::{Code, Request, Response, Status, Streaming};
 
 const WAIT: Duration = Duration::from_secs(5);
-const SERVICE: &str = "/spark.connect.SparkConnectService/";
 
 /// How the server handles one AddArtifacts attempt.
 #[derive(Clone, Copy)]
@@ -65,7 +62,7 @@ struct State {
 
 struct Fixture {
     state: Arc<State>,
-    server: tokio::task::JoinHandle<()>,
+    _server: FakeServer,
     address: std::net::SocketAddr,
 }
 
@@ -75,22 +72,11 @@ impl Fixture {
             attempts: Mutex::new(attempts.into_iter().collect()),
             received: Mutex::new(Vec::new()),
         });
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let incoming = stream::unfold(listener, |listener| async {
-            Some((listener.accept().await.map(|(socket, _)| socket), listener))
-        });
-        let service = TestService(state.clone());
-        let server = tokio::spawn(async move {
-            Server::builder()
-                .add_service(service)
-                .serve_with_incoming(incoming)
-                .await
-                .unwrap();
-        });
+        let server = service(state.clone()).serve().await;
+        let address = server.address;
         Self {
             state,
-            server,
+            _server: server,
             address,
         }
     }
@@ -113,12 +99,6 @@ impl Fixture {
     /// The frames that each AddArtifacts attempt received, in order.
     fn attempts(&self) -> Vec<Vec<AddArtifactsRequest>> {
         self.state.received.lock().unwrap().clone()
-    }
-}
-
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        self.server.abort();
     }
 }
 
@@ -328,33 +308,14 @@ async fn a_missing_file_fails_before_any_attempt() {
 }
 
 /// The AddArtifacts service, which receives each attempt's frames and acknowledges them.
-#[derive(Clone)]
-struct TestService(Arc<State>);
-
-impl NamedService for TestService {
-    const NAME: &'static str = "spark.connect.SparkConnectService";
-}
-
-impl Service<http::Request<Body>> for TestService {
-    type Response = http::Response<Body>;
-    type Error = Infallible;
-    type Future = BoxFuture<Self::Response, Self::Error>;
-
-    fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        Poll::Ready(Ok(()))
-    }
-
-    fn call(&mut self, request: http::Request<Body>) -> Self::Future {
-        let method = request.uri().path().trim_start_matches(SERVICE).to_string();
-        let state = self.0.clone();
-        Box::pin(async move {
-            let mut grpc = tonic::server::Grpc::new(BytesCodec);
-            Ok(match method.as_str() {
-                "AddArtifacts" => grpc.client_streaming(AddArtifacts(state), request).await,
-                _ => grpc.unary(Unary, request).await,
-            })
-        })
-    }
+fn service(state: Arc<State>) -> FakeService {
+    FakeService::new()
+        .client_streaming(
+            "AddArtifacts",
+            || BytesCodec,
+            move |_| AddArtifacts(state.clone()),
+        )
+        .fallback_unary(|| BytesCodec, |_| Unary)
 }
 
 struct AddArtifacts(Arc<State>);

@@ -1,18 +1,11 @@
 //! Numerical tests of native LinearRegression. Set SPARK_REMOTE to use a live server.
+mod common;
+
+use common::live_session;
 use spark_connect::column::{col, lit};
 use spark_connect::expression::Expression;
 use spark_connect::ml::{Estimator, Evaluator, LinearRegression, RegressionEvaluator};
-use spark_connect::{Column, DataFrame, SparkSession};
-
-fn session() -> Option<SparkSession> {
-    let remote = std::env::var("SPARK_REMOTE").ok()?;
-    Some(
-        SparkSession::builder()
-            .remote(&remote)
-            .get_or_create()
-            .unwrap(),
-    )
-}
+use spark_connect::{Column, DataFrame};
 
 fn vectorize(df: DataFrame, name: &str) -> DataFrame {
     df.with_column(
@@ -43,7 +36,7 @@ fn assert_close(actual: Vec<f64>, expected: &[f64], tolerance: f64) {
 
 #[test]
 fn linear_regression_fits_different_lines_and_keeps_lazy_predictions_alive() {
-    let Some(s) = session() else {
+    let Some(s) = live_session() else {
         return;
     };
     let training = vectorize(
@@ -133,7 +126,7 @@ fn linear_regression_fits_different_lines_and_keeps_lazy_predictions_alive() {
 
 #[test]
 fn linear_regression_default_columns_and_zero_weight_outlier() {
-    let Some(s) = session() else {
+    let Some(s) = live_session() else {
         return;
     };
     let training = vectorize(s.sql(
@@ -169,7 +162,7 @@ fn linear_regression_default_columns_and_zero_weight_outlier() {
 
 #[test]
 fn linear_regression_iterative_elastic_net_and_huber_loss() {
-    let Some(s) = session() else {
+    let Some(s) = live_session() else {
         return;
     };
     let training = vectorize(
@@ -217,7 +210,7 @@ fn linear_regression_iterative_elastic_net_and_huber_loss() {
 
 #[test]
 fn linear_regression_fit_propagates_invalid_data_and_parameter_errors() {
-    let Some(s) = session() else {
+    let Some(s) = live_session() else {
         return;
     };
     assert!(LinearRegression::new().fit(&s.range(3).unwrap()).is_err());

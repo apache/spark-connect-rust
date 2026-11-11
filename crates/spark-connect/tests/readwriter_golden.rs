@@ -11,17 +11,6 @@ use spark_connect::plan::LogicalPlan;
 use spark_connect::readwriter::{ReadType, SaveMode, TableSaveMethod};
 use spark_connect_proto as proto;
 
-/// Normalize a relation by clearing non-deterministic fields.
-fn normalize_relation(r: &mut proto::Relation) {
-    r.common = None;
-    if let Some(_rel_type) = &mut r.rel_type {
-        use proto::relation::RelType;
-        if let RelType::Read(_read) = _rel_type {
-            // No recursive normalization needed for Read
-        }
-    }
-}
-
 #[test]
 fn test_read_json() {
     // Test reading JSON format

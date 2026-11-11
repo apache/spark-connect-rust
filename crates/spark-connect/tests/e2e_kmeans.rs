@@ -1,18 +1,11 @@
 //! Native KMeans tests. Set SPARK_REMOTE to run against a live Connect server.
+mod common;
+
+use common::live_session;
 use spark_connect::column::{col, lit};
 use spark_connect::expression::Expression;
 use spark_connect::ml::{Estimator, KMeans};
-use spark_connect::{Column, DataFrame, SparkSession};
-
-fn session() -> Option<SparkSession> {
-    let remote = std::env::var("SPARK_REMOTE").ok()?;
-    Some(
-        SparkSession::builder()
-            .remote(&remote)
-            .get_or_create()
-            .unwrap(),
-    )
-}
+use spark_connect::{Column, DataFrame};
 
 fn vectorize(df: DataFrame, name: &str) -> DataFrame {
     df.with_column(
@@ -50,7 +43,7 @@ fn assert_partition(actual: &[i64], expected: &[i64]) {
 
 #[test]
 fn kmeans_learns_distinct_models_and_keeps_lazy_predictions_alive() {
-    let Some(s) = session() else {
+    let Some(s) = live_session() else {
         return;
     };
     let training = vectorize(
@@ -132,7 +125,7 @@ fn kmeans_learns_distinct_models_and_keeps_lazy_predictions_alive() {
 
 #[test]
 fn kmeans_weights_move_the_boundary_with_default_columns() {
-    let Some(s) = session() else {
+    let Some(s) = live_session() else {
         return;
     };
     let training = vectorize(
@@ -165,7 +158,7 @@ fn kmeans_weights_move_the_boundary_with_default_columns() {
 
 #[test]
 fn kmeans_block_solver_random_initialization_and_three_clusters() {
-    let Some(s) = session() else {
+    let Some(s) = live_session() else {
         return;
     };
     let training = vectorize(s.sql(
@@ -192,7 +185,7 @@ fn kmeans_block_solver_random_initialization_and_three_clusters() {
 
 #[test]
 fn kmeans_cosine_distance_groups_vectors_by_direction() {
-    let Some(s) = session() else {
+    let Some(s) = live_session() else {
         return;
     };
     let training = vectorize(s.sql(
@@ -221,7 +214,7 @@ fn kmeans_cosine_distance_groups_vectors_by_direction() {
 
 #[test]
 fn kmeans_fit_rejects_invalid_data_and_parameters() {
-    let Some(s) = session() else {
+    let Some(s) = live_session() else {
         return;
     };
     assert!(KMeans::new().fit(&s.range(3).unwrap()).is_err());

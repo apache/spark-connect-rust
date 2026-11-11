@@ -3,22 +3,15 @@
 //! (Full byte-for-byte builder parity lives in functions_golden.rs; this pins runtime
 //! behavior and covers the exec path.) Run with SPARK_REMOTE set.
 
+mod common;
+
+use common::{session, should_run};
 use spark_connect::column::{col, lit, lit_double, lit_string, Column};
 use spark_connect::dataframe::DataFrame;
 use spark_connect::functions as f;
 use spark_connect::row::Value;
 use spark_connect::session::SparkSession;
 
-fn should_run() -> bool {
-    std::env::var("SPARK_REMOTE").is_ok()
-}
-fn session() -> SparkSession {
-    let url = std::env::var("SPARK_REMOTE").unwrap_or_else(|_| "sc://localhost:15002".to_string());
-    SparkSession::builder()
-        .remote(&url)
-        .get_or_create()
-        .expect("session")
-}
 fn base(s: &SparkSession) -> DataFrame {
     s.sql(
         "SELECT -5 AS neg, 4.0 AS four, 'abc' AS s, array(3,1,2) AS arr, \

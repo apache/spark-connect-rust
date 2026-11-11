@@ -5,12 +5,10 @@
 //! PySpark client output captured in `tests/golden/functions.jsonl`. Any missing
 //! or mismatched case FAILS the test - no silent skips.
 
-use std::collections::HashMap;
-use std::fs::File;
-use std::io::{BufRead, BufReader};
+mod common;
 
-use base64::{engine::general_purpose::STANDARD, Engine};
-use prost::Message;
+use std::collections::HashMap;
+
 use spark_connect_proto as proto;
 
 /// Random-seed functions whose trailing `long` seed is non-deterministic
@@ -85,26 +83,7 @@ fn normalize(e: &mut proto::Expression) {
 }
 
 fn load_goldens() -> HashMap<String, proto::Expression> {
-    let path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../tests/golden/functions.jsonl"
-    );
-    let file = File::open(path).expect("golden file functions.jsonl missing");
-    let mut out = HashMap::new();
-    for line in BufReader::new(file).lines() {
-        let line = line.unwrap();
-        if line.trim().is_empty() {
-            continue;
-        }
-        let obj: serde_json::Value = serde_json::from_str(&line).unwrap();
-        let name = obj["name"].as_str().unwrap().to_string();
-        let b64 = obj["b64"].as_str().unwrap();
-        let bytes = STANDARD.decode(b64).unwrap();
-        let mut expr = proto::Expression::decode(&bytes[..]).unwrap();
-        normalize(&mut expr);
-        out.insert(name, expr);
-    }
-    out
+    common::load_goldens("functions.jsonl", normalize)
 }
 
 #[test]

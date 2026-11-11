@@ -8,23 +8,14 @@
 //!
 //! Run with: `SPARK_REMOTE=sc://localhost:15002 cargo test --test e2e_coverage`
 
+mod common;
+
 use std::collections::HashMap;
 
+use common::{session, should_run};
 use spark_connect::column::{col, lit, lit_string};
 use spark_connect::functions as f;
 use spark_connect::session::SparkSession;
-
-fn should_run() -> bool {
-    std::env::var("SPARK_REMOTE").is_ok()
-}
-
-fn session() -> SparkSession {
-    let url = std::env::var("SPARK_REMOTE").unwrap_or_else(|_| "sc://localhost:15002".to_string());
-    SparkSession::builder()
-        .remote(&url)
-        .get_or_create()
-        .expect("session")
-}
 
 /// A small typed DataFrame with a null, for na/stat/agg coverage.
 fn sample(s: &SparkSession) -> spark_connect::dataframe::DataFrame {

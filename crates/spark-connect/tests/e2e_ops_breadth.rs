@@ -5,24 +5,15 @@
 //! execution surface, so most calls are resilient (`let _ = ...`) and a few safe ones
 //! are asserted. Run with SPARK_REMOTE set.
 
+mod common;
+
+use common::{session, should_run};
 use spark_connect::column::{col, lit};
 use spark_connect::dataframe::DataFrame;
 use spark_connect::functions as f;
 use spark_connect::plan::JoinType;
 use spark_connect::session::SparkSession;
 use spark_connect::types::DataType;
-
-fn should_run() -> bool {
-    std::env::var("SPARK_REMOTE").is_ok()
-}
-
-fn session() -> SparkSession {
-    let url = std::env::var("SPARK_REMOTE").unwrap_or_else(|_| "sc://localhost:15002".to_string());
-    SparkSession::builder()
-        .remote(&url)
-        .get_or_create()
-        .expect("session")
-}
 
 // (id, name, v) with a duplicate row for dedup/set-op paths.
 fn base(s: &SparkSession) -> DataFrame {

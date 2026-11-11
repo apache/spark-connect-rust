@@ -17,21 +17,6 @@ use prost::Message;
 
 use spark_connect_proto as proto;
 
-/// Recursively clear fields that vary run-to-run and are not client-authored:
-/// `common` (holds Python origin) everywhere, and relation/attribute `plan_id`.
-fn normalize_relation(r: &mut proto::Relation) {
-    r.common = None;
-    if let Some(rel_type) = &mut r.rel_type {
-        use proto::relation::RelType;
-        match rel_type {
-            RelType::Catalog(_) => {}
-            _ => {
-                // Handle other relation types if needed
-            }
-        }
-    }
-}
-
 /// Normalize expression fields (plan_id, origin/source_info)
 fn normalize_expression(e: &mut proto::Expression) {
     if let Some(expr_type) = &mut e.expr_type {

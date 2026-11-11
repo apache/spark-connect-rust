@@ -1,18 +1,11 @@
 //! Native LinearSVC tests. Set SPARK_REMOTE to run against a live Spark Connect server.
+mod common;
+
+use common::live_session;
 use spark_connect::column::{col, lit};
 use spark_connect::expression::Expression;
 use spark_connect::ml::{Estimator, LinearSVC};
 use spark_connect::{Column, DataFrame, SparkSession};
-
-fn session() -> Option<SparkSession> {
-    let remote = std::env::var("SPARK_REMOTE").ok()?;
-    Some(
-        SparkSession::builder()
-            .remote(&remote)
-            .get_or_create()
-            .unwrap(),
-    )
-}
 
 fn vectorize(df: DataFrame, name: &str) -> DataFrame {
     df.with_column(
@@ -36,7 +29,7 @@ fn predictions(df: DataFrame, name: &str) -> Vec<f64> {
 
 #[test]
 fn linear_svc_fits_separate_models_and_predicts_on_unseen_data() {
-    let Some(s) = session() else {
+    let Some(s) = live_session() else {
         return;
     };
     let training = vectorize(
@@ -112,7 +105,7 @@ fn linear_svc_fits_separate_models_and_predicts_on_unseen_data() {
 
 #[test]
 fn linear_svc_defaults_and_zero_weight_training_examples() {
-    let Some(s) = session() else {
+    let Some(s) = live_session() else {
         return;
     };
     let training = vectorize(s.sql(
@@ -146,7 +139,7 @@ fn linear_svc_defaults_and_zero_weight_training_examples() {
 
 #[test]
 fn linear_svc_fit_rejects_invalid_training_data_and_parameters() {
-    let Some(s) = session() else {
+    let Some(s) = live_session() else {
         return;
     };
     assert!(LinearSVC::new().fit(&s.range(3).unwrap()).is_err());
@@ -209,7 +202,7 @@ fn wait_for_cached_models(s: &SparkSession, expected: usize) -> usize {
 
 #[test]
 fn linear_svc_model_is_deleted_from_the_server_when_its_last_owner_is_dropped() {
-    let Some(s) = session() else {
+    let Some(s) = live_session() else {
         return;
     };
     let training = vectorize(
