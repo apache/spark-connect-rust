@@ -10,24 +10,10 @@ use crate::column::PyColumn;
 use crate::errors::{not_expected_type, ResultExt};
 use crate::group::PyGroupedData;
 use crate::interrupt::interruptible;
+use crate::options::{set_option_skip_none, set_options_skip_none};
 use crate::row::{FieldConverters, NestedFieldNames};
 use crate::streaming::PyDataStreamWriter;
 use crate::types::PyDataType;
-
-/// Apply a single writer option (skipping None; bool->"true"/"false").
-fn wset_opt(
-    w: spark_connect::readwriter::DataFrameWriter,
-    name: &str,
-    v: Option<&Bound<'_, PyAny>>,
-) -> PyResult<spark_connect::readwriter::DataFrameWriter> {
-    match v {
-        Some(x) => match crate::coerce_option_value(x)? {
-            Some(sv) => Ok(w.option(name, &sv)),
-            None => Ok(w),
-        },
-        None => Ok(w),
-    }
-}
 
 /// Flatten `*cols` args that are each a str or a list of str (pyspark
 /// partitionBy/bucketBy/sortBy accept both forms).
@@ -3516,13 +3502,8 @@ fn apply_write_common(
         };
         w = w.partition_by(cols);
     }
-    if let Some(opts) = options {
-        let mut map = std::collections::HashMap::new();
-        for (k, v) in opts.iter() {
-            if let Some(val) = crate::coerce_option_value(&v)? {
-                map.insert(k.str()?.to_string(), val);
-            }
-        }
+    if options.is_some() {
+        let map = crate::options::kwargs_skip_none(options)?;
         w = w.options(map);
     }
     Ok(w)
@@ -3538,7 +3519,7 @@ impl PyDataFrameWriter {
         schema: Option<Bound<'_, PyAny>>,
         options: Option<Bound<'_, pyo3::types::PyDict>>,
     ) -> PyResult<()> {
-        crate::readwriter::set_opts(slf.as_any(), schema.as_ref(), options.as_ref())
+        crate::options::set_opts(slf.as_any(), schema.as_ref(), options.as_ref())
     }
 
     /// The save mode, as PySpark's: `None` keeps the default, "error".
@@ -3581,14 +3562,7 @@ impl PyDataFrameWriter {
         slf: &Bound<'py, Self>,
         options: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Bound<'py, Self>> {
-        let mut map = std::collections::HashMap::new();
-        if let Some(options) = options {
-            for (k, v) in options.iter() {
-                if let Some(val) = crate::coerce_option_value(&v)? {
-                    map.insert(k.str()?.to_string(), val);
-                }
-            }
-        }
+        let map = crate::options::kwargs_skip_none(options)?;
         slf.borrow().inner.update(|w| w.options(map));
         Ok(slf.clone())
     }
@@ -3761,7 +3735,7 @@ impl PyDataFrameWriter {
             };
             w = w.partition_by(cols);
         }
-        w = wset_opt(w, "compression", compression)?;
+        w = set_option_skip_none(w, "compression", compression)?;
         // PySpark sets the mode/options/format on the writer itself, then saves.
         self.inner.set(w.clone().format("parquet"));
         interruptible(py, &w.spark_session(), || w.parquet(path).map_err(Box::new))
@@ -3787,12 +3761,17 @@ impl PyDataFrameWriter {
         if let Some(m) = mode {
             w = w.mode(&m.str()?.to_string());
         }
-        w = wset_opt(w, "compression", compression)?;
-        w = wset_opt(w, "dateFormat", dateFormat)?;
-        w = wset_opt(w, "timestampFormat", timestampFormat)?;
-        w = wset_opt(w, "lineSep", lineSep)?;
-        w = wset_opt(w, "encoding", encoding)?;
-        w = wset_opt(w, "ignoreNullFields", ignoreNullFields)?;
+        w = set_options_skip_none(
+            w,
+            &[
+                ("compression", compression),
+                ("dateFormat", dateFormat),
+                ("timestampFormat", timestampFormat),
+                ("lineSep", lineSep),
+                ("encoding", encoding),
+                ("ignoreNullFields", ignoreNullFields),
+            ],
+        )?;
         // PySpark sets the mode/options/format on the writer itself, then saves.
         self.inner.set(w.clone().format("json"));
         interruptible(py, &w.spark_session(), || w.json(path).map_err(Box::new))
@@ -3828,22 +3807,27 @@ impl PyDataFrameWriter {
         if let Some(m) = mode {
             w = w.mode(&m.str()?.to_string());
         }
-        w = wset_opt(w, "compression", compression)?;
-        w = wset_opt(w, "sep", sep)?;
-        w = wset_opt(w, "quote", quote)?;
-        w = wset_opt(w, "escape", escape)?;
-        w = wset_opt(w, "header", header)?;
-        w = wset_opt(w, "nullValue", nullValue)?;
-        w = wset_opt(w, "escapeQuotes", escapeQuotes)?;
-        w = wset_opt(w, "quoteAll", quoteAll)?;
-        w = wset_opt(w, "dateFormat", dateFormat)?;
-        w = wset_opt(w, "timestampFormat", timestampFormat)?;
-        w = wset_opt(w, "ignoreLeadingWhiteSpace", ignoreLeadingWhiteSpace)?;
-        w = wset_opt(w, "ignoreTrailingWhiteSpace", ignoreTrailingWhiteSpace)?;
-        w = wset_opt(w, "charToEscapeQuoteEscaping", charToEscapeQuoteEscaping)?;
-        w = wset_opt(w, "encoding", encoding)?;
-        w = wset_opt(w, "emptyValue", emptyValue)?;
-        w = wset_opt(w, "lineSep", lineSep)?;
+        w = set_options_skip_none(
+            w,
+            &[
+                ("compression", compression),
+                ("sep", sep),
+                ("quote", quote),
+                ("escape", escape),
+                ("header", header),
+                ("nullValue", nullValue),
+                ("escapeQuotes", escapeQuotes),
+                ("quoteAll", quoteAll),
+                ("dateFormat", dateFormat),
+                ("timestampFormat", timestampFormat),
+                ("ignoreLeadingWhiteSpace", ignoreLeadingWhiteSpace),
+                ("ignoreTrailingWhiteSpace", ignoreTrailingWhiteSpace),
+                ("charToEscapeQuoteEscaping", charToEscapeQuoteEscaping),
+                ("encoding", encoding),
+                ("emptyValue", emptyValue),
+                ("lineSep", lineSep),
+            ],
+        )?;
         // PySpark sets the mode/options/format on the writer itself, then saves.
         self.inner.set(w.clone().format("csv"));
         interruptible(py, &w.spark_session(), || w.csv(path).map_err(Box::new))
@@ -3873,7 +3857,7 @@ impl PyDataFrameWriter {
             };
             w = w.partition_by(cols);
         }
-        w = wset_opt(w, "compression", compression)?;
+        w = set_option_skip_none(w, "compression", compression)?;
         // PySpark sets the mode/options/format on the writer itself, then saves.
         self.inner.set(w.clone().format("orc"));
         interruptible(py, &w.spark_session(), || w.orc(path).map_err(Box::new))
@@ -3891,8 +3875,7 @@ impl PyDataFrameWriter {
         lineSep: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<()> {
         let mut w = self.inner.get();
-        w = wset_opt(w, "compression", compression)?;
-        w = wset_opt(w, "lineSep", lineSep)?;
+        w = set_options_skip_none(w, &[("compression", compression), ("lineSep", lineSep)])?;
         // PySpark sets the mode/options/format on the writer itself, then saves.
         self.inner.set(w.clone().format("text"));
         interruptible(py, &w.spark_session(), || w.text(path).map_err(Box::new))
@@ -3921,21 +3904,26 @@ impl PyDataFrameWriter {
         validateName: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<()> {
         let mut w = self.inner.get();
-        w = wset_opt(w, "rowTag", rowTag)?;
+        w = set_option_skip_none(w, "rowTag", rowTag)?;
         if let Some(m) = mode {
             w = w.mode(&m.str()?.to_string());
         }
-        w = wset_opt(w, "attributePrefix", attributePrefix)?;
-        w = wset_opt(w, "valueTag", valueTag)?;
-        w = wset_opt(w, "rootTag", rootTag)?;
-        w = wset_opt(w, "declaration", declaration)?;
-        w = wset_opt(w, "arrayElementName", arrayElementName)?;
-        w = wset_opt(w, "nullValue", nullValue)?;
-        w = wset_opt(w, "dateFormat", dateFormat)?;
-        w = wset_opt(w, "timestampFormat", timestampFormat)?;
-        w = wset_opt(w, "compression", compression)?;
-        w = wset_opt(w, "encoding", encoding)?;
-        w = wset_opt(w, "validateName", validateName)?;
+        w = set_options_skip_none(
+            w,
+            &[
+                ("attributePrefix", attributePrefix),
+                ("valueTag", valueTag),
+                ("rootTag", rootTag),
+                ("declaration", declaration),
+                ("arrayElementName", arrayElementName),
+                ("nullValue", nullValue),
+                ("dateFormat", dateFormat),
+                ("timestampFormat", timestampFormat),
+                ("compression", compression),
+                ("encoding", encoding),
+                ("validateName", validateName),
+            ],
+        )?;
         // PySpark sets the mode/options/format on the writer itself, then saves.
         self.inner.set(w.clone().format("xml"));
         interruptible(py, &w.spark_session(), || w.xml(path).map_err(Box::new))
@@ -3965,7 +3953,7 @@ impl PyDataFrameWriterV2 {
         schema: Option<Bound<'_, PyAny>>,
         options: Option<Bound<'_, pyo3::types::PyDict>>,
     ) -> PyResult<()> {
-        crate::readwriter::set_opts(slf.as_any(), schema.as_ref(), options.as_ref())
+        crate::options::set_opts(slf.as_any(), schema.as_ref(), options.as_ref())
     }
 
     fn using<'py>(slf: &Bound<'py, Self>, provider: &str) -> PyResult<Bound<'py, Self>> {
@@ -3995,14 +3983,7 @@ impl PyDataFrameWriterV2 {
         slf: &Bound<'py, Self>,
         options: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Bound<'py, Self>> {
-        let mut map = std::collections::HashMap::new();
-        if let Some(options) = options {
-            for (k, v) in options.iter() {
-                if let Some(val) = crate::coerce_option_value(&v)? {
-                    map.insert(k.str()?.to_string(), val);
-                }
-            }
-        }
+        let map = crate::options::kwargs_skip_none(options)?;
         slf.borrow().inner.update(|w| w.options(map));
         Ok(slf.clone())
     }

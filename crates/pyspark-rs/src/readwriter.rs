@@ -8,6 +8,10 @@ use spark_connect::readwriter::DataFrameReader;
 
 use crate::dataframe::PyDataFrame;
 use crate::errors::{not_expected_type, ResultExt};
+use crate::options::{
+    set_option_skip_none, set_options_skip_none, set_reader_kwargs_unset_none,
+    set_reader_option_unset_none,
+};
 
 /// Python wrapper for the batch DataFrameReader.
 ///
@@ -149,42 +153,6 @@ pub(crate) fn bucket_count(num_buckets: &Bound<'_, PyAny>) -> PyResult<i32> {
     }
 }
 
-/// The reader `r` with the `options` of a call, lowercasing bools. A None value unsets its
-/// option when `unset_none`, as PySpark's `DataFrameReader.option`, `options` and `load` do,
-/// and is skipped otherwise, as the `_set_opts` of its format methods does.
-fn apply_options(
-    mut r: DataFrameReader,
-    options: Option<&Bound<'_, PyDict>>,
-    unset_none: bool,
-) -> PyResult<DataFrameReader> {
-    if let Some(opts) = options {
-        for (k, v) in opts.iter() {
-            let key = k.str()?.to_string();
-            match crate::coerce_option_value(&v)? {
-                Some(val) => r = r.option(&key, &val),
-                None if unset_none => r = r.unset_option(&key),
-                None => {}
-            }
-        }
-    }
-    Ok(r)
-}
-
-/// Apply a single reader option (skipping None; bool->"true"/"false").
-fn set_opt(
-    r: DataFrameReader,
-    name: &str,
-    v: Option<&Bound<'_, PyAny>>,
-) -> PyResult<DataFrameReader> {
-    match v {
-        Some(x) => match crate::coerce_option_value(x)? {
-            Some(sv) => Ok(r.option(name, &sv)),
-            None => Ok(r),
-        },
-        None => Ok(r),
-    }
-}
-
 /// A reader `schema` as pyspark's `DataFrameReader.schema` and `DataStreamReader.schema`
 /// send it: a StructType as its JSON, which keeps field metadata, and a string as is, for
 /// the server to parse. Anything else raises `NOT_EXPECTED_TYPE`.
@@ -239,27 +207,6 @@ fn apply_reader_schema(r: DataFrameReader, v: &Bound<'_, PyAny>) -> PyResult<Dat
     Ok(r.schema(reader_schema(v)?))
 }
 
-/// The `_set_opts` of the readers and writers, as PySpark's `OptionUtils._set_opts`: the schema of
-/// `slf`, if any, and its options of `options` that are not None, through its own `schema` and
-/// `option`, which convert them and raise their errors.
-pub(crate) fn set_opts(
-    slf: &Bound<'_, PyAny>,
-    schema: Option<&Bound<'_, PyAny>>,
-    options: Option<&Bound<'_, pyo3::types::PyDict>>,
-) -> PyResult<()> {
-    if let Some(schema) = schema.filter(|schema| !schema.is_none()) {
-        slf.call_method1("schema", (schema,))?;
-    }
-    if let Some(options) = options {
-        for (key, value) in options.iter() {
-            if !value.is_none() {
-                slf.call_method1("option", (key, value))?;
-            }
-        }
-    }
-    Ok(())
-}
-
 #[pymethods]
 impl PyDataFrameReader {
     /// Set the schema, if any, and the options of `options` that are not None, through its own
@@ -270,7 +217,7 @@ impl PyDataFrameReader {
         schema: Option<Bound<'_, PyAny>>,
         options: Option<Bound<'_, pyo3::types::PyDict>>,
     ) -> PyResult<()> {
-        crate::readwriter::set_opts(slf.as_any(), schema.as_ref(), options.as_ref())
+        crate::options::set_opts(slf.as_any(), schema.as_ref(), options.as_ref())
     }
 
     /// Set the source format (e.g. "parquet", "json", "csv"). As PySpark's, None unsets it, so
@@ -300,10 +247,7 @@ impl PyDataFrameReader {
         key: &str,
         value: &Bound<'_, PyAny>,
     ) -> PyResult<PyRefMut<'py, Self>> {
-        slf.inner = match crate::coerce_option_value(value)? {
-            Some(v) => slf.inner.clone().option(key, &v),
-            None => slf.inner.clone().unset_option(key),
-        };
+        slf.inner = set_reader_option_unset_none(slf.inner.clone(), key, value)?;
         Ok(slf)
     }
 
@@ -314,7 +258,7 @@ impl PyDataFrameReader {
         mut slf: PyRefMut<'py, Self>,
         options: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyRefMut<'py, Self>> {
-        slf.inner = apply_options(slf.inner.clone(), options, true)?;
+        slf.inner = set_reader_kwargs_unset_none(slf.inner.clone(), options)?;
         Ok(slf)
     }
 
@@ -360,7 +304,7 @@ impl PyDataFrameReader {
         schema: Option<&Bound<'_, PyAny>>,
         options: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyDataFrame> {
-        let mut r = apply_options(self.inner.clone(), options, true)?;
+        let mut r = set_reader_kwargs_unset_none(self.inner.clone(), options)?;
         if let Some(f) = format {
             r = r.format(f);
         }
@@ -425,34 +369,38 @@ impl PyDataFrameReader {
         if let Some(v) = schema {
             r = apply_reader_schema(r, v)?;
         }
-        r = set_opt(r, "primitivesAsString", primitivesAsString)?;
-        r = set_opt(r, "prefersDecimal", prefersDecimal)?;
-        r = set_opt(r, "allowComments", allowComments)?;
-        r = set_opt(r, "allowUnquotedFieldNames", allowUnquotedFieldNames)?;
-        r = set_opt(r, "allowSingleQuotes", allowSingleQuotes)?;
-        r = set_opt(r, "allowNumericLeadingZero", allowNumericLeadingZero)?;
-        r = set_opt(
+        r = set_options_skip_none(
             r,
-            "allowBackslashEscapingAnyCharacter",
-            allowBackslashEscapingAnyCharacter,
+            &[
+                ("primitivesAsString", primitivesAsString),
+                ("prefersDecimal", prefersDecimal),
+                ("allowComments", allowComments),
+                ("allowUnquotedFieldNames", allowUnquotedFieldNames),
+                ("allowSingleQuotes", allowSingleQuotes),
+                ("allowNumericLeadingZero", allowNumericLeadingZero),
+                (
+                    "allowBackslashEscapingAnyCharacter",
+                    allowBackslashEscapingAnyCharacter,
+                ),
+                ("mode", mode),
+                ("columnNameOfCorruptRecord", columnNameOfCorruptRecord),
+                ("dateFormat", dateFormat),
+                ("timestampFormat", timestampFormat),
+                ("multiLine", multiLine),
+                ("allowUnquotedControlChars", allowUnquotedControlChars),
+                ("lineSep", lineSep),
+                ("samplingRatio", samplingRatio),
+                ("dropFieldIfAllNull", dropFieldIfAllNull),
+                ("encoding", encoding),
+                ("locale", locale),
+                ("pathGlobFilter", pathGlobFilter),
+                ("recursiveFileLookup", recursiveFileLookup),
+                ("modifiedBefore", modifiedBefore),
+                ("modifiedAfter", modifiedAfter),
+                ("allowNonNumericNumbers", allowNonNumericNumbers),
+                ("useUnsafeRow", useUnsafeRow),
+            ],
         )?;
-        r = set_opt(r, "mode", mode)?;
-        r = set_opt(r, "columnNameOfCorruptRecord", columnNameOfCorruptRecord)?;
-        r = set_opt(r, "dateFormat", dateFormat)?;
-        r = set_opt(r, "timestampFormat", timestampFormat)?;
-        r = set_opt(r, "multiLine", multiLine)?;
-        r = set_opt(r, "allowUnquotedControlChars", allowUnquotedControlChars)?;
-        r = set_opt(r, "lineSep", lineSep)?;
-        r = set_opt(r, "samplingRatio", samplingRatio)?;
-        r = set_opt(r, "dropFieldIfAllNull", dropFieldIfAllNull)?;
-        r = set_opt(r, "encoding", encoding)?;
-        r = set_opt(r, "locale", locale)?;
-        r = set_opt(r, "pathGlobFilter", pathGlobFilter)?;
-        r = set_opt(r, "recursiveFileLookup", recursiveFileLookup)?;
-        r = set_opt(r, "modifiedBefore", modifiedBefore)?;
-        r = set_opt(r, "modifiedAfter", modifiedAfter)?;
-        r = set_opt(r, "allowNonNumericNumbers", allowNonNumericNumbers)?;
-        r = set_opt(r, "useUnsafeRow", useUnsafeRow)?;
         self.read_or_parse(r, "json", spark_connect::plan::ParseFormat::Json, path)
     }
 
@@ -477,7 +425,7 @@ impl PyDataFrameReader {
             "int96RebaseMode",
         ] {
             let value = options.map(|o| o.get_item(name)).transpose()?.flatten();
-            r = set_opt(r, name, value.as_ref())?;
+            r = set_option_skip_none(r, name, value.as_ref())?;
         }
         let paths = path_list(&paths)?;
         self.commit(&r, "parquet");
@@ -529,42 +477,43 @@ impl PyDataFrameReader {
         if let Some(v) = schema {
             r = apply_reader_schema(r, v)?;
         }
-        r = set_opt(r, "sep", sep)?;
-        r = set_opt(r, "encoding", encoding)?;
-        r = set_opt(r, "quote", quote)?;
-        r = set_opt(r, "escape", escape)?;
-        r = set_opt(r, "comment", comment)?;
-        r = set_opt(r, "header", header)?;
-        r = set_opt(r, "inferSchema", inferSchema)?;
-        r = set_opt(r, "ignoreLeadingWhiteSpace", ignoreLeadingWhiteSpace)?;
-        r = set_opt(r, "ignoreTrailingWhiteSpace", ignoreTrailingWhiteSpace)?;
-        r = set_opt(r, "nullValue", nullValue)?;
-        r = set_opt(r, "nanValue", nanValue)?;
-        r = set_opt(r, "positiveInf", positiveInf)?;
-        r = set_opt(r, "negativeInf", negativeInf)?;
-        r = set_opt(r, "dateFormat", dateFormat)?;
-        r = set_opt(r, "timestampFormat", timestampFormat)?;
-        r = set_opt(r, "maxColumns", maxColumns)?;
-        r = set_opt(r, "maxCharsPerColumn", maxCharsPerColumn)?;
-        r = set_opt(
+        r = set_options_skip_none(
             r,
-            "maxMalformedLogPerPartition",
-            maxMalformedLogPerPartition,
+            &[
+                ("sep", sep),
+                ("encoding", encoding),
+                ("quote", quote),
+                ("escape", escape),
+                ("comment", comment),
+                ("header", header),
+                ("inferSchema", inferSchema),
+                ("ignoreLeadingWhiteSpace", ignoreLeadingWhiteSpace),
+                ("ignoreTrailingWhiteSpace", ignoreTrailingWhiteSpace),
+                ("nullValue", nullValue),
+                ("nanValue", nanValue),
+                ("positiveInf", positiveInf),
+                ("negativeInf", negativeInf),
+                ("dateFormat", dateFormat),
+                ("timestampFormat", timestampFormat),
+                ("maxColumns", maxColumns),
+                ("maxCharsPerColumn", maxCharsPerColumn),
+                ("maxMalformedLogPerPartition", maxMalformedLogPerPartition),
+                ("mode", mode),
+                ("columnNameOfCorruptRecord", columnNameOfCorruptRecord),
+                ("multiLine", multiLine),
+                ("charToEscapeQuoteEscaping", charToEscapeQuoteEscaping),
+                ("samplingRatio", samplingRatio),
+                ("enforceSchema", enforceSchema),
+                ("emptyValue", emptyValue),
+                ("locale", locale),
+                ("lineSep", lineSep),
+                ("pathGlobFilter", pathGlobFilter),
+                ("recursiveFileLookup", recursiveFileLookup),
+                ("modifiedBefore", modifiedBefore),
+                ("modifiedAfter", modifiedAfter),
+                ("unescapedQuoteHandling", unescapedQuoteHandling),
+            ],
         )?;
-        r = set_opt(r, "mode", mode)?;
-        r = set_opt(r, "columnNameOfCorruptRecord", columnNameOfCorruptRecord)?;
-        r = set_opt(r, "multiLine", multiLine)?;
-        r = set_opt(r, "charToEscapeQuoteEscaping", charToEscapeQuoteEscaping)?;
-        r = set_opt(r, "samplingRatio", samplingRatio)?;
-        r = set_opt(r, "enforceSchema", enforceSchema)?;
-        r = set_opt(r, "emptyValue", emptyValue)?;
-        r = set_opt(r, "locale", locale)?;
-        r = set_opt(r, "lineSep", lineSep)?;
-        r = set_opt(r, "pathGlobFilter", pathGlobFilter)?;
-        r = set_opt(r, "recursiveFileLookup", recursiveFileLookup)?;
-        r = set_opt(r, "modifiedBefore", modifiedBefore)?;
-        r = set_opt(r, "modifiedAfter", modifiedAfter)?;
-        r = set_opt(r, "unescapedQuoteHandling", unescapedQuoteHandling)?;
         self.read_or_parse(r, "csv", spark_connect::plan::ParseFormat::Csv, path)
     }
 
@@ -582,11 +531,16 @@ impl PyDataFrameReader {
         modifiedAfter: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
         let mut r = self.inner.clone();
-        r = set_opt(r, "mergeSchema", mergeSchema)?;
-        r = set_opt(r, "pathGlobFilter", pathGlobFilter)?;
-        r = set_opt(r, "recursiveFileLookup", recursiveFileLookup)?;
-        r = set_opt(r, "modifiedBefore", modifiedBefore)?;
-        r = set_opt(r, "modifiedAfter", modifiedAfter)?;
+        r = set_options_skip_none(
+            r,
+            &[
+                ("mergeSchema", mergeSchema),
+                ("pathGlobFilter", pathGlobFilter),
+                ("recursiveFileLookup", recursiveFileLookup),
+                ("modifiedBefore", modifiedBefore),
+                ("modifiedAfter", modifiedAfter),
+            ],
+        )?;
         let paths = paths_of(path)?;
         self.commit(&r, "orc");
         Ok(PyDataFrame::new(r.format("orc").load_paths(paths)))
@@ -607,12 +561,17 @@ impl PyDataFrameReader {
         modifiedAfter: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
         let mut r = self.inner.clone();
-        r = set_opt(r, "wholetext", wholetext)?;
-        r = set_opt(r, "lineSep", lineSep)?;
-        r = set_opt(r, "pathGlobFilter", pathGlobFilter)?;
-        r = set_opt(r, "recursiveFileLookup", recursiveFileLookup)?;
-        r = set_opt(r, "modifiedBefore", modifiedBefore)?;
-        r = set_opt(r, "modifiedAfter", modifiedAfter)?;
+        r = set_options_skip_none(
+            r,
+            &[
+                ("wholetext", wholetext),
+                ("lineSep", lineSep),
+                ("pathGlobFilter", pathGlobFilter),
+                ("recursiveFileLookup", recursiveFileLookup),
+                ("modifiedBefore", modifiedBefore),
+                ("modifiedAfter", modifiedAfter),
+            ],
+        )?;
         let paths = paths_of(paths)?;
         self.commit(&r, "text");
         Ok(PyDataFrame::new(r.format("text").load_paths(paths)))
@@ -646,27 +605,32 @@ impl PyDataFrameReader {
         locale: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
         let mut r = self.inner.clone();
-        r = set_opt(r, "rowTag", rowTag)?;
+        r = set_option_skip_none(r, "rowTag", rowTag)?;
         if let Some(v) = schema {
             r = apply_reader_schema(r, v)?;
         }
-        r = set_opt(r, "excludeAttribute", excludeAttribute)?;
-        r = set_opt(r, "attributePrefix", attributePrefix)?;
-        r = set_opt(r, "valueTag", valueTag)?;
-        r = set_opt(r, "ignoreSurroundingSpaces", ignoreSurroundingSpaces)?;
-        r = set_opt(r, "rowValidationXSDPath", rowValidationXSDPath)?;
-        r = set_opt(r, "ignoreNamespace", ignoreNamespace)?;
-        r = set_opt(r, "wildcardColName", wildcardColName)?;
-        r = set_opt(r, "encoding", encoding)?;
-        r = set_opt(r, "inferSchema", inferSchema)?;
-        r = set_opt(r, "nullValue", nullValue)?;
-        r = set_opt(r, "dateFormat", dateFormat)?;
-        r = set_opt(r, "timestampFormat", timestampFormat)?;
-        r = set_opt(r, "mode", mode)?;
-        r = set_opt(r, "columnNameOfCorruptRecord", columnNameOfCorruptRecord)?;
-        r = set_opt(r, "multiLine", multiLine)?;
-        r = set_opt(r, "samplingRatio", samplingRatio)?;
-        r = set_opt(r, "locale", locale)?;
+        r = set_options_skip_none(
+            r,
+            &[
+                ("excludeAttribute", excludeAttribute),
+                ("attributePrefix", attributePrefix),
+                ("valueTag", valueTag),
+                ("ignoreSurroundingSpaces", ignoreSurroundingSpaces),
+                ("rowValidationXSDPath", rowValidationXSDPath),
+                ("ignoreNamespace", ignoreNamespace),
+                ("wildcardColName", wildcardColName),
+                ("encoding", encoding),
+                ("inferSchema", inferSchema),
+                ("nullValue", nullValue),
+                ("dateFormat", dateFormat),
+                ("timestampFormat", timestampFormat),
+                ("mode", mode),
+                ("columnNameOfCorruptRecord", columnNameOfCorruptRecord),
+                ("multiLine", multiLine),
+                ("samplingRatio", samplingRatio),
+                ("locale", locale),
+            ],
+        )?;
         self.read_or_parse(r, "xml", spark_connect::plan::ParseFormat::Xml, path)
     }
 
@@ -707,17 +671,22 @@ impl PyDataFrameReader {
                         )));
                     }
                 }
-                r = set_opt(r, "partitionColumn", Some(column))?;
-                r = set_opt(r, "lowerBound", lowerBound)?;
-                r = set_opt(r, "upperBound", upperBound)?;
-                r = set_opt(r, "numPartitions", numPartitions)?;
+                r = set_options_skip_none(
+                    r,
+                    &[
+                        ("partitionColumn", Some(column)),
+                        ("lowerBound", lowerBound),
+                        ("upperBound", upperBound),
+                        ("numPartitions", numPartitions),
+                    ],
+                )?;
                 None
             }
             None => predicates,
         };
         if let Some(properties) = properties {
             for (key, value) in properties.iter() {
-                r = set_opt(r, &key.str()?.to_cow()?, Some(&value))?;
+                r = set_option_skip_none(r, &key.str()?.to_cow()?, Some(&value))?;
             }
         }
         // PySpark's jdbc also leaves url/dbtable on the reader.

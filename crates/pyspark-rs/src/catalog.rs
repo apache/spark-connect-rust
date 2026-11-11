@@ -48,28 +48,6 @@ fn table_schema(
     ))
 }
 
-/// The `**options` of `createTable`, as PySpark's: strings, where a `None` is left out.
-fn table_options(
-    options: Option<&Bound<'_, pyo3::types::PyDict>>,
-) -> PyResult<std::collections::HashMap<String, String>> {
-    let mut map = std::collections::HashMap::new();
-    for (key, value) in options.into_iter().flat_map(|options| options.iter()) {
-        if value.is_none() {
-            continue;
-        }
-        if !value.is_instance_of::<pyo3::types::PyString>() {
-            // As the protobuf map of strings that PySpark sets the options in.
-            return Err(pyo3::exceptions::PyTypeError::new_err(format!(
-                "{} has type {}, but expected one of: (<class 'bytes'>, <class 'str'>)",
-                value.repr()?,
-                value.get_type().str()?
-            )));
-        }
-        map.insert(key.extract()?, value.extract()?);
-    }
-    Ok(map)
-}
-
 /// The NamedTuple of `pyspark.sql.catalog` of a result of the catalog, as PySpark's `Catalog`
 /// returns: `CatalogMetadata`, `Database`, `Table`, `Column`, `Function` or `TablePartition`.
 trait NamedTuple {
@@ -429,7 +407,7 @@ impl PyCatalog {
         options: Option<&Bound<'_, pyo3::types::PyDict>>,
     ) -> PyResult<PyDataFrame> {
         let schema = table_schema(schema)?;
-        let options = table_options(options)?;
+        let options = crate::options::str_kwargs_skip_none(options)?;
         py.detach(|| {
             self.catalog
                 .create_table_with(

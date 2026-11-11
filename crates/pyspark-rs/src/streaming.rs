@@ -14,6 +14,7 @@ use std::sync::Arc;
 use crate::dataframe::{PyDataFrame, WriterState};
 use crate::errors::spark_error_to_py_exception;
 use crate::interrupt::{interruptible, interruptible_outcome};
+use crate::options::{set_option_skip_none, set_options_skip_none};
 
 /// Adapts Python listeners to the native bus: deserialize one typed event for the whole
 /// snapshot, then dispatch it through Python's callback-exception isolation helper. Decode
@@ -173,23 +174,6 @@ fn post_started_event(
     .map_err(|error| *error)
 }
 
-/// Apply a named read option to a streaming reader when supplied (mirrors the batch
-/// `set_opt` in readwriter.rs): `None` leaves the option unset (not the string "None");
-/// booleans lowercase to "true"/"false" via `coerce_option_value`.
-fn set_ropt(
-    r: DataStreamReader,
-    name: &str,
-    v: Option<&Bound<'_, PyAny>>,
-) -> PyResult<DataStreamReader> {
-    match v {
-        Some(x) => match crate::coerce_option_value(x)? {
-            Some(sv) => Ok(r.option(name, &sv)),
-            None => Ok(r),
-        },
-        None => Ok(r),
-    }
-}
-
 /// Apply a `schema` argument (a StructType or a DDL string) to a streaming reader, as the
 /// batch reader does.
 fn apply_stream_schema(r: DataStreamReader, v: &Bound<'_, PyAny>) -> PyResult<DataStreamReader> {
@@ -295,7 +279,7 @@ impl PyDataStreamReader {
         schema: Option<Bound<'_, PyAny>>,
         options: Option<Bound<'_, pyo3::types::PyDict>>,
     ) -> PyResult<()> {
-        crate::readwriter::set_opts(slf.as_any(), schema.as_ref(), options.as_ref())
+        crate::options::set_opts(slf.as_any(), schema.as_ref(), options.as_ref())
     }
 
     /// Set the source format. As PySpark's, None unsets it, so that the server reads its
@@ -343,14 +327,7 @@ impl PyDataStreamReader {
         mut slf: PyRefMut<'py, Self>,
         options: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyRefMut<'py, Self>> {
-        let mut opts = HashMap::new();
-        if let Some(options) = options {
-            for (k, v) in options.iter() {
-                if let Some(val) = crate::coerce_option_value(&v)? {
-                    opts.insert(k.str()?.to_string(), val);
-                }
-            }
-        }
+        let opts = crate::options::kwargs_skip_none(options)?;
         slf.inner = slf.inner.clone().options(opts);
         Ok(slf)
     }
@@ -388,13 +365,8 @@ impl PyDataStreamReader {
         if let Some(v) = schema {
             r = apply_stream_schema(r, v)?;
         }
-        if let Some(options) = options {
-            let mut opts = HashMap::new();
-            for (k, v) in options.iter() {
-                if let Some(val) = crate::coerce_option_value(&v)? {
-                    opts.insert(k.str()?.to_string(), val);
-                }
-            }
+        if options.is_some() {
+            let opts = crate::options::kwargs_skip_none(options)?;
             r = r.options(opts);
         }
         // PySpark's one-shot load sets format/schema/options on the reader itself.
@@ -469,27 +441,32 @@ impl PyDataStreamReader {
         locale: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
         let mut r = self.inner.clone().format("xml");
-        r = set_ropt(r, "rowTag", rowTag)?;
+        r = set_option_skip_none(r, "rowTag", rowTag)?;
         if let Some(v) = schema {
             r = apply_stream_schema(r, v)?;
         }
-        r = set_ropt(r, "excludeAttribute", excludeAttribute)?;
-        r = set_ropt(r, "attributePrefix", attributePrefix)?;
-        r = set_ropt(r, "valueTag", valueTag)?;
-        r = set_ropt(r, "ignoreSurroundingSpaces", ignoreSurroundingSpaces)?;
-        r = set_ropt(r, "rowValidationXSDPath", rowValidationXSDPath)?;
-        r = set_ropt(r, "ignoreNamespace", ignoreNamespace)?;
-        r = set_ropt(r, "wildcardColName", wildcardColName)?;
-        r = set_ropt(r, "encoding", encoding)?;
-        r = set_ropt(r, "inferSchema", inferSchema)?;
-        r = set_ropt(r, "nullValue", nullValue)?;
-        r = set_ropt(r, "dateFormat", dateFormat)?;
-        r = set_ropt(r, "timestampFormat", timestampFormat)?;
-        r = set_ropt(r, "mode", mode)?;
-        r = set_ropt(r, "columnNameOfCorruptRecord", columnNameOfCorruptRecord)?;
-        r = set_ropt(r, "multiLine", multiLine)?;
-        r = set_ropt(r, "samplingRatio", samplingRatio)?;
-        r = set_ropt(r, "locale", locale)?;
+        r = set_options_skip_none(
+            r,
+            &[
+                ("excludeAttribute", excludeAttribute),
+                ("attributePrefix", attributePrefix),
+                ("valueTag", valueTag),
+                ("ignoreSurroundingSpaces", ignoreSurroundingSpaces),
+                ("rowValidationXSDPath", rowValidationXSDPath),
+                ("ignoreNamespace", ignoreNamespace),
+                ("wildcardColName", wildcardColName),
+                ("encoding", encoding),
+                ("inferSchema", inferSchema),
+                ("nullValue", nullValue),
+                ("dateFormat", dateFormat),
+                ("timestampFormat", timestampFormat),
+                ("mode", mode),
+                ("columnNameOfCorruptRecord", columnNameOfCorruptRecord),
+                ("multiLine", multiLine),
+                ("samplingRatio", samplingRatio),
+                ("locale", locale),
+            ],
+        )?;
         // Like PySpark, the options and the xml format stay on the reader.
         self.inner = r.clone();
         let path = format_path(path)?;
@@ -533,31 +510,35 @@ impl PyDataStreamReader {
         if let Some(v) = schema {
             r = apply_stream_schema(r, v)?;
         }
-        r = set_ropt(r, "primitivesAsString", primitivesAsString)?;
-        r = set_ropt(r, "prefersDecimal", prefersDecimal)?;
-        r = set_ropt(r, "allowComments", allowComments)?;
-        r = set_ropt(r, "allowUnquotedFieldNames", allowUnquotedFieldNames)?;
-        r = set_ropt(r, "allowSingleQuotes", allowSingleQuotes)?;
-        r = set_ropt(r, "allowNumericLeadingZero", allowNumericLeadingZero)?;
-        r = set_ropt(
+        r = set_options_skip_none(
             r,
-            "allowBackslashEscapingAnyCharacter",
-            allowBackslashEscapingAnyCharacter,
+            &[
+                ("primitivesAsString", primitivesAsString),
+                ("prefersDecimal", prefersDecimal),
+                ("allowComments", allowComments),
+                ("allowUnquotedFieldNames", allowUnquotedFieldNames),
+                ("allowSingleQuotes", allowSingleQuotes),
+                ("allowNumericLeadingZero", allowNumericLeadingZero),
+                (
+                    "allowBackslashEscapingAnyCharacter",
+                    allowBackslashEscapingAnyCharacter,
+                ),
+                ("mode", mode),
+                ("columnNameOfCorruptRecord", columnNameOfCorruptRecord),
+                ("dateFormat", dateFormat),
+                ("timestampFormat", timestampFormat),
+                ("multiLine", multiLine),
+                ("allowUnquotedControlChars", allowUnquotedControlChars),
+                ("lineSep", lineSep),
+                ("locale", locale),
+                ("dropFieldIfAllNull", dropFieldIfAllNull),
+                ("encoding", encoding),
+                ("pathGlobFilter", pathGlobFilter),
+                ("recursiveFileLookup", recursiveFileLookup),
+                ("allowNonNumericNumbers", allowNonNumericNumbers),
+                ("useUnsafeRow", useUnsafeRow),
+            ],
         )?;
-        r = set_ropt(r, "mode", mode)?;
-        r = set_ropt(r, "columnNameOfCorruptRecord", columnNameOfCorruptRecord)?;
-        r = set_ropt(r, "dateFormat", dateFormat)?;
-        r = set_ropt(r, "timestampFormat", timestampFormat)?;
-        r = set_ropt(r, "multiLine", multiLine)?;
-        r = set_ropt(r, "allowUnquotedControlChars", allowUnquotedControlChars)?;
-        r = set_ropt(r, "lineSep", lineSep)?;
-        r = set_ropt(r, "locale", locale)?;
-        r = set_ropt(r, "dropFieldIfAllNull", dropFieldIfAllNull)?;
-        r = set_ropt(r, "encoding", encoding)?;
-        r = set_ropt(r, "pathGlobFilter", pathGlobFilter)?;
-        r = set_ropt(r, "recursiveFileLookup", recursiveFileLookup)?;
-        r = set_ropt(r, "allowNonNumericNumbers", allowNonNumericNumbers)?;
-        r = set_ropt(r, "useUnsafeRow", useUnsafeRow)?;
         // Like PySpark, the options and the format stay on the reader.
         self.inner = r.clone().format("json");
         let path = format_path(path)?;
@@ -576,11 +557,16 @@ impl PyDataStreamReader {
         int96RebaseMode: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
         let mut r = self.inner.clone();
-        r = set_ropt(r, "mergeSchema", mergeSchema)?;
-        r = set_ropt(r, "pathGlobFilter", pathGlobFilter)?;
-        r = set_ropt(r, "recursiveFileLookup", recursiveFileLookup)?;
-        r = set_ropt(r, "datetimeRebaseMode", datetimeRebaseMode)?;
-        r = set_ropt(r, "int96RebaseMode", int96RebaseMode)?;
+        r = set_options_skip_none(
+            r,
+            &[
+                ("mergeSchema", mergeSchema),
+                ("pathGlobFilter", pathGlobFilter),
+                ("recursiveFileLookup", recursiveFileLookup),
+                ("datetimeRebaseMode", datetimeRebaseMode),
+                ("int96RebaseMode", int96RebaseMode),
+            ],
+        )?;
         // Like PySpark, the options and the format stay on the reader.
         self.inner = r.clone().format("parquet");
         let path = format_path(path)?;
@@ -627,39 +613,40 @@ impl PyDataStreamReader {
         if let Some(v) = schema {
             r = apply_stream_schema(r, v)?;
         }
-        r = set_ropt(r, "sep", sep)?;
-        r = set_ropt(r, "encoding", encoding)?;
-        r = set_ropt(r, "quote", quote)?;
-        r = set_ropt(r, "escape", escape)?;
-        r = set_ropt(r, "comment", comment)?;
-        r = set_ropt(r, "header", header)?;
-        r = set_ropt(r, "inferSchema", inferSchema)?;
-        r = set_ropt(r, "ignoreLeadingWhiteSpace", ignoreLeadingWhiteSpace)?;
-        r = set_ropt(r, "ignoreTrailingWhiteSpace", ignoreTrailingWhiteSpace)?;
-        r = set_ropt(r, "nullValue", nullValue)?;
-        r = set_ropt(r, "nanValue", nanValue)?;
-        r = set_ropt(r, "positiveInf", positiveInf)?;
-        r = set_ropt(r, "negativeInf", negativeInf)?;
-        r = set_ropt(r, "dateFormat", dateFormat)?;
-        r = set_ropt(r, "timestampFormat", timestampFormat)?;
-        r = set_ropt(r, "maxColumns", maxColumns)?;
-        r = set_ropt(r, "maxCharsPerColumn", maxCharsPerColumn)?;
-        r = set_ropt(
+        r = set_options_skip_none(
             r,
-            "maxMalformedLogPerPartition",
-            maxMalformedLogPerPartition,
+            &[
+                ("sep", sep),
+                ("encoding", encoding),
+                ("quote", quote),
+                ("escape", escape),
+                ("comment", comment),
+                ("header", header),
+                ("inferSchema", inferSchema),
+                ("ignoreLeadingWhiteSpace", ignoreLeadingWhiteSpace),
+                ("ignoreTrailingWhiteSpace", ignoreTrailingWhiteSpace),
+                ("nullValue", nullValue),
+                ("nanValue", nanValue),
+                ("positiveInf", positiveInf),
+                ("negativeInf", negativeInf),
+                ("dateFormat", dateFormat),
+                ("timestampFormat", timestampFormat),
+                ("maxColumns", maxColumns),
+                ("maxCharsPerColumn", maxCharsPerColumn),
+                ("maxMalformedLogPerPartition", maxMalformedLogPerPartition),
+                ("mode", mode),
+                ("columnNameOfCorruptRecord", columnNameOfCorruptRecord),
+                ("multiLine", multiLine),
+                ("charToEscapeQuoteEscaping", charToEscapeQuoteEscaping),
+                ("enforceSchema", enforceSchema),
+                ("emptyValue", emptyValue),
+                ("locale", locale),
+                ("lineSep", lineSep),
+                ("pathGlobFilter", pathGlobFilter),
+                ("recursiveFileLookup", recursiveFileLookup),
+                ("unescapedQuoteHandling", unescapedQuoteHandling),
+            ],
         )?;
-        r = set_ropt(r, "mode", mode)?;
-        r = set_ropt(r, "columnNameOfCorruptRecord", columnNameOfCorruptRecord)?;
-        r = set_ropt(r, "multiLine", multiLine)?;
-        r = set_ropt(r, "charToEscapeQuoteEscaping", charToEscapeQuoteEscaping)?;
-        r = set_ropt(r, "enforceSchema", enforceSchema)?;
-        r = set_ropt(r, "emptyValue", emptyValue)?;
-        r = set_ropt(r, "locale", locale)?;
-        r = set_ropt(r, "lineSep", lineSep)?;
-        r = set_ropt(r, "pathGlobFilter", pathGlobFilter)?;
-        r = set_ropt(r, "recursiveFileLookup", recursiveFileLookup)?;
-        r = set_ropt(r, "unescapedQuoteHandling", unescapedQuoteHandling)?;
         // Like PySpark, the options and the format stay on the reader.
         self.inner = r.clone().format("csv");
         let path = format_path(path)?;
@@ -676,9 +663,14 @@ impl PyDataStreamReader {
         recursiveFileLookup: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
         let mut r = self.inner.clone();
-        r = set_ropt(r, "mergeSchema", mergeSchema)?;
-        r = set_ropt(r, "pathGlobFilter", pathGlobFilter)?;
-        r = set_ropt(r, "recursiveFileLookup", recursiveFileLookup)?;
+        r = set_options_skip_none(
+            r,
+            &[
+                ("mergeSchema", mergeSchema),
+                ("pathGlobFilter", pathGlobFilter),
+                ("recursiveFileLookup", recursiveFileLookup),
+            ],
+        )?;
         // Like PySpark, the options and the format stay on the reader.
         self.inner = r.clone().format("orc");
         let path = format_path(path)?;
@@ -696,10 +688,15 @@ impl PyDataStreamReader {
         recursiveFileLookup: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
         let mut r = self.inner.clone();
-        r = set_ropt(r, "wholetext", wholetext)?;
-        r = set_ropt(r, "lineSep", lineSep)?;
-        r = set_ropt(r, "pathGlobFilter", pathGlobFilter)?;
-        r = set_ropt(r, "recursiveFileLookup", recursiveFileLookup)?;
+        r = set_options_skip_none(
+            r,
+            &[
+                ("wholetext", wholetext),
+                ("lineSep", lineSep),
+                ("pathGlobFilter", pathGlobFilter),
+                ("recursiveFileLookup", recursiveFileLookup),
+            ],
+        )?;
         // Like PySpark, the options and the format stay on the reader.
         self.inner = r.clone().format("text");
         let path = format_path(path)?;
@@ -795,13 +792,8 @@ impl PyDataStreamWriter {
         if let Some(qn) = query_name {
             w = w.query_name(&query_name_of(qn)?);
         }
-        if let Some(options) = options {
-            let mut opts = HashMap::new();
-            for (k, v) in options.iter() {
-                if let Some(val) = crate::coerce_option_value(&v)? {
-                    opts.insert(k.str()?.to_string(), val);
-                }
-            }
+        if options.is_some() {
+            let opts = crate::options::kwargs_skip_none(options)?;
             w = w.options(opts);
         }
         // PySpark's start/toTable set these on the writer itself before starting.
@@ -844,14 +836,7 @@ impl PyDataStreamWriter {
         slf: &Bound<'py, Self>,
         options: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Bound<'py, Self>> {
-        let mut opts = HashMap::new();
-        if let Some(options) = options {
-            for (k, v) in options.iter() {
-                if let Some(val) = crate::coerce_option_value(&v)? {
-                    opts.insert(k.str()?.to_string(), val);
-                }
-            }
-        }
+        let opts = crate::options::kwargs_skip_none(options)?;
         slf.borrow().inner.update(|w| w.options(opts));
         Ok(slf.clone())
     }
