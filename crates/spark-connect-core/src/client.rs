@@ -1315,16 +1315,20 @@ impl SparkConnectClient {
         F: FnMut() -> Fut,
         Fut: std::future::Future<Output = std::result::Result<T, tonic::Status>>,
     {
+        use futures::FutureExt;
         self.with_attempts(|| {
-            let call = op();
-            async move {
-                // An attempt that is not answered ends with the signal that a wait of the caller
-                // takes, as PySpark's blocked call does.
-                match crate::runtime::until_abort(crate::runtime::ABORT_RETRIES, call).await {
+            // An attempt that is not answered ends with the signal that a wait of the caller
+            // takes, as PySpark's blocked call does. A combinator rather than an async block that
+            // awaits the call: such a block keeps the future of the call twice, as what it
+            // captures and as what it awaits, and that future, of the state of a gRPC call, is
+            // large enough that the extra copy overflows the stack of a test thread or of a
+            // Python thread of 512 KiB.
+            crate::runtime::until_abort(crate::runtime::ABORT_RETRIES, op()).map(|attempt| {
+                match attempt {
                     Some(result) => result.map_err(RetryError::Status),
                     None => Err(RetryError::Aborted(wait_aborted())),
                 }
-            }
+            })
         })
         .await
     }
