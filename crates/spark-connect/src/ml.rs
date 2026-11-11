@@ -85,7 +85,7 @@ impl Params {
             .collect();
         let literal = LiteralExpression::Array {
             element_type: Box::new(DataType::String {
-                collation: String::new(),
+                collation: "UTF8_BINARY".to_string(),
             }),
             elements,
         }
@@ -159,6 +159,40 @@ impl Params {
     pub fn clear_param(mut self, name: &str) -> Self {
         self.params.remove(name);
         self
+    }
+
+    /// Set a parameter to a null, as PySpark sends a None value of a param it was given.
+    pub fn set_param_null(mut self, name: &str) -> Self {
+        let literal = proto::expression::Literal {
+            literal_type: Some(proto::expression::literal::LiteralType::Null(
+                DataType::Null.to_proto(),
+            )),
+            ..Default::default()
+        };
+        self.params.insert(
+            name.to_string(),
+            proto::Expression {
+                expr_type: Some(proto::expression::ExprType::Literal(literal)),
+                ..Default::default()
+            },
+        );
+        self
+    }
+
+    /// Whether a parameter is an array without elements. PySpark cannot infer the element type
+    /// of such an array, so it cannot send the params that hold one.
+    pub fn has_empty_array(&self) -> bool {
+        self.params.values().any(|expr| {
+            matches!(
+                &expr.expr_type,
+                Some(proto::expression::ExprType::Literal(lit))
+                    if matches!(
+                        &lit.literal_type,
+                        Some(proto::expression::literal::LiteralType::Array(array))
+                            if array.elements.is_empty()
+                    )
+            )
+        })
     }
 
     /// Get a parameter value.
@@ -2889,6 +2923,42 @@ mod tests {
 
         assert!(params.get_param("inputCol").is_some());
         assert!(params.get_param("outputCol").is_some());
+    }
+
+    #[test]
+    fn test_params_null_and_empty_arrays() {
+        let params = Params::new()
+            .set_param_null("weightCol")
+            .set_param_string_array("inputCols", &["a".to_string()]);
+        let null = params.to_proto();
+        assert!(matches!(
+            null.params["weightCol"].literal_type,
+            Some(proto::expression::literal::LiteralType::Null(_))
+        ));
+        assert!(!params.has_empty_array());
+
+        let empty = Params::new().set_param_string_array("inputCols", Vec::<String>::new());
+        assert!(empty.has_empty_array());
+        let empty = Params::new().set_param_double_array("thresholds", []);
+        assert!(empty.has_empty_array());
+        assert!(!Params::new().set_param_null("x").has_empty_array());
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn test_string_array_param_has_the_default_collation() {
+        // As PySpark infers the type of a list of strings: a string of the UTF8_BINARY collation.
+        let params = Params::new().set_param_string_array("inputCols", &["a".to_string()]);
+        let literal = params.to_proto().params["inputCols"].clone();
+        let Some(proto::expression::literal::LiteralType::Array(array)) = literal.literal_type
+        else {
+            panic!("expected an array literal");
+        };
+        let element_type = array.element_type.expect("element type");
+        let Some(proto::data_type::Kind::String(string)) = element_type.kind else {
+            panic!("expected a string element type");
+        };
+        assert_eq!(string.collation, "UTF8_BINARY");
     }
 
     #[test]

@@ -484,9 +484,8 @@ def test_ml_connect_constructors_send_only_the_params_they_are_given_as_pyspark(
 def test_ml_connect_unsendable_ints_none_and_uids_as_pyspark(ml_mock):
     # As PySpark: an int beyond a long is taken by the constructor and the setter, and the
     # next fit raises the VALUE_NOT_BETWEEN of PySpark's serialization of the params, before
-    # any request, until the param is set again. None leaves a param unset, where PySpark
-    # sends a null that the server rejects (a NullPointerException for a number). The uid of
-    # every native class is the name of its class and 12 hex digits, as PySpark's.
+    # any request, until the param is set again. None is sent as a null, as PySpark sends it.
+    # The uid of every native class is the name of its class and 12 hex digits, as PySpark's.
     import re
 
     import pyspark.ml.connect as connect
@@ -511,8 +510,9 @@ def test_ml_connect_unsendable_ints_none_and_uids_as_pyspark(ml_mock):
     estimator = connect.KMeans(seed=2**64)
     assert estimator.setSeed(5) is estimator
     assert _native_sent(spark, service, estimator, models) == {"seed": ("integer", 5)}
-    assert _native_sent(spark, service, connect.KMeans(seed=2**64, k=2).setSeed(None),
-                        models) == {"k": ("integer", 2)}
+    sent = _native_sent(spark, service, connect.KMeans(seed=2**64, k=2).setSeed(None), models)
+    assert sent.keys() == {"k", "seed"} and sent["k"] == ("integer", 2)
+    assert sent["seed"][0] == "null"
 
     for name, params in _NATIVE_PARAMS.items():
         cls = getattr(connect, name)
@@ -522,9 +522,11 @@ def test_ml_connect_unsendable_ints_none_and_uids_as_pyspark(ml_mock):
             obj = cls()
             assert getattr(obj, setter)(value) is obj
             assert getattr(obj, setter)(None) is obj
-            assert _native_sent(spark, service, obj, models) == {}, (name, param)
+            assert _native_sent(spark, service, obj, models).keys() == {param}, (name, param)
+            assert _native_sent(spark, service, obj, models)[param][0] == "null", (name, param)
             if param != "thresholds":
-                assert _native_sent(spark, service, cls(**{param: None}), models) == {}
+                sent = _native_sent(spark, service, cls(**{param: None}), models)
+                assert sent.keys() == {param} and sent[param][0] == "null", (name, param)
         operator, _ = _native_request(spark, service, cls(), models)
         assert re.fullmatch(name + "_[0-9a-f]{12}", operator.uid), operator.uid
 
@@ -2243,3 +2245,41 @@ def test_session_hooks_raise_their_errors_as_pyspark(_ml_mock_server):
         assert service.execute_requests == []
     finally:
         spark.stop()
+
+
+def test_ml_none_params_send_null_and_empty_lists_raise_at_the_command_as_pyspark(ml_mock):
+    # As PySpark's Params._set: None is stored and sent as a null literal, and a param that is
+    # not given is not sent. A list without elements is accepted by the constructor and the
+    # setters, and PySpark raises CANNOT_INFER_ARRAY_ELEMENT_TYPE when its serialization sends
+    # the params of a fit, transform or evaluate, before any request.
+    import pyspark.ml.connect as connect
+    from pyspark.ml.connect.pipeline import Pipeline
+
+    spark, service = ml_mock
+    df = spark.range(1)
+    models = []
+
+    sent = _native_sent(spark, service, connect.RandomForestClassifier(bootstrap=None), models)
+    assert sent.keys() == {"bootstrap"} and sent["bootstrap"][0] == "null"
+    assert "bootstrap" not in _native_sent(
+        spark, service, connect.RandomForestClassifier(numTrees=3), models
+    )
+
+    assembler = connect.VectorAssembler(inputCols=[], outputCol="f")
+    before = len(service.execute_requests)
+    with pytest.raises(PySparkTypeError, match="CANNOT_INFER_ARRAY_ELEMENT_TYPE") as error:
+        assembler.transform(df)
+    assert error.value.getCondition() == "CANNOT_INFER_ARRAY_ELEMENT_TYPE"
+    with pytest.raises(PySparkTypeError, match="CANNOT_INFER_ARRAY_ELEMENT_TYPE"):
+        connect.RandomForestClassifier().setThresholds([]).fit(df)
+    with pytest.raises(PySparkTypeError, match="CANNOT_INFER_ARRAY_ELEMENT_TYPE"):
+        Pipeline(stages=[]).fit(df)
+    assert len(service.execute_requests) == before
+
+    # Elements given again make the list sendable.
+    assert assembler.setInputCols(["a", "b"]) is assembler
+    _, params = _native_request(spark, service, assembler, models)
+    expected = 'array { element_type { %s } elements { string: "a" } elements { string: "b" } }'
+    assert params.params["inputCols"] == text_format.Parse(
+        expected % _UTF8, pb2.Expression.Literal()
+    )

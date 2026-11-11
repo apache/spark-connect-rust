@@ -55,6 +55,26 @@ def _labeled(session):
     return session.createDataFrame(rows, ["id", "label", "features"])
 
 
+def test_ml_connect_random_forest_null_bootstrap_fits_as_pyspark(session):
+    # As PySpark, a None param is sent as a null: the server reads a null bootstrap as false, so
+    # the forest of bootstrap=None is the forest of bootstrap=False, and a null seed fails.
+    from pyspark.ml.connect.classification import RandomForestClassifier
+
+    df = _labeled(session)
+
+    def probabilities(estimator):
+        return [
+            row.probability.toArray().tolist()
+            for row in estimator.fit(df).transform(df).orderBy("id").collect()
+        ]
+
+    assert probabilities(RandomForestClassifier(bootstrap=None, numTrees=5, seed=42)) == (
+        probabilities(RandomForestClassifier(bootstrap=False, numTrees=5, seed=42))
+    )
+    with pytest.raises(Exception, match="NullPointerException"):
+        RandomForestClassifier(numTrees=5, seed=None).fit(df)
+
+
 def test_ml_connect_scalers_fit_and_transform_as_pyspark(session):
     # pyspark.ml.connect's StandardScaler, MaxAbsScaler and StringIndexer: the server fits each one
     # and caches the model, and the transform of the model gives the values of PySpark 4.3.0.

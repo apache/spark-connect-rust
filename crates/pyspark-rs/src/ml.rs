@@ -62,9 +62,9 @@ static TYPE_CONVERTERS: pyo3::sync::PyOnceLock<Py<PyType>> = pyo3::sync::PyOnceL
 
 /// The value of a param, as PySpark's `Params._set` converts it.
 enum Converted {
-    /// None, which leaves the param unset, so that the server uses its default. PySpark sends a
-    /// null, which the server rejects (a NullPointerException for a number).
-    Clear,
+    /// None, which PySpark sends as a null literal: the server rejects a null number (a
+    /// NullPointerException), and reads a null bootstrap as false.
+    Null,
     Int(i64),
     /// An int beyond a long, which PySpark's `LiteralExpression` cannot send.
     Unsendable,
@@ -79,7 +79,7 @@ enum Converted {
 /// TypeError of `Params._set` for a value that it cannot convert.
 fn convert(name: &str, kind: Kind, value: &Bound<'_, PyAny>) -> PyResult<Converted> {
     if value.is_none() {
-        return Ok(Converted::Clear);
+        return Ok(Converted::Null);
     }
     let py = value.py();
     let converters = TYPE_CONVERTERS.import(py, "pyspark.ml.param", "TypeConverters")?;
@@ -114,6 +114,7 @@ trait Native {
     fn params_mut(&mut self) -> &mut Params;
     /// The params whose value PySpark cannot send: a fit, transform or evaluate raises PySpark's
     /// error of its serialization of the params, before any request.
+    fn params(&self) -> &Params;
     fn unsendable(&self) -> &[&'static str];
     fn unsendable_mut(&mut self) -> &mut Vec<&'static str>;
 }
@@ -127,6 +128,9 @@ macro_rules! native {
             }
             fn params_mut(&mut self) -> &mut Params {
                 self.inner.params_mut()
+            }
+            fn params(&self) -> &Params {
+                self.inner.params()
             }
             fn unsendable(&self) -> &[&'static str] {
                 &self.unsendable
@@ -143,7 +147,7 @@ fn apply<T: Native>(target: &mut T, name: &'static str, value: Converted) {
     target.unsendable_mut().retain(|unsent| *unsent != name);
     let params = std::mem::take(target.params_mut());
     let params = match value {
-        Converted::Clear => params.clear_param(name),
+        Converted::Null => params.set_param_null(name),
         Converted::Unsendable => {
             target.unsendable_mut().push(name);
             params.clear_param(name)
@@ -231,11 +235,20 @@ fn init_params<T: Native>(
 /// The core object of `slf`, cloned under a short borrow, so that a setter that another
 /// thread calls while a fit, transform or evaluate waits for the server does not fail. As
 /// PySpark's serialization of the params, it first raises `VALUE_NOT_BETWEEN` of an int
-/// that PySpark cannot send.
+/// that PySpark cannot send, and `CANNOT_INFER_ARRAY_ELEMENT_TYPE` of a list param without
+/// elements, whose element type PySpark cannot infer.
 fn snapshot<T: Native + PyClass>(slf: &Bound<'_, T>) -> PyResult<T::Core> {
     let this = slf.try_borrow()?;
     if !this.unsendable().is_empty() {
         return Err(crate::functions::value_not_between(slf.py()));
+    }
+    if this.params().has_empty_array() {
+        return Err(crate::column::raise_pyspark(
+            slf.py(),
+            "PySparkTypeError",
+            "CANNOT_INFER_ARRAY_ELEMENT_TYPE",
+            &[],
+        ));
     }
     Ok(this.inner().clone())
 }
