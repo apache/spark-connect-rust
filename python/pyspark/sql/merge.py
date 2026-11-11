@@ -16,4 +16,5 @@
 #
 """Re-export of the Rust-backed class(es) under the official pyspark.sql import path."""
 from pyspark._pyspark import MergeIntoWriter
+
 __all__ = ["MergeIntoWriter"]

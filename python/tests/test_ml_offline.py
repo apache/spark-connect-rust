@@ -32,9 +32,7 @@ import weakref
 
 import numpy as np
 import pytest
-
 from _mock_connect_server import mock_connect_session
-
 from pyspark.loose_version import LooseVersion
 
 # The generated pyspark.sql.connect.proto, of Apache Spark v4.3.0, needs protobuf >= 6.33.5.
@@ -43,9 +41,7 @@ if LooseVersion(_protobuf.__version__) < LooseVersion("6.33.5"):
     pytest.skip("pyspark.sql.connect.proto needs protobuf >= 6.33.5", allow_module_level=True)
 
 import pyspark.sql.connect.proto as pb2  # noqa: E402
-
 from google.protobuf import text_format  # noqa: E402
-
 from pyspark.errors import PySparkTypeError, PySparkValueError  # noqa: E402
 from pyspark.sql import SparkSession  # noqa: E402
 from pyspark.sql import functions as F  # noqa: E402
@@ -194,14 +190,12 @@ def test_ml_connect_setters_set_the_params_of_their_receiver_as_pyspark(ml_mock)
     # as the object of the constructor of the same params sends it.
     from pyspark.ml.connect import (
         BinaryClassificationEvaluator,
-        CrossValidator,
         KMeans,
         LinearRegression,
         LinearSVC,
         LogisticRegression,
         MaxAbsScaler,
         MulticlassClassificationEvaluator,
-        Pipeline,
         RegressionEvaluator,
         StandardScaler,
         StringIndexer,
@@ -1501,24 +1495,24 @@ def test_public_dataframe_extensions_reach_native_frames_and_restore(ml_mock, mo
             concrete_count = lambda self: 74
             # A concrete patch installed after the public override also survives
             # its undo. This assignment is owned by the surrounding finally.
-            setattr(ConnectDataFrame, "count", concrete_count)
+            ConnectDataFrame.count = concrete_count
         assert vars(ConnectDataFrame)["count"] is concrete_count
         assert DataFrame.count(frame) == frame.count() == 74
     finally:
-        setattr(ConnectDataFrame, "count", original_native_count)
+        ConnectDataFrame.count = original_native_count
     assert vars(DataFrame)["count"] is original_public_count
 
     try:
         with monkeypatch.context() as public_patch:
             public_patch.setattr(DataFrame, "count", lambda self: 99)
             concrete_count = lambda self: 75
-            setattr(ConnectDataFrame, "count", concrete_count)
+            ConnectDataFrame.count = concrete_count
             public_patch.setattr(DataFrame, "count", lambda self: 100)
             assert frame.count() == 100
         assert vars(ConnectDataFrame)["count"] is concrete_count
         assert DataFrame.count(frame) == frame.count() == 75
     finally:
-        setattr(ConnectDataFrame, "count", original_native_count)
+        ConnectDataFrame.count = original_native_count
     assert vars(DataFrame)["count"] is original_public_count
 
     # Added helpers obey the same ownership rule as initial members, including
@@ -1530,7 +1524,7 @@ def test_public_dataframe_extensions_reach_native_frames_and_restore(ml_mock, mo
                     DataFrame, "compatibility_helper", lambda self: 1, raising=False
                 )
                 concrete_helper = lambda self: 76
-                setattr(ConnectDataFrame, "compatibility_helper", concrete_helper)
+                ConnectDataFrame.compatibility_helper = concrete_helper
                 if repeat_public_override:
                     public_patch.setattr(DataFrame, "compatibility_helper", lambda self: 2)
                     assert frame.compatibility_helper() == 2

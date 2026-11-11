@@ -29,8 +29,9 @@ messages are those of the generated ``pyspark.sql.connect.proto``, which needs t
 package.
 """
 
+from collections.abc import Sequence
 from threading import Lock
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Optional
 
 import pyspark.sql.connect.proto as proto
 from pyspark.sql.column import Column
@@ -58,7 +59,7 @@ class LogicalPlan:
         self._child = child
         self._root_plan_id = LogicalPlan._fresh_plan_id()
 
-        self._references: Sequence["LogicalPlan"] = references or []
+        self._references: Sequence[LogicalPlan] = references or []
         self._plan_id_with_rel: Optional[int] = None
         if len(self._references) > 0:
             assert all(isinstance(r, LogicalPlan) for r in self._references)
@@ -102,7 +103,7 @@ class LogicalPlan:
         return test_plan == plan
 
     @property
-    def observations(self) -> Dict[str, Any]:
+    def observations(self) -> dict[str, Any]:
         if self._child is None:
             return {}
         else:
@@ -147,7 +148,7 @@ class Read(LogicalPlan):
     def __init__(
         self,
         table_name: str,
-        options: Optional[Dict[str, str]] = None,
+        options: Optional[dict[str, str]] = None,
         is_streaming: Optional[bool] = None,
     ) -> None:
         super().__init__(None)
@@ -215,22 +216,22 @@ class SQL(LogicalPlan):
     def __init__(
         self,
         query: str,
-        args: Optional[List[Column]] = None,
-        named_args: Optional[Dict[str, Column]] = None,
+        args: Optional[list[Column]] = None,
+        named_args: Optional[dict[str, Column]] = None,
         views: Optional[Sequence[SubqueryAlias]] = None,
     ) -> None:
         if args is not None:
-            assert isinstance(args, List)
+            assert isinstance(args, list)
             assert all(isinstance(arg, Column) for arg in args)
 
         if named_args is not None:
-            assert isinstance(named_args, Dict)
+            assert isinstance(named_args, dict)
             for k, arg in named_args.items():
                 assert isinstance(k, str)
                 assert isinstance(arg, Column)
 
         if views is not None:
-            assert isinstance(views, List)
+            assert isinstance(views, list)
             assert all(isinstance(v, SubqueryAlias) for v in views)
 
         super().__init__(None, views)

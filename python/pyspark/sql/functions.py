@@ -315,15 +315,16 @@ def _dict_to_options_column(options_dict):
     return _call_function("create_map", *[_pyfunc_lit(arg) for arg in args])
 
 # Import UDF / UDTF functions
-from pyspark.sql.udf import udf
 from pyspark.sql.pandas.functions import arrow_udf, pandas_udf
+from pyspark.sql.udf import udf
 from pyspark.sql.udtf import (
-    udtf,
-    arrow_udtf,
     OrderingColumn,
     PartitioningColumn,
     SelectedColumn,
+    arrow_udtf,
+    udtf,
 )
+
 
 # Hand-written special functions. Thin wrappers so the public parameter names match
 # the reference PySpark 4.2.0 signatures (keyword-call parity), forwarding to the native
@@ -349,8 +350,7 @@ def lit(col):
             raise PySparkValueError(
                 errorClass="COLUMN_IN_LIST", messageParameters={"func_name": "lit"}
             )
-        return array(*[lit(c) for c in col])
-    import sys
+        return array(*[lit(c) for c in col])  # noqa: F821 - from functions_generated
 
     # An ndarray exists only when NumPy is imported, so this does not import it.
     np = sys.modules.get("numpy")
@@ -364,7 +364,7 @@ def lit(col):
                 errorClass="UNSUPPORTED_NUMPY_ARRAY_SCALAR",
                 messageParameters={"dtype": col.dtype.name},
             )
-        return array(*[lit(c) for c in col]).cast(ArrayType(dt))
+        return array(*[lit(c) for c in col]).cast(ArrayType(dt))  # noqa: F821 - from functions_generated
     return _pyfunc_lit(col)
 
 
@@ -449,8 +449,6 @@ def sum_distinct(col):
 
 def sumDistinct(col):
     """sumDistinct(col): deprecated since 3.4, use sum_distinct."""
-    import warnings
-
     warnings.warn("Deprecated in 3.4, use sum_distinct instead.", FutureWarning)
     return sum_distinct(col)
 
@@ -499,6 +497,7 @@ def string_agg_distinct(col, delimiter=None):
 # import so they take precedence over any generic wrapper.
 # ---------------------------------------------------------------------------
 import inspect as _inspect
+
 from pyspark.errors import PySparkValueError as _PySparkValueError
 
 _named_lambda_variable = _functions.pyfunc_named_lambda_variable
@@ -606,7 +605,7 @@ def map_zip_with(col1, col2, f):
 
 
 # ``random`` is an alias for ``rand`` (matches pyspark.sql.functions).
-random = rand
+random = rand  # noqa: F821 - from functions_generated
 
 
 # ``column`` is an alias of ``col`` (matches pyspark.sql.functions).
@@ -626,8 +625,6 @@ def call_function(funcName, *cols):
 
 
 def broadcast(df):
-    from pyspark.errors import PySparkTypeError
-
     if not isinstance(df, _pyspark.DataFrame):
         raise PySparkTypeError(
             errorClass="NOT_EXPECTED_TYPE",
@@ -733,14 +730,14 @@ except Exception:  # pragma: no cover
     pass
 try:
     from pyspark.sql.udtf import (  # noqa: F401
-        UserDefinedTableFunction,
         AnalyzeArgument,
         AnalyzeResult,
         SkipRestOfInputTableException,
+        UserDefinedTableFunction,
     )
 except Exception:  # pragma: no cover
     pass
-from pyspark.sql.pandas.functions import PandasUDFType, ArrowUDFType  # noqa: E402,F401
+from pyspark.sql.pandas.functions import ArrowUDFType, PandasUDFType  # noqa: E402,F401
 
 # The public names of PySpark 4.3.0's pyspark.sql.functions, in its order. A star import
 # brings in exactly these; the other names of this module (e.g. chr, random, uuid, which

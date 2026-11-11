@@ -15,7 +15,7 @@
 # limitations under the License.
 #
 """Rust-backed DataFrame under the connect import path (testing/connectutils imports from here)."""
-from typing import Any, Callable, Tuple
+from typing import Any, Callable
 
 from pyspark._pyspark import DataFrame
 from pyspark.sql.dataframe import DataFrameNaFunctions, DataFrameStatFunctions
@@ -23,7 +23,7 @@ from pyspark.sql.dataframe import DataFrameNaFunctions, DataFrameStatFunctions
 __all__ = ["DataFrame", "DataFrameNaFunctions", "DataFrameStatFunctions"]
 
 
-def _reduce_dataframe(session: Any, relation: bytes) -> Tuple[Callable[..., Any], Tuple[Any, ...]]:
+def _reduce_dataframe(session: Any, relation: bytes) -> tuple[Callable[..., Any], tuple[Any, ...]]:
     """The ``__reduce__`` of a DataFrame of ``session`` and the bytes of its ``relation``, as
     PySpark Connect's, of its session and its plan: a function, which cloudpickle pickles by
     value, of the session, which unpickles first, and of the relation.

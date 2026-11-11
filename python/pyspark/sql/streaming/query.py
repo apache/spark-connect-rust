@@ -25,26 +25,29 @@ with Python-side listener bus implementation.
 
 import json
 import warnings
+from threading import Lock, Thread
 from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional, Union
-from threading import Thread, Lock
+
 from pyspark import cloudpickle
-
-from pyspark.sql.streaming.listener import (
-    StreamingQueryListener,
-    QueryStartedEvent,
-    QueryProgressEvent,
-    QueryIdleEvent,
-    QueryTerminatedEvent,
-)
-
 from pyspark._pyspark import (
     StreamingQuery as _StreamingQuery,
+)
+from pyspark._pyspark import (
     StreamingQueryManager as _StreamingQueryManager,
 )
-from pyspark.errors import PySparkValueError
 
 # As PySpark's, the exception of a failed query is that of pyspark.errors.
-from pyspark.errors import StreamingQueryException  # noqa: F401
+from pyspark.errors import (
+    PySparkValueError,
+    StreamingQueryException,  # noqa: F401
+)
+from pyspark.sql.streaming.listener import (
+    QueryIdleEvent,
+    QueryProgressEvent,
+    QueryStartedEvent,
+    QueryTerminatedEvent,
+    StreamingQueryListener,
+)
 
 if TYPE_CHECKING:
     from pyspark.sql.session import SparkSession

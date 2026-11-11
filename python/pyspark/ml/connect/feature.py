@@ -1,7 +1,7 @@
 """Feature transformers/estimators (pyspark.ml.connect.feature)."""
 from pyspark._pyspark import (
-    StandardScaler,
     MaxAbsScaler,
+    StandardScaler,
     StringIndexer,
     VectorAssembler,
 )

@@ -19,7 +19,8 @@
 The functions that call ``f`` are pickled with cloudpickle and run by the server's Python
 worker, so they are Python, as PySpark's ``pyspark.sql.connect.dataframe`` builds them.
 """
-from typing import TYPE_CHECKING, Any, Callable, Iterator
+from collections.abc import Iterator
+from typing import TYPE_CHECKING, Any, Callable
 
 from pyspark.sql import functions as F
 from pyspark.sql.conversion import ArrowTableToRowsConversion

@@ -17,8 +17,10 @@
 """Protobuf functions, mirroring ``pyspark.sql.protobuf.functions``."""
 
 from pyspark import _pyspark
+
 # As PySpark's `_to_col`, which raises NOT_EXPECTED_TYPE for a `data` that is not a Column or a str.
-from pyspark.sql.functions import _column_or_name as _to_col, _dict_to_options_column
+from pyspark.sql.functions import _column_or_name as _to_col
+from pyspark.sql.functions import _dict_to_options_column
 
 _functions = _pyspark.functions
 _pyfunc_from_protobuf = _functions.pyfunc_from_protobuf

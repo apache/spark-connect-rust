@@ -25,7 +25,6 @@ from contextlib import contextmanager
 from queue import Empty, Queue
 from threading import Condition, Event
 
-
 # The drop-in package does not ship generated service protobuf classes, so these
 # encoders provide just the messages needed by this test server.
 # The key that a client reads on its first plan, to compress the plans of the session.

@@ -16,4 +16,5 @@
 #
 """Rust-backed PandasCogroupedOps under the official import path."""
 from pyspark._pyspark import PandasCogroupedOps
+
 __all__ = ["PandasCogroupedOps"]

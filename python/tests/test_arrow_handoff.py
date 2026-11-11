@@ -37,7 +37,8 @@ import pandas as pd
 import pyarrow as pa
 import pytest
 from google.protobuf import descriptor_pb2, descriptor_pool, message_factory
-from pyspark.sql import SparkSession, types as T
+from pyspark.sql import SparkSession
+from pyspark.sql import types as T
 from pyspark.sql._pandas_input import prepare_int64_table
 
 
@@ -975,6 +976,7 @@ def test_artifact_upload_retries_a_transient_failure_of_each_path(protocol, tmp_
 @pytest.mark.parametrize("explicit", [False, True], ids=["inferred", "explicit"])
 def test_arrow_input_schema_handoff(protocol, cached, explicit):
     import json
+
     from pyspark.sql import types as T
 
     table = pa.table({"id": [1, 2]})
@@ -2033,7 +2035,7 @@ def test_integer_custom_extension_dtype_cannot_select_arrow(protocol, class_spoo
 
 @pytest.mark.parametrize("custom", ["dtype", "array"])
 def test_integer_nullable_dtype_and_array_subclasses_keep_fallback(protocol, custom):
-    from pandas.core.arrays.integer import IntegerArray, Int64Dtype
+    from pandas.core.arrays.integer import Int64Dtype, IntegerArray
 
     arrow_calls = []
 
@@ -2342,6 +2344,7 @@ def test_integer_rebound_index_data_keeps_native_read_order(
 @pytest.mark.parametrize("unit", ["ns", "us"])
 def test_pandas_timestamp_ipc_preserves_every_microsecond(protocol, monkeypatch, zone, unit):
     import json
+
     from pyspark.sql import types as T
 
     monkeypatch.setenv("TZ", "America/New_York")
@@ -2374,8 +2377,9 @@ def test_pandas_timestamp_ipc_preserves_every_microsecond(protocol, monkeypatch,
 
 
 def test_pandas_naive_timestamp_utc_ipc(protocol, monkeypatch):
-    from pyspark.sql import types as T
     import time
+
+    from pyspark.sql import types as T
     monkeypatch.setenv("TZ", "UTC")
     monkeypatch.setattr(time, "tzname", ("UTC", "UTC"))
     frame = pd.DataFrame({"a": pd.to_datetime(["1969-12-31 23:59:59.999999", None,
@@ -2397,6 +2401,7 @@ def test_pandas_naive_timestamp_utc_ipc(protocol, monkeypatch):
                                     "datetime64[s]", "object"])
 def test_pandas_timestamp_eligibility(monkeypatch, dtype):
     import time
+
     from pyspark.sql import types as T
     from pyspark.sql._pandas_input import timestamp_columns
 
@@ -2414,8 +2419,9 @@ def test_pandas_timestamp_eligibility(monkeypatch, dtype):
 
 def test_pandas_timestamp_precision_and_timezone_fallback(monkeypatch):
     import time
+
     from pyspark.sql import types as T
-    from pyspark.sql._pandas_input import timestamp_columns, prepare_timestamp_table
+    from pyspark.sql._pandas_input import prepare_timestamp_table, timestamp_columns
 
     monkeypatch.setenv("TZ", "UTC")
     monkeypatch.setattr(time, "tzname", ("UTC", "UTC"))
@@ -2445,7 +2451,6 @@ def test_timestamp_non_utc_host_declines_and_converts_as_pyspark(
     # A host zone other than a literal UTC declines the timestamp fast path before its
     # session time zone RPC; the frame then converts as PySpark's Arrow conversion does,
     # which reads the configs first and takes naive values in the session time zone (UTC).
-    import json
     import time
 
     if host_tz is None:
@@ -2549,6 +2554,7 @@ def test_timestamp_custom_normalization_hooks_keep_native_row_path(
     import json
     import time
     from types import MethodType
+
     import pyspark.sql._pandas_input as helper
 
     monkeypatch.setenv("TZ", "UTC")
@@ -2798,8 +2804,9 @@ def test_timestamp_deleted_importer_atomic_alias_keeps_row_path():
 
 
 def test_timestamp_warm_local_converter_imports_keep_columnar_route(protocol, monkeypatch):
-    import types
     import sys
+    import types
+
     import pyspark.sql._arrow_input as importer
     from pyspark.sql import types as T
     from pyspark.sql._pandas_input import timestamp_columns
@@ -3067,8 +3074,9 @@ def test_timestamp_rebound_index_data_keeps_native_read_order(protocol, monkeypa
 @pytest.mark.parametrize("unit", ["ns", "us"])
 @pytest.mark.parametrize("storage", ["object", "default", "python", "pyarrow", "python_nan", "pyarrow_nan"])
 def test_timestamp_canonical_columns_storage_stays_columnar(protocol, unit, storage):
-    from pyspark.sql.pandas.types import to_arrow_schema
     import json
+
+    from pyspark.sql.pandas.types import to_arrow_schema
 
     values, frame, schema = _timestamp_columns_fixture(unit)
     if storage == "object":
@@ -3186,7 +3194,6 @@ def test_float64_columnar_ipc_matches_existing_row_conversion(protocol, monkeypa
 
 @pytest.mark.parametrize("nullable", [False, True])
 def test_float64_pandas_infinity_missing_option_keeps_row_semantics(protocol, nullable):
-    from pyspark.errors import PySparkRuntimeError
 
     try:
         pd.get_option("mode.use_inf_as_na")
@@ -4355,7 +4362,8 @@ def test_string_canonical_column_storage_stays_eligible(kind):
     elif kind == "default":
         frame.columns = pd.Index(["original"])
     elif kind.endswith("_numpy"):
-        from pandas.core.arrays import string_ as strings, string_arrow as arrow_strings
+        from pandas.core.arrays import string_ as strings
+        from pandas.core.arrays import string_arrow as arrow_strings
 
         module = strings if kind.startswith("python") else arrow_strings
         name = ("StringArrayNumpySemantics" if kind.startswith("python")
@@ -4374,7 +4382,9 @@ def test_string_canonical_column_storage_stays_eligible(kind):
 @pytest.mark.parametrize("missing", ["module", "owner", "base"])
 def test_string_absent_private_columns_storage_keeps_row_fallback(monkeypatch, missing):
     import builtins
-    from pandas.core.arrays import numpy_ as numpy_module, string_ as string_module
+
+    from pandas.core.arrays import numpy_ as numpy_module
+    from pandas.core.arrays import string_ as string_module
     from pyspark.sql._pandas_input import _has_canonical_columns
 
     columns = pd.Index(pd.array(["original"], dtype=pd.StringDtype(storage="python")))
@@ -4821,7 +4831,9 @@ def test_arrow_string_numpy_semantics_accessor_keeps_native_outcomes(
     import importlib
     import json
     import traceback
-    from pandas.core.arrays import _arrow_string_mixins as string_mixins, string_arrow
+
+    from pandas.core.arrays import _arrow_string_mixins as string_mixins
+    from pandas.core.arrays import string_arrow
     from pyspark.sql.pandas.types import from_arrow_schema
 
     helper = importlib.import_module("pyspark.sql._pandas_input")
@@ -6788,9 +6800,10 @@ def test_date_present_invalid_importer_function_keeps_native_row_path(name):
 
 
 def test_date_warm_importer_without_global_converter_aliases(protocol, monkeypatch):
-    import pyspark.sql._arrow_input as importer
     import sys
     import types
+
+    import pyspark.sql._arrow_input as importer
 
     original = importer.prepare_table
 
@@ -6831,6 +6844,7 @@ def test_date_custom_normalization_hooks_keep_native_row_path(
     protocol, monkeypatch, location, method
 ):
     from types import MethodType
+
     from pyspark.sql._pandas_input import prepare_date_table
 
     values = [date(2020, 1, 1)] * 10000
@@ -6893,6 +6907,7 @@ def _date_columns_guard_input(native_rows=False):
 
 def _assert_date_columns_guard_payload(state, schema, expected, *, row_path):
     import json
+
     from pyspark.sql.pandas.types import from_arrow_metadata
 
     assert len(state["input_tables"]) == 1

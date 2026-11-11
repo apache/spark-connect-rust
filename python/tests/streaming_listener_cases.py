@@ -26,7 +26,6 @@ import warnings
 from pathlib import Path
 
 import pytest
-
 from pyspark.sql.streaming.listener import QueryIdleEvent, StreamingQueryListener
 
 

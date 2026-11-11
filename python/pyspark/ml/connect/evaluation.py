@@ -1,8 +1,8 @@
 """Evaluators (pyspark.ml.connect.evaluation)."""
 from pyspark._pyspark import (
-    RegressionEvaluator,
     BinaryClassificationEvaluator,
     MulticlassClassificationEvaluator,
+    RegressionEvaluator,
 )
 
 __all__ = ["RegressionEvaluator", "BinaryClassificationEvaluator", "MulticlassClassificationEvaluator"]

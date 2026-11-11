@@ -24,6 +24,10 @@ from typing import (
 )
 
 if TYPE_CHECKING:
+    from py4j.java_collections import JavaArray
+    from py4j.java_gateway import JavaObject
+
+    from pyspark.serializers import Serializer
     from pyspark.sql import SparkSession
 
 from pyspark.serializers import (

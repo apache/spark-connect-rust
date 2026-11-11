@@ -28,6 +28,9 @@ from decimal import Decimal
 
 import pyarrow as pa
 import pytest
+
+# Keep interval round trips in the live suite selected by CI.
+from interval_input_cases import IntervalInputLiveTests  # noqa: F401
 from pyspark.errors import AnalysisException, PySparkValueError
 from pyspark.sql import Row, SparkSession
 from pyspark.sql import functions as F
@@ -43,9 +46,6 @@ from pyspark.sql.types import (
     StructType,
     TimestampType,
 )
-
-# Keep interval round trips in the live suite selected by CI.
-from interval_input_cases import IntervalInputLiveTests  # noqa: F401
 
 
 @pytest.fixture
@@ -517,7 +517,6 @@ def test_nanosecond_timestamps_are_not_collected_as_pyspark(session):
     import re
 
     from pyspark.errors import PySparkValueError
-
     from pyspark.sql.functions import from_json, lit
     from pyspark.sql.types import DataType, StructType
 
@@ -594,10 +593,10 @@ def test_ntz_collect_is_the_wall_clock_in_the_client_time_zone_as_pyspark():
     remote = os.environ.get("SPARK_REMOTE")
     if not remote:
         pytest.skip("SPARK_REMOTE is required for live-server tests")
-    out = _run_in_time_zone("""
+    out = _run_in_time_zone(f"""
 import datetime
 from pyspark.sql import SparkSession
-spark = SparkSession.builder.remote(%r).getOrCreate()
+spark = SparkSession.builder.remote({remote!r}).getOrCreate()
 print(spark.createDataFrame([(datetime.datetime(2020, 7, 1, 12, 0),)], "t timestamp_ntz").collect())
 print(spark.sql("select timestamp_ntz'2020-07-01 12:00:00' t").collect())
 print(spark.sql("select timestamp_ntz'0001-01-01 00:00:00' t, timestamp_ntz'9999-12-31 23:59:59.999999' u").collect())
@@ -605,7 +604,7 @@ print(spark.sql(
     "select array(timestamp_ntz'2020-07-01 12:00:00') a, map('k', timestamp_ntz'2020-07-01 12:00:00') m, "
     "named_struct('x', timestamp_ntz'2020-07-01 12:00:00') s").collect())
 print(spark.sql("select timestamp'2020-07-01 12:00:00' t, timestamp_micros(9223372036854775) u").collect())
-""" % remote, "America/Los_Angeles")
+""", "America/Los_Angeles")
     lines = out.strip().splitlines()
     assert lines[0] == "[Row(t=datetime.datetime(2020, 7, 1, 12, 0))]"
     assert lines[1] == "[Row(t=datetime.datetime(2020, 7, 1, 12, 0))]"
@@ -771,6 +770,7 @@ def test_udtf_takes_a_ddl_or_struct_return_type_as_pyspark(session):
 
 def test_udtf_passes_custom_analyze_result_to_handler(session):
     from dataclasses import dataclass
+
     from pyspark.sql.udtf import AnalyzeResult
 
     @dataclass
@@ -895,7 +895,6 @@ def test_map_functions_take_a_ddl_schema(session):
 def test_inheritable_threads_run_with_the_tags_of_their_parents_as_pyspark(session):
     # As PySpark's: the operation of an InheritableThread carries the tags of the thread that
     # started it, so interruptTag of a tag of the parent interrupts it.
-    import threading
     import time
 
     from pyspark import InheritableThread
@@ -1313,10 +1312,10 @@ def test_progress_handler_that_runs_queries_without_end_raises_recursion_error()
     remote = os.environ.get("SPARK_REMOTE")
     if not remote:
         pytest.skip("SPARK_REMOTE is required for live-server tests")
-    result = subprocess.run([sys.executable, "-c", """
+    result = subprocess.run([sys.executable, "-c", f"""
 import sys
 from pyspark.sql import SparkSession
-spark = SparkSession.builder.remote(%r).getOrCreate()
+spark = SparkSession.builder.remote({remote!r}).getOrCreate()
 spark.conf.set("spark.connect.progress.reportInterval", "10ms")
 spark.registerProgressHandler(
     lambda **kw: spark.range(100).repartition(20).count() if not kw["done"] else None)
@@ -1324,7 +1323,7 @@ try:
     print(spark.range(0, 2000, 1, 4).repartition(20).selectExpr("sum(id) as t").collect())
 except RecursionError as error:
     print("raised RecursionError", error)
-""" % remote], env=dict(os.environ, TZ="UTC"), capture_output=True, text=True, timeout=300)
+"""], env=dict(os.environ, TZ="UTC"), capture_output=True, text=True, timeout=300)
     assert result.returncode == 0, result.stderr
     assert "raised RecursionError" in result.stdout, (result.stdout, result.stderr)
 
@@ -1358,9 +1357,9 @@ def test_a_deep_plan_raises_recursion_error_as_pyspark():
     remote = os.environ.get("SPARK_REMOTE")
     if not remote:
         pytest.skip("SPARK_REMOTE is required for live-server tests")
-    result = subprocess.run([sys.executable, "-c", """
+    result = subprocess.run([sys.executable, "-c", f"""
 from pyspark.sql import SparkSession, functions as F
-spark = SparkSession.builder.remote(%r).getOrCreate()
+spark = SparkSession.builder.remote({remote!r}).getOrCreate()
 for levels in [1000, 1500, 2000, 3000, 5000, 10000]:
     df = spark.range(10)
     for _ in range(levels):
@@ -1370,7 +1369,7 @@ for levels in [1000, 1500, 2000, 3000, 5000, 10000]:
     except RecursionError:
         print(levels, "RecursionError")
 print(spark.range(3).count())
-""" % remote], capture_output=True, text=True, timeout=300)
+"""], capture_output=True, text=True, timeout=300)
     assert result.returncode == 0, result.stderr
     assert result.stdout.splitlines() == [
         "1000 RecursionError",
@@ -2070,7 +2069,7 @@ def test_tags_are_those_of_each_thread_as_pyspark(session):
 
 
 def test_grouped_map_functions_take_iterators_by_their_type_hints(session):
-    from typing import Iterator, Tuple
+    from collections.abc import Iterator
 
     import numpy as np
     import pandas as pd
@@ -2079,7 +2078,7 @@ def test_grouped_map_functions_take_iterators_by_their_type_hints(session):
         for frame in batches:
             yield frame.assign(v=frame.v * 10)
 
-    def shifted(key: Tuple[np.int64], batches: Iterator[pd.DataFrame]) -> Iterator[pd.DataFrame]:
+    def shifted(key: tuple[np.int64], batches: Iterator[pd.DataFrame]) -> Iterator[pd.DataFrame]:
         for frame in batches:
             yield frame.assign(v=frame.v + key[0])
 
@@ -2087,7 +2086,7 @@ def test_grouped_map_functions_take_iterators_by_their_type_hints(session):
         yield from it
 
     def keyed_batches(
-        key: Tuple[pa.Scalar, ...], it: Iterator[pa.RecordBatch]
+        key: tuple[pa.Scalar, ...], it: Iterator[pa.RecordBatch]
     ) -> Iterator[pa.RecordBatch]:
         yield from it
 
@@ -2659,7 +2658,7 @@ def test_udfs_that_refer_to_variant_and_spatial_values_run_on_the_server_as_pysp
 
     @F.udf("string")
     def described(_):
-        return "%s %d %d" % (variant.toJson(), geometry.getSrid(), geography.getSrid())
+        return f"{variant.toJson()} {geometry.getSrid():d} {geography.getSrid():d}"
 
     assert session.range(1).select(described("id")).first()[0] == '{"a":1} 4326 3857'
 
@@ -3495,10 +3494,10 @@ def test_datetime_literals_collect_the_exact_values_of_pyspark():
     remote = os.environ.get("SPARK_REMOTE")
     if not remote:
         pytest.skip("SPARK_REMOTE is required for live-server tests")
-    out = _run_in_time_zone("""
+    out = _run_in_time_zone(f"""
 import datetime
 from pyspark.sql import SparkSession, functions as F
-spark = SparkSession.builder.remote(%r).getOrCreate()
+spark = SparkSession.builder.remote({remote!r}).getOrCreate()
 utc = datetime.timezone.utc
 values = [
     ("aware_1", datetime.datetime(1, 1, 1, 0, 0, 0, 1, tzinfo=utc)),
@@ -3514,7 +3513,7 @@ for name, value in values:
         print(name, repr(spark.range(1).select(F.lit(value).alias("v")).collect()[0][0]))
     except Exception as error:
         print(name, type(error).__name__)
-""" % remote, "Asia/Seoul")
+""", "Asia/Seoul")
     assert out.splitlines() == [
         "aware_1 datetime.datetime(1, 1, 1, 8, 27, 52, 1)",
         "aware_1969 datetime.datetime(1970, 1, 1, 8, 59, 59, 999999)",
@@ -3871,22 +3870,22 @@ def test_progress_handlers_run_on_the_thread_of_an_interruptible_collect_as_pysp
     remote = os.environ.get("SPARK_REMOTE")
     if not remote:
         pytest.skip("SPARK_REMOTE is required for live-server tests")
-    result = subprocess.run([sys.executable, "-c", """
+    result = subprocess.run([sys.executable, "-c", f"""
 import threading
 from pyspark.sql import SparkSession
-spark = SparkSession.builder.remote(%r).getOrCreate()
+spark = SparkSession.builder.remote({remote!r}).getOrCreate()
 spark.conf.set("spark.connect.progress.reportInterval", "10ms")
 main = threading.get_ident()
 threads = []
 spark.registerProgressHandler(lambda **kw: threads.append(threading.get_ident()))
 print(spark.range(0, 2000, 1, 4).repartition(20).selectExpr("sum(id) as t").collect())
 print("handler threads", len(threads), set(t == main for t in threads))
-""" % remote], env=dict(os.environ, TZ="UTC"), capture_output=True, text=True, timeout=300)
+"""], env=dict(os.environ, TZ="UTC"), capture_output=True, text=True, timeout=300)
     assert result.returncode == 0, result.stderr
     lines = result.stdout.splitlines()
     calls = int(lines[-1].split()[2])
     assert calls >= 1, result.stdout
-    assert lines[-1] == "handler threads %d {True}" % calls, result.stdout
+    assert lines[-1] == f"handler threads {calls:d} {{True}}", result.stdout
 
 
 def test_sigint_during_action_raises_keyboard_interrupt_and_the_session_works_as_pyspark():
@@ -3898,10 +3897,10 @@ def test_sigint_during_action_raises_keyboard_interrupt_and_the_session_works_as
     remote = os.environ.get("SPARK_REMOTE")
     if not remote:
         pytest.skip("SPARK_REMOTE is required for live-server tests")
-    result = subprocess.run([sys.executable, "-c", """
+    result = subprocess.run([sys.executable, "-c", f"""
 import os, signal, threading, time
 from pyspark.sql import SparkSession, functions as F
-spark = SparkSession.builder.remote(%r).getOrCreate()
+spark = SparkSession.builder.remote({remote!r}).getOrCreate()
 slow = spark.range(0, 10**12, 1, 2).agg(F.sum(F.sqrt("id")))
 threading.Timer(3.0, lambda: os.kill(os.getpid(), signal.SIGINT)).start()
 started = time.monotonic()
@@ -3909,10 +3908,10 @@ try:
     slow.collect()
     print("collect returned")
 except KeyboardInterrupt:
-    print("interrupted after %%.1f" %% (time.monotonic() - started))
+    print("interrupted after %.1f" % (time.monotonic() - started))
 print("interrupted ids", spark.interruptAll())
 print("count", spark.range(3).count())
-""" % remote], env=dict(os.environ, TZ="UTC"), capture_output=True, text=True, timeout=120)
+"""], env=dict(os.environ, TZ="UTC"), capture_output=True, text=True, timeout=120)
     assert result.returncode == 0, result.stderr
     lines = result.stdout.splitlines()
     assert lines[0].startswith("interrupted after "), result.stdout
@@ -3931,10 +3930,10 @@ def test_sigint_interrupts_the_iterator_that_waits_and_not_a_held_one_as_pyspark
     remote = os.environ.get("SPARK_REMOTE")
     if not remote:
         pytest.skip("SPARK_REMOTE is required for live-server tests")
-    result = subprocess.run([sys.executable, "-c", """
+    result = subprocess.run([sys.executable, "-c", f"""
 import os, signal, threading, time
 from pyspark.sql import SparkSession, functions as F
-spark = SparkSession.builder.remote(%r).getOrCreate()
+spark = SparkSession.builder.remote({remote!r}).getOrCreate()
 # Partition 0 returns at once; partitions 1 and 2 sleep 20 s on the server.
 a = spark.range(0, 3, 1, 3).select(
     F.expr("reflect('java.lang.Thread', 'sleep', case when id = 0 then 0L else 20000L end)")
@@ -3949,9 +3948,9 @@ try:
     next(ia)
     print("next returned", flush=True)
 except KeyboardInterrupt:
-    print("interrupted after %%.1f" %% (time.monotonic() - started), flush=True)
+    print("interrupted after %.1f" % (time.monotonic() - started), flush=True)
 print("b", next(ib).id, flush=True)
-""" % remote], env=dict(os.environ, TZ="UTC"), capture_output=True, text=True, timeout=120)
+"""], env=dict(os.environ, TZ="UTC"), capture_output=True, text=True, timeout=120)
     assert result.returncode == 0, result.stderr
     lines = result.stdout.splitlines()
     assert lines[:2] == ["a 0", "b 0"], result.stdout

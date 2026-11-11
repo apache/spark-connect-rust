@@ -15,7 +15,7 @@
 # limitations under the License.
 #
 """Rust-backed Column under the connect import path (pandas-on-Spark and connect tests import ConnectColumn from here)."""
-from typing import Any, Callable, List, Optional, Tuple
+from typing import Any, Callable, Optional
 
 from pyspark import cloudpickle as _cloudpickle
 from pyspark._pyspark import Column
@@ -29,10 +29,10 @@ _cloudpickle.register_pickle_by_value(_column_reduce)
 def _reduce_column(
     expression: bytes,
     rendered: str,
-    branches: Optional[List[Tuple[Any, Any]]] = None,
+    branches: Optional[list[tuple[Any, Any]]] = None,
     else_value: Any = None,
-    sort: Optional[Tuple[Any, str]] = None,
-) -> Tuple[Callable[..., Any], Tuple[Any, ...]]:
+    sort: Optional[tuple[Any, str]] = None,
+) -> tuple[Callable[..., Any], tuple[Any, ...]]:
     """The ``__reduce__`` of a Column of the bytes of its ``spark.connect.Expression`` and of its
     rendering, as PySpark Connect's Column pickles its expression: the function of
     ``pyspark.sql.connect._column_reduce``, which gives back the Column, which sends the

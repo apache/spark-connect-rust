@@ -20,7 +20,7 @@ The Catalog is implemented natively in the Rust core and re-exported here. Its m
 the NamedTuples of PySpark's ``pyspark.sql.catalog`` below (Database, Table, Column, Function,
 CatalogMetadata and TablePartition), which are tuples, as PySpark's are."""
 
-from typing import List, NamedTuple, Optional
+from typing import NamedTuple, Optional
 
 from pyspark._pyspark import Catalog
 
@@ -40,7 +40,7 @@ class Database(NamedTuple):
 class Table(NamedTuple):
     name: str
     catalog: Optional[str]
-    namespace: Optional[List[str]]
+    namespace: Optional[list[str]]
     description: Optional[str]
     tableType: str
     isTemporary: bool
@@ -66,7 +66,7 @@ class Column(NamedTuple):
 class Function(NamedTuple):
     name: str
     catalog: Optional[str]
-    namespace: Optional[List[str]]
+    namespace: Optional[list[str]]
     description: Optional[str]
     className: str
     isTemporary: bool
