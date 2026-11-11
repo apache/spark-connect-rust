@@ -13853,9 +13853,14 @@ def test_a_local_iterator_that_a_thread_is_running_raises_as_a_generator_does(mo
             outcome.append(error)
 
     def in_the_fetch():
-        # The thread is in the call to next once its frame is in wait_for_the_row.
+        # The thread is in the call to next once a frame that wait_for_the_row called, that of
+        # the generator, is on its stack: the generator is then executing.
         frame = sys._current_frames().get(waiting.ident)
-        return frame is not None and frame.f_code.co_name == "wait_for_the_row"
+        while frame is not None:
+            if frame.f_back is not None and frame.f_back.f_code.co_name == "wait_for_the_row":
+                return True
+            frame = frame.f_back
+        return False
 
     waiting = threading.Thread(target=wait_for_the_end)
     waiting.start()
