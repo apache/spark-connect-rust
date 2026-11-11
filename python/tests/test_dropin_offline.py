@@ -13774,6 +13774,7 @@ def test_a_local_iterator_that_a_thread_is_running_raises_as_a_generator_does(mo
     # As PySpark's toLocalIterator, a generator: while a thread waits in it for the next row,
     # the next or close of another thread raises the ValueError of a generator that is already
     # executing, and the iterator goes on for the thread that runs it.
+    import sys
     import threading
 
     spark, service = mock_connect
@@ -13781,22 +13782,29 @@ def test_a_local_iterator_that_a_thread_is_running_raises_as_a_generator_does(mo
     service.block_result_complete = True
     rows = spark.range(2).toLocalIterator()
     assert [next(rows).id, next(rows).id] == [0, 1]
-    entering = threading.Event()
     outcome = []
 
+    def wait_for_the_row():
+        return next(rows)
+
     def wait_for_the_end():
-        entering.set()
         try:
-            outcome.append(next(rows))
+            outcome.append(wait_for_the_row())
         except BaseException as error:  # noqa: BLE001
             outcome.append(error)
+
+    def in_the_fetch():
+        # The thread is in the call to next once its frame is in wait_for_the_row.
+        frame = sys._current_frames().get(waiting.ident)
+        return frame is not None and frame.f_code.co_name == "wait_for_the_row"
 
     waiting = threading.Thread(target=wait_for_the_end)
     waiting.start()
     try:
-        assert entering.wait(5)
-        # The thread is in the fetch, without the GIL, once it has not ended for a while.
-        waiting.join(0.5)
+        deadline = time.monotonic() + 5
+        while not in_the_fetch() and time.monotonic() < deadline:
+            time.sleep(0.001)
+        assert in_the_fetch()
         assert waiting.is_alive()
         for call in (lambda: next(rows), rows.close):
             with pytest.raises(ValueError, match="generator already executing"):
@@ -18270,6 +18278,49 @@ def test_sigint_during_stop_with_a_registered_listener_raises_at_once(mock_conne
     service.release_session_release()
     spark.stop()
     assert spark.is_stopped
+
+
+def test_sigint_during_add_listener_keeps_the_registration_removable(mock_connect):
+    # As PySpark's append: a signal that ends the wait for the server's acknowledgement raises
+    # KeyboardInterrupt, and the listener stays in the bus, while the server still adds its
+    # listener once it answers. A removeListener then removes that registration.
+    import signal
+    import threading
+
+    from pyspark.sql.streaming.listener import StreamingQueryListener
+
+    class Listener(StreamingQueryListener):
+        def onQueryStarted(self, event):
+            pass
+
+        def onQueryProgress(self, event):
+            pass
+
+        def onQueryIdle(self, event):
+            pass
+
+        def onQueryTerminated(self, event):
+            pass
+
+    spark, service = mock_connect
+    service.listener_bus_enabled = True
+    service.listener_register_blocked = True
+    listener = Listener()
+    release = threading.Timer(2.5, service.release_listener_registration)
+    timer = threading.Timer(0.5, os.kill, (os.getpid(), signal.SIGINT))
+    release.start()
+    timer.start()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            spark.streams.addListener(listener)
+    finally:
+        timer.cancel()
+    release.join(5)
+    assert service.wait_listener_registration(1)
+    assert spark.streams._sqlb._listener_bus == [listener]
+    spark.streams.removeListener(listener)
+    assert spark.streams._sqlb._listener_bus == []
+    assert service.listener_removals == 1
 
 
 def test_sigint_during_the_plan_compression_lookup_raises_keyboard_interrupt_at_once(mock_connect):
