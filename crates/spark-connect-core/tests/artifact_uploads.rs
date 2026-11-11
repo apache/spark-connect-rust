@@ -196,11 +196,12 @@ async fn a_large_file_is_uploaded_as_one_chunked_artifact() {
     for frame in frames.iter().skip(1) {
         assert!(matches!(frame.payload, Some(Payload::Chunk(_))));
     }
-    // Every frame carries the CRC of its chunk, and the session and user context of the client.
+    // Every frame carries the CRC of its chunk, and the session and user context of the client,
+    // and, as the frames of PySpark's ArtifactManager, no client type.
     for frame in frames {
         assert_eq!(frame.session_id, client.session_id());
         assert!(frame.user_context.is_some());
-        assert!(frame.client_type.is_some());
+        assert_eq!(frame.client_type, None);
     }
     let crcs: Vec<i64> = frames
         .iter()
