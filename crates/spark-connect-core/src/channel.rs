@@ -433,7 +433,7 @@ fn split_params(path: &str) -> (&str, &str) {
 }
 
 /// Whether a parameter is a secret: its value is shown redacted, and never in an error.
-fn is_secret_param(key: &str) -> bool {
+pub(crate) fn is_secret_param(key: &str) -> bool {
     key.eq_ignore_ascii_case(PARAM_TOKEN) || key.eq_ignore_ascii_case("authorization")
 }
 

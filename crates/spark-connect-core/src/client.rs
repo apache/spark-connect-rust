@@ -3,9 +3,8 @@
 //! Mirrors `pyspark.sql.connect.client.core.SparkConnectClient`.
 
 use std::collections::BTreeMap;
-use std::str::FromStr;
 use std::time::Duration;
-use tonic::metadata::{MetadataMap, MetadataValue};
+use tonic::metadata::{AsciiMetadataKey, AsciiMetadataValue, MetadataMap};
 use tonic::transport::{Channel, ClientTlsConfig};
 use tonic::{Request, Response, Streaming};
 use uuid::Uuid;
@@ -26,7 +25,7 @@ use crate::artifact::{
     cache_artifact_requests, check_artifact_upload, take_frame_failure, ArtifactFrames,
     FileArtifact, NamedArtifact,
 };
-use crate::channel::{ChannelBuilder, GRPC_MAX_MESSAGE_LENGTH_DEFAULT};
+use crate::channel::{is_secret_param, ChannelBuilder, GRPC_MAX_MESSAGE_LENGTH_DEFAULT};
 use crate::error::{Result, SparkError, SparkErrorKind};
 use crate::reattach::ExecutePlanResponseReattachableIterator;
 use crate::retries::{retry_delay_ms, RetryPolicy, RetryPolicyState};
@@ -370,8 +369,11 @@ pub struct SparkConnectClient {
     session_id: String,
     /// User context (user_id from the channel builder).
     user_id: Option<String>,
-    /// Metadata headers to attach to every request.
+    /// The metadata of the connection string, and the `authorization` of its token.
     metadata: Vec<(String, String)>,
+    /// The headers of every request: the user agent, then `metadata`. They are validated
+    /// once, by `connect`, so that attaching them to a request cannot fail.
+    headers: Vec<(AsciiMetadataKey, AsciiMetadataValue)>,
     /// User-agent header.
     user_agent: String,
     /// The user context extensions of the requests of the client.
@@ -619,7 +621,16 @@ impl SparkConnectClient {
             .max_decoding_message_size(GRPC_MAX_MESSAGE_LENGTH_DEFAULT)
             .max_encoding_message_size(GRPC_MAX_MESSAGE_LENGTH_DEFAULT);
 
+        // The headers are checked here, once: one that gRPC cannot send is an error of the
+        // connection, rather than a header that every request silently goes without.
+        let mut headers = vec![(
+            AsciiMetadataKey::from_static("user-agent"),
+            user_agent_header(&user_agent)?,
+        )];
         let mut metadata: Vec<(String, String)> = builder.metadata();
+        for (key, value) in &metadata {
+            headers.push((metadata_key(key)?, metadata_value(key, value)?));
+        }
         // Spark Connect servers that require token auth expect the connection-string
         // `token` as an `Authorization: Bearer <token>` header. It is a reserved key
         // excluded from `metadata()`, so attach it explicitly here; this then propagates
@@ -628,7 +639,12 @@ impl SparkConnectClient {
             // The token is sent over TLS, or over plaintext only on `localhost`: the scheme
             // above is `builder.secure()`, which is TLS for a token on any other host, as
             // the reference client does.
-            metadata.push((AUTHORIZATION_HEADER.to_string(), format!("Bearer {}", tok)));
+            let bearer = format!("Bearer {}", tok);
+            headers.push((
+                AsciiMetadataKey::from_static(AUTHORIZATION_HEADER),
+                token_header(&bearer)?,
+            ));
+            metadata.push((AUTHORIZATION_HEADER.to_string(), bearer));
         }
 
         Ok(Self {
@@ -638,6 +654,7 @@ impl SparkConnectClient {
             session_id,
             user_id: builder.user_id().map(String::from).or_else(default_user_id),
             metadata,
+            headers,
             user_agent,
             user_context_extensions: Default::default(),
             retry_policy: RetryPolicy::default(),
@@ -668,6 +685,7 @@ impl SparkConnectClient {
             session_id: Uuid::new_v4().to_string(),
             user_id: self.user_id.clone(),
             metadata: self.metadata.clone(),
+            headers: self.headers.clone(),
             user_agent: self.user_agent.clone(),
             // As PySpark's client of a new session, of no user context extensions.
             user_context_extensions: Default::default(),
@@ -2143,7 +2161,8 @@ impl SparkConnectClient {
 
     /// Attach metadata headers to a request.
     ///
-    /// Inserts session_id, user-agent, and token (if present) into the gRPC metadata.
+    /// Inserts the user agent, the metadata of the connection string and the token (if
+    /// present) into the gRPC metadata. They were validated by `connect`.
     fn _attach_metadata<T>(&self, req: &mut Request<T>) {
         let metadata = req.metadata_mut();
         // NOTE: the session id is carried in the request *body* (proto), not in gRPC
@@ -2151,21 +2170,92 @@ impl SparkConnectClient {
         // (with our own client-generated id, which differs from the body's session id
         // when we forward a request built by another client) can make the server
         // associate work with the wrong session. So we do not attach it here.
-        // Add user-agent
-        if let Ok(header_value) = MetadataValue::from_str(&self.user_agent) {
-            let _ = metadata.insert("user-agent", header_value);
-        }
         // No user_id header: as PySpark's `ChannelBuilder.metadata()`, which leaves the user ID
         // to the user context of the requests.
-        // Add custom metadata
-        for (k, v) in &self.metadata {
-            if let Ok(header_value) = MetadataValue::from_str(v) {
-                if let Ok(key) = tonic::metadata::MetadataKey::from_bytes(k.as_bytes()) {
-                    let _ = metadata.insert(key, header_value);
-                }
-            }
+        for (key, value) in &self.headers {
+            metadata.insert(key.clone(), value.clone());
         }
     }
+}
+
+/// The key of a metadata parameter of the connection string as a gRPC header key, or the
+/// error of grpc-python for it. gRPC keys are of `[0-9a-z_.-]`, which is narrower than the
+/// HTTP header names that tonic takes (it would lower-case `X-Hdr`): grpc-python raises
+/// `ValueError("metadata was invalid: ...")` for any other key when the call starts. A `-bin`
+/// key takes bytes, which a connection string cannot give, so it is the `TypeError` that
+/// grpc-python raises for the `str` value of one.
+fn metadata_key(key: &str) -> Result<AsciiMetadataKey> {
+    let invalid = || {
+        SparkError::builtin_value_msg(format!(
+            "metadata was invalid: '{}' is not a gRPC metadata key, which is of the \
+             characters [0-9a-z_.-]",
+            key.escape_debug()
+        ))
+    };
+    let legal = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_.-".contains(&b);
+    if key.is_empty() || !key.bytes().all(legal) {
+        return Err(invalid());
+    }
+    if key.ends_with("-bin") {
+        let mut error = SparkError::value_msg(format!(
+            "Binary metadata key='{key}' expected bytes, got a string"
+        ));
+        error.kind = SparkErrorKind::TypeError;
+        return Err(error);
+    }
+    AsciiMetadataKey::from_bytes(key.as_bytes()).map_err(|_| invalid())
+}
+
+/// The value of the metadata parameter `key` as a gRPC header value. A value is of the
+/// printable ASCII characters and the space (not the tab that HTTP allows), as in grpc-python,
+/// which raises `ValueError("metadata was invalid: ...")` for any other. The error names the
+/// key only: the value may be a secret.
+fn metadata_value(key: &str, value: &str) -> Result<AsciiMetadataValue> {
+    let invalid = || {
+        SparkError::builtin_value_msg(format!(
+            "metadata was invalid: the value of '{key}' is not a gRPC metadata value, which \
+             is of the printable ASCII characters"
+        ))
+    };
+    let mut header = ascii_header_value(value).ok_or_else(invalid)?;
+    header.set_sensitive(is_secret_param(key));
+    Ok(header)
+}
+
+/// The `Bearer <token>` of the token as the value of the `authorization` header. grpc-python,
+/// whose call credentials add the header, fails every call of a token that is not a header
+/// value with `UNAVAILABLE: Illegal metadata`; this is that error, which never holds the
+/// token. The value is marked sensitive, so that its `Debug` does not show it.
+fn token_header(bearer: &str) -> Result<AsciiMetadataValue> {
+    let mut header = ascii_header_value(bearer).ok_or_else(|| {
+        SparkError::from_grpc_status(tonic::Status::unavailable(
+            "Illegal metadata: the token is not a gRPC header value, which is of the \
+             printable ASCII characters",
+        ))
+    })?;
+    header.set_sensitive(true);
+    Ok(header)
+}
+
+/// `value` as a header value of gRPC, if it is of the printable ASCII characters and the space.
+fn ascii_header_value(value: &str) -> Option<AsciiMetadataValue> {
+    if !value.bytes().all(|b| (0x20..=0x7e).contains(&b)) {
+        return None;
+    }
+    AsciiMetadataValue::try_from(value).ok()
+}
+
+/// The user agent as the value of the `user-agent` header. The reference client sets it as a
+/// channel option, which gRPC sends as it is, so that its UTF-8 bytes go unchanged. HTTP/2
+/// cannot carry a control character, which is an error here rather than a request without
+/// the header.
+fn user_agent_header(user_agent: &str) -> Result<AsciiMetadataValue> {
+    AsciiMetadataValue::try_from(user_agent.as_bytes()).map_err(|_| {
+        SparkError::builtin_value_msg(
+            "'user_agent' parameter should not contain control characters: it is sent as \
+             the user-agent header.",
+        )
+    })
 }
 
 /// A reattachable, retrying response stream for a reattachable ExecutePlan.
@@ -2232,15 +2322,8 @@ impl SparkConnectClient {
     /// The gRPC metadata of every request about an execution.
     fn execution_metadata(&self) -> MetadataMap {
         let mut metadata = MetadataMap::new();
-        if let Ok(v) = MetadataValue::from_str(&self.user_agent) {
-            let _ = metadata.insert("user-agent", v);
-        }
-        for (k, v) in &self.metadata {
-            if let Ok(v) = MetadataValue::from_str(v) {
-                if let Ok(key) = tonic::metadata::MetadataKey::from_bytes(k.as_bytes()) {
-                    let _ = metadata.insert(key, v);
-                }
-            }
+        for (key, value) in &self.headers {
+            metadata.insert(key.clone(), value.clone());
         }
         metadata
     }
@@ -3919,5 +4002,199 @@ mod request_fields_tests {
             error.message(),
             "invalid literal for int() with base 10: 'abc'"
         );
+    }
+}
+
+#[cfg(test)]
+mod metadata_validation_tests {
+    use super::*;
+    use crate::error::SparkErrorKind;
+
+    /// Connects without dialing (the channel is lazy), with no token in the environment.
+    fn connect(url: &str) -> Result<SparkConnectClient> {
+        let _env = crate::channel::set_env(&[
+            ("SPARK_CONNECT_AUTHENTICATE_TOKEN", None),
+            ("SPARK_CONNECT_USER_AGENT", None),
+        ]);
+        let builder = ChannelBuilder::parse(url)?;
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(SparkConnectClient::connect(&builder))
+    }
+
+    fn connect_err(url: &str) -> SparkError {
+        match connect(url) {
+            Ok(_) => panic!("{url:?} should not connect"),
+            Err(e) => e,
+        }
+    }
+
+    /// Everything of an error that a caller or a log may show.
+    fn shown(e: &SparkError) -> String {
+        format!("{e} | {e:?} | {}", e.get_message())
+    }
+
+    #[test]
+    fn token_that_is_not_a_header_value_fails_to_connect() {
+        // grpc-python fails every call of such a token with UNAVAILABLE "Illegal metadata"
+        // (its call credentials add the header); before, the header was left off silently.
+        for url in [
+            "sc://localhost/;token=SECRETTOK%0A",
+            "sc://localhost/;token=SECRET%0D%0ATOK",
+            "sc://localhost/;token=SECRETTOK%C3%A9",
+            "sc://localhost/;token=SECRET%7FTOK",
+            "sc://localhost/;token=SECRET%09TOK",
+            "sc://example.com/;token=SECRETTOK%00",
+        ] {
+            let e = connect_err(url);
+            assert_eq!(
+                e.grpc_code(),
+                Some(tonic::Code::Unavailable as i32),
+                "{url}"
+            );
+            let shown = shown(&e);
+            assert!(shown.contains("Illegal metadata"), "{shown}");
+            assert!(shown.contains("token"), "{shown}");
+            assert!(
+                !shown.contains("SECRET") && !shown.contains("TOK"),
+                "{shown}"
+            );
+        }
+    }
+
+    #[test]
+    fn token_header_is_checked_whatever_the_source_of_the_token() {
+        // The token of the environment (`SPARK_CONNECT_AUTHENTICATE_TOKEN`) takes the path of
+        // the one of the connection string, `ChannelBuilder::token`. It is not set here: the
+        // other tests of the crate connect without holding the lock of the environment.
+        let e = token_header("Bearer SECRET\nTOK").unwrap_err();
+        let shown = shown(&e);
+        assert!(shown.contains("Illegal metadata"), "{shown}");
+        assert!(
+            !shown.contains("SECRET") && !shown.contains("TOK"),
+            "{shown}"
+        );
+        let header = token_header("Bearer SECRETTOK").unwrap();
+        assert_eq!(header, "Bearer SECRETTOK");
+        assert!(header.is_sensitive());
+    }
+
+    #[test]
+    fn metadata_value_that_is_not_a_header_value_fails_to_connect() {
+        // grpc-python raises the builtin ValueError "metadata was invalid: ..." for these.
+        for url in [
+            "sc://localhost/;x-hdr=VAL%0AUE",
+            "sc://localhost/;x-hdr=VALUE%C3%A9",
+            "sc://localhost/;x-hdr=VAL%7FUE",
+            "sc://localhost/;x-hdr=VAL%09UE",
+            "sc://localhost/;ok=1;x-hdr=%00VALUE",
+        ] {
+            let e = connect_err(url);
+            assert_eq!(e.kind, SparkErrorKind::BuiltinValueError, "{url}");
+            let shown = shown(&e);
+            assert!(shown.contains("metadata was invalid"), "{shown}");
+            assert!(shown.contains("x-hdr"), "{shown}");
+            assert!(!shown.contains("VAL") && !shown.contains("UE"), "{shown}");
+        }
+    }
+
+    #[test]
+    fn authorization_parameter_that_is_not_a_header_value_is_not_echoed() {
+        let e = connect_err("sc://localhost/;authorization=Bearer%20SECRETXYZ%0A");
+        assert_eq!(e.kind, SparkErrorKind::BuiltinValueError);
+        let shown = shown(&e);
+        assert!(shown.contains("authorization"), "{shown}");
+        assert!(!shown.contains("SECRETXYZ"), "{shown}");
+    }
+
+    #[test]
+    fn metadata_key_that_is_not_a_header_key_fails_to_connect() {
+        // The keys of gRPC are of `[0-9a-z_.-]`: grpc-python raises the builtin ValueError
+        // for any other, an upper-case one included.
+        for (url, key) in [
+            ("sc://localhost/;x hdr=v", "x hdr"),
+            ("sc://localhost/;X-Hdr=v", "X-Hdr"),
+            ("sc://localhost/;x%20hdr=v", "x%20hdr"),
+            ("sc://localhost/;x:hdr=v", "x:hdr"),
+            ("sc://localhost/;h\u{e9}=v", "h\u{e9}"),
+            ("sc://localhost/;=v", "''"),
+        ] {
+            let e = connect_err(url);
+            assert_eq!(e.kind, SparkErrorKind::BuiltinValueError, "{url}");
+            let shown = shown(&e);
+            assert!(shown.contains("metadata was invalid"), "{shown}");
+            assert!(shown.contains(key), "{url}: {shown}");
+        }
+    }
+
+    #[test]
+    fn binary_metadata_key_fails_to_connect() {
+        // A `-bin` key takes bytes, which a connection string cannot give: grpc-python raises
+        // a TypeError for its str value.
+        let e = connect_err("sc://localhost/;x-bin=VALUE");
+        assert_eq!(e.kind, SparkErrorKind::TypeError);
+        let shown = shown(&e);
+        assert!(shown.contains("x-bin"), "{shown}");
+        assert!(!shown.contains("VALUE"), "{shown}");
+    }
+
+    #[test]
+    fn user_agent_that_is_not_a_header_value_fails_to_connect() {
+        let e = connect_err("sc://localhost/;user_agent=my%0Aagent");
+        assert_eq!(e.kind, SparkErrorKind::BuiltinValueError);
+        assert!(shown(&e).contains("user_agent"), "{}", shown(&e));
+    }
+
+    #[test]
+    fn valid_metadata_is_on_every_request() {
+        let client =
+            connect("sc://localhost/;token=tok-1.2_3~+;x-hdr=a b;x_y.z-0=;user_agent=caf%C3%A9")
+                .unwrap();
+        let mut request = Request::new(());
+        client._attach_metadata(&mut request);
+        for metadata in [request.metadata().clone(), client.execution_metadata()] {
+            assert_eq!(metadata.get("authorization").unwrap(), "Bearer tok-1.2_3~+");
+            assert_eq!(metadata.get("x-hdr").unwrap(), "a b");
+            // An empty value is a value, as in grpc-python.
+            assert_eq!(metadata.get("x_y.z-0").unwrap(), "");
+            // The user agent goes as its UTF-8 bytes, as grpc-python sends it.
+            let user_agent = metadata.get("user-agent").unwrap().as_encoded_bytes();
+            assert!(user_agent.starts_with("caf\u{e9} spark/".as_bytes()));
+            assert_eq!(metadata.len(), 4, "{metadata:?}");
+        }
+    }
+
+    #[test]
+    fn token_parameter_wins_over_an_authorization_parameter() {
+        let client = connect("sc://localhost/;authorization=Basic%20abc;token=tok").unwrap();
+        let metadata = client.execution_metadata();
+        let all: Vec<_> = metadata.get_all("authorization").iter().collect();
+        assert_eq!(all, ["Bearer tok"]);
+    }
+
+    #[test]
+    fn debug_of_the_request_metadata_does_not_show_the_secrets() {
+        for url in [
+            "sc://localhost/;token=SECRETTOK",
+            "sc://localhost/;authorization=Bearer%20SECRETTOK",
+        ] {
+            let client = connect(url).unwrap();
+            let mut request = Request::new(());
+            client._attach_metadata(&mut request);
+            let shown = format!("{:?} {:?}", request.metadata(), client.execution_metadata());
+            assert!(shown.contains("authorization"), "{shown}");
+            assert!(!shown.contains("SECRETTOK"), "{shown}");
+        }
+    }
+
+    #[test]
+    fn new_session_keeps_the_metadata() {
+        let client = connect("sc://localhost/;token=tok;x-hdr=v").unwrap();
+        let other = client.with_new_session_id();
+        let metadata = other.execution_metadata();
+        assert_eq!(metadata.get("authorization").unwrap(), "Bearer tok");
+        assert_eq!(metadata.get("x-hdr").unwrap(), "v");
     }
 }
