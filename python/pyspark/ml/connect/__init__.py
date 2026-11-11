@@ -12,7 +12,7 @@ from pyspark.ml.connect.feature import (
     VectorAssembler,
 )
 from pyspark.ml.connect.classification import DecisionTreeClassifier, LinearSVC, LogisticRegression, RandomForestClassifier
-from pyspark.ml.connect.regression import LinearRegression, RandomForestRegressor
+from pyspark.ml.connect.regression import DecisionTreeRegressor, LinearRegression, RandomForestRegressor
 from pyspark.ml.connect.clustering import KMeans
 from pyspark.ml.connect.evaluation import (
     RegressionEvaluator,
@@ -49,6 +49,7 @@ __all__ = [
     "DecisionTreeClassifier",
     "RandomForestClassifier",
     "LinearRegression",
+    "DecisionTreeRegressor",
     "RandomForestRegressor",
     "KMeans",
     "RegressionEvaluator",

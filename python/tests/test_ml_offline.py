@@ -349,6 +349,13 @@ _NATIVE_PARAMS = {
         seed="int", subsamplingRate="float", leafCol="str", minWeightFractionPerNode="float",
         weightCol="str", bootstrap="bool", thresholds="float_list",
     ),
+    "DecisionTreeRegressor": dict(
+        featuresCol="str", labelCol="str", predictionCol="str", maxDepth="int",
+        maxBins="int", minInstancesPerNode="int", minInfoGain="float", maxMemoryInMB="int",
+        cacheNodeIds="bool", checkpointInterval="int", impurity="str",
+        seed="int", varianceCol="str", leafCol="str",
+        minWeightFractionPerNode="float", weightCol="str",
+    ),
     "RandomForestRegressor": dict(
         featuresCol="str", labelCol="str", predictionCol="str", maxDepth="int",
         maxBins="int", minInstancesPerNode="int", minInfoGain="float", maxMemoryInMB="int",
@@ -2417,4 +2424,46 @@ def test_decision_tree_classifier_native_parameters_match_official_fixture(ml_mo
         assert estimator.setThresholds([0.25,0.75]) is estimator
         operator, params = _native_request(spark, service, estimator, models)
         assert operator.name == "org.apache.spark.ml.classification.DecisionTreeClassifier"
+        assert params == pb2.MlParams.FromString(base64.b64decode(case["params_b64"]))
+
+
+@pytest.mark.parametrize("use_setters", [False, True], ids=["constructor", "setters"])
+def test_decision_tree_regressor_native_parameters_match_official_fixture(ml_mock, use_setters):
+    import base64
+    import inspect
+    import json
+    from pathlib import Path
+
+    import pyspark._pyspark as native
+    from pyspark.ml.connect import DecisionTreeRegressor as exported
+    from pyspark.ml.connect.regression import DecisionTreeRegressor
+
+    assert exported is DecisionTreeRegressor is native.DecisionTreeRegressor
+    defaults = dict(featuresCol="features", labelCol="label", predictionCol="prediction",
+                    maxDepth=5, maxBins=32, minInstancesPerNode=1, minInfoGain=0.0,
+                    maxMemoryInMB=256, cacheNodeIds=False, checkpointInterval=10,
+                    impurity="variance", seed=None, varianceCol=None, weightCol=None,
+                    leafCol="", minWeightFractionPerNode=0.0)
+    signature = inspect.signature(DecisionTreeRegressor)
+    assert list(signature.parameters) == list(defaults)
+    for name, default in defaults.items():
+        assert signature.parameters[name].kind == inspect.Parameter.KEYWORD_ONLY
+        assert signature.parameters[name].default == default
+    fixture = json.loads((Path(__file__).resolve().parents[2] / "tests/golden/decision_tree_regressor.json").read_text())
+    spark, service = ml_mock
+    models = []
+    for case in fixture["cases"]:
+        values = dict(featuresCol="input", labelCol="target", predictionCol="value", maxDepth=3,
+                      maxBins=16, minInstancesPerNode=2, minInfoGain=0.01, maxMemoryInMB=64,
+                      cacheNodeIds=True, checkpointInterval=-1, impurity="variance",
+                      seed=case["seed"], varianceCol="uncertainty", weightCol="weight",
+                      leafCol="leaves", minWeightFractionPerNode=0.1)
+        if use_setters:
+            estimator = DecisionTreeRegressor()
+            for name, value in values.items():
+                assert getattr(estimator,"set"+name[0].upper()+name[1:])(value) is estimator
+        else:
+            estimator = DecisionTreeRegressor(**values)
+        operator, params = _native_request(spark, service, estimator, models)
+        assert operator.name == "org.apache.spark.ml.regression.DecisionTreeRegressor"
         assert params == pb2.MlParams.FromString(base64.b64decode(case["params_b64"]))

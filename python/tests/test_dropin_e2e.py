@@ -5330,3 +5330,107 @@ def test_decision_tree_classifier_rejects_invalid_parameters_and_training_data(s
         DecisionTreeClassifier().fit(training.drop("features"))
     with pytest.raises(Exception):
         DecisionTreeClassifier().fit(training.withColumn("features",F.array(F.lit(1.0))))
+
+
+def _decision_tree_regressor():
+    try:
+        from pyspark.ml.connect.regression import DecisionTreeRegressor
+    except ImportError:
+        from pyspark.ml.regression import DecisionTreeRegressor
+    return DecisionTreeRegressor
+
+
+@pytest.mark.parametrize("use_setters", [False, True], ids=["constructor", "setters"])
+def test_decision_tree_regressor_learns_nonlinear_values_and_retains_lazy_predictions(session, use_setters):
+    DecisionTreeRegressor = _decision_tree_regressor()
+    training = _forest_vectors(session,
+        "SELECT array(CAST(x AS DOUBLE)) AS xs, CAST(y AS DOUBLE) AS target, 1.0D AS weight "
+        "FROM VALUES (-3,-4.0),(-2,-4.0),(-1,5.5),(0,5.5),(1,5.5),(2,-4.0),(3,-4.0) AS t(x,y)", "input")
+    held_out = _forest_vectors(session,
+        "SELECT id, array(CAST(x AS DOUBLE)) AS xs "
+        "FROM VALUES (0,-2.5),(1,-0.5),(2,0.5),(3,2.5) AS t(id,x)", "input")
+    options = dict(featuresCol="input", labelCol="target", predictionCol="value",
+                   maxDepth=3, maxBins=16, minInstancesPerNode=1, minInfoGain=0.0,
+                   maxMemoryInMB=64, cacheNodeIds=True, checkpointInterval=-1,
+                   impurity="variance", seed=42,
+                   leafCol="leaves", varianceCol="uncertainty", minWeightFractionPerNode=0.0,
+                   weightCol="weight")
+    if use_setters:
+        estimator = DecisionTreeRegressor()
+        for name, value in options.items():
+            assert getattr(estimator, "set" + name[0].upper() + name[1:])(value) is estimator
+    else:
+        estimator = DecisionTreeRegressor(**options)
+    first = estimator.fit(training)
+    second = estimator.fit(training.withColumn("target", F.col("target") + 10.0))
+    expected = [-4.0, 5.5, 5.5, -4.0]
+    assert _forest_predictions(first, held_out, "value") == expected
+    assert _forest_predictions(second, held_out, "value") == [6.0, 15.5, 15.5, 6.0]
+    assert _forest_predictions(estimator.fit(training), held_out, "value") == expected
+    output = first.transform(held_out).orderBy("id")
+    assert output.schema["leaves"].dataType == DoubleType()
+    assert output.schema["uncertainty"].dataType == DoubleType()
+    assert [r.leaves for r in output.select("leaves").collect()] == [0.0,1.0,1.0,2.0]
+    assert [r.uncertainty for r in output.select("uncertainty").collect()] == [0.0]*4
+    delayed = first.transform(held_out).select("id", "value")
+    del first
+    import gc
+    gc.collect()
+    assert [r.value for r in delayed.orderBy("id").collect()] == expected
+
+
+def test_decision_tree_regressor_instance_weights_change_the_mean(session):
+    DecisionTreeRegressor = _decision_tree_regressor()
+    training = _forest_vectors(session,
+        "SELECT 0 AS id, array(0.0D) AS xs, CAST(y AS DOUBLE) AS label, CAST(w AS DOUBLE) AS weight "
+        "FROM VALUES (-2,1),(-2,1),(-2,1),(10,9) AS t(y,w)")
+    options = dict(seed=42, maxDepth=0)
+    plain = DecisionTreeRegressor(**options).fit(training)
+    weighted = DecisionTreeRegressor(**options, weightCol="weight").fit(training)
+    assert _forest_predictions(plain, training) == [1.0]*4
+    assert _forest_predictions(weighted, training) == [7.0]*4
+    assert "variance" not in plain.transform(training).columns
+    assert "leaf" not in plain.transform(training).columns
+
+
+def test_decision_tree_regressor_rejects_invalid_parameters_and_data(session):
+    DecisionTreeRegressor = _decision_tree_regressor()
+    training = _forest_vectors(session,
+        "SELECT array(CAST(x AS DOUBLE)) AS xs, CAST(y AS DOUBLE) AS label, 1.0D AS weight "
+        "FROM VALUES (-1,-2.5),(1,3.5) AS t(x,y)")
+    for options in [dict(maxDepth=31),dict(maxBins=1),
+                    dict(minInstancesPerNode=0),dict(minInfoGain=-1.0),dict(maxMemoryInMB=-1),
+                    dict(checkpointInterval=0),dict(impurity="gini"),
+
+                    dict(minWeightFractionPerNode=0.5)]:
+        with pytest.raises(Exception):
+            DecisionTreeRegressor(**options).fit(training)
+    with pytest.raises(Exception):
+        DecisionTreeRegressor().fit(training.drop("label"))
+    with pytest.raises(Exception):
+        DecisionTreeRegressor().fit(training.withColumn("label",F.lit(float("nan"))))
+    with pytest.raises(Exception):
+        DecisionTreeRegressor(weightCol="weight").fit(training.withColumn("weight",F.lit(-1.0)))
+    with pytest.raises(Exception):
+        DecisionTreeRegressor().fit(training.withColumn("features",F.lit(1.0)))
+
+
+
+
+def test_decision_tree_regressor_reports_weighted_variance_in_each_leaf(session):
+    DecisionTreeRegressor = _decision_tree_regressor()
+    training = _forest_vectors(session,
+        "SELECT array(CAST(x AS DOUBLE)) AS xs, CAST(y AS DOUBLE) AS label, "
+        "CAST(w AS DOUBLE) AS weight "
+        "FROM VALUES (-2,-2,1),(-1,0,3),(1,4,1),(2,8,3) AS t(x,y,w)")
+    held_out = _forest_vectors(session,
+        "SELECT id, array(CAST(x AS DOUBLE)) AS xs "
+        "FROM VALUES (0,-1.5),(1,1.5) AS t(id,x)")
+    estimator = DecisionTreeRegressor(seed=2**33, maxDepth=1, weightCol="weight",
+                                      varianceCol="uncertainty", leafCol="leaf")
+    first = estimator.fit(training)
+    rows = first.transform(held_out).orderBy("id").select("prediction", "uncertainty", "leaf").collect()
+    assert [r.prediction for r in rows] == [-0.5,7.0]
+    assert [r.uncertainty for r in rows] == [0.75,3.0]
+    assert [r.leaf for r in rows] == [0.0,1.0]
+    assert _forest_predictions(estimator.fit(training), held_out) == [-0.5,7.0]

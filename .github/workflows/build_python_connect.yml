@@ -556,7 +556,7 @@ jobs:
         run: |
           cargo test -p apache-spark-connect \
             --test e2e_functions --test e2e_columns --test e2e_dataframe \
-            --test e2e_coverage --test e2e_linear_svc --test e2e_linear_regression --test e2e_kmeans --test e2e_decision_tree_classifier --test e2e_random_forest --test e2e_random_forest_regressor --test e2e_integration \
+            --test e2e_coverage --test e2e_linear_svc --test e2e_linear_regression --test e2e_kmeans --test e2e_decision_tree_regressor --test e2e_decision_tree_classifier --test e2e_random_forest --test e2e_random_forest_regressor --test e2e_integration \
             --test arrow_map_input --test array_literal --test execute_plan_hook --test raw_relation \
             --test types_roundtrip \
             --test e2e_reattach_drop \

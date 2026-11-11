@@ -243,6 +243,7 @@ def _native_estimators():
     # caches for its fit, and data that it fits.
     from pyspark.ml.connect import (
         DecisionTreeClassifier,
+        DecisionTreeRegressor,
         KMeans,
         LinearRegression,
         LinearSVC,
@@ -256,6 +257,7 @@ def _native_estimators():
 
     ml = "org.apache.spark.ml."
     return [
+        (DecisionTreeRegressor(), ml + "regression.DecisionTreeRegressionModel"),
         (DecisionTreeClassifier(), ml + "classification.DecisionTreeClassificationModel"),
         (KMeans(k=2, seed=1), ml + "clustering.KMeansModel"),
         (LinearSVC(maxIter=2), ml + "classification.LinearSVCModel"),

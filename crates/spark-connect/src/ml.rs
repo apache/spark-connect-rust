@@ -2553,6 +2553,292 @@ impl Model for RandomForestClassificationModel {
     }
 }
 
+/// Decision tree regression using Spark's JVM implementation and ML vector features.
+///
+/// Supports continuous numeric labels. Unset parameters use Spark's defaults. Without a
+/// seed, tie-breaking uses Spark's default seed (the hash of the class name), as with
+/// PySpark, so fits are reproducible either way; set a seed to change tie-breaking.
+#[derive(Debug, Clone)]
+pub struct DecisionTreeRegressor {
+    operator: MlOperator,
+    params: Params,
+}
+
+impl DecisionTreeRegressor {
+    pub fn new() -> Self {
+        Self {
+            operator: MlOperator::new(
+                "org.apache.spark.ml.regression.DecisionTreeRegressor",
+                OperatorType::Estimator,
+            ),
+            params: Params::new(),
+        }
+    }
+
+    /// Feature vector column.
+    pub fn set_feature_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("featuresCol", value);
+        self
+    }
+
+    /// Numeric regression label column.
+    pub fn set_label_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("labelCol", value);
+        self
+    }
+
+    /// Regression prediction output column.
+    pub fn set_prediction_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("predictionCol", value);
+        self
+    }
+
+    /// Optional output column for the weighted label variance in the predicted leaf.
+    pub fn set_variance_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("varianceCol", value);
+        self
+    }
+
+    /// Maximum tree depth, from 0 to 30.
+    pub fn set_max_depth(mut self, value: i32) -> Self {
+        self.params = self.params.set_param_int32("maxDepth", value);
+        self
+    }
+
+    /// Maximum number of bins for discretizing continuous features.
+    pub fn set_max_bins(mut self, value: i32) -> Self {
+        self.params = self.params.set_param_int32("maxBins", value);
+        self
+    }
+
+    /// Minimum number of training instances in each child node.
+    pub fn set_min_instances_per_node(mut self, value: i32) -> Self {
+        self.params = self.params.set_param_int32("minInstancesPerNode", value);
+        self
+    }
+
+    /// Minimum information gain for a split.
+    pub fn set_min_info_gain(mut self, value: f64) -> Self {
+        self.params = self.params.set_param_double("minInfoGain", value);
+        self
+    }
+
+    /// Maximum memory in MB for histogram aggregation.
+    pub fn set_max_memory_in_mb(mut self, value: i32) -> Self {
+        self.params = self.params.set_param_int32("maxMemoryInMB", value);
+        self
+    }
+
+    /// Whether to cache node IDs for training instances.
+    pub fn set_cache_node_ids(mut self, value: bool) -> Self {
+        self.params = self.params.set_param_bool("cacheNodeIds", value);
+        self
+    }
+
+    /// Node ID cache checkpoint interval; -1 disables checkpointing.
+    pub fn set_checkpoint_interval(mut self, value: i32) -> Self {
+        self.params = self.params.set_param_int32("checkpointInterval", value);
+        self
+    }
+
+    /// Impurity measure: variance.
+    pub fn set_impurity(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("impurity", value);
+        self
+    }
+
+    /// Random seed for breaking ties between equally good splits.
+    pub fn set_seed(mut self, value: i64) -> Self {
+        self.params = self.params.set_param_int_narrow("seed", value);
+        self
+    }
+
+    /// Optional scalar leaf index output column; empty disables it.
+    pub fn set_leaf_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("leafCol", value);
+        self
+    }
+
+    /// Minimum fraction of total weight in each child node, in [0, 0.5).
+    pub fn set_min_weight_fraction_per_node(mut self, value: f64) -> Self {
+        self.params = self
+            .params
+            .set_param_double("minWeightFractionPerNode", value);
+        self
+    }
+
+    /// Optional instance weight column.
+    pub fn set_weight_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("weightCol", value);
+        self
+    }
+
+    /// The feature vector column (default: "features").
+    pub fn feature_col(&self) -> &str {
+        self.params.string_or("featuresCol", "features")
+    }
+
+    /// The label column (default: "label").
+    pub fn label_col(&self) -> &str {
+        self.params.string_or("labelCol", "label")
+    }
+
+    /// The regression prediction output column (default: "prediction").
+    pub fn prediction_col(&self) -> &str {
+        self.params.string_or("predictionCol", "prediction")
+    }
+
+    /// The prediction variance output column, if one is set.
+    pub fn variance_col(&self) -> Option<&str> {
+        self.params.string_opt("varianceCol")
+    }
+
+    /// The maximum tree depth (default: 5).
+    pub fn max_depth(&self) -> i32 {
+        self.params.int_or("maxDepth", 5)
+    }
+
+    /// The maximum number of bins for continuous features (default: 32).
+    pub fn max_bins(&self) -> i32 {
+        self.params.int_or("maxBins", 32)
+    }
+
+    /// The minimum number of training instances in each child node (default: 1).
+    pub fn min_instances_per_node(&self) -> i32 {
+        self.params.int_or("minInstancesPerNode", 1)
+    }
+
+    /// The minimum information gain for a split (default: 0).
+    pub fn min_info_gain(&self) -> f64 {
+        self.params.double_or("minInfoGain", 0.0)
+    }
+
+    /// The maximum memory in MB for histogram aggregation (default: 256).
+    pub fn max_memory_in_mb(&self) -> i32 {
+        self.params.int_or("maxMemoryInMB", 256)
+    }
+
+    /// Whether to cache node IDs for training instances (default: false).
+    pub fn cache_node_ids(&self) -> bool {
+        self.params.bool_or("cacheNodeIds", false)
+    }
+
+    /// The node ID cache checkpoint interval (default: 10).
+    pub fn checkpoint_interval(&self) -> i32 {
+        self.params.int_or("checkpointInterval", 10)
+    }
+
+    /// The impurity measure (default: "variance").
+    pub fn impurity(&self) -> &str {
+        self.params.string_or("impurity", "variance")
+    }
+
+    /// The random seed, if one is set; else Spark's default seed applies.
+    pub fn seed(&self) -> Option<i64> {
+        self.params.long_opt("seed")
+    }
+
+    /// The leaf index output column (default: empty, no column).
+    pub fn leaf_col(&self) -> &str {
+        self.params.string_or("leafCol", "")
+    }
+
+    /// The minimum fraction of total weight in each child node (default: 0).
+    pub fn min_weight_fraction_per_node(&self) -> f64 {
+        self.params.double_or("minWeightFractionPerNode", 0.0)
+    }
+
+    /// The instance weight column, if one is set.
+    pub fn weight_col(&self) -> Option<&str> {
+        self.params.string_opt("weightCol")
+    }
+
+    fn model_from_info(
+        &self,
+        info: proto::ml_command_result::MlOperatorInfo,
+        session: &SparkSession,
+    ) -> spark_connect_core::error::Result<DecisionTreeRegressionModel> {
+        let cached = CachedModel::from_info(&info, session, "DecisionTreeRegressor")?;
+        Ok(DecisionTreeRegressionModel {
+            operator: MlOperator::with_uid(
+                "org.apache.spark.ml.regression.DecisionTreeRegressionModel",
+                info.uid.as_deref().unwrap_or(&self.operator.uid),
+                OperatorType::Model,
+            ),
+            params: self.params.clone(),
+            cached,
+        })
+    }
+}
+
+impl Default for DecisionTreeRegressor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Estimator for DecisionTreeRegressor {
+    fn operator(&self) -> &MlOperator {
+        &self.operator
+    }
+    fn operator_mut(&mut self) -> &mut MlOperator {
+        &mut self.operator
+    }
+    fn params(&self) -> &Params {
+        &self.params
+    }
+    fn params_mut(&mut self) -> &mut Params {
+        &mut self.params
+    }
+
+    fn fit_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<Box<dyn Model>> {
+        let info = fit_via_command(&self.operator, &self.params, df)?;
+        Ok(Box::new(self.model_from_info(info, &df.session)?))
+    }
+}
+
+/// A decision tree regression model fitted by Spark Connect.
+///
+/// Obtain it through [`Estimator::fit`]. The model, its clones and transformed
+/// DataFrames retain the cached server model until the last owner is dropped.
+#[derive(Debug, Clone)]
+pub struct DecisionTreeRegressionModel {
+    operator: MlOperator,
+    params: Params,
+    cached: CachedModel,
+}
+
+impl Transformer for DecisionTreeRegressionModel {
+    fn operator(&self) -> &MlOperator {
+        &self.operator
+    }
+    fn operator_mut(&mut self) -> &mut MlOperator {
+        &mut self.operator
+    }
+    fn params(&self) -> &Params {
+        &self.params
+    }
+    fn params_mut(&mut self) -> &mut Params {
+        &mut self.params
+    }
+
+    fn build_ml_relation(
+        &self,
+        input: &DataFrame,
+    ) -> spark_connect_core::error::Result<proto::MlRelation> {
+        self.cached.build_ml_relation(input, &self.params)
+    }
+
+    fn transform_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<DataFrame> {
+        self.cached.transform(df, &self.params)
+    }
+}
+
+impl Model for DecisionTreeRegressionModel {
+    fn clone_box(&self) -> Box<dyn Model> {
+        Box::new(self.clone())
+    }
+}
 /// Random forest regression using Spark's JVM implementation and ML vector features.
 ///
 /// Supports continuous numeric labels. Unset parameters use Spark's defaults. Without a
@@ -4676,6 +4962,200 @@ mod tests {
         assert!(model.clone_box().transform(&df).is_ok());
     }
     #[test]
+    fn decision_tree_regressor_getters_follow_defaults_builders_and_mutable_params() {
+        let mut tree = DecisionTreeRegressor::default();
+        assert_eq!(tree.feature_col(), "features");
+        assert_eq!(tree.label_col(), "label");
+        assert_eq!(tree.prediction_col(), "prediction");
+        assert_eq!(tree.max_depth(), 5);
+        assert_eq!(tree.max_bins(), 32);
+        assert_eq!(tree.min_instances_per_node(), 1);
+        assert_eq!(tree.min_info_gain(), 0.0);
+        assert_eq!(tree.max_memory_in_mb(), 256);
+        assert_eq!(tree.cache_node_ids(), false);
+        assert_eq!(tree.checkpoint_interval(), 10);
+        assert_eq!(tree.impurity(), "variance");
+        assert_eq!(tree.seed(), None);
+        assert_eq!(tree.variance_col(), None);
+        assert_eq!(tree.weight_col(), None);
+        assert_eq!(tree.leaf_col(), "");
+        assert_eq!(tree.min_weight_fraction_per_node(), 0.0);
+        let mut built = DecisionTreeRegressor::new()
+            .set_feature_col("input")
+            .set_label_col("target")
+            .set_prediction_col("value")
+            .set_max_depth(3)
+            .set_max_bins(16)
+            .set_min_instances_per_node(2)
+            .set_min_info_gain(0.01)
+            .set_max_memory_in_mb(64)
+            .set_cache_node_ids(true)
+            .set_checkpoint_interval(-1)
+            .set_impurity("variance")
+            .set_seed(1_i64 << 33)
+            .set_variance_col("uncertainty")
+            .set_weight_col("weight")
+            .set_leaf_col("leaf")
+            .set_min_weight_fraction_per_node(0.1);
+        *tree.params_mut() = tree
+            .params()
+            .clone()
+            .set_param_string("featuresCol", "input");
+        assert_eq!(tree.feature_col(), "input");
+        assert_eq!(built.feature_col(), tree.feature_col());
+        *tree.params_mut() = tree.params().clone().set_param_string("labelCol", "target");
+        assert_eq!(tree.label_col(), "target");
+        assert_eq!(built.label_col(), tree.label_col());
+        *tree.params_mut() = tree
+            .params()
+            .clone()
+            .set_param_string("predictionCol", "value");
+        assert_eq!(tree.prediction_col(), "value");
+        assert_eq!(built.prediction_col(), tree.prediction_col());
+        *tree.params_mut() = tree.params().clone().set_param_int32("maxDepth", 3);
+        assert_eq!(tree.max_depth(), 3);
+        assert_eq!(built.max_depth(), tree.max_depth());
+        *tree.params_mut() = tree.params().clone().set_param_int32("maxBins", 16);
+        assert_eq!(tree.max_bins(), 16);
+        assert_eq!(built.max_bins(), tree.max_bins());
+        *tree.params_mut() = tree
+            .params()
+            .clone()
+            .set_param_int32("minInstancesPerNode", 2);
+        assert_eq!(tree.min_instances_per_node(), 2);
+        assert_eq!(
+            built.min_instances_per_node(),
+            tree.min_instances_per_node()
+        );
+        *tree.params_mut() = tree.params().clone().set_param_double("minInfoGain", 0.01);
+        assert_eq!(tree.min_info_gain(), 0.01);
+        assert_eq!(built.min_info_gain(), tree.min_info_gain());
+        *tree.params_mut() = tree.params().clone().set_param_int32("maxMemoryInMB", 64);
+        assert_eq!(tree.max_memory_in_mb(), 64);
+        assert_eq!(built.max_memory_in_mb(), tree.max_memory_in_mb());
+        *tree.params_mut() = tree.params().clone().set_param_bool("cacheNodeIds", true);
+        assert_eq!(tree.cache_node_ids(), true);
+        assert_eq!(built.cache_node_ids(), tree.cache_node_ids());
+        *tree.params_mut() = tree
+            .params()
+            .clone()
+            .set_param_int32("checkpointInterval", -1);
+        assert_eq!(tree.checkpoint_interval(), -1);
+        assert_eq!(built.checkpoint_interval(), tree.checkpoint_interval());
+        *tree.params_mut() = tree
+            .params()
+            .clone()
+            .set_param_string("impurity", "variance");
+        assert_eq!(tree.impurity(), "variance");
+        assert_eq!(built.impurity(), tree.impurity());
+        *tree.params_mut() = tree
+            .params()
+            .clone()
+            .set_param_int_narrow("seed", 1_i64 << 33);
+        assert_eq!(tree.seed(), Some(1_i64 << 33));
+        assert_eq!(built.seed(), tree.seed());
+        *tree.params_mut() = tree
+            .params()
+            .clone()
+            .set_param_string("varianceCol", "uncertainty");
+        assert_eq!(tree.variance_col(), Some("uncertainty"));
+        assert_eq!(built.variance_col(), tree.variance_col());
+        *tree.params_mut() = tree
+            .params()
+            .clone()
+            .set_param_string("weightCol", "weight");
+        assert_eq!(tree.weight_col(), Some("weight"));
+        assert_eq!(built.weight_col(), tree.weight_col());
+        *tree.params_mut() = tree.params().clone().set_param_string("leafCol", "leaf");
+        assert_eq!(tree.leaf_col(), "leaf");
+        assert_eq!(built.leaf_col(), tree.leaf_col());
+        *tree.params_mut() = tree
+            .params()
+            .clone()
+            .set_param_double("minWeightFractionPerNode", 0.1);
+        assert_eq!(tree.min_weight_fraction_per_node(), 0.1);
+        assert_eq!(
+            built.min_weight_fraction_per_node(),
+            tree.min_weight_fraction_per_node()
+        );
+        assert_eq!(tree.params().to_proto(), built.params().to_proto());
+        assert!(built
+            .operator_mut()
+            .uid
+            .starts_with("DecisionTreeRegressor_"));
+    }
+
+    #[test]
+    fn decision_tree_regressor_validates_fitted_references_and_model_metadata() {
+        let session = offline_session();
+        let estimator = DecisionTreeRegressor::default().set_prediction_col("value");
+        assert_eq!(
+            estimator.operator().name,
+            "org.apache.spark.ml.regression.DecisionTreeRegressor"
+        );
+        assert_eq!(estimator.operator().op_type, OperatorType::Estimator);
+        for kind in [
+            None,
+            Some(proto::ml_command_result::ml_operator_info::Type::Name(
+                "model".into(),
+            )),
+            Some(proto::ml_command_result::ml_operator_info::Type::ObjRef(
+                proto::ObjectRef::default(),
+            )),
+        ] {
+            assert!(estimator
+                .model_from_info(
+                    proto::ml_command_result::MlOperatorInfo {
+                        r#type: kind,
+                        ..Default::default()
+                    },
+                    &session
+                )
+                .is_err());
+        }
+        let info = |uid| proto::ml_command_result::MlOperatorInfo {
+            r#type: Some(proto::ml_command_result::ml_operator_info::Type::ObjRef(
+                proto::ObjectRef {
+                    id: "trained-decision-tree-regressor".into(),
+                },
+            )),
+            uid,
+            ..Default::default()
+        };
+        let mut model = estimator
+            .model_from_info(info(Some("returned-uid".into())), &session)
+            .unwrap();
+        assert_eq!(model.operator().uid, "returned-uid");
+        assert_eq!(
+            model.operator().name,
+            "org.apache.spark.ml.regression.DecisionTreeRegressionModel"
+        );
+        assert_eq!(model.operator().op_type, OperatorType::Model);
+        let fallback = estimator.model_from_info(info(None), &session).unwrap();
+        assert_eq!(fallback.operator().uid, estimator.operator().uid);
+        let df = session.range(2).unwrap();
+        let proto::ml_relation::MlType::Transform(t) =
+            model.build_ml_relation(&df).unwrap().ml_type.unwrap()
+        else {
+            panic!("transform")
+        };
+        assert_eq!(
+            t.operator,
+            Some(proto::ml_relation::transform::Operator::ObjRef(
+                proto::ObjectRef {
+                    id: "trained-decision-tree-regressor".into()
+                }
+            ))
+        );
+        assert_eq!(*t.input.unwrap(), df.relation().unwrap());
+        assert_eq!(t.params.unwrap(), estimator.params().to_proto());
+        assert!(model
+            .transform(&session.new_session().range(2).unwrap())
+            .is_err());
+        assert!(model.clone_box().transform(&df).is_ok());
+    }
+
+    #[test]
     fn random_forest_regressor_validates_fitted_references_and_model_metadata() {
         let session = offline_session();
         let estimator = RandomForestRegressor::default().set_prediction_col("value");
@@ -4787,6 +5267,8 @@ mod tests {
             assert_eq!(sent(forest.params()), Some(expected.clone()));
             let tree = DecisionTreeClassifier::new().set_seed(seed);
             assert_eq!(sent(tree.params()), Some(expected.clone()));
+            let tree_regressor = DecisionTreeRegressor::new().set_seed(seed);
+            assert_eq!(sent(tree_regressor.params()), Some(expected.clone()));
             let cv = CrossValidator::new().set_seed(seed);
             assert_eq!(sent(cv.params()), Some(expected));
         }
