@@ -1,0 +1,64 @@
+#
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+
+name: Generated files drift
+
+# Guards the two files that scripts/gen_fn_dispatch.py generates
+# (crates/pyspark-rs/src/dispatch_generated.rs and
+# python/pyspark/sql/functions_generated.py): regenerates them in memory from
+# crates/spark-connect/src/functions.rs and the PySpark of the tracked Apache Spark
+# tag, and fails with a diff when a checked-in file differs. Catches hand edits to the
+# generated files, and generator or functions.rs changes that were not regenerated.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+on:
+  push:
+    branches: [master, "branch-*"]
+  pull_request:
+    branches: [master, "branch-*"]
+
+jobs:
+  generated-drift:
+    name: Generated files match scripts/gen_fn_dispatch.py
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          # The generator copies function bodies and signatures from the reference
+          # PySpark with `inspect`; keep the interpreter the one the files were
+          # generated with.
+          python-version: "3.11"
+      - name: Fetch the reference PySpark (sparse, blobless)
+        # The tracked tag is the one the vendored-drift check pins.
+        run: |
+          SPARK_TAG="$(sed -n 's/^SPARK_TAG="\(.*\)"$/\1/p' scripts/check_vendored_upstream.sh)"
+          test -n "${SPARK_TAG}"
+          echo "Fetching Apache Spark ${SPARK_TAG} ..."
+          git clone --quiet --depth 1 --branch "${SPARK_TAG}" --filter=blob:none --sparse \
+            https://github.com/apache/spark.git "${RUNNER_TEMP}/spark"
+          git -C "${RUNNER_TEMP}/spark" sparse-checkout set python/pyspark
+      - name: Install the dependencies of PySpark Connect
+        # Only so that pyspark.sql.connect.functions.builtin imports; the generated
+        # text does not depend on their versions.
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install 'pandas>=2.2,<3.0' pyarrow numpy grpcio grpcio-status googleapis-common-protos zstandard py4j
+      - name: Check the generated files
+        run: python scripts/gen_fn_dispatch.py --pyspark-src "${RUNNER_TEMP}/spark/python" --check
