@@ -41,16 +41,10 @@ fn table_schema(
             fields: st.current_fields(schema.py())?,
         }));
     }
-    let type_name = schema.get_type().name()?.to_string();
-    Err(crate::column::raise_pyspark(
-        schema.py(),
-        "PySparkTypeError",
-        "NOT_EXPECTED_TYPE",
-        &[
-            ("arg_name", "schema"),
-            ("expected_type", "struct type"),
-            ("arg_type", &type_name),
-        ],
+    Err(crate::errors::not_expected_type(
+        schema,
+        "schema",
+        "struct type",
     ))
 }
 

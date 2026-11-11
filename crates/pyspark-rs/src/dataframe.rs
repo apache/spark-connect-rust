@@ -7,7 +7,7 @@ use spark_connect::plan::JoinType;
 use spark_connect::udf::{eval_type, CommonInlineUserDefinedFunctionExpression, PythonUDFPayload};
 
 use crate::column::PyColumn;
-use crate::errors::ResultExt;
+use crate::errors::{not_expected_type, ResultExt};
 use crate::group::PyGroupedData;
 use crate::interrupt::interruptible;
 use crate::row::{FieldConverters, NestedFieldNames};
@@ -187,28 +187,11 @@ impl PyDataFrame {
                 pyo3::types::PyBool::new(py, false).to_owned().into_any(),
             ],
         )?;
-        let not_expected = |expected: &str, name: &str, value: &Bound<'_, PyAny>| -> PyErr {
-            let type_name = value
-                .get_type()
-                .name()
-                .map(|name| name.to_string())
-                .unwrap_or_default();
-            crate::column::raise_pyspark(
-                py,
-                "PySparkTypeError",
-                "NOT_EXPECTED_TYPE",
-                &[
-                    ("expected_type", expected),
-                    ("arg_name", name),
-                    ("arg_type", &type_name),
-                ],
-            )
-        };
         if n.is_instance_of::<pyo3::types::PyBool>() || !n.is_instance_of::<pyo3::types::PyInt>() {
-            return Err(not_expected("int", "n", &n));
+            return Err(not_expected_type(&n, "n", "int"));
         }
         if !vertical.is_instance_of::<pyo3::types::PyBool>() {
-            return Err(not_expected("bool", "vertical", &vertical));
+            return Err(not_expected_type(&vertical, "vertical", "bool"));
         }
         let truncate =
             if truncate.is_instance_of::<pyo3::types::PyBool>() && truncate.is_truthy()? {
@@ -218,7 +201,7 @@ impl PyDataFrame {
                 match py.import("builtins")?.getattr("int")?.call1((&truncate,)) {
                     Ok(value) => value.extract::<i32>()?,
                     Err(err) if err.is_instance_of::<pyo3::exceptions::PyValueError>(py) => {
-                        return Err(not_expected("bool", "truncate", &truncate));
+                        return Err(not_expected_type(&truncate, "truncate", "bool"));
                     }
                     Err(err) => return Err(err),
                 }
@@ -407,26 +390,6 @@ fn unwrap_sequence(cols: Vec<Bound<'_, PyAny>>) -> PyResult<Vec<Bound<'_, PyAny>
         }
         _ => Ok(cols),
     }
-}
-
-/// PySpark's `NOT_EXPECTED_TYPE` error of the argument `name`, `value`, which should be of
-/// the type `expected`.
-fn not_expected_type(value: &Bound<'_, PyAny>, name: &str, expected: &str) -> PyErr {
-    let type_name = value
-        .get_type()
-        .name()
-        .map(|name| name.to_string())
-        .unwrap_or_default();
-    crate::column::raise_pyspark(
-        value.py(),
-        "PySparkTypeError",
-        "NOT_EXPECTED_TYPE",
-        &[
-            ("expected_type", expected),
-            ("arg_name", name),
-            ("arg_type", &type_name),
-        ],
-    )
 }
 
 /// PySpark's `VALUE_NOT_POSITIVE` error of `numPartitions`, unless it is positive.
@@ -673,7 +636,7 @@ fn watermark_argument(value: &Bound<'_, PyAny>, name: &str) -> PyResult<String> 
             .get_type()
             .is(value.py().get_type::<pyo3::types::PyString>())
     {
-        return Err(crate::stat_arguments::not_expected_type(value, name, "str"));
+        return Err(not_expected_type(value, name, "str"));
     }
     value.extract()
 }
@@ -1966,9 +1929,7 @@ impl PyDataFrame {
         metadata: &Bound<'_, PyAny>,
     ) -> PyResult<PyDataFrame> {
         if !metadata.is_instance_of::<PyDict>() {
-            return Err(crate::stat_arguments::not_expected_type(
-                metadata, "metadata", "dict",
-            ));
+            return Err(not_expected_type(metadata, "metadata", "dict"));
         }
         let json: String = py
             .import("json")?
@@ -3299,21 +3260,7 @@ pub(crate) fn column_or_name(col: &Bound<'_, PyAny>) -> PyResult<spark_connect::
         let _origin = crate::origin::with_origin("col");
         return Ok(spark_connect::functions::col(&col.extract::<String>()?));
     }
-    let type_name = col
-        .get_type()
-        .name()
-        .map(|name| name.to_string())
-        .unwrap_or_default();
-    Err(crate::column::raise_pyspark(
-        col.py(),
-        "PySparkTypeError",
-        "NOT_EXPECTED_TYPE",
-        &[
-            ("expected_type", "Column or str"),
-            ("arg_name", "col"),
-            ("arg_type", &type_name),
-        ],
-    ))
+    Err(not_expected_type(col, "col", "Column or str"))
 }
 
 /// Python wrapper for `MergeIntoWriter` (`df.mergeInto(...)`).
