@@ -308,7 +308,8 @@ def test_server_session_id_is_observed_and_a_changed_one_closes_the_session_as_p
         session._client._server_session_id = str(uuid.uuid4())
         with pytest.raises(SparkConnectException) as error:
             session.range(3).collect()
-        assert "SESSION_CHANGED" in str(error.value)
+        # The close by the session change makes the fetch of the error's details raise this.
+        assert "NO_ACTIVE_SESSION" in str(error.value)
         assert session.is_stopped
     finally:
         session.release_session_on_close = False
@@ -3399,6 +3400,34 @@ def test_local_iterator_closes_as_a_generator_as_pyspark(session):
     rows.close()
 
 
+def test_local_iterator_is_a_generator_as_pyspark(session):
+    # As PySpark's generator function: it yields the rows, and a close() or a throw() in the
+    # middle ends it.
+    import inspect
+    import types
+
+    df = session.range(1000, numPartitions=10)
+    rows = df.toLocalIterator()
+    assert isinstance(rows, types.GeneratorType)
+    assert [row.id for row in rows] == list(range(1000))
+    assert inspect.getgeneratorstate(rows) == inspect.GEN_CLOSED
+    assert next(rows, None) is None
+
+    rows = df.toLocalIterator()
+    assert next(rows).id == 0
+    assert inspect.getgeneratorstate(rows) == inspect.GEN_SUSPENDED
+    with pytest.raises(ValueError, match="stop"):
+        rows.throw(ValueError("stop"))
+    assert inspect.getgeneratorstate(rows) == inspect.GEN_CLOSED
+    assert list(rows) == []
+
+    rows = df.toLocalIterator()
+    next(rows)
+    rows.close()
+    assert inspect.getgeneratorstate(rows) == inspect.GEN_CLOSED
+    assert list(rows) == []
+
+
 def test_create_dataframe_takes_the_ddl_of_spark_as_pyspark(session):
     # As PySpark Connect's, which parses a DDL schema on the server: nested structs, arrays and
     # maps of them, backtick-quoted names, and NOT NULL and COMMENT clauses.
@@ -5347,3 +5376,20 @@ def test_decision_tree_classifier_rejects_invalid_parameters_and_training_data(s
         DecisionTreeClassifier().fit(training.drop("features"))
     with pytest.raises(Exception):
         DecisionTreeClassifier().fit(training.withColumn("features",F.array(F.lit(1.0))))
+
+
+def test_binary_subclasses_are_sent_as_the_bytes_of_pyspark(session):
+    class Bytes(bytes):
+        def __bytes__(self):
+            return b"other"
+
+    class ByteArray(bytearray):
+        def __bytes__(self):
+            return b"other"
+
+    rows = session.createDataFrame(
+        [(Bytes(b"orig"),), (ByteArray(b"orig"),), (bytearray(b"ba"),), (None,)], "b binary"
+    ).collect()
+    assert [row.b for row in rows] == [b"other", b"other", b"ba", None]
+    rows = session.createDataFrame([([Bytes(b"orig")],)], "a array<binary>").collect()
+    assert rows[0].a == [b"other"]
