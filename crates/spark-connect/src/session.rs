@@ -1548,6 +1548,36 @@ fn dedup_field_names<'a>(names: impl IntoIterator<Item = &'a str>) -> Vec<String
         .collect()
 }
 
+/// The precision and scale of an Arrow `Decimal128` for a Spark `decimal(precision, scale)`.
+///
+/// `DataType::Decimal` holds `i32`s and, as PySpark's `DecimalType`, is not validated when it is
+/// built or parsed, so they are narrowed here with checks rather than `as` casts, which would
+/// wrap `decimal(300,0)` to a precision of 44. Arrow's own limits apply, as they do in PySpark's
+/// `to_arrow_type` (`pa.decimal128` raises for a precision outside 1 to 38).
+fn decimal128_precision_and_scale(precision: i32, scale: i32) -> Result<(u8, i8)> {
+    use arrow::datatypes::{
+        validate_decimal_precision_and_scale, Decimal128Type, DECIMAL128_MAX_PRECISION,
+    };
+    let unsupported = |reason: String| {
+        SparkError::connect_msg(format!(
+            "unsupported decimal type decimal({precision},{scale}): {reason}"
+        ))
+    };
+    let arrow_precision = u8::try_from(precision)
+        .ok()
+        .filter(|p| (1..=DECIMAL128_MAX_PRECISION).contains(p))
+        .ok_or_else(|| {
+            unsupported(format!(
+                "precision must be between 1 and {DECIMAL128_MAX_PRECISION}"
+            ))
+        })?;
+    let arrow_scale = i8::try_from(scale)
+        .map_err(|_| unsupported(format!("scale must be between {} and {}", i8::MIN, i8::MAX)))?;
+    validate_decimal_precision_and_scale::<Decimal128Type>(arrow_precision, arrow_scale)
+        .map_err(|e| unsupported(e.to_string()))?;
+    Ok((arrow_precision, arrow_scale))
+}
+
 /// Map a Spark `DataType` to its Arrow `DataType`, recursively (array/map/struct included).
 fn datatype_to_arrow(dt: &DataType) -> Result<arrow::datatypes::DataType> {
     use arrow::datatypes::{DataType as A, Field, Fields, TimeUnit};
@@ -1580,7 +1610,10 @@ fn datatype_to_arrow(dt: &DataType) -> Result<arrow::datatypes::DataType> {
         DataType::YearMonthInterval { .. } => {
             A::Interval(arrow::datatypes::IntervalUnit::YearMonth)
         }
-        DataType::Decimal { precision, scale } => A::Decimal128(*precision as u8, *scale as i8),
+        DataType::Decimal { precision, scale } => {
+            let (precision, scale) = decimal128_precision_and_scale(*precision, *scale)?;
+            A::Decimal128(precision, scale)
+        }
         DataType::Array {
             element_type,
             contains_null,
@@ -1821,6 +1854,9 @@ fn values_to_arrow(values: &[&Value], dt: &DataType) -> Result<Arc<dyn arrow::ar
         }
         DataType::Decimal { precision, scale } => {
             let col_scale = *scale;
+            // Checked before the values, so a column of nulls (or no rows) is validated too.
+            let (arrow_precision, arrow_scale) =
+                decimal128_precision_and_scale(*precision, col_scale)?;
             let vals: Result<Vec<Option<i128>>> = values
                 .iter()
                 .map(|v| match *v {
@@ -1834,7 +1870,7 @@ fn values_to_arrow(values: &[&Value], dt: &DataType) -> Result<Arc<dyn arrow::ar
             // Use the DECLARED precision/scale so the array matches the Arrow schema field
             // (Decimal128(precision, scale)); hardcoding 38 mismatched a DecimalType(10, 2).
             let arr = Decimal128Array::from(vals?)
-                .with_precision_and_scale(*precision as u8, col_scale as i8)
+                .with_precision_and_scale(arrow_precision, arrow_scale)
                 .map_err(|e| SparkError::connect_msg(format!("decimal build: {e}")))?;
             Ok(Arc::new(arr))
         }
@@ -2306,6 +2342,81 @@ mod tests {
                 999_999_999_999_999_999,
                 -999_999_999_999_999_999
             ]
+        );
+    }
+
+    fn decimal(precision: i32, scale: i32) -> DataType {
+        DataType::Decimal { precision, scale }
+    }
+
+    #[test]
+    fn decimal_arrow_type_rejects_an_out_of_range_precision_or_scale() {
+        // `as u8` / `as i8` used to wrap these: decimal(300,0) to a precision of 44,
+        // decimal(257,0) to the valid Decimal128(1, 0) and decimal(38,256) to a scale of 0.
+        for (precision, scale, reason) in [
+            (300, 0, "precision must be between 1 and 38"),
+            (257, 0, "precision must be between 1 and 38"),
+            (39, 0, "precision must be between 1 and 38"),
+            (0, 0, "precision must be between 1 and 38"),
+            (-1, 0, "precision must be between 1 and 38"),
+            (38, 256, "scale must be between -128 and 127"),
+            (38, 128, "scale must be between -128 and 127"),
+            (38, -129, "scale must be between -128 and 127"),
+            (5, 6, "scale 6 is greater than precision 5"),
+            (38, 39, "scale 39 is greater than max 38"),
+        ] {
+            let expected = format!("unsupported decimal type decimal({precision},{scale})");
+            let dt = decimal(precision, scale);
+
+            let error = datatype_to_arrow(&dt).unwrap_err().to_string();
+            assert!(error.contains(&expected), "{error}");
+            assert!(error.contains(reason), "{error}");
+
+            // The schema of a nested type is checked as well.
+            let nested = DataType::Array {
+                element_type: Box::new(dt.clone()),
+                contains_null: true,
+            };
+            let error = datatype_to_arrow(&nested).unwrap_err().to_string();
+            assert!(error.contains(&expected), "{error}");
+
+            // A column of nulls has no value to fail on, so the type itself must.
+            let error = values_to_arrow(&[&Value::Null], &dt)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(&expected), "{error}");
+            assert!(error.contains(reason), "{error}");
+
+            let error = rows_to_arrow_ipc(&[row(vec![Value::Null])], &schema(vec![dt]))
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(&expected), "{error}");
+        }
+    }
+
+    #[test]
+    fn decimal_arrow_type_keeps_the_in_range_boundaries() {
+        use arrow::datatypes::DataType as A;
+        for (precision, scale) in [(1, 0), (1, 1), (38, 0), (38, 38), (10, 2)] {
+            let dt = decimal(precision, scale);
+            let expected = A::Decimal128(precision as u8, scale as i8);
+            assert_eq!(datatype_to_arrow(&dt).unwrap(), expected);
+
+            let zero = Value::Decimal {
+                value: "0".to_string(),
+                precision: None,
+                scale: None,
+            };
+            let array = values_to_arrow(&[&Value::Null, &zero], &dt).unwrap();
+            assert_eq!(array.data_type(), &expected);
+            assert_eq!(array.len(), 2);
+            assert!(array.is_null(0));
+        }
+        // Arrow represents a negative scale, so the type is not refused here; whether Spark
+        // takes it is the server's call (`spark.sql.legacy.allowNegativeScaleOfDecimal`).
+        assert_eq!(
+            datatype_to_arrow(&decimal(10, -2)).unwrap(),
+            A::Decimal128(10, -2)
         );
     }
 

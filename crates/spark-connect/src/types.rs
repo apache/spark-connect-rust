@@ -3702,6 +3702,21 @@ mod tests {
     }
 
     #[test]
+    fn test_decimal_out_of_range_is_not_rejected_at_parse_time() {
+        // As PySpark, whose `DecimalType(39, 0)`, `_parse_datatype_json_string` and
+        // `pyspark_types_to_proto_types` do not validate the precision or the scale: the server
+        // rejects the type on analysis. The client only refuses it where it has to build an
+        // Arrow type (`decimal128_precision_and_scale` in session.rs).
+        for (precision, scale) in [(39, 0), (5, 6), (10, -2), (300, 0), (0, 0)] {
+            let dt = DataType::Decimal { precision, scale };
+            let text = format!("decimal({precision},{scale})");
+            assert_eq!(DataType::from_json(&serde_json::json!(text)).unwrap(), dt);
+            assert_eq!(dt.json_value(), serde_json::json!(text));
+            assert_eq!(DataType::from_proto(&dt.to_proto()).unwrap(), dt);
+        }
+    }
+
+    #[test]
     fn test_from_json_unparsed_roundtrip() {
         let dt = DataType::Unparsed {
             data_type_string: "int".to_string(),
