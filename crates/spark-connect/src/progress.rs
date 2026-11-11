@@ -256,6 +256,14 @@ impl ExecutionStream {
         }
     }
 
+    /// `error`, of the caller of an execution that ends before its stream does, such as of the
+    /// decoding of a batch: the handlers get their done call now, whose error replaces
+    /// `error`, as PySpark's `Progress.__exit__` replaces an error raised in the `with` of the
+    /// execution.
+    pub(crate) fn fail(&mut self, error: SparkError) -> SparkError {
+        self.progress.finish_after(error)
+    }
+
     /// The response of the stream, `response`, after its progress has updated the handlers and
     /// its chunk is joined into its batch.
     fn handle(

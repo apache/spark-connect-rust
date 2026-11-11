@@ -5744,7 +5744,8 @@ def test_string_surrogate_fallback_precedes_importer_configuration(protocol, mon
     monkeypatch.setattr(pd.DataFrame, "astype", record_rows)
     with _arrow_input_service(protocol) as (spark, state):
         state["config_error"] = grpc.StatusCode.INVALID_ARGUMENT
-        with pytest.raises(TypeError, match="unsupported value type for createDataFrame: str"):
+        # The UnicodeEncodeError of pyarrow's conversion of PySpark, a ValueError.
+        with pytest.raises(UnicodeEncodeError, match="surrogates not allowed"):
             spark.createDataFrame(frame, schema)
         assert calls == ["astype"]
         assert state["config_requests"] == []

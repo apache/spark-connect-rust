@@ -213,13 +213,16 @@ impl LocalRowIterator {
                     Ok(Some(mut resp)) => {
                         capture_execution(&mut resp, execution_info, session);
                         if let Err(e) = keep_schema(&mut resp, &self.schema) {
-                            return Some(Err(e));
+                            return Some(Err(stream.fail(e)));
                         }
                         if let Some(proto::execute_plan_response::ResponseType::ArrowBatch(batch)) =
                             resp.response_type
                         {
                             let schema = self.schema.lock().unwrap_or_else(|p| p.into_inner());
-                            return Some(decode_arrow_batch_of(&batch, schema.as_ref()));
+                            return Some(
+                                decode_arrow_batch_of(&batch, schema.as_ref())
+                                    .map_err(|e| stream.fail(e)),
+                            );
                         }
                         // Metrics/progress response: keep pulling for a batch.
                     }
@@ -957,7 +960,7 @@ impl DataFrame {
             };
             capture_execution(&mut resp, &mut info, &self.session);
             if let Some(data_type) = resp.schema.take() {
-                schema = Some(DataType::from_proto(&data_type)?);
+                schema = Some(DataType::from_proto(&data_type).map_err(|e| stream.fail(e))?);
             }
             if let Some(proto::execute_plan_response::ResponseType::ArrowBatch(batch)) =
                 resp.response_type
@@ -974,7 +977,7 @@ impl DataFrame {
                             invalid_utf8 = Some(error);
                         }
                     }
-                    Err(error) => return Err(error),
+                    Err(error) => return Err(stream.fail(error)),
                 }
             }
         }
@@ -1048,12 +1051,13 @@ impl DataFrame {
             };
             capture_execution(&mut resp, &mut info, &self.session);
             if let Some(data_type) = resp.schema.take() {
-                schema = Some(DataType::from_proto(&data_type)?);
+                schema = Some(DataType::from_proto(&data_type).map_err(|e| stream.fail(e))?);
             }
             if let Some(proto::execute_plan_response::ResponseType::ArrowBatch(batch)) =
                 resp.response_type
             {
-                let record_batches = decode_arrow_record_batches(&batch)?;
+                let record_batches =
+                    decode_arrow_record_batches(&batch).map_err(|e| stream.fail(e))?;
                 batches.extend(record_batches);
             }
         }
@@ -1779,7 +1783,9 @@ impl DataFrame {
         }
     }
 
-    /// Observe metrics on this DataFrame.
+    /// Observe metrics on this DataFrame. With no `exprs`, the action fails on the server, where
+    /// PySpark's `observe` raises `CANNOT_BE_EMPTY` at the call, as
+    /// [`DataFrame::observe_with`] does.
     pub fn observe(&self, name: &str, exprs: Vec<Expression>) -> DataFrame {
         let plan = LogicalPlan::Observe {
             input: Arc::clone(&self.plan),
@@ -1801,6 +1807,14 @@ impl DataFrame {
         observation: &crate::observation::Observation,
         exprs: Vec<Expression>,
     ) -> Result<DataFrame> {
+        // As PySpark's `observe`, which checks this first.
+        if exprs.is_empty() {
+            return Err(SparkError::classed(
+                SparkErrorKind::ValueError,
+                "CANNOT_BE_EMPTY",
+                &[("item", "exprs")],
+            ));
+        }
         let name = observation.name_to_observe()?;
         if self.is_streaming()? {
             return Err(SparkError::classed(
@@ -1843,7 +1857,9 @@ impl DataFrame {
         crate::group::NaFunctions::new(self.clone())
     }
 
-    /// Perform aggregation without grouping.
+    /// Perform aggregation without grouping. With no `expressions`, the result is one row of
+    /// no columns, as of the Scala client's `agg(Map.empty)`, where PySpark's `agg` raises
+    /// `CANNOT_BE_EMPTY`.
     pub fn agg(&self, expressions: Vec<Expression>) -> DataFrame {
         let plan = LogicalPlan::Aggregate {
             input: Arc::clone(&self.plan),
@@ -5093,6 +5109,24 @@ mod plan_construction_tests {
         assert_eq!(
             message(vec![]),
             "[CANNOT_BE_EMPTY] At least one value must be specified."
+        );
+    }
+
+    #[test]
+    fn observe_with_no_expressions_is_cannot_be_empty_as_pyspark() {
+        // As PySpark's `observe`, which checks this first, before any request.
+        let observation = crate::observation::Observation::new("metrics");
+        let Err(error) = session()
+            .range(3)
+            .unwrap()
+            .observe_with(&observation, vec![])
+        else {
+            panic!("no exprs must be rejected");
+        };
+        assert_eq!(error.kind, SparkErrorKind::ValueError);
+        assert_eq!(
+            error.message(),
+            "[CANNOT_BE_EMPTY] At least one exprs must be specified."
         );
     }
 

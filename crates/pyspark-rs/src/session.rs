@@ -116,7 +116,7 @@ impl PySparkSessionBuilder {
         }
         if let Some(m) = map {
             for (k, v) in m.iter() {
-                let ks = k.str()?.to_string();
+                let ks = crate::str_text(&k)?;
                 let vs = crate::coerce_option_value(&v)?;
                 slf.set_option_value(py, &ks, vs)?;
             }
@@ -125,8 +125,8 @@ impl PySparkSessionBuilder {
             // A SparkConf: apply its (key, value) pairs via getAll().
             for pair in c.call_method0("getAll")?.try_iter()? {
                 let pair = pair?;
-                let k: String = pair.get_item(0)?.str()?.to_string();
-                let v: String = pair.get_item(1)?.str()?.to_string();
+                let k: String = crate::str_text(&pair.get_item(0)?)?;
+                let v: String = crate::str_text(&pair.get_item(1)?)?;
                 slf.set_option(py, &k, v)?;
             }
         }
@@ -3738,8 +3738,11 @@ pub(crate) fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
     }
 
     // Check for str
-    if let Ok(s) = obj.extract::<String>() {
-        return Ok(Value::String(s));
+    if obj.is_instance_of::<pyo3::types::PyString>() {
+        // A str that UTF-8 cannot encode (a lone surrogate) raises the UnicodeEncodeError of its
+        // encoding, a ValueError, as pyarrow's conversion of PySpark does, rather than the
+        // TypeError of an unsupported type below.
+        return Ok(Value::String(obj.extract::<String>()?));
     }
 
     // Check for bytes/bytearray SPECIFICALLY (not `extract::<Vec<u8>>()`, which also
