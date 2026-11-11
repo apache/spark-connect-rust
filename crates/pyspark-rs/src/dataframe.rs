@@ -1985,12 +1985,13 @@ impl PyDataFrame {
 
     /// Randomly split into multiple DataFrames by the given weights.
     /// As PySpark's: `VALUE_NOT_POSITIVE` for a negative weight and for weights of a sum that is
-    /// not positive, of their `str`; without a seed, the client chooses one of every split.
+    /// not positive, of their `str`; without a seed, the client chooses one of every split; a
+    /// seed goes through `int()`, so a float or a str is accepted.
     #[pyo3(name = "randomSplit", signature = (weights, seed=None))]
     fn random_split(
         &self,
         weights: &Bound<'_, PyAny>,
-        seed: Option<i64>,
+        seed: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Vec<PyDataFrame>> {
         let py = weights.py();
         let not_positive = |arg_name: &str, value: &Bound<'_, PyAny>| -> PyResult<PyErr> {
@@ -2014,13 +2015,15 @@ impl PyDataFrame {
         }
         // Drawn before the sum is checked, as PySpark does, so that a failing sum uses one too.
         let seed = match seed {
-            Some(seed) => seed,
-            None => python_random_seed(py)?,
+            Some(seed) => seed.clone(),
+            None => python_random_seed(py)?.into_pyobject(py)?.into_any(),
         };
         let total = py.import("builtins")?.call_method1("sum", (weights,))?;
         if total.le(0)? {
             return Err(not_positive("sum(weights)", &total)?);
         }
+        // Converted once the sum is checked, as PySpark's plans do with int(seed).
+        let seed = python_int(py, &seed)?;
         let weights: Vec<f64> = weights.extract()?;
         Ok(self
             .dataframe
@@ -2605,12 +2608,7 @@ impl PyDataFrame {
         seed: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
         use pyo3::types::{PyBool, PyFloat};
-        let int = |value: &Bound<'_, PyAny>| -> PyResult<i64> {
-            py.import("builtins")?
-                .getattr("int")?
-                .call1((value,))?
-                .extract()
-        };
+        let int = |value: &Bound<'_, PyAny>| python_int(py, value);
         let (replace, frac, seed) = match (withReplacement, fraction) {
             (Some(w), Some(f)) if w.is_instance_of::<PyBool>() && f.is_instance_of::<PyFloat>() => {
                 (w.extract()?, f.extract()?, seed.map(int).transpose()?)
@@ -4528,6 +4526,15 @@ pub(crate) fn python_random_seed(py: Python<'_>) -> PyResult<i64> {
     let max_size = py.import("sys")?.getattr("maxsize")?;
     py.import("random")?
         .call_method1("randint", (0, max_size))?
+        .extract()
+}
+
+/// `int(value)` of Python, as PySpark applies to a seed: a float is truncated, a str is parsed,
+/// and a value that `int()` rejects raises its error.
+pub(crate) fn python_int(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<i64> {
+    py.import("builtins")?
+        .getattr("int")?
+        .call1((value,))?
         .extract()
 }
 
