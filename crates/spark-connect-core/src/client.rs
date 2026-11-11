@@ -283,6 +283,22 @@ fn plan_compression_of(threshold: Option<&str>, algorithm: Option<&str>) -> Plan
     }
 }
 
+/// The stack that a clone of a request takes for the levels of its plan: prost's derived `Clone`
+/// recurses once per level, with about 2 KiB of stack per level in a release build (more in a
+/// debug one), while encoding and dropping a plan take a fraction of that. A plan of PySpark's
+/// serializer, at most 746 levels, must not overflow a thread of a small stack, such as a Python
+/// thread of 512 KiB, that calls the client.
+const REQUEST_STACK: usize = if cfg!(debug_assertions) {
+    16 << 20
+} else {
+    4 << 20
+};
+
+/// Clone `value`, a request, on a stack that holds its levels (see [`REQUEST_STACK`]).
+fn clone_on_grown_stack<T: Clone>(value: &T) -> T {
+    stacker::maybe_grow(REQUEST_STACK, REQUEST_STACK, || value.clone())
+}
+
 /// Replace the relation or command of `plan` with its zstd-compressed operation, when it is over
 /// `threshold` bytes and compression makes it smaller, as PySpark's `_try_compress_and_set_plan`.
 fn compress_over_threshold(plan: &mut Plan, threshold: usize) {
@@ -1240,7 +1256,7 @@ impl SparkConnectClient {
         let response = self
             .with_retry(|| {
                 let deadline = self.rpc_deadlines.analyze_plan;
-                let mut request = request.clone();
+                let mut request = clone_on_grown_stack(&request);
                 self.observe_on(&mut request.client_observed_server_side_session_id);
                 let mut req = with_deadline(Request::new(request), deadline);
                 self._attach_metadata(&mut req);
@@ -1318,14 +1334,14 @@ impl SparkConnectClient {
             std::sync::Arc::clone(&self.inflight_operations),
             iter.operation_id().to_string(),
         );
-        let start = iter.request().clone();
         let deadline = self.rpc_deadlines.reattachable_execute_plan;
         let mut stream_deadline = None;
         let stream = {
             // The first RPC is a wait of the caller for the execution.
             let _waiting = inflight.waiting();
             self.with_retry(|| {
-                let mut req = with_deadline(Request::new(start.clone()), deadline);
+                let request = clone_on_grown_stack(iter.request());
+                let mut req = with_deadline(Request::new(request), deadline);
                 self._attach_metadata(&mut req);
                 stream_deadline = deadline.map(|d| tokio::time::Instant::now() + d);
                 let mut stub = self.stub.clone();
@@ -2447,7 +2463,8 @@ impl ReattachableResponseStream {
         &mut self,
     ) -> std::result::Result<Streaming<ExecutePlanResponse>, tonic::Status> {
         let deadline = self.client.rpc_deadlines.reattachable_execute_plan;
-        let mut req = with_deadline(Request::new(self.iter.request().clone()), deadline);
+        let request = clone_on_grown_stack(self.iter.request());
+        let mut req = with_deadline(Request::new(request), deadline);
         self.client._attach_metadata(&mut req);
         self.stream_deadline = deadline.map(|d| tokio::time::Instant::now() + d);
         let response =

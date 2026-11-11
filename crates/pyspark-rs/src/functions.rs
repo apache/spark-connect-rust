@@ -360,10 +360,11 @@ pub(crate) fn to_value_column(obj: &Bound<'_, PyAny>) -> PyResult<Column> {
     to_column(obj)
 }
 
-/// How deep the lists of a Column method may nest. PySpark's `LiteralExpression` recurses in
-/// Python for each level, so under Python's default recursion limit it raises `RecursionError`
-/// for a list nested about 990 levels deep (a little less below a deeper caller). A deeper list
-/// is a `RecursionError` here too, rather than a native stack overflow.
+/// How deep the lists of a Column method may nest. It protects this client: a deeper list is a
+/// `RecursionError` here, rather than a native stack overflow. PySpark's `LiteralExpression`
+/// recurses in Python for each level, so where its `RecursionError` starts depends on the Python
+/// recursion limit and on the protobuf backend, and this bound is not a copy of its point (a
+/// little less below a deeper caller).
 const MAX_LIST_DEPTH: usize = 988;
 
 /// The stack that a level of nested lists keeps free before it goes down a level, and the size of

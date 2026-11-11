@@ -805,13 +805,15 @@ pub fn resolve_request(request: &mut proto::ExecutePlanRequest) -> Result<()> {
     }
 }
 
-/// How many levels deep a plan may be to be sent, with the plans of its subqueries. PySpark
-/// builds the proto of a plan by recursing in Python, so under Python's default recursion limit
-/// its serializer raises `RecursionError` from about 747 levels (from 746 for a chain of filters,
-/// 747 of `withColumn`s or `select`s, and 748 of limits); a deeper plan fails in the same way
-/// here, before any request is sent. The server itself rejects a plan of about 510 levels or more
-/// (its marshaller nests at most 1024 messages), with an error that gives no reason, so the plans
-/// between the two fail there, as they do for PySpark.
+/// How many levels deep a plan may be to be sent, with the plans of its subqueries. It protects
+/// this client: the serialization of a plan, the clone of its request and the encoding of the
+/// request recurse once per level, so a deeper plan is refused here with a `RecursionError`,
+/// before any request is built, and the levels that are sent fit the stack that the client grows
+/// for them. PySpark's own point is not this number, and depends on its protobuf backend: its
+/// serializer recurses in Python, so it raises `RecursionError` from about 245 levels with the
+/// pure-Python backend, and from about 992 with upb (measured with pyspark-client 4.3.0). The
+/// server itself rejects a plan of about 510 levels or more (its marshaller nests at most 1024
+/// messages), with an error that gives no reason, so the plans between the two fail there.
 pub const MAX_PLAN_DEPTH: usize = 746;
 
 /// The stack that the clone of a [`LogicalPlan::Raw`] relation takes for each of its levels:

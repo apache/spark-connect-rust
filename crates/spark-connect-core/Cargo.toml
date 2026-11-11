@@ -33,6 +33,8 @@ sha2 = "0.10"
 # Transport errors that tonic keeps as a status's source, for `RetryPolicy::can_retry`.
 h2 = "0.4"
 hyper = "1"
+# Grows the stack for the clones and drops of the requests of deep plans.
+stacker = "0.1"
 
 [target.'cfg(all(target_arch = "aarch64", not(target_os = "windows")))'.dependencies]
 # sha2 0.10 requires this feature for ARM hardware acceleration; sha2-asm excludes Windows.
