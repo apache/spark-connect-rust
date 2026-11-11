@@ -1329,9 +1329,10 @@ except RecursionError as error:
 
 
 def test_plans_of_a_few_hundred_levels_are_sent_as_pyspark(session):
-    # As PySpark, which serializes plans up to about 746 levels, and the server runs them up to
-    # about 510: Apache's test_recursion_handling_for_plan_logging builds 400 withColumns, and a
-    # subquery of 300 levels under 33 more runs too. Both were a RecursionError, or a crash.
+    # Plans of a few hundred levels are sent, which the client grows the stack for, while the
+    # server runs them up to about 510: Apache's test_recursion_handling_for_plan_logging builds
+    # 400 withColumns, and a subquery of 300 levels under 33 more runs too. Both were a
+    # RecursionError, or a crash.
     df = session.range(10)
     for x in range(400):
         df = df.withColumn(f"col{x}", F.lit(x))

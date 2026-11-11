@@ -10670,6 +10670,76 @@ def test_a_plan_too_deep_to_send_raises_recursion_error_without_a_request(mock_c
     assert service.analyze_requests == []
 
 
+def test_a_plan_of_256_levels_is_sent_from_a_thread_with_a_small_stack(mock_connect):
+    # Each clone of a request recurses once per level of its plan, on the thread that sends it:
+    # on a Python thread of 512 KiB, a plan of 256 levels overflowed the stack (SIGBUS) in the
+    # clone. The thread runs in a subprocess, since the crash would end this one.
+    import subprocess
+    import sys
+
+    _, service = mock_connect
+    script = """
+import threading
+from pyspark.sql import SparkSession, functions as F
+spark = SparkSession.builder.remote(REMOTE_URL).getOrCreate()
+
+def work():
+    df = spark.range(10)
+    for x in range(255):
+        df = df.withColumn(f"col{x}", F.lit(x))
+    df.schema
+    print("analyzed", flush=True)
+    df.collect()
+    print("collected", flush=True)
+
+threading.stack_size(512 * 1024)
+thread = threading.Thread(target=work)
+thread.start()
+thread.join()
+""".replace("REMOTE_URL", repr(service.remote))
+    result = subprocess.run(
+        [sys.executable, "-c", script], env=dict(os.environ, TZ="UTC"),
+        capture_output=True, text=True, timeout=300)
+    assert result.returncode == 0, result.stderr
+    assert "analyzed" in result.stdout, result.stdout
+    assert "collected" in result.stdout, result.stdout
+    assert len(service.analyze_requests) == 1
+    assert len(service.execute_requests) == 1
+
+
+def test_an_expression_of_200_additions_is_sent_from_a_thread_with_a_small_stack(mock_connect):
+    # As the plan above, for an expression: its clone recurses once per level, on a Python
+    # thread of 512 KiB, which overflowed the stack (SIGBUS). The thread runs in a subprocess.
+    import subprocess
+    import sys
+
+    _, service = mock_connect
+    script = """
+import threading
+from pyspark.sql import SparkSession, functions as F
+spark = SparkSession.builder.remote(REMOTE_URL).getOrCreate()
+
+def work():
+    c = F.col("id")
+    for _ in range(200):
+        c = c + 1
+    df = spark.range(1).select(c.alias("x"))
+    df.schema
+    print("analyzed", flush=True)
+
+threading.stack_size(512 * 1024)
+thread = threading.Thread(target=work)
+thread.start()
+thread.join()
+""".replace("REMOTE_URL", repr(service.remote))
+    result = subprocess.run(
+        [sys.executable, "-c", script], env=dict(os.environ, TZ="UTC"),
+        capture_output=True, text=True, timeout=300)
+    assert result.returncode == 0, result.stderr
+    assert "analyzed" in result.stdout, result.stdout
+    assert len(service.analyze_requests) == 1
+
+
 def test_create_dataframe_raises_recursion_error_for_a_value_that_contains_itself():
     class Node:
         def __init__(self):
@@ -16092,9 +16162,10 @@ def test_column_reprs_as_pyspark(column, expected):
 
 
 def test_an_expression_too_deep_to_send_raises_recursion_error_without_a_request(mock_connect):
-    # As PySpark, whose client raises RecursionError while it builds the proto of an expression
-    # from 744 additions under an alias, before any request, rather than overflowing the native
-    # stack (which killed the process from about 30,000 levels); 743 are sent.
+    # Past the bound of expressions, the client raises RecursionError while it builds the proto
+    # of an expression of 744 additions under an alias, before any request, rather than
+    # overflowing the native stack (which killed the process from about 30,000 levels); 743 are
+    # sent. PySpark's own point depends on its protobuf backend (see MAX_EXPRESSION_DEPTH).
     from pyspark.sql import functions as F
 
     spark, service = mock_connect
