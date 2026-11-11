@@ -356,12 +356,7 @@ fn value_to_py<'py>(
         Value::Variant { value, metadata } => {
             // A VARIANT materializes as a VariantVal (toJson/toPython decode lazily),
             // matching pyspark, rather than a raw {value, metadata} dict.
-            Py::new(
-                py,
-                crate::values::PyVariantVal::from_parts(value.clone(), metadata.clone()),
-            )?
-            .into_bound(py)
-            .into_any()
+            crate::values::variant_val(py, value, metadata)?
         }
     })
 }

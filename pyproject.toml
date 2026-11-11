@@ -44,14 +44,14 @@ Repository = "https://github.com/apache/spark-connect-rust"
 "Bug Tracker" = "https://issues.apache.org/jira/browse/SPARK"
 
 [tool.ruff]
-# Lint our authored tooling/scripts and the embedded Row implementation.
+# Lint our authored tooling/scripts and the embedded Row and value classes.
 # The python/pyspark tree is largely vendored from Apache Spark (pandas-on-Spark
 # and the drop-in skin). It must stay byte-compatible with upstream and is excluded
 # from this linter.
 line-length = 100
 target-version = "py39"
 extend-exclude = ["python/pyspark", "target", ".claude"]
-include = ["scripts/**/*.py", "crates/pyspark-rs/src/row.py"]
+include = ["scripts/**/*.py", "crates/pyspark-rs/src/row.py", "crates/pyspark-rs/src/values.py"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B"]
@@ -61,6 +61,8 @@ ignore = ["E501"]  # line length handled by the formatter, not enforced hard
 # Keep the upstream Row implementation's implicit exception context and percent
 # formatting so error behavior and source comparisons stay faithful to PySpark 4.3.0.
 "crates/pyspark-rs/src/row.py" = ["B904", "UP031"]
+# The upstream value classes format their reprs with percent formatting, as PySpark 4.3.0.
+"crates/pyspark-rs/src/values.py" = ["UP031"]
 
 [tool.maturin]
 # Mixed Python/Rust layout: the pure-Python drop-in skin lives under python/pyspark,

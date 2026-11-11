@@ -211,9 +211,7 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyYearMonthIntervalType>()?;
     m.add_class::<PyDayTimeIntervalType>()?;
     m.add_class::<PyVariantType>()?;
-    m.add_class::<values::PyVariantVal>()?;
-    m.add_class::<values::PyGeography>()?;
-    m.add_class::<values::PyGeometry>()?;
+    values::register(m)?;
 
     // Register Window classes
     m.add_class::<PyWindow>()?;

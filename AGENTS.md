@@ -243,9 +243,10 @@ Vendor the ones we don't have a Rust implementation for.
   (the gRPC channel connects lazily, so proto/plan construction needs no server)
   and server-gated `tests/e2e_*.rs` (they check `std::env::var("SPARK_REMOTE")`).
 - **Python drop-in**: `python/.coveragerc` scopes to the hand-written shim
-  (omits vendored/generated/Rust-only). The embedded `crates/pyspark-rs/src/row.py`
-  runs as `pyspark/_row.py` without a file at that path and is explicitly omitted;
-  Row tests exercise its behavior and Ruff checks its source. Run:
+  (omits vendored/generated/Rust-only). The embedded `crates/pyspark-rs/src/row.py` and
+  `values.py` run as `pyspark/_row.py` and `pyspark/_values.py` without files at those paths
+  and are explicitly omitted; their tests exercise their behavior and Ruff checks their source.
+  Run:
   ```
   cd python && PYTHONPATH=$(pwd) python -m coverage run --rcfile=.coveragerc \
     -m pytest tests/test_dropin_offline.py && python -m coverage report --rcfile=.coveragerc
@@ -425,6 +426,11 @@ For every method matching a pyspark name:
   record batch. Nested names are shared by schema path across the execution, including
   iterator batches, while distinct sibling paths keep separate lists.
   Nested local-input Rows follow the tuple inference paths; named Rows expose `__fields__`.
+- **Value classes:** `crates/pyspark-rs/src/values.py` embeds PySpark's plain classes
+  `VariantVal`, `Geometry` and `Geography` the same way, exported by `pyspark._pyspark`, so
+  their attributes are the instance attributes of PySpark's, as given, and they pickle as plain
+  classes into the server's Python workers. Do not make them `#[pyclass(dict)]` types: PyO3 0.28
+  clears but never releases the `__dict__` of such an instance, so each value would keep a dict.
 - **Streaming listeners and progress holders:** Keep progress holders (`StreamingQueryProgress`,
   `StateOperatorProgress`, etc.) as faithful pure-Python implementations parsed from server
   JSON, not Rust-backed. The listener bus (subscribe/dispatch) is genuinely Rust-backed;

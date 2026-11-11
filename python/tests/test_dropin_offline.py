@@ -7064,6 +7064,146 @@ def test_spatial_values_copy_pickle_and_are_subclassed_as_pyspark():
     assert (restored.value, restored.metadata) == (b"\x0c\x01", b"\x01\x00\x00")
 
 
+def test_variant_and_spatial_values_keep_their_attributes_as_given_as_pyspark():
+    # As PySpark's VariantVal, Geometry and Geography, plain classes whose __init__ stores its
+    # arguments, of any type, as instance attributes: they are in vars(), writable and
+    # deletable, and the methods, repr, str and == read them, which raise for a value they
+    # cannot use, not the constructor. A VariantVal compares by identity; the spatial values
+    # compare their attributes, with the values of their own class only, and are not hashable.
+    import pickle
+
+    v = T.VariantVal(b"\x0c\x01", b"\x01\x00\x00")
+    assert vars(v) == {"value": b"\x0c\x01", "metadata": b"\x01\x00\x00"}
+    v.value, v.tag = bytearray(b"\x0c\x02"), "kept"
+    assert vars(v) == {"value": bytearray(b"\x0c\x02"), "metadata": b"\x01\x00\x00", "tag": "kept"}
+    assert (v.toJson(), str(v), v.toPython()) == ("2", "2", 2)
+    assert repr(v) == "VariantVal(bytearray(b'\\x0c\\x02'), b'\\x01\\x00\\x00')"
+    assert vars(pickle.loads(pickle.dumps(v))) == vars(v)
+    del v.metadata
+    assert vars(v) == {"value": bytearray(b"\x0c\x02"), "tag": "kept"}
+    with pytest.raises(AttributeError, match="metadata"):
+        repr(v)
+    odd = T.VariantVal("x", None)
+    assert (odd.value, odd.metadata, repr(odd)) == ("x", None, "VariantVal('x', None)")
+    with pytest.raises(TypeError):
+        odd.toJson()
+    assert vars(T.VariantVal(metadata=2, value=1)) == {"value": 1, "metadata": 2}
+    assert vars(T.VariantVal.parseJson(b"1")) == {"value": b"\x0c\x01", "metadata": b"\x01\x00\x00"}
+    assert T.VariantVal(b"\x0c\x01", b"\x01\x00\x00") != T.VariantVal(b"\x0c\x01", b"\x01\x00\x00")
+    assert hash(v) == hash(v)
+
+    wkb = bytes.fromhex("0101000000000000000000F03F0000000000000040")
+    for cls, other in ((T.Geometry, T.Geography), (T.Geography, T.Geometry)):
+        name = cls.__name__
+        g = cls.fromWKB("x", "4326")
+        assert type(g) is cls and vars(g) == {"wkb": "x", "srid": "4326"}
+        assert (g.getBytes(), g.getSrid()) == ("x", "4326")
+        with pytest.raises(TypeError, match="%d format: a real number is required, not str"):
+            repr(g)
+        g.srid = 3857.9
+        assert repr(g) == str(g) == f"{name}('x', 3857)"
+        del g.wkb
+        assert vars(g) == {"srid": 3857.9}
+        assert cls(wkb, 4326) == cls(bytearray(wkb), 4326.0) and cls(wkb, 4326) != cls(wkb, 3857)
+        assert cls(wkb, 4326).__eq__(other(wkb, 4326)) is NotImplemented
+        assert cls(wkb, 4326) != other(wkb, 4326) and cls.__hash__ is None
+
+
+class _AssignedVariant(T.VariantVal):
+    # Sets the attributes itself, without the __init__ of VariantVal.
+    def __init__(self, value, metadata):
+        self.value, self.metadata = value, metadata
+
+
+class _AssignedGeometry(T.Geometry):
+    def __init__(self, wkb, srid):
+        self.wkb, self.srid = wkb, srid
+
+
+class _AssignedGeography(T.Geography):
+    def __init__(self, wkb, srid):
+        self.wkb, self.srid = wkb, srid
+
+
+def test_variant_and_spatial_values_are_sent_and_collected_by_their_attributes_as_pyspark(
+        mock_connect):
+    # As PySpark's: createDataFrame sends the attributes of a VariantVal, a Geometry and a
+    # Geography, also of a subclass whose __init__ sets them itself, as PyArrow converts them to
+    # the fields of their structs: a bytearray, a memoryview or a str (its UTF-8) as binary,
+    # else its ArrowTypeError, raised when the value is converted. A value of a subclass of
+    # Geometry is inferred by its __dict__, as it is not of the class. And the values that
+    # collect builds have their attributes in their __dict__.
+    import pickle
+
+    import pyarrow as pa
+    from _mock_connect_server import data_type_proto
+
+    spark, service = mock_connect
+
+    def local_table(df):
+        df.toArrow()
+        request = parse_message(service.execute_requests[-1])
+        relation = parse_message(parse_message(request[3][0])[1][0])
+        while 18 in relation:  # Relation.to_df -> ToDF.input.
+            relation = parse_message(parse_message(relation[18][0])[1][0])
+        # Relation.local_relation=11 -> LocalRelation.data=1.
+        local = parse_message(relation[11][0])
+        return pa.ipc.open_stream(local[1][0]).read_all()
+
+    value, metadata = b"\x0c\x01", b"\x01\x00\x00"
+    assigned = _AssignedVariant(value, metadata)
+    assert vars(assigned) == {"value": value, "metadata": metadata}
+    assert (assigned.toJson(), repr(assigned)) == ("1", repr(T.VariantVal(value, metadata)))
+    restored = pickle.loads(pickle.dumps(assigned))
+    assert type(restored) is _AssignedVariant and vars(restored) == vars(assigned)
+    sent = local_table(spark.createDataFrame([(T.VariantVal(value, metadata),)], "v variant"))
+    for variant in (assigned, T.VariantVal(bytearray(value), memoryview(metadata)),
+                    _AssignedVariant("\x0c\x01", "\x01\x00\x00")):
+        assert local_table(spark.createDataFrame([(variant,)], "v variant")).equals(sent)
+    with pytest.raises(pa.ArrowTypeError, match="Expected bytes, got a 'int' object"):
+        spark.createDataFrame([(T.VariantVal(value, 1),)], "v variant")
+    with pytest.raises(AttributeError, match="no attribute 'value'"):
+        spark.createDataFrame([(_AssignedVariant.__new__(_AssignedVariant),)], "v variant")
+
+    wkb = bytes.fromhex("0101000000000000000000F03F0000000000000040")
+    for cls, assigned_cls, schema in ((T.Geometry, _AssignedGeometry, "g geometry(4326)"),
+                                      (T.Geography, _AssignedGeography, "g geography(4326)")):
+        g = assigned_cls(wkb, 4326)
+        assert vars(g) == {"wkb": wkb, "srid": 4326} and g == cls(wkb, 4326)
+        assert repr(g) == repr(cls(wkb, 4326))
+        sent = local_table(spark.createDataFrame([(cls(wkb, 4326),)], schema))
+        for spatial in (g, cls(bytearray(wkb), 4326.0)):
+            assert local_table(spark.createDataFrame([(spatial,)], schema)).equals(sent)
+        with pytest.raises(pa.ArrowInvalid, match="Could not convert '4326' with type str"):
+            spark.createDataFrame([(cls(wkb, "4326"),)], schema)
+        with pytest.raises(pa.ArrowTypeError, match="Expected bytes, got a 'int' object"):
+            spark.createDataFrame([(cls(1, 4326),)], schema)
+    inferred = local_table(spark.createDataFrame([(_AssignedGeometry(wkb, 4326),)]))
+    assert inferred.schema.field("_1").type == pa.struct(
+        [("srid", pa.int64()), ("wkb", pa.binary())])
+
+    def respond(schema, table):
+        sink = pa.BufferOutputStream()
+        with pa.ipc.new_stream(sink, table.schema) as writer:
+            writer.write_table(table)
+        # ExecutePlanResponse.schema=7 and arrow_batch=2: ArrowBatch.row_count=1, data=2.
+        service.execute_payload = message_field(7, schema) + message_field(
+            2, varint_field(1, table.num_rows) + message_field(2, sink.getvalue().to_pybytes()))
+
+    variant_type = pa.struct([pa.field("value", pa.binary(), False),
+                              pa.field("metadata", pa.binary(), False, {"variant": "true"})])
+    geometry_type = pa.struct([pa.field("srid", pa.int32(), False),
+                               pa.field("wkb", pa.binary(), False)])
+    respond(data_type_proto({"type": "struct", "fields": [
+        {"name": "v", "type": "variant", "nullable": True, "metadata": {}},
+        {"name": "g", "type": "geometry(SRID:0)", "nullable": True, "metadata": {}}]}),
+        pa.table({"v": pa.array([{"value": value, "metadata": metadata}], variant_type),
+                  "g": pa.array([{"srid": 0, "wkb": wkb}], geometry_type)}))
+    row = spark.range(1).collect()[0]
+    assert type(row.v) is T.VariantVal and vars(row.v) == {"value": value, "metadata": metadata}
+    assert type(row.g) is T.Geometry and vars(row.g) == {"wkb": wkb, "srid": 0}
+
+
 def test_str_of_variant_values_is_their_json_and_they_are_no_rows_as_pyspark():
     # As PySpark's VariantVal: str is its JSON, in UTC, as toJson(); repr is of its bytes. And
     # as PySpark's createDataFrame, whose VariantVal has a __dict__, so that it is a row, which

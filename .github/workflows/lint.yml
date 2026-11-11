@@ -76,6 +76,6 @@ jobs:
       - name: Install ruff
         run: python -m pip install "ruff==0.14.0"
       - name: ruff check - blocking
-        run: ruff check scripts/ crates/pyspark-rs/src/row.py
+        run: ruff check scripts/ crates/pyspark-rs/src/row.py crates/pyspark-rs/src/values.py
       - name: ruff format (check) - blocking
-        run: ruff format --check scripts/ crates/pyspark-rs/src/row.py
+        run: ruff format --check scripts/ crates/pyspark-rs/src/row.py crates/pyspark-rs/src/values.py
