@@ -160,6 +160,37 @@ def decode_value(ret_type: str, buf: bytes) -> Any:
     return value
 
 
+# --- instantiation -----------------------------------------------------------
+
+
+def _instantiate(engine: Any, store: Any, module: Any) -> Any:
+    """Instantiate ``module`` in ``store``, returning its exports.
+
+    A module that imports nothing (``wasm32-unknown-unknown``) is instantiated as it
+    is. A WASI module (``wasm32-wasip1``) gets, as its environment, a snapshot of
+    this worker's ``os.environ`` -- what a Python UDF sees, including the session's
+    ``spark.pythonWorkerEnv.*`` variables -- and no files, arguments or standard
+    streams.
+    """
+    import os
+
+    import wasmtime
+
+    if not any(imp.module.startswith("wasi_") for imp in module.imports):
+        return wasmtime.Instance(store, module, []).exports(store)
+    config = wasmtime.WasiConfig()
+    config.env = list(os.environ.items())
+    store.set_wasi(config)
+    linker = wasmtime.Linker(engine)
+    linker.define_wasi()
+    exports = linker.instantiate(store, module).exports(store)
+    # A WASI reactor must run its initializer before any other export is called.
+    init = exports.get("_initialize")
+    if init is not None:
+        init(store)
+    return exports
+
+
 # --- the picklable, per-row callable -----------------------------------------
 
 
@@ -202,8 +233,7 @@ class WasmScalarUDF:
         engine = wasmtime.Engine()
         module = wasmtime.Module(engine, self.wasm)
         store = wasmtime.Store(engine)
-        instance = wasmtime.Instance(store, module, [])
-        exports = instance.exports(store)
+        exports = _instantiate(engine, store, module)
 
         def need(name):
             e = exports.get(name)
@@ -300,7 +330,7 @@ class WasmArrowUDF(WasmScalarUDF):
         if key not in modules:
             modules[key] = wasmtime.Module(engine, self.wasm)
         store = wasmtime.Store(engine)
-        exports = wasmtime.Instance(store, modules[key], []).exports(store)
+        exports = _instantiate(engine, store, modules[key])
         entry = exports.get(self.entrypoint)
         if entry is None:
             raise ValueError(f"WASM module does not export '{self.entrypoint}'")

@@ -172,3 +172,28 @@ let wasm = std::fs::read("shout.wasm")?;
 let shout = udf("shout", wasm, "shout", vec![AbiType::Str], AbiType::Str);
 let c = shout.call(vec![col("name")])?;
 ```
+
+## Environment variables
+
+A session sets environment variables for the Python workers that run its UDFs with
+`spark.pythonWorkerEnv.<NAME>` (Spark 4.4.0+), as in PySpark:
+
+```{.rust .no-run}
+spark.conf().set("spark.pythonWorkerEnv.MY_SETTING", "value")?;
+```
+
+A module built for `wasm32-unknown-unknown` has no environment, so `std::env::var`
+always fails in it. To read the worker's environment - the same `os.environ` a
+Python UDF sees, the session's variables included - build the module for
+`wasm32-wasip1` (`rustup target add wasm32-wasip1`):
+
+```{.rust .no-run}
+// build.rs
+spark_connect_build::embed_wasm_udf_for(
+    "src/lib.rs",
+    spark_connect_build::WasmTarget::Wasip1,
+);
+```
+
+The module then gets, through WASI, a snapshot of the worker's environment taken
+when it is instantiated, and no files, arguments or standard streams.
