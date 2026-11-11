@@ -1396,6 +1396,22 @@ def test_repartition_does_not_unpack_a_list_among_its_columns_as_pyspark(mock_co
     df.repartitionByRange(2, "id", F.col("id"))
 
 
+def test_is_empty_sends_a_limit_of_one_row_over_an_empty_projection_as_pyspark(mock_connect):
+    # As PySpark's select().take(1): Limit(1) over a Project with no expressions.
+    spark, service = mock_connect
+    spark.range(3).isEmpty()
+    # ExecutePlanRequest.plan=3, Plan.root=1; Relation.limit=8, project=3, range=15;
+    # Project.expressions=3.
+    plan = parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0]
+    relation = parse_message(plan)
+    assert 9 not in relation
+    limit = parse_message(relation[8][0])
+    assert limit[2] == [1]
+    project = parse_message(parse_message(limit[1][0])[3][0])
+    assert 3 not in project
+    assert 15 in parse_message(project[1][0])
+
+
 def test_session_id_of_any_uuid_version_and_the_user_id_of_the_requests(monkeypatch, mock_connect):
     # A session_id is any UUID, as uuid.UUID(session_id, version=4) takes it, and is sent as
     # given. The user ID of each request is SPARK_USER, else USER, as PySpark sets it.
@@ -2783,6 +2799,49 @@ def test_udtfs_are_created_as_pyspark(mock_connect):
     # Only udtf() without useArrow reads its Arrow setting; every collect reads the result setting.
     binary_conf = "spark.sql.execution.pyspark.binaryAsBytes"
     assert service.read_confs == [arrow_conf] + [binary_conf] * 5 + [arrow_conf] + [binary_conf] * 2
+
+
+def test_binary_subclasses_are_sent_as_the_bytes_of_pyspark(mock_connect):
+    # As PySpark: bytes(value), which takes the __bytes__ of a subclass, not its buffer.
+    import pyarrow as pa
+
+    class Bytes(bytes):
+        def __bytes__(self):
+            return b"other"
+
+    class ByteArray(bytearray):
+        def __bytes__(self):
+            return b"other"
+
+    class Plain(bytes):
+        pass
+
+    spark, service = mock_connect
+    values = [Bytes(b"orig"), ByteArray(b"orig"), Plain(b"plain"), bytearray(b"ba"), b"b", None]
+    df = spark.createDataFrame([(v,) for v in values], "b binary")
+    df.columns
+    relation = _sent_relation(service.analyze_requests[-1], 11)
+    table = pa.ipc.open_stream(relation[1][0]).read_all()
+    assert table.column(0).to_pylist() == [b"other", b"other", b"plain", b"ba", b"b", None]
+
+    class NotBytes(bytes):
+        def __bytes__(self):
+            return "x"
+
+    class Raises(bytes):
+        def __bytes__(self):
+            raise KeyError("boom")
+
+    with pytest.raises(TypeError, match="__bytes__ returned non-bytes"):
+        spark.createDataFrame([(NotBytes(b"a"),)], "b binary")
+    with pytest.raises(KeyError, match="boom"):
+        spark.createDataFrame([(Raises(b"a"),)], "b binary")
+
+    df = spark.createDataFrame([([Bytes(b"orig"), None],)], "a array<binary>")
+    df.columns
+    relation = _sent_relation(service.analyze_requests[-1], 11)
+    table = pa.ipc.open_stream(relation[1][0]).read_all()
+    assert table.column(0).to_pylist() == [[b"other", None]]
 
 
 def test_time_values_are_sent_as_pyspark(mock_connect):
@@ -16898,6 +16957,56 @@ def test_local_iterator_close_ends_it_before_it_runs_as_pyspark(mock_connect):
         pass
     assert list(rows) == []
     assert service.execute_requests == []
+
+
+def test_to_local_iterator_is_a_generator_as_pyspark(mock_connect):
+    # As PySpark's generator function, which sends nothing until its first row.
+    import inspect
+    import types
+
+    spark, service = mock_connect
+    rows = spark.range(3).toLocalIterator()
+    assert isinstance(rows, types.GeneratorType)
+    assert rows.__name__ == "toLocalIterator"
+    assert rows.__qualname__ == "DataFrame.toLocalIterator"
+    assert inspect.getgeneratorstate(rows) == inspect.GEN_CREATED
+    assert service.rpc_events == []
+
+
+@pytest.mark.parametrize("ending", ["close", "throw"])
+def test_to_local_iterator_ending_releases_the_execution_as_pyspark(mock_connect, ending):
+    # A close and a throw in the middle end the execution at once, also while the exception,
+    # with its traceback, is kept.
+    import pyarrow as pa
+    from _mock_connect_server import parse_message
+    from binary_configuration_cases import _results, _wait_for
+
+    spark, service = mock_connect
+    _results(service, pa.RecordBatch.from_arrays([pa.array([0, 1])], names=["id"]))
+    service.block_result_complete = True
+    try:
+        rows = spark.range(2).toLocalIterator()
+        assert next(rows).id == 0
+        operation_id = parse_message(service.execute_requests[0])[6][0]
+        kept = None
+        if ending == "close":
+            rows.close()
+        else:
+            with pytest.raises(ValueError, match="stop") as kept:
+                rows.throw(ValueError("stop"))
+
+        def released():
+            # ReleaseExecuteRequest.release_all=5 and operation_id=3.
+            return any(5 in fields and fields.get(3) == [operation_id]
+                       for fields in map(parse_message, service.release_execute_requests))
+
+        _wait_for(released)
+        assert released()
+        assert operation_id not in service.result_complete_operations
+        assert list(rows) == []
+        del kept
+    finally:
+        service.release_response()
 
 
 def test_dataframes_of_other_sessions_raise_session_not_same_as_pyspark():

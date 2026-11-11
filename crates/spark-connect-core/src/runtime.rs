@@ -41,11 +41,20 @@ pub fn get_runtime() -> &'static Runtime {
 /// session hook of the executions), which may run a query itself: as PySpark does, the
 /// nested query runs. The thread is then in the runtime's context, which `block_in_place`
 /// leaves for the nested `block_on`.
+///
+/// The future is driven from the heap, so that the stack of the calling thread holds no copy of
+/// it, however large it is.
 pub fn block_on<F>(f: F) -> F::Output
 where
     F: std::future::Future + Send,
     F::Output: Send,
 {
+    // The future of a request holds the state of its gRPC call and of its retries, tens of KiB,
+    // and each frame that moves it on to the runtime (`drive`, the runtime's `block_on`, the
+    // closure of `block_in_place`) keeps a copy of it on the calling thread, unless the compiler
+    // inlines that frame, which depends on the crate that calls this one. A Python thread may
+    // have a stack of 512 KiB. Moved from the heap, those frames hold only its pointer.
+    let f = Box::pin(f);
     let watch = WAIT_WATCH.with(|watch| watch.borrow().clone());
     match tokio::runtime::Handle::try_current() {
         Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
@@ -160,8 +169,10 @@ where
     F: std::future::Future + Send,
     F::Output: Send,
 {
+    // Driven from the heap, as `block_on` drives its future.
+    let f = Box::pin(f);
     let watch = WAIT_WATCH.with(|watch| watch.borrow().clone());
-    let drive = |f: F| match watch {
+    let drive = |f: Pin<Box<F>>| match watch {
         Some(watch) => get_runtime().block_on(watched_abortable(f, watch)),
         None => Some(get_runtime().block_on(f)),
     };
@@ -415,6 +426,33 @@ mod tests {
             x + y
         });
         assert_eq!(result, 30);
+    }
+
+    /// A future of a large state, as the future of a request is of the state of its gRPC call,
+    /// is driven from the heap: a thread of a small stack, which holds it once, holds no other
+    /// copy of it in the frames that drive it, whatever the compiler inlines. (The frames of a
+    /// debug build copy more, so its thread has the stack of a default thread of Linux.)
+    #[test]
+    fn test_block_on_holds_no_copy_of_a_large_future_on_a_small_stack() {
+        const STATE: usize = 192 << 10;
+        let stack = if cfg!(debug_assertions) {
+            8 << 20
+        } else {
+            512 << 10
+        };
+        let output = std::thread::Builder::new()
+            .stack_size(stack)
+            .spawn(|| {
+                block_on(async {
+                    let state = [7u8; STATE];
+                    tokio::task::yield_now().await;
+                    state[STATE - 1]
+                })
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        assert_eq!(output, 7);
     }
 
     #[test]
