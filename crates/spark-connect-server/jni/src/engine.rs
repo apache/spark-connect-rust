@@ -510,6 +510,7 @@ impl<W> CleanupAttachment<W> {
         core: &Arc<JvmEngine>,
         attach: impl FnOnce(&Arc<JvmEngine>) -> Result<W, Status>,
         reported: &mut Option<Weak<JvmEngine>>,
+        report: impl FnOnce(&Status),
     ) -> Option<Self> {
         match Self::attach_with(core, attach) {
             Ok(attachment) => {
@@ -518,17 +519,16 @@ impl<W> CleanupAttachment<W> {
             }
             Err(error) if error.code() == tonic::Code::Unavailable => None,
             Err(error) => {
-                // Retry every item and report for each failing engine without
-                // retaining it. A successful attachment also resets reporting.
+                // Suppress consecutive reports for the same engine until an
+                // attachment succeeds. Alternating failing engines report once
+                // per switch. The weak identity does not retain the engine.
                 let identity = Arc::downgrade(core);
                 if reported
                     .as_ref()
                     .is_none_or(|previous| !Weak::ptr_eq(previous, &identity))
                 {
                     *reported = Some(identity);
-                    eprintln!(
-                        "JVM cleanup lane attachment failed; using per-call attachment: {error}"
-                    );
+                    report(&error);
                 }
                 None
             }
@@ -584,8 +584,16 @@ fn cleanup_loop_with<W>(
                     drop(attachment.take());
                     // Per-call JNI scopes remain the fallback on attachment
                     // failure or when shutdown has already closed admission.
-                    attachment =
-                        CleanupAttachment::attach_or_fallback(core, &mut attach, &mut reported);
+                    attachment = CleanupAttachment::attach_or_fallback(
+                        core,
+                        &mut attach,
+                        &mut reported,
+                        |error| {
+                            eprintln!(
+                                "JVM cleanup lane attachment failed; using per-call attachment: {error}"
+                            );
+                        },
+                    );
                 }
             }
             None => drop(attachment.take()),
@@ -1700,10 +1708,14 @@ mod tests {
             }
         };
         let mut reported = None;
-        for failed in [true, false, true] {
+        let mut reports = 0;
+        for (failed, expected_reports) in [(true, 1), (false, 1), (true, 2)] {
             let attachment =
-                CleanupAttachment::attach_or_fallback(&core, &mut attach, &mut reported);
+                CleanupAttachment::attach_or_fallback(&core, &mut attach, &mut reported, |_| {
+                    reports += 1
+                });
             assert_eq!(attachment.is_none(), failed);
+            assert_eq!(reports, expected_reports);
             assert_eq!(
                 reported
                     .as_ref()
@@ -1722,15 +1734,24 @@ mod tests {
         let first = JvmEngine::new(std::ptr::null_mut());
         let second = JvmEngine::new(std::ptr::null_mut());
         let mut reported = None;
-        for core in [&first, &first, &second, &second, &first] {
+        let mut reports = 0;
+        for (core, expected_reports) in [
+            (&first, 1),
+            (&first, 1),
+            (&second, 2),
+            (&second, 2),
+            (&first, 3),
+        ] {
             let attachment = CleanupAttachment::attach_or_fallback(
                 core,
                 |_| -> Result<TestCleanupWorker, Status> {
                     Err(Status::internal("injected attach failure"))
                 },
                 &mut reported,
+                |_| reports += 1,
             );
             assert!(attachment.is_none());
+            assert_eq!(reports, expected_reports);
             assert!(Weak::ptr_eq(
                 reported.as_ref().unwrap(),
                 &Arc::downgrade(core)
