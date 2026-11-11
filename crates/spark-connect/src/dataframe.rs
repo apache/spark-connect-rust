@@ -139,6 +139,8 @@ enum RowSource {
         stream: Box<ExecutionStream>,
         execution_info: ExecutionInfo,
         execution_recorded: bool,
+        /// The Observations of the plan, which the observed metrics set.
+        observations: Vec<(String, crate::observation::Observation)>,
     },
     /// Batches are fetched by a background task that keeps one batch buffered
     /// ahead, so the next server fetch overlaps with the caller consuming the
@@ -154,17 +156,19 @@ enum RowSource {
 }
 
 impl LocalRowIterator {
-    /// Create a new `LocalRowIterator` over an already-issued ExecutePlan stream.
+    /// Create a new `LocalRowIterator` over an already-issued ExecutePlan stream, of a plan of
+    /// the Observations `observations`.
     pub(crate) fn new(
         session: SparkSession,
         stream: ExecutionStream,
         prefetch_partitions: bool,
+        observations: Vec<(String, crate::observation::Observation)>,
     ) -> Self {
         let schema = SchemaSlot::default();
         let source = if prefetch_partitions {
             {
                 let wait = stream.inflight_handle();
-                let (rx, task) = spawn_prefetch(session, stream, Arc::clone(&schema));
+                let (rx, task) = spawn_prefetch(session, stream, Arc::clone(&schema), observations);
                 RowSource::Prefetch {
                     rx,
                     task: Some(task),
@@ -177,6 +181,7 @@ impl LocalRowIterator {
                 stream: Box::new(stream),
                 execution_info: ExecutionInfo::default(),
                 execution_recorded: false,
+                observations,
             }
         };
         LocalRowIterator {
@@ -208,10 +213,19 @@ impl LocalRowIterator {
                 stream,
                 execution_info,
                 execution_recorded,
+                observations,
             } => loop {
-                match stream.next_message() {
+                let message = match stream.next_message() {
                     Ok(Some(mut resp)) => {
-                        capture_execution(&mut resp, execution_info, session);
+                        match capture_execution(&mut resp, execution_info, session, observations) {
+                            Ok(()) => Ok(Some(resp)),
+                            Err(error) => Err(stream.fail(error)),
+                        }
+                    }
+                    other => other,
+                };
+                match message {
+                    Ok(Some(mut resp)) => {
                         if let Err(e) = keep_schema(&mut resp, &self.schema) {
                             return Some(Err(stream.fail(e)));
                         }
@@ -305,11 +319,13 @@ impl Iterator for LocalRowIterator {
 /// (capacity-1) channel, keeping one batch buffered ahead of the consumer.
 /// Closing the receiver stops the task even while it awaits a response; dropping
 /// the stream releases the execution. Metrics received so far are recorded on the
-/// session when the task stops. Backs `to_local_iterator(prefetch_partitions = true)`.
+/// session when the task stops, and the observed ones set `observations`, the Observations of
+/// the plan. Backs `to_local_iterator(prefetch_partitions = true)`.
 fn spawn_prefetch(
     session: SparkSession,
     mut stream: ExecutionStream,
     schema: SchemaSlot,
+    observations: Vec<(String, crate::observation::Observation)>,
 ) -> (
     tokio::sync::mpsc::Receiver<Result<Vec<Row>>>,
     tokio::task::JoinHandle<()>,
@@ -326,7 +342,12 @@ fn spawn_prefetch(
             };
             match response {
                 Ok(Some(mut resp)) => {
-                    capture_execution(&mut resp, &mut execution_info, &session);
+                    let captured =
+                        capture_execution(&mut resp, &mut execution_info, &session, &observations);
+                    if let Err(e) = captured {
+                        let _ = tx.send(Err(stream.fail(e))).await;
+                        break;
+                    }
                     if let Err(e) = keep_schema(&mut resp, &schema) {
                         let _ = tx.send(Err(e)).await;
                         break;
@@ -947,6 +968,7 @@ impl DataFrame {
     /// Unlike the Arrow schema of the rows, it has the user-defined types of the columns.
     pub fn collect_with_schema(&self) -> Result<(Vec<Row>, Option<DataType>)> {
         let request = self.build_execute_request()?;
+        let observations = self.plan.observations();
         let mut stream = self.session.execute_plan(request)?;
 
         let mut rows = vec![];
@@ -958,7 +980,8 @@ impl DataFrame {
             let Some(mut resp) = resp else {
                 break;
             };
-            capture_execution(&mut resp, &mut info, &self.session);
+            capture_execution(&mut resp, &mut info, &self.session, &observations)
+                .map_err(|error| stream.fail(error))?;
             if let Some(data_type) = resp.schema.take() {
                 schema = Some(DataType::from_proto(&data_type).map_err(|e| stream.fail(e))?);
             }
@@ -1002,11 +1025,13 @@ impl DataFrame {
     ///   fetched on demand only once the previous batch is exhausted.
     pub fn to_local_iterator(&self, prefetch_partitions: bool) -> Result<LocalRowIterator> {
         let request = self.build_execute_request()?;
+        let observations = self.plan.observations();
         let stream = self.session.execute_plan(request)?;
         Ok(LocalRowIterator::new(
             self.session.clone(),
             stream,
             prefetch_partitions,
+            observations,
         ))
     }
 
@@ -1039,6 +1064,7 @@ impl DataFrame {
         &self,
     ) -> Result<(Vec<arrow::record_batch::RecordBatch>, Option<DataType>)> {
         let request = self.build_execute_request()?;
+        let observations = self.plan.observations();
         let mut stream = self.session.execute_plan(request)?;
 
         let mut batches = vec![];
@@ -1049,7 +1075,8 @@ impl DataFrame {
             let Some(mut resp) = resp else {
                 break;
             };
-            capture_execution(&mut resp, &mut info, &self.session);
+            capture_execution(&mut resp, &mut info, &self.session, &observations)
+                .map_err(|error| stream.fail(error))?;
             if let Some(data_type) = resp.schema.take() {
                 schema = Some(DataType::from_proto(&data_type).map_err(|e| stream.fail(e))?);
             }
@@ -1150,16 +1177,23 @@ impl DataFrame {
     /// `pyspark.ml`, which the core sends as it is, keeping `owner`, if any, alive while any
     /// DataFrame of it is. The placeholders of `relation`, which stand for the DataFrames that
     /// the plans of `pyspark.ml` take as input (see `placeholder_relation`), are replaced by
-    /// the relations of those DataFrames. Not a stable API.
+    /// the relations of those DataFrames. The Observations of the DataFrame that it holds as its
+    /// child are those of its plan, as PySpark's plans of `pyspark.ml` collect them. Not a stable
+    /// API.
     #[doc(hidden)]
     pub fn from_relation(
         session: SparkSession,
         mut relation: proto::Relation,
         owner: Option<Arc<dyn std::any::Any + Send + Sync>>,
     ) -> Result<DataFrame> {
+        let observations = crate::plan::child_observations(&relation);
         let depth = crate::plan::resolve_relation_levels(&mut relation)?;
         Ok(DataFrame::from_raw_relation(
-            session, relation, owner, depth,
+            session,
+            relation,
+            owner,
+            depth,
+            observations,
         ))
     }
 
@@ -1210,12 +1244,13 @@ impl DataFrame {
     }
 
     /// The DataFrame of `relation`, as `from_relation`, of a relation without placeholders, of
-    /// `depth` levels.
+    /// `depth` levels, and of the Observations of its child.
     fn from_raw_relation(
         session: SparkSession,
         relation: proto::Relation,
         owner: Option<Arc<dyn std::any::Any + Send + Sync>>,
         depth: usize,
+        observations: Vec<(String, crate::observation::Observation)>,
     ) -> DataFrame {
         DataFrame::new(
             session,
@@ -1223,6 +1258,7 @@ impl DataFrame {
                 relation: Box::new(relation),
                 owner: owner.map(crate::plan::RelationOwner),
                 depth,
+                observations,
             },
         )
     }
@@ -1230,12 +1266,18 @@ impl DataFrame {
     /// The DataFrame of `relation`, a relation that `session` sent, such as that of a DataFrame
     /// that was pickled, which keeps its plan ID, as PySpark Connect's pickled plans keep
     /// theirs: so it is sent as it is, and the columns of the DataFrame it was of resolve
-    /// against it. Not a stable API.
+    /// against it. While the DataFrame that it was of is alive, it has its Observations, as a
+    /// copy of PySpark's DataFrame has those of its plan: the actions of this one set them, and
+    /// raise for their metrics that PySpark does not convert. Not a stable API.
     #[doc(hidden)]
     pub fn from_sent_relation(session: SparkSession, relation: proto::Relation) -> DataFrame {
         let plan_id = relation.common.as_ref().and_then(|common| common.plan_id);
+        let observations = plan_id
+            .and_then(|plan_id| session.plan_ids().node_of(plan_id))
+            .map(|node| node.observations())
+            .unwrap_or_default();
         // A relation decoded from bytes is shallow: prost decodes at most 100 nested messages.
-        let dataframe = DataFrame::from_raw_relation(session, relation, None, 1);
+        let dataframe = DataFrame::from_raw_relation(session, relation, None, 1, observations);
         if let Some(plan_id) = plan_id {
             dataframe
                 .session
@@ -1520,7 +1562,9 @@ impl DataFrame {
 
     /// Execute a `CheckpointCommand` and return a DataFrame referencing the resulting
     /// cached remote relation. Mirrors `DataFrame.checkpoint`/`localCheckpoint`, which
-    /// materialize server-side and return a handle to the checkpointed data.
+    /// materialize server-side and return a handle to the checkpointed data. As PySpark's, which
+    /// runs the command without the Observations of the plan, the metrics that it observes set
+    /// none of them.
     fn checkpoint_impl(
         &self,
         local: bool,
@@ -1535,6 +1579,7 @@ impl DataFrame {
         let (responses, info) = execute_command_with_info(
             &self.session,
             proto::command::CommandType::CheckpointCommand(cmd),
+            &[],
         )?;
         self.record_execution(info);
         for resp in &responses {
@@ -1582,7 +1627,8 @@ impl DataFrame {
     }
 
     /// Build + execute a real `CreateDataFrameViewCommand` (was previously a
-    /// silent no-op that passed the query relation through and never created a view).
+    /// silent no-op that passed the query relation through and never created a view), with the
+    /// Observations of the plan, as PySpark's.
     fn create_view(&self, name: &str, replace: bool, global: bool) -> Result<()> {
         let input = self.relation()?;
         let mut cmd = proto::CreateDataFrameViewCommand::default();
@@ -1593,6 +1639,7 @@ impl DataFrame {
         let (_, info) = execute_command_with_info(
             &self.session,
             proto::command::CommandType::CreateDataframeView(cmd),
+            &self.plan.observations(),
         )?;
         self.record_execution(info);
         Ok(())
@@ -2701,7 +2748,7 @@ pub(crate) fn execute_command_collect(
     session: &SparkSession,
     command_type: proto::command::CommandType,
 ) -> Result<Vec<proto::ExecutePlanResponse>> {
-    execute_command_with_info(session, command_type).map(|(responses, _)| responses)
+    execute_command_with_info(session, command_type, &[]).map(|(responses, _)| responses)
 }
 
 /// Like `execute_command_collect`, for a command that PySpark runs without a `Progress` (its
@@ -2711,24 +2758,29 @@ pub(crate) fn execute_command_unreported(
     session: &SparkSession,
     command_type: proto::command::CommandType,
 ) -> Result<()> {
-    execute_command_reporting(session, command_type, false).map(|_| ())
+    execute_command_reporting(session, command_type, false, &[]).map(|_| ())
 }
 
 /// Like `execute_command_collect`, and also returns the information of the execution, which
-/// it records as the session's most recent one, for a DataFrame that keeps its own.
+/// it records as the session's most recent one, for a DataFrame that keeps its own. The metrics
+/// that it observes set `observations`, the Observations of the plan of the DataFrame that the
+/// command writes, as PySpark's `execute_command(command, observations)` sets them: none for a
+/// command that PySpark runs without them, such as a checkpoint or a SQL statement.
 pub(crate) fn execute_command_with_info(
     session: &SparkSession,
     command_type: proto::command::CommandType,
+    observations: &[(String, crate::observation::Observation)],
 ) -> Result<(Vec<proto::ExecutePlanResponse>, ExecutionInfo)> {
-    execute_command_reporting(session, command_type, true)
+    execute_command_reporting(session, command_type, true, observations)
 }
 
 /// The command `command_type`, executed with its progress for the progress handlers when
-/// `reported`.
+/// `reported`, whose observed metrics set `observations`.
 fn execute_command_reporting(
     session: &SparkSession,
     command_type: proto::command::CommandType,
     reported: bool,
+    observations: &[(String, crate::observation::Observation)],
 ) -> Result<(Vec<proto::ExecutePlanResponse>, ExecutionInfo)> {
     let mut command = proto::Command::default();
     command.command_type = Some(command_type);
@@ -2752,7 +2804,8 @@ fn execute_command_reporting(
     let mut info = ExecutionInfo::default();
     let mut responses = Vec::new();
     while let Some(mut resp) = stream.next_message()? {
-        capture_execution(&mut resp, &mut info, session);
+        capture_execution(&mut resp, &mut info, session, observations)
+            .map_err(|error| stream.fail(error))?;
         responses.push(resp);
     }
     session.record_execution(info.clone());
@@ -2762,12 +2815,14 @@ fn execute_command_reporting(
 /// Pull execution metrics/observed-metrics off a response; the `ExecutionStream` of the
 /// response updates the progress of the execution. `metrics`/`observed_metrics` are top-level
 /// fields (not part of the `response_type` oneof), so this must run before `response_type` is
-/// consumed.
+/// consumed. The observed metrics set `observations`, the Observations of the executed plan
+/// (see [`set_observations`]), whose error, of the check of the session, fails the execution.
 fn capture_execution(
     resp: &mut proto::ExecutePlanResponse,
     info: &mut ExecutionInfo,
     session: &SparkSession,
-) {
+    observations: &[(String, crate::observation::Observation)],
+) -> Result<()> {
     if info.operation_id.is_none() && !resp.operation_id.is_empty() {
         info.operation_id = Some(resp.operation_id.clone());
     }
@@ -2776,43 +2831,59 @@ fn capture_execution(
     }
     if !resp.observed_metrics.is_empty() {
         let metrics = std::mem::take(&mut resp.observed_metrics);
-        set_observations(session, &metrics);
-        // The updates of the Python accumulators, such as the results of the UDF profilers.
-        session.python_accumulators().accumulate(&metrics);
+        let set = set_observations(session, observations, &metrics);
         info.observed_metrics.extend(metrics);
+        // As PySpark's client raises an error of the execution with its operation ID.
+        set.map_err(|error| match &info.operation_id {
+            Some(operation_id) => error.with_operation_id(operation_id.as_str()),
+            None => error,
+        })?;
     }
+    Ok(())
 }
 
-/// Set the metrics that the server observed in the Observations of their relations, as
-/// PySpark's client sets them in the Observations of the plan: those of each relation, which
-/// the server reports by its plan ID, or the error of collecting them.
+/// Set the observed metrics `metrics` of an execution, in their order, as PySpark's client sets
+/// them in `observations`, the Observations of the executed plan (`LogicalPlan.observations`),
+/// by their names: the metrics of the Observation of their name, or the error of collecting
+/// them, which the server reported. The updates of the Python accumulators, such as the results
+/// of the UDF profilers, go to the handler of the session. The check of the session
+/// ([`SparkSession::set_observation_metrics_check`]) checks the metrics of an Observation before
+/// they are set: its error is returned, and neither those metrics nor the ones after them are
+/// set, as PySpark's client raises when it converts them.
 fn set_observations(
     session: &SparkSession,
+    observations: &[(String, crate::observation::Observation)],
     metrics: &[proto::execute_plan_response::ObservedMetrics],
-) {
+) -> Result<()> {
+    let check = session.observation_metrics_check();
     for observed in metrics {
-        let Some(node) = session.plan_ids().node_of(observed.plan_id) else {
-            continue;
-        };
-        let LogicalPlan::Observe {
-            name,
-            observation: Some(observation),
-            ..
-        } = node.as_ref()
-        else {
-            continue;
-        };
-        if *name != observed.name {
-            continue;
-        }
+        let observation = observations
+            .iter()
+            .find(|(name, _)| *name == observed.name)
+            .map(|(_, observation)| observation);
         match observed.root_error_idx {
-            Some(root_error_idx) => observation.set_error(SparkError::from_observation_errors(
-                root_error_idx,
-                observed.errors.clone(),
-            )),
-            None => observation.update(&observed.keys, &observed.values),
+            Some(root_error_idx) => {
+                if let Some(observation) = observation {
+                    observation.set_error(SparkError::from_observation_errors(
+                        root_error_idx,
+                        observed.errors.clone(),
+                    ));
+                }
+            }
+            None if observed.name == crate::profiler::PYTHON_ACCUMULATOR_METRICS => session
+                .python_accumulators()
+                .accumulate(std::slice::from_ref(observed)),
+            None => {
+                if let Some(observation) = observation {
+                    if let Some(check) = &check {
+                        check(observed)?;
+                    }
+                    observation.update(&observed.keys, &observed.values);
+                }
+            }
         }
     }
+    Ok(())
 }
 
 /// Whether `value` is a fill of PySpark's `fillna`: a bool, an integer, a float or a string. Any
@@ -5018,12 +5089,12 @@ mod plan_construction_tests {
         let mut info = ExecutionInfo::default();
         let mut resp = proto::ExecutePlanResponse::default();
         // An empty operation id (e.g. a synthetic response) is not recorded.
-        capture_execution(&mut resp, &mut info, &spark);
+        capture_execution(&mut resp, &mut info, &spark, &[]).unwrap();
         assert_eq!(info.operation_id, None);
         resp.operation_id = "op-1".to_string();
-        capture_execution(&mut resp, &mut info, &spark);
+        capture_execution(&mut resp, &mut info, &spark, &[]).unwrap();
         resp.operation_id = "op-2".to_string();
-        capture_execution(&mut resp, &mut info, &spark);
+        capture_execution(&mut resp, &mut info, &spark, &[]).unwrap();
         assert_eq!(info.operation_id.as_deref(), Some("op-1"));
     }
 
@@ -5510,8 +5581,11 @@ mod plan_construction_tests {
         assert_eq!(error.get_error_class().as_deref(), Some("SESSION_NOT_SAME"));
     }
 
+    /// As PySpark's client, which sets the metrics of `observations[name]`, of the Observations
+    /// of the executed plan by their names: not those of an Observation of another plan, of the
+    /// same name, whatever the plan ID that the server reports.
     #[test]
-    fn observed_metrics_set_the_observations_of_their_relations() {
+    fn observed_metrics_set_the_observations_of_the_executed_plan_by_name_as_pyspark() {
         use crate::observation::Observation;
         use proto::expression::literal::LiteralType;
         let spark = session();
@@ -5536,19 +5610,20 @@ mod plan_construction_tests {
         let err = df1.observe_with(&first, count()).err().unwrap();
         assert_eq!(err.get_condition().as_deref(), Some("REUSE_OBSERVATION"));
 
-        let observed = |df: &DataFrame, value: i64| proto::execute_plan_response::ObservedMetrics {
+        // Of the plan ID of the relation of the other DataFrame.
+        let observed = |value: i64| proto::execute_plan_response::ObservedMetrics {
             name: "m".to_string(),
             values: vec![literal(value)],
             keys: vec!["c".to_string()],
-            plan_id: spark.plan_ids().id_of(&df.plan),
+            plan_id: spark.plan_ids().id_of(&df2.plan),
             ..Default::default()
         };
         let mut resp = proto::ExecutePlanResponse {
-            observed_metrics: vec![observed(&df1, 3)],
+            observed_metrics: vec![observed(3)],
             ..Default::default()
         };
         let mut info = ExecutionInfo::default();
-        capture_execution(&mut resp, &mut info, &spark);
+        capture_execution(&mut resp, &mut info, &spark, &df1.plan.observations()).unwrap();
         let value = |obs: &Observation| -> Vec<(String, Option<LiteralType>)> {
             obs.get()
                 .unwrap()
@@ -5561,25 +5636,208 @@ mod plan_construction_tests {
             vec![("c".to_string(), Some(LiteralType::Long(3)))]
         );
         assert!(value(&second).is_empty());
-        // The metrics of a relation by another name, or of no relation, set nothing.
-        let mut other = observed(&df2, 5);
+        // The metrics of another name, or of an execution without Observations, as a checkpoint
+        // runs, set nothing.
+        let mut other = observed(5);
         other.name = "other".to_string();
-        let mut unknown = observed(&df2, 5);
-        unknown.plan_id = -1;
-        resp.observed_metrics = vec![other, unknown];
-        capture_execution(&mut resp, &mut info, &spark);
+        resp.observed_metrics = vec![other];
+        capture_execution(&mut resp, &mut info, &spark, &df2.plan.observations()).unwrap();
+        resp.observed_metrics = vec![observed(5)];
+        capture_execution(&mut resp, &mut info, &spark, &[]).unwrap();
         assert!(value(&second).is_empty());
         // An error of collecting the metrics is what get returns.
-        let mut failed = observed(&df2, 5);
+        let mut failed = observed(5);
         failed.root_error_idx = Some(0);
         resp.observed_metrics = vec![failed];
-        capture_execution(&mut resp, &mut info, &spark);
+        capture_execution(&mut resp, &mut info, &spark, &df2.plan.observations()).unwrap();
         assert_eq!(
             second.get().unwrap_err().message(),
             "Observation error: invalid root_error_idx"
         );
         // That a streaming DataFrame is not observed, which the server tells, the live tests
         // check.
+    }
+
+    /// As PySpark's `LogicalPlan.observations`: the Observations along the children of a plan,
+    /// both sides of a join and of a union, and the child of a relation of `pyspark.ml`, the
+    /// outer one and the right one of a name; not those of a subquery or of the DataFrames of a
+    /// SQL statement.
+    #[test]
+    fn the_observations_of_a_plan_are_those_that_pyspark_collects() {
+        use crate::functions::col;
+        use crate::observation::Observation;
+        let spark = session();
+        let count = || {
+            vec![crate::functions::count(crate::column::lit(1))
+                .expression()
+                .clone()]
+        };
+        let observe = |df: &DataFrame, observation: &Observation| {
+            df.observed_with(observation, observation.name_to_observe().unwrap(), count())
+        };
+        let assert_observations = |df: &DataFrame, expected: &[(&str, &Observation)]| {
+            let mut observations = df.plan.observations();
+            observations.sort_by(|(left, _), (right, _)| left.cmp(right));
+            assert_eq!(observations.len(), expected.len(), "{observations:?}");
+            for ((name, observation), (expected_name, expected)) in
+                observations.iter().zip(expected)
+            {
+                assert_eq!(name, expected_name);
+                assert!(observation.same(expected), "{name}");
+            }
+        };
+        let base = spark.range(3).unwrap();
+        let (inner, a, outer) = (
+            Observation::new("x"),
+            Observation::new("a"),
+            Observation::new("x"),
+        );
+        let chained = observe(
+            &observe(&observe(&base, &inner).select([col("id")]), &a),
+            &outer,
+        );
+        assert_observations(&chained, &[("a", &a), ("x", &outer)]);
+        assert_observations(&base, &[]);
+
+        let (left, right) = (Observation::new("x"), Observation::new("x"));
+        let (left, right) = (observe(&base, &left), observe(&base, &right));
+        let side = |df: &DataFrame| match df.plan.as_ref() {
+            LogicalPlan::Observe {
+                observation: Some(observation),
+                ..
+            } => observation.clone(),
+            _ => unreachable!(),
+        };
+        let joined = left.join(&right, None, JoinType::Inner);
+        assert_observations(&joined, &[("x", &side(&right))]);
+        assert_observations(&right.union(&left), &[("x", &side(&left))]);
+        assert_observations(&left.union(&left).limit(1), &[("x", &side(&left))]);
+
+        let in_subquery = observe(&base, &Observation::new("s"));
+        assert_observations(&base.select([in_subquery.scalar()]), &[]);
+        assert_observations(&base.filter(in_subquery.exists()), &[]);
+        let sql = spark.sql_without_running(
+            "SELECT * FROM v",
+            Vec::new(),
+            HashMap::new(),
+            vec![(in_subquery.clone(), "v".to_string())],
+        );
+        assert_observations(&sql, &[]);
+
+        // A transform of pyspark.ml, over the placeholder of its input.
+        let model_input = Observation::new("m");
+        let input = observe(&base, &model_input);
+        let transform = proto::Relation {
+            common: None,
+            rel_type: Some(proto::relation::RelType::MlRelation(Box::new(
+                proto::MlRelation {
+                    model_summary_dataset: None,
+                    ml_type: Some(proto::ml_relation::MlType::Transform(Box::new(
+                        proto::ml_relation::Transform {
+                            input: Some(Box::new(input.placeholder_relation())),
+                            params: None,
+                            operator: None,
+                        },
+                    ))),
+                },
+            ))),
+        };
+        let transformed = DataFrame::from_relation(spark.clone(), transform, None).unwrap();
+        assert_observations(&transformed.limit(1), &[("m", &model_input)]);
+        // A copy, of a relation that the session sent, while the DataFrame it was of is alive.
+        let copied = DataFrame::from_sent_relation(spark.clone(), input.to_relation().unwrap());
+        assert_observations(&copied.limit(1), &[("m", &model_input)]);
+        let sent = spark.range(1).unwrap().to_relation().unwrap();
+        assert_observations(&DataFrame::from_sent_relation(spark.clone(), sent), &[]);
+    }
+
+    /// As PySpark's client, which converts the metrics of the Observations of the plan as they
+    /// arrive: metrics that the check of the session rejects fail the execution, of its
+    /// operation ID, and neither they nor the metrics after them are set, so that their
+    /// Observations keep the metrics of the executions before; those before them are set.
+    #[test]
+    fn rejected_metrics_fail_the_execution_and_keep_the_earlier_metrics_as_pyspark() {
+        use crate::observation::Observation;
+        use proto::expression::literal::LiteralType;
+        let spark = session();
+        spark.set_observation_metrics_check(|metrics| {
+            let rejected = |value: &proto::expression::Literal| {
+                value.literal_type == Some(LiteralType::Long(-1))
+            };
+            if metrics.values.iter().any(rejected) {
+                return Err(SparkError::classed(
+                    SparkErrorKind::TypeError,
+                    "UNSUPPORTED_LITERAL",
+                    &[("literal", "-1")],
+                ));
+            }
+            Ok(())
+        });
+        assert!(spark.clone().observation_metrics_check().is_some());
+        assert!(spark.new_session().observation_metrics_check().is_none());
+        let count = || {
+            vec![crate::functions::count(crate::column::lit(1))
+                .expression()
+                .clone()]
+        };
+        let observe = |df: &DataFrame, observation: &Observation| {
+            df.observed_with(observation, observation.name_to_observe().unwrap(), count())
+        };
+        let (a, b, c) = (
+            Observation::new("a"),
+            Observation::new("b"),
+            Observation::new("c"),
+        );
+        let df = observe(&observe(&observe(&spark.range(3).unwrap(), &a), &b), &c);
+        let observations = df.plan.observations();
+        let observed = |name: &str, value: i64| proto::execute_plan_response::ObservedMetrics {
+            name: name.to_string(),
+            values: vec![proto::expression::Literal {
+                literal_type: Some(LiteralType::Long(value)),
+                ..Default::default()
+            }],
+            keys: vec!["v".to_string()],
+            ..Default::default()
+        };
+        let value = |observation: &Observation| -> Vec<Option<LiteralType>> {
+            let metrics = observation.get().unwrap().into_iter();
+            metrics.map(|(_, value)| value.literal_type).collect()
+        };
+        let response = |metrics, operation_id: &str| proto::ExecutePlanResponse {
+            observed_metrics: metrics,
+            operation_id: operation_id.to_string(),
+            ..Default::default()
+        };
+        let mut resp = response(
+            vec![observed("a", 1), observed("b", 1), observed("c", 1)],
+            "op-1",
+        );
+        let mut info = ExecutionInfo::default();
+        capture_execution(&mut resp, &mut info, &spark, &observations).unwrap();
+
+        let mut resp = response(
+            vec![observed("a", 2), observed("b", -1), observed("c", 2)],
+            "op-2",
+        );
+        let mut info = ExecutionInfo::default();
+        let error = capture_execution(&mut resp, &mut info, &spark, &observations).unwrap_err();
+        assert_eq!(
+            error.get_condition().as_deref(),
+            Some("UNSUPPORTED_LITERAL")
+        );
+        assert_eq!(error.operation_id.as_deref(), Some("op-2"));
+        assert_eq!(value(&a), vec![Some(LiteralType::Long(2))]);
+        assert_eq!(value(&b), vec![Some(LiteralType::Long(1))]);
+        assert_eq!(value(&c), vec![Some(LiteralType::Long(1))]);
+        assert_eq!(info.observed_metrics.len(), 3);
+
+        // Neither the metrics of a name of no Observation of the plan nor those of an error are
+        // checked.
+        let mut failed = observed("b", -1);
+        failed.root_error_idx = Some(0);
+        let mut resp = response(vec![observed("other", -1), failed], "op-3");
+        capture_execution(&mut resp, &mut info, &spark, &observations).unwrap();
+        assert!(b.get().is_err());
     }
 
     #[test]

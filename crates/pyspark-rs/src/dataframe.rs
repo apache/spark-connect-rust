@@ -4554,9 +4554,6 @@ pub struct PyLocalRowIterator {
     fields: Option<(std::sync::Arc<[String]>, Py<PyList>)>,
     /// Nested names belong to schema paths and stay shared across iterator batches.
     nested_fields: NestedFieldNames,
-    /// The check of the metrics of Observations of the execution, made once at its end rather
-    /// than by each row, as the metrics come with the end of the result.
-    observed: Option<crate::observation::ObservedMetricsCheck>,
 }
 
 impl PyLocalRowIterator {
@@ -4569,7 +4566,6 @@ impl PyLocalRowIterator {
             binary_as_bytes: None,
             fields: None,
             nested_fields: NestedFieldNames::default(),
-            observed: None,
         }
     }
 
@@ -4594,14 +4590,9 @@ impl PyLocalRowIterator {
                 value
             }
         };
-        let session = self.dataframe.spark_session();
-        if self.iterator.is_none() {
-            self.observed = crate::observation::ObservedMetricsCheck::before(py, &session);
-        }
-        let next = crate::interrupt::interruptible_outcome(py, &session, || {
+        let next = interruptible(py, &self.dataframe.spark_session(), || {
             Ok::<_, Box<spark_connect_core::error::SparkError>>(self.next_row())
-        })?
-        .to_pyerr()?;
+        })?;
         if self.converters.is_none() {
             if let Some(schema) = self.iterator.as_ref().and_then(LocalRowIterator::schema) {
                 // The result is known once its first message arrives, possibly with no rows.
@@ -4644,12 +4635,7 @@ impl PyLocalRowIterator {
                 .map(Some)
             }
             Some(Err(error)) => Err(crate::errors::spark_error_to_py_exception(error)),
-            None => {
-                if let Some(observed) = self.observed.take() {
-                    observed.after(py, &session)?;
-                }
-                Ok(None)
-            }
+            None => Ok(None),
         }
     }
 }
@@ -4736,10 +4722,16 @@ fn execution_metrics<'py>(
         .getattr("PlanObservedMetrics")?;
     let observed = pyo3::types::PyList::empty(py);
     for o in &info.observed_metrics {
+        // A metric that holds a literal of a kind that PySpark does not convert, itself or as an
+        // element, is the marker of that literal, for which `pairs` raises as PySpark's raises
+        // when it converts the metric.
         let values = o
             .values
             .iter()
-            .map(|l| literal_to_py(py, l, None))
+            .map(|l| match unsupported_literal(l) {
+                Some(literal) => unsupported_literal_marker(py, literal),
+                None => literal_to_py(py, l, None),
+            })
             .collect::<PyResult<Vec<_>>>()?;
         observed.append(observed_cls.call1((&o.name, values, o.keys.clone()))?)?;
     }
@@ -4887,12 +4879,22 @@ pub(crate) fn literal_to_py(
                 .call1((names, values))?
                 .unbind()
         }
-        Some(_) => py
-            .import("pyspark.sql.connect.client")?
-            .getattr("_UnsupportedLiteral")?
-            .call1((literal_text(py, literal),))?
-            .unbind(),
+        Some(_) => unsupported_literal_marker(py, literal)?,
     })
+}
+
+/// The `_UnsupportedLiteral` marker of `literal`, a literal of a kind that `literal_to_py` does
+/// not convert, of its text, for which `PlanObservedMetrics.pairs` raises PySpark's
+/// `UNSUPPORTED_LITERAL`.
+fn unsupported_literal_marker(
+    py: Python<'_>,
+    literal: &spark_connect_proto::expression::Literal,
+) -> PyResult<Py<PyAny>> {
+    Ok(py
+        .import("pyspark.sql.connect.client")?
+        .getattr("_UnsupportedLiteral")?
+        .call1((literal_text(py, literal),))?
+        .unbind())
 }
 
 /// The first literal of `literal`, itself or an element, whose kind `literal_to_py` does not

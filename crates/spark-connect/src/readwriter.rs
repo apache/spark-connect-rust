@@ -336,9 +336,14 @@ impl DataFrameWriter {
         self
     }
 
-    /// Run the command of the write, keeping its execution as its DataFrame's last one.
+    /// Run the command of the write, keeping its execution as its DataFrame's last one, with the
+    /// Observations of its DataFrame, as PySpark's writer runs it.
     fn run(&self, command_type: proto::command::CommandType) -> Result<()> {
-        let (_, info) = crate::dataframe::execute_command_with_info(&self.session, command_type)?;
+        let (_, info) = crate::dataframe::execute_command_with_info(
+            &self.session,
+            command_type,
+            &self.input_plan.observations(),
+        )?;
         if let Some(execution) = &self.execution {
             *execution.lock().unwrap() = Some(info);
         }
@@ -557,9 +562,14 @@ impl DataFrameWriterV2 {
         self
     }
 
-    /// Run the command of the write, keeping its execution as its DataFrame's last one.
+    /// Run the command of the write, keeping its execution as its DataFrame's last one, with the
+    /// Observations of its DataFrame, as PySpark's writer runs it.
     fn run(&self, command_type: proto::command::CommandType) -> Result<()> {
-        let (_, info) = crate::dataframe::execute_command_with_info(&self.session, command_type)?;
+        let (_, info) = crate::dataframe::execute_command_with_info(
+            &self.session,
+            command_type,
+            &self.input_plan.observations(),
+        )?;
         if let Some(execution) = &self.execution {
             *execution.lock().unwrap() = Some(info);
         }

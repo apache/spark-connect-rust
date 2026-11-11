@@ -31,6 +31,11 @@ pub(crate) type FallibleProgressHandler = Arc<dyn Fn(&ProgressUpdate) -> Result<
 /// The shared registry of progress handlers and their ids, without retaining a session.
 pub(crate) type ProgressHandlers = Arc<Mutex<Vec<(u64, FallibleProgressHandler)>>>;
 
+/// A check of the metrics that an execution observed for an Observation of its plan, made before
+/// they are set, as [`SparkSession::set_observation_metrics_check`] sets it.
+pub type ObservationMetricsCheck =
+    Arc<dyn Fn(&proto::execute_plan_response::ObservedMetrics) -> Result<()> + Send + Sync>;
+
 /// Metrics captured from the last executed query. Mirrors the data behind
 /// `pyspark.sql.DataFrame.executionInfo` / `client.core.ExecutionInfo`.
 #[derive(Debug, Clone, Default)]
@@ -152,6 +157,8 @@ pub struct SparkSession {
     progress_handler_id: Arc<AtomicU64>,
     /// The handler of the updates of the Python accumulators of its executions.
     python_accumulators: PythonAccumulators,
+    /// The check of the metrics of the Observations of its executions (shared across clones).
+    observation_metrics_check: Arc<Mutex<Option<ObservationMetricsCheck>>>,
     /// Whether `stop()` has been called on this session (shared across clones).
     /// Backs `is_stopped`.
     stopped: Arc<AtomicBool>,
@@ -174,6 +181,7 @@ impl SparkSession {
             progress_handlers: Arc::new(Mutex::new(Vec::new())),
             progress_handler_id: Arc::new(AtomicU64::new(0)),
             python_accumulators: PythonAccumulators::default(),
+            observation_metrics_check: Arc::default(),
             stopped: Arc::new(AtomicBool::new(false)),
             server_version: Arc::new(Mutex::new(None)),
             listener_bus: Arc::default(),
@@ -388,6 +396,7 @@ impl SparkSession {
             progress_handlers: Arc::new(Mutex::new(Vec::new())),
             progress_handler_id: Arc::new(AtomicU64::new(0)),
             python_accumulators: PythonAccumulators::default(),
+            observation_metrics_check: Arc::default(),
             stopped: Arc::new(AtomicBool::new(false)),
             server_version: Arc::new(Mutex::new(None)),
             listener_bus: Arc::default(),
@@ -553,9 +562,10 @@ impl SparkSession {
         references: Vec<(DataFrame, String)>,
     ) -> Result<DataFrame> {
         let plan = Self::sql_plan(query, pos_args, named_args, references);
-        // As pyspark, run the statement as a command now. The server executes a command and
-        // returns a relation of its result; for a query it returns the query's relation, which
-        // then runs at an action.
+        // As pyspark, run the statement as a command now, without the Observations of its
+        // DataFrames, which the DataFrame of its result does not have either. The server executes
+        // a command and returns a relation of its result; for a query it returns the query's
+        // relation, which then runs at an action.
         let command = proto::SqlCommand {
             input: Some(crate::dataframe::build_input_relation(&plan, self)?),
             ..Default::default()
@@ -851,8 +861,9 @@ impl SparkSession {
 
     /// Execute `command`, a command built outside the core, such as the ML commands of
     /// `pyspark.ml`, and return the responses of the server, as the Python client's
-    /// `execute_command` reads them. The placeholders of its relations are replaced, as
-    /// `DataFrame::from_relation` does. Not a stable API.
+    /// `execute_command` reads them, without Observations, as `pyspark.ml` runs them. The
+    /// placeholders of its relations are replaced, as `DataFrame::from_relation` does. Not a
+    /// stable API.
     #[doc(hidden)]
     pub fn execute_command_proto(
         &self,
@@ -862,7 +873,7 @@ impl SparkSession {
         let Some(command_type) = command.command_type else {
             return Err(SparkError::value_msg("a command of no command type"));
         };
-        let (responses, _) = crate::dataframe::execute_command_with_info(self, command_type)?;
+        let (responses, _) = crate::dataframe::execute_command_with_info(self, command_type, &[])?;
         Ok(responses)
     }
 
@@ -1274,6 +1285,33 @@ impl SparkSession {
         &self.python_accumulators
     }
 
+    /// Set the check of the metrics that the executions of this session, and of its clones,
+    /// observe for the Observations of their plans, made before the metrics of each are set: an
+    /// error of the check is the error of the execution, and that Observation keeps the metrics
+    /// that it had, as do those whose metrics come after it, as PySpark's client raises from an
+    /// execution at the first metric that it does not convert. Used by the Python client to raise
+    /// PySpark's `UNSUPPORTED_LITERAL` for a metric of a kind that PySpark does not convert.
+    pub fn set_observation_metrics_check(
+        &self,
+        check: impl Fn(&proto::execute_plan_response::ObservedMetrics) -> Result<()>
+            + Send
+            + Sync
+            + 'static,
+    ) {
+        *self
+            .observation_metrics_check
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(check));
+    }
+
+    /// The check of the metrics of the Observations of the executions, if one is set.
+    pub(crate) fn observation_metrics_check(&self) -> Option<ObservationMetricsCheck> {
+        self.observation_metrics_check
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
     /// Stop this Spark session.
     ///
     /// Idempotent, mirroring pyspark: the session is marked stopped even if releasing it
@@ -1363,6 +1401,7 @@ impl Clone for SparkSession {
             progress_handlers: Arc::clone(&self.progress_handlers),
             progress_handler_id: Arc::clone(&self.progress_handler_id),
             python_accumulators: self.python_accumulators.clone(),
+            observation_metrics_check: Arc::clone(&self.observation_metrics_check),
             stopped: Arc::clone(&self.stopped),
             server_version: Arc::clone(&self.server_version),
             listener_bus: Arc::clone(&self.listener_bus),

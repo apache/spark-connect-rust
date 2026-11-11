@@ -4551,6 +4551,49 @@ def test_an_observation_of_a_year_month_interval_fails_the_action_as_pyspark(ses
     assert observation.get == {}
 
 
+def test_only_the_observations_of_the_plan_of_an_action_convert_its_metrics_as_pyspark(session):
+    # As PySpark's client, which converts and sets the metrics of the Observations of the plan of
+    # an action, and runs localCheckpoint and a SQL statement without them: a year-month interval
+    # metric fails neither those nor a subquery of the observed DataFrame, an Observation keeps
+    # the metrics of the earlier actions when an action fails, and a metric of a name that holds
+    # an interval as an element raises when executionInfo reads it.
+    from pyspark.errors import PySparkTypeError
+    from pyspark.sql import Observation
+
+    interval = F.expr("INTERVAL '1' YEAR")
+    observation = Observation("unset_by_commands_and_subqueries")
+    df = session.range(3).observe(observation, F.max(interval).alias("ym"))
+    assert df.localCheckpoint().count() == 3
+    assert session.sql("SELECT * FROM {d}", d=df).count() == 3
+    assert session.range(2).select(df.select(F.max("id")).scalar().alias("m")).collect() == [
+        Row(m=2), Row(m=2)]
+    assert observation.get == {}
+
+    table = f"observation_kept_metrics_{os.getpid()}"
+    session.sql(f"DROP TABLE IF EXISTS {table}")
+    session.sql(f"CREATE TABLE {table} (x INT) USING parquet")
+    try:
+        kept = Observation("kept_after_a_failing_action")
+        observed = session.table(table).observe(
+            kept, F.max(F.when(F.col("x") > 0, interval)).alias("ym"),
+            F.count(F.lit(1)).alias("c"))
+        assert observed.count() == 0 and kept.get == {"ym": None, "c": 0}
+        session.sql(f"INSERT INTO {table} VALUES (1)")
+        with pytest.raises(PySparkTypeError) as error:
+            observed.count()
+        assert error.value.getCondition() == "UNSUPPORTED_LITERAL"
+        assert error.value._operation_id is not None
+        assert kept.get == {"ym": None, "c": 0}
+    finally:
+        session.sql(f"DROP TABLE IF EXISTS {table}")
+
+    named = session.range(2).observe("holds_an_interval", F.collect_list(interval).alias("m"))
+    assert named.collect() == [Row(id=0), Row(id=1)]
+    with pytest.raises(PySparkTypeError) as error:
+        named.executionInfo.flows
+    assert error.value.getMessageParameters() == {"literal": "year_month_interval: 12\n"}
+
+
 def test_sample_split_and_sample_by_without_a_seed_follow_python_random_as_pyspark(
         session, tmp_path):
     # As PySpark's: without a seed, sample, randomSplit and sampleBy draw one from Python's

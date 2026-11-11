@@ -9179,6 +9179,142 @@ def test_metrics_that_pyspark_cannot_convert_fail_the_action_of_their_observatio
         named.executionInfo.flows
 
 
+def _count_batch_and_observed_metrics(service, df):
+    # The response of the row of a count() of 3 (ExecutePlanResponse.arrow_batch=2: row_count=1,
+    # data=2), and a function of the response of the observed metrics of a name, of one literal
+    # of a key, reported by the plan ID of the CollectMetrics of that name in the plan of `df`
+    # (ExecutePlanResponse.observed_metrics=6: name=1, values=2, keys=3, plan_id=4).
+    import pyarrow as pa
+
+    df.collect()
+    # ExecutePlanRequest.plan=3 -> Plan.root=1.
+    ids = _collect_metrics_plan_ids(
+        parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0])
+    table = pa.table({"count(1)": pa.array([3], pa.int64())})
+    sink = pa.BufferOutputStream()
+    with pa.ipc.new_stream(sink, table.schema) as writer:
+        writer.write_table(table)
+    batch = message_field(2, varint_field(1, 1) + message_field(2, sink.getvalue().to_pybytes()))
+
+    def observed(name, literal, key):
+        return message_field(6, message_field(1, name) + message_field(2, literal)
+                             + message_field(3, key) + varint_field(4, ids[name]))
+
+    return batch, observed
+
+
+def test_only_the_observations_of_the_plan_of_an_action_receive_its_metrics_as_pyspark(
+        mock_connect):
+    # As PySpark's client, which converts and sets the metrics of the Observations of the plan of
+    # an action (LogicalPlan.observations, of its children), and runs checkpoint, localCheckpoint
+    # and a SQL statement without them: the metrics of an Observation of a DataFrame that only a
+    # checkpoint, a SQL statement or a subquery runs set nothing, and a metric that PySpark does
+    # not convert raises nothing there.
+    import copy
+
+    from pyspark.errors import PySparkTypeError
+    from pyspark.sql import Observation
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+    observation = Observation("o")
+    df = spark.range(3).observe(observation, F.count(F.lit(1)).alias("c"))
+    batch, observed = _count_batch_and_observed_metrics(service, df)
+    # Literal.long=7, year_month_interval=20; ExecutePlanResponse.checkpoint_command_result=19
+    # (CheckpointCommandResult.relation=1, CachedRemoteRelation.relation_id=1).
+    count = observed("o", varint_field(7, 3), "c")
+    interval = observed("o", varint_field(20, 14), "c")
+    checkpointed = message_field(19, message_field(1, message_field(1, "r1")))
+    for metrics in (count, interval):
+        service.execute_payload = checkpointed + metrics
+        df.localCheckpoint()
+        df.checkpoint()
+        service.execute_payload = metrics
+        statement = spark.sql("SELECT * FROM {d}", d=df)
+        service.execute_payload = batch + metrics
+        assert statement.count() == 3
+        assert spark.range(1).select(df.select(F.max("id")).scalar()).count() == 3
+        assert spark.range(1).where(df.exists()).count() == 3
+        assert observation.get == {}
+    # An action of a plan of the Observation sets its metrics, as does one of a copy of the
+    # DataFrame, whose plan PySpark copies with the Observation, and both raise for a metric that
+    # PySpark does not convert.
+    service.execute_payload = batch + count
+    assert df.where("id > 0").count() == 3 and observation.get == {"c": 3}
+    service.execute_payload = batch + observed("o", varint_field(7, 4), "c")
+    assert copy.copy(df).count() == 3 and observation.get == {"c": 4}
+    service.execute_payload = batch + interval
+    for frame in (df.union(spark.range(1)), copy.copy(df), copy.deepcopy(df)):
+        with pytest.raises(PySparkTypeError):
+            frame.count()
+    assert observation.get == {"c": 4}
+
+
+def test_a_failing_action_keeps_the_metrics_of_the_earlier_actions_as_pyspark(mock_connect):
+    # As PySpark's client, which converts the metrics of an Observation before it updates the
+    # Observation with them: the Observation of a metric that it does not convert, and those
+    # whose metrics come after it, keep the metrics of the earlier actions, and the exception has
+    # the operation ID of the execution, as PySpark's _handle_error stamps it.
+    from pyspark.errors import PySparkTypeError
+    from pyspark.sql import Observation
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+    first, second = Observation("first"), Observation("second")
+    df = (spark.range(3).observe(first, F.count(F.lit(1)).alias("c"))
+          .observe(second, F.max("id").alias("m")))
+    _, observed = _count_batch_and_observed_metrics(service, df)
+    # Literal.long=7, year_month_interval=20.
+    interval = varint_field(20, 14)
+    service.execute_payload = (observed("first", varint_field(7, 3), "c")
+                               + observed("second", varint_field(7, 2), "m"))
+    df.collect()
+    assert first.get == {"c": 3} and second.get == {"m": 2}
+    for payload, kept in [
+        (observed("second", interval, "m") + observed("first", varint_field(7, 4), "c"),
+         {"c": 3}),
+        (observed("first", varint_field(7, 5), "c") + observed("second", interval, "m"),
+         {"c": 5}),
+    ]:
+        service.execute_payload = payload
+        with pytest.raises(PySparkTypeError) as error:
+            df.collect()
+        assert error.value.getCondition() == "UNSUPPORTED_LITERAL"
+        assert first.get == kept and second.get == {"m": 2}
+        assert error.value._operation_id == _request_operation_id(service.execute_requests[-1])
+
+
+def test_flows_raise_for_a_metric_that_holds_one_pyspark_cannot_convert_as_pyspark(mock_connect):
+    # As PySpark's PlanObservedMetrics.pairs, which converts each metric with
+    # LiteralExpression._to_value: a metric of a name that holds a year-month interval as an
+    # element, of an array, a struct or a map, raises UNSUPPORTED_LITERAL of that element.
+    from pyspark.errors import PySparkTypeError
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+    # Literal.string=13, year_month_interval=20, array=22 (Array.elements=2), map=23 (Map.keys=3,
+    # values=4), struct=24 (Struct.elements=2).
+    first, later = varint_field(20, 12), varint_field(20, 13)
+    holders = [
+        message_field(22, message_field(2, first) + message_field(2, later)),
+        message_field(24, message_field(2, first)),
+        message_field(23, message_field(3, message_field(13, "k")) + message_field(4, first)),
+        message_field(22, message_field(2, message_field(24, message_field(2, first)))),
+    ]
+    named = spark.range(3).observe("named", F.max("id").alias("m"))
+    for holder in holders:
+        service.execute_payload = message_field(
+            6, message_field(1, "named") + message_field(2, holder) + message_field(3, "m"))
+        assert named.collect() == []
+        info = named.executionInfo
+        with pytest.raises(PySparkTypeError) as error:
+            info.flows
+        assert error.value.getCondition() == "UNSUPPORTED_LITERAL"
+        assert error.value.getMessageParameters() == {"literal": "year_month_interval: 12\n"}
+        with pytest.raises(PySparkTypeError):
+            [metrics.to_dict() for metrics in info._observations]
+
+
 def test_json_names_of_nanosecond_timestamps_are_not_data_types_as_pyspark():
     # As PySpark's, which has no nanosecond timestamp types: their JSON names do not parse
     # (CANNOT_PARSE_DATATYPE), and pyspark.sql.types has no names of them.
