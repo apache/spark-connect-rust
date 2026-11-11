@@ -61,9 +61,7 @@ the Rust and Python sides, no stubs, green CI.
   (`gh auth switch`) and break your pushes. Before pushing, confirm with
   `gh auth status` that `gh` is authenticated as the account you intend to push
   with.
-- Commit messages end with `Co-authored-by: Isaac <no-reply@databricks.com>`.
-  PR bodies end with `This pull request and its description were written by Isaac.`
-  Never bypass git hooks (`--no-verify`).
+- Never bypass git hooks (`--no-verify`).
 - **Always merge PRs with the dev merge script** `dev/merge_connect_rust_pr.py`
   (never `gh pr merge` or a manual `git push`). It produces the Apache-canonical
   squashed commit — `Closes #<n>`, `Authored-by:`/`Co-authored-by:`, `Signed-off-by:`
