@@ -28,9 +28,6 @@ struct SignalWatch {
 
 impl SignalWatch {
     fn poll(&self) -> Watch {
-        if self.interrupted.load(Ordering::SeqCst) {
-            return Watch::Continue;
-        }
         {
             let mut error = self.error.lock().unwrap_or_else(|e| e.into_inner());
             if error.is_none() {
@@ -39,10 +36,14 @@ impl SignalWatch {
                     Ok(()) => return Watch::Continue,
                     Err(signal) => *error = Some(signal),
                 }
+            } else if self.interrupted.load(Ordering::SeqCst) {
+                // After the interrupt, a second signal ends the wait, as PySpark's wait does.
+                return match Python::attach(|py| py.check_signals()) {
+                    Ok(()) => Watch::Continue,
+                    Err(_) => Watch::Abort,
+                };
             }
         }
-        // The signal stays captured while no execution that the wait is for is in flight, so
-        // that the first one the call starts is interrupted.
         match self.session.running_operation_id() {
             Some(operation_id) => {
                 self.interrupted.store(true, Ordering::SeqCst);
@@ -64,11 +65,12 @@ impl SignalWatch {
 /// is interrupted, and the exception of the handler is raised once `f` has ended. Otherwise the
 /// result of `f` is returned.
 ///
-/// The execution is interrupted only when a wait of the calling thread is for one. A signal that
-/// arrives while none is (such as during the analysis of a plan, or the plan compression before
-/// an execution) is kept, and the first execution that `f` then waits for is interrupted; a
-/// request that never starts one ends when its response arrives, and the exception is raised
-/// then. A wait of `block_on_abortable` (the release of `stop()`) ends at once instead.
+/// The execution is interrupted only when a wait of the calling thread is for one. The waits
+/// that a signal ends at once, as PySpark's do (a retry sleep, or a call that the server does not
+/// answer): the retries and the RPCs of `f` that are not answered when the first signal arrives
+/// during an execution, and all of them when no execution is in flight, or after a second
+/// signal. A streaming execution is still read after the first one, until the server cancels it.
+/// A wait of `block_on_abortable` (the release of `stop()`) ends at once as well.
 ///
 /// An execution that `f` ran then raises for the metrics of an Observation that PySpark does
 /// not convert, as PySpark's does (`ObservedMetricsCheck`).
@@ -104,8 +106,23 @@ pub(crate) fn interruptible_outcome<T: Send, E: Send + Into<Box<SparkError>>>(
     };
     let output = py.detach(|| with_wait_watch(poll, f));
     let signal = watch.error.lock().unwrap_or_else(|e| e.into_inner()).take();
+    let output: Result<T, Box<SparkError>> = output.map_err(Into::into);
     match signal {
-        Some(error) => Err(error),
-        None => Ok(output.map_err(Into::into)),
+        Some(error) => {
+            // As PySpark's: the done call of a progress handler that raised while the signal ended
+            // the call replaces the KeyboardInterrupt, which becomes its context, as the done call
+            // runs in the `except KeyboardInterrupt` of PySpark's execution. Its exception is
+            // released from the core's callbacks, so that it is not left behind.
+            if let Err(err) = &output {
+                if let Some(done) = crate::errors::callback_exception(err) {
+                    // The context is set on the instance, as the implicit chaining of PySpark's
+                    // `except` clause sets it.
+                    let _ = done.value(py).setattr("__context__", error.value(py));
+                    return Err(done);
+                }
+            }
+            Err(error)
+        }
+        None => Ok(output),
     }
 }

@@ -228,8 +228,9 @@ fn callback_id(err: &SparkError) -> Option<u64> {
     err.params.get("callback_id")?.parse::<u64>().ok()
 }
 
-/// The exception of the Python callback of `err`, if it is the error of one.
-fn callback_exception(err: &SparkError) -> Option<PyErr> {
+/// The exception of the Python callback of `err`, if it is the error of one, which is then
+/// released: the exception is raised by the caller instead of `err`.
+pub(crate) fn callback_exception(err: &SparkError) -> Option<PyErr> {
     let id = callback_id(err)?;
     CALLBACK_EXCEPTIONS
         .lock()
