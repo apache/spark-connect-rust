@@ -2736,6 +2736,17 @@ mod tests {
         let builder = ChannelBuilder::parse("sc://localhost/;custom_header=custom_value").unwrap();
         let client = SparkConnectClient::connect(&builder).await.unwrap();
         assert!(client.user_agent.contains("spark/"));
+        // The header of the connection string and the user agent are on a request.
+        let mut request = Request::new(());
+        client._attach_metadata(&mut request);
+        assert_eq!(
+            request.metadata().get("custom_header").unwrap(),
+            "custom_value"
+        );
+        assert_eq!(
+            request.metadata().get("user-agent").unwrap(),
+            client.user_agent.as_str()
+        );
     }
 
     #[test]
@@ -2979,71 +2990,6 @@ mod tests {
                 client.metadata
             );
         }
-    }
-
-    #[tokio::test]
-    async fn test_get_configs_request_structure() {
-        let builder = ChannelBuilder::parse("sc://localhost").unwrap();
-        let client = SparkConnectClient::connect(&builder).await.unwrap();
-
-        // Test that get_configs returns a Vec of Option<String>
-        // Note: This will fail against a real server, but tests the structure
-        let _result = client.get_configs(&["spark.sql.shuffle.partitions"]);
-        // We don't assert on the result since we may not have a server
-    }
-
-    #[tokio::test]
-    async fn test_set_config_request_structure() {
-        let builder = ChannelBuilder::parse("sc://localhost").unwrap();
-        let client = SparkConnectClient::connect(&builder).await.unwrap();
-
-        // Test that set_config can be called without panicking
-        let _result = client.set_config("spark.sql.shuffle.partitions", "200");
-    }
-
-    #[tokio::test]
-    async fn test_unset_config_request_structure() {
-        let builder = ChannelBuilder::parse("sc://localhost").unwrap();
-        let client = SparkConnectClient::connect(&builder).await.unwrap();
-
-        // Test that unset_config can be called without panicking
-        let _result = client.unset_config("spark.sql.shuffle.partitions");
-    }
-
-    #[tokio::test]
-    async fn test_interrupt_all_request_structure() {
-        let builder = ChannelBuilder::parse("sc://localhost").unwrap();
-        let client = SparkConnectClient::connect(&builder).await.unwrap();
-
-        // Test that interrupt_all can be called without panicking
-        let _result = client.interrupt_all();
-    }
-
-    #[tokio::test]
-    async fn test_interrupt_tag_request_structure() {
-        let builder = ChannelBuilder::parse("sc://localhost").unwrap();
-        let client = SparkConnectClient::connect(&builder).await.unwrap();
-
-        // Test that interrupt_tag can be called without panicking
-        let _result = client.interrupt_tag("my-tag");
-    }
-
-    #[tokio::test]
-    async fn test_interrupt_operation_request_structure() {
-        let builder = ChannelBuilder::parse("sc://localhost").unwrap();
-        let client = SparkConnectClient::connect(&builder).await.unwrap();
-
-        // Test that interrupt_operation can be called without panicking
-        let _result = client.interrupt_operation("operation-123");
-    }
-
-    #[tokio::test]
-    async fn test_release_session_request_structure() {
-        let builder = ChannelBuilder::parse("sc://localhost").unwrap();
-        let client = SparkConnectClient::connect(&builder).await.unwrap();
-
-        // Test that release_session can be called without panicking
-        let _result = client.release_session();
     }
 
     /// A loopback service of ReleaseSession only: its first `unavailable` calls answer
@@ -3891,6 +3837,175 @@ mod request_fields_tests {
                 "{method}"
             );
         }
+    }
+
+    /// A client of the user `u1` of a recording server, what that server received, and the
+    /// server.
+    async fn recorded_client() -> (SparkConnectClient, Received, tokio::task::JoinHandle<()>) {
+        let received: Received = Default::default();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let incoming = futures::stream::unfold(listener, |listener| async {
+            Some((listener.accept().await.map(|(socket, _)| socket), listener))
+        });
+        let service = Recorder(received.clone());
+        let server = tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(service)
+                .serve_with_incoming(incoming)
+                .await
+                .unwrap();
+        });
+        let builder = {
+            let _env = crate::channel::set_env(&[("SPARK_CONNECT_AUTHENTICATE_TOKEN", None)]);
+            ChannelBuilder::parse(&format!("sc://127.0.0.1:{}/;user_id=u1", address.port()))
+                .unwrap()
+        };
+        let client = SparkConnectClient::connect(&builder).await.unwrap();
+        (client, received, server)
+    }
+
+    /// The only request that the server received, which is of `method`.
+    fn only_request<T: Message + Default>(received: &Received, method: &str) -> T {
+        let requests = received.lock().unwrap();
+        let methods: Vec<&str> = requests.iter().map(|(m, _)| m.as_str()).collect();
+        assert_eq!(methods, [method]);
+        T::decode(requests[0].1.as_slice()).unwrap()
+    }
+
+    /// The operation of the only request that the server received, a Config of the session and
+    /// the user of `client`.
+    fn config_operation(
+        client: &SparkConnectClient,
+        received: &Received,
+    ) -> spark_connect_proto::config_request::operation::OpType {
+        let request: ConfigRequest = only_request(received, "Config");
+        assert_eq!(request.session_id, client.session_id());
+        assert_eq!(request.user_context.unwrap().user_id, "u1");
+        request.operation.unwrap().op_type.unwrap()
+    }
+
+    /// The interrupt type and the interrupt of the only request that the server received, an
+    /// Interrupt of the session and the user of `client`.
+    fn interruption(
+        client: &SparkConnectClient,
+        received: &Received,
+    ) -> (
+        i32,
+        Option<spark_connect_proto::interrupt_request::Interrupt>,
+    ) {
+        let request: InterruptRequest = only_request(received, "Interrupt");
+        assert_eq!(request.session_id, client.session_id());
+        assert_eq!(request.user_context.unwrap().user_id, "u1");
+        (request.interrupt_type, request.interrupt)
+    }
+
+    #[tokio::test]
+    async fn test_get_configs_request_structure() {
+        use spark_connect_proto::config_request::{operation::OpType, Get};
+        let (client, received, server) = recorded_client().await;
+        let keys = ["spark.sql.shuffle.partitions", "spark.sql.ansi.enabled"];
+        // The server answers no pair, so each key is unset.
+        assert_eq!(client.get_configs(&keys).await.unwrap(), [None, None]);
+        server.abort();
+        assert_eq!(
+            config_operation(&client, &received),
+            OpType::Get(Get {
+                keys: keys.map(str::to_string).to_vec(),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn test_set_config_request_structure() {
+        use spark_connect_proto::config_request::{operation::OpType, Set};
+        let (client, received, server) = recorded_client().await;
+        client
+            .set_config("spark.sql.shuffle.partitions", "200")
+            .await
+            .unwrap();
+        server.abort();
+        assert_eq!(
+            config_operation(&client, &received),
+            OpType::Set(Set {
+                pairs: vec![spark_connect_proto::KeyValue {
+                    key: "spark.sql.shuffle.partitions".into(),
+                    value: Some("200".into()),
+                }],
+                silent: None,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn test_unset_config_request_structure() {
+        use spark_connect_proto::config_request::{operation::OpType, Unset};
+        let (client, received, server) = recorded_client().await;
+        client
+            .unset_config("spark.sql.shuffle.partitions")
+            .await
+            .unwrap();
+        server.abort();
+        assert_eq!(
+            config_operation(&client, &received),
+            OpType::Unset(Unset {
+                keys: vec!["spark.sql.shuffle.partitions".into()],
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn test_interrupt_all_request_structure() {
+        use spark_connect_proto::interrupt_request::InterruptType;
+        let (client, received, server) = recorded_client().await;
+        client.interrupt_all().await.unwrap();
+        server.abort();
+        assert_eq!(
+            interruption(&client, &received),
+            (InterruptType::All as i32, None)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_interrupt_tag_request_structure() {
+        use spark_connect_proto::interrupt_request::{Interrupt, InterruptType};
+        let (client, received, server) = recorded_client().await;
+        client.interrupt_tag("my-tag").await.unwrap();
+        server.abort();
+        assert_eq!(
+            interruption(&client, &received),
+            (
+                InterruptType::Tag as i32,
+                Some(Interrupt::OperationTag("my-tag".into()))
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn test_interrupt_operation_request_structure() {
+        use spark_connect_proto::interrupt_request::{Interrupt, InterruptType};
+        let (client, received, server) = recorded_client().await;
+        client.interrupt_operation("operation-123").await.unwrap();
+        server.abort();
+        assert_eq!(
+            interruption(&client, &received),
+            (
+                InterruptType::OperationId as i32,
+                Some(Interrupt::OperationId("operation-123".into()))
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn test_release_session_request_structure() {
+        let (client, received, server) = recorded_client().await;
+        client.release_session().await.unwrap();
+        server.abort();
+        let request: ReleaseSessionRequest = only_request(&received, "ReleaseSession");
+        assert_eq!(request.session_id, client.session_id());
+        assert_eq!(request.user_context.unwrap().user_id, "u1");
+        assert_eq!(request.client_type, Some(client.user_agent.clone()));
+        assert!(!request.allow_reconnect);
     }
 
     #[tokio::test]
