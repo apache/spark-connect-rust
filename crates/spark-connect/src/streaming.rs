@@ -1003,10 +1003,11 @@ pub trait StreamingQueryListener: Send + Sync {
 ///
 /// `state` is the only lock of the bus, and it is taken only through [`ListenerBus::lock`] and
 /// [`ListenerBus::wait`]. Nothing that can block or run the code of a user happens while it is
-/// held: no listener callback, no drop of a listener (see [`drop_isolated`]), no RPC, no join of
-/// the worker and no drop of an event stream, whose progress handlers are of the user. A critical
-/// section only reads and assigns the fields and takes no other lock, so the bus has no lock
-/// order to break. The waits for another thread are on `changed`, which releases the lock.
+/// held: no listener callback, no drop of a listener (see [`drop_isolated`]), no RPC and no join of
+/// the worker. An event stream is dropped without the lock too, though its drop runs no code of
+/// a user: its execution is unreported, so the progress handlers are none. A critical section only
+/// reads and assigns the fields and takes no other lock, so the bus has no lock order to break.
+/// The waits for another thread are on `changed`, which releases the lock.
 #[derive(Default)]
 pub(crate) struct ListenerBus {
     state: Mutex<ListenerBusState>,
@@ -1038,6 +1039,9 @@ struct ListenerBusState {
     /// listener: the server removes it only on REMOVE_LISTENER_BUS_LISTENER, and answers a new
     /// ADD_LISTENER_BUS_LISTENER for it with no response. A new subscription removes it first.
     server_registration_held: bool,
+    /// The generation whose worker has begun its terminal failure. Its callbacks run before its
+    /// registrations are cleared, so a listener added from them opens a new subscription.
+    terminating: Option<u64>,
 }
 
 /// A synchronous started event in delivery by the calling thread of `start`/`toTable`.
@@ -1086,6 +1090,22 @@ enum ListenerBusPhase {
     Stopping,
 }
 
+impl Drop for ListenerBus {
+    /// The last owner of the bus drops the listeners that it still holds, as the removals do: a
+    /// listener's `Drop` is code of the user, so its panic is isolated and does not reach the
+    /// dropper of the session.
+    fn drop(&mut self) {
+        let listeners = std::mem::take(
+            &mut self
+                .state
+                .get_mut()
+                .unwrap_or_else(PoisonError::into_inner)
+                .listeners,
+        );
+        drop_isolated(listeners);
+    }
+}
+
 impl ListenerBus {
     /// Lock the state of the bus. A poisoned lock is recovered rather than propagated: no
     /// critical section runs the code of a user or leaves the fields half-updated where it can
@@ -1120,11 +1140,13 @@ impl ListenerBus {
         drop_isolated(stale);
     }
 
-    /// Record that the server may still hold the listener of `generation`, whose worker failed.
-    fn mark_server_registration_held(&self, generation: u64) {
+    /// Record that the worker of `generation` has failed: the server may still hold its listener,
+    /// and its registrations are cleared once the terminal notification has been made.
+    fn begin_terminal_failure(&self, generation: u64) {
         let mut state = self.lock();
         if state.generation == generation {
             state.server_registration_held = true;
+            state.terminating = Some(generation);
         }
     }
 
@@ -1283,7 +1305,7 @@ fn run_listener_event_loop(
         // listener registered: the server drops it only on a later failed event send or on
         // REMOVE, so the next subscription removes it first.
         if let Some(owner) = bus.upgrade() {
-            owner.mark_server_registration_held(generation);
+            owner.begin_terminal_failure(generation);
         }
         // A removal from another thread waits for this terminal notification, just
         // as it waits for an ordinary event. No state lock or strong bus owner is
@@ -1363,11 +1385,12 @@ impl StreamingQueryManager {
             .thread
             .as_ref()
             .is_some_and(|worker| !worker.is_finished());
-        if !state.listeners.is_empty() && worker_alive {
+        let terminating = state.terminating == Some(state.generation);
+        if !state.listeners.is_empty() && worker_alive && !terminating {
             state.listeners.push((id.clone(), listener));
             return Ok(id);
         }
-        // The registrations of a worker that has ended get no more events: they are
+        // The registrations of a worker that has ended or is failing get no more events: they are
         // cleared, and this listener opens a new subscription.
         let stale = std::mem::take(&mut state.listeners);
         let release_server = std::mem::take(&mut state.server_registration_held);
@@ -1412,8 +1435,8 @@ impl StreamingQueryManager {
         match stream {
             Ok(stream) => {
                 // The worker is given the stream only once it exists: a thread that cannot be
-                // spawned is an error rather than a panic under the lock, and the stream, whose
-                // drop runs the progress handlers of the user, is then dropped without the lock.
+                // spawned is an error rather than a panic under the lock, and the stream is then
+                // dropped without the lock.
                 let bus = Arc::downgrade(&self.bus);
                 let (handover, handed_over) = std::sync::mpsc::channel::<ListenerEventStream>();
                 let spawned = std::thread::Builder::new().spawn(move || {
@@ -1536,7 +1559,24 @@ impl StreamingQueryManager {
         let worker = state.thread.take();
         drop(state);
         let removal = if had_listeners {
-            self.remove_server_listener(true)
+            // The reported removal runs the progress handlers of the session, and a panic of one
+            // must not leave the phase of the bus set: the removal fails as an error does, which
+            // keeps its registrations and worker for a retry, and the panic then goes on.
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                self.remove_server_listener(true)
+            })) {
+                Ok(removal) => removal,
+                Err(payload) => {
+                    let _ = self.finish_listener_removal(
+                        generation,
+                        worker,
+                        Err(SparkError::connect_msg(
+                            "removing the streaming query listener panicked",
+                        )),
+                    );
+                    std::panic::resume_unwind(payload);
+                }
+            }
         } else {
             Ok(())
         };
@@ -2124,6 +2164,106 @@ mod tests {
             assert!(state.listeners.is_empty());
             assert!(state.dispatching.is_none());
         }
+    }
+
+    /// A listener that the terminal error of its subscription re-adds from `on_stream_error`, as a
+    /// client resubscribes, is not left on the ending generation: the generation clears its
+    /// registrations after the callbacks. The add opens a new subscription, so the listener is
+    /// listed afterwards when the add succeeds, and the add reports an error otherwise.
+    #[test]
+    fn a_listener_added_from_the_stream_error_of_its_generation_is_subscribed() {
+        struct Listener;
+        impl StreamingQueryListener for Listener {
+            fn on_event(&self, _: &StreamingQueryListenerEvent) {}
+        }
+        struct Resubscribing {
+            manager: StreamingQueryManager,
+            listener: Arc<dyn StreamingQueryListener>,
+            result: Mutex<Option<Result<String>>>,
+        }
+        impl StreamingQueryListener for Resubscribing {
+            fn on_event(&self, _: &StreamingQueryListenerEvent) {}
+
+            fn on_stream_error(&self, _: &SparkError) -> bool {
+                let added = self.manager.add_listener(Arc::clone(&self.listener));
+                *self.result.lock().unwrap() = Some(added);
+                true
+            }
+        }
+
+        let session = unreachable_session_without_retries();
+        let bus = session.listener_bus();
+        // A live worker, so that the bus holds a generation whose worker is still running.
+        let _quiet = waiting_listener_worker(&session);
+        let generation = {
+            let mut state = bus.lock();
+            state.listeners.clear();
+            state.generation
+        };
+        let resubscribing = Arc::new(Resubscribing {
+            manager: session.streams(),
+            listener: Arc::new(Listener),
+            result: Mutex::new(None),
+        });
+        bus.lock()
+            .listeners
+            .push(("resubscribing".to_string(), resubscribing.clone()));
+
+        run_listener_event_loop(
+            vec![Err(SparkError::connect_msg("transport failed"))],
+            Arc::downgrade(&bus),
+            generation,
+        );
+
+        let result = resubscribing
+            .result
+            .lock()
+            .unwrap()
+            .take()
+            .expect("the terminal error reached the listener");
+        let state = bus.lock();
+        assert_ne!(
+            state.generation, generation,
+            "the add opens a new subscription rather than joining the ending generation"
+        );
+        match result {
+            Ok(id) => assert!(
+                state
+                    .listeners
+                    .iter()
+                    .any(|(listener_id, _)| *listener_id == id),
+                "a listener whose add succeeded is subscribed"
+            ),
+            Err(_) => assert!(state.listeners.is_empty()),
+        }
+    }
+
+    /// The bus drops the listeners that it still holds when its last owner goes, as it drops the
+    /// removed ones: a panic of their `Drop` is isolated, and it does not reach the dropper.
+    #[test]
+    fn dropping_the_bus_isolates_the_panic_of_a_listener_it_still_holds() {
+        struct PanicsOnDrop;
+        impl StreamingQueryListener for PanicsOnDrop {
+            fn on_event(&self, _: &StreamingQueryListenerEvent) {}
+        }
+        impl Drop for PanicsOnDrop {
+            fn drop(&mut self) {
+                panic!("the drop of the listener panics");
+            }
+        }
+
+        let bus = Arc::new(ListenerBus::default());
+        {
+            let mut state = bus.lock();
+            state
+                .listeners
+                .push(("first".to_string(), Arc::new(PanicsOnDrop)));
+            state
+                .listeners
+                .push(("second".to_string(), Arc::new(PanicsOnDrop)));
+        }
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || drop(bus)))
+            .expect("the drop of the bus does not propagate the panic of a listener");
     }
 
     #[test]
