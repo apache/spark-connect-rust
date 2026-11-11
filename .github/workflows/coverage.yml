@@ -33,6 +33,14 @@ on:
 env:
   CARGO_TERM_COLOR: always
   SPARK_VERSION: "4.3.0"
+  # Coverage floors, in percent, enforced by the last step of the job. They are regression
+  # floors set just below what master measures, not the target: AGENTS.md states the target
+  # (>90% on both sides). Rust is the line coverage of cargo-llvm-cov; Python is the
+  # percent_covered of coverage.py (lines and branches) within the scope of python/.coveragerc.
+  # The Rust number moves by about 0.1 between runs of the same commit, since the e2e tests
+  # run against a live server. Raise a floor as coverage grows; lower one only on purpose.
+  RUST_COVERAGE_FLOOR: "92.0"
+  PYTHON_COVERAGE_FLOOR: "93.0"
 
 jobs:
   coverage:
@@ -174,6 +182,7 @@ jobs:
         run: |
           python3 << 'PYTHON_EOF'
           import json
+          import os
 
           # Read the llvm-cov output. NB: this report is named coverage-rust-llvm.json,
           # NOT coverage-rust.json - the latter is the badge file published at the root of
@@ -219,6 +228,10 @@ jobs:
           with open("coverage-rust-badge.json", "w") as f:
               json.dump(badge_json, f)
 
+          # The floor is checked in the last step, after the badge is published.
+          with open(os.environ["GITHUB_ENV"], "a") as f:
+              f.write(f"RUST_COVERAGE_PCT={coverage_pct}\n")
+
           print(f"Rust coverage: {coverage_pct:.1f}% ({color})")
           PYTHON_EOF
 
@@ -227,10 +240,14 @@ jobs:
           cargo build -p pyspark-rs --release
           cp target/release/lib_pyspark.so python/pyspark/_pyspark.so
 
-      - name: Measure Python coverage with offline test suite
+      - name: Offline Python test suite (under coverage)
+        # This step is the only place the offline suite runs, on every pull request and
+        # every push, so it is the gate for these tests as well as the coverage measurement:
+        # a failing test fails the job here. -rs lists every skipped test with its reason,
+        # so that a test skipped for a missing or too-old dependency shows in the log.
         run: |
           cd python
-          PYTHONPATH=$(pwd) python -m coverage run --rcfile=.coveragerc -m pytest \
+          PYTHONPATH=$(pwd) python -m coverage run --rcfile=.coveragerc -m pytest -rs \
             tests/test_dropin_offline.py tests/test_arrow_handoff.py tests/test_ml_offline.py
           PYTHONPATH=$(pwd) python -m coverage json --rcfile=.coveragerc -o coverage-python.json
 
@@ -238,6 +255,7 @@ jobs:
         run: |
           python3 << 'PYTHON_EOF'
           import json
+          import os
 
           # Read the coverage JSON output
           with open("python/coverage-python.json", "r") as f:
@@ -264,6 +282,10 @@ jobs:
 
           with open("coverage-python-badge.json", "w") as f:
               json.dump(badge_json, f)
+
+          # The floor is checked in the last step, after the badge is published.
+          with open(os.environ["GITHUB_ENV"], "a") as f:
+              f.write(f"PYTHON_COVERAGE_PCT={coverage_pct}\n")
 
           print(f"Python coverage: {coverage_pct:.1f}% ({color})")
           PYTHON_EOF
@@ -316,6 +338,30 @@ jobs:
             coverage-rust-llvm.json
             python/coverage-python.json
           retention-days: 5
+
+      - name: Enforce coverage floors
+        # After the badge and the artifacts, so that a run below a floor still publishes the
+        # number it measured. Reads only the environment: on a push to master the step that
+        # updates the badges has left the checkout on the badges branch.
+        run: |
+          python3 << 'PYTHON_EOF'
+          import os
+          import sys
+
+          failed = False
+          for side in ("RUST", "PYTHON"):
+              measured = float(os.environ[f"{side}_COVERAGE_PCT"])
+              floor = float(os.environ[f"{side}_COVERAGE_FLOOR"])
+              ok = measured >= floor
+              failed = failed or not ok
+              print(f"{side.lower()} coverage: {measured:.2f}% (floor {floor:.2f}%): {'ok' if ok else 'BELOW FLOOR'}")
+              if not ok:
+                  print(
+                      f"::error::{side.lower()} coverage {measured:.2f}% is below the floor of "
+                      f"{floor:.2f}% ({side}_COVERAGE_FLOOR in .github/workflows/coverage.yml)"
+                  )
+          sys.exit(1 if failed else 0)
+          PYTHON_EOF
 
       - name: Upload Connect server log
         if: always()
