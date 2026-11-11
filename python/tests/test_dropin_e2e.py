@@ -5206,3 +5206,127 @@ def test_random_forest_regressor_rejects_invalid_parameters_and_data(session):
         RandomForestRegressor(weightCol="weight").fit(training.withColumn("weight",F.lit(-1.0)))
     with pytest.raises(Exception):
         RandomForestRegressor().fit(training.withColumn("features",F.lit(1.0)))
+
+
+def _decision_tree_classifier():
+    try:
+        from pyspark.ml.connect.classification import DecisionTreeClassifier
+    except ImportError:
+        from pyspark.ml.classification import DecisionTreeClassifier
+    return DecisionTreeClassifier
+
+@pytest.mark.parametrize("use_setters", [False, True], ids=["constructor", "setters"])
+def test_decision_tree_classifier_learns_nonlinear_labels_and_preserves_lazy_predictions(session, use_setters):
+    from pyspark.ml.connect.functions import vector_to_array
+    DecisionTreeClassifier = _decision_tree_classifier()
+    training = _forest_vectors(session,
+        "SELECT array(CAST(x AS DOUBLE)) AS xs, CAST(y AS DOUBLE) AS target, 1.0D AS weight "
+        "FROM VALUES (-3,0),(-2,0),(-1,1),(0,1),(1,1),(2,0),(3,0) AS t(x,y)", "input")
+    held_out = _forest_vectors(session,
+        "SELECT id, array(CAST(x AS DOUBLE)) AS xs "
+        "FROM VALUES (0,-2.5),(1,-0.5),(2,0.5),(3,2.5) AS t(id,x)", "input")
+    kwargs = dict(featuresCol="input", labelCol="target", predictionCol="class",
+                  probabilityCol="probs", rawPredictionCol="votes", maxDepth=3,
+                  maxBins=16, minInstancesPerNode=1, minInfoGain=0.0, pruneTree=False,
+                  maxMemoryInMB=64, cacheNodeIds=True, checkpointInterval=-1,
+                  impurity="entropy", seed=42,
+                  leafCol="leaves", minWeightFractionPerNode=0.0,
+                  weightCol="weight")
+    if use_setters:
+        estimator = DecisionTreeClassifier()
+        for name, value in kwargs.items():
+            assert getattr(estimator, "set" + name[0].upper() + name[1:])(value) is estimator
+    else:
+        estimator = DecisionTreeClassifier(**kwargs)
+    model = estimator.fit(training)
+    other = estimator.fit(training.withColumn("target", 1.0 - F.col("target")))
+    delayed = model.transform(held_out).select("id", "class")
+    rows = model.transform(held_out).orderBy("id").select(
+        vector_to_array("probs").alias("p"), vector_to_array("votes").alias("v"),
+        F.col("leaves").alias("l")).collect()
+    assert [r.p for r in rows] == [[1.0,0.0],[0.0,1.0],[0.0,1.0],[1.0,0.0]]
+    assert [r.v for r in rows] == [[2.0,0.0],[0.0,3.0],[0.0,3.0],[2.0,0.0]]
+    assert [r.l for r in rows] == [0.0,1.0,1.0,2.0]
+    assert _forest_predictions(model, held_out, "class") == [0.0,1.0,1.0,0.0]
+    assert _forest_predictions(estimator.fit(training), held_out, "class") == [0.0,1.0,1.0,0.0]
+    del model
+    import gc
+    gc.collect()
+    assert [r["class"] for r in delayed.orderBy("id").collect()] == [0.0,1.0,1.0,0.0]
+    assert _forest_predictions(other, held_out, "class") == [1.0,0.0,0.0,1.0]
+
+
+def test_decision_tree_classifier_multiclass_probabilities_and_leaf_indices(session):
+    from pyspark.ml.connect.functions import vector_to_array
+    DecisionTreeClassifier = _decision_tree_classifier()
+    training = _forest_vectors(session,
+        "SELECT array(CAST(x AS DOUBLE)) AS xs, CAST(y AS DOUBLE) AS label "
+        "FROM VALUES (-3,0),(-2,0),(-1,1),(0,1),(1,2),(2,2) AS t(x,y)")
+    held_out = _forest_vectors(session,
+        "SELECT id, array(CAST(x AS DOUBLE)) AS xs "
+        "FROM VALUES (0,-2.5),(1,-0.5),(2,1.5) AS t(id,x)")
+    model = DecisionTreeClassifier(seed=42, maxDepth=3,
+
+                                   leafCol="leaves").fit(training)
+    assert _forest_predictions(model, held_out) == [0.0,1.0,2.0]
+    assert model.transform(held_out).schema["leaves"].dataType == DoubleType()
+    rows = model.transform(held_out).orderBy("id").select(
+        vector_to_array("probability").alias("p"),
+        vector_to_array("rawPrediction").alias("v"), F.col("leaves").alias("l")).collect()
+    assert [r.p for r in rows] == [[1.0,0.0,0.0],[0.0,1.0,0.0],[0.0,0.0,1.0]]
+    assert [r.v for r in rows] == [[2.0,0.0,0.0],[0.0,2.0,0.0],[0.0,0.0,2.0]]
+    assert [r.l for r in rows] == [0.0,1.0,2.0]
+
+
+def test_decision_tree_classifier_weights_and_class_thresholds_change_predictions(session):
+    from pyspark.ml.connect.functions import vector_to_array
+    DecisionTreeClassifier = _decision_tree_classifier()
+    training = _forest_vectors(session,
+        "SELECT array(0.0D) AS xs, CAST(y AS DOUBLE) AS label, CAST(w AS DOUBLE) AS weight "
+        "FROM VALUES (0,1),(0,1),(0,1),(1,9) AS t(y,w)")
+    held_out = _forest_vectors(session, "SELECT 0 AS id, array(0.0D) AS xs")
+    options = dict(seed=42, maxDepth=0)
+    plain = DecisionTreeClassifier(**options).fit(training)
+    weighted = DecisionTreeClassifier(**options, weightCol="weight").fit(training)
+    estimator = DecisionTreeClassifier(**options)
+    assert estimator.setThresholds([1.0,0.1]) is estimator
+    thresholded = estimator.fit(training)
+    assert _forest_predictions(plain, held_out) == [0.0]
+    assert _forest_predictions(weighted, held_out) == [1.0]
+    assert _forest_predictions(thresholded, held_out) == [1.0]
+    for model, expected, counts in [(plain,[0.75,0.25],[3.0,1.0]),
+                                     (weighted,[0.25,0.75],[3.0,9.0]),
+                                     (thresholded,[0.75,0.25],[3.0,1.0])]:
+        row = model.transform(held_out).select(
+            vector_to_array("probability").alias("p"),
+            vector_to_array("rawPrediction").alias("raw")).first()
+        assert row.p == expected
+        assert row.raw == counts
+
+
+def test_decision_tree_classifier_rejects_invalid_parameters_and_training_data(session):
+    DecisionTreeClassifier = _decision_tree_classifier()
+    training = _forest_vectors(session,
+        "SELECT array(CAST(x AS DOUBLE)) AS xs, CAST(y AS DOUBLE) AS label, 1.0D AS weight "
+        "FROM VALUES (-1,0),(1,1) AS t(x,y)")
+    for options in [dict(maxDepth=31),dict(maxBins=1),
+                    dict(minInstancesPerNode=0),dict(minInfoGain=-1.0),
+                    dict(maxMemoryInMB=-1),dict(checkpointInterval=0),
+                    dict(impurity="invalid"),
+                    dict(minWeightFractionPerNode=0.5)]:
+        with pytest.raises(Exception):
+            DecisionTreeClassifier(**options).fit(training)
+    with pytest.raises(Exception):
+        DecisionTreeClassifier().setThresholds([1.0,1.0,1.0]).fit(training)
+    with pytest.raises(Exception):
+        DecisionTreeClassifier().fit(training.drop("label"))
+    with pytest.raises(Exception):
+        DecisionTreeClassifier().fit(training.withColumn("label",F.lit(-1.0)))
+    with pytest.raises(Exception):
+        DecisionTreeClassifier(weightCol="weight").fit(training.withColumn("weight",F.lit(-1.0)))
+
+
+    with pytest.raises(Exception):
+        DecisionTreeClassifier().fit(training.drop("features"))
+    with pytest.raises(Exception):
+        DecisionTreeClassifier().fit(training.withColumn("features",F.array(F.lit(1.0))))

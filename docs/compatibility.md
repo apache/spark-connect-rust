@@ -198,6 +198,26 @@ transformed DataFrames retain the cached server model until their last owner dro
 Tree inspection, feature importances, single-vector prediction and persistence are
 not exposed by this native addition.
 
+## Native DecisionTreeClassifier
+
+`spark_connect::ml::DecisionTreeClassifier` trains Spark's JVM decision tree
+classifier through Connect with ML vector features and contiguous numeric class
+labels starting at zero. Rust builder setters cover all 18 PySpark constructor
+parameters, including `pruneTree` (Spark 4.3.0), plus class thresholds. Unset
+parameters use Spark's defaults.
+
+The Python binding is available as
+`pyspark.ml.connect.classification.DecisionTreeClassifier` and
+`pyspark.ml.connect.DecisionTreeClassifier`. Its keyword-only constructor matches
+PySpark's parameter names and defaults; mutating `setFeaturesCol`, `setMaxDepth`,
+etc. methods and `setThresholds` return the estimator.
+
+Fitted models expose DataFrame `transform`, including prediction, probability,
+raw per-leaf weighted class counts and an optional scalar double leaf index.
+Models, clones and lazy transformed DataFrames retain the cached model in its
+fitting session until the last owner is dropped. Tree inspection, feature
+importances, single-vector prediction and persistence are outside this addition.
+
 ## Native RandomForestClassifier
 
 `spark_connect::ml::RandomForestClassifier` trains Spark's JVM random forest
