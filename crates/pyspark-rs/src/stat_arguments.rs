@@ -2,7 +2,7 @@
 //! ...), which check their arguments on the client as PySpark Connect's DataFrame does.
 
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyFloat, PyInt, PyList, PyString, PyTuple};
+use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple};
 use spark_connect::dataframe::DataFrame;
 use spark_connect::group::StatFunctions;
 
@@ -101,17 +101,39 @@ pub(crate) fn dropna(
     Ok(PyDataFrame::new(dataframe))
 }
 
-/// The `thresh` and the `subset` of `dropna`, checked as PySpark's.
+/// The `thresh` and the `subset` of `dropna`, checked as PySpark's. The `subset` is checked
+/// before the `thresh` is sent as a proto int, which [`proto_int32`] checks.
 fn dropna_thresh_and_subset(
     thresh: Option<&Bound<'_, PyAny>>,
     subset: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<(Option<i32>, Vec<String>)> {
     let thresh = match thresh {
         None => None,
-        Some(thresh) if thresh.is_instance_of::<PyInt>() => Some(thresh.extract::<i32>()?),
+        Some(thresh) if thresh.is_instance_of::<PyInt>() => Some(thresh),
         Some(thresh) => return Err(not_expected_type(thresh, "thresh", "int")),
     };
-    Ok((thresh, subset_columns(subset, "list, str or tuple")?))
+    let columns = subset_columns(subset, "list, str or tuple")?;
+    let thresh = thresh.map(proto_int32).transpose()?;
+    Ok((thresh, columns))
+}
+
+/// An int, the `thresh` of `dropna`, as the proto's int32. A bool, which is an int, is refused as
+/// the proto refuses it, `TypeError`, and an int out of the range of an int32 is a `ValueError`.
+fn proto_int32(thresh: &Bound<'_, PyAny>) -> PyResult<i32> {
+    if thresh.is_instance_of::<PyBool>() {
+        return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+            "Cannot set spark.connect.NADrop.min_non_nulls to {thresh}: {thresh} has type {}, \
+             but expected one of: (int).",
+            thresh.get_type()
+        )));
+    }
+    match thresh.extract::<i32>() {
+        Ok(thresh) => Ok(thresh),
+        Err(_) => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "Value out of range: {}",
+            thresh.str()?
+        ))),
+    }
 }
 
 /// `df.fillna(value, subset)` and `df.na.fill`, as PySpark's: `value` is a bool, an int, a
