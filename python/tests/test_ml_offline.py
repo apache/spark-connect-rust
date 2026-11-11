@@ -333,6 +333,14 @@ _NATIVE_PARAMS = {
         solver="str", weightCol="str", aggregationDepth="int", loss="str", epsilon="float",
         maxBlockSizeInMB="float",
     ),
+    "DecisionTreeClassifier": dict(
+        featuresCol="str", labelCol="str", predictionCol="str", probabilityCol="str",
+        rawPredictionCol="str", maxDepth="int", maxBins="int", minInstancesPerNode="int",
+        minInfoGain="float", pruneTree="bool", maxMemoryInMB="int", cacheNodeIds="bool",
+        checkpointInterval="int", impurity="str",
+        seed="int", leafCol="str", minWeightFractionPerNode="float",
+        weightCol="str", thresholds="float_list",
+    ),
     "RandomForestClassifier": dict(
         featuresCol="str", labelCol="str", predictionCol="str", probabilityCol="str",
         rawPredictionCol="str", maxDepth="int", maxBins="int", minInstancesPerNode="int",
@@ -340,6 +348,13 @@ _NATIVE_PARAMS = {
         checkpointInterval="int", impurity="str", numTrees="int", featureSubsetStrategy="str",
         seed="int", subsamplingRate="float", leafCol="str", minWeightFractionPerNode="float",
         weightCol="str", bootstrap="bool", thresholds="float_list",
+    ),
+    "RandomForestRegressor": dict(
+        featuresCol="str", labelCol="str", predictionCol="str", maxDepth="int",
+        maxBins="int", minInstancesPerNode="int", minInfoGain="float", maxMemoryInMB="int",
+        cacheNodeIds="bool", checkpointInterval="int", impurity="str", subsamplingRate="float",
+        seed="int", numTrees="int", featureSubsetStrategy="str", leafCol="str",
+        minWeightFractionPerNode="float", weightCol="str", bootstrap="bool",
     ),
     "KMeans": dict(
         featuresCol="str", predictionCol="str", k="int", initMode="str", initSteps="int",
@@ -2314,3 +2329,92 @@ def test_ml_none_params_send_null_and_empty_lists_raise_at_the_command_as_pyspar
     assert params.params["inputCols"] == text_format.Parse(
         expected % _UTF8, pb2.Expression.Literal()
     )
+
+
+@pytest.mark.parametrize("use_setters", [False, True], ids=["constructor", "setters"])
+def test_random_forest_regressor_native_parameters_match_official_fixture(ml_mock, use_setters):
+    import base64
+    import inspect
+    import json
+    from pathlib import Path
+
+    from pyspark.ml.connect import RandomForestRegressor as exported
+    from pyspark.ml.connect.regression import RandomForestRegressor
+
+    assert exported is RandomForestRegressor
+    defaults = dict(featuresCol="features", labelCol="label", predictionCol="prediction",
+                    maxDepth=5, maxBins=32, minInstancesPerNode=1, minInfoGain=0.0,
+                    maxMemoryInMB=256, cacheNodeIds=False, checkpointInterval=10,
+                    impurity="variance", subsamplingRate=1.0, seed=None, numTrees=20,
+                    featureSubsetStrategy="auto", leafCol="", minWeightFractionPerNode=0.0,
+                    weightCol=None, bootstrap=True)
+    signature = inspect.signature(RandomForestRegressor)
+    assert list(signature.parameters) == list(defaults)
+    for name, default in defaults.items():
+        assert signature.parameters[name].kind == inspect.Parameter.KEYWORD_ONLY
+        assert signature.parameters[name].default == default
+    fixture = json.loads((Path(__file__).resolve().parents[2] / "tests/golden/random_forest_regressor.json").read_text())
+    spark, service = ml_mock
+    models = []
+    for case in fixture["cases"]:
+        values = dict(featuresCol="input", labelCol="target", predictionCol="value", maxDepth=3,
+                      maxBins=16, minInstancesPerNode=2, minInfoGain=0.01, maxMemoryInMB=64,
+                      cacheNodeIds=True, checkpointInterval=-1, impurity="variance", numTrees=7,
+                      featureSubsetStrategy="all", seed=case["seed"], subsamplingRate=0.75,
+                      leafCol="leaves", minWeightFractionPerNode=0.1, weightCol="weight", bootstrap=False)
+        if use_setters:
+            estimator = RandomForestRegressor()
+            for name, value in values.items():
+                assert getattr(estimator,"set"+name[0].upper()+name[1:])(value) is estimator
+        else:
+            estimator = RandomForestRegressor(**values)
+        operator, params = _native_request(spark, service, estimator, models)
+        assert operator.name == "org.apache.spark.ml.regression.RandomForestRegressor"
+        assert params == pb2.MlParams.FromString(base64.b64decode(case["params_b64"]))
+
+
+@pytest.mark.parametrize("use_setters", [False, True], ids=["constructor", "setters"])
+def test_decision_tree_classifier_native_parameters_match_official_fixture(ml_mock, use_setters):
+    import base64
+    import inspect
+    import json
+    from pathlib import Path
+
+    import pyspark._pyspark as native
+    from pyspark.ml.connect import DecisionTreeClassifier as exported
+    from pyspark.ml.connect.classification import DecisionTreeClassifier
+
+    assert exported is DecisionTreeClassifier is native.DecisionTreeClassifier
+    with pytest.raises(TypeError, match="unexpected keyword argument 'thresholds'"):
+        DecisionTreeClassifier(thresholds=[0.25, 0.75])
+    defaults = dict(featuresCol="features", labelCol="label", predictionCol="prediction",
+                    probabilityCol="probability", rawPredictionCol="rawPrediction",
+                    maxDepth=5, maxBins=32, minInstancesPerNode=1, minInfoGain=0.0,
+                    pruneTree=True, maxMemoryInMB=256, cacheNodeIds=False,
+                    checkpointInterval=10, impurity="gini", seed=None, weightCol=None,
+                    leafCol="", minWeightFractionPerNode=0.0)
+    signature = inspect.signature(DecisionTreeClassifier)
+    assert list(signature.parameters) == list(defaults)
+    for name, default in defaults.items():
+        assert signature.parameters[name].kind == inspect.Parameter.KEYWORD_ONLY
+        assert signature.parameters[name].default == default
+    fixture = json.loads((Path(__file__).resolve().parents[2] / "tests/golden/decision_tree_classifier.json").read_text())
+    spark, service = ml_mock
+    models = []
+    for case in fixture["cases"]:
+        values = dict(featuresCol="input", labelCol="target", predictionCol="class",
+                      probabilityCol="probs", rawPredictionCol="counts", maxDepth=3,
+                      maxBins=16, minInstancesPerNode=2, minInfoGain=0.01, pruneTree=False,
+                      maxMemoryInMB=64, cacheNodeIds=True, checkpointInterval=-1,
+                      impurity="entropy", seed=case["seed"], weightCol="weight",
+                      leafCol="leaves", minWeightFractionPerNode=0.1)
+        if use_setters:
+            estimator = DecisionTreeClassifier()
+            for name, value in values.items():
+                assert getattr(estimator,"set"+name[0].upper()+name[1:])(value) is estimator
+        else:
+            estimator = DecisionTreeClassifier(**values)
+        assert estimator.setThresholds([0.25,0.75]) is estimator
+        operator, params = _native_request(spark, service, estimator, models)
+        assert operator.name == "org.apache.spark.ml.classification.DecisionTreeClassifier"
+        assert params == pb2.MlParams.FromString(base64.b64decode(case["params_b64"]))

@@ -241,9 +241,18 @@ impl LocalRowIterator {
             },
             RowSource::Prefetch { rx, task, wait } => {
                 // The caller waits for the batch of the task, which is a wait for the execution.
+                // The task has no wait of its own that a signal aborts, so the caller ends its
+                // wait for the batch at the first signal, as PySpark's retry sleeps do, and
+                // dropping the receiver stops the task.
                 let batch = {
                     let _waiting = wait.waiting();
-                    block_on(rx.recv())
+                    block_on(spark_connect_core::runtime::until_abort(
+                        spark_connect_core::runtime::ABORT_RETRIES,
+                        rx.recv(),
+                    ))
+                };
+                let Some(batch) = batch else {
+                    return Some(Err(spark_connect_core::client::wait_aborted().into()));
                 };
                 if batch.is_none() {
                     // The channel closed: the task ended, or it panicked, which then drops its
@@ -1328,7 +1337,8 @@ impl DataFrame {
 
     /// Check if the DataFrame is empty.
     pub fn is_empty(&self) -> Result<bool> {
-        self.limit(1).count().map(|c| c == 0)
+        let no_columns: [Column; 0] = [];
+        self.select(no_columns).take(1).map(|rows| rows.is_empty())
     }
 
     /// Get column names.
@@ -6841,6 +6851,84 @@ mod subquery_tests {
         assert_eq!(
             df.exists().expression().render(),
             format!("SubqueryExpression(plan=<plan {id}>, type=exists)")
+        );
+    }
+}
+
+/// The requests of deep plans and expressions, sent from a thread with a small stack. The clone of
+/// a request recurses once per level, as its serialization does, so the client grows the stack for
+/// it. The client of a port that nothing listens to fails each call after its request is built and
+/// cloned, so that a call returns an error without a server.
+#[cfg(test)]
+mod deep_request_stack_tests {
+    use super::*;
+    use crate::column::col;
+    use crate::expression::MAX_EXPRESSION_DEPTH;
+    use crate::plan::MAX_PLAN_DEPTH;
+    use crate::session::SparkSession;
+    use spark_connect_core::retries::RetryPolicy;
+    use spark_connect_core::{ChannelBuilder, SparkConnectClient};
+
+    fn unreachable_session() -> SparkSession {
+        let builder = ChannelBuilder::parse("sc://127.0.0.1:1").expect("valid URL");
+        let mut client =
+            block_on(SparkConnectClient::connect(&builder)).expect("failed to build client");
+        client.set_retry_policy(RetryPolicy::no_retries());
+        SparkSession::new(client)
+    }
+
+    /// Run `f` on a thread of 512 KiB, the smallest stack that a Python thread may have, in a
+    /// release build, as the drop-in runs. The frames of a debug build, and more so of a
+    /// coverage build, are several times larger, and the encode and drop of a request at the
+    /// bound, which stay on the calling thread, take more than 512 KiB there, so its thread has
+    /// the 8 MiB of a default thread of Linux.
+    fn on_a_small_stack<T: Send>(f: impl FnOnce() -> T + Send) -> T {
+        let stack = if cfg!(debug_assertions) {
+            8 << 20
+        } else {
+            512 << 10
+        };
+        std::thread::scope(|scope| {
+            std::thread::Builder::new()
+                .stack_size(stack)
+                .spawn_scoped(scope, f)
+                .unwrap()
+                .join()
+                .unwrap()
+        })
+    }
+
+    #[test]
+    fn a_plan_at_the_bound_is_sent_from_a_small_stack_without_overflowing_it() {
+        let spark = unreachable_session();
+        let mut df = spark.range(1).unwrap();
+        for i in 1..MAX_PLAN_DEPTH {
+            df = df.with_column(&format!("c{i}"), col("id"));
+        }
+        assert_eq!(df.plan().depth(), MAX_PLAN_DEPTH);
+        let (schema, collect) = on_a_small_stack(move || (df.schema(), df.collect()));
+        for error in [schema.unwrap_err(), collect.unwrap_err()] {
+            assert_ne!(
+                error.kind,
+                SparkErrorKind::RecursionError,
+                "a plan at the bound is sent: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_deep_expression_is_sent_from_a_small_stack_without_overflowing_it() {
+        let spark = unreachable_session();
+        let mut expr = col("id");
+        for _ in 0..MAX_EXPRESSION_DEPTH - 5 {
+            expr = expr.add(col("id"));
+        }
+        let df = spark.range(1).unwrap().select([expr.alias("x")]);
+        let schema = on_a_small_stack(move || df.schema()).unwrap_err();
+        assert_ne!(
+            schema.kind,
+            SparkErrorKind::RecursionError,
+            "an expression within the bound is sent: {schema}"
         );
     }
 }

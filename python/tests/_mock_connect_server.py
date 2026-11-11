@@ -243,6 +243,24 @@ def struct_schema(name="id"):
     return message_field(21, message_field(1, field))
 
 
+def retry_info_status(code, delay_ms):
+    """The grpc-status-details-bin of a failure of `code` with a RetryInfo of `delay_ms`."""
+    import grpc
+
+    # google.rpc: Status.code=1, message=2, details=3; Any.type_url=1, value=2;
+    # RetryInfo.retry_delay=1; Duration.seconds=1, nanos=2.
+    delay = varint_field(1, delay_ms // 1000) + varint_field(2, (delay_ms % 1000) * 1_000_000)
+    return (
+        varint_field(1, getattr(grpc.StatusCode, code).value[0])
+        + message_field(2, "retry later")
+        + message_field(
+            3,
+            message_field(1, "type.googleapis.com/google.rpc.RetryInfo")
+            + message_field(2, message_field(1, delay)),
+        )
+    )
+
+
 def serve(connection):
     import grpc
 
@@ -291,6 +309,8 @@ def serve(connection):
             self.execute_payloads = None
             self.execute_failure = None
             self.execute_error = None
+            self.stream_failure = None
+            self.reattach_requests = []
             self.retry_info_failures = []
             # The InterruptRequests of each Interrupt, and the operations that they interrupt.
             self.interrupt_requests = []
@@ -308,6 +328,7 @@ def serve(connection):
             self.config_failure = None
             self.block_config = False
             self.plan_compression_lookup_delay = 0
+            self.interrupt_failure = None
             self.rpc_events = []
             self.set_confs = []
             self.clone_requests = []
@@ -424,6 +445,12 @@ def serve(connection):
         # streams one response of each, r1, r2, ..., instead of `execute_payload`.
         execute_payloads = None
         execute_failure = None
+        # With `stream_failure` set to a status code name, or a (name, delay in ms) of a failure
+        # with that RetryInfo delay, ExecutePlan streams its responses and then fails with it,
+        # before ResultComplete, as a dropped stream does. Each ReattachExecute is recorded in
+        # `reattach_requests`.
+        stream_failure = None
+        reattach_requests = []
         # With `execute_error` set to (message, reason, metadata), ExecutePlan fails as the
         # server does for an error that it raised: INTERNAL, with a google.rpc.Status of an
         # ErrorInfo of `reason` and `metadata` in grpc-status-details-bin.
@@ -464,6 +491,8 @@ def serve(connection):
         block_config = False
         # The seconds that the plan compression lookup of the first plan of a session takes.
         plan_compression_lookup_delay = 0
+        # The (code, message) of each Interrupt, which the server fails with, or None.
+        interrupt_failure = None
         rpc_events = []
         set_confs = []
 
@@ -628,20 +657,7 @@ def serve(connection):
                     )
             if self.retry_info_failures:
                 code, delay_ms = self.retry_info_failures.pop(0)
-                # google.rpc: Status.code=1, message=2, details=3; Any.type_url=1, value=2;
-                # RetryInfo.retry_delay=1; Duration.seconds=1, nanos=2.
-                delay = varint_field(1, delay_ms // 1000) + varint_field(
-                    2, (delay_ms % 1000) * 1_000_000
-                )
-                status = (
-                    varint_field(1, getattr(grpc.StatusCode, code).value[0])
-                    + message_field(2, "retry later")
-                    + message_field(
-                        3,
-                        message_field(1, "type.googleapis.com/google.rpc.RetryInfo")
-                        + message_field(2, message_field(1, delay)),
-                    )
-                )
+                status = retry_info_status(code, delay_ms)
                 context.set_trailing_metadata((("grpc-status-details-bin", status),))
                 context.abort(getattr(grpc.StatusCode, code), "retry later")
             if self.execute_failure:
@@ -681,6 +697,16 @@ def serve(connection):
             )
             for index, payload in enumerate(payloads, 1):
                 yield header + message_field(13, f"r{index}") + payload
+            if self.stream_failure:
+                code, delay_ms = (
+                    self.stream_failure
+                    if isinstance(self.stream_failure, tuple)
+                    else (self.stream_failure, None)
+                )
+                if delay_ms is not None:
+                    status = retry_info_status(code, delay_ms)
+                    context.set_trailing_metadata((("grpc-status-details-bin", status),))
+                context.abort(getattr(grpc.StatusCode, code), "stream dropped")
             if block_result_complete:
                 released = self.wait_for_response(response_gate, operation_id, 30)
                 if released == "interrupted":
@@ -696,6 +722,11 @@ def serve(connection):
         def warnings_fields(self):
             # ConfigResponse.warnings=3, of `config_warnings`.
             return b"".join(message_field(3, warning) for warning in self.config_warnings)
+
+        def reattach_execute(self, request, context):
+            self.reattach_requests.append(request)
+            # ExecutePlanResponse.result_complete=14.
+            yield message_field(14, b"")
 
         def release_execute(self, request, context):
             self.release_execute_requests.append(request)
@@ -717,6 +748,9 @@ def serve(connection):
             # .session_id=1, interrupted_ids=2.
             fields = parse_message(request)
             self.interrupt_requests.append(request)
+            if self.interrupt_failure:
+                code, message = self.interrupt_failure
+                context.abort(getattr(grpc.StatusCode, code), message)
             if fields.get(4, [0])[0] != 3:
                 context.abort(grpc.StatusCode.UNIMPLEMENTED, "only Interrupt of an operation")
             operation_id = fields[6][0]
@@ -829,9 +863,7 @@ def serve(connection):
             "AnalyzePlan": grpc.unary_unary_rpc_method_handler(service.analyze),
             "ReleaseSession": grpc.unary_unary_rpc_method_handler(service.release_session),
             "ExecutePlan": grpc.unary_stream_rpc_method_handler(service.execute),
-            "ReattachExecute": grpc.unary_stream_rpc_method_handler(
-                lambda request, context: iter([message_field(14, b"")])
-            ),
+            "ReattachExecute": grpc.unary_stream_rpc_method_handler(service.reattach_execute),
             "ReleaseExecute": grpc.unary_unary_rpc_method_handler(service.release_execute),
             "FetchErrorDetails": grpc.unary_unary_rpc_method_handler(service.fetch_error_details),
             "Config": grpc.unary_unary_rpc_method_handler(service.config),

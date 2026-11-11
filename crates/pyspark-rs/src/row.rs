@@ -5,14 +5,47 @@ use std::sync::Arc;
 
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
-use pyo3::types::{PyByteArray, PyBytes, PyDict, PyList, PyTuple};
+use pyo3::types::{PyByteArray, PyBytes, PyDict, PyList, PyTuple, PyType};
 use spark_connect::row::{StructValue, Value};
 
 /// Functions that deserialize user-defined or spatial values in each result field.
 pub(crate) type FieldConverters = Arc<Vec<Option<Py<PyAny>>>>;
 
 static CREATE_ROW: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static DATETIME_OBJECTS: PyOnceLock<DateTimeObjects> = PyOnceLock::new();
+static DECIMAL: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 const ROW_SOURCE: &std::ffi::CStr = pyo3::ffi::c_str!(include_str!("row.py"));
+
+/// Python classes and immutable epoch values used for every collected date/time value.
+/// Resolving them once avoids repeated imports and module attribute lookups per field.
+struct DateTimeObjects {
+    date: Py<PyType>,
+    time: Py<PyType>,
+    timedelta: Py<PyType>,
+    naive_epoch: Py<PyAny>,
+    utc_epoch: Py<PyAny>,
+}
+
+fn datetime_objects(py: Python<'_>) -> PyResult<&DateTimeObjects> {
+    DATETIME_OBJECTS.get_or_try_init(py, || {
+        let module = py.import("datetime")?;
+        let class = |name: &str| -> PyResult<Bound<'_, PyType>> {
+            Ok(module.getattr(name)?.cast_into::<PyType>()?)
+        };
+        let datetime = class("datetime")?;
+        let naive_epoch = datetime.call1((1970, 1, 1))?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("tzinfo", module.getattr("timezone")?.getattr("utc")?)?;
+        let utc_epoch = datetime.call((1970, 1, 1), Some(&kwargs))?;
+        Ok(DateTimeObjects {
+            date: class("date")?.unbind(),
+            time: class("time")?.unbind(),
+            timedelta: class("timedelta")?.unbind(),
+            naive_epoch: naive_epoch.unbind(),
+            utc_epoch: utc_epoch.unbind(),
+        })
+    })
+}
 
 /// Expose the embedded tuple `Row` as `pyspark._pyspark.Row`, re-exported by the Python shims.
 /// Its source imports PySpark modules only inside methods, avoiding import cycles
@@ -176,19 +209,12 @@ pub(crate) fn row_values_to_py(
 
 /// `datetime.datetime(1970, 1, 1)`, the epoch of Spark's timestamps, without a time zone.
 fn naive_epoch(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
-    py.import("datetime")?
-        .getattr("datetime")?
-        .call1((1970, 1, 1))
+    Ok(datetime_objects(py)?.naive_epoch.bind(py).clone())
 }
 
 /// `datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)`, the epoch of the instants.
 fn utc_epoch(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
-    let datetime = py.import("datetime")?;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item("tzinfo", datetime.getattr("timezone")?.getattr("utc")?)?;
-    datetime
-        .getattr("datetime")?
-        .call((1970, 1, 1), Some(&kwargs))
+    Ok(datetime_objects(py)?.utc_epoch.bind(py).clone())
 }
 
 /// The `datetime.timedelta` of `micros` microseconds, exact over the whole i64 range: a float
@@ -196,7 +222,7 @@ fn utc_epoch(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
 fn micros_timedelta(py: Python<'_>, micros: i64) -> PyResult<Bound<'_, PyAny>> {
     let days = micros.div_euclid(86_400_000_000);
     let remainder = micros.rem_euclid(86_400_000_000);
-    py.import("datetime")?.getattr("timedelta")?.call1((
+    datetime_objects(py)?.timedelta.bind(py).call1((
         days,
         remainder / 1_000_000,
         remainder % 1_000_000,
@@ -230,8 +256,8 @@ fn value_to_py<'py>(
         Value::Binary(b) => PyByteArray::new(py, b).into_any(),
         Value::Date(d) => {
             // Convert days-since-epoch (i32) to datetime.date
-            let date_mod = py.import("datetime")?;
-            let date_cls = date_mod.getattr("date")?;
+            let datetime = datetime_objects(py)?;
+            let date_cls = datetime.date.bind(py);
             if (-719_162..=2_932_896).contains(d) {
                 // 719163 is the ordinal of 1970-01-01
                 let ordinal = (*d as i64) + 719163i64;
@@ -241,7 +267,7 @@ fn value_to_py<'py>(
                 // `date(1970, 1, 1) + timedelta(days=d)`, which raises its OverflowError.
                 let kwargs = PyDict::new(py);
                 kwargs.set_item("days", *d)?;
-                let delta = date_mod.getattr("timedelta")?.call((), Some(&kwargs))?;
+                let delta = datetime.timedelta.bind(py).call((), Some(&kwargs))?;
                 date_cls.call1((1970, 1, 1))?.add(delta)?.into_any()
             }
         }
@@ -265,7 +291,7 @@ fn value_to_py<'py>(
             );
             let (minutes, remainder) = (remainder / 60_000_000_000, remainder % 60_000_000_000);
             let (seconds, remainder) = (remainder / 1_000_000_000, remainder % 1_000_000_000);
-            py.import("datetime")?.getattr("time")?.call1((
+            datetime_objects(py)?.time.bind(py).call1((
                 hours,
                 minutes,
                 seconds,
@@ -278,7 +304,7 @@ fn value_to_py<'py>(
             // The resulting +/-107 million days fit timedelta's +/-999999999 days.
             let days = micros.div_euclid(86_400_000_000);
             let remainder = micros.rem_euclid(86_400_000_000);
-            py.import("datetime")?.getattr("timedelta")?.call1((
+            datetime_objects(py)?.timedelta.bind(py).call1((
                 days,
                 remainder / 1_000_000,
                 remainder % 1_000_000,
@@ -299,8 +325,7 @@ fn value_to_py<'py>(
         }
         Value::Decimal { value, .. } => {
             // Convert to Python decimal.Decimal by instantiating the class
-            let decimal_mod = py.import("decimal")?;
-            let decimal_cls = decimal_mod.getattr("Decimal")?;
+            let decimal_cls = DECIMAL.import(py, "decimal", "Decimal")?;
             decimal_cls.call1((value.as_str(),))?.into_any()
         }
         Value::List(items) => {

@@ -1259,10 +1259,14 @@ pub(crate) fn convert(
             Ok(Value::Map(entries))
         }
         DataType::Binary => {
-            if let Ok(bytes) = obj.cast::<PyBytes>() {
+            if let Ok(bytes) = obj.cast_exact::<PyBytes>() {
                 Ok(Value::Binary(bytes.as_bytes().to_vec()))
-            } else if let Ok(bytes) = obj.cast::<PyByteArray>() {
+            } else if let Ok(bytes) = obj.cast_exact::<PyByteArray>() {
                 Ok(Value::Binary(bytes.to_vec()))
+            } else if obj.is_instance_of::<PyBytes>() || obj.is_instance_of::<PyByteArray>() {
+                // bytes(obj) honors a __bytes__ of the subclass, which its buffer does not.
+                let bytes = py.get_type::<PyBytes>().call1((obj,))?;
+                Ok(Value::Binary(bytes.cast::<PyBytes>()?.as_bytes().to_vec()))
             } else {
                 Err(assertion())
             }

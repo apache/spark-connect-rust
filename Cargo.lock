@@ -71,6 +71,7 @@ dependencies = [
  "stacker",
  "thiserror",
  "tokio",
+ "tonic",
  "uuid",
 ]
 
@@ -95,6 +96,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "stacker",
  "tempfile",
  "thiserror",
  "tokio",

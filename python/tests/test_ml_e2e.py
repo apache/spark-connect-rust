@@ -242,23 +242,27 @@ def _native_estimators():
     # Every native pyspark.ml.connect estimator, with the class of the model that the server
     # caches for its fit, and data that it fits.
     from pyspark.ml.connect import (
+        DecisionTreeClassifier,
         KMeans,
         LinearRegression,
         LinearSVC,
         LogisticRegression,
         MaxAbsScaler,
         RandomForestClassifier,
+        RandomForestRegressor,
         StandardScaler,
         StringIndexer,
     )
 
     ml = "org.apache.spark.ml."
     return [
+        (DecisionTreeClassifier(), ml + "classification.DecisionTreeClassificationModel"),
         (KMeans(k=2, seed=1), ml + "clustering.KMeansModel"),
         (LinearSVC(maxIter=2), ml + "classification.LinearSVCModel"),
         (LinearRegression(maxIter=2), ml + "regression.LinearRegressionModel"),
         (LogisticRegression(maxIter=2), ml + "classification.LogisticRegressionModel"),
         (RandomForestClassifier(numTrees=2), ml + "classification.RandomForestClassificationModel"),
+        (RandomForestRegressor(numTrees=2), ml + "regression.RandomForestRegressionModel"),
         (StandardScaler(inputCol="features", outputCol="o"), ml + "feature.StandardScalerModel"),
         (MaxAbsScaler(inputCol="features", outputCol="o"), ml + "feature.MaxAbsScalerModel"),
         (StringIndexer(inputCol="s", outputCol="o"), ml + "feature.StringIndexerModel"),

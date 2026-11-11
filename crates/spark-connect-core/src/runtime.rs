@@ -41,11 +41,20 @@ pub fn get_runtime() -> &'static Runtime {
 /// session hook of the executions), which may run a query itself: as PySpark does, the
 /// nested query runs. The thread is then in the runtime's context, which `block_in_place`
 /// leaves for the nested `block_on`.
+///
+/// The future is driven from the heap, so that the stack of the calling thread holds no copy of
+/// it, however large it is.
 pub fn block_on<F>(f: F) -> F::Output
 where
     F: std::future::Future + Send,
     F::Output: Send,
 {
+    // The future of a request holds the state of its gRPC call and of its retries, tens of KiB,
+    // and each frame that moves it on to the runtime (`drive`, the runtime's `block_on`, the
+    // closure of `block_in_place`) keeps a copy of it on the calling thread, unless the compiler
+    // inlines that frame, which depends on the crate that calls this one. A Python thread may
+    // have a stack of 512 KiB. Moved from the heap, those frames hold only its pointer.
+    let f = Box::pin(f);
     let watch = WAIT_WATCH.with(|watch| watch.borrow().clone());
     match tokio::runtime::Handle::try_current() {
         Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
@@ -74,8 +83,59 @@ pub enum Watch {
 /// [`POLL_INTERVAL`] on the thread that waits.
 pub type WaitWatch = dyn Fn() -> Watch + Send + Sync;
 
+/// The level of [`until_abort`] that a wait reaches once the first signal of the process
+/// arrives while an execution of the wait is in flight: the retries, the backoffs and the RPCs
+/// that have not been answered end at once, as PySpark's retry sleeps raise KeyboardInterrupt,
+/// while the responses of a streaming execution are still read, so that the server's
+/// cancellation of it ends them.
+pub const ABORT_RETRIES: u8 = 1;
+
+/// The level of [`until_abort`] that every wait reaches, when a signal arrives while no execution
+/// of the wait is in flight, or a second signal arrives after the interrupt of the execution.
+pub const ABORT_ALL: u8 = 2;
+
 thread_local! {
     static WAIT_WATCH: RefCell<Option<Arc<WaitWatch>>> = const { RefCell::new(None) };
+    /// The abort level of the wait that the calling thread runs, see [`until_abort`].
+    static WAIT_ABORT: RefCell<Option<tokio::sync::watch::Receiver<u8>>> =
+        const { RefCell::new(None) };
+}
+
+/// Runs the abort level of the wait of [`drive`] on this thread, until it drops.
+struct AbortScope(Option<tokio::sync::watch::Receiver<u8>>);
+
+impl AbortScope {
+    fn enter(receiver: tokio::sync::watch::Receiver<u8>) -> Self {
+        AbortScope(WAIT_ABORT.with(|abort| abort.replace(Some(receiver))))
+    }
+}
+
+impl Drop for AbortScope {
+    fn drop(&mut self) {
+        let previous = self.0.take();
+        WAIT_ABORT.with(|abort| *abort.borrow_mut() = previous);
+    }
+}
+
+/// `f`, which a wait of the calling thread ends at once, dropping it unfinished, when the wait
+/// reaches `level` (see [`ABORT_RETRIES`] and [`ABORT_ALL`]): None then, else the output of `f`.
+/// Outside a wait that a watch polls, `f` is awaited as it is.
+pub async fn until_abort<F: std::future::Future>(level: u8, f: F) -> Option<F::Output> {
+    let receiver = WAIT_ABORT.with(|abort| abort.borrow().clone());
+    let Some(mut receiver) = receiver else {
+        return Some(f.await);
+    };
+    tokio::pin!(f);
+    tokio::select! {
+        biased;
+        _ = async {
+            // A wait whose sender is gone is not aborted by it.
+            if receiver.wait_for(|reached| *reached >= level).await.is_err() {
+                std::future::pending::<()>().await;
+            }
+        } => None,
+        output = &mut f => Some(output),
+    }
 }
 
 /// Run `f` on this thread, with `watch` called by the waits for the server that `f` makes on this
@@ -109,8 +169,10 @@ where
     F: std::future::Future + Send,
     F::Output: Send,
 {
+    // Driven from the heap, as `block_on` drives its future.
+    let f = Box::pin(f);
     let watch = WAIT_WATCH.with(|watch| watch.borrow().clone());
-    let drive = |f: F| match watch {
+    let drive = |f: Pin<Box<F>>| match watch {
         Some(watch) => get_runtime().block_on(watched_abortable(f, watch)),
         None => Some(get_runtime().block_on(f)),
     };
@@ -151,31 +213,62 @@ async fn watched_abortable<F: Future>(f: F, watch: Arc<WaitWatch>) -> Option<F::
 /// Drive `f` on the shared runtime, polling `watch` (if any) as the wait goes on.
 fn drive<F: Future>(f: F, watch: Option<Arc<WaitWatch>>) -> F::Output {
     match watch {
-        Some(watch) => get_runtime().block_on(watched(f, watch)),
+        Some(watch) => {
+            let (abort, receiver) = tokio::sync::watch::channel(0_u8);
+            let _scope = AbortScope::enter(receiver);
+            get_runtime().block_on(watched(f, watch, abort))
+        }
         None => get_runtime().block_on(f),
     }
 }
 
-/// `f`, polled as it is, and `watch` called every [`POLL_INTERVAL`] until it returns an interrupt,
-/// which is spawned once. `f` is driven to its end, and the interrupt is awaited with it, so that
-/// the cleanup of `f` runs as the server ends the execution.
-async fn watched<F: Future>(f: F, watch: Arc<WaitWatch>) -> F::Output {
+/// `f`, polled as it is, and `watch` called every [`POLL_INTERVAL`]. The first interrupt that it
+/// returns is spawned, and the wait reaches [`ABORT_RETRIES`]: `f` is driven on, and the interrupt
+/// is awaited with it, so that the cleanup of `f` runs as the server ends the execution. A wait
+/// that `watch` aborts reaches [`ABORT_ALL`], which ends the waits of `f` that [`until_abort`]
+/// covers, and the interrupt that is still running. The polls go on after an interrupt, so that
+/// a second signal aborts the wait.
+async fn watched<F: Future>(
+    f: F,
+    watch: Arc<WaitWatch>,
+    abort: tokio::sync::watch::Sender<u8>,
+) -> F::Output {
     tokio::pin!(f);
     let mut ticks = tokio::time::interval(POLL_INTERVAL);
     let mut interrupt: Option<tokio::task::JoinHandle<()>> = None;
     loop {
         tokio::select! {
             output = &mut f => {
-                if let Some(interrupt) = interrupt {
-                    let _ = interrupt.await;
+                // The interrupt is awaited, and a second signal, polled meanwhile, ends the wait
+                // of it: the interrupt is then cancelled.
+                if let Some(mut interrupt) = interrupt {
+                    loop {
+                        tokio::select! {
+                            _ = &mut interrupt => break,
+                            _ = ticks.tick() => {
+                                if let Watch::Abort = watch() {
+                                    abort.send_replace(ABORT_ALL);
+                                    interrupt.abort();
+                                    break;
+                                }
+                            }
+                        }
+                    }
                 }
                 return output;
             }
-            _ = ticks.tick(), if interrupt.is_none() => {
-                if let Watch::Interrupt(sent) = watch() {
-                    interrupt = Some(tokio::spawn(sent));
+            _ = ticks.tick() => match watch() {
+                Watch::Continue => {}
+                Watch::Interrupt(sent) => {
+                    abort.send_replace(ABORT_RETRIES);
+                    if interrupt.is_none() {
+                        interrupt = Some(tokio::spawn(sent));
+                    }
                 }
-            }
+                Watch::Abort => {
+                    abort.send_replace(ABORT_ALL);
+                }
+            },
         }
     }
 }
@@ -335,6 +428,33 @@ mod tests {
         assert_eq!(result, 30);
     }
 
+    /// A future of a large state, as the future of a request is of the state of its gRPC call,
+    /// is driven from the heap: a thread of a small stack, which holds it once, holds no other
+    /// copy of it in the frames that drive it, whatever the compiler inlines. (The frames of a
+    /// debug build copy more, so its thread has the stack of a default thread of Linux.)
+    #[test]
+    fn test_block_on_holds_no_copy_of_a_large_future_on_a_small_stack() {
+        const STATE: usize = 192 << 10;
+        let stack = if cfg!(debug_assertions) {
+            8 << 20
+        } else {
+            512 << 10
+        };
+        let output = std::thread::Builder::new()
+            .stack_size(stack)
+            .spawn(|| {
+                block_on(async {
+                    let state = [7u8; STATE];
+                    tokio::task::yield_now().await;
+                    state[STATE - 1]
+                })
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        assert_eq!(output, 7);
+    }
+
     #[test]
     fn test_watch_is_called_while_the_future_waits() {
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -375,7 +495,7 @@ mod tests {
             })
         });
         assert_eq!(output, 9);
-        assert!(interrupted.load(Ordering::SeqCst));
+        assert!(interrupted.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     #[test]
@@ -402,6 +522,31 @@ mod tests {
             })
         });
         assert_eq!(waited, 9);
+    }
+
+    #[test]
+    fn test_until_abort_ends_the_waits_that_the_watch_aborts_at_their_level() {
+        // A wait of the watch's abort at ABORT_ALL ends at once, dropping its future unfinished.
+        let aborted = with_wait_watch(Arc::new(|| Watch::Abort), || {
+            block_on(until_abort(ABORT_ALL, std::future::pending::<u8>()))
+        });
+        assert_eq!(aborted, None);
+        // An interrupt reaches ABORT_RETRIES only: the retries end, and the interrupt is awaited.
+        let interrupted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = Arc::clone(&interrupted);
+        let retried = with_wait_watch(
+            Arc::new(move || {
+                let flag = Arc::clone(&flag);
+                Watch::Interrupt(Box::pin(async move {
+                    flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                }))
+            }),
+            || block_on(until_abort(ABORT_RETRIES, std::future::pending::<u8>())),
+        );
+        assert_eq!(retried, None);
+        assert!(interrupted.load(std::sync::atomic::Ordering::SeqCst));
+        // Outside a watch, a future is awaited as it is.
+        assert_eq!(block_on(until_abort(ABORT_ALL, async { 8 })), Some(8));
     }
 
     #[test]
