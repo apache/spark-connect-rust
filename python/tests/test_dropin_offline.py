@@ -18932,7 +18932,8 @@ def test_stream_reader_checks_its_arguments_as_pyspark(offline_spark):
     assert e.value.getCondition() == "VALUE_NOT_NON_EMPTY_STR"
     with pytest.raises(PySparkTypeError):
         reader.json(1, multiLine=True)
-    assert reader._options["multiLine"] == "true"
+    # As PySpark's format methods, which set their options through option, a bool is "True".
+    assert reader._options["multiLine"] == "True"
     with pytest.raises(AnalysisException) as e:
         offline_spark.readStream.schema("id long").changes("t")
     assert e.value.getCondition() == "_LEGACY_ERROR_TEMP_1189"
@@ -19043,6 +19044,22 @@ def test_stream_reader_setters_mutate_and_return_self(offline_spark):
     assert r._format == "xml" and r._options["rowTag"] == "row"
     r.table("t")
     assert type(r.load()).__name__ == "DataFrame"
+
+
+def test_stream_reader_converts_bool_options_as_pyspark(offline_spark):
+    # As PySpark's DataStreamReader: option sets str(value), and so do the format methods, which
+    # set their options through option, so a bool is "True"; options and load lower it, as to_str.
+    r = offline_spark.readStream
+    assert r.option("a", True) is r and r.option("b", False) is r
+    assert r.option("c", None) is r
+    assert r._options == {"a": "True", "b": "False"}
+    assert r.options(d=True, e=False, f=None) is r
+    assert r._options == {"a": "True", "b": "False", "d": "true", "e": "false"}
+    r.csv("/c", header=True, inferSchema=False)
+    assert r._options["header"] == "True" and r._options["inferSchema"] == "False"
+    r.load("/l", format="json", g=True)
+    assert r._options["g"] == "true"
+    assert r._options["header"] == "True"
 
 
 def test_writer_setters_mutate_and_return_self(offline_spark):
@@ -19823,6 +19840,25 @@ def test_catalog_creates_tables_eagerly_as_pyspark(mock_connect):
         warnings.simplefilter("ignore", FutureWarning)
         with pytest.raises(PySparkTypeError):
             spark.catalog.createExternalTable("e", schema=1)
+
+
+def test_catalog_create_table_takes_bytes_options_as_protobuf_does(mock_connect):
+    spark, service = mock_connect
+    # As PySpark's protobuf map of strings, bytes that are UTF-8 are sent decoded, while bytes
+    # that are not UTF-8 raise a ValueError, and a bytearray or a memoryview a TypeError.
+    spark.catalog.createTable("t", source="parquet", a=b"x", b=None)
+    create = _sent_catalog(service.execute_requests[-1], 14)
+    assert [parse_message(entry) for entry in create[6]] == [{1: [b"a"], 2: [b"x"]}]
+    spark.catalog.createTable("t", source="parquet", a="\u00e9".encode())
+    create = _sent_catalog(service.execute_requests[-1], 14)
+    assert [parse_message(entry) for entry in create[6]] == [{1: [b"a"], 2: [b"\xc3\xa9"]}]
+    calls = len(service.execute_requests)
+    with pytest.raises(ValueError, match="has type bytes, but isn't valid UTF-8 encoding"):
+        spark.catalog.createTable("t", source="parquet", a=b"\xff\xfe")
+    for value in (bytearray(b"x"), memoryview(b"x")):
+        with pytest.raises(TypeError, match=r"has type <class '(bytearray|memoryview)'>"):
+            spark.catalog.createTable("t", source="parquet", a=value)
+    assert len(service.execute_requests) == calls
 
 
 @pytest.mark.parametrize("call, method", [
