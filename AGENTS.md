@@ -57,12 +57,11 @@ the Rust and Python sides, no stubs, green CI.
   autonomously committed+pushed against instructions. If you delegate, give each
   agent a **disjoint file set**, tell them **no git, no gh, no cargo-collision**,
   and commit centrally yourself. Only one process may run cargo at a time.
-- **Never let an agent run `gh`** — it flips the active account
-  (`gh auth switch`) and breaks your pushes. Run `gh auth switch -u HyukjinKwon`
-  before pushing.
-- Commit messages end with `Co-authored-by: Isaac <no-reply@databricks.com>`.
-  PR bodies end with `This pull request and its description were written by Isaac.`
-  Never bypass git hooks (`--no-verify`).
+- **Never let a delegated agent run `gh`** — it can flip the active account
+  (`gh auth switch`) and break your pushes. Before pushing, confirm with
+  `gh auth status` that `gh` is authenticated as the account you intend to push
+  with.
+- Never bypass git hooks (`--no-verify`).
 - **Always merge PRs with the dev merge script** `dev/merge_connect_rust_pr.py`
   (never `gh pr merge` or a manual `git push`). It produces the Apache-canonical
   squashed commit — `Closes #<n>`, `Authored-by:`/`Co-authored-by:`, `Signed-off-by:`
@@ -268,7 +267,8 @@ cargo clippy --workspace --all-targets                             # advisory (|
 Then re-run the step-2 diff (0 user-facing gaps) and the parity gate
 `scripts/run_official_tests.py` (runs the official connect suite through our Rust
 transport; `FLAKY_FILES` = retry, not skip). Only then
-`gh auth switch -u HyukjinKwon` and push.
+confirm `gh` is authenticated as the account you intend to push with
+(`gh auth status`) and push.
 
 **Run the NEW version's own official test cases — they change every release.**
 Do not rely on the previous version's suite. When bumping to vX.Y.Z:
@@ -318,7 +318,7 @@ Do not rely on the previous version's suite. When bumping to vX.Y.Z:
 6. Re-audit the packaging manifest for newly-shipped client files (step 5 / step 10).
 7. Coverage >90% both sides (step 6).
 8. Pre-push discipline: compile-all-tests, fmt, clippy, parity gate, prove-diff (step 7).
-9. Push (after `gh auth switch`), monitor CI, fix.
+9. Push (after confirming the active `gh` account), monitor CI, fix.
 
 ---
 
