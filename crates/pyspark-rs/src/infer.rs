@@ -1459,7 +1459,8 @@ fn arrow_scalar(obj: &Bound<'_, PyAny>, dt: &DataType) -> PyResult<Value> {
                 )?))
             }
         }
-        _ => unreachable!("not a type that PyArrow converts as it is"),
+        // `convert` calls this for the types above only, those that PySpark has no converter of.
+        _ => unreachable!("arrow_scalar of {dt:?}, a type that convert does not defer to it"),
     }
 }
 
