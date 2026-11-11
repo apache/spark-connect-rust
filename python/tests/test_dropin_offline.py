@@ -7284,6 +7284,112 @@ def test_variant_and_spatial_values_are_sent_and_collected_by_their_attributes_a
     assert type(row.g) is T.Geometry and vars(row.g) == {"wkb": wkb, "srid": 0}
 
 
+def test_freed_instances_release_their_dict_as_pyspark(mock_connect):
+    # As PySpark's classes, plain Python classes, whose instance __dict__ CPython releases with
+    # the instance: an attribute is set, read, listed by vars() and dir() and deleted; one that
+    # shadows a method, as monkeypatching sets it, is called in its place until it is deleted;
+    # and a freed instance releases its dict, which keeps its items while it is referenced. Of
+    # a class, of one that extends it in Rust (ArrayType) and of a Python subclass (a UDT), whose
+    # dict pickles and copies. PyO3 0.28 emptied the dict of a freed instance and kept it.
+    import copy
+    import sys
+    import weakref
+
+    from pyspark.sql import functions as F
+    from pyspark.sql.observation import Observation
+    from pyspark.sql.window import Window
+
+    spark, _ = mock_connect
+    df = spark.range(1)
+    column = F.col("a")
+    column.tag = 1
+    assert column.tag == 1 and vars(column) == {"tag": 1} and "tag" in dir(column)
+    del column.tag
+    assert vars(column) == {}
+    column.alias = lambda *names: "patched"
+    df.count = lambda: 42
+    assert column.alias("b") == "patched" and df.count() == 42
+    del column.alias, df.count
+    assert repr(column.alias("b")) == "Column<'a AS b'>" and df.count.__self__ is df
+    udt = _ScaledPointUDT(2.0)
+    for copied in (pickle.loads(pickle.dumps(udt)), copy.copy(udt), copy.deepcopy(udt)):
+        assert type(copied) is _ScaledPointUDT and vars(copied) == {"scale": 2.0}
+
+    for make in (lambda: F.col("a"), lambda: spark.range(1), lambda: df.groupBy("id"),
+                 lambda: spark.conf, lambda: spark.catalog, lambda: spark.read, lambda: df.na,
+                 lambda: df.write, lambda: Window.partitionBy("id"), lambda: Observation("o"),
+                 lambda: T.StructField("a", T.LongType()), T.DataType,
+                 lambda: T.ArrayType(T.LongType()), lambda: _ScaledPointUDT(2.0)):
+        obj = make()
+        obj.tag = [1]
+        attributes, freed = vars(obj), weakref.ref(obj)
+        expected, references = dict(attributes), sys.getrefcount(attributes)
+        del obj
+        assert freed() is None and attributes == expected
+        assert sys.getrefcount(attributes) == references - 1
+
+
+def test_freed_instances_given_attributes_keep_no_memory_as_pyspark(mock_connect):
+    # As PySpark's classes, plain Python classes: 20,000 instances, each given an attribute,
+    # keep next to nothing once freed (PySpark's, 32 bytes): of a Column, a GroupedData of the
+    # session, a DataType, a UDT (a Python subclass of DataType) and an Observation. PyO3 0.28
+    # kept the emptied dict of each, 64 bytes. On CPython 3.11 and 3.12, PyO3 0.28 also loses
+    # the dict that object.__new__ makes for each instance, which only PyO3 0.29 fixes: there,
+    # the memory that as many instances given no attribute keep is the base.
+    import gc
+    import sys
+    import tracemalloc
+
+    from pyspark.sql import functions as F
+    from pyspark.sql.observation import Observation
+
+    spark, _ = mock_connect
+    df = spark.range(1)
+
+    def kept(make, attribute):
+        gc.collect()
+        tracemalloc.start()
+        try:
+            before = tracemalloc.get_traced_memory()[0]
+            for _ in range(20_000):
+                obj = make()
+                if attribute:
+                    obj.tag = 1
+                del obj
+            gc.collect()
+            return tracemalloc.get_traced_memory()[0] - before
+        finally:
+            tracemalloc.stop()
+
+    eager_dicts = sys.version_info[:2] in ((3, 11), (3, 12))
+    for make in (lambda: F.col("a"), lambda: df.groupBy("id"), lambda: T.ArrayType(T.LongType()),
+                 _DayPointUDT, lambda: Observation("o")):
+        make().tag = 1  # What a first instance caches is no leak.
+        base = kept(make, False) if eager_dicts else 0
+        assert kept(make, True) - base < 20_000
+
+
+def test_freed_instances_free_a_deep_chain_of_their_attributes_as_pyspark():
+    # As PySpark's classes, whose instances CPython frees through its trashcan: a chain of
+    # 300,000 Columns, each an attribute of the next, is freed. PyO3 0.28 emptied the dict of each
+    # in its dealloc, which freed the next one within it, until the C stack overflowed. In a new
+    # interpreter, as that crashed it.
+    import subprocess
+    import sys
+
+    freed = subprocess.run([sys.executable, "-c", """
+from pyspark.sql import functions as F
+head = None
+for _ in range(300_000):
+    column = F.col("a")
+    column.next = head
+    head = column
+del column, head
+print("freed")
+"""], capture_output=True, text=True, timeout=300)
+    assert (freed.returncode, freed.stdout) == (0, "freed\n"), freed.stderr
+
+
 def test_str_of_variant_values_is_their_json_and_they_are_no_rows_as_pyspark():
     # As PySpark's VariantVal: str is its JSON, in UTC, as toJson(); repr is of its bytes. And
     # as PySpark's createDataFrame, whose VariantVal has a __dict__, so that it is a row, which
