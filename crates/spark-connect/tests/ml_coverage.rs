@@ -68,3 +68,41 @@ fn ml_estimators_setters_getters_proto() {
     assert_eq!(cv.num_folds(), 3);
     assert_eq!(cv.parallelism(), 2);
 }
+
+#[test]
+fn params_builders_send_the_literals_of_pyspark_from_outside_the_crate() {
+    // The public `Params` builder sends what PySpark sends of a Python value: an int that fits
+    // 32 bits as an `Integer`, a larger one as a `Long`, and a list of strings or floats as an
+    // array literal of that element type; `clear_param` leaves a param unset.
+    use spark_connect_proto::expression::literal::LiteralType as L;
+    let params = Params::new()
+        .set_param_int32("maxIter", 5)
+        .set_param_int_narrow("k", 3)
+        .set_param_int_narrow("seed", 1 << 40)
+        .set_param_string_array("inputCols", ["a", "b"])
+        .set_param_double_array("thresholds", [0.25, 0.75])
+        .set_param_string("weightCol", "w")
+        .clear_param("weightCol")
+        .to_proto()
+        .params;
+    assert_eq!(params["maxIter"].literal_type, Some(L::Integer(5)));
+    assert_eq!(params["k"].literal_type, Some(L::Integer(3)));
+    assert_eq!(params["seed"].literal_type, Some(L::Long(1 << 40)));
+    assert!(!params.contains_key("weightCol"));
+    let elements = |name: &str| match &params[name].literal_type {
+        Some(L::Array(array)) => array
+            .elements
+            .iter()
+            .map(|element| element.literal_type.clone())
+            .collect::<Vec<_>>(),
+        other => panic!("{name}: {other:?}"),
+    };
+    assert_eq!(
+        elements("inputCols"),
+        [Some(L::String("a".into())), Some(L::String("b".into()))]
+    );
+    assert_eq!(
+        elements("thresholds"),
+        [Some(L::Double(0.25)), Some(L::Double(0.75))]
+    );
+}

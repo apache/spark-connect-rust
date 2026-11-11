@@ -288,7 +288,7 @@ impl ChannelBuilder {
         ] {
             match self.params.get(key) {
                 Some(value) if python_int(value).is_none() => {
-                    return Err(SparkError::value_msg(format!(
+                    return Err(SparkError::builtin_value_msg(format!(
                         "invalid literal for int() with base 10: {}",
                         python_repr(value)
                     )));
@@ -486,19 +486,28 @@ fn parse_authority(authority: &str, shown_url: &str) -> Result<(String, u16)> {
 
     let port = match port_str {
         None | Some("") => DEFAULT_PORT,
-        // As urllib's message (`Port could not be cast to integer value as '...'`), with no URL.
-        Some(p) => p.parse::<u16>().map_err(|_| {
-            SparkError::value(
-                "INVALID_CONNECT_URL",
-                &[(
-                    "detail",
-                    &format!("Port could not be cast to integer value as '{p}'"),
-                )],
-            )
-        })?,
+        Some(p) => parse_port(p)?,
     };
 
     Ok((host, port))
+}
+
+/// The port of a connection string as `urllib.parse`'s `port` reads it: ASCII digits, within
+/// 0-65535. Its messages are those of its ValueError, which the reference client raises
+/// unwrapped and without the URL.
+fn parse_port(text: &str) -> Result<u16> {
+    if !text.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(SparkError::builtin_value_msg(format!(
+            "Port could not be cast to integer value as {}",
+            python_repr(text)
+        )));
+    }
+    // Saturating, so that a long run of digits is out of range rather than wrapping around.
+    let port = text.bytes().fold(0u64, |port, digit| {
+        port.saturating_mul(10)
+            .saturating_add(u64::from(digit - b'0'))
+    });
+    u16::try_from(port).map_err(|_| SparkError::builtin_value_msg("Port out of range 0-65535"))
 }
 
 /// Decode `%XX` percent-escapes (CPython `urllib.parse.unquote`).
@@ -676,7 +685,7 @@ mod tests {
             let error = c.check_keepalive().unwrap_err();
             assert_eq!(
                 error.kind,
-                crate::error::SparkErrorKind::ValueError,
+                crate::error::SparkErrorKind::BuiltinValueError,
                 "{params}"
             );
             assert_eq!(
@@ -693,6 +702,72 @@ mod tests {
         ] {
             let c = ChannelBuilder::parse(&format!("sc://localhost/;{params}")).unwrap();
             assert!(c.check_keepalive().is_ok(), "{params}");
+        }
+    }
+
+    #[test]
+    fn port_is_read_as_urllib_reads_it() {
+        // `urllib.parse`'s `port`: ASCII digits only, within 0-65535, else a ValueError. Its
+        // messages are a builtin ValueError's, which the reference client raises unwrapped.
+        for (port, expected) in [
+            ("15003", 15003),
+            ("0080", 80),
+            ("0", 0),
+            ("65535", 65535),
+            ("", DEFAULT_PORT), // no port, or an empty one
+        ] {
+            let c = ChannelBuilder::parse(&format!("sc://localhost:{port}/;token=SECRET")).unwrap();
+            assert_eq!(c.port(), expected, "{port}");
+        }
+        for (url, message) in [
+            ("sc://localhost:99999/", "Port out of range 0-65535"),
+            ("sc://localhost:65536", "Port out of range 0-65535"),
+            (
+                "sc://localhost:01234567890123456789",
+                "Port out of range 0-65535",
+            ),
+            ("sc://[::1]:99999/", "Port out of range 0-65535"),
+            (
+                "sc://localhost:+80/",
+                "Port could not be cast to integer value as '+80'",
+            ),
+            (
+                "sc://localhost:-1/",
+                "Port could not be cast to integer value as '-1'",
+            ),
+            (
+                "sc://localhost:8 0/",
+                "Port could not be cast to integer value as '8 0'",
+            ),
+            (
+                "sc://localhost:80x/",
+                "Port could not be cast to integer value as '80x'",
+            ),
+            (
+                "sc://localhost:1_0/",
+                "Port could not be cast to integer value as '1_0'",
+            ),
+            (
+                "sc://localhost:%38%30/",
+                "Port could not be cast to integer value as '%38%30'",
+            ),
+            (
+                "sc://[::1]:x/",
+                "Port could not be cast to integer value as 'x'",
+            ),
+            // Not ASCII digits, even when they are the Arabic-Indic one and two.
+            (
+                "sc://localhost:\u{0661}\u{0662}/",
+                "Port could not be cast to integer value as '\u{0661}\u{0662}'",
+            ),
+        ] {
+            let e = ChannelBuilder::parse(url).unwrap_err();
+            assert_eq!(
+                e.kind,
+                crate::error::SparkErrorKind::BuiltinValueError,
+                "{url}"
+            );
+            assert_eq!(e.message(), message, "{url}");
         }
     }
 
@@ -737,7 +812,7 @@ mod tests {
     fn parse_errors_do_not_echo_the_token() {
         // A bad port names the port only, as PySpark's message does; the URL is not quoted.
         let e = ChannelBuilder::parse("sc://localhost:notaport/;token=SECRET").unwrap_err();
-        assert_eq!(e.error_class, "INVALID_CONNECT_URL");
+        assert_eq!(e.kind, crate::error::SparkErrorKind::BuiltinValueError);
         let shown = e.to_string();
         assert!(
             shown.contains("Port could not be cast to integer value as 'notaport'"),

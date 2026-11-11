@@ -3421,6 +3421,7 @@ dependencies = [
  "prost-types",
  "pyo3",
  "serde_json",
+ "stacker",
  "tokio",
  "tonic",
 ]

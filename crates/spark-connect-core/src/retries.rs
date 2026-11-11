@@ -3,6 +3,8 @@
 //! Mirrors `pyspark.sql.connect.client.retries.RetryPolicy` and friends.
 //! The backoff computation is deterministic and unit-testable without sleeping.
 
+use prost::Message;
+
 /// Default maximum cumulative elapsed time for retry exception retries.
 pub const DEFAULT_MAX_RETRY_EXCEPTION_ELAPSED_TIME: u64 = 60 * 60; // 1 hour in seconds
 
@@ -34,16 +36,17 @@ pub struct RetryPolicy {
 }
 
 impl Default for RetryPolicy {
+    /// The values of PySpark's `DefaultPolicy`, which the Scala client's `defaultPolicy()` shares.
     fn default() -> Self {
         Self {
             max_retries: Some(15),
-            initial_backoff_ms: 1000,
-            max_backoff_ms: Some(64000),
-            backoff_multiplier: 2.0,
-            jitter_ms: 0,
-            min_jitter_threshold_ms: 0,
-            recognize_server_retry_delay: false,
-            max_server_retry_delay_ms: None,
+            initial_backoff_ms: 50,
+            max_backoff_ms: Some(60000),
+            backoff_multiplier: 4.0,
+            jitter_ms: 500,
+            min_jitter_threshold_ms: 2000,
+            recognize_server_retry_delay: true,
+            max_server_retry_delay_ms: Some(10 * 60 * 1000),
             max_retry_exception_elapsed_time_ms: Some(
                 DEFAULT_MAX_RETRY_EXCEPTION_ELAPSED_TIME * 1000,
             ),
@@ -70,14 +73,55 @@ impl RetryPolicy {
     /// Mirrors `pyspark.sql.connect.client.retries.DefaultPolicy.can_retry`, on the code that
     /// grpc-python gives the failure (see [`grpc_python_code`]): retry transient `UNAVAILABLE`,
     /// and `INTERNAL` errors whose message carries `INVALID_CURSOR.DISCONNECTED` (a mid-stream
-    /// cursor drop resumed via reattach).
+    /// cursor drop resumed via reattach). Any failure with a `RetryInfo` detail is retried too,
+    /// whatever its code, as the server asks for it.
     pub fn can_retry(&self, status: &tonic::Status) -> bool {
-        match grpc_python_code(status) {
+        let transient = match grpc_python_code(status) {
             tonic::Code::Unavailable => true,
             tonic::Code::Internal => status.message().contains("INVALID_CURSOR.DISCONNECTED"),
             _ => false,
-        }
+        };
+        transient || retry_info(status).is_some()
     }
+}
+
+/// The `google.rpc.Status` of a failed RPC, from its `grpc-status-details-bin`, whose details
+/// hold Any-packed messages.
+#[derive(Clone, PartialEq, Message)]
+struct StatusDetails {
+    #[prost(message, repeated, tag = "3")]
+    details: Vec<prost_types::Any>,
+}
+
+/// The `google.rpc.RetryInfo` of a failed RPC: how long the server asks the client to wait.
+#[derive(Clone, PartialEq, Message)]
+struct RetryInfo {
+    #[prost(message, optional, tag = "1")]
+    retry_delay: Option<prost_types::Duration>,
+}
+
+/// The `google.rpc.RetryInfo` detail of a status, if it has one.
+fn retry_info(status: &tonic::Status) -> Option<RetryInfo> {
+    StatusDetails::decode(status.details())
+        .ok()?
+        .details
+        .into_iter()
+        .find(|detail| detail.type_url.rsplit('/').next() == Some("google.rpc.RetryInfo"))
+        .and_then(|detail| RetryInfo::decode(detail.value.as_slice()).ok())
+}
+
+/// The delay that the server asks for in the `RetryInfo` detail of a status, in milliseconds.
+///
+/// Mirrors `pyspark.sql.connect.client.retries.extract_retry_delay`. A negative delay is zero.
+pub fn retry_delay_ms(status: &tonic::Status) -> Option<u64> {
+    let delay = retry_info(status)?.retry_delay?;
+    let seconds = u64::try_from(delay.seconds).unwrap_or(0);
+    let nanos = u64::try_from(delay.nanos).unwrap_or(0);
+    Some(
+        seconds
+            .saturating_mul(1000)
+            .saturating_add(nanos / 1_000_000),
+    )
 }
 
 /// The code of a failed RPC as grpc-python reports it, which PySpark's retries and errors see.
@@ -186,8 +230,8 @@ impl RetryPolicyState {
             wait_time += rand_jitter(self.policy.jitter_ms);
         }
 
-        // Round to whole milliseconds
-        Some(wait_time.ceil() as u64)
+        // Round down to whole milliseconds, as the reference's int()
+        Some(wait_time.floor() as u64)
     }
 
     pub fn policy(&self) -> &RetryPolicy {
@@ -405,6 +449,147 @@ mod tests {
         // Second attempt with server delay < client backoff
         let wait = state.next_attempt(Some(50));
         assert_eq!(wait, Some(200)); // client backoff wins
+    }
+
+    /// A status of `code` with a `RetryInfo` detail that asks for a delay of `seconds` and
+    /// `nanos`, as the server sends it in `grpc-status-details-bin`.
+    fn status_with_retry_info(code: tonic::Code, seconds: i64, nanos: i32) -> tonic::Status {
+        let info = RetryInfo {
+            retry_delay: Some(prost_types::Duration { seconds, nanos }),
+        };
+        let detail = prost_types::Any {
+            type_url: "type.googleapis.com/google.rpc.RetryInfo".to_string(),
+            value: info.encode_to_vec(),
+        };
+        let details = StatusDetails {
+            details: vec![detail],
+        };
+        tonic::Status::with_details(code, "retry", details.encode_to_vec().into())
+    }
+
+    #[test]
+    fn test_default_schedule_without_jitter() {
+        // The waits of PySpark's DefaultPolicy with the jitter off: 50 ms, quadrupling up to
+        // the 60 s maximum, over the 15 retries.
+        let policy = RetryPolicy {
+            jitter_ms: 0,
+            min_jitter_threshold_ms: 0,
+            ..RetryPolicy::default()
+        };
+        let mut state = RetryPolicyState::new(policy);
+        let mut waits = Vec::new();
+        while let Some(wait) = state.next_attempt(None) {
+            waits.push(wait);
+        }
+        let mut expected = vec![50, 200, 800, 3200, 12800, 51200];
+        expected.extend([60000; 9]);
+        assert_eq!(waits, expected);
+        assert_eq!(waits.iter().sum::<u64>(), 608250);
+    }
+
+    #[test]
+    fn test_default_jitter_applies_only_at_or_above_the_threshold() {
+        // The waits below the 2 s threshold get no jitter. The 3.2 s wait gets one in [0, 500) ms.
+        let mut jittered = Vec::new();
+        for _ in 0..20 {
+            let mut state = RetryPolicyState::new(RetryPolicy::default());
+            assert_eq!(state.next_attempt(None), Some(50));
+            assert_eq!(state.next_attempt(None), Some(200));
+            assert_eq!(state.next_attempt(None), Some(800));
+            let wait = state.next_attempt(None).expect("fourth retry allowed");
+            assert!(
+                (3200..3700).contains(&wait),
+                "expected 3200..3700, got {wait}"
+            );
+            jittered.push(wait);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(jittered.iter().any(|&wait| wait > 3200), "{jittered:?}");
+        // A wait of the max backoff is jittered too, in [60000, 60500).
+        let mut state = RetryPolicyState::new(RetryPolicy::default());
+        for _ in 0..8 {
+            state.next_attempt(None);
+        }
+        let wait = state.next_attempt(None).expect("last retry allowed");
+        assert!(
+            (60000..60500).contains(&wait),
+            "expected 60000..60500, got {wait}"
+        );
+    }
+
+    #[test]
+    fn test_server_retry_delay_from_retry_info_is_honored() {
+        let policy = RetryPolicy {
+            jitter_ms: 0,
+            min_jitter_threshold_ms: 0,
+            ..RetryPolicy::default()
+        };
+        // A RetryInfo of 2.5 s is the delay of the retry, above the 50 ms base wait.
+        let status = status_with_retry_info(tonic::Code::Unavailable, 2, 500_000_000);
+        assert_eq!(retry_delay_ms(&status), Some(2500));
+        let mut state = RetryPolicyState::new(policy.clone());
+        assert_eq!(state.next_attempt(retry_delay_ms(&status)), Some(2500));
+        // A delay above max_server_retry_delay (10 minutes) is capped to it.
+        let status = status_with_retry_info(tonic::Code::Unavailable, 3600, 0);
+        assert_eq!(retry_delay_ms(&status), Some(3_600_000));
+        assert_eq!(state.next_attempt(retry_delay_ms(&status)), Some(600_000));
+        // A status without a RetryInfo has no delay, and the base wait applies.
+        let status = tonic::Status::unavailable("server restarting");
+        assert_eq!(retry_delay_ms(&status), None);
+        assert_eq!(state.next_attempt(retry_delay_ms(&status)), Some(800));
+        // The delay is ignored when the policy does not recognize it.
+        let policy = RetryPolicy {
+            recognize_server_retry_delay: false,
+            ..policy
+        };
+        let status = status_with_retry_info(tonic::Code::Unavailable, 2, 0);
+        let mut state = RetryPolicyState::new(policy);
+        assert_eq!(state.next_attempt(retry_delay_ms(&status)), Some(50));
+    }
+
+    #[test]
+    fn test_server_retry_delay_with_default_jitter_is_jittered_above_the_threshold() {
+        // The 2.5 s delay is above the 2 s threshold, so it gets the jitter of [0, 500) ms.
+        let status = status_with_retry_info(tonic::Code::Unavailable, 2, 500_000_000);
+        for _ in 0..20 {
+            let mut state = RetryPolicyState::new(RetryPolicy::default());
+            let wait = state
+                .next_attempt(retry_delay_ms(&status))
+                .expect("allowed");
+            assert!(
+                (2500..3000).contains(&wait),
+                "expected 2500..3000, got {wait}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_can_retry_a_status_with_retry_info_whatever_its_code() {
+        // As PySpark's DefaultPolicy, a RetryInfo of a failure makes it retryable.
+        let p = RetryPolicy::default();
+        assert!(p.can_retry(&status_with_retry_info(
+            tonic::Code::ResourceExhausted,
+            1,
+            0
+        )));
+        assert!(p.can_retry(&status_with_retry_info(tonic::Code::Internal, 0, 0)));
+        // The same codes without the RetryInfo are not retried.
+        assert!(!p.can_retry(&tonic::Status::new(tonic::Code::ResourceExhausted, "retry")));
+        // Another detail of the status is not a RetryInfo.
+        let detail = prost_types::Any {
+            type_url: "type.googleapis.com/google.rpc.ErrorInfo".to_string(),
+            value: Vec::new(),
+        };
+        let details = StatusDetails {
+            details: vec![detail],
+        };
+        let status = tonic::Status::with_details(
+            tonic::Code::ResourceExhausted,
+            "retry",
+            details.encode_to_vec().into(),
+        );
+        assert!(!p.can_retry(&status));
+        assert_eq!(retry_delay_ms(&status), None);
     }
 
     #[test]

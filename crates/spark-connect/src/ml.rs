@@ -44,8 +44,9 @@ impl Params {
         self
     }
 
-    /// Encode an ML parameter whose JVM type is a 32-bit integer.
-    fn set_param_int32(mut self, name: &str, value: i32) -> Self {
+    /// Set a parameter to a 32-bit integer (`Integer`) literal, as PySpark sends a Python int
+    /// that fits 32 bits; for a parameter whose JVM type is `Int`, such as `maxIter`.
+    pub fn set_param_int32(mut self, name: &str, value: i32) -> Self {
         let literal = proto::expression::Literal {
             literal_type: Some(proto::expression::literal::LiteralType::Integer(value)),
             ..Default::default()
@@ -60,21 +61,27 @@ impl Params {
         self
     }
 
-    /// Encode an ML parameter whose JVM type is `Int` from a 64-bit value: an `Integer` literal
-    /// when it fits 32 bits, as PySpark sends a Python int, else a `Long`.
-    fn set_param_int_narrow(self, name: &str, value: i64) -> Self {
+    /// Set a parameter to the narrowest integer literal that holds `value`, as PySpark sends a
+    /// Python int: an `Integer` literal when it fits 32 bits, else a `Long`. The server converts
+    /// it to the JVM type of the parameter (`Int` or `Long`, such as `seed`), as it converts the
+    /// ints of PySpark.
+    pub fn set_param_int_narrow(self, name: &str, value: i64) -> Self {
         match i32::try_from(value) {
             Ok(value) => self.set_param_int32(name, value),
             Err(_) => self.set_param_int(name, value),
         }
     }
 
-    /// Encode an ML parameter whose JVM type is `Array[String]` (such as `inputCols`), as PySpark
-    /// sends a list of strings: an array literal of `string` elements.
-    fn set_param_string_array(mut self, name: &str, values: &[String]) -> Self {
+    /// Set a parameter whose JVM type is `Array[String]` (such as `inputCols`), as PySpark sends
+    /// a list of strings: an array literal of `string` elements.
+    pub fn set_param_string_array<I, S>(mut self, name: &str, values: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
         let elements = values
-            .iter()
-            .map(|v| LiteralExpression::String(v.clone()))
+            .into_iter()
+            .map(|v| LiteralExpression::String(v.into()))
             .collect();
         let literal = LiteralExpression::Array {
             element_type: Box::new(DataType::String {
@@ -93,8 +100,13 @@ impl Params {
         self
     }
 
-    /// Encode an ML parameter whose JVM type is `Array[Double]`, as PySpark sends thresholds.
-    fn set_param_double_array(mut self, name: &str, values: impl IntoIterator<Item = f64>) -> Self {
+    /// Set a parameter whose JVM type is `Array[Double]` (such as `thresholds`), as PySpark
+    /// sends a list of floats: an array literal of `double` elements.
+    pub fn set_param_double_array(
+        mut self,
+        name: &str,
+        values: impl IntoIterator<Item = f64>,
+    ) -> Self {
         let literal = LiteralExpression::Array {
             element_type: Box::new(DataType::Double),
             elements: values.into_iter().map(LiteralExpression::Double).collect(),
@@ -142,9 +154,114 @@ impl Params {
         self
     }
 
+    /// Remove a parameter, so that it is not sent and the server uses its default, as
+    /// PySpark's `Params.clear` does.
+    pub fn clear_param(mut self, name: &str) -> Self {
+        self.params.remove(name);
+        self
+    }
+
     /// Get a parameter value.
     pub fn get_param(&self, name: &str) -> Option<&proto::Expression> {
         self.params.get(name)
+    }
+
+    /// The literal value of the parameter `name`, if it is set.
+    fn literal(&self, name: &str) -> Option<&proto::expression::literal::LiteralType> {
+        match &self.params.get(name)?.expr_type {
+            Some(proto::expression::ExprType::Literal(literal)) => literal.literal_type.as_ref(),
+            _ => None,
+        }
+    }
+
+    /// The string parameter `name`, or `default` when it is not set.
+    fn string_or<'a>(&'a self, name: &str, default: &'a str) -> &'a str {
+        self.string_opt(name).unwrap_or(default)
+    }
+
+    /// The string parameter `name`, if it is set.
+    fn string_opt(&self, name: &str) -> Option<&str> {
+        match self.literal(name)? {
+            proto::expression::literal::LiteralType::String(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    /// The integer parameter `name`, if it is set, as the server reads it into a JVM `Long`.
+    fn long_opt(&self, name: &str) -> Option<i64> {
+        use proto::expression::literal::LiteralType as L;
+        match self.literal(name)? {
+            L::Integer(value) => Some(i64::from(*value)),
+            L::Long(value) => Some(*value),
+            // As the JVM's `Double.longValue`, which saturates.
+            L::Double(value) => Some(*value as i64),
+            _ => None,
+        }
+    }
+
+    /// The integer parameter `name`, or `default` when it is not set, as the server reads it
+    /// into a JVM `Int`: a `Long` wraps to 32 bits, as the JVM's `Long.intValue` does.
+    fn int_or(&self, name: &str, default: i32) -> i32 {
+        use proto::expression::literal::LiteralType as L;
+        match self.literal(name) {
+            Some(L::Integer(value)) => *value,
+            Some(L::Long(value)) => *value as i32,
+            Some(L::Double(value)) => *value as i32,
+            _ => default,
+        }
+    }
+
+    /// The floating-point parameter `name`, or `default` when it is not set.
+    fn double_or(&self, name: &str, default: f64) -> f64 {
+        use proto::expression::literal::LiteralType as L;
+        match self.literal(name) {
+            Some(L::Double(value)) => *value,
+            Some(L::Integer(value)) => f64::from(*value),
+            Some(L::Long(value)) => *value as f64,
+            _ => default,
+        }
+    }
+
+    /// The boolean parameter `name`, or `default` when it is not set.
+    fn bool_or(&self, name: &str, default: bool) -> bool {
+        match self.literal(name) {
+            Some(proto::expression::literal::LiteralType::Boolean(value)) => *value,
+            _ => default,
+        }
+    }
+
+    /// The elements of the array parameter `name`, if it is set.
+    fn array_opt(&self, name: &str) -> Option<&[proto::expression::Literal]> {
+        match self.literal(name)? {
+            proto::expression::literal::LiteralType::Array(array) => Some(&array.elements),
+            _ => None,
+        }
+    }
+
+    /// The string array parameter `name`, empty when it is not set.
+    fn string_array(&self, name: &str) -> Vec<String> {
+        self.array_opt(name)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|element| match &element.literal_type {
+                Some(proto::expression::literal::LiteralType::String(value)) => Some(value.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The floating-point array parameter `name`, if it is set.
+    fn double_array_opt(&self, name: &str) -> Option<Vec<f64>> {
+        let elements = self.array_opt(name)?;
+        Some(
+            elements
+                .iter()
+                .filter_map(|element| match element.literal_type {
+                    Some(proto::expression::literal::LiteralType::Double(value)) => Some(value),
+                    _ => None,
+                })
+                .collect(),
+        )
     }
 
     /// Convert to proto MlParams for transmission. MlParams stores `Literal`
@@ -221,11 +338,15 @@ pub struct MlOperator {
 }
 
 impl MlOperator {
-    /// Create a new MlOperator with auto-generated UID.
+    /// Create a new MlOperator with an auto-generated UID: the simple name of the class and
+    /// twelve random hex digits (`KMeans_1b2c3d4e5f60`), as PySpark's `Identifiable._randomUID`
+    /// and Spark's `Identifiable.randomUID` make it, so that server messages name the class.
     pub fn new(name: &str, op_type: OperatorType) -> Self {
+        let class = name.rsplit('.').next().unwrap_or(name);
+        let hex = Uuid::new_v4().simple().to_string();
         MlOperator {
             name: name.to_string(),
-            uid: Uuid::new_v4().to_string(),
+            uid: format!("{class}_{}", &hex[hex.len() - 12..]),
             op_type,
         }
     }
@@ -413,10 +534,6 @@ fn evaluate_via_command(
 pub struct StandardScaler {
     operator: MlOperator,
     params: Params,
-    /// Input column name (default: "features")
-    input_col: String,
-    /// Output column name (default: "scaled_features")
-    output_col: String,
 }
 
 impl StandardScaler {
@@ -428,33 +545,29 @@ impl StandardScaler {
                 OperatorType::Estimator,
             ),
             params: Params::new(),
-            input_col: "features".to_string(),
-            output_col: "scaled_features".to_string(),
         }
     }
 
     /// Set the input column name.
     pub fn set_input_col(mut self, col: &str) -> Self {
-        self.input_col = col.to_string();
         self.params = self.params.set_param_string("inputCol", col);
         self
     }
 
-    /// Get the input column name.
+    /// Get the input column name (default: "features").
     pub fn input_col(&self) -> &str {
-        &self.input_col
+        self.params.string_or("inputCol", "features")
     }
 
     /// Set the output column name.
     pub fn set_output_col(mut self, col: &str) -> Self {
-        self.output_col = col.to_string();
         self.params = self.params.set_param_string("outputCol", col);
         self
     }
 
-    /// Get the output column name.
+    /// Get the output column name (default: "scaled_features").
     pub fn output_col(&self) -> &str {
-        &self.output_col
+        self.params.string_or("outputCol", "scaled_features")
     }
 
     fn model_from_info(
@@ -554,8 +667,6 @@ impl Model for StandardScalerModel {
 pub struct VectorAssembler {
     operator: MlOperator,
     params: Params,
-    input_cols: Vec<String>,
-    output_col: String,
 }
 
 impl VectorAssembler {
@@ -566,31 +677,27 @@ impl VectorAssembler {
                 OperatorType::Transformer,
             ),
             params: Params::new(),
-            input_cols: Vec::new(),
-            output_col: "assembled".to_string(),
         }
     }
 
     pub fn set_input_cols(mut self, cols: Vec<&str>) -> Self {
-        self.input_cols = cols.iter().map(|c| c.to_string()).collect();
-        self.params = self
-            .params
-            .set_param_string_array("inputCols", &self.input_cols);
+        self.params = self.params.set_param_string_array("inputCols", cols);
         self
     }
 
-    pub fn input_cols(&self) -> &[String] {
-        &self.input_cols
+    /// The input columns (default: none).
+    pub fn input_cols(&self) -> Vec<String> {
+        self.params.string_array("inputCols")
     }
 
     pub fn set_output_col(mut self, col: &str) -> Self {
-        self.output_col = col.to_string();
         self.params = self.params.set_param_string("outputCol", col);
         self
     }
 
+    /// The output column (default: "assembled").
     pub fn output_col(&self) -> &str {
-        &self.output_col
+        self.params.string_or("outputCol", "assembled")
     }
 }
 
@@ -636,8 +743,6 @@ impl Transformer for VectorAssembler {
 pub struct StringIndexer {
     operator: MlOperator,
     params: Params,
-    input_col: String,
-    output_col: String,
 }
 
 impl StringIndexer {
@@ -648,29 +753,27 @@ impl StringIndexer {
                 OperatorType::Estimator,
             ),
             params: Params::new(),
-            input_col: String::new(),
-            output_col: "indexed".to_string(),
         }
     }
 
     pub fn set_input_col(mut self, col: &str) -> Self {
-        self.input_col = col.to_string();
         self.params = self.params.set_param_string("inputCol", col);
         self
     }
 
+    /// The input column (default: empty).
     pub fn input_col(&self) -> &str {
-        &self.input_col
+        self.params.string_or("inputCol", "")
     }
 
     pub fn set_output_col(mut self, col: &str) -> Self {
-        self.output_col = col.to_string();
         self.params = self.params.set_param_string("outputCol", col);
         self
     }
 
+    /// The output column (default: "indexed").
     pub fn output_col(&self) -> &str {
-        &self.output_col
+        self.params.string_or("outputCol", "indexed")
     }
 
     fn model_from_info(
@@ -725,8 +828,8 @@ impl Estimator for StringIndexer {
 /// session. Its transform refers to the cached model, as a fitted PySpark model's does.
 #[derive(Debug, Clone)]
 pub struct StringIndexerModel {
-    pub operator: MlOperator,
-    pub params: Params,
+    operator: MlOperator,
+    params: Params,
     cached: CachedModel,
 }
 
@@ -770,8 +873,6 @@ impl Model for StringIndexerModel {
 pub struct MaxAbsScaler {
     operator: MlOperator,
     params: Params,
-    input_col: String,
-    output_col: String,
 }
 
 impl MaxAbsScaler {
@@ -782,29 +883,27 @@ impl MaxAbsScaler {
                 OperatorType::Estimator,
             ),
             params: Params::new(),
-            input_col: "features".to_string(),
-            output_col: "maxAbs_scaled".to_string(),
         }
     }
 
     pub fn set_input_col(mut self, col: &str) -> Self {
-        self.input_col = col.to_string();
         self.params = self.params.set_param_string("inputCol", col);
         self
     }
 
+    /// The input column (default: "features").
     pub fn input_col(&self) -> &str {
-        &self.input_col
+        self.params.string_or("inputCol", "features")
     }
 
     pub fn set_output_col(mut self, col: &str) -> Self {
-        self.output_col = col.to_string();
         self.params = self.params.set_param_string("outputCol", col);
         self
     }
 
+    /// The output column (default: "maxAbs_scaled").
     pub fn output_col(&self) -> &str {
-        &self.output_col
+        self.params.string_or("outputCol", "maxAbs_scaled")
     }
 
     fn model_from_info(
@@ -859,8 +958,8 @@ impl Estimator for MaxAbsScaler {
 /// session. Its transform refers to the cached model, as a fitted PySpark model's does.
 #[derive(Debug, Clone)]
 pub struct MaxAbsScalerModel {
-    pub operator: MlOperator,
-    pub params: Params,
+    operator: MlOperator,
+    params: Params,
     cached: CachedModel,
 }
 
@@ -1034,10 +1133,6 @@ impl CachedModel {
 pub struct LogisticRegression {
     operator: MlOperator,
     params: Params,
-    feature_col: String,
-    label_col: String,
-    prediction_col: String,
-    max_iter: i64,
 }
 
 impl LogisticRegression {
@@ -1048,51 +1143,48 @@ impl LogisticRegression {
                 OperatorType::Estimator,
             ),
             params: Params::new(),
-            feature_col: "features".to_string(),
-            label_col: "label".to_string(),
-            prediction_col: "prediction".to_string(),
-            max_iter: 100,
         }
     }
 
     pub fn set_feature_col(mut self, col: &str) -> Self {
-        self.feature_col = col.to_string();
         self.params = self.params.set_param_string("featuresCol", col);
         self
     }
 
     pub fn set_label_col(mut self, col: &str) -> Self {
-        self.label_col = col.to_string();
         self.params = self.params.set_param_string("labelCol", col);
         self
     }
 
     pub fn set_prediction_col(mut self, col: &str) -> Self {
-        self.prediction_col = col.to_string();
         self.params = self.params.set_param_string("predictionCol", col);
         self
     }
 
-    pub fn set_max_iter(mut self, max_iter: i64) -> Self {
-        self.max_iter = max_iter;
-        self.params = self.params.set_param_int_narrow("maxIter", max_iter);
+    /// Maximum number of optimizer iterations.
+    pub fn set_max_iter(mut self, max_iter: i32) -> Self {
+        self.params = self.params.set_param_int32("maxIter", max_iter);
         self
     }
 
+    /// The feature vector column (default: "features").
     pub fn feature_col(&self) -> &str {
-        &self.feature_col
+        self.params.string_or("featuresCol", "features")
     }
 
+    /// The label column (default: "label").
     pub fn label_col(&self) -> &str {
-        &self.label_col
+        self.params.string_or("labelCol", "label")
     }
 
+    /// The prediction output column (default: "prediction").
     pub fn prediction_col(&self) -> &str {
-        &self.prediction_col
+        self.params.string_or("predictionCol", "prediction")
     }
 
-    pub fn max_iter(&self) -> i64 {
-        self.max_iter
+    /// The maximum number of optimizer iterations (default: 100).
+    pub fn max_iter(&self) -> i32 {
+        self.params.int_or("maxIter", 100)
     }
 
     fn model_from_info(
@@ -1108,9 +1200,6 @@ impl LogisticRegression {
                 OperatorType::Model,
             ),
             params: self.params.clone(),
-            feature_col: self.feature_col.clone(),
-            label_col: self.label_col.clone(),
-            prediction_col: self.prediction_col.clone(),
             cached,
         })
     }
@@ -1153,12 +1242,26 @@ impl Estimator for LogisticRegression {
 /// it transformed is alive, then deletes it.
 #[derive(Debug, Clone)]
 pub struct LogisticRegressionModel {
-    pub operator: MlOperator,
-    pub params: Params,
-    pub feature_col: String,
-    pub label_col: String,
-    pub prediction_col: String,
+    operator: MlOperator,
+    params: Params,
     cached: CachedModel,
+}
+
+impl LogisticRegressionModel {
+    /// The feature vector column of the estimator that fitted the model (default: "features").
+    pub fn feature_col(&self) -> &str {
+        self.params.string_or("featuresCol", "features")
+    }
+
+    /// The label column of the estimator that fitted the model (default: "label").
+    pub fn label_col(&self) -> &str {
+        self.params.string_or("labelCol", "label")
+    }
+
+    /// The prediction output column of the model (default: "prediction").
+    pub fn prediction_col(&self) -> &str {
+        self.params.string_or("predictionCol", "prediction")
+    }
 }
 
 impl Transformer for LogisticRegressionModel {
@@ -1243,8 +1346,8 @@ impl LinearSVC {
     }
 
     /// Maximum number of optimizer iterations.
-    pub fn set_max_iter(mut self, value: i64) -> Self {
-        self.params = self.params.set_param_int_narrow("maxIter", value);
+    pub fn set_max_iter(mut self, value: i32) -> Self {
+        self.params = self.params.set_param_int32("maxIter", value);
         self
     }
 
@@ -1285,8 +1388,8 @@ impl LinearSVC {
     }
 
     /// Tree aggregation depth.
-    pub fn set_aggregation_depth(mut self, value: i64) -> Self {
-        self.params = self.params.set_param_int_narrow("aggregationDepth", value);
+    pub fn set_aggregation_depth(mut self, value: i32) -> Self {
+        self.params = self.params.set_param_int32("aggregationDepth", value);
         self
     }
 
@@ -1294,6 +1397,71 @@ impl LinearSVC {
     pub fn set_max_block_size_in_mb(mut self, value: f64) -> Self {
         self.params = self.params.set_param_double("maxBlockSizeInMB", value);
         self
+    }
+
+    /// The feature vector column (default: "features").
+    pub fn feature_col(&self) -> &str {
+        self.params.string_or("featuresCol", "features")
+    }
+
+    /// The label column (default: "label").
+    pub fn label_col(&self) -> &str {
+        self.params.string_or("labelCol", "label")
+    }
+
+    /// The prediction output column (default: "prediction").
+    pub fn prediction_col(&self) -> &str {
+        self.params.string_or("predictionCol", "prediction")
+    }
+
+    /// The raw margin output column (default: "rawPrediction").
+    pub fn raw_prediction_col(&self) -> &str {
+        self.params.string_or("rawPredictionCol", "rawPrediction")
+    }
+
+    /// The maximum number of optimizer iterations (default: 100).
+    pub fn max_iter(&self) -> i32 {
+        self.params.int_or("maxIter", 100)
+    }
+
+    /// The L2 regularization strength (default: 0).
+    pub fn reg_param(&self) -> f64 {
+        self.params.double_or("regParam", 0.0)
+    }
+
+    /// The convergence tolerance (default: 1e-6).
+    pub fn tol(&self) -> f64 {
+        self.params.double_or("tol", 1e-6)
+    }
+
+    /// Whether to fit an intercept (default: true).
+    pub fn fit_intercept(&self) -> bool {
+        self.params.bool_or("fitIntercept", true)
+    }
+
+    /// Whether to standardize training features (default: true).
+    pub fn standardization(&self) -> bool {
+        self.params.bool_or("standardization", true)
+    }
+
+    /// The decision threshold applied to the model margin (default: 0).
+    pub fn threshold(&self) -> f64 {
+        self.params.double_or("threshold", 0.0)
+    }
+
+    /// The instance weight column, if one is set.
+    pub fn weight_col(&self) -> Option<&str> {
+        self.params.string_opt("weightCol")
+    }
+
+    /// The tree aggregation depth (default: 2).
+    pub fn aggregation_depth(&self) -> i32 {
+        self.params.int_or("aggregationDepth", 2)
+    }
+
+    /// The maximum size in MB of stacked input blocks (default: 0, chosen by Spark).
+    pub fn max_block_size_in_mb(&self) -> f64 {
+        self.params.double_or("maxBlockSizeInMB", 0.0)
     }
 
     fn model_from_info(
@@ -1492,6 +1660,81 @@ impl LinearRegression {
         self
     }
 
+    /// The feature vector column (default: "features").
+    pub fn feature_col(&self) -> &str {
+        self.params.string_or("featuresCol", "features")
+    }
+
+    /// The label column (default: "label").
+    pub fn label_col(&self) -> &str {
+        self.params.string_or("labelCol", "label")
+    }
+
+    /// The prediction output column (default: "prediction").
+    pub fn prediction_col(&self) -> &str {
+        self.params.string_or("predictionCol", "prediction")
+    }
+
+    /// The maximum number of optimizer iterations (default: 100).
+    pub fn max_iter(&self) -> i32 {
+        self.params.int_or("maxIter", 100)
+    }
+
+    /// The regularization strength (default: 0).
+    pub fn reg_param(&self) -> f64 {
+        self.params.double_or("regParam", 0.0)
+    }
+
+    /// The elastic-net mixing parameter (default: 0, L2).
+    pub fn elastic_net_param(&self) -> f64 {
+        self.params.double_or("elasticNetParam", 0.0)
+    }
+
+    /// The convergence tolerance (default: 1e-6).
+    pub fn tol(&self) -> f64 {
+        self.params.double_or("tol", 1e-6)
+    }
+
+    /// Whether to fit an intercept (default: true).
+    pub fn fit_intercept(&self) -> bool {
+        self.params.bool_or("fitIntercept", true)
+    }
+
+    /// Whether to standardize training features (default: true).
+    pub fn standardization(&self) -> bool {
+        self.params.bool_or("standardization", true)
+    }
+
+    /// The solver (default: "auto").
+    pub fn solver(&self) -> &str {
+        self.params.string_or("solver", "auto")
+    }
+
+    /// The instance weight column, if one is set.
+    pub fn weight_col(&self) -> Option<&str> {
+        self.params.string_opt("weightCol")
+    }
+
+    /// The tree aggregation depth (default: 2).
+    pub fn aggregation_depth(&self) -> i32 {
+        self.params.int_or("aggregationDepth", 2)
+    }
+
+    /// The loss function (default: "squaredError").
+    pub fn loss(&self) -> &str {
+        self.params.string_or("loss", "squaredError")
+    }
+
+    /// The Huber loss shape parameter (default: 1.35).
+    pub fn epsilon(&self) -> f64 {
+        self.params.double_or("epsilon", 1.35)
+    }
+
+    /// The maximum size in MB of stacked input blocks (default: 0, chosen by Spark).
+    pub fn max_block_size_in_mb(&self) -> f64 {
+        self.params.double_or("maxBlockSizeInMB", 0.0)
+    }
+
     fn model_from_info(
         &self,
         info: proto::ml_command_result::MlOperatorInfo,
@@ -1581,8 +1824,9 @@ impl Model for LinearRegressionModel {
 
 /// Random forest classification using Spark's JVM implementation and ML vector features.
 ///
-/// Supports binary and multiclass labels. Unset parameters use Spark's defaults.
-/// Set a seed explicitly for reproducible sampling.
+/// Supports binary and multiclass labels. Unset parameters use Spark's defaults. Without a
+/// seed, the sampling uses Spark's default seed (the hash of the class name), as with
+/// PySpark, so fits are reproducible either way; set a seed to draw other samples.
 #[derive(Debug, Clone)]
 pub struct RandomForestClassifier {
     operator: MlOperator,
@@ -1741,6 +1985,121 @@ impl RandomForestClassifier {
         self
     }
 
+    /// The feature vector column (default: "features").
+    pub fn feature_col(&self) -> &str {
+        self.params.string_or("featuresCol", "features")
+    }
+
+    /// The label column (default: "label").
+    pub fn label_col(&self) -> &str {
+        self.params.string_or("labelCol", "label")
+    }
+
+    /// The predicted class output column (default: "prediction").
+    pub fn prediction_col(&self) -> &str {
+        self.params.string_or("predictionCol", "prediction")
+    }
+
+    /// The class probability output column (default: "probability").
+    pub fn probability_col(&self) -> &str {
+        self.params.string_or("probabilityCol", "probability")
+    }
+
+    /// The raw class prediction output column (default: "rawPrediction").
+    pub fn raw_prediction_col(&self) -> &str {
+        self.params.string_or("rawPredictionCol", "rawPrediction")
+    }
+
+    /// The maximum tree depth (default: 5).
+    pub fn max_depth(&self) -> i32 {
+        self.params.int_or("maxDepth", 5)
+    }
+
+    /// The maximum number of bins for continuous features (default: 32).
+    pub fn max_bins(&self) -> i32 {
+        self.params.int_or("maxBins", 32)
+    }
+
+    /// The minimum number of training instances in each child node (default: 1).
+    pub fn min_instances_per_node(&self) -> i32 {
+        self.params.int_or("minInstancesPerNode", 1)
+    }
+
+    /// The minimum information gain for a split (default: 0).
+    pub fn min_info_gain(&self) -> f64 {
+        self.params.double_or("minInfoGain", 0.0)
+    }
+
+    /// Whether to prune redundant nodes (default: true).
+    pub fn prune_tree(&self) -> bool {
+        self.params.bool_or("pruneTree", true)
+    }
+
+    /// The maximum memory in MB for histogram aggregation (default: 256).
+    pub fn max_memory_in_mb(&self) -> i32 {
+        self.params.int_or("maxMemoryInMB", 256)
+    }
+
+    /// Whether to cache node IDs for training instances (default: false).
+    pub fn cache_node_ids(&self) -> bool {
+        self.params.bool_or("cacheNodeIds", false)
+    }
+
+    /// The node ID cache checkpoint interval (default: 10).
+    pub fn checkpoint_interval(&self) -> i32 {
+        self.params.int_or("checkpointInterval", 10)
+    }
+
+    /// The impurity measure (default: "gini").
+    pub fn impurity(&self) -> &str {
+        self.params.string_or("impurity", "gini")
+    }
+
+    /// The number of trees (default: 20).
+    pub fn num_trees(&self) -> i32 {
+        self.params.int_or("numTrees", 20)
+    }
+
+    /// The feature subset strategy (default: "auto").
+    pub fn feature_subset_strategy(&self) -> &str {
+        self.params.string_or("featureSubsetStrategy", "auto")
+    }
+
+    /// The random seed, if one is set; else Spark's default seed applies.
+    pub fn seed(&self) -> Option<i64> {
+        self.params.long_opt("seed")
+    }
+
+    /// The fraction of training data used to train each tree (default: 1).
+    pub fn subsampling_rate(&self) -> f64 {
+        self.params.double_or("subsamplingRate", 1.0)
+    }
+
+    /// The leaf index output column (default: empty, no column).
+    pub fn leaf_col(&self) -> &str {
+        self.params.string_or("leafCol", "")
+    }
+
+    /// The minimum fraction of total weight in each child node (default: 0).
+    pub fn min_weight_fraction_per_node(&self) -> f64 {
+        self.params.double_or("minWeightFractionPerNode", 0.0)
+    }
+
+    /// The instance weight column, if one is set.
+    pub fn weight_col(&self) -> Option<&str> {
+        self.params.string_opt("weightCol")
+    }
+
+    /// Whether each tree samples training instances with replacement (default: true).
+    pub fn bootstrap(&self) -> bool {
+        self.params.bool_or("bootstrap", true)
+    }
+
+    /// The per-class thresholds, if they are set.
+    pub fn thresholds(&self) -> Option<Vec<f64>> {
+        self.params.double_array_opt("thresholds")
+    }
+
     fn model_from_info(
         &self,
         info: proto::ml_command_result::MlOperatorInfo,
@@ -1830,8 +2189,9 @@ impl Model for RandomForestClassificationModel {
 
 /// K-means clustering using Spark's JVM implementation and ML vector features.
 ///
-/// Supports Euclidean and cosine distance. Unset parameters use Spark's defaults.
-/// Set a seed explicitly for reproducible initialization.
+/// Supports Euclidean and cosine distance. Unset parameters use Spark's defaults. Without a
+/// seed, the initialization uses Spark's default seed (the hash of the class name), as with
+/// PySpark, so fits are reproducible either way; set a seed to start from other centers.
 #[derive(Debug, Clone)]
 pub struct KMeans {
     operator: MlOperator,
@@ -1893,11 +2253,7 @@ impl KMeans {
 
     /// Random seed for initialization.
     pub fn set_seed(mut self, value: i64) -> Self {
-        // PySpark uses the narrowest integer literal that holds the seed.
-        self.params = match i32::try_from(value) {
-            Ok(value) => self.params.set_param_int32("seed", value),
-            Err(_) => self.params.set_param_int("seed", value),
-        };
+        self.params = self.params.set_param_int_narrow("seed", value);
         self
     }
 
@@ -1923,6 +2279,66 @@ impl KMeans {
     pub fn set_max_block_size_in_mb(mut self, value: f64) -> Self {
         self.params = self.params.set_param_double("maxBlockSizeInMB", value);
         self
+    }
+
+    /// The feature vector column (default: "features").
+    pub fn feature_col(&self) -> &str {
+        self.params.string_or("featuresCol", "features")
+    }
+
+    /// The cluster assignment output column (default: "prediction").
+    pub fn prediction_col(&self) -> &str {
+        self.params.string_or("predictionCol", "prediction")
+    }
+
+    /// The number of clusters (default: 2).
+    pub fn k(&self) -> i32 {
+        self.params.int_or("k", 2)
+    }
+
+    /// The initialization mode (default: "k-means||").
+    pub fn init_mode(&self) -> &str {
+        self.params.string_or("initMode", "k-means||")
+    }
+
+    /// The number of steps in k-means|| initialization (default: 2).
+    pub fn init_steps(&self) -> i32 {
+        self.params.int_or("initSteps", 2)
+    }
+
+    /// The convergence tolerance (default: 1e-4).
+    pub fn tol(&self) -> f64 {
+        self.params.double_or("tol", 1e-4)
+    }
+
+    /// The maximum number of clustering iterations (default: 20).
+    pub fn max_iter(&self) -> i32 {
+        self.params.int_or("maxIter", 20)
+    }
+
+    /// The random seed, if one is set; else Spark's default seed applies.
+    pub fn seed(&self) -> Option<i64> {
+        self.params.long_opt("seed")
+    }
+
+    /// The distance measure (default: "euclidean").
+    pub fn distance_measure(&self) -> &str {
+        self.params.string_or("distanceMeasure", "euclidean")
+    }
+
+    /// The instance weight column, if one is set.
+    pub fn weight_col(&self) -> Option<&str> {
+        self.params.string_opt("weightCol")
+    }
+
+    /// The solver (default: "auto").
+    pub fn solver(&self) -> &str {
+        self.params.string_or("solver", "auto")
+    }
+
+    /// The maximum size in MB of stacked input blocks (default: 0, chosen by Spark).
+    pub fn max_block_size_in_mb(&self) -> f64 {
+        self.params.double_or("maxBlockSizeInMB", 0.0)
     }
 
     fn model_from_info(
@@ -2017,9 +2433,6 @@ impl Model for KMeansModel {
 pub struct RegressionEvaluator {
     operator: MlOperator,
     params: Params,
-    label_col: String,
-    prediction_col: String,
-    metric_name: String,
 }
 
 impl RegressionEvaluator {
@@ -2030,40 +2443,42 @@ impl RegressionEvaluator {
                 OperatorType::Evaluator,
             ),
             params: Params::new(),
-            label_col: "label".to_string(),
-            prediction_col: "prediction".to_string(),
-            metric_name: "rmse".to_string(),
         }
     }
 
     pub fn set_label_col(mut self, col: &str) -> Self {
-        self.label_col = col.to_string();
         self.params = self.params.set_param_string("labelCol", col);
         self
     }
 
     pub fn set_prediction_col(mut self, col: &str) -> Self {
-        self.prediction_col = col.to_string();
         self.params = self.params.set_param_string("predictionCol", col);
         self
     }
 
     pub fn set_metric_name(mut self, metric: &str) -> Self {
-        self.metric_name = metric.to_string();
         self.params = self.params.set_param_string("metricName", metric);
         self
     }
 
+    /// The label column (default: "label").
     pub fn label_col(&self) -> &str {
-        &self.label_col
+        self.params.string_or("labelCol", "label")
     }
 
+    /// The prediction column (default: "prediction").
     pub fn prediction_col(&self) -> &str {
-        &self.prediction_col
+        self.params.string_or("predictionCol", "prediction")
     }
 
+    /// The metric (default: "rmse").
     pub fn metric_name(&self) -> &str {
-        &self.metric_name
+        self.params.string_or("metricName", "rmse")
+    }
+
+    /// Get mutable parameters, as estimators and transformers have them.
+    pub fn params_mut(&mut self) -> &mut Params {
+        &mut self.params
     }
 }
 
@@ -2092,9 +2507,6 @@ impl Evaluator for RegressionEvaluator {
 pub struct BinaryClassificationEvaluator {
     operator: MlOperator,
     params: Params,
-    label_col: String,
-    raw_prediction_col: String,
-    metric_name: String,
 }
 
 impl BinaryClassificationEvaluator {
@@ -2105,41 +2517,43 @@ impl BinaryClassificationEvaluator {
                 OperatorType::Evaluator,
             ),
             params: Params::new(),
-            label_col: "label".to_string(),
-            raw_prediction_col: "rawPrediction".to_string(),
-            metric_name: "areaUnderROC".to_string(),
         }
     }
 
     pub fn set_label_col(mut self, col: &str) -> Self {
-        self.label_col = col.to_string();
         self.params = self.params.set_param_string("labelCol", col);
         self
     }
 
     /// Set the column of the scores (a vector of raw predictions), the JVM `rawPredictionCol`.
     pub fn set_raw_prediction_col(mut self, col: &str) -> Self {
-        self.raw_prediction_col = col.to_string();
         self.params = self.params.set_param_string("rawPredictionCol", col);
         self
     }
 
     pub fn set_metric_name(mut self, metric: &str) -> Self {
-        self.metric_name = metric.to_string();
         self.params = self.params.set_param_string("metricName", metric);
         self
     }
 
+    /// The label column (default: "label").
     pub fn label_col(&self) -> &str {
-        &self.label_col
+        self.params.string_or("labelCol", "label")
     }
 
+    /// The column of the scores (default: "rawPrediction").
     pub fn raw_prediction_col(&self) -> &str {
-        &self.raw_prediction_col
+        self.params.string_or("rawPredictionCol", "rawPrediction")
     }
 
+    /// The metric (default: "areaUnderROC").
     pub fn metric_name(&self) -> &str {
-        &self.metric_name
+        self.params.string_or("metricName", "areaUnderROC")
+    }
+
+    /// Get mutable parameters, as estimators and transformers have them.
+    pub fn params_mut(&mut self) -> &mut Params {
+        &mut self.params
     }
 }
 
@@ -2168,7 +2582,6 @@ impl Evaluator for BinaryClassificationEvaluator {
 pub struct Pipeline {
     operator: MlOperator,
     params: Params,
-    stages: Vec<String>,
 }
 
 impl Pipeline {
@@ -2176,18 +2589,17 @@ impl Pipeline {
         Pipeline {
             operator: MlOperator::new("org.apache.spark.ml.Pipeline", OperatorType::Estimator),
             params: Params::new(),
-            stages: Vec::new(),
         }
     }
 
     pub fn set_stages(mut self, stage_names: Vec<&str>) -> Self {
-        self.stages = stage_names.iter().map(|s| s.to_string()).collect();
-        self.params = self.params.set_param_string_array("stages", &self.stages);
+        self.params = self.params.set_param_string_array("stages", stage_names);
         self
     }
 
-    pub fn stages(&self) -> &[String] {
-        &self.stages
+    /// The names of the stages (default: none).
+    pub fn stages(&self) -> Vec<String> {
+        self.params.string_array("stages")
     }
 }
 
@@ -2222,7 +2634,7 @@ impl Estimator for Pipeline {
                 OperatorType::Model,
             ),
             params: self.params.clone(),
-            stages: self.stages.clone(),
+            stages: self.stages(),
         };
         Ok(Box::new(model))
     }
@@ -2278,9 +2690,6 @@ impl Model for PipelineModel {
 pub struct MulticlassClassificationEvaluator {
     operator: MlOperator,
     params: Params,
-    label_col: String,
-    prediction_col: String,
-    metric_name: String,
 }
 
 impl MulticlassClassificationEvaluator {
@@ -2291,34 +2700,35 @@ impl MulticlassClassificationEvaluator {
                 OperatorType::Evaluator,
             ),
             params: Params::new(),
-            label_col: "label".to_string(),
-            prediction_col: "prediction".to_string(),
-            metric_name: "f1".to_string(),
         }
     }
     pub fn set_label_col(mut self, col: &str) -> Self {
-        self.label_col = col.to_string();
         self.params = self.params.set_param_string("labelCol", col);
         self
     }
     pub fn set_prediction_col(mut self, col: &str) -> Self {
-        self.prediction_col = col.to_string();
         self.params = self.params.set_param_string("predictionCol", col);
         self
     }
     pub fn set_metric_name(mut self, metric: &str) -> Self {
-        self.metric_name = metric.to_string();
         self.params = self.params.set_param_string("metricName", metric);
         self
     }
+    /// The label column (default: "label").
     pub fn label_col(&self) -> &str {
-        &self.label_col
+        self.params.string_or("labelCol", "label")
     }
+    /// The prediction column (default: "prediction").
     pub fn prediction_col(&self) -> &str {
-        &self.prediction_col
+        self.params.string_or("predictionCol", "prediction")
     }
+    /// The metric (default: "f1").
     pub fn metric_name(&self) -> &str {
-        &self.metric_name
+        self.params.string_or("metricName", "f1")
+    }
+    /// Get mutable parameters, as estimators and transformers have them.
+    pub fn params_mut(&mut self) -> &mut Params {
+        &mut self.params
     }
 }
 
@@ -2351,9 +2761,6 @@ impl Evaluator for MulticlassClassificationEvaluator {
 pub struct CrossValidator {
     operator: MlOperator,
     params: Params,
-    num_folds: i32,
-    parallelism: i32,
-    seed: Option<i64>,
 }
 
 impl CrossValidator {
@@ -2364,31 +2771,33 @@ impl CrossValidator {
                 OperatorType::Estimator,
             ),
             params: Params::new(),
-            num_folds: 3,
-            parallelism: 1,
-            seed: None,
         }
     }
     pub fn set_num_folds(mut self, num_folds: i32) -> Self {
-        self.num_folds = num_folds;
         self.params = self.params.set_param_int32("numFolds", num_folds);
         self
     }
     pub fn set_parallelism(mut self, parallelism: i32) -> Self {
-        self.parallelism = parallelism;
         self.params = self.params.set_param_int32("parallelism", parallelism);
         self
     }
+    /// The random seed of the folds, sent as the narrowest integer literal that holds it,
+    /// as PySpark sends a Python int.
     pub fn set_seed(mut self, seed: i64) -> Self {
-        self.seed = Some(seed);
-        self.params = self.params.set_param_int("seed", seed);
+        self.params = self.params.set_param_int_narrow("seed", seed);
         self
     }
+    /// The number of folds (default: 3).
     pub fn num_folds(&self) -> i32 {
-        self.num_folds
+        self.params.int_or("numFolds", 3)
     }
+    /// The number of models fitted in parallel (default: 1).
     pub fn parallelism(&self) -> i32 {
-        self.parallelism
+        self.params.int_or("parallelism", 1)
+    }
+    /// The random seed of the folds, if one is set; else Spark's default seed applies.
+    pub fn seed(&self) -> Option<i64> {
+        self.params.long_opt("seed")
     }
 }
 
@@ -3324,5 +3733,345 @@ mod tests {
             .transform(&session.new_session().range(2).unwrap())
             .is_err());
         assert!(model.clone_box().transform(&df).is_ok());
+    }
+
+    #[test]
+    fn generated_uids_name_the_class_as_pyspark() {
+        // As PySpark's `Identifiable._randomUID` and Spark's `Identifiable.randomUID`: the
+        // simple name of the class and 12 hex digits, which the server's messages show.
+        for (name, prefix) in [
+            ("org.apache.spark.ml.clustering.KMeans", "KMeans_"),
+            ("org.apache.spark.ml.Pipeline", "Pipeline_"),
+            ("Unqualified", "Unqualified_"),
+        ] {
+            let uid = MlOperator::new(name, OperatorType::Estimator).uid;
+            let hex = uid.strip_prefix(prefix).unwrap_or_else(|| panic!("{uid}"));
+            assert_eq!(hex.len(), 12, "{uid}");
+            assert!(
+                hex.chars()
+                    .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
+                "{uid}"
+            );
+        }
+        assert_ne!(KMeans::new().operator().uid, KMeans::new().operator().uid);
+        assert!(RandomForestClassifier::new()
+            .operator()
+            .uid
+            .starts_with("RandomForestClassifier_"));
+    }
+
+    #[test]
+    fn seeds_are_sent_as_pyspark_sends_a_python_int() {
+        // A seed, a JVM Long, is the narrowest integer literal that holds it, as PySpark sends
+        // a Python int, for every estimator that has one.
+        use proto::expression::literal::LiteralType as L;
+        let sent = |params: &Params| params.to_proto().params["seed"].literal_type.clone();
+        for (seed, expected) in [
+            (7, L::Integer(7)),
+            (i64::from(i32::MIN), L::Integer(i32::MIN)),
+            (1 << 31, L::Long(1 << 31)),
+        ] {
+            let kmeans = KMeans::new().set_seed(seed);
+            assert_eq!(sent(kmeans.params()), Some(expected.clone()));
+            let forest = RandomForestClassifier::new().set_seed(seed);
+            assert_eq!(sent(forest.params()), Some(expected.clone()));
+            let cv = CrossValidator::new().set_seed(seed);
+            assert_eq!(sent(cv.params()), Some(expected));
+        }
+    }
+
+    #[test]
+    fn native_estimators_get_their_params_or_the_spark_defaults() {
+        // Every native estimator has a getter of each param: the value that is set, else the
+        // default of Spark (None for a param that has none).
+        let km = KMeans::new();
+        macro_rules! all {
+            ($km:expr) => {{
+                let km: &KMeans = &$km;
+                (
+                    (
+                        km.feature_col(),
+                        km.prediction_col(),
+                        km.k(),
+                        km.init_mode(),
+                    ),
+                    (km.init_steps(), km.tol(), km.max_iter(), km.seed()),
+                    (km.distance_measure(), km.weight_col(), km.solver()),
+                    km.max_block_size_in_mb(),
+                )
+            }};
+        }
+        assert_eq!(
+            all!(km),
+            (
+                ("features", "prediction", 2, "k-means||"),
+                (2, 1e-4, 20, None),
+                ("euclidean", None, "auto"),
+                0.0
+            )
+        );
+        let km = km
+            .set_feature_col("f")
+            .set_prediction_col("p")
+            .set_k(3)
+            .set_init_mode("random")
+            .set_init_steps(4)
+            .set_tol(0.5)
+            .set_max_iter(7)
+            .set_seed(1 << 40)
+            .set_distance_measure("cosine")
+            .set_weight_col("w")
+            .set_solver("row")
+            .set_max_block_size_in_mb(1.5);
+        assert_eq!(
+            all!(km),
+            (
+                ("f", "p", 3, "random"),
+                (4, 0.5, 7, Some(1 << 40)),
+                ("cosine", Some("w"), "row"),
+                1.5
+            )
+        );
+
+        let svc = LinearSVC::new();
+        macro_rules! all {
+            ($s:expr) => {{
+                let s: &LinearSVC = &$s;
+                (
+                    (s.feature_col(), s.label_col(), s.prediction_col()),
+                    (s.raw_prediction_col(), s.max_iter(), s.reg_param(), s.tol()),
+                    (s.fit_intercept(), s.standardization(), s.threshold()),
+                    (
+                        s.weight_col(),
+                        s.aggregation_depth(),
+                        s.max_block_size_in_mb(),
+                    ),
+                )
+            }};
+        }
+        assert_eq!(
+            all!(svc),
+            (
+                ("features", "label", "prediction"),
+                ("rawPrediction", 100, 0.0, 1e-6),
+                (true, true, 0.0),
+                (None, 2, 0.0)
+            )
+        );
+        let svc = svc
+            .set_feature_col("f")
+            .set_label_col("l")
+            .set_prediction_col("p")
+            .set_raw_prediction_col("r")
+            .set_max_iter(5)
+            .set_reg_param(0.1)
+            .set_tol(0.2)
+            .set_fit_intercept(false)
+            .set_standardization(false)
+            .set_threshold(0.3)
+            .set_weight_col("w")
+            .set_aggregation_depth(3)
+            .set_max_block_size_in_mb(1.5);
+        assert_eq!(
+            all!(svc),
+            (
+                ("f", "l", "p"),
+                ("r", 5, 0.1, 0.2),
+                (false, false, 0.3),
+                (Some("w"), 3, 1.5)
+            )
+        );
+
+        let lr = LinearRegression::new();
+        macro_rules! all {
+            ($r:expr) => {{
+                let r: &LinearRegression = &$r;
+                (
+                    (
+                        r.feature_col(),
+                        r.label_col(),
+                        r.prediction_col(),
+                        r.max_iter(),
+                    ),
+                    (
+                        r.reg_param(),
+                        r.elastic_net_param(),
+                        r.tol(),
+                        r.fit_intercept(),
+                    ),
+                    (r.standardization(), r.solver(), r.weight_col()),
+                    (r.aggregation_depth(), r.loss(), r.epsilon()),
+                    r.max_block_size_in_mb(),
+                )
+            }};
+        }
+        assert_eq!(
+            all!(lr),
+            (
+                ("features", "label", "prediction", 100),
+                (0.0, 0.0, 1e-6, true),
+                (true, "auto", None),
+                (2, "squaredError", 1.35),
+                0.0
+            )
+        );
+        let lr = lr
+            .set_feature_col("f")
+            .set_label_col("l")
+            .set_prediction_col("p")
+            .set_max_iter(5)
+            .set_reg_param(0.1)
+            .set_elastic_net_param(0.2)
+            .set_tol(0.3)
+            .set_fit_intercept(false)
+            .set_standardization(false)
+            .set_solver("normal")
+            .set_weight_col("w")
+            .set_aggregation_depth(3)
+            .set_loss("huber")
+            .set_epsilon(1.5)
+            .set_max_block_size_in_mb(2.5);
+        assert_eq!(
+            all!(lr),
+            (
+                ("f", "l", "p", 5),
+                (0.1, 0.2, 0.3, false),
+                (false, "normal", Some("w")),
+                (3, "huber", 1.5),
+                2.5
+            )
+        );
+
+        let rf = RandomForestClassifier::new();
+        macro_rules! all {
+            ($f:expr) => {{
+                let f: &RandomForestClassifier = &$f;
+                (
+                    (f.feature_col(), f.label_col(), f.prediction_col()),
+                    (f.probability_col(), f.raw_prediction_col(), f.max_depth()),
+                    (f.max_bins(), f.min_instances_per_node(), f.min_info_gain()),
+                    (f.prune_tree(), f.max_memory_in_mb(), f.cache_node_ids()),
+                    (f.checkpoint_interval(), f.impurity(), f.num_trees()),
+                    (f.feature_subset_strategy(), f.seed(), f.subsampling_rate()),
+                    (
+                        f.leaf_col(),
+                        f.min_weight_fraction_per_node(),
+                        f.weight_col(),
+                    ),
+                    (f.bootstrap(), f.thresholds()),
+                )
+            }};
+        }
+        assert_eq!(
+            all!(rf),
+            (
+                ("features", "label", "prediction"),
+                ("probability", "rawPrediction", 5),
+                (32, 1, 0.0),
+                (true, 256, false),
+                (10, "gini", 20),
+                ("auto", None, 1.0),
+                ("", 0.0, None),
+                (true, None)
+            )
+        );
+        let rf = rf
+            .set_feature_col("f")
+            .set_label_col("l")
+            .set_prediction_col("p")
+            .set_probability_col("pr")
+            .set_raw_prediction_col("r")
+            .set_max_depth(3)
+            .set_max_bins(16)
+            .set_min_instances_per_node(2)
+            .set_min_info_gain(0.1)
+            .set_prune_tree(false)
+            .set_max_memory_in_mb(64)
+            .set_cache_node_ids(true)
+            .set_checkpoint_interval(-1)
+            .set_impurity("entropy")
+            .set_num_trees(7)
+            .set_feature_subset_strategy("all")
+            .set_seed(5)
+            .set_subsampling_rate(0.5)
+            .set_leaf_col("leaves")
+            .set_min_weight_fraction_per_node(0.2)
+            .set_weight_col("w")
+            .set_bootstrap(false)
+            .set_thresholds([0.25, 0.75]);
+        assert_eq!(
+            all!(rf),
+            (
+                ("f", "l", "p"),
+                ("pr", "r", 3),
+                (16, 2, 0.1),
+                (false, 64, true),
+                (-1, "entropy", 7),
+                ("all", Some(5), 0.5),
+                ("leaves", 0.2, Some("w")),
+                (false, Some(vec![0.25, 0.75]))
+            )
+        );
+
+        let logistic = LogisticRegression::new();
+        assert_eq!(
+            (
+                logistic.feature_col(),
+                logistic.label_col(),
+                logistic.prediction_col(),
+                logistic.max_iter()
+            ),
+            ("features", "label", "prediction", 100)
+        );
+        let cv = CrossValidator::new();
+        assert_eq!((cv.num_folds(), cv.parallelism(), cv.seed()), (3, 1, None));
+        let cv = cv.set_num_folds(5).set_parallelism(2).set_seed(9);
+        assert_eq!(
+            (cv.num_folds(), cv.parallelism(), cv.seed()),
+            (5, 2, Some(9))
+        );
+    }
+
+    #[test]
+    fn getters_read_the_params_that_are_sent() {
+        // The getters read the params themselves, so that a change through `params_mut` is
+        // the value of the getter too. A Long literal of an Int param wraps to 32 bits, as the
+        // server's `intValue` reads it.
+        let mut lr = LogisticRegression::new().set_label_col("y").set_max_iter(5);
+        let params = std::mem::take(lr.params_mut());
+        *lr.params_mut() = params
+            .set_param_int("maxIter", (1 << 33) + 3)
+            .clear_param("labelCol");
+        assert_eq!((lr.max_iter(), lr.label_col()), (3, "label"));
+
+        let mut evaluator = RegressionEvaluator::new().set_metric_name("r2");
+        assert_eq!(evaluator.metric_name(), "r2");
+        let params = std::mem::take(evaluator.params_mut());
+        *evaluator.params_mut() = params.clear_param("metricName");
+        assert_eq!(evaluator.metric_name(), "rmse");
+        assert!(evaluator.params().to_proto().params.is_empty());
+
+        let mut va = VectorAssembler::new().set_input_cols(vec!["a", "b"]);
+        assert_eq!(va.input_cols(), ["a", "b"]);
+        let params = std::mem::take(va.params_mut());
+        *va.params_mut() = params.set_param_string_array("inputCols", ["c"]);
+        assert_eq!(va.input_cols(), ["c"]);
+        let pipeline = Pipeline::new().set_stages(vec!["s"]);
+        assert_eq!(pipeline.stages(), ["s"]);
+    }
+
+    #[test]
+    fn logistic_regression_model_reads_its_columns_from_its_params() {
+        let session = offline_session();
+        let model = fitted_logistic_regression(&session);
+        assert_eq!(
+            (
+                model.feature_col(),
+                model.label_col(),
+                model.prediction_col()
+            ),
+            ("features", "label", "pred")
+        );
+        assert_eq!(model.operator().uid, "operator-uid");
     }
 }

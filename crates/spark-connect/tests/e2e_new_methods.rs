@@ -126,6 +126,34 @@ fn stat_corr_cov_sample_by() {
     assert!(sampled.len() <= 5);
 }
 
+/// As PySpark's `sampleBy`, whose seed the client chooses when none is given: every execution of
+/// a sample without a seed returns the same rows, where a server that drew a seed in each planning
+/// would count other rows each time.
+#[test]
+fn sample_by_without_a_seed_returns_the_same_rows_in_every_execution_as_pyspark() {
+    if !should_run() {
+        return;
+    }
+    let spark = session();
+    let df = spark
+        .sql("SELECT id, id % 2 AS k FROM range(0, 200, 1, 2)")
+        .expect("sql");
+    let fractions = vec![
+        (lit(0).expression().clone(), 0.5),
+        (lit(1).expression().clone(), 0.5),
+    ];
+    let sampled = df
+        .stat()
+        .sample_by("k", fractions, None)
+        .expect("sample_by");
+    let counts: Vec<i64> = (0..3).map(|_| sampled.count().expect("count")).collect();
+    let collected = sampled.collect().expect("collect").len() as i64;
+    assert!(
+        counts.iter().all(|&count| count == collected),
+        "{counts:?} and {collected}"
+    );
+}
+
 #[test]
 fn replace_to_with_metadata_random_split() {
     if !should_run() {

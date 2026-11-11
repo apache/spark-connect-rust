@@ -868,9 +868,13 @@ impl SparkSession {
 
     /// Delete the ML cached objects `refs` on the server, as PySpark's `RemoteModelRef` does
     /// when the last reference to a model goes. It does not wait for the server: the request
-    /// runs on the shared runtime, and its errors (a stopped session, a closed channel) are
-    /// ignored. Safe to call from `Drop`.
+    /// runs on the shared runtime, and its errors (a closed channel) are ignored. As
+    /// `release_cached_remote_relation`, a stopped session is not released: stopping it
+    /// released its server state, ML cache included. Safe to call from `Drop`.
     pub(crate) fn release_ml_objects(&self, refs: Vec<proto::ObjectRef>) {
+        if self.is_stopped() {
+            return;
+        }
         let command = proto::Command {
             command_type: Some(proto::command::CommandType::MlCommand(proto::MlCommand {
                 command: Some(proto::ml_command::Command::Delete(
@@ -4056,5 +4060,58 @@ mod tests {
         );
         spark.set_server_session_id(None);
         assert_eq!(spark.server_session_id(), None);
+    }
+}
+
+/// The hook of the executions without a server: a session of a dead port whose requests are not
+/// retried, since the plan compression of the first plan reads the confs of the server before
+/// the hook runs, as PySpark does, and the default retry policy retries that read for minutes.
+#[cfg(test)]
+mod execute_plan_hook_tests {
+    use super::*;
+
+    fn unreachable_session_without_retries() -> SparkSession {
+        let builder = ChannelBuilder::parse("sc://127.0.0.1:1").expect("valid URL");
+        let mut client =
+            block_on(SparkConnectClient::connect(&builder)).expect("failed to build client");
+        client.set_retry_policy(spark_connect_core::retries::RetryPolicy::no_retries());
+        SparkSession::new(client)
+    }
+
+    #[test]
+    fn the_error_of_a_hook_is_the_error_of_the_execution() {
+        let session = unreachable_session_without_retries();
+        let seen: Arc<Mutex<Vec<proto::ExecutePlanRequest>>> = Arc::default();
+        let requests = Arc::clone(&seen);
+        let hook: ExecutePlanHook = Arc::new(move |request| {
+            requests.lock().unwrap().push(request);
+            Err(SparkError::value_msg("the hook failed"))
+        });
+        session.set_execute_plan_hook(Some(hook));
+        let error = session.range(3).unwrap().collect().unwrap_err();
+        assert!(error.to_string().contains("the hook failed"), "{error}");
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].session_id, session.session_id());
+        assert!(seen[0].operation_id.is_some());
+        assert!(seen[0].plan.is_some());
+    }
+
+    #[test]
+    fn a_cleared_or_replaced_hook_is_not_called() {
+        let session = unreachable_session_without_retries();
+        let calls = Arc::new(Mutex::new(0));
+        let counted = Arc::clone(&calls);
+        let first: ExecutePlanHook = Arc::new(move |_| {
+            *counted.lock().unwrap() += 1;
+            Err(SparkError::value_msg("the first hook"))
+        });
+        session.set_execute_plan_hook(Some(first));
+        session.set_execute_plan_hook(None);
+        let second: ExecutePlanHook = Arc::new(|_| Err(SparkError::value_msg("the second hook")));
+        session.set_execute_plan_hook(Some(second));
+        let error = session.range(1).unwrap().collect().unwrap_err();
+        assert!(error.to_string().contains("the second hook"), "{error}");
+        assert_eq!(*calls.lock().unwrap(), 0);
     }
 }

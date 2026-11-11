@@ -29,7 +29,7 @@ use crate::artifact::{
 use crate::channel::{ChannelBuilder, GRPC_MAX_MESSAGE_LENGTH_DEFAULT};
 use crate::error::{Result, SparkError, SparkErrorKind};
 use crate::reattach::ExecutePlanResponseReattachableIterator;
-use crate::retries::{RetryPolicy, RetryPolicyState};
+use crate::retries::{retry_delay_ms, RetryPolicy, RetryPolicyState};
 use crate::thread_entries::forget_when_thread_ends;
 
 /// How long to wait for the lazy gRPC channel to become ready before surfacing a
@@ -1301,7 +1301,7 @@ impl SparkConnectClient {
                 Ok(v) => return Ok(v),
                 Err(status) => {
                     if self.retry_policy.can_retry(&status) {
-                        if let Some(wait_ms) = state.next_attempt(None) {
+                        if let Some(wait_ms) = state.next_attempt(retry_delay_ms(&status)) {
                             // The backoff ends with a signal, as PySpark's `Retrying` sleep does.
                             let backoff =
                                 tokio::time::sleep(std::time::Duration::from_millis(wait_ms));
@@ -2082,7 +2082,7 @@ impl SparkConnectClient {
                 }
                 Err(status) => {
                     if self.retry_policy.can_retry(&status) {
-                        if let Some(wait_ms) = state.next_attempt(None) {
+                        if let Some(wait_ms) = state.next_attempt(retry_delay_ms(&status)) {
                             let backoff =
                                 tokio::time::sleep(std::time::Duration::from_millis(wait_ms));
                             if crate::runtime::until_abort(crate::runtime::ABORT_RETRIES, backoff)
@@ -2271,7 +2271,7 @@ impl SparkConnectClient {
                     Ok(_) => return,
                     Err(status) => {
                         if policy.can_retry(&status) {
-                            if let Some(w) = state.next_attempt(None) {
+                            if let Some(w) = state.next_attempt(retry_delay_ms(&status)) {
                                 tokio::time::sleep(Duration::from_millis(w)).await;
                                 continue;
                             }
@@ -2478,7 +2478,7 @@ impl ReattachableResponseStream {
                 continue;
             }
             if self.retry_policy.can_retry(&status) {
-                if let Some(w) = retry_state.next_attempt(None) {
+                if let Some(w) = retry_state.next_attempt(retry_delay_ms(&status)) {
                     let backoff = tokio::time::sleep(Duration::from_millis(w));
                     if crate::runtime::until_abort(crate::runtime::ABORT_RETRIES, backoff)
                         .await
@@ -3880,7 +3880,7 @@ mod request_fields_tests {
             .await
             .err()
             .expect("a keepalive time that is not an integer must raise");
-        assert_eq!(error.kind, SparkErrorKind::ValueError);
+        assert_eq!(error.kind, SparkErrorKind::BuiltinValueError);
         assert_eq!(
             error.message(),
             "invalid literal for int() with base 10: 'abc'"

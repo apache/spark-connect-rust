@@ -291,6 +291,7 @@ def serve(connection):
             self.execute_payload = b""
             self.execute_failure = None
             self.execute_error = None
+            self.retry_info_failures = []
             # The InterruptRequests of each Interrupt, and the operations that they interrupt.
             self.interrupt_requests = []
             self.interrupted_operations = set()
@@ -425,6 +426,9 @@ def serve(connection):
         # server does for an error that it raised: INTERNAL, with a google.rpc.Status of an
         # ErrorInfo of `reason` and `metadata` in grpc-status-details-bin.
         execute_error = None
+        # Each (code name, delay in ms) of this list fails an ExecutePlan, once, as the server
+        # does for a failure with a google.rpc.RetryInfo that asks for the delay.
+        retry_info_failures = ()
         # FetchErrorDetails returns `error_details` (raw FetchErrorDetailsResponse fields)
         # and records the error id asked for. Config Get returns the values in `confs`, or
         # else those of `default_confs`, the defaults of SQL configs of the server, and
@@ -622,6 +626,24 @@ def serve(connection):
                         grpc.StatusCode.DEADLINE_EXCEEDED,
                         "Python thread could not run while the statement ran",
                     )
+            if self.retry_info_failures:
+                code, delay_ms = self.retry_info_failures.pop(0)
+                # google.rpc: Status.code=1, message=2, details=3; Any.type_url=1, value=2;
+                # RetryInfo.retry_delay=1; Duration.seconds=1, nanos=2.
+                delay = varint_field(1, delay_ms // 1000) + varint_field(
+                    2, (delay_ms % 1000) * 1_000_000
+                )
+                status = (
+                    varint_field(1, getattr(grpc.StatusCode, code).value[0])
+                    + message_field(2, "retry later")
+                    + message_field(
+                        3,
+                        message_field(1, "type.googleapis.com/google.rpc.RetryInfo")
+                        + message_field(2, message_field(1, delay)),
+                    )
+                )
+                context.set_trailing_metadata((("grpc-status-details-bin", status),))
+                context.abort(getattr(grpc.StatusCode, code), "retry later")
             if self.execute_failure:
                 code, message = (
                     self.execute_failure
