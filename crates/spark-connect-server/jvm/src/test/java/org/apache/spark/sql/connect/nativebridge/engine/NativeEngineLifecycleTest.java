@@ -18,6 +18,7 @@
 package org.apache.spark.sql.connect.nativebridge.engine;
 
 import java.io.ByteArrayInputStream;
+import java.lang.management.ManagementFactory;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
@@ -138,6 +139,7 @@ public final class NativeEngineLifecycleTest {
             var stub = SparkConnectServiceGrpc.newBlockingStub(channel);
             for (int warmup = 0; warmup < 32; warmup++) check(analyze(stub, request));
             nativeReadersAndWriter(stub, callers, session, request);
+            cleanupAttachmentReuse(stub, callers, session);
             ANALYZER_THREADS.clear();
             RECORD.set(true);
             try {
@@ -186,11 +188,13 @@ public final class NativeEngineLifecycleTest {
         }
         require(!spark.sparkContext().isStopped(), "runtime close stopped shared SparkContext");
       }
+      concurrentEngineCleanup(spark, arguments[0], callers);
       System.out.println("NATIVE_ENGINE_LIFECYCLE_OK: native concurrent metadata/config readers; "
           + "synchronous Java engine factory close before native stop returns; "
           + "Config writer exclusion/readback; two-session worker context reuse; attachment reuse; "
           + "12-level struct/list and all-empty variable-width Arrow descriptor export and values; "
           + "lossy schema/shuffle-cleanup rejection; three runtime restarts; session release; "
+          + "cleanup attachment reuse; concurrent engine shutdown; "
           + "listener rebind; shared SparkContext survives");
     } finally {
       RECORD.set(false);
@@ -201,6 +205,156 @@ public final class NativeEngineLifecycleTest {
       require(callers.awaitTermination(10, TimeUnit.SECONDS), "native client workers did not stop");
       spark.stop();
     }
+  }
+
+  private static void cleanupAttachmentReuse(
+      SparkConnectServiceGrpc.SparkConnectServiceBlockingStub stub,
+      ExecutorService callers, String session) throws Exception {
+    String key = "spark.sql.session.timeZone";
+    String expected = getConfig(stub, session, key);
+    configBurst(stub, callers, session, key, expected, 16);
+    var threads = ManagementFactory.getThreadMXBean();
+    long before = threads.getTotalStartedThreadCount();
+    configBurst(stub, callers, session, key, expected, 128);
+    long started = threads.getTotalStartedThreadCount() - before;
+    // This coarse JVM-wide count includes unrelated background threads. A budget of half
+    // the 1024 requests allows pool growth, but rejects per-request cleanup attachment.
+    // The 64-task admission bound requires most task frees before the burst can finish.
+    require(started < 512, "cleanup did not reuse JVM attachments: " + started
+        + " threads started for 1024 Config requests");
+    System.out.println("NATIVE_CLEANUP_ATTACHMENT_REUSE threads_started=" + started
+        + " requests=1024");
+  }
+
+  private static void configBurst(SparkConnectServiceGrpc.SparkConnectServiceBlockingStub stub,
+      ExecutorService callers, String session, String key, String expected, int perCaller)
+      throws Exception {
+    List<Callable<Void>> work = new ArrayList<>();
+    for (int caller = 0; caller < 8; caller++) {
+      work.add(() -> {
+        for (int call = 0; call < perCaller; call++) {
+          require(expected.equals(getConfig(stub, session, key)),
+              "Config changed during cleanup attachment burst");
+        }
+        return null;
+      });
+    }
+    for (Future<Void> result : callers.invokeAll(work, 60, TimeUnit.SECONDS)) {
+      result.get(1, TimeUnit.SECONDS);
+    }
+  }
+
+  private static void concurrentEngineCleanup(
+      SparkSession spark, String library, ExecutorService callers) throws Exception {
+    try (SparkJvmEngine firstEngine = new SparkJvmEngine(spark);
+         SparkJvmEngine secondEngine = new SparkJvmEngine(spark);
+         NativeEngineServer firstServer = new NativeEngineServer(
+             library, "127.0.0.1:0", firstEngine);
+         NativeEngineServer secondServer = new NativeEngineServer(
+             library, "127.0.0.1:0", secondEngine)) {
+      ManagedChannel firstChannel = ManagedChannelBuilder.forTarget(firstServer.address())
+          .usePlaintext().build();
+      ManagedChannel secondChannel = ManagedChannelBuilder.forTarget(secondServer.address())
+          .usePlaintext().build();
+      try {
+        var first = SparkConnectServiceGrpc.newBlockingStub(firstChannel);
+        var second = SparkConnectServiceGrpc.newBlockingStub(secondChannel);
+        String firstSession = UUID.randomUUID().toString();
+        String secondSession = UUID.randomUUID().toString();
+        String key = "spark-connect.native.multi-engine.value";
+        setConfig(first, firstSession, key, "first", CONTEXT_KEY, "first",
+            "spark.sql.session.timeZone", "UTC", "spark.sql.timestampType", "TIMESTAMP_LTZ");
+        setConfig(second, secondSession, key, "before", CONTEXT_KEY, "second",
+            "spark.sql.session.timeZone", "Asia/Tokyo", "spark.sql.timestampType", "TIMESTAMP_NTZ");
+        ContextProbe probe = new ContextProbe();
+        require(CONTEXT_PROBE.compareAndSet(null, probe), "another native context probe is active");
+        try {
+          for (int turn = 0; turn < 8; turn++) {
+            contextCall(first, firstSession, false, probe, turn * 2);
+            require("first".equals(getConfig(first, firstSession, key)),
+                "first engine Config changed");
+            contextCall(second, secondSession, true, probe, turn * 2 + 1);
+            require("before".equals(getConfig(second, secondSession, key)),
+                "second engine Config changed");
+            var selected = turn % 2 == 0 ? first : second;
+            String temporary = UUID.randomUUID().toString();
+            setConfig(selected, temporary, key, "temporary");
+            releaseSession(selected, temporary);
+          }
+        } finally {
+          CONTEXT_PROBE.compareAndSet(probe, null);
+        }
+        Relation range = Relation.newBuilder().setRange(Range.newBuilder()
+            .setStart(0).setEnd(10).setStep(1)).build();
+        AnalyzePlanRequest request = schemaRequest(secondSession, range);
+        try (AnalysisGate gate = new AnalysisGate(key)) {
+          setConfig(second, secondSession, GATE_KEY, gate.marker);
+          require(ANALYSIS_GATE.compareAndSet(null, gate),
+              "another native analysis gate is active");
+          Future<AnalyzePlanResponse> firstRead = callers.submit(() -> analyze(second, request));
+          Future<AnalyzePlanResponse> secondRead = callers.submit(() -> analyze(second, request));
+          require(gate.entered.await(10, TimeUnit.SECONDS),
+              "second engine readers did not enter Spark");
+          AtomicBoolean running = new AtomicBoolean(true);
+          CountDownLatch trafficStarted = new CountDownLatch(1);
+          Future<Integer> traffic = callers.submit(() -> {
+            int completed = 0;
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+            while (running.get() && System.nanoTime() < deadline) {
+              require("before".equals(getConfig(second, secondSession, key)),
+                  "surviving engine Config changed during peer shutdown");
+              completed++;
+              trafficStarted.countDown();
+            }
+            return completed;
+          });
+          try {
+            require(trafficStarted.await(10, TimeUnit.SECONDS),
+                "second engine Config traffic did not start");
+            releaseSession(first, firstSession);
+            Future<?> stopped = callers.submit(() -> { firstServer.close(); return null; });
+            stopped.get(15, TimeUnit.SECONDS);
+            require(firstEngine.isClosed(), "peer shutdown did not close its engine");
+            require(!secondEngine.isClosed(), "peer shutdown closed the surviving engine");
+            require(!spark.sparkContext().isStopped(), "peer shutdown stopped shared SparkContext");
+            require(!firstRead.isDone() && !secondRead.isDone(),
+                "peer shutdown interrupted the surviving engine readers");
+            require("before".equals(getConfig(second, secondSession, key)),
+                "surviving engine stopped serving Config");
+          } finally {
+            running.set(false);
+            gate.close();
+          }
+          require(traffic.get(10, TimeUnit.SECONDS) > 0,
+              "second engine completed no Config traffic");
+          check(firstRead.get(10, TimeUnit.SECONDS));
+          check(secondRead.get(10, TimeUnit.SECONDS));
+        }
+        check(analyze(second, request));
+        require("before".equals(getConfig(second, secondSession, key)),
+            "surviving engine Config changed");
+        releaseSession(second, secondSession);
+      } finally {
+        firstChannel.shutdownNow();
+        secondChannel.shutdownNow();
+        require(firstChannel.awaitTermination(10, TimeUnit.SECONDS),
+            "first engine channel did not stop");
+        require(secondChannel.awaitTermination(10, TimeUnit.SECONDS),
+            "second engine channel did not stop");
+      }
+      secondServer.close();
+      require(secondEngine.isClosed(), "second native stop returned before engine close");
+      require(!spark.sparkContext().isStopped(),
+          "concurrent engine close stopped shared SparkContext");
+    }
+  }
+
+  private static void releaseSession(
+      SparkConnectServiceGrpc.SparkConnectServiceBlockingStub stub, String session) {
+    require(stub.withDeadlineAfter(30, TimeUnit.SECONDS).releaseSession(
+        ReleaseSessionRequest.newBuilder().setSessionId(session).build())
+        .getSessionId().equals(session),
+        "session release identity changed");
   }
 
   private static final class AnalysisGate implements AutoCloseable {

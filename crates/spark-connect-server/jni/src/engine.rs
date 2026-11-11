@@ -49,6 +49,7 @@ use tokio::time::Instant;
 use tonic::Status;
 
 const SESSION_ADMISSION_TIMEOUT: Duration = Duration::from_secs(2);
+const CLEANUP_ATTACHMENT_IDLE: Duration = Duration::from_millis(10);
 
 extern "C" {
     fn spark_connect_engine_thread_attach(
@@ -455,6 +456,15 @@ enum Cleanup {
     },
 }
 impl Cleanup {
+    fn core(&self) -> Option<&Arc<JvmEngine>> {
+        match self {
+            Self::Cancel(handle) => Some(&handle.core),
+            Self::Arrow { lease, .. } => Some(&lease.0),
+            Self::Free { core, .. } => Some(core),
+            #[cfg(test)]
+            Self::TestAction { .. } => None,
+        }
+    }
     fn lane(&self) -> CleanupLane {
         match self {
             Self::Cancel(_) | Self::Arrow { .. } => CleanupLane::Task,
@@ -464,6 +474,96 @@ impl Cleanup {
         }
     }
 }
+
+/// Cleanup lanes outlive individual servers. Retain an attachment only during
+/// a burst, and count that whole lifetime as activity so shutdown waits for the
+/// same-thread detach before it releases the engine factory.
+struct CleanupAttachment<W> {
+    worker: Option<W>,
+    activity: Activity,
+}
+impl<W> CleanupAttachment<W> {
+    fn attach_with(
+        core: &Arc<JvmEngine>,
+        attach: impl FnOnce(&Arc<JvmEngine>) -> Result<W, Status>,
+    ) -> Result<Self, Status> {
+        let activity = {
+            let mut counts = core
+                .counts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if core.closed.load(Ordering::SeqCst) {
+                return Err(Status::unavailable("Spark engine is stopping"));
+            }
+            counts.workers += 1;
+            Activity(core.clone())
+        };
+        // Each queued item still owns a handle or export, retaining the factory
+        // across attachment acquisition and any concurrent shutdown.
+        let worker = attach(core)?;
+        Ok(Self {
+            worker: Some(worker),
+            activity,
+        })
+    }
+    fn belongs_to(&self, core: &Arc<JvmEngine>) -> bool {
+        Arc::ptr_eq(&self.activity.0, core)
+    }
+}
+impl<W> Drop for CleanupAttachment<W> {
+    fn drop(&mut self) {
+        // Activity must stay reserved until detach completes. A detach failure
+        // remains visible through verify_workers_detached's attachment count.
+        drop(self.worker.take());
+    }
+}
+
+fn cleanup_loop(rx: mpsc::Receiver<Cleanup>) {
+    cleanup_loop_with(rx, CLEANUP_ATTACHMENT_IDLE, JvmEngine::attach_worker);
+}
+
+// The generic worker constructor lets tests exercise successful attachment
+// lifetimes without a JVM; the production loop still uses the native guard.
+fn cleanup_loop_with<W>(
+    rx: mpsc::Receiver<Cleanup>,
+    idle: Duration,
+    mut attach: impl FnMut(&Arc<JvmEngine>) -> Result<W, Status>,
+) {
+    let mut attachment: Option<CleanupAttachment<W>> = None;
+    loop {
+        let item = if attachment.is_some() {
+            match rx.recv_timeout(idle) {
+                Ok(item) => item,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    drop(attachment.take());
+                    continue;
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        } else {
+            match rx.recv() {
+                Ok(item) => item,
+                Err(_) => break,
+            }
+        };
+        match item.core() {
+            Some(core) => {
+                if attachment
+                    .as_ref()
+                    .is_none_or(|current| !current.belongs_to(core))
+                {
+                    drop(attachment.take());
+                    // Per-call JNI scopes remain the fallback on attachment
+                    // failure or when shutdown has already closed admission.
+                    attachment = CleanupAttachment::attach_with(core, &mut attach).ok();
+                }
+            }
+            None => drop(attachment.take()),
+        }
+        cleanup(item);
+    }
+}
+
 fn cleanup_sender(lane: CleanupLane) -> &'static Result<mpsc::Sender<Cleanup>, String> {
     // Session close may block on Spark teardown. Isolate it from Query frees
     // that hold task admission, and Task/cancel/Arrow reclamation itself.
@@ -479,11 +579,7 @@ fn cleanup_sender(lane: CleanupLane) -> &'static Result<mpsc::Sender<Cleanup>, S
         let (tx, rx) = mpsc::channel();
         std::thread::Builder::new()
             .name(name.into())
-            .spawn(move || {
-                for item in rx {
-                    cleanup(item);
-                }
-            })
+            .spawn(move || cleanup_loop(rx))
             .map_err(|e| e.to_string())?;
         Ok(tx)
     })
@@ -1342,6 +1438,228 @@ mod tests {
             tonic::Code::ResourceExhausted
         );
     }
+
+    #[derive(Debug)]
+    struct CleanupAttachmentEvent {
+        action: &'static str,
+        core: usize,
+        thread: std::thread::ThreadId,
+        workers: usize,
+        handles: usize,
+    }
+    struct TestCleanupWorker {
+        core: Arc<JvmEngine>,
+        events: mpsc::Sender<CleanupAttachmentEvent>,
+        release: Option<mpsc::Receiver<()>>,
+        _thread: PhantomData<Rc<()>>,
+    }
+    impl TestCleanupWorker {
+        fn new(
+            core: &Arc<JvmEngine>,
+            events: &mpsc::Sender<CleanupAttachmentEvent>,
+            release: Option<mpsc::Receiver<()>>,
+        ) -> Self {
+            let worker = Self {
+                core: core.clone(),
+                events: events.clone(),
+                release,
+                _thread: PhantomData,
+            };
+            worker.record("attach");
+            worker
+        }
+        fn record(&self, action: &'static str) {
+            let counts = self.core.counts.lock().unwrap();
+            let _ = self.events.send(CleanupAttachmentEvent {
+                action,
+                core: Arc::as_ptr(&self.core) as usize,
+                thread: std::thread::current().id(),
+                workers: counts.workers,
+                handles: counts.handles,
+            });
+        }
+    }
+    impl Drop for TestCleanupWorker {
+        fn drop(&mut self) {
+            self.record("detach");
+            if let Some(release) = &self.release {
+                // The test owns a CleanupBlock that also releases on unwind.
+                let _ = release.recv();
+            }
+        }
+    }
+    fn empty_cleanup(core: &Arc<JvmEngine>) -> Cleanup {
+        core.counts.lock().unwrap().handles += 1;
+        Cleanup::Free {
+            pointer: 0,
+            core: core.clone(),
+            permit: None,
+            lane: CleanupLane::Task,
+            retained_task: None,
+        }
+    }
+    fn attachment_event(rx: &mpsc::Receiver<CleanupAttachmentEvent>) -> CleanupAttachmentEvent {
+        rx.recv_timeout(Duration::from_secs(5)).unwrap()
+    }
+    struct CleanupTestLane {
+        thread: std::thread::JoinHandle<()>,
+        done: mpsc::Receiver<()>,
+    }
+    impl CleanupTestLane {
+        fn spawn(action: impl FnOnce() + Send + 'static) -> Self {
+            let (done_tx, done) = mpsc::channel();
+            let thread = std::thread::spawn(move || {
+                action();
+                let _ = done_tx.send(());
+            });
+            Self { thread, done }
+        }
+        fn join(self) {
+            self.done.recv_timeout(Duration::from_secs(5)).unwrap();
+            self.thread.join().unwrap();
+        }
+    }
+    fn cleanup_drained(core: Arc<JvmEngine>) {
+        let (done_tx, done_rx) = mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            core.wait_drained();
+            let _ = done_tx.send(());
+        });
+        done_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        waiter.join().unwrap();
+    }
+    #[test]
+    fn cleanup_attachment_detaches_on_idle_without_closing_the_lane() {
+        let core = JvmEngine::new(std::ptr::null_mut());
+        let (tx, rx) = mpsc::channel();
+        let (events_tx, events_rx) = mpsc::channel();
+        assert!(tx.send(empty_cleanup(&core)).is_ok());
+        let lane = CleanupTestLane::spawn(move || {
+            // Zero makes the empty-queue timeout deterministic, independent of
+            // scheduler speed; the sender stays open until detach is observed.
+            cleanup_loop_with(rx, Duration::ZERO, |core| {
+                Ok(TestCleanupWorker::new(core, &events_tx, None))
+            });
+        });
+        let attached = attachment_event(&events_rx);
+        let detached = attachment_event(&events_rx);
+        assert_eq!((attached.action, detached.action), ("attach", "detach"));
+        assert_eq!(attached.thread, detached.thread);
+        assert_eq!((detached.workers, detached.handles), (1, 0));
+        cleanup_drained(core.clone());
+        assert_eq!(core.counts.lock().unwrap().workers, 0);
+        drop(tx);
+        lane.join();
+    }
+    #[test]
+    fn cleanup_attachment_reuses_a_burst_and_detaches_before_switching_engines() {
+        let first = JvmEngine::new(std::ptr::null_mut());
+        let second = JvmEngine::new(std::ptr::null_mut());
+        let (tx, rx) = mpsc::channel();
+        let (events_tx, events_rx) = mpsc::channel();
+        for core in [&first, &first, &second] {
+            assert!(tx.send(empty_cleanup(core)).is_ok());
+        }
+        drop(tx);
+        let first_core = first.clone();
+        let lane = CleanupTestLane::spawn(move || {
+            // All work and disconnect are queued before the receiver starts.
+            cleanup_loop_with(rx, Duration::from_secs(60), |core| {
+                if !Arc::ptr_eq(core, &first_core) {
+                    assert_eq!(first_core.counts.lock().unwrap().workers, 0);
+                }
+                Ok(TestCleanupWorker::new(core, &events_tx, None))
+            });
+        });
+        lane.join();
+        let events = events_rx.try_iter().collect::<Vec<_>>();
+        assert_eq!(
+            events.iter().map(|event| event.action).collect::<Vec<_>>(),
+            ["attach", "detach", "attach", "detach"]
+        );
+        assert_eq!(events[0].core, Arc::as_ptr(&first) as usize);
+        assert_eq!(events[1].core, events[0].core);
+        assert_eq!(events[2].core, Arc::as_ptr(&second) as usize);
+        assert_eq!(events[3].core, events[2].core);
+        assert!(events.iter().all(|event| event.thread == events[0].thread));
+        assert!(events.iter().all(|event| event.workers == 1));
+        assert_eq!((events[1].handles, events[3].handles), (0, 0));
+        for core in [first, second] {
+            assert_eq!(core.counts.lock().unwrap().workers, 0);
+            cleanup_drained(core);
+        }
+    }
+    #[test]
+    fn cleanup_attachment_activity_outlives_a_blocked_detach_during_shutdown() {
+        let core = JvmEngine::new(std::ptr::null_mut());
+        let (tx, rx) = mpsc::channel();
+        let (events_tx, events_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let release = CleanupBlock(release_tx);
+        assert!(tx.send(empty_cleanup(&core)).is_ok());
+        drop(tx);
+        let lane = CleanupTestLane::spawn(move || {
+            let mut release_rx = Some(release_rx);
+            cleanup_loop_with(rx, Duration::from_secs(60), |core| {
+                Ok(TestCleanupWorker::new(core, &events_tx, release_rx.take()))
+            });
+        });
+        let attached = attachment_event(&events_rx);
+        let detaching = attachment_event(&events_rx);
+        assert_eq!((attached.action, detaching.action), ("attach", "detach"));
+        assert_eq!(attached.thread, detaching.thread);
+        assert_eq!((detaching.workers, detaching.handles), (1, 0));
+        core.shutdown();
+        assert!(core
+            .take_factory_after_drain()
+            .unwrap_err()
+            .contains("drained work"));
+        let waiting_core = core.clone();
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            ready_tx.send(()).unwrap();
+            waiting_core.wait_drained();
+            done_tx.send(()).unwrap();
+        });
+        ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(matches!(done_rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
+        assert_eq!(core.counts.lock().unwrap().workers, 1);
+        drop(release);
+        done_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        waiter.join().unwrap();
+        lane.join();
+        assert_eq!(core.counts.lock().unwrap().workers, 0);
+        core.release_factory().unwrap();
+    }
+    #[test]
+    fn cleanup_attachment_failure_releases_activity_and_closed_engines_still_clean_up() {
+        let core = JvmEngine::new(std::ptr::null_mut());
+        let status = CleanupAttachment::attach_with(&core, |core| {
+            assert_eq!(core.counts.lock().unwrap().workers, 1);
+            Err::<TestCleanupWorker, _>(Status::internal("injected attach failure"))
+        })
+        .err()
+        .unwrap();
+        assert_eq!(status.code(), tonic::Code::Internal);
+        assert_eq!(core.counts.lock().unwrap().workers, 0);
+        core.shutdown();
+        let (tx, rx) = mpsc::channel();
+        assert!(tx.send(empty_cleanup(&core)).is_ok());
+        drop(tx);
+        cleanup_loop_with(
+            rx,
+            Duration::ZERO,
+            |_| -> Result<TestCleanupWorker, Status> {
+                panic!("closed cleanup must use the per-call fallback")
+            },
+        );
+        assert_eq!(core.counts.lock().unwrap().handles, 0);
+        assert_eq!(core.counts.lock().unwrap().workers, 0);
+        cleanup_drained(core.clone());
+        core.release_factory().unwrap();
+    }
+
     #[test]
     fn factory_release_requires_drain_and_transfers_ownership_once_with_core_arcs_retained() {
         // This is only an opaque ownership token, never a JNI handle. Prevent
