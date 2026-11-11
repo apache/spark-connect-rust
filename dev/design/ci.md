@@ -157,6 +157,34 @@ releases retain their six-hour limit. Check artifacts expire after one day;
 release artifacts retain the repository default. Checkout credentials are not
 persisted in either build.
 
+## Coverage and the offline Python suite (`coverage.yml`)
+
+This workflow runs on pushes and pull requests targeting `master` and `branch-*`. Its
+one job does three things:
+
+- **Rust coverage**: `cargo llvm-cov` over the unit and golden tests of
+  `apache-spark-connect` and `apache-spark-connect-core`, plus the behavioral e2e tests
+  against a live Connect server, merged into one report.
+- **Offline Python suite**: builds the extension and runs
+  `python/tests/test_dropin_offline.py`, `test_arrow_handoff.py` and `test_ml_offline.py`
+  under `coverage.py`. No other workflow runs these files, so this step is their gate: a
+  failing test fails the job. `-rs` prints every skipped test with its reason. The scope
+  of the Python number is the hand-written shim, as `python/.coveragerc` defines it.
+- **Coverage floors**: the last step fails the job when a number is below its floor,
+  `RUST_COVERAGE_FLOOR` (Rust line coverage) or `PYTHON_COVERAGE_FLOOR` (Python line and
+  branch coverage), both set in the `env` block of the workflow. The step runs after the
+  badge and the artifacts are published, so a run below a floor still reports the number
+  it measured.
+
+The floors are regression floors, set just below what `master` measures; the target
+(above 90% on both sides) is in `AGENTS.md`. Raise a floor when coverage has grown and
+stayed there. The Rust number moves by about 0.1 between runs of the same commit, since
+the e2e tests run against a live server, so keep a floor a few tenths below the measured
+value.
+
+On a push to `master` the job also publishes both numbers to the `badges` branch, which
+the README badges read.
+
 ## Continuous improvement
 
 The parity ledger (`dev/parity/inventory.csv`) is the source of truth:
