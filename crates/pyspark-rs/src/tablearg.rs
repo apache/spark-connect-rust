@@ -3,8 +3,8 @@
 use pyo3::prelude::*;
 use spark_connect::table_arg::TableArg;
 
-use crate::dataframe::to_column_list;
 use crate::errors::ResultExt;
+use crate::window::window_columns;
 
 /// A table argument for a table-valued function, mirroring
 /// `pyspark.sql.connect.table_arg.TableArg`. Built via `df.asTable()`, then optionally
@@ -26,7 +26,7 @@ impl PyTableArg {
     #[pyo3(signature = (*cols))]
     #[allow(non_snake_case)]
     fn partitionBy(&self, cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyTableArg> {
-        let columns = to_column_list(cols)?;
+        let columns = window_columns(cols)?;
         Ok(PyTableArg {
             inner: self.inner.clone().partition_by(columns).to_pyerr()?,
         })
@@ -36,7 +36,7 @@ impl PyTableArg {
     #[pyo3(signature = (*cols))]
     #[allow(non_snake_case)]
     fn orderBy(&self, cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyTableArg> {
-        let columns = to_column_list(cols)?;
+        let columns = window_columns(cols)?;
         Ok(PyTableArg {
             inner: self.inner.clone().order_by(columns).to_pyerr()?,
         })
