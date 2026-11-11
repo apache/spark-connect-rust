@@ -1142,4 +1142,168 @@ mod tests {
         let batch = build_artifact_request_stream("s".to_string(), vec![make()]).unwrap();
         assert_eq!(a, batch);
     }
+
+    /// The artifacts of the pinned framing, by name and size: an empty one, one of exactly a
+    /// chunk, one a byte over a chunk, small ones that cross a batch boundary, small ones
+    /// between chunked ones, and ones of several chunks, the last a whole number of chunks.
+    const PINNED_ARTIFACTS: [(&str, usize); 13] = [
+        ("files/empty", 0),
+        ("files/exact", CHUNK_SIZE),
+        ("jars/over.jar", CHUNK_SIZE + 1),
+        ("pyfiles/a.py", 10_000),
+        ("pyfiles/b.py", 10_000),
+        ("pyfiles/c.py", 10_000),
+        ("pyfiles/d.py", 10_000),
+        ("files/tiny", 5),
+        ("jars/multi.jar", CHUNK_SIZE * 3 + 7),
+        ("files/one", 1),
+        ("files/rest", CHUNK_SIZE - 1),
+        ("files/spill", 1),
+        ("jars/whole.jar", CHUNK_SIZE * 2),
+    ];
+
+    fn pinned_data(index: usize, size: usize) -> Vec<u8> {
+        (0..size).map(|i| (i * 31 + index * 7) as u8).collect()
+    }
+
+    fn pinned_named(index: usize) -> NamedArtifact {
+        let (name, size) = PINNED_ARTIFACTS[index];
+        NamedArtifact::new(
+            name.to_string(),
+            Box::new(InMemoryArtifact::new(pinned_data(index, size))),
+        )
+    }
+
+    /// One line for each request: its payload, with the length and the CRC of each chunk.
+    fn framing(requests: &[AddArtifactsRequest]) -> Vec<String> {
+        let chunk = |chunk: &Option<add_artifacts_request::ArtifactChunk>| {
+            let chunk = chunk.as_ref().unwrap();
+            assert_eq!(chunk.crc, compute_crc32(&chunk.data) as i64);
+            format!("{}:{:08x}", chunk.data.len(), chunk.crc)
+        };
+        requests
+            .iter()
+            .map(|request| {
+                assert_eq!(request.session_id, "session");
+                match request.payload.as_ref().unwrap() {
+                    add_artifacts_request::Payload::Batch(batch) => {
+                        let artifacts: Vec<String> = batch
+                            .artifacts
+                            .iter()
+                            .map(|artifact| format!("{}={}", artifact.name, chunk(&artifact.data)))
+                            .collect();
+                        format!("batch [{}]", artifacts.join(", "))
+                    }
+                    add_artifacts_request::Payload::BeginChunk(begin) => format!(
+                        "begin {} total={} chunks={} {}",
+                        begin.name,
+                        begin.total_bytes,
+                        begin.num_chunks,
+                        chunk(&begin.initial_chunk)
+                    ),
+                    add_artifacts_request::Payload::Chunk(data) => {
+                        format!("chunk {}", chunk(&Some(data.clone())))
+                    }
+                }
+            })
+            .collect()
+    }
+
+    /// The CRC of the requests as they are encoded for the wire, one after another.
+    fn wire_crc(requests: &[AddArtifactsRequest]) -> u32 {
+        use prost::Message;
+        let mut hasher = Hasher::new();
+        for request in requests {
+            hasher.update(&request.encode_length_delimited_to_vec());
+        }
+        hasher.finalize()
+    }
+
+    /// Pins the requests that every way of framing artifacts puts on the wire.
+    #[test]
+    fn the_framing_of_artifacts_is_pinned() {
+        let all = 0..PINNED_ARTIFACTS.len();
+        let eager = build_artifact_request_stream(
+            "session".to_string(),
+            all.clone().map(pinned_named).collect(),
+        )
+        .unwrap();
+        let cached: Vec<AddArtifactsRequest> = cache_artifact_requests(
+            "session".to_string(),
+            all.clone()
+                .map(|index| {
+                    let (name, size) = PINNED_ARTIFACTS[index];
+                    (name.to_string(), Bytes::from(pinned_data(index, size)))
+                })
+                .collect(),
+        )
+        .collect();
+        assert_eq!(
+            framing(&eager),
+            [
+                "batch [files/empty=0:00000000, files/exact=32768:7bc368d8]",
+                "begin jars/over.jar total=32769 chunks=2 32768:5f6349da",
+                "chunk 1:35bac28a",
+                "batch [pyfiles/a.py=10000:d625043c, pyfiles/b.py=10000:39b2157a, \
+                 pyfiles/c.py=10000:f0508888]",
+                "batch [pyfiles/d.py=10000:ed3d6035, files/tiny=5:df828f04]",
+                "begin jars/multi.jar total=98311 chunks=4 32768:6036fb23",
+                "chunk 32768:6036fb23",
+                "chunk 32768:6036fb23",
+                "chunk 7:d0965bdd",
+                "batch [files/one=1:6464c2b0, files/rest=32767:a89fc864]",
+                "batch [files/spill=1:da6fd2a0]",
+                "begin jars/whole.jar total=65536 chunks=2 32768:a1b78124",
+                "chunk 32768:a1b78124",
+            ]
+        );
+        assert_eq!(wire_crc(&eager), 0x29c4_d88a);
+        assert_eq!(framing(&cached), framing(&eager));
+        assert_eq!(cached, eager);
+
+        // One artifact at a time, as an upload of a file frames it.
+        let mut single = Vec::new();
+        for index in all {
+            let artifact = pinned_named(index);
+            let mut frames = ArtifactFrames::new("session".to_string(), &artifact).unwrap();
+            let lazy: Vec<AddArtifactsRequest> = frames.by_ref().collect();
+            take_frame_failure(&frames.failure()).unwrap();
+            let alone =
+                build_artifact_request_stream("session".to_string(), vec![pinned_named(index)])
+                    .unwrap();
+            assert_eq!(lazy, alone, "{}", artifact.name);
+            let (name, size) = PINNED_ARTIFACTS[index];
+            let alone_cached: Vec<AddArtifactsRequest> = cache_artifact_requests(
+                "session".to_string(),
+                vec![(name.to_string(), Bytes::from(pinned_data(index, size)))],
+            )
+            .collect();
+            assert_eq!(lazy, alone_cached, "{}", artifact.name);
+            single.extend(lazy);
+        }
+        assert_eq!(
+            framing(&single),
+            [
+                "batch [files/empty=0:00000000]",
+                "batch [files/exact=32768:7bc368d8]",
+                "begin jars/over.jar total=32769 chunks=2 32768:5f6349da",
+                "chunk 1:35bac28a",
+                "batch [pyfiles/a.py=10000:d625043c]",
+                "batch [pyfiles/b.py=10000:39b2157a]",
+                "batch [pyfiles/c.py=10000:f0508888]",
+                "batch [pyfiles/d.py=10000:ed3d6035]",
+                "batch [files/tiny=5:df828f04]",
+                "begin jars/multi.jar total=98311 chunks=4 32768:6036fb23",
+                "chunk 32768:6036fb23",
+                "chunk 32768:6036fb23",
+                "chunk 7:d0965bdd",
+                "batch [files/one=1:6464c2b0]",
+                "batch [files/rest=32767:a89fc864]",
+                "batch [files/spill=1:da6fd2a0]",
+                "begin jars/whole.jar total=65536 chunks=2 32768:a1b78124",
+                "chunk 32768:a1b78124",
+            ]
+        );
+        assert_eq!(wire_crc(&single), 0xd422_9fba);
+    }
 }
