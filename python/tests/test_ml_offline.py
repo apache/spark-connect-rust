@@ -2335,6 +2335,7 @@ def test_random_forest_regressor_native_parameters_match_official_fixture(ml_moc
     import inspect
     import json
     from pathlib import Path
+
     from pyspark.ml.connect import RandomForestRegressor as exported
     from pyspark.ml.connect.regression import RandomForestRegressor
 
