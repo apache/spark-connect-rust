@@ -38,6 +38,7 @@ polars = { workspace = true, optional = true }
 
 [dev-dependencies]
 base64 = "0.21"
+tonic.workspace = true
 
 [features]
 # Run Rust UDFs on Spark via WebAssembly (the `wasm_udf` module). Off by

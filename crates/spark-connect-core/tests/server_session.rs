@@ -242,6 +242,11 @@ impl UnaryService<Vec<u8>> for Unary {
 /// A `google.rpc.Status` with an `ErrorInfo` of `error_class`, as the server sends the errors it
 /// raises.
 fn error_with_class(message: &str, error_class: &str) -> Status {
+    error_with_class_and_id(message, error_class, None)
+}
+
+/// [`error_with_class`] that also names the `errorId` under which the server keeps the details.
+fn error_with_class_and_id(message: &str, error_class: &str, error_id: Option<&str>) -> Status {
     #[derive(Clone, PartialEq, prost::Message)]
     struct ErrorInfo {
         #[prost(string, tag = "1")]
@@ -260,10 +265,14 @@ fn error_with_class(message: &str, error_class: &str) -> Status {
         #[prost(message, repeated, tag = "3")]
         details: Vec<prost_types::Any>,
     }
+    let mut metadata = HashMap::from([("errorClass".to_string(), error_class.to_string())]);
+    if let Some(id) = error_id {
+        metadata.insert("errorId".to_string(), id.to_string());
+    }
     let info = ErrorInfo {
         reason: "SESSION_CHANGED".into(),
         domain: "org.apache.spark".into(),
-        metadata: HashMap::from([("errorClass".to_string(), error_class.to_string())]),
+        metadata,
     };
     let details = RpcStatus {
         code: Code::Internal as i32,
@@ -473,6 +482,33 @@ async fn a_session_changed_error_closes_the_client() {
         .await
         .expect_err("a closed client must raise");
     assert_eq!(error.get_condition().as_deref(), Some("NO_ACTIVE_SESSION"));
+}
+
+#[tokio::test]
+async fn a_session_changed_error_that_has_details_raises_no_active_session() {
+    // The client is closed by the error, and the fetch of the details of the error goes through
+    // it: PySpark raises the `NO_ACTIVE_SESSION` of that fetch from the call that failed.
+    let fixture = Fixture::start().await;
+    let client = fixture.client().await;
+    fixture.state.failures.lock().unwrap().push_back((
+        "Config".to_string(),
+        error_with_class_and_id(
+            "The existing Spark server driver instance has restarted. Please reconnect.",
+            "INVALID_HANDLE.SESSION_CHANGED",
+            Some("error-1"),
+        ),
+    ));
+
+    let error = client
+        .config(config_request(&client))
+        .await
+        .expect_err("a session change must raise");
+    assert_eq!(error.get_condition().as_deref(), Some("NO_ACTIVE_SESSION"));
+    assert!(client.is_closed());
+    assert!(fixture
+        .state
+        .requests_of::<spark_connect_proto::FetchErrorDetailsRequest>("FetchErrorDetails")
+        .is_empty());
 }
 
 #[tokio::test]
