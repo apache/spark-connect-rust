@@ -4,22 +4,15 @@
 //! bitwise, membership, struct/array/map access, window). This both covers column.rs
 //! and pins correct behavior. Run with SPARK_REMOTE set.
 
+mod common;
+
+use common::{session, should_run};
 use spark_connect::column::{col, lit, lit_boolean, lit_double, lit_string, when, Column};
 use spark_connect::dataframe::DataFrame;
 use spark_connect::functions as f;
 use spark_connect::row::Value;
 use spark_connect::session::SparkSession;
 
-fn should_run() -> bool {
-    std::env::var("SPARK_REMOTE").is_ok()
-}
-fn session() -> SparkSession {
-    let url = std::env::var("SPARK_REMOTE").unwrap_or_else(|_| "sc://localhost:15002".to_string());
-    SparkSession::builder()
-        .remote(&url)
-        .get_or_create()
-        .expect("session")
-}
 fn base(s: &SparkSession) -> DataFrame {
     s.sql(
         "SELECT * FROM VALUES (1,'apple',10.0),(2,'banana',20.0),(3,NULL,30.0) \

@@ -6,12 +6,10 @@
 //! before comparing: rename every distinct UnresolvedNamedLambdaVariable name_parts
 //! to v0, v1, ... in first-appearance order.
 
-use std::collections::HashMap;
-use std::fs::File;
-use std::io::{BufRead, BufReader};
+mod common;
 
-use base64::{engine::general_purpose::STANDARD, Engine};
-use prost::Message;
+use std::collections::HashMap;
+
 use spark_connect::column::col;
 use spark_connect::expression::Expression;
 use spark_connect::functions::{
@@ -109,30 +107,12 @@ fn canonicalize_lambda_vars(
 }
 
 fn load_goldens() -> HashMap<String, proto::Expression> {
-    // Goldens live at the repo root; tests run with CWD at the crate dir.
-    let path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../tests/golden/functions_hof.jsonl"
-    );
-    let file = File::open(path).expect("golden file functions_hof.jsonl missing");
-    let mut out = HashMap::new();
-    for line in BufReader::new(file).lines() {
-        let line = line.unwrap();
-        if line.trim().is_empty() {
-            continue;
-        }
-        let obj: serde_json::Value = serde_json::from_str(&line).unwrap();
-        let name = obj["name"].as_str().unwrap().to_string();
-        let b64 = obj["b64"].as_str().unwrap();
-        let bytes = STANDARD.decode(b64).unwrap();
-        let mut expr = proto::Expression::decode(&bytes[..]).unwrap();
+    common::load_goldens("functions_hof.jsonl", |expr| {
         // Canonicalize reference golden
         let mut name_map = HashMap::new();
         let mut counter = 0;
-        canonicalize_lambda_vars(&mut expr, &mut name_map, &mut counter);
-        out.insert(name, expr);
-    }
-    out
+        canonicalize_lambda_vars(expr, &mut name_map, &mut counter);
+    })
 }
 
 fn build(name: &str) -> Option<Expression> {

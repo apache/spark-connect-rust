@@ -19,13 +19,14 @@
 //! server-side session ID of the server, which a test changes to restart it: the observed ID of
 //! the requests, the check of the responses, and the close of the client on a restart.
 
+mod common;
+
 use std::collections::HashMap;
 use std::collections::VecDeque;
-use std::convert::Infallible;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll};
 
+use common::{FakeServer, FakeService};
 use futures::{stream, Stream};
 use prost::Message;
 use spark_connect_core::bytes_codec::BytesCodec;
@@ -35,14 +36,10 @@ use spark_connect_proto::{
     ConfigRequest, ConfigResponse, ExecutePlanRequest, ExecutePlanResponse, ReattachExecuteRequest,
     ReleaseExecuteRequest, ReleaseExecuteResponse,
 };
-use tokio::net::TcpListener;
-use tonic::body::Body;
-use tonic::codegen::{http, BoxFuture, Service};
-use tonic::server::{NamedService, ServerStreamingService, UnaryService};
-use tonic::transport::Server;
+use tonic::codegen::BoxFuture;
+use tonic::server::{ServerStreamingService, UnaryService};
 use tonic::{Code, Request, Response, Status};
 
-const SERVICE: &str = "/spark.connect.SparkConnectService/";
 const FIRST_SERVER_ID: &str = "server-1";
 const RESTARTED_SERVER_ID: &str = "server-2";
 type Frames = Pin<Box<dyn Stream<Item = Result<Vec<u8>, Status>> + Send>>;
@@ -93,7 +90,7 @@ impl State {
 
 struct Fixture {
     state: Arc<State>,
-    server: tokio::task::JoinHandle<()>,
+    _server: FakeServer,
     address: std::net::SocketAddr,
 }
 
@@ -105,22 +102,11 @@ impl Fixture {
             failures: Mutex::new(VecDeque::new()),
             requests: Mutex::new(Vec::new()),
         });
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let incoming = futures::stream::unfold(listener, |listener| async {
-            Some((listener.accept().await.map(|(socket, _)| socket), listener))
-        });
-        let service = TestService(state.clone());
-        let server = tokio::spawn(async move {
-            Server::builder()
-                .add_service(service)
-                .serve_with_incoming(incoming)
-                .await
-                .unwrap();
-        });
+        let server = service(state.clone()).serve().await;
+        let address = server.address;
         Self {
             state,
-            server,
+            _server: server,
             address,
         }
     }
@@ -136,12 +122,6 @@ impl Fixture {
             ..RetryPolicy::default()
         });
         client
-    }
-}
-
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        self.server.abort();
     }
 }
 
@@ -179,36 +159,20 @@ fn first_response(session_id: &str, server_session_id: &str) -> Vec<u8> {
     .encode_to_vec()
 }
 
-#[derive(Clone)]
-struct TestService(Arc<State>);
-
-impl NamedService for TestService {
-    const NAME: &'static str = "spark.connect.SparkConnectService";
-}
-
-impl Service<http::Request<Body>> for TestService {
-    type Response = http::Response<Body>;
-    type Error = Infallible;
-    type Future = BoxFuture<Self::Response, Self::Error>;
-
-    fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        Poll::Ready(Ok(()))
-    }
-
-    fn call(&mut self, request: http::Request<Body>) -> Self::Future {
-        let method = request.uri().path().trim_start_matches(SERVICE).to_string();
-        let state = self.0.clone();
-        Box::pin(async move {
-            let mut grpc = tonic::server::Grpc::new(BytesCodec);
-            Ok(match method.as_str() {
-                "ExecutePlan" | "ReattachExecute" => {
-                    grpc.server_streaming(Streamed(state, method), request)
-                        .await
-                }
-                _ => grpc.unary(Unary(state, method), request).await,
-            })
-        })
-    }
+/// The loopback service: ExecutePlan and ReattachExecute stream, and every other method is
+/// unary.
+fn service(state: Arc<State>) -> FakeService {
+    let streamed = {
+        let state = state.clone();
+        move |method: &str| Streamed(state.clone(), method.to_string())
+    };
+    FakeService::new()
+        .server_streaming("ExecutePlan", || BytesCodec, streamed.clone())
+        .server_streaming("ReattachExecute", || BytesCodec, streamed)
+        .fallback_unary(
+            || BytesCodec,
+            move |method| Unary(state.clone(), method.to_string()),
+        )
 }
 
 /// ExecutePlan and ReattachExecute.

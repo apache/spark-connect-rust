@@ -19,14 +19,15 @@
 //! execution that the server does not know. No Spark server required: a loopback tonic
 //! service stalls its calls before they send headers, as a stalled connection does.
 
+mod common;
+
 use std::collections::{HashSet, VecDeque};
-use std::convert::Infallible;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
+use common::{FakeServer, FakeService};
 use futures::{stream, Stream};
 use spark_connect_core::{ChannelBuilder, RetryPolicy, RpcDeadlines, SparkConnectClient};
 use spark_connect_proto::execute_plan_response::{ResponseType, ResultComplete};
@@ -35,13 +36,11 @@ use spark_connect_proto::{
     ConfigRequest, ConfigResponse, ExecutePlanRequest, ExecutePlanResponse, ReattachExecuteRequest,
     ReleaseExecuteRequest, ReleaseExecuteResponse, UserContext,
 };
-use tokio::net::TcpListener;
-use tonic::body::Body;
-use tonic::codegen::{http, BoxFuture, Service};
+use tonic::codegen::BoxFuture;
 use tonic::metadata::MetadataMap;
-use tonic::server::{NamedService, ServerStreamingService, UnaryService};
-use tonic::transport::Server;
+use tonic::server::{ServerStreamingService, UnaryService};
 use tonic::{Code, Request, Response, Status};
+use tonic_prost::ProstCodec;
 
 /// The per-RPC deadline of the tests: short, so that the stalls end quickly.
 const DEADLINE: Duration = Duration::from_millis(200);
@@ -135,7 +134,7 @@ impl State {
 
 struct Fixture {
     state: Arc<State>,
-    server: tokio::task::JoinHandle<()>,
+    _server: FakeServer,
     client: SparkConnectClient,
 }
 
@@ -144,19 +143,8 @@ impl Fixture {
     /// the given retry policy.
     async fn start(execute: Vec<Step>, reattach: Vec<Step>, retry_policy: RetryPolicy) -> Self {
         let state = Arc::new(State::new(execute, reattach));
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let incoming = stream::unfold(listener, |listener| async {
-            Some((listener.accept().await.map(|(socket, _)| socket), listener))
-        });
-        let service = TestService(state.clone());
-        let server = tokio::spawn(async move {
-            Server::builder()
-                .add_service(service)
-                .serve_with_incoming(incoming)
-                .await
-                .unwrap();
-        });
+        let server = service(state.clone()).serve().await;
+        let address = server.address;
         let builder = ChannelBuilder::parse(&format!(
             "sc://localhost:{}/;user_id=transport-user;token=fixture-token;session_id=00000000-0000-4000-8000-000000000001",
             address.port()
@@ -174,7 +162,7 @@ impl Fixture {
         });
         Self {
             state,
-            server,
+            _server: server,
             client,
         }
     }
@@ -191,12 +179,6 @@ impl Fixture {
         .await;
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert_eq!(self.state.release_all_count(), expected);
-    }
-}
-
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        self.server.abort();
     }
 }
 
@@ -701,51 +683,21 @@ fn error_info_details() -> Vec<u8> {
 }
 
 /// The loopback service: ExecutePlan, ReattachExecute, ReleaseExecute and Config.
-#[derive(Clone)]
-struct TestService(Arc<State>);
-
-impl NamedService for TestService {
-    const NAME: &'static str = "spark.connect.SparkConnectService";
-}
-
-impl Service<http::Request<Body>> for TestService {
-    type Response = http::Response<Body>;
-    type Error = Infallible;
-    type Future = BoxFuture<Self::Response, Self::Error>;
-
-    fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        Poll::Ready(Ok(()))
-    }
-
-    fn call(&mut self, request: http::Request<Body>) -> Self::Future {
-        let state = self.0.clone();
-        match request.uri().path() {
-            "/spark.connect.SparkConnectService/ExecutePlan" => Box::pin(async move {
-                let mut grpc = tonic::server::Grpc::new(tonic_prost::ProstCodec::default());
-                Ok(grpc.server_streaming(Execute(state), request).await)
-            }),
-            "/spark.connect.SparkConnectService/ReattachExecute" => Box::pin(async move {
-                let mut grpc = tonic::server::Grpc::new(tonic_prost::ProstCodec::default());
-                Ok(grpc.server_streaming(Reattach(state), request).await)
-            }),
-            "/spark.connect.SparkConnectService/ReleaseExecute" => Box::pin(async move {
-                let mut grpc = tonic::server::Grpc::new(tonic_prost::ProstCodec::default());
-                Ok(grpc.unary(ReleaseRpc(state), request).await)
-            }),
-            "/spark.connect.SparkConnectService/Config" => Box::pin(async move {
-                let mut grpc = tonic::server::Grpc::new(tonic_prost::ProstCodec::default());
-                Ok(grpc.unary(Config(state), request).await)
-            }),
-            _ => Box::pin(async {
-                Ok(http::Response::builder()
-                    .status(200)
-                    .header("grpc-status", "12")
-                    .header("content-type", "application/grpc")
-                    .body(Body::empty())
-                    .unwrap())
-            }),
-        }
-    }
+fn service(state: Arc<State>) -> FakeService {
+    let (execute, reattach, release) = (state.clone(), state.clone(), state.clone());
+    FakeService::new()
+        .server_streaming("ExecutePlan", ProstCodec::default, move |_| {
+            Execute(execute.clone())
+        })
+        .server_streaming("ReattachExecute", ProstCodec::default, move |_| {
+            Reattach(reattach.clone())
+        })
+        .unary("ReleaseExecute", ProstCodec::default, move |_| {
+            ReleaseRpc(release.clone())
+        })
+        .unary("Config", ProstCodec::default, move |_| {
+            Config(state.clone())
+        })
 }
 
 /// Serves the next step of `script`, a call that stalls never returning its headers.

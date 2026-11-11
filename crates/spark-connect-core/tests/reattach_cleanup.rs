@@ -17,15 +17,16 @@
 
 //! Real-wire lifecycle tests; no Spark server or generated server bindings required.
 
+mod common;
+
 use std::collections::VecDeque;
-use std::convert::Infallible;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll};
 use std::time::Duration;
 
+use common::{FakeServer, FakeService};
 use futures::{stream, Stream, StreamExt};
 use spark_connect_core::{ChannelBuilder, RetryPolicy, RpcDeadlines, SparkConnectClient};
 use spark_connect_proto::execute_plan_response::{ResponseType, ResultComplete};
@@ -34,14 +35,12 @@ use spark_connect_proto::{
     ExecutePlanRequest, ExecutePlanResponse, ReattachExecuteRequest, ReleaseExecuteRequest,
     ReleaseExecuteResponse, UserContext,
 };
-use tokio::net::TcpListener;
 use tokio::sync::{oneshot, Notify};
-use tonic::body::Body;
-use tonic::codegen::{http, BoxFuture, Service};
+use tonic::codegen::BoxFuture;
 use tonic::metadata::MetadataMap;
-use tonic::server::{NamedService, ServerStreamingService, UnaryService};
-use tonic::transport::Server;
+use tonic::server::{ServerStreamingService, UnaryService};
 use tonic::{Code, Request, Response, Status};
+use tonic_prost::ProstCodec;
 
 const WAIT: Duration = Duration::from_secs(3);
 type Responses = Pin<Box<dyn Stream<Item = Result<ExecutePlanResponse, Status>> + Send>>;
@@ -124,7 +123,7 @@ impl State {
 
 struct Fixture {
     state: Arc<State>,
-    server: tokio::task::JoinHandle<()>,
+    _server: FakeServer,
     client: SparkConnectClient,
 }
 
@@ -145,19 +144,8 @@ impl Fixture {
             changed: Notify::new(),
             timeouts: Mutex::new(Vec::new()),
         });
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let incoming = stream::unfold(listener, |listener| async {
-            Some((listener.accept().await.map(|(socket, _)| socket), listener))
-        });
-        let service = TestService(state.clone());
-        let server = tokio::spawn(async move {
-            Server::builder()
-                .add_service(service)
-                .serve_with_incoming(incoming)
-                .await
-                .unwrap();
-        });
+        let server = service(state.clone()).serve().await;
+        let address = server.address;
         let builder = ChannelBuilder::parse(&format!(
             "sc://localhost:{}/;user_id=transport-user;token=fixture-token;x-cleanup=fixture-value;session_id=00000000-0000-4000-8000-000000000001",
             address.port()
@@ -174,7 +162,7 @@ impl Fixture {
         });
         Self {
             state,
-            server,
+            _server: server,
             client,
         }
     }
@@ -205,12 +193,6 @@ impl Fixture {
             .is_err(),
             "execution received more ReleaseAll requests than expected"
         );
-    }
-}
-
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        self.server.abort();
     }
 }
 
@@ -260,47 +242,19 @@ fn assert_metadata(metadata: &MetadataMap) {
     assert!(metadata.get("user-agent").is_some());
 }
 
-#[derive(Clone)]
-struct TestService(Arc<State>);
-
-impl NamedService for TestService {
-    const NAME: &'static str = "spark.connect.SparkConnectService";
-}
-
-impl Service<http::Request<Body>> for TestService {
-    type Response = http::Response<Body>;
-    type Error = Infallible;
-    type Future = BoxFuture<Self::Response, Self::Error>;
-
-    fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        Poll::Ready(Ok(()))
-    }
-
-    fn call(&mut self, request: http::Request<Body>) -> Self::Future {
-        let state = self.0.clone();
-        match request.uri().path() {
-            "/spark.connect.SparkConnectService/ExecutePlan" => Box::pin(async move {
-                let mut grpc = tonic::server::Grpc::new(tonic_prost::ProstCodec::default());
-                Ok(grpc.server_streaming(Execute(state), request).await)
-            }),
-            "/spark.connect.SparkConnectService/ReattachExecute" => Box::pin(async move {
-                let mut grpc = tonic::server::Grpc::new(tonic_prost::ProstCodec::default());
-                Ok(grpc.server_streaming(Reattach(state), request).await)
-            }),
-            "/spark.connect.SparkConnectService/ReleaseExecute" => Box::pin(async move {
-                let mut grpc = tonic::server::Grpc::new(tonic_prost::ProstCodec::default());
-                Ok(grpc.unary(ReleaseRpc(state), request).await)
-            }),
-            _ => Box::pin(async {
-                Ok(http::Response::builder()
-                    .status(200)
-                    .header("grpc-status", "12")
-                    .header("content-type", "application/grpc")
-                    .body(Body::empty())
-                    .unwrap())
-            }),
-        }
-    }
+/// The loopback service: ExecutePlan, ReattachExecute and ReleaseExecute.
+fn service(state: Arc<State>) -> FakeService {
+    let (execute, reattach) = (state.clone(), state.clone());
+    FakeService::new()
+        .server_streaming("ExecutePlan", ProstCodec::default, move |_| {
+            Execute(execute.clone())
+        })
+        .server_streaming("ReattachExecute", ProstCodec::default, move |_| {
+            Reattach(reattach.clone())
+        })
+        .unary("ReleaseExecute", ProstCodec::default, move |_| {
+            ReleaseRpc(state.clone())
+        })
 }
 
 struct Execute(Arc<State>);

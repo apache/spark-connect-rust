@@ -7,18 +7,9 @@
 //!
 //! Run with: `SPARK_REMOTE=sc://localhost:15002 cargo test --test e2e_session_catalog`
 
-use spark_connect::session::SparkSession;
+mod common;
 
-fn should_run() -> bool {
-    std::env::var("SPARK_REMOTE").is_ok()
-}
-fn session() -> SparkSession {
-    let url = std::env::var("SPARK_REMOTE").unwrap_or_else(|_| "sc://localhost:15002".to_string());
-    SparkSession::builder()
-        .remote(&url)
-        .get_or_create()
-        .expect("session")
-}
+use common::{session, should_run};
 
 /// Exercise the whole Catalog RPC surface. Most `list_*`/`get_*` calls return a lazy
 /// DataFrame, so we collect them (tolerantly) to actually drive the server.

@@ -7,23 +7,14 @@
 //!
 //! Run with: `SPARK_REMOTE=sc://localhost:15002 cargo test --test e2e_new_methods`
 
+mod common;
+
 use std::collections::HashMap;
 
+use common::{session, should_run};
 use spark_connect::column::{col, lit};
 use spark_connect::session::SparkSession;
 use spark_connect::types::DataType;
-
-fn should_run() -> bool {
-    std::env::var("SPARK_REMOTE").is_ok()
-}
-
-fn session() -> SparkSession {
-    let url = std::env::var("SPARK_REMOTE").unwrap_or_else(|_| "sc://localhost:15002".to_string());
-    SparkSession::builder()
-        .remote(&url)
-        .get_or_create()
-        .expect("session")
-}
 
 fn numeric(s: &SparkSession) -> spark_connect::dataframe::DataFrame {
     s.sql("SELECT * FROM VALUES (0,1.0),(1,2.0),(1,3.0),(2,4.0),(3,5.0) AS t(g, v)")

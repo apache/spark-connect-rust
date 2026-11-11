@@ -5,20 +5,10 @@
 //!
 //! Run with: `SPARK_REMOTE=sc://localhost:15002 cargo test --test e2e_streaming`
 
-use spark_connect::session::SparkSession;
+mod common;
+
+use common::{session, should_run};
 use spark_connect::streaming::Trigger;
-
-fn should_run() -> bool {
-    std::env::var("SPARK_REMOTE").is_ok()
-}
-
-fn session() -> SparkSession {
-    let url = std::env::var("SPARK_REMOTE").unwrap_or_else(|_| "sc://localhost:15002".to_string());
-    SparkSession::builder()
-        .remote(&url)
-        .get_or_create()
-        .expect("session")
-}
 
 /// A short-lived query on the `rate` source into an in-memory sink, so the whole
 /// reader -> writer.start -> StreamingQuery -> stop path runs against the server.
