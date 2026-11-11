@@ -1173,9 +1173,11 @@ impl SparkSession {
         &self,
         udf: crate::udf::CommonInlineUserDefinedFunctionExpression,
     ) -> Result<()> {
+        // An argument of the function is serialized as a request serializes its expressions.
+        let function = crate::expression::with_expression_depth_bound(|| udf.to_proto())?;
         crate::dataframe::execute_command_unreported(
             self,
-            proto::command::CommandType::RegisterFunction(udf.to_proto()),
+            proto::command::CommandType::RegisterFunction(function),
         )
     }
 

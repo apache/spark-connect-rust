@@ -393,6 +393,13 @@ impl Column {
         self.expr.to_proto()
     }
 
+    /// Convert to proto expression as a request serializes it: an expression deeper than
+    /// [`crate::expression::MAX_EXPRESSION_DEPTH`] is a `RecursionError`, as PySpark's
+    /// serializer raises it (see [`Expression::try_to_proto`]).
+    pub fn try_to_proto(&self) -> spark_connect_core::error::Result<proto::Expression> {
+        self.expr.try_to_proto()
+    }
+
     /// Mirrors `pyspark.sql.column.Column.over` - window function application.
     pub fn over(self, window_spec: WindowSpec) -> Column {
         // Convert window frame spec if present

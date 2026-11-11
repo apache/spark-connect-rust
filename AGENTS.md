@@ -472,6 +472,9 @@ For every method matching a pyspark name:
 - **`*cols` methods unpack a single list.** `df.select(["a","b"])` must behave like
   `df.select("a","b")` (pyspark unpacks a lone list/tuple arg). Handled centrally in
   `to_column_list`, so it covers `select`/`sort`/`groupBy`/... at once — don't re-solve per method.
+  The exceptions are `repartition` and `repartitionByRange`, which give PySpark's `_to_cols` the
+  `*cols` tuple itself, so a list among their columns is `NOT_EXPECTED_TYPE`
+  (`to_columns_as_given`).
 - **Pipelines (SDP):** The pure-Python surface vendors cleanly with one edit to imports. The
   Connect-server path requires a dedicated Rust `PipelineCommand` seam with high-level methods
   on the session, separate from drop-in parity work.

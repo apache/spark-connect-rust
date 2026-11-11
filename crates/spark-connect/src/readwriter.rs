@@ -610,22 +610,28 @@ impl DataFrameWriterV2 {
         self
     }
 
-    /// Build the `WriteOperationV2` command proto for the given mode.
+    /// Build the `WriteOperationV2` command proto for the given mode. As PySpark's serializer,
+    /// it fails with a `RecursionError`, before any request is sent, if a partitioning column or
+    /// the overwrite condition is deeper than [`crate::expression::MAX_EXPRESSION_DEPTH`].
     pub(crate) fn build_operation(
         &self,
         mode: proto::write_operation_v2::Mode,
-        overwrite_condition: Option<proto::Expression>,
+        overwrite_condition: Option<&Column>,
     ) -> Result<proto::WriteOperationV2> {
         let mut op = proto::WriteOperationV2::default();
         op.input = Some(build_input_relation(&self.input_plan, &self.session)?);
         op.table_name = self.table_name.clone();
         op.provider = self.provider.clone();
-        op.partitioning_columns = self.partition_cols.iter().map(|c| c.to_proto()).collect();
+        op.partitioning_columns = self
+            .partition_cols
+            .iter()
+            .map(Column::try_to_proto)
+            .collect::<Result<_>>()?;
         op.clustering_columns = self.cluster_cols.clone();
         op.options = self.options.clone();
         op.table_properties = self.table_properties.clone();
         op.mode = mode as i32;
-        op.overwrite_condition = overwrite_condition;
+        op.overwrite_condition = overwrite_condition.map(Column::try_to_proto).transpose()?;
         Ok(op)
     }
 
@@ -656,10 +662,8 @@ impl DataFrameWriterV2 {
 
     /// Overwrite rows matching `condition` with the DataFrame's rows.
     pub fn overwrite(self, condition: Column) -> Result<()> {
-        let op = self.build_operation(
-            proto::write_operation_v2::Mode::Overwrite,
-            Some(condition.to_proto()),
-        )?;
+        let op =
+            self.build_operation(proto::write_operation_v2::Mode::Overwrite, Some(&condition))?;
         self.run(proto::command::CommandType::WriteOperationV2(op))
     }
 
@@ -822,7 +826,7 @@ mod tests {
             .write_to("t")
             .build_operation(
                 proto::write_operation_v2::Mode::Overwrite,
-                Some(crate::column::col("id").to_proto()),
+                Some(&crate::column::col("id")),
             )
             .unwrap();
         assert_eq!(op.mode, proto::write_operation_v2::Mode::Overwrite as i32);

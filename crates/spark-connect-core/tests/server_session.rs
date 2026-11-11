@@ -422,6 +422,67 @@ async fn a_restarted_server_raises_and_closes_the_client() {
 }
 
 #[tokio::test]
+async fn a_restart_that_the_plan_compression_lookup_sees_sends_no_plan_as_pyspark() {
+    use spark_connect_proto::analyze_plan_request::{Analyze, Schema};
+    use spark_connect_proto::{plan, AnalyzePlanRequest, Plan, Relation};
+
+    // As PySpark, which reads its `_stub` for an execution or an analysis once the plan is
+    // built: the lookup of the plan compression of the first plan gets a response of the
+    // restarted server, which closes the client, so the call raises NO_ACTIVE_SESSION and sends
+    // nothing.
+    let fixture = Fixture::start().await;
+    let a_plan = || {
+        Some(Plan {
+            op_type: Some(plan::OpType::Root(Relation::default())),
+        })
+    };
+    let mut conditions = Vec::new();
+    for call in ["reattachable ExecutePlan", "ExecutePlan", "AnalyzePlan"] {
+        *fixture.state.server_session_id.lock().unwrap() = FIRST_SERVER_ID.to_string();
+        let client = fixture.client().await;
+        client.config(config_request(&client)).await.unwrap();
+        *fixture.state.server_session_id.lock().unwrap() = RESTARTED_SERVER_ID.to_string();
+        let execution = ExecutePlanRequest {
+            plan: a_plan(),
+            ..execute_request(&client)
+        };
+        let error = match call {
+            "reattachable ExecutePlan" => client.execute_plan_reattachable(execution).await.err(),
+            "ExecutePlan" => client.execute_plan(execution).await.err(),
+            _ => client
+                .analyze_plan(AnalyzePlanRequest {
+                    session_id: client.session_id().to_string(),
+                    analyze: Some(Analyze::Schema(Schema { plan: a_plan() })),
+                    ..Default::default()
+                })
+                .await
+                .err(),
+        };
+        assert!(client.is_closed(), "{call}");
+        conditions.push((call, error.and_then(|error| error.get_condition())));
+    }
+    let no_active_session = Some("NO_ACTIVE_SESSION".to_string());
+    assert_eq!(
+        conditions,
+        [
+            ("reattachable ExecutePlan", no_active_session.clone()),
+            ("ExecutePlan", no_active_session.clone()),
+            ("AnalyzePlan", no_active_session),
+        ]
+    );
+    // Of each client, its Config and the lookup, and nothing after them.
+    let methods: Vec<String> = fixture
+        .state
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(method, _)| method.clone())
+        .collect();
+    assert_eq!(methods, ["Config"; 6]);
+}
+
+#[tokio::test]
 async fn a_session_changed_error_closes_the_client() {
     let fixture = Fixture::start().await;
     let client = fixture.client().await;

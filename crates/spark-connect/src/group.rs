@@ -165,7 +165,13 @@ impl GroupedData {
         let mut group_cols: Vec<Column> = Vec::new();
         for set in &grouping_sets {
             for col in set {
-                let key = prost::Message::encode_to_vec(&col.expression().clone().to_proto());
+                // Serialized as a request serializes it: a column too deep to be sent is kept,
+                // and the request of the grouping fails with its `RecursionError`.
+                let Ok(expression) = col.try_to_proto() else {
+                    group_cols.push(col.clone());
+                    continue;
+                };
+                let key = prost::Message::encode_to_vec(&expression);
                 if !seen.contains(&key) {
                     seen.push(key);
                     group_cols.push(col.clone());

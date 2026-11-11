@@ -1367,6 +1367,35 @@ def test_repartition_by_range_without_a_count_sends_none_as_pyspark(mock_connect
     assert sent(df.repartitionByRange(2, "id")) == [2]
 
 
+
+def test_repartition_does_not_unpack_a_list_among_its_columns_as_pyspark(mock_connect):
+    # As PySpark's repartition and repartitionByRange, which give the tuple of *cols itself to
+    # _to_cols: a list or a tuple among the columns is NOT_EXPECTED_TYPE, where select unpacks a
+    # single one. repartitionByRange(n, []) is that error too, not CANNOT_BE_EMPTY.
+    from pyspark.errors import PySparkTypeError
+    from pyspark.sql import functions as F
+
+    spark, _ = mock_connect
+    df = spark.range(1)
+    for call, arg_type in [
+        (lambda: df.repartition(2, ["id"]), "list"),
+        (lambda: df.repartition(2, []), "list"),
+        (lambda: df.repartition("id", ["id"]), "list"),
+        (lambda: df.repartition(2, 1), "int"),
+        (lambda: df.repartitionByRange(2, ["id"]), "list"),
+        (lambda: df.repartitionByRange(2, ("id",)), "tuple"),
+        (lambda: df.repartitionByRange(2, []), "list"),
+        (lambda: df.repartitionByRange("id", ["id"]), "list"),
+    ]:
+        with pytest.raises(PySparkTypeError) as e:
+            call()
+        assert e.value.getCondition() == "NOT_EXPECTED_TYPE"
+        assert e.value.getMessageParameters() == {
+            "expected_type": "Column or str", "arg_name": "cols", "arg_type": arg_type}
+    df.repartition(2, "id", F.col("id"))
+    df.repartitionByRange(2, "id", F.col("id"))
+
+
 def test_session_id_of_any_uuid_version_and_the_user_id_of_the_requests(monkeypatch, mock_connect):
     # A session_id is any UUID, as uuid.UUID(session_id, version=4) takes it, and is sent as
     # given. The user ID of each request is SPARK_USER, else USER, as PySpark sets it.
@@ -7273,6 +7302,35 @@ def test_column_getitem():
     # Accessing a field by name or index
     assert type(c["field"]).__name__ == "Column"
     assert type(c[0]).__name__ == "Column"
+
+
+
+def test_get_item_of_a_column_warns_and_pow_takes_no_modulo_as_pyspark():
+    # As PySpark's Column.getItem, which warns of a Column as the key, as getField does of a
+    # name; and as its __pow__ and __rpow__, which take no modulo, so a ternary pow raises.
+    import warnings
+
+    from pyspark.sql import functions as F
+
+    c = F.col("a")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        c.getItem(F.col("k"))
+        c.getItem("k")
+        c.getItem(0)
+    assert [(w.category, str(w.message)) for w in caught] == [(
+        FutureWarning,
+        "A column as 'key' in getItem is deprecated as of Spark 3.0, and will not be supported "
+        "in the future release. Use `column[key]` or `column.key` syntax instead.",
+    )]
+    with pytest.raises(TypeError, match=r"^Column\.__pow__\(\) takes 2 positional arguments but 3 "
+                                        r"were given$"):
+        pow(c, 2, 3)
+    with pytest.raises(TypeError, match=r"^unsupported operand type\(s\) for \*\* or pow\(\): "
+                                        r"'int', '(pyspark\.sql\.connect\.column\.)?Column', "
+                                        r"'int'$"):
+        pow(2, c, 3)
+    assert repr(c ** 2) == "Column<'power(a, 2)'>" and repr(2 ** c) == "Column<'power(2, a)'>"
 
 
 def test_session_builder_remote_url():
@@ -14996,6 +15054,33 @@ def test_protobuf_options_must_be_a_map_as_pyspark():
         P.to_protobuf("b", "M", None, F.col("x"))
 
 
+
+def test_connect_to_col_raises_for_an_argument_that_is_not_a_column_as_pyspark():
+    # As PySpark Connect's _to_col, of pyspark.sql.connect.functions.builtin, which the ML
+    # vector functions and the protobuf functions convert their column with: an argument that is
+    # not a Column or a str is NOT_EXPECTED_TYPE.
+    from pyspark.errors import PySparkTypeError
+    from pyspark.ml.functions import array_to_vector, vector_to_array
+    from pyspark.sql.connect.functions import builtin as B
+    from pyspark.sql.protobuf.functions import from_protobuf, to_protobuf
+
+    for call, arg_type in [
+        (lambda: B._to_col(1), "int"),
+        (lambda: B._invoke_function_over_columns("abs", [1]), "list"),
+        (lambda: vector_to_array([1.0]), "list"),
+        (lambda: array_to_vector(1), "int"),
+        (lambda: from_protobuf(1, "M", binaryDescriptorSet=b"x"), "int"),
+        (lambda: to_protobuf([1], "M", binaryDescriptorSet=b"x"), "list"),
+    ]:
+        with pytest.raises(PySparkTypeError) as e:
+            call()
+        assert e.value.getCondition() == "NOT_EXPECTED_TYPE"
+        assert e.value.getMessageParameters() == {
+            "expected_type": "Column or str", "arg_name": "col", "arg_type": arg_type}
+    assert repr(B._to_col("x")) == "Column<'x'>"
+    assert repr(vector_to_array("v")) == "Column<'vector_to_array(v, float64)'>"
+
+
 def test_udtf_decorator_warns_without_pyarrow_as_pyspark(mock_connect, monkeypatch):
     from pyspark.sql import functions as F
     from pyspark.sql.pandas import utils as pandas_utils
@@ -15820,6 +15905,59 @@ def test_an_expression_too_deep_to_send_raises_recursion_error_without_a_request
     assert service.execute_requests == []
     spark.range(1).select(chained(743)).collect()
     assert len(service.execute_requests) == 1
+
+
+def test_a_command_expression_too_deep_to_send_raises_recursion_error_as_pyspark(mock_connect):
+    # As PySpark, whose serializer raises RecursionError, before any request, for an expression of
+    # about 1,000 levels as a merge condition, a condition or an assignment of a merge clause (as
+    # the clause method adds the clause, which is not added then), a partitioning column or an
+    # overwrite condition, and as it pickles a Column or builds its to_plan; 20,000 levels killed
+    # the process, and pickling took minutes. 744 additions, the 745 levels of the bound, are sent.
+    import pickle
+
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+
+    def chained(additions):
+        c = F.col("id")
+        for _ in range(additions):
+            c = c + 1
+        return c
+
+    df = spark.range(3).alias("s")
+    writer = df.mergeInto("t", F.col("id")).whenMatched().delete()
+    too_deep = "an expression may be at most 745 levels"
+    for additions in [745, 30_000]:
+        deep = chained(additions)
+        with pytest.raises(RecursionError, match=too_deep):
+            df.mergeInto("t", deep).whenMatched().updateAll().merge()
+        with pytest.raises(RecursionError, match=too_deep):
+            writer.whenNotMatchedBySource(deep).updateAll()
+        with pytest.raises(RecursionError, match=too_deep):
+            writer.whenNotMatched().insert({"v": deep})
+        with pytest.raises(RecursionError, match=too_deep):
+            df.writeTo("t").overwrite(deep)
+        with pytest.raises(RecursionError, match=too_deep):
+            df.writeTo("t").partitionedBy(deep).create()
+        with pytest.raises(RecursionError, match=too_deep):
+            pickle.dumps(deep)
+        with pytest.raises(RecursionError, match=too_deep):
+            deep._expr.to_plan(spark.client)
+        del deep
+    assert service.execute_requests == []
+    # The merge sends the one clause that was added: ExecutePlanRequest.plan=3, Plan.command=2,
+    # Command.merge_into_table_command=16, of match_actions=4, not_matched_actions=5 and
+    # not_matched_by_source_actions=6.
+    writer.merge()
+    plan = parse_message(parse_message(service.execute_requests[-1])[3][0])
+    merge = parse_message(parse_message(plan[2][0])[16][0])
+    assert [len(merge.get(field, [])) for field in [4, 5, 6]] == [1, 0, 0]
+    at_bound = chained(744)
+    df.mergeInto("t", at_bound).whenMatched(at_bound).update({"v": at_bound}).merge()
+    df.writeTo("t").partitionedBy(at_bound).overwrite(at_bound)
+    assert len(service.execute_requests) == 3
+    assert pickle.dumps(at_bound)
 
 
 def test_window_and_lambda_reprs_as_pyspark():

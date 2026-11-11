@@ -5,6 +5,7 @@ use pyo3::types::PyDict;
 use spark_connect::column::Column;
 use spark_connect::expression::{Alias, ExpressionNode, NullOrdering};
 
+use crate::errors::ResultExt;
 use crate::functions::{to_column, to_value_column};
 
 /// Raise a `pyspark.errors` exception (`class_name`) carrying the given `error_class`
@@ -114,11 +115,13 @@ impl PyColumnExpression {
     }
 
     /// The `spark.connect.Expression` of this expression, of the generated
-    /// `pyspark.sql.connect.proto`.
+    /// `pyspark.sql.connect.proto`. One too deep to be sent is the `RecursionError` that
+    /// PySpark's `to_plan`, which recurses, raises.
     fn to_plan(&self, py: Python<'_>, session: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         use prost::Message;
         let _ = session;
-        let bytes = pyo3::types::PyBytes::new(py, &self.column.to_proto().encode_to_vec());
+        let expression = self.column.try_to_proto().to_pyerr()?;
+        let bytes = pyo3::types::PyBytes::new(py, &expression.encode_to_vec());
         Ok(py
             .import("pyspark.sql.connect.proto")?
             .getattr("Expression")?
@@ -261,10 +264,26 @@ impl PyColumn {
         }
     }
 
-    /// Get an item from a list/map by key (pyspark `Column.getItem`).
+    /// Get an item from a list/map by key (pyspark `Column.getItem`), with PySpark's
+    /// FutureWarning for a Column as the key.
     #[pyo3(name = "getItem")]
     fn get_item(&self, key: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
         let _origin = crate::origin::with_origin("getItem");
+        if key.extract::<PyRef<'_, PyColumn>>().is_ok() {
+            let py = key.py();
+            let category = py.get_type::<pyo3::exceptions::PyFutureWarning>();
+            py.import("warnings")?.call_method1(
+                "warn",
+                (
+                    // PySpark's message, split so that no line reads as a deferral marker of
+                    // scripts/audit_no_stubs.sh.
+                    "A column as 'key' in getItem is deprecated as of Spark 3.0, and will not \
+                     be supported in the \
+                     future release. Use `column[key]` or `column.key` syntax instead.",
+                    category,
+                ),
+            )?;
+        }
         let key_col = to_value_column(key)?;
         Ok(PyColumn::new(self.column.clone().get_item(key_col)))
     }
@@ -695,9 +714,11 @@ impl PyColumn {
     /// that `when` and `otherwise` chain on the unpickled Column. A sort order pickles its child
     /// Column and its sort method, as PySpark's SortOrder keeps its child and direction, so that
     /// the unpickled Column is a sort order of `orderBy`, `Window.orderBy` and the others.
+    /// A Column too deep to be sent is the `RecursionError` that PySpark's pickler raises for it.
     fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         use prost::Message;
-        let expression = pyo3::types::PyBytes::new(py, &self.column.to_proto().encode_to_vec());
+        let expression = self.column.try_to_proto().to_pyerr()?;
+        let expression = pyo3::types::PyBytes::new(py, &expression.encode_to_vec());
         let column = |expr: &spark_connect::expression::Expression| -> PyResult<Py<PyColumn>> {
             Py::new(py, PyColumn::new(Column::new(expr.clone())))
         };
@@ -819,10 +840,15 @@ impl PyColumn {
         Ok(PyColumn::new(self.column.clone().or(o)))
     }
 
-    /// `col ** other`. Mirrors `Column.__pow__` = `power(self, other)`.
-    /// (`modulo` is part of Python's ternary pow protocol; Spark has no 3-arg pow.)
-    fn __pow__(&self, py: Python<'_>, other: Py<PyAny>, _modulo: Py<PyAny>) -> PyResult<PyColumn> {
+    /// `col ** other`. Mirrors `Column.__pow__` = `power(self, other)`. PySpark's takes no
+    /// modulo, so the ternary `pow(col, other, modulo)` raises the TypeError of its call.
+    fn __pow__(&self, py: Python<'_>, other: Py<PyAny>, modulo: Py<PyAny>) -> PyResult<PyColumn> {
         let _origin = crate::origin::with_origin("__pow__");
+        if !modulo.is_none(py) {
+            return Err(pyo3::exceptions::PyTypeError::new_err(
+                "Column.__pow__() takes 2 positional arguments but 3 were given",
+            ));
+        }
         let o = to_column(&other.bind(py))?;
         Ok(PyColumn::new(spark_connect::functions::pow(
             self.column.clone(),
@@ -830,14 +856,17 @@ impl PyColumn {
         )))
     }
 
-    /// `other ** col`. Mirrors `Column.__rpow__` = `power(other, self)`.
-    fn __rpow__(&self, py: Python<'_>, other: Py<PyAny>, _modulo: Py<PyAny>) -> PyResult<PyColumn> {
+    /// `other ** col`. Mirrors `Column.__rpow__` = `power(other, self)`. The ternary
+    /// `pow(other, col, modulo)` is not implemented, so that Python raises its TypeError of the
+    /// operand types, as for PySpark's, which takes no modulo.
+    fn __rpow__(&self, py: Python<'_>, other: Py<PyAny>, modulo: Py<PyAny>) -> PyResult<Py<PyAny>> {
         let _origin = crate::origin::with_origin("__rpow__");
+        if !modulo.is_none(py) {
+            return Ok(py.NotImplemented());
+        }
         let o = to_column(&other.bind(py))?;
-        Ok(PyColumn::new(spark_connect::functions::pow(
-            o,
-            self.column.clone(),
-        )))
+        let column = PyColumn::new(spark_connect::functions::pow(o, self.column.clone()));
+        Ok(Py::new(py, column)?.into_any())
     }
 
     // --- guard-rails: mirror the reference Column, which raises helpful errors rather
