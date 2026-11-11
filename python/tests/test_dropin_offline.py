@@ -17795,6 +17795,27 @@ def test_sigint_during_the_plan_compression_lookup_raises_keyboard_interrupt_at_
     assert service.interrupt_requests == []
 
 
+def test_sigint_ends_the_backoff_before_the_reattach_of_a_dropped_stream(mock_connect):
+    # As PySpark's: a stream that fails after a response is reattached after the backoff of the
+    # retry policy, here the server's RetryInfo delay of 5 s, as an attempt of its `Retrying`,
+    # and a signal ends that backoff at once, as it ends the reference's retry sleep.
+    import signal
+    import threading
+
+    spark, service = mock_connect
+    service.stream_failure = ("UNAVAILABLE", 5000)
+    timer = threading.Timer(1.0, os.kill, (os.getpid(), signal.SIGINT))
+    started = time.monotonic()
+    timer.start()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            spark.range(3).collect()
+    finally:
+        timer.cancel()
+    assert time.monotonic() - started < 3
+    assert service.reattach_requests == []
+
+
 def test_sigint_while_an_unavailable_execute_is_retried_raises_keyboard_interrupt(mock_connect):
     # As PySpark's: the retry sleep of an ExecutePlan that the server answers UNAVAILABLE raises
     # KeyboardInterrupt at the first signal, instead of the whole retry budget.

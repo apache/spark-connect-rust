@@ -2457,9 +2457,18 @@ impl ReattachableResponseStream {
                     // reattaching and is the error once the policy's retries are spent. Else a
                     // connection that keeps failing after the headers of each reattach is
                     // reattached at once, without end. As at the other retries, the server's
-                    // RetryInfo delay of the failure, if any, is the wait.
+                    // RetryInfo delay of the failure, if any, is the wait. The backoff ends with a
+                    // signal, as the reference's `Retrying` sleep does.
                     match retry_state.next_attempt(retry_delay_ms(&status)) {
-                        Some(wait_ms) => tokio::time::sleep(Duration::from_millis(wait_ms)).await,
+                        Some(wait_ms) => {
+                            let backoff = tokio::time::sleep(Duration::from_millis(wait_ms));
+                            if crate::runtime::until_abort(crate::runtime::ABORT_RETRIES, backoff)
+                                .await
+                                .is_none()
+                            {
+                                return Err(self.fail(wait_aborted()));
+                            }
+                        }
                         None => return Err(self.fail_with_status(status).await),
                     }
                     self.reattach(&mut retry_state, &mut retry_exception_since)
