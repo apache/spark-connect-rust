@@ -28,7 +28,7 @@ concurrency:
 # Rust-backed client: download the Spark 4.3.0 Connect server, start it, pull the
 # official v4.3.0 connect test files, and run them through our client - the gate is
 # "every test passes except the checked-in known-environmental-failures manifest".
-# A separate job enforces Rust test coverage across all crates.
+# The build, the tests and the no-stub audit of the pure-Rust crates run in rust.yml.
 
 on:
   push:
@@ -654,40 +654,3 @@ jobs:
             /tmp/bench_ours.json
             /tmp/bench_compare.txt
           if-no-files-found: warn
-
-  # ---------------------------------------------------------------------------
-  # Rust checks - must be fully green.
-  # ---------------------------------------------------------------------------
-  rust-checks:
-    name: Rust checks
-    runs-on: ubuntu-latest
-    # Hard-fail on any compiler warning in our workspace crates (cargo caps dependency
-    # lints to `allow`, so third-party deps are unaffected). Job-scoped on purpose: the
-    # parity job above builds the pyspark-rs extension, which this must not gate.
-    env:
-      RUSTFLAGS: "-D warnings"
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install Rust toolchain
-        run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
-      - name: Cache cargo & target
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-checks-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-checks-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update && sudo apt-get install -y protobuf-compiler
-      - name: Cargo build
-        run: cargo build --release
-      - name: Cargo test
-        run: cargo test -p apache-spark-connect -p apache-spark-connect-core --release
-      - name: No-stub audit
-        run: bash scripts/audit_no_stubs.sh
-
