@@ -1412,6 +1412,34 @@ def test_is_empty_sends_a_limit_of_one_row_over_an_empty_projection_as_pyspark(m
     assert 15 in parse_message(project[1][0])
 
 
+def test_is_empty_reads_the_binary_setting_after_its_execution_as_pyspark(mock_connect):
+    # As PySpark's isEmpty, select().take(1), whose collect reads
+    # spark.sql.execution.pyspark.binaryAsBytes once the rows are fetched; it is asked once.
+    spark, service = mock_connect
+    df = spark.range(3)
+    before = len(service.rpc_events)
+    df.isEmpty()
+    df.isEmpty()
+    assert service.rpc_events[before:] == ["execute", "config"]
+    assert service.read_confs == ["spark.sql.execution.pyspark.binaryAsBytes"]
+
+
+def test_corr_and_cov_send_their_statistic_as_it_is_as_pyspark(mock_connect):
+    # As PySpark's corr and cov, which take the first value of _to_table() of their statistic:
+    # the root of the plan is the statistic, with no limit over it, and no setting is read.
+    import pyspark.sql.connect.proto as pb2
+
+    spark, service = mock_connect
+    df = spark.range(3)
+    before = len(service.rpc_events)
+    for stat in (df.corr, df.cov, df.stat.corr, df.stat.cov):
+        stat("id", "id")
+    roots = [pb2.ExecutePlanRequest.FromString(request).plan.root.WhichOneof("rel_type")
+             for request in service.execute_requests]
+    assert roots == ["corr", "cov", "corr", "cov"]
+    assert service.rpc_events[before:] == ["execute"] * 4
+
+
 def test_session_id_of_any_uuid_version_and_the_user_id_of_the_requests(monkeypatch, mock_connect):
     # A session_id is any UUID, as uuid.UUID(session_id, version=4) takes it, and is sent as
     # given. The user ID of each request is SPARK_USER, else USER, as PySpark sets it.
@@ -2842,6 +2870,58 @@ def test_binary_subclasses_are_sent_as_the_bytes_of_pyspark(mock_connect):
     relation = _sent_relation(service.analyze_requests[-1], 11)
     table = pa.ipc.open_stream(relation[1][0]).read_all()
     assert table.column(0).to_pylist() == [[b"other", None]]
+
+
+def test_binary_literals_of_subclasses_are_sent_as_the_bytes_of_pyspark(mock_connect):
+    # As PySpark's LiteralExpression.to_plan, which sends bytes(value): the __bytes__ of a
+    # subclass of bytes or bytearray, not its buffer, in lit, in the values of the functions and
+    # of the Column methods, in the elements of a typed array, and in the arguments of sql.
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.sql import functions as F
+
+    class Bytes(bytes):
+        def __bytes__(self):
+            return b"other"
+
+    class ByteArray(bytearray):
+        def __bytes__(self):
+            return b"other"
+
+    class NotBytes(bytes):
+        def __bytes__(self):
+            return "x"
+
+    def sent(column):
+        return column._expr.to_plan(None)
+
+    assert sent(F.lit(Bytes(b"orig"))).literal.binary == b"other"
+    assert sent(F.lit(ByteArray(b"orig"))).literal.binary == b"other"
+    assert sent(F.lit(bytearray(b"ba"))).literal.binary == b"ba"
+    isin = sent(F.col("b").isin(Bytes(b"orig"))).unresolved_function
+    assert isin.arguments[1].literal.binary == b"other"
+    when = sent(F.when(F.lit(True), ByteArray(b"orig"))).unresolved_function
+    assert when.arguments[1].literal.binary == b"other"
+    entry = sent(F.create_map(F.lit("k"), F.lit(Bytes(b"orig")))).unresolved_function
+    assert entry.arguments[1].literal.binary == b"other"
+    # The first element of a typed array is the literal of its value, and the others are
+    # literals of its type.
+    for values in ([Bytes(b"orig"), b"b", ByteArray(b"orig")], [b"b", Bytes(b"orig")]):
+        array = sent(F.when(F.lit(False), F.lit(None)).otherwise(values)).unresolved_function
+        elements = array.arguments[2].literal.array.elements
+        assert [e.binary for e in elements] == [bytes(value) for value in values]
+    # The error of bytes(); PySpark raises it once it sends the plan, and this client once it
+    # builds the literal.
+    with pytest.raises(TypeError, match="__bytes__ returned non-bytes"):
+        F.lit(NotBytes(b"a"))
+
+    spark, service = mock_connect
+    spark.sql("SELECT :x", args={"x": Bytes(b"orig")})
+    request = pb2.ExecutePlanRequest.FromString(service.execute_requests[-1])
+    named = request.plan.command.sql_command.input.sql.named_arguments
+    assert named["x"].literal.binary == b"other"
+    spark.sql("SELECT ?", args=[ByteArray(b"orig")])
+    request = pb2.ExecutePlanRequest.FromString(service.execute_requests[-1])
+    assert request.plan.command.sql_command.input.sql.pos_arguments[0].literal.binary == b"other"
 
 
 def test_time_values_are_sent_as_pyspark(mock_connect):
@@ -14973,6 +15053,88 @@ def test_local_rows_raise_the_error_of_a_converter_before_that_of_pyarrow(
         spark.createDataFrame(rows, ddl)
     assert type(e.value) is error
     assert message in str(e.value)
+
+
+def test_local_rows_raise_the_first_error_of_the_arrow_schema_depth_first_as_pyspark(
+    mock_connect,
+):
+    # As PySpark's to_arrow_schema, which builds the Arrow fields one at a time, depth first, each
+    # once its type is built: the first of a type that Arrow has no type of and of a null type
+    # field that is not nullable, as a map key never is, raises. A user-defined type is built as
+    # its SQL type.
+    from pyspark.errors import PySparkTypeError
+
+    class YearMonthUDT(T.UserDefinedType):
+        @classmethod
+        def sqlType(cls):
+            return T.YearMonthIntervalType()
+
+        @classmethod
+        def module(cls):
+            return __name__
+
+        def serialize(self, obj):
+            return obj
+
+        def deserialize(self, datum):
+            return datum
+
+    def struct(*fields):
+        return T.StructType([T.StructField(name, data_type) for name, data_type in fields])
+
+    ym, void = T.YearMonthIntervalType(), T.NullType()
+    spark, _ = mock_connect
+    for rows, schema, error in [
+        ([(None, None)], "a interval year to month, b void not null", "YearMonthIntervalType(0, 1)"),
+        ([(None, None)], "a void not null, b interval year to month", ValueError),
+        ([(None,)], "a struct<x: interval year to month, y: void not null>",
+         "YearMonthIntervalType(0, 1)"),
+        ([(None, None)], "a struct<x: void not null>, b interval year to month", ValueError),
+        ([(None, None)], struct(("a", T.ArrayType(void, False)), ("b", T.CharType(3))), ValueError),
+        ([(None,)], struct(("a", T.ArrayType(T.ArrayType(ym), False))),
+         "YearMonthIntervalType(0, 1)"),
+        ([(None,)], struct(("a", T.MapType(void, ym))), ValueError),
+        ([(None,)], struct(("a", T.MapType(ym, void, False))), "YearMonthIntervalType(0, 1)"),
+        ([(None, None)], T.StructType([T.StructField("a", YearMonthUDT()),
+                                       T.StructField("b", void, False)]),
+         "YearMonthIntervalType(0, 1)"),
+    ]:
+        with pytest.raises((PySparkTypeError, ValueError)) as e:
+            spark.createDataFrame(rows, schema)
+        if error is ValueError:
+            assert type(e.value) is ValueError, schema
+            assert str(e.value) == "A null type field may not be non-nullable"
+        else:
+            assert type(e.value) is PySparkTypeError, schema
+            assert e.value.getCondition() == "UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION"
+            assert e.value.getMessageParameters() == {"data_type": error}
+
+
+def test_an_array_of_no_converter_takes_the_values_that_pyarrow_takes_as_pyspark(mock_connect):
+    # As PyArrow's list conversion of a value that PySpark passes as it is: a sequence, a set or
+    # a dict_values is a list, and another iterable, such as a generator, an iterator, a
+    # frozenset, a dict_keys or a dict_items, is not a sequence, an error that waits for the
+    # converters of the other columns.
+    import pyarrow as pa
+
+    spark, service = mock_connect
+    d = {1: 2}
+    for value in (lambda: (i for i in [1]), lambda: iter([1]), d.keys, d.items,
+                  lambda: frozenset([1])):
+        with pytest.raises(pa.ArrowTypeError) as e:
+            spark.createDataFrame([(value(),)], "a array<int>")
+        assert str(e.value).endswith(
+            f"with type {type(value()).__name__}: was not a sequence or recognized null for "
+            "conversion to list type"
+        )
+        with pytest.raises(AssertionError):
+            spark.createDataFrame([(value(), 0)], "a array<int>, b timestamp")
+
+    df = spark.createDataFrame([(range(2),), ({1, 2},), (d.values(),), ((3,),)], "a array<int>")
+    df.columns
+    relation = _sent_relation(service.analyze_requests[-1], 11)
+    table = pa.ipc.open_stream(relation[1][0]).read_all()
+    assert table.column(0).to_pylist() == [[0, 1], [1, 2], [2], [3]]
 
 
 def test_nested_duplicate_field_names_are_deduplicated_in_the_arrow_schema(mock_connect):

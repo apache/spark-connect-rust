@@ -1424,6 +1424,41 @@ mod tests {
         }
     }
 
+    /// As PySpark's `corr` and `cov`, which take the first value of `_to_table()` of their
+    /// statistic: the relation of the statistic is the root of the plan, with no limit over it.
+    #[test]
+    fn corr_and_cov_send_their_statistic_as_it_is_as_pyspark() {
+        use spark_connect_proto::{plan::OpType, relation::RelType};
+        // A session of a dead port whose requests are not retried, so that the plan compression
+        // lookup fails at once; the hook records the request of the execution and fails it.
+        let builder = spark_connect_core::channel::ChannelBuilder::parse("sc://127.0.0.1:1")
+            .expect("valid URL");
+        let mut client = spark_connect_core::runtime::block_on(
+            spark_connect_core::client::SparkConnectClient::connect(&builder),
+        )
+        .expect("failed to build client");
+        client.set_retry_policy(spark_connect_core::retries::RetryPolicy::no_retries());
+        let spark = SparkSession::new(client);
+        let roots: Arc<std::sync::Mutex<Vec<RelType>>> = Arc::default();
+        let seen = Arc::clone(&roots);
+        let hook: spark_connect_core::client::ExecutePlanHook =
+            Arc::new(move |request: spark_connect_proto::ExecutePlanRequest| {
+                if let Some(OpType::Root(root)) = request.plan.and_then(|plan| plan.op_type) {
+                    seen.lock().unwrap().extend(root.rel_type);
+                }
+                Err(SparkError::value_msg("not sent"))
+            });
+        spark.set_execute_plan_hook(Some(hook));
+        let stat = spark.range(3).unwrap().stat();
+        assert!(stat.corr("id", "id").is_err());
+        assert!(stat.cov("id", "id").is_err());
+        let roots = roots.lock().unwrap();
+        assert!(
+            matches!(roots.as_slice(), [RelType::Corr(_), RelType::Cov(_)]),
+            "{roots:?}"
+        );
+    }
+
     #[test]
     fn stat_sample_by_plan() {
         let spark = session();

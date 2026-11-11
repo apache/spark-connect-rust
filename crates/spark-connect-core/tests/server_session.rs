@@ -512,6 +512,42 @@ async fn a_session_changed_error_that_has_details_raises_no_active_session() {
 }
 
 #[tokio::test]
+async fn a_session_changed_error_reads_no_stack_trace_setting_as_pyspark() {
+    // PySpark's `_display_server_stack_trace` reads its settings through `_stub`, which raises
+    // NO_ACTIVE_SESSION once the session change has closed the client: nothing is sent, and the
+    // stack trace is shown, as when the settings cannot be read.
+    let fixture = Fixture::start().await;
+    let client = fixture.client().await;
+    fixture.state.failures.lock().unwrap().push_back((
+        "Config".to_string(),
+        error_with_class(
+            "The existing Spark server driver instance has restarted. Please reconnect.",
+            "INVALID_HANDLE.SESSION_CHANGED",
+        ),
+    ));
+
+    let error = client
+        .config(config_request(&client))
+        .await
+        .expect_err("a session change must raise");
+    assert_eq!(
+        error.get_condition().as_deref(),
+        Some("INVALID_HANDLE.SESSION_CHANGED")
+    );
+    assert!(client.is_closed());
+    // The Config that failed, and nothing after it.
+    let methods: Vec<String> = fixture
+        .state
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(method, _)| method.clone())
+        .collect();
+    assert_eq!(methods, ["Config"]);
+}
+
+#[tokio::test]
 async fn a_client_without_session_tracking_passes_the_ids_of_its_requests_through() {
     // The transport-injection stub sends the requests of the reference client's session, which
     // tracks its server-side session itself, as over the grpcio stub that does no tracking.

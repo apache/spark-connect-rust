@@ -535,14 +535,11 @@ fn literal_as(
                 Err(_) => return Err(not_utf8_string(obj)),
             }
         }
-        DataType::Binary => {
-            if !(obj.is_instance_of::<pyo3::types::PyBytes>()
-                || obj.is_instance_of::<pyo3::types::PyByteArray>())
-            {
-                return Err(assertion());
-            }
-            LiteralExpression::Binary(obj.extract::<Vec<u8>>()?)
-        }
+        // As PySpark's `to_plan`, which sends `bytes(value)`.
+        DataType::Binary => match crate::infer::bytes_of(obj)? {
+            Some(bytes) => LiteralExpression::Binary(bytes),
+            None => return Err(assertion()),
+        },
         DataType::Date => {
             // A datetime is a date too, and its date is the one of the literal.
             if !is_instance_of_class(obj, "datetime", "date")? {
@@ -840,10 +837,8 @@ fn scalar_literal(obj: &Bound<'_, PyAny>) -> PyResult<Option<LiteralExpression>>
     }
 
     // bytes / bytearray -> Binary. Checked explicitly so it is not mistaken for anything else.
-    if obj.is_instance_of::<pyo3::types::PyBytes>()
-        || obj.is_instance_of::<pyo3::types::PyByteArray>()
-    {
-        let bytes: Vec<u8> = obj.extract()?;
+    // PySpark's `to_plan` sends `bytes(value)`, which honors the `__bytes__` of a subclass.
+    if let Some(bytes) = crate::infer::bytes_of(obj)? {
         return Ok(Some(LiteralExpression::Binary(bytes)));
     }
 

@@ -14,8 +14,8 @@ use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::{
-    IntoPyDict, PyBool, PyByteArray, PyBytes, PyDict, PyFloat, PyInt, PyList, PyMemoryView,
-    PyString, PyTuple, PyType,
+    IntoPyDict, PyBool, PyByteArray, PyBytes, PyDict, PyDictValues, PyFloat, PyInt, PyList,
+    PyMemoryView, PySet, PyString, PyTuple, PyType,
 };
 use spark_connect::conf::RuntimeConf;
 use spark_connect::row::{StructValue, Value};
@@ -1184,6 +1184,35 @@ fn utf8_text(text: &Bound<'_, PyString>) -> PyResult<Value> {
     Ok(Value::String(text.to_cow()?.into_owned()))
 }
 
+/// The bytes of a bytes or a bytearray, as PySpark sends `bytes(value)` of one, in a binary
+/// column of createDataFrame and in a binary literal: an exact one is read as it is, and of a
+/// subclass, `bytes()` honors its `__bytes__`, which its buffer does not. `None` for another
+/// value.
+pub(crate) fn bytes_of(obj: &Bound<'_, PyAny>) -> PyResult<Option<Vec<u8>>> {
+    if let Ok(bytes) = obj.cast_exact::<PyBytes>() {
+        Ok(Some(bytes.as_bytes().to_vec()))
+    } else if let Ok(bytes) = obj.cast_exact::<PyByteArray>() {
+        Ok(Some(bytes.to_vec()))
+    } else if obj.is_instance_of::<PyBytes>() || obj.is_instance_of::<PyByteArray>() {
+        let bytes = obj.py().get_type::<PyBytes>().call1((obj,))?;
+        Ok(Some(bytes.cast::<PyBytes>()?.as_bytes().to_vec()))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Whether PyArrow's list converter takes `obj` as the value of a list: a sequence by
+/// `PySequence_Check`, such as a tuple, a range or a NumPy array, which a dict is not, a set or
+/// a `dict_values`. Another iterable, such as an iterator, a generator, a frozenset, a
+/// `dict_keys` or a `dict_items`, is "not a sequence" to it.
+fn is_arrow_list(obj: &Bound<'_, PyAny>) -> bool {
+    // SAFETY: `obj` is a live object, and PySequence_Check always succeeds without calling
+    // into Python.
+    (unsafe { pyo3::ffi::PySequence_Check(obj.as_ptr()) } == 1)
+        || obj.is_instance_of::<PySet>()
+        || obj.is_instance_of::<PyDictValues>()
+}
+
 /// A field value of `dt` from `obj`, as PySpark's converters and then PyArrow convert it.
 pub(crate) fn convert(
     obj: &Bound<'_, PyAny>,
@@ -1215,15 +1244,16 @@ pub(crate) fn convert(
             contains_null,
         } => {
             // As PySpark: an array whose elements need a converter takes a list or an
-            // array.array, and another array is taken as it is, by PyArrow, which takes any
-            // sequence, such as a tuple or a NumPy array of numbers or bools.
+            // array.array, and another array is taken as it is, by PyArrow, which takes a
+            // sequence, such as a tuple or a NumPy array of numbers or bools, a set or a
+            // dict_values (`is_arrow_list`).
             if needs_converter(dt, nullable) {
                 if !obj.is_instance_of::<PyList>()
                     && !obj.is_instance(ARRAY.import(py, "array", "array")?.as_any())?
                 {
                     return Err(assertion());
                 }
-            } else if obj.is_instance_of::<PyDict>() || obj.try_iter().is_err() {
+            } else if !is_arrow_list(obj) || obj.try_iter().is_err() {
                 return Ok(late.defer(|| {
                     Err(pyarrow_error(
                         py,
@@ -1258,19 +1288,10 @@ pub(crate) fn convert(
             }
             Ok(Value::Map(entries))
         }
-        DataType::Binary => {
-            if let Ok(bytes) = obj.cast_exact::<PyBytes>() {
-                Ok(Value::Binary(bytes.as_bytes().to_vec()))
-            } else if let Ok(bytes) = obj.cast_exact::<PyByteArray>() {
-                Ok(Value::Binary(bytes.to_vec()))
-            } else if obj.is_instance_of::<PyBytes>() || obj.is_instance_of::<PyByteArray>() {
-                // bytes(obj) honors a __bytes__ of the subclass, which its buffer does not.
-                let bytes = py.get_type::<PyBytes>().call1((obj,))?;
-                Ok(Value::Binary(bytes.cast::<PyBytes>()?.as_bytes().to_vec()))
-            } else {
-                Err(assertion())
-            }
-        }
+        DataType::Binary => match bytes_of(obj)? {
+            Some(bytes) => Ok(Value::Binary(bytes)),
+            None => Err(assertion()),
+        },
         DataType::Timestamp | DataType::TimestampLtzNanos { .. } => {
             if !obj.is_instance(DATETIME.import(py, "datetime", "datetime")?.as_any())? {
                 return Err(assertion());
@@ -1327,7 +1348,7 @@ pub(crate) fn convert(
             Ok(late.defer(|| utf8_text(&text)))
         }
         // As PySpark, which has no converter of these types: the value goes as it is to
-        // `to_arrow_schema`, which raises for the type (`unsupported_arrow_type`).
+        // `to_arrow_schema`, which raises for the type (`arrow_schema_error`).
         DataType::Char { .. }
         | DataType::Varchar { .. }
         | DataType::YearMonthInterval { .. }
@@ -1480,66 +1501,70 @@ fn date_days(obj: &Bound<'_, PyAny>) -> PyResult<i32> {
     Ok(c_int_from_python(obj, 32, Some("Integer too large for date32"))? as i32)
 }
 
-/// Whether a field of `fields`, or a type in one, is a null type that is not nullable. PyArrow
-/// rejects such a field when it builds it, `pa.field(name, pa.null(), nullable=False)`, which
-/// PySpark's `to_arrow_schema` does. A map key is never nullable.
-pub(crate) fn has_non_nullable_null_type(fields: &[StructField]) -> bool {
-    fn in_type(dt: &DataType) -> bool {
-        match dt {
-            DataType::Struct { fields } => has_non_nullable_null_type(fields),
-            DataType::Array {
-                element_type,
-                contains_null,
-            } => {
-                (!contains_null && matches!(**element_type, DataType::Null))
-                    || in_type(element_type)
-            }
-            DataType::Map {
-                key_type,
-                value_type,
-                value_contains_null,
-            } => {
-                matches!(**key_type, DataType::Null)
-                    || (!value_contains_null && matches!(**value_type, DataType::Null))
-                    || in_type(key_type)
-                    || in_type(value_type)
-            }
-            _ => false,
-        }
+/// The first error of PySpark's `to_arrow_schema` of the schema of local rows, which builds the
+/// Arrow fields one at a time, depth first, each once its type is built: a char, varchar,
+/// year-month or calendar interval type, of which Arrow has no type, is
+/// `UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION`, and a field of the null type that is not
+/// nullable, as a map key never is, is the `ValueError` of PyArrow's
+/// `pa.field(name, pa.null(), nullable=False)`. A user-defined type is built as its SQL type.
+pub(crate) fn arrow_schema_error(
+    py: Python<'_>,
+    fields: &[StructField],
+) -> PyResult<Option<PyErr>> {
+    enum Error<'a> {
+        Unsupported(&'a DataType),
+        NonNullableNull,
     }
-    fields
-        .iter()
-        .any(|f| (!f.nullable && matches!(f.data_type, DataType::Null)) || in_type(&f.data_type))
-}
-
-/// The `UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION` of the first char, varchar, year-month or
-/// calendar interval type of `dt`, depth first, which PySpark's `to_arrow_schema` raises when it
-/// converts the schema of local rows to Arrow: it has no Arrow type of these types.
-pub(crate) fn unsupported_arrow_type(py: Python<'_>, dt: &DataType) -> PyResult<Option<PyErr>> {
-    fn first_unsupported(dt: &DataType) -> Option<&DataType> {
+    fn of_type(dt: &DataType) -> Option<Error<'_>> {
         match dt {
             DataType::Char { .. }
             | DataType::Varchar { .. }
             | DataType::YearMonthInterval { .. }
-            | DataType::CalendarInterval => Some(dt),
-            DataType::Struct { fields } => {
-                fields.iter().find_map(|f| first_unsupported(&f.data_type))
-            }
-            DataType::Array { element_type, .. } => first_unsupported(element_type),
+            | DataType::CalendarInterval => Some(Error::Unsupported(dt)),
+            DataType::Struct { fields } => fields
+                .iter()
+                .find_map(|f| of_field(&f.data_type, f.nullable)),
+            DataType::Array {
+                element_type,
+                contains_null,
+            } => of_field(element_type, *contains_null),
             DataType::Map {
                 key_type,
                 value_type,
+                value_contains_null,
+            } => of_field(key_type, false).or_else(|| of_field(value_type, *value_contains_null)),
+            DataType::Udt {
+                sql_type: Some(sql_type),
                 ..
-            } => first_unsupported(key_type).or_else(|| first_unsupported(value_type)),
+            } => of_type(sql_type),
             _ => None,
         }
     }
-    Ok(match first_unsupported(dt) {
-        Some(unsupported) => Some(raise_pyspark(
+    fn is_null(dt: &DataType) -> bool {
+        match dt {
+            DataType::Null => true,
+            DataType::Udt {
+                sql_type: Some(sql_type),
+                ..
+            } => is_null(sql_type),
+            _ => false,
+        }
+    }
+    fn of_field(dt: &DataType, nullable: bool) -> Option<Error<'_>> {
+        of_type(dt).or_else(|| (!nullable && is_null(dt)).then_some(Error::NonNullableNull))
+    }
+    let first = fields
+        .iter()
+        .find_map(|f| of_field(&f.data_type, f.nullable));
+    Ok(match first {
+        Some(Error::Unsupported(unsupported)) => Some(raise_pyspark(
             py,
             "PySparkTypeError",
             "UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION",
             &[("data_type", &data_type_str(py, unsupported)?)],
+        )),
+        Some(Error::NonNullableNull) => Some(PyValueError::new_err(
+            "A null type field may not be non-nullable",
         )),
         None => None,
     })
