@@ -172,8 +172,11 @@ PySpark (an integral float for an int param, for example), and a value that the
 converter rejects raises its `TypeError`. A fit, transform or evaluate sends only the
 params that the constructor or a setter set, so the server applies its defaults to
 the others, as with PySpark. An int beyond a long raises PySpark's
-`VALUE_NOT_BETWEEN` at the next fit. `None` leaves a param unset, so the server's
-default applies; PySpark sends a null, which the server rejects.
+`VALUE_NOT_BETWEEN` at the next fit. `None` is sent as a null literal, as PySpark sends
+it: the server reads a null `bootstrap` as false and rejects the other nulls. A param that is
+not given is not sent, so the server's default applies. A list param without elements is
+accepted by its constructor and setters, and a fit, transform or evaluate raises PySpark's
+`CANNOT_INFER_ARRAY_ELEMENT_TYPE` for it, as PySpark's serialization does.
 
 ## Native RandomForestClassifier
 
@@ -249,6 +252,21 @@ dropped, the server deletes the cached model, as `pyspark.ml` does.
 The Python model uses the existing `MLModel.transform` interface. Model inspection
 (coefficients, intercept and summaries), single-vector prediction and model
 persistence are not exposed by this addition.
+
+## Native Pipeline and CrossValidator: fit is not implemented
+
+`spark_connect::ml::Pipeline` and `spark_connect::ml::CrossValidator`, and their Python
+classes `pyspark.ml.connect.Pipeline` and `pyspark.ml.connect.CrossValidator`, do not fit.
+Their `fit` raises `NOT_IMPLEMENTED` (`PySparkNotImplementedError` in Python), naming
+`Pipeline.fit` or `CrossValidator.fit`, before any request is sent, and returns no model.
+The Connect ML protocol cannot run either one: the native Pipeline holds stage names, which
+the server cannot fit, and it has no pipeline model to transform; the native CrossValidator
+holds its numeric params only, without the estimator, evaluator or param grid. Their
+constructors and setters still set the params, as before.
+
+To fit a pipeline or to tune a model from Python, use the vendored `pyspark.ml.Pipeline` and
+`pyspark.ml.tuning.CrossValidator`, which take the estimator and transformer objects, as
+PySpark does. The Rust API has no way to fit a pipeline or to tune a model.
 
 ## pyspark.ml
 

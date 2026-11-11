@@ -1137,6 +1137,49 @@ def test_collect_of_a_string_that_is_not_utf8_raises_as_pyspark(mock_connect):
     assert spark.range(1).collect() == [Row(s="a")]
     assert len(list(spark.range(1).toLocalIterator())) == 1
 
+def test_malformed_arrow_chunks_raise_spark_connect_exception_as_pyspark(mock_connect):
+    # As PySpark Connect's ExecuteAndFetchAsIterator: a chunk that is not the next one of its
+    # batch, or a batch that does not start where the rows before it end, raises a
+    # SparkConnectException of the message of the reference client, with no error class.
+    from pyspark.errors.exceptions.connect import SparkConnectException
+
+    spark, service = mock_connect
+
+    def batch(index, num_chunks, data, start_offset=None):
+        # ExecutePlanResponse.arrow_batch=2: ArrowBatch.row_count=1, data=2, start_offset=3,
+        # chunk_index=4, num_chunks_in_batch=5. A batch that is not chunked has no chunk fields.
+        fields = varint_field(1, 1) + message_field(2, data)
+        if start_offset is not None:
+            fields += varint_field(3, start_offset)
+        if num_chunks is not None:
+            fields += varint_field(4, index) + varint_field(5, num_chunks)
+        return message_field(2, fields)
+
+    cases = [
+        (
+            [batch(0, 3, b"a", start_offset=0), batch(2, 3, b"c")],
+            "Expected chunk index 1 of the arrow batch but got 2.",
+        ),
+        (
+            [batch(1, 2, b"b", start_offset=0)],
+            "Expected chunk index 0 of the next arrow batch but got 1.",
+        ),
+        (
+            [batch(0, None, b"a", start_offset=5)],
+            "Expected arrow batch to start at row offset 0 in results, but received arrow batch "
+            "starting at offset 5.",
+        ),
+    ]
+    for payloads, message in cases:
+        service.execute_payloads = payloads
+        with pytest.raises(SparkConnectException) as e:
+            spark.range(1).collect()
+        assert type(e.value) is SparkConnectException
+        assert str(e.value) == message
+        assert e.value.getCondition() is None
+    service.execute_payloads = None
+
+
 def test_tags_are_those_of_each_thread_as_pyspark(mock_connect):
     # As PySpark's: the tags of addTag are those of the current thread, of a set of getTags,
     # which the operations that the thread starts carry; a new thread starts without tags.
@@ -3660,6 +3703,42 @@ def test_na_and_stat_functions_check_their_arguments_as_pyspark():
             call()
         assert error.value.getCondition() == condition
         assert error.value.getMessageParameters() == parameters
+
+
+def test_dropna_thresh_that_the_proto_refuses_is_refused_as_pyspark():
+    # As PySpark sends `thresh` as a proto int, after it checks `how` and `subset`: a bool, which
+    # is an int, is a TypeError, and an int out of the range of an int32 a ValueError.
+    from pyspark.errors import PySparkTypeError
+    from pyspark.sql import DataFrame
+
+    df = _offline_session().range(1)
+    cases = (
+        (lambda: df.dropna(thresh=True), TypeError,
+         "Cannot set spark.connect.NADrop.min_non_nulls to True: True has type <class 'bool'>, "
+         "but expected one of: (int)."),
+        (lambda: df.na.drop(thresh=False), TypeError,
+         "Cannot set spark.connect.NADrop.min_non_nulls to False: False has type <class 'bool'>, "
+         "but expected one of: (int)."),
+        (lambda: df.dropna(thresh=True, subset=["id"]), TypeError,
+         "Cannot set spark.connect.NADrop.min_non_nulls to True: True has type <class 'bool'>, "
+         "but expected one of: (int)."),
+        (lambda: df.dropna(thresh=2**40), ValueError, "Value out of range: 1099511627776"),
+        (lambda: df.na.drop(thresh=-(2**31) - 1), ValueError, "Value out of range: -2147483649"),
+        (lambda: df.dropna(how="all", thresh=2**40), ValueError,
+         "Value out of range: 1099511627776"),
+    )
+    for call, error_type, message in cases:
+        with pytest.raises(error_type) as error:
+            call()
+        assert type(error.value) is error_type
+        assert str(error.value) == message
+    # The `subset` is checked before the `thresh` is sent.
+    with pytest.raises(PySparkTypeError) as error:
+        df.dropna(thresh=True, subset=1)
+    assert error.value.getCondition() == "NOT_EXPECTED_TYPE"
+    # The bounds of an int32 are those of the proto.
+    assert isinstance(df.dropna(thresh=2**31 - 1), DataFrame)
+    assert isinstance(df.na.drop(thresh=-(2**31)), DataFrame)
 
 
 def test_avro_protobuf_partitioning_submodules():
@@ -9885,6 +9964,32 @@ def test_sample_split_and_sample_by_draw_their_seed_from_python_random_as_pyspar
     assert seed_of(df.stat.sampleBy("id", {0: 1.0}, 7), 107) == 7
 
 
+def test_random_split_converts_its_seed_with_int_as_pyspark(mock_connect):
+    # As PySpark Connect's randomSplit: the seed goes through int() in each Sample, so a float
+    # is truncated and a str is parsed, and the splits are those of the int seed. A str that
+    # int() rejects raises its ValueError, after the weights are checked.
+    from pyspark.errors import PySparkValueError
+
+    spark, service = mock_connect
+    df = spark.range(10)
+
+    def sample_of(dataframe):
+        # The Sample relation (field 12) of the plan of the last request.
+        dataframe.collect()
+        plan = parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0]
+        return parse_message(plan)[12][0]
+
+    expected = [sample_of(split) for split in df.randomSplit([1.0, 1.0], 1)]
+    assert [sample_of(split) for split in df.randomSplit([1.0, 1.0], 1.5)] == expected
+    assert [sample_of(split) for split in df.randomSplit([1.0, 1.0], "1")] == expected
+    assert [parse_message(sample)[5][0] for sample in expected] == [1, 1]
+    with pytest.raises(ValueError, match="invalid literal for int"):
+        df.randomSplit([1.0, 1.0], "3.5")
+    with pytest.raises(PySparkValueError) as error:
+        df.randomSplit([0.0, 0.0], "3.5")
+    assert error.value.getCondition() == "VALUE_NOT_POSITIVE"
+
+
 def test_with_metadata_and_pivot_refer_to_their_column_through_the_dataframe_as_pyspark(
         mock_connect):
     # As PySpark's withMetadata (self[columnName]) and pivot (self._df[pivot_col]): the column
@@ -13217,6 +13322,74 @@ def test_the_exception_of_a_done_call_fails_the_execution_as_pyspark(mock_connec
     assert unraisable == []
     service.execute_payload = b""
     assert spark.range(1).collect() == []
+
+
+def test_the_done_error_of_a_progress_handler_keeps_the_execution_error_as_context(mock_connect):
+    # As PySpark's Progress.__exit__: a done call that raises after the execution failed raises
+    # its own exception, with the exception of the execution as its __context__.
+    from pyspark.errors import AnalysisException
+
+    spark, service = mock_connect
+    classes = ["org.apache.spark.sql.AnalysisException", "java.lang.Exception"]
+    service.execute_error = ("[TABLE_OR_VIEW_NOT_FOUND] t", classes[0],
+                             _error_info(classes, errorClass="TABLE_OR_VIEW_NOT_FOUND"))
+    error = ValueError("done-a")
+
+    def failing(**kwargs):
+        if kwargs["done"]:
+            raise error
+
+    spark.registerProgressHandler(failing)
+    try:
+        with pytest.raises(ValueError) as raised:
+            spark.range(1).collect()
+    finally:
+        service.execute_error = None
+        spark.removeProgressHandler(failing)
+    assert raised.value is error
+    assert isinstance(raised.value.__context__, AnalysisException)
+    assert "TABLE_OR_VIEW_NOT_FOUND" in str(raised.value.__context__)
+
+
+def test_a_dropped_local_iterator_hands_the_done_error_to_unraisablehook_with_an_object(
+        mock_connect, monkeypatch):
+    # As PySpark's generator of toLocalIterator, which is closed with its execution unfinished:
+    # its done call raises, and the error goes to sys.unraisablehook with an object, which the
+    # hook prints as the "Exception ignored in:" header.
+    import sys
+
+    pa = pytest.importorskip("pyarrow")
+
+    spark, service = mock_connect
+    # ExecutePlanResponse.arrow_batch=2: row_count=3, data=2, with three rows, so that the
+    # iterator is left with rows when it is dropped, before the end of the execution.
+    batch = pa.record_batch([pa.array([1, 2, 3])], names=["id"])
+    sink = pa.BufferOutputStream()
+    with pa.ipc.new_stream(sink, batch.schema) as writer:
+        writer.write_batch(batch)
+    service.execute_payload = message_field(2, varint_field(1, 3)
+                                            + message_field(2, sink.getvalue().to_pybytes()))
+    unraisable = []
+    monkeypatch.setattr(sys, "unraisablehook", unraisable.append)
+    error = ValueError("done-b")
+
+    def failing(**kwargs):
+        if kwargs["done"]:
+            raise error
+
+    spark.registerProgressHandler(failing)
+    try:
+        rows = spark.range(3).toLocalIterator()
+        iterator_type = type(rows)
+        assert next(rows) is not None
+        rows = None
+    finally:
+        spark.removeProgressHandler(failing)
+        service.execute_payload = b""
+    assert len(unraisable) == 1
+    assert unraisable[0].exc_value is error
+    assert unraisable[0].object is not None
+    assert unraisable[0].object is iterator_type
 
 
 def test_progress_handler_that_runs_queries_without_end_is_bounded(mock_connect, monkeypatch):

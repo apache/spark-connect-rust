@@ -289,6 +289,7 @@ def serve(connection):
             self.execute_requests = []
             self.release_execute_requests = []
             self.execute_payload = b""
+            self.execute_payloads = None
             self.execute_failure = None
             self.execute_error = None
             self.retry_info_failures = []
@@ -421,6 +422,9 @@ def serve(connection):
         execute_requests = []
         release_execute_requests = []
         execute_payload = b""
+        # With `execute_payloads` set (a list of raw ExecutePlanResponse fields), the execution
+        # streams one response of each, r1, r2, ..., instead of `execute_payload`.
+        execute_payloads = None
         execute_failure = None
         # With `execute_error` set to (message, reason, metadata), ExecutePlan fails as the
         # server does for an error that it raised: INTERNAL, with a google.rpc.Status of an
@@ -676,7 +680,11 @@ def serve(connection):
             header = message_field(1, parse_message(request).get(1, [b""])[0]) + message_field(
                 12, operation_id
             )
-            yield header + message_field(13, "r1") + self.execute_payload
+            payloads = (
+                [self.execute_payload] if self.execute_payloads is None else self.execute_payloads
+            )
+            for index, payload in enumerate(payloads, 1):
+                yield header + message_field(13, f"r{index}") + payload
             if block_result_complete:
                 released = self.wait_for_response(response_gate, operation_id, 30)
                 if released == "interrupted":
@@ -687,7 +695,7 @@ def serve(connection):
                         "ResultComplete was not released by the test",
                     )
             result_complete_operations.append(operation_id)
-            yield header + message_field(13, "r2") + message_field(14, b"")
+            yield header + message_field(13, f"r{len(payloads) + 1}") + message_field(14, b"")
 
         def warnings_fields(self):
             # ConfigResponse.warnings=3, of `config_warnings`.

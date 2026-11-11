@@ -55,6 +55,26 @@ def _labeled(session):
     return session.createDataFrame(rows, ["id", "label", "features"])
 
 
+def test_ml_connect_random_forest_null_bootstrap_fits_as_pyspark(session):
+    # As PySpark, a None param is sent as a null: the server reads a null bootstrap as false, so
+    # the forest of bootstrap=None is the forest of bootstrap=False, and a null seed fails.
+    from pyspark.ml.connect.classification import RandomForestClassifier
+
+    df = _labeled(session)
+
+    def probabilities(estimator):
+        return [
+            row.probability.toArray().tolist()
+            for row in estimator.fit(df).transform(df).orderBy("id").collect()
+        ]
+
+    assert probabilities(RandomForestClassifier(bootstrap=None, numTrees=5, seed=42)) == (
+        probabilities(RandomForestClassifier(bootstrap=False, numTrees=5, seed=42))
+    )
+    with pytest.raises(Exception, match="NullPointerException"):
+        RandomForestClassifier(numTrees=5, seed=None).fit(df)
+
+
 def test_ml_connect_scalers_fit_and_transform_as_pyspark(session):
     # pyspark.ml.connect's StandardScaler, MaxAbsScaler and StringIndexer: the server fits each one
     # and caches the model, and the transform of the model gives the values of PySpark 4.3.0.
@@ -356,7 +376,6 @@ def test_ml_connect_setters_change_the_next_evaluate_and_fit_as_pyspark(session)
     # As PySpark's Params._set: a setter of pyspark.ml.connect sets the param of the evaluator or
     # estimator itself and returns it, so the next evaluate or fit uses the value of a setter whose
     # result is dropped, with the values of PySpark 4.3.0.
-    import pyspark.sql.connect.proto as pb2
     from pyspark.ml.connect.classification import LogisticRegression
     from pyspark.ml.connect.evaluation import (
         BinaryClassificationEvaluator,
@@ -398,13 +417,16 @@ def test_ml_connect_setters_change_the_next_evaluate_and_fit_as_pyspark(session)
     predictions = estimator.fit(labeled).transform(labeled).orderBy("id").collect()
     assert [r.prediction for r in predictions] == labels
 
-    # The server transforms no native Pipeline of stage names: the stages of the setter are
-    # those that the transform of its model sends.
+    # The native Pipeline of stage names is not implemented: its fit raises NOT_IMPLEMENTED, as
+    # the server cannot fit the stages, and the setter still sets them.
+    from pyspark.errors import PySparkNotImplementedError
+
     pipeline = Pipeline()
     assert pipeline.setStages(["a", "b"]) is pipeline
-    relation = pb2.Relation.FromString(pipeline.fit(labeled).transform(labeled)._relation_bytes())
-    stages = relation.ml_relation.transform.params.params["stages"].array.elements
-    assert [stage.string for stage in stages] == ["a", "b"]
+    with pytest.raises(PySparkNotImplementedError) as error:
+        pipeline.fit(labeled)
+    assert error.value.getCondition() == "NOT_IMPLEMENTED"
+    assert error.value.getMessageParameters() == {"feature": "Pipeline.fit"}
 
 
 def test_ml_statistics_as_pyspark(session):

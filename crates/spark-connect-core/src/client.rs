@@ -1106,6 +1106,10 @@ impl SparkConnectClient {
 
     /// Execute a plan and return a stream of responses.
     ///
+    /// The request allows the server to chunk an Arrow batch too large for one message, so a
+    /// batch may arrive as several responses, whose `arrow_batch` fields are not decodable on
+    /// their own. The chunks are returned as they arrive: see [`ReattachableResponseStream`].
+    ///
     /// Mirrors `pyspark.sql.connect.client.core.SparkConnectClient.execute_plan`.
     pub async fn execute_plan(
         &self,
@@ -1329,6 +1333,9 @@ impl SparkConnectClient {
     /// or the server ends it before `ResultComplete`, transparently resumes it with
     /// `ReattachExecute` from the last observed `response_id`. The stream releases the
     /// execution on the server with `ReleaseExecute` (see [`ReattachableResponseStream`]).
+    ///
+    /// The responses are the raw responses of the execution, chunks included, as the server
+    /// sent them: see [`ReattachableResponseStream`] for how a chunked Arrow batch is read.
     /// Mirrors the reference reattachable execute path.
     pub async fn execute_plan_reattachable(
         &self,
@@ -2203,6 +2210,22 @@ impl SparkConnectClient {
 /// execution once the result is complete, the stream fails, or it is dropped, so that the
 /// server does not keep them until the execution is abandoned. Mirrors
 /// `pyspark.sql.connect.client.reattach.ExecutePlanResponseReattachableIterator`.
+///
+/// # Chunked Arrow batches
+///
+/// The execution allows the server to split an Arrow batch that is too large for one message.
+/// The chunks of a batch come as responses in order, each with an `arrow_batch` whose
+/// `chunk_index` is its place among the `num_chunks_in_batch` chunks of the batch. Other
+/// responses may come between the chunks. `start_offset`, when the server sets it, is the row
+/// where the batch starts, and `row_count` is the number of rows of the whole batch, not of
+/// the chunk.
+///
+/// This stream returns the responses as they arrive, so the `arrow_batch.data` of a chunk
+/// is a part of the Arrow IPC stream of its batch, not a batch of its own. A consumer that
+/// reads the responses itself must join the `data` of the chunks of a batch, in order, before
+/// it decodes the batch, and must check the order and the count of the chunks as PySpark
+/// does. The high-level APIs of the `apache-spark-connect` crate, such as `DataFrame::collect`,
+/// do this join for their results.
 pub struct ReattachableResponseStream {
     /// The client that started the execution, whose stub, headers and session it uses.
     client: SparkConnectClient,

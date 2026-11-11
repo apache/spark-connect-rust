@@ -6,6 +6,7 @@
 //! - Base traits: `Estimator`, `Transformer`, `Model`, `Evaluator`
 //! - Concrete example: `StandardScaler` estimator + `StandardScalerModel`
 
+use spark_connect_core::error::{SparkError, SparkErrorKind};
 use spark_connect_proto as proto;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -85,7 +86,7 @@ impl Params {
             .collect();
         let literal = LiteralExpression::Array {
             element_type: Box::new(DataType::String {
-                collation: String::new(),
+                collation: "UTF8_BINARY".to_string(),
             }),
             elements,
         }
@@ -159,6 +160,40 @@ impl Params {
     pub fn clear_param(mut self, name: &str) -> Self {
         self.params.remove(name);
         self
+    }
+
+    /// Set a parameter to a null, as PySpark sends a None value of a param it was given.
+    pub fn set_param_null(mut self, name: &str) -> Self {
+        let literal = proto::expression::Literal {
+            literal_type: Some(proto::expression::literal::LiteralType::Null(
+                DataType::Null.to_proto(),
+            )),
+            ..Default::default()
+        };
+        self.params.insert(
+            name.to_string(),
+            proto::Expression {
+                expr_type: Some(proto::expression::ExprType::Literal(literal)),
+                ..Default::default()
+            },
+        );
+        self
+    }
+
+    /// Whether a parameter is an array without elements. PySpark cannot infer the element type
+    /// of such an array, so it cannot send the params that hold one.
+    pub fn has_empty_array(&self) -> bool {
+        self.params.values().any(|expr| {
+            matches!(
+                &expr.expr_type,
+                Some(proto::expression::ExprType::Literal(lit))
+                    if matches!(
+                        &lit.literal_type,
+                        Some(proto::expression::literal::LiteralType::Array(array))
+                            if array.elements.is_empty()
+                    )
+            )
+        })
     }
 
     /// Get a parameter value.
@@ -996,6 +1031,16 @@ impl Model for MaxAbsScalerModel {
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }
+}
+
+/// The NOT_IMPLEMENTED error of a `fit` that the Connect ML protocol cannot run, named by
+/// `feature` as PySpark's NOT_IMPLEMENTED names it.
+fn fit_not_implemented(feature: &str) -> SparkError {
+    SparkError::classed(
+        SparkErrorKind::NotImplementedError,
+        "NOT_IMPLEMENTED",
+        &[("feature", feature)],
+    )
 }
 
 /// Submit training data and parameters and read the fitted operator metadata.
@@ -2626,17 +2671,10 @@ impl Estimator for Pipeline {
         &mut self.params
     }
 
+    // The stages are names that the server cannot fit, and it has no PipelineModel to
+    // transform. This raises before any request, so no model that fails later is returned.
     fn fit_impl(&mut self, _df: &DataFrame) -> spark_connect_core::error::Result<Box<dyn Model>> {
-        let model = PipelineModel {
-            operator: MlOperator::with_uid(
-                &self.operator.name,
-                &self.operator.uid,
-                OperatorType::Model,
-            ),
-            params: self.params.clone(),
-            stages: self.stages(),
-        };
-        Ok(Box::new(model))
+        Err(fit_not_implemented("Pipeline.fit"))
     }
 }
 
@@ -2754,9 +2792,8 @@ impl Evaluator for MulticlassClassificationEvaluator {
 ///
 /// The nested estimator/evaluator/estimatorParamMaps have no scalar-literal
 /// encoding, so this carries the numeric tuning params it can faithfully encode
-/// (numFolds, seed, parallelism); the sub-estimator/evaluator are held for the
-/// server-side fit. fit() produces a CrossValidatorModel the same lazy way the
-/// other estimators do.
+/// (numFolds, seed, parallelism). fit() raises NOT_IMPLEMENTED, as those nested
+/// params are not held for a server-side fit.
 #[derive(Debug, Clone)]
 pub struct CrossValidator {
     operator: MlOperator,
@@ -2820,16 +2857,10 @@ impl Estimator for CrossValidator {
     fn params_mut(&mut self) -> &mut Params {
         &mut self.params
     }
+    // The estimator, evaluator and param grid are not held, so the server cannot run the
+    // tuning. This raises before any request, so no model that fails later is returned.
     fn fit_impl(&mut self, _df: &DataFrame) -> spark_connect_core::error::Result<Box<dyn Model>> {
-        let model = CrossValidatorModel {
-            operator: MlOperator::with_uid(
-                &self.operator.name,
-                &self.operator.uid,
-                OperatorType::Model,
-            ),
-            params: self.params.clone(),
-        };
-        Ok(Box::new(model))
+        Err(fit_not_implemented("CrossValidator.fit"))
     }
 }
 
@@ -2889,6 +2920,42 @@ mod tests {
 
         assert!(params.get_param("inputCol").is_some());
         assert!(params.get_param("outputCol").is_some());
+    }
+
+    #[test]
+    fn test_params_null_and_empty_arrays() {
+        let params = Params::new()
+            .set_param_null("weightCol")
+            .set_param_string_array("inputCols", &["a".to_string()]);
+        let null = params.to_proto();
+        assert!(matches!(
+            null.params["weightCol"].literal_type,
+            Some(proto::expression::literal::LiteralType::Null(_))
+        ));
+        assert!(!params.has_empty_array());
+
+        let empty = Params::new().set_param_string_array("inputCols", Vec::<String>::new());
+        assert!(empty.has_empty_array());
+        let empty = Params::new().set_param_double_array("thresholds", []);
+        assert!(empty.has_empty_array());
+        assert!(!Params::new().set_param_null("x").has_empty_array());
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn test_string_array_param_has_the_default_collation() {
+        // As PySpark infers the type of a list of strings: a string of the UTF8_BINARY collation.
+        let params = Params::new().set_param_string_array("inputCols", &["a".to_string()]);
+        let literal = params.to_proto().params["inputCols"].clone();
+        let Some(proto::expression::literal::LiteralType::Array(array)) = literal.literal_type
+        else {
+            panic!("expected an array literal");
+        };
+        let element_type = array.element_type.expect("element type");
+        let Some(proto::data_type::Kind::String(string)) = element_type.kind else {
+            panic!("expected a string element type");
+        };
+        assert_eq!(string.collation, "UTF8_BINARY");
     }
 
     #[test]
@@ -3295,6 +3362,23 @@ mod tests {
         );
     }
 
+    /// Asserts that `result` is the NOT_IMPLEMENTED error of the `fit` named `feature`, and
+    /// that no model is returned with it.
+    fn assert_fit_not_implemented(
+        result: spark_connect_core::error::Result<Box<dyn Model>>,
+        feature: &str,
+    ) {
+        let error = result
+            .err()
+            .expect("fit raises an error, and returns no model");
+        assert_eq!(error.kind, SparkErrorKind::NotImplementedError);
+        assert_eq!(error.get_condition().as_deref(), Some("NOT_IMPLEMENTED"));
+        assert_eq!(
+            error.message(),
+            format!("[NOT_IMPLEMENTED] {feature} is not implemented.")
+        );
+    }
+
     #[test]
     fn cross_validator_creation_getters_and_fit() {
         let cv = CrossValidator::new()
@@ -3312,14 +3396,22 @@ mod tests {
         assert!(cv.params().get_param("seed").is_some());
         assert_eq!(CrossValidator::default().num_folds(), 3);
 
-        // fit builds a CrossValidatorModel; its transform yields an MlTransform plan.
+        // fit is not implemented: it raises NOT_IMPLEMENTED without a request, and returns no
+        // model that the server could not transform.
         let s = offline_session();
         let df = s.range(3).unwrap();
         let mut cv2 = CrossValidator::new().set_num_folds(2);
-        let mut model = cv2.fit(&df).unwrap();
-        let out = model.transform(&df).unwrap();
-        assert!(matches!(out.plan.as_ref(), LogicalPlan::MlTransform { .. }));
-        let _ = model.clone_box();
+        assert_fit_not_implemented(cv2.fit(&df), "CrossValidator.fit");
+        assert_eq!(cv2.num_folds(), 2);
+    }
+
+    #[test]
+    fn pipeline_fit_is_not_implemented() {
+        let s = offline_session();
+        let df = s.range(3).unwrap();
+        let mut pipeline = Pipeline::new().set_stages(vec!["a", "b"]);
+        assert_fit_not_implemented(pipeline.fit(&df), "Pipeline.fit");
+        assert_eq!(pipeline.stages(), ["a", "b"]);
     }
 
     #[test]
@@ -3348,12 +3440,6 @@ mod tests {
         };
         let out = m.transform(&df).unwrap();
         assert_eq!(transform_model_ref(&out), "indexer-1");
-        let _ = m.clone_box();
-
-        let mut pipe = Pipeline::new().set_stages(vec!["a", "b"]);
-        assert_eq!(pipe.stages().len(), 2);
-        let mut m = pipe.fit(&df).unwrap();
-        let _ = m.transform(&df).unwrap();
         let _ = m.clone_box();
 
         // VectorAssembler transformer.

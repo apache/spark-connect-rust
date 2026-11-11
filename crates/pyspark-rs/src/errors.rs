@@ -51,6 +51,8 @@ fn kind_to_pyspark_class_name(kind: SparkErrorKind) -> &'static str {
         // so we fall back to PySparkRuntimeError. An error that the server raised is built by
         // `server_error_to_py` instead.
         SparkErrorKind::Connect => "PySparkRuntimeError",
+        // A `SparkConnectException` of a plain message: `spark_error_to_py_exception` raises it.
+        SparkErrorKind::ConnectMessage => "PySparkRuntimeError",
         SparkErrorKind::ConnectGrpc => "PySparkRuntimeError",
         SparkErrorKind::InvalidPlanInput => "PySparkRuntimeError",
         SparkErrorKind::Spark => "PySparkRuntimeError",
@@ -175,17 +177,39 @@ pub(crate) fn callback_error(exception: PyErr) -> SparkError {
     )
 }
 
-/// The exception of the Python callback of `err`, if it is the error of one, which is then
-/// released: the exception is raised by the caller instead of `err`.
-pub(crate) fn callback_exception(err: &SparkError) -> Option<PyErr> {
+/// The ID of the exception of the Python callback that `err` is the error of, if it is one.
+fn callback_id(err: &SparkError) -> Option<u64> {
     if err.error_class != PYTHON_CALLBACK_ERROR {
         return None;
     }
-    let id = err.params.get("callback_id")?.parse::<u64>().ok()?;
+    err.params.get("callback_id")?.parse::<u64>().ok()
+}
+
+/// The exception of the Python callback of `err`, if it is the error of one, which is then
+/// released: the exception is raised by the caller instead of `err`.
+pub(crate) fn callback_exception(err: &SparkError) -> Option<PyErr> {
+    let id = callback_id(err)?;
     CALLBACK_EXCEPTIONS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .remove(&id)
+}
+
+/// Make `context` the `__context__` of the exception of the Python callback that `err` is the
+/// error of, as PySpark's `Progress.__exit__` makes the exception of its body the context of the
+/// one that it raises. An error that is not the error of a callback has no exception to change.
+pub(crate) fn set_callback_context(py: Python<'_>, err: &SparkError, context: PyErr) {
+    let Some(id) = callback_id(err) else {
+        return;
+    };
+    let exceptions = CALLBACK_EXCEPTIONS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if let Some(exception) = exceptions.get(&id) {
+        let _ = exception
+            .value(py)
+            .setattr("__context__", context.value(py));
+    }
 }
 
 /// The UnicodeDecodeError of a string of the result that is not valid UTF-8, as PySpark raises
@@ -243,9 +267,11 @@ pub fn spark_error_to_py_exception(err: SparkError) -> PyErr {
             }
         };
 
-        // A classed Connect error, such as `NO_ACTIVE_SESSION`, is a `SparkConnectException`, as
-        // the reference client raises it.
-        let exc_class = if err.kind == SparkErrorKind::Connect && !err.error_class.is_empty() {
+        // A classed Connect error, such as `NO_ACTIVE_SESSION`, and a Connect error of a plain
+        // message are `SparkConnectException`s, as the reference client raises them.
+        let connect_class = err.kind == SparkErrorKind::ConnectMessage
+            || (err.kind == SparkErrorKind::Connect && !err.error_class.is_empty());
+        let exc_class = if connect_class {
             py.import("pyspark.errors.exceptions.connect")
                 .and_then(|module| module.getattr("SparkConnectException"))
         } else {
