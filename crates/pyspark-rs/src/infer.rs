@@ -14,8 +14,8 @@ use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::{
-    IntoPyDict, PyBool, PyByteArray, PyBytes, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple,
-    PyType,
+    IntoPyDict, PyBool, PyByteArray, PyBytes, PyDict, PyFloat, PyInt, PyList, PyMemoryView,
+    PyString, PyTuple, PyType,
 };
 use spark_connect::conf::RuntimeConf;
 use spark_connect::row::{StructValue, Value};
@@ -23,7 +23,7 @@ use spark_connect::types::{DataType, GeographyType, GeometryType, StructField};
 
 use crate::column::raise_pyspark;
 use crate::errors::ResultExt;
-use crate::values::{PyGeography, PyGeometry, PyVariantVal};
+use crate::values::{geography_class, geometry_class, variant_val_class};
 
 static DECIMAL: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static C_DECIMAL: PyOnceLock<Option<Py<PyType>>> = PyOnceLock::new();
@@ -461,12 +461,12 @@ pub(crate) fn infer_type(obj: &Bound<'_, PyAny>, o: Options<'_>) -> PyResult<Dat
     // As PySpark's `_infer_type`, the type of a value is `GeometryType(srid)` or
     // `GeographyType(srid)`, which raises `ST_INVALID_SRID_VALUE` for an SRID that the type does
     // not take (the explicit schema is not checked here, the server checks the values of it).
-    if obj.is_exact_instance_of::<PyGeometry>() {
+    if obj.get_type().is(geometry_class(py)?) {
         let srid = obj.call_method0(intern!(py, "getSrid"))?;
         let srid = crate::types::spatial_type_srid(&srid, false)?;
         return Ok(DataType::Geometry { srid });
     }
-    if obj.is_exact_instance_of::<PyGeography>() {
+    if obj.get_type().is(geography_class(py)?) {
         let srid = obj.call_method0(intern!(py, "getSrid"))?;
         let srid = crate::types::spatial_type_srid(&srid, true)?;
         return Ok(DataType::Geography { srid });
@@ -495,7 +495,7 @@ pub(crate) fn infer_type(obj: &Bound<'_, PyAny>, o: Options<'_>) -> PyResult<Dat
             )),
         };
     }
-    if obj.is_instance_of::<PyVariantVal>() {
+    if obj.is_instance(variant_val_class(py)?)? {
         return Ok(DataType::Variant);
     }
     match infer_schema(obj, None, o.for_nested_rows()) {
@@ -1340,47 +1340,50 @@ pub(crate) fn convert(obj: &Bound<'_, PyAny>, dt: &DataType, nullable: bool) -> 
                 )?))
             }
         }
-        // As PySpark's converters of these types: the value and metadata of a VariantVal, and
-        // the srid and WKB of a Geometry or a Geography, the structs of their Arrow types.
-        DataType::Variant => match obj.cast::<PyVariantVal>() {
-            Ok(variant) => {
-                let variant = variant.borrow();
+        // As PySpark's converters of these types, their `toInternal`: the `value` and
+        // `metadata` attributes of a VariantVal, and the `srid` and `wkb` of a Geometry or a
+        // Geography, which PyArrow converts as the fields of the structs of their Arrow types.
+        DataType::Variant => {
+            if obj.is_instance(variant_val_class(py)?)? {
+                let value = obj.getattr(intern!(py, "value"))?;
+                let metadata = obj.getattr(intern!(py, "metadata"))?;
                 Ok(Value::Variant {
-                    value: variant.value.clone(),
-                    metadata: variant.metadata.clone(),
+                    value: arrow_binary(&value)?,
+                    metadata: arrow_binary(&metadata)?,
                 })
+            } else {
+                Err(raise_pyspark(
+                    py,
+                    "PySparkValueError",
+                    "MALFORMED_VARIANT",
+                    &[],
+                ))
             }
-            Err(_) => Err(raise_pyspark(
-                py,
-                "PySparkValueError",
-                "MALFORMED_VARIANT",
-                &[],
-            )),
-        },
-        DataType::Geometry { .. } => match obj.cast::<PyGeometry>() {
-            Ok(geometry) => {
-                let geometry = geometry.borrow();
-                Ok(spatial_value(geometry.srid, &geometry.wkb))
+        }
+        DataType::Geometry { .. } => {
+            if obj.is_instance(geometry_class(py)?)? {
+                spatial_value(obj)
+            } else {
+                Err(raise_pyspark(
+                    py,
+                    "PySparkValueError",
+                    "MALFORMED_GEOMETRY",
+                    &[],
+                ))
             }
-            Err(_) => Err(raise_pyspark(
-                py,
-                "PySparkValueError",
-                "MALFORMED_GEOMETRY",
-                &[],
-            )),
-        },
-        DataType::Geography { .. } => match obj.cast::<PyGeography>() {
-            Ok(geography) => {
-                let geography = geography.borrow();
-                Ok(spatial_value(geography.srid, &geography.wkb))
+        }
+        DataType::Geography { .. } => {
+            if obj.is_instance(geography_class(py)?)? {
+                spatial_value(obj)
+            } else {
+                Err(raise_pyspark(
+                    py,
+                    "PySparkValueError",
+                    "MALFORMED_GEOGRAPHY",
+                    &[],
+                ))
             }
-            Err(_) => Err(raise_pyspark(
-                py,
-                "PySparkValueError",
-                "MALFORMED_GEOGRAPHY",
-                &[],
-            )),
-        },
+        }
         // As PySpark's converter of a user-defined type: the value serialized by the UDT, and
         // converted as its SQL type.
         DataType::Udt {
@@ -1515,15 +1518,51 @@ pub(crate) fn time_nanos(obj: &Bound<'_, PyAny>) -> PyResult<i64> {
     Ok(seconds * 1_000_000_000 + field(intern!(py, "microsecond"))? * 1_000)
 }
 
-/// The value of a GEOMETRY or a GEOGRAPHY, as their `toInternal`: its srid and WKB.
-fn spatial_value(srid: i32, wkb: &[u8]) -> Value {
-    Value::Struct(
+/// The value of a Geometry or a Geography `obj`, as their `toInternal`, the dict of its `srid`
+/// and `wkb` attributes, which PyArrow converts to the int32 and the binary of their struct.
+fn spatial_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
+    let py = obj.py();
+    let srid = obj.getattr(intern!(py, "srid"))?;
+    let wkb = obj.getattr(intern!(py, "wkb"))?;
+    Ok(Value::Struct(
         spark_connect::row::Row::new(
             vec!["srid".to_string(), "wkb".to_string()],
-            vec![Value::Integer(srid), Value::Binary(wkb.to_vec())],
+            vec![
+                convert_integral(&srid, &DataType::Integer)?,
+                Value::Binary(arrow_binary(&wkb)?),
+            ],
         )
         .into(),
-    )
+    ))
+}
+
+/// The bytes of `obj` as PyArrow converts a value to binary: of a bytes, a bytearray or a
+/// memoryview, or the UTF-8 of a str; else the `ArrowTypeError` "Expected bytes, got a 'T'
+/// object". So are the attributes of a VariantVal, a Geometry and a Geography, which PySpark
+/// stores as they are given, converted. A None, which PyArrow takes as a null that the server
+/// then rejects, is no value here either, as these structs have no null fields here.
+fn arrow_binary(obj: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
+    let py = obj.py();
+    if let Ok(bytes) = obj.cast::<PyBytes>() {
+        Ok(bytes.as_bytes().to_vec())
+    } else if let Ok(text) = obj.cast::<PyString>() {
+        Ok(text.to_cow()?.as_bytes().to_vec())
+    } else if let Ok(bytes) = obj.cast::<PyByteArray>() {
+        Ok(bytes.to_vec())
+    } else if obj.is_instance_of::<PyMemoryView>() {
+        // Its bytes in C order, as PyArrow takes them, also of a view that is not contiguous.
+        Ok(obj
+            .call_method0(intern!(py, "tobytes"))?
+            .cast_into::<PyBytes>()?
+            .as_bytes()
+            .to_vec())
+    } else {
+        Err(pyarrow_error(
+            py,
+            "ArrowTypeError",
+            format!("Expected bytes, got a '{}' object", arrow_type_name(obj)?),
+        )?)
+    }
 }
 
 /// The user-defined type of a column whose class is `python_class`, to serialize `obj`: that of
@@ -1751,7 +1790,7 @@ pub(crate) fn row_values<'py>(
     if item.is_instance_of::<PyDict>() {
         return values_by_name(item, fields);
     }
-    if item.is_instance_of::<PyVariantVal>() {
+    if item.is_instance(variant_val_class(py)?)? {
         return Err(variant_row(py));
     }
     if item.hasattr(intern!(py, "__dict__"))? {
