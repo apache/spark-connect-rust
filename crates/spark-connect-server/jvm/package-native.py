@@ -144,12 +144,12 @@ def write_jar(path, entries):
     descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     os.close(descriptor)
     try:
-        with zipfile.ZipFile(temporary, "w", compression=zipfile.ZIP_STORED) as archive:
+        with zipfile.ZipFile(temporary, "w") as archive:
             for name, data in sorted(entries.items()):
                 info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
                 info.create_system = 3
                 info.external_attr = 0o100644 << 16
-                archive.writestr(info, data)
+                archive.writestr(info, data, compress_type=zipfile.ZIP_DEFLATED, compresslevel=9)
         os.chmod(temporary, 0o644)
         os.replace(temporary, path)
     finally:
@@ -219,9 +219,11 @@ def copy_adapter(adapter, output_dir, version):
     return destination
 
 
-def combine_jars(jars, output_dir, version):
+def combine_jars(jars, output_dir, version, *, macos_only=False):
     entries = licenses()
     seen = set()
+    required = {name for name in PLATFORMS if not macos_only or name.startswith("macos-")}
+    artifact = "macos-universal" if macos_only else "all"
     for path in jars:
         with checked_archive(path) as archive:
             metadata_names = [name for name in archive.namelist()
@@ -232,6 +234,8 @@ def combine_jars(jars, output_dir, version):
             classifier = metadata_name.split("/")[2]
             if classifier not in PLATFORMS or classifier in seen:
                 raise ValueError(f"unsupported or duplicate platform in combine inputs: {classifier}")
+            if classifier not in required:
+                raise ValueError(f"{artifact} JAR does not accept platform: {classifier}")
             info = archive.getinfo(metadata_name)
             if info.file_size > MAX_METADATA_SIZE:
                 raise ValueError("native metadata exceeds the 16 KiB limit")
@@ -258,11 +262,13 @@ def combine_jars(jars, output_dir, version):
             entries[metadata_name] = metadata_data
             entries[library_name] = data
             seen.add(classifier)
-    missing = set(PLATFORMS) - seen
+    missing = required - seen
     if missing:
-        raise ValueError("all-platform JAR requires every supported platform; missing: "
+        label = ("macOS universal JAR requires both macOS platforms" if macos_only
+                 else "all-platform JAR requires every supported platform")
+        raise ValueError(label + "; missing: "
                          + ", ".join(sorted(missing)))
-    return write_jar(output_dir / f"spark-connect-native-{version}-all.jar", entries)
+    return write_jar(output_dir / f"spark-connect-native-{version}-{artifact}.jar", entries)
 
 
 def main():
@@ -271,6 +277,8 @@ def main():
     mode.add_argument("--print-version", action="store_true", help="print the shared JNI artifact version")
     mode.add_argument("--library", type=Path, help="absolute path to an already-built native library")
     mode.add_argument("--combine", type=Path, nargs="+", help="combine platform JARs into an all-platform JAR")
+    mode.add_argument("--combine-macos", type=Path, nargs="+",
+                      help="combine both macOS platform JARs into a macOS universal JAR")
     parser.add_argument("--platform", choices=sorted(PLATFORMS), help="default: current OS/architecture")
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--adapter-jar", type=Path, help="also copy and version-check the compiled adapter")
@@ -285,10 +293,11 @@ def main():
         if args.output_dir is None:
             parser.error("--output-dir is required for packaging")
         args.output_dir.mkdir(parents=True, exist_ok=True)
-        if args.combine:
+        if args.combine or args.combine_macos:
             if args.platform:
-                parser.error("--platform cannot be used with --combine")
-            result = combine_jars(args.combine, args.output_dir, version)
+                parser.error("--platform cannot be used with --combine or --combine-macos")
+            result = combine_jars(args.combine or args.combine_macos, args.output_dir, version,
+                                  macos_only=args.combine_macos is not None)
         else:
             result = package_library(args.library, args.output_dir, args.platform or host_platform(), version)
         print(result)

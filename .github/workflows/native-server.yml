@@ -197,6 +197,13 @@ jobs:
           native_jar=(native-jars/spark-connect-native-*-all.jar)
           crates/spark-connect-server/jvm/test-native-loader.sh --native-jar "${native_jar[0]}"
 
+      - name: Build macOS universal native JAR
+        run: |
+          macos_jars=(platform-jars/*-macos-*.jar)
+          test "${#macos_jars[@]}" -eq 2
+          python3 -B crates/spark-connect-server/jvm/package-native.py \
+            --combine-macos "${macos_jars[@]}" --output-dir macos-native-jars
+
       - name: Upload all-platform native JAR
         uses: actions/upload-artifact@v4
         with:
@@ -205,3 +212,46 @@ jobs:
           if-no-files-found: error
           overwrite: true
           retention-days: 7
+
+      - name: Upload macOS universal native JAR
+        uses: actions/upload-artifact@v4
+        with:
+          name: spark-connect-native-macos-universal
+          path: macos-native-jars/*
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 7
+
+  test-macos-universal:
+    name: Load macOS universal JAR (${{ matrix.platform }})
+    needs: combine-native-jars
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: macos-15-intel, platform: macos-x86_64 }
+          - { runner: macos-15, platform: macos-aarch64 }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Download macOS universal native JAR
+        uses: actions/download-artifact@v4
+        with:
+          name: spark-connect-native-macos-universal
+          path: native-jars
+
+      - name: Load matching native library from macOS universal JAR
+        run: |
+          native_jar=(native-jars/spark-connect-native-*-macos-universal.jar)
+          crates/spark-connect-server/jvm/test-native-loader.sh --native-jar "${native_jar[0]}"

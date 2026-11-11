@@ -275,12 +275,19 @@ the C adapter's JNI headers. Workspace-wide lint also installs JDK 21 because it
 `--workspace` Clippy command includes the JNI crate.
 
 Each platform job builds a release library, validates its binary architecture,
-packages it in a platform JAR, and runs the dependency-free Java loader tests
-against a JNI fixture and the actual packaged library. It uploads the JAR and
-SHA-256 sidecar as development CI artifacts. Linux builds use Ubuntu 22.04 and
-macOS builds set `MACOSX_DEPLOYMENT_TARGET=11.0`. A dependent job validates and
-combines all four artifacts into an all-platform native JAR, checks loading its
-matching library, and uploads that artifact. Neither job publishes to Maven.
+packages it in a platform JAR with ZIP DEFLATE compression, and runs the
+dependency-free Java loader tests against a JNI fixture and the actual library. It
+uploads the JAR and SHA-256 sidecar as development CI artifacts. Linux builds use
+Ubuntu 22.04 and macOS builds set `MACOSX_DEPLOYMENT_TARGET=11.0`.
+
+A dependent job validates and combines all four artifacts into an all-platform
+native JAR and the two macOS artifacts into a macOS universal JAR. It checks
+loading the matching library from the all-platform JAR on Linux and uploads both
+JARs with checksum sidecars as separate artifacts. Two lightweight jobs then
+download the same macOS universal JAR and test loading it on native x86-64 and
+ARM64 macOS runners. The universal JAR retains both thin libraries under their
+platform resource paths; the existing loader selects the JVM's architecture.
+These jobs do not publish to Maven.
 
 CI compiles the dependency-free Java loader, but does not download a Spark
 snapshot, compile the full Spark-dependent adapter or run a live Spark JVM in

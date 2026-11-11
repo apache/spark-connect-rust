@@ -58,11 +58,11 @@ class NativePackagingTests(unittest.TestCase):
         self.output.mkdir()
         self.version = packaging.artifact_version()
 
-    def package(self, classifier):
+    def package(self, classifier, payload=b""):
         directory = self.directory / classifier
         directory.mkdir(exist_ok=True)
         library = directory / packaging.PLATFORMS[classifier][0]
-        library.write_bytes(library_header(classifier))
+        library.write_bytes(library_header(classifier) + payload)
         return packaging.package_library(library, self.output, classifier, self.version)
 
     def rewrite(self, jar, transform):
@@ -133,6 +133,24 @@ class NativePackagingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "named"):
             packaging.package_library(invalid, self.output, "linux-x86_64", self.version)
 
+    def test_native_jar_compresses_entries_without_changing_bytes_or_digest(self):
+        classifier = "macos-aarch64"
+        payload = bytes(range(256)) * 2048
+        data = library_header(classifier) + payload
+        jar = self.package(classifier, payload)
+        prefix = f"META-INF/native/{classifier}/"
+        with zipfile.ZipFile(jar) as archive:
+            self.assertTrue(all(info.compress_type == zipfile.ZIP_DEFLATED
+                                for info in archive.infolist()))
+            library = archive.getinfo(prefix + "libspark_connect_jni.dylib")
+            self.assertLess(library.compress_size, library.file_size // 4)
+            self.assertEqual(archive.read(library), data)
+            metadata = packaging.parse_properties(archive.read(prefix + "native.properties"))
+            self.assertEqual(metadata["library.sha256"], hashlib.sha256(data).hexdigest())
+            self.assertEqual(metadata["artifact.version"], self.version)
+            self.assertEqual(metadata["native.abi.version"], "1")
+            self.assertEqual(archive.read("META-INF/LICENSE"), packaging.licenses()["META-INF/LICENSE"])
+
     def test_combine_preserves_four_validated_platforms(self):
         jars = [self.package(classifier) for classifier in packaging.PLATFORMS]
         combined = packaging.combine_jars(jars, self.output, self.version)
@@ -155,6 +173,57 @@ class NativePackagingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "missing: macos-aarch64"):
             packaging.combine_jars(jars, self.output, self.version)
         self.assertFalse((self.output / f"spark-connect-native-{self.version}-all.jar").exists())
+
+    def test_macos_universal_preserves_both_platforms_and_is_reproducible(self):
+        classifiers = ["macos-x86_64", "macos-aarch64"]
+        jars = [self.package(classifier) for classifier in classifiers]
+        combined = packaging.combine_jars(jars, self.output, self.version, macos_only=True)
+        self.assertEqual(combined.name, f"spark-connect-native-{self.version}-macos-universal.jar")
+        self.assertEqual(stat.S_IMODE(combined.stat().st_mode), 0o644)
+        first = combined.read_bytes()
+        packaging.combine_jars(reversed(jars), self.output, self.version, macos_only=True)
+        self.assertEqual(combined.read_bytes(), first)
+        with zipfile.ZipFile(combined) as archive:
+            expected_names = set(packaging.licenses())
+            for classifier, jar in zip(classifiers, jars):
+                prefix = f"META-INF/native/{classifier}/"
+                expected_names.update({prefix + "native.properties",
+                                       prefix + "libspark_connect_jni.dylib"})
+                with zipfile.ZipFile(jar) as original:
+                    for name in original.namelist():
+                        self.assertEqual(archive.read(name), original.read(name))
+            self.assertEqual(set(archive.namelist()), expected_names)
+            self.assertTrue(all(info.compress_type == zipfile.ZIP_DEFLATED
+                                for info in archive.infolist()))
+        self.assertEqual(combined.with_suffix(".jar.sha256").read_text(),
+                         f"{hashlib.sha256(first).hexdigest()}  {combined.name}\n")
+
+    def test_macos_universal_rejects_missing_platform_before_writing(self):
+        jars = [self.package(classifier) for classifier in ["macos-x86_64", "macos-aarch64"]]
+        combined = self.output / f"spark-connect-native-{self.version}-macos-universal.jar"
+        for incomplete in [[], jars[:1], jars[1:]]:
+            with self.subTest(inputs=[jar.name for jar in incomplete]):
+                with self.assertRaisesRegex(ValueError, "missing"):
+                    packaging.combine_jars(incomplete, self.output, self.version, macos_only=True)
+                self.assertFalse(combined.exists())
+
+    def test_macos_universal_rejects_duplicate_platform_before_writing(self):
+        jar = self.package("macos-aarch64")
+        combined = self.output / f"spark-connect-native-{self.version}-macos-universal.jar"
+        with self.assertRaisesRegex(ValueError, "duplicate platform"):
+            packaging.combine_jars([jar, jar], self.output, self.version, macos_only=True)
+        self.assertFalse(combined.exists())
+
+    def test_macos_universal_rejects_linux_inputs_before_writing(self):
+        macos = [self.package(classifier) for classifier in ["macos-x86_64", "macos-aarch64"]]
+        combined = self.output / f"spark-connect-native-{self.version}-macos-universal.jar"
+        for classifier in ["linux-x86_64", "linux-aarch64"]:
+            jar = self.package(classifier)
+            for inputs in [[jar], macos + [jar]]:
+                with self.subTest(inputs=[item.name for item in inputs]):
+                    with self.assertRaisesRegex(ValueError, "does not accept platform: linux-"):
+                        packaging.combine_jars(inputs, self.output, self.version, macos_only=True)
+                    self.assertFalse(combined.exists())
 
     def test_combine_rejects_version_and_abi_mismatch(self):
         for key, value, message in [
@@ -204,7 +273,7 @@ class NativePackagingTests(unittest.TestCase):
 
     def test_cli_packaging_requires_output_directory_and_rejects_mixed_version_mode(self):
         script = str(Path(packaging.__file__))
-        for mode in ["--library", "--combine"]:
+        for mode in ["--library", "--combine", "--combine-macos"]:
             completed = subprocess.run([sys.executable, "-B", script, mode, "/unused"],
                                        text=True, capture_output=True)
             self.assertEqual(completed.returncode, 2)
@@ -215,6 +284,41 @@ class NativePackagingTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 2)
         self.assertIn("--print-version cannot be combined", completed.stderr)
         self.assertFalse((self.directory / "unwanted").exists())
+
+    def test_cli_macos_combine_creates_valid_universal_jar(self):
+        jars = [self.package(classifier) for classifier in ["macos-x86_64", "macos-aarch64"]]
+        completed = subprocess.run([sys.executable, "-B", str(Path(packaging.__file__)),
+                                    "--combine-macos", *map(str, jars),
+                                    "--output-dir", str(self.output)],
+                                   text=True, capture_output=True, check=True)
+        combined = self.output / f"spark-connect-native-{self.version}-macos-universal.jar"
+        self.assertEqual(completed.stdout, str(combined) + "\n")
+        self.assertEqual(completed.stderr, "")
+        with zipfile.ZipFile(combined) as archive:
+            for classifier, jar in zip(["macos-x86_64", "macos-aarch64"], jars):
+                prefix = f"META-INF/native/{classifier}/"
+                with zipfile.ZipFile(jar) as original:
+                    self.assertEqual(archive.read(prefix + "libspark_connect_jni.dylib"),
+                                     original.read(prefix + "libspark_connect_jni.dylib"))
+
+    def test_cli_combine_modes_reject_platform_override(self):
+        jars = {classifier: self.package(classifier) for classifier in packaging.PLATFORMS}
+        for mode, inputs in [("--combine", list(jars.values())),
+                             ("--combine-macos", [jars["macos-x86_64"], jars["macos-aarch64"]])]:
+            with self.subTest(mode=mode):
+                completed = subprocess.run([sys.executable, "-B", str(Path(packaging.__file__)),
+                                            mode, *map(str, inputs), "--platform", "macos-aarch64",
+                                            "--output-dir", str(self.output)],
+                                           text=True, capture_output=True)
+                self.assertEqual(completed.returncode, 2)
+                self.assertIn("--platform cannot be used", completed.stderr)
+
+    def test_cli_macos_combine_and_print_version_are_mutually_exclusive(self):
+        completed = subprocess.run([sys.executable, "-B", str(Path(packaging.__file__)),
+                                    "--combine-macos", "/unused", "--print-version"],
+                                   text=True, capture_output=True)
+        self.assertEqual(completed.returncode, 2)
+        self.assertIn("not allowed", completed.stderr)
 
     def test_combine_rejects_tampered_library(self):
         jar = self.package("linux-x86_64")

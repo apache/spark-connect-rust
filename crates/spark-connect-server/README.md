@@ -126,6 +126,9 @@ This produces a shared `spark-connect-native-adapter-0.1.0.jar`, the current
 platform's `spark-connect-native-0.1.0-<platform>.jar`, and checksum sidecars.
 The packager checks the actual ELF or Mach-O header against the selected
 platform. Selecting another platform does not cross-compile the library.
+Native JAR entries use ZIP DEFLATE compression at level 9. Archive metadata is
+normalized for reproducible packaging with the same toolchain; compressed bytes
+can differ between zlib versions.
 
 For example, launch the packaged native library on macOS ARM64:
 
@@ -154,9 +157,9 @@ filesystem that permits loading native libraries.
 
 The native CI matrix builds and tests each of the four targets on a runner with
 the matching architecture, uploads the platform JARs, and combines them into
-`spark-connect-native-0.1.0-all.jar`. The all-platform JAR includes the native
-resources; applications still need the shared Java adapter JAR. To combine
-downloaded platform artifacts locally:
+`spark-connect-native-0.1.0-all.jar` and a macOS universal JAR. Applications still
+need the shared Java adapter JAR. The `--combine` command requires all four
+platform artifacts:
 
 ```bash
 python3 crates/spark-connect-server/jvm/package-native.py \
@@ -166,6 +169,27 @@ python3 crates/spark-connect-server/jvm/package-native.py \
     /path/to/platform-jars/spark-connect-native-0.1.0-macos-aarch64.jar \
   --output-dir crates/spark-connect-server/.build/jars
 ```
+
+To bundle both macOS architectures in one JAR:
+
+```bash
+python3 crates/spark-connect-server/jvm/package-native.py \
+  --combine-macos /path/to/platform-jars/spark-connect-native-0.1.0-macos-x86_64.jar \
+    /path/to/platform-jars/spark-connect-native-0.1.0-macos-aarch64.jar \
+  --output-dir crates/spark-connect-server/.build/jars
+```
+
+This requires exactly the two macOS platform artifacts and produces
+`spark-connect-native-0.1.0-macos-universal.jar`. It contains both thin native
+libraries; the loader selects the JVM's architecture, including under Rosetta,
+and extracts only that library. Pass this JAR with `--native-jar` or
+`spark-submit --jars` using the same launch commands above. CI checks loading the
+same universal JAR on both macOS architectures.
+
+A Universal2 Mach-O library also contains both architectures' machine code, so
+combining them into a fat binary does not itself remove those bytes. ZIP
+compression reduces the universal JAR's stored and transfer size; the selected
+library is decompressed when extracted.
 
 Linux artifacts are built on Ubuntu 22.04 and require glibc 2.35 or newer; musl
 is outside this matrix. macOS artifacts target macOS 11 or newer. These are
