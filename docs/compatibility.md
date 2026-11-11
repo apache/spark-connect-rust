@@ -181,6 +181,23 @@ not given is not sent, so the server's default applies. A list param without ele
 accepted by its constructor and setters, and a fit, transform or evaluate raises PySpark's
 `CANNOT_INFER_ARRAY_ELEMENT_TYPE` for it, as PySpark's serialization does.
 
+## Native RandomForestRegressor
+
+`spark_connect::ml::RandomForestRegressor` fits Spark's JVM random forest regressor
+through Connect using ML vector features and numeric labels. Rust builder setters
+and getters cover all 19 PySpark constructor parameters, including instance weights,
+bootstrap sampling, feature sampling and optional per-tree leaf indices. Unset
+parameters use Spark's defaults; a seed can select another reproducible sample.
+
+The native Python estimator is available from
+`pyspark.ml.connect.regression.RandomForestRegressor` and
+`pyspark.ml.connect.RandomForestRegressor`. It uses PySpark's keyword-only constructor
+names, defaults and parameter conversions, with mutating setters. Fitted models
+expose DataFrame `transform` for the fitting session. Models, clones and lazy
+transformed DataFrames retain the cached server model until their last owner drops.
+Tree inspection, feature importances, single-vector prediction and persistence are
+not exposed by this native addition.
+
 ## Native RandomForestClassifier
 
 `spark_connect::ml::RandomForestClassifier` trains Spark's JVM random forest

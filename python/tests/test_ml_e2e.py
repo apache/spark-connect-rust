@@ -248,6 +248,7 @@ def _native_estimators():
         LogisticRegression,
         MaxAbsScaler,
         RandomForestClassifier,
+        RandomForestRegressor,
         StandardScaler,
         StringIndexer,
     )
@@ -259,6 +260,7 @@ def _native_estimators():
         (LinearRegression(maxIter=2), ml + "regression.LinearRegressionModel"),
         (LogisticRegression(maxIter=2), ml + "classification.LogisticRegressionModel"),
         (RandomForestClassifier(numTrees=2), ml + "classification.RandomForestClassificationModel"),
+        (RandomForestRegressor(numTrees=2), ml + "regression.RandomForestRegressionModel"),
         (StandardScaler(inputCol="features", outputCol="o"), ml + "feature.StandardScalerModel"),
         (MaxAbsScaler(inputCol="features", outputCol="o"), ml + "feature.MaxAbsScalerModel"),
         (StringIndexer(inputCol="s", outputCol="o"), ml + "feature.StringIndexerModel"),

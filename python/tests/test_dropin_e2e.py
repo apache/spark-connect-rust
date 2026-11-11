@@ -5113,3 +5113,96 @@ def test_random_forest_rejects_invalid_parameters_and_training_data(session):
         RandomForestClassifier().fit(training.withColumn("label",F.lit(-1.0)))
     with pytest.raises(Exception):
         RandomForestClassifier(weightCol="weight").fit(training.withColumn("weight",F.lit(-1.0)))
+
+
+def _random_forest_regressor():
+    try:
+        from pyspark.ml.connect.regression import RandomForestRegressor
+    except ImportError:
+        from pyspark.ml.regression import RandomForestRegressor
+    return RandomForestRegressor
+
+
+@pytest.mark.parametrize("use_setters", [False, True], ids=["constructor", "setters"])
+def test_random_forest_regressor_learns_nonlinear_values_and_retains_lazy_predictions(session, use_setters):
+    from pyspark.ml.connect.functions import vector_to_array
+    RandomForestRegressor = _random_forest_regressor()
+    training = _forest_vectors(session,
+        "SELECT array(CAST(x AS DOUBLE)) AS xs, CAST(y AS DOUBLE) AS target, 1.0D AS weight "
+        "FROM VALUES (-3,-4.0),(-2,-4.0),(-1,5.5),(0,5.5),(1,5.5),(2,-4.0),(3,-4.0) AS t(x,y)", "input")
+    held_out = _forest_vectors(session,
+        "SELECT id, array(CAST(x AS DOUBLE)) AS xs "
+        "FROM VALUES (0,-2.5),(1,-0.5),(2,0.5),(3,2.5) AS t(id,x)", "input")
+    options = dict(featuresCol="input", labelCol="target", predictionCol="value",
+                   maxDepth=3, maxBins=16, minInstancesPerNode=1, minInfoGain=0.0,
+                   maxMemoryInMB=64, cacheNodeIds=True, checkpointInterval=-1,
+                   impurity="variance", subsamplingRate=1.0, seed=42, numTrees=3,
+                   featureSubsetStrategy="all", leafCol="leaves", minWeightFractionPerNode=0.0,
+                   weightCol="weight", bootstrap=False)
+    if use_setters:
+        estimator = RandomForestRegressor()
+        for name, value in options.items():
+            assert getattr(estimator, "set" + name[0].upper() + name[1:])(value) is estimator
+    else:
+        estimator = RandomForestRegressor(**options)
+    first = estimator.fit(training)
+    second = estimator.fit(training.withColumn("target", F.col("target") + 10.0))
+    expected = [-4.0, 5.5, 5.5, -4.0]
+    assert _forest_predictions(first, held_out, "value") == expected
+    assert _forest_predictions(second, held_out, "value") == [6.0, 15.5, 15.5, 6.0]
+    assert _forest_predictions(estimator.fit(training), held_out, "value") == expected
+    leaves = first.transform(held_out).select(vector_to_array("leaves").alias("v")).collect()
+    assert all(len(r.v)==3 and all(x>=0 for x in r.v) for r in leaves)
+    delayed = first.transform(held_out).select("id", "value")
+    del first
+    import gc
+    gc.collect()
+    assert [r.value for r in delayed.orderBy("id").collect()] == expected
+
+
+def test_random_forest_regressor_instance_weights_change_the_mean(session):
+    RandomForestRegressor = _random_forest_regressor()
+    training = _forest_vectors(session,
+        "SELECT 0 AS id, array(0.0D) AS xs, CAST(y AS DOUBLE) AS label, CAST(w AS DOUBLE) AS weight "
+        "FROM VALUES (-2,1),(-2,1),(-2,1),(10,9) AS t(y,w)")
+    options = dict(seed=42, numTrees=3, maxDepth=0, featureSubsetStrategy="all", bootstrap=False)
+    plain = RandomForestRegressor(**options).fit(training)
+    weighted = RandomForestRegressor(**options, weightCol="weight").fit(training)
+    assert _forest_predictions(plain, training) == [1.0]*4
+    assert _forest_predictions(weighted, training) == [7.0]*4
+
+
+def test_random_forest_regressor_seeded_bootstrap_and_feature_sampling(session):
+    RandomForestRegressor = _random_forest_regressor()
+    training = _forest_vectors(session,
+        "SELECT id, array(CAST(id AS DOUBLE),CAST(id % 3 AS DOUBLE)) AS xs, "
+        "CAST(CASE WHEN id < 20 THEN -3 ELSE 8 END AS DOUBLE) AS label FROM range(40)")
+    estimator = RandomForestRegressor(seed=2**33, numTrees=7, maxDepth=3,
+                                      bootstrap=True, subsamplingRate=0.8,
+                                      featureSubsetStrategy="sqrt")
+    first = _forest_predictions(estimator.fit(training), training)
+    assert first == _forest_predictions(estimator.fit(training), training)
+    assert all(-3.0 <= x <= 8.0 for x in first)
+    assert first[0] < first[-1]
+
+
+def test_random_forest_regressor_rejects_invalid_parameters_and_data(session):
+    RandomForestRegressor = _random_forest_regressor()
+    training = _forest_vectors(session,
+        "SELECT array(CAST(x AS DOUBLE)) AS xs, CAST(y AS DOUBLE) AS label, 1.0D AS weight "
+        "FROM VALUES (-1,-2.5),(1,3.5) AS t(x,y)")
+    for options in [dict(numTrees=0),dict(maxDepth=31),dict(maxBins=1),
+                    dict(minInstancesPerNode=0),dict(minInfoGain=-1.0),dict(maxMemoryInMB=-1),
+                    dict(checkpointInterval=0),dict(impurity="gini"),
+                    dict(featureSubsetStrategy="invalid"),dict(subsamplingRate=0.0),
+                    dict(minWeightFractionPerNode=0.5)]:
+        with pytest.raises(Exception):
+            RandomForestRegressor(**options).fit(training)
+    with pytest.raises(Exception):
+        RandomForestRegressor().fit(training.drop("label"))
+    with pytest.raises(Exception):
+        RandomForestRegressor().fit(training.withColumn("label",F.lit(float("nan"))))
+    with pytest.raises(Exception):
+        RandomForestRegressor(weightCol="weight").fit(training.withColumn("weight",F.lit(-1.0)))
+    with pytest.raises(Exception):
+        RandomForestRegressor().fit(training.withColumn("features",F.lit(1.0)))
