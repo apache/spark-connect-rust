@@ -6867,11 +6867,20 @@ mod deep_request_stack_tests {
         SparkSession::new(client)
     }
 
-    /// Run `f` on a thread of 512 KiB, the smallest stack that a Python thread may have.
+    /// Run `f` on a thread of 512 KiB, the smallest stack that a Python thread may have, in a
+    /// release build, as the drop-in runs. The frames of a debug build, and more so of a
+    /// coverage build, are several times larger, and the encode and drop of a request at the
+    /// bound, which stay on the calling thread, take more than 512 KiB there, so its thread has
+    /// the 8 MiB of a default thread of Linux.
     fn on_a_small_stack<T: Send>(f: impl FnOnce() -> T + Send) -> T {
+        let stack = if cfg!(debug_assertions) {
+            8 << 20
+        } else {
+            512 << 10
+        };
         std::thread::scope(|scope| {
             std::thread::Builder::new()
-                .stack_size(512 << 10)
+                .stack_size(stack)
                 .spawn_scoped(scope, f)
                 .unwrap()
                 .join()
