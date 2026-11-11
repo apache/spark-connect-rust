@@ -15907,6 +15907,59 @@ def test_an_expression_too_deep_to_send_raises_recursion_error_without_a_request
     assert len(service.execute_requests) == 1
 
 
+def test_a_command_expression_too_deep_to_send_raises_recursion_error_as_pyspark(mock_connect):
+    # As PySpark, whose serializer raises RecursionError, before any request, for an expression of
+    # about 1,000 levels as a merge condition, a condition or an assignment of a merge clause (as
+    # the clause method adds the clause, which is not added then), a partitioning column or an
+    # overwrite condition, and as it pickles a Column or builds its to_plan; 20,000 levels killed
+    # the process, and pickling took minutes. 744 additions, the 745 levels of the bound, are sent.
+    import pickle
+
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+
+    def chained(additions):
+        c = F.col("id")
+        for _ in range(additions):
+            c = c + 1
+        return c
+
+    df = spark.range(3).alias("s")
+    writer = df.mergeInto("t", F.col("id")).whenMatched().delete()
+    too_deep = "an expression may be at most 745 levels"
+    for additions in [745, 30_000]:
+        deep = chained(additions)
+        with pytest.raises(RecursionError, match=too_deep):
+            df.mergeInto("t", deep).whenMatched().updateAll().merge()
+        with pytest.raises(RecursionError, match=too_deep):
+            writer.whenNotMatchedBySource(deep).updateAll()
+        with pytest.raises(RecursionError, match=too_deep):
+            writer.whenNotMatched().insert({"v": deep})
+        with pytest.raises(RecursionError, match=too_deep):
+            df.writeTo("t").overwrite(deep)
+        with pytest.raises(RecursionError, match=too_deep):
+            df.writeTo("t").partitionedBy(deep).create()
+        with pytest.raises(RecursionError, match=too_deep):
+            pickle.dumps(deep)
+        with pytest.raises(RecursionError, match=too_deep):
+            deep._expr.to_plan(spark.client)
+        del deep
+    assert service.execute_requests == []
+    # The merge sends the one clause that was added: ExecutePlanRequest.plan=3, Plan.command=2,
+    # Command.merge_into_table_command=16, of match_actions=4, not_matched_actions=5 and
+    # not_matched_by_source_actions=6.
+    writer.merge()
+    plan = parse_message(parse_message(service.execute_requests[-1])[3][0])
+    merge = parse_message(parse_message(plan[2][0])[16][0])
+    assert [len(merge.get(field, [])) for field in [4, 5, 6]] == [1, 0, 0]
+    at_bound = chained(744)
+    df.mergeInto("t", at_bound).whenMatched(at_bound).update({"v": at_bound}).merge()
+    df.writeTo("t").partitionedBy(at_bound).overwrite(at_bound)
+    assert len(service.execute_requests) == 3
+    assert pickle.dumps(at_bound)
+
+
 def test_window_and_lambda_reprs_as_pyspark():
     import re
 

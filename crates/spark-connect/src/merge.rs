@@ -18,23 +18,47 @@ fn merge_action(
     action_type: proto::merge_action::ActionType,
     condition: Option<&Column>,
     assignments: Option<HashMap<String, Column>>,
-) -> proto::Expression {
-    let mut action = proto::MergeAction::default();
-    action.action_type = action_type as i32;
-    action.condition = condition.map(|c| Box::new(c.to_proto()));
-    if let Some(assignments) = assignments {
-        action.assignments = assignments
-            .into_iter()
-            .map(|(k, v)| proto::merge_action::Assignment {
-                // Mirrors the reference `expr(k)` for the assignment target.
-                key: Some(crate::functions::expr(&k).to_proto()),
-                value: Some(v.to_proto()),
-            })
-            .collect();
+) -> MergeClause {
+    MergeClause {
+        action_type,
+        condition: condition.cloned(),
+        assignments,
     }
-    let mut expr = proto::Expression::default();
-    expr.expr_type = Some(proto::expression::ExprType::MergeAction(Box::new(action)));
-    expr
+}
+
+/// A clause of a merge: its action, and its condition and assignments, which are serialized when
+/// the merge runs, as a request serializes them (see [`MergeIntoWriter::merge`]).
+#[derive(Clone)]
+struct MergeClause {
+    action_type: proto::merge_action::ActionType,
+    condition: Option<Column>,
+    assignments: Option<HashMap<String, Column>>,
+}
+
+impl MergeClause {
+    /// The `MergeAction` expression of the clause, as PySpark's `_build_merge_action` builds it.
+    fn to_proto(&self) -> Result<proto::Expression> {
+        let assignments = self.assignments.iter().flatten().map(|(k, v)| {
+            Ok(proto::merge_action::Assignment {
+                // Mirrors the reference `expr(k)` for the assignment target.
+                key: Some(crate::functions::expr(k).try_to_proto()?),
+                value: Some(v.try_to_proto()?),
+            })
+        });
+        let action = proto::MergeAction {
+            action_type: self.action_type as i32,
+            assignments: assignments.collect::<Result<_>>()?,
+            condition: self
+                .condition
+                .as_ref()
+                .map(|c| c.try_to_proto().map(Box::new))
+                .transpose()?,
+        };
+        Ok(proto::Expression {
+            expr_type: Some(proto::expression::ExprType::MergeAction(Box::new(action))),
+            ..Default::default()
+        })
+    }
 }
 
 /// Fluent builder for a MERGE INTO command. Create it via [`crate::dataframe::DataFrame::merge_into`].
@@ -45,9 +69,9 @@ pub struct MergeIntoWriter {
     target_table: String,
     condition: Column,
     schema_evolution: bool,
-    matched_actions: Vec<proto::Expression>,
-    not_matched_actions: Vec<proto::Expression>,
-    not_matched_by_source_actions: Vec<proto::Expression>,
+    matched_actions: Vec<MergeClause>,
+    not_matched_actions: Vec<MergeClause>,
+    not_matched_by_source_actions: Vec<MergeClause>,
     execution: Option<crate::dataframe::ExecutionSlot>,
 }
 
@@ -127,15 +151,20 @@ impl MergeIntoWriter {
         self
     }
 
-    /// Execute the merge.
+    /// Execute the merge. As PySpark's serializer, it fails with a `RecursionError`, before any
+    /// request is sent, if its condition, or a condition or an assignment of one of its clauses,
+    /// is deeper than [`crate::expression::MAX_EXPRESSION_DEPTH`].
     pub fn merge(mut self) -> Result<()> {
+        let actions = |clauses: &[MergeClause]| -> Result<Vec<proto::Expression>> {
+            clauses.iter().map(MergeClause::to_proto).collect()
+        };
         let cmd = proto::MergeIntoTableCommand {
             target_table_name: std::mem::take(&mut self.target_table),
             source_table_plan: Some(build_input_relation(&self.source_plan, &self.session)?),
-            merge_condition: Some(self.condition.to_proto()),
-            match_actions: std::mem::take(&mut self.matched_actions),
-            not_matched_actions: std::mem::take(&mut self.not_matched_actions),
-            not_matched_by_source_actions: std::mem::take(&mut self.not_matched_by_source_actions),
+            merge_condition: Some(self.condition.try_to_proto()?),
+            match_actions: actions(&self.matched_actions)?,
+            not_matched_actions: actions(&self.not_matched_actions)?,
+            not_matched_by_source_actions: actions(&self.not_matched_by_source_actions)?,
             with_schema_evolution: self.schema_evolution,
         };
         self.run(proto::command::CommandType::MergeIntoTableCommand(cmd))

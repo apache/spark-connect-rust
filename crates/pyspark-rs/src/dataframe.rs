@@ -3338,6 +3338,23 @@ fn merge_clause_action(
     Ok(writer.clone_ref(py))
 }
 
+/// Serialize the condition and the assignment values of a merge clause, as PySpark's
+/// `_build_merge_action` does when its clause method adds the clause: one too deep to be sent is
+/// the `RecursionError` of PySpark's serializer there, and the clause is not added. The merge
+/// serializes them again when it runs.
+fn check_merge_clause(
+    condition: Option<&spark_connect::column::Column>,
+    assignments: Option<&std::collections::HashMap<String, spark_connect::column::Column>>,
+) -> PyResult<()> {
+    let values = assignments
+        .into_iter()
+        .flat_map(|assignments| assignments.values());
+    for column in condition.into_iter().chain(values) {
+        column.try_to_proto().to_pyerr()?;
+    }
+    Ok(())
+}
+
 #[pymethods]
 impl PyMergeIntoWriter {
     /// Nested builder-class references, mirroring pyspark's `MergeIntoWriter.WhenMatched`
@@ -3423,6 +3440,7 @@ impl PyWhenMatched {
     #[pyo3(name = "updateAll")]
     fn update_all(&self, py: Python<'_>) -> PyResult<Py<PyMergeIntoWriter>> {
         let cond = self.condition.clone();
+        check_merge_clause(cond.as_ref(), None)?;
         merge_clause_action(py, &self.writer, |w| w.when_matched(cond).update_all())
     }
 
@@ -3433,11 +3451,13 @@ impl PyWhenMatched {
     ) -> PyResult<Py<PyMergeIntoWriter>> {
         let cond = self.condition.clone();
         let map = assignments_to_map(py, assignments);
+        check_merge_clause(cond.as_ref(), Some(&map))?;
         merge_clause_action(py, &self.writer, |w| w.when_matched(cond).update(map))
     }
 
     fn delete(&self, py: Python<'_>) -> PyResult<Py<PyMergeIntoWriter>> {
         let cond = self.condition.clone();
+        check_merge_clause(cond.as_ref(), None)?;
         merge_clause_action(py, &self.writer, |w| w.when_matched(cond).delete())
     }
 }
@@ -3455,6 +3475,7 @@ impl PyWhenNotMatched {
     #[pyo3(name = "insertAll")]
     fn insert_all(&self, py: Python<'_>) -> PyResult<Py<PyMergeIntoWriter>> {
         let cond = self.condition.clone();
+        check_merge_clause(cond.as_ref(), None)?;
         merge_clause_action(py, &self.writer, |w| w.when_not_matched(cond).insert_all())
     }
 
@@ -3465,6 +3486,7 @@ impl PyWhenNotMatched {
     ) -> PyResult<Py<PyMergeIntoWriter>> {
         let cond = self.condition.clone();
         let map = assignments_to_map(py, assignments);
+        check_merge_clause(cond.as_ref(), Some(&map))?;
         merge_clause_action(py, &self.writer, |w| w.when_not_matched(cond).insert(map))
     }
 }
@@ -3482,6 +3504,7 @@ impl PyWhenNotMatchedBySource {
     #[pyo3(name = "updateAll")]
     fn update_all(&self, py: Python<'_>) -> PyResult<Py<PyMergeIntoWriter>> {
         let cond = self.condition.clone();
+        check_merge_clause(cond.as_ref(), None)?;
         merge_clause_action(py, &self.writer, |w| {
             w.when_not_matched_by_source(cond).update_all()
         })
@@ -3494,6 +3517,7 @@ impl PyWhenNotMatchedBySource {
     ) -> PyResult<Py<PyMergeIntoWriter>> {
         let cond = self.condition.clone();
         let map = assignments_to_map(py, assignments);
+        check_merge_clause(cond.as_ref(), Some(&map))?;
         merge_clause_action(py, &self.writer, |w| {
             w.when_not_matched_by_source(cond).update(map)
         })
@@ -3501,6 +3525,7 @@ impl PyWhenNotMatchedBySource {
 
     fn delete(&self, py: Python<'_>) -> PyResult<Py<PyMergeIntoWriter>> {
         let cond = self.condition.clone();
+        check_merge_clause(cond.as_ref(), None)?;
         merge_clause_action(py, &self.writer, |w| {
             w.when_not_matched_by_source(cond).delete()
         })

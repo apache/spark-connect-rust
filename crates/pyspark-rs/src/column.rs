@@ -5,6 +5,7 @@ use pyo3::types::PyDict;
 use spark_connect::column::Column;
 use spark_connect::expression::{Alias, ExpressionNode, NullOrdering};
 
+use crate::errors::ResultExt;
 use crate::functions::{to_column, to_value_column};
 
 /// Raise a `pyspark.errors` exception (`class_name`) carrying the given `error_class`
@@ -114,11 +115,13 @@ impl PyColumnExpression {
     }
 
     /// The `spark.connect.Expression` of this expression, of the generated
-    /// `pyspark.sql.connect.proto`.
+    /// `pyspark.sql.connect.proto`. One too deep to be sent is the `RecursionError` that
+    /// PySpark's `to_plan`, which recurses, raises.
     fn to_plan(&self, py: Python<'_>, session: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         use prost::Message;
         let _ = session;
-        let bytes = pyo3::types::PyBytes::new(py, &self.column.to_proto().encode_to_vec());
+        let expression = self.column.try_to_proto().to_pyerr()?;
+        let bytes = pyo3::types::PyBytes::new(py, &expression.encode_to_vec());
         Ok(py
             .import("pyspark.sql.connect.proto")?
             .getattr("Expression")?
@@ -711,9 +714,11 @@ impl PyColumn {
     /// that `when` and `otherwise` chain on the unpickled Column. A sort order pickles its child
     /// Column and its sort method, as PySpark's SortOrder keeps its child and direction, so that
     /// the unpickled Column is a sort order of `orderBy`, `Window.orderBy` and the others.
+    /// A Column too deep to be sent is the `RecursionError` that PySpark's pickler raises for it.
     fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         use prost::Message;
-        let expression = pyo3::types::PyBytes::new(py, &self.column.to_proto().encode_to_vec());
+        let expression = self.column.try_to_proto().to_pyerr()?;
+        let expression = pyo3::types::PyBytes::new(py, &expression.encode_to_vec());
         let column = |expr: &spark_connect::expression::Expression| -> PyResult<Py<PyColumn>> {
             Py::new(py, PyColumn::new(Column::new(expr.clone())))
         };

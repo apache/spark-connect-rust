@@ -211,24 +211,26 @@ pub fn pipeline_define_auto_cdc_flow(
     track_history_except_column_list: Option<Vec<PyRef<'_, PyColumn>>>,
     sql_conf: Option<HashMap<String, String>>,
 ) -> PyResult<()> {
-    let to_expr = |c: &PyColumn| c.column.expression().to_proto();
+    // As a request serializes its expressions: one too deep to be sent is the RecursionError of
+    // PySpark's serializer, before any request.
+    let to_expr = |c: &PyColumn| c.column.try_to_proto().to_pyerr();
     let to_exprs = |cs: Option<Vec<PyRef<'_, PyColumn>>>| {
         cs.unwrap_or_default()
             .iter()
             .map(|c| to_expr(c))
-            .collect::<Vec<_>>()
+            .collect::<PyResult<Vec<_>>>()
     };
     let details = proto::pipeline_command::define_flow::AutoCdcFlowDetails {
         source: Some(source),
-        keys: keys.iter().map(|c| to_expr(c)).collect(),
-        sequence_by: Some(to_expr(&sequence_by)),
-        apply_as_deletes: apply_as_deletes.as_ref().map(|c| to_expr(c)),
+        keys: keys.iter().map(|c| to_expr(c)).collect::<PyResult<_>>()?,
+        sequence_by: Some(to_expr(&sequence_by)?),
+        apply_as_deletes: apply_as_deletes.as_ref().map(|c| to_expr(c)).transpose()?,
         apply_as_truncates: None,
-        column_list: to_exprs(column_list),
-        except_column_list: to_exprs(except_column_list),
+        column_list: to_exprs(column_list)?,
+        except_column_list: to_exprs(except_column_list)?,
         stored_as_scd_type,
-        track_history_column_list: to_exprs(track_history_column_list),
-        track_history_except_column_list: to_exprs(track_history_except_column_list),
+        track_history_column_list: to_exprs(track_history_column_list)?,
+        track_history_except_column_list: to_exprs(track_history_except_column_list)?,
         ignore_null_updates_column_list: vec![],
         ignore_null_updates_except_column_list: vec![],
     };
