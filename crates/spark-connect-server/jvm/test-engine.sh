@@ -20,6 +20,21 @@ set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEST_PYTHON="${NATIVE_TEST_PYTHON:-python3}"
+# Compile and run against the same assembly when an explicit CLI path overrides
+# the environment. Let argparse handle both option spellings and repeated flags.
+SPARK_HOME="$("$TEST_PYTHON" -B - "$@" <<'PY'
+import argparse
+import os
+
+parser = argparse.ArgumentParser(add_help=False)
+parser.add_argument("--spark-home", default=os.environ.get("SPARK_HOME"))
+args, _ = parser.parse_known_args()
+if args.spark_home is None:
+    parser.error("set SPARK_HOME or pass --spark-home")
+print(args.spark_home)
+PY
+)"
+export SPARK_HOME
 "$TEST_PYTHON" -B "$PROJECT_DIR/jvm/test_acceptance_guards.py"
 "$PROJECT_DIR/jvm/build.sh" --tests
 exec "$TEST_PYTHON" -B "$PROJECT_DIR/jvm/run_acceptance.py" "$@"

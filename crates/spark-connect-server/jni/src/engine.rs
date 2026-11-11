@@ -509,18 +509,23 @@ impl<W> CleanupAttachment<W> {
     fn attach_or_fallback(
         core: &Arc<JvmEngine>,
         attach: impl FnOnce(&Arc<JvmEngine>) -> Result<W, Status>,
-        reported: &mut bool,
+        reported: &mut Option<Weak<JvmEngine>>,
     ) -> Option<Self> {
         match Self::attach_with(core, attach) {
             Ok(attachment) => {
-                *reported = false;
+                *reported = None;
                 Some(attachment)
             }
             Err(error) if error.code() == tonic::Code::Unavailable => None,
             Err(error) => {
-                // Retry transient failures; a successful attachment resets reporting.
-                if !*reported {
-                    *reported = true;
+                // Retry every item and report for each failing engine without
+                // retaining it. A successful attachment also resets reporting.
+                let identity = Arc::downgrade(core);
+                if reported
+                    .as_ref()
+                    .is_none_or(|previous| !Weak::ptr_eq(previous, &identity))
+                {
+                    *reported = Some(identity);
                     eprintln!(
                         "JVM cleanup lane attachment failed; using per-call attachment: {error}"
                     );
@@ -553,7 +558,7 @@ fn cleanup_loop_with<W>(
     mut attach: impl FnMut(&Arc<JvmEngine>) -> Result<W, Status>,
 ) {
     let mut attachment: Option<CleanupAttachment<W>> = None;
-    let mut reported = false;
+    let mut reported = None;
     loop {
         let item = if attachment.is_some() {
             match rx.recv_timeout(idle) {
@@ -1694,12 +1699,17 @@ mod tests {
                 Err(Status::internal("injected attach failure"))
             }
         };
-        let mut reported = false;
+        let mut reported = None;
         for failed in [true, false, true] {
             let attachment =
                 CleanupAttachment::attach_or_fallback(&core, &mut attach, &mut reported);
             assert_eq!(attachment.is_none(), failed);
-            assert_eq!(reported, failed);
+            assert_eq!(
+                reported
+                    .as_ref()
+                    .is_some_and(|reported| Weak::ptr_eq(reported, &Arc::downgrade(&core))),
+                failed
+            );
             drop(attachment);
             assert_eq!(core.counts.lock().unwrap().workers, 0);
         }
@@ -1708,11 +1718,40 @@ mod tests {
     }
 
     #[test]
+    fn cleanup_attachment_failure_reporting_tracks_engines_without_retaining_them() {
+        let first = JvmEngine::new(std::ptr::null_mut());
+        let second = JvmEngine::new(std::ptr::null_mut());
+        let mut reported = None;
+        for core in [&first, &first, &second, &second, &first] {
+            let attachment = CleanupAttachment::attach_or_fallback(
+                core,
+                |_| -> Result<TestCleanupWorker, Status> {
+                    Err(Status::internal("injected attach failure"))
+                },
+                &mut reported,
+            );
+            assert!(attachment.is_none());
+            assert!(Weak::ptr_eq(
+                reported.as_ref().unwrap(),
+                &Arc::downgrade(core)
+            ));
+            assert_eq!(Arc::strong_count(core), 1);
+            assert_eq!(core.counts.lock().unwrap().workers, 0);
+        }
+        cleanup_drained(first.clone());
+        cleanup_drained(second.clone());
+        drop(first);
+        drop(second);
+        assert!(reported.unwrap().upgrade().is_none());
+    }
+
+    #[test]
     fn cleanup_attachment_loop_retries_failures_and_drains_every_item() {
-        let core = JvmEngine::new(std::ptr::null_mut());
+        let first = JvmEngine::new(std::ptr::null_mut());
+        let second = JvmEngine::new(std::ptr::null_mut());
         let (tx, rx) = mpsc::channel();
-        for _ in 0..2 {
-            assert!(tx.send(empty_cleanup(&core)).is_ok());
+        for core in [&first, &first, &second, &second] {
+            assert!(tx.send(empty_cleanup(core)).is_ok());
         }
         drop(tx);
         let attempts = Arc::new(AtomicUsize::new(0));
@@ -1728,12 +1767,14 @@ mod tests {
             );
         });
         lane.join();
-        assert_eq!(attempts.load(Ordering::SeqCst), 2);
-        {
-            let counts = core.counts.lock().unwrap();
-            assert_eq!((counts.handles, counts.workers), (0, 0));
+        assert_eq!(attempts.load(Ordering::SeqCst), 4);
+        for core in [first, second] {
+            {
+                let counts = core.counts.lock().unwrap();
+                assert_eq!((counts.handles, counts.workers), (0, 0));
+            }
+            cleanup_drained(core);
         }
-        cleanup_drained(core);
     }
 
     #[test]

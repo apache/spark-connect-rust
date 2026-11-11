@@ -18,9 +18,11 @@
 """Check acceptance's shutdown and listener ownership evidence; no Spark needed."""
 
 from pathlib import Path
+import json
 import os
 import signal
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -158,6 +160,51 @@ class LauncherArgumentsTest(unittest.TestCase):
 
     def test_packaged_path_on_system_bash(self):
         self.launch(True)
+
+
+class AcceptanceAssemblyTest(unittest.TestCase):
+    def launch(self, option, environment_home):
+        with tempfile.TemporaryDirectory(prefix="native acceptance space ") as directory:
+            root = Path(directory)
+            jvm = root / "project" / "jvm"
+            jvm.mkdir(parents=True)
+            wrapper = jvm / "test-engine.sh"
+            wrapper.write_bytes(Path(__file__).with_name("test-engine.sh").read_bytes())
+            (jvm / "test_acceptance_guards.py").write_text("pass\n")
+            build = jvm / "build.sh"
+            build.write_text('#!/bin/bash\nprintf "%s" "$SPARK_HOME" > "$NATIVE_BUILD_CAPTURE"\n')
+            build.chmod(0o755)
+            (jvm / "run_acceptance.py").write_text(
+                "import json, os, sys\nfrom pathlib import Path\n"
+                "Path(os.environ['NATIVE_RUN_CAPTURE']).write_text("
+                "json.dumps([os.environ['SPARK_HOME'], sys.argv[1:]]))\n")
+            selected = str(root / "selected spark home")
+            arguments = ["--library", "native artifact.so"]
+            if option == "separate":
+                arguments += ["--spark-home", selected]
+            elif option == "equals":
+                arguments += ["--spark-home=" + selected]
+            environment = os.environ.copy()
+            environment.pop("SPARK_HOME", None)
+            if environment_home:
+                environment["SPARK_HOME"] = str(root / "environment spark home")
+            environment.update(NATIVE_TEST_PYTHON=sys.executable,
+                               NATIVE_BUILD_CAPTURE=str(root / "built"),
+                               NATIVE_RUN_CAPTURE=str(root / "ran"))
+            subprocess.run(["/bin/bash", str(wrapper), *arguments], env=environment,
+                           check=True, capture_output=True, timeout=10)
+            expected = selected if option else environment["SPARK_HOME"]
+            self.assertEqual((root / "built").read_text(), expected)
+            self.assertEqual(json.loads((root / "ran").read_text()), [expected, arguments])
+
+    def test_cli_assembly_overrides_environment_on_system_bash(self):
+        self.launch("separate", True)
+
+    def test_equals_assembly_without_environment_on_system_bash(self):
+        self.launch("equals", False)
+
+    def test_environment_assembly_on_system_bash(self):
+        self.launch(None, True)
 
 
 if __name__ == "__main__":
