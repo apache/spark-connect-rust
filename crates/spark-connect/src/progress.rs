@@ -47,18 +47,21 @@ pub struct ProgressUpdate {
 
 /// The error of a progress handler that no caller is left to return to.
 #[derive(Debug)]
-pub enum UnreturnedError {
+pub enum UnreturnedError<'a> {
     /// The error of the done call of an execution dropped before its end, as an iterator that
     /// its caller stopped reading: PySpark's generator reports the exception of its
     /// `Progress.__exit__` as unraisable then.
     DroppedDone(SparkError),
-    /// The error of an execution that the error of its done call replaced: as the exception of
-    /// PySpark's `Progress.__exit__` replaces that of the body of its `with`, which it keeps as
-    /// the `__context__` of the one it raises.
-    Replaced(SparkError),
+    /// The error of an execution that the error of its done call, `done`, replaced: as the
+    /// exception of PySpark's `Progress.__exit__` replaces that of the body of its `with`, which
+    /// it keeps as the `__context__` of the one it raises.
+    Replaced {
+        error: SparkError,
+        done: &'a SparkError,
+    },
 }
 
-type UnreturnedErrorHandler = Arc<dyn Fn(UnreturnedError) + Send + Sync>;
+type UnreturnedErrorHandler = Arc<dyn for<'a> Fn(UnreturnedError<'a>) + Send + Sync>;
 
 static UNRETURNED_ERROR_HANDLER: std::sync::Mutex<Option<UnreturnedErrorHandler>> =
     std::sync::Mutex::new(None);
@@ -66,13 +69,15 @@ static UNRETURNED_ERROR_HANDLER: std::sync::Mutex<Option<UnreturnedErrorHandler>
 /// Set what becomes of the errors of progress handlers that no caller is left to return to (see
 /// [`UnreturnedError`]), for every session; by default they are dropped. The Python client
 /// reports a dropped execution's to `sys.unraisablehook`, as PySpark does.
-pub fn set_unreturned_error_handler(handler: impl Fn(UnreturnedError) + Send + Sync + 'static) {
+pub fn set_unreturned_error_handler(
+    handler: impl for<'a> Fn(UnreturnedError<'a>) + Send + Sync + 'static,
+) {
     *UNRETURNED_ERROR_HANDLER
         .lock()
         .unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(handler));
 }
 
-fn hand_over(error: UnreturnedError) {
+fn hand_over(error: UnreturnedError<'_>) {
     let handler = UNRETURNED_ERROR_HANDLER
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -128,7 +133,7 @@ impl ProgressTracker {
         match self.finish() {
             Ok(()) => error,
             Err(done) => {
-                hand_over(UnreturnedError::Replaced(error));
+                hand_over(UnreturnedError::Replaced { error, done: &done });
                 done
             }
         }
@@ -428,14 +433,16 @@ mod tests {
         let handed = Arc::new(Mutex::new(Vec::new()));
         let sink = Arc::clone(&handed);
         set_unreturned_error_handler(move |error| {
-            let (kind, error) = match error {
-                UnreturnedError::DroppedDone(error) => ("dropped", error),
-                UnreturnedError::Replaced(error) => ("replaced", error),
+            let (kind, error, done) = match error {
+                UnreturnedError::DroppedDone(error) => ("dropped", error, String::new()),
+                UnreturnedError::Replaced { error, done } => {
+                    ("replaced", error, format!(" after {}", done.message()))
+                }
             };
             if error.message().starts_with("s16") {
                 sink.lock()
                     .unwrap()
-                    .push(format!("{kind}: {}", error.message()));
+                    .push(format!("{kind}: {}{done}", error.message()));
             }
         });
 
@@ -453,7 +460,10 @@ mod tests {
         assert_eq!(done_calls.load(Ordering::SeqCst), 3);
         assert_eq!(
             *handed.lock().unwrap(),
-            vec!["replaced: s16 execution failed", "dropped: s16 done failed"]
+            vec![
+                "replaced: s16 execution failed after s16 done failed",
+                "dropped: s16 done failed"
+            ]
         );
         session.remove_progress_handler(id);
     }

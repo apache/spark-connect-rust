@@ -175,16 +175,38 @@ pub(crate) fn callback_error(exception: PyErr) -> SparkError {
     )
 }
 
-/// The exception of the Python callback of `err`, if it is the error of one.
-fn callback_exception(err: &SparkError) -> Option<PyErr> {
+/// The ID of the exception of the Python callback that `err` is the error of, if it is one.
+fn callback_id(err: &SparkError) -> Option<u64> {
     if err.error_class != PYTHON_CALLBACK_ERROR {
         return None;
     }
-    let id = err.params.get("callback_id")?.parse::<u64>().ok()?;
+    err.params.get("callback_id")?.parse::<u64>().ok()
+}
+
+/// The exception of the Python callback of `err`, if it is the error of one.
+fn callback_exception(err: &SparkError) -> Option<PyErr> {
+    let id = callback_id(err)?;
     CALLBACK_EXCEPTIONS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .remove(&id)
+}
+
+/// Make `context` the `__context__` of the exception of the Python callback that `err` is the
+/// error of, as PySpark's `Progress.__exit__` makes the exception of its body the context of the
+/// one that it raises. An error that is not the error of a callback has no exception to change.
+pub(crate) fn set_callback_context(py: Python<'_>, err: &SparkError, context: PyErr) {
+    let Some(id) = callback_id(err) else {
+        return;
+    };
+    let exceptions = CALLBACK_EXCEPTIONS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if let Some(exception) = exceptions.get(&id) {
+        let _ = exception
+            .value(py)
+            .setattr("__context__", context.value(py));
+    }
 }
 
 /// The UnicodeDecodeError of a string of the result that is not valid UTF-8, as PySpark raises

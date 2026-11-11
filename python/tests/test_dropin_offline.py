@@ -13219,6 +13219,74 @@ def test_the_exception_of_a_done_call_fails_the_execution_as_pyspark(mock_connec
     assert spark.range(1).collect() == []
 
 
+def test_the_done_error_of_a_progress_handler_keeps_the_execution_error_as_context(mock_connect):
+    # As PySpark's Progress.__exit__: a done call that raises after the execution failed raises
+    # its own exception, with the exception of the execution as its __context__.
+    from pyspark.errors import AnalysisException
+
+    spark, service = mock_connect
+    classes = ["org.apache.spark.sql.AnalysisException", "java.lang.Exception"]
+    service.execute_error = ("[TABLE_OR_VIEW_NOT_FOUND] t", classes[0],
+                             _error_info(classes, errorClass="TABLE_OR_VIEW_NOT_FOUND"))
+    error = ValueError("done-a")
+
+    def failing(**kwargs):
+        if kwargs["done"]:
+            raise error
+
+    spark.registerProgressHandler(failing)
+    try:
+        with pytest.raises(ValueError) as raised:
+            spark.range(1).collect()
+    finally:
+        service.execute_error = None
+        spark.removeProgressHandler(failing)
+    assert raised.value is error
+    assert isinstance(raised.value.__context__, AnalysisException)
+    assert "TABLE_OR_VIEW_NOT_FOUND" in str(raised.value.__context__)
+
+
+def test_a_dropped_local_iterator_hands_the_done_error_to_unraisablehook_with_an_object(
+        mock_connect, monkeypatch):
+    # As PySpark's generator of toLocalIterator, which is closed with its execution unfinished:
+    # its done call raises, and the error goes to sys.unraisablehook with an object, which the
+    # hook prints as the "Exception ignored in:" header.
+    import sys
+
+    pa = pytest.importorskip("pyarrow")
+
+    spark, service = mock_connect
+    # ExecutePlanResponse.arrow_batch=2: row_count=3, data=2, with three rows, so that the
+    # iterator is left with rows when it is dropped, before the end of the execution.
+    batch = pa.record_batch([pa.array([1, 2, 3])], names=["id"])
+    sink = pa.BufferOutputStream()
+    with pa.ipc.new_stream(sink, batch.schema) as writer:
+        writer.write_batch(batch)
+    service.execute_payload = message_field(2, varint_field(1, 3)
+                                            + message_field(2, sink.getvalue().to_pybytes()))
+    unraisable = []
+    monkeypatch.setattr(sys, "unraisablehook", unraisable.append)
+    error = ValueError("done-b")
+
+    def failing(**kwargs):
+        if kwargs["done"]:
+            raise error
+
+    spark.registerProgressHandler(failing)
+    try:
+        rows = spark.range(3).toLocalIterator()
+        iterator_type = type(rows)
+        assert next(rows) is not None
+        rows = None
+    finally:
+        spark.removeProgressHandler(failing)
+        service.execute_payload = b""
+    assert len(unraisable) == 1
+    assert unraisable[0].exc_value is error
+    assert unraisable[0].object is not None
+    assert unraisable[0].object is iterator_type
+
+
 def test_progress_handler_that_runs_queries_without_end_is_bounded(mock_connect, monkeypatch):
     # A handler that runs a query for each progress of an execution nests the executions past
     # the bound of nested callbacks: the query past it fails with a RecursionError, which the
