@@ -36,7 +36,7 @@ listener on loopback and read the [security policy](../../SECURITY.md) before us
 
 ## Build requirements and compatibility
 
-- Rust 1.88 or newer, Cargo and `protoc`.
+- Rust 1.88 or newer, Cargo and `protoc` 3.15 or newer (proto3 optional support).
 - JDK 21, a C compiler with C11/pthread support and JNI headers. Set `JAVA_HOME`
   to the JDK directory.
 - Python 3.9 or newer for artifact metadata and packaging. Java build scripts use

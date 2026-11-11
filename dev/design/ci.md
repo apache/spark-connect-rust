@@ -265,10 +265,11 @@ runs on changes to these crates, their protocol/client dependencies, workspace
 dependencies and build configuration. Existing client workflows remain in place.
 
 The workflow uses native Linux and macOS runners for x86-64 and ARM64. Each job
-installs Rust 1.88, JDK 21 and `protoc`, then runs the server and JNI Rust tests,
-strict native Clippy, Python acceptance/launcher and packaging tests, and the C
-Arrow ownership tests with and without sanitizers. LeakSanitizer is enabled on
-Linux; macOS runs AddressSanitizer and UndefinedBehaviorSanitizer without leak
+installs Rust 1.88, JDK 21 and the hash-locked `protoc-wheel-0==30.2` compiler,
+then runs the server and JNI Rust tests, strict native Clippy, Python
+acceptance/launcher and packaging tests, and the C Arrow ownership tests with
+and without sanitizers. LeakSanitizer is enabled on Linux; macOS runs
+AddressSanitizer and UndefinedBehaviorSanitizer without leak
 detection. The Rust tests use deterministic engine fixtures, and the JDK provides
 the C adapter's JNI headers. Workspace-wide lint also installs JDK 21 because its
 `--workspace` Clippy command includes the JNI crate.

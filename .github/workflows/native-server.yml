@@ -28,6 +28,7 @@ on:
     branches: [master, "branch-*"]
     paths:
       - ".github/workflows/native-server.yml"
+      - ".github/native-server-protoc.txt"
       - "Cargo.toml"
       - "Cargo.lock"
       - ".cargo/**"
@@ -39,6 +40,7 @@ on:
     branches: [master, "branch-*"]
     paths:
       - ".github/workflows/native-server.yml"
+      - ".github/native-server-protoc.txt"
       - "Cargo.toml"
       - "Cargo.lock"
       - ".cargo/**"
@@ -98,18 +100,18 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ matrix.platform }}-cargo-jvm-server-1.88.0-${{ hashFiles('Cargo.lock') }}
-          restore-keys: ${{ matrix.platform }}-cargo-jvm-server-1.88.0-
+          key: ${{ matrix.platform }}-cargo-jvm-server-1.88.0-${{ hashFiles('.github/native-server-protoc.txt') }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ matrix.platform }}-cargo-jvm-server-1.88.0-${{ hashFiles('.github/native-server-protoc.txt') }}-
 
-      - name: Install protobuf compiler
-        if: runner.os == 'Linux'
+      - name: Install protobuf compiler with proto3 optional support
+        # Ubuntu 22.04's protoc 3.12 requires an extra optional-field flag.
+        # Pin one compiler on every host while preserving the glibc baseline.
         run: |
-          sudo apt-get update
-          sudo apt-get install -y protobuf-compiler
-
-      - name: Install protobuf compiler on macOS
-        if: runner.os == 'macOS'
-        run: brew list protobuf >/dev/null 2>&1 || brew install protobuf
+          python3 -m pip install --require-hashes --only-binary=:all: --no-deps \
+            -r .github/native-server-protoc.txt
+          protoc_path="$(python3 -c 'import sysconfig; print(sysconfig.get_path("scripts"))')/protoc"
+          "$protoc_path" --version
+          echo "PROTOC=$protoc_path" >> "$GITHUB_ENV"
 
       - name: Test frontend and JNI crates
         # Deterministic engine fixtures; no Spark distribution is needed.
