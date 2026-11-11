@@ -99,15 +99,23 @@ fn dropna_thresh_and_subset(
     Ok((thresh, columns))
 }
 
+/// The `TypeError` of protobuf for a bool in the int field `field`: a bool is an int, but the
+/// proto refuses it.
+pub(crate) fn bool_not_proto_int(value: &Bound<'_, PyAny>, field: &str) -> PyErr {
+    pyo3::exceptions::PyTypeError::new_err(format!(
+        "Cannot set {field} to {value}: {value} has type {}, but expected one of: (int).",
+        value.get_type()
+    ))
+}
+
 /// An int, the `thresh` of `dropna`, as the proto's int32. A bool, which is an int, is refused as
 /// the proto refuses it, `TypeError`, and an int out of the range of an int32 is a `ValueError`.
 fn proto_int32(thresh: &Bound<'_, PyAny>) -> PyResult<i32> {
     if thresh.is_instance_of::<PyBool>() {
-        return Err(pyo3::exceptions::PyTypeError::new_err(format!(
-            "Cannot set spark.connect.NADrop.min_non_nulls to {thresh}: {thresh} has type {}, \
-             but expected one of: (int).",
-            thresh.get_type()
-        )));
+        return Err(bool_not_proto_int(
+            thresh,
+            "spark.connect.NADrop.min_non_nulls",
+        ));
     }
     match thresh.extract::<i32>() {
         Ok(thresh) => Ok(thresh),

@@ -5,6 +5,8 @@ use spark_connect::group::StatFunctions;
 
 use crate::dataframe::{python_random_seed, PyDataFrame};
 use crate::errors::ResultExt;
+use crate::session::value_out_of_range;
+use crate::stat_arguments::bool_not_proto_int;
 
 /// Python wrapper for DataFrame statistical functions.
 #[pyclass(
@@ -83,14 +85,11 @@ impl PyStatFunctions {
         &self,
         col: &Bound<'_, PyAny>,
         fractions: &Bound<'_, PyAny>,
-        seed: Option<i64>,
+        seed: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
         let py = col.py();
         let (col, fractions) = sample_by_arguments(col, fractions)?;
-        let seed = match seed {
-            Some(seed) => seed,
-            None => python_random_seed(py)?,
-        };
+        let seed = sample_by_seed(py, seed)?;
         Ok(PyDataFrame::new(
             self.stat.sample_by(col, fractions, Some(seed)).to_pyerr()?,
         ))
@@ -180,4 +179,22 @@ pub(crate) fn sample_by_arguments(
         strata.push((stratum, fraction));
     }
     Ok((col, strata))
+}
+
+/// The seed of `sampleBy`, drawn from Python's `random` when there is none. As PySpark's
+/// `StatSampleBy` asserts an int, any other type is a bare `AssertionError`. A bool, which is an
+/// int, is refused by the proto, and an int out of the range of a long is a `ValueError`.
+pub(crate) fn sample_by_seed(py: Python<'_>, seed: Option<&Bound<'_, PyAny>>) -> PyResult<i64> {
+    use pyo3::types::{PyBool, PyInt};
+
+    let Some(seed) = seed else {
+        return python_random_seed(py);
+    };
+    if !seed.is_instance_of::<PyInt>() {
+        return Err(pyo3::exceptions::PyAssertionError::new_err(()));
+    }
+    if seed.is_instance_of::<PyBool>() {
+        return Err(bool_not_proto_int(seed, "spark.connect.StatSampleBy.seed"));
+    }
+    seed.extract::<i64>().map_err(|_| value_out_of_range(seed))
 }
