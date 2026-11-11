@@ -4657,6 +4657,27 @@ impl PyLocalRowIterator {
     }
 }
 
+impl PyLocalRowIterator {
+    /// The iterator, for a call that runs or closes it. The fetch of a row releases the GIL
+    /// with the iterator borrowed, so that a second thread can call it meanwhile: its state is
+    /// never shared, as the borrow is exclusive, and the second call raises the `ValueError` of
+    /// a generator that is already executing, as PySpark's generator does, rather than the
+    /// `RuntimeError` of the borrow.
+    fn not_executing<'py>(slf: &Bound<'py, Self>) -> PyResult<PyRefMut<'py, Self>> {
+        slf.try_borrow_mut()
+            .map_err(|_| pyo3::exceptions::PyValueError::new_err("generator already executing"))
+    }
+
+    /// End the iteration, releasing its execution without the GIL.
+    fn finish(&mut self, py: Python<'_>) {
+        let iterator = self.iterator.take();
+        self.finished = true;
+        self.fields = None;
+        self.nested_fields.clear();
+        py.detach(move || drop(iterator));
+    }
+}
+
 #[pymethods]
 impl PyLocalRowIterator {
     /// Make this object an iterator by returning self.
@@ -4666,26 +4687,25 @@ impl PyLocalRowIterator {
 
     /// Close the iterator, as a generator does: the rows that are left are not fetched, so the
     /// execution of the query is released, and the iteration ends. Closing it again does nothing.
-    fn close(&mut self, py: Python<'_>) {
-        let iterator = self.iterator.take();
-        self.finished = true;
-        self.fields = None;
-        self.nested_fields.clear();
-        py.detach(move || drop(iterator));
+    fn close(slf: &Bound<'_, Self>) -> PyResult<()> {
+        Self::not_executing(slf)?.finish(slf.py());
+        Ok(())
     }
 
     /// Fetch the next row from the iterator.
     ///
     /// The first call snapshots the binary result setting before starting execution.
     /// Both the Config RPC and blocking row fetch release the GIL.
-    fn __next__(&mut self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
-        if self.finished {
+    fn __next__(slf: &Bound<'_, Self>) -> PyResult<Option<Py<PyAny>>> {
+        let py = slf.py();
+        let mut this = Self::not_executing(slf)?;
+        if this.finished {
             return Ok(None);
         }
-        match self.next_python_row(py) {
+        match this.next_python_row(py) {
             Ok(Some(row)) => Ok(Some(row)),
             result => {
-                self.close(py);
+                this.finish(py);
                 result
             }
         }
