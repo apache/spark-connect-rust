@@ -13618,6 +13618,220 @@ def test_the_done_error_of_a_progress_handler_keeps_the_execution_error_as_conte
     assert "TABLE_OR_VIEW_NOT_FOUND" in str(raised.value.__context__)
 
 
+def _progress_of_one_stage(service):
+    # ExecutePlanResponse.execution_progress=18 -> ExecutionProgress.stages=1 (StageInfo
+    # stage_id=1, num_tasks=2, num_completed_tasks=3, input_bytes_read=4, done=5),
+    # num_inflight_tasks=2.
+    stage = (varint_field(1, 7) + varint_field(2, 4) + varint_field(3, 1)
+             + varint_field(4, 1024) + varint_field(5, 0))
+    service.execute_payload = message_field(18, message_field(1, stage) + varint_field(2, 3))
+
+
+def test_a_progress_handler_registered_while_the_handlers_are_cleared_is_called(mock_connect):
+    # Clearing the handlers drops them, which runs the __del__ of one that nothing else holds;
+    # a handler that it registers is in the list after the clear, as in the _progress_handlers
+    # of PySpark's client, and is called. The number of handlers that the client keeps beside
+    # the list must not be left at that of the cleared list.
+    spark, service = mock_connect
+    _progress_of_one_stage(service)
+    calls = []
+
+    def late(**kwargs):
+        calls.append(kwargs["done"])
+
+    class Registering:
+        def __call__(self, **kwargs):
+            pass
+
+        def __del__(self):
+            spark.registerProgressHandler(late)
+
+    spark.registerProgressHandler(Registering())
+    spark.clearProgressHandlers()
+    try:
+        spark.range(1).collect()
+    finally:
+        spark.clearProgressHandlers()
+    assert calls == [False, True]
+
+
+def test_progress_handlers_registered_and_removed_by_many_threads_at_once(mock_connect):
+    # Threads that register and remove their own handlers at once leave the handlers, and the
+    # number of them that the client keeps beside the list, as the last change left them: a
+    # handler registered after them is called, and none is once they are all removed.
+    import threading
+
+    spark, service = mock_connect
+    _progress_of_one_stage(service)
+    threads, rounds = 8, 200
+    barrier = threading.Barrier(threads)
+    failures, calls = [], []
+
+    def work(index):
+        def own(**kwargs):
+            calls.append(index)
+
+        try:
+            barrier.wait(10)
+            for _ in range(rounds):
+                spark.registerProgressHandler(own)
+                spark.removeProgressHandler(own)
+        except BaseException as error:  # noqa: BLE001
+            failures.append(error)
+
+    def kept(**kwargs):
+        calls.append("kept")
+
+    spark.registerProgressHandler(kept)
+    workers = [threading.Thread(target=work, args=(index,)) for index in range(threads)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(60)
+    assert failures == []
+    try:
+        spark.range(1).collect()
+        assert calls == ["kept", "kept"]
+        spark.removeProgressHandler(kept)
+        calls.clear()
+        spark.range(1).collect()
+        assert calls == []
+    finally:
+        spark.clearProgressHandlers()
+
+
+def test_a_local_iterator_that_a_thread_is_running_raises_as_a_generator_does(mock_connect):
+    # As PySpark's toLocalIterator, a generator: while a thread waits in it for the next row,
+    # the next or close of another thread raises the ValueError of a generator that is already
+    # executing, and the iterator goes on for the thread that runs it.
+    import threading
+
+    spark, service = mock_connect
+    _two_row_range_results(service)
+    service.block_result_complete = True
+    rows = spark.range(2).toLocalIterator()
+    assert [next(rows).id, next(rows).id] == [0, 1]
+    entering = threading.Event()
+    outcome = []
+
+    def wait_for_the_end():
+        entering.set()
+        try:
+            outcome.append(next(rows))
+        except BaseException as error:  # noqa: BLE001
+            outcome.append(error)
+
+    waiting = threading.Thread(target=wait_for_the_end)
+    waiting.start()
+    try:
+        assert entering.wait(5)
+        # The thread is in the fetch, without the GIL, once it has not ended for a while.
+        waiting.join(0.5)
+        assert waiting.is_alive()
+        for call in (lambda: next(rows), rows.close):
+            with pytest.raises(ValueError, match="generator already executing"):
+                call()
+    finally:
+        service.block_result_complete = False
+        service.release_response()
+        waiting.join(10)
+    assert not waiting.is_alive()
+    [ended] = outcome
+    assert isinstance(ended, StopIteration)
+    assert list(rows) == []
+
+
+def test_the_done_error_of_a_handler_that_refuses_attributes_keeps_its_context(mock_connect):
+    # As Python chains an exception raised while another is handled, which PySpark's
+    # Progress.__exit__ relies on: the context is not set through the __setattr__ of the
+    # exception, so one that refuses attributes has it too.
+    from pyspark.errors import AnalysisException
+
+    class Refusing(ValueError):
+        def __setattr__(self, name, value):
+            raise AttributeError(name)
+
+    spark, service = mock_connect
+    classes = ["org.apache.spark.sql.AnalysisException", "java.lang.Exception"]
+    service.execute_error = ("[TABLE_OR_VIEW_NOT_FOUND] t", classes[0],
+                             _error_info(classes, errorClass="TABLE_OR_VIEW_NOT_FOUND"))
+    error = Refusing("done")
+
+    def failing(**kwargs):
+        if kwargs["done"]:
+            raise error
+
+    spark.registerProgressHandler(failing)
+    try:
+        with pytest.raises(Refusing) as raised:
+            spark.range(1).collect()
+    finally:
+        service.execute_error = None
+        spark.removeProgressHandler(failing)
+    assert raised.value is error
+    assert isinstance(raised.value.__context__, AnalysisException)
+
+
+def test_a_failure_to_make_the_exception_of_a_server_error_is_its_context(
+        mock_connect, monkeypatch):
+    # Should the exception of the connect classes of an error of the server fail to be made,
+    # the error is raised as the class of its kind, and the failure is not dropped: it is the
+    # __context__ of the exception that is raised.
+    import pyspark.errors.exceptions.connect as connect_errors
+    from pyspark.errors import AnalysisException
+
+    spark, service = mock_connect
+    classes = ["org.apache.spark.sql.AnalysisException", "java.lang.Exception"]
+    service.execute_error = ("[TABLE_OR_VIEW_NOT_FOUND] t", classes[0],
+                             _error_info(classes, errorClass="TABLE_OR_VIEW_NOT_FOUND"))
+    failure = LookupError("no exception of the connect classes")
+
+    def failing(**kwargs):
+        raise failure
+
+    monkeypatch.setattr(connect_errors, "_convert_server_error", failing)
+    try:
+        with pytest.raises(AnalysisException) as raised:
+            spark.range(1).collect()
+    finally:
+        service.execute_error = None
+    assert "TABLE_OR_VIEW_NOT_FOUND" in str(raised.value)
+    assert raised.value.__context__ is failure
+
+
+def test_an_exception_that_refuses_its_operation_id_is_raised_and_the_refusal_reported(
+        mock_connect, monkeypatch):
+    # The _operation_id that the client stamps on the exception of an execution, as the
+    # reference client does, is auxiliary: an exception that refuses it is the one raised, and
+    # the refusal goes to sys.unraisablehook rather than nowhere.
+    import sys
+
+    import pyspark.errors.exceptions.connect as connect_errors
+
+    class Refusing(Exception):
+        def __setattr__(self, name, value):
+            raise AttributeError(f"refused {name}")
+
+    spark, service = mock_connect
+    classes = ["org.apache.spark.sql.AnalysisException", "java.lang.Exception"]
+    service.execute_error = ("[TABLE_OR_VIEW_NOT_FOUND] t", classes[0],
+                             _error_info(classes, errorClass="TABLE_OR_VIEW_NOT_FOUND"))
+    error = Refusing("server")
+    unraisable = []
+    monkeypatch.setattr(sys, "unraisablehook", unraisable.append)
+    monkeypatch.setattr(connect_errors, "_convert_server_error", lambda **kwargs: error)
+    try:
+        with pytest.raises(Refusing) as raised:
+            spark.range(1).collect()
+    finally:
+        service.execute_error = None
+    assert raised.value is error
+    [reported] = unraisable
+    assert isinstance(reported.exc_value, AttributeError)
+    assert "refused _operation_id" in str(reported.exc_value)
+    assert reported.object is error
+
+
 def test_a_dropped_local_iterator_hands_the_done_error_to_unraisablehook_with_an_object(
         mock_connect, monkeypatch):
     # As PySpark's generator of toLocalIterator, which is closed with its execution unfinished:

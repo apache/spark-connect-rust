@@ -21,6 +21,11 @@ use crate::options::{set_option_skip_none, set_options_skip_none};
 /// errors return to the bus, and terminal failures produce the reference handler warning.
 struct PyListenerAdapter {
     listener: Py<PyAny>,
+    /// The id of this registration in the bus of its session, once the bus has added it. It is
+    /// kept here, not on the listener: the listener is the user's object, which may have no
+    /// attributes to set (`__slots__`), and may be added by several threads and to several
+    /// sessions at once.
+    id: std::sync::OnceLock<String>,
 }
 
 /// An unisolated dispatch failure. Keep Python errors intact so synchronous starts
@@ -1377,9 +1382,9 @@ impl PyStreamingQueryManager {
     /// Register a client-side listener object (with onQueryStarted/Progress/Idle/
     /// Terminated callbacks). Mirrors `StreamingQueryManager.addListener`: the listener gets the
     /// session as its `spark`, and the native Rust bus of the session dispatches its events to
-    /// it. The id of each registration is appended to the listener's `_rust_listener_ids`, as a
-    /// listener added twice is in the bus twice. Should the server fail to add its listener, this
-    /// warns, as PySpark Connect's does.
+    /// it. A listener added twice is in the bus twice, and each registration keeps its own id
+    /// (see `PyListenerAdapter::id`); nothing is stored on the listener. Should the server fail
+    /// to add its listener, this warns, as PySpark Connect's does.
     /// A terminal event-stream end or error clears the registrations; add listeners again
     /// to open a new subscription.
     fn addListener(&self, py: Python<'_>, listener: Py<PyAny>) -> PyResult<()> {
@@ -1388,17 +1393,17 @@ impl PyStreamingQueryManager {
             .bind(py)
             .call_method1("_set_spark_session", (session,))?;
         let adapter = Arc::new(PyListenerAdapter {
-            listener: listener.clone_ref(py),
+            listener,
+            id: std::sync::OnceLock::new(),
         });
+        let registration = Arc::clone(&adapter);
         match interruptible_outcome(py, &self.inner.spark_session(), || {
-            self.inner.add_listener(adapter).map_err(Box::new)
+            self.inner.add_listener(registration).map_err(Box::new)
         })? {
             Ok(id) => {
-                let bound = listener.bind(py);
-                match bound.getattr("_rust_listener_ids") {
-                    Ok(ids) => ids.call_method1("append", (id,)).map(|_| ()),
-                    Err(_) => bound.setattr("_rust_listener_ids", vec![id]),
-                }
+                // Set once, by the only call that adds this adapter.
+                let _ = adapter.id.set(id);
+                Ok(())
             }
             Err(error) => warn(
                 py,
@@ -1413,43 +1418,66 @@ impl PyStreamingQueryManager {
 
     /// Remove a previously-added client-side listener object. Mirrors
     /// `StreamingQueryManager.removeListener`: one registration of the listener is removed from
-    /// the bus of the session, the first one that the bus has (as the bus removes the first
-    /// occurrence), and the others, which are of other buses, stay. Should the server fail to
-    /// remove its listener, this warns, and the listener stays, as PySpark Connect's does.
-    /// A callback coalesced with another caller's in-progress last-listener removal or close
-    /// keeps its ids so a failed operation can be retried. Only a completed removal consumes
-    /// one matching id from this session's bus.
+    /// the bus of the session, the first one that the bus has, as PySpark's `list.remove` of
+    /// its bus finds it: the first that is the listener, or equal to it. The registrations of
+    /// the listener in the buses of other sessions stay. Should the server fail to remove its
+    /// listener, this warns, and the listener stays, as PySpark Connect's does.
+    /// The registrations are read from the bus, so a removal that did not complete, such as a
+    /// callback coalesced with another caller's in-progress last-listener removal or close,
+    /// leaves its registration there to be removed again, and those that a terminal end of the
+    /// event stream cleared are not looked for.
     fn removeListener(&self, py: Python<'_>, listener: Py<PyAny>) -> PyResult<()> {
-        let bound = listener.bind(py);
-        let Ok(ids) = bound.getattr("_rust_listener_ids") else {
-            return Ok(());
-        };
-        let registered: Vec<String> = ids.extract()?;
-        for id in registered {
-            match interruptible_outcome(py, &self.inner.spark_session(), || {
-                self.inner.remove_listener_found(&id).map_err(Box::new)
-            })? {
-                Ok(false) => continue,
-                Ok(true) => {
-                    ids.call_method1("remove", (&id,))?;
-                    if ids.len()? == 0 {
-                        let _ = bound.delattr("_rust_listener_ids");
-                    }
-                    return Ok(());
+        let listener = listener.bind(py);
+        // The registrations that this call did not remove: another call removed them first,
+        // or their removal is left to the caller that is closing the bus.
+        let mut tried: Vec<String> = Vec::new();
+        loop {
+            let mut registered = Vec::new();
+            for candidate in self.inner.listeners() {
+                let Some(adapter) = candidate
+                    .as_any()
+                    .and_then(|any| any.downcast_ref::<PyListenerAdapter>())
+                else {
+                    continue;
+                };
+                // A registration without an id is still being added by another thread: this
+                // removal is before it.
+                let Some(id) = adapter.id.get() else {
+                    continue;
+                };
+                if tried.contains(id) {
+                    continue;
                 }
-                Err(error) => {
-                    return warn(
-                        py,
-                        format!(
-                            "Failed to remove the listener because of exception: {}\n\
-                             The listener is not removed, please remove it again.",
-                            spark_error_to_py_exception(*error).value(py)
-                        ),
-                    );
+                let found = adapter.listener.bind(py);
+                if found.is(listener) || found.eq(listener)? {
+                    registered.push(id.clone());
+                }
+            }
+            if registered.is_empty() {
+                return Ok(());
+            }
+            for id in registered {
+                match interruptible_outcome(py, &self.inner.spark_session(), || {
+                    self.inner.remove_listener_found(&id).map_err(Box::new)
+                })? {
+                    // The bus is read again once these are tried: a call that removed this
+                    // registration first leaves its own to this one, which may have been
+                    // added since the bus was read.
+                    Ok(false) => tried.push(id),
+                    Ok(true) => return Ok(()),
+                    Err(error) => {
+                        return warn(
+                            py,
+                            format!(
+                                "Failed to remove the listener because of exception: {}\n\
+                                 The listener is not removed, please remove it again.",
+                                spark_error_to_py_exception(*error).value(py)
+                            ),
+                        );
+                    }
                 }
             }
         }
-        Ok(())
     }
 
     /// The listener bus of the session, as PySpark Connect's `_sqlb`.
