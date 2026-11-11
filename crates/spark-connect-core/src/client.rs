@@ -173,10 +173,14 @@ impl RpcDeadlines {
     }
 }
 
+/// The longest timeout gRPC encodes in its `grpc-timeout`, 99,999,999 hours. tonic panics on a
+/// longer one, and no call reaches this one, so a longer deadline is sent as this one.
+const LONGEST_GRPC_TIMEOUT: Duration = Duration::from_secs(99_999_999 * 60 * 60);
+
 /// `request` with the timeout `deadline`, which gRPC sends as its `grpc-timeout`.
 fn with_deadline<T>(mut request: Request<T>, deadline: Option<Duration>) -> Request<T> {
     if let Some(deadline) = deadline {
-        request.set_timeout(deadline);
+        request.set_timeout(deadline.min(LONGEST_GRPC_TIMEOUT));
     }
     request
 }
@@ -2844,6 +2848,30 @@ mod tests {
         assert!(deadline <= tokio::time::Instant::now() + Duration::from_secs(600));
         // Adding it to the time would overflow, and panic.
         assert_eq!(stream_deadline_in(Some(Duration::MAX)), None);
+    }
+
+    #[test]
+    fn test_with_deadline_too_long_for_the_grpc_timeout_is_the_longest_one_sent() {
+        let timeout = |request: Request<()>| {
+            request
+                .metadata()
+                .get("grpc-timeout")
+                .map(|value| value.to_str().unwrap().to_string())
+        };
+        assert_eq!(timeout(with_deadline(Request::new(()), None)), None);
+        assert_eq!(
+            timeout(with_deadline(
+                Request::new(()),
+                Some(Duration::from_secs(600))
+            )),
+            Some("600000m".to_string())
+        );
+        // gRPC encodes at most 99,999,999 hours; tonic panics on a longer timeout, so a longer
+        // deadline is sent as that, which no call reaches.
+        assert_eq!(
+            timeout(with_deadline(Request::new(()), Some(Duration::MAX))),
+            Some("99999999H".to_string())
+        );
     }
 
     #[tokio::test]
