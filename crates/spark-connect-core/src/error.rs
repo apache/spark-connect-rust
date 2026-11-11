@@ -243,6 +243,10 @@ pub enum SparkErrorKind {
     ImportError,
     /// ``pyspark.errors.exceptions.connect.SparkConnectException`` and subclasses
     Connect,
+    /// ``pyspark.errors.exceptions.connect.SparkConnectException`` of a plain message, which has
+    /// no error class: the reference client raises it for a malformed result, such as a chunk of
+    /// an Arrow batch that is out of order.
+    ConnectMessage,
     /// ``pyspark.errors.exceptions.connect.SparkConnectGrpcException``
     ConnectGrpc,
     /// ``pyspark.errors.exceptions.base.AnalysisException``
@@ -328,6 +332,15 @@ impl SparkError {
             grpc_details: None,
             operation_id: None,
             server: None,
+        }
+    }
+
+    /// Create a ConnectMessage-kind error with a plain message (no error class), which is a
+    /// `SparkConnectException` in Python.
+    pub fn connect_exception_msg(message: impl Into<String>) -> Self {
+        Self {
+            kind: SparkErrorKind::ConnectMessage,
+            ..Self::connect_msg(message)
         }
     }
 
@@ -1242,6 +1255,7 @@ mod tests {
         let _ = SparkErrorKind::PicklingError;
         let _ = SparkErrorKind::ImportError;
         let _ = SparkErrorKind::Connect;
+        let _ = SparkErrorKind::ConnectMessage;
         let _ = SparkErrorKind::ConnectGrpc;
         let _ = SparkErrorKind::Analysis;
         let _ = SparkErrorKind::Parse;
