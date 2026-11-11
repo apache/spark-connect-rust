@@ -253,6 +253,21 @@ The Python model uses the existing `MLModel.transform` interface. Model inspecti
 (coefficients, intercept and summaries), single-vector prediction and model
 persistence are not exposed by this addition.
 
+## Native Pipeline and CrossValidator: fit is not implemented
+
+`spark_connect::ml::Pipeline` and `spark_connect::ml::CrossValidator`, and their Python
+classes `pyspark.ml.connect.Pipeline` and `pyspark.ml.connect.CrossValidator`, do not fit.
+Their `fit` raises `NOT_IMPLEMENTED` (`PySparkNotImplementedError` in Python), naming
+`Pipeline.fit` or `CrossValidator.fit`, before any request is sent, and returns no model.
+The Connect ML protocol cannot run either one: the native Pipeline holds stage names, which
+the server cannot fit, and it has no pipeline model to transform; the native CrossValidator
+holds its numeric params only, without the estimator, evaluator or param grid. Their
+constructors and setters still set the params, as before.
+
+To fit a pipeline or to tune a model from Python, use the vendored `pyspark.ml.Pipeline` and
+`pyspark.ml.tuning.CrossValidator`, which take the estimator and transformer objects, as
+PySpark does. The Rust API has no way to fit a pipeline or to tune a model.
+
 ## pyspark.ml
 
 The DataFrame-based `pyspark.ml` API (`pyspark.ml.classification`, `feature`,
