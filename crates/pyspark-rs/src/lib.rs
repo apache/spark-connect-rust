@@ -7,22 +7,6 @@
 #![allow(non_snake_case)]
 
 use pyo3::prelude::*;
-use pyo3::types::PyBool;
-
-/// Coerce a Python option value the way reference pyspark's `to_str` does:
-/// `None` -> `None` (the option is left unset, NOT the literal string "None"), a
-/// bool -> lowercase `"true"`/`"false"` (not Python's `"True"`/`"False"`), and
-/// everything else -> its `str()`. Used by every reader/writer/conf `option(s)`
-/// binding so option handling matches the reference client.
-pub(crate) fn coerce_option_value(v: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
-    if v.is_none() {
-        return Ok(None);
-    }
-    if let Ok(b) = v.cast::<PyBool>() {
-        return Ok(Some(if b.is_true() { "true" } else { "false" }.to_string()));
-    }
-    Ok(Some(v.str()?.to_string()))
-}
 
 mod catalog;
 mod column;
@@ -38,6 +22,7 @@ mod infer;
 mod interrupt;
 mod ml;
 mod observation;
+mod options;
 mod origin;
 mod pandas_input;
 mod pipelines;
@@ -71,6 +56,7 @@ use dataframe::{
 };
 use datasource::PyDataSourceRegistration;
 use group::{PyCoGroupedData, PyGroupedData};
+pub(crate) use options::coerce_option_value;
 use readwriter::PyDataFrameReader;
 use resource::{
     PyExecutorResourceRequests, PyResourceProfile, PyResourceProfileBuilder, PyTaskResourceRequests,

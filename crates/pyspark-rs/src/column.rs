@@ -5,52 +5,10 @@ use pyo3::types::PyDict;
 use spark_connect::column::Column;
 use spark_connect::expression::{Alias, ExpressionNode, NullOrdering};
 
-use crate::errors::ResultExt;
+use crate::errors::{not_expected_type, ResultExt};
+// Re-exported for the modules that raise through `crate::column::raise_pyspark`.
+pub(crate) use crate::errors::raise_pyspark;
 use crate::functions::{to_column, to_value_column};
-
-/// Raise a `pyspark.errors` exception (`class_name`) carrying the given `error_class`
-/// condition and message parameters, mirroring the reference Column guard-rails.
-pub(crate) fn raise_pyspark(
-    py: Python<'_>,
-    class_name: &str,
-    error_class: &str,
-    params: &[(&str, &str)],
-) -> PyErr {
-    use pyo3::types::PyDict;
-    let build = || -> PyResult<PyErr> {
-        let cls = py.import("pyspark.errors")?.getattr(class_name)?;
-        let kwargs = PyDict::new(py);
-        kwargs.set_item("errorClass", error_class)?;
-        let mp = PyDict::new(py);
-        for (k, v) in params {
-            mp.set_item(*k, *v)?;
-        }
-        kwargs.set_item("messageParameters", mp)?;
-        let exc = cls.call((), Some(&kwargs))?;
-        Ok(PyErr::from_value(exc))
-    };
-    build().unwrap_or_else(|e| e)
-}
-
-/// PySpark's `NOT_EXPECTED_TYPE` error of the argument `name`, `value`, which should be of
-/// the type `expected`.
-fn not_expected(value: &Bound<'_, PyAny>, name: &str, expected: &str) -> PyErr {
-    let type_name = value
-        .get_type()
-        .name()
-        .map(|name| name.to_string())
-        .unwrap_or_default();
-    raise_pyspark(
-        value.py(),
-        "PySparkTypeError",
-        "NOT_EXPECTED_TYPE",
-        &[
-            ("arg_name", name),
-            ("expected_type", expected),
-            ("arg_type", &type_name),
-        ],
-    )
-}
 
 /// The function `name` of `column` and `other`, a Column or a literal value, as PySpark's
 /// `_bin_op`.
@@ -223,7 +181,7 @@ impl PyColumn {
         if !(dataType.is_instance_of::<pyo3::types::PyString>()
             || dataType.is_instance_of::<crate::types::PyDataType>())
         {
-            return Err(not_expected(dataType, "dataType", "DataType or str"));
+            return Err(not_expected_type(dataType, "dataType", "DataType or str"));
         }
         // A DDL string keeps the unparsed type_str form (reference cast("int"));
         // any DataType object is converted to a typed cast.
@@ -679,7 +637,7 @@ impl PyColumn {
     fn over(&self, window: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
         let _origin = crate::origin::with_origin("over");
         let Ok(window) = window.extract::<PyRef<'_, crate::window::PyWindowSpec>>() else {
-            return Err(not_expected(window, "window", "WindowSpec"));
+            return Err(not_expected_type(window, "window", "WindowSpec"));
         };
         Ok(PyColumn::new(self.column.clone().over(window.spec.clone())))
     }
@@ -1004,10 +962,10 @@ impl PyColumn {
         let _origin = crate::origin::with_origin("withField");
         // As PySpark's, of a str and a Column.
         if !fieldName.is_instance_of::<pyo3::types::PyString>() {
-            return Err(not_expected(fieldName, "fieldName", "str"));
+            return Err(not_expected_type(fieldName, "fieldName", "str"));
         }
         let Ok(value) = col.extract::<PyRef<'_, PyColumn>>() else {
-            return Err(not_expected(col, "col", "Column"));
+            return Err(not_expected_type(col, "col", "Column"));
         };
         let field_name: String = fieldName.extract()?;
         Ok(PyColumn::new(
@@ -1023,7 +981,7 @@ impl PyColumn {
         let mut names = Vec::with_capacity(fieldNames.len());
         for name in &fieldNames {
             if !name.is_instance_of::<pyo3::types::PyString>() {
-                return Err(not_expected(name, "fieldName", "str"));
+                return Err(not_expected_type(name, "fieldName", "str"));
             }
             names.push(name.extract::<String>()?);
         }
