@@ -71,6 +71,7 @@ dependencies = [
  "stacker",
  "thiserror",
  "tokio",
+ "tonic",
  "uuid",
 ]
 

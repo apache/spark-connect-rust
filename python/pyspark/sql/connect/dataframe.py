@@ -15,12 +15,27 @@
 # limitations under the License.
 #
 """Rust-backed DataFrame under the connect import path (testing/connectutils imports from here)."""
+from collections.abc import Iterator
 from typing import Any, Callable
 
 from pyspark._pyspark import DataFrame
 from pyspark.sql.dataframe import DataFrameNaFunctions, DataFrameStatFunctions
 
 __all__ = ["DataFrame", "DataFrameNaFunctions", "DataFrameStatFunctions"]
+
+
+def _local_rows(rows: Any) -> Iterator[Any]:
+    """The generator that ``DataFrame.toLocalIterator`` returns, as PySpark's: the first row
+    starts the execution of the rows, and a close, a throw, an error or the end of the generator
+    ends it."""
+    try:
+        yield from rows
+    finally:
+        rows.close()
+
+
+_local_rows.__name__ = "toLocalIterator"
+_local_rows.__qualname__ = "DataFrame.toLocalIterator"
 
 
 def _reduce_dataframe(session: Any, relation: bytes) -> tuple[Callable[..., Any], tuple[Any, ...]]:
