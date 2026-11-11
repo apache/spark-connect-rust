@@ -2785,6 +2785,49 @@ def test_udtfs_are_created_as_pyspark(mock_connect):
     assert service.read_confs == [arrow_conf] + [binary_conf] * 5 + [arrow_conf] + [binary_conf] * 2
 
 
+def test_binary_subclasses_are_sent_as_the_bytes_of_pyspark(mock_connect):
+    # As PySpark: bytes(value), which takes the __bytes__ of a subclass, not its buffer.
+    import pyarrow as pa
+
+    class Bytes(bytes):
+        def __bytes__(self):
+            return b"other"
+
+    class ByteArray(bytearray):
+        def __bytes__(self):
+            return b"other"
+
+    class Plain(bytes):
+        pass
+
+    spark, service = mock_connect
+    values = [Bytes(b"orig"), ByteArray(b"orig"), Plain(b"plain"), bytearray(b"ba"), b"b", None]
+    df = spark.createDataFrame([(v,) for v in values], "b binary")
+    df.columns
+    relation = _sent_relation(service.analyze_requests[-1], 11)
+    table = pa.ipc.open_stream(relation[1][0]).read_all()
+    assert table.column(0).to_pylist() == [b"other", b"other", b"plain", b"ba", b"b", None]
+
+    class NotBytes(bytes):
+        def __bytes__(self):
+            return "x"
+
+    class Raises(bytes):
+        def __bytes__(self):
+            raise KeyError("boom")
+
+    with pytest.raises(TypeError, match="__bytes__ returned non-bytes"):
+        spark.createDataFrame([(NotBytes(b"a"),)], "b binary")
+    with pytest.raises(KeyError, match="boom"):
+        spark.createDataFrame([(Raises(b"a"),)], "b binary")
+
+    df = spark.createDataFrame([([Bytes(b"orig"), None],)], "a array<binary>")
+    df.columns
+    relation = _sent_relation(service.analyze_requests[-1], 11)
+    table = pa.ipc.open_stream(relation[1][0]).read_all()
+    assert table.column(0).to_pylist() == [[b"other", None]]
+
+
 def test_time_values_are_sent_as_pyspark(mock_connect):
     # As PySpark: a datetime.time is of TimeType(), and createDataFrame sends it as PyArrow's
     # time64[ns] of the value, which takes the nanoseconds of an int too, and lit() of it is

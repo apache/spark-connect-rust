@@ -5330,3 +5330,20 @@ def test_decision_tree_classifier_rejects_invalid_parameters_and_training_data(s
         DecisionTreeClassifier().fit(training.drop("features"))
     with pytest.raises(Exception):
         DecisionTreeClassifier().fit(training.withColumn("features",F.array(F.lit(1.0))))
+
+
+def test_binary_subclasses_are_sent_as_the_bytes_of_pyspark(session):
+    class Bytes(bytes):
+        def __bytes__(self):
+            return b"other"
+
+    class ByteArray(bytearray):
+        def __bytes__(self):
+            return b"other"
+
+    rows = session.createDataFrame(
+        [(Bytes(b"orig"),), (ByteArray(b"orig"),), (bytearray(b"ba"),), (None,)], "b binary"
+    ).collect()
+    assert [row.b for row in rows] == [b"other", b"other", b"ba", None]
+    rows = session.createDataFrame([([Bytes(b"orig")],)], "a array<binary>").collect()
+    assert rows[0].a == [b"other"]
