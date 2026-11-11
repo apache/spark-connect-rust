@@ -17,14 +17,14 @@
 
 """SPARK-60659: exact interval inputs and live Spark round trips."""
 
-from datetime import timedelta
 import os
 import unittest
-
-from pyspark.sql import Row, SparkSession, types as T
-from pyspark.errors import PySparkTypeError
+from datetime import timedelta
 
 from _mock_connect_server import mock_connect_session, parse_message
+from pyspark.errors import PySparkTypeError
+from pyspark.sql import Row, SparkSession
+from pyspark.sql import types as T
 
 try:
     import grpc

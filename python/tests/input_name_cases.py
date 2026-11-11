@@ -17,9 +17,9 @@
 
 """Check input names and complete IPC values without a Spark server or JVM."""
 
-from concurrent.futures import ThreadPoolExecutor
 import json
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 
 try:
     import grpc
@@ -28,7 +28,8 @@ try:
 except ImportError:
     grpc = pd = pa = None
 
-from pyspark.sql import Row, SparkSession, types as T
+from pyspark.sql import Row, SparkSession
+from pyspark.sql import types as T
 
 
 def _varint(value):

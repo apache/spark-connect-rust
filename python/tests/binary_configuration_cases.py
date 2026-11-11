@@ -16,17 +16,15 @@
 # under the License.
 """Binary result configuration through native actions and the mock transport."""
 
-from concurrent.futures import ThreadPoolExecutor
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
-
 from _mock_connect_server import data_type_proto, message_field, parse_message, varint_field
 from pyspark.errors import PySparkException
 from pyspark.sql import types as T
-
 
 _BINARY_CONF = "spark.sql.execution.pyspark.binaryAsBytes"
 _EAGER_ACTIONS = ["collect", "first", "head", "head_n", "take", "tail"]

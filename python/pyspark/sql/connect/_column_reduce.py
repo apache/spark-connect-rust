@@ -21,15 +21,15 @@ Column that a UDF or a ``foreachBatch`` function captures unpickles on a Python 
 server, whose PySpark has no Rust client, while ``pickle`` pickles the function by reference, of
 this module, on the client.
 """
-from typing import Any, List, Optional, Tuple
+from typing import Any, Optional
 
 
 def column_of(
     expression: bytes,
     rendered: str,
-    branches: Optional[List[Tuple[Any, Any]]] = None,
+    branches: Optional[list[tuple[Any, Any]]] = None,
     else_value: Any = None,
-    sort: Optional[Tuple[Any, str]] = None,
+    sort: Optional[tuple[Any, str]] = None,
 ) -> Any:
     """The Column of ``expression``, the bytes of a ``spark.connect.Expression``, and of its
     rendering ``rendered``, which sends the expression as it is: of the Rust client, or, on a

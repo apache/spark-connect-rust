@@ -25,14 +25,14 @@ Envelopes and logical types are generated from the vendored Spark Connect protos
 using protoc, which is also required to build the Rust client.
 """
 
-from concurrent.futures import ThreadPoolExecutor
-from datetime import timedelta
-import unittest
 import os
-from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import unittest
+from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
+from pathlib import Path
 
 try:
     import grpc
@@ -41,7 +41,8 @@ try:
 except ImportError:
     grpc = pa = None
 
-from pyspark.sql import Row, SparkSession, types as T
+from pyspark.sql import Row, SparkSession
+from pyspark.sql import types as T
 
 
 def _messages():

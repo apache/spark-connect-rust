@@ -7,14 +7,14 @@ that require a live server live in test_dropin_e2e.py and are gated on SPARK_REM
 """
 
 import array
-import io
 import contextlib
 import datetime
-import os
-import re
 import decimal
+import io
 import json
+import os
 import pickle
+import re
 import time
 from collections import namedtuple
 from concurrent.futures import ThreadPoolExecutor
@@ -23,7 +23,6 @@ from threading import Barrier
 
 import numpy as np
 import pytest
-
 from _mock_connect_server import (
     ddl_data_type,
     ddl_json,
@@ -34,12 +33,13 @@ from _mock_connect_server import (
     struct_schema,
     varint_field,
 )
-from pyspark.sql import Row, SparkSession, types as T
 
 # Collected here so the existing offline CI suite exercises real Arrow results.
 from binary_configuration_cases import TestBinaryConfiguration  # noqa: F401
 from day_time_interval_cases import DayTimeIntervalTests  # noqa: F401
 from interval_input_cases import IntervalInputConversionTests  # noqa: F401
+from pyspark.sql import Row, SparkSession
+from pyspark.sql import types as T
 from streaming_listener_cases import TestStreamingListenerLifecycle  # noqa: F401
 
 
@@ -70,8 +70,8 @@ def test_connect_expressions_distributed_sequence_id_and_lambda_names_offline():
 def test_connect_resource_profile_module_offline():
     # PySpark Connect's module of ResourceProfile, which the client packages ship; the profile id
     # that `ResourceProfile.id` gives is the server's, as PySpark's is.
-    from pyspark.sql.connect.resource.profile import ResourceProfile
     from pyspark.resource import ResourceProfile as ClientResourceProfile
+    from pyspark.sql.connect.resource.profile import ResourceProfile
 
     assert ResourceProfile is ClientResourceProfile
 
@@ -2077,7 +2077,6 @@ def test_udfs_are_created_as_pyspark(mock_connect):
     # the UDF.
     import pandas as pd
     import pyarrow as pa
-
     from pyspark.sql import functions as F
     from pyspark.sql.udf import UserDefinedFunction
 
@@ -2392,8 +2391,9 @@ def test_lit_of_a_timestamp_under_ntz_is_its_wall_clock_without_a_warning(mock_c
     # As PySpark's TimestampNTZType.toInternal, which reads the fields of the value: the
     # nanoseconds of a pandas Timestamp are dropped silently, where its to_pydatetime() warns,
     # and an aware datetime is the wall clock that it shows.
-    import pandas as pd
     import warnings
+
+    import pandas as pd
     from pyspark.sql import functions as F
 
     _, service = mock_connect
@@ -2652,7 +2652,8 @@ def test_subqueries_are_sent_with_the_plans_they_refer_to_as_pyspark(mock_connec
     # As PySpark's DataFrame.scalar(), DataFrame.exists() and Column.isin(df): Columns of
     # SubqueryExpressions of the plan of the DataFrame, sent in a WithRelations of the plans
     # that they refer to; and asTable() is a table argument that a UDTF call takes.
-    from pyspark.sql import Column, functions as F
+    from pyspark.sql import Column
+    from pyspark.sql import functions as F
 
     spark, service = mock_connect
 
@@ -3378,8 +3379,8 @@ def test_higher_order_functions():
 
 
 def test_higher_order_function_validation():
-    from pyspark.sql import functions as F
     from pyspark.errors import PySparkValueError
+    from pyspark.sql import functions as F
 
     # arity must be 1..3
     with pytest.raises(PySparkValueError):
@@ -3636,8 +3637,8 @@ def test_the_plan_of_a_dataframe_that_a_hook_puts_in_is_compressed_as_pyspark(mo
 
 
 def test_broadcast_type_check():
-    from pyspark.sql import functions as F
     from pyspark.errors import PySparkTypeError
+    from pyspark.sql import functions as F
 
     with pytest.raises(PySparkTypeError):
         F.broadcast("not a dataframe")
@@ -3774,8 +3775,8 @@ def test_avro_protobuf_partitioning_submodules():
     # The official import paths resolve (the implementations live in
     # pyspark.sql.functions and are re-exported here).
     import pyspark.sql.avro.functions as af
-    import pyspark.sql.protobuf.functions as pf
     import pyspark.sql.functions.partitioning as part
+    import pyspark.sql.protobuf.functions as pf
     from pyspark.sql import functions as F
 
     assert hasattr(af, "from_avro") and hasattr(af, "to_avro")
@@ -3836,7 +3837,7 @@ def test_udf_registration_has_java_methods():
 
 def test_udf_udtf_determinism_and_extras(mock_connect):
     from pyspark.sql import functions as F
-    from pyspark.sql.udf import udf, UserDefinedFunction
+    from pyspark.sql.udf import UserDefinedFunction, udf
     from pyspark.sql.udtf import udtf
 
     # As PySpark's, asNondeterministic() of the function wrapper of a UDF marks the UDF
@@ -3867,7 +3868,13 @@ def test_catalog_result_classes():
     # pyspark.sql.catalog, and the Table `database` property derives from a single-element
     # namespace.
     from pyspark.sql.catalog import (
-        Catalog, CatalogMetadata, Database, Table, Column, Function, TablePartition,
+        Catalog,
+        CatalogMetadata,
+        Column,
+        Database,
+        Function,
+        Table,
+        TablePartition,
     )
     assert Catalog.__module__ == "pyspark.sql.catalog"
     for cls in (CatalogMetadata, Database, Table, Column, Function, TablePartition):
@@ -3919,8 +3926,11 @@ def test_unparsed_data_types_are_those_of_pyspark(mock_connect):
 
 def test_udtf_analyze_result_family():
     from pyspark.sql.udtf import (
-        AnalyzeArgument, PartitioningColumn, OrderingColumn, SelectedColumn,
-        AnalyzeResult, SkipRestOfInputTableException,
+        AnalyzeResult,
+        OrderingColumn,
+        PartitioningColumn,
+        SelectedColumn,
+        SkipRestOfInputTableException,
     )
     assert PartitioningColumn("x").name == "x"
     oc = OrderingColumn("y", ascending=False)
@@ -3936,6 +3946,7 @@ def test_udtf_analyze_result_family():
 
 def test_udtf_analyze_result_subclass_preserves_custom_state():
     from dataclasses import dataclass, fields
+
     from pyspark.serializers import CloudPickleSerializer
     from pyspark.sql.connect.udtf import AnalyzeResult as ConnectAnalyzeResult
     from pyspark.sql.udtf import AnalyzeResult, udtf
@@ -3982,9 +3993,14 @@ def test_udtf_analysis_classes_are_the_frozen_dataclasses_of_pyspark():
     # which a handler that captures them pickles with, by reference, of which the Python worker
     # of the server unpickles PySpark's.
     import dataclasses
+
     from pyspark.serializers import CloudPickleSerializer
     from pyspark.sql.udtf import (
-        AnalyzeArgument, AnalyzeResult, OrderingColumn, PartitioningColumn, SelectedColumn,
+        AnalyzeArgument,
+        AnalyzeResult,
+        OrderingColumn,
+        PartitioningColumn,
+        SelectedColumn,
     )
 
     missing = dataclasses.MISSING
@@ -4106,8 +4122,8 @@ def test_spatial_types_are_parsed_of_their_json_as_pyspark():
         ("geography(OGC:CRS84, SPHERICAL)", T.GeographyType(4326)),
         ("geography(SRID:ANY)", T.GeographyType("ANY")),
     ]
-    for json, expected in valid:
-        assert _parse_datatype_json_value(json) == expected
+    for json_value, expected in valid:
+        assert _parse_datatype_json_value(json_value) == expected
         assert _parse_datatype_json_string(expected.json()) == expected
     invalid = [
         ("geometry(4326)", PySparkValueError, "CANNOT_PARSE_DATATYPE"),
@@ -4119,9 +4135,9 @@ def test_spatial_types_are_parsed_of_their_json_as_pyspark():
         ("geography(OGC:CRS84, spherical)", IllegalArgumentException, "ST_INVALID_ALGORITHM_VALUE"),
         ("geography(SRID:0,)", PySparkValueError, "CANNOT_PARSE_DATATYPE"),
     ]
-    for json, error, condition in invalid:
+    for json_value, error, condition in invalid:
         with pytest.raises(error) as e:
-            _parse_datatype_json_value(json)
+            _parse_datatype_json_value(json_value)
         assert e.value.getCondition() == condition
     # Of the classmethods `_from_crs` of the types, of which PySpark's JSON parses them.
     assert T.GeometryType._from_crs("EPSG:3857") == T.GeometryType(3857)
@@ -4210,7 +4226,7 @@ def test_a_server_side_session_change_stops_the_session_as_pyspark():
 
 
 def test_variant_and_geo_values():
-    from pyspark.sql.types import VariantVal, Geometry, Geography
+    from pyspark.sql.types import Geography, Geometry, VariantVal
     v = VariantVal.parseJson('{"a": 1, "b": [2, 3]}')
     assert v.toJson() == '{"a":1,"b":[2,3]}'
     assert v.toPython() == {"a": 1, "b": [2, 3]}
@@ -4256,7 +4272,7 @@ def test_util_helpers():
 
 
 def test_udf_nondeterministic_and_evaltypes():
-    from pyspark.sql.functions import udf, pandas_udf
+    from pyspark.sql.functions import pandas_udf, udf
     # useArrow path selects the arrow eval type.
     a = udf(lambda x: x, T.IntegerType(), useArrow=True)
     assert callable(a)
@@ -4363,7 +4379,7 @@ def test_partition_transforms_are_those_of_pyspark_and_the_others_deprecated():
 
 
 def test_udtf_construction():
-    from pyspark.sql.udtf import udtf, UserDefinedTableFunction
+    from pyspark.sql.udtf import UserDefinedTableFunction, udtf
 
     @udtf(returnType="a int")
     class Echo:
@@ -4641,7 +4657,7 @@ def test_functions_protobuf_descriptor_branches(tmp_path):
 
 
 def test_udf_defaults_and_registration():
-    from pyspark.sql.functions import udf, pandas_udf
+    from pyspark.sql.functions import pandas_udf, udf
     # returnType defaults to StringType
     u = udf(lambda x: x)
     assert callable(u)
@@ -4685,6 +4701,7 @@ def test_udf_defaults_and_registration():
 
 def test_util_print_exec_and_skip_env(monkeypatch):
     import io
+
     from pyspark import util
     try:
         raise ValueError("boom")
@@ -5635,7 +5652,6 @@ def test_row_fields():
     from pyspark.errors import (
         PySparkAttributeError,
         PySparkRuntimeError,
-        PySparkTypeError,
         PySparkValueError,
     )
     from pyspark.sql import Row
@@ -5750,7 +5766,6 @@ def test_row_as_dict():
 def test_datatype_from_ddl_parsing(mock_connect):
     """Test DataType.fromDDL parsing of DDL strings."""
     # StructField DDL parsing
-    import pyspark.sql.types as types_module
     # StructField.fromDDL is DataType.fromDDL, which works offline
     sf = T.StructField.fromDDL("a int")
     assert sf.simpleString() == "struct<a:int>"
@@ -5773,6 +5788,7 @@ def test_columns_pickle_as_their_expressions_as_pyspark():
     # deepcopy give back a Column of the expression as it was sent, of its repr, and the
     # expressions over it are those over the original.
     import copy
+
     from pyspark.serializers import CloudPickleSerializer
     from pyspark.sql import functions as F
 
@@ -5816,8 +5832,8 @@ def test_column_repr_and_operations():
 
 def test_column_guard_rails():
     """Test that Column raises errors for invalid operations."""
-    from pyspark.sql import functions as F
     from pyspark.errors import PySparkValueError
+    from pyspark.sql import functions as F
 
     c = F.col("x")
 
@@ -5834,9 +5850,8 @@ def test_inheritable_thread_targets_carry_the_user_context_extensions_as_pyspark
     # InheritableThread takes none, as PySpark's.
     import threading
 
-    from google.protobuf import any_pb2
-
     import pyspark.sql.connect.proto as pb2
+    from google.protobuf import any_pb2
     from pyspark import InheritableThread, inheritable_thread_target
 
     spark, service = mock_connect
@@ -6047,7 +6062,6 @@ def test_functions_mathematical():
 def test_udf_with_defaults():
     """Test UDF with default return type."""
     from pyspark.sql.functions import udf
-    from pyspark.sql.types import StringType
 
     # No return type specified (defaults to StringType)
     u = udf(lambda x: str(x))
@@ -6218,6 +6232,7 @@ def test_functions_explode():
     map_col = F.col("map")
     assert type(F.explode(arr_col)).__name__ == "Column"
     assert type(F.explode_outer(arr_col)).__name__ == "Column"
+    assert type(F.explode(map_col)).__name__ == "Column"
 
 
 def test_functions_sequence():
@@ -6255,7 +6270,7 @@ def test_grouped_data_are_represented_as_pyspark(mock_connect):
 
     spark, _ = mock_connect
     df = spark.range(3)
-    value = ", ".join("%s: %s" % column for column in df.dtypes)
+    value = ", ".join("{}: {}".format(*column) for column in df.dtypes)
     for grouped, expressions, kind in (
             (df.groupBy("id"), "id", "GroupBy"), (df.rollup("id"), "id", "RollUp"),
             (df.cube(F.col("id") + 1), "+(id, 1)", "Cube"),
@@ -6733,7 +6748,7 @@ def test_functions_dayofyear():
 def test_functions_cast():
     """Test cast function with different types (via Column method)."""
     from pyspark.sql import functions as F
-    from pyspark.sql.types import StringType, IntegerType
+    from pyspark.sql.types import IntegerType, StringType
 
     c = F.col("x")
     # cast is a Column method, not a functions module function
@@ -6829,7 +6844,13 @@ def test_column_cast_edge_cases():
 def test_drop_metadata_utility():
     """Test _drop_metadata utility function if available."""
     try:
-        from pyspark.sql.types import _drop_metadata, StructType, StructField, StringType, IntegerType
+        from pyspark.sql.types import (
+            IntegerType,
+            StringType,
+            StructField,
+            StructType,
+            _drop_metadata,
+        )
 
         # Test on StructType with metadata
         st = StructType([
@@ -6868,8 +6889,8 @@ def test_string_type_collation_provider():
 
 def test_error_handling_in_higher_order_functions():
     """Test error handling in higher-order functions."""
-    from pyspark.sql import functions as F
     from pyspark.errors import PySparkValueError
+    from pyspark.sql import functions as F
 
     # Lambda with wrong arity should raise
     with pytest.raises(PySparkValueError):
@@ -7214,9 +7235,9 @@ def test_str_of_variant_values_is_their_json_and_they_are_no_rows_as_pyspark():
 
     v = VariantVal.parseJson('{"b": [1, "2", true, null], "a": 1.5}')
     assert str(v) == v.toJson() == '{"a":1.5,"b":[1,"2",true,null]}'
-    assert repr(v) == "VariantVal(%r, %r)" % (v.value, v.metadata)
+    assert repr(v) == f"VariantVal({v.value!r}, {v.metadata!r})"
     assert str(VariantVal.parseJson('"x"')) == '"x"'
-    assert "%s" % VariantVal.parseJson("1") == "1"
+    assert "{}".format(VariantVal.parseJson("1")) == "1"
 
     spark = _offline_session()
     struct = T.StructType([T.StructField("v", T.VariantType())])
@@ -7230,7 +7251,7 @@ def test_str_of_variant_values_is_their_json_and_they_are_no_rows_as_pyspark():
 
 def test_variant_values():
     """Test VariantVal and other variant types."""
-    from pyspark.sql.types import VariantVal, Geometry, Geography
+    from pyspark.sql.types import Geography, Geometry, VariantVal
 
     # VariantVal JSON parsing
     v = VariantVal.parseJson('{"x": 1}')
@@ -7571,7 +7592,7 @@ def test_udf_with_explicit_name():
 
 def test_udf_call_with_column():
     """Test calling UDF with Column argument."""
-    from pyspark.sql.functions import udf, col
+    from pyspark.sql.functions import col, udf
     from pyspark.sql.types import IntegerType
 
     u = udf(lambda x: x + 1, IntegerType())
@@ -7582,7 +7603,7 @@ def test_udf_call_with_column():
 
 def test_udf_multiple_args():
     """Test UDF with multiple arguments."""
-    from pyspark.sql.functions import udf, col
+    from pyspark.sql.functions import col, udf
     from pyspark.sql.types import IntegerType
 
     u = udf(lambda x, y: x + y, IntegerType())
@@ -7602,11 +7623,9 @@ def test_pandas_udf_scalar():
 
 def test_pandas_udf_grouped_agg():
     """Test pandas_udf with grouped_agg function type."""
-    from pyspark.sql.functions import pandas_udf
-    from pyspark.sql.types import IntegerType
-
     # Create pandas_udf without decorator to avoid execution issues
-    from pyspark.sql.functions import PandasUDFType
+    from pyspark.sql.functions import PandasUDFType, pandas_udf
+    from pyspark.sql.types import IntegerType
 
     p = pandas_udf(lambda s: s, IntegerType(), functionType=PandasUDFType.GROUPED_AGG)
     assert callable(p)
@@ -8237,7 +8256,6 @@ def test_row_usable_in_set_and_dict():
 def test_row_hash_unhashable_values_raise():
     """Rows holding list/dict values are unhashable, as a tuple holding them is."""
     import pytest
-
     from pyspark.sql import Row
 
     with pytest.raises(TypeError):
@@ -8272,16 +8290,17 @@ def test_connect_shim_imports():
         assert m is not None
 
     # Column/DataFrame re-exported under the connect path are the Rust-backed classes.
+    from pyspark._pyspark import Column as RustColumn
+    from pyspark._pyspark import DataFrame as RustDataFrame
     from pyspark.sql.connect.column import Column as ConnectColumn
     from pyspark.sql.connect.dataframe import DataFrame as ConnectDataFrame
-    from pyspark._pyspark import Column as RustColumn, DataFrame as RustDataFrame
 
     assert ConnectColumn is RustColumn
     assert ConnectDataFrame is RustDataFrame
 
     # The internal-function dispatcher builds an UnresolvedFunction by name.
-    from pyspark.sql.connect.functions.builtin import _invoke_function_over_columns
     from pyspark.sql import functions as F
+    from pyspark.sql.connect.functions.builtin import _invoke_function_over_columns
 
     assert repr(_invoke_function_over_columns("pandas_product", F.col("x"))) == "Column<'pandas_product(x)'>"
 
@@ -8413,7 +8432,7 @@ def test_connect_utils_check_the_dependencies_of_the_client(tmp_path):
     from pyspark.errors import PySparkImportError
     from pyspark.sql.connect import utils
 
-    assert utils.get_python_ver() == "%d.%d" % sys.version_info[:2]
+    assert utils.get_python_ver() == "{:d}.{:d}".format(*sys.version_info[:2])
     utils.check_dependencies()
     for check in [
         utils.require_minimum_grpc_version,
@@ -8475,16 +8494,30 @@ def test_is_remote_flags():
 
 # --- UserDefinedType protocol + types.py helpers (offline) -------------------
 from pyspark.sql.types import (
-    UserDefinedType,
     ArrayType as _AT,
+)
+from pyspark.sql.types import (
     DoubleType as _DT,
+)
+from pyspark.sql.types import (
     IntegerType as _IT,
-    StringType as _ST,
-    StructField as _SF,
-    StructType as _StT,
+)
+from pyspark.sql.types import (
     MapType as _MT,
-    _drop_metadata,
+)
+from pyspark.sql.types import (
+    StringType as _ST,
+)
+from pyspark.sql.types import (
+    StructField as _SF,
+)
+from pyspark.sql.types import (
+    StructType as _StT,
+)
+from pyspark.sql.types import (
+    UserDefinedType,
     _create_row,
+    _drop_metadata,
 )
 
 
@@ -8614,7 +8647,9 @@ def test_drop_metadata_and_create_row():
 import inspect  # noqa: E402
 
 import pyspark  # noqa: E402
-from pyspark.sql import SparkSession as _SS, DataFrame as _DF, Column as _Col  # noqa: E402
+from pyspark.sql import Column as _Col
+from pyspark.sql import DataFrame as _DF
+from pyspark.sql import SparkSession as _SS  # noqa: E402
 from pyspark.sql.connect.dataframe import DataFrame as _ConnectDF  # noqa: E402
 
 
@@ -8756,7 +8791,6 @@ def test_metrics_that_pyspark_cannot_convert_fail_the_action_of_their_observatio
     # action, and neither its metrics nor those that come after it are set. Metrics observed by
     # a name are not converted by the action.
     import pyarrow as pa
-
     from pyspark.errors import PySparkTypeError
     from pyspark.sql import Observation
     from pyspark.sql import functions as F
@@ -8979,7 +9013,7 @@ def test_generated_fn_accepts_str_column_name():
 
 def test_udf_string_arg_is_column_name_not_literal():
     # udf(f)("colname") must reference a column (ColumnOrName), not a string literal.
-    from pyspark.sql.functions import udf, col
+    from pyspark.sql.functions import col, udf
     from pyspark.sql.types import IntegerType
     u = udf(lambda x: x + 1, IntegerType())
     c = u("id")
@@ -9071,7 +9105,7 @@ def test_nanosecond_timestamps_are_not_collected_as_pyspark(
 
 def test_udf_and_pandas_udf_decorator_forms(mock_connect):
     # @udf(returnType) / @pandas_udf(returnType) return a decorator that wraps a function.
-    from pyspark.sql.functions import udf, pandas_udf
+    from pyspark.sql.functions import pandas_udf, udf
     from pyspark.sql.types import IntegerType
     from pyspark.sql.udf import UserDefinedFunction
 
@@ -9091,6 +9125,7 @@ def test_udf_return_type_normalized_to_concrete_datatype(mock_connect):
     # A DDL-string returnType must become a concrete, picklable DataType so the
     # cloudpickled command carries a real type (the pandas/Arrow worker needs it).
     import pickle
+
     from pyspark.sql.functions import pandas_udf
     from pyspark.sql.types import DoubleType
 
@@ -9106,7 +9141,8 @@ def test_pandas_udf_eval_type_inferred_from_type_hints(mock_connect):
     # @pandas_udf("type") infers eval type from the function's pandas type hints:
     # Series->Series = scalar(200), Iterator->Iterator = scalar_iter(204),
     # Series->scalar = grouped_agg(202).
-    from typing import Iterator
+    from collections.abc import Iterator
+
     import pandas as pd
     from pyspark.sql.functions import pandas_udf
 
@@ -9397,10 +9433,14 @@ def test_streaming_progress_and_listeners_are_those_of_pyspark():
 
 def test_streaming_exports_the_stateful_processor_and_tws_tester():
     import pandas as pd
-
     from pyspark.sql import Row
-    from pyspark.sql.streaming import StatefulProcessor, StatefulProcessorHandle, TwsTester
-    from pyspark.sql.streaming import stateful_processor, tws_tester
+    from pyspark.sql.streaming import (
+        StatefulProcessor,
+        StatefulProcessorHandle,
+        TwsTester,
+        stateful_processor,
+        tws_tester,
+    )
 
     assert StatefulProcessor is stateful_processor.StatefulProcessor
     assert StatefulProcessorHandle is stateful_processor.StatefulProcessorHandle
@@ -9464,7 +9504,7 @@ def test_ml_vector_functions_build_their_columns_as_pyspark():
 
 
 def test_ml_connect_base_classes_and_functions():
-    from pyspark.ml.connect import Estimator, Transformer, Evaluator, Model, PipelineModel
+    from pyspark.ml.connect import Estimator, Evaluator, Model, PipelineModel, Transformer
 
     for cls in (Estimator, Transformer, Evaluator, Model, PipelineModel):
         assert isinstance(cls, type)
@@ -10777,6 +10817,7 @@ def test_customized_pandas_row_frames_share_absent_safecheck_setting(
     mock_connect, kind
 ):
     from decimal import Decimal
+
     from pyspark.errors import PySparkValueError
 
     pd = pytest.importorskip("pandas")
@@ -10821,8 +10862,9 @@ def test_customized_pandas_row_frames_share_absent_safecheck_setting(
 def test_customized_pandas_named_row_timestamps_preserve_arrow_type_and_wall_clock(
     mock_connect, monkeypatch, timestamp_type, infer_dict_as_map, aware
 ):
-    import pyarrow as pa
     from datetime import datetime, timezone
+
+    import pyarrow as pa
 
     if not hasattr(time, "tzset"):
         pytest.skip("client timezone control requires time.tzset")
@@ -10852,8 +10894,9 @@ def test_customized_pandas_named_row_timestamps_preserve_arrow_type_and_wall_clo
 
 @pytest.mark.parametrize("kind", ["date", "timedelta"])
 def test_customized_pandas_named_row_dates_and_timedeltas_keep_arrow_values(mock_connect, kind):
-    import pyarrow as pa
     from datetime import date, timedelta
+
+    import pyarrow as pa
 
     pd = pytest.importorskip("pandas")
     values = ([date(1969, 12, 31), date(2000, 2, 29)] if kind == "date"
@@ -10905,6 +10948,7 @@ def test_customized_pandas_multiple_named_row_columns_keep_names_padding(mock_co
 @pytest.mark.parametrize("row_position", [0, 3, 6])
 def test_customized_pandas_named_rows_preserve_multiple_native_columns(mock_connect, row_position):
     from decimal import Decimal
+
     import pyarrow as pa
 
     pd = pytest.importorskip("pandas")
@@ -11002,6 +11046,7 @@ def test_customized_pandas_named_rows_keep_native_fallback_without_pyarrow(mock_
 @pytest.mark.parametrize("row_first", [False, True])
 def test_customized_pandas_named_row_errors_follow_column_order(mock_connect, kind, row_first):
     from decimal import Decimal
+
     from pyspark.errors import PySparkRuntimeError, PySparkTypeError, PySparkValueError
 
     pd = pytest.importorskip("pandas")
@@ -11724,7 +11769,8 @@ def test_pandas_native_inferred_numbers_inside_nested_dict_values(mock_connect, 
 
 
 # Exact list/tuple conversion and pandas input IPC regressions.
-from datetime import date as container_input_date, datetime as container_input_datetime
+from datetime import date as container_input_date
+from datetime import datetime as container_input_datetime
 from decimal import Decimal as ContainerInputDecimal
 
 from pyspark.sql import Row as ContainerInputRow
@@ -11894,6 +11940,7 @@ def test_pandas_columns_of_decimals_and_other_values_follow_arrow(decimal_ipc_se
     # Decimals and raises for the others (strings in `values` are Decimals here, and a 1-tuple
     # holds a plain string).
     from decimal import Decimal
+
     import pyarrow as pa
     from pyspark import errors
 
@@ -11917,10 +11964,16 @@ def test_pandas_columns_of_decimals_and_other_values_follow_arrow(decimal_ipc_se
 # --------------------------------------------------------------------------- exact date input
 
 from datetime import (
-    date as _exact_date_date, datetime as _exact_date_datetime,
+    date as _exact_date_date,
+)
+from datetime import (
+    datetime as _exact_date_datetime,
+)
+from datetime import (
     timezone as _exact_date_timezone,
 )
 from decimal import Decimal as _exact_date_Decimal
+
 from pyspark.sql import Row as _exact_date_Row
 
 
@@ -12106,6 +12159,7 @@ def _exact_date_fields(data):
 
 def _exact_date_capture_server(connection):
     from concurrent.futures import ThreadPoolExecutor
+
     import grpc
 
     captured = []
@@ -12261,6 +12315,7 @@ def test_year_month_and_calendar_intervals_raise_as_pyspark_for_local_rows(mock_
 @pytest.mark.parametrize("schema_kind", ["inferred", "names", "explicit", "ddl"])
 def test_exact_date_ipc_calendar_range(exact_date_capture_input, source, schema_kind):
     import calendar
+
     import pyarrow as pa
     from pyspark.sql import types as T
 
@@ -12378,9 +12433,9 @@ with ThreadPoolExecutor(max_workers=4) as executor:
 @pytest.fixture(scope="module")
 def decimal_ipc_protocol(tmp_path_factory):
     import os
-    from pathlib import Path
     import shutil
     import subprocess
+    from pathlib import Path
 
     pytest.importorskip("grpc")
     pytest.importorskip("pyarrow")
@@ -12404,6 +12459,7 @@ def decimal_ipc_protocol(tmp_path_factory):
 def decimal_ipc_session(decimal_ipc_protocol, tmp_path):
     import subprocess
     import sys
+
     from pyspark.sql import SparkSession
 
     payload = tmp_path / "input.arrow"
@@ -12642,6 +12698,7 @@ for schema in (None, ["v"]):
 ])
 def test_decimal_scientific_local_input_ipc(decimal_ipc_session, kind, precision, scale, texts):
     from decimal import Decimal
+
     import pyarrow as pa
 
     spark, payload = decimal_ipc_session
@@ -12698,6 +12755,7 @@ def test_decimal_rescaling_follows_pyspark(
     # the precision, in the Decimal conversion; a pandas column fails its Arrow conversion
     # for any value that does not fit exactly, in either notation, rather than losing digits.
     from decimal import Decimal
+
     import pyarrow as pa
     from pyspark.errors import PySparkValueError
 
@@ -12787,7 +12845,8 @@ def test_decimal_scale_input_ipc(decimal_ipc_session, kind, schema_mode, texts):
     # cells and types as PySpark's, which types an inferred pandas column by its values as
     # Arrow does, and a local one as decimal(38, 18). The Decimal context of the thread,
     # here one that would round and trap, changes nothing.
-    from decimal import Decimal, Inexact, ROUND_UP, localcontext
+    from decimal import ROUND_UP, Decimal, Inexact, localcontext
+
     import pyarrow as pa
 
     spark, payload = decimal_ipc_session
@@ -12822,6 +12881,7 @@ def test_decimal_scale_of_subclasses(decimal_ipc_session):
     # A subclass can override __str__ and as_tuple, so it is still asked for both, as Arrow
     # does; their errors are raised.
     from decimal import Decimal
+
     import pyarrow as pa
 
     pd = pytest.importorskip("pandas")
@@ -12937,6 +12997,7 @@ def test_decimal_scale_avoids_coefficient_tuple(decimal_ipc_session, schema):
 
 def test_decimal_explicit_pandas_schema_uses_arrow_conversion(decimal_ipc_session, monkeypatch):
     from decimal import Decimal
+
     import pyarrow as pa
     from pyspark.sql import _pandas_input
 
@@ -12981,6 +13042,7 @@ def test_decimal_quanta_of_each_type_and_conversion(decimal_ipc_session, monkeyp
     # decimal.DefaultContext applies from the next createDataFrame.
     import decimal
     from decimal import Decimal
+
     import pyarrow as pa
 
     spark, payload = decimal_ipc_session
@@ -13024,6 +13086,7 @@ def test_decimal_quanta_preserve_keyword_quantize_overrides(
     decimal_ipc_session, monkeypatch, prefix_exact
 ):
     import decimal
+
     import pyarrow as pa
 
     spark, payload = decimal_ipc_session
@@ -13063,6 +13126,7 @@ def test_decimal_quanta_preserve_keyword_quantize_overrides(
 
 def test_decimal_quanta_restore_outer_conversion_after_reentry(decimal_ipc_session):
     import decimal
+
     import pyarrow as pa
 
     spark, payload = decimal_ipc_session
@@ -13096,6 +13160,7 @@ def test_decimal_quanta_restore_outer_conversion_after_reentry(decimal_ipc_sessi
 ])
 def test_pandas_nested_decimals_use_every_observed_scale(mock_connect, layout, schema_kind):
     from decimal import Decimal
+
     import pyarrow as pa
 
     decimals = [Decimal("1.5"), Decimal("1.25"), Decimal("0.003"), Decimal("1E+3")]
@@ -13144,6 +13209,7 @@ def test_pandas_nested_decimals_use_every_observed_scale(mock_connect, layout, s
 @pytest.mark.parametrize("schema_kind", ["inferred", "names"])
 def test_pandas_nested_decimals_mixed_row_dict_raise_arrow_errors(mock_connect, schema_kind):
     from decimal import Decimal
+
     from pyspark.errors import PySparkValueError
 
     _, service = mock_connect
@@ -13165,6 +13231,7 @@ def test_pandas_nested_decimals_mixed_row_dict_raise_arrow_errors(mock_connect, 
 @pytest.mark.parametrize("scale", [38, 39, 50, 128, 5_000_000_000])
 def test_pandas_nested_decimal_scale_bounds(mock_connect, scale):
     from decimal import Decimal
+
     import pyarrow as pa
 
     spark, service = mock_connect
@@ -13190,6 +13257,7 @@ def test_pandas_nested_decimal_scale_bounds(mock_connect, scale):
 
 def test_pandas_nested_decimal_trailing_zeros_preserve_values(mock_connect):
     from decimal import Decimal
+
     import pyarrow as pa
 
     # The second value's trailing zeros increase the scale even though it represents 1.
@@ -13205,6 +13273,7 @@ def test_pandas_nested_decimal_trailing_zeros_preserve_values(mock_connect):
 
 def test_pandas_nested_decimal_scale_widening_can_overflow_precision(decimal_ipc_session):
     from decimal import Decimal
+
     from pyspark.errors import PySparkRuntimeError
 
     pd = pytest.importorskip("pandas")
@@ -14500,6 +14569,7 @@ def _completion_field(name, data_type):
 
 def _completion_serve(connection):
     from concurrent.futures import ThreadPoolExecutor
+
     import grpc
 
     # A separate process also exercises columns/dtypes, whose first access may
@@ -14563,6 +14633,7 @@ class _CompletionRemoteService:
 @pytest.fixture
 def completion_analyzed():
     import multiprocessing
+
     from pyspark.sql import SparkSession
 
     pytest.importorskip("grpc")
@@ -14749,7 +14820,7 @@ def test_ddl_schemas_are_parsed_on_the_server_as_pyspark(mock_connect):
     df.mapInPandas(lambda it: it, "id long NOT NULL")
     df.mapInArrow(lambda it: it, "id long COMMENT 'c'")
     df.groupBy("id").applyInPandas(lambda pdf: pdf, "`id` long")
-    df.groupBy("id").cogroup(df.groupBy("id")).applyInArrow(lambda l, r: l, "id: long")
+    df.groupBy("id").cogroup(df.groupBy("id")).applyInArrow(lambda left, right: left, "id: long")
     assert ddl_requests()[2:] == [
         "id long NOT NULL", "id long COMMENT 'c'", "`id` long", "id: long"]
     df.mapInPandas(lambda it: it, T.StructType([T.StructField("id", T.LongType())]))
@@ -15849,9 +15920,10 @@ def test_functions_are_of_the_builtin_module_and_pickle_by_reference_as_pyspark(
     # As PySpark's, the functions are of pyspark.sql.functions.builtin, but pandas_udf and
     # arrow_udf, so they pickle by reference, by that name, which PySpark's workers import.
     import inspect
+
+    import pyspark.sql.functions.builtin as builtin
     from pyspark.serializers import CloudPickleSerializer
     from pyspark.sql import functions as F
-    import pyspark.sql.functions.builtin as builtin
 
     functions = [getattr(F, name) for name in F.__all__ if inspect.isfunction(getattr(F, name))]
     assert len(functions) > 500
@@ -16630,6 +16702,8 @@ def test_execution_info_and_operation_id():
     from pyspark.errors import AnalysisException
     from pyspark.errors.exceptions.connect import (
         AnalysisException as ConnectAnalysisException,
+    )
+    from pyspark.errors.exceptions.connect import (
         SparkConnectException,
     )
     from pyspark.sql.connect.client import PlanObservedMetrics
@@ -16855,8 +16929,9 @@ def _repr_field(name, data_type):
 
 
 def _repr_serve(connection):
-    import grpc
     from concurrent.futures import ThreadPoolExecutor
+
+    import grpc
 
     # A separate process can serve schema RPCs while repr holds the client GIL.
     class Service:
@@ -16943,6 +17018,7 @@ class _ReprRemoteService:
 @pytest.fixture
 def repr_analyzed():
     import multiprocessing
+
     from pyspark.sql import SparkSession
 
     pytest.importorskip("grpc")
@@ -17216,7 +17292,6 @@ def test_foreach_and_foreach_partition_send_python_functions_as_pyspark(mock_con
     # no result that calls f with an iterator of the rows of each partition. They run on the
     # server, so this calls the functions that are sent.
     import pyarrow as pa
-
     from pyspark import cloudpickle
 
     spark, service = mock_connect
@@ -17981,11 +18056,14 @@ def test_connect_registry_sends_auto_cdc_define_flow(mock_connect):
 
 
 # Positional DataFrame indexing via a separate-process mock gRPC service.
-from concurrent.futures import ThreadPoolExecutor as positional_indexing_ThreadPoolExecutor
 import multiprocessing as positional_indexing_multiprocessing
+from concurrent.futures import ThreadPoolExecutor as positional_indexing_ThreadPoolExecutor
 
 from pyspark.sql import (
-    SparkSession as positional_indexing_SparkSession, Column as positional_indexing_Column,
+    Column as positional_indexing_Column,
+)
+from pyspark.sql import (
+    SparkSession as positional_indexing_SparkSession,
 )
 
 
@@ -18975,7 +19053,8 @@ def test_column_origins_capture_their_call_site_without_importing_per_call(mock_
 
     spark, service = mock_connect
     monkeypatch.setattr(errors_utils, "_enable_debugging_cache", True)
-    column = F.col("id") + 1; expected = errors_utils._capture_call_site(1)
+    # One line on purpose: the call site that is captured is the line of the Column.
+    column = F.col("id") + 1; expected = errors_utils._capture_call_site(1)  # noqa: E702
     imports = []
     real_import = builtins.__import__
 
@@ -19480,7 +19559,7 @@ def test_explicit_schema_spatial_values_are_not_inferred_from_their_srids(mock_c
 
 
 def _group_map_functions():
-    from typing import Iterator, Tuple
+    from collections.abc import Iterator
 
     import numpy as np
     import pandas as pd
@@ -19490,7 +19569,7 @@ def _group_map_functions():
         yield from batches
 
     def pandas_iter_key(
-        key: Tuple[np.int64], batches: Iterator[pd.DataFrame]
+        key: tuple[np.int64], batches: Iterator[pd.DataFrame]
     ) -> Iterator[pd.DataFrame]:
         yield from batches
 
@@ -19501,7 +19580,7 @@ def _group_map_functions():
         yield from batches
 
     def arrow_iter_key(
-        key: Tuple[pa.Scalar, ...], batches: Iterator[pa.RecordBatch]
+        key: tuple[pa.Scalar, ...], batches: Iterator[pa.RecordBatch]
     ) -> Iterator[pa.RecordBatch]:
         yield from batches
 
@@ -19572,6 +19651,7 @@ def test_grouped_apply_takes_only_grouped_map_pandas_udfs_as_pyspark(mock_connec
     # SQL_GROUPED_MAP_PANDAS_UDF raises INVALID_UDF_EVAL_TYPE, also a Column, which has any
     # attribute; such a UDF is applied with applyInPandas, with the warning to prefer that.
     import warnings
+
     from pyspark.errors import PySparkTypeError
     from pyspark.sql import functions as F
     from pyspark.sql.functions import PandasUDFType, pandas_udf
@@ -19647,8 +19727,8 @@ def test_map_functions_reject_what_is_not_callable_as_pyspark(mock_connect, buil
 
 # Session version cache regressions, selected by the existing offline CI suite.
 # The mock runs in a separate process and needs no Spark server.
-from concurrent.futures import ThreadPoolExecutor as version_cache_ThreadPoolExecutor
 import multiprocessing as version_cache_multiprocessing
+from concurrent.futures import ThreadPoolExecutor as version_cache_ThreadPoolExecutor
 from threading import Event as version_cache_Event
 
 from pyspark.sql import SparkSession as version_cache_SparkSession

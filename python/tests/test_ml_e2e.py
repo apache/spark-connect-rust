@@ -25,7 +25,6 @@ import gc
 import os
 
 import pytest
-
 from pyspark.loose_version import LooseVersion
 
 # The generated pyspark.sql.connect.proto, of Apache Spark v4.3.0, needs protobuf >= 6.33.5.

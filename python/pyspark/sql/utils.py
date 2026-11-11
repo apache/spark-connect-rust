@@ -17,23 +17,24 @@
 """Small subset of pyspark.sql.utils needed by the drop-in and vendored modules, and the
 exceptions that PySpark's re-exports from ``pyspark.errors``, of their import path before it."""
 
+from collections.abc import Sequence
 from enum import Enum
-from typing import Any, Union, TYPE_CHECKING, Sequence
+from typing import TYPE_CHECKING, Any, Union
 
 # Re-exported, as PySpark's pyspark.sql.utils does: `from pyspark.sql.utils import
 # AnalysisException` is their import path before pyspark.errors.
 from pyspark.errors import (  # noqa: F401
     AnalysisException,
-    ParseException,
     IllegalArgumentException,
-    StreamingQueryException,
-    QueryExecutionException,
-    PythonException,
-    UnknownException,
-    SparkUpgradeException,
+    ParseException,
     PySparkImportError,
     PySparkNotImplementedError,
     PySparkRuntimeError,
+    PythonException,
+    QueryExecutionException,
+    SparkUpgradeException,
+    StreamingQueryException,
+    UnknownException,
 )
 from pyspark.errors.exceptions.captured import CapturedException  # noqa: F401
 
@@ -83,8 +84,8 @@ def pyspark_column_op(
 ) -> Union["SeriesOrIndex", None]:
     """Wrapper function for column_op to get proper Column class."""
     from pyspark.pandas.base import column_op
-    from pyspark.sql.column import Column
     from pyspark.pandas.data_type_ops.base import _is_extension_dtypes
+    from pyspark.sql.column import Column
 
     result = column_op(getattr(Column, func_name))(left, right)
     # It works as expected on extension dtype, so we don't need to call `fillna` for this case.
@@ -97,7 +98,6 @@ def pyspark_column_op(
 def require_minimum_plotly_version() -> None:
     """Raise ImportError if plotly is not installed"""
     from pyspark.loose_version import LooseVersion
-    from pyspark.errors import PySparkImportError
 
     minimum_plotly_version = "4.8"
 

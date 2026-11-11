@@ -25,11 +25,16 @@ subclassable) PyO3 class is needed; `.foreach` sends the function of
 `_construct_foreach_function`, as PySpark does.
 """
 
-from typing import Any, Callable, Iterator, Union, cast
+from collections.abc import Iterator
+from typing import Any, Callable, Union, cast
 
 from pyspark._pyspark import (
     DataStreamReader as _DataStreamReader,
+)
+from pyspark._pyspark import (
     DataStreamWriter as _DataStreamWriter,
+)
+from pyspark._pyspark import (
     Trigger as _Trigger,
 )
 from pyspark.errors import PySparkAttributeError, PySparkRuntimeError
@@ -73,7 +78,7 @@ def _construct_foreach_function(
                 messageParameters={"attr_name": "process", "obj_name": "f"},
             )
 
-        if not callable(getattr(f, "process")):
+        if not callable(f.process):
             raise PySparkAttributeError(
                 errorClass="ATTRIBUTE_NOT_CALLABLE",
                 messageParameters={"attr_name": "process", "obj_name": "f"},

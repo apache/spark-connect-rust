@@ -37,9 +37,11 @@ from typing import NamedTuple
 
 from pyspark._pyspark import (
     Column,
-    DataFrame as _NativeDataFrame,
     DataFrameNaFunctions,
     DataFrameStatFunctions,
+)
+from pyspark._pyspark import (
+    DataFrame as _NativeDataFrame,
 )
 
 __all__ = ["DataFrame", "DataFrameNaFunctions", "DataFrameStatFunctions"]

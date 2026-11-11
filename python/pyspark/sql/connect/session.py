@@ -15,7 +15,7 @@
 # limitations under the License.
 #
 """Rust-backed SparkSession under the connect import path (testing/connectutils imports from here)."""
-from typing import Callable, Tuple
+from typing import Callable
 
 from pyspark.errors import PySparkRuntimeError, PySparkValueError
 from pyspark.sql.session import SparkSession
@@ -35,7 +35,7 @@ def _connect_url_not_set_error() -> Exception:
     return _ConnectUrlNotSetError(errorClass="CONNECT_URL_NOT_SET", messageParameters={})
 
 
-def _reduce_session(session_id: str) -> Tuple[Callable[[str], "SparkSession"], Tuple[str]]:
+def _reduce_session(session_id: str) -> tuple[Callable[[str], "SparkSession"], tuple[str]]:
     """The ``__reduce__`` of the session of ``session_id``, as PySpark Connect's: a function,
     which cloudpickle pickles by value, that gives back the active session of that ID. It reads
     the class of ``pyspark.sql.connect.session`` when it is called, so that on a Python worker

@@ -21,13 +21,14 @@ window that a UDF or a ``foreachBatch`` function captures unpickles on a Python 
 server, whose PySpark has no Rust client, while ``pickle`` pickles the function by reference, of
 this module, on the client.
 """
-from typing import Any, Optional, Sequence, Tuple
+from collections.abc import Sequence
+from typing import Any, Optional
 
 
 def window_of(
     partition: Sequence[Any],
-    order: Sequence[Tuple[Any, str]],
-    frame: Optional[Tuple[bool, int, int]],
+    order: Sequence[tuple[Any, str]],
+    frame: Optional[tuple[bool, int, int]],
 ) -> Any:
     """The WindowSpec of the Columns ``partition`` and of the sort orders ``order``, each a
     Column of its child and the name of the method of its direction and nulls, such as

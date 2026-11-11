@@ -28,7 +28,8 @@ import sys
 import urllib.parse
 import uuid
 import weakref
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
+from collections.abc import Iterable, Mapping
+from typing import Any, Optional
 
 from pyspark.errors import PySparkNotImplementedError, PySparkValueError
 from pyspark.errors.exceptions.connect import SparkConnectException
@@ -68,14 +69,14 @@ class ChannelBuilder:
 
     def __init__(
         self,
-        channelOptions: Optional[List[Tuple[str, Any]]] = None,
-        params: Optional[Dict[str, str]] = None,
+        channelOptions: Optional[list[tuple[str, Any]]] = None,
+        params: Optional[dict[str, str]] = None,
     ):
         if channelOptions:
             raise PySparkNotImplementedError(
                 errorClass="NOT_IMPLEMENTED", messageParameters={"feature": "channelOptions"}
             )
-        self._params: Dict[str, str] = params or dict()
+        self._params: dict[str, str] = params or dict()
 
     def get(self, key: str) -> Any:
         """The value of the parameter ``key``; raises ``KeyError`` if it is not set."""
@@ -152,7 +153,7 @@ class ChannelBuilder:
             == "true"
         )
 
-    def _effective_channel_options(self) -> List[Tuple[str, Any]]:
+    def _effective_channel_options(self) -> list[tuple[str, Any]]:
         """The gRPC options of the channel: the defaults, and the keepalive options unless the
         keepalive is disabled. The Rust channel applies the same keepalive, from the same
         parameters, and the same message lengths."""
@@ -174,7 +175,8 @@ class ChannelBuilder:
             try:
                 uuid.UUID(session_id, version=4)
             except ValueError as ve:
-                raise PySparkValueError(
+                # As PySpark's: no `from`, so the __cause__ of the error stays None.
+                raise PySparkValueError(  # noqa: B904
                     errorClass="INVALID_SESSION_UUID_ID",
                     messageParameters={"arg_name": "session_id", "origin": str(ve)},
                 )
@@ -204,7 +206,7 @@ class ChannelBuilder:
             ]
         )
 
-    def metadata(self) -> Iterable[Tuple[str, str]]:
+    def metadata(self) -> Iterable[tuple[str, str]]:
         """The parameters that are not used by the channel, as gRPC metadata of each request."""
         reserved = [
             ChannelBuilder.PARAM_TOKEN,
@@ -240,7 +242,7 @@ class DefaultChannelBuilder(ChannelBuilder):
         # JVM as PySpark does in the testing mode.
         return 15002
 
-    def __init__(self, url: str, channelOptions: Optional[List[Tuple[str, Any]]] = None) -> None:
+    def __init__(self, url: str, channelOptions: Optional[list[tuple[str, Any]]] = None) -> None:
         """Construct a channel builder of the connection string ``url``, such as
         ``sc://hostname:port/;key=value``."""
         super().__init__(channelOptions=channelOptions)
@@ -337,7 +339,7 @@ class PlanObservedMetrics(ObservedMetrics):
     ``DataFrame.executionInfo.flows``. Mirrors ``pyspark.sql.connect.client.core
     .PlanObservedMetrics``; the Rust transport has already decoded the literal values."""
 
-    def __init__(self, name: str, metrics: List[Any], keys: List[str]):
+    def __init__(self, name: str, metrics: list[Any], keys: list[str]):
         self._name = name
         self._metrics = metrics
         self._keys = keys if keys else [f"observed_metric_{i}" for i in range(len(metrics))]
@@ -350,11 +352,11 @@ class PlanObservedMetrics(ObservedMetrics):
         return self._name
 
     @property
-    def metrics(self) -> List[Any]:
+    def metrics(self) -> list[Any]:
         return self._metrics
 
     @property
-    def pairs(self) -> Dict[str, Any]:
+    def pairs(self) -> dict[str, Any]:
         for metric in self._metrics:
             if isinstance(metric, _UnsupportedLiteral):
                 from pyspark.errors import PySparkTypeError
@@ -366,18 +368,18 @@ class PlanObservedMetrics(ObservedMetrics):
         return {self._keys[i]: self._metrics[i] for i in range(len(self._metrics))}
 
     @property
-    def keys(self) -> List[str]:
+    def keys(self) -> list[str]:
         return self._keys
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {"name": self._name, "keys": self._keys, "pairs": self.pairs}
 
 
 def _to_pandas(
     table: Any,
     schema: Any,
-    metrics: List[Any],
-    observed_metrics: List[Any],
+    metrics: list[Any],
+    observed_metrics: list[Any],
     *,
     timezone: Any,
     struct_handling_mode: Any,
@@ -424,7 +426,7 @@ class SparkConnectClient:
         self.global_user_context_extensions_lock = threading.Lock()
 
     @property
-    def global_user_context_extensions(self) -> List[Any]:
+    def global_user_context_extensions(self) -> list[Any]:
         """The global user context extensions, as SparkConnectClient's: of their IDs."""
         return _extensions_of(self._session._user_context_extensions(True))
 
@@ -525,7 +527,7 @@ class SparkConnectClient:
 
         return p2
 
-    def get_configs(self, *keys: str) -> Tuple[Optional[str], ...]:
+    def get_configs(self, *keys: str) -> tuple[Optional[str], ...]:
         """The values of the configurations ``keys``, in one request, as SparkConnectClient's
         ``get_configs``."""
         return tuple(self._session.conf._get_many(list(keys)))
@@ -536,8 +538,8 @@ class SparkConnectClient:
         return dict(zip(keys, self.get_configs(*keys)))
 
     def get_config_with_defaults(
-        self, *pairs: Tuple[str, Optional[str]]
-    ) -> Tuple[Optional[str], ...]:
+        self, *pairs: tuple[str, Optional[str]]
+    ) -> tuple[Optional[str], ...]:
         """The values of the configurations of ``pairs`` of a key and its default, the default of
         a key that is not set, in one request, as SparkConnectClient's
         ``get_config_with_defaults``, of which pandas-on-Spark reads its ANSI mode."""
@@ -551,7 +553,7 @@ class SparkConnectClient:
         checkpoint), and no execution information."""
         import pyspark.sql.connect.proto as pb2
 
-        properties: Dict[str, Any] = {}
+        properties: dict[str, Any] = {}
         for data in self._session._execute_command(command.SerializeToString()):
             response = pb2.ExecutePlanResponse.FromString(data)
             # The results of commands, as SparkConnectClient._execute_and_fetch_as_iterator
@@ -616,7 +618,7 @@ class SparkConnectClient:
         not released on the server."""
         self._session._close()
 
-    def _resources(self) -> Dict[str, Any]:
+    def _resources(self) -> dict[str, Any]:
         """The resources of the cluster, as SparkConnectClient's: of a GetResourcesCommand, by
         their names."""
         import pyspark.sql.connect.proto as pb2
@@ -626,7 +628,7 @@ class SparkConnectClient:
         _, properties, _ = self.execute_command(command)
         return properties["get_resources_command_result"]
 
-    def _delete_ml_cache(self, cache_ids: List[str], evict_only: bool = False) -> List[str]:
+    def _delete_ml_cache(self, cache_ids: list[str], evict_only: bool = False) -> list[str]:
         """Delete the cached objects of ``cache_ids`` on the server, as SparkConnectClient's: the
         IDs deleted, or none if it fails."""
         import threading
@@ -673,7 +675,7 @@ class SparkConnectClient:
         except Exception:
             pass
 
-    def _get_ml_cache_info(self) -> List[str]:
+    def _get_ml_cache_info(self) -> list[str]:
         """The cached ML objects of the session on the server, as SparkConnectClient's: their
         JSON descriptions."""
         import pyspark.sql.connect.proto as pb2
@@ -699,7 +701,7 @@ class SparkConnectClient:
         return properties["ml_command_result"].param.long
 
 
-def _extensions_of(extensions: Any) -> List[Any]:
+def _extensions_of(extensions: Any) -> list[Any]:
     # The user context extensions of the Rust transport, as SparkConnectClient keeps them: the
     # ID and the google.protobuf.Any of each.
     from google.protobuf import any_pb2
@@ -716,7 +718,7 @@ class _ThreadLocalOfClient:
         self._session = session
 
     @property
-    def user_context_extensions(self) -> List[Any]:
+    def user_context_extensions(self) -> list[Any]:
         return _extensions_of(self._session._user_context_extensions(False))
 
     @property

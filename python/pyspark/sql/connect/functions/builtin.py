@@ -18,13 +18,14 @@
 import random as py_random  # noqa: F401
 from typing import TYPE_CHECKING
 
+# As PySpark Connect's `_to_col`, which raises NOT_EXPECTED_TYPE for an argument that is not a
+# Column or a str; the `_to_col` of pyspark.sql.functions passes such an argument on as it is.
+from pyspark.sql.functions import _column_or_name as _to_col  # noqa: F401
+from pyspark.sql.functions import _invoke_function, col, expr  # noqa: F401
+
 # Every public name of pyspark.sql.functions.builtin, also the deprecated functions that
 # ``pyspark.sql.functions.__all__`` leaves out, as PySpark Connect's builtin has them.
 from pyspark.sql.functions.builtin import *  # noqa: F401,F403
-# As PySpark Connect's `_to_col`, which raises NOT_EXPECTED_TYPE for an argument that is not a
-# Column or a str; the `_to_col` of pyspark.sql.functions passes such an argument on as it is.
-from pyspark.sql.functions import col, expr, _invoke_function  # noqa: F401
-from pyspark.sql.functions import _column_or_name as _to_col  # noqa: F401
 
 if TYPE_CHECKING:
     from pyspark.sql import Column

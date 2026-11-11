@@ -92,7 +92,6 @@ import os
 import re
 from decimal import Decimal
 
-
 _CASE_END = "!-- end"
 _SECTION_PREFIX = "--! "
 _FILE_METADATA_NAME = "__file_metadata__"
@@ -139,7 +138,7 @@ def parse_test_file(filepath, require_terminated=False):
     cases : list[dict]
         One dict per test case, mapping section name to content.
     """
-    with open(filepath, "r") as f:
+    with open(filepath) as f:
         lines = f.read().split("\n")
 
     cases = []
@@ -152,9 +151,7 @@ def parse_test_file(filepath, require_terminated=False):
         if section_key is not None and current is not None:
             # A repeated section name is a copy/paste or merge mistake; last-wins
             # would silently discard one of the two, so fail loudly instead.
-            assert section_key not in current, "{}: duplicate section `{}`".format(
-                filepath, section_key
-            )
+            assert section_key not in current, f"{filepath}: duplicate section `{section_key}`"
             current[section_key] = "\n".join(section_lines).strip("\n")
         section_key = None
         section_lines = []
@@ -176,9 +173,7 @@ def parse_test_file(filepath, require_terminated=False):
             # typo'd section marker. Left as body it would silently turn an
             # assertion into inert prose, so reject it.
             raise AssertionError(
-                "{}: malformed section marker (expected `{}`): {!r}".format(
-                    filepath, _SECTION_PREFIX, line
-                )
+                f"{filepath}: malformed section marker (expected `{_SECTION_PREFIX}`): {line!r}"
             )
         elif section_key is not None:
             section_lines.append(line)
@@ -186,7 +181,7 @@ def parse_test_file(filepath, require_terminated=False):
             # Non-blank content outside any section (before the first marker or
             # between cases) is dropped by the original loop; that hides stray
             # text, so fail loudly. Blank separator lines are fine.
-            raise AssertionError("{}: content outside any section: {!r}".format(filepath, line))
+            raise AssertionError(f"{filepath}: content outside any section: {line!r}")
 
     # A case still open here never hit "!-- end". In verify mode that is
     # corruption; under regeneration stay lenient and keep it so the rewrite can
@@ -194,9 +189,7 @@ def parse_test_file(filepath, require_terminated=False):
     flush()
     if current:
         assert not require_terminated, (
-            "{}: file does not end with `{}` (last case is unterminated)".format(
-                filepath, _CASE_END
-            )
+            f"{filepath}: file does not end with `{_CASE_END}` (last case is unterminated)"
         )
         cases.append(current)
 
@@ -430,7 +423,7 @@ def _format_value(value, data_type, nested=False):
         if "\t" in value or "\n" in value:
             raise AssertionError(
                 "df_golden: result string contains a tab or newline, which is "
-                "not supported yet (would desync the rendered table): {!r}".format(value)
+                f"not supported yet (would desync the rendered table): {value!r}"
             )
         return '"' + value + '"' if nested else value
     if isinstance(data_type, DecimalType):
@@ -440,7 +433,7 @@ def _format_value(value, data_type, nested=False):
         return format_double(value)
     if isinstance(data_type, StructType):
         parts = [
-            '"{}":{}'.format(f.name, _format_value(value[i], f.dataType, nested=True))
+            f'"{f.name}":{_format_value(value[i], f.dataType, nested=True)}'
             for i, f in enumerate(data_type.fields)
         ]
         return "{" + ",".join(parts) + "}"
@@ -471,8 +464,8 @@ def _format_value(value, data_type, nested=False):
         (FloatType, DateType, TimestampType, TimestampNTZType, BinaryType),
     ):
         raise AssertionError(
-            "df_golden: result column of type {} is not supported yet (needs a "
-            "Hive-style formatter)".format(data_type.simpleString())
+            f"df_golden: result column of type {data_type.simpleString()} is not supported yet (needs a "
+            "Hive-style formatter)"
         )
     return str(value)
 
@@ -507,7 +500,7 @@ def render_result_table(columns, rows):
         +----+----+
         printed all 1 rows.
     """
-    trailer = "printed all {} rows.".format(len(rows))
+    trailer = f"printed all {len(rows)} rows."
     if not columns:
         return trailer
 
@@ -547,13 +540,13 @@ def run_script(spark, script_path):
     The script runs with ``spark`` in scope and is responsible for its own
     imports.
     """
-    with open(script_path, "r") as f:
+    with open(script_path) as f:
         code = f.read()
     namespace = {"spark": spark}
     exec(compile(code, script_path, "exec"), namespace)
     if "df" not in namespace:
         raise AssertionError(
-            "Test script {} must assign a DataFrame to a variable named `df`".format(script_path)
+            f"Test script {script_path} must assign a DataFrame to a variable named `df`"
         )
     return namespace["df"]
 
@@ -616,11 +609,11 @@ def _validate_test_file(test_file, header, cases, regenerate):
     assert not unknown_header, "{}: unknown header sections: {}".format(
         test_file, ", ".join(sorted(unknown_header))
     )
-    assert cases, "{}: no test cases found".format(test_file)
+    assert cases, f"{test_file}: no test cases found"
     for case in cases:
-        assert case.get("name"), "{}: every test case needs a name".format(test_file)
+        assert case.get("name"), f"{test_file}: every test case needs a name"
         name = case["name"]
-        assert case.get("script"), "{}: case `{}` needs a script".format(test_file, name)
+        assert case.get("script"), f"{test_file}: case `{name}` needs a script"
         # Unknown sections are dropped and rewritten by regeneration, so only
         # reject them in verify mode.  Enforcing this during regeneration would
         # block the very migration regeneration exists to perform: a section
@@ -643,8 +636,8 @@ def _validate_test_file(test_file, header, cases, regenerate):
         # sections yet; in verify mode such a case would pass vacuously.
         if not regenerate:
             assert any(case.get(key) is not None for key in _RESULT_SECTIONS), (
-                "{}: case `{}` has no expected_* sections and would assert "
-                "nothing; regenerate the golden files".format(test_file, name)
+                f"{test_file}: case `{name}` has no expected_* sections and would assert "
+                "nothing; regenerate the golden files"
             )
             # ``_compare_case`` only checks sections present in the file, so a
             # dropped section (merge/manual edit) silently shrinks coverage
@@ -669,8 +662,8 @@ def _validate_test_file(test_file, header, cases, regenerate):
                 # The result table and its hash are a pair; dropping one leaves
                 # the other asserting half the result, so require both or neither.
                 assert has_result == has_hash, (
-                    "{}: case `{}` must have both `expected_result` and "
-                    "`expected_result_hash` or neither".format(test_file, name)
+                    f"{test_file}: case `{name}` must have both `expected_result` and "
+                    "`expected_result_hash` or neither"
                 )
 
 
@@ -737,10 +730,10 @@ def _compare_case(test_case, case, actual):
         if got is None:
             produced = ", ".join(sorted(actual)) or "<nothing>"
             test_case.fail(
-                "[{}] expected section `{}` but the case produced: {}".format(name, key, produced)
+                f"[{name}] expected section `{key}` but the case produced: {produced}"
             )
         test_case.assertEqual(
             expected.strip("\n"),
             got.strip("\n"),
-            "[{}] mismatch in `{}`".format(name, key),
+            f"[{name}] mismatch in `{key}`",
         )

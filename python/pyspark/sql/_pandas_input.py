@@ -62,7 +62,9 @@ def _arrow_string_class_is_canonical(cls):
     properties, and NumPy-semantics accessor dispatch using raw MRO lookups.
     """
     import pandas as pd
-    from pandas.core.arrays import base as array_base_module, string_ as string_module, string_arrow
+    from pandas.core.arrays import base as array_base_module
+    from pandas.core.arrays import string_ as string_module
+    from pandas.core.arrays import string_arrow
     from pandas.core.arrays.arrow import array as arrow_module
 
     numpy_semantics = getattr(string_arrow, "ArrowStringArrayNumpySemantics", None)
@@ -86,6 +88,7 @@ def _arrow_string_class_is_canonical(cls):
                 access, "__getattribute__", string_arrow):
             return False
         from functools import partial
+
         from pandas.core.arrays import _arrow_string_mixins as string_mixins
 
         mixin = string_mixins.ArrowStringArrayMixin
@@ -172,7 +175,8 @@ def _has_canonical_structured_columns(columns, module, multi):
     import numpy as np
     from pandas.core import base as base_module
     from pandas.core.arrays import categorical as categorical_module
-    from pandas.core.indexes import base as index_module, frozen as frozen_module
+    from pandas.core.indexes import base as index_module
+    from pandas.core.indexes import frozen as frozen_module
 
     cls = type(columns)
     if (cls.__getattribute__ is not object.__getattribute__
@@ -319,11 +323,14 @@ def _has_canonical_label_array(backing, pa):
     import numpy as np
 
     try:
-        from pandas.core.arrays import base as base_module, boolean as boolean_module
-        from pandas.core.arrays import floating as floating_module, integer as integer_module
-        from pandas.core.arrays import masked as masked_module, numeric as numeric_module
-        from pandas.core.arrays.arrow import array as arrow_module
         from pandas._libs.properties import CachedProperty
+        from pandas.core.arrays import base as base_module
+        from pandas.core.arrays import boolean as boolean_module
+        from pandas.core.arrays import floating as floating_module
+        from pandas.core.arrays import integer as integer_module
+        from pandas.core.arrays import masked as masked_module
+        from pandas.core.arrays import numeric as numeric_module
+        from pandas.core.arrays.arrow import array as arrow_module
     except ImportError:
         return False
     cls = type(backing)
@@ -435,9 +442,11 @@ def _has_canonical_columns(columns):
         return False
 
     try:
-        from pandas.core.arrays import numpy_ as numpy_module, string_ as string_module
-        from pandas.core.arrays import base as array_base_module, _mixins as mixins_module
         from pandas._libs.arrays import NDArrayBacked
+        from pandas.core.arrays import _mixins as mixins_module
+        from pandas.core.arrays import base as array_base_module
+        from pandas.core.arrays import numpy_ as numpy_module
+        from pandas.core.arrays import string_ as string_module
         from pandas.core.arrays import string_arrow as string_arrow_module
         from pandas.core.arrays.arrow import array as arrow_module
     except ImportError:
@@ -550,7 +559,14 @@ def prepare_int64_table(frame, schema):
         return None
 
     from pyspark._pyspark import (
-        AtomicType, BooleanType, ByteType, ShortType, IntegerType, LongType, StructField, StructType,
+        AtomicType,
+        BooleanType,
+        ByteType,
+        IntegerType,
+        LongType,
+        ShortType,
+        StructField,
+        StructType,
     )
     from pyspark.sql import types as sql_types
 
@@ -681,7 +697,8 @@ def timestamp_columns(frame, schema):
 
     import numpy as np
     import pandas as pd
-    from pandas.core import frame as frame_module, generic as generic_module
+    from pandas.core import frame as frame_module
+    from pandas.core import generic as generic_module
     try:
         from pandas.core.arrays.datetimes import DatetimeArray
         from pandas.core.dtypes.dtypes import DatetimeTZDtype
@@ -690,9 +707,23 @@ def timestamp_columns(frame, schema):
     except ImportError:
         return None
     from pyspark._pyspark import (
-        AtomicType, BooleanType, ByteType, ShortType, IntegerType, LongType, FloatType,
-        DoubleType, DecimalType, StringType, BinaryType, DateType, TimestampType,
-        StructField, StructType as NativeStructType,
+        AtomicType,
+        BinaryType,
+        BooleanType,
+        ByteType,
+        DateType,
+        DecimalType,
+        DoubleType,
+        FloatType,
+        IntegerType,
+        LongType,
+        ShortType,
+        StringType,
+        StructField,
+        TimestampType,
+    )
+    from pyspark._pyspark import (
+        StructType as NativeStructType,
     )
     from pyspark.sql import types as sql_types
 
@@ -842,12 +873,14 @@ def prepare_timestamp_table(columns, schema, timezone):
 
 def prepare_float64_table(frame, schema):
     """Keep explicit native double columns columnar without changing pandas nulls."""
+    from types import FunctionType, GetSetDescriptorType, WrapperDescriptorType
+
     import numpy as np
     import pandas as pd
-    from pandas.core import frame as frame_module, generic as generic_module
+    from pandas.core import frame as frame_module
+    from pandas.core import generic as generic_module
     from pandas.core.frame import DataFrame
     from pandas.core.series import Series
-    from types import FunctionType, GetSetDescriptorType, WrapperDescriptorType
 
     from pyspark import _pyspark as native
     from pyspark.sql import types as sql_types
@@ -963,14 +996,17 @@ def prepare_string_input(frame, schema):
     conversion hooks, and pandas treats several other objects as missing values.
     Those cases must keep the existing row conversion and its error ordering.
     """
-    import numpy as np
-    import pandas as pd
-    from pandas.core import frame as frame_module, generic as generic_module
-    from pandas.core.frame import DataFrame
-    from pandas.core.series import Series
     from types import GetSetDescriptorType, MethodDescriptorType, WrapperDescriptorType
 
-    from pyspark._pyspark import StringType, StructField, StructType as NativeStructType
+    import numpy as np
+    import pandas as pd
+    from pandas.core import frame as frame_module
+    from pandas.core import generic as generic_module
+    from pandas.core.frame import DataFrame
+    from pandas.core.series import Series
+
+    from pyspark._pyspark import StringType, StructField
+    from pyspark._pyspark import StructType as NativeStructType
     from pyspark.sql import types as sql_types
 
     # Keep small frames on the established row path.
@@ -1121,19 +1157,33 @@ def prepare_date_table(frame, schema):
     conversion hooks, and pandas treats several other objects as missing values.
     Those cases must keep the existing row conversion and its error ordering.
     """
-    from datetime import date
     import sys
+    from datetime import date
+    from types import FunctionType, GetSetDescriptorType, WrapperDescriptorType
 
     import numpy as np
     import pandas as pd
-    from pandas.core import frame as frame_module, generic as generic_module
+    from pandas.core import frame as frame_module
+    from pandas.core import generic as generic_module
     from pandas.core.frame import DataFrame
     from pandas.core.series import Series
-    from types import FunctionType, GetSetDescriptorType, WrapperDescriptorType
 
     from pyspark._pyspark import (
-        AtomicType, BooleanType, ByteType, ShortType, IntegerType, LongType, FloatType,
-        DoubleType, DecimalType, StringType, BinaryType, DateType, StructField,
+        AtomicType,
+        BinaryType,
+        BooleanType,
+        ByteType,
+        DateType,
+        DecimalType,
+        DoubleType,
+        FloatType,
+        IntegerType,
+        LongType,
+        ShortType,
+        StringType,
+        StructField,
+    )
+    from pyspark._pyspark import (
         StructType as NativeStructType,
     )
     from pyspark.sql import types as sql_types
@@ -1403,7 +1453,8 @@ def accepts_pandas_frame(frame):
             return False
     # The native row path normalizes cells through these methods, which a customized class
     # or instance keeps on the row path.
-    from pandas.core import frame as frame_module, generic as generic_module
+    from pandas.core import frame as frame_module
+    from pandas.core import generic as generic_module
 
     if any(name in vars(frame) for name in ("astype", "notna", "where")):
         return False
@@ -1429,10 +1480,10 @@ def prepare_pandas_table(frame, schema, timezone, safecheck, prefers_large_types
     and overflow messages. The caller checks the frame with `accepts_pandas_table` and
     the column count against the schema first.
     """
+    import pyarrow as pa
+
     from pyspark.sql.pandas.conversion import create_arrow_table_from_pandas
     from pyspark.sql.pandas.types import _deduplicate_field_names, to_arrow_schema
-
-    import pyarrow as pa
 
     deduplicated = _deduplicate_field_names(schema)
     arrow_schema = to_arrow_schema(
@@ -1461,10 +1512,11 @@ def arrow_decimal_column(values, dtype, name):
     as Arrow types and converts it: PySpark's conversion of pandas leaves such a column to
     Arrow, which takes ints as Decimals and raises for the others."""
     import pyarrow as pa
+
     from pyspark.errors import PySparkTypeError, PySparkValueError
 
-    message = ("Exception thrown when converting pandas.Series (%s) with name '%s' to Arrow "
-               "Array (None)." % (dtype, name))
+    message = (f"Exception thrown when converting pandas.Series ({dtype}) with name '{name}' to Arrow "
+               "Array (None).")
     try:
         array = pa.array(values, from_pandas=True)
     except pa.lib.ArrowException as e:
@@ -1675,6 +1727,7 @@ def prepare_inferred_pandas_row_column(values, name, timezone, safecheck,
     Return the inferred Spark type and the original one-column Arrow table.
     """
     from pandas.core.frame import DataFrame
+
     from pyspark.sql.pandas.types import from_arrow_type
 
     frame = DataFrame({name: values}, dtype=object)
