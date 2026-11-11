@@ -51,6 +51,9 @@ cp "$PROJECT_DIR/../../LICENSE" "$BUILD_DIR/classes/META-INF/LICENSE"
 if [[ -f "$PROJECT_DIR/../../NOTICE" ]]; then
   cp "$PROJECT_DIR/../../NOTICE" "$BUILD_DIR/classes/META-INF/NOTICE"
 fi
+NATIVE_VERSION="$("${NATIVE_BUILD_PYTHON:-python3}" "$PROJECT_DIR/jvm/package-native.py" --print-version)"
+printf 'artifact.version=%s\nnative.abi.version=1\n' "$NATIVE_VERSION" \
+  > "$BUILD_DIR/classes/META-INF/spark-connect-native-adapter.properties"
 "$JAR" --create --file "$BUILD_DIR/spark-connect-native-bridge.jar" -C "$BUILD_DIR/classes" .
 echo "$BUILD_DIR/spark-connect-native-bridge.jar"
 if [[ "${1:-}" == "--tests" ]]; then

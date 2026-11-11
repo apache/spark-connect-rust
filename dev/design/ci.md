@@ -264,15 +264,26 @@ workspace members, excluded from default Cargo builds. Their dedicated workflow
 runs on changes to these crates, their protocol/client dependencies, workspace
 dependencies and build configuration. Existing client workflows remain in place.
 
-The job installs Rust 1.88, JDK 21 and `protoc`, then runs the server and JNI Rust
-tests, strict Clippy for the new crates, the Python acceptance-runner guard tests,
-and the C Arrow ownership tests with and without sanitizers. The Rust tests use
-deterministic engine fixtures and do not require a Spark distribution. The JDK
-provides JNI headers for compiling the C adapter. Workspace-wide lint also sets
-up JDK 21 because its `--workspace` Clippy command includes the JNI crate.
+The workflow uses native Linux and macOS runners for x86-64 and ARM64. Each job
+installs Rust 1.88, JDK 21 and `protoc`, then runs the server and JNI Rust tests,
+strict native Clippy, Python acceptance/launcher and packaging tests, and the C
+Arrow ownership tests with and without sanitizers. LeakSanitizer is enabled on
+Linux; macOS runs AddressSanitizer and UndefinedBehaviorSanitizer without leak
+detection. The Rust tests use deterministic engine fixtures, and the JDK provides
+the C adapter's JNI headers. Workspace-wide lint also installs JDK 21 because its
+`--workspace` Clippy command includes the JNI crate.
 
-CI does not download a Spark snapshot, compile the Java adapter or run a live
-Spark JVM in this workflow. Those checks require the explicitly documented Spark
+Each platform job builds a release library, validates its binary architecture,
+packages it in a platform JAR, and runs the dependency-free Java loader tests
+against a JNI fixture and the actual packaged library. It uploads the JAR and
+SHA-256 sidecar as development CI artifacts. Linux builds use Ubuntu 22.04 and
+macOS builds set `MACOSX_DEPLOYMENT_TARGET=11.0`. A dependent job validates and
+combines all four artifacts into an all-platform native JAR, checks loading its
+matching library, and uploads that artifact. Neither job publishes to Maven.
+
+CI compiles the dependency-free Java loader, but does not download a Spark
+snapshot, compile the full Spark-dependent adapter or run a live Spark JVM in
+this workflow. Those checks require the explicitly documented Spark
 assembly and are run locally with `jvm/test-engine.sh`. The
 [server guide](../../crates/spark-connect-server/README.md) records the tested
 assembly and reproducible local commands. A passing native CI job alone does not

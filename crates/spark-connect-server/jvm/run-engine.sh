@@ -18,16 +18,32 @@
 
 set -euo pipefail
 
-if [[ $# -lt 1 || $# -gt 2 || "$1" != /* ]]; then
+usage() {
   echo "usage: $0 <absolute-native-library> [listen-address]" >&2
+  echo "       $0 --native-jar <absolute-native-jar> [listen-address]" >&2
   exit 1
+}
+[[ $# -ge 1 ]] || usage
+NATIVE_JAR=""
+if [[ "$1" == "--native-jar" ]]; then
+  [[ $# -ge 2 && $# -le 3 && "$2" == /* && -f "$2" && "$2" != *,* ]] || usage
+  NATIVE_JAR="$2"
+  NATIVE_INPUT=--bundled
+  LISTEN_ADDRESS="${3:-127.0.0.1:15002}"
+else
+  [[ $# -le 2 && "$1" == /* && -f "$1" ]] || usage
+  NATIVE_INPUT="$1"
+  LISTEN_ADDRESS="${2:-127.0.0.1:15002}"
 fi
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 "$PROJECT_DIR/jvm/build.sh"
 unset SPARK_REMOTE
 export SPARK_LOCAL_IP="${SPARK_LOCAL_IP:-127.0.0.1}"
 export SPARK_CONNECT_MODE=0
-exec "$SPARK_HOME/bin/spark-submit" \
-  --class org.apache.spark.sql.connect.nativebridge.engine.EmbeddedSparkEngine \
-  --master "${SPARK_MASTER:-local[2]}" \
-  "$PROJECT_DIR/.build/jvm/spark-connect-native-bridge.jar" "$1" "${2:-127.0.0.1:15002}"
+SPARK_ARGUMENTS=(--class org.apache.spark.sql.connect.nativebridge.engine.EmbeddedSparkEngine
+  --master "${SPARK_MASTER:-local[2]}")
+if [[ -n "$NATIVE_JAR" ]]; then
+  SPARK_ARGUMENTS+=(--jars "$NATIVE_JAR")
+fi
+exec "$SPARK_HOME/bin/spark-submit" "${SPARK_ARGUMENTS[@]}" \
+  "$PROJECT_DIR/.build/jvm/spark-connect-native-bridge.jar" "$NATIVE_INPUT" "$LISTEN_ADDRESS"

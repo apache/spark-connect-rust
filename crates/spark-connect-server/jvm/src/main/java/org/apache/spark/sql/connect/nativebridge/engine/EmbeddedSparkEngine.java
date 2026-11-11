@@ -34,7 +34,7 @@ public final class EmbeddedSparkEngine {
   public static void main(String[] arguments) throws InterruptedException {
     if (arguments.length < 1 || arguments.length > 2) {
       throw new IllegalArgumentException(
-          "usage: EmbeddedSparkEngine <absolute-native-library> [listen-address]");
+          "usage: EmbeddedSparkEngine <absolute-native-library|--bundled> [listen-address]");
     }
     String address = arguments.length == 2 ? arguments[1] : "127.0.0.1:15002";
     SparkSession session = SparkSession.builder().appName("Rust Spark Connect with Catalyst")
@@ -48,7 +48,9 @@ public final class EmbeddedSparkEngine {
     Object hook = null;
     try {
       engine = new SparkJvmEngine(session);
-      server = new NativeEngineServer(arguments[0], address, engine);
+      server = "--bundled".equals(arguments[0])
+          ? new NativeEngineServer(address, engine)
+          : new NativeEngineServer(arguments[0], address, engine);
       // NativeEngineServer owns the engine after acquisition; the extra idempotent close also
       // covers Java-side startup failures before acquisition and keeps one cleanup helper.
       SparkJvmEngine shutdownEngine = engine;

@@ -18,11 +18,13 @@
 """Launch the native server inside Spark and run reproducible lifecycle/API acceptance."""
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import shutil
+import shlex
 import signal
 import socket
 import subprocess
@@ -83,6 +85,8 @@ def listener_owner_pids(port, *, proc_root=Path("/proc")):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--library", required=True, type=Path, help="built JNI .dylib or .so")
+    parser.add_argument("--native-jar", type=Path,
+                        help="also exercise classpath loading from this native platform/all JAR")
     parser.add_argument("--spark-home", type=Path, default=os.environ.get("SPARK_HOME"))
     parser.add_argument("--python", default=sys.executable, help="official PySpark client/worker Python")
     parser.add_argument("--rust-example", type=Path, help="optional prebuilt official Rust client example")
@@ -94,6 +98,7 @@ def main():
         parser.error("acceptance checks require Python assertions; unset PYTHONOPTIMIZE")
     root = Path(__file__).resolve().parents[1]
     library = args.library.resolve(strict=True)
+    native_jar = args.native_jar.resolve(strict=True) if args.native_jar else None
     spark_home = args.spark_home.resolve(strict=True)
     reports = root / ".build" / "jvm-native"
     reports.mkdir(parents=True, exist_ok=True)
@@ -121,6 +126,7 @@ def main():
               "--conf", "spark.sql.warehouse.dir=" + str(build / "warehouse")]
     marker = SHUTDOWN_COMPLETE
     report = {"backend": "spark-jvm", "library": str(library), "spark_home": str(spark_home),
+              "native_jar": str(native_jar) if native_jar else None,
               "run_directory": str(build), "results": []}
     server = None
     log = None
@@ -166,10 +172,16 @@ def main():
             str(tests_jar), str(library)])
         if "NATIVE_ENGINE_LIFECYCLE_OK" not in engine_lifecycle.stdout:
             raise RuntimeError("native engine lifecycle success marker missing")
-        command = common + ["--class",
+        # A private JVM temp root lets the check prove extracted library cleanup at exit.
+        native_temp = build / "native-temp"
+        native_temp.mkdir()
+        packaged_options = (["--jars", str(native_jar), "--conf",
+                             "spark.driver.extraJavaOptions=-Xcheck:jni -Djava.io.tmpdir="
+                             + shlex.quote(str(native_temp))] if native_jar else [])
+        command = common + packaged_options + ["--class",
                             "org.apache.spark.sql.connect.nativebridge.engine.EmbeddedSparkEngine",
                             str(production_jar),
-                            str(library), "127.0.0.1:0"]
+                            "--bundled" if native_jar else str(library), "127.0.0.1:0"]
         log_path = build / "server.log"
         log = log_path.open("w")
         server = subprocess.Popen(command, cwd=root, env=env, stdout=log, stderr=subprocess.STDOUT)
@@ -194,6 +206,13 @@ def main():
         report["listener_owner_pids"] = owners
         if owners != [server.pid]:
             raise RuntimeError("native listener is not owned exclusively by the Spark JVM")
+        if native_jar:
+            extracted = list(native_temp.rglob("libspark_connect_jni.*"))
+            if len(extracted) != 1:
+                raise RuntimeError("expected one extracted native library while server is running")
+            if hashlib.sha256(extracted[0].read_bytes()).digest() != hashlib.sha256(library.read_bytes()).digest():
+                raise RuntimeError("packaged library differs from selected native artifact")
+            report["extracted_native_library"] = str(extracted[0])
         env["SPARK_REMOTE"] = "sc://" + address
         report["remote"] = env["SPARK_REMOTE"]
         client_report = build / "engine-client.json"
@@ -225,6 +244,11 @@ def main():
             report["server_exit_code"] = server.returncode
         if log is not None:
             log.close()
+        if report.get("extracted_native_library"):
+            extracted = Path(report["extracted_native_library"])
+            report["extracted_library_cleaned"] = not extracted.exists() and not extracted.parent.exists()
+            if not report["extracted_library_cleaned"]:
+                report.setdefault("error", "extracted native library or private directory leaked at JVM exit")
         if address is not None:
             try:
                 with socket.create_connection(("127.0.0.1", int(address.rsplit(":", 1)[1])), timeout=1):

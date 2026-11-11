@@ -18,6 +18,7 @@
 """Check acceptance's shutdown and listener ownership evidence; no Spark needed."""
 
 from pathlib import Path
+import os
 import signal
 import subprocess
 import tempfile
@@ -111,6 +112,52 @@ class ListenerOwnershipTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaisesRegex(RuntimeError, "requires lsof or Linux /proc"):
                 listener_owner_pids(12345, proc_root=Path(directory))
+
+
+class LauncherArgumentsTest(unittest.TestCase):
+    def launch(self, bundled):
+        # Exercise the actual launcher with paths containing spaces. /bin/bash is
+        # deliberately used so macOS also checks its system Bash 3.2 behavior.
+        with tempfile.TemporaryDirectory(prefix="native launch space ") as directory:
+            root = Path(directory)
+            project = root / "project"
+            jvm = project / "jvm"
+            jvm.mkdir(parents=True)
+            launcher = jvm / "run-engine.sh"
+            launcher.write_bytes(Path(__file__).with_name("run-engine.sh").read_bytes())
+            build = jvm / "build.sh"
+            build.write_text("#!/bin/bash\nexit 0\n")
+            build.chmod(0o755)
+            spark = root / "spark home"
+            (spark / "bin").mkdir(parents=True)
+            submit = spark / "bin" / "spark-submit"
+            submit.write_text('#!/bin/bash\nprintf "%s\\0" "${SPARK_REMOTE-unset}" '
+                              '"$SPARK_CONNECT_MODE" "$@" > "$NATIVE_LAUNCH_CAPTURE"\n')
+            submit.chmod(0o755)
+            native = root / ("native artifact.jar" if bundled else "native artifact.so")
+            native.touch()
+            capture = root / "arguments"
+            environment = os.environ.copy()
+            environment.update(SPARK_HOME=str(spark), SPARK_REMOTE="sc://must-be-cleared",
+                               NATIVE_LAUNCH_CAPTURE=str(capture))
+            arguments = ["--native-jar", str(native)] if bundled else [str(native)]
+            subprocess.run(["/bin/bash", str(launcher), *arguments, "127.0.0.1:0"],
+                           env=environment, check=True, capture_output=True, timeout=10)
+            actual = capture.read_bytes().decode().rstrip("\0").split("\0")
+            expected = ["unset", "0", "--class",
+                        "org.apache.spark.sql.connect.nativebridge.engine.EmbeddedSparkEngine",
+                        "--master", environment.get("SPARK_MASTER", "local[2]")]
+            if bundled:
+                expected += ["--jars", str(native)]
+            expected += [str(project / ".build/jvm/spark-connect-native-bridge.jar"),
+                         "--bundled" if bundled else str(native), "127.0.0.1:0"]
+            self.assertEqual(actual, expected)
+
+    def test_explicit_path_on_system_bash(self):
+        self.launch(False)
+
+    def test_packaged_path_on_system_bash(self):
+        self.launch(True)
 
 
 if __name__ == "__main__":

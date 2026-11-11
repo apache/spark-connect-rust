@@ -39,6 +39,8 @@ listener on loopback and read the [security policy](../../SECURITY.md) before us
 - Rust 1.88 or newer, Cargo and `protoc`.
 - JDK 21, a C compiler with C11/pthread support and JNI headers. Set `JAVA_HOME`
   to the JDK directory.
+- Python 3.9 or newer for artifact metadata and packaging. Java build scripts use
+  `python3`; set `NATIVE_BUILD_PYTHON` to select another interpreter.
 - macOS or Linux. Windows is not supported by this prototype.
 - A compatible Spark assembly containing the shaded Connect protobuf/gRPC jars.
   Set `SPARK_HOME` to its directory. The scripts accept jars in either
@@ -100,6 +102,75 @@ releases engine sessions and closes the Rust listener before Spark is stopped.
 The native library is process-lived; unloading it while the JVM continues running
 is unsupported. A failed drain is reported, and resources can remain retained
 until teardown succeeds or the process exits.
+
+## Bundle native libraries in JARs
+
+The Java adapter is shared across operating systems and CPU architectures for a
+compatible Spark/Scala/JDK combination. Native code is packaged separately for
+`linux-x86_64`, `linux-aarch64`, `macos-x86_64` and `macos-aarch64`. Each platform
+JAR contains the library and version, ABI and SHA-256 metadata under
+`META-INF/native/<platform>/`. The artifact version comes from `jni/Cargo.toml`;
+it currently is `0.1.0`, independently of the client workspace's Spark version.
+
+After building the native library and Java adapter, package them with Python 3:
+
+```bash
+crates/spark-connect-server/jvm/build.sh
+python3 crates/spark-connect-server/jvm/package-native.py \
+  --library "$NATIVE_LIBRARY" \
+  --adapter-jar crates/spark-connect-server/.build/jvm/spark-connect-native-bridge.jar \
+  --output-dir crates/spark-connect-server/.build/jars
+```
+
+This produces a shared `spark-connect-native-adapter-0.1.0.jar`, the current
+platform's `spark-connect-native-0.1.0-<platform>.jar`, and checksum sidecars.
+The packager checks the actual ELF or Mach-O header against the selected
+platform. Selecting another platform does not cross-compile the library.
+
+For example, launch the packaged native library on macOS ARM64:
+
+```bash
+crates/spark-connect-server/jvm/run-engine.sh --native-jar \
+  "$PWD/crates/spark-connect-server/.build/jars/spark-connect-native-0.1.0-macos-aarch64.jar" \
+  127.0.0.1:15002
+```
+
+For a deployment using already built JARs, pass the platform JAR with
+`spark-submit --jars`, use the shared adapter JAR as the application JAR, and
+invoke `EmbeddedSparkEngine --bundled [listen-address]`. An existing host can
+use `new NativeEngineServer(listenAddress, engine)` with both JARs on its
+classpath. The explicit absolute-library-path constructor remains available.
+
+The loader detects the host platform, checks matching artifact and ABI versions
+and the library checksum, then extracts the library into a private temporary
+directory before calling `System.load`. Exactly one matching adapter metadata,
+platform metadata and library resource must be visible to the adapter's defining
+classloader. Mixing duplicate or incompatible native JARs fails explicitly.
+The extracted library stays available for the process lifetime and is removed
+at normal JVM exit. Abrupt process termination can leave the temporary directory.
+If the default temporary filesystem is mounted `noexec`, set `-Djava.io.tmpdir`
+(through `spark.driver.extraJavaOptions` for Spark) to a private directory on a
+filesystem that permits loading native libraries.
+
+The native CI matrix builds and tests each of the four targets on a runner with
+the matching architecture, uploads the platform JARs, and combines them into
+`spark-connect-native-0.1.0-all.jar`. The all-platform JAR includes the native
+resources; applications still need the shared Java adapter JAR. To combine
+downloaded platform artifacts locally:
+
+```bash
+python3 crates/spark-connect-server/jvm/package-native.py \
+  --combine /path/to/platform-jars/spark-connect-native-0.1.0-linux-x86_64.jar \
+    /path/to/platform-jars/spark-connect-native-0.1.0-linux-aarch64.jar \
+    /path/to/platform-jars/spark-connect-native-0.1.0-macos-x86_64.jar \
+    /path/to/platform-jars/spark-connect-native-0.1.0-macos-aarch64.jar \
+  --output-dir crates/spark-connect-server/.build/jars
+```
+
+Linux artifacts are built on Ubuntu 22.04 and require glibc 2.35 or newer; musl
+is outside this matrix. macOS artifacts target macOS 11 or newer. These are
+development CI artifacts, with no Maven Central publication in this WIP. Native
+packaging does not expand the Spark assembly compatibility described above.
 
 ## Supported scope
 
@@ -204,6 +275,8 @@ cargo clippy -p spark-connect-server -p spark-connect-jni --all-targets --no-dep
 crates/spark-connect-server/jni/test-c-export.sh
 crates/spark-connect-server/jni/test-c-export.sh --sanitize
 python3 -B crates/spark-connect-server/jvm/test_acceptance_guards.py
+python3 -B crates/spark-connect-server/jvm/test_package_native.py
+crates/spark-connect-server/jvm/test-native-loader.sh
 ```
 
 The C ownership runner supports macOS and Linux; sanitizer mode requires a
@@ -239,8 +312,17 @@ These interoperability tests complement the Rust tests. The default report is
 `crates/spark-connect-server/.build/jvm-native/engine-acceptance.json`; pass
 `--output /absolute/report.json` to choose another path.
 
+Pass `--native-jar /absolute/platform-or-all.jar` as well as `--library` to run
+the client acceptance through classpath extraction. The lifecycle checks still
+exercise explicit-path loading. This mode checks the extracted library bytes
+against `--library`, and verifies that the extracted file and private directory
+are removed after JVM exit.
+
 The native CI workflow runs the deterministic Rust tests, strict native Clippy,
-acceptance-runner guards and C ownership checks. It does not download a Spark
-snapshot, compile Java or run live JNI acceptance. Those require the explicitly
+acceptance-runner guards, packaging tests and C ownership checks on its platform
+matrix. It builds release libraries, packages platform/all-platform JARs and
+tests actual native loading with a JDK-only loader suite. It does not download a
+Spark snapshot, compile the Spark-dependent Java adapter or run live Spark/JNI
+acceptance. Those require the explicitly
 selected assembly and must be validated locally. Passing native CI alone does not
 establish JVM compatibility.

@@ -34,12 +34,24 @@ import java.util.Objects;
 public final class NativeEngineServer implements AutoCloseable {
   private long handle;
 
+  /** Load the native library from the matching platform JAR on the adapter's classpath. */
+  public NativeEngineServer(String listenAddress, SparkJvmEngine engine) {
+    Objects.requireNonNull(listenAddress, "listenAddress");
+    Objects.requireNonNull(engine, "engine");
+    NativeLibraryLoader.loadBundled();
+    start(listenAddress, engine);
+  }
+
   public NativeEngineServer(String absoluteLibraryPath, String listenAddress, SparkJvmEngine engine) {
     Path library = Path.of(Objects.requireNonNull(absoluteLibraryPath, "absoluteLibraryPath"));
     if (!library.isAbsolute()) throw new IllegalArgumentException("native library path must be absolute");
     Objects.requireNonNull(listenAddress, "listenAddress");
     Objects.requireNonNull(engine, "engine");
-    System.load(library.toString());
+    NativeLibraryLoader.loadAbsolute(library);
+    start(listenAddress, engine);
+  }
+
+  private void start(String listenAddress, SparkJvmEngine engine) {
     handle = nativeStart(listenAddress.getBytes(StandardCharsets.UTF_8), engine);
     if (handle == 0) throw new IllegalStateException("native engine returned an invalid handle");
   }
