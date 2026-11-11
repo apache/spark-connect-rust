@@ -1396,6 +1396,22 @@ def test_repartition_does_not_unpack_a_list_among_its_columns_as_pyspark(mock_co
     df.repartitionByRange(2, "id", F.col("id"))
 
 
+def test_is_empty_sends_a_limit_of_one_row_over_an_empty_projection_as_pyspark(mock_connect):
+    # As PySpark's select().take(1): Limit(1) over a Project with no expressions.
+    spark, service = mock_connect
+    spark.range(3).isEmpty()
+    # ExecutePlanRequest.plan=3, Plan.root=1; Relation.limit=8, project=3, range=15;
+    # Project.expressions=3.
+    plan = parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0]
+    relation = parse_message(plan)
+    assert 9 not in relation
+    limit = parse_message(relation[8][0])
+    assert limit[2] == [1]
+    project = parse_message(parse_message(limit[1][0])[3][0])
+    assert 3 not in project
+    assert 15 in parse_message(project[1][0])
+
+
 def test_session_id_of_any_uuid_version_and_the_user_id_of_the_requests(monkeypatch, mock_connect):
     # A session_id is any UUID, as uuid.UUID(session_id, version=4) takes it, and is sent as
     # given. The user ID of each request is SPARK_USER, else USER, as PySpark sets it.
