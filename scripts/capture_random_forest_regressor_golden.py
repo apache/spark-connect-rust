@@ -6,15 +6,17 @@ import base64
 import json
 from pathlib import Path
 
-from pyspark.ml.regression import RandomForestRegressor
 from pyspark.ml.connect.serialize import serialize_ml_params
+from pyspark.ml.regression import RandomForestRegressor
 from pyspark.sql import SparkSession
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--remote", default="sc://localhost:15002")
-    parser.add_argument("--out", type=Path, default=Path("tests/golden/random_forest_regressor.json"))
+    parser.add_argument(
+        "--out", type=Path, default=Path("tests/golden/random_forest_regressor.json")
+    )
     args = parser.parse_args()
     spark = SparkSession.builder.remote(args.remote).getOrCreate()
     # These literal-only parameters need no RPC, including when closing the client.
