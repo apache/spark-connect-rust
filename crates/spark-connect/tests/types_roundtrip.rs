@@ -1184,3 +1184,297 @@ fn to_ddl_comments_round_trip_through_the_server_parser() {
         );
     }
 }
+
+/// What one of the two parsers of type strings makes of a string: a type, or an error.
+type Parsed = Option<DataType>;
+
+/// `text` as the JSON parser reads it, the string of a type of `DataType::from_json`.
+fn parsed_as_json(text: &str) -> Parsed {
+    DataType::from_json(&serde_json::Value::String(text.to_string())).ok()
+}
+
+/// `text` as the DDL parser reads it. It is read alone and as the element of an array, where it
+/// cannot be taken for a `name type` field, and the two have to agree.
+fn parsed_as_ddl(text: &str) -> Parsed {
+    let alone = DataType::from_ddl(text).ok();
+    let element = match DataType::from_ddl(&format!("array<{text}>")) {
+        Ok(DataType::Array { element_type, .. }) => Some(*element_type),
+        Ok(other) => panic!("array<{text}> is not an array: {other:?}"),
+        Err(_) => None,
+    };
+    assert_eq!(alone, element, "DDL {text:?} alone and in an array");
+    alone
+}
+
+/// The JSON and the DDL parser share one parser of each atomic and parameterized form, so a form
+/// is the same type, or the same error, of both. The exceptions are the differences of the two
+/// grammars of PySpark: those of `_parse_datatype_json_value`, which reads JSON on the client,
+/// and of the server's parser, which reads DDL. Each row of the tables is fed through both.
+#[test]
+fn json_and_ddl_parsers_agree_on_the_atomic_and_parameterized_forms() {
+    let decimal = |precision, scale| DataType::Decimal { precision, scale };
+    let string = |collation: &str| DataType::String {
+        collation: collation.to_string(),
+    };
+    let year_month = |start_field, end_field| DataType::YearMonthInterval {
+        start_field,
+        end_field,
+    };
+    let day_time = |start_field, end_field| DataType::DayTimeInterval {
+        start_field,
+        end_field,
+    };
+
+    // The same type of both parsers.
+    let same: Vec<(&str, DataType)> = vec![
+        ("void", DataType::Null),
+        ("null", DataType::Null),
+        ("boolean", DataType::Boolean),
+        ("byte", DataType::Byte),
+        ("short", DataType::Short),
+        ("integer", DataType::Integer),
+        ("long", DataType::Long),
+        ("float", DataType::Float),
+        ("double", DataType::Double),
+        ("string", string("UTF8_BINARY")),
+        ("binary", DataType::Binary),
+        ("date", DataType::Date),
+        ("timestamp", DataType::Timestamp),
+        ("timestamp_ntz", DataType::TimestampNtz),
+        ("variant", DataType::Variant),
+        // The defaults of the bare names.
+        ("decimal", decimal(10, 0)),
+        ("time", DataType::Time { precision: 6 }),
+        ("interval", DataType::CalendarInterval),
+        // decimal(p,s), with whitespace around its arguments.
+        ("decimal(10,2)", decimal(10, 2)),
+        ("decimal( 10 , 2 )", decimal(10, 2)),
+        ("decimal(38,18)", decimal(38, 18)),
+        // Neither parser checks the range of a precision or a scale, as PySpark's does not: the
+        // server refuses the type, and the conversion to Arrow refuses what Arrow cannot hold.
+        ("decimal(39,0)", decimal(39, 0)),
+        ("decimal(300,0)", decimal(300, 0)),
+        ("decimal(5,6)", decimal(5, 6)),
+        ("decimal(0,0)", decimal(0, 0)),
+        // char(n), varchar(n) and time(p).
+        ("char(3)", DataType::Char { length: 3 }),
+        ("char( 3 )", DataType::Char { length: 3 }),
+        ("char(0)", DataType::Char { length: 0 }),
+        ("varchar(20)", DataType::Varchar { length: 20 }),
+        ("varchar( 20 )", DataType::Varchar { length: 20 }),
+        ("time(0)", DataType::Time { precision: 0 }),
+        ("time( 3 )", DataType::Time { precision: 3 }),
+        ("time(6)", DataType::Time { precision: 6 }),
+        ("time(9)", DataType::Time { precision: 9 }),
+        // The nanosecond timestamps.
+        (
+            "timestamp_ntz(9)",
+            DataType::TimestampNtzNanos { precision: 9 },
+        ),
+        (
+            "timestamp_ltz(7)",
+            DataType::TimestampLtzNanos { precision: 7 },
+        ),
+        // Intervals of one field, and of a range whose end is later than its start.
+        ("interval year", year_month(0, 0)),
+        ("interval month", year_month(1, 1)),
+        ("interval year to month", year_month(0, 1)),
+        ("interval day", day_time(0, 0)),
+        ("interval hour", day_time(1, 1)),
+        ("interval minute", day_time(2, 2)),
+        ("interval second", day_time(3, 3)),
+        ("interval day to hour", day_time(0, 1)),
+        ("interval day to second", day_time(0, 3)),
+        ("interval hour to minute", day_time(1, 2)),
+        ("interval minute to second", day_time(2, 3)),
+        // A collation that is written in its canonical form, of any whitespace.
+        ("string collate UTF8_BINARY", string("UTF8_BINARY")),
+        ("string collate UTF8_LCASE", string("UTF8_LCASE")),
+        ("string collate UNICODE_CI", string("UNICODE_CI")),
+        ("string  collate\tUNICODE", string("UNICODE")),
+        (
+            "string collate sr_Cyrl_SRB_CI_AI",
+            string("sr_Cyrl_SRB_CI_AI"),
+        ),
+        // The spatial types, of an SRID or of a CRS.
+        ("geometry(4326)", DataType::Geometry { srid: 4326 }),
+        ("geometry(any)", DataType::Geometry { srid: -1 }),
+        ("geography(4326)", DataType::Geography { srid: 4326 }),
+    ];
+    for (text, expected) in &same {
+        assert_eq!(
+            parsed_as_json(text).as_ref(),
+            Some(expected),
+            "JSON {text:?}"
+        );
+        assert_eq!(parsed_as_ddl(text).as_ref(), Some(expected), "DDL {text:?}");
+    }
+
+    // An error of both parsers.
+    let neither = [
+        // An argument is of digits alone: no sign, but for the scale of a decimal of JSON.
+        "decimal()",
+        "decimal(,2)",
+        "decimal(a,2)",
+        "decimal(10,b)",
+        "decimal(10,2,3)",
+        "decimal(-5,2)",
+        "decimal(+5,2)",
+        "decimal(10,+2)",
+        "decimal(10,2",
+        "decimal(10 2)",
+        "decimal(1 0,2)",
+        "decimal(99999999999,0)",
+        "char()",
+        "char(x)",
+        "char(-3)",
+        "char(+3)",
+        "char(3,4)",
+        "char(3",
+        "varchar()",
+        "varchar(-1)",
+        "varchar(+1)",
+        "time()",
+        "time(a)",
+        "time(-1)",
+        "time(+6)",
+        "timestamp_ntz(3)",
+        "timestamp_ltz(10)",
+        "timestamp_ntz(+9)",
+        // An interval is of one family, and of nothing more.
+        "interval foo",
+        "intervalday",
+        "interval year to day",
+        "interval day to month",
+        "interval day to",
+        "interval to second",
+        "interval day second",
+        "interval day to second to hour",
+        "interval day to second xyz",
+        // A collated string names one collation, of letters, digits and underscores.
+        "string collate",
+        "string collate ",
+        "string collateUNICODE",
+        "string collate UNICODE CI",
+        "string collate UNI-CODE",
+        "string collate 'UNICODE'",
+        "string UNICODE",
+        "string collate other.builtin.UNICODE",
+        "char(5) collate UNICODE",
+        // Not a type.
+        "",
+        "foo",
+        "decimals",
+        "strings",
+    ];
+    for text in neither {
+        assert_eq!(parsed_as_json(text), None, "JSON {text:?}");
+        // An empty DDL string alone is the empty schema, so it is read as an element only.
+        if text.is_empty() {
+            assert!(DataType::from_ddl("array<>").is_err());
+        } else {
+            assert_eq!(parsed_as_ddl(text), None, "DDL {text:?}");
+        }
+    }
+
+    // The differences of the two grammars: (the string, of JSON, of DDL).
+    let differ: Vec<(&str, Parsed, Parsed)> = vec![
+        // JSON names a decimal with its scale (PySpark's `_FIXED_DECIMAL`); Spark's `decimal(p)`
+        // has scale 0.
+        ("decimal(5)", None, Some(decimal(5, 0))),
+        ("decimal( 5 )", None, Some(decimal(5, 0))),
+        // The JSON of `DecimalType(10, -2)` has its negative scale; an argument of Spark's
+        // grammar is an unsigned integer.
+        ("decimal(10,-2)", Some(decimal(10, -2)), None),
+        ("decimal(10, -2)", Some(decimal(10, -2)), None),
+        // PySpark reads the JSON of an interval of any two fields of a family, which is that
+        // of the type of its constructor, as `DayTimeIntervalType(3, 0)`; the end field of
+        // Spark's grammar is later than the start field.
+        ("interval second to day", Some(day_time(3, 0)), None),
+        ("interval hour to day", Some(day_time(1, 0)), None),
+        ("interval day to day", Some(day_time(0, 0)), None),
+        ("interval month to year", Some(year_month(1, 0)), None),
+        ("interval year to year", Some(year_month(0, 0)), None),
+        // PySpark keeps the collation of JSON as it is written; the server gives the collation
+        // of DDL in its canonical form, and takes it qualified.
+        (
+            "string collate unicode_ci",
+            Some(string("unicode_ci")),
+            Some(string("UNICODE_CI")),
+        ),
+        (
+            "string collate utf8_binary",
+            Some(string("utf8_binary")),
+            Some(string("UTF8_BINARY")),
+        ),
+        (
+            "string collate SR_CYRL_SRB_ci",
+            Some(string("SR_CYRL_SRB_ci")),
+            Some(string("sr_Cyrl_SRB_CI")),
+        ),
+        (
+            "string collate system.builtin.unicode_ci",
+            None,
+            Some(string("UNICODE_CI")),
+        ),
+        (
+            "string collate SYSTEM.BUILTIN.UTF8_LCASE",
+            None,
+            Some(string("UTF8_LCASE")),
+        ),
+        // JSON is in lower case and of single spaces; the keywords of DDL are of any case and
+        // any whitespace.
+        ("DECIMAL(10,2)", None, Some(decimal(10, 2))),
+        ("decimal (10,2)", None, Some(decimal(10, 2))),
+        ("Char(3)", None, Some(DataType::Char { length: 3 })),
+        ("TIME(3)", None, Some(DataType::Time { precision: 3 })),
+        ("INTERVAL DAY TO SECOND", None, Some(day_time(0, 3))),
+        ("interval  day\tto second", None, Some(day_time(0, 3))),
+        (
+            "STRING COLLATE UNICODE_CI",
+            None,
+            Some(string("UNICODE_CI")),
+        ),
+        (" decimal(10,2)", None, Some(decimal(10, 2))),
+        ("decimal(10,2) ", None, Some(decimal(10, 2))),
+        // The names of Spark's grammar alone.
+        ("tinyint", None, Some(DataType::Byte)),
+        ("smallint", None, Some(DataType::Short)),
+        ("int", None, Some(DataType::Integer)),
+        ("bigint", None, Some(DataType::Long)),
+        ("real", None, Some(DataType::Float)),
+        ("dec(5,1)", None, Some(decimal(5, 1))),
+        ("numeric(5,1)", None, Some(decimal(5, 1))),
+        ("character(3)", None, Some(DataType::Char { length: 3 })),
+        ("timestamp_ltz", None, Some(DataType::Timestamp)),
+        ("timestamp_ntz(6)", None, Some(DataType::TimestampNtz)),
+        // The names of JSON alone.
+        ("calendarinterval", Some(DataType::CalendarInterval), None),
+        (
+            "unparsed(x)",
+            Some(DataType::Unparsed {
+                data_type_string: "x".to_string(),
+            }),
+            None,
+        ),
+    ];
+    for (text, json, ddl) in &differ {
+        assert_ne!(json, ddl, "{text:?} is not a difference");
+        assert_eq!(&parsed_as_json(text), json, "JSON {text:?}");
+        assert_eq!(&parsed_as_ddl(text), ddl, "DDL {text:?}");
+    }
+
+    // The JSON of a type is read back as the type, also of an interval that DDL cannot name.
+    for data_type in [
+        decimal(10, -2),
+        decimal(300, 0),
+        day_time(3, 0),
+        year_month(1, 0),
+        string("unicode_ci"),
+    ] {
+        assert_eq!(
+            DataType::from_json(&data_type.json_value()).unwrap(),
+            data_type
+        );
+    }
+}
