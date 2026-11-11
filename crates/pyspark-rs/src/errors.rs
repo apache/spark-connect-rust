@@ -5,6 +5,49 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
 use spark_connect_core::error::{ServerErrorInfo, SparkError, SparkErrorKind};
 
+/// Raise a `pyspark.errors` exception (`class_name`) carrying the given `error_class`
+/// condition and message parameters, mirroring the reference Column guard-rails.
+pub(crate) fn raise_pyspark(
+    py: Python<'_>,
+    class_name: &str,
+    error_class: &str,
+    params: &[(&str, &str)],
+) -> PyErr {
+    let build = || -> PyResult<PyErr> {
+        let cls = py.import("pyspark.errors")?.getattr(class_name)?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("errorClass", error_class)?;
+        let mp = PyDict::new(py);
+        for (k, v) in params {
+            mp.set_item(*k, *v)?;
+        }
+        kwargs.set_item("messageParameters", mp)?;
+        let exc = cls.call((), Some(&kwargs))?;
+        Ok(PyErr::from_value(exc))
+    };
+    build().unwrap_or_else(|e| e)
+}
+
+/// PySpark's `NOT_EXPECTED_TYPE` error of the argument `name`, `value`, which should be of
+/// the type `expected`.
+pub(crate) fn not_expected_type(value: &Bound<'_, PyAny>, name: &str, expected: &str) -> PyErr {
+    let type_name = value
+        .get_type()
+        .name()
+        .map(|name| name.to_string())
+        .unwrap_or_default();
+    raise_pyspark(
+        value.py(),
+        "PySparkTypeError",
+        "NOT_EXPECTED_TYPE",
+        &[
+            ("arg_name", name),
+            ("expected_type", expected),
+            ("arg_type", &type_name),
+        ],
+    )
+}
+
 /// Maps a SparkErrorKind to the corresponding pyspark.errors exception class name.
 /// Returns a string that can be used to retrieve the class from the pyspark.errors module.
 fn kind_to_pyspark_class_name(kind: SparkErrorKind) -> &'static str {

@@ -8,28 +8,10 @@ use spark_connect::group::StatFunctions;
 
 use crate::column::raise_pyspark;
 use crate::dataframe::PyDataFrame;
+// Re-exported for the modules that raise through `crate::stat_arguments::not_expected_type`.
+pub(crate) use crate::errors::not_expected_type;
 use crate::errors::ResultExt;
 use crate::interrupt::interruptible;
-
-/// PySpark's `NOT_EXPECTED_TYPE` error of the argument `name`, `value`, which should be of
-/// the type `expected`.
-pub(crate) fn not_expected_type(value: &Bound<'_, PyAny>, name: &str, expected: &str) -> PyErr {
-    let type_name = value
-        .get_type()
-        .name()
-        .map(|name| name.to_string())
-        .unwrap_or_default();
-    raise_pyspark(
-        value.py(),
-        "PySparkTypeError",
-        "NOT_EXPECTED_TYPE",
-        &[
-            ("arg_name", name),
-            ("expected_type", expected),
-            ("arg_type", &type_name),
-        ],
-    )
-}
 
 fn is_sequence(value: &Bound<'_, PyAny>) -> bool {
     value.is_instance_of::<PyList>() || value.is_instance_of::<PyTuple>()

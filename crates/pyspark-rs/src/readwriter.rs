@@ -7,7 +7,7 @@ use pyo3::types::PyDict;
 use spark_connect::readwriter::DataFrameReader;
 
 use crate::dataframe::PyDataFrame;
-use crate::errors::ResultExt;
+use crate::errors::{not_expected_type, ResultExt};
 
 /// Python wrapper for the batch DataFrameReader.
 ///
@@ -98,26 +98,6 @@ fn path_list(paths: &[Bound<'_, PyAny>]) -> PyResult<Vec<String>> {
             }
         })
         .collect()
-}
-
-/// PySpark's `NOT_EXPECTED_TYPE` error of the argument `name`, `value`, which should be of
-/// the type `expected`.
-fn not_expected_type(value: &Bound<'_, PyAny>, name: &str, expected: &str) -> PyErr {
-    let type_name = value
-        .get_type()
-        .name()
-        .map(|name| name.to_string())
-        .unwrap_or_default();
-    crate::column::raise_pyspark(
-        value.py(),
-        "PySparkTypeError",
-        "NOT_EXPECTED_TYPE",
-        &[
-            ("arg_name", name),
-            ("expected_type", expected),
-            ("arg_type", &type_name),
-        ],
-    )
 }
 
 /// The columns of `df.write.bucketBy(numBuckets, col, *cols)` and `sortBy(col, *cols)`, as
