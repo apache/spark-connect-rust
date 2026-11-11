@@ -28,7 +28,7 @@ use crate::artifact::{
 use crate::channel::{is_secret_param, ChannelBuilder, GRPC_MAX_MESSAGE_LENGTH_DEFAULT};
 use crate::error::{Result, SparkError, SparkErrorKind};
 use crate::reattach::ExecutePlanResponseReattachableIterator;
-use crate::retries::{retry_delay_ms, RetryPolicy, RetryPolicyState};
+use crate::retries::{retrying, unknown_operation, Backoff, RetryError, RetryPolicy, Retrying};
 use crate::thread_entries::forget_when_thread_ends;
 
 /// How long to wait for the lazy gRPC channel to become ready before surfacing a
@@ -220,16 +220,11 @@ fn assertion_error(message: String) -> SparkError {
     }
 }
 
-/// The error class of `status` when the server does not know the operation of a reattach, or
-/// its session, which the reference reads alike: the initial ExecutePlan never reached the
-/// server, unless a response was read already.
-fn unknown_operation(status: &tonic::Status) -> Option<&'static str> {
-    [
-        "INVALID_HANDLE.OPERATION_NOT_FOUND",
-        "INVALID_HANDLE.SESSION_NOT_FOUND",
-    ]
-    .into_iter()
-    .find(|error| status.message().contains(error))
+/// When a stream opened now passes `deadline`, the timeout of the call that opens it. A
+/// deadline too far to be a time, as of a duration set to its maximum, is never reached, so
+/// it is none, where adding it to the time would panic.
+fn stream_deadline_in(deadline: Option<Duration>) -> Option<tokio::time::Instant> {
+    deadline.and_then(|deadline| tokio::time::Instant::now().checked_add(deadline))
 }
 
 /// The error of a reattach to an operation that the server does not know, once a response was
@@ -240,18 +235,6 @@ fn response_already_received(error_type: &str) -> SparkError {
         "RESPONSE_ALREADY_RECEIVED",
         &[("error_type", error_type)],
     )
-}
-
-/// Whether the retries that the reference makes as `RetryException`s have run for the policy's
-/// elapsed-time bound, measured from the first of them, which starts `since` when it is unset.
-fn retry_exception_bound_passed(
-    policy: &RetryPolicy,
-    since: &mut Option<std::time::Instant>,
-) -> bool {
-    let since = *since.get_or_insert_with(std::time::Instant::now);
-    policy
-        .max_retry_exception_elapsed_time_ms
-        .is_some_and(|ms| since.elapsed() >= Duration::from_millis(ms))
 }
 
 const PLAN_COMPRESSION_THRESHOLD_CONF: &str = "spark.connect.session.planCompression.threshold";
@@ -1332,39 +1315,39 @@ impl SparkConnectClient {
         F: FnMut() -> Fut,
         Fut: std::future::Future<Output = std::result::Result<T, tonic::Status>>,
     {
-        let mut state = RetryPolicyState::new(self.retry_policy.clone());
-        loop {
-            // An attempt that is not answered ends with the signal that a wait of the caller
-            // takes, as PySpark's blocked call does.
-            let attempt =
-                match crate::runtime::until_abort(crate::runtime::ABORT_RETRIES, op()).await {
-                    Some(attempt) => attempt,
-                    None => return Err(wait_aborted()),
-                };
-            match attempt {
-                Ok(v) => return Ok(v),
-                Err(status) => {
-                    if self.retry_policy.can_retry(&status) {
-                        if let Some(wait_ms) = state.next_attempt(retry_delay_ms(&status)) {
-                            // The backoff ends with a signal, as PySpark's `Retrying` sleep does.
-                            let backoff =
-                                tokio::time::sleep(std::time::Duration::from_millis(wait_ms));
-                            if crate::runtime::until_abort(crate::runtime::ABORT_RETRIES, backoff)
-                                .await
-                                .is_none()
-                            {
-                                return Err(wait_aborted());
-                            }
-                            // As the reference's `_stub`, through which each attempt goes: once
-                            // the client is closed (its session stopped while the call waited),
-                            // the retry raises NO_ACTIVE_SESSION and sends nothing.
-                            self.ensure_open()?;
-                            continue;
-                        }
-                    }
-                    return Err(self.error_from_status(status).await);
+        self.with_attempts(|| {
+            let call = op();
+            async move {
+                // An attempt that is not answered ends with the signal that a wait of the caller
+                // takes, as PySpark's blocked call does.
+                match crate::runtime::until_abort(crate::runtime::ABORT_RETRIES, call).await {
+                    Some(result) => result.map_err(RetryError::Status),
+                    None => Err(RetryError::Aborted(wait_aborted())),
                 }
             }
+        })
+        .await
+    }
+
+    /// Makes the attempts of a call of this client under its retry policy (see [`retrying`]),
+    /// and gives the failed RPC that ends them as the error of the server. An attempt may fail
+    /// with an error that is not a failed RPC, which is not retried. The backoff before a retry
+    /// ends with a signal that the wait of the caller takes, as the sleep of PySpark's
+    /// `Retrying` does.
+    async fn with_attempts<T, Fut>(&self, attempt: impl FnMut() -> Fut) -> Result<T>
+    where
+        Fut: std::future::Future<Output = std::result::Result<T, RetryError<SparkError>>>,
+    {
+        let retries = Retrying::new(&self.retry_policy).ending_with_abort();
+        // As the reference's `_stub`, through which each attempt goes: once the client is closed
+        // (its session stopped while the call waited), the retry raises NO_ACTIVE_SESSION and
+        // sends nothing.
+        let still_open = || self.ensure_open();
+        match retrying(retries, still_open, attempt).await {
+            Ok(value) => Ok(value),
+            Err(RetryError::Status(status)) => Err(self.error_from_status(status).await),
+            Err(RetryError::Aborted(error)) => Err(error),
+            Err(RetryError::WaitAborted) => Err(wait_aborted()),
         }
     }
 
@@ -1414,7 +1397,7 @@ impl SparkConnectClient {
                 let request = clone_on_grown_stack(iter.request());
                 let mut req = with_deadline(Request::new(request), deadline);
                 self._attach_metadata(&mut req);
-                stream_deadline = deadline.map(|d| tokio::time::Instant::now() + d);
+                stream_deadline = stream_deadline_in(deadline);
                 let mut stub = self.stub.clone();
                 async move {
                     within_deadline(deadline, stub.execute_plan(req))
@@ -2122,39 +2105,20 @@ impl SparkConnectClient {
     /// a stream is not resumed. The frames are read as the RPC consumes them, so an attempt
     /// holds one chunk of the artifact at a time.
     async fn upload_artifact(&self, artifact: &NamedArtifact) -> Result<()> {
-        let mut state = RetryPolicyState::new(self.retry_policy.clone());
-        loop {
-            // A data source that cannot be opened is an error before any frame is sent.
-            let frames = ArtifactFrames::new(self.session_id.clone(), artifact)?;
-            let failure = frames.failure();
-            let result = self.add_artifacts_rpc(frames).await;
-            // A read that failed ended the frames early, whatever the RPC answered.
-            take_frame_failure(&failure)?;
-            match result {
-                Ok(response) => {
-                    self.verify_response(&response.session_id, &response.server_side_session_id)?;
-                    return check_artifact_upload(response, None);
-                }
-                Err(status) => {
-                    if self.retry_policy.can_retry(&status) {
-                        if let Some(wait_ms) = state.next_attempt(retry_delay_ms(&status)) {
-                            let backoff =
-                                tokio::time::sleep(std::time::Duration::from_millis(wait_ms));
-                            if crate::runtime::until_abort(crate::runtime::ABORT_RETRIES, backoff)
-                                .await
-                                .is_none()
-                            {
-                                return Err(wait_aborted());
-                            }
-                            // As in `with_retry`: a closed client sends no more attempts.
-                            self.ensure_open()?;
-                            continue;
-                        }
-                    }
-                    return Err(self.error_from_status(status).await);
-                }
-            }
-        }
+        let response = self
+            .with_attempts(|| async move {
+                // A data source that cannot be opened is an error before any frame is sent.
+                let frames = ArtifactFrames::new(self.session_id.clone(), artifact)
+                    .map_err(RetryError::Aborted)?;
+                let failure = frames.failure();
+                let result = self.add_artifacts_rpc(frames).await;
+                // A read that failed ended the frames early, whatever the RPC answered.
+                take_frame_failure(&failure).map_err(RetryError::Aborted)?;
+                result.map_err(RetryError::Status)
+            })
+            .await?;
+        self.verify_response(&response.session_id, &response.server_side_session_id)?;
+        check_artifact_upload(response, None)
     }
 
     /// The AddArtifacts call of `requests`, once. Stamps user_context on every frame as it is
@@ -2394,30 +2358,34 @@ impl SparkConnectClient {
     /// `spark.connect.execute.manager.detachedTimeout`. As the reference's, the request carries
     /// no observed server-side session ID.
     fn spawn_release(&self, metadata: MetadataMap, request: ReleaseExecuteRequest) {
-        let mut stub = self.stub.clone();
+        let stub = self.stub.clone();
         let policy = self.retry_policy.clone();
         let release = async move {
-            let mut state = RetryPolicyState::new(policy.clone());
-            loop {
+            // As the reference's, which goes through the stub of its iterator rather than the
+            // `_stub` of the client: a release is retried whether or not the client was closed.
+            let whatever_the_client = || Ok::<(), std::convert::Infallible>(());
+            let released = retrying(Retrying::new(&policy), whatever_the_client, || {
                 let mut req = Request::new(request.clone());
                 *req.metadata_mut() = metadata.clone();
-                match stub.release_execute(req).await {
-                    Ok(_) => return,
-                    Err(status) => {
-                        if policy.can_retry(&status) {
-                            if let Some(w) = state.next_attempt(retry_delay_ms(&status)) {
-                                tokio::time::sleep(Duration::from_millis(w)).await;
-                                continue;
-                            }
-                        }
-                        tracing::warn!(
-                            "ReleaseExecute of operation {} failed: {}",
-                            request.operation_id,
-                            status
-                        );
-                        return;
-                    }
+                let mut stub = stub.clone();
+                async move {
+                    stub.release_execute(req)
+                        .await
+                        .map(drop)
+                        .map_err(RetryError::Status)
                 }
+            })
+            .await;
+            match released {
+                Ok(()) => {}
+                Err(RetryError::Status(status)) => tracing::warn!(
+                    "ReleaseExecute of operation {} failed: {}",
+                    request.operation_id,
+                    status
+                ),
+                Err(RetryError::Aborted(never)) => match never {},
+                // Its backoffs are waited whole.
+                Err(RetryError::WaitAborted) => {}
             }
         };
         // A stream is read inside a runtime, but it can be dropped outside of any, for
@@ -2456,15 +2424,12 @@ impl ReattachableResponseStream {
         let _waiting = self._inflight.waiting();
         // As the reference iterator's `_has_next` retries with a `Retrying` of its own, the
         // reattaches of each response have the attempts and the elapsed time of the policy.
-        let mut retry_state = RetryPolicyState::new(self.retry_policy.clone());
         // The clock of the retries that the reference makes as `RetryException`s, bounded by the
-        // policy's elapsed time: it starts at the first deadline that passes, the deadline of
-        // the initial ExecutePlan included, and the reattaches after a deadline or an unknown
+        // policy's elapsed time, starts at the first deadline that passes, the deadline of the
+        // initial ExecutePlan included, and the reattaches after a deadline or an unknown
         // execution are its retries.
-        let mut retry_exception_since: Option<std::time::Instant> = None;
-        if self.stream.is_none()
-            && retry_exception_bound_passed(&self.retry_policy, &mut retry_exception_since)
-        {
+        let mut retrying = Retrying::new(&self.retry_policy).ending_with_abort();
+        if self.stream.is_none() && !retrying.retry_at_once() {
             // The initial ExecutePlan passed its deadline, a RetryException that fails at once
             // when the bound of the retries has passed, as it has when the bound is 0.
             let status = tonic::Status::deadline_exceeded("Deadline Exceeded");
@@ -2472,8 +2437,7 @@ impl ReattachableResponseStream {
         }
         loop {
             let Some(stream) = self.stream.as_mut() else {
-                self.reattach(&mut retry_state, &mut retry_exception_since)
-                    .await?;
+                self.reattach(&mut retrying).await?;
                 continue;
             };
             let deadline = self.stream_deadline;
@@ -2511,10 +2475,7 @@ impl ReattachableResponseStream {
                 // The server completes a reattachable stream before `ResultComplete` on
                 // purpose, after `senderMaxStreamDuration` or `senderMaxStreamSize`: the rest
                 // of the result is read by reattaching.
-                Ok(None) => {
-                    self.reattach(&mut retry_state, &mut retry_exception_since)
-                        .await?
-                }
+                Ok(None) => self.reattach(&mut retrying).await?,
                 // As the reference iterator: the per-RPC deadline of the stream passed, and the
                 // execution goes on on the server, so the iteration reattaches at once, for up
                 // to the policy's bound of such retries.
@@ -2522,8 +2483,7 @@ impl ReattachableResponseStream {
                     if status.code() == tonic::Code::DeadlineExceeded
                         && !self.iter.is_completed().await =>
                 {
-                    if retry_exception_bound_passed(&self.retry_policy, &mut retry_exception_since)
-                    {
+                    if !retrying.retry_at_once() {
                         return Err(self.fail_with_status(status).await);
                     }
                     self.stream = None;
@@ -2538,8 +2498,7 @@ impl ReattachableResponseStream {
                         let error_type = unknown_operation(&status).unwrap_or_default();
                         return Err(self.fail(response_already_received(error_type)));
                     }
-                    if retry_exception_bound_passed(&self.retry_policy, &mut retry_exception_since)
-                    {
+                    if !retrying.retry_at_once() {
                         return Err(self.fail_with_status(status).await);
                     }
                     self.execute_again = true;
@@ -2547,9 +2506,6 @@ impl ReattachableResponseStream {
                 }
                 Err(status) => {
                     // Only reattach a still-running execution on a retriable drop.
-                    if self.iter.is_completed().await || !self.retry_policy.can_retry(&status) {
-                        return Err(self.fail_with_status(status).await);
-                    }
                     // As the reference's `_has_next`, which reads the stream and reattaches in
                     // one attempt of its `Retrying`: a stream that fails, also one that a
                     // reattach opened, is an attempt of the policy, which waits its backoff before
@@ -2558,20 +2514,15 @@ impl ReattachableResponseStream {
                     // reattached at once, without end. As at the other retries, the server's
                     // RetryInfo delay of the failure, if any, is the wait. The backoff ends with a
                     // signal, as the reference's `Retrying` sleep does.
-                    match retry_state.next_attempt(retry_delay_ms(&status)) {
-                        Some(wait_ms) => {
-                            let backoff = tokio::time::sleep(Duration::from_millis(wait_ms));
-                            if crate::runtime::until_abort(crate::runtime::ABORT_RETRIES, backoff)
-                                .await
-                                .is_none()
-                            {
-                                return Err(self.fail(wait_aborted()));
-                            }
-                        }
-                        None => return Err(self.fail_with_status(status).await),
+                    if self.iter.is_completed().await {
+                        return Err(self.fail_with_status(status).await);
                     }
-                    self.reattach(&mut retry_state, &mut retry_exception_since)
-                        .await?;
+                    match retrying.backoff(&status).await {
+                        Backoff::Retry => {}
+                        Backoff::GiveUp => return Err(self.fail_with_status(status).await),
+                        Backoff::Aborted => return Err(self.fail(wait_aborted())),
+                    }
+                    self.reattach(&mut retrying).await?;
                 }
             }
         }
@@ -2579,13 +2530,12 @@ impl ReattachableResponseStream {
 
     /// Opens the stream of the execution again: by reattaching to it from the last response
     /// read, or, when the server does not know it, by sending the ExecutePlan again. Transient
-    /// failures are retried under `retry_state`, and a deadline or an unknown execution as the
-    /// reference's `RetryException`s, bounded by `retry_exception_since`.
-    async fn reattach(
-        &mut self,
-        retry_state: &mut RetryPolicyState,
-        retry_exception_since: &mut Option<std::time::Instant>,
-    ) -> Result<()> {
+    /// failures are retried under the policy with their backoff ([`Retrying::backoff`]), and a
+    /// deadline or an unknown execution at once, as the reference's `RetryException`s, for up
+    /// to their elapsed-time bound ([`Retrying::retry_at_once`]). `retrying` is that of the
+    /// response being read, so the failures of its streams and of its reattaches share the
+    /// attempts of the policy.
+    async fn reattach(&mut self, retrying: &mut Retrying) -> Result<()> {
         loop {
             // As the reference's `_stub`: once the client is closed (its session stopped), the
             // reattach and the ExecutePlan sent again raise NO_ACTIVE_SESSION, and the stream ends.
@@ -2616,7 +2566,7 @@ impl ReattachableResponseStream {
                 if self.iter.last_response_id().await.is_some() {
                     return Err(self.fail(response_already_received(error_type)));
                 }
-                if retry_exception_bound_passed(&self.retry_policy, retry_exception_since) {
+                if !retrying.retry_at_once() {
                     return Err(self.fail_with_status(status).await);
                 }
                 self.execute_again = true;
@@ -2625,25 +2575,17 @@ impl ReattachableResponseStream {
             if status.code() == tonic::Code::DeadlineExceeded {
                 // As the reference: a call past its deadline, whether it is sent again or
                 // reattached, is retried at once, the execution going on on the server.
-                if retry_exception_bound_passed(&self.retry_policy, retry_exception_since) {
+                if !retrying.retry_at_once() {
                     return Err(self.fail_with_status(status).await);
                 }
                 self.execute_again = false;
                 continue;
             }
-            if self.retry_policy.can_retry(&status) {
-                if let Some(w) = retry_state.next_attempt(retry_delay_ms(&status)) {
-                    let backoff = tokio::time::sleep(Duration::from_millis(w));
-                    if crate::runtime::until_abort(crate::runtime::ABORT_RETRIES, backoff)
-                        .await
-                        .is_none()
-                    {
-                        return Err(self.fail(wait_aborted()));
-                    }
-                    continue;
-                }
+            match retrying.backoff(&status).await {
+                Backoff::Retry => continue,
+                Backoff::GiveUp => return Err(self.fail_with_status(status).await),
+                Backoff::Aborted => return Err(self.fail(wait_aborted())),
             }
-            return Err(self.fail_with_status(status).await);
         }
     }
 
@@ -2656,7 +2598,7 @@ impl ReattachableResponseStream {
         self.attach_metadata(&mut req);
         // After the metadata, which the deadline is a header of.
         let req = with_deadline(req, deadline);
-        self.stream_deadline = deadline.map(|d| tokio::time::Instant::now() + d);
+        self.stream_deadline = stream_deadline_in(deadline);
         let response =
             within_deadline(deadline, self.client.stub.clone().reattach_execute(req)).await?;
         Ok(response.into_inner())
@@ -2670,7 +2612,7 @@ impl ReattachableResponseStream {
         let request = clone_on_grown_stack(self.iter.request());
         let mut req = with_deadline(Request::new(request), deadline);
         self.client._attach_metadata(&mut req);
-        self.stream_deadline = deadline.map(|d| tokio::time::Instant::now() + d);
+        self.stream_deadline = stream_deadline_in(deadline);
         let response =
             within_deadline(deadline, self.client.stub.clone().execute_plan(req)).await?;
         Ok(response.into_inner())
@@ -2879,6 +2821,17 @@ mod tests {
             let error = artifact_hashing_task_error(cancelled);
             assert!(error.to_string().contains("Artifact hashing task failed:"));
         });
+    }
+
+    #[tokio::test]
+    async fn test_stream_deadline_too_far_to_be_a_time_is_none() {
+        assert_eq!(stream_deadline_in(None), None);
+        let before = tokio::time::Instant::now();
+        let deadline = stream_deadline_in(Some(Duration::from_secs(600))).expect("a time");
+        assert!(deadline >= before + Duration::from_secs(600));
+        assert!(deadline <= tokio::time::Instant::now() + Duration::from_secs(600));
+        // Adding it to the time would overflow, and panic.
+        assert_eq!(stream_deadline_in(Some(Duration::MAX)), None);
     }
 
     #[tokio::test]
