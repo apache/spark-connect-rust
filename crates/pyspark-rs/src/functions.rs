@@ -352,10 +352,19 @@ pub fn to_column(obj: &Bound<'_, PyAny>) -> PyResult<Column> {
 /// or `getItem`, to a Column. A list is a typed array literal, as PySpark's
 /// `LiteralExpression._from_value` makes it, so an empty list or one that starts with None is
 /// CANNOT_INFER_ARRAY_ELEMENT_TYPE. `to_column` builds a list as `lit` does, for the functions.
+/// A NumPy array is not a value, as PySpark's `_from_value` does not take it, though `lit` does.
 pub(crate) fn to_value_column(obj: &Bound<'_, PyAny>) -> PyResult<Column> {
     let obj = &enum_to_value(obj)?;
     if let Ok(list) = obj.cast::<pyo3::types::PyList>() {
         return Ok(Column::new(Expression::literal(typed_array_literal(list)?)));
+    }
+    if numpy_ndarray_ndim(obj)?.is_some() {
+        return Err(crate::column::raise_pyspark(
+            obj.py(),
+            "PySparkTypeError",
+            "UNSUPPORTED_DATA_TYPE",
+            &[("data_type", "ndarray")],
+        ));
     }
     to_column(obj)
 }

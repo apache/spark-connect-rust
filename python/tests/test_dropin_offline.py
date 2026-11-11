@@ -2230,6 +2230,121 @@ def test_try_cast_and_isin_take_their_arguments_as_pyspark():
     assert e.value.getMessageParameters() == {"data_type": "tuple"}
 
 
+def _column_operators(c):
+    # Each operator of a Column that takes an operand, by name, as a function of the operand.
+    # The reverse dunders are called directly, as NumPy takes `value + column` before a Column.
+    return {
+        "add": lambda v: c + v,
+        "radd": lambda v: c.__radd__(v),
+        "sub": lambda v: c - v,
+        "rsub": lambda v: c.__rsub__(v),
+        "mul": lambda v: c * v,
+        "rmul": lambda v: c.__rmul__(v),
+        "truediv": lambda v: c / v,
+        "rtruediv": lambda v: c.__rtruediv__(v),
+        "mod": lambda v: c % v,
+        "rmod": lambda v: c.__rmod__(v),
+        "pow": lambda v: c ** v,
+        "rpow": lambda v: c.__rpow__(v, None),
+        "eq": lambda v: c == v,
+        "ne": lambda v: c != v,
+        "lt": lambda v: c < v,
+        "le": lambda v: c <= v,
+        "gt": lambda v: c > v,
+        "ge": lambda v: c >= v,
+        "and": lambda v: c & v,
+        "rand": lambda v: c.__rand__(v),
+        "or": lambda v: c | v,
+        "ror": lambda v: c.__ror__(v),
+        "bitwiseAND": lambda v: c.bitwiseAND(v),
+        "bitwiseOR": lambda v: c.bitwiseOR(v),
+        "bitwiseXOR": lambda v: c.bitwiseXOR(v),
+        "eqNullSafe": lambda v: c.eqNullSafe(v),
+        "contains": lambda v: c.contains(v),
+        "startswith": lambda v: c.startswith(v),
+        "endswith": lambda v: c.endswith(v),
+        "like": lambda v: c.like(v),
+        "rlike": lambda v: c.rlike(v),
+        "ilike": lambda v: c.ilike(v),
+        "between": lambda v: c.between(v, 1),
+        "between_upper": lambda v: c.between(1, v),
+    }
+
+
+def test_column_operators_take_their_operands_as_pyspark():
+    # As PySpark's _bin_op: an operand that is neither a Column nor a literal value has its
+    # `_expr` looked up, so the error of that lookup is the one raised, a PySparkAttributeError
+    # for a Row. NumPy's int64 and bool_ are not literals, though a float64 is.
+    from pyspark.sql import functions as F
+
+    def expr_error(value):
+        with pytest.raises(AttributeError) as expected:
+            value._expr
+        return expected.value
+
+    rejected = [[2], (2,), {1: 2}, {1}, np.array([2]), np.int64(2), np.bool_(True),
+                b"x", bytearray(b"x"), Row(a=1), object()]
+    operators = _column_operators(F.col("a"))
+    for name, build in operators.items():
+        for value in rejected:
+            expected = expr_error(value)
+            with pytest.raises(type(expected)) as error:
+                build(value)
+            assert str(error.value) == str(expected), (name, type(value))
+
+
+def test_column_operators_take_the_literals_that_pyspark_takes():
+    import datetime
+    import decimal
+    import enum
+
+    from pyspark.sql import functions as F
+    from pyspark.sql.connect.column import Column
+
+    class Code(enum.IntEnum):
+        A = 2
+
+    c = F.col("a")
+    literals = [None, True, 2, 2.5, np.float64(2.5), decimal.Decimal("1.5"),
+                datetime.date(2020, 1, 2), datetime.time(1, 2),
+                datetime.datetime(2020, 1, 2, 3), datetime.timedelta(1), "x", np.str_("x"),
+                Code.A, F.col("b")]
+    for name, build in _column_operators(c).items():
+        for value in literals:
+            if name == "eq" and isinstance(value, datetime.timedelta):
+                # PySpark's `__eq__` takes no timedelta as a literal, though `__ne__` does.
+                with pytest.raises(AttributeError, match="has no attribute '_expr'"):
+                    build(value)
+                continue
+            assert isinstance(build(value), Column), (name, value)
+    assert repr(c + np.float64(2.5)) == "Column<'+(a, 2.5)'>"
+    assert repr(c == Code.A) == "Column<'==(a, 2)'>"
+    assert repr(c != datetime.timedelta(1)) == "Column<'not(==(a, P1DT0H0M0S))'>"
+
+
+def test_column_value_methods_take_no_numpy_array_as_pyspark():
+    # As PySpark's LiteralExpression._from_value, which takes a list as an array, but not a NumPy
+    # array, as UNSUPPORTED_DATA_TYPE; the functions take one with lit, as F.when does.
+    from pyspark.errors import PySparkTypeError
+    from pyspark.sql import functions as F
+
+    c = F.col("a")
+    array = np.array([1, 2])
+    for build in (
+        lambda: F.when(c == 1, 1).otherwise(array),
+        lambda: F.when(c == 1, 1).when(c == 2, array),
+        lambda: c.isin(array),
+        lambda: c.isin(np.array([[0], [1]])),
+        lambda: c.getItem(np.array([0])),
+        lambda: c[np.array([0])],
+    ):
+        with pytest.raises(PySparkTypeError) as error:
+            build()
+        assert error.value.getCondition() == "UNSUPPORTED_DATA_TYPE"
+        assert error.value.getMessageParameters() == {"data_type": "ndarray"}
+    assert repr(F.when(F.lit(True), array)) == repr(F.when(F.lit(True), F.lit(array)))
+
+
 @pytest.mark.parametrize("value", [[], [None, 2], [[], [1]]])
 def test_column_methods_cannot_infer_the_element_type_of_a_list_as_pyspark(value):
     # As PySpark's LiteralExpression of a list: its element type is that of its first element,
