@@ -732,8 +732,21 @@ impl PyDataFrameReader {
             None => predicates,
         };
         if let Some(properties) = properties {
+            // As PySpark's `options(**properties)`, whose unpacking raises for a key that is not
+            // a str before any property is set, with the format and the options of a column kept
+            // on the reader.
+            if properties
+                .keys()
+                .iter()
+                .any(|key| !key.is_instance_of::<pyo3::types::PyString>())
+            {
+                self.inner = r;
+                return Err(pyo3::exceptions::PyTypeError::new_err(
+                    "keywords must be strings",
+                ));
+            }
             for (key, value) in properties.iter() {
-                r = set_option_skip_none(r, &crate::str_text(&key)?, Some(&value))?;
+                r = set_option_skip_none(r, &crate::str_argument(&key)?, Some(&value))?;
             }
         }
         // PySpark's jdbc also leaves url/dbtable on the reader.

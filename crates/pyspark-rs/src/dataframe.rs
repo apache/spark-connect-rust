@@ -3688,9 +3688,21 @@ impl PyDataFrameWriter {
             w = w.mode(m);
         }
         if let Some(props) = properties {
+            // As PySpark's `options(**properties)`, whose unpacking raises for a key that is not
+            // a str before any property is set, with the format and the mode kept on the writer.
+            if props
+                .keys()
+                .iter()
+                .any(|key| !key.is_instance_of::<pyo3::types::PyString>())
+            {
+                self.inner.set(w);
+                return Err(pyo3::exceptions::PyTypeError::new_err(
+                    "keywords must be strings",
+                ));
+            }
             for (key, value) in props.iter() {
                 if let Some(value) = crate::coerce_option_value(&value)? {
-                    w = w.option(&crate::str_text(&key)?, &value);
+                    w = w.option(&crate::str_argument(&key)?, &value);
                 }
             }
         }
