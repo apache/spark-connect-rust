@@ -259,9 +259,29 @@ where
     T: Native + PyClass,
     T::Core: Estimator,
 {
-    let mut estimator = snapshot(slf)?;
+    let estimator = snapshot(slf)?;
+    fit_core(slf.py(), estimator, df)
+}
+
+/// The fit of a native estimator whose core cannot fit it, as Pipeline and CrossValidator.
+/// The core raises NOT_IMPLEMENTED before any request, whatever its params are, so the params
+/// are not serialized first, and PySpark's serialization errors of them are not raised.
+fn fit_unimplemented<T>(slf: &Bound<'_, T>, df: &PyDataFrame) -> PyResult<PyMLModel>
+where
+    T: Native + PyClass,
+    T::Core: Estimator,
+{
+    let estimator = slf.try_borrow()?.inner().clone();
+    fit_core(slf.py(), estimator, df)
+}
+
+fn fit_core<C: Estimator>(
+    py: Python<'_>,
+    mut estimator: C,
+    df: &PyDataFrame,
+) -> PyResult<PyMLModel> {
     let session = df.dataframe.spark_session();
-    let model = interruptible(slf.py(), &session, || {
+    let model = interruptible(py, &session, || {
         estimator.fit(&df.dataframe).map_err(Box::new)
     })?;
     Ok(PyMLModel {
@@ -1805,7 +1825,7 @@ impl PyPipeline {
         set_param(slf, "stages", Kind::StrList, value)
     }
     fn fit(slf: &Bound<'_, Self>, df: &PyDataFrame) -> PyResult<PyMLModel> {
-        fit_native(slf, df)
+        fit_unimplemented(slf, df)
     }
 }
 
@@ -1931,7 +1951,7 @@ impl PyCrossValidator {
         set_param(slf, "seed", Kind::Int, value)
     }
     fn fit(slf: &Bound<'_, Self>, df: &PyDataFrame) -> PyResult<PyMLModel> {
-        fit_native(slf, df)
+        fit_unimplemented(slf, df)
     }
 }
 

@@ -212,8 +212,8 @@ not exposed by this native addition.
 ## Native DecisionTreeClassifier
 
 `spark_connect::ml::DecisionTreeClassifier` trains Spark's JVM decision tree
-classifier through Connect with ML vector features and contiguous numeric class
-labels starting at zero. Rust builder setters cover all 18 PySpark constructor
+classifier through Connect with ML vector features and non-negative integer class
+labels below numClasses. Rust builder setters cover all 18 PySpark constructor
 parameters, including `pruneTree` (Spark 4.3.0), plus class thresholds. Unset
 parameters use Spark's defaults.
 
@@ -232,8 +232,8 @@ importances, single-vector prediction and persistence are outside this addition.
 ## Native RandomForestClassifier
 
 `spark_connect::ml::RandomForestClassifier` trains Spark's JVM random forest
-classifier through Connect with ML vector features and contiguous numeric class
-labels starting at zero. Rust builder setters cover all 22 PySpark constructor
+classifier through Connect with ML vector features and non-negative integer class
+labels below numClasses. Rust builder setters cover all 22 PySpark constructor
 parameters, including `pruneTree` (Spark 4.3.0), plus class thresholds. Unset
 parameters use Spark's defaults. Without a seed, the sampling uses Spark's default
 seed (the hash of the class name), as with PySpark, so fits are reproducible either

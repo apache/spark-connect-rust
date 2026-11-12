@@ -1876,9 +1876,11 @@ impl Model for LinearRegressionModel {
 
 /// Decision tree classification using Spark's JVM implementation and ML vector features.
 ///
-/// Supports binary and multiclass labels. Unset parameters use Spark's defaults. Without a
-/// seed, tie-breaking uses Spark's default seed (the hash of the class name), as with
-/// PySpark, so fits are reproducible either way; set a seed to change tie-breaking.
+/// Supports binary and multiclass labels. Unset parameters use Spark's defaults. A single
+/// tree samples its rows to find split candidates only when there are more than
+/// max(maxBins^2, 10000) rows; the seed picks that sample, or else Spark's default seed (the
+/// hash of the class name), as with PySpark, so fits are reproducible either way. Equal-gain
+/// splits are chosen deterministically, so the seed does not break ties.
 #[derive(Debug, Clone)]
 pub struct DecisionTreeClassifier {
     operator: MlOperator,
@@ -1902,7 +1904,8 @@ impl DecisionTreeClassifier {
         self
     }
 
-    /// Numeric label column; labels must be contiguous class indices starting at zero.
+    /// Numeric label column of non-negative integer class indices below numClasses, which
+    /// is the label column metadata's count, else the maximum label plus one.
     pub fn set_label_col(mut self, value: &str) -> Self {
         self.params = self.params.set_param_string("labelCol", value);
         self
@@ -1980,7 +1983,7 @@ impl DecisionTreeClassifier {
         self
     }
 
-    /// Random seed for breaking ties between equally good splits.
+    /// Random seed for sampling the rows that find the split candidates, on large inputs.
     pub fn set_seed(mut self, value: i64) -> Self {
         self.params = self.params.set_param_int_narrow("seed", value);
         self
@@ -2223,7 +2226,8 @@ impl RandomForestClassifier {
         self
     }
 
-    /// Numeric label column; labels must be contiguous class indices starting at zero.
+    /// Numeric label column of non-negative integer class indices below numClasses, which
+    /// is the label column metadata's count, else the maximum label plus one.
     pub fn set_label_col(mut self, value: &str) -> Self {
         self.params = self.params.set_param_string("labelCol", value);
         self
@@ -4411,9 +4415,9 @@ mod tests {
         assert_eq!(tree.max_bins(), 32);
         assert_eq!(tree.min_instances_per_node(), 1);
         assert_eq!(tree.min_info_gain(), 0.0);
-        assert_eq!(tree.prune_tree(), true);
+        assert!(tree.prune_tree());
         assert_eq!(tree.max_memory_in_mb(), 256);
-        assert_eq!(tree.cache_node_ids(), false);
+        assert!(!tree.cache_node_ids());
         assert_eq!(tree.checkpoint_interval(), 10);
         assert_eq!(tree.impurity(), "gini");
         assert_eq!(tree.seed(), None);
@@ -4487,13 +4491,13 @@ mod tests {
         assert_eq!(tree.min_info_gain(), 0.01);
         assert_eq!(built.min_info_gain(), tree.min_info_gain());
         *tree.params_mut() = tree.params().clone().set_param_bool("pruneTree", false);
-        assert_eq!(tree.prune_tree(), false);
+        assert!(!tree.prune_tree());
         assert_eq!(built.prune_tree(), tree.prune_tree());
         *tree.params_mut() = tree.params().clone().set_param_int32("maxMemoryInMB", 64);
         assert_eq!(tree.max_memory_in_mb(), 64);
         assert_eq!(built.max_memory_in_mb(), tree.max_memory_in_mb());
         *tree.params_mut() = tree.params().clone().set_param_bool("cacheNodeIds", true);
-        assert_eq!(tree.cache_node_ids(), true);
+        assert!(tree.cache_node_ids());
         assert_eq!(built.cache_node_ids(), tree.cache_node_ids());
         *tree.params_mut() = tree
             .params()

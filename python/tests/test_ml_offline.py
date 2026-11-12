@@ -301,6 +301,12 @@ def test_ml_pipeline_and_cross_validator_fit_is_not_implemented(ml_mock):
         (cv, "CrossValidator.fit"),
         (Pipeline(stages=["a"]), "Pipeline.fit"),
         (CrossValidator(numFolds=2, seed=1), "CrossValidator.fit"),
+        # The params that PySpark's serialization cannot send, or sends as an empty list, do not
+        # raise their errors first: the fit raises NOT_IMPLEMENTED for every param state.
+        (Pipeline(stages=[]), "Pipeline.fit"),
+        (CrossValidator(seed=2**64), "CrossValidator.fit"),
+        (CrossValidator(seed=2**64, numFolds=2), "CrossValidator.fit"),
+        (CrossValidator(numFolds=2**70), "CrossValidator.fit"),
     ]:
         sent = _requests_but_deletes(service)
         with pytest.raises(PySparkNotImplementedError) as error:
@@ -568,7 +574,9 @@ def test_ml_connect_evaluators_take_the_signatures_and_defaults_of_pyspark(ml_mo
 def test_ml_connect_unsendable_ints_none_and_uids_as_pyspark(ml_mock):
     # As PySpark: an int beyond a long is taken by the constructor and the setter, and the
     # next fit raises the VALUE_NOT_BETWEEN of PySpark's serialization of the params, before
-    # any request, until the param is set again. None is sent as a null, as PySpark sends it.
+    # any request, until the param is set again. A CrossValidator raises NOT_IMPLEMENTED instead,
+    # see test_ml_pipeline_and_cross_validator_fit_is_not_implemented. None is sent as a null,
+    # as PySpark sends it.
     # The uid of every native class is the name of its class and 12 hex digits, as PySpark's.
     import re
 
@@ -580,7 +588,6 @@ def test_ml_connect_unsendable_ints_none_and_uids_as_pyspark(ml_mock):
         connect.KMeans(seed=2**64),
         connect.KMeans().setSeed(-(2**63) - 1),
         connect.RandomForestClassifier().setNumTrees(2**70),
-        connect.CrossValidator(numFolds=2**70),
     ]:
         sent = _requests_but_deletes(service)
         with pytest.raises(PySparkValueError) as error:
@@ -2344,7 +2351,6 @@ def test_ml_none_params_send_null_and_empty_lists_raise_at_the_command_as_pyspar
     # setters, and PySpark raises CANNOT_INFER_ARRAY_ELEMENT_TYPE when its serialization sends
     # the params of a fit, transform or evaluate, before any request.
     import pyspark.ml.connect as connect
-    from pyspark.ml.connect.pipeline import Pipeline
 
     spark, service = ml_mock
     df = spark.range(1)
@@ -2363,8 +2369,6 @@ def test_ml_none_params_send_null_and_empty_lists_raise_at_the_command_as_pyspar
     assert error.value.getCondition() == "CANNOT_INFER_ARRAY_ELEMENT_TYPE"
     with pytest.raises(PySparkTypeError, match="CANNOT_INFER_ARRAY_ELEMENT_TYPE"):
         connect.RandomForestClassifier().setThresholds([]).fit(df)
-    with pytest.raises(PySparkTypeError, match="CANNOT_INFER_ARRAY_ELEMENT_TYPE"):
-        Pipeline(stages=[]).fit(df)
     assert len(service.execute_requests) == before
 
     # Elements given again make the list sendable.
