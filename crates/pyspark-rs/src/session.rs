@@ -1000,11 +1000,17 @@ impl PySparkSession {
         let mut values: Vec<Vec<Value>> = (0..parts.len())
             .map(|_| Vec::with_capacity(fields.len()))
             .collect();
+        let mut late = infer::Late::default();
         {
             let _quanta = infer::DecimalQuanta::new();
             for (i, field) in fields.iter().enumerate() {
                 for (row, out) in parts.iter().zip(values.iter_mut()) {
-                    out.push(infer::convert(&row[i], &field.data_type, field.nullable)?);
+                    out.push(infer::convert(
+                        &row[i],
+                        &field.data_type,
+                        field.nullable,
+                        &mut late,
+                    )?);
                 }
             }
         }
@@ -1020,6 +1026,8 @@ impl PySparkSession {
                 return Err(err);
             }
         }
+        // Then the columns are built, which rejects the values that no converter of PySpark does.
+        late.finish()?;
         // The names, with those that inference added, must name every column.
         if let Some(cols) = &cols {
             if cols.len() != fields.len() {
