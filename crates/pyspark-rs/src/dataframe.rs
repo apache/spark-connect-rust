@@ -3681,15 +3681,17 @@ impl PyDataFrameWriter {
     fn save(
         &self,
         py: Python<'_>,
-        path: Option<String>,
+        path: Option<&Bound<'_, PyAny>>,
         format: Option<&str>,
         mode: Option<&str>,
         partitionBy: Option<&Bound<'_, PyAny>>,
         options: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<()> {
         let w = apply_write_common(self.inner.get(), format, mode, partitionBy, options)?;
-        // PySpark sets the inline format/mode/partitionBy/options on the writer itself.
+        // PySpark sets the inline format/mode/partitionBy/options on the writer itself, before
+        // it checks the path.
         self.inner.set(w.clone());
+        let path = path.map(crate::readwriter::writer_path).transpose()?;
         interruptible(py, &w.spark_session(), || {
             w.save(path.as_deref()).map_err(Box::new)
         })
@@ -3740,7 +3742,7 @@ impl PyDataFrameWriter {
     fn parquet(
         &self,
         py: Python<'_>,
-        path: &str,
+        path: &Bound<'_, PyAny>,
         mode: Option<&Bound<'_, PyAny>>,
         partitionBy: Option<&Bound<'_, PyAny>>,
         compression: Option<&Bound<'_, PyAny>>,
@@ -3760,7 +3762,10 @@ impl PyDataFrameWriter {
         w = set_option_skip_none(w, "compression", compression)?;
         // PySpark sets the mode/options/format on the writer itself, then saves.
         self.inner.set(w.clone().format("parquet"));
-        interruptible(py, &w.spark_session(), || w.parquet(path).map_err(Box::new))
+        let path = crate::readwriter::writer_path(path)?;
+        interruptible(py, &w.spark_session(), || {
+            w.parquet(&path).map_err(Box::new)
+        })
     }
 
     /// Write as JSON - full pyspark signature; each named option is
@@ -3770,7 +3775,7 @@ impl PyDataFrameWriter {
     fn json(
         &self,
         py: Python<'_>,
-        path: &str,
+        path: &Bound<'_, PyAny>,
         mode: Option<&Bound<'_, PyAny>>,
         compression: Option<&Bound<'_, PyAny>>,
         dateFormat: Option<&Bound<'_, PyAny>>,
@@ -3796,7 +3801,8 @@ impl PyDataFrameWriter {
         )?;
         // PySpark sets the mode/options/format on the writer itself, then saves.
         self.inner.set(w.clone().format("json"));
-        interruptible(py, &w.spark_session(), || w.json(path).map_err(Box::new))
+        let path = crate::readwriter::writer_path(path)?;
+        interruptible(py, &w.spark_session(), || w.json(&path).map_err(Box::new))
     }
 
     /// Write as CSV - full pyspark signature; each named option is
@@ -3806,7 +3812,7 @@ impl PyDataFrameWriter {
     fn csv(
         &self,
         py: Python<'_>,
-        path: &str,
+        path: &Bound<'_, PyAny>,
         mode: Option<&Bound<'_, PyAny>>,
         compression: Option<&Bound<'_, PyAny>>,
         sep: Option<&Bound<'_, PyAny>>,
@@ -3852,7 +3858,8 @@ impl PyDataFrameWriter {
         )?;
         // PySpark sets the mode/options/format on the writer itself, then saves.
         self.inner.set(w.clone().format("csv"));
-        interruptible(py, &w.spark_session(), || w.csv(path).map_err(Box::new))
+        let path = crate::readwriter::writer_path(path)?;
+        interruptible(py, &w.spark_session(), || w.csv(&path).map_err(Box::new))
     }
 
     /// Write as ORC - full pyspark signature; each named option is
@@ -3862,7 +3869,7 @@ impl PyDataFrameWriter {
     fn orc(
         &self,
         py: Python<'_>,
-        path: &str,
+        path: &Bound<'_, PyAny>,
         mode: Option<&Bound<'_, PyAny>>,
         partitionBy: Option<&Bound<'_, PyAny>>,
         compression: Option<&Bound<'_, PyAny>>,
@@ -3882,7 +3889,8 @@ impl PyDataFrameWriter {
         w = set_option_skip_none(w, "compression", compression)?;
         // PySpark sets the mode/options/format on the writer itself, then saves.
         self.inner.set(w.clone().format("orc"));
-        interruptible(py, &w.spark_session(), || w.orc(path).map_err(Box::new))
+        let path = crate::readwriter::writer_path(path)?;
+        interruptible(py, &w.spark_session(), || w.orc(&path).map_err(Box::new))
     }
 
     /// Write as TEXT - full pyspark signature; each named option is
@@ -3892,7 +3900,7 @@ impl PyDataFrameWriter {
     fn text(
         &self,
         py: Python<'_>,
-        path: &str,
+        path: &Bound<'_, PyAny>,
         compression: Option<&Bound<'_, PyAny>>,
         lineSep: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<()> {
@@ -3900,7 +3908,8 @@ impl PyDataFrameWriter {
         w = set_options_skip_none(w, &[("compression", compression), ("lineSep", lineSep)])?;
         // PySpark sets the mode/options/format on the writer itself, then saves.
         self.inner.set(w.clone().format("text"));
-        interruptible(py, &w.spark_session(), || w.text(path).map_err(Box::new))
+        let path = crate::readwriter::writer_path(path)?;
+        interruptible(py, &w.spark_session(), || w.text(&path).map_err(Box::new))
     }
 
     /// Write as XML - full pyspark signature; each named option is
@@ -3910,7 +3919,7 @@ impl PyDataFrameWriter {
     fn xml(
         &self,
         py: Python<'_>,
-        path: &str,
+        path: &Bound<'_, PyAny>,
         rowTag: Option<&Bound<'_, PyAny>>,
         mode: Option<&Bound<'_, PyAny>>,
         attributePrefix: Option<&Bound<'_, PyAny>>,
@@ -3948,7 +3957,8 @@ impl PyDataFrameWriter {
         )?;
         // PySpark sets the mode/options/format on the writer itself, then saves.
         self.inner.set(w.clone().format("xml"));
-        interruptible(py, &w.spark_session(), || w.xml(path).map_err(Box::new))
+        let path = crate::readwriter::writer_path(path)?;
+        interruptible(py, &w.spark_session(), || w.xml(&path).map_err(Box::new))
     }
 }
 
