@@ -1801,18 +1801,23 @@ fn interval_field(name: &str, fields: &[(&str, i32)]) -> Option<i32> {
 /// In JSON the name is of the letters of any script, as the `\w+` of PySpark's
 /// `_STRING_WITH_COLLATION` reads them, and the collation is the name as it is written, as
 /// PySpark's `StringType(name)` keeps it. In DDL the name is a multipart identifier of ASCII
-/// letters, digits and underscores, as Spark's lexer reads an unquoted one, and each of its parts
-/// may be in backquotes (see [`multipart_identifier`]). The collation is the name in the canonical
+/// letters, digits and underscores, as Spark's lexer reads an unquoted one, each of its parts may
+/// be in backquotes, and its dots may have whitespace around them (see [`multipart_identifier`]).
+/// Its keywords and unquoted parts are read in ASCII lowercase, so a letter outside ASCII, such
+/// as the Kelvin sign, is not taken for an ASCII one. The collation is the name in the canonical
 /// form that the server gives it (see [`canonical_collation_name`]), which may be qualified as
 /// `system.builtin.<name>`, as Spark's `CollationFactory.resolveFullyQualifiedName` reads it.
 fn parse_collated_string(s: &str, grammar: TypeStringGrammar) -> Result<DataType> {
     let invalid = || invalid_type_string(s, "collated string type");
-    let words: Vec<&str> = s.split_whitespace().collect();
-    let ["string", "collate", name] = words[..] else {
-        return Err(invalid());
-    };
+    let name = s
+        .strip_prefix("string")
+        .and_then(|rest| rest.trim_start().strip_prefix("collate"))
+        .filter(|rest| rest.starts_with(char::is_whitespace))
+        .map(str::trim)
+        .ok_or_else(invalid)?;
     let parts = match grammar {
-        TypeStringGrammar::Json => vec![name.to_string()],
+        TypeStringGrammar::Json if !name.contains(char::is_whitespace) => vec![name.to_string()],
+        TypeStringGrammar::Json => return Err(invalid()),
         TypeStringGrammar::Ddl => multipart_identifier(name).ok_or_else(invalid)?,
     };
     let name = match parts.as_slice() {
@@ -1840,12 +1845,14 @@ fn parse_collated_string(s: &str, grammar: TypeStringGrammar) -> Result<DataType
 }
 
 /// The parts of the multipart identifier `name` of DDL, as Spark's `multipartIdentifier` reads
-/// it: parts separated by dots, each of them either as it is written or in backquotes, where a
-/// doubled backquote is one backquote. `None` if `name` is malformed.
+/// it: parts separated by dots, with any whitespace around them, each of them either as it is
+/// written or in backquotes, where a doubled backquote is one backquote. `None` if `name` is
+/// malformed, such as a part with whitespace in it that is not in backquotes.
 fn multipart_identifier(name: &str) -> Option<Vec<String>> {
     let mut parts = Vec::new();
     let mut chars = name.chars().peekable();
     loop {
+        while chars.next_if(|c| c.is_whitespace()).is_some() {}
         let mut part = String::new();
         if chars.next_if_eq(&'`').is_some() {
             loop {
@@ -1856,10 +1863,11 @@ fn multipart_identifier(name: &str) -> Option<Vec<String>> {
                 }
             }
         } else {
-            while let Some(c) = chars.next_if(|c| *c != '.') {
+            while let Some(c) = chars.next_if(|c| *c != '.' && !c.is_whitespace()) {
                 part.push(c);
             }
         }
+        while chars.next_if(|c| c.is_whitespace()).is_some() {}
         parts.push(part);
         match chars.next() {
             Some('.') => {}
@@ -2374,7 +2382,9 @@ fn complex_type_inner<'a>(input: &'a str, keyword: &str, detail: &str) -> Result
 
 /// Parse a single type (primitive or complex)
 fn parse_single_type(input: &str) -> Result<DataType> {
-    let trimmed = canonical_type_spelling(&input.trim().to_lowercase());
+    // ASCII only, as Spark's lexer, whose keywords and unquoted identifiers are of ASCII letters:
+    // a lowercase of the letters of any script would read the Kelvin sign as a `k`.
+    let trimmed = canonical_type_spelling(&input.trim().to_ascii_lowercase());
 
     // Complex types
     if after_complex_keyword(input, "array").is_some() {

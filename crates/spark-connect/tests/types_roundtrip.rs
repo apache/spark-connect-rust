@@ -1097,6 +1097,9 @@ fn ddl_collations_and_trailing_whitespace_agree_with_the_server_parser() {
         "string collate `UTF8_LCASE`",
         "string collate `system`.`builtin`.`utf8_lcase`",
         "string collate `system`.builtin.`utf8_lcase`",
+        "string collate system . builtin . utf8_lcase",
+        "string collate `system` . `builtin` . `utf8_lcase`",
+        "string collate ko",
         "string collate UNICODE ",
         "time",
     ] {
@@ -1111,6 +1114,8 @@ fn ddl_collations_and_trailing_whitespace_agree_with_the_server_parser() {
         "string collate `été`",
         "string collate été",
         "string collate `system.builtin.utf8_lcase`",
+        "string collate \u{212A}o",
+        "string collate sys tem.builtin.utf8_lcase",
         "null",
     ] {
         assert!(session.parse_ddl(ddl).is_err(), "{ddl}");
@@ -1399,6 +1404,8 @@ fn json_and_ddl_parsers_agree_on_the_atomic_and_parameterized_forms() {
         "string collate `system`.`builtin`",
         "string collate `system.builtin.utf8_lcase`",
         "string collate `system`.`builtin`.`utf8_lcase`.`x`",
+        "string collate sys tem.builtin.utf8_lcase",
+        "string collate system . . utf8_lcase",
         "char(5) collate UNICODE",
         // Not a type.
         "",
@@ -1479,10 +1486,24 @@ fn json_and_ddl_parsers_agree_on_the_atomic_and_parameterized_forms() {
             Some(string("UTF8_LCASE")),
         ),
         ("string collate `UNICODE`", None, Some(string("UNICODE"))),
+        // As Spark's `multipartIdentifier`, the dots of a qualified name may have whitespace around
+        // them in DDL.
+        (
+            "string collate system . builtin . utf8_lcase",
+            None,
+            Some(string("UTF8_LCASE")),
+        ),
+        (
+            "string collate `system` .`builtin`.  `utf8_lcase`",
+            None,
+            Some(string("UTF8_LCASE")),
+        ),
         // JSON reads a name of letters, digits and underscores, as PySpark's `\w+` does, and a
         // letter of any script is one. DDL's unquoted identifiers are of ASCII letters, digits and
-        // underscores only, as Spark's lexer reads them.
+        // underscores only, as Spark's lexer reads them, and its case is ASCII: the Kelvin sign
+        // (U+212A), which a Unicode lowercase makes a `k`, is not one.
         ("string collate été", Some(string("été")), None),
+        ("string collate \u{212A}o", Some(string("\u{212A}o")), None),
         // JSON is in lower case and of single spaces; the keywords of DDL are of any case and
         // any whitespace.
         ("DECIMAL(10,2)", None, Some(decimal(10, 2))),
