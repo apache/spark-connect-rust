@@ -521,3 +521,28 @@ This native surface covers construction, parameter setters, fit and DataFrame
 transform. Model coefficient/statistic inspection, single-vector prediction and
 persistence are outside this surface. The vendored `pyspark.ml.classification`
 API continues to use its existing implementation.
+
+
+## Native BisectingKMeans
+
+The Rust `ml::BisectingKMeans` and `ml::BisectingKMeansModel` support training and
+DataFrame cluster assignment through Spark Connect's cached-model protocol. Python
+exports the native estimator from `pyspark.ml.connect` and
+`pyspark.ml.connect.clustering`; `fit` returns the shared native `MLModel`.
+
+All eight constructor parameters and named setters are supported: `featuresCol`,
+`predictionCol`, `maxIter`, `seed`, `k`, `minDivisibleClusterSize`, `distanceMeasure`
+and `weightCol`. Rust also provides parameter getters. The keyword-only Python
+constructor matches official PySpark's order/defaults and parameter conversions.
+Unset parameters are omitted so the server uses its defaults, including `k=4`.
+
+Live tests cover hierarchical splitting, absolute/fractional minimum divisible
+cluster sizes (which may produce fewer than `k` leaves), instance weights,
+Euclidean/cosine distance, sparse/dense inputs, seeded reproducibility, independent
+fits, session isolation and lazy model lifetime. Golden fixtures compare all eight
+parameters at six signed seed/integer-width boundaries with official PySpark.
+
+This native API covers construction, setters, fit and DataFrame transform.
+Cluster-center/summary/cost inspection, single-vector prediction and persistence
+are outside this surface. The vendored `pyspark.ml.clustering` API retains its
+existing implementation.

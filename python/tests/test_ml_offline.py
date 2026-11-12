@@ -534,6 +534,10 @@ _NATIVE_PARAMS = {
         seed="int", numTrees="int", featureSubsetStrategy="str", leafCol="str",
         minWeightFractionPerNode="float", weightCol="str", bootstrap="bool",
     ),
+    "BisectingKMeans": dict(
+        featuresCol="str", predictionCol="str", maxIter="int", seed="int", k="int",
+        minDivisibleClusterSize="float", distanceMeasure="str", weightCol="str",
+    ),
     "KMeans": dict(
         featuresCol="str", predictionCol="str", k="int", initMode="str", initSteps="int",
         tol="float", maxIter="int", seed="int", distanceMeasure="str", weightCol="str",
@@ -2743,6 +2747,62 @@ def test_decision_tree_regressor_native_parameters_match_official_fixture(ml_moc
             estimator = DecisionTreeRegressor(**values)
         operator, params = _native_request(spark, service, estimator, models)
         assert operator.name == "org.apache.spark.ml.regression.DecisionTreeRegressor"
+        assert params == pb2.MlParams.FromString(base64.b64decode(case["params_b64"]))
+
+
+@pytest.mark.parametrize("use_setters", [False, True], ids=["constructor", "setters"])
+def test_bisecting_kmeans_native_parameters_match_official_fixture(ml_mock, use_setters):
+    import base64
+    import inspect
+    import json
+    from pathlib import Path
+
+    from pyspark import _pyspark as native
+    from pyspark.ml.connect import BisectingKMeans as exported
+    from pyspark.ml.connect.clustering import BisectingKMeans
+
+    assert exported is BisectingKMeans is native.BisectingKMeans
+    defaults = dict(
+        featuresCol="features",
+        predictionCol="prediction",
+        maxIter=20,
+        seed=None,
+        k=4,
+        minDivisibleClusterSize=1.0,
+        distanceMeasure="euclidean",
+        weightCol=None,
+    )
+    signature = inspect.signature(BisectingKMeans)
+    assert list(signature.parameters) == list(defaults)
+    for name, value in defaults.items():
+        assert signature.parameters[name].kind == inspect.Parameter.KEYWORD_ONLY
+        assert signature.parameters[name].default == value
+    fixture = json.loads(
+        (Path(__file__).resolve().parents[2] / "tests/golden/bisecting_kmeans.json").read_text()
+    )
+    spark, service = ml_mock
+    models = []
+    _, params = _native_request(spark, service, BisectingKMeans(), models)
+    assert params == pb2.MlParams()
+    for case in fixture["cases"]:
+        values = dict(
+            featuresCol="input",
+            predictionCol="cluster",
+            maxIter=50,
+            seed=case["seed"],
+            k=3,
+            minDivisibleClusterSize=0.25,
+            distanceMeasure="cosine",
+            weightCol="weight",
+        )
+        if use_setters:
+            estimator = BisectingKMeans()
+            for name, value in values.items():
+                assert getattr(estimator, "set" + name[0].upper() + name[1:])(value) is estimator
+        else:
+            estimator = BisectingKMeans(**values)
+        operator, params = _native_request(spark, service, estimator, models)
+        assert operator.name == "org.apache.spark.ml.clustering.BisectingKMeans"
         assert params == pb2.MlParams.FromString(base64.b64decode(case["params_b64"]))
 
 
