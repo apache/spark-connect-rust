@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use crate::dataframe::{PyDataFrame, WriterState};
 use crate::errors::spark_error_to_py_exception;
-use crate::interrupt::{interruptible, interruptible_outcome};
+use crate::interrupt::{interruptible, interruptible_caught};
 use crate::options::{set_stream_option_skip_none, set_stream_options_skip_none, DefaultedOption};
 
 /// Adapts Python listeners to the native bus: deserialize one typed event for the whole
@@ -1413,7 +1413,9 @@ impl PyStreamingQueryManager {
             id: std::sync::OnceLock::new(),
         });
         let registration = Arc::clone(&adapter);
-        match interruptible_outcome(py, &self.inner.spark_session(), || {
+        // As PySpark's append, whose `except Exception` also catches the error of an interrupt
+        // that the server failed, which replaces the KeyboardInterrupt of a signal.
+        match interruptible_caught(py, &self.inner.spark_session(), || {
             self.inner
                 .add_listener(registration)
                 .map(|id| {
@@ -1425,14 +1427,21 @@ impl PyStreamingQueryManager {
                 .map_err(Box::new)
         })? {
             Ok(()) => Ok(()),
-            Err(error) => warn(
-                py,
-                format!(
-                    "Failed to add the listener because of exception: {}\n\
-                     The listener is not added, please add it again.",
-                    spark_error_to_py_exception(*error).value(py)
-                ),
-            ),
+            Err(error) => {
+                // As PySpark's append, which then removes the listener from its bus: the
+                // registration that an add that a signal ended keeps.
+                if let Some(id) = adapter.id.get() {
+                    self.inner.discard_listener(id);
+                }
+                warn(
+                    py,
+                    format!(
+                        "Failed to add the listener because of exception: {}\n\
+                         The listener is not added, please add it again.",
+                        spark_error_to_py_exception(*error).value(py)
+                    ),
+                )
+            }
         }
     }
 
@@ -1480,7 +1489,7 @@ impl PyStreamingQueryManager {
             let Some(id) = first else {
                 return Ok(());
             };
-            match interruptible_outcome(py, &self.inner.spark_session(), || {
+            match interruptible_caught(py, &self.inner.spark_session(), || {
                 self.inner.remove_listener_found(&id).map_err(Box::new)
             })? {
                 // The bus is read again once this is tried: a call that removed this
@@ -1514,7 +1523,7 @@ impl PyStreamingQueryManager {
     /// `StreamingQueryManager.close`. A server removal failure warns and keeps the
     /// listeners registered, as PySpark Connect's does, so close can be retried.
     fn close(&self, py: Python<'_>) -> PyResult<()> {
-        if let Err(error) = interruptible_outcome(py, &self.inner.spark_session(), || {
+        if let Err(error) = interruptible_caught(py, &self.inner.spark_session(), || {
             self.inner.close().map_err(Box::new)
         })? {
             return warn(

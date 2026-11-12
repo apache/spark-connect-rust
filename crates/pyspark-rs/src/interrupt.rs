@@ -145,6 +145,28 @@ pub(crate) fn interruptible_outcome<T: Send, E: Send + Into<Box<SparkError>>>(
     session: &SparkSession,
     f: impl FnOnce() -> Result<T, E> + Send,
 ) -> PyResult<Result<T, Box<SparkError>>> {
+    run_interruptible(py, session, f, false)
+}
+
+/// As [`interruptible_outcome`], for a call that PySpark makes in a `try` whose `except Exception`
+/// warns, as its listener bus does: the error of an interrupt that the server failed, which
+/// replaces the KeyboardInterrupt of the signal, is caught there, so it is the inner result too.
+pub(crate) fn interruptible_caught<T: Send, E: Send + Into<Box<SparkError>>>(
+    py: Python<'_>,
+    session: &SparkSession,
+    f: impl FnOnce() -> Result<T, E> + Send,
+) -> PyResult<Result<T, Box<SparkError>>> {
+    run_interruptible(py, session, f, true)
+}
+
+/// The wait of [`interruptible_outcome`], of whose results a failed interrupt is the inner one
+/// when `catch_interrupt_failure`.
+fn run_interruptible<T: Send, E: Send + Into<Box<SparkError>>>(
+    py: Python<'_>,
+    session: &SparkSession,
+    f: impl FnOnce() -> Result<T, E> + Send,
+    catch_interrupt_failure: bool,
+) -> PyResult<Result<T, Box<SparkError>>> {
     let watch = Arc::new(SignalWatch {
         session: session.clone(),
         interrupted: AtomicBool::new(false),
@@ -180,6 +202,9 @@ pub(crate) fn interruptible_outcome<T: Send, E: Send + Into<Box<SparkError>>>(
             // As PySpark's: the error of the interrupt replaces the KeyboardInterrupt, which
             // becomes its context, as `interrupt_operation` raises out of the `except` clause.
             if let Some(failure) = interrupt_failure {
+                if catch_interrupt_failure {
+                    return Ok(Err(Box::new(failure)));
+                }
                 let failure = crate::errors::spark_error_to_py_exception(failure);
                 return Err(crate::errors::with_context(py, failure, error));
             }
