@@ -259,13 +259,21 @@ fn snapshot<T: Native + PyClass>(slf: &Bound<'_, T>) -> PyResult<T::Core> {
     Ok(this.inner().clone())
 }
 
+/// The fit of a native estimator, on `df` as its JVM estimator reads it: an array column that the
+/// JVM estimator reads as an ML vector is sent as that vector (see [`Vectors`]).
 fn fit_native<T>(slf: &Bound<'_, T>, df: &PyDataFrame) -> PyResult<PyMLModel>
 where
     T: Native + PyClass,
     T::Core: Estimator,
 {
+    let py = slf.py();
     let estimator = snapshot(slf)?;
-    fit_core(slf.py(), estimator, df)
+    let vectors = Vectors::of(estimator.operator(), estimator.params());
+    let dataset = match vectors.array_input(py, &df.dataframe, false)? {
+        Some(field) => df.dataframe.with_column(&field.name, vector_of(&field)),
+        None => df.dataframe.clone(),
+    };
+    fit_core(py, estimator, &dataset)
 }
 
 /// The fit of a native estimator whose core cannot fit it, as Pipeline and CrossValidator.
@@ -277,22 +285,180 @@ where
     T::Core: Estimator,
 {
     let estimator = slf.try_borrow()?.inner().clone();
-    fit_core(slf.py(), estimator, df)
+    fit_core(slf.py(), estimator, &df.dataframe)
 }
 
-fn fit_core<C: Estimator>(
-    py: Python<'_>,
-    mut estimator: C,
-    df: &PyDataFrame,
-) -> PyResult<PyMLModel> {
-    let session = df.dataframe.spark_session();
-    let model = interruptible(py, &session, || {
-        estimator.fit(&df.dataframe).map_err(Box::new)
-    })?;
+fn fit_core<C: Estimator>(py: Python<'_>, mut estimator: C, df: &DataFrame) -> PyResult<PyMLModel> {
+    let session = df.spark_session();
+    let model = interruptible(py, &session, || estimator.fit(df).map_err(Box::new))?;
     Ok(PyMLModel {
         model,
         session_id: session.session_id().to_string(),
     })
+}
+
+/// The columns of a native estimator, and of the model of its fit, that the JVM reads or writes
+/// as ML vectors, as their fit and transform send them, so that they take the columns of PySpark's
+/// `pyspark.ml.connect` classes, which compute with numpy and torch on arrays: an array of numbers
+/// of the `input` column is sent as a vector by `array_to_vector`, and a vector as it is, while the
+/// `output` vector of a scaler is converted to an `array<double>` by `vector_to_array`, as
+/// PySpark's scalers output (their `_output_columns`).
+#[derive(Default)]
+struct Vectors {
+    input: Option<String>,
+    output: Option<String>,
+}
+
+impl Vectors {
+    /// The vector columns of the JVM estimator or model `operator`, of the params `params`, as
+    /// Spark's ML classes read and write them: those of the classification, regression and
+    /// clustering packages read the vector of their `featuresCol` (`features` unless set). Of the
+    /// feature package, the scalers read the vector of their `inputCol` and write that of their
+    /// `outputCol` (`<uid>__output` unless set), and the others (StringIndexer) read no vector.
+    fn of(operator: &spark_connect::ml::MlOperator, params: &Params) -> Self {
+        let class = operator
+            .name
+            .strip_suffix("Model")
+            .unwrap_or(&operator.name);
+        match class.strip_prefix("org.apache.spark.ml.feature.") {
+            Some(feature) if feature.ends_with("Scaler") => Self {
+                input: string_param(params, "inputCol"),
+                output: Some(
+                    string_param(params, "outputCol")
+                        .unwrap_or_else(|| format!("{}__output", operator.uid)),
+                ),
+            },
+            Some(_) => Self::default(),
+            None => Self {
+                input: Some(
+                    string_param(params, "featuresCol").unwrap_or_else(|| "features".to_string()),
+                ),
+                output: None,
+            },
+        }
+    }
+
+    /// The field of the `input` column in the schema of `df`, found regardless of case as Spark
+    /// resolves it, when it is an array of numbers. Another type is sent as it is, which the JVM
+    /// estimator checks. The schema is read only for an `input`. With `lazily`, of a transform,
+    /// which is lazy as the transforms of PySpark's JVM models are, a schema that the server does
+    /// not give (of a DataFrame too deep for it, say) leaves the column as it is: the server
+    /// raises its error when the transformed DataFrame is analyzed or run, as without the read.
+    fn array_input(
+        &self,
+        py: Python<'_>,
+        df: &DataFrame,
+        lazily: bool,
+    ) -> PyResult<Option<spark_connect::types::StructField>> {
+        use spark_connect::types::DataType;
+
+        let Some(input) = &self.input else {
+            return Ok(None);
+        };
+        let fields = if lazily {
+            let session = df.spark_session();
+            // A signal still raises: it is the outer error.
+            match crate::interrupt::interruptible_outcome(py, &session, || {
+                df.schema().map_err(Box::new)
+            })? {
+                Ok(DataType::Struct { fields }) => fields,
+                _ => return Ok(None),
+            }
+        } else {
+            schema_fields(py, df)?
+        };
+        Ok(fields
+            .into_iter()
+            .find(|field| field.name.eq_ignore_ascii_case(input))
+            .filter(|field| match &field.data_type {
+                DataType::Array { element_type, .. } => matches!(
+                    **element_type,
+                    DataType::Byte
+                        | DataType::Short
+                        | DataType::Integer
+                        | DataType::Long
+                        | DataType::Float
+                        | DataType::Double
+                        | DataType::Decimal { .. }
+                ),
+                _ => false,
+            }))
+    }
+}
+
+/// The ML vector of `field`, an array column of numbers: `array_to_vector` of it, which takes
+/// the arrays of the numbers that Spark casts up to doubles. An array of decimals, which it does
+/// not take, is cast to an `array<double>` first, as PySpark's MaxAbsScaler computes on decimals.
+fn vector_of(field: &spark_connect::types::StructField) -> spark_connect::Column {
+    use spark_connect::types::DataType;
+
+    let column = exact_column(&field.name);
+    array_to_vector(match &field.data_type {
+        DataType::Array { element_type, .. }
+            if matches!(**element_type, DataType::Decimal { .. }) =>
+        {
+            column.cast(DataType::Array {
+                element_type: Box::new(DataType::Double),
+                contains_null: true,
+            })
+        }
+        _ => column,
+    })
+}
+
+/// The string param `name` of `params`, if it is set to a string, as the core reads it (a null is
+/// not a string).
+fn string_param(params: &Params, name: &str) -> Option<String> {
+    use spark_connect_proto::expression::{literal::LiteralType, ExprType};
+
+    match params.get_param(name)?.expr_type.as_ref()? {
+        ExprType::Literal(literal) => match literal.literal_type.as_ref()? {
+            LiteralType::String(value) => Some(value.clone()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The fields of the schema of `df`, which is read from the server once (and then cached).
+fn schema_fields(
+    py: Python<'_>,
+    df: &DataFrame,
+) -> PyResult<Vec<spark_connect::types::StructField>> {
+    use spark_connect::types::DataType;
+
+    let schema = interruptible(py, &df.spark_session(), || df.schema().map_err(Box::new))?;
+    Ok(match schema {
+        DataType::Struct { fields } => fields,
+        _ => Vec::new(),
+    })
+}
+
+/// The column of the name `name` exactly, a name with a dot too.
+fn exact_column(name: &str) -> spark_connect::Column {
+    spark_connect::column::col(&format!("`{}`", name.replace('`', "``")))
+}
+
+/// `array_to_vector` of `column`, the ML vector of an array of numbers.
+fn array_to_vector(column: spark_connect::Column) -> spark_connect::Column {
+    spark_connect::Column::new(spark_connect::expression::Expression::function(
+        "array_to_vector",
+        vec![column.expression().clone()],
+    ))
+}
+
+/// `vector_to_array` of the column `name`, of PySpark's default dtype `float64`: the
+/// `array<double>` of an ML vector.
+fn vector_to_array(name: &str) -> spark_connect::Column {
+    spark_connect::Column::new(spark_connect::expression::Expression::function(
+        "vector_to_array",
+        vec![
+            exact_column(name).expression().clone(),
+            spark_connect::column::lit_string("float64")
+                .expression()
+                .clone(),
+        ],
+    ))
 }
 
 /// The input columns of an evaluator, as the JVM evaluator reads them: `doubles`, a prediction
@@ -364,10 +530,7 @@ fn evaluation_dataset(dataset: &Bound<'_, PyAny>) -> PyResult<DataFrame> {
 fn evaluator_input(py: Python<'_>, df: DataFrame, inputs: EvaluatorInputs) -> PyResult<DataFrame> {
     use spark_connect::types::DataType;
 
-    let schema = interruptible(py, &df.spark_session(), || df.schema().map_err(Box::new))?;
-    let DataType::Struct { fields } = schema else {
-        return Ok(df);
-    };
+    let fields = schema_fields(py, &df)?;
     let mut df = df;
     for field in fields {
         let named = |name: &String| name.eq_ignore_ascii_case(&field.name);
@@ -375,21 +538,14 @@ fn evaluator_input(py: Python<'_>, df: DataFrame, inputs: EvaluatorInputs) -> Py
         if !score && !inputs.doubles.iter().any(named) {
             continue;
         }
-        // The column of this name exactly, a name with a dot too.
-        let column = spark_connect::column::col(&format!("`{}`", field.name.replace('`', "``")));
         let converted = match &field.data_type {
             DataType::Byte
             | DataType::Short
             | DataType::Integer
             | DataType::Long
             | DataType::Float
-            | DataType::Decimal { .. } => column.cast(DataType::Double),
-            DataType::Array { .. } if score => {
-                spark_connect::Column::new(spark_connect::expression::Expression::function(
-                    "array_to_vector",
-                    vec![column.expression().clone()],
-                ))
-            }
+            | DataType::Decimal { .. } => exact_column(&field.name).cast(DataType::Double),
+            DataType::Array { .. } if score => array_to_vector(exact_column(&field.name)),
             _ => continue,
         };
         df = df.with_column(&field.name, converted);
@@ -407,33 +563,62 @@ pub struct PyMLModel {
 
 #[pymethods]
 impl PyMLModel {
-    /// Apply the model to a DataFrame.
+    /// Apply the model to a DataFrame. As PySpark's models of `pyspark.ml.connect`, it takes an
+    /// array of numbers where the JVM model reads a vector, and keeps that column as it is in its
+    /// output, and a scaler outputs an `array<double>` (see [`Vectors`]).
     fn transform(&self, py: Python<'_>, df: &PyDataFrame) -> PyResult<PyDataFrame> {
         let mut model = self.model.clone_box();
         let session = df.dataframe.spark_session();
-        if session.session_id() != self.session_id {
+        let vectors = Vectors::of(model.operator(), model.params());
+        // An array input is sent as its vector, which the JVM model reads, and kept as it is in a
+        // column of its own, which takes its place again in the output.
+        let array = vectors
+            .array_input(py, &df.dataframe, true)?
+            .map(|field| (format!("{}__input", model.operator().uid), field));
+        let input = match &array {
+            Some((kept, field)) => df.dataframe.with_columns(vec![
+                (kept.clone(), exact_column(&field.name)),
+                (field.name.clone(), vector_of(field)),
+            ]),
+            None => df.dataframe.clone(),
+        };
+        let out = if session.session_id() != self.session_id {
             // As PySpark, the transform of a DataFrame of another session refers to the model
             // on the server of that session, which raises CONNECT_ML.CACHE_INVALID when the
             // DataFrame is analyzed or run, as it caches no such model. (The Rust API rejects
             // the transform itself.) Its input is the placeholder of the DataFrame, as in the
             // plans of `pyspark.ml`: the core resolves it, counting its levels for the depth
             // bound, where an input put in whole would count as one level.
-            let input =
-                DataFrame::from_sent_relation(session.clone(), df.dataframe.placeholder_relation());
+            let placeholder =
+                DataFrame::from_sent_relation(session.clone(), input.placeholder_relation());
             let relation = spark_connect_proto::Relation {
                 rel_type: Some(spark_connect_proto::relation::RelType::MlRelation(
-                    Box::new(model.build_ml_relation(&input).to_pyerr()?),
+                    Box::new(model.build_ml_relation(&placeholder).to_pyerr()?),
                 )),
                 ..Default::default()
             };
-            return Ok(PyDataFrame::new(
-                DataFrame::from_relation(session, relation, None).to_pyerr()?,
-            ));
+            DataFrame::from_relation(session, relation, None).to_pyerr()?
+        } else {
+            py.detach(|| model.transform(&input).map_err(Box::new))
+                .to_pyerr()?
+        };
+        // The JVM model appends its output columns, and keeps the columns of its input, in place.
+        let mut columns = Vec::new();
+        if let Some((kept, field)) = &array {
+            columns.push((field.name.clone(), exact_column(kept)));
         }
-        let out = py
-            .detach(|| model.transform(&df.dataframe).map_err(Box::new))
-            .to_pyerr()?;
-        Ok(PyDataFrame::new(out))
+        if let Some(output) = &vectors.output {
+            columns.push((output.clone(), vector_to_array(output)));
+        }
+        let out = if columns.is_empty() {
+            out
+        } else {
+            out.with_columns(columns)
+        };
+        Ok(PyDataFrame::new(match &array {
+            Some((kept, _)) => out.drop(vec![kept.as_str()]),
+            None => out,
+        }))
     }
 }
 
@@ -455,6 +640,9 @@ impl PyStandardScaler {
             inner: StandardScaler::new(),
             unsendable: Vec::new(),
         };
+        // As PySpark's, which scales the values to (x - mean) / std: the JVM scaler centers them
+        // only with `withMean`, false by default, a param that PySpark's scaler does not have.
+        apply(&mut this, "withMean", Converted::Bool(true));
         init_params(
             &mut this,
             "StandardScaler",

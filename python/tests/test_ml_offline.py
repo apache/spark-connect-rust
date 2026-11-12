@@ -181,19 +181,148 @@ def test_ml_connect_fitted_scalers_transform_the_cached_model(ml_mock):
         fit = _commands_but_deletes(service, sent)[0].ml_command.fit
         assert fit.estimator.name == name
         assert fit.estimator.type == pb2.MlOperator.OPERATOR_TYPE_ESTIMATOR
+        # StandardScaler also sends withMean, as PySpark's scales to (x - mean) / std.
         assert dict(fit.params.params) == {
             "inputCol": pb2.Expression.Literal(string=column),
             "outputCol": pb2.Expression.Literal(string="o"),
+            **({"withMean": pb2.Expression.Literal(boolean=True)} if cls is StandardScaler else {}),
         }
         assert fit.dataset == _relation(df)
 
         scaled = models[-1].transform(df)
         assert len(service.execute_requests) == sent + 1
-        transform = _relation(scaled).ml_relation.transform
+        relation = _relation(scaled)
+        if cls is not StringIndexer:
+            # The vector that the JVM scaler outputs is sent as the array<double> of PySpark's.
+            assert _aliases(relation.with_columns) == [(["o"], _vector_to_array("o"))]
+            relation = relation.with_columns.input
+        transform = relation.ml_relation.transform
         assert transform.obj_ref == pb2.ObjectRef(id="model-1")
         assert not transform.HasField("transformer")
         assert transform.input == _relation(df)
         assert transform.params.params["outputCol"] == pb2.Expression.Literal(string="o")
+
+
+def _attribute(name):
+    # The text of the column of the name `name` exactly, as PySpark's col("`name`") sends it.
+    return f'unresolved_attribute {{ unparsed_identifier: "`{name}`" is_metadata_column: false }}'
+
+
+def _array_to_vector(name):
+    # The text of PySpark's array_to_vector(col("`name`")).
+    return (
+        'unresolved_function { function_name: "array_to_vector" '
+        f'arguments {{ {_attribute(name)} }} }}'
+    )
+
+
+def _vector_to_array(name):
+    # The text of PySpark's vector_to_array(col("`name`")), of its default dtype, float64.
+    return (
+        'unresolved_function { function_name: "vector_to_array" '
+        f'arguments {{ {_attribute(name)} }} arguments {{ literal {{ string: "float64" }} }} }}'
+    )
+
+
+def _aliases(with_columns):
+    # The names and the expressions of the columns of a WithColumns relation.
+    return [(list(alias.name), _text(alias.expr)) for alias in with_columns.aliases]
+
+
+def test_ml_connect_native_estimators_take_the_array_columns_of_pyspark(ml_mock):
+    # As PySpark's pyspark.ml.connect classes, which compute on arrays: the fit of a native scaler,
+    # or of an estimator of a featuresCol, and the transform of its model find the column in the
+    # schema of the DataFrame, which they read once, regardless of case as Spark resolves it, and
+    # send an array of numbers as PySpark's array_to_vector of it, the vector that the JVM reads.
+    # The transform keeps the array in a column of its own, which takes its place again in the
+    # output, as PySpark's transform keeps its input columns, and the vector that a scaler outputs
+    # is PySpark's vector_to_array of it, an array<double>. A vector, another type and the column
+    # of StringIndexer, which reads no vector, are sent as they are.
+    import pyspark.ml.connect as connect
+    from _mock_connect_server import ddl_data_type
+    from pyspark.ml.linalg import VectorUDT
+
+    spark, service = ml_mock
+    models = []  # Kept alive, so that no model is released during the checks.
+    scalers = (connect.MaxAbsScaler, connect.StandardScaler)
+
+    def requests(estimator, reads=1):
+        # The Fit of estimator, and the relation of the transform of its model, of a new
+        # DataFrame, whose schema the mock server answers.
+        df = spark.range(1)
+        analyzed = len(service.analyze_requests)
+        sent = len(service.execute_requests)
+        service.execute_payload = _operator_info("model-1")
+        models.append(estimator.fit(df))
+        fit = _commands_but_deletes(service, sent)[0].ml_command.fit
+        transformed = _relation(models[-1].transform(df))
+        assert len(service.analyze_requests) == analyzed + reads, estimator
+        return df, fit, transformed
+
+    service.data_type = ddl_data_type(
+        "id bigint, Features array<int>, label double, s string, words array<string>, "
+        "d array<decimal(10,2)>"
+    )
+    # Every native estimator of a featuresCol, of its default "features" here.
+    featured = [name for name, params in _NATIVE_PARAMS.items() if "featuresCol" in params]
+    assert {"LogisticRegression", "KMeans"} <= set(featured)
+    estimators = [cls(inputCol="features", outputCol="o") for cls in scalers] + [
+        getattr(connect, name)() for name in featured
+    ]
+    for estimator in estimators:
+        name = type(estimator).__name__
+        df, fit, transformed = requests(estimator)
+        # The params name the column as they were given, and the dataset has the vector of the
+        # array in its place.
+        params = {"inputCol": "features", "outputCol": "o"} if type(estimator) in scalers else {}
+        sent = {k: v.string for k, v in fit.params.params.items() if k != "withMean"}
+        assert sent == params, name
+        assert ("withMean" in fit.params.params) == (name == "StandardScaler"), name
+        assert fit.dataset.with_columns.input == _relation(df), name
+        assert _aliases(fit.dataset.with_columns) == [
+            (["Features"], _array_to_vector("Features"))
+        ], name
+
+        (kept,) = transformed.drop.column_names
+        output = transformed.drop.input.with_columns
+        transform = output.input.ml_relation.transform
+        assert transform.obj_ref == pb2.ObjectRef(id="model-1"), name
+        assert transform.input.with_columns.input == _relation(df), name
+        assert _aliases(transform.input.with_columns) == [
+            ([kept], _attribute("Features")),
+            (["Features"], _array_to_vector("Features")),
+        ], name
+        scaled = [(["o"], _vector_to_array("o"))] if type(estimator) in scalers else []
+        assert _aliases(output) == [(["Features"], _attribute(kept))] + scaled, name
+
+    # An array of decimals, which array_to_vector does not take, is cast to an array<double>.
+    _, fit, _ = requests(connect.MaxAbsScaler(inputCol="d", outputCol="o"))
+    cast = (
+        f"cast {{ expr {{ {_attribute('d')} }} "
+        "type { array { element_type { double { } } contains_null: true } } }"
+    )
+    vector = f'unresolved_function {{ function_name: "array_to_vector" arguments {{ {cast} }} }}'
+    assert _aliases(fit.dataset.with_columns) == [(["d"], vector)]
+
+    for estimator, reads in [
+        (connect.LogisticRegression(featuresCol="s"), 1),
+        (connect.KMeans(featuresCol="words"), 1),
+        (connect.StringIndexer(inputCol="features", outputCol="o"), 0),
+    ]:
+        df, fit, transformed = requests(estimator, reads)
+        assert fit.dataset == _relation(df), estimator
+        assert transformed.ml_relation.transform.input == _relation(df), estimator
+
+    service.data_type = _data_type_proto(
+        T.StructType([T.StructField("features", VectorUDT())])
+    ).SerializeToString()
+    for estimator in [connect.MaxAbsScaler(inputCol="features", outputCol="o"), connect.KMeans()]:
+        df, fit, transformed = requests(estimator)
+        assert fit.dataset == _relation(df), estimator
+        if type(estimator) in scalers:
+            assert _aliases(transformed.with_columns) == [(["o"], _vector_to_array("o"))]
+            transformed = transformed.with_columns.input
+        assert transformed.ml_relation.transform.input == _relation(df), estimator
 
 
 def test_ml_connect_setters_set_the_params_of_their_receiver_as_pyspark(ml_mock):
@@ -479,11 +608,14 @@ def _sent_name(name, param):
 def _defaults_sent(name):
     # The params that a native class sends unless it is given them: the metric of
     # MulticlassClassificationEvaluator and the probability column of
-    # BinaryClassificationEvaluator, which PySpark's constructor sets.
+    # BinaryClassificationEvaluator, which PySpark's constructor sets, and the centering of
+    # StandardScaler, as PySpark's scales to (x - mean) / std.
     if name == "MulticlassClassificationEvaluator":
         return {"metricName": ("string", "accuracy")}
     if name == "BinaryClassificationEvaluator":
         return {"rawPredictionCol": ("string", "probability")}
+    if name == "StandardScaler":
+        return {"withMean": ("boolean", True)}
     return {}
 
 
