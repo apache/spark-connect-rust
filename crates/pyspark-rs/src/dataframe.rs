@@ -2754,9 +2754,7 @@ impl PyDataFrame {
     /// The V1 writer interface (`df.write`).
     #[getter]
     fn write(&self) -> PyDataFrameWriter {
-        PyDataFrameWriter {
-            inner: WriterState::new(self.dataframe.write()),
-        }
+        PyDataFrameWriter::new(self.dataframe.write())
     }
 
     /// The V2 writer interface (`df.writeTo("table")`).
@@ -3561,9 +3559,42 @@ impl PyWhenNotMatchedBySource {
 )]
 pub struct PyDataFrameWriter {
     inner: WriterState<spark_connect::readwriter::DataFrameWriter>,
+    /// The `numBuckets` of the last `bucketBy` when it is a positive count that the proto
+    /// refuses, which PySpark keeps and fails each write with, as its `WriteOperation.command`
+    /// sets it in the proto; the core writer then has no bucketing.
+    refused_bucket_count: std::sync::Mutex<Option<Py<PyAny>>>,
 }
 
-impl PyDataFrameWriter {}
+impl PyDataFrameWriter {
+    pub(crate) fn new(writer: spark_connect::readwriter::DataFrameWriter) -> Self {
+        PyDataFrameWriter {
+            inner: WriterState::new(writer),
+            refused_bucket_count: std::sync::Mutex::new(None),
+        }
+    }
+
+    fn refused_bucket_count(&self) -> std::sync::MutexGuard<'_, Option<Py<PyAny>>> {
+        self.refused_bucket_count
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Fail a write of a bucket count that the proto refuses, as PySpark's
+    /// `WriteOperation.command`, which sets the count after the input plan and before the path,
+    /// the table name and the save mode, so before any request; each write fails again.
+    fn check_bucket_count(&self, py: Python<'_>) -> PyResult<()> {
+        let refused = self
+            .refused_bucket_count()
+            .as_ref()
+            .map(|n| n.clone_ref(py));
+        match refused {
+            Some(num_buckets) => {
+                crate::readwriter::check_refused_bucket_count(num_buckets.bind(py))
+            }
+            None => Ok(()),
+        }
+    }
+}
 
 /// Apply the shared `format` / `mode` / `partitionBy` / `**options` arguments that
 /// reference `DataFrameWriter.save` and `.saveAsTable` accept inline, mirroring
@@ -3673,11 +3704,28 @@ impl PyDataFrameWriter {
         col: &Bound<'_, PyAny>,
         cols: Vec<Bound<'_, PyAny>>,
     ) -> PyResult<Bound<'py, Self>> {
+        use crate::readwriter::BucketCount;
+
         let num_buckets = crate::readwriter::bucket_count(numBuckets)?;
         let columns = crate::readwriter::writer_columns(col, &cols)?;
-        slf.borrow()
-            .inner
-            .update(|w| w.bucket_by(num_buckets, columns));
+        // As PySpark's, the last call wins: a count that is not positive, or one that the
+        // proto refuses, leaves no bucketing of an earlier call on the writer.
+        let writer = slf.borrow();
+        let refused = match num_buckets {
+            BucketCount::Count(count) => {
+                writer.inner.update(|w| w.bucket_by(count, columns));
+                None
+            }
+            BucketCount::Unsent => {
+                writer.inner.update(|w| w.clear_bucket_by());
+                None
+            }
+            BucketCount::Refused(count) => {
+                writer.inner.update(|w| w.clear_bucket_by());
+                Some(count.unbind())
+            }
+        };
+        *writer.refused_bucket_count() = refused;
         Ok(slf.clone())
     }
 
@@ -3752,6 +3800,7 @@ impl PyDataFrameWriter {
         }
         w = w.option("url", url).option("dbtable", table);
         self.inner.set(w.clone());
+        self.check_bucket_count(py)?;
         interruptible(py, &w.spark_session(), || w.save(None).map_err(Box::new))
     }
 
@@ -3768,8 +3817,9 @@ impl PyDataFrameWriter {
     ) -> PyResult<()> {
         let w = apply_write_common(self.inner.get(), format, mode, partitionBy, options)?;
         // PySpark sets the inline format/mode/partitionBy/options on the writer itself, before
-        // it checks the path.
+        // its command sets the bucket count and then the path.
         self.inner.set(w.clone());
+        self.check_bucket_count(py)?;
         let path = path.map(crate::readwriter::writer_path).transpose()?;
         interruptible(py, &w.spark_session(), || {
             w.save(path.as_deref()).map_err(Box::new)
@@ -3789,6 +3839,7 @@ impl PyDataFrameWriter {
     ) -> PyResult<()> {
         let w = apply_write_common(self.inner.get(), format, mode, partitionBy, options)?;
         self.inner.set(w.clone());
+        self.check_bucket_count(py)?;
         interruptible(py, &w.spark_session(), || {
             w.save_as_table(name).map_err(Box::new)
         })
@@ -3809,6 +3860,7 @@ impl PyDataFrameWriter {
         }
         // PySpark sets the overwrite/append mode on the writer itself.
         self.inner.set(w.clone());
+        self.check_bucket_count(py)?;
         interruptible(py, &w.spark_session(), || {
             w.insert_into(tableName).map_err(Box::new)
         })
@@ -3841,6 +3893,7 @@ impl PyDataFrameWriter {
         w = set_option_skip_none(w, "compression", compression)?;
         // PySpark sets the mode/options/format on the writer itself, then saves.
         self.inner.set(w.clone().format("parquet"));
+        self.check_bucket_count(py)?;
         let path = crate::readwriter::writer_path(path)?;
         interruptible(py, &w.spark_session(), || {
             w.parquet(&path).map_err(Box::new)
@@ -3880,6 +3933,7 @@ impl PyDataFrameWriter {
         )?;
         // PySpark sets the mode/options/format on the writer itself, then saves.
         self.inner.set(w.clone().format("json"));
+        self.check_bucket_count(py)?;
         let path = crate::readwriter::writer_path(path)?;
         interruptible(py, &w.spark_session(), || w.json(&path).map_err(Box::new))
     }
@@ -3937,6 +3991,7 @@ impl PyDataFrameWriter {
         )?;
         // PySpark sets the mode/options/format on the writer itself, then saves.
         self.inner.set(w.clone().format("csv"));
+        self.check_bucket_count(py)?;
         let path = crate::readwriter::writer_path(path)?;
         interruptible(py, &w.spark_session(), || w.csv(&path).map_err(Box::new))
     }
@@ -3968,6 +4023,7 @@ impl PyDataFrameWriter {
         w = set_option_skip_none(w, "compression", compression)?;
         // PySpark sets the mode/options/format on the writer itself, then saves.
         self.inner.set(w.clone().format("orc"));
+        self.check_bucket_count(py)?;
         let path = crate::readwriter::writer_path(path)?;
         interruptible(py, &w.spark_session(), || w.orc(&path).map_err(Box::new))
     }
@@ -3987,6 +4043,7 @@ impl PyDataFrameWriter {
         w = set_options_skip_none(w, &[("compression", compression), ("lineSep", lineSep)])?;
         // PySpark sets the mode/options/format on the writer itself, then saves.
         self.inner.set(w.clone().format("text"));
+        self.check_bucket_count(py)?;
         let path = crate::readwriter::writer_path(path)?;
         interruptible(py, &w.spark_session(), || w.text(&path).map_err(Box::new))
     }
@@ -4036,6 +4093,7 @@ impl PyDataFrameWriter {
         )?;
         // PySpark sets the mode/options/format on the writer itself, then saves.
         self.inner.set(w.clone().format("xml"));
+        self.check_bucket_count(py)?;
         let path = crate::readwriter::writer_path(path)?;
         interruptible(py, &w.spark_session(), || w.xml(&path).map_err(Box::new))
     }

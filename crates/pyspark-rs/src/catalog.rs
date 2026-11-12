@@ -323,7 +323,9 @@ impl PyCatalog {
     ///
     /// A supplied pyspark `StorageLevel` is mapped onto the `spark.connect`
     /// `CacheTable.storage_level` field (the same field layout `DataFrame.persist` uses);
-    /// `None` leaves it unset so the server default applies.
+    /// `None` leaves it unset so the server default applies. As PySpark's `CacheTable`, which
+    /// converts a storage level that is true (`if self._storage_level:`), any false value, such
+    /// as 0, leaves it unset too, and another true value fails the assertion of the conversion.
     #[pyo3(signature = (tableName, storageLevel=None))]
     fn cacheTable(
         &self,
@@ -331,9 +333,12 @@ impl PyCatalog {
         tableName: &str,
         storageLevel: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<()> {
-        let level = storageLevel
-            .map(crate::storagelevel::storage_level_proto)
-            .transpose()?;
+        let level = match storageLevel {
+            Some(level) if level.is_truthy()? => {
+                Some(crate::storagelevel::storage_level_proto(level)?)
+            }
+            _ => None,
+        };
         self.detached(py, |catalog| {
             { catalog.cache_table_with_storage_level(tableName, level) }.map_err(Box::new)
         })

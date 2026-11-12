@@ -412,6 +412,15 @@ impl DataFrameWriter {
         self
     }
 
+    /// Unset the bucketing specification, so that the write sends none, as PySpark's
+    /// `bucketBy` of a count that is not positive does: its `WriteOperation` sends the
+    /// bucketing only of a count above 0, and the last `bucketBy` wins.
+    pub fn clear_bucket_by(mut self) -> Self {
+        self.num_buckets = None;
+        self.bucket_cols.clear();
+        self
+    }
+
     /// Set the sort columns.
     pub fn sort_by<S: Into<String>>(mut self, cols: impl IntoIterator<Item = S>) -> Self {
         self.sort_cols = cols.into_iter().map(Into::into).collect();
@@ -962,6 +971,36 @@ mod tests {
         let bucket_by = op.bucket_by.unwrap();
         assert_eq!(bucket_by.num_buckets, 10);
         assert_eq!(bucket_by.bucket_column_names, vec!["col1"]);
+    }
+
+    #[test]
+    fn v1_write_clear_bucket_by_sends_no_bucketing() {
+        // As PySpark's `bucketBy` of a count that is not positive after another: the last call
+        // wins, and the write sends no bucketing, while the sort columns stay.
+        let spark = session();
+        let df = spark.range(3).unwrap();
+        let path = || {
+            Some(proto::write_operation::SaveType::Path(
+                "/tmp/out".to_string(),
+            ))
+        };
+        let writer = df
+            .write()
+            .bucket_by(4, vec!["col1"])
+            .sort_by(vec!["col1"])
+            .clear_bucket_by();
+        let op = writer.build_write_operation(path()).unwrap();
+        assert_eq!(op.bucket_by, None);
+        assert_eq!(op.sort_column_names, vec!["col1"]);
+        let op = writer
+            .bucket_by(2, vec!["col2"])
+            .build_write_operation(path())
+            .unwrap();
+        let bucket_by = op.bucket_by.unwrap();
+        assert_eq!(
+            (bucket_by.num_buckets, bucket_by.bucket_column_names),
+            (2, vec!["col2".to_string()])
+        );
     }
 
     #[test]
