@@ -36,8 +36,7 @@ impl PyDataFrameReader {
 
     /// Keep the options of a format-specific read on this reader, as PySpark does
     /// (its `json`/`csv`/... set the options and the format on `self`, then `load`).
-    /// Called only after every argument was validated, so a failed call leaves the
-    /// reader unchanged.
+    /// Called before the path is checked, as PySpark's `load` sets the format first.
     fn commit(&mut self, r: &DataFrameReader, format: &str) {
         self.inner = r.clone().format(format);
     }
@@ -46,15 +45,18 @@ impl PyDataFrameReader {
     /// of `path`, as PySpark's: a DataFrame of strings, which it parses as `parse_format`,
     /// keeping the schema and the options on this reader but not the format, or else a path
     /// or a list of them, which it loads as `format`. `csv`, unlike the others, passes any
-    /// other `path` to `load`, which asserts it.
+    /// other `path` to `load`, which asserts it. The schema, if any, is set only on those two
+    /// paths, as PySpark's, so a path of another type keeps the options alone.
     fn read_or_parse(
         &mut self,
         r: DataFrameReader,
+        schema: Option<&Bound<'_, PyAny>>,
         format: &str,
         parse_format: spark_connect::plan::ParseFormat,
         path: &Bound<'_, PyAny>,
     ) -> PyResult<PyDataFrame> {
         if let Ok(df) = path.extract::<PyRef<'_, PyDataFrame>>() {
+            let r = apply_optional_schema(r, schema)?;
             let parsed = r
                 .clone()
                 .parse(parse_format, &df.dataframe)
@@ -67,10 +69,13 @@ impl PyDataFrameReader {
             || path.is_instance_of::<pyo3::types::PyList>()
             || parse_format == spark_connect::plan::ParseFormat::Csv
         {
-            let paths = paths_of(path)?;
+            let r = apply_optional_schema(r, schema)?;
             self.commit(&r, format);
+            let paths = paths_of(path)?;
             return Ok(PyDataFrame::new(r.format(format).load_paths(paths)));
         }
+        // PySpark's options are set before the path is checked, so they stay on this reader.
+        self.inner = r;
         Err(not_expected_type(path, "path", "str, list, or DataFrame"))
     }
 }
@@ -102,6 +107,17 @@ fn path_list(paths: &[Bound<'_, PyAny>]) -> PyResult<Vec<String>> {
             }
         })
         .collect()
+}
+
+/// The path of a writer, a str, as its protobuf field takes it. Another type raises the TypeError
+/// of protobuf, which the upb backend of PySpark raises with this message.
+pub(crate) fn writer_path(path: &Bound<'_, PyAny>) -> PyResult<String> {
+    if path.is_instance_of::<pyo3::types::PyString>() {
+        return path.extract();
+    }
+    Err(pyo3::exceptions::PyTypeError::new_err(
+        "bad argument type for built-in operation",
+    ))
 }
 
 /// The columns of `df.write.bucketBy(numBuckets, col, *cols)` and `sortBy(col, *cols)`, as
@@ -205,6 +221,17 @@ pub(crate) fn changes_of_schema_error(py: Python<'_>) -> PyErr {
 /// Apply the `schema` argument of a format method, as pyspark does through `schema()`.
 fn apply_reader_schema(r: DataFrameReader, v: &Bound<'_, PyAny>) -> PyResult<DataFrameReader> {
     Ok(r.schema(reader_schema(v)?))
+}
+
+/// Apply the `schema` argument of a format method, if there is one.
+fn apply_optional_schema(
+    r: DataFrameReader,
+    schema: Option<&Bound<'_, PyAny>>,
+) -> PyResult<DataFrameReader> {
+    match schema {
+        Some(v) => apply_reader_schema(r, v),
+        None => Ok(r),
+    }
 }
 
 #[pymethods]
@@ -312,9 +339,10 @@ impl PyDataFrameReader {
         if let Some(s) = schema {
             r = apply_reader_schema(r, s)?;
         }
-        let paths = path.map(paths_of).transpose()?.unwrap_or_default();
-        // PySpark's one-shot load sets format/schema/options on the reader itself.
+        // PySpark's one-shot load sets format/schema/options on the reader itself, before it
+        // checks the path.
         self.inner = r.clone();
+        let paths = path.map(paths_of).transpose()?.unwrap_or_default();
         Ok(PyDataFrame::new(r.load_paths(paths)))
     }
 
@@ -367,9 +395,6 @@ impl PyDataFrameReader {
         useUnsafeRow: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
         let mut r = self.inner.clone();
-        if let Some(v) = schema {
-            r = apply_reader_schema(r, v)?;
-        }
         r = set_options_skip_none(
             r,
             &[
@@ -402,7 +427,13 @@ impl PyDataFrameReader {
                 ("useUnsafeRow", useUnsafeRow),
             ],
         )?;
-        self.read_or_parse(r, "json", spark_connect::plan::ParseFormat::Json, path)
+        self.read_or_parse(
+            r,
+            schema,
+            "json",
+            spark_connect::plan::ParseFormat::Json,
+            path,
+        )
     }
 
     /// Read Parquet file(s). As PySpark's `parquet(*paths, **options)`, only the options
@@ -428,8 +459,8 @@ impl PyDataFrameReader {
             let value = options.map(|o| o.get_item(name)).transpose()?.flatten();
             r = set_option_skip_none(r, name, value.as_ref())?;
         }
-        let paths = path_list(&paths)?;
         self.commit(&r, "parquet");
+        let paths = path_list(&paths)?;
         Ok(PyDataFrame::new(r.format("parquet").load_paths(paths)))
     }
 
@@ -475,9 +506,6 @@ impl PyDataFrameReader {
         unescapedQuoteHandling: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
         let mut r = self.inner.clone();
-        if let Some(v) = schema {
-            r = apply_reader_schema(r, v)?;
-        }
         r = set_options_skip_none(
             r,
             &[
@@ -515,7 +543,13 @@ impl PyDataFrameReader {
                 ("unescapedQuoteHandling", unescapedQuoteHandling),
             ],
         )?;
-        self.read_or_parse(r, "csv", spark_connect::plan::ParseFormat::Csv, path)
+        self.read_or_parse(
+            r,
+            schema,
+            "csv",
+            spark_connect::plan::ParseFormat::Csv,
+            path,
+        )
     }
 
     /// Read ORC file(s) - full pyspark signature; each named option is
@@ -542,8 +576,8 @@ impl PyDataFrameReader {
                 ("modifiedAfter", modifiedAfter),
             ],
         )?;
-        let paths = paths_of(path)?;
         self.commit(&r, "orc");
+        let paths = paths_of(path)?;
         Ok(PyDataFrame::new(r.format("orc").load_paths(paths)))
     }
 
@@ -579,8 +613,8 @@ impl PyDataFrameReader {
                 ("modifiedAfter", modifiedAfter),
             ],
         )?;
-        let paths = paths_of(paths)?;
         self.commit(&r, "text");
+        let paths = paths_of(paths)?;
         Ok(PyDataFrame::new(r.format("text").load_paths(paths)))
     }
 
@@ -638,7 +672,7 @@ impl PyDataFrameReader {
                 ("locale", locale),
             ],
         )?;
-        self.read_or_parse(r, "xml", spark_connect::plan::ParseFormat::Xml, path)
+        self.read_or_parse(r, None, "xml", spark_connect::plan::ParseFormat::Xml, path)
     }
 
     /// Read from a JDBC source. Mirrors `DataFrameReader.jdbc(url, table, column=None,

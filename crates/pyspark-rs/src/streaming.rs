@@ -980,7 +980,7 @@ impl PyDataStreamWriter {
     fn start(
         &self,
         py: Python<'_>,
-        path: Option<&str>,
+        path: Option<&Bound<'_, PyAny>>,
         format: Option<&str>,
         outputMode: Option<&str>,
         partitionBy: Option<&Bound<'_, PyAny>>,
@@ -988,10 +988,12 @@ impl PyDataStreamWriter {
         options: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyStreamingQuery> {
         let writer = self.apply_write_opts(format, outputMode, partitionBy, queryName, options)?;
+        // PySpark's start sets these on the writer before it checks the path.
+        let path = path.map(crate::readwriter::writer_path).transpose()?;
         // Memory/console/foreach sinks take no path; the core treats "" as unset.
         let query = interruptible(py, &writer.spark_session(), || {
             writer
-                .start_with_event_handler(path.unwrap_or(""), post_started_event)
+                .start_with_event_handler(path.as_deref().unwrap_or(""), post_started_event)
                 .map_err(Box::new)
         })?;
         Ok(PyStreamingQuery::new(query))

@@ -6961,6 +6961,110 @@ def test_strings_that_utf8_cannot_encode_raise_value_error_in_option_keys_conf_a
     assert service.execute_requests == []
 
 
+def test_writers_and_readers_reject_a_path_that_is_not_a_str_as_pyspark(mock_connect):
+    # As PySpark's upb protobuf backend, which raises a TypeError of this message for a path
+    # that is not a str, in every writer method and in DataStreamWriter.start.
+    spark, service = mock_connect
+    df = spark.range(1)
+    stream = spark.readStream.format("rate").load().writeStream
+    message = "bad argument type for built-in operation"
+    for path in [123, 1.5, ["a", 1]]:
+        for call in [
+            lambda: df.write.save(path),
+            lambda: df.write.json(path),
+            lambda: df.write.csv(path),
+            lambda: df.write.parquet(path),
+            lambda: df.write.orc(path),
+            lambda: df.write.text(path),
+            lambda: df.write.xml(path),
+            lambda: stream.start(path),
+        ]:
+            with pytest.raises(TypeError) as error:
+                call()
+            assert type(error.value) is TypeError and str(error.value) == message
+    assert service.execute_requests == []
+
+
+def test_readers_keep_their_settings_when_the_path_is_not_a_str_as_pyspark(mock_connect):
+    # As PySpark, whose format readers set the options and the format before they check the path,
+    # which is an AssertionError for a path that is not a str.
+    from pyspark.errors import PySparkTypeError
+
+    spark, _ = mock_connect
+    reader = spark.read.option("wholetext", True)
+    with pytest.raises(AssertionError):
+        reader.text(123)
+    assert reader._format == "text" and reader._options == {"wholetext": "false"}
+    reader = spark.read.option("mergeSchema", True)
+    with pytest.raises(AssertionError):
+        reader.parquet(123)
+    assert reader._format == "parquet" and reader._options == {"mergeSchema": "true"}
+    reader = spark.read.option("sep", ";")
+    with pytest.raises(AssertionError):
+        reader.csv(123)
+    assert reader._format == "csv" and reader._options == {"sep": ";"}
+    # json and xml raise a PySparkTypeError, after their options, and xml's schema, which
+    # json does not set on a path of another type.
+    reader = spark.read
+    with pytest.raises(PySparkTypeError) as error:
+        reader.json(123, schema="a int", multiLine=True)
+    assert error.value.getCondition() == "NOT_EXPECTED_TYPE"
+    assert reader._format is None and reader._options == {"multiLine": "true"}
+    assert reader._schema == ""
+    reader = spark.read
+    with pytest.raises(PySparkTypeError):
+        reader.xml(123, schema="a int", rowTag="r")
+    assert reader._format is None and reader._options == {"rowTag": "r"}
+    assert reader._schema == "a int"
+
+
+def test_writers_keep_their_settings_when_the_path_is_not_a_str_as_pyspark(mock_connect):
+    # As PySpark, whose writer sets the settings of a call before it checks the path: a later
+    # save of the writer sends the format and the options of the failed call.
+    spark, service = mock_connect
+
+    def sent_write():
+        # ExecutePlanRequest.plan=3, Plan.command=2, Command.write_operation=2.
+        plan = parse_message(parse_message(service.execute_requests[-1])[3][0])
+        return parse_message(parse_message(plan[2][0])[2][0])
+
+    writer = spark.range(1).write.option("compression", "gzip")
+    with pytest.raises(TypeError):
+        writer.json(123)
+    writer.save("p")
+    # WriteOperation.source=2, and options=9, of entries of key=1 and value=2.
+    assert sent_write()[2] == [b"json"]
+    options = {parse_message(entry)[1][0]: parse_message(entry)[2][0] for entry in sent_write()[9]}
+    assert options == {b"compression": b"gzip"}
+
+    writer = spark.range(1).write.mode("overwrite")
+    with pytest.raises(TypeError):
+        writer.save(123, format="parquet")
+    writer.save("p")
+    # WriteOperation.source=2 and mode=5, of SAVE_MODE_OVERWRITE=2.
+    assert sent_write()[2] == [b"parquet"] and sent_write()[5] == [2]
+
+
+def test_stream_writers_keep_their_settings_when_the_path_is_not_a_str_as_pyspark(mock_connect):
+    # As PySpark, whose start sets the format, query name and output mode before it checks the
+    # path: a later start of the stream writer starts the query of the failed call's settings.
+    spark, service = mock_connect
+    # ExecutePlanResponse.write_stream_operation_start_result=8: query_id=1 (id=1, run_id=2).
+    service.execute_payload = message_field(
+        8, message_field(1, message_field(1, "q") + message_field(2, "r")))
+    writer = spark.readStream.format("rate").load().writeStream
+    with pytest.raises(TypeError):
+        writer.start(123, format="memory", queryName="q", outputMode="append")
+    assert service.execute_requests == []
+    writer.start()
+    # ExecutePlanRequest.plan=3 -> Plan.command=2 -> Command.write_stream_operation_start=6.
+    plan = parse_message(parse_message(service.execute_requests[-1])[3][0])
+    start = parse_message(parse_message(plan[2][0])[6][0])
+    # WriteStreamOperationStart.format=2, output_mode=9, query_name=10.
+    assert start[2] == [b"memory"] and start[9] == [b"append"] and start[10] == [b"q"]
+    assert 11 not in start
+
+
 def test_functions_levenshtein():
     """Test levenshtein distance function."""
     from pyspark.sql import functions as F
