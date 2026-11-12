@@ -15706,6 +15706,23 @@ def test_values_of_local_rows_convert_and_raise_as_pyarrow(mock_connect):
         assert e.value.getCondition() == "UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION"
         assert e.value.getMessageParameters() == {"data_type": data_type}
 
+
+def test_a_numpy_nat_of_a_day_time_interval_field_is_null_as_pyarrow(mock_connect):
+    # As PyArrow, to which PySpark passes the values of a day-time interval field as they are: a
+    # NaT of NumPy is null, as a scalar and in an array, also within a struct or a map.
+    np = pytest.importorskip("numpy")
+    spark, service = mock_connect
+    nat = np.timedelta64("NaT", "us")
+    table, _ = _local_rows_relation_of(service, spark.createDataFrame(
+        [(nat, np.array([1, "NaT"], dtype="timedelta64[us]"), (nat,), {"k": nat})],
+        "v interval day to second, a array<interval day to second>, "
+        "s struct<x: interval day to second>, m map<string, interval day to second>"))
+    assert table.column("v").to_pylist() == [None]
+    assert table.column("a").to_pylist() == [[datetime.timedelta(microseconds=1), None]]
+    assert table.column("s").to_pylist() == [{"x": None}]
+    assert table.column("m").to_pylist() == [[("k", None)]]
+
+
 @pytest.mark.parametrize(
     "rows,ddl,error,message",
     [

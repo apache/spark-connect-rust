@@ -32,6 +32,7 @@ static TIME: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static TIMEDELTA: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static ARRAY: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static SORTED: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static SYS: PyOnceLock<Py<PyModule>> = PyOnceLock::new();
 
 /// Cache the accelerator class, including its absence, independently of the public alias.
 pub(crate) fn c_decimal_type(py: Python<'_>) -> PyResult<Option<&Bound<'_, PyType>>> {
@@ -1245,6 +1246,19 @@ fn arrow_list(
 ) -> PyResult<Value> {
     let py = obj.py();
     let mut items = Vec::new();
+    // A list and a tuple, the values of most rows, are read first: neither is a NumPy array.
+    if let Ok(list) = obj.cast::<PyList>() {
+        for item in list.iter() {
+            items.push(convert(&item, element_type, contains_null, late)?);
+        }
+        return Ok(Value::List(items));
+    }
+    if let Ok(tuple) = obj.cast::<PyTuple>() {
+        for item in tuple.iter() {
+            items.push(convert(&item, element_type, contains_null, late)?);
+        }
+        return Ok(Value::List(items));
+    }
     if numpy_array_dimensions(obj)?.is_some_and(|dimensions| dimensions != 1) {
         let message = match arrow_type_text(dt) {
             Some(list) => format!(
@@ -1258,15 +1272,7 @@ fn arrow_list(
     // SAFETY: `obj` is a live object, and PySequence_Check always succeeds without calling
     // into Python.
     let is_sequence = unsafe { pyo3::ffi::PySequence_Check(obj.as_ptr()) } == 1;
-    if let Ok(list) = obj.cast::<PyList>() {
-        for item in list.iter() {
-            items.push(convert(&item, element_type, contains_null, late)?);
-        }
-    } else if let Ok(tuple) = obj.cast::<PyTuple>() {
-        for item in tuple.iter() {
-            items.push(convert(&item, element_type, contains_null, late)?);
-        }
-    } else if is_sequence {
+    if is_sequence {
         // SAFETY: `obj` is a live object. PySequence_Size returns -1 with an exception set
         // when it fails.
         let len = unsafe { pyo3::ffi::PySequence_Size(obj.as_ptr()) };
@@ -1312,8 +1318,9 @@ fn arrow_list(
 /// not loaded, as such a value can only exist once it was.
 fn numpy_array_dimensions(obj: &Bound<'_, PyAny>) -> PyResult<Option<usize>> {
     let py = obj.py();
-    let modules = py
-        .import(intern!(py, "sys"))?
+    let modules = SYS
+        .get_or_try_init(py, || py.import("sys").map(Bound::unbind))?
+        .bind(py)
         .getattr(intern!(py, "modules"))?;
     match modules.cast::<PyDict>()?.get_item(intern!(py, "numpy"))? {
         Some(numpy) if !numpy.is_none() => {
@@ -1597,7 +1604,9 @@ fn arrow_scalar(obj: &Bound<'_, PyAny>, dt: &DataType) -> PyResult<Value> {
                 _ => Value::Double(value),
             })
         }
-        DataType::DayTimeInterval { .. } => Ok(Value::DayTimeInterval(duration_micros(obj)?)),
+        DataType::DayTimeInterval { .. } => {
+            Ok(duration_micros(obj)?.map_or(Value::Null, Value::DayTimeInterval))
+        }
         DataType::Date => Ok(Value::Date(date_days(obj)?)),
         // As PyArrow's `time64[ns]`, to which PySpark passes the value as it is: a time, else
         // the nanoseconds of the value as `CIntFromPython` takes it.
@@ -1839,12 +1848,13 @@ fn udt_of<'py>(
 }
 
 /// The microseconds of a value of a day-time interval column, as PyArrow converts it to
-/// `duration[us]`: a timedelta; a NumPy scalar of `timedelta64[us]`, as another NumPy scalar
-/// raises `ArrowNotImplementedError`; else the value as `CIntFromPython` takes it.
-fn duration_micros(obj: &Bound<'_, PyAny>) -> PyResult<i64> {
+/// `duration[us]`: a timedelta; a NumPy scalar of `timedelta64[us]`, or None for its NaT, which
+/// PyArrow makes null, as another NumPy scalar raises `ArrowNotImplementedError`; else the value
+/// as `CIntFromPython` takes it.
+fn duration_micros(obj: &Bound<'_, PyAny>) -> PyResult<Option<i64>> {
     let py = obj.py();
     if obj.is_instance(TIMEDELTA.import(py, "datetime", "timedelta")?.as_any())? {
-        return timedelta_micros(obj);
+        return timedelta_micros(obj).map(Some);
     }
     if numpy_generic(obj)? {
         let arrow_type = py.import(intern!(py, "pyarrow"))?.call_method1(
@@ -1853,10 +1863,12 @@ fn duration_micros(obj: &Bound<'_, PyAny>) -> PyResult<i64> {
         )?;
         let arrow_type = arrow_type.str()?.to_cow()?.into_owned();
         if arrow_type == "duration[us]" {
-            // The microseconds that the scalar holds, as PyArrow reads them.
-            return obj
+            // The microseconds that the scalar holds, as PyArrow reads them. A NaT, which NumPy
+            // holds as the least int64, is null, as PyArrow makes it.
+            let micros: i64 = obj
                 .call_method1(intern!(py, "astype"), (intern!(py, "int64"),))?
-                .extract();
+                .extract()?;
+            return Ok((micros != i64::MIN).then_some(micros));
         }
         return Err(pyarrow_error(
             py,
@@ -1864,7 +1876,7 @@ fn duration_micros(obj: &Bound<'_, PyAny>) -> PyResult<i64> {
             format!("Expected np.timedelta64 but got: {arrow_type}"),
         )?);
     }
-    c_int_from_python(obj, 64, None)
+    c_int_from_python(obj, 64, None).map(Some)
 }
 
 /// The microseconds of a `datetime.timedelta`, as `DayTimeIntervalType.toInternal`:/// The microseconds of a `datetime.timedelta`, as `DayTimeIntervalType.toInternal`:
