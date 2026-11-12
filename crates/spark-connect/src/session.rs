@@ -183,16 +183,19 @@ impl StopLock {
                 }
             })?;
         }
-        Some(StopLockHold)
+        Some(StopLockHold { thread })
     }
 
-    /// Leave the lock by one entry of the calling thread, waking the waits for it.
-    fn leave(&self) {
+    /// Leave the lock by one entry of `thread`, waking the waits for it. A hold exists only while
+    /// its thread holds the lock, so the entry is that of the hold, on whichever thread it drops.
+    fn leave(&self, thread: std::thread::ThreadId) {
         let mut holder = self.holder.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((_, depth)) = holder.as_mut() {
-            *depth -= 1;
-            if *depth == 0 {
-                *holder = None;
+        if let Some((owner, depth)) = holder.as_mut() {
+            if *owner == thread {
+                *depth -= 1;
+                if *depth == 0 {
+                    *holder = None;
+                }
             }
         }
         drop(holder);
@@ -202,11 +205,14 @@ impl StopLock {
 
 /// A hold of the lock that `stop()` takes, which is left when it drops. See
 /// [`enter_stop_lock`].
-pub struct StopLockHold;
+pub struct StopLockHold {
+    /// The thread that entered the lock, whose entry the hold leaves.
+    thread: std::thread::ThreadId,
+}
 
 impl Drop for StopLockHold {
     fn drop(&mut self) {
-        stop_lock().leave();
+        stop_lock().leave(self.thread);
     }
 }
 
