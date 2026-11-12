@@ -54,7 +54,7 @@ default-members = [
 version = "4.3.0"
 edition = "2021"
 # The minimum Rust that the dependencies of the published crates need: tonic, tonic-prost and
-# tonic-build 0.14 (and DataFusion 53 of the `datafusion` feature) declare 1.88. CI checks it.
+# tonic-build 0.14 declare 1.88 (the `datafusion` feature needs 1.94, see below). CI checks it.
 rust-version = "1.88"
 license = "Apache-2.0"
 repository = "https://github.com/apache/spark-connect-rust"
@@ -75,11 +75,12 @@ tokio-stream = "0.1"
 futures = "0.3"
 
 # Arrow (result decoding).
-arrow = { version = "58", default-features = false, features = ["ipc", "ipc_compression", "prettyprint"] }
+arrow = { version = "59", default-features = false, features = ["ipc", "ipc_compression", "prettyprint"] }
 
 # DataFusion for the optional to_datafusion() conversion.
-# Pinned to 53 for arrow 58 compatibility.
-datafusion = { version = "53", default-features = false }
+# Pinned to 55 for arrow 59 compatibility. 55 needs Rust 1.94, so only the `datafusion` feature
+# needs that much; no DataFusion release is on Arrow 60 yet.
+datafusion = { version = "55", default-features = false }
 
 # Polars for the optional to_polars() conversion. Bridged via Arrow IPC bytes
 # (the `ipc` feature) rather than the polars-arrow/`arrow_rs` path, so polars'
@@ -87,7 +88,7 @@ datafusion = { version = "53", default-features = false }
 polars = { version = "0.54", default-features = false, features = ["ipc"] }
 
 # PyO3 for the pyspark-rs CPython extension.
-pyo3 = { version = "0.28", features = ["extension-module", "abi3-py39"] }
+pyo3 = { version = "0.29", features = ["extension-module", "abi3-py39"] }
 
 # misc
 bytes = "1"

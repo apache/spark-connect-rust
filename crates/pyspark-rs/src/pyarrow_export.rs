@@ -48,13 +48,13 @@ pub(crate) fn record_batches_to_pyarrow(
         ));
     }
     if schema.fields().iter().any(|field| field_needs_ipc(field)) {
-        // Arrow 58.3 panics on NUL-containing C strings inside the C stream
-        // `get_schema` callback. Unwinding across that extern "C" boundary
-        // aborts Python instead of raising an exception. Check before export,
-        // then reuse the collected batches for IPC without another request.
-        // CString::new(...).unwrap() in FFI_ArrowSchema::try_new / with_name:
-        // https://github.com/apache/arrow-rs/blob/58.3.0/arrow-schema/src/ffi.rs#L148
-        // https://github.com/apache/arrow-rs/blob/58.3.0/arrow-schema/src/ffi.rs#L174
+        // Arrow 59.3 panics on a NUL in a timestamp time zone inside the C stream
+        // `get_schema` callback: the time zone is in the C format string, which is made with
+        // CString::new(...).unwrap(), at
+        // https://github.com/apache/arrow-rs/blob/59.3.2/arrow-schema/src/ffi.rs#L148.
+        // Unwinding across that extern "C" boundary aborts Python instead of raising an
+        // exception. Check before export, then reuse the collected batches for IPC without
+        // another request.
         let bytes = py
             .detach(|| -> arrow::error::Result<Vec<u8>> {
                 let mut bytes = Vec::new();
