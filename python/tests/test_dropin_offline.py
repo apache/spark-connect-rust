@@ -10433,6 +10433,85 @@ def test_random_split_converts_its_seed_with_int_as_pyspark(mock_connect):
     assert error.value.getCondition() == "VALUE_NOT_POSITIVE"
 
 
+def test_seeds_that_pyspark_cannot_send_are_refused_as_pyspark(mock_connect):
+    # As PySpark Connect's: randomSplit and sample take int() of the seed, and an int out of the
+    # range of a long is the ValueError of protobuf. sampleBy's StatSampleBy asserts an int, so
+    # a float, a str or an np.int64 is a bare AssertionError, and a bool passes the assertion but
+    # is refused by the proto. Its checks of col and fractions come first.
+    from pyspark.errors import PySparkTypeError
+
+    spark, service = mock_connect
+    df = spark.range(10)
+
+    def split(seed):
+        return df.randomSplit([1.0, 1.0], seed)
+
+    def sample(seed):
+        return df.sample(0.5, seed)
+
+    def keyword_sample(seed):
+        return df.sample(fraction=0.5, seed=seed)
+
+    def positional_sample(seed):
+        return df.sample(False, 0.5, seed)
+
+    out_of_range = (
+        (1e30, "1000000000000000019884624838656"),
+        (2**63, "9223372036854775808"),
+        (-(2**63) - 1, "-9223372036854775809"),
+        (np.uint64(2**63), "9223372036854775808"),
+    )
+    for call in (split, sample, keyword_sample, positional_sample):
+        for seed, shown in out_of_range:
+            with pytest.raises(ValueError) as error:
+                call(seed)
+            assert type(error.value) is ValueError
+            assert str(error.value) == f"Value out of range: {shown}"
+
+    def sample_by(seed):
+        return df.sampleBy("id", {0: 0.5}, seed)
+
+    def stat_sample_by(seed):
+        return df.stat.sampleBy("id", {0: 0.5}, seed)
+
+    for call in (sample_by, stat_sample_by):
+        for seed in (3.7, np.int64(3), "3"):
+            with pytest.raises(AssertionError) as error:
+                call(seed)
+            assert type(error.value) is AssertionError
+            assert str(error.value) == ""
+        for seed in (True, False):
+            with pytest.raises(TypeError) as error:
+                call(seed)
+            assert str(error.value) == (
+                f"Cannot set spark.connect.StatSampleBy.seed to {seed}: {seed} has type "
+                "<class 'bool'>, but expected one of: (int)."
+            )
+        for seed, shown in out_of_range[1:3]:
+            with pytest.raises(ValueError) as error:
+                call(seed)
+            assert str(error.value) == f"Value out of range: {shown}"
+    with pytest.raises(PySparkTypeError) as error:
+        df.sampleBy(1, {0: 0.5}, 3.7)
+    assert error.value.getCondition() == "NOT_EXPECTED_TYPE"
+    with pytest.raises(PySparkTypeError) as error:
+        df.sampleBy("id", [0.5], 3.7)
+    assert error.value.getCondition() == "NOT_EXPECTED_TYPE"
+
+    # The bounds of a long are valid seeds, sent as they are, by Sample.seed=5 and
+    # StatSampleBy.seed=5, of Relation.sample=12 and Relation.sample_by=107.
+    def sent_seed(dataframe, field):
+        dataframe.collect()
+        plan = parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0]
+        return parse_message(parse_message(plan)[field][0])[5][0]
+
+    assert sent_seed(df.sample(0.5, 2**63 - 1), 12) == 2**63 - 1
+    assert sent_seed(df.sampleBy("id", {0: 1.0}, 2**63 - 1), 107) == 2**63 - 1
+    assert len(df.randomSplit([1.0, 1.0], -(2**63))) == 2
+    assert df.sample(0.5, -(2**63)) is not None
+    assert df.sampleBy("id", {0: 1.0}, -(2**63)) is not None
+
+
 def test_with_metadata_and_pivot_refer_to_their_column_through_the_dataframe_as_pyspark(
         mock_connect):
     # As PySpark's withMetadata (self[columnName]) and pivot (self._df[pivot_col]): the column

@@ -1871,14 +1871,11 @@ impl PyDataFrame {
         &self,
         col: &Bound<'_, PyAny>,
         fractions: &Bound<'_, PyAny>,
-        seed: Option<i64>,
+        seed: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
         let py = col.py();
         let (col, fractions) = crate::stat::sample_by_arguments(col, fractions)?;
-        let seed = match seed {
-            Some(seed) => seed,
-            None => python_random_seed(py)?,
-        };
+        let seed = crate::stat::sample_by_seed(py, seed)?;
         Ok(PyDataFrame::new(
             self.dataframe
                 .stat()
@@ -4501,12 +4498,12 @@ pub(crate) fn python_random_seed(py: Python<'_>) -> PyResult<i64> {
 }
 
 /// `int(value)` of Python, as PySpark applies to a seed: a float is truncated, a str is parsed,
-/// and a value that `int()` rejects raises its error.
+/// and a value that `int()` rejects raises its error. An int out of the range of a long is the
+/// `ValueError` of protobuf.
 pub(crate) fn python_int(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<i64> {
-    py.import("builtins")?
-        .getattr("int")?
-        .call1((value,))?
-        .extract()
+    let int = py.import("builtins")?.getattr("int")?.call1((value,))?;
+    int.extract::<i64>()
+        .map_err(|_| crate::session::value_out_of_range(&int))
 }
 
 /// The collected `rows` of a result of `schema`, with configured binary values and

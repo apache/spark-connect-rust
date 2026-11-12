@@ -4017,7 +4017,7 @@ pub(crate) fn range_arguments(
 }
 
 /// The `ValueError` of protobuf for an int out of the range of its field.
-fn value_out_of_range(int: &Bound<'_, PyAny>) -> PyErr {
+pub(crate) fn value_out_of_range(int: &Bound<'_, PyAny>) -> PyErr {
     let shown = int.str().map(|text| text.to_string()).unwrap_or_default();
     pyo3::exceptions::PyValueError::new_err(format!("Value out of range: {shown}"))
 }
