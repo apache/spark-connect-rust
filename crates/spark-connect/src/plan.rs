@@ -133,11 +133,14 @@ pub enum LogicalPlan {
     /// (`pyspark.ml.connect.proto.TransformerRelation`), sent as it is, with the plan ID of the
     /// core, and the owner of the relation, if any, which the plan keeps alive. `depth` is the
     /// number of levels of the relation as a plan, with those of the plans of DataFrames that it
-    /// holds (1 for a relation without them), which count for [`MAX_PLAN_DEPTH`].
+    /// holds (1 for a relation without them), which count for [`MAX_PLAN_DEPTH`]. `observations`
+    /// are those of the DataFrames that the relation holds as its child, as PySpark's plans of
+    /// `pyspark.ml` collect them (see [`LogicalPlan::observations`]).
     Raw {
         relation: Box<proto::Relation>,
         owner: Option<RelationOwner>,
         depth: usize,
+        observations: Vec<(String, crate::observation::Observation)>,
     },
     /// Deduplicate: `df.distinct()` or `df.dropDuplicates()`.
     Deduplicate {
@@ -593,14 +596,15 @@ impl PlanIds {
             .insert(Arc::as_ptr(node) as usize, (Arc::downgrade(node), id));
     }
 
-    /// The live node of the plan ID `id`, as the server reports a relation by its plan ID.
+    /// A live node of the plan ID `id`, such as that of the DataFrame of a relation that this
+    /// session sent.
     pub(crate) fn node_of(&self, id: i64) -> Option<Arc<LogicalPlan>> {
         let nodes = self.nodes.lock().unwrap_or_else(|e| e.into_inner());
         nodes
             .ids
             .values()
-            .find(|(_, node_id)| *node_id == id)
-            .and_then(|(node, _)| node.upgrade())
+            .filter(|(_, node_id)| *node_id == id)
+            .find_map(|(node, _)| node.upgrade())
     }
 
     #[cfg(test)]
@@ -684,6 +688,44 @@ pub(crate) fn placeholder_relation(node: &Arc<LogicalPlan>, ids: &Arc<PlanIds>) 
             type_url: PLACEHOLDER_TYPE_URL.to_string(),
             value: marker.to_le_bytes().to_vec(),
         })),
+    }
+}
+
+/// The Observations of the DataFrame whose placeholder `relation`, a relation of `pyspark.ml`,
+/// holds as its child: the relation itself, or the input of a transform, the dataset of a model
+/// summary or the root of a `WithRelations`, and so on down, as PySpark's `TransformerRelation`,
+/// `AttributeRelation` and `WithRelations` collect the `observations` of their child (see
+/// [`LogicalPlan::observations`]). Taken before the placeholders are replaced, which then no
+/// longer name their DataFrames.
+pub(crate) fn child_observations(
+    relation: &proto::Relation,
+) -> Vec<(String, crate::observation::Observation)> {
+    let mut relation = relation;
+    loop {
+        let child = match &relation.rel_type {
+            Some(proto::relation::RelType::Extension(any))
+                if any.type_url == PLACEHOLDER_TYPE_URL =>
+            {
+                let target = <[u8; 8]>::try_from(any.value.as_slice())
+                    .ok()
+                    .and_then(|marker| placeholder_target(i64::from_le_bytes(marker)));
+                return target
+                    .map(|(node, _)| node.observations())
+                    .unwrap_or_default();
+            }
+            Some(proto::relation::RelType::MlRelation(ml)) => match &ml.ml_type {
+                Some(proto::ml_relation::MlType::Transform(transform)) => {
+                    transform.input.as_deref()
+                }
+                _ => ml.model_summary_dataset.as_deref(),
+            },
+            Some(proto::relation::RelType::WithRelations(with)) => with.root.as_deref(),
+            _ => None,
+        };
+        match child {
+            Some(child) => relation = child,
+            None => return Vec::new(),
+        }
     }
 }
 
@@ -1160,6 +1202,71 @@ impl LogicalPlan {
     /// The plans that this one reads directly.
     pub(crate) fn inputs(&self) -> Vec<&Arc<LogicalPlan>> {
         inputs_of!(self)
+    }
+
+    /// The Observations of this plan by their names, as PySpark's `LogicalPlan.observations`
+    /// collects those whose metrics an action of the plan sets: of each `Observe` node of an
+    /// [`Observation`](crate::observation::Observation) on the inputs that PySpark's plans hold
+    /// as their child, both sides of a join, a set operation and a zip, and the DataFrames that
+    /// a relation of `pyspark.ml` holds as its child. Not of the plans that an expression refers
+    /// to (a subquery), the DataFrames of `SparkSession.sql`, the other input of a `CoGroupMap`
+    /// or the initial state of a `GroupMap`, which PySpark's plans hold apart from their child.
+    /// Of two Observations of one name, the one that PySpark's dict keeps: the outer one, and
+    /// that of the right side.
+    pub(crate) fn observations(&self) -> Vec<(String, crate::observation::Observation)> {
+        // PySpark merges `{**child, **own}` and `{**left, **right}`, so the last Observation of
+        // a name in the post-order of the plan is kept. This walks the reverse of that order (a
+        // node, then its right side, then its left side) and keeps the first one of a name,
+        // without recursing, as a plan may be deep. A node that several inputs share is walked
+        // once: the Observations under it come after those of its first walk.
+        let mut observations: Vec<(String, crate::observation::Observation)> = Vec::new();
+        let mut keep = |name: &String, observation: &crate::observation::Observation| {
+            if !observations.iter().any(|(kept, _)| kept == name) {
+                observations.push((name.clone(), observation.clone()));
+            }
+        };
+        let mut walked: std::collections::HashSet<*const LogicalPlan> = Default::default();
+        let mut pending: Vec<&LogicalPlan> = vec![self];
+        while let Some(plan) = pending.pop() {
+            let key: *const LogicalPlan = plan;
+            if !walked.insert(key) {
+                continue;
+            }
+            match plan {
+                LogicalPlan::Observe {
+                    name,
+                    observation: Some(observation),
+                    ..
+                } => keep(name, observation),
+                LogicalPlan::Raw {
+                    observations: held, ..
+                } => {
+                    for (name, observation) in held {
+                        keep(name, observation);
+                    }
+                }
+                _ => {}
+            }
+            match plan {
+                // The right side is walked first, as it is popped first.
+                LogicalPlan::Join { left, right, .. }
+                | LogicalPlan::LateralJoin { left, right, .. }
+                | LogicalPlan::SetOperation { left, right, .. }
+                | LogicalPlan::Zip { left, right, .. }
+                | LogicalPlan::AsOfJoin { left, right, .. }
+                | LogicalPlan::NearestByJoin { left, right, .. } => {
+                    pending.push(left);
+                    pending.push(right);
+                }
+                LogicalPlan::CoGroupMap { input, .. } | LogicalPlan::GroupMap { input, .. } => {
+                    pending.push(input)
+                }
+                LogicalPlan::WithRelations { root, .. } => pending.push(root),
+                // The other plans hold their input as PySpark's hold their child.
+                _ => pending.extend(plan.inputs().into_iter().map(|input| input.as_ref())),
+            }
+        }
+        observations
     }
 
     /// The levels of this node itself, under which its inputs are: one, or those of the relation
@@ -3583,6 +3690,7 @@ mod deep_plan_tests {
             relation: Box::new(relation),
             owner: None,
             depth,
+            observations: Vec::new(),
         })
     }
 

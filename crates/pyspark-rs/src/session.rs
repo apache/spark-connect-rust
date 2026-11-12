@@ -879,6 +879,8 @@ impl PySparkSession {
                 error.write_unraisable(py, None);
             }
         });
+        // The metrics of the Observations of its executions, which PySpark's client converts.
+        crate::observation::check_observed_metrics(&session);
         PySparkSession {
             session,
             streams: std::sync::OnceLock::new(),
