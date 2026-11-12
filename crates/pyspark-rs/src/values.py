@@ -255,3 +255,24 @@ class Geometry:
         :return: Python representation of the Geometry type value.
         """
         return Geometry(wkb, srid)
+
+
+def _publish_methods(*classes: type) -> None:
+    # As the methods of PySpark's classes, those of these classes are of ``pyspark.sql.types``, the
+    # module that the server's Python workers import: a UDF that is, or captures, one of them pickles
+    # it by reference to that module, where ``pyspark._values`` exists on the client only.
+    import types
+
+    for cls in classes:
+        for value in vars(cls).values():
+            if isinstance(value, property):
+                functions = [value.fget, value.fset, value.fdel]
+            else:
+                functions = [getattr(value, "__func__", value)]
+            for function in functions:
+                if isinstance(function, types.FunctionType):
+                    function.__module__ = cls.__module__
+
+
+_publish_methods(VariantVal, Geography, Geometry)
+del _publish_methods

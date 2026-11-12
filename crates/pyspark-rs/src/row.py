@@ -226,3 +226,24 @@ class Row(tuple):
                 "%s=%r" % (key, value) for key, value in zip(self.__fields__, tuple(self))
             )
         return "<Row(%s)>" % ", ".join(repr(value) for value in self)
+
+
+def _publish_methods(*classes) -> None:
+    # As the methods of PySpark's classes, those of this class are of ``pyspark.sql.types``, the
+    # module that the server's Python workers import: a UDF that is, or captures, one of them pickles
+    # it by reference to that module, where ``pyspark._row`` exists on the client only.
+    import types
+
+    for cls in classes:
+        for value in vars(cls).values():
+            if isinstance(value, property):
+                functions = [value.fget, value.fset, value.fdel]
+            else:
+                functions = [getattr(value, "__func__", value)]
+            for function in functions:
+                if isinstance(function, types.FunctionType):
+                    function.__module__ = cls.__module__
+
+
+_publish_methods(Row)
+del _publish_methods
