@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use uuid;
 
 use spark_connect_core::error::{Result, SparkError, SparkErrorKind};
-use spark_connect_core::runtime::block_on;
+use spark_connect_core::runtime::{block_on, until_abort, ABORT_RETRIES};
 use spark_connect_proto as proto;
 
 use crate::dataframe::DataFrame;
@@ -799,39 +799,55 @@ pub struct ListenerEventStream {
     buffered_events: std::vec::IntoIter<(i32, String)>,
     done: bool,
     cancel: Option<tokio::sync::oneshot::Receiver<()>>,
+    /// Whether a signal of the process ended a read, as it ends the acknowledgement wait of
+    /// `add_listener`. The stream is then done, and the server is not awaited for its cancellation.
+    interrupted: bool,
 }
 
 impl ListenerEventStream {
     /// Read the next response unless canceled, checking cancellation before a ready response.
     /// Cancellation consumes its oneshot receiver and ends the stream like EOF; once done,
-    /// the transport is never polled again.
+    /// the transport is never polled again. A signal that a wait of this thread polls ends the
+    /// read at once, as PySpark's wait for the acknowledgement does, and marks the stream
+    /// interrupted. Only a wait of the caller reaches that: the reads of the listener bus's
+    /// worker and of the iterator run with no signal watch.
     fn message(&mut self) -> Result<Option<proto::ExecutePlanResponse>> {
         if self.done {
             return Ok(None);
         }
+        // None: canceled. Some(None): interrupted by a signal. Some(Some(..)): the read.
         let response = block_on(async {
+            let read = until_abort(ABORT_RETRIES, self.stream.message());
             if let Some(cancel) = &mut self.cancel {
                 tokio::select! {
                     biased;
                     _ = cancel => None,
-                    response = self.stream.message() => Some(response),
+                    response = read => Some(response),
                 }
             } else {
-                Some(self.stream.message().await)
+                Some(read.await)
             }
         });
         match response {
-            None | Some(Ok(None)) => {
+            None | Some(Some(Ok(None))) => {
                 // A completed oneshot must never be polled again.
                 self.cancel.take();
                 self.done = true;
                 Ok(None)
             }
-            Some(Err(error)) => {
+            Some(None) => {
+                self.cancel.take();
+                self.done = true;
+                self.interrupted = true;
+                Err(SparkError::connect_msg(
+                    "the wait for the streaming query listener acknowledgement was interrupted",
+                ))
+            }
+            Some(Some(Err(error))) => {
                 self.done = true;
                 Err(error)
             }
-            Some(response) => response,
+            Some(Some(response)) => response,
         }
     }
 
@@ -1399,6 +1415,9 @@ impl StreamingQueryManager {
     /// again to open a new subscription. Terminal teardown cancels acknowledgement waits
     /// once the RPC stream is established. Establishing the stream itself follows the
     /// transport's deadline and retry policy; a stopped session then reports NO_ACTIVE_SESSION.
+    /// A signal of the process that a wait of this thread polls ends the acknowledgement wait
+    /// at once: the listener then stays in the bus, with its id, and the server's listener is
+    /// removed by the next removal, as PySpark's append leaves its listener in the bus.
     pub fn add_listener(&self, listener: Arc<dyn StreamingQueryListener>) -> Result<String> {
         let mut state = self.idle_state(false)?.expect("adding obtains the state");
         if self.session.is_stopped() {
@@ -1443,12 +1462,15 @@ impl StreamingQueryManager {
         // Whether the stream that sends the ADD was opened: the server may then hold its
         // listener, whatever ends the wait for its acknowledgement.
         let mut opened = false;
+        let mut interrupted = false;
         let stream = self.listener_event_stream().and_then(|mut stream| {
             opened = true;
             // Cancel a pending acknowledgement once the RPC stream exists. Establishing
             // the stream above still follows the transport's deadline and retry policy.
             stream.cancel = Some(receiver);
-            stream.wait_until_listener_added()?;
+            let acknowledged = stream.wait_until_listener_added();
+            interrupted = stream.interrupted;
+            acknowledged?;
             Ok(stream)
         });
         let mut state = self.bus.lock();
@@ -1500,6 +1522,14 @@ impl StreamingQueryManager {
                 // subscription removes it first. That REMOVE finds none at worst.
                 if opened {
                     state.server_registration_held = true;
+                }
+                if interrupted {
+                    // As PySpark's append, a signal that ends the wait for the acknowledgement
+                    // leaves the listener in the bus, and returns its id, so a removal finds it.
+                    // The registration held above is removed by the next removal or subscription.
+                    state.listeners.push((id.clone(), listener));
+                    state.cancel.take();
+                    return Ok(id);
                 }
                 state.cancel.take();
                 Err(error)
@@ -1930,6 +1960,7 @@ impl StreamingQueryManager {
             stream: response_stream,
             buffered_events: vec![].into_iter(),
             done: false,
+            interrupted: false,
             cancel: None,
         })
     }

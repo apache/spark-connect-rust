@@ -19599,8 +19599,8 @@ def test_sigint_during_stop_with_a_registered_listener_raises_at_once(mock_conne
 
 def test_sigint_during_add_listener_keeps_the_registration_removable(mock_connect):
     # As PySpark's append: a signal that ends the wait for the server's acknowledgement raises
-    # KeyboardInterrupt, and the listener stays in the bus, while the server still adds its
-    # listener once it answers. A removeListener then removes that registration.
+    # KeyboardInterrupt at once, and the listener stays in the bus, while the server still adds
+    # its listener once it answers. A removeListener then removes that registration.
     import signal
     import threading
 
@@ -19623,15 +19623,18 @@ def test_sigint_during_add_listener_keeps_the_registration_removable(mock_connec
     service.listener_bus_enabled = True
     service.listener_register_blocked = True
     listener = Listener()
+    # The release comes well after the signal: a wait that the signal does not end lasts until it.
     release = threading.Timer(2.5, service.release_listener_registration)
     timer = threading.Timer(0.5, os.kill, (os.getpid(), signal.SIGINT))
     release.start()
     timer.start()
+    started = time.monotonic()
     try:
         with pytest.raises(KeyboardInterrupt):
             spark.streams.addListener(listener)
     finally:
         timer.cancel()
+    assert time.monotonic() - started < 2
     release.join(5)
     assert service.wait_listener_registration(1)
     assert spark.streams._sqlb._listener_bus == [listener]
@@ -19688,6 +19691,47 @@ def test_a_second_sigint_during_add_listener_removes_the_server_listener_before_
     assert service.listener_removals == 1
     assert service.listener_subscriptions == 2
     spark.streams.removeListener(listener)
+
+
+def test_sigint_during_add_listener_with_the_acknowledgement_held_raises_at_once(mock_connect):
+    # The server does not answer the registration for 15 seconds, while PySpark raises
+    # KeyboardInterrupt at the signal: the wait for the acknowledgement ends with the signal.
+    import signal
+    import threading
+
+    from pyspark.sql.streaming.listener import StreamingQueryListener
+
+    class Listener(StreamingQueryListener):
+        def onQueryStarted(self, event):
+            pass
+
+        def onQueryProgress(self, event):
+            pass
+
+        def onQueryIdle(self, event):
+            pass
+
+        def onQueryTerminated(self, event):
+            pass
+
+    spark, service = mock_connect
+    service.listener_bus_enabled = True
+    service.listener_register_blocked = True
+    listener = Listener()
+    timer = threading.Timer(0.5, os.kill, (os.getpid(), signal.SIGINT))
+    timer.start()
+    started = time.monotonic()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            spark.streams.addListener(listener)
+    finally:
+        timer.cancel()
+    assert time.monotonic() - started < 5
+    assert spark.streams._sqlb._listener_bus == [listener]
+    service.release_listener_registration()
+    spark.streams.removeListener(listener)
+    assert spark.streams._sqlb._listener_bus == []
+    assert service.listener_removals == 1
 
 
 def test_sigint_during_the_plan_compression_lookup_raises_keyboard_interrupt_at_once(mock_connect):
