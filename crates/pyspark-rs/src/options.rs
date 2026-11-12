@@ -36,21 +36,47 @@ pub(crate) fn coerce_option_value(v: &Bound<'_, PyAny>) -> PyResult<Option<Strin
 }
 
 /// The `str()` of `v`, as the reference client sends it in a protobuf string field, which raises
-/// protobuf's `ValueError` for a str that UTF-8 cannot encode (a lone surrogate) where a lossy
-/// conversion would send another text, such as another path.
+/// the `UnicodeEncodeError` of a str that UTF-8 cannot encode (a lone surrogate), as
+/// [`str_argument`], where a lossy conversion would send another text, such as another path.
 pub(crate) fn str_text(v: &Bound<'_, PyAny>) -> PyResult<String> {
-    let text = v.str()?;
-    text.extract::<String>()
-        .map_err(|_| crate::functions::not_utf8_string(text.as_any()))
+    str_argument(v.str()?.as_any())
 }
 
-/// The text of a str argument, as a protobuf string field takes it: the text of the str itself,
-/// which PyO3's extraction of a str gives, and protobuf's `ValueError` for a str that UTF-8
-/// cannot encode. Another type is a `TypeError`, as that extraction raises.
+/// The text of `v` that PySpark sets in a protobuf string field as it is, as protobuf's default
+/// (upb) backend converts it: a str as its UTF-8, and bytes decoded as UTF-8, with the error of
+/// that conversion: the `UnicodeEncodeError` of a str that UTF-8 cannot encode (a lone
+/// surrogate), the `UnicodeDecodeError` of bytes that are not UTF-8, and the `TypeError` of
+/// `PyUnicode_AsUTF8AndSize` for any other object, such as an int, a bytearray or None.
 pub(crate) fn str_argument(v: &Bound<'_, PyAny>) -> PyResult<String> {
-    let text = v.cast::<PyString>()?;
-    text.extract::<String>()
-        .map_err(|_| crate::functions::not_utf8_string(v))
+    if let Ok(text) = v.cast::<PyString>() {
+        return text.extract();
+    }
+    if v.is_instance_of::<PyBytes>() {
+        // As upb's `PyUnicode_FromEncodedObject(obj, "utf-8", NULL)`.
+        return PyString::from_encoded_object(v, Some(c"utf-8"), None)?.extract();
+    }
+    Err(pyo3::exceptions::PyTypeError::new_err(
+        "bad argument type for built-in operation",
+    ))
+}
+
+/// The key of an option that PySpark keeps in a dict, which raises the `TypeError` of an
+/// unhashable key, and sends in a protobuf string field as it is, as [`str_argument`] converts it:
+/// the options of the writers, and of `SparkSession.builder.config`.
+pub(crate) fn option_dict_key(key: &Bound<'_, PyAny>) -> PyResult<String> {
+    key.hash()?;
+    str_argument(key)
+}
+
+/// The key of an option of `DataFrameReader.option` and `DataStreamReader.option`, which PySpark
+/// keeps in a dict, which raises the `TypeError` of an unhashable key, and whose `DataSource` plan
+/// asserts that each key is a str, a bare `AssertionError` for any other key, bytes too.
+pub(crate) fn reader_option_key(key: &Bound<'_, PyAny>) -> PyResult<String> {
+    key.hash()?;
+    if !key.is_instance_of::<PyString>() {
+        return Err(pyo3::exceptions::PyAssertionError::new_err(()));
+    }
+    str_argument(key)
 }
 
 /// A reader or writer that takes string options one at a time.
@@ -148,8 +174,8 @@ pub(crate) fn set_reader_kwargs_unset_none(
 
 /// The `**options` of `Catalog.createTable`, **skipping** those that are None. Unlike the
 /// options of the readers and writers these are not converted: PySpark sets them in a protobuf
-/// map of strings as they are. That map takes a str, and bytes that are UTF-8, which it decodes;
-/// it raises a `TypeError` for any other type, and a `ValueError` for bytes that are not UTF-8.
+/// map of strings as they are, which takes a str, and bytes that are UTF-8, which it decodes, and
+/// raises the error of [`str_argument`] for any other value.
 pub(crate) fn str_kwargs_skip_none(
     options: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<HashMap<String, String>> {
@@ -158,28 +184,9 @@ pub(crate) fn str_kwargs_skip_none(
         if value.is_none() {
             continue;
         }
-        let text = if let Ok(text) = value.cast::<PyString>() {
-            text.to_cow()?.into_owned()
-        } else if let Ok(bytes) = value.cast::<PyBytes>() {
-            match std::str::from_utf8(bytes.as_bytes()) {
-                Ok(text) => text.to_string(),
-                Err(_) => {
-                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                        "{} has type bytes, but isn't valid UTF-8 encoding. Non-UTF-8 strings \
-                         must be converted to unicode objects before being added.",
-                        value.repr()?
-                    )));
-                }
-            }
-        } else {
-            // As the protobuf map of strings that PySpark sets the options in.
-            return Err(pyo3::exceptions::PyTypeError::new_err(format!(
-                "{} has type {}, but expected one of: (<class 'bytes'>, <class 'str'>)",
-                value.repr()?,
-                value.get_type().str()?
-            )));
-        };
-        map.insert(key.extract()?, text);
+        // The key first, as protobuf sets an entry of a map.
+        let key = str_argument(&key)?;
+        map.insert(key, str_argument(&value)?);
     }
     Ok(map)
 }

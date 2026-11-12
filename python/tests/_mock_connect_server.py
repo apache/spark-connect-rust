@@ -830,10 +830,11 @@ def serve(connection):
                 pairs = []
                 for pair in set_request.get(1, []):
                     pair = parse_message(pair)
-                    # A KeyValue of no value=2, as PySpark sends None, is recorded as None.
+                    # A KeyValue of no value=2, as PySpark sends None, is recorded as None, and
+                    # one of no key=1, the empty key of proto3, as "".
                     value = pair.get(2, [None])[0]
                     value = None if value is None else value.decode()
-                    pairs.append((pair[1][0].decode(), value))
+                    pairs.append((pair.get(1, [b""])[0].decode(), value))
                 self.set_confs.append((pairs, set_request.get(2, [None])[0]))
                 return message_field(1, request[1][0]) + self.warnings_fields()
             if 6 in operation:

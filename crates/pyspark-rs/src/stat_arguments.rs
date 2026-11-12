@@ -2,7 +2,7 @@
 //! ...), which check their arguments on the client as PySpark Connect's DataFrame does.
 
 use pyo3::prelude::*;
-use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple};
+use pyo3::types::{PyDict, PyFloat, PyInt, PyList, PyString, PyTuple};
 use spark_connect::dataframe::DataFrame;
 use spark_connect::group::StatFunctions;
 
@@ -99,23 +99,20 @@ fn dropna_thresh_and_subset(
     Ok((thresh, columns))
 }
 
-/// The `TypeError` of protobuf for a bool in the int field `field`: a bool is an int, but the
-/// proto refuses it.
-pub(crate) fn bool_not_proto_int(value: &Bound<'_, PyAny>, field: &str) -> PyErr {
+/// The `TypeError` of protobuf's default (upb) backend for a bool in the int field `field`, the
+/// full name of the field: a bool is an int, but protobuf refuses it since 7.34. Earlier versions
+/// took it as 1 or 0, with a `DeprecationWarning`.
+pub(crate) fn bool_not_proto_int(field: &str) -> PyErr {
     pyo3::exceptions::PyTypeError::new_err(format!(
-        "Cannot set {field} to {value}: {value} has type {}, but expected one of: (int).",
-        value.get_type()
+        "Field {field}: Expected an int, got a boolean."
     ))
 }
 
 /// An int, the `thresh` of `dropna`, as the proto's int32. A bool, which is an int, is refused as
 /// the proto refuses it, `TypeError`, and an int out of the range of an int32 is a `ValueError`.
 fn proto_int32(thresh: &Bound<'_, PyAny>) -> PyResult<i32> {
-    if thresh.is_instance_of::<PyBool>() {
-        return Err(bool_not_proto_int(
-            thresh,
-            "spark.connect.NADrop.min_non_nulls",
-        ));
+    if thresh.is_instance_of::<pyo3::types::PyBool>() {
+        return Err(bool_not_proto_int("spark.connect.NADrop.min_non_nulls"));
     }
     match thresh.extract::<i32>() {
         Ok(thresh) => Ok(thresh),

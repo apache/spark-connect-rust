@@ -107,8 +107,10 @@ impl PySparkSessionBuilder {
         conf: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyRefMut<'py, Self>> {
         let py = slf.py();
+        // PySpark keeps the options in a dict, and sends each in a `KeyValue` of the key as it
+        // is, whose constructor leaves a key of None unset, the empty key.
         if let Some(k) = key {
-            let k = crate::str_argument(k)?;
+            let k = crate::options::option_dict_key(k)?;
             let v = match value {
                 Some(v) => crate::coerce_option_value(v)?,
                 None => None,
@@ -117,7 +119,11 @@ impl PySparkSessionBuilder {
         }
         if let Some(m) = map {
             for (k, v) in m.iter() {
-                let ks = crate::str_text(&k)?;
+                let ks = if k.is_none() {
+                    String::new()
+                } else {
+                    crate::str_argument(&k)?
+                };
                 let vs = crate::coerce_option_value(&v)?;
                 slf.set_option_value(py, &ks, vs)?;
             }
@@ -2001,7 +2007,6 @@ impl PySparkSession {
             }
             Ok(crate::functions::to_column(v)?.expression().clone())
         }
-        let sqlQuery = crate::str_argument(sqlQuery)?;
         let py = slf.py();
         let mut pos: Vec<spark_connect::expression::Expression> = Vec::new();
         let mut named: std::collections::HashMap<String, spark_connect::expression::Expression> =
@@ -2031,21 +2036,22 @@ impl PySparkSession {
                 ));
             }
         }
-        let mut query = sqlQuery.to_string();
+        // The query as it is, formatted with the keyword arguments, if any, and then set in the
+        // string field of the plan, as PySpark's, after it checks `args`.
+        let mut query = sqlQuery.clone();
         let mut references = Vec::new();
         if let Some(kwargs) = kwargs.filter(|kwargs| !kwargs.is_empty()) {
             let formatter = py
                 .import("pyspark.sql.connect.sql_formatter")?
                 .getattr("SQLStringFormatter")?
                 .call1((slf,))?;
-            query = formatter
-                .call_method("format", (sqlQuery,), Some(&kwargs))?
-                .extract()?;
+            query = formatter.call_method("format", (sqlQuery,), Some(&kwargs))?;
             for view in formatter.getattr("_temp_views")?.try_iter()? {
                 let (df, name): (PyRef<'_, PyDataFrame>, String) = view?.extract()?;
                 references.push((df.dataframe.clone(), name));
             }
         }
+        let query = crate::str_argument(&query)?;
         let session = slf.borrow().session.clone();
         // Within a pipeline flow function, the statement is not run here: the server analyzes
         // its relation in the pipeline once the flow is defined, as PySpark's server returns
