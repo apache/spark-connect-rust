@@ -19,6 +19,7 @@ from pyspark.ml.connect.classification import (
     RandomForestClassifier,
 )
 from pyspark.ml.connect.regression import (
+    GBTRegressor,
     DecisionTreeRegressor,
     LinearRegression,
     RandomForestRegressor,
@@ -58,6 +59,7 @@ __all__ = [
     "LinearSVC",
     "DecisionTreeClassifier",
     "GBTClassifier",
+    "GBTRegressor",
     "RandomForestClassifier",
     "LinearRegression",
     "DecisionTreeRegressor",
