@@ -15570,9 +15570,10 @@ def test_ints_of_date_fields_convert_as_pyarrow(mock_connect):
 
 def test_values_of_local_rows_convert_and_raise_as_pyarrow(mock_connect):
     # As PySpark Connect's, which passes these values to PyArrow as they are: an int, date,
-    # day-time interval and time field takes the __index__, else the __int__, of a value, such
-    # as a Decimal, and the errors are PyArrow's. A char or varchar field raises the error of
-    # PySpark's to_arrow_schema.
+    # day-time interval and time field takes the __index__, else the nb_int slot of the type, of
+    # a value, such as a Decimal, and the errors are PyArrow's. A NumPy str_ or bytes_ has no
+    # nb_int, although its type has the __int__ of numpy.generic. A char or varchar field
+    # raises the error of PySpark's to_arrow_schema.
     import re
 
     import pyarrow as pa
@@ -15606,6 +15607,15 @@ def test_values_of_local_rows_convert_and_raise_as_pyarrow(mock_connect):
          "Expected np.timedelta64 but got: duration[ns]"),
         ("x", "boolean", pa.ArrowInvalid,
          "Could not convert 'x' with type str: tried to convert to boolean"),
+        (np.str_("1"), "int", pa.ArrowInvalid,
+         f"Could not convert {np.str_('1')!r} with type numpy.str_: tried to convert to int32"),
+        (np.bytes_(b"1"), "bigint", pa.ArrowInvalid,
+         f"Could not convert {np.bytes_(b'1')!r} with type numpy.bytes_: tried to convert to "
+         "int64"),
+        (np.str_("1"), "date", pa.ArrowTypeError,
+         "object of type <class 'numpy.str_'> cannot be converted to int"),
+        (np.bytes_(b"1"), "time", pa.ArrowTypeError,
+         "object of type <class 'numpy.bytes_'> cannot be converted to int"),
     ]:
         with pytest.raises(error, match="^" + re.escape(message) + "$") as e:
             spark.createDataFrame([(value,)], f"v {ddl}")
@@ -15745,6 +15755,86 @@ def test_an_array_of_no_converter_takes_the_values_that_pyarrow_takes_as_pyspark
     relation = _sent_relation(service.analyze_requests[-1], 11)
     table = pa.ipc.open_stream(relation[1][0]).read_all()
     assert table.column(0).to_pylist() == [[0, 1], [1, 2], [2], [3]]
+
+
+def test_an_array_of_no_converter_reads_a_sequence_by_its_length_and_items_as_pyarrow(
+    mock_connect,
+):
+    # As PyArrow's list conversion of a value that PySpark passes as it is: a list or a tuple
+    # is read as it is stored, another sequence by its length and the item at each index, and
+    # a NumPy array has to be one-dimensional. Its errors wait for the converters of the other
+    # columns, and the first one in the order of the columns and then the rows is raised.
+    import pyarrow as pa
+
+    spark, service = mock_connect
+
+    class GetOnly:
+        def __init__(self, values):
+            self.values = values
+
+        def __getitem__(self, index):
+            return self.values[index]
+
+    class LongLen(GetOnly):
+        def __len__(self):
+            return len(self.values) + 3
+
+    class ShortLen(GetOnly):
+        def __len__(self):
+            return 1
+
+    class OwnIter(GetOnly):
+        def __len__(self):
+            return len(self.values)
+
+        def __iter__(self):
+            return iter([9] * len(self.values))
+
+    class List(list):
+        def __iter__(self):
+            return iter([9] * len(self))
+
+        def __getitem__(self, index):
+            return 8
+
+    class Tuple(tuple):
+        def __iter__(self):
+            return iter([9] * len(self))
+
+        def __getitem__(self, index):
+            return 8
+
+    table, _ = _local_rows_relation_of(service, spark.createDataFrame(
+        [(ShortLen([5, 6]),), (OwnIter([1, 2]),), (List([3, 4]),), (Tuple((5,)),),
+         (np.array([6, 7]),)], "a array<int>"))
+    assert table.column(0).to_pylist() == [[5], [1, 2], [3, 4], [5], [6, 7]]
+
+    with pytest.raises(TypeError, match=r"^object of type 'GetOnly' has no len\(\)$"):
+        spark.createDataFrame([(GetOnly([1, 2]),)], "a array<int>")
+    with pytest.raises(IndexError, match="^list index out of range$"):
+        spark.createDataFrame([(LongLen([1, 2]),)], "a array<int>")
+    for value in (GetOnly([1]), LongLen([1])):
+        with pytest.raises(AssertionError):
+            spark.createDataFrame([(value, 0)], "a array<int>, b timestamp")
+    with pytest.raises(TypeError, match="has no len"):
+        spark.createDataFrame([(GetOnly([1]),), (["x"],)], "a array<int>")
+    for rows in ([(["x"],), (GetOnly([1]),)], [(LongLen(["x", 2]),)]):
+        with pytest.raises(pa.ArrowInvalid, match="^Could not convert 'x' with type str"):
+            spark.createDataFrame(rows, "a array<int>")
+
+    for value, schema, arrow_type in [
+        (np.array([[1, 2], [3, 4]]), "a array<int>", "list<element: int32>"),
+        (np.array(5), "a array<double>", "list<element: double>"),
+        (np.zeros((0, 2)), "a array<date>", "list<element: date32[day]>"),
+        (np.array([[1, 2]]), "a array<array<bigint>>", "list<element: list<element: int64>>"),
+        ([np.array([[1, 2]])], "a array<array<smallint>>", "list<element: int16>"),
+    ]:
+        with pytest.raises(pa.ArrowInvalid) as e:
+            spark.createDataFrame([(value,)], schema)
+        assert str(e.value) == (
+            f"Can only convert 1-dimensional array values of {arrow_type} to a variable-sized "
+            "list"
+        )
 
 
 def test_nested_duplicate_field_names_are_deduplicated_in_the_arrow_schema(mock_connect):
