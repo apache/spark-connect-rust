@@ -1399,13 +1399,17 @@ impl PyStreamingQueryManager {
         });
         let registration = Arc::clone(&adapter);
         match interruptible_outcome(py, &self.inner.spark_session(), || {
-            self.inner.add_listener(registration).map_err(Box::new)
+            self.inner
+                .add_listener(registration)
+                .map(|id| {
+                    // Set once, by the only call that adds this adapter, as soon as the bus has
+                    // the registration: a signal that ends the wait below then leaves it
+                    // removable, as PySpark's append leaves the listener in its bus.
+                    let _ = adapter.id.set(id);
+                })
+                .map_err(Box::new)
         })? {
-            Ok(id) => {
-                // Set once, by the only call that adds this adapter.
-                let _ = adapter.id.set(id);
-                Ok(())
-            }
+            Ok(()) => Ok(()),
             Err(error) => warn(
                 py,
                 format!(
@@ -1433,7 +1437,10 @@ impl PyStreamingQueryManager {
         // or their removal is left to the caller that is closing the bus.
         let mut tried: Vec<String> = Vec::new();
         loop {
-            let mut registered = Vec::new();
+            // The first registration in the order of the bus that is the listener or equal to
+            // it. The entries after it are not compared, as PySpark's `in` and `list.remove`
+            // stop at the first match.
+            let mut first = None;
             for candidate in self.inner.listeners() {
                 let Some(adapter) = candidate
                     .as_any()
@@ -1451,31 +1458,30 @@ impl PyStreamingQueryManager {
                 }
                 let found = adapter.listener.bind(py);
                 if found.is(listener) || found.eq(listener)? {
-                    registered.push(id.clone());
+                    first = Some(id.clone());
+                    break;
                 }
             }
-            if registered.is_empty() {
+            let Some(id) = first else {
                 return Ok(());
-            }
-            for id in registered {
-                match interruptible_outcome(py, &self.inner.spark_session(), || {
-                    self.inner.remove_listener_found(&id).map_err(Box::new)
-                })? {
-                    // The bus is read again once these are tried: a call that removed this
-                    // registration first leaves its own to this one, which may have been
-                    // added since the bus was read.
-                    Ok(false) => tried.push(id),
-                    Ok(true) => return Ok(()),
-                    Err(error) => {
-                        return warn(
-                            py,
-                            format!(
-                                "Failed to remove the listener because of exception: {}\n\
-                                 The listener is not removed, please remove it again.",
-                                spark_error_to_py_exception(*error).value(py)
-                            ),
-                        );
-                    }
+            };
+            match interruptible_outcome(py, &self.inner.spark_session(), || {
+                self.inner.remove_listener_found(&id).map_err(Box::new)
+            })? {
+                // The bus is read again once this is tried: a call that removed this
+                // registration first leaves the next match to this one, which may have been
+                // added since the bus was read.
+                Ok(false) => tried.push(id),
+                Ok(true) => return Ok(()),
+                Err(error) => {
+                    return warn(
+                        py,
+                        format!(
+                            "Failed to remove the listener because of exception: {}\n\
+                             The listener is not removed, please remove it again.",
+                            spark_error_to_py_exception(*error).value(py)
+                        ),
+                    );
                 }
             }
         }

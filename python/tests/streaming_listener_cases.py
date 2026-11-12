@@ -570,6 +570,29 @@ class TestStreamingListenerLifecycle:
         finally:
             spark.streams.close()
 
+    def test_streaming_listener_removal_stops_at_the_first_match_as_pyspark(self, mock_connect):
+        # As the `in` and list.remove of PySpark's bus: the entries are compared in order, and
+        # the first one that is the listener, or equal to it, is removed, so the entries after
+        # it are not compared with it.
+        spark, service = mock_connect
+        service.listener_bus_enabled = True
+
+        class Angry(IdleListener):
+            def __eq__(self, other):
+                raise RuntimeError("Angry.__eq__ called")
+
+            __hash__ = None
+
+        first, second = IdleListener(), Angry()
+        try:
+            spark.streams.addListener(first)
+            spark.streams.addListener(second)
+            spark.streams.removeListener(first)
+            assert spark.streams._sqlb._listener_bus == [second]
+            assert service.listener_removals == 0
+        finally:
+            spark.streams.close()
+
     def test_streaming_listener_added_and_removed_by_many_threads_at_once(self, mock_connect):
         # The registrations of one listener that several threads add and remove at once are
         # each removed once: none is lost, and none is left in the bus.
