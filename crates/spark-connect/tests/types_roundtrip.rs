@@ -1082,6 +1082,42 @@ fn from_ddl_interval_colon_and_spellings_agree_with_the_server_parser() {
     }
 }
 
+/// The collations of DDL, backquoted or qualified as the server reads them, and the names that it
+/// refuses, agree with the server's parser; so do the `time` of DDL and a trailing whitespace.
+#[test]
+fn ddl_collations_and_trailing_whitespace_agree_with_the_server_parser() {
+    let Ok(url) = std::env::var("SPARK_REMOTE") else {
+        return;
+    };
+    let session = spark_connect::session::SparkSession::builder()
+        .remote(&url)
+        .get_or_create()
+        .expect("session");
+    for ddl in [
+        "string collate `UTF8_LCASE`",
+        "string collate `system`.`builtin`.`utf8_lcase`",
+        "string collate `system`.builtin.`utf8_lcase`",
+        "string collate UNICODE ",
+        "time",
+    ] {
+        let server = session
+            .parse_ddl(ddl)
+            .unwrap_or_else(|e| panic!("{ddl}: {e:?}"));
+        assert_eq!(DataType::from_ddl(ddl).unwrap(), server, "{ddl}");
+    }
+    for ddl in [
+        "string collate `system`.`builtin`",
+        "string collate `UNI``CODE`",
+        "string collate `été`",
+        "string collate été",
+        "string collate `system.builtin.utf8_lcase`",
+        "null",
+    ] {
+        assert!(session.parse_ddl(ddl).is_err(), "{ddl}");
+        assert!(DataType::from_ddl(ddl).is_err(), "{ddl}");
+    }
+}
+
 /// Spatial types name their SRID by its CRS in JSON, as PySpark does, and read it back.
 #[test]
 fn spatial_json_names_the_crs_as_pyspark() {
@@ -1228,7 +1264,6 @@ fn json_and_ddl_parsers_agree_on_the_atomic_and_parameterized_forms() {
     // The same type of both parsers.
     let same: Vec<(&str, DataType)> = vec![
         ("void", DataType::Null),
-        ("null", DataType::Null),
         ("boolean", DataType::Boolean),
         ("byte", DataType::Byte),
         ("short", DataType::Short),
@@ -1244,7 +1279,6 @@ fn json_and_ddl_parsers_agree_on_the_atomic_and_parameterized_forms() {
         ("variant", DataType::Variant),
         // The defaults of the bare names.
         ("decimal", decimal(10, 0)),
-        ("time", DataType::Time { precision: 6 }),
         ("interval", DataType::CalendarInterval),
         // decimal(p,s), with whitespace around its arguments.
         ("decimal(10,2)", decimal(10, 2)),
@@ -1360,6 +1394,11 @@ fn json_and_ddl_parsers_agree_on_the_atomic_and_parameterized_forms() {
         "string collate 'UNICODE'",
         "string UNICODE",
         "string collate other.builtin.UNICODE",
+        "string collate `UNI``CODE`",
+        "string collate `été`",
+        "string collate `system`.`builtin`",
+        "string collate `system.builtin.utf8_lcase`",
+        "string collate `system`.`builtin`.`utf8_lcase`.`x`",
         "char(5) collate UNICODE",
         // Not a type.
         "",
@@ -1422,6 +1461,28 @@ fn json_and_ddl_parsers_agree_on_the_atomic_and_parameterized_forms() {
             None,
             Some(string("UTF8_LCASE")),
         ),
+        // DDL takes a name in backquotes, as Spark's grammar does, and reads each part of a
+        // qualified name; JSON has no quoting.
+        (
+            "string collate `UTF8_LCASE`",
+            None,
+            Some(string("UTF8_LCASE")),
+        ),
+        (
+            "string collate `system`.`builtin`.`utf8_lcase`",
+            None,
+            Some(string("UTF8_LCASE")),
+        ),
+        (
+            "string collate `system`.builtin.`utf8_lcase`",
+            None,
+            Some(string("UTF8_LCASE")),
+        ),
+        ("string collate `UNICODE`", None, Some(string("UNICODE"))),
+        // JSON reads a name of letters, digits and underscores, as PySpark's `\w+` does, and a
+        // letter of any script is one. DDL's unquoted identifiers are of ASCII letters, digits and
+        // underscores only, as Spark's lexer reads them.
+        ("string collate été", Some(string("été")), None),
         // JSON is in lower case and of single spaces; the keywords of DDL are of any case and
         // any whitespace.
         ("DECIMAL(10,2)", None, Some(decimal(10, 2))),
@@ -1436,8 +1497,9 @@ fn json_and_ddl_parsers_agree_on_the_atomic_and_parameterized_forms() {
             Some(string("UNICODE_CI")),
         ),
         (" decimal(10,2)", None, Some(decimal(10, 2))),
-        ("decimal(10,2) ", None, Some(decimal(10, 2))),
-        // The names of Spark's grammar alone.
+        // The names of Spark's grammar alone: the server reads `time` as `time(6)`, which JSON
+        // names only with its precision, as PySpark's `TimeType.jsonValue` does.
+        ("time", None, Some(DataType::Time { precision: 6 })),
         ("tinyint", None, Some(DataType::Byte)),
         ("smallint", None, Some(DataType::Short)),
         ("int", None, Some(DataType::Integer)),
@@ -1448,7 +1510,10 @@ fn json_and_ddl_parsers_agree_on_the_atomic_and_parameterized_forms() {
         ("character(3)", None, Some(DataType::Char { length: 3 })),
         ("timestamp_ltz", None, Some(DataType::Timestamp)),
         ("timestamp_ntz(6)", None, Some(DataType::TimestampNtz)),
-        // The names of JSON alone.
+        // The names of JSON alone. The server's JSON parser reads `null` for the schemas written
+        // before NullType was named `void` (its `nameToType`, "for backwards compatibility"), and
+        // its DDL parser has no such name. PySpark rejects it.
+        ("null", Some(DataType::Null), None),
         ("calendarinterval", Some(DataType::CalendarInterval), None),
         (
             "unparsed(x)",
@@ -1464,6 +1529,45 @@ fn json_and_ddl_parsers_agree_on_the_atomic_and_parameterized_forms() {
         assert_eq!(&parsed_as_ddl(text), ddl, "DDL {text:?}");
     }
 
+    // Whitespace after a form that PySpark's patterns match as a prefix is not a part of it, and
+    // is accepted: the JSON of PySpark's `_parse_datatype_json_value` is `re.match`, and DDL is
+    // trimmed. A bare name is matched whole, so whitespace after it is not a type in JSON.
+    let trailing: Vec<(&str, DataType)> = vec![
+        ("string collate UNICODE ", string("UNICODE")),
+        ("string collate UNICODE\t", string("UNICODE")),
+        ("interval day ", day_time(0, 0)),
+        ("interval day to second ", day_time(0, 3)),
+        ("interval year to month ", year_month(0, 1)),
+        ("decimal(10,2) ", decimal(10, 2)),
+        ("char(3) ", DataType::Char { length: 3 }),
+        ("varchar(20) ", DataType::Varchar { length: 20 }),
+        ("time(6) ", DataType::Time { precision: 6 }),
+    ];
+    for (text, expected) in &trailing {
+        assert_eq!(
+            parsed_as_json(text).as_ref(),
+            Some(expected),
+            "JSON {text:?}"
+        );
+        assert_eq!(parsed_as_ddl(text).as_ref(), Some(expected), "DDL {text:?}");
+    }
+    // A JSON-only trailing whitespace: the negative scale of JSON, and bare names.
+    assert_eq!(
+        parsed_as_json("decimal(10,-2) "),
+        Some(decimal(10, -2)),
+        "JSON decimal(10,-2) with trailing whitespace"
+    );
+    for text in [
+        "integer ",
+        "void ",
+        "decimal ",
+        "interval ",
+        "string ",
+        "time ",
+    ] {
+        assert_eq!(parsed_as_json(text), None, "JSON {text:?}");
+    }
+
     // The JSON of a type is read back as the type, also of an interval that DDL cannot name.
     for data_type in [
         decimal(10, -2),
@@ -1476,5 +1580,26 @@ fn json_and_ddl_parsers_agree_on_the_atomic_and_parameterized_forms() {
             DataType::from_json(&data_type.json_value()).unwrap(),
             data_type
         );
+    }
+}
+
+/// A backquoted collation name in DDL is unquoted, as Spark's parser unquotes it, also in a struct
+/// field, where a comment follows the type.
+#[test]
+fn from_ddl_unquotes_a_backquoted_collation_name_of_a_field() {
+    let dt = DataType::from_ddl("a: string collate `UTF8_LCASE` COMMENT 'x'")
+        .expect("a backquoted collation name of a field");
+    match dt {
+        DataType::Struct { fields } => {
+            assert_eq!(fields.len(), 1);
+            assert_eq!(fields[0].name, "a");
+            assert_eq!(
+                fields[0].data_type,
+                DataType::String {
+                    collation: "UTF8_LCASE".to_string()
+                }
+            );
+        }
+        other => panic!("expected struct, got {other:?}"),
     }
 }

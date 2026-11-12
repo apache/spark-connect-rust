@@ -282,6 +282,24 @@ def test_spatial_and_collated_json_forms_parse():
         assert want.json() == json.dumps(j)
 
 
+def test_json_forms_accept_trailing_whitespace_as_pyspark(mock_connect):
+    # As PySpark's `_parse_datatype_json_value`, whose patterns match a prefix of the string: the
+    # whitespace after a form with an argument or a field is not a part of it. A bare name is
+    # matched whole, so `integer ` is not a type.
+    import json
+
+    cases = {
+        "string collate UNICODE ": T.StringType("UNICODE"),
+        "interval day ": T.DayTimeIntervalType(0),
+        "interval day to second ": T.DayTimeIntervalType(0, 3),
+        "decimal(10,2) ": T.DecimalType(10, 2),
+    }
+    for j, want in cases.items():
+        assert T._parse_datatype_json_string(json.dumps(j)) == want
+    with pytest.raises(ValueError):
+        T._parse_datatype_json_string(json.dumps("integer "))
+
+
 def test_private_type_helpers_are_those_of_pyspark():
     # As PySpark's pyspark.sql.types: the inference, merging, conversion and verification of the
     # types of Python objects and their tables, including tuple-based Rows.
@@ -3063,11 +3081,12 @@ def test_window_specs_pickle_as_pyspark(mock_connect):
 
 
 def test_time_types_parse_as_pyspark(mock_connect):
-    # As PySpark's: a bare time is TimeType(), of the default precision 6, in a DDL string and
-    # in the JSON of a type.
+    # As PySpark's: a bare time is TimeType(), of the default precision 6, in a DDL string. The
+    # JSON of a type names a time with its precision, and the bare name is not a type of JSON.
     assert T.DataType.fromDDL("t time") == T.StructType([T.StructField("t", T.TimeType(6))])
     assert T.DataType.fromDDL("t time(3)") == T.StructType([T.StructField("t", T.TimeType(3))])
-    assert T._parse_datatype_json_string('"time"') == T.TimeType(6)
+    with pytest.raises(ValueError):
+        T._parse_datatype_json_string('"time"')
     assert T._parse_datatype_json_string('"time(0)"') == T.TimeType(0)
 
 
