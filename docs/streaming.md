@@ -136,6 +136,10 @@ clears the subscription's listeners. Add the listeners again to open a subscript
 A server-side end of the event stream also clears registrations without a warning;
 reference PySpark retains them after a normal stream end.
 
+`streams.close()` removes every listener. Reference PySpark's `close()` removes the listeners
+while it iterates over its list, which each removal shortens, so with three listeners it leaves
+the second one registered, with the server's listener. The drop-in does not mirror that.
+
 Callback exceptions derived from `Exception` produce per-listener warnings and
 dispatch continues. An uncaught `BaseException`, or a callback warning promoted to
 an error by Python's warning filters, terminates the native subscription and clears

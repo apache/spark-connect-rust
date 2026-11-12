@@ -101,6 +101,42 @@ pub(crate) fn interruptible<T: Send, E: Send + Into<Box<SparkError>>>(
     interruptible_outcome(py, session, f)?.to_pyerr()
 }
 
+/// Run `f`, a wait that no session stands behind, without the GIL, on the calling thread: a
+/// wait of `block_on_abortable` that a signal of the process ends, as the acquire of PySpark's
+/// lock is interrupted by one. `f` returns None then, and the exception of the signal is raised.
+/// Without a signal, `f` returns its output.
+pub(crate) fn abortable_without_session<T: Send>(
+    py: Python<'_>,
+    f: impl FnOnce() -> Option<T> + Send,
+) -> PyResult<T> {
+    let signal: Arc<Mutex<Option<PyErr>>> = Arc::default();
+    let poll: Arc<WaitWatch> = {
+        let signal = Arc::clone(&signal);
+        Arc::new(move || {
+            let mut error = signal.lock().unwrap_or_else(|e| e.into_inner());
+            if error.is_some() {
+                return Watch::Abort;
+            }
+            // Takes the GIL for the check only, as the wait runs without it.
+            match Python::attach(|py| py.check_signals()) {
+                Ok(()) => Watch::Continue,
+                Err(raised) => {
+                    *error = Some(raised);
+                    Watch::Abort
+                }
+            }
+        })
+    };
+    match py.detach(|| with_wait_watch(poll, f)) {
+        Some(output) => Ok(output),
+        None => Err(signal
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+            .unwrap_or_else(|| pyo3::exceptions::PyKeyboardInterrupt::new_err(()))),
+    }
+}
+
 /// As [`interruptible`], but a failure of `f` is the inner result, which the caller handles, as
 /// a warning. The outer error is the exception of a signal handler only, which is never handled
 /// as a failure of the call: as PySpark's `except Exception` does not catch it.
