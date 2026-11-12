@@ -855,10 +855,10 @@ fn scalar_literal(obj: &Bound<'_, PyAny>) -> PyResult<Option<LiteralExpression>>
 }
 
 #[pyfunction]
-fn pyfunc_col(name: &str) -> PyColumn {
+fn pyfunc_col(name: &str) -> PyResult<PyColumn> {
     // As PySpark's `col`, of `_with_origin`.
-    let _origin = crate::origin::with_origin("col");
-    PyColumn::new(spark_funcs::col(name))
+    let _origin = crate::origin::with_origin("col")?;
+    Ok(PyColumn::new(spark_funcs::col(name)))
 }
 
 #[pyfunction]
@@ -893,7 +893,7 @@ fn pyfunc_count(col: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
         }
     } else if col.is_instance_of::<pyo3::types::PyString>() {
         // As PySpark's `_to_col`, by `col`, of its origin.
-        let _origin = crate::origin::with_origin("col");
+        let _origin = crate::origin::with_origin("col")?;
         spark_funcs::col(&col.extract::<String>()?)
     } else {
         let type_name = col.get_type().name()?.to_string();

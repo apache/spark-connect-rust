@@ -19646,6 +19646,38 @@ except KeyboardInterrupt:
     assert 2.0 <= float(lines[-1].rsplit(" ", 1)[1]) < 4.5, result.stdout
 
 
+def test_sigint_raises_from_the_origin_capture_of_the_first_column_as_pyspark():
+    # As PySpark's _with_origin, which lets the error of is_debugging_enabled raise: the first
+    # F.col of a session reads spark.python.sql.dataFrameDebugging.enabled, which no server
+    # answers here, and a signal during its retries raises KeyboardInterrupt from F.col.
+    import subprocess
+    import sys
+
+    code = """
+import os, signal, threading, time
+from pyspark.sql import SparkSession, functions as F
+spark = SparkSession.builder.remote("sc://127.0.0.1:1").getOrCreate()
+threading.Timer(1.0, lambda: os.kill(os.getpid(), signal.SIGINT)).start()
+started = time.monotonic()
+try:
+    F.col("a")
+    print("col returned after", round(time.monotonic() - started, 1))
+except KeyboardInterrupt:
+    print("interrupted after", round(time.monotonic() - started, 1))
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        env=dict(os.environ, TZ="UTC"),
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    lines = result.stdout.splitlines()
+    assert lines[-1].startswith("interrupted after "), result.stdout
+    assert 1.0 <= float(lines[-1].rsplit(" ", 1)[1]) < 3.5, result.stdout
+
+
 def test_connect_registry_sends_auto_cdc_define_flow(mock_connect):
     from pyspark import pipelines as dp
     from pyspark.pipelines.graph_element_registry import graph_element_registration_context

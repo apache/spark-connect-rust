@@ -229,7 +229,7 @@ impl PyDataFrame {
             .as_any()
             .get_item(index)?
             .extract()?;
-        let _origin = crate::origin::with_origin("col");
+        let _origin = crate::origin::with_origin("col")?;
         Ok(spark_connect::functions::col(&name))
     }
 
@@ -261,7 +261,7 @@ impl PyDataFrame {
                 }
                 if c.is_instance_of::<PyString>() {
                     // As PySpark's `F._to_col`, by `col`, of its origin.
-                    let _origin = crate::origin::with_origin("col");
+                    let _origin = crate::origin::with_origin("col")?;
                     return Ok(spark_connect::functions::col(&c.extract::<String>()?));
                 }
                 if c.is_instance_of::<PyInt>() && !c.is_instance_of::<PyBool>() {
@@ -320,7 +320,7 @@ impl PyDataFrame {
                 column.column.clone()
             } else if c.is_instance_of::<PyString>() {
                 // As PySpark's `F._to_col`, by `col`, of its origin.
-                let _origin = crate::origin::with_origin("col");
+                let _origin = crate::origin::with_origin("col")?;
                 spark_connect::functions::col(&c.extract::<String>()?)
             } else {
                 return Err(not_expected_type(&c, "col", "Column, int or str"));
@@ -441,7 +441,7 @@ pub(crate) fn to_columns_as_given(
             // Try as string (column name)
             if let Ok(name) = arg.extract::<String>() {
                 // As PySpark's `F._to_col`, by `col`, of its origin.
-                let _origin = crate::origin::with_origin("col");
+                let _origin = crate::origin::with_origin("col")?;
                 cols.push(spark_connect::functions::col(&name));
             } else {
                 // As PySpark's `_to_cols`.
@@ -1140,7 +1140,7 @@ impl PyDataFrame {
             Some(c) => Some(if let Ok(column) = c.extract::<PyRef<'_, PyColumn>>() {
                 column.column.clone()
             } else if c.is_instance_of::<pyo3::types::PyString>() {
-                let _origin = crate::origin::with_origin("col");
+                let _origin = crate::origin::with_origin("col")?;
                 spark_connect::functions::col(&c.extract::<String>()?)
             } else {
                 return Err(not_expected_type(c, "col", "Column or str"));
@@ -1225,7 +1225,7 @@ impl PyDataFrame {
             c.borrow().column.clone()
         } else if let Ok(name) = partitionIdCol.extract::<String>() {
             // As PySpark's `F._to_col`, by `col`, of its origin.
-            let _origin = crate::origin::with_origin("col");
+            let _origin = crate::origin::with_origin("col")?;
             spark_connect::functions::col(&name)
         } else {
             return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
@@ -2771,7 +2771,7 @@ impl PyDataFrame {
             ));
         };
         // As PySpark's `F.col(self.columns[item])`, of the origin of `col`.
-        let _origin = crate::origin::with_origin("col");
+        let _origin = crate::origin::with_origin("col")?;
         PyColumn::new(spark_connect::functions::col(&name)).into_py_any(py)
     }
 
@@ -3259,7 +3259,7 @@ pub(crate) fn column_or_name(col: &Bound<'_, PyAny>) -> PyResult<spark_connect::
     }
     if col.is_instance_of::<pyo3::types::PyString>() {
         // As PySpark's `F._to_col`, by `col`, of its origin.
-        let _origin = crate::origin::with_origin("col");
+        let _origin = crate::origin::with_origin("col")?;
         return Ok(spark_connect::functions::col(&col.extract::<String>()?));
     }
     Err(not_expected_type(col, "col", "Column or str"))
