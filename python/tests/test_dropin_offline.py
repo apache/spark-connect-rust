@@ -1396,6 +1396,30 @@ def test_repartition_does_not_unpack_a_list_among_its_columns_as_pyspark(mock_co
     df.repartitionByRange(2, "id", F.col("id"))
 
 
+def test_table_arg_partition_and_order_unpack_only_a_list_as_pyspark(mock_connect):
+    # As PySpark's TableArg, whose _to_cols unpacks a single list but not a tuple: a tuple
+    # among the columns of partitionBy or orderBy is NOT_EXPECTED_TYPE, and so is a list among
+    # several of them, both of the argument col.
+    from pyspark.errors import PySparkTypeError
+
+    spark, _ = mock_connect
+    table = spark.range(1).asTable()
+    for call, arg_type in [
+        (lambda: table.partitionBy(("id",)), "tuple"),
+        (lambda: table.partitionBy("id", ["id"]), "list"),
+        (lambda: table.partitionBy([1]), "int"),
+        (lambda: table.partitionBy("id").orderBy(("id",)), "tuple"),
+        (lambda: table.partitionBy("id").orderBy("id", ["id"]), "list"),
+    ]:
+        with pytest.raises(PySparkTypeError) as e:
+            call()
+        assert e.value.getCondition() == "NOT_EXPECTED_TYPE"
+        assert e.value.getMessageParameters() == {
+            "expected_type": "Column or str", "arg_name": "col", "arg_type": arg_type}
+    # A lone list is unpacked.
+    table.partitionBy(["id"]).orderBy(["id"])
+
+
 def test_is_empty_sends_a_limit_of_one_row_over_an_empty_projection_as_pyspark(mock_connect):
     # As PySpark's select().take(1): Limit(1) over a Project with no expressions.
     spark, service = mock_connect

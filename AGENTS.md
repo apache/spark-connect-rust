@@ -476,11 +476,14 @@ For every method matching a pyspark name:
     special-case them client-side (e.g. faking `distributed_sequence_id` with a `row_number`
     window — it is wrong and non-distributed).
 - **`*cols` methods unpack a single list.** `df.select(["a","b"])` must behave like
-  `df.select("a","b")` (pyspark unpacks a lone list/tuple arg). Handled centrally in
-  `to_column_list`, so it covers `select`/`sort`/`groupBy`/... at once — don't re-solve per method.
-  The exceptions are `repartition` and `repartitionByRange`, which give PySpark's `_to_cols` the
-  `*cols` tuple itself, so a list among their columns is `NOT_EXPECTED_TYPE`
-  (`to_columns_as_given`).
+  `df.select("a","b")`. The rule lives in the helper each family shares, so reuse the one
+  that matches the method rather than re-solving it per method: `to_column_list` (`select`,
+  which also unpacks a lone tuple); `unwrap_sequence` (`sort`/`orderBy`/`sortWithinPartitions`,
+  and `groupBy`/`rollup`/`cube` through `grouping_columns`); `window_columns` (`Window.partitionBy`/
+  `orderBy` and `TableArg.partitionBy`/`orderBy`, which unpack a lone list but not a tuple, as
+  PySpark's `_to_cols` does). The exceptions are `repartition` and `repartitionByRange`, which give
+  PySpark's `_to_cols` the `*cols` tuple itself, so a list among their columns is
+  `NOT_EXPECTED_TYPE` (`to_columns_as_given`).
 - **Pipelines (SDP):** The pure-Python surface vendors cleanly with one edit to imports. The
   Connect-server path requires a dedicated Rust `PipelineCommand` seam with high-level methods
   on the session, separate from drop-in parity work.
