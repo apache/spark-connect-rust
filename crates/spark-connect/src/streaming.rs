@@ -1561,7 +1561,9 @@ impl StreamingQueryManager {
     }
 
     /// Remove a listener by id. Unknown ids do nothing. Removing the last listener drains
-    /// the server event stream before returning, as PySpark's removeListener does.
+    /// the server event stream before returning, as PySpark's removeListener does. A removal
+    /// from another thread than the worker first waits for the delivery in flight, as PySpark's
+    /// removal waits for the lock that its bus holds while it calls the listeners.
     /// A callback during another caller's shutdown returns without waiting for its own
     /// worker; that caller owns the final result and may retry a failed removal.
     /// In the Python client, a signal ends the waits of the removal for the deliveries and the
@@ -1644,11 +1646,9 @@ impl StreamingQueryManager {
             }
             // The removal of the last listener waits for a started event that another thread
             // delivers, before it removes the server's listener, as PySpark's bus holds its lock
-            // for that delivery. A worker's own event is not awaited: its callbacks may remove
-            // or stop the bus while the removal is in flight. The lock is released while
-            // waiting, so the bus is checked again after it. A signal ends the wait in the
-            // Python client, as it interrupts the acquire of the lock of PySpark's bus, before
-            // anything is removed.
+            // for that delivery. The lock is released while waiting, so the bus is checked again
+            // after it. A signal ends the wait in the Python client, as it interrupts the acquire
+            // of the lock of PySpark's bus, before anything is removed.
             let current = std::thread::current().id();
             if state.worker_id != Some(current)
                 && state
@@ -1658,6 +1658,33 @@ impl StreamingQueryManager {
             {
                 drop(self.bus.wait(state)?);
                 continue;
+            }
+            // It waits for the delivery of the worker too, as PySpark's removal waits for the
+            // lock that its post_to_all holds while it calls the listeners, before it sends the
+            // REMOVE. The bus is Stopping meanwhile, as for a removal in flight, so that a callback
+            // of the delivery that removes a listener or closes the bus coalesces with this
+            // removal, which owns the result, and one that adds a listener is refused. A signal
+            // ends the wait in the Python client before anything is removed or sent.
+            if state.worker_id != Some(current) && state.dispatching == Some(state.generation) {
+                let generation = state.generation;
+                state.phase = ListenerBusPhase::Stopping;
+                while state.generation == generation
+                    && (state.dispatching == Some(generation)
+                        || state
+                            .started_dispatches
+                            .iter()
+                            .any(|thread| *thread != current))
+                {
+                    state = match self.bus.wait(state) {
+                        Ok(state) => state,
+                        Err(interrupted) => {
+                            let mut state = self.bus.lock();
+                            state.phase = ListenerBusPhase::Idle;
+                            self.bus.changed.notify_all();
+                            return Err(interrupted);
+                        }
+                    };
+                }
             }
             return self.stop_listener_bus(state);
         }

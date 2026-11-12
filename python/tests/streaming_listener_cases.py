@@ -956,15 +956,21 @@ def concurrent_close_case(remove_failure, callback_action):
                 assert entered.wait(5)
                 closing.start()
                 try:
-                    assert service.wait_listener_removal()
+                    # As PySpark's remove, which waits for the lock that its post_to_all holds
+                    # while the listeners are called: the close sends no REMOVE while the
+                    # callback runs.
+                    assert not service.wait_listener_removal(timeout=1)
+                    assert closing.is_alive()
                     release.set()
-                    # The RPC stays gated until the callback's remove/stop has returned.
+                    # The callback's remove coalesces with the close, and its add is refused.
                     assert removed.wait(5)
                     assert len(callback_threads) == registrations
                     assert all(thread not in (caller_thread, closing.ident)
                                for thread in callback_threads)
-                    assert closing.is_alive()
                     if callback_action != "stop":
+                        # Then the close sends its REMOVE, which stays gated.
+                        assert service.wait_listener_removal()
+                        assert closing.is_alive()
                         # The callback's own removal did not consume a registration.
                         assert spark.streams._sqlb._listener_bus == [listener] * registrations
                 finally:
@@ -986,16 +992,18 @@ def concurrent_close_case(remove_failure, callback_action):
                 assert attempted.timestamps == []
             else:
                 assert add_warnings == []
-            if remove_failure:
+            if remove_failure and callback_action != "stop":
                 assert len(close_warnings) == 1
                 assert "listener removal failed" in close_warnings[0]
             else:
                 assert close_warnings == []
             if callback_action == "stop":
+                # The stop of the callback ended the subscription, with the session, before the
+                # close sent a REMOVE, so the close found nothing left to remove.
                 assert spark.is_stopped
                 assert spark.streams._sqlb._listener_bus == []
                 assert service.release_session_calls == 1
-                assert service.listener_removals == 1
+                assert service.listener_removals == 0
                 assert service.wait_listener_streams_finished(1)
                 return
             if remove_failure:

@@ -20146,14 +20146,14 @@ def _blocking_idle_listener(entered, release):
 
 
 @pytest.mark.parametrize("interrupted_call", ["removeListener", "close"])
-def test_sigint_during_the_join_of_a_busy_listener_worker_raises_keyboard_interrupt(
+def test_sigint_during_the_removal_of_a_busy_listener_raises_keyboard_interrupt(
     mock_connect,
     interrupted_call,
 ):
-    # As PySpark's remove, which sends the REMOVE and then joins the thread of the listener, a
-    # thread that the join waits for on a callback that does not return: a signal raises
-    # KeyboardInterrupt at once, the REMOVE stays sent, and the listener stays in the bus. A
-    # later removal or close joins the worker and empties the bus.
+    # As PySpark's remove, which acquires the lock of the bus that its post_to_all holds while a
+    # callback runs, here one that does not return: a signal interrupts the acquire, so it raises
+    # KeyboardInterrupt at once, before the REMOVE is sent, and the listener stays in the bus. A
+    # later removal or close sends the REMOVE, joins the worker and empties the bus.
     import signal
     import threading
 
@@ -20185,11 +20185,12 @@ def test_sigint_during_the_join_of_a_busy_listener_worker_raises_keyboard_interr
         finally:
             timer.cancel()
         assert time.monotonic() - started < 3
-        assert service.listener_removals == 1
+        assert service.listener_removals == 0
         assert spark.streams._sqlb._listener_bus == [listener]
     finally:
         release.set()
     spark.streams.removeListener(listener)
+    assert service.listener_removals == 1
     assert spark.streams._sqlb._listener_bus == []
 
 
