@@ -19969,6 +19969,120 @@ def test_sigint_during_the_add_that_joins_a_failing_listener_worker_raises_keybo
         warnings.showwarning = previous_showwarning
 
 
+def test_sigint_during_an_add_listener_that_reaches_no_server_keeps_the_listener_as_pyspark():
+    # As PySpark's append, which puts the listener in its bus before it registers it: a signal
+    # that ends the registration before the server answers, here a server that cannot be
+    # reached, leaves the listener in the bus, as a signal during the wait for the server's
+    # acknowledgement does.
+    import subprocess
+    import sys
+
+    code = """
+import os, signal, threading
+from pyspark.sql import SparkSession
+from pyspark.sql.streaming.listener import StreamingQueryListener
+class Listener(StreamingQueryListener):
+    def onQueryStarted(self, event): pass
+    def onQueryProgress(self, event): pass
+    def onQueryIdle(self, event): pass
+    def onQueryTerminated(self, event): pass
+spark = SparkSession.builder.remote("sc://127.0.0.1:1").getOrCreate()
+listener = Listener()
+threading.Timer(1.0, lambda: os.kill(os.getpid(), signal.SIGINT)).start()
+try:
+    spark.streams.addListener(listener)
+    print("returned")
+except KeyboardInterrupt:
+    print("interrupted, in the bus:", spark.streams._sqlb._listener_bus == [listener])
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code], env=dict(os.environ, TZ="UTC"),
+        capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines()[-1] == "interrupted, in the bus: True", result.stdout
+
+
+def test_a_failed_interrupt_during_add_listener_warns_and_drops_the_listener_as_pyspark(
+    mock_connect,
+):
+    # As PySpark's append, whose `except Exception` catches the error of an interrupt that the
+    # server failed, which replaces the KeyboardInterrupt of the signal: the add warns, returns,
+    # and removes the listener from the bus. The server may hold its listener, which the next
+    # add removes first.
+    import signal
+    import threading
+    import warnings
+
+    spark, service = mock_connect
+    service.listener_bus_enabled = True
+    service.listener_register_blocked = True
+    service.interrupt_failure = ("INTERNAL", "interrupt failed on the server")
+    listener = _blocking_idle_listener(threading.Event(), threading.Event())
+    timer = threading.Timer(0.5, os.kill, (os.getpid(), signal.SIGINT))
+    started = time.monotonic()
+    timer.start()
+    try:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            assert spark.streams.addListener(listener) is None
+    finally:
+        timer.cancel()
+        service.interrupt_failure = None
+    assert time.monotonic() - started < 3
+    messages = [str(w.message) for w in caught]
+    assert len(messages) == 1, messages
+    assert messages[0].startswith("Failed to add the listener because of exception: ")
+    assert "interrupt failed on the server" in messages[0]
+    assert spark.streams._sqlb._listener_bus == []
+    service.release_listener_registration()
+    service.listener_register_blocked = False
+    spark.streams.addListener(listener)
+    assert service.listener_removals == 1
+    assert spark.streams._sqlb._listener_bus == [listener]
+    spark.streams.removeListener(listener)
+
+
+def test_a_failed_interrupt_during_remove_listener_warns_and_keeps_the_listener_as_pyspark(
+    mock_connect,
+):
+    # As PySpark's remove, whose `except Exception` catches the error of an interrupt of the
+    # REMOVE that the server failed, which replaces the KeyboardInterrupt of the signal: the
+    # removal warns, returns, and the listener stays in the bus, to be removed again.
+    import signal
+    import threading
+    import warnings
+
+    spark, service = mock_connect
+    service.listener_bus_enabled = True
+    listener = _blocking_idle_listener(threading.Event(), threading.Event())
+    spark.streams.addListener(listener)
+    service.listener_remove_blocked = True
+    service.interrupt_failure = ("INTERNAL", "interrupt failed on the server")
+    timer = threading.Timer(0.5, os.kill, (os.getpid(), signal.SIGINT))
+    started = time.monotonic()
+    timer.start()
+    try:
+        try:
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                assert spark.streams.removeListener(listener) is None
+        finally:
+            timer.cancel()
+            service.interrupt_failure = None
+        assert time.monotonic() - started < 3
+        messages = [str(w.message) for w in caught]
+        assert len(messages) == 1, messages
+        assert messages[0].startswith("Failed to remove the listener because of exception: ")
+        assert "interrupt failed on the server" in messages[0]
+        assert spark.streams._sqlb._listener_bus == [listener]
+    finally:
+        # The held REMOVE then ends the server's stream, which may clear the bus first.
+        service.listener_remove_blocked = False
+        service.release_listener_removal()
+    spark.streams.removeListener(listener)
+    assert spark.streams._sqlb._listener_bus == []
+
+
 def test_sigint_during_a_native_kmeans_fit_raises_keyboard_interrupt(mock_connect):
     # As the other native estimators of pyspark.ml.connect: the fit waits for the server as an
     # execution, which a signal interrupts on the server.

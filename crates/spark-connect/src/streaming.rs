@@ -1538,14 +1538,18 @@ impl StreamingQueryManager {
                 // A wait for the acknowledgement that failed, by a transport error or by a
                 // signal in the Python client, after the ADD was sent: the server may have added
                 // its listener, and would answer the next ADD with no response, so the next
-                // subscription removes it first. That REMOVE finds none at worst.
-                if opened {
+                // subscription removes it first. That REMOVE finds none at worst. A signal that
+                // ended the wait for the stream itself, before the server's headers came, may
+                // have come after the ADD was sent too.
+                let aborted = !opened && spark_connect_core::client::is_wait_aborted(&error);
+                if opened || aborted {
                     state.server_registration_held = true;
                 }
-                if interrupted {
-                    // As PySpark's append, a signal that ends the wait for the acknowledgement
-                    // leaves the listener in the bus, and returns its id, so a removal finds it.
-                    // The registration held above is removed by the next removal or subscription.
+                if interrupted || aborted {
+                    // As PySpark's append, which puts the listener in the bus before it registers
+                    // it, a signal that ends the registration leaves the listener in the bus, and
+                    // returns its id, so a removal finds it. The registration held above is
+                    // removed by the next removal or subscription.
                     state.listeners.push((id.clone(), listener));
                     state.cancel.take();
                     return Ok(id);
@@ -1743,6 +1747,31 @@ impl StreamingQueryManager {
             .iter()
             .map(|(_, listener)| Arc::clone(listener))
             .collect()
+    }
+
+    /// Drop the registration `id` from the bus without removing the server's listener, as
+    /// PySpark's append drops a listener whose registration failed: for the Python client, whose
+    /// add that a signal ended keeps its registration until the interrupt of the signal fails.
+    /// The server may hold its listener, which the next subscription removes first. Returns
+    /// whether the registration was there.
+    #[doc(hidden)]
+    pub fn discard_listener(&self, id: &str) -> bool {
+        let removed = {
+            let mut state = self.bus.lock();
+            let Some(index) = state
+                .listeners
+                .iter()
+                .position(|(listener_id, _)| listener_id == id)
+            else {
+                return false;
+            };
+            if state.listeners.len() == 1 {
+                state.server_registration_held = true;
+            }
+            state.listeners.remove(index)
+        };
+        drop_isolated([removed]);
+        true
     }
 
     /// Mark the calling thread as delivering a synchronous started event until the returned
