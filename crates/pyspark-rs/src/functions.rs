@@ -220,20 +220,6 @@ pub(crate) fn value_not_between(py: Python<'_>) -> PyErr {
     )
 }
 
-/// The `ValueError` of protobuf's Python string field for a str that is not encodable as UTF-8,
-/// with its message, which shows at most 1024 characters of the repr of the value.
-pub(crate) fn not_utf8_string(obj: &Bound<'_, PyAny>) -> PyErr {
-    let message = pyo3::types::PyString::new(
-        obj.py(),
-        "%.1024r isn't a valid unicode string and can't be encoded in UTF-8.",
-    )
-    .call_method1("__mod__", ((obj,),));
-    match message {
-        Ok(message) => pyo3::exceptions::PyValueError::new_err(message.unbind()),
-        Err(error) => error,
-    }
-}
-
 /// An int32 literal within its range, otherwise a long, as PySpark's `_infer_type`.
 fn integer_literal(value: i64) -> LiteralExpression {
     if let Ok(value) = i32::try_from(value) {
@@ -267,12 +253,11 @@ pub fn to_column(obj: &Bound<'_, PyAny>) -> PyResult<Column> {
         ))));
     }
     if let Ok(string) = obj.cast_exact::<pyo3::types::PyString>() {
-        return match string.extract::<String>() {
-            Ok(string) => Ok(Column::new(Expression::literal(LiteralExpression::string(
-                string,
-            )))),
-            Err(_) => Err(not_utf8_string(obj)),
-        };
+        // A str that UTF-8 cannot encode raises the `UnicodeEncodeError` of its encoding, as
+        // the str of a subclass below.
+        return Ok(Column::new(Expression::literal(LiteralExpression::string(
+            string.extract::<String>()?,
+        ))));
     }
     if obj.is_exact_instance_of::<pyo3::types::PyBytes>()
         || obj.is_exact_instance_of::<pyo3::types::PyByteArray>()
@@ -349,14 +334,11 @@ pub fn to_column(obj: &Bound<'_, PyAny>) -> PyResult<Column> {
     }
 
     if obj.is_instance_of::<pyo3::types::PyString>() {
-        return match obj.extract::<String>() {
-            Ok(s) => Ok(Column::new(Expression::literal(LiteralExpression::string(
-                s,
-            )))),
-            // A str that UTF-8 cannot encode (a lone surrogate), as protobuf's string field
-            // rejects it when PySpark sends the literal.
-            Err(_) => Err(not_utf8_string(obj)),
-        };
+        // A str that UTF-8 cannot encode (a lone surrogate) raises the `UnicodeEncodeError` of
+        // its encoding, as protobuf's string field does when PySpark sends the literal.
+        return Ok(Column::new(Expression::literal(LiteralExpression::string(
+            obj.extract::<String>()?,
+        ))));
     }
 
     // As PySpark's literal conversion for a value of another type.
@@ -563,11 +545,8 @@ fn literal_as(
             if !obj.is_instance_of::<pyo3::types::PyString>() {
                 return Err(assertion());
             }
-            match obj.extract::<String>() {
-                Ok(s) => LiteralExpression::String(s),
-                // A str that UTF-8 cannot encode, as in `to_column`.
-                Err(_) => return Err(not_utf8_string(obj)),
-            }
+            // A str that UTF-8 cannot encode raises, as in `to_column`.
+            LiteralExpression::String(obj.extract::<String>()?)
         }
         // As PySpark's `to_plan`, which sends `bytes(value)`.
         DataType::Binary => match crate::infer::bytes_of(obj)? {

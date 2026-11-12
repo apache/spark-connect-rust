@@ -6,7 +6,6 @@ use spark_connect::group::StatFunctions;
 use crate::dataframe::{python_random_seed, PyDataFrame};
 use crate::errors::ResultExt;
 use crate::session::value_out_of_range;
-use crate::stat_arguments::bool_not_proto_int;
 
 /// Python wrapper for DataFrame statistical functions.
 #[pyclass(
@@ -194,7 +193,9 @@ pub(crate) fn sample_by_seed(py: Python<'_>, seed: Option<&Bound<'_, PyAny>>) ->
         return Err(pyo3::exceptions::PyAssertionError::new_err(()));
     }
     if seed.is_instance_of::<PyBool>() {
-        return Err(bool_not_proto_int(seed, "spark.connect.StatSampleBy.seed"));
+        return Err(crate::stat_arguments::bool_not_proto_int(
+            "spark.connect.StatSampleBy.seed",
+        ));
     }
     seed.extract::<i64>().map_err(|_| value_out_of_range(seed))
 }

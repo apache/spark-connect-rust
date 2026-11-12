@@ -54,10 +54,10 @@ fn checked_str(obj: &Bound<'_, PyAny>, name: &str) -> PyResult<String> {
 }
 
 /// The value of `RuntimeConf.set`, as PySpark sends it in a `KeyValue`: a bool as "true" or
-/// "false", an int as its `str()`, a str, or UTF-8 bytes, as it is, and None as no value,
-/// which the server rejects. Another value is the `TypeError` of protobuf, as in PySpark.
+/// "false", an int as its `str()`, and None as no value, which the server rejects. Any other
+/// value is set in the string field as it is, as [`crate::str_argument`] converts it.
 fn conf_value(value: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
-    use pyo3::types::{PyBool, PyBytes, PyInt, PyString};
+    use pyo3::types::{PyBool, PyInt};
     if value.is_none() {
         return Ok(None);
     }
@@ -69,25 +69,7 @@ fn conf_value(value: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
     if value.is_instance_of::<PyInt>() {
         return Ok(Some(value.str()?.to_cow()?.into_owned()));
     }
-    if let Ok(text) = value.cast::<PyString>() {
-        return Ok(Some(crate::str_argument(text.as_any())?));
-    }
-    let shown = value.repr()?;
-    if let Ok(bytes) = value.cast::<PyBytes>() {
-        return String::from_utf8(bytes.as_bytes().to_vec())
-            .map(Some)
-            .map_err(|_| {
-                pyo3::exceptions::PyValueError::new_err(format!(
-                    "{shown} has type bytes, but isn't valid UTF-8 encoding. Non-UTF-8 strings \
-                     must be converted to unicode objects before being added."
-                ))
-            });
-    }
-    Err(pyo3::exceptions::PyTypeError::new_err(format!(
-        "Cannot set spark.connect.KeyValue.value to {shown}: {shown} has type {}, but expected \
-         one of: (<class 'bytes'>, <class 'str'>) for field KeyValue.value",
-        value.get_type().repr()?
-    )))
+    crate::str_argument(value).map(Some)
 }
 
 /// Warn each warning of the server, such as of a deprecated or unsupported configuration, as
@@ -115,7 +97,13 @@ impl PyRuntimeConf {
         key: &Bound<'_, PyAny>,
         value: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
-        let key = crate::str_argument(key)?;
+        // A key of None is the empty key, as the constructor of PySpark's `KeyValue` leaves a
+        // field of None unset.
+        let key = if key.is_none() {
+            String::new()
+        } else {
+            crate::str_argument(key)?
+        };
         let value = conf_value(value)?;
         let warnings = interruptible(py, &self.session, || {
             self.conf

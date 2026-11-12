@@ -325,9 +325,13 @@ impl PyDataStreamReader {
         key: &Bound<'_, PyAny>,
         value: &Bound<'_, PyAny>,
     ) -> PyResult<PyRefMut<'py, Self>> {
-        let key = crate::str_argument(key)?;
-        // None -> option left unset; other values as `str()`, so a bool is "True" (reference
-        // `DataStreamReader.option`, unlike `options` and `load`).
+        // None -> option left unset, before the key is looked at, as PySpark's returns at once;
+        // other values as `str()`, so a bool is "True" (reference `DataStreamReader.option`,
+        // unlike `options` and `load`).
+        if value.is_none() {
+            return Ok(slf);
+        }
+        let key = crate::options::reader_option_key(key)?;
         match crate::options::stream_option_value(value)? {
             Some(v) => {
                 slf.inner = slf.inner.clone().option(&key, &v);
@@ -837,15 +841,17 @@ impl PyDataStreamWriter {
         key: &Bound<'_, PyAny>,
         value: &Bound<'_, PyAny>,
     ) -> PyResult<Bound<'py, Self>> {
-        let key = crate::str_argument(key)?;
-        // None -> option left unset; bools -> "true"/"false" (reference `to_str`).
-        match crate::coerce_option_value(value)? {
-            Some(v) => {
-                slf.borrow().inner.update(|w| w.option(&key, &v));
-                Ok(slf.clone())
-            }
-            None => Ok(slf.clone()),
+        // None -> option left unset, before the key is looked at, as PySpark's returns at once;
+        // bools -> "true"/"false" (reference `to_str`). PySpark sets the option in the protobuf
+        // map of its command at once, with the key as it is.
+        if value.is_none() {
+            return Ok(slf.clone());
         }
+        let key = crate::str_argument(key)?;
+        if let Some(v) = crate::coerce_option_value(value)? {
+            slf.borrow().inner.update(|w| w.option(&key, &v));
+        }
+        Ok(slf.clone())
     }
 
     // Mirrors reference `DataStreamWriter.options(**options)`: keyword args; None values
@@ -1115,23 +1121,46 @@ fn positive_timeout(timeout: Option<&Bound<'_, PyAny>>) -> PyResult<Option<f64>>
     }
 }
 
-/// A bool argument that PySpark sets on a proto bool field, which takes a bool or an int, and
-/// raises the `TypeError` of protobuf for another value.
-pub(crate) struct ProtoBool(pub(crate) bool);
+/// A bool argument that PySpark sets in a proto bool field, taken as it is (None when it is
+/// omitted) and converted in the call by [`ProtoBool::value`], as PyO3 would prefix the
+/// `TypeError` of the conversion of an argument with its name.
+pub(crate) struct ProtoBool(Option<Py<PyAny>>);
 
 impl<'a, 'py> FromPyObject<'a, 'py> for ProtoBool {
     type Error = PyErr;
 
     fn extract(obj: Borrowed<'a, 'py, PyAny>) -> PyResult<Self> {
-        if obj.is_instance_of::<pyo3::types::PyInt>() {
-            return Ok(ProtoBool(obj.is_truthy()?));
+        Ok(ProtoBool(Some(obj.to_owned().unbind())))
+    }
+}
+
+impl ProtoBool {
+    /// The bool of the argument, false when it is omitted, as protobuf's default (upb) backend
+    /// converts it for a bool field: a NumPy bool by its truth, a NumPy array is protobuf's
+    /// `TypeError`, and any other object is read as a C long, true when it is not 0, which raises
+    /// the `TypeError` of an object that is not an int, and the `OverflowError` of an int that a
+    /// C long cannot hold.
+    pub(crate) fn value(&self, py: Python<'_>) -> PyResult<bool> {
+        let Some(obj) = &self.0 else {
+            return Ok(false);
+        };
+        let obj = obj.bind(py);
+        let typ = obj.get_type();
+        let module = typ.module().ok();
+        if module.is_some_and(|module| module.to_cow().is_ok_and(|module| module == "numpy")) {
+            let name = typ.name()?;
+            let name = name.to_cow()?;
+            if name == "ndarray" {
+                return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+                    "{} has type ndarray, but expected one of: bool",
+                    obj.str()?
+                )));
+            }
+            if name == "bool" {
+                return obj.is_truthy();
+            }
         }
-        let shown = obj.repr()?;
-        Err(pyo3::exceptions::PyTypeError::new_err(format!(
-            "Cannot set spark.connect.StreamingQueryCommand.ExplainCommand.extended to {shown}: \
-             {shown} has type {}, but expected one of: (<class 'bool'>, <class 'int'>)",
-            obj.get_type().repr()?
-        )))
+        Ok(obj.extract::<std::os::raw::c_long>()? != 0)
     }
 }
 
@@ -1265,10 +1294,11 @@ impl PyStreamingQuery {
 
     /// Print the plan of the query with Python's `print`, as PySpark's
     /// `StreamingQuery.explain(extended=False)`.
-    #[pyo3(signature = (extended=ProtoBool(false)))]
+    #[pyo3(signature = (extended=ProtoBool(None)))]
     fn explain(&self, py: Python<'_>, extended: ProtoBool) -> PyResult<()> {
+        let extended = extended.value(py)?;
         let plan = interruptible(py, &self.inner.spark_session(), || {
-            self.inner.explain(extended.0).map_err(Box::new)
+            self.inner.explain(extended).map_err(Box::new)
         })?;
         py.import("builtins")?.call_method1("print", (plan,))?;
         Ok(())

@@ -519,44 +519,10 @@ fn no_to_plan(obj: &Bound<'_, PyAny>) -> PyErr {
     ))
 }
 
-/// The `TypeError` of protobuf for a name that is not a string, which the plan of PySpark's
-/// `_joinAsOf` raises for a name in `on` or an as-of column that is not a string.
-fn proto_string_type_error(value: &Bound<'_, PyAny>) -> PyErr {
-    let repr = value
-        .repr()
-        .map(|repr| repr.to_string())
-        .unwrap_or_default();
-    let typ = value
-        .get_type()
-        .repr()
-        .map(|typ| typ.to_string())
-        .unwrap_or_default();
-    pyo3::exceptions::PyTypeError::new_err(format!(
-        "{repr} has type {typ}, but expected one of: (<class 'bytes'>, <class 'str'>)"
-    ))
-}
-
-/// The text of the `direction` of `_joinAsOf`, as protobuf's default upb backend sets the string
-/// field `AsOfJoin.direction` from it when PySpark sends the plan: a str, of which one that UTF-8
-/// cannot encode raises the `UnicodeEncodeError` of its encoding, or bytes, decoded as UTF-8 with
-/// the `UnicodeDecodeError` of invalid ones. Any other value is upb's `TypeError`.
-fn as_of_direction(value: &Bound<'_, PyAny>) -> PyResult<String> {
-    if value.is_instance_of::<pyo3::types::PyString>() {
-        return value.extract::<String>();
-    }
-    if value.is_instance_of::<pyo3::types::PyBytes>() {
-        return value
-            .call_method1(pyo3::intern!(value.py(), "decode"), ("utf-8",))?
-            .extract::<String>();
-    }
-    Err(pyo3::exceptions::PyTypeError::new_err(
-        "bad argument type for built-in operation",
-    ))
-}
-
 /// The join condition of `_joinAsOf` for its `on`, as PySpark's `AsOfJoin` plan sends it: a
 /// name or a list of names (`using_columns`), or a Column or a list of Columns, which are
-/// joined on their conjunction (`join_expr`).
+/// joined on their conjunction (`join_expr`). The names of a list whose first item is a name
+/// are set in the repeated string field as they are, as [`crate::str_argument`] converts them.
 fn as_of_join_condition(
     on: &Bound<'_, PyAny>,
 ) -> PyResult<(Option<spark_connect::column::Column>, Vec<String>)> {
@@ -579,10 +545,7 @@ fn as_of_join_condition(
     if first.is_instance_of::<pyo3::types::PyString>() {
         let names = list
             .iter()
-            .map(|item| {
-                item.extract::<String>()
-                    .map_err(|_| proto_string_type_error(&item))
-            })
+            .map(|item| crate::str_argument(&item))
             .collect::<PyResult<Vec<_>>>()?;
         return Ok((None, names));
     }
@@ -600,7 +563,8 @@ fn as_of_join_condition(
 }
 
 /// The as-of column of `_joinAsOf` of `df`: a Column as it is, or the column of `df` that
-/// has this name, as PySpark's `df._col(name)`.
+/// has this name, as PySpark's `df._col(name)`, whose `ColumnReference` asserts that the name
+/// is a str: any other object is a bare `AssertionError`.
 fn as_of_column(
     df: &DataFrame,
     column: &Bound<'_, PyAny>,
@@ -608,10 +572,10 @@ fn as_of_column(
     if let Ok(column) = column.extract::<PyRef<PyColumn>>() {
         return Ok(column.column.clone());
     }
-    let name = column
-        .extract::<String>()
-        .map_err(|_| proto_string_type_error(column))?;
-    Ok(df.col(&name))
+    if !column.is_instance_of::<pyo3::types::PyString>() {
+        return Err(pyo3::exceptions::PyAssertionError::new_err(()));
+    }
+    Ok(df.col(&column.extract::<String>()?))
 }
 
 /// Resolve a filter/where condition: a Column, or a SQL string parsed via `expr`.
@@ -1111,25 +1075,29 @@ impl PyDataFrame {
                 Some(column.column.clone())
             }
         };
+        // The as-of columns before `on`, as PySpark converts them before its `AsOfJoin` plan
+        // iterates `on`.
+        let left_as_of = as_of_column(&self.dataframe, leftAsOfColumn)?;
+        let right_as_of = as_of_column(&other.dataframe, rightAsOfColumn)?;
         let (on, using_columns) = match on.filter(|on| !on.is_none()) {
             None => (None, Vec::new()),
             Some(on) => as_of_join_condition(&on)?,
         };
         let options = AsOfJoinOptions {
-            left_as_of: as_of_column(&self.dataframe, leftAsOfColumn)?,
-            right_as_of: as_of_column(&other.dataframe, rightAsOfColumn)?,
+            left_as_of,
+            right_as_of,
             on,
             using_columns,
             join_type,
             tolerance,
             allow_exact_matches: allowExactMatches,
-            // PySpark does not check `direction`, so its errors come last, as those of protobuf
-            // when the plan is sent (`as_of_direction`).
+            // PySpark does not check `direction`, so its errors come last, as those of protobuf's
+            // string field when the plan is sent (`crate::str_argument`).
             direction: match &direction {
                 DefaultedOption::Omitted => AsOfJoinDirection::Backward,
-                DefaultedOption::Given(direction) => {
-                    AsOfJoinDirection::parse(&as_of_direction(direction.bind(leftAsOfColumn.py()))?)
-                }
+                DefaultedOption::Given(direction) => AsOfJoinDirection::parse(
+                    &crate::str_argument(direction.bind(leftAsOfColumn.py()))?,
+                ),
             },
         };
         let df = self
@@ -3195,10 +3163,17 @@ fn replace_values(
             ],
         ));
     }
+    // The names of a list or a tuple are set in the repeated string field of the plan as they
+    // are, as `crate::str_argument` converts them.
     let subset: Option<Vec<String>> = match subset {
         None => None,
         Some(subset) if subset.is_instance_of::<PyString>() => Some(vec![subset.extract()?]),
-        Some(subset) if is_sequence(subset) => Some(subset.extract()?),
+        Some(subset) if is_sequence(subset) => Some(
+            subset
+                .try_iter()?
+                .map(|name| crate::str_argument(&name?))
+                .collect::<PyResult<_>>()?,
+        ),
         Some(subset) => {
             return Err(raise(
                 "PySparkTypeError",
@@ -3600,15 +3575,16 @@ impl PyDataFrameWriter {
         key: &Bound<'_, PyAny>,
         value: &Bound<'_, PyAny>,
     ) -> PyResult<Bound<'py, Self>> {
-        let key = crate::str_argument(key)?;
-        // None -> option left unset; bools -> "true"/"false" (reference `to_str`).
-        match crate::coerce_option_value(value)? {
-            Some(v) => {
-                slf.borrow().inner.update(|w| w.option(&key, &v));
-                Ok(slf.clone())
-            }
-            None => Ok(slf.clone()),
+        // None -> option left unset, before the key is looked at, as PySpark's returns at once;
+        // bools -> "true"/"false" (reference `to_str`).
+        if value.is_none() {
+            return Ok(slf.clone());
         }
+        let key = crate::options::option_dict_key(key)?;
+        if let Some(v) = crate::coerce_option_value(value)? {
+            slf.borrow().inner.update(|w| w.option(&key, &v));
+        }
+        Ok(slf.clone())
     }
 
     // Mirrors reference `DataFrameWriter.options(**options)`: keyword args; None values
@@ -4027,21 +4003,21 @@ impl PyDataFrameWriterV2 {
         Ok(slf.clone())
     }
 
-    // None -> option left unset; bools -> "true"/"false" (reference `to_str`), same as
-    // the other reader/writer option bindings.
+    // None -> option left unset, before the key is looked at, as PySpark's returns at once;
+    // bools -> "true"/"false" (reference `to_str`), same as the other writer option bindings.
     fn option<'py>(
         slf: &Bound<'py, Self>,
         key: &Bound<'_, PyAny>,
         value: &Bound<'_, PyAny>,
     ) -> PyResult<Bound<'py, Self>> {
-        let key = crate::str_argument(key)?;
-        match crate::coerce_option_value(value)? {
-            Some(v) => {
-                slf.borrow().inner.update(|w| w.option(&key, &v));
-                Ok(slf.clone())
-            }
-            None => Ok(slf.clone()),
+        if value.is_none() {
+            return Ok(slf.clone());
         }
+        let key = crate::options::option_dict_key(key)?;
+        if let Some(v) = crate::coerce_option_value(value)? {
+            slf.borrow().inner.update(|w| w.option(&key, &v));
+        }
+        Ok(slf.clone())
     }
 
     // Mirrors reference `DataFrameWriterV2.options(**options)`; None skipped, bools lowercased.

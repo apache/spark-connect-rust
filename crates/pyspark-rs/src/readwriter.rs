@@ -269,12 +269,22 @@ impl PyDataFrameReader {
 
     /// Set a single read option. `None` unsets the option, as PySpark's does (not the
     /// string "None"); booleans lowercase to "true"/"false" (reference `to_str` semantics).
+    /// PySpark keeps the options in a dict, which hashes every key, and its `DataSource` plan
+    /// checks the keys of the values that are not None only.
     fn option<'py>(
         mut slf: PyRefMut<'py, Self>,
         key: &Bound<'_, PyAny>,
         value: &Bound<'_, PyAny>,
     ) -> PyResult<PyRefMut<'py, Self>> {
-        let key = crate::str_argument(key)?;
+        if value.is_none() {
+            key.hash()?;
+            // Only a str that UTF-8 encodes is the key of an option that is set.
+            if let Ok(key) = key.extract::<String>() {
+                slf.inner = slf.inner.clone().unset_option(&key);
+            }
+            return Ok(slf);
+        }
+        let key = crate::options::reader_option_key(key)?;
         slf.inner = set_reader_option_unset_none(slf.inner.clone(), &key, value)?;
         Ok(slf)
     }

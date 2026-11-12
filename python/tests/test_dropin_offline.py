@@ -1017,11 +1017,15 @@ def test_conf_warns_the_warnings_of_the_server_and_checks_its_arguments_as_pyspa
         [("v", None)],
         [("v", "y")],
     ]
-    for value in [1.5, [1], object()]:
-        with pytest.raises(TypeError, match="Cannot set spark.connect.KeyValue.value"):
+    # As protobuf's default (upb) backend, a value of another type is the TypeError of its string
+    # field, and bytes that are not UTF-8 the UnicodeDecodeError of their decoding.
+    for value in [1.5, [1], object(), bytearray(b"y")]:
+        with pytest.raises(TypeError) as e:
             spark.conf.set("v", value)
-    with pytest.raises(ValueError, match="isn't valid UTF-8"):
+        assert str(e.value) == "bad argument type for built-in operation"
+    with pytest.raises(UnicodeDecodeError) as e:
         spark.conf.set("v", b"\xff")
+    assert str(e.value) == "'utf-8' codec can't decode byte 0xff in position 0: invalid start byte"
     assert len(service.set_confs) == 6
     for args, arg_name, arg_type in [
         ((1,), "key", "int"),
@@ -4081,21 +4085,17 @@ def test_na_and_stat_functions_check_their_arguments_as_pyspark():
 
 def test_dropna_thresh_that_the_proto_refuses_is_refused_as_pyspark():
     # As PySpark sends `thresh` as a proto int, after it checks `how` and `subset`: a bool, which
-    # is an int, is a TypeError, and an int out of the range of an int32 a ValueError.
+    # is an int, is the TypeError of protobuf's default (upb) backend, since protobuf 7.34, and an
+    # int out of the range of an int32 a ValueError.
     from pyspark.errors import PySparkTypeError
     from pyspark.sql import DataFrame
 
     df = _offline_session().range(1)
+    refused = "Field spark.connect.NADrop.min_non_nulls: Expected an int, got a boolean."
     cases = (
-        (lambda: df.dropna(thresh=True), TypeError,
-         "Cannot set spark.connect.NADrop.min_non_nulls to True: True has type <class 'bool'>, "
-         "but expected one of: (int)."),
-        (lambda: df.na.drop(thresh=False), TypeError,
-         "Cannot set spark.connect.NADrop.min_non_nulls to False: False has type <class 'bool'>, "
-         "but expected one of: (int)."),
-        (lambda: df.dropna(thresh=True, subset=["id"]), TypeError,
-         "Cannot set spark.connect.NADrop.min_non_nulls to True: True has type <class 'bool'>, "
-         "but expected one of: (int)."),
+        (lambda: df.dropna(thresh=True), TypeError, refused),
+        (lambda: df.na.drop(thresh=False), TypeError, refused),
+        (lambda: df.dropna(thresh=True, subset=["id"]), TypeError, refused),
         (lambda: df.dropna(thresh=2**40), ValueError, "Value out of range: 1099511627776"),
         (lambda: df.na.drop(thresh=-(2**31) - 1), ValueError, "Value out of range: -2147483649"),
         (lambda: df.dropna(how="all", thresh=2**40), ValueError,
@@ -6893,14 +6893,16 @@ def test_the_exception_of_a_done_call_replaces_the_error_of_a_batch_as_pyspark(m
 def test_strings_that_utf8_cannot_encode_raise_value_error_as_options_and_fills_as_pyspark(
     mock_connect,
 ):
-    # As PySpark, whose protobuf string fields raise ValueError for a str that UTF-8 cannot encode
-    # (a lone surrogate): an option is not sent as another text (another path), and a fill value
-    # raises the ValueError of its encoding rather than a TypeError of its type.
+    # As PySpark, whose protobuf string fields raise the UnicodeEncodeError, a ValueError, of a str
+    # that UTF-8 cannot encode (a lone surrogate), in protobuf's default (upb) backend: an option
+    # is not sent as another text (another path), and a fill value raises the error of its
+    # encoding rather than a TypeError of its type.
     from pyspark.sql import SparkSession
 
     spark, service = mock_connect
     bad = "a\ud800b"
-    message = re.escape(f"{bad!r} isn't a valid unicode string and can't be encoded in UTF-8.")
+    message = re.escape(
+        "'utf-8' codec can't encode character '\\ud800' in position 1: surrogates not allowed")
     df = spark.range(1)
     for call in [
         lambda: spark.read.option("path", bad),
@@ -6915,7 +6917,7 @@ def test_strings_that_utf8_cannot_encode_raise_value_error_as_options_and_fills_
         lambda: SparkSession.builder.config(map={bad: "v"}),
         lambda: SparkSession.builder.config(bad, "v"),
     ]:
-        with pytest.raises(ValueError, match=message):
+        with pytest.raises(UnicodeEncodeError, match=message):
             call()
     # The fill of a value, of a dict's key and of a subset column is sent in a string field too.
     for call in [
@@ -6923,19 +6925,20 @@ def test_strings_that_utf8_cannot_encode_raise_value_error_as_options_and_fills_
         lambda: df.fillna({bad: 1}),
         lambda: df.fillna("x", subset=[bad]),
     ]:
-        with pytest.raises(ValueError, match=message):
+        with pytest.raises(UnicodeEncodeError, match=message):
             call()
 
 
 def test_strings_that_utf8_cannot_encode_raise_value_error_in_option_keys_conf_and_names_as_pyspark(
     mock_connect,
 ):
-    # As PySpark, whose protobuf string fields raise the ValueError of a str that UTF-8 cannot
-    # encode, for the key of an option, a key or value of the runtime conf, a name of a table and
-    # the text of a query, where the UnicodeEncodeError of its encoding raised before.
+    # As PySpark, whose protobuf string fields raise the UnicodeEncodeError of a str that UTF-8
+    # cannot encode, in protobuf's default (upb) backend, for the key of an option, a key or value
+    # of the runtime conf, a name of a table and the text of a query.
     spark, service = mock_connect
     bad = "a\ud800b"
-    message = re.escape(f"{bad!r} isn't a valid unicode string and can't be encoded in UTF-8.")
+    message = re.escape(
+        "'utf-8' codec can't encode character '\\ud800' in position 1: surrogates not allowed")
     df = spark.range(1)
     for call in [
         lambda: spark.read.option(bad, "v"),
@@ -6950,13 +6953,13 @@ def test_strings_that_utf8_cannot_encode_raise_value_error_in_option_keys_conf_a
         lambda: spark.conf.isModifiable(bad),
         lambda: spark.table(bad),
     ]:
-        with pytest.raises(ValueError, match=message):
+        with pytest.raises(UnicodeEncodeError, match=message):
             call()
     query = "select '" + bad + "'"
-    with pytest.raises(ValueError) as error:
+    with pytest.raises(UnicodeEncodeError) as error:
         spark.sql(query)
     assert str(error.value) == (
-        f"{query!r} isn't a valid unicode string and can't be encoded in UTF-8."
+        "'utf-8' codec can't encode character '\\ud800' in position 9: surrogates not allowed"
     )
     assert service.execute_requests == []
 
@@ -7063,6 +7066,127 @@ def test_stream_writers_keep_their_settings_when_the_path_is_not_a_str_as_pyspar
     # WriteStreamOperationStart.format=2, output_mode=9, query_name=10.
     assert start[2] == [b"memory"] and start[9] == [b"append"] and start[10] == [b"q"]
     assert 11 not in start
+
+
+def test_protobuf_string_fields_take_bytes_and_refuse_other_objects_as_pyspark(mock_connect):
+    # As protobuf's default (upb) backend, whose string fields PySpark sets as they are with the
+    # keys of the runtime conf and of the options of the builder, the text of sql, the names of
+    # `on` of _joinAsOf and the subset of replace: bytes are decoded as UTF-8, bytes that are not
+    # UTF-8 raise the UnicodeDecodeError of their decoding, and another object the TypeError of
+    # the field. A key of None is the empty key, as the constructor of KeyValue leaves it unset.
+    from pyspark.errors import PySparkTypeError
+    from pyspark.sql import SparkSession
+
+    spark, service = mock_connect
+    df = spark.range(1)
+    spark.conf.set(b"spark.k", b"v")
+    spark.conf.set(None, "w")
+    spark.conf.unset(b"spark.k")
+    assert [pairs for pairs, _ in service.set_confs[-2:]] == [[("spark.k", "v")], [("", "w")]]
+    assert service.unset_confs[-1] == ["spark.k"]
+    builder = SparkSession.builder.remote("sc://localhost:1").config(b"spark.sql.b", "1")
+    assert builder.config(map={b"spark.sql.m": "2"}).getOrCreate() is spark
+    assert sorted(service.set_confs[-1][0]) == [("spark.sql.b", "1"), ("spark.sql.m", "2")]
+    spark.sql(b"select 1")
+    # ExecutePlanRequest.plan=3, Plan.command=2, Command.sql_command=5, SqlCommand.input=6,
+    # Relation.sql=10, SQL.query=1.
+    command = parse_message(parse_message(service.execute_requests[-1])[3][0])[2][0]
+    relation = parse_message(parse_message(parse_message(command)[5][0])[6][0])
+    assert parse_message(relation[10][0])[1] == [b"select 1"]
+    # Relation.as_of_join=39 of AsOfJoin.using_columns=6, and Relation.replace=92 of
+    # NAReplace.cols=2.
+    df._joinAsOf(spark.range(1), "id", "id", on=["id", b"id"]).collect()
+    assert _sent_relation(service.execute_requests[-1], 39, execute=True)[6] == [b"id", b"id"]
+    df.replace(1, 2, subset=[b"id"]).collect()
+    assert _sent_relation(service.execute_requests[-1], 92, execute=True)[2] == [b"id"]
+    sent = len(service.execute_requests), len(service.set_confs), len(service.unset_confs)
+    for call in [
+        lambda: spark.conf.set(1, "v"),
+        lambda: spark.conf.set("spark.k", 1.5),
+        lambda: spark.conf.unset(None),
+        lambda: spark.conf.isModifiable(1),
+        lambda: SparkSession.builder.config(1, "v"),
+        lambda: SparkSession.builder.config(map={1: "v"}),
+        lambda: spark.sql(None),
+        lambda: spark.sql(1),
+        lambda: df._joinAsOf(spark.range(1), "id", "id", on=["id", 1]),
+        lambda: df._joinAsOf(spark.range(1), "id", "id", on=["id", None]),
+        lambda: df.replace(1, 2, subset=["id", 1]),
+        lambda: df.replace(1, 2, subset=("id", bytearray(b"id"))),
+    ]:
+        with pytest.raises(TypeError) as error:
+            call()
+        assert type(error.value) is TypeError
+        assert str(error.value) == "bad argument type for built-in operation"
+    with pytest.raises(UnicodeDecodeError) as error:
+        spark.sql(b"select \xff")
+    assert str(error.value) == (
+        "'utf-8' codec can't decode byte 0xff in position 7: invalid start byte")
+    # The query is formatted as it is, and `args` are checked before it is set in the plan.
+    with pytest.raises(TypeError, match="^expected str, got bytes$"):
+        spark.sql(b"select {x}", x=1)
+    with pytest.raises(PySparkTypeError) as error:
+        spark.sql(1, args=1)
+    assert error.value.getCondition() == "INVALID_TYPE"
+    # An as-of column that is not a Column is a name, which PySpark's ColumnReference asserts is
+    # a str, before `on` is looked at.
+    for column in (1, b"id", None):
+        for left, right in ((column, "id"), ("id", column)):
+            with pytest.raises(AssertionError) as error:
+                df._joinAsOf(spark.range(1), left, right, on=5)
+            assert type(error.value) is AssertionError and str(error.value) == ""
+    assert (len(service.execute_requests), len(service.set_confs),
+            len(service.unset_confs)) == sent
+
+
+def test_option_keys_are_checked_as_the_dicts_and_the_plans_of_pyspark(mock_connect):
+    # As PySpark: the option of a writer of a value of None returns before it looks at the key,
+    # as DataStreamReader.option does, while DataFrameReader.option keeps the None in its dict,
+    # which hashes the key. The writers keep their other options in a dict too, which raises the
+    # TypeError of an unhashable key, and set the key in a protobuf map of strings as it is, as
+    # the writer of a stream does at once: bytes are decoded, and another object is the
+    # TypeError of the field. The DataSource plan of the readers asserts that a key is a str.
+    spark, service = mock_connect
+    df = spark.range(1)
+    stream = spark.readStream.format("rate").load().writeStream
+    for writer in (df.write, df.writeTo("t"), stream, spark.readStream):
+        assert writer.option([1], None) is writer
+    with pytest.raises(TypeError, match="^unhashable type: 'list'$"):
+        spark.read.option([1], None)
+    reader = spark.read.option("k", "v")
+    assert reader.option(1, None) is reader and reader.option(b"k", None) is reader
+    assert reader._options == {"k": "v"}
+    assert stream.option(b"k", "v") is stream
+    for call in [
+        lambda: df.write.option(bytearray(b"k"), "v"),
+        lambda: df.writeTo("t").option([1], "v"),
+        lambda: spark.read.option({}, "v"),
+        lambda: spark.readStream.option(bytearray(b"k"), "v"),
+    ]:
+        with pytest.raises(TypeError, match="^unhashable type: "):
+            call()
+    for call in [
+        lambda: df.write.option(1, "v"),
+        lambda: df.writeTo("t").option(None, "v"),
+        lambda: stream.option(bytearray(b"k"), "v"),
+        lambda: stream.option(1, "v"),
+    ]:
+        with pytest.raises(TypeError, match="^bad argument type for built-in operation$"):
+            call()
+    for call in [
+        lambda: spark.read.option(1, "v"),
+        lambda: spark.read.option(b"k", "v"),
+        lambda: spark.readStream.option(b"k", "v"),
+        lambda: spark.readStream.option(None, "v"),
+    ]:
+        with pytest.raises(AssertionError) as error:
+            call()
+        assert type(error.value) is AssertionError and str(error.value) == ""
+    # A bytes key of a writer is sent decoded: Command.write_operation=2, WriteOperation.options=9.
+    df.write.format("noop").option(b"k", "v").save()
+    plan = parse_message(parse_message(service.execute_requests[-1])[3][0])
+    write = parse_message(parse_message(plan[2][0])[2][0])
+    assert [parse_message(entry) for entry in write[9]] == [{1: [b"k"], 2: [b"v"]}]
 
 
 def test_functions_levenshtein():
@@ -9380,24 +9504,24 @@ def test_lit_takes_an_int_or_a_float_by_its_type_as_pyspark(mock_connect):
         assert repr(F.lit(value)) == f"Column<'{text}'>"
 
 
-def test_a_str_that_utf8_cannot_encode_is_the_value_error_of_protobuf_as_pyspark(mock_connect):
-    # As PySpark's, whose protobuf string field rejects a str with a lone surrogate: a ValueError
-    # of protobuf's message, of at most 1024 characters of the repr of the value, for a literal
-    # and the arguments of sql.
+def test_a_str_that_utf8_cannot_encode_is_the_encode_error_of_protobuf_as_pyspark(mock_connect):
+    # As PySpark's, whose protobuf string field rejects a str with a lone surrogate, in protobuf's
+    # default (upb) backend: the UnicodeEncodeError of its encoding, of the position of the
+    # surrogate, for a literal and the arguments of sql.
     from pyspark.sql import functions as F
 
     spark, service = mock_connect
     value, long_value = "a\ud800b", "x" * 2000 + "\ud800"
-    message = "%.1024r isn't a valid unicode string and can't be encoded in UTF-8."
-    for build, text in ((lambda: F.lit(value), message % value),
-                        (lambda: F.col("id") == value, message % value),
-                        (lambda: F.lit([value]), message % value),
-                        (lambda: F.lit(long_value), message % long_value),
-                        (lambda: spark.sql("SELECT :x", args={"x": value}), message % value),
-                        (lambda: spark.sql("SELECT ?", args=[value]), message % value)):
-        with pytest.raises(ValueError) as error:
+    message = "'utf-8' codec can't encode character '\\ud800' in position %d: surrogates not allowed"
+    for build, text in ((lambda: F.lit(value), message % 1),
+                        (lambda: F.col("id") == value, message % 1),
+                        (lambda: F.lit([value]), message % 1),
+                        (lambda: F.lit(long_value), message % 2000),
+                        (lambda: spark.sql("SELECT :x", args={"x": value}), message % 1),
+                        (lambda: spark.sql("SELECT ?", args=[value]), message % 1)):
+        with pytest.raises(UnicodeEncodeError) as error:
             build()
-        assert type(error.value) is ValueError and str(error.value) == text
+        assert type(error.value) is UnicodeEncodeError and str(error.value) == text
     assert service.execute_requests == []
 
 
@@ -11069,7 +11193,8 @@ def test_seeds_that_pyspark_cannot_send_are_refused_as_pyspark(mock_connect):
     # As PySpark Connect's: randomSplit and sample take int() of the seed, and an int out of the
     # range of a long is the ValueError of protobuf. sampleBy's StatSampleBy asserts an int, so
     # a float, a str or an np.int64 is a bare AssertionError, and a bool passes the assertion but
-    # is refused by the proto. Its checks of col and fractions come first.
+    # is refused by the proto, the TypeError of protobuf's default (upb) backend since protobuf
+    # 7.34. Its checks of col and fractions come first.
     from pyspark.errors import PySparkTypeError
 
     spark, service = mock_connect
@@ -11116,9 +11241,7 @@ def test_seeds_that_pyspark_cannot_send_are_refused_as_pyspark(mock_connect):
             with pytest.raises(TypeError) as error:
                 call(seed)
             assert str(error.value) == (
-                f"Cannot set spark.connect.StatSampleBy.seed to {seed}: {seed} has type "
-                "<class 'bool'>, but expected one of: (int)."
-            )
+                "Field spark.connect.StatSampleBy.seed: Expected an int, got a boolean.")
         for seed, shown in out_of_range[1:3]:
             with pytest.raises(ValueError) as error:
                 call(seed)
@@ -21317,7 +21440,7 @@ def test_streaming_queries_check_their_timeouts_as_pyspark(mock_connect):
     # As PySpark's: StreamingQueryException of pyspark.sql.streaming is that of
     # pyspark.errors; the waits of a query and of spark.streams raise VALUE_NOT_POSITIVE of a
     # timeout that is not a positive number, of the name of its type; and explain takes an
-    # int as a bool, but no other value.
+    # int, or a NumPy bool, as a bool, but no other value.
     import pyspark.errors
     import pyspark.sql.streaming
     import pyspark.sql.streaming.query
@@ -21342,9 +21465,31 @@ def test_streaming_queries_check_their_timeouts_as_pyspark(mock_connect):
                 "arg_name": "timeout",
                 "arg_value": type(timeout).__name__,
             }
-    for extended in (1.5, "x", None):
-        with pytest.raises(TypeError, match="but expected one of"):
+    # As protobuf's default (upb) backend, which reads the `extended` that PySpark sets in its
+    # ExplainCommand as a C long, true when it is not 0, and a NumPy bool by its truth: another
+    # object raises the error of that conversion, and a NumPy array protobuf's TypeError.
+    for extended, error, message in (
+        (1.5, TypeError, "'float' object cannot be interpreted as an integer"),
+        ("x", TypeError, "'str' object cannot be interpreted as an integer"),
+        (None, TypeError, "'NoneType' object cannot be interpreted as an integer"),
+        (b"x", TypeError, "'bytes' object cannot be interpreted as an integer"),
+        (np.float64(1), TypeError, "'numpy.float64' object cannot be interpreted as an integer"),
+        (2**70, OverflowError, "Python int too large to convert to C long"),
+        (np.array([1]), TypeError, "[1] has type ndarray, but expected one of: bool"),
+    ):
+        with pytest.raises(error) as e:
             query.explain(extended)
+        assert type(e.value) is error and str(e.value) == message
+    # ExecutePlanResponse.streaming_query_command_result=9: query_id=1, explain=4 (result=1).
+    service.execute_payload = message_field(9, message_field(
+        1, message_field(1, "q") + message_field(2, "r")) + message_field(4, message_field(1, "p")))
+    for extended, sent in ((np.True_, 1), (np.int64(0), 0), (2, 1), (-1, 1), (False, 0)):
+        query.explain(extended)
+        # ExecutePlanRequest.plan=3, Plan.command=2, Command.streaming_query_command=7,
+        # StreamingQueryCommand.explain=7, ExplainCommand.extended=1.
+        command = parse_message(parse_message(service.execute_requests[-1])[3][0])[2][0]
+        query_command = parse_message(parse_message(command)[7][0])
+        assert parse_message(query_command[7][0]).get(1, [0]) == [sent]
 
 
 def test_stream_writer_setters_mutate_and_return_self(offline_spark):
@@ -21940,7 +22085,7 @@ def test_catalog_creates_tables_eagerly_as_pyspark(mock_connect):
     assert (create[1], create[2], create[3], create[4]) == ([b"t"], [b"/p"], [b"parquet"], [b"d"])
     assert _struct_field_names(create[5][0]) == ["a", "b"]
     assert [parse_message(entry) for entry in create[6]] == [{1: [b"k"], 2: [b"v"]}]
-    with pytest.raises(TypeError, match="1 has type <class 'int'>"):
+    with pytest.raises(TypeError, match="^bad argument type for built-in operation$"):
         spark.catalog.createTable("t", source="parquet", k=1)
     for schema in ("a INT", T.LongType()):
         with pytest.raises(PySparkTypeError) as error:
@@ -21966,8 +22111,9 @@ def test_catalog_creates_tables_eagerly_as_pyspark(mock_connect):
 
 def test_catalog_create_table_takes_bytes_options_as_protobuf_does(mock_connect):
     spark, service = mock_connect
-    # As PySpark's protobuf map of strings, bytes that are UTF-8 are sent decoded, while bytes
-    # that are not UTF-8 raise a ValueError, and a bytearray or a memoryview a TypeError.
+    # As PySpark's protobuf map of strings, in protobuf's default (upb) backend: bytes that are
+    # UTF-8 are sent decoded, while bytes that are not UTF-8 raise the UnicodeDecodeError of their
+    # decoding, and a bytearray or a memoryview the TypeError of the string field.
     spark.catalog.createTable("t", source="parquet", a=b"x", b=None)
     create = _sent_catalog(service.execute_requests[-1], 14)
     assert [parse_message(entry) for entry in create[6]] == [{1: [b"a"], 2: [b"x"]}]
@@ -21975,10 +22121,12 @@ def test_catalog_create_table_takes_bytes_options_as_protobuf_does(mock_connect)
     create = _sent_catalog(service.execute_requests[-1], 14)
     assert [parse_message(entry) for entry in create[6]] == [{1: [b"a"], 2: [b"\xc3\xa9"]}]
     calls = len(service.execute_requests)
-    with pytest.raises(ValueError, match="has type bytes, but isn't valid UTF-8 encoding"):
+    with pytest.raises(UnicodeDecodeError) as error:
         spark.catalog.createTable("t", source="parquet", a=b"\xff\xfe")
+    assert str(error.value) == (
+        "'utf-8' codec can't decode byte 0xff in position 0: invalid start byte")
     for value in (bytearray(b"x"), memoryview(b"x")):
-        with pytest.raises(TypeError, match=r"has type <class '(bytearray|memoryview)'>"):
+        with pytest.raises(TypeError, match="^bad argument type for built-in operation$"):
             spark.catalog.createTable("t", source="parquet", a=value)
     assert len(service.execute_requests) == calls
 
