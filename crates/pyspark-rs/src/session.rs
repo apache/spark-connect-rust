@@ -503,7 +503,11 @@ thread_local! {
 
 /// The request that `hooks` return of `request`, as PySpark's client calls its session hooks:
 /// each `on_execute_plan` with the request of the one before, as a `pb2.ExecutePlanRequest`
-/// of the generated `pyspark.sql.connect.proto`, of the operation ID of `request`.
+/// of the generated `pyspark.sql.connect.proto`, of the operation ID of `request`. The hooks get
+/// the request as `parse_deep` parses it, which takes a request of any nesting, where
+/// `FromString` stops at protobuf's limit of 100 nested messages. Its messages are encoded,
+/// decoded and dropped on a grown stack, as the caller's thread may be a small one, while the
+/// Python code (the parse and the hooks) runs on the stack of the caller's thread.
 fn call_execute_plan_hooks(
     py: Python<'_>,
     hooks: &[Py<PyAny>],
@@ -511,13 +515,15 @@ fn call_execute_plan_hooks(
 ) -> PyResult<spark_connect_proto::ExecutePlanRequest> {
     use prost::Message;
     let operation_id = request.operation_id.clone();
+    let bytes = pyo3::types::PyBytes::new(py, &crate::encode_on_grown_stack(request));
     let mut message = py
-        .import("pyspark.sql.connect.proto")?
-        .getattr("ExecutePlanRequest")?
-        .call_method1(
-            "FromString",
-            (pyo3::types::PyBytes::new(py, &request.encode_to_vec()),),
-        )?;
+        .import("pyspark.sql.connect._column_reduce")?
+        .getattr("parse_deep")?
+        .call1((
+            py.import("pyspark.sql.connect.proto")?
+                .getattr("ExecutePlanRequest")?,
+            bytes,
+        ))?;
     for hook in hooks {
         message = hook.bind(py).call_method1("on_execute_plan", (message,))?;
         if let Some(operation_id) = &operation_id {
@@ -525,10 +531,10 @@ fn call_execute_plan_hooks(
         }
     }
     let bytes = message.call_method0("SerializeToString")?;
-    let mut request = spark_connect_proto::ExecutePlanRequest::decode(
-        bytes.cast::<pyo3::types::PyBytes>()?.as_bytes(),
-    )
-    .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+    let bytes = bytes.cast::<pyo3::types::PyBytes>()?.as_bytes();
+    let mut request =
+        crate::on_grown_stack(|| spark_connect_proto::ExecutePlanRequest::decode(bytes))
+            .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
     // A hook may put in the plan of a DataFrame, which the Python plan sends as a placeholder.
     spark_connect::plan::resolve_request(&mut request)
         .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;

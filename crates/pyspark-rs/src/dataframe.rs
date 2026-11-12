@@ -674,9 +674,11 @@ impl PyDataFrame {
 
     /// The bytes of the relation of this DataFrame as it is sent, for the plan of `_plan`.
     fn _relation_bytes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyBytes>> {
-        use prost::Message;
         let relation = self.dataframe.to_relation().to_pyerr()?;
-        Ok(pyo3::types::PyBytes::new(py, &relation.encode_to_vec()))
+        Ok(pyo3::types::PyBytes::new(
+            py,
+            &crate::encode_on_grown_stack(relation),
+        ))
     }
 
     /// The bytes of the placeholder of the relation of this DataFrame, which the plan of `_plan`
@@ -696,23 +698,34 @@ impl PyDataFrame {
         let this = slf.borrow();
         py.import("pyspark.sql.connect.dataframe")?
             .getattr("_reduce_dataframe")?
-            .call1((this.spark_session(py)?, this._relation_bytes(py)?))
+            .call1((
+                this.spark_session(py)?,
+                this._relation_bytes(py)?,
+                this.dataframe.plan_levels(),
+            ))
     }
 
-    /// The DataFrame of `relation`, the bytes of a relation of `session`, as a pickled DataFrame
-    /// unpickles.
+    /// The DataFrame of `relation`, the bytes of a relation of `levels` levels of `session`, as a
+    /// pickled DataFrame unpickles.
     #[staticmethod]
+    #[pyo3(signature = (session, relation, levels=1))]
     fn _of_relation(
         session: &Bound<'_, crate::session::PySparkSession>,
         relation: &[u8],
+        levels: usize,
     ) -> PyResult<PyDataFrame> {
+        let session = session.borrow().session.clone();
         use prost::Message;
-        let relation = spark_connect_proto::Relation::decode(relation)
-            .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
-        Ok(PyDataFrame::new(DataFrame::from_sent_relation(
-            session.borrow().session.clone(),
-            relation,
-        )))
+        // Decoded, and then built or dropped, on a stack that holds its levels.
+        // The errors become Python exceptions on the caller's stack, which runs no Python code
+        // on the grown one.
+        let dataframe = crate::on_grown_stack(|| {
+            spark_connect_proto::Relation::decode(relation)
+                .map(|relation| DataFrame::from_sent_relation_levels(session, relation, levels))
+        })
+        .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?
+        .to_pyerr()?;
+        Ok(PyDataFrame::new(dataframe))
     }
 
     /// The plan of this DataFrame, as PySpark Connect's `DataFrame._plan`, whose

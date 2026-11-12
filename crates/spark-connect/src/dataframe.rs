@@ -1277,13 +1277,39 @@ impl DataFrame {
     /// raise for their metrics that PySpark does not convert. Not a stable API.
     #[doc(hidden)]
     pub fn from_sent_relation(session: SparkSession, relation: proto::Relation) -> DataFrame {
+        // A relation of one level holds no plan, as a relation built without a pickled plan.
+        DataFrame::from_sent_relation_at(session, relation, 1)
+    }
+
+    /// As [`DataFrame::from_sent_relation`], for a relation of `levels` levels, as the plan of
+    /// the DataFrame that was pickled had: the levels count for [`MAX_PLAN_DEPTH`] as they did
+    /// there, so a relation deeper than it is a `RecursionError`, as the API raises it when it
+    /// sends one. Not a stable API.
+    #[doc(hidden)]
+    pub fn from_sent_relation_levels(
+        session: SparkSession,
+        relation: proto::Relation,
+        levels: usize,
+    ) -> Result<DataFrame> {
+        if levels > crate::plan::MAX_PLAN_DEPTH {
+            return Err(crate::plan::too_deep_a_plan(levels));
+        }
+        Ok(DataFrame::from_sent_relation_at(session, relation, levels))
+    }
+
+    /// The DataFrame of `relation`, of `levels` levels, which is within the bound.
+    fn from_sent_relation_at(
+        session: SparkSession,
+        relation: proto::Relation,
+        levels: usize,
+    ) -> DataFrame {
         let plan_id = relation.common.as_ref().and_then(|common| common.plan_id);
         let observations = plan_id
             .and_then(|plan_id| session.plan_ids().node_of(plan_id))
             .map(|node| node.observations())
             .unwrap_or_default();
-        // A relation decoded from bytes is shallow: prost decodes at most 100 nested messages.
-        let dataframe = DataFrame::from_raw_relation(session, relation, None, 1, observations);
+        // The relation is sent as it is, and its clone and drop take the stack of its levels.
+        let dataframe = DataFrame::from_raw_relation(session, relation, None, levels, observations);
         if let Some(plan_id) = plan_id {
             dataframe
                 .session
@@ -1291,6 +1317,13 @@ impl DataFrame {
                 .assign(&dataframe.plan, plan_id);
         }
         dataframe
+    }
+
+    /// The levels of the plan of this DataFrame, as a pickled DataFrame records them for
+    /// [`DataFrame::from_sent_relation_levels`]. Not a stable API.
+    #[doc(hidden)]
+    pub fn plan_levels(&self) -> usize {
+        self.plan.depth()
     }
 
     /// The relation of this DataFrame as it is sent, with the plan IDs of its session, for a
@@ -7263,5 +7296,61 @@ mod deep_request_stack_tests {
             SparkErrorKind::RecursionError,
             "an expression within the bound is sent: {schema}"
         );
+    }
+
+    /// A relation of `levels` levels of limits over a range, as a pickled DataFrame's relation.
+    fn limit_relation(levels: usize) -> spark_connect_proto::Relation {
+        use spark_connect_proto as proto;
+        let mut relation = proto::Relation {
+            common: None,
+            rel_type: Some(proto::relation::RelType::Range(proto::Range {
+                start: None,
+                end: 1,
+                step: 1,
+                num_partitions: None,
+            })),
+        };
+        for _ in 1..levels {
+            relation = proto::Relation {
+                common: None,
+                rel_type: Some(proto::relation::RelType::Limit(Box::new(proto::Limit {
+                    input: Some(Box::new(relation)),
+                    limit: 1,
+                }))),
+            };
+        }
+        relation
+    }
+
+    #[test]
+    fn a_sent_relation_past_the_bound_is_a_recursion_error_as_the_api_raises_it() {
+        let spark = unreachable_session();
+        let error = DataFrame::from_sent_relation_levels(
+            spark.clone(),
+            limit_relation(3),
+            MAX_PLAN_DEPTH + 1,
+        )
+        .err()
+        .expect("a relation past the bound is refused");
+        assert_eq!(error.kind, SparkErrorKind::RecursionError, "{error}");
+        let df = DataFrame::from_sent_relation_levels(spark, limit_relation(3), MAX_PLAN_DEPTH)
+            .expect("a relation at the bound is accepted");
+        assert_eq!(df.plan().depth(), MAX_PLAN_DEPTH);
+    }
+
+    #[test]
+    fn a_sent_relation_at_the_bound_is_sent_from_a_small_stack_without_overflowing_it() {
+        let spark = unreachable_session();
+        let relation = limit_relation(MAX_PLAN_DEPTH);
+        let df = DataFrame::from_sent_relation_levels(spark, relation, MAX_PLAN_DEPTH)
+            .expect("a relation at the bound is accepted");
+        let (schema, collect) = on_a_small_stack(move || (df.schema(), df.collect()));
+        for error in [schema.unwrap_err(), collect.unwrap_err()] {
+            assert_ne!(
+                error.kind,
+                SparkErrorKind::RecursionError,
+                "a relation at the bound is sent: {error}"
+            );
+        }
     }
 }

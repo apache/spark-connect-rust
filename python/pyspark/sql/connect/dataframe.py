@@ -18,10 +18,15 @@
 from collections.abc import Iterator
 from typing import Any, Callable
 
+from pyspark import cloudpickle as _cloudpickle
 from pyspark._pyspark import DataFrame
+from pyspark.sql.connect import _column_reduce
+from pyspark.sql.connect._column_reduce import parse_deep
 from pyspark.sql.dataframe import DataFrameNaFunctions, DataFrameStatFunctions
 
 __all__ = ["DataFrame", "DataFrameNaFunctions", "DataFrameStatFunctions"]
+
+_cloudpickle.register_pickle_by_value(_column_reduce)
 
 
 def _local_rows(rows: Any) -> Iterator[Any]:
@@ -47,17 +52,19 @@ _local_rows.__code__ = _local_rows.__code__.replace(
 )
 
 
-def _reduce_dataframe(session: Any, relation: bytes) -> tuple[Callable[..., Any], tuple[Any, ...]]:
-    """The ``__reduce__`` of a DataFrame of ``session`` and the bytes of its ``relation``, as
-    PySpark Connect's, of its session and its plan: a function, which cloudpickle pickles by
-    value, of the session, which unpickles first, and of the relation.
+def _reduce_dataframe(
+    session: Any, relation: bytes, levels: int = 1
+) -> tuple[Callable[..., Any], tuple[Any, ...]]:
+    """The ``__reduce__`` of a DataFrame of ``session`` and the bytes of its ``relation`` of
+    ``levels`` levels, as PySpark Connect's, of its session and its plan: a function, which
+    cloudpickle pickles by value, of the session, which unpickles first, and of the relation.
 
     On a Python worker of the server, whose PySpark has no Rust client, such as the worker of a
     ``foreachBatch`` function, which has the active session of the query, the function gives
     back PySpark Connect's DataFrame of the relation, as PySpark's DataFrame of its plan unpickles
     there. So everything that it calls there is of PySpark, which the worker has."""
 
-    def creator(session: Any, relation: bytes) -> Any:
+    def creator(session: Any, relation: bytes, levels: int) -> Any:
         try:
             from pyspark import _pyspark
         except ImportError:
@@ -82,8 +89,8 @@ def _reduce_dataframe(session: Any, relation: bytes) -> tuple[Callable[..., Any]
                     sent.CopyFrom(self._relation)
                     return sent
 
-            return ConnectDataFrame(Relation(proto.Relation.FromString(relation)), session)
+            return ConnectDataFrame(Relation(parse_deep(proto.Relation, relation)), session)
 
-        return _pyspark.DataFrame._of_relation(session, relation)
+        return _pyspark.DataFrame._of_relation(session, relation, levels)
 
-    return creator, (session, relation)
+    return creator, (session, relation, levels)

@@ -117,15 +117,21 @@ pub(crate) fn with_stack_for_a_level<T>(f: impl FnOnce() -> T) -> T {
 /// expression is serialized down to the bound only: its proto is dropped and encoded by
 /// recursing too, so it must not be deeper.
 pub(crate) fn with_expression_depth_bound<T>(serialize: impl FnOnce() -> T) -> Result<T> {
+    with_expression_levels(serialize).map(|(value, _)| value)
+}
+
+/// As [`with_expression_depth_bound`], and the levels that the expressions of `serialize` reach.
+fn with_expression_levels<T>(serialize: impl FnOnce() -> T) -> Result<(T, usize)> {
     let scope = DepthBoundScope::enter();
     let value = serialize();
-    if scope.deepest() > MAX_EXPRESSION_DEPTH {
+    let levels = scope.deepest();
+    if levels > MAX_EXPRESSION_DEPTH {
         return Err(SparkError::recursion_msg(format!(
             "maximum recursion depth exceeded while serializing an expression; an expression \
              may be at most {MAX_EXPRESSION_DEPTH} levels deep"
         )));
     }
-    Ok(value)
+    Ok((value, levels))
 }
 
 /// An immutable, shared expression, mirroring PySpark's base Expression type.
@@ -234,11 +240,13 @@ pub enum ExpressionNode {
 }
 
 /// An expression of [`ExpressionNode::Sent`]: the `spark.connect.Expression` of a Column as it
-/// was sent, and its rendering, as `Column<'...'>` shows it.
+/// was sent, its rendering, as `Column<'...'>` shows it, and its levels, as
+/// [`Expression::try_to_proto_with_levels`] counts them when the Column was pickled.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SentExpression {
     pub expression: proto::Expression,
     pub rendered: String,
+    pub levels: usize,
 }
 
 /// The type of a [`SubqueryExpression`]. Mirrors the `subquery_type` of
@@ -556,7 +564,17 @@ impl Expression {
         // levels, and count them for `with_expression_depth_bound`.
         with_stack_for_a_level(|| {
             let level = ExpressionLevel::enter();
-            if level.0 > MAX_EXPRESSION_DEPTH && EXPRESSION_DEPTH_BOUNDED.with(Cell::get) {
+            // A sent expression has the levels that it was pickled with, below this one.
+            let deepest = match self.node() {
+                ExpressionNode::Sent(sent) => {
+                    let deepest = level.0 + sent.levels.saturating_sub(1);
+                    DEEPEST_EXPRESSION_LEVEL
+                        .with(|current| current.set(current.get().max(deepest)));
+                    deepest
+                }
+                _ => level.0,
+            };
+            if deepest > MAX_EXPRESSION_DEPTH && EXPRESSION_DEPTH_BOUNDED.with(Cell::get) {
                 // The request fails with a `RecursionError`: stop here, so that the proto of the
                 // expression is no deeper than the bound.
                 return proto::Expression::default();
@@ -573,6 +591,38 @@ impl Expression {
     /// proto by recursing, so a deeper one could overflow the stack there.
     pub fn try_to_proto(&self) -> Result<proto::Expression> {
         with_expression_depth_bound(|| self.to_proto())
+    }
+
+    /// As [`Expression::try_to_proto`], and the levels of the expression, as a pickled Column
+    /// records them, so that its unpickled copy, [`Expression::sent`], is as deep as it was.
+    pub fn try_to_proto_with_levels(&self) -> Result<(proto::Expression, usize)> {
+        with_expression_levels(|| self.to_proto())
+    }
+
+    /// The expression of `expression`, the `spark.connect.Expression` of a Column as it was
+    /// sent, with its `rendered` rendering and its `levels`, as a pickled Column unpickles: it
+    /// sends the expression as it is. An expression of more levels than
+    /// [`MAX_EXPRESSION_DEPTH`] is a `RecursionError`, as the API raises it when it sends one.
+    /// Not a stable API.
+    #[doc(hidden)]
+    pub fn sent(
+        expression: proto::Expression,
+        rendered: String,
+        levels: usize,
+    ) -> Result<Expression> {
+        if levels > MAX_EXPRESSION_DEPTH {
+            return Err(SparkError::recursion_msg(format!(
+                "maximum recursion depth exceeded while unpickling an expression of {levels} \
+                 levels; an expression may be at most {MAX_EXPRESSION_DEPTH} levels deep"
+            )));
+        }
+        Ok(Expression::new(ExpressionNode::Sent(Box::new(
+            SentExpression {
+                expression,
+                rendered,
+                levels,
+            },
+        ))))
     }
 
     fn to_proto_with_origin(&self) -> proto::Expression {
@@ -1991,6 +2041,51 @@ mod tests {
     }
 
     #[test]
+    fn a_sent_expression_has_its_levels_and_counts_them_under_another_expression() {
+        // As a pickled Column of 300 additions: 301 levels, which the Column keeps when it is
+        // unpickled, and which count under an expression over it, as the levels of the API do.
+        let mut expr = col("id");
+        for _ in 0..300 {
+            expr = Expression::function(
+                "+",
+                vec![expr, Expression::literal(LiteralExpression::Long(1))],
+            );
+        }
+        let rendered = expr.render();
+        let (sent, levels) = expr.try_to_proto_with_levels().unwrap();
+        assert_eq!(levels, 301);
+        let unpickled = Expression::sent(sent.clone(), rendered.clone(), levels).unwrap();
+        assert_eq!(unpickled.to_proto(), sent);
+        let over = Expression::function("abs", vec![unpickled.clone()]);
+        assert_eq!(over.try_to_proto_with_levels().unwrap().1, 302);
+        assert_eq!(
+            over.try_to_proto().unwrap(),
+            Expression::function("abs", vec![expr])
+                .try_to_proto()
+                .unwrap()
+        );
+        // At the bound it is sent, and one level more, under an expression, is a RecursionError.
+        let at_bound = Expression::sent(sent.clone(), rendered.clone(), MAX_EXPRESSION_DEPTH);
+        let at_bound = at_bound.unwrap();
+        assert!(at_bound.try_to_proto().is_ok());
+        let error = Expression::function("abs", vec![at_bound])
+            .try_to_proto()
+            .unwrap_err();
+        assert_eq!(
+            error.kind,
+            spark_connect_core::error::SparkErrorKind::RecursionError
+        );
+        // A sent expression deeper than the bound is refused as it is unpickled.
+        let error = Expression::sent(sent, rendered, MAX_EXPRESSION_DEPTH + 1)
+            .err()
+            .unwrap();
+        assert_eq!(
+            error.kind,
+            spark_connect_core::error::SparkErrorKind::RecursionError
+        );
+    }
+
+    #[test]
     fn sent_expressions_are_sent_and_rendered_as_they_were() {
         // As a pickled Column unpickles: the expression as it was sent, of its rendering, which
         // the expressions over it send and render.
@@ -2002,6 +2097,7 @@ mod tests {
         let sent = Expression::new(ExpressionNode::Sent(Box::new(SentExpression {
             expression: original.to_proto(),
             rendered: original.render(),
+            levels: 3,
         })));
         assert_eq!(sent.to_proto(), original.to_proto());
         assert_eq!(sent.render(), "+(a, 1) AS b");

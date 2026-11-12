@@ -736,9 +736,8 @@ impl PyColumn {
     /// the unpickled Column is a sort order of `orderBy`, `Window.orderBy` and the others.
     /// A Column too deep to be sent is the `RecursionError` that PySpark's pickler raises for it.
     fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        use prost::Message;
-        let expression = self.column.try_to_proto().to_pyerr()?;
-        let expression = pyo3::types::PyBytes::new(py, &expression.encode_to_vec());
+        let (expression, levels) = self.column.try_to_proto_with_levels().to_pyerr()?;
+        let expression = pyo3::types::PyBytes::new(py, &crate::encode_on_grown_stack(expression));
         let column = |expr: &spark_connect::expression::Expression| -> PyResult<Py<PyColumn>> {
             Py::new(py, PyColumn::new(Column::new(expr.clone())))
         };
@@ -778,19 +777,22 @@ impl PyColumn {
                 branches,
                 else_value,
                 sort,
+                levels,
             ))
     }
 
     /// The Column of `expression`, the bytes of a `spark.connect.Expression`, and of its
-    /// `rendered` rendering, as a pickled Column unpickles: it sends the expression as it is.
-    /// The CASE WHEN of `branches` and `else_value`, the Columns of its parts, is built as it was.
+    /// `rendered` rendering, of its `levels`, as a pickled Column unpickles: it sends the
+    /// expression as it is. The CASE WHEN of `branches` and `else_value`, the Columns of its
+    /// parts, is built as it was.
     #[staticmethod]
-    #[pyo3(signature = (expression, rendered, branches=None, else_value=None))]
+    #[pyo3(signature = (expression, rendered, branches=None, else_value=None, levels=1))]
     fn _of_expression(
         expression: &[u8],
         rendered: String,
         branches: Option<Vec<(PyRef<'_, PyColumn>, PyRef<'_, PyColumn>)>>,
         else_value: Option<PyRef<'_, PyColumn>>,
+        levels: usize,
     ) -> PyResult<PyColumn> {
         if let Some(branches) = branches {
             let branches = branches
@@ -813,18 +815,16 @@ impl PyColumn {
             )));
         }
         use prost::Message;
-        let expression = spark_connect_proto::Expression::decode(expression)
-            .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
-        Ok(PyColumn::new(Column::new(
-            spark_connect::expression::Expression::new(
-                spark_connect::expression::ExpressionNode::Sent(Box::new(
-                    spark_connect::expression::SentExpression {
-                        expression,
-                        rendered,
-                    },
-                )),
-            ),
-        )))
+        // Decoded, and then built or dropped, on a stack that holds its levels.
+        // The errors become Python exceptions on the caller's stack, which runs no Python code
+        // on the grown one.
+        let column = crate::on_grown_stack(|| {
+            spark_connect_proto::Expression::decode(expression)
+                .map(|expression| Column::sent(expression, rendered, levels))
+        })
+        .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?
+        .to_pyerr()?;
+        Ok(PyColumn::new(column))
     }
 
     /// As PySpark's Column, which has no `__str__` of its own for `_with_origin` to wrap: no
