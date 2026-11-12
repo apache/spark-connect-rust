@@ -109,15 +109,11 @@ fn path_list(paths: &[Bound<'_, PyAny>]) -> PyResult<Vec<String>> {
         .collect()
 }
 
-/// The path of a writer, a str, as its protobuf field takes it. Another type raises the TypeError
-/// of protobuf, which the upb backend of PySpark raises with this message.
+/// The path of a writer, as PySpark sets it in its protobuf string field, which the default
+/// (upb) backend converts as [`crate::str_argument`] does: a str, or bytes decoded as UTF-8, and
+/// the error of that conversion for another object.
 pub(crate) fn writer_path(path: &Bound<'_, PyAny>) -> PyResult<String> {
-    if path.is_instance_of::<pyo3::types::PyString>() {
-        return path.extract();
-    }
-    Err(pyo3::exceptions::PyTypeError::new_err(
-        "bad argument type for built-in operation",
-    ))
+    crate::str_argument(path)
 }
 
 /// The columns of `df.write.bucketBy(numBuckets, col, *cols)` and `sortBy(col, *cols)`, as
