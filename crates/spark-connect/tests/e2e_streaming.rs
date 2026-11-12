@@ -300,3 +300,144 @@ fn streaming_last_native_owner_drop_cancels_a_quiet_listener_worker() {
         .recv_timeout(Duration::from_secs(5))
         .expect("dropping every native owner releases the listener of the quiet real worker");
 }
+
+/// A listener whose subscription fails on its first event re-adds another listener from its
+/// `on_stream_error`, as a client resubscribes. The re-added listener must be subscribed on the
+/// server: it receives the events of a query that runs afterwards.
+#[test]
+fn streaming_listener_readded_from_a_stream_error_receives_events() {
+    if !should_run() {
+        return;
+    }
+    use spark_connect::streaming::{StreamingQueryListener, StreamingQueryListenerEvent};
+    use spark_connect::streaming::{StreamingQueryManager, QUERY_PROGRESS_EVENT};
+    use spark_connect::{Result, SparkError};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    struct Counting(AtomicUsize);
+    impl StreamingQueryListener for Counting {
+        fn on_event(&self, event: &StreamingQueryListenerEvent) {
+            if event.event_type == QUERY_PROGRESS_EVENT {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    struct FailsThenReadds {
+        manager: StreamingQueryManager,
+        next: Arc<dyn StreamingQueryListener>,
+        result: Mutex<Option<Result<String>>>,
+    }
+    impl StreamingQueryListener for FailsThenReadds {
+        fn on_event(&self, _: &StreamingQueryListenerEvent) {}
+
+        fn try_on_event(&self, _: &StreamingQueryListenerEvent) -> Result<()> {
+            Err(SparkError::connect_msg("the event cannot be read"))
+        }
+
+        fn on_stream_error(&self, _: &SparkError) -> bool {
+            let added = self.manager.add_listener(Arc::clone(&self.next));
+            *self.result.lock().unwrap() = Some(added);
+            true
+        }
+    }
+
+    let spark = session();
+    let manager = spark.streams();
+    let counting = Arc::new(Counting(AtomicUsize::new(0)));
+    let failing = Arc::new(FailsThenReadds {
+        manager: spark.streams(),
+        next: counting.clone(),
+        result: Mutex::new(None),
+    });
+    manager
+        .add_listener(failing.clone())
+        .expect("add the listener that fails");
+    let query = spark
+        .read_stream()
+        .format("rate")
+        .option("rowsPerSecond", "1")
+        .load(None)
+        .write_stream()
+        .format("noop")
+        .query_name("e2e_listener_readded_after_stream_error")
+        .start("")
+        .expect("start the query");
+    for _ in 0..60 {
+        if counting.0.load(Ordering::SeqCst) > 0 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    query.stop().expect("stop the query");
+    let added = failing
+        .result
+        .lock()
+        .unwrap()
+        .take()
+        .expect("the failing listener reported its stream error");
+    assert!(added.is_ok(), "the re-add succeeds: {added:?}");
+    assert_eq!(
+        manager.listeners().len(),
+        1,
+        "only the re-added listener remains"
+    );
+    assert!(
+        counting.0.load(Ordering::SeqCst) > 0,
+        "the re-added listener receives the events of the query"
+    );
+    manager.close().expect("close the listener bus");
+}
+
+/// A session progress handler that panics on the reported removal of the listener bus does not
+/// leave the bus in its lifecycle phase: the first close reports the panic, and the next close
+/// returns rather than waiting for the phase.
+#[test]
+fn streaming_listener_close_returns_after_a_panicking_progress_handler() {
+    if !should_run() {
+        return;
+    }
+    use spark_connect::streaming::{StreamingQueryListener, StreamingQueryListenerEvent};
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{mpsc, Arc};
+    use std::time::Duration;
+
+    struct Quiet;
+    impl StreamingQueryListener for Quiet {
+        fn on_event(&self, _: &StreamingQueryListenerEvent) {}
+    }
+
+    let spark = session();
+    let manager = spark.streams();
+    manager
+        .add_listener(Arc::new(Quiet))
+        .expect("add the listener");
+    let panicked = Arc::new(AtomicBool::new(false));
+    let fired = Arc::clone(&panicked);
+    let handler = spark.register_progress_handler(move |_| {
+        if !fired.swap(true, Ordering::SeqCst) {
+            panic!("the progress handler panics");
+        }
+    });
+
+    let first = catch_unwind(AssertUnwindSafe(|| manager.close()));
+    spark.remove_progress_handler(handler);
+    assert!(
+        first.is_err(),
+        "the first close reports the panic of the handler"
+    );
+    assert!(panicked.load(Ordering::SeqCst));
+
+    let (returned, done) = mpsc::channel();
+    let retry = spark.clone();
+    std::thread::spawn(move || {
+        let _ = returned.send(retry.streams().close());
+    });
+    done.recv_timeout(Duration::from_secs(60))
+        .expect("the next close returns")
+        .expect("the next close removes the listener");
+    assert!(manager.listeners().is_empty());
+}
