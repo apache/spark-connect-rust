@@ -384,7 +384,9 @@ pub(crate) enum RetryError<E> {
 }
 
 /// Makes the attempts of a call under the policy of `retrying` until one succeeds or fails for
-/// good: a failed RPC is retried as [`Retrying::backoff`] decides, after its wait.
+/// good: a failed RPC is retried as [`Retrying::backoff`] decides, after its wait. The retries
+/// are the caller's, so that a call and the wait for the first response of its execution can
+/// share their attempts (see [`crate::client::ReattachableResponseStream`]).
 ///
 /// What differs between the calls is given rather than built in:
 ///
@@ -396,7 +398,7 @@ pub(crate) enum RetryError<E> {
 /// - `attempt` fails with [`RetryError::Aborted`] for an error that is no failed RPC, such as
 ///   the unreadable source of an upload, which ends the call as it is.
 pub(crate) async fn retrying<T, E, Fut>(
-    mut retrying: Retrying,
+    retrying: &mut Retrying,
     mut before_retry: impl FnMut() -> Result<(), E>,
     mut attempt: impl FnMut() -> Fut,
 ) -> Result<T, RetryError<E>>
@@ -1183,7 +1185,7 @@ mod tests {
         let mut outcomes = outcomes.into_iter();
         let mut checks = 0;
         let result = retrying(
-            Retrying::new(policy),
+            &mut Retrying::new(policy),
             || {
                 checks += 1;
                 Ok(())
@@ -1293,7 +1295,7 @@ mod tests {
     async fn test_retrying_ends_with_the_error_of_the_check_before_a_retry() {
         let mut attempts = 0;
         let result: Result<(), _> = retrying(
-            Retrying::new(&quick_policy(5)),
+            &mut Retrying::new(&quick_policy(5)),
             || Err("closed"),
             || {
                 attempts += 1;
@@ -1367,7 +1369,7 @@ mod tests {
         let result: Result<(), RetryError<&'static str>> =
             with_wait_watch(std::sync::Arc::new(|| Watch::Abort), || {
                 block_on(retrying(
-                    Retrying::new(&slow_policy()).ending_with_abort(),
+                    &mut Retrying::new(&slow_policy()).ending_with_abort(),
                     || panic!("no check before a retry that is not made"),
                     || {
                         attempts += 1;
@@ -1377,6 +1379,58 @@ mod tests {
             });
         assert!(matches!(result, Err(RetryError::WaitAborted)), "{result:?}");
         assert_eq!(attempts, 1);
+    }
+
+    #[test]
+    fn test_an_interrupt_ends_the_backoff_of_an_abortable_wait_as_the_first_signal_does() {
+        // The release of `stop()` backs off inside `block_on_abortable`, which an interrupt of
+        // the execution in flight leaves running. The first interrupt ends the backoff at once,
+        // as PySpark's sleep raises KeyboardInterrupt, and a future without backoffs is not ended
+        // by it. The wait runs on a thread of its own, so that a backoff that is not ended fails
+        // the test at its timeout rather than after the whole minute.
+        use crate::runtime::{block_on_abortable, with_wait_watch, Watch};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let first = std::sync::Arc::new(AtomicBool::new(true));
+            let watch: std::sync::Arc<crate::runtime::WaitWatch> = std::sync::Arc::new(move || {
+                if first.swap(false, Ordering::SeqCst) {
+                    Watch::Interrupt(Box::pin(async {}))
+                } else {
+                    Watch::Continue
+                }
+            });
+            let ended = with_wait_watch(watch, || {
+                block_on_abortable(async {
+                    let mut retrying = Retrying::new(&slow_policy()).ending_with_abort();
+                    retrying.backoff(&tonic::Status::unavailable("down")).await
+                })
+            });
+            let _ = sender.send(ended);
+        });
+        let ended = receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the interrupt did not end the backoff");
+        assert_eq!(ended, Some(Backoff::Aborted));
+
+        // A future that waits without backoffs is given its output after the interrupt.
+        let watch: std::sync::Arc<crate::runtime::WaitWatch> = std::sync::Arc::new({
+            let first = AtomicBool::new(true);
+            move || {
+                if first.swap(false, Ordering::SeqCst) {
+                    Watch::Interrupt(Box::pin(async {}))
+                } else {
+                    Watch::Continue
+                }
+            }
+        });
+        let kept = with_wait_watch(watch, || {
+            block_on_abortable(async {
+                tokio::time::sleep(crate::runtime::POLL_INTERVAL * 2).await;
+                5
+            })
+        });
+        assert_eq!(kept, Some(5));
     }
 
     #[test]

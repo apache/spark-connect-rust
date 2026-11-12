@@ -1314,13 +1314,24 @@ impl SparkConnectClient {
     /// Mirrors `pyspark.sql.connect.client.retries.Retrying` / `RetryPolicy`: retry
     /// `UNAVAILABLE` (and cursor-disconnect) per the policy, sleeping the computed
     /// backoff between attempts, then surface the last error.
-    async fn with_retry<T, Fut, F>(&self, mut op: F) -> Result<T>
+    async fn with_retry<T, Fut, F>(&self, op: F) -> Result<T>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = std::result::Result<T, tonic::Status>>,
+    {
+        let mut retries = Retrying::new(&self.retry_policy).ending_with_abort();
+        self.with_retry_in(&mut retries, op).await
+    }
+
+    /// As [`Self::with_retry`], whose attempts are those of `retries`, which the caller keeps
+    /// for the wait that follows the call (see [`ReattachableResponseStream`]).
+    async fn with_retry_in<T, Fut, F>(&self, retries: &mut Retrying, mut op: F) -> Result<T>
     where
         F: FnMut() -> Fut,
         Fut: std::future::Future<Output = std::result::Result<T, tonic::Status>>,
     {
         use futures::FutureExt;
-        self.with_attempts(|| {
+        self.with_attempts_in(retries, || {
             // An attempt that is not answered ends with the signal that a wait of the caller
             // takes, as PySpark's blocked call does. A combinator rather than an async block that
             // awaits the call: such a block keeps the future of the call twice, as what it
@@ -1346,7 +1357,20 @@ impl SparkConnectClient {
     where
         Fut: std::future::Future<Output = std::result::Result<T, RetryError<SparkError>>>,
     {
-        let retries = Retrying::new(&self.retry_policy).ending_with_abort();
+        let mut retries = Retrying::new(&self.retry_policy).ending_with_abort();
+        self.with_attempts_in(&mut retries, attempt).await
+    }
+
+    /// As [`Self::with_attempts`], whose attempts are those of `retries` (see
+    /// [`Self::with_retry_in`]).
+    async fn with_attempts_in<T, Fut>(
+        &self,
+        retries: &mut Retrying,
+        attempt: impl FnMut() -> Fut,
+    ) -> Result<T>
+    where
+        Fut: std::future::Future<Output = std::result::Result<T, RetryError<SparkError>>>,
+    {
         // As the reference's `_stub`, through which each attempt goes: once the client is closed
         // (its session stopped while the call waited), the retry raises NO_ACTIVE_SESSION and
         // sends nothing.
@@ -1398,10 +1422,13 @@ impl SparkConnectClient {
         );
         let deadline = self.rpc_deadlines.reattachable_execute_plan;
         let mut stream_deadline = None;
+        // The attempts of the first RPC are those of the first response too, as the reference's
+        // first `_has_next` retries both (see `first_response_retries`).
+        let mut first_response_retries = Retrying::new(&self.retry_policy).ending_with_abort();
         let stream = {
             // The first RPC is a wait of the caller for the execution.
             let _waiting = inflight.waiting();
-            self.with_retry(|| {
+            self.with_retry_in(&mut first_response_retries, || {
                 let request = clone_on_grown_stack(iter.request());
                 let mut req = with_deadline(Request::new(request), deadline);
                 self._attach_metadata(&mut req);
@@ -1432,6 +1459,7 @@ impl SparkConnectClient {
         Ok(ReattachableResponseStream {
             client: self.clone(),
             retry_policy,
+            first_response_retries: Some(first_response_retries),
             iter,
             stream,
             stream_deadline,
@@ -2335,6 +2363,11 @@ pub struct ReattachableResponseStream {
     /// The client that started the execution, whose stub, headers and session it uses.
     client: SparkConnectClient,
     retry_policy: RetryPolicy,
+    /// The retries of the first wait for a response, which carry on the attempts of the first RPC
+    /// that started the execution: as the reference's first `_has_next` retries the initial
+    /// ExecutePlan together with the reads of its first response, the policy's attempts are shared
+    /// by both. Taken by that wait; the later waits have their own.
+    first_response_retries: Option<Retrying>,
     iter: ExecutePlanResponseReattachableIterator,
     /// The stream of the execution, or none to reattach before reading.
     stream: Option<Streaming<ExecutePlanResponse>>,
@@ -2387,7 +2420,7 @@ impl SparkConnectClient {
             // As the reference's, which goes through the stub of its iterator rather than the
             // `_stub` of the client: a release is retried whether or not the client was closed.
             let whatever_the_client = || Ok::<(), std::convert::Infallible>(());
-            let released = retrying(Retrying::new(&policy), whatever_the_client, || {
+            let released = retrying(&mut Retrying::new(&policy), whatever_the_client, || {
                 let mut req = Request::new(request.clone());
                 *req.metadata_mut() = metadata.clone();
                 let mut stub = stub.clone();
@@ -2451,7 +2484,10 @@ impl ReattachableResponseStream {
         // policy's elapsed time, starts at the first deadline that passes, the deadline of the
         // initial ExecutePlan included, and the reattaches after a deadline or an unknown
         // execution are its retries.
-        let mut retrying = Retrying::new(&self.retry_policy).ending_with_abort();
+        let mut retrying = match self.first_response_retries.take() {
+            Some(retries) => retries,
+            None => Retrying::new(&self.retry_policy).ending_with_abort(),
+        };
         if self.stream.is_none() && !retrying.retry_at_once() {
             // The initial ExecutePlan passed its deadline, a RetryException that fails at once
             // when the bound of the retries has passed, as it has when the bound is 0.
@@ -3165,6 +3201,176 @@ mod tests {
                 client.metadata
             );
         }
+    }
+
+    /// A loopback service of ExecutePlan and ReattachExecute only. Its first `execute_failures`
+    /// ExecutePlan calls answer UNAVAILABLE; a later one opens a stream whose first response is
+    /// UNAVAILABLE, and every ReattachExecute answers UNAVAILABLE. The calls of each are counted.
+    struct FirstResponseCalls {
+        execute_plan: std::sync::atomic::AtomicUsize,
+        reattach: std::sync::atomic::AtomicUsize,
+        execute_failures: usize,
+    }
+
+    #[derive(Clone)]
+    struct FirstResponseService(std::sync::Arc<FirstResponseCalls>);
+
+    impl tonic::server::NamedService for FirstResponseService {
+        const NAME: &'static str = "spark.connect.SparkConnectService";
+    }
+
+    impl tonic::codegen::Service<tonic::codegen::http::Request<tonic::body::Body>>
+        for FirstResponseService
+    {
+        type Response = tonic::codegen::http::Response<tonic::body::Body>;
+        type Error = std::convert::Infallible;
+        type Future = tonic::codegen::BoxFuture<Self::Response, Self::Error>;
+
+        fn poll_ready(
+            &mut self,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::result::Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn call(
+            &mut self,
+            request: tonic::codegen::http::Request<tonic::body::Body>,
+        ) -> Self::Future {
+            let state = self.0.clone();
+            Box::pin(async move {
+                // Each method has a codec of its own, for the message it decodes.
+                match request.uri().path() {
+                    "/spark.connect.SparkConnectService/ExecutePlan" => {
+                        let mut grpc = tonic::server::Grpc::new(tonic_prost::ProstCodec::default());
+                        Ok(grpc.server_streaming(ExecutePlanRpc(state), request).await)
+                    }
+                    "/spark.connect.SparkConnectService/ReattachExecute" => {
+                        let mut grpc = tonic::server::Grpc::new(tonic_prost::ProstCodec::default());
+                        Ok(grpc
+                            .server_streaming(ReattachExecuteRpc(state), request)
+                            .await)
+                    }
+                    _ => Ok(tonic::codegen::http::Response::builder()
+                        .status(200)
+                        .header("grpc-status", "12")
+                        .header("content-type", "application/grpc")
+                        .body(tonic::body::Body::empty())
+                        .unwrap()),
+                }
+            })
+        }
+    }
+
+    struct ExecutePlanRpc(std::sync::Arc<FirstResponseCalls>);
+
+    impl tonic::server::ServerStreamingService<ExecutePlanRequest> for ExecutePlanRpc {
+        type Response = spark_connect_proto::ExecutePlanResponse;
+        type ResponseStream = futures::stream::Iter<
+            std::vec::IntoIter<std::result::Result<Self::Response, tonic::Status>>,
+        >;
+        type Future =
+            tonic::codegen::BoxFuture<tonic::Response<Self::ResponseStream>, tonic::Status>;
+
+        fn call(&mut self, _request: tonic::Request<ExecutePlanRequest>) -> Self::Future {
+            let state = self.0.clone();
+            Box::pin(async move {
+                let call = state
+                    .execute_plan
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if call < state.execute_failures {
+                    return Err(tonic::Status::unavailable("the server is restarting"));
+                }
+                let lost = tonic::Status::unavailable("the first response is lost");
+                Ok(tonic::Response::new(futures::stream::iter(vec![Err(lost)])))
+            })
+        }
+    }
+
+    struct ReattachExecuteRpc(std::sync::Arc<FirstResponseCalls>);
+
+    impl tonic::server::ServerStreamingService<spark_connect_proto::ReattachExecuteRequest>
+        for ReattachExecuteRpc
+    {
+        type Response = spark_connect_proto::ExecutePlanResponse;
+        type ResponseStream = futures::stream::Iter<
+            std::vec::IntoIter<std::result::Result<Self::Response, tonic::Status>>,
+        >;
+        type Future =
+            tonic::codegen::BoxFuture<tonic::Response<Self::ResponseStream>, tonic::Status>;
+
+        fn call(
+            &mut self,
+            _request: tonic::Request<spark_connect_proto::ReattachExecuteRequest>,
+        ) -> Self::Future {
+            let state = self.0.clone();
+            Box::pin(async move {
+                state
+                    .reattach
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Err(tonic::Status::unavailable("the server is restarting"))
+            })
+        }
+    }
+
+    /// The first response of an execution shares the attempts of its first RPC, as the reference's
+    /// first `_has_next` does: an ExecutePlan that is unavailable twice, then opens a stream whose
+    /// first response is unavailable, and a ReattachExecute that is unavailable, make four calls
+    /// under the three retries of the policy. Each of the two waits having its own budget would
+    /// make six.
+    #[tokio::test]
+    async fn the_first_response_shares_the_attempts_of_the_first_rpc_as_pyspark() {
+        let calls = std::sync::Arc::new(FirstResponseCalls {
+            execute_plan: std::sync::atomic::AtomicUsize::new(0),
+            reattach: std::sync::atomic::AtomicUsize::new(0),
+            execute_failures: 2,
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let incoming = futures::stream::unfold(listener, |listener| async {
+            Some((listener.accept().await.map(|(socket, _)| socket), listener))
+        });
+        let service = FirstResponseService(calls.clone());
+        let server = tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(service)
+                .serve_with_incoming(incoming)
+                .await
+                .unwrap();
+        });
+        // `connect` reads the token of the environment too, so none is set until it returns:
+        // another test may set one, which would make the channel TLS.
+        let env = crate::channel::set_env(&[("SPARK_CONNECT_AUTHENTICATE_TOKEN", None)]);
+        let builder = ChannelBuilder::parse(&format!("sc://127.0.0.1:{}", address.port())).unwrap();
+        let mut client = SparkConnectClient::connect(&builder).await.unwrap();
+        drop(env);
+        client.set_retry_policy(RetryPolicy {
+            max_retries: Some(3),
+            initial_backoff_ms: 1,
+            max_backoff_ms: Some(2),
+            ..RetryPolicy::default()
+        });
+
+        let mut stream = client
+            .execute_plan_reattachable(ExecutePlanRequest {
+                session_id: client.session_id().to_string(),
+                plan: Some(Plan {
+                    op_type: Some(PlanOpType::Root(Default::default())),
+                }),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let failed = stream.message().await;
+        server.abort();
+        failed.expect_err("the first response is unavailable and the retries are spent");
+        let execute_plan = calls.execute_plan.load(std::sync::atomic::Ordering::SeqCst);
+        let reattach = calls.reattach.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            (execute_plan, reattach),
+            (3, 1),
+            "the first response retried outside the budget of the first RPC"
+        );
     }
 
     /// A loopback service of ReleaseSession only: its first `unavailable` calls answer

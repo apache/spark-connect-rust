@@ -173,7 +173,11 @@ where
     let f = Box::pin(f);
     let watch = WAIT_WATCH.with(|watch| watch.borrow().clone());
     let drive = |f: Pin<Box<F>>| match watch {
-        Some(watch) => get_runtime().block_on(watched_abortable(f, watch)),
+        Some(watch) => {
+            let (abort, receiver) = tokio::sync::watch::channel(0_u8);
+            let _scope = AbortScope::enter(receiver);
+            get_runtime().block_on(watched_abortable(f, watch, abort))
+        }
         None => Some(get_runtime().block_on(f)),
     };
     match tokio::runtime::Handle::try_current() {
@@ -188,10 +192,15 @@ where
 
 /// `f`, polled as it is, and `watch` called every [`POLL_INTERVAL`]: `None` at once when it
 /// returns [`Watch::Abort`], else the output of `f`. The first interrupt that `watch` returns is
-/// spawned and awaited with `f`, as in [`watched`]. The polls go on after it, so that a second
-/// signal ends the wait even while the interrupt hangs, and the running interrupt is cancelled
-/// with the wait.
-async fn watched_abortable<F: Future>(f: F, watch: Arc<WaitWatch>) -> Option<F::Output> {
+/// spawned and awaited with `f`, as in [`watched`], and the wait reaches [`ABORT_RETRIES`], which
+/// ends the backoffs of `f` (see [`until_abort`]), as PySpark's retry sleeps raise
+/// KeyboardInterrupt at the first signal. The polls go on after it, so that a second signal ends
+/// the wait even while the interrupt hangs, and the running interrupt is cancelled with the wait.
+async fn watched_abortable<F: Future>(
+    f: F,
+    watch: Arc<WaitWatch>,
+    abort: tokio::sync::watch::Sender<u8>,
+) -> Option<F::Output> {
     tokio::pin!(f);
     let mut ticks = tokio::time::interval(POLL_INTERVAL);
     let mut interrupt: Option<tokio::task::JoinHandle<()>> = None;
@@ -223,6 +232,7 @@ async fn watched_abortable<F: Future>(f: F, watch: Arc<WaitWatch>) -> Option<F::
                     return None;
                 }
                 Watch::Interrupt(sent) => {
+                    abort.send_replace(ABORT_RETRIES);
                     if interrupt.is_none() {
                         interrupt = Some(tokio::spawn(sent));
                     }
