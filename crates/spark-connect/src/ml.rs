@@ -2566,9 +2566,11 @@ impl Model for RandomForestClassificationModel {
 
 /// Decision tree regression using Spark's JVM implementation and ML vector features.
 ///
-/// Supports continuous numeric labels. Unset parameters use Spark's defaults. Without a
-/// seed, tie-breaking uses Spark's default seed (the hash of the class name), as with
-/// PySpark, so fits are reproducible either way; set a seed to change tie-breaking.
+/// Supports continuous numeric labels. Unset parameters use Spark's defaults. A single tree
+/// samples its rows to find split candidates only when there are more than
+/// max(maxBins^2, 10000) rows; the seed picks that sample, or else Spark's default seed (the
+/// hash of the class name), as with PySpark, so fits are reproducible either way. Equal-gain
+/// splits are chosen deterministically, so the seed does not break ties.
 #[derive(Debug, Clone)]
 pub struct DecisionTreeRegressor {
     operator: MlOperator,
@@ -2658,7 +2660,7 @@ impl DecisionTreeRegressor {
         self
     }
 
-    /// Random seed for breaking ties between equally good splits.
+    /// Random seed for sampling the rows that find the split candidates, on large inputs.
     pub fn set_seed(mut self, value: i64) -> Self {
         self.params = self.params.set_param_int_narrow("seed", value);
         self
