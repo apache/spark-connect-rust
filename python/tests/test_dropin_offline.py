@@ -22440,6 +22440,32 @@ def test_reader_and_writer_check_their_arguments_as_pyspark(mock_connect):
         read(None).columns
         assert _sent_data_source_paths(service.analyze_requests[-1]) == []
 
+
+def test_jdbc_properties_are_keywords_as_pyspark(mock_connect):
+    # As PySpark's jdbc of the reader and the writer, which pass the properties as
+    # `options(**properties)`: a key that is not a str raises the TypeError of the unpacking
+    # before any property is set, with the format (and the options of a column, the mode) already
+    # set, where a key went through str() as another option name before.
+    spark, service = mock_connect
+    df = spark.range(1)
+    sent = len(service.execute_requests), len(service.analyze_requests)
+    for key in (1, b"user", None):
+        reader = spark.read
+        with pytest.raises(TypeError) as error:
+            reader.jdbc("jdbc:x", "t", properties={"user": "u", key: "v"})
+        assert type(error.value) is TypeError and str(error.value) == "keywords must be strings"
+        assert reader._format == "jdbc" and reader._options == {}
+        reader = spark.read
+        with pytest.raises(TypeError, match="^keywords must be strings$"):
+            reader.jdbc("jdbc:x", "t", column="c", lowerBound=1, upperBound=2, numPartitions=3,
+                        properties={key: "v"})
+        assert reader._options == {
+            "partitionColumn": "c", "lowerBound": "1", "upperBound": "2", "numPartitions": "3"}
+        with pytest.raises(TypeError, match="^keywords must be strings$"):
+            df.write.jdbc("jdbc:x", "t", mode="append", properties={key: "v"})
+    assert (len(service.execute_requests), len(service.analyze_requests)) == sent
+
+
 def test_reader_paths_are_checked_as_pyspark(offline_spark):
     from pyspark.errors import PySparkTypeError
 
