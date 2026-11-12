@@ -213,6 +213,30 @@ transformed DataFrames retain the cached server model until their last owner dro
 Tree inspection, feature importances, single-vector prediction and persistence are
 not exposed by this native addition.
 
+## Native GBTClassifier
+
+`spark_connect::ml::GBTClassifier` fits Spark's JVM gradient-boosted binary
+classifier through Connect with ML vector features and labels 0 or 1. Rust builder
+setters/getters cover all 22 PySpark constructor parameters, plus probability/raw
+prediction column names and class thresholds. Unset parameters use Spark's defaults.
+A seed controls split-candidate row sampling, subsampling and feature sampling.
+
+The Python binding is available as `pyspark.ml.connect.classification.GBTClassifier`
+and `pyspark.ml.connect.GBTClassifier`. Its keyword-only constructor mirrors PySpark.
+Probability/raw prediction column names and thresholds are set through
+`setProbabilityCol`, `setRawPredictionCol` and `setThresholds`. `validationTol` is a
+constructor argument; PySpark does not provide a Python setter for it.
+
+`maxIter` limits boosting iterations, and `stepSize` scales each tree after the
+first. With `validationIndicatorCol`, false rows train the trees and true rows
+validate early stopping; the resulting ensemble can contain fewer than `maxIter`
+trees. DataFrame transforms expose predictions, probabilities, raw margins and an
+optional vector of leaf IDs, one per fitted tree. Instance weights are supported.
+Models, clones and lazy transformed DataFrames retain the cached model in its
+fitting session until the last owner is dropped. Multiclass training, model
+inspection, per-iteration evaluation, single-vector prediction and persistence
+are outside this native addition.
+
 ## Native DecisionTreeRegressor
 
 `spark_connect::ml::DecisionTreeRegressor` fits Spark's JVM decision tree
