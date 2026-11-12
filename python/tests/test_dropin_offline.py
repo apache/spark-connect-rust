@@ -7,6 +7,7 @@ that require a live server live in test_dropin_e2e.py and are gated on SPARK_REM
 """
 
 import array
+import collections
 import contextlib
 import datetime
 import decimal
@@ -7690,7 +7691,8 @@ def test_variant_and_spatial_values_are_sent_and_collected_by_their_attributes_a
 
 def test_freed_instances_release_their_dict_as_pyspark(mock_connect):
     # As PySpark's classes, plain Python classes, whose instance __dict__ CPython releases with
-    # the instance: an attribute is set, read, listed by vars() and dir() and deleted; one that
+    # the instance: an attribute is set, read, listed by dir() and deleted, and vars() of a Column
+    # here holds the attributes set and nothing else (PySpark's also holds _expr); one that
     # shadows a method, as monkeypatching sets it, is called in its place until it is deleted;
     # and a freed instance releases its dict, which keeps its items while it is referenced. Of
     # a class, of one that extends it in Rust (ArrayType) and of a Python subclass (a UDT), whose
@@ -15812,6 +15814,38 @@ def test_an_array_of_no_converter_takes_the_values_that_pyarrow_takes_as_pyspark
     relation = _sent_relation(service.analyze_requests[-1], 11)
     table = pa.ipc.open_stream(relation[1][0]).read_all()
     assert table.column(0).to_pylist() == [[0, 1], [1, 2], [2], [3]]
+
+
+class _DictSub(dict):
+    pass
+
+
+class _FrozenSub(frozenset):
+    pass
+
+
+@pytest.mark.parametrize("value, type_name", [
+    (_DictSub({1: 2}), "_DictSub"),
+    (collections.Counter(), "Counter"),
+    (_FrozenSub([1]), "_FrozenSub"),
+    (collections.OrderedDict(), "collections.OrderedDict"),
+    ({}, "dict"),
+])
+def test_pyarrow_names_a_type_by_its_tp_name_in_its_errors(mock_connect, value, type_name):
+    # As PyArrow's errors, which name the type of a value by its tp_name: the bare name of a class
+    # defined in Python, and the module with the name of a builtin or C type, as OrderedDict.
+    import pyarrow as pa
+
+    spark, _ = mock_connect
+    with pytest.raises(pa.ArrowTypeError) as e:
+        spark.createDataFrame([(value,)], "a array<int>")
+    assert str(e.value) == (
+        f"Could not convert {value!r} with type {type_name}: was not a sequence or recognized "
+        "null for conversion to list type"
+    )
+    with pytest.raises(pa.ArrowTypeError,
+                       match=f"^Expected bytes, got a '{re.escape(type_name)}' object$"):
+        spark.createDataFrame([(T.VariantVal(b"\x0c\x01", value),)], "v variant")
 
 
 def test_an_array_of_no_converter_reads_a_sequence_by_its_length_and_items_as_pyarrow(
