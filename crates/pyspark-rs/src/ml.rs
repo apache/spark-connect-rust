@@ -16,8 +16,8 @@ use pyo3::types::{PyDict, PyTuple, PyType};
 use pyo3::PyClass;
 use spark_connect::ml::{
     BinaryClassificationEvaluator, CrossValidator, DecisionTreeClassifier, DecisionTreeRegressor,
-    Estimator, Evaluator, GBTClassifier, KMeans, LinearRegression, LinearSVC, LogisticRegression,
-    MaxAbsScaler, Model, MulticlassClassificationEvaluator, Params, Pipeline,
+    Estimator, Evaluator, GBTClassifier, GBTRegressor, KMeans, LinearRegression, LinearSVC,
+    LogisticRegression, MaxAbsScaler, Model, MulticlassClassificationEvaluator, Params, Pipeline,
     RandomForestClassifier, RandomForestRegressor, RegressionEvaluator, StandardScaler,
     StringIndexer, Transformer, VectorAssembler,
 };
@@ -1684,6 +1684,231 @@ impl PyRandomForestClassifier {
     }
 }
 
+/// Gradient-boosted regressor fitted and cached by Spark Connect.
+#[pyclass(name = "GBTRegressor", module = "pyspark.ml.connect.regression")]
+pub struct PyGBTRegressor {
+    inner: GBTRegressor,
+    unsendable: Vec<&'static str>,
+}
+
+const GBT_REGRESSOR_PARAMS: &[(&str, Kind)] = &[
+    ("featuresCol", Kind::Str),
+    ("labelCol", Kind::Str),
+    ("predictionCol", Kind::Str),
+    ("maxDepth", Kind::Int),
+    ("maxBins", Kind::Int),
+    ("minInstancesPerNode", Kind::Int),
+    ("minInfoGain", Kind::Float),
+    ("maxMemoryInMB", Kind::Int),
+    ("cacheNodeIds", Kind::Bool),
+    ("subsamplingRate", Kind::Float),
+    ("checkpointInterval", Kind::Int),
+    ("lossType", Kind::Str),
+    ("maxIter", Kind::Int),
+    ("stepSize", Kind::Float),
+    ("seed", Kind::Int),
+    ("impurity", Kind::Str),
+    ("featureSubsetStrategy", Kind::Str),
+    ("validationTol", Kind::Float),
+    ("validationIndicatorCol", Kind::Str),
+    ("leafCol", Kind::Str),
+    ("minWeightFractionPerNode", Kind::Float),
+    ("weightCol", Kind::Str),
+];
+
+#[pymethods]
+impl PyGBTRegressor {
+    #[new]
+    #[pyo3(signature = (*args, **kwargs), text_signature = "(*, featuresCol='features', labelCol='label', predictionCol='prediction', maxDepth=5, maxBins=32, minInstancesPerNode=1, minInfoGain=0.0, maxMemoryInMB=256, cacheNodeIds=False, subsamplingRate=1.0, checkpointInterval=10, lossType='squared', maxIter=20, stepSize=0.1, seed=None, impurity='variance', featureSubsetStrategy='all', validationTol=0.1, validationIndicatorCol=None, leafCol='', minWeightFractionPerNode=0.0, weightCol=None)")]
+    fn new(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
+        let mut this = Self {
+            inner: GBTRegressor::new(),
+            unsendable: Vec::new(),
+        };
+        init_params(
+            &mut this,
+            "GBTRegressor",
+            &[],
+            GBT_REGRESSOR_PARAMS,
+            args,
+            kwargs,
+        )?;
+        Ok(this)
+    }
+
+    #[pyo3(name = "setFeaturesCol")]
+    fn set_feature_col<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "featuresCol", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setLabelCol")]
+    fn set_label_col<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "labelCol", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setPredictionCol")]
+    fn set_prediction_col<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "predictionCol", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setMaxDepth")]
+    fn set_max_depth<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "maxDepth", Kind::Int, value)
+    }
+
+    #[pyo3(name = "setMaxBins")]
+    fn set_max_bins<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "maxBins", Kind::Int, value)
+    }
+
+    #[pyo3(name = "setMinInstancesPerNode")]
+    fn set_min_instances_per_node<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "minInstancesPerNode", Kind::Int, value)
+    }
+
+    #[pyo3(name = "setMinInfoGain")]
+    fn set_min_info_gain<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "minInfoGain", Kind::Float, value)
+    }
+
+    #[pyo3(name = "setMaxMemoryInMB")]
+    fn set_max_memory_in_mb<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "maxMemoryInMB", Kind::Int, value)
+    }
+
+    #[pyo3(name = "setCacheNodeIds")]
+    fn set_cache_node_ids<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "cacheNodeIds", Kind::Bool, value)
+    }
+
+    #[pyo3(name = "setCheckpointInterval")]
+    fn set_checkpoint_interval<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "checkpointInterval", Kind::Int, value)
+    }
+
+    #[pyo3(name = "setImpurity")]
+    fn set_impurity<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "impurity", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setFeatureSubsetStrategy")]
+    fn set_feature_subset_strategy<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "featureSubsetStrategy", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setSeed")]
+    fn set_seed<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "seed", Kind::Int, value)
+    }
+
+    #[pyo3(name = "setSubsamplingRate")]
+    fn set_subsampling_rate<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "subsamplingRate", Kind::Float, value)
+    }
+
+    #[pyo3(name = "setLeafCol")]
+    fn set_leaf_col<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "leafCol", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setMinWeightFractionPerNode")]
+    fn set_min_weight_fraction_per_node<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "minWeightFractionPerNode", Kind::Float, value)
+    }
+
+    #[pyo3(name = "setWeightCol")]
+    fn set_weight_col<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "weightCol", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setLossType")]
+    fn set_loss_type<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "lossType", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setMaxIter")]
+    fn set_max_iter<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "maxIter", Kind::Int, value)
+    }
+
+    #[pyo3(name = "setStepSize")]
+    fn set_step_size<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "stepSize", Kind::Float, value)
+    }
+
+    #[pyo3(name = "setValidationIndicatorCol")]
+    fn set_validation_indicator_col<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "validationIndicatorCol", Kind::Str, value)
+    }
+
+    fn fit(slf: &Bound<'_, Self>, df: &PyDataFrame) -> PyResult<PyMLModel> {
+        fit_native(slf, df)
+    }
+}
+
 /// Decision tree regressor fitted and cached by Spark Connect.
 #[pyclass(
     name = "DecisionTreeRegressor",
@@ -2542,6 +2767,7 @@ native!(
     PyLinearRegression => LinearRegression,
     PyDecisionTreeClassifier => DecisionTreeClassifier,
     PyGBTClassifier => GBTClassifier,
+    PyGBTRegressor => GBTRegressor,
     PyRandomForestClassifier => RandomForestClassifier,
     PyDecisionTreeRegressor => DecisionTreeRegressor,
     PyRandomForestRegressor => RandomForestRegressor,

@@ -223,6 +223,30 @@ transformed DataFrames retain the cached server model until their last owner dro
 Tree inspection, feature importances, single-vector prediction and persistence are
 not exposed by this native addition.
 
+## Native GBTRegressor
+
+`spark_connect::ml::GBTRegressor` fits Spark's JVM gradient-boosted regressor
+through Connect with ML vector features and continuous numeric labels. Rust
+setters/getters cover all 22 PySpark constructor parameters. It supports squared
+and absolute loss, instance weights, row/feature sampling, learning rate,
+iteration limits and validation-set early stopping.
+
+The Python binding is available as `pyspark.ml.connect.regression.GBTRegressor`
+and `pyspark.ml.connect.GBTRegressor`. Its keyword-only signature and 21 named
+setters match PySpark. `validationTol` has no Python setter. The reference's
+signature advertises `validationTol=0.1`, but omitting it leaves the parameter
+unset and uses Spark's `0.01` default. This binding preserves that behavior;
+`GBTRegressor(validationTol=0.1)` explicitly sends `0.1`. The Rust getter returns
+`0.01` when unset.
+
+`maxIter` limits boosting iterations, and `stepSize` scales each tree after the
+first. With `validationIndicatorCol`, false rows train and true rows validate;
+early stopping can fit fewer trees. DataFrame transforms expose predictions and
+an optional vector of leaf IDs, one per fitted tree. Models, clones and lazy
+transformed DataFrames retain the cached model in its fitting session until the
+last owner is dropped. Tree inspection, per-iteration evaluation, single-vector
+prediction and persistence are outside this native addition.
+
 ## Native GBTClassifier
 
 `spark_connect::ml::GBTClassifier` fits Spark's JVM gradient-boosted binary

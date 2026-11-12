@@ -248,6 +248,7 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ml::PyLinearRegression>()?;
     m.add_class::<ml::PyDecisionTreeClassifier>()?;
     m.add_class::<ml::PyGBTClassifier>()?;
+    m.add_class::<ml::PyGBTRegressor>()?;
     m.add_class::<ml::PyRandomForestClassifier>()?;
     m.add_class::<ml::PyDecisionTreeRegressor>()?;
     m.add_class::<ml::PyRandomForestRegressor>()?;

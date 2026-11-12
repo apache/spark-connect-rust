@@ -362,6 +362,14 @@ _NATIVE_PARAMS = {
         seed="int", leafCol="str", minWeightFractionPerNode="float",
         weightCol="str", thresholds="float_list",
     ),
+    "GBTRegressor": dict(
+        featuresCol="str", labelCol="str", predictionCol="str",
+         maxDepth="int", maxBins="int", minInstancesPerNode="int",
+        minInfoGain="float", maxMemoryInMB="int", cacheNodeIds="bool",
+        checkpointInterval="int", impurity="str", featureSubsetStrategy="str",
+        seed="int", subsamplingRate="float", leafCol="str", minWeightFractionPerNode="float",
+        lossType="str", maxIter="int", stepSize="float", validationIndicatorCol="str", weightCol="str",
+    ),
     "GBTClassifier": dict(
         featuresCol="str", labelCol="str", predictionCol="str",
          maxDepth="int", maxBins="int", minInstancesPerNode="int",
@@ -2599,6 +2607,99 @@ def test_decision_tree_regressor_native_parameters_match_official_fixture(ml_moc
         operator, params = _native_request(spark, service, estimator, models)
         assert operator.name == "org.apache.spark.ml.regression.DecisionTreeRegressor"
         assert params == pb2.MlParams.FromString(base64.b64decode(case["params_b64"]))
+
+
+@pytest.mark.parametrize("use_setters", [False, True], ids=["constructor", "setters"])
+def test_gbt_regressor_native_parameters_match_official_fixture(ml_mock, use_setters):
+    import base64
+    import inspect
+    import json
+    from pathlib import Path
+
+    import pyspark._pyspark as native
+    from pyspark.ml.connect import GBTRegressor as exported
+    from pyspark.ml.connect.regression import GBTRegressor
+
+    assert exported is GBTRegressor is native.GBTRegressor
+    defaults = dict(
+        featuresCol="features",
+        labelCol="label",
+        predictionCol="prediction",
+        maxDepth=5,
+        maxBins=32,
+        minInstancesPerNode=1,
+        minInfoGain=0.0,
+        maxMemoryInMB=256,
+        cacheNodeIds=False,
+        subsamplingRate=1.0,
+        checkpointInterval=10,
+        lossType="squared",
+        maxIter=20,
+        stepSize=0.1,
+        seed=None,
+        impurity="variance",
+        featureSubsetStrategy="all",
+        validationTol=0.1,
+        validationIndicatorCol=None,
+        leafCol="",
+        minWeightFractionPerNode=0.0,
+        weightCol=None,
+    )
+    signature = inspect.signature(GBTRegressor)
+    assert list(signature.parameters) == list(defaults)
+    for name, default in defaults.items():
+        assert signature.parameters[name].kind == inspect.Parameter.KEYWORD_ONLY
+        assert signature.parameters[name].default == default
+    assert not hasattr(GBTRegressor(), "setValidationTol")
+    fixture = json.loads(
+        (Path(__file__).resolve().parents[2] / "tests/golden/gbt_regressor.json").read_text()
+    )
+    assert fixture["omitted_validation_tol"] == 0.01
+    assert fixture["explicit_validation_tol"] == 0.1
+    spark, service = ml_mock
+    models = []
+    assert _native_sent(spark, service, GBTRegressor(), models) == {}
+    assert _native_sent(spark, service, GBTRegressor(validationTol=0.1), models) == {
+        "validationTol": ("double", fixture["explicit_validation_tol"])
+    }
+    for case in fixture["cases"]:
+        values = dict(
+            featuresCol="input",
+            labelCol="target",
+            predictionCol="value",
+            maxDepth=3,
+            maxBins=16,
+            minInstancesPerNode=2,
+            minInfoGain=0.01,
+            maxMemoryInMB=64,
+            cacheNodeIds=True,
+            subsamplingRate=0.75,
+            checkpointInterval=-1,
+            lossType="absolute",
+            maxIter=4,
+            stepSize=0.2,
+            seed=case["seed"],
+            impurity="variance",
+            featureSubsetStrategy="all",
+            validationIndicatorCol="validation",
+            leafCol="leaves",
+            minWeightFractionPerNode=0.1,
+            weightCol="weight",
+        )
+        if use_setters:
+            estimator = GBTRegressor(validationTol=0.05)
+            for name, value in values.items():
+                assert getattr(estimator, "set" + name[0].upper() + name[1:])(value) is estimator
+        else:
+            estimator = GBTRegressor(**values, validationTol=0.05)
+        operator, params = _native_request(spark, service, estimator, models)
+        assert operator.name == "org.apache.spark.ml.regression.GBTRegressor"
+        assert params == pb2.MlParams.FromString(base64.b64decode(case["params_b64"]))
+    for value in [np.float64(0.05), 1, None]:
+        sent = _native_sent(spark, service, GBTRegressor(validationTol=value), models)
+        assert sent["validationTol"][0] == ("null" if value is None else "double")
+    with pytest.raises(TypeError, match="Invalid param value"):
+        GBTRegressor(validationTol="invalid")
 
 
 @pytest.mark.parametrize("use_setters", [False, True], ids=["constructor", "setters"])

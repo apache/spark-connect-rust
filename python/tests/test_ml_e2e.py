@@ -245,6 +245,7 @@ def _native_estimators():
         DecisionTreeClassifier,
         DecisionTreeRegressor,
         GBTClassifier,
+        GBTRegressor,
         KMeans,
         LinearRegression,
         LinearSVC,
@@ -258,6 +259,7 @@ def _native_estimators():
 
     ml = "org.apache.spark.ml."
     return [
+        (GBTRegressor(maxIter=2), ml + "regression.GBTRegressionModel"),
         (GBTClassifier(maxIter=2), ml + "classification.GBTClassificationModel"),
         (DecisionTreeRegressor(), ml + "regression.DecisionTreeRegressionModel"),
         (DecisionTreeClassifier(), ml + "classification.DecisionTreeClassificationModel"),
