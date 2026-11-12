@@ -17,8 +17,8 @@ use pyo3::PyClass;
 use spark_connect::ml::{
     BinaryClassificationEvaluator, CrossValidator, DecisionTreeClassifier, DecisionTreeRegressor,
     Estimator, Evaluator, GBTClassifier, GBTRegressor, KMeans, LinearRegression, LinearSVC,
-    LogisticRegression, MaxAbsScaler, Model, MulticlassClassificationEvaluator, Params, Pipeline,
-    RandomForestClassifier, RandomForestRegressor, RegressionEvaluator, StandardScaler,
+    LogisticRegression, MaxAbsScaler, Model, MulticlassClassificationEvaluator, NaiveBayes, Params,
+    Pipeline, RandomForestClassifier, RandomForestRegressor, RegressionEvaluator, StandardScaler,
     StringIndexer, Transformer, VectorAssembler,
 };
 use spark_connect::DataFrame;
@@ -1184,6 +1184,122 @@ impl PyDecisionTreeClassifier {
         value: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, Self>> {
         set_param(slf, "thresholds", Kind::FloatList, value)
+    }
+
+    fn fit(slf: &Bound<'_, Self>, df: &PyDataFrame) -> PyResult<PyMLModel> {
+        fit_native(slf, df)
+    }
+}
+
+/// Naive Bayes classifier fitted and cached by Spark Connect.
+#[pyclass(name = "NaiveBayes", module = "pyspark.ml.connect.classification")]
+pub struct PyNaiveBayes {
+    inner: NaiveBayes,
+    unsendable: Vec<&'static str>,
+}
+
+const NAIVE_BAYES_PARAMS: &[(&str, Kind)] = &[
+    ("featuresCol", Kind::Str),
+    ("labelCol", Kind::Str),
+    ("predictionCol", Kind::Str),
+    ("probabilityCol", Kind::Str),
+    ("rawPredictionCol", Kind::Str),
+    ("smoothing", Kind::Float),
+    ("modelType", Kind::Str),
+    ("thresholds", Kind::FloatList),
+    ("weightCol", Kind::Str),
+];
+
+#[pymethods]
+impl PyNaiveBayes {
+    #[new]
+    #[pyo3(signature = (*args, **kwargs), text_signature = "(*, featuresCol='features', labelCol='label', predictionCol='prediction', probabilityCol='probability', rawPredictionCol='rawPrediction', smoothing=1.0, modelType='multinomial', thresholds=None, weightCol=None)")]
+    fn new(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
+        let mut this = Self {
+            inner: NaiveBayes::new(),
+            unsendable: Vec::new(),
+        };
+        init_params(
+            &mut this,
+            "NaiveBayes",
+            &[],
+            NAIVE_BAYES_PARAMS,
+            args,
+            kwargs,
+        )?;
+        Ok(this)
+    }
+
+    #[pyo3(name = "setFeaturesCol")]
+    fn set_feature_col<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "featuresCol", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setLabelCol")]
+    fn set_label_col<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "labelCol", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setPredictionCol")]
+    fn set_prediction_col<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "predictionCol", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setProbabilityCol")]
+    fn set_probability_col<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "probabilityCol", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setRawPredictionCol")]
+    fn set_raw_prediction_col<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "rawPredictionCol", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setSmoothing")]
+    fn set_smoothing<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "smoothing", Kind::Float, value)
+    }
+
+    #[pyo3(name = "setModelType")]
+    fn set_model_type<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "modelType", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setThresholds")]
+    fn set_thresholds<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "thresholds", Kind::FloatList, value)
+    }
+
+    #[pyo3(name = "setWeightCol")]
+    fn set_weight_col<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "weightCol", Kind::Str, value)
     }
 
     fn fit(slf: &Bound<'_, Self>, df: &PyDataFrame) -> PyResult<PyMLModel> {
@@ -2766,6 +2882,7 @@ native!(
     PyLinearSVC => LinearSVC,
     PyLinearRegression => LinearRegression,
     PyDecisionTreeClassifier => DecisionTreeClassifier,
+    PyNaiveBayes => NaiveBayes,
     PyGBTClassifier => GBTClassifier,
     PyGBTRegressor => GBTRegressor,
     PyRandomForestClassifier => RandomForestClassifier,

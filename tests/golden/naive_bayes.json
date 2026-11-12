@@ -1,0 +1,21 @@
+{
+  "source": "apache/spark v4.3.0 pyspark.ml.classification.NaiveBayes",
+  "cases": [
+    {
+      "model_type": "multinomial",
+      "params_b64": "ChYKC2ZlYXR1cmVzQ29sEgdqBWlucHV0ChQKCGxhYmVsQ29sEghqBnRhcmdldAoaCgltb2RlbFR5cGUSDWoLbXVsdGlub21pYWwKGAoNcHJlZGljdGlvbkNvbBIHagVjbGFzcwoZCg5wcm9iYWJpbGl0eUNvbBIHagVwcm9icwocChByYXdQcmVkaWN0aW9uQ29sEghqBnNjb3JlcwoWCglzbW9vdGhpbmcSCVkAAAAAAADQPwo2Cgp0aHJlc2hvbGRzEiiyASUKAkoAEglZAAAAAAAA0D8SCVkAAAAAAADgPxIJWQAAAAAAAPA/ChUKCXdlaWdodENvbBIIagZ3ZWlnaHQ="
+    },
+    {
+      "model_type": "bernoulli",
+      "params_b64": "ChYKC2ZlYXR1cmVzQ29sEgdqBWlucHV0ChQKCGxhYmVsQ29sEghqBnRhcmdldAoYCgltb2RlbFR5cGUSC2oJYmVybm91bGxpChgKDXByZWRpY3Rpb25Db2wSB2oFY2xhc3MKGQoOcHJvYmFiaWxpdHlDb2wSB2oFcHJvYnMKHAoQcmF3UHJlZGljdGlvbkNvbBIIagZzY29yZXMKFgoJc21vb3RoaW5nEglZAAAAAAAA0D8KNgoKdGhyZXNob2xkcxIosgElCgJKABIJWQAAAAAAANA/EglZAAAAAAAA4D8SCVkAAAAAAADwPwoVCgl3ZWlnaHRDb2wSCGoGd2VpZ2h0"
+    },
+    {
+      "model_type": "complement",
+      "params_b64": "ChYKC2ZlYXR1cmVzQ29sEgdqBWlucHV0ChQKCGxhYmVsQ29sEghqBnRhcmdldAoZCgltb2RlbFR5cGUSDGoKY29tcGxlbWVudAoYCg1wcmVkaWN0aW9uQ29sEgdqBWNsYXNzChkKDnByb2JhYmlsaXR5Q29sEgdqBXByb2JzChwKEHJhd1ByZWRpY3Rpb25Db2wSCGoGc2NvcmVzChYKCXNtb290aGluZxIJWQAAAAAAANA/CjYKCnRocmVzaG9sZHMSKLIBJQoCSgASCVkAAAAAAADQPxIJWQAAAAAAAOA/EglZAAAAAAAA8D8KFQoJd2VpZ2h0Q29sEghqBndlaWdodA=="
+    },
+    {
+      "model_type": "gaussian",
+      "params_b64": "ChYKC2ZlYXR1cmVzQ29sEgdqBWlucHV0ChQKCGxhYmVsQ29sEghqBnRhcmdldAoXCgltb2RlbFR5cGUSCmoIZ2F1c3NpYW4KGAoNcHJlZGljdGlvbkNvbBIHagVjbGFzcwoZCg5wcm9iYWJpbGl0eUNvbBIHagVwcm9icwocChByYXdQcmVkaWN0aW9uQ29sEghqBnNjb3JlcwoWCglzbW9vdGhpbmcSCVkAAAAAAADQPwo2Cgp0aHJlc2hvbGRzEiiyASUKAkoAEglZAAAAAAAA0D8SCVkAAAAAAADgPxIJWQAAAAAAAPA/ChUKCXdlaWdodENvbBIIagZ3ZWlnaHQ="
+    }
+  ]
+}

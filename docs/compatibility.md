@@ -483,3 +483,30 @@ protobuf and prost stop at 100 nested messages. Its Rust client enables prost's
 decodes server responses deeper than 100 nested messages, such as the schema of a struct nested
 34 levels deep, which PySpark's client rejects with "Exception deserializing response!". The
 server is trusted, as SECURITY.md sets out, so this is not a bound on the responses.
+
+## Native NaiveBayes
+
+The Rust `ml::NaiveBayes` and `ml::NaiveBayesModel` train and predict through Spark
+Connect's cached-model protocol. The Rust-backed Python API exports `NaiveBayes`
+from `pyspark.ml.connect` and `pyspark.ml.connect.classification`; `fit` returns the
+shared native `MLModel`, whose `transform` produces DataFrame predictions.
+
+All nine PySpark constructor parameters and named setters are supported:
+`featuresCol`, `labelCol`, `predictionCol`, `probabilityCol`, `rawPredictionCol`,
+`smoothing`, `modelType`, `thresholds` and `weightCol`. Rust exposes corresponding
+builder setters and getters. Unset parameters are omitted so the server uses its
+defaults. The Python constructor is keyword-only and converts values with
+PySpark's parameter converters.
+
+All four model types are covered by live tests: `multinomial`, `bernoulli`,
+`complement` and `gaussian`. Multinomial/complement inputs must be nonnegative;
+Bernoulli inputs must be binary; Gaussian inputs may contain continuous negative
+values. Tests also cover multiclass dense/sparse inputs, probability/raw score
+columns, smoothing and instance weights, threshold decisions, suppressed vector
+outputs, independent fits, session isolation and lazy model lifetime. A golden
+fixture captures all nine parameters for each model type from official PySpark.
+
+This native surface covers construction, parameter setters, fit and DataFrame
+transform. Model coefficient/statistic inspection, single-vector prediction and
+persistence are outside this surface. The vendored `pyspark.ml.classification`
+API continues to use its existing implementation.

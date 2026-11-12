@@ -4,7 +4,8 @@ from pyspark._pyspark import (
     GBTClassifier,
     LinearSVC,
     LogisticRegression,
+    NaiveBayes,
     RandomForestClassifier,
 )
 
-__all__ = ["GBTClassifier", "DecisionTreeClassifier", "LinearSVC", "LogisticRegression", "RandomForestClassifier"]
+__all__ = ["NaiveBayes", "GBTClassifier", "DecisionTreeClassifier", "LinearSVC", "LogisticRegression", "RandomForestClassifier"]
