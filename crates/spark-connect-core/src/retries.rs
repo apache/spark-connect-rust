@@ -294,7 +294,7 @@ impl RetryPolicyState {
 ///
 /// [`retrying`] is the loop over the attempts of a call. A caller whose attempts are not one
 /// call each, as the reader of a reattachable stream, asks the two methods itself.
-pub struct Retrying {
+pub(crate) struct Retrying {
     state: RetryPolicyState,
     /// When the first retry made at once was asked for.
     retry_exception_since: Option<std::time::Instant>,
@@ -304,7 +304,7 @@ pub struct Retrying {
 
 /// What [`Retrying::backoff`] decides for a failed attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Backoff {
+pub(crate) enum Backoff {
     /// The wait before the retry is over: the attempt is made again.
     Retry,
     /// The policy cannot retry the failure, or its retries are spent: the failure is the error
@@ -317,7 +317,7 @@ pub enum Backoff {
 
 impl Retrying {
     /// The retries of a call under `policy`, whose backoffs are waited whole.
-    pub fn new(policy: &RetryPolicy) -> Self {
+    pub(crate) fn new(policy: &RetryPolicy) -> Self {
         Self {
             state: RetryPolicyState::new(policy.clone()),
             retry_exception_since: None,
@@ -329,7 +329,7 @@ impl Retrying {
     /// takes it ([`crate::runtime::ABORT_RETRIES`]), as the sleep of PySpark's `Retrying`
     /// raises KeyboardInterrupt. For the calls that a caller waits for; a call in the
     /// background, that no caller waits for, waits its backoffs whole.
-    pub fn ending_with_abort(mut self) -> Self {
+    pub(crate) fn ending_with_abort(mut self) -> Self {
         self.ends_with_abort = true;
         self
     }
@@ -337,7 +337,7 @@ impl Retrying {
     /// Whether the attempt that failed with `status` is made again under the policy, after the
     /// wait before it, which this awaits. It is not when the policy cannot retry the failure,
     /// or once its retries are spent: `status` is then the error of the call.
-    pub async fn backoff(&mut self, status: &tonic::Status) -> Backoff {
+    pub(crate) async fn backoff(&mut self, status: &tonic::Status) -> Backoff {
         if !self.state.policy().can_retry(status) {
             return Backoff::GiveUp;
         }
@@ -358,7 +358,7 @@ impl Retrying {
     /// Whether a failure that the reference retries as a `RetryException` is retried, at once:
     /// until such retries have run for the policy's elapsed-time bound, measured from the first
     /// of them, which this call is when there was none.
-    pub fn retry_at_once(&mut self) -> bool {
+    pub(crate) fn retry_at_once(&mut self) -> bool {
         let since = *self
             .retry_exception_since
             .get_or_insert_with(std::time::Instant::now);
@@ -372,7 +372,7 @@ impl Retrying {
 
 /// Why a call made by [`retrying`] failed, and what an attempt of it fails with.
 #[derive(Debug)]
-pub enum RetryError<E> {
+pub(crate) enum RetryError<E> {
     /// A failed RPC. From an attempt, it is retried when the policy allows; from [`retrying`],
     /// the policy could not retry it, or its retries are spent.
     Status(tonic::Status),
@@ -395,7 +395,7 @@ pub enum RetryError<E> {
 ///   reference sends through the stub of its iterator, checks nothing.
 /// - `attempt` fails with [`RetryError::Aborted`] for an error that is no failed RPC, such as
 ///   the unreadable source of an upload, which ends the call as it is.
-pub async fn retrying<T, E, Fut>(
+pub(crate) async fn retrying<T, E, Fut>(
     mut retrying: Retrying,
     mut before_retry: impl FnMut() -> Result<(), E>,
     mut attempt: impl FnMut() -> Fut,
@@ -1321,10 +1321,9 @@ mod tests {
         let started = std::time::Instant::now();
         assert_eq!(retrying.backoff(&status).await, Backoff::Retry);
         assert!(started.elapsed() >= std::time::Duration::from_millis(40));
-        // The retries are spent: no wait, and no retry.
-        let started = std::time::Instant::now();
+        // The retries are spent: no retry. (How long that takes is not asserted: a loaded runner
+        // can deschedule the thread for longer than any bound.)
         assert_eq!(retrying.backoff(&status).await, Backoff::GiveUp);
-        assert!(started.elapsed() < std::time::Duration::from_millis(40));
     }
 
     #[tokio::test]

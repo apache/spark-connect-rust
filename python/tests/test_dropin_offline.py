@@ -18951,6 +18951,31 @@ def test_sigint_while_an_unavailable_execute_is_retried_raises_keyboard_interrup
     assert time.monotonic() - started < 3
 
 
+def test_sigint_while_an_artifact_upload_is_unanswered_raises_keyboard_interrupt(
+    mock_connect, tmp_path
+):
+    # As PySpark's: the call of an upload that the server accepts and does not answer waits in
+    # grpc's blocking call, which the signal interrupts, so KeyboardInterrupt is raised at once.
+    import signal
+    import threading
+
+    spark, service = mock_connect
+    note = tmp_path / "note.txt"
+    note.write_bytes(b"x")
+    service.block_add_artifacts = True
+    timer = threading.Timer(0.5, os.kill, (os.getpid(), signal.SIGINT))
+    started = time.monotonic()
+    timer.start()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            spark.addArtifacts(str(note), file=True)
+    finally:
+        timer.cancel()
+        service.block_add_artifacts = False
+        service.release_add_artifacts()
+    assert time.monotonic() - started < 3
+
+
 def test_second_sigint_ends_the_wait_for_an_interrupt_that_is_retried(mock_connect):
     # As PySpark's: the first signal interrupts the operation, and the interrupt call is retried
     # while the server is unavailable, so the call waits for it; a second signal raises
