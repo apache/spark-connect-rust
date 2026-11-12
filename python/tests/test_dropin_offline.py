@@ -842,6 +842,57 @@ def test_storage_level():
     assert StorageLevel.DISK_ONLY != StorageLevel.MEMORY_ONLY
 
 
+def test_storage_levels_keep_their_values_as_pyspark():
+    # As PySpark's StorageLevel, a plain Python class: its constructor keeps the values as they
+    # are, unchecked, in attributes that may be set; repr shows the str() of each, str the names
+    # of the flags that are true, and == compares the values with those of another
+    # StorageLevel, and is False of anything else; it is unhashable, a subclass may override
+    # __init__, and an instance pickles and copies by its attributes. The class shows the
+    # signature of its __init__.
+    import copy
+    import inspect
+
+    from pyspark.storagelevel import StorageLevel
+
+    level = StorageLevel(1.5, "x", None, 0, 2**40)
+    assert vars(level) == {"useDisk": 1.5, "useMemory": "x", "useOffHeap": None,
+                           "deserialized": 0, "replication": 2**40}
+    assert repr(level) == "StorageLevel(1.5, x, None, 0, 1099511627776)"
+    assert str(level) == "Disk Memory Serialized 1099511627776x Replicated"
+    level.useMemory, level.replication = 0, "2"
+    assert (repr(level), str(level)) == ("StorageLevel(1.5, 0, None, 0, 2)",
+                                         "Disk Serialized 2x Replicated")
+    assert StorageLevel(useDisk=1, useMemory=0, useOffHeap=0, deserialized=0).replication == 1
+    assert StorageLevel(1, 0, 0, 0) == StorageLevel.DISK_ONLY
+    assert StorageLevel(1, 0, 0, 0, 2.0) == StorageLevel.DISK_ONLY_2
+    assert StorageLevel(1, 0, 0, 0, 3) != StorageLevel.DISK_ONLY_2
+    assert (StorageLevel.DISK_ONLY == (True, False, False, False, 1)) is False
+    assert StorageLevel.DISK_ONLY != 1
+    assert StorageLevel.OFF_HEAP is StorageLevel.OFF_HEAP
+    assert repr(StorageLevel.MEMORY_AND_DISK_DESER) == "StorageLevel(True, True, False, True, 1)"
+    assert str(StorageLevel.OFF_HEAP) == "Disk Memory OffHeap Serialized 1x Replicated"
+    with pytest.raises(TypeError, match="unhashable type"):
+        hash(StorageLevel.DISK_ONLY)
+    with pytest.raises(TypeError, match=r"__init__\(\) missing 1 required positional argument: "
+                                        r"'deserialized'$"):
+        StorageLevel(True, True, True)
+    parameters = inspect.signature(StorageLevel).parameters
+    assert list(parameters) == ["useDisk", "useMemory", "useOffHeap", "deserialized",
+                                "replication"]
+    assert parameters["replication"].default == 1
+
+    class Replicated(StorageLevel):
+        def __init__(self, replication):
+            super().__init__(True, False, False, False, replication)
+
+    assert Replicated(2) == StorageLevel.DISK_ONLY_2 and isinstance(Replicated(2), StorageLevel)
+    for copied in (pickle.loads(pickle.dumps(level)), copy.copy(level), copy.deepcopy(level)):
+        assert type(copied) is StorageLevel and copied is not level
+        assert vars(copied) == vars(level)
+    copied = copy.copy(Replicated(3))
+    assert type(copied) is Replicated and copied == StorageLevel.DISK_ONLY_3
+
+
 def test_dataframe_plot_is_the_plot_accessor_of_pyspark():
     # As PySpark's DataFrame.plot: the PySparkPlotAccessor of pyspark.sql.plot, of the
     # DataFrame itself.
@@ -914,6 +965,69 @@ def test_persist_cache_and_unpersist_return_the_dataframe_itself_as_pyspark(mock
     assert df.cache() is df
     assert df.unpersist() is df
     assert df.unpersist(blocking=True) is df
+
+
+def test_storage_levels_are_converted_as_pyspark(mock_connect):
+    # As PySpark's storage_level_to_proto, of persist, localCheckpoint and cacheTable: it asserts
+    # a StorageLevel, a bare AssertionError of anything else, reads its attributes, and passes
+    # them to pb2.StorageLevel(...), whose default (upb) backend converts them in their order:
+    # None is unset, a flag is the truth of an int, of a NumPy bool too, and the int32
+    # replication refuses a bool and an int beyond its range, before any request. cacheTable
+    # converts a storage level that is true, so another false value is unset, as None is.
+    from pyspark.storagelevel import StorageLevel
+
+    spark, service = mock_connect
+    df = spark.range(1)
+
+    def sent_level():
+        # AnalyzePlanRequest.persist=14 -> Persist.storage_level=2: use_disk=1, use_memory=2,
+        # use_off_heap=3, deserialized=4 and replication=5, where false and 0 are not sent.
+        persist = parse_message(parse_message(service.analyze_requests[-1])[14][0])
+        return parse_message(persist[2][0])
+
+    df.persist(StorageLevel(2, np.int64(1), None, np.bool_(False), np.int32(3)))
+    assert sent_level() == {1: [1], 2: [1], 5: [3]}
+    df.persist(StorageLevel(-1, 0, 2**62, True, None))
+    assert sent_level() == {1: [1], 3: [1], 4: [1]}
+
+    class Level:
+        useDisk, useMemory, useOffHeap, deserialized, replication = True, False, False, False, 1
+
+    # The attributes are read before any of them is converted.
+    unread = StorageLevel(1.5, True, True, True)
+    del unread.replication
+    boolean = "Field spark.connect.StorageLevel.replication: Expected an int, got a boolean."
+    requests = (len(service.analyze_requests), len(service.execute_requests))
+    for level, error, message in [
+            (Level(), AssertionError, "^$"),
+            ((True, False, False, False, 1), AssertionError, "^$"),
+            (unread, AttributeError, "object has no attribute 'replication'$"),
+            (StorageLevel(1.5, True, True, True), TypeError,
+             "^'float' object cannot be interpreted as an integer$"),
+            (StorageLevel(True, "x", True, True, True), TypeError,
+             "^'str' object cannot be interpreted as an integer$"),
+            (StorageLevel(True, True, 2**63, True), OverflowError,
+             "^Python int too large to convert to C long$"),
+            (StorageLevel(True, True, True, np.array([1])), TypeError,
+             r"^\[1\] has type ndarray, but expected one of: bool$"),
+            (StorageLevel(True, True, None, True, False), TypeError, f"^{re.escape(boolean)}$"),
+            (StorageLevel(True, True, True, True, 2**31), ValueError,
+             "^Value out of range: 2147483648$"),
+            (StorageLevel(True, True, True, True, 1.0), TypeError,
+             "^'float' object cannot be interpreted as an integer$")]:
+        for call in (lambda: df.persist(level),
+                     lambda: df.localCheckpoint(storageLevel=level),
+                     lambda: spark.catalog.cacheTable("t", level)):
+            with pytest.raises(error, match=message) as e:
+                call()
+            assert type(e.value) is error
+    assert (len(service.analyze_requests), len(service.execute_requests)) == requests
+    for level in (None, 0, "", False):
+        spark.catalog.cacheTable("t", level)
+        # Relation.catalog=200 -> Catalog.cache_table=19: table_name=1 and storage_level=2.
+        assert _sent_catalog(service.execute_requests[-1], 19) == {1: [b"t"]}
+    spark.catalog.cacheTable("t", StorageLevel(0, 1, 0, 0))
+    assert parse_message(_sent_catalog(service.execute_requests[-1], 19)[2][0]) == {2: [1], 5: [1]}
 
 
 # --------------------------------------------------------------------------- session builder
@@ -11941,6 +12055,31 @@ def test_seeds_that_pyspark_cannot_send_are_refused_as_pyspark(mock_connect):
     assert df.sampleBy("id", {0: 1.0}, -(2**63)) is not None
 
 
+def test_sample_by_seeds_of_int_subclasses_are_set_as_protobuf_does_as_pyspark(mock_connect):
+    # As PySpark's StatSampleBy, which sets its seed, an int, in the long field of the proto:
+    # protobuf's default (upb) backend takes the int of an int subclass, and the ValueError of
+    # one out of the range of a long shows that int, not the str() of the subclass.
+    spark, service = mock_connect
+    df = spark.range(10)
+
+    class Seed(int):
+        def __str__(self):
+            return "seed"
+
+        __repr__ = __str__
+
+    for call in (df.sampleBy, df.stat.sampleBy):
+        for seed, shown in ((Seed(2**63), "9223372036854775808"),
+                            (Seed(-(2**63) - 1), "-9223372036854775809")):
+            with pytest.raises(ValueError) as error:
+                call("id", {0: 0.5}, seed)
+            assert str(error.value) == f"Value out of range: {shown}"
+    # Relation.sample_by=107 -> StatSampleBy.seed=5.
+    df.sampleBy("id", {0: 1.0}, Seed(5)).collect()
+    plan = parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0]
+    assert parse_message(parse_message(plan)[107][0])[5] == [5]
+
+
 def test_with_metadata_and_pivot_refer_to_their_column_through_the_dataframe_as_pyspark(
         mock_connect):
     # As PySpark's withMetadata (self[columnName]) and pivot (self._df[pivot_col]): the column
@@ -18778,6 +18917,83 @@ def test_window_frames_and_columns_are_checked_as_pyspark():
     assert repr(Window.partitionBy(["a", "b"])) == "WindowSpec(PartitionBy(a, b))"
 
 
+def test_window_frame_bounds_are_compared_asserted_and_converted_as_pyspark():
+    # As PySpark's rowsBetween and rangeBetween: they compare the start and then the end with the
+    # thresholds of their sides, with Python's <= and >=, whose TypeError a type that does not
+    # compare with an int raises; WindowFrame then asserts that the start and then the end that
+    # is not past its threshold is an int, a bare AssertionError of a NumPy int or a Decimal;
+    # and the plan converts the start and then the end, whose errors are raised at the call: 0,
+    # False too, is the current row, a row frame sets an int of an int32 in the integer literal,
+    # and a range frame any other int in the long literal, both of which protobuf's default
+    # (upb) backend refuses of a bool, and the long of an int beyond a long.
+    from pyspark.errors import PySparkValueError
+    from pyspark.sql import Window
+    from pyspark.sql import functions as F
+
+    o = Window.orderBy("id")
+
+    def bounds(spec):
+        frame = F.sum("a").over(spec)._expr.to_plan(None).window.frame_spec
+
+        def bound(boundary):
+            which = boundary.WhichOneof("boundary")
+            if which != "value":
+                return which
+            literal = boundary.value.literal
+            kind = literal.WhichOneof("literal_type")
+            return kind, getattr(literal, kind)
+
+        return bound(frame.lower), bound(frame.upper)
+
+    integer = "Field spark.connect.Expression.Literal.integer: Expected an int, got a boolean."
+    long = "Field spark.connect.Expression.Literal.long: Expected an int, got a boolean."
+    rows = (o.rowsBetween, Window.rowsBetween)
+    ranges = (o.rangeBetween, Window.rangeBetween)
+    for between in rows + ranges:
+        for start, end, message in [
+                ("1", 0, "'<=' not supported between instances of 'str' and 'int'"),
+                (None, "x", "'<=' not supported between instances of 'NoneType' and 'int'"),
+                (2.5, "x", "'>=' not supported between instances of 'str' and 'int'"),
+                (True, [], "'>=' not supported between instances of 'list' and 'int'")]:
+            with pytest.raises(TypeError) as error:
+                between(start, end)
+            assert str(error.value) == message
+        for start, end in [(np.int64(1), 0), (0, np.int64(1)), (decimal.Decimal(1), 0),
+                           (np.bool_(True), 0), (2**64, 1.5)]:
+            with pytest.raises(AssertionError) as error:
+                between(start, end)
+            assert type(error.value) is AssertionError and str(error.value) == ""
+        assert bounds(between(False, False)) == ("current_row", "current_row")
+        # A NumPy int past its threshold is unbounded, as PySpark replaces it by an int.
+        assert bounds(between(np.int64(-2**63), np.int64(2**63 - 1))) == ("unbounded",) * 2
+    for between in rows:
+        assert bounds(between(-5, 2**31 - 1)) == (("integer", -5), ("integer", 2**31 - 1))
+        for start, end in [(True, 0), (0, True), (True, 2**40)]:
+            with pytest.raises(TypeError) as error:
+                between(start, end)
+            assert str(error.value) == integer
+        with pytest.raises(PySparkValueError) as error:
+            between(2**40, True)
+        assert error.value.getMessageParameters()["arg_name"] == "start"
+    for between in ranges:
+        assert bounds(between(-(2**31) - 1, 2**40)) == (("long", -(2**31) - 1), ("long", 2**40))
+        assert bounds(between(Window.unboundedFollowing, Window.unboundedPreceding)) == (
+            ("long", 2**63 - 1), ("long", -(2**63)))
+        for start, end in [(True, 0), (0, True), (2**40, True)]:
+            with pytest.raises(TypeError) as error:
+                between(start, end)
+            assert str(error.value) == long
+        for start, end, shown in [(2**63, 0, "9223372036854775808"),
+                                  (0, -(2**63) - 1, "-9223372036854775809"),
+                                  (2**64, True, "18446744073709551616")]:
+            with pytest.raises(ValueError) as error:
+                between(start, end)
+            assert type(error.value) is ValueError
+            assert str(error.value) == f"Value out of range: {shown}"
+    assert repr(o.rangeBetween(0, Window.unboundedPreceding)) == (
+        "WindowSpec(OrderBy(id ASC NULLS FIRST), WindowFrame(RANGE_FRAME, 0, -9223372036854775808))")
+
+
 def test_expressions_carry_their_origins_as_pyspark():
     # As PySpark's _with_origin: col() and the Column methods give the expressions that they
     # build the origin of their name and their call site in user code, as the python_origin of
@@ -23079,6 +23295,67 @@ def test_writer_bucket_sort_and_cluster_columns_are_checked_as_pyspark(offline_s
     for call in (w.clusterBy, lambda: w.clusterBy([])):
         with pytest.raises(AssertionError, match="clusterBy needs one or more"):
             call()
+
+
+def test_writer_bucket_counts_are_set_at_the_write_as_pyspark(mock_connect):
+    # As PySpark's: bucketBy keeps an int, a bool included, and the WriteOperation of each write
+    # sends the bucketing only of a count above 0, which it sets in the int32 num_buckets after
+    # the input plan, so a bool is the TypeError and an int beyond an int32 the ValueError of
+    # protobuf's default (upb) backend, before the path, the table name and the save mode are
+    # checked, and before any request. The last bucketBy wins.
+    spark, service = mock_connect
+    df = spark.range(3)
+
+    def sent_bucket_by():
+        # ExecutePlanRequest.plan=3, Plan.command=2, Command.write_operation=2, and
+        # WriteOperation.bucket_by=8: bucket_column_names=1 and num_buckets=2.
+        plan = parse_message(parse_message(service.execute_requests[-1])[3][0])
+        write = parse_message(parse_message(plan[2][0])[2][0])
+        return [parse_message(bucket_by) for bucket_by in write.get(8, [])]
+
+    for count in (0, -1, False, -(2**31) - 1, -(2**64)):
+        df.write.bucketBy(count, "id").save("p")
+        assert sent_bucket_by() == []
+    df.write.bucketBy(4, "id").sortBy("id").bucketBy(0, "id").saveAsTable("t")
+    assert sent_bucket_by() == []
+    df.write.bucketBy(True, "id").bucketBy(2**31 - 1, ["id", "x"]).insertInto("t")
+    assert sent_bucket_by() == [{1: [b"id", b"x"], 2: [2**31 - 1]}]
+
+    requests = len(service.execute_requests)
+    refused = [
+        (True, TypeError,
+         "Field spark.connect.WriteOperation.BucketBy.num_buckets: Expected an int, got a boolean."),
+        (2**31, ValueError, "Value out of range: 2147483648"),
+        (2**64, ValueError, "Value out of range: 18446744073709551616"),
+    ]
+    writes = [
+        lambda w: w.save("p"),
+        lambda w: w.save(123),
+        lambda w: w.mode("bad").save("p"),
+        lambda w: w.saveAsTable("t", format="parquet"),
+        lambda w: w.insertInto("t", overwrite=True),
+        lambda w: w.jdbc("jdbc:x", "t"),
+        lambda w: w.parquet(123),
+        lambda w: w.json("p"),
+        lambda w: w.csv("p"),
+        lambda w: w.orc("p"),
+        lambda w: w.text("p"),
+        lambda w: w.xml("p", rowTag="r"),
+    ]
+    for count, error, message in refused:
+        for write in writes:
+            writer = df.write.bucketBy(4, "id").bucketBy(count, "id")
+            # Each write fails again, as PySpark's writer keeps the count.
+            for _ in range(2):
+                with pytest.raises(error) as e:
+                    write(writer)
+                assert type(e.value) is error and str(e.value) == message
+    assert len(service.execute_requests) == requests
+    writer = df.write.bucketBy(True, "id")
+    with pytest.raises(TypeError):
+        writer.save("p")
+    writer.bucketBy(2, "id").save("p")
+    assert sent_bucket_by() == [{1: [b"id"], 2: [2]}]
 
 
 def _sent_catalog(request, field):

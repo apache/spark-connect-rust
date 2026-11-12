@@ -87,76 +87,137 @@ impl PyFrameBound {
 const UNBOUNDED_PRECEDING: i64 = i64::MIN;
 const UNBOUNDED_FOLLOWING: i64 = i64::MAX;
 
-/// Resolve a frame-bound argument, the `start` of a frame if `start`, else its end: a plain
-/// int (negative=preceding/positive=following) or a `FrameBound`. As PySpark's
-/// `rowsBetween` and `rangeBetween`, a start of `-sys.maxsize` or less is unbounded preceding
-/// and an end of `sys.maxsize` or more unbounded following, also of a float, such as
-/// `float("-inf")` and `float("inf")`, while a start of `Window.unboundedFollowing` or an end of
-/// `Window.unboundedPreceding` is a value.
-fn to_frame_bound(v: &Bound<'_, PyAny>, start: bool) -> PyResult<FrameBound> {
-    if let Ok(fb) = v.extract::<PyFrameBound>() {
-        return Ok(fb.bound);
-    }
-    if !v.is_instance_of::<pyo3::types::PyInt>() {
-        if v.is_instance_of::<pyo3::types::PyFloat>() {
-            // As PySpark's: a bound past the threshold of its side is unbounded, and
-            // WindowFrame asserts that another is an int.
-            if start && v.le(-i64::MAX)? {
-                return Ok(FrameBound::UnboundedPreceding);
-            }
-            if !start && v.ge(i64::MAX)? {
-                return Ok(FrameBound::UnboundedFollowing);
-            }
-            return Err(pyo3::exceptions::PyAssertionError::new_err(()));
-        }
-        return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-            "frame bound must be an int or FrameBound",
-        ));
-    }
-    let n: i64 = match v.extract() {
-        Ok(n) => n,
-        // An int beyond a long is past the thresholds of its side, or else out of range.
-        Err(_) if start && v.lt(0)? => return Ok(FrameBound::UnboundedPreceding),
-        Err(_) if !start && v.gt(0)? => return Ok(FrameBound::UnboundedFollowing),
-        Err(err) => return Err(err),
-    };
-    Ok(match n {
-        n if start && n <= -i64::MAX => FrameBound::UnboundedPreceding,
-        n if !start && n == i64::MAX => FrameBound::UnboundedFollowing,
-        0 => FrameBound::CurrentRow,
-        n if n < 0 => FrameBound::Preceding(n.checked_neg().unwrap_or(i64::MAX)),
-        n => FrameBound::Following(n),
-    })
+/// The literal fields of the boundary of a value, which PySpark's `WindowExpression` sets: an
+/// int32 in a row frame, and a long in a range frame.
+const ROW_BOUNDARY_FIELD: &str = "spark.connect.Expression.Literal.integer";
+const RANGE_BOUNDARY_FIELD: &str = "spark.connect.Expression.Literal.long";
+
+/// A frame-bound argument once compared with the threshold of its side: a `FrameBound` as it
+/// is, the unbounded bound of its side past the threshold, or else the value of the argument.
+enum FrameArgument<'a, 'py> {
+    Bound(FrameBound),
+    Value(&'a Bound<'py, PyAny>),
 }
 
-/// The bounds of a row frame, as PySpark's, whose plan raises `VALUE_NOT_BETWEEN` for a
-/// boundary of a value that is not an int.
-fn row_frame_bounds(
+/// The frame-bound argument `v`, the start of a frame if `start`, else its end, compared as
+/// PySpark's `rowsBetween` and `rangeBetween` compare it, with Python's `<=` and `>=`: a start of
+/// `Window._PRECEDING_THRESHOLD` (`-sys.maxsize`) or less is unbounded preceding and an end of
+/// `Window._FOLLOWING_THRESHOLD` (`sys.maxsize`) or more unbounded following, of any type, so
+/// also of a float such as `float("inf")`, and a type that does not compare with an int raises
+/// the `TypeError` of the comparison. A start of `Window.unboundedFollowing` or an end of
+/// `Window.unboundedPreceding` is a value.
+fn compared_frame_argument<'a, 'py>(
+    v: &'a Bound<'py, PyAny>,
+    start: bool,
+) -> PyResult<FrameArgument<'a, 'py>> {
+    if let Ok(fb) = v.extract::<PyFrameBound>() {
+        return Ok(FrameArgument::Bound(fb.bound));
+    }
+    if start && v.le(-i64::MAX)? {
+        return Ok(FrameArgument::Bound(FrameBound::UnboundedPreceding));
+    }
+    if !start && v.ge(i64::MAX)? {
+        return Ok(FrameArgument::Bound(FrameBound::UnboundedFollowing));
+    }
+    Ok(FrameArgument::Value(v))
+}
+
+/// The bound of the offset `n`: a negative one is preceding, and a positive one following. The
+/// offset of `Window.unboundedPreceding`, as the end of a range frame, is a following one, as
+/// the count of the rows that it precedes is beyond a long.
+fn frame_bound_of(n: i64) -> FrameBound {
+    match n {
+        0 => FrameBound::CurrentRow,
+        n if n > 0 => FrameBound::Following(n),
+        n => n
+            .checked_neg()
+            .map_or(FrameBound::Following(n), FrameBound::Preceding),
+    }
+}
+
+/// PySpark's `VALUE_NOT_BETWEEN` of the boundary `name` of a row frame beyond an int32.
+fn boundary_not_between(py: Python<'_>, name: &str) -> PyErr {
+    crate::column::raise_pyspark(
+        py,
+        "PySparkValueError",
+        "VALUE_NOT_BETWEEN",
+        &[
+            ("arg_name", name),
+            ("min", &i32::MIN.to_string()),
+            ("max", &i32::MAX.to_string()),
+        ],
+    )
+}
+
+/// The bound `name` of a frame argument, as the plan of PySpark's `WindowExpression` converts
+/// it, in a row frame if `rows`, else in a range frame: an int of 0 (False too) is the current
+/// row; a row frame sets any other int of an int32 in the int32 literal, which protobuf's default
+/// (upb) backend refuses of a bool, and raises `VALUE_NOT_BETWEEN` of an int beyond an int32;
+/// and a range frame sets it in the long literal, which refuses a bool and an int beyond a long,
+/// as [`crate::stat_arguments::proto_int`] does. A `FrameBound` of a row frame is checked as
+/// such an int.
+fn converted_frame_bound(
+    py: Python<'_>,
+    argument: FrameArgument<'_, '_>,
+    name: &str,
+    rows: bool,
+) -> PyResult<FrameBound> {
+    let value = match argument {
+        FrameArgument::Bound(bound) => {
+            let offset = match &bound {
+                FrameBound::Preceding(n) => Some(n.saturating_neg()),
+                FrameBound::Following(n) => Some(*n),
+                _ => None,
+            };
+            if rows && offset.is_some_and(|n| i32::try_from(n).is_err()) {
+                return Err(boundary_not_between(py, name));
+            }
+            return Ok(bound);
+        }
+        FrameArgument::Value(value) => value,
+    };
+    let long = value.extract::<i64>().ok();
+    if long == Some(0) {
+        return Ok(FrameBound::CurrentRow);
+    }
+    if !rows {
+        return crate::stat_arguments::proto_int::<i64>(value, RANGE_BOUNDARY_FIELD)
+            .map(frame_bound_of);
+    }
+    match long.and_then(|n| i32::try_from(n).ok()) {
+        Some(_) if value.is_instance_of::<pyo3::types::PyBool>() => Err(
+            crate::stat_arguments::bool_not_proto_int(ROW_BOUNDARY_FIELD),
+        ),
+        Some(n) => Ok(frame_bound_of(n.into())),
+        None => Err(boundary_not_between(py, name)),
+    }
+}
+
+/// The bounds of `rowsBetween(start, end)` if `rows`, else of `rangeBetween(start, end)`, a
+/// plain int (negative is preceding, positive following) or a `FrameBound` each, as PySpark's:
+/// it compares the start and then the end with the thresholds of their sides, and WindowFrame
+/// then asserts that the start and then the end that is not past its threshold is an int (a
+/// bool included), a bare `AssertionError` of a NumPy int, a float or a Decimal. The errors of
+/// the plan, which converts the start and then the end, are raised here, after those.
+fn frame_bounds(
     py: Python<'_>,
     start: &Bound<'_, PyAny>,
     end: &Bound<'_, PyAny>,
+    rows: bool,
 ) -> PyResult<(FrameBound, FrameBound)> {
-    let bounds = (to_frame_bound(start, true)?, to_frame_bound(end, false)?);
-    for (name, bound) in [("start", &bounds.0), ("end", &bounds.1)] {
-        let value = match bound {
-            FrameBound::Preceding(n) => n.saturating_neg(),
-            FrameBound::Following(n) => *n,
-            _ => continue,
-        };
-        if i32::try_from(value).is_err() {
-            return Err(crate::column::raise_pyspark(
-                py,
-                "PySparkValueError",
-                "VALUE_NOT_BETWEEN",
-                &[
-                    ("arg_name", name),
-                    ("min", &i32::MIN.to_string()),
-                    ("max", &i32::MAX.to_string()),
-                ],
-            ));
+    let start = compared_frame_argument(start, true)?;
+    let end = compared_frame_argument(end, false)?;
+    for argument in [&start, &end] {
+        if let FrameArgument::Value(value) = argument {
+            if !value.is_instance_of::<pyo3::types::PyInt>() {
+                return Err(pyo3::exceptions::PyAssertionError::new_err(()));
+            }
         }
     }
-    Ok(bounds)
+    Ok((
+        converted_frame_bound(py, start, "start", rows)?,
+        converted_frame_bound(py, end, "end", rows)?,
+    ))
 }
 
 #[pymethods]
@@ -214,7 +275,7 @@ impl PyWindowSpec {
         start: &Bound<'_, PyAny>,
         end: &Bound<'_, PyAny>,
     ) -> PyResult<PyWindowSpec> {
-        let (start, end) = row_frame_bounds(py, start, end)?;
+        let (start, end) = frame_bounds(py, start, end, true)?;
         let new_spec = self.spec.clone().rows_between(start, end);
         Ok(PyWindowSpec::new(new_spec))
     }
@@ -222,13 +283,12 @@ impl PyWindowSpec {
     /// Define a RANGE frame between start and end bounds (ints or FrameBounds).
     fn rangeBetween(
         &self,
+        py: Python<'_>,
         start: &Bound<'_, PyAny>,
         end: &Bound<'_, PyAny>,
     ) -> PyResult<PyWindowSpec> {
-        let new_spec = self
-            .spec
-            .clone()
-            .range_between(to_frame_bound(start, true)?, to_frame_bound(end, false)?);
+        let (start, end) = frame_bounds(py, start, end, false)?;
+        let new_spec = self.spec.clone().range_between(start, end);
         Ok(PyWindowSpec::new(new_spec))
     }
 
@@ -335,7 +395,7 @@ impl PyWindow {
         start: &Bound<'_, PyAny>,
         end: &Bound<'_, PyAny>,
     ) -> PyResult<PyWindowSpec> {
-        let (start, end) = row_frame_bounds(py, start, end)?;
+        let (start, end) = frame_bounds(py, start, end, true)?;
         Ok(PyWindowSpec::new(
             WindowSpec::new().rows_between(start, end),
         ))
@@ -343,10 +403,15 @@ impl PyWindow {
 
     /// Create a WindowSpec with a RANGE frame between the given bounds.
     #[staticmethod]
-    fn rangeBetween(start: &Bound<'_, PyAny>, end: &Bound<'_, PyAny>) -> PyResult<PyWindowSpec> {
-        let spec = WindowSpec::new()
-            .range_between(to_frame_bound(start, true)?, to_frame_bound(end, false)?);
-        Ok(PyWindowSpec::new(spec))
+    fn rangeBetween(
+        py: Python<'_>,
+        start: &Bound<'_, PyAny>,
+        end: &Bound<'_, PyAny>,
+    ) -> PyResult<PyWindowSpec> {
+        let (start, end) = frame_bounds(py, start, end, false)?;
+        Ok(PyWindowSpec::new(
+            WindowSpec::new().range_between(start, end),
+        ))
     }
 
     fn __repr__(&self) -> String {

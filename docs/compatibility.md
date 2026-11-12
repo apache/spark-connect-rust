@@ -158,6 +158,10 @@ two runs, were equal. For reproducible values, use the `_with_seed` variants
 (`rand_with_seed(42)`, `uuid_with_seed(lit(42))`, ...). `random` and
 `random_with_seed` are added as the aliases of `rand` that PySpark has.
 
+`DataFrameWriter::clear_bucket_by` is added: it unsets the bucketing of a writer, so that
+its write sends none, as PySpark's `bucketBy` of a count that is not positive, the last
+`bucketBy` winning. `bucket_by` is unchanged and sends the count it is given.
+
 ## Native LogisticRegression
 
 The native `spark_connect::ml::LogisticRegression` fits Spark's JVM

@@ -1135,33 +1135,36 @@ impl<'a, 'py> FromPyObject<'a, 'py> for ProtoBool {
 }
 
 impl ProtoBool {
-    /// The bool of the argument, false when it is omitted, as protobuf's default (upb) backend
-    /// converts it for a bool field: a NumPy bool by its truth, a NumPy array is protobuf's
-    /// `TypeError`, and any other object is read as a C long, true when it is not 0, which raises
-    /// the `TypeError` of an object that is not an int, and the `OverflowError` of an int that a
-    /// C long cannot hold.
+    /// The bool of the argument, false when it is omitted, as [`proto_bool`] converts it.
     pub(crate) fn value(&self, py: Python<'_>) -> PyResult<bool> {
-        let Some(obj) = &self.0 else {
-            return Ok(false);
-        };
-        let obj = obj.bind(py);
-        let typ = obj.get_type();
-        let module = typ.module().ok();
-        if module.is_some_and(|module| module.to_cow().is_ok_and(|module| module == "numpy")) {
-            let name = typ.name()?;
-            let name = name.to_cow()?;
-            if name == "ndarray" {
-                return Err(pyo3::exceptions::PyTypeError::new_err(format!(
-                    "{} has type ndarray, but expected one of: bool",
-                    obj.str()?
-                )));
-            }
-            if name == "bool" {
-                return obj.is_truthy();
-            }
+        match &self.0 {
+            Some(obj) => proto_bool(obj.bind(py)),
+            None => Ok(false),
         }
-        Ok(obj.extract::<std::os::raw::c_long>()? != 0)
     }
+}
+
+/// The bool of `obj`, as protobuf's default (upb) backend converts it for a bool field: a NumPy
+/// bool by its truth, a NumPy array is protobuf's `TypeError`, and any other object is read as a
+/// C long, true when it is not 0, which raises the `TypeError` of an object that is not an int,
+/// and the `OverflowError` of an int that a C long cannot hold.
+pub(crate) fn proto_bool(obj: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let typ = obj.get_type();
+    let module = typ.module().ok();
+    if module.is_some_and(|module| module.to_cow().is_ok_and(|module| module == "numpy")) {
+        let name = typ.name()?;
+        let name = name.to_cow()?;
+        if name == "ndarray" {
+            return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+                "{} has type ndarray, but expected one of: bool",
+                obj.str()?
+            )));
+        }
+        if name == "bool" {
+            return obj.is_truthy();
+        }
+    }
+    Ok(obj.extract::<std::os::raw::c_long>()? != 0)
 }
 
 /// The command of the function of `foreach` or `foreachBatch`, as PySpark's: of

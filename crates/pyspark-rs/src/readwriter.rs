@@ -156,13 +156,44 @@ pub(crate) fn writer_columns(
         .collect()
 }
 
-/// The number of buckets of `df.write.bucketBy`, an int, as PySpark's.
-pub(crate) fn bucket_count(num_buckets: &Bound<'_, PyAny>) -> PyResult<i32> {
-    if num_buckets.is_instance_of::<pyo3::types::PyInt>() {
-        num_buckets.extract()
-    } else {
-        Err(not_expected_type(num_buckets, "numBuckets", "int"))
+/// The int32 field of the number of buckets, which PySpark sets at the write.
+const BUCKET_COUNT_FIELD: &str = "spark.connect.WriteOperation.BucketBy.num_buckets";
+
+/// The number of buckets of `df.write.bucketBy`, as PySpark's: `bucketBy` checks that it is an
+/// int, a bool included, and keeps it, and the `WriteOperation` of each write sends the bucketing
+/// only of a count above 0, which it then sets in the int32 field.
+pub(crate) enum BucketCount<'py> {
+    /// A count that is not positive: no bucketing is sent.
+    Unsent,
+    /// The count of the buckets.
+    Count(i32),
+    /// A positive count that the int32 field refuses, a bool or an int beyond its range, with
+    /// which each write fails, as [`check_refused_bucket_count`] raises.
+    Refused(Bound<'py, PyAny>),
+}
+
+/// The [`BucketCount`] of `num_buckets`, else `NOT_EXPECTED_TYPE` of an argument that is not an
+/// int, as PySpark's `bucketBy` raises at the call.
+pub(crate) fn bucket_count<'py>(num_buckets: &Bound<'py, PyAny>) -> PyResult<BucketCount<'py>> {
+    if !num_buckets.is_instance_of::<pyo3::types::PyInt>() {
+        return Err(not_expected_type(num_buckets, "numBuckets", "int"));
     }
+    if !num_buckets.gt(0)? {
+        return Ok(BucketCount::Unsent);
+    }
+    Ok(
+        match crate::stat_arguments::proto_int::<i32>(num_buckets, BUCKET_COUNT_FIELD) {
+            Ok(count) => BucketCount::Count(count),
+            Err(_) => BucketCount::Refused(num_buckets.clone()),
+        },
+    )
+}
+
+/// Set a count of [`BucketCount::Refused`] in the int32 field again, as PySpark's
+/// `WriteOperation.command` does at each write, which fails with the error of protobuf's default
+/// (upb) backend: the `TypeError` of a bool and the `ValueError` of an int out of the range.
+pub(crate) fn check_refused_bucket_count(num_buckets: &Bound<'_, PyAny>) -> PyResult<()> {
+    crate::stat_arguments::proto_int::<i32>(num_buckets, BUCKET_COUNT_FIELD).map(|_| ())
 }
 
 /// A reader `schema` as pyspark's `DataFrameReader.schema` and `DataStreamReader.schema`
