@@ -40,15 +40,22 @@ pub fn embed_wasm_udf(src_file: impl AsRef<Path>) -> PathBuf {
 
 /// The WebAssembly target a UDF module is compiled for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum WasmTarget {
     /// `wasm32-unknown-unknown`: the module imports nothing from its host, so
     /// `std::env::var` always fails and `std::time` and `std::fs` are unavailable.
     #[default]
     Unknown,
-    /// `wasm32-wasip1`: the runner gives the module, through WASI, the environment of
-    /// the Python worker that runs it -- the same `os.environ` a Python UDF sees,
-    /// including the session's `spark.pythonWorkerEnv.*` variables -- so `std::env::var`
-    /// reads it. The module gets no files, arguments or standard streams.
+    /// `wasm32-wasip1`: the runner gives the module, through WASI, a snapshot of the
+    /// environment of the Python worker that runs it, taken when the module is
+    /// instantiated: the `os.environ` a Python UDF sees, including the session's
+    /// `spark.pythonWorkerEnv.*` variables, without the names Spark reserves for its
+    /// workers (`SPARK_*`, `PYSPARK_*`, `PYTHON_WORKER_FACTORY_*` and a few others), so
+    /// `std::env::var` reads it.
+    ///
+    /// WASI also gives the module clocks, randomness and sleep, so a UDF that reads the
+    /// time or random numbers should be marked nondeterministic. It gets no files or
+    /// arguments, and what it writes to standard output or error is discarded.
     Wasip1,
 }
 
@@ -61,7 +68,9 @@ impl WasmTarget {
     }
 }
 
-/// [`embed_wasm_udf`] for the target `target`.
+/// Like [`embed_wasm_udf`], but compile `src_file` for `target`: pick
+/// [`WasmTarget::Wasip1`] for UDFs that read environment variables. Emits the same
+/// `WASM_UDFS_MODULE` env var and returns the module path.
 pub fn embed_wasm_udf_for(src_file: impl AsRef<Path>, target: WasmTarget) -> PathBuf {
     let src_file = src_file.as_ref();
     let out_dir = PathBuf::from(env("OUT_DIR"));

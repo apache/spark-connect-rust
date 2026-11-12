@@ -29,4 +29,17 @@ mod fixtures {
     pub fn can_list(path: String) -> bool {
         std::fs::read_dir(path).is_ok()
     }
+
+    /// Returns `s` after writing it to standard output and error, which the runner
+    /// discards.
+    pub fn echo(s: String) -> String {
+        println!("{s}");
+        eprintln!("{s}");
+        s
+    }
+
+    /// Exits the module with `code` instead of returning.
+    pub fn exit_with(code: i32) -> i32 {
+        std::process::exit(code)
+    }
 }

@@ -39,8 +39,9 @@ def load(name):
     return pickle.loads(commands[name])[0]
 "#;
 
-/// Runs `check` in Python with `commands[name]` bound to each UDF's pickled command.
-fn run_python(udfs: &[(&str, UserDefinedFunction)], check: &str) {
+/// Runs `check` in Python with `commands[name]` bound to each UDF's pickled command,
+/// returning what the script wrote to standard output and error.
+fn run_python(udfs: &[(&str, UserDefinedFunction)], check: &str) -> String {
     let mut script = format!("{PRELUDE}\ncommands = {{}}\n");
     for (name, f) in udfs {
         let command = f.to_payload().expect("packer should succeed").command;
@@ -66,6 +67,7 @@ fn run_python(udfs: &[(&str, UserDefinedFunction)], check: &str) {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "{stderr}");
     assert!(!stderr.contains("Exception ignored"), "{stderr}");
+    format!("{}{stderr}", String::from_utf8_lossy(&output.stdout))
 }
 
 fn per_row(f: UserDefinedFunction) -> UserDefinedFunction {
@@ -105,9 +107,115 @@ os.environ["WASI_PROBE"] = "changed"
 assert f("WASI_PROBE") == "from-worker"
 assert load("wasi")("WASI_PROBE") == "changed"
 
-# WASI gives the module the environment and nothing else.
+# The module gets no directory.
 assert load("can_list")("/") is False
 assert load("can_list")(".") is False
+"#,
+    );
+}
+
+#[test]
+#[ignore]
+fn a_wasi_module_gets_neither_spark_variables_nor_ones_wasi_cannot_carry() {
+    run_python(
+        &[("wasi", per_row(wasi::env_var_udf()))],
+        r#"
+SPARK_OWNED = ("SPARK_PROBE", "PYSPARK_PROBE", "PYTHON_WORKER_FACTORY_SECRET",
+               "OMP_NUM_THREADS", "PYTHON_UNIX_DOMAIN_ENABLED")
+for name in SPARK_OWNED:
+    os.environ[name] = "spark-owned"
+os.environ["PYTHONWARNINGS"] = "ignore"
+# Not valid UTF-8: WASI cannot carry it, and it must not stop the module starting.
+os.environb[b"WASI_NOT_UTF8"] = b"\xff"
+os.environ["WASI_OK"] = "ok"
+
+f = load("wasi")
+for name in SPARK_OWNED + ("WASI_NOT_UTF8",):
+    assert f(name) is None, name
+# A name that only resembles Spark's is the session's to set, so it gets through.
+assert f("PYTHONWARNINGS") == "ignore"
+assert f("WASI_OK") == "ok"
+"#,
+    );
+}
+
+#[test]
+#[ignore]
+fn a_wasi_module_writes_nowhere_and_its_exit_is_an_error() {
+    let output = run_python(
+        &[
+            ("echo", per_row(wasi::echo_udf())),
+            ("exit_row", per_row(wasi::exit_with_udf())),
+            ("exit_batch", wasi::exit_with_udf()),
+        ],
+        r#"
+import wasmtime
+
+assert load("echo")("WASI_STDIO_MARKER") == "WASI_STDIO_MARKER"
+
+
+def assert_exits(call, code):
+    try:
+        call()
+    except wasmtime.ExitTrap as e:
+        assert e.code == code, e.code
+    else:
+        raise AssertionError("expected ExitTrap")
+
+
+assert_exits(lambda: load("exit_row")(3), 3)
+
+batch = load("exit_batch")
+assert type(batch).__name__ == "WasmArrowUDF"
+assert_exits(lambda: batch(pa.array([3], pa.int32())), 3)
+# The batch runner drops the instance an exit leaves behind.
+assert batch._rt is None
+"#,
+    );
+    assert!(!output.contains("WASI_STDIO_MARKER"), "{output}");
+}
+
+#[test]
+#[ignore]
+fn instantiate_initializes_a_reactor_and_names_an_import_it_cannot_provide() {
+    run_python(
+        &[("wasi", per_row(wasi::env_var_udf()))],
+        r#"
+import wasmtime
+
+instantiate = type(load("wasi"))._ensure.__globals__["_instantiate"]
+engine = wasmtime.Engine()
+
+
+def instance(wat):
+    store = wasmtime.Store(engine)
+    module = wasmtime.Module(engine, wasmtime.wat2wasm(wat))
+    return store, instantiate(engine, store, module)
+
+
+ENVIRON = '(import "wasi_snapshot_preview1" "environ_sizes_get" ' \
+          '(func (param i32 i32) (result i32)))'
+
+# A reactor's `_initialize` runs before anything else is called.
+store, exports = instance(f"""
+(module {ENVIRON}
+  (memory (export "memory") 1)
+  (global $ready (export "ready") (mut i32) (i32.const 0))
+  (func (export "_initialize") (global.set $ready (i32.const 1))))
+""")
+assert exports["ready"].value(store) == 1
+
+# A module without one is instantiated all the same.
+store, exports = instance(f"(module {ENVIRON} (memory (export \"memory\") 1))")
+assert "memory" in exports
+
+# An import that is neither WASI nor provided fails, naming it.
+try:
+    instance(f'(module {ENVIRON} (import "host" "lookup" (func)))')
+except wasmtime.WasmtimeError as e:
+    assert "lookup" in str(e), str(e)
+else:
+    raise AssertionError("expected WasmtimeError")
 "#,
     );
 }

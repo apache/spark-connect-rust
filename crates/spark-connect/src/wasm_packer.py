@@ -162,24 +162,62 @@ def decode_value(ret_type: str, buf: bytes) -> Any:
 
 # --- instantiation -----------------------------------------------------------
 
+# The names Spark reserves for its own Python workers, which a session cannot set
+# through ``spark.pythonWorkerEnv.*``. Mirrors ``PythonWorkerEnvironment`` in Spark,
+# so a WASI module never receives Spark's own variables, such as the worker's
+# ``PYTHON_WORKER_FACTORY_SECRET``.
+_RESERVED_ENV_PREFIXES = ("SPARK_", "PYSPARK_", "PYTHON_WORKER_FACTORY_")
+_RESERVED_ENV_NAMES = frozenset(
+    {
+        "OMP_NUM_THREADS",
+        "PYTHON_DAEMON_KILL_WORKER_ON_FLUSH_FAILURE",
+        "PYTHON_FAULTHANDLER_DIR",
+        "PYTHON_TRACEBACK_DUMP_INTERVAL_SECONDS",
+        "PYTHON_UNIX_DOMAIN_ENABLED",
+    }
+)
+
+
+def _wasi_env() -> List[Tuple[str, str]]:
+    """The environment a WASI module gets: this worker's ``os.environ`` without the
+    names Spark reserves, and without an entry that is not valid UTF-8, which WASI
+    cannot carry and Rust's ``std::env::var`` would reject anyway."""
+    import os
+
+    def utf8(s: str) -> bool:
+        try:
+            s.encode("utf-8")
+        except UnicodeEncodeError:
+            return False
+        return True
+
+    return [
+        (name, value)
+        for name, value in os.environ.items()
+        if not name.startswith(_RESERVED_ENV_PREFIXES)
+        and name not in _RESERVED_ENV_NAMES
+        and utf8(name)
+        and utf8(value)
+    ]
+
 
 def _instantiate(engine: Any, store: Any, module: Any) -> Any:
     """Instantiate ``module`` in ``store``, returning its exports.
 
     A module that imports nothing (``wasm32-unknown-unknown``) is instantiated as it
     is. A WASI module (``wasm32-wasip1``) gets, as its environment, a snapshot of
-    this worker's ``os.environ`` -- what a Python UDF sees, including the session's
-    ``spark.pythonWorkerEnv.*`` variables -- and no files, arguments or standard
-    streams.
+    this worker's ``os.environ`` taken now -- what a Python UDF sees, including the
+    session's ``spark.pythonWorkerEnv.*`` variables -- without the names Spark
+    reserves (see ``_wasi_env``). WASI also gives it clocks, randomness and sleep;
+    it gets no files or arguments, and what it writes to standard output or error is
+    discarded.
     """
-    import os
-
     import wasmtime
 
     if not any(imp.module.startswith("wasi_") for imp in module.imports):
         return wasmtime.Instance(store, module, []).exports(store)
     config = wasmtime.WasiConfig()
-    config.env = list(os.environ.items())
+    config.env = _wasi_env()
     store.set_wasi(config)
     linker = wasmtime.Linker(engine)
     linker.define_wasi()
