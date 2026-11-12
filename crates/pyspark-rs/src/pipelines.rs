@@ -10,6 +10,7 @@ use pyo3::prelude::*;
 use spark_connect::pipelines::{
     self, OutputSpec, PipelineRunStream, SinkDetailsSpec, TableDetailsSpec,
 };
+use spark_connect::session::SparkSession;
 use spark_connect_proto as proto;
 
 use crate::column::PyColumn;
@@ -284,6 +285,9 @@ pub fn pipeline_define_sql_graph_elements(
 )]
 pub struct PyPipelineRunStream {
     inner: PipelineRunStream,
+    /// The session of the run, whose executions a signal of the process interrupts while the
+    /// next response of the run is waited for.
+    session: SparkSession,
 }
 
 #[pymethods]
@@ -294,9 +298,10 @@ impl PyPipelineRunStream {
 
     fn __next__(&mut self, py: Python<'_>) -> PyResult<Option<(String, i64)>> {
         loop {
-            let resp = py
-                .detach(|| self.inner.next_response().map_err(Box::new))
-                .to_pyerr()?;
+            let resp = crate::interrupt::interruptible_outcome(py, &self.session, || {
+                self.inner.next_response()
+            })?
+            .to_pyerr()?;
             let Some(resp) = resp else {
                 return Ok(None); // stream complete -> StopIteration
             };
@@ -344,5 +349,8 @@ pub fn pipeline_start_run(
         )
         .map_err(Box::new)
     })?;
-    Ok(PyPipelineRunStream { inner })
+    Ok(PyPipelineRunStream {
+        inner,
+        session: sess,
+    })
 }

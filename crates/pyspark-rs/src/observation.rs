@@ -135,9 +135,9 @@ pub(crate) fn observe(
     exprs: Vec<Expression>,
 ) -> PyResult<PyDataFrame> {
     let inner = observation.borrow().inner.clone();
-    let observed = py
-        .detach(|| df.observe_with(&inner, exprs).map_err(Box::new))
-        .to_pyerr()?;
+    let observed = crate::interrupt::interruptible(py, &df.spark_session(), || {
+        df.observe_with(&inner, exprs)
+    })?;
     if let Some(name) = inner.name() {
         let weak = PyWeakrefReference::new(observation)?.unbind();
         let mut sessions = observations().lock().unwrap_or_else(|e| e.into_inner());

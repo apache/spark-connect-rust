@@ -2,8 +2,9 @@
 
 use pyo3::prelude::*;
 use spark_connect::conf::RuntimeConf;
+use spark_connect::session::SparkSession;
 
-use crate::errors::ResultExt;
+use crate::interrupt::interruptible;
 
 /// Python wrapper for the session runtime configuration.
 #[pyclass(
@@ -14,11 +15,17 @@ use crate::errors::ResultExt;
 )]
 pub struct PyRuntimeConf {
     conf: RuntimeConf,
+    /// The session of the configuration, whose executions a signal of the process interrupts
+    /// while a call of the configuration waits for the server.
+    session: SparkSession,
 }
 
 impl PyRuntimeConf {
-    pub fn new(conf: RuntimeConf) -> Self {
-        PyRuntimeConf { conf }
+    pub fn new(session: SparkSession) -> Self {
+        PyRuntimeConf {
+            conf: session.conf(),
+            session,
+        }
     }
 }
 
@@ -94,8 +101,9 @@ pub(crate) fn warn_all(py: Python<'_>, warnings: &[String]) -> PyResult<()> {
 }
 
 // Every method round-trips to the server (`block_on(client.set_config/get_configs)`
-// in the core), so each releases the GIL across the RPC via `py.detach`; otherwise a
-// Python thread stays blocked for the whole call.
+// in the core), so each waits through `interruptible`, which releases the GIL across the
+// RPC and lets a signal end the wait; otherwise a Python thread stays blocked for the
+// whole call.
 #[pymethods]
 impl PyRuntimeConf {
     /// Set a configuration value, as PySpark's: a bool as "true" or "false", an int as its
@@ -103,13 +111,11 @@ impl PyRuntimeConf {
     /// warning of the server.
     fn set(&self, py: Python<'_>, key: &str, value: &Bound<'_, PyAny>) -> PyResult<()> {
         let value = conf_value(value)?;
-        let warnings = py
-            .detach(|| {
-                self.conf
-                    .set_pairs(&[(key, value.as_deref())], None)
-                    .map_err(Box::new)
-            })
-            .to_pyerr()?;
+        let warnings = interruptible(py, &self.session, || {
+            self.conf
+                .set_pairs(&[(key, value.as_deref())], None)
+                .map_err(Box::new)
+        })?;
         warn_all(py, &warnings)
     }
 
@@ -133,25 +139,22 @@ impl PyRuntimeConf {
                 } else {
                     Some(checked_str(default, "default")?)
                 };
-                py.detach(|| {
+                interruptible(py, &self.session, || {
                     self.conf
                         .get_with_default(&key, default.as_deref())
                         .map_err(Box::new)
                 })
-                .to_pyerr()
             }
-            ConfDefault::Omitted => py
-                .detach(|| self.conf.get(&key).map_err(Box::new))
-                .to_pyerr(),
+            ConfDefault::Omitted => {
+                interruptible(py, &self.session, || self.conf.get(&key).map_err(Box::new))
+            }
         }
     }
 
     /// Reset a configuration value to its default. Warns each warning of the server, as
     /// PySpark's.
     fn unset(&self, py: Python<'_>, key: &str) -> PyResult<()> {
-        let warnings = py
-            .detach(|| self.conf.unset(key).map_err(Box::new))
-            .to_pyerr()?;
+        let warnings = interruptible(py, &self.session, || self.conf.unset(key).map_err(Box::new))?;
         warn_all(py, &warnings)
     }
 
@@ -160,11 +163,10 @@ impl PyRuntimeConf {
     /// `SparkConnectClient.get_configs`, which `SparkConnectClient` of the connect import path
     /// gives.
     fn _get_many(&self, py: Python<'_>, keys: Vec<String>) -> PyResult<Vec<Option<String>>> {
-        py.detach(|| {
+        interruptible(py, &self.session, || {
             let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
             self.conf.get_many(&keys).map_err(Box::new)
         })
-        .to_pyerr()
     }
 
     /// The values of the configurations of `pairs` of a key and its default, in one request, as
@@ -174,25 +176,26 @@ impl PyRuntimeConf {
         py: Python<'_>,
         pairs: Vec<(String, Option<String>)>,
     ) -> PyResult<Vec<Option<String>>> {
-        py.detach(|| {
+        interruptible(py, &self.session, || {
             let pairs: Vec<(&str, Option<&str>)> = pairs
                 .iter()
                 .map(|(key, default)| (key.as_str(), default.as_deref()))
                 .collect();
             self.conf.get_with_defaults(&pairs).map_err(Box::new)
         })
-        .to_pyerr()
     }
 
     #[pyo3(name = "isModifiable")]
     fn is_modifiable(&self, py: Python<'_>, key: &str) -> PyResult<bool> {
-        py.detach(|| self.conf.is_modifiable(key)).to_pyerr()
+        interruptible(py, &self.session, || {
+            self.conf.is_modifiable(key).map_err(Box::new)
+        })
     }
 
     /// All configuration values as a dict. Mirrors the `RuntimeConf.getAll` property.
     #[getter(getAll)]
     fn get_all<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
-        let all = py.detach(|| self.conf.get_all()).to_pyerr()?;
+        let all = interruptible(py, &self.session, || self.conf.get_all().map_err(Box::new))?;
         let dict = pyo3::types::PyDict::new(py);
         for (k, v) in all {
             dict.set_item(k, v)?;

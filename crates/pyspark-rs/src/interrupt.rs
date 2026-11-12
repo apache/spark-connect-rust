@@ -24,9 +24,21 @@ struct SignalWatch {
     interrupted: AtomicBool,
     /// The exception of the first handler that raised, which the wait raises once it has ended.
     error: Mutex<Option<PyErr>>,
+    /// The error of the interrupt of the execution, if the server fails it. The wait raises it
+    /// once it has ended, in place of the KeyboardInterrupt of the signal, as PySpark's
+    /// `interrupt_operation` raises out of the `except KeyboardInterrupt` of an execution.
+    interrupt_failure: Arc<Mutex<Option<SparkError>>>,
 }
 
 impl SignalWatch {
+    /// Whether the server has failed the interrupt of the execution.
+    fn interrupt_failure_is_set(&self) -> bool {
+        self.interrupt_failure
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
+    }
+
     fn poll(&self) -> Watch {
         {
             let mut error = self.error.lock().unwrap_or_else(|e| e.into_inner());
@@ -37,6 +49,11 @@ impl SignalWatch {
                     Err(signal) => *error = Some(signal),
                 }
             } else if self.interrupted.load(Ordering::SeqCst) {
+                // A failed interrupt ends the wait at once, as PySpark raises the error of the
+                // interrupt without waiting for the server to end the execution.
+                if self.interrupt_failure_is_set() {
+                    return Watch::Abort;
+                }
                 // After the interrupt, a second signal ends the wait, as PySpark's wait does.
                 return match Python::attach(|py| py.check_signals()) {
                     Ok(()) => Watch::Continue,
@@ -48,9 +65,11 @@ impl SignalWatch {
             Some(operation_id) => {
                 self.interrupted.store(true, Ordering::SeqCst);
                 let session = self.session.clone();
+                let failure = Arc::clone(&self.interrupt_failure);
                 Watch::Interrupt(Box::pin(async move {
-                    // A failed interrupt does not replace the exception of the signal.
-                    let _ = session.interrupt_operation_async(&operation_id).await;
+                    if let Err(error) = session.interrupt_operation_async(&operation_id).await {
+                        *failure.lock().unwrap_or_else(|e| e.into_inner()) = Some(error);
+                    }
                 }))
             }
             // No execution to interrupt: a wait that can end before its future, such as the
@@ -99,6 +118,7 @@ pub(crate) fn interruptible_outcome<T: Send, E: Send + Into<Box<SparkError>>>(
         session: session.clone(),
         interrupted: AtomicBool::new(false),
         error: Mutex::new(None),
+        interrupt_failure: Arc::new(Mutex::new(None)),
     });
     let poll: Arc<WaitWatch> = {
         let watch = Arc::clone(&watch);
@@ -106,6 +126,11 @@ pub(crate) fn interruptible_outcome<T: Send, E: Send + Into<Box<SparkError>>>(
     };
     let output = py.detach(|| with_wait_watch(poll, f));
     let signal = watch.error.lock().unwrap_or_else(|e| e.into_inner()).take();
+    let interrupt_failure = watch
+        .interrupt_failure
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take();
     let output: Result<T, Box<SparkError>> = output.map_err(Into::into);
     match signal {
         Some(error) => {
@@ -120,6 +145,12 @@ pub(crate) fn interruptible_outcome<T: Send, E: Send + Into<Box<SparkError>>>(
                     let _ = done.value(py).setattr("__context__", error.value(py));
                     return Err(done);
                 }
+            }
+            // As PySpark's: the error of the interrupt replaces the KeyboardInterrupt, which
+            // becomes its context, as `interrupt_operation` raises out of the `except` clause.
+            if let Some(failure) = interrupt_failure {
+                let failure = crate::errors::spark_error_to_py_exception(failure);
+                return Err(crate::errors::with_context(py, failure, error));
             }
             Err(error)
         }

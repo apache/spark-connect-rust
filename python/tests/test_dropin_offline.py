@@ -19009,6 +19009,138 @@ def test_sigint_raises_the_done_call_error_of_a_progress_handler_with_the_signal
     assert isinstance(error.value.__context__, KeyboardInterrupt)
 
 
+@pytest.mark.parametrize("server", ["unreachable", "hung"])
+def test_sigint_ends_a_call_that_waits_for_the_server_at_once(server, tmp_path):
+    # As PySpark's: the configuration, schema, artifact, clone and interrupt calls that wait for
+    # the server raise KeyboardInterrupt about a second after the signal, whether no server
+    # answers the address (the retries of the call sleep) or a server accepts the connection and
+    # never answers (the call waits). Each call is made in turn, and each gets its own signal.
+    import subprocess
+    import sys
+
+    artifact = tmp_path / "artifact.txt"
+    artifact.write_text("x")
+    code = """
+import os, signal, socket, sys, threading, time
+from pyspark.sql import SparkSession
+mode, artifact = sys.argv[1], sys.argv[2]
+if mode == "hung":
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    # Listens and never accepts: the connection is made, and the server never answers.
+    listener.listen(16)
+    remote = "sc://127.0.0.1:%d" % listener.getsockname()[1]
+else:
+    remote = "sc://127.0.0.1:1"
+spark = SparkSession.builder.remote(remote).getOrCreate()
+calls = {
+    "conf.get": lambda: spark.conf.get("spark.sql.shuffle.partitions"),
+    "conf.set": lambda: spark.conf.set("spark.sql.shuffle.partitions", "3"),
+    "schema": lambda: spark.range(3).schema,
+    "cloneSession": lambda: spark.cloneSession(),
+    "interruptAll": lambda: spark.interruptAll(),
+}
+# An unanswered AddArtifacts RPC is awaited by the core without a signal check, so the upload is
+# only checked against the server that refuses the connection.
+if mode != "hung":
+    calls["addArtifacts"] = lambda: spark.addArtifacts(artifact, file=True)
+for name, call in calls.items():
+    timer = threading.Timer(0.5, os.kill, (os.getpid(), signal.SIGINT))
+    started = time.monotonic()
+    timer.start()
+    try:
+        call()
+        outcome = "returned"
+    except KeyboardInterrupt:
+        outcome = "interrupted"
+    finally:
+        timer.cancel()
+    print(name, outcome, round(time.monotonic() - started, 2), flush=True)
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code, server, str(artifact)],
+        env=dict(os.environ, TZ="UTC"),
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    assert result.returncode == 0, result.stderr
+    lines = [line.split() for line in result.stdout.splitlines()]
+    names = ["conf.get", "conf.set", "schema", "cloneSession", "interruptAll"]
+    if server != "hung":
+        names.append("addArtifacts")
+    assert [line[0] for line in lines] == names, result.stdout
+    for _name, outcome, seconds in lines:
+        assert outcome == "interrupted", result.stdout
+        assert float(seconds) < 3, result.stdout
+
+
+def test_a_failed_interrupt_of_a_blocked_collect_is_raised_with_the_signal_as_context(mock_connect):
+    # As PySpark's: the Interrupt that the signal sends is an RPC whose error is raised, as
+    # `interrupt_operation` raises out of the `except KeyboardInterrupt` of the execution, with the
+    # KeyboardInterrupt as the context of the error.
+    import signal
+    import threading
+
+    from pyspark.errors.exceptions.connect import SparkConnectGrpcException
+
+    spark, service = mock_connect
+    service.block_execute = True
+    service.interrupt_failure = ("INTERNAL", "interrupt failed on the server")
+    timer = threading.Timer(0.3, os.kill, (os.getpid(), signal.SIGINT))
+    started = time.monotonic()
+    timer.start()
+    try:
+        with pytest.raises(BaseException) as error:
+            spark.range(3).collect()
+        elapsed = time.monotonic() - started
+    finally:
+        timer.cancel()
+        service.interrupt_failure = None
+        service.release_response()
+    assert elapsed < 3
+    assert isinstance(error.value, SparkConnectGrpcException), repr(error.value)
+    assert isinstance(error.value.__context__, KeyboardInterrupt)
+    assert len(service.interrupt_requests) == 1
+
+
+def test_a_failed_interrupt_of_a_held_local_iterator_is_raised_at_the_first_signal(mock_connect):
+    # As PySpark's: the Interrupt of the iterator that waits for the server is raised, as the
+    # first signal interrupts it, instead of being dropped, so the job does not run on.
+    import signal
+    import threading
+
+    from pyspark.errors.exceptions.connect import SparkConnectGrpcException
+
+    spark, service = mock_connect
+    _two_row_range_results(service)
+    service.block_result_complete = True
+    rows = spark.range(2).toLocalIterator()
+    assert next(rows).id == 0
+    assert next(rows).id == 1
+    service.interrupt_failure = ("INTERNAL", "interrupt failed on the server")
+    # Bounds the wait of a run that does not raise, as the server would end it at its own limit.
+    release = threading.Timer(3.0, service.release_response)
+    timer = threading.Timer(0.3, os.kill, (os.getpid(), signal.SIGINT))
+    started = time.monotonic()
+    timer.start()
+    release.start()
+    try:
+        with pytest.raises(BaseException) as error:
+            next(rows)
+        elapsed = time.monotonic() - started
+    finally:
+        timer.cancel()
+        release.cancel()
+        release.join()
+        service.interrupt_failure = None
+        service.release_response()
+    assert elapsed < 2.5
+    assert isinstance(error.value, SparkConnectGrpcException), repr(error.value)
+    assert isinstance(error.value.__context__, KeyboardInterrupt)
+    assert len(service.interrupt_requests) == 1
+
+
 def test_sigint_ends_a_call_to_an_unreachable_server_at_once_as_pyspark():
     # As PySpark's: the Config lookup of the first plan of a session that no server answers is
     # retried, and a signal raises KeyboardInterrupt from its retry sleep. No server is needed.

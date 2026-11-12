@@ -277,7 +277,7 @@ fn set_context(
 /// `raised`, with `secondary` as its `__context__`: an exception that kept the client from
 /// raising a more specific exception than `raised` is not dropped, but chained to the one that
 /// is raised in its place, as Python chains an exception raised while another is handled.
-fn with_context(py: Python<'_>, raised: PyErr, secondary: PyErr) -> PyErr {
+pub(crate) fn with_context(py: Python<'_>, raised: PyErr, secondary: PyErr) -> PyErr {
     set_context(py, raised.value(py), secondary);
     raised
 }

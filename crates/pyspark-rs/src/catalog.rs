@@ -9,7 +9,6 @@ use spark_connect::catalog::{
 use spark_connect_core::error::SparkError;
 
 use crate::dataframe::PyDataFrame;
-use crate::errors::ResultExt;
 use crate::interrupt::interruptible;
 
 /// PySpark's FutureWarning of the deprecated `dbName` of the catalog method `method`.
@@ -408,7 +407,7 @@ impl PyCatalog {
     ) -> PyResult<PyDataFrame> {
         let schema = table_schema(schema)?;
         let options = crate::options::str_kwargs_skip_none(options)?;
-        py.detach(|| {
+        interruptible(py, self.catalog.spark_session(), || {
             self.catalog
                 .create_table_with(
                     tableName,
@@ -421,7 +420,6 @@ impl PyCatalog {
                 .map_err(Box::new)
         })
         .map(PyDataFrame::new)
-        .to_pyerr()
     }
 
     /// Create an external table from a data source: deprecated, as PySpark's, which warns and
