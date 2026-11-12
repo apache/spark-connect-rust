@@ -19723,18 +19723,24 @@ def test_a_second_sigint_during_add_listener_removes_the_server_listener_before_
     spark, service = mock_connect
     service.listener_bus_enabled = True
     service.listener_register_blocked = True
+    # The interrupt of the first signal is retried, as the server is unavailable for it, so only
+    # the second signal ends the wait, as PySpark's retry sleep raises at it.
+    service.interrupt_failure = ("UNAVAILABLE", "server is unavailable")
     # A wait that the signals do not end is released after 10 s, so the test fails, not hangs.
     release = threading.Timer(10, service.release_listener_registration)
     timers = [threading.Timer(delay, os.kill, (os.getpid(), signal.SIGINT)) for delay in (0.5, 1.0)]
     release.start()
     for timer in timers:
         timer.start()
+    started = time.monotonic()
     try:
         with pytest.raises(KeyboardInterrupt):
             spark.streams.addListener(Listener())
     finally:
         for timer in timers:
             timer.cancel()
+        service.interrupt_failure = None
+    assert 0.9 < time.monotonic() - started < 5
     release.cancel()
     service.release_listener_registration()
     assert service.wait_listener_registration(1)
@@ -19786,6 +19792,56 @@ def test_sigint_during_add_listener_with_the_acknowledgement_held_raises_at_once
     spark.streams.removeListener(listener)
     assert spark.streams._sqlb._listener_bus == []
     assert service.listener_removals == 1
+
+
+def test_sigint_during_the_next_listener_event_raises_keyboard_interrupt_at_once(mock_connect):
+    # The iterator of streamListenerEvents, an extra of this client, waits for the next event of
+    # the server, which a signal ends at once, as it ends the other waits for the server.
+    import signal
+    import threading
+
+    spark, service = mock_connect
+    service.listener_bus_enabled = True
+    events = spark.streams.streamListenerEvents()
+    # The stream ends after 10 s, so that a wait that the signal does not end fails, not hangs.
+    end = threading.Timer(10, service.end_listener_stream, (spark.session_id,))
+    timer = threading.Timer(0.5, os.kill, (os.getpid(), signal.SIGINT))
+    end.start()
+    timer.start()
+    started = time.monotonic()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            next(events)
+    finally:
+        timer.cancel()
+    assert time.monotonic() - started < 5
+    end.cancel()
+    del events
+
+
+def test_tests_restore_the_sigint_handler_that_a_background_start_ignores():
+    # A process that a non-interactive shell starts in the background inherits SIGINT as
+    # ignored: conftest.py installs Python's handler, so that a SIGINT raises KeyboardInterrupt.
+    import signal
+    import subprocess
+    import sys
+
+    conftest = os.path.join(os.path.dirname(os.path.abspath(__file__)), "conftest.py")
+    code = (
+        "import os, runpy, signal, time\n"
+        "assert signal.getsignal(signal.SIGINT) == signal.SIG_IGN\n"
+        "runpy.run_path(os.environ['CONFTEST'])\n"
+        "try:\n"
+        "    os.kill(os.getpid(), signal.SIGINT)\n"
+        "    time.sleep(5)\n"
+        "except KeyboardInterrupt:\n"
+        "    print('interrupted')\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], env={**os.environ, "CONFTEST": conftest},
+        preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_IGN),
+        capture_output=True, text=True, timeout=60, check=True)
+    assert result.stdout.strip() == "interrupted"
 
 
 def test_sigint_during_the_plan_compression_lookup_raises_keyboard_interrupt_at_once(mock_connect):

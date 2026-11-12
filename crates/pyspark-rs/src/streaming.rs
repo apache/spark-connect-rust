@@ -1528,10 +1528,11 @@ impl PyStreamingQueryManager {
     }
 
     fn streamListenerEvents(&self, py: Python<'_>) -> PyResult<PyListenerEventStream> {
-        let stream = interruptible(py, &self.inner.spark_session(), || {
+        let session = self.inner.spark_session();
+        let stream = interruptible(py, &session, || {
             self.inner.listener_event_stream().map_err(Box::new)
         })?;
-        Ok(PyListenerEventStream::new(stream))
+        Ok(PyListenerEventStream::new(stream, session))
     }
 }
 
@@ -1540,12 +1541,15 @@ impl PyStreamingQueryManager {
 #[pyclass(name = "ListenerEventStream", module = "pyspark.sql.streaming.query")]
 pub struct PyListenerEventStream {
     inner: Option<ListenerEventStream>,
+    /// The session of the stream, whose waits a signal of the process ends.
+    session: spark_connect::session::SparkSession,
 }
 
 impl PyListenerEventStream {
-    pub fn new(stream: ListenerEventStream) -> Self {
+    pub fn new(stream: ListenerEventStream, session: spark_connect::session::SparkSession) -> Self {
         PyListenerEventStream {
             inner: Some(stream),
+            session,
         }
     }
 }
@@ -1563,10 +1567,13 @@ impl PyListenerEventStream {
             ));
         };
         // The listener bus blocks in `next()` waiting for the server's next event
-        // (arbitrarily far apart on a live query), so release the GIL across it —
-        // otherwise the daemon thread would freeze the whole interpreter between
-        // events. Mirrors `PyLocalRowIterator::__next__`.
-        match py.detach(|| stream.next()) {
+        // (arbitrarily far apart on a live query), so the wait releases the GIL, or a daemon
+        // thread would freeze the whole interpreter between events, and a signal of the process
+        // ends it with its exception, as it ends the other waits of the client for the server.
+        let next = interruptible(py, &self.session, || {
+            Ok::<_, Box<SparkError>>(stream.next())
+        })?;
+        match next {
             Some(Ok((event_type, event_json))) => Ok(Some((event_type, event_json))),
             Some(Err(e)) => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
                 "Error reading listener events: {}",
