@@ -50,9 +50,10 @@ To run a Spark Connect server locally for development:
 export SPARK_HOME=/path/to/spark
 
 # Start the server on sc://localhost:15002
-$SPARK_HOME/sbin/start-connect-server.sh \
-  --packages "org.apache.spark:spark-connect_2.13:4.3.0"
+$SPARK_HOME/sbin/start-connect-server.sh
 ```
+
+The Spark distribution bundles the Spark Connect server, so it needs no `--packages`.
 
 The server listens on port `15002` by default. To use a different port, add `--conf spark.connect.grpc.binding.port=<port>`.
 
