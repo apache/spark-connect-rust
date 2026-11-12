@@ -11116,6 +11116,22 @@ def test_join_as_of_sends_the_as_of_join_as_pyspark(mock_connect):
     assert attribute(join[3][0]) == "id" and 5 in join and 6 not in join
     assert join[7] == [b"left"] and join[10] == [b"backward"]
 
+    # As PySpark, which checks neither `how` nor `direction` but that `how` is a string: each
+    # is sent as it is. The server reads the names, and other spellings of them, and refuses
+    # the rest in the analysis.
+    for how in ("inner", "left", "LEFT", "left_outer", "leftouter", "right", "sideways", ""):
+        for direction in ("backward", "forward", "nearest", "Forward", "sideways", ""):
+            join = sent_as_of_join(left._joinAsOf(
+                right, "id", "id", how=how, direction=direction))
+            # An empty string is the default of its field, which is not sent.
+            assert join.get(7, [b""]) == [how.encode()]
+            assert join.get(10, [b""]) == [direction.encode()]
+    join = sent_as_of_join(left._joinAsOf(right, "id", "id", how=None))
+    assert join[7] == [b"inner"]
+    for how in (1, ["left"], b"left"):
+        with pytest.raises(AssertionError, match="^how should be a string$"):
+            left._joinAsOf(right, "id", "id", how=how)
+
 
 def test_grouping_sets_group_by_their_grouping_columns_as_pyspark(mock_connect):
     # As PySpark's, groupingSets(groupingSets, *cols) groups by the sets with the grouping

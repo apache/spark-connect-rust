@@ -12,7 +12,10 @@ use spark_connect_proto as proto;
 
 use crate::column::Column;
 use crate::expression::{Expression, ExpressionNode, SortOrder};
-use crate::plan::{AggregateGroupType, JoinType, LogicalPlan, RelationOwner, SetOpType};
+use crate::plan::{
+    AggregateGroupType, AsOfJoinDirection, AsOfJoinType, JoinType, LogicalPlan, RelationOwner,
+    SetOpType,
+};
 use crate::progress::ExecutionStream;
 use crate::row::{Row, StructValue, Value};
 use crate::session::{ExecutionInfo, SparkSession};
@@ -75,14 +78,15 @@ pub struct AsOfJoinOptions {
     pub on: Option<Column>,
     /// Column names that both sides share, sent as `using_columns`.
     pub using_columns: Vec<String>,
-    /// The join type, such as `"inner"` or `"left"`, sent as it is.
-    pub join_type: String,
+    /// The join type: inner or left outer, or a string for the server to read.
+    pub join_type: AsOfJoinType,
     /// The as-of tolerance: the largest distance a match may have.
     pub tolerance: Option<Column>,
     /// Whether a row may match a row with the same as-of value.
     pub allow_exact_matches: bool,
-    /// `"backward"`, `"forward"` or `"nearest"`, sent as it is.
-    pub direction: String,
+    /// The direction of the search: backward, forward or nearest, or a string for the server
+    /// to read.
+    pub direction: AsOfJoinDirection,
 }
 
 impl AsOfJoinOptions {
@@ -93,10 +97,10 @@ impl AsOfJoinOptions {
             right_as_of,
             on: None,
             using_columns: Vec::new(),
-            join_type: "inner".to_string(),
+            join_type: AsOfJoinType::Inner,
             tolerance: None,
             allow_exact_matches: true,
-            direction: "backward".to_string(),
+            direction: AsOfJoinDirection::Backward,
         }
     }
 }
@@ -669,8 +673,10 @@ impl DataFrame {
     /// As-of join with another DataFrame: each row of this DataFrame is matched with the
     /// nearest row of `right` on the as-of columns, as `DataFrame._joinAsOf` does.
     ///
-    /// Errors with `SESSION_NOT_SAME` when `right` is of another session. The join type and
-    /// the direction are sent as they are; the server checks them.
+    /// Errors with `SESSION_NOT_SAME` when `right` is of another session. As PySpark, this
+    /// does not check the join type and the direction: a string that is none of
+    /// [`AsOfJoinType`] or of [`AsOfJoinDirection`] is sent as it is, and the server refuses
+    /// what it does not read.
     pub fn as_of_join(&self, right: &DataFrame, options: AsOfJoinOptions) -> Result<DataFrame> {
         // As PySpark's `_check_same_session`.
         if self.session.client().session_id() != right.session.client().session_id() {
@@ -5519,10 +5525,10 @@ mod plan_construction_tests {
         let right = spark.range(4).unwrap();
         let options = AsOfJoinOptions {
             using_columns: vec!["id".to_string()],
-            join_type: "left".to_string(),
+            join_type: AsOfJoinType::LeftOuter,
             tolerance: Some(crate::column::lit(1)),
             allow_exact_matches: false,
-            direction: "forward".to_string(),
+            direction: AsOfJoinDirection::Forward,
             ..AsOfJoinOptions::new(col("id"), col("id"))
         };
         let joined = left.as_of_join(&right, options).unwrap();

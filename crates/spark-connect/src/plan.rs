@@ -464,10 +464,10 @@ pub enum LogicalPlan {
         right_as_of: Column,
         on: Option<Column>,
         using_columns: Vec<String>,
-        join_type: String,
+        join_type: AsOfJoinType,
         tolerance: Option<Column>,
         allow_exact_matches: bool,
-        direction: String,
+        direction: AsOfJoinDirection,
     },
     /// NearestByJoin: `DataFrame.nearestByJoin`.
     NearestByJoin {
@@ -511,6 +511,99 @@ pub enum JoinType {
     LeftSemi,
     LeftAnti,
     Cross,
+}
+
+/// The join type of an as-of join (`DataFrame._joinAsOf`): the server joins as of only an
+/// inner or a left outer join.
+///
+/// PySpark does not check `how`: it sends the string as it is, and the server reads it as any
+/// join type, without regard to case or underscores (`"LEFT"`, `"left_outer"`), and fails the
+/// analysis for a join type that is not one, or that an as-of join does not have. So a string
+/// that is not exactly the name of a variant is kept in `Other`, and is sent as it is.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum AsOfJoinType {
+    /// `"inner"`, the default: the rows of the left side that have a match.
+    #[default]
+    Inner,
+    /// `"left"`: every row of the left side.
+    LeftOuter,
+    /// Any other string, sent as it is, for the server to read or to refuse.
+    Other(String),
+}
+
+impl AsOfJoinType {
+    /// The join type of `how`: `"inner"`, `"left"`, or the string as it is.
+    pub fn parse(how: &str) -> Self {
+        match how {
+            "inner" => AsOfJoinType::Inner,
+            "left" => AsOfJoinType::LeftOuter,
+            other => AsOfJoinType::Other(other.to_string()),
+        }
+    }
+
+    /// The string that is sent as the `join_type` of the as-of join.
+    pub fn as_str(&self) -> &str {
+        match self {
+            AsOfJoinType::Inner => "inner",
+            AsOfJoinType::LeftOuter => "left",
+            AsOfJoinType::Other(how) => how,
+        }
+    }
+}
+
+impl From<&str> for AsOfJoinType {
+    fn from(how: &str) -> Self {
+        AsOfJoinType::parse(how)
+    }
+}
+
+/// The direction in which an as-of join (`DataFrame._joinAsOf`) searches for the match of a
+/// row.
+///
+/// PySpark does not check `direction`: it sends the string as it is, and the server reads it
+/// without regard to case, and fails the analysis with `AS_OF_JOIN.UNSUPPORTED_DIRECTION` for
+/// any other. So a string that is not exactly the name of a variant is kept in `Other`, and is
+/// sent as it is.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum AsOfJoinDirection {
+    /// `"backward"`, the default: the last row whose as-of value is not greater.
+    #[default]
+    Backward,
+    /// `"forward"`: the first row whose as-of value is not smaller.
+    Forward,
+    /// `"nearest"`: the row whose as-of value is the closest.
+    Nearest,
+    /// Any other string, sent as it is, for the server to read or to refuse.
+    Other(String),
+}
+
+impl AsOfJoinDirection {
+    /// The direction of `direction`: `"backward"`, `"forward"`, `"nearest"`, or the string as
+    /// it is.
+    pub fn parse(direction: &str) -> Self {
+        match direction {
+            "backward" => AsOfJoinDirection::Backward,
+            "forward" => AsOfJoinDirection::Forward,
+            "nearest" => AsOfJoinDirection::Nearest,
+            other => AsOfJoinDirection::Other(other.to_string()),
+        }
+    }
+
+    /// The string that is sent as the `direction` of the as-of join.
+    pub fn as_str(&self) -> &str {
+        match self {
+            AsOfJoinDirection::Backward => "backward",
+            AsOfJoinDirection::Forward => "forward",
+            AsOfJoinDirection::Nearest => "nearest",
+            AsOfJoinDirection::Other(direction) => direction,
+        }
+    }
+}
+
+impl From<&str> for AsOfJoinDirection {
+    fn from(direction: &str) -> Self {
+        AsOfJoinDirection::parse(direction)
+    }
 }
 
 /// Set operation type (UNION, INTERSECT, EXCEPT).
@@ -598,6 +691,18 @@ impl PlanIds {
 
     /// A live node of the plan ID `id`, such as that of the DataFrame of a relation that this
     /// session sent.
+    ///
+    /// A plan ID is of one node that this session numbered (`id_of`), and of each node that
+    /// was given it (`assign`): each DataFrame of a relation that the session sent, such as
+    /// each unpickled copy of a DataFrame, is a node of its own with the plan ID of the
+    /// DataFrame it was of, which may be alive too. Any one of them is given, on purpose: they
+    /// are all the relation of that plan ID, and each copy took the Observations of a node of
+    /// the ID when it was made (`DataFrame::from_sent_relation`, the one caller), so they all
+    /// have the same ones.
+    ///
+    /// This scans every node of the session, once for each DataFrame made of a sent relation,
+    /// which costs less than keeping a second map by plan ID in step with the first on every
+    /// insert and prune.
     pub(crate) fn node_of(&self, id: i64) -> Option<Arc<LogicalPlan>> {
         let nodes = self.nodes.lock().unwrap_or_else(|e| e.into_inner());
         nodes
@@ -1485,10 +1590,10 @@ impl LogicalPlan {
                     right_as_of: Some(right_as_of.to_proto()),
                     join_expr: on.as_ref().map(|condition| condition.to_proto()),
                     using_columns: using_columns.clone(),
-                    join_type: join_type.clone(),
+                    join_type: join_type.as_str().to_string(),
                     tolerance: tolerance.as_ref().map(|tolerance| tolerance.to_proto()),
                     allow_exact_matches: *allow_exact_matches,
-                    direction: direction.clone(),
+                    direction: direction.as_str().to_string(),
                 };
                 relation.rel_type = Some(proto::relation::RelType::AsOfJoin(Box::new(aj)));
             }
@@ -3122,6 +3227,56 @@ mod with_relations_tests {
         assert_eq!(distinct.len(), 4, "{all:?}");
         // The DataFrame keeps its own plan ID as a reference.
         assert_eq!(id(input), Some(ids.id_of(&df)));
+    }
+}
+
+#[cfg(test)]
+mod plan_id_tests {
+    use super::*;
+
+    /// Whether `node` is one of the allocations of `expected`.
+    fn one_of(node: Option<Arc<LogicalPlan>>, expected: &[&Arc<LogicalPlan>]) -> bool {
+        node.is_some_and(|node| expected.iter().any(|expected| Arc::ptr_eq(&node, expected)))
+    }
+
+    #[test]
+    fn a_numbered_node_is_the_one_node_of_its_plan_id() {
+        let ids = PlanIds::new();
+        let (first, second) = (Arc::new(range(0, 3, 1)), Arc::new(range(0, 5, 1)));
+        let (first_id, second_id) = (ids.id_of(&first), ids.id_of(&second));
+        assert_ne!(first_id, second_id);
+        assert!(one_of(ids.node_of(first_id), &[&first]));
+        assert!(one_of(ids.node_of(second_id), &[&second]));
+        // The plan ID of the root of a node within its `WithRelations` is another ID of it.
+        let root_id = ids.root_id_of(&first);
+        assert_ne!(root_id, first_id);
+        assert!(one_of(ids.node_of(root_id), &[&first]));
+        assert!(ids.node_of(-1).is_none());
+    }
+
+    /// A relation that the session sent keeps its plan ID in each DataFrame of it, so a plan
+    /// ID is of all of them and of the node it was first of: the node of the ID is one of
+    /// those that are alive.
+    #[test]
+    fn the_node_of_a_plan_id_that_was_given_is_one_of_its_live_nodes() {
+        let ids = PlanIds::new();
+        let numbered = Arc::new(range(0, 3, 1));
+        let id = ids.id_of(&numbered);
+        let (copy, other_copy) = (Arc::new(range(0, 3, 1)), Arc::new(range(0, 3, 1)));
+        ids.assign(&copy, id);
+        ids.assign(&other_copy, id);
+        assert_eq!(ids.id_of(&copy), id);
+        assert!(one_of(ids.node_of(id), &[&numbered, &copy, &other_copy]));
+        // A node that is dropped is no longer a node of the ID; the others still are.
+        std::mem::drop(numbered);
+        assert!(one_of(ids.node_of(id), &[&copy, &other_copy]));
+        std::mem::drop(copy);
+        assert!(one_of(ids.node_of(id), &[&other_copy]));
+        std::mem::drop(other_copy);
+        assert!(ids.node_of(id).is_none());
+        // A plan ID that was given is not one that the session numbers a later node with.
+        let later = Arc::new(range(0, 1, 1));
+        assert_ne!(ids.id_of(&later), id);
     }
 }
 
