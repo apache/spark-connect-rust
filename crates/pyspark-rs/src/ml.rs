@@ -15,9 +15,9 @@ use pyo3::pyclass::boolean_struct::False;
 use pyo3::types::{PyDict, PyTuple, PyType};
 use pyo3::PyClass;
 use spark_connect::ml::{
-    BinaryClassificationEvaluator, CrossValidator, DecisionTreeClassifier, Estimator, Evaluator,
-    KMeans, LinearRegression, LinearSVC, LogisticRegression, MaxAbsScaler, Model,
-    MulticlassClassificationEvaluator, Params, Pipeline, RandomForestClassifier,
+    BinaryClassificationEvaluator, CrossValidator, DecisionTreeClassifier, DecisionTreeRegressor,
+    Estimator, Evaluator, KMeans, LinearRegression, LinearSVC, LogisticRegression, MaxAbsScaler,
+    Model, MulticlassClassificationEvaluator, Params, Pipeline, RandomForestClassifier,
     RandomForestRegressor, RegressionEvaluator, StandardScaler, StringIndexer, Transformer,
     VectorAssembler,
 };
@@ -1339,6 +1339,187 @@ impl PyRandomForestClassifier {
     }
 }
 
+/// Decision tree regressor fitted and cached by Spark Connect.
+#[pyclass(
+    name = "DecisionTreeRegressor",
+    module = "pyspark.ml.connect.regression"
+)]
+pub struct PyDecisionTreeRegressor {
+    inner: DecisionTreeRegressor,
+    unsendable: Vec<&'static str>,
+}
+
+const DECISION_TREE_REGRESSOR_PARAMS: &[(&str, Kind)] = &[
+    ("featuresCol", Kind::Str),
+    ("labelCol", Kind::Str),
+    ("predictionCol", Kind::Str),
+    ("maxDepth", Kind::Int),
+    ("maxBins", Kind::Int),
+    ("minInstancesPerNode", Kind::Int),
+    ("minInfoGain", Kind::Float),
+    ("maxMemoryInMB", Kind::Int),
+    ("cacheNodeIds", Kind::Bool),
+    ("checkpointInterval", Kind::Int),
+    ("impurity", Kind::Str),
+    ("seed", Kind::Int),
+    ("varianceCol", Kind::Str),
+    ("leafCol", Kind::Str),
+    ("minWeightFractionPerNode", Kind::Float),
+    ("weightCol", Kind::Str),
+];
+
+#[pymethods]
+impl PyDecisionTreeRegressor {
+    #[new]
+    #[pyo3(signature = (*args, **kwargs), text_signature = "(*, featuresCol='features', labelCol='label', predictionCol='prediction', maxDepth=5, maxBins=32, minInstancesPerNode=1, minInfoGain=0.0, maxMemoryInMB=256, cacheNodeIds=False, checkpointInterval=10, impurity='variance', seed=None, varianceCol=None, weightCol=None, leafCol='', minWeightFractionPerNode=0.0)")]
+    fn new(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
+        let mut this = Self {
+            inner: DecisionTreeRegressor::new(),
+            unsendable: Vec::new(),
+        };
+        init_params(
+            &mut this,
+            "DecisionTreeRegressor",
+            &[],
+            DECISION_TREE_REGRESSOR_PARAMS,
+            args,
+            kwargs,
+        )?;
+        Ok(this)
+    }
+
+    #[pyo3(name = "setFeaturesCol")]
+    fn set_feature_col<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "featuresCol", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setLabelCol")]
+    fn set_label_col<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "labelCol", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setPredictionCol")]
+    fn set_prediction_col<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "predictionCol", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setMaxDepth")]
+    fn set_max_depth<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "maxDepth", Kind::Int, value)
+    }
+
+    #[pyo3(name = "setMaxBins")]
+    fn set_max_bins<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "maxBins", Kind::Int, value)
+    }
+
+    #[pyo3(name = "setMinInstancesPerNode")]
+    fn set_min_instances_per_node<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "minInstancesPerNode", Kind::Int, value)
+    }
+
+    #[pyo3(name = "setMinInfoGain")]
+    fn set_min_info_gain<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "minInfoGain", Kind::Float, value)
+    }
+
+    #[pyo3(name = "setMaxMemoryInMB")]
+    fn set_max_memory_in_mb<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "maxMemoryInMB", Kind::Int, value)
+    }
+
+    #[pyo3(name = "setCacheNodeIds")]
+    fn set_cache_node_ids<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "cacheNodeIds", Kind::Bool, value)
+    }
+
+    #[pyo3(name = "setCheckpointInterval")]
+    fn set_checkpoint_interval<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "checkpointInterval", Kind::Int, value)
+    }
+
+    #[pyo3(name = "setImpurity")]
+    fn set_impurity<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "impurity", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setSeed")]
+    fn set_seed<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "seed", Kind::Int, value)
+    }
+
+    #[pyo3(name = "setLeafCol")]
+    fn set_leaf_col<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "leafCol", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setMinWeightFractionPerNode")]
+    fn set_min_weight_fraction_per_node<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "minWeightFractionPerNode", Kind::Float, value)
+    }
+
+    #[pyo3(name = "setWeightCol")]
+    fn set_weight_col<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "weightCol", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setVarianceCol")]
+    fn set_variance_col<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "varianceCol", Kind::Str, value)
+    }
+
+    fn fit(slf: &Bound<'_, Self>, df: &PyDataFrame) -> PyResult<PyMLModel> {
+        fit_native(slf, df)
+    }
+}
 /// Random forest regressor fitted and cached by Spark Connect.
 #[pyclass(
     name = "RandomForestRegressor",
@@ -1965,6 +2146,7 @@ native!(
     PyLinearRegression => LinearRegression,
     PyDecisionTreeClassifier => DecisionTreeClassifier,
     PyRandomForestClassifier => RandomForestClassifier,
+    PyDecisionTreeRegressor => DecisionTreeRegressor,
     PyRandomForestRegressor => RandomForestRegressor,
     PyKMeans => KMeans,
     PyRegressionEvaluator => RegressionEvaluator,

@@ -209,6 +209,28 @@ transformed DataFrames retain the cached server model until their last owner dro
 Tree inspection, feature importances, single-vector prediction and persistence are
 not exposed by this native addition.
 
+## Native DecisionTreeRegressor
+
+`spark_connect::ml::DecisionTreeRegressor` fits Spark's JVM decision tree
+regressor through Connect with ML vector features and continuous numeric labels.
+Rust builder setters/getters cover all 16 PySpark constructor parameters,
+including `set_variance_col`, `set_weight_col` and `set_leaf_col`. Unset
+parameters use Spark's defaults.
+
+The native Python binding is available as
+`pyspark.ml.connect.regression.DecisionTreeRegressor` and
+`pyspark.ml.connect.DecisionTreeRegressor`. Its keyword-only constructor mirrors
+PySpark's parameter names and defaults. Mutating `setFeaturesCol`, `setMaxDepth`,
+`setVarianceCol`, etc. methods return the estimator.
+
+Fitted models expose DataFrame `transform`, including predictions, optional
+weighted label variance in the predicted leaf and optional scalar double leaf
+indices. Variance is computed within the predicted leaf; it is not a confidence
+interval for the prediction. Models, clones and lazy transformed DataFrames keep
+the cached server model alive in its fitting session until the last owner is
+dropped. Tree inspection, feature importances, single-vector prediction and
+persistence are outside this addition.
+
 ## Native DecisionTreeClassifier
 
 `spark_connect::ml::DecisionTreeClassifier` trains Spark's JVM decision tree
