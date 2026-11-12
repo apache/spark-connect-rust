@@ -61,13 +61,14 @@ jobs:
           rustup toolchain install stable --profile minimal
           rustup default stable
 
-      - name: Cache cargo & target
+      - name: Cache cargo & release target
         uses: actions/cache@v4
         with:
+          # Cache the release extension build; keep llvm-cov artifacts out.
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
+            target/release
           key: ${{ runner.os }}-cargo-coverage-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-coverage-
 
@@ -148,6 +149,10 @@ jobs:
           done
 
       - name: Generate Rust coverage report
+        env:
+          # Keep instrumented objects out of the restored target cache: stale source
+          # mappings can survive package-scoped cleanup after a toolchain layout change.
+          CARGO_LLVM_COV_TARGET_DIR: ${{ runner.temp }}/spark-connect-rust-coverage
         # The behavioral e2e_* tests self-gate on SPARK_REMOTE and no-op without a live
         # server, so a server-less coverage run undercounts the runtime execution paths
         # (collect/count/RPC-backed DataFrame, functions, session, catalog, ...) and the

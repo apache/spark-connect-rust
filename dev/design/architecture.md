@@ -58,6 +58,14 @@ thin compatibility skin. Python-only concerns that *must* stay in Python -
 cloudpickle UDF serialization, pandas/pyarrow interop - live behind PyO3 calls
 into the interpreter, not reimplemented in Rust.
 
+## Logical plans
+
+The client plan separates operator payloads (`LogicalPlanKind`) from their
+ordered shared inputs. DataFrames share immutable root nodes, and checked
+construction validates each operator's input count. Serialization retains the
+existing stable plan IDs, depth bounds and protobuf behavior. See
+[the plan representation and Rust API migration](plan-representation.md).
+
 ## Runtime & async model
 
 Rust transport is async (`tonic` + `tokio`). Python's API is synchronous, so

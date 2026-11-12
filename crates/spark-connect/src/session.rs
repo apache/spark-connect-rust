@@ -13,7 +13,7 @@ use spark_connect_core::thread_entries::forget_when_thread_ends;
 use spark_connect_proto as proto;
 
 use crate::dataframe::DataFrame;
-use crate::plan::{LogicalPlan, PlanIds};
+use crate::plan::{LogicalPlan, LogicalPlanKind, OpaqueRelation, PlanIds};
 use crate::profiler::PythonAccumulators;
 use crate::progress::{ExecutionStream, ProgressTracker, ProgressUpdate};
 use crate::row::{Row, Value};
@@ -560,12 +560,15 @@ impl SparkSession {
         step: i64,
         num_partitions: Option<i32>,
     ) -> Result<DataFrame> {
-        let plan = LogicalPlan::Range {
-            start,
-            end,
-            step,
-            num_partitions,
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::Range {
+                start,
+                end,
+                step,
+                num_partitions,
+            },
+            [],
+        );
         Ok(DataFrame::new(self.clone(), plan))
     }
 
@@ -676,9 +679,12 @@ impl SparkSession {
         Ok(DataFrame::new(
             self.clone(),
             match returned {
-                Some(relation) => LogicalPlan::CachedRelation {
-                    relation: Box::new(relation),
-                },
+                Some(relation) => LogicalPlan::from_builder(
+                    LogicalPlanKind::CachedRelation {
+                        relation: OpaqueRelation::new(relation),
+                    },
+                    [],
+                ),
                 // A server that returns no result relation runs the query lazily, as pyspark
                 // then does.
                 None => Arc::unwrap_or_clone(plan),
@@ -693,26 +699,26 @@ impl SparkSession {
         named_args: std::collections::HashMap<String, crate::expression::Expression>,
         references: Vec<(DataFrame, String)>,
     ) -> Arc<LogicalPlan> {
-        let sql = Arc::new(LogicalPlan::Sql {
-            query: query.to_string(),
-            pos_args,
-            named_args,
-        });
+        let sql = Arc::new(LogicalPlan::from_builder(
+            LogicalPlanKind::Sql {
+                query: query.to_string(),
+                pos_args,
+                named_args,
+            },
+            [],
+        ));
         if references.is_empty() {
             return sql;
         }
-        Arc::new(LogicalPlan::WithRelations {
-            root: sql,
-            references: references
-                .into_iter()
-                .map(|(df, alias)| {
-                    Arc::new(LogicalPlan::SubqueryAlias {
-                        input: df.plan,
-                        alias,
-                    })
-                })
-                .collect(),
-        })
+        Arc::new(LogicalPlan::from_builder(
+            LogicalPlanKind::WithRelations,
+            std::iter::once(sql).chain(references.into_iter().map(|(df, alias)| {
+                Arc::new(LogicalPlan::from_builder(
+                    LogicalPlanKind::SubqueryAlias { alias },
+                    [df.plan],
+                ))
+            })),
+        ))
     }
 
     /// Internal: the DataFrame of a SQL statement that is not run until an action, for a
@@ -739,10 +745,13 @@ impl SparkSession {
         // relation from the schema. A zero-row Arrow payload would be empty bytes, which the
         // server cannot parse ("Unexpected end of input. Missing schema.").
         if rows.is_empty() {
-            let plan = LogicalPlan::LocalRelation {
-                schema: Some(schema),
-                data: None,
-            };
+            let plan = LogicalPlan::from_builder(
+                LogicalPlanKind::LocalRelation {
+                    schema: Some(schema),
+                    data: None,
+                },
+                [],
+            );
             return Ok(DataFrame::new(self.clone(), plan));
         }
         let batch = rows_to_arrow_batch(&rows, &schema)?;
@@ -770,10 +779,13 @@ impl SparkSession {
                 None,
             );
         }
-        Ok(LogicalPlan::LocalRelation {
-            schema: Some(schema),
-            data: Some(batch_to_arrow_ipc(&batch)?),
-        })
+        Ok(LogicalPlan::from_builder(
+            LogicalPlanKind::LocalRelation {
+                schema: Some(schema),
+                data: Some(batch_to_arrow_ipc(&batch)?),
+            },
+            [],
+        ))
     }
 
     /// Create an inline local relation from columns with the same encoding as local rows.
@@ -816,10 +828,13 @@ impl SparkSession {
                 .map_err(|e| SparkError::connect_msg(format!("Failed to read Arrow IPC: {e}")))?;
             crate::arrow_input::create_relation(&self.client, batches, Some(schema), None)?
         } else {
-            LogicalPlan::LocalRelation {
-                schema: Some(schema),
-                data: Some(data),
-            }
+            LogicalPlan::from_builder(
+                LogicalPlanKind::LocalRelation {
+                    schema: Some(schema),
+                    data: Some(data),
+                },
+                [],
+            )
         };
         Ok(DataFrame::new(self.clone(), plan))
     }
@@ -1172,10 +1187,13 @@ impl SparkSession {
     /// Mirrors `pyspark.sql.SparkSession.createDataFrame([], StructType([]))` /
     /// `SparkSession.emptyDataFrame`.
     pub fn empty_data_frame(&self) -> Result<DataFrame> {
-        let plan = LogicalPlan::LocalRelation {
-            schema: Some(DataType::Struct { fields: vec![] }),
-            data: None,
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::LocalRelation {
+                schema: Some(DataType::Struct { fields: vec![] }),
+                data: None,
+            },
+            [],
+        );
         Ok(DataFrame::new(self.clone(), plan))
     }
 
@@ -3270,9 +3288,9 @@ mod tests {
             Some(schema.clone()),
         )
         .unwrap();
-        let LogicalPlan::LocalRelation {
+        let LogicalPlanKind::LocalRelation {
             data: Some(data), ..
-        } = &plan
+        } = plan.kind()
         else {
             panic!("expected Arrow local relation")
         };
@@ -3295,8 +3313,9 @@ mod tests {
             spark
                 .create_dataframe_from_arrow(vec![], schema)
                 .unwrap()
-                .plan(),
-            LogicalPlan::LocalRelation { data: None, .. }
+                .plan()
+                .kind(),
+            LogicalPlanKind::LocalRelation { data: None, .. }
         ));
     }
 

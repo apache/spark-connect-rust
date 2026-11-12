@@ -32,6 +32,24 @@ checker = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(checker)
 
 
+class CheckBlockArgumentsTests(unittest.TestCase):
+    def test_rustc_receives_all_dependency_directories(self):
+        result = subprocess.CompletedProcess([], 0, "", "")
+        deps = [Path("/target/debug/deps"), Path("/target/debug/build/unit/hash/out")]
+        with (
+            tempfile.TemporaryDirectory() as td,
+            patch.object(checker.subprocess, "run", return_value=result) as run,
+        ):
+            ok, error = checker.check_block("", Path(td), 1, Path("/client.rlib"), deps)
+        self.assertTrue(ok, error)
+        args = run.call_args.args[0]
+        self.assertEqual(
+            args[args.index("-L") : args.index("--extern")],
+            ["-L", f"dependency={deps[0]}", "-L", f"dependency={deps[1]}"],
+        )
+        self.assertIn("spark_connect=/client.rlib", args)
+
+
 @unittest.skipUnless(shutil.which("rustc"), "rustc is required")
 class CheckDocSnippetsTests(unittest.TestCase):
     # Self-contained snippets isolate compiler mode from the crate's dependencies.
@@ -122,6 +140,37 @@ class CrateArtifactsTests(unittest.TestCase):
         self.assertIn("error[E0425]: cannot find value `x`", printed)
         self.assertNotIn("unused variable", printed)
         self.assertIn("error: build failed", printed)
+
+    def test_cargo_artifacts_supply_each_dependency_directory(self):
+        # Include both layouts, a fresh unit, a proc macro and duplicate paths.
+        files = [
+            ("arrow", ["/target/debug/deps/libarrow.rlib"]),
+            ("macros", ["/target/debug/build/macros/hash/out/libmacros.dylib"]),
+            (
+                "spark_connect",
+                [
+                    "/target/debug/build/client/hash/out/libspark_connect.rlib",
+                    "/target/debug/build/client/hash/out/libspark_connect.rmeta",
+                ],
+            ),
+        ]
+        output = ["cargo diagnostic", json.dumps({"reason": "build-finished"})]
+        output.extend(
+            json.dumps(
+                {
+                    "reason": "compiler-artifact",
+                    "target": {"name": name},
+                    "filenames": names,
+                    "fresh": True,
+                }
+            )
+            for name, names in files
+        )
+        result = subprocess.CompletedProcess([], 0, "\n".join(output), "")
+        with patch.object(checker.subprocess, "run", return_value=result):
+            rlib, deps = checker.crate_artifacts()
+        self.assertEqual(rlib, Path(files[2][1][0]))
+        self.assertEqual(deps, [Path(names[0]).parent for _, names in files])
 
 
 if __name__ == "__main__":

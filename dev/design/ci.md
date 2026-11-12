@@ -228,7 +228,10 @@ one job does three things:
   `apache-spark-connect` and `apache-spark-connect-core`, plus nine behavioral e2e test
   files (`e2e_functions`, `e2e_columns`, `e2e_dataframe`, `e2e_coverage`, `e2e_integration`,
   `e2e_streaming`, `e2e_new_methods`, `e2e_ops_breadth`, `e2e_session_catalog`) against a live
-  Connect server, merged into one report.
+  Connect server, merged into one report. Instrumented builds use a fresh directory under the
+  runner's temporary directory so restored Cargo artifacts cannot contribute stale source
+  mappings. These builds do not reuse the ordinary `target` cache; their duration counts toward
+  the job's timeout.
 - **Offline Python suite**: builds the extension and runs
   `python/tests/test_dropin_offline.py`, `test_arrow_handoff.py` and `test_ml_offline.py`
   under `coverage.py`. No other workflow runs these files, so this step is their gate: a

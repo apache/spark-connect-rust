@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use crate::dataframe::DataFrame;
 use crate::expression::LiteralExpression;
-use crate::plan::{LogicalPlan, RelationOwner};
+use crate::plan::{LogicalPlan, LogicalPlanKind, OpaqueRelation, RelationOwner};
 use crate::session::SparkSession;
 use crate::types::DataType;
 
@@ -771,11 +771,13 @@ impl Transformer for VectorAssembler {
         let mut relation = proto::Relation::default();
         relation.common = Some(proto::RelationCommon::default());
         relation.rel_type = Some(proto::relation::RelType::MlRelation(Box::new(ml_relation)));
-        let plan = LogicalPlan::MlTransform {
-            ml_relation: relation,
-            input: df.plan.clone(),
-            owner: None,
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::MlTransform {
+                ml_relation: OpaqueRelation::new(relation),
+                owner: None,
+            },
+            [df.plan.clone()],
+        );
         Ok(DataFrame::new(df.session.clone(), plan))
     }
 }
@@ -1171,11 +1173,13 @@ impl CachedModel {
         // The DataFrame keeps this model, and the plan of its input, alive.
         Ok(DataFrame::new(
             df.session.clone(),
-            LogicalPlan::MlTransform {
-                ml_relation: relation,
-                input: df.plan.clone(),
-                owner: Some(RelationOwner(self.0.clone())),
-            },
+            LogicalPlan::from_builder(
+                LogicalPlanKind::MlTransform {
+                    ml_relation: OpaqueRelation::new(relation),
+                    owner: Some(RelationOwner(self.0.clone())),
+                },
+                [df.plan.clone()],
+            ),
         ))
     }
 }
@@ -5295,11 +5299,13 @@ impl Transformer for PipelineModel {
         let mut relation = proto::Relation::default();
         relation.common = Some(proto::RelationCommon::default());
         relation.rel_type = Some(proto::relation::RelType::MlRelation(Box::new(ml_relation)));
-        let plan = LogicalPlan::MlTransform {
-            ml_relation: relation,
-            input: df.plan.clone(),
-            owner: None,
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::MlTransform {
+                ml_relation: OpaqueRelation::new(relation),
+                owner: None,
+            },
+            [df.plan.clone()],
+        );
         Ok(DataFrame::new(df.session.clone(), plan))
     }
 }
@@ -5476,11 +5482,13 @@ impl Transformer for CrossValidatorModel {
         let mut relation = proto::Relation::default();
         relation.common = Some(proto::RelationCommon::default());
         relation.rel_type = Some(proto::relation::RelType::MlRelation(Box::new(ml_relation)));
-        let plan = LogicalPlan::MlTransform {
-            ml_relation: relation,
-            input: df.plan.clone(),
-            owner: None,
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::MlTransform {
+                ml_relation: OpaqueRelation::new(relation),
+                owner: None,
+            },
+            [df.plan.clone()],
+        );
         Ok(DataFrame::new(df.session.clone(), plan))
     }
 }
@@ -5800,10 +5808,11 @@ mod tests {
 
     /// The object reference of the model that the transform of `df` refers to.
     fn transform_model_ref(df: &DataFrame) -> String {
-        let LogicalPlan::MlTransform { ml_relation, .. } = df.plan.as_ref() else {
+        let LogicalPlanKind::MlTransform { ml_relation, .. } = df.plan.kind() else {
             panic!("expected an ML transform plan");
         };
-        let Some(proto::relation::RelType::MlRelation(ml)) = &ml_relation.rel_type else {
+        let Some(proto::relation::RelType::MlRelation(ml)) = &ml_relation.as_proto().rel_type
+        else {
             panic!("expected an ML relation");
         };
         let Some(proto::ml_relation::MlType::Transform(transform)) = &ml.ml_type else {
@@ -5907,7 +5916,10 @@ mod tests {
             .set_input_cols(vec!["id"])
             .set_output_col("v");
         let out = va.transform(&df).unwrap();
-        assert!(matches!(out.plan.as_ref(), LogicalPlan::MlTransform { .. }));
+        assert!(matches!(
+            out.plan.kind(),
+            LogicalPlanKind::MlTransform { .. }
+        ));
 
         // A fitted StandardScaler transforms through the model that the server cached: the
         // transform refers to its object reference, as PySpark's transform of a fitted
@@ -5922,8 +5934,8 @@ mod tests {
         };
         let scaled = model.transform(&df).unwrap();
         assert!(matches!(
-            scaled.plan.as_ref(),
-            LogicalPlan::MlTransform { .. }
+            scaled.plan.kind(),
+            LogicalPlanKind::MlTransform { .. }
         ));
         assert_eq!(transform_model_ref(&scaled), "scaler-1");
         let _cloned = model.clone_box();

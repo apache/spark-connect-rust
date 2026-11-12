@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use spark_connect::column::col;
-use spark_connect::plan::{self, JoinType, LogicalPlan};
+use spark_connect::plan::{self, JoinType, LogicalPlan, LogicalPlanKind};
 use spark_connect::types::DataType;
 use spark_connect_proto as proto;
 
@@ -26,19 +26,13 @@ fn plan_helpers_accept_shared_nodes_without_cloning_them() {
         None,
         vec![],
     );
-    let LogicalPlan::Project { input, .. } = projected.as_ref() else {
-        panic!("expected projection");
-    };
-    assert!(Arc::ptr_eq(input, &source));
-    let LogicalPlan::Limit { input, .. } = &limited else {
-        panic!("expected limit");
-    };
-    assert!(Arc::ptr_eq(input, &projected));
-    let LogicalPlan::Join { left, right, .. } = &joined else {
-        panic!("expected join");
-    };
-    assert!(Arc::ptr_eq(left, &projected));
-    assert!(Arc::ptr_eq(right, &projected));
+    assert!(matches!(projected.kind(), LogicalPlanKind::Project { .. }));
+    assert!(Arc::ptr_eq(&projected.children()[0], &source));
+    assert!(matches!(limited.kind(), LogicalPlanKind::Limit { .. }));
+    assert!(Arc::ptr_eq(&limited.children()[0], &projected));
+    assert!(matches!(joined.kind(), LogicalPlanKind::Join { .. }));
+    assert!(Arc::ptr_eq(&joined.children()[0], &projected));
+    assert!(Arc::ptr_eq(&joined.children()[1], &projected));
     assert_eq!(
         limited.to_proto(),
         plan::limit(plan::project(base(), vec![col("id")]), 3).to_proto()
@@ -151,11 +145,15 @@ fn relation_changes_maps_to_correct_proto() {
     options.insert("startingVersion".to_string(), "0".to_string());
 
     // Batch changes: is_streaming defaults to false.
-    let batch = LogicalPlan::RelationChanges {
-        table_name: "db.tbl".to_string(),
-        options: options.clone(),
-        is_streaming: None,
-    }
+    let batch = LogicalPlan::try_new(
+        LogicalPlanKind::RelationChanges {
+            table_name: "db.tbl".to_string(),
+            options: options.clone(),
+            is_streaming: None,
+        },
+        vec![],
+    )
+    .unwrap()
     .to_proto();
     match batch.rel_type {
         Some(proto::relation::RelType::RelationChanges(rc)) => {
@@ -170,11 +168,15 @@ fn relation_changes_maps_to_correct_proto() {
     }
 
     // Streaming changes: is_streaming = true.
-    let streaming = LogicalPlan::RelationChanges {
-        table_name: "db.tbl".to_string(),
-        options: HashMap::new(),
-        is_streaming: Some(true),
-    }
+    let streaming = LogicalPlan::try_new(
+        LogicalPlanKind::RelationChanges {
+            table_name: "db.tbl".to_string(),
+            options: HashMap::new(),
+            is_streaming: Some(true),
+        },
+        vec![],
+    )
+    .unwrap()
     .to_proto();
     match streaming.rel_type {
         Some(proto::relation::RelType::RelationChanges(rc)) => {

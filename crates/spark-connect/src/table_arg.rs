@@ -6,7 +6,7 @@ use crate::column::Column;
 use crate::dataframe::DataFrame;
 use crate::expression::{ExpressionNode, SubqueryExpression, SubqueryType};
 #[cfg(test)]
-use crate::plan::LogicalPlan;
+use crate::plan::{LogicalPlan, LogicalPlanKind};
 use spark_connect_core::error::{Result, SparkError, SparkErrorKind};
 
 /// The `IllegalArgumentException` of `message`, as PySpark's `TableArg` raises for a
@@ -168,12 +168,15 @@ mod tests {
     use spark_connect_proto as proto;
 
     fn base_plan() -> LogicalPlan {
-        LogicalPlan::Range {
-            start: 0,
-            end: 10,
-            step: 1,
-            num_partitions: None,
-        }
+        LogicalPlan::from_builder(
+            LogicalPlanKind::Range {
+                start: 0,
+                end: 10,
+                step: 1,
+                num_partitions: None,
+            },
+            [],
+        )
     }
 
     fn arg() -> TableArg {
@@ -201,7 +204,7 @@ mod tests {
         assert!(!t.is_single_partition());
         assert!(spec(&t).0.is_empty());
         assert!(spec(&t).1.is_empty());
-        assert!(matches!(t.plan(), LogicalPlan::Range { .. }));
+        assert!(matches!(t.plan().kind(), LogicalPlanKind::Range { .. }));
         // As PySpark, which sets no options for a table argument without any.
         let subquery = subquery_proto(&t);
         assert_eq!(subquery.plan_id, 7);
