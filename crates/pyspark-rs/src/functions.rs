@@ -222,7 +222,7 @@ pub(crate) fn value_not_between(py: Python<'_>) -> PyErr {
 
 /// The `ValueError` of protobuf's Python string field for a str that is not encodable as UTF-8,
 /// with its message, which shows at most 1024 characters of the repr of the value.
-fn not_utf8_string(obj: &Bound<'_, PyAny>) -> PyErr {
+pub(crate) fn not_utf8_string(obj: &Bound<'_, PyAny>) -> PyErr {
     let message = pyo3::types::PyString::new(
         obj.py(),
         "%.1024r isn't a valid unicode string and can't be encoded in UTF-8.",
@@ -813,8 +813,7 @@ fn scalar_literal(obj: &Bound<'_, PyAny>) -> PyResult<Option<LiteralExpression>>
                     crate::infer::wall_clock_micros(obj)?,
                 )));
             }
-            // Shared with session::py_to_value so lit() and createDataFrame() agree (a pandas
-            // Timestamp's .timestamp() treats a naive value as UTC; normalize it first).
+            // Shared with session::py_to_value so lit() and createDataFrame() agree.
             let micros = crate::session::datetime_to_micros(obj)?;
             return Ok(Some(LiteralExpression::Timestamp(micros)));
         }

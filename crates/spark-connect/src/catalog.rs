@@ -1066,7 +1066,7 @@ impl Catalog {
             if let Some(proto::execute_plan_response::ResponseType::ArrowBatch(batch)) =
                 resp.response_type
             {
-                rows.extend(decode_arrow_batch(&batch)?);
+                rows.extend(decode_arrow_batch(&batch).map_err(|e| stream.fail(e))?);
             }
         }
         Ok(rows)

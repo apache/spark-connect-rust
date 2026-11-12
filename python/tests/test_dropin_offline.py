@@ -6578,6 +6578,60 @@ def test_functions_ascii_and_unicode():
     assert type(F.ascii(str_col)).__name__ == "Column"
 
 
+def test_the_exception_of_a_done_call_replaces_the_error_of_a_batch_as_pyspark(mock_connect):
+    # As PySpark's Progress.__exit__, which makes the done call when the decoding of a batch raises
+    # in the `with` of the execution: the exception of the done call replaces that error, for
+    # collect as for an iterator, instead of going unreported when the execution is dropped.
+    spark, service = mock_connect
+    # ExecutePlanResponse.arrow_batch=2: row_count=1, data=2 of bytes that are not Arrow IPC.
+    service.execute_payload = message_field(2, varint_field(1, 1) + message_field(2, b"not arrow"))
+    error = ValueError("the done call raises")
+
+    def failing(**kwargs):
+        if kwargs["done"]:
+            raise error
+
+    for action in [lambda: spark.range(3).collect(),
+                   lambda: next(spark.range(3).toLocalIterator())]:
+        with pytest.raises(Exception) as decoding:
+            action()
+        assert decoding.value is not error
+        spark.registerProgressHandler(failing)
+        try:
+            with pytest.raises(ValueError) as raised:
+                action()
+            assert raised.value is error
+        finally:
+            spark.clearProgressHandlers()
+
+
+def test_strings_that_utf8_cannot_encode_raise_value_error_as_options_and_fills_as_pyspark(
+    mock_connect,
+):
+    # As PySpark, whose protobuf string fields raise ValueError for a str that UTF-8 cannot encode
+    # (a lone surrogate): an option is not sent as another text (another path), and a fill value
+    # raises the ValueError of its encoding rather than a TypeError of its type.
+    from pyspark.sql import SparkSession
+
+    spark, service = mock_connect
+    bad = "a\ud800b"
+    message = re.escape(f"{bad!r} isn't a valid unicode string and can't be encoded in UTF-8.")
+    df = spark.range(1)
+    for call in [
+        lambda: spark.read.option("path", bad),
+        lambda: spark.read.options(k=bad),
+        lambda: spark.read.options(**{bad: "v"}),
+        lambda: df.write.option("path", bad),
+        lambda: df.write.options(**{bad: "v"}),
+        lambda: spark.readStream.options(**{bad: "v"}),
+        lambda: SparkSession.builder.config(map={bad: "v"}),
+    ]:
+        with pytest.raises(ValueError, match=message):
+            call()
+    with pytest.raises(ValueError):
+        df.fillna(bad)
+
+
 def test_functions_levenshtein():
     """Test levenshtein distance function."""
     from pyspark.sql import functions as F

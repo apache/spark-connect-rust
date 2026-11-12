@@ -332,6 +332,30 @@ def test_native_models_transform_a_dataframe_of_another_session_as_pyspark(sessi
         other.stop()
 
 
+def test_the_transform_of_a_deep_dataframe_of_another_session_counts_its_levels_as_pyspark(
+    session,
+):
+    # As PySpark, which serializes the plan of the transform with the plan of its input in one
+    # recursion: the transform of a DataFrame of another session counts the levels of that
+    # DataFrame, so that levels over it past the bound raise RecursionError before any request,
+    # where the input counted as one level.
+    from pyspark.ml.connect import KMeans
+
+    model = KMeans(k=2, seed=1).fit(_native_training(session))
+    other = session.newSession()
+    try:
+        deep = _native_training(other)
+        for _ in range(700):
+            deep = deep.select("*")
+        transformed = model.transform(deep)
+        for _ in range(100):
+            transformed = transformed.select("*")
+        with pytest.raises(RecursionError):
+            transformed.columns
+    finally:
+        other.stop()
+
+
 def test_ml_feature_transformers_as_pyspark(session):
     from pyspark.ml.feature import IDF, HashingTF, MinMaxScaler, Tokenizer
 

@@ -52,7 +52,7 @@ fn params_operator_type_and_ml_operator_conversions() {
 fn estimator_builders_and_accessors() {
     // StandardScaler
     let mut e = StandardScaler::new().set_input_col("f").set_output_col("o");
-    assert_eq!(e.input_col(), "f");
+    assert_eq!(e.input_col(), Some("f"));
     assert_eq!(e.output_col(), "o");
     let _ = e.operator();
     let _ = e.operator_mut();
@@ -62,7 +62,7 @@ fn estimator_builders_and_accessors() {
 
     // StringIndexer
     let mut e = StringIndexer::new().set_input_col("f").set_output_col("o");
-    assert_eq!(e.input_col(), "f");
+    assert_eq!(e.input_col(), Some("f"));
     assert_eq!(e.output_col(), "o");
     let _ = e.operator();
     let _ = e.operator_mut();
@@ -72,7 +72,7 @@ fn estimator_builders_and_accessors() {
 
     // MaxAbsScaler
     let mut e = MaxAbsScaler::new().set_input_col("f").set_output_col("o");
-    assert_eq!(e.input_col(), "f");
+    assert_eq!(e.input_col(), Some("f"));
     assert_eq!(e.output_col(), "o");
     let _ = e.operator();
     let _ = e.operator_mut();

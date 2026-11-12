@@ -7,7 +7,7 @@ use spark_connect::ml::*;
 #[test]
 fn ml_estimators_setters_getters_proto() {
     let ss = StandardScaler::new().set_input_col("f").set_output_col("s");
-    assert_eq!(ss.input_col(), "f");
+    assert_eq!(ss.input_col(), Some("f"));
     assert_eq!(ss.output_col(), "s");
 
     let va = VectorAssembler::new()
@@ -17,11 +17,11 @@ fn ml_estimators_setters_getters_proto() {
     assert_eq!(va.output_col(), "v");
 
     let si = StringIndexer::new().set_input_col("c").set_output_col("i");
-    assert_eq!(si.input_col(), "c");
+    assert_eq!(si.input_col(), Some("c"));
     assert_eq!(si.output_col(), "i");
 
     let ma = MaxAbsScaler::new().set_input_col("f").set_output_col("s");
-    assert_eq!(ma.input_col(), "f");
+    assert_eq!(ma.input_col(), Some("f"));
     assert_eq!(ma.output_col(), "s");
 
     let lr = LogisticRegression::new()

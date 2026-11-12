@@ -424,6 +424,14 @@ def _literal_value(literal):
     return kind, getattr(literal, kind)
 
 
+def _defaults_sent(name):
+    # The params that a native class sends unless it is given them: the metric of
+    # MulticlassClassificationEvaluator, which PySpark's constructor sets.
+    if name == "MulticlassClassificationEvaluator":
+        return {"metricName": ("string", "accuracy")}
+    return {}
+
+
 def _native_sent(spark, service, obj, models):
     _, params = _native_request(spark, service, obj, models)
     return {name: _literal_value(literal) for name, literal in params.params.items()}
@@ -490,7 +498,7 @@ def test_ml_connect_params_convert_with_the_type_converters_of_pyspark(ml_mock):
                     if name in _NOT_FITTABLE:
                         continue  # Their params are sent by no request.
                     sent = _native_sent(spark, service, obj, models)
-                    assert sent == {param: expected}, (name, param, value)
+                    assert sent == {**_defaults_sent(name), param: expected}, (name, param, value)
             for value, message in _NATIVE_REJECTED[kind]:
                 expected = f'Invalid param value given for param "{param}". {message}'
                 with pytest.raises(TypeError) as error:
@@ -516,12 +524,44 @@ def test_ml_connect_constructors_send_only_the_params_they_are_given_as_pyspark(
     models = []
     for name in _NATIVE_PARAMS:
         if name not in _NOT_FITTABLE:
-            assert _native_sent(spark, service, getattr(connect, name)(), models) == {}, name
+            sent = _native_sent(spark, service, getattr(connect, name)(), models)
+            assert sent == _defaults_sent(name), name
     assert _native_sent(spark, service, connect.KMeans(k=3), models) == {"k": ("integer", 3)}
     forest = connect.RandomForestClassifier(numTrees=3, seed=2**33)
     assert _native_sent(spark, service, forest, models) == {
         "numTrees": ("integer", 3),
         "seed": ("long", 2**33),
+    }
+
+
+def test_ml_connect_evaluators_take_the_signatures_and_defaults_of_pyspark(ml_mock):
+    # As PySpark's pyspark.ml.connect evaluators: their signatures, and the metric of
+    # MulticlassClassificationEvaluator, "accuracy" unless given, which its constructor sets, where
+    # the JVM evaluator's default is "f1".
+    import inspect
+
+    import pyspark.ml.connect as connect
+
+    spark, service = ml_mock
+    signatures = {
+        "RegressionEvaluator": "(*, metricName='rmse', labelCol='label', predictionCol='prediction')",
+        "BinaryClassificationEvaluator":
+            "(*, metricName='areaUnderROC', labelCol='label', rawPredictionCol='rawPrediction')",
+        "MulticlassClassificationEvaluator":
+            "(metricName='accuracy', labelCol='label', predictionCol='prediction')",
+    }
+    for name, signature in signatures.items():
+        assert str(inspect.signature(getattr(connect, name))) == signature, name
+    models = []
+    evaluator = connect.MulticlassClassificationEvaluator
+    assert _native_sent(spark, service, evaluator(), models) == {
+        "metricName": ("string", "accuracy")
+    }
+    assert _native_sent(spark, service, evaluator(metricName="f1"), models) == {
+        "metricName": ("string", "f1")
+    }
+    assert _native_sent(spark, service, evaluator("weightedPrecision"), models) == {
+        "metricName": ("string", "weightedPrecision")
     }
 
 
@@ -568,11 +608,13 @@ def test_ml_connect_unsendable_ints_none_and_uids_as_pyspark(ml_mock):
             obj = cls()
             assert getattr(obj, setter)(value) is obj
             assert getattr(obj, setter)(None) is obj
-            assert _native_sent(spark, service, obj, models).keys() == {param}, (name, param)
+            sent = _native_sent(spark, service, obj, models)
+            assert sent.keys() == {param} | _defaults_sent(name).keys(), (name, param)
             assert _native_sent(spark, service, obj, models)[param][0] == "null", (name, param)
             if param != "thresholds":
                 sent = _native_sent(spark, service, cls(**{param: None}), models)
-                assert sent.keys() == {param} and sent[param][0] == "null", (name, param)
+                assert sent.keys() == {param} | _defaults_sent(name).keys(), (name, param)
+                assert sent[param][0] == "null", (name, param)
         operator, _ = _native_request(spark, service, cls(), models)
         assert re.fullmatch(name + "_[0-9a-f]{12}", operator.uid), operator.uid
 
@@ -624,8 +666,11 @@ def test_ml_connect_setters_run_while_a_fit_or_an_evaluate_waits_as_pyspark(ml_m
         assert len(outcome) == 1 and not isinstance(outcome[0], Exception), (name, outcome)
         (command,) = _commands(service)
         held = command.ml_command.evaluate if hasattr(obj, "evaluate") else command.ml_command.fit
-        assert dict(held.params.params) == {}, name
-        assert _native_sent(spark, service, obj, models) == {param: ("string", "changed")}
+        assert set(held.params.params) == set(_defaults_sent(name)), name
+        assert _native_sent(spark, service, obj, models) == {
+            **_defaults_sent(name),
+            param: ("string", "changed"),
+        }
 
 
 def test_native_models_released_while_their_session_stops_send_no_delete(ml_mock):

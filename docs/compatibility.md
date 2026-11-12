@@ -32,10 +32,15 @@ The native ML classes take a JVM `Int` param as an `i32`: `LogisticRegression::s
 of its params (`KMeans::k`, `RandomForestClassifier::num_trees`, ...), which reads its
 `Params`: the value that is set, else Spark's default (`None` for `seed`, `weight_col` and
 `thresholds`). The fields of `LogisticRegressionModel`, `StringIndexerModel` and
-`MaxAbsScalerModel` are private, as those of the other fitted models: use
+`MaxAbsScalerModel` are private, as those of the other fitted models but `PipelineModel`: use
 `Transformer::operator` and `Transformer::params`, and `LogisticRegressionModel::feature_col`,
 `label_col` and `prediction_col`. `VectorAssembler::input_cols` and `Pipeline::stages`
-return a `Vec<String>`.
+return a `Vec<String>`, and `VectorAssembler::set_input_cols` and `Pipeline::set_stages` take
+`impl IntoIterator<Item = impl Into<String>>`. The `input_col` of `StandardScaler`,
+`MaxAbsScaler` and `StringIndexer` returns an `Option<&str>`, which is `None` unless set: as in
+Spark, it has no default. Their `output_col`, and that of `VectorAssembler`, return a `String`,
+Spark's `<uid>__output` unless set, the column that the server writes. Before, they gave names
+that the server never wrote, such as `scaled_features`.
 
 `Params::set_param_int32`, `set_param_int_narrow`, `set_param_string_array` and
 `set_param_double_array` are public, with the new `Params::clear_param`, and the evaluators
@@ -118,7 +123,8 @@ of many thousands of levels can overflow a small stack.
 months. Collect gives it for a year-month interval, where it gave the text of the
 interval (`Value::String("1-0")`), so that a pivot on collected values names its
 columns as the pivot without values does (`INTERVAL '1-0' YEAR TO MONTH`), and
-`create_dataframe` takes it for a year-month interval column. Downstream exhaustive
+`create_dataframe` takes it for an `INTERVAL YEAR TO MONTH` column (not for `INTERVAL YEAR`
+or `INTERVAL MONTH`, which the server cannot narrow the Arrow interval to). Downstream exhaustive
 matches on these enums must handle the new variant. The Python client still raises
 `NOT_IMPLEMENTED` when it collects a year-month interval, as PySpark does.
 
@@ -170,7 +176,8 @@ The Python classes of the native estimators, transformers and evaluators of
 `pyspark.ml.connect` take their params as PySpark's do. The constructors are
 keyword-only, raising PySpark's `TypeError`, except `MulticlassClassificationEvaluator`,
 which takes `metricName`, `labelCol` and `predictionCol` by position as well, as
-PySpark's does. Each value is converted by the `TypeConverters` of its param in
+PySpark's does; its `metricName` is `accuracy` by default, as in PySpark, where the JVM
+evaluator and the Rust API default to `f1`. Each value is converted by the `TypeConverters` of its param in
 PySpark (an integral float for an int param, for example), and a value that the
 converter rejects raises its `TypeError`. A fit, transform or evaluate sends only the
 params that the constructor or a setter set, so the server applies its defaults to

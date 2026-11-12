@@ -410,7 +410,8 @@ impl GroupedData {
         }
     }
 
-    /// Perform an aggregation.
+    /// Perform an aggregation. With no `expressions`, the result is the distinct grouping keys,
+    /// as of the Scala client, where PySpark's `agg` raises an `AssertionError`.
     pub fn agg(&self, expressions: Vec<Expression>) -> DataFrame {
         // Convert group columns to expressions
         let grouping_expressions = self
