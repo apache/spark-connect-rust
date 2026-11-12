@@ -196,9 +196,7 @@ impl RustConnectStub {
         let builder = ChannelBuilder::parse(url).to_pyerr()?;
         // Release the GIL during the connect handshake so a slow/unresponsive server
         // can't wedge the whole interpreter (incl. signal handling / Ctrl-C).
-        let mut client = py
-            .detach(|| block_on(SparkConnectClient::connect(&builder)))
-            .to_pyerr()?;
+        let mut client = until_signal(py, SparkConnectClient::connect(&builder))?.to_pyerr()?;
         // This stub is a drop-in for the grpcio stub: a single RPC per call. The reference
         // client wraps calls in its own GrpcRetryHandler (per the client-side retry
         // policy), so retrying inside our client too would double-retry and ignore that
@@ -259,8 +257,7 @@ impl RustConnectStub {
     /// ReleaseExecute: unary.
     fn release_execute<'py>(&self, py: Python<'py>, request: &[u8]) -> PyResult<Py<PyBytes>> {
         let req = proto::ReleaseExecuteRequest::decode(request).map_err(err)?;
-        let resp = py
-            .detach(|| block_on(self.client.release_execute(req)))
+        let resp = until_signal(py, self.client.release_execute(req))?
             .map_err(|e| spark_err_to_py(py, e))?;
         Ok(PyBytes::new(py, &resp.encode_to_vec()).unbind())
     }
@@ -268,8 +265,7 @@ impl RustConnectStub {
     /// AnalyzePlan: unary. Forwards raw request bytes (no prost decode) so deeply
     /// nested plans don't hit prost's recursion limit; returns raw response bytes.
     fn analyze_plan<'py>(&self, py: Python<'py>, request: &[u8]) -> PyResult<Py<PyBytes>> {
-        let resp = py
-            .detach(|| block_on(self.client.analyze_plan_raw(request.to_vec())))
+        let resp = until_signal(py, self.client.analyze_plan_raw(request.to_vec()))?
             .map_err(|e| spark_err_to_py(py, e))?;
         Ok(PyBytes::new(py, &resp).unbind())
     }
@@ -277,18 +273,16 @@ impl RustConnectStub {
     /// Config: unary.
     fn config<'py>(&self, py: Python<'py>, request: &[u8]) -> PyResult<Py<PyBytes>> {
         let req = proto::ConfigRequest::decode(request).map_err(err)?;
-        let resp = py
-            .detach(|| block_on(self.client.config(req)))
-            .map_err(|e| spark_err_to_py(py, e))?;
+        let resp =
+            until_signal(py, self.client.config(req))?.map_err(|e| spark_err_to_py(py, e))?;
         Ok(PyBytes::new(py, &resp.encode_to_vec()).unbind())
     }
 
     /// Interrupt: unary.
     fn interrupt<'py>(&self, py: Python<'py>, request: &[u8]) -> PyResult<Py<PyBytes>> {
         let req = proto::InterruptRequest::decode(request).map_err(err)?;
-        let resp = py
-            .detach(|| block_on(self.client.interrupt(req)))
-            .map_err(|e| spark_err_to_py(py, e))?;
+        let resp =
+            until_signal(py, self.client.interrupt(req))?.map_err(|e| spark_err_to_py(py, e))?;
         Ok(PyBytes::new(py, &resp.encode_to_vec()).unbind())
     }
 
@@ -296,8 +290,7 @@ impl RustConnectStub {
     /// the full server-side stack trace / message (needed for message-regex assertions).
     fn fetch_error_details<'py>(&self, py: Python<'py>, request: &[u8]) -> PyResult<Py<PyBytes>> {
         let req = proto::FetchErrorDetailsRequest::decode(request).map_err(err)?;
-        let resp = py
-            .detach(|| block_on(self.client.fetch_error_details(req)))
+        let resp = until_signal(py, self.client.fetch_error_details(req))?
             .map_err(|e| spark_err_to_py(py, e))?;
         Ok(PyBytes::new(py, &resp.encode_to_vec()).unbind())
     }

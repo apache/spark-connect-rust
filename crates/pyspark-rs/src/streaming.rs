@@ -1183,7 +1183,7 @@ impl PyStreamingQuery {
 
     #[getter]
     fn isActive(&self, py: Python<'_>) -> PyResult<bool> {
-        crate::dataframe::detached(py, || self.inner.is_active().map_err(Box::new))
+        interruptible(py, &self.inner.spark_session(), || self.inner.is_active())
     }
 
     /// The status of the query, as PySpark's: a dict of its `message`, `isDataAvailable` and

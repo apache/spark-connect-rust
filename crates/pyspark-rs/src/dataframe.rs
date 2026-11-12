@@ -108,19 +108,13 @@ impl PyDataFrame {
         py: Python<'_>,
         struct_handling_mode: Option<Bound<'_, PyAny>>,
     ) -> PyResult<Py<PyAny>> {
-        let settings = py
-            .detach(|| {
-                self.dataframe
-                    .spark_session()
-                    .conf()
-                    .get_many(&[
-                        "spark.sql.session.timeZone",
-                        "spark.sql.execution.pandas.structHandlingMode",
-                        "spark.sql.execution.arrow.pyspark.selfDestruct.enabled",
-                    ])
-                    .map_err(Box::new)
-            })
-            .to_pyerr()?;
+        let settings = interruptible(py, &self.dataframe.spark_session(), || {
+            self.dataframe.spark_session().conf().get_many(&[
+                "spark.sql.session.timeZone",
+                "spark.sql.execution.pandas.structHandlingMode",
+                "spark.sql.execution.arrow.pyspark.selfDestruct.enabled",
+            ])
+        })?;
         let (batches, schema) = interruptible(py, &self.dataframe.spark_session(), || {
             self.dataframe
                 .collect_record_batches_with_schema()
@@ -215,10 +209,8 @@ impl PyDataFrame {
     /// The number of rows and the truncation of the eager evaluation, as PySpark's `int` of
     /// each setting, if it is enabled.
     fn eager_eval(&self, py: Python<'_>) -> PyResult<Option<(i32, i32)>> {
-        let conf = self.dataframe.spark_session().conf();
-        let values = py
-            .detach(|| conf.get_many(&EAGER_EVAL).map_err(Box::new))
-            .to_pyerr()?;
+        let session = self.dataframe.spark_session();
+        let values = interruptible(py, &session, || session.conf().get_many(&EAGER_EVAL))?;
         if values[0].as_deref() != Some("true") {
             return Ok(None);
         }
@@ -1469,16 +1461,18 @@ impl PyDataFrame {
             return Err(not_expected_type(other, "other", "DataFrame"));
         }
         let other = self.same_session(other)?.dataframe.clone();
-        py.detach(|| self.dataframe.same_semantics(&other))
-            .to_pyerr()
+        interruptible(py, &self.dataframe.spark_session(), || {
+            self.dataframe.same_semantics(&other)
+        })
     }
 
     /// The server-side hash of this DataFrame's logical plan, asked once, as PySpark's.
     #[pyo3(name = "semanticHash")]
     fn semantic_hash(&self, py: Python<'_>) -> PyResult<i32> {
         cached(&self.semantic_hash, || {
-            py.detach(|| self.dataframe.semantic_hash().map_err(Box::new))
-                .to_pyerr()
+            interruptible(py, &self.dataframe.spark_session(), || {
+                self.dataframe.semantic_hash().map_err(Box::new)
+            })
         })
     }
 
@@ -1555,7 +1549,7 @@ impl PyDataFrame {
     fn cache<'py>(slf: PyRef<'py, Self>, py: Python<'py>) -> PyResult<PyRef<'py, Self>> {
         // As PySpark's, which returns the DataFrame itself.
         let df = slf.dataframe.clone();
-        py.detach(|| df.cache().map_err(Box::new)).to_pyerr()?;
+        interruptible(py, &df.spark_session(), || df.cache().map_err(Box::new))?;
         Ok(slf)
     }
 
@@ -1568,8 +1562,9 @@ impl PyDataFrame {
     ) -> PyResult<PyRef<'py, Self>> {
         // As PySpark's, which returns the DataFrame itself.
         let df = slf.dataframe.clone();
-        py.detach(|| df.unpersist(blocking).map_err(Box::new))
-            .to_pyerr()?;
+        interruptible(py, &df.spark_session(), || {
+            df.unpersist(blocking).map_err(Box::new)
+        })?;
         Ok(slf)
     }
 
@@ -1632,12 +1627,11 @@ impl PyDataFrame {
                 ))
             }
         };
-        py.detach(|| {
+        interruptible(py, &self.dataframe.spark_session(), || {
             self.dataframe
                 .explain_string(&explain_mode)
                 .map_err(Box::new)
         })
-        .to_pyerr()
     }
 
     /// Register this DataFrame as a temporary view.
@@ -1996,24 +1990,27 @@ impl PyDataFrame {
     #[pyo3(name = "inputFiles")]
     fn input_files(&self, py: Python<'_>) -> PyResult<Vec<String>> {
         cached(&self.input_files, || {
-            py.detach(|| self.dataframe.input_files().map_err(Box::new))
-                .to_pyerr()
+            interruptible(py, &self.dataframe.spark_session(), || {
+                self.dataframe.input_files().map_err(Box::new)
+            })
         })
     }
 
     /// Whether the server answers that this DataFrame is local (a local relation).
     #[pyo3(name = "isLocal")]
     fn is_local(&self, py: Python<'_>) -> PyResult<bool> {
-        py.detach(|| self.dataframe.is_local_on_server().map_err(Box::new))
-            .to_pyerr()
+        interruptible(py, &self.dataframe.spark_session(), || {
+            self.dataframe.is_local_on_server().map_err(Box::new)
+        })
     }
 
     /// Whether this (cached) DataFrame is cached.
     #[pyo3(name = "is_cached")]
     #[getter]
     fn is_cached(&self, py: Python<'_>) -> PyResult<bool> {
-        py.detach(|| self.dataframe.is_cached().map_err(Box::new))
-            .to_pyerr()
+        interruptible(py, &self.dataframe.spark_session(), || {
+            self.dataframe.is_cached().map_err(Box::new)
+        })
     }
 
     /// Whether this DataFrame contains one or more sources that continuously return data, asked
@@ -2022,8 +2019,9 @@ impl PyDataFrame {
     #[getter]
     fn is_streaming(&self, py: Python<'_>) -> PyResult<bool> {
         cached(&self.is_streaming, || {
-            py.detach(|| self.dataframe.is_streaming().map_err(Box::new))
-                .to_pyerr()
+            interruptible(py, &self.dataframe.spark_session(), || {
+                self.dataframe.is_streaming().map_err(Box::new)
+            })
         })
     }
 
@@ -2031,9 +2029,9 @@ impl PyDataFrame {
     #[pyo3(name = "storageLevel")]
     #[getter]
     fn storage_level(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let sl = py
-            .detach(|| self.dataframe.storage_level().map_err(Box::new))
-            .to_pyerr()?;
+        let sl = interruptible(py, &self.dataframe.spark_session(), || {
+            self.dataframe.storage_level().map_err(Box::new)
+        })?;
         let cls = py.import("pyspark.storagelevel")?.getattr("StorageLevel")?;
         Ok(cls
             .call1((
@@ -2183,8 +2181,9 @@ impl PyDataFrame {
         };
         // As PySpark's, which returns the DataFrame itself.
         let df = slf.dataframe.clone();
-        py.detach(|| df.persist(level).map_err(Box::new))
-            .to_pyerr()?;
+        interruptible(py, &df.spark_session(), || {
+            df.persist(level).map_err(Box::new)
+        })?;
         Ok(slf)
     }
 
@@ -2494,9 +2493,9 @@ impl PyDataFrame {
     /// `df.schema.fields`, `df.schema["c"]`, `df.schema.fieldNames()` all work.
     #[getter]
     fn schema(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let schema = py
-            .detach(|| self.dataframe.schema().map_err(Box::new))
-            .to_pyerr()?;
+        let schema = interruptible(py, &self.dataframe.spark_session(), || {
+            self.dataframe.schema()
+        })?;
         check_nanosecond_timestamps(py, Some(&schema))?;
         crate::types::data_type_to_py(py, &schema)
     }
@@ -2545,9 +2544,10 @@ impl PyDataFrame {
     #[getter]
     fn columns(&self, py: Python<'_>) -> PyResult<Vec<String>> {
         // The schema is cached, so the names come from it without another request.
-        let schema = py.detach(|| self.dataframe.schema()).to_pyerr()?;
+        let session = self.dataframe.spark_session();
+        let schema = interruptible(py, &session, || self.dataframe.schema())?;
         check_nanosecond_timestamps(py, Some(&schema))?;
-        py.detach(|| self.dataframe.columns().to_pyerr())
+        interruptible(py, &session, || self.dataframe.columns())
     }
 
     /// Get the last `num` rows as a list of Rows (eager, like pyspark `tail`).
@@ -2642,7 +2642,9 @@ impl PyDataFrame {
             Some(level) if level.is_truthy()? => Some(level),
             _ => None,
         };
-        let schema = py.detach(|| self.dataframe.schema().to_pyerr())?;
+        let schema = interruptible(py, &self.dataframe.spark_session(), || {
+            self.dataframe.schema()
+        })?;
         check_nanosecond_timestamps(py, Some(&schema))?;
         let depth = level
             .map(crate::types::normalize_tree_depth)
@@ -2656,7 +2658,9 @@ impl PyDataFrame {
     /// Get the schema as a list of (name, type) tuples.
     #[getter]
     fn dtypes(&self, py: Python<'_>) -> PyResult<Vec<(String, String)>> {
-        let schema = py.detach(|| self.dataframe.schema().to_pyerr())?;
+        let schema = interruptible(py, &self.dataframe.spark_session(), || {
+            self.dataframe.schema()
+        })?;
         check_nanosecond_timestamps(py, Some(&schema))?;
         let spark_connect::types::DataType::Struct { fields } = schema else {
             unreachable!("schema() validates struct responses")
@@ -2828,9 +2832,9 @@ impl PyDataFrame {
         profile: Option<Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
         validate_map_function(py, &func, eval_type::SQL_MAP_PANDAS_ITER_UDF)?;
-        let cols = py
-            .detach(|| self.dataframe.columns().map_err(Box::new))
-            .to_pyerr()?;
+        let cols = interruptible(py, &self.dataframe.spark_session(), || {
+            self.dataframe.columns()
+        })?;
         let udf = build_map_udf(
             py,
             &self.dataframe.spark_session(),
@@ -2858,9 +2862,9 @@ impl PyDataFrame {
         profile: Option<Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
         validate_map_function(py, &func, eval_type::SQL_MAP_ARROW_ITER_UDF)?;
-        let cols = py
-            .detach(|| self.dataframe.columns().map_err(Box::new))
-            .to_pyerr()?;
+        let cols = interruptible(py, &self.dataframe.spark_session(), || {
+            self.dataframe.columns()
+        })?;
         let udf = build_map_udf(
             py,
             &self.dataframe.spark_session(),
@@ -4124,15 +4128,6 @@ impl<T: Clone> WriterState<T> {
     }
 }
 
-/// `f` without the GIL, as PySpark's requests to the server release it while they wait, so
-/// that other Python threads run. `f` boxes its error, which keeps its result small.
-pub(crate) fn detached<T: Send>(
-    py: Python<'_>,
-    f: impl FnOnce() -> Result<T, Box<spark_connect_core::error::SparkError>> + Send,
-) -> PyResult<T> {
-    py.detach(f).to_pyerr()
-}
-
 // ---- Shared helpers for closure-based (UDF) DataFrame/GroupedData methods ----
 
 /// cloudpickle an arbitrary Python object to bytes (mirrors the scalar UDF path,
@@ -4481,12 +4476,11 @@ fn check_collectable(
 /// including when the server sends only an Arrow schema or the result has no binary fields.
 /// Collect reads it after execution; a local iterator snapshots it before its first fetch.
 fn read_binary_as_bytes(py: Python<'_>, dataframe: &DataFrame) -> PyResult<bool> {
-    let value = detached(py, || {
-        dataframe
-            .spark_session()
+    let session = dataframe.spark_session();
+    let value = interruptible(py, &session, || {
+        session
             .conf()
             .get_with_default("spark.sql.execution.pyspark.binaryAsBytes", Some("true"))
-            .map_err(Box::new)
     })?;
     Ok(value.is_some_and(|value| value.eq_ignore_ascii_case("true")))
 }

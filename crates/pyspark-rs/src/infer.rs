@@ -17,12 +17,11 @@ use pyo3::types::{
     IntoPyDict, PyBool, PyByteArray, PyBytes, PyDict, PyFloat, PyInt, PyList, PyMemoryView,
     PyString, PyTuple, PyType,
 };
-use spark_connect::conf::RuntimeConf;
 use spark_connect::row::{StructValue, Value};
+use spark_connect::session::SparkSession;
 use spark_connect::types::{DataType, GeographyType, GeometryType, StructField};
 
 use crate::column::raise_pyspark;
-use crate::errors::ResultExt;
 use crate::values::{geography_class, geometry_class, variant_val_class};
 
 static DECIMAL: PyOnceLock<Py<PyType>> = PyOnceLock::new();
@@ -236,14 +235,14 @@ struct Confs {
 /// needs one. Only dicts, lists of more than one element and naive datetimes depend on them,
 /// so other data is inferred without a request, as without a server.
 pub(crate) struct LazyConfs {
-    conf: RuntimeConf,
+    session: SparkSession,
     confs: OnceCell<Confs>,
 }
 
 impl LazyConfs {
-    pub(crate) fn new(conf: RuntimeConf) -> Self {
+    pub(crate) fn new(session: SparkSession) -> Self {
         LazyConfs {
-            conf,
+            session,
             confs: OnceCell::new(),
         }
     }
@@ -258,10 +257,9 @@ impl LazyConfs {
             "spark.sql.pyspark.legacy.inferMapTypeFromFirstPair.enabled",
             "spark.sql.timestampType",
         ];
-        let conf = &self.conf;
-        let values = py
-            .detach(|| conf.get_many(&keys).map_err(Box::new))
-            .to_pyerr()?;
+        let session = self.session.clone();
+        let values =
+            crate::interrupt::interruptible(py, &session, || session.conf().get_many(&keys))?;
         let is =
             |i: usize, expected: &str| values.get(i).and_then(|v| v.as_deref()) == Some(expected);
         Ok(self.confs.get_or_init(|| Confs {
