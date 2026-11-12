@@ -6971,7 +6971,7 @@ def test_writers_and_readers_reject_a_path_that_is_not_a_str_as_pyspark(mock_con
     df = spark.range(1)
     stream = spark.readStream.format("rate").load().writeStream
     message = "bad argument type for built-in operation"
-    for path in [123, 1.5, ["a", 1]]:
+    for path in [123, 1.5, ["a", 1], bytearray(b"p")]:
         for call in [
             lambda: df.write.save(path),
             lambda: df.write.json(path),
@@ -6986,6 +6986,38 @@ def test_writers_and_readers_reject_a_path_that_is_not_a_str_as_pyspark(mock_con
                 call()
             assert type(error.value) is TypeError and str(error.value) == message
     assert service.execute_requests == []
+
+
+def test_writers_take_a_bytes_path_as_pyspark(mock_connect):
+    # As PySpark's default protobuf backend (upb), which sets a bytes value of a string field as
+    # its UTF-8 text: the writers and DataStreamWriter.start write to a bytes path, and bytes that
+    # are not UTF-8 raise the UnicodeDecodeError of their decoding.
+    spark, service = mock_connect
+
+    def sent_command():
+        # ExecutePlanRequest.plan=3 -> Plan.command=2.
+        plan = parse_message(parse_message(service.execute_requests[-1])[3][0])
+        return parse_message(plan[2][0])
+
+    for write in [
+        lambda path: spark.range(1).write.save(path),
+        lambda path: spark.range(1).write.json(path),
+        lambda path: spark.range(1).write.parquet(path),
+    ]:
+        write(b"p")
+        # Command.write_operation=2 -> WriteOperation.path=3.
+        assert parse_message(sent_command()[2][0])[3] == [b"p"]
+        with pytest.raises(UnicodeDecodeError) as error:
+            write(b"\xff")
+        assert str(error.value) == (
+            "'utf-8' codec can't decode byte 0xff in position 0: invalid start byte"
+        )
+    # ExecutePlanResponse.write_stream_operation_start_result=8: query_id=1 (id=1, run_id=2).
+    service.execute_payload = message_field(
+        8, message_field(1, message_field(1, "q") + message_field(2, "r")))
+    spark.readStream.format("rate").load().writeStream.start(b"s")
+    # Command.write_stream_operation_start=6 -> WriteStreamOperationStart.path=11.
+    assert parse_message(sent_command()[6][0])[11] == [b"s"]
 
 
 def test_readers_keep_their_settings_when_the_path_is_not_a_str_as_pyspark(mock_connect):
