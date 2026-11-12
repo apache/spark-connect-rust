@@ -222,7 +222,7 @@ pub(crate) fn value_not_between(py: Python<'_>) -> PyErr {
 
 /// The `ValueError` of protobuf's Python string field for a str that is not encodable as UTF-8,
 /// with its message, which shows at most 1024 characters of the repr of the value.
-fn not_utf8_string(obj: &Bound<'_, PyAny>) -> PyErr {
+pub(crate) fn not_utf8_string(obj: &Bound<'_, PyAny>) -> PyErr {
     let message = pyo3::types::PyString::new(
         obj.py(),
         "%.1024r isn't a valid unicode string and can't be encoded in UTF-8.",
@@ -360,10 +360,11 @@ pub(crate) fn to_value_column(obj: &Bound<'_, PyAny>) -> PyResult<Column> {
     to_column(obj)
 }
 
-/// How deep the lists of a Column method may nest. PySpark's `LiteralExpression` recurses in
-/// Python for each level, so under Python's default recursion limit it raises `RecursionError`
-/// for a list nested about 990 levels deep (a little less below a deeper caller). A deeper list
-/// is a `RecursionError` here too, rather than a native stack overflow.
+/// How deep the lists of a Column method may nest. It protects this client: a deeper list is a
+/// `RecursionError` here, rather than a native stack overflow. PySpark's `LiteralExpression`
+/// recurses in Python for each level, so where its `RecursionError` starts depends on the Python
+/// recursion limit and on the protobuf backend, and this bound is not a copy of its point (a
+/// little less below a deeper caller).
 const MAX_LIST_DEPTH: usize = 988;
 
 /// The stack that a level of nested lists keeps free before it goes down a level, and the size of
@@ -812,8 +813,7 @@ fn scalar_literal(obj: &Bound<'_, PyAny>) -> PyResult<Option<LiteralExpression>>
                     crate::infer::wall_clock_micros(obj)?,
                 )));
             }
-            // Shared with session::py_to_value so lit() and createDataFrame() agree (a pandas
-            // Timestamp's .timestamp() treats a naive value as UTC; normalize it first).
+            // Shared with session::py_to_value so lit() and createDataFrame() agree.
             let micros = crate::session::datetime_to_micros(obj)?;
             return Ok(Some(LiteralExpression::Timestamp(micros)));
         }

@@ -213,13 +213,16 @@ impl LocalRowIterator {
                     Ok(Some(mut resp)) => {
                         capture_execution(&mut resp, execution_info, session);
                         if let Err(e) = keep_schema(&mut resp, &self.schema) {
-                            return Some(Err(e));
+                            return Some(Err(stream.fail(e)));
                         }
                         if let Some(proto::execute_plan_response::ResponseType::ArrowBatch(batch)) =
                             resp.response_type
                         {
                             let schema = self.schema.lock().unwrap_or_else(|p| p.into_inner());
-                            return Some(decode_arrow_batch_of(&batch, schema.as_ref()));
+                            return Some(
+                                decode_arrow_batch_of(&batch, schema.as_ref())
+                                    .map_err(|e| stream.fail(e)),
+                            );
                         }
                         // Metrics/progress response: keep pulling for a batch.
                     }
@@ -241,9 +244,18 @@ impl LocalRowIterator {
             },
             RowSource::Prefetch { rx, task, wait } => {
                 // The caller waits for the batch of the task, which is a wait for the execution.
+                // The task has no wait of its own that a signal aborts, so the caller ends its
+                // wait for the batch at the first signal, as PySpark's retry sleeps do, and
+                // dropping the receiver stops the task.
                 let batch = {
                     let _waiting = wait.waiting();
-                    block_on(rx.recv())
+                    block_on(spark_connect_core::runtime::until_abort(
+                        spark_connect_core::runtime::ABORT_RETRIES,
+                        rx.recv(),
+                    ))
+                };
+                let Some(batch) = batch else {
+                    return Some(Err(spark_connect_core::client::wait_aborted().into()));
                 };
                 if batch.is_none() {
                     // The channel closed: the task ended, or it panicked, which then drops its
@@ -948,7 +960,7 @@ impl DataFrame {
             };
             capture_execution(&mut resp, &mut info, &self.session);
             if let Some(data_type) = resp.schema.take() {
-                schema = Some(DataType::from_proto(&data_type)?);
+                schema = Some(DataType::from_proto(&data_type).map_err(|e| stream.fail(e))?);
             }
             if let Some(proto::execute_plan_response::ResponseType::ArrowBatch(batch)) =
                 resp.response_type
@@ -965,7 +977,7 @@ impl DataFrame {
                             invalid_utf8 = Some(error);
                         }
                     }
-                    Err(error) => return Err(error),
+                    Err(error) => return Err(stream.fail(error)),
                 }
             }
         }
@@ -1039,12 +1051,13 @@ impl DataFrame {
             };
             capture_execution(&mut resp, &mut info, &self.session);
             if let Some(data_type) = resp.schema.take() {
-                schema = Some(DataType::from_proto(&data_type)?);
+                schema = Some(DataType::from_proto(&data_type).map_err(|e| stream.fail(e))?);
             }
             if let Some(proto::execute_plan_response::ResponseType::ArrowBatch(batch)) =
                 resp.response_type
             {
-                let record_batches = decode_arrow_record_batches(&batch)?;
+                let record_batches =
+                    decode_arrow_record_batches(&batch).map_err(|e| stream.fail(e))?;
                 batches.extend(record_batches);
             }
         }
@@ -1328,7 +1341,8 @@ impl DataFrame {
 
     /// Check if the DataFrame is empty.
     pub fn is_empty(&self) -> Result<bool> {
-        self.limit(1).count().map(|c| c == 0)
+        let no_columns: [Column; 0] = [];
+        self.select(no_columns).take(1).map(|rows| rows.is_empty())
     }
 
     /// Get column names.
@@ -1769,7 +1783,9 @@ impl DataFrame {
         }
     }
 
-    /// Observe metrics on this DataFrame.
+    /// Observe metrics on this DataFrame. With no `exprs`, the action fails on the server, where
+    /// PySpark's `observe` raises `CANNOT_BE_EMPTY` at the call, as
+    /// [`DataFrame::observe_with`] does.
     pub fn observe(&self, name: &str, exprs: Vec<Expression>) -> DataFrame {
         let plan = LogicalPlan::Observe {
             input: Arc::clone(&self.plan),
@@ -1791,6 +1807,14 @@ impl DataFrame {
         observation: &crate::observation::Observation,
         exprs: Vec<Expression>,
     ) -> Result<DataFrame> {
+        // As PySpark's `observe`, which checks this first.
+        if exprs.is_empty() {
+            return Err(SparkError::classed(
+                SparkErrorKind::ValueError,
+                "CANNOT_BE_EMPTY",
+                &[("item", "exprs")],
+            ));
+        }
         let name = observation.name_to_observe()?;
         if self.is_streaming()? {
             return Err(SparkError::classed(
@@ -1833,7 +1857,9 @@ impl DataFrame {
         crate::group::NaFunctions::new(self.clone())
     }
 
-    /// Perform aggregation without grouping.
+    /// Perform aggregation without grouping. With no `expressions`, the result is one row of
+    /// no columns, as of the Scala client's `agg(Map.empty)`, where PySpark's `agg` raises
+    /// `CANNOT_BE_EMPTY`.
     pub fn agg(&self, expressions: Vec<Expression>) -> DataFrame {
         let plan = LogicalPlan::Aggregate {
             input: Arc::clone(&self.plan),
@@ -2991,6 +3017,9 @@ fn read_strings_as_binary(
         let message = root_as_message(take(&mut rest, meta_len)?).ok()?;
         let body = take(&mut rest, usize::try_from(message.bodyLength()).ok()?)?;
         match message.header_type() {
+            // A stream has one schema: with another, its batches would not have the columns
+            // of the types read, so it does not read.
+            MessageHeader::Schema if strings.is_some() => return None,
             MessageHeader::Schema => {
                 let fields = fb_to_schema(message.header_as_schema()?);
                 schema = Some(Arc::new(binary_schema(&fields)));
@@ -4161,6 +4190,36 @@ mod nested_decode_tests {
     }
 
     #[test]
+    fn a_stream_of_two_schemas_has_no_invalid_utf8_to_report() {
+        // An IPC stream has one schema. With a second one of fewer columns, the scan, which took
+        // the columns of the first batch and the types of the last schema, indexed out of bounds.
+        use arrow::ipc::writer::StreamWriter;
+        let stream = |names: &[&str]| {
+            let fields: Vec<_> = names
+                .iter()
+                .map(|name| Field::new(*name, DataType::Utf8, true))
+                .collect();
+            let schema = Arc::new(arrow::datatypes::Schema::new(fields));
+            let columns = names
+                .iter()
+                .map(|_| Arc::new(arrow::array::StringArray::from(vec!["a"])) as ArrayRef)
+                .collect();
+            let batch = arrow::record_batch::RecordBatch::try_new(schema.clone(), columns).unwrap();
+            let mut data = vec![];
+            let mut writer = StreamWriter::try_new(&mut data, &schema).unwrap();
+            writer.write(&batch).unwrap();
+            writer.finish().unwrap();
+            drop(writer);
+            data
+        };
+        let mut data = stream(&["x", "y"]);
+        // Without its end of stream, so that the second stream's schema follows its batch.
+        data.truncate(data.len() - 8);
+        data.extend(stream(&["x"]));
+        assert_eq!(first_invalid_utf8(&data), None);
+    }
+
+    #[test]
     fn unsupported_children_remain_lazy_under_nulls_empty_containers_and_variants() {
         let null_duration = DurationSecondArray::from(vec![None]);
         assert_eq!(arrow_value_at(&null_duration, 0).unwrap(), Value::Null);
@@ -5083,6 +5142,24 @@ mod plan_construction_tests {
         assert_eq!(
             message(vec![]),
             "[CANNOT_BE_EMPTY] At least one value must be specified."
+        );
+    }
+
+    #[test]
+    fn observe_with_no_expressions_is_cannot_be_empty_as_pyspark() {
+        // As PySpark's `observe`, which checks this first, before any request.
+        let observation = crate::observation::Observation::new("metrics");
+        let Err(error) = session()
+            .range(3)
+            .unwrap()
+            .observe_with(&observation, vec![])
+        else {
+            panic!("no exprs must be rejected");
+        };
+        assert_eq!(error.kind, SparkErrorKind::ValueError);
+        assert_eq!(
+            error.message(),
+            "[CANNOT_BE_EMPTY] At least one exprs must be specified."
         );
     }
 
@@ -6841,6 +6918,84 @@ mod subquery_tests {
         assert_eq!(
             df.exists().expression().render(),
             format!("SubqueryExpression(plan=<plan {id}>, type=exists)")
+        );
+    }
+}
+
+/// The requests of deep plans and expressions, sent from a thread with a small stack. The clone of
+/// a request recurses once per level, as its serialization does, so the client grows the stack for
+/// it. The client of a port that nothing listens to fails each call after its request is built and
+/// cloned, so that a call returns an error without a server.
+#[cfg(test)]
+mod deep_request_stack_tests {
+    use super::*;
+    use crate::column::col;
+    use crate::expression::MAX_EXPRESSION_DEPTH;
+    use crate::plan::MAX_PLAN_DEPTH;
+    use crate::session::SparkSession;
+    use spark_connect_core::retries::RetryPolicy;
+    use spark_connect_core::{ChannelBuilder, SparkConnectClient};
+
+    fn unreachable_session() -> SparkSession {
+        let builder = ChannelBuilder::parse("sc://127.0.0.1:1").expect("valid URL");
+        let mut client =
+            block_on(SparkConnectClient::connect(&builder)).expect("failed to build client");
+        client.set_retry_policy(RetryPolicy::no_retries());
+        SparkSession::new(client)
+    }
+
+    /// Run `f` on a thread of 512 KiB, the smallest stack that a Python thread may have, in a
+    /// release build, as the drop-in runs. The frames of a debug build, and more so of a
+    /// coverage build, are several times larger, and the encode and drop of a request at the
+    /// bound, which stay on the calling thread, take more than 512 KiB there, so its thread has
+    /// the 8 MiB of a default thread of Linux.
+    fn on_a_small_stack<T: Send>(f: impl FnOnce() -> T + Send) -> T {
+        let stack = if cfg!(debug_assertions) {
+            8 << 20
+        } else {
+            512 << 10
+        };
+        std::thread::scope(|scope| {
+            std::thread::Builder::new()
+                .stack_size(stack)
+                .spawn_scoped(scope, f)
+                .unwrap()
+                .join()
+                .unwrap()
+        })
+    }
+
+    #[test]
+    fn a_plan_at_the_bound_is_sent_from_a_small_stack_without_overflowing_it() {
+        let spark = unreachable_session();
+        let mut df = spark.range(1).unwrap();
+        for i in 1..MAX_PLAN_DEPTH {
+            df = df.with_column(&format!("c{i}"), col("id"));
+        }
+        assert_eq!(df.plan().depth(), MAX_PLAN_DEPTH);
+        let (schema, collect) = on_a_small_stack(move || (df.schema(), df.collect()));
+        for error in [schema.unwrap_err(), collect.unwrap_err()] {
+            assert_ne!(
+                error.kind,
+                SparkErrorKind::RecursionError,
+                "a plan at the bound is sent: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_deep_expression_is_sent_from_a_small_stack_without_overflowing_it() {
+        let spark = unreachable_session();
+        let mut expr = col("id");
+        for _ in 0..MAX_EXPRESSION_DEPTH - 5 {
+            expr = expr.add(col("id"));
+        }
+        let df = spark.range(1).unwrap().select([expr.alias("x")]);
+        let schema = on_a_small_stack(move || df.schema()).unwrap_err();
+        assert_ne!(
+            schema.kind,
+            SparkErrorKind::RecursionError,
+            "an expression within the bound is sent: {schema}"
         );
     }
 }

@@ -299,10 +299,14 @@ impl PyMLModel {
             // As PySpark, the transform of a DataFrame of another session refers to the model
             // on the server of that session, which raises CONNECT_ML.CACHE_INVALID when the
             // DataFrame is analyzed or run, as it caches no such model. (The Rust API rejects
-            // the transform itself.)
+            // the transform itself.) Its input is the placeholder of the DataFrame, as in the
+            // plans of `pyspark.ml`: the core resolves it, counting its levels for the depth
+            // bound, where an input put in whole would count as one level.
+            let input =
+                DataFrame::from_sent_relation(session.clone(), df.dataframe.placeholder_relation());
             let relation = spark_connect_proto::Relation {
                 rel_type: Some(spark_connect_proto::relation::RelType::MlRelation(
-                    Box::new(model.build_ml_relation(&df.dataframe).to_pyerr()?),
+                    Box::new(model.build_ml_relation(&input).to_pyerr()?),
                 )),
                 ..Default::default()
             };
@@ -1850,7 +1854,7 @@ impl PyRegressionEvaluator {
     #[new]
     #[pyo3(
         signature = (*args, **kwargs),
-        text_signature = "(*, labelCol=None, predictionCol=None, metricName=None)"
+        text_signature = "(*, metricName='rmse', labelCol='label', predictionCol='prediction')"
     )]
     fn new(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
         let mut this = Self {
@@ -1906,7 +1910,7 @@ impl PyBinaryClassificationEvaluator {
     #[new]
     #[pyo3(
         signature = (*args, **kwargs),
-        text_signature = "(*, labelCol=None, rawPredictionCol=None, metricName=None)"
+        text_signature = "(*, metricName='areaUnderROC', labelCol='label', rawPredictionCol='rawPrediction')"
     )]
     fn new(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
         let mut this = Self {
@@ -2009,13 +2013,20 @@ impl PyMulticlassClassificationEvaluator {
     #[new]
     #[pyo3(
         signature = (*args, **kwargs),
-        text_signature = "(metricName=None, labelCol=None, predictionCol=None)"
+        text_signature = "(metricName='accuracy', labelCol='label', predictionCol='prediction')"
     )]
     fn new(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
         let mut this = Self {
             inner: MulticlassClassificationEvaluator::new(),
             unsendable: Vec::new(),
         };
+        // As PySpark's, whose constructor sets the metric "accuracy" by default, where the JVM
+        // evaluator's default (that of the Rust API) is "f1".
+        apply(
+            &mut this,
+            "metricName",
+            Converted::Str("accuracy".to_string()),
+        );
         init_params(
             &mut this,
             "MulticlassClassificationEvaluator",

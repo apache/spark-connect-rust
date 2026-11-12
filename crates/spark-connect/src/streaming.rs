@@ -4,7 +4,7 @@
 //! for building and executing streaming workloads.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak};
 use uuid;
 
 use spark_connect_core::error::{Result, SparkError, SparkErrorKind};
@@ -998,12 +998,26 @@ pub trait StreamingQueryListener: Send + Sync {
 
 /// The client-side listener bus of one session. Handles of the same session share it;
 /// a new server session has a separate bus. It never owns a session or a manager.
+///
+/// # Locking
+///
+/// `state` is the only lock of the bus, and it is taken only through [`ListenerBus::lock`] and
+/// [`ListenerBus::wait`]. Nothing that can block or run the code of a user happens while it is
+/// held: no listener callback, no drop of a listener (see [`drop_isolated`]), no RPC, no join of
+/// the worker and no drop of an event stream, whose progress handlers are of the user. A critical
+/// section only reads and assigns the fields and takes no other lock, so the bus has no lock
+/// order to break. The waits for another thread are on `changed`, which releases the lock.
 #[derive(Default)]
 pub(crate) struct ListenerBus {
     state: Mutex<ListenerBusState>,
     changed: Condvar,
 }
 
+/// The fields are of two groups, which one lock guards because a removal reads them together:
+/// the subscription (`listeners`, `thread`, `cancel`, `phase`, `worker_id`, `generation`,
+/// `server_registration_held`), and the deliveries in flight (`dispatching`,
+/// `started_dispatches`). The worker marks its delivery and takes its snapshot of the listeners
+/// in one critical section, so a removal either precedes the snapshot or sees the delivery.
 #[derive(Default)]
 struct ListenerBusState {
     listeners: Vec<(String, Arc<dyn StreamingQueryListener>)>,
@@ -1034,7 +1048,7 @@ struct StartedDispatch {
 
 impl Drop for StartedDispatch {
     fn drop(&mut self) {
-        let mut state = self.bus.state.lock().unwrap();
+        let mut state = self.bus.lock();
         if let Some(index) = state
             .started_dispatches
             .iter()
@@ -1055,7 +1069,7 @@ struct Dispatch<'a> {
 impl Drop for Dispatch<'_> {
     fn drop(&mut self) {
         if let Some(bus) = self.bus.upgrade() {
-            let mut state = bus.state.lock().unwrap();
+            let mut state = bus.lock();
             if state.dispatching == Some(self.generation) {
                 state.dispatching = None;
                 bus.changed.notify_all();
@@ -1073,18 +1087,42 @@ enum ListenerBusPhase {
 }
 
 impl ListenerBus {
+    /// Lock the state of the bus. A poisoned lock is recovered rather than propagated: no
+    /// critical section runs the code of a user or leaves the fields half-updated where it can
+    /// panic, so the state behind a poisoned lock is as valid as any other, and a panic of one
+    /// thread must not fail every later call on the session, or abort the process from the
+    /// guards that lock while they unwind.
+    fn lock(&self) -> MutexGuard<'_, ListenerBusState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Wait for a change of the state, releasing the lock meanwhile; as [`lock`](Self::lock)
+    /// for a poisoned lock.
+    fn wait<'a>(
+        &self,
+        state: MutexGuard<'a, ListenerBusState>,
+    ) -> MutexGuard<'a, ListenerBusState> {
+        self.changed
+            .wait(state)
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
     /// Clear only the registrations of the worker that has finished this generation.
     fn finish_generation(&self, generation: u64) {
-        let mut state = self.state.lock().unwrap();
-        if state.generation == generation {
-            state.listeners.clear();
+        let stale = {
+            let mut state = self.lock();
+            if state.generation != generation {
+                return;
+            }
             state.cancel.take();
-        }
+            std::mem::take(&mut state.listeners)
+        };
+        drop_isolated(stale);
     }
 
     /// Record that the server may still hold the listener of `generation`, whose worker failed.
     fn mark_server_registration_held(&self, generation: u64) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.lock();
         if state.generation == generation {
             state.server_registration_held = true;
         }
@@ -1095,19 +1133,31 @@ impl ListenerBus {
     /// of one listener: the query is still returned, and the other listeners still get the event.
     fn post_to_all(&self, event: &StreamingQueryListenerEvent) {
         let listeners: Vec<Arc<dyn StreamingQueryListener>> = self
-            .state
             .lock()
-            .unwrap()
             .listeners
             .iter()
             .map(|(_, listener)| Arc::clone(listener))
             .collect();
-        for listener in listeners {
+        for listener in &listeners {
             let posted =
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| listener.on_event(event)));
             if let Err(payload) = posted {
                 warn_of_listener_panic(payload.as_ref());
             }
+        }
+        drop_isolated(listeners);
+    }
+}
+
+/// Drop listeners that left the bus, or the snapshot of a delivery, one by one and never under
+/// the state lock: the last reference to a listener runs its `Drop`, which is code of the user
+/// as its callbacks are. It may call back into the bus, and its panic is reported and isolated
+/// as that of a callback, so it neither poisons the lock nor unwinds through the bus.
+fn drop_isolated<T>(values: impl IntoIterator<Item = T>) {
+    for value in values {
+        let dropped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(value)));
+        if let Err(payload) = dropped {
+            warn_of_listener_panic(payload.as_ref());
         }
     }
 }
@@ -1173,7 +1223,7 @@ fn run_listener_event_loop(
             break;
         };
         let listeners: Vec<Arc<dyn StreamingQueryListener>> = {
-            let mut state = owner.state.lock().unwrap();
+            let mut state = owner.lock();
             if state.generation != generation || state.listeners.is_empty() {
                 break;
             }
@@ -1226,6 +1276,7 @@ fn run_listener_event_loop(
             break;
         }
         drop(dispatch);
+        drop_isolated(listeners);
     }
     if let Some((listeners, error, dispatch)) = failure {
         // Any failure of the subscription, transport included, may leave the server's
@@ -1237,7 +1288,7 @@ fn run_listener_event_loop(
         // A removal from another thread waits for this terminal notification, just
         // as it waits for an ordinary event. No state lock or strong bus owner is
         // held across either callback path; the worker can still remove itself.
-        for listener in listeners {
+        for listener in &listeners {
             let reported = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 listener.on_stream_error(&error)
             }));
@@ -1246,6 +1297,7 @@ fn run_listener_event_loop(
             }
         }
         drop(dispatch);
+        drop_isolated(listeners);
     }
 }
 
@@ -1274,7 +1326,7 @@ impl StreamingQueryManager {
     /// callbacks. A callback during shutdown may remove/close the bus as a no-op, but
     /// cannot wait for its own worker to finish in order to start a new subscription.
     fn idle_state(&self, removing: bool) -> Result<Option<MutexGuard<'_, ListenerBusState>>> {
-        let mut state = self.bus.state.lock().unwrap();
+        let mut state = self.bus.lock();
         while state.phase != ListenerBusPhase::Idle {
             if state.worker_id == Some(std::thread::current().id()) {
                 if removing && state.phase == ListenerBusPhase::Stopping {
@@ -1285,7 +1337,7 @@ impl StreamingQueryManager {
                      lifecycle operation is in progress",
                 ));
             }
-            state = self.bus.changed.wait(state).unwrap();
+            state = self.bus.wait(state);
         }
         Ok(Some(state))
     }
@@ -1327,13 +1379,13 @@ impl StreamingQueryManager {
         state.cancel = Some(cancel);
         let previous = state.thread.take();
         drop(state);
-        drop(stale);
+        drop_isolated(stale);
         Self::join_listener_thread(previous);
         if release_server {
             if let Err(error) = self.remove_server_listener(false) {
                 // Without the removal, the server would answer the add below with no response,
                 // and the add would wait for ever. Keep the flag, so that a retry removes first.
-                let mut state = self.bus.state.lock().unwrap();
+                let mut state = self.bus.lock();
                 state.server_registration_held = true;
                 state.cancel.take();
                 state.phase = ListenerBusPhase::Idle;
@@ -1348,7 +1400,7 @@ impl StreamingQueryManager {
             stream.wait_until_listener_added()?;
             Ok(stream)
         });
-        let mut state = self.bus.state.lock().unwrap();
+        let mut state = self.bus.lock();
         state.phase = ListenerBusPhase::Idle;
         self.bus.changed.notify_all();
         // Terminal teardown sets stopped before canceling the stream. Its acknowledgement
@@ -1359,14 +1411,36 @@ impl StreamingQueryManager {
         }
         match stream {
             Ok(stream) => {
-                state.listeners.push((id.clone(), listener));
+                // The worker is given the stream only once it exists: a thread that cannot be
+                // spawned is an error rather than a panic under the lock, and the stream, whose
+                // drop runs the progress handlers of the user, is then dropped without the lock.
                 let bus = Arc::downgrade(&self.bus);
-                let worker = std::thread::spawn(move || {
-                    run_listener_event_loop(stream, bus, generation);
+                let (handover, handed_over) = std::sync::mpsc::channel::<ListenerEventStream>();
+                let spawned = std::thread::Builder::new().spawn(move || {
+                    if let Ok(stream) = handed_over.recv() {
+                        run_listener_event_loop(stream, bus, generation);
+                    }
                 });
-                state.worker_id = Some(worker.thread().id());
-                state.thread = Some(worker);
-                Ok(id)
+                match spawned {
+                    Ok(worker) => {
+                        state.listeners.push((id.clone(), listener));
+                        state.worker_id = Some(worker.thread().id());
+                        state.thread = Some(worker);
+                        // The worker waits for the lock held here before its first event.
+                        let _ = handover.send(stream);
+                        Ok(id)
+                    }
+                    Err(error) => {
+                        // The server added its listener, and nothing reads its events.
+                        state.server_registration_held = true;
+                        state.cancel.take();
+                        drop(state);
+                        drop(stream);
+                        Err(SparkError::connect_msg(format!(
+                            "cannot start the streaming query listener thread: {error}"
+                        )))
+                    }
+                }
             }
             Err(error) => {
                 state.cancel.take();
@@ -1413,7 +1487,7 @@ impl StreamingQueryManager {
                     return Ok(false);
                 };
                 if state.listeners.len() > 1 {
-                    state.listeners.remove(index);
+                    let removed = state.listeners.remove(index);
                     // As in PySpark's bus, a removal waits for delivery to the snapshot,
                     // including the removed listener, to finish. This also covers a
                     // terminal error notification. A callback of the bus does not wait,
@@ -1427,9 +1501,11 @@ impl StreamingQueryManager {
                                 .iter()
                                 .any(|thread| *thread != current)
                         {
-                            state = self.bus.changed.wait(state).unwrap();
+                            state = self.bus.wait(state);
                         }
                     }
+                    drop(state);
+                    drop_isolated([removed]);
                     return Ok(true);
                 }
             }
@@ -1445,7 +1521,7 @@ impl StreamingQueryManager {
                     .iter()
                     .any(|thread| *thread != current)
             {
-                drop(self.bus.changed.wait(state).unwrap());
+                drop(self.bus.wait(state));
                 continue;
             }
             return self.stop_listener_bus(state);
@@ -1475,7 +1551,8 @@ impl StreamingQueryManager {
         worker: Option<std::thread::JoinHandle<()>>,
         removal: Result<()>,
     ) -> Result<()> {
-        let mut state = self.bus.state.lock().unwrap();
+        let mut state = self.bus.lock();
+        let mut removed = vec![];
         if removal.is_err() && state.generation == generation {
             // A failed ordinary removal keeps its registrations and worker for a retry.
             state.thread = worker;
@@ -1484,13 +1561,15 @@ impl StreamingQueryManager {
             // able to recognize their worker and coalesce a concurrent remove/close.
             drop(state);
             Self::join_listener_thread(worker);
-            state = self.bus.state.lock().unwrap();
-            state.listeners.clear();
+            state = self.bus.lock();
+            removed = std::mem::take(&mut state.listeners);
             state.cancel.take();
             state.worker_id = None;
         }
         state.phase = ListenerBusPhase::Idle;
         self.bus.changed.notify_all();
+        drop(state);
+        drop_isolated(removed);
         removal
     }
 
@@ -1498,9 +1577,7 @@ impl StreamingQueryManager {
     /// `_listener_bus` of PySpark Connect's `StreamingQueryListenerBus`.
     pub fn listeners(&self) -> Vec<Arc<dyn StreamingQueryListener>> {
         self.bus
-            .state
             .lock()
-            .unwrap()
             .listeners
             .iter()
             .map(|(_, listener)| Arc::clone(listener))
@@ -1511,12 +1588,7 @@ impl StreamingQueryManager {
     /// guard drops. Take it before the listener snapshot of the delivery.
     fn started_dispatch(&self) -> StartedDispatch {
         let thread = std::thread::current().id();
-        self.bus
-            .state
-            .lock()
-            .unwrap()
-            .started_dispatches
-            .push(thread);
+        self.bus.lock().started_dispatches.push(thread);
         StartedDispatch {
             bus: Arc::clone(&self.bus),
             thread,
@@ -1534,13 +1606,13 @@ impl StreamingQueryManager {
     /// Never wait for a lifecycle phase: this can be called by its worker callback while
     /// another caller is already draining that worker. That caller keeps its join handle.
     pub(crate) fn cancel_listener_bus(&self) {
-        let worker = {
-            let mut state = self.bus.state.lock().unwrap();
-            state.listeners.clear();
+        let (removed, worker) = {
+            let mut state = self.bus.lock();
             state.cancel.take();
             state.generation = state.generation.wrapping_add(1);
-            state.thread.take()
+            (std::mem::take(&mut state.listeners), state.thread.take())
         };
+        drop_isolated(removed);
         // A callback may wait for an RPC ended by ReleaseSession, or for a lock held
         // by the terminal caller. Detach instead of making teardown wait for it.
         drop(worker);
@@ -1837,7 +1909,7 @@ mod tests {
         let spark = session();
         let manager = spark.streams();
         {
-            let mut state = manager.bus.state.lock().unwrap();
+            let mut state = manager.bus.lock();
             state
                 .listeners
                 .push(("registered".to_string(), Arc::new(Listener)));
@@ -1846,7 +1918,7 @@ mod tests {
         }
         assert!(!manager.remove_listener_found("registered").unwrap());
         assert_eq!(manager.listeners().len(), 1);
-        let mut state = manager.bus.state.lock().unwrap();
+        let mut state = manager.bus.lock();
         state.phase = ListenerBusPhase::Idle;
         state.worker_id = None;
     }
@@ -1861,7 +1933,7 @@ mod tests {
         let manager = spark.streams();
         let listener: Arc<dyn StreamingQueryListener> = Arc::new(Listener);
         {
-            let mut state = manager.bus.state.lock().unwrap();
+            let mut state = manager.bus.lock();
             state
                 .listeners
                 .push(("first".to_string(), Arc::clone(&listener)));
@@ -1872,7 +1944,7 @@ mod tests {
         assert!(!manager.remove_listener_found("foreign").unwrap());
         assert_eq!(manager.listeners().len(), 2);
         assert!(manager.remove_listener_found("first").unwrap());
-        let state = manager.bus.state.lock().unwrap();
+        let state = manager.bus.lock();
         assert_eq!(state.listeners.len(), 1);
         assert_eq!(state.listeners[0].0, "second");
         assert!(Arc::ptr_eq(&state.listeners[0].1, &listener));
@@ -1893,7 +1965,7 @@ mod tests {
             let _ = finished.send(());
         });
         let bus = session.listener_bus();
-        let mut state = bus.state.lock().unwrap();
+        let mut state = bus.lock();
         state
             .listeners
             .push(("listener".to_string(), Arc::new(Listener)));
@@ -1931,7 +2003,7 @@ mod tests {
         let finished = waiting_listener_worker(&session);
         let manager = session.streams();
         let (generation, worker) = {
-            let mut state = manager.bus.state.lock().unwrap();
+            let mut state = manager.bus.lock();
             state.phase = ListenerBusPhase::Stopping;
             (state.generation, state.thread.take())
         };
@@ -1948,7 +2020,7 @@ mod tests {
         finished
             .try_recv()
             .expect("failed removal joins a generation canceled during its RPC");
-        let state = manager.bus.state.lock().unwrap();
+        let state = manager.bus.lock();
         assert_eq!(state.phase, ListenerBusPhase::Idle);
         assert!(state.worker_id.is_none());
         assert!(state.thread.is_none());
@@ -1961,14 +2033,14 @@ mod tests {
         let finished = waiting_listener_worker(&session);
         let bus = session.listener_bus();
         let old_generation = {
-            let mut state = bus.state.lock().unwrap();
+            let mut state = bus.lock();
             let old_generation = state.generation;
             state.generation = state.generation.wrapping_add(1);
             old_generation
         };
         bus.finish_generation(old_generation);
         {
-            let state = bus.state.lock().unwrap();
+            let state = bus.lock();
             assert_eq!(state.listeners.len(), 1);
             assert!(state.cancel.is_some());
             assert!(!state.thread.as_ref().unwrap().is_finished());
@@ -2004,7 +2076,7 @@ mod tests {
             fn on_stream_error(&self, error: &SparkError) -> bool {
                 // Reporting runs before cleanup, without holding the bus lock.
                 let bus = self.bus.upgrade().unwrap();
-                let state = bus.state.lock().unwrap();
+                let state = bus.lock();
                 assert_eq!(state.listeners.len(), 2);
                 assert_eq!(state.dispatching, Some(0));
                 drop(state);
@@ -2021,7 +2093,7 @@ mod tests {
                 errors: Mutex::new(vec![]),
             });
             {
-                let mut state = bus.state.lock().unwrap();
+                let mut state = bus.lock();
                 state
                     .listeners
                     .push(("first".to_string(), listener.clone()));
@@ -2048,7 +2120,7 @@ mod tests {
                     "transport failed"
                 }],
             );
-            let state = bus.state.lock().unwrap();
+            let state = bus.lock();
             assert!(state.listeners.is_empty());
             assert!(state.dispatching.is_none());
         }
@@ -2122,7 +2194,7 @@ mod tests {
                 errors: AtomicUsize::new(0),
             });
             {
-                let mut state = manager.bus.state.lock().unwrap();
+                let mut state = manager.bus.lock();
                 state
                     .listeners
                     .push(("first".to_string(), listener.clone()));
@@ -2146,7 +2218,7 @@ mod tests {
                     started.recv_timeout(Duration::from_secs(5)).unwrap();
                     run_listener_event_loop(vec![failure], bus, 0);
                 });
-                manager.bus.state.lock().unwrap().worker_id = Some(worker.thread().id());
+                manager.bus.lock().worker_id = Some(worker.thread().id());
                 start.send(()).unwrap();
                 reporting.recv_timeout(Duration::from_secs(5)).unwrap();
                 let removal_order = Arc::clone(&order);
@@ -2158,7 +2230,7 @@ mod tests {
                 });
                 let deadline = Instant::now() + Duration::from_secs(5);
                 loop {
-                    if manager.bus.state.lock().unwrap().listeners.len() == 1 {
+                    if manager.bus.lock().listeners.len() == 1 {
                         break;
                     }
                     assert!(Instant::now() < deadline, "remover did not reach the bus");
@@ -2173,7 +2245,7 @@ mod tests {
                 if removal_result.is_err() {
                     // Keep a broken guard-release regression from stranding the
                     // scoped remover while the assertion reports its failure.
-                    let mut state = manager.bus.state.lock().unwrap();
+                    let mut state = manager.bus.lock();
                     if state.dispatching == Some(0) {
                         state.dispatching = None;
                         manager.bus.changed.notify_all();
@@ -2189,7 +2261,7 @@ mod tests {
             assert_eq!(*order.lock().unwrap(), ["reporting", "reported", "removed"]);
             assert_eq!(listener.events.load(Ordering::SeqCst), 0);
             assert_eq!(listener.errors.load(Ordering::SeqCst), 1);
-            let state = manager.bus.state.lock().unwrap();
+            let state = manager.bus.lock();
             assert!(state.listeners.is_empty());
             assert!(state.dispatching.is_none());
         }
@@ -2222,7 +2294,7 @@ mod tests {
         let weak = Arc::downgrade(&bus);
         let (entered, reporting) = mpsc::channel();
         let (release, released) = mpsc::channel();
-        bus.state.lock().unwrap().listeners.push((
+        bus.lock().listeners.push((
             "listener".to_string(),
             Arc::new(Listener {
                 entered,
@@ -2279,7 +2351,7 @@ mod tests {
         };
         let (panicking, after) = (listener(true), listener(false));
         {
-            let mut state = bus.state.lock().unwrap();
+            let mut state = bus.lock();
             state.generation = 3;
             state
                 .listeners
@@ -2298,7 +2370,7 @@ mod tests {
             assert_eq!(listener.events.load(Ordering::SeqCst), 2);
             assert!(listener.errors.lock().unwrap().is_empty());
         }
-        let state = bus.state.lock().unwrap();
+        let state = bus.lock();
         assert!(state.dispatching.is_none());
         assert!(!state.server_registration_held);
     }
@@ -2326,9 +2398,7 @@ mod tests {
         }
         let bus = Arc::new(ListenerBus::default());
         let adapter = Arc::new(Adapter(Mutex::new(vec![])));
-        bus.state
-            .lock()
-            .unwrap()
+        bus.lock()
             .listeners
             .push(("adapter".to_string(), adapter.clone()));
         run_listener_event_loop(
@@ -2343,7 +2413,7 @@ mod tests {
             *adapter.0.lock().unwrap(),
             vec!["a streaming query listener panicked: adapter panic".to_string()],
         );
-        let state = bus.state.lock().unwrap();
+        let state = bus.lock();
         assert!(state.listeners.is_empty());
         assert!(state.server_registration_held);
     }
@@ -2366,7 +2436,7 @@ mod tests {
         let bus = Arc::new(ListenerBus::default());
         let listener = Arc::new(Listener(AtomicUsize::new(0)));
         {
-            let mut state = bus.state.lock().unwrap();
+            let mut state = bus.lock();
             state.generation = 2;
             state
                 .listeners
@@ -2378,7 +2448,7 @@ mod tests {
             1,
         );
         assert_eq!(listener.0.load(Ordering::SeqCst), 0);
-        assert_eq!(bus.state.lock().unwrap().listeners.len(), 1);
+        assert_eq!(bus.lock().listeners.len(), 1);
     }
 
     #[test]
@@ -2433,7 +2503,7 @@ mod tests {
                 errors: AtomicUsize::new(0),
             });
             {
-                let mut state = bus.state.lock().unwrap();
+                let mut state = bus.lock();
                 // A native listener precedes duplicate adapter registrations. Batch
                 // preparation must run before even that first native callback.
                 state.listeners.push(("native".to_string(), native.clone()));
@@ -2458,7 +2528,7 @@ mod tests {
                 if fail { 0 } else { 4 }
             );
             assert_eq!(batch.errors.load(Ordering::SeqCst), usize::from(fail));
-            assert!(bus.state.lock().unwrap().listeners.is_empty());
+            assert!(bus.lock().listeners.is_empty());
         }
     }
 
@@ -2552,7 +2622,7 @@ mod tests {
         let manager = spark.streams();
         let counting = Arc::new(Counting(AtomicUsize::new(0)));
         {
-            let mut state = manager.bus.state.lock().unwrap();
+            let mut state = manager.bus.lock();
             state
                 .listeners
                 .push(("panicking".to_string(), Arc::new(Panicking)));
@@ -2601,13 +2671,7 @@ mod tests {
                 .expect("removal finishes once the started event is delivered")
                 .unwrap();
         });
-        assert!(manager
-            .bus
-            .state
-            .lock()
-            .unwrap()
-            .started_dispatches
-            .is_empty());
+        assert!(manager.bus.lock().started_dispatches.is_empty());
     }
 
     /// A failed server removal before a new subscription keeps the registration marked as held,
@@ -2622,13 +2686,13 @@ mod tests {
 
         let spark = unreachable_session_without_retries();
         let manager = spark.streams();
-        manager.bus.state.lock().unwrap().server_registration_held = true;
+        manager.bus.lock().server_registration_held = true;
         // No server is reachable here, so the removal fails and the add reports it.
         manager
             .add_listener(Arc::new(Listener))
             .expect_err("a failed removal fails the add");
         assert!(manager.listeners().is_empty());
-        let state = manager.bus.state.lock().unwrap();
+        let state = manager.bus.lock();
         assert!(state.server_registration_held);
         assert_eq!(state.phase, ListenerBusPhase::Idle);
         assert!(state.cancel.is_none());
@@ -2645,7 +2709,7 @@ mod tests {
 
         let bus = Arc::new(ListenerBus::default());
         {
-            let mut state = bus.state.lock().unwrap();
+            let mut state = bus.lock();
             state.generation = 4;
             state
                 .listeners
@@ -2656,7 +2720,7 @@ mod tests {
             Arc::downgrade(&bus),
             4,
         );
-        let state = bus.state.lock().unwrap();
+        let state = bus.lock();
         assert!(state.listeners.is_empty());
         assert!(state.server_registration_held);
     }
@@ -2807,7 +2871,7 @@ mod tests {
         let spark = session();
         let manager = spark.streams();
         {
-            let mut state = manager.bus.state.lock().unwrap();
+            let mut state = manager.bus.lock();
             state
                 .listeners
                 .push(("first".to_string(), Arc::new(Listener)));
@@ -2828,7 +2892,7 @@ mod tests {
             });
             let deadline = Instant::now() + Duration::from_secs(5);
             loop {
-                if manager.bus.state.lock().unwrap().listeners.len() == 1 {
+                if manager.bus.lock().listeners.len() == 1 {
                     break;
                 }
                 assert!(Instant::now() < deadline, "remover did not reach the bus");
@@ -2843,7 +2907,7 @@ mod tests {
                 .recv_timeout(Duration::from_secs(5))
                 .expect("removal finishes once the started event is delivered");
         });
-        let state = manager.bus.state.lock().unwrap();
+        let state = manager.bus.lock();
         assert!(state.started_dispatches.is_empty());
         assert_eq!(state.listeners.len(), 1);
     }
@@ -2861,7 +2925,7 @@ mod tests {
         let spark = session();
         {
             let bus = spark.listener_bus();
-            let mut state = bus.state.lock().unwrap();
+            let mut state = bus.lock();
             state
                 .listeners
                 .push(("first".to_string(), Arc::new(Listener)));
@@ -2883,5 +2947,288 @@ mod tests {
             .expect("a removal from its own started event does not wait for itself")
             .unwrap();
         assert!(removed);
+    }
+
+    /// Poison the state lock of `bus`, as a thread that panics while it holds the lock does.
+    fn poison(bus: &Arc<ListenerBus>) {
+        let poisoner = Arc::clone(bus);
+        std::thread::spawn(move || {
+            let _state = poisoner.lock();
+            panic!("poison the state lock of the listener bus");
+        })
+        .join()
+        .expect_err("the poisoning thread panics");
+        assert!(bus.state.is_poisoned());
+    }
+
+    fn progress_event() -> StreamingQueryListenerEvent {
+        StreamingQueryListenerEvent {
+            event_type: QUERY_PROGRESS_EVENT,
+            event_json: "{}".to_string(),
+        }
+    }
+
+    /// A listener that counts its events and, if `panics`, panics in every callback.
+    struct Recorded {
+        panics: bool,
+        events: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Recorded {
+        fn new(panics: bool) -> Arc<Self> {
+            Arc::new(Recorded {
+                panics,
+                events: Default::default(),
+            })
+        }
+
+        fn events(&self) -> usize {
+            self.events.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl StreamingQueryListener for Recorded {
+        fn on_event(&self, _: &StreamingQueryListenerEvent) {
+            self.events
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.panics {
+                panic!("the listener panics on an event");
+            }
+        }
+
+        fn on_stream_error(&self, _: &SparkError) -> bool {
+            if self.panics {
+                panic!("the listener panics on the stream error");
+            }
+            false
+        }
+    }
+
+    /// A callback that panics, on the started event, on an event of the bus or on its terminal
+    /// error, leaves the lock unpoisoned and the bus usable: later deliveries, removals and adds
+    /// behave as without the panic, and the bus is dropped with its session.
+    #[test]
+    fn a_panicking_callback_does_not_break_later_add_remove_and_dispatch() {
+        let spark = unreachable_session_without_retries();
+        let manager = spark.streams();
+        let panicking = Recorded::new(true);
+        let counting = Recorded::new(false);
+        {
+            let mut state = manager.bus.lock();
+            state
+                .listeners
+                .push(("panicking".to_string(), panicking.clone()));
+            state
+                .listeners
+                .push(("counting".to_string(), counting.clone()));
+            state
+                .listeners
+                .push(("other".to_string(), Recorded::new(false)));
+        }
+
+        // The started event, on the calling thread.
+        manager.post_to_all(&progress_event());
+        assert_eq!((panicking.events(), counting.events()), (1, 1));
+        assert!(!manager.bus.state.is_poisoned());
+
+        // A removal and a later dispatch after the panic.
+        assert!(manager.remove_listener_found("other").unwrap());
+        assert_eq!(manager.listeners().len(), 2);
+        manager.post_to_all(&progress_event());
+        assert_eq!((panicking.events(), counting.events()), (2, 2));
+
+        // Events of the bus, then a failure of its stream, on the worker.
+        let weak = Arc::downgrade(&manager.bus);
+        std::thread::spawn(move || {
+            run_listener_event_loop(
+                vec![
+                    Ok((QUERY_PROGRESS_EVENT, "{}".to_string())),
+                    Ok((QUERY_IDLE_EVENT, "{}".to_string())),
+                    Err(SparkError::connect_msg("transport failed")),
+                ],
+                weak,
+                0,
+            );
+        })
+        .join()
+        .expect("the worker isolates the panics of the callbacks");
+        assert_eq!((panicking.events(), counting.events()), (4, 4));
+        assert!(!manager.bus.state.is_poisoned());
+        assert!(manager.listeners().is_empty());
+
+        // No server is reachable here: the add fails with its error, not with a panic.
+        manager
+            .add_listener(Recorded::new(false))
+            .expect_err("no server acknowledges the listener");
+        assert!(manager.remove_listener_found("panicking").is_ok());
+        manager.close().unwrap();
+        assert_eq!(manager.bus.lock().phase, ListenerBusPhase::Idle);
+
+        let bus = Arc::downgrade(&manager.bus);
+        drop(manager);
+        drop(spark);
+        assert!(bus.upgrade().is_none());
+    }
+
+    /// A poisoned state lock is recovered: every entry point of the bus still works on it.
+    #[test]
+    fn a_poisoned_state_lock_does_not_fail_later_calls_on_the_bus() {
+        let spark = unreachable_session_without_retries();
+        let manager = spark.streams();
+        let first = Recorded::new(false);
+        let second = Recorded::new(false);
+        {
+            let mut state = manager.bus.lock();
+            state.listeners.push(("first".to_string(), first.clone()));
+            state.listeners.push(("second".to_string(), second.clone()));
+        }
+        poison(&manager.bus);
+
+        assert_eq!(manager.listeners().len(), 2);
+        manager.post_to_all(&progress_event());
+        assert_eq!((first.events(), second.events()), (1, 1));
+        assert!(manager.remove_listener_found("first").unwrap());
+        assert!(!manager.remove_listener_found("absent").unwrap());
+        drop(manager.started_dispatch());
+        assert!(manager.bus.lock().started_dispatches.is_empty());
+
+        run_listener_event_loop(
+            vec![Ok((QUERY_PROGRESS_EVENT, "{}".to_string()))],
+            Arc::downgrade(&manager.bus),
+            0,
+        );
+        assert_eq!((first.events(), second.events()), (1, 2));
+        assert!(manager.listeners().is_empty());
+
+        manager
+            .add_listener(Recorded::new(false))
+            .expect_err("no server acknowledges the listener");
+        manager.close().unwrap();
+        manager.cancel_listener_bus();
+        {
+            let state = manager.bus.lock();
+            assert_eq!(state.phase, ListenerBusPhase::Idle);
+            assert!(state.dispatching.is_none());
+        }
+        // The lock was poisoned all along; nothing above cleared it.
+        assert!(manager.bus.state.is_poisoned());
+
+        let bus = Arc::downgrade(&manager.bus);
+        drop(manager);
+        drop(spark);
+        assert!(bus.upgrade().is_none());
+    }
+
+    /// The guards of the bus lock its state in their `Drop`. With a poisoned lock they used to
+    /// panic there, which aborts the process when they are dropped by a panic that unwinds.
+    #[test]
+    fn the_guards_of_the_bus_do_not_abort_when_a_panic_unwinds_them_with_a_poisoned_lock() {
+        let spark = session();
+        let manager = spark.streams();
+        let listener = Recorded::new(false);
+        manager
+            .bus
+            .lock()
+            .listeners
+            .push(("listener".to_string(), listener.clone()));
+        poison(&manager.bus);
+
+        // A started event whose handler panics unwinds the guard of its delivery.
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let _dispatch = manager.started_dispatch();
+                    panic!("the handler of the started event panics");
+                })
+                .join()
+                .expect_err("the handler panics");
+        });
+        assert!(manager.bus.lock().started_dispatches.is_empty());
+
+        // A worker whose stream panics unwinds the guard that ends its generation.
+        let events = std::iter::once(Ok((QUERY_PROGRESS_EVENT, "{}".to_string()))).chain(
+            std::iter::from_fn(|| -> Option<Result<(i32, String)>> {
+                panic!("the event stream panics")
+            }),
+        );
+        let weak = Arc::downgrade(&manager.bus);
+        std::thread::spawn(move || run_listener_event_loop(events, weak, 0))
+            .join()
+            .expect_err("the stream panics");
+        assert_eq!(listener.events(), 1);
+        {
+            let state = manager.bus.lock();
+            assert!(state.listeners.is_empty());
+            assert!(state.dispatching.is_none());
+        }
+
+        let bus = Arc::downgrade(&manager.bus);
+        drop(manager);
+        drop(spark);
+        assert!(bus.upgrade().is_none());
+    }
+
+    /// The last reference to a listener runs its `Drop`, which is code of the user: the bus
+    /// drops the listeners that it removes without its state lock, and isolates their panic.
+    #[test]
+    fn a_listener_removed_from_the_bus_is_dropped_without_the_state_lock() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::TryLockError;
+
+        struct Reentrant {
+            bus: Weak<ListenerBus>,
+            unlocked_drops: Arc<AtomicUsize>,
+        }
+        impl StreamingQueryListener for Reentrant {
+            fn on_event(&self, _: &StreamingQueryListenerEvent) {}
+        }
+        impl Drop for Reentrant {
+            fn drop(&mut self) {
+                if let Some(bus) = self.bus.upgrade() {
+                    if !matches!(bus.state.try_lock(), Err(TryLockError::WouldBlock)) {
+                        self.unlocked_drops.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+                panic!("the drop of the listener panics");
+            }
+        }
+
+        let spark = session();
+        let manager = spark.streams();
+        let unlocked_drops = Arc::new(AtomicUsize::new(0));
+        let register = |ids: &[&str]| {
+            let mut state = manager.bus.lock();
+            for id in ids {
+                state.listeners.push((
+                    id.to_string(),
+                    Arc::new(Reentrant {
+                        bus: Arc::downgrade(&manager.bus),
+                        unlocked_drops: Arc::clone(&unlocked_drops),
+                    }),
+                ));
+            }
+        };
+
+        // The removal of a listener that is not the last one.
+        register(&["first", "second"]);
+        assert!(manager.remove_listener_found("first").unwrap());
+        assert_eq!(unlocked_drops.load(Ordering::SeqCst), 1);
+
+        // The end of the generation of a worker.
+        manager.bus.finish_generation(0);
+        assert_eq!(unlocked_drops.load(Ordering::SeqCst), 2);
+
+        // The end of a removal of the last listener.
+        register(&["third"]);
+        manager.finish_listener_removal(0, None, Ok(())).unwrap();
+        assert_eq!(unlocked_drops.load(Ordering::SeqCst), 3);
+
+        // The teardown of the session.
+        register(&["fourth", "fifth"]);
+        manager.cancel_listener_bus();
+        assert_eq!(unlocked_drops.load(Ordering::SeqCst), 5);
+
+        assert!(!manager.bus.state.is_poisoned());
+        assert!(manager.listeners().is_empty());
     }
 }

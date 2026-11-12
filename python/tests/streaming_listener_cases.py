@@ -487,32 +487,121 @@ class TestStreamingListenerLifecycle:
         try:
             spark.streams.addListener(listener)
             spark.streams.addListener(listener)
-            first, second = listener._rust_listener_ids
             other.streams.addListener(listener)
-            third = listener._rust_listener_ids[-1]
-            assert len({first, second, third}) == 3
             assert spark.streams._sqlb._listener_bus == [listener, listener]
             assert other.streams._sqlb._listener_bus == [listener]
             assert service.listener_subscriptions == 2
 
             other.streams.removeListener(listener)
-            assert listener._rust_listener_ids == [first, second]
             assert other.streams._sqlb._listener_bus == []
             assert spark.streams._sqlb._listener_bus == [listener, listener]
             assert service.listener_removals == 1
             assert service.wait_listener_streams_finished(1)
 
             spark.streams.removeListener(listener)
-            assert listener._rust_listener_ids == [second]
             assert spark.streams._sqlb._listener_bus == [listener]
             assert service.listener_removals == 1
             spark.streams.removeListener(listener)
-            assert not hasattr(listener, "_rust_listener_ids")
             assert spark.streams._sqlb._listener_bus == []
             assert service.listener_removals == 2
             assert service.wait_listener_streams_finished(2)
         finally:
             other.stop()
+            spark.streams.close()
+
+    def test_streaming_listener_registrations_are_not_kept_on_the_listener(self, mock_connect):
+        # As PySpark's bus, which keeps its listeners in its own list: adding a listener leaves
+        # nothing on the object but the session that _set_spark_session gives it, so a listener
+        # that has no room for another attribute, of __slots__, is added and removed.
+        # (PySpark's client-side bus takes any object with the callbacks.)
+        spark, service = mock_connect
+        service.listener_bus_enabled = True
+
+        class SlottedListener:
+            # Not a StreamingQueryListener, whose instances have a __dict__.
+            __slots__ = ("spark",)
+
+            def _set_spark_session(self, session):
+                self.spark = session
+
+        slotted, plain = SlottedListener(), IdleListener()
+        assert not hasattr(slotted, "__dict__")
+        try:
+            spark.streams.addListener(plain)
+            attributes = set(vars(plain))
+            spark.streams.addListener(plain)
+            assert set(vars(plain)) == attributes
+            spark.streams.addListener(slotted)
+            assert spark.streams._sqlb._listener_bus == [plain, plain, slotted]
+            spark.streams.removeListener(slotted)
+            assert spark.streams._sqlb._listener_bus == [plain, plain]
+            spark.streams.removeListener(plain)
+            spark.streams.removeListener(plain)
+            assert spark.streams._sqlb._listener_bus == []
+            # Not registered any more: nothing to remove, as PySpark's remove does nothing.
+            spark.streams.removeListener(plain)
+            assert service.listener_removals == 1
+        finally:
+            spark.streams.close()
+
+    def test_streaming_listener_is_removed_by_equality_as_pyspark(self, mock_connect):
+        # As the list.remove of PySpark's bus: the first listener that is the one given, or
+        # equal to it, is removed.
+        spark, service = mock_connect
+        service.listener_bus_enabled = True
+
+        class NamedListener(IdleListener):
+            def __init__(self, name):
+                super().__init__()
+                self.name = name
+
+            def __eq__(self, other):
+                return isinstance(other, NamedListener) and self.name == other.name
+
+            __hash__ = None
+
+        first, second = NamedListener("a"), NamedListener("b")
+        try:
+            spark.streams.addListener(first)
+            spark.streams.addListener(second)
+            spark.streams.removeListener(NamedListener("b"))
+            [left] = spark.streams._sqlb._listener_bus
+            assert left is first
+        finally:
+            spark.streams.close()
+
+    def test_streaming_listener_added_and_removed_by_many_threads_at_once(self, mock_connect):
+        # The registrations of one listener that several threads add and remove at once are
+        # each removed once: none is lost, and none is left in the bus.
+        spark, service = mock_connect
+        service.listener_bus_enabled = True
+        listener, keeper = IdleListener(), IdleListener()
+        threads, rounds = 8, 25
+        barrier = threading.Barrier(threads)
+        failures = []
+
+        def work():
+            try:
+                barrier.wait(10)
+                for _ in range(rounds):
+                    spark.streams.addListener(listener)
+                    spark.streams.removeListener(listener)
+            except BaseException as error:  # noqa: BLE001
+                failures.append(error)
+
+        try:
+            # A listener that stays keeps the bus open, so that the rounds make no RPC.
+            spark.streams.addListener(keeper)
+            workers = [threading.Thread(target=work) for _ in range(threads)]
+            for worker in workers:
+                worker.start()
+            for worker in workers:
+                worker.join(60)
+            assert failures == []
+            assert spark.streams._sqlb._listener_bus == [keeper]
+            assert not hasattr(listener, "_rust_listener_ids")
+            assert service.listener_subscriptions == 1
+        finally:
             spark.streams.close()
 
     def test_streaming_listener_registration_failure_can_be_retried(self, mock_connect):
@@ -523,7 +612,7 @@ class TestStreamingListenerLifecycle:
         with pytest.warns(UserWarning, match="listener registration failed") as caught:
             assert spark.streams.addListener(listener) is None
         assert "The listener is not added, please add it again." in str(caught[0].message)
-        assert not hasattr(listener, "_rust_listener_ids")
+        assert spark.streams._sqlb._listener_bus == []
         service.listener_register_failure = False
         try:
             spark.streams.addListener(listener)
@@ -539,7 +628,6 @@ class TestStreamingListenerLifecycle:
         service.listener_bus_enabled = True
         listener = IdleListener()
         spark.streams.addListener(listener)
-        listener_ids = list(listener._rust_listener_ids)
 
         def remove():
             if method == "removeListener":
@@ -554,7 +642,7 @@ class TestStreamingListenerLifecycle:
                 "The listener is not removed, please remove it again."
                 in str(caught[0].message)
             )
-            assert listener._rust_listener_ids == listener_ids
+            assert spark.streams._sqlb._listener_bus == [listener]
             assert service.listener_streams_finished == 0
             emit_idle(service, spark, "still-registered")
             listener.wait_for("still-registered")
@@ -563,19 +651,17 @@ class TestStreamingListenerLifecycle:
             assert remove() is None
             assert service.listener_removals == 2
             assert service.wait_listener_streams_finished(1)
-            # A completed remove consumes its id; manager close leaves stale private ids,
-            # which must not prevent registering and removing the same object again.
-            remaining_ids = listener_ids if method == "close" else []
-            assert getattr(listener, "_rust_listener_ids", []) == remaining_ids
+            # A completed remove, or close, leaves no registration of the listener, so the
+            # same object registers and is removed again.
+            assert spark.streams._sqlb._listener_bus == []
             # A fresh registration after removal opens a new server subscription.
             spark.streams.addListener(listener)
-            assert listener._rust_listener_ids[:-1] == remaining_ids
-            assert listener._rust_listener_ids[-1] not in listener_ids
+            assert spark.streams._sqlb._listener_bus == [listener]
             assert service.listener_subscriptions == 2
             emit_idle(service, spark, "registered-again")
             listener.wait_for("registered-again")
             spark.streams.removeListener(listener)
-            assert getattr(listener, "_rust_listener_ids", []) == remaining_ids
+            assert spark.streams._sqlb._listener_bus == []
             assert service.listener_removals == 3
             assert service.wait_listener_streams_finished(2)
         finally:
@@ -839,7 +925,6 @@ def concurrent_close_case(remove_failure, callback_action):
         listener = RemovingListener()
         for _ in range(registrations):
             spark.streams.addListener(listener)
-        listener_ids = list(listener._rust_listener_ids)
         closing = threading.Thread(target=close, daemon=True)
         try:
             with warnings.catch_warnings(record=True) as caught:
@@ -856,7 +941,9 @@ def concurrent_close_case(remove_failure, callback_action):
                     assert all(thread not in (caller_thread, closing.ident)
                                for thread in callback_threads)
                     assert closing.is_alive()
-                    assert listener._rust_listener_ids == listener_ids
+                    if callback_action != "stop":
+                        # The callback's own removal did not consume a registration.
+                        assert spark.streams._sqlb._listener_bus == [listener] * registrations
                 finally:
                     release.set()
                     service.release_listener_removal()
@@ -872,7 +959,7 @@ def concurrent_close_case(remove_failure, callback_action):
                 assert len(add_warnings) == 1
                 assert "cannot change the listener bus from its own callback" in add_warnings[0]
                 assert "The listener is not added, please add it again." in add_warnings[0]
-                assert not hasattr(attempted, "_rust_listener_ids")
+                assert attempted not in spark.streams._sqlb._listener_bus
                 assert attempted.timestamps == []
             else:
                 assert add_warnings == []
@@ -898,20 +985,15 @@ def concurrent_close_case(remove_failure, callback_action):
                 for remaining in range(registrations - 1, -1, -1):
                     spark.streams.removeListener(listener)
                     assert spark.streams._sqlb._listener_bus == [listener] * remaining
-                    if remaining:
-                        assert listener._rust_listener_ids == listener_ids[-remaining:]
-                    else:
-                        assert not hasattr(listener, "_rust_listener_ids")
                 assert service.listener_removals == 2
             else:
                 assert service.listener_removals == 1
             assert service.wait_listener_streams_finished(1)
-            # Successful external close leaves stale ids. A fresh add appends a new id
-            # and opens exactly one subscription; failed-close retries consumed their ids.
-            remaining_ids = list(getattr(listener, "_rust_listener_ids", []))
+            # A close, or the retried removals, leaves no registration. A fresh add is the
+            # only one, and opens exactly one subscription.
+            assert spark.streams._sqlb._listener_bus == []
             spark.streams.addListener(listener)
-            assert listener._rust_listener_ids[:-1] == remaining_ids
-            assert listener._rust_listener_ids[-1] not in listener_ids
+            assert spark.streams._sqlb._listener_bus == [listener]
             assert service.listener_subscriptions == 2
             emit_idle(service, spark, "registered-again")
             listener.wait_for("registered-again")
@@ -1104,7 +1186,6 @@ def pending_registration_case(method):
             assert len(relevant) == 1
             assert "NO_ACTIVE_SESSION" in relevant[0]
             assert "The listener is not added, please add it again." in relevant[0]
-            assert not hasattr(listener, "_rust_listener_ids")
             assert spark.is_stopped
             assert spark.streams._sqlb._listener_bus == []
             assert service.listener_removals == 0
@@ -1126,7 +1207,6 @@ def ended_stream_case(termination):
         listener = IdleListener()
         try:
             manager.addListener(listener)
-            stale_ids = list(listener._rust_listener_ids)
             emit_idle(service, spark, "before-end")
             listener.wait_for("before-end")
             # End the subscription without a client removal RPC, either at ResultComplete
@@ -1134,20 +1214,16 @@ def ended_stream_case(termination):
             assert service.end_listener_stream(spark.session_id, failure=termination == "error")
             assert service.wait_listener_streams_finished(1)
             wait_for_empty_bus(manager, "ended stream kept its registrations")
-            assert listener._rust_listener_ids == stale_ids
             manager.removeListener(listener)
-            assert listener._rust_listener_ids == stale_ids
             assert service.listener_removals == 0
 
-            # Reuse the same manager and object: stale tokens must not match the new
-            # generation or prevent removal of its one active registration. A failed stream
+            # Reuse the same manager and object: the registrations that the end cleared
+            # must not prevent removal of its one active registration. A failed stream
             # leaves the server's registration held, so the add removes it first; a normal
             # end leaves none.
             removals = 1 if termination == "error" else 0
             manager.addListener(listener)
             assert service.listener_removals == removals
-            assert listener._rust_listener_ids[:-1] == stale_ids
-            assert listener._rust_listener_ids[-1] not in stale_ids
             assert service.listener_subscriptions == 2
             assert manager._sqlb._listener_bus == [listener]
             emit_idle(service, spark, "after-end")
@@ -1155,11 +1231,9 @@ def ended_stream_case(termination):
             assert listener.timestamps == ["before-end", "after-end"]
             manager.removeListener(listener)
             assert manager._sqlb._listener_bus == []
-            assert listener._rust_listener_ids == stale_ids
             assert service.listener_removals == removals + 1
             assert service.wait_listener_streams_finished(2)
             manager.removeListener(listener)
-            assert listener._rust_listener_ids == stale_ids
             assert service.listener_removals == removals + 1
         finally:
             manager.close()
@@ -1203,7 +1277,7 @@ def second_rpc_case():
             service.release_listener_registration()
             starting.join(5)
             assert not starting.is_alive()
-            assert hasattr(listener, "_rust_listener_ids")
+            assert spark.streams._sqlb._listener_bus == [listener]
             closing.start()
             assert service.wait_listener_removal(2)
             assert closing.is_alive()

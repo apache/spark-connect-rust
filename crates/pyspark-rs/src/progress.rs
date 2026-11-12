@@ -13,8 +13,6 @@ use spark_connect::progress::ProgressUpdate;
 use spark_connect::SparkSession;
 use spark_connect_core::error::SparkError;
 
-use crate::dataframe::PyLocalRowIterator;
-
 /// The progress handlers of a session, and the progress bars of its executions.
 pub(crate) struct SessionProgress {
     /// The handlers, as the `_progress_handlers` list of PySpark's client.
@@ -22,7 +20,11 @@ pub(crate) struct SessionProgress {
     /// The `Progress` of each execution of a progress bar, by its operation ID.
     bars: Py<PyDict>,
     /// The number of handlers, so that an execution takes the GIL only for a handler or a bar.
+    /// Written only by [`SessionProgress::sync_count`].
     count: AtomicUsize,
+    /// Makes reading the length of `handlers` and storing it in `count` one step, so that the
+    /// count that is left after concurrent changes of the list is that of the last one.
+    count_sync: Mutex<()>,
 }
 
 /// The progress of each session of the client, by its session ID: every Python object of a
@@ -32,19 +34,30 @@ fn registry() -> &'static Mutex<HashMap<String, Arc<SessionProgress>>> {
     REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+fn lock_registry() -> std::sync::MutexGuard<'static, HashMap<String, Arc<SessionProgress>>> {
+    registry().lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// The progress of `session`: the first time, it registers the handler of the core session
 /// that calls the Python handlers and drives the progress bars.
 pub(crate) fn session_progress(py: Python<'_>, session: &SparkSession) -> Arc<SessionProgress> {
-    let mut registry = registry().lock().unwrap_or_else(|e| e.into_inner());
     let id = session.session_id().to_string();
-    if let Some(progress) = registry.get(&id) {
+    if let Some(progress) = lock_registry().get(&id) {
         return Arc::clone(progress);
     }
+    // The Python objects are made before the registry is locked: making one can run the
+    // garbage collector, and with it any Python code, which must not find the registry locked.
     let progress = Arc::new(SessionProgress {
         handlers: PyList::empty(py).unbind(),
         bars: PyDict::new(py).unbind(),
         count: AtomicUsize::new(0),
+        count_sync: Mutex::new(()),
     });
+    let mut registry = lock_registry();
+    if let Some(progress) = registry.get(&id) {
+        // Another thread registered the progress of the session meanwhile.
+        return Arc::clone(progress);
+    }
     let shared = Arc::clone(&progress);
     session.register_fallible_progress_handler(move |update| shared.notify(update));
     install_unreturned_error_handler();
@@ -63,12 +76,15 @@ fn install_unreturned_error_handler() {
             use spark_connect::progress::UnreturnedError;
             Python::attach(|py| match error {
                 UnreturnedError::DroppedDone(error) => {
-                    // The iterator may be freed by now, so no reference to it is left: its class
-                    // is the object of the hook. Only a LocalRowIterator drops an execution that
-                    // calls the handlers unfinished; the other iterators do not report progress.
-                    let iterator = py.get_type::<PyLocalRowIterator>();
-                    crate::errors::spark_error_to_py_exception(error)
-                        .write_unraisable(py, Some(iterator.as_any()))
+                    // The generator of toLocalIterator may be freed by now, so no reference to it
+                    // is left: its type is the object of the hook. Only that generator drops an
+                    // execution that calls the handlers unfinished; the other iterators do not
+                    // report progress.
+                    let error = crate::errors::spark_error_to_py_exception(error);
+                    match py.import("types").and_then(|t| t.getattr("GeneratorType")) {
+                        Ok(generator) => error.write_unraisable(py, Some(&generator)),
+                        Err(_) => error.write_unraisable(py, None),
+                    }
                 }
                 UnreturnedError::Replaced { error, done } => {
                     let context = crate::errors::spark_error_to_py_exception(error);
@@ -81,10 +97,7 @@ fn install_unreturned_error_handler() {
 
 /// Forget the progress of a stopped session.
 pub(crate) fn forget_session(session: &SparkSession) {
-    registry()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .remove(session.session_id());
+    lock_registry().remove(session.session_id());
 }
 
 /// Whether the progress bar is enabled, as `pyspark.sql.connect.shell.progress_bar_enabled`.
@@ -93,30 +106,46 @@ fn progress_bar_enabled() -> bool {
 }
 
 impl SessionProgress {
+    /// Make `count` the number of handlers, after a change of the list. A change of the list
+    /// can run Python code, the `__eq__` of a handler or the `__del__` of one that it drops,
+    /// and on a free-threaded build nothing orders two changes, so that the length that a
+    /// change left may be stale by the time it is stored: the length is read and stored under
+    /// one lock, and each change calls this after it, so that the last store is of a length
+    /// read after every change. No Python code runs under the lock.
+    fn sync_count(&self, py: Python<'_>) {
+        let _sync = self.count_sync.lock().unwrap_or_else(|e| e.into_inner());
+        self.count
+            .store(self.handlers.bind(py).len(), Ordering::SeqCst);
+    }
+
     /// As PySpark's `register_progress_handler`: a handler is registered once.
     pub(crate) fn register(&self, py: Python<'_>, handler: &Bound<'_, PyAny>) -> PyResult<()> {
         let handlers = self.handlers.bind(py);
-        if !handlers.contains(handler)? {
-            handlers.append(handler)?;
-        }
-        self.count.store(handlers.len(), Ordering::SeqCst);
-        Ok(())
+        let registered = handlers.contains(handler).and_then(|found| {
+            if found {
+                Ok(())
+            } else {
+                handlers.append(handler)
+            }
+        });
+        self.sync_count(py);
+        registered
     }
 
     /// As PySpark's `remove_progress_handler`: a `ValueError` for a handler that is not
     /// registered, of `list.remove`.
     pub(crate) fn remove(&self, py: Python<'_>, handler: &Bound<'_, PyAny>) -> PyResult<()> {
         let handlers = self.handlers.bind(py);
-        handlers.call_method1("remove", (handler,))?;
-        self.count.store(handlers.len(), Ordering::SeqCst);
-        Ok(())
+        let removed = handlers.call_method1("remove", (handler,));
+        self.sync_count(py);
+        removed.map(|_| ())
     }
 
     /// As PySpark's `clear_progress_handlers`.
     pub(crate) fn clear(&self, py: Python<'_>) -> PyResult<()> {
-        self.handlers.bind(py).call_method0("clear")?;
-        self.count.store(0, Ordering::SeqCst);
-        Ok(())
+        let cleared = self.handlers.bind(py).call_method0("clear");
+        self.sync_count(py);
+        cleared.map(|_| ())
     }
 
     /// Call the handlers with `update`. The exception of a handler fails the execution that

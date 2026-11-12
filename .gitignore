@@ -30,6 +30,7 @@ __pycache__/
 *.egg-info/
 
 .vscode
+.idea/
 *.ipynb
 
 # local dev Spark Connect server runtime state

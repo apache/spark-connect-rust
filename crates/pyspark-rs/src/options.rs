@@ -31,7 +31,16 @@ pub(crate) fn coerce_option_value(v: &Bound<'_, PyAny>) -> PyResult<Option<Strin
     if let Ok(b) = v.cast::<PyBool>() {
         return Ok(Some(if b.is_true() { "true" } else { "false" }.to_string()));
     }
-    Ok(Some(v.str()?.to_string()))
+    Ok(Some(str_text(v)?))
+}
+
+/// The `str()` of `v`, as the reference client sends it in a protobuf string field, which raises
+/// protobuf's `ValueError` for a str that UTF-8 cannot encode (a lone surrogate) where a lossy
+/// conversion would send another text, such as another path.
+pub(crate) fn str_text(v: &Bound<'_, PyAny>) -> PyResult<String> {
+    let text = v.str()?;
+    text.extract::<String>()
+        .map_err(|_| crate::functions::not_utf8_string(text.as_any()))
 }
 
 /// A reader or writer that takes string options one at a time.
@@ -92,7 +101,7 @@ pub(crate) fn kwargs_skip_none(
     if let Some(options) = options {
         for (key, value) in options.iter() {
             if let Some(value) = coerce_option_value(&value)? {
-                map.insert(key.str()?.to_string(), value);
+                map.insert(str_text(&key)?, value);
             }
         }
     }
@@ -120,7 +129,7 @@ pub(crate) fn set_reader_kwargs_unset_none(
 ) -> PyResult<DataFrameReader> {
     if let Some(options) = options {
         for (key, value) in options.iter() {
-            let key = key.str()?.to_string();
+            let key = str_text(&key)?;
             reader = set_reader_option_unset_none(reader, &key, &value)?;
         }
     }

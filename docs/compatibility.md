@@ -32,10 +32,15 @@ The native ML classes take a JVM `Int` param as an `i32`: `LogisticRegression::s
 of its params (`KMeans::k`, `RandomForestClassifier::num_trees`, ...), which reads its
 `Params`: the value that is set, else Spark's default (`None` for `seed`, `weight_col` and
 `thresholds`). The fields of `LogisticRegressionModel`, `StringIndexerModel` and
-`MaxAbsScalerModel` are private, as those of the other fitted models: use
+`MaxAbsScalerModel` are private, as those of the other fitted models but `PipelineModel`: use
 `Transformer::operator` and `Transformer::params`, and `LogisticRegressionModel::feature_col`,
 `label_col` and `prediction_col`. `VectorAssembler::input_cols` and `Pipeline::stages`
-return a `Vec<String>`.
+return a `Vec<String>`, and `VectorAssembler::set_input_cols` and `Pipeline::set_stages` take
+`impl IntoIterator<Item = impl Into<String>>`. The `input_col` of `StandardScaler`,
+`MaxAbsScaler` and `StringIndexer` returns an `Option<&str>`, which is `None` unless set: as in
+Spark, it has no default. Their `output_col`, and that of `VectorAssembler`, return a `String`,
+Spark's `<uid>__output` unless set, the column that the server writes. Before, they gave names
+that the server never wrote, such as `scaled_features`.
 
 `Params::set_param_int32`, `set_param_int_narrow`, `set_param_string_array` and
 `set_param_double_array` are public, with the new `Params::clear_param`, and the evaluators
@@ -48,8 +53,10 @@ int. `MlOperator::new` makes a uid of the simple class name and 12 hex digits
 `dropna` does. As PySpark's `fillna`, they take a bool, an integer, a float or a
 string (an integer is sent as a long, a float as a double), and reject other values
 with `NOT_EXPECTED_TYPE` and an empty map with `CANNOT_BE_EMPTY`. Before, such a
-value filled string columns with its debug text. `fillna`, `fillna_double`,
-`fillna_string` and `fillna_bool` are unchanged.
+value filled string columns with its debug text. A `Value::Map` given to
+`fillna_value` fills the columns of its keys, as PySpark's `fillna` of a dict, instead
+of being rejected. `fillna`, `fillna_double`, `fillna_string` and `fillna_bool` are
+unchanged.
 
 A transport failure has the gRPC code that grpc-python gives it, which PySpark's errors and
 retries see. `SparkError::grpc_code` is `UNAVAILABLE` (14) for a connection that closes or is reset
@@ -118,7 +125,8 @@ of many thousands of levels can overflow a small stack.
 months. Collect gives it for a year-month interval, where it gave the text of the
 interval (`Value::String("1-0")`), so that a pivot on collected values names its
 columns as the pivot without values does (`INTERVAL '1-0' YEAR TO MONTH`), and
-`create_dataframe` takes it for a year-month interval column. Downstream exhaustive
+`create_dataframe` takes it for an `INTERVAL YEAR TO MONTH` column (not for `INTERVAL YEAR`
+or `INTERVAL MONTH`, which the server cannot narrow the Arrow interval to). Downstream exhaustive
 matches on these enums must handle the new variant. The Python client still raises
 `NOT_IMPLEMENTED` when it collects a year-month interval, as PySpark does.
 
@@ -126,10 +134,12 @@ matches on these enums must handle the new variant. The Python client still rais
 As PySpark's `repartitionByRange`, a partition count that is not positive is
 `VALUE_NOT_POSITIVE` and an empty column list `CANNOT_BE_EMPTY`. Before, the server
 split the rows round-robin for an empty column list. `StatFunctions::sample_by`
-returns a `Result` too: a stratum that is not a literal is
-`DISALLOWED_TYPE_FOR_CONTAINER`, as PySpark rejects a key that is not a float, an int
-or a str. Before, it was sent as an empty literal, which failed only when the
-DataFrame ran.
+returns a `Result` too: a stratum that is not a literal of a bool, an integer, a float
+or a string (a null, a decimal, binary, a date, a timestamp, an interval or an array)
+is `DISALLOWED_TYPE_FOR_CONTAINER`, as PySpark rejects a key that is not a float, an
+int or a str. Before, it was sent as an empty literal, which failed only when the
+DataFrame ran, or as its own literal, which sampled no rows. Without a seed,
+`sample_by` sends one that the client draws, as `sample` and `random_split` do.
 
 A panic of a native `StreamingQueryListener` on an event of the listener bus is
 isolated, as on the started event and as PySpark isolates the exception of a listener:
@@ -170,7 +180,8 @@ The Python classes of the native estimators, transformers and evaluators of
 `pyspark.ml.connect` take their params as PySpark's do. The constructors are
 keyword-only, raising PySpark's `TypeError`, except `MulticlassClassificationEvaluator`,
 which takes `metricName`, `labelCol` and `predictionCol` by position as well, as
-PySpark's does. Each value is converted by the `TypeConverters` of its param in
+PySpark's does; its `metricName` is `accuracy` by default, as in PySpark, where the JVM
+evaluator and the Rust API default to `f1`. Each value is converted by the `TypeConverters` of its param in
 PySpark (an integral float for an int param, for example), and a value that the
 converter rejects raises its `TypeError`. A fit, transform or evaluate sends only the
 params that the constructor or a setter set, so the server applies its defaults to

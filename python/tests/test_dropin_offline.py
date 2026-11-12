@@ -1396,6 +1396,22 @@ def test_repartition_does_not_unpack_a_list_among_its_columns_as_pyspark(mock_co
     df.repartitionByRange(2, "id", F.col("id"))
 
 
+def test_is_empty_sends_a_limit_of_one_row_over_an_empty_projection_as_pyspark(mock_connect):
+    # As PySpark's select().take(1): Limit(1) over a Project with no expressions.
+    spark, service = mock_connect
+    spark.range(3).isEmpty()
+    # ExecutePlanRequest.plan=3, Plan.root=1; Relation.limit=8, project=3, range=15;
+    # Project.expressions=3.
+    plan = parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0]
+    relation = parse_message(plan)
+    assert 9 not in relation
+    limit = parse_message(relation[8][0])
+    assert limit[2] == [1]
+    project = parse_message(parse_message(limit[1][0])[3][0])
+    assert 3 not in project
+    assert 15 in parse_message(project[1][0])
+
+
 def test_session_id_of_any_uuid_version_and_the_user_id_of_the_requests(monkeypatch, mock_connect):
     # A session_id is any UUID, as uuid.UUID(session_id, version=4) takes it, and is sent as
     # given. The user ID of each request is SPARK_USER, else USER, as PySpark sets it.
@@ -2783,6 +2799,49 @@ def test_udtfs_are_created_as_pyspark(mock_connect):
     # Only udtf() without useArrow reads its Arrow setting; every collect reads the result setting.
     binary_conf = "spark.sql.execution.pyspark.binaryAsBytes"
     assert service.read_confs == [arrow_conf] + [binary_conf] * 5 + [arrow_conf] + [binary_conf] * 2
+
+
+def test_binary_subclasses_are_sent_as_the_bytes_of_pyspark(mock_connect):
+    # As PySpark: bytes(value), which takes the __bytes__ of a subclass, not its buffer.
+    import pyarrow as pa
+
+    class Bytes(bytes):
+        def __bytes__(self):
+            return b"other"
+
+    class ByteArray(bytearray):
+        def __bytes__(self):
+            return b"other"
+
+    class Plain(bytes):
+        pass
+
+    spark, service = mock_connect
+    values = [Bytes(b"orig"), ByteArray(b"orig"), Plain(b"plain"), bytearray(b"ba"), b"b", None]
+    df = spark.createDataFrame([(v,) for v in values], "b binary")
+    df.columns
+    relation = _sent_relation(service.analyze_requests[-1], 11)
+    table = pa.ipc.open_stream(relation[1][0]).read_all()
+    assert table.column(0).to_pylist() == [b"other", b"other", b"plain", b"ba", b"b", None]
+
+    class NotBytes(bytes):
+        def __bytes__(self):
+            return "x"
+
+    class Raises(bytes):
+        def __bytes__(self):
+            raise KeyError("boom")
+
+    with pytest.raises(TypeError, match="__bytes__ returned non-bytes"):
+        spark.createDataFrame([(NotBytes(b"a"),)], "b binary")
+    with pytest.raises(KeyError, match="boom"):
+        spark.createDataFrame([(Raises(b"a"),)], "b binary")
+
+    df = spark.createDataFrame([([Bytes(b"orig"), None],)], "a array<binary>")
+    df.columns
+    relation = _sent_relation(service.analyze_requests[-1], 11)
+    table = pa.ipc.open_stream(relation[1][0]).read_all()
+    assert table.column(0).to_pylist() == [[b"other", None]]
 
 
 def test_time_values_are_sent_as_pyspark(mock_connect):
@@ -6519,6 +6578,60 @@ def test_functions_ascii_and_unicode():
     assert type(F.ascii(str_col)).__name__ == "Column"
 
 
+def test_the_exception_of_a_done_call_replaces_the_error_of_a_batch_as_pyspark(mock_connect):
+    # As PySpark's Progress.__exit__, which makes the done call when the decoding of a batch raises
+    # in the `with` of the execution: the exception of the done call replaces that error, for
+    # collect as for an iterator, instead of going unreported when the execution is dropped.
+    spark, service = mock_connect
+    # ExecutePlanResponse.arrow_batch=2: row_count=1, data=2 of bytes that are not Arrow IPC.
+    service.execute_payload = message_field(2, varint_field(1, 1) + message_field(2, b"not arrow"))
+    error = ValueError("the done call raises")
+
+    def failing(**kwargs):
+        if kwargs["done"]:
+            raise error
+
+    for action in [lambda: spark.range(3).collect(),
+                   lambda: next(spark.range(3).toLocalIterator())]:
+        with pytest.raises(Exception) as decoding:
+            action()
+        assert decoding.value is not error
+        spark.registerProgressHandler(failing)
+        try:
+            with pytest.raises(ValueError) as raised:
+                action()
+            assert raised.value is error
+        finally:
+            spark.clearProgressHandlers()
+
+
+def test_strings_that_utf8_cannot_encode_raise_value_error_as_options_and_fills_as_pyspark(
+    mock_connect,
+):
+    # As PySpark, whose protobuf string fields raise ValueError for a str that UTF-8 cannot encode
+    # (a lone surrogate): an option is not sent as another text (another path), and a fill value
+    # raises the ValueError of its encoding rather than a TypeError of its type.
+    from pyspark.sql import SparkSession
+
+    spark, service = mock_connect
+    bad = "a\ud800b"
+    message = re.escape(f"{bad!r} isn't a valid unicode string and can't be encoded in UTF-8.")
+    df = spark.range(1)
+    for call in [
+        lambda: spark.read.option("path", bad),
+        lambda: spark.read.options(k=bad),
+        lambda: spark.read.options(**{bad: "v"}),
+        lambda: df.write.option("path", bad),
+        lambda: df.write.options(**{bad: "v"}),
+        lambda: spark.readStream.options(**{bad: "v"}),
+        lambda: SparkSession.builder.config(map={bad: "v"}),
+    ]:
+        with pytest.raises(ValueError, match=message):
+            call()
+    with pytest.raises(ValueError):
+        df.fillna(bad)
+
+
 def test_functions_levenshtein():
     """Test levenshtein distance function."""
     from pyspark.sql import functions as F
@@ -7057,6 +7170,28 @@ def test_variant_and_spatial_values_pickle_as_pysparks_plain_classes_which_load_
             restored = pickle.loads(pyspark_pickle(name, {"tag": "x", **fields}, protocol))
             assert type(restored) is type(value) and restored.tag == "x"
             assert {field: getattr(restored, field) for field in fields} == fields
+
+
+def test_methods_of_rows_and_values_pickle_by_reference_to_pyspark_sql_types_as_pyspark():
+    # As PySpark's, whose methods are of pyspark.sql.types: a UDF that is, or captures, a method of
+    # Row, VariantVal, Geometry or Geography pickles it by reference to that module, which the
+    # server's Python workers import, where pyspark._values and pyspark._row are of the client only.
+    from pyspark import cloudpickle
+    from pyspark.sql.types import Geography, Geometry, Row, VariantVal
+
+    wkb = bytes.fromhex("0101000000000000000000F03F0000000000000040")
+    variant = VariantVal(b"\x0c\x01", b"\x01\x00\x00")
+    geography, geometry, row = Geography(wkb, 4326), Geometry(wkb, 0), Row(a=1)
+    # Their functions and bound methods; a classmethod pickles by value, as PySpark's does.
+    methods = [
+        VariantVal.toJson, variant.toJson, VariantVal.toPython,
+        Geography.getSrid, geography.getBytes, Geometry.getSrid, geometry.getBytes,
+        Row.asDict, row.asDict, Row.__repr__,
+    ]
+    for method in methods:
+        data = cloudpickle.dumps(method)
+        assert b"pyspark._values" not in data and b"pyspark._row" not in data, method
+        assert b"pyspark.sql.types" in data, method
 
 
 def test_spatial_values_copy_pickle_and_are_subclassed_as_pyspark():
@@ -10670,6 +10805,76 @@ def test_a_plan_too_deep_to_send_raises_recursion_error_without_a_request(mock_c
     assert service.analyze_requests == []
 
 
+def test_a_plan_of_256_levels_is_sent_from_a_thread_with_a_small_stack(mock_connect):
+    # Each clone of a request recurses once per level of its plan, on the thread that sends it:
+    # on a Python thread of 512 KiB, a plan of 256 levels overflowed the stack (SIGBUS) in the
+    # clone. The thread runs in a subprocess, since the crash would end this one.
+    import subprocess
+    import sys
+
+    _, service = mock_connect
+    script = """
+import threading
+from pyspark.sql import SparkSession, functions as F
+spark = SparkSession.builder.remote(REMOTE_URL).getOrCreate()
+
+def work():
+    df = spark.range(10)
+    for x in range(255):
+        df = df.withColumn(f"col{x}", F.lit(x))
+    df.schema
+    print("analyzed", flush=True)
+    df.collect()
+    print("collected", flush=True)
+
+threading.stack_size(512 * 1024)
+thread = threading.Thread(target=work)
+thread.start()
+thread.join()
+""".replace("REMOTE_URL", repr(service.remote))
+    result = subprocess.run(
+        [sys.executable, "-c", script], env=dict(os.environ, TZ="UTC"),
+        capture_output=True, text=True, timeout=300)
+    assert result.returncode == 0, result.stderr
+    assert "analyzed" in result.stdout, result.stdout
+    assert "collected" in result.stdout, result.stdout
+    assert len(service.analyze_requests) == 1
+    assert len(service.execute_requests) == 1
+
+
+def test_an_expression_of_200_additions_is_sent_from_a_thread_with_a_small_stack(mock_connect):
+    # As the plan above, for an expression: its clone recurses once per level, on a Python
+    # thread of 512 KiB, which overflowed the stack (SIGBUS). The thread runs in a subprocess.
+    import subprocess
+    import sys
+
+    _, service = mock_connect
+    script = """
+import threading
+from pyspark.sql import SparkSession, functions as F
+spark = SparkSession.builder.remote(REMOTE_URL).getOrCreate()
+
+def work():
+    c = F.col("id")
+    for _ in range(200):
+        c = c + 1
+    df = spark.range(1).select(c.alias("x"))
+    df.schema
+    print("analyzed", flush=True)
+
+threading.stack_size(512 * 1024)
+thread = threading.Thread(target=work)
+thread.start()
+thread.join()
+""".replace("REMOTE_URL", repr(service.remote))
+    result = subprocess.run(
+        [sys.executable, "-c", script], env=dict(os.environ, TZ="UTC"),
+        capture_output=True, text=True, timeout=300)
+    assert result.returncode == 0, result.stderr
+    assert "analyzed" in result.stdout, result.stdout
+    assert len(service.analyze_requests) == 1
+
+
 def test_create_dataframe_raises_recursion_error_for_a_value_that_contains_itself():
     class Node:
         def __init__(self):
@@ -13618,6 +13823,220 @@ def test_the_done_error_of_a_progress_handler_keeps_the_execution_error_as_conte
     assert "TABLE_OR_VIEW_NOT_FOUND" in str(raised.value.__context__)
 
 
+def _progress_of_one_stage(service):
+    # ExecutePlanResponse.execution_progress=18 -> ExecutionProgress.stages=1 (StageInfo
+    # stage_id=1, num_tasks=2, num_completed_tasks=3, input_bytes_read=4, done=5),
+    # num_inflight_tasks=2.
+    stage = (varint_field(1, 7) + varint_field(2, 4) + varint_field(3, 1)
+             + varint_field(4, 1024) + varint_field(5, 0))
+    service.execute_payload = message_field(18, message_field(1, stage) + varint_field(2, 3))
+
+
+def test_a_progress_handler_registered_while_the_handlers_are_cleared_is_called(mock_connect):
+    # Clearing the handlers drops them, which runs the __del__ of one that nothing else holds;
+    # a handler that it registers is in the list after the clear, as in the _progress_handlers
+    # of PySpark's client, and is called. The number of handlers that the client keeps beside
+    # the list must not be left at that of the cleared list.
+    spark, service = mock_connect
+    _progress_of_one_stage(service)
+    calls = []
+
+    def late(**kwargs):
+        calls.append(kwargs["done"])
+
+    class Registering:
+        def __call__(self, **kwargs):
+            pass
+
+        def __del__(self):
+            spark.registerProgressHandler(late)
+
+    spark.registerProgressHandler(Registering())
+    spark.clearProgressHandlers()
+    try:
+        spark.range(1).collect()
+    finally:
+        spark.clearProgressHandlers()
+    assert calls == [False, True]
+
+
+def test_progress_handlers_registered_and_removed_by_many_threads_at_once(mock_connect):
+    # Threads that register and remove their own handlers at once leave the handlers, and the
+    # number of them that the client keeps beside the list, as the last change left them: a
+    # handler registered after them is called, and none is once they are all removed.
+    import threading
+
+    spark, service = mock_connect
+    _progress_of_one_stage(service)
+    threads, rounds = 8, 200
+    barrier = threading.Barrier(threads)
+    failures, calls = [], []
+
+    def work(index):
+        def own(**kwargs):
+            calls.append(index)
+
+        try:
+            barrier.wait(10)
+            for _ in range(rounds):
+                spark.registerProgressHandler(own)
+                spark.removeProgressHandler(own)
+        except BaseException as error:  # noqa: BLE001
+            failures.append(error)
+
+    def kept(**kwargs):
+        calls.append("kept")
+
+    spark.registerProgressHandler(kept)
+    workers = [threading.Thread(target=work, args=(index,)) for index in range(threads)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(60)
+    assert failures == []
+    try:
+        spark.range(1).collect()
+        assert calls == ["kept", "kept"]
+        spark.removeProgressHandler(kept)
+        calls.clear()
+        spark.range(1).collect()
+        assert calls == []
+    finally:
+        spark.clearProgressHandlers()
+
+
+def test_a_local_iterator_that_a_thread_is_running_raises_as_a_generator_does(mock_connect):
+    # As PySpark's toLocalIterator, a generator: while a thread waits in it for the next row,
+    # the next or close of another thread raises the ValueError of a generator that is already
+    # executing, and the iterator goes on for the thread that runs it.
+    import threading
+
+    spark, service = mock_connect
+    _two_row_range_results(service)
+    service.block_result_complete = True
+    rows = spark.range(2).toLocalIterator()
+    assert [next(rows).id, next(rows).id] == [0, 1]
+    entering = threading.Event()
+    outcome = []
+
+    def wait_for_the_end():
+        entering.set()
+        try:
+            outcome.append(next(rows))
+        except BaseException as error:  # noqa: BLE001
+            outcome.append(error)
+
+    waiting = threading.Thread(target=wait_for_the_end)
+    waiting.start()
+    try:
+        assert entering.wait(5)
+        # The thread is in the fetch, without the GIL, once it has not ended for a while.
+        waiting.join(0.5)
+        assert waiting.is_alive()
+        for call in (lambda: next(rows), rows.close):
+            with pytest.raises(ValueError, match="generator already executing"):
+                call()
+    finally:
+        service.block_result_complete = False
+        service.release_response()
+        waiting.join(10)
+    assert not waiting.is_alive()
+    [ended] = outcome
+    assert isinstance(ended, StopIteration)
+    assert list(rows) == []
+
+
+def test_the_done_error_of_a_handler_that_refuses_attributes_keeps_its_context(mock_connect):
+    # As Python chains an exception raised while another is handled, which PySpark's
+    # Progress.__exit__ relies on: the context is not set through the __setattr__ of the
+    # exception, so one that refuses attributes has it too.
+    from pyspark.errors import AnalysisException
+
+    class Refusing(ValueError):
+        def __setattr__(self, name, value):
+            raise AttributeError(name)
+
+    spark, service = mock_connect
+    classes = ["org.apache.spark.sql.AnalysisException", "java.lang.Exception"]
+    service.execute_error = ("[TABLE_OR_VIEW_NOT_FOUND] t", classes[0],
+                             _error_info(classes, errorClass="TABLE_OR_VIEW_NOT_FOUND"))
+    error = Refusing("done")
+
+    def failing(**kwargs):
+        if kwargs["done"]:
+            raise error
+
+    spark.registerProgressHandler(failing)
+    try:
+        with pytest.raises(Refusing) as raised:
+            spark.range(1).collect()
+    finally:
+        service.execute_error = None
+        spark.removeProgressHandler(failing)
+    assert raised.value is error
+    assert isinstance(raised.value.__context__, AnalysisException)
+
+
+def test_a_failure_to_make_the_exception_of_a_server_error_is_its_context(
+        mock_connect, monkeypatch):
+    # Should the exception of the connect classes of an error of the server fail to be made,
+    # the error is raised as the class of its kind, and the failure is not dropped: it is the
+    # __context__ of the exception that is raised.
+    import pyspark.errors.exceptions.connect as connect_errors
+    from pyspark.errors import AnalysisException
+
+    spark, service = mock_connect
+    classes = ["org.apache.spark.sql.AnalysisException", "java.lang.Exception"]
+    service.execute_error = ("[TABLE_OR_VIEW_NOT_FOUND] t", classes[0],
+                             _error_info(classes, errorClass="TABLE_OR_VIEW_NOT_FOUND"))
+    failure = LookupError("no exception of the connect classes")
+
+    def failing(**kwargs):
+        raise failure
+
+    monkeypatch.setattr(connect_errors, "_convert_server_error", failing)
+    try:
+        with pytest.raises(AnalysisException) as raised:
+            spark.range(1).collect()
+    finally:
+        service.execute_error = None
+    assert "TABLE_OR_VIEW_NOT_FOUND" in str(raised.value)
+    assert raised.value.__context__ is failure
+
+
+def test_an_exception_that_refuses_its_operation_id_is_raised_and_the_refusal_reported(
+        mock_connect, monkeypatch):
+    # The _operation_id that the client stamps on the exception of an execution, as the
+    # reference client does, is auxiliary: an exception that refuses it is the one raised, and
+    # the refusal goes to sys.unraisablehook rather than nowhere.
+    import sys
+
+    import pyspark.errors.exceptions.connect as connect_errors
+
+    class Refusing(Exception):
+        def __setattr__(self, name, value):
+            raise AttributeError(f"refused {name}")
+
+    spark, service = mock_connect
+    classes = ["org.apache.spark.sql.AnalysisException", "java.lang.Exception"]
+    service.execute_error = ("[TABLE_OR_VIEW_NOT_FOUND] t", classes[0],
+                             _error_info(classes, errorClass="TABLE_OR_VIEW_NOT_FOUND"))
+    error = Refusing("server")
+    unraisable = []
+    monkeypatch.setattr(sys, "unraisablehook", unraisable.append)
+    monkeypatch.setattr(connect_errors, "_convert_server_error", lambda **kwargs: error)
+    try:
+        with pytest.raises(Refusing) as raised:
+            spark.range(1).collect()
+    finally:
+        service.execute_error = None
+    assert raised.value is error
+    [reported] = unraisable
+    assert isinstance(reported.exc_value, AttributeError)
+    assert "refused _operation_id" in str(reported.exc_value)
+    assert reported.object is error
+
+
 def test_a_dropped_local_iterator_hands_the_done_error_to_unraisablehook_with_an_object(
         mock_connect, monkeypatch):
     # As PySpark's generator of toLocalIterator, which is closed with its execution unfinished:
@@ -16092,9 +16511,10 @@ def test_column_reprs_as_pyspark(column, expected):
 
 
 def test_an_expression_too_deep_to_send_raises_recursion_error_without_a_request(mock_connect):
-    # As PySpark, whose client raises RecursionError while it builds the proto of an expression
-    # from 744 additions under an alias, before any request, rather than overflowing the native
-    # stack (which killed the process from about 30,000 levels); 743 are sent.
+    # Past the bound of expressions, the client raises RecursionError while it builds the proto
+    # of an expression of 744 additions under an alias, before any request, rather than
+    # overflowing the native stack (which killed the process from about 30,000 levels); 743 are
+    # sent. PySpark's own point depends on its protobuf backend (see MAX_EXPRESSION_DEPTH).
     from pyspark.sql import functions as F
 
     spark, service = mock_connect
@@ -16534,6 +16954,56 @@ def test_local_iterator_close_ends_it_before_it_runs_as_pyspark(mock_connect):
         pass
     assert list(rows) == []
     assert service.execute_requests == []
+
+
+def test_to_local_iterator_is_a_generator_as_pyspark(mock_connect):
+    # As PySpark's generator function, which sends nothing until its first row.
+    import inspect
+    import types
+
+    spark, service = mock_connect
+    rows = spark.range(3).toLocalIterator()
+    assert isinstance(rows, types.GeneratorType)
+    assert rows.__name__ == "toLocalIterator"
+    assert rows.__qualname__ == "DataFrame.toLocalIterator"
+    assert inspect.getgeneratorstate(rows) == inspect.GEN_CREATED
+    assert service.rpc_events == []
+
+
+@pytest.mark.parametrize("ending", ["close", "throw"])
+def test_to_local_iterator_ending_releases_the_execution_as_pyspark(mock_connect, ending):
+    # A close and a throw in the middle end the execution at once, also while the exception,
+    # with its traceback, is kept.
+    import pyarrow as pa
+    from _mock_connect_server import parse_message
+    from binary_configuration_cases import _results, _wait_for
+
+    spark, service = mock_connect
+    _results(service, pa.RecordBatch.from_arrays([pa.array([0, 1])], names=["id"]))
+    service.block_result_complete = True
+    try:
+        rows = spark.range(2).toLocalIterator()
+        assert next(rows).id == 0
+        operation_id = parse_message(service.execute_requests[0])[6][0]
+        kept = None
+        if ending == "close":
+            rows.close()
+        else:
+            with pytest.raises(ValueError, match="stop") as kept:
+                rows.throw(ValueError("stop"))
+
+        def released():
+            # ReleaseExecuteRequest.release_all=5 and operation_id=3.
+            return any(5 in fields and fields.get(3) == [operation_id]
+                       for fields in map(parse_message, service.release_execute_requests))
+
+        _wait_for(released)
+        assert released()
+        assert operation_id not in service.result_complete_operations
+        assert list(rows) == []
+        del kept
+    finally:
+        service.release_response()
 
 
 def test_dataframes_of_other_sessions_raise_session_not_same_as_pyspark():
@@ -17987,16 +18457,14 @@ def test_sigint_during_stop_with_a_registered_listener_raises_at_once(mock_conne
     assert spark.is_stopped
 
 
-def test_sigint_during_the_plan_compression_lookup_interrupts_the_first_execution(mock_connect):
-    # As PySpark's, where a signal that arrives while the call waits for the plan compression
-    # lookup of its first plan is raised when the lookup returns, so no execution starts. Here
-    # the execution that the call starts after the lookup is interrupted at once instead: the
-    # signal is kept until an execution is in flight, and the call ends promptly.
+def test_sigint_during_the_plan_compression_lookup_raises_keyboard_interrupt_at_once(mock_connect):
+    # As PySpark's: the Config lookup of the plan compression of the first plan is a blocked call
+    # with no execution in flight, which a signal ends at once, so no execution is started.
     import signal
     import threading
 
     spark, service = mock_connect
-    service.plan_compression_lookup_delay = 1.0
+    service.plan_compression_lookup_delay = 2.0
     service.block_execute = True
     timer = threading.Timer(0.3, os.kill, (os.getpid(), signal.SIGINT))
     started = time.monotonic()
@@ -18007,8 +18475,139 @@ def test_sigint_during_the_plan_compression_lookup_interrupts_the_first_executio
     finally:
         timer.cancel()
         service.release_response()
+    assert time.monotonic() - started < 1.5
+    assert service.execute_requests == []
+    assert service.interrupt_requests == []
+
+
+def test_sigint_ends_the_backoff_before_the_reattach_of_a_dropped_stream(mock_connect):
+    # As PySpark's: a stream that fails after a response is reattached after the backoff of the
+    # retry policy, here the server's RetryInfo delay of 5 s, as an attempt of its `Retrying`,
+    # and a signal ends that backoff at once, as it ends the reference's retry sleep.
+    import signal
+    import threading
+
+    spark, service = mock_connect
+    service.stream_failure = ("UNAVAILABLE", 5000)
+    timer = threading.Timer(1.0, os.kill, (os.getpid(), signal.SIGINT))
+    started = time.monotonic()
+    timer.start()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            spark.range(3).collect()
+    finally:
+        timer.cancel()
     assert time.monotonic() - started < 3
-    assert len(service.interrupt_requests) == 1
+    assert service.reattach_requests == []
+
+
+def test_sigint_while_an_unavailable_execute_is_retried_raises_keyboard_interrupt(mock_connect):
+    # As PySpark's: the retry sleep of an ExecutePlan that the server answers UNAVAILABLE raises
+    # KeyboardInterrupt at the first signal, instead of the whole retry budget.
+    import signal
+    import threading
+
+    spark, service = mock_connect
+    service.execute_failure = ("UNAVAILABLE", "server is unavailable")
+    timer = threading.Timer(0.5, os.kill, (os.getpid(), signal.SIGINT))
+    started = time.monotonic()
+    timer.start()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            spark.range(3).collect()
+    finally:
+        timer.cancel()
+        service.execute_failure = None
+    assert time.monotonic() - started < 3
+
+
+def test_second_sigint_ends_the_wait_for_an_interrupt_that_is_retried(mock_connect):
+    # As PySpark's: the first signal interrupts the operation, and the interrupt call is retried
+    # while the server is unavailable, so the call waits for it; a second signal raises
+    # KeyboardInterrupt out of that wait.
+    import signal
+    import threading
+
+    spark, service = mock_connect
+    service.block_execute = True
+    service.interrupt_failure = ("UNAVAILABLE", "server is unavailable")
+    first = threading.Timer(0.5, os.kill, (os.getpid(), signal.SIGINT))
+    second = threading.Timer(1.5, os.kill, (os.getpid(), signal.SIGINT))
+    started = time.monotonic()
+    first.start()
+    second.start()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            spark.range(3).collect()
+    finally:
+        first.cancel()
+        second.cancel()
+        service.interrupt_failure = None
+        service.release_response()
+    assert 1.5 <= time.monotonic() - started < 4
+    assert len(service.interrupt_requests) >= 1
+
+
+def test_sigint_raises_the_done_call_error_of_a_progress_handler_with_the_signal_as_context(
+    mock_connect,
+):
+    # As PySpark's: the progress handler's done call, made in the `except KeyboardInterrupt` of
+    # the execution, raises its own exception, which replaces the KeyboardInterrupt, with the
+    # KeyboardInterrupt as its context.
+    import signal
+    import threading
+
+    spark, service = mock_connect
+    stage = (varint_field(1, 7) + varint_field(2, 4) + varint_field(3, 1)
+             + varint_field(4, 1024) + varint_field(5, 0))
+    service.execute_payload = message_field(18, message_field(1, stage) + varint_field(2, 3))
+    service.block_result_complete = True
+
+    def handler(**kwargs):
+        if kwargs["done"]:
+            raise ValueError("done call failed")
+
+    spark.registerProgressHandler(handler)
+    timer = threading.Timer(0.5, os.kill, (os.getpid(), signal.SIGINT))
+    timer.start()
+    try:
+        with pytest.raises(ValueError, match="done call failed") as error:
+            spark.range(1).collect()
+    finally:
+        timer.cancel()
+        service.release_response()
+    assert isinstance(error.value.__context__, KeyboardInterrupt)
+
+
+def test_sigint_ends_a_call_to_an_unreachable_server_at_once_as_pyspark():
+    # As PySpark's: the Config lookup of the first plan of a session that no server answers is
+    # retried, and a signal raises KeyboardInterrupt from its retry sleep. No server is needed.
+    import subprocess
+    import sys
+
+    code = """
+import os, signal, threading, time
+from pyspark.sql import SparkSession
+spark = SparkSession.builder.remote("sc://127.0.0.1:1").getOrCreate()
+threading.Timer(2.0, lambda: os.kill(os.getpid(), signal.SIGINT)).start()
+started = time.monotonic()
+try:
+    spark.range(1).collect()
+    print("collect returned")
+except KeyboardInterrupt:
+    print("interrupted after", round(time.monotonic() - started, 1))
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        env=dict(os.environ, TZ="UTC"),
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    lines = result.stdout.splitlines()
+    assert lines[-1].startswith("interrupted after "), result.stdout
+    assert 2.0 <= float(lines[-1].rsplit(" ", 1)[1]) < 4.5, result.stdout
 
 
 def test_connect_registry_sends_auto_cdc_define_flow(mock_connect):

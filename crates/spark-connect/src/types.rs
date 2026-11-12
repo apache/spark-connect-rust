@@ -1440,56 +1440,28 @@ fn parse_json_value(
     }
 }
 
+/// Parses the string of a type of JSON, as PySpark's `_parse_datatype_json_value` reads one: a
+/// name of [`common_atomic_type`], or a form of [`parse_parameterized_type`] of
+/// [`TypeStringGrammar::Json`].
 fn parse_json_type_string(s: &str) -> Result<DataType> {
+    if let Some(data_type) = common_atomic_type(s) {
+        return Ok(data_type);
+    }
     match s {
         // `null` and `calendarinterval` are lenient aliases that the drop-in's Python parser
         // accepted before it delegated here.
-        "void" | "null" => Ok(DataType::Null),
-        "boolean" => Ok(DataType::Boolean),
-        "byte" => Ok(DataType::Byte),
-        "short" => Ok(DataType::Short),
-        "integer" => Ok(DataType::Integer),
-        "long" => Ok(DataType::Long),
-        "float" => Ok(DataType::Float),
-        "double" => Ok(DataType::Double),
-        "binary" => Ok(DataType::Binary),
-        "date" => Ok(DataType::Date),
-        "timestamp" => Ok(DataType::Timestamp),
-        "timestamp_ntz" => Ok(DataType::TimestampNtz),
-        // A bare `time`, as `TimeType().typeName()` names it, is the default time(6).
-        "time" => Ok(DataType::Time { precision: 6 }),
-        "interval" | "calendarinterval" => Ok(DataType::CalendarInterval),
-        "variant" => Ok(DataType::Variant),
-        // A bare `decimal`, as `DecimalType().typeName()` names it, is the default decimal(10,0).
-        "decimal" => Ok(DataType::Decimal {
-            precision: 10,
-            scale: 0,
-        }),
-        s if s.starts_with("decimal(") => parse_decimal(s),
-        s if s.starts_with("char(") => parse_char(s),
-        s if s.starts_with("varchar(") => parse_varchar(s),
-        s if s.starts_with("time(") => parse_time(s),
-        s if s.starts_with("timestamp_ntz(") || s.starts_with("timestamp_ltz(") => {
-            parse_timestamp_nanos(s)
-        }
-        s if s.starts_with("interval") => parse_interval_string(s),
-        s if s.starts_with("string collate") => {
-            let collation = s.trim_start_matches("string collate").trim().to_string();
-            Ok(DataType::String { collation })
-        }
-        "string" => Ok(DataType::String {
-            collation: "UTF8_BINARY".to_string(),
-        }),
-        s if s.starts_with("geometry(") => parse_geometry(s),
-        s if s.starts_with("geography(") => parse_geography(s),
+        "null" => Ok(DataType::Null),
+        "calendarinterval" => Ok(DataType::CalendarInterval),
         // The inverse of `json_value`, which writes `unparsed(<data_type_string>)`.
         s if s.starts_with("unparsed(") && s.ends_with(')') => Ok(DataType::Unparsed {
             data_type_string: s["unparsed(".len()..s.len() - 1].to_string(),
         }),
-        _ => Err(SparkError::value(
-            "INVALID_DATATYPE_STRING",
-            &[("detail", &format!("Unknown type string: {}", s))],
-        )),
+        _ => parse_parameterized_type(s, TypeStringGrammar::Json).unwrap_or_else(|| {
+            Err(SparkError::value(
+                "INVALID_DATATYPE_STRING",
+                &[("detail", &format!("Unknown type string: {}", s))],
+            ))
+        }),
     }
 }
 
@@ -1594,187 +1566,211 @@ fn parse_json_object(
     }
 }
 
-fn parse_decimal(s: &str) -> Result<DataType> {
-    let inner = s
-        .strip_prefix("decimal(")
-        .and_then(|s| s.strip_suffix(")"))
-        .ok_or_else(|| {
-            SparkError::value(
-                "INVALID_DATATYPE_FORMAT",
-                &[("detail", "Invalid decimal format")],
-            )
-        })?;
-
-    // A precision alone has scale 0, as Spark's `decimal(p)` does.
-    let parts: Vec<&str> = inner.split(',').collect();
-    if parts.len() > 2 {
-        return Err(SparkError::value(
-            "INVALID_DATATYPE_FORMAT",
-            &[("detail", "Decimal takes a precision and a scale")],
-        ));
-    }
-
-    let precision = parts[0].trim().parse::<i32>().map_err(|_| {
-        SparkError::value(
-            "INVALID_DATATYPE_FORMAT",
-            &[("detail", "Invalid precision")],
-        )
-    })?;
-    let scale = match parts.get(1) {
-        Some(scale) => scale.trim().parse::<i32>().map_err(|_| {
-            SparkError::value("INVALID_DATATYPE_FORMAT", &[("detail", "Invalid scale")])
-        })?,
-        None => 0,
-    };
-
-    Ok(DataType::Decimal { precision, scale })
+/// The grammar that a type string is read by. The JSON and the DDL parsers share one parser of
+/// each atomic and parameterized form, [`common_atomic_type`] and [`parse_parameterized_type`],
+/// and this names the few places where the two grammars really differ, as PySpark's do:
+///
+/// | form | [`Json`](Self::Json) (PySpark's `_parse_datatype_json_value`) | [`Ddl`](Self::Ddl) (the server's parser) |
+/// |---|---|---|
+/// | letter case and spacing | as written: lower case, single spaces | any case, any whitespace between keywords |
+/// | `decimal(p)` | not a type: the scale is required | scale 0 |
+/// | `decimal(p,-s)` | a negative scale | not a type: an argument is an unsigned integer |
+/// | `interval <a> to <b>` | any two fields of one family, as `DayTimeIntervalType(a, b)` | `b` later than `a` |
+/// | `string collate <name>` | the name as written | the name in its canonical form, `system.builtin.` dropped |
+///
+/// Neither checks the range of an argument, such as the precision of a decimal: PySpark's types
+/// take any, and the server refuses the type. A decimal that Arrow cannot hold is refused when it
+/// is converted (see `decimal128_precision_and_scale` of the session).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TypeStringGrammar {
+    Json,
+    Ddl,
 }
 
-fn parse_char(s: &str) -> Result<DataType> {
-    let inner = s
-        .strip_prefix("char(")
-        .and_then(|s| s.strip_suffix(")"))
-        .ok_or_else(|| {
-            SparkError::value(
-                "INVALID_DATATYPE_FORMAT",
-                &[("detail", "Invalid char format")],
-            )
-        })?;
-
-    let length = inner.trim().parse::<i32>().map_err(|_| {
-        SparkError::value(
-            "INVALID_DATATYPE_FORMAT",
-            &[("detail", "Invalid char length")],
-        )
-    })?;
-
-    Ok(DataType::Char { length })
-}
-
-fn parse_varchar(s: &str) -> Result<DataType> {
-    let inner = s
-        .strip_prefix("varchar(")
-        .and_then(|s| s.strip_suffix(")"))
-        .ok_or_else(|| {
-            SparkError::value(
-                "INVALID_DATATYPE_FORMAT",
-                &[("detail", "Invalid varchar format")],
-            )
-        })?;
-
-    let length = inner.trim().parse::<i32>().map_err(|_| {
-        SparkError::value(
-            "INVALID_DATATYPE_FORMAT",
-            &[("detail", "Invalid varchar length")],
-        )
-    })?;
-
-    Ok(DataType::Varchar { length })
-}
-
-fn parse_time(s: &str) -> Result<DataType> {
-    let inner = s
-        .strip_prefix("time(")
-        .and_then(|s| s.strip_suffix(")"))
-        .ok_or_else(|| {
-            SparkError::value(
-                "INVALID_DATATYPE_FORMAT",
-                &[("detail", "Invalid time format")],
-            )
-        })?;
-
-    let precision = inner.trim().parse::<i32>().map_err(|_| {
-        SparkError::value(
-            "INVALID_DATATYPE_FORMAT",
-            &[("detail", "Invalid time precision")],
-        )
-    })?;
-
-    Ok(DataType::Time { precision })
-}
-
-/// Parses `timestamp_ntz(p)` / `timestamp_ltz(p)` (p in 7..=9), mirroring the
-/// `TIMESTAMP_{NTZ,LTZ}_NANOS_TYPE` patterns in Scala `DataType.nameToType`.
-fn parse_timestamp_nanos(s: &str) -> Result<DataType> {
-    let (ntz, rest) = if let Some(r) = s.strip_prefix("timestamp_ntz(") {
-        (true, r)
-    } else if let Some(r) = s.strip_prefix("timestamp_ltz(") {
-        (false, r)
-    } else {
-        return Err(SparkError::value(
-            "INVALID_DATATYPE_FORMAT",
-            &[("detail", "Invalid timestamp format")],
-        ));
-    };
-    let precision = rest
-        .strip_suffix(")")
-        .and_then(|p| p.trim().parse::<i32>().ok())
-        .filter(|p| (7..=9).contains(p))
-        .ok_or_else(|| {
-            SparkError::value(
-                "INVALID_DATATYPE_FORMAT",
-                &[("detail", "Invalid timestamp precision (expected 7..9)")],
-            )
-        })?;
-    Ok(if ntz {
-        DataType::TimestampNtzNanos { precision }
-    } else {
-        DataType::TimestampLtzNanos { precision }
+/// The type of a name that is one in both grammars, as it is written in JSON, in lower case.
+fn common_atomic_type(s: &str) -> Option<DataType> {
+    Some(match s {
+        "void" => DataType::Null,
+        "boolean" => DataType::Boolean,
+        "byte" => DataType::Byte,
+        "short" => DataType::Short,
+        "integer" => DataType::Integer,
+        "long" => DataType::Long,
+        "float" => DataType::Float,
+        "double" => DataType::Double,
+        "string" => DataType::String {
+            collation: "UTF8_BINARY".to_string(),
+        },
+        "binary" => DataType::Binary,
+        "date" => DataType::Date,
+        "timestamp" => DataType::Timestamp,
+        "timestamp_ntz" => DataType::TimestampNtz,
+        // A bare `time`, as `TimeType().typeName()` and Spark's `TIME`, is the default time(6).
+        "time" => DataType::Time { precision: 6 },
+        "interval" => DataType::CalendarInterval,
+        "variant" => DataType::Variant,
+        // A bare `decimal`, as `DecimalType().typeName()` and Spark's `DECIMAL`, is the default
+        // decimal(10,0).
+        "decimal" => DataType::Decimal {
+            precision: 10,
+            scale: 0,
+        },
+        _ => return None,
     })
 }
 
-/// Parses `interval`, `interval <field>` or `interval <field> to <field>`, as the grammar of
-/// Spark's parser does: a range is in one family (`year to month`, or `day` to `second`), and its
-/// end field is later than its start field. Anything else is an error, as the server's parser
-/// rejects it.
-fn parse_interval_string(s: &str) -> Result<DataType> {
-    let invalid = || {
-        SparkError::value(
-            "INVALID_DATATYPE_FORMAT",
-            &[("detail", &format!("Invalid interval format: {s}"))],
-        )
+/// Parses `s` if it is of a form that takes arguments or is of several words: `decimal(p,s)`,
+/// `char(n)`, `varchar(n)`, `time(p)`, `timestamp_ntz(p)`, `timestamp_ltz(p)`, `interval ...`,
+/// `string collate <name>`, `geometry(...)` or `geography(...)`. `None` if it is of none of them,
+/// and an error if it is a malformed one.
+///
+/// This is the one parser of these forms, of the JSON and of the DDL parser: a DDL string comes
+/// in lower case and with its whitespace collapsed (see [`canonical_type_spelling`]), so that it
+/// is spelled as the JSON form is. `grammar` selects what [`TypeStringGrammar`] lists.
+fn parse_parameterized_type(s: &str, grammar: TypeStringGrammar) -> Option<Result<DataType>> {
+    if let Some(args) = type_arguments(s, "decimal") {
+        Some(args.and_then(|args| parse_decimal(s, args, grammar)))
+    } else if let Some(args) = type_arguments(s, "char") {
+        Some(args.and_then(|args| {
+            Ok(DataType::Char {
+                length: type_argument(s, args, false)?,
+            })
+        }))
+    } else if let Some(args) = type_arguments(s, "varchar") {
+        Some(args.and_then(|args| {
+            Ok(DataType::Varchar {
+                length: type_argument(s, args, false)?,
+            })
+        }))
+    } else if let Some(args) = type_arguments(s, "time") {
+        Some(args.and_then(|args| {
+            Ok(DataType::Time {
+                precision: type_argument(s, args, false)?,
+            })
+        }))
+    } else if let Some(args) = type_arguments(s, "timestamp_ntz") {
+        Some(args.and_then(|args| {
+            Ok(DataType::TimestampNtzNanos {
+                precision: timestamp_nanos_precision(s, args)?,
+            })
+        }))
+    } else if let Some(args) = type_arguments(s, "timestamp_ltz") {
+        Some(args.and_then(|args| {
+            Ok(DataType::TimestampLtzNanos {
+                precision: timestamp_nanos_precision(s, args)?,
+            })
+        }))
+    } else if s.starts_with("interval") {
+        Some(parse_interval_string(s, grammar))
+    } else if s
+        .strip_prefix("string")
+        .is_some_and(|rest| rest.starts_with(char::is_whitespace))
+    {
+        Some(parse_collated_string(s, grammar))
+    } else if s.starts_with("geometry(") {
+        Some(parse_geometry(s))
+    } else if s.starts_with("geography(") {
+        Some(parse_geography(s))
+    } else {
+        None
+    }
+}
+
+/// The `INVALID_DATATYPE_FORMAT` error of the type string `s` that is not a valid `what`.
+fn invalid_type_string(s: &str, what: &str) -> SparkError {
+    SparkError::value(
+        "INVALID_DATATYPE_FORMAT",
+        &[("detail", &format!("Invalid {what}: {s}"))],
+    )
+}
+
+/// The text between the parentheses of `s` if it is `name(...)`: `None` if `s` does not start
+/// with `name(`, and an error if it does not end with the `)`.
+fn type_arguments<'a>(s: &'a str, name: &str) -> Option<Result<&'a str>> {
+    let rest = s.strip_prefix(name)?.strip_prefix('(')?;
+    Some(
+        rest.strip_suffix(')')
+            .ok_or_else(|| invalid_type_string(s, &format!("{name} type"))),
+    )
+}
+
+/// The integer argument `arg` of the type string `s`, which may have whitespace around it: only
+/// digits, as the `\d+` of PySpark's patterns of JSON and the `INTEGER_VALUE` of Spark's grammar,
+/// so not `+5`, and `-5` only where the argument is `signed`, the scale of a decimal of JSON.
+fn type_argument(s: &str, arg: &str, signed: bool) -> Result<i32> {
+    let arg = arg.trim();
+    let digits = match arg.strip_prefix('-') {
+        Some(digits) if signed => digits,
+        _ => arg,
     };
-    let parts: Vec<&str> = s.split_whitespace().collect();
-    match parts.as_slice() {
-        ["interval"] => Ok(DataType::CalendarInterval),
-        ["interval", field] => {
-            if let Some(code) = interval_field(field, YEAR_MONTH_FIELDS) {
-                Ok(DataType::YearMonthInterval {
-                    start_field: code,
-                    end_field: code,
-                })
-            } else if let Some(code) = interval_field(field, DAY_TIME_FIELDS) {
-                Ok(DataType::DayTimeInterval {
-                    start_field: code,
-                    end_field: code,
-                })
-            } else {
-                Err(invalid())
-            }
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(invalid_type_string(s, "type argument"));
+    }
+    arg.parse()
+        .map_err(|_| invalid_type_string(s, "type argument"))
+}
+
+/// Parses the arguments of `decimal(p,s)`. In DDL, `decimal(p)` has scale 0, as Spark's does; in
+/// JSON, which names a decimal with both, the scale may be negative, as PySpark's `_FIXED_DECIMAL`.
+/// The range of neither is checked, as [`TypeStringGrammar`] says.
+fn parse_decimal(s: &str, args: &str, grammar: TypeStringGrammar) -> Result<DataType> {
+    let (precision, scale) = match (args.split_once(','), grammar) {
+        (Some((precision, scale)), _) => (precision, Some(scale)),
+        (None, TypeStringGrammar::Ddl) => (args, None),
+        (None, TypeStringGrammar::Json) => return Err(invalid_type_string(s, "decimal type")),
+    };
+    Ok(DataType::Decimal {
+        precision: type_argument(s, precision, false)?,
+        scale: match scale {
+            Some(scale) => type_argument(s, scale, grammar == TypeStringGrammar::Json)?,
+            None => 0,
+        },
+    })
+}
+
+/// The precision of `timestamp_ntz(p)` / `timestamp_ltz(p)` (p in 7..=9), mirroring the
+/// `TIMESTAMP_{NTZ,LTZ}_NANOS_TYPE` patterns in Scala `DataType.nameToType`.
+fn timestamp_nanos_precision(s: &str, args: &str) -> Result<i32> {
+    type_argument(s, args, false)
+        .ok()
+        .filter(|p| (7..=9).contains(p))
+        .ok_or_else(|| invalid_type_string(s, "timestamp precision (expected 7..9)"))
+}
+
+/// Parses `interval`, `interval <field>` or `interval <field> to <field>`, its words separated
+/// by single spaces. A range is in one family (`year` and `month`, or `day` to `second`).
+///
+/// In DDL its end field is later than its start field, as the grammar of Spark's parser has it,
+/// and anything else is an error, as the server's parser rejects it. In JSON it is of any two
+/// fields of its family, as PySpark's `_INTERVAL_DAYTIME` and `_INTERVAL_YEARMONTH` read
+/// `interval second to day` as `DayTimeIntervalType(3, 0)`, whose JSON it is.
+fn parse_interval_string(s: &str, grammar: TypeStringGrammar) -> Result<DataType> {
+    let invalid = || invalid_type_string(s, "interval type");
+    let words: Vec<&str> = s.split(' ').collect();
+    let (start, end, range) = match words[..] {
+        ["interval"] => return Ok(DataType::CalendarInterval),
+        ["interval", field] => (field, field, false),
+        ["interval", start, "to", end] => (start, end, true),
+        _ => return Err(invalid()),
+    };
+    let fields_of = |fields: &[(&str, i32)]| {
+        Some((interval_field(start, fields)?, interval_field(end, fields)?))
+    };
+    let in_order = |start_field: i32, end_field: i32| {
+        !range || grammar == TypeStringGrammar::Json || start_field < end_field
+    };
+    match (fields_of(YEAR_MONTH_FIELDS), fields_of(DAY_TIME_FIELDS)) {
+        (Some((start_field, end_field)), _) if in_order(start_field, end_field) => {
+            Ok(DataType::YearMonthInterval {
+                start_field,
+                end_field,
+            })
         }
-        ["interval", start, "to", end] => {
-            if let (Some(start_field), Some(end_field)) = (
-                interval_field(start, YEAR_MONTH_FIELDS),
-                interval_field(end, YEAR_MONTH_FIELDS),
-            ) {
-                if start_field < end_field {
-                    return Ok(DataType::YearMonthInterval {
-                        start_field,
-                        end_field,
-                    });
-                }
-            } else if let (Some(start_field), Some(end_field)) = (
-                interval_field(start, DAY_TIME_FIELDS),
-                interval_field(end, DAY_TIME_FIELDS),
-            ) {
-                if start_field < end_field {
-                    return Ok(DataType::DayTimeInterval {
-                        start_field,
-                        end_field,
-                    });
-                }
-            }
-            Err(invalid())
+        (_, Some((start_field, end_field))) if in_order(start_field, end_field) => {
+            Ok(DataType::DayTimeInterval {
+                start_field,
+                end_field,
+            })
         }
         _ => Err(invalid()),
     }
@@ -1786,6 +1782,41 @@ fn interval_field(name: &str, fields: &[(&str, i32)]) -> Option<i32> {
         .iter()
         .find(|(field, _)| *field == name)
         .map(|&(_, code)| code)
+}
+
+/// Parses `string collate <name>`, of any whitespace between its words, whose name is of letters,
+/// digits and underscores, as the `\w+` of PySpark's `_STRING_WITH_COLLATION`.
+///
+/// In JSON the collation is the name as it is written, as PySpark's `StringType(name)` keeps it.
+/// In DDL it is the name in the canonical form that the server gives it (see
+/// [`canonical_collation_name`]), which may be qualified as `system.builtin.<name>`, as Spark's
+/// `CollationFactory.resolveFullyQualifiedName` reads it.
+fn parse_collated_string(s: &str, grammar: TypeStringGrammar) -> Result<DataType> {
+    let invalid = || invalid_type_string(s, "collated string type");
+    let words: Vec<&str> = s.split_whitespace().collect();
+    let ["string", "collate", name] = words[..] else {
+        return Err(invalid());
+    };
+    if s.ends_with(char::is_whitespace) {
+        return Err(invalid());
+    }
+    let name = match (grammar, name.split('.').collect::<Vec<_>>().as_slice()) {
+        (TypeStringGrammar::Ddl, [catalog, schema, unqualified])
+            if catalog.eq_ignore_ascii_case("system") && schema.eq_ignore_ascii_case("builtin") =>
+        {
+            unqualified
+        }
+        _ => name,
+    };
+    if name.is_empty() || !name.chars().all(|c| c == '_' || c.is_alphanumeric()) {
+        return Err(invalid());
+    }
+    Ok(DataType::String {
+        collation: match grammar {
+            TypeStringGrammar::Json => name.to_string(),
+            TypeStringGrammar::Ddl => canonical_collation_name(name),
+        },
+    })
 }
 
 fn parse_geometry(s: &str) -> Result<DataType> {
@@ -2306,68 +2337,23 @@ fn parse_single_type(input: &str) -> Result<DataType> {
         return parse_struct_type(input);
     }
 
-    // Primitive types
+    // The names of both grammars, then those of DDL alone, then the forms with arguments.
+    if let Some(data_type) = common_atomic_type(&trimmed) {
+        return Ok(data_type);
+    }
     match trimmed.as_str() {
-        "null" | "void" => Ok(DataType::Null),
-        "boolean" => Ok(DataType::Boolean),
-        "byte" | "tinyint" => Ok(DataType::Byte),
-        "short" | "smallint" => Ok(DataType::Short),
-        "int" | "integer" => Ok(DataType::Integer),
-        "long" | "bigint" => Ok(DataType::Long),
-        "float" => Ok(DataType::Float),
-        "double" => Ok(DataType::Double),
-        "string" => Ok(DataType::String {
-            collation: "UTF8_BINARY".to_string(),
+        "null" => Ok(DataType::Null),
+        "tinyint" => Ok(DataType::Byte),
+        "smallint" => Ok(DataType::Short),
+        "int" => Ok(DataType::Integer),
+        "bigint" => Ok(DataType::Long),
+        "timestamp_ltz" => Ok(DataType::Timestamp),
+        _ => parse_parameterized_type(&trimmed, TypeStringGrammar::Ddl).unwrap_or_else(|| {
+            Err(SparkError::value(
+                "INVALID_DATATYPE_FORMAT",
+                &[("detail", &format!("Unknown type: {}", input))],
+            ))
         }),
-        "binary" => Ok(DataType::Binary),
-        "date" => Ok(DataType::Date),
-        "timestamp" | "timestamp_ltz" => Ok(DataType::Timestamp),
-        "timestamp_ntz" => Ok(DataType::TimestampNtz),
-        // As Spark's `TIME`, of the default precision.
-        "time" => Ok(DataType::Time { precision: 6 }),
-        "interval" => Ok(DataType::CalendarInterval),
-        "variant" => Ok(DataType::Variant),
-        // As Spark's `DECIMAL`, of the default precision and scale.
-        "decimal" => Ok(DataType::Decimal {
-            precision: 10,
-            scale: 0,
-        }),
-        _ => {
-            // Try complex parsing with already-lowercased trimmed version
-            if trimmed.starts_with("decimal(") {
-                parse_decimal(&trimmed)
-            } else if trimmed.starts_with("char(") {
-                parse_char(&trimmed)
-            } else if trimmed.starts_with("varchar(") {
-                parse_varchar(&trimmed)
-            } else if trimmed.starts_with("time(") {
-                parse_time(&trimmed)
-            } else if trimmed.starts_with("timestamp_ntz(") || trimmed.starts_with("timestamp_ltz(")
-            {
-                parse_timestamp_nanos(&trimmed)
-            } else if trimmed.starts_with("interval") {
-                parse_interval_string(&trimmed)
-            } else if trimmed.starts_with("string collate") {
-                // The name is taken from the input, not from `trimmed`, which is lowercased.
-                let collation = input
-                    .split_whitespace()
-                    .skip(2)
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                Ok(DataType::String {
-                    collation: canonical_collation_name(&collation),
-                })
-            } else if trimmed.starts_with("geometry(") {
-                parse_geometry(&trimmed)
-            } else if trimmed.starts_with("geography(") {
-                parse_geography(&trimmed)
-            } else {
-                Err(SparkError::value(
-                    "INVALID_DATATYPE_FORMAT",
-                    &[("detail", &format!("Unknown type: {}", input))],
-                ))
-            }
-        }
     }
 }
 

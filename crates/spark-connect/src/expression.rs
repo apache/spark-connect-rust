@@ -21,11 +21,13 @@ pub fn next_lambda_var_index() -> u32 {
     LAMBDA_VAR_COUNTER.fetch_add(1, Ordering::SeqCst)
 }
 
-/// The most levels of an expression that a plan of a request may carry. PySpark builds the proto
-/// of an expression by recursing in Python, so under Python's default recursion limit its
-/// serializer raises `RecursionError` for `select((col("id") + 1 + ... + 1).alias("x"))` from
-/// 744 additions, an expression of 746 levels with its alias and column, and serializes 745; a
-/// deeper expression is a `RecursionError` here too (see [`with_expression_depth_bound`]).
+/// The most levels of an expression that a plan of a request may carry. It protects this client,
+/// as [`crate::plan::MAX_PLAN_DEPTH`] does for plans: a deeper expression is a `RecursionError`
+/// here, before any request is built (see [`with_expression_depth_bound`]). PySpark's own point is
+/// not this number, and depends on its protobuf backend: it builds the proto of an expression by
+/// recursing in Python, so with the pure-Python backend its serializer raises `RecursionError` from
+/// about 244 additions, as in `select((col("id") + 1 + ... + 1).alias("x"))`, and with upb it
+/// raises a `DecodeError` from 48 additions in some paths (measured with pyspark-client 4.3.0).
 pub const MAX_EXPRESSION_DEPTH: usize = 745;
 
 /// The stack that serializing or rendering an expression keeps free before it goes down a level,

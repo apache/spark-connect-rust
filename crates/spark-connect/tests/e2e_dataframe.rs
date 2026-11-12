@@ -937,3 +937,18 @@ fn repartition_by_range_splits_into_contiguous_ranges() {
         vec![(0, 24, 25), (25, 49, 25), (50, 74, 25), (75, 99, 25)]
     );
 }
+
+#[test]
+fn is_empty_is_true_only_without_rows() {
+    if !should_run() {
+        return;
+    }
+    let s = session();
+    assert!(!s.range(3).unwrap().is_empty().unwrap());
+    assert!(s
+        .range(3)
+        .unwrap()
+        .filter(col("id").gt(lit(5)))
+        .is_empty()
+        .unwrap());
+}

@@ -228,8 +228,9 @@ fn callback_id(err: &SparkError) -> Option<u64> {
     err.params.get("callback_id")?.parse::<u64>().ok()
 }
 
-/// The exception of the Python callback of `err`, if it is the error of one.
-fn callback_exception(err: &SparkError) -> Option<PyErr> {
+/// The exception of the Python callback of `err`, if it is the error of one, which is then
+/// released: the exception is raised by the caller instead of `err`.
+pub(crate) fn callback_exception(err: &SparkError) -> Option<PyErr> {
     let id = callback_id(err)?;
     CALLBACK_EXCEPTIONS
         .lock()
@@ -244,13 +245,52 @@ pub(crate) fn set_callback_context(py: Python<'_>, err: &SparkError, context: Py
     let Some(id) = callback_id(err) else {
         return;
     };
-    let exceptions = CALLBACK_EXCEPTIONS
+    // Taken out of the lock: dropping the context that the exception had can run Python code.
+    let exception = CALLBACK_EXCEPTIONS
         .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    if let Some(exception) = exceptions.get(&id) {
-        let _ = exception
-            .value(py)
-            .setattr("__context__", context.value(py));
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&id)
+        .map(|exception| exception.clone_ref(py));
+    if let Some(exception) = exception {
+        set_context(py, exception.value(py), context);
+    }
+}
+
+/// Make `context` the `__context__` of `exception`, as Python makes the exception that is being
+/// handled the context of one that is raised: through the C API, which cannot fail, rather than
+/// by setting the attribute, which the `__setattr__` of the class of the exception could refuse.
+/// An exception is never made its own context.
+fn set_context(
+    py: Python<'_>,
+    exception: &Bound<'_, pyo3::exceptions::PyBaseException>,
+    context: PyErr,
+) {
+    let context = context.into_value(py);
+    if context.as_ptr() == exception.as_ptr() {
+        return;
+    }
+    // SAFETY: both are exception instances, held with the interpreter attached, and
+    // `PyException_SetContext` steals the reference to the context that `into_ptr` gives it.
+    unsafe { pyo3::ffi::PyException_SetContext(exception.as_ptr(), context.into_ptr()) }
+}
+
+/// `raised`, with `secondary` as its `__context__`: an exception that kept the client from
+/// raising a more specific exception than `raised` is not dropped, but chained to the one that
+/// is raised in its place, as Python chains an exception raised while another is handled.
+fn with_context(py: Python<'_>, raised: PyErr, secondary: PyErr) -> PyErr {
+    set_context(py, raised.value(py), secondary);
+    raised
+}
+
+/// Stamp `_operation_id` on an exception of an ExecutePlan, as the reference client does (read
+/// through `operation_id`). The id is auxiliary: an exception that refuses the attribute is
+/// still the one to raise, so the refusal does not replace it, and goes to
+/// `sys.unraisablehook` instead of being dropped.
+fn stamp_operation_id(exception: &Bound<'_, PyAny>, operation_id: Option<&str>) {
+    if let Some(operation_id) = operation_id {
+        if let Err(error) = exception.setattr("_operation_id", operation_id) {
+            error.write_unraisable(exception.py(), Some(exception));
+        }
     }
 }
 
@@ -286,71 +326,70 @@ pub fn spark_error_to_py_exception(err: SparkError) -> PyErr {
     let operation_id = err.operation_id.clone();
     let class_name = kind_to_pyspark_class_name(err.kind);
 
-    // Try to acquire the GIL and import the exception class from pyspark.errors
     Python::attach(|py| {
-        // Should the connect classes not import, fall back to the class by kind below.
+        // An error of the server, or of gRPC, is the exception of the connect classes. Should
+        // making it fail, the error is raised as the class of its kind below, with the
+        // exception of the failure as its `__context__`.
         let connect_error = match (&err.server, err.grpc_code) {
-            (Some(server), _) => server_error_to_py(py, &err, server).ok(),
-            (None, Some(code)) => grpc_error_to_py(py, &msg, code).ok(),
+            (Some(server), _) => Some(server_error_to_py(py, &err, server)),
+            (None, Some(code)) => Some(grpc_error_to_py(py, &msg, code)),
             (None, None) => None,
         };
-        if let Some(exc_instance) = connect_error {
-            if let Some(op) = &operation_id {
-                let _ = exc_instance.setattr("_operation_id", op);
+        let connect_failure = match connect_error {
+            Some(Ok(exc_instance)) => {
+                stamp_operation_id(&exc_instance, operation_id.as_deref());
+                return PyErr::from_value(exc_instance);
             }
-            return PyErr::from_value(exc_instance);
-        }
-        // First, verify and get the exception class from pyspark.errors
-        let errors_module = match py.import("pyspark.errors") {
-            Ok(m) => m,
-            Err(_) => {
-                // If import fails, return PyRuntimeError as fallback
-                return exceptions::PyRuntimeError::new_err(msg);
-            }
+            Some(Err(failure)) => Some(failure),
+            None => None,
         };
-
-        // A classed Connect error, such as `NO_ACTIVE_SESSION`, and a Connect error of a plain
-        // message are `SparkConnectException`s, as the reference client raises them.
-        let connect_class = err.kind == SparkErrorKind::ConnectMessage
-            || (err.kind == SparkErrorKind::Connect && !err.error_class.is_empty());
-        let exc_class = if connect_class {
-            py.import("pyspark.errors.exceptions.connect")
-                .and_then(|module| module.getattr("SparkConnectException"))
-        } else {
-            errors_module.getattr(class_name)
-        };
-        // Get the exception class from the module
-        match exc_class {
-            Ok(exc_class) => {
-                // Instantiate the exception class: of the error class and message parameters
-                // of an error of a PySpark error class, otherwise of the message.
-                let created = match classed_exception(&exc_class, &err) {
-                    Some(exc_instance) => Ok(exc_instance),
-                    None => exc_class.call1((msg.clone(),)),
-                };
-                match created {
-                    Ok(exc_instance) => {
-                        // Mirror the reference client, which stamps `_operation_id` on
-                        // errors raised for an ExecutePlan (read via `operation_id`).
-                        if let Some(op) = &operation_id {
-                            let _ = exc_instance.setattr("_operation_id", op);
-                        }
-                        // Convert the exception instance to a PyErr.
-                        // We use unsafe code to construct the PyErr from the exception value.
-                        PyErr::from_value(exc_instance)
-                    }
-                    Err(_) => {
-                        // If instantiation fails, fall back to PyRuntimeError
-                        exceptions::PyRuntimeError::new_err(msg)
-                    }
+        match kind_exception(py, &err, class_name, &msg) {
+            Ok(exc_instance) => {
+                stamp_operation_id(&exc_instance, operation_id.as_deref());
+                let raised = PyErr::from_value(exc_instance);
+                match connect_failure {
+                    Some(failure) => with_context(py, raised, failure),
+                    None => raised,
                 }
             }
-            Err(_) => {
-                // If class not found, fall back to PyRuntimeError
-                exceptions::PyRuntimeError::new_err(msg)
+            // The class of the kind does not import, or does not take the message: a
+            // RuntimeError of the message, with the exception of the failure as its context,
+            // which the failure of the connect classes, if any, came before.
+            Err(failure) => {
+                let failure = match connect_failure {
+                    Some(earlier) => with_context(py, failure, earlier),
+                    None => failure,
+                };
+                with_context(py, exceptions::PyRuntimeError::new_err(msg), failure)
             }
         }
     })
+}
+
+/// The exception of `err` of the class of its kind, `class_name` of `pyspark.errors`.
+fn kind_exception<'py>(
+    py: Python<'py>,
+    err: &SparkError,
+    class_name: &str,
+    msg: &str,
+) -> PyResult<Bound<'py, PyAny>> {
+    let errors_module = py.import("pyspark.errors")?;
+    // A classed Connect error, such as `NO_ACTIVE_SESSION`, and a Connect error of a plain
+    // message are `SparkConnectException`s, as the reference client raises them.
+    let connect_class = err.kind == SparkErrorKind::ConnectMessage
+        || (err.kind == SparkErrorKind::Connect && !err.error_class.is_empty());
+    let exc_class = if connect_class {
+        py.import("pyspark.errors.exceptions.connect")?
+            .getattr("SparkConnectException")?
+    } else {
+        errors_module.getattr(class_name)?
+    };
+    // Of the error class and message parameters of an error of a PySpark error class,
+    // otherwise of the message.
+    match classed_exception(&exc_class, err) {
+        Some(exc_instance) => Ok(exc_instance),
+        None => exc_class.call1((msg,)),
+    }
 }
 
 /// The exception of `exc_class` for an error of a PySpark error class that the client raised,

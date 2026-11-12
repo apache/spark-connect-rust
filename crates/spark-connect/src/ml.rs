@@ -214,6 +214,13 @@ impl Params {
         self.string_opt(name).unwrap_or(default)
     }
 
+    /// The `outputCol` parameter, or Spark's default of `HasOutputCol`, `<uid>__output`, of the
+    /// object of `uid`, the column that the server writes when it is not set.
+    fn output_col_or_default(&self, uid: &str) -> String {
+        self.string_opt("outputCol")
+            .map_or_else(|| format!("{uid}__output"), str::to_string)
+    }
+
     /// The string parameter `name`, if it is set.
     fn string_opt(&self, name: &str) -> Option<&str> {
         match self.literal(name)? {
@@ -589,9 +596,9 @@ impl StandardScaler {
         self
     }
 
-    /// Get the input column name (default: "features").
-    pub fn input_col(&self) -> &str {
-        self.params.string_or("inputCol", "features")
+    /// The input column, if set: as in Spark, it has no default.
+    pub fn input_col(&self) -> Option<&str> {
+        self.params.string_opt("inputCol")
     }
 
     /// Set the output column name.
@@ -600,9 +607,9 @@ impl StandardScaler {
         self
     }
 
-    /// Get the output column name (default: "scaled_features").
-    pub fn output_col(&self) -> &str {
-        self.params.string_or("outputCol", "scaled_features")
+    /// The output column: as in Spark, `<uid>__output` unless set.
+    pub fn output_col(&self) -> String {
+        self.params.output_col_or_default(&self.operator.uid)
     }
 
     fn model_from_info(
@@ -715,7 +722,7 @@ impl VectorAssembler {
         }
     }
 
-    pub fn set_input_cols(mut self, cols: Vec<&str>) -> Self {
+    pub fn set_input_cols(mut self, cols: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.params = self.params.set_param_string_array("inputCols", cols);
         self
     }
@@ -730,9 +737,9 @@ impl VectorAssembler {
         self
     }
 
-    /// The output column (default: "assembled").
-    pub fn output_col(&self) -> &str {
-        self.params.string_or("outputCol", "assembled")
+    /// The output column: as in Spark, `<uid>__output` unless set.
+    pub fn output_col(&self) -> String {
+        self.params.output_col_or_default(&self.operator.uid)
     }
 }
 
@@ -796,9 +803,9 @@ impl StringIndexer {
         self
     }
 
-    /// The input column (default: empty).
-    pub fn input_col(&self) -> &str {
-        self.params.string_or("inputCol", "")
+    /// The input column, if set: as in Spark, it has no default.
+    pub fn input_col(&self) -> Option<&str> {
+        self.params.string_opt("inputCol")
     }
 
     pub fn set_output_col(mut self, col: &str) -> Self {
@@ -806,9 +813,9 @@ impl StringIndexer {
         self
     }
 
-    /// The output column (default: "indexed").
-    pub fn output_col(&self) -> &str {
-        self.params.string_or("outputCol", "indexed")
+    /// The output column: as in Spark, `<uid>__output` unless set.
+    pub fn output_col(&self) -> String {
+        self.params.output_col_or_default(&self.operator.uid)
     }
 
     fn model_from_info(
@@ -926,9 +933,9 @@ impl MaxAbsScaler {
         self
     }
 
-    /// The input column (default: "features").
-    pub fn input_col(&self) -> &str {
-        self.params.string_or("inputCol", "features")
+    /// The input column, if set: as in Spark, it has no default.
+    pub fn input_col(&self) -> Option<&str> {
+        self.params.string_opt("inputCol")
     }
 
     pub fn set_output_col(mut self, col: &str) -> Self {
@@ -936,9 +943,9 @@ impl MaxAbsScaler {
         self
     }
 
-    /// The output column (default: "maxAbs_scaled").
-    pub fn output_col(&self) -> &str {
-        self.params.string_or("outputCol", "maxAbs_scaled")
+    /// The output column: as in Spark, `<uid>__output` unless set.
+    pub fn output_col(&self) -> String {
+        self.params.output_col_or_default(&self.operator.uid)
     }
 
     fn model_from_info(
@@ -3564,7 +3571,7 @@ impl Pipeline {
         }
     }
 
-    pub fn set_stages(mut self, stage_names: Vec<&str>) -> Self {
+    pub fn set_stages(mut self, stage_names: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.params = self.params.set_param_string_array("stages", stage_names);
         self
     }
@@ -3902,7 +3909,7 @@ mod tests {
             .set_input_col("my_features")
             .set_output_col("my_scaled");
 
-        assert_eq!(scaler.input_col(), "my_features");
+        assert_eq!(scaler.input_col(), Some("my_features"));
         assert_eq!(scaler.output_col(), "my_scaled");
     }
 
@@ -3938,7 +3945,7 @@ mod tests {
             .set_input_col("category")
             .set_output_col("category_index");
 
-        assert_eq!(indexer.input_col(), "category");
+        assert_eq!(indexer.input_col(), Some("category"));
         assert_eq!(indexer.output_col(), "category_index");
     }
 
@@ -3956,7 +3963,7 @@ mod tests {
             .set_input_col("features")
             .set_output_col("scaled");
 
-        assert_eq!(scaler.input_col(), "features");
+        assert_eq!(scaler.input_col(), Some("features"));
         assert_eq!(scaler.output_col(), "scaled");
     }
 
@@ -4348,7 +4355,7 @@ mod tests {
         // The models of the server-fitted estimators transform through their cached model;
         // this exercises the offline model wrappers. The fits are tested against a server.
         let mas = MaxAbsScaler::new().set_input_col("f").set_output_col("o");
-        assert_eq!(mas.input_col(), "f");
+        assert_eq!(mas.input_col(), Some("f"));
         let mut m = MaxAbsScalerModel {
             operator: MlOperator::new("test", OperatorType::Model),
             params: mas.params().clone(),
@@ -5272,6 +5279,45 @@ mod tests {
             let cv = CrossValidator::new().set_seed(seed);
             assert_eq!(sent(cv.params()), Some(expected));
         }
+    }
+
+    #[test]
+    fn column_getters_give_the_defaults_of_spark() {
+        // As Spark's HasInputCol, which has no default, and HasOutputCol, whose default is
+        // `<uid>__output`, the column that the server writes when it is not set.
+        let scaler = StandardScaler::new();
+        assert_eq!(scaler.input_col(), None);
+        assert_eq!(
+            scaler.output_col(),
+            format!("{}__output", scaler.operator.uid)
+        );
+        let scaler = scaler.set_input_col("x").set_output_col("y");
+        assert_eq!(
+            (scaler.input_col(), scaler.output_col()),
+            (Some("x"), "y".to_string())
+        );
+        let max_abs = MaxAbsScaler::new();
+        assert_eq!(max_abs.input_col(), None);
+        assert_eq!(
+            max_abs.output_col(),
+            format!("{}__output", max_abs.operator.uid)
+        );
+        let indexer = StringIndexer::new();
+        assert_eq!(indexer.input_col(), None);
+        assert_eq!(
+            indexer.output_col(),
+            format!("{}__output", indexer.operator.uid)
+        );
+        let assembler = VectorAssembler::new();
+        assert_eq!(
+            assembler.output_col(),
+            format!("{}__output", assembler.operator.uid)
+        );
+        // The list setters take any strings, as `set_param_string_array`.
+        let assembler = assembler.set_input_cols(["a".to_string(), "b".to_string()]);
+        assert_eq!(assembler.input_cols(), vec!["a", "b"]);
+        let pipeline = Pipeline::new().set_stages(vec!["s1"]);
+        assert_eq!(pipeline.stages(), vec!["s1"]);
     }
 
     #[test]

@@ -308,7 +308,8 @@ def test_server_session_id_is_observed_and_a_changed_one_closes_the_session_as_p
         session._client._server_session_id = str(uuid.uuid4())
         with pytest.raises(SparkConnectException) as error:
             session.range(3).collect()
-        assert "SESSION_CHANGED" in str(error.value)
+        # The close by the session change makes the fetch of the error's details raise this.
+        assert "NO_ACTIVE_SESSION" in str(error.value)
         assert session.is_stopped
     finally:
         session.release_session_on_close = False
@@ -1329,9 +1330,10 @@ except RecursionError as error:
 
 
 def test_plans_of_a_few_hundred_levels_are_sent_as_pyspark(session):
-    # As PySpark, which serializes plans up to about 746 levels, and the server runs them up to
-    # about 510: Apache's test_recursion_handling_for_plan_logging builds 400 withColumns, and a
-    # subquery of 300 levels under 33 more runs too. Both were a RecursionError, or a crash.
+    # Plans of a few hundred levels are sent, which the client grows the stack for, while the
+    # server runs them up to about 510: Apache's test_recursion_handling_for_plan_logging builds
+    # 400 withColumns, and a subquery of 300 levels under 33 more runs too. Both were a
+    # RecursionError, or a crash.
     df = session.range(10)
     for x in range(400):
         df = df.withColumn(f"col{x}", F.lit(x))
@@ -2663,6 +2665,28 @@ def test_udfs_that_refer_to_variant_and_spatial_values_run_on_the_server_as_pysp
     assert session.range(1).select(described("id")).first()[0] == '{"a":1} 4326 3857'
 
 
+def test_udfs_of_methods_of_rows_and_values_run_on_the_server_as_pyspark(session):
+    # As PySpark's: a UDF that is, or captures, a method of Row, VariantVal, Geometry or Geography
+    # pickles it by reference to pyspark.sql.types, which the server's Python workers import.
+    from pyspark.sql import functions as F
+    from pyspark.sql.types import Geography, Row, VariantVal
+
+    geography = session.sql(
+        "SELECT st_geogfromwkb(X'0101000000000000000000F03F0000000000000040') AS g")
+    assert geography.select(F.udf(Geography.getSrid, "int")("g")).first()[0] == 4326
+    variant = session.sql("""SELECT parse_json('{"b": 2}') AS v""")
+    assert variant.select(F.udf(VariantVal.toJson, "string")("v")).first()[0] == '{"b":2}'
+    row = Row(a=1, b="x")
+    as_dict = Row.asDict
+
+    @F.udf("string")
+    def captured(_):
+        return str(as_dict(row))
+
+    assert session.range(1).select(captured("id")).first()[0] == "{'a': 1, 'b': 'x'}"
+
+
+
 def test_create_dataframe_of_multi_and_categorical_labels_as_pyspark(session):
     # As PySpark's: a frame whose labels are a MultiIndex or a CategoricalIndex converts its
     # cells as a frame of default labels does. A naive datetime of a list reads back unchanged
@@ -3380,6 +3404,34 @@ def test_local_iterator_closes_as_a_generator_as_pyspark(session):
         assert next(rows).id == 0
     assert list(rows) == []
     rows.close()
+
+
+def test_local_iterator_is_a_generator_as_pyspark(session):
+    # As PySpark's generator function: it yields the rows, and a close() or a throw() in the
+    # middle ends it.
+    import inspect
+    import types
+
+    df = session.range(1000, numPartitions=10)
+    rows = df.toLocalIterator()
+    assert isinstance(rows, types.GeneratorType)
+    assert [row.id for row in rows] == list(range(1000))
+    assert inspect.getgeneratorstate(rows) == inspect.GEN_CLOSED
+    assert next(rows, None) is None
+
+    rows = df.toLocalIterator()
+    assert next(rows).id == 0
+    assert inspect.getgeneratorstate(rows) == inspect.GEN_SUSPENDED
+    with pytest.raises(ValueError, match="stop"):
+        rows.throw(ValueError("stop"))
+    assert inspect.getgeneratorstate(rows) == inspect.GEN_CLOSED
+    assert list(rows) == []
+
+    rows = df.toLocalIterator()
+    next(rows)
+    rows.close()
+    assert inspect.getgeneratorstate(rows) == inspect.GEN_CLOSED
+    assert list(rows) == []
 
 
 def test_create_dataframe_takes_the_ddl_of_spark_as_pyspark(session):
@@ -5434,3 +5486,20 @@ def test_decision_tree_regressor_reports_weighted_variance_in_each_leaf(session)
     assert [r.uncertainty for r in rows] == [0.75,3.0]
     assert [r.leaf for r in rows] == [0.0,1.0]
     assert _forest_predictions(estimator.fit(training), held_out) == [-0.5,7.0]
+
+
+def test_binary_subclasses_are_sent_as_the_bytes_of_pyspark(session):
+    class Bytes(bytes):
+        def __bytes__(self):
+            return b"other"
+
+    class ByteArray(bytearray):
+        def __bytes__(self):
+            return b"other"
+
+    rows = session.createDataFrame(
+        [(Bytes(b"orig"),), (ByteArray(b"orig"),), (bytearray(b"ba"),), (None,)], "b binary"
+    ).collect()
+    assert [row.b for row in rows] == [b"other", b"other", b"ba", None]
+    rows = session.createDataFrame([([Bytes(b"orig")],)], "a array<binary>").collect()
+    assert rows[0].a == [b"other"]
