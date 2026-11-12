@@ -3945,6 +3945,28 @@ def test_a_deep_copy_of_a_dataframe_sets_its_own_observations_as_pyspark(session
     assert first.get == {"c": 3} and second.get == {"c": 5}
 
 
+def test_an_observation_copies_and_pickles_as_the_plain_object_of_pyspark(session):
+    # As PySpark's Observation, a plain object: a shallow copy shares the metrics that the actions
+    # set later, a deep copy keeps those that it had, and one pickled into the server's Python
+    # worker, whose PySpark has no Rust client, unpickles as PySpark's of its name and metrics.
+    import copy
+
+    from pyspark.sql import Observation
+
+    observation = Observation("copied")
+    df = session.range(3).observe(observation, F.count(F.lit(1)).alias("c"))
+    shallow, deep = copy.copy(observation), copy.deepcopy(observation)
+    assert df.count() == 3
+    assert observation.get == {"c": 3} and shallow.get == {"c": 3} and deep.get == {}
+
+    @F.udf("string")
+    def unpickled(_):
+        return f"{type(observation).__module__} {observation._name} {observation.get}"
+
+    assert session.range(1).select(unpickled("id")).first()[0] == (
+        "pyspark.sql.connect.observation copied {'c': 3}")
+
+
 def test_try_cast_and_isin_raise_the_errors_of_pyspark(session):
     # As PySpark Connect's: try_cast of an int, and isin of a tuple, raise PySpark's errors.
     from pyspark.errors import PySparkTypeError

@@ -10223,6 +10223,149 @@ def test_a_deep_copy_of_a_join_sets_the_observations_of_its_copy_as_pyspark(mock
     assert first.get == {"c": 3} and second.get == {"c": 5}
 
 
+def test_an_observation_copies_as_the_plain_object_of_pyspark(mock_connect):
+    # As copy.copy and copy.deepcopy of PySpark's Observation, a plain object: a copy of an unused
+    # one is of its name and is used on its own; a shallow copy of a used one shares its result
+    # dict, so it has the metrics that the actions set later too, while a deep copy keeps those
+    # that it had; both are used; and the attributes are copied as a plain object's.
+    import copy
+
+    from pyspark.errors import PySparkAssertionError
+    from pyspark.sql import Observation
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+    observation = Observation("o")
+    for unused in (copy.copy(observation), copy.deepcopy(observation)):
+        assert unused is not observation and unused._name == "o"
+        with pytest.raises(PySparkAssertionError, match="NO_OBSERVE_BEFORE_GET"):
+            unused.get
+    unnamed = Observation()
+    copied = copy.copy(unnamed)
+    spark.range(1).observe(copied, F.count(F.lit(1)).alias("c"))
+    assert copied._name is not None and unnamed._name is None
+    with pytest.raises(PySparkAssertionError, match="NO_OBSERVE_BEFORE_GET"):
+        unnamed.get
+    spark.range(1).observe(unnamed, F.count(F.lit(1)).alias("c"))
+    assert unnamed._name not in (None, copied._name)
+
+    df = spark.range(3).observe(observation, F.count(F.lit(1)).alias("c"))
+    shallow, deep = copy.copy(observation), copy.deepcopy(observation)
+    assert shallow.get == {} and deep.get == {}
+    batch, observed = _count_batch_and_observed_metrics(service, df)
+    service.execute_payload = batch + observed("o", varint_field(7, 3), "c")
+    assert df.count() == 3
+    assert observation.get == {"c": 3} and shallow.get == {"c": 3} and deep.get == {}
+    later = copy.deepcopy(observation)
+    for used in (shallow, deep, later, copy.copy(observation)):
+        with pytest.raises(PySparkAssertionError, match="REUSE_OBSERVATION"):
+            spark.range(1).observe(used, F.count(F.lit(1)).alias("c"))
+    service.execute_payload = batch + observed("o", varint_field(7, 4), "c")
+    assert df.count() == 3
+    assert observation.get == {"c": 4} and shallow.get == {"c": 4} and later.get == {"c": 3}
+
+    observation.tags = ["t"]
+    observation.me = observation
+    shallow = copy.copy(observation)
+    assert shallow.tags is observation.tags and shallow.me is observation
+    deep = copy.deepcopy(observation)
+    assert deep.tags == ["t"] and deep.tags is not observation.tags and deep.me is deep
+    both = copy.deepcopy([observation, observation])
+    assert both[0] is both[1] and both[0] is not observation and both[0].get == {"c": 4}
+
+
+def test_an_observation_pickles_as_the_plain_object_of_pyspark(mock_connect):
+    # As pickle of PySpark's Observation, a plain object of pyspark.sql.connect.observation, of
+    # its __dict__: _name, _result and _error. So a Python worker of the server, whose PySpark
+    # has no Rust client, unpickles PySpark's Observation, and this client its own: an unused one
+    # is used on its own, a used one keeps its metrics, which no action sets, and a failed one
+    # raises its error, of the class and the message of the error that the server sent.
+    import copy
+    import copyreg
+    import io
+    import pickle
+    import subprocess
+    import sys
+
+    from pyspark import cloudpickle
+    from pyspark.errors import PySparkAssertionError
+    from pyspark.sql import Observation
+    from pyspark.sql import functions as F
+
+    class Worker(pickle.Unpickler):
+        # The classes that a worker's PySpark finds: a plain class for the Observation.
+        def find_class(self, module, name):
+            if (module, name) == ("pyspark.sql.connect.observation", "Observation"):
+                return type("Observation", (), {})
+            return super().find_class(module, name)
+
+    def on_worker(observation):
+        # As cloudpickle pickles it into a worker, by reference to the class, and as pickle does.
+        pickled = [vars(Worker(io.BytesIO(dumps(observation))).load())
+                   for dumps in (pickle.dumps, cloudpickle.dumps)]
+        # An exception is equal only to itself: compare its class and message.
+        same = [{k: (type(v), str(v)) if isinstance(v, BaseException) else v
+                 for k, v in state.items()} for state in pickled]
+        assert same[0] == same[1]
+        return pickled[1]
+
+    # cloudpickle finds the module of a class only in sys.modules, which pyspark.sql fills with it,
+    # in a new process too.
+    script = "import sys, pyspark.sql\nprint('pyspark.sql.connect.observation' in sys.modules)\n"
+    imported = subprocess.run([sys.executable], input=script, capture_output=True, text=True,
+                              check=True)
+    assert imported.stdout.strip() == "True"
+    spark, service = mock_connect
+    unused = pickle.loads(pickle.dumps(Observation("u")))
+    assert type(unused) is Observation and unused._name == "u"
+    assert on_worker(Observation("u")) == {"_name": "u", "_result": None, "_error": None}
+    spark.range(1).observe(unused, F.count(F.lit(1)).alias("c"))
+    assert pickle.loads(pickle.dumps(unused)).get == {}
+
+    observation = Observation("o")
+    df = spark.range(3).observe(observation, F.count(F.lit(1)).alias("c"))
+    batch, observed = _count_batch_and_observed_metrics(service, df)
+    service.execute_payload = batch + observed("o", varint_field(7, 3), "c")
+    assert df.count() == 3
+    observation.tag = "t"
+    restored = pickle.loads(pickle.dumps(observation))
+    assert restored.get == {"c": 3} and restored._name == "o" and restored.tag == "t"
+    assert restored.get is restored.get
+    assert on_worker(observation) == {"_name": "o", "_result": {"c": 3}, "_error": None,
+                                      "tag": "t"}
+    assert pickle.loads(pickle.dumps(observation, protocol=2)).get == {"c": 3}
+    assert observation.__reduce_ex__(4)[:2] == (copyreg.__newobj__, (Observation,))
+    with pytest.raises(PySparkAssertionError, match="REUSE_OBSERVATION"):
+        spark.range(1).observe(restored, F.count(F.lit(1)).alias("c"))
+    service.execute_payload = batch + observed("o", varint_field(7, 4), "c")
+    assert df.count() == 3
+    assert observation.get == {"c": 4} and restored.get == {"c": 3}
+    shallow, deep = copy.copy(restored), copy.deepcopy(restored)
+    assert shallow.get is restored.get and deep.get == {"c": 3} and deep.get is not restored.get
+
+    # ExecutePlanResponse.observed_metrics=6: ObservedMetrics.name=1, root_error_idx=5, errors=6;
+    # Error.error_type_hierarchy=1, message=2, spark_throwable=5; SparkThrowable.error_class=1,
+    # sql_state=4.
+    failed = Observation("f")
+    failing = spark.range(3).observe(failed, F.count(F.lit(1)).alias("c"))
+    error = (message_field(1, "org.apache.spark.SparkArithmeticException")
+             + message_field(1, "java.lang.ArithmeticException")
+             + message_field(2, "[DIVIDE_BY_ZERO] Division by zero. SQLSTATE: 22012")
+             + message_field(5, message_field(1, "DIVIDE_BY_ZERO") + message_field(4, "22012")))
+    service.execute_payload = batch + message_field(
+        6, message_field(1, "f") + varint_field(5, 0) + message_field(6, error))
+    assert failing.count() == 3
+    with pytest.raises(Exception, match="DIVIDE_BY_ZERO") as raised:
+        failed.get
+    assert type(raised.value).__name__ == "ArithmeticException"
+    for copied in (pickle.loads(pickle.dumps(failed)), copy.deepcopy(pickle.loads(
+            pickle.dumps(failed)))):
+        with pytest.raises(type(raised.value)) as again:
+            copied.get
+        assert str(again.value) == str(raised.value)
+    assert type(on_worker(failed)["_error"]) is type(raised.value)
+
+
 def test_a_failing_action_keeps_the_metrics_of_the_earlier_actions_as_pyspark(mock_connect):
     # As PySpark's client, which converts the metrics of an Observation before it updates the
     # Observation with them: the Observation of a metric that it does not convert, and those
