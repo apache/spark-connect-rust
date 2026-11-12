@@ -111,6 +111,19 @@ def _requests_but_deletes(service):
     return sum(not command.ml_command.HasField("delete") for command in _commands(service))
 
 
+def _commands_but_deletes(service, start=0):
+    # The commands of the requests that the server received from the start-th on, but the
+    # Deletes of models that earlier tests released: a release is sent without waiting for it,
+    # so it can reach the server between a request of a test and the check of that request.
+    return [c for c in _commands(service)[start:] if not c.ml_command.HasField("delete")]
+
+
+def _last_request_but_deletes(service):
+    # The last ExecutePlanRequest that the server received, but such a Delete.
+    requests = map(pb2.ExecutePlanRequest.FromString, service.execute_requests)
+    return [r for r in requests if not r.plan.command.ml_command.HasField("delete")][-1]
+
+
 def _relation(df):
     # The relation of a DataFrame, as the core sends it: the relation that the plans of pyspark.ml
     # send in place of its placeholder, which the core replaces with it.
@@ -143,7 +156,7 @@ def test_ml_cache_queries_are_those_of_pyspark(ml_mock):
 
     service.execute_payload = _ml_result(param=pb2.Expression.Literal(long=42))
     assert client._query_model_size("ref-1") == 42
-    command = _commands(service)[-1]
+    command = _commands_but_deletes(service)[-1]
     assert command.ml_command.get_model_size.model_ref == pb2.ObjectRef(id="ref-1")
 
 
@@ -165,7 +178,7 @@ def test_ml_connect_fitted_scalers_transform_the_cached_model(ml_mock):
         service.execute_payload = _operator_info("model-1")
         estimator = cls(inputCol=column, outputCol="o")
         models.append(estimator.fit(df))
-        fit = _commands(service)[sent].ml_command.fit
+        fit = _commands_but_deletes(service, sent)[0].ml_command.fit
         assert fit.estimator.name == name
         assert fit.estimator.type == pb2.MlOperator.OPERATOR_TYPE_ESTIMATOR
         assert dict(fit.params.params) == {
@@ -218,11 +231,11 @@ def test_ml_connect_setters_set_the_params_of_their_receiver_as_pyspark(ml_mock)
         if hasattr(obj, "evaluate"):
             service.execute_payload = _ml_result(param=pb2.Expression.Literal(double=0.5))
             assert obj.evaluate(df) == 0.5
-            params = _commands(service)[sent].ml_command.evaluate.params
+            params = _commands_but_deletes(service, sent)[0].ml_command.evaluate.params
         elif hasattr(obj, "fit"):
             service.execute_payload = _operator_info("model-1")
             models.append(obj.fit(df))
-            params = _commands(service)[sent].ml_command.fit.params
+            params = _commands_but_deletes(service, sent)[0].ml_command.fit.params
         else:
             params = _relation(obj.transform(df)).ml_relation.transform.params
         return {name: value(literal) for name, literal in params.params.items()}
@@ -412,12 +425,12 @@ def _native_request(spark, service, obj, models):
     if hasattr(obj, "evaluate"):
         service.execute_payload = _ml_result(param=pb2.Expression.Literal(double=0.5))
         assert obj.evaluate(df) == 0.5
-        evaluate = _commands(service)[sent].ml_command.evaluate
+        evaluate = _commands_but_deletes(service, sent)[0].ml_command.evaluate
         return evaluate.evaluator, evaluate.params
     if hasattr(obj, "fit"):
         service.execute_payload = _operator_info("model-1")
         models.append(obj.fit(df))
-        fit = _commands(service)[sent].ml_command.fit
+        fit = _commands_but_deletes(service, sent)[0].ml_command.fit
         return fit.estimator, fit.params
     transform = _relation(obj.transform(df)).ml_relation.transform
     return transform.transformer, transform.params
@@ -1108,7 +1121,7 @@ def test_user_context_extensions_are_sent_as_pyspark(ml_mock):
     command = pb2.Command()
     command.ml_command.clean_cache.SetInParent()
     client.execute_command(command)
-    request = pb2.ExecutePlanRequest.FromString(service.execute_requests[-1])
+    request = _last_request_but_deletes(service)
     assert list(request.user_context.extensions) == [packed("global"), packed("local")]
     assert spark.range(1).schema is not None
     analysis = pb2.AnalyzePlanRequest.FromString(service.analyze_requests[-1])
@@ -1125,7 +1138,7 @@ def test_user_context_extensions_are_sent_as_pyspark(ml_mock):
     thread.start()
     thread.join()
     assert seen == [[]]
-    request = pb2.ExecutePlanRequest.FromString(service.execute_requests[-1])
+    request = _last_request_but_deletes(service)
     assert list(request.user_context.extensions) == [packed("global")]
 
     client.remove_user_context_extension(local)
@@ -1133,7 +1146,7 @@ def test_user_context_extensions_are_sent_as_pyspark(ml_mock):
     client.clear_user_context_extensions()
     assert client.global_user_context_extensions == []
     client.execute_command(command)
-    request = pb2.ExecutePlanRequest.FromString(service.execute_requests[-1])
+    request = _last_request_but_deletes(service)
     assert list(request.user_context.extensions) == []
 
 
@@ -1249,7 +1262,7 @@ def test_ml_execute_command_returns_the_results_of_pyspark(ml_mock):
     assert data is None and info is None
     assert list(properties) == ["ml_command_result"]
     assert properties["ml_command_result"].operator_info.obj_ref.id == "ref-1"
-    request = pb2.ExecutePlanRequest.FromString(service.execute_requests[-1])
+    request = _last_request_but_deletes(service)
     assert request.session_id == spark.session_id
     assert request.plan.command == command
 
@@ -1275,7 +1288,7 @@ def test_ml_cache_commands_are_those_of_pyspark(ml_mock):
     assert client._delete_ml_cache([]) == []
     assert len(service.execute_requests) == 1
     client._cleanup_ml_cache()
-    assert _commands(service)[-1].ml_command.HasField("clean_cache")
+    assert _commands_but_deletes(service)[-1].ml_command.HasField("clean_cache")
     service.execute_failure = "the server failed"
     assert client._delete_ml_cache(["c"]) == []
     client._cleanup_ml_cache()
@@ -2308,7 +2321,7 @@ def test_session_hooks_rewrite_the_requests_of_executions_as_pyspark(_ml_mock_se
         command = pb2.Command()
         command.ml_command.clean_cache.SetInParent()
         spark.client.execute_command(command)
-        request = pb2.ExecutePlanRequest.FromString(service.execute_requests[-1])
+        request = _last_request_but_deletes(service)
         assert list(request.tags)[-2:] == ["first", "second"]
         assert request.operation_id == created[0].operation_ids[0]
         assert created[1].operation_ids == created[0].operation_ids

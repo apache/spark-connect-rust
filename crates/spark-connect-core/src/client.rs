@@ -3225,11 +3225,12 @@ mod tests {
                 .await
                 .unwrap();
         });
-        let builder = {
-            let _env = crate::channel::set_env(&[("SPARK_CONNECT_AUTHENTICATE_TOKEN", None)]);
-            ChannelBuilder::parse(&format!("sc://127.0.0.1:{}", address.port())).unwrap()
-        };
+        // `connect` reads the token of the environment too, so none is set until it returns:
+        // another test may set one, which would make the channel TLS.
+        let env = crate::channel::set_env(&[("SPARK_CONNECT_AUTHENTICATE_TOKEN", None)]);
+        let builder = ChannelBuilder::parse(&format!("sc://127.0.0.1:{}", address.port())).unwrap();
         let mut client = SparkConnectClient::connect(&builder).await.unwrap();
+        drop(env);
         client.set_retry_policy(RetryPolicy {
             max_retries: Some(2),
             initial_backoff_ms: 1,
@@ -3784,11 +3785,13 @@ mod request_fields_tests {
                 .await
                 .unwrap();
         });
-        let builder = {
-            let _env = crate::channel::set_env(&[("SPARK_CONNECT_AUTHENTICATE_TOKEN", None)]);
-            ChannelBuilder::parse(&format!("sc://127.0.0.1:{}/", address.port())).unwrap()
-        };
+        // `connect` reads the token of the environment too, so none is set until it returns:
+        // another test may set one, which would make the channel TLS.
+        let env = crate::channel::set_env(&[("SPARK_CONNECT_AUTHENTICATE_TOKEN", None)]);
+        let builder =
+            ChannelBuilder::parse(&format!("sc://127.0.0.1:{}/", address.port())).unwrap();
         let client = SparkConnectClient::connect(&builder).await.unwrap();
+        drop(env);
         *client.plan_compression.lock().unwrap() = PlanCompression::Zstd { threshold: 1000 };
         let large = spark_connect_proto::Relation {
             rel_type: Some(spark_connect_proto::relation::RelType::LocalRelation(
@@ -3849,12 +3852,14 @@ mod request_fields_tests {
                 .await
                 .unwrap();
         });
-        let builder = {
-            let _env = crate::channel::set_env(&[("SPARK_CONNECT_AUTHENTICATE_TOKEN", None)]);
+        // `connect` reads the token of the environment too, so none is set until it returns:
+        // another test may set one, which would make the channel TLS.
+        let env = crate::channel::set_env(&[("SPARK_CONNECT_AUTHENTICATE_TOKEN", None)]);
+        let builder =
             ChannelBuilder::parse(&format!("sc://127.0.0.1:{}/;user_id=u1", address.port()))
-                .unwrap()
-        };
+                .unwrap();
         let client = SparkConnectClient::connect(&builder).await.unwrap();
+        drop(env);
         let session_id = client.session_id().to_string();
         let extension = prost_types::Any {
             type_url: "example.org/context".into(),
@@ -3996,12 +4001,14 @@ mod request_fields_tests {
                 .await
                 .unwrap();
         });
-        let builder = {
-            let _env = crate::channel::set_env(&[("SPARK_CONNECT_AUTHENTICATE_TOKEN", None)]);
+        // `connect` reads the token of the environment too, so none is set until it returns:
+        // another test may set one, which would make the channel TLS.
+        let env = crate::channel::set_env(&[("SPARK_CONNECT_AUTHENTICATE_TOKEN", None)]);
+        let builder =
             ChannelBuilder::parse(&format!("sc://127.0.0.1:{}/;user_id=u1", address.port()))
-                .unwrap()
-        };
+                .unwrap();
         let client = SparkConnectClient::connect(&builder).await.unwrap();
+        drop(env);
         (client, received, server)
     }
 
