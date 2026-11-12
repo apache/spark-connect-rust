@@ -244,10 +244,11 @@ impl PyDataFrameReader {
     /// string "None"); booleans lowercase to "true"/"false" (reference `to_str` semantics).
     fn option<'py>(
         mut slf: PyRefMut<'py, Self>,
-        key: &str,
+        key: &Bound<'_, PyAny>,
         value: &Bound<'_, PyAny>,
     ) -> PyResult<PyRefMut<'py, Self>> {
-        slf.inner = set_reader_option_unset_none(slf.inner.clone(), key, value)?;
+        let key = crate::str_argument(key)?;
+        slf.inner = set_reader_option_unset_none(slf.inner.clone(), &key, value)?;
         Ok(slf)
     }
 
@@ -692,7 +693,7 @@ impl PyDataFrameReader {
         };
         if let Some(properties) = properties {
             for (key, value) in properties.iter() {
-                r = set_option_skip_none(r, &key.str()?.to_cow()?, Some(&value))?;
+                r = set_option_skip_none(r, &crate::str_text(&key)?, Some(&value))?;
             }
         }
         // PySpark's jdbc also leaves url/dbtable on the reader.

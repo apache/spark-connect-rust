@@ -57,7 +57,7 @@ use dataframe::{
 };
 use datasource::PyDataSourceRegistration;
 use group::{PyCoGroupedData, PyGroupedData};
-pub(crate) use options::{coerce_option_value, str_text};
+pub(crate) use options::{coerce_option_value, str_argument, str_text};
 use readwriter::PyDataFrameReader;
 use resource::{
     PyExecutorResourceRequests, PyResourceProfile, PyResourceProfileBuilder, PyTaskResourceRequests,

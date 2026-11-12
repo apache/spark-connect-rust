@@ -118,6 +118,10 @@ trait Native {
     fn params(&self) -> &Params;
     fn unsendable(&self) -> &[&'static str];
     fn unsendable_mut(&mut self) -> &mut Vec<&'static str>;
+    /// The name of the param `name` in the JVM class, where it is not the name of PySpark's.
+    fn jvm_name(name: &'static str) -> &'static str {
+        name
+    }
 }
 
 macro_rules! native {
@@ -146,19 +150,20 @@ macro_rules! native {
 /// Set the param `name` of `target` to `value`.
 fn apply<T: Native>(target: &mut T, name: &'static str, value: Converted) {
     target.unsendable_mut().retain(|unsent| *unsent != name);
+    let jvm = T::jvm_name(name);
     let params = std::mem::take(target.params_mut());
     let params = match value {
-        Converted::Null => params.set_param_null(name),
+        Converted::Null => params.set_param_null(jvm),
         Converted::Unsendable => {
             target.unsendable_mut().push(name);
-            params.clear_param(name)
+            params.clear_param(jvm)
         }
-        Converted::Int(value) => params.set_param_int_narrow(name, value),
-        Converted::Float(value) => params.set_param_double(name, value),
-        Converted::Str(value) => params.set_param_string(name, &value),
-        Converted::Bool(value) => params.set_param_bool(name, value),
-        Converted::StrList(values) => params.set_param_string_array(name, values),
-        Converted::FloatList(values) => params.set_param_double_array(name, values),
+        Converted::Int(value) => params.set_param_int_narrow(jvm, value),
+        Converted::Float(value) => params.set_param_double(jvm, value),
+        Converted::Str(value) => params.set_param_string(jvm, &value),
+        Converted::Bool(value) => params.set_param_bool(jvm, value),
+        Converted::StrList(values) => params.set_param_string_array(jvm, values),
+        Converted::FloatList(values) => params.set_param_double_array(jvm, values),
     };
     *target.params_mut() = params;
 }
@@ -1925,21 +1930,57 @@ pub struct PyBinaryClassificationEvaluator {
     unsendable: Vec<&'static str>,
 }
 
+/// The JVM evaluator scores its rawPredictionCol, so the probability column of PySpark's
+/// evaluator is sent as that param: a probability vector is read at its element 1, as the
+/// positive class of PySpark's evaluator.
+impl Native for PyBinaryClassificationEvaluator {
+    type Core = BinaryClassificationEvaluator;
+    fn inner(&self) -> &BinaryClassificationEvaluator {
+        &self.inner
+    }
+    fn params_mut(&mut self) -> &mut Params {
+        self.inner.params_mut()
+    }
+    fn params(&self) -> &Params {
+        self.inner.params()
+    }
+    fn unsendable(&self) -> &[&'static str] {
+        &self.unsendable
+    }
+    fn unsendable_mut(&mut self) -> &mut Vec<&'static str> {
+        &mut self.unsendable
+    }
+    fn jvm_name(name: &'static str) -> &'static str {
+        if name == "probabilityCol" {
+            "rawPredictionCol"
+        } else {
+            name
+        }
+    }
+}
+
 #[pymethods]
 impl PyBinaryClassificationEvaluator {
     #[new]
     #[pyo3(
         signature = (*args, **kwargs),
-        text_signature = "(*, metricName='areaUnderROC', labelCol='label', rawPredictionCol='rawPrediction')"
+        text_signature = "(*, metricName='areaUnderROC', labelCol='label', probabilityCol='probability')"
     )]
     fn new(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
         let mut this = Self {
             inner: BinaryClassificationEvaluator::new(),
             unsendable: Vec::new(),
         };
+        // As PySpark's, whose constructor sets the probability column "probability" by default,
+        // where the JVM evaluator's default is "rawPrediction".
+        apply(
+            &mut this,
+            "probabilityCol",
+            Converted::Str("probability".to_string()),
+        );
         let params = &[
             ("labelCol", Kind::Str),
-            ("rawPredictionCol", Kind::Str),
+            ("probabilityCol", Kind::Str),
             ("metricName", Kind::Str),
         ];
         init_params(
@@ -1959,12 +2000,12 @@ impl PyBinaryClassificationEvaluator {
     ) -> PyResult<Bound<'py, Self>> {
         set_param(slf, "labelCol", Kind::Str, value)
     }
-    #[pyo3(name = "setRawPredictionCol")]
-    fn set_raw_prediction_col<'py>(
+    #[pyo3(name = "setProbabilityCol")]
+    fn set_probability_col<'py>(
         slf: Bound<'py, Self>,
         value: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, Self>> {
-        set_param(slf, "rawPredictionCol", Kind::Str, value)
+        set_param(slf, "probabilityCol", Kind::Str, value)
     }
     #[pyo3(name = "setMetricName")]
     fn set_metric_name<'py>(
@@ -2150,7 +2191,6 @@ native!(
     PyRandomForestRegressor => RandomForestRegressor,
     PyKMeans => KMeans,
     PyRegressionEvaluator => RegressionEvaluator,
-    PyBinaryClassificationEvaluator => BinaryClassificationEvaluator,
     PyMulticlassClassificationEvaluator => MulticlassClassificationEvaluator,
     PyPipeline => Pipeline,
     PyCrossValidator => CrossValidator,

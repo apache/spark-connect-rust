@@ -23,8 +23,10 @@ Python `timedelta` map keys are not yet supported.
 `BinaryClassificationEvaluator::set_score_col` and `score_col`, and the Python
 `scoreCol=` argument and `setScoreCol` of v4.2.0 are removed, without an alias:
 Spark's evaluator has no `scoreCol` param, so no value of it worked on the server.
-Use `set_raw_prediction_col` and `raw_prediction_col` (Python `rawPredictionCol=` and
-`setRawPredictionCol`), the column of raw prediction vectors that the evaluator scores.
+Use `set_raw_prediction_col` and `raw_prediction_col` in Rust, the column of raw prediction
+vectors that the evaluator scores. In Python, as in PySpark, it is `probabilityCol=` and
+`setProbabilityCol`, the column of probabilities, which the server reads as its raw prediction
+column.
 
 The native ML classes take a JVM `Int` param as an `i32`: `LogisticRegression::set_max_iter`,
 `LinearSVC::set_max_iter` and `LinearSVC::set_aggregation_depth` take an `i32`, and
@@ -181,7 +183,9 @@ The Python classes of the native estimators, transformers and evaluators of
 keyword-only, raising PySpark's `TypeError`, except `MulticlassClassificationEvaluator`,
 which takes `metricName`, `labelCol` and `predictionCol` by position as well, as
 PySpark's does; its `metricName` is `accuracy` by default, as in PySpark, where the JVM
-evaluator and the Rust API default to `f1`. Each value is converted by the `TypeConverters` of its param in
+evaluator and the Rust API default to `f1`. The `probabilityCol` of
+`BinaryClassificationEvaluator` is `probability` by default, as in PySpark, and is sent as the
+`rawPredictionCol` that the JVM evaluator scores. Each value is converted by the `TypeConverters` of its param in
 PySpark (an integral float for an int param, for example), and a value that the
 converter rejects raises its `TypeError`. A fit, transform or evaluate sends only the
 params that the constructor or a setter set, so the server applies its defaults to

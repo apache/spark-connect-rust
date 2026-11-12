@@ -3563,13 +3563,14 @@ impl PyDataFrameWriter {
 
     fn option<'py>(
         slf: &Bound<'py, Self>,
-        key: &str,
+        key: &Bound<'_, PyAny>,
         value: &Bound<'_, PyAny>,
     ) -> PyResult<Bound<'py, Self>> {
+        let key = crate::str_argument(key)?;
         // None -> option left unset; bools -> "true"/"false" (reference `to_str`).
         match crate::coerce_option_value(value)? {
             Some(v) => {
-                slf.borrow().inner.update(|w| w.option(key, &v));
+                slf.borrow().inner.update(|w| w.option(&key, &v));
                 Ok(slf.clone())
             }
             None => Ok(slf.clone()),
@@ -3666,7 +3667,7 @@ impl PyDataFrameWriter {
         if let Some(props) = properties {
             for (key, value) in props.iter() {
                 if let Some(value) = crate::coerce_option_value(&value)? {
-                    w = w.option(&key.str()?.to_cow()?, &value);
+                    w = w.option(&crate::str_text(&key)?, &value);
                 }
             }
         }
@@ -3986,12 +3987,13 @@ impl PyDataFrameWriterV2 {
     // the other reader/writer option bindings.
     fn option<'py>(
         slf: &Bound<'py, Self>,
-        key: &str,
+        key: &Bound<'_, PyAny>,
         value: &Bound<'_, PyAny>,
     ) -> PyResult<Bound<'py, Self>> {
+        let key = crate::str_argument(key)?;
         match crate::coerce_option_value(value)? {
             Some(v) => {
-                slf.borrow().inner.update(|w| w.option(key, &v));
+                slf.borrow().inner.update(|w| w.option(&key, &v));
                 Ok(slf.clone())
             }
             None => Ok(slf.clone()),

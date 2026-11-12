@@ -44,6 +44,15 @@ pub(crate) fn str_text(v: &Bound<'_, PyAny>) -> PyResult<String> {
         .map_err(|_| crate::functions::not_utf8_string(text.as_any()))
 }
 
+/// The text of a str argument, as a protobuf string field takes it: the text of the str itself,
+/// which PyO3's extraction of a str gives, and protobuf's `ValueError` for a str that UTF-8
+/// cannot encode. Another type is a `TypeError`, as that extraction raises.
+pub(crate) fn str_argument(v: &Bound<'_, PyAny>) -> PyResult<String> {
+    let text = v.cast::<PyString>()?;
+    text.extract::<String>()
+        .map_err(|_| crate::functions::not_utf8_string(v))
+}
+
 /// A reader or writer that takes string options one at a time.
 pub(crate) trait OptionBuilder: Sized {
     fn with_option(self, key: &str, value: &str) -> Self;

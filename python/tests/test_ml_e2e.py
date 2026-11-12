@@ -375,8 +375,8 @@ def test_ml_feature_transformers_as_pyspark(session):
 
 def test_ml_connect_vector_assembler_and_evaluator_as_pyspark(session):
     # pyspark.ml.connect's VectorAssembler sends inputCols as a list of strings, and the native
-    # BinaryClassificationEvaluator scores its rawPredictionCol (default rawPrediction), with
-    # the values of PySpark 4.3.0.
+    # BinaryClassificationEvaluator scores its probabilityCol (default probability), which the
+    # JVM evaluator reads as its rawPredictionCol, with the values of PySpark 4.3.0.
     from pyspark.ml.connect.evaluation import BinaryClassificationEvaluator
     from pyspark.ml.connect.feature import VectorAssembler
     from pyspark.ml.functions import array_to_vector
@@ -392,13 +392,29 @@ def test_ml_connect_vector_assembler_and_evaluator_as_pyspark(session):
     scores = [(0.0, 0.1), (0.0, 0.4), (1.0, 0.35), (1.0, 0.8)]
     raw = session.createDataFrame(scores, "label double, score double").select(
         "label",
-        array_to_vector(F.array(1.0 - F.col("score"), F.col("score"))).alias("rawPrediction"),
+        array_to_vector(F.array(1.0 - F.col("score"), F.col("score"))).alias("probability"),
     )
     assert BinaryClassificationEvaluator().evaluate(raw) == 0.75
-    evaluator = BinaryClassificationEvaluator(rawPredictionCol="rawPrediction", labelCol="label")
+    evaluator = BinaryClassificationEvaluator(probabilityCol="probability", labelCol="label")
     assert evaluator.evaluate(raw) == 0.75
-    pr = BinaryClassificationEvaluator(metricName="areaUnderPR", rawPredictionCol="rawPrediction")
+    pr = BinaryClassificationEvaluator(metricName="areaUnderPR", probabilityCol="probability")
     assert pr.evaluate(raw) == pytest.approx(0.7916666666666666)
+
+
+def test_ml_connect_binary_evaluator_scores_the_probability_of_pyspark_docstring(session):
+    # The example of PySpark's BinaryClassificationEvaluator: probabilities that are not vectors,
+    # and the default probabilityCol, which the evaluator reads with no other option. The metric
+    # is that of the server's evaluator: its areaUnderPR is the trapezoids of Spark's thresholds,
+    # 0.9027777777777777, where PySpark's torcheval metric of the docstring gives 0.9166666865.
+    from pyspark.ml.connect.evaluation import BinaryClassificationEvaluator
+
+    dataset = session.createDataFrame(
+        [(1, 0.6), (0, 0.55), (0, 0.1), (1, 0.6), (1, 0.4)],
+        schema=["label", "probability"],
+    )
+    pr = BinaryClassificationEvaluator(metricName="areaUnderPR")
+    assert pr.evaluate(dataset) == pytest.approx(0.9027777777777777, abs=1e-9)
+    assert BinaryClassificationEvaluator().evaluate(dataset) == pytest.approx(5 / 6, abs=1e-9)
 
 
 def test_ml_connect_setters_change_the_next_evaluate_and_fit_as_pyspark(session):
@@ -430,7 +446,7 @@ def test_ml_connect_setters_change_the_next_evaluate_and_fit_as_pyspark(session)
     assert multiclass.setMetricName("accuracy") is multiclass
     assert multiclass.evaluate(scored) == 0.75  # The f1 is 0.733.
     binary = BinaryClassificationEvaluator()
-    assert binary.setRawPredictionCol("score") is binary  # No rawPrediction column is there.
+    assert binary.setProbabilityCol("score") is binary  # No probability column is there.
     assert binary.evaluate(scored) == 0.75
     assert binary.setMetricName("areaUnderPR") is binary
     assert binary.evaluate(scored) == pytest.approx(0.7916666666666666)
