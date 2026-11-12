@@ -101,18 +101,19 @@ impl PySparkSessionBuilder {
     #[pyo3(signature = (key=None, value=None, map=None, conf=None))]
     fn config<'py>(
         mut slf: PyRefMut<'py, Self>,
-        key: Option<&str>,
+        key: Option<&Bound<'_, PyAny>>,
         value: Option<&Bound<'_, PyAny>>,
         map: Option<&Bound<'_, PyDict>>,
         conf: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyRefMut<'py, Self>> {
         let py = slf.py();
         if let Some(k) = key {
+            let k = crate::str_argument(k)?;
             let v = match value {
                 Some(v) => crate::coerce_option_value(v)?,
                 None => None,
             };
-            slf.set_option_value(py, k, v)?;
+            slf.set_option_value(py, &k, v)?;
         }
         if let Some(m) = map {
             for (k, v) in m.iter() {
@@ -1982,7 +1983,7 @@ impl PySparkSession {
     #[pyo3(signature = (sqlQuery, args=None, **kwargs))]
     fn sql(
         slf: &Bound<'_, Self>,
-        sqlQuery: &str,
+        sqlQuery: &Bound<'_, PyAny>,
         args: Option<Bound<'_, PyAny>>,
         kwargs: Option<Bound<'_, PyDict>>,
     ) -> PyResult<PyDataFrame> {
@@ -1993,6 +1994,7 @@ impl PySparkSession {
             }
             Ok(crate::functions::to_column(v)?.expression().clone())
         }
+        let sqlQuery = crate::str_argument(sqlQuery)?;
         let py = slf.py();
         let mut pos: Vec<spark_connect::expression::Expression> = Vec::new();
         let mut named: std::collections::HashMap<String, spark_connect::expression::Expression> =
@@ -2004,7 +2006,7 @@ impl PySparkSession {
                     let k = k
                         .cast::<pyo3::types::PyString>()
                         .map_err(|_| pyo3::exceptions::PyAssertionError::new_err(()))?;
-                    named.insert(k.to_cow()?.into_owned(), to_lit(&v)?);
+                    named.insert(crate::str_argument(k.as_any())?, to_lit(&v)?);
                 }
             } else if let Ok(lst) = a.cast::<PyList>() {
                 for v in lst.iter() {
@@ -3007,7 +3009,9 @@ impl PySparkSession {
             ));
         };
         Ok(PyDataFrame::new(
-            self.session.table(&name.to_cow()?).to_pyerr()?,
+            self.session
+                .table(&crate::str_argument(name.as_any())?)
+                .to_pyerr()?,
         ))
     }
 

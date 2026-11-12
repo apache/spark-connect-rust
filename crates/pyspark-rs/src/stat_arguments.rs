@@ -40,7 +40,7 @@ fn subset_columns(subset: Option<&Bound<'_, PyAny>>, expected: &str) -> PyResult
         return Ok(Vec::new());
     };
     if subset.is_instance_of::<PyString>() {
-        return Ok(vec![subset.extract()?]);
+        return Ok(vec![crate::str_argument(subset)?]);
     }
     if !is_sequence(subset) {
         return Err(not_expected_type(subset, "subset", expected));
@@ -50,7 +50,7 @@ fn subset_columns(subset: Option<&Bound<'_, PyAny>>, expected: &str) -> PyResult
         .map(|column| {
             let column = column?;
             if column.is_instance_of::<PyString>() {
-                column.extract()
+                crate::str_argument(&column)
             } else {
                 Err(not_expected_type(&column, "cols", "list, str or tuple"))
             }
@@ -167,7 +167,7 @@ pub(crate) fn fillna(
     if let Some(dict) = dict {
         let mut pairs = Vec::with_capacity(dict.len());
         for (column, fill) in dict.iter() {
-            pairs.push((column.extract()?, fill_value(&fill)?));
+            pairs.push((crate::str_argument(&column)?, fill_value(&fill)?));
         }
         return Ok(PyDataFrame::new(df.fillna_map(pairs).to_pyerr()?));
     }
@@ -180,6 +180,13 @@ pub(crate) fn fillna(
 /// The value of a fill. As PySpark sends it as a proto literal, an int beyond a long is out of
 /// range for the proto, which raises `ValueError`, not the error of a literal.
 fn fill_value(value: &Bound<'_, PyAny>) -> PyResult<spark_connect::row::Value> {
+    // A str is sent in a protobuf string field, which raises the ValueError of a str that UTF-8
+    // cannot encode, as `str_argument` does.
+    if value.is_instance_of::<PyString>() {
+        return Ok(spark_connect::row::Value::String(crate::str_argument(
+            value,
+        )?));
+    }
     if value.is_instance_of::<PyInt>()
         && !value.is_instance_of::<pyo3::types::PyBool>()
         && value.extract::<i64>().is_err()

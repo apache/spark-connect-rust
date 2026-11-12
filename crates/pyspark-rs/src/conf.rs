@@ -48,7 +48,7 @@ impl<'a, 'py> FromPyObject<'a, 'py> for ConfDefault {
 /// `RuntimeConf._checkType`.
 fn checked_str(obj: &Bound<'_, PyAny>, name: &str) -> PyResult<String> {
     match obj.cast::<pyo3::types::PyString>() {
-        Ok(text) => Ok(text.to_cow()?.into_owned()),
+        Ok(text) => crate::str_argument(text.as_any()),
         Err(_) => Err(crate::stat_arguments::not_expected_type(obj, name, "str")),
     }
 }
@@ -70,7 +70,7 @@ fn conf_value(value: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
         return Ok(Some(value.str()?.to_cow()?.into_owned()));
     }
     if let Ok(text) = value.cast::<PyString>() {
-        return Ok(Some(text.to_cow()?.into_owned()));
+        return Ok(Some(crate::str_argument(text.as_any())?));
     }
     let shown = value.repr()?;
     if let Ok(bytes) = value.cast::<PyBytes>() {
@@ -109,11 +109,17 @@ impl PyRuntimeConf {
     /// Set a configuration value, as PySpark's: a bool as "true" or "false", an int as its
     /// `str()`, a str as it is, and None as no value, which the server rejects. Warns each
     /// warning of the server.
-    fn set(&self, py: Python<'_>, key: &str, value: &Bound<'_, PyAny>) -> PyResult<()> {
+    fn set(
+        &self,
+        py: Python<'_>,
+        key: &Bound<'_, PyAny>,
+        value: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        let key = crate::str_argument(key)?;
         let value = conf_value(value)?;
         let warnings = interruptible(py, &self.session, || {
             self.conf
-                .set_pairs(&[(key, value.as_deref())], None)
+                .set_pairs(&[(key.as_str(), value.as_deref())], None)
                 .map_err(Box::new)
         })?;
         warn_all(py, &warnings)
@@ -153,8 +159,11 @@ impl PyRuntimeConf {
 
     /// Reset a configuration value to its default. Warns each warning of the server, as
     /// PySpark's.
-    fn unset(&self, py: Python<'_>, key: &str) -> PyResult<()> {
-        let warnings = interruptible(py, &self.session, || self.conf.unset(key).map_err(Box::new))?;
+    fn unset(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<()> {
+        let key = crate::str_argument(key)?;
+        let warnings = interruptible(py, &self.session, || {
+            self.conf.unset(&key).map_err(Box::new)
+        })?;
         warn_all(py, &warnings)
     }
 
@@ -186,9 +195,10 @@ impl PyRuntimeConf {
     }
 
     #[pyo3(name = "isModifiable")]
-    fn is_modifiable(&self, py: Python<'_>, key: &str) -> PyResult<bool> {
+    fn is_modifiable(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<bool> {
+        let key = crate::str_argument(key)?;
         interruptible(py, &self.session, || {
-            self.conf.is_modifiable(key).map_err(Box::new)
+            self.conf.is_modifiable(&key).map_err(Box::new)
         })
     }
 

@@ -312,14 +312,15 @@ impl PyDataStreamReader {
 
     fn option<'py>(
         mut slf: PyRefMut<'py, Self>,
-        key: &str,
+        key: &Bound<'_, PyAny>,
         value: &Bound<'_, PyAny>,
     ) -> PyResult<PyRefMut<'py, Self>> {
+        let key = crate::str_argument(key)?;
         // None -> option left unset; other values as `str()`, so a bool is "True" (reference
         // `DataStreamReader.option`, unlike `options` and `load`).
         match crate::options::stream_option_value(value)? {
             Some(v) => {
-                slf.inner = slf.inner.clone().option(key, &v);
+                slf.inner = slf.inner.clone().option(&key, &v);
                 Ok(slf)
             }
             None => Ok(slf),
@@ -829,13 +830,14 @@ impl PyDataStreamWriter {
 
     fn option<'py>(
         slf: &Bound<'py, Self>,
-        key: &str,
+        key: &Bound<'_, PyAny>,
         value: &Bound<'_, PyAny>,
     ) -> PyResult<Bound<'py, Self>> {
+        let key = crate::str_argument(key)?;
         // None -> option left unset; bools -> "true"/"false" (reference `to_str`).
         match crate::coerce_option_value(value)? {
             Some(v) => {
-                slf.borrow().inner.update(|w| w.option(key, &v));
+                slf.borrow().inner.update(|w| w.option(&key, &v));
                 Ok(slf.clone())
             }
             None => Ok(slf.clone()),

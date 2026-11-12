@@ -6912,11 +6912,52 @@ def test_strings_that_utf8_cannot_encode_raise_value_error_as_options_and_fills_
         lambda: spark.readStream.text("/t", lineSep=bad),
         lambda: spark.readStream.format("text").option("path", bad),
         lambda: SparkSession.builder.config(map={bad: "v"}),
+        lambda: SparkSession.builder.config(bad, "v"),
     ]:
         with pytest.raises(ValueError, match=message):
             call()
-    with pytest.raises(ValueError):
-        df.fillna(bad)
+    # The fill of a value, of a dict's key and of a subset column is sent in a string field too.
+    for call in [
+        lambda: df.fillna(bad),
+        lambda: df.fillna({bad: 1}),
+        lambda: df.fillna("x", subset=[bad]),
+    ]:
+        with pytest.raises(ValueError, match=message):
+            call()
+
+
+def test_strings_that_utf8_cannot_encode_raise_value_error_in_option_keys_conf_and_names_as_pyspark(
+    mock_connect,
+):
+    # As PySpark, whose protobuf string fields raise the ValueError of a str that UTF-8 cannot
+    # encode, for the key of an option, a key or value of the runtime conf, a name of a table and
+    # the text of a query, where the UnicodeEncodeError of its encoding raised before.
+    spark, service = mock_connect
+    bad = "a\ud800b"
+    message = re.escape(f"{bad!r} isn't a valid unicode string and can't be encoded in UTF-8.")
+    df = spark.range(1)
+    for call in [
+        lambda: spark.read.option(bad, "v"),
+        lambda: df.write.option(bad, "v"),
+        lambda: df.writeTo("t").option(bad, "v"),
+        lambda: spark.readStream.option(bad, "v"),
+        lambda: spark.readStream.format("rate").load().writeStream.option(bad, "v"),
+        lambda: spark.conf.set(bad, "v"),
+        lambda: spark.conf.set("spark.k", bad),
+        lambda: spark.conf.get(bad),
+        lambda: spark.conf.unset(bad),
+        lambda: spark.conf.isModifiable(bad),
+        lambda: spark.table(bad),
+    ]:
+        with pytest.raises(ValueError, match=message):
+            call()
+    query = "select '" + bad + "'"
+    with pytest.raises(ValueError) as error:
+        spark.sql(query)
+    assert str(error.value) == (
+        f"{query!r} isn't a valid unicode string and can't be encoded in UTF-8."
+    )
+    assert service.execute_requests == []
 
 
 def test_functions_levenshtein():
