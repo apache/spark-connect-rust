@@ -104,7 +104,7 @@ impl PyDataFrame {
     /// The pandas DataFrame of the result, as `SparkConnectClient.to_pandas` makes it: the
     /// settings of the conversion first, in one request; then the Arrow result with the schema
     /// that the server sends, which `pyspark.sql.connect.client._to_pandas` converts.
-    fn to_pandas(
+    pub(crate) fn to_pandas(
         &self,
         py: Python<'_>,
         struct_handling_mode: Option<Bound<'_, PyAny>>,

@@ -169,9 +169,19 @@ The native `spark_connect::ml::LogisticRegression` fits Spark's JVM
 protocol. In the Rust API, training features must be ML vectors; convert an array column
 with `array_to_vector` before fitting. The Python class takes an array column of numbers too,
 as the deprecated `pyspark.ml.connect.classification.LogisticRegression` of PySpark does (see
-below), but fits the JVM estimator, where PySpark's trains with PyTorch: its model outputs the
-JVM's `rawPrediction` and `probability` vectors and a double `prediction`, where PySpark's
-outputs a `bigint` prediction and an `array<double>` probability.
+below), but fits the JVM estimator, where PySpark's trains with PyTorch. Its constructor takes
+the params of PySpark's that the JVM estimator honors, `featuresCol`, `labelCol`,
+`predictionCol`, `probabilityCol`, `maxIter` and `tol`, whose defaults are PySpark's, and it has
+their setters. The params of PySpark's PyTorch training, `numTrainWorkers`, `batchSize`,
+`learningRate`, `momentum` and `seed`, have no counterpart in the L-BFGS of the JVM estimator,
+and raise the `TypeError` of an unexpected keyword argument. Its model outputs the columns of
+PySpark's: a `bigint` prediction, and then the `array<double>` of the probabilities unless
+`probabilityCol` is empty, and no raw prediction: the constructor sends an empty
+`rawPredictionCol`, a param of the JVM estimator that PySpark's does not have. The
+probabilities are the JVM's doubles, where PySpark's are of float32 tensors. As PySpark's, its
+fit reads only the features and the labels, so that a DataFrame with a `prediction`,
+`probability` or `rawPrediction` column is fitted, and it fits no pandas DataFrame, raising
+PySpark's `NotImplementedError`.
 
 Fitting returns a server-cached model. Prediction uses that model's object
 reference and must use the same Spark session. Models are obtained through
@@ -193,23 +203,9 @@ which takes `metricName`, `labelCol` and `predictionCol` by position as well, as
 PySpark's does; its `metricName` is `accuracy` by default, as in PySpark, where the JVM
 evaluator and the Rust API default to `f1`. The `probabilityCol` of
 `BinaryClassificationEvaluator` is `probability` by default, as in PySpark, and is sent as the
-`rawPredictionCol` that the JVM evaluator scores. The evaluators take a DataFrame or a pandas
-DataFrame, as PySpark's do, and run on the server: a pandas DataFrame is sent through
-`createDataFrame` of the active session. A prediction or a probability of another numeric type
-is cast to a double, and an array of probabilities is sent as a vector (`array_to_vector`),
-whose element 1 is scored, as PySpark's evaluator reads the column 1 of an array. The values
-are the JVM evaluators' doubles, where PySpark's are of float32 tensors (`0.6` where PySpark
-returns `0.6000000238418579`). The native scalers, and the native estimators of a
-`featuresCol`, take the array columns of numbers that PySpark's take, as well as ML vectors: a
-fit, and the transform of its model, read the schema of the DataFrame, as PySpark's transform
-reads its columns, and send an array `inputCol` of a scaler, or `featuresCol` of another
-estimator, as the vector (`array_to_vector`) that the JVM reads; the transform outputs the
-array column as it was. The models of `StandardScaler` and `MaxAbsScaler` output an
-`array<double>` (`vector_to_array`), as PySpark's do, also of a vector input, which PySpark's
-scalers do not take. The scaled values are the JVM's doubles, also of an array of floats
-(`0.3333333333333333` where PySpark's float32 give `0.3333333432674408`).
-`StandardScaler` scales to `(x - mean) / std`, as PySpark's does: its constructor sends the
-`withMean` of Spark's scaler, which is false by default and which PySpark's scaler does not have.
+`rawPredictionCol` that the JVM evaluator scores. `StandardScaler` scales to
+`(x - mean) / std`, as PySpark's does: its constructor sends the `withMean` of Spark's scaler,
+which is false by default and which PySpark's scaler does not have.
 Each value is converted by the `TypeConverters` of its param in
 PySpark (an integral float for an int param, for example), and a value that the
 converter rejects raises its `TypeError`. A fit, transform or evaluate sends only the
@@ -220,6 +216,38 @@ it: the server reads a null `bootstrap` as false and rejects the other nulls. A 
 not given is not sent, so the server's default applies. A list param without elements is
 accepted by its constructor and setters, and a fit, transform or evaluate raises PySpark's
 `CANNOT_INFER_ARRAY_ELEMENT_TYPE` for it, as PySpark's serialization does.
+
+Their fit, transform and evaluate take a DataFrame or a pandas DataFrame, as PySpark's do, and
+run on the server, where PySpark's compute on a pandas DataFrame locally: a pandas DataFrame is
+sent through `createDataFrame` of the active session, and the transform of one is a shallow copy
+of it (`copy(deep=False)`) with the output columns appended, of its index, as PySpark's makes
+it, of PySpark's dtypes and cells (an `int64` prediction, ndarrays of the probabilities and of
+the scaled values). Another object raises the `AttributeError` that PySpark's raises, of its
+`select` in a fit or an evaluate, and of its `columns` in a transform. The fit of
+`LogisticRegression` and of a scaler sends only the columns that PySpark's fit reads (the
+features and the labels, or the `inputCol`), so the JVM estimator checks no other column, and
+their models send only the column that PySpark's transform reads of a pandas DataFrame. An
+output column of the name of a column that the fit reads still raises the JVM's error at the
+fit, where PySpark's raises at the transform. The transform of the model of
+`LogisticRegression` or of a scaler raises PySpark's `ValueError` of an output column that the
+DataFrame has already, of its exact name, before any transform. The other native models, of the
+classes that PySpark's `pyspark.ml.connect` does not have, are sent the whole of a pandas
+DataFrame, and their JVM models check their output columns, which the transform of a pandas
+DataFrame appends. The evaluators cast a prediction or a probability of another
+numeric type to a double, and send an array of probabilities as a vector (`array_to_vector`),
+whose element 1 is scored, as PySpark's evaluator reads the column 1 of an array. The values
+are the JVM evaluators' doubles, where PySpark's are of float32 tensors (`0.6` where PySpark
+returns `0.6000000238418579`). The native scalers, and the native estimators of a
+`featuresCol`, take the array columns of numbers that PySpark's take, as well as ML vectors: a
+fit, and the transform of its model, read the schema of the DataFrame, as PySpark's transform
+reads its columns, and send an array `inputCol` of a scaler, or `featuresCol` of another
+estimator, as the vector (`array_to_vector`) that the JVM reads; the transform outputs the
+array column as it was. The models of `StandardScaler` and `MaxAbsScaler` output the
+`array<double>` of PySpark's, nullable and of nullable elements as its `pandas_udf` outputs it,
+also of a vector input, which PySpark's scalers do not take. The scaled values are the JVM's
+doubles, also of an array of floats (`0.3333333333333333` where PySpark's float32 give
+`0.3333333432674408`), and the cells of the transform of a pandas DataFrame are float64
+ndarrays, where PySpark's are float32 of float32 inputs.
 
 ## Native RandomForestRegressor
 

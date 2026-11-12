@@ -7,17 +7,18 @@
 //! `TypeConverters` of the param in PySpark, and send it as PySpark sends a Python value. A
 //! setter sets the param of the wrapper itself and returns the wrapper, as PySpark's
 //! `Params._set` does. `fit`, `transform` and `evaluate` clone the core object under a short
-//! borrow, so that another thread may call a setter while they wait for the server.
+//! borrow, so that another thread may call a setter while they wait for the server. They take
+//! a DataFrame or a pandas DataFrame, as PySpark's do (see [`Dataset`]).
 
-use pyo3::exceptions::PyTypeError;
+use pyo3::exceptions::{PyNotImplementedError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::pyclass::boolean_struct::False;
-use pyo3::types::{PyDict, PyTuple, PyType};
+use pyo3::types::{PyDict, PyList, PyTuple, PyType};
 use pyo3::PyClass;
 use spark_connect::ml::{
     BinaryClassificationEvaluator, BisectingKMeans, CrossValidator, DecisionTreeClassifier,
     DecisionTreeRegressor, Estimator, Evaluator, GBTClassifier, GBTRegressor, KMeans,
-    LinearRegression, LinearSVC, LogisticRegression, MaxAbsScaler, Model,
+    LinearRegression, LinearSVC, LogisticRegression, MaxAbsScaler, MlOperator, Model,
     MulticlassClassificationEvaluator, NaiveBayes, Params, Pipeline, RandomForestClassifier,
     RandomForestRegressor, RegressionEvaluator, StandardScaler, StringIndexer, Transformer,
     VectorAssembler,
@@ -260,33 +261,162 @@ fn snapshot<T: Native + PyClass>(slf: &Bound<'_, T>) -> PyResult<T::Core> {
     Ok(this.inner().clone())
 }
 
-/// The fit of a native estimator, on `df` as its JVM estimator reads it: an array column that the
-/// JVM estimator reads as an ML vector is sent as that vector (see [`Vectors`]).
-fn fit_native<T>(slf: &Bound<'_, T>, df: &PyDataFrame) -> PyResult<PyMLModel>
+/// A dataset of a fit, a transform or an evaluate, as the classes of PySpark's
+/// `pyspark.ml.connect` take it: a DataFrame, or a pandas DataFrame, which PySpark's compute on
+/// locally, and which is sent here with `createDataFrame` of the active session, as the native
+/// classes run on the server.
+enum Dataset<'py> {
+    Spark(DataFrame),
+    Pandas(Bound<'py, PyAny>),
+}
+
+/// Whether `dataset` is a pandas DataFrame, of an imported pandas.
+fn is_pandas(dataset: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let pandas = dataset
+        .py()
+        .import("sys")?
+        .getattr("modules")?
+        .get_item("pandas")
+        .ok();
+    match pandas {
+        Some(pandas) => dataset.is_instance(&pandas.getattr("DataFrame")?),
+        None => Ok(false),
+    }
+}
+
+/// The dataset of `method`, `dataset`. Another object raises the `AttributeError` of `attribute`,
+/// the attribute that PySpark reads of it first: `select` in a fit (by `select` of the columns
+/// that it reads) and an evaluate (by `aggregate_dataframe`), `columns` in a transform (by
+/// `Transformer._transform`). An object that has it raises a TypeError.
+fn dataset_of<'py>(
+    dataset: &Bound<'py, PyAny>,
+    method: &str,
+    attribute: &str,
+) -> PyResult<Dataset<'py>> {
+    if let Ok(df) = dataset.extract::<PyRef<'_, PyDataFrame>>() {
+        return Ok(Dataset::Spark(df.dataframe.clone()));
+    }
+    if is_pandas(dataset)? {
+        return Ok(Dataset::Pandas(dataset.clone()));
+    }
+    dataset.getattr(attribute)?;
+    Err(PyTypeError::new_err(format!(
+        "{method}() takes a DataFrame or a pandas DataFrame, not '{}'",
+        dataset.get_type().name()?
+    )))
+}
+
+/// The DataFrame of the pandas DataFrame `pdf`, of `createDataFrame` of the active session.
+fn active_dataframe(pdf: &Bound<'_, PyAny>) -> PyResult<DataFrame> {
+    let df = pdf
+        .py()
+        .import("pyspark.sql")?
+        .getattr("SparkSession")?
+        .call_method0("active")?
+        .call_method1("createDataFrame", (pdf,))?;
+    Ok(df.extract::<PyRef<'_, PyDataFrame>>()?.dataframe.clone())
+}
+
+/// The columns that the fit of a class of PySpark's `pyspark.ml.connect` reads, as the params
+/// that name them, of their defaults: LogisticRegression's selects its features and its labels,
+/// and a scaler's its `inputCol`, which has no default.
+type Reads = &'static [(&'static str, Option<&'static str>)];
+
+const LOGISTIC_REGRESSION_READS: Reads = &[
+    ("featuresCol", Some("features")),
+    ("labelCol", Some("label")),
+];
+
+const SCALER_READS: Reads = &[("inputCol", None)];
+
+/// The string param `name` of `params` if it is set, else `default`. None when it is set to
+/// another value (a null), or is not set and has no default, which the server rejects.
+fn string_or(params: &Params, name: &str, default: Option<&str>) -> Option<String> {
+    match params.get_param(name) {
+        Some(_) => string_param(params, name),
+        None => default.map(str::to_string),
+    }
+}
+
+/// The names of the columns `reads` of `params` (see [`string_or`]), or None when one of them has
+/// none.
+fn read_columns(params: &Params, reads: Reads) -> Option<Vec<String>> {
+    reads
+        .iter()
+        .map(|&(name, default)| string_or(params, name, default))
+        .collect()
+}
+
+/// The fit of a native estimator, on `dataset` as its JVM estimator reads it: an array column that
+/// the JVM estimator reads as an ML vector is sent as that vector (see [`Vectors`]), and a pandas
+/// DataFrame with `createDataFrame` of the active session (see [`Dataset`]). With `reads`, of an
+/// estimator of a class of PySpark's `pyspark.ml.connect`, only the columns that PySpark's fit
+/// reads are sent: their `select`, or `dataset[columns]` of a pandas DataFrame, which raises the
+/// KeyError of pandas for a missing column, as PySpark's `aggregate_dataframe`. So the JVM
+/// estimator checks no other column, as PySpark's fit reads no other, and the dataset may have
+/// an output column (a `prediction`, say). The other estimators, of the classes that PySpark's
+/// `pyspark.ml.connect` does not have, fit the whole dataset, as their JVM estimators read it.
+fn fit_native<T>(
+    slf: &Bound<'_, T>,
+    dataset: &Bound<'_, PyAny>,
+    reads: Option<Reads>,
+) -> PyResult<PyMLModel>
 where
     T: Native + PyClass,
     T::Core: Estimator,
 {
     let py = slf.py();
+    let dataset = dataset_of(dataset, "fit", "select")?;
     let estimator = snapshot(slf)?;
-    let vectors = Vectors::of(estimator.operator(), estimator.params());
-    let dataset = match vectors.array_input(py, &df.dataframe, false)? {
-        Some(field) => df.dataframe.with_column(&field.name, vector_of(&field)),
-        None => df.dataframe.clone(),
+    let columns = reads.and_then(|reads| read_columns(estimator.params(), reads));
+    let (df, select) = match dataset {
+        Dataset::Spark(df) => (df, columns),
+        Dataset::Pandas(pdf) => {
+            let pdf = match &columns {
+                Some(columns) => pdf.get_item(PyList::new(py, columns)?)?,
+                None => pdf,
+            };
+            (active_dataframe(&pdf)?, None)
+        }
     };
-    fit_core(py, estimator, &dataset)
+    let vectors = Vectors::of(estimator.operator(), estimator.params());
+    // Found in the schema of the whole DataFrame, which is read once for a fit and a transform
+    // of it: the selection keeps the columns as they are.
+    let array = vectors.array_input(py, &df, false)?;
+    let df = match select {
+        Some(columns) => df.select(columns.iter().map(|name| exact_column(name))),
+        None => df,
+    };
+    let df = match array {
+        Some(field) => df.with_column(&field.name, vector_of(&field)),
+        None => df,
+    };
+    fit_core(py, estimator, &df)
 }
 
 /// The fit of a native estimator whose core cannot fit it, as Pipeline and CrossValidator.
-/// The core raises NOT_IMPLEMENTED before any request, whatever its params are, so the params
-/// are not serialized first, and PySpark's serialization errors of them are not raised.
-fn fit_unimplemented<T>(slf: &Bound<'_, T>, df: &PyDataFrame) -> PyResult<PyMLModel>
+/// The core raises NOT_IMPLEMENTED of `feature` before any request, whatever its params are, so
+/// the params are not serialized first, and PySpark's serialization errors of them are not
+/// raised. So does the fit of a pandas DataFrame, or of another object, which is not sent.
+fn fit_unimplemented<T>(
+    slf: &Bound<'_, T>,
+    dataset: &Bound<'_, PyAny>,
+    feature: &str,
+) -> PyResult<PyMLModel>
 where
     T: Native + PyClass,
     T::Core: Estimator,
 {
-    let estimator = slf.try_borrow()?.inner().clone();
-    fit_core(slf.py(), estimator, &df.dataframe)
+    let py = slf.py();
+    match dataset.extract::<PyRef<'_, PyDataFrame>>() {
+        Ok(df) => fit_core(py, slf.try_borrow()?.inner().clone(), &df.dataframe),
+        Err(_) => Err(crate::column::raise_pyspark(
+            py,
+            "PySparkNotImplementedError",
+            "NOT_IMPLEMENTED",
+            &[("feature", feature)],
+        )),
+    }
 }
 
 fn fit_core<C: Estimator>(py: Python<'_>, mut estimator: C, df: &DataFrame) -> PyResult<PyMLModel> {
@@ -302,8 +432,8 @@ fn fit_core<C: Estimator>(py: Python<'_>, mut estimator: C, df: &DataFrame) -> P
 /// as ML vectors, as their fit and transform send them, so that they take the columns of PySpark's
 /// `pyspark.ml.connect` classes, which compute with numpy and torch on arrays: an array of numbers
 /// of the `input` column is sent as a vector by `array_to_vector`, and a vector as it is, while the
-/// `output` vector of a scaler is converted to an `array<double>` by `vector_to_array`, as
-/// PySpark's scalers output (their `_output_columns`).
+/// `output` vector of a scaler is converted to the `array<double>` that PySpark's scalers output
+/// (their `_output_columns`, see [`vector_array`]).
 #[derive(Default)]
 struct Vectors {
     input: Option<String>,
@@ -462,6 +592,22 @@ fn vector_to_array(name: &str) -> spark_connect::Column {
     ))
 }
 
+/// The `array<double>` of the ML vector column `name`, of the values of `vector_to_array`, as a
+/// `pandas_udf` of PySpark's `transform_dataframe_column` outputs it: a nullable column of
+/// nullable elements (`containsNull`), where `vector_to_array` is of neither. Its elements are
+/// cast to nullable doubles, and it is the array where the vector is not null, else null.
+fn vector_array(name: &str) -> spark_connect::Column {
+    use spark_connect::types::DataType;
+
+    spark_connect::column::when(
+        exact_column(name).is_not_null(),
+        vector_to_array(name).cast(DataType::Array {
+            element_type: Box::new(DataType::Double),
+            contains_null: true,
+        }),
+    )
+}
+
 /// The input columns of an evaluator, as the JVM evaluator reads them: `doubles`, a prediction
 /// that it reads as a double only, and `score`, a probability that it reads as a double or a
 /// vector, where PySpark's evaluators read any numeric column, and an array, as a tensor.
@@ -490,36 +636,14 @@ where
     })
 }
 
-/// The dataset of `evaluate`, as PySpark's evaluators take it: a DataFrame, or a pandas DataFrame,
-/// which PySpark evaluates locally, and which is sent here with `createDataFrame` of the active
-/// session, as the evaluators of this client run on the server. Another object raises the
-/// `AttributeError` of the `select` that PySpark's `aggregate_dataframe` calls on it.
+/// The dataset of `evaluate`, as PySpark's evaluators take it (see [`Dataset`]): a pandas DataFrame,
+/// which PySpark evaluates locally, is sent with `createDataFrame` of the active session, as the
+/// evaluators of this client run on the server.
 fn evaluation_dataset(dataset: &Bound<'_, PyAny>) -> PyResult<DataFrame> {
-    let py = dataset.py();
-    if let Ok(df) = dataset.extract::<PyRef<'_, PyDataFrame>>() {
-        return Ok(df.dataframe.clone());
+    match dataset_of(dataset, "evaluate", "select")? {
+        Dataset::Spark(df) => Ok(df),
+        Dataset::Pandas(pdf) => active_dataframe(&pdf),
     }
-    // A pandas DataFrame is of an imported pandas.
-    let pandas = py
-        .import("sys")?
-        .getattr("modules")?
-        .get_item("pandas")
-        .ok();
-    if let Some(pandas) = pandas {
-        if dataset.is_instance(&pandas.getattr("DataFrame")?)? {
-            let df = py
-                .import("pyspark.sql")?
-                .getattr("SparkSession")?
-                .call_method0("active")?
-                .call_method1("createDataFrame", (dataset,))?;
-            return Ok(df.extract::<PyRef<'_, PyDataFrame>>()?.dataframe.clone());
-        }
-    }
-    dataset.getattr("select")?;
-    Err(PyTypeError::new_err(format!(
-        "evaluate() takes a DataFrame or a pandas DataFrame, not '{}'",
-        dataset.get_type().name()?
-    )))
 }
 
 /// `df` as the JVM evaluator reads it, with its columns of `inputs` converted: a prediction
@@ -554,6 +678,143 @@ fn evaluator_input(py: Python<'_>, df: DataFrame, inputs: EvaluatorInputs) -> Py
     Ok(df)
 }
 
+/// The model of a class of PySpark's `pyspark.ml.connect`, LogisticRegression, MaxAbsScaler or
+/// StandardScaler, whose transform outputs what PySpark's `Transformer._transform` outputs: the
+/// columns of its `_output_columns`, of their types and in their order, appended to the dataset,
+/// which may not have any of them already. The other native models, of the classes that PySpark's
+/// `pyspark.ml.connect` does not have, output what their JVM models output, which check it.
+enum PySparkModel {
+    /// LogisticRegressionModel: of its `featuresCol`, and its `bigint` prediction, and its
+    /// `array<double>` probability unless its `probabilityCol` is empty (PySpark's `if prob_col`),
+    /// of which the JVM model, whose rawPredictionCol is empty (see [`PyLogisticRegression`]),
+    /// outputs no raw prediction. (A null column param, which the server rejects, fits no model.)
+    LogisticRegression {
+        features: Option<String>,
+        prediction: Option<String>,
+        probability: Option<String>,
+    },
+    /// MaxAbsScalerModel or StandardScalerModel: of its `inputCol`, and its `array<double>`
+    /// `outputCol` (see [`Vectors`]).
+    Scaler {
+        input: Option<String>,
+        output: String,
+    },
+}
+
+impl PySparkModel {
+    fn of(operator: &MlOperator, params: &Params) -> Option<Self> {
+        match operator.name.as_str() {
+            "org.apache.spark.ml.classification.LogisticRegressionModel" => {
+                // An empty output column is not output, as by PySpark's `if prob_col`.
+                let output = |name, default| {
+                    string_or(params, name, Some(default)).filter(|name| !name.is_empty())
+                };
+                Some(Self::LogisticRegression {
+                    features: string_or(params, "featuresCol", Some("features")),
+                    prediction: output("predictionCol", "prediction"),
+                    probability: output("probabilityCol", "probability"),
+                })
+            }
+            "org.apache.spark.ml.feature.MaxAbsScalerModel"
+            | "org.apache.spark.ml.feature.StandardScalerModel" => {
+                let vectors = Vectors::of(operator, params);
+                Some(Self::Scaler {
+                    input: vectors.input,
+                    output: vectors.output?,
+                })
+            }
+            _ => None,
+        }
+    }
+
+    /// The column that PySpark's transform reads (`_input_columns`).
+    fn input(&self) -> Option<&str> {
+        match self {
+            Self::LogisticRegression { features, .. } => features.as_deref(),
+            Self::Scaler { input, .. } => input.as_deref(),
+        }
+    }
+
+    /// The columns that PySpark's transform appends, in their order (`_output_columns`).
+    fn outputs(&self) -> Vec<String> {
+        match self {
+            Self::LogisticRegression {
+                prediction,
+                probability,
+                ..
+            } => prediction.iter().chain(probability).cloned().collect(),
+            Self::Scaler { output, .. } => vec![output.clone()],
+        }
+    }
+
+    /// PySpark's ValueError of `Transformer._transform` of an output column that `dataset` has
+    /// already: one of `list(dataset.columns)`, of their exact names, before any transform.
+    fn check_outputs(&self, dataset: &Bound<'_, PyAny>) -> PyResult<()> {
+        let existing = dataset
+            .py()
+            .get_type::<PyList>()
+            .call1((dataset.getattr("columns")?,))?;
+        for output in self.outputs() {
+            if existing.contains(output)? {
+                return Err(PyValueError::new_err(
+                    "Transformers does not allow output column having the same name with \
+                     existing columns.",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The transform of the pandas DataFrame `pdf`, as PySpark's `transform_dataframe_column`
+/// returns it: a shallow copy of `pdf` (`copy(deep=False)`) with the output columns inserted
+/// after its columns. PySpark's computes them locally, where `transform` computes them on the
+/// server, of `pdf` sent with `createDataFrame` of the active session, and they are taken back by
+/// `toPandas`, of the rows in their order, with the index of `pdf`. A model of a class of
+/// PySpark's (see [`PySparkModel`]) is sent only the column that PySpark's reads, `pdf[input]`,
+/// which raises the KeyError of pandas for a missing column, as PySpark's; another transform is
+/// sent the whole of `pdf`, and its outputs are the columns that the server appends.
+fn transform_pandas<'py>(
+    pdf: &Bound<'py, PyAny>,
+    pyspark: Option<&PySparkModel>,
+    transform: impl FnOnce(&DataFrame) -> PyResult<DataFrame>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let py = pdf.py();
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("deep", false)?;
+    let copy = pdf.call_method("copy", (), Some(&kwargs))?;
+    let sent = match pyspark.and_then(PySparkModel::input) {
+        Some(input) => copy.get_item(input)?.call_method0("to_frame")?,
+        None => copy.clone(),
+    };
+    let df = active_dataframe(&sent)?;
+    let out = transform(&df)?;
+    let outputs = match pyspark {
+        Some(model) => model.outputs(),
+        None => {
+            let sent: Vec<String> = schema_fields(py, &df)?
+                .into_iter()
+                .map(|field| field.name)
+                .collect();
+            schema_fields(py, &out)?
+                .into_iter()
+                .map(|field| field.name)
+                .filter(|name| !sent.contains(name))
+                .collect()
+        }
+    };
+    let selected = out.select(outputs.iter().map(|name| exact_column(name)));
+    let result = PyDataFrame::new(selected)
+        .to_pandas(py, None)?
+        .into_bound(py);
+    result.setattr("index", copy.getattr("index")?)?;
+    for output in &outputs {
+        let at = copy.getattr("columns")?.len()?;
+        copy.call_method1("insert", (at, output, result.get_item(output)?))?;
+    }
+    Ok(copy)
+}
+
 /// A fitted ML model (result of `Estimator.fit`), wrapping a boxed core `Model`.
 #[pyclass(name = "MLModel", module = "pyspark.ml.connect")]
 pub struct PyMLModel {
@@ -564,24 +825,66 @@ pub struct PyMLModel {
 
 #[pymethods]
 impl PyMLModel {
-    /// Apply the model to a DataFrame. As PySpark's models of `pyspark.ml.connect`, it takes an
-    /// array of numbers where the JVM model reads a vector, and keeps that column as it is in its
-    /// output, and a scaler outputs an `array<double>` (see [`Vectors`]).
-    fn transform(&self, py: Python<'_>, df: &PyDataFrame) -> PyResult<PyDataFrame> {
+    /// Apply the model to `dataset`, a DataFrame or a pandas DataFrame, as PySpark's
+    /// `Transformer.transform` takes it, whose transform of a pandas DataFrame is a pandas
+    /// DataFrame (see [`transform_pandas`]). The model of a class of PySpark's raises PySpark's
+    /// ValueError of an output column that the dataset has already (see [`PySparkModel`]).
+    fn transform(&self, py: Python<'_>, dataset: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let pyspark = PySparkModel::of(self.model.operator(), self.model.params());
+        let input = dataset_of(dataset, "transform", "columns")?;
+        if let Some(model) = &pyspark {
+            model.check_outputs(dataset)?;
+        }
+        let transform = |df: &DataFrame| self.transform_dataframe(py, df, pyspark.as_ref());
+        Ok(match input {
+            Dataset::Spark(df) => Py::new(py, PyDataFrame::new(transform(&df)?))?.into_any(),
+            Dataset::Pandas(pdf) => transform_pandas(&pdf, pyspark.as_ref(), transform)?.unbind(),
+        })
+    }
+}
+
+impl PyMLModel {
+    /// The transform of the DataFrame `df`. As PySpark's models of `pyspark.ml.connect`, it takes
+    /// an array of numbers where the JVM model reads a vector, and keeps that column as it is in
+    /// its output, and a scaler outputs an `array<double>` (see [`Vectors`]). A LogisticRegression
+    /// model outputs PySpark's `bigint` prediction, and then its `array<double>` probability, of
+    /// the vector that the JVM model outputs in a column of its own, before its prediction.
+    fn transform_dataframe(
+        &self,
+        py: Python<'_>,
+        df: &DataFrame,
+        pyspark: Option<&PySparkModel>,
+    ) -> PyResult<DataFrame> {
+        use spark_connect::types::DataType;
+
         let mut model = self.model.clone_box();
-        let session = df.dataframe.spark_session();
+        let session = df.spark_session();
         let vectors = Vectors::of(model.operator(), model.params());
+        // The JVM model appends its probability vector before its prediction: it is output in a
+        // column of its own, whose array is appended after the prediction, as PySpark's is.
+        let probability = match pyspark {
+            Some(PySparkModel::LogisticRegression {
+                probability: Some(probability),
+                ..
+            }) => {
+                let vector = format!("{}__probability", model.operator().uid);
+                let params = std::mem::take(model.params_mut());
+                *model.params_mut() = params.set_param_string("probabilityCol", &vector);
+                Some((probability.clone(), vector))
+            }
+            _ => None,
+        };
         // An array input is sent as its vector, which the JVM model reads, and kept as it is in a
         // column of its own, which takes its place again in the output.
         let array = vectors
-            .array_input(py, &df.dataframe, true)?
+            .array_input(py, df, true)?
             .map(|field| (format!("{}__input", model.operator().uid), field));
         let input = match &array {
-            Some((kept, field)) => df.dataframe.with_columns(vec![
+            Some((kept, field)) => df.with_columns(vec![
                 (kept.clone(), exact_column(&field.name)),
                 (field.name.clone(), vector_of(field)),
             ]),
-            None => df.dataframe.clone(),
+            None => df.clone(),
         };
         let out = if session.session_id() != self.session_id {
             // As PySpark, the transform of a DataFrame of another session refers to the model
@@ -604,22 +907,41 @@ impl PyMLModel {
                 .to_pyerr()?
         };
         // The JVM model appends its output columns, and keeps the columns of its input, in place.
+        // The columns that take the place of others keep it, and the others are appended in
+        // their order, as by PySpark's `withColumns` of its outputs.
         let mut columns = Vec::new();
+        let mut dropped = Vec::new();
         if let Some((kept, field)) = &array {
             columns.push((field.name.clone(), exact_column(kept)));
+            dropped.push(kept.as_str());
         }
         if let Some(output) = &vectors.output {
-            columns.push((output.clone(), vector_to_array(output)));
+            columns.push((output.clone(), vector_array(output)));
+        }
+        if let Some(PySparkModel::LogisticRegression {
+            prediction: Some(prediction),
+            ..
+        }) = pyspark
+        {
+            columns.push((
+                prediction.clone(),
+                exact_column(prediction).cast(DataType::Long),
+            ));
+        }
+        if let Some((probability, vector)) = &probability {
+            columns.push((probability.clone(), vector_array(vector)));
+            dropped.push(vector.as_str());
         }
         let out = if columns.is_empty() {
             out
         } else {
             out.with_columns(columns)
         };
-        Ok(PyDataFrame::new(match &array {
-            Some((kept, _)) => out.drop(vec![kept.as_str()]),
-            None => out,
-        }))
+        Ok(if dropped.is_empty() {
+            out
+        } else {
+            out.drop(dropped)
+        })
     }
 }
 
@@ -668,8 +990,8 @@ impl PyStandardScaler {
     ) -> PyResult<Bound<'py, Self>> {
         set_param(slf, "outputCol", Kind::Str, value)
     }
-    fn fit(slf: &Bound<'_, Self>, df: &PyDataFrame) -> PyResult<PyMLModel> {
-        fit_native(slf, df)
+    fn fit(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<PyMLModel> {
+        fit_native(slf, dataset, Some(SCALER_READS))
     }
 }
 
@@ -706,8 +1028,8 @@ impl PyMaxAbsScaler {
     ) -> PyResult<Bound<'py, Self>> {
         set_param(slf, "outputCol", Kind::Str, value)
     }
-    fn fit(slf: &Bound<'_, Self>, df: &PyDataFrame) -> PyResult<PyMLModel> {
-        fit_native(slf, df)
+    fn fit(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<PyMLModel> {
+        fit_native(slf, dataset, Some(SCALER_READS))
     }
 }
 
@@ -744,8 +1066,8 @@ impl PyStringIndexer {
     ) -> PyResult<Bound<'py, Self>> {
         set_param(slf, "outputCol", Kind::Str, value)
     }
-    fn fit(slf: &Bound<'_, Self>, df: &PyDataFrame) -> PyResult<PyMLModel> {
-        fit_native(slf, df)
+    fn fit(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<PyMLModel> {
+        fit_native(slf, dataset, None)
     }
 }
 
@@ -783,13 +1105,22 @@ impl PyVectorAssembler {
     ) -> PyResult<Bound<'py, Self>> {
         set_param(slf, "outputCol", Kind::Str, value)
     }
-    fn transform(slf: &Bound<'_, Self>, df: &PyDataFrame) -> PyResult<PyDataFrame> {
+    /// Transform `dataset`, a DataFrame or a pandas DataFrame, as PySpark's transformers take it
+    /// (see [`transform_pandas`]).
+    fn transform(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let py = slf.py();
+        let input = dataset_of(dataset, "transform", "columns")?;
         let mut transformer = snapshot(slf)?;
-        let out = slf
-            .py()
-            .detach(|| transformer.transform(&df.dataframe).map_err(Box::new))
-            .to_pyerr()?;
-        Ok(PyDataFrame::new(out))
+        let mut transform =
+            |df: &DataFrame| py.detach(|| transformer.transform(df).map_err(Box::new));
+        Ok(match input {
+            Dataset::Spark(df) => {
+                Py::new(py, PyDataFrame::new(transform(&df).to_pyerr()?))?.into_any()
+            }
+            Dataset::Pandas(pdf) => {
+                transform_pandas(&pdf, None, |df| transform(df).to_pyerr())?.unbind()
+            }
+        })
     }
 }
 
@@ -803,25 +1134,43 @@ pub struct PyLogisticRegression {
     unsendable: Vec<&'static str>,
 }
 
+/// The params of LogisticRegression, in the order of PySpark's constructor, which also takes the
+/// params of its PyTorch training, `numTrainWorkers`, `batchSize`, `learningRate`, `momentum` and
+/// `seed`. The L-BFGS of the JVM estimator has none of them, so the constructor raises the TypeError
+/// of an unexpected keyword argument for them, rather than take a value that no fit would use.
+const LOGISTIC_REGRESSION_PARAMS: &[(&str, Kind)] = &[
+    ("featuresCol", Kind::Str),
+    ("labelCol", Kind::Str),
+    ("predictionCol", Kind::Str),
+    ("probabilityCol", Kind::Str),
+    ("maxIter", Kind::Int),
+    ("tol", Kind::Float),
+];
+
 #[pymethods]
 impl PyLogisticRegression {
     #[new]
     #[pyo3(
         signature = (*args, **kwargs),
-        text_signature = "(*, featuresCol=None, labelCol=None, predictionCol=None, maxIter=None)"
+        text_signature = "(*, featuresCol='features', labelCol='label', predictionCol='prediction', probabilityCol='probability', maxIter=100, tol=1e-06)"
     )]
     fn new(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
         let mut this = Self {
             inner: LogisticRegression::new(),
             unsendable: Vec::new(),
         };
-        let params = &[
-            ("featuresCol", Kind::Str),
-            ("labelCol", Kind::Str),
-            ("predictionCol", Kind::Str),
-            ("maxIter", Kind::Int),
-        ];
-        init_params(&mut this, "LogisticRegression", &[], params, args, kwargs)?;
+        // As PySpark's, whose model outputs no raw prediction: the JVM model outputs none of an
+        // empty rawPredictionCol, a param that PySpark's LogisticRegression does not have, so that
+        // a dataset with a `rawPrediction` column is fitted and transformed, as with PySpark.
+        apply(&mut this, "rawPredictionCol", Converted::Str(String::new()));
+        init_params(
+            &mut this,
+            "LogisticRegression",
+            &[],
+            LOGISTIC_REGRESSION_PARAMS,
+            args,
+            kwargs,
+        )?;
         Ok(this)
     }
     #[pyo3(name = "setFeaturesCol")]
@@ -845,6 +1194,13 @@ impl PyLogisticRegression {
     ) -> PyResult<Bound<'py, Self>> {
         set_param(slf, "predictionCol", Kind::Str, value)
     }
+    #[pyo3(name = "setProbabilityCol")]
+    fn set_probability_col<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "probabilityCol", Kind::Str, value)
+    }
     #[pyo3(name = "setMaxIter")]
     fn set_max_iter<'py>(
         slf: Bound<'py, Self>,
@@ -852,8 +1208,22 @@ impl PyLogisticRegression {
     ) -> PyResult<Bound<'py, Self>> {
         set_param(slf, "maxIter", Kind::Int, value)
     }
-    fn fit(slf: &Bound<'_, Self>, df: &PyDataFrame) -> PyResult<PyMLModel> {
-        fit_native(slf, df)
+    #[pyo3(name = "setTol")]
+    fn set_tol<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "tol", Kind::Float, value)
+    }
+    /// Fit `dataset`, of which the fit reads the features and the labels, as PySpark's (see
+    /// [`fit_native`]). As PySpark's, it fits no pandas DataFrame yet.
+    fn fit(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<PyMLModel> {
+        if is_pandas(dataset)? {
+            return Err(PyNotImplementedError::new_err(
+                "Fitting pandas dataframe is not supported yet.",
+            ));
+        }
+        fit_native(slf, dataset, Some(LOGISTIC_REGRESSION_READS))
     }
 }
 
@@ -997,8 +1367,8 @@ impl PyLinearSVC {
         set_param(slf, "maxBlockSizeInMB", Kind::Float, value)
     }
 
-    fn fit(slf: &Bound<'_, Self>, df: &PyDataFrame) -> PyResult<PyMLModel> {
-        fit_native(slf, df)
+    fn fit(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<PyMLModel> {
+        fit_native(slf, dataset, None)
     }
 }
 
@@ -1167,8 +1537,8 @@ impl PyLinearRegression {
         set_param(slf, "maxBlockSizeInMB", Kind::Float, value)
     }
 
-    fn fit(slf: &Bound<'_, Self>, df: &PyDataFrame) -> PyResult<PyMLModel> {
-        fit_native(slf, df)
+    fn fit(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<PyMLModel> {
+        fit_native(slf, dataset, None)
     }
 }
 
@@ -1375,8 +1745,8 @@ impl PyDecisionTreeClassifier {
         set_param(slf, "thresholds", Kind::FloatList, value)
     }
 
-    fn fit(slf: &Bound<'_, Self>, df: &PyDataFrame) -> PyResult<PyMLModel> {
-        fit_native(slf, df)
+    fn fit(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<PyMLModel> {
+        fit_native(slf, dataset, None)
     }
 }
 
@@ -1491,8 +1861,8 @@ impl PyNaiveBayes {
         set_param(slf, "weightCol", Kind::Str, value)
     }
 
-    fn fit(slf: &Bound<'_, Self>, df: &PyDataFrame) -> PyResult<PyMLModel> {
-        fit_native(slf, df)
+    fn fit(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<PyMLModel> {
+        fit_native(slf, dataset, None)
     }
 }
 
@@ -1740,8 +2110,8 @@ impl PyGBTClassifier {
         set_param(slf, "validationIndicatorCol", Kind::Str, value)
     }
 
-    fn fit(slf: &Bound<'_, Self>, df: &PyDataFrame) -> PyResult<PyMLModel> {
-        fit_native(slf, df)
+    fn fit(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<PyMLModel> {
+        fit_native(slf, dataset, None)
     }
 }
 
@@ -1984,8 +2354,8 @@ impl PyRandomForestClassifier {
         set_param(slf, "thresholds", Kind::FloatList, value)
     }
 
-    fn fit(slf: &Bound<'_, Self>, df: &PyDataFrame) -> PyResult<PyMLModel> {
-        fit_native(slf, df)
+    fn fit(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<PyMLModel> {
+        fit_native(slf, dataset, None)
     }
 }
 
@@ -2209,8 +2579,8 @@ impl PyGBTRegressor {
         set_param(slf, "validationIndicatorCol", Kind::Str, value)
     }
 
-    fn fit(slf: &Bound<'_, Self>, df: &PyDataFrame) -> PyResult<PyMLModel> {
-        fit_native(slf, df)
+    fn fit(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<PyMLModel> {
+        fit_native(slf, dataset, None)
     }
 }
 
@@ -2391,8 +2761,8 @@ impl PyDecisionTreeRegressor {
         set_param(slf, "varianceCol", Kind::Str, value)
     }
 
-    fn fit(slf: &Bound<'_, Self>, df: &PyDataFrame) -> PyResult<PyMLModel> {
-        fit_native(slf, df)
+    fn fit(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<PyMLModel> {
+        fit_native(slf, dataset, None)
     }
 }
 /// Random forest regressor fitted and cached by Spark Connect.
@@ -2599,8 +2969,8 @@ impl PyRandomForestRegressor {
         set_param(slf, "bootstrap", Kind::Bool, value)
     }
 
-    fn fit(slf: &Bound<'_, Self>, df: &PyDataFrame) -> PyResult<PyMLModel> {
-        fit_native(slf, df)
+    fn fit(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<PyMLModel> {
+        fit_native(slf, dataset, None)
     }
 }
 
@@ -2732,8 +3102,8 @@ impl PyKMeans {
         set_param(slf, "maxBlockSizeInMB", Kind::Float, value)
     }
 
-    fn fit(slf: &Bound<'_, Self>, df: &PyDataFrame) -> PyResult<PyMLModel> {
-        fit_native(slf, df)
+    fn fit(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<PyMLModel> {
+        fit_native(slf, dataset, None)
     }
 }
 
@@ -2998,8 +3368,8 @@ impl PyBisectingKMeans {
         set_param(slf, "minDivisibleClusterSize", Kind::Float, value)
     }
 
-    fn fit(slf: &Bound<'_, Self>, df: &PyDataFrame) -> PyResult<PyMLModel> {
-        fit_native(slf, df)
+    fn fit(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<PyMLModel> {
+        fit_native(slf, dataset, None)
     }
 }
 
@@ -3030,8 +3400,8 @@ impl PyPipeline {
     ) -> PyResult<Bound<'py, Self>> {
         set_param(slf, "stages", Kind::StrList, value)
     }
-    fn fit(slf: &Bound<'_, Self>, df: &PyDataFrame) -> PyResult<PyMLModel> {
-        fit_unimplemented(slf, df)
+    fn fit(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<PyMLModel> {
+        fit_unimplemented(slf, dataset, "Pipeline.fit")
     }
 }
 
@@ -3161,8 +3531,8 @@ impl PyCrossValidator {
     ) -> PyResult<Bound<'py, Self>> {
         set_param(slf, "seed", Kind::Int, value)
     }
-    fn fit(slf: &Bound<'_, Self>, df: &PyDataFrame) -> PyResult<PyMLModel> {
-        fit_unimplemented(slf, df)
+    fn fit(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<PyMLModel> {
+        fit_unimplemented(slf, dataset, "CrossValidator.fit")
     }
 }
 
