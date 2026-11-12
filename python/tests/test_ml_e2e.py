@@ -536,30 +536,162 @@ def test_ml_connect_scalers_and_estimators_take_the_array_columns_of_pyspark(ses
         [0.3779644730092272, 1.1208970766356101], rel=1e-12)
 
     # LogisticRegression is Spark's JVM estimator here, without the torch params of PySpark's
-    # (learningRate), and the labels are ints, as in PySpark's example.
+    # (learningRate), and the labels are ints, as in PySpark's example, whose columns its model
+    # outputs: a bigint prediction, and then the array<double> of the probabilities.
     labeled = session.createDataFrame(
         [([1.0, 2.0], 1), ([2.0, -1.0], 1), ([-3.0, -2.0], 0), ([-1.0, -2.0], 0)],
         schema=["features", "label"],
     )
     model = LogisticRegression(maxIter=20).fit(labeled)
     transformed = model.transform(labeled)
-    assert transformed.columns[:2] == ["features", "label"]
-    assert transformed.schema["features"].dataType.simpleString() == "array<double>"
-    assert [(row.features, row.prediction) for row in transformed.collect()] == [
-        ([1.0, 2.0], 1.0),
-        ([2.0, -1.0], 1.0),
-        ([-3.0, -2.0], 0.0),
-        ([-1.0, -2.0], 0.0),
+    assert transformed.schema.simpleString() == (
+        "struct<features:array<double>,label:bigint,prediction:bigint,probability:array<double>>"
+    )
+    rows = transformed.collect()
+    assert [(row.features, row.prediction) for row in rows] == [
+        ([1.0, 2.0], 1),
+        ([2.0, -1.0], 1),
+        ([-3.0, -2.0], 0),
+        ([-1.0, -2.0], 0),
     ]
+    assert all(type(row.prediction) is int for row in rows)
+    for row in rows:
+        assert sum(row.probability) == pytest.approx(1.0)
+        assert row.probability.index(max(row.probability)) == row.prediction
 
     # The array<double> of a scaler is the input of the next estimator, as in PySpark.
     scaler = MaxAbsScaler(inputCol="features", outputCol="scaled")
     scaled = scaler.fit(labeled).transform(labeled)
     model = LogisticRegression(featuresCol="scaled", maxIter=20).fit(scaled)
-    assert [row.prediction for row in model.transform(scaled).collect()] == [1.0, 1.0, 0.0, 0.0]
+    assert [row.prediction for row in model.transform(scaled).collect()] == [1, 1, 0, 0]
     clusters = KMeans(featuresCol="scaled", k=2, seed=1).fit(scaled).transform(scaled)
     assert clusters.schema["scaled"].dataType.simpleString() == "array<double>"
     assert len({row.prediction for row in clusters.collect()}) == 2
+
+
+def test_ml_connect_logistic_regression_and_scalers_output_the_columns_of_pyspark(session):
+    # The schemas of the transforms of PySpark 4.3.0's LogisticRegression and scalers of
+    # pyspark.ml.connect, of their pandas_udf: the columns of their _output_columns, nullable and
+    # of nullable elements, with no metadata, a probability only of a probabilityCol, and no raw
+    # prediction. As PySpark's, a transform raises its ValueError of an output column that the
+    # DataFrame has, of its exact name, while a fit reads only its input columns, so that the
+    # output columns of another transform (a rawPrediction, say) are there.
+    from pyspark.ml.connect.classification import LogisticRegression
+    from pyspark.ml.connect.feature import MaxAbsScaler, StandardScaler
+    from pyspark.sql import functions as F
+
+    def field(name, data_type):
+        return {"metadata": {}, "name": name, "nullable": True, "type": data_type}
+
+    doubles = {"containsNull": True, "elementType": "double", "type": "array"}
+    inputs = [field("features", doubles), field("label", "long")]
+    labeled = session.createDataFrame(
+        [([1.0, 2.0], 1), ([2.0, -1.0], 1), ([-3.0, -2.0], 0), ([-1.0, -2.0], 0)],
+        schema=["features", "label"],
+    )
+    for estimator, outputs in [
+        (LogisticRegression(maxIter=5), [field("prediction", "long"), field("probability", doubles)]),
+        (LogisticRegression(maxIter=5, predictionCol="p", probabilityCol="q"),
+         [field("p", "long"), field("q", doubles)]),
+        (LogisticRegression(maxIter=5, probabilityCol=""), [field("prediction", "long")]),
+        (MaxAbsScaler(inputCol="features", outputCol="scaled"), [field("scaled", doubles)]),
+        (StandardScaler(inputCol="features", outputCol="scaled"), [field("scaled", doubles)]),
+    ]:
+        transformed = estimator.fit(labeled).transform(labeled)
+        assert transformed.schema.jsonValue() == {"fields": inputs + outputs, "type": "struct"}
+        assert len(transformed.collect()) == 4
+
+    message = "Transformers does not allow output column having the same name with existing columns."
+    model = LogisticRegression(maxIter=5).fit(labeled)
+    for column in ("prediction", "probability"):
+        with pytest.raises(ValueError) as error:
+            model.transform(labeled.withColumn(column, F.lit(0)))
+        assert str(error.value) == message
+    scaler = MaxAbsScaler(inputCol="features", outputCol="scaled").fit(labeled)
+    with pytest.raises(ValueError) as error:
+        scaler.transform(labeled.withColumn("scaled", F.lit(0)))
+    assert str(error.value) == message
+    # Not of the exact name: Spark replaces the column of the other case, as with PySpark.
+    assert scaler.transform(labeled.withColumnRenamed("label", "Scaled")).columns == [
+        "features", "scaled"
+    ]
+
+    for column in ("rawPrediction", "probability", "prediction"):
+        extra = labeled.withColumn(column, F.lit(0))
+        if column == "rawPrediction":
+            assert model.transform(extra).columns == [
+                "features", "label", "rawPrediction", "prediction", "probability"
+            ]
+        fitted = LogisticRegression(maxIter=5).fit(extra)
+        assert [row.prediction for row in fitted.transform(labeled).collect()] == [1, 1, 0, 0]
+    fitted = MaxAbsScaler(inputCol="features", outputCol="scaled").fit(
+        labeled.withColumn("scaled", F.lit(0)))
+    assert len(fitted.transform(labeled).collect()) == 4
+
+
+def test_ml_connect_estimators_fit_and_transform_the_pandas_frames_of_pyspark(session):
+    # As PySpark's pyspark.ml.connect classes, whose fit and transform take a pandas DataFrame:
+    # here it is sent with createDataFrame of the active session, and the transform is a shallow
+    # copy of it with the output columns appended, of its index, of the dtypes and the cells of
+    # PySpark's (an int64 prediction, ndarrays of probabilities and of scaled values), of the
+    # values of the JVM. PySpark's LogisticRegression fits no pandas DataFrame. The native classes
+    # that PySpark's pyspark.ml.connect does not have are sent the whole pandas DataFrame, and
+    # append the columns that their JVM models append, which check them.
+    import numpy as np
+    import pandas as pd
+    from pyspark.ml.connect.classification import LogisticRegression
+    from pyspark.ml.connect.clustering import KMeans
+    from pyspark.ml.connect.feature import MaxAbsScaler, StandardScaler, VectorAssembler
+
+    features = [[1.0, 2.0], [2.0, -1.0], [-3.0, -2.0]]
+    pdf = pd.DataFrame({"features": features, "label": [1, 1, 0]}, index=[10, 20, 30])
+
+    def appended(transformed, columns):
+        # The output columns of the transform of pdf, which is a shallow copy of it.
+        assert transformed is not pdf and list(pdf.columns) == ["features", "label"]
+        assert list(transformed.columns) == ["features", "label"] + columns
+        assert list(transformed.index) == [10, 20, 30]
+        assert transformed["features"].tolist() == features
+        assert np.shares_memory(transformed["label"].to_numpy(), pdf["label"].to_numpy())
+        return transformed[columns]
+
+    scaled = appended(MaxAbsScaler(inputCol="features", outputCol="o").fit(pdf).transform(pdf), ["o"])
+    assert scaled.dtypes.astype(str).tolist() == ["object"]
+    assert [type(value) for value in scaled["o"]] == [np.ndarray] * 3
+    assert [value.tolist() for value in scaled["o"]] == [
+        [1 / 3, 1.0], [2 / 3, -0.5], [-1.0, -1.0]
+    ]
+    # The output column of PySpark's default, <uid>__output.
+    transformed = StandardScaler(inputCol="features").fit(pdf).transform(pdf)
+    output = transformed.columns[-1]
+    assert output.startswith("StandardScaler_") and output.endswith("__output")
+    # The first row of PySpark 4.3.0's StandardScaler of pdf.
+    assert appended(transformed, [output])[output].iloc[0].tolist() == pytest.approx(
+        [0.3779644730092272, 1.1208970766356101], rel=1e-12)
+
+    labeled = session.createDataFrame(pdf)
+    with pytest.raises(NotImplementedError, match="Fitting pandas dataframe is not supported yet."):
+        LogisticRegression().fit(pdf)
+    predicted = appended(
+        LogisticRegression(maxIter=20).fit(labeled).transform(pdf), ["prediction", "probability"]
+    )
+    assert predicted.dtypes.astype(str).tolist() == ["int64", "object"]
+    assert predicted["prediction"].tolist() == [1, 1, 0]
+    for prediction, probability in zip(predicted["prediction"], predicted["probability"]):
+        assert type(probability) is np.ndarray and probability.dtype == np.float64
+        assert probability.sum() == pytest.approx(1.0) and probability.argmax() == prediction
+    message = "Transformers does not allow output column having the same name with existing columns."
+    with pytest.raises(ValueError, match=message):
+        LogisticRegression(maxIter=5).fit(labeled).transform(pdf.assign(probability=0))
+
+    clusters = appended(KMeans(k=2, seed=1).fit(pdf).transform(pdf), ["prediction"])
+    assert len(set(clusters["prediction"])) == 2
+    assembled = VectorAssembler(inputCols=["label"], outputCol="v").transform(pdf)
+    assert [value.toArray().tolist() for value in appended(assembled, ["v"])["v"]] == [
+        [1.0], [1.0], [0.0]
+    ]
+    with pytest.raises(Exception, match="Column prediction already exists"):
+        KMeans(k=2, seed=1).fit(pdf).transform(pdf.assign(prediction=0))
 
 
 def test_ml_connect_setters_change_the_next_evaluate_and_fit_as_pyspark(session):
