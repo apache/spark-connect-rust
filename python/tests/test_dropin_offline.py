@@ -18030,6 +18030,100 @@ def test_duplicate_struct_field_names_keep_int64_columns_as_pyspark(mock_connect
     assert table.column(1).to_pylist() == list(range(1000, 2000))
 
 
+def test_local_timestamp_conversion_reuses_utc_epoch_and_calls_subclass_hooks(mock_connect):
+    from datetime import datetime, timezone
+
+    epochs, zones = [], []
+
+    class TracedDatetime(datetime):
+        def astimezone(self, tz=None):
+            zones.append(tz)
+            return self
+
+        def __sub__(self, other):
+            epochs.append(other)
+            return super().__sub__(other)
+
+    value = TracedDatetime(1969, 12, 31, 23, 59, 59, 999999, tzinfo=timezone.utc)
+    schema = T.StructType().add("value", T.TimestampType()) \
+        .add("items", T.ArrayType(T.TimestampType())) \
+        .add("mapping", T.MapType(T.StringType(), T.TimestampType())) \
+        .add("nested", T.StructType().add("value", T.TimestampType()))
+    for _ in range(2):
+        table = _native_number_input_table(
+            mock_connect, [(value, [value, None], {"key": value}, (value,))], schema)
+        assert table["value"].cast("int64").to_pylist() == [-1]
+        assert table["items"][0].as_py() == [value, None]
+        assert table["mapping"][0].as_py() == [("key", value)]
+        assert table["nested"][0].as_py() == {"value": value}
+    assert len(epochs) == len(zones) == 8
+    assert all(zone is timezone.utc for zone in zones)
+    assert epochs[0] == datetime(1970, 1, 1, tzinfo=timezone.utc)
+    assert all(epoch is epochs[0] for epoch in epochs)
+
+
+def test_local_timestamp_cached_epoch_preserves_timezone_and_precision(mock_connect, monkeypatch):
+    import time
+    from datetime import datetime, timedelta, timezone
+    from zoneinfo import ZoneInfo
+
+    if not hasattr(time, "tzset"):
+        pytest.skip("requires time.tzset")
+    utc = timezone.utc
+    eastern = ZoneInfo("America/New_York")
+    values = [
+        None, datetime.min.replace(tzinfo=utc), datetime.max.replace(tzinfo=utc),
+        datetime(1969, 12, 31, 23, 59, 59, 999999, tzinfo=utc),
+        datetime(2500, 1, 2, 3, 4, 5, 123456, tzinfo=utc),
+        datetime(2020, 1, 2, 3, 4, 5, 123456, tzinfo=timezone(timedelta(hours=5, minutes=30))),
+        datetime(2021, 11, 7, 1, 30, 0, 123456, tzinfo=eastern, fold=0),
+        datetime(2021, 11, 7, 1, 30, 0, 123456, tzinfo=eastern, fold=1),
+        datetime(2021, 11, 7, 1, 30, 0, 123456, fold=0),
+        datetime(2021, 11, 7, 1, 30, 0, 123456, fold=1),
+    ]
+    schema = T.StructType().add("value", T.TimestampType())
+    epoch = datetime(1970, 1, 1, tzinfo=utc)
+    try:
+        # A warmed cache must still observe changes to the local timezone of naive values.
+        with monkeypatch.context() as patch:
+            for zone in ("UTC", "America/New_York", "UTC"):
+                patch.setenv("TZ", zone)
+                time.tzset()
+                expected = []
+                for value in values:
+                    if value is None:
+                        expected.append(None)
+                    else:
+                        delta = value.astimezone(utc) - epoch
+                        expected.append((delta.days * 86400 + delta.seconds) * 1000000
+                                        + delta.microseconds)
+                table = _native_number_input_table(mock_connect, [(v,) for v in values], schema)
+                assert table["value"].cast("int64").to_pylist() == expected
+    finally:
+        time.tzset()
+
+
+@pytest.mark.parametrize("method", ["astimezone", "__sub__"])
+def test_local_timestamp_cached_epoch_preserves_subclass_errors(mock_connect, method):
+    from datetime import datetime, timezone
+
+    error = RuntimeError("timestamp hook failed")
+
+    def fail(*args):
+        raise error
+
+    class BrokenDatetime(datetime):
+        def astimezone(self, tz=None):
+            return self
+
+    setattr(BrokenDatetime, method, fail)
+    value = BrokenDatetime(2020, 1, 1, tzinfo=timezone.utc)
+    spark, _ = mock_connect
+    with pytest.raises(RuntimeError, match="timestamp hook failed") as raised:
+        spark.createDataFrame([(value,)], T.StructType().add("value", T.TimestampType()))
+    assert raised.value is error
+
+
 def test_null_timestamps_in_non_nullable_fields_raise_as_pyspark(mock_connect):
     pd = pytest.importorskip("pandas")
     from pyspark.sql import types as T
