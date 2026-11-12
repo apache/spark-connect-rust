@@ -19229,6 +19229,163 @@ def test_sigint_during_the_release_of_stop_raises_keyboard_interrupt_and_keeps_t
     assert spark.is_stopped
 
 
+def test_a_stop_that_waits_for_an_interrupted_stop_releases_the_session_as_pyspark(mock_connect):
+    # As PySpark's stop, which runs under SparkSession._lock: the stop of another thread waits for
+    # the one in progress, and when a signal interrupts that one, it releases and closes the
+    # session itself. The session is stopped only once that release has ended, as PySpark's
+    # is_stopped is the client's is_closed, which its stop sets after the release.
+    import signal
+    import threading
+
+    spark, service = mock_connect
+    service.release_session_blocked = True
+    outcome = {}
+
+    def stop():
+        try:
+            spark.stop()
+            outcome["stopped"] = spark.is_stopped
+        except BaseException as error:
+            outcome["error"] = error
+
+    other = threading.Thread(target=stop, daemon=True)
+
+    def stop_meanwhile_and_signal():
+        # The server holds the release of the first stop: the other stop waits for it, and the
+        # signal interrupts the first one.
+        deadline = time.monotonic() + 5
+        while service.release_session_calls < 1 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        other.start()
+        time.sleep(0.3)
+        os.kill(os.getpid(), signal.SIGINT)
+
+    signaller = threading.Thread(target=stop_meanwhile_and_signal, daemon=True)
+    signaller.start()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            spark.stop()
+        signaller.join(5)
+        # The other stop releases the session, which the server holds again.
+        deadline = time.monotonic() + 5
+        while service.release_session_calls < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert service.release_session_calls == 2
+        assert other.is_alive()
+        assert not spark.is_stopped
+    finally:
+        service.release_session_blocked = False
+        service.release_session_release()
+    other.join(5)
+    assert outcome == {"stopped": True}
+    assert spark.is_stopped
+
+
+def test_a_stop_from_a_signal_handler_while_stop_releases_runs_within_it_as_pyspark(mock_connect):
+    # As PySpark's stop, whose SparkSession._lock is an RLock: a signal handler that stops the
+    # session while the release of stop() waits runs its stop within the first one, which it does
+    # not wait for. That stop releases the session too and closes it, then the first one ends.
+    import signal
+    import threading
+
+    spark, service = mock_connect
+    service.release_session_blocked = True
+    seen = []
+
+    def handler(signum, frame):
+        seen.append(spark.is_stopped)
+        spark.stop()
+        seen.append(spark.is_stopped)
+
+    def signal_then_release():
+        deadline = time.monotonic() + 5
+        while service.release_session_calls < 1 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        os.kill(os.getpid(), signal.SIGINT)
+        # The server answers both releases once that of the handler's stop arrives.
+        deadline = time.monotonic() + 3
+        while service.release_session_calls < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        service.release_session_blocked = False
+        service.release_session_release()
+
+    previous = signal.signal(signal.SIGINT, handler)
+    signaller = threading.Thread(target=signal_then_release, daemon=True)
+    try:
+        signaller.start()
+        spark.stop()
+    finally:
+        signal.signal(signal.SIGINT, previous)
+        signaller.join(10)
+    assert seen == [False, True]
+    assert service.release_session_calls == 2
+    assert spark.is_stopped
+
+
+def test_sigint_during_the_removal_of_the_last_listener_raises_keyboard_interrupt_as_pyspark(
+    mock_connect,
+):
+    # As PySpark's removeListener, whose wait for the lock of the listener bus, which the delivery
+    # of a started event on another thread holds, a signal interrupts: KeyboardInterrupt is raised
+    # at once, the listener stays registered, and a later removal removes it.
+    import signal
+    import threading
+
+    from pyspark.sql.streaming.listener import StreamingQueryListener
+
+    entered, release = threading.Event(), threading.Event()
+
+    class Blocking(StreamingQueryListener):
+        def onQueryStarted(self, event):
+            entered.set()
+            release.wait(5)
+
+        def onQueryProgress(self, event):
+            pass
+
+        def onQueryIdle(self, event):
+            pass
+
+        def onQueryTerminated(self, event):
+            pass
+
+    spark, service = mock_connect
+    service.listener_bus_enabled = True
+    # ExecutePlanResponse.write_stream_operation_start_result=8: query_id=1 (id=1, run_id=2),
+    # query_started_event_json=3.
+    service.execute_payload = message_field(8, message_field(
+        1, message_field(1, "q") + message_field(2, "r")) + message_field(3, json.dumps({
+            "id": "00000000-0000-4000-8000-000000000001",
+            "runId": "00000000-0000-4000-8000-000000000002",
+            "name": "query", "timestamp": "started", "jobTags": [],
+        })))
+    listener = Blocking()
+    spark.streams.addListener(listener)
+    starter = threading.Thread(
+        target=lambda: spark.readStream.format("rate").load().writeStream.start(), daemon=True)
+    starter.start()
+    try:
+        assert entered.wait(5)
+        timer = threading.Timer(0.3, os.kill, (os.getpid(), signal.SIGINT))
+        started = time.monotonic()
+        timer.start()
+        try:
+            with pytest.raises(KeyboardInterrupt):
+                spark.streams.removeListener(listener)
+        finally:
+            timer.cancel()
+        assert time.monotonic() - started < 3
+        assert spark.streams._sqlb._listener_bus == [listener]
+        assert service.listener_removals == 0
+    finally:
+        release.set()
+        starter.join(5)
+    # The bus is usable: a removal removes the listener, and the listener of the server.
+    spark.streams.removeListener(listener)
+    assert spark.streams._sqlb._listener_bus == []
+    assert service.wait_listener_removal(1)
+
+
 def test_sigint_during_a_native_kmeans_fit_raises_keyboard_interrupt(mock_connect):
     # As the other native estimators of pyspark.ml.connect: the fit waits for the server as an
     # execution, which a signal interrupts on the server.
@@ -19440,6 +19597,56 @@ def test_sigint_during_add_listener_keeps_the_registration_removable(mock_connec
     spark.streams.removeListener(listener)
     assert spark.streams._sqlb._listener_bus == []
     assert service.listener_removals == 1
+
+
+def test_a_second_sigint_during_add_listener_removes_the_server_listener_before_the_next_add(
+        mock_connect):
+    # A second signal ends the wait for the server's acknowledgement of addListener, after the
+    # server added its listener. The server answers a later ADD of the session with no response
+    # while it holds that listener, so the next addListener removes it first.
+    import signal
+    import threading
+
+    from pyspark.sql.streaming.listener import StreamingQueryListener
+
+    class Listener(StreamingQueryListener):
+        def onQueryStarted(self, event):
+            pass
+
+        def onQueryProgress(self, event):
+            pass
+
+        def onQueryIdle(self, event):
+            pass
+
+        def onQueryTerminated(self, event):
+            pass
+
+    spark, service = mock_connect
+    service.listener_bus_enabled = True
+    service.listener_register_blocked = True
+    # A wait that the signals do not end is released after 10 s, so the test fails, not hangs.
+    release = threading.Timer(10, service.release_listener_registration)
+    timers = [threading.Timer(delay, os.kill, (os.getpid(), signal.SIGINT)) for delay in (0.5, 1.0)]
+    release.start()
+    for timer in timers:
+        timer.start()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            spark.streams.addListener(Listener())
+    finally:
+        for timer in timers:
+            timer.cancel()
+    release.cancel()
+    service.release_listener_registration()
+    assert service.wait_listener_registration(1)
+    assert service.listener_removals == 0
+    service.listener_register_blocked = False
+    listener = Listener()
+    spark.streams.addListener(listener)
+    assert service.listener_removals == 1
+    assert service.listener_subscriptions == 2
+    spark.streams.removeListener(listener)
 
 
 def test_sigint_during_the_plan_compression_lookup_raises_keyboard_interrupt_at_once(mock_connect):

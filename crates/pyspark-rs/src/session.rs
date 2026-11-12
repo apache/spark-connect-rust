@@ -2423,7 +2423,9 @@ impl PySparkSession {
         {
             // As PySpark's stop, whose sleeps between the retries of the release a signal
             // interrupts: the exception of the signal is raised at once, and leaves the session
-            // open, so nothing below runs.
+            // open, so nothing below runs. The core runs the stops of other threads one at a
+            // time, as PySpark's `SparkSession._lock`, whose acquire a signal interrupts too;
+            // the resets below are idempotent, and run with the GIL, after the core's stop.
             crate::interrupt::interruptible_outcome(py, &self.session, || {
                 self.session.stop().map_err(Box::new)
             })?

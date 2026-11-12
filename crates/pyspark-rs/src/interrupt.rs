@@ -89,7 +89,10 @@ impl SignalWatch {
 /// answer): the retries and the RPCs of `f` that are not answered when the first signal arrives
 /// during an execution, and all of them when no execution is in flight, or after a second
 /// signal. A streaming execution is still read after the first one, until the server cancels it.
-/// A wait of `block_on_abortable` (the release of `stop()`) ends at once as well.
+/// A wait of `block_on_abortable` ends at once as well: the release of `stop()`, the wait of a
+/// `stop()` for that of another thread, and the waits of the listener bus for the deliveries and
+/// the lifecycle operations of other threads, as a signal interrupts the acquire of PySpark's
+/// locks.
 pub(crate) fn interruptible<T: Send, E: Send + Into<Box<SparkError>>>(
     py: Python<'_>,
     session: &SparkSession,

@@ -4,7 +4,7 @@
 //! for building and executing streaming workloads.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use uuid;
 
 use spark_connect_core::error::{Result, SparkError, SparkErrorKind};
@@ -1011,7 +1011,19 @@ pub trait StreamingQueryListener: Send + Sync {
 #[derive(Default)]
 pub(crate) struct ListenerBus {
     state: Mutex<ListenerBusState>,
-    changed: Condvar,
+    changed: BusChanged,
+}
+
+/// The changes of the state of a listener bus, which wake its waits (see [`ListenerBus::wait`])
+/// as the `notify_all` of a `Condvar` wakes those of the `Condvar`.
+#[derive(Default)]
+struct BusChanged(tokio::sync::Notify);
+
+impl BusChanged {
+    /// Wake the waits of the bus, which then check its state again.
+    fn notify_all(&self) {
+        self.0.notify_waiters();
+    }
 }
 
 /// The fields are of two groups, which one lock guards because a removal reads them together:
@@ -1116,15 +1128,25 @@ impl ListenerBus {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Wait for a change of the state, releasing the lock meanwhile; as [`lock`](Self::lock)
-    /// for a poisoned lock.
+    /// Wait for a change of the state of the bus, with `state` unlocked meanwhile, as the wait of
+    /// a `Condvar` does, and lock it again as [`lock`](Self::lock) does, for a poisoned lock
+    /// too. As the acquire of the lock of PySpark's bus, which a signal of the process
+    /// interrupts, the wait ends with an error when a signal ends it in the Python client (see
+    /// [`block_on_abortable`](spark_connect_core::runtime::block_on_abortable)); without that,
+    /// it waits for the change.
     fn wait<'a>(
-        &self,
+        &'a self,
         state: MutexGuard<'a, ListenerBusState>,
-    ) -> MutexGuard<'a, ListenerBusState> {
-        self.changed
-            .wait(state)
-            .unwrap_or_else(PoisonError::into_inner)
+    ) -> Result<MutexGuard<'a, ListenerBusState>> {
+        // Made while the state is locked, so that the change that the caller waits for wakes it.
+        let changed = self.changed.0.notified();
+        drop(state);
+        if spark_connect_core::runtime::block_on_abortable(changed).is_none() {
+            return Err(SparkError::connect_msg(
+                "the wait for the streaming query listener bus was interrupted",
+            ));
+        }
+        Ok(self.lock())
     }
 
     /// Clear only the registrations of the worker that has finished this generation.
@@ -1347,6 +1369,8 @@ impl StreamingQueryManager {
     /// Wait for another caller's start/stop operation without holding a lock needed by
     /// callbacks. A callback during shutdown may remove/close the bus as a no-op, but
     /// cannot wait for its own worker to finish in order to start a new subscription.
+    /// A signal ends the wait in the Python client, as it interrupts the acquire of the lock of
+    /// PySpark's bus, with an error and the bus unchanged.
     fn idle_state(&self, removing: bool) -> Result<Option<MutexGuard<'_, ListenerBusState>>> {
         let mut state = self.bus.lock();
         while state.phase != ListenerBusPhase::Idle {
@@ -1359,7 +1383,7 @@ impl StreamingQueryManager {
                      lifecycle operation is in progress",
                 ));
             }
-            state = self.bus.wait(state);
+            state = self.bus.wait(state)?;
         }
         Ok(Some(state))
     }
@@ -1416,7 +1440,11 @@ impl StreamingQueryManager {
                 return Err(error);
             }
         }
+        // Whether the stream that sends the ADD was opened: the server may then hold its
+        // listener, whatever ends the wait for its acknowledgement.
+        let mut opened = false;
         let stream = self.listener_event_stream().and_then(|mut stream| {
+            opened = true;
             // Cancel a pending acknowledgement once the RPC stream exists. Establishing
             // the stream above still follows the transport's deadline and retry policy.
             stream.cancel = Some(receiver);
@@ -1466,6 +1494,13 @@ impl StreamingQueryManager {
                 }
             }
             Err(error) => {
+                // A wait for the acknowledgement that failed, by a transport error or by a
+                // signal in the Python client, after the ADD was sent: the server may have added
+                // its listener, and would answer the next ADD with no response, so the next
+                // subscription removes it first. That REMOVE finds none at worst.
+                if opened {
+                    state.server_registration_held = true;
+                }
                 state.cancel.take();
                 Err(error)
             }
@@ -1476,6 +1511,10 @@ impl StreamingQueryManager {
     /// the server event stream before returning, as PySpark's removeListener does.
     /// A callback during another caller's shutdown returns without waiting for its own
     /// worker; that caller owns the final result and may retry a failed removal.
+    /// In the Python client, a signal ends the waits of the removal for the deliveries and the
+    /// lifecycle operations of other threads, as it interrupts the acquire of the lock of
+    /// PySpark's bus: the removal then fails as if it had not started, so the listener stays
+    /// registered.
     pub fn remove_listener(&self, id: &str) -> Result<()> {
         self.remove_listener_found(id).map(|_| ())
     }
@@ -1524,7 +1563,25 @@ impl StreamingQueryManager {
                                 .iter()
                                 .any(|thread| *thread != current)
                         {
-                            state = self.bus.wait(state);
+                            state = match self.bus.wait(state) {
+                                Ok(state) => state,
+                                Err(interrupted) => {
+                                    // As PySpark's removal, whose acquire of the lock of the bus
+                                    // a signal interrupts before it removes the listener: the
+                                    // listener stays, unless its subscription ended meanwhile,
+                                    // when it is dropped without the lock.
+                                    let mut state = self.bus.lock();
+                                    if state.generation == generation && !state.listeners.is_empty()
+                                    {
+                                        let index = index.min(state.listeners.len());
+                                        state.listeners.insert(index, removed);
+                                    } else {
+                                        drop(state);
+                                        drop_isolated([removed]);
+                                    }
+                                    return Err(interrupted);
+                                }
+                            };
                         }
                     }
                     drop(state);
@@ -1536,7 +1593,9 @@ impl StreamingQueryManager {
             // delivers, before it removes the server's listener, as PySpark's bus holds its lock
             // for that delivery. A worker's own event is not awaited: its callbacks may remove
             // or stop the bus while the removal is in flight. The lock is released while
-            // waiting, so the bus is checked again after it.
+            // waiting, so the bus is checked again after it. A signal ends the wait in the
+            // Python client, as it interrupts the acquire of the lock of PySpark's bus, before
+            // anything is removed.
             let current = std::thread::current().id();
             if state.worker_id != Some(current)
                 && state
@@ -1544,7 +1603,7 @@ impl StreamingQueryManager {
                     .iter()
                     .any(|thread| *thread != current)
             {
-                drop(self.bus.wait(state));
+                drop(self.bus.wait(state)?);
                 continue;
             }
             return self.stop_listener_bus(state);
@@ -2882,6 +2941,107 @@ mod tests {
         // the same notification.
         drop(spark.streams().listener_event_stream());
         assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    /// As PySpark's removal, whose acquire of the lock of the bus a signal interrupts while
+    /// another thread holds it, to deliver a started event or to add a listener: a watch that
+    /// aborts the wait of a removal (as a signal does in the Python client) ends it with an
+    /// error, and leaves the bus as it was, which a later removal then changes.
+    #[test]
+    fn an_interrupted_wait_of_a_removal_leaves_the_bus_as_it_was_as_pyspark() {
+        use spark_connect_core::runtime::{with_wait_watch, WaitWatch, Watch};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        struct Listener;
+        impl StreamingQueryListener for Listener {
+            fn on_event(&self, _: &StreamingQueryListenerEvent) {}
+        }
+        /// Ends an add in progress, also when an assertion fails.
+        struct AddEnds<'a>(&'a StreamingQueryManager);
+        impl Drop for AddEnds<'_> {
+            fn drop(&mut self) {
+                self.0.bus.lock().phase = ListenerBusPhase::Idle;
+                self.0.bus.changed.notify_all();
+            }
+        }
+        let ids = |manager: &StreamingQueryManager| -> Vec<String> {
+            let state = manager.bus.lock();
+            state.listeners.iter().map(|(id, _)| id.clone()).collect()
+        };
+
+        // The removal of the last listener, and of one of two, waits for a started event in
+        // delivery on another thread; a removal waits for an add of another thread too.
+        for (registered, removed, add_in_progress) in [
+            (&["only"][..], "only", false),
+            (&["first", "second"][..], "first", false),
+            (&["only"][..], "only", true),
+        ] {
+            // No server: the REMOVE of the last listener fails at once, which keeps it.
+            let spark = unreachable_session_without_retries();
+            let manager = spark.streams();
+            {
+                let mut state = manager.bus.lock();
+                for id in registered {
+                    state.listeners.push((id.to_string(), Arc::new(Listener)));
+                }
+                if add_in_progress {
+                    state.phase = ListenerBusPhase::Starting;
+                }
+            }
+            let aborted = Arc::new(AtomicBool::new(false));
+            let watch: Arc<WaitWatch> = {
+                let aborted = Arc::clone(&aborted);
+                Arc::new(move || {
+                    if aborted.load(Ordering::SeqCst) {
+                        Watch::Abort
+                    } else {
+                        Watch::Continue
+                    }
+                })
+            };
+            let dispatch = (!add_in_progress).then(|| manager.started_dispatch());
+            let (sent, removal) = mpsc::channel();
+            std::thread::scope(|scope| {
+                // End what the removal waits for even if an assertion fails, so the scoped
+                // remover is released before the scope joins it.
+                let dispatch = dispatch;
+                let add = AddEnds(&manager);
+                let manager = &manager;
+                scope.spawn(move || {
+                    let removal = with_wait_watch(watch, || manager.remove_listener_found(removed));
+                    sent.send(removal).unwrap();
+                });
+                assert!(
+                    matches!(
+                        removal.recv_timeout(Duration::from_millis(300)),
+                        Err(mpsc::RecvTimeoutError::Timeout)
+                    ),
+                    "the removal of {removed} of {registered:?} did not wait"
+                );
+                aborted.store(true, Ordering::SeqCst);
+                removal
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("the watch ends the wait of the removal")
+                    .expect_err("the removal is interrupted");
+                assert_eq!(ids(manager), registered);
+                drop(dispatch);
+                drop(add);
+            });
+            let state = manager.bus.lock();
+            assert_eq!(state.phase, ListenerBusPhase::Idle);
+            assert!(state.started_dispatches.is_empty());
+            drop(state);
+            let removal = manager.remove_listener_found(removed);
+            if registered.len() > 1 {
+                assert!(removal.expect("a later removal of one of two listeners"));
+                assert_eq!(ids(&manager), ["second"]);
+            } else {
+                removal.expect_err("no server removes the listener of the server");
+                assert_eq!(ids(&manager), registered);
+            }
+        }
     }
 
     #[test]

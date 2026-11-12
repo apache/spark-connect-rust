@@ -693,18 +693,28 @@ def test_ml_connect_setters_run_while_a_fit_or_an_evaluate_waits_as_pyspark(ml_m
         }
 
 
-def test_native_models_released_while_their_session_stops_send_no_delete(ml_mock):
-    # As the release of a cached remote relation: a native model that goes once its session is
-    # stopped, here while its ReleaseSession waits for the server, sends no Delete, since
-    # stopping the session releases its ML cache on the server.
+def test_native_models_released_while_their_session_stops_send_their_delete_as_pyspark(ml_mock):
+    # As PySpark's del_remote_cache, which deletes through the active session, whose client is
+    # closed only once its ReleaseSession ends: a native model that goes while that release waits
+    # for the server sends its Delete, and the session is not stopped yet. One that goes once the
+    # session is stopped sends none: stopping the session released its ML cache on the server.
     import threading
     import time
 
     from pyspark.ml.connect import KMeans
 
+    def deleted():
+        # The IDs that the Deletes since the fits name. A Delete of a model that an earlier test
+        # released can arrive meanwhile, so the models of this test have IDs of their own.
+        return [ref.id for command in _commands(service)[sent:]
+                if command.ml_command.HasField("delete")
+                for ref in command.ml_command.delete.obj_refs]
+
     spark, service = ml_mock
-    service.execute_payload = _operator_info("model-1")
-    model = KMeans(k=2).fit(spark.range(1))
+    service.execute_payload = _operator_info("model-released-while-stopping")
+    during = KMeans(k=2).fit(spark.range(1))
+    service.execute_payload = _operator_info("model-released-once-stopped")
+    after = KMeans(k=2).fit(spark.range(1))
     sent = len(service.execute_requests)
     service.release_session_blocked = True
     stopper = threading.Thread(target=spark.stop)
@@ -714,16 +724,22 @@ def test_native_models_released_while_their_session_stops_send_no_delete(ml_mock
         while service.release_session_calls == 0 and time.time() < deadline:
             time.sleep(0.01)
         assert service.release_session_calls == 1
-        del model
+        assert not spark.is_stopped
+        del during
         gc.collect()
-        # The release is sent without waiting for it: give one the time to arrive.
-        time.sleep(0.5)
-        commands = _commands(service)[sent:]
-        assert not [c for c in commands if c.ml_command.HasField("delete")]
+        # The release is sent without waiting for it.
+        deadline = time.time() + 5
+        while "model-released-while-stopping" not in deleted() and time.time() < deadline:
+            time.sleep(0.05)
+        assert "model-released-while-stopping" in deleted()
     finally:
         service.release_session_release()
         stopper.join(10)
     assert spark.is_stopped
+    del after
+    gc.collect()
+    time.sleep(0.5)
+    assert "model-released-once-stopped" not in deleted()
 
 
 @pytest.mark.parametrize(
