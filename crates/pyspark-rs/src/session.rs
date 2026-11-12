@@ -197,6 +197,13 @@ impl PySparkSessionBuilder {
     #[pyo3(name = "getOrCreate")]
     fn get_or_create(&self, py: Python<'_>) -> PyResult<Py<PySparkSession>> {
         let (session, created) = {
+            // As PySpark's getOrCreate, which holds `SparkSession._lock` for its lookup: a stop in
+            // progress, on any session, is waited for, so that the lookup does not return a session
+            // that it stops. A signal ends the wait, as it interrupts the acquire of that lock.
+            let _stopping = crate::interrupt::abortable_without_session(
+                py,
+                spark_connect::session::enter_stop_lock,
+            )?;
             let _creating = session_lock();
             match active_session(py).or_else(|| default_session(py)) {
                 Some(session) => (session, false),
@@ -2425,14 +2432,18 @@ impl PySparkSession {
         {
             // As PySpark's stop, whose sleeps between the retries of the release a signal
             // interrupts: the exception of the signal is raised at once, and leaves the session
-            // open, so nothing below runs. The core runs the stops of other threads one at a
-            // time, as PySpark's `SparkSession._lock`, whose acquire a signal interrupts too;
-            // the resets below are idempotent, and run with the GIL, after the core's stop.
+            // open, so nothing below runs. The core runs the stops of all sessions one at a time,
+            // as PySpark's `SparkSession._lock`, whose acquire a signal interrupts too; the resets
+            // below are idempotent, and run with the GIL, after the core's stop.
             crate::interrupt::interruptible_outcome(py, &self.session, || {
                 self.session.stop().map_err(Box::new)
             })?
         } else {
-            // As PySpark's stop: without the release, the client is closed all the same.
+            // As PySpark's stop, which closes the client under `SparkSession._lock` all the same.
+            let _stopping = crate::interrupt::abortable_without_session(
+                py,
+                spark_connect::session::enter_stop_lock,
+            )?;
             py.detach(|| self.session.close());
             Ok(())
         };
@@ -2806,8 +2817,8 @@ impl PySparkSession {
     }
 
     /// The class attribute `_lock`, PySpark's `threading.RLock` of the session registry, for the
-    /// Python code that takes it. The drop-in serializes the creation of sessions with its own
-    /// lock, as `getOrCreate` does with `_lock`.
+    /// Python code that takes it. The drop-in's `getOrCreate` and `stop()` serialize through the
+    /// stop lock of the core and their own session lock, not through this object.
     #[classattr]
     fn _lock(py: Python<'_>) -> PyResult<Py<PyAny>> {
         Ok(py.import("threading")?.call_method0("RLock")?.unbind())

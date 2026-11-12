@@ -1158,9 +1158,7 @@ impl ListenerBus {
         let changed = self.changed.0.notified();
         drop(state);
         if spark_connect_core::runtime::block_on_abortable(changed).is_none() {
-            return Err(SparkError::connect_msg(
-                "the wait for the streaming query listener bus was interrupted",
-            ));
+            return Err(interrupted_wait());
         }
         Ok(self.lock())
     }
@@ -1207,6 +1205,11 @@ impl ListenerBus {
         }
         drop_isolated(listeners);
     }
+}
+
+/// The error of a wait of the bus that a signal of the process ended in the Python client.
+fn interrupted_wait() -> SparkError {
+    SparkError::connect_msg("the wait for the streaming query listener bus was interrupted")
 }
 
 /// Drop listeners that left the bus, or the snapshot of a delivery, one by one and never under
@@ -1437,6 +1440,7 @@ impl StreamingQueryManager {
         // cleared, and this listener opens a new subscription.
         let stale = std::mem::take(&mut state.listeners);
         let release_server = std::mem::take(&mut state.server_registration_held);
+        let previous_generation = state.generation;
         state.phase = ListenerBusPhase::Starting;
         // An earlier worker must not clear this registration's cancellation sender.
         state.generation = state.generation.wrapping_add(1);
@@ -1445,8 +1449,23 @@ impl StreamingQueryManager {
         state.cancel = Some(cancel);
         let previous = state.thread.take();
         drop(state);
+        if let Some(previous) = previous {
+            if let Some(previous) = Self::join_listener_thread(previous) {
+                // A signal ended the wait for the earlier worker to exit. Nothing of this add has
+                // been sent, so the bus is as it was before it: the registrations, the generation
+                // and the server registration of the earlier worker, which it joins later.
+                let mut state = self.bus.lock();
+                state.listeners = stale;
+                state.generation = previous_generation;
+                state.thread = Some(previous);
+                state.server_registration_held |= release_server;
+                state.cancel.take();
+                state.phase = ListenerBusPhase::Idle;
+                self.bus.changed.notify_all();
+                return Err(interrupted_wait());
+            }
+        }
         drop_isolated(stale);
-        Self::join_listener_thread(previous);
         if release_server {
             if let Err(error) = self.remove_server_listener(false) {
                 // Without the removal, the server would answer the add below with no response,
@@ -1689,7 +1708,20 @@ impl StreamingQueryManager {
             // Keep worker_id and Stopping until after the join: callbacks must still be
             // able to recognize their worker and coalesce a concurrent remove/close.
             drop(state);
-            Self::join_listener_thread(worker);
+            if let Some(worker) = worker {
+                if let Some(worker) = Self::join_listener_thread(worker) {
+                    // A signal ended the wait for the worker to exit, after the removal was
+                    // sent. As PySpark's removal, which the REMOVE precedes, the listeners stay
+                    // in the bus; the worker is kept, so that a later removal, close or add
+                    // joins it, and the wait is the error of the call.
+                    let mut state = self.bus.lock();
+                    state.thread = Some(worker);
+                    state.phase = ListenerBusPhase::Idle;
+                    self.bus.changed.notify_all();
+                    drop(state);
+                    return removal.and(Err(interrupted_wait()));
+                }
+            }
             state = self.bus.lock();
             removed = std::mem::take(&mut state.listeners);
             state.cancel.take();
@@ -1747,14 +1779,30 @@ impl StreamingQueryManager {
         drop(worker);
     }
 
-    /// Join the event worker unless called from that worker itself.
-    fn join_listener_thread(handle: Option<std::thread::JoinHandle<()>>) {
-        if let Some(handle) = handle {
-            // A listener may remove itself from its callback. It cannot join itself;
-            // after the callback returns the stopped stream lets its worker exit.
-            if handle.thread().id() != std::thread::current().id() {
-                let _ = handle.join();
+    /// Join the event worker, after waiting for it to exit, unless called from that worker
+    /// itself. A worker cannot join itself, and after its callback returns the stopped stream
+    /// lets it exit. A signal that ends the wait in the Python client (see
+    /// [`block_on_abortable`](spark_connect_core::runtime::block_on_abortable)) gives the worker
+    /// back, unjoined, as `Some`, so that a later removal, close or add joins it.
+    fn join_listener_thread(
+        handle: std::thread::JoinHandle<()>,
+    ) -> Option<std::thread::JoinHandle<()>> {
+        // A listener may remove itself from its callback. Its handle is dropped, which detaches it.
+        if handle.thread().id() == std::thread::current().id() {
+            return None;
+        }
+        let exited = spark_connect_core::runtime::block_on_abortable(async {
+            let mut ticks = tokio::time::interval(std::time::Duration::from_millis(5));
+            while !handle.is_finished() {
+                ticks.tick().await;
             }
+        });
+        match exited {
+            Some(()) => {
+                let _ = handle.join();
+                None
+            }
+            None => Some(handle),
         }
     }
 
@@ -3073,6 +3121,62 @@ mod tests {
                 assert_eq!(ids(&manager), registered);
             }
         }
+    }
+
+    /// As PySpark's removal, whose join of the listener thread follows the REMOVE: a signal that
+    /// ends the join in the Python client ends the call with an error, and leaves the bus with
+    /// its listeners and its worker, which a later removal joins once the worker has exited.
+    #[test]
+    fn an_interrupted_join_of_a_removed_worker_keeps_the_bus_and_the_worker() {
+        use spark_connect_core::runtime::{with_wait_watch, WaitWatch, Watch};
+
+        struct Listener;
+        impl StreamingQueryListener for Listener {
+            fn on_event(&self, _: &StreamingQueryListenerEvent) {}
+        }
+
+        let spark = unreachable_session_without_retries();
+        let manager = spark.streams();
+        // A worker that stays in its callback until the test lets it exit.
+        let (exit, exited) = std::sync::mpsc::channel::<()>();
+        let worker = std::thread::spawn(move || {
+            // Exits on its own, so that a join that ignores the signal fails rather than hangs.
+            let _ = exited.recv_timeout(std::time::Duration::from_secs(5));
+        });
+        let generation = {
+            let mut state = manager.bus.lock();
+            state
+                .listeners
+                .push(("only".to_string(), Arc::new(Listener)));
+            state.phase = ListenerBusPhase::Stopping;
+            state.worker_id = Some(worker.thread().id());
+            state.generation
+        };
+        // The REMOVE has been sent, so the removal succeeded; only the join is interrupted.
+        let abort: Arc<WaitWatch> = Arc::new(|| Watch::Abort);
+        with_wait_watch(abort, || {
+            manager.finish_listener_removal(generation, Some(worker), Ok(()))
+        })
+        .expect_err("the signal ends the join");
+        {
+            let state = manager.bus.lock();
+            assert_eq!(state.listeners.len(), 1);
+            assert_eq!(state.phase, ListenerBusPhase::Idle);
+            assert!(
+                state.thread.is_some(),
+                "the worker is kept to be joined later"
+            );
+            assert!(state.worker_id.is_some());
+        }
+        exit.send(()).unwrap();
+        let worker = manager.bus.lock().thread.take();
+        manager
+            .finish_listener_removal(generation, worker, Ok(()))
+            .expect("a later removal joins the worker");
+        let state = manager.bus.lock();
+        assert!(state.listeners.is_empty());
+        assert!(state.thread.is_none());
+        assert!(state.worker_id.is_none());
     }
 
     #[test]

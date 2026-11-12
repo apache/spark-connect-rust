@@ -135,16 +135,22 @@ impl ThreadTags {
     }
 }
 
-/// The lock that `stop()` holds, shared by the clones of a session, as PySpark's `stop()` holds
-/// `SparkSession._lock`, an `RLock`: a `stop()` of another thread waits for the one in progress,
-/// and a `stop()` of the thread that holds it, as from a signal handler that runs while the
-/// release waits, enters it again.
+/// The lock that `stop()` holds, one for all sessions of the process, as PySpark's `stop()` holds
+/// `SparkSession._lock`, a class-wide `RLock`: a `stop()` of another thread waits for the one in
+/// progress, whichever session it stops, and a `stop()` of the thread that holds it, as from a
+/// signal handler that runs while the release waits, enters it again.
 #[derive(Default)]
 struct StopLock {
     /// The thread that holds the lock, and how many times it entered it.
     holder: Mutex<Option<(std::thread::ThreadId, usize)>>,
     /// Wakes the waits for the lock when it is left.
     left: tokio::sync::Notify,
+}
+
+/// The lock that `stop()` holds.
+fn stop_lock() -> &'static StopLock {
+    static LOCK: std::sync::OnceLock<StopLock> = std::sync::OnceLock::new();
+    LOCK.get_or_init(StopLock::default)
 }
 
 impl StopLock {
@@ -163,7 +169,7 @@ impl StopLock {
     /// acquire of PySpark's lock, which a signal of the process interrupts, the wait ends with
     /// None when a signal ends it in the Python client (see
     /// [`block_on_abortable`](spark_connect_core::runtime::block_on_abortable)).
-    fn enter(&self) -> Option<StopGuard<'_>> {
+    fn enter(&self) -> Option<StopLockHold> {
         let thread = spark_connect_core::runtime::calling_thread_id();
         if !self.try_enter(thread) {
             spark_connect_core::runtime::block_on_abortable(async {
@@ -177,25 +183,47 @@ impl StopLock {
                 }
             })?;
         }
-        Some(StopGuard(self))
+        Some(StopLockHold { thread })
     }
-}
 
-/// The hold of a [`StopLock`] by a `stop()`, which leaves the lock when it drops.
-struct StopGuard<'a>(&'a StopLock);
-
-impl Drop for StopGuard<'_> {
-    fn drop(&mut self) {
-        let mut holder = self.0.holder.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((_, depth)) = holder.as_mut() {
-            *depth -= 1;
-            if *depth == 0 {
-                *holder = None;
+    /// Leave the lock by one entry of `thread`, waking the waits for it. A hold exists only while
+    /// its thread holds the lock, so the entry is that of the hold, on whichever thread it drops.
+    fn leave(&self, thread: std::thread::ThreadId) {
+        let mut holder = self.holder.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((owner, depth)) = holder.as_mut() {
+            if *owner == thread {
+                *depth -= 1;
+                if *depth == 0 {
+                    *holder = None;
+                }
             }
         }
         drop(holder);
-        self.0.left.notify_waiters();
+        self.left.notify_waiters();
     }
+}
+
+/// A hold of the lock that `stop()` takes, which is left when it drops. See
+/// [`enter_stop_lock`].
+pub struct StopLockHold {
+    /// The thread that entered the lock, whose entry the hold leaves.
+    thread: std::thread::ThreadId,
+}
+
+impl Drop for StopLockHold {
+    fn drop(&mut self) {
+        stop_lock().leave(self.thread);
+    }
+}
+
+/// Enter the lock that `stop()` holds, for as long as the returned hold lives, as PySpark's
+/// `getOrCreate` takes `SparkSession._lock` while it looks up or creates a session. A `stop()` in
+/// progress on another thread, of any session, is waited for, so that the lookup sees a session
+/// that it stops as stopped; one on the calling thread is entered within, as the lock is reentrant.
+/// The wait ends with None when a signal of the process ends it in the Python client, as the
+/// acquire of PySpark's lock is interrupted; without that, it waits for the stop.
+pub fn enter_stop_lock() -> Option<StopLockHold> {
+    stop_lock().enter()
 }
 
 /// A Spark Connect session for interacting with a remote Spark cluster.
@@ -225,8 +253,6 @@ pub struct SparkSession {
     /// Whether this session was stopped, by `stop()` once its release ended, or by `close()`
     /// (shared across clones). Backs `is_stopped`.
     stopped: Arc<AtomicBool>,
-    /// The lock that `stop()` holds (shared across clones), as PySpark's `SparkSession._lock`.
-    stop_lock: Arc<StopLock>,
     /// Successful server version, shared by handles for this session only.
     server_version: Arc<Mutex<Option<String>>>,
     /// The client-side listener bus of the streaming queries of this session (shared across
@@ -248,7 +274,6 @@ impl SparkSession {
             python_accumulators: PythonAccumulators::default(),
             observation_metrics_check: Arc::default(),
             stopped: Arc::new(AtomicBool::new(false)),
-            stop_lock: Arc::default(),
             server_version: Arc::new(Mutex::new(None)),
             listener_bus: Arc::default(),
         }
@@ -464,7 +489,6 @@ impl SparkSession {
             python_accumulators: PythonAccumulators::default(),
             observation_metrics_check: Arc::default(),
             stopped: Arc::new(AtomicBool::new(false)),
-            stop_lock: Arc::default(),
             server_version: Arc::new(Mutex::new(None)),
             listener_bus: Arc::default(),
         }
@@ -1384,12 +1408,13 @@ impl SparkSession {
     /// Idempotent, mirroring pyspark: the session is marked stopped even if releasing it
     /// on the server fails, and stopping an already stopped session is a no-op.
     ///
-    /// As PySpark's `stop()`, which runs under `SparkSession._lock`, the `stop()`s of a session
-    /// and of its clones run one at a time: a `stop()` of another thread waits for the one in
-    /// progress, and releases the session itself if that one was interrupted before it closed
-    /// the session; a `stop()` of the thread that runs one (a signal handler of the Python
-    /// client) runs within it. The session is stopped once its release has ended, as PySpark's
-    /// `is_stopped` is the client's `is_closed`, which its `stop()` sets after the release.
+    /// As PySpark's `stop()`, which runs under `SparkSession._lock`, the `stop()`s of all the
+    /// sessions of the process run one at a time: a `stop()` of another thread waits for the one
+    /// in progress, whichever session it stops, and releases the session itself if that one was
+    /// interrupted before it closed the session; a `stop()` of the thread that runs one (a signal
+    /// handler of the Python client) runs within it. The session is stopped once its release has
+    /// ended, as PySpark's `is_stopped` is the client's `is_closed`, which its `stop()` sets after
+    /// the release.
     ///
     /// Release the server session first, then cancel local listener registration/dispatch and
     /// close the client even if release fails. ReleaseSession makes the server send the
@@ -1402,7 +1427,7 @@ impl SparkSession {
     pub fn stop(&self) -> Result<()> {
         // A signal of the process ends the wait for another thread's `stop()` in the Python
         // client, as it interrupts the acquire of PySpark's lock.
-        let Some(_stopping) = self.stop_lock.enter() else {
+        let Some(_stopping) = enter_stop_lock() else {
             return Err(SparkError::connect_msg(
                 "the wait for the stop of the session on another thread was interrupted",
             ));
@@ -1487,7 +1512,6 @@ impl Clone for SparkSession {
             python_accumulators: self.python_accumulators.clone(),
             observation_metrics_check: Arc::clone(&self.observation_metrics_check),
             stopped: Arc::clone(&self.stopped),
-            stop_lock: Arc::clone(&self.stop_lock),
             server_version: Arc::clone(&self.server_version),
             listener_bus: Arc::clone(&self.listener_bus),
         }
@@ -3443,6 +3467,92 @@ mod tests {
             .expect("the second stop ends with its release")
             .expect_err("the release of the second stop fails as its connection closes");
         assert!(spark.is_stopped());
+    }
+
+    /// As PySpark's `stop()`, whose `SparkSession._lock` is one lock of the class: the `stop()` of
+    /// another session waits for the release of the one in progress, sends its own release only
+    /// after it, and is not stopped until that release has ended.
+    #[test]
+    fn stops_of_different_sessions_run_one_at_a_time_as_pyspark() {
+        use spark_connect_core::runtime::{with_wait_watch, WaitWatch, Watch};
+        use std::sync::mpsc::{channel, RecvTimeoutError};
+        use std::time::{Duration, Instant};
+
+        let server = UnansweringServer::start();
+        let builder =
+            ChannelBuilder::parse(&format!("sc://127.0.0.1:{}", server.port)).expect("valid URL");
+        let new_session = || {
+            let mut client =
+                block_on(SparkConnectClient::connect(&builder)).expect("failed to build client");
+            // The release fails at once when its connection closes.
+            client.set_retry_policy(spark_connect_core::retries::RetryPolicy::no_retries());
+            SparkSession::new(client)
+        };
+        let first_session = new_session();
+        let second_session = new_session();
+        let aborted = Arc::new(AtomicBool::new(false));
+        let watch: Arc<WaitWatch> = {
+            let aborted = Arc::clone(&aborted);
+            Arc::new(move || {
+                if aborted.load(Ordering::SeqCst) {
+                    Watch::Abort
+                } else {
+                    Watch::Continue
+                }
+            })
+        };
+        let (first_ended, first) = channel();
+        let interrupted = first_session.clone();
+        std::thread::spawn(move || {
+            let _ = first_ended.send(with_wait_watch(watch, || interrupted.stop()));
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while server.connections.lock().unwrap().is_empty() {
+            assert!(
+                Instant::now() < deadline,
+                "the release of the first stop connects"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let (second_ended, second) = channel();
+        let waiting = second_session.clone();
+        std::thread::spawn(move || {
+            let _ = second_ended.send(waiting.stop());
+        });
+        assert!(
+            matches!(
+                second.recv_timeout(Duration::from_millis(300)),
+                Err(RecvTimeoutError::Timeout)
+            ),
+            "a stop of another session returned while the release of the first was in progress"
+        );
+        let connected = server.connections.lock().unwrap().len();
+        assert_eq!(
+            connected, 1,
+            "the release of the other session was sent while the first stop was in progress"
+        );
+        aborted.store(true, Ordering::SeqCst);
+        first
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the watch ends the first stop")
+            .expect_err("the first stop is interrupted");
+        // The second stop releases its session once the first one has left the lock.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while server.connections.lock().unwrap().len() < 2 {
+            assert!(
+                Instant::now() < deadline,
+                "the second stop sends its release once the first has left the lock"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(!second_session.is_stopped());
+        drop(server);
+        second
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the second stop ends with its release")
+            .expect_err("the release of the second stop fails as its connection closes");
+        assert!(second_session.is_stopped());
+        assert!(!first_session.is_stopped());
     }
 
     #[test]

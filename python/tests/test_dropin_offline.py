@@ -19434,6 +19434,80 @@ def test_a_stop_from_a_signal_handler_while_stop_releases_runs_within_it_as_pysp
     assert spark.is_stopped
 
 
+def test_get_or_create_waits_for_a_stop_in_progress_and_creates_a_new_session_as_pyspark(
+    mock_connect,
+):
+    # As PySpark's getOrCreate, which takes SparkSession._lock, the lock that stop() holds through
+    # its release: a getOrCreate during the release waits for it, finds the session stopped, and
+    # creates a new session, which is open.
+    import threading
+
+    from pyspark.sql import SparkSession
+
+    spark, service = mock_connect
+    service.release_session_blocked = True
+    stopper = threading.Thread(target=spark.stop, daemon=True)
+    stopper.start()
+    deadline = time.monotonic() + 5
+    while service.release_session_calls < 1 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    outcome = {}
+
+    def get_or_create():
+        outcome["session"] = SparkSession.builder.remote(service.remote).getOrCreate()
+        outcome["returned"] = time.monotonic()
+
+    getter = threading.Thread(target=get_or_create, daemon=True)
+    getter.start()
+    try:
+        getter.join(0.5)
+        assert getter.is_alive(), "getOrCreate returned during the release of stop"
+    finally:
+        released = time.monotonic()
+        service.release_session_blocked = False
+        service.release_session_release()
+    stopper.join(5)
+    getter.join(5)
+    created = outcome["session"]
+    try:
+        assert outcome["returned"] >= released
+        assert created is not spark
+        assert spark.is_stopped
+        assert not created.is_stopped
+    finally:
+        created.stop()
+
+
+def test_stops_of_two_sessions_run_one_at_a_time_as_pyspark(mock_connect):
+    # As PySpark's stop, whose SparkSession._lock is one lock of the class: the stop of another
+    # session waits for the release of the one in progress, and sends its own release after it.
+    import threading
+
+    spark, service = mock_connect
+    other = spark.newSession()
+    service.release_session_blocked = True
+    stopper = threading.Thread(target=spark.stop, daemon=True)
+    stopper.start()
+    deadline = time.monotonic() + 5
+    while service.release_session_calls < 1 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    other_stopper = threading.Thread(target=other.stop, daemon=True)
+    other_stopper.start()
+    try:
+        other_stopper.join(0.5)
+        assert other_stopper.is_alive(), "the stop of another session did not wait"
+        assert service.release_session_calls == 1
+        assert not other.is_stopped
+    finally:
+        service.release_session_blocked = False
+        service.release_session_release()
+    stopper.join(5)
+    other_stopper.join(5)
+    assert service.release_session_calls == 2
+    assert spark.is_stopped
+    assert other.is_stopped
+
+
 def test_sigint_during_the_removal_of_the_last_listener_raises_keyboard_interrupt_as_pyspark(
     mock_connect,
 ):
@@ -19496,6 +19570,143 @@ def test_sigint_during_the_removal_of_the_last_listener_raises_keyboard_interrup
     spark.streams.removeListener(listener)
     assert spark.streams._sqlb._listener_bus == []
     assert service.wait_listener_removal(1)
+
+
+def _blocking_idle_listener(entered, release):
+    from pyspark.sql.streaming.listener import StreamingQueryListener
+
+    class Blocking(StreamingQueryListener):
+        def onQueryStarted(self, event):
+            pass
+
+        def onQueryProgress(self, event):
+            pass
+
+        def onQueryIdle(self, event):
+            entered.set()
+            release.wait(10)
+
+        def onQueryTerminated(self, event):
+            pass
+
+    return Blocking()
+
+
+@pytest.mark.parametrize("interrupted_call", ["removeListener", "close"])
+def test_sigint_during_the_join_of_a_busy_listener_worker_raises_keyboard_interrupt(
+    mock_connect,
+    interrupted_call,
+):
+    # As PySpark's remove, which sends the REMOVE and then joins the thread of the listener, a
+    # thread that the join waits for on a callback that does not return: a signal raises
+    # KeyboardInterrupt at once, the REMOVE stays sent, and the listener stays in the bus. A
+    # later removal or close joins the worker and empties the bus.
+    import signal
+    import threading
+
+    entered, release = threading.Event(), threading.Event()
+    spark, service = mock_connect
+    service.listener_bus_enabled = True
+    listener = _blocking_idle_listener(entered, release)
+    spark.streams.addListener(listener)
+    service.listener_event(
+        spark.session_id,
+        3,
+        {
+            "id": "00000000-0000-4000-8000-000000000001",
+            "runId": "00000000-0000-4000-8000-000000000002",
+            "timestamp": "idle",
+        },
+    )
+    try:
+        assert entered.wait(5)
+        timer = threading.Timer(0.5, os.kill, (os.getpid(), signal.SIGINT))
+        started = time.monotonic()
+        timer.start()
+        try:
+            with pytest.raises(KeyboardInterrupt):
+                if interrupted_call == "close":
+                    spark.streams.close()
+                else:
+                    spark.streams.removeListener(listener)
+        finally:
+            timer.cancel()
+        assert time.monotonic() - started < 3
+        assert service.listener_removals == 1
+        assert spark.streams._sqlb._listener_bus == [listener]
+    finally:
+        release.set()
+    spark.streams.removeListener(listener)
+    assert spark.streams._sqlb._listener_bus == []
+
+
+def test_sigint_during_the_add_that_joins_a_failing_listener_worker_raises_keyboard_interrupt(
+    mock_connect,
+):
+    # As PySpark's add, whose bus takes the new listener only once the failed one is gone: a
+    # signal ends the wait for a worker whose terminal notification (a warning) does not return.
+    # The add sends nothing, the bus keeps its listeners, and the next add removes the server's
+    # listener of the failed subscription before its own ADD.
+    import signal
+    import threading
+    import warnings
+
+    from pyspark.sql.streaming.listener import StreamingQueryListener
+
+    class Plain(StreamingQueryListener):
+        def onQueryStarted(self, event):
+            pass
+
+        def onQueryProgress(self, event):
+            pass
+
+        def onQueryIdle(self, event):
+            pass
+
+        def onQueryTerminated(self, event):
+            pass
+
+    warning_entered, warning_release = threading.Event(), threading.Event()
+    previous_showwarning = warnings.showwarning
+
+    def blocking_showwarning(*args, **kwargs):
+        warning_entered.set()
+        warning_release.wait(10)
+
+    spark, service = mock_connect
+    service.listener_bus_enabled = True
+    first = Plain()
+    second = Plain()
+    spark.streams.addListener(first)
+    warnings.showwarning = blocking_showwarning
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("always")
+            service.end_listener_stream(spark.session_id, failure=True)
+            assert warning_entered.wait(5)
+            timer = threading.Timer(0.5, os.kill, (os.getpid(), signal.SIGINT))
+            started = time.monotonic()
+            timer.start()
+            try:
+                with pytest.raises(KeyboardInterrupt):
+                    spark.streams.addListener(second)
+            finally:
+                timer.cancel()
+            assert time.monotonic() - started < 3
+            assert service.listener_subscriptions == 1
+            assert service.listener_removals == 0
+            warning_release.set()
+            deadline = time.monotonic() + 5
+            while spark.streams._sqlb._listener_bus and time.monotonic() < deadline:
+                time.sleep(0.01)
+            spark.streams.addListener(second)
+            assert service.listener_removals == 1
+            assert service.wait_listener_registration(2)
+            assert spark.streams._sqlb._listener_bus == [second]
+            spark.streams.removeListener(second)
+    finally:
+        warning_release.set()
+        warnings.showwarning = previous_showwarning
 
 
 def test_sigint_during_a_native_kmeans_fit_raises_keyboard_interrupt(mock_connect):
