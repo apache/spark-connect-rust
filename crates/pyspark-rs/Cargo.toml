@@ -26,7 +26,10 @@ spark-connect-proto = { package = "apache-spark-connect-proto", path = "../spark
 pyo3.workspace = true
 arrow = { workspace = true, features = ["pyarrow"] }
 tokio.workspace = true
-prost.workspace = true
+# The drop-in decodes the protobufs that a pickled Column or DataFrame, and a session hook's
+# request, carry, which PySpark's protobuf decodes at any depth: lift prost's limit of 100
+# nested messages for this crate (the decode stacks are grown, see `on_grown_stack`).
+prost = { workspace = true, features = ["no-recursion-limit"] }
 prost-types.workspace = true
 tonic.workspace = true
 serde_json = "1.0"

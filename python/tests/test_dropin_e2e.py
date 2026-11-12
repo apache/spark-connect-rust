@@ -1168,6 +1168,49 @@ def test_pickled_when_columns_chain_on_the_server_as_pyspark(session, tmp_path):
         session.sql(f"DROP TABLE IF EXISTS {table}").collect()
 
 
+def test_pickled_deep_column_on_the_server_as_pyspark(session, tmp_path):
+    # As PySpark's: a pickled Column of 100 additions, deeper than protobuf's parser reads,
+    # collects as the Column built without the pickling, and a foreachBatch function that captures
+    # it unpickles it on the Python worker of the server, with PySpark's Column.
+    import pickle
+
+    (tmp_path / "input.txt").write_text("a\nbb\n")
+    df = session.createDataFrame([(1,), (2,)], "a int")
+    direct = F.length(F.col("a").cast("string"))
+    for _ in range(100):
+        direct = direct + 1
+    copied = pickle.loads(pickle.dumps(direct))
+    assert sorted(row[0] for row in df.select(copied.alias("n")).collect()) == [101, 101]
+    assert df.select(copied.alias("n")).collect() == df.select(direct.alias("n")).collect()
+
+    captured = F.length(F.col("value"))
+    for _ in range(100):
+        captured = captured + 1
+    # The bytes of the expression that the pickle carries, as Column.__reduce__ gives them.
+    expected = len(captured.__reduce__()[1][0])
+    table = "foreach_batch_captured_deep_column"
+
+    def func(batch, batch_id):
+        # The worker's PySpark unpickles the Column, and gives the expression back whole. Its own
+        # plans take an expression this deep only with protobuf's pure-Python backend: upb copies
+        # a message added to a repeated field through its parser, which stops at 100 levels, so
+        # official PySpark raises DecodeError for `batch.select(captured)` there too. The worker
+        # checks the expression itself, which any backend gives back.
+        size = captured._expr.to_plan(None).ByteSize()
+        batch.sparkSession.createDataFrame([(batch_id, size)], "b long, size long").write.mode(
+            "append"
+        ).saveAsTable(table)
+
+    query = session.readStream.format("text").load(str(tmp_path)).writeStream.foreachBatch(func)
+    query = query.start()
+    try:
+        query.processAllAvailable()
+        assert [row.size for row in session.table(table).collect()] == [expected]
+    finally:
+        query.stop()
+        session.sql(f"DROP TABLE IF EXISTS {table}").collect()
+
+
 @pytest.mark.parametrize(
     "schema, expected",
     [

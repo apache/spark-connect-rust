@@ -400,6 +400,27 @@ impl Column {
         self.expr.try_to_proto()
     }
 
+    /// As [`Column::try_to_proto`], and the levels of the expression, which a pickled Column keeps
+    /// for [`Column::sent`]. Not a stable API.
+    #[doc(hidden)]
+    pub fn try_to_proto_with_levels(
+        &self,
+    ) -> spark_connect_core::error::Result<(proto::Expression, usize)> {
+        self.expr.try_to_proto_with_levels()
+    }
+
+    /// The Column of the `spark.connect.Expression` `expression`, as it was sent, with its
+    /// `rendered` rendering and its `levels` (see [`Column::try_to_proto_with_levels`]), as a
+    /// pickled Column unpickles. Not a stable API.
+    #[doc(hidden)]
+    pub fn sent(
+        expression: proto::Expression,
+        rendered: String,
+        levels: usize,
+    ) -> spark_connect_core::error::Result<Column> {
+        Ok(Column::new(Expression::sent(expression, rendered, levels)?))
+    }
+
     /// Mirrors `pyspark.sql.column.Column.over` - window function application.
     pub fn over(self, window_spec: WindowSpec) -> Column {
         // Convert window frame spec if present

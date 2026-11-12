@@ -1813,6 +1813,267 @@ def test_pickled_when_columns_chain_as_pyspark(mock_connect):
         assert error.value.getCondition() == "INVALID_WHEN_USAGE"
 
 
+def _deep_addition(column, levels):
+    for _ in range(levels):
+        column = column + 1
+    return column
+
+
+def test_pickled_deep_columns_round_trip_and_send_as_they_were(mock_connect):
+    # As PySpark's Column, which pickles its expression tree and unpickles at any depth: a column
+    # of 60, 100 or 300 additions round-trips, and so do a CASE WHEN, a sort order and a window
+    # expression over it, each sending the expression that it sends without the pickling.
+    import cloudpickle
+    from pyspark.sql import functions as F
+    from pyspark.sql.window import Window
+
+    spark, service = mock_connect
+    df = spark.range(1)
+
+    def sent_root():
+        # ExecutePlanRequest.plan=3, Plan.root=1.
+        return parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0]
+
+    def sent_expressions(column):
+        # Relation.project=3, Project.expressions=3.
+        df.select(column.alias("x")).collect()
+        return parse_message(parse_message(sent_root())[3][0])[3]
+
+    def sent_sort_order(column):
+        # Relation.sort=7, Sort.order=2.
+        df.orderBy(column).collect()
+        return parse_message(parse_message(sent_root())[7][0])[2]
+
+    for levels in (60, 100, 300):
+        direct = _deep_addition(F.col("id"), levels)
+        for copied in (pickle.loads(pickle.dumps(direct)),
+                       cloudpickle.loads(cloudpickle.dumps(direct))):
+            assert repr(copied) == repr(direct)
+            assert sent_expressions(copied) == sent_expressions(direct)
+            assert sent_expressions(F.sum(copied).over(Window.partitionBy("id"))) == (
+                sent_expressions(F.sum(direct).over(Window.partitionBy("id"))))
+        when = F.when(direct > 0, direct).otherwise(direct)
+        copied = pickle.loads(pickle.dumps(when))
+        assert repr(copied) == repr(when)
+        assert sent_expressions(copied) == sent_expressions(when)
+        order = direct.desc()
+        copied = pickle.loads(pickle.dumps(order))
+        assert sent_sort_order(copied) == sent_sort_order(order)
+    # A column of 300 additions, pickled again, and its copy of 300 with the same expression.
+    direct = _deep_addition(F.col("id"), 300)
+    twice = pickle.loads(pickle.dumps(pickle.loads(pickle.dumps(direct))))
+    assert sent_expressions(twice) == sent_expressions(direct)
+
+
+def test_pickled_deep_dataframes_round_trip_and_send_as_they_were(mock_connect):
+    # As PySpark's DataFrame, whose pickle keeps its plan: a DataFrame of 60, 100 or 300
+    # withColumn levels round-trips, and its copy sends the plan that the DataFrame sends.
+    import cloudpickle
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+    for levels in (60, 100, 300):
+        df = spark.range(1)
+        for i in range(levels):
+            df = df.withColumn(f"c{i}", F.col("id"))
+        copied = cloudpickle.loads(cloudpickle.dumps(df))
+        assert copied.columns == df.columns
+        # The plan of each request: its operation ID is a new UUID.
+        df.collect()
+        sent = _sent_plan(service.execute_requests)[1][0]
+        copied.collect()
+        assert _sent_plan(service.execute_requests)[1][0] == sent
+
+
+def _project_levels(relation):
+    # Relation.with_columns=23 and WithColumns.input=1, until a relation that is not one.
+    levels = 0
+    while 23 in parse_message(relation):
+        levels += 1
+        relation = parse_message(parse_message(relation)[23][0])[1][0]
+    return levels
+
+
+@pytest.mark.parametrize("levels", [60, 150, 300])
+def test_session_hooks_see_deep_plans_as_pyspark(mock_connect, levels):
+    # As PySpark's hooks, which get the request of the client as it is: a hook sees the whole
+    # plan, however deep, and the request is sent as the hook returns it. At 300 levels the
+    # request is serialized by the Python backend of protobuf, which recurses and stops at about
+    # 245 levels, as PySpark's serializer does with that backend; the upb backend does not.
+    pytest.importorskip("google.protobuf")
+    from google.protobuf.internal import api_implementation
+    from pyspark.sql import SparkSession
+    from pyspark.sql import functions as F
+
+    _, service = mock_connect
+    seen = []
+
+    class Counting(SparkSession.Hook):
+        def on_execute_plan(self, request):
+            relation = request.plan.root
+            depth = 0
+            while relation.WhichOneof("rel_type") == "with_columns":
+                depth += 1
+                relation = relation.with_columns.input
+            seen.append(depth)
+            return request
+
+    builder = SparkSession.builder.remote(service.remote)
+    builder._registerHook(lambda _: Counting())
+    spark = builder.create()
+    try:
+        df = spark.range(1)
+        for i in range(levels):
+            df = df.withColumn(f"c{i}", F.col("id"))
+        if levels > 200 and api_implementation.Type() == "python":
+            with pytest.raises(RecursionError):
+                df.collect()
+        else:
+            df.collect()
+            assert _project_levels(_sent_plan(service.execute_requests)[1][0]) == levels
+        assert seen == [levels]
+    finally:
+        spark.stop()
+
+
+def test_a_session_hook_that_replaces_a_deep_plan_sends_the_replacement(mock_connect):
+    # As PySpark's: a hook that puts in the plan of another DataFrame, which is deep, sends that
+    # plan, and the request of the replaced plan is not sent.
+    from pyspark.sql import SparkSession
+    from pyspark.sql import functions as F
+
+    _, service = mock_connect
+    spark_plain = SparkSession.builder.remote(service.remote).getOrCreate()
+    replacement = spark_plain.range(1)
+    for i in range(60):
+        replacement = replacement.withColumn(f"r{i}", F.col("id"))
+    replacement.collect()
+    expected = service.execute_requests[-1]
+
+    class Replacing(SparkSession.Hook):
+        def on_execute_plan(self, request):
+            request.plan.root.CopyFrom(replacement._plan.plan(None))
+            return request
+
+    builder = SparkSession.builder.remote(service.remote)
+    builder._registerHook(lambda _: Replacing())
+    spark = builder.create()
+    try:
+        spark.range(1).select(F.lit(1).alias("one")).collect()
+        sent_root = _sent_plan(service.execute_requests)[1][0]
+        assert sent_root == _sent_plan([expected])[1][0]
+        assert _project_levels(sent_root) == 60
+    finally:
+        spark.stop()
+
+
+def test_deep_messages_parse_as_from_string_and_fill_past_protobufs_limit():
+    # The parser of a deep Column or DataFrame: a message that FromString gives is the one it
+    # gives, and a message past protobuf's limit of 100 nested messages is filled in full, so that
+    # it serializes to the bytes it was parsed from, with a map, a repeated message and a oneof.
+    pytest.importorskip("google.protobuf")
+    from google.protobuf.message import DecodeError
+    from pyspark.sql.connect import proto
+    from pyspark.sql.connect._column_reduce import parse_deep
+
+    def deep_expression(levels):
+        root = proto.Expression()
+        current = root
+        for _ in range(levels):
+            function = current.unresolved_function
+            function.function_name = "+"
+            current = function.arguments.add()
+            function.arguments.add().literal.integer = 1
+        current.unresolved_attribute.unparsed_identifier = "id"
+        return root
+
+    for levels in (0, 1, 40):
+        shallow = deep_expression(levels)
+        data = shallow.SerializeToString()
+        assert parse_deep(proto.Expression, data).SerializeToString() == data
+        assert parse_deep(proto.Expression, data).SerializeToString() == (
+            proto.Expression.FromString(data).SerializeToString())
+    for levels in (60, 90):
+        data = deep_expression(levels).SerializeToString()
+        assert parse_deep(proto.Expression, data).SerializeToString() == data
+        with pytest.raises(DecodeError):
+            proto.Expression.FromString(data)
+
+    # A chain of 60 projections over a SQL relation, whose named arguments are a map, whose
+    # positional arguments are a repeated message, and whose relation is a oneof.
+    leaf = proto.Relation()
+    leaf.sql.query = "SELECT :a, ?"
+    leaf.sql.named_arguments["a"].literal.integer = 7
+    leaf.sql.pos_arguments.add().literal.integer = 8
+    leaf.sql.pos_arguments.add().unresolved_attribute.unparsed_identifier = "id"
+    relation = leaf
+    for _ in range(60):
+        project = proto.Relation()
+        project.project.input.CopyFrom(relation)
+        project.project.expressions.add().literal.integer = 1
+        relation = project
+    request = proto.ExecutePlanRequest()
+    request.plan.root.CopyFrom(relation)
+    data = request.SerializeToString()
+    back = parse_deep(proto.ExecutePlanRequest, data)
+    assert back.SerializeToString() == data
+    node = back.plan.root
+    for _ in range(60):
+        assert node.WhichOneof("rel_type") == "project"
+        assert node.project.expressions[0].literal.integer == 1
+        node = node.project.input
+    assert node.WhichOneof("rel_type") == "sql"
+    assert node.sql.named_arguments["a"].literal.integer == 7
+    assert [arg.literal.integer for arg in node.sql.pos_arguments][:1] == [8]
+    assert node.sql.pos_arguments[1].unresolved_attribute.unparsed_identifier == "id"
+
+
+def test_a_deep_column_unpickles_and_is_used_on_a_thread_of_512_kib(mock_connect):
+    # The unpickling, the use and the drop of a column and a DataFrame of 300 levels recurse once
+    # per level, on the thread that does them: on a Python thread of 512 KiB, which overflowed in
+    # those (SIGBUS). The thread runs in a subprocess, since the crash would end this one.
+    import subprocess
+    import sys
+
+    _, service = mock_connect
+    script = """
+import pickle
+import threading
+import cloudpickle
+from pyspark.sql import SparkSession, functions as F
+
+def work():
+    spark = SparkSession.builder.remote(REMOTE_URL).create()
+    column = F.col("id")
+    for _ in range(300):
+        column = column + 1
+    column = pickle.loads(pickle.dumps(column))
+    frame = spark.range(1).select(column.alias("x"))
+    frame.schema
+    print("column", flush=True)
+    frame = spark.range(1)
+    for x in range(300):
+        frame = frame.withColumn(f"c{x}", F.col("id"))
+    frame = cloudpickle.loads(cloudpickle.dumps(frame))
+    frame.schema
+    print("frame", flush=True)
+    del column, frame
+    spark.stop()
+
+threading.stack_size(512 * 1024)
+thread = threading.Thread(target=work)
+thread.start()
+thread.join()
+print("done", flush=True)
+""".replace("REMOTE_URL", repr(service.remote))
+    result = subprocess.run(
+        [sys.executable, "-c", script], env=dict(os.environ, TZ="UTC"),
+        capture_output=True, text=True, timeout=300)
+    assert result.returncode == 0, result.stderr
+    assert "column" in result.stdout and "frame" in result.stdout, result.stdout
+    assert "done" in result.stdout, result.stdout
+
+
 def test_functions_build_columns():
     from pyspark.sql import functions as F
     c = F.col("id")

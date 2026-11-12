@@ -451,3 +451,11 @@ From Python, `pyspark-client-rust` replaces the `pyspark-client` package: same
 `import pyspark`, same public API, same server - see [Installation](installation.md).
 Use it exactly like [PySpark](https://spark.apache.org/docs/latest/api/python/).
 The native [Rust API](dataframes.md) mirrors the same surface.
+
+The drop-in parses the protobufs that a pickled Column or DataFrame carries, and the requests
+that session hooks see, at any depth that PySpark's serializer reaches, where the parsers of
+protobuf and prost stop at 100 nested messages. Its Rust client enables prost's
+`no-recursion-limit` feature, which applies to every message the drop-in decodes. So it also
+decodes server responses deeper than 100 nested messages, such as the schema of a struct nested
+34 levels deep, which PySpark's client rejects with "Exception deserializing response!". The
+server is trusted, as SECURITY.md sets out, so this is not a bound on the responses.

@@ -973,6 +973,14 @@ const RAW_CLONE_STACK_PER_LEVEL: usize = if cfg!(debug_assertions) {
     2 << 10
 };
 
+/// The stack that the clone of a [`LogicalPlan::Raw`] relation of `levels` levels takes: see
+/// [`RAW_CLONE_STACK_PER_LEVEL`].
+fn raw_relation_stack(levels: usize) -> usize {
+    levels
+        .saturating_mul(RAW_CLONE_STACK_PER_LEVEL)
+        .saturating_add(64 << 10)
+}
+
 thread_local! {
     /// The level of the plan that this thread serializes now, the plans of subqueries
     /// included, and the deepest one since the start of the innermost `with_plan_depth_bound`.
@@ -1035,7 +1043,7 @@ fn with_plan_depth_bound<T>(serialize: impl FnOnce() -> T) -> Result<(T, usize)>
 }
 
 /// The `RecursionError` of a plan of `depth` levels, deeper than [`MAX_PLAN_DEPTH`].
-fn too_deep_a_plan(depth: usize) -> SparkError {
+pub(crate) fn too_deep_a_plan(depth: usize) -> SparkError {
     SparkError::recursion_msg(format!(
         "maximum recursion depth exceeded while serializing a plan of {depth} levels; \
          a plan may be at most {MAX_PLAN_DEPTH} levels deep"
@@ -1700,9 +1708,7 @@ impl LogicalPlan {
                 ..
             } => {
                 // The clone recurses for each level of the relation: grow the stack for them all.
-                let stack = depth
-                    .saturating_mul(RAW_CLONE_STACK_PER_LEVEL)
-                    .saturating_add(64 << 10);
+                let stack = raw_relation_stack(*depth);
                 relation = stacker::maybe_grow(stack, stack, || raw.as_ref().clone());
                 relation.common.get_or_insert_with(Default::default);
             }

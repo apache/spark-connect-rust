@@ -79,6 +79,27 @@ use types::{
 };
 use window::{PyFrameBound, PyWindow, PyWindowSpec};
 
+/// The stack that the encode, the decode and the drop of a protobuf of a pickled Column,
+/// DataFrame or hook request take on the thread that unpickles or sends it. Prost recurses once
+/// per level of a message, with frames of about 1 KiB in a release build and more in a debug
+/// one, and a deep message has at most `MAX_PLAN_DEPTH` levels (the client refuses more), so this
+/// holds them with room to spare, on a thread of 512 KiB as well.
+const PROTO_STACK: usize = if cfg!(debug_assertions) {
+    16 << 20
+} else {
+    4 << 20
+};
+
+/// Run `f`, which encodes, decodes or drops a deep protobuf, on a stack that holds its levels.
+pub(crate) fn on_grown_stack<T>(f: impl FnOnce() -> T) -> T {
+    stacker::maybe_grow(PROTO_STACK, PROTO_STACK, f)
+}
+
+/// The bytes of `message`, encoded and dropped on a stack that holds its levels.
+pub(crate) fn encode_on_grown_stack<M: prost::Message + Send>(message: M) -> Vec<u8> {
+    on_grown_stack(move || message.encode_to_vec())
+}
+
 #[pymodule(gil_used = false)]
 fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySparkSession>()?;
