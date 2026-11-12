@@ -78,11 +78,47 @@ impl RetryPolicy {
     pub fn can_retry(&self, status: &tonic::Status) -> bool {
         let transient = match grpc_python_code(status) {
             tonic::Code::Unavailable => true,
-            tonic::Code::Internal => status.message().contains("INVALID_CURSOR.DISCONNECTED"),
+            tonic::Code::Internal => cursor_disconnected(status),
             _ => false,
         };
         transient || retry_info(status).is_some()
     }
+}
+
+/// The first of the error conditions `conditions` that the message of a failed RPC names.
+///
+/// The reference client recognizes these conditions by their name in the message of the error
+/// (`"INVALID_CURSOR.DISCONNECTED" in str(e)` in `DefaultPolicy.can_retry`, and
+/// `error in status.message` in `ExecutePlanResponseReattachableIterator`), not by the
+/// `ErrorInfo` detail of the status, so this client does too: every such match goes through
+/// here.
+fn condition_in_message(
+    status: &tonic::Status,
+    conditions: &[&'static str],
+) -> Option<&'static str> {
+    conditions
+        .iter()
+        .copied()
+        .find(|condition| status.message().contains(condition))
+}
+
+/// Whether the message of `status` names `INVALID_CURSOR.DISCONNECTED`: another RPC took over
+/// the cursor of the response stream, which a reattach resumes.
+pub(crate) fn cursor_disconnected(status: &tonic::Status) -> bool {
+    condition_in_message(status, &["INVALID_CURSOR.DISCONNECTED"]).is_some()
+}
+
+/// The error class of `status` when the server does not know the operation of a reattach, or
+/// its session, which the reference reads alike: the initial ExecutePlan never reached the
+/// server, unless a response was read already.
+pub(crate) fn unknown_operation(status: &tonic::Status) -> Option<&'static str> {
+    condition_in_message(
+        status,
+        &[
+            "INVALID_HANDLE.OPERATION_NOT_FOUND",
+            "INVALID_HANDLE.SESSION_NOT_FOUND",
+        ],
+    )
 }
 
 /// The `google.rpc.Status` of a failed RPC, from its `grpc-status-details-bin`, whose details
@@ -240,6 +276,145 @@ impl RetryPolicyState {
 
     pub fn attempt(&self) -> u32 {
         self.attempt
+    }
+}
+
+/// The retries of one call, as PySpark's `Retrying`: the one place that decides whether a
+/// failed attempt is made again, and that waits before it is.
+///
+/// A failure is retried in one of two ways, as in the reference:
+///
+/// - [`Retrying::backoff`]: a failed RPC that the policy can retry
+///   ([`RetryPolicy::can_retry`]) is an attempt of the policy. It waits the backoff of the
+///   attempt (or the delay that the server asks for) and is bounded by `max_retries`.
+/// - [`Retrying::retry_at_once`]: what the reference raises as a `RetryException` (a stream of
+///   an execution past its deadline, or an execution that the server does not know yet) is
+///   retried without a wait and outside the attempts of the policy, for up to
+///   `max_retry_exception_elapsed_time_ms` from the first of them.
+///
+/// [`retrying`] is the loop over the attempts of a call. A caller whose attempts are not one
+/// call each, as the reader of a reattachable stream, asks the two methods itself.
+pub struct Retrying {
+    state: RetryPolicyState,
+    /// When the first retry made at once was asked for.
+    retry_exception_since: Option<std::time::Instant>,
+    /// Whether a signal that the wait of the caller takes ends a backoff.
+    ends_with_abort: bool,
+}
+
+/// What [`Retrying::backoff`] decides for a failed attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Backoff {
+    /// The wait before the retry is over: the attempt is made again.
+    Retry,
+    /// The policy cannot retry the failure, or its retries are spent: the failure is the error
+    /// of the call.
+    GiveUp,
+    /// A signal that the wait of the caller takes ended the wait before the retry, which is not
+    /// made (see [`crate::runtime::until_abort`]).
+    Aborted,
+}
+
+impl Retrying {
+    /// The retries of a call under `policy`, whose backoffs are waited whole.
+    pub fn new(policy: &RetryPolicy) -> Self {
+        Self {
+            state: RetryPolicyState::new(policy.clone()),
+            retry_exception_since: None,
+            ends_with_abort: false,
+        }
+    }
+
+    /// These retries, whose backoffs a signal of the process ends when the wait of the caller
+    /// takes it ([`crate::runtime::ABORT_RETRIES`]), as the sleep of PySpark's `Retrying`
+    /// raises KeyboardInterrupt. For the calls that a caller waits for; a call in the
+    /// background, that no caller waits for, waits its backoffs whole.
+    pub fn ending_with_abort(mut self) -> Self {
+        self.ends_with_abort = true;
+        self
+    }
+
+    /// Whether the attempt that failed with `status` is made again under the policy, after the
+    /// wait before it, which this awaits. It is not when the policy cannot retry the failure,
+    /// or once its retries are spent: `status` is then the error of the call.
+    pub async fn backoff(&mut self, status: &tonic::Status) -> Backoff {
+        if !self.state.policy().can_retry(status) {
+            return Backoff::GiveUp;
+        }
+        let Some(wait_ms) = self.state.next_attempt(retry_delay_ms(status)) else {
+            return Backoff::GiveUp;
+        };
+        let wait = tokio::time::sleep(std::time::Duration::from_millis(wait_ms));
+        if !self.ends_with_abort {
+            wait.await;
+            return Backoff::Retry;
+        }
+        match crate::runtime::until_abort(crate::runtime::ABORT_RETRIES, wait).await {
+            Some(()) => Backoff::Retry,
+            None => Backoff::Aborted,
+        }
+    }
+
+    /// Whether a failure that the reference retries as a `RetryException` is retried, at once:
+    /// until such retries have run for the policy's elapsed-time bound, measured from the first
+    /// of them, which this call is when there was none.
+    pub fn retry_at_once(&mut self) -> bool {
+        let since = *self
+            .retry_exception_since
+            .get_or_insert_with(std::time::Instant::now);
+        !self
+            .state
+            .policy()
+            .max_retry_exception_elapsed_time_ms
+            .is_some_and(|ms| since.elapsed() >= std::time::Duration::from_millis(ms))
+    }
+}
+
+/// Why a call made by [`retrying`] failed, and what an attempt of it fails with.
+#[derive(Debug)]
+pub enum RetryError<E> {
+    /// A failed RPC. From an attempt, it is retried when the policy allows; from [`retrying`],
+    /// the policy could not retry it, or its retries are spent.
+    Status(tonic::Status),
+    /// An error that is not retried: of an attempt, or of the check before a retry.
+    Aborted(E),
+    /// A signal ended the wait before a retry ([`Backoff::Aborted`]). Only of retries
+    /// [`Retrying::ending_with_abort`].
+    WaitAborted,
+}
+
+/// Makes the attempts of a call under the policy of `retrying` until one succeeds or fails for
+/// good: a failed RPC is retried as [`Retrying::backoff`] decides, after its wait.
+///
+/// What differs between the calls is given rather than built in:
+///
+/// - `retrying` says whether a signal ends the backoffs ([`Retrying::ending_with_abort`]).
+/// - `before_retry` runs after the wait of each retry, before its attempt, and its error ends
+///   the call. The calls of a client check there that the client is still open, as the
+///   reference's `_stub` raises for a closed one; the release of an execution, which the
+///   reference sends through the stub of its iterator, checks nothing.
+/// - `attempt` fails with [`RetryError::Aborted`] for an error that is no failed RPC, such as
+///   the unreadable source of an upload, which ends the call as it is.
+pub async fn retrying<T, E, Fut>(
+    mut retrying: Retrying,
+    mut before_retry: impl FnMut() -> Result<(), E>,
+    mut attempt: impl FnMut() -> Fut,
+) -> Result<T, RetryError<E>>
+where
+    Fut: std::future::Future<Output = Result<T, RetryError<E>>>,
+{
+    loop {
+        match attempt().await {
+            Err(RetryError::Status(status)) => {
+                match retrying.backoff(&status).await {
+                    Backoff::Retry => {}
+                    Backoff::GiveUp => return Err(RetryError::Status(status)),
+                    Backoff::Aborted => return Err(RetryError::WaitAborted),
+                }
+                before_retry().map_err(RetryError::Aborted)?;
+            }
+            result => return result,
+        }
     }
 }
 
@@ -939,5 +1114,315 @@ mod tests {
         assert_eq!(timeout.code(), tonic::Code::Cancelled);
         assert_eq!(grpc_python_code(&timeout), tonic::Code::Cancelled);
         assert!(!p.can_retry(&timeout));
+    }
+
+    #[test]
+    fn test_conditions_are_read_from_the_message_as_the_reference_does() {
+        // The cursor that another RPC took over, anywhere in the message.
+        let disconnected = tonic::Status::internal(
+            "[INVALID_CURSOR.DISCONNECTED] The cursor has been disconnected by the server.",
+        );
+        assert!(cursor_disconnected(&disconnected));
+        assert!(!cursor_disconnected(&tonic::Status::internal(
+            "[INVALID_CURSOR.POSITION_NOT_FOUND] The cursor position was not found."
+        )));
+        assert!(!cursor_disconnected(&tonic::Status::internal("")));
+        // The match is on the message alone, whatever the code: `can_retry` asks for INTERNAL.
+        let not_internal = tonic::Status::invalid_argument("INVALID_CURSOR.DISCONNECTED");
+        assert!(cursor_disconnected(&not_internal));
+        assert!(!RetryPolicy::default().can_retry(&not_internal));
+        assert!(RetryPolicy::default().can_retry(&disconnected));
+
+        // An operation or a session that the server does not know, named as the server names it.
+        assert_eq!(
+            unknown_operation(&tonic::Status::not_found(
+                "[INVALID_HANDLE.OPERATION_NOT_FOUND] Operation not found."
+            )),
+            Some("INVALID_HANDLE.OPERATION_NOT_FOUND")
+        );
+        assert_eq!(
+            unknown_operation(&tonic::Status::internal(
+                "[INVALID_HANDLE.SESSION_NOT_FOUND] Session not found."
+            )),
+            Some("INVALID_HANDLE.SESSION_NOT_FOUND")
+        );
+        // The other conditions of a handle are not: a session that changed closes the client.
+        for message in [
+            "[INVALID_HANDLE.SESSION_CHANGED] The existing session changed.",
+            "[INVALID_HANDLE.OPERATION_ABANDONED] Operation was abandoned.",
+            "INVALID_HANDLE",
+            "operation not found",
+            "",
+        ] {
+            assert_eq!(unknown_operation(&tonic::Status::internal(message)), None);
+        }
+    }
+
+    /// A policy of `max_retries` retries with waits of 1 ms, so that a test does not wait.
+    fn quick_policy(max_retries: u32) -> RetryPolicy {
+        RetryPolicy {
+            max_retries: Some(max_retries),
+            initial_backoff_ms: 1,
+            max_backoff_ms: Some(1),
+            backoff_multiplier: 1.0,
+            jitter_ms: 0,
+            min_jitter_threshold_ms: 0,
+            recognize_server_retry_delay: false,
+            max_server_retry_delay_ms: None,
+            max_retry_exception_elapsed_time_ms: None,
+        }
+    }
+
+    /// Runs [`retrying`] over `outcomes`, one for each attempt in order, and gives its result
+    /// with the numbers of attempts made and of checks made before a retry.
+    async fn retry_over(
+        policy: &RetryPolicy,
+        outcomes: Vec<Result<u32, RetryError<&'static str>>>,
+    ) -> (Result<u32, RetryError<&'static str>>, usize, usize) {
+        let total = outcomes.len();
+        let mut outcomes = outcomes.into_iter();
+        let mut checks = 0;
+        let result = retrying(
+            Retrying::new(policy),
+            || {
+                checks += 1;
+                Ok(())
+            },
+            || {
+                let outcome = outcomes.next().expect("no attempt after the last outcome");
+                async move { outcome }
+            },
+        )
+        .await;
+        (result, total - outcomes.len(), checks)
+    }
+
+    fn unavailable<T>() -> Result<T, RetryError<&'static str>> {
+        Err(RetryError::Status(tonic::Status::unavailable("restarting")))
+    }
+
+    #[tokio::test]
+    async fn test_retrying_retries_a_retryable_failure_until_an_attempt_succeeds() {
+        let outcomes = vec![unavailable(), unavailable(), Ok(7)];
+        let (result, attempts, checks) = retry_over(&quick_policy(5), outcomes).await;
+        assert!(matches!(result, Ok(7)), "{result:?}");
+        assert_eq!(attempts, 3);
+        // The check runs before each retry, and not before the first attempt.
+        assert_eq!(checks, 2);
+    }
+
+    #[tokio::test]
+    async fn test_retrying_makes_one_attempt_of_a_call_that_succeeds() {
+        let (result, attempts, checks) = retry_over(&quick_policy(5), vec![Ok(1)]).await;
+        assert!(matches!(result, Ok(1)), "{result:?}");
+        assert_eq!((attempts, checks), (1, 0));
+    }
+
+    #[tokio::test]
+    async fn test_retrying_does_not_retry_a_failure_that_the_policy_cannot() {
+        let outcomes = vec![
+            Err(RetryError::Status(tonic::Status::invalid_argument("bad"))),
+            Ok(1),
+        ];
+        let (result, attempts, checks) = retry_over(&quick_policy(5), outcomes).await;
+        match result {
+            Err(RetryError::Status(status)) => {
+                assert_eq!(status.code(), tonic::Code::InvalidArgument);
+                assert_eq!(status.message(), "bad");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!((attempts, checks), (1, 0));
+    }
+
+    #[tokio::test]
+    async fn test_retrying_fails_with_the_last_failure_once_the_retries_are_spent() {
+        let outcomes = vec![
+            unavailable(),
+            unavailable(),
+            Err(RetryError::Status(tonic::Status::unavailable("the last"))),
+            Ok(1),
+        ];
+        // Two retries: three attempts.
+        let (result, attempts, checks) = retry_over(&quick_policy(2), outcomes).await;
+        match result {
+            Err(RetryError::Status(status)) => assert_eq!(status.message(), "the last"),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!((attempts, checks), (3, 2));
+
+        // No retries: the failure of the only attempt.
+        let (result, attempts, checks) =
+            retry_over(&RetryPolicy::no_retries(), vec![unavailable(), Ok(1)]).await;
+        assert!(matches!(result, Err(RetryError::Status(_))), "{result:?}");
+        assert_eq!((attempts, checks), (1, 0));
+    }
+
+    #[tokio::test]
+    async fn test_retrying_does_not_retry_a_call_past_its_deadline() {
+        // The deadline of a call is not a failure of the policy: the reference retries it only
+        // as a RetryException of a reattachable execution, which `retry_at_once` bounds.
+        let outcomes = vec![
+            Err(RetryError::Status(tonic::Status::deadline_exceeded(
+                "Deadline Exceeded",
+            ))),
+            Ok(1),
+        ];
+        let (result, attempts, checks) = retry_over(&quick_policy(5), outcomes).await;
+        match result {
+            Err(RetryError::Status(status)) => {
+                assert_eq!(status.code(), tonic::Code::DeadlineExceeded)
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!((attempts, checks), (1, 0));
+    }
+
+    #[tokio::test]
+    async fn test_retrying_ends_with_the_error_of_an_attempt_that_is_no_failed_rpc() {
+        let outcomes = vec![unavailable(), Err(RetryError::Aborted("unreadable")), Ok(1)];
+        let (result, attempts, checks) = retry_over(&quick_policy(5), outcomes).await;
+        assert!(
+            matches!(result, Err(RetryError::Aborted("unreadable"))),
+            "{result:?}"
+        );
+        assert_eq!((attempts, checks), (2, 1));
+    }
+
+    #[tokio::test]
+    async fn test_retrying_ends_with_the_error_of_the_check_before_a_retry() {
+        let mut attempts = 0;
+        let result: Result<(), _> = retrying(
+            Retrying::new(&quick_policy(5)),
+            || Err("closed"),
+            || {
+                attempts += 1;
+                async { unavailable() }
+            },
+        )
+        .await;
+        assert!(
+            matches!(result, Err(RetryError::Aborted("closed"))),
+            "{result:?}"
+        );
+        // The retry that the check refused is not sent.
+        assert_eq!(attempts, 1);
+    }
+
+    #[tokio::test]
+    async fn test_backoff_waits_the_delay_of_the_attempt_before_a_retry() {
+        let policy = RetryPolicy {
+            initial_backoff_ms: 40,
+            max_backoff_ms: Some(40),
+            ..quick_policy(1)
+        };
+        let mut retrying = Retrying::new(&policy);
+        let status = tonic::Status::unavailable("restarting");
+        let started = std::time::Instant::now();
+        assert_eq!(retrying.backoff(&status).await, Backoff::Retry);
+        assert!(started.elapsed() >= std::time::Duration::from_millis(40));
+        // The retries are spent: no wait, and no retry.
+        let started = std::time::Instant::now();
+        assert_eq!(retrying.backoff(&status).await, Backoff::GiveUp);
+        assert!(started.elapsed() < std::time::Duration::from_millis(40));
+    }
+
+    #[tokio::test]
+    async fn test_backoff_does_not_spend_a_retry_on_a_failure_that_is_not_retried() {
+        let mut retrying = Retrying::new(&quick_policy(1));
+        let missing = tonic::Status::not_found("missing");
+        assert_eq!(retrying.backoff(&missing).await, Backoff::GiveUp);
+        let late = tonic::Status::deadline_exceeded("Deadline Exceeded");
+        assert_eq!(retrying.backoff(&late).await, Backoff::GiveUp);
+        // The one retry of the policy is still there.
+        let down = tonic::Status::unavailable("down");
+        assert_eq!(retrying.backoff(&down).await, Backoff::Retry);
+        assert_eq!(retrying.backoff(&down).await, Backoff::GiveUp);
+    }
+
+    /// A policy whose one backoff, of a minute, a test does not wait out.
+    fn slow_policy() -> RetryPolicy {
+        RetryPolicy {
+            initial_backoff_ms: 60_000,
+            max_backoff_ms: Some(60_000),
+            ..quick_policy(1)
+        }
+    }
+
+    #[test]
+    fn test_a_signal_ends_the_backoff_of_retries_that_end_with_an_abort() {
+        use crate::runtime::{block_on, with_wait_watch, Watch};
+        let down = tonic::Status::unavailable("down");
+        let started = std::time::Instant::now();
+        let ended = with_wait_watch(std::sync::Arc::new(|| Watch::Abort), || {
+            block_on(async {
+                let mut retrying = Retrying::new(&slow_policy()).ending_with_abort();
+                retrying.backoff(&down).await
+            })
+        });
+        assert_eq!(ended, Backoff::Aborted);
+        assert!(started.elapsed() < std::time::Duration::from_secs(30));
+
+        // The retry after the backoff is not made, and its check is not run.
+        let mut attempts = 0;
+        let result: Result<(), RetryError<&'static str>> =
+            with_wait_watch(std::sync::Arc::new(|| Watch::Abort), || {
+                block_on(retrying(
+                    Retrying::new(&slow_policy()).ending_with_abort(),
+                    || panic!("no check before a retry that is not made"),
+                    || {
+                        attempts += 1;
+                        async { unavailable() }
+                    },
+                ))
+            });
+        assert!(matches!(result, Err(RetryError::WaitAborted)), "{result:?}");
+        assert_eq!(attempts, 1);
+    }
+
+    #[test]
+    fn test_a_signal_does_not_end_the_backoff_of_retries_that_are_waited_whole() {
+        use crate::runtime::{block_on, with_wait_watch, Watch, POLL_INTERVAL};
+        // Longer than the poll of the watch, which aborts at its first poll.
+        let policy = RetryPolicy {
+            initial_backoff_ms: (POLL_INTERVAL * 2).as_millis() as u64,
+            max_backoff_ms: None,
+            ..quick_policy(1)
+        };
+        let down = tonic::Status::unavailable("down");
+        let ended = with_wait_watch(std::sync::Arc::new(|| Watch::Abort), || {
+            block_on(async {
+                let mut retrying = Retrying::new(&policy);
+                retrying.backoff(&down).await
+            })
+        });
+        assert_eq!(ended, Backoff::Retry);
+    }
+
+    #[tokio::test]
+    async fn test_retries_at_once_are_bounded_by_their_elapsed_time_and_not_by_the_attempts() {
+        let bounded = |ms| RetryPolicy {
+            max_retry_exception_elapsed_time_ms: ms,
+            ..quick_policy(0)
+        };
+        // No bound: always, though the policy has no retries.
+        let mut retrying = Retrying::new(&bounded(None));
+        assert!((0..100).all(|_| retrying.retry_at_once()));
+        // A bound of 0 has passed at the first of them.
+        assert!(!Retrying::new(&bounded(Some(0))).retry_at_once());
+        // The clock starts at the first of them, not when the call started.
+        let mut retrying = Retrying::new(&bounded(Some(50)));
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        assert!(retrying.retry_at_once());
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        assert!(!retrying.retry_at_once());
+        // They do not spend the retries of the policy, nor the policy's theirs.
+        let mut retrying = Retrying::new(&RetryPolicy {
+            max_retry_exception_elapsed_time_ms: Some(0),
+            ..quick_policy(1)
+        });
+        assert!(!retrying.retry_at_once());
+        let down = tonic::Status::unavailable("down");
+        assert_eq!(retrying.backoff(&down).await, Backoff::Retry);
     }
 }
