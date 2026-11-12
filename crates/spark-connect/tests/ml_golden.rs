@@ -20,11 +20,7 @@ use spark_connect::ml::{MlOperator, OperatorType, Params};
 use spark_connect_proto as proto;
 
 fn normalize_expression(e: &mut proto::Expression) {
-    use proto::expression::ExprType as T;
     e.common = None;
-    if let Some(t) = e.expr_type.as_mut() {
-        if let T::Literal(_) = t {}
-    }
 }
 
 fn load_ml_goldens() -> HashMap<String, proto::Relation> {

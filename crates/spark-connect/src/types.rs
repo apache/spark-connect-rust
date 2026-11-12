@@ -3284,10 +3284,11 @@ mod tests {
         ];
 
         for case in test_cases {
-            let dt = DataType::from_ddl(case).expect(&format!("Failed to parse: {}", case));
+            let dt =
+                DataType::from_ddl(case).unwrap_or_else(|_| panic!("Failed to parse: {}", case));
             let simple = dt.simple_string();
-            let dt2 =
-                DataType::from_ddl(&simple).expect(&format!("Failed to roundtrip: {}", simple));
+            let dt2 = DataType::from_ddl(&simple)
+                .unwrap_or_else(|_| panic!("Failed to roundtrip: {}", simple));
             assert_eq!(dt, dt2, "Roundtrip failed for: {}", case);
         }
     }

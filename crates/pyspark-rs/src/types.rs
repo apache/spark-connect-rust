@@ -2618,8 +2618,6 @@ impl PyStructType {
         simple_string_with_udts(py, &self.current_data_type(py)?)
     }
 
-    /// `StructType.typeName()` == "struct".
-
     /// Field names, as a copy of the `names` list. Mirrors `StructType.fieldNames()`, which is
     /// `list(self.names)`: it does not follow an edit of `fields`.
     #[pyo3(name = "fieldNames")]

@@ -23,6 +23,9 @@ rust-version.workspace = true
 license.workspace = true
 description = "Procedural macros for the Rust Spark Connect client (e.g. #[spark_wasm_udf])"
 
+[lints]
+workspace = true
+
 [lib]
 name = "spark_connect_macros"
 proc-macro = true

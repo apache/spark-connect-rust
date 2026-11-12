@@ -1583,7 +1583,7 @@ impl PySparkSession {
                         }
                         let values = values
                             .iter()
-                            .map(|v| Ok(py_to_value(v)?))
+                            .map(|v| py_to_value(v))
                             .collect::<PyResult<Vec<Value>>>()?;
                         if let Some(columns) = native_columns.as_mut() {
                             columns[i] = values;

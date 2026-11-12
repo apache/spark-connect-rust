@@ -9,6 +9,9 @@ homepage.workspace = true
 authors.workspace = true
 description = "Pure-Rust Spark Connect DataFrame client mirroring the PySpark API surface"
 
+[lints]
+workspace = true
+
 [lib]
 name = "spark_connect"
 

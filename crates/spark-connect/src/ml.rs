@@ -8548,7 +8548,7 @@ mod tests {
         assert_eq!(defaults.prediction_col(), "prediction");
         assert_eq!(defaults.family(), "gaussian");
         assert_eq!(defaults.link(), None);
-        assert_eq!(defaults.fit_intercept(), true);
+        assert!(defaults.fit_intercept());
         assert_eq!(defaults.max_iter(), 25);
         assert_eq!(defaults.tol(), 1e-06);
         assert_eq!(defaults.reg_param(), 0.0);
@@ -8581,7 +8581,7 @@ mod tests {
         assert_eq!(configured.prediction_col(), "pred");
         assert_eq!(configured.family(), "tweedie");
         assert_eq!(configured.link(), Some("log"));
-        assert_eq!(configured.fit_intercept(), false);
+        assert!(!configured.fit_intercept());
         assert_eq!(configured.max_iter(), 50);
         assert_eq!(configured.tol(), 1e-08);
         assert_eq!(configured.reg_param(), 0.25);
@@ -9328,7 +9328,7 @@ mod tests {
         assert_eq!(tree.min_instances_per_node(), 1);
         assert_eq!(tree.min_info_gain(), 0.0);
         assert_eq!(tree.max_memory_in_mb(), 256);
-        assert_eq!(tree.cache_node_ids(), false);
+        assert!(!tree.cache_node_ids());
         assert_eq!(tree.checkpoint_interval(), 10);
         assert_eq!(tree.impurity(), "variance");
         assert_eq!(tree.feature_subset_strategy(), "all");
@@ -9418,7 +9418,7 @@ mod tests {
         assert_eq!(tree.max_memory_in_mb(), 64);
         assert_eq!(built.max_memory_in_mb(), tree.max_memory_in_mb());
         *tree.params_mut() = tree.params().clone().set_param_bool("cacheNodeIds", true);
-        assert_eq!(tree.cache_node_ids(), true);
+        assert!(tree.cache_node_ids());
         assert_eq!(built.cache_node_ids(), tree.cache_node_ids());
         *tree.params_mut() = tree
             .params()
@@ -9519,7 +9519,7 @@ mod tests {
         assert_eq!(tree.min_instances_per_node(), 1);
         assert_eq!(tree.min_info_gain(), 0.0);
         assert_eq!(tree.max_memory_in_mb(), 256);
-        assert_eq!(tree.cache_node_ids(), false);
+        assert!(!tree.cache_node_ids());
         assert_eq!(tree.checkpoint_interval(), 10);
         assert_eq!(tree.impurity(), "variance");
         assert_eq!(tree.feature_subset_strategy(), "all");
@@ -9593,7 +9593,7 @@ mod tests {
         assert_eq!(tree.max_memory_in_mb(), 64);
         assert_eq!(built.max_memory_in_mb(), tree.max_memory_in_mb());
         *tree.params_mut() = tree.params().clone().set_param_bool("cacheNodeIds", true);
-        assert_eq!(tree.cache_node_ids(), true);
+        assert!(tree.cache_node_ids());
         assert_eq!(built.cache_node_ids(), tree.cache_node_ids());
         *tree.params_mut() = tree
             .params()
@@ -9895,7 +9895,7 @@ mod tests {
         assert_eq!(tree.min_instances_per_node(), 1);
         assert_eq!(tree.min_info_gain(), 0.0);
         assert_eq!(tree.max_memory_in_mb(), 256);
-        assert_eq!(tree.cache_node_ids(), false);
+        assert!(!tree.cache_node_ids());
         assert_eq!(tree.checkpoint_interval(), 10);
         assert_eq!(tree.impurity(), "variance");
         assert_eq!(tree.seed(), None);
@@ -9957,7 +9957,7 @@ mod tests {
         assert_eq!(tree.max_memory_in_mb(), 64);
         assert_eq!(built.max_memory_in_mb(), tree.max_memory_in_mb());
         *tree.params_mut() = tree.params().clone().set_param_bool("cacheNodeIds", true);
-        assert_eq!(tree.cache_node_ids(), true);
+        assert!(tree.cache_node_ids());
         assert_eq!(built.cache_node_ids(), tree.cache_node_ids());
         *tree.params_mut() = tree
             .params()

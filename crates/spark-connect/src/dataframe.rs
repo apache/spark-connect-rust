@@ -273,7 +273,7 @@ impl LocalRowIterator {
                     ))
                 };
                 let Some(batch) = batch else {
-                    return Some(Err(spark_connect_core::client::wait_aborted().into()));
+                    return Some(Err(spark_connect_core::client::wait_aborted()));
                 };
                 if batch.is_none() {
                     // The channel closed: the task ended, or it panicked, which then drops its
@@ -5551,7 +5551,7 @@ mod plan_construction_tests {
             replication: 1,
             ..Default::default()
         };
-        assert_eq!(sent(Some(disk.clone())), Some(disk));
+        assert_eq!(sent(Some(disk)), Some(disk));
     }
 
     #[test]
@@ -7001,21 +7001,21 @@ mod plan_construction_tests {
             &df.drop_columns(vec![col("id")], vec!["x"]),
             [
                 &df.drop_columns([col("id")], ["x"]),
-                &df.drop_columns(vec![col("id")].into_iter(), ["x"].into_iter()),
+                &df.drop_columns(vec![col("id")], ["x"]),
             ],
         );
         same_as(
             &df.with_columns(vec![("p".to_string(), lit(1))]),
             [
                 &df.with_columns([("p", lit(1))]),
-                &df.with_columns(vec![("p", lit(1))].into_iter()),
+                &df.with_columns(vec![("p", lit(1))]),
             ],
         );
         same_as(
             &df.with_columns_renamed(vec![("id".to_string(), "x".to_string())]),
             [
                 &df.with_columns_renamed([("id", "x")]),
-                &df.with_columns_renamed(vec![("id", "x")].into_iter()),
+                &df.with_columns_renamed(vec![("id", "x")]),
             ],
         );
         same_as(
@@ -7079,7 +7079,7 @@ mod plan_construction_tests {
                     .agg(aggregates()),
                 &df.grouping_sets_with_columns(
                     (0..1).map(|_| vec![col("id")]),
-                    vec![col("id"), col("id") % lit(2)].into_iter(),
+                    vec![col("id"), col("id") % lit(2)],
                 )
                 .agg(aggregates()),
             ],
