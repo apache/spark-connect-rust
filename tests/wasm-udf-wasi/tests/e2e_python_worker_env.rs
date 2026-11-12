@@ -139,6 +139,15 @@ fn python_worker_env_reaches_python_and_wasi_udfs() {
         [s("hello"), Value::Null, s("hello"), s("hello")]
     );
 
+    // An empty value is set, not absent, and a non-ASCII one arrives intact.
+    for value in ["", "h\u{e9}llo \u{4e16}\u{754c}"] {
+        conf.set(&key, value).unwrap();
+        assert_eq!(
+            observe(&spark, "RUST_CLIENT_PROBE"),
+            [s(value), Value::Null, s(value), s(value)]
+        );
+    }
+
     // A change takes effect on the next action.
     conf.set(&key, "world").unwrap();
     assert_eq!(
@@ -181,8 +190,8 @@ fn python_worker_env_reaches_python_and_wasi_udfs() {
     // A name the redaction pattern matches is withheld on read, yet still delivered.
     let token = format!("{PREFIX}RUST_TOKEN");
     conf.set(&token, "s3cr3t").unwrap();
-    // The server leaves the entry out of the response, so the read fails as for an
-    // unknown key, as it does in PySpark.
+    // The server refuses a GET of the key as for an unknown one, as PySpark sees, and
+    // leaves it out of GET_ALL.
     assert_eq!(
         conf.get(&token).unwrap_err().error_class,
         "SQL_CONF_NOT_FOUND"
@@ -202,6 +211,9 @@ fn python_worker_env_reaches_python_and_wasi_udfs() {
         .expect("second session");
     assert_ne!(other.session_id(), spark.session_id());
     assert_eq!(observe(&other, "RUST_CLIENT_PROBE"), NONE);
-    assert_eq!(observe(&spark, "RUST_CLIENT_PROBE")[0], s("only-here"));
+    assert_eq!(
+        observe(&spark, "RUST_CLIENT_PROBE"),
+        [s("only-here"), Value::Null, s("only-here"), s("only-here")]
+    );
     conf.unset(&key).unwrap();
 }

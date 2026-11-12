@@ -197,10 +197,14 @@ spark_connect_build::embed_wasm_udf_for(
 ```
 
 The module then gets, through WASI, a snapshot of the worker's environment taken
-when it is instantiated (once per task), without the names Spark reserves for its
-own workers: those beginning with `SPARK_`, `PYSPARK_` or `PYTHON_WORKER_FACTORY_`,
-and a few others, none of which a session can set. A prebuilt WASI module passed to
-`wasm_udf::udf` gets the same environment, so only use modules you trust with it.
+when it is instantiated, once per UDF in each task. That is the whole environment
+of the worker, not only the session's variables: it includes what the executor and
+`spark.executorEnv.*` set, which can hold credentials. Unsetting a session variable
+reveals any value the worker inherited for the same name. Left out are the names
+Spark reserves for its own workers (those beginning with `SPARK_`, `PYSPARK_` or
+`PYTHON_WORKER_FACTORY_`, and a few others, none of which a session can set) and a
+variable the worker's Python cannot decode as UTF-8. A prebuilt WASI module passed
+to `wasm_udf::udf` gets the same environment, so only use modules you trust with it.
 
 WASI also gives the module clocks, randomness and sleep, so mark a UDF that reads
 the time or random numbers with `.as_nondeterministic()`. It gets no files or

@@ -164,8 +164,9 @@ def decode_value(ret_type: str, buf: bytes) -> Any:
 
 # The names Spark reserves for its own Python workers, which a session cannot set
 # through ``spark.pythonWorkerEnv.*``. Mirrors ``PythonWorkerEnvironment`` in Spark,
-# so a WASI module never receives Spark's own variables, such as the worker's
-# ``PYTHON_WORKER_FACTORY_SECRET``.
+# so a WASI module never receives the reserved ones, such as the worker's
+# ``PYTHON_WORKER_FACTORY_SECRET``. Variables Spark sets unconditionally, such as
+# ``PYTHONUNBUFFERED``, are not reserved and pass through.
 _RESERVED_ENV_PREFIXES = ("SPARK_", "PYSPARK_", "PYTHON_WORKER_FACTORY_")
 _RESERVED_ENV_NAMES = frozenset(
     {
