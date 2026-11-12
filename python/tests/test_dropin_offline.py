@@ -9235,6 +9235,32 @@ def test_local_iterators_call_the_progress_handlers_in_next_whatever_the_prefetc
     spark.clearProgressHandlers()
 
 
+def test_local_iterators_take_any_prefetch_partitions_as_pyspark(mock_connect):
+    # As PySpark Connect's toLocalIterator, which ignores prefetchPartitions: any value, by
+    # position or by name, sends the plan of the default and yields the rows. The default is
+    # False, as PySpark's.
+    import inspect
+
+    import pyarrow as pa
+    from binary_configuration_cases import _results
+
+    spark, service = mock_connect
+    _results(service, pa.RecordBatch.from_arrays([pa.array([0, 1])], names=["id"]))
+    df = spark.range(2)
+    assert [row.id for row in df.toLocalIterator()] == [0, 1]
+    # ExecutePlanRequest.plan=3.
+    plan = parse_message(service.execute_requests[-1])[3]
+    for value in (True, False, 1, 0, None, "x", [1]):
+        assert [row.id for row in df.toLocalIterator(value)] == [0, 1]
+        assert parse_message(service.execute_requests[-1])[3] == plan
+        assert [row.id for row in df.toLocalIterator(prefetchPartitions=value)] == [0, 1]
+        assert parse_message(service.execute_requests[-1])[3] == plan
+    signature = inspect.signature(type(df).toLocalIterator)
+    assert signature.parameters["prefetchPartitions"].default is False
+    with pytest.raises(TypeError):
+        df.toLocalIterator(True, 1)
+
+
 def test_is_streaming_is_empty_and_input_files_are_asked_once_per_dataframe_as_pyspark(
         mock_connect):
     # As PySpark's isStreaming (a cached_property), isEmpty and inputFiles (functools.cache): a
@@ -17344,17 +17370,33 @@ def test_local_iterator_close_ends_it_before_it_runs_as_pyspark(mock_connect):
 
 
 def test_to_local_iterator_is_a_generator_as_pyspark(mock_connect):
-    # As PySpark's generator function, which sends nothing until its first row.
+    # As PySpark's generator function, which sends nothing until its first row, and whose code,
+    # which tracebacks show, has the name of the method.
     import inspect
+    import sys
+    import traceback
     import types
+
+    import pyarrow as pa
+    from binary_configuration_cases import _results
 
     spark, service = mock_connect
     rows = spark.range(3).toLocalIterator()
     assert isinstance(rows, types.GeneratorType)
     assert rows.__name__ == "toLocalIterator"
     assert rows.__qualname__ == "DataFrame.toLocalIterator"
+    assert rows.gi_code.co_name == "toLocalIterator"
+    if sys.version_info >= (3, 11):
+        assert rows.gi_code.co_qualname == "DataFrame.toLocalIterator"
     assert inspect.getgeneratorstate(rows) == inspect.GEN_CREATED
     assert service.rpc_events == []
+
+    _results(service, pa.RecordBatch.from_arrays([pa.array([0, 1])], names=["id"]))
+    rows = spark.range(2).toLocalIterator()
+    assert next(rows).id == 0
+    with pytest.raises(ValueError, match="stop") as raised:
+        rows.throw(ValueError("stop"))
+    assert traceback.extract_tb(raised.tb)[-1].name == "toLocalIterator"
 
 
 @pytest.mark.parametrize("ending", ["close", "throw"])

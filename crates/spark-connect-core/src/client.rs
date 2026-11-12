@@ -2041,14 +2041,11 @@ impl SparkConnectClient {
             .cloned()
             .collect();
         let (blobs, names, unique) = (&blobs, &names, &unique);
-        // The IDs of the status response, checked once the retries are done, as its own.
-        let (status_ids, uploaded) = self
+        // As PySpark's ArtifactManager, which does not check the IDs of its responses: a change of
+        // the server-side session is raised by the next call of the client.
+        let uploaded = self
             .with_retry(|| async move {
                 let status = self.artifact_status_rpc(unique).await?;
-                let status_ids = (
-                    status.session_id.clone(),
-                    status.server_side_session_id.clone(),
-                );
                 let cached: std::collections::HashMap<String, bool> = status
                     .statuses
                     .into_iter()
@@ -2062,18 +2059,16 @@ impl SparkConnectClient {
                     }
                 }
                 if artifacts.is_empty() {
-                    return Ok((status_ids, None));
+                    return Ok(None);
                 }
                 let expected: HashSet<String> =
                     artifacts.iter().map(|(name, _)| name.clone()).collect();
                 let requests = cache_artifact_requests(self.session_id.clone(), artifacts);
                 let response = self.add_artifacts_rpc(requests).await?;
-                Ok((status_ids, Some((response, expected))))
+                Ok(Some((response, expected)))
             })
             .await?;
-        self.verify_response(&status_ids.0, &status_ids.1)?;
         if let Some((response, expected)) = uploaded {
-            self.verify_response(&response.session_id, &response.server_side_session_id)?;
             check_artifact_upload(response, Some(&expected))?;
         }
         Ok(hashes)
@@ -2129,7 +2124,7 @@ impl SparkConnectClient {
                 result.map_err(RetryError::Status)
             })
             .await?;
-        self.verify_response(&response.session_id, &response.server_side_session_id)?;
+        // The IDs of the response are not checked, as by PySpark's ArtifactManager.
         check_artifact_upload(response, None)
     }
 
@@ -2163,14 +2158,12 @@ impl SparkConnectClient {
         self.ensure_open()?;
         let names: Vec<String> = names.iter().map(|n| n.to_string()).collect();
         match self.artifact_status_rpc(&names).await {
-            Ok(response) => {
-                self.verify_response(&response.session_id, &response.server_side_session_id)?;
-                Ok(response
-                    .statuses
-                    .into_iter()
-                    .map(|(name, status)| (name, status.exists))
-                    .collect())
-            }
+            // The IDs of the response are not checked, as by PySpark's ArtifactManager.
+            Ok(response) => Ok(response
+                .statuses
+                .into_iter()
+                .map(|(name, status)| (name, status.exists))
+                .collect()),
             Err(status) => Err(self.error_from_status(status).await),
         }
     }
