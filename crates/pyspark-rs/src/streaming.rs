@@ -203,17 +203,6 @@ fn load_path(path: &Bound<'_, PyAny>) -> PyResult<String> {
     ))
 }
 
-/// The path of a format reader of `DataStreamReader`, such as `json`, as PySpark's takes it: a
-/// str, else `NOT_EXPECTED_TYPE` of `path`, which it then loads as `load` does.
-fn format_path(path: &Bound<'_, PyAny>) -> PyResult<String> {
-    if !path.is_instance_of::<pyo3::types::PyString>() {
-        return Err(crate::stat_arguments::not_expected_type(
-            path, "path", "str",
-        ));
-    }
-    load_path(path)
-}
-
 /// Coerce a `partitionBy` argument (a single column name or a list of names) to a
 /// column-name vector, mirroring PySpark's `str | list[str]` acceptance.
 fn extract_partition_cols(v: &Bound<'_, PyAny>) -> PyResult<Vec<String>> {
@@ -271,6 +260,27 @@ pub struct PyDataStreamReader {
 impl PyDataStreamReader {
     pub fn new(reader: DataStreamReader) -> Self {
         PyDataStreamReader { inner: reader }
+    }
+
+    /// The path of a format reader, such as `json`, as PySpark's takes it, and the state that
+    /// it leaves on this reader, which takes `reader`, with the options of the call. A path that
+    /// is not a str is `NOT_EXPECTED_TYPE`, and the format of the reader stays as it was. Else
+    /// the reader takes `format`, and the path is checked as `load`, which PySpark's format
+    /// readers call with their format, checks it after setting the format.
+    fn format_path(
+        &mut self,
+        reader: &DataStreamReader,
+        format: &str,
+        path: &Bound<'_, PyAny>,
+    ) -> PyResult<String> {
+        self.inner = reader.clone();
+        if !path.is_instance_of::<pyo3::types::PyString>() {
+            return Err(crate::stat_arguments::not_expected_type(
+                path, "path", "str",
+            ));
+        }
+        self.inner = reader.clone().format(format);
+        load_path(path)
     }
 }
 
@@ -446,7 +456,7 @@ impl PyDataStreamReader {
         samplingRatio: Option<&Bound<'_, PyAny>>,
         locale: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
-        let mut r = self.inner.clone().format("xml");
+        let mut r = self.inner.clone();
         r = set_stream_option_skip_none(r, "rowTag", rowTag)?;
         if let Some(v) = schema {
             r = apply_stream_schema(r, v)?;
@@ -473,10 +483,9 @@ impl PyDataStreamReader {
                 ("locale", locale),
             ],
         )?;
-        // Like PySpark, the options and the xml format stay on the reader.
-        self.inner = r.clone();
-        let path = format_path(path)?;
-        Ok(PyDataFrame::new(r.load(Some(&path))))
+        // Like PySpark, the options stay on the reader, and the format of a str path.
+        let path = self.format_path(&r, "xml", path)?;
+        Ok(PyDataFrame::new(r.format("xml").load(Some(&path))))
     }
 
     fn table(&self, tableName: &str) -> PyResult<PyDataFrame> {
@@ -545,9 +554,8 @@ impl PyDataStreamReader {
                 ("useUnsafeRow", useUnsafeRow),
             ],
         )?;
-        // Like PySpark, the options and the format stay on the reader.
-        self.inner = r.clone().format("json");
-        let path = format_path(path)?;
+        // Like PySpark, the options stay on the reader, and the format of a str path.
+        let path = self.format_path(&r, "json", path)?;
         Ok(PyDataFrame::new(r.json(&path)))
     }
 
@@ -573,9 +581,8 @@ impl PyDataStreamReader {
                 ("int96RebaseMode", int96RebaseMode),
             ],
         )?;
-        // Like PySpark, the options and the format stay on the reader.
-        self.inner = r.clone().format("parquet");
-        let path = format_path(path)?;
+        // Like PySpark, the options stay on the reader, and the format of a str path.
+        let path = self.format_path(&r, "parquet", path)?;
         Ok(PyDataFrame::new(r.parquet(&path)))
     }
 
@@ -653,9 +660,8 @@ impl PyDataStreamReader {
                 ("unescapedQuoteHandling", unescapedQuoteHandling),
             ],
         )?;
-        // Like PySpark, the options and the format stay on the reader.
-        self.inner = r.clone().format("csv");
-        let path = format_path(path)?;
+        // Like PySpark, the options stay on the reader, and the format of a str path.
+        let path = self.format_path(&r, "csv", path)?;
         Ok(PyDataFrame::new(r.csv(&path)))
     }
 
@@ -677,9 +683,8 @@ impl PyDataStreamReader {
                 ("recursiveFileLookup", recursiveFileLookup),
             ],
         )?;
-        // Like PySpark, the options and the format stay on the reader.
-        self.inner = r.clone().format("orc");
-        let path = format_path(path)?;
+        // Like PySpark, the options stay on the reader, and the format of a str path.
+        let path = self.format_path(&r, "orc", path)?;
         Ok(PyDataFrame::new(r.orc(&path)))
     }
 
@@ -710,9 +715,8 @@ impl PyDataStreamReader {
                 ("recursiveFileLookup", recursiveFileLookup),
             ],
         )?;
-        // Like PySpark, the options and the format stay on the reader.
-        self.inner = r.clone().format("text");
-        let path = format_path(path)?;
+        // Like PySpark, the options stay on the reader, and the format of a str path.
+        let path = self.format_path(&r, "text", path)?;
         Ok(PyDataFrame::new(r.text(&path)))
     }
 }

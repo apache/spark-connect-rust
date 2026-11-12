@@ -20628,6 +20628,35 @@ def test_stream_reader_converts_bool_options_as_pyspark(offline_spark):
     assert r._options["header"] == "True"
 
 
+def test_stream_format_readers_set_their_format_for_a_str_path_only_as_pyspark(offline_spark):
+    # As PySpark's DataStreamReader.json, csv, parquet, orc, text and xml: their options stay on
+    # the reader, and a path that is not a str is NOT_EXPECTED_TYPE before load, which sets the
+    # format, so the format of the reader stays as it was. A str path goes to load, which sets
+    # the format before its VALUE_NOT_NON_EMPTY_STR.
+    from pyspark.errors import PySparkTypeError, PySparkValueError
+
+    for name in ("json", "csv", "parquet", "orc", "text", "xml"):
+        kwargs = {"rowTag": "row"} if name == "xml" else {}
+        for start in (None, "rate"):
+            r = offline_spark.readStream
+            if start is not None:
+                r = r.format(start)
+            with pytest.raises(PySparkTypeError) as e:
+                getattr(r, name)(123, **kwargs)
+            assert e.value.getCondition() == "NOT_EXPECTED_TYPE"
+            assert r._format == start, name
+        r = offline_spark.readStream.format("rate")
+        with pytest.raises(PySparkValueError) as e:
+            getattr(r, name)("  ", **kwargs)
+        assert e.value.getCondition() == "VALUE_NOT_NON_EMPTY_STR"
+        assert r._format == name
+    r = offline_spark.readStream
+    with pytest.raises(PySparkTypeError):
+        r.text(123, lineSep="|")
+    assert r._format is None
+    assert r._options == {"wholetext": "False", "lineSep": "|"}
+
+
 def test_text_sets_its_wholetext_default_over_an_earlier_option_as_pyspark(offline_spark):
     # As PySpark's text(paths, wholetext=False, ...), whose _set_opts sets the default on every
     # call: an earlier wholetext option is overridden, unless wholetext=None, which is skipped.
