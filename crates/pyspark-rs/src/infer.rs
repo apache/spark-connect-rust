@@ -28,6 +28,7 @@ static DECIMAL: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static C_DECIMAL: PyOnceLock<Option<Py<PyType>>> = PyOnceLock::new();
 static DATE: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static DATETIME: PyOnceLock<Py<PyType>> = PyOnceLock::new();
+static UTC_EPOCH: PyOnceLock<UtcEpoch> = PyOnceLock::new();
 static TIME: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static TIMEDELTA: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 static ARRAY: PyOnceLock<Py<PyType>> = PyOnceLock::new();
@@ -1143,19 +1144,32 @@ fn delta_micros(delta: &Bound<'_, PyAny>) -> PyResult<i64> {
     Ok(days * 86_400_000_000 + seconds * 1_000_000 + micros)
 }
 
+/// Immutable arguments shared by local timestamp conversions. The input's local timezone
+/// and datetime subclass hooks are still resolved for every value.
+struct UtcEpoch {
+    timezone: Py<PyAny>,
+    datetime: Py<PyAny>,
+}
+
 /// Microseconds since the epoch of the instant of a datetime, which PySpark takes with
 /// `astimezone(timezone.utc)`: a naive datetime is in the local time zone.
 fn instant_micros(obj: &Bound<'_, PyAny>) -> PyResult<i64> {
     let py = obj.py();
-    let datetime = py.import(intern!(py, "datetime"))?;
-    let utc = datetime
-        .getattr(intern!(py, "timezone"))?
-        .getattr(intern!(py, "utc"))?;
-    let aware = obj.call_method1(intern!(py, "astimezone"), (&utc,))?;
-    let epoch = DATETIME
-        .import(py, "datetime", "datetime")?
-        .call((1970, 1, 1), Some(&[("tzinfo", &utc)].into_py_dict(py)?))?;
-    delta_micros(&aware.sub(epoch)?)
+    let epoch = UTC_EPOCH.get_or_try_init(py, || -> PyResult<_> {
+        let utc = py
+            .import(intern!(py, "datetime"))?
+            .getattr(intern!(py, "timezone"))?
+            .getattr(intern!(py, "utc"))?;
+        let datetime = DATETIME
+            .import(py, "datetime", "datetime")?
+            .call((1970, 1, 1), Some(&[("tzinfo", &utc)].into_py_dict(py)?))?;
+        Ok(UtcEpoch {
+            timezone: utc.unbind(),
+            datetime: datetime.unbind(),
+        })
+    })?;
+    let aware = obj.call_method1(intern!(py, "astimezone"), (epoch.timezone.bind(py),))?;
+    delta_micros(&aware.sub(epoch.datetime.bind(py))?)
 }
 
 /// The microseconds of the wall clock of a datetime, naive or aware, as PySpark's
