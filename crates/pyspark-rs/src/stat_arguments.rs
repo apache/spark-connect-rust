@@ -84,7 +84,7 @@ pub(crate) fn dropna(
 }
 
 /// The `thresh` and the `subset` of `dropna`, checked as PySpark's. The `subset` is checked
-/// before the `thresh` is sent as a proto int, which [`proto_int32`] checks.
+/// before the `thresh` is sent as the proto's int32, which [`proto_int`] converts.
 fn dropna_thresh_and_subset(
     thresh: Option<&Bound<'_, PyAny>>,
     subset: Option<&Bound<'_, PyAny>>,
@@ -95,7 +95,9 @@ fn dropna_thresh_and_subset(
         Some(thresh) => return Err(not_expected_type(thresh, "thresh", "int")),
     };
     let columns = subset_columns(subset, "list, str or tuple")?;
-    let thresh = thresh.map(proto_int32).transpose()?;
+    let thresh = thresh
+        .map(|thresh| proto_int(thresh, "spark.connect.NADrop.min_non_nulls"))
+        .transpose()?;
     Ok((thresh, columns))
 }
 
@@ -108,19 +110,24 @@ pub(crate) fn bool_not_proto_int(field: &str) -> PyErr {
     ))
 }
 
-/// An int, the `thresh` of `dropna`, as the proto's int32. A bool, which is an int, is refused as
-/// the proto refuses it, `TypeError`, and an int out of the range of an int32 is a `ValueError`.
-fn proto_int32(thresh: &Bound<'_, PyAny>) -> PyResult<i32> {
-    if thresh.is_instance_of::<pyo3::types::PyBool>() {
-        return Err(bool_not_proto_int("spark.connect.NADrop.min_non_nulls"));
+/// A value that PySpark sets in the proto's int field `field`, the full name of the field, of the
+/// type `T` of the field (`i32` or `i64`), as protobuf's default (upb) backend converts it. A
+/// bool, which is an int, is refused, as [`bool_not_proto_int`] gives; any other value is the int
+/// of its `__index__`, so a float, a str or None raises the `TypeError` of `operator.index`, and a
+/// NumPy int is taken, but not a NumPy bool. An int beyond a long is the `ValueError` of that int,
+/// and one out of the range of `T`, the `ValueError` of the value itself, as upb shows them.
+pub(crate) fn proto_int<T: TryFrom<i64>>(value: &Bound<'_, PyAny>, field: &str) -> PyResult<T> {
+    if value.is_instance_of::<pyo3::types::PyBool>() {
+        return Err(bool_not_proto_int(field));
     }
-    match thresh.extract::<i32>() {
-        Ok(thresh) => Ok(thresh),
-        Err(_) => Err(pyo3::exceptions::PyValueError::new_err(format!(
-            "Value out of range: {}",
-            thresh.str()?
-        ))),
-    }
+    // SAFETY: PyNumber_Index returns a new reference, or NULL with an exception set.
+    let index = unsafe {
+        Bound::from_owned_ptr_or_err(value.py(), pyo3::ffi::PyNumber_Index(value.as_ptr()))
+    }?;
+    let long: i64 = index
+        .extract()
+        .map_err(|_| crate::session::value_out_of_range(&index))?;
+    T::try_from(long).map_err(|_| crate::session::value_out_of_range(value))
 }
 
 /// `df.fillna(value, subset)` and `df.na.fill`, as PySpark's: `value` is a bool, an int, a

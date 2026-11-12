@@ -12,6 +12,7 @@ use crate::group::PyGroupedData;
 use crate::interrupt::interruptible;
 use crate::options::{set_option_skip_none, set_options_skip_none, DefaultedOption};
 use crate::row::{FieldConverters, NestedFieldNames};
+use crate::stat_arguments::proto_int;
 use crate::streaming::PyDataStreamWriter;
 use crate::types::PyDataType;
 
@@ -370,18 +371,25 @@ fn unwrap_sequence(cols: Vec<Bound<'_, PyAny>>) -> PyResult<Vec<Bound<'_, PyAny>
     }
 }
 
-/// PySpark's `VALUE_NOT_POSITIVE` error of `numPartitions`, unless it is positive.
-fn positive_partitions(py: Python<'_>, num_partitions: i64) -> PyResult<i32> {
-    if num_partitions > 0 {
-        return Ok(i32::try_from(num_partitions)?);
+/// PySpark's check of the `numPartitions` of `repartition`, `repartitionByRange` and `coalesce`,
+/// `not numPartitions > 0`: `VALUE_NOT_POSITIVE`, or the `TypeError` of the comparison, as for
+/// None in `coalesce`. The count is converted after, as the proto's int32 ([`proto_int`]).
+fn positive_partitions(num_partitions: &Bound<'_, PyAny>) -> PyResult<()> {
+    if num_partitions.gt(0)? {
+        return Ok(());
     }
-    Err(crate::column::raise_pyspark(
-        py,
+    Err(not_positive_partitions(num_partitions)?)
+}
+
+/// PySpark's `VALUE_NOT_POSITIVE` error of `numPartitions`, of its `str`.
+fn not_positive_partitions(num_partitions: &Bound<'_, PyAny>) -> PyResult<PyErr> {
+    Ok(crate::column::raise_pyspark(
+        num_partitions.py(),
         "PySparkValueError",
         "VALUE_NOT_POSITIVE",
         &[
             ("arg_name", "numPartitions"),
-            ("arg_value", &num_partitions.to_string()),
+            ("arg_value", &num_partitions.str()?.to_cow()?),
         ],
     ))
 }
@@ -908,14 +916,18 @@ impl PyDataFrame {
         ))
     }
 
-    /// Limit the number of rows.
-    fn limit(&self, num: i32) -> PyDataFrame {
-        PyDataFrame::new(self.dataframe.limit(num))
+    /// Limit the number of rows, as PySpark's `limit`, which does not check `num`: its plan sets
+    /// `num` in the proto's int32, whose errors ([`proto_int`]) PySpark raises once it sends the
+    /// plan; this client builds the plan here, so it raises them here. The server checks the rest.
+    fn limit(&self, num: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        let num = proto_int(num, "spark.connect.Limit.limit")?;
+        Ok(PyDataFrame::new(self.dataframe.limit(num)))
     }
 
-    /// Skip the first n rows.
-    fn offset(&self, num: i32) -> PyDataFrame {
-        PyDataFrame::new(self.dataframe.offset(num))
+    /// Skip the first `num` rows, as PySpark's `offset`, which sends `num` as `limit` does.
+    fn offset(&self, num: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        let num = proto_int(num, "spark.connect.Offset.offset")?;
+        Ok(PyDataFrame::new(self.dataframe.offset(num)))
     }
 
     /// Remove duplicate rows.
@@ -1187,7 +1199,7 @@ impl PyDataFrame {
         // As PySpark's: a positive partition count and columns, or columns alone. The columns
         // are sorted ascending unless they are sort orders, by `repartition_by_range_opt`.
         let (num_partitions, cols) = if numPartitions.is_instance_of::<PyInt>() {
-            let n = positive_partitions(py, numPartitions.extract()?)?;
+            positive_partitions(&numPartitions)?;
             if cols.is_empty() {
                 return Err(crate::column::raise_pyspark(
                     py,
@@ -1196,7 +1208,7 @@ impl PyDataFrame {
                     &[("item", "cols")],
                 ));
             }
-            (Some(n), cols)
+            (Some(numPartitions), cols)
         } else if numPartitions.is_instance_of::<pyo3::types::PyString>()
             || numPartitions.extract::<PyRef<'_, PyColumn>>().is_ok()
         {
@@ -1216,6 +1228,11 @@ impl PyDataFrame {
             .into_iter()
             .map(|c| c.expression().clone())
             .collect();
+        // The count is the proto's int32 of the plan, which PySpark converts once it sends the
+        // plan, after the columns; this client builds the plan here, so it converts it here.
+        let num_partitions = num_partitions
+            .map(|n| proto_int(&n, "spark.connect.RepartitionByExpression.num_partitions"))
+            .transpose()?;
         Ok(PyDataFrame::new(
             self.dataframe
                 .repartition_by_range_opt(num_partitions, exprs)
@@ -1229,31 +1246,36 @@ impl PyDataFrame {
     #[allow(non_snake_case)]
     fn repartitionById(
         &self,
-        py: Python<'_>,
         numPartitions: &Bound<'_, PyAny>,
         partitionIdCol: &Bound<'_, PyAny>,
     ) -> PyResult<PyDataFrame> {
-        // As PySpark's: an int that is not a bool, and positive.
+        // As PySpark's: an int that is not a bool, and not `numPartitions <= 0`.
         if !numPartitions.is_instance_of::<PyInt>()
             || numPartitions.is_instance_of::<pyo3::types::PyBool>()
         {
             return Err(not_expected_type(numPartitions, "numPartitions", "int"));
         }
-        let numPartitions = positive_partitions(py, numPartitions.extract()?)?;
-        // A `ColumnOrName`, as in pyspark: a string is a column name, not a literal.
+        if numPartitions.le(0)? {
+            return Err(not_positive_partitions(numPartitions)?);
+        }
+        // A `ColumnOrName`, as PySpark's `F._to_col`: a string is a column name, by `col`, of its
+        // origin, not a literal, and another value is NOT_EXPECTED_TYPE of `col`.
         let col = if let Ok(c) = partitionIdCol.extract::<Bound<'_, PyColumn>>() {
             c.borrow().column.clone()
-        } else if let Ok(name) = partitionIdCol.extract::<String>() {
-            // As PySpark's `F._to_col`, by `col`, of its origin.
+        } else if partitionIdCol.is_instance_of::<pyo3::types::PyString>() {
             let _origin = crate::origin::with_origin("col")?;
-            spark_connect::functions::col(&name)
+            spark_connect::functions::col(&partitionIdCol.extract::<String>()?)
         } else {
-            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                "partitionIdCol should be a Column or a column name (str)",
-            ));
+            return Err(not_expected_type(partitionIdCol, "col", "Column or str"));
         };
+        // The count is the proto's int32 of the plan, converted after the column, as in
+        // `repartitionByRange`.
+        let num_partitions = proto_int(
+            numPartitions,
+            "spark.connect.RepartitionByExpression.num_partitions",
+        )?;
         Ok(PyDataFrame::new(
-            self.dataframe.repartition_by_id(numPartitions, col),
+            self.dataframe.repartition_by_id(num_partitions, col),
         ))
     }
 
@@ -1322,15 +1344,16 @@ impl PyDataFrame {
     #[pyo3(signature = (numPartitions, *cols))]
     fn repartition(
         &self,
-        py: Python<'_>,
         numPartitions: Bound<'_, PyAny>,
         cols: Vec<Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
         // As PySpark's: a positive partition count, or a partition column (str/Column), at
-        // the server's count (passed as 0 = unset).
+        // the server's count (passed as 0 = unset). The count is the proto's int32 of the plan,
+        // converted after the columns, as in `repartitionByRange`.
         if numPartitions.is_instance_of::<PyInt>() {
-            let n = positive_partitions(py, numPartitions.extract()?)?;
+            positive_partitions(&numPartitions)?;
             if cols.is_empty() {
+                let n = proto_int(&numPartitions, "spark.connect.Repartition.num_partitions")?;
                 return Ok(PyDataFrame::new(self.dataframe.repartition(n)));
             }
             // As PySpark's `_to_cols(cols)`, which does not unpack a list among them.
@@ -1338,6 +1361,10 @@ impl PyDataFrame {
                 .iter()
                 .map(|c| c.expression().clone())
                 .collect();
+            let n = proto_int(
+                &numPartitions,
+                "spark.connect.RepartitionByExpression.num_partitions",
+            )?;
             return Ok(PyDataFrame::new(
                 self.dataframe.repartition_by_expressions(n, exprs),
             ));
@@ -1362,9 +1389,11 @@ impl PyDataFrame {
         ))
     }
 
-    /// Coalesce.
-    fn coalesce(&self, py: Python<'_>, numPartitions: i64) -> PyResult<PyDataFrame> {
-        let num_partitions = positive_partitions(py, numPartitions)?;
+    /// Coalesce into `numPartitions` partitions, as PySpark's `coalesce`: any value that is
+    /// `> 0`, which is then the proto's int32 of the plan, as in `repartitionByRange`.
+    fn coalesce(&self, numPartitions: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        positive_partitions(numPartitions)?;
+        let num_partitions = proto_int(numPartitions, "spark.connect.Repartition.num_partitions")?;
         Ok(PyDataFrame::new(self.dataframe.coalesce(num_partitions)))
     }
 
@@ -2529,29 +2558,21 @@ impl PyDataFrame {
         Ok(rows_to_py(py, &self.dataframe, row.as_slice(), schema.as_ref())?.pop())
     }
 
-    /// Alias for first.
+    /// The first row, or None, or with `n`, a list of the first `n` rows, as PySpark's `head`,
+    /// whose `head(n)` is `take(n)`.
     #[pyo3(signature = (n=None))]
-    fn head(&self, py: Python<'_>, n: Option<i32>) -> PyResult<Py<PyAny>> {
+    fn head(&self, py: Python<'_>, n: Option<&Bound<'_, PyAny>>) -> PyResult<Py<PyAny>> {
         use pyo3::IntoPyObjectExt;
         match n {
-            // head() -> the first Row (or None), matching reference pyspark.
             None => self.first(py)?.into_py_any(py),
-            // head(n) -> a list of the first n Rows.
-            Some(k) => {
-                let (rows, schema) = interruptible(py, &self.dataframe.spark_session(), || {
-                    self.dataframe
-                        .limit(k)
-                        .collect_with_schema()
-                        .map_err(Box::new)
-                })?;
-                rows_to_py(py, &self.dataframe, &rows, schema.as_ref())?.into_py_any(py)
-            }
+            Some(n) => self.take(py, n)?.into_py_any(py),
         }
     }
 
-    /// Get the first n rows, as PySpark's `DataFrame.take`, which is `limit(num).collect()`, so
-    /// the server checks `num`.
-    fn take(&self, py: Python<'_>, num: i32) -> PyResult<Vec<Py<PyAny>>> {
+    /// Get the first n rows, as PySpark's `DataFrame.take`, which is `limit(num).collect()`: `num`
+    /// is converted as `limit` converts it, and the server checks the rest.
+    fn take(&self, py: Python<'_>, num: &Bound<'_, PyAny>) -> PyResult<Vec<Py<PyAny>>> {
+        let num = proto_int(num, "spark.connect.Limit.limit")?;
         let (rows, schema) = interruptible(py, &self.dataframe.spark_session(), || {
             self.dataframe
                 .limit(num)
@@ -2571,8 +2592,10 @@ impl PyDataFrame {
         interruptible(py, &session, || self.dataframe.columns())
     }
 
-    /// Get the last `num` rows as a list of Rows (eager, like pyspark `tail`).
-    fn tail(&self, py: Python<'_>, num: i32) -> PyResult<Vec<Py<PyAny>>> {
+    /// Get the last `num` rows as a list of Rows (eager, like pyspark `tail`), of `num` as the
+    /// proto's int32 of the plan, converted as `limit` converts it.
+    fn tail(&self, py: Python<'_>, num: &Bound<'_, PyAny>) -> PyResult<Vec<Py<PyAny>>> {
+        let num = proto_int(num, "spark.connect.Tail.limit")?;
         let (rows, schema) = interruptible(py, &self.dataframe.spark_session(), || {
             self.dataframe
                 .tail(num)
