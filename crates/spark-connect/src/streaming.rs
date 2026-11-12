@@ -1440,7 +1440,11 @@ impl StreamingQueryManager {
                 return Err(error);
             }
         }
+        // Whether the stream that sends the ADD was opened: the server may then hold its
+        // listener, whatever ends the wait for its acknowledgement.
+        let mut opened = false;
         let stream = self.listener_event_stream().and_then(|mut stream| {
+            opened = true;
             // Cancel a pending acknowledgement once the RPC stream exists. Establishing
             // the stream above still follows the transport's deadline and retry policy.
             stream.cancel = Some(receiver);
@@ -1490,6 +1494,13 @@ impl StreamingQueryManager {
                 }
             }
             Err(error) => {
+                // A wait for the acknowledgement that failed, by a transport error or by a
+                // signal in the Python client, after the ADD was sent: the server may have added
+                // its listener, and would answer the next ADD with no response, so the next
+                // subscription removes it first. That REMOVE finds none at worst.
+                if opened {
+                    state.server_registration_held = true;
+                }
                 state.cancel.take();
                 Err(error)
             }

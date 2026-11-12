@@ -19493,6 +19493,56 @@ def test_sigint_during_add_listener_keeps_the_registration_removable(mock_connec
     assert service.listener_removals == 1
 
 
+def test_a_second_sigint_during_add_listener_removes_the_server_listener_before_the_next_add(
+        mock_connect):
+    # A second signal ends the wait for the server's acknowledgement of addListener, after the
+    # server added its listener. The server answers a later ADD of the session with no response
+    # while it holds that listener, so the next addListener removes it first.
+    import signal
+    import threading
+
+    from pyspark.sql.streaming.listener import StreamingQueryListener
+
+    class Listener(StreamingQueryListener):
+        def onQueryStarted(self, event):
+            pass
+
+        def onQueryProgress(self, event):
+            pass
+
+        def onQueryIdle(self, event):
+            pass
+
+        def onQueryTerminated(self, event):
+            pass
+
+    spark, service = mock_connect
+    service.listener_bus_enabled = True
+    service.listener_register_blocked = True
+    # A wait that the signals do not end is released after 10 s, so the test fails, not hangs.
+    release = threading.Timer(10, service.release_listener_registration)
+    timers = [threading.Timer(delay, os.kill, (os.getpid(), signal.SIGINT)) for delay in (0.5, 1.0)]
+    release.start()
+    for timer in timers:
+        timer.start()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            spark.streams.addListener(Listener())
+    finally:
+        for timer in timers:
+            timer.cancel()
+    release.cancel()
+    service.release_listener_registration()
+    assert service.wait_listener_registration(1)
+    assert service.listener_removals == 0
+    service.listener_register_blocked = False
+    listener = Listener()
+    spark.streams.addListener(listener)
+    assert service.listener_removals == 1
+    assert service.listener_subscriptions == 2
+    spark.streams.removeListener(listener)
+
+
 def test_sigint_during_the_plan_compression_lookup_raises_keyboard_interrupt_at_once(mock_connect):
     # As PySpark's: the Config lookup of the plan compression of the first plan is a blocked call
     # with no execution in flight, which a signal ends at once, so no execution is started.
