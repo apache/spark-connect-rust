@@ -10875,6 +10875,49 @@ thread.join()
     assert len(service.analyze_requests) == 1
 
 
+def test_a_plan_over_a_deep_expression_is_analyzed_from_a_thread_with_a_small_stack(mock_connect):
+    # The levels of a plan and the additions of an expression under it are one request: 300
+    # levels over a column of 700 additions overflowed the stack of the analyzing thread (SIGBUS),
+    # though each part is within its bound. The server sets the plan compression that a real one
+    # does, whose encoded size is measured on the thread of the call.
+    import subprocess
+    import sys
+
+    _, service = mock_connect
+    service.confs = _plan_confs(str(10 << 20))
+    script = """
+import threading
+from pyspark.sql import SparkSession, functions as F
+spark = SparkSession.builder.remote(REMOTE_URL).getOrCreate()
+
+def work():
+    c = F.col("id")
+    for _ in range(700):
+        c = c + 1
+    df = spark.range(1).withColumn("deep", c)
+    for x in range(300):
+        df = df.withColumn(f"col{x}", F.lit(x))
+    print("schema", len(df.schema.fields), flush=True)
+    print("dtypes", len(df.dtypes), flush=True)
+    print("streaming", df.isStreaming, flush=True)
+    df.explain()
+    print("explained", flush=True)
+
+threading.stack_size(512 * 1024)
+thread = threading.Thread(target=work)
+thread.start()
+thread.join()
+""".replace("REMOTE_URL", repr(service.remote))
+    result = subprocess.run(
+        [sys.executable, "-c", script], env=dict(os.environ, TZ="UTC"),
+        capture_output=True, text=True, timeout=300)
+    assert result.returncode == 0, result.stderr
+    assert "schema 1" in result.stdout, result.stdout
+    assert "explained" in result.stdout, result.stdout
+    # dtypes reads the schema that schema analyzed, so three requests are analyzed.
+    assert len(service.analyze_requests) == 3
+
+
 def test_create_dataframe_raises_recursion_error_for_a_value_that_contains_itself():
     class Node:
         def __init__(self):
