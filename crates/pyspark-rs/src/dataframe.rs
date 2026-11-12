@@ -536,28 +536,22 @@ fn proto_string_type_error(value: &Bound<'_, PyAny>) -> PyErr {
     ))
 }
 
-/// The text of the `direction` of `_joinAsOf`, as protobuf sets the string field
-/// `AsOfJoin.direction` from it when PySpark sends the plan: a str, of which one that UTF-8
-/// cannot encode is protobuf's `ValueError`, or bytes of UTF-8, else the `ValueError` of their
-/// encoding. Any other value is protobuf's `TypeError`.
+/// The text of the `direction` of `_joinAsOf`, as protobuf's default upb backend sets the string
+/// field `AsOfJoin.direction` from it when PySpark sends the plan: a str, of which one that UTF-8
+/// cannot encode raises the `UnicodeEncodeError` of its encoding, or bytes, decoded as UTF-8 with
+/// the `UnicodeDecodeError` of invalid ones. Any other value is upb's `TypeError`.
 fn as_of_direction(value: &Bound<'_, PyAny>) -> PyResult<String> {
     if value.is_instance_of::<pyo3::types::PyString>() {
-        return crate::str_argument(value);
+        return value.extract::<String>();
     }
-    let shown = value.repr()?;
-    if let Ok(bytes) = value.cast::<pyo3::types::PyBytes>() {
-        return String::from_utf8(bytes.as_bytes().to_vec()).map_err(|_| {
-            pyo3::exceptions::PyValueError::new_err(format!(
-                "{shown} has type bytes, but isn't valid UTF-8 encoding. Non-UTF-8 strings must \
-                 be converted to unicode objects before being added."
-            ))
-        });
+    if value.is_instance_of::<pyo3::types::PyBytes>() {
+        return value
+            .call_method1(pyo3::intern!(value.py(), "decode"), ("utf-8",))?
+            .extract::<String>();
     }
-    Err(pyo3::exceptions::PyTypeError::new_err(format!(
-        "Cannot set spark.connect.AsOfJoin.direction to {shown}: {shown} has type {}, but \
-         expected one of: (<class 'bytes'>, <class 'str'>)",
-        value.get_type().repr()?
-    )))
+    Err(pyo3::exceptions::PyTypeError::new_err(
+        "bad argument type for built-in operation",
+    ))
 }
 
 /// The join condition of `_joinAsOf` for its `on`, as PySpark's `AsOfJoin` plan sends it: a
@@ -1095,12 +1089,12 @@ impl PyDataFrame {
         // As PySpark's `_check_same_session`, first.
         let other = self.same_session(other)?;
         // As PySpark's `assert isinstance(how, str)`. A str that UTF-8 cannot encode is one, and
-        // raises protobuf's ValueError once PySpark sends the plan; this client builds the plan
-        // here, so it raises that ValueError here.
+        // raises the UnicodeEncodeError of its encoding once PySpark sends the plan, in protobuf's
+        // default upb backend; this client builds the plan here, so it raises that error here.
         let join_type = match how.filter(|how| !how.is_none()) {
             None => AsOfJoinType::Inner,
             Some(how) if how.is_instance_of::<pyo3::types::PyString>() => {
-                AsOfJoinType::parse(&crate::str_argument(&how)?)
+                AsOfJoinType::parse(&how.extract::<String>()?)
             }
             Some(_) => {
                 return Err(pyo3::exceptions::PyAssertionError::new_err(
