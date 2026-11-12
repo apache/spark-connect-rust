@@ -2127,7 +2127,16 @@ impl SparkConnectClient {
                 let frames = ArtifactFrames::new(self.session_id.clone(), artifact)
                     .map_err(RetryError::Aborted)?;
                 let failure = frames.failure();
-                let result = self.add_artifacts_rpc(frames).await;
+                // An RPC that a signal ends is not answered, as an attempt of with_retry.
+                let result = crate::runtime::until_abort(
+                    crate::runtime::ABORT_RETRIES,
+                    self.add_artifacts_rpc(frames),
+                )
+                .await;
+                let result = match result {
+                    Some(result) => result,
+                    None => return Err(RetryError::Aborted(wait_aborted())),
+                };
                 // A read that failed ended the frames early, whatever the RPC answered.
                 take_frame_failure(&failure).map_err(RetryError::Aborted)?;
                 result.map_err(RetryError::Status)
