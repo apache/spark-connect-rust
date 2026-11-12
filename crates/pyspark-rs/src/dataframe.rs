@@ -2291,12 +2291,16 @@ impl PyDataFrame {
     /// which ignores `prefetchPartitions`, a batch is fetched when the iteration reaches it, so
     /// the progress handlers of the execution are called by `next()`, on the iterating thread.
     #[pyo3(name = "toLocalIterator")]
-    #[pyo3(signature = (prefetchPartitions=false))]
+    #[pyo3(
+        signature = (prefetchPartitions=None),
+        text_signature = "($self, prefetchPartitions=False)"
+    )]
     fn to_local_iterator<'py>(
         &self,
         py: Python<'py>,
-        prefetchPartitions: bool,
+        prefetchPartitions: Option<&Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        // Any value, as PySpark Connect's, which ignores it.
         let _ = prefetchPartitions;
         let rows = PyLocalRowIterator::new(self.dataframe.clone());
         py.import("pyspark.sql.connect.dataframe")?

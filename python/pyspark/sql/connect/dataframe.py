@@ -36,6 +36,15 @@ def _local_rows(rows: Any) -> Iterator[Any]:
 
 _local_rows.__name__ = "toLocalIterator"
 _local_rows.__qualname__ = "DataFrame.toLocalIterator"
+# And the name of its code, as PySpark's generator, which tracebacks and `inspect` show.
+_local_rows.__code__ = _local_rows.__code__.replace(
+    co_name="toLocalIterator",
+    **(
+        {"co_qualname": "DataFrame.toLocalIterator"}
+        if hasattr(_local_rows.__code__, "co_qualname")
+        else {}
+    ),
+)
 
 
 def _reduce_dataframe(session: Any, relation: bytes) -> tuple[Callable[..., Any], tuple[Any, ...]]:
