@@ -483,6 +483,11 @@ _NATIVE_PARAMS = {
         solver="str", weightCol="str", aggregationDepth="int", loss="str", epsilon="float",
         maxBlockSizeInMB="float",
     ),
+    "NaiveBayes": dict(
+        featuresCol="str", labelCol="str", predictionCol="str", probabilityCol="str",
+        rawPredictionCol="str", smoothing="float", modelType="str",
+        thresholds="float_list", weightCol="str",
+    ),
     "DecisionTreeClassifier": dict(
         featuresCol="str", labelCol="str", predictionCol="str", probabilityCol="str",
         rawPredictionCol="str", maxDepth="int", maxBins="int", minInstancesPerNode="int",
@@ -2738,6 +2743,64 @@ def test_decision_tree_regressor_native_parameters_match_official_fixture(ml_moc
             estimator = DecisionTreeRegressor(**values)
         operator, params = _native_request(spark, service, estimator, models)
         assert operator.name == "org.apache.spark.ml.regression.DecisionTreeRegressor"
+        assert params == pb2.MlParams.FromString(base64.b64decode(case["params_b64"]))
+
+
+@pytest.mark.parametrize("use_setters", [False, True], ids=["constructor", "setters"])
+def test_naive_bayes_native_parameters_match_official_fixture(ml_mock, use_setters):
+    import base64
+    import inspect
+    import json
+    from pathlib import Path
+
+    from pyspark import _pyspark as native
+    from pyspark.ml.connect import NaiveBayes as exported
+    from pyspark.ml.connect.classification import NaiveBayes
+
+    assert exported is NaiveBayes is native.NaiveBayes
+    defaults = dict(
+        featuresCol="features",
+        labelCol="label",
+        predictionCol="prediction",
+        probabilityCol="probability",
+        rawPredictionCol="rawPrediction",
+        smoothing=1.0,
+        modelType="multinomial",
+        thresholds=None,
+        weightCol=None,
+    )
+    signature = inspect.signature(NaiveBayes)
+    assert list(signature.parameters) == list(defaults)
+    for name, value in defaults.items():
+        assert signature.parameters[name].kind == inspect.Parameter.KEYWORD_ONLY
+        assert signature.parameters[name].default == value
+    fixture = json.loads(
+        (Path(__file__).resolve().parents[2] / "tests/golden/naive_bayes.json").read_text()
+    )
+    spark, service = ml_mock
+    models = []
+    _, params = _native_request(spark, service, NaiveBayes(), models)
+    assert params == pb2.MlParams()
+    for case in fixture["cases"]:
+        values = dict(
+            featuresCol="input",
+            labelCol="target",
+            predictionCol="class",
+            probabilityCol="probs",
+            rawPredictionCol="scores",
+            smoothing=0.25,
+            modelType=case["model_type"],
+            thresholds=[0.25, 0.5, 1.0],
+            weightCol="weight",
+        )
+        if use_setters:
+            estimator = NaiveBayes()
+            for name, value in values.items():
+                assert getattr(estimator, "set" + name[0].upper() + name[1:])(value) is estimator
+        else:
+            estimator = NaiveBayes(**values)
+        operator, params = _native_request(spark, service, estimator, models)
+        assert operator.name == "org.apache.spark.ml.classification.NaiveBayes"
         assert params == pb2.MlParams.FromString(base64.b64decode(case["params_b64"]))
 
 

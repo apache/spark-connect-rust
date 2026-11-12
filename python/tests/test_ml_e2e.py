@@ -255,6 +255,7 @@ def _native_estimators():
         LinearSVC,
         LogisticRegression,
         MaxAbsScaler,
+        NaiveBayes,
         RandomForestClassifier,
         RandomForestRegressor,
         StandardScaler,
@@ -263,6 +264,7 @@ def _native_estimators():
 
     ml = "org.apache.spark.ml."
     return [
+        (NaiveBayes(), ml + "classification.NaiveBayesModel"),
         (GBTRegressor(maxIter=2), ml + "regression.GBTRegressionModel"),
         (GBTClassifier(maxIter=2), ml + "classification.GBTClassificationModel"),
         (DecisionTreeRegressor(), ml + "regression.DecisionTreeRegressionModel"),

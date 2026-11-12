@@ -16,6 +16,7 @@ from pyspark.ml.connect.classification import (
     DecisionTreeClassifier,
     LinearSVC,
     LogisticRegression,
+    NaiveBayes,
     RandomForestClassifier,
 )
 from pyspark.ml.connect.regression import (
@@ -56,6 +57,7 @@ __all__ = [
     "StringIndexer",
     "VectorAssembler",
     "LogisticRegression",
+    "NaiveBayes",
     "LinearSVC",
     "DecisionTreeClassifier",
     "GBTClassifier",

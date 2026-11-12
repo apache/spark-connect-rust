@@ -2198,6 +2198,214 @@ impl Model for DecisionTreeClassificationModel {
     }
 }
 
+/// Naive Bayes classification using Spark's JVM implementation and ML vectors.
+///
+/// Supports multinomial, Bernoulli, complement and Gaussian models. Multinomial and
+/// complement features must be nonnegative, Bernoulli features must be 0 or 1, and
+/// Gaussian features may be continuous and negative. Unset parameters use Spark's defaults.
+#[derive(Debug, Clone)]
+pub struct NaiveBayes {
+    operator: MlOperator,
+    params: Params,
+}
+
+impl NaiveBayes {
+    pub fn new() -> Self {
+        Self {
+            operator: MlOperator::new(
+                "org.apache.spark.ml.classification.NaiveBayes",
+                OperatorType::Estimator,
+            ),
+            params: Params::new(),
+        }
+    }
+
+    /// Feature vector column.
+    pub fn set_feature_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("featuresCol", value);
+        self
+    }
+
+    /// Numeric label column of nonnegative integer class indices.
+    pub fn set_label_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("labelCol", value);
+        self
+    }
+
+    /// Predicted class output column.
+    pub fn set_prediction_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("predictionCol", value);
+        self
+    }
+
+    /// Class probability output column; empty disables it.
+    pub fn set_probability_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("probabilityCol", value);
+        self
+    }
+
+    /// Raw class prediction output column; empty disables it.
+    pub fn set_raw_prediction_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("rawPredictionCol", value);
+        self
+    }
+
+    /// Additive smoothing parameter, which must be nonnegative.
+    pub fn set_smoothing(mut self, value: f64) -> Self {
+        self.params = self.params.set_param_double("smoothing", value);
+        self
+    }
+
+    /// Model type: multinomial, bernoulli, complement or gaussian.
+    pub fn set_model_type(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("modelType", value);
+        self
+    }
+
+    /// Per-class thresholds: predictions maximize probability divided by threshold.
+    pub fn set_thresholds(mut self, value: impl IntoIterator<Item = f64>) -> Self {
+        self.params = self.params.set_param_double_array("thresholds", value);
+        self
+    }
+
+    /// Optional instance weight column.
+    pub fn set_weight_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("weightCol", value);
+        self
+    }
+
+    /// The featuresCol value; default: "features".
+    pub fn feature_col(&self) -> &str {
+        self.params.string_or("featuresCol", "features")
+    }
+
+    /// The labelCol value; default: "label".
+    pub fn label_col(&self) -> &str {
+        self.params.string_or("labelCol", "label")
+    }
+
+    /// The predictionCol value; default: "prediction".
+    pub fn prediction_col(&self) -> &str {
+        self.params.string_or("predictionCol", "prediction")
+    }
+
+    /// The probabilityCol value; default: "probability".
+    pub fn probability_col(&self) -> &str {
+        self.params.string_or("probabilityCol", "probability")
+    }
+
+    /// The rawPredictionCol value; default: "rawPrediction".
+    pub fn raw_prediction_col(&self) -> &str {
+        self.params.string_or("rawPredictionCol", "rawPrediction")
+    }
+
+    /// The smoothing value; default: 1.0.
+    pub fn smoothing(&self) -> f64 {
+        self.params.double_or("smoothing", 1.0)
+    }
+
+    /// The modelType value; default: "multinomial".
+    pub fn model_type(&self) -> &str {
+        self.params.string_or("modelType", "multinomial")
+    }
+
+    /// The thresholds value, if set.
+    pub fn thresholds(&self) -> Option<Vec<f64>> {
+        self.params.double_array_opt("thresholds")
+    }
+
+    /// The weightCol value, if set.
+    pub fn weight_col(&self) -> Option<&str> {
+        self.params.string_opt("weightCol")
+    }
+
+    fn model_from_info(
+        &self,
+        info: proto::ml_command_result::MlOperatorInfo,
+        session: &SparkSession,
+    ) -> spark_connect_core::error::Result<NaiveBayesModel> {
+        let cached = CachedModel::from_info(&info, session, "NaiveBayes")?;
+        Ok(NaiveBayesModel {
+            operator: MlOperator::with_uid(
+                "org.apache.spark.ml.classification.NaiveBayesModel",
+                info.uid.as_deref().unwrap_or(&self.operator.uid),
+                OperatorType::Model,
+            ),
+            params: self.params.clone(),
+            cached,
+        })
+    }
+}
+
+impl Default for NaiveBayes {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Estimator for NaiveBayes {
+    fn operator(&self) -> &MlOperator {
+        &self.operator
+    }
+    fn operator_mut(&mut self) -> &mut MlOperator {
+        &mut self.operator
+    }
+    fn params(&self) -> &Params {
+        &self.params
+    }
+    fn params_mut(&mut self) -> &mut Params {
+        &mut self.params
+    }
+
+    fn fit_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<Box<dyn Model>> {
+        let info = fit_via_command(&self.operator, &self.params, df)?;
+        Ok(Box::new(self.model_from_info(info, &df.session)?))
+    }
+}
+
+/// A Naive Bayes classification model fitted by Spark Connect.
+///
+/// Obtain it through [`Estimator::fit`]. The model, its clones and transformed
+/// DataFrames retain the cached server model until the last owner is dropped.
+#[derive(Debug, Clone)]
+pub struct NaiveBayesModel {
+    operator: MlOperator,
+    params: Params,
+    cached: CachedModel,
+}
+
+impl Transformer for NaiveBayesModel {
+    fn operator(&self) -> &MlOperator {
+        &self.operator
+    }
+    fn operator_mut(&mut self) -> &mut MlOperator {
+        &mut self.operator
+    }
+    fn params(&self) -> &Params {
+        &self.params
+    }
+    fn params_mut(&mut self) -> &mut Params {
+        &mut self.params
+    }
+
+    fn build_ml_relation(
+        &self,
+        input: &DataFrame,
+    ) -> spark_connect_core::error::Result<proto::MlRelation> {
+        self.cached.build_ml_relation(input, &self.params)
+    }
+
+    fn transform_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<DataFrame> {
+        self.cached.transform(df, &self.params)
+    }
+}
+
+impl Model for NaiveBayesModel {
+    fn clone_box(&self) -> Box<dyn Model> {
+        Box::new(self.clone())
+    }
+}
+
 /// Gradient-boosted binary classification using Spark's JVM implementation and ML vectors.
 ///
 /// Labels must be 0 or 1. Unset parameters use Spark's defaults. A seed controls row sampling
@@ -5578,6 +5786,155 @@ mod tests {
             .starts_with("DecisionTreeClassifier_"));
     }
 
+    #[test]
+    fn naive_bayes_getters_follow_defaults_builders_and_mutable_params() {
+        let mut estimator = NaiveBayes::default();
+        assert_eq!(estimator.feature_col(), "features");
+        assert_eq!(estimator.label_col(), "label");
+        assert_eq!(estimator.prediction_col(), "prediction");
+        assert_eq!(estimator.probability_col(), "probability");
+        assert_eq!(estimator.raw_prediction_col(), "rawPrediction");
+        assert_eq!(estimator.smoothing(), 1.0);
+        assert_eq!(estimator.model_type(), "multinomial");
+        assert_eq!(estimator.thresholds(), None);
+        assert_eq!(estimator.weight_col(), None);
+        let built = NaiveBayes::new()
+            .set_feature_col("input")
+            .set_label_col("target")
+            .set_prediction_col("class")
+            .set_probability_col("probs")
+            .set_raw_prediction_col("scores")
+            .set_smoothing(0.5)
+            .set_model_type("gaussian")
+            .set_thresholds(vec![0.5, 1.5])
+            .set_weight_col("weight");
+        *estimator.params_mut() = estimator
+            .params()
+            .clone()
+            .set_param_string("featuresCol", "input");
+        assert_eq!(estimator.feature_col(), "input");
+        assert_eq!(built.feature_col(), estimator.feature_col());
+        *estimator.params_mut() = estimator
+            .params()
+            .clone()
+            .set_param_string("labelCol", "target");
+        assert_eq!(estimator.label_col(), "target");
+        assert_eq!(built.label_col(), estimator.label_col());
+        *estimator.params_mut() = estimator
+            .params()
+            .clone()
+            .set_param_string("predictionCol", "class");
+        assert_eq!(estimator.prediction_col(), "class");
+        assert_eq!(built.prediction_col(), estimator.prediction_col());
+        *estimator.params_mut() = estimator
+            .params()
+            .clone()
+            .set_param_string("probabilityCol", "probs");
+        assert_eq!(estimator.probability_col(), "probs");
+        assert_eq!(built.probability_col(), estimator.probability_col());
+        *estimator.params_mut() = estimator
+            .params()
+            .clone()
+            .set_param_string("rawPredictionCol", "scores");
+        assert_eq!(estimator.raw_prediction_col(), "scores");
+        assert_eq!(built.raw_prediction_col(), estimator.raw_prediction_col());
+        *estimator.params_mut() = estimator
+            .params()
+            .clone()
+            .set_param_double("smoothing", 0.5);
+        assert_eq!(estimator.smoothing(), 0.5);
+        assert_eq!(built.smoothing(), estimator.smoothing());
+        *estimator.params_mut() = estimator
+            .params()
+            .clone()
+            .set_param_string("modelType", "gaussian");
+        assert_eq!(estimator.model_type(), "gaussian");
+        assert_eq!(built.model_type(), estimator.model_type());
+        *estimator.params_mut() = estimator
+            .params()
+            .clone()
+            .set_param_double_array("thresholds", vec![0.5, 1.5]);
+        assert_eq!(estimator.thresholds(), Some(vec![0.5, 1.5]));
+        assert_eq!(built.thresholds(), estimator.thresholds());
+        *estimator.params_mut() = estimator
+            .params()
+            .clone()
+            .set_param_string("weightCol", "weight");
+        assert_eq!(estimator.weight_col(), Some("weight"));
+        assert_eq!(built.weight_col(), estimator.weight_col());
+        assert_eq!(built.params().to_proto(), estimator.params().to_proto());
+        assert!(estimator.operator_mut().uid.starts_with("NaiveBayes_"));
+    }
+
+    #[test]
+    fn naive_bayes_validates_fitted_references_and_model_metadata() {
+        let session = offline_session();
+        let estimator = NaiveBayes::default().set_prediction_col("class");
+        assert_eq!(
+            estimator.operator().name,
+            "org.apache.spark.ml.classification.NaiveBayes"
+        );
+        assert_eq!(estimator.operator().op_type, OperatorType::Estimator);
+        for kind in [
+            None,
+            Some(proto::ml_command_result::ml_operator_info::Type::Name(
+                "model".into(),
+            )),
+            Some(proto::ml_command_result::ml_operator_info::Type::ObjRef(
+                proto::ObjectRef::default(),
+            )),
+        ] {
+            assert!(estimator
+                .model_from_info(
+                    proto::ml_command_result::MlOperatorInfo {
+                        r#type: kind,
+                        ..Default::default()
+                    },
+                    &session
+                )
+                .is_err());
+        }
+        let info = |uid| proto::ml_command_result::MlOperatorInfo {
+            r#type: Some(proto::ml_command_result::ml_operator_info::Type::ObjRef(
+                proto::ObjectRef {
+                    id: "trained-naive-bayes".into(),
+                },
+            )),
+            uid,
+            ..Default::default()
+        };
+        let mut model = estimator
+            .model_from_info(info(Some("returned-uid".into())), &session)
+            .unwrap();
+        assert_eq!(model.operator().uid, "returned-uid");
+        assert_eq!(
+            model.operator().name,
+            "org.apache.spark.ml.classification.NaiveBayesModel"
+        );
+        assert_eq!(model.operator().op_type, OperatorType::Model);
+        let fallback = estimator.model_from_info(info(None), &session).unwrap();
+        assert_eq!(fallback.operator().uid, estimator.operator().uid);
+        let df = session.range(2).unwrap();
+        let proto::ml_relation::MlType::Transform(t) =
+            model.build_ml_relation(&df).unwrap().ml_type.unwrap()
+        else {
+            panic!("transform")
+        };
+        assert_eq!(
+            t.operator,
+            Some(proto::ml_relation::transform::Operator::ObjRef(
+                proto::ObjectRef {
+                    id: "trained-naive-bayes".into()
+                }
+            ))
+        );
+        assert_eq!(*t.input.unwrap(), df.relation().unwrap());
+        assert_eq!(t.params.unwrap(), estimator.params().to_proto());
+        assert!(model
+            .transform(&session.new_session().range(2).unwrap())
+            .is_err());
+        assert!(model.clone_box().transform(&df).is_ok());
+    }
     #[test]
     fn decision_tree_classifier_validates_fitted_references_and_model_metadata() {
         let session = offline_session();
