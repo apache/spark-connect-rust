@@ -982,9 +982,10 @@ fn arrow_invalid(obj: &Bound<'_, PyAny>, arrow_type: &str) -> PyResult<PyErr> {
 }
 
 /// `obj` as an int, as PyArrow's `PyObjectToPyInt` takes it: by `__index__`, else by the
-/// `__int__` of its type, which may raise, such as for a NaN; else the `ArrowTypeError` "object
-/// of type <class 'T'> cannot be converted to int". A float, a `Decimal` and a NumPy number or
-/// bool are taken by their `__int__`.
+/// `nb_int` slot of its type, which may raise, such as for a NaN; else the `ArrowTypeError`
+/// "object of type <class 'T'> cannot be converted to int". A float, a `Decimal` and a NumPy
+/// number or bool are taken by their `nb_int`. A NumPy `str_` or `bytes_` has none, although
+/// its type has the `__int__` of `numpy.generic`.
 fn py_int<'py>(obj: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
     let py = obj.py();
     // SAFETY: PyNumber_Index returns a new reference, or NULL with an exception set.
@@ -994,7 +995,20 @@ fn py_int<'py>(obj: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
         return Ok(index);
     }
     let ty = obj.get_type();
-    if ty.hasattr(intern!(py, "__int__"))? {
+    // SAFETY: `ty` is a live type object. PyType_GetSlot gives NULL for a slot that is not set,
+    // and, before Python 3.10, which reads the slots of heap types only, also with an exception
+    // set for a static type.
+    let slot = unsafe { pyo3::ffi::PyType_GetSlot(ty.as_type_ptr(), pyo3::ffi::Py_nb_int) };
+    if !slot.is_null() {
+        // SAFETY: the nb_int slot is a unaryfunc, which returns a new reference, or NULL with
+        // an exception set.
+        return unsafe {
+            let nb_int = std::mem::transmute::<*mut std::ffi::c_void, pyo3::ffi::unaryfunc>(slot);
+            Bound::from_owned_ptr_or_err(py, nb_int(obj.as_ptr()))
+        };
+    }
+    // On Python 3.9, the `__int__` of a static type, which wraps its nb_int, stands for it.
+    if PyErr::take(py).is_some() && ty.hasattr(intern!(py, "__int__"))? {
         return ty.getattr(intern!(py, "__int__"))?.call1((obj,));
     }
     Err(pyarrow_error(
@@ -1199,16 +1213,137 @@ pub(crate) fn bytes_of(obj: &Bound<'_, PyAny>) -> PyResult<Option<Vec<u8>>> {
     }
 }
 
-/// Whether PyArrow's list converter takes `obj` as the value of a list: a sequence by
-/// `PySequence_Check`, such as a tuple, a range or a NumPy array, which a dict is not, a set or
-/// a `dict_values`. Another iterable, such as an iterator, a generator, a frozenset, a
-/// `dict_keys` or a `dict_items`, is "not a sequence" to it.
-fn is_arrow_list(obj: &Bound<'_, PyAny>) -> bool {
+/// A value of an array whose elements need no converter, which PySpark passes to PyArrow as
+/// it is, as PyArrow's list converter reads it:
+/// - A NumPy array that is not one-dimensional is the `ArrowInvalid` "Can only convert
+///   1-dimensional array values".
+/// - A list or a tuple is read as it is stored, also of a subclass that overrides `__iter__`
+///   or `__getitem__`.
+/// - Another sequence by `PySequence_Check`, such as a range or a NumPy array, is read by
+///   `PySequence_Size` and then `PySequence_GetItem` of each index, whose errors PyArrow raises:
+///   a `__getitem__` without a `__len__` "has no len()", and a `__len__` longer than the items
+///   gives the `IndexError` of the first index past them. A shorter one ends the list there.
+/// - A set and a `dict_values` are iterated.
+/// - Any other value, a dict too, is "not a sequence": an iterator, a generator, a frozenset,
+///   a `dict_keys` or a `dict_items`.
+///
+/// Its errors, as those of its elements, wait for the converters of the other columns.
+fn arrow_list(
+    obj: &Bound<'_, PyAny>,
+    dt: &DataType,
+    element_type: &DataType,
+    contains_null: bool,
+    late: &mut Late,
+) -> PyResult<Value> {
+    let py = obj.py();
+    let mut items = Vec::new();
+    if numpy_array_dimensions(obj)?.is_some_and(|dimensions| dimensions != 1) {
+        let message = match arrow_type_text(dt) {
+            Some(list) => format!(
+                "Can only convert 1-dimensional array values of {list} to a variable-sized list"
+            ),
+            // A type that PyArrow has none of, which `arrow_schema_error` raises first.
+            None => "Can only convert 1-dimensional array values".to_string(),
+        };
+        return Ok(late.defer(|| Err(pyarrow_error(py, "ArrowInvalid", message)?)));
+    }
     // SAFETY: `obj` is a live object, and PySequence_Check always succeeds without calling
     // into Python.
-    (unsafe { pyo3::ffi::PySequence_Check(obj.as_ptr()) } == 1)
-        || obj.is_instance_of::<PySet>()
-        || obj.is_instance_of::<PyDictValues>()
+    let is_sequence = unsafe { pyo3::ffi::PySequence_Check(obj.as_ptr()) } == 1;
+    if let Ok(list) = obj.cast::<PyList>() {
+        for item in list.iter() {
+            items.push(convert(&item, element_type, contains_null, late)?);
+        }
+    } else if let Ok(tuple) = obj.cast::<PyTuple>() {
+        for item in tuple.iter() {
+            items.push(convert(&item, element_type, contains_null, late)?);
+        }
+    } else if is_sequence {
+        // SAFETY: `obj` is a live object. PySequence_Size returns -1 with an exception set
+        // when it fails.
+        let len = unsafe { pyo3::ffi::PySequence_Size(obj.as_ptr()) };
+        if len < 0 {
+            let err = PyErr::fetch(py);
+            return Ok(late.defer(|| Err(err)));
+        }
+        // The length is the object's own, so it reserves nothing: a wrong one is read up to
+        // the first index that fails.
+        for index in 0..len {
+            // SAFETY: PySequence_GetItem returns a new reference, or NULL with an exception
+            // set.
+            let item = unsafe {
+                Bound::from_owned_ptr_or_err(py, pyo3::ffi::PySequence_GetItem(obj.as_ptr(), index))
+            };
+            match item {
+                Ok(item) => items.push(convert(&item, element_type, contains_null, late)?),
+                Err(err) => return Ok(late.defer(|| Err(err))),
+            }
+        }
+    } else if obj.is_instance_of::<PySet>() || obj.is_instance_of::<PyDictValues>() {
+        for item in obj.try_iter()? {
+            items.push(convert(&item?, element_type, contains_null, late)?);
+        }
+    } else {
+        return Ok(late.defer(|| {
+            Err(pyarrow_error(
+                py,
+                "ArrowTypeError",
+                format!(
+                    "Could not convert {} with type {}: was not a sequence or recognized null \
+                     for conversion to list type",
+                    obj.repr()?,
+                    arrow_type_name(obj)?
+                ),
+            )?)
+        }));
+    }
+    Ok(Value::List(items))
+}
+
+/// The number of dimensions of `obj` if it is a NumPy array. NumPy is not imported when it is
+/// not loaded, as such a value can only exist once it was.
+fn numpy_array_dimensions(obj: &Bound<'_, PyAny>) -> PyResult<Option<usize>> {
+    let py = obj.py();
+    let modules = py
+        .import(intern!(py, "sys"))?
+        .getattr(intern!(py, "modules"))?;
+    match modules.cast::<PyDict>()?.get_item(intern!(py, "numpy"))? {
+        Some(numpy) if !numpy.is_none() => {
+            if obj.is_instance(&numpy.getattr(intern!(py, "ndarray"))?)? {
+                Ok(Some(obj.getattr(intern!(py, "ndim"))?.extract()?))
+            } else {
+                Ok(None)
+            }
+        }
+        _ => Ok(None),
+    }
+}
+
+/// The Arrow type of `dt` as PyArrow writes it, for the types that PySpark has no converter
+/// of, whose values PyArrow takes as they are (`arrow_list`). `None` for a type that PySpark's
+/// `to_arrow_type` has no Arrow type of, such as a char or a year-month interval.
+fn arrow_type_text(dt: &DataType) -> Option<String> {
+    Some(match dt {
+        DataType::Boolean => "bool".to_string(),
+        DataType::Byte => "int8".to_string(),
+        DataType::Short => "int16".to_string(),
+        DataType::Integer => "int32".to_string(),
+        DataType::Long => "int64".to_string(),
+        DataType::Float => "float".to_string(),
+        DataType::Double => "double".to_string(),
+        DataType::Date => "date32[day]".to_string(),
+        DataType::DayTimeInterval { .. } => "duration[us]".to_string(),
+        DataType::Time { .. } => "time64[ns]".to_string(),
+        DataType::Array {
+            element_type,
+            contains_null,
+        } => format!(
+            "list<element: {}{}>",
+            arrow_type_text(element_type)?,
+            if *contains_null { "" } else { " not null" }
+        ),
+        _ => return None,
+    })
 }
 
 /// A field value of `dt` from `obj`, as PySpark's converters and then PyArrow convert it.
@@ -1242,28 +1377,15 @@ pub(crate) fn convert(
             contains_null,
         } => {
             // As PySpark: an array whose elements need a converter takes a list or an
-            // array.array, and another array is taken as it is, by PyArrow, which takes a
-            // sequence, such as a tuple or a NumPy array of numbers or bools, a set or a
-            // dict_values (`is_arrow_list`).
-            if needs_converter(dt, nullable) {
-                if !obj.is_instance_of::<PyList>()
-                    && !obj.is_instance(ARRAY.import(py, "array", "array")?.as_any())?
-                {
-                    return Err(assertion());
-                }
-            } else if !is_arrow_list(obj) || obj.try_iter().is_err() {
-                return Ok(late.defer(|| {
-                    Err(pyarrow_error(
-                        py,
-                        "ArrowTypeError",
-                        format!(
-                            "Could not convert {} with type {}: was not a sequence or \
-                             recognized null for conversion to list type",
-                            obj.repr()?,
-                            arrow_type_name(obj)?
-                        ),
-                    )?)
-                }));
+            // array.array, which the converter iterates, and another array is taken as it is,
+            // by PyArrow (`arrow_list`).
+            if !needs_converter(dt, nullable) {
+                return arrow_list(obj, dt, element_type, *contains_null, late);
+            }
+            if !obj.is_instance_of::<PyList>()
+                && !obj.is_instance(ARRAY.import(py, "array", "array")?.as_any())?
+            {
+                return Err(assertion());
             }
             let mut items = Vec::with_capacity(obj.len().unwrap_or(0));
             for item in obj.try_iter()? {
