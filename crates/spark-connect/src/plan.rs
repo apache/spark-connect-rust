@@ -634,8 +634,19 @@ pub(crate) struct PlanIds {
 /// The state of `PlanIds`, all guarded by its one lock.
 #[derive(Debug)]
 struct PlanIdNodes {
-    ids: HashMap<usize, (Weak<LogicalPlan>, i64)>,
+    /// Each key's node, its plan ID, and the order in which the key got that ID.
+    ids: HashMap<usize, (Weak<LogicalPlan>, i64, u64)>,
     prune_at: usize,
+    /// The order of the next key that gets an ID.
+    next_order: u64,
+}
+
+impl PlanIdNodes {
+    fn insert(&mut self, key: usize, node: &Arc<LogicalPlan>, id: i64) {
+        let order = self.next_order;
+        self.next_order += 1;
+        self.ids.insert(key, (Arc::downgrade(node), id, order));
+    }
 }
 
 impl PlanIds {
@@ -646,6 +657,7 @@ impl PlanIds {
             nodes: Mutex::new(PlanIdNodes {
                 ids: HashMap::new(),
                 prune_at: Self::MIN_PRUNE_AT,
+                next_order: 0,
             }),
         }
     }
@@ -667,15 +679,15 @@ impl PlanIds {
         let mut nodes = self.nodes.lock().unwrap_or_else(|e| e.into_inner());
         // The entry's `Weak` keeps its allocation from being freed, so a live node at this
         // address is the node the entry was made for.
-        if let Some((_, id)) = nodes.ids.get(&key) {
+        if let Some((_, id, _)) = nodes.ids.get(&key) {
             return *id;
         }
         if nodes.ids.len() >= nodes.prune_at {
-            nodes.ids.retain(|_, (node, _)| node.strong_count() > 0);
+            nodes.ids.retain(|_, (node, _, _)| node.strong_count() > 0);
             nodes.prune_at = (nodes.ids.len() * 2).max(Self::MIN_PRUNE_AT);
         }
         let id = NEXT_PLAN_ID.fetch_add(1, Ordering::Relaxed);
-        nodes.ids.insert(key, (Arc::downgrade(node), id));
+        nodes.insert(key, node, id);
         id
     }
 
@@ -684,22 +696,20 @@ impl PlanIds {
     pub(crate) fn assign(&self, node: &Arc<LogicalPlan>, id: i64) {
         NEXT_PLAN_ID.fetch_max(id.saturating_add(1), Ordering::Relaxed);
         let mut nodes = self.nodes.lock().unwrap_or_else(|e| e.into_inner());
-        nodes
-            .ids
-            .insert(Arc::as_ptr(node) as usize, (Arc::downgrade(node), id));
+        nodes.insert(Arc::as_ptr(node) as usize, node, id);
     }
 
-    /// A live node of the plan ID `id`, such as that of the DataFrame of a relation that this
-    /// session sent.
+    /// The live node of the plan ID `id` that was first given it, such as the DataFrame that a
+    /// relation that this session sent is of, when it is alive.
     ///
     /// A plan ID is of one node that this session numbered (`id_of`, or `root_id_of` for the
     /// relation within the `WithRelations` that sends it), and of each node that was given it
-    /// (`assign`): each DataFrame of a relation that the session sent, such as
-    /// each unpickled copy of a DataFrame, is a node of its own with the plan ID of the
-    /// DataFrame it was of, which may be alive too. Any one of them is given, on purpose: they
-    /// are all the relation of that plan ID, and each copy took the Observations of a node of
-    /// the ID when it was made (`DataFrame::from_sent_relation`, the one caller), so they all
-    /// have the same ones.
+    /// (`assign`): each DataFrame of a relation that the session sent, such as each unpickled
+    /// copy of a DataFrame, or a deep copy of one, is a node of its own with the plan ID of the
+    /// DataFrame it was of, which may be alive too. A deep copy has Observations of its own
+    /// (`DataFrame::detached_copy`), so the nodes of an ID may differ in them: the first given
+    /// the ID is taken, which is the DataFrame that the copies were made of, as long as it is
+    /// alive, so that a copy of a relation shares its Observations as PySpark's `copy.copy` does.
     ///
     /// This scans every node of the session, once for each DataFrame made of a sent relation,
     /// which costs less than keeping a second map by plan ID in step with the first on every
@@ -709,8 +719,10 @@ impl PlanIds {
         nodes
             .ids
             .values()
-            .filter(|(_, node_id)| *node_id == id)
-            .find_map(|(node, _)| node.upgrade())
+            .filter(|(_, node_id, _)| *node_id == id)
+            .filter_map(|(node, _, order)| node.upgrade().map(|node| (*order, node)))
+            .min_by_key(|(order, _)| *order)
+            .map(|(_, node)| node)
     }
 
     #[cfg(test)]
@@ -3284,6 +3296,23 @@ mod plan_id_tests {
         // A plan ID that was given is not one that the session numbers a later node with.
         let later = Arc::new(range(0, 1, 1));
         assert_ne!(ids.id_of(&later), id);
+    }
+
+    /// The node of a plan ID is the first of its nodes that was given the ID and is alive, so a
+    /// copy that was made later, whose Observations may differ, is taken only once that is gone.
+    #[test]
+    fn the_node_of_a_plan_id_is_the_first_given_one_that_is_alive() {
+        let ids = PlanIds::new();
+        let numbered = Arc::new(range(0, 3, 1));
+        let id = ids.id_of(&numbered);
+        let (copy, other_copy) = (Arc::new(range(0, 3, 1)), Arc::new(range(0, 3, 1)));
+        ids.assign(&copy, id);
+        ids.assign(&other_copy, id);
+        assert!(one_of(ids.node_of(id), &[&numbered]));
+        std::mem::drop(numbered);
+        assert!(one_of(ids.node_of(id), &[&copy]));
+        std::mem::drop(copy);
+        assert!(one_of(ids.node_of(id), &[&other_copy]));
     }
 }
 

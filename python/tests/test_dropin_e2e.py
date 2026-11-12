@@ -3906,6 +3906,45 @@ def test_observations_receive_the_observed_metrics_as_pyspark(session):
     assert error.value.getCondition() == "UNSUPPORTED_OPERATION"
 
 
+def test_a_deep_copy_of_a_dataframe_sets_its_own_observations_as_pyspark(session):
+    # As PySpark's deep copy of a DataFrame, which copies the Observations of its plan: an
+    # action of the copy sets the copies and not the Observations of the DataFrame, which keep
+    # their metrics as they were when copied; copy.copy shares them, and so does a DataFrame
+    # over a shared one.
+    import copy
+    import gc
+
+    from pyspark.sql import Observation
+
+    observation = Observation("deep")
+    df = session.range(3).observe(observation, F.count(F.lit(1)).alias("c"))
+    copied = copy.deepcopy(df)
+    del df
+    gc.collect()
+    assert copied.count() == 3
+    assert observation.get == {}
+
+    shallow = Observation("shallow")
+    df = session.range(4).observe(shallow, F.count(F.lit(1)).alias("c"))
+    assert copy.copy(df).count() == 4 and shallow.get == {"c": 4}
+
+    collected = Observation("collected")
+    df = session.range(2).observe(collected, F.count(F.lit(1)).alias("c"))
+    assert df.collect() == [Row(id=0), Row(id=1)] and collected.get == {"c": 2}
+    late = copy.deepcopy(df)
+    assert late.count() == 2 and collected.get == {"c": 2}
+
+    first, second = Observation("join_first"), Observation("join_second")
+    left = session.range(3).observe(first, F.count(F.lit(1)).alias("c"))
+    right = session.range(5).observe(second, F.count(F.lit(1)).alias("c"))
+    joined = left.join(right, "id")
+    joined_copy = copy.deepcopy(joined)
+    assert joined_copy.count() == 3
+    assert first.get == {} and second.get == {}
+    assert joined.count() == 3
+    assert first.get == {"c": 3} and second.get == {"c": 5}
+
+
 def test_try_cast_and_isin_raise_the_errors_of_pyspark(session):
     # As PySpark Connect's: try_cast of an int, and isin of a tuple, raise PySpark's errors.
     from pyspark.errors import PySparkTypeError
