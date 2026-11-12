@@ -10,7 +10,7 @@ use crate::dataframe::PyDataFrame;
 use crate::errors::{not_expected_type, ResultExt};
 use crate::options::{
     set_option_skip_none, set_options_skip_none, set_reader_kwargs_unset_none,
-    set_reader_option_unset_none,
+    set_reader_option_unset_none, DefaultedOption,
 };
 
 /// Python wrapper for the batch DataFrameReader.
@@ -547,24 +547,30 @@ impl PyDataFrameReader {
     }
 
     /// Read TEXT file(s) - full pyspark signature; each named option is
-    /// applied as a read option when provided.
-    #[pyo3(signature = (paths, wholetext=None, lineSep=None, pathGlobFilter=None, recursiveFileLookup=None, modifiedBefore=None, modifiedAfter=None))]
+    /// applied as a read option when provided. As PySpark's `wholetext=False`, an omitted
+    /// `wholetext` sets `false`, also over an earlier `wholetext` option.
+    #[pyo3(
+        signature = (paths, wholetext=DefaultedOption::Omitted, lineSep=None, pathGlobFilter=None, recursiveFileLookup=None, modifiedBefore=None, modifiedAfter=None),
+        text_signature = "($self, paths, wholetext=False, lineSep=None, pathGlobFilter=None, recursiveFileLookup=None, modifiedBefore=None, modifiedAfter=None)"
+    )]
     #[allow(non_snake_case, clippy::too_many_arguments)]
     fn text(
         &mut self,
+        py: Python<'_>,
         paths: &Bound<'_, PyAny>,
-        wholetext: Option<&Bound<'_, PyAny>>,
+        wholetext: DefaultedOption,
         lineSep: Option<&Bound<'_, PyAny>>,
         pathGlobFilter: Option<&Bound<'_, PyAny>>,
         recursiveFileLookup: Option<&Bound<'_, PyAny>>,
         modifiedBefore: Option<&Bound<'_, PyAny>>,
         modifiedAfter: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
+        let wholetext = wholetext.or_bool(py, false);
         let mut r = self.inner.clone();
         r = set_options_skip_none(
             r,
             &[
-                ("wholetext", wholetext),
+                ("wholetext", Some(&wholetext)),
                 ("lineSep", lineSep),
                 ("pathGlobFilter", pathGlobFilter),
                 ("recursiveFileLookup", recursiveFileLookup),
