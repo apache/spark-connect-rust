@@ -198,12 +198,40 @@ pub(crate) fn set_opts(
 
 /// The text of an option of the stream reader, as `DataStreamReader.option` and its format methods
 /// send it: the `str()` of the value, so a bool is `"True"`, where `options` and `load` lowercase
-/// it through `to_str`. None is left out.
+/// it through `to_str`. None is left out. A str that UTF-8 cannot encode raises, as
+/// [`str_text`].
 pub(crate) fn stream_option_value(v: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
     if v.is_none() {
         return Ok(None);
     }
-    Ok(Some(v.str()?.to_string()))
+    Ok(Some(str_text(v)?))
+}
+
+/// An option argument of a format method whose Python default is not None, which PySpark's
+/// `_set_opts` then sets on every call, over an earlier option of the same name: `text`'s
+/// `wholetext=False`. An omitted argument is that default, and None is skipped, as PySpark
+/// tells them apart.
+pub(crate) enum DefaultedOption {
+    Omitted,
+    Given(Py<PyAny>),
+}
+
+impl<'a, 'py> FromPyObject<'a, 'py> for DefaultedOption {
+    type Error = PyErr;
+
+    fn extract(obj: Borrowed<'a, 'py, PyAny>) -> PyResult<Self> {
+        Ok(DefaultedOption::Given(obj.to_owned().unbind()))
+    }
+}
+
+impl DefaultedOption {
+    /// The value of the argument, `default` when it is omitted.
+    pub(crate) fn or_bool<'py>(&self, py: Python<'py>, default: bool) -> Bound<'py, PyAny> {
+        match self {
+            DefaultedOption::Omitted => PyBool::new(py, default).to_owned().into_any(),
+            DefaultedOption::Given(value) => value.bind(py).clone(),
+        }
+    }
 }
 
 /// `builder` with the option `name` of `value` for the stream reader, **skipping** a `value` that

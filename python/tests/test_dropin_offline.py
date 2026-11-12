@@ -6828,6 +6828,9 @@ def test_strings_that_utf8_cannot_encode_raise_value_error_as_options_and_fills_
         lambda: df.write.option("path", bad),
         lambda: df.write.options(**{bad: "v"}),
         lambda: spark.readStream.options(**{bad: "v"}),
+        lambda: spark.readStream.option("lineSep", bad),
+        lambda: spark.readStream.text("/t", lineSep=bad),
+        lambda: spark.readStream.format("text").option("path", bad),
         lambda: SparkSession.builder.config(map={bad: "v"}),
     ]:
         with pytest.raises(ValueError, match=message):
@@ -19832,6 +19835,29 @@ def test_stream_reader_converts_bool_options_as_pyspark(offline_spark):
     r.load("/l", format="json", g=True)
     assert r._options["g"] == "true"
     assert r._options["header"] == "True"
+
+
+def test_text_sets_its_wholetext_default_over_an_earlier_option_as_pyspark(offline_spark):
+    # As PySpark's text(paths, wholetext=False, ...), whose _set_opts sets the default on every
+    # call: an earlier wholetext option is overridden, unless wholetext=None, which is skipped.
+    # The batch reader sets "false", as to_str, and the stream reader "False", as str.
+    import inspect
+
+    for reader, default, given in [
+        (lambda: offline_spark.read, "false", "true"),
+        (lambda: offline_spark.readStream, "False", "True"),
+    ]:
+        r = reader().option("wholetext", True)
+        r.text("/t")
+        assert r._options["wholetext"] == default
+        r = reader().option("wholetext", True)
+        r.text("/t", wholetext=None)
+        assert r._options["wholetext"] == given
+        r = reader()
+        r.text("/t", wholetext=True)
+        assert r._options["wholetext"] == given
+        signature = inspect.signature(reader().text)
+        assert signature.parameters["wholetext"].default is False
 
 
 def test_writer_setters_mutate_and_return_self(offline_spark):

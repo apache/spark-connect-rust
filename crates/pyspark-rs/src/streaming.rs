@@ -14,7 +14,7 @@ use std::sync::Arc;
 use crate::dataframe::{PyDataFrame, WriterState};
 use crate::errors::spark_error_to_py_exception;
 use crate::interrupt::{interruptible, interruptible_outcome};
-use crate::options::{set_stream_option_skip_none, set_stream_options_skip_none};
+use crate::options::{set_stream_option_skip_none, set_stream_options_skip_none, DefaultedOption};
 
 /// Adapts Python listeners to the native bus: deserialize one typed event for the whole
 /// snapshot, then dispatch it through Python's callback-exception isolation helper. Decode
@@ -683,21 +683,28 @@ impl PyDataStreamReader {
         Ok(PyDataFrame::new(r.orc(&path)))
     }
 
-    #[pyo3(signature = (path, wholetext=None, lineSep=None, pathGlobFilter=None, recursiveFileLookup=None))]
+    /// As PySpark's `wholetext=False`, an omitted `wholetext` sets `False`, also over an earlier
+    /// `wholetext` option.
+    #[pyo3(
+        signature = (path, wholetext=DefaultedOption::Omitted, lineSep=None, pathGlobFilter=None, recursiveFileLookup=None),
+        text_signature = "($self, path, wholetext=False, lineSep=None, pathGlobFilter=None, recursiveFileLookup=None)"
+    )]
     #[allow(non_snake_case)]
     fn text(
         &mut self,
+        py: Python<'_>,
         path: &Bound<'_, PyAny>,
-        wholetext: Option<&Bound<'_, PyAny>>,
+        wholetext: DefaultedOption,
         lineSep: Option<&Bound<'_, PyAny>>,
         pathGlobFilter: Option<&Bound<'_, PyAny>>,
         recursiveFileLookup: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
+        let wholetext = wholetext.or_bool(py, false);
         let mut r = self.inner.clone();
         r = set_stream_options_skip_none(
             r,
             &[
-                ("wholetext", wholetext),
+                ("wholetext", Some(&wholetext)),
                 ("lineSep", lineSep),
                 ("pathGlobFilter", pathGlobFilter),
                 ("recursiveFileLookup", recursiveFileLookup),
