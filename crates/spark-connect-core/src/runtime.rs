@@ -236,12 +236,20 @@ async fn watched<F: Future>(
     tokio::pin!(f);
     let mut ticks = tokio::time::interval(POLL_INTERVAL);
     let mut interrupt: Option<tokio::task::JoinHandle<()>> = None;
+    // Whether `watch` aborted the wait, which a second signal after an interrupt does.
+    let mut aborted = false;
     loop {
         tokio::select! {
             output = &mut f => {
                 // The interrupt is awaited, and a second signal, polled meanwhile, ends the wait
-                // of it: the interrupt is then cancelled.
+                // of it: the interrupt is then cancelled. When that signal already aborted the
+                // wait, which ended `f`, the interrupt is cancelled at once, as PySpark stops at
+                // the second signal while an interrupt hangs or is retried.
                 if let Some(mut interrupt) = interrupt {
+                    if aborted {
+                        interrupt.abort();
+                        return output;
+                    }
                     loop {
                         tokio::select! {
                             _ = &mut interrupt => break,
@@ -267,6 +275,7 @@ async fn watched<F: Future>(
                 }
                 Watch::Abort => {
                     abort.send_replace(ABORT_ALL);
+                    aborted = true;
                 }
             },
         }
@@ -496,6 +505,52 @@ mod tests {
         });
         assert_eq!(output, 9);
         assert!(interrupted.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_a_second_signal_ends_the_wait_without_awaiting_a_hung_interrupt() {
+        // The first signal interrupts, and the interrupt never ends, as against a server that
+        // does not answer it. The second aborts the wait, which ends its future, and the wait
+        // returns at once, cancelling the interrupt, without the third signal that comes later.
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        struct Dropped(Arc<AtomicBool>);
+        impl Drop for Dropped {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        let polls = Arc::new(AtomicUsize::new(0));
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let (counter, flag) = (Arc::clone(&polls), Arc::clone(&cancelled));
+        let watch: Arc<WaitWatch> =
+            Arc::new(move || match counter.fetch_add(1, Ordering::SeqCst) {
+                0 => {
+                    let dropped = Dropped(Arc::clone(&flag));
+                    Watch::Interrupt(Box::pin(async move {
+                        let _dropped = dropped;
+                        std::future::pending::<()>().await
+                    }))
+                }
+                1 => Watch::Abort,
+                n if n >= 10 => Watch::Abort,
+                _ => Watch::Continue,
+            });
+        let output = with_wait_watch(watch, || {
+            block_on(until_abort(ABORT_ALL, std::future::pending::<u8>()))
+        });
+        assert_eq!(output, None);
+        assert!(
+            polls.load(Ordering::SeqCst) < 10,
+            "the wait needed a third signal"
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !cancelled.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            cancelled.load(Ordering::SeqCst),
+            "the interrupt was not cancelled"
+        );
     }
 
     #[test]

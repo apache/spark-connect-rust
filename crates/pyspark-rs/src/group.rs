@@ -64,7 +64,7 @@ pub(crate) fn dict_aggregates(
             return Err(pyo3::exceptions::PyAssertionError::new_err(()));
         };
         // As PySpark's `agg` of a dict, by `col`, of its origin.
-        let _origin = crate::origin::with_origin("col");
+        let _origin = crate::origin::with_origin("col")?;
         let c = spark_connect::functions::col(&column);
         // Build func(col) as an unresolved function resolved server-side, so aggregate names
         // (max/min/sum/avg/count/...) all work regardless of whether they are in the generated

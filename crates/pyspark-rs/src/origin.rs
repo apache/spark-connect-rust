@@ -21,9 +21,13 @@ static IPYTHON_IMPORTS_TRIED: AtomicBool = AtomicBool::new(false);
 /// debugging is enabled. As PySpark's `_with_origin`, with the functions of
 /// `pyspark.errors.utils` that it calls: `is_debugging_enabled`, which reads
 /// `spark.python.sql.dataFrameDebugging.enabled` once, and `_capture_call_site`, which
-/// `call_site` gives without importing a module per call. An origin that cannot be read is
-/// not set, as an expression is the same without one.
-pub(crate) fn with_origin(fragment: &str) -> Option<OriginGuard> {
+/// `call_site` gives without importing a module per call.
+///
+/// As `_with_origin`, the error of `is_debugging_enabled` is raised by the API function: the
+/// KeyboardInterrupt that ends its wait for the server, or the error of a server that cannot be
+/// reached. A call site that cannot be read leaves the expression without an origin, as it is
+/// the same without one, unless its error is not an `Exception`, as a KeyboardInterrupt.
+pub(crate) fn with_origin(fragment: &str) -> PyResult<Option<OriginGuard>> {
     Python::attach(|py| -> PyResult<Option<OriginGuard>> {
         let utils = UTILS
             .get_or_try_init(py, || py.import("pyspark.errors.utils").map(Bound::unbind))?
@@ -31,13 +35,16 @@ pub(crate) fn with_origin(fragment: &str) -> Option<OriginGuard> {
         if !utils.call_method0("is_debugging_enabled")?.is_truthy()? {
             return Ok(None);
         }
-        let call_site = call_site(py, 1)?;
+        let call_site = match call_site(py, 1) {
+            Ok(call_site) => call_site,
+            Err(err) if err.is_instance_of::<pyo3::exceptions::PyException>(py) => return Ok(None),
+            Err(err) => return Err(err),
+        };
         Ok(Some(set_current(Origin {
             fragment: fragment.to_string(),
             call_site,
         })))
     })
-    .unwrap_or(None)
 }
 
 /// The call site of the first `depth` frames of user code, as `_capture_call_site(depth)` of
