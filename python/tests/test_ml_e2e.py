@@ -419,6 +419,60 @@ def test_ml_connect_binary_evaluator_scores_the_probability_of_pyspark_docstring
     assert BinaryClassificationEvaluator().evaluate(dataset) == pytest.approx(5 / 6, abs=1e-9)
 
 
+def test_ml_connect_evaluators_take_the_columns_and_the_pandas_frames_of_pyspark_tests(session):
+    # The inputs of PySpark's own evaluator tests (test_legacy_mode_evaluation.py) and docstrings,
+    # which its torch evaluators read as tensors: int labels and predictions, a float32 or an
+    # array probability, whose column 1 is the positive class, and pandas DataFrames, which are
+    # sent through createDataFrame here, as the evaluators run on the server. The JVM evaluators
+    # give doubles, 0.6 where PySpark's float32 tensors give 0.6000000238418579.
+    from pyspark.ml.connect.evaluation import (
+        BinaryClassificationEvaluator,
+        MulticlassClassificationEvaluator,
+        RegressionEvaluator,
+    )
+    from pyspark.sql import functions as F
+
+    multiclass = session.createDataFrame(
+        [(1, 1), (1, 1), (2, 3), (0, 0), (0, 1), (3, 1), (3, 3), (2, 2), (1, 0), (2, 2)],
+        schema=["label", "prediction"],
+    )
+    accuracy = MulticlassClassificationEvaluator(metricName="accuracy")
+    assert accuracy.evaluate(multiclass) == pytest.approx(0.6)
+    assert accuracy.evaluate(dataset=multiclass.toPandas()) == pytest.approx(0.6)
+    docstring = session.createDataFrame(
+        [(1, 1), (0, 0), (2, 2), (1, 0), (2, 1)], schema=["label", "prediction"])
+    assert MulticlassClassificationEvaluator().evaluate(docstring) == pytest.approx(0.6)
+
+    regression = session.createDataFrame(
+        [(1.0, 2), (-1.0, -1), (2.0, 3)], schema=["label", "prediction"])
+    mse = RegressionEvaluator(metricName="mse")
+    assert mse.evaluate(regression) == pytest.approx(2 / 3)
+    assert mse.evaluate(regression.toPandas()) == pytest.approx(2 / 3)
+
+    binary = session.createDataFrame(
+        [
+            (1, 0.2, [0.8, 0.2]),
+            (0, 0.6, [0.4, 0.6]),
+            (1, 0.8, [0.2, 0.8]),
+            (1, 0.7, [0.3, 0.7]),
+            (0, 0.4, [0.6, 0.4]),
+            (0, 0.3, [0.7, 0.3]),
+        ],
+        schema=["label", "prob", "prob2"],
+    ).withColumn("prob32", F.col("prob").cast("float"))
+    for metric in ("areaUnderROC", "areaUnderPR"):
+        expected = BinaryClassificationEvaluator(
+            metricName=metric, probabilityCol="prob").evaluate(binary)
+        for column in ("prob2", "prob32"):
+            evaluator = BinaryClassificationEvaluator(metricName=metric, probabilityCol=column)
+            assert evaluator.evaluate(binary) == pytest.approx(expected), (metric, column)
+            assert evaluator.evaluate(binary.toPandas()) == pytest.approx(expected), (metric, column)
+    auroc = BinaryClassificationEvaluator(probabilityCol="prob2").evaluate(binary)
+    assert auroc == pytest.approx(2 / 3)
+    with pytest.raises(AttributeError, match="'list' object has no attribute 'select'"):
+        accuracy.evaluate([(1, 1)])
+
+
 def test_ml_connect_setters_change_the_next_evaluate_and_fit_as_pyspark(session):
     # As PySpark's Params._set: a setter of pyspark.ml.connect sets the param of the evaluator or
     # estimator itself and returns it, so the next evaluate or fit uses the value of a setter whose

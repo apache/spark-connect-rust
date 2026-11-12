@@ -286,7 +286,8 @@ def test_ml_connect_setters_set_the_params_of_their_receiver_as_pyspark(ml_mock)
         assert sorted(n for n in dir(cls) if n.startswith("set")) == sorted(setters)
         receiver = cls()
         for setter, name in setters.items():
-            # By the name of the argument of PySpark's setters, value.
+            # By the name of the argument of PySpark's setters, value. The evaluators' setters are
+            # of this client, as PySpark's evaluators have none, with the same argument.
             assert getattr(receiver, setter)(value=values[name]) is receiver, (cls, setter)
         params = sent_params(receiver)
         sent_values = {_sent_name(cls.__name__, name): value for name, value in values.items()}

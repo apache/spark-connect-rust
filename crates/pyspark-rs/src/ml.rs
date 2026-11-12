@@ -295,15 +295,106 @@ fn fit_core<C: Estimator>(
     })
 }
 
-fn evaluate_native<T>(slf: &Bound<'_, T>, df: &PyDataFrame) -> PyResult<f64>
+/// The input columns of an evaluator, as the JVM evaluator reads them: `doubles`, a prediction
+/// that it reads as a double only, and `score`, a probability that it reads as a double or a
+/// vector, where PySpark's evaluators read any numeric column, and an array, as a tensor.
+struct EvaluatorInputs {
+    doubles: Vec<String>,
+    score: Option<String>,
+}
+
+/// Evaluate `dataset` with the JVM evaluator of `slf`, whose input columns `inputs` gives, as
+/// PySpark's evaluators evaluate it (see [`evaluation_dataset`] and [`evaluator_input`]).
+fn evaluate_native<T>(
+    slf: &Bound<'_, T>,
+    dataset: &Bound<'_, PyAny>,
+    inputs: impl FnOnce(&T::Core) -> EvaluatorInputs,
+) -> PyResult<f64>
 where
     T: Native + PyClass,
     T::Core: Evaluator,
 {
+    let py = slf.py();
     let evaluator = snapshot(slf)?;
-    interruptible(slf.py(), &df.dataframe.spark_session(), || {
-        evaluator.evaluate(&df.dataframe).map_err(Box::new)
+    let df = evaluation_dataset(dataset)?;
+    let df = evaluator_input(py, df, inputs(&evaluator))?;
+    interruptible(py, &df.spark_session(), || {
+        evaluator.evaluate(&df).map_err(Box::new)
     })
+}
+
+/// The dataset of `evaluate`, as PySpark's evaluators take it: a DataFrame, or a pandas DataFrame,
+/// which PySpark evaluates locally, and which is sent here with `createDataFrame` of the active
+/// session, as the evaluators of this client run on the server. Another object raises the
+/// `AttributeError` of the `select` that PySpark's `aggregate_dataframe` calls on it.
+fn evaluation_dataset(dataset: &Bound<'_, PyAny>) -> PyResult<DataFrame> {
+    let py = dataset.py();
+    if let Ok(df) = dataset.extract::<PyRef<'_, PyDataFrame>>() {
+        return Ok(df.dataframe.clone());
+    }
+    // A pandas DataFrame is of an imported pandas.
+    let pandas = py
+        .import("sys")?
+        .getattr("modules")?
+        .get_item("pandas")
+        .ok();
+    if let Some(pandas) = pandas {
+        if dataset.is_instance(&pandas.getattr("DataFrame")?)? {
+            let df = py
+                .import("pyspark.sql")?
+                .getattr("SparkSession")?
+                .call_method0("active")?
+                .call_method1("createDataFrame", (dataset,))?;
+            return Ok(df.extract::<PyRef<'_, PyDataFrame>>()?.dataframe.clone());
+        }
+    }
+    dataset.getattr("select")?;
+    Err(PyTypeError::new_err(format!(
+        "evaluate() takes a DataFrame or a pandas DataFrame, not '{}'",
+        dataset.get_type().name()?
+    )))
+}
+
+/// `df` as the JVM evaluator reads it, with its columns of `inputs` converted: a prediction
+/// (`inputs.doubles`) of another numeric type is cast to a double, and a score (`inputs.score`) of
+/// another numeric type too, while an array score is sent as a vector by `array_to_vector`, which
+/// the JVM evaluator reads at its element 1, as PySpark's reads the column 1 of an array. The
+/// columns are found in the schema of `df` regardless of case, as Spark resolves them; another
+/// type is sent as it is, which the JVM evaluator checks.
+fn evaluator_input(py: Python<'_>, df: DataFrame, inputs: EvaluatorInputs) -> PyResult<DataFrame> {
+    use spark_connect::types::DataType;
+
+    let schema = interruptible(py, &df.spark_session(), || df.schema().map_err(Box::new))?;
+    let DataType::Struct { fields } = schema else {
+        return Ok(df);
+    };
+    let mut df = df;
+    for field in fields {
+        let named = |name: &String| name.eq_ignore_ascii_case(&field.name);
+        let score = inputs.score.as_ref().is_some_and(named);
+        if !score && !inputs.doubles.iter().any(named) {
+            continue;
+        }
+        // The column of this name exactly, a name with a dot too.
+        let column = spark_connect::column::col(&format!("`{}`", field.name.replace('`', "``")));
+        let converted = match &field.data_type {
+            DataType::Byte
+            | DataType::Short
+            | DataType::Integer
+            | DataType::Long
+            | DataType::Float
+            | DataType::Decimal { .. } => column.cast(DataType::Double),
+            DataType::Array { .. } if score => {
+                spark_connect::Column::new(spark_connect::expression::Expression::function(
+                    "array_to_vector",
+                    vec![column.expression().clone()],
+                ))
+            }
+            _ => continue,
+        };
+        df = df.with_column(&field.name, converted);
+    }
+    Ok(df)
 }
 
 /// A fitted ML model (result of `Estimator.fit`), wrapping a boxed core `Model`.
@@ -2164,8 +2255,13 @@ impl PyRegressionEvaluator {
     ) -> PyResult<Bound<'py, Self>> {
         set_param(slf, "metricName", Kind::Str, value)
     }
-    fn evaluate(slf: &Bound<'_, Self>, df: &PyDataFrame) -> PyResult<f64> {
-        evaluate_native(slf, df)
+    /// Evaluate `dataset`, a DataFrame or a pandas DataFrame, as PySpark's evaluator, which reads a
+    /// prediction of any numeric type.
+    fn evaluate(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<f64> {
+        evaluate_native(slf, dataset, |evaluator| EvaluatorInputs {
+            doubles: vec![evaluator.prediction_col().to_string()],
+            score: None,
+        })
     }
 }
 
@@ -2263,8 +2359,13 @@ impl PyBinaryClassificationEvaluator {
     ) -> PyResult<Bound<'py, Self>> {
         set_param(slf, "metricName", Kind::Str, value)
     }
-    fn evaluate(slf: &Bound<'_, Self>, df: &PyDataFrame) -> PyResult<f64> {
-        evaluate_native(slf, df)
+    /// Evaluate `dataset`, a DataFrame or a pandas DataFrame, as PySpark's evaluator, which reads a
+    /// probability of any numeric type, or an array of the probabilities of the classes.
+    fn evaluate(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<f64> {
+        evaluate_native(slf, dataset, |evaluator| EvaluatorInputs {
+            doubles: Vec::new(),
+            score: Some(evaluator.raw_prediction_col().to_string()),
+        })
     }
 }
 
@@ -2368,8 +2469,13 @@ impl PyMulticlassClassificationEvaluator {
     ) -> PyResult<Bound<'py, Self>> {
         set_param(slf, "metricName", Kind::Str, value)
     }
-    fn evaluate(slf: &Bound<'_, Self>, df: &PyDataFrame) -> PyResult<f64> {
-        evaluate_native(slf, df)
+    /// Evaluate `dataset`, a DataFrame or a pandas DataFrame, as PySpark's evaluator, which reads a
+    /// prediction of any numeric type.
+    fn evaluate(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<f64> {
+        evaluate_native(slf, dataset, |evaluator| EvaluatorInputs {
+            doubles: vec![evaluator.prediction_col().to_string()],
+            score: None,
+        })
     }
 }
 

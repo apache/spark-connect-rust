@@ -24,9 +24,11 @@ Python `timedelta` map keys are not yet supported.
 `scoreCol=` argument and `setScoreCol` of v4.2.0 are removed, without an alias:
 Spark's evaluator has no `scoreCol` param, so no value of it worked on the server.
 Use `set_raw_prediction_col` and `raw_prediction_col` in Rust, the column of raw prediction
-vectors that the evaluator scores. In Python, as in PySpark, it is `probabilityCol=` and
-`setProbabilityCol`, the column of probabilities, which the server reads as its raw prediction
-column.
+vectors that the evaluator scores. In Python it is `probabilityCol=`, as in PySpark, and
+`setProbabilityCol`, a setter of this client (PySpark's evaluators have none): the column of
+probabilities, which the server reads as its raw prediction column. A model without a
+probability column, such as the native `LinearSVC`, is scored with
+`probabilityCol="rawPrediction"`.
 
 The native ML classes take a JVM `Int` param as an `i32`: `LogisticRegression::set_max_iter`,
 `LinearSVC::set_max_iter` and `LinearSVC::set_aggregation_depth` take an `i32`, and
@@ -185,7 +187,15 @@ which takes `metricName`, `labelCol` and `predictionCol` by position as well, as
 PySpark's does; its `metricName` is `accuracy` by default, as in PySpark, where the JVM
 evaluator and the Rust API default to `f1`. The `probabilityCol` of
 `BinaryClassificationEvaluator` is `probability` by default, as in PySpark, and is sent as the
-`rawPredictionCol` that the JVM evaluator scores. Each value is converted by the `TypeConverters` of its param in
+`rawPredictionCol` that the JVM evaluator scores. The evaluators take a DataFrame or a pandas
+DataFrame, as PySpark's do, and run on the server: a pandas DataFrame is sent through
+`createDataFrame` of the active session. A prediction or a probability of another numeric type
+is cast to a double, and an array of probabilities is sent as a vector (`array_to_vector`),
+whose element 1 is scored, as PySpark's evaluator reads the column 1 of an array. The values
+are the JVM evaluators' doubles, where PySpark's are of float32 tensors (`0.6` where PySpark
+returns `0.6000000238418579`). The native scalers, as the native estimators, take ML vector
+features, where PySpark's take arrays: convert an array column with `array_to_vector`.
+Each value is converted by the `TypeConverters` of its param in
 PySpark (an integral float for an int param, for example), and a value that the
 converter rejects raises its `TypeError`. A fit, transform or evaluate sends only the
 params that the constructor or a setter set, so the server applies its defaults to
