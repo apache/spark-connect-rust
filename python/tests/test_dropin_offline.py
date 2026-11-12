@@ -11175,6 +11175,26 @@ def test_join_as_of_sends_the_as_of_join_as_pyspark(mock_connect):
         with pytest.raises(AssertionError, match="^how should be a string$"):
             left._joinAsOf(right, "id", "id", how=how)
 
+    # PySpark sends `how` and `direction` as protobuf string fields, whose errors it raises when
+    # it sends the plan, those of protobuf's default upb backend; this client builds the plan at
+    # once, so it raises them at the call. A str that UTF-8 cannot encode is a str to the assert
+    # of `how`, and the UnicodeEncodeError of its encoding; a `direction` of bytes is decoded as
+    # UTF-8, and any other value is upb's TypeError.
+    for kwargs in ({"how": "a\ud800"}, {"direction": "a\ud800"}):
+        with pytest.raises(UnicodeEncodeError) as e:
+            left._joinAsOf(right, "id", "id", **kwargs)
+        assert str(e.value) == (
+            "'utf-8' codec can't encode character '\\ud800' in position 1: surrogates not allowed"
+        )
+    join = sent_as_of_join(left._joinAsOf(right, "id", "id", direction=b"forward"))
+    assert join[10] == [b"forward"]
+    with pytest.raises(UnicodeDecodeError) as e:
+        left._joinAsOf(right, "id", "id", direction=b"\xff")
+    assert str(e.value) == "'utf-8' codec can't decode byte 0xff in position 0: invalid start byte"
+    for direction in (1, None):
+        with pytest.raises(TypeError, match="^bad argument type for built-in operation$"):
+            left._joinAsOf(right, "id", "id", direction=direction)
+
 
 def test_grouping_sets_group_by_their_grouping_columns_as_pyspark(mock_connect):
     # As PySpark's, groupingSets(groupingSets, *cols) groups by the sets with the grouping

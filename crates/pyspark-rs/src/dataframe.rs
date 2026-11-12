@@ -10,7 +10,7 @@ use crate::column::PyColumn;
 use crate::errors::{not_expected_type, ResultExt};
 use crate::group::PyGroupedData;
 use crate::interrupt::interruptible;
-use crate::options::{set_option_skip_none, set_options_skip_none};
+use crate::options::{set_option_skip_none, set_options_skip_none, DefaultedOption};
 use crate::row::{FieldConverters, NestedFieldNames};
 use crate::streaming::PyDataStreamWriter;
 use crate::types::PyDataType;
@@ -536,6 +536,24 @@ fn proto_string_type_error(value: &Bound<'_, PyAny>) -> PyErr {
     ))
 }
 
+/// The text of the `direction` of `_joinAsOf`, as protobuf's default upb backend sets the string
+/// field `AsOfJoin.direction` from it when PySpark sends the plan: a str, of which one that UTF-8
+/// cannot encode raises the `UnicodeEncodeError` of its encoding, or bytes, decoded as UTF-8 with
+/// the `UnicodeDecodeError` of invalid ones. Any other value is upb's `TypeError`.
+fn as_of_direction(value: &Bound<'_, PyAny>) -> PyResult<String> {
+    if value.is_instance_of::<pyo3::types::PyString>() {
+        return value.extract::<String>();
+    }
+    if value.is_instance_of::<pyo3::types::PyBytes>() {
+        return value
+            .call_method1(pyo3::intern!(value.py(), "decode"), ("utf-8",))?
+            .extract::<String>();
+    }
+    Err(pyo3::exceptions::PyTypeError::new_err(
+        "bad argument type for built-in operation",
+    ))
+}
+
 /// The join condition of `_joinAsOf` for its `on`, as PySpark's `AsOfJoin` plan sends it: a
 /// name or a list of names (`using_columns`), or a Column or a list of Columns, which are
 /// joined on their conjunction (`join_expr`).
@@ -1051,7 +1069,11 @@ impl PyDataFrame {
     /// default) and `direction` are not checked, as PySpark does not check them: a string that
     /// is none of the join types or directions of the core is sent as it is, and the server
     /// refuses what it does not read.
-    #[pyo3(name = "_joinAsOf", signature = (other, leftAsOfColumn, rightAsOfColumn, on=None, how=None, *, tolerance=None, allowExactMatches=true, direction="backward"))]
+    #[pyo3(
+        name = "_joinAsOf",
+        signature = (other, leftAsOfColumn, rightAsOfColumn, on=None, how=None, *, tolerance=None, allowExactMatches=true, direction=DefaultedOption::Omitted),
+        text_signature = "($self, other, leftAsOfColumn, rightAsOfColumn, on=None, how=None, *, tolerance=None, allowExactMatches=True, direction='backward')"
+    )]
     #[allow(non_snake_case, clippy::too_many_arguments)]
     fn join_as_of(
         &self,
@@ -1062,17 +1084,22 @@ impl PyDataFrame {
         how: Option<Bound<'_, PyAny>>,
         tolerance: Option<Bound<'_, PyAny>>,
         allowExactMatches: bool,
-        direction: &str,
+        direction: DefaultedOption,
     ) -> PyResult<PyDataFrame> {
         // As PySpark's `_check_same_session`, first.
         let other = self.same_session(other)?;
+        // As PySpark's `assert isinstance(how, str)`. A str that UTF-8 cannot encode is one, and
+        // raises the UnicodeEncodeError of its encoding once PySpark sends the plan, in protobuf's
+        // default upb backend; this client builds the plan here, so it raises that error here.
         let join_type = match how.filter(|how| !how.is_none()) {
             None => AsOfJoinType::Inner,
-            Some(how) => {
-                let how = how.extract::<String>().map_err(|_| {
-                    pyo3::exceptions::PyAssertionError::new_err("how should be a string")
-                })?;
-                AsOfJoinType::parse(&how)
+            Some(how) if how.is_instance_of::<pyo3::types::PyString>() => {
+                AsOfJoinType::parse(&how.extract::<String>()?)
+            }
+            Some(_) => {
+                return Err(pyo3::exceptions::PyAssertionError::new_err(
+                    "how should be a string",
+                ))
             }
         };
         let tolerance = match tolerance.filter(|tolerance| !tolerance.is_none()) {
@@ -1096,7 +1123,14 @@ impl PyDataFrame {
             join_type,
             tolerance,
             allow_exact_matches: allowExactMatches,
-            direction: AsOfJoinDirection::parse(direction),
+            // PySpark does not check `direction`, so its errors come last, as those of protobuf
+            // when the plan is sent (`as_of_direction`).
+            direction: match &direction {
+                DefaultedOption::Omitted => AsOfJoinDirection::Backward,
+                DefaultedOption::Given(direction) => {
+                    AsOfJoinDirection::parse(&as_of_direction(direction.bind(leftAsOfColumn.py()))?)
+                }
+            },
         };
         let df = self
             .dataframe
