@@ -5521,8 +5521,10 @@ def test_decision_tree_classifier_rejects_invalid_parameters_and_training_data(s
 
     with pytest.raises(Exception):
         DecisionTreeClassifier().fit(training.drop("features"))
+    # An array of numbers is taken as the vector of its numbers, as PySpark's estimators take
+    # arrays; an array of strings is not.
     with pytest.raises(Exception):
-        DecisionTreeClassifier().fit(training.withColumn("features",F.array(F.lit(1.0))))
+        DecisionTreeClassifier().fit(training.withColumn("features",F.array(F.lit("a"))))
 
 
 def _decision_tree_regressor():

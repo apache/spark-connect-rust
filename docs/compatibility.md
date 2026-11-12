@@ -162,10 +162,12 @@ two runs, were equal. For reproducible values, use the `_with_seed` variants
 
 The native `spark_connect::ml::LogisticRegression` fits Spark's JVM
 `org.apache.spark.ml.classification.LogisticRegression` through the Connect ML
-protocol. Training features must be ML vectors; convert an array column with
-`array_to_vector` before fitting. This differs from the deprecated Python
-`pyspark.ml.connect.classification.LogisticRegression`, which uses array features
-and PyTorch training.
+protocol. In the Rust API, training features must be ML vectors; convert an array column
+with `array_to_vector` before fitting. The Python class takes an array column of numbers too,
+as the deprecated `pyspark.ml.connect.classification.LogisticRegression` of PySpark does (see
+below), but fits the JVM estimator, where PySpark's trains with PyTorch: its model outputs the
+JVM's `rawPrediction` and `probability` vectors and a double `prediction`, where PySpark's
+outputs a `bigint` prediction and an `array<double>` probability.
 
 Fitting returns a server-cached model. Prediction uses that model's object
 reference and must use the same Spark session. Models are obtained through
@@ -193,8 +195,17 @@ DataFrame, as PySpark's do, and run on the server: a pandas DataFrame is sent th
 is cast to a double, and an array of probabilities is sent as a vector (`array_to_vector`),
 whose element 1 is scored, as PySpark's evaluator reads the column 1 of an array. The values
 are the JVM evaluators' doubles, where PySpark's are of float32 tensors (`0.6` where PySpark
-returns `0.6000000238418579`). The native scalers, as the native estimators, take ML vector
-features, where PySpark's take arrays: convert an array column with `array_to_vector`.
+returns `0.6000000238418579`). The native scalers, and the native estimators of a
+`featuresCol`, take the array columns of numbers that PySpark's take, as well as ML vectors: a
+fit, and the transform of its model, read the schema of the DataFrame, as PySpark's transform
+reads its columns, and send an array `inputCol` of a scaler, or `featuresCol` of another
+estimator, as the vector (`array_to_vector`) that the JVM reads; the transform outputs the
+array column as it was. The models of `StandardScaler` and `MaxAbsScaler` output an
+`array<double>` (`vector_to_array`), as PySpark's do, also of a vector input, which PySpark's
+scalers do not take. The scaled values are the JVM's doubles, also of an array of floats
+(`0.3333333333333333` where PySpark's float32 give `0.3333333432674408`).
+`StandardScaler` scales to `(x - mean) / std`, as PySpark's does: its constructor sends the
+`withMean` of Spark's scaler, which is false by default and which PySpark's scaler does not have.
 Each value is converted by the `TypeConverters` of its param in
 PySpark (an integral float for an int param, for example), and a value that the
 converter rejects raises its `TypeError`. A fit, transform or evaluate sends only the
