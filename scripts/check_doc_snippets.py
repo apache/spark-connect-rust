@@ -43,6 +43,7 @@ Usage:
 """
 
 import glob
+import json
 import re
 import subprocess
 import sys
@@ -50,10 +51,6 @@ import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-# cargo places the primary lib without a hash in target/debug; its dependencies
-# (arrow, prost, ...) live in target/debug/deps and are found via -L dependency.
-RLIB = REPO / "target" / "debug" / "libspark_connect.rlib"
-DEPS = REPO / "target" / "debug" / "deps"
 
 # ```rust``` (checked) vs ```{.rust .no-run}``` (rendered but skipped). We only check
 # plain ```rust``` fences; any info string with a comma/space/brace is left alone.
@@ -79,7 +76,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {{
 """
 
 
-def check_block(code: str, tmpdir: Path, idx: int) -> tuple[bool, str]:
+def check_block(
+    code: str, tmpdir: Path, idx: int, rlib: Path, deps: list[Path]
+) -> tuple[bool, str]:
     indented = "\n".join("        " + ln if ln.strip() else ln for ln in code.splitlines())
     src = tmpdir / f"snippet_{idx}.rs"
     src.write_text(HARNESS.format(body=indented))
@@ -92,10 +91,9 @@ def check_block(code: str, tmpdir: Path, idx: int) -> tuple[bool, str]:
             "--crate-type",
             "bin",
             "--emit=metadata",
-            "-L",
-            f"dependency={DEPS}",
+            *(arg for dep in deps for arg in ("-L", f"dependency={dep}")),
             "--extern",
-            f"spark_connect={RLIB}",
+            f"spark_connect={rlib}",
             "-o",
             str(out),
             str(src),
@@ -106,9 +104,49 @@ def check_block(code: str, tmpdir: Path, idx: int) -> tuple[bool, str]:
     return r.returncode == 0, r.stderr
 
 
+def crate_artifacts() -> tuple[Path | None, list[Path]]:
+    """The rlib of ``apache-spark-connect`` and the directories of the artifacts of its
+    dependencies (arrow, prost, ...), which rustc finds them in with ``-L dependency``, as cargo
+    reports them for ``cargo build -p apache-spark-connect``, of the units that are fresh too.
+
+    Cargo's layout of them changed: before Rust 1.100, the artifacts of all the dependencies are
+    in ``target/debug/deps``, and from Rust 1.100, those of each unit are in a directory of its
+    own, ``target/debug/build/<package>/<hash>/out``.
+    """
+    r = subprocess.run(
+        ["cargo", "build", "-p", "apache-spark-connect", "--message-format=json"],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+    )
+    if r.returncode != 0:
+        print(r.stderr[-4000:])
+        return None, []
+    rlib = None
+    deps: list[Path] = []
+    for line in r.stdout.splitlines():
+        try:
+            msg = json.loads(line)
+        except ValueError:
+            continue
+        if msg.get("reason") != "compiler-artifact":
+            continue
+        for name in msg.get("filenames", []):
+            path = Path(name)
+            if (
+                path.suffix in (".rlib", ".rmeta", ".so", ".dylib", ".dll")
+                and path.parent not in deps
+            ):
+                deps.append(path.parent)
+            if msg.get("target", {}).get("name") == "spark_connect" and path.suffix == ".rlib":
+                rlib = path
+    return rlib, deps
+
+
 def main() -> int:
-    if not RLIB.exists():
-        print(f"!! {RLIB} not found - run `cargo build -p apache-spark-connect` first")
+    rlib, deps = crate_artifacts()
+    if rlib is None or not rlib.exists():
+        print("!! no rlib of apache-spark-connect - run `cargo build -p apache-spark-connect`")
         return 2
 
     failures = []
@@ -121,7 +159,7 @@ def main() -> int:
             for m in _BLOCK.finditer(text):
                 idx += 1
                 checked += 1
-                ok, err = check_block(m.group(1), tmpdir, idx)
+                ok, err = check_block(m.group(1), tmpdir, idx, rlib, deps)
                 if not ok:
                     rel = Path(md).relative_to(REPO)
                     # First rustc error line is the most informative.

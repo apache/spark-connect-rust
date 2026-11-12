@@ -49,19 +49,24 @@ pub fn embed_wasm_udf(src_file: impl AsRef<Path>) -> PathBuf {
         .unwrap_or_else(|| "wasm_udf".to_string());
     let wasm_out = out_dir.join(format!("{stem}.wasm"));
 
-    // deps dir: OUT_DIR = target/<profile>/build/<crate>-<hash>/out
-    let deps_dir = out_dir
-        .ancestors()
-        .nth(3)
-        .expect("unexpected OUT_DIR layout")
-        .join("deps");
-    let macro_dylib = find_proc_macro(&deps_dir, "spark_connect_macros").unwrap_or_else(|| {
+    let macro_dirs = proc_macro_dirs(&out_dir, "apache-spark-connect-macros");
+    let macro_dylib = find_proc_macro(&macro_dirs, "spark_connect_macros").unwrap_or_else(|| {
         panic!(
             "could not find the spark_connect_macros proc-macro dylib in {}. \
              Add `apache-spark-connect-macros` to [build-dependencies].",
-            deps_dir.display()
+            macro_dirs
+                .iter()
+                .map(|dir| dir.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
         )
     });
+    // The directory of the dylib: rustc loads a proc-macro crate as it is, without the
+    // dependencies that it was built with, so it needs no other `-L dependency=` directory.
+    let deps_dir = macro_dylib
+        .parent()
+        .expect("a file has a parent directory")
+        .to_path_buf();
 
     // The macro's wasm export wrappers reference `crate::spark_wasm_rt` for the
     // binary-ABI codec + allocator. Prepend that runtime and compile the
@@ -483,22 +488,50 @@ fn env(key: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| panic!("`{key}` is not set (call from a build script)"))
 }
 
-/// Find `lib<name>-<hash>.{dylib,so,dll}` in `deps_dir`, newest first.
-fn find_proc_macro(deps_dir: &Path, name: &str) -> Option<PathBuf> {
-    let prefix = format!("lib{name}-");
+/// The directories where cargo puts the dylib of the proc-macro package `package`, a
+/// build-dependency, for the build script whose `OUT_DIR` is `out_dir`, in either layout of
+/// cargo's build directory:
+///
+/// * before Rust 1.100, `OUT_DIR` is `<profile>/build/<crate>-<hash>/out`, and the artifacts
+///   of all the dependencies are in `<profile>/deps`;
+/// * from Rust 1.100, `OUT_DIR` is `<profile>/build/<package>/<hash>/out`, and the artifacts of
+///   each unit are in the `out` directory of that unit, `<profile>/build/<package>/<hash>/out`.
+fn proc_macro_dirs(out_dir: &Path, package: &str) -> Vec<PathBuf> {
+    // `<profile>` in the layout before Rust 1.100, and `<profile>/build` in the later one.
+    let Some(base) = out_dir.ancestors().nth(3) else {
+        return Vec::new();
+    };
+    let mut dirs = vec![base.join("deps")];
+    if let Ok(units) = std::fs::read_dir(base.join(package)) {
+        let mut units: Vec<PathBuf> = units.flatten().map(|unit| unit.path().join("out")).collect();
+        units.sort();
+        dirs.extend(units);
+    }
+    dirs
+}
+
+/// Find `lib<name>-<hash>.{dylib,so}`, or `<name>-<hash>.dll` on Windows, in `dirs`: the newest
+/// one, as a rebuild leaves the stale ones.
+fn find_proc_macro(dirs: &[PathBuf], name: &str) -> Option<PathBuf> {
+    let prefixes = [format!("lib{name}-"), format!("{name}-")];
     let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
-    for entry in std::fs::read_dir(deps_dir).ok()?.flatten() {
-        let path = entry.path();
-        let fname = match path.file_name() {
-            Some(f) => f.to_string_lossy().into_owned(),
-            None => continue,
+    for dir in dirs {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
         };
-        let is_dylib =
-            fname.ends_with(".dylib") || fname.ends_with(".so") || fname.ends_with(".dll");
-        if fname.starts_with(&prefix) && is_dylib {
-            if let Ok(mtime) = entry.metadata().and_then(|m| m.modified()) {
-                if best.as_ref().map(|(t, _)| mtime > *t).unwrap_or(true) {
-                    best = Some((mtime, path));
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let fname = match path.file_name() {
+                Some(f) => f.to_string_lossy().into_owned(),
+                None => continue,
+            };
+            let is_dylib =
+                fname.ends_with(".dylib") || fname.ends_with(".so") || fname.ends_with(".dll");
+            if is_dylib && prefixes.iter().any(|prefix| fname.starts_with(prefix)) {
+                if let Ok(mtime) = entry.metadata().and_then(|m| m.modified()) {
+                    if best.as_ref().map(|(t, _)| mtime > *t).unwrap_or(true) {
+                        best = Some((mtime, path));
+                    }
                 }
             }
         }
