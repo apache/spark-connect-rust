@@ -229,42 +229,41 @@ fn integer_literal(value: i64) -> LiteralExpression {
     }
 }
 
+/// Exact built-in primitives need no Enum, NumPy or non-primitive scalar probing.
+/// Subclasses and out-of-range ints retain the generic conversion order in the callers.
+fn exact_primitive_literal(obj: &Bound<'_, PyAny>) -> PyResult<Option<LiteralExpression>> {
+    if let Ok(boolean) = obj.cast_exact::<pyo3::types::PyBool>() {
+        return Ok(Some(LiteralExpression::boolean(boolean.extract()?)));
+    }
+    if let Ok(integer) = obj.cast_exact::<pyo3::types::PyInt>() {
+        if let Ok(value) = integer.extract::<i64>() {
+            return Ok(Some(integer_literal(value)));
+        }
+    }
+    if let Ok(float) = obj.cast_exact::<pyo3::types::PyFloat>() {
+        return Ok(Some(LiteralExpression::double(float.extract()?)));
+    }
+    if let Ok(string) = obj.cast_exact::<pyo3::types::PyString>() {
+        // A str that UTF-8 cannot encode raises the `UnicodeEncodeError` of its encoding, as
+        // the str of a subclass below.
+        return Ok(Some(LiteralExpression::string(string.extract::<String>()?)));
+    }
+    if obj.is_exact_instance_of::<pyo3::types::PyBytes>()
+        || obj.is_exact_instance_of::<pyo3::types::PyByteArray>()
+    {
+        return Ok(Some(LiteralExpression::Binary(obj.extract()?)));
+    }
+    Ok(None)
+}
+
 /// Convert a Python object to a Rust Column (handles Column or scalars that become literals).
 pub fn to_column(obj: &Bound<'_, PyAny>) -> PyResult<Column> {
     // Try to get as PyColumn first
     if let Ok(col) = obj.extract::<Bound<'_, PyColumn>>() {
         return Ok(col.borrow().column.clone());
     }
-    // Exact built-in primitives need no Enum, NumPy or non-primitive scalar probing.
-    // Subclasses and out-of-range ints retain the generic conversion order below.
-    if let Ok(boolean) = obj.cast_exact::<pyo3::types::PyBool>() {
-        return Ok(Column::new(Expression::literal(
-            LiteralExpression::boolean(boolean.extract()?),
-        )));
-    }
-    if let Ok(integer) = obj.cast_exact::<pyo3::types::PyInt>() {
-        if let Ok(value) = integer.extract::<i64>() {
-            return Ok(Column::new(Expression::literal(integer_literal(value))));
-        }
-    }
-    if let Ok(float) = obj.cast_exact::<pyo3::types::PyFloat>() {
-        return Ok(Column::new(Expression::literal(LiteralExpression::double(
-            float.extract()?,
-        ))));
-    }
-    if let Ok(string) = obj.cast_exact::<pyo3::types::PyString>() {
-        // A str that UTF-8 cannot encode raises the `UnicodeEncodeError` of its encoding, as
-        // the str of a subclass below.
-        return Ok(Column::new(Expression::literal(LiteralExpression::string(
-            string.extract::<String>()?,
-        ))));
-    }
-    if obj.is_exact_instance_of::<pyo3::types::PyBytes>()
-        || obj.is_exact_instance_of::<pyo3::types::PyByteArray>()
-    {
-        return Ok(Column::new(Expression::literal(LiteralExpression::Binary(
-            obj.extract()?,
-        ))));
+    if let Some(lit) = exact_primitive_literal(obj)? {
+        return Ok(Column::new(Expression::literal(lit)));
     }
     // An Enum is the literal of its value, as PySpark's.
     let obj = &enum_to_value(obj)?;
@@ -361,6 +360,9 @@ pub fn to_column(obj: &Bound<'_, PyAny>) -> PyResult<Column> {
 /// CANNOT_INFER_ARRAY_ELEMENT_TYPE. `to_column` builds a list as `lit` does, for the functions.
 /// A NumPy array is not a value, as PySpark's `_from_value` does not take it, though `lit` does.
 pub(crate) fn to_value_column(obj: &Bound<'_, PyAny>) -> PyResult<Column> {
+    if let Some(lit) = exact_primitive_literal(obj)? {
+        return Ok(Column::new(Expression::literal(lit)));
+    }
     let obj = &enum_to_value(obj)?;
     if let Ok(list) = obj.cast::<pyo3::types::PyList>() {
         return Ok(Column::new(Expression::literal(typed_array_literal(list)?)));

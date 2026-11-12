@@ -16433,6 +16433,58 @@ def test_exact_primitive_literals_skip_numpy_probes(monkeypatch):
                 _pyspark.functions.pyfunc_lit(value)
 
 
+@pytest.mark.parametrize("method", ["isin", "getItem", "__getitem__", "when", "otherwise"])
+def test_column_value_primitives_skip_numpy_probes(monkeypatch, method):
+    import sys
+    from enum import IntEnum
+
+    from pyspark.sql import functions as F
+
+    class IntegerEnum(IntEnum):
+        VALUE = 5
+
+    class ProbeSentinel:
+        @property
+        def ndarray(self):
+            raise RuntimeError("NumPy probe reached")
+
+    column = F.col("a")
+    condition = column > 0
+    when = F.when(condition, 0)
+    if method == "when":
+        build = lambda value: when.when(condition, value)
+    elif method == "otherwise":
+        build = when.otherwise
+    else:
+        build = getattr(column, method)
+
+    def literal(value):
+        plan = build(value)._expr.to_plan(None)
+        if method in ("getItem", "__getitem__"):
+            return plan.unresolved_extract_value.extraction.literal
+        index = {"isin": 1, "when": 3, "otherwise": 2}[method]
+        return plan.unresolved_function.arguments[index].literal
+
+    values = [
+        False, True, -(2**63), -(2**31) - 1, -(2**31), 0, 2**31 - 1, 2**31, 2**63 - 1,
+        -0.0, 1.25, float("inf"), float("nan"), "", "雪", b"", b"\x00\xff",
+        bytearray(), bytearray(b"\x00\xff"),
+    ]
+    expected = [F.lit(value)._expr.to_plan(None).literal.SerializeToString() for value in values]
+    subclasses = [type(f"{type(value).__name__}Subclass", (type(value),), {})(value)
+                  for value in (5, 1.25, "x", b"x", bytearray(b"x"))]
+    with monkeypatch.context() as patch:
+        patch.setitem(sys.modules, "numpy", ProbeSentinel())
+        for value, wire in zip(values, expected):
+            # Serialized literals also distinguish signed zero and compare NaN reliably.
+            assert literal(value).SerializeToString() == wire
+        with pytest.raises(UnicodeEncodeError):
+            build("\ud800")
+        for value in [*subclasses, IntegerEnum.VALUE, 2**63, -(2**63) - 1]:
+            with pytest.raises(RuntimeError, match="NumPy probe reached"):
+                build(value)
+
+
 def test_boolean_literals_keep_their_wire_type():
     from pyspark.sql import functions as F
     from pyspark.sql.connect import proto
