@@ -187,8 +187,10 @@ where
 }
 
 /// `f`, polled as it is, and `watch` called every [`POLL_INTERVAL`]: `None` at once when it
-/// returns [`Watch::Abort`], else the output of `f`. An interrupt is spawned once and awaited
-/// with `f`, as in [`watched`].
+/// returns [`Watch::Abort`], else the output of `f`. The first interrupt that `watch` returns is
+/// spawned and awaited with `f`, as in [`watched`]. The polls go on after it, so that a second
+/// signal ends the wait even while the interrupt hangs, and the running interrupt is cancelled
+/// with the wait.
 async fn watched_abortable<F: Future>(f: F, watch: Arc<WaitWatch>) -> Option<F::Output> {
     tokio::pin!(f);
     let mut ticks = tokio::time::interval(POLL_INTERVAL);
@@ -196,14 +198,35 @@ async fn watched_abortable<F: Future>(f: F, watch: Arc<WaitWatch>) -> Option<F::
     loop {
         tokio::select! {
             output = &mut f => {
-                if let Some(interrupt) = interrupt {
-                    let _ = interrupt.await;
+                // `f` has ended, so the wait only awaits the interrupt; a second signal, polled
+                // meanwhile, ends that too.
+                if let Some(mut interrupt) = interrupt {
+                    loop {
+                        tokio::select! {
+                            _ = &mut interrupt => break,
+                            _ = ticks.tick() => {
+                                if let Watch::Abort = watch() {
+                                    interrupt.abort();
+                                    break;
+                                }
+                            }
+                        }
+                    }
                 }
                 return Some(output);
             }
-            _ = ticks.tick(), if interrupt.is_none() => match watch() {
-                Watch::Abort => return None,
-                Watch::Interrupt(sent) => interrupt = Some(tokio::spawn(sent)),
+            _ = ticks.tick() => match watch() {
+                Watch::Abort => {
+                    if let Some(interrupt) = interrupt {
+                        interrupt.abort();
+                    }
+                    return None;
+                }
+                Watch::Interrupt(sent) => {
+                    if interrupt.is_none() {
+                        interrupt = Some(tokio::spawn(sent));
+                    }
+                }
                 Watch::Continue => {}
             },
         }
@@ -551,6 +574,108 @@ mod tests {
             cancelled.load(Ordering::SeqCst),
             "the interrupt was not cancelled"
         );
+    }
+
+    /// The output of `block_on_abortable(f)` under `watch`, run on a thread of its own, or None
+    /// when the wait has not ended within 5 s: a wait that is not ended then fails the test,
+    /// rather than hanging it.
+    fn abortable_wait_under<F>(watch: Arc<WaitWatch>, f: F) -> Option<Option<F::Output>>
+    where
+        F: std::future::Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let output = with_wait_watch(watch, || block_on_abortable(f));
+            let _ = sender.send(output);
+        });
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .ok()
+    }
+
+    #[test]
+    fn test_a_second_signal_ends_an_abortable_wait_while_its_interrupt_hangs() {
+        // As `watched`: the first signal interrupts, and the interrupt never ends. The second
+        // signal aborts the wait, which ends at once without the output of its future, and the
+        // interrupt is cancelled.
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        struct Dropped(Arc<AtomicBool>);
+        impl Drop for Dropped {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        let polls = Arc::new(AtomicUsize::new(0));
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let (counter, flag) = (Arc::clone(&polls), Arc::clone(&cancelled));
+        let watch: Arc<WaitWatch> =
+            Arc::new(move || match counter.fetch_add(1, Ordering::SeqCst) {
+                0 => {
+                    let dropped = Dropped(Arc::clone(&flag));
+                    Watch::Interrupt(Box::pin(async move {
+                        let _dropped = dropped;
+                        std::future::pending::<()>().await
+                    }))
+                }
+                1 => Watch::Abort,
+                _ => Watch::Continue,
+            });
+        let output = abortable_wait_under(watch, std::future::pending::<u8>());
+        assert_eq!(
+            output,
+            Some(None),
+            "the wait did not end at the second signal"
+        );
+        assert_eq!(polls.load(Ordering::SeqCst), 2);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !cancelled.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            cancelled.load(Ordering::SeqCst),
+            "the interrupt was not cancelled"
+        );
+    }
+
+    #[test]
+    fn test_a_second_signal_ends_an_abortable_wait_while_its_future_waits_after_the_interrupt() {
+        // The interrupt ends at once, and the future then waits, as a release that the server
+        // does not answer: the first signal alone does not end the wait, the second one does.
+        let polls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = Arc::clone(&polls);
+        let watch: Arc<WaitWatch> =
+            Arc::new(
+                move || match counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+                    0 => Watch::Interrupt(Box::pin(async {})),
+                    1 => Watch::Continue,
+                    _ => Watch::Abort,
+                },
+            );
+        let output = abortable_wait_under(watch, std::future::pending::<u8>());
+        assert_eq!(
+            output,
+            Some(None),
+            "the wait did not end at the second signal"
+        );
+        assert_eq!(polls.load(std::sync::atomic::Ordering::SeqCst), 3);
+
+        // Without a second signal, the output of the future is still given after the interrupt.
+        let watch: Arc<WaitWatch> = Arc::new({
+            let first = std::sync::atomic::AtomicBool::new(true);
+            move || {
+                if first.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                    Watch::Interrupt(Box::pin(async {}))
+                } else {
+                    Watch::Continue
+                }
+            }
+        });
+        let ended = abortable_wait_under(watch, async {
+            tokio::time::sleep(POLL_INTERVAL * 2).await;
+            7_u8
+        });
+        assert_eq!(ended, Some(Some(7)));
     }
 
     #[test]
