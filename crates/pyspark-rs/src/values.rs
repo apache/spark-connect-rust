@@ -4,9 +4,8 @@
 //! PySpark's `__init__` stores its arguments, as they are given, as the instance attributes
 //! `value` and `metadata`, or `wkb` and `srid`, which are writable, deletable and in the
 //! instance `__dict__`, and a subclass's `__init__` may set them itself. A value pickles as any
-//! plain class does, which the server's Python workers, of PySpark, unpickle. The classes are
-//! not `#[pyclass(dict)]` types, as PyO3 0.28 clears but does not release the `__dict__` of
-//! such an instance when it is freed, so that every value would keep a dict alive.
+//! plain class does, which the server's Python workers, of PySpark, unpickle. They are not
+//! `#[pyclass(dict)]` types, so their instances are PySpark's own.
 
 use pyo3::intern;
 use pyo3::prelude::*;

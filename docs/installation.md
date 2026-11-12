@@ -21,7 +21,7 @@ apache-spark-connect = { version = "4.3", features = ["datafusion", "polars"] }
 ```
 
 **Requirements:**
-- Rust 1.88 or later
+- Rust 1.88 or later (1.94 or later with the `datafusion` feature)
 - `protobuf-compiler` (e.g., `brew install protobuf` on macOS, `apt-get install protobuf-compiler` on Linux)
 - A running Spark Connect server (see [Configuration and Connection](configuration.md))
 

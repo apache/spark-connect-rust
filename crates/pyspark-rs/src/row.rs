@@ -229,7 +229,7 @@ fn micros_timedelta(py: Python<'_>, micros: i64) -> PyResult<Bound<'_, PyAny>> {
     ))
 }
 
-/// Convert a Spark `Value` into a Python object (PyO3 0.28 `IntoPyObject`), whose binary values
+/// Convert a Spark `Value` into a Python object (PyO3's `IntoPyObject`), whose binary values
 /// are `bytes` if `binary_as_bytes`, or else `bytearray`, also in arrays, maps and structs.
 /// `nested_fields` supplies shared struct names. Call through `NestedFieldNames::value_at`
 /// so its schema path is set for this value and restored after conversion.

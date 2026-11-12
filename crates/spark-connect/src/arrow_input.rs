@@ -827,7 +827,7 @@ mod tests {
                 )
                 .unwrap(),
             );
-            // Arrow 58.3 accepts this through its safe constructor despite the
+            // Arrow 59.3 accepts this through its safe constructor despite the
             // declared Int64 field containing an Int32 child.
             assert!(array.to_data().validate_full().is_err());
             let batch = RecordBatch::try_new(

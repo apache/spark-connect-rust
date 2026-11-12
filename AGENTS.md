@@ -429,19 +429,14 @@ For every method matching a pyspark name:
 - **Value classes:** `crates/pyspark-rs/src/values.py` embeds PySpark's plain classes
   `VariantVal`, `Geometry` and `Geography` the same way, exported by `pyspark._pyspark`, so
   their attributes are the instance attributes of PySpark's, as given, and they pickle as plain
-  classes into the server's Python workers. Do not make them `#[pyclass(dict)]` types: PyO3 0.28
-  clears but never releases the `__dict__` of such an instance, so each value would keep a dict.
-- **Instance dicts of `#[pyclass(dict)]` classes:** PyO3 0.28's dealloc empties the `__dict__` of
-  an instance (`PyDict_Clear`) but never releases it. `crates/pyspark-rs/src/instance_dict.rs`
-  wraps, at module init, the `tp_dealloc` of each class whose instances have the dict: the wrapper
-  takes the dict out of its slot, runs PyO3's dealloc and then releases the dict, so the attribute
-  semantics stay CPython's (a `__getattr__`/`__setattr__` store instead would break the lookup
-  order of monkeypatched methods and slow every access). List there every new `dict` class and
-  every class that `extends` one, whose Rust dealloc does not go through its base's slot; Python
-  subclasses go through it. On CPython 3.11 and 3.12, PyO3 0.28 also writes over the dict that
-  `object.__new__` makes for every instance of such a class, which no code outside PyO3 can reach:
-  a `dict` class still costs a dict per instance there (hence the value classes above) until the
-  PyO3 0.29 upgrade, after which the module is to be removed.
+  classes into the server's Python workers. Keep them plain Python classes rather than
+  `#[pyclass(dict)]` types, so that their instances and pickles are PySpark's own.
+- **Instance dicts of `#[pyclass(dict)]` classes:** PyO3 0.29 releases the `__dict__` of an
+  instance when the instance is freed, keeps the dict that `object.__new__` makes for it on
+  CPython 3.11 and 3.12, and synthesizes `tp_traverse` and `tp_clear` for a dict class, so a
+  reference cycle through an instance dict is collected. No code of the extension wraps the
+  `tp_dealloc` of a class any more. (PyO3 0.28 did not do any of this, which needed the
+  `instance_dict` wrapper of SPARK-61490; that module was removed with the upgrade.)
 - **Streaming listeners and progress holders:** Keep progress holders (`StreamingQueryProgress`,
   `StateOperatorProgress`, etc.) as faithful pure-Python implementations parsed from server
   JSON, not Rust-backed. The listener bus (subscribe/dispatch) is genuinely Rust-backed;

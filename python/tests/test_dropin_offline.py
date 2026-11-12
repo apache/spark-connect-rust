@@ -8418,15 +8418,35 @@ def test_freed_instances_release_their_dict_as_pyspark(mock_connect):
         assert sys.getrefcount(attributes) == references - 1
 
 
+def test_cycles_through_instance_dicts_are_collected_as_pyspark(mock_connect):
+    # As PySpark's classes, plain Python classes, whose instances a reference cycle through their
+    # __dict__ keeps alive until the cycle is collected: a DataFrame, a Column, an Observation, a
+    # reader and the runtime conf of the session. PyO3 0.28 gave such a class no tp_traverse, so
+    # the cycle was never collected.
+    import gc
+    import weakref
+
+    from pyspark.sql import functions as F
+    from pyspark.sql.observation import Observation
+
+    spark, _ = mock_connect
+    for make in (lambda: spark.range(1), lambda: F.col("a"), lambda: Observation("o"),
+                 lambda: spark.read, lambda: spark.conf):
+        obj = make()
+        obj.me = obj
+        freed = weakref.ref(obj)
+        del obj
+        gc.collect()
+        assert freed() is None
+
+
 def test_freed_instances_given_attributes_keep_no_memory_as_pyspark(mock_connect):
     # As PySpark's classes, plain Python classes: 20,000 instances, each given an attribute,
     # keep next to nothing once freed (PySpark's, 32 bytes): of a Column, a GroupedData of the
-    # session, a DataType, a UDT (a Python subclass of DataType) and an Observation. PyO3 0.28
-    # kept the emptied dict of each, 64 bytes. On CPython 3.11 and 3.12, PyO3 0.28 also loses
-    # the dict that object.__new__ makes for each instance, which only PyO3 0.29 fixes: there,
-    # the memory that as many instances given no attribute keep is the base.
+    # session, a DataType, a UDT (a Python subclass of DataType) and an Observation. Instances
+    # given no attribute keep nothing either: on CPython 3.11 and 3.12 the dict that
+    # object.__new__ makes for each instance is released with it, which PyO3 0.28 lost.
     import gc
-    import sys
     import tracemalloc
 
     from pyspark.sql import functions as F
@@ -8450,12 +8470,10 @@ def test_freed_instances_given_attributes_keep_no_memory_as_pyspark(mock_connect
         finally:
             tracemalloc.stop()
 
-    eager_dicts = sys.version_info[:2] in ((3, 11), (3, 12))
     for make in (lambda: F.col("a"), lambda: df.groupBy("id"), lambda: T.ArrayType(T.LongType()),
                  _DayPointUDT, lambda: Observation("o")):
         make().tag = 1  # What a first instance caches is no leak.
-        base = kept(make, False) if eager_dicts else 0
-        assert kept(make, True) - base < 20_000
+        assert kept(make, False) < 20_000 and kept(make, True) < 20_000
 
 
 def test_freed_instances_free_a_deep_chain_of_their_attributes_as_pyspark():

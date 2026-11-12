@@ -19,7 +19,6 @@ mod eval_type;
 mod functions;
 mod group;
 mod infer;
-mod instance_dict;
 mod interrupt;
 mod ml;
 mod observation;
@@ -265,10 +264,6 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     let functions_module = PyModule::new(_py, "functions")?;
     functions::register_functions(_py, &functions_module)?;
     m.add_submodule(&functions_module)?;
-
-    // The instances of the classes with a `__dict__` release it when they are freed, which
-    // PyO3 0.28 does not do (see `instance_dict`).
-    instance_dict::release_instance_dicts(_py)?;
 
     Ok(())
 }
