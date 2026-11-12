@@ -692,8 +692,9 @@ impl PlanIds {
     /// A live node of the plan ID `id`, such as that of the DataFrame of a relation that this
     /// session sent.
     ///
-    /// A plan ID is of one node that this session numbered (`id_of`), and of each node that
-    /// was given it (`assign`): each DataFrame of a relation that the session sent, such as
+    /// A plan ID is of one node that this session numbered (`id_of`, or `root_id_of` for the
+    /// relation within the `WithRelations` that sends it), and of each node that was given it
+    /// (`assign`): each DataFrame of a relation that the session sent, such as
     /// each unpickled copy of a DataFrame, is a node of its own with the plan ID of the
     /// DataFrame it was of, which may be alive too. Any one of them is given, on purpose: they
     /// are all the relation of that plan ID, and each copy took the Observations of a node of
