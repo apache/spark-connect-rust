@@ -4376,6 +4376,168 @@ def test_dropna_thresh_that_the_proto_refuses_is_refused_as_pyspark():
     assert isinstance(df.na.drop(thresh=-(2**31)), DataFrame)
 
 
+def test_counts_that_the_proto_refuses_are_refused_as_pyspark():
+    # As PySpark's limit, offset, tail, head, take, repartition, coalesce, repartitionByRange and
+    # repartitionById, whose plans set the count in a proto int32 after PySpark's own checks:
+    # protobuf's default (upb) backend refuses a bool, which is an int, since protobuf 7.34, takes
+    # any other value by its __index__, so a float, a str or None is the TypeError of
+    # operator.index, and refuses an int out of the range of the field with a ValueError, of the
+    # value itself, or of its int when that is beyond a long. PySpark raises these once it sends
+    # the plan; this client builds the plan at the call, so it raises them there.
+    import operator
+
+    from pyspark.errors import PySparkTypeError, PySparkValueError
+
+    class Shown(int):
+        def __str__(self):
+            return "shown"
+
+    def index_error(value):
+        with pytest.raises(TypeError) as error:
+            operator.index(value)
+        return str(error.value)
+
+    def refused(field):
+        return TypeError, f"Field spark.connect.{field}: Expected an int, got a boolean."
+
+    df = _offline_session().range(1)
+    for method, field in (
+        (df.limit, "Limit.limit"),
+        (df.offset, "Offset.offset"),
+        (df.tail, "Tail.limit"),
+        (df.head, "Limit.limit"),
+        (df.take, "Limit.limit"),
+    ):
+        for value, error_type, message in (
+            (True, *refused(field)),
+            (False, *refused(field)),
+            (1.5, TypeError, index_error(1.5)),
+            ("1", TypeError, index_error("1")),
+            (np.True_, TypeError, index_error(np.True_)),
+            (2**40, ValueError, "Value out of range: 1099511627776"),
+            (-(2**31) - 1, ValueError, "Value out of range: -2147483649"),
+            (np.int64(2**31), ValueError, "Value out of range: 2147483648"),
+            (Shown(2**40), ValueError, "Value out of range: shown"),
+            (Shown(2**70), ValueError, "Value out of range: 1180591620717411303424"),
+        ):
+            with pytest.raises(error_type) as error:
+                method(value)
+            assert type(error.value) is error_type, (method, value)
+            assert str(error.value) == message, (method, value)
+    count_cases = [
+        (lambda: df.limit(None), TypeError, index_error(None)),
+        (lambda: df.take(None), TypeError, index_error(None)),
+        (lambda: df.limit(num=True), *refused("Limit.limit")),
+        (lambda: df.head(n=True), *refused("Limit.limit")),
+        (lambda: df.repartition(True), *refused("Repartition.num_partitions")),
+        (lambda: df.repartition(True, "id"), *refused("RepartitionByExpression.num_partitions")),
+        (lambda: df.coalesce(True), *refused("Repartition.num_partitions")),
+        (lambda: df.repartitionByRange(True, "id"),
+         *refused("RepartitionByExpression.num_partitions")),
+        (lambda: df.repartition(2**40), ValueError, "Value out of range: 1099511627776"),
+        (lambda: df.repartition(2**31, "id"), ValueError, "Value out of range: 2147483648"),
+        (lambda: df.coalesce(2**70), ValueError, "Value out of range: 1180591620717411303424"),
+        (lambda: df.repartitionByRange(Shown(2**40), "id"), ValueError,
+         "Value out of range: shown"),
+        (lambda: df.repartitionById(2**40, "id"), ValueError, "Value out of range: 1099511627776"),
+        # coalesce compares any value with 0 first, so that the proto takes what passes.
+        (lambda: df.coalesce(1.5), TypeError, index_error(1.5)),
+        (lambda: df.coalesce(np.True_), TypeError, index_error(np.True_)),
+        (lambda: df.coalesce(None), TypeError,
+         "'>' not supported between instances of 'NoneType' and 'int'"),
+        (lambda: df.coalesce("1"), TypeError,
+         "'>' not supported between instances of 'str' and 'int'"),
+    ]
+    for call, error_type, message in count_cases:
+        with pytest.raises(error_type) as error:
+            call()
+        assert type(error.value) is error_type, message
+        assert str(error.value) == message
+
+    def not_positive(value):
+        return PySparkValueError, "VALUE_NOT_POSITIVE", {
+            "arg_name": "numPartitions", "arg_value": value}
+
+    def not_expected(arg_name, expected_type, arg_type):
+        return PySparkTypeError, "NOT_EXPECTED_TYPE", {
+            "arg_name": arg_name, "expected_type": expected_type, "arg_type": arg_type}
+
+    # PySpark's own checks come first, of the str of the count, and so do those of the columns.
+    pyspark_cases = [
+        (lambda: df.repartition(False), not_positive("False")),
+        (lambda: df.repartition(Shown(0), "id"), not_positive("shown")),
+        (lambda: df.coalesce(False), not_positive("False")),
+        (lambda: df.coalesce(np.False_), not_positive("False")),
+        (lambda: df.repartitionByRange(False, "id"), not_positive("False")),
+        (lambda: df.repartitionById(Shown(0), "id"), not_positive("shown")),
+        (lambda: df.repartitionByRange(True),
+         (PySparkValueError, "CANNOT_BE_EMPTY", {"item": "cols"})),
+        (lambda: df.repartition(np.int64(2)),
+         not_expected("numPartitions", "Column or str", "int64")),
+        (lambda: df.repartitionByRange(np.int64(2), "id"),
+         not_expected("numPartitions", "Column, int or str", "int64")),
+        (lambda: df.repartition(2**40, 1.5), not_expected("cols", "Column or str", "float")),
+        (lambda: df.repartitionByRange(True, 1.5),
+         not_expected("cols", "Column or str", "float")),
+        (lambda: df.repartitionById(2**40, 1.5), not_expected("col", "Column or str", "float")),
+    ]
+    for call, (error_type, condition, parameters) in pyspark_cases:
+        with pytest.raises(error_type) as error:
+            call()
+        assert error.value.getCondition() == condition
+        assert error.value.getMessageParameters() == parameters
+
+
+def test_counts_are_sent_by_their_index_as_pyspark(mock_connect):
+    # As protobuf's default (upb) backend takes the count of these plans, by its __index__: a
+    # NumPy int, an int of a subclass, or another object with __index__ is sent as its int, and so
+    # are the bounds of an int32, for the server to check. A count that it refuses sends nothing.
+    spark, service = mock_connect
+    df = spark.range(3)
+
+    class Index:
+        def __index__(self):
+            return 2
+
+    class Shown(int):
+        def __str__(self):
+            return "shown"
+
+    def sent(field, number):
+        # ExecutePlanRequest.plan=3, Plan.root=1; Relation.limit=8, offset=13, repartition=17,
+        # tail=22 and repartition_by_expression=27, of their counts.
+        return _sent_relation(service.execute_requests[-1], field, execute=True)[number]
+
+    for run, field, number, count in (
+        (lambda: df.limit(np.int64(2)).collect(), 8, 2, 2),
+        (lambda: df.limit(Index()).collect(), 8, 2, 2),
+        (lambda: df.limit(2**31 - 1).collect(), 8, 2, 2**31 - 1),
+        (lambda: df.limit(-(2**31)).collect(), 8, 2, 2**64 - 2**31),
+        (lambda: df.offset(np.int32(1)).collect(), 13, 2, 1),
+        (lambda: df.tail(np.int64(2)), 22, 2, 2),
+        (lambda: df.take(Index()), 8, 2, 2),
+        (lambda: df.head(Shown(2)), 8, 2, 2),
+        (lambda: df.coalesce(np.int64(2)).collect(), 17, 2, 2),
+        (lambda: df.repartition(Shown(2)).collect(), 17, 2, 2),
+        (lambda: df.repartition(Shown(2), "id").collect(), 27, 3, 2),
+        (lambda: df.repartitionByRange(Shown(2), "id").collect(), 27, 3, 2),
+        (lambda: df.repartitionById(Shown(2), "id").collect(), 27, 3, 2),
+    ):
+        run()
+        assert sent(field, number) == [count]
+    before = len(service.execute_requests)
+    for run, error_type in (
+        (lambda: df.take(True), TypeError),
+        (lambda: df.head(False), TypeError),
+        (lambda: df.tail(2**40), ValueError),
+        (lambda: df.limit(True).collect(), TypeError),
+        (lambda: df.coalesce(True).collect(), TypeError),
+    ):
+        with pytest.raises(error_type):
+            run()
+    assert len(service.execute_requests) == before
+
+
 def test_avro_protobuf_partitioning_submodules():
     # The official import paths resolve (the implementations live in
     # pyspark.sql.functions and are re-exported here).
