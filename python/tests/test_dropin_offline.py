@@ -3668,6 +3668,52 @@ def test_create_raises_for_a_port_that_urllib_rejects_as_pyspark():
         assert str(error.value) == message, url
 
 
+def test_create_raises_for_an_authority_that_urllib_rejects_as_pyspark():
+    # As PySpark's channel builder, whose netloc urlsplit checks before the path and the params
+    # are read, and whose port urllib reads: the ValueErrors of urllib, with no token in them.
+    from pyspark.sql import SparkSession
+
+    for url, message in [
+        ("sc://a:1:2", "Port could not be cast to integer value as '1:2'"),
+        ("sc://localhost:15012:1/", "Port could not be cast to integer value as '15012:1'"),
+        ("sc://localhost:x;token=SECRET",
+         "Port could not be cast to integer value as 'x;token=<redacted>'"),
+        ("sc://[::1]x", "Invalid IPv6 URL"),
+        ("sc://[::1]x:15002", "Invalid IPv6 URL"),
+        ("sc://[1.2.3.4]:15002", "An IPv4 address cannot be in brackets"),
+        ("sc://[localhost]:15002", "'localhost' does not appear to be an IPv4 or IPv6 address"),
+        ("sc://[a;token=SECRET]:1",
+         "'a;token=<redacted>' does not appear to be an IPv4 or IPv6 address"),
+    ]:
+        with pytest.raises(ValueError) as error:
+            SparkSession.builder.remote(url).create()
+        assert type(error.value) is ValueError, url
+        assert str(error.value) == message, url
+    # The userinfo ends at the last '@', so the host is localhost and the token is plaintext, as
+    # urllib reads it: the session is made, and no TLS is configured for it.
+    session = SparkSession.builder.remote("sc://user@localhost:15012/;token=SECRET").create()
+    # No server to release on: a release would wait for the retries of a refused port.
+    session.release_session_on_close = False
+    session.stop()
+
+
+def test_create_raises_for_a_too_long_user_agent_as_pyspark(monkeypatch):
+    # As PySpark's channel builder: a user agent of more than 2048 characters after the URL
+    # escaping raises a SparkConnectException of the message of the reference client.
+    from pyspark.errors.exceptions.connect import SparkConnectException
+    from pyspark.sql import SparkSession
+
+    monkeypatch.delenv("SPARK_CONNECT_USER_AGENT", raising=False)
+    with pytest.raises(SparkConnectException) as error:
+        SparkSession.builder.remote("sc://localhost/;user_agent=" + "a" * 2049).create()
+    assert type(error.value) is SparkConnectException
+    assert str(error.value) == (
+        "'user_agent' parameter should not exceed 2048 characters after URL escaping, "
+        "found 2049 characters."
+    )
+    assert error.value.getCondition() is None
+
+
 def test_the_plan_of_a_dataframe_that_a_hook_puts_in_is_compressed_as_pyspark(mock_connect):
     # As PySpark's hook, which would put in the plan of `to_proto`, which compresses it: the plan
     # of a DataFrame that an on_execute_plan hook puts in is sent compressed over the threshold.
