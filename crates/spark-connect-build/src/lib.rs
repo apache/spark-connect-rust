@@ -503,7 +503,10 @@ fn proc_macro_dirs(out_dir: &Path, package: &str) -> Vec<PathBuf> {
     };
     let mut dirs = vec![base.join("deps")];
     if let Ok(units) = std::fs::read_dir(base.join(package)) {
-        let mut units: Vec<PathBuf> = units.flatten().map(|unit| unit.path().join("out")).collect();
+        let mut units: Vec<PathBuf> = units
+            .flatten()
+            .map(|unit| unit.path().join("out"))
+            .collect();
         units.sort();
         dirs.extend(units);
     }
