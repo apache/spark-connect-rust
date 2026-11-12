@@ -3,7 +3,7 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyInt, PyList, PyTuple};
 use spark_connect::dataframe::{AsOfJoinOptions, DataFrame, LocalRowIterator};
-use spark_connect::plan::JoinType;
+use spark_connect::plan::{AsOfJoinDirection, AsOfJoinType, JoinType};
 use spark_connect::udf::{eval_type, CommonInlineUserDefinedFunctionExpression, PythonUDFPayload};
 
 use crate::column::PyColumn;
@@ -1048,7 +1048,9 @@ impl PyDataFrame {
     /// tolerance=None, allowExactMatches=True, direction="backward")`, the as-of join of
     /// pandas-on-Spark's `merge_asof`, as PySpark's. The as-of columns are Columns, or names of
     /// their DataFrame. `on` is a name, a Column condition, or a list of either. `how` (inner by
-    /// default) and `direction` are sent as they are, and the server checks them.
+    /// default) and `direction` are not checked, as PySpark does not check them: a string that
+    /// is none of the join types or directions of the core is sent as it is, and the server
+    /// refuses what it does not read.
     #[pyo3(name = "_joinAsOf", signature = (other, leftAsOfColumn, rightAsOfColumn, on=None, how=None, *, tolerance=None, allowExactMatches=true, direction="backward"))]
     #[allow(non_snake_case, clippy::too_many_arguments)]
     fn join_as_of(
@@ -1065,10 +1067,13 @@ impl PyDataFrame {
         // As PySpark's `_check_same_session`, first.
         let other = self.same_session(other)?;
         let join_type = match how.filter(|how| !how.is_none()) {
-            None => "inner".to_string(),
-            Some(how) => how.extract::<String>().map_err(|_| {
-                pyo3::exceptions::PyAssertionError::new_err("how should be a string")
-            })?,
+            None => AsOfJoinType::Inner,
+            Some(how) => {
+                let how = how.extract::<String>().map_err(|_| {
+                    pyo3::exceptions::PyAssertionError::new_err("how should be a string")
+                })?;
+                AsOfJoinType::parse(&how)
+            }
         };
         let tolerance = match tolerance.filter(|tolerance| !tolerance.is_none()) {
             None => None,
@@ -1091,7 +1096,7 @@ impl PyDataFrame {
             join_type,
             tolerance,
             allow_exact_matches: allowExactMatches,
-            direction: direction.to_string(),
+            direction: AsOfJoinDirection::parse(direction),
         };
         let df = self
             .dataframe
