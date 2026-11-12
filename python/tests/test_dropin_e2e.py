@@ -1854,6 +1854,22 @@ def test_reader_schema_keeps_field_metadata(session, tmp_path, ddl):
     assert stream.schema.fields[0].metadata == {"comment": "the key"}
 
 
+def test_bool_stream_options_and_bytes_table_options_are_read_by_the_server(session, tmp_path):
+    # As PySpark's: the stream format methods send a bool as "True", which the server reads as
+    # true, and createTable sends bytes that are UTF-8 as their text, as its compression.
+    (tmp_path / "s").mkdir()
+    schema = StructType([StructField("a", LongType())])
+    stream = session.readStream.schema(schema).csv(str(tmp_path / "s"), header=True)
+    assert stream.isStreaming
+    session.sql("DROP TABLE IF EXISTS e2e_bytes_table_option")
+    try:
+        session.catalog.createTable(
+            "e2e_bytes_table_option", source="parquet", schema=schema, compression=b"snappy")
+        assert session.catalog.tableExists("e2e_bytes_table_option")
+    finally:
+        session.sql("DROP TABLE IF EXISTS e2e_bytes_table_option")
+
+
 def test_reader_none_unsets_an_option_and_external_description_is_the_comment(session, tmp_path):
     # As PySpark's: DataFrameReader.option, options and load unset an option given None, while
     # the format methods skip None and keep it. createExternalTable's description is the

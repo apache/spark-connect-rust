@@ -10,12 +10,13 @@
 //! - **unset**: the `None` removes the key from the builder. This is `DataFrameReader.option`,
 //!   `options` and `load`.
 //!
-//! Every other value goes through [`coerce_option_value`].
+//! Every other value goes through [`coerce_option_value`], or through [`stream_option_value`] for
+//! the option and the format methods of the stream reader, which PySpark converts differently.
 
 use std::collections::HashMap;
 
 use pyo3::prelude::*;
-use pyo3::types::{PyBool, PyDict, PyString};
+use pyo3::types::{PyBool, PyBytes, PyDict, PyString};
 use spark_connect::readwriter::{DataFrameReader, DataFrameWriter};
 use spark_connect::streaming::DataStreamReader;
 
@@ -138,7 +139,8 @@ pub(crate) fn set_reader_kwargs_unset_none(
 
 /// The `**options` of `Catalog.createTable`, **skipping** those that are None. Unlike the
 /// options of the readers and writers these are not converted: PySpark sets them in a protobuf
-/// map of strings as they are, which takes a str and raises a `TypeError` for anything else.
+/// map of strings as they are. That map takes a str, and bytes that are UTF-8, which it decodes;
+/// it raises a `TypeError` for any other type, and a `ValueError` for bytes that are not UTF-8.
 pub(crate) fn str_kwargs_skip_none(
     options: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<HashMap<String, String>> {
@@ -147,15 +149,28 @@ pub(crate) fn str_kwargs_skip_none(
         if value.is_none() {
             continue;
         }
-        if !value.is_instance_of::<PyString>() {
+        let text = if let Ok(text) = value.cast::<PyString>() {
+            text.to_cow()?.into_owned()
+        } else if let Ok(bytes) = value.cast::<PyBytes>() {
+            match std::str::from_utf8(bytes.as_bytes()) {
+                Ok(text) => text.to_string(),
+                Err(_) => {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "{} has type bytes, but isn't valid UTF-8 encoding. Non-UTF-8 strings \
+                         must be converted to unicode objects before being added.",
+                        value.repr()?
+                    )));
+                }
+            }
+        } else {
             // As the protobuf map of strings that PySpark sets the options in.
             return Err(pyo3::exceptions::PyTypeError::new_err(format!(
                 "{} has type {}, but expected one of: (<class 'bytes'>, <class 'str'>)",
                 value.repr()?,
                 value.get_type().str()?
             )));
-        }
-        map.insert(key.extract()?, value.extract()?);
+        };
+        map.insert(key.extract()?, text);
     }
     Ok(map)
 }
@@ -179,4 +194,42 @@ pub(crate) fn set_opts(
         }
     }
     Ok(())
+}
+
+/// The text of an option of the stream reader, as `DataStreamReader.option` and its format methods
+/// send it: the `str()` of the value, so a bool is `"True"`, where `options` and `load` lowercase
+/// it through `to_str`. None is left out.
+pub(crate) fn stream_option_value(v: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
+    if v.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(v.str()?.to_string()))
+}
+
+/// `builder` with the option `name` of `value` for the stream reader, **skipping** a `value` that
+/// is absent or None, as [`set_option_skip_none`] does with [`stream_option_value`].
+pub(crate) fn set_stream_option_skip_none(
+    builder: DataStreamReader,
+    name: &str,
+    value: Option<&Bound<'_, PyAny>>,
+) -> PyResult<DataStreamReader> {
+    match value {
+        Some(value) => match stream_option_value(value)? {
+            Some(value) => Ok(builder.option(name, &value)),
+            None => Ok(builder),
+        },
+        None => Ok(builder),
+    }
+}
+
+/// `builder` with each of `options` in order for the stream reader, **skipping** those that are
+/// absent or None, as [`set_options_skip_none`] does with [`set_stream_option_skip_none`].
+pub(crate) fn set_stream_options_skip_none(
+    mut builder: DataStreamReader,
+    options: &[(&str, Option<&Bound<'_, PyAny>>)],
+) -> PyResult<DataStreamReader> {
+    for (name, value) in options {
+        builder = set_stream_option_skip_none(builder, name, *value)?;
+    }
+    Ok(builder)
 }

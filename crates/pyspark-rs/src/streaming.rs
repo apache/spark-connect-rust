@@ -14,7 +14,7 @@ use std::sync::Arc;
 use crate::dataframe::{PyDataFrame, WriterState};
 use crate::errors::spark_error_to_py_exception;
 use crate::interrupt::{interruptible, interruptible_outcome};
-use crate::options::{set_option_skip_none, set_options_skip_none};
+use crate::options::{set_stream_option_skip_none, set_stream_options_skip_none};
 
 /// Adapts Python listeners to the native bus: deserialize one typed event for the whole
 /// snapshot, then dispatch it through Python's callback-exception isolation helper. Decode
@@ -315,8 +315,9 @@ impl PyDataStreamReader {
         key: &str,
         value: &Bound<'_, PyAny>,
     ) -> PyResult<PyRefMut<'py, Self>> {
-        // None -> option left unset; bools -> "true"/"false" (reference `to_str`).
-        match crate::coerce_option_value(value)? {
+        // None -> option left unset; other values as `str()`, so a bool is "True" (reference
+        // `DataStreamReader.option`, unlike `options` and `load`).
+        match crate::options::stream_option_value(value)? {
             Some(v) => {
                 slf.inner = slf.inner.clone().option(key, &v);
                 Ok(slf)
@@ -446,11 +447,11 @@ impl PyDataStreamReader {
         locale: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
         let mut r = self.inner.clone().format("xml");
-        r = set_option_skip_none(r, "rowTag", rowTag)?;
+        r = set_stream_option_skip_none(r, "rowTag", rowTag)?;
         if let Some(v) = schema {
             r = apply_stream_schema(r, v)?;
         }
-        r = set_options_skip_none(
+        r = set_stream_options_skip_none(
             r,
             &[
                 ("excludeAttribute", excludeAttribute),
@@ -515,7 +516,7 @@ impl PyDataStreamReader {
         if let Some(v) = schema {
             r = apply_stream_schema(r, v)?;
         }
-        r = set_options_skip_none(
+        r = set_stream_options_skip_none(
             r,
             &[
                 ("primitivesAsString", primitivesAsString),
@@ -562,7 +563,7 @@ impl PyDataStreamReader {
         int96RebaseMode: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
         let mut r = self.inner.clone();
-        r = set_options_skip_none(
+        r = set_stream_options_skip_none(
             r,
             &[
                 ("mergeSchema", mergeSchema),
@@ -618,7 +619,7 @@ impl PyDataStreamReader {
         if let Some(v) = schema {
             r = apply_stream_schema(r, v)?;
         }
-        r = set_options_skip_none(
+        r = set_stream_options_skip_none(
             r,
             &[
                 ("sep", sep),
@@ -668,7 +669,7 @@ impl PyDataStreamReader {
         recursiveFileLookup: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
         let mut r = self.inner.clone();
-        r = set_options_skip_none(
+        r = set_stream_options_skip_none(
             r,
             &[
                 ("mergeSchema", mergeSchema),
@@ -693,7 +694,7 @@ impl PyDataStreamReader {
         recursiveFileLookup: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
         let mut r = self.inner.clone();
-        r = set_options_skip_none(
+        r = set_stream_options_skip_none(
             r,
             &[
                 ("wholetext", wholetext),
