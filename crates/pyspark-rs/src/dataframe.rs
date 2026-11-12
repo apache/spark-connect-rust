@@ -2624,9 +2624,13 @@ impl PyDataFrame {
     /// Check if the DataFrame is empty, asked once, as PySpark's.
     fn isEmpty(&self, py: Python<'_>) -> PyResult<bool> {
         cached(&self.is_empty, || {
-            interruptible(py, &self.dataframe.spark_session(), || {
+            let empty = interruptible(py, &self.dataframe.spark_session(), || {
                 self.dataframe.is_empty().map_err(Box::new)
-            })
+            })?;
+            // As PySpark's `select().take(1)`, whose `collect` reads the binary setting once the
+            // rows are fetched, though they have no columns.
+            read_binary_as_bytes(py, &self.dataframe)?;
+            Ok(empty)
         })
     }
 

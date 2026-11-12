@@ -2680,9 +2680,11 @@ impl DataFrame {
         Column::new(ExpressionNode::Subquery(Box::new(subquery)).into())
     }
 
-    /// The first value of the first row, if any.
+    /// The first value of the first row, if any, of the whole result, as PySpark's `cov` and
+    /// `corr` take `_to_table()[0][0]` of their statistic: the relation is sent as it is, with
+    /// no limit over it.
     pub(crate) fn first_value(&self) -> Result<Option<Value>> {
-        let rows = self.limit(1).collect()?;
+        let rows = self.collect()?;
         Ok(rows.first().and_then(|row| row.get(0).cloned()))
     }
 

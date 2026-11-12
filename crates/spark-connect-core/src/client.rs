@@ -1542,6 +1542,11 @@ impl SparkConnectClient {
     /// raised, so that a failure is neither retried nor raised.
     async fn conf_while_raising(&self, key: &str) -> Option<String> {
         use spark_connect_proto::config_request::{operation::OpType, Get, Operation};
+        // PySpark reads the config through `_stub`, which raises NO_ACTIVE_SESSION once the
+        // client is closed, as a session change closes it, so it sends nothing then.
+        if self.is_closed() {
+            return None;
+        }
         let request = ConfigRequest {
             session_id: self.session_id.clone(),
             user_context: Some(UserContext {
