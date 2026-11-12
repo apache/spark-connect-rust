@@ -939,10 +939,18 @@ fn unsupported(obj: &Bound<'_, PyAny>) -> PyResult<PyErr> {
     )))
 }
 
-/// The name of the type of `obj` as PyArrow writes it in its errors: with its module, unless
-/// it is a builtin type, such as `int` or `numpy.int64`.
+/// The name of the type of `obj` as PyArrow writes it in its errors, which is the `tp_name` of
+/// the type: the bare name of a heap type, a class defined in Python, such as `Counter`; else
+/// the name with its module, unless it is a builtin type, such as `int` or `numpy.int64`.
 fn arrow_type_name(obj: &Bound<'_, PyAny>) -> PyResult<String> {
     let ty = obj.get_type();
+    // SAFETY: `ty` is a live type object, and PyType_HasFeature only reads its flags.
+    let heap_type = unsafe {
+        pyo3::ffi::PyType_HasFeature(ty.as_type_ptr(), pyo3::ffi::Py_TPFLAGS_HEAPTYPE) != 0
+    };
+    if heap_type {
+        return Ok(ty.name()?.to_string());
+    }
     let (module, name) = (ty.module()?.to_string(), ty.qualname()?.to_string());
     Ok(if module == "builtins" {
         name
