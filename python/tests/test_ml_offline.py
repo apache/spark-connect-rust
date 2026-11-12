@@ -360,6 +360,14 @@ _NATIVE_PARAMS = {
         seed="int", leafCol="str", minWeightFractionPerNode="float",
         weightCol="str", thresholds="float_list",
     ),
+    "GBTClassifier": dict(
+        featuresCol="str", labelCol="str", predictionCol="str", probabilityCol="str",
+        rawPredictionCol="str", maxDepth="int", maxBins="int", minInstancesPerNode="int",
+        minInfoGain="float", maxMemoryInMB="int", cacheNodeIds="bool",
+        checkpointInterval="int", impurity="str", featureSubsetStrategy="str",
+        seed="int", subsamplingRate="float", leafCol="str", minWeightFractionPerNode="float",
+        lossType="str", maxIter="int", stepSize="float", validationIndicatorCol="str", weightCol="str", thresholds="float_list",
+    ),
     "RandomForestClassifier": dict(
         featuresCol="str", labelCol="str", predictionCol="str", probabilityCol="str",
         rawPredictionCol="str", maxDepth="int", maxBins="int", minInstancesPerNode="int",
@@ -518,7 +526,9 @@ def test_ml_connect_params_convert_with_the_type_converters_of_pyspark(ml_mock):
             setter = "set" + param[0].upper() + param[1:]
             for value, expected in _NATIVE_CONVERTED[kind]:
                 made = [getattr(cls(), setter)(value)]
-                if param != "thresholds":
+                if param != "thresholds" and not (
+                    name == "GBTClassifier" and param in ("probabilityCol", "rawPredictionCol")
+                ):
                     made.append(cls(**{param: value}))
                 for obj in made:
                     if name in _NOT_FITTABLE:
@@ -530,7 +540,9 @@ def test_ml_connect_params_convert_with_the_type_converters_of_pyspark(ml_mock):
                 with pytest.raises(TypeError) as error:
                     getattr(cls(), setter)(value)
                 assert str(error.value) == expected, (name, param, value)
-                if param != "thresholds":
+                if param != "thresholds" and not (
+                    name == "GBTClassifier" and param in ("probabilityCol", "rawPredictionCol")
+                ):
                     with pytest.raises(TypeError) as error:
                         cls(**{param: value})
                     assert str(error.value) == expected, (name, param, value)
@@ -638,7 +650,9 @@ def test_ml_connect_unsendable_ints_none_and_uids_as_pyspark(ml_mock):
             sent = _native_sent(spark, service, obj, models)
             assert sent.keys() == {param} | _defaults_sent(name).keys(), (name, param)
             assert _native_sent(spark, service, obj, models)[param][0] == "null", (name, param)
-            if param != "thresholds":
+            if param != "thresholds" and not (
+                    name == "GBTClassifier" and param in ("probabilityCol", "rawPredictionCol")
+                ):
                 sent = _native_sent(spark, service, cls(**{param: None}), models)
                 assert sent.keys() == {param} | _defaults_sent(name).keys(), (name, param)
                 assert sent[param][0] == "null", (name, param)
@@ -2545,3 +2559,58 @@ def test_decision_tree_regressor_native_parameters_match_official_fixture(ml_moc
         operator, params = _native_request(spark, service, estimator, models)
         assert operator.name == "org.apache.spark.ml.regression.DecisionTreeRegressor"
         assert params == pb2.MlParams.FromString(base64.b64decode(case["params_b64"]))
+
+
+@pytest.mark.parametrize("use_setters", [False, True], ids=["constructor", "setters"])
+def test_gbt_classifier_native_parameters_match_official_fixture(ml_mock, use_setters):
+    import base64
+    import inspect
+    import json
+    from pathlib import Path
+
+    import pyspark._pyspark as native
+    from pyspark.ml.connect import GBTClassifier as exported
+    from pyspark.ml.connect.classification import GBTClassifier
+
+    assert exported is GBTClassifier is native.GBTClassifier
+    defaults = dict(featuresCol="features", labelCol="label", predictionCol="prediction",
+                    maxDepth=5, maxBins=32, minInstancesPerNode=1, minInfoGain=0.0,
+                    maxMemoryInMB=256, cacheNodeIds=False, checkpointInterval=10, lossType="logistic",
+                    maxIter=20, stepSize=0.1, seed=None, subsamplingRate=1.0, impurity="variance",
+                    featureSubsetStrategy="all", validationTol=0.01, validationIndicatorCol=None,
+                    leafCol="", minWeightFractionPerNode=0.0, weightCol=None)
+    signature = inspect.signature(GBTClassifier)
+    assert list(signature.parameters) == list(defaults)
+    for name, default in defaults.items():
+        assert signature.parameters[name].kind == inspect.Parameter.KEYWORD_ONLY
+        assert signature.parameters[name].default == default
+    for name in ("probabilityCol", "rawPredictionCol", "thresholds"):
+        with pytest.raises(TypeError, match="unexpected keyword argument"):
+            GBTClassifier(**{name: None})
+    assert not hasattr(GBTClassifier(), "setValidationTol")
+    fixture = json.loads((Path(__file__).resolve().parents[2] / "tests/golden/gbt_classifier.json").read_text())
+    spark, service = ml_mock
+    models = []
+    for case in fixture["cases"]:
+        values = dict(featuresCol="input", labelCol="target", predictionCol="class", maxDepth=3,
+                      maxBins=16, minInstancesPerNode=2, minInfoGain=0.01, maxMemoryInMB=64,
+                      cacheNodeIds=True, checkpointInterval=-1, lossType="logistic", maxIter=4,
+                      stepSize=0.2, seed=case["seed"], subsamplingRate=0.75, impurity="variance",
+                      featureSubsetStrategy="all", validationIndicatorCol="validation",
+                      leafCol="leaves", minWeightFractionPerNode=0.1, weightCol="weight")
+        if use_setters:
+            estimator = GBTClassifier(validationTol=0.05)
+            for name, value in values.items():
+                assert getattr(estimator,"set"+name[0].upper()+name[1:])(value) is estimator
+        else:
+            estimator = GBTClassifier(**values, validationTol=0.05)
+        for name, value in [("ProbabilityCol","probs"),("RawPredictionCol","margin"),("Thresholds",[0.25,0.75])]:
+            assert getattr(estimator,"set"+name)(value) is estimator
+        operator, params = _native_request(spark, service, estimator, models)
+        assert operator.name == "org.apache.spark.ml.classification.GBTClassifier"
+        assert params == pb2.MlParams.FromString(base64.b64decode(case["params_b64"]))
+    for value in [np.float64(0.05), 1, None]:
+        sent = _native_sent(spark, service, GBTClassifier(validationTol=value), models)
+        assert sent["validationTol"][0] == ("null" if value is None else "double")
+    with pytest.raises(TypeError, match="Invalid param value"):
+        GBTClassifier(validationTol="invalid")

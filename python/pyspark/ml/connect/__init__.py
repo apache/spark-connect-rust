@@ -12,6 +12,7 @@ from pyspark.ml.connect.feature import (
     VectorAssembler,
 )
 from pyspark.ml.connect.classification import (
+    GBTClassifier,
     DecisionTreeClassifier,
     LinearSVC,
     LogisticRegression,
@@ -56,6 +57,7 @@ __all__ = [
     "LogisticRegression",
     "LinearSVC",
     "DecisionTreeClassifier",
+    "GBTClassifier",
     "RandomForestClassifier",
     "LinearRegression",
     "DecisionTreeRegressor",
