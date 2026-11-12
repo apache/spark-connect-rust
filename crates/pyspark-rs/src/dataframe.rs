@@ -695,6 +695,27 @@ impl PyDataFrame {
             ))
     }
 
+    /// The shallow copy of a DataFrame, as PySpark's `copy.copy` of its `__reduce__`: the same
+    /// plan, and so the same Observations, as PySpark's copy shares its plan, with the
+    /// `_support_repr_html` that its state carries.
+    fn __copy__(&self) -> PyDataFrame {
+        let copy = PyDataFrame::new(self.dataframe.clone());
+        copy.support_repr_html.store(
+            self.support_repr_html
+                .load(std::sync::atomic::Ordering::SeqCst),
+            std::sync::atomic::Ordering::SeqCst,
+        );
+        copy
+    }
+
+    /// The deep copy of a DataFrame, as PySpark's `copy.deepcopy`: the same plan, whose
+    /// Observations are copies of its own, which the actions of the copy set. `copy.copy` and
+    /// pickling keep sharing them.
+    fn __deepcopy__(&self, _memo: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        let copy = crate::on_grown_stack(|| self.dataframe.detached_copy()).to_pyerr()?;
+        Ok(PyDataFrame::new(copy))
+    }
+
     /// The DataFrame of `relation`, the bytes of a relation of `levels` levels of `session`, as a
     /// pickled DataFrame unpickles.
     #[staticmethod]

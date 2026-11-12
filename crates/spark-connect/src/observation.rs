@@ -76,6 +76,19 @@ impl Observation {
         Arc::ptr_eq(&self.state, &other.state)
     }
 
+    /// A copy of this observation, of its name and of its state as it is now, which the actions
+    /// of the copy set and this one does not, as PySpark's `copy.deepcopy` of an Observation.
+    pub(crate) fn detached(&self) -> Observation {
+        let state = self.lock();
+        Observation {
+            state: Arc::new(Mutex::new(ObservationState {
+                name: state.name.clone(),
+                result: state.result.clone(),
+                error: state.error.clone(),
+            })),
+        }
+    }
+
     /// The name to observe the metrics by, as PySpark's `Observation._on` before it
     /// observes them: `REUSE_OBSERVATION` for an observation used already, and the name,
     /// a random UUID that it keeps for an unnamed observation.
@@ -184,5 +197,56 @@ mod tests {
         obs.set_error(SparkError::connect_msg("failed"));
         assert!(obs.get().unwrap_err().message().contains("failed"));
         assert!(format!("{obs:?}").contains(&name));
+    }
+
+    #[test]
+    fn a_detached_observation_keeps_the_state_and_sets_only_its_own() {
+        let obs = Observation::new("d");
+        // A copy of an unused observation is unused too, and is used on its own.
+        let unused = obs.detached();
+        assert!(!unused.same(&obs));
+        assert_eq!(unused.name().as_deref(), Some("d"));
+        assert!(unused.get().is_err());
+        unused.name_to_observe().unwrap();
+        unused.start();
+        assert!(obs.get().is_err());
+
+        obs.start();
+        obs.update(&["a".to_string()], &[long(1)]);
+        let copy = obs.detached();
+        copy.update(&["a".to_string(), "b".to_string()], &[long(2), long(3)]);
+        obs.update(&["c".to_string()], &[long(4)]);
+        let values = |o: &Observation| -> Vec<(String, Option<LiteralType>)> {
+            o.get()
+                .unwrap()
+                .into_iter()
+                .map(|(name, value)| (name, value.literal_type))
+                .collect()
+        };
+        assert_eq!(
+            values(&obs),
+            vec![
+                ("a".to_string(), Some(LiteralType::Long(1))),
+                ("c".to_string(), Some(LiteralType::Long(4))),
+            ]
+        );
+        assert_eq!(
+            values(&copy),
+            vec![
+                ("a".to_string(), Some(LiteralType::Long(2))),
+                ("b".to_string(), Some(LiteralType::Long(3))),
+            ]
+        );
+
+        // A failed observation keeps its error in the copy.
+        let failed = Observation::new("f");
+        failed.start();
+        failed.set_error(SparkError::connect_msg("failed"));
+        assert!(failed
+            .detached()
+            .get()
+            .unwrap_err()
+            .message()
+            .contains("failed"));
     }
 }

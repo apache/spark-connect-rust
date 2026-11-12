@@ -10165,6 +10165,64 @@ def test_only_the_observations_of_the_plan_of_an_action_receive_its_metrics_as_p
     assert observation.get == {"c": 4}
 
 
+def test_a_deep_copy_sets_its_own_observations_and_a_shallow_one_shares_them_as_pyspark(
+        mock_connect):
+    # As PySpark's DataFrame.__reduce__, whose deep copy copies the plan, and so the Observations
+    # of its CollectMetrics: an action of a deep copy sets the copied Observations, and not those
+    # of the DataFrame, which keep the metrics that they had when it was copied; copy.copy shares
+    # them, as do the DataFrames over the copied one.
+    import copy
+
+    from pyspark.sql import Observation
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+    observation = Observation("o")
+    df = spark.range(3).observe(observation, F.count(F.lit(1)).alias("c"))
+    batch, observed = _count_batch_and_observed_metrics(service, df)
+    # Before the action of the copy: the original keeps its metrics, which are none.
+    deep = copy.deepcopy(df)
+    service.execute_payload = batch + observed("o", varint_field(7, 3), "c")
+    assert deep.count() == 3 and observation.get == {}
+    # A shallow copy of the deep copy shares the deep copy's Observations, not the original's.
+    service.execute_payload = batch + observed("o", varint_field(7, 7), "c")
+    assert copy.copy(deep).count() == 3 and observation.get == {}
+    service.execute_payload = batch + observed("o", varint_field(7, 4), "c")
+    assert copy.copy(df).count() == 3 and observation.get == {"c": 4}
+    # After the action of the original: a deep copy has its metrics, and then its own.
+    service.execute_payload = batch + observed("o", varint_field(7, 5), "c")
+    assert df.count() == 3 and observation.get == {"c": 5}
+    later = copy.deepcopy(df)
+    assert observation.get == {"c": 5}
+    service.execute_payload = batch + observed("o", varint_field(7, 6), "c")
+    assert later.count() == 3 and observation.get == {"c": 5}
+
+
+def test_a_deep_copy_of_a_join_sets_the_observations_of_its_copy_as_pyspark(mock_connect):
+    # As PySpark's deep copy of a plan, which copies both Observations of a join: an action of
+    # the copy sets the copies, and an action of the joined DataFrame sets the two Observations.
+    import copy
+
+    from pyspark.sql import Observation
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+    first, second = Observation("first"), Observation("second")
+    left = spark.range(3).observe(first, F.count(F.lit(1)).alias("c"))
+    right = spark.range(5).observe(second, F.count(F.lit(1)).alias("c"))
+    joined = left.join(right, "id")
+    # The plan IDs of each side, which the join shares with its request.
+    batch, observed = _count_batch_and_observed_metrics(service, left)
+    _, observed_right = _count_batch_and_observed_metrics(service, right)
+    copied = copy.deepcopy(joined)
+    service.execute_payload = (batch + observed("first", varint_field(7, 3), "c")
+                               + observed_right("second", varint_field(7, 5), "c"))
+    assert copied.count() == 3
+    assert first.get == {} and second.get == {}
+    assert joined.count() == 3
+    assert first.get == {"c": 3} and second.get == {"c": 5}
+
+
 def test_a_failing_action_keeps_the_metrics_of_the_earlier_actions_as_pyspark(mock_connect):
     # As PySpark's client, which converts the metrics of an Observation before it updates the
     # Observation with them: the Observation of a metric that it does not convert, and those

@@ -1308,6 +1308,18 @@ impl DataFrame {
             .and_then(|plan_id| session.plan_ids().node_of(plan_id))
             .map(|node| node.observations())
             .unwrap_or_default();
+        DataFrame::from_sent_relation_with(session, relation, levels, observations)
+    }
+
+    /// The DataFrame of `relation`, of `levels` levels, which has `observations`, and keeps the
+    /// plan ID of `relation`.
+    fn from_sent_relation_with(
+        session: SparkSession,
+        relation: proto::Relation,
+        levels: usize,
+        observations: Vec<(String, crate::observation::Observation)>,
+    ) -> DataFrame {
+        let plan_id = relation.common.as_ref().and_then(|common| common.plan_id);
         // The relation is sent as it is, and its clone and drop take the stack of its levels.
         let dataframe = DataFrame::from_raw_relation(session, relation, None, levels, observations);
         if let Some(plan_id) = plan_id {
@@ -1317,6 +1329,27 @@ impl DataFrame {
                 .assign(&dataframe.plan, plan_id);
         }
         dataframe
+    }
+
+    /// The copy of this DataFrame that PySpark's `copy.deepcopy` makes: the same relation and
+    /// plan ID, whose Observations are detached copies of those of this DataFrame, as PySpark's
+    /// deep copy of its plan copies its Observations. So the actions of the copy set the copies,
+    /// and those of this DataFrame stay as they are. Not a stable API.
+    #[doc(hidden)]
+    pub fn detached_copy(&self) -> Result<DataFrame> {
+        let relation = self.to_relation()?;
+        let observations = self
+            .plan
+            .observations()
+            .into_iter()
+            .map(|(name, observation)| (name, observation.detached()))
+            .collect();
+        Ok(DataFrame::from_sent_relation_with(
+            self.session.clone(),
+            relation,
+            self.plan_levels(),
+            observations,
+        ))
     }
 
     /// The levels of the plan of this DataFrame, as a pickled DataFrame records them for
@@ -5620,6 +5653,95 @@ mod plan_construction_tests {
             .err()
             .expect("a session mismatch");
         assert_eq!(error.get_error_class().as_deref(), Some("SESSION_NOT_SAME"));
+    }
+
+    /// As PySpark's `copy.deepcopy` of a DataFrame: the copy keeps the plan ID, and its
+    /// Observations are detached copies of those of the DataFrame, with their state as it is
+    /// when it is copied. So the metrics that the actions of the copy observe set the copy's,
+    /// and those that the actions of the DataFrame observe set its own.
+    #[test]
+    fn a_detached_copy_sets_its_own_observations_as_pyspark_deep_copies() {
+        use crate::observation::Observation;
+        use proto::expression::literal::LiteralType;
+        let spark = session();
+        let literal = |value: i64| proto::expression::Literal {
+            literal_type: Some(LiteralType::Long(value)),
+            ..Default::default()
+        };
+        let count = || {
+            vec![crate::functions::count(crate::column::lit(1))
+                .expression()
+                .clone()]
+        };
+        let observation = Observation::new("c");
+        let df = spark
+            .range(3)
+            .unwrap()
+            .observed_with(&observation, "c".to_string(), count());
+        let value = |obs: &Observation| -> Vec<(String, Option<LiteralType>)> {
+            obs.get()
+                .unwrap()
+                .into_iter()
+                .map(|(key, value)| (key, value.literal_type))
+                .collect()
+        };
+        // Observed by an action of the DataFrame, which sets its own Observation.
+        let observe = |df: &DataFrame, value: i64| {
+            let mut resp = proto::ExecutePlanResponse {
+                observed_metrics: vec![proto::execute_plan_response::ObservedMetrics {
+                    name: "c".to_string(),
+                    values: vec![literal(value)],
+                    keys: vec!["c".to_string()],
+                    plan_id: spark.plan_ids().id_of(&df.plan),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+            let mut info = ExecutionInfo::default();
+            capture_execution(&mut resp, &mut info, &spark, &df.plan.observations()).unwrap();
+        };
+
+        let copy = df.detached_copy().unwrap();
+        assert_eq!(
+            spark.plan_ids().id_of(&copy.plan),
+            spark.plan_ids().id_of(&df.plan)
+        );
+        let copied = copy.plan.observations();
+        assert_eq!(copied.len(), 1);
+        assert_eq!(copied[0].0, "c");
+        assert!(!copied[0].1.same(&observation));
+
+        observe(&df, 5);
+        assert_eq!(
+            value(&observation),
+            vec![("c".to_string(), Some(LiteralType::Long(5)))]
+        );
+        // The copy keeps the state of the Observation as it was when copied.
+        assert!(value(&copied[0].1).is_empty());
+        // A copy of the DataFrame after the action has the metrics of the action.
+        let later = df.detached_copy().unwrap();
+        assert_eq!(
+            value(&later.plan.observations()[0].1),
+            vec![("c".to_string(), Some(LiteralType::Long(5)))]
+        );
+
+        observe(&copy, 3);
+        assert_eq!(
+            value(&copied[0].1),
+            vec![("c".to_string(), Some(LiteralType::Long(3)))]
+        );
+        assert_eq!(
+            value(&observation),
+            vec![("c".to_string(), Some(LiteralType::Long(5)))]
+        );
+
+        // A copy of the relation, as copy.copy and pickling make, shares the Observations of the
+        // DataFrame that the relation is of while it is alive, and then those of the first copy.
+        let shared = DataFrame::from_sent_relation(spark.clone(), df.to_relation().unwrap());
+        assert!(shared.plan.observations()[0].1.same(&observation));
+        std::mem::drop(df);
+        let shared = DataFrame::from_sent_relation(spark.clone(), copy.to_relation().unwrap());
+        assert!(shared.plan.observations()[0].1.same(&copied[0].1));
     }
 
     /// As PySpark's client, which sets the metrics of `observations[name]`, of the Observations
