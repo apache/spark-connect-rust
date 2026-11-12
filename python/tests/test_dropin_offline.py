@@ -16074,14 +16074,27 @@ def test_integer_literal_wire_boundaries(value, wire_type):
         assert compared.unresolved_function.arguments[1].literal == expected
 
 
-def test_exact_integer_operators_skip_numpy_probes(monkeypatch):
+def test_exact_primitive_literals_skip_numpy_probes(monkeypatch):
     import sys
     from enum import IntEnum
 
+    from pyspark import _pyspark
     from pyspark.sql import functions as F
     from pyspark.sql.connect import proto
 
     class IntegerSubclass(int):
+        pass
+
+    class FloatSubclass(float):
+        pass
+
+    class StringSubclass(str):
+        pass
+
+    class BytesSubclass(bytes):
+        pass
+
+    class ByteArraySubclass(bytearray):
         pass
 
     class IntegerEnum(IntEnum):
@@ -16092,14 +16105,34 @@ def test_exact_integer_operators_skip_numpy_probes(monkeypatch):
         def ndarray(self):
             raise RuntimeError("NumPy probe reached")
 
-    column = F.col("id")
+    exact = [
+        (None, proto.Expression.Literal(null=proto.DataType(null=proto.DataType.NULL()))),
+        (True, proto.Expression.Literal(boolean=True)),
+        (5, proto.Expression.Literal(integer=5)),
+        (1.25, proto.Expression.Literal(double=1.25)),
+        ("x", proto.Expression.Literal(string="x")),
+        (b"x", proto.Expression.Literal(binary=b"x")),
+        (bytearray(b"x"), proto.Expression.Literal(binary=b"x")),
+    ]
+    for value, expected in exact:
+        assert F.lit(value)._expr.to_plan(None).literal == expected
+
     with monkeypatch.context() as patch:
         patch.setitem(sys.modules, "numpy", ProbeSentinel())
-        compared = (column == 5)._expr.to_plan(None)
-        assert compared.unresolved_function.arguments[1].literal == proto.Expression.Literal(integer=5)
-        for value in (IntegerSubclass(5), IntegerEnum.VALUE, True, 2**63):
+        for value, expected in exact:
+            literal = _pyspark.functions.pyfunc_lit(value)._expr.to_plan(None).literal
+            assert literal == expected
+        for value in (
+            IntegerSubclass(5),
+            FloatSubclass(1.25),
+            StringSubclass("x"),
+            BytesSubclass(b"x"),
+            ByteArraySubclass(b"x"),
+            IntegerEnum.VALUE,
+            2**63,
+        ):
             with pytest.raises(RuntimeError, match="NumPy probe reached"):
-                column == value
+                _pyspark.functions.pyfunc_lit(value)
 
 
 def test_boolean_literals_keep_their_wire_type():

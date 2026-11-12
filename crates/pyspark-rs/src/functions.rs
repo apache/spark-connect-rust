@@ -249,12 +249,37 @@ pub fn to_column(obj: &Bound<'_, PyAny>) -> PyResult<Column> {
     if let Ok(col) = obj.extract::<Bound<'_, PyColumn>>() {
         return Ok(col.borrow().column.clone());
     }
-    // Exact built-in ints need no Enum, NumPy or non-primitive scalar probing.
+    // Exact built-in primitives need no Enum, NumPy or non-primitive scalar probing.
     // Subclasses and out-of-range ints retain the generic conversion order below.
+    if let Ok(boolean) = obj.cast_exact::<pyo3::types::PyBool>() {
+        return Ok(Column::new(Expression::literal(
+            LiteralExpression::boolean(boolean.extract()?),
+        )));
+    }
     if let Ok(integer) = obj.cast_exact::<pyo3::types::PyInt>() {
         if let Ok(value) = integer.extract::<i64>() {
             return Ok(Column::new(Expression::literal(integer_literal(value))));
         }
+    }
+    if let Ok(float) = obj.cast_exact::<pyo3::types::PyFloat>() {
+        return Ok(Column::new(Expression::literal(LiteralExpression::double(
+            float.extract()?,
+        ))));
+    }
+    if let Ok(string) = obj.cast_exact::<pyo3::types::PyString>() {
+        return match string.extract::<String>() {
+            Ok(string) => Ok(Column::new(Expression::literal(LiteralExpression::string(
+                string,
+            )))),
+            Err(_) => Err(not_utf8_string(obj)),
+        };
+    }
+    if obj.is_exact_instance_of::<pyo3::types::PyBytes>()
+        || obj.is_exact_instance_of::<pyo3::types::PyByteArray>()
+    {
+        return Ok(Column::new(Expression::literal(LiteralExpression::Binary(
+            obj.extract()?,
+        ))));
     }
     // An Enum is the literal of its value, as PySpark's.
     let obj = &enum_to_value(obj)?;
