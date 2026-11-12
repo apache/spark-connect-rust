@@ -233,6 +233,24 @@ impl UnaryService<Vec<u8>> for Unary {
                 ..Default::default()
             }
             .encode_to_vec(),
+            // Every artifact that is asked for exists.
+            "ArtifactStatus" => spark_connect_proto::ArtifactStatusesResponse {
+                session_id,
+                server_side_session_id,
+                statuses: spark_connect_proto::ArtifactStatusesRequest::decode(bytes.as_slice())
+                    .map(|request| request.names)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|name| {
+                        let exists =
+                            spark_connect_proto::artifact_statuses_response::ArtifactStatus {
+                                exists: true,
+                            };
+                        (name, exists)
+                    })
+                    .collect(),
+            }
+            .encode_to_vec(),
             _ => Vec::new(),
         };
         Box::pin(async { Ok(Response::new(body)) })
@@ -394,6 +412,34 @@ async fn a_restarted_server_raises_and_closes_the_client() {
     assert_eq!(error.get_condition().as_deref(), Some("NO_ACTIVE_SESSION"));
 }
 
+/// As PySpark's ArtifactManager, which does not check the IDs of its responses: the artifact
+/// statuses of a restarted server are returned, also to a cache of artifacts, and the next call
+/// of the client raises.
+#[tokio::test]
+async fn artifact_responses_of_a_restarted_server_are_not_checked_as_pyspark() {
+    let fixture = Fixture::start().await;
+    let client = fixture.client().await;
+    client.config(config_request(&client)).await.unwrap();
+
+    *fixture.state.server_session_id.lock().unwrap() = RESTARTED_SERVER_ID.to_string();
+    let statuses = client
+        .artifact_status(&["cache/a"])
+        .await
+        .expect("an artifact status");
+    assert_eq!(statuses.get("cache/a"), Some(&true));
+    client
+        .cache_artifacts(vec![b"blob".to_vec()])
+        .await
+        .expect("a cache of artifacts that exist");
+    assert!(!client.is_closed());
+    let error = client
+        .config(config_request(&client))
+        .await
+        .expect_err("the next call of the client raises");
+    assert_eq!(error.kind, SparkErrorKind::AssertionError);
+    assert!(client.is_closed());
+}
+
 #[tokio::test]
 async fn a_restart_that_the_plan_compression_lookup_sees_sends_no_plan_as_pyspark() {
     use spark_connect_proto::analyze_plan_request::{Analyze, Schema};
@@ -509,6 +555,42 @@ async fn a_session_changed_error_that_has_details_raises_no_active_session() {
         .state
         .requests_of::<spark_connect_proto::FetchErrorDetailsRequest>("FetchErrorDetails")
         .is_empty());
+}
+
+#[tokio::test]
+async fn a_session_changed_error_reads_no_stack_trace_setting_as_pyspark() {
+    // PySpark's `_display_server_stack_trace` reads its settings through `_stub`, which raises
+    // NO_ACTIVE_SESSION once the session change has closed the client: nothing is sent, and the
+    // stack trace is shown, as when the settings cannot be read.
+    let fixture = Fixture::start().await;
+    let client = fixture.client().await;
+    fixture.state.failures.lock().unwrap().push_back((
+        "Config".to_string(),
+        error_with_class(
+            "The existing Spark server driver instance has restarted. Please reconnect.",
+            "INVALID_HANDLE.SESSION_CHANGED",
+        ),
+    ));
+
+    let error = client
+        .config(config_request(&client))
+        .await
+        .expect_err("a session change must raise");
+    assert_eq!(
+        error.get_condition().as_deref(),
+        Some("INVALID_HANDLE.SESSION_CHANGED")
+    );
+    assert!(client.is_closed());
+    // The Config that failed, and nothing after it.
+    let methods: Vec<String> = fixture
+        .state
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(method, _)| method.clone())
+        .collect();
+    assert_eq!(methods, ["Config"]);
 }
 
 #[tokio::test]

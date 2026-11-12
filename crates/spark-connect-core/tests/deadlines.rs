@@ -313,6 +313,32 @@ async fn unary_call_past_its_deadline_is_deadline_exceeded() {
 }
 
 #[tokio::test]
+async fn deadlines_too_long_for_the_grpc_timeout_are_sent_and_the_calls_run() {
+    // A deadline that gRPC cannot encode is never reached, so the execution and its reattach
+    // run to their results, instead of the client panicking while it sets the deadline.
+    let mut fixture = Fixture::start(
+        vec![streamed(vec![response("r1", false)])],
+        vec![streamed(vec![response("r2", true)])],
+        quick_retries(),
+    )
+    .await;
+    fixture.client.set_rpc_deadlines(RpcDeadlines {
+        reattachable_execute_plan: Some(Duration::MAX),
+        reattach_execute: Some(Duration::MAX),
+        ..RpcDeadlines::default()
+    });
+    let mut stream = bounded(fixture.client.execute_plan_reattachable(execute_request()))
+        .await
+        .unwrap();
+    let ids = drain(&mut stream).await.unwrap();
+    assert_eq!(ids, ["r1", "r2"]);
+
+    assert_eq!(*fixture.state.executes.lock().unwrap(), 1);
+    assert_eq!(fixture.state.reattaches.lock().unwrap().len(), 1);
+    fixture.assert_release_all_count(1).await;
+}
+
+#[tokio::test]
 async fn execute_plan_past_its_deadline_is_bounded_as_the_reference_retries() {
     // As the reference: the deadline of the initial ExecutePlan is a RetryException, which is
     // the error once the bound of the retries has passed. With no bound, the error is the

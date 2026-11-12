@@ -352,9 +352,9 @@ impl PySparkSessionBuilder {
             .map(|(key, value)| (key.as_str(), value.as_deref()))
             .collect();
         let conf = session.conf();
-        let warnings = py
-            .detach(|| conf.set_pairs(&pairs, Some(true)).map_err(Box::new))
-            .to_pyerr()?;
+        let warnings = interruptible(py, session, || {
+            conf.set_pairs(&pairs, Some(true)).map_err(Box::new)
+        })?;
         // As PySpark's `_set_all`, which warns each warning of the server.
         crate::conf::warn_all(py, &warnings)
     }
@@ -879,6 +879,8 @@ impl PySparkSession {
                 error.write_unraisable(py, None);
             }
         });
+        // The metrics of the Observations of its executions, which PySpark's client converts.
+        crate::observation::check_observed_metrics(&session);
         PySparkSession {
             session,
             streams: std::sync::OnceLock::new(),
@@ -914,13 +916,11 @@ impl PySparkSession {
                 ));
             };
             let schema = DataType::Struct { fields };
-            let df = py
-                .detach(|| {
-                    self.session
-                        .create_dataframe(Vec::new(), schema)
-                        .map_err(Box::new)
-                })
-                .to_pyerr()?;
+            let df = interruptible(py, &self.session, || {
+                self.session
+                    .create_dataframe(Vec::new(), schema)
+                    .map_err(Box::new)
+            })?;
             return Ok(PyDataFrame::new(df));
         }
         let mut items: Vec<Bound<'_, PyAny>> = data.try_iter()?.collect::<PyResult<_>>()?;
@@ -952,7 +952,7 @@ impl PySparkSession {
             Some(fields) => fields,
             None => {
                 // The configurations are read only when a value depends on them.
-                let confs = infer::LazyConfs::new(self.session.conf());
+                let confs = infer::LazyConfs::new(self.session.clone());
                 let options = infer::Options::new(&confs);
                 let mut merged: Option<DataType> = None;
                 for item in &items {
@@ -1000,26 +1000,28 @@ impl PySparkSession {
         let mut values: Vec<Vec<Value>> = (0..parts.len())
             .map(|_| Vec::with_capacity(fields.len()))
             .collect();
+        let mut late = infer::Late::default();
         {
             let _quanta = infer::DecimalQuanta::new();
             for (i, field) in fields.iter().enumerate() {
                 for (row, out) in parts.iter().zip(values.iter_mut()) {
-                    out.push(infer::convert(&row[i], &field.data_type, field.nullable)?);
+                    out.push(infer::convert(
+                        &row[i],
+                        &field.data_type,
+                        field.nullable,
+                        &mut late,
+                    )?);
                 }
             }
         }
-        // Then, as PySpark, the schema converts to Arrow, which rejects a null type that is not
-        // nullable, and has no char, varchar, year-month or calendar interval type.
-        if infer::has_non_nullable_null_type(&fields) {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "A null type field may not be non-nullable",
-            ));
+        // Then, as PySpark, the schema converts to Arrow, a field at a time and depth first,
+        // which rejects a null type that is not nullable, and has no char, varchar, year-month
+        // or calendar interval type.
+        if let Some(err) = infer::arrow_schema_error(py, &fields)? {
+            return Err(err);
         }
-        for field in &fields {
-            if let Some(err) = infer::unsupported_arrow_type(py, &field.data_type)? {
-                return Err(err);
-            }
-        }
+        // Then the columns are built, which rejects the values that no converter of PySpark does.
+        late.finish()?;
         // The names, with those that inference added, must name every column.
         if let Some(cols) = &cols {
             if cols.len() != fields.len() {
@@ -1032,13 +1034,11 @@ impl PySparkSession {
             .map(|values| StructValue::new(names.clone(), values).into())
             .collect();
         let schema = DataType::Struct { fields };
-        let df = py
-            .detach(|| {
-                self.session
-                    .create_dataframe(rows, schema)
-                    .map_err(Box::new)
-            })
-            .to_pyerr()?;
+        let df = interruptible(py, &self.session, || {
+            self.session
+                .create_dataframe(rows, schema)
+                .map_err(Box::new)
+        })?;
         // As pyspark, column names are applied with toDF. The local relation already carries
         // them, so this only changes the plan, which the server resolves into a Project that
         // is not local; it keeps isLocal() as in pyspark and is not redundant.
@@ -1072,19 +1072,17 @@ impl PySparkSession {
         {
             return Ok(None);
         }
-        let options = py.detach(|| self.session.arrow_input_options().to_pyerr())?;
+        let options = interruptible(py, &self.session, || self.session.arrow_input_options())?;
         // The option is always set, as the importer requires it.
         let timezone = options.timezone().unwrap_or("UTC").to_owned();
         let large = options.use_large_var_types() == Some("true");
-        let safecheck = py
-            .detach(|| {
-                self.session
-                    .conf()
-                    .get("spark.sql.execution.pandas.convertToArrowArraySafely")
-                    .map_err(Box::new)
-            })
-            .to_pyerr()?
-            .as_deref()
+        let safecheck = interruptible(py, &self.session, || {
+            self.session
+                .conf()
+                .get("spark.sql.execution.pandas.convertToArrowArraySafely")
+                .map_err(Box::new)
+        })?
+        .as_deref()
             == Some("true");
         // The caller's StructType, which the guard checked, is converted as given; a DDL
         // string is parsed into the same fields.
@@ -1114,13 +1112,11 @@ impl PySparkSession {
         // of the fields of a struct (DUPLICATED_FIELD_NAME_IN_ARROW_STRUCT).
         let spark_schema = crate::types::py_to_data_type(schema_py.bind(py))?;
         let batches = crate::pyarrow_import::table_batches(&table)?;
-        let df = py
-            .detach(|| {
-                self.session
-                    .create_dataframe_from_arrow_with_options(batches, Some(spark_schema), &options)
-                    .map_err(Box::new)
-            })
-            .to_pyerr()?;
+        let df = interruptible(py, &self.session, || {
+            self.session
+                .create_dataframe_from_arrow_with_options(batches, Some(spark_schema), &options)
+                .map_err(Box::new)
+        })?;
         // As the other pandas paths, the explicit names are applied with toDF.
         Ok(Some(PyDataFrame::new(df.to_df(
             fields.iter().map(|field| field.name.as_str()).collect(),
@@ -1204,13 +1200,11 @@ impl PySparkSession {
             ));
         }
         let batches = crate::pyarrow_import::table_batches(&table)?;
-        let df = py
-            .detach(|| {
-                self.session
-                    .create_dataframe_from_arrow_with_options(batches, None, &settings.options)
-                    .map_err(Box::new)
-            })
-            .to_pyerr()?;
+        let df = interruptible(py, &self.session, || {
+            self.session
+                .create_dataframe_from_arrow_with_options(batches, None, &settings.options)
+                .map_err(Box::new)
+        })?;
         Ok(Some(PyDataFrame::new(if columns.is_empty() {
             df
         } else {
@@ -1284,14 +1278,12 @@ impl PySparkSession {
             return Err(axis_length_mismatch(expected));
         }
         let batches = crate::pyarrow_import::table_batches(&table)?;
-        let options = py.detach(|| self.session.arrow_input_options().to_pyerr())?;
-        let df = py
-            .detach(|| {
-                self.session
-                    .create_dataframe_from_arrow_with_options(batches, schema, &options)
-                    .map_err(Box::new)
-            })
-            .to_pyerr()?;
+        let options = interruptible(py, &self.session, || self.session.arrow_input_options())?;
+        let df = interruptible(py, &self.session, || {
+            self.session
+                .create_dataframe_from_arrow_with_options(batches, schema, &options)
+                .map_err(Box::new)
+        })?;
         Ok(PyDataFrame::new(df))
     }
 
@@ -1683,7 +1675,7 @@ impl PySparkSession {
             let settings = row_settings.ok_or_else(|| {
                 pyo3::exceptions::PyRuntimeError::new_err("missing pandas Row Arrow options")
             })?;
-            py.detach(|| {
+            interruptible(py, &self.session, || {
                 self.session
                     .create_dataframe_from_arrow_with_options(
                         batches,
@@ -1691,15 +1683,13 @@ impl PySparkSession {
                         &settings.options,
                     )
                     .map_err(Box::new)
-            })
-            .to_pyerr()?
+            })?
         } else {
-            py.detach(|| {
+            interruptible(py, &self.session, || {
                 self.session
                     .create_dataframe(rows, schema)
                     .map_err(Box::new)
-            })
-            .to_pyerr()?
+            })?
         };
         Ok(PyDataFrame::new(match names {
             Some(names) if !names.is_empty() => {
@@ -1714,10 +1704,9 @@ impl PySparkSession {
         py: Python<'_>,
         allow_dict_as_map: bool,
     ) -> PyResult<PandasArrowSettings> {
-        let options = py.detach(|| self.session.arrow_input_options().to_pyerr())?;
+        let options = interruptible(py, &self.session, || self.session.arrow_input_options())?;
         let conf = |key: &'static str| {
-            py.detach(|| self.session.conf().get(key).map_err(Box::new))
-                .to_pyerr()
+            interruptible(py, &self.session, || self.session.conf().get(key))
                 .map(|value| value.as_deref() == Some("true"))
         };
         Ok(PandasArrowSettings {
@@ -1852,15 +1841,17 @@ impl PySparkSession {
         );
         // Row frames reuse the Arrow settings already read for the whole frame. Other
         // native frames retain their existing read-on-error behavior and default.
-        let safecheck = safecheck.unwrap_or_else(|| {
-            py.detach(|| {
+        // A signal that ends the read raises its exception, which the default does not replace.
+        let safecheck = match safecheck {
+            Some(safecheck) => safecheck,
+            None => crate::interrupt::interruptible_outcome(py, &self.session, || {
                 self.session
                     .conf()
                     .get("spark.sql.execution.pandas.convertToArrowArraySafely")
                     .map_err(Box::new)
-            })
-            .map_or(true, |value| value.is_none_or(|value| value == "true"))
-        });
+            })?
+            .map_or(true, |value| value.is_none_or(|value| value == "true")),
+        };
         if safecheck {
             message.push_str(
                 " It can be caused by overflows or other unsafe conversions warned by Arrow. \
@@ -2149,11 +2140,8 @@ impl PySparkSession {
                 let timezone = if aware {
                     None
                 } else {
-                    py.detach(|| {
-                        self.session
-                            .conf()
-                            .get("spark.sql.session.timeZone")
-                            .to_pyerr()
+                    interruptible(py, &self.session, || {
+                        self.session.conf().get("spark.sql.session.timeZone")
                     })?
                 };
                 let table = helper
@@ -2191,13 +2179,11 @@ impl PySparkSession {
                     fields: fields.clone(),
                 };
                 let ipc: Vec<u8> = ipc.extract()?;
-                let frame = py
-                    .detach(|| {
-                        self.session
-                            .create_dataframe_from_inline_arrow_ipc(ipc, schema)
-                            .map_err(Box::new)
-                    })
-                    .to_pyerr()?;
+                let frame = interruptible(py, &self.session, || {
+                    self.session
+                        .create_dataframe_from_inline_arrow_ipc(ipc, schema)
+                        .map_err(Box::new)
+                })?;
                 // Match pandas row input: explicit nonempty field names travel
                 // through toDF as well as the local relation's logical schema.
                 return Ok(PyDataFrame::new(
@@ -2237,13 +2223,11 @@ impl PySparkSession {
                     fields: fields.clone(),
                 };
                 let ipc: Vec<u8> = ipc.extract()?;
-                let frame = py
-                    .detach(|| {
-                        self.session
-                            .create_dataframe_from_inline_arrow_ipc(ipc, schema)
-                            .map_err(Box::new)
-                    })
-                    .to_pyerr()?;
+                let frame = interruptible(py, &self.session, || {
+                    self.session
+                        .create_dataframe_from_inline_arrow_ipc(ipc, schema)
+                        .map_err(Box::new)
+                })?;
                 // Match pandas row input: explicit nonempty field names travel
                 // through toDF as well as the local relation's logical schema.
                 return Ok(PyDataFrame::new(
@@ -2290,13 +2274,11 @@ impl PySparkSession {
                         let schema = DataType::Struct {
                             fields: fields.clone(),
                         };
-                        let df = py
-                            .detach(|| {
-                                self.session
-                                    .create_dataframe_from_columns(columns, schema)
-                                    .map_err(Box::new)
-                            })
-                            .to_pyerr()?;
+                        let df = interruptible(py, &self.session, || {
+                            self.session
+                                .create_dataframe_from_columns(columns, schema)
+                                .map_err(Box::new)
+                        })?;
                         return Ok(PyDataFrame::new(df));
                     }
                 }
@@ -2316,7 +2298,7 @@ impl PySparkSession {
     #[getter]
     #[pyo3(name = "conf")]
     fn conf(&self) -> crate::conf::PyRuntimeConf {
-        crate::conf::PyRuntimeConf::new(self.session.conf())
+        crate::conf::PyRuntimeConf::new(self.session.clone())
     }
 
     /// Table-valued functions namespace (`spark.tvf`).
@@ -2373,12 +2355,11 @@ impl PySparkSession {
                 "destination FS path must be an absolute path.",
             ));
         }
-        py.detach(|| {
+        interruptible(py, &self.session, || {
             self.session
                 .copy_from_local_to_fs(local_path, dest_path)
                 .map_err(Box::new)
         })
-        .to_pyerr()
     }
 
     /// As PySpark Connect's: the attributes of the JVM of a classic session raise
@@ -2714,8 +2695,7 @@ impl PySparkSession {
     /// Release the session on the server, without stopping it, for `client.release_session`.
     fn _release_session(&self, py: Python<'_>) -> PyResult<()> {
         let session = self.session.clone();
-        py.detach(|| session.release_session().map_err(Box::new))
-            .to_pyerr()
+        interruptible(py, &session, || session.release_session().map_err(Box::new))
     }
 
     /// Close the session without releasing it on the server, for `client.close`.
@@ -2921,9 +2901,7 @@ impl PySparkSession {
     /// The type of the DDL string `ddl`, as the server parses it, as PySpark Connect's
     /// `SparkSession._parse_ddl`, of a `DDLParse` of an `AnalyzePlanRequest`.
     fn _parse_ddl(&self, py: Python<'_>, ddl: &str) -> PyResult<Py<PyAny>> {
-        let data_type = py
-            .detach(|| self.session.parse_ddl(ddl).map_err(Box::new))
-            .to_pyerr()?;
+        let data_type = interruptible(py, &self.session, || self.session.parse_ddl(ddl))?;
         crate::dataframe::check_nanosecond_timestamps(py, Some(&data_type))?;
         crate::types::data_type_to_py(py, &data_type)
     }
@@ -3004,18 +2982,18 @@ impl PySparkSession {
     /// Returns the server-assigned profile ID that can be used with `DataFrame.withResources()`.
     #[pyo3(name = "buildResourceProfile")]
     fn build_resource_profile(&self, py: Python<'_>, profile: &PyResourceProfile) -> PyResult<i32> {
-        py.detach(|| {
+        interruptible(py, &self.session, || {
             self.session
                 .build_resource_profile(&profile.inner)
                 .map_err(Box::new)
         })
-        .to_pyerr()
     }
 
     #[getter]
     fn version(&self, py: Python<'_>) -> PyResult<String> {
-        py.detach(|| self.session.version().map_err(Box::new))
-            .to_pyerr()
+        interruptible(py, &self.session, || {
+            self.session.version().map_err(Box::new)
+        })
     }
 
     /// The DataFrame of a table, as PySpark Connect's: `NOT_EXPECTED_TYPE` for a name that is not
@@ -3055,20 +3033,23 @@ impl PySparkSession {
 
     #[pyo3(name = "interruptAll")]
     fn interrupt_all(&self, py: Python<'_>) -> PyResult<Vec<String>> {
-        py.detach(|| self.session.interrupt_all().map_err(Box::new))
-            .to_pyerr()
+        interruptible(py, &self.session, || {
+            self.session.interrupt_all().map_err(Box::new)
+        })
     }
 
     #[pyo3(name = "interruptTag")]
     fn interrupt_tag(&self, py: Python<'_>, tag: &str) -> PyResult<Vec<String>> {
-        py.detach(|| self.session.interrupt_tag(tag).map_err(Box::new))
-            .to_pyerr()
+        interruptible(py, &self.session, || {
+            self.session.interrupt_tag(tag).map_err(Box::new)
+        })
     }
 
     #[pyo3(name = "interruptOperation")]
     fn interrupt_operation(&self, py: Python<'_>, op_id: &str) -> PyResult<Vec<String>> {
-        py.detach(|| self.session.interrupt_operation(op_id))
-            .to_pyerr()
+        interruptible(py, &self.session, || {
+            self.session.interrupt_operation(op_id)
+        })
     }
 
     /// Add a tag of the current thread, with the errors of PySpark Connect's tags: `CANNOT_BE_NONE`
@@ -3102,8 +3083,9 @@ impl PySparkSession {
     fn to_ddl(&self, py: Python<'_>, r#struct: &Bound<'_, PyAny>) -> PyResult<String> {
         let json: String = r#struct.call_method0("json")?.extract()?;
         let session = self.session.clone();
-        py.detach(|| session.json_to_ddl(&json).map_err(Box::new))
-            .to_pyerr()
+        interruptible(py, &session, || {
+            session.json_to_ddl(&json).map_err(Box::new)
+        })
     }
 
     /// The tags of the current thread, a set, as PySpark's `getTags`.
@@ -3185,12 +3167,11 @@ impl PySparkSession {
             check_local_artifact(py, &name, &local, pyfile)?;
         }
         let refs: Vec<&str> = path.iter().map(|s| s.as_str()).collect();
-        py.detach(|| {
+        interruptible(py, &self.session, || {
             self.session
                 .add_artifacts_with(&refs, pyfile, archive, file)
                 .map_err(Box::new)
         })
-        .to_pyerr()
     }
 
     /// `addArtifact` is `addArtifacts`, as in PySpark.
@@ -3221,13 +3202,11 @@ impl PySparkSession {
         py: Python<'_>,
         new_session_id: Option<String>,
     ) -> PyResult<Py<PySparkSession>> {
-        let session = py
-            .detach(|| {
-                self.session
-                    .clone_session_with_id(new_session_id.as_deref())
-                    .map_err(Box::new)
-            })
-            .to_pyerr()?;
+        let session = interruptible(py, &self.session, || {
+            self.session
+                .clone_session_with_id(new_session_id.as_deref())
+                .map_err(Box::new)
+        })?;
         session_object(py, &session)
     }
 }
@@ -4009,7 +3988,7 @@ pub(crate) fn range_arguments(
 }
 
 /// The `ValueError` of protobuf for an int out of the range of its field.
-fn value_out_of_range(int: &Bound<'_, PyAny>) -> PyErr {
+pub(crate) fn value_out_of_range(int: &Bound<'_, PyAny>) -> PyErr {
     let shown = int.str().map(|text| text.to_string()).unwrap_or_default();
     pyo3::exceptions::PyValueError::new_err(format!("Value out of range: {shown}"))
 }

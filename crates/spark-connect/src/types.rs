@@ -1448,20 +1448,32 @@ fn parse_json_type_string(s: &str) -> Result<DataType> {
         return Ok(data_type);
     }
     match s {
-        // `null` and `calendarinterval` are lenient aliases that the drop-in's Python parser
-        // accepted before it delegated here.
+        // `null` is read as the server's JSON parser reads it, for the schemas written before
+        // NullType was named `void`, and PySpark rejects it. `calendarinterval` is a lenient alias
+        // that the drop-in's Python parser accepted before it delegated here.
         "null" => Ok(DataType::Null),
         "calendarinterval" => Ok(DataType::CalendarInterval),
         // The inverse of `json_value`, which writes `unparsed(<data_type_string>)`.
         s if s.starts_with("unparsed(") && s.ends_with(')') => Ok(DataType::Unparsed {
             data_type_string: s["unparsed(".len()..s.len() - 1].to_string(),
         }),
-        _ => parse_parameterized_type(s, TypeStringGrammar::Json).unwrap_or_else(|| {
-            Err(SparkError::value(
-                "INVALID_DATATYPE_STRING",
-                &[("detail", &format!("Unknown type string: {}", s))],
-            ))
-        }),
+        _ => {
+            // PySpark's patterns match a prefix of the string, so whitespace after a form with
+            // arguments or fields is not a part of it and is accepted. A bare name is matched
+            // whole, so whitespace after it, as in `interval `, is not a type.
+            let trimmed = s.trim_end();
+            let form = if common_atomic_type(trimmed).is_some() {
+                s
+            } else {
+                trimmed
+            };
+            parse_parameterized_type(form, TypeStringGrammar::Json).unwrap_or_else(|| {
+                Err(SparkError::value(
+                    "INVALID_DATATYPE_STRING",
+                    &[("detail", &format!("Unknown type string: {}", s))],
+                ))
+            })
+        }
     }
 }
 
@@ -1576,6 +1588,7 @@ fn parse_json_object(
 /// | `decimal(p)` | not a type: the scale is required | scale 0 |
 /// | `decimal(p,-s)` | a negative scale | not a type: an argument is an unsigned integer |
 /// | `interval <a> to <b>` | any two fields of one family, as `DayTimeIntervalType(a, b)` | `b` later than `a` |
+/// | `time` | not a type: the precision is required | `time(6)` |
 /// | `string collate <name>` | the name as written | the name in its canonical form, `system.builtin.` dropped |
 ///
 /// Neither checks the range of an argument, such as the precision of a decimal: PySpark's types
@@ -1605,8 +1618,6 @@ fn common_atomic_type(s: &str) -> Option<DataType> {
         "date" => DataType::Date,
         "timestamp" => DataType::Timestamp,
         "timestamp_ntz" => DataType::TimestampNtz,
-        // A bare `time`, as `TimeType().typeName()` and Spark's `TIME`, is the default time(6).
-        "time" => DataType::Time { precision: 6 },
         "interval" => DataType::CalendarInterval,
         "variant" => DataType::Variant,
         // A bare `decimal`, as `DecimalType().typeName()` and Spark's `DECIMAL`, is the default
@@ -1785,38 +1796,77 @@ fn interval_field(name: &str, fields: &[(&str, i32)]) -> Option<i32> {
 }
 
 /// Parses `string collate <name>`, of any whitespace between its words, whose name is of letters,
-/// digits and underscores, as the `\w+` of PySpark's `_STRING_WITH_COLLATION`.
+/// digits and underscores.
 ///
-/// In JSON the collation is the name as it is written, as PySpark's `StringType(name)` keeps it.
-/// In DDL it is the name in the canonical form that the server gives it (see
-/// [`canonical_collation_name`]), which may be qualified as `system.builtin.<name>`, as Spark's
-/// `CollationFactory.resolveFullyQualifiedName` reads it.
+/// In JSON the name is of the letters of any script, as the `\w+` of PySpark's
+/// `_STRING_WITH_COLLATION` reads them, and the collation is the name as it is written, as
+/// PySpark's `StringType(name)` keeps it. In DDL the name is a multipart identifier of ASCII
+/// letters, digits and underscores, as Spark's lexer reads an unquoted one, and each of its parts
+/// may be in backquotes (see [`multipart_identifier`]). The collation is the name in the canonical
+/// form that the server gives it (see [`canonical_collation_name`]), which may be qualified as
+/// `system.builtin.<name>`, as Spark's `CollationFactory.resolveFullyQualifiedName` reads it.
 fn parse_collated_string(s: &str, grammar: TypeStringGrammar) -> Result<DataType> {
     let invalid = || invalid_type_string(s, "collated string type");
     let words: Vec<&str> = s.split_whitespace().collect();
     let ["string", "collate", name] = words[..] else {
         return Err(invalid());
     };
-    if s.ends_with(char::is_whitespace) {
-        return Err(invalid());
-    }
-    let name = match (grammar, name.split('.').collect::<Vec<_>>().as_slice()) {
-        (TypeStringGrammar::Ddl, [catalog, schema, unqualified])
+    let parts = match grammar {
+        TypeStringGrammar::Json => vec![name.to_string()],
+        TypeStringGrammar::Ddl => multipart_identifier(name).ok_or_else(invalid)?,
+    };
+    let name = match parts.as_slice() {
+        [name] => name,
+        [catalog, schema, name]
             if catalog.eq_ignore_ascii_case("system") && schema.eq_ignore_ascii_case("builtin") =>
         {
-            unqualified
+            name
         }
-        _ => name,
+        _ => return Err(invalid()),
     };
-    if name.is_empty() || !name.chars().all(|c| c == '_' || c.is_alphanumeric()) {
+    let is_word = |c: char| match grammar {
+        TypeStringGrammar::Json => c == '_' || c.is_alphanumeric(),
+        TypeStringGrammar::Ddl => c == '_' || c.is_ascii_alphanumeric(),
+    };
+    if name.is_empty() || !name.chars().all(is_word) {
         return Err(invalid());
     }
     Ok(DataType::String {
         collation: match grammar {
-            TypeStringGrammar::Json => name.to_string(),
+            TypeStringGrammar::Json => name.clone(),
             TypeStringGrammar::Ddl => canonical_collation_name(name),
         },
     })
+}
+
+/// The parts of the multipart identifier `name` of DDL, as Spark's `multipartIdentifier` reads
+/// it: parts separated by dots, each of them either as it is written or in backquotes, where a
+/// doubled backquote is one backquote. `None` if `name` is malformed.
+fn multipart_identifier(name: &str) -> Option<Vec<String>> {
+    let mut parts = Vec::new();
+    let mut chars = name.chars().peekable();
+    loop {
+        let mut part = String::new();
+        if chars.next_if_eq(&'`').is_some() {
+            loop {
+                match chars.next()? {
+                    '`' if chars.next_if_eq(&'`').is_some() => part.push('`'),
+                    '`' => break,
+                    c => part.push(c),
+                }
+            }
+        } else {
+            while let Some(c) = chars.next_if(|c| *c != '.') {
+                part.push(c);
+            }
+        }
+        parts.push(part);
+        match chars.next() {
+            Some('.') => {}
+            None => return Some(parts),
+            Some(_) => return None,
+        }
+    }
 }
 
 fn parse_geometry(s: &str) -> Result<DataType> {
@@ -2342,7 +2392,9 @@ fn parse_single_type(input: &str) -> Result<DataType> {
         return Ok(data_type);
     }
     match trimmed.as_str() {
-        "null" => Ok(DataType::Null),
+        // A bare `time` is the default time(6) of Spark's grammar; JSON names a time with its
+        // precision only, as `time(p)`.
+        "time" => Ok(DataType::Time { precision: 6 }),
         "tinyint" => Ok(DataType::Byte),
         "smallint" => Ok(DataType::Short),
         "int" => Ok(DataType::Integer),
@@ -3060,8 +3112,10 @@ mod tests {
             DataType::from_ddl("time").unwrap(),
             DataType::Time { precision: 6 }
         );
+        // JSON names a time with its precision only, as `TimeType.jsonValue` does.
+        assert!(DataType::from_json_str("\"time\"").is_err());
         assert_eq!(
-            DataType::from_json_str("\"time\"").unwrap(),
+            DataType::from_json_str("\"time(6)\"").unwrap(),
             DataType::Time { precision: 6 }
         );
     }

@@ -8,10 +8,13 @@ use spark_connect::window::{FrameBound, FrameType, WindowSpec};
 
 use crate::column::PyColumn;
 
-/// The columns of `Window.partitionBy` and `orderBy`, as PySpark Connect's `_to_cols`: a single
-/// list is the columns, each a Column or a column name (not a literal), else
-/// `NOT_EXPECTED_TYPE` of the argument `col`, as its `F._to_col`.
-fn window_columns(cols: Vec<Bound<'_, PyAny>>) -> PyResult<Vec<spark_connect::column::Column>> {
+/// The columns of `Window.partitionBy` and `orderBy`, and of `TableArg.partitionBy` and
+/// `orderBy`, as PySpark Connect's `_to_cols`: a single list is the columns, each a Column or
+/// a column name (not a literal), else `NOT_EXPECTED_TYPE` of the argument `col`, as its
+/// `F._to_col`.
+pub(crate) fn window_columns(
+    cols: Vec<Bound<'_, PyAny>>,
+) -> PyResult<Vec<spark_connect::column::Column>> {
     let cols = match cols.as_slice() {
         [only] if only.is_instance_of::<pyo3::types::PyList>() => {
             only.try_iter()?.collect::<PyResult<Vec<_>>>()?
@@ -25,7 +28,7 @@ fn window_columns(cols: Vec<Bound<'_, PyAny>>) -> PyResult<Vec<spark_connect::co
             }
             if c.is_instance_of::<pyo3::types::PyString>() {
                 // As PySpark's `F._to_col`, by `col`, of its origin.
-                let _origin = crate::origin::with_origin("col");
+                let _origin = crate::origin::with_origin("col")?;
                 return Ok(spark_connect::functions::col(&c.extract::<String>()?));
             }
             let type_name = c.get_type().name()?.to_string();

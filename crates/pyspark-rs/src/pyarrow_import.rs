@@ -23,7 +23,6 @@ use pyo3::prelude::*;
 use spark_connect::session::SparkSession;
 
 use crate::dataframe::PyDataFrame;
-use crate::errors::ResultExt;
 
 /// The record batches of a pyarrow table, at least one, so that a table without rows keeps its
 /// schema, as PySpark's IPC stream does, for the relation to carry it.
@@ -60,7 +59,9 @@ pub(crate) fn create_dataframe(
     let options = if empty {
         None
     } else {
-        Some(py.detach(|| session.arrow_input_options().to_pyerr())?)
+        Some(crate::interrupt::interruptible(py, session, || {
+            session.arrow_input_options()
+        })?)
     };
     let result = helper.getattr("prepare_table")?.call1((
         table,
@@ -82,14 +83,11 @@ pub(crate) fn create_dataframe(
     } else {
         table_batches(&normalized)?
     };
-    let dataframe = py.detach(|| {
-        match options.as_ref() {
-            Some(options) => {
-                session.create_dataframe_from_arrow_with_options(batches, spark_schema, options)
-            }
-            None => session.create_dataframe_from_arrow(batches, spark_schema),
+    let dataframe = crate::interrupt::interruptible(py, session, || match options.as_ref() {
+        Some(options) => {
+            session.create_dataframe_from_arrow_with_options(batches, spark_schema, options)
         }
-        .to_pyerr()
+        None => session.create_dataframe_from_arrow(batches, spark_schema),
     })?;
     // As in PySpark, column names are applied with toDF only when there are any.
     let dataframe = match names {

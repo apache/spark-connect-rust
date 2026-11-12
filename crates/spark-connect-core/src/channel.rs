@@ -100,6 +100,8 @@ impl ChannelBuilder {
         let auth_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
         let authority = &rest[..auth_end];
         let tail = &rest[auth_end..];
+        // urlsplit checks the netloc before the path and the params are read.
+        let (host_text, port_text) = split_hostinfo(authority)?;
 
         // Path is the tail up to any query/fragment.
         let path_end = tail.find(['?', '#']).unwrap_or(tail.len());
@@ -144,7 +146,7 @@ impl ChannelBuilder {
             }
         }
 
-        let (host_raw, port) = parse_authority(authority, &redact_url(url))?;
+        let (host_raw, port) = parse_authority(host_text, port_text, &redact_url(url))?;
         // urllib lowercases the hostname.
         let hostname = host_raw.to_ascii_lowercase();
         let host = if hostname.contains(':') {
@@ -309,7 +311,7 @@ impl ChannelBuilder {
             .unwrap_or_else(|| "_SPARK_CONNECT_PYTHON".to_string());
         let ua_len = quote_len(&ua);
         if ua_len > 2048 {
-            return Err(SparkError::connect_msg(format!(
+            return Err(SparkError::connect_exception_msg(format!(
                 "'user_agent' parameter should not exceed 2048 characters after URL \
                  escaping, found {ua_len} characters."
             )));
@@ -451,11 +453,81 @@ fn redact_url(url: &str) -> String {
         .join(";")
 }
 
-/// Parse `host`, `host:port`, `[ipv6]`, or `[ipv6]:port` into (host, port). `shown_url` is the
-/// URL for the messages, with its secrets redacted.
-fn parse_authority(authority: &str, shown_url: &str) -> Result<(String, u16)> {
-    let missing_host = || {
-        SparkError::value(
+/// The host and the port texts of a netloc, as `urllib.parse` splits them (`urlsplit` and
+/// `_hostinfo`): the host is what follows the last `@`, a bracketed host ends at its `]`, and
+/// otherwise the host ends at the first `:`. The checks are those of `urlsplit`, which raises
+/// their ValueErrors before the path is read. The messages quote the text with its secrets
+/// redacted.
+fn split_hostinfo(authority: &str) -> Result<(&str, Option<&str>)> {
+    // A `[` and a `]` come in pairs in the netloc, the userinfo included.
+    if authority.contains('[') != authority.contains(']') {
+        return Err(SparkError::builtin_value_msg("Invalid IPv6 URL"));
+    }
+    let hostinfo = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, hostinfo)| hostinfo);
+    let (host, port) = match hostinfo.split_once('[') {
+        Some((before, bracketed)) => {
+            // `_check_bracketed_netloc`: no data before the bracket, nor after it but a port.
+            let (addr, after) = bracketed.split_once(']').unwrap_or((bracketed, ""));
+            if !before.is_empty() || !(after.is_empty() || after.starts_with(':')) {
+                return Err(SparkError::builtin_value_msg("Invalid IPv6 URL"));
+            }
+            (addr, after.strip_prefix(':'))
+        }
+        None => match hostinfo.split_once(':') {
+            Some((host, port)) => (host, Some(port)),
+            None => (hostinfo, None),
+        },
+    };
+    // A netloc with brackets checks its host as an address, bracketed or not.
+    if authority.contains('[') {
+        check_bracketed_host(host)?;
+    }
+    // An empty port is no port.
+    Ok((host, port.filter(|port| !port.is_empty())))
+}
+
+/// `urllib`'s check of the host of a netloc with brackets, as `ipaddress.ip_address` makes it: an
+/// IPv6 address (with a zone), or an IPvFuture (`v` hex digits `.` text), but no IPv4 address.
+fn check_bracketed_host(host: &str) -> Result<()> {
+    if let Some(future) = host.strip_prefix('v') {
+        let hex = future.bytes().take_while(u8::is_ascii_hexdigit).count();
+        let text = future[hex..].strip_prefix('.');
+        return match text {
+            Some(text) if hex > 0 && !text.is_empty() && !text.contains('\n') => Ok(()),
+            _ => Err(SparkError::builtin_value_msg(
+                "IPvFuture address is invalid",
+            )),
+        };
+    }
+    if host.parse::<std::net::Ipv4Addr>().is_ok() {
+        return Err(SparkError::builtin_value_msg(
+            "An IPv4 address cannot be in brackets",
+        ));
+    }
+    let ipv6 = match host.split_once('%') {
+        // A zone is the text after the `%`, which may not be empty or hold another `%`.
+        Some((addr, zone)) => {
+            !zone.is_empty() && !zone.contains('%') && addr.parse::<std::net::Ipv6Addr>().is_ok()
+        }
+        None => host.parse::<std::net::Ipv6Addr>().is_ok(),
+    };
+    if ipv6 {
+        Ok(())
+    } else {
+        Err(SparkError::builtin_value_msg(format!(
+            "{} does not appear to be an IPv4 or IPv6 address",
+            python_repr(&redact_url(host))
+        )))
+    }
+}
+
+/// The host and the port of a connection string, once its params are read: the host must not be
+/// empty (urllib's `hostname`), and the port is the one of the netloc, or the default.
+fn parse_authority(host: &str, port: Option<&str>, shown_url: &str) -> Result<(String, u16)> {
+    if host.is_empty() {
+        return Err(SparkError::value(
             "INVALID_CONNECT_URL",
             &[(
                 "detail",
@@ -464,42 +536,25 @@ fn parse_authority(authority: &str, shown_url: &str) -> Result<(String, u16)> {
                      to follow the correct format, e.g., 'sc://hostname:port'."
                 ),
             )],
-        )
-    };
-
-    let (host, port_str) = if let Some(bracket_end) = authority.strip_prefix('[') {
-        // IPv6: [addr] or [addr]:port
-        let close = bracket_end.find(']').ok_or_else(missing_host)?;
-        let addr = &bracket_end[..close];
-        let after = &bracket_end[close + 1..];
-        let port = after.strip_prefix(':');
-        (addr.to_string(), port)
-    } else if let Some((h, p)) = authority.rsplit_once(':') {
-        (h.to_string(), Some(p))
-    } else {
-        (authority.to_string(), None)
-    };
-
-    if host.is_empty() {
-        return Err(missing_host());
+        ));
     }
 
-    let port = match port_str {
-        None | Some("") => DEFAULT_PORT,
+    let port = match port {
+        None => DEFAULT_PORT,
         Some(p) => parse_port(p)?,
     };
 
-    Ok((host, port))
+    Ok((host.to_string(), port))
 }
 
 /// The port of a connection string as `urllib.parse`'s `port` reads it: ASCII digits, within
 /// 0-65535. Its messages are those of its ValueError, which the reference client raises
-/// unwrapped and without the URL.
+/// unwrapped and without the URL; the text is quoted with its secrets redacted.
 fn parse_port(text: &str) -> Result<u16> {
     if !text.bytes().all(|b| b.is_ascii_digit()) {
         return Err(SparkError::builtin_value_msg(format!(
             "Port could not be cast to integer value as {}",
-            python_repr(text)
+            python_repr(&redact_url(text))
         )));
     }
     // Saturating, so that a long run of digits is out of range rather than wrapping around.
@@ -769,6 +824,119 @@ mod tests {
             );
             assert_eq!(e.message(), message, "{url}");
         }
+    }
+
+    #[test]
+    fn authority_is_read_as_urllib_reads_it() {
+        // The host (lowercased, a bracketed IPv6 address wrapped in `[ ]`) and the port of the
+        // netloc: the host follows the last `@`, a bracketed host ends at its `]`, and otherwise
+        // the host ends at the first `:`.
+        for (url, host, port) in [
+            (
+                "sc://user@localhost:15012/;token=SECRET",
+                "localhost",
+                15012,
+            ),
+            ("sc://user:pw@localhost:15012/", "localhost", 15012),
+            ("sc://u]@[::1]:15002", "[::1]", 15002),
+            ("sc://[::1]:15012/", "[::1]", 15012),
+            ("sc://LOCALHOST:15012/", "localhost", 15012),
+            ("sc://[v1.x]:15002", "v1.x", 15002),
+            ("sc://[fe80::1%25eth0]:15002", "[fe80::1%25eth0]", 15002),
+            ("sc://[::1]:/", "[::1]", DEFAULT_PORT),
+        ] {
+            let c = ChannelBuilder::parse(url).unwrap();
+            assert_eq!(c.host(), host, "{url}");
+            assert_eq!(c.port(), port, "{url}");
+        }
+        // The messages are the ValueErrors of urllib, with the secrets of the URL redacted.
+        for (url, message) in [
+            (
+                "sc://localhost:15012:1/",
+                "Port could not be cast to integer value as '15012:1'",
+            ),
+            (
+                "sc://a:1:2",
+                "Port could not be cast to integer value as '1:2'",
+            ),
+            (
+                "sc://localhost:x;token=SECRET",
+                "Port could not be cast to integer value as 'x;token=<redacted>'",
+            ),
+            (
+                "sc://localhost:15002;token=SECRET",
+                "Port could not be cast to integer value as '15002;token=<redacted>'",
+            ),
+            ("sc://[::1]x", "Invalid IPv6 URL"),
+            ("sc://[::1]x:15002", "Invalid IPv6 URL"),
+            (
+                "sc://]@[x",
+                "'x' does not appear to be an IPv4 or IPv6 address",
+            ),
+            (
+                "sc://[::1]@host:15002",
+                "'host' does not appear to be an IPv4 or IPv6 address",
+            ),
+            (
+                "sc://[::1@x]",
+                "'x]' does not appear to be an IPv4 or IPv6 address",
+            ),
+            (
+                "sc://[1.2.3.4]:15002",
+                "An IPv4 address cannot be in brackets",
+            ),
+            (
+                "sc://[localhost]:15002",
+                "'localhost' does not appear to be an IPv4 or IPv6 address",
+            ),
+            (
+                "sc://[]:15002",
+                "'' does not appear to be an IPv4 or IPv6 address",
+            ),
+            ("sc://[vz]:15002", "IPvFuture address is invalid"),
+            (
+                "sc://[a;token=SECRET]:1",
+                "'a;token=<redacted>' does not appear to be an IPv4 or IPv6 address",
+            ),
+        ] {
+            let e = ChannelBuilder::parse(url).unwrap_err();
+            assert_eq!(
+                e.kind,
+                crate::error::SparkErrorKind::BuiltinValueError,
+                "{url}"
+            );
+            assert_eq!(e.message(), message, "{url}");
+            assert!(!e.message().contains("SECRET"), "{url}");
+        }
+        // A missing host is the INVALID_CONNECT_URL of the reference client, read after params.
+        let e = ChannelBuilder::parse("sc://user:pw@:15002").unwrap_err();
+        assert_eq!(e.kind, crate::error::SparkErrorKind::ValueError);
+        assert!(
+            e.message().contains("Hostname is missing"),
+            "{}",
+            e.message()
+        );
+    }
+
+    #[test]
+    fn a_too_long_user_agent_is_a_connect_exception() {
+        // PySpark raises a SparkConnectException of this message, not a RuntimeError.
+        let _env = set_env(&[("SPARK_CONNECT_USER_AGENT", None)]);
+        let url = |len: usize| format!("sc://localhost/;user_agent={}", "a".repeat(len));
+        assert!(ChannelBuilder::parse(&url(2048))
+            .unwrap()
+            .user_agent()
+            .is_ok());
+        let e = ChannelBuilder::parse(&url(2049))
+            .unwrap()
+            .user_agent()
+            .unwrap_err();
+        assert_eq!(e.kind, crate::error::SparkErrorKind::ConnectMessage);
+        assert_eq!(
+            e.message(),
+            "'user_agent' parameter should not exceed 2048 characters after URL escaping, \
+             found 2049 characters."
+        );
     }
 
     #[test]

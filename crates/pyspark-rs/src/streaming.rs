@@ -14,7 +14,7 @@ use std::sync::Arc;
 use crate::dataframe::{PyDataFrame, WriterState};
 use crate::errors::spark_error_to_py_exception;
 use crate::interrupt::{interruptible, interruptible_outcome};
-use crate::options::{set_option_skip_none, set_options_skip_none};
+use crate::options::{set_stream_option_skip_none, set_stream_options_skip_none, DefaultedOption};
 
 /// Adapts Python listeners to the native bus: deserialize one typed event for the whole
 /// snapshot, then dispatch it through Python's callback-exception isolation helper. Decode
@@ -315,8 +315,9 @@ impl PyDataStreamReader {
         key: &str,
         value: &Bound<'_, PyAny>,
     ) -> PyResult<PyRefMut<'py, Self>> {
-        // None -> option left unset; bools -> "true"/"false" (reference `to_str`).
-        match crate::coerce_option_value(value)? {
+        // None -> option left unset; other values as `str()`, so a bool is "True" (reference
+        // `DataStreamReader.option`, unlike `options` and `load`).
+        match crate::options::stream_option_value(value)? {
             Some(v) => {
                 slf.inner = slf.inner.clone().option(key, &v);
                 Ok(slf)
@@ -446,11 +447,11 @@ impl PyDataStreamReader {
         locale: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
         let mut r = self.inner.clone().format("xml");
-        r = set_option_skip_none(r, "rowTag", rowTag)?;
+        r = set_stream_option_skip_none(r, "rowTag", rowTag)?;
         if let Some(v) = schema {
             r = apply_stream_schema(r, v)?;
         }
-        r = set_options_skip_none(
+        r = set_stream_options_skip_none(
             r,
             &[
                 ("excludeAttribute", excludeAttribute),
@@ -515,7 +516,7 @@ impl PyDataStreamReader {
         if let Some(v) = schema {
             r = apply_stream_schema(r, v)?;
         }
-        r = set_options_skip_none(
+        r = set_stream_options_skip_none(
             r,
             &[
                 ("primitivesAsString", primitivesAsString),
@@ -562,7 +563,7 @@ impl PyDataStreamReader {
         int96RebaseMode: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
         let mut r = self.inner.clone();
-        r = set_options_skip_none(
+        r = set_stream_options_skip_none(
             r,
             &[
                 ("mergeSchema", mergeSchema),
@@ -618,7 +619,7 @@ impl PyDataStreamReader {
         if let Some(v) = schema {
             r = apply_stream_schema(r, v)?;
         }
-        r = set_options_skip_none(
+        r = set_stream_options_skip_none(
             r,
             &[
                 ("sep", sep),
@@ -668,7 +669,7 @@ impl PyDataStreamReader {
         recursiveFileLookup: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
         let mut r = self.inner.clone();
-        r = set_options_skip_none(
+        r = set_stream_options_skip_none(
             r,
             &[
                 ("mergeSchema", mergeSchema),
@@ -682,21 +683,28 @@ impl PyDataStreamReader {
         Ok(PyDataFrame::new(r.orc(&path)))
     }
 
-    #[pyo3(signature = (path, wholetext=None, lineSep=None, pathGlobFilter=None, recursiveFileLookup=None))]
+    /// As PySpark's `wholetext=False`, an omitted `wholetext` sets `False`, also over an earlier
+    /// `wholetext` option.
+    #[pyo3(
+        signature = (path, wholetext=DefaultedOption::Omitted, lineSep=None, pathGlobFilter=None, recursiveFileLookup=None),
+        text_signature = "($self, path, wholetext=False, lineSep=None, pathGlobFilter=None, recursiveFileLookup=None)"
+    )]
     #[allow(non_snake_case)]
     fn text(
         &mut self,
+        py: Python<'_>,
         path: &Bound<'_, PyAny>,
-        wholetext: Option<&Bound<'_, PyAny>>,
+        wholetext: DefaultedOption,
         lineSep: Option<&Bound<'_, PyAny>>,
         pathGlobFilter: Option<&Bound<'_, PyAny>>,
         recursiveFileLookup: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
+        let wholetext = wholetext.or_bool(py, false);
         let mut r = self.inner.clone();
-        r = set_options_skip_none(
+        r = set_stream_options_skip_none(
             r,
             &[
-                ("wholetext", wholetext),
+                ("wholetext", Some(&wholetext)),
                 ("lineSep", lineSep),
                 ("pathGlobFilter", pathGlobFilter),
                 ("recursiveFileLookup", recursiveFileLookup),
@@ -1183,7 +1191,7 @@ impl PyStreamingQuery {
 
     #[getter]
     fn isActive(&self, py: Python<'_>) -> PyResult<bool> {
-        crate::dataframe::detached(py, || self.inner.is_active().map_err(Box::new))
+        interruptible(py, &self.inner.spark_session(), || self.inner.is_active())
     }
 
     /// The status of the query, as PySpark's: a dict of its `message`, `isDataAvailable` and
@@ -1398,13 +1406,17 @@ impl PyStreamingQueryManager {
         });
         let registration = Arc::clone(&adapter);
         match interruptible_outcome(py, &self.inner.spark_session(), || {
-            self.inner.add_listener(registration).map_err(Box::new)
+            self.inner
+                .add_listener(registration)
+                .map(|id| {
+                    // Set once, by the only call that adds this adapter, as soon as the bus has
+                    // the registration: a signal that ends the wait below then leaves it
+                    // removable, as PySpark's append leaves the listener in its bus.
+                    let _ = adapter.id.set(id);
+                })
+                .map_err(Box::new)
         })? {
-            Ok(id) => {
-                // Set once, by the only call that adds this adapter.
-                let _ = adapter.id.set(id);
-                Ok(())
-            }
+            Ok(()) => Ok(()),
             Err(error) => warn(
                 py,
                 format!(
@@ -1432,7 +1444,10 @@ impl PyStreamingQueryManager {
         // or their removal is left to the caller that is closing the bus.
         let mut tried: Vec<String> = Vec::new();
         loop {
-            let mut registered = Vec::new();
+            // The first registration in the order of the bus that is the listener or equal to
+            // it. The entries after it are not compared, as PySpark's `in` and `list.remove`
+            // stop at the first match.
+            let mut first = None;
             for candidate in self.inner.listeners() {
                 let Some(adapter) = candidate
                     .as_any()
@@ -1450,31 +1465,30 @@ impl PyStreamingQueryManager {
                 }
                 let found = adapter.listener.bind(py);
                 if found.is(listener) || found.eq(listener)? {
-                    registered.push(id.clone());
+                    first = Some(id.clone());
+                    break;
                 }
             }
-            if registered.is_empty() {
+            let Some(id) = first else {
                 return Ok(());
-            }
-            for id in registered {
-                match interruptible_outcome(py, &self.inner.spark_session(), || {
-                    self.inner.remove_listener_found(&id).map_err(Box::new)
-                })? {
-                    // The bus is read again once these are tried: a call that removed this
-                    // registration first leaves its own to this one, which may have been
-                    // added since the bus was read.
-                    Ok(false) => tried.push(id),
-                    Ok(true) => return Ok(()),
-                    Err(error) => {
-                        return warn(
-                            py,
-                            format!(
-                                "Failed to remove the listener because of exception: {}\n\
-                                 The listener is not removed, please remove it again.",
-                                spark_error_to_py_exception(*error).value(py)
-                            ),
-                        );
-                    }
+            };
+            match interruptible_outcome(py, &self.inner.spark_session(), || {
+                self.inner.remove_listener_found(&id).map_err(Box::new)
+            })? {
+                // The bus is read again once this is tried: a call that removed this
+                // registration first leaves the next match to this one, which may have been
+                // added since the bus was read.
+                Ok(false) => tried.push(id),
+                Ok(true) => return Ok(()),
+                Err(error) => {
+                    return warn(
+                        py,
+                        format!(
+                            "Failed to remove the listener because of exception: {}\n\
+                             The listener is not removed, please remove it again.",
+                            spark_error_to_py_exception(*error).value(py)
+                        ),
+                    );
                 }
             }
         }

@@ -3889,9 +3889,7 @@ pub(crate) fn schema_data_type(
 ) -> PyResult<DataType> {
     if schema.is_instance_of::<pyo3::types::PyString>() {
         let ddl: String = schema.extract()?;
-        let parsed = crate::errors::ResultExt::to_pyerr(
-            py.detach(|| session.parse_ddl(&ddl).map_err(Box::new)),
-        )?;
+        let parsed = crate::interrupt::interruptible(py, session, || session.parse_ddl(&ddl))?;
         // As PySpark converts the parsed type from its proto, which fails for a nanosecond timestamp.
         crate::dataframe::check_nanosecond_timestamps(py, Some(&parsed))?;
         return Ok(parsed);

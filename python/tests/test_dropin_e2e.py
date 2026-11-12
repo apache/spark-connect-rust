@@ -1854,6 +1854,22 @@ def test_reader_schema_keeps_field_metadata(session, tmp_path, ddl):
     assert stream.schema.fields[0].metadata == {"comment": "the key"}
 
 
+def test_bool_stream_options_and_bytes_table_options_are_read_by_the_server(session, tmp_path):
+    # As PySpark's: the stream format methods send a bool as "True", which the server reads as
+    # true, and createTable sends bytes that are UTF-8 as their text, as its compression.
+    (tmp_path / "s").mkdir()
+    schema = StructType([StructField("a", LongType())])
+    stream = session.readStream.schema(schema).csv(str(tmp_path / "s"), header=True)
+    assert stream.isStreaming
+    session.sql("DROP TABLE IF EXISTS e2e_bytes_table_option")
+    try:
+        session.catalog.createTable(
+            "e2e_bytes_table_option", source="parquet", schema=schema, compression=b"snappy")
+        assert session.catalog.tableExists("e2e_bytes_table_option")
+    finally:
+        session.sql("DROP TABLE IF EXISTS e2e_bytes_table_option")
+
+
 def test_reader_none_unsets_an_option_and_external_description_is_the_comment(session, tmp_path):
     # As PySpark's: DataFrameReader.option, options and load unset an option given None, while
     # the format methods skip None and keep it. createExternalTable's description is the
@@ -4533,6 +4549,49 @@ def test_an_observation_of_a_year_month_interval_fails_the_action_as_pyspark(ses
     assert error.value.getCondition() == "UNSUPPORTED_LITERAL"
     assert error.value.getMessageParameters() == {"literal": "year_month_interval: 14\n"}
     assert observation.get == {}
+
+
+def test_only_the_observations_of_the_plan_of_an_action_convert_its_metrics_as_pyspark(session):
+    # As PySpark's client, which converts and sets the metrics of the Observations of the plan of
+    # an action, and runs localCheckpoint and a SQL statement without them: a year-month interval
+    # metric fails neither those nor a subquery of the observed DataFrame, an Observation keeps
+    # the metrics of the earlier actions when an action fails, and a metric of a name that holds
+    # an interval as an element raises when executionInfo reads it.
+    from pyspark.errors import PySparkTypeError
+    from pyspark.sql import Observation
+
+    interval = F.expr("INTERVAL '1' YEAR")
+    observation = Observation("unset_by_commands_and_subqueries")
+    df = session.range(3).observe(observation, F.max(interval).alias("ym"))
+    assert df.localCheckpoint().count() == 3
+    assert session.sql("SELECT * FROM {d}", d=df).count() == 3
+    assert session.range(2).select(df.select(F.max("id")).scalar().alias("m")).collect() == [
+        Row(m=2), Row(m=2)]
+    assert observation.get == {}
+
+    table = f"observation_kept_metrics_{os.getpid()}"
+    session.sql(f"DROP TABLE IF EXISTS {table}")
+    session.sql(f"CREATE TABLE {table} (x INT) USING parquet")
+    try:
+        kept = Observation("kept_after_a_failing_action")
+        observed = session.table(table).observe(
+            kept, F.max(F.when(F.col("x") > 0, interval)).alias("ym"),
+            F.count(F.lit(1)).alias("c"))
+        assert observed.count() == 0 and kept.get == {"ym": None, "c": 0}
+        session.sql(f"INSERT INTO {table} VALUES (1)")
+        with pytest.raises(PySparkTypeError) as error:
+            observed.count()
+        assert error.value.getCondition() == "UNSUPPORTED_LITERAL"
+        assert error.value._operation_id is not None
+        assert kept.get == {"ym": None, "c": 0}
+    finally:
+        session.sql(f"DROP TABLE IF EXISTS {table}")
+
+    named = session.range(2).observe("holds_an_interval", F.collect_list(interval).alias("m"))
+    assert named.collect() == [Row(id=0), Row(id=1)]
+    with pytest.raises(PySparkTypeError) as error:
+        named.executionInfo.flows
+    assert error.value.getMessageParameters() == {"literal": "year_month_interval: 12\n"}
 
 
 def test_sample_split_and_sample_by_without_a_seed_follow_python_random_as_pyspark(

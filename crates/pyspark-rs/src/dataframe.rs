@@ -108,19 +108,13 @@ impl PyDataFrame {
         py: Python<'_>,
         struct_handling_mode: Option<Bound<'_, PyAny>>,
     ) -> PyResult<Py<PyAny>> {
-        let settings = py
-            .detach(|| {
-                self.dataframe
-                    .spark_session()
-                    .conf()
-                    .get_many(&[
-                        "spark.sql.session.timeZone",
-                        "spark.sql.execution.pandas.structHandlingMode",
-                        "spark.sql.execution.arrow.pyspark.selfDestruct.enabled",
-                    ])
-                    .map_err(Box::new)
-            })
-            .to_pyerr()?;
+        let settings = interruptible(py, &self.dataframe.spark_session(), || {
+            self.dataframe.spark_session().conf().get_many(&[
+                "spark.sql.session.timeZone",
+                "spark.sql.execution.pandas.structHandlingMode",
+                "spark.sql.execution.arrow.pyspark.selfDestruct.enabled",
+            ])
+        })?;
         let (batches, schema) = interruptible(py, &self.dataframe.spark_session(), || {
             self.dataframe
                 .collect_record_batches_with_schema()
@@ -215,10 +209,8 @@ impl PyDataFrame {
     /// The number of rows and the truncation of the eager evaluation, as PySpark's `int` of
     /// each setting, if it is enabled.
     fn eager_eval(&self, py: Python<'_>) -> PyResult<Option<(i32, i32)>> {
-        let conf = self.dataframe.spark_session().conf();
-        let values = py
-            .detach(|| conf.get_many(&EAGER_EVAL).map_err(Box::new))
-            .to_pyerr()?;
+        let session = self.dataframe.spark_session();
+        let values = interruptible(py, &session, || session.conf().get_many(&EAGER_EVAL))?;
         if values[0].as_deref() != Some("true") {
             return Ok(None);
         }
@@ -237,7 +229,7 @@ impl PyDataFrame {
             .as_any()
             .get_item(index)?
             .extract()?;
-        let _origin = crate::origin::with_origin("col");
+        let _origin = crate::origin::with_origin("col")?;
         Ok(spark_connect::functions::col(&name))
     }
 
@@ -269,7 +261,7 @@ impl PyDataFrame {
                 }
                 if c.is_instance_of::<PyString>() {
                     // As PySpark's `F._to_col`, by `col`, of its origin.
-                    let _origin = crate::origin::with_origin("col");
+                    let _origin = crate::origin::with_origin("col")?;
                     return Ok(spark_connect::functions::col(&c.extract::<String>()?));
                 }
                 if c.is_instance_of::<PyInt>() && !c.is_instance_of::<PyBool>() {
@@ -328,7 +320,7 @@ impl PyDataFrame {
                 column.column.clone()
             } else if c.is_instance_of::<PyString>() {
                 // As PySpark's `F._to_col`, by `col`, of its origin.
-                let _origin = crate::origin::with_origin("col");
+                let _origin = crate::origin::with_origin("col")?;
                 spark_connect::functions::col(&c.extract::<String>()?)
             } else {
                 return Err(not_expected_type(&c, "col", "Column, int or str"));
@@ -449,7 +441,7 @@ pub(crate) fn to_columns_as_given(
             // Try as string (column name)
             if let Ok(name) = arg.extract::<String>() {
                 // As PySpark's `F._to_col`, by `col`, of its origin.
-                let _origin = crate::origin::with_origin("col");
+                let _origin = crate::origin::with_origin("col")?;
                 cols.push(spark_connect::functions::col(&name));
             } else {
                 // As PySpark's `_to_cols`.
@@ -1148,7 +1140,7 @@ impl PyDataFrame {
             Some(c) => Some(if let Ok(column) = c.extract::<PyRef<'_, PyColumn>>() {
                 column.column.clone()
             } else if c.is_instance_of::<pyo3::types::PyString>() {
-                let _origin = crate::origin::with_origin("col");
+                let _origin = crate::origin::with_origin("col")?;
                 spark_connect::functions::col(&c.extract::<String>()?)
             } else {
                 return Err(not_expected_type(c, "col", "Column or str"));
@@ -1233,7 +1225,7 @@ impl PyDataFrame {
             c.borrow().column.clone()
         } else if let Ok(name) = partitionIdCol.extract::<String>() {
             // As PySpark's `F._to_col`, by `col`, of its origin.
-            let _origin = crate::origin::with_origin("col");
+            let _origin = crate::origin::with_origin("col")?;
             spark_connect::functions::col(&name)
         } else {
             return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
@@ -1469,16 +1461,18 @@ impl PyDataFrame {
             return Err(not_expected_type(other, "other", "DataFrame"));
         }
         let other = self.same_session(other)?.dataframe.clone();
-        py.detach(|| self.dataframe.same_semantics(&other))
-            .to_pyerr()
+        interruptible(py, &self.dataframe.spark_session(), || {
+            self.dataframe.same_semantics(&other)
+        })
     }
 
     /// The server-side hash of this DataFrame's logical plan, asked once, as PySpark's.
     #[pyo3(name = "semanticHash")]
     fn semantic_hash(&self, py: Python<'_>) -> PyResult<i32> {
         cached(&self.semantic_hash, || {
-            py.detach(|| self.dataframe.semantic_hash().map_err(Box::new))
-                .to_pyerr()
+            interruptible(py, &self.dataframe.spark_session(), || {
+                self.dataframe.semantic_hash().map_err(Box::new)
+            })
         })
     }
 
@@ -1555,7 +1549,7 @@ impl PyDataFrame {
     fn cache<'py>(slf: PyRef<'py, Self>, py: Python<'py>) -> PyResult<PyRef<'py, Self>> {
         // As PySpark's, which returns the DataFrame itself.
         let df = slf.dataframe.clone();
-        py.detach(|| df.cache().map_err(Box::new)).to_pyerr()?;
+        interruptible(py, &df.spark_session(), || df.cache().map_err(Box::new))?;
         Ok(slf)
     }
 
@@ -1568,8 +1562,9 @@ impl PyDataFrame {
     ) -> PyResult<PyRef<'py, Self>> {
         // As PySpark's, which returns the DataFrame itself.
         let df = slf.dataframe.clone();
-        py.detach(|| df.unpersist(blocking).map_err(Box::new))
-            .to_pyerr()?;
+        interruptible(py, &df.spark_session(), || {
+            df.unpersist(blocking).map_err(Box::new)
+        })?;
         Ok(slf)
     }
 
@@ -1632,12 +1627,11 @@ impl PyDataFrame {
                 ))
             }
         };
-        py.detach(|| {
+        interruptible(py, &self.dataframe.spark_session(), || {
             self.dataframe
                 .explain_string(&explain_mode)
                 .map_err(Box::new)
         })
-        .to_pyerr()
     }
 
     /// Register this DataFrame as a temporary view.
@@ -1871,14 +1865,11 @@ impl PyDataFrame {
         &self,
         col: &Bound<'_, PyAny>,
         fractions: &Bound<'_, PyAny>,
-        seed: Option<i64>,
+        seed: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
         let py = col.py();
         let (col, fractions) = crate::stat::sample_by_arguments(col, fractions)?;
-        let seed = match seed {
-            Some(seed) => seed,
-            None => python_random_seed(py)?,
-        };
+        let seed = crate::stat::sample_by_seed(py, seed)?;
         Ok(PyDataFrame::new(
             self.dataframe
                 .stat()
@@ -1996,24 +1987,27 @@ impl PyDataFrame {
     #[pyo3(name = "inputFiles")]
     fn input_files(&self, py: Python<'_>) -> PyResult<Vec<String>> {
         cached(&self.input_files, || {
-            py.detach(|| self.dataframe.input_files().map_err(Box::new))
-                .to_pyerr()
+            interruptible(py, &self.dataframe.spark_session(), || {
+                self.dataframe.input_files().map_err(Box::new)
+            })
         })
     }
 
     /// Whether the server answers that this DataFrame is local (a local relation).
     #[pyo3(name = "isLocal")]
     fn is_local(&self, py: Python<'_>) -> PyResult<bool> {
-        py.detach(|| self.dataframe.is_local_on_server().map_err(Box::new))
-            .to_pyerr()
+        interruptible(py, &self.dataframe.spark_session(), || {
+            self.dataframe.is_local_on_server().map_err(Box::new)
+        })
     }
 
     /// Whether this (cached) DataFrame is cached.
     #[pyo3(name = "is_cached")]
     #[getter]
     fn is_cached(&self, py: Python<'_>) -> PyResult<bool> {
-        py.detach(|| self.dataframe.is_cached().map_err(Box::new))
-            .to_pyerr()
+        interruptible(py, &self.dataframe.spark_session(), || {
+            self.dataframe.is_cached().map_err(Box::new)
+        })
     }
 
     /// Whether this DataFrame contains one or more sources that continuously return data, asked
@@ -2022,8 +2016,9 @@ impl PyDataFrame {
     #[getter]
     fn is_streaming(&self, py: Python<'_>) -> PyResult<bool> {
         cached(&self.is_streaming, || {
-            py.detach(|| self.dataframe.is_streaming().map_err(Box::new))
-                .to_pyerr()
+            interruptible(py, &self.dataframe.spark_session(), || {
+                self.dataframe.is_streaming().map_err(Box::new)
+            })
         })
     }
 
@@ -2031,9 +2026,9 @@ impl PyDataFrame {
     #[pyo3(name = "storageLevel")]
     #[getter]
     fn storage_level(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let sl = py
-            .detach(|| self.dataframe.storage_level().map_err(Box::new))
-            .to_pyerr()?;
+        let sl = interruptible(py, &self.dataframe.spark_session(), || {
+            self.dataframe.storage_level().map_err(Box::new)
+        })?;
         let cls = py.import("pyspark.storagelevel")?.getattr("StorageLevel")?;
         Ok(cls
             .call1((
@@ -2183,8 +2178,9 @@ impl PyDataFrame {
         };
         // As PySpark's, which returns the DataFrame itself.
         let df = slf.dataframe.clone();
-        py.detach(|| df.persist(level).map_err(Box::new))
-            .to_pyerr()?;
+        interruptible(py, &df.spark_session(), || {
+            df.persist(level).map_err(Box::new)
+        })?;
         Ok(slf)
     }
 
@@ -2295,12 +2291,16 @@ impl PyDataFrame {
     /// which ignores `prefetchPartitions`, a batch is fetched when the iteration reaches it, so
     /// the progress handlers of the execution are called by `next()`, on the iterating thread.
     #[pyo3(name = "toLocalIterator")]
-    #[pyo3(signature = (prefetchPartitions=false))]
+    #[pyo3(
+        signature = (prefetchPartitions=None),
+        text_signature = "($self, prefetchPartitions=False)"
+    )]
     fn to_local_iterator<'py>(
         &self,
         py: Python<'py>,
-        prefetchPartitions: bool,
+        prefetchPartitions: Option<&Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        // Any value, as PySpark Connect's, which ignores it.
         let _ = prefetchPartitions;
         let rows = PyLocalRowIterator::new(self.dataframe.clone());
         py.import("pyspark.sql.connect.dataframe")?
@@ -2494,9 +2494,9 @@ impl PyDataFrame {
     /// `df.schema.fields`, `df.schema["c"]`, `df.schema.fieldNames()` all work.
     #[getter]
     fn schema(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let schema = py
-            .detach(|| self.dataframe.schema().map_err(Box::new))
-            .to_pyerr()?;
+        let schema = interruptible(py, &self.dataframe.spark_session(), || {
+            self.dataframe.schema()
+        })?;
         check_nanosecond_timestamps(py, Some(&schema))?;
         crate::types::data_type_to_py(py, &schema)
     }
@@ -2545,9 +2545,10 @@ impl PyDataFrame {
     #[getter]
     fn columns(&self, py: Python<'_>) -> PyResult<Vec<String>> {
         // The schema is cached, so the names come from it without another request.
-        let schema = py.detach(|| self.dataframe.schema()).to_pyerr()?;
+        let session = self.dataframe.spark_session();
+        let schema = interruptible(py, &session, || self.dataframe.schema())?;
         check_nanosecond_timestamps(py, Some(&schema))?;
-        py.detach(|| self.dataframe.columns().to_pyerr())
+        interruptible(py, &session, || self.dataframe.columns())
     }
 
     /// Get the last `num` rows as a list of Rows (eager, like pyspark `tail`).
@@ -2627,9 +2628,13 @@ impl PyDataFrame {
     /// Check if the DataFrame is empty, asked once, as PySpark's.
     fn isEmpty(&self, py: Python<'_>) -> PyResult<bool> {
         cached(&self.is_empty, || {
-            interruptible(py, &self.dataframe.spark_session(), || {
+            let empty = interruptible(py, &self.dataframe.spark_session(), || {
                 self.dataframe.is_empty().map_err(Box::new)
-            })
+            })?;
+            // As PySpark's `select().take(1)`, whose `collect` reads the binary setting once the
+            // rows are fetched, though they have no columns.
+            read_binary_as_bytes(py, &self.dataframe)?;
+            Ok(empty)
         })
     }
 
@@ -2642,7 +2647,9 @@ impl PyDataFrame {
             Some(level) if level.is_truthy()? => Some(level),
             _ => None,
         };
-        let schema = py.detach(|| self.dataframe.schema().to_pyerr())?;
+        let schema = interruptible(py, &self.dataframe.spark_session(), || {
+            self.dataframe.schema()
+        })?;
         check_nanosecond_timestamps(py, Some(&schema))?;
         let depth = level
             .map(crate::types::normalize_tree_depth)
@@ -2656,7 +2663,9 @@ impl PyDataFrame {
     /// Get the schema as a list of (name, type) tuples.
     #[getter]
     fn dtypes(&self, py: Python<'_>) -> PyResult<Vec<(String, String)>> {
-        let schema = py.detach(|| self.dataframe.schema().to_pyerr())?;
+        let schema = interruptible(py, &self.dataframe.spark_session(), || {
+            self.dataframe.schema()
+        })?;
         check_nanosecond_timestamps(py, Some(&schema))?;
         let spark_connect::types::DataType::Struct { fields } = schema else {
             unreachable!("schema() validates struct responses")
@@ -2762,7 +2771,7 @@ impl PyDataFrame {
             ));
         };
         // As PySpark's `F.col(self.columns[item])`, of the origin of `col`.
-        let _origin = crate::origin::with_origin("col");
+        let _origin = crate::origin::with_origin("col")?;
         PyColumn::new(spark_connect::functions::col(&name)).into_py_any(py)
     }
 
@@ -2828,9 +2837,9 @@ impl PyDataFrame {
         profile: Option<Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
         validate_map_function(py, &func, eval_type::SQL_MAP_PANDAS_ITER_UDF)?;
-        let cols = py
-            .detach(|| self.dataframe.columns().map_err(Box::new))
-            .to_pyerr()?;
+        let cols = interruptible(py, &self.dataframe.spark_session(), || {
+            self.dataframe.columns()
+        })?;
         let udf = build_map_udf(
             py,
             &self.dataframe.spark_session(),
@@ -2858,9 +2867,9 @@ impl PyDataFrame {
         profile: Option<Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
         validate_map_function(py, &func, eval_type::SQL_MAP_ARROW_ITER_UDF)?;
-        let cols = py
-            .detach(|| self.dataframe.columns().map_err(Box::new))
-            .to_pyerr()?;
+        let cols = interruptible(py, &self.dataframe.spark_session(), || {
+            self.dataframe.columns()
+        })?;
         let udf = build_map_udf(
             py,
             &self.dataframe.spark_session(),
@@ -3250,7 +3259,7 @@ pub(crate) fn column_or_name(col: &Bound<'_, PyAny>) -> PyResult<spark_connect::
     }
     if col.is_instance_of::<pyo3::types::PyString>() {
         // As PySpark's `F._to_col`, by `col`, of its origin.
-        let _origin = crate::origin::with_origin("col");
+        let _origin = crate::origin::with_origin("col")?;
         return Ok(spark_connect::functions::col(&col.extract::<String>()?));
     }
     Err(not_expected_type(col, "col", "Column or str"))
@@ -4124,15 +4133,6 @@ impl<T: Clone> WriterState<T> {
     }
 }
 
-/// `f` without the GIL, as PySpark's requests to the server release it while they wait, so
-/// that other Python threads run. `f` boxes its error, which keeps its result small.
-pub(crate) fn detached<T: Send>(
-    py: Python<'_>,
-    f: impl FnOnce() -> Result<T, Box<spark_connect_core::error::SparkError>> + Send,
-) -> PyResult<T> {
-    py.detach(f).to_pyerr()
-}
-
 // ---- Shared helpers for closure-based (UDF) DataFrame/GroupedData methods ----
 
 /// cloudpickle an arbitrary Python object to bytes (mirrors the scalar UDF path,
@@ -4481,12 +4481,11 @@ fn check_collectable(
 /// including when the server sends only an Arrow schema or the result has no binary fields.
 /// Collect reads it after execution; a local iterator snapshots it before its first fetch.
 fn read_binary_as_bytes(py: Python<'_>, dataframe: &DataFrame) -> PyResult<bool> {
-    let value = detached(py, || {
-        dataframe
-            .spark_session()
+    let session = dataframe.spark_session();
+    let value = interruptible(py, &session, || {
+        session
             .conf()
             .get_with_default("spark.sql.execution.pyspark.binaryAsBytes", Some("true"))
-            .map_err(Box::new)
     })?;
     Ok(value.is_some_and(|value| value.eq_ignore_ascii_case("true")))
 }
@@ -4501,12 +4500,12 @@ pub(crate) fn python_random_seed(py: Python<'_>) -> PyResult<i64> {
 }
 
 /// `int(value)` of Python, as PySpark applies to a seed: a float is truncated, a str is parsed,
-/// and a value that `int()` rejects raises its error.
+/// and a value that `int()` rejects raises its error. An int out of the range of a long is the
+/// `ValueError` of protobuf.
 pub(crate) fn python_int(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<i64> {
-    py.import("builtins")?
-        .getattr("int")?
-        .call1((value,))?
-        .extract()
+    let int = py.import("builtins")?.getattr("int")?.call1((value,))?;
+    int.extract::<i64>()
+        .map_err(|_| crate::session::value_out_of_range(&int))
 }
 
 /// The collected `rows` of a result of `schema`, with configured binary values and
@@ -4563,9 +4562,6 @@ pub struct PyLocalRowIterator {
     fields: Option<(std::sync::Arc<[String]>, Py<PyList>)>,
     /// Nested names belong to schema paths and stay shared across iterator batches.
     nested_fields: NestedFieldNames,
-    /// The check of the metrics of Observations of the execution, made once at its end rather
-    /// than by each row, as the metrics come with the end of the result.
-    observed: Option<crate::observation::ObservedMetricsCheck>,
 }
 
 impl PyLocalRowIterator {
@@ -4578,7 +4574,6 @@ impl PyLocalRowIterator {
             binary_as_bytes: None,
             fields: None,
             nested_fields: NestedFieldNames::default(),
-            observed: None,
         }
     }
 
@@ -4603,14 +4598,9 @@ impl PyLocalRowIterator {
                 value
             }
         };
-        let session = self.dataframe.spark_session();
-        if self.iterator.is_none() {
-            self.observed = crate::observation::ObservedMetricsCheck::before(py, &session);
-        }
-        let next = crate::interrupt::interruptible_outcome(py, &session, || {
+        let next = interruptible(py, &self.dataframe.spark_session(), || {
             Ok::<_, Box<spark_connect_core::error::SparkError>>(self.next_row())
-        })?
-        .to_pyerr()?;
+        })?;
         if self.converters.is_none() {
             if let Some(schema) = self.iterator.as_ref().and_then(LocalRowIterator::schema) {
                 // The result is known once its first message arrives, possibly with no rows.
@@ -4653,12 +4643,7 @@ impl PyLocalRowIterator {
                 .map(Some)
             }
             Some(Err(error)) => Err(crate::errors::spark_error_to_py_exception(error)),
-            None => {
-                if let Some(observed) = self.observed.take() {
-                    observed.after(py, &session)?;
-                }
-                Ok(None)
-            }
+            None => Ok(None),
         }
     }
 }
@@ -4745,10 +4730,16 @@ fn execution_metrics<'py>(
         .getattr("PlanObservedMetrics")?;
     let observed = pyo3::types::PyList::empty(py);
     for o in &info.observed_metrics {
+        // A metric that holds a literal of a kind that PySpark does not convert, itself or as an
+        // element, is the marker of that literal, for which `pairs` raises as PySpark's raises
+        // when it converts the metric.
         let values = o
             .values
             .iter()
-            .map(|l| literal_to_py(py, l, None))
+            .map(|l| match unsupported_literal(l) {
+                Some(literal) => unsupported_literal_marker(py, literal),
+                None => literal_to_py(py, l, None),
+            })
             .collect::<PyResult<Vec<_>>>()?;
         observed.append(observed_cls.call1((&o.name, values, o.keys.clone()))?)?;
     }
@@ -4896,12 +4887,22 @@ pub(crate) fn literal_to_py(
                 .call1((names, values))?
                 .unbind()
         }
-        Some(_) => py
-            .import("pyspark.sql.connect.client")?
-            .getattr("_UnsupportedLiteral")?
-            .call1((literal_text(py, literal),))?
-            .unbind(),
+        Some(_) => unsupported_literal_marker(py, literal)?,
     })
+}
+
+/// The `_UnsupportedLiteral` marker of `literal`, a literal of a kind that `literal_to_py` does
+/// not convert, of its text, for which `PlanObservedMetrics.pairs` raises PySpark's
+/// `UNSUPPORTED_LITERAL`.
+fn unsupported_literal_marker(
+    py: Python<'_>,
+    literal: &spark_connect_proto::expression::Literal,
+) -> PyResult<Py<PyAny>> {
+    Ok(py
+        .import("pyspark.sql.connect.client")?
+        .getattr("_UnsupportedLiteral")?
+        .call1((literal_text(py, literal),))?
+        .unbind())
 }
 
 /// The first literal of `literal`, itself or an element, whose kind `literal_to_py` does not

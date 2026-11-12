@@ -8,12 +8,12 @@ use spark_connect::expression::{Alias, ExpressionNode, NullOrdering};
 use crate::errors::{not_expected_type, ResultExt};
 // Re-exported for the modules that raise through `crate::column::raise_pyspark`.
 pub(crate) use crate::errors::raise_pyspark;
-use crate::functions::{to_column, to_value_column};
+use crate::functions::{enum_to_value, to_column, to_value_column};
 
 /// The function `name` of `column` and `other`, a Column or a literal value, as PySpark's
 /// `_bin_op`.
 fn binary_function(name: &str, column: &Column, other: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
-    let other = to_column(other)?;
+    let other = operand_column(other)?;
     Ok(PyColumn::new(Column::new(
         spark_connect::expression::Expression::function(
             name,
@@ -57,6 +57,62 @@ impl PyColumn {
 /// Helper to convert Python object to Column.
 fn py_obj_to_column(obj: &Bound<'_, PyAny>) -> PyResult<Column> {
     to_column(obj)
+}
+
+/// The Column of an operand of a binary operator, as PySpark's `_bin_op` takes it: a Column, or
+/// a literal (see `is_literal_operand`). Another object is looked up for its `_expr`, as PySpark
+/// does, so that its AttributeError, or a Row's PySparkAttributeError, is the one it raises.
+fn operand_column(obj: &Bound<'_, PyAny>) -> PyResult<Column> {
+    operand(obj, true)
+}
+
+/// The Column of the operand of `__eq__`, as PySpark's `Column.__eq__` takes it: as `_bin_op`,
+/// but without timedelta, which `__eq__` does not take as a literal.
+fn equality_operand_column(obj: &Bound<'_, PyAny>) -> PyResult<Column> {
+    operand(obj, false)
+}
+
+fn operand(obj: &Bound<'_, PyAny>, with_timedelta: bool) -> PyResult<Column> {
+    // The literal is converted from the object itself, as `to_column` takes an Enum's value.
+    let value = enum_to_value(obj)?;
+    if obj.is_instance_of::<PyColumn>() || is_literal_operand(&value, with_timedelta)? {
+        return to_column(obj);
+    }
+    // The `_expr` of PySpark's operand: an object that has none raises its lookup's error here.
+    value.getattr("_expr")?;
+    // An object with an `_expr` is an expression of PySpark's, which this client does not take.
+    let type_name = value.get_type().name()?.to_string();
+    Err(raise_pyspark(
+        value.py(),
+        "PySparkTypeError",
+        "UNSUPPORTED_DATA_TYPE",
+        &[("data_type", &type_name)],
+    ))
+}
+
+/// Whether `value` is a literal of PySpark's `_bin_op`, by isinstance: None, or an instance of
+/// int (a bool too), float (a NumPy float64 too), str, date, time, datetime, timedelta (unless
+/// `with_timedelta` is false) or Decimal. A NumPy int64 or bool_ is not one.
+fn is_literal_operand(value: &Bound<'_, PyAny>, with_timedelta: bool) -> PyResult<bool> {
+    if value.is_none()
+        || value.is_instance_of::<pyo3::types::PyInt>()
+        || value.is_instance_of::<pyo3::types::PyFloat>()
+        || value.is_instance_of::<pyo3::types::PyString>()
+    {
+        return Ok(true);
+    }
+    let py = value.py();
+    let datetime = py.import("datetime")?;
+    let mut types = vec![
+        datetime.getattr("date")?,
+        datetime.getattr("time")?,
+        datetime.getattr("datetime")?,
+    ];
+    if with_timedelta {
+        types.push(datetime.getattr("timedelta")?);
+    }
+    types.push(py.import("decimal")?.getattr("Decimal")?);
+    value.is_instance(pyo3::types::PyTuple::new(py, types)?.as_any())
 }
 
 /// The expression of a Column, as PySpark Connect's `Column._expr`: its `str` and `repr` are
@@ -106,7 +162,7 @@ impl PyColumn {
         alias: Vec<String>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyColumn> {
-        let _origin = crate::origin::with_origin("alias");
+        let _origin = crate::origin::with_origin("alias")?;
         let mut metadata = None;
         if let Some(kwargs) = kwargs {
             let rest = kwargs.copy()?;
@@ -160,29 +216,29 @@ impl PyColumn {
         alias: Vec<String>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyColumn> {
-        let _origin = crate::origin::with_origin("name");
+        let _origin = crate::origin::with_origin("name")?;
         self.alias(py, alias, kwargs)
     }
 
     /// Apply a transformation function to this column. Mirrors `Column.transform(f)`,
     /// which is simply `f(self)`.
     fn transform<'py>(slf: Bound<'py, Self>, f: Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
-        let _origin = crate::origin::with_origin("transform");
+        let _origin = crate::origin::with_origin("transform")?;
         f.call1((slf,))
     }
 
     /// Mark this column as an outer reference (for correlated subqueries / lateral
     /// joins). Mirrors `Column.outer()`, which returns the same expression — outer
     /// resolution is performed server-side via the plan id.
-    fn outer(&self) -> PyColumn {
-        let _origin = crate::origin::with_origin("outer");
-        PyColumn::new(self.column.clone())
+    fn outer(&self) -> PyResult<PyColumn> {
+        let _origin = crate::origin::with_origin("outer")?;
+        Ok(PyColumn::new(self.column.clone()))
     }
 
     /// Cast to a different type. Accepts a `DataType` or a DDL type string,
     /// matching `pyspark.sql.Column.cast`.
     fn cast(&self, dataType: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
-        let _origin = crate::origin::with_origin("cast");
+        let _origin = crate::origin::with_origin("cast")?;
         // As PySpark's, of a DataType or a str.
         if !(dataType.is_instance_of::<pyo3::types::PyString>()
             || dataType.is_instance_of::<crate::types::PyDataType>())
@@ -201,7 +257,7 @@ impl PyColumn {
 
     /// Alias for `cast` (pyspark `Column.astype`).
     fn astype(&self, dataType: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
-        let _origin = crate::origin::with_origin("astype");
+        let _origin = crate::origin::with_origin("astype")?;
         self.cast(dataType)
     }
 
@@ -209,7 +265,7 @@ impl PyColumn {
     /// Mirrors `pyspark.sql.Column.try_cast`.
     #[pyo3(name = "try_cast")]
     fn try_cast(&self, dataType: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
-        let _origin = crate::origin::with_origin("try_cast");
+        let _origin = crate::origin::with_origin("try_cast")?;
         // As PySpark's: a DataType or a str, else NOT_EXPECTED_TYPE.
         if !dataType.is_instance_of::<crate::types::PyDataType>()
             && !dataType.is_instance_of::<pyo3::types::PyString>()
@@ -232,7 +288,7 @@ impl PyColumn {
     /// FutureWarning for a Column as the key.
     #[pyo3(name = "getItem")]
     fn get_item(&self, key: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
-        let _origin = crate::origin::with_origin("getItem");
+        let _origin = crate::origin::with_origin("getItem")?;
         if key.extract::<PyRef<'_, PyColumn>>().is_ok() {
             let py = key.py();
             let category = py.get_type::<pyo3::exceptions::PyFutureWarning>();
@@ -254,21 +310,21 @@ impl PyColumn {
 
     /// Check if NULL.
     #[pyo3(name = "isNull")]
-    fn is_null(&self) -> PyColumn {
-        let _origin = crate::origin::with_origin("isNull");
-        PyColumn::new(self.column.clone().is_null())
+    fn is_null(&self) -> PyResult<PyColumn> {
+        let _origin = crate::origin::with_origin("isNull")?;
+        Ok(PyColumn::new(self.column.clone().is_null()))
     }
 
     /// Check if NOT NULL.
     #[pyo3(name = "isNotNull")]
-    fn is_not_null(&self) -> PyColumn {
-        let _origin = crate::origin::with_origin("isNotNull");
-        PyColumn::new(self.column.clone().is_not_null())
+    fn is_not_null(&self) -> PyResult<PyColumn> {
+        let _origin = crate::origin::with_origin("isNotNull")?;
+        Ok(PyColumn::new(self.column.clone().is_not_null()))
     }
 
     /// Substring extraction (start and length as columns).
     fn substr(&self, startPos: &Bound<'_, PyAny>, length: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
-        let _origin = crate::origin::with_origin("substr");
+        let _origin = crate::origin::with_origin("substr")?;
         // As PySpark: the arguments, as values of an Enum, must be of one type, a Column or
         // an int.
         let py = startPos.py();
@@ -314,77 +370,77 @@ impl PyColumn {
 
     /// Pattern matching with LIKE, of any value, as PySpark's `_bin_op("like", ...)`.
     fn like(&self, other: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
-        let _origin = crate::origin::with_origin("like");
+        let _origin = crate::origin::with_origin("like")?;
         binary_function("like", &self.column, other)
     }
 
     /// Pattern matching with RLIKE (regex).
     fn rlike(&self, other: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
-        let _origin = crate::origin::with_origin("rlike");
+        let _origin = crate::origin::with_origin("rlike")?;
         binary_function("rlike", &self.column, other)
     }
 
     /// Check if contains another column value.
     fn contains(&self, other: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
-        let _origin = crate::origin::with_origin("contains");
-        let other_col = py_obj_to_column(other)?;
+        let _origin = crate::origin::with_origin("contains")?;
+        let other_col = operand_column(other)?;
         Ok(PyColumn::new(self.column.clone().contains(other_col)))
     }
 
     /// Check if starts with another column value.
     fn startswith(&self, other: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
-        let _origin = crate::origin::with_origin("startswith");
-        let other_col = py_obj_to_column(other)?;
+        let _origin = crate::origin::with_origin("startswith")?;
+        let other_col = operand_column(other)?;
         Ok(PyColumn::new(self.column.clone().startswith(other_col)))
     }
 
     /// Check if ends with another column value.
     fn endswith(&self, other: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
-        let _origin = crate::origin::with_origin("endswith");
-        let other_col = py_obj_to_column(other)?;
+        let _origin = crate::origin::with_origin("endswith")?;
+        let other_col = operand_column(other)?;
         Ok(PyColumn::new(self.column.clone().endswith(other_col)))
     }
 
     /// Ascending sort.
-    fn asc(&self) -> PyColumn {
-        let _origin = crate::origin::with_origin("asc");
-        PyColumn::new(self.column.clone().asc())
+    fn asc(&self) -> PyResult<PyColumn> {
+        let _origin = crate::origin::with_origin("asc")?;
+        Ok(PyColumn::new(self.column.clone().asc()))
     }
 
     /// Ascending sort with nulls first.
-    fn asc_nulls_first(&self) -> PyColumn {
-        let _origin = crate::origin::with_origin("asc_nulls_first");
-        PyColumn::new(self.column.clone().asc_nulls_first())
+    fn asc_nulls_first(&self) -> PyResult<PyColumn> {
+        let _origin = crate::origin::with_origin("asc_nulls_first")?;
+        Ok(PyColumn::new(self.column.clone().asc_nulls_first()))
     }
 
     /// Ascending sort with nulls last.
-    fn asc_nulls_last(&self) -> PyColumn {
-        let _origin = crate::origin::with_origin("asc_nulls_last");
-        PyColumn::new(self.column.clone().asc_nulls_last())
+    fn asc_nulls_last(&self) -> PyResult<PyColumn> {
+        let _origin = crate::origin::with_origin("asc_nulls_last")?;
+        Ok(PyColumn::new(self.column.clone().asc_nulls_last()))
     }
 
     /// Descending sort.
-    fn desc(&self) -> PyColumn {
-        let _origin = crate::origin::with_origin("desc");
-        PyColumn::new(self.column.clone().desc())
+    fn desc(&self) -> PyResult<PyColumn> {
+        let _origin = crate::origin::with_origin("desc")?;
+        Ok(PyColumn::new(self.column.clone().desc()))
     }
 
     /// Descending sort with nulls first.
-    fn desc_nulls_first(&self) -> PyColumn {
-        let _origin = crate::origin::with_origin("desc_nulls_first");
-        PyColumn::new(self.column.clone().desc_nulls_first())
+    fn desc_nulls_first(&self) -> PyResult<PyColumn> {
+        let _origin = crate::origin::with_origin("desc_nulls_first")?;
+        Ok(PyColumn::new(self.column.clone().desc_nulls_first()))
     }
 
     /// Descending sort with nulls last.
-    fn desc_nulls_last(&self) -> PyColumn {
-        let _origin = crate::origin::with_origin("desc_nulls_last");
-        PyColumn::new(self.column.clone().desc_nulls_last())
+    fn desc_nulls_last(&self) -> PyResult<PyColumn> {
+        let _origin = crate::origin::with_origin("desc_nulls_last")?;
+        Ok(PyColumn::new(self.column.clone().desc_nulls_last()))
     }
 
     /// A branch more of a CASE WHEN. Mirrors `Column.when`: the condition is a Column, and
     /// the column a `when()` without `otherwise()` (`INVALID_WHEN_USAGE`).
     fn when(&self, condition: &Bound<'_, PyAny>, value: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
-        let _origin = crate::origin::with_origin("when");
+        let _origin = crate::origin::with_origin("when")?;
         let py = condition.py();
         let Ok(condition) = condition.extract::<PyRef<'_, PyColumn>>() else {
             let arg_type = condition.get_type().name()?.to_string();
@@ -419,7 +475,7 @@ impl PyColumn {
     /// The value of a CASE WHEN when no branch holds. Mirrors `Column.otherwise`, which
     /// raises PySparkTypeError for a column that is not a `when()`, or one that has one.
     fn otherwise(&self, value: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
-        let _origin = crate::origin::with_origin("otherwise");
+        let _origin = crate::origin::with_origin("otherwise")?;
         let message = match self.column.expression().node() {
             ExpressionNode::CaseWhen(case_when) if case_when.else_expr.is_none() => None,
             ExpressionNode::CaseWhen(_) => Some(
@@ -442,7 +498,7 @@ impl PyColumn {
     /// Get item by key/index, or a slice as `substr(start, stop)`. Mirrors
     /// `Column.__getitem__`.
     fn __getitem__(&self, key: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
-        let _origin = crate::origin::with_origin("__getitem__");
+        let _origin = crate::origin::with_origin("__getitem__")?;
         if key.is_instance_of::<pyo3::types::PySlice>() {
             if !key.getattr("step")?.is_none() {
                 return Err(raise_pyspark(
@@ -462,7 +518,7 @@ impl PyColumn {
     /// `col["name"]`. Mirrors `Column.__getattr__`, which raises for `_jc` and for a name
     /// that starts with `__`.
     fn __getattr__(&self, py: Python<'_>, item: &str) -> PyResult<PyColumn> {
-        let _origin = crate::origin::with_origin("__getattr__");
+        let _origin = crate::origin::with_origin("__getattr__")?;
         if item == "_jc" {
             return Err(raise_pyspark(
                 py,
@@ -484,142 +540,142 @@ impl PyColumn {
 
     /// Equality (==) - returns a Column condition
     fn __eq__(&self, py: Python<'_>, other: Py<PyAny>) -> PyResult<PyColumn> {
-        let _origin = crate::origin::with_origin("__eq__");
-        let other_col = to_column(&other.bind(py))?;
+        let _origin = crate::origin::with_origin("__eq__")?;
+        let other_col = equality_operand_column(other.bind(py))?;
         Ok(PyColumn::new(self.column.clone().eq(other_col)))
     }
 
     /// Inequality (!=) - returns a Column condition
     fn __ne__(&self, py: Python<'_>, other: Py<PyAny>) -> PyResult<PyColumn> {
-        let _origin = crate::origin::with_origin("__ne__");
-        let other_col = to_column(&other.bind(py))?;
+        let _origin = crate::origin::with_origin("__ne__")?;
+        let other_col = operand_column(other.bind(py))?;
         Ok(PyColumn::new(self.column.clone().ne(other_col)))
     }
 
     /// Greater than (>) - returns a Column condition
     fn __gt__(&self, py: Python<'_>, other: Py<PyAny>) -> PyResult<PyColumn> {
-        let _origin = crate::origin::with_origin("__gt__");
-        let other_col = to_column(&other.bind(py))?;
+        let _origin = crate::origin::with_origin("__gt__")?;
+        let other_col = operand_column(other.bind(py))?;
         Ok(PyColumn::new(self.column.clone().gt(other_col)))
     }
 
     /// Less than (<) - returns a Column condition
     fn __lt__(&self, py: Python<'_>, other: Py<PyAny>) -> PyResult<PyColumn> {
-        let _origin = crate::origin::with_origin("__lt__");
-        let other_col = to_column(&other.bind(py))?;
+        let _origin = crate::origin::with_origin("__lt__")?;
+        let other_col = operand_column(other.bind(py))?;
         Ok(PyColumn::new(self.column.clone().lt(other_col)))
     }
 
     /// Greater than or equal (>=) - returns a Column condition
     fn __ge__(&self, py: Python<'_>, other: Py<PyAny>) -> PyResult<PyColumn> {
-        let _origin = crate::origin::with_origin("__ge__");
-        let other_col = to_column(&other.bind(py))?;
+        let _origin = crate::origin::with_origin("__ge__")?;
+        let other_col = operand_column(other.bind(py))?;
         Ok(PyColumn::new(self.column.clone().ge(other_col)))
     }
 
     /// Less than or equal (<=) - returns a Column condition
     fn __le__(&self, py: Python<'_>, other: Py<PyAny>) -> PyResult<PyColumn> {
-        let _origin = crate::origin::with_origin("__le__");
-        let other_col = to_column(&other.bind(py))?;
+        let _origin = crate::origin::with_origin("__le__")?;
+        let other_col = operand_column(other.bind(py))?;
         Ok(PyColumn::new(self.column.clone().le(other_col)))
     }
 
     // Arithmetic operators
     /// Addition (+)
     fn __add__(&self, py: Python<'_>, other: Py<PyAny>) -> PyResult<PyColumn> {
-        let _origin = crate::origin::with_origin("__add__");
-        let other_col = to_column(&other.bind(py))?;
+        let _origin = crate::origin::with_origin("__add__")?;
+        let other_col = operand_column(other.bind(py))?;
         Ok(PyColumn::new(self.column.clone().add(other_col)))
     }
 
     /// Right addition (for reverse operations)
     fn __radd__(&self, py: Python<'_>, other: Py<PyAny>) -> PyResult<PyColumn> {
-        let _origin = crate::origin::with_origin("__radd__");
-        let other_col = to_column(&other.bind(py))?;
+        let _origin = crate::origin::with_origin("__radd__")?;
+        let other_col = operand_column(other.bind(py))?;
         Ok(PyColumn::new(other_col.add(self.column.clone())))
     }
 
     /// Subtraction (-)
     fn __sub__(&self, py: Python<'_>, other: Py<PyAny>) -> PyResult<PyColumn> {
-        let _origin = crate::origin::with_origin("__sub__");
-        let other_col = to_column(&other.bind(py))?;
+        let _origin = crate::origin::with_origin("__sub__")?;
+        let other_col = operand_column(other.bind(py))?;
         Ok(PyColumn::new(self.column.clone().sub(other_col)))
     }
 
     /// Right subtraction (for reverse operations)
     fn __rsub__(&self, py: Python<'_>, other: Py<PyAny>) -> PyResult<PyColumn> {
-        let _origin = crate::origin::with_origin("__rsub__");
-        let other_col = to_column(&other.bind(py))?;
+        let _origin = crate::origin::with_origin("__rsub__")?;
+        let other_col = operand_column(other.bind(py))?;
         Ok(PyColumn::new(other_col.sub(self.column.clone())))
     }
 
     /// Multiplication (*)
     fn __mul__(&self, py: Python<'_>, other: Py<PyAny>) -> PyResult<PyColumn> {
-        let _origin = crate::origin::with_origin("__mul__");
-        let other_col = to_column(&other.bind(py))?;
+        let _origin = crate::origin::with_origin("__mul__")?;
+        let other_col = operand_column(other.bind(py))?;
         Ok(PyColumn::new(self.column.clone().mul(other_col)))
     }
 
     /// Right multiplication (for reverse operations)
     fn __rmul__(&self, py: Python<'_>, other: Py<PyAny>) -> PyResult<PyColumn> {
-        let _origin = crate::origin::with_origin("__rmul__");
-        let other_col = to_column(&other.bind(py))?;
+        let _origin = crate::origin::with_origin("__rmul__")?;
+        let other_col = operand_column(other.bind(py))?;
         Ok(PyColumn::new(other_col.mul(self.column.clone())))
     }
 
     /// Division (/)
     fn __truediv__(&self, py: Python<'_>, other: Py<PyAny>) -> PyResult<PyColumn> {
-        let _origin = crate::origin::with_origin("__truediv__");
-        let other_col = to_column(&other.bind(py))?;
+        let _origin = crate::origin::with_origin("__truediv__")?;
+        let other_col = operand_column(other.bind(py))?;
         Ok(PyColumn::new(self.column.clone().div(other_col)))
     }
 
     /// Division (/), of the name of Python 2, as PySpark's Column has it, which pandas-on-Spark
     /// calls: as `__truediv__`.
     fn __div__(&self, py: Python<'_>, other: Py<PyAny>) -> PyResult<PyColumn> {
-        let _origin = crate::origin::with_origin("__div__");
-        let other_col = to_column(&other.bind(py))?;
+        let _origin = crate::origin::with_origin("__div__")?;
+        let other_col = operand_column(other.bind(py))?;
         Ok(PyColumn::new(self.column.clone().div(other_col)))
     }
 
     /// Modulo (%)
     fn __mod__(&self, py: Python<'_>, other: Py<PyAny>) -> PyResult<PyColumn> {
-        let _origin = crate::origin::with_origin("__mod__");
-        let other_col = to_column(&other.bind(py))?;
+        let _origin = crate::origin::with_origin("__mod__")?;
+        let other_col = operand_column(other.bind(py))?;
         Ok(PyColumn::new(self.column.clone().modulo(other_col)))
     }
 
     // Bitwise operators (logical in Spark context)
     /// Bitwise AND (&) - logical AND in Spark
     fn __and__(&self, py: Python<'_>, other: Py<PyAny>) -> PyResult<PyColumn> {
-        let _origin = crate::origin::with_origin("__and__");
-        let other_col = to_column(&other.bind(py))?;
+        let _origin = crate::origin::with_origin("__and__")?;
+        let other_col = operand_column(other.bind(py))?;
         Ok(PyColumn::new(self.column.clone().and(other_col)))
     }
 
     /// Bitwise OR (|) - logical OR in Spark
     fn __or__(&self, py: Python<'_>, other: Py<PyAny>) -> PyResult<PyColumn> {
-        let _origin = crate::origin::with_origin("__or__");
-        let other_col = to_column(&other.bind(py))?;
+        let _origin = crate::origin::with_origin("__or__")?;
+        let other_col = operand_column(other.bind(py))?;
         Ok(PyColumn::new(self.column.clone().or(other_col)))
     }
 
     /// Bitwise NOT (~) - logical NOT in Spark
-    fn __invert__(&self) -> PyColumn {
-        let _origin = crate::origin::with_origin("__invert__");
-        PyColumn::new(self.column.clone().not())
+    fn __invert__(&self) -> PyResult<PyColumn> {
+        let _origin = crate::origin::with_origin("__invert__")?;
+        Ok(PyColumn::new(self.column.clone().not()))
     }
 
     /// Negation (-)
-    fn __neg__(&self) -> PyColumn {
-        let _origin = crate::origin::with_origin("__neg__");
-        PyColumn::new(self.column.clone().neg())
+    fn __neg__(&self) -> PyResult<PyColumn> {
+        let _origin = crate::origin::with_origin("__neg__")?;
+        Ok(PyColumn::new(self.column.clone().neg()))
     }
 
     /// Get field by name (for struct/nested types).
     #[pyo3(name = "getField")]
     fn get_field(&self, name: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
-        let _origin = crate::origin::with_origin("getField");
+        let _origin = crate::origin::with_origin("getField")?;
         // As PySpark's, `self[name]`, with a FutureWarning for a Column.
         if name.extract::<PyRef<'_, PyColumn>>().is_ok() {
             let py = name.py();
@@ -641,7 +697,7 @@ impl PyColumn {
 
     /// Apply a window function over a window specification.
     fn over(&self, window: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
-        let _origin = crate::origin::with_origin("over");
+        let _origin = crate::origin::with_origin("over")?;
         let Ok(window) = window.extract::<PyRef<'_, crate::window::PyWindowSpec>>() else {
             return Err(not_expected_type(window, "window", "WindowSpec"));
         };
@@ -771,49 +827,50 @@ impl PyColumn {
         )))
     }
 
+    /// As PySpark's Column, which has no `__str__` of its own for `_with_origin` to wrap: no
+    /// origin, so no read of the debugging conf.
     fn __str__(&self) -> String {
-        let _origin = crate::origin::with_origin("__str__");
         self.__repr__()
     }
 
     // --- reverse arithmetic/logical dunders (operand order swapped) ---
     fn __rtruediv__(&self, py: Python<'_>, other: Py<PyAny>) -> PyResult<PyColumn> {
-        let _origin = crate::origin::with_origin("__rtruediv__");
-        let o = to_column(&other.bind(py))?;
+        let _origin = crate::origin::with_origin("__rtruediv__")?;
+        let o = operand_column(other.bind(py))?;
         Ok(PyColumn::new(o.div(self.column.clone())))
     }
     /// Reverse division, of the name of Python 2, as PySpark's Column has it: as `__rtruediv__`.
     fn __rdiv__(&self, py: Python<'_>, other: Py<PyAny>) -> PyResult<PyColumn> {
-        let _origin = crate::origin::with_origin("__rdiv__");
-        let o = to_column(&other.bind(py))?;
+        let _origin = crate::origin::with_origin("__rdiv__")?;
+        let o = operand_column(other.bind(py))?;
         Ok(PyColumn::new(o.div(self.column.clone())))
     }
     fn __rmod__(&self, py: Python<'_>, other: Py<PyAny>) -> PyResult<PyColumn> {
-        let _origin = crate::origin::with_origin("__rmod__");
-        let o = to_column(&other.bind(py))?;
+        let _origin = crate::origin::with_origin("__rmod__")?;
+        let o = operand_column(other.bind(py))?;
         Ok(PyColumn::new(o.modulo(self.column.clone())))
     }
     fn __rand__(&self, py: Python<'_>, other: Py<PyAny>) -> PyResult<PyColumn> {
-        let _origin = crate::origin::with_origin("__rand__");
-        let o = to_column(&other.bind(py))?;
+        let _origin = crate::origin::with_origin("__rand__")?;
+        let o = operand_column(other.bind(py))?;
         Ok(PyColumn::new(self.column.clone().and(o)))
     }
     fn __ror__(&self, py: Python<'_>, other: Py<PyAny>) -> PyResult<PyColumn> {
-        let _origin = crate::origin::with_origin("__ror__");
-        let o = to_column(&other.bind(py))?;
+        let _origin = crate::origin::with_origin("__ror__")?;
+        let o = operand_column(other.bind(py))?;
         Ok(PyColumn::new(self.column.clone().or(o)))
     }
 
     /// `col ** other`. Mirrors `Column.__pow__` = `power(self, other)`. PySpark's takes no
     /// modulo, so the ternary `pow(col, other, modulo)` raises the TypeError of its call.
     fn __pow__(&self, py: Python<'_>, other: Py<PyAny>, modulo: Py<PyAny>) -> PyResult<PyColumn> {
-        let _origin = crate::origin::with_origin("__pow__");
+        let _origin = crate::origin::with_origin("__pow__")?;
         if !modulo.is_none(py) {
             return Err(pyo3::exceptions::PyTypeError::new_err(
                 "Column.__pow__() takes 2 positional arguments but 3 were given",
             ));
         }
-        let o = to_column(&other.bind(py))?;
+        let o = operand_column(other.bind(py))?;
         Ok(PyColumn::new(spark_connect::functions::pow(
             self.column.clone(),
             o,
@@ -824,11 +881,11 @@ impl PyColumn {
     /// `pow(other, col, modulo)` is not implemented, so that Python raises its TypeError of the
     /// operand types, as for PySpark's, which takes no modulo.
     fn __rpow__(&self, py: Python<'_>, other: Py<PyAny>, modulo: Py<PyAny>) -> PyResult<Py<PyAny>> {
-        let _origin = crate::origin::with_origin("__rpow__");
+        let _origin = crate::origin::with_origin("__rpow__")?;
         if !modulo.is_none(py) {
             return Ok(py.NotImplemented());
         }
-        let o = to_column(&other.bind(py))?;
+        let o = operand_column(other.bind(py))?;
         let column = PyColumn::new(spark_connect::functions::pow(o, self.column.clone()));
         Ok(Py::new(py, column)?.into_any())
     }
@@ -838,7 +895,7 @@ impl PyColumn {
 
     /// `x in col` is not supported. Mirrors `Column.__contains__`.
     fn __contains__(&self, py: Python<'_>, _item: Py<PyAny>) -> PyResult<()> {
-        let _origin = crate::origin::with_origin("__contains__");
+        let _origin = crate::origin::with_origin("__contains__")?;
         Err(raise_pyspark(
             py,
             "PySparkValueError",
@@ -885,47 +942,47 @@ impl PyColumn {
         lowerBound: Py<PyAny>,
         upperBound: Py<PyAny>,
     ) -> PyResult<PyColumn> {
-        let _origin = crate::origin::with_origin("between");
-        let l = to_column(&lowerBound.bind(py))?;
-        let u = to_column(&upperBound.bind(py))?;
+        let _origin = crate::origin::with_origin("between")?;
+        let l = operand_column(lowerBound.bind(py))?;
+        let u = operand_column(upperBound.bind(py))?;
         Ok(PyColumn::new(self.column.clone().between(l, u)))
     }
     #[pyo3(name = "bitwiseAND")]
     fn bitwise_and(&self, py: Python<'_>, other: Py<PyAny>) -> PyResult<PyColumn> {
-        let _origin = crate::origin::with_origin("bitwiseAND");
-        let o = to_column(&other.bind(py))?;
+        let _origin = crate::origin::with_origin("bitwiseAND")?;
+        let o = operand_column(other.bind(py))?;
         Ok(PyColumn::new(self.column.clone().bitwise_and(o)))
     }
     #[pyo3(name = "bitwiseOR")]
     fn bitwise_or(&self, py: Python<'_>, other: Py<PyAny>) -> PyResult<PyColumn> {
-        let _origin = crate::origin::with_origin("bitwiseOR");
-        let o = to_column(&other.bind(py))?;
+        let _origin = crate::origin::with_origin("bitwiseOR")?;
+        let o = operand_column(other.bind(py))?;
         Ok(PyColumn::new(self.column.clone().bitwise_or(o)))
     }
     #[pyo3(name = "bitwiseXOR")]
     fn bitwise_xor(&self, py: Python<'_>, other: Py<PyAny>) -> PyResult<PyColumn> {
-        let _origin = crate::origin::with_origin("bitwiseXOR");
-        let o = to_column(&other.bind(py))?;
+        let _origin = crate::origin::with_origin("bitwiseXOR")?;
+        let o = operand_column(other.bind(py))?;
         Ok(PyColumn::new(self.column.clone().bitwise_xor(o)))
     }
     fn ilike(&self, other: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
-        let _origin = crate::origin::with_origin("ilike");
+        let _origin = crate::origin::with_origin("ilike")?;
         binary_function("ilike", &self.column, other)
     }
     #[pyo3(name = "isNaN")]
-    fn is_nan(&self) -> PyColumn {
-        let _origin = crate::origin::with_origin("isNaN");
-        PyColumn::new(self.column.clone().is_nan())
+    fn is_nan(&self) -> PyResult<PyColumn> {
+        let _origin = crate::origin::with_origin("isNaN")?;
+        Ok(PyColumn::new(self.column.clone().is_nan()))
     }
     #[pyo3(name = "eqNullSafe")]
     fn eq_null_safe(&self, py: Python<'_>, other: Py<PyAny>) -> PyResult<PyColumn> {
-        let _origin = crate::origin::with_origin("eqNullSafe");
-        let o = to_column(&other.bind(py))?;
+        let _origin = crate::origin::with_origin("eqNullSafe")?;
+        let o = operand_column(other.bind(py))?;
         Ok(PyColumn::new(self.column.clone().eq_null_safe(o)))
     }
     #[pyo3(signature = (*cols))]
     fn isin(&self, py: Python<'_>, cols: Vec<Py<PyAny>>) -> PyResult<PyColumn> {
-        let _origin = crate::origin::with_origin("isin");
+        let _origin = crate::origin::with_origin("isin")?;
         // As pyspark's, a single DataFrame makes an IN subquery of it.
         if let [only] = cols.as_slice() {
             if let Ok(df) = only
@@ -965,7 +1022,7 @@ impl PyColumn {
         fieldName: &Bound<'_, PyAny>,
         col: &Bound<'_, PyAny>,
     ) -> PyResult<PyColumn> {
-        let _origin = crate::origin::with_origin("withField");
+        let _origin = crate::origin::with_origin("withField")?;
         // As PySpark's, of a str and a Column.
         if !fieldName.is_instance_of::<pyo3::types::PyString>() {
             return Err(not_expected_type(fieldName, "fieldName", "str"));
@@ -982,7 +1039,7 @@ impl PyColumn {
     }
     #[pyo3(name = "dropFields", signature = (*fieldNames))]
     fn drop_fields(&self, py: Python<'_>, fieldNames: Vec<Bound<'_, PyAny>>) -> PyResult<PyColumn> {
-        let _origin = crate::origin::with_origin("dropFields");
+        let _origin = crate::origin::with_origin("dropFields")?;
         // As PySpark's, of strings, at least one.
         let mut names = Vec::with_capacity(fieldNames.len());
         for name in &fieldNames {

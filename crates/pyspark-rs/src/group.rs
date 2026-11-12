@@ -8,6 +8,7 @@ use crate::dataframe::{
     build_map_udf, infer_group_map_eval_type, validate_map_function, PyDataFrame,
 };
 use crate::errors::ResultExt;
+use crate::interrupt::interruptible;
 
 /// As PySpark's `_check_same_session` of the DataFrames of grouped data: `SESSION_NOT_SAME`
 /// unless `other` is of the session of `this`.
@@ -63,7 +64,7 @@ pub(crate) fn dict_aggregates(
             return Err(pyo3::exceptions::PyAssertionError::new_err(()));
         };
         // As PySpark's `agg` of a dict, by `col`, of its origin.
-        let _origin = crate::origin::with_origin("col");
+        let _origin = crate::origin::with_origin("col")?;
         let c = spark_connect::functions::col(&column);
         // Build func(col) as an unresolved function resolved server-side, so aggregate names
         // (max/min/sum/avg/count/...) all work regardless of whether they are in the generated
@@ -95,9 +96,10 @@ impl PyGroupedData {
         }
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
         let grouped = &self.grouped_data;
-        py.detach(|| grouped.numeric_agg(function, refs).map_err(Box::new))
-            .to_pyerr()
-            .map(PyDataFrame::new)
+        interruptible(py, &grouped.spark_session(), || {
+            grouped.numeric_agg(function, refs)
+        })
+        .map(PyDataFrame::new)
     }
 }
 
@@ -116,9 +118,7 @@ impl PyGroupedData {
             .map(|column| column.expression().render())
             .collect();
         let dataframe = self.grouped_data.dataframe().clone();
-        let dtypes = py
-            .detach(|| dataframe.dtypes().map_err(Box::new))
-            .to_pyerr()?;
+        let dtypes = interruptible(py, &dataframe.spark_session(), || dataframe.dtypes())?;
         let values: Vec<String> = dtypes
             .iter()
             .map(|(name, data_type)| format!("{name}: {data_type}"))
@@ -268,7 +268,9 @@ impl PyGroupedData {
             eval_type::SQL_GROUPED_MAP_PANDAS_UDF,
         )?;
         validate_map_function(py, &func, eval_type_id)?;
-        let cols = py.detach(|| self.grouped_data.input_columns()).to_pyerr()?;
+        let cols = interruptible(py, &self.grouped_data.spark_session(), || {
+            self.grouped_data.input_columns()
+        })?;
         let session = self.grouped_data.spark_session();
         let udf = build_map_udf(py, &session, &func, &schema, eval_type_id, &cols)?;
         Ok(PyDataFrame::new(self.grouped_data.apply_in_pandas(udf)))
@@ -325,7 +327,9 @@ impl PyGroupedData {
             eval_type::SQL_GROUPED_MAP_ARROW_UDF,
         )?;
         validate_map_function(py, &func, eval_type_id)?;
-        let cols = py.detach(|| self.grouped_data.input_columns()).to_pyerr()?;
+        let cols = interruptible(py, &self.grouped_data.spark_session(), || {
+            self.grouped_data.input_columns()
+        })?;
         let session = self.grouped_data.spark_session();
         let udf = build_map_udf(py, &session, &func, &schema, eval_type_id, &cols)?;
         Ok(PyDataFrame::new(self.grouped_data.apply_in_arrow(udf)))
@@ -353,7 +357,9 @@ impl PyGroupedData {
         timeoutConf: &str,
     ) -> PyResult<PyDataFrame> {
         validate_map_function(py, &func, eval_type::SQL_GROUPED_MAP_PANDAS_UDF_WITH_STATE)?;
-        let cols = py.detach(|| self.grouped_data.input_columns()).to_pyerr()?;
+        let cols = interruptible(py, &self.grouped_data.spark_session(), || {
+            self.grouped_data.input_columns()
+        })?;
         let session = self.grouped_data.spark_session();
         let udf = build_map_udf(
             py,
@@ -401,7 +407,9 @@ impl PyGroupedData {
             initialState.is_some(),
             true,
         )?;
-        let cols = py.detach(|| self.grouped_data.input_columns()).to_pyerr()?;
+        let cols = interruptible(py, &self.grouped_data.spark_session(), || {
+            self.grouped_data.input_columns()
+        })?;
         let session = self.grouped_data.spark_session();
         let udf = build_map_udf(py, &session, &func, &outputStructType, et, &cols)?;
         // As PySpark's, which sends a DDL string as an `UnparsedDataType`, for the server to
@@ -451,7 +459,9 @@ impl PyGroupedData {
             initialState.is_some(),
             false,
         )?;
-        let cols = py.detach(|| self.grouped_data.input_columns()).to_pyerr()?;
+        let cols = interruptible(py, &self.grouped_data.spark_session(), || {
+            self.grouped_data.input_columns()
+        })?;
         let session = self.grouped_data.spark_session();
         let udf = build_map_udf(py, &session, &func, &outputStructType, et, &cols)?;
         let etc = (!eventTimeColumnName.is_empty()).then_some(eventTimeColumnName);
@@ -522,7 +532,9 @@ impl PyCoGroupedData {
         schema: Bound<'_, PyAny>,
     ) -> PyResult<PyDataFrame> {
         validate_map_function(py, &func, eval_type::SQL_COGROUPED_MAP_PANDAS_UDF)?;
-        let cols = py.detach(|| self.inner.input_columns()).to_pyerr()?;
+        let cols = interruptible(py, &self.inner.spark_session(), || {
+            self.inner.input_columns()
+        })?;
         let udf = build_map_udf(
             py,
             &self.inner.spark_session(),
@@ -543,7 +555,9 @@ impl PyCoGroupedData {
         schema: Bound<'_, PyAny>,
     ) -> PyResult<PyDataFrame> {
         validate_map_function(py, &func, eval_type::SQL_COGROUPED_MAP_ARROW_UDF)?;
-        let cols = py.detach(|| self.inner.input_columns()).to_pyerr()?;
+        let cols = interruptible(py, &self.inner.spark_session(), || {
+            self.inner.input_columns()
+        })?;
         let udf = build_map_udf(
             py,
             &self.inner.spark_session(),

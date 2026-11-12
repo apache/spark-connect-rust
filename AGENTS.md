@@ -431,6 +431,17 @@ For every method matching a pyspark name:
   their attributes are the instance attributes of PySpark's, as given, and they pickle as plain
   classes into the server's Python workers. Do not make them `#[pyclass(dict)]` types: PyO3 0.28
   clears but never releases the `__dict__` of such an instance, so each value would keep a dict.
+- **Instance dicts of `#[pyclass(dict)]` classes:** PyO3 0.28's dealloc empties the `__dict__` of
+  an instance (`PyDict_Clear`) but never releases it. `crates/pyspark-rs/src/instance_dict.rs`
+  wraps, at module init, the `tp_dealloc` of each class whose instances have the dict: the wrapper
+  takes the dict out of its slot, runs PyO3's dealloc and then releases the dict, so the attribute
+  semantics stay CPython's (a `__getattr__`/`__setattr__` store instead would break the lookup
+  order of monkeypatched methods and slow every access). List there every new `dict` class and
+  every class that `extends` one, whose Rust dealloc does not go through its base's slot; Python
+  subclasses go through it. On CPython 3.11 and 3.12, PyO3 0.28 also writes over the dict that
+  `object.__new__` makes for every instance of such a class, which no code outside PyO3 can reach:
+  a `dict` class still costs a dict per instance there (hence the value classes above) until the
+  PyO3 0.29 upgrade, after which the module is to be removed.
 - **Streaming listeners and progress holders:** Keep progress holders (`StreamingQueryProgress`,
   `StateOperatorProgress`, etc.) as faithful pure-Python implementations parsed from server
   JSON, not Rust-backed. The listener bus (subscribe/dispatch) is genuinely Rust-backed;
@@ -476,11 +487,14 @@ For every method matching a pyspark name:
     special-case them client-side (e.g. faking `distributed_sequence_id` with a `row_number`
     window — it is wrong and non-distributed).
 - **`*cols` methods unpack a single list.** `df.select(["a","b"])` must behave like
-  `df.select("a","b")` (pyspark unpacks a lone list/tuple arg). Handled centrally in
-  `to_column_list`, so it covers `select`/`sort`/`groupBy`/... at once — don't re-solve per method.
-  The exceptions are `repartition` and `repartitionByRange`, which give PySpark's `_to_cols` the
-  `*cols` tuple itself, so a list among their columns is `NOT_EXPECTED_TYPE`
-  (`to_columns_as_given`).
+  `df.select("a","b")`. The rule lives in the helper each family shares, so reuse the one
+  that matches the method rather than re-solving it per method: `to_column_list` (`select`,
+  which also unpacks a lone tuple); `unwrap_sequence` (`sort`/`orderBy`/`sortWithinPartitions`,
+  and `groupBy`/`rollup`/`cube` through `grouping_columns`); `window_columns` (`Window.partitionBy`/
+  `orderBy` and `TableArg.partitionBy`/`orderBy`, which unpack a lone list but not a tuple, as
+  PySpark's `_to_cols` does). The exceptions are `repartition` and `repartitionByRange`, which give
+  PySpark's `_to_cols` the `*cols` tuple itself, so a list among their columns is
+  `NOT_EXPECTED_TYPE` (`to_columns_as_given`).
 - **Pipelines (SDP):** The pure-Python surface vendors cleanly with one edit to imports. The
   Connect-server path requires a dedicated Rust `PipelineCommand` seam with high-level methods
   on the session, separate from drop-in parity work.

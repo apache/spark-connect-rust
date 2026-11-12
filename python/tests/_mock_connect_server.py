@@ -281,6 +281,9 @@ def serve(connection):
         # execution released by close with one released by normal completion.
         block_result_complete = False
         result_complete_operations = []
+        # With `block_add_artifacts` set, AddArtifacts holds its answer until the gate is released.
+        block_add_artifacts = False
+        add_artifacts_gate = Event()
 
         # Each AnalyzePlanRequest, recorded.
         analyze_requests = []
@@ -300,6 +303,7 @@ def serve(connection):
             self.block_result_complete = False
             self.result_complete_operations = []
             self.analyze_requests = []
+            self.block_add_artifacts = False
             # The isLocal answer of a test, or None for the answer of the plan, and a failure.
             self.local = None
             self.local_failure = False
@@ -350,7 +354,12 @@ def serve(connection):
                 self.listener_removals = 0
                 self.listener_streams_finished = 0
                 self.listener_condition.notify_all()
-            for name in ("listener_register_gate", "listener_remove_gate", "release_session_gate"):
+            for name in (
+                "listener_register_gate",
+                "listener_remove_gate",
+                "release_session_gate",
+                "add_artifacts_gate",
+            ):
                 gate = getattr(self, name, None)
                 if gate is not None:
                     gate.set()
@@ -368,6 +377,7 @@ def serve(connection):
             self.release_session_events = []
             self.release_session_blocked = False
             self.release_session_gate = Event()
+            self.add_artifacts_gate = Event()
 
         def analyze(self, request, context):
             # AnalyzePlanRequest.session_id=1, echoed as AnalyzePlanResponse.session_id=1, as the
@@ -495,6 +505,20 @@ def serve(connection):
         interrupt_failure = None
         rpc_events = []
         set_confs = []
+
+        def add_artifacts(self, requests, context):
+            # AddArtifactsRequest.session_id=1, echoed as AddArtifactsResponse.session_id=2 with
+            # no artifact summary. With `block_add_artifacts` set, the answer waits for the gate,
+            # as a server that accepts an upload and does not answer it.
+            session_id = b""
+            for request in requests:
+                session_id = parse_message(request).get(1, [b""])[0]
+                break
+            if self.block_add_artifacts and not self.add_artifacts_gate.wait(15):
+                context.abort(
+                    grpc.StatusCode.INVALID_ARGUMENT, "artifact upload gate was not released"
+                )
+            return message_field(2, session_id)
 
         def release_session(self, request, context):
             with self.listener_condition:
@@ -869,6 +893,7 @@ def serve(connection):
             "Config": grpc.unary_unary_rpc_method_handler(service.config),
             "CloneSession": grpc.unary_unary_rpc_method_handler(service.clone_session),
             "Interrupt": grpc.unary_unary_rpc_method_handler(service.interrupt),
+            "AddArtifacts": grpc.stream_unary_rpc_method_handler(service.add_artifacts),
         }
         server.add_generic_rpc_handlers(
             (grpc.method_handlers_generic_handler("spark.connect.SparkConnectService", handlers),)
@@ -927,6 +952,9 @@ def serve(connection):
                     connection.send(None)
                 elif command[0] == "release_session_release":
                     service.release_session_gate.set()
+                    connection.send(None)
+                elif command[0] == "release_add_artifacts":
+                    service.add_artifacts_gate.set()
                     connection.send(None)
         finally:
             server.stop(0).wait()
@@ -1009,6 +1037,11 @@ class RemoteService:
 
     def release_session_release(self):
         self.connection.send(("release_session_release",))
+        assert self.connection.poll(10), "Mock server did not respond"
+        self.connection.recv()
+
+    def release_add_artifacts(self):
+        self.connection.send(("release_add_artifacts",))
         assert self.connection.poll(10), "Mock server did not respond"
         self.connection.recv()
 

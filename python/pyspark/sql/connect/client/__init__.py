@@ -325,7 +325,8 @@ class DefaultChannelBuilder(ChannelBuilder):
 class _UnsupportedLiteral:
     """An observed-metric literal of a kind ``LiteralExpression._to_value`` rejects. The
     Rust transport decodes eagerly, so it leaves this marker and ``pairs`` raises the
-    reference's ``UNSUPPORTED_LITERAL`` when read, as the reference does."""
+    reference's ``UNSUPPORTED_LITERAL`` when read, as the reference does. A metric that holds
+    such a literal as an element is the marker of that literal, which the reference names."""
 
     def __init__(self, literal: str):
         self.literal = literal
