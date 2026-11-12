@@ -15,11 +15,12 @@ use pyo3::pyclass::boolean_struct::False;
 use pyo3::types::{PyDict, PyTuple, PyType};
 use pyo3::PyClass;
 use spark_connect::ml::{
-    BinaryClassificationEvaluator, CrossValidator, DecisionTreeClassifier, DecisionTreeRegressor,
-    Estimator, Evaluator, GBTClassifier, GBTRegressor, KMeans, LinearRegression, LinearSVC,
-    LogisticRegression, MaxAbsScaler, Model, MulticlassClassificationEvaluator, NaiveBayes, Params,
-    Pipeline, RandomForestClassifier, RandomForestRegressor, RegressionEvaluator, StandardScaler,
-    StringIndexer, Transformer, VectorAssembler,
+    BinaryClassificationEvaluator, BisectingKMeans, CrossValidator, DecisionTreeClassifier,
+    DecisionTreeRegressor, Estimator, Evaluator, GBTClassifier, GBTRegressor, KMeans,
+    LinearRegression, LinearSVC, LogisticRegression, MaxAbsScaler, Model,
+    MulticlassClassificationEvaluator, NaiveBayes, Params, Pipeline, RandomForestClassifier,
+    RandomForestRegressor, RegressionEvaluator, StandardScaler, StringIndexer, Transformer,
+    VectorAssembler,
 };
 use spark_connect::DataFrame;
 
@@ -2898,6 +2899,110 @@ impl PyBinaryClassificationEvaluator {
     }
 }
 
+/// Bisecting K-means fitted and cached by Spark Connect.
+#[pyclass(name = "BisectingKMeans", module = "pyspark.ml.connect.clustering")]
+pub struct PyBisectingKMeans {
+    inner: BisectingKMeans,
+    unsendable: Vec<&'static str>,
+}
+
+const BISECTING_KMEANS_PARAMS: &[(&str, Kind)] = &[
+    ("featuresCol", Kind::Str),
+    ("predictionCol", Kind::Str),
+    ("maxIter", Kind::Int),
+    ("seed", Kind::Int),
+    ("k", Kind::Int),
+    ("minDivisibleClusterSize", Kind::Float),
+    ("distanceMeasure", Kind::Str),
+    ("weightCol", Kind::Str),
+];
+
+#[pymethods]
+impl PyBisectingKMeans {
+    #[new]
+    #[pyo3(signature = (*args, **kwargs), text_signature = "(*, featuresCol='features', predictionCol='prediction', maxIter=20, seed=None, k=4, minDivisibleClusterSize=1.0, distanceMeasure='euclidean', weightCol=None)")]
+    fn new(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
+        let mut this = Self {
+            inner: BisectingKMeans::new(),
+            unsendable: Vec::new(),
+        };
+        init_params(
+            &mut this,
+            "BisectingKMeans",
+            &[],
+            BISECTING_KMEANS_PARAMS,
+            args,
+            kwargs,
+        )?;
+        Ok(this)
+    }
+
+    #[pyo3(name = "setFeaturesCol")]
+    fn set_feature_col<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "featuresCol", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setPredictionCol")]
+    fn set_prediction_col<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "predictionCol", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setK")]
+    fn set_k<'py>(slf: Bound<'py, Self>, value: &Bound<'py, PyAny>) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "k", Kind::Int, value)
+    }
+
+    #[pyo3(name = "setMaxIter")]
+    fn set_max_iter<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "maxIter", Kind::Int, value)
+    }
+
+    #[pyo3(name = "setSeed")]
+    fn set_seed<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "seed", Kind::Int, value)
+    }
+
+    #[pyo3(name = "setDistanceMeasure")]
+    fn set_distance_measure<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "distanceMeasure", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setWeightCol")]
+    fn set_weight_col<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "weightCol", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setMinDivisibleClusterSize")]
+    fn set_min_divisible_cluster_size<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "minDivisibleClusterSize", Kind::Float, value)
+    }
+
+    fn fit(slf: &Bound<'_, Self>, df: &PyDataFrame) -> PyResult<PyMLModel> {
+        fit_native(slf, df)
+    }
+}
+
 /// Pipeline estimator (chains stages by name).
 #[pyclass(name = "Pipeline", module = "pyspark.ml.connect.pipeline")]
 pub struct PyPipeline {
@@ -3077,6 +3182,7 @@ native!(
     PyDecisionTreeRegressor => DecisionTreeRegressor,
     PyRandomForestRegressor => RandomForestRegressor,
     PyKMeans => KMeans,
+    PyBisectingKMeans => BisectingKMeans,
     PyRegressionEvaluator => RegressionEvaluator,
     PyMulticlassClassificationEvaluator => MulticlassClassificationEvaluator,
     PyPipeline => Pipeline,

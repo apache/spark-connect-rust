@@ -4363,6 +4363,206 @@ impl Model for KMeansModel {
     }
 }
 
+/// Hierarchical bisecting K-means using Spark's JVM implementation and ML vectors.
+///
+/// Starts with one cluster and repeatedly splits divisible leaf clusters until there
+/// are k leaves or no further splits are possible. Supports Euclidean and cosine distance,
+/// instance weights and seeded initialization. Unset parameters use Spark's defaults.
+#[derive(Debug, Clone)]
+pub struct BisectingKMeans {
+    operator: MlOperator,
+    params: Params,
+}
+
+impl BisectingKMeans {
+    pub fn new() -> Self {
+        Self {
+            operator: MlOperator::new(
+                "org.apache.spark.ml.clustering.BisectingKMeans",
+                OperatorType::Estimator,
+            ),
+            params: Params::new(),
+        }
+    }
+
+    /// Feature vector column.
+    pub fn set_feature_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("featuresCol", value);
+        self
+    }
+
+    /// Cluster assignment output column.
+    pub fn set_prediction_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("predictionCol", value);
+        self
+    }
+
+    /// Number of clusters; must be greater than 1.
+    pub fn set_k(mut self, value: i32) -> Self {
+        self.params = self.params.set_param_int32("k", value);
+        self
+    }
+
+    /// Minimum cluster size eligible for splitting: an absolute count when at least 1,
+    /// or a fraction of the total number of points when less than 1. Must be positive.
+    pub fn set_min_divisible_cluster_size(mut self, value: f64) -> Self {
+        self.params = self
+            .params
+            .set_param_double("minDivisibleClusterSize", value);
+        self
+    }
+
+    /// Maximum number of clustering iterations.
+    pub fn set_max_iter(mut self, value: i32) -> Self {
+        self.params = self.params.set_param_int32("maxIter", value);
+        self
+    }
+
+    /// Random seed for initialization.
+    pub fn set_seed(mut self, value: i64) -> Self {
+        self.params = self.params.set_param_int_narrow("seed", value);
+        self
+    }
+
+    /// Distance measure: euclidean or cosine.
+    pub fn set_distance_measure(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("distanceMeasure", value);
+        self
+    }
+
+    /// Optional instance weight column.
+    pub fn set_weight_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("weightCol", value);
+        self
+    }
+
+    /// The feature vector column (default: "features").
+    pub fn feature_col(&self) -> &str {
+        self.params.string_or("featuresCol", "features")
+    }
+
+    /// The cluster assignment output column (default: "prediction").
+    pub fn prediction_col(&self) -> &str {
+        self.params.string_or("predictionCol", "prediction")
+    }
+
+    /// The desired number of leaf clusters (default: 4).
+    pub fn k(&self) -> i32 {
+        self.params.int_or("k", 4)
+    }
+
+    /// The minimum divisible cluster size (default: 1.0).
+    pub fn min_divisible_cluster_size(&self) -> f64 {
+        self.params.double_or("minDivisibleClusterSize", 1.0)
+    }
+
+    /// The maximum number of clustering iterations (default: 20).
+    pub fn max_iter(&self) -> i32 {
+        self.params.int_or("maxIter", 20)
+    }
+
+    /// The random seed, if one is set; else Spark's default seed applies.
+    pub fn seed(&self) -> Option<i64> {
+        self.params.long_opt("seed")
+    }
+
+    /// The distance measure (default: "euclidean").
+    pub fn distance_measure(&self) -> &str {
+        self.params.string_or("distanceMeasure", "euclidean")
+    }
+
+    /// The instance weight column, if one is set.
+    pub fn weight_col(&self) -> Option<&str> {
+        self.params.string_opt("weightCol")
+    }
+
+    fn model_from_info(
+        &self,
+        info: proto::ml_command_result::MlOperatorInfo,
+        session: &SparkSession,
+    ) -> spark_connect_core::error::Result<BisectingKMeansModel> {
+        let cached = CachedModel::from_info(&info, session, "BisectingKMeans")?;
+        Ok(BisectingKMeansModel {
+            operator: MlOperator::with_uid(
+                "org.apache.spark.ml.clustering.BisectingKMeansModel",
+                info.uid.as_deref().unwrap_or(&self.operator.uid),
+                OperatorType::Model,
+            ),
+            params: self.params.clone(),
+            cached,
+        })
+    }
+}
+
+impl Default for BisectingKMeans {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Estimator for BisectingKMeans {
+    fn operator(&self) -> &MlOperator {
+        &self.operator
+    }
+    fn operator_mut(&mut self) -> &mut MlOperator {
+        &mut self.operator
+    }
+    fn params(&self) -> &Params {
+        &self.params
+    }
+    fn params_mut(&mut self) -> &mut Params {
+        &mut self.params
+    }
+
+    fn fit_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<Box<dyn Model>> {
+        let info = fit_via_command(&self.operator, &self.params, df)?;
+        Ok(Box::new(self.model_from_info(info, &df.session)?))
+    }
+}
+
+/// A bisecting K-means model fitted by Spark Connect.
+///
+/// Obtain it through [`Estimator::fit`]. The model, its clones and transformed
+/// DataFrames retain the cached server model until the last owner is dropped.
+#[derive(Debug, Clone)]
+pub struct BisectingKMeansModel {
+    operator: MlOperator,
+    params: Params,
+    cached: CachedModel,
+}
+
+impl Transformer for BisectingKMeansModel {
+    fn operator(&self) -> &MlOperator {
+        &self.operator
+    }
+    fn operator_mut(&mut self) -> &mut MlOperator {
+        &mut self.operator
+    }
+    fn params(&self) -> &Params {
+        &self.params
+    }
+    fn params_mut(&mut self) -> &mut Params {
+        &mut self.params
+    }
+
+    fn build_ml_relation(
+        &self,
+        input: &DataFrame,
+    ) -> spark_connect_core::error::Result<proto::MlRelation> {
+        self.cached.build_ml_relation(input, &self.params)
+    }
+
+    fn transform_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<DataFrame> {
+        self.cached.transform(df, &self.params)
+    }
+}
+
+impl Model for BisectingKMeansModel {
+    fn clone_box(&self) -> Box<dyn Model> {
+        Box::new(self.clone())
+    }
+}
+
 /// RegressionEvaluator: evaluates regression models.
 #[derive(Debug, Clone)]
 pub struct RegressionEvaluator {
@@ -5572,6 +5772,144 @@ mod tests {
         assert!(model.clone_box().transform(&df).is_ok());
     }
 
+    #[test]
+    fn bisecting_kmeans_getters_follow_defaults_builders_and_mutable_params() {
+        let mut estimator = BisectingKMeans::default();
+        assert_eq!(estimator.feature_col(), "features");
+        assert_eq!(estimator.prediction_col(), "prediction");
+        assert_eq!(estimator.max_iter(), 20);
+        assert_eq!(estimator.seed(), None);
+        assert_eq!(estimator.k(), 4);
+        assert_eq!(estimator.min_divisible_cluster_size(), 1.0);
+        assert_eq!(estimator.distance_measure(), "euclidean");
+        assert_eq!(estimator.weight_col(), None);
+        let built = BisectingKMeans::new()
+            .set_feature_col("input")
+            .set_prediction_col("cluster")
+            .set_max_iter(30)
+            .set_seed(1_i64 << 33)
+            .set_k(3)
+            .set_min_divisible_cluster_size(0.1)
+            .set_distance_measure("cosine")
+            .set_weight_col("weight");
+        *estimator.params_mut() = estimator
+            .params()
+            .clone()
+            .set_param_string("featuresCol", "input");
+        assert_eq!(estimator.feature_col(), "input");
+        assert_eq!(built.feature_col(), estimator.feature_col());
+        *estimator.params_mut() = estimator
+            .params()
+            .clone()
+            .set_param_string("predictionCol", "cluster");
+        assert_eq!(estimator.prediction_col(), "cluster");
+        assert_eq!(built.prediction_col(), estimator.prediction_col());
+        *estimator.params_mut() = estimator.params().clone().set_param_int32("maxIter", 30);
+        assert_eq!(estimator.max_iter(), 30);
+        assert_eq!(built.max_iter(), estimator.max_iter());
+        *estimator.params_mut() = estimator
+            .params()
+            .clone()
+            .set_param_int_narrow("seed", 1_i64 << 33);
+        assert_eq!(estimator.seed(), Some(1_i64 << 33));
+        assert_eq!(built.seed(), estimator.seed());
+        *estimator.params_mut() = estimator.params().clone().set_param_int32("k", 3);
+        assert_eq!(estimator.k(), 3);
+        assert_eq!(built.k(), estimator.k());
+        *estimator.params_mut() = estimator
+            .params()
+            .clone()
+            .set_param_double("minDivisibleClusterSize", 0.1);
+        assert_eq!(estimator.min_divisible_cluster_size(), 0.1);
+        assert_eq!(
+            built.min_divisible_cluster_size(),
+            estimator.min_divisible_cluster_size()
+        );
+        *estimator.params_mut() = estimator
+            .params()
+            .clone()
+            .set_param_string("distanceMeasure", "cosine");
+        assert_eq!(estimator.distance_measure(), "cosine");
+        assert_eq!(built.distance_measure(), estimator.distance_measure());
+        *estimator.params_mut() = estimator
+            .params()
+            .clone()
+            .set_param_string("weightCol", "weight");
+        assert_eq!(estimator.weight_col(), Some("weight"));
+        assert_eq!(built.weight_col(), estimator.weight_col());
+        assert_eq!(built.params().to_proto(), estimator.params().to_proto());
+        assert!(estimator.operator_mut().uid.starts_with("BisectingKMeans_"));
+    }
+
+    #[test]
+    fn bisecting_kmeans_validates_fitted_references_and_model_metadata() {
+        let session = offline_session();
+        let estimator = BisectingKMeans::default().set_prediction_col("cluster");
+        assert_eq!(
+            estimator.operator().name,
+            "org.apache.spark.ml.clustering.BisectingKMeans"
+        );
+        assert_eq!(estimator.operator().op_type, OperatorType::Estimator);
+        for kind in [
+            None,
+            Some(proto::ml_command_result::ml_operator_info::Type::Name(
+                "model".into(),
+            )),
+            Some(proto::ml_command_result::ml_operator_info::Type::ObjRef(
+                proto::ObjectRef::default(),
+            )),
+        ] {
+            assert!(estimator
+                .model_from_info(
+                    proto::ml_command_result::MlOperatorInfo {
+                        r#type: kind,
+                        ..Default::default()
+                    },
+                    &session
+                )
+                .is_err());
+        }
+        let info = |uid| proto::ml_command_result::MlOperatorInfo {
+            r#type: Some(proto::ml_command_result::ml_operator_info::Type::ObjRef(
+                proto::ObjectRef {
+                    id: "trained-bisecting-kmeans".into(),
+                },
+            )),
+            uid,
+            ..Default::default()
+        };
+        let mut model = estimator
+            .model_from_info(info(Some("returned-uid".into())), &session)
+            .unwrap();
+        assert_eq!(model.operator().uid, "returned-uid");
+        assert_eq!(
+            model.operator().name,
+            "org.apache.spark.ml.clustering.BisectingKMeansModel"
+        );
+        assert_eq!(model.operator().op_type, OperatorType::Model);
+        let fallback = estimator.model_from_info(info(None), &session).unwrap();
+        assert_eq!(fallback.operator().uid, estimator.operator().uid);
+        let df = session.range(2).unwrap();
+        let proto::ml_relation::MlType::Transform(t) =
+            model.build_ml_relation(&df).unwrap().ml_type.unwrap()
+        else {
+            panic!("transform")
+        };
+        assert_eq!(
+            t.operator,
+            Some(proto::ml_relation::transform::Operator::ObjRef(
+                proto::ObjectRef {
+                    id: "trained-bisecting-kmeans".into()
+                }
+            ))
+        );
+        assert_eq!(*t.input.unwrap(), df.relation().unwrap());
+        assert_eq!(t.params.unwrap(), estimator.params().to_proto());
+        assert!(model
+            .transform(&session.new_session().range(2).unwrap())
+            .is_err());
+        assert!(model.clone_box().transform(&df).is_ok());
+    }
     #[test]
     fn kmeans_validates_fitted_references_and_model_metadata() {
         let session = offline_session();
@@ -6875,6 +7213,8 @@ mod tests {
         ] {
             let kmeans = KMeans::new().set_seed(seed);
             assert_eq!(sent(kmeans.params()), Some(expected.clone()));
+            let bkm = BisectingKMeans::new().set_seed(seed);
+            assert_eq!(sent(bkm.params()), Some(expected.clone()));
             let forest = RandomForestClassifier::new().set_seed(seed);
             assert_eq!(sent(forest.params()), Some(expected.clone()));
             let tree = DecisionTreeClassifier::new().set_seed(seed);

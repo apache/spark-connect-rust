@@ -246,6 +246,7 @@ def _native_estimators():
     # Every native pyspark.ml.connect estimator, with the class of the model that the server
     # caches for its fit, and data that it fits.
     from pyspark.ml.connect import (
+        BisectingKMeans,
         DecisionTreeClassifier,
         DecisionTreeRegressor,
         GBTClassifier,
@@ -264,6 +265,7 @@ def _native_estimators():
 
     ml = "org.apache.spark.ml."
     return [
+        (BisectingKMeans(k=2, seed=1), ml + "clustering.BisectingKMeansModel"),
         (NaiveBayes(), ml + "classification.NaiveBayesModel"),
         (GBTRegressor(maxIter=2), ml + "regression.GBTRegressionModel"),
         (GBTClassifier(maxIter=2), ml + "classification.GBTClassificationModel"),
