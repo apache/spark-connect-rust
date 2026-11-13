@@ -9,7 +9,7 @@ use spark_connect::readwriter::DataFrameReader;
 use crate::dataframe::PyDataFrame;
 use crate::errors::{not_expected_type, ResultExt};
 use crate::options::{
-    set_option_skip_none, set_options_skip_none, set_reader_kwargs_unset_none,
+    check_keyword_keys, set_option_skip_none, set_options_skip_none, set_reader_kwargs_unset_none,
     set_reader_option_unset_none, DefaultedOption,
 };
 
@@ -102,6 +102,24 @@ fn path_list(paths: &[Bound<'_, PyAny>]) -> PyResult<Vec<String>> {
         .map(|path| {
             if path.is_instance_of::<pyo3::types::PyString>() {
                 path.extract()
+            } else {
+                Err(pyo3::exceptions::PyAssertionError::new_err(()))
+            }
+        })
+        .collect()
+}
+
+/// The `predicates` of `jdbc`, which PySpark's `DataSource` plan asserts to be a list, and each of
+/// its items a str: a bare `AssertionError` for a tuple, a str, or an item that is not a str.
+fn jdbc_predicates(predicates: &Bound<'_, PyAny>) -> PyResult<Vec<String>> {
+    let Ok(predicates) = predicates.cast::<pyo3::types::PyList>() else {
+        return Err(pyo3::exceptions::PyAssertionError::new_err(()));
+    };
+    predicates
+        .iter()
+        .map(|predicate| {
+            if predicate.is_instance_of::<pyo3::types::PyString>() {
+                crate::str_argument(&predicate)
             } else {
                 Err(pyo3::exceptions::PyAssertionError::new_err(()))
             }
@@ -483,6 +501,7 @@ impl PyDataFrameReader {
         paths: Vec<Bound<'_, PyAny>>,
         options: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyDataFrame> {
+        check_keyword_keys(options)?;
         let mut r = self.inner.clone();
         for name in [
             "mergeSchema",
@@ -731,7 +750,7 @@ impl PyDataFrameReader {
         lowerBound: Option<&Bound<'_, PyAny>>,
         upperBound: Option<&Bound<'_, PyAny>>,
         numPartitions: Option<&Bound<'_, PyAny>>,
-        predicates: Option<Vec<String>>,
+        predicates: Option<&Bound<'_, PyAny>>,
         properties: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyDataFrame> {
         self.inner = self.inner.clone().format("jdbc");
@@ -766,22 +785,17 @@ impl PyDataFrameReader {
             // As PySpark's `options(**properties)`, whose unpacking raises for a key that is not
             // a str before any property is set, with the format and the options of a column kept
             // on the reader.
-            if properties
-                .keys()
-                .iter()
-                .any(|key| !key.is_instance_of::<pyo3::types::PyString>())
-            {
+            if let Err(err) = check_keyword_keys(Some(properties)) {
                 self.inner = r;
-                return Err(pyo3::exceptions::PyTypeError::new_err(
-                    "keywords must be strings",
-                ));
+                return Err(err);
             }
             for (key, value) in properties.iter() {
                 r = set_option_skip_none(r, &crate::str_argument(&key)?, Some(&value))?;
             }
         }
-        // PySpark's jdbc also leaves url/dbtable on the reader.
+        // PySpark's jdbc also leaves url/dbtable on the reader, before it asserts the predicates.
         self.inner = r.clone().option("url", url).option("dbtable", table);
+        let predicates = predicates.map(jdbc_predicates).transpose()?;
         Ok(PyDataFrame::new(r.jdbc(url, table, predicates)))
     }
 }

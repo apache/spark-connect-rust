@@ -379,6 +379,7 @@ impl PyDataStreamReader {
         schema: Option<&Bound<'_, PyAny>>,
         options: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyDataFrame> {
+        crate::options::check_keyword_keys(options)?;
         let mut r = self.inner.clone();
         if let Some(fmt) = format {
             r = r.format(fmt);
@@ -799,6 +800,7 @@ impl PyDataStreamWriter {
         query_name: Option<&Bound<'_, PyAny>>,
         options: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<DataStreamWriter> {
+        crate::options::check_keyword_keys(options)?;
         let mut w = self.inner.get();
         if let Some(fmt) = format {
             w = w.format(fmt);
