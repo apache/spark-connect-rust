@@ -815,6 +815,7 @@ def test_ml_pipeline_and_cross_validator_fit_is_not_implemented(ml_mock):
 # param in PySpark. Their constructors take them all but thresholds, which PySpark's
 # RandomForestClassifier takes by its setter only.
 _NATIVE_PARAMS = {
+    "LDA": {'featuresCol': 'str', 'maxIter': 'int', 'seed': 'int', 'checkpointInterval': 'int', 'k': 'int', 'optimizer': 'str', 'learningOffset': 'float', 'learningDecay': 'float', 'subsamplingRate': 'float', 'optimizeDocConcentration': 'bool', 'docConcentration': 'float_list', 'topicConcentration': 'float', 'topicDistributionCol': 'str', 'keepLastCheckpoint': 'bool'},
     'AFTSurvivalRegression': {'featuresCol': 'str', 'labelCol': 'str', 'predictionCol': 'str', 'fitIntercept': 'bool', 'maxIter': 'int', 'tol': 'float', 'censorCol': 'str', 'quantileProbabilities': 'float_list', 'quantilesCol': 'str', 'aggregationDepth': 'int', 'maxBlockSizeInMB': 'float'},
     'IsotonicRegression': {'featuresCol': 'str', 'labelCol': 'str', 'predictionCol': 'str', 'weightCol': 'str', 'isotonic': 'bool', 'featureIndex': 'int'},
     'FMRegressor': {'featuresCol': 'str', 'labelCol': 'str', 'predictionCol': 'str', 'factorSize': 'int', 'fitIntercept': 'bool', 'fitLinear': 'bool', 'regParam': 'float', 'miniBatchFraction': 'float', 'initStd': 'float', 'maxIter': 'int', 'stepSize': 'float', 'tol': 'float', 'solver': 'str', 'seed': 'int'},
@@ -3736,12 +3737,13 @@ def _native_ml_method(name):
     import pyspark.ml.connect as connect
 
     instance = getattr(connect, name)()
-    method = ("evaluate" if name.endswith("Evaluator") else
+    method = ("assignClusters" if name == "PowerIterationClustering" else
+              "evaluate" if name.endswith("Evaluator") else
               "transform" if name == "VectorAssembler" else "fit")
     return getattr(instance, method)
 
 
-@pytest.mark.parametrize("name", [*_NATIVE_PARAMS, "OneVsRest"])
+@pytest.mark.parametrize("name", [*_NATIVE_PARAMS, "OneVsRest", "PowerIterationClustering"])
 def test_native_ml_rejects_pandas_without_active_session(name, pandas_ml_input):
     assert SparkSession.getActiveSession() is None
     method = _native_ml_method(name)
@@ -3769,7 +3771,7 @@ def test_native_ml_rejects_pandas_before_any_requests(ml_mock, pandas_ml_input, 
                 len(service.config_requests))
 
     sent = requests()
-    methods = [_native_ml_method(name) for name in [*_NATIVE_PARAMS, "OneVsRest"]]
+    methods = [_native_ml_method(name) for name in [*_NATIVE_PARAMS, "OneVsRest", "PowerIterationClustering"]]
     methods += [model.transform, connect.OneVsRest(parallelism=0).fit,
                 connect.LogisticRegression(maxIter=2**100).fit,
                 connect.VectorAssembler(inputCols=[]).transform]
@@ -3777,3 +3779,75 @@ def test_native_ml_rejects_pandas_before_any_requests(ml_mock, pandas_ml_input, 
         with pytest.raises(TypeError, match="requires a Spark DataFrame"):
             method(pandas_ml_input)
         assert requests() == sent
+
+
+@pytest.mark.parametrize("name", ["LDA", "PowerIterationClustering"])
+def test_remaining_clustering_signatures_and_native_exports(name):
+    import inspect
+    import json
+    from pathlib import Path
+
+    import pyspark.ml.connect as connect
+    from pyspark import _pyspark
+    from pyspark.ml.connect import clustering
+
+    cls = getattr(clustering, name)
+    assert cls is getattr(_pyspark, name) is getattr(connect, name)
+    fixture = json.loads((Path(__file__).parents[2] / "tests/golden/remaining_clustering.json").read_text())
+    parameters = inspect.signature(cls).parameters
+    assert list(parameters) == list(fixture["defaults"][name])
+    for param, default in fixture["defaults"][name].items():
+        assert parameters[param].kind == inspect.Parameter.KEYWORD_ONLY
+        assert parameters[param].default == default
+        assert hasattr(cls, "set" + param[0].upper() + param[1:])
+
+
+def test_pic_helper_request_matches_official_and_is_lazy(ml_mock):
+    import base64
+    import json
+    from pathlib import Path
+
+    from pyspark.ml.connect import PowerIterationClustering
+
+    spark, service = ml_mock
+    fixture = json.loads((Path(__file__).parents[2] / "tests/golden/remaining_clustering.json").read_text())
+    df = spark.range(1)
+    sent = (_requests_but_deletes(service), len(service.analyze_requests), len(service.config_requests))
+    for case in fixture["pic_fetch"]:
+        result = PowerIterationClustering(**case["values"]).assignClusters(dataset=df)
+        actual = _relation(result).ml_relation.fetch
+        assert actual.methods[0].args[0].input == _relation(df)
+        actual.methods[0].args[0].input.Clear()
+        assert actual == pb2.Fetch.FromString(base64.b64decode(case["fetch_b64"]))
+    assert (_requests_but_deletes(service), len(service.analyze_requests), len(service.config_requests)) == sent
+
+
+def test_pic_parameter_converters_and_deferred_overflow(ml_mock):
+    from pyspark.ml.connect import PowerIterationClustering
+
+    spark, service = ml_mock
+    names = ["k", "maxIter", "initMode", "srcCol", "dstCol", "weightCol"]
+    for index, name in enumerate(names):
+        setter = "set" + name[0].upper() + name[1:]
+        kind = "int" if index < 2 else "str"
+        for value, expected in _NATIVE_CONVERTED[kind]:
+            original = PowerIterationClustering()
+            configured = getattr(original, setter)(value)
+            assert configured is original
+            for instance in [configured, PowerIterationClustering(**{name: value})]:
+                fetch = _relation(instance.assignClusters(spark.range(1))).ml_relation.fetch
+                assert _literal_value(fetch.methods[0].args[index + 1].param) == expected
+        for value, _ in _NATIVE_REJECTED[kind]:
+            with pytest.raises(TypeError):
+                getattr(PowerIterationClustering(), setter)(value)
+            with pytest.raises(TypeError):
+                PowerIterationClustering(**{name: value})
+    with pytest.raises(TypeError, match="keyword arguments"):
+        PowerIterationClustering(2)
+    with pytest.raises(TypeError, match="unexpected keyword argument"):
+        PowerIterationClustering(seed=42)
+    for name in ["k", "maxIter"]:
+        with pytest.raises(PySparkValueError) as error:
+            PowerIterationClustering(**{name: 2**100}).assignClusters(spark.range(1))
+        assert error.value.getCondition() == "VALUE_NOT_BETWEEN"
+    assert _requests_but_deletes(service) == 0
