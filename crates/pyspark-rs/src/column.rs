@@ -749,11 +749,7 @@ impl PyColumn {
                     .iter()
                     .map(|(condition, value)| Ok((column(condition)?, column(value)?)))
                     .collect::<PyResult<Vec<_>>>()?;
-                let else_value = case_when
-                    .else_expr
-                    .as_ref()
-                    .map(|else_expr| column(else_expr))
-                    .transpose()?;
+                let else_value = case_when.else_expr.as_ref().map(column).transpose()?;
                 (Some(branches), else_value)
             }
             _ => (None, None),

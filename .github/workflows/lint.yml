@@ -44,6 +44,9 @@ jobs:
           rustup toolchain install stable --profile minimal
           rustup default stable
           rustup component add rustfmt clippy
+          # `--workspace` reaches `examples/wasm-udfs` (a path dependency of the `examples`
+          # member), whose build script compiles its UDFs to WASM.
+          rustup target add wasm32-unknown-unknown
       - name: Cache cargo & target
         uses: actions/cache@v4
         with:
@@ -58,10 +61,14 @@ jobs:
           sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - name: rustfmt (check) - blocking
         run: cargo fmt --all --check
-      - name: clippy - advisory
-        # Advisory for now: the tree still carries pre-existing warnings. This surfaces
-        # them in the log without blocking. Tighten to `-- -D warnings` once cleaned.
-        run: cargo clippy --workspace --all-targets || true
+      - name: clippy - blocking
+        # Any finding fails the job. Lints this codebase triggers by design are allowed once,
+        # with a reason, in `[workspace.lints.clippy]` of the root Cargo.toml. The workspace
+        # run builds `apache-spark-connect` with `wasm-udf` on (feature unification through
+        # `examples/wasm-udfs`); the second run covers the default feature set.
+        run: |
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo clippy -p apache-spark-connect --all-targets -- -D warnings
       - name: Tooling unit tests
         run: python3 -m unittest discover -s scripts/tests
       - name: LICENSE-binary and NOTICE-binary are up to date

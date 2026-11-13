@@ -171,9 +171,11 @@ These logs are available in the workflow run artifacts for debugging failures.
 ### Test selection
 
 The parity job discovers every `test_*.py` under `<spark>/python` whose path contains
-`/sql/tests/connect/`, minus the three local-cluster-only basenames. The drop-in job discovers
-the Connect suites of `pyspark/sql`, `pyspark/ml`, `pyspark/errors` and `pyspark/logger`. Apart
-from the local-cluster phase's `--only` list, no module is named by hand. See
+`/sql/tests/connect/`, minus the three local-cluster-only basenames, which it names in
+`--exclude`. The drop-in job discovers the Connect suites of `pyspark/sql`, `pyspark/ml`,
+`pyspark/errors` and `pyspark/logger`, minus the same three files, which
+`scripts/run_official_tests.py` names in `DROPIN_LOCAL_CLUSTER_ONLY`. The local-cluster phase
+names its four modules in `--only`. No other module is named by hand. See
 [official-tests.md](official-tests.md) for the selection, skip and retry rules.
 
 ### Handling test failures

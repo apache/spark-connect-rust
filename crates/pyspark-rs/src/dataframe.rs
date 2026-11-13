@@ -2394,7 +2394,7 @@ impl PyDataFrame {
                         "exprs should not be empty",
                     ));
                 }
-                let expressions = crate::group::dict_aggregates(&dict)?;
+                let expressions = crate::group::dict_aggregates(dict)?;
                 return Ok(PyDataFrame::new(self.dataframe.agg(expressions)));
             }
         }

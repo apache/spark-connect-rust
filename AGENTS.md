@@ -265,7 +265,7 @@ cargo test -p apache-spark-connect --release --lib
 cargo test -p apache-spark-connect --release --no-run              # compiles ALL integration tests
 cargo test -p apache-spark-connect --release --features wasm-udf --no-run
 cargo fmt --all --check                                            # BLOCKING CI gate
-cargo clippy --workspace --all-targets                             # advisory (|| true in CI), but fix errors
+cargo clippy --workspace --all-targets -- -D warnings              # BLOCKING CI gate (needs the wasm32-unknown-unknown target)
 ```
 Then re-run the step-2 diff (0 user-facing gaps) and the parity gate
 `scripts/run_official_tests.py` (runs the official connect suite through our Rust

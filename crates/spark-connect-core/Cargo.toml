@@ -9,6 +9,9 @@ homepage.workspace = true
 authors.workspace = true
 description = "Spark Connect client transport: gRPC channel, retries, reattach, artifacts, config, errors"
 
+[lints]
+workspace = true
+
 [lib]
 name = "spark_connect_core"
 

@@ -4,6 +4,10 @@
 //! camelCase public API (e.g. `toPandas`, `withColumn`, `containsNull`), so the Rust method,
 //! field, and argument names must match the Python names verbatim — renaming them would change
 //! the user-facing API.
+//!
+//! Warnings are errors for this crate in every build: CI builds it via several workflows that
+//! don't all set `RUSTFLAGS=-D warnings`.
+#![deny(warnings)]
 #![allow(non_snake_case)]
 
 use pyo3::prelude::*;

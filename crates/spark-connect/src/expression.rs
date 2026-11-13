@@ -2128,14 +2128,14 @@ mod tests {
 
     #[test]
     fn test_literal_render_float() {
-        let lit = LiteralExpression::Float(3.14);
-        assert_eq!(lit.render(), "3.140000104904175");
+        let lit = LiteralExpression::Float(1.1);
+        assert_eq!(lit.render(), "1.100000023841858");
     }
 
     #[test]
     fn test_literal_render_double() {
-        let lit = LiteralExpression::Double(2.71828);
-        assert_eq!(lit.render(), "2.71828");
+        let lit = LiteralExpression::Double(1.23456);
+        assert_eq!(lit.render(), "1.23456");
     }
 
     #[test]
@@ -2930,12 +2930,12 @@ mod tests {
 
     #[test]
     fn test_literal_float_to_proto() {
-        let lit = LiteralExpression::Float(3.14);
+        let lit = LiteralExpression::Float(1.1);
         let proto = lit.to_proto();
         assert!(proto.expr_type.is_some());
         if let Some(proto::expression::ExprType::Literal(literal)) = proto.expr_type {
             if let Some(proto::expression::literal::LiteralType::Float(f)) = literal.literal_type {
-                assert!((f - 3.14).abs() < 0.01);
+                assert!((f - 1.1).abs() < 0.01);
             } else {
                 panic!("Expected float literal type");
             }
@@ -2946,12 +2946,12 @@ mod tests {
 
     #[test]
     fn test_literal_double_to_proto() {
-        let lit = LiteralExpression::Double(2.71828);
+        let lit = LiteralExpression::Double(1.23456);
         let proto = lit.to_proto();
         assert!(proto.expr_type.is_some());
         if let Some(proto::expression::ExprType::Literal(literal)) = proto.expr_type {
             if let Some(proto::expression::literal::LiteralType::Double(d)) = literal.literal_type {
-                assert!((d - 2.71828).abs() < 0.00001);
+                assert!((d - 1.23456).abs() < 0.00001);
             } else {
                 panic!("Expected double literal type");
             }

@@ -36,7 +36,7 @@ fn load_golden_cases(path: &str) -> HashMap<String, Vec<u8>> {
 
     if let Ok(file) = File::open(path) {
         let reader = BufReader::new(file);
-        for line in reader.lines().flatten() {
+        for line in reader.lines().map_while(Result::ok) {
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(&line) {
                 if let (Some(name), Some(b64)) = (
                     json.get("name").and_then(|v| v.as_str()),
