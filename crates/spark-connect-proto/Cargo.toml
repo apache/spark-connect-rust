@@ -9,6 +9,9 @@ homepage.workspace = true
 authors.workspace = true
 description = "Generated Spark Connect protobuf/gRPC types (spark.connect.*)"
 
+[lints]
+workspace = true
+
 [lib]
 name = "spark_connect_proto"
 

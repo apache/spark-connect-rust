@@ -23,6 +23,9 @@ edition.workspace = true
 license.workspace = true
 publish = false
 
+[lints]
+workspace = true
+
 [[bin]]
 name = "sql"
 path = "src/sql.rs"

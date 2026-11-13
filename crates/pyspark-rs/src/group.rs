@@ -150,7 +150,7 @@ impl PyGroupedData {
         // Dict form: {column_name: aggregate_function_name} -> func(col(name)) per entry.
         if exprs.len() == 1 {
             if let Ok(dict) = exprs[0].cast::<pyo3::types::PyDict>() {
-                let agg_exprs = dict_aggregates(&dict)?;
+                let agg_exprs = dict_aggregates(dict)?;
                 let df = self.grouped_data.agg(agg_exprs);
                 return Ok(PyDataFrame::new(df));
             }

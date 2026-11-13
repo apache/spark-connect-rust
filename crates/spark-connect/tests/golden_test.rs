@@ -70,6 +70,8 @@ fn load_goldens() -> HashMap<String, proto::Expression> {
 /// Build the Rust expression for each golden case name we are responsible for.
 /// (Pure `functions.*` cases like upper/concat/coalesce/sum_agg/count_star are
 /// validated in the functions phase, not here.)
+// `lit_double` is 3.14 because the golden file was recorded from PySpark with that value.
+#[allow(clippy::approx_constant)]
 fn build(name: &str) -> Option<Expression> {
     let e = match name {
         "col" => col("x").expression().clone(),

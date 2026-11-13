@@ -273,7 +273,7 @@ impl LocalRowIterator {
                     ))
                 };
                 let Some(batch) = batch else {
-                    return Some(Err(spark_connect_core::client::wait_aborted().into()));
+                    return Some(Err(spark_connect_core::client::wait_aborted()));
                 };
                 if batch.is_none() {
                     // The channel closed: the task ended, or it panicked, which then drops its
@@ -620,9 +620,10 @@ impl DataFrame {
     /// nulls variants, sorts as it says; any other column is sorted ascending, nulls first,
     /// as PySpark's `sort` sorts it.
     ///
-    /// An empty `columns` builds a sort that the server rejects when the DataFrame runs, with
-    /// `CONNECT_INVALID_PLAN.ASSERTION_FAILURE`, as with the Scala client. PySpark's `df.sort()`
-    /// raises `CANNOT_BE_EMPTY` at the call instead.
+    /// An empty `columns` builds a sort that the server rejects when the DataFrame is analyzed
+    /// or run, with `CONNECT_INVALID_PLAN.ASSERTION_FAILURE`. Its `schema()` returns the cached
+    /// schema of this DataFrame without asking the server, as PySpark's `sort([])` does. PySpark's
+    /// `df.sort()` raises `CANNOT_BE_EMPTY` at the call instead.
     pub fn sort<C: Into<Column>>(&self, columns: impl IntoIterator<Item = C>) -> DataFrame {
         let plan = LogicalPlan::Sort {
             input: Arc::clone(&self.plan),
@@ -633,7 +634,7 @@ impl DataFrame {
     }
 
     /// Alias for [`DataFrame::sort`]. An empty `columns` fails as it does for
-    /// [`DataFrame::sort`], when the DataFrame runs.
+    /// [`DataFrame::sort`], when the DataFrame is analyzed or run.
     pub fn order_by<C: Into<Column>>(&self, columns: impl IntoIterator<Item = C>) -> DataFrame {
         self.sort(columns)
     }
@@ -2372,8 +2373,8 @@ impl DataFrame {
     }
 
     /// Sort within partitions (local sort), by `columns` as [`DataFrame::sort`] sorts by them.
-    /// An empty `columns` fails as it does for [`DataFrame::sort`], when the DataFrame runs,
-    /// where PySpark's `df.sortWithinPartitions()` raises `CANNOT_BE_EMPTY` at the call.
+    /// An empty `columns` fails as it does for [`DataFrame::sort`], when the DataFrame is analyzed
+    /// or run, where PySpark's `df.sortWithinPartitions()` raises `CANNOT_BE_EMPTY` at the call.
     pub fn sort_within_partitions<C: Into<Column>>(
         &self,
         columns: impl IntoIterator<Item = C>,
@@ -5132,6 +5133,39 @@ mod cache_tests {
     }
 
     #[test]
+    fn an_empty_sort_keeps_the_cached_schema_of_its_input_as_pyspark_does() {
+        let spark = SparkSession::builder()
+            .remote("sc://localhost:15002")
+            .get_or_create()
+            .unwrap();
+        let df = spark.range(3).unwrap();
+        let schema = DataType::Struct { fields: vec![] };
+        *df.schema_cache.lock().unwrap() = Some(Arc::new(schema.clone()));
+
+        // The schema of a sort is the cached schema of its input, whatever the form of the
+        // sort and whether or not it has columns: PySpark's `sort([])` keeps it too.
+        assert_eq!(
+            df.sort(Vec::<Column>::new()).cached_schema().as_deref(),
+            Some(&schema)
+        );
+        assert_eq!(
+            df.order_by(Vec::<Column>::new()).cached_schema().as_deref(),
+            Some(&schema)
+        );
+        assert_eq!(
+            df.sort_within_partitions(Vec::<Column>::new())
+                .cached_schema()
+                .as_deref(),
+            Some(&schema)
+        );
+        assert_eq!(df.sort(["id"]).cached_schema().as_deref(), Some(&schema));
+        assert_eq!(
+            df.sort_within_partitions(["id"]).cached_schema().as_deref(),
+            Some(&schema)
+        );
+    }
+
+    #[test]
     fn schema_cache_recovers_after_analysis_panics() {
         let spark = SparkSession::builder()
             .remote("sc://localhost:15002")
@@ -5551,7 +5585,7 @@ mod plan_construction_tests {
             replication: 1,
             ..Default::default()
         };
-        assert_eq!(sent(Some(disk.clone())), Some(disk));
+        assert_eq!(sent(Some(disk)), Some(disk));
     }
 
     #[test]
@@ -7001,21 +7035,21 @@ mod plan_construction_tests {
             &df.drop_columns(vec![col("id")], vec!["x"]),
             [
                 &df.drop_columns([col("id")], ["x"]),
-                &df.drop_columns(vec![col("id")].into_iter(), ["x"].into_iter()),
+                &df.drop_columns(vec![col("id")], ["x"]),
             ],
         );
         same_as(
             &df.with_columns(vec![("p".to_string(), lit(1))]),
             [
                 &df.with_columns([("p", lit(1))]),
-                &df.with_columns(vec![("p", lit(1))].into_iter()),
+                &df.with_columns(vec![("p", lit(1))]),
             ],
         );
         same_as(
             &df.with_columns_renamed(vec![("id".to_string(), "x".to_string())]),
             [
                 &df.with_columns_renamed([("id", "x")]),
-                &df.with_columns_renamed(vec![("id", "x")].into_iter()),
+                &df.with_columns_renamed(vec![("id", "x")]),
             ],
         );
         same_as(
@@ -7079,7 +7113,7 @@ mod plan_construction_tests {
                     .agg(aggregates()),
                 &df.grouping_sets_with_columns(
                     (0..1).map(|_| vec![col("id")]),
-                    vec![col("id"), col("id") % lit(2)].into_iter(),
+                    vec![col("id"), col("id") % lit(2)],
                 )
                 .agg(aggregates()),
             ],

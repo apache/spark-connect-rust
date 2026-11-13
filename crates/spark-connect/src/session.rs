@@ -1647,7 +1647,7 @@ fn batch_to_arrow_ipc(batch: &arrow::record_batch::RecordBatch) -> Result<Vec<u8
         let mut writer = StreamWriter::try_new(&mut buffer, &batch.schema())
             .map_err(|e| SparkError::connect_msg(format!("Failed to create IPC writer: {}", e)))?;
         writer
-            .write(&batch)
+            .write(batch)
             .map_err(|e| SparkError::connect_msg(format!("Failed to write batch to IPC: {}", e)))?;
         writer
             .finish()
@@ -3011,7 +3011,7 @@ mod tests {
                 struct_field("missing", DataType::Integer),
             ],
         };
-        let values = vec![
+        let values = [
             Value::Struct(
                 Row::new(
                     vec!["dup".to_string(), "dup".to_string(), "other".to_string()],

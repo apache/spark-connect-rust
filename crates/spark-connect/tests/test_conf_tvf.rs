@@ -1,6 +1,6 @@
-/// Test suite for RuntimeConf, TVF, and TableArg features.
-///
-/// These tests verify that the Rust implementation matches the PySpark reference.
+//! Test suite for RuntimeConf, TVF, and TableArg features.
+//!
+//! These tests verify that the Rust implementation matches the PySpark reference.
 
 #[cfg(test)]
 mod tests {

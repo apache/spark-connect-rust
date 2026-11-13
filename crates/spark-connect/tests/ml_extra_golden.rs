@@ -183,7 +183,7 @@ fn test_ml_extra_golden_coverage() {
     let goldens = load_ml_extra_goldens();
     // If golden file exists, ensure we handle it correctly
     if !goldens.is_empty() {
-        for (name, _rel) in goldens.iter() {
+        for name in goldens.keys() {
             assert!(
                 !name.is_empty(),
                 "Golden relation should have a non-empty name"

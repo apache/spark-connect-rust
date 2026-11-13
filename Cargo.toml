@@ -61,6 +61,24 @@ repository = "https://github.com/apache/spark-connect-rust"
 homepage = "https://spark.apache.org/"
 authors = ["Apache Spark <dev@spark.apache.org>"]
 
+# Lints shared by every workspace crate (each one sets `lints.workspace = true`). CI runs
+# `cargo clippy --workspace --all-targets -- -D warnings`, so anything clippy reports fails the
+# build. The lints below are allowed here, once, because this codebase triggers them by design;
+# a targeted `#[allow]` elsewhere needs a comment saying why.
+[workspace.lints.clippy]
+# Public functions mirror PySpark signatures (`csv(...)`, `applyInPandas(...)`), whose
+# parameter lists are long.
+too_many_arguments = "allow"
+# `SparkError` carries a `tonic::Status` and is the error type of the whole public API;
+# boxing it would change that API.
+result_large_err = "allow"
+# Protobuf messages have many optional fields: `let mut m = Msg::default(); m.field = ...;`
+# is the idiomatic way to fill a prost message, and reads better than nested struct updates.
+field_reassign_with_default = "allow"
+# `Column::add`/`sub`/`not`/... and `SaveMode::from_str` are public methods named after their
+# PySpark counterparts; the matching `std::ops` traits are implemented alongside them.
+should_implement_trait = "allow"
+
 [workspace.dependencies]
 # gRPC / protobuf.
 tonic = { version = "0.14" }

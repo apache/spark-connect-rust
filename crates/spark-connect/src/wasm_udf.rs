@@ -730,7 +730,7 @@ mod tests {
             .expect("packer should succeed");
         let of_array = f.to_expression([col("x")]).expect("packer should succeed");
         let of_iter = f
-            .to_expression(vec![col("x")].into_iter())
+            .to_expression(vec![col("x")])
             .expect("packer should succeed");
         assert_eq!(of_array.arguments, of_vec.arguments);
         assert_eq!(of_iter.arguments, of_vec.arguments);

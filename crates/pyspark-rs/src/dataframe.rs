@@ -2385,7 +2385,7 @@ impl PyDataFrame {
                         "exprs should not be empty",
                     ));
                 }
-                let expressions = crate::group::dict_aggregates(&dict)?;
+                let expressions = crate::group::dict_aggregates(dict)?;
                 return Ok(PyDataFrame::new(self.dataframe.agg(expressions)));
             }
         }
@@ -3983,7 +3983,7 @@ impl PyDataFrameWriter {
 
     /// Write as PARQUET - full pyspark signature; each named option is
     /// applied when provided.
-    #[pyo3(signature = (path, mode=None, partitionBy=None, compression=None))]
+    #[pyo3(signature = (path, mode=None, partitionBy=None, compression=None, **unexpected), text_signature = "($self, path, mode=None, partitionBy=None, compression=None)")]
     #[allow(non_snake_case, clippy::too_many_arguments)]
     fn parquet(
         &self,
@@ -3992,7 +3992,9 @@ impl PyDataFrameWriter {
         mode: Option<&Bound<'_, PyAny>>,
         partitionBy: Option<&Bound<'_, PyAny>>,
         compression: Option<&Bound<'_, PyAny>>,
+        unexpected: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<()> {
+        crate::options::check_unexpected_keywords("DataFrameWriter.parquet", unexpected)?;
         let mut w = self.inner.get();
         if let Some(m) = mode {
             w = w.mode(&m.str()?.to_string());
@@ -4017,7 +4019,7 @@ impl PyDataFrameWriter {
 
     /// Write as JSON - full pyspark signature; each named option is
     /// applied when provided.
-    #[pyo3(signature = (path, mode=None, compression=None, dateFormat=None, timestampFormat=None, lineSep=None, encoding=None, ignoreNullFields=None))]
+    #[pyo3(signature = (path, mode=None, compression=None, dateFormat=None, timestampFormat=None, lineSep=None, encoding=None, ignoreNullFields=None, **unexpected), text_signature = "($self, path, mode=None, compression=None, dateFormat=None, timestampFormat=None, lineSep=None, encoding=None, ignoreNullFields=None)")]
     #[allow(non_snake_case, clippy::too_many_arguments)]
     fn json(
         &self,
@@ -4030,7 +4032,9 @@ impl PyDataFrameWriter {
         lineSep: Option<&Bound<'_, PyAny>>,
         encoding: Option<&Bound<'_, PyAny>>,
         ignoreNullFields: Option<&Bound<'_, PyAny>>,
+        unexpected: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<()> {
+        crate::options::check_unexpected_keywords("DataFrameWriter.json", unexpected)?;
         let mut w = self.inner.get();
         if let Some(m) = mode {
             w = w.mode(&m.str()?.to_string());
@@ -4055,7 +4059,7 @@ impl PyDataFrameWriter {
 
     /// Write as CSV - full pyspark signature; each named option is
     /// applied when provided.
-    #[pyo3(signature = (path, mode=None, compression=None, sep=None, quote=None, escape=None, header=None, nullValue=None, escapeQuotes=None, quoteAll=None, dateFormat=None, timestampFormat=None, ignoreLeadingWhiteSpace=None, ignoreTrailingWhiteSpace=None, charToEscapeQuoteEscaping=None, encoding=None, emptyValue=None, lineSep=None))]
+    #[pyo3(signature = (path, mode=None, compression=None, sep=None, quote=None, escape=None, header=None, nullValue=None, escapeQuotes=None, quoteAll=None, dateFormat=None, timestampFormat=None, ignoreLeadingWhiteSpace=None, ignoreTrailingWhiteSpace=None, charToEscapeQuoteEscaping=None, encoding=None, emptyValue=None, lineSep=None, **unexpected), text_signature = "($self, path, mode=None, compression=None, sep=None, quote=None, escape=None, header=None, nullValue=None, escapeQuotes=None, quoteAll=None, dateFormat=None, timestampFormat=None, ignoreLeadingWhiteSpace=None, ignoreTrailingWhiteSpace=None, charToEscapeQuoteEscaping=None, encoding=None, emptyValue=None, lineSep=None)")]
     #[allow(non_snake_case, clippy::too_many_arguments)]
     fn csv(
         &self,
@@ -4078,7 +4082,9 @@ impl PyDataFrameWriter {
         encoding: Option<&Bound<'_, PyAny>>,
         emptyValue: Option<&Bound<'_, PyAny>>,
         lineSep: Option<&Bound<'_, PyAny>>,
+        unexpected: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<()> {
+        crate::options::check_unexpected_keywords("DataFrameWriter.csv", unexpected)?;
         let mut w = self.inner.get();
         if let Some(m) = mode {
             w = w.mode(&m.str()?.to_string());
@@ -4113,7 +4119,7 @@ impl PyDataFrameWriter {
 
     /// Write as ORC - full pyspark signature; each named option is
     /// applied when provided.
-    #[pyo3(signature = (path, mode=None, partitionBy=None, compression=None))]
+    #[pyo3(signature = (path, mode=None, partitionBy=None, compression=None, **unexpected), text_signature = "($self, path, mode=None, partitionBy=None, compression=None)")]
     #[allow(non_snake_case, clippy::too_many_arguments)]
     fn orc(
         &self,
@@ -4122,7 +4128,9 @@ impl PyDataFrameWriter {
         mode: Option<&Bound<'_, PyAny>>,
         partitionBy: Option<&Bound<'_, PyAny>>,
         compression: Option<&Bound<'_, PyAny>>,
+        unexpected: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<()> {
+        crate::options::check_unexpected_keywords("DataFrameWriter.orc", unexpected)?;
         let mut w = self.inner.get();
         if let Some(m) = mode {
             w = w.mode(&m.str()?.to_string());
@@ -4145,7 +4153,7 @@ impl PyDataFrameWriter {
 
     /// Write as TEXT - full pyspark signature; each named option is
     /// applied when provided.
-    #[pyo3(signature = (path, compression=None, lineSep=None))]
+    #[pyo3(signature = (path, compression=None, lineSep=None, **unexpected), text_signature = "($self, path, compression=None, lineSep=None)")]
     #[allow(non_snake_case, clippy::too_many_arguments)]
     fn text(
         &self,
@@ -4153,7 +4161,9 @@ impl PyDataFrameWriter {
         path: &Bound<'_, PyAny>,
         compression: Option<&Bound<'_, PyAny>>,
         lineSep: Option<&Bound<'_, PyAny>>,
+        unexpected: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<()> {
+        crate::options::check_unexpected_keywords("DataFrameWriter.text", unexpected)?;
         let mut w = self.inner.get();
         w = set_options_skip_none(w, &[("compression", compression), ("lineSep", lineSep)])?;
         // PySpark sets the mode/options/format on the writer itself, then saves.
@@ -4165,7 +4175,7 @@ impl PyDataFrameWriter {
 
     /// Write as XML - full pyspark signature; each named option is
     /// applied when provided.
-    #[pyo3(signature = (path, rowTag=None, mode=None, attributePrefix=None, valueTag=None, rootTag=None, declaration=None, arrayElementName=None, nullValue=None, dateFormat=None, timestampFormat=None, compression=None, encoding=None, validateName=None))]
+    #[pyo3(signature = (path, rowTag=None, mode=None, attributePrefix=None, valueTag=None, rootTag=None, declaration=None, arrayElementName=None, nullValue=None, dateFormat=None, timestampFormat=None, compression=None, encoding=None, validateName=None, **unexpected), text_signature = "($self, path, rowTag=None, mode=None, attributePrefix=None, valueTag=None, rootTag=None, declaration=None, arrayElementName=None, nullValue=None, dateFormat=None, timestampFormat=None, compression=None, encoding=None, validateName=None)")]
     #[allow(non_snake_case, clippy::too_many_arguments)]
     fn xml(
         &self,
@@ -4184,7 +4194,9 @@ impl PyDataFrameWriter {
         compression: Option<&Bound<'_, PyAny>>,
         encoding: Option<&Bound<'_, PyAny>>,
         validateName: Option<&Bound<'_, PyAny>>,
+        unexpected: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<()> {
+        crate::options::check_unexpected_keywords("DataFrameWriter.xml", unexpected)?;
         let mut w = self.inner.get();
         w = set_option_skip_none(w, "rowTag", rowTag)?;
         if let Some(m) = mode {

@@ -402,6 +402,8 @@ fn test_schema() {
     }
 }
 
+// 3.14159 is the decimal literal of the SQL text under test, not a use of PI.
+#[allow(clippy::approx_constant)]
 #[test]
 fn test_decimal_round() {
     if !should_run() {

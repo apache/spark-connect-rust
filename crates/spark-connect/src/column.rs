@@ -1041,7 +1041,7 @@ mod tests {
         ));
 
         // Test lit_double
-        let c = lit_double(3.14);
+        let c = lit_double(1.25);
         assert!(matches!(
             c.expr.node(),
             ExpressionNode::Literal(LiteralExpression::Double(_))
