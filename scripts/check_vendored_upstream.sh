@@ -183,6 +183,9 @@ VENDORED_FILES=(
   "sql/connect/proto/example_plugins_pb2.pyi"
   # ML connect base ABCs (Estimator/Transformer/Evaluator/Model) - pure upstream.
   "ml/connect/base.py"
+  # The scalers and ArrayAssembler of pyspark.ml.connect, which run their fit and transform in
+  # Python on the server (summarize_dataframe and the closures of the models) - pure upstream.
+  "ml/connect/feature.py"
   # vector_to_array/array_to_vector of pyspark.ml.functions build their columns here, through
   # pyspark.sql.connect.functions.builtin - pure upstream.
   "ml/connect/functions.py"
