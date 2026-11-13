@@ -22,10 +22,12 @@ Common issues and solutions when using Spark Connect Rust.
 **Solution:**
 1. Verify you are using the correct connection string format with TLS enabled:
    ```rust
-let spark = SparkSessionBuilder::default()
-    .remote("sc://host:15002/;use_ssl=true;token=YOUR_TOKEN")
-    .get_or_create()?;
-```
+   use spark_connect::SparkSessionBuilder;
+
+   let spark = SparkSessionBuilder::default()
+       .remote("sc://host:15002/;use_ssl=true;token=YOUR_TOKEN")
+       .get_or_create()?;
+   ```
 2. If the server uses self-signed certificates, consult your infrastructure team.
 3. Check that your token or authentication credentials are valid.
 4. Verify the server is configured to accept your authentication method (check server config or logs).

@@ -20,7 +20,8 @@
 The published guides drifted out of sync with the API (examples that used `lit`
 without importing it, or `SparkSessionBuilder` without a `use`), and nothing in CI
 caught it because the docs workflow only *deploys*. This type-checks every
-```rust``` block so a doc example can't reference a symbol the crate doesn't export.
+```rust``` block, including the indented ones of list items, admonitions and content
+tabs, so a doc example can't reference a symbol the crate doesn't export.
 
 Each block is wrapped in a small harness that binds ``spark`` and ``df`` (so the
 common "continue from an earlier block" fragments type-check) and is run through
@@ -54,8 +55,24 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 
 # ```rust``` (checked) vs ```{.rust .no-run}``` (rendered but skipped). We only check
-# plain ```rust``` fences; any info string with a comma/space/brace is left alone.
-_BLOCK = re.compile(r"^```rust\s*$\n(.*?)^```\s*$", re.DOTALL | re.MULTILINE)
+# plain ```rust``` fences; any info string with a comma/space/brace is left alone. A fence
+# may be indented, as in a list item, an admonition or a content tab, and its closing fence
+# with it.
+_BLOCK = re.compile(
+    r"^(?P<indent>[ \t]*)```rust[ \t]*$\n(?P<body>.*?)^[ \t]*```[ \t]*$", re.DOTALL | re.MULTILINE
+)
+
+
+def snippets(text: str) -> list[str]:
+    """The ```rust``` snippets of the Markdown ``text``. Each line of an indented snippet loses
+    up to the indentation of its opening fence, as Markdown strips it."""
+    found = []
+    for m in _BLOCK.finditer(text):
+        width = len(m.group("indent"))
+        lines = m.group("body").splitlines()
+        found.append("\n".join(ln[min(width, len(ln) - len(ln.lstrip(" \t"))) :] for ln in lines))
+    return found
+
 
 # Harness: bind the identifiers the fragments assume from earlier blocks. `use`
 # statements are legal inside a fn body, so a block can carry its own imports; a
@@ -172,10 +189,10 @@ def main() -> int:
         idx = 0
         for md in sorted(glob.glob(str(REPO / "docs" / "**" / "*.md"), recursive=True)):
             text = Path(md).read_text()
-            for m in _BLOCK.finditer(text):
+            for code in snippets(text):
                 idx += 1
                 checked += 1
-                ok, err = check_block(m.group(1), tmpdir, idx, rlib, deps)
+                ok, err = check_block(code, tmpdir, idx, rlib, deps)
                 if not ok:
                     rel = Path(md).relative_to(REPO)
                     # First rustc error line is the most informative.
