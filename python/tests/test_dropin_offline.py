@@ -8081,6 +8081,477 @@ def test_write_to_and_merge_into_set_their_table_at_each_write_as_pyspark(mock_c
         assert ref() is None
 
 
+def test_writer_formats_take_bytes_and_fail_the_write_as_pyspark(mock_connect):
+    # As PySpark's WriteOperation, which sets the source as it is given and converts it at the
+    # command: bytes are sent decoded, and another object raises at each write, the TypeError of
+    # the field, or the error of its decoding, while the call of format keeps it. A format method
+    # of PySpark sets its own format over the kept one.
+    spark, service = mock_connect
+    df = spark.range(1)
+
+    def sent_operation():
+        # ExecutePlanRequest.plan=3 -> Plan.command=2 -> Command.write_operation=2.
+        plan = parse_message(parse_message(service.execute_requests[-1])[3][0])
+        return parse_message(parse_message(plan[2][0])[2][0])
+
+    # WriteOperation.source=2, and WriteOperation.mode=5 (SAVE_MODE_OVERWRITE=2).
+    df.write.format(b"noop").mode("overwrite").save()
+    assert sent_operation()[2] == [b"noop"] and sent_operation()[5] == [2]
+    df.write.save(format=b"noop", mode="overwrite")
+    assert sent_operation()[2] == [b"noop"]
+    df.write.format(5).format("noop").mode("overwrite").save()
+    assert sent_operation()[2] == [b"noop"]
+    df.write.format(5).json("p")
+    assert sent_operation()[2] == [b"json"]
+
+    # None unsets the format, so that no source is sent.
+    df.write.format(None).mode("overwrite").save()
+    assert 2 not in sent_operation()
+    requests = len(service.execute_requests)
+    for source in [5, bytearray(b"noop")]:
+        writer = df.write.format(source)
+        assert len(service.execute_requests) == requests
+        with pytest.raises(TypeError) as error:
+            writer.mode("overwrite").save()
+        assert str(error.value) == "bad argument type for built-in operation"
+    for source, error, message in [
+        (b"\xff", UnicodeDecodeError, "'utf-8' codec can't decode byte 0xff in position 0: invalid start byte"),
+        ("\ud800", UnicodeEncodeError, "'utf-8' codec can't encode character '\\ud800' in position 0: surrogates not allowed"),
+    ]:
+        with pytest.raises(error) as raised:
+            df.write.format(source).save()
+        assert str(raised.value) == message
+    with pytest.raises(TypeError, match="^bad argument type for built-in operation$"):
+        df.write.save(format=5)
+    assert len(service.execute_requests) == requests
+
+
+def test_writer_modes_take_any_object_and_fail_the_write_as_pyspark(mock_connect):
+    # As PySpark's WriteOperation, which resolves a mode that is not a str at the write, after its
+    # path: `lower()` of it is one of the four modes, else UNSUPPORTED_OPERATION of the mode, and
+    # an object without `lower` raises its AttributeError. None leaves the mode as it is, and a
+    # later mode, or insertInto's overwrite, replaces the kept one.
+    from pyspark.errors import PySparkValueError
+
+    spark, service = mock_connect
+    df = spark.range(1)
+    requests = len(service.execute_requests)
+    writer = df.write.format("noop").mode(b"append").mode(None)
+    assert len(service.execute_requests) == requests
+    with pytest.raises(PySparkValueError) as error:
+        writer.save()
+    assert error.value.getCondition() == "UNSUPPORTED_OPERATION"
+    assert error.value.getMessageParameters() == {"operation": b"append"}
+    assert str(error.value) == "[UNSUPPORTED_OPERATION] b'append' is not supported."
+    with pytest.raises(PySparkValueError) as error:
+        df.write.format("noop").mode(bytearray(b"append")).save()
+    assert error.value.getMessageParameters() == {"operation": bytearray(b"append")}
+    with pytest.raises(AttributeError, match="^'int' object has no attribute 'lower'$"):
+        df.write.format("noop").mode(5).save()
+    with pytest.raises(PySparkValueError):
+        df.write.save(format="noop", mode=b"append")
+    with pytest.raises(PySparkValueError):
+        df.write.parquet("p", mode=b"append")
+    assert len(service.execute_requests) == requests
+    # The later mode replaces the kept one, and insertInto's overwrite too.
+    df.write.format("noop").mode(5).mode("overwrite").save()
+    df.write.mode(b"append").insertInto(b"t", True)
+    assert len(service.execute_requests) == requests + 2
+
+
+def test_stream_writer_formats_and_output_modes_take_bytes_at_the_call_as_pyspark(mock_connect):
+    # As PySpark's DataStreamWriter, which sets the format and the output mode in their protobuf
+    # string fields at the call: bytes are sent decoded, and another object raises the TypeError of
+    # the field at the call, and so does start with it, before any request.
+    spark, service = mock_connect
+    stream = spark.readStream.format("rate").load().writeStream
+    stream.format(b"noop").outputMode(b"append")
+    requests = len(service.execute_requests)
+    for call in [
+        lambda: stream.format(5),
+        lambda: stream.format(None),
+        lambda: stream.outputMode(bytearray(b"append")),
+        lambda: stream.outputMode(None),
+    ]:
+        with pytest.raises(TypeError, match="^bad argument type for built-in operation$"):
+            call()
+    assert len(service.execute_requests) == requests
+    # ExecutePlanResponse.write_stream_operation_start_result=8: query_id=1 (id=1, run_id=2).
+    service.execute_payload = message_field(
+        8, message_field(1, message_field(1, "q") + message_field(2, "r")))
+    stream.start(format=b"noop", outputMode=b"append")
+    # Command.write_stream_operation_start=6 -> WriteStreamOperationStart.format=2, output_mode=9.
+    plan = parse_message(parse_message(service.execute_requests[-1])[3][0])
+    start = parse_message(parse_message(plan[2][0])[6][0])
+    assert start[2] == [b"noop"] and start[9] == [b"append"]
+    with pytest.raises(TypeError, match="^bad argument type for built-in operation$"):
+        stream.start(format=5)
+    assert len(service.execute_requests) == requests + 1
+
+
+def test_reader_formats_are_kept_until_load_as_pyspark(mock_connect):
+    # As PySpark's DataFrameReader, whose DataSource asserts the format at load, and whose format
+    # methods of a path set their own. The assertion has no message.
+    spark, service = mock_connect
+    for call in [
+        lambda: spark.read.format(b"noop").load(),
+        lambda: spark.read.format(5).load("p"),
+        lambda: spark.read.load(format=bytearray(b"noop")),
+    ]:
+        with pytest.raises(AssertionError) as error:
+            call()
+        assert str(error.value) == ""
+    assert service.analyze_requests == [] and service.execute_requests == []
+    spark.read.format(b"noop").format("noop").load()
+    df = spark.read.format(5).parquet("p")
+    assert df.schema is not None
+    # Read.data_source=2 -> DataSource.format=1.
+    data_source = parse_message(_sent_relation(service.analyze_requests[-1], 2)[2][0])
+    assert data_source[1] == [b"parquet"]
+
+
+def test_stream_reader_formats_are_kept_until_load_as_pyspark(mock_connect):
+    # As PySpark's DataStreamReader.load, which checks the path before its DataSource asserts the
+    # format, and whose format methods of a path set their own.
+    from pyspark.errors import PySparkValueError
+
+    spark, service = mock_connect
+    with pytest.raises(PySparkValueError) as error:
+        spark.readStream.format(5).load("")
+    assert error.value.getCondition() == "VALUE_NOT_NON_EMPTY_STR"
+    for call in [
+        lambda: spark.readStream.format(b"rate").load(),
+        lambda: spark.readStream.load(format=b"rate"),
+    ]:
+        with pytest.raises(AssertionError) as error:
+            call()
+        assert str(error.value) == ""
+    stream = spark.readStream.format(b"rate").format("rate").load()
+    assert stream.schema is not None
+    # Read.data_source=2 -> DataSource.format=1.
+    data_source = parse_message(_sent_relation(service.analyze_requests[-1], 2)[2][0])
+    assert data_source[1] == [b"rate"]
+    spark.readStream.format(5).json("p")
+
+
+def test_reader_jdbc_sends_url_and_dbtable_as_options_of_to_str_as_pyspark(mock_connect):
+    # As PySpark's DataFrameReader.jdbc, which sets url and dbtable as the options of to_str: a
+    # bool is "true" or "false", another object its str(), and None leaves the option out.
+    spark, service = mock_connect
+
+    def options(df):
+        assert df.schema is not None
+        # Read.data_source=2 -> DataSource.options=3, the entries of which have key=1, value=2.
+        data_source = parse_message(_sent_relation(service.analyze_requests[-1], 2)[2][0])
+        return {parse_message(e)[1][0]: parse_message(e)[2][0] for e in data_source.get(3, [])}
+
+    assert options(spark.read.jdbc("jdbc:zz:nx", b"t")) == {
+        b"url": b"jdbc:zz:nx", b"dbtable": b"b't'"}
+    assert options(spark.read.jdbc("jdbc:zz:nx", 7))[b"dbtable"] == b"7"
+    assert options(spark.read.jdbc(True, "t"))[b"url"] == b"true"
+    unset = options(spark.read.jdbc("jdbc:zz:nx", None))
+    assert b"dbtable" not in unset and unset[b"url"] == b"jdbc:zz:nx"
+
+
+def test_writer_jdbc_sends_url_and_dbtable_as_options_of_to_str_as_pyspark(mock_connect):
+    # As PySpark's DataFrameWriter.jdbc, which sets url and dbtable as options, which skip a None,
+    # of to_str, and writes with the format "jdbc".
+    spark, service = mock_connect
+    df = spark.range(1)
+    df.write.jdbc("jdbc:zz:nx", b"t")
+    # Command.write_operation=2 -> WriteOperation.source=2, options=9 (key=1, value=2).
+    plan = parse_message(parse_message(service.execute_requests[-1])[3][0])
+    operation = parse_message(parse_message(plan[2][0])[2][0])
+    assert operation[2] == [b"jdbc"]
+    assert {parse_message(e)[1][0]: parse_message(e)[2][0] for e in operation[9]} == {
+        b"url": b"jdbc:zz:nx", b"dbtable": b"b't'"}
+    df.write.jdbc(None, 7)
+    plan = parse_message(parse_message(service.execute_requests[-1])[3][0])
+    operation = parse_message(parse_message(plan[2][0])[2][0])
+    assert {parse_message(e)[1][0]: parse_message(e)[2][0] for e in operation[9]} == {
+        b"dbtable": b"7"}
+
+
+def test_partition_columns_take_bytes_at_each_write_as_pyspark(mock_connect):
+    # As PySpark's WriteOperation, which sets each partitioning column in its string field at the
+    # write: bytes are sent decoded, a list or tuple alone stands for its items, a later call
+    # replaces the columns, and a column that is not a str of UTF-8 fails each write, not the call.
+    spark, service = mock_connect
+    df = spark.range(1)
+
+    def sent_operation():
+        # ExecutePlanRequest.plan=3 -> Plan.command=2 -> Command.write_operation=2.
+        plan = parse_message(parse_message(service.execute_requests[-1])[3][0])
+        return parse_message(parse_message(plan[2][0])[2][0])
+
+    # WriteOperation.partitioning_columns=7.
+    df.write.partitionBy(b"k").format("noop").save()
+    assert sent_operation()[7] == [b"k"]
+    df.write.save(format="noop", partitionBy=[b"a", "b"])
+    assert sent_operation()[7] == [b"a", b"b"]
+    requests = len(service.execute_requests)
+    writer = df.write.partitionBy(5)
+    assert len(service.execute_requests) == requests
+    with pytest.raises(TypeError, match="^bad argument type for built-in operation$"):
+        writer.format("noop").save()
+    with pytest.raises(TypeError, match="^bad argument type for built-in operation$"):
+        df.write.partitionBy("a", ["b"]).format("noop").save()
+    df.write.partitionBy(5).partitionBy(b"k").format("noop").save()
+    assert sent_operation()[7] == [b"k"]
+    with pytest.raises(TypeError, match="^bad argument type for built-in operation$"):
+        df.write.parquet("p", partitionBy=5)
+    assert len(service.execute_requests) == requests + 1
+
+
+def test_v2_using_takes_bytes_and_fails_each_write_as_pyspark(mock_connect):
+    # As PySpark's WriteOperationV2, which sets the provider after the table at each write: bytes
+    # are sent decoded, and another object fails each write after the table, while using keeps it.
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+    df = spark.range(1)
+
+    def sent_operation():
+        # ExecutePlanRequest.plan=3 -> Plan.command=2 -> Command.write_operation_v2=4.
+        plan = parse_message(parse_message(service.execute_requests[-1])[3][0])
+        return parse_message(parse_message(plan[2][0])[4][0])
+
+    # WriteOperationV2.table_name=2, provider=3.
+    df.writeTo("t").using(b"noop").append()
+    assert sent_operation()[3] == [b"noop"]
+    df.writeTo("t").using(5).using("noop").append()
+    assert sent_operation()[3] == [b"noop"]
+    df.writeTo("t").using(5).using(None).append()
+    assert 3 not in sent_operation()
+    requests = len(service.execute_requests)
+    writer = df.writeTo("t").using(5)
+    assert len(service.execute_requests) == requests
+    for write in [writer.create, writer.replace, writer.createOrReplace, writer.append,
+                  writer.overwritePartitions, lambda: writer.overwrite(F.lit(True))]:
+        with pytest.raises(TypeError, match="^bad argument type for built-in operation$"):
+            write()
+    with pytest.raises(UnicodeDecodeError):
+        df.writeTo(b"\xff").using(5).append()
+    assert len(service.execute_requests) == requests
+
+
+def test_kept_arguments_of_the_writers_and_readers_are_seen_by_the_collector_as_pyspark(
+        mock_connect):
+    # The kept arguments of the writers and readers are visited by Python's garbage collector, which
+    # frees a reference cycle through them.
+    import gc
+    import weakref
+
+    spark, _ = mock_connect
+    df = spark.range(1)
+
+    class Holder:
+        pass
+
+    for keep in [
+        lambda h: df.write.format(h),
+        lambda h: df.write.mode(h),
+        lambda h: df.write.partitionBy(h),
+        lambda h: df.write.clusterBy(h),
+        lambda h: df.writeTo("t").using(h),
+        lambda h: df.writeTo("t").clusterBy(h),
+        lambda h: spark.read.format(h),
+        lambda h: spark.readStream.format(h),
+    ]:
+        holder = Holder()
+        holder.kept = keep(holder)
+        ref = weakref.ref(holder.kept)
+        del holder
+        gc.collect()
+        assert ref() is None
+
+
+def test_stream_writer_columns_take_bytes_at_the_call_as_pyspark(mock_connect):
+    # As PySpark's DataStreamWriter, which clears and then extends the partitioning and clustering
+    # columns in their protobuf string fields at the call: bytes are sent decoded, a list or tuple
+    # alone stands for its items, and a column that does not convert raises at the call, leaving
+    # none.
+    spark, service = mock_connect
+    stream = spark.readStream.format("rate").load().writeStream
+
+    def sent_start():
+        # ExecutePlanRequest.plan=3 -> Plan.command=2 -> Command.write_stream_operation_start=6.
+        plan = parse_message(parse_message(service.execute_requests[-1])[3][0])
+        return parse_message(parse_message(plan[2][0])[6][0])
+
+    stream.partitionBy(b"k", "j").clusterBy([b"c"])
+    # ExecutePlanResponse.write_stream_operation_start_result=8: query_id=1 (id=1, run_id=2).
+    service.execute_payload = message_field(
+        8, message_field(1, message_field(1, "q") + message_field(2, "r")))
+    stream.start(format="noop")
+    # WriteStreamOperationStart.partitioning_column_names=4, clustering_column_names=15.
+    assert sent_start()[15] == [b"c"]
+    stream.start(partitionBy=[b"p", "q"], format="noop")
+    assert sent_start()[4] == [b"p", b"q"]
+    requests = len(service.execute_requests)
+    message = "^bad argument type for built-in operation$"
+    with pytest.raises(TypeError, match=message):
+        stream.partitionBy(b"a", 5)
+    with pytest.raises(TypeError, match=message):
+        stream.clusterBy(None)
+    with pytest.raises(UnicodeDecodeError):
+        stream.start(partitionBy=b"\xff")
+    assert len(service.execute_requests) == requests
+    stream.start(format="noop")
+    assert 4 not in sent_start()
+
+
+def test_writer_clusters_take_bytes_and_fail_each_write_as_pyspark(mock_connect):
+    # As PySpark's DataFrameWriter.clusterBy, which asserts the count after a list or tuple alone is
+    # unpacked, and keeps the columns for each write: bytes are sent decoded, another object fails
+    # each write after the partitioning columns, and not the call.
+    spark, service = mock_connect
+    df = spark.range(1)
+
+    def sent_operation():
+        # ExecutePlanRequest.plan=3 -> Plan.command=2 -> Command.write_operation=2.
+        plan = parse_message(parse_message(service.execute_requests[-1])[3][0])
+        return parse_message(parse_message(plan[2][0])[2][0])
+
+    # WriteOperation.clustering_columns=10.
+    df.write.clusterBy(b"k").format("noop").mode("overwrite").save()
+    assert sent_operation()[10] == [b"k"]
+    df.write.clusterBy([b"a", "b"]).format("noop").mode("overwrite").save()
+    assert sent_operation()[10] == [b"a", b"b"]
+    with pytest.raises(AssertionError, match="^clusterBy needs one or more clustering columns.$"):
+        df.write.clusterBy([])
+    requests = len(service.execute_requests)
+    writer = df.write.clusterBy(5)
+    assert len(service.execute_requests) == requests
+    with pytest.raises(TypeError, match="^bad argument type for built-in operation$"):
+        writer.format("noop").mode("overwrite").save()
+    # The partitioning columns are converted first.
+    with pytest.raises(TypeError, match="^bad argument type for built-in operation$"):
+        df.write.partitionBy(5).clusterBy(b"\xff").format("noop").save()
+    with pytest.raises(UnicodeDecodeError):
+        df.write.clusterBy(b"\xff").format("noop").save()
+    assert len(service.execute_requests) == requests
+
+
+def test_v2_cluster_by_takes_bytes_and_fails_each_write_as_pyspark(mock_connect):
+    # As PySpark's DataFrameWriterV2.clusterBy, which keeps `[col, *cols]` as it is given and extends
+    # the clustering columns of each write after its provider: bytes are sent decoded, and another
+    # object fails each write, after the table and the provider.
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+    df = spark.range(1)
+
+    def sent_operation():
+        # ExecutePlanRequest.plan=3 -> Plan.command=2 -> Command.write_operation_v2=4.
+        plan = parse_message(parse_message(service.execute_requests[-1])[3][0])
+        return parse_message(parse_message(plan[2][0])[4][0])
+
+    # WriteOperationV2.clustering_columns=9.
+    df.writeTo("t").clusterBy(b"k").append()
+    assert sent_operation()[9] == [b"k"]
+    df.writeTo("t").clusterBy(b"a", "b").append()
+    assert sent_operation()[9] == [b"a", b"b"]
+    requests = len(service.execute_requests)
+    writer = df.writeTo("t").clusterBy(5)
+    assert len(service.execute_requests) == requests
+    for write in [writer.create, writer.replace, writer.createOrReplace, writer.append,
+                  writer.overwritePartitions, lambda: writer.overwrite(F.lit(True))]:
+        with pytest.raises(TypeError, match="^bad argument type for built-in operation$"):
+            write()
+    with pytest.raises(TypeError, match="^bad argument type for built-in operation$"):
+        df.writeTo("t").using(5).clusterBy(5).append()
+    with pytest.raises(UnicodeDecodeError):
+        df.writeTo(b"\xff").clusterBy(5).append()
+    assert len(service.execute_requests) == requests
+
+
+def test_stream_writer_keeps_the_steps_before_a_failing_one_as_pyspark(mock_connect):
+    # As PySpark's _start_internal, which sets the options, the output mode, the partitioning
+    # columns, the format and the query name on the writer in turn, each in place: a step that
+    # fails keeps the steps before it, and a failing partitioning clears its columns.
+    from pyspark.errors import PySparkValueError
+
+    spark, service = mock_connect
+    # ExecutePlanResponse.write_stream_operation_start_result=8: query_id=1 (id=1, run_id=2).
+    service.execute_payload = message_field(
+        8, message_field(1, message_field(1, "q") + message_field(2, "r")))
+    message = "^bad argument type for built-in operation$"
+
+    def started(stream):
+        # Command.write_stream_operation_start=6 -> WriteStreamOperationStart; its options=3 map
+        # has key=1 and value=2, partitioning_column_names=4, output_mode=9.
+        stream.start(format="noop")
+        plan = parse_message(parse_message(service.execute_requests[-1])[3][0])
+        start = parse_message(parse_message(plan[2][0])[6][0])
+        options = {parse_message(e)[1][0]: parse_message(e)[2][0] for e in start.get(3, [])}
+        return start, options
+
+    rate = spark.readStream.format("rate").load()
+    stream = rate.writeStream
+    with pytest.raises(TypeError, match=message):
+        stream.start(outputMode=5, foo="1")
+    start, options = started(stream)
+    assert options == {b"foo": b"1"} and 9 not in start
+
+    stream = rate.writeStream
+    with pytest.raises(TypeError, match=message):
+        stream.start(outputMode=b"append", format=5)
+    start, _ = started(stream)
+    assert start[9] == [b"append"]
+
+    stream = rate.writeStream
+    with pytest.raises(TypeError, match=message):
+        stream.start(partitionBy=5, bar="1")
+    start, options = started(stream)
+    assert options == {b"bar": b"1"} and 4 not in start
+
+    stream = rate.writeStream
+    stream.partitionBy(b"k")
+    with pytest.raises(TypeError, match=message):
+        stream.start(partitionBy=5)
+    start, _ = started(stream)
+    assert 4 not in start
+
+    stream = rate.writeStream
+    with pytest.raises(TypeError, match=message):
+        stream.toTable("t", format=5, qux="1")
+    start, options = started(stream)
+    assert options == {b"qux": b"1"}
+
+    stream = rate.writeStream
+    with pytest.raises(PySparkValueError) as error:
+        stream.start(queryName="", quux="1")
+    assert error.value.getCondition() == "VALUE_NOT_NON_EMPTY_STR"
+    start, options = started(stream)
+    assert options == {b"quux": b"1"}
+
+
+def test_readers_keep_the_format_of_a_load_whose_schema_fails_as_pyspark(mock_connect):
+    # As PySpark's load, which sets the format, then the schema, then the options on the reader in
+    # turn: a schema that is not a str or a struct fails after the format, which the reader keeps,
+    # and before the options, which are not applied.
+    from pyspark.errors import PySparkTypeError
+
+    spark, service = mock_connect
+    reader = spark.read
+    with pytest.raises(PySparkTypeError) as error:
+        reader.load(format="csv", schema=5, foo="1")
+    assert error.value.getCondition() == "NOT_EXPECTED_TYPE"
+    assert reader.load().schema is not None
+    # Read.data_source=2 -> DataSource.format=1, and options=3 (key=1).
+    data_source = parse_message(_sent_relation(service.analyze_requests[-1], 2)[2][0])
+    assert data_source[1] == [b"csv"]
+    assert b"foo" not in {parse_message(e)[1][0] for e in data_source.get(3, [])}
+
+    stream_reader = spark.readStream
+    with pytest.raises(PySparkTypeError):
+        stream_reader.load(format="rate", schema=5, foo="1")
+    assert stream_reader.load().schema is not None
+    data_source = parse_message(_sent_relation(service.analyze_requests[-1], 2)[2][0])
+    assert data_source[1] == [b"rate"]
+
+
 def test_stream_writer_skips_a_false_path_and_table_as_pyspark(mock_connect):
     # As PySpark's `_start_internal`, which sets the path of start and the table of toTable in
     # the string fields of its command only `if path:` and `if tableName:`: a false one, such as
@@ -25882,3 +26353,147 @@ def test_a_shallow_copy_of_a_merge_builder_keeps_its_schema_evolution_as_pyspark
     copied.merge()
     assert sent_schema_evolution() is True
     assert len(service.execute_requests) >= 2
+
+
+class _NotAMode:
+    # An object that is not a save mode, whose `lower()` names none of them.
+    def lower(self):
+        return "bogus"
+
+
+def test_copies_of_the_writers_share_their_kept_arguments_as_pyspark(mock_connect):
+    # As PySpark's copy.copy of a writer, which shares its `_write`: an argument that the copy keeps
+    # for the write (a format, a save mode, a partitioning or clustering column, or a provider) is in
+    # the write of the original too, as an attribute set on the shared object is.
+    import copy
+
+    from pyspark.errors import PySparkValueError
+
+    spark, _ = mock_connect
+    df = spark.range(1)
+    writer = df.write
+    copied = copy.copy(writer)
+    copied.format(5)
+    with pytest.raises(TypeError, match="^bad argument type for built-in operation$"):
+        writer.mode("overwrite").save()
+    writer.format("noop")
+    copied.mode(b"append")
+    with pytest.raises(PySparkValueError) as error:
+        writer.save()
+    assert error.value.getCondition() == "UNSUPPORTED_OPERATION"
+    writer.mode("overwrite")
+    copied.partitionBy(5)
+    with pytest.raises(TypeError, match="^bad argument type for built-in operation$"):
+        writer.save()
+    writer.partitionBy("id")
+    copied.clusterBy(5)
+    with pytest.raises(TypeError, match="^bad argument type for built-in operation$"):
+        writer.save()
+    writer.clusterBy("id")
+    copied.format(5)
+    with pytest.raises(TypeError, match="^bad argument type for built-in operation$"):
+        writer.save()
+
+    v2 = df.writeTo("forked_copy_table")
+    copied_v2 = copy.copy(v2)
+    copied_v2.using(5)
+    with pytest.raises(TypeError, match="^bad argument type for built-in operation$"):
+        v2.append()
+    v2.using("noop")
+    copied_v2.clusterBy(5)
+    with pytest.raises(TypeError, match="^bad argument type for built-in operation$"):
+        v2.append()
+
+
+def test_deep_copies_keep_the_kept_arguments_through_the_memo_as_pyspark(mock_connect):
+    # As PySpark's copy.deepcopy, which copies the state of a writer, and the objects that it keeps,
+    # through the memo: the copied save mode of the copied writer is the copy of the object.
+    import copy
+
+    from pyspark.errors import PySparkValueError
+
+    spark, _ = mock_connect
+    mode = _NotAMode()
+    copied = copy.deepcopy({"writer": spark.range(1).write.mode(mode), "mode": mode})
+    with pytest.raises(PySparkValueError) as error:
+        copied["writer"].format("noop").save()
+    assert error.value.getMessageParameters()["operation"] is copied["mode"]
+    assert copied["mode"] is not mode
+
+
+def test_reader_copies_keep_their_format_and_share_their_options_as_pyspark(mock_connect):
+    # As PySpark's copy.copy of a reader: the copy shares the options, and its format and schema
+    # stay its own, so a format on the copy does not reach the original.
+    import copy
+
+    spark, _ = mock_connect
+    reader = spark.read.format("noop")
+    copied = copy.copy(reader)
+    copied.format(5).option("k", "v")
+    assert reader.load() is not None
+    assert reader._options == {"k": "v"}
+    with pytest.raises(AssertionError):
+        copied.load()
+    deep = copy.deepcopy(copied)
+    with pytest.raises(AssertionError):
+        deep.load()
+
+
+def test_unpickled_kept_arguments_fail_as_the_originals_do_as_pyspark(mock_connect):
+    # As PySpark's cloudpickle of the writers and readers: the kept arguments unpickle with them, so
+    # that the write or the load fails as the original's does, and an object that does not pickle
+    # makes the pickle fail with its TypeError.
+    import copy
+    import threading
+
+    import cloudpickle
+
+    spark, _ = mock_connect
+    df = spark.range(1)
+
+    def unpickled(obj):
+        return cloudpickle.loads(cloudpickle.dumps(obj))
+
+    with pytest.raises(TypeError, match="^bad argument type for built-in operation$"):
+        unpickled(df.write.format(5)).mode("overwrite").save()
+    with pytest.raises(TypeError, match="^bad argument type for built-in operation$"):
+        unpickled(df.writeTo("forked_pickle_table").using(5)).append()
+    with pytest.raises(TypeError, match="^bad argument type for built-in operation$"):
+        unpickled(df.writeTo("forked_pickle_table").clusterBy(5)).append()
+    with pytest.raises(AssertionError):
+        unpickled(spark.read.format(5)).load()
+    with pytest.raises(AssertionError):
+        unpickled(spark.readStream.format(5)).load()
+    with pytest.raises(TypeError, match="^cannot pickle '_thread.lock' object$"):
+        cloudpickle.dumps(df.write.format(threading.Lock()))
+    with pytest.raises(TypeError, match="^cannot pickle '_thread.lock' object$"):
+        copy.deepcopy(df.write.format(threading.Lock()))
+
+
+def test_kept_arguments_shared_by_copies_are_not_counted_twice_by_the_collector_as_pyspark(
+        mock_connect):
+    # The kept objects of a writer and of its copy are shared: Python's garbage collector reports
+    # them from no owner, as the owners of a DataFrame that another plan shares, so a collection
+    # that runs while they are shared frees nothing that the copy still uses.
+    import gc
+
+    spark, _ = mock_connect
+    df = spark.range(1)
+
+    class Holder:
+        pass
+
+    holder = Holder()
+    writer = df.write.format(holder)
+    copied = copy_module_copy(writer)
+    holder.writer = writer
+    del holder
+    gc.collect()
+    with pytest.raises(TypeError, match="^bad argument type for built-in operation$"):
+        copied.mode("overwrite").save()
+
+
+def copy_module_copy(obj):
+    import copy
+
+    return copy.copy(obj)
