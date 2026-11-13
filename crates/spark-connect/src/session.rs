@@ -3544,7 +3544,13 @@ mod tests {
         let stop = outcome
             .recv_timeout(Duration::from_secs(5))
             .expect("the signal ends the backoff of the release");
-        stop.expect_err("the interrupted stop raises");
+        let error = stop.expect_err("the interrupted stop raises");
+        assert!(
+            error
+                .to_string()
+                .contains("the release of the session was interrupted; the session is still open"),
+            "the interrupted stop raises the error of an interrupted release: {error}"
+        );
         assert!(
             !spark.is_stopped(),
             "an interrupted stop marked the session stopped"
