@@ -217,6 +217,14 @@ pub enum LogicalPlan {
         input: Arc<LogicalPlan>,
         schema: DataType,
     },
+    /// A plan that PySpark's client fails to build when a request sends it, with `error`: the
+    /// error is raised by each request of the plan, and the plan is not built, as PySpark's
+    /// `DataFrame.to` of a schema that is not a DataType, and `unionByName` of a flag that a
+    /// protobuf bool does not take. The plans below it are built first, as PySpark builds them.
+    Unbuildable {
+        input: Arc<LogicalPlan>,
+        error: SparkError,
+    },
     /// Hint: `df.hint(name, parameters...)`.
     Hint {
         input: Arc<LogicalPlan>,
@@ -1081,6 +1089,9 @@ fn relation_with_ids_and_levels(
 ) -> Result<(proto::Relation, usize)> {
     // The levels of the plan itself are known before it is serialized; those of the plans of
     // its subqueries are counted as they are serialized.
+    if let Some(error) = node.unbuildable_error() {
+        return Err(error);
+    }
     let depth = node.depth();
     if depth > MAX_PLAN_DEPTH {
         return Err(too_deep_a_plan(depth));
@@ -1228,6 +1239,7 @@ macro_rules! inputs_of {
             | LogicalPlan::Drop { input, .. }
             | LogicalPlan::ToDF { input, .. }
             | LogicalPlan::ToSchema { input, .. }
+            | LogicalPlan::Unbuildable { input, .. }
             | LogicalPlan::Hint { input, .. }
             | LogicalPlan::Parse { input, .. }
             | LogicalPlan::Unpivot { input, .. }
@@ -1438,6 +1450,34 @@ impl LogicalPlan {
         depths[&(self as *const LogicalPlan)]
     }
 
+    /// The error of the first [`LogicalPlan::Unbuildable`] of this plan, which a request raises
+    /// before it serializes the plan. The plans below a plan are built before it, the left ones
+    /// first, so the error of the deepest and leftmost of them is the one raised. Computed
+    /// without recursing, and once for each node that several plans share.
+    pub(crate) fn unbuildable_error(&self) -> Option<SparkError> {
+        let mut seen: std::collections::HashSet<*const LogicalPlan> = Default::default();
+        let mut pending: Vec<(&LogicalPlan, bool)> = vec![(self, false)];
+        while let Some((plan, inputs_done)) = pending.pop() {
+            if inputs_done {
+                if let LogicalPlan::Unbuildable { error, .. } = plan {
+                    return Some(error.clone());
+                }
+                continue;
+            }
+            if !seen.insert(plan as *const LogicalPlan) {
+                continue;
+            }
+            pending.push((plan, true));
+            pending.extend(
+                plan.inputs()
+                    .into_iter()
+                    .rev()
+                    .map(|input| (input.as_ref(), false)),
+            );
+        }
+        None
+    }
+
     /// Convert this logical plan to a `spark.connect.Relation` protobuf, without plan IDs.
     ///
     /// Any depth is serialized, on a stack that grows for its levels; but prost encodes and drops
@@ -1452,6 +1492,9 @@ impl LogicalPlan {
     /// subqueries, or with an expression deeper than [`crate::expression::MAX_EXPRESSION_DEPTH`],
     /// is a `RecursionError`, as PySpark's serializer raises it, and its proto is not built.
     pub fn try_to_proto(&self) -> Result<proto::Relation> {
+        if let Some(error) = self.unbuildable_error() {
+            return Err(error);
+        }
         let depth = self.depth();
         if depth > MAX_PLAN_DEPTH {
             return Err(too_deep_a_plan(depth));
@@ -1913,6 +1956,12 @@ impl LogicalPlan {
                 to_df.input = Some(Box::new(relation_of(input, plan_ids)));
                 to_df.column_names.extend(column_names.clone());
                 relation.rel_type = Some(proto::relation::RelType::ToDf(Box::new(to_df)));
+            }
+
+            LogicalPlan::Unbuildable { input, .. } => {
+                // A request checks the error before it serializes the plan
+                // (`unbuildable_error`); this path serializes the input alone.
+                relation.rel_type = relation_of(input, plan_ids).rel_type;
             }
 
             LogicalPlan::ToSchema { input, schema } => {
@@ -3975,5 +4024,45 @@ mod deep_plan_tests {
             let relation = on_a_small_stack(|| deep.to_proto());
             assert_eq!(nested_limits(&relation), 10_000);
         });
+    }
+
+    /// A plan that fails to build with an error of `value` as its message.
+    fn unbuildable(input: Arc<LogicalPlan>, value: &str) -> Arc<LogicalPlan> {
+        let error = SparkError::classed(
+            SparkErrorKind::ValueError,
+            "UNSUPPORTED_OPERATION",
+            &[("operation", &format!("data type {value}"))],
+        );
+        Arc::new(LogicalPlan::Unbuildable { input, error })
+    }
+
+    #[test]
+    fn an_unbuildable_plan_fails_each_request_with_its_error() {
+        let plan = Arc::new(limit(unbuildable(Arc::new(range(0, 10, 1)), "a bigint"), 1));
+        for error in [
+            relation_with_ids(&plan, &PlanIds::new()).unwrap_err(),
+            plan.try_to_proto().unwrap_err(),
+        ] {
+            assert_eq!(error.kind, SparkErrorKind::ValueError, "{error}");
+            assert_eq!(error.error_class, "UNSUPPORTED_OPERATION");
+            assert!(error.message().contains("data type a bigint"), "{error}");
+        }
+    }
+
+    #[test]
+    fn the_error_of_an_unbuildable_plan_is_that_of_its_deepest_leftmost_input() {
+        let left = unbuildable(Arc::new(range(0, 10, 1)), "left");
+        let right = unbuildable(Arc::new(range(0, 10, 1)), "right");
+        let both = LogicalPlan::SetOperation {
+            left: unbuildable(Arc::clone(&left), "outer left"),
+            right,
+            set_op_type: SetOpType::Union,
+            is_all: true,
+            by_name: true,
+            allow_missing_columns: false,
+        };
+        let error = both.unbuildable_error().unwrap();
+        assert!(error.message().contains("data type left"), "{error}");
+        assert!(range(0, 10, 1).unbuildable_error().is_none());
     }
 }
