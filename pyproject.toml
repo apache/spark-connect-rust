@@ -49,6 +49,10 @@ Repository = "https://github.com/apache/spark-connect-rust"
 # under python/pyspark (the modules that are neither vendored nor generated).
 line-length = 100
 target-version = "py39"
+# Apply the excludes below to the paths given on the command line too, so that
+# `ruff check <file>` or an editor integration skips a vendored or generated file, as
+# `ruff check` of the whole tree does.
+force-exclude = true
 include = [
     "scripts/**/*.py",
     "crates/pyspark-rs/src/row.py",
