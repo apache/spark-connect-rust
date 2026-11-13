@@ -2221,6 +2221,13 @@ impl PyOneVsRest {
                     ("weightCol is ignored, as it is not supported by this classifier",),
                 )?;
             }
+            // PySpark's fit trains the binary classifiers in a ThreadPool of `parallelism`
+            // processes, which raises this ValueError when there are fewer than one.
+            if this.inner.parallelism() < 1 {
+                return Err(PyValueError::new_err(
+                    "Number of processes must be at least 1",
+                ));
+            }
             this.inner = this.inner.clone().set_classifier(classifier);
         }
         fit_native(slf, dataset, None)

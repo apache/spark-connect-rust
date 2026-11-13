@@ -4069,6 +4069,22 @@ def test_one_vs_rest_defers_base_param_validation_until_fit():
         estimator.fit(None)
 
 
+@pytest.mark.parametrize("use_setter", [False, True])
+@pytest.mark.parametrize("parallelism", [0, -1])
+def test_one_vs_rest_raises_pysparks_error_for_fewer_than_one_process(parallelism, use_setter):
+    from pyspark.ml.connect.classification import LinearSVC, OneVsRest
+
+    if use_setter:
+        estimator = OneVsRest(classifier=LinearSVC()).setParallelism(parallelism)
+    else:
+        estimator = OneVsRest(classifier=LinearSVC(), parallelism=parallelism)
+    # PySpark's fit trains the classifiers in a ThreadPool of `parallelism` processes, which
+    # raises a plain ValueError for fewer than one, before anything is sent.
+    with pytest.raises(ValueError, match="^Number of processes must be at least 1$") as raised:
+        estimator.fit(None)
+    assert type(raised.value) is ValueError
+
+
 @pytest.mark.parametrize("name", ["AFTSurvivalRegression", "IsotonicRegression", "FMRegressor"])
 @pytest.mark.parametrize("use_setters", [False, True])
 def test_remaining_regressor_native_parameters_match_official_fixture(ml_mock, name, use_setters):
