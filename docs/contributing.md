@@ -214,7 +214,12 @@ cargo clippy --workspace --all-targets -- -D warnings   # lint (blocking in CI)
 Rust CI builds with `RUSTFLAGS="-D warnings"`, so a compiler warning fails it, and so
 does any clippy finding. Clippy over the workspace needs the `wasm32-unknown-unknown`
 target (`rustup target add wasm32-unknown-unknown`), because it builds
-`examples/wasm-udfs`. The lints this codebase triggers by design are allowed once, with
+`examples/wasm-udfs`. CI runs rustfmt and clippy with a pinned toolchain, Rust 1.100.0
+(`.github/workflows/lint.yml`), so that their verdicts do not change with a new release:
+run `cargo +1.100.0 clippy ...` to match it. CI also lints the `datafusion` and `polars`
+features of `apache-spark-connect`, and the crates that the workspace excludes
+(`examples/wasm-udfs`, `examples/wasm-udf-inline` and `tests/wasm-udf`) through their
+manifests. The lints this codebase triggers by design are allowed once, with
 a reason, in `[workspace.lints.clippy]` of the root `Cargo.toml`; a targeted `#[allow]`
 needs a comment saying why. CI also fails on deferral
 markers such as `TODO`, `FIXME`, `todo!()` or "for now" in `crates/*/src`
