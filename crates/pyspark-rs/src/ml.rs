@@ -2646,6 +2646,25 @@ impl PyAFTSurvivalRegression {
         Ok(this)
     }
 
+    #[pyo3(
+        name = "setParams",
+        signature = (*args, **kwargs),
+        text_signature = "(self, *, featuresCol='features', labelCol='label', predictionCol='prediction', fitIntercept=True, maxIter=100, tol=1e-06, censorCol='censor', quantileProbabilities=[0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99], quantilesCol=None, aggregationDepth=2, maxBlockSizeInMB=0.0)"
+    )]
+    fn set_params<'py>(
+        slf: Bound<'py, Self>,
+        args: &Bound<'py, PyTuple>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_params_of(
+            slf,
+            "AFTSurvivalRegression",
+            AFTSURVIVAL_REGRESSION_PARAMS,
+            args,
+            kwargs,
+        )
+    }
+
     #[pyo3(name = "setFeaturesCol")]
     fn set_feature_col<'py>(
         slf: Bound<'py, Self>,
@@ -2734,7 +2753,13 @@ impl PyAFTSurvivalRegression {
         set_param(slf, "maxBlockSizeInMB", Kind::Float, value)
     }
 
-    fn fit(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<PyMLModel> {
+    #[pyo3(signature = (dataset, params=None))]
+    fn fit(
+        slf: &Bound<'_, Self>,
+        dataset: &Bound<'_, PyAny>,
+        params: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyMLModel> {
+        check_fit_params(params, true)?;
         fit_native(slf, dataset, None)
     }
 }
@@ -2773,6 +2798,25 @@ impl PyIsotonicRegression {
             kwargs,
         )?;
         Ok(this)
+    }
+
+    #[pyo3(
+        name = "setParams",
+        signature = (*args, **kwargs),
+        text_signature = "(self, *, featuresCol='features', labelCol='label', predictionCol='prediction', weightCol=None, isotonic=True, featureIndex=0)"
+    )]
+    fn set_params<'py>(
+        slf: Bound<'py, Self>,
+        args: &Bound<'py, PyTuple>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_params_of(
+            slf,
+            "IsotonicRegression",
+            ISOTONIC_REGRESSION_PARAMS,
+            args,
+            kwargs,
+        )
     }
 
     #[pyo3(name = "setFeaturesCol")]
@@ -2823,7 +2867,13 @@ impl PyIsotonicRegression {
         set_param(slf, "featureIndex", Kind::Int, value)
     }
 
-    fn fit(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<PyMLModel> {
+    #[pyo3(signature = (dataset, params=None))]
+    fn fit(
+        slf: &Bound<'_, Self>,
+        dataset: &Bound<'_, PyAny>,
+        params: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyMLModel> {
+        check_fit_params(params, true)?;
         fit_native(slf, dataset, None)
     }
 }
@@ -2870,6 +2920,19 @@ impl PyFMRegressor {
             kwargs,
         )?;
         Ok(this)
+    }
+
+    #[pyo3(
+        name = "setParams",
+        signature = (*args, **kwargs),
+        text_signature = "(self, *, featuresCol='features', labelCol='label', predictionCol='prediction', factorSize=8, fitIntercept=True, fitLinear=True, regParam=0.0, miniBatchFraction=1.0, initStd=0.01, maxIter=100, stepSize=1.0, tol=1e-06, solver='adamW', seed=None)"
+    )]
+    fn set_params<'py>(
+        slf: Bound<'py, Self>,
+        args: &Bound<'py, PyTuple>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_params_of(slf, "FMRegressor", FMREGRESSOR_PARAMS, args, kwargs)
     }
 
     #[pyo3(name = "setFeaturesCol")]
@@ -2984,7 +3047,13 @@ impl PyFMRegressor {
         set_param(slf, "seed", Kind::Int, value)
     }
 
-    fn fit(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<PyMLModel> {
+    #[pyo3(signature = (dataset, params=None))]
+    fn fit(
+        slf: &Bound<'_, Self>,
+        dataset: &Bound<'_, PyAny>,
+        params: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyMLModel> {
+        check_fit_params(params, true)?;
         fit_native(slf, dataset, None)
     }
 }
