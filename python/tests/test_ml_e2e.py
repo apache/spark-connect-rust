@@ -440,11 +440,11 @@ def test_ml_connect_binary_evaluator_scores_the_probability_of_pyspark_docstring
     assert BinaryClassificationEvaluator().evaluate(dataset) == pytest.approx(5 / 6, abs=1e-9)
 
 
-def test_ml_connect_evaluators_take_the_columns_and_the_pandas_frames_of_pyspark_tests(session):
+def test_ml_connect_evaluators_take_spark_columns_and_reject_pandas(session):
     # The inputs of PySpark's own evaluator tests (test_legacy_mode_evaluation.py) and docstrings,
     # which its torch evaluators read as tensors: int labels and predictions, a float32 or an
-    # array probability, whose column 1 is the positive class, and pandas DataFrames, which are
-    # sent through createDataFrame here, as the evaluators run on the server. The JVM evaluators
+    # array probability, whose column 1 is the positive class. Pandas inputs must be converted
+    # explicitly to Spark DataFrames. The JVM evaluators
     # give doubles, 0.6 where PySpark's float32 tensors give 0.6000000238418579.
     from pyspark.ml.connect.evaluation import (
         BinaryClassificationEvaluator,
@@ -459,7 +459,8 @@ def test_ml_connect_evaluators_take_the_columns_and_the_pandas_frames_of_pyspark
     )
     accuracy = MulticlassClassificationEvaluator(metricName="accuracy")
     assert accuracy.evaluate(multiclass) == pytest.approx(0.6)
-    assert accuracy.evaluate(dataset=multiclass.toPandas()) == pytest.approx(0.6)
+    with pytest.raises(TypeError, match="requires a Spark DataFrame"):
+        accuracy.evaluate(dataset=multiclass.toPandas())
     docstring = session.createDataFrame(
         [(1, 1), (0, 0), (2, 2), (1, 0), (2, 1)], schema=["label", "prediction"])
     assert MulticlassClassificationEvaluator().evaluate(docstring) == pytest.approx(0.6)
@@ -468,7 +469,8 @@ def test_ml_connect_evaluators_take_the_columns_and_the_pandas_frames_of_pyspark
         [(1.0, 2), (-1.0, -1), (2.0, 3)], schema=["label", "prediction"])
     mse = RegressionEvaluator(metricName="mse")
     assert mse.evaluate(regression) == pytest.approx(2 / 3)
-    assert mse.evaluate(regression.toPandas()) == pytest.approx(2 / 3)
+    with pytest.raises(TypeError, match="requires a Spark DataFrame"):
+        mse.evaluate(regression.toPandas())
 
     binary = session.createDataFrame(
         [
@@ -487,44 +489,46 @@ def test_ml_connect_evaluators_take_the_columns_and_the_pandas_frames_of_pyspark
         for column in ("prob2", "prob32"):
             evaluator = BinaryClassificationEvaluator(metricName=metric, probabilityCol=column)
             assert evaluator.evaluate(binary) == pytest.approx(expected), (metric, column)
-            assert evaluator.evaluate(binary.toPandas()) == pytest.approx(expected), (metric, column)
+            with pytest.raises(TypeError, match="requires a Spark DataFrame"):
+                evaluator.evaluate(binary.toPandas())
     auroc = BinaryClassificationEvaluator(probabilityCol="prob2").evaluate(binary)
     assert auroc == pytest.approx(2 / 3)
     with pytest.raises(AttributeError, match="'list' object has no attribute 'select'"):
         accuracy.evaluate([(1, 1)])
 
 
-def test_ml_connect_pandas_frames_name_int_labels_and_read_their_columns_as_pyspark(session):
-    # As PySpark's pandas DataFrames: an evaluator selects the columns it reads, so a uint64
-    # column that Arrow does not take is not sent, and a native model that sends the whole frame
-    # names its int label "0", as createDataFrame names it by its str, and keeps it in its output.
-    import numpy as np
+def test_native_ml_accepts_explicitly_converted_pandas(session):
     import pandas as pd
-    from pyspark.ml.connect import KMeans
-    from pyspark.ml.connect.evaluation import RegressionEvaluator
+    import pyspark.ml.connect as connect
+    from pyspark.sql import DataFrame
 
-    pdf = pd.DataFrame(
-        {
-            0: [1.0, 2.0, 3.0],
-            "label": [1.0, 2.0, 3.0],
-            "prediction": [1.0, 2.5, 3.0],
-            "u": np.array([1, 2, 3], dtype=np.uint64),
-        }
-    )
-    evaluator = RegressionEvaluator(labelCol="label", predictionCol="prediction")
-    assert evaluator.evaluate(pdf) == pytest.approx(0.28867513459481287)
+    # Exercise the native bindings, independently of the deprecated Python ML implementations.
+    assert connect.KMeans is __import__("pyspark._pyspark", fromlist=["KMeans"]).KMeans
+    pdf = pd.DataFrame({"features": [[0.0, 1.0], [1.0, 0.0], [2.0, 2.0], [3.0, 1.0]],
+                        "label": [0.0, 1.0, 1.0, 0.0]})
+    df = session.createDataFrame(pdf)
+    for estimator in [connect.LogisticRegression(maxIter=5), connect.KMeans(k=2, seed=1)]:
+        with pytest.raises(TypeError, match="requires a Spark DataFrame"):
+            estimator.fit(pdf)
+        model = estimator.fit(df)
+        with pytest.raises(TypeError, match="requires a Spark DataFrame"):
+            model.transform(pdf)
+        transformed = model.transform(df)
+        assert isinstance(transformed, DataFrame)
+        assert transformed.count() == len(pdf)
+        assert set(transformed.toPandas()["prediction"]) <= {0, 1}
 
-    train = session.createDataFrame(
-        [([0.0, 1.0], 0.0), ([1.0, 0.0], 1.0), ([2.0, 2.0], 1.0), ([3.0, 1.0], 0.0)],
-        schema=["features", "label"],
-    )
-    model = KMeans(k=2, seed=1).fit(train)
-    frame = pd.DataFrame({0: [7, 8], "features": [np.array([0.0, 1.0]), np.array([3.0, 1.0])]})
-    out = model.transform(frame)
-    assert list(out.columns) == [0, "features", "prediction"]
-    assert out[0].tolist() == [7, 8]
-    assert out["prediction"].tolist()[0] != out["prediction"].tolist()[1]
-
+    assembler = connect.VectorAssembler(inputCols=["label"], outputCol="assembled")
+    with pytest.raises(TypeError, match="requires a Spark DataFrame"):
+        assembler.transform(pdf)
+    assert [row.assembled.toArray().tolist() for row in assembler.transform(df).collect()] == [
+        [0.0], [1.0], [1.0], [0.0]
+    ]
+    scored = pd.DataFrame({"label": [1.0, 2.0, 3.0], "prediction": [1.0, 2.5, 3.0]})
+    evaluator = connect.RegressionEvaluator()
+    with pytest.raises(TypeError, match="requires a Spark DataFrame"):
+        evaluator.evaluate(scored)
+    assert evaluator.evaluate(session.createDataFrame(scored)) == pytest.approx(0.28867513459481287)
 
 def test_ml_connect_columns_spelled_in_another_case_than_the_schema_as_pyspark(session):
     # As Spark resolves a column name regardless of case: a native fit, transform and evaluate
@@ -741,19 +745,11 @@ def test_ml_connect_logistic_regression_and_scalers_output_the_columns_of_pyspar
     assert len(fitted.transform(labeled).collect()) == 4
 
 
-def test_ml_connect_estimators_fit_and_transform_the_pandas_frames_of_pyspark(session):
-    # As PySpark's pyspark.ml.connect classes, whose fit and transform take a pandas DataFrame:
-    # here it is sent with createDataFrame of the active session, and the transform is a shallow
-    # copy of it with the output columns appended, of its index, of the dtypes and the cells of
-    # PySpark's (an int64 prediction, ndarrays of probabilities and of scaled values). PySpark's
-    # LogisticRegression fits no pandas DataFrame. The native classes
-    # that PySpark's pyspark.ml.connect does not have are sent the whole pandas DataFrame, and
-    # append the columns that their JVM models append, which check them.
+def test_vendored_ml_scalers_keep_their_pandas_contract(session):
+    # These pure-Python upstream scalers are separate from the native ML bindings.
     import numpy as np
     import pandas as pd
-    from pyspark.ml.connect.classification import LogisticRegression
-    from pyspark.ml.connect.clustering import KMeans
-    from pyspark.ml.connect.feature import MaxAbsScaler, StandardScaler, VectorAssembler
+    from pyspark.ml.connect.feature import MaxAbsScaler, StandardScaler
 
     features = [[1.0, 2.0], [2.0, -1.0], [-3.0, -2.0]]
     pdf = pd.DataFrame({"features": features, "label": [1, 1, 0]}, index=[10, 20, 30])
@@ -780,31 +776,6 @@ def test_ml_connect_estimators_fit_and_transform_the_pandas_frames_of_pyspark(se
     # The first row of PySpark 4.3.0's StandardScaler of pdf.
     assert appended(transformed, [output])[output].iloc[0].tolist() == pytest.approx(
         [0.3779644730092272, 1.1208970766356101], rel=1e-12)
-
-    labeled = session.createDataFrame(pdf)
-    with pytest.raises(NotImplementedError, match="Fitting pandas dataframe is not supported yet."):
-        LogisticRegression().fit(pdf)
-    predicted = appended(
-        LogisticRegression(maxIter=20).fit(labeled).transform(pdf), ["prediction", "probability"]
-    )
-    assert predicted.dtypes.astype(str).tolist() == ["int64", "object"]
-    assert predicted["prediction"].tolist() == [1, 1, 0]
-    for prediction, probability in zip(predicted["prediction"], predicted["probability"]):
-        assert type(probability) is np.ndarray and probability.dtype == np.float64
-        assert probability.sum() == pytest.approx(1.0) and probability.argmax() == prediction
-    message = "Transformers does not allow output column having the same name with existing columns."
-    with pytest.raises(ValueError, match=message):
-        LogisticRegression(maxIter=5).fit(labeled).transform(pdf.assign(probability=0))
-
-    clusters = appended(KMeans(k=2, seed=1).fit(pdf).transform(pdf), ["prediction"])
-    assert len(set(clusters["prediction"])) == 2
-    assembled = VectorAssembler(inputCols=["label"], outputCol="v").transform(pdf)
-    assert [value.toArray().tolist() for value in appended(assembled, ["v"])["v"]] == [
-        [1.0], [1.0], [0.0]
-    ]
-    with pytest.raises(Exception, match="Column prediction already exists"):
-        KMeans(k=2, seed=1).fit(pdf).transform(pdf.assign(prediction=0))
-
 
 def test_ml_connect_scaler_fit_with_its_input_as_output_as_pyspark(session):
     # As PySpark's scaler fit, which reads only its inputCol: a scaler whose outputCol is its
@@ -870,10 +841,8 @@ def test_ml_connect_scalers_transform_the_nan_of_pandas_frames_as_pyspark(sessio
     )
 
 
-def test_ml_connect_empty_pandas_transforms_as_pyspark(session):
-    # As PySpark's transform of an empty pandas DataFrame, which computes locally: a scaler appends
-    # its output column, of object dtype, and a LogisticRegression model raises the ValueError of
-    # its transform function, which stacks no array. The server is not asked for them.
+def test_ml_connect_empty_pandas_transforms(session):
+    # Vendored Python scalers retain their local behavior; native models reject pandas input.
     import pandas as pd
     from pyspark.ml.connect.classification import LogisticRegression
     from pyspark.ml.connect.feature import MaxAbsScaler, StandardScaler
@@ -887,7 +856,7 @@ def test_ml_connect_empty_pandas_transforms_as_pyspark(session):
         assert len(transformed) == 0, cls
 
     model = LogisticRegression(maxIter=5).fit(_labeled(session))
-    with pytest.raises(ValueError, match="need at least one array to stack"):
+    with pytest.raises(TypeError, match="requires a Spark DataFrame"):
         model.transform(pd.DataFrame({"features": pd.Series([], dtype=object)}))
 
 
