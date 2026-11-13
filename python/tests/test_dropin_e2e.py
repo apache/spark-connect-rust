@@ -5701,3 +5701,18 @@ def test_binary_subclasses_are_sent_as_the_bytes_of_pyspark(session):
     assert [row.b for row in rows] == [b"other", b"other", b"ba", None]
     rows = session.createDataFrame([([Bytes(b"orig")],)], "a array<binary>").collect()
     assert rows[0].a == [b"other"]
+
+
+def test_null_get_item_reads_its_nulls_though_the_server_declares_it_non_nullable(session):
+    # As official PySpark 4.3.0: `arr.getItem(None)` is declared non-nullable by the server while
+    # its values are null; the rows, the iterator, the struct field and the Arrow table keep them.
+    arr = F.array(F.lit(10), F.lit(20))
+    df = session.range(3).select(arr.getItem(None).alias("v"))
+    assert df.schema["v"].nullable is False
+    assert [row.v for row in df.collect()] == [None, None, None]
+    assert [row.v for row in df.toLocalIterator()] == [None, None, None]
+    rows = session.range(2).select(F.struct(arr.getItem(None).alias("x")).alias("s")).collect()
+    assert [row.s.x for row in rows] == [None, None]
+    # The table is cast to the non-nullable schema, which raises for a null, as PySpark's does.
+    with pytest.raises(ValueError, match="Casting field 'v' with null values to non-nullable"):
+        df.toArrow()
