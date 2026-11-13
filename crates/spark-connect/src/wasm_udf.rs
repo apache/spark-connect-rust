@@ -68,7 +68,7 @@ use std::process::{Command, Stdio};
 
 use base64::Engine as _;
 
-use crate::column::Column;
+use crate::column::{expressions_of, Column};
 use crate::expression::ExpressionNode;
 use crate::types::DataType;
 use crate::udf::{eval_type, CommonInlineUserDefinedFunctionExpression, PythonUDFPayload};
@@ -444,14 +444,14 @@ impl UserDefinedFunction {
 
     /// Build the [`CommonInlineUserDefinedFunctionExpression`] for the given
     /// argument columns.
-    pub fn to_expression(
+    pub fn to_expression<C: Into<Column>>(
         &self,
-        args: Vec<Column>,
+        args: impl IntoIterator<Item = C>,
     ) -> Result<CommonInlineUserDefinedFunctionExpression> {
         Ok(CommonInlineUserDefinedFunctionExpression::new(
             self.name.clone(),
             self.deterministic,
-            args.iter().map(|c| c.expression().clone()).collect(),
+            expressions_of(args),
             self.to_payload()?,
         ))
     }
@@ -459,7 +459,6 @@ impl UserDefinedFunction {
     /// Apply the UDF to `args`, producing a [`Column`] — mirroring calling a
     /// PySpark `UserDefinedFunction` on columns (`my_udf(col("x"))`).
     pub fn call<C: Into<Column>>(&self, args: impl IntoIterator<Item = C>) -> Result<Column> {
-        let args: Vec<Column> = args.into_iter().map(Into::into).collect();
         let expr = self.to_expression(args)?;
         Ok(Column::new(
             ExpressionNode::CommonInlineUserDefinedFunction(Box::new(expr)).into(),
@@ -716,6 +715,25 @@ mod tests {
         let cmd = f.build_command().expect("packer should succeed");
         assert!(!cmd.is_empty());
         assert_eq!(cmd[0], 0x80); // cloudpickle PROTO opcode
+    }
+
+    /// `to_expression` takes its argument Columns as any iterable of them, as `call` does. It
+    /// packs the UDF, so it runs with the packer, as the test above: `--features wasm-udf -- --ignored`.
+    #[test]
+    #[ignore]
+    fn to_expression_takes_any_columns_as_a_vec_does() {
+        use crate::column::col;
+
+        let f = sample();
+        let of_vec = f
+            .to_expression(vec![col("x")])
+            .expect("packer should succeed");
+        let of_array = f.to_expression([col("x")]).expect("packer should succeed");
+        let of_iter = f
+            .to_expression(vec![col("x")].into_iter())
+            .expect("packer should succeed");
+        assert_eq!(of_array.arguments, of_vec.arguments);
+        assert_eq!(of_iter.arguments, of_vec.arguments);
     }
 
     #[test]

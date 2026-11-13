@@ -21,15 +21,26 @@ the new variant. Rust interval map keys are stringified as raw microseconds;
 Python `timedelta` map keys are not yet supported.
 
 `DataFrame::sort`, `order_by`, `sort_within_partitions`, `agg`, `observe`, `observe_with`,
-`hint_expressions`, `repartition_by_range`, `repartition_by_range_opt` and
-`repartition_by_expressions`, `GroupedData::agg`, and the `partition_by` and `order_by` of
-`Window` and `WindowSpec` take `impl IntoIterator<Item = impl Into<Column>>`, as `select` and
-`group_by` do: Columns, column names or expressions, such as `df.sort([col("x").desc()])` and
-`.agg([sum(col("id")).alias("total")])`, without `.expression().clone()`. The `Vec<Expression>`
-that they took still compiles, by the new `From<Expression> for Column`, and so does the
-`Vec<SortOrder>` of the `order_by` of a window, by `From<SortOrder> for Column`; there a Column
-that is not a sort order is sorted ascending, nulls first, as PySpark's `WindowSpec.orderBy`
-sorts it. An empty `vec![]` has no item type to infer: pass `Vec::<Column>::new()` instead.
+`hint_expressions`, `repartition_by_range`, `repartition_by_range_opt`,
+`repartition_by_expressions`, `drop_columns`, `with_columns`, `grouping_sets` and
+`grouping_sets_with_columns`, `GroupedData::agg`, the `partition_by` and `order_by` of `Window`
+and `WindowSpec`, and `TableValuedFunction::udtf` take
+`impl IntoIterator<Item = impl Into<Column>>`, as `select` and `group_by` do: Columns, column
+names or expressions, such as `df.sort([col("x").desc()])` and
+`.agg([sum(col("id")).alias("total")])`, without `.expression().clone()`. The names of `drop`,
+`describe`, `to_df`, `to_schema`, `melt`, the numeric aggregates of `GroupedData` (`sum`, `avg`,
+`min`, `max`, `mean`, `numeric_agg`), the `freq_items` and `approx_quantile` of `StatFunctions`,
+`Column::drop_fields` and the `partition_by` and `cluster_by` of `DataStreamWriter` take any
+iterable of names. The `(name, Column)` pairs of `with_columns` and the `(old, new)` pairs of
+`with_columns_renamed` take any iterable of pairs, and `functions::count_distinct_columns` and
+`UserDefinedFunction::to_expression` (wasm) takes any Columns. A `Vec` or an array of them
+compiles as before. The `Vec<Expression>` that the sort and aggregate methods took still compiles,
+by the new `From<Expression> for Column`, and so does the `Vec<SortOrder>` of the `order_by` of a
+window, by `From<SortOrder> for Column`; there a Column that is not a sort order is sorted
+ascending, nulls first, as PySpark's `WindowSpec.orderBy` sorts it. An empty `vec![]` or `[]` has
+no item type to infer: pass `Vec::<Column>::new()` or `Vec::<&str>::new()` instead. The optional
+`subset` arguments of the null functions, and the optional `value_vars` of `melt`, stay
+`Option<Vec<&str>>`, so that `None` still infers its type.
 
 `BinaryClassificationEvaluator::set_score_col` and `score_col`, and the Python
 `scoreCol=` argument and `setScoreCol` of v4.2.0 are removed, without an alias:
