@@ -691,8 +691,11 @@ pub trait Evaluator: Send + Sync {
     /// Get the parameters of this evaluator.
     fn params(&self) -> &Params;
 
-    /// Get mutable parameters.
-    fn params_mut(&mut self) -> &mut Params;
+    /// Get mutable parameters, where the evaluator exposes them. The default is None, so that an
+    /// implementation outside this crate needs no change.
+    fn params_mut(&mut self) -> Option<&mut Params> {
+        None
+    }
 
     /// Evaluate a DataFrame and return a metric value.
     fn evaluate(&self, _df: &DataFrame) -> spark_connect_core::error::Result<f64>;
@@ -6353,8 +6356,8 @@ impl Evaluator for RegressionEvaluator {
         &self.params
     }
 
-    fn params_mut(&mut self) -> &mut Params {
-        &mut self.params
+    fn params_mut(&mut self) -> Option<&mut Params> {
+        Some(&mut self.params)
     }
 
     fn evaluate(&self, df: &DataFrame) -> spark_connect_core::error::Result<f64> {
@@ -6432,8 +6435,8 @@ impl Evaluator for BinaryClassificationEvaluator {
         &self.params
     }
 
-    fn params_mut(&mut self) -> &mut Params {
-        &mut self.params
+    fn params_mut(&mut self) -> Option<&mut Params> {
+        Some(&mut self.params)
     }
 
     fn evaluate(&self, df: &DataFrame) -> spark_connect_core::error::Result<f64> {
@@ -6602,8 +6605,8 @@ impl Evaluator for MulticlassClassificationEvaluator {
     fn params(&self) -> &Params {
         &self.params
     }
-    fn params_mut(&mut self) -> &mut Params {
-        &mut self.params
+    fn params_mut(&mut self) -> Option<&mut Params> {
+        Some(&mut self.params)
     }
     fn evaluate(&self, df: &DataFrame) -> spark_connect_core::error::Result<f64> {
         evaluate_via_command(&self.operator, &self.params, df)
@@ -6731,6 +6734,39 @@ mod tests {
     use super::*;
     // Used only by the tests below (the non-test build does not reference it).
     use crate::session::SparkSession;
+
+    /// An evaluator outside this crate, which implements only the methods that were required
+    /// before `params_mut`: it must still compile, and it exposes no params to mutate.
+    struct ExternalEvaluator {
+        operator: MlOperator,
+        params: Params,
+    }
+
+    impl Evaluator for ExternalEvaluator {
+        fn operator(&self) -> &MlOperator {
+            &self.operator
+        }
+
+        fn params(&self) -> &Params {
+            &self.params
+        }
+
+        fn evaluate(&self, _df: &DataFrame) -> spark_connect_core::error::Result<f64> {
+            Ok(0.0)
+        }
+    }
+
+    #[test]
+    fn evaluator_params_mut_is_optional_for_external_implementations() {
+        let mut evaluator = ExternalEvaluator {
+            operator: MlOperator::new("external.Evaluator", OperatorType::Evaluator),
+            params: Params::new(),
+        };
+        assert!(evaluator.params_mut().is_none());
+        assert!(evaluator.params().get_param("labelCol").is_none());
+        let mut regression = RegressionEvaluator::new();
+        assert!(Evaluator::params_mut(&mut regression).is_some());
+    }
 
     #[test]
     fn test_params_creation() {

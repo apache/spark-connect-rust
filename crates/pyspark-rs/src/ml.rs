@@ -800,15 +800,18 @@ where
     let inputs = inputs(&evaluator);
     let df = evaluation_dataset(dataset, &inputs)?;
     let fields = schema_fields(py, &df)?;
-    let mut params = std::mem::take(evaluator.params_mut());
-    params = spell_param(params, &fields, "labelCol", Some("label"));
-    if !inputs.doubles.is_empty() {
-        params = spell_param(params, &fields, "predictionCol", Some("prediction"));
+    // An evaluator that exposes no params is sent as it is (see `Evaluator::params_mut`).
+    if let Some(evaluator_params) = evaluator.params_mut() {
+        let mut params = std::mem::take(evaluator_params);
+        params = spell_param(params, &fields, "labelCol", Some("label"));
+        if !inputs.doubles.is_empty() {
+            params = spell_param(params, &fields, "predictionCol", Some("prediction"));
+        }
+        if inputs.score.is_some() {
+            params = spell_param(params, &fields, "rawPredictionCol", Some("rawPrediction"));
+        }
+        *evaluator_params = params;
     }
-    if inputs.score.is_some() {
-        params = spell_param(params, &fields, "rawPredictionCol", Some("rawPrediction"));
-    }
-    *evaluator.params_mut() = params;
     let df = evaluator_input(df, &fields, inputs);
     interruptible(py, &df.spark_session(), || {
         evaluator.evaluate(&df).map_err(Box::new)
