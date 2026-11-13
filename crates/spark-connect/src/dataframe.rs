@@ -1098,6 +1098,7 @@ impl DataFrame {
 
         let mut batches = vec![];
         let mut schema = None;
+        let mut relaxed = None;
         let mut info = ExecutionInfo::default();
         loop {
             let resp = stream.next_message()?;
@@ -1112,14 +1113,14 @@ impl DataFrame {
             if let Some(proto::execute_plan_response::ResponseType::ArrowBatch(batch)) =
                 resp.response_type
             {
-                let record_batches =
+                let (record_batches, read) =
                     decode_arrow_record_batches(&batch).map_err(|e| stream.fail(e))?;
                 batches.extend(record_batches);
+                relaxed = read.or(relaxed);
             }
         }
         self.record_execution(info);
-
-        Ok((batches, schema))
+        Ok((share_schema(batches, relaxed)?, schema))
     }
 
     /// Get the count of rows.
@@ -3097,25 +3098,11 @@ pub(crate) fn decode_arrow_batch_of(
     batch: &proto::execute_plan_response::ArrowBatch,
     spark_schema: Option<&DataType>,
 ) -> Result<Vec<Row>> {
-    use arrow::ipc::reader::StreamReader;
-    use std::io::Cursor;
-
-    if batch.data.is_empty() {
-        return Ok(vec![]);
-    }
-
-    let cursor = Cursor::new(&batch.data);
-    let mut reader = StreamReader::try_new(cursor, None).map_err(|e| {
-        SparkError::connect_msg(format!("Failed to create Arrow stream reader: {}", e))
-    })?;
+    let (record_batches, _) = read_record_batches(&batch.data, decode_error)?;
 
     let mut rows = vec![];
 
-    while let Some(record_batch) = reader
-        .next()
-        .transpose()
-        .map_err(|e| decode_error(&batch.data, e))?
-    {
+    for record_batch in record_batches {
         let schema = record_batch.schema();
         let num_rows = record_batch.num_rows();
         if num_rows == 0 {
@@ -3153,6 +3140,80 @@ pub(crate) fn decode_arrow_batch_of(
     Ok(rows)
 }
 
+/// The record batches of the Arrow IPC stream `data`, and the schema of them when they are read
+/// with the fields nullable, as [`read_stream_relaxed`] reads them.
+///
+/// arrow-rs refuses a batch with nulls in a non-nullable field, at any depth, but the server
+/// declares such a field for values that are nulls, as `arr.getItem(None)` does, and PyArrow
+/// reads them: such a stream is read again with its fields nullable, and the batches of it have
+/// that schema. Any other error of a batch is `batch_error` of it.
+fn read_record_batches(
+    data: &[u8],
+    batch_error: impl Fn(&[u8], arrow::error::ArrowError) -> SparkError,
+) -> Result<(
+    Vec<arrow::record_batch::RecordBatch>,
+    Option<arrow::datatypes::SchemaRef>,
+)> {
+    use arrow::ipc::reader::StreamReader;
+    use std::io::Cursor;
+
+    if data.is_empty() {
+        return Ok((vec![], None));
+    }
+
+    let reader = StreamReader::try_new(Cursor::new(data), None).map_err(|e| {
+        SparkError::connect_msg(format!("Failed to create Arrow stream reader: {}", e))
+    })?;
+
+    let mut batches = vec![];
+    for item in reader {
+        match item {
+            Ok(batch) => batches.push(batch),
+            Err(error) => {
+                let relaxed = is_non_nullable_error(&error)
+                    .then(|| read_stream_relaxed(data, false))
+                    .flatten();
+                return match relaxed {
+                    Some((_, relaxed)) => {
+                        let schema = relaxed.first().map(|batch| batch.schema());
+                        Ok((relaxed, schema))
+                    }
+                    // The strings of a stream that does not read with its fields nullable are
+                    // checked as those of any other, so that an invalid one is still named.
+                    None => Err(match first_invalid_utf8(data) {
+                        Some((column, value)) => SparkError::invalid_utf8(column, &value),
+                        None => batch_error(data, error),
+                    }),
+                };
+            }
+        }
+    }
+    Ok((batches, None))
+}
+
+/// The batches of a result, which share one schema: when some were read with their fields
+/// nullable, as `relaxed` is, each batch takes `relaxed`. A batch read without that relaxation
+/// only has its fields widened to nullable, which `with_schema` allows, so no data changes.
+fn share_schema(
+    batches: Vec<arrow::record_batch::RecordBatch>,
+    relaxed: Option<arrow::datatypes::SchemaRef>,
+) -> Result<Vec<arrow::record_batch::RecordBatch>> {
+    let Some(relaxed) = relaxed else {
+        return Ok(batches);
+    };
+    batches
+        .into_iter()
+        .map(|batch| batch.with_schema(relaxed.clone()))
+        .collect::<std::result::Result<_, _>>()
+        .map_err(|e| SparkError::connect_msg(format!("Failed to decode Arrow batch: {e}")))
+}
+
+/// Whether `error` is arrow-rs refusing a non-nullable field, at any depth, for its nulls.
+fn is_non_nullable_error(error: &arrow::error::ArrowError) -> bool {
+    let message = error.to_string();
+    message.contains("non-nullable") || message.contains("Non-nullable")
+}
+
 /// The error of an Arrow IPC stream `data` that arrow-rs fails with `error`. A string that is not
 /// valid UTF-8 is an error of its own, with its bytes, which the Python client raises as the
 /// reference client does.
@@ -3170,7 +3231,7 @@ fn decode_error(data: &[u8], error: arrow::error::ArrowError) -> SparkError {
 /// its bytes, in the order in which PySpark converts a result: column by column, each batch by
 /// batch, in the order of [`first_invalid_utf8_in`].
 fn first_invalid_utf8(data: &[u8]) -> Option<(usize, Vec<u8>)> {
-    let (strings, batches) = read_strings_as_binary(data)?;
+    let (strings, batches) = read_stream_relaxed(data, true)?;
     let columns = batches.first()?.num_columns();
     (0..columns).find_map(|column| {
         let data_type = strings.field(column).data_type();
@@ -3181,13 +3242,16 @@ fn first_invalid_utf8(data: &[u8]) -> Option<(usize, Vec<u8>)> {
     })
 }
 
-/// The schema of the Arrow IPC stream `data`, as the server sends it, and its record batches, with
-/// its string types read as binary types of the same layout. arrow-rs still checks the offsets and
-/// lengths of these batches, but not their UTF-8. The messages are split here because arrow-rs's
-/// stream reader cannot take a schema of its own. None for a stream with a message that is not a
-/// schema or a record batch, such as a dictionary, or one that does not read.
-fn read_strings_as_binary(
+/// The schema of the Arrow IPC stream `data`, as the server sends it, and its record batches, read
+/// with each field nullable (see [`read_schema`]) and, if `strings_as_binary`, with its string
+/// types read as binary types of the same layout. arrow-rs still checks the offsets and lengths of
+/// these batches, but not their UTF-8 when they are read as binary, nor their nulls. The messages
+/// are split here because arrow-rs's stream reader cannot take a schema of its own. None for a
+/// stream with a message that is not a schema or a record batch, such as a dictionary, or one that
+/// does not read.
+fn read_stream_relaxed(
     data: &[u8],
+    strings_as_binary: bool,
 ) -> Option<(
     arrow::datatypes::Schema,
     Vec<arrow::record_batch::RecordBatch>,
@@ -3225,7 +3289,7 @@ fn read_strings_as_binary(
             MessageHeader::Schema if strings.is_some() => return None,
             MessageHeader::Schema => {
                 let fields = fb_to_schema(message.header_as_schema()?);
-                schema = Some(Arc::new(binary_schema(&fields)));
+                schema = Some(Arc::new(read_schema(&fields, strings_as_binary)));
                 strings = Some(fields);
             }
             MessageHeader::RecordBatch => {
@@ -3246,44 +3310,91 @@ fn read_strings_as_binary(
     Some((strings?, batches))
 }
 
-/// The schema `schema`, with each string type of it, at any depth, as the binary type of the same
-/// layout: Utf8 as Binary, LargeUtf8 as LargeBinary and Utf8View as BinaryView.
-fn binary_schema(schema: &arrow::datatypes::Schema) -> arrow::datatypes::Schema {
+/// The schema `schema` as its batches are read by [`read_stream_relaxed`]: each field nullable,
+/// at any depth (see [`read_field`]), and, if `strings_as_binary`, each string type of it as the
+/// binary type of the same layout (see [`read_type`]).
+fn read_schema(
+    schema: &arrow::datatypes::Schema,
+    strings_as_binary: bool,
+) -> arrow::datatypes::Schema {
     let fields: Vec<arrow::datatypes::Field> = schema
         .fields()
         .iter()
-        .map(|field| binary_field(field))
+        .map(|field| read_field(field, strings_as_binary))
         .collect();
     arrow::datatypes::Schema::new_with_metadata(fields, schema.metadata().clone())
 }
 
-fn binary_field(field: &arrow::datatypes::Field) -> arrow::datatypes::Field {
-    field.clone().with_data_type(binary_type(field.data_type()))
+/// The field `field` as it is read: nullable, so that arrow-rs does not refuse its nulls, with
+/// its type as [`read_type`] reads it.
+fn read_field(field: &arrow::datatypes::Field, strings_as_binary: bool) -> arrow::datatypes::Field {
+    field
+        .clone()
+        .with_data_type(read_type(field.data_type(), strings_as_binary))
+        .with_nullable(true)
 }
 
-fn binary_type(data_type: &arrow::datatypes::DataType) -> arrow::datatypes::DataType {
+/// The type `data_type` as it is read: its string types, at any depth, as the binary types of the
+/// same layout if `strings_as_binary` (Utf8 as Binary, LargeUtf8 as LargeBinary and Utf8View as
+/// BinaryView), and its fields nullable (see [`read_field`]), except the entries of a map, whose
+/// keys arrow-rs requires to be non-nullable (see [`read_map_entries`]).
+fn read_type(
+    data_type: &arrow::datatypes::DataType,
+    strings_as_binary: bool,
+) -> arrow::datatypes::DataType {
     use arrow::datatypes::DataType as ArrowDataType;
 
+    let read = |field: &arrow::datatypes::Field| read_field(field, strings_as_binary);
     match data_type {
-        ArrowDataType::Utf8 => ArrowDataType::Binary,
-        ArrowDataType::LargeUtf8 => ArrowDataType::LargeBinary,
-        ArrowDataType::Utf8View => ArrowDataType::BinaryView,
-        ArrowDataType::List(field) => ArrowDataType::List(Arc::new(binary_field(field))),
-        ArrowDataType::LargeList(field) => ArrowDataType::LargeList(Arc::new(binary_field(field))),
+        ArrowDataType::Utf8 if strings_as_binary => ArrowDataType::Binary,
+        ArrowDataType::LargeUtf8 if strings_as_binary => ArrowDataType::LargeBinary,
+        ArrowDataType::Utf8View if strings_as_binary => ArrowDataType::BinaryView,
+        ArrowDataType::List(field) => ArrowDataType::List(Arc::new(read(field))),
+        ArrowDataType::LargeList(field) => ArrowDataType::LargeList(Arc::new(read(field))),
         ArrowDataType::FixedSizeList(field, size) => {
-            ArrowDataType::FixedSizeList(Arc::new(binary_field(field)), *size)
+            ArrowDataType::FixedSizeList(Arc::new(read(field)), *size)
         }
-        ArrowDataType::Map(field, sorted) => {
-            ArrowDataType::Map(Arc::new(binary_field(field)), *sorted)
-        }
-        ArrowDataType::Struct(fields) => ArrowDataType::Struct(
-            fields
-                .iter()
-                .map(|field| Arc::new(binary_field(field)))
-                .collect(),
+        ArrowDataType::Map(entries, sorted) => ArrowDataType::Map(
+            Arc::new(read_map_entries(entries, strings_as_binary)),
+            *sorted,
         ),
+        ArrowDataType::Struct(fields) => {
+            ArrowDataType::Struct(fields.iter().map(|field| Arc::new(read(field))).collect())
+        }
         other => other.clone(),
     }
+}
+
+/// The entries field of a map as it is read (see [`read_type`]): arrow-rs requires the entries
+/// to be non-nullable and their key too, as a map has no null entry or key, so only the value is
+/// read as any other field.
+fn read_map_entries(
+    entries: &arrow::datatypes::Field,
+    strings_as_binary: bool,
+) -> arrow::datatypes::Field {
+    use arrow::datatypes::DataType as ArrowDataType;
+
+    let ArrowDataType::Struct(children) = entries.data_type() else {
+        return entries.clone();
+    };
+    let children = children
+        .iter()
+        .enumerate()
+        .map(|(i, child)| {
+            let child = if i == 0 {
+                child
+                    .as_ref()
+                    .clone()
+                    .with_data_type(read_type(child.data_type(), strings_as_binary))
+            } else {
+                read_field(child, strings_as_binary)
+            };
+            Arc::new(child)
+        })
+        .collect();
+    entries
+        .clone()
+        .with_data_type(ArrowDataType::Struct(children))
 }
 
 /// The bytes of the first string of `array` that is not valid UTF-8, in the order in which
@@ -3381,30 +3492,13 @@ fn invalid_bytes(bytes: &[u8]) -> Option<Vec<u8>> {
 /// to DataFusion and Polars.
 fn decode_arrow_record_batches(
     batch: &proto::execute_plan_response::ArrowBatch,
-) -> Result<Vec<arrow::record_batch::RecordBatch>> {
-    use arrow::ipc::reader::StreamReader;
-    use std::io::Cursor;
-
-    if batch.data.is_empty() {
-        return Ok(vec![]);
-    }
-
-    let cursor = Cursor::new(&batch.data);
-    let mut reader = StreamReader::try_new(cursor, None).map_err(|e| {
-        SparkError::connect_msg(format!("Failed to create Arrow stream reader: {}", e))
-    })?;
-
-    let mut batches = vec![];
-
-    while let Some(record_batch) = reader
-        .next()
-        .transpose()
-        .map_err(|e| SparkError::connect_msg(format!("Failed to decode Arrow batch: {}", e)))?
-    {
-        batches.push(record_batch);
-    }
-
-    Ok(batches)
+) -> Result<(
+    Vec<arrow::record_batch::RecordBatch>,
+    Option<arrow::datatypes::SchemaRef>,
+)> {
+    read_record_batches(&batch.data, |_, error| {
+        SparkError::connect_msg(format!("Failed to decode Arrow batch: {}", error))
+    })
 }
 
 /// Extract a value at a specific index from an Arrow array.
@@ -3991,8 +4085,8 @@ mod nested_decode_tests {
             };
             assert_eq!(decode_arrow_batch(&compressed).unwrap(), rows, "{codec:?}");
             assert_eq!(
-                decode_arrow_record_batches(&compressed).unwrap(),
-                decode_arrow_record_batches(&plain).unwrap(),
+                decode_arrow_record_batches(&compressed).unwrap().0,
+                decode_arrow_record_batches(&plain).unwrap().0,
                 "{codec:?}"
             );
         }
@@ -6984,6 +7078,246 @@ mod plan_construction_tests {
 /// each Arrow type and asserts the decoded `Value` variant, so the large per-type
 /// match runs without a live server (the server->collect->decode path is covered
 /// separately by the server-gated e2e_integration tests).
+/// Streams that declare a field non-nullable but carry nulls in it, as the server does for
+/// `arr.getItem(None)`: arrow-rs refuses them when it reads them, and PyArrow reads them as is.
+#[cfg(test)]
+mod non_nullable_decode_tests {
+    use super::*;
+    use arrow::array::*;
+    use arrow::buffer::{NullBuffer, OffsetBuffer};
+    use arrow::datatypes::{DataType, Field, Fields, Schema};
+    use arrow::ipc::writer::StreamWriter;
+    use arrow::record_batch::RecordBatch;
+
+    /// The Arrow IPC stream of one batch of `columns`, each with the field it is declared as. The
+    /// writer declares the fields, and the arrays carry the values, as the server does: a
+    /// declared field may be non-nullable while its array has nulls, which arrow-rs's writer does
+    /// not check.
+    fn stream_declaring(
+        columns: Vec<(Field, ArrayRef)>,
+    ) -> proto::execute_plan_response::ArrowBatch {
+        let schema = Arc::new(Schema::new(
+            columns
+                .iter()
+                .map(|(field, _)| field.clone())
+                .collect::<Vec<_>>(),
+        ));
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(
+                columns
+                    .iter()
+                    .map(|(field, array)| Field::new(field.name(), array.data_type().clone(), true))
+                    .collect::<Vec<_>>(),
+            )),
+            columns.iter().map(|(_, array)| array.clone()).collect(),
+        )
+        .unwrap();
+        let mut data = vec![];
+        {
+            let mut writer = StreamWriter::try_new(&mut data, &schema).unwrap();
+            writer.write(&batch).unwrap();
+            writer.finish().unwrap();
+        }
+        proto::execute_plan_response::ArrowBatch {
+            data: data.into(),
+            ..Default::default()
+        }
+    }
+
+    fn declared(name: &str, data_type: DataType) -> Field {
+        Field::new(name, data_type, false)
+    }
+
+    /// `[1, null, 3]` as a non-nullable column of `arr.getItem(None)`, next to a nullable `id`.
+    fn null_column_stream() -> proto::execute_plan_response::ArrowBatch {
+        stream_declaring(vec![
+            (
+                declared("arr[NULL]", DataType::Int64),
+                Arc::new(Int64Array::from(vec![None, None, None])),
+            ),
+            (
+                Field::new("id", DataType::Int64, true),
+                Arc::new(Int64Array::from(vec![Some(0), Some(1), Some(2)])),
+            ),
+        ])
+    }
+
+    #[test]
+    fn a_non_nullable_column_with_nulls_decodes_as_rows() {
+        let rows = decode_arrow_batch_of(&null_column_stream(), None).unwrap();
+        let values: Vec<_> = rows.iter().map(|row| row.values().to_vec()).collect();
+        assert_eq!(
+            values,
+            vec![
+                vec![Value::Null, Value::Long(0)],
+                vec![Value::Null, Value::Long(1)],
+                vec![Value::Null, Value::Long(2)],
+            ]
+        );
+    }
+
+    #[test]
+    fn a_non_nullable_column_with_nulls_reads_as_record_batches_with_the_nulls() {
+        let (batches, relaxed) = decode_arrow_record_batches(&null_column_stream()).unwrap();
+        let schema = relaxed.expect("the stream is read with its fields nullable");
+        assert_eq!(batches.len(), 1);
+        let batch = &batches[0];
+        assert_eq!(batch.schema(), schema);
+        assert!(batch.schema().field(0).is_nullable());
+        assert_eq!(batch.column(0).null_count(), 3);
+        assert_eq!(batch.column(1).null_count(), 0);
+    }
+
+    #[test]
+    fn a_stream_without_nulls_in_a_non_nullable_column_is_read_as_declared() {
+        let batch = stream_declaring(vec![(
+            declared("n", DataType::Int64),
+            Arc::new(Int64Array::from(vec![1, 2])),
+        )]);
+        let (batches, relaxed) = decode_arrow_record_batches(&batch).unwrap();
+        assert!(relaxed.is_none());
+        assert!(!batches[0].schema().field(0).is_nullable());
+    }
+
+    #[test]
+    fn non_nullable_fields_with_nulls_decode_at_any_depth() {
+        // A list whose item is non-nullable, with a null item.
+        let list = Arc::new(ListArray::new(
+            Arc::new(Field::new("item", DataType::Int64, true)),
+            OffsetBuffer::from_lengths([2, 1]),
+            Arc::new(Int64Array::from(vec![None, Some(7), None])),
+            None,
+        )) as ArrayRef;
+        let list_type = DataType::List(Arc::new(declared("item", DataType::Int64)));
+        // A struct whose field is non-nullable, with a null field, and a null struct.
+        let struct_array = Arc::new(StructArray::new(
+            Fields::from(vec![Field::new("x", DataType::Int64, true)]),
+            vec![Arc::new(Int64Array::from(vec![None, Some(1)])) as ArrayRef],
+            Some(NullBuffer::from(vec![true, false])),
+        )) as ArrayRef;
+        let struct_type = DataType::Struct(Fields::from(vec![declared("x", DataType::Int64)]));
+        // A map whose value is non-nullable, with a null value.
+        let entries = StructArray::new(
+            Fields::from(vec![
+                Field::new("key", DataType::Utf8, false),
+                Field::new("value", DataType::Int64, true),
+            ]),
+            vec![
+                Arc::new(StringArray::from(vec!["a", "b"])) as ArrayRef,
+                Arc::new(Int64Array::from(vec![None, Some(2)])) as ArrayRef,
+            ],
+            None,
+        );
+        let map = Arc::new(MapArray::new(
+            Arc::new(Field::new("entries", entries.data_type().clone(), false)),
+            OffsetBuffer::from_lengths([1, 1]),
+            entries,
+            None,
+            false,
+        )) as ArrayRef;
+        let map_type = DataType::Map(
+            Arc::new(Field::new(
+                "entries",
+                DataType::Struct(Fields::from(vec![
+                    Field::new("key", DataType::Utf8, false),
+                    declared("value", DataType::Int64),
+                ])),
+                false,
+            )),
+            false,
+        );
+
+        let batch = stream_declaring(vec![
+            (declared("l", list_type), list),
+            (declared("s", struct_type), struct_array),
+            (declared("m", map_type), map),
+        ]);
+        let rows = decode_arrow_batch_of(&batch, None).unwrap();
+        let values: Vec<_> = rows.iter().map(|row| row.values().to_vec()).collect();
+        assert_eq!(
+            values,
+            vec![
+                vec![
+                    Value::List(vec![Value::Null, Value::Long(7)]),
+                    Value::Struct(StructValue::new(
+                        Arc::from(vec!["x".to_string()]),
+                        vec![Value::Null],
+                    )),
+                    Value::Map(vec![(Value::String("a".into()), Value::Null)]),
+                ],
+                vec![
+                    Value::List(vec![Value::Null]),
+                    Value::Null,
+                    Value::Map(vec![(Value::String("b".into()), Value::Long(2))]),
+                ],
+            ]
+        );
+    }
+
+    #[test]
+    fn a_non_nullable_column_with_an_invalid_string_names_the_string() {
+        // The marker of the string is replaced by bytes that are not UTF-8, of the same length.
+        let mut batch = stream_declaring(vec![
+            (
+                declared("n", DataType::Int64),
+                Arc::new(Int64Array::from(vec![None, None])),
+            ),
+            (
+                Field::new("s", DataType::Utf8, true),
+                Arc::new(StringArray::from(vec!["x", "qz9"])),
+            ),
+        ]);
+        let mut data = batch.data.to_vec();
+        let at = data.windows(3).position(|window| window == b"qz9").unwrap();
+        data[at..at + 3].copy_from_slice(&[0xc3, 0x28, 0x39]);
+        batch.data = data.into();
+        let Err(error) = decode_arrow_batch_of(&batch, None) else {
+            panic!("the invalid string must not decode");
+        };
+        assert_eq!(error.utf8_column(), Some(1));
+        assert_eq!(error.invalid_utf8_value(), Some(vec![0xc3, 0x28, 0x39]));
+    }
+
+    #[test]
+    fn a_stream_of_another_error_still_fails() {
+        // Truncated data is not a nullability error, so it is not read again.
+        let mut batch = null_column_stream();
+        let len = batch.data.len();
+        batch.data = batch.data.slice(..len - 8);
+        let Err(error) = decode_arrow_batch_of(&batch, None) else {
+            panic!("the truncated stream must not decode");
+        };
+        assert!(error.to_string().contains("Failed to decode Arrow batch"));
+    }
+
+    #[test]
+    fn share_schema_widens_the_batches_of_a_result_to_the_relaxed_schema() {
+        let (relaxed, schema) = decode_arrow_record_batches(&null_column_stream()).unwrap();
+        assert!(schema.is_some());
+        let relaxed = relaxed.into_iter().next().unwrap();
+        let strict = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                declared("arr[NULL]", DataType::Int64),
+                Field::new("id", DataType::Int64, true),
+            ])),
+            vec![
+                Arc::new(Int64Array::from(vec![1, 2, 3])) as ArrayRef,
+                Arc::new(Int64Array::from(vec![0, 1, 2])) as ArrayRef,
+            ],
+        )
+        .unwrap();
+        let relaxed_schema = relaxed.schema();
+        let widened =
+            share_schema(vec![strict, relaxed.clone()], Some(relaxed_schema.clone())).unwrap();
+        assert!(widened.iter().all(|batch| batch.schema() == relaxed_schema));
+        assert_eq!(widened[0].column(0).null_count(), 0);
+        assert_eq!(widened[1].column(0).null_count(), 3);
+        // Without a relaxed schema, the batches are as they are.
+        let plain = share_schema(vec![widened[0].clone()], None).unwrap();
+        assert_eq!(plain[0].schema(), relaxed_schema);
+    }
+}
+
 #[cfg(test)]
 mod arrow_value_tests {
     use super::*;

@@ -24556,3 +24556,21 @@ def test_random_forest_native_binding_sends_reference_parameters(mock_connect, u
         assert fit.estimator.name == "org.apache.spark.ml.classification.RandomForestClassifier"
         expected = proto.MlParams.FromString(base64.b64decode(case["params_b64"]))
         assert fit.params == expected
+
+
+def test_a_non_nullable_column_with_nulls_is_read_with_its_nulls_as_pyarrow_reads_it(mock_connect):
+    # The server declares `arr[NULL]` non-nullable for `arr.getItem(None)`, whose values are all
+    # null. PySpark reads the batch as PyArrow does, so the rows keep the nulls.
+    pa = pytest.importorskip("pyarrow")
+    spark, service = mock_connect
+    schema = pa.schema([pa.field("id", pa.int64(), nullable=False)])
+    batch = pa.RecordBatch.from_arrays([pa.array([None, None, None], pa.int64())], schema=schema)
+    sink = pa.BufferOutputStream()
+    with pa.ipc.new_stream(sink, schema) as writer:
+        writer.write_batch(batch)
+    # ExecutePlanResponse.arrow_batch=2: row_count=3, data=2.
+    service.execute_payload = message_field(
+        2, varint_field(1, 3) + message_field(2, sink.getvalue().to_pybytes())
+    )
+    assert spark.range(3).collect() == [Row(id=None), Row(id=None), Row(id=None)]
+    assert list(spark.range(3).toLocalIterator()) == [Row(id=None), Row(id=None), Row(id=None)]
