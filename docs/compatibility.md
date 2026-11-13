@@ -594,6 +594,12 @@ unpickles it, as CPython's `copyreg._reconstructor` cannot create the drop-in's 
 class with a native base; protocols 2 and up, pickle's default, load in both clients, and PySpark
 loads the drop-in's at every protocol.
 
+The `TypeError` for too many positional arguments counts them without `self`: where CPython says
+"takes from 2 to 4 positional arguments but 5 were given", the drop-in says "takes from 1 to 3
+positional arguments but 4 were given". A warning that the Rust core raises, such as the
+`FutureWarning` of `registerTempTable`, is attributed to the caller's frame and module, so a
+`warnings.filterwarnings(..., module="pyspark")` does not match it, as it matches PySpark's.
+
 ## Native NaiveBayes
 
 The Rust `ml::NaiveBayes` and `ml::NaiveBayesModel` train and predict through Spark

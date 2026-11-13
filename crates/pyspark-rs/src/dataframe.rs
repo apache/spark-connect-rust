@@ -13,7 +13,7 @@ use crate::interrupt::interruptible;
 use crate::options::{set_option_skip_none, set_options_skip_none, DefaultedOption};
 use crate::row::{FieldConverters, NestedFieldNames};
 use crate::stat_arguments::proto_int;
-use crate::streaming::PyDataStreamWriter;
+use crate::streaming::{proto_bool, ProtoBool, PyDataStreamWriter};
 use crate::types::PyDataType;
 
 /// Flatten `*cols` args that are each a str or a list of str (pyspark
@@ -118,7 +118,7 @@ impl PyDataFrame {
         })?;
         let (batches, schema) = interruptible(py, &self.dataframe.spark_session(), || {
             self.dataframe
-                .collect_record_batches_with_schema()
+                .collect_record_batches_with_schema_checked(check_schema_at_receipt)
                 .map_err(Box::new)
         })?;
         check_schema_conversion(py, schema.as_ref())?;
@@ -1374,18 +1374,21 @@ impl PyDataFrame {
         Ok(PyDataFrame::new(self.dataframe.union(&other.dataframe)))
     }
 
-    /// Union by name, optionally filling columns missing on one side with null.
-    #[pyo3(signature = (other, allowMissingColumns=false))]
+    /// Union by name, optionally filling columns missing on one side with null. The flag is
+    /// converted as PySpark's set operation sets it: None is a `TypeError`.
+    #[pyo3(signature = (other, allowMissingColumns=ProtoBool::default()))]
     fn unionByName(
         &self,
+        py: Python<'_>,
         other: &Bound<'_, PyAny>,
-        allowMissingColumns: bool,
+        allowMissingColumns: ProtoBool,
     ) -> PyResult<PyDataFrame> {
+        let allow_missing_columns = allowMissingColumns.value(py)?;
         let other = self.same_session(other)?;
-        Ok(PyDataFrame::new(
-            self.dataframe
-                .union_by_name_opt(&other.dataframe, allowMissingColumns),
-        ))
+        Ok(PyDataFrame::new(self.dataframe.union_by_name_opt(
+            &other.dataframe,
+            allow_missing_columns,
+        )))
     }
 
     /// Intersect with another DataFrame.
@@ -1945,8 +1948,9 @@ impl PyDataFrame {
     }
 
     /// Reliable checkpoint (materialize + truncate lineage), at once if `eager`, as PySpark's.
-    #[pyo3(signature = (eager=true))]
-    fn checkpoint(&self, py: Python<'_>, eager: bool) -> PyResult<PyDataFrame> {
+    #[pyo3(signature = (eager=DefaultedOption::Omitted), text_signature = "($self, eager=True)")]
+    fn checkpoint(&self, py: Python<'_>, eager: DefaultedOption) -> PyResult<PyDataFrame> {
+        let eager = checkpoint_eager(py, &eager)?;
         Ok(PyDataFrame::new(interruptible(
             py,
             &self.dataframe.spark_session(),
@@ -1956,13 +1960,18 @@ impl PyDataFrame {
 
     /// Local checkpoint, at once if `eager`, kept at `storageLevel`, else at the server's
     /// default, as PySpark's.
-    #[pyo3(name = "localCheckpoint", signature = (eager=true, storageLevel=None))]
+    #[pyo3(
+        name = "localCheckpoint",
+        signature = (eager=DefaultedOption::Omitted, storageLevel=None),
+        text_signature = "($self, eager=True, storageLevel=None)"
+    )]
     fn local_checkpoint(
         &self,
         py: Python<'_>,
-        eager: bool,
+        eager: DefaultedOption,
         storageLevel: Option<Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
+        let eager = checkpoint_eager(py, &eager)?;
         let level = storageLevel
             .filter(|level| !level.is_none())
             .map(|level| crate::storagelevel::storage_level_proto(&level))
@@ -2405,7 +2414,9 @@ impl PyDataFrame {
     fn collect(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
         // Release the GIL across the blocking RPC so other Python threads run.
         let (rows, schema) = interruptible(py, &self.dataframe.spark_session(), || {
-            self.dataframe.collect_with_schema().map_err(Box::new)
+            self.dataframe
+                .collect_with_schema_checked(check_schema_at_receipt)
+                .map_err(Box::new)
         })?;
         rows_to_py(py, &self.dataframe, &rows, schema.as_ref())
     }
@@ -2452,7 +2463,7 @@ impl PyDataFrame {
     fn to_arrow(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let (batches, schema) = interruptible(py, &self.dataframe.spark_session(), || {
             self.dataframe
-                .collect_record_batches_with_schema()
+                .collect_record_batches_with_schema_checked(check_schema_at_receipt)
                 .map_err(Box::new)
         })?;
         check_schema_conversion(py, schema.as_ref())?;
@@ -2632,7 +2643,9 @@ impl PyDataFrame {
     /// Get the first row.
     fn first(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
         let (row, schema) = interruptible(py, &self.dataframe.spark_session(), || {
-            self.dataframe.first_with_schema().map_err(Box::new)
+            self.dataframe
+                .first_with_schema_checked(check_schema_at_receipt)
+                .map_err(Box::new)
         })?;
         Ok(rows_to_py(py, &self.dataframe, row.as_slice(), schema.as_ref())?.pop())
     }
@@ -2655,7 +2668,7 @@ impl PyDataFrame {
         let (rows, schema) = interruptible(py, &self.dataframe.spark_session(), || {
             self.dataframe
                 .limit(num)
-                .collect_with_schema()
+                .collect_with_schema_checked(check_schema_at_receipt)
                 .map_err(Box::new)
         })?;
         rows_to_py(py, &self.dataframe, &rows, schema.as_ref())
@@ -2678,7 +2691,7 @@ impl PyDataFrame {
         let (rows, schema) = interruptible(py, &self.dataframe.spark_session(), || {
             self.dataframe
                 .tail(num)
-                .collect_with_schema()
+                .collect_with_schema_checked(check_schema_at_receipt)
                 .map_err(Box::new)
         })?;
         rows_to_py(py, &self.dataframe, &rows, schema.as_ref())
@@ -4795,6 +4808,55 @@ pub(crate) fn check_schema_conversion(
         Some(UnconvertibleType::SpatialSrid(srid)) => {
             Err(crate::types::invalid_schema_srid(py, srid))
         }
+        None => Ok(()),
+    }
+}
+
+/// The `eager` flag of a checkpoint, which PySpark passes to the constructor of its command: true
+/// when it is omitted, and false for None, which the constructor leaves unset. Another value is
+/// converted as [`proto_bool`] converts it.
+fn checkpoint_eager(py: Python<'_>, eager: &DefaultedOption) -> PyResult<bool> {
+    match eager {
+        DefaultedOption::Omitted => Ok(true),
+        DefaultedOption::Given(value) => {
+            let value = value.bind(py);
+            if value.is_none() {
+                Ok(false)
+            } else {
+                proto_bool(value)
+            }
+        }
+    }
+}
+
+/// The error that [`check_schema_conversion`] raises for a schema that it cannot convert, as the
+/// core error of the same PySpark error class and parameters.
+fn unconvertible_schema_error(
+    schema: &spark_connect::types::DataType,
+) -> Option<spark_connect_core::error::SparkError> {
+    use spark_connect_core::error::{SparkError, SparkErrorKind};
+    unconvertible_type(schema).map(|unconvertible| match unconvertible {
+        UnconvertibleType::NanosecondTimestamp(text) => SparkError::classed(
+            SparkErrorKind::ValueError,
+            "UNSUPPORTED_OPERATION",
+            &[("operation", &format!("data type {text}"))],
+        ),
+        UnconvertibleType::SpatialSrid(srid) => SparkError::classed(
+            SparkErrorKind::IllegalArgument,
+            "ST_INVALID_SRID_VALUE",
+            &[("srid", &srid.to_string())],
+        ),
+    })
+}
+
+/// The check of the schema that the collecting APIs run as the server sends it, as
+/// [`unconvertible_schema_error`]: PySpark raises the error of a schema that it cannot convert
+/// when it receives the schema, before the rows and any later failure of the execution.
+fn check_schema_at_receipt(
+    schema: &spark_connect::types::DataType,
+) -> spark_connect_core::error::Result<()> {
+    match unconvertible_schema_error(schema) {
+        Some(error) => Err(error),
         None => Ok(()),
     }
 }

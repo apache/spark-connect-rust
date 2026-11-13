@@ -391,6 +391,76 @@ def test_schema_surfaces_raise_for_a_spatial_srid_that_pyspark_does_not_take(moc
         assert repr(df) == f"DataFrame[g: {simple}]"
 
 
+def test_collect_raises_the_srid_error_of_the_schema_before_a_later_stream_failure(mock_connect):
+    # As PySpark, which converts the schema of the first response that carries one, so an SRID
+    # that PySpark does not take raises ST_INVALID_SRID_VALUE before the stream fails after the
+    # schema, in each read of the rows, and the rows are not converted.
+    from pyspark.errors import IllegalArgumentException
+
+    spark, service = mock_connect
+    # The settings that toPandas reads before the execution.
+    service.confs = {"spark.sql.session.timeZone": "UTC",
+                     "spark.sql.execution.pandas.structHandlingMode": "legacy",
+                     "spark.sql.execution.arrow.pyspark.selfDestruct.enabled": "false"}
+    # DataType.geometry=26 with its srid=1; DataType.struct=21 (Struct.fields=1; StructField
+    # name=1, data_type=2, nullable=3).
+    geometry = message_field(26, varint_field(1, 2154))
+    schema = message_field(21, message_field(
+        1, message_field(1, "g") + message_field(2, geometry) + varint_field(3, 1)))
+    # ExecutePlanResponse.schema=7, and then the stream fails.
+    service.execute_payloads = [message_field(7, schema)]
+    service.stream_failure = "INTERNAL"
+    df = spark.range(1)
+    for read in (lambda: df.collect(),
+                 lambda: df.toPandas(),
+                 lambda: df.first(),
+                 lambda: df.head(2),
+                 lambda: df.take(2),
+                 lambda: df.tail(2),
+                 lambda: list(df.toLocalIterator())):
+        with pytest.raises(IllegalArgumentException) as e:
+            read()
+        assert e.value.getCondition() == "ST_INVALID_SRID_VALUE"
+        assert e.value.getMessageParameters() == {"srid": "2154"}
+
+
+def test_nested_types_assert_a_data_type_not_a_type_string_as_pyspark():
+    # As PySpark's constructors, which assert that the type is a DataType, so a type string is an
+    # AssertionError, as is any other value. StructType.add takes a type string, which it parses.
+    import pyspark.sql.types as T
+
+    data_type_class = "<class 'pyspark.sql.types.DataType'>"
+    cases = [
+        (lambda: T.StructField("g", "int"),
+         f"dataType int should be an instance of {data_type_class}"),
+        (lambda: T.StructField("g", None),
+         f"dataType None should be an instance of {data_type_class}"),
+        (lambda: T.StructField("g", "geography(2154)"),
+         f"dataType geography(2154) should be an instance of {data_type_class}"),
+        (lambda: T.ArrayType("int"), f"elementType int should be an instance of {data_type_class}"),
+        (lambda: T.ArrayType(5), f"elementType 5 should be an instance of {data_type_class}"),
+        (lambda: T.MapType("int", T.IntegerType()),
+         f"keyType int should be an instance of {data_type_class}"),
+        (lambda: T.MapType(T.IntegerType(), "int"),
+         f"valueType int should be an instance of {data_type_class}"),
+    ]
+    for make, message in cases:
+        with pytest.raises(AssertionError) as e:
+            make()
+        assert str(e.value) == message
+    assert T.StructType().add("g", "string").fields[0].dataType == T.StringType()
+    assert T.StructType().add("g", T.LongType()).fields[0].dataType == T.LongType()
+
+
+def test_bad_type_strings_raise_their_message_not_a_debug_dump(mock_connect):
+    # A type string that does not parse, as the schema of `to`, raises a ValueError with the message
+    # of its error, not the Debug output of the error.
+    spark, _ = mock_connect
+    with pytest.raises(ValueError) as e:
+        spark.range(1).to("foo bar")
+    assert str(e.value) == "invalid type string 'foo bar': [INVALID_DATATYPE_FORMAT]"
+
+
 def test_json_forms_accept_trailing_whitespace_as_pyspark(mock_connect):
     # As PySpark's `_parse_datatype_json_value`, whose patterns match a prefix of the string: the
     # whitespace after a form with an argument or a field is not a part of it. A bare name is
@@ -1010,6 +1080,59 @@ def test_dataframe_plot_is_the_plot_accessor_of_pyspark():
     plot = df.plot
     assert type(plot) is PySparkPlotAccessor
     assert plot.data is df
+
+
+def test_bool_arguments_of_checkpoints_and_union_convert_as_protobuf_does(mock_connect):
+    # As PySpark, which passes the flags into the proto bool fields: upb converts 0, 1, 2 and an
+    # object with __index__ as bools. None is unset in the constructor of a checkpoint command,
+    # but a TypeError in the attribute of a set operation. Any other value is a TypeError.
+    spark, service = mock_connect
+    # ExecutePlanResponse.checkpoint_command_result=19 -> relation=1 -> relation_id=1.
+    service.execute_payload = message_field(19, message_field(1, message_field(1, "r1")))
+
+    class Index:
+        def __index__(self):
+            return 1
+
+    kept = []
+
+    def checkpoint_eager(make):
+        # The checkpoints are kept, as a dropped one sends its removal in the background.
+        kept.append(make())
+        # ExecutePlanRequest.plan=3 -> Plan.command=2 -> Command.checkpoint_command=14, whose
+        # CheckpointCommand.eager=3 is sent when true, and not when false.
+        plan = parse_message(parse_message(service.execute_requests[-1])[3][0])
+        return parse_message(parse_message(plan[2][0])[14][0]).get(3, [])
+
+    def union_allow_missing(value):
+        spark.range(1).unionByName(spark.range(1), value).collect()
+        # ExecutePlanRequest.plan=3 -> Plan.root=1 -> Relation.set_op=6, whose
+        # SetOperation.allow_missing_columns=6 is sent as a present field.
+        plan = parse_message(parse_message(service.execute_requests[-1])[3][0])
+        return parse_message(parse_message(plan[1][0])[6][0]).get(6)
+
+    df = spark.range(1)
+    other = spark.range(1)
+    cases = [(True, [1], [1]), (False, [], [0]), (0, [], [0]), (1, [1], [1]), (2, [1], [1]),
+             (Index(), [1], [1])]
+    for value, eager, allow_missing in cases:
+        assert checkpoint_eager(lambda: df.checkpoint(eager=value)) == eager, value
+        assert checkpoint_eager(lambda: df.localCheckpoint(eager=value)) == eager, value
+        assert union_allow_missing(value) == allow_missing, value
+    # None is unset for the checkpoint command, which the constructor takes, as false.
+    assert checkpoint_eager(lambda: df.checkpoint(eager=None)) == []
+    assert checkpoint_eager(lambda: df.localCheckpoint(eager=None)) == []
+    with pytest.raises(TypeError) as e:
+        df.unionByName(other, None)
+    assert str(e.value) == "'NoneType' object cannot be interpreted as an integer"
+    for value, message in [("x", "'str' object cannot be interpreted as an integer"),
+                           (1.5, "'float' object cannot be interpreted as an integer")]:
+        for make in (lambda: df.checkpoint(eager=value),
+                     lambda: df.localCheckpoint(eager=value),
+                     lambda: df.unionByName(other, value)):
+            with pytest.raises(TypeError) as e:
+                make()
+            assert str(e.value) == message
 
 
 def test_checkpoints_send_their_eager_and_storage_level_as_pyspark(mock_connect):
