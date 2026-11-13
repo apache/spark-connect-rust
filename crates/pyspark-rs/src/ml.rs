@@ -26,6 +26,8 @@ use spark_connect::ml::{
 use spark_connect::types::StructField;
 use spark_connect::DataFrame;
 
+pub(crate) mod stat;
+
 pub(crate) mod evaluation;
 pub use evaluation::{
     PyBinaryClassificationEvaluator, PyClusteringEvaluator, PyMulticlassClassificationEvaluator,

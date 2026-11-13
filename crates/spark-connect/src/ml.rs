@@ -15,6 +15,9 @@ use uuid::Uuid;
 mod recommendation;
 pub use recommendation::*;
 
+mod stat;
+pub use stat::*;
+
 mod evaluation;
 pub use evaluation::*;
 

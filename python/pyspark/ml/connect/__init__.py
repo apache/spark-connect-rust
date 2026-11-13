@@ -51,6 +51,14 @@ from pyspark.ml.connect.recommendation import ALS, ALSModel
 from pyspark.ml.connect.pipeline import Pipeline, PipelineModel
 from pyspark.ml.connect.tuning import CrossValidator, CrossValidatorModel
 from pyspark.ml.connect.fpm import FPGrowth, FPGrowthModel, PrefixSpan
+from pyspark.ml.connect.stat import (
+    ChiSquareTest,
+    Correlation,
+    KolmogorovSmirnovTest,
+    Summarizer,
+    SummaryBuilder,
+    MultivariateGaussian,
+)
 from pyspark._pyspark import MLModel
 
 # Base ABCs (vendored from upstream base.py) and the submodules, matching the reference
@@ -118,6 +126,13 @@ __all__ = [
     "FPGrowth",
     "FPGrowthModel",
     "PrefixSpan",
+    "ChiSquareTest",
+    "Correlation",
+    "KolmogorovSmirnovTest",
+    "Summarizer",
+    "SummaryBuilder",
+    "MultivariateGaussian",
+
 ]
 
 __all__ += [name for name in _native._ml_feature_names if name not in __all__]

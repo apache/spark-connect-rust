@@ -941,3 +941,38 @@ weights, regression through the origin, binary score bins, multiclass log-loss
 clipping and beta, per-label metrics, both silhouette distances, ranking cutoffs,
 invalid inputs, and metric direction. Generic parameter-map APIs and evaluator
 persistence remain separate work.
+
+
+## Native ML statistics
+
+Rust's `ml::{ChiSquareTest, Correlation, KolmogorovSmirnovTest, Summarizer,
+SummaryBuilder, MultivariateGaussian}` and the native Python classes in
+`pyspark.ml.connect.stat` cover the standard `pyspark.ml.stat` APIs from PySpark
+4.3.0. The standard vendored `pyspark.ml.stat` module remains unchanged.
+
+The statistical tests return lazy Spark DataFrames. Chi-square supports both the
+vector result and one row per feature (`flatten=True`); correlation supports
+Pearson and Spearman; the KS test supports Spark's normal distribution, with
+optional mean and standard deviation. Spark validates column types and
+statistical arguments. Pandas DataFrames are rejected before serialization or RPC.
+Results retain any fitted models used by their input plans.
+
+`Summarizer.metrics(...).summary(features, weight)` builds a SQL aggregate that
+works in `select` and grouped aggregations. All ten metrics are supported:
+`mean`, `sum`, `variance`, `std`, `count`, `numNonZeros`, `max`, `min`, `normL1`,
+and `normL2`. Each also has a static convenience method; Rust uses snake_case
+(`num_non_zeros`, `norm_l1`, `norm_l2`). Omitted weights default to 1.0. Inputs
+are ML vector Columns, including sparse vectors. Metric names are case sensitive;
+`numNonZeros` uses a capital Z. An empty metric selection returns an empty struct.
+
+`MultivariateGaussian` is a mutable mean/covariance holder, with no computation
+or extra validation. Rust uses `MlVector` and `MlMatrix` (dense or sparse storage);
+the Python holder preserves the original vector and matrix objects. Python
+results materialize vectors and matrices through the existing ML UDT conversion.
+
+Reference protobuf fixtures and live Rust/Python tests cover every metric with
+and without weights, grouped summaries, chi-square flattening, both correlation
+methods, KS parameters, constant-feature NaNs, invalid inputs, and lazy model
+ownership. Python tests additionally compare sparse and dense inputs. Native
+classes are asserted explicitly; the tests also run separately with official
+PySpark as the reference.
