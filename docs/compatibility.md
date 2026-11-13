@@ -20,6 +20,17 @@ microseconds. Downstream exhaustive matches on these public enums must handle
 the new variant. Rust interval map keys are stringified as raw microseconds;
 Python `timedelta` map keys are not yet supported.
 
+`DataFrame::sort`, `order_by`, `sort_within_partitions`, `agg`, `observe`, `observe_with`,
+`hint_expressions`, `repartition_by_range`, `repartition_by_range_opt` and
+`repartition_by_expressions`, `GroupedData::agg`, and the `partition_by` and `order_by` of
+`Window` and `WindowSpec` take `impl IntoIterator<Item = impl Into<Column>>`, as `select` and
+`group_by` do: Columns, column names or expressions, such as `df.sort([col("x").desc()])` and
+`.agg([sum(col("id")).alias("total")])`, without `.expression().clone()`. The `Vec<Expression>`
+that they took still compiles, by the new `From<Expression> for Column`, and so does the
+`Vec<SortOrder>` of the `order_by` of a window, by `From<SortOrder> for Column`; there a Column
+that is not a sort order is sorted ascending, nulls first, as PySpark's `WindowSpec.orderBy`
+sorts it. An empty `vec![]` has no item type to infer: pass `Vec::<Column>::new()` instead.
+
 `BinaryClassificationEvaluator::set_score_col` and `score_col`, and the Python
 `scoreCol=` argument and `setScoreCol` of v4.2.0 are removed, without an alias:
 Spark's evaluator has no `scoreCol` param, so no value of it worked on the server.
@@ -583,3 +594,29 @@ This native API covers construction, setters, fit and DataFrame transform.
 Cluster-center/summary/cost inspection, single-vector prediction and persistence
 are outside this surface. The vendored `pyspark.ml.clustering` API retains its
 existing implementation.
+
+
+## Native GaussianMixture
+
+Rust `ml::GaussianMixture` and `ml::GaussianMixtureModel` train Gaussian mixture
+models and produce cluster assignments and component probabilities through Spark
+Connect's cached-model protocol. Python exports the native estimator from
+`pyspark.ml.connect` and `pyspark.ml.connect.clustering`; `fit` returns the shared
+native `MLModel`.
+
+All nine constructor parameters and named setters are supported: `featuresCol`,
+`predictionCol`, `k`, `probabilityCol`, `tol`, `maxIter`, `seed`, `aggregationDepth`
+and `weightCol`. Rust also provides corresponding getters. The keyword-only
+Python constructor matches official PySpark's order/defaults and conversions.
+Unset values are omitted so the server uses its defaults.
+
+Live tests cover one- and two-dimensional mixtures, two/three components,
+normalized probabilities and assignments, dense/sparse vectors, weights, seeded
+reproducibility, independent fits, disabled probability output, server validation,
+session isolation and lazy model lifetime. Golden fixtures compare all nine
+parameters at six signed seed/integer-width boundaries with official PySpark.
+
+The native surface covers construction, parameter setters, fit and DataFrame
+transform. Component/weight/covariance inspection, training summaries,
+single-vector prediction and persistence are outside this surface. The vendored
+`pyspark.ml.clustering` API retains its existing implementation.

@@ -17,10 +17,7 @@ let df = spark.read()
 
 df
     .group_by([f::col("category")])
-    .agg(vec![
-        f::sum(f::col("amount")).expression().clone(),
-        f::avg(f::col("price")).expression().clone(),
-    ])
+    .agg([f::sum(f::col("amount")), f::avg(f::col("price"))])
     .show(20)?;
 ```
 
@@ -40,7 +37,7 @@ df
         f::split(f::col("line"), lit_string(" "))
     ).alias("word")])
     .group_by([f::col("word")])
-    .agg(vec![f::count(f::col("word")).expression().clone()])
+    .agg([f::count(f::col("word"))])
     .show(20)?;
 ```
 

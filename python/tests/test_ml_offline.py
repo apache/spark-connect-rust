@@ -856,6 +856,10 @@ _NATIVE_PARAMS = {
         featuresCol="str", predictionCol="str", maxIter="int", seed="int", k="int",
         minDivisibleClusterSize="float", distanceMeasure="str", weightCol="str",
     ),
+    "GaussianMixture": dict(
+        featuresCol="str", predictionCol="str", k="int", probabilityCol="str", tol="float",
+        maxIter="int", seed="int", aggregationDepth="int", weightCol="str",
+    ),
     "KMeans": dict(
         featuresCol="str", predictionCol="str", k="int", initMode="str", initSteps="int",
         tol="float", maxIter="int", seed="int", distanceMeasure="str", weightCol="str",
@@ -3068,6 +3072,64 @@ def test_decision_tree_regressor_native_parameters_match_official_fixture(ml_moc
             estimator = DecisionTreeRegressor(**values)
         operator, params = _native_request(spark, service, estimator, models)
         assert operator.name == "org.apache.spark.ml.regression.DecisionTreeRegressor"
+        assert params == pb2.MlParams.FromString(base64.b64decode(case["params_b64"]))
+
+
+@pytest.mark.parametrize("use_setters", [False, True], ids=["constructor", "setters"])
+def test_gaussian_mixture_native_parameters_match_official_fixture(ml_mock, use_setters):
+    import base64
+    import inspect
+    import json
+    from pathlib import Path
+
+    from pyspark import _pyspark as native
+    from pyspark.ml.connect import GaussianMixture as exported
+    from pyspark.ml.connect.clustering import GaussianMixture
+
+    assert exported is GaussianMixture is native.GaussianMixture
+    defaults = dict(
+        featuresCol="features",
+        predictionCol="prediction",
+        k=2,
+        probabilityCol="probability",
+        tol=0.01,
+        maxIter=100,
+        seed=None,
+        aggregationDepth=2,
+        weightCol=None,
+    )
+    signature = inspect.signature(GaussianMixture)
+    assert list(signature.parameters) == list(defaults)
+    for name, value in defaults.items():
+        assert signature.parameters[name].kind == inspect.Parameter.KEYWORD_ONLY
+        assert signature.parameters[name].default == value
+    fixture = json.loads(
+        (Path(__file__).resolve().parents[2] / "tests/golden/gaussian_mixture.json").read_text()
+    )
+    spark, service = ml_mock
+    models = []
+    _, params = _native_request(spark, service, GaussianMixture(), models)
+    assert params == pb2.MlParams()
+    for case in fixture["cases"]:
+        values = dict(
+            featuresCol="input",
+            predictionCol="cluster",
+            k=3,
+            probabilityCol="probs",
+            tol=1e-5,
+            maxIter=50,
+            seed=case["seed"],
+            aggregationDepth=3,
+            weightCol="weight",
+        )
+        if use_setters:
+            estimator = GaussianMixture()
+            for name, value in values.items():
+                assert getattr(estimator, "set" + name[0].upper() + name[1:])(value) is estimator
+        else:
+            estimator = GaussianMixture(**values)
+        operator, params = _native_request(spark, service, estimator, models)
+        assert operator.name == "org.apache.spark.ml.clustering.GaussianMixture"
         assert params == pb2.MlParams.FromString(base64.b64decode(case["params_b64"]))
 
 

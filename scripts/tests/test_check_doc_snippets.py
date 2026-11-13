@@ -17,7 +17,10 @@
 """Check metadata-only compilation with rustc; no Spark server or crate build needed."""
 
 import importlib.util
+import io
+import json
 import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -64,6 +67,30 @@ class CheckDocSnippetsTests(unittest.TestCase):
                 ok, error = checker.check_block(code, Path(td), 1)
                 self.assertFalse(ok)
                 self.assertIn(diagnostic, error)
+
+
+class CrateArtifactsTests(unittest.TestCase):
+    def test_failed_build_prints_the_rendered_errors_of_rustc(self):
+        # cargo prints the errors of rustc as JSON on stdout with --message-format=json.
+        error = {
+            "reason": "compiler-message",
+            "message": {"level": "error", "rendered": "error[E0425]: cannot find value `x`\n"},
+        }
+        warning = {
+            "reason": "compiler-message",
+            "message": {"level": "warning", "rendered": "warning: unused variable\n"},
+        }
+        stdout = "\n".join([json.dumps(warning), json.dumps(error), "not json"])
+        failed = subprocess.CompletedProcess([], 101, stdout=stdout, stderr="error: build failed")
+        with (
+            patch.object(checker.subprocess, "run", return_value=failed),
+            patch("sys.stdout", new_callable=io.StringIO) as out,
+        ):
+            self.assertEqual(checker.crate_artifacts(), (None, []))
+        printed = out.getvalue()
+        self.assertIn("error[E0425]: cannot find value `x`", printed)
+        self.assertNotIn("unused variable", printed)
+        self.assertIn("error: build failed", printed)
 
 
 if __name__ == "__main__":

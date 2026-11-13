@@ -362,6 +362,55 @@ fn dataframe_metadata_json_semantics() {
     assert_eq!(parts.len(), 2);
 }
 
+/// `observe_with` takes Columns, as `select` does, and the `Vec<Expression>` that it took
+/// before: an action sets the same metrics of both in their observations.
+#[test]
+fn observe_with_takes_columns_and_expressions_alike() {
+    if !should_run() {
+        return;
+    }
+    use spark_connect::observation::Observation;
+    use spark_connect_proto::expression::literal::LiteralType;
+
+    let df = df4(&session());
+    let of_columns = Observation::new("of_columns");
+    let of_expressions = Observation::new("of_expressions");
+    df.observe_with(
+        &of_columns,
+        [
+            f::count(lit(1)).alias("rows"),
+            f::max(col("id")).alias("top"),
+        ],
+    )
+    .unwrap()
+    .collect()
+    .unwrap();
+    df.observe_with(
+        &of_expressions,
+        vec![
+            f::count(lit(1)).alias("rows").expression().clone(),
+            f::max(col("id")).alias("top").expression().clone(),
+        ],
+    )
+    .unwrap()
+    .collect()
+    .unwrap();
+    let metrics = |observation: &Observation| -> Vec<(String, Option<LiteralType>)> {
+        observation
+            .get()
+            .unwrap()
+            .into_iter()
+            .map(|(key, value)| (key, value.literal_type))
+            .collect()
+    };
+    let expected = vec![
+        ("rows".to_string(), Some(LiteralType::Long(4))),
+        ("top".to_string(), Some(LiteralType::Integer(3))),
+    ];
+    assert_eq!(metrics(&of_columns), expected);
+    assert_eq!(metrics(&of_expressions), expected);
+}
+
 /// `GroupedData.pivot` takes explicit values of the types of the Spark literals, dates,
 /// timestamps and decimals too: they give the columns of the pivot without values, which PySpark
 /// computes for the same data. PySpark itself rejects those types as values (NOT_EXPECTED_TYPE),

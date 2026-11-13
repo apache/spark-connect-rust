@@ -57,9 +57,9 @@ let df = spark.range(20)?;
 df
     .with_column("category", f::col("id") % lit(3))
     .group_by([f::col("category")])
-    .agg(vec![
-        f::sum(f::col("id")).alias("total").expression().clone(),
-        f::avg(f::col("id")).alias("average").expression().clone(),
+    .agg([
+        f::sum(f::col("id")).alias("total"),
+        f::avg(f::col("id")).alias("average"),
     ])
     .show(20)?;
 ```
