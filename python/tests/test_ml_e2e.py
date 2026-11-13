@@ -494,6 +494,70 @@ def test_ml_connect_evaluators_take_the_columns_and_the_pandas_frames_of_pyspark
         accuracy.evaluate([(1, 1)])
 
 
+def test_ml_connect_pandas_frames_name_int_labels_and_read_their_columns_as_pyspark(session):
+    # As PySpark's pandas DataFrames: an evaluator selects the columns it reads, so a uint64
+    # column that Arrow does not take is not sent, and a native model that sends the whole frame
+    # names its int label "0", as createDataFrame names it by its str, and keeps it in its output.
+    import numpy as np
+    import pandas as pd
+    from pyspark.ml.connect import KMeans
+    from pyspark.ml.connect.evaluation import RegressionEvaluator
+
+    pdf = pd.DataFrame(
+        {
+            0: [1.0, 2.0, 3.0],
+            "label": [1.0, 2.0, 3.0],
+            "prediction": [1.0, 2.5, 3.0],
+            "u": np.array([1, 2, 3], dtype=np.uint64),
+        }
+    )
+    evaluator = RegressionEvaluator(labelCol="label", predictionCol="prediction")
+    assert evaluator.evaluate(pdf) == pytest.approx(0.28867513459481287)
+
+    train = session.createDataFrame(
+        [([0.0, 1.0], 0.0), ([1.0, 0.0], 1.0), ([2.0, 2.0], 1.0), ([3.0, 1.0], 0.0)],
+        schema=["features", "label"],
+    )
+    model = KMeans(k=2, seed=1).fit(train)
+    frame = pd.DataFrame({0: [7, 8], "features": [np.array([0.0, 1.0]), np.array([3.0, 1.0])]})
+    out = model.transform(frame)
+    assert list(out.columns) == [0, "features", "prediction"]
+    assert out[0].tolist() == [7, 8]
+    assert out["prediction"].tolist()[0] != out["prediction"].tolist()[1]
+
+
+def test_ml_connect_columns_spelled_in_another_case_than_the_schema_as_pyspark(session):
+    # As Spark resolves a column name regardless of case: a native fit, transform and evaluate
+    # whose params spell a column FEATURES, LABEL or PREDICTION, which the schema spells in lower
+    # case, read the column as the schema spells it, as the JVM reads the params it is given.
+    from pyspark.ml.connect import KMeans
+    from pyspark.ml.connect.classification import LogisticRegression
+    from pyspark.ml.connect.evaluation import RegressionEvaluator
+
+    train = session.sql(
+        "select * from values (array(0.0D, 1.0D), 0.0D), (array(1.0D, 0.0D), 1.0D), "
+        "(array(2.0D, 2.0D), 1.0D), (array(3.0D, 1.0D), 0.0D) as t(features, label)"
+    )
+    model = KMeans(k=2, seed=1, featuresCol="FEATURES").fit(train)
+    out = model.transform(train.selectExpr("features AS FEATURES", "label")).toPandas()
+    assert list(out.columns) == ["FEATURES", "label", "prediction"]
+    assert set(out["prediction"]) <= {0, 1}
+
+    fitted = LogisticRegression(featuresCol="FEATURES", labelCol="LABEL", maxIter=5).fit(
+        train.selectExpr("features AS FEATURES", "label AS LABEL")
+    )
+    out = fitted.transform(train.selectExpr("features AS FEATURES", "label")).toPandas()
+    assert list(out.columns) == ["FEATURES", "label", "prediction", "probability"]
+
+    # The schema spells the label LABEL and the prediction prediction: the evaluator reads both.
+    scored = session.sql(
+        "select label AS LABEL, cast(label AS double) AS prediction "
+        "from values (1.0D), (2.0D) as t(label)"
+    )
+    metric = RegressionEvaluator(labelCol="LABEL", predictionCol="PREDICTION").evaluate(scored)
+    assert metric == pytest.approx(0.0)
+
+
 def test_ml_connect_scalers_and_estimators_take_the_array_columns_of_pyspark(session):
     # The examples of PySpark's MaxAbsScaler, StandardScaler and LogisticRegression, whose
     # pyspark.ml.connect classes compute on arrays: the scalers are PySpark's own, and output an

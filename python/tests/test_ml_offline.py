@@ -373,14 +373,16 @@ def test_ml_connect_native_estimators_take_the_array_columns_of_pyspark(ml_mock)
     featured = [name for name, params in _NATIVE_PARAMS.items() if "featuresCol" in params]
     assert {"LogisticRegression", "KMeans"} <= set(featured)
     estimators = [getattr(connect, name)() for name in featured]
-    reads = {"LogisticRegression": ["features", "label"]}
+    # The fit of LogisticRegression selects its columns by the spelling of the schema too.
+    reads = {"LogisticRegression": ["Features", "label"]}
     for estimator in estimators:
         name = type(estimator).__name__
         df, fit, transformed = requests(estimator)
-        # The params name the column as they were given, and the dataset has the vector of the
-        # array in its place. (The params that a class sends of itself: see _defaults_sent.)
+        # The params name the column as the schema spells it, "Features" (the default featuresCol
+        # is "features"), and the dataset has the vector of the array in its place. (The params
+        # that a class sends of itself: see _defaults_sent.)
         sent = {k: v.string for k, v in fit.params.params.items() if k not in _defaults_sent(name)}
-        assert sent == {}, name
+        assert sent == {"featuresCol": "Features"}, name
         assert _defaults_sent(name).keys() <= fit.params.params.keys(), name
         assert selected(fit.dataset.with_columns.input, df, reads.get(name)), name
         assert _aliases(fit.dataset.with_columns) == [
@@ -719,6 +721,97 @@ def test_ml_connect_pandas_frames_send_their_nan_as_pyspark(ml_mock):
     assert table.column("s").to_pylist() == ["a", None]
     first, second = table.column("x").to_pylist()
     assert math.isnan(first[0]) and first[1] == 1.0 and second == [2.0, 4.0]
+
+
+def test_ml_connect_pandas_frames_name_and_read_their_columns_as_pyspark(ml_mock):
+    # As PySpark's evaluators, which take a pandas DataFrame and read only their input columns of
+    # it (aggregate_dataframe selects them: dataframe[columns]): the columns of the frame are named
+    # by the str of their labels, as createDataFrame names them, so the label 0 is "0" and a label
+    # that is not a string is no TypeError, and only the columns that the evaluator reads are sent,
+    # so a column of a type that Arrow does not take, a uint64 here, is not sent either.
+    import numpy as np
+    import pandas as pd
+    import pyarrow as pa
+    import pyspark.ml.connect as connect
+    from _mock_connect_server import ddl_data_type
+
+    spark, service = ml_mock
+    service.data_type = ddl_data_type("0 double, label double, prediction double")
+    pdf = pd.DataFrame(
+        {
+            0: [1.0, 2.0, 3.0],
+            "label": [1.0, 2.0, 3.0],
+            "prediction": [1.0, 2.5, 3.0],
+            "u": np.array([1, 2, 3], dtype=np.uint64),
+        }
+    )
+    models = []  # Kept alive, so that no model is released during the checks.
+
+    sent = len(service.execute_requests)
+    service.execute_payload = _ml_result(param=pb2.Expression.Literal(double=0.25))
+    assert connect.RegressionEvaluator().evaluate(pdf) == 0.25
+    evaluate = _commands_but_deletes(service, sent)[0].ml_command.evaluate
+    table = pa.ipc.open_stream(_local_data(evaluate.dataset)).read_all()
+    assert table.column_names == ["prediction", "label"]
+    assert table.column("label").to_pylist() == [1.0, 2.0, 3.0]
+
+    # The other native classes send the whole of the frame, which its int label names "0".
+    sent = len(service.execute_requests)
+    service.execute_payload = _operator_info("model-1")
+    models.append(connect.KMeans().fit(pdf.drop(columns=["u"])))
+    fit = _commands_but_deletes(service, sent)[0].ml_command.fit
+    table = pa.ipc.open_stream(_local_data(fit.dataset)).read_all()
+    assert table.column_names == ["0", "label", "prediction"]
+
+
+def test_ml_connect_native_columns_are_spelled_as_the_schema_of_the_dataset(ml_mock):
+    # As Spark resolves a column name regardless of case, but the JVM reads the column params as
+    # they are given: a native fit, transform or evaluate spells its featuresCol and labelCol as
+    # the schema of the dataset spells them, which is also the name of the columns that its select
+    # and its array of numbers take. PySpark's LogisticRegression selects its columns, which Spark
+    # resolves regardless of case, so the fit sends the schema's spelling of them too.
+    import pyspark.ml.connect as connect
+    from _mock_connect_server import ddl_data_type
+
+    spark, service = ml_mock
+    service.data_type = ddl_data_type("id bigint, features array<double>, label double")
+    df = spark.range(1)
+    models = []  # Kept alive, so that no model is released during the checks.
+
+    def fit(estimator):
+        sent = len(service.execute_requests)
+        service.execute_payload = _operator_info("model-1")
+        service.query_payload = _labels_result()
+        models.append(estimator.fit(df))
+        service.query_payload = None
+        return _commands_but_deletes(service, sent)[0].ml_command.fit
+
+    kmeans = fit(connect.KMeans(featuresCol="FEATURES"))
+    assert kmeans.params.params == {"featuresCol": pb2.Expression.Literal(string="features")}
+    assert _aliases(kmeans.dataset.with_columns) == [(["features"], _array_to_vector("features"))]
+
+    logistic = fit(connect.LogisticRegression(featuresCol="FEATURES", labelCol="LABEL"))
+    assert logistic.params.params["featuresCol"] == pb2.Expression.Literal(string="features")
+    assert logistic.params.params["labelCol"] == pb2.Expression.Literal(string="label")
+    columns = logistic.dataset.with_columns.input.project.expressions
+    assert [_text(column) for column in columns] == [_attribute("features"), _attribute("label")]
+
+    # The transform of a model whose featuresCol is given in another case than the schema of the
+    # transformed DataFrame, which spells it FEATURES, sends the spelling of that schema.
+    service.data_type = ddl_data_type("id bigint, FEATURES array<double>, label double")
+    transformed = _relation(models[-1].transform(spark.range(1)))
+    transform = transformed.drop.input.with_columns.input.ml_relation.transform
+    assert transform.params.params["featuresCol"] == pb2.Expression.Literal(string="FEATURES")
+
+    # The evaluate of a DataFrame sends the labelCol and the predictionCol that the schema spells.
+    service.data_type = ddl_data_type("label double, prediction double")
+    sent = len(service.execute_requests)
+    service.execute_payload = _ml_result(param=pb2.Expression.Literal(double=0.5))
+    evaluator = connect.RegressionEvaluator(labelCol="LABEL", predictionCol="PREDICTION")
+    assert evaluator.evaluate(spark.range(1)) == 0.5
+    evaluate = _commands_but_deletes(service, sent)[0].ml_command.evaluate
+    assert evaluate.params.params["labelCol"] == pb2.Expression.Literal(string="label")
+    assert evaluate.params.params["predictionCol"] == pb2.Expression.Literal(string="prediction")
 
 
 def test_ml_connect_logistic_regression_transforms_an_empty_pandas_frame_as_pyspark(ml_mock):
