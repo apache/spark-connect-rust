@@ -62,11 +62,45 @@ impl PartialEq for ExpressionNode {
 
 impl Drop for ExpressionNode {
     fn drop(&mut self) {
-        let mut pending = std::mem::take(&mut self.children);
-        while let Some(expression) = pending.pop() {
-            if let Some(mut node) = Arc::into_inner(expression.node) {
-                pending.extend(std::mem::take(&mut node.children));
+        if !self.children.is_empty() {
+            let mut pending = std::mem::take(&mut self.children);
+            while let Some(expression) = pending.pop() {
+                // Leaves cannot recurse through structural inputs. Drop them in place
+                // rather than moving their complete node out of its Arc allocation.
+                if expression.children().is_empty() {
+                    drop(expression);
+                } else if let Some(mut node) = Arc::into_inner(expression.node) {
+                    pending.extend(std::mem::take(&mut node.children));
+                }
             }
+        }
+        // These payloads have no recursive fields once their inputs are drained.
+        // Keep recursive literal/type/protobuf/plan payloads on the guarded path.
+        let shallow_payload = match &self.kind {
+            ExpressionKind::Literal(literal) => matches!(
+                literal,
+                LiteralExpression::Boolean(_)
+                    | LiteralExpression::Byte(_)
+                    | LiteralExpression::Short(_)
+                    | LiteralExpression::Integer(_)
+                    | LiteralExpression::Long(_)
+                    | LiteralExpression::Float(_)
+                    | LiteralExpression::Double(_)
+                    | LiteralExpression::Decimal { .. }
+                    | LiteralExpression::String(_)
+                    | LiteralExpression::Binary(_)
+                    | LiteralExpression::Date(_)
+                    | LiteralExpression::Timestamp(_)
+                    | LiteralExpression::TimestampNtz(_)
+                    | LiteralExpression::DayTimeInterval(_)
+                    | LiteralExpression::YearMonthInterval(_)
+                    | LiteralExpression::Time { .. }
+            ),
+            ExpressionKind::ColumnReference(_) | ExpressionKind::UnresolvedFunction { .. } => true,
+            _ => false,
+        };
+        if matches!(self.ty, ExpressionType::Unresolved) && shallow_payload {
+            return;
         }
         // Opaque protobuf and type payloads retain their recursive destruction behavior.
         let kind = std::mem::replace(&mut self.kind, ExpressionKind::SQLExpression(String::new()));
@@ -159,7 +193,7 @@ pub enum ExpressionKind {
     WindowExpression {
         partition_count: usize,
         order_spec: Vec<SortOrderProperties>,
-        frame_spec: Option<(u32, FrameBoundary, FrameBoundary)>,
+        frame_spec: Option<Arc<(u32, FrameBoundary, FrameBoundary)>>,
     },
     LambdaFunction {
         arguments: Vec<UnresolvedNamedLambdaVariable>,
@@ -324,40 +358,19 @@ impl ExpressionKind {
         Ok(())
     }
 
-    // Rebuilding clones the payload and reuses its declared type metadata.
-    // Guard typed-null and structured-cast payload type clones at each level.
-    fn clone_for_rebuild(&self) -> Self {
-        match self {
-            Self::Literal(LiteralExpression::Null(ty)) => {
-                Self::Literal(LiteralExpression::Null(clone_declared_type(ty)))
-            }
-            Self::Cast {
-                target: CastTarget::Type(ty),
-                eval_mode,
-            } => Self::Cast {
-                target: CastTarget::Type(clone_declared_type(ty)),
-                eval_mode: *eval_mode,
-            },
-            _ => self.clone(),
-        }
-    }
-
     #[inline]
     fn declared_type(&self) -> ExpressionType {
-        let data_type = match self {
-            Self::Literal(LiteralExpression::Null(data_type)) => Some(data_type),
-            Self::Cast {
+        match self {
+            Self::Literal(LiteralExpression::Null(data_type))
+            | Self::Cast {
                 target: CastTarget::Type(data_type),
                 ..
-            } => Some(data_type),
+            } => ExpressionType::Known(Arc::clone(data_type)),
             Self::CommonInlineUserDefinedFunction { python_udf, .. } => {
-                Some(&python_udf.output_type)
+                ExpressionType::Known(Arc::new(clone_declared_type(&python_udf.output_type)))
             }
-            _ => None,
-        };
-        data_type.map_or(ExpressionType::Unresolved, |ty| {
-            ExpressionType::Known(Arc::new(clone_declared_type(ty)))
-        })
+            _ => ExpressionType::Unresolved,
+        }
     }
 }
 
@@ -511,7 +524,7 @@ impl Expression {
         // Reject malformed layouts before cloning recursive or expensive payloads.
         self.kind().validate_inputs(children.len())?;
         Ok(Self::allocate(
-            self.kind().clone_for_rebuild(),
+            self.kind().clone(),
             children,
             self.node.ty.clone(),
             self.node.origin.clone(),
@@ -712,7 +725,7 @@ impl Expression {
                 K::WindowExpression {
                     partition_count,
                     order_spec,
-                    frame_spec: value.frame_spec,
+                    frame_spec: value.frame_spec.map(Arc::new),
                 }
             }
             S::LambdaFunction(value) => {
@@ -842,7 +855,7 @@ impl Expression {
                         null_ordering: properties.null_ordering,
                     })
                     .collect(),
-                frame_spec: frame_spec.clone(),
+                frame_spec: frame_spec.as_deref().cloned(),
             })),
             K::LambdaFunction { arguments } => S::LambdaFunction(Box::new(LambdaFunction {
                 function: children[0].clone(),

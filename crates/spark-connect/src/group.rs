@@ -1602,7 +1602,7 @@ mod tests {
                 .unwrap_or_else(|error| panic!("{accepted:?}: {error}"));
         }
         for (rejected, item_type) in [
-            (L::Null(DataType::Long), "NoneType"),
+            (L::null(DataType::Long), "NoneType"),
             (
                 L::Decimal {
                     value: "1.5".into(),

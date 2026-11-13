@@ -52,12 +52,20 @@ This field does not infer function return types, resolve names, or validate
 coercions. Construction computes this immutable type metadata from the payload;
 input replacement shares it because the payload is unchanged.
 
-UDF payloads and declared types are shared across input replacements, so
-rewriting arguments copies neither the pickled command nor the output schema.
-Reconstructing an owned `ExpressionSpec` copies
-that payload as required by the builder's ownership contract. Rebuilding typed
-nulls and structured casts guards each recursive declared-type clone level;
-arbitrary JSON field metadata retains its existing clone behavior.
+Typed-null and structured-cast types use `Arc<DataType>`, as does the known-type
+cache. The canonical window kind shares its optional frame through an `Arc`.
+These payloads stay outside the inline kind, keeping their size from enlarging
+every expression node. UDF payloads and declared types are shared across input
+replacements, so rewriting arguments copies neither the pickled command nor the
+output schema. Reconstructing an owned `ExpressionSpec` retains shared types;
+payloads required as owned values by its builders are cloned.
+
+For direct enum construction, migrate `LiteralExpression::Null(data_type)` to
+`LiteralExpression::null(data_type)` or wrap the type in an `Arc`. Likewise,
+`CastTarget::Type` now takes an `Arc<DataType>`; `Cast::new(child, data_type)`
+continues to accept an owned type. Direct construction of
+`ExpressionKind::WindowExpression` wraps a present frame tuple in an `Arc`;
+`WindowExpressionWrapper::new` retains its owned-frame argument.
 
 ## Ordered inputs
 

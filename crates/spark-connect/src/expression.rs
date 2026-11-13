@@ -624,7 +624,7 @@ impl Expression {
                         .iter()
                         .zip(order_spec.iter())
                         .map(|(base, order)| (base, order.ascending, order.null_ordering)),
-                    frame_spec.as_ref(),
+                    frame_spec.as_deref(),
                 )
             }
             ExpressionKind::LambdaFunction { arguments } => {
@@ -856,7 +856,7 @@ impl Expression {
                         .iter()
                         .zip(order_spec.iter())
                         .map(|(base, order)| (base, order.ascending, order.null_ordering)),
-                    frame_spec.as_ref(),
+                    frame_spec.as_deref(),
                 );
             }
             ExpressionKind::LambdaFunction { arguments } => {
@@ -915,7 +915,9 @@ impl Expression {
 /// `pyspark.sql.connect.expressions.LiteralExpression`
 #[derive(Debug, Clone, PartialEq)]
 pub enum LiteralExpression {
-    Null(DataType),
+    /// A typed null. Share the uncommon type payload so scalar literals stay compact.
+    /// Use [`LiteralExpression::null`] to construct one from an owned type.
+    Null(Arc<DataType>),
     Boolean(bool),
     Byte(i32),
     Short(i32),
@@ -1077,7 +1079,7 @@ impl LiteralExpression {
 
     /// Construct a null literal of a specific type.
     pub fn null(data_type: DataType) -> Self {
-        LiteralExpression::Null(data_type)
+        LiteralExpression::Null(Arc::new(data_type))
     }
 
     /// Construct an integer literal.
@@ -1335,7 +1337,8 @@ pub struct Cast {
 /// string form, `Column.cast(IntegerType())` the structured form.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CastTarget {
-    Type(DataType),
+    /// A shared structured type. [`Cast::new`] accepts an owned type.
+    Type(Arc<DataType>),
     TypeStr(String),
 }
 
@@ -1350,7 +1353,7 @@ impl Cast {
     pub fn new(child: Expression, to_type: DataType) -> Self {
         Self {
             child,
-            target: CastTarget::Type(to_type),
+            target: CastTarget::Type(Arc::new(to_type)),
             eval_mode: None,
         }
     }

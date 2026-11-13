@@ -1,7 +1,7 @@
 //! Public structural expression contracts, independent of a running Connect server.
 
 use spark_connect::expression::{
-    Alias, CaseWhen, Cast, ColumnReference, Expression, ExpressionKind, ExpressionSpec,
+    Alias, CaseWhen, Cast, CastTarget, ColumnReference, Expression, ExpressionKind, ExpressionSpec,
     ExpressionType, FrameBoundary, InvalidExpressionInputs, LambdaFunction, LiteralExpression,
     NullOrdering, SortOrder, SortOrderProperties, UnresolvedNamedLambdaVariable,
     WindowExpressionWrapper, MAX_EXPRESSION_DEPTH,
@@ -89,10 +89,10 @@ fn convenience_leaves_match_typed_specs_including_type_wire_and_origin() {
     };
     for literal in [
         LiteralExpression::Long(7),
-        LiteralExpression::Null(DataType::Array {
+        LiteralExpression::Null(Arc::new(DataType::Array {
             element_type: Box::new(DataType::Long),
             contains_null: true,
-        }),
+        })),
     ] {
         compare(
             Expression::literal(literal.clone()),
@@ -277,6 +277,35 @@ fn window_children_preserve_order_flags_and_frame_payload() {
     let rebuilt = root
         .with_children(expected[..3].iter().cloned().chain([replacement.clone()]))
         .unwrap();
+    let transformed = root
+        .try_transform_up(|node| {
+            Ok::<_, InvalidExpressionInputs>(if node.ptr_eq(&expected[3]) {
+                replacement.clone()
+            } else {
+                node.clone()
+            })
+        })
+        .unwrap();
+    assert!(!transformed.ptr_eq(&root));
+    assert_inputs(&transformed, rebuilt.children());
+    assert_eq!(transformed.to_proto(), rebuilt.to_proto());
+    let ExpressionKind::WindowExpression {
+        frame_spec: Some(frame),
+        ..
+    } = root.kind()
+    else {
+        panic!("expected a canonical window frame");
+    };
+    for expression in [&rebuilt, &transformed] {
+        let ExpressionKind::WindowExpression {
+            frame_spec: Some(rebuilt_frame),
+            ..
+        } = expression.kind()
+        else {
+            panic!("rebuilt windows must retain their frame");
+        };
+        assert!(Arc::ptr_eq(frame, rebuilt_frame));
+    }
     let Some(proto::expression::ExprType::Window(window)) = rebuilt.to_proto().expr_type else {
         panic!("expected a window expression");
     };
@@ -408,16 +437,33 @@ fn declared_types_survive_rebuild_while_columns_and_functions_stay_unresolved() 
         Expression::function("abs", vec![input]).ty(),
         ExpressionType::Unresolved
     ));
-    let typed_null = Expression::literal(LiteralExpression::Null(DataType::Long));
+    let typed_null = Expression::literal(LiteralExpression::Null(Arc::new(DataType::Long)));
     assert_inputs(&typed_null, &[]);
     assert!(matches!(
         typed_null.ty(),
         ExpressionType::Known(ty) if ty.as_ref() == &DataType::Long
     ));
-    assert_eq!(
-        typed_null.with_children([]).unwrap().to_proto(),
-        typed_null.to_proto()
-    );
+    let rebuilt_null = typed_null.with_children([]).unwrap();
+    assert_eq!(rebuilt_null.to_proto(), typed_null.to_proto());
+    for (original, rebuilt) in [(&cast, &rebuilt), (&typed_null, &rebuilt_null)] {
+        let (ExpressionType::Known(original_type), ExpressionType::Known(rebuilt_type)) =
+            (original.ty(), rebuilt.ty())
+        else {
+            panic!("typed expressions must retain their declared types");
+        };
+        assert!(Arc::ptr_eq(original_type, rebuilt_type));
+        for expression in [original, rebuilt] {
+            let payload = match expression.kind() {
+                ExpressionKind::Literal(LiteralExpression::Null(payload))
+                | ExpressionKind::Cast {
+                    target: CastTarget::Type(payload),
+                    ..
+                } => payload,
+                _ => panic!("expected a typed null or structured cast"),
+            };
+            assert!(Arc::ptr_eq(payload, original_type));
+        }
+    }
 }
 
 #[test]
@@ -617,31 +663,36 @@ fn deep_structural_walks_and_no_op_rewrites_work_on_a_small_stack() {
         .unwrap();
 }
 
+fn nested_alias_wire(levels: usize) -> proto::Expression {
+    let mut wire = proto::Expression {
+        expr_type: Some(proto::expression::ExprType::ExpressionString(
+            proto::expression::ExpressionString {
+                expression: "hidden".into(),
+            },
+        )),
+        ..Default::default()
+    };
+    for level in 0..levels {
+        wire = proto::Expression {
+            expr_type: Some(proto::expression::ExprType::Alias(Box::new(
+                proto::expression::Alias {
+                    expr: Some(Box::new(wire)),
+                    name: vec![format!("level_{level}")],
+                    ..Default::default()
+                },
+            ))),
+            ..Default::default()
+        };
+    }
+    wire
+}
+
 #[test]
 fn deep_sent_payloads_clone_and_rebuild_on_a_small_stack() {
     std::thread::Builder::new()
         .stack_size(64 << 20)
         .spawn(|| {
-            let mut wire = proto::Expression {
-                expr_type: Some(proto::expression::ExprType::ExpressionString(
-                    proto::expression::ExpressionString {
-                        expression: "hidden".into(),
-                    },
-                )),
-                ..Default::default()
-            };
-            for level in 0..1000 {
-                wire = proto::Expression {
-                    expr_type: Some(proto::expression::ExprType::Alias(Box::new(
-                        proto::expression::Alias {
-                            expr: Some(Box::new(wire)),
-                            name: vec![format!("level_{level}")],
-                            ..Default::default()
-                        },
-                    ))),
-                    ..Default::default()
-                };
-            }
+            let wire = nested_alias_wire(1000);
             let expected = wire.clone();
             // Logical depth remains a caller-supplied Sent contract. The physical
             // protobuf nesting must independently size the clone's stack.
@@ -686,7 +737,35 @@ fn deep_sent_payloads_clone_and_rebuild_on_a_small_stack() {
 }
 
 #[test]
-fn constructing_and_rebuilding_deep_declared_types_guard_each_clone_level() {
+fn deep_sent_child_drops_on_a_small_stack() {
+    std::thread::Builder::new()
+        .stack_size(64 << 20)
+        .spawn(|| {
+            let sent = Expression::sent(
+                nested_alias_wire(1000),
+                "opaque".into(),
+                MAX_EXPRESSION_DEPTH,
+            )
+            .unwrap();
+            let ExpressionKind::Sent(payload) = sent.kind() else {
+                panic!("expected an opaque Sent payload");
+            };
+            let payload = Arc::downgrade(payload);
+            std::thread::Builder::new()
+                .stack_size(64 << 10)
+                .spawn(move || drop(Expression::function("opaque_leaf", vec![sent])))
+                .unwrap()
+                .join()
+                .unwrap();
+            assert!(payload.upgrade().is_none());
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn deep_declared_types_rebuild_on_a_small_stack() {
     std::thread::Builder::new()
         .stack_size(64 << 20)
         .spawn(|| {
@@ -705,7 +784,8 @@ fn constructing_and_rebuilding_deep_declared_types_guard_each_clone_level() {
             let (expression, rebuilt, cast, rebuilt_cast) = std::thread::Builder::new()
                 .stack_size(512 << 10)
                 .spawn(move || {
-                    let expression = Expression::literal(LiteralExpression::Null(declared));
+                    let expression =
+                        Expression::literal(LiteralExpression::Null(Arc::new(declared)));
                     assert!(expression
                         .with_children([Expression::column("invalid")])
                         .is_err());
@@ -726,7 +806,8 @@ fn constructing_and_rebuilding_deep_declared_types_guard_each_clone_level() {
             else {
                 panic!("expected a typed null payload");
             };
-            assert_eq!(payload, &expected);
+            assert_eq!(payload.as_ref(), &expected);
+            assert!(Arc::ptr_eq(payload, cached));
             assert!(expression.children().is_empty());
             for root in [&rebuilt, &cast, &rebuilt_cast] {
                 let ExpressionType::Known(cached) = root.ty() else {
@@ -755,12 +836,13 @@ fn expression_owned_declared_type_cache_drops_inside_the_stack_guard() {
             std::thread::Builder::new()
                 .stack_size(64 << 10)
                 .spawn(move || {
-                    let expression = Expression::literal(LiteralExpression::Null(declared));
+                    let expression =
+                        Expression::literal(LiteralExpression::Null(Arc::new(declared)));
                     assert!(matches!(expression.ty(), ExpressionType::Known(_)));
-                    // The kind already has a guarded drop. Its cached copy of
-                    // the declared type must be released inside that guard too.
+                    // The leaf payload and cached type handles must both be
+                    // released inside its guard when the parent's drain drops it.
                     // No standalone DataType or opaque protobuf is dropped here.
-                    drop(expression);
+                    drop(Expression::function("typed_leaf", vec![expression]));
                 })
                 .unwrap()
                 .join()

@@ -473,7 +473,7 @@ fn literal_as(
     use spark_connect::types::DataType;
     let obj = &enum_to_value(obj)?;
     if obj.is_none() {
-        return Ok(LiteralExpression::Null(data_type.clone()));
+        return Ok(LiteralExpression::null(data_type.clone()));
     }
     let assertion = || pyo3::exceptions::PyAssertionError::new_err(());
     let literal = match data_type {
@@ -658,7 +658,7 @@ fn scalar_literal_of(obj: &Bound<'_, PyAny>) -> PyResult<LiteralExpression> {
 fn literal_data_type(literal: &LiteralExpression) -> spark_connect::types::DataType {
     use spark_connect::types::DataType;
     match literal {
-        LiteralExpression::Null(data_type) => data_type.clone(),
+        LiteralExpression::Null(data_type) => data_type.as_ref().clone(),
         LiteralExpression::Boolean(_) => DataType::Boolean,
         LiteralExpression::Byte(_) => DataType::Byte,
         LiteralExpression::Short(_) => DataType::Short,

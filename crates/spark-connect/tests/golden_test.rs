@@ -77,7 +77,7 @@ fn build(name: &str) -> Option<Expression> {
         "lit_str" => Expression::literal(LiteralExpression::string("hello")),
         "lit_double" => Expression::literal(LiteralExpression::double(3.14)),
         "lit_bool" => Expression::literal(LiteralExpression::boolean(true)),
-        "lit_null" => Expression::literal(LiteralExpression::Null(DataType::Null)),
+        "lit_null" => Expression::literal(LiteralExpression::null(DataType::Null)),
         "add" => (col("id") + cint(1)).expression().clone(),
         "sub" => (col("id") - cint(1)).expression().clone(),
         "mul" => (col("id") * cint(2)).expression().clone(),

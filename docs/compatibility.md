@@ -106,6 +106,16 @@ it to `Expression::new` or convert it with `.into()`. Match stored payloads on
 so existing enum matches on that method must change. The `literal`, `column`
 and `function` convenience constructors remain.
 
+`LiteralExpression::Null` and `CastTarget::Type` now hold an `Arc<DataType>`.
+Direct enum construction must wrap the type in an `Arc`; the convenience
+constructors `LiteralExpression::null(data_type)` and `Cast::new(child, data_type)`
+continue to accept an owned `DataType`. The `frame_spec` of the canonical
+`ExpressionKind::WindowExpression` is now an `Option<Arc<(u32, FrameBoundary,
+FrameBoundary)>>`, so direct construction must wrap a present tuple in an `Arc`.
+`WindowExpressionWrapper::new` continues to accept an owned frame tuple. These
+shared payloads keep large type and frame values out of every expression node
+and avoid copying them when inputs are rebuilt.
+
 `Debug` output now uses `ExpressionNode { kind: ..., children: ..., ty: ..., .. }`;
 its format is not a stable API.
 

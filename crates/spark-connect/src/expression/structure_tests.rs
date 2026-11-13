@@ -6,19 +6,16 @@ use crate::plan;
 use crate::udf::PythonUDFPayload;
 use std::ops::RangeInclusive;
 
-// Check the 112/160-byte layout budgets when tests are built for 64-bit
-// x86-64/AArch64 targets.
-// Inline DataType payloads in LiteralExpression::Null and CastTarget::Type
-// dominate the kind; children, declared type and origin bring the node to 160 B.
-// These are upper bounds for these 64-bit targets, not a stable Rust ABI promise
-// or an assumed budget for 32-bit targets.
+// Shared uncommon type/frame payloads and union-backed inline children keep
+// scalar expression allocations compact. These 64-bit upper bounds are not a
+// stable Rust ABI promise or an assumed budget for 32-bit targets.
 #[cfg(all(
     target_pointer_width = "64",
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
 const _: () = {
-    assert!(std::mem::size_of::<ExpressionKind>() <= 112);
-    assert!(std::mem::size_of::<ExpressionNode>() <= 160);
+    assert!(std::mem::size_of::<ExpressionKind>() <= 56);
+    assert!(std::mem::size_of::<ExpressionNode>() <= 96);
 };
 
 #[test]
@@ -65,6 +62,97 @@ fn variadic_arguments_normalize_storage_by_length_and_preserve_handles() {
             }
         }
     }
+}
+
+#[test]
+fn deep_shared_destruction_preserves_external_leaves_and_releases_unique_nodes() {
+    std::thread::Builder::new()
+        .stack_size(128 << 10)
+        .spawn(|| {
+            let (root, survivor, unique_nodes, survivor_node, origin) = {
+                let _origin = crate::origin::set_current(crate::origin::Origin {
+                    fragment: "shared destruction".into(),
+                    call_site: "drop.py:10".into(),
+                });
+                let survivor = Expression::literal(LiteralExpression::Integer(7));
+                let survivor_node = Arc::downgrade(&survivor.node);
+                let origin = Arc::downgrade(survivor.node.origin.as_ref().unwrap());
+                let mut root = survivor.clone();
+                let mut unique_nodes = Vec::new();
+                for value in 0..10_000 {
+                    let unique = Expression::literal(LiteralExpression::Integer(value));
+                    unique_nodes.push(Arc::downgrade(&unique.node));
+                    root = Expression::function("branch", vec![root, survivor.clone(), unique]);
+                }
+                (root, survivor, unique_nodes, survivor_node, origin)
+            };
+
+            drop(root);
+            assert!(unique_nodes.iter().all(|node| node.upgrade().is_none()));
+            assert!(survivor_node.upgrade().is_some());
+            assert_eq!(survivor.render(), "7");
+            assert_eq!(survivor.origin().unwrap().fragment, "shared destruction");
+            drop(survivor);
+            assert!(survivor_node.upgrade().is_none());
+            assert!(origin.upgrade().is_none());
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn concurrent_wide_destruction_releases_last_owned_and_recursive_leaves() {
+    const WORKERS: usize = 4;
+    let declared = Arc::new(DataType::Long);
+    let declared_weak = Arc::downgrade(&declared);
+    let mut nested = LiteralExpression::Null(declared);
+    for _ in 0..1000 {
+        nested = LiteralExpression::Array {
+            element_type: Box::new(DataType::Long),
+            elements: vec![nested],
+        };
+    }
+    let leaves = [
+        Expression::literal(LiteralExpression::Integer(7)),
+        Expression::column("survivor"),
+        Expression::literal(nested),
+    ];
+    let leaf_nodes: Vec<_> = leaves
+        .iter()
+        .map(|leaf| Arc::downgrade(&leaf.node))
+        .collect();
+    let survivor = leaves[1].clone();
+    let start = Arc::new(std::sync::Barrier::new(WORKERS + 1));
+    let mut workers = Vec::new();
+    for _ in 0..WORKERS {
+        let arguments = (0..1024).flat_map(|_| leaves.iter().cloned()).collect();
+        let root = Expression::function("wide", arguments);
+        let root_node = Arc::downgrade(&root.node);
+        let start = Arc::clone(&start);
+        let worker = std::thread::Builder::new()
+            .stack_size(64 << 10)
+            .spawn(move || {
+                start.wait();
+                drop(root);
+            })
+            .unwrap();
+        workers.push((worker, root_node));
+    }
+    drop(leaves);
+    start.wait();
+    for (worker, root_node) in workers {
+        worker.join().unwrap();
+        assert!(root_node.upgrade().is_none());
+    }
+
+    assert!(leaf_nodes[0].upgrade().is_none());
+    assert!(leaf_nodes[2].upgrade().is_none());
+    assert!(declared_weak.upgrade().is_none());
+    assert_eq!(survivor.render(), "survivor");
+    assert!(leaf_nodes[1].upgrade().is_some());
+    drop(survivor);
+    assert!(leaf_nodes[1].upgrade().is_none());
 }
 
 struct Fixture {
@@ -197,7 +285,7 @@ expression_inventory! {
         Fixture::new(
             ExpressionSpec::Literal(LiteralExpression::Array {
                 element_type: Box::new(DataType::Long),
-                elements: vec![LiteralExpression::Long(4), LiteralExpression::Null(DataType::Long)],
+                elements: vec![LiteralExpression::Long(4), LiteralExpression::Null(Arc::new(DataType::Long))],
             }),
             vec![],
             "[4, None]",
