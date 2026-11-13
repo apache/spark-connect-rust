@@ -69,6 +69,37 @@ class CheckDocSnippetsTests(unittest.TestCase):
                 self.assertIn(diagnostic, error)
 
 
+class SnippetsTests(unittest.TestCase):
+    def test_finds_indented_fences_and_strips_their_indentation(self):
+        text = "\n".join(
+            [
+                "```rust",
+                "let a = 1;",
+                "```",
+                "1. In a list item:",
+                "   ```rust",
+                "   let b = 2;",
+                "       let c = 3;",
+                "   ```",
+                "!!! note",
+                "    ```rust",
+                "    let d = 4;",
+                "    ```",
+                "   ```{.rust .no-run}",
+                "   let e = 5;",
+                "   ```",
+                "```python",
+                "f = 6",
+                "```",
+                "",
+            ]
+        )
+        self.assertEqual(
+            checker.snippets(text),
+            ["let a = 1;", "let b = 2;\n    let c = 3;", "let d = 4;"],
+        )
+
+
 class CrateArtifactsTests(unittest.TestCase):
     def test_failed_build_prints_the_rendered_errors_of_rustc(self):
         # cargo prints the errors of rustc as JSON on stdout with --message-format=json.
