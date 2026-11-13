@@ -9,6 +9,8 @@ use std::hash::{Hash, Hasher};
 
 use spark_connect_core::error::{Result, SparkError, SparkErrorKind};
 
+use crate::srs;
+
 /// The base DataType representation, mirroring `pyspark.sql.types.DataType`.
 ///
 /// All concrete types are variants of this enum. Each variant carries the data
@@ -454,11 +456,11 @@ impl DataType {
             }
             DataType::Variant => serde_json::json!("variant"),
             DataType::Geometry { srid } => {
-                serde_json::json!(format!("geometry({})", spatial_crs(*srid)))
+                serde_json::json!(format!("geometry({})", spatial_crs(*srid, false)))
             }
             DataType::Geography { srid } => serde_json::json!(format!(
                 "geography({}, {})",
-                spatial_crs(*srid),
+                spatial_crs(*srid, true),
                 GeographyType::DEFAULT_ALG
             )),
             DataType::Udt {
@@ -1888,13 +1890,7 @@ fn parse_geometry(s: &str) -> Result<DataType> {
             )
         })?;
 
-    let srid = spatial_srid(inner).ok_or_else(|| {
-        SparkError::value(
-            "INVALID_DATATYPE_FORMAT",
-            &[("detail", "Invalid geometry srid")],
-        )
-    })?;
-
+    let srid = spatial_srid(inner, false)?;
     Ok(DataType::Geometry { srid })
 }
 
@@ -1911,47 +1907,49 @@ fn parse_geography(s: &str) -> Result<DataType> {
 
     // The JSON form also names the algorithm, as in `OGC:CRS84, SPHERICAL`.
     let crs = inner.split(',').next().unwrap_or_default();
-    let srid = spatial_srid(crs).ok_or_else(|| {
-        SparkError::value(
-            "INVALID_DATATYPE_FORMAT",
-            &[("detail", "Invalid geography srid")],
-        )
-    })?;
-
+    let srid = spatial_srid(crs, true)?;
     Ok(DataType::Geography { srid })
 }
 
 /// The coordinate reference system that a spatial type's SRID is named by in its JSON, as
-/// PySpark's `geo_utils` names the SRIDs that it supports: `SRID:0`, `EPSG:3857` and
-/// `OGC:CRS84` for 4326, and `SRID:ANY` for a mixed SRID. Another SRID, which PySpark does not
-/// accept, is named `SRID:<srid>`.
-fn spatial_crs(srid: i32) -> String {
+/// Spark's `GeometryType.jsonValue` and `GeographyType.jsonValue` name it: the string ID that
+/// Spark writes for the SRID (`OGC:CRS84` for 4326, `EPSG:2154`, `SRID:0`), and `SRID:ANY` for a
+/// mixed SRID. An SRID that Spark does not know has no string ID, so it is written `SRID:<srid>`,
+/// which Spark rejects too.
+fn spatial_crs(srid: i32, geographic: bool) -> String {
     match srid {
         SpatialType::MIXED_SRID => SpatialType::MIXED_CRS.to_string(),
-        3857 => "EPSG:3857".to_string(),
-        GeometryType::DEFAULT_SRID => GeometryType::DEFAULT_CRS.to_string(),
-        other => format!("SRID:{other}"),
+        _ => {
+            srs::string_id(srid, geographic).map_or_else(|| format!("SRID:{srid}"), str::to_string)
+        }
     }
 }
 
-/// The SRID of a spatial type's CRS, as [`spatial_crs`] names it, or of the SRID itself, as
-/// in a DDL string such as `geometry(4326)`, or `any`.
-fn spatial_srid(crs: &str) -> Option<i32> {
-    let crs = crs.trim();
-    if crs.eq_ignore_ascii_case("any") || crs.eq_ignore_ascii_case(SpatialType::MIXED_CRS) {
-        return Some(SpatialType::MIXED_SRID);
+/// The SRID that a spatial type of the given kind names by `text`, the CRS of its JSON or the
+/// SRID of its DDL: `any` or `SRID:ANY` (of any case) for a mixed SRID, a string ID that Spark
+/// reads (its aliases included, and the match is exact), or an integer SRID. An integer that the
+/// type does not take is `ST_INVALID_SRID_VALUE`, and any other text that is no CRS of the type
+/// is `ST_INVALID_CRS_VALUE`, as the parsers of Spark raise them.
+fn spatial_srid(text: &str, geographic: bool) -> Result<i32> {
+    let text = text.trim();
+    if text.eq_ignore_ascii_case("any") || text.eq_ignore_ascii_case(SpatialType::MIXED_CRS) {
+        return Ok(SpatialType::MIXED_SRID);
     }
-    if crs.eq_ignore_ascii_case(GeometryType::DEFAULT_CRS) {
-        return Some(GeometryType::DEFAULT_SRID);
+    if let Some(srid) = srs::srid(text, geographic) {
+        return Ok(srid);
     }
-    if crs.eq_ignore_ascii_case("EPSG:3857") {
-        return Some(3857);
+    let digits = text.strip_prefix(['+', '-']).unwrap_or(text);
+    if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) {
+        return match text.parse::<i32>() {
+            Ok(srid) if srs::is_supported(srid, geographic) => Ok(srid),
+            // An integer out of the 32-bit range is an SRID too, as in Spark's parser.
+            _ => Err(SparkError::value(
+                "ST_INVALID_SRID_VALUE",
+                &[("srid", text)],
+            )),
+        };
     }
-    let number = match crs.get(..5) {
-        Some(prefix) if prefix.eq_ignore_ascii_case("SRID:") => &crs[5..],
-        _ => crs,
-    };
-    number.parse().ok()
+    Err(SparkError::value("ST_INVALID_CRS_VALUE", &[("crs", text)]))
 }
 
 /// Main DDL parser: parses DDL strings into DataType.

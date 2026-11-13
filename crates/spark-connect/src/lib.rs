@@ -37,6 +37,7 @@ pub mod readwriter;
 pub mod resource;
 pub mod row;
 pub mod session;
+mod srs;
 pub mod storage;
 pub mod streaming;
 pub mod table_arg;

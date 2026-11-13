@@ -410,6 +410,46 @@ fn json_to_ddl_converts_on_the_server() {
     let _ = spark.stop();
 }
 
+/// The server reads the JSON of a spatial type that names the CRS of an SRID of Spark's registry
+/// beyond the ones PySpark knows, as Spark writes it (`geometry(EPSG:2154)`), and a schema that the
+/// server sends with such a type reads back to the same type.
+#[test]
+fn spatial_json_with_an_epsg_crs_is_read_by_the_server() {
+    if !should_run() {
+        return;
+    }
+    use spark_connect::types::{DataType, StructField};
+    let spark = session();
+    let field = |name: &str, data_type: DataType| StructField {
+        name: name.to_string(),
+        data_type,
+        nullable: true,
+        metadata: Default::default(),
+    };
+    let schema = DataType::Struct {
+        fields: vec![
+            field("g", DataType::Geometry { srid: 2154 }),
+            field("h", DataType::Geography { srid: 4269 }),
+        ],
+    };
+    let ddl = spark.json_to_ddl(&schema.json()).expect("ddl");
+    assert_eq!(ddl, "g GEOMETRY(2154),h GEOGRAPHY(4269)");
+
+    let read = spark
+        .sql("SELECT CAST(NULL AS GEOMETRY(2154)) AS g")
+        .expect("sql")
+        .schema()
+        .expect("schema");
+    assert_eq!(
+        read,
+        DataType::Struct {
+            fields: vec![field("g", DataType::Geometry { srid: 2154 })],
+        }
+    );
+    assert_eq!(DataType::from_json_str(&read.json()).expect("json"), read);
+    let _ = spark.stop();
+}
+
 /// The execution that the calling thread waits for is the one that its wait interrupts, as
 /// PySpark's `KeyboardInterrupt` does: the wait ends with the server's cancellation, and the
 /// session goes on.

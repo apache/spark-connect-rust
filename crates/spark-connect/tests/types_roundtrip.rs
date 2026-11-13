@@ -1154,6 +1154,95 @@ fn spatial_json_names_the_crs_as_pyspark() {
     );
 }
 
+/// The JSON of a spatial type names the CRS of any SRID that Spark knows by the string ID that
+/// Spark writes, the OGC ones of the EPSG systems of 4267, 4269 and 4326 included, and reads the
+/// EPSG aliases back as well.
+#[test]
+fn spatial_json_names_any_srid_of_spark_by_its_crs() {
+    for (dt, json) in [
+        (DataType::Geometry { srid: 2154 }, "\"geometry(EPSG:2154)\""),
+        (DataType::Geometry { srid: 4267 }, "\"geometry(OGC:CRS27)\""),
+        (DataType::Geometry { srid: 4269 }, "\"geometry(OGC:CRS83)\""),
+        (
+            DataType::Geography { srid: 4267 },
+            "\"geography(OGC:CRS27, SPHERICAL)\"",
+        ),
+        (
+            DataType::Geography { srid: 4269 },
+            "\"geography(OGC:CRS83, SPHERICAL)\"",
+        ),
+    ] {
+        assert_eq!(dt.json(), json);
+        assert_eq!(DataType::from_json(&dt.json_value()).unwrap(), dt);
+    }
+    for (json, expected) in [
+        ("geometry(EPSG:4326)", DataType::Geometry { srid: 4326 }),
+        ("geometry(EPSG:4269)", DataType::Geometry { srid: 4269 }),
+        ("geometry(EPSG:2154)", DataType::Geometry { srid: 2154 }),
+        (
+            "geography(EPSG:4269, SPHERICAL)",
+            DataType::Geography { srid: 4269 },
+        ),
+        (
+            "geography(EPSG:4326, SPHERICAL)",
+            DataType::Geography { srid: 4326 },
+        ),
+    ] {
+        assert_eq!(
+            DataType::from_json(&serde_json::Value::String(json.to_string())).unwrap(),
+            expected,
+            "{json}"
+        );
+    }
+}
+
+/// The JSON of a spatial type names a CRS that Spark does not know, or one that the type does not
+/// take, with `ST_INVALID_CRS_VALUE`, as Spark's parser does, and reads none of them.
+#[test]
+fn spatial_json_rejects_a_crs_that_spark_does_not_take() {
+    for json in [
+        "geometry(SRID:2154)",
+        "geometry(srid:0)",
+        "geometry(ogc:crs84)",
+        "geometry(EPSG:99999999)",
+        "geography(EPSG:3857, SPHERICAL)",
+        "geography(SRID:0, SPHERICAL)",
+    ] {
+        let error =
+            DataType::from_json(&serde_json::Value::String(json.to_string())).expect_err(json);
+        assert_eq!(error.error_class, "ST_INVALID_CRS_VALUE", "{json}");
+    }
+}
+
+/// The DDL of a spatial type names its SRID by its number, or `any`, and Spark's parser rejects an
+/// SRID that the type does not take with `ST_INVALID_SRID_VALUE`.
+#[test]
+fn spatial_ddl_checks_the_srid_as_spark_does() {
+    assert_eq!(
+        DataType::from_ddl("geometry(2154)").unwrap(),
+        DataType::Geometry { srid: 2154 }
+    );
+    assert_eq!(
+        DataType::from_ddl("geography(4269)").unwrap(),
+        DataType::Geography { srid: 4269 }
+    );
+    for ddl in [
+        "geometry(99999)",
+        "geometry(-1)",
+        "geometry(99999999999)",
+        "geography(3857)",
+        "geography(0)",
+    ] {
+        let error = DataType::from_ddl(ddl).expect_err(ddl);
+        assert_eq!(error.error_class, "ST_INVALID_SRID_VALUE", "{ddl}");
+    }
+    // An SRID that Spark does not know is written `SRID:<srid>` in JSON, which Spark rejects too.
+    assert_eq!(
+        DataType::Geometry { srid: 99_999 }.json(),
+        "\"geometry(SRID:99999)\""
+    );
+}
+
 /// The COMMENT of `toDDL` escapes the backslashes and the single quotes of a comment as Spark's
 /// `escapeSingleQuotedString` does, so that the parser reads back the comment as it is.
 #[test]

@@ -2665,6 +2665,23 @@ def test_map_functions_reject_a_non_struct_return_type_before_the_server(session
     assert df.mapInPandas(lambda frames: frames, "id long").collect() == [Row(id=0), Row(id=1)]
 
 
+def test_spatial_schema_srids_are_those_of_pyspark(session):
+    # As PySpark's: the server answers the SRIDs that PySpark 4.3.0 takes, and the schema of a
+    # geometry or a geography of another SRID, such as the EPSG 2154 or 4269, raises
+    # ST_INVALID_SRID_VALUE when it is read.
+    from pyspark.errors import IllegalArgumentException
+    from pyspark.sql.types import GeographyType, GeometryType
+
+    geometry = session.sql("SELECT CAST(NULL AS GEOMETRY(3857)) AS g").schema["g"]
+    assert geometry.dataType == GeometryType(3857)
+    geography = session.sql("SELECT CAST(NULL AS GEOGRAPHY(4326)) AS g").schema["g"]
+    assert geography.dataType == GeographyType(4326)
+    for spatial in ["GEOMETRY(2154)", "GEOGRAPHY(4269)"]:
+        with pytest.raises(IllegalArgumentException) as e:
+            session.sql(f"SELECT CAST(NULL AS {spatial}) AS g").schema["g"].dataType
+        assert e.value.getCondition() == "ST_INVALID_SRID_VALUE"
+
+
 def test_variant_spatial_and_user_defined_values_round_trip_as_pyspark(session):
     # As PySpark's: createDataFrame sends a VariantVal, a Geometry, a Geography and a value of
     # a user-defined type, and collects them as they are.

@@ -283,6 +283,37 @@ def test_spatial_and_collated_json_forms_parse():
         assert want.json() == json.dumps(j)
 
 
+def test_schema_spatial_srids_are_those_of_pyspark(mock_connect):
+    # As PySpark's schema conversion, which builds the spatial type of each SRID that the server
+    # sends with GeometryType(srid) or GeographyType(srid): the SRIDs that PySpark 4.3.0 takes
+    # and the mixed SRID are read, and another SRID, such as 2154, raises ST_INVALID_SRID_VALUE.
+    from pyspark.errors import IllegalArgumentException
+
+    spark, service = mock_connect
+
+    def schema_with(kind, srid):
+        # DataType.geometry=26 or geography=27, with its srid=1; StructField: name=1,
+        # data_type=2, nullable=3; Struct.fields=1, and DataType.struct=21.
+        spatial = message_field(26 if kind == "geometry" else 27, varint_field(1, srid))
+        field = message_field(1, "g") + message_field(2, spatial) + varint_field(3, 1)
+        return message_field(21, message_field(1, field))
+
+    for kind, srid, expected in [
+        ("geometry", 3857, T.GeometryType(3857)),
+        ("geometry", -1, T.GeometryType("ANY")),
+        ("geography", 4326, T.GeographyType(4326)),
+        ("geography", -1, T.GeographyType("ANY")),
+    ]:
+        service.data_type = schema_with(kind, srid)
+        assert spark.range(1).schema["g"].dataType == expected
+    for kind, srid in [("geometry", 2154), ("geography", 4269), ("geography", 3857)]:
+        service.data_type = schema_with(kind, srid)
+        with pytest.raises(IllegalArgumentException) as e:
+            spark.range(1).schema["g"].dataType
+        assert e.value.getCondition() == "ST_INVALID_SRID_VALUE"
+        assert e.value.getMessageParameters() == {"srid": str(srid)}
+
+
 def test_json_forms_accept_trailing_whitespace_as_pyspark(mock_connect):
     # As PySpark's `_parse_datatype_json_value`, whose patterns match a prefix of the string: the
     # whitespace after a form with an argument or a field is not a part of it. A bare name is
