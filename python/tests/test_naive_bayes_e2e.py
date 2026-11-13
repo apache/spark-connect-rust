@@ -21,6 +21,7 @@ import math
 import os
 
 import pytest
+from _native_classes import native_class
 from pyspark.ml.connect.functions import array_to_vector, vector_to_array
 from pyspark.ml.linalg import Vectors
 from pyspark.sql import SparkSession
@@ -40,11 +41,7 @@ def session():
 
 
 def _classifier():
-    try:
-        from pyspark.ml.connect.classification import NaiveBayes
-    except ImportError:
-        from pyspark.ml.classification import NaiveBayes
-    return NaiveBayes
+    return native_class("pyspark.ml.connect.classification", "NaiveBayes", "pyspark.ml.classification")
 
 
 def _vectors(session, sql, name="features"):

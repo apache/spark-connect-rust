@@ -23,10 +23,12 @@ use spark_connect::ml::{
     LogisticRegression, MlOperator, MlVector, Model, MulticlassClassificationEvaluator,
     MultilayerPerceptronClassifier, NaiveBayes, OneVsRest, Params, Pipeline,
     PowerIterationClustering, RandomForestClassifier, RandomForestRegressor, RegressionEvaluator,
-    StringIndexer, Transformer, VectorAssembler, LDA,
+    Transformer, LDA,
 };
 use spark_connect::types::StructField;
 use spark_connect::DataFrame;
+
+pub(crate) mod feature;
 
 use crate::dataframe::PyDataFrame;
 use crate::errors::ResultExt;
@@ -49,6 +51,8 @@ enum Kind {
     /// `toListFloat`: an array literal of doubles.
     FloatList,
     IntList,
+    FloatListList,
+    Identity,
     Vector,
 }
 
@@ -63,6 +67,8 @@ impl Kind {
             Kind::FloatList => "toListFloat",
             Kind::IntList => "toListInt",
             Kind::Vector => "toVector",
+            Kind::FloatListList => "toListListFloat",
+            Kind::Identity => "identity",
         }
     }
 }
@@ -85,6 +91,8 @@ enum Converted {
     FloatList(Vec<f64>),
     IntList(Vec<i64>),
     Vector(MlVector),
+    FloatListList(Vec<Vec<f64>>),
+    Raw(Py<PyAny>),
 }
 
 /// Convert `value` of the param `name` with its `TypeConverters` method, raising PySpark's
@@ -119,6 +127,8 @@ fn convert(name: &str, kind: Kind, value: &Bound<'_, PyAny>) -> PyResult<Convert
         Kind::IntList => converted
             .extract::<Vec<i64>>()
             .map_or(Converted::Unsendable, Converted::IntList),
+        Kind::FloatListList => Converted::FloatListList(converted.extract()?),
+        Kind::Identity => Converted::Raw(converted.unbind()),
         Kind::Vector => {
             let linalg = py.import("pyspark.ml.linalg")?;
             let values = converted
@@ -145,6 +155,12 @@ fn convert(name: &str, kind: Kind, value: &Bound<'_, PyAny>) -> PyResult<Convert
 trait Native {
     type Core: Clone;
     fn inner(&self) -> &Self::Core;
+    fn snapshot_core(&self, _py: Python<'_>) -> PyResult<Self::Core> {
+        Ok(self.inner().clone())
+    }
+    fn raw_params_mut(&mut self) -> Option<&mut Vec<(&'static str, Py<PyAny>)>> {
+        None
+    }
     fn params_mut(&mut self) -> &mut Params;
     /// The params whose value PySpark cannot send: a fit, transform or evaluate raises PySpark's
     /// error of its serialization of the params, before any request.
@@ -183,6 +199,9 @@ macro_rules! native {
 /// Set the param `name` of `target` to `value`.
 fn apply<T: Native>(target: &mut T, name: &'static str, value: Converted) {
     target.unsendable_mut().retain(|unsent| *unsent != name);
+    if let Some(raw) = target.raw_params_mut() {
+        raw.retain(|(key, _)| *key != name);
+    }
     let jvm = T::jvm_name(name);
     let params = std::mem::take(target.params_mut());
     let params = match value {
@@ -199,6 +218,14 @@ fn apply<T: Native>(target: &mut T, name: &'static str, value: Converted) {
         Converted::FloatList(values) => params.set_param_double_array(jvm, values),
         Converted::IntList(values) => params.set_param_int_array(jvm, values),
         Converted::Vector(value) => params.set_param_vector(jvm, value),
+        Converted::FloatListList(value) => params.set_param_double_arrays(jvm, value),
+        Converted::Raw(value) => {
+            target
+                .raw_params_mut()
+                .expect("identity parameters retain their Python values")
+                .push((name, value));
+            params.clear_param(jvm)
+        }
     };
     *target.params_mut() = params;
 }
@@ -388,7 +415,7 @@ fn snapshot<T: Native + PyClass>(slf: &Bound<'_, T>) -> PyResult<T::Core> {
             &[],
         ));
     }
-    Ok(this.inner().clone())
+    this.snapshot_core(slf.py())
 }
 
 /// Whether `dataset` is a pandas DataFrame, of an imported pandas.
@@ -1082,143 +1109,6 @@ impl PyMLModel {
         } else {
             out.drop(dropped)
         })
-    }
-}
-
-const COLUMN_PARAMS: &[(&str, Kind)] = &[("inputCol", Kind::Str), ("outputCol", Kind::Str)];
-
-const VECTOR_ASSEMBLER_PARAMS: &[(&str, Kind)] =
-    &[("inputCols", Kind::StrList), ("outputCol", Kind::Str)];
-
-/// StringIndexer estimator.
-#[pyclass(name = "StringIndexer", module = "pyspark.ml.connect.feature")]
-pub struct PyStringIndexer {
-    inner: StringIndexer,
-    unsendable: Vec<&'static str>,
-}
-
-#[pymethods]
-impl PyStringIndexer {
-    #[new]
-    #[pyo3(signature = (*args, **kwargs), text_signature = "(*, inputCol=None, outputCol=None)")]
-    fn new(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
-        let mut this = Self {
-            inner: StringIndexer::new(),
-            unsendable: Vec::new(),
-        };
-        init_params(&mut this, "StringIndexer", &[], COLUMN_PARAMS, args, kwargs)?;
-        Ok(this)
-    }
-    #[pyo3(
-        name = "setParams",
-        signature = (*args, **kwargs),
-        text_signature = "(self, *, inputCol=None, outputCol=None)"
-    )]
-    fn set_params<'py>(
-        slf: Bound<'py, Self>,
-        args: &Bound<'py, PyTuple>,
-        kwargs: Option<&Bound<'py, PyDict>>,
-    ) -> PyResult<Bound<'py, Self>> {
-        set_params_of(slf, "StringIndexer", COLUMN_PARAMS, args, kwargs)
-    }
-    #[pyo3(name = "setInputCol")]
-    fn set_input_col<'py>(
-        slf: Bound<'py, Self>,
-        value: &Bound<'py, PyAny>,
-    ) -> PyResult<Bound<'py, Self>> {
-        set_param(slf, "inputCol", Kind::Str, value)
-    }
-    #[pyo3(name = "setOutputCol")]
-    fn set_output_col<'py>(
-        slf: Bound<'py, Self>,
-        value: &Bound<'py, PyAny>,
-    ) -> PyResult<Bound<'py, Self>> {
-        set_param(slf, "outputCol", Kind::Str, value)
-    }
-    #[pyo3(signature = (dataset, params=None))]
-    fn fit(
-        slf: &Bound<'_, Self>,
-        dataset: &Bound<'_, PyAny>,
-        params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<PyMLModel> {
-        check_fit_params(params)?;
-        fit_native(slf, dataset, None)
-    }
-}
-
-/// VectorAssembler transformer.
-#[pyclass(name = "VectorAssembler", module = "pyspark.ml.connect.feature")]
-pub struct PyVectorAssembler {
-    inner: VectorAssembler,
-    unsendable: Vec<&'static str>,
-}
-
-#[pymethods]
-impl PyVectorAssembler {
-    #[new]
-    #[pyo3(signature = (*args, **kwargs), text_signature = "(*, inputCols=None, outputCol=None)")]
-    fn new(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
-        let mut this = Self {
-            inner: VectorAssembler::new(),
-            unsendable: Vec::new(),
-        };
-        init_params(
-            &mut this,
-            "VectorAssembler",
-            &[],
-            VECTOR_ASSEMBLER_PARAMS,
-            args,
-            kwargs,
-        )?;
-        Ok(this)
-    }
-    #[pyo3(
-        name = "setParams",
-        signature = (*args, **kwargs),
-        text_signature = "(self, *, inputCols=None, outputCol=None)"
-    )]
-    fn set_params<'py>(
-        slf: Bound<'py, Self>,
-        args: &Bound<'py, PyTuple>,
-        kwargs: Option<&Bound<'py, PyDict>>,
-    ) -> PyResult<Bound<'py, Self>> {
-        set_params_of(
-            slf,
-            "VectorAssembler",
-            VECTOR_ASSEMBLER_PARAMS,
-            args,
-            kwargs,
-        )
-    }
-    #[pyo3(name = "setInputCols")]
-    fn set_input_cols<'py>(
-        slf: Bound<'py, Self>,
-        value: &Bound<'py, PyAny>,
-    ) -> PyResult<Bound<'py, Self>> {
-        set_param(slf, "inputCols", Kind::StrList, value)
-    }
-    #[pyo3(name = "setOutputCol")]
-    fn set_output_col<'py>(
-        slf: Bound<'py, Self>,
-        value: &Bound<'py, PyAny>,
-    ) -> PyResult<Bound<'py, Self>> {
-        set_param(slf, "outputCol", Kind::Str, value)
-    }
-    /// Transform a Spark DataFrame.
-    #[pyo3(signature = (dataset, params=None))]
-    fn transform(
-        slf: &Bound<'_, Self>,
-        dataset: &Bound<'_, PyAny>,
-        params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<PyDataFrame> {
-        check_params(params)?;
-        let py = slf.py();
-        let input = dataset_of(dataset, "transform", "columns")?;
-        let mut transformer = snapshot(slf)?;
-        let output = py
-            .detach(|| transformer.transform(&input).map_err(Box::new))
-            .to_pyerr()?;
-        Ok(PyDataFrame::new(output))
     }
 }
 
@@ -5656,8 +5546,6 @@ impl PyCrossValidator {
 }
 
 native!(
-    PyStringIndexer => StringIndexer,
-    PyVectorAssembler => VectorAssembler,
     PyLogisticRegression => LogisticRegression,
     PyLinearSVC => LinearSVC,
     PyFMClassifier => FMClassifier,

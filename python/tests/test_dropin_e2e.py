@@ -28,6 +28,7 @@ from decimal import Decimal
 
 import pyarrow as pa
 import pytest
+from _native_classes import native_class
 
 # Keep interval round trips in the live suite selected by CI.
 from interval_input_cases import IntervalInputLiveTests  # noqa: F401
@@ -5176,18 +5177,7 @@ def test_linear_regression_weights_and_iterative_losses(session):
 
 
 def _native_ml(name, reference_module):
-    # The native pyspark.ml.connect class of this client, which these cases are of: one that is
-    # missing fails them, rather than running them with the vendored pyspark.ml class. The
-    # reference client, which has no pyspark._pyspark, runs them with its JVM-backed class.
-    import importlib
-
-    try:
-        import pyspark._pyspark  # noqa: F401
-    except ImportError:
-        return getattr(importlib.import_module(reference_module), name)
-    native = getattr(importlib.import_module("pyspark.ml.connect"), name)
-    assert native.__module__.startswith("pyspark.ml.connect"), native
-    return native
+    return native_class("pyspark.ml.connect", name, reference_module)
 
 
 def _kmeans():

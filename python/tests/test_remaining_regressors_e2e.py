@@ -22,6 +22,7 @@ import os
 from pathlib import Path
 
 import pytest
+from _native_classes import native_class
 from pyspark.errors import PySparkException
 from pyspark.ml.linalg import Vectors
 from pyspark.sql import SparkSession
@@ -41,15 +42,7 @@ def session():
 
 
 def _regressor(name):
-    try:
-        from pyspark.ml.connect import regression as native
-    except ImportError:
-        native = None
-    if native is not None and hasattr(native, "AFTSurvivalRegression"):
-        return getattr(native, name)
-    from pyspark.ml import regression as official
-
-    return getattr(official, name)
+    return native_class("pyspark.ml.connect.regression", name, "pyspark.ml.regression")
 
 
 def _estimator(name, options, setters):

@@ -66,7 +66,7 @@ def _wrap(obj):
     """Wrap the result from _call_function as a Column."""
     return obj
 
-# Auto-derived from PySpark 4.2.0 signatures: for generated functions, which positional
+# Auto-derived from PySpark 4.3.0 signatures: for generated functions, which positional
 # args are ColumnOrName (a bare str is a COLUMN NAME). Functions NOT listed here have
 # ALL args as columns. Value = (column_positions, variadic_col_start_or_None).
 _FN_COL_ARGS = {
@@ -327,7 +327,7 @@ from pyspark.sql.udtf import (
 
 
 # Hand-written special functions. Thin wrappers so the public parameter names match
-# the reference PySpark 4.2.0 signatures (keyword-call parity), forwarding to the native
+# the reference PySpark 4.3.0 signatures (keyword-call parity), forwarding to the native
 # bindings whose Rust arg names differ.
 def col(col):
     """Returns a Column based on the given column name."""
@@ -1310,7 +1310,7 @@ __all__ = [
 # Leave no loop variables behind, as PySpark has no `functions.name` or `functions.obj`.
 del name
 
-# Expose the `builtin` submodule at ``pyspark.sql.functions.builtin``. Upstream v4.2.0 splits
+# Expose the `builtin` submodule at ``pyspark.sql.functions.builtin``. Upstream v4.3.0 splits
 # functions into a package whose ``builtin`` submodule holds the actual functions and whose
 # ``__init__`` re-exports them; here this module IS the implementation, so register a synthetic
 # ``builtin`` submodule mirroring it (so ``import pyspark.sql.functions.builtin`` and
