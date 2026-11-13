@@ -483,7 +483,7 @@ jobs:
         run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
-          rustup target add wasm32-unknown-unknown
+          rustup target add wasm32-unknown-unknown wasm32-wasip1
 
       - name: Cache cargo & target
         uses: actions/cache@v4
@@ -565,7 +565,10 @@ jobs:
       - name: Rust WASM UDF e2e test (against the live server)
         env:
           SPARK_REMOTE: sc://localhost:15002
-        run: cargo test --manifest-path tests/wasm-udf/Cargo.toml --test e2e_wasm_udf
+        run: |
+          cargo test --manifest-path tests/wasm-udf/Cargo.toml --test e2e_wasm_udf
+          # Skips itself on a server older than 4.4.0, which has no spark.pythonWorkerEnv.
+          cargo test --manifest-path tests/wasm-udf-wasi/Cargo.toml --test e2e_python_worker_env
 
   # ---------------------------------------------------------------------------
   # E2E performance benchmark: our client vs reference, same 4.3.0 server.

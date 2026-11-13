@@ -303,7 +303,11 @@ Do not rely on the previous version's suite. When bumping to vX.Y.Z:
   in `apache-spark-connect-build`. The tests that check this are outside the
   workspace: `cargo test --manifest-path tests/wasm-udf/Cargo.toml -- --ignored`
   (Python with `pyspark`, `pyarrow` and `wasmtime`), formatted with
-  `cargo fmt --manifest-path tests/wasm-udf/Cargo.toml`.
+  `cargo fmt --manifest-path tests/wasm-udf/Cargo.toml`. The same goes for
+  `tests/wasm-udf-wasi`, which needs the `wasm32-wasip1` target too.
+- A module that imports WASI (`WasmTarget::Wasip1`) gets the worker's `os.environ`
+  without the names Spark reserves; keep `_RESERVED_ENV_PREFIXES` and
+  `_RESERVED_ENV_NAMES` in the packer in step with Spark's `PythonWorkerEnvironment`.
 - Registration mirrors pyspark: `spark.udf().register("name", &udf)` (a
   session-side `UdfRegistration` handle), then callable from SQL.
 - Removing Python on the client entirely would mean pre-baking the cloudpickled
