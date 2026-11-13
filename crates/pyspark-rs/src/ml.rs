@@ -25,6 +25,7 @@ use spark_connect::ml::{
     RandomForestClassifier, RandomForestRegressor, RegressionEvaluator, StringIndexer, Transformer,
     VectorAssembler,
 };
+use spark_connect::types::StructField;
 use spark_connect::DataFrame;
 
 use crate::dataframe::PyDataFrame;
@@ -441,7 +442,8 @@ fn dataset_of<'py>(
 /// columns are sent as Arrow arrays, built without pandas' conversion of NaN to null (which the
 /// non-nullable element type of an array rejects), so that a NaN element or value stays NaN, as
 /// PySpark computes on it locally. A column that Arrow takes only with that conversion, such as the
-/// strings with a NaN, is taken as pandas takes it.
+/// strings with a NaN, is taken as pandas takes it. Its column names are the `str` of the labels
+/// of `pdf`, as createDataFrame names them (a label that is not a string, such as 0, is a name).
 fn active_dataframe(pdf: &Bound<'_, PyAny>) -> PyResult<DataFrame> {
     let py = pdf.py();
     let pa = py.import("pyarrow")?;
@@ -456,7 +458,7 @@ fn active_dataframe(pdf: &Bound<'_, PyAny>) -> PyResult<DataFrame> {
             Err(_) => pa.call_method1("array", (column,))?,
         };
         arrays.append(array)?;
-        names.append(name)?;
+        names.append(name.str()?)?;
     }
     let table = pa
         .getattr("Table")?
@@ -533,7 +535,7 @@ where
 {
     let py = slf.py();
     let dataset = dataset_of(dataset, "fit", "select")?;
-    let estimator = snapshot(slf)?;
+    let mut estimator = snapshot(slf)?;
     let columns = reads.and_then(|reads| read_columns(estimator.params(), reads));
     let (df, select) = match dataset {
         Dataset::Spark(df) => (df, columns),
@@ -547,10 +549,23 @@ where
     };
     let vectors = Vectors::of(estimator.operator(), estimator.params());
     // Found in the schema of the whole DataFrame, which is read once for a fit and a transform
-    // of it: the selection keeps the columns as they are.
-    let array = vectors.array_input(py, &df, false)?;
+    // of it: the selection keeps the columns as they are. The JVM estimator reads its columns by
+    // the spelling of the schema (see [`spell_param`]).
+    let labelled = estimator.params().get_param("labelCol").is_some();
+    let fields = if vectors.input.is_some() || labelled {
+        schema_fields(py, &df)?
+    } else {
+        Vec::new()
+    };
+    let array = vectors.input_field(&fields).filter(is_number_array);
+    let params = vectors.spell_features(std::mem::take(estimator.params_mut()), &fields);
+    *estimator.params_mut() = spell_param(params, &fields, "labelCol", None);
     let df = match select {
-        Some(columns) => df.select(columns.iter().map(|name| exact_column(name))),
+        Some(columns) => df.select(
+            columns
+                .iter()
+                .map(|name| exact_column(spelling(&fields, name))),
+        ),
         None => df,
     };
     check(py, &estimator, &df)?;
@@ -671,51 +686,86 @@ impl Vectors {
         }
     }
 
-    /// The field of the `input` column in the schema of `df`, found regardless of case as Spark
-    /// resolves it, when it is an array of numbers. Another type is sent as it is, which the JVM
-    /// estimator checks. The schema is read only for an `input`. With `lazily`, of a transform,
-    /// which is lazy as the transforms of PySpark's JVM models are, a schema that the server does
-    /// not give (of a DataFrame too deep for it, say) leaves the column as it is: the server
-    /// raises its error when the transformed DataFrame is analyzed or run, as without the read.
-    fn array_input(
-        &self,
-        py: Python<'_>,
-        df: &DataFrame,
-        lazily: bool,
-    ) -> PyResult<Option<spark_connect::types::StructField>> {
-        use spark_connect::types::DataType;
-
-        let Some(input) = &self.input else {
-            return Ok(None);
-        };
-        let fields = if lazily {
-            let session = df.spark_session();
-            // A signal still raises: it is the outer error.
-            match crate::interrupt::interruptible_outcome(py, &session, || {
-                df.schema().map_err(Box::new)
-            })? {
-                Ok(DataType::Struct { fields }) => fields,
-                _ => return Ok(None),
-            }
-        } else {
-            schema_fields(py, df)?
-        };
-        Ok(fields
-            .into_iter()
+    /// The field of the `input` column in `fields`, the schema of a DataFrame, found regardless of
+    /// case as Spark resolves it, of any type. None when there is no `input`, or no such column.
+    fn input_field(&self, fields: &[StructField]) -> Option<StructField> {
+        let input = self.input.as_ref()?;
+        fields
+            .iter()
             .find(|field| field.name.eq_ignore_ascii_case(input))
-            .filter(|field| match &field.data_type {
-                DataType::Array { element_type, .. } => matches!(
-                    **element_type,
-                    DataType::Byte
-                        | DataType::Short
-                        | DataType::Integer
-                        | DataType::Long
-                        | DataType::Float
-                        | DataType::Double
-                        | DataType::Decimal { .. }
-                ),
-                _ => false,
-            }))
+            .cloned()
+    }
+
+    /// `params`, with the featuresCol spelled as the input column of `fields` is (see
+    /// [`spell_param`]), where the JVM estimator or model reads a vector of its featuresCol.
+    fn spell_features(&self, params: Params, fields: &[StructField]) -> Params {
+        match self.input {
+            Some(_) => spell_param(params, fields, "featuresCol", Some("features")),
+            None => params,
+        }
+    }
+}
+
+/// Whether `field` is an array of numbers, which an input column sends as its ML vector.
+fn is_number_array(field: &StructField) -> bool {
+    use spark_connect::types::DataType;
+
+    match &field.data_type {
+        DataType::Array { element_type, .. } => matches!(
+            **element_type,
+            DataType::Byte
+                | DataType::Short
+                | DataType::Integer
+                | DataType::Long
+                | DataType::Float
+                | DataType::Double
+                | DataType::Decimal { .. }
+        ),
+        _ => false,
+    }
+}
+
+/// `params`, whose string param `name` is spelled as the field of `fields` that it names. Spark
+/// resolves a column name regardless of case, but the JVM reads the param as it is given, so the
+/// param takes the spelling of the schema where the two differ. An unset param names `default`,
+/// and is set only where that differs too. Without a `default`, an unset param is left as it is.
+fn spell_param(
+    params: Params,
+    fields: &[StructField],
+    name: &str,
+    default: Option<&str>,
+) -> Params {
+    let Some(given) = string_or(&params, name, default) else {
+        return params;
+    };
+    let spelled = spelling(fields, &given);
+    if spelled == given {
+        params
+    } else {
+        params.set_param_string(name, spelled)
+    }
+}
+
+/// The spelling in `fields`, the schema of a DataFrame, of the column `name`, which Spark resolves
+/// regardless of case; `name` itself when `fields` has no such column.
+fn spelling<'a>(fields: &'a [StructField], name: &'a str) -> &'a str {
+    fields
+        .iter()
+        .find(|field| field.name.eq_ignore_ascii_case(name))
+        .map_or(name, |field| field.name.as_str())
+}
+
+/// The fields of the schema of `df`, read lazily, as a transform is, which is lazy as the
+/// transforms of PySpark's JVM models are: a schema that the server does not give (of a DataFrame
+/// too deep for it, say) is empty, and leaves the columns as they are, as the server raises its
+/// error when the transformed DataFrame is analyzed or run, as without the read. A signal raises.
+fn lazy_schema_fields(py: Python<'_>, df: &DataFrame) -> PyResult<Vec<StructField>> {
+    use spark_connect::types::DataType;
+
+    let session = df.spark_session();
+    match crate::interrupt::interruptible_outcome(py, &session, || df.schema().map_err(Box::new))? {
+        Ok(DataType::Struct { fields }) => Ok(fields),
+        _ => Ok(Vec::new()),
     }
 }
 
@@ -812,14 +862,30 @@ fn vector_array(name: &str) -> spark_connect::Column {
 
 /// The input columns of an evaluator, as the JVM evaluator reads them: `doubles`, a prediction
 /// that it reads as a double only, and `score`, a probability that it reads as a double or a
-/// vector, where PySpark's evaluators read any numeric column, and an array, as a tensor.
+/// vector, where PySpark's evaluators read any numeric column, and an array, as a tensor. `label`
+/// is the label column, which the JVM evaluator reads as its labelCol.
 struct EvaluatorInputs {
     doubles: Vec<String>,
     score: Option<String>,
+    label: String,
+}
+
+impl EvaluatorInputs {
+    /// The columns that PySpark's evaluator reads of its dataset, as its `_get_input_cols` does:
+    /// the prediction or the probability, then the label.
+    fn reads(&self) -> Vec<String> {
+        self.doubles
+            .iter()
+            .chain(&self.score)
+            .cloned()
+            .chain([self.label.clone()])
+            .collect()
+    }
 }
 
 /// Evaluate `dataset` with the JVM evaluator of `slf`, whose input columns `inputs` gives, as
-/// PySpark's evaluators evaluate it (see [`evaluation_dataset`] and [`evaluator_input`]).
+/// PySpark's evaluators evaluate it (see [`evaluation_dataset`] and [`evaluator_input`]). The
+/// JVM evaluator reads its columns by the spelling of the schema of the dataset.
 fn evaluate_native<T>(
     slf: &Bound<'_, T>,
     dataset: &Bound<'_, PyAny>,
@@ -830,9 +896,23 @@ where
     T::Core: Evaluator,
 {
     let py = slf.py();
-    let evaluator = snapshot(slf)?;
-    let df = evaluation_dataset(dataset)?;
-    let df = evaluator_input(py, df, inputs(&evaluator))?;
+    let mut evaluator = snapshot(slf)?;
+    let inputs = inputs(&evaluator);
+    let df = evaluation_dataset(dataset, &inputs)?;
+    let fields = schema_fields(py, &df)?;
+    // An evaluator that exposes no params is sent as it is (see `Evaluator::params_mut`).
+    if let Some(evaluator_params) = evaluator.params_mut() {
+        let mut params = std::mem::take(evaluator_params);
+        params = spell_param(params, &fields, "labelCol", Some("label"));
+        if !inputs.doubles.is_empty() {
+            params = spell_param(params, &fields, "predictionCol", Some("prediction"));
+        }
+        if inputs.score.is_some() {
+            params = spell_param(params, &fields, "rawPredictionCol", Some("rawPrediction"));
+        }
+        *evaluator_params = params;
+    }
+    let df = evaluator_input(df, &fields, inputs);
     interruptible(py, &df.spark_session(), || {
         evaluator.evaluate(&df).map_err(Box::new)
     })
@@ -840,25 +920,31 @@ where
 
 /// The dataset of `evaluate`, as PySpark's evaluators take it (see [`Dataset`]): a pandas DataFrame,
 /// which PySpark evaluates locally, is sent with `createDataFrame` of the active session, as the
-/// evaluators of this client run on the server.
-fn evaluation_dataset(dataset: &Bound<'_, PyAny>) -> PyResult<DataFrame> {
+/// evaluators of this client run on the server. Only the columns that PySpark's evaluator reads
+/// are sent, as `pdf[columns]` selects them, which raises the KeyError of pandas for a missing one.
+fn evaluation_dataset(dataset: &Bound<'_, PyAny>, inputs: &EvaluatorInputs) -> PyResult<DataFrame> {
     match dataset_of(dataset, "evaluate", "select")? {
         Dataset::Spark(df) => Ok(df),
-        Dataset::Pandas(pdf) => active_dataframe(&pdf),
+        Dataset::Pandas(pdf) => {
+            let columns = PyList::new(pdf.py(), inputs.reads())?;
+            active_dataframe(&pdf.get_item(columns)?)
+        }
     }
 }
 
-/// `df` as the JVM evaluator reads it, with its columns of `inputs` converted: a prediction
-/// (`inputs.doubles`) of another numeric type is cast to a double, and a score (`inputs.score`) of
-/// another numeric type too, while an array score is sent as a vector by `array_to_vector`, which
-/// the JVM evaluator reads at its element 1, as PySpark's reads the column 1 of an array. The
-/// columns are found in the schema of `df` regardless of case, as Spark resolves them; another
-/// type is sent as it is, which the JVM evaluator checks.
-fn evaluator_input(py: Python<'_>, df: DataFrame, inputs: EvaluatorInputs) -> PyResult<DataFrame> {
+/// `df` as the JVM evaluator reads it, whose schema has the fields `fields`, with its columns of
+/// `inputs` converted: a prediction (`inputs.doubles`) of another numeric type is cast to a
+/// double, and a score (`inputs.score`) of another numeric type too, while an array score is sent
+/// as a vector by `array_to_vector`, which the JVM evaluator reads at its element 1, as PySpark's
+/// reads the column 1 of an array. The columns are found in `fields` regardless of case, as Spark
+/// resolves them; another type is sent as it is, which the JVM evaluator checks.
+fn evaluator_input(
+    mut df: DataFrame,
+    fields: &[StructField],
+    inputs: EvaluatorInputs,
+) -> DataFrame {
     use spark_connect::types::DataType;
 
-    let fields = schema_fields(py, &df)?;
-    let mut df = df;
     for field in fields {
         let named = |name: &String| name.eq_ignore_ascii_case(&field.name);
         let score = inputs.score.as_ref().is_some_and(named);
@@ -877,7 +963,7 @@ fn evaluator_input(py: Python<'_>, df: DataFrame, inputs: EvaluatorInputs) -> Py
         };
         df = df.with_column(&field.name, converted);
     }
-    Ok(df)
+    df
 }
 
 /// The model of a class of PySpark's `pyspark.ml.connect`, LogisticRegression, whose transform
@@ -1069,6 +1155,14 @@ impl PyMLModel {
         let mut model = self.model.clone_box();
         let session = df.spark_session();
         let vectors = Vectors::of(model.operator(), model.params());
+        // The JVM model reads its featuresCol by the spelling of the schema of the input.
+        let fields = if vectors.input.is_some() {
+            lazy_schema_fields(py, df)?
+        } else {
+            Vec::new()
+        };
+        let params = std::mem::take(model.params_mut());
+        *model.params_mut() = vectors.spell_features(params, &fields);
         // The JVM model appends its probability vector before its prediction: it is output in a
         // column of its own, whose array is appended after the prediction, as PySpark's is.
         let probability = match pyspark {
@@ -1086,7 +1180,8 @@ impl PyMLModel {
         // An array input is sent as its vector, which the JVM model reads, and kept as it is in a
         // column of its own, which takes its place again in the output.
         let array = vectors
-            .array_input(py, df, true)?
+            .input_field(&fields)
+            .filter(is_number_array)
             .map(|field| (format!("{}__input", model.operator().uid), field));
         let input = match &array {
             Some((kept, field)) => df.with_columns(vec![
@@ -4851,6 +4946,7 @@ impl PyRegressionEvaluator {
         evaluate_native(slf, dataset, |evaluator| EvaluatorInputs {
             doubles: vec![evaluator.prediction_col().to_string()],
             score: None,
+            label: evaluator.label_col().to_string(),
         })
     }
 }
@@ -4961,6 +5057,7 @@ impl PyBinaryClassificationEvaluator {
         evaluate_native(slf, dataset, |evaluator| EvaluatorInputs {
             doubles: Vec::new(),
             score: Some(evaluator.raw_prediction_col().to_string()),
+            label: evaluator.label_col().to_string(),
         })
     }
 }
@@ -5361,6 +5458,7 @@ impl PyMulticlassClassificationEvaluator {
         evaluate_native(slf, dataset, |evaluator| EvaluatorInputs {
             doubles: vec![evaluator.prediction_col().to_string()],
             score: None,
+            label: evaluator.label_col().to_string(),
         })
     }
 }
