@@ -111,6 +111,18 @@ def _labels_result(classes=(0, 1), double=False):
     return _arrow_result(table, T.StructType([T.StructField("labels", T.ArrayType(element))]))
 
 
+def _label_query_result(obj):
+    # The response of the query that the fit of obj makes of its labels: the array of the distinct
+    # labels of a LogisticRegression, and the maximum label of a OneVsRest, which it fits one model
+    # of each class of.
+    import pyarrow as pa
+
+    if type(obj).__name__ == "OneVsRest":
+        table = pa.table({"max": pa.array([1.0], pa.float64())})
+        return _arrow_result(table, T.StructType([T.StructField("max", T.DoubleType())]))
+    return _labels_result()
+
+
 def _arrow_result(table, schema):
     # The ExecutePlanResponse of the rows of the Arrow table, of the Spark schema `schema`, which
     # the mock server sends of an execution.
@@ -746,6 +758,8 @@ def test_ml_connect_setters_set_the_params_of_their_receiver_as_pyspark(ml_mock)
     # as the object of the constructor of the same params sends it.
     from pyspark.ml.connect import (
         BinaryClassificationEvaluator,
+        GaussianMixture,
+        GeneralizedLinearRegression,
         KMeans,
         LinearRegression,
         LinearSVC,
@@ -818,6 +832,22 @@ def test_ml_connect_setters_set_the_params_of_their_receiver_as_pyspark(ml_mock)
                 solver="row", maxBlockSizeInMB=1.5,
             ),
         ),
+        (
+            GaussianMixture,
+            dict(
+                featuresCol="f", predictionCol="p", k=3, probabilityCol="q", tol=0.5,
+                maxIter=7, seed=5, aggregationDepth=3, weightCol="w",
+            ),
+        ),
+        (
+            GeneralizedLinearRegression,
+            dict(
+                labelCol="y", featuresCol="f", predictionCol="p", family="poisson", link="log",
+                fitIntercept=False, maxIter=7, tol=0.5, regParam=0.25, weightCol="w",
+                solver="irls", linkPredictionCol="lp", variancePower=1.5, linkPower=0.5,
+                offsetCol="o", aggregationDepth=3,
+            ),
+        ),
         (RegressionEvaluator, dict(labelCol="y", predictionCol="p", metricName="r2")),
         (
             BinaryClassificationEvaluator,
@@ -829,8 +859,10 @@ def test_ml_connect_setters_set_the_params_of_their_receiver_as_pyspark(ml_mock)
         ),
     ]:
         setters = {"set" + name[0].upper() + name[1:]: name for name in values}
-        # Every setter of the class is checked.
-        assert sorted(n for n in dir(cls) if n.startswith("set")) == sorted(setters)
+        # Every setter of the class is checked, and its setParams, which has a test of its own.
+        assert sorted(
+            n for n in dir(cls) if n.startswith("set") and n != "setParams"
+        ) == sorted(setters)
         receiver = cls()
         for setter, name in setters.items():
             # By the name of the argument of PySpark's setters, value. The evaluators' setters are
@@ -840,6 +872,262 @@ def test_ml_connect_setters_set_the_params_of_their_receiver_as_pyspark(ml_mock)
         sent_values = {_sent_name(cls.__name__, name): value for name, value in values.items()}
         assert {name: params.get(name) for name in sent_values} == sent_values, cls
         assert params == sent_params(cls(**values)), cls
+
+
+_NO_SET_PARAMS = (
+    "LogisticRegression",
+    "RegressionEvaluator",
+    "BinaryClassificationEvaluator",
+    "MulticlassClassificationEvaluator",
+)
+_ONE_VS_REST_PARAMS = dict(
+    featuresCol="str", labelCol="str", predictionCol="str", rawPredictionCol="str",
+    weightCol="str", parallelism="int",
+)
+_NO_PARAM_MAP = (
+    "The native ML classes take no param map: set their params with the constructor or "
+    "setParams instead."
+)
+
+
+def _renamed_by_fit(name, param):
+    # The fit of a OneVsRest renames its label and prediction columns to the names of its own, which
+    # contain its uid, and sends those in place of the params.
+    return name == "OneVsRest" and param in ("labelCol", "predictionCol")
+
+
+def _user_sent(name, sent):
+    # The params of a request, without the ones that the fit of a OneVsRest sends in place of its
+    # own, as its uid names them.
+    if name != "OneVsRest":
+        return sent
+    return {key: value for key, value in sent.items() if not _renamed_by_fit(name, key)}
+
+
+def test_ml_connect_set_params_as_pyspark(ml_mock):
+    # As PySpark's setParams, of each class that has one: the pyspark.ml classes, which have it
+    # all, and the Pipeline and CrossValidator of pyspark.ml.connect. LogisticRegression and the
+    # evaluators of pyspark.ml.connect have none. It is keyword-only, with the params of the
+    # constructor, sets the params that it is given, in order, and returns the object. A value
+    # that its converter rejects raises the TypeError of the constructor. StringIndexer,
+    # VectorAssembler and CrossValidator take the params of their constructors, which are fewer
+    # than the params of PySpark's setParams, so they are the only ones that differ.
+    import inspect
+
+    import pyspark.ml.connect as connect
+
+    spark, service = ml_mock
+    models = []
+    for name in _NO_SET_PARAMS:
+        assert not hasattr(getattr(connect, name), "setParams"), name
+    tables = {n: p for n, p in _NATIVE_PARAMS.items() if n not in _NO_SET_PARAMS}
+    tables["OneVsRest"] = _ONE_VS_REST_PARAMS
+    for name, params in tables.items():
+        cls = getattr(connect, name)
+
+        def make(**given):
+            # OneVsRest needs its classifier to fit, as PySpark's does.
+            if name == "OneVsRest":
+                return cls(classifier=connect.LinearSVC(), **given)
+            return cls(**given)
+
+        assert str(inspect.signature(cls.setParams)) == (
+            "(self, " + str(inspect.signature(cls))[1:]
+        ), name
+        with pytest.raises(TypeError) as error:
+            make().setParams(bogus=1)
+        assert str(error.value) == f"{name}.setParams() got an unexpected keyword argument 'bogus'"
+        for args in [("a",), (1, 2)]:
+            with pytest.raises(TypeError) as error:
+                make().setParams(*args)
+            assert str(error.value) == "Method setParams forces keyword arguments.", name
+        fittable = name not in _NOT_FITTABLE
+        takes = set(inspect.signature(cls).parameters)
+        for param, kind in params.items():
+            value, expected = _NATIVE_CONVERTED[kind][0]
+            if param not in takes:
+                # The setter of a param that PySpark's class has none of, and its constructor
+                # takes none, so that setParams takes none (as PySpark's setParams).
+                with pytest.raises(TypeError) as error:
+                    make().setParams(**{param: value})
+                assert str(error.value) == (
+                    f"{name}.setParams() got an unexpected keyword argument '{param}'"
+                ), (name, param)
+                continue
+            obj = make()
+            assert obj.setParams(**{param: value}) is obj, (name, param)
+            if fittable and not _renamed_by_fit(name, param):
+                sent = _user_sent(name, _native_sent(spark, service, obj, models))
+                built = _user_sent(
+                    name, _native_sent(spark, service, make(**{param: value}), models)
+                )
+                assert sent == built, (name, param)
+                if name != "OneVsRest":
+                    assert sent == {
+                        **_defaults_sent(name), _sent_name(name, param): expected
+                    }, (name, param)
+            for bad, message in _NATIVE_REJECTED[kind][:1]:
+                expected_error = f'Invalid param value given for param "{param}". {message}'
+                with pytest.raises(TypeError) as error:
+                    make().setParams(**{param: bad})
+                assert str(error.value) == expected_error, (name, param)
+                with pytest.raises(TypeError) as error:
+                    make(**{param: bad})
+                assert str(error.value) == expected_error, (name, param)
+        if fittable and len(params) > 1:
+            # Two params, of which the second is set by setParams: as the constructor with both.
+            (first, first_kind), (second, second_kind) = list(params.items())[:2]
+            first_value = _NATIVE_CONVERTED[first_kind][0][0]
+            second_value = _NATIVE_CONVERTED[second_kind][0][0]
+            obj = make(**{first: first_value})
+            assert obj.setParams(**{second: second_value}) is obj
+            both = make(**{first: first_value, second: second_value})
+            assert _user_sent(name, _native_sent(spark, service, obj, models)) == _user_sent(
+                name, _native_sent(spark, service, both, models)
+            ), name
+
+    # A value that is rejected after another is set leaves that one set, as PySpark's _set does.
+    kmeans = connect.KMeans(k=3)
+    with pytest.raises(TypeError):
+        kmeans.setParams(maxIter=5, seed="x")
+    assert _native_sent(spark, service, kmeans, models) == {
+        "k": ("integer", 3),
+        "maxIter": ("integer", 5),
+    }
+
+
+def test_ml_connect_one_vs_rest_set_params_sets_its_classifier_as_its_constructor(ml_mock):
+    # As the constructor, setParams takes the classifier by setClassifier: a classifier of None
+    # clears it, and the fit of a OneVsRest with none raises the ValueError of its fit.
+    from pyspark.ml.connect.classification import LinearSVC, OneVsRest
+
+    spark, service = ml_mock
+    models = []
+    base = LinearSVC(maxIter=3)
+    estimator = OneVsRest()
+    assert estimator.setParams(classifier=base, parallelism=2) is estimator
+    assert _user_sent("OneVsRest", _native_sent(spark, service, estimator, models)) == _user_sent(
+        "OneVsRest", _native_sent(spark, service, OneVsRest(classifier=base, parallelism=2), models)
+    )
+    assert estimator.setParams(classifier=None) is estimator
+    with pytest.raises(ValueError, match="classifier"):
+        estimator.fit(spark.range(1))
+    with pytest.raises(TypeError) as error:
+        OneVsRest().setParams(bogus=1)
+    assert str(error.value) == "OneVsRest.setParams() got an unexpected keyword argument 'bogus'"
+
+
+def test_ml_connect_params_argument_of_fit_transform_and_evaluate_as_pyspark(ml_mock):
+    # As PySpark's Estimator.fit, Transformer.transform and Evaluator.evaluate, whose params
+    # argument is a param map: None and an empty dict leave the params as they are, so the call
+    # sends what it sends without the argument. A non-empty map raises TypeError here, as the
+    # native classes take no param map (and a list or tuple to a fit of pyspark.ml, which PySpark
+    # fits as one model per map). Any other value raises the TypeError that PySpark raises for it,
+    # before anything is sent. A connect LogisticRegression, Pipeline and CrossValidator take a
+    # list or tuple to their fit as any other value.
+    import pyspark.ml.connect as connect
+    from pyspark.errors import PySparkNotImplementedError
+
+    spark, service = ml_mock
+    df = spark.range(1)
+    models = []
+    fit_message = (
+        "Params must be either a param map or a list/tuple of param maps, but got {}."
+    )
+    map_message = "Params must be a param map but got {}."
+
+    def fitted(estimator, *params):
+        # The params of the fit request, which the fits of a OneVsRest name with its uid.
+        sent = len(service.execute_requests)
+        service.execute_payload = _operator_info("model-1")
+        service.query_payload = _label_query_result(estimator)
+        models.append(estimator.fit(df, *params))
+        service.query_payload = None
+        return _commands_but_deletes(service, sent)[0].ml_command.fit.params
+
+    def evaluated(evaluator, *params):
+        sent = len(service.execute_requests)
+        service.execute_payload = _ml_result(param=pb2.Expression.Literal(double=0.5))
+        assert evaluator.evaluate(df, *params) == 0.5
+        return _commands_but_deletes(service, sent)[0].ml_command.evaluate
+
+    def transformed(transformer, *params):
+        return _relation(transformer.transform(df, *params)).ml_relation.transform
+
+    def refused(call, message):
+        sent = _requests_but_deletes(service)
+        with pytest.raises(TypeError) as error:
+            call()
+        assert str(error.value) == message
+        assert _requests_but_deletes(service) == sent
+
+    # The fits of the pyspark.ml classes, which take a list or tuple as a fit of many models.
+    classifier = connect.LinearSVC()
+    for estimator in [
+        connect.NaiveBayes(smoothing=2.0),
+        connect.KMeans(k=3),
+        connect.GBTRegressor(maxIter=3),
+        connect.OneVsRest(classifier=classifier),
+    ]:
+        base = fitted(estimator)
+        assert fitted(estimator, None) == base, type(estimator)
+        assert fitted(estimator, {}) == base, type(estimator)
+        refused(lambda: estimator.fit(df, {"smoothing": 2.0}), _NO_PARAM_MAP)
+        for value in [[], [{}], ()]:
+            refused(lambda: estimator.fit(df, value), _NO_PARAM_MAP)
+        for value in ["x", 3]:
+            refused(
+                lambda: estimator.fit(df, value),
+                fit_message.format(type(value)),
+            )
+    # The fits of pyspark.ml.connect: a list or tuple is not a param map there either.
+    logistic = connect.LogisticRegression()
+    base = fitted(logistic)
+    assert fitted(logistic, None) == base
+    assert fitted(logistic, {}) == base
+    refused(lambda: logistic.fit(df, {"maxIter": 2}), _NO_PARAM_MAP)
+    for value in [[{}], ()]:
+        refused(lambda: logistic.fit(df, value), fit_message.format(type(value)))
+    refused(lambda: logistic.fit(df, "x"), fit_message.format(str))
+    assert fitted(logistic, None) == base
+
+    # The fits of the classes that are not fitted: None and {} raise NOT_IMPLEMENTED, the error
+    # of their fit, and any other value its TypeError first.
+    for estimator in [connect.Pipeline(), connect.CrossValidator()]:
+        for params in [(), (None,), ({},)]:
+            with pytest.raises(PySparkNotImplementedError):
+                estimator.fit(df, *params)
+        refused(lambda: estimator.fit(df, {"stages": []}), _NO_PARAM_MAP)
+        refused(lambda: estimator.fit(df, "x"), fit_message.format(str))
+        refused(lambda: estimator.fit(df, [{}]), fit_message.format(list))
+
+    # The check of the params is before the dataset, as in PySpark's fit.
+    with pytest.raises(TypeError) as error:
+        connect.NaiveBayes().fit(object(), "x")
+    assert str(error.value) == fit_message.format(str)
+
+    # The transforms: a transformer and a model of pyspark.ml.connect.
+    assembler = connect.VectorAssembler(inputCols=["id"], outputCol="out")
+    base = transformed(assembler)
+    assert transformed(assembler, None) == base
+    assert transformed(assembler, {}) == base
+    model = models[-1]
+    model_base = _relation(model.transform(df)).ml_relation.transform
+    assert transformed(model, None) == model_base
+    assert transformed(model, {}) == model_base
+    for transformer in [assembler, model]:
+        refused(lambda: transformer.transform(df, {"outputCol": "o"}), _NO_PARAM_MAP)
+        for value in [[], ("a",), "x", 3]:
+            refused(lambda: transformer.transform(df, value), map_message.format(type(value)))
+
+    # The evaluates of the evaluators, which take a param map as their transforms do.
+    evaluator = connect.RegressionEvaluator()
+    base = evaluated(evaluator)
+    assert evaluated(evaluator, None) == base
+    assert evaluated(evaluator, {}) == base
+    refused(lambda: evaluator.evaluate(df, {"labelCol": "y"}), _NO_PARAM_MAP)
+    for value in [[], "x"]:
+        refused(lambda: evaluator.evaluate(df, value), map_message.format(type(value)))
 
 
 def test_ml_pipeline_and_cross_validator_fit_is_not_implemented(ml_mock):
@@ -1016,7 +1304,7 @@ def _native_request(spark, service, obj, models):
         return evaluate.evaluator, evaluate.params
     if hasattr(obj, "fit"):
         service.execute_payload = _operator_info("model-1")
-        service.query_payload = _labels_result()
+        service.query_payload = _label_query_result(obj)
         models.append(obj.fit(df))
         service.query_payload = None
         fit = _commands_but_deletes(service, sent)[0].ml_command.fit

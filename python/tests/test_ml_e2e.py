@@ -878,6 +878,32 @@ def test_ml_connect_setters_change_the_next_evaluate_and_fit_as_pyspark(session)
     assert error.value.getMessageParameters() == {"feature": "Pipeline.fit"}
 
 
+def test_ml_connect_set_params_fits_the_model_of_the_constructor_as_pyspark(session):
+    # As PySpark's setParams, which sets the params that it is given: an estimator whose params
+    # are set by setParams fits the model of the constructor with the same params, which gives
+    # the same predictions on the server, for a classifier and a clusterer.
+    from pyspark.ml.connect.classification import LinearSVC
+    from pyspark.ml.connect.clustering import KMeans
+
+    labeled = _labeled(session)
+
+    by_setter = LinearSVC().setParams(maxIter=7, regParam=0.1, threshold=0.5)
+    by_constructor = LinearSVC(maxIter=7, regParam=0.1, threshold=0.5)
+    setter_rows = by_setter.fit(labeled).transform(labeled).orderBy("id").collect()
+    constructor_rows = by_constructor.fit(labeled).transform(labeled).orderBy("id").collect()
+    assert [(r.prediction, list(r.rawPrediction)) for r in setter_rows] == [
+        (r.prediction, list(r.rawPrediction)) for r in constructor_rows
+    ]
+
+    clusters = KMeans().setParams(k=2, seed=7, maxIter=5)
+    by_constructor = KMeans(k=2, seed=7, maxIter=5)
+    setter_clusters = clusters.fit(labeled).transform(labeled).orderBy("id").collect()
+    constructor_clusters = by_constructor.fit(labeled).transform(labeled).orderBy("id").collect()
+    assert [r.prediction for r in setter_clusters] == [
+        r.prediction for r in constructor_clusters
+    ]
+
+
 def test_ml_statistics_as_pyspark(session):
     from pyspark.ml.stat import ChiSquareTest, Correlation, Summarizer
 
