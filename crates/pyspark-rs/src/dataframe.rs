@@ -212,6 +212,19 @@ impl PyDataFrame {
         }
     }
 
+    /// The DataFrame of `dataframe`, a copy of this one, with the `_support_repr_html` of this
+    /// one, as the state of PySpark's DataFrame carries it to its copies. Its other answers are
+    /// its own, as PySpark keeps them for each DataFrame.
+    fn copy_of(&self, dataframe: DataFrame) -> PyDataFrame {
+        let copy = PyDataFrame::new(dataframe);
+        copy.support_repr_html.store(
+            self.support_repr_html
+                .load(std::sync::atomic::Ordering::SeqCst),
+            std::sync::atomic::Ordering::SeqCst,
+        );
+        copy
+    }
+
     /// The number of rows and the truncation of the eager evaluation, as PySpark's `int` of
     /// each setting, if it is enabled.
     fn eager_eval(&self, py: Python<'_>) -> PyResult<Option<(i32, i32)>> {
@@ -686,9 +699,11 @@ impl PyDataFrame {
     }
 
     /// A DataFrame pickles, as PySpark Connect's, of its session, which gives back the active
-    /// session of its ID, and of its plan, here the bytes of its relation. The session unpickles
-    /// first: so on a Python worker of the server, which has no active session, a pickled
-    /// DataFrame raises `NO_ACTIVE_SESSION`, as PySpark's does.
+    /// session of its ID, of its plan, here the bytes of its relation, and of the
+    /// `_support_repr_html` of its state. The session unpickles first: so on a Python worker of
+    /// the server, which has no active session, a pickled DataFrame raises `NO_ACTIVE_SESSION`,
+    /// as PySpark's does. The unpickled DataFrame has copies of the Observations of this one
+    /// (see `DataFrame::from_sent_relation`).
     fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
         let py = slf.py();
         let this = slf.borrow();
@@ -698,38 +713,64 @@ impl PyDataFrame {
                 this.spark_session(py)?,
                 this._relation_bytes(py)?,
                 this.dataframe.plan_levels(),
+                this.support_repr_html
+                    .load(std::sync::atomic::Ordering::SeqCst),
             ))
     }
 
     /// The shallow copy of a DataFrame, as PySpark's `copy.copy` of its `__reduce__`: the same
     /// plan, and so the same Observations, as PySpark's copy shares its plan, with the
-    /// `_support_repr_html` that its state carries.
+    /// `_support_repr_html` and the schema that its state carries, and an `executionInfo` of its
+    /// own, None until it executes, as that of PySpark's `DataFrame(plan, session)`.
     fn __copy__(&self) -> PyDataFrame {
-        let copy = PyDataFrame::new(self.dataframe.clone());
-        copy.support_repr_html.store(
-            self.support_repr_html
-                .load(std::sync::atomic::Ordering::SeqCst),
-            std::sync::atomic::Ordering::SeqCst,
-        );
-        copy
+        self.copy_of(self.dataframe.shallow_copy())
     }
 
-    /// The deep copy of a DataFrame, as PySpark's `copy.deepcopy`: the same plan, whose
-    /// Observations are copies of its own, which the actions of the copy set. `copy.copy` and
-    /// pickling keep sharing them.
-    fn __deepcopy__(&self, _memo: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        let copy = crate::on_grown_stack(|| self.dataframe.detached_copy()).to_pyerr()?;
-        Ok(PyDataFrame::new(copy))
+    /// The deep copy of a DataFrame, as PySpark's `copy.deepcopy` of its `__reduce__`, which
+    /// copies its plan and then its session with the memo of the call: the same relation and
+    /// plan ID, with the `_support_repr_html` and the schema that its state carries and an
+    /// `executionInfo` of its own, whose Observations are the copies of those of this DataFrame
+    /// in `memo` (see `observation::deep_copy_in`). So an Observation that the call copies too,
+    /// in a tuple or an object that holds both, is copied once, and the actions of the copied
+    /// DataFrame set the copy; the Observations of this DataFrame stay as they are. The copy of
+    /// the session is that of its `__reduce__`, the active session of its ID, once in a call: so
+    /// a deep copy raises `NO_ACTIVE_SESSION` where no session is active, as on another thread,
+    /// and `PySparkAssertionError` where another one is, while `copy.copy` keeps the session.
+    fn __deepcopy__(&self, py: Python<'_>, memo: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        let observations = self
+            .dataframe
+            .observations()
+            .into_iter()
+            .map(|(name, observation)| {
+                Ok((
+                    name,
+                    crate::observation::deep_copy_in(py, &observation, memo)?,
+                ))
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        let session = py
+            .import("copy")?
+            .call_method1(
+                pyo3::intern!(py, "deepcopy"),
+                (self.spark_session(py)?, memo),
+            )?
+            .extract::<PyRef<'_, crate::session::PySparkSession>>()?
+            .session
+            .clone();
+        let copy = crate::on_grown_stack(|| self.dataframe.deep_copy_with(session, observations))
+            .to_pyerr()?;
+        Ok(self.copy_of(copy))
     }
 
     /// The DataFrame of `relation`, the bytes of a relation of `levels` levels of `session`, as a
-    /// pickled DataFrame unpickles.
+    /// pickled DataFrame unpickles, with the `_support_repr_html` of its state.
     #[staticmethod]
-    #[pyo3(signature = (session, relation, levels=1))]
+    #[pyo3(signature = (session, relation, levels=1, support_repr_html=false))]
     fn _of_relation(
         session: &Bound<'_, crate::session::PySparkSession>,
         relation: &[u8],
         levels: usize,
+        support_repr_html: bool,
     ) -> PyResult<PyDataFrame> {
         let session = session.borrow().session.clone();
         use prost::Message;
@@ -742,7 +783,11 @@ impl PyDataFrame {
         })
         .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?
         .to_pyerr()?;
-        Ok(PyDataFrame::new(dataframe))
+        let dataframe = PyDataFrame::new(dataframe);
+        dataframe
+            .support_repr_html
+            .store(support_repr_html, std::sync::atomic::Ordering::SeqCst);
+        Ok(dataframe)
     }
 
     /// The plan of this DataFrame, as PySpark Connect's `DataFrame._plan`, whose
