@@ -242,6 +242,10 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ml::PyVectorAssembler>()?;
     m.add_class::<ml::PyLogisticRegression>()?;
     m.add_class::<ml::PyLinearSVC>()?;
+    m.add_class::<ml::PyFMClassifier>()?;
+    m.add_class::<ml::PyMultilayerPerceptronClassifier>()?;
+    m.add_class::<ml::PyOneVsRest>()?;
+
     m.add_class::<ml::PyLinearRegression>()?;
     m.add_class::<ml::PyGeneralizedLinearRegression>()?;
     m.add_class::<ml::PyDecisionTreeClassifier>()?;

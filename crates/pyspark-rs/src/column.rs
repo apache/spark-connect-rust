@@ -162,6 +162,7 @@ impl PyColumn {
         alias: Vec<String>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyColumn> {
+        crate::options::check_keyword_keys(kwargs)?;
         let _origin = crate::origin::with_origin("alias")?;
         let mut metadata = None;
         if let Some(kwargs) = kwargs {

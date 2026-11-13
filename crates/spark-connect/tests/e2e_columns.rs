@@ -9,9 +9,11 @@ mod common;
 use common::{session, should_run};
 use spark_connect::column::{col, lit, lit_boolean, lit_double, lit_string, when, Column};
 use spark_connect::dataframe::DataFrame;
+use spark_connect::expression::{Expression, LiteralExpression};
 use spark_connect::functions as f;
 use spark_connect::row::Value;
 use spark_connect::session::SparkSession;
+use spark_connect::types::DataType;
 
 fn base(s: &SparkSession) -> DataFrame {
     s.sql(
@@ -250,4 +252,49 @@ fn column_struct_array_map_access() {
     // map value access
     let m = f::create_map(vec![lit_string("k"), lit(7)]);
     assert_eq!(i64s(&one(&df, m.get_item(lit_string("k")))), vec![Some(7)]);
+}
+
+/// `arr.getItem(None)` is declared non-nullable by the server, and its values are all null. The
+/// rows, the local iterator and the Arrow batches read those nulls as PyArrow does, unchanged.
+#[test]
+fn null_get_item_reads_its_nulls_though_the_server_declares_it_non_nullable() {
+    if !should_run() {
+        return;
+    }
+    let s = session();
+    let df = s.range(3).expect("range");
+    let arr = f::array(vec![lit(10), lit(20)]);
+    let null_key = Column::new(Expression::literal(LiteralExpression::null(DataType::Null)));
+    let null_item = arr.get_item(null_key);
+
+    let rows = df
+        .select(vec![null_item.clone()])
+        .collect()
+        .expect("collect");
+    assert_eq!(rows.len(), 3);
+    assert!(rows.iter().all(|row| row.get(0) == Some(&Value::Null)));
+
+    let iter = df
+        .select(vec![null_item.clone()])
+        .to_local_iterator(false)
+        .expect("to_local_iterator");
+    let streamed: Vec<_> = iter.collect::<Result<Vec<_>, _>>().expect("iterate");
+    assert_eq!(streamed.len(), 3);
+    assert!(streamed.iter().all(|row| row.get(0) == Some(&Value::Null)));
+
+    let batches = df
+        .select(vec![null_item.clone()])
+        .collect_record_batches()
+        .expect("collect_record_batches");
+    let nulls: usize = batches.iter().map(|b| b.column(0).null_count()).sum();
+    assert_eq!(nulls, 3);
+
+    // A struct field of the same value is read with its nulls too.
+    let st = f::r#struct(vec![null_item.alias("x")]);
+    let rows = df.select(vec![st]).collect().expect("collect struct");
+    assert_eq!(rows.len(), 3);
+    let Some(Value::Struct(first)) = rows[0].get(0) else {
+        panic!("a struct value, got {:?}", rows[0].get(0));
+    };
+    assert_eq!(first.values(), &[Value::Null]);
 }

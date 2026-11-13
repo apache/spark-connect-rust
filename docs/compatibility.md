@@ -669,3 +669,56 @@ The native surface covers construction, parameter setters, fit and DataFrame
 transform. Component/weight/covariance inspection, training summaries,
 single-vector prediction and persistence are outside this surface. The vendored
 `pyspark.ml.clustering` API retains its existing implementation.
+
+## Native FMClassifier
+
+`spark_connect::ml::FMClassifier` and
+`pyspark.ml.connect.classification.FMClassifier` fit Spark's binary factorization
+machine classifier. All 17 PySpark constructor parameters have Rust builder
+setters/getters and named Python setters. Fitted models produce prediction,
+probability and raw-prediction columns, with configurable thresholds. Both the
+`gd` and `adamW` solvers run on the Spark server.
+
+## Native MultilayerPerceptronClassifier
+
+`spark_connect::ml::MultilayerPerceptronClassifier` and its native Python binding
+support all 13 PySpark constructor parameters plus `setThresholds`. Configure
+`layers` before fitting; input and output sizes must match the feature dimension
+and number of classes. `initialWeights` accepts dense or sparse ML vectors:
+Rust uses `MlVector` (a `Vec<f64>` or array also converts to a dense vector), and
+Python accepts the values supported by PySpark's `TypeConverters.toVector`.
+Layer arrays and vector parameters are encoded in Rust and checked against
+fixtures captured with official PySpark.
+
+The fitted model produces multiclass prediction, probability and raw-prediction
+columns. Both `l-bfgs` and `gd` are supported. As in PySpark, fitting an empty
+DataFrame can return a model; the native client preserves that server behavior.
+
+## Native OneVsRest
+
+`spark_connect::ml::OneVsRest` and `pyspark.ml.connect.classification.OneVsRest`
+implement the multiclass reduction in Rust. Supply a native binary classifier,
+for example `OneVsRest::new().set_classifier(LinearSVC::new())` in Rust or
+`OneVsRest(classifier=LinearSVC())` in Python. The `Classifier` enum accepts all
+eight native binary classifiers: LogisticRegression, LinearSVC,
+DecisionTreeClassifier, RandomForestClassifier, GBTClassifier, NaiveBayes,
+FMClassifier and MultilayerPerceptronClassifier. Perceptron base classifiers need
+a two-unit output layer.
+
+All seven PySpark constructor parameters have named setters. Rust exposes scalar
+parameter getters and the configured classifier. Fits clone the base classifier
+for each class and run at most `parallelism` fits at once. Python observes
+mutations to the supplied classifier made before `fit`, while fitting leaves that
+classifier unchanged. Class indices run from zero through the maximum label, as
+in PySpark. Instance weights are forwarded when the base classifier supports
+them; Python warns when they are ignored for FMClassifier or the perceptron.
+
+The model aggregates positive-class raw scores into `rawPrediction` and chooses
+the first highest score for `prediction`, ignoring NaN/null scores as PySpark
+does. It produces no probability column. Temporary columns and fit-created
+caches are cleaned up, and transformed DataFrames retain the binary models for
+lazy evaluation. Models must transform data in their fitting session.
+
+These additions cover native estimator construction, parameters, fitting and
+DataFrame transforms. Model coefficient/weight inspection, training summaries,
+persistence and single-vector prediction remain separate API work.

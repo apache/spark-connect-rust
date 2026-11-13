@@ -410,6 +410,7 @@ impl PyCatalog {
         description: Option<&str>,
         options: Option<&Bound<'_, pyo3::types::PyDict>>,
     ) -> PyResult<PyDataFrame> {
+        crate::options::check_keyword_keys(options)?;
         let schema = table_schema(schema)?;
         let options = crate::options::str_kwargs_skip_none(options)?;
         interruptible(py, self.catalog.spark_session(), || {
@@ -441,6 +442,7 @@ impl PyCatalog {
         description: Option<&str>,
         options: Option<&Bound<'_, pyo3::types::PyDict>>,
     ) -> PyResult<PyDataFrame> {
+        crate::options::check_keyword_keys(options)?;
         py.import("warnings")?.call_method1(
             "warn",
             (
