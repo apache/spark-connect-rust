@@ -2044,14 +2044,17 @@ impl DataFrame {
         DataFrame::new(self.session.clone(), plan)
     }
 
-    /// Select with SQL expressions, mirroring `DataFrame.selectExpr`.
+    /// Select with SQL expressions, mirroring `DataFrame.selectExpr`, of any iterable of them.
     ///
     /// Each string is parsed as a SQL expression (e.g. `"id + 1 AS x"`), not treated
     /// as a bare column name - so it must go through `functions::expr` (an
     /// `ExpressionString` the server parses), not `col` (an unresolved attribute,
     /// which made `selectExpr("id + 1 AS x")` fail to resolve).
-    pub fn select_expr(&self, exprs: Vec<&str>) -> DataFrame {
-        let cols: Vec<Column> = exprs.iter().map(|e| crate::functions::expr(e)).collect();
+    pub fn select_expr<S: Into<String>>(&self, exprs: impl IntoIterator<Item = S>) -> DataFrame {
+        let cols: Vec<Column> = exprs
+            .into_iter()
+            .map(|e| crate::functions::expr(&e.into()))
+            .collect();
         self.select(cols)
     }
 
@@ -2132,10 +2135,15 @@ impl DataFrame {
         DataFrame::new(self.session.clone(), plan)
     }
 
-    /// Fill NA values per column from `(column, value)` pairs. Mirrors
-    /// `df.fillna({col: value, ...})`: the values are as those of [`DataFrame::fillna_value`],
-    /// and an empty map is a `CANNOT_BE_EMPTY` error, as PySpark raises.
-    pub fn fillna_map(&self, pairs: Vec<(String, crate::row::Value)>) -> Result<DataFrame> {
+    /// Fill NA values per column from `(column, value)` pairs, of any iterable of them, such as a
+    /// `Vec`, an array or a map of the names. Mirrors `df.fillna({col: value, ...})`: the values
+    /// are as those of [`DataFrame::fillna_value`], and an empty map is a `CANNOT_BE_EMPTY`
+    /// error, as PySpark raises.
+    pub fn fillna_map(
+        &self,
+        pairs: impl IntoIterator<Item = (String, crate::row::Value)>,
+    ) -> Result<DataFrame> {
+        let pairs: Vec<(String, crate::row::Value)> = pairs.into_iter().collect();
         if pairs.is_empty() {
             return Err(SparkError::classed(
                 SparkErrorKind::ValueError,
@@ -2239,12 +2247,12 @@ impl DataFrame {
         DataFrame::new(self.session.clone(), plan)
     }
 
-    /// Get summary statistics.
-    pub fn summary(&self, percentiles: Vec<&str>) -> DataFrame {
-        let percs = percentiles.iter().map(|s| s.to_string()).collect();
+    /// Get summary statistics, of any iterable of their names, such as `"count"` and `"25%"`, as
+    /// PySpark's `DataFrame.summary(*statistics)`.
+    pub fn summary<S: Into<String>>(&self, statistics: impl IntoIterator<Item = S>) -> DataFrame {
         let plan = LogicalPlan::Summary {
             input: Arc::clone(&self.plan),
-            percentiles: percs,
+            percentiles: statistics.into_iter().map(Into::into).collect(),
         };
         DataFrame::new(self.session.clone(), plan)
     }
@@ -6892,6 +6900,45 @@ mod plan_construction_tests {
             [
                 &df.agg([count_distinct_columns(col("id"), [col("id")])]),
                 &df.agg([count_distinct_columns(col("id"), ["id"])]),
+            ],
+        );
+    }
+
+    /// The SQL expressions of `select_expr`, the statistics of `summary` and the pairs of
+    /// `fillna_map` are of any iterable too: an array, a Vec and an iterator build the same plan,
+    /// and `fillna_map` takes a map of the names as well.
+    #[test]
+    fn expression_statistic_and_fill_lists_take_any_iterable_as_their_vec_does() {
+        use crate::row::Value;
+        use std::collections::BTreeMap;
+
+        let df = session().range(5).unwrap();
+        let same_as = |vec_form: &DataFrame, others: [&DataFrame; 2]| {
+            for other in others {
+                assert_eq!(other.plan.to_proto(), vec_form.plan.to_proto());
+            }
+        };
+
+        same_as(
+            &df.select_expr(vec!["id + 1 AS x", "id"]),
+            [
+                &df.select_expr(["id + 1 AS x", "id"]),
+                &df.select_expr(["id + 1 AS x", "id"].iter().map(|e| e.to_string())),
+            ],
+        );
+        same_as(
+            &df.summary(vec!["count", "25%"]),
+            [
+                &df.summary(["count", "25%"]),
+                &df.summary(["count", "25%"].iter().copied()),
+            ],
+        );
+        let pairs = || [("id".to_string(), Value::Long(0))];
+        same_as(
+            &df.fillna_map(pairs().to_vec()).unwrap(),
+            [
+                &df.fillna_map(pairs()).unwrap(),
+                &df.fillna_map(BTreeMap::from(pairs())).unwrap(),
             ],
         );
     }
