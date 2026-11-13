@@ -11,7 +11,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::plan::LogicalPlan;
+use crate::plan::{LogicalPlan, LogicalPlanKind};
 use crate::types::DataType;
 
 /// Internal settings snapshot shared with the Python Arrow importer; not a stable API.
@@ -332,7 +332,10 @@ fn write_inline_relation(batches: &[RecordBatch], schema: Option<DataType>) -> R
     } else {
         None
     };
-    Ok(LogicalPlan::LocalRelation { schema, data })
+    Ok(LogicalPlan::from_builder(
+        LogicalPlanKind::LocalRelation { schema, data },
+        [],
+    ))
 }
 
 pub(crate) fn create_relation(
@@ -395,10 +398,13 @@ pub(crate) fn create_relation(
     serialize_chunks(&batches, options, &mut |chunk| enqueue(chunk, true))?;
     hashes.extend(block_on(client.cache_artifacts(pending))?);
     let schema_hash = schema.map(|_| hashes.remove(0));
-    Ok(LogicalPlan::ChunkedCachedLocalRelation {
-        data_hashes: hashes,
-        schema_hash,
-    })
+    Ok(LogicalPlan::from_builder(
+        LogicalPlanKind::ChunkedCachedLocalRelation {
+            data_hashes: hashes,
+            schema_hash,
+        },
+        [],
+    ))
 }
 
 fn new_writer(schema: &SchemaRef) -> Result<StreamWriter<Vec<u8>>> {
@@ -581,9 +587,9 @@ mod tests {
         assert_eq!(before.offsets(), after.offsets());
 
         let relation = inline_relation(std::slice::from_ref(&batch), None).unwrap();
-        let LogicalPlan::LocalRelation {
+        let LogicalPlanKind::LocalRelation {
             data: Some(data), ..
-        } = &relation
+        } = relation.kind()
         else {
             panic!("expected inline data");
         };
@@ -889,9 +895,9 @@ mod tests {
         let after = after.as_any().downcast_ref::<StructArray>().unwrap();
         assert_map_values_unchanged(&maps, after.column(0));
         let relation = inline_relation(std::slice::from_ref(&batch), None).unwrap();
-        let LogicalPlan::LocalRelation {
+        let LogicalPlanKind::LocalRelation {
             data: Some(data), ..
-        } = &relation
+        } = relation.kind()
         else {
             panic!("expected inline relation");
         };
@@ -955,9 +961,9 @@ mod tests {
         let prepared = normalize_map_names(std::slice::from_ref(&batch)).unwrap();
         assert!(matches!(prepared, Cow::Borrowed(_)));
         let relation = inline_relation(std::slice::from_ref(&batch), None).unwrap();
-        let LogicalPlan::LocalRelation {
+        let LogicalPlanKind::LocalRelation {
             data: Some(data), ..
-        } = &relation
+        } = relation.kind()
         else {
             panic!("expected inline relation");
         };

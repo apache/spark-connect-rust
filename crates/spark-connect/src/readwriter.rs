@@ -10,7 +10,7 @@ use spark_connect_proto as proto;
 
 use crate::column::Column;
 use crate::dataframe::{build_input_relation, DataFrame};
-use crate::plan::LogicalPlan;
+use crate::plan::{LogicalPlan, LogicalPlanKind};
 use crate::session::SparkSession;
 
 /// DataFrameReader for reading data from various sources.
@@ -96,31 +96,37 @@ impl DataFrameReader {
     /// configured format, schema, and options.
     pub fn load_paths(self, paths: Vec<String>) -> DataFrame {
         let paths = Some(paths);
-        let plan = LogicalPlan::Read {
-            read_type: ReadType::DataSource {
-                format: self.format,
-                schema: if self.schema.is_empty() {
-                    None
-                } else {
-                    Some(self.schema)
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::Read {
+                read_type: ReadType::DataSource {
+                    format: self.format,
+                    schema: if self.schema.is_empty() {
+                        None
+                    } else {
+                        Some(self.schema)
+                    },
+                    options: self.options,
+                    paths: paths.unwrap_or_default(),
+                    predicates: vec![],
+                    source_name: None,
                 },
-                options: self.options,
-                paths: paths.unwrap_or_default(),
-                predicates: vec![],
-                source_name: None,
+                is_streaming: false,
             },
-            is_streaming: false,
-        };
+            [],
+        );
         DataFrame::new(self.session, plan)
     }
 
     /// Read the CDC changes of a named table. Mirrors `DataFrameReader.changes`.
     pub fn changes(self, table_name: &str) -> DataFrame {
-        let plan = LogicalPlan::RelationChanges {
-            table_name: table_name.to_string(),
-            options: self.options,
-            is_streaming: None,
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::RelationChanges {
+                table_name: table_name.to_string(),
+                options: self.options,
+                is_streaming: None,
+            },
+            [],
+        );
         DataFrame::new(self.session, plan)
     }
 
@@ -136,24 +142,29 @@ impl DataFrameReader {
         } else {
             Some(self.session.parse_ddl(&self.schema)?)
         };
-        let plan = LogicalPlan::Parse {
-            input: Arc::clone(&input.plan),
-            format,
-            schema,
-            options: self.options,
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::Parse {
+                format,
+                schema,
+                options: self.options,
+            },
+            [Arc::clone(&input.plan)],
+        );
         Ok(DataFrame::new(self.session, plan))
     }
 
     /// Read from a named table.
     pub fn table(self, table_name: &str) -> DataFrame {
-        let plan = LogicalPlan::Read {
-            read_type: ReadType::NamedTable {
-                table_name: table_name.to_string(),
-                options: self.options,
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::Read {
+                read_type: ReadType::NamedTable {
+                    table_name: table_name.to_string(),
+                    options: self.options,
+                },
+                is_streaming: false,
             },
-            is_streaming: false,
-        };
+            [],
+        );
         DataFrame::new(self.session, plan)
     }
 
@@ -194,21 +205,24 @@ impl DataFrameReader {
         self.options
             .insert("dbtable".to_string(), table.to_string());
 
-        let plan = LogicalPlan::Read {
-            read_type: ReadType::DataSource {
-                format: self.format,
-                schema: if self.schema.is_empty() {
-                    None
-                } else {
-                    Some(self.schema)
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::Read {
+                read_type: ReadType::DataSource {
+                    format: self.format,
+                    schema: if self.schema.is_empty() {
+                        None
+                    } else {
+                        Some(self.schema)
+                    },
+                    options: self.options,
+                    paths: vec![],
+                    predicates: predicates.unwrap_or_default(),
+                    source_name: None,
                 },
-                options: self.options,
-                paths: vec![],
-                predicates: predicates.unwrap_or_default(),
-                source_name: None,
+                is_streaming: false,
             },
-            is_streaming: false,
-        };
+            [],
+        );
         DataFrame::new(self.session, plan)
     }
 }
@@ -891,8 +905,8 @@ mod tests {
             .option("password", "secret")
             .jdbc("jdbc:mysql://localhost:3306/db", "table_name", None);
 
-        match df.plan.as_ref() {
-            LogicalPlan::Read {
+        match df.plan.kind() {
+            LogicalPlanKind::Read {
                 read_type:
                     ReadType::DataSource {
                         options, format, ..
@@ -922,8 +936,8 @@ mod tests {
             Some(predicates.clone()),
         );
 
-        match df.plan.as_ref() {
-            LogicalPlan::Read {
+        match df.plan.kind() {
+            LogicalPlanKind::Read {
                 read_type:
                     ReadType::DataSource {
                         predicates: preds, ..
@@ -1032,8 +1046,8 @@ mod tests {
             .options(opts)
             .load(Some("/data.csv"));
 
-        match df.plan.as_ref() {
-            LogicalPlan::Read {
+        match df.plan.kind() {
+            LogicalPlanKind::Read {
                 read_type:
                     ReadType::DataSource {
                         options, format, ..

@@ -1079,9 +1079,12 @@ impl Catalog {
     /// server-side schema and row data - and, crucially, returns an empty result
     /// for an empty database (e.g. `listTables` with no tables) rather than erroring.
     fn execute_catalog_as_dataframe(&self, catalog: &proto::Catalog) -> Result<DataFrame> {
-        let plan = crate::plan::LogicalPlan::Catalog {
-            catalog: catalog.clone(),
-        };
+        let plan = crate::plan::LogicalPlan::from_builder(
+            crate::plan::LogicalPlanKind::Catalog {
+                catalog: catalog.clone(),
+            },
+            [],
+        );
         Ok(DataFrame::new(self.session.clone(), plan))
     }
 

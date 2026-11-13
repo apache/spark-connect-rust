@@ -12,7 +12,7 @@ use spark_connect_core::runtime::{block_on, until_abort, ABORT_RETRIES};
 use spark_connect_proto as proto;
 
 use crate::dataframe::DataFrame;
-use crate::plan::LogicalPlan;
+use crate::plan::{LogicalPlan, LogicalPlanKind};
 use crate::readwriter::ReadType;
 use crate::session::SparkSession;
 use crate::udf::PythonUDFPayload;
@@ -96,44 +96,53 @@ impl DataStreamReader {
     /// Load streaming data from the specified path(s).
     pub fn load(self, path: Option<&str>) -> DataFrame {
         let paths = path.map(|p| vec![p.to_string()]);
-        let plan = LogicalPlan::Read {
-            read_type: ReadType::DataSource {
-                format: self.format.clone(),
-                schema: if self.schema.is_empty() {
-                    None
-                } else {
-                    Some(self.schema.clone())
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::Read {
+                read_type: ReadType::DataSource {
+                    format: self.format.clone(),
+                    schema: if self.schema.is_empty() {
+                        None
+                    } else {
+                        Some(self.schema.clone())
+                    },
+                    options: self.options.clone(),
+                    paths: paths.unwrap_or_default(),
+                    predicates: vec![],
+                    source_name: self.source_name.clone(),
                 },
-                options: self.options.clone(),
-                paths: paths.unwrap_or_default(),
-                predicates: vec![],
-                source_name: self.source_name.clone(),
+                is_streaming: true,
             },
-            is_streaming: true,
-        };
+            [],
+        );
         DataFrame::new(self.session, plan)
     }
 
     /// Read a named streaming table.
     pub fn table(self, table_name: &str) -> DataFrame {
-        let plan = LogicalPlan::Read {
-            read_type: ReadType::NamedTable {
-                table_name: table_name.to_string(),
-                options: self.options.clone(),
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::Read {
+                read_type: ReadType::NamedTable {
+                    table_name: table_name.to_string(),
+                    options: self.options.clone(),
+                },
+                is_streaming: true,
             },
-            is_streaming: true,
-        };
+            [],
+        );
         DataFrame::new(self.session, plan)
     }
 
     /// Read the streaming CDC changes of a named table. Mirrors
     /// `DataStreamReader.changes` (`is_streaming = true`).
     pub fn changes(self, table_name: &str) -> DataFrame {
-        let plan = LogicalPlan::RelationChanges {
-            table_name: table_name.to_string(),
-            options: self.options.clone(),
-            is_streaming: Some(true),
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::RelationChanges {
+                table_name: table_name.to_string(),
+                options: self.options.clone(),
+                is_streaming: Some(true),
+            },
+            [],
+        );
         DataFrame::new(self.session, plan)
     }
 
@@ -141,21 +150,24 @@ impl DataStreamReader {
     pub fn json(mut self, path: &str) -> DataFrame {
         self.format = Some("json".to_string());
         let paths = vec![path.to_string()];
-        let plan = LogicalPlan::Read {
-            read_type: ReadType::DataSource {
-                format: self.format.clone(),
-                schema: if self.schema.is_empty() {
-                    None
-                } else {
-                    Some(self.schema.clone())
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::Read {
+                read_type: ReadType::DataSource {
+                    format: self.format.clone(),
+                    schema: if self.schema.is_empty() {
+                        None
+                    } else {
+                        Some(self.schema.clone())
+                    },
+                    options: self.options.clone(),
+                    paths,
+                    predicates: vec![],
+                    source_name: self.source_name.clone(),
                 },
-                options: self.options.clone(),
-                paths,
-                predicates: vec![],
-                source_name: self.source_name.clone(),
+                is_streaming: true,
             },
-            is_streaming: true,
-        };
+            [],
+        );
         DataFrame::new(self.session, plan)
     }
 
@@ -163,21 +175,24 @@ impl DataStreamReader {
     pub fn parquet(mut self, path: &str) -> DataFrame {
         self.format = Some("parquet".to_string());
         let paths = vec![path.to_string()];
-        let plan = LogicalPlan::Read {
-            read_type: ReadType::DataSource {
-                format: self.format.clone(),
-                schema: if self.schema.is_empty() {
-                    None
-                } else {
-                    Some(self.schema.clone())
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::Read {
+                read_type: ReadType::DataSource {
+                    format: self.format.clone(),
+                    schema: if self.schema.is_empty() {
+                        None
+                    } else {
+                        Some(self.schema.clone())
+                    },
+                    options: self.options.clone(),
+                    paths,
+                    predicates: vec![],
+                    source_name: self.source_name.clone(),
                 },
-                options: self.options.clone(),
-                paths,
-                predicates: vec![],
-                source_name: self.source_name.clone(),
+                is_streaming: true,
             },
-            is_streaming: true,
-        };
+            [],
+        );
         DataFrame::new(self.session, plan)
     }
 
@@ -185,21 +200,24 @@ impl DataStreamReader {
     pub fn csv(mut self, path: &str) -> DataFrame {
         self.format = Some("csv".to_string());
         let paths = vec![path.to_string()];
-        let plan = LogicalPlan::Read {
-            read_type: ReadType::DataSource {
-                format: self.format.clone(),
-                schema: if self.schema.is_empty() {
-                    None
-                } else {
-                    Some(self.schema.clone())
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::Read {
+                read_type: ReadType::DataSource {
+                    format: self.format.clone(),
+                    schema: if self.schema.is_empty() {
+                        None
+                    } else {
+                        Some(self.schema.clone())
+                    },
+                    options: self.options.clone(),
+                    paths,
+                    predicates: vec![],
+                    source_name: self.source_name.clone(),
                 },
-                options: self.options.clone(),
-                paths,
-                predicates: vec![],
-                source_name: self.source_name.clone(),
+                is_streaming: true,
             },
-            is_streaming: true,
-        };
+            [],
+        );
         DataFrame::new(self.session, plan)
     }
 
@@ -207,21 +225,24 @@ impl DataStreamReader {
     pub fn orc(mut self, path: &str) -> DataFrame {
         self.format = Some("orc".to_string());
         let paths = vec![path.to_string()];
-        let plan = LogicalPlan::Read {
-            read_type: ReadType::DataSource {
-                format: self.format.clone(),
-                schema: if self.schema.is_empty() {
-                    None
-                } else {
-                    Some(self.schema.clone())
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::Read {
+                read_type: ReadType::DataSource {
+                    format: self.format.clone(),
+                    schema: if self.schema.is_empty() {
+                        None
+                    } else {
+                        Some(self.schema.clone())
+                    },
+                    options: self.options.clone(),
+                    paths,
+                    predicates: vec![],
+                    source_name: self.source_name.clone(),
                 },
-                options: self.options.clone(),
-                paths,
-                predicates: vec![],
-                source_name: self.source_name.clone(),
+                is_streaming: true,
             },
-            is_streaming: true,
-        };
+            [],
+        );
         DataFrame::new(self.session, plan)
     }
 
@@ -229,21 +250,24 @@ impl DataStreamReader {
     pub fn text(mut self, path: &str) -> DataFrame {
         self.format = Some("text".to_string());
         let paths = vec![path.to_string()];
-        let plan = LogicalPlan::Read {
-            read_type: ReadType::DataSource {
-                format: self.format.clone(),
-                schema: if self.schema.is_empty() {
-                    None
-                } else {
-                    Some(self.schema.clone())
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::Read {
+                read_type: ReadType::DataSource {
+                    format: self.format.clone(),
+                    schema: if self.schema.is_empty() {
+                        None
+                    } else {
+                        Some(self.schema.clone())
+                    },
+                    options: self.options.clone(),
+                    paths,
+                    predicates: vec![],
+                    source_name: self.source_name.clone(),
                 },
-                options: self.options.clone(),
-                paths,
-                predicates: vec![],
-                source_name: self.source_name.clone(),
+                is_streaming: true,
             },
-            is_streaming: true,
-        };
+            [],
+        );
         DataFrame::new(self.session, plan)
     }
 }
@@ -2900,8 +2924,8 @@ mod tests {
         let reader = spark.read_stream().format("kafka");
         let df = reader.load(Some("/path/to/data"));
         assert!(matches!(
-            df.plan.as_ref(),
-            crate::plan::LogicalPlan::Read {
+            df.plan.kind(),
+            crate::plan::LogicalPlanKind::Read {
                 is_streaming: true,
                 ..
             }
@@ -2914,8 +2938,8 @@ mod tests {
         let reader = spark.read_stream();
         let df = reader.json("/path/to/json");
         // Verify that the plan has the streaming flag set
-        match df.plan.as_ref() {
-            crate::plan::LogicalPlan::Read { is_streaming, .. } => {
+        match df.plan.kind() {
+            crate::plan::LogicalPlanKind::Read { is_streaming, .. } => {
                 assert!(*is_streaming);
             }
             _ => panic!("expected Read plan with streaming"),

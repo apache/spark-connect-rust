@@ -3,26 +3,30 @@
 //! These tests verify that streaming DataStreamReader and DataStreamWriter
 //! build correct proto structures. They don't require a remote connection.
 
-use spark_connect::plan::LogicalPlan;
+use spark_connect::plan::{LogicalPlan, LogicalPlanKind};
 use spark_connect::readwriter::ReadType;
 use spark_connect_proto as proto;
 
 /// Verify a basic streaming read plan builds correctly.
 #[test]
 fn test_stream_read_basic_structure() {
-    let plan = LogicalPlan::Read {
-        read_type: ReadType::DataSource {
-            format: Some("rate".to_string()),
-            schema: None,
-            options: vec![("rowsPerSecond".to_string(), "10".to_string())]
-                .into_iter()
-                .collect(),
-            paths: vec![],
-            predicates: vec![],
-            source_name: None,
+    let plan = LogicalPlan::try_new(
+        LogicalPlanKind::Read {
+            read_type: ReadType::DataSource {
+                format: Some("rate".to_string()),
+                schema: None,
+                options: vec![("rowsPerSecond".to_string(), "10".to_string())]
+                    .into_iter()
+                    .collect(),
+                paths: vec![],
+                predicates: vec![],
+                source_name: None,
+            },
+            is_streaming: true,
         },
-        is_streaming: true,
-    };
+        vec![],
+    )
+    .unwrap();
 
     let proto_plan = plan.to_proto();
 
@@ -37,17 +41,21 @@ fn test_stream_read_basic_structure() {
 
 #[test]
 fn test_stream_read_json_format() {
-    let plan = LogicalPlan::Read {
-        read_type: ReadType::DataSource {
-            format: Some("json".to_string()),
-            schema: None,
-            options: Default::default(),
-            paths: vec!["s3://bucket/path".to_string()],
-            predicates: vec![],
-            source_name: None,
+    let plan = LogicalPlan::try_new(
+        LogicalPlanKind::Read {
+            read_type: ReadType::DataSource {
+                format: Some("json".to_string()),
+                schema: None,
+                options: Default::default(),
+                paths: vec!["s3://bucket/path".to_string()],
+                predicates: vec![],
+                source_name: None,
+            },
+            is_streaming: true,
         },
-        is_streaming: true,
-    };
+        vec![],
+    )
+    .unwrap();
 
     let proto_plan = plan.to_proto();
 
@@ -68,17 +76,21 @@ fn test_stream_read_json_format() {
 
 #[test]
 fn test_stream_read_with_schema() {
-    let plan = LogicalPlan::Read {
-        read_type: ReadType::DataSource {
-            format: Some("json".to_string()),
-            schema: Some("id INT, name STRING, timestamp TIMESTAMP".to_string()),
-            options: Default::default(),
-            paths: vec!["/data/stream".to_string()],
-            predicates: vec![],
-            source_name: None,
+    let plan = LogicalPlan::try_new(
+        LogicalPlanKind::Read {
+            read_type: ReadType::DataSource {
+                format: Some("json".to_string()),
+                schema: Some("id INT, name STRING, timestamp TIMESTAMP".to_string()),
+                options: Default::default(),
+                paths: vec!["/data/stream".to_string()],
+                predicates: vec![],
+                source_name: None,
+            },
+            is_streaming: true,
         },
-        is_streaming: true,
-    };
+        vec![],
+    )
+    .unwrap();
 
     let proto_plan = plan.to_proto();
 
@@ -98,13 +110,17 @@ fn test_stream_read_with_schema() {
 
 #[test]
 fn test_stream_read_named_table() {
-    let plan = LogicalPlan::Read {
-        read_type: ReadType::NamedTable {
-            table_name: "my_table".to_string(),
-            options: Default::default(),
+    let plan = LogicalPlan::try_new(
+        LogicalPlanKind::Read {
+            read_type: ReadType::NamedTable {
+                table_name: "my_table".to_string(),
+                options: Default::default(),
+            },
+            is_streaming: true,
         },
-        is_streaming: true,
-    };
+        vec![],
+    )
+    .unwrap();
 
     let proto_plan = plan.to_proto();
 
@@ -124,17 +140,21 @@ fn test_stream_read_named_table() {
 
 #[test]
 fn test_stream_read_with_source_name() {
-    let plan = LogicalPlan::Read {
-        read_type: ReadType::DataSource {
-            format: Some("rate".to_string()),
-            schema: None,
-            options: Default::default(),
-            paths: vec![],
-            predicates: vec![],
-            source_name: Some("my_rate_source".to_string()),
+    let plan = LogicalPlan::try_new(
+        LogicalPlanKind::Read {
+            read_type: ReadType::DataSource {
+                format: Some("rate".to_string()),
+                schema: None,
+                options: Default::default(),
+                paths: vec![],
+                predicates: vec![],
+                source_name: Some("my_rate_source".to_string()),
+            },
+            is_streaming: true,
         },
-        is_streaming: true,
-    };
+        vec![],
+    )
+    .unwrap();
 
     let proto_plan = plan.to_proto();
 
@@ -152,17 +172,21 @@ fn test_stream_read_with_source_name() {
 #[test]
 fn test_stream_read_non_streaming_false() {
     // Verify that non-streaming reads are marked appropriately
-    let plan = LogicalPlan::Read {
-        read_type: ReadType::DataSource {
-            format: Some("parquet".to_string()),
-            schema: None,
-            options: Default::default(),
-            paths: vec!["/path".to_string()],
-            predicates: vec![],
-            source_name: None,
+    let plan = LogicalPlan::try_new(
+        LogicalPlanKind::Read {
+            read_type: ReadType::DataSource {
+                format: Some("parquet".to_string()),
+                schema: None,
+                options: Default::default(),
+                paths: vec!["/path".to_string()],
+                predicates: vec![],
+                source_name: None,
+            },
+            is_streaming: false,
         },
-        is_streaming: false,
-    };
+        vec![],
+    )
+    .unwrap();
 
     let proto_plan = plan.to_proto();
 

@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use spark_connect::column::lit;
-use spark_connect::plan::{self, JoinType, LogicalPlan};
+use spark_connect::plan::{self, JoinType, LogicalPlan, LogicalPlanKind};
 use spark_connect::readwriter::ReadType;
 use spark_connect::row::Value;
 use spark_connect::types::DataType;
@@ -94,12 +94,14 @@ fn lateral_join_to_proto_all_join_types() {
         JoinType::LeftAnti,
         JoinType::Cross,
     ] {
-        let p = LogicalPlan::LateralJoin {
-            left: Arc::new(base()),
-            right: Arc::new(base()),
-            join_type: jt,
-            on: None,
-        };
+        let p = LogicalPlan::try_new(
+            LogicalPlanKind::LateralJoin {
+                join_type: jt,
+                on: None,
+            },
+            vec![Arc::new(base()), Arc::new(base())],
+        )
+        .unwrap();
         assert!(p.to_proto().rel_type.is_some());
     }
 }
@@ -107,11 +109,14 @@ fn lateral_join_to_proto_all_join_types() {
 /// `RepartitionByRange::to_proto` with an explicit partition count (the `Some` branch).
 #[test]
 fn repartition_by_range_to_proto() {
-    let p = LogicalPlan::RepartitionByRange {
-        input: Arc::new(base()),
-        num_partitions: Some(4),
-        partition_exprs: vec![],
-    };
+    let p = LogicalPlan::try_new(
+        LogicalPlanKind::RepartitionByRange {
+            num_partitions: Some(4),
+            partition_exprs: vec![],
+        },
+        vec![Arc::new(base())],
+    )
+    .unwrap();
     assert!(p.to_proto().rel_type.is_some());
 }
 
@@ -122,11 +127,14 @@ fn repartition_by_range_without_a_count_sends_none() {
     use spark_connect_proto::relation::RelType;
 
     let count_of = |num_partitions: Option<i32>| {
-        let p = LogicalPlan::RepartitionByRange {
-            input: Arc::new(base()),
-            num_partitions,
-            partition_exprs: vec![],
-        };
+        let p = LogicalPlan::try_new(
+            LogicalPlanKind::RepartitionByRange {
+                num_partitions,
+                partition_exprs: vec![],
+            },
+            vec![Arc::new(base())],
+        )
+        .unwrap();
         match p.to_proto().rel_type {
             Some(RelType::RepartitionByExpression(r)) => r.num_partitions,
             other => panic!("unexpected relation {other:?}"),
@@ -139,17 +147,21 @@ fn repartition_by_range_without_a_count_sends_none() {
 /// `Read::to_proto` for the DataSource read type with format/schema/source_name set.
 #[test]
 fn read_datasource_to_proto() {
-    let p = LogicalPlan::Read {
-        read_type: ReadType::DataSource {
-            format: Some("parquet".to_string()),
-            schema: Some("a INT, b STRING".to_string()),
-            options: HashMap::new(),
-            paths: vec!["/tmp/data".to_string()],
-            predicates: vec![],
-            source_name: Some("src".to_string()),
+    let p = LogicalPlan::try_new(
+        LogicalPlanKind::Read {
+            read_type: ReadType::DataSource {
+                format: Some("parquet".to_string()),
+                schema: Some("a INT, b STRING".to_string()),
+                options: HashMap::new(),
+                paths: vec!["/tmp/data".to_string()],
+                predicates: vec![],
+                source_name: Some("src".to_string()),
+            },
+            is_streaming: false,
         },
-        is_streaming: false,
-    };
+        vec![],
+    )
+    .unwrap();
     assert!(p.to_proto().rel_type.is_some());
 }
 
@@ -157,15 +169,18 @@ fn read_datasource_to_proto() {
 /// PySpark sends them, and seed.
 #[test]
 fn stat_sample_by_to_proto() {
-    let p = LogicalPlan::StatSampleBy {
-        input: Arc::new(base()),
-        col: spark_connect::expression::Expression::column("k"),
-        fractions: vec![
-            (lit(0).expression().clone(), 0.1),
-            (lit(1).expression().clone(), 0.9),
-        ],
-        seed: Some(7),
-    };
+    let p = LogicalPlan::try_new(
+        LogicalPlanKind::StatSampleBy {
+            col: spark_connect::expression::Expression::column("k"),
+            fractions: vec![
+                (lit(0).expression().clone(), 0.1),
+                (lit(1).expression().clone(), 0.9),
+            ],
+            seed: Some(7),
+        },
+        vec![Arc::new(base())],
+    )
+    .unwrap();
     let Some(spark_connect_proto::relation::RelType::SampleBy(stat)) = p.to_proto().rel_type else {
         panic!("expected StatSampleBy");
     };

@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 
-use spark_connect::plan::LogicalPlan;
+use spark_connect::plan::{LogicalPlan, LogicalPlanKind};
 use spark_connect::readwriter::{ReadType, SaveMode, TableSaveMethod};
 use spark_connect_proto as proto;
 
@@ -23,10 +23,14 @@ fn test_read_json() {
         source_name: None,
     };
 
-    let plan = LogicalPlan::Read {
-        read_type,
-        is_streaming: false,
-    };
+    let plan = LogicalPlan::try_new(
+        LogicalPlanKind::Read {
+            read_type,
+            is_streaming: false,
+        },
+        vec![],
+    )
+    .unwrap();
 
     let proto = plan.to_proto();
     assert!(proto.rel_type.is_some());
@@ -55,10 +59,14 @@ fn test_read_parquet() {
         source_name: None,
     };
 
-    let plan = LogicalPlan::Read {
-        read_type,
-        is_streaming: false,
-    };
+    let plan = LogicalPlan::try_new(
+        LogicalPlanKind::Read {
+            read_type,
+            is_streaming: false,
+        },
+        vec![],
+    )
+    .unwrap();
 
     let proto = plan.to_proto();
     if let Some(proto::relation::RelType::Read(read)) = proto.rel_type {
@@ -85,10 +93,14 @@ fn test_read_csv() {
         source_name: None,
     };
 
-    let plan = LogicalPlan::Read {
-        read_type,
-        is_streaming: false,
-    };
+    let plan = LogicalPlan::try_new(
+        LogicalPlanKind::Read {
+            read_type,
+            is_streaming: false,
+        },
+        vec![],
+    )
+    .unwrap();
 
     let proto = plan.to_proto();
     if let Some(proto::relation::RelType::Read(read)) = proto.rel_type {
@@ -114,10 +126,14 @@ fn test_read_orc() {
         source_name: None,
     };
 
-    let plan = LogicalPlan::Read {
-        read_type,
-        is_streaming: false,
-    };
+    let plan = LogicalPlan::try_new(
+        LogicalPlanKind::Read {
+            read_type,
+            is_streaming: false,
+        },
+        vec![],
+    )
+    .unwrap();
 
     let proto = plan.to_proto();
     if let Some(proto::relation::RelType::Read(read)) = proto.rel_type {
@@ -143,10 +159,14 @@ fn test_read_text() {
         source_name: None,
     };
 
-    let plan = LogicalPlan::Read {
-        read_type,
-        is_streaming: false,
-    };
+    let plan = LogicalPlan::try_new(
+        LogicalPlanKind::Read {
+            read_type,
+            is_streaming: false,
+        },
+        vec![],
+    )
+    .unwrap();
 
     let proto = plan.to_proto();
     if let Some(proto::relation::RelType::Read(read)) = proto.rel_type {
@@ -176,10 +196,14 @@ fn test_read_with_options() {
         source_name: None,
     };
 
-    let plan = LogicalPlan::Read {
-        read_type,
-        is_streaming: false,
-    };
+    let plan = LogicalPlan::try_new(
+        LogicalPlanKind::Read {
+            read_type,
+            is_streaming: false,
+        },
+        vec![],
+    )
+    .unwrap();
 
     let proto = plan.to_proto();
     if let Some(proto::relation::RelType::Read(read)) = proto.rel_type {
@@ -206,10 +230,14 @@ fn test_read_with_schema() {
         source_name: None,
     };
 
-    let plan = LogicalPlan::Read {
-        read_type,
-        is_streaming: false,
-    };
+    let plan = LogicalPlan::try_new(
+        LogicalPlanKind::Read {
+            read_type,
+            is_streaming: false,
+        },
+        vec![],
+    )
+    .unwrap();
 
     let proto = plan.to_proto();
     if let Some(proto::relation::RelType::Read(read)) = proto.rel_type {
@@ -231,10 +259,14 @@ fn test_read_table() {
         options: HashMap::new(),
     };
 
-    let plan = LogicalPlan::Read {
-        read_type,
-        is_streaming: false,
-    };
+    let plan = LogicalPlan::try_new(
+        LogicalPlanKind::Read {
+            read_type,
+            is_streaming: false,
+        },
+        vec![],
+    )
+    .unwrap();
 
     let proto = plan.to_proto();
     if let Some(proto::relation::RelType::Read(read)) = proto.rel_type {
@@ -266,10 +298,14 @@ fn test_read_jdbc() {
         source_name: None,
     };
 
-    let plan = LogicalPlan::Read {
-        read_type,
-        is_streaming: false,
-    };
+    let plan = LogicalPlan::try_new(
+        LogicalPlanKind::Read {
+            read_type,
+            is_streaming: false,
+        },
+        vec![],
+    )
+    .unwrap();
 
     let proto = plan.to_proto();
     if let Some(proto::relation::RelType::Read(read)) = proto.rel_type {

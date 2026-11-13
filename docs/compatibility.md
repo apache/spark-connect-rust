@@ -124,20 +124,90 @@ Child expressions are handles too: `ExpressionNode::DirectShufflePartitionId`
 takes an `Expression`, and `CaseWhen::else_expr` is `Option<Expression>`, without
 the previous extra `Box`.
 
-Logical-plan child fields now use `Arc<LogicalPlan>` instead of `Box<LogicalPlan>`.
-When constructing variants directly, replace `Box::new(child)` with
-`Arc::new(child)`, or clone an existing `Arc` to share that child. Plan-building
-helpers accept `impl Into<Arc<LogicalPlan>>`, so they accept either an owned
-`LogicalPlan` or an existing `Arc<LogicalPlan>`. Serialization still produces the
-same protobuf tree; sharing does not deduplicate repeated relations on the wire.
+`LogicalPlan` is now a checked node. Its former enum variants live in
+`LogicalPlanKind`, without their child fields. Pass the kind and its ordered
+inputs to `LogicalPlan::try_new`, which accepts any
+`IntoIterator<Item = Arc<LogicalPlan>>`, such as an array or `Vec`. An invalid
+input count returns `InvalidPlanArity`, whose `expected_max: Option<usize>` is
+`None` for an unbounded count and `Some(max)` for a finite upper bound.
+`LogicalPlanKind::arity()` remains an inclusive range. Match on `plan.kind()` and
+read the shared input nodes through `plan.children()`. To edit an owned node,
+`into_parts()` returns its `(LogicalPlanKind, Vec<Arc<LogicalPlan>>)` without
+copying its payload or inputs; reconstruct it through `try_new` to validate the
+input count. For example:
 
-`LogicalPlan` implements `Drop`, so that a plan of many levels is dropped without
-recursing. A field can therefore not be moved out of an owned `LogicalPlan`:
-destructuring one by value is a compile error (E0509). Match on a reference instead
-(`match &plan`, or `match plan.as_ref()` of an `Arc<LogicalPlan>`) and clone the
-fields you need; the inputs are `Arc`s, so cloning them shares them.
+```rust
+use std::sync::Arc;
+use spark_connect::column::col;
+use spark_connect::plan::{self, LogicalPlan, LogicalPlanKind};
 
-`LogicalPlan::Raw` adds a `depth` field: the levels of its relation as a plan, with
+let input = Arc::new(plan::range(0, 10, 1));
+let projected = LogicalPlan::try_new(
+    LogicalPlanKind::Project { columns: vec![col("id")] },
+    vec![input],
+).expect("Project requires one input");
+match projected.kind() {
+    LogicalPlanKind::Project { columns } => assert_eq!(columns.len(), 1),
+    _ => unreachable!(),
+}
+assert_eq!(projected.children().len(), 1);
+
+let (kind, children) = projected.into_parts();
+let rebuilt = LogicalPlan::try_new(kind, children).expect("the input count is unchanged");
+assert_eq!(rebuilt.children().len(), 1);
+```
+
+Unary nodes take one input; binary nodes take left then right. `CoGroupMap`
+takes input then other. `GroupMap` takes its primary input and an optional
+initial state, and `WithRelations` takes its root followed by references.
+`with_children` returns a rebuilt node with the same payload, or a
+`PlanRebuildError`: `InvalidArity` for an invalid input count, or
+`OpaqueInputReplacement` when an `MlTransform` input is replaced by a different
+`Arc` allocation. Its opaque wire relation still holds the original input, so
+even an equivalent replacement is rejected. Passing the same input `Arc`
+returns a validated clone rather than rewiring that relation.
+
+Plan-building helpers retain their `impl Into<Arc<LogicalPlan>>` inputs, accepting
+either an owned node or an existing `Arc`. Clone an `Arc` to share a node; cloning
+an owned `LogicalPlan` copies its payload while sharing its inputs. The node's
+kind and error types are non-exhaustive; match `OpaqueInputReplacement` with `..`.
+Structural inputs are dropped iteratively. Serialization still produces the same
+protobuf tree; sharing does not deduplicate repeated relations on the wire.
+Debug output changes from inline-input enum variants to
+`LogicalPlan { kind, children, .. }`; snapshots of that text may need updating.
+
+`visit` visits each allocation once in first-encounter preorder.
+`visit_all_paths` visits every occurrence, which can take exponential time on a
+shared DAG.
+
+On an `Arc<LogicalPlan>`, `try_transform_up` rewrites structural inputs bottom-up
+once per original allocation, preserving shared inputs. Its callback receives the
+candidate `Arc` after child rewriting; returning `Arc::clone(node)` retains it.
+The error type must implement `From<PlanRebuildError>`. A no-op rewrite preserves
+all identities; changed inputs rebuild through `with_children` and retain its
+opaque-input restriction. When an `MlTransform`'s transformed direct input
+has a different `Arc` allocation, rebuilding fails before its callback runs.
+Returning a replacement for the whole `MlTransform` from that callback cannot
+recover from this failure. Whole-node replacement works when its direct input
+remains unchanged. Replacement subtrees are not rewritten again.
+
+The opaque protobuf fields of `Raw`, `CachedRelation` and `MlTransform` now
+use `OpaqueRelation`. Construct it explicitly with `OpaqueRelation::new`, which
+accepts an owned or boxed relation and measures its relation depth once.
+`as_proto()` provides an immutable protobuf reference. `into_proto()` consumes
+the wrapper and returns its owned protobuf without cloning. Edit that owned
+protobuf and wrap it again when changing an opaque payload. The relation and
+cached depth are private so they cannot become inconsistent.
+
+Cloning an `OpaqueRelation`, an owned `LogicalPlan` or a standalone
+`LogicalPlanKind` guards deep opaque protobuf clones using the wrapper's cached
+depth, without measuring it again. Cloning protobuf expressions and nested data
+types retains recursive behavior; `Expression` and `Column` handles remain
+shared. Debug formatting, protobuf encoding and protobuf destruction also
+retain recursive limits. Debug formats shared inputs on every occurrence, so
+output can grow exponentially in the number of distinct nodes.
+
+`LogicalPlanKind::Raw` has a `depth` field: the levels of its relation as a plan, with
 those of the DataFrames that it holds, as `pyspark.ml` builds a relation over its
 input. They count for `MAX_PLAN_DEPTH`, as PySpark's serializer counts the plan of the
 input within its own. Code that constructs the variant directly sets it to 1 for a

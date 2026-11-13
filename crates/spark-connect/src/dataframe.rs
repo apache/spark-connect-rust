@@ -13,8 +13,8 @@ use spark_connect_proto as proto;
 use crate::column::{columns_of, expressions_of, Column};
 use crate::expression::{Expression, ExpressionNode, SortOrder};
 use crate::plan::{
-    AggregateGroupType, AsOfJoinDirection, AsOfJoinType, JoinType, LogicalPlan, RelationOwner,
-    SetOpType,
+    AggregateGroupType, AsOfJoinDirection, AsOfJoinType, JoinType, LogicalPlan, LogicalPlanKind,
+    OpaqueRelation, RelationOwner, SetOpType,
 };
 use crate::progress::ExecutionStream;
 use crate::row::{Row, StructValue, Value};
@@ -468,19 +468,19 @@ impl DataFrame {
     /// Select specific columns.
     pub fn select<C: Into<Column>>(&self, columns: impl IntoIterator<Item = C>) -> DataFrame {
         let columns: Vec<Column> = columns.into_iter().map(Into::into).collect();
-        let plan = LogicalPlan::Project {
-            input: Arc::clone(&self.plan),
-            columns,
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::Project { columns },
+            [Arc::clone(&self.plan)],
+        );
         DataFrame::new(self.session.clone(), plan)
     }
 
     /// Filter rows by a condition.
     pub fn filter(&self, condition: Column) -> DataFrame {
-        let plan = LogicalPlan::Filter {
-            input: Arc::clone(&self.plan),
-            condition,
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::Filter { condition },
+            [Arc::clone(&self.plan)],
+        );
         self.with_cached_schema(plan)
     }
 
@@ -491,11 +491,13 @@ impl DataFrame {
 
     /// Add or replace a column.
     pub fn with_column(&self, name: &str, col: Column) -> DataFrame {
-        let plan = LogicalPlan::WithColumns {
-            input: Arc::clone(&self.plan),
-            column_names: vec![name.to_string()],
-            columns: vec![col],
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::WithColumns {
+                column_names: vec![name.to_string()],
+                columns: vec![col],
+            },
+            [Arc::clone(&self.plan)],
+        );
         DataFrame::new(self.session.clone(), plan)
     }
 
@@ -508,20 +510,24 @@ impl DataFrame {
             .into_iter()
             .map(|(name, column)| (name.into(), column.into()))
             .unzip();
-        let plan = LogicalPlan::WithColumns {
-            input: Arc::clone(&self.plan),
-            column_names: names,
-            columns: cols,
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::WithColumns {
+                column_names: names,
+                columns: cols,
+            },
+            [Arc::clone(&self.plan)],
+        );
         DataFrame::new(self.session.clone(), plan)
     }
 
     /// Rename a column.
     pub fn with_column_renamed(&self, existing: &str, new: &str) -> DataFrame {
-        let plan = LogicalPlan::WithColumnsRenamed {
-            input: Arc::clone(&self.plan),
-            renames: vec![(existing.to_string(), new.to_string())],
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::WithColumnsRenamed {
+                renames: vec![(existing.to_string(), new.to_string())],
+            },
+            [Arc::clone(&self.plan)],
+        );
         DataFrame::new(self.session.clone(), plan)
     }
 
@@ -532,13 +538,15 @@ impl DataFrame {
         &self,
         renames: impl IntoIterator<Item = (O, N)>,
     ) -> DataFrame {
-        let plan = LogicalPlan::WithColumnsRenamed {
-            input: Arc::clone(&self.plan),
-            renames: renames
-                .into_iter()
-                .map(|(old, new)| (old.into(), new.into()))
-                .collect(),
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::WithColumnsRenamed {
+                renames: renames
+                    .into_iter()
+                    .map(|(old, new)| (old.into(), new.into()))
+                    .collect(),
+            },
+            [Arc::clone(&self.plan)],
+        );
         DataFrame::new(self.session.clone(), plan)
     }
 
@@ -554,49 +562,51 @@ impl DataFrame {
         columns: impl IntoIterator<Item = C>,
         column_names: impl IntoIterator<Item = S>,
     ) -> DataFrame {
-        let plan = LogicalPlan::Drop {
-            input: Arc::clone(&self.plan),
-            columns: column_names.into_iter().map(Into::into).collect(),
-            expressions: expressions_of(columns),
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::Drop {
+                columns: column_names.into_iter().map(Into::into).collect(),
+                expressions: expressions_of(columns),
+            },
+            [Arc::clone(&self.plan)],
+        );
         DataFrame::new(self.session.clone(), plan)
     }
 
     /// Limit the number of rows.
     pub fn limit(&self, n: i32) -> DataFrame {
-        let plan = LogicalPlan::Limit {
-            input: Arc::clone(&self.plan),
-            limit: n,
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::Limit { limit: n },
+            [Arc::clone(&self.plan)],
+        );
         self.with_cached_schema(plan)
     }
 
     /// Skip the first n rows.
     pub fn offset(&self, n: i32) -> DataFrame {
-        let plan = LogicalPlan::Offset {
-            input: Arc::clone(&self.plan),
-            offset: n,
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::Offset { offset: n },
+            [Arc::clone(&self.plan)],
+        );
         DataFrame::new(self.session.clone(), plan)
     }
 
     /// Get the last n rows.
     pub fn tail(&self, n: i32) -> DataFrame {
-        let plan = LogicalPlan::Tail {
-            input: Arc::clone(&self.plan),
-            limit: n,
-        };
+        let plan =
+            LogicalPlan::from_builder(LogicalPlanKind::Tail { limit: n }, [Arc::clone(&self.plan)]);
         DataFrame::new(self.session.clone(), plan)
     }
 
     /// Remove duplicate rows.
     pub fn distinct(&self) -> DataFrame {
-        let plan = LogicalPlan::Deduplicate {
-            input: Arc::clone(&self.plan),
-            all_columns_as_keys: true,
-            column_names: vec![],
-            within_watermark: false,
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::Deduplicate {
+                all_columns_as_keys: true,
+                column_names: vec![],
+                within_watermark: false,
+            },
+            [Arc::clone(&self.plan)],
+        );
         self.with_cached_schema(plan)
     }
 
@@ -607,12 +617,14 @@ impl DataFrame {
             .map(|c| c.iter().map(|s| s.to_string()).collect())
             .unwrap_or_default();
 
-        let plan = LogicalPlan::Deduplicate {
-            input: Arc::clone(&self.plan),
-            all_columns_as_keys: all_cols,
-            column_names: cols,
-            within_watermark: false,
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::Deduplicate {
+                all_columns_as_keys: all_cols,
+                column_names: cols,
+                within_watermark: false,
+            },
+            [Arc::clone(&self.plan)],
+        );
         self.with_cached_schema(plan)
     }
 
@@ -624,11 +636,13 @@ impl DataFrame {
     /// `CONNECT_INVALID_PLAN.ASSERTION_FAILURE`, as with the Scala client. PySpark's `df.sort()`
     /// raises `CANNOT_BE_EMPTY` at the call instead.
     pub fn sort<C: Into<Column>>(&self, columns: impl IntoIterator<Item = C>) -> DataFrame {
-        let plan = LogicalPlan::Sort {
-            input: Arc::clone(&self.plan),
-            order: expressions_of(columns),
-            is_global: true,
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::Sort {
+                order: expressions_of(columns),
+                is_global: true,
+            },
+            [Arc::clone(&self.plan)],
+        );
         self.with_cached_schema(plan)
     }
 
@@ -640,13 +654,14 @@ impl DataFrame {
 
     /// Join with another DataFrame.
     pub fn join(&self, right: &DataFrame, on: Option<Column>, join_type: JoinType) -> DataFrame {
-        let plan = LogicalPlan::Join {
-            left: Arc::clone(&self.plan),
-            right: Arc::clone(&right.plan),
-            join_type,
-            on,
-            using_columns: vec![],
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::Join {
+                join_type,
+                on,
+                using_columns: vec![],
+            },
+            [Arc::clone(&self.plan), Arc::clone(&right.plan)],
+        );
         DataFrame::new(self.session.clone(), plan)
     }
 
@@ -657,13 +672,14 @@ impl DataFrame {
         using_columns: impl IntoIterator<Item = S>,
         join_type: JoinType,
     ) -> DataFrame {
-        let plan = LogicalPlan::Join {
-            left: Arc::clone(&self.plan),
-            right: Arc::clone(&right.plan),
-            join_type,
-            on: None,
-            using_columns: using_columns.into_iter().map(Into::into).collect(),
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::Join {
+                join_type,
+                on: None,
+                using_columns: using_columns.into_iter().map(Into::into).collect(),
+            },
+            [Arc::clone(&self.plan), Arc::clone(&right.plan)],
+        );
         DataFrame::new(self.session.clone(), plan)
     }
 
@@ -681,15 +697,16 @@ impl DataFrame {
         direction: &str,
         join_type: &str,
     ) -> DataFrame {
-        let plan = LogicalPlan::NearestByJoin {
-            left: Arc::clone(&self.plan),
-            right: Arc::clone(&other.plan),
-            ranking_expression: ranking_expression.expression().clone(),
-            num_results,
-            join_type: join_type.to_string(),
-            mode: mode.to_string(),
-            direction: direction.to_string(),
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::NearestByJoin {
+                ranking_expression: ranking_expression.expression().clone(),
+                num_results,
+                join_type: join_type.to_string(),
+                mode: mode.to_string(),
+                direction: direction.to_string(),
+            },
+            [Arc::clone(&self.plan), Arc::clone(&other.plan)],
+        );
         DataFrame::new(self.session.clone(), plan)
     }
 
@@ -709,18 +726,19 @@ impl DataFrame {
                 &[],
             ));
         }
-        let plan = LogicalPlan::AsOfJoin {
-            left: Arc::clone(&self.plan),
-            right: Arc::clone(&right.plan),
-            left_as_of: options.left_as_of,
-            right_as_of: options.right_as_of,
-            on: options.on,
-            using_columns: options.using_columns,
-            join_type: options.join_type,
-            tolerance: options.tolerance,
-            allow_exact_matches: options.allow_exact_matches,
-            direction: options.direction,
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::AsOfJoin {
+                left_as_of: options.left_as_of,
+                right_as_of: options.right_as_of,
+                on: options.on,
+                using_columns: options.using_columns,
+                join_type: options.join_type,
+                tolerance: options.tolerance,
+                allow_exact_matches: options.allow_exact_matches,
+                direction: options.direction,
+            },
+            [Arc::clone(&self.plan), Arc::clone(&right.plan)],
+        );
         Ok(DataFrame::new(self.session.clone(), plan))
     }
 
@@ -738,25 +756,24 @@ impl DataFrame {
         on: Option<Column>,
         join_type: JoinType,
     ) -> DataFrame {
-        let plan = LogicalPlan::LateralJoin {
-            left: Arc::clone(&self.plan),
-            right: Arc::clone(&right.plan),
-            join_type,
-            on,
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::LateralJoin { join_type, on },
+            [Arc::clone(&self.plan), Arc::clone(&right.plan)],
+        );
         DataFrame::new(self.session.clone(), plan)
     }
 
     /// Union with another DataFrame.
     pub fn union(&self, other: &DataFrame) -> DataFrame {
-        let plan = LogicalPlan::SetOperation {
-            left: Arc::clone(&self.plan),
-            right: Arc::clone(&other.plan),
-            set_op_type: SetOpType::Union,
-            is_all: true,
-            by_name: false,
-            allow_missing_columns: false,
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::SetOperation {
+                set_op_type: SetOpType::Union,
+                is_all: true,
+                by_name: false,
+                allow_missing_columns: false,
+            },
+            [Arc::clone(&self.plan), Arc::clone(&other.plan)],
+        );
         self.with_merged_schema(other, plan)
     }
 
@@ -769,60 +786,67 @@ impl DataFrame {
     /// one side are filled with null rather than rejected). Mirrors
     /// `DataFrame.unionByName(other, allowMissingColumns=False)`.
     pub fn union_by_name_opt(&self, other: &DataFrame, allow_missing_columns: bool) -> DataFrame {
-        let plan = LogicalPlan::SetOperation {
-            left: Arc::clone(&self.plan),
-            right: Arc::clone(&other.plan),
-            set_op_type: SetOpType::Union,
-            is_all: true,
-            by_name: true,
-            allow_missing_columns,
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::SetOperation {
+                set_op_type: SetOpType::Union,
+                is_all: true,
+                by_name: true,
+                allow_missing_columns,
+            },
+            [Arc::clone(&self.plan), Arc::clone(&other.plan)],
+        );
         self.with_merged_schema(other, plan)
     }
 
     /// Intersect with another DataFrame.
     pub fn intersect(&self, other: &DataFrame) -> DataFrame {
-        let plan = LogicalPlan::SetOperation {
-            left: Arc::clone(&self.plan),
-            right: Arc::clone(&other.plan),
-            set_op_type: SetOpType::Intersect,
-            is_all: false,
-            by_name: false,
-            allow_missing_columns: false,
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::SetOperation {
+                set_op_type: SetOpType::Intersect,
+                is_all: false,
+                by_name: false,
+                allow_missing_columns: false,
+            },
+            [Arc::clone(&self.plan), Arc::clone(&other.plan)],
+        );
         self.with_merged_schema(other, plan)
     }
 
     /// Subtract (except) another DataFrame.
     pub fn subtract(&self, other: &DataFrame) -> DataFrame {
-        let plan = LogicalPlan::SetOperation {
-            left: Arc::clone(&self.plan),
-            right: Arc::clone(&other.plan),
-            set_op_type: SetOpType::Except,
-            is_all: false,
-            by_name: false,
-            allow_missing_columns: false,
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::SetOperation {
+                set_op_type: SetOpType::Except,
+                is_all: false,
+                by_name: false,
+                allow_missing_columns: false,
+            },
+            [Arc::clone(&self.plan), Arc::clone(&other.plan)],
+        );
         self.with_merged_schema(other, plan)
     }
 
     /// Repartition.
     pub fn repartition(&self, num_partitions: i32) -> DataFrame {
-        let plan = LogicalPlan::Repartition {
-            input: Arc::clone(&self.plan),
-            num_partitions,
-            shuffle: true,
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::Repartition {
+                num_partitions,
+                shuffle: true,
+            },
+            [Arc::clone(&self.plan)],
+        );
         self.with_cached_schema(plan)
     }
 
     /// Coalesce.
     pub fn coalesce(&self, num_partitions: i32) -> DataFrame {
-        let plan = LogicalPlan::Repartition {
-            input: Arc::clone(&self.plan),
-            num_partitions,
-            shuffle: false,
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::Repartition {
+                num_partitions,
+                shuffle: false,
+            },
+            [Arc::clone(&self.plan)],
+        );
         self.with_cached_schema(plan)
     }
 
@@ -847,11 +871,13 @@ impl DataFrame {
         name: &str,
         parameters: impl IntoIterator<Item = C>,
     ) -> DataFrame {
-        let plan = LogicalPlan::Hint {
-            input: Arc::clone(&self.plan),
-            name: name.to_string(),
-            parameters: expressions_of(parameters),
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::Hint {
+                name: name.to_string(),
+                parameters: expressions_of(parameters),
+            },
+            [Arc::clone(&self.plan)],
+        );
         self.with_cached_schema(plan)
     }
 
@@ -864,19 +890,23 @@ impl DataFrame {
     /// Convert to DataFrame with new column names.
     pub fn to_df<S: Into<String>>(&self, column_names: impl IntoIterator<Item = S>) -> DataFrame {
         let names: Vec<String> = column_names.into_iter().map(Into::into).collect();
-        let plan = LogicalPlan::ToDF {
-            input: Arc::clone(&self.plan),
-            column_names: names,
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::ToDF {
+                column_names: names,
+            },
+            [Arc::clone(&self.plan)],
+        );
         DataFrame::new(self.session.clone(), plan)
     }
 
     /// Alias this DataFrame.
     pub fn alias(&self, alias: &str) -> DataFrame {
-        let plan = LogicalPlan::SubqueryAlias {
-            input: Arc::clone(&self.plan),
-            alias: alias.to_string(),
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::SubqueryAlias {
+                alias: alias.to_string(),
+            },
+            [Arc::clone(&self.plan)],
+        );
         self.with_cached_schema(plan)
     }
 
@@ -932,12 +962,14 @@ impl DataFrame {
         profile_id: Option<i32>,
     ) -> DataFrame {
         let schema = func.python_udf.output_type.clone();
-        let plan = LogicalPlan::MapPartitions {
-            input: Arc::clone(&self.plan),
-            func,
-            is_barrier,
-            profile_id,
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::MapPartitions {
+                func,
+                is_barrier,
+                profile_id,
+            },
+            [Arc::clone(&self.plan)],
+        );
         Self::new_with_schema(self.session.clone(), plan, Some(schema))
     }
 
@@ -970,14 +1002,16 @@ impl DataFrame {
         with_replacement: bool,
         seed: Option<i64>,
     ) -> DataFrame {
-        let plan = LogicalPlan::Sample {
-            input: Arc::clone(&self.plan),
-            lower_bound: 0.0,
-            upper_bound: fraction,
-            with_replacement,
-            seed: Some(seed.unwrap_or_else(random_seed)),
-            deterministic_order: false,
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::Sample {
+                lower_bound: 0.0,
+                upper_bound: fraction,
+                with_replacement,
+                seed: Some(seed.unwrap_or_else(random_seed)),
+                deterministic_order: false,
+            },
+            [Arc::clone(&self.plan)],
+        );
         self.with_cached_schema(plan)
     }
 
@@ -1140,15 +1174,17 @@ impl DataFrame {
         .expression()
         .clone();
 
-        let plan = LogicalPlan::Aggregate {
-            input: Arc::clone(&self.plan),
-            group_type: AggregateGroupType::GroupBy,
-            grouping_expressions: vec![],
-            aggregate_expressions: vec![count_expr],
-            pivot_col: None,
-            pivot_values: vec![],
-            grouping_sets: vec![],
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::Aggregate {
+                group_type: AggregateGroupType::GroupBy,
+                grouping_expressions: vec![],
+                aggregate_expressions: vec![count_expr],
+                pivot_col: None,
+                pivot_values: vec![],
+                grouping_sets: vec![],
+            },
+            [Arc::clone(&self.plan)],
+        );
         let agg_df = DataFrame::new(self.session.clone(), plan);
 
         let rows = agg_df.collect()?;
@@ -1166,12 +1202,14 @@ impl DataFrame {
     pub fn show_string(&self, n: i32, truncate: i32, vertical: bool) -> Result<String> {
         let shown = DataFrame::new(
             self.session.clone(),
-            LogicalPlan::ShowString {
-                input: Arc::clone(&self.plan),
-                num_rows: n,
-                truncate,
-                vertical,
-            },
+            LogicalPlan::from_builder(
+                LogicalPlanKind::ShowString {
+                    num_rows: n,
+                    truncate,
+                    vertical,
+                },
+                [Arc::clone(&self.plan)],
+            ),
         );
         match shown.collect()?.first().map(|row| row.values()) {
             Some([Value::String(table)]) => Ok(table.clone()),
@@ -1186,11 +1224,13 @@ impl DataFrame {
     pub fn html_string(&self, n: i32, truncate: i32) -> Result<String> {
         let html = DataFrame::new(
             self.session.clone(),
-            LogicalPlan::HtmlString {
-                input: Arc::clone(&self.plan),
-                num_rows: n,
-                truncate,
-            },
+            LogicalPlan::from_builder(
+                LogicalPlanKind::HtmlString {
+                    num_rows: n,
+                    truncate,
+                },
+                [Arc::clone(&self.plan)],
+            ),
         );
         match html.collect()?.first().map(|row| row.values()) {
             Some([Value::String(table)]) => Ok(table.clone()),
@@ -1247,17 +1287,17 @@ impl DataFrame {
         }
         let mut pending: Vec<&LogicalPlan> = vec![self.plan.as_ref()];
         while let Some(plan) = pending.pop() {
-            if let LogicalPlan::Raw {
+            if let LogicalPlanKind::Raw {
                 owner: Some(owner), ..
-            } = plan
+            } = plan.kind()
             {
                 if Arc::strong_count(&owner.0) == 1 {
                     owners.push(owner.0.as_ref());
                 }
             }
             pending.extend(
-                plan.inputs()
-                    .into_iter()
+                plan.children()
+                    .iter()
                     .filter(|input| Arc::strong_count(input) == 1)
                     .map(|input| input.as_ref()),
             );
@@ -1270,12 +1310,15 @@ impl DataFrame {
     /// way, as it clears the references of a Python object. Not a stable API.
     #[doc(hidden)]
     pub fn clear_plan(&mut self) {
-        self.plan = Arc::new(LogicalPlan::Range {
-            start: 0,
-            end: 0,
-            step: 1,
-            num_partitions: None,
-        });
+        self.plan = Arc::new(LogicalPlan::from_builder(
+            LogicalPlanKind::Range {
+                start: 0,
+                end: 0,
+                step: 1,
+                num_partitions: None,
+            },
+            [],
+        ));
     }
 
     /// The DataFrame of `relation`, as `from_relation`, of a relation without placeholders, of
@@ -1289,12 +1332,15 @@ impl DataFrame {
     ) -> DataFrame {
         DataFrame::new(
             session,
-            LogicalPlan::Raw {
-                relation: Box::new(relation),
-                owner: owner.map(crate::plan::RelationOwner),
-                depth,
-                observations,
-            },
+            LogicalPlan::from_builder(
+                LogicalPlanKind::Raw {
+                    relation: OpaqueRelation::new(relation),
+                    owner: owner.map(crate::plan::RelationOwner),
+                    depth,
+                    observations,
+                },
+                [],
+            ),
         )
     }
 
@@ -1349,7 +1395,7 @@ impl DataFrame {
         observations: Vec<(String, crate::observation::Observation)>,
     ) -> DataFrame {
         let plan_id = relation.common.as_ref().and_then(|common| common.plan_id);
-        // The relation is sent as it is, and its clone and drop take the stack of its levels.
+        // Sent unchanged; measured wire depth sizes the clone stack; `levels` bounds requests.
         let dataframe = DataFrame::from_raw_relation(session, relation, None, levels, observations);
         if let Some(plan_id) = plan_id {
             dataframe
@@ -1707,10 +1753,13 @@ impl DataFrame {
                     };
                     return Ok(DataFrame::new(
                         self.session.clone(),
-                        LogicalPlan::CachedRemoteRelation {
-                            relation_id: rel.relation_id.clone(),
-                            owner: Some(RelationOwner(Arc::new(checkpoint))),
-                        },
+                        LogicalPlan::from_builder(
+                            LogicalPlanKind::CachedRemoteRelation {
+                                relation_id: rel.relation_id.clone(),
+                                owner: Some(RelationOwner(Arc::new(checkpoint))),
+                            },
+                            [],
+                        ),
                     ));
                 }
             }
@@ -1820,11 +1869,13 @@ impl DataFrame {
 
     /// Add a watermark to this DataFrame for event-time based windows.
     pub fn with_watermark(&self, time_column: &str, delay_threshold: &str) -> DataFrame {
-        let plan = LogicalPlan::WithWatermark {
-            input: Arc::clone(&self.plan),
-            time_column: time_column.to_string(),
-            delay_threshold: delay_threshold.to_string(),
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::WithWatermark {
+                time_column: time_column.to_string(),
+                delay_threshold: delay_threshold.to_string(),
+            },
+            [Arc::clone(&self.plan)],
+        );
         DataFrame::new(self.session.clone(), plan)
     }
 
@@ -1876,11 +1927,13 @@ impl DataFrame {
                 }
             })
             .collect();
-        let plan = LogicalPlan::RepartitionByRange {
-            input: Arc::clone(&self.plan),
-            num_partitions,
-            partition_exprs,
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::RepartitionByRange {
+                num_partitions,
+                partition_exprs,
+            },
+            [Arc::clone(&self.plan)],
+        );
         Ok(self.with_cached_schema(plan))
     }
 
@@ -1891,11 +1944,13 @@ impl DataFrame {
         num_partitions: i32,
         columns: impl IntoIterator<Item = C>,
     ) -> DataFrame {
-        let plan = LogicalPlan::RepartitionByExpression {
-            input: Arc::clone(&self.plan),
-            num_partitions,
-            expressions: expressions_of(columns),
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::RepartitionByExpression {
+                num_partitions,
+                expressions: expressions_of(columns),
+            },
+            [Arc::clone(&self.plan)],
+        );
         self.with_cached_schema(plan)
     }
 
@@ -1921,13 +1976,15 @@ impl DataFrame {
         let vals: Option<Vec<Column>> =
             value_vars.map(|v| v.iter().map(|name| col(name)).collect());
 
-        let plan = LogicalPlan::Unpivot {
-            input: Arc::clone(&self.plan),
-            ids,
-            values: vals,
-            variable_column_name: var_name.to_string(),
-            value_column_name: value_name.to_string(),
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::Unpivot {
+                ids,
+                values: vals,
+                variable_column_name: var_name.to_string(),
+                value_column_name: value_name.to_string(),
+            },
+            [Arc::clone(&self.plan)],
+        );
         DataFrame::new(self.session.clone(), plan)
     }
 
@@ -1957,12 +2014,14 @@ impl DataFrame {
         name: &str,
         exprs: impl IntoIterator<Item = C>,
     ) -> DataFrame {
-        let plan = LogicalPlan::Observe {
-            input: Arc::clone(&self.plan),
-            name: name.to_string(),
-            exprs: expressions_of(exprs),
-            observation: None,
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::Observe {
+                name: name.to_string(),
+                exprs: expressions_of(exprs),
+                observation: None,
+            },
+            [Arc::clone(&self.plan)],
+        );
         self.with_cached_schema(plan)
     }
 
@@ -2007,12 +2066,14 @@ impl DataFrame {
         exprs: Vec<Expression>,
     ) -> DataFrame {
         observation.start();
-        let plan = LogicalPlan::Observe {
-            input: Arc::clone(&self.plan),
-            name,
-            exprs,
-            observation: Some(observation.clone()),
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::Observe {
+                name,
+                exprs,
+                observation: Some(observation.clone()),
+            },
+            [Arc::clone(&self.plan)],
+        );
         self.with_cached_schema(plan)
     }
 
@@ -2032,15 +2093,17 @@ impl DataFrame {
     /// no columns, as of the Scala client's `agg(Map.empty)`, where PySpark's `agg` raises
     /// `CANNOT_BE_EMPTY`.
     pub fn agg<C: Into<Column>>(&self, expressions: impl IntoIterator<Item = C>) -> DataFrame {
-        let plan = LogicalPlan::Aggregate {
-            input: Arc::clone(&self.plan),
-            group_type: AggregateGroupType::GroupBy,
-            grouping_expressions: vec![],
-            aggregate_expressions: expressions_of(expressions),
-            pivot_col: None,
-            pivot_values: vec![],
-            grouping_sets: vec![],
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::Aggregate {
+                group_type: AggregateGroupType::GroupBy,
+                grouping_expressions: vec![],
+                aggregate_expressions: expressions_of(expressions),
+                pivot_col: None,
+                pivot_values: vec![],
+                grouping_sets: vec![],
+            },
+            [Arc::clone(&self.plan)],
+        );
         DataFrame::new(self.session.clone(), plan)
     }
 
@@ -2124,11 +2187,13 @@ impl DataFrame {
         let columns = subset
             .map(|v| v.iter().map(|s| s.to_string()).collect())
             .unwrap_or_default();
-        let plan = LogicalPlan::NAFill {
-            input: Arc::clone(&self.plan),
-            fill_value: value,
-            columns,
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::NAFill {
+                fill_value: value,
+                columns,
+            },
+            [Arc::clone(&self.plan)],
+        );
         DataFrame::new(self.session.clone(), plan)
     }
 
@@ -2147,11 +2212,10 @@ impl DataFrame {
             check_fill_value(value, "value type of dict", "bool, float, int or str")?;
         }
         let (cols, values): (Vec<String>, Vec<crate::row::Value>) = pairs.into_iter().unzip();
-        let plan = LogicalPlan::NAFillColumns {
-            input: Arc::clone(&self.plan),
-            cols,
-            values,
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::NAFillColumns { cols, values },
+            [Arc::clone(&self.plan)],
+        );
         Ok(DataFrame::new(self.session.clone(), plan))
     }
 
@@ -2178,12 +2242,14 @@ impl DataFrame {
             .unwrap_or_default();
         // `how` is carried into the plan; `min_non_nulls` is derived from `how`
         // and `thresh` in `NADrop::to_proto` (mirrors pyspark's translation).
-        let plan = LogicalPlan::NADrop {
-            input: Arc::clone(&self.plan),
-            how: how_str.to_string(),
-            min_non_null: thresh,
-            columns,
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::NADrop {
+                how: how_str.to_string(),
+                min_non_null: thresh,
+                columns,
+            },
+            [Arc::clone(&self.plan)],
+        );
         Ok(DataFrame::new(self.session.clone(), plan))
     }
 
@@ -2221,31 +2287,33 @@ impl DataFrame {
         let columns = subset
             .map(|v| v.iter().map(|s| s.to_string()).collect())
             .unwrap_or_default();
-        let plan = LogicalPlan::NAReplace {
-            input: Arc::clone(&self.plan),
-            replacements,
-            columns,
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::NAReplace {
+                replacements,
+                columns,
+            },
+            [Arc::clone(&self.plan)],
+        );
         DataFrame::new(self.session.clone(), plan)
     }
 
     /// Describe this DataFrame (show statistics).
     pub fn describe<S: Into<String>>(&self, columns: impl IntoIterator<Item = S>) -> DataFrame {
         let col_names = columns.into_iter().map(Into::into).collect();
-        let plan = LogicalPlan::Describe {
-            input: Arc::clone(&self.plan),
-            columns: col_names,
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::Describe { columns: col_names },
+            [Arc::clone(&self.plan)],
+        );
         DataFrame::new(self.session.clone(), plan)
     }
 
     /// Get summary statistics.
     pub fn summary(&self, percentiles: Vec<&str>) -> DataFrame {
         let percs = percentiles.iter().map(|s| s.to_string()).collect();
-        let plan = LogicalPlan::Summary {
-            input: Arc::clone(&self.plan),
-            percentiles: percs,
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::Summary { percentiles: percs },
+            [Arc::clone(&self.plan)],
+        );
         DataFrame::new(self.session.clone(), plan)
     }
 
@@ -2337,11 +2405,13 @@ impl DataFrame {
         &self,
         columns: impl IntoIterator<Item = C>,
     ) -> DataFrame {
-        let plan = LogicalPlan::Sort {
-            input: Arc::clone(&self.plan),
-            order: expressions_of(columns),
-            is_global: false,
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::Sort {
+                order: expressions_of(columns),
+                is_global: false,
+            },
+            [Arc::clone(&self.plan)],
+        );
         self.with_cached_schema(plan)
     }
 
@@ -2352,12 +2422,14 @@ impl DataFrame {
             .map(|c| c.iter().map(|s| s.to_string()).collect())
             .unwrap_or_default();
 
-        let plan = LogicalPlan::Deduplicate {
-            input: Arc::clone(&self.plan),
-            all_columns_as_keys: all_cols,
-            column_names: cols,
-            within_watermark: true,
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::Deduplicate {
+                all_columns_as_keys: all_cols,
+                column_names: cols,
+                within_watermark: true,
+            },
+            [Arc::clone(&self.plan)],
+        );
         DataFrame::new(self.session.clone(), plan)
     }
 
@@ -2410,14 +2482,16 @@ impl DataFrame {
 
         for weight in normalized {
             let upper = cumulative + weight;
-            let plan = LogicalPlan::Sample {
-                input: Arc::clone(&self.plan),
-                lower_bound: cumulative,
-                upper_bound: upper,
-                with_replacement: false,
-                seed,
-                deterministic_order: true,
-            };
+            let plan = LogicalPlan::from_builder(
+                LogicalPlanKind::Sample {
+                    lower_bound: cumulative,
+                    upper_bound: upper,
+                    with_replacement: false,
+                    seed,
+                    deterministic_order: true,
+                },
+                [Arc::clone(&self.plan)],
+            );
             results.push(self.with_cached_schema(plan));
             cumulative = upper;
         }
@@ -2543,40 +2617,43 @@ impl DataFrame {
 
     /// Union all rows (alias for union with all=true).
     pub fn union_all(&self, other: &DataFrame) -> DataFrame {
-        let plan = LogicalPlan::SetOperation {
-            left: Arc::clone(&self.plan),
-            right: Arc::clone(&other.plan),
-            set_op_type: SetOpType::Union,
-            is_all: true,
-            by_name: false,
-            allow_missing_columns: false,
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::SetOperation {
+                set_op_type: SetOpType::Union,
+                is_all: true,
+                by_name: false,
+                allow_missing_columns: false,
+            },
+            [Arc::clone(&self.plan), Arc::clone(&other.plan)],
+        );
         self.with_merged_schema(other, plan)
     }
 
     /// Except all rows.
     pub fn except_all(&self, other: &DataFrame) -> DataFrame {
-        let plan = LogicalPlan::SetOperation {
-            left: Arc::clone(&self.plan),
-            right: Arc::clone(&other.plan),
-            set_op_type: SetOpType::Except,
-            is_all: true,
-            by_name: false,
-            allow_missing_columns: false,
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::SetOperation {
+                set_op_type: SetOpType::Except,
+                is_all: true,
+                by_name: false,
+                allow_missing_columns: false,
+            },
+            [Arc::clone(&self.plan), Arc::clone(&other.plan)],
+        );
         self.with_merged_schema(other, plan)
     }
 
     /// Intersect all rows.
     pub fn intersect_all(&self, other: &DataFrame) -> DataFrame {
-        let plan = LogicalPlan::SetOperation {
-            left: Arc::clone(&self.plan),
-            right: Arc::clone(&other.plan),
-            set_op_type: SetOpType::Intersect,
-            is_all: true,
-            by_name: false,
-            allow_missing_columns: false,
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::SetOperation {
+                set_op_type: SetOpType::Intersect,
+                is_all: true,
+                by_name: false,
+                allow_missing_columns: false,
+            },
+            [Arc::clone(&self.plan), Arc::clone(&other.plan)],
+        );
         self.with_merged_schema(other, plan)
     }
 
@@ -2590,13 +2667,15 @@ impl DataFrame {
     ) -> DataFrame {
         let ids: Vec<Column> = ids.into_iter().map(Into::into).collect();
         let values: Option<Vec<Column>> = values.map(|v| v.into_iter().map(Into::into).collect());
-        let plan = LogicalPlan::Unpivot {
-            input: Arc::clone(&self.plan),
-            ids,
-            values,
-            variable_column_name: variable_column_name.to_string(),
-            value_column_name: value_column_name.to_string(),
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::Unpivot {
+                ids,
+                values,
+                variable_column_name: variable_column_name.to_string(),
+                value_column_name: value_column_name.to_string(),
+            },
+            [Arc::clone(&self.plan)],
+        );
         DataFrame::new(self.session.clone(), plan)
     }
 
@@ -2612,12 +2691,14 @@ impl DataFrame {
     /// Set the metadata of a column of its JSON, of any JSON values, as PySpark's
     /// `withMetadata` sends `json.dumps(metadata)`.
     pub fn with_metadata_json(&self, column_name: &str, metadata_json: &str) -> DataFrame {
-        let plan = LogicalPlan::WithColumnMetadata {
-            input: Arc::clone(&self.plan),
-            column_name: column_name.to_string(),
-            column: self.col(column_name).expression().clone(),
-            metadata_json: metadata_json.to_string(),
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::WithColumnMetadata {
+                column_name: column_name.to_string(),
+                column: self.col(column_name).expression().clone(),
+                metadata_json: metadata_json.to_string(),
+            },
+            [Arc::clone(&self.plan)],
+        );
         DataFrame::new(self.session.clone(), plan)
     }
 
@@ -2638,12 +2719,11 @@ impl DataFrame {
     /// `DataFrame.isLocal` asks the server, as [`DataFrame::is_local_on_server`] does.
     pub fn is_local(&self) -> bool {
         use proto::relation::RelType;
-        match self.plan.as_ref() {
-            LogicalPlan::LocalRelation { .. } | LogicalPlan::ChunkedCachedLocalRelation { .. } => {
-                true
-            }
-            LogicalPlan::CachedRelation { relation } => matches!(
-                relation.rel_type,
+        match self.plan.kind() {
+            LogicalPlanKind::LocalRelation { .. }
+            | LogicalPlanKind::ChunkedCachedLocalRelation { .. } => true,
+            LogicalPlanKind::CachedRelation { relation } => matches!(
+                relation.as_proto().rel_type,
                 Some(RelType::LocalRelation(_))
                     | Some(RelType::CachedLocalRelation(_))
                     | Some(RelType::ChunkedCachedLocalRelation(_))
@@ -2783,10 +2863,12 @@ impl DataFrame {
     ///
     /// Mirrors `pyspark.sql.connect.dataframe.DataFrame.to` (a `ToSchema` relation).
     pub fn to(&self, schema: DataType) -> DataFrame {
-        let plan = LogicalPlan::ToSchema {
-            input: Arc::clone(&self.plan),
-            schema: schema.clone(),
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::ToSchema {
+                schema: schema.clone(),
+            },
+            [Arc::clone(&self.plan)],
+        );
         Self::new_with_schema(self.session.clone(), plan, Some(schema))
     }
 
@@ -2830,29 +2912,33 @@ impl DataFrame {
     /// relation). Mirrors `pyspark.sql.connect.dataframe.DataFrame.transpose()`
     /// with no index column (the server uses the first column as the header).
     pub fn transpose(&self) -> Result<DataFrame> {
-        let plan = LogicalPlan::Transpose {
-            input: Arc::clone(&self.plan),
-            index_columns: vec![],
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::Transpose {
+                index_columns: vec![],
+            },
+            [Arc::clone(&self.plan)],
+        );
         Ok(DataFrame::new(self.session.clone(), plan))
     }
 
     /// Transpose using an explicit index column as the transposed header.
     /// Mirrors `DataFrame.transpose(indexColumn)`.
     pub fn transpose_with_index(&self, index_column: Column) -> Result<DataFrame> {
-        let plan = LogicalPlan::Transpose {
-            input: Arc::clone(&self.plan),
-            index_columns: vec![index_column.expression().clone()],
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::Transpose {
+                index_columns: vec![index_column.expression().clone()],
+            },
+            [Arc::clone(&self.plan)],
+        );
         Ok(DataFrame::new(self.session.clone(), plan))
     }
 
     /// Zip this DataFrame with another DataFrame by row number.
     pub fn zip(&self, other: &DataFrame) -> Result<DataFrame> {
-        let plan = LogicalPlan::Zip {
-            left: Arc::clone(&self.plan),
-            right: Arc::clone(&other.plan),
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::Zip,
+            [Arc::clone(&self.plan), Arc::clone(&other.plan)],
+        );
         Ok(DataFrame::new(self.session.clone(), plan))
     }
 
@@ -5580,10 +5666,13 @@ mod plan_construction_tests {
         let local = spark.empty_data_frame().unwrap();
         let cached = DataFrame::new(
             spark.clone(),
-            LogicalPlan::ChunkedCachedLocalRelation {
-                data_hashes: vec!["hash".to_string()],
-                schema_hash: None,
-            },
+            LogicalPlan::from_builder(
+                LogicalPlanKind::ChunkedCachedLocalRelation {
+                    data_hashes: vec!["hash".to_string()],
+                    schema_hash: None,
+                },
+                [],
+            ),
         );
         assert!(local.is_local());
         assert!(cached.is_local());
@@ -5608,9 +5697,12 @@ mod plan_construction_tests {
             };
             DataFrame::new(
                 spark.clone(),
-                LogicalPlan::CachedRelation {
-                    relation: Box::new(relation),
-                },
+                LogicalPlan::from_builder(
+                    LogicalPlanKind::CachedRelation {
+                        relation: OpaqueRelation::new(relation),
+                    },
+                    [],
+                ),
             )
         };
         // The result of a command is the local relation the server returned.
@@ -5653,11 +5745,10 @@ mod plan_construction_tests {
         let spark = session();
         let df = spark.range(3).unwrap();
         let result = df.with_watermark("timestamp", "1 minute");
-        match result.plan.as_ref() {
-            LogicalPlan::WithWatermark {
+        match result.plan.kind() {
+            LogicalPlanKind::WithWatermark {
                 time_column,
                 delay_threshold,
-                ..
             } => {
                 assert_eq!(time_column, "timestamp");
                 assert_eq!(delay_threshold, "1 minute");
@@ -5679,23 +5770,28 @@ mod plan_construction_tests {
         let projected = source.select(vec![col("id")]);
         let filtered = source.filter(col("id").gt(crate::column::lit(0)));
         let limited = projected.limit(5);
-        let LogicalPlan::Project { input, .. } = projected.plan.as_ref() else {
+        let LogicalPlanKind::Project { .. } = projected.plan.kind() else {
             panic!("expected projection");
         };
+        let input = &projected.plan.children()[0];
         assert!(Arc::ptr_eq(input, &source.plan));
-        let LogicalPlan::Filter { input, .. } = filtered.plan.as_ref() else {
+        let LogicalPlanKind::Filter { .. } = filtered.plan.kind() else {
             panic!("expected filter");
         };
+        let input = &filtered.plan.children()[0];
         assert!(Arc::ptr_eq(input, &source.plan));
-        let LogicalPlan::Limit { input, .. } = limited.plan.as_ref() else {
+        let LogicalPlanKind::Limit { .. } = limited.plan.kind() else {
             panic!("expected limit");
         };
+        let input = &limited.plan.children()[0];
         assert!(Arc::ptr_eq(input, &projected.plan));
 
         let joined = projected.cross_join(&filtered);
-        let LogicalPlan::Join { left, right, .. } = joined.plan.as_ref() else {
+        let LogicalPlanKind::Join { .. } = joined.plan.kind() else {
             panic!("expected join");
         };
+        let left = &joined.plan.children()[0];
+        let right = &joined.plan.children()[1];
         assert!(Arc::ptr_eq(left, &projected.plan));
         assert!(Arc::ptr_eq(right, &filtered.plan));
         assert_eq!(source.plan.to_proto(), original);
@@ -5749,9 +5845,11 @@ mod plan_construction_tests {
         let spark = session();
         let projected = spark.range(10).unwrap().select(vec![col("id")]);
         let joined = projected.cross_join(&projected);
-        let LogicalPlan::Join { left, right, .. } = joined.plan.as_ref() else {
+        let LogicalPlanKind::Join { .. } = joined.plan.kind() else {
             panic!("expected join");
         };
+        let left = &joined.plan.children()[0];
+        let right = &joined.plan.children()[1];
         assert!(Arc::ptr_eq(left, right));
         let expected = plan::join(
             plan::project(plan::range(0, 10, 1), vec![col("id")]),
@@ -6062,8 +6160,8 @@ mod plan_construction_tests {
 
         let (left, right) = (Observation::new("x"), Observation::new("x"));
         let (left, right) = (observe(&base, &left), observe(&base, &right));
-        let side = |df: &DataFrame| match df.plan.as_ref() {
-            LogicalPlan::Observe {
+        let side = |df: &DataFrame| match df.plan.kind() {
+            LogicalPlanKind::Observe {
                 observation: Some(observation),
                 ..
             } => observation.clone(),
@@ -6073,6 +6171,44 @@ mod plan_construction_tests {
         assert_observations(&joined, &[("x", &side(&right))]);
         assert_observations(&right.union(&left), &[("x", &side(&left))]);
         assert_observations(&left.union(&left).limit(1), &[("x", &side(&left))]);
+
+        // Grouped-map initial state, a cogroup's other side and WithRelations references
+        // are structural inputs, but PySpark does not collect their Observations.
+        let udf = || {
+            CommonInlineUserDefinedFunctionExpression::new(
+                "f".to_string(),
+                true,
+                vec![],
+                crate::udf::PythonUDFPayload::new(
+                    DataType::Integer,
+                    crate::udf::eval_type::SQL_GROUPED_MAP_PANDAS_UDF,
+                    vec![1, 2, 3],
+                    "3.11".to_string(),
+                ),
+            )
+        };
+        let left_grouped = left.group_by(vec![col("id")]);
+        let right_grouped = right.group_by(vec![col("id")]);
+        let grouped = left_grouped.apply_in_pandas(udf());
+        assert_observations(&grouped, &[("x", &side(&left))]);
+        let with_initial = DataFrame::new(
+            spark.clone(),
+            LogicalPlan::from_builder(
+                grouped.plan.kind().clone(),
+                [Arc::clone(&left.plan), Arc::clone(&right.plan)],
+            ),
+        );
+        assert_observations(&with_initial, &[("x", &side(&left))]);
+        let cogrouped = left_grouped.cogroup(&right_grouped).apply_in_pandas(udf());
+        assert_observations(&cogrouped, &[("x", &side(&left))]);
+        let with_references = DataFrame::new(
+            spark.clone(),
+            LogicalPlan::from_builder(
+                LogicalPlanKind::WithRelations,
+                [Arc::clone(&left.plan), Arc::clone(&right.plan)],
+            ),
+        );
+        assert_observations(&with_references, &[("x", &side(&left))]);
 
         let in_subquery = observe(&base, &Observation::new("s"));
         assert_observations(&base.select([in_subquery.scalar()]), &[]);
@@ -6266,8 +6402,8 @@ mod plan_construction_tests {
     fn to_json_dataframe_selects_the_json_of_a_struct_of_every_column() {
         let spark = session();
         let df = spark.range(3).unwrap().to_json_dataframe();
-        match df.plan.as_ref() {
-            LogicalPlan::Project { columns, .. } => {
+        match df.plan.kind() {
+            LogicalPlanKind::Project { columns } => {
                 let rendered: Vec<String> =
                     columns.iter().map(|c| c.expression().render()).collect();
                 // As PySpark Connect's repr of the column.
@@ -6287,8 +6423,8 @@ mod plan_construction_tests {
         let mut metadata = std::collections::HashMap::new();
         metadata.insert("key".to_string(), "value".to_string());
         let result = df.with_metadata("col", metadata);
-        match result.plan.as_ref() {
-            LogicalPlan::WithColumnMetadata {
+        match result.plan.kind() {
+            LogicalPlanKind::WithColumnMetadata {
                 column_name,
                 metadata_json,
                 ..
@@ -6310,8 +6446,8 @@ mod plan_construction_tests {
             .random_split(vec![0.5, 0.5], None)
             .unwrap()
             .iter()
-            .map(|split| match split.plan.as_ref() {
-                LogicalPlan::Sample {
+            .map(|split| match split.plan.kind() {
+                LogicalPlanKind::Sample {
                     seed,
                     deterministic_order,
                     ..
@@ -6322,8 +6458,8 @@ mod plan_construction_tests {
         assert!(seeds[0].0.is_some_and(|seed| seed >= 0));
         assert_eq!(seeds[0], seeds[1]);
         assert!(seeds[0].1);
-        match df.sample(0.5, None).plan.as_ref() {
-            LogicalPlan::Sample {
+        match df.sample(0.5, None).plan.kind() {
+            LogicalPlanKind::Sample {
                 seed: Some(_),
                 deterministic_order: false,
                 ..
@@ -6340,8 +6476,8 @@ mod plan_construction_tests {
         assert_eq!(dfs.len(), 2);
         // Each split is a different DataFrame with its own plan
         for split_df in &dfs {
-            match split_df.plan.as_ref() {
-                LogicalPlan::Sample {
+            match split_df.plan.kind() {
+                LogicalPlanKind::Sample {
                     with_replacement: false,
                     ..
                 } => {
@@ -6435,11 +6571,10 @@ mod plan_construction_tests {
             df.na()
                 .replace_literals(replacements.clone(), Some(vec!["k"])),
         ] {
-            match result.plan.as_ref() {
-                LogicalPlan::NAReplace {
+            match result.plan.kind() {
+                LogicalPlanKind::NAReplace {
                     replacements: planned,
                     columns,
-                    ..
                 } => {
                     assert_eq!(planned, &replacements);
                     assert_eq!(columns, &vec!["k".to_string()]);
@@ -6451,9 +6586,9 @@ mod plan_construction_tests {
         match df
             .replace(vec![("1".to_string(), "a".to_string())], None)
             .plan
-            .as_ref()
+            .kind()
         {
-            LogicalPlan::NAReplace { replacements, .. } => assert_eq!(
+            LogicalPlanKind::NAReplace { replacements, .. } => assert_eq!(
                 replacements,
                 &vec![(
                     LiteralExpression::double(1.0),
@@ -6470,8 +6605,8 @@ mod plan_construction_tests {
         let df = spark.range(3).unwrap();
         let replacements = vec![("old".to_string(), "new".to_string())];
         let result = df.replace(replacements, Some(vec!["col"]));
-        match result.plan.as_ref() {
-            LogicalPlan::NAReplace { replacements, .. } => {
+        match result.plan.kind() {
+            LogicalPlanKind::NAReplace { replacements, .. } => {
                 assert_eq!(replacements.len(), 1);
             }
             _ => panic!("expected NAReplace plan"),
@@ -6502,8 +6637,8 @@ mod plan_construction_tests {
             df.repartition_by_range_opt(None, inputs).unwrap(),
         ];
         for out in &outputs {
-            match out.plan.as_ref() {
-                LogicalPlan::RepartitionByRange {
+            match out.plan.kind() {
+                LogicalPlanKind::RepartitionByRange {
                     partition_exprs, ..
                 } => {
                     assert_eq!(partition_exprs, &expected);
@@ -6528,14 +6663,17 @@ mod plan_construction_tests {
             ]
         };
         let before = |num_partitions| {
-            LogicalPlan::RepartitionByRange {
-                input: Arc::clone(&df.plan),
-                num_partitions,
-                partition_exprs: vec![
-                    col("id").asc_nulls_first().expression().clone(),
-                    col("id").desc_nulls_last().expression().clone(),
-                ],
-            }
+            LogicalPlan::try_new(
+                LogicalPlanKind::RepartitionByRange {
+                    num_partitions,
+                    partition_exprs: vec![
+                        col("id").asc_nulls_first().expression().clone(),
+                        col("id").desc_nulls_last().expression().clone(),
+                    ],
+                },
+                [Arc::clone(&df.plan)],
+            )
+            .expect("RepartitionByRange requires one input")
             .to_proto()
         };
         for (num_partitions, of_columns, of_expressions) in [
@@ -6704,10 +6842,15 @@ mod plan_construction_tests {
                 (col("id") % lit(2)).expression().clone(),
             ]
         };
-        let sorted = |is_global| LogicalPlan::Sort {
-            input: input(),
-            order: order_expressions(),
-            is_global,
+        let sorted = |is_global| {
+            LogicalPlan::try_new(
+                LogicalPlanKind::Sort {
+                    order: order_expressions(),
+                    is_global,
+                },
+                [input()],
+            )
+            .expect("Sort requires one input")
         };
         let cases = [
             (sorted(true), df.sort(order()), df.sort(order_expressions())),
@@ -6722,43 +6865,55 @@ mod plan_construction_tests {
                 df.sort_within_partitions(order_expressions()),
             ),
             (
-                LogicalPlan::Aggregate {
-                    input: input(),
-                    group_type: AggregateGroupType::GroupBy,
-                    grouping_expressions: vec![],
-                    aggregate_expressions: metric_expressions(),
-                    pivot_col: None,
-                    pivot_values: vec![],
-                    grouping_sets: vec![],
-                },
+                LogicalPlan::try_new(
+                    LogicalPlanKind::Aggregate {
+                        group_type: AggregateGroupType::GroupBy,
+                        grouping_expressions: vec![],
+                        aggregate_expressions: metric_expressions(),
+                        pivot_col: None,
+                        pivot_values: vec![],
+                        grouping_sets: vec![],
+                    },
+                    [input()],
+                )
+                .expect("Aggregate requires one input"),
                 df.agg(metrics()),
                 df.agg(metric_expressions()),
             ),
             (
-                LogicalPlan::Observe {
-                    input: input(),
-                    name: "metrics".to_string(),
-                    exprs: metric_expressions(),
-                    observation: None,
-                },
+                LogicalPlan::try_new(
+                    LogicalPlanKind::Observe {
+                        name: "metrics".to_string(),
+                        exprs: metric_expressions(),
+                        observation: None,
+                    },
+                    [input()],
+                )
+                .expect("Observe requires one input"),
                 df.observe("metrics", metrics()),
                 df.observe("metrics", metric_expressions()),
             ),
             (
-                LogicalPlan::Hint {
-                    input: input(),
-                    name: "rebalance".to_string(),
-                    parameters: parameter_expressions(),
-                },
+                LogicalPlan::try_new(
+                    LogicalPlanKind::Hint {
+                        name: "rebalance".to_string(),
+                        parameters: parameter_expressions(),
+                    },
+                    [input()],
+                )
+                .expect("Hint requires one input"),
                 df.hint_expressions("rebalance", parameters()),
                 df.hint_expressions("rebalance", parameter_expressions()),
             ),
             (
-                LogicalPlan::RepartitionByExpression {
-                    input: input(),
-                    num_partitions: 3,
-                    expressions: key_expressions(),
-                },
+                LogicalPlan::try_new(
+                    LogicalPlanKind::RepartitionByExpression {
+                        num_partitions: 3,
+                        expressions: key_expressions(),
+                    },
+                    [input()],
+                )
+                .expect("RepartitionByExpression requires one input"),
                 df.repartition_by_expressions(3, keys()),
                 df.repartition_by_expressions(3, key_expressions()),
             ),

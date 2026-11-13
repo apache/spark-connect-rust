@@ -9,7 +9,7 @@ use spark_connect_core::error::{Result, SparkError, SparkErrorKind};
 use crate::column::{expressions_of, Column};
 use crate::dataframe::DataFrame;
 use crate::expression::Expression;
-use crate::plan::{AggregateGroupType, LogicalPlan};
+use crate::plan::{AggregateGroupType, LogicalPlan, LogicalPlanKind};
 use crate::types::DataType;
 use crate::udf::CommonInlineUserDefinedFunctionExpression;
 
@@ -281,19 +281,20 @@ impl GroupedData {
 
     fn group_map(&self, func: CommonInlineUserDefinedFunctionExpression) -> DataFrame {
         let schema = func.python_udf.output_type.clone();
-        let plan = LogicalPlan::GroupMap {
-            input: Arc::clone(&self.dataframe.plan),
-            grouping_expressions: self.grouping_expressions(),
-            func,
-            sorting_expressions: vec![],
-            initial_input: None,
-            initial_grouping_expressions: vec![],
-            is_map_groups_with_state: None,
-            output_mode: None,
-            timeout_conf: None,
-            state_schema: None,
-            transform_with_state_info: None,
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::GroupMap {
+                grouping_expressions: self.grouping_expressions(),
+                func,
+                sorting_expressions: vec![],
+                initial_grouping_expressions: vec![],
+                is_map_groups_with_state: None,
+                output_mode: None,
+                timeout_conf: None,
+                state_schema: None,
+                transform_with_state_info: None,
+            },
+            [Arc::clone(&self.dataframe.plan)],
+        );
         DataFrame::new_with_schema(self.dataframe.session.clone(), plan, Some(schema))
     }
 
@@ -310,15 +311,17 @@ impl GroupedData {
         output_mode: &str,
         timeout_conf: &str,
     ) -> DataFrame {
-        let plan = LogicalPlan::ApplyInPandasWithState {
-            input: Arc::clone(&self.dataframe.plan),
-            grouping_expressions: self.grouping_expressions(),
-            output_schema: func.python_udf.output_type.clone(),
-            func,
-            state_schema,
-            output_mode: output_mode.to_string(),
-            timeout_conf: timeout_conf.to_string(),
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::ApplyInPandasWithState {
+                grouping_expressions: self.grouping_expressions(),
+                output_schema: func.python_udf.output_type.clone(),
+                func,
+                state_schema,
+                output_mode: output_mode.to_string(),
+                timeout_conf: timeout_conf.to_string(),
+            },
+            [Arc::clone(&self.dataframe.plan)],
+        );
         DataFrame::new(self.dataframe.session.clone(), plan)
     }
 
@@ -382,23 +385,24 @@ impl GroupedData {
             ),
             None => (None, vec![]),
         };
-        let plan = LogicalPlan::GroupMap {
-            input: Arc::clone(&self.dataframe.plan),
-            grouping_expressions: self.grouping_expressions(),
-            func,
-            sorting_expressions: vec![],
-            initial_input,
-            initial_grouping_expressions,
-            is_map_groups_with_state: None,
-            output_mode: Some(output_mode.to_string()),
-            timeout_conf: None,
-            state_schema: None,
-            transform_with_state_info: Some(crate::plan::TransformWithStateInfo {
-                time_mode: time_mode.to_string(),
-                event_time_column_name: event_time_column_name.map(|s| s.to_string()),
-                output_schema,
-            }),
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::GroupMap {
+                grouping_expressions: self.grouping_expressions(),
+                func,
+                sorting_expressions: vec![],
+                initial_grouping_expressions,
+                is_map_groups_with_state: None,
+                output_mode: Some(output_mode.to_string()),
+                timeout_conf: None,
+                state_schema: None,
+                transform_with_state_info: Some(crate::plan::TransformWithStateInfo {
+                    time_mode: time_mode.to_string(),
+                    event_time_column_name: event_time_column_name.map(|s| s.to_string()),
+                    output_schema,
+                }),
+            },
+            std::iter::once(Arc::clone(&self.dataframe.plan)).chain(initial_input),
+        );
         DataFrame::new(self.dataframe.session.clone(), plan)
     }
 
@@ -427,15 +431,17 @@ impl GroupedData {
             .map(|set| set.iter().map(|c| c.expression().clone()).collect())
             .collect();
 
-        let plan = LogicalPlan::Aggregate {
-            input: Arc::clone(&self.dataframe.plan),
-            group_type: self.group_type,
-            grouping_expressions,
-            aggregate_expressions: expressions_of(expressions),
-            pivot_col: self.pivot_col.clone(),
-            pivot_values: self.pivot_values.clone(),
-            grouping_sets,
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::Aggregate {
+                group_type: self.group_type,
+                grouping_expressions,
+                aggregate_expressions: expressions_of(expressions),
+                pivot_col: self.pivot_col.clone(),
+                pivot_values: self.pivot_values.clone(),
+                grouping_sets,
+            },
+            [Arc::clone(&self.dataframe.plan)],
+        );
 
         DataFrame::new(self.dataframe.session.clone(), plan)
     }
@@ -640,11 +646,13 @@ impl StatFunctions {
 
     /// Compute a cross-tabulation of two columns.
     pub fn crosstab(&self, col1: &str, col2: &str) -> DataFrame {
-        let plan = LogicalPlan::StatCrosstab {
-            input: Arc::clone(&self.dataframe.plan),
-            col1: col1.to_string(),
-            col2: col2.to_string(),
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::StatCrosstab {
+                col1: col1.to_string(),
+                col2: col2.to_string(),
+            },
+            [Arc::clone(&self.dataframe.plan)],
+        );
         DataFrame::new(self.dataframe.session.clone(), plan)
     }
 
@@ -654,11 +662,13 @@ impl StatFunctions {
         columns: impl IntoIterator<Item = S>,
         support: f64,
     ) -> DataFrame {
-        let plan = LogicalPlan::StatFreqItems {
-            input: Arc::clone(&self.dataframe.plan),
-            columns: columns.into_iter().map(Into::into).collect(),
-            support,
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::StatFreqItems {
+                columns: columns.into_iter().map(Into::into).collect(),
+                support,
+            },
+            [Arc::clone(&self.dataframe.plan)],
+        );
         DataFrame::new(self.dataframe.session.clone(), plan)
     }
 
@@ -669,12 +679,14 @@ impl StatFunctions {
         probabilities: Vec<f64>,
         relative_error: f64,
     ) -> DataFrame {
-        let plan = LogicalPlan::StatApproxQuantile {
-            input: Arc::clone(&self.dataframe.plan),
-            columns: columns.into_iter().map(Into::into).collect(),
-            probabilities,
-            relative_error,
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::StatApproxQuantile {
+                columns: columns.into_iter().map(Into::into).collect(),
+                probabilities,
+                relative_error,
+            },
+            [Arc::clone(&self.dataframe.plan)],
+        );
         DataFrame::new(self.dataframe.session.clone(), plan)
     }
 
@@ -683,11 +695,13 @@ impl StatFunctions {
     /// Executes the stat aggregation and returns the resulting `f64`
     /// (NaN when the correlation is undefined, e.g. an empty relation).
     pub fn corr(&self, col1: &str, col2: &str) -> Result<f64> {
-        let plan = LogicalPlan::StatCorr {
-            input: Arc::clone(&self.dataframe.plan),
-            col1: col1.to_string(),
-            col2: col2.to_string(),
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::StatCorr {
+                col1: col1.to_string(),
+                col2: col2.to_string(),
+            },
+            [Arc::clone(&self.dataframe.plan)],
+        );
         let df = DataFrame::new(self.dataframe.session.clone(), plan);
         Ok(df
             .first_value()?
@@ -699,11 +713,13 @@ impl StatFunctions {
     ///
     /// Executes the stat aggregation and returns the resulting `f64`.
     pub fn cov(&self, col1: &str, col2: &str) -> Result<f64> {
-        let plan = LogicalPlan::StatCov {
-            input: Arc::clone(&self.dataframe.plan),
-            col1: col1.to_string(),
-            col2: col2.to_string(),
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::StatCov {
+                col1: col1.to_string(),
+                col2: col2.to_string(),
+            },
+            [Arc::clone(&self.dataframe.plan)],
+        );
         let df = DataFrame::new(self.dataframe.session.clone(), plan);
         Ok(df
             .first_value()?
@@ -763,12 +779,14 @@ impl StatFunctions {
                 ],
             ));
         }
-        let plan = LogicalPlan::StatSampleBy {
-            input: Arc::clone(&self.dataframe.plan),
-            col: col.into().expression().clone(),
-            fractions,
-            seed: Some(seed.unwrap_or_else(crate::dataframe::random_seed)),
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::StatSampleBy {
+                col: col.into().expression().clone(),
+                fractions,
+                seed: Some(seed.unwrap_or_else(crate::dataframe::random_seed)),
+            },
+            [Arc::clone(&self.dataframe.plan)],
+        );
         Ok(DataFrame::new(self.dataframe.session.clone(), plan))
     }
 }
@@ -863,13 +881,17 @@ impl CoGroupedData {
 
     fn cogroup_map(&self, func: CommonInlineUserDefinedFunctionExpression) -> DataFrame {
         let schema = func.python_udf.output_type.clone();
-        let plan = LogicalPlan::CoGroupMap {
-            input: Arc::clone(&self.left.dataframe.plan),
-            input_grouping_expressions: self.left.grouping_expressions(),
-            other: Arc::clone(&self.right.dataframe.plan),
-            other_grouping_expressions: self.right.grouping_expressions(),
-            func,
-        };
+        let plan = LogicalPlan::from_builder(
+            LogicalPlanKind::CoGroupMap {
+                input_grouping_expressions: self.left.grouping_expressions(),
+                other_grouping_expressions: self.right.grouping_expressions(),
+                func,
+            },
+            [
+                Arc::clone(&self.left.dataframe.plan),
+                Arc::clone(&self.right.dataframe.plan),
+            ],
+        );
         DataFrame::new_with_schema(self.left.dataframe.session.clone(), plan, Some(schema))
     }
 }
@@ -961,17 +983,19 @@ mod tests {
         let cloned = grouped.clone();
         assert!(Arc::ptr_eq(&cloned.dataframe.plan, &df.plan));
         let count = grouped.count();
-        let LogicalPlan::Aggregate { input, .. } = count.plan.as_ref() else {
+        let LogicalPlanKind::Aggregate { .. } = count.plan.kind() else {
             panic!("expected aggregate");
         };
+        let input = &count.plan.children()[0];
         assert!(Arc::ptr_eq(input, &df.plan));
 
         let stat = df.stat();
         assert!(Arc::ptr_eq(&stat.dataframe.plan, &df.plan));
         let result = stat.crosstab("id", "id");
-        let LogicalPlan::StatCrosstab { input, .. } = result.plan.as_ref() else {
+        let LogicalPlanKind::StatCrosstab { .. } = result.plan.kind() else {
             panic!("expected crosstab");
         };
+        let input = &result.plan.children()[0];
         assert!(Arc::ptr_eq(input, &df.plan));
     }
 
@@ -1091,8 +1115,8 @@ mod tests {
         let df = spark.range(10).unwrap();
         let grouped = df.group_by(vec![crate::column::col("id")]);
         let result = grouped.count();
-        match result.plan.as_ref() {
-            LogicalPlan::Aggregate {
+        match result.plan.kind() {
+            LogicalPlanKind::Aggregate {
                 group_type: AggregateGroupType::GroupBy,
                 ..
             } => {
@@ -1111,8 +1135,8 @@ mod tests {
             .expression()
             .clone()];
         let result = grouped.agg(exprs);
-        match result.plan.as_ref() {
-            LogicalPlan::Aggregate {
+        match result.plan.kind() {
+            LogicalPlanKind::Aggregate {
                 group_type: AggregateGroupType::GroupBy,
                 ..
             } => {
@@ -1137,15 +1161,18 @@ mod tests {
                 max(col("id")).expression().clone(),
             ]
         };
-        let before = LogicalPlan::Aggregate {
-            input: Arc::clone(&df.plan),
-            group_type: AggregateGroupType::GroupBy,
-            grouping_expressions: vec![col("id").expression().clone()],
-            aggregate_expressions: expressions(),
-            pivot_col: None,
-            pivot_values: vec![],
-            grouping_sets: vec![],
-        }
+        let before = LogicalPlan::try_new(
+            LogicalPlanKind::Aggregate {
+                group_type: AggregateGroupType::GroupBy,
+                grouping_expressions: vec![col("id").expression().clone()],
+                aggregate_expressions: expressions(),
+                pivot_col: None,
+                pivot_values: vec![],
+                grouping_sets: vec![],
+            },
+            [Arc::clone(&df.plan)],
+        )
+        .expect("Aggregate requires one input")
         .to_proto();
         let of_columns = grouped.agg([sum(col("id")).alias("total"), max(col("id"))]);
         assert_eq!(of_columns.plan.to_proto(), before);
@@ -1417,8 +1444,8 @@ mod tests {
         let df = spark.range(10).unwrap();
         let stats = df.stat();
         let result = stats.crosstab("col1", "col2");
-        match result.plan.as_ref() {
-            LogicalPlan::StatCrosstab { .. } => {
+        match result.plan.kind() {
+            LogicalPlanKind::StatCrosstab { .. } => {
                 // Plan is correct
             }
             _ => panic!("expected StatCrosstab plan"),
@@ -1431,10 +1458,8 @@ mod tests {
         let df = spark.range(10).unwrap();
         let stats = df.stat();
         let result = stats.freq_items(vec!["col1", "col2"], 0.25);
-        match result.plan.as_ref() {
-            LogicalPlan::StatFreqItems {
-                columns, support, ..
-            } => {
+        match result.plan.kind() {
+            LogicalPlanKind::StatFreqItems { columns, support } => {
                 assert_eq!(columns.len(), 2);
                 assert_eq!(*support, 0.25);
             }
@@ -1448,12 +1473,11 @@ mod tests {
         let df = spark.range(10).unwrap();
         let stats = df.stat();
         let result = stats.approx_quantile(vec!["col1"], vec![0.25, 0.75], 0.05);
-        match result.plan.as_ref() {
-            LogicalPlan::StatApproxQuantile {
+        match result.plan.kind() {
+            LogicalPlanKind::StatApproxQuantile {
                 columns,
                 probabilities,
                 relative_error,
-                ..
             } => {
                 assert_eq!(columns.len(), 1);
                 assert_eq!(probabilities.len(), 2);
@@ -1514,12 +1538,11 @@ mod tests {
             ),
         ];
         let result = stats.sample_by("category", fractions, Some(42)).unwrap();
-        match result.plan.as_ref() {
-            LogicalPlan::StatSampleBy {
+        match result.plan.kind() {
+            LogicalPlanKind::StatSampleBy {
                 col,
                 seed,
                 fractions,
-                ..
             } => {
                 assert_eq!(*col, Expression::column("category"));
                 assert_eq!(*seed, Some(42));
