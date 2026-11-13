@@ -1098,6 +1098,23 @@ ARROW_TABLE_ROWS = [
 ]
 
 
+def test_empty_sort_list_keeps_the_cached_schema_and_fails_when_it_runs(session):
+    # As PySpark's: a sort of an empty list keeps the cached schema of its input, so its schema
+    # is returned without asking the server, while the server rejects the sort when it runs.
+    df = session.range(3)
+    schema = df.schema
+    for sort in (
+        lambda d: d.sort([]),
+        lambda d: d.orderBy([]),
+        lambda d: d.sortWithinPartitions([]),
+    ):
+        empty = sort(df)
+        assert empty.schema == schema
+        with pytest.raises(Exception) as error:
+            empty.collect()
+        assert error.value.getCondition() == "CONNECT_INVALID_PLAN.ASSERTION_FAILURE"
+
+
 def test_pickled_sort_columns_sort_on_the_server_as_pyspark(session, tmp_path):
     # As PySpark's: a pickled sort Column is a sort order again, so orderBy, a window and
     # repartitionByRange sort by it as by the Column built without the pickling, and a

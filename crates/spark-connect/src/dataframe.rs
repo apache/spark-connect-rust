@@ -620,9 +620,10 @@ impl DataFrame {
     /// nulls variants, sorts as it says; any other column is sorted ascending, nulls first,
     /// as PySpark's `sort` sorts it.
     ///
-    /// An empty `columns` builds a sort that the server rejects when the DataFrame runs, with
-    /// `CONNECT_INVALID_PLAN.ASSERTION_FAILURE`, as with the Scala client. PySpark's `df.sort()`
-    /// raises `CANNOT_BE_EMPTY` at the call instead.
+    /// An empty `columns` builds a sort that the server rejects when the DataFrame is analyzed
+    /// or run, with `CONNECT_INVALID_PLAN.ASSERTION_FAILURE`. Its `schema()` returns the cached
+    /// schema of this DataFrame without asking the server, as PySpark's `sort([])` does. PySpark's
+    /// `df.sort()` raises `CANNOT_BE_EMPTY` at the call instead.
     pub fn sort<C: Into<Column>>(&self, columns: impl IntoIterator<Item = C>) -> DataFrame {
         let plan = LogicalPlan::Sort {
             input: Arc::clone(&self.plan),
@@ -633,7 +634,7 @@ impl DataFrame {
     }
 
     /// Alias for [`DataFrame::sort`]. An empty `columns` fails as it does for
-    /// [`DataFrame::sort`], when the DataFrame runs.
+    /// [`DataFrame::sort`], when the DataFrame is analyzed or run.
     pub fn order_by<C: Into<Column>>(&self, columns: impl IntoIterator<Item = C>) -> DataFrame {
         self.sort(columns)
     }
@@ -2372,8 +2373,8 @@ impl DataFrame {
     }
 
     /// Sort within partitions (local sort), by `columns` as [`DataFrame::sort`] sorts by them.
-    /// An empty `columns` fails as it does for [`DataFrame::sort`], when the DataFrame runs,
-    /// where PySpark's `df.sortWithinPartitions()` raises `CANNOT_BE_EMPTY` at the call.
+    /// An empty `columns` fails as it does for [`DataFrame::sort`], when the DataFrame is analyzed
+    /// or run, where PySpark's `df.sortWithinPartitions()` raises `CANNOT_BE_EMPTY` at the call.
     pub fn sort_within_partitions<C: Into<Column>>(
         &self,
         columns: impl IntoIterator<Item = C>,
@@ -5129,6 +5130,39 @@ mod cache_tests {
             .map_in_arrow(udf(DataType::Long), false)
             .cached_schema()
             .is_none());
+    }
+
+    #[test]
+    fn an_empty_sort_keeps_the_cached_schema_of_its_input_as_pyspark_does() {
+        let spark = SparkSession::builder()
+            .remote("sc://localhost:15002")
+            .get_or_create()
+            .unwrap();
+        let df = spark.range(3).unwrap();
+        let schema = DataType::Struct { fields: vec![] };
+        *df.schema_cache.lock().unwrap() = Some(Arc::new(schema.clone()));
+
+        // The schema of a sort is the cached schema of its input, whatever the form of the
+        // sort and whether or not it has columns: PySpark's `sort([])` keeps it too.
+        assert_eq!(
+            df.sort(Vec::<Column>::new()).cached_schema().as_deref(),
+            Some(&schema)
+        );
+        assert_eq!(
+            df.order_by(Vec::<Column>::new()).cached_schema().as_deref(),
+            Some(&schema)
+        );
+        assert_eq!(
+            df.sort_within_partitions(Vec::<Column>::new())
+                .cached_schema()
+                .as_deref(),
+            Some(&schema)
+        );
+        assert_eq!(df.sort(["id"]).cached_schema().as_deref(), Some(&schema));
+        assert_eq!(
+            df.sort_within_partitions(["id"]).cached_schema().as_deref(),
+            Some(&schema)
+        );
     }
 
     #[test]
