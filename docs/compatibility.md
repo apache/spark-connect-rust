@@ -50,7 +50,9 @@ that is not a sort order is sorted ascending, nulls first, as PySpark's `WindowS
 it. An empty `vec![]` or `[]` has no item type to infer: pass `Vec::<Column>::new()` or
 `Vec::<&str>::new()` instead. This breaks a caller of v4.2.0 that passes an empty literal to
 `select_expr` or `summary`, which took a `Vec<&str>` there: `df.summary(vec![])`, for the default
-statistics, becomes `df.summary(Vec::<&str>::new())`. The same goes for `load_paths`. The optional
+statistics, becomes `df.summary(Vec::<&str>::new())`. `load_paths` is new in this release: v4.2.0
+had only `load`, so no v4.2.0 caller breaks on it, and a new caller passes an empty literal as
+`load_paths(Vec::<&str>::new())`. The optional
 `subset` arguments of the null functions, the optional `value_vars` of `melt` and the optional
 `column_names` of `drop_duplicates` and `drop_duplicates_within_watermark` stay
 `Option<Vec<&str>>`, as in v4.2.0, so that `None` still infers its type. The optional `values` of
@@ -585,7 +587,12 @@ loads the drop-in's at every protocol.
 
 The `TypeError` for too many positional arguments counts them without `self`: where CPython says
 "takes from 2 to 4 positional arguments but 5 were given", the drop-in says "takes from 1 to 3
-positional arguments but 4 were given". A warning that the Rust core raises, such as the
+positional arguments but 4 were given". A method that takes no arguments gets "takes no arguments
+(1 given)", where CPython says "takes 1 positional argument but 2 were given" for
+`DataFrame.distinct(1)`. A method that takes one argument gets the plural "positional arguments"
+even for a count of one: the drop-in says "takes 1 positional arguments but 3 were given" for
+`DataFrame.limit(1, 2, 3)`, where CPython says "takes 2 positional arguments but 4 were given".
+A warning that the Rust core raises, such as the
 `FutureWarning` of `registerTempTable`, is attributed to the caller's frame and module, so a
 `warnings.filterwarnings(..., module="pyspark")` does not match it, as it matches PySpark's.
 
