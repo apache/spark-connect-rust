@@ -48,6 +48,7 @@ import re
 import subprocess
 import sys
 import tempfile
+from collections.abc import Sequence
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -77,8 +78,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {{
 
 
 def check_block(
-    code: str, tmpdir: Path, idx: int, rlib: Path, deps: list[Path]
+    code: str,
+    tmpdir: Path,
+    idx: int,
+    rlib: Path | None = None,
+    deps: Sequence[Path] = (),
 ) -> tuple[bool, str]:
+    """Compile the snippet ``code`` (the ``idx``-th) in ``tmpdir`` against ``rlib``, the rlib of
+    ``apache-spark-connect``, whose dependencies are in the directories ``deps``. Without
+    ``rlib``, the snippet is compiled without the crate."""
     indented = "\n".join("        " + ln if ln.strip() else ln for ln in code.splitlines())
     src = tmpdir / f"snippet_{idx}.rs"
     src.write_text(HARNESS.format(body=indented))
@@ -92,8 +100,7 @@ def check_block(
             "bin",
             "--emit=metadata",
             *(arg for dep in deps for arg in ("-L", f"dependency={dep}")),
-            "--extern",
-            f"spark_connect={rlib}",
+            *(("--extern", f"spark_connect={rlib}") if rlib is not None else ()),
             "-o",
             str(out),
             str(src),
