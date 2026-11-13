@@ -306,14 +306,35 @@ fn dataset_of<'py>(
     )))
 }
 
-/// The DataFrame of the pandas DataFrame `pdf`, of `createDataFrame` of the active session.
+/// The DataFrame of the pandas DataFrame `pdf`, of `createDataFrame` of the active session. Its
+/// columns are sent as Arrow arrays, built without pandas' conversion of NaN to null (which the
+/// non-nullable element type of an array rejects), so that a NaN element or value stays NaN, as
+/// PySpark computes on it locally. A column that Arrow takes only with that conversion, such as the
+/// strings with a NaN, is taken as pandas takes it.
 fn active_dataframe(pdf: &Bound<'_, PyAny>) -> PyResult<DataFrame> {
-    let df = pdf
-        .py()
+    let py = pdf.py();
+    let pa = py.import("pyarrow")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("from_pandas", false)?;
+    let arrays = PyList::empty(py);
+    let names = PyList::empty(py);
+    for item in pdf.call_method0("items")?.try_iter()? {
+        let (name, column): (Bound<'_, PyAny>, Bound<'_, PyAny>) = item?.extract()?;
+        let array = match pa.call_method("array", (&column,), Some(&kwargs)) {
+            Ok(array) => array,
+            Err(_) => pa.call_method1("array", (column,))?,
+        };
+        arrays.append(array)?;
+        names.append(name)?;
+    }
+    let table = pa
+        .getattr("Table")?
+        .call_method1("from_arrays", (arrays, names))?;
+    let df = py
         .import("pyspark.sql")?
         .getattr("SparkSession")?
         .call_method0("active")?
-        .call_method1("createDataFrame", (pdf,))?;
+        .call_method1("createDataFrame", (table,))?;
     Ok(df.extract::<PyRef<'_, PyDataFrame>>()?.dataframe.clone())
 }
 
@@ -367,7 +388,7 @@ where
 {
     let py = slf.py();
     let dataset = dataset_of(dataset, "fit", "select")?;
-    let estimator = snapshot(slf)?;
+    let mut estimator = snapshot(slf)?;
     let columns = reads.and_then(|reads| read_columns(estimator.params(), reads));
     let (df, select) = match dataset {
         Dataset::Spark(df) => (df, columns),
@@ -391,7 +412,41 @@ where
         Some(field) => df.with_column(&field.name, vector_of(&field)),
         None => df,
     };
-    fit_core(py, estimator, &df)
+    // A scaler's JVM fit checks that its output column does not exist yet, and reads only its
+    // input column, as PySpark's scaler fit does. So the fit sends no outputCol, and the model
+    // keeps it.
+    let output = match vectors.output.is_some() {
+        true => take_output_col(estimator.params_mut()),
+        false => None,
+    };
+    let mut model = fit_core(py, estimator, &df)?;
+    keep_output_col(model.model.params_mut(), output);
+    Ok(model)
+}
+
+/// The `outputCol` of the params of a scaler, as they hold it: a string or a null, or None when
+/// it is not set (see [`take_output_col`]).
+type OutputCol = Option<Option<String>>;
+
+/// Take the `outputCol` off `params`, and return it (see [`fit_native`]).
+fn take_output_col(params: &mut Params) -> OutputCol {
+    // None when it is not set, so that there is no outputCol to keep.
+    params.get_param("outputCol")?;
+    let value = string_param(params, "outputCol");
+    *params = std::mem::take(params).clear_param("outputCol");
+    Some(value)
+}
+
+/// Set the `outputCol` of `params` back to `output`, as [`take_output_col`] took it.
+fn keep_output_col(params: &mut Params, output: OutputCol) {
+    let Some(value) = output else {
+        return;
+    };
+    let taken = std::mem::take(params);
+    *params = match value {
+        Some(value) => taken.set_param_string("outputCol", &value),
+        None => taken.set_param_null("outputCol"),
+    };
 }
 
 /// The fit of a native estimator whose core cannot fit it, as Pipeline and CrossValidator.
@@ -747,6 +802,32 @@ impl PySparkModel {
         }
     }
 
+    /// The transform of the empty pandas DataFrame `copy` (a shallow copy of it), as PySpark's
+    /// transform computes it locally. A scaler appends its `array<double>` output as an empty
+    /// object column, with the index of `copy`. A LogisticRegression model raises the ValueError of
+    /// `np.stack` in PySpark's transform function, which has no array to stack.
+    fn transform_empty<'py>(&self, copy: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+        let py = copy.py();
+        match self {
+            Self::LogisticRegression { .. } => {
+                Err(PyValueError::new_err("need at least one array to stack"))
+            }
+            Self::Scaler { output, .. } => {
+                let kwargs = PyDict::new(py);
+                kwargs.set_item("dtype", "object")?;
+                kwargs.set_item("index", copy.getattr("index")?)?;
+                let column = py.import("pandas")?.call_method(
+                    "Series",
+                    (PyList::empty(py),),
+                    Some(&kwargs),
+                )?;
+                let at = copy.getattr("columns")?.len()?;
+                copy.call_method1("insert", (at, output, column))?;
+                Ok(copy.clone())
+            }
+        }
+    }
+
     /// PySpark's ValueError of `Transformer._transform` of an output column that `dataset` has
     /// already: one of `list(dataset.columns)`, of their exact names, before any transform.
     fn check_outputs(&self, dataset: &Bound<'_, PyAny>) -> PyResult<()> {
@@ -787,6 +868,11 @@ fn transform_pandas<'py>(
         Some(input) => copy.get_item(input)?.call_method0("to_frame")?,
         None => copy.clone(),
     };
+    // The server cannot infer the schema of an empty pandas DataFrame, so PySpark's own result of
+    // no rows is computed here, as PySpark computes it.
+    if let (Some(model), 0) = (pyspark, pdf.len()?) {
+        return model.transform_empty(&copy);
+    }
     let df = active_dataframe(&sent)?;
     let out = transform(&df)?;
     let outputs = match pyspark {

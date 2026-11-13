@@ -146,6 +146,21 @@ def _relation(df):
     return pb2.Relation.FromString(df._relation_bytes())
 
 
+def _local_data(message):
+    # The Arrow IPC data of the first LocalRelation under message, as createDataFrame sends the
+    # local data of a pandas DataFrame, or None when there is none.
+    if message.DESCRIPTOR.name == "LocalRelation":
+        return message.data
+    for field, value in message.ListFields():
+        if field.type != field.TYPE_MESSAGE or field.message_type.GetOptions().map_entry:
+            continue
+        for item in value if field.is_repeated else [value]:
+            data = _local_data(item)
+            if data is not None:
+                return data
+    return None
+
+
 class _Color(enum.Enum):
     RED = 1
 
@@ -197,10 +212,16 @@ def test_ml_connect_fitted_scalers_transform_the_cached_model(ml_mock):
         fit = _commands_but_deletes(service, sent)[0].ml_command.fit
         assert fit.estimator.name == name
         assert fit.estimator.type == pb2.MlOperator.OPERATOR_TYPE_ESTIMATOR
-        # StandardScaler also sends withMean, as PySpark's scales to (x - mean) / std.
+        # StandardScaler also sends withMean, as PySpark's scales to (x - mean) / std. A scaler's
+        # fit sends no outputCol (see _unsent_by_fit), and its transform sends it below.
+        outputs = (
+            {}
+            if _unsent_by_fit(cls.__name__)
+            else {"outputCol": pb2.Expression.Literal(string="o")}
+        )
         assert dict(fit.params.params) == {
             "inputCol": pb2.Expression.Literal(string=column),
-            "outputCol": pb2.Expression.Literal(string="o"),
+            **outputs,
             **({"withMean": pb2.Expression.Literal(boolean=True)} if cls is StandardScaler else {}),
         }
         if cls is StringIndexer:
@@ -222,6 +243,44 @@ def test_ml_connect_fitted_scalers_transform_the_cached_model(ml_mock):
         assert not transform.HasField("transformer")
         assert transform.input == _relation(df)
         assert transform.params.params["outputCol"] == pb2.Expression.Literal(string="o")
+
+
+def test_ml_connect_scaler_fit_with_its_input_as_output_takes_no_output_col_as_pyspark(ml_mock):
+    # As PySpark's scaler fit, which reads only its inputCol, the fit of a scaler whose outputCol is
+    # its inputCol succeeds. The JVM fit checks that the output column does not exist, so the fit
+    # sends no outputCol, and the model keeps it: its transform raises PySpark's ValueError of an
+    # output column that the DataFrame has, before any request, and sends the outputCol otherwise.
+    from _mock_connect_server import ddl_data_type
+    from pyspark.ml.connect.feature import MaxAbsScaler, StandardScaler
+
+    spark, service = ml_mock
+    x = spark.range(1).selectExpr("array(1.0D, 2.0D) AS x")
+    models = []  # Kept alive, so that no model is released during the checks.
+    message = (
+        "Transformers does not allow output column having the same name with existing columns."
+    )
+    for cls in (StandardScaler, MaxAbsScaler):
+        service.data_type = ddl_data_type("x array<double>")
+        sent = len(service.execute_requests)
+        service.execute_payload = _operator_info("model-1")
+        models.append(cls(inputCol="x", outputCol="x").fit(x))
+        fit = _commands_but_deletes(service, sent)[0].ml_command.fit
+        assert "outputCol" not in fit.params.params, cls
+        assert fit.params.params["inputCol"] == pb2.Expression.Literal(string="x"), cls
+
+        sent = _requests_but_deletes(service)
+        with pytest.raises(ValueError) as error:
+            models[-1].transform(x)
+        assert str(error.value) == message, cls
+        assert _requests_but_deletes(service) == sent, cls
+        # Of a DataFrame without x, the transform appends x, as PySpark's does.
+        y = spark.range(1).selectExpr("array(3.0D) AS y")
+        service.data_type = ddl_data_type("y array<double>")
+        assert _model_sent(models[-1], y) == {
+            "inputCol": ("string", "x"),
+            **({"withMean": ("boolean", True)} if cls is StandardScaler else {}),
+            "outputCol": ("string", "x"),
+        }, cls
 
 
 def _attribute(name):
@@ -326,8 +385,9 @@ def test_ml_connect_native_estimators_take_the_array_columns_of_pyspark(ml_mock)
         name = type(estimator).__name__
         df, fit, transformed = requests(estimator)
         # The params name the column as they were given, and the dataset has the vector of the
-        # array in its place. (The params that a class sends of itself: see _defaults_sent.)
-        params = {"inputCol": "features", "outputCol": "o"} if type(estimator) in scalers else {}
+        # array in its place. (The params that a class sends of itself: see _defaults_sent, and
+        # the outputCol that a scaler's fit does not send: see _unsent_by_fit.)
+        params = {"inputCol": "features"} if type(estimator) in scalers else {}
         sent = {k: v.string for k, v in fit.params.params.items() if k not in _defaults_sent(name)}
         assert sent == params, name
         assert _defaults_sent(name).keys() <= fit.params.params.keys(), name
@@ -636,6 +696,83 @@ def test_ml_connect_fit_and_transform_take_the_pandas_frames_of_pyspark(ml_mock)
     assert str(error.value) == "fit() takes a DataFrame or a pandas DataFrame, not 'Columns'"
 
 
+def test_ml_connect_pandas_frames_send_their_nan_as_pyspark(ml_mock):
+    # As PySpark computes on a pandas DataFrame locally, its NaN elements of arrays and its NaN
+    # values are NaN, not nulls: the DataFrame is sent as an Arrow table of its columns, built
+    # without pandas' conversion of NaN to null, which createDataFrame of a pandas DataFrame makes
+    # of the elements of an array, though the schema of such an array has no null.
+    import math
+
+    import pandas as pd
+    import pyarrow as pa
+    import pyspark.ml.connect as connect
+
+    spark, service = ml_mock
+    pdf = pd.DataFrame(
+        {
+            "x": [np.array([np.nan, 1.0]), np.array([2.0, 4.0])],
+            "y": [1.5, np.nan],
+            "s": ["a", np.nan],
+        }
+    )
+    models = []  # Kept alive, so that no model is released during the checks.
+
+    def sent_data(estimator):
+        # The Arrow table of the local data that the fit of estimator sends.
+        sent = len(service.execute_requests)
+        service.execute_payload = _operator_info("model-1")
+        models.append(estimator.fit(pdf))
+        fit = _commands_but_deletes(service, sent)[0].ml_command.fit
+        return pa.ipc.open_stream(_local_data(fit.dataset)).read_all()
+
+    # A scaler fits its inputCol, and the NaN of its elements survives.
+    table = sent_data(connect.MaxAbsScaler(inputCol="x", outputCol="o"))
+    assert table.column_names == ["x"]
+    first, second = table.column("x").to_pylist()
+    assert math.isnan(first[0]) and first[1] == 1.0 and second == [2.0, 4.0]
+    # The other native classes send the whole of the pandas DataFrame, and a NaN value survives,
+    # while the NaN of a string column is a null, as pandas makes it.
+    table = sent_data(connect.KMeans())
+    assert table.column_names == ["x", "y", "s"]
+    assert math.isnan(table.column("y").to_pylist()[1])
+    assert table.column("y").to_pylist()[0] == 1.5
+    assert table.column("s").to_pylist() == ["a", None]
+
+
+def test_ml_connect_empty_pandas_transforms_compute_locally_as_pyspark(ml_mock):
+    # As PySpark's transform of an empty pandas DataFrame, which computes locally: a scaler appends
+    # its output column, of object dtype, to the index of the DataFrame, and a LogisticRegression
+    # model raises the ValueError of its transform function, which stacks no array. Neither sends
+    # a request, as the server cannot infer the schema of no rows.
+    import pandas as pd
+    import pyspark.ml.connect as connect
+
+    spark, service = ml_mock
+    features = spark.range(1).selectExpr("array(1.0D, 2.0D) AS features")
+    models = []  # Kept alive, so that no model is released during the checks.
+    service.execute_payload = _operator_info("model-1")
+    models.append(connect.MaxAbsScaler(inputCol="features", outputCol="o").fit(features))
+    sent = _requests_but_deletes(service)
+
+    empty = pd.DataFrame({"features": pd.Series([], dtype=object)})
+    transformed = models[-1].transform(empty)
+    assert transformed is not empty and list(empty.columns) == ["features"]
+    assert list(transformed.columns) == ["features", "o"]
+    assert transformed.dtypes.astype(str).to_dict() == {"features": "object", "o": "object"}
+    assert len(transformed) == 0 and transformed.index.equals(empty.index)
+    assert _requests_but_deletes(service) == sent
+    with pytest.raises(KeyError) as error:
+        models[-1].transform(pd.DataFrame({"x": pd.Series([], dtype=object)}))
+    assert error.value.args == ("features",)
+
+    service.execute_payload = _operator_info("model-2")
+    models.append(connect.LogisticRegression().fit(features))
+    sent = _requests_but_deletes(service)
+    with pytest.raises(ValueError, match="need at least one array to stack"):
+        models[-1].transform(empty)
+    assert _requests_but_deletes(service) == sent
+
+
 def test_ml_connect_setters_set_the_params_of_their_receiver_as_pyspark(ml_mock):
     # As PySpark's Params._set: every setter of the native pyspark.ml.connect estimators,
     # transformers and evaluators sets its param on the object itself and returns the object, so
@@ -737,6 +874,10 @@ def test_ml_connect_setters_set_the_params_of_their_receiver_as_pyspark(ml_mock)
             assert getattr(receiver, setter)(value=values[name]) is receiver, (cls, setter)
         params = sent_params(receiver)
         sent_values = {_sent_name(cls.__name__, name): value for name, value in values.items()}
+        for name in _unsent_by_fit(cls.__name__):
+            # The fit sends no such param, and the transform of the model it fitted sends it.
+            assert _model_sent(models[-1], df)[name] == ("string", values[name]), (cls, name)
+            del sent_values[name]
         assert {name: params.get(name) for name in sent_values} == sent_values, cls
         assert params == sent_params(cls(**values)), cls
 
@@ -954,6 +1095,20 @@ def _defaults_sent(name):
     return {}
 
 
+def _unsent_by_fit(name):
+    # The params that the fit of a native class takes but does not send: the outputCol of a scaler,
+    # whose JVM fit checks that its output column does not exist yet, so that the fit reads no
+    # output column, and whose model keeps it, for the transform to send it.
+    return {"outputCol"} if name in ("StandardScaler", "MaxAbsScaler") else set()
+
+
+def _model_sent(model, df):
+    # The params that the transform of a fitted scaler sends: its output column is appended, so
+    # that its relation is the with_columns of the transform.
+    transform = _relation(model.transform(df)).with_columns.input.ml_relation.transform
+    return {name: _literal_value(literal) for name, literal in transform.params.params.items()}
+
+
 def _native_sent(spark, service, obj, models):
     _, params = _native_request(spark, service, obj, models)
     return {name: _literal_value(literal) for name, literal in params.params.items()}
@@ -1020,6 +1175,12 @@ def test_ml_connect_params_convert_with_the_type_converters_of_pyspark(ml_mock):
                     if name in _NOT_FITTABLE:
                         continue  # Their params are sent by no request.
                     sent = _native_sent(spark, service, obj, models)
+                    if param in _unsent_by_fit(name):
+                        # The fit sends none of it, and the transform of its model sends it.
+                        assert sent == _defaults_sent(name), (name, param, value)
+                        model_sent = _model_sent(models[-1], spark.range(1))
+                        assert model_sent[param] == expected, (name, param, value)
+                        continue
                     assert sent == {
                         **_defaults_sent(name), _sent_name(name, param): expected
                     }, (name, param, value)
@@ -1164,13 +1325,17 @@ def test_ml_connect_unsendable_ints_none_and_uids_as_pyspark(ml_mock):
             assert getattr(obj, setter)(value) is obj
             assert getattr(obj, setter)(None) is obj
             sent_name = _sent_name(name, param)
+            # The params that the fit sends: a scaler's fit sends no outputCol (see _unsent_by_fit).
+            sent_names = {sent_name} - _unsent_by_fit(name)
             sent = _native_sent(spark, service, obj, models)
-            assert sent.keys() == {sent_name} | _defaults_sent(name).keys(), (name, param)
-            assert sent[sent_name][0] == "null", (name, param)
+            assert sent.keys() == sent_names | _defaults_sent(name).keys(), (name, param)
+            if sent_names:
+                assert sent[sent_name][0] == "null", (name, param)
             if param != "thresholds":
                 sent = _native_sent(spark, service, cls(**{param: None}), models)
-                assert sent.keys() == {sent_name} | _defaults_sent(name).keys(), (name, param)
-                assert sent[sent_name][0] == "null", (name, param)
+                assert sent.keys() == sent_names | _defaults_sent(name).keys(), (name, param)
+                if sent_names:
+                    assert sent[sent_name][0] == "null", (name, param)
         operator, _ = _native_request(spark, service, cls(), models)
         assert re.fullmatch(name + "_[0-9a-f]{12}", operator.uid), operator.uid
 
