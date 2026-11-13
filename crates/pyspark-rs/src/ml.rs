@@ -8,9 +8,9 @@
 //! setter sets the param of the wrapper itself and returns the wrapper, as PySpark's
 //! `Params._set` does. `fit`, `transform` and `evaluate` clone the core object under a short
 //! borrow, so that another thread may call a setter while they wait for the server. They take
-//! a DataFrame or a pandas DataFrame, as PySpark's do (see [`Dataset`]).
+//! a Spark DataFrame, matching the dataset contract of standard `pyspark.ml` over Spark Connect.
 
-use pyo3::exceptions::{PyNotImplementedError, PyTypeError, PyValueError};
+use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::pyclass::boolean_struct::False;
 use pyo3::types::{PyDict, PyList, PyTuple, PyType};
@@ -391,15 +391,6 @@ fn snapshot<T: Native + PyClass>(slf: &Bound<'_, T>) -> PyResult<T::Core> {
     Ok(this.inner().clone())
 }
 
-/// A dataset of a fit, a transform or an evaluate, as the classes of PySpark's
-/// `pyspark.ml.connect` take it: a DataFrame, or a pandas DataFrame, which PySpark's compute on
-/// locally, and which is sent here with `createDataFrame` of the active session, as the native
-/// classes run on the server.
-enum Dataset<'py> {
-    Spark(DataFrame),
-    Pandas(Bound<'py, PyAny>),
-}
-
 /// Whether `dataset` is a pandas DataFrame, of an imported pandas.
 fn is_pandas(dataset: &Bound<'_, PyAny>) -> PyResult<bool> {
     let pandas = dataset
@@ -414,59 +405,31 @@ fn is_pandas(dataset: &Bound<'_, PyAny>) -> PyResult<bool> {
     }
 }
 
+/// Native ML runs on Spark DataFrames. Pandas input must be converted explicitly by the caller.
+fn reject_pandas(dataset: &Bound<'_, PyAny>, method: &str) -> PyResult<()> {
+    if is_pandas(dataset)? {
+        return Err(PyTypeError::new_err(format!(
+            "{method}() requires a Spark DataFrame; pandas DataFrames are not supported. \
+             Convert the input with spark.createDataFrame(...) first."
+        )));
+    }
+    Ok(())
+}
+
 /// The dataset of `method`, `dataset`. Another object raises the `AttributeError` of `attribute`,
 /// the attribute that PySpark reads of it first: `select` in a fit (by `select` of the columns
 /// that it reads) and an evaluate (by `aggregate_dataframe`), `columns` in a transform (by
 /// `Transformer._transform`). An object that has it raises a TypeError.
-fn dataset_of<'py>(
-    dataset: &Bound<'py, PyAny>,
-    method: &str,
-    attribute: &str,
-) -> PyResult<Dataset<'py>> {
+fn dataset_of(dataset: &Bound<'_, PyAny>, method: &str, attribute: &str) -> PyResult<DataFrame> {
     if let Ok(df) = dataset.extract::<PyRef<'_, PyDataFrame>>() {
-        return Ok(Dataset::Spark(df.dataframe.clone()));
+        return Ok(df.dataframe.clone());
     }
-    if is_pandas(dataset)? {
-        return Ok(Dataset::Pandas(dataset.clone()));
-    }
+    reject_pandas(dataset, method)?;
     dataset.getattr(attribute)?;
     Err(PyTypeError::new_err(format!(
-        "{method}() takes a DataFrame or a pandas DataFrame, not '{}'",
+        "{method}() takes a Spark DataFrame, not '{}'",
         dataset.get_type().name()?
     )))
-}
-
-/// The DataFrame of the pandas DataFrame `pdf`, of `createDataFrame` of the active session. Its
-/// columns are sent as Arrow arrays, built without pandas' conversion of NaN to null (which the
-/// non-nullable element type of an array rejects), so that a NaN element or value stays NaN, as
-/// PySpark computes on it locally. A column that Arrow takes only with that conversion, such as the
-/// strings with a NaN, is taken as pandas takes it. Its column names are the `str` of the labels
-/// of `pdf`, as createDataFrame names them (a label that is not a string, such as 0, is a name).
-fn active_dataframe(pdf: &Bound<'_, PyAny>) -> PyResult<DataFrame> {
-    let py = pdf.py();
-    let pa = py.import("pyarrow")?;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item("from_pandas", false)?;
-    let arrays = PyList::empty(py);
-    let names = PyList::empty(py);
-    for item in pdf.call_method0("items")?.try_iter()? {
-        let (name, column): (Bound<'_, PyAny>, Bound<'_, PyAny>) = item?.extract()?;
-        let array = match pa.call_method("array", (&column,), Some(&kwargs)) {
-            Ok(array) => array,
-            Err(_) => pa.call_method1("array", (column,))?,
-        };
-        arrays.append(array)?;
-        names.append(name.str()?)?;
-    }
-    let table = pa
-        .getattr("Table")?
-        .call_method1("from_arrays", (arrays, names))?;
-    let df = py
-        .import("pyspark.sql")?
-        .getattr("SparkSession")?
-        .call_method0("active")?
-        .call_method1("createDataFrame", (table,))?;
-    Ok(df.extract::<PyRef<'_, PyDataFrame>>()?.dataframe.clone())
 }
 
 /// The columns that the fit of a class of PySpark's `pyspark.ml.connect` reads, as the params
@@ -496,17 +459,9 @@ fn read_columns(params: &Params, reads: Reads) -> Option<Vec<String>> {
         .collect()
 }
 
-/// The fit of a native estimator, on `dataset` as its JVM estimator reads it: an array column that
-/// the JVM estimator reads as an ML vector is sent as that vector (see [`Vectors`]), and a pandas
-/// DataFrame with `createDataFrame` of the active session (see [`Dataset`]). With `reads`, of an
-/// estimator of a class of PySpark's `pyspark.ml.connect`, only the columns that PySpark's fit
-/// reads are sent: their `select`, or `dataset[columns]` of a pandas DataFrame, which raises the
-/// KeyError of pandas for a missing column, as PySpark's `aggregate_dataframe`. So the JVM
-/// estimator checks no other column, as PySpark's fit reads no other, and the dataset may have
-/// an output column (a `prediction`, say). The other estimators, of the classes that PySpark's
-/// `pyspark.ml.connect` does not have, fit the whole dataset, as their JVM estimators read it, and
-/// take vectors, arrays of numbers and pandas DataFrames, where classic `pyspark.ml` estimators
-/// take only a `VectorUDT` column.
+/// Fit a native estimator on a Spark DataFrame. Numeric array features are converted to ML
+/// vectors for the JVM estimator (see [`Vectors`]). When `reads` is provided, only those input
+/// columns are selected; otherwise the estimator receives the whole DataFrame.
 fn fit_native<T>(
     slf: &Bound<'_, T>,
     dataset: &Bound<'_, PyAny>,
@@ -532,19 +487,9 @@ where
     T::Core: Estimator,
 {
     let py = slf.py();
-    let dataset = dataset_of(dataset, "fit", "select")?;
+    let df = dataset_of(dataset, "fit", "select")?;
     let mut estimator = snapshot(slf)?;
-    let columns = reads.and_then(|reads| read_columns(estimator.params(), reads));
-    let (df, select) = match dataset {
-        Dataset::Spark(df) => (df, columns),
-        Dataset::Pandas(pdf) => {
-            let pdf = match &columns {
-                Some(columns) => pdf.get_item(PyList::new(py, columns)?)?,
-                None => pdf,
-            };
-            (active_dataframe(&pdf)?, None)
-        }
-    };
+    let select = reads.and_then(|reads| read_columns(estimator.params(), reads));
     let vectors = Vectors::of(estimator.operator(), estimator.params());
     // Found in the schema of the whole DataFrame, which is read once for a fit and a transform
     // of it: the selection keeps the columns as they are. The JVM estimator reads its columns by
@@ -624,7 +569,7 @@ fn check_labels(py: Python<'_>, df: &DataFrame, label: &str) -> PyResult<()> {
 /// The fit of a native estimator whose core cannot fit it, as Pipeline and CrossValidator.
 /// The core raises NOT_IMPLEMENTED of `feature` before any request, whatever its params are, so
 /// the params are not serialized first, and PySpark's serialization errors of them are not
-/// raised. So does the fit of a pandas DataFrame, or of another object, which is not sent.
+/// raised. Pandas inputs are rejected before reaching this unsupported operation.
 fn fit_unimplemented<T>(
     slf: &Bound<'_, T>,
     dataset: &Bound<'_, PyAny>,
@@ -635,6 +580,7 @@ where
     T::Core: Estimator,
 {
     let py = slf.py();
+    reject_pandas(dataset, "fit")?;
     match dataset.extract::<PyRef<'_, PyDataFrame>>() {
         Ok(df) => fit_core(py, slf.try_borrow()?.inner().clone(), &df.dataframe),
         Err(_) => Err(crate::column::raise_pyspark(
@@ -860,29 +806,14 @@ fn vector_array(name: &str) -> spark_connect::Column {
 
 /// The input columns of an evaluator, as the JVM evaluator reads them: `doubles`, a prediction
 /// that it reads as a double only, and `score`, a probability that it reads as a double or a
-/// vector, where PySpark's evaluators read any numeric column, and an array, as a tensor. `label`
-/// is the label column, which the JVM evaluator reads as its labelCol.
+/// vector, where PySpark's evaluators read any numeric column, and an array, as a tensor.
 struct EvaluatorInputs {
     doubles: Vec<String>,
     score: Option<String>,
-    label: String,
-}
-
-impl EvaluatorInputs {
-    /// The columns that PySpark's evaluator reads of its dataset, as its `_get_input_cols` does:
-    /// the prediction or the probability, then the label.
-    fn reads(&self) -> Vec<String> {
-        self.doubles
-            .iter()
-            .chain(&self.score)
-            .cloned()
-            .chain([self.label.clone()])
-            .collect()
-    }
 }
 
 /// Evaluate `dataset` with the JVM evaluator of `slf`, whose input columns `inputs` gives, as
-/// PySpark's evaluators evaluate it (see [`evaluation_dataset`] and [`evaluator_input`]). The
+/// PySpark's evaluators evaluate it (see [`evaluator_input`]). The
 /// JVM evaluator reads its columns by the spelling of the schema of the dataset.
 fn evaluate_native<T>(
     slf: &Bound<'_, T>,
@@ -894,9 +825,9 @@ where
     T::Core: Evaluator,
 {
     let py = slf.py();
+    let df = dataset_of(dataset, "evaluate", "select")?;
     let mut evaluator = snapshot(slf)?;
     let inputs = inputs(&evaluator);
-    let df = evaluation_dataset(dataset, &inputs)?;
     let fields = schema_fields(py, &df)?;
     // An evaluator that exposes no params is sent as it is (see `Evaluator::params_mut`).
     if let Some(evaluator_params) = evaluator.params_mut() {
@@ -914,20 +845,6 @@ where
     interruptible(py, &df.spark_session(), || {
         evaluator.evaluate(&df).map_err(Box::new)
     })
-}
-
-/// The dataset of `evaluate`, as PySpark's evaluators take it (see [`Dataset`]): a pandas DataFrame,
-/// which PySpark evaluates locally, is sent with `createDataFrame` of the active session, as the
-/// evaluators of this client run on the server. Only the columns that PySpark's evaluator reads
-/// are sent, as `pdf[columns]` selects them, which raises the KeyError of pandas for a missing one.
-fn evaluation_dataset(dataset: &Bound<'_, PyAny>, inputs: &EvaluatorInputs) -> PyResult<DataFrame> {
-    match dataset_of(dataset, "evaluate", "select")? {
-        Dataset::Spark(df) => Ok(df),
-        Dataset::Pandas(pdf) => {
-            let columns = PyList::new(pdf.py(), inputs.reads())?;
-            active_dataframe(&pdf.get_item(columns)?)
-        }
-    }
 }
 
 /// `df` as the JVM evaluator reads it, whose schema has the fields `fields`, with its columns of
@@ -975,7 +892,6 @@ enum PySparkModel {
     /// of which the JVM model, whose rawPredictionCol is empty (see [`PyLogisticRegression`]),
     /// outputs no raw prediction. (A null column param, which the server rejects, fits no model.)
     LogisticRegression {
-        features: Option<String>,
         prediction: Option<String>,
         probability: Option<String>,
     },
@@ -990,19 +906,11 @@ impl PySparkModel {
                     string_or(params, name, Some(default)).filter(|name| !name.is_empty())
                 };
                 Some(Self::LogisticRegression {
-                    features: string_or(params, "featuresCol", Some("features")),
                     prediction: output("predictionCol", "prediction"),
                     probability: output("probabilityCol", "probability"),
                 })
             }
             _ => None,
-        }
-    }
-
-    /// The column that PySpark's transform reads (`_input_columns`).
-    fn input(&self) -> Option<&str> {
-        match self {
-            Self::LogisticRegression { features, .. } => features.as_deref(),
         }
     }
 
@@ -1014,17 +922,6 @@ impl PySparkModel {
                 probability,
                 ..
             } => prediction.iter().chain(probability).cloned().collect(),
-        }
-    }
-
-    /// The transform of the empty pandas DataFrame `copy` (a shallow copy of it), as PySpark's
-    /// transform computes it locally: a LogisticRegression model raises the ValueError of
-    /// `np.stack` in PySpark's transform function, which has no array to stack.
-    fn transform_empty<'py>(&self, _copy: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
-        match self {
-            Self::LogisticRegression { .. } => {
-                Err(PyValueError::new_err("need at least one array to stack"))
-            }
         }
     }
 
@@ -1047,60 +944,6 @@ impl PySparkModel {
     }
 }
 
-/// The transform of the pandas DataFrame `pdf`, as PySpark's `transform_dataframe_column`
-/// returns it: a shallow copy of `pdf` (`copy(deep=False)`) with the output columns inserted
-/// after its columns. PySpark's computes them locally, where `transform` computes them on the
-/// server, of `pdf` sent with `createDataFrame` of the active session, and they are taken back by
-/// `toPandas`, of the rows in their order, with the index of `pdf`. A model of a class of
-/// PySpark's (see [`PySparkModel`]) is sent only the column that PySpark's reads, `pdf[input]`,
-/// which raises the KeyError of pandas for a missing column, as PySpark's; another transform is
-/// sent the whole of `pdf`, and its outputs are the columns that the server appends.
-fn transform_pandas<'py>(
-    pdf: &Bound<'py, PyAny>,
-    pyspark: Option<&PySparkModel>,
-    transform: impl FnOnce(&DataFrame) -> PyResult<DataFrame>,
-) -> PyResult<Bound<'py, PyAny>> {
-    let py = pdf.py();
-    let kwargs = PyDict::new(py);
-    kwargs.set_item("deep", false)?;
-    let copy = pdf.call_method("copy", (), Some(&kwargs))?;
-    let sent = match pyspark.and_then(PySparkModel::input) {
-        Some(input) => copy.get_item(input)?.call_method0("to_frame")?,
-        None => copy.clone(),
-    };
-    // The server cannot infer the schema of an empty pandas DataFrame, so PySpark's own result of
-    // no rows is computed here, as PySpark computes it.
-    if let (Some(model), 0) = (pyspark, pdf.len()?) {
-        return model.transform_empty(&copy);
-    }
-    let df = active_dataframe(&sent)?;
-    let out = transform(&df)?;
-    let outputs = match pyspark {
-        Some(model) => model.outputs(),
-        None => {
-            let sent: Vec<String> = schema_fields(py, &df)?
-                .into_iter()
-                .map(|field| field.name)
-                .collect();
-            schema_fields(py, &out)?
-                .into_iter()
-                .map(|field| field.name)
-                .filter(|name| !sent.contains(name))
-                .collect()
-        }
-    };
-    let selected = out.select(outputs.iter().map(|name| exact_column(name)));
-    let result = PyDataFrame::new(selected)
-        .to_pandas(py, None)?
-        .into_bound(py);
-    result.setattr("index", copy.getattr("index")?)?;
-    for output in &outputs {
-        let at = copy.getattr("columns")?.len()?;
-        copy.call_method1("insert", (at, output, result.get_item(output)?))?;
-    }
-    Ok(copy)
-}
-
 /// A fitted ML model (result of `Estimator.fit`), wrapping a boxed core `Model`.
 #[pyclass(name = "MLModel", module = "pyspark.ml.connect")]
 pub struct PyMLModel {
@@ -1111,28 +954,26 @@ pub struct PyMLModel {
 
 #[pymethods]
 impl PyMLModel {
-    /// Apply the model to `dataset`, a DataFrame or a pandas DataFrame, as PySpark's
-    /// `Transformer.transform` takes it, whose transform of a pandas DataFrame is a pandas
-    /// DataFrame (see [`transform_pandas`]). The model of a class of PySpark's raises PySpark's
-    /// ValueError of an output column that the dataset has already (see [`PySparkModel`]).
+    /// Apply the model to a Spark DataFrame. LogisticRegression checks for existing output
+    /// columns before constructing the transform (see [`PySparkModel`]).
     #[pyo3(signature = (dataset, params=None))]
     fn transform(
         &self,
         py: Python<'_>,
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Py<PyAny>> {
+    ) -> PyResult<PyDataFrame> {
         check_params(params)?;
-        let pyspark = PySparkModel::of(self.model.operator(), self.model.params());
         let input = dataset_of(dataset, "transform", "columns")?;
+        let pyspark = PySparkModel::of(self.model.operator(), self.model.params());
         if let Some(model) = &pyspark {
             model.check_outputs(dataset)?;
         }
-        let transform = |df: &DataFrame| self.transform_dataframe(py, df, pyspark.as_ref());
-        Ok(match input {
-            Dataset::Spark(df) => Py::new(py, PyDataFrame::new(transform(&df)?))?.into_any(),
-            Dataset::Pandas(pdf) => transform_pandas(&pdf, pyspark.as_ref(), transform)?.unbind(),
-        })
+        Ok(PyDataFrame::new(self.transform_dataframe(
+            py,
+            &input,
+            pyspark.as_ref(),
+        )?))
     }
 }
 
@@ -1363,28 +1204,21 @@ impl PyVectorAssembler {
     ) -> PyResult<Bound<'py, Self>> {
         set_param(slf, "outputCol", Kind::Str, value)
     }
-    /// Transform `dataset`, a DataFrame or a pandas DataFrame, as PySpark's transformers take it
-    /// (see [`transform_pandas`]).
+    /// Transform a Spark DataFrame.
     #[pyo3(signature = (dataset, params=None))]
     fn transform(
         slf: &Bound<'_, Self>,
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Py<PyAny>> {
+    ) -> PyResult<PyDataFrame> {
         check_params(params)?;
         let py = slf.py();
         let input = dataset_of(dataset, "transform", "columns")?;
         let mut transformer = snapshot(slf)?;
-        let mut transform =
-            |df: &DataFrame| py.detach(|| transformer.transform(df).map_err(Box::new));
-        Ok(match input {
-            Dataset::Spark(df) => {
-                Py::new(py, PyDataFrame::new(transform(&df).to_pyerr()?))?.into_any()
-            }
-            Dataset::Pandas(pdf) => {
-                transform_pandas(&pdf, None, |df| transform(df).to_pyerr())?.unbind()
-            }
-        })
+        let output = py
+            .detach(|| transformer.transform(&input).map_err(Box::new))
+            .to_pyerr()?;
+        Ok(PyDataFrame::new(output))
     }
 }
 
@@ -1480,7 +1314,7 @@ impl PyLogisticRegression {
         set_param(slf, "tol", Kind::Float, value)
     }
     /// Fit `dataset`, of which the fit reads the features and the labels, as PySpark's (see
-    /// [`fit_native`]). As PySpark's, it fits no pandas DataFrame yet.
+    /// [`fit_native`]).
     #[pyo3(signature = (dataset, params=None))]
     fn fit(
         slf: &Bound<'_, Self>,
@@ -1488,11 +1322,6 @@ impl PyLogisticRegression {
         params: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyMLModel> {
         check_fit_params(params)?;
-        if is_pandas(dataset)? {
-            return Err(PyNotImplementedError::new_err(
-                "Fitting pandas dataframe is not supported yet.",
-            ));
-        }
         fit_native_checked(
             slf,
             dataset,
@@ -2202,6 +2031,7 @@ impl PyOneVsRest {
         params: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyMLModel> {
         check_fit_params(params)?;
+        reject_pandas(dataset, "fit")?;
         let classifier = slf
             .try_borrow()?
             .classifier
@@ -4951,7 +4781,6 @@ impl PyRegressionEvaluator {
         evaluate_native(slf, dataset, |evaluator| EvaluatorInputs {
             doubles: vec![evaluator.prediction_col().to_string()],
             score: None,
-            label: evaluator.label_col().to_string(),
         })
     }
 }
@@ -5062,7 +4891,6 @@ impl PyBinaryClassificationEvaluator {
         evaluate_native(slf, dataset, |evaluator| EvaluatorInputs {
             doubles: Vec::new(),
             score: Some(evaluator.raw_prediction_col().to_string()),
-            label: evaluator.label_col().to_string(),
         })
     }
 }
@@ -5463,7 +5291,6 @@ impl PyMulticlassClassificationEvaluator {
         evaluate_native(slf, dataset, |evaluator| EvaluatorInputs {
             doubles: vec![evaluator.prediction_col().to_string()],
             score: None,
-            label: evaluator.label_col().to_string(),
         })
     }
 }

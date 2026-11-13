@@ -30,6 +30,24 @@ pub struct DataStreamReader {
 }
 
 impl DataStreamReader {
+    /// The session of this reader, whose reads it runs.
+    pub fn spark_session(&self) -> SparkSession {
+        self.session.clone()
+    }
+
+    /// Remove an option of this reader, as `DataFrameReader::unset_option` does. Not a stable API.
+    #[doc(hidden)]
+    pub fn unset_option(mut self, key: &str) -> Self {
+        self.options.remove(key);
+        self
+    }
+
+    /// The source name of this reader, as set by `name`, if any. Not a stable API.
+    #[doc(hidden)]
+    pub fn get_source_name(&self) -> Option<&str> {
+        self.source_name.as_deref()
+    }
+
     /// Create a new DataStreamReader.
     pub(crate) fn new(session: SparkSession) -> Self {
         DataStreamReader {
@@ -303,6 +321,49 @@ impl DataStreamWriter {
     pub fn spark_session(&self) -> SparkSession {
         self.session.clone()
     }
+
+    /// The format of this writer, as set by `format`, if any. Not a stable API.
+    #[doc(hidden)]
+    pub fn get_format(&self) -> Option<&str> {
+        self.format.as_deref()
+    }
+
+    /// The output mode of this writer, as set by `output_mode`, if any. Not a stable API.
+    #[doc(hidden)]
+    pub fn get_output_mode(&self) -> Option<&str> {
+        self.output_mode.as_deref()
+    }
+
+    /// The options of this writer. Not a stable API.
+    #[doc(hidden)]
+    pub fn get_options(&self) -> &HashMap<String, String> {
+        &self.options
+    }
+
+    /// The partitioning columns of this writer. Not a stable API.
+    #[doc(hidden)]
+    pub fn get_partition_cols(&self) -> &[String] {
+        &self.partitioning_columns
+    }
+
+    /// The clustering columns of this writer. Not a stable API.
+    #[doc(hidden)]
+    pub fn get_cluster_cols(&self) -> &[String] {
+        &self.clustering_columns
+    }
+
+    /// The query name of this writer, if any. Not a stable API.
+    #[doc(hidden)]
+    pub fn get_query_name(&self) -> Option<&str> {
+        self.query_name.as_deref()
+    }
+
+    /// The trigger of this writer, if any. Not a stable API.
+    #[doc(hidden)]
+    pub fn get_trigger(&self) -> Option<&Trigger> {
+        self.trigger.as_ref()
+    }
+
     #[cfg(test)]
     pub(crate) fn plan(&self) -> &LogicalPlan {
         self.plan.as_ref()
@@ -558,10 +619,27 @@ pub struct StreamingQuery {
 }
 
 impl StreamingQuery {
+    /// A query of its parts, as a pickled StreamingQuery gives them back. Not a stable API.
+    #[doc(hidden)]
+    pub fn from_parts(
+        session: SparkSession,
+        query_id: String,
+        run_id: String,
+        name: Option<String>,
+    ) -> Self {
+        StreamingQuery {
+            session,
+            query_id,
+            run_id,
+            name,
+        }
+    }
+
     /// The session of this query, whose executions it runs.
     pub fn spark_session(&self) -> SparkSession {
         self.session.clone()
     }
+
     /// Get the query ID.
     pub fn id(&self) -> &str {
         &self.query_id
@@ -1369,6 +1447,7 @@ fn run_listener_event_loop(
 /// Mirrors `pyspark.sql.connect.streaming.StreamingQueryManager`, including a native
 /// client-side listener bus (so Rust clients get the listener feature too), which is that of
 /// its session.
+#[derive(Clone)]
 pub struct StreamingQueryManager {
     session: SparkSession,
     bus: Arc<ListenerBus>,

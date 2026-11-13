@@ -1,13 +1,17 @@
 //! PyO3 wrapper for spark_connect::group::GroupedData.
 
 use pyo3::prelude::*;
+use pyo3::types::{PyList, PyTuple};
+
 use spark_connect::group::{CoGroupedData as RustCoGroupedData, GroupedData as RustGroupedData};
 use spark_connect::udf::eval_type;
 
+use crate::column::PyColumn;
 use crate::dataframe::{
     build_map_udf, infer_group_map_eval_type, validate_map_function, PyDataFrame,
 };
 use crate::errors::ResultExt;
+
 use crate::interrupt::interruptible;
 
 /// As PySpark's `_check_same_session` of the DataFrames of grouped data: `SESSION_NOT_SAME`
@@ -33,11 +37,17 @@ fn check_same_session(
 #[pyclass(name = "GroupedData", module = "pyspark.sql.group", weakref, dict)]
 pub struct PyGroupedData {
     pub(crate) grouped_data: RustGroupedData,
+    /// The DataFrame that is grouped, as the Python object that `groupBy` was called on, as
+    /// PySpark's `GroupedData._df` is.
+    frame: Py<PyDataFrame>,
 }
 
 impl PyGroupedData {
-    pub fn new(grouped_data: RustGroupedData) -> Self {
-        PyGroupedData { grouped_data }
+    pub fn new(grouped_data: RustGroupedData, frame: Py<PyDataFrame>) -> Self {
+        PyGroupedData {
+            grouped_data,
+            frame,
+        }
     }
 }
 
@@ -105,6 +115,89 @@ impl PyGroupedData {
 
 #[pymethods]
 impl PyGroupedData {
+    /// The DataFrame that is grouped, as PySpark's `GroupedData._df`.
+    #[getter(_df)]
+    fn df(&self, py: Python<'_>) -> Py<PyDataFrame> {
+        self.frame.clone_ref(py)
+    }
+
+    /// The shallow copy of grouped data, as PySpark's `copy.copy`: of the DataFrame that it
+    /// groups, which the copy holds too, and of the same grouping.
+    fn __copy__(&self, py: Python<'_>) -> PyGroupedData {
+        PyGroupedData {
+            grouped_data: self.grouped_data.clone(),
+            frame: self.frame.clone_ref(py),
+        }
+    }
+
+    /// The reduce of grouped data, as PySpark's pickle of its state: its DataFrame, the
+    /// grouping columns, the type of the grouping, the pivot column and values, and the
+    /// grouping sets, which `_of_state` gives back.
+    fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        use crate::reduce::{column_list, group_type_name, of_state_reduce};
+
+        let group = &self.grouped_data;
+        let pivot_col = match group.pivot_column() {
+            Some(column) => Bound::new(py, PyColumn::new(column))?.into_any(),
+            None => py.None().into_bound(py),
+        };
+        let sets = group
+            .grouping_set_columns()
+            .iter()
+            .map(|set| column_list(py, set))
+            .collect::<PyResult<Vec<_>>>()?;
+        let args = PyTuple::new(
+            py,
+            [
+                self.frame.clone_ref(py).into_any().into_bound(py),
+                group_type_name(group.group_type())
+                    .into_pyobject(py)?
+                    .into_any(),
+                column_list(py, group.grouping_columns())?.into_any(),
+                pivot_col,
+                column_list(py, &group.pivot_value_columns())?.into_any(),
+                PyList::new(py, sets)?.into_any(),
+            ],
+        )?;
+        of_state_reduce::<PyGroupedData>(py, args)
+    }
+
+    /// Grouped data of its state, as `__reduce__` gives it: of the DataFrame `frame`, the
+    /// grouping columns `cols`, the type of the grouping `group_type`, the pivot column
+    /// `pivot_col` (None if there is none), the pivot values `pivot_values`, and the grouping
+    /// sets `grouping_sets`, each a list of columns.
+    #[staticmethod]
+    fn _of_state(
+        py: Python<'_>,
+        frame: Py<PyDataFrame>,
+        group_type: &str,
+        cols: &Bound<'_, PyAny>,
+        pivot_col: &Bound<'_, PyAny>,
+        pivot_values: &Bound<'_, PyAny>,
+        grouping_sets: &Bound<'_, PyAny>,
+    ) -> PyResult<PyGroupedData> {
+        use crate::reduce::{columns_of, group_type_of};
+
+        let pivot_col = match pivot_col.is_none() {
+            true => None,
+            false => Some(pivot_col.extract::<PyRef<'_, PyColumn>>()?.column.clone()),
+        };
+        let sets = grouping_sets
+            .try_iter()?
+            .map(|set| columns_of(&set?))
+            .collect::<PyResult<Vec<_>>>()?;
+        let dataframe = frame.borrow(py).dataframe.clone();
+        let grouped = RustGroupedData::from_parts(
+            dataframe,
+            columns_of(cols)?,
+            group_type_of(group_type)?,
+            pivot_col,
+            columns_of(pivot_values)?,
+            sets,
+        );
+        Ok(PyGroupedData::new(grouped, frame))
+    }
+
     /// As PySpark Connect's: the grouping expressions, the columns of the DataFrame and their
     /// types, and the type of the grouping, such as
     /// `GroupedData[grouping expressions: [k], value: [k: int, v: double], type: GroupBy]`.
@@ -181,6 +274,7 @@ impl PyGroupedData {
     #[pyo3(signature = (pivot_col, values=None))]
     fn pivot(
         &self,
+        py: Python<'_>,
         pivot_col: &Bound<'_, PyAny>,
         values: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyGroupedData> {
@@ -219,6 +313,7 @@ impl PyGroupedData {
         let pcol = self.grouped_data.dataframe().col(&name.to_cow()?);
         Ok(PyGroupedData::new(
             self.grouped_data.pivot(pcol, vals).to_pyerr()?,
+            self.frame.clone_ref(py),
         ))
     }
 
@@ -337,10 +432,18 @@ impl PyGroupedData {
 
     /// `GroupedData.cogroup`.
     #[pyo3(name = "cogroup")]
-    fn cogroup(&self, py: Python<'_>, other: &PyGroupedData) -> PyResult<PyCoGroupedData> {
-        check_same_session(py, &self.grouped_data, &other.grouped_data)?;
+    fn cogroup(
+        slf: &Bound<'_, Self>,
+        py: Python<'_>,
+        other: &Bound<'_, PyGroupedData>,
+    ) -> PyResult<PyCoGroupedData> {
+        let this = slf.borrow();
+        let that = other.borrow();
+        check_same_session(py, &this.grouped_data, &that.grouped_data)?;
         Ok(PyCoGroupedData {
-            inner: self.grouped_data.cogroup(&other.grouped_data),
+            inner: this.grouped_data.cogroup(&that.grouped_data),
+            left: slf.clone().unbind(),
+            right: other.clone().unbind(),
         })
     }
 
@@ -519,10 +622,50 @@ fn twus_func<'py>(
 )]
 pub struct PyCoGroupedData {
     pub(crate) inner: RustCoGroupedData,
+    /// The grouped data on the left and on the right, as the Python objects of `cogroup`.
+    left: Py<PyGroupedData>,
+    right: Py<PyGroupedData>,
 }
 
 #[pymethods]
 impl PyCoGroupedData {
+    /// The shallow copy of cogrouped ops, as PySpark's `copy.copy`: of the same two groups.
+    fn __copy__(&self, py: Python<'_>) -> PyCoGroupedData {
+        PyCoGroupedData {
+            inner: self.inner.clone(),
+            left: self.left.clone_ref(py),
+            right: self.right.clone_ref(py),
+        }
+    }
+
+    /// The reduce of cogrouped ops, as PySpark's pickle of its two grouped data, which
+    /// `_of_state` gives back.
+    fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        let args = PyTuple::new(
+            py,
+            [
+                self.left.clone_ref(py).into_any().into_bound(py),
+                self.right.clone_ref(py).into_any().into_bound(py),
+            ],
+        )?;
+        crate::reduce::of_state_reduce::<PyCoGroupedData>(py, args)
+    }
+
+    /// The cogrouped ops of two grouped data, as `__reduce__` gives them back.
+    #[staticmethod]
+    fn _of_state(
+        py: Python<'_>,
+        left: Py<PyGroupedData>,
+        right: Py<PyGroupedData>,
+    ) -> PyResult<PyCoGroupedData> {
+        let inner = {
+            let this = left.borrow(py);
+            let that = right.borrow(py);
+            this.grouped_data.cogroup(&that.grouped_data)
+        };
+        Ok(PyCoGroupedData { inner, left, right })
+    }
+
     /// `PandasCogroupedOps.applyInPandas`.
     #[pyo3(name = "applyInPandas")]
     fn apply_in_pandas(

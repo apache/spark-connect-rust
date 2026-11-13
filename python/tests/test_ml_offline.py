@@ -549,8 +549,8 @@ def test_ml_connect_logistic_regression_outputs_the_columns_of_pyspark(ml_mock):
 def test_ml_connect_transforms_raise_the_value_error_of_pyspark_of_an_existing_output(ml_mock):
     # As PySpark's Transformer._transform: the transform of a model of LogisticRegression raises
     # its ValueError of an output column that the DataFrame has already, of its exact name, before
-    # any execution, as PySpark reads the dataset's columns first, and so does the transform of a
-    # pandas DataFrame. The other native models, which PySpark's pyspark.ml.connect does not have,
+    # any execution, as PySpark reads the dataset's columns first. The other native models,
+    # which PySpark's pyspark.ml.connect does not have,
     # leave their outputs to the checks of their JVM models.
     import pandas as pd
     import pyspark.ml.connect as connect
@@ -584,9 +584,8 @@ def test_ml_connect_transforms_raise_the_value_error_of_pyspark_of_an_existing_o
         with pytest.raises(ValueError) as error:
             model.transform(spark.range(1))
         assert str(error.value) == message, column
-        with pytest.raises(ValueError) as error:
+        with pytest.raises(TypeError, match="requires a Spark DataFrame"):
             model.transform(pd.DataFrame({"f": [[1.0]], column: [1.0]}))
-        assert str(error.value) == message, column
         assert _requests_but_deletes(service) == sent, column
 
     for model, column in [
@@ -598,84 +597,14 @@ def test_ml_connect_transforms_raise_the_value_error_of_pyspark_of_an_existing_o
         model.transform(spark.range(1))  # No ValueError.
 
 
-def test_ml_connect_fit_and_transform_take_the_pandas_frames_of_pyspark(ml_mock):
-    # As PySpark's pyspark.ml.connect classes, whose fit and transform take a pandas DataFrame,
-    # which they compute on locally: here it is sent with createDataFrame of the active session,
-    # of only the input column that the fit or the transform of PySpark's class reads, and the
-    # whole of it of the other native classes. The transform is a shallow copy of the pandas
-    # DataFrame, with the output columns of the server appended, of its index, as PySpark's
-    # transform_dataframe_column makes it. PySpark's LogisticRegression fits no pandas DataFrame,
-    # and an object that is not a DataFrame raises the AttributeError of PySpark's first access
-    # to it. (The scalers compute on a pandas DataFrame locally, as PySpark's do: no request.)
-    import pandas as pd
-    import pyarrow as pa
+def test_native_ml_other_invalid_inputs(ml_mock):
     import pyspark.ml.connect as connect
-    from _mock_connect_server import ddl_data_type
-    from pyspark.errors import PySparkNotImplementedError
 
     spark, service = ml_mock
-    # The settings that toPandas reads, of a Spark 4.3.0 server.
-    service.confs = {
-        "spark.sql.execution.pandas.structHandlingMode": "legacy",
-        "spark.sql.execution.arrow.pyspark.selfDestruct.enabled": "false",
-    }
-    service.data_type = ddl_data_type("features array<double>")
-    pdf = pd.DataFrame({"features": [[1.0, 2.0], [2.0, -1.0]], "label": [1, 0]}, index=[7, 9])
-    models = []  # Kept alive, so that no model is released during the checks.
-
-    def fit(estimator):
-        # The Fit that the fit of pdf sends.
-        sent = len(service.execute_requests)
-        service.execute_payload = _operator_info("model-1")
-        models.append(estimator.fit(pdf))
-        return _commands_but_deletes(service, sent)[0].ml_command.fit
-
-    sent = fit(connect.KMeans()).dataset.with_columns
-    assert list(sent.input.to_df.column_names) == ["features", "label"]
-
-    sent = _requests_but_deletes(service)
-    with pytest.raises(NotImplementedError) as error:
-        connect.LogisticRegression().fit(pdf)
-    assert str(error.value) == "Fitting pandas dataframe is not supported yet."
-    for unimplemented in (connect.Pipeline(), connect.CrossValidator()):
-        with pytest.raises(PySparkNotImplementedError) as error:
-            unimplemented.fit(pdf)
-        assert error.value.getCondition() == "NOT_IMPLEMENTED"
-    assert _requests_but_deletes(service) == sent
-
-    service.execute_payload = _operator_info("model-2")
+    service.execute_payload = _operator_info("model-1")
     service.query_payload = _labels_result()
-    models.append(connect.LogisticRegression().fit(spark.range(1)))
+    model = connect.LogisticRegression().fit(spark.range(1))
     service.query_payload = None
-    service.execute_payload = _arrow_result(
-        pa.table({
-            "prediction": pa.array([1, 0], pa.int64()),
-            "probability": pa.array([[0.25, 0.75], [0.5, 0.5]], pa.list_(pa.float64())),
-        }),
-        T.StructType([
-            T.StructField("prediction", T.LongType()),
-            T.StructField("probability", T.ArrayType(T.DoubleType())),
-        ]),
-    )
-    transformed = models[-1].transform(pdf)
-    root = _last_request_but_deletes(service).plan.root
-    assert [_text(e) for e in root.project.expressions] == [
-        _attribute("prediction"), _attribute("probability"),
-    ]
-    assert list(transformed.columns) == ["features", "label", "prediction", "probability"]
-    assert list(transformed.index) == [7, 9]
-    assert transformed.dtypes.astype(str).to_dict() == {
-        "features": "object", "label": "int64", "prediction": "int64", "probability": "object",
-    }
-    assert transformed["prediction"].tolist() == [1, 0]
-    assert [value.tolist() for value in transformed["probability"]] == [[0.25, 0.75], [0.5, 0.5]]
-    # A shallow copy, of the data of pdf.
-    assert np.shares_memory(transformed["label"].to_numpy(), pdf["label"].to_numpy())
-    sent = _requests_but_deletes(service)
-    with pytest.raises(KeyError) as error:
-        models[-1].transform(pd.DataFrame({"x": [1]}))
-    assert error.value.args == ("features",)
-    assert _requests_but_deletes(service) == sent
 
     class Columns:
         # An object of the attributes that PySpark reads, which is not a DataFrame.
@@ -685,95 +614,21 @@ def test_ml_connect_fit_and_transform_take_the_pandas_frames_of_pyspark(ml_mock)
     for other in ([1], None):
         name = type(other).__name__
         with pytest.raises(AttributeError) as error:
-            models[-1].transform(other)
+            model.transform(other)
         assert str(error.value) == f"'{name}' object has no attribute 'columns'"
         for estimator in (connect.LogisticRegression(), connect.KMeans()):
             with pytest.raises(AttributeError) as error:
                 estimator.fit(other)
             assert str(error.value) == f"'{name}' object has no attribute 'select'"
     with pytest.raises(TypeError) as error:
-        models[-1].transform(Columns())
-    assert str(error.value) == "transform() takes a DataFrame or a pandas DataFrame, not 'Columns'"
+        model.transform(Columns())
+    assert str(error.value) == "transform() takes a Spark DataFrame, not 'Columns'"
     with pytest.raises(TypeError) as error:
         connect.KMeans().fit(Columns())
-    assert str(error.value) == "fit() takes a DataFrame or a pandas DataFrame, not 'Columns'"
+    assert str(error.value) == "fit() takes a Spark DataFrame, not 'Columns'"
 
 
-def test_ml_connect_pandas_frames_send_their_nan_as_pyspark(ml_mock):
-    # As PySpark computes on a pandas DataFrame locally, its NaN elements of arrays and its NaN
-    # values are NaN, not nulls: the DataFrame is sent as an Arrow table of its columns, built
-    # without pandas' conversion of NaN to null, which createDataFrame of a pandas DataFrame makes
-    # of the elements of an array, though the schema of such an array has no null.
-    import math
 
-    import pandas as pd
-    import pyarrow as pa
-    import pyspark.ml.connect as connect
-
-    spark, service = ml_mock
-    pdf = pd.DataFrame(
-        {
-            "x": [np.array([np.nan, 1.0]), np.array([2.0, 4.0])],
-            "y": [1.5, np.nan],
-            "s": ["a", np.nan],
-        }
-    )
-    models = []  # Kept alive, so that no model is released during the checks.
-
-    # The other native classes send the whole of the pandas DataFrame, and a NaN value survives,
-    # while the NaN of a string column is a null, as pandas makes it.
-    sent = len(service.execute_requests)
-    service.execute_payload = _operator_info("model-1")
-    models.append(connect.KMeans().fit(pdf))
-    fit = _commands_but_deletes(service, sent)[0].ml_command.fit
-    table = pa.ipc.open_stream(_local_data(fit.dataset)).read_all()
-    assert table.column_names == ["x", "y", "s"]
-    assert math.isnan(table.column("y").to_pylist()[1])
-    assert table.column("y").to_pylist()[0] == 1.5
-    assert table.column("s").to_pylist() == ["a", None]
-    first, second = table.column("x").to_pylist()
-    assert math.isnan(first[0]) and first[1] == 1.0 and second == [2.0, 4.0]
-
-
-def test_ml_connect_pandas_frames_name_and_read_their_columns_as_pyspark(ml_mock):
-    # As PySpark's evaluators, which take a pandas DataFrame and read only their input columns of
-    # it (aggregate_dataframe selects them: dataframe[columns]): the columns of the frame are named
-    # by the str of their labels, as createDataFrame names them, so the label 0 is "0" and a label
-    # that is not a string is no TypeError, and only the columns that the evaluator reads are sent,
-    # so a column of a type that Arrow does not take, a uint64 here, is not sent either.
-    import numpy as np
-    import pandas as pd
-    import pyarrow as pa
-    import pyspark.ml.connect as connect
-    from _mock_connect_server import ddl_data_type
-
-    spark, service = ml_mock
-    service.data_type = ddl_data_type("0 double, label double, prediction double")
-    pdf = pd.DataFrame(
-        {
-            0: [1.0, 2.0, 3.0],
-            "label": [1.0, 2.0, 3.0],
-            "prediction": [1.0, 2.5, 3.0],
-            "u": np.array([1, 2, 3], dtype=np.uint64),
-        }
-    )
-    models = []  # Kept alive, so that no model is released during the checks.
-
-    sent = len(service.execute_requests)
-    service.execute_payload = _ml_result(param=pb2.Expression.Literal(double=0.25))
-    assert connect.RegressionEvaluator().evaluate(pdf) == 0.25
-    evaluate = _commands_but_deletes(service, sent)[0].ml_command.evaluate
-    table = pa.ipc.open_stream(_local_data(evaluate.dataset)).read_all()
-    assert table.column_names == ["prediction", "label"]
-    assert table.column("label").to_pylist() == [1.0, 2.0, 3.0]
-
-    # The other native classes send the whole of the frame, which its int label names "0".
-    sent = len(service.execute_requests)
-    service.execute_payload = _operator_info("model-1")
-    models.append(connect.KMeans().fit(pdf.drop(columns=["u"])))
-    fit = _commands_but_deletes(service, sent)[0].ml_command.fit
-    table = pa.ipc.open_stream(_local_data(fit.dataset)).read_all()
-    assert table.column_names == ["0", "label", "prediction"]
 
 
 def test_ml_connect_native_columns_are_spelled_as_the_schema_of_the_dataset(ml_mock):
@@ -826,26 +681,6 @@ def test_ml_connect_native_columns_are_spelled_as_the_schema_of_the_dataset(ml_m
     assert evaluate.params.params["predictionCol"] == pb2.Expression.Literal(string="prediction")
 
 
-def test_ml_connect_logistic_regression_transforms_an_empty_pandas_frame_as_pyspark(ml_mock):
-    # As PySpark's transform of an empty pandas DataFrame, which computes locally: a
-    # LogisticRegression model raises the ValueError of its transform function, which stacks no
-    # array. It sends no request, as the server cannot infer the schema of no rows.
-    import pandas as pd
-    import pyspark.ml.connect as connect
-
-    spark, service = ml_mock
-    features = spark.range(1).selectExpr("array(1.0D, 2.0D) AS features")
-    models = []  # Kept alive, so that no model is released during the checks.
-    service.execute_payload = _operator_info("model-2")
-    service.query_payload = _labels_result()
-    models.append(connect.LogisticRegression().fit(features))
-    service.query_payload = None
-    sent = _requests_but_deletes(service)
-
-    empty = pd.DataFrame({"features": pd.Series([], dtype=object)})
-    with pytest.raises(ValueError, match="need at least one array to stack"):
-        models[-1].transform(empty)
-    assert _requests_but_deletes(service) == sent
 
 
 def test_ml_connect_setters_set_the_params_of_their_receiver_as_pyspark(ml_mock):
@@ -4159,3 +3994,73 @@ def test_remaining_regressor_native_parameters_match_official_fixture(ml_mock, n
         operator, params = _native_request(spark, service, estimator, models)
         assert operator.name == "org.apache.spark.ml.regression." + name
         assert params == pb2.MlParams.FromString(base64.b64decode(case["params_b64"]))
+
+
+@pytest.fixture(params=["arrays", "empty", "vectors", "subclass", "missing-columns"])
+def pandas_ml_input(request):
+    import pandas as pd
+    from pyspark.ml.linalg import Vectors
+
+    if request.param == "empty":
+        return pd.DataFrame({"features": pd.Series([], dtype=object)})
+    if request.param == "vectors":
+        return pd.DataFrame({
+            "features": [Vectors.dense([1.0, 0.0]), Vectors.sparse(2, {1: 2.0})],
+            "label": [0.0, 1.0],
+        })
+    if request.param == "missing-columns":
+        return pd.DataFrame({0: [object()]})
+
+    class Frame(pd.DataFrame):
+        pass
+
+    cls = Frame if request.param == "subclass" else pd.DataFrame
+    return cls({"features": [[1.0, 0.0], [0.0, 2.0]], "label": [0.0, 1.0],
+                "prediction": [0.0, 1.0]}, index=[7, 9])
+
+
+def _native_ml_method(name):
+    import pyspark.ml.connect as connect
+
+    instance = getattr(connect, name)()
+    method = ("evaluate" if name.endswith("Evaluator") else
+              "transform" if name == "VectorAssembler" else "fit")
+    return getattr(instance, method)
+
+
+@pytest.mark.parametrize("name", [*_NATIVE_PARAMS, "OneVsRest"])
+def test_native_ml_rejects_pandas_without_active_session(name, pandas_ml_input):
+    assert SparkSession.getActiveSession() is None
+    method = _native_ml_method(name)
+    with pytest.raises(TypeError) as error:
+        method(dataset=pandas_ml_input)
+    assert str(error.value) == (
+        f"{method.__name__}() requires a Spark DataFrame; pandas DataFrames are not supported. "
+        "Convert the input with spark.createDataFrame(...) first."
+    )
+    assert SparkSession.getActiveSession() is None
+
+
+@pytest.mark.parametrize("estimator_name", ["LogisticRegression", "KMeans"])
+def test_native_ml_rejects_pandas_before_any_requests(ml_mock, pandas_ml_input, estimator_name):
+    import pyspark.ml.connect as connect
+
+    spark, service = ml_mock
+    service.execute_payload = _operator_info("model-1")
+    service.query_payload = _labels_result()
+    model = getattr(connect, estimator_name)().fit(spark.range(1))
+    service.query_payload = None
+
+    def requests():
+        return (_requests_but_deletes(service), len(service.analyze_requests),
+                len(service.config_requests))
+
+    sent = requests()
+    methods = [_native_ml_method(name) for name in [*_NATIVE_PARAMS, "OneVsRest"]]
+    methods += [model.transform, connect.OneVsRest(parallelism=0).fit,
+                connect.LogisticRegression(maxIter=2**100).fit,
+                connect.VectorAssembler(inputCols=[]).transform]
+    for method in methods:
+        with pytest.raises(TypeError, match="requires a Spark DataFrame"):
+            method(pandas_ml_input)
+        assert requests() == sent

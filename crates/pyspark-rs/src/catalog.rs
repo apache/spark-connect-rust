@@ -208,6 +208,18 @@ impl PyCatalog {
 
 #[pymethods]
 impl PyCatalog {
+    /// The shallow copy of the catalog, as PySpark's `copy.copy`: of the same session.
+    fn __copy__(&self) -> PyCatalog {
+        PyCatalog::new(self.catalog.clone())
+    }
+
+    /// The reduce of the catalog, as PySpark's: `catalog` of its session, which unpickles with
+    /// it.
+    fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyTuple>> {
+        let session = crate::session::session_object(py, self.catalog.spark_session())?;
+        crate::reduce::getattr_reduce(py, session.into_bound(py).into_any(), "catalog")
+    }
+
     /// Get the current catalog.
     fn currentCatalog(&self, py: Python<'_>) -> PyResult<String> {
         self.detached(py, |catalog| catalog.current_catalog().map_err(Box::new))
