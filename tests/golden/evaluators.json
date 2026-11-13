@@ -1,0 +1,1871 @@
+{
+  "spark_version": "4.3.0",
+  "datasets": {
+    "regression": {
+      "sql": "SELECT * FROM VALUES (0, 1.0D, 0.5D, 1.0D), (1, 2.0D, 2.5D, 2.0D), (2, 4.0D, 3.0D, 0.5D), (3, 3.0D, 4.0D, 3.0D), (4, 1.0D, 8.0D, 0.0D) AS t(id, target, guess, w)",
+      "vectors": []
+    },
+    "binary": {
+      "sql": "SELECT *, array(1.0D-score, score) AS scoreVec FROM VALUES (0, 0.0D, 0.1D, 1.0D), (1, 0.0D, 0.4D, 2.0D), (2, 1.0D, 0.35D, 1.0D), (3, 1.0D, 0.8D, 3.0D), (4, 1.0D, 0.4D, 0.5D), (5, 0.0D, 0.9D, 0.0D) AS t(id, target, score, w)",
+      "vectors": [
+        "scoreVec"
+      ]
+    },
+    "multiclass": {
+      "sql": "SELECT * FROM VALUES (0, 0.0D, 0.0D, array(0.8D,0.1D,0.1D),1.0D), (1,1.0D,0.0D,array(0.6D,0.3D,0.1D),2.0D), (2,2.0D,2.0D,array(0.0D,0.2D,0.8D),1.0D), (3,2.0D,1.0D,array(0.0D,1.0D,0.0D),0.5D), (4,1.0D,1.0D,array(0.1D,0.8D,0.1D),3.0D), (5,0.0D,2.0D,array(0.1D,0.1D,0.8D),1.0D) AS t(id,target,guess,p,w)",
+      "vectors": [
+        "p"
+      ]
+    },
+    "multilabel": {
+      "sql": "SELECT * FROM VALUES (0,array(0.0D,2.0D),array(0.0D,1.0D)), (1,array(1.0D),array(1.0D,2.0D)), (2,array(0.0D,1.0D,2.0D),array(0.0D,1.0D)), (3,array(2.0D),CAST(array() AS ARRAY<DOUBLE>)), (4,array(0.0D),array(0.0D)) AS t(id,target,guess)",
+      "vectors": []
+    },
+    "clustering": {
+      "sql": "SELECT * FROM VALUES (0,0.0D,array(1.0D,0.0D),1.0D), (1,0.0D,array(0.8D,0.2D),2.0D), (2,1.0D,array(0.0D,1.0D),1.0D), (3,1.0D,array(0.1D,0.9D),3.0D) AS t(id,guess,xs,w)",
+      "vectors": [
+        "xs"
+      ]
+    },
+    "ranking": {
+      "sql": "SELECT * FROM VALUES (0,array(1.0D,2.0D,3.0D),array(1.0D,6.0D,2.0D,7.0D,3.0D)), (1,array(2.0D,4.0D),array(4.0D,1.0D,2.0D)), (2,array(3.0D),array(1.0D,2.0D)), (3,CAST(array() AS ARRAY<DOUBLE>),array(1.0D,2.0D)), (4,array(1.0D),CAST(array() AS ARRAY<DOUBLE>)) AS t(id,target,guess)",
+      "vectors": []
+    }
+  },
+  "classes": {
+    "RegressionEvaluator": {
+      "signature": "(*, predictionCol='prediction', labelCol='label', metricName='rmse', weightCol=None, throughOrigin=False)",
+      "defaults": {
+        "labelCol": "label",
+        "metricName": "rmse",
+        "predictionCol": "prediction",
+        "throughOrigin": false
+      },
+      "parameters": [
+        "predictionCol",
+        "labelCol",
+        "metricName",
+        "weightCol",
+        "throughOrigin"
+      ],
+      "params": [
+        {
+          "values": {},
+          "params_b64": ""
+        },
+        {
+          "values": {
+            "predictionCol": "guess",
+            "labelCol": "target",
+            "metricName": "rmse",
+            "weightCol": "w",
+            "throughOrigin": false
+          },
+          "params_b64": "ChQKCGxhYmVsQ29sEghqBnRhcmdldAoUCgptZXRyaWNOYW1lEgZqBHJtc2UKGAoNcHJlZGljdGlvbkNvbBIHagVndWVzcwoTCg10aHJvdWdoT3JpZ2luEgIYAAoQCgl3ZWlnaHRDb2wSA2oBdw=="
+        },
+        {
+          "values": {
+            "predictionCol": null,
+            "labelCol": null,
+            "metricName": null,
+            "weightCol": null,
+            "throughOrigin": null
+          },
+          "params_b64": "ChAKCGxhYmVsQ29sEgQKAgoAChIKCm1ldHJpY05hbWUSBAoCCgAKFQoNcHJlZGljdGlvbkNvbBIECgIKAAoVCg10aHJvdWdoT3JpZ2luEgQKAgoAChEKCXdlaWdodENvbBIECgIKAA=="
+        }
+      ],
+      "directions": [
+        {
+          "metric": "rmse",
+          "larger": false
+        },
+        {
+          "metric": "mse",
+          "larger": false
+        },
+        {
+          "metric": "r2",
+          "larger": true
+        },
+        {
+          "metric": "mae",
+          "larger": false
+        },
+        {
+          "metric": "var",
+          "larger": true
+        },
+        {
+          "metric": "invalid",
+          "larger": false
+        },
+        {
+          "metric": null,
+          "larger": false
+        }
+      ]
+    },
+    "BinaryClassificationEvaluator": {
+      "signature": "(*, rawPredictionCol='rawPrediction', labelCol='label', metricName='areaUnderROC', weightCol=None, numBins=1000)",
+      "defaults": {
+        "labelCol": "label",
+        "metricName": "areaUnderROC",
+        "numBins": 1000,
+        "rawPredictionCol": "rawPrediction"
+      },
+      "parameters": [
+        "rawPredictionCol",
+        "labelCol",
+        "metricName",
+        "weightCol",
+        "numBins"
+      ],
+      "params": [
+        {
+          "values": {},
+          "params_b64": ""
+        },
+        {
+          "values": {
+            "rawPredictionCol": "score",
+            "labelCol": "target",
+            "metricName": "areaUnderROC",
+            "weightCol": "w",
+            "numBins": 0
+          },
+          "params_b64": "ChQKCGxhYmVsQ29sEghqBnRhcmdldAocCgptZXRyaWNOYW1lEg5qDGFyZWFVbmRlclJPQwoNCgdudW1CaW5zEgIwAAobChByYXdQcmVkaWN0aW9uQ29sEgdqBXNjb3JlChAKCXdlaWdodENvbBIDagF3"
+        },
+        {
+          "values": {
+            "rawPredictionCol": null,
+            "labelCol": null,
+            "metricName": null,
+            "weightCol": null,
+            "numBins": null
+          },
+          "params_b64": "ChAKCGxhYmVsQ29sEgQKAgoAChIKCm1ldHJpY05hbWUSBAoCCgAKDwoHbnVtQmlucxIECgIKAAoYChByYXdQcmVkaWN0aW9uQ29sEgQKAgoAChEKCXdlaWdodENvbBIECgIKAA=="
+        },
+        {
+          "values": {
+            "rawPredictionCol": "score",
+            "labelCol": "target",
+            "metricName": "areaUnderROC",
+            "weightCol": "w",
+            "numBins": 2147483647
+          },
+          "params_b64": "ChQKCGxhYmVsQ29sEghqBnRhcmdldAocCgptZXRyaWNOYW1lEg5qDGFyZWFVbmRlclJPQwoRCgdudW1CaW5zEgYw/////wcKGwoQcmF3UHJlZGljdGlvbkNvbBIHagVzY29yZQoQCgl3ZWlnaHRDb2wSA2oBdw=="
+        },
+        {
+          "values": {
+            "rawPredictionCol": "score",
+            "labelCol": "target",
+            "metricName": "areaUnderROC",
+            "weightCol": "w",
+            "numBins": 2147483648
+          },
+          "params_b64": "ChQKCGxhYmVsQ29sEghqBnRhcmdldAocCgptZXRyaWNOYW1lEg5qDGFyZWFVbmRlclJPQwoRCgdudW1CaW5zEgY4gICAgAgKGwoQcmF3UHJlZGljdGlvbkNvbBIHagVzY29yZQoQCgl3ZWlnaHRDb2wSA2oBdw=="
+        },
+        {
+          "values": {
+            "rawPredictionCol": "score",
+            "labelCol": "target",
+            "metricName": "areaUnderROC",
+            "weightCol": "w",
+            "numBins": 9223372036854775807
+          },
+          "params_b64": "ChQKCGxhYmVsQ29sEghqBnRhcmdldAocCgptZXRyaWNOYW1lEg5qDGFyZWFVbmRlclJPQwoVCgdudW1CaW5zEgo4//////////9/ChsKEHJhd1ByZWRpY3Rpb25Db2wSB2oFc2NvcmUKEAoJd2VpZ2h0Q29sEgNqAXc="
+        },
+        {
+          "values": {
+            "rawPredictionCol": "score",
+            "labelCol": "target",
+            "metricName": "areaUnderROC",
+            "weightCol": "w",
+            "numBins": -9223372036854775808
+          },
+          "params_b64": "ChQKCGxhYmVsQ29sEghqBnRhcmdldAocCgptZXRyaWNOYW1lEg5qDGFyZWFVbmRlclJPQwoWCgdudW1CaW5zEgs4gICAgICAgICAAQobChByYXdQcmVkaWN0aW9uQ29sEgdqBXNjb3JlChAKCXdlaWdodENvbBIDagF3"
+        }
+      ],
+      "directions": [
+        {
+          "metric": "areaUnderROC",
+          "larger": true
+        },
+        {
+          "metric": "areaUnderPR",
+          "larger": true
+        },
+        {
+          "metric": "invalid",
+          "larger": true
+        },
+        {
+          "metric": null,
+          "larger": true
+        }
+      ]
+    },
+    "MulticlassClassificationEvaluator": {
+      "signature": "(*, predictionCol='prediction', labelCol='label', metricName='f1', weightCol=None, metricLabel=0.0, beta=1.0, probabilityCol='probability', eps=1e-15)",
+      "defaults": {
+        "beta": 1.0,
+        "eps": 1e-15,
+        "labelCol": "label",
+        "metricLabel": 0.0,
+        "metricName": "f1",
+        "predictionCol": "prediction",
+        "probabilityCol": "probability"
+      },
+      "parameters": [
+        "predictionCol",
+        "labelCol",
+        "metricName",
+        "weightCol",
+        "metricLabel",
+        "beta",
+        "probabilityCol",
+        "eps"
+      ],
+      "params": [
+        {
+          "values": {},
+          "params_b64": ""
+        },
+        {
+          "values": {
+            "predictionCol": "guess",
+            "labelCol": "target",
+            "metricName": "f1",
+            "weightCol": "w",
+            "metricLabel": 1.0,
+            "beta": 2.0,
+            "probabilityCol": "p",
+            "eps": 0.05
+          },
+          "params_b64": "ChEKBGJldGESCVkAAAAAAAAAQAoQCgNlcHMSCVmamZmZmZmpPwoUCghsYWJlbENvbBIIagZ0YXJnZXQKGAoLbWV0cmljTGFiZWwSCVkAAAAAAADwPwoSCgptZXRyaWNOYW1lEgRqAmYxChgKDXByZWRpY3Rpb25Db2wSB2oFZ3Vlc3MKFQoOcHJvYmFiaWxpdHlDb2wSA2oBcAoQCgl3ZWlnaHRDb2wSA2oBdw=="
+        },
+        {
+          "values": {
+            "predictionCol": null,
+            "labelCol": null,
+            "metricName": null,
+            "weightCol": null,
+            "metricLabel": null,
+            "beta": null,
+            "probabilityCol": null,
+            "eps": null
+          },
+          "params_b64": "CgwKBGJldGESBAoCCgAKCwoDZXBzEgQKAgoAChAKCGxhYmVsQ29sEgQKAgoAChMKC21ldHJpY0xhYmVsEgQKAgoAChIKCm1ldHJpY05hbWUSBAoCCgAKFQoNcHJlZGljdGlvbkNvbBIECgIKAAoWCg5wcm9iYWJpbGl0eUNvbBIECgIKAAoRCgl3ZWlnaHRDb2wSBAoCCgA="
+        }
+      ],
+      "directions": [
+        {
+          "metric": "f1",
+          "larger": true
+        },
+        {
+          "metric": "accuracy",
+          "larger": true
+        },
+        {
+          "metric": "weightedPrecision",
+          "larger": true
+        },
+        {
+          "metric": "weightedRecall",
+          "larger": true
+        },
+        {
+          "metric": "weightedTruePositiveRate",
+          "larger": true
+        },
+        {
+          "metric": "weightedFalsePositiveRate",
+          "larger": false
+        },
+        {
+          "metric": "weightedFMeasure",
+          "larger": true
+        },
+        {
+          "metric": "truePositiveRateByLabel",
+          "larger": true
+        },
+        {
+          "metric": "falsePositiveRateByLabel",
+          "larger": false
+        },
+        {
+          "metric": "precisionByLabel",
+          "larger": true
+        },
+        {
+          "metric": "recallByLabel",
+          "larger": true
+        },
+        {
+          "metric": "fMeasureByLabel",
+          "larger": true
+        },
+        {
+          "metric": "logLoss",
+          "larger": false
+        },
+        {
+          "metric": "hammingLoss",
+          "larger": false
+        },
+        {
+          "metric": "invalid",
+          "larger": true
+        },
+        {
+          "metric": null,
+          "larger": true
+        }
+      ]
+    },
+    "MultilabelClassificationEvaluator": {
+      "signature": "(*, predictionCol='prediction', labelCol='label', metricName='f1Measure', metricLabel=0.0)",
+      "defaults": {
+        "labelCol": "label",
+        "metricLabel": 0.0,
+        "metricName": "f1Measure",
+        "predictionCol": "prediction"
+      },
+      "parameters": [
+        "predictionCol",
+        "labelCol",
+        "metricName",
+        "metricLabel"
+      ],
+      "params": [
+        {
+          "values": {},
+          "params_b64": ""
+        },
+        {
+          "values": {
+            "predictionCol": "guess",
+            "labelCol": "target",
+            "metricName": "f1Measure",
+            "metricLabel": 1.0
+          },
+          "params_b64": "ChQKCGxhYmVsQ29sEghqBnRhcmdldAoYCgttZXRyaWNMYWJlbBIJWQAAAAAAAPA/ChkKCm1ldHJpY05hbWUSC2oJZjFNZWFzdXJlChgKDXByZWRpY3Rpb25Db2wSB2oFZ3Vlc3M="
+        },
+        {
+          "values": {
+            "predictionCol": null,
+            "labelCol": null,
+            "metricName": null,
+            "metricLabel": null
+          },
+          "params_b64": "ChAKCGxhYmVsQ29sEgQKAgoAChMKC21ldHJpY0xhYmVsEgQKAgoAChIKCm1ldHJpY05hbWUSBAoCCgAKFQoNcHJlZGljdGlvbkNvbBIECgIKAA=="
+        }
+      ],
+      "directions": [
+        {
+          "metric": "subsetAccuracy",
+          "larger": true
+        },
+        {
+          "metric": "accuracy",
+          "larger": true
+        },
+        {
+          "metric": "hammingLoss",
+          "larger": false
+        },
+        {
+          "metric": "precision",
+          "larger": true
+        },
+        {
+          "metric": "recall",
+          "larger": true
+        },
+        {
+          "metric": "f1Measure",
+          "larger": true
+        },
+        {
+          "metric": "precisionByLabel",
+          "larger": true
+        },
+        {
+          "metric": "recallByLabel",
+          "larger": true
+        },
+        {
+          "metric": "f1MeasureByLabel",
+          "larger": true
+        },
+        {
+          "metric": "microPrecision",
+          "larger": true
+        },
+        {
+          "metric": "microRecall",
+          "larger": true
+        },
+        {
+          "metric": "microF1Measure",
+          "larger": true
+        },
+        {
+          "metric": "invalid",
+          "larger": true
+        },
+        {
+          "metric": null,
+          "larger": true
+        }
+      ]
+    },
+    "ClusteringEvaluator": {
+      "signature": "(*, predictionCol='prediction', featuresCol='features', metricName='silhouette', distanceMeasure='squaredEuclidean', weightCol=None)",
+      "defaults": {
+        "distanceMeasure": "squaredEuclidean",
+        "featuresCol": "features",
+        "metricName": "silhouette",
+        "predictionCol": "prediction"
+      },
+      "parameters": [
+        "predictionCol",
+        "featuresCol",
+        "metricName",
+        "distanceMeasure",
+        "weightCol"
+      ],
+      "params": [
+        {
+          "values": {},
+          "params_b64": ""
+        },
+        {
+          "values": {
+            "predictionCol": "guess",
+            "featuresCol": "xs",
+            "metricName": "silhouette",
+            "distanceMeasure": "squaredEuclidean",
+            "weightCol": "w"
+          },
+          "params_b64": "CiUKD2Rpc3RhbmNlTWVhc3VyZRISahBzcXVhcmVkRXVjbGlkZWFuChMKC2ZlYXR1cmVzQ29sEgRqAnhzChoKCm1ldHJpY05hbWUSDGoKc2lsaG91ZXR0ZQoYCg1wcmVkaWN0aW9uQ29sEgdqBWd1ZXNzChAKCXdlaWdodENvbBIDagF3"
+        },
+        {
+          "values": {
+            "predictionCol": null,
+            "featuresCol": null,
+            "metricName": null,
+            "distanceMeasure": null,
+            "weightCol": null
+          },
+          "params_b64": "ChcKD2Rpc3RhbmNlTWVhc3VyZRIECgIKAAoTCgtmZWF0dXJlc0NvbBIECgIKAAoSCgptZXRyaWNOYW1lEgQKAgoAChUKDXByZWRpY3Rpb25Db2wSBAoCCgAKEQoJd2VpZ2h0Q29sEgQKAgoA"
+        }
+      ],
+      "directions": [
+        {
+          "metric": "silhouette",
+          "larger": true
+        },
+        {
+          "metric": "invalid",
+          "larger": true
+        },
+        {
+          "metric": null,
+          "larger": true
+        }
+      ]
+    },
+    "RankingEvaluator": {
+      "signature": "(*, predictionCol='prediction', labelCol='label', metricName='meanAveragePrecision', k=10)",
+      "defaults": {
+        "k": 10,
+        "labelCol": "label",
+        "metricName": "meanAveragePrecision",
+        "predictionCol": "prediction"
+      },
+      "parameters": [
+        "predictionCol",
+        "labelCol",
+        "metricName",
+        "k"
+      ],
+      "params": [
+        {
+          "values": {},
+          "params_b64": ""
+        },
+        {
+          "values": {
+            "predictionCol": "guess",
+            "labelCol": "target",
+            "metricName": "meanAveragePrecision",
+            "k": 2
+          },
+          "params_b64": "CgcKAWsSAjACChQKCGxhYmVsQ29sEghqBnRhcmdldAokCgptZXRyaWNOYW1lEhZqFG1lYW5BdmVyYWdlUHJlY2lzaW9uChgKDXByZWRpY3Rpb25Db2wSB2oFZ3Vlc3M="
+        },
+        {
+          "values": {
+            "predictionCol": null,
+            "labelCol": null,
+            "metricName": null,
+            "k": null
+          },
+          "params_b64": "CgkKAWsSBAoCCgAKEAoIbGFiZWxDb2wSBAoCCgAKEgoKbWV0cmljTmFtZRIECgIKAAoVCg1wcmVkaWN0aW9uQ29sEgQKAgoA"
+        },
+        {
+          "values": {
+            "predictionCol": "guess",
+            "labelCol": "target",
+            "metricName": "meanAveragePrecision",
+            "k": 2147483647
+          },
+          "params_b64": "CgsKAWsSBjD/////BwoUCghsYWJlbENvbBIIagZ0YXJnZXQKJAoKbWV0cmljTmFtZRIWahRtZWFuQXZlcmFnZVByZWNpc2lvbgoYCg1wcmVkaWN0aW9uQ29sEgdqBWd1ZXNz"
+        },
+        {
+          "values": {
+            "predictionCol": "guess",
+            "labelCol": "target",
+            "metricName": "meanAveragePrecision",
+            "k": 2147483648
+          },
+          "params_b64": "CgsKAWsSBjiAgICACAoUCghsYWJlbENvbBIIagZ0YXJnZXQKJAoKbWV0cmljTmFtZRIWahRtZWFuQXZlcmFnZVByZWNpc2lvbgoYCg1wcmVkaWN0aW9uQ29sEgdqBWd1ZXNz"
+        },
+        {
+          "values": {
+            "predictionCol": "guess",
+            "labelCol": "target",
+            "metricName": "meanAveragePrecision",
+            "k": 9223372036854775807
+          },
+          "params_b64": "Cg8KAWsSCjj//////////38KFAoIbGFiZWxDb2wSCGoGdGFyZ2V0CiQKCm1ldHJpY05hbWUSFmoUbWVhbkF2ZXJhZ2VQcmVjaXNpb24KGAoNcHJlZGljdGlvbkNvbBIHagVndWVzcw=="
+        },
+        {
+          "values": {
+            "predictionCol": "guess",
+            "labelCol": "target",
+            "metricName": "meanAveragePrecision",
+            "k": -9223372036854775808
+          },
+          "params_b64": "ChAKAWsSCziAgICAgICAgIABChQKCGxhYmVsQ29sEghqBnRhcmdldAokCgptZXRyaWNOYW1lEhZqFG1lYW5BdmVyYWdlUHJlY2lzaW9uChgKDXByZWRpY3Rpb25Db2wSB2oFZ3Vlc3M="
+        }
+      ],
+      "directions": [
+        {
+          "metric": "meanAveragePrecision",
+          "larger": true
+        },
+        {
+          "metric": "meanAveragePrecisionAtK",
+          "larger": true
+        },
+        {
+          "metric": "precisionAtK",
+          "larger": true
+        },
+        {
+          "metric": "ndcgAtK",
+          "larger": true
+        },
+        {
+          "metric": "recallAtK",
+          "larger": true
+        },
+        {
+          "metric": "invalid",
+          "larger": true
+        },
+        {
+          "metric": null,
+          "larger": true
+        }
+      ]
+    }
+  },
+  "cases": [
+    {
+      "name": "RegressionEvaluator-0-rmse",
+      "class": "RegressionEvaluator",
+      "dataset": "regression",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "rmse",
+        "weightCol": "w",
+        "throughOrigin": false
+      },
+      "value": 0.8086075400626399,
+      "larger": false
+    },
+    {
+      "name": "RegressionEvaluator-0-mse",
+      "class": "RegressionEvaluator",
+      "dataset": "regression",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "mse",
+        "weightCol": "w",
+        "throughOrigin": false
+      },
+      "value": 0.6538461538461539,
+      "larger": false
+    },
+    {
+      "name": "RegressionEvaluator-0-r2",
+      "class": "RegressionEvaluator",
+      "dataset": "regression",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "r2",
+        "weightCol": "w",
+        "throughOrigin": false
+      },
+      "value": 0.2787878787878787,
+      "larger": true
+    },
+    {
+      "name": "RegressionEvaluator-0-mae",
+      "class": "RegressionEvaluator",
+      "dataset": "regression",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "mae",
+        "weightCol": "w",
+        "throughOrigin": false
+      },
+      "value": 0.7692307692307693,
+      "larger": false
+    },
+    {
+      "name": "RegressionEvaluator-0-var",
+      "class": "RegressionEvaluator",
+      "dataset": "regression",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "var",
+        "weightCol": "w",
+        "throughOrigin": false
+      },
+      "value": 1.7071005917159732,
+      "larger": true
+    },
+    {
+      "name": "RegressionEvaluator-1-rmse",
+      "class": "RegressionEvaluator",
+      "dataset": "regression",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "rmse",
+        "throughOrigin": false
+      },
+      "value": 3.2093613071762426,
+      "larger": false
+    },
+    {
+      "name": "RegressionEvaluator-1-mse",
+      "class": "RegressionEvaluator",
+      "dataset": "regression",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "mse",
+        "throughOrigin": false
+      },
+      "value": 10.3,
+      "larger": false
+    },
+    {
+      "name": "RegressionEvaluator-1-r2",
+      "class": "RegressionEvaluator",
+      "dataset": "regression",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "r2",
+        "throughOrigin": false
+      },
+      "value": -6.573529411764705,
+      "larger": true
+    },
+    {
+      "name": "RegressionEvaluator-1-mae",
+      "class": "RegressionEvaluator",
+      "dataset": "regression",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "mae",
+        "throughOrigin": false
+      },
+      "value": 2.0,
+      "larger": false
+    },
+    {
+      "name": "RegressionEvaluator-1-var",
+      "class": "RegressionEvaluator",
+      "dataset": "regression",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "var",
+        "throughOrigin": false
+      },
+      "value": 8.100000000000003,
+      "larger": true
+    },
+    {
+      "name": "RegressionEvaluator-2-rmse",
+      "class": "RegressionEvaluator",
+      "dataset": "regression",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "rmse",
+        "weightCol": "w",
+        "throughOrigin": true
+      },
+      "value": 0.8086075400626399,
+      "larger": false
+    },
+    {
+      "name": "RegressionEvaluator-2-mse",
+      "class": "RegressionEvaluator",
+      "dataset": "regression",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "mse",
+        "weightCol": "w",
+        "throughOrigin": true
+      },
+      "value": 0.6538461538461539,
+      "larger": false
+    },
+    {
+      "name": "RegressionEvaluator-2-r2",
+      "class": "RegressionEvaluator",
+      "dataset": "regression",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "r2",
+        "weightCol": "w",
+        "throughOrigin": true
+      },
+      "value": 0.9034090909090909,
+      "larger": true
+    },
+    {
+      "name": "RegressionEvaluator-2-mae",
+      "class": "RegressionEvaluator",
+      "dataset": "regression",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "mae",
+        "weightCol": "w",
+        "throughOrigin": true
+      },
+      "value": 0.7692307692307693,
+      "larger": false
+    },
+    {
+      "name": "RegressionEvaluator-2-var",
+      "class": "RegressionEvaluator",
+      "dataset": "regression",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "var",
+        "weightCol": "w",
+        "throughOrigin": true
+      },
+      "value": 1.7071005917159732,
+      "larger": true
+    },
+    {
+      "name": "BinaryClassificationEvaluator-0-areaUnderROC",
+      "class": "BinaryClassificationEvaluator",
+      "dataset": "binary",
+      "values": {
+        "rawPredictionCol": "score",
+        "labelCol": "target",
+        "metricName": "areaUnderROC",
+        "weightCol": "w",
+        "numBins": 0
+      },
+      "value": 0.8148148148148149,
+      "larger": true
+    },
+    {
+      "name": "BinaryClassificationEvaluator-0-areaUnderPR",
+      "class": "BinaryClassificationEvaluator",
+      "dataset": "binary",
+      "values": {
+        "rawPredictionCol": "score",
+        "labelCol": "target",
+        "metricName": "areaUnderPR",
+        "weightCol": "w",
+        "numBins": 0
+      },
+      "value": 0.9052059052059052,
+      "larger": true
+    },
+    {
+      "name": "BinaryClassificationEvaluator-1-areaUnderROC",
+      "class": "BinaryClassificationEvaluator",
+      "dataset": "binary",
+      "values": {
+        "rawPredictionCol": "score",
+        "labelCol": "target",
+        "metricName": "areaUnderROC",
+        "numBins": 0
+      },
+      "value": 0.5,
+      "larger": true
+    },
+    {
+      "name": "BinaryClassificationEvaluator-1-areaUnderPR",
+      "class": "BinaryClassificationEvaluator",
+      "dataset": "binary",
+      "values": {
+        "rawPredictionCol": "score",
+        "labelCol": "target",
+        "metricName": "areaUnderPR",
+        "numBins": 0
+      },
+      "value": 0.43333333333333335,
+      "larger": true
+    },
+    {
+      "name": "BinaryClassificationEvaluator-2-areaUnderROC",
+      "class": "BinaryClassificationEvaluator",
+      "dataset": "binary",
+      "values": {
+        "rawPredictionCol": "scoreVec",
+        "labelCol": "target",
+        "metricName": "areaUnderROC",
+        "weightCol": "w",
+        "numBins": 0
+      },
+      "value": 0.8148148148148149,
+      "larger": true
+    },
+    {
+      "name": "BinaryClassificationEvaluator-2-areaUnderPR",
+      "class": "BinaryClassificationEvaluator",
+      "dataset": "binary",
+      "values": {
+        "rawPredictionCol": "scoreVec",
+        "labelCol": "target",
+        "metricName": "areaUnderPR",
+        "weightCol": "w",
+        "numBins": 0
+      },
+      "value": 0.9052059052059052,
+      "larger": true
+    },
+    {
+      "name": "BinaryClassificationEvaluator-3-areaUnderROC",
+      "class": "BinaryClassificationEvaluator",
+      "dataset": "binary",
+      "values": {
+        "rawPredictionCol": "score",
+        "labelCol": "target",
+        "metricName": "areaUnderROC",
+        "weightCol": "w",
+        "numBins": 2
+      },
+      "value": 0.7777777777777778,
+      "larger": true
+    },
+    {
+      "name": "BinaryClassificationEvaluator-3-areaUnderPR",
+      "class": "BinaryClassificationEvaluator",
+      "dataset": "binary",
+      "values": {
+        "rawPredictionCol": "score",
+        "labelCol": "target",
+        "metricName": "areaUnderPR",
+        "weightCol": "w",
+        "numBins": 2
+      },
+      "value": 0.8949494949494949,
+      "larger": true
+    },
+    {
+      "name": "MulticlassClassificationEvaluator-0-f1",
+      "class": "MulticlassClassificationEvaluator",
+      "dataset": "multiclass",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "f1",
+        "weightCol": "w",
+        "metricLabel": 1.0,
+        "beta": 2.0,
+        "probabilityCol": "p",
+        "eps": 0.05
+      },
+      "value": 0.610182896688087,
+      "larger": true
+    },
+    {
+      "name": "MulticlassClassificationEvaluator-0-accuracy",
+      "class": "MulticlassClassificationEvaluator",
+      "dataset": "multiclass",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "accuracy",
+        "weightCol": "w",
+        "metricLabel": 1.0,
+        "beta": 2.0,
+        "probabilityCol": "p",
+        "eps": 0.05
+      },
+      "value": 0.5882352941176471,
+      "larger": true
+    },
+    {
+      "name": "MulticlassClassificationEvaluator-0-weightedPrecision",
+      "class": "MulticlassClassificationEvaluator",
+      "dataset": "multiclass",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "weightedPrecision",
+        "weightCol": "w",
+        "metricLabel": 1.0,
+        "beta": 2.0,
+        "probabilityCol": "p",
+        "eps": 0.05
+      },
+      "value": 0.6708683473389355,
+      "larger": true
+    },
+    {
+      "name": "MulticlassClassificationEvaluator-0-weightedRecall",
+      "class": "MulticlassClassificationEvaluator",
+      "dataset": "multiclass",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "weightedRecall",
+        "weightCol": "w",
+        "metricLabel": 1.0,
+        "beta": 2.0,
+        "probabilityCol": "p",
+        "eps": 0.05
+      },
+      "value": 0.5882352941176471,
+      "larger": true
+    },
+    {
+      "name": "MulticlassClassificationEvaluator-0-weightedTruePositiveRate",
+      "class": "MulticlassClassificationEvaluator",
+      "dataset": "multiclass",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "weightedTruePositiveRate",
+        "weightCol": "w",
+        "metricLabel": 1.0,
+        "beta": 2.0,
+        "probabilityCol": "p",
+        "eps": 0.05
+      },
+      "value": 0.5882352941176471,
+      "larger": true
+    },
+    {
+      "name": "MulticlassClassificationEvaluator-0-weightedFalsePositiveRate",
+      "class": "MulticlassClassificationEvaluator",
+      "dataset": "multiclass",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "weightedFalsePositiveRate",
+        "weightCol": "w",
+        "metricLabel": 1.0,
+        "beta": 2.0,
+        "probabilityCol": "p",
+        "eps": 0.05
+      },
+      "value": 0.18164188752424046,
+      "larger": false
+    },
+    {
+      "name": "MulticlassClassificationEvaluator-0-weightedFMeasure",
+      "class": "MulticlassClassificationEvaluator",
+      "dataset": "multiclass",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "weightedFMeasure",
+        "weightCol": "w",
+        "metricLabel": 1.0,
+        "beta": 2.0,
+        "probabilityCol": "p",
+        "eps": 0.05
+      },
+      "value": 0.5927153259756512,
+      "larger": true
+    },
+    {
+      "name": "MulticlassClassificationEvaluator-0-truePositiveRateByLabel",
+      "class": "MulticlassClassificationEvaluator",
+      "dataset": "multiclass",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "truePositiveRateByLabel",
+        "weightCol": "w",
+        "metricLabel": 1.0,
+        "beta": 2.0,
+        "probabilityCol": "p",
+        "eps": 0.05
+      },
+      "value": 0.6,
+      "larger": true
+    },
+    {
+      "name": "MulticlassClassificationEvaluator-0-falsePositiveRateByLabel",
+      "class": "MulticlassClassificationEvaluator",
+      "dataset": "multiclass",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "falsePositiveRateByLabel",
+        "weightCol": "w",
+        "metricLabel": 1.0,
+        "beta": 2.0,
+        "probabilityCol": "p",
+        "eps": 0.05
+      },
+      "value": 0.14285714285714285,
+      "larger": false
+    },
+    {
+      "name": "MulticlassClassificationEvaluator-0-precisionByLabel",
+      "class": "MulticlassClassificationEvaluator",
+      "dataset": "multiclass",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "precisionByLabel",
+        "weightCol": "w",
+        "metricLabel": 1.0,
+        "beta": 2.0,
+        "probabilityCol": "p",
+        "eps": 0.05
+      },
+      "value": 0.8571428571428571,
+      "larger": true
+    },
+    {
+      "name": "MulticlassClassificationEvaluator-0-recallByLabel",
+      "class": "MulticlassClassificationEvaluator",
+      "dataset": "multiclass",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "recallByLabel",
+        "weightCol": "w",
+        "metricLabel": 1.0,
+        "beta": 2.0,
+        "probabilityCol": "p",
+        "eps": 0.05
+      },
+      "value": 0.6,
+      "larger": true
+    },
+    {
+      "name": "MulticlassClassificationEvaluator-0-fMeasureByLabel",
+      "class": "MulticlassClassificationEvaluator",
+      "dataset": "multiclass",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "fMeasureByLabel",
+        "weightCol": "w",
+        "metricLabel": 1.0,
+        "beta": 2.0,
+        "probabilityCol": "p",
+        "eps": 0.05
+      },
+      "value": 0.6382978723404255,
+      "larger": true
+    },
+    {
+      "name": "MulticlassClassificationEvaluator-0-logLoss",
+      "class": "MulticlassClassificationEvaluator",
+      "dataset": "multiclass",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "logLoss",
+        "weightCol": "w",
+        "metricLabel": 1.0,
+        "beta": 2.0,
+        "probabilityCol": "p",
+        "eps": 0.05
+      },
+      "value": 0.8616605405875248,
+      "larger": false
+    },
+    {
+      "name": "MulticlassClassificationEvaluator-0-hammingLoss",
+      "class": "MulticlassClassificationEvaluator",
+      "dataset": "multiclass",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "hammingLoss",
+        "weightCol": "w",
+        "metricLabel": 1.0,
+        "beta": 2.0,
+        "probabilityCol": "p",
+        "eps": 0.05
+      },
+      "value": 0.4117647058823529,
+      "larger": false
+    },
+    {
+      "name": "MulticlassClassificationEvaluator-1-f1",
+      "class": "MulticlassClassificationEvaluator",
+      "dataset": "multiclass",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "f1",
+        "metricLabel": 1.0,
+        "beta": 2.0,
+        "probabilityCol": "p",
+        "eps": 0.05
+      },
+      "value": 0.5,
+      "larger": true
+    },
+    {
+      "name": "MulticlassClassificationEvaluator-1-accuracy",
+      "class": "MulticlassClassificationEvaluator",
+      "dataset": "multiclass",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "accuracy",
+        "metricLabel": 1.0,
+        "beta": 2.0,
+        "probabilityCol": "p",
+        "eps": 0.05
+      },
+      "value": 0.5,
+      "larger": true
+    },
+    {
+      "name": "MulticlassClassificationEvaluator-1-weightedPrecision",
+      "class": "MulticlassClassificationEvaluator",
+      "dataset": "multiclass",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "weightedPrecision",
+        "metricLabel": 1.0,
+        "beta": 2.0,
+        "probabilityCol": "p",
+        "eps": 0.05
+      },
+      "value": 0.5,
+      "larger": true
+    },
+    {
+      "name": "MulticlassClassificationEvaluator-1-weightedRecall",
+      "class": "MulticlassClassificationEvaluator",
+      "dataset": "multiclass",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "weightedRecall",
+        "metricLabel": 1.0,
+        "beta": 2.0,
+        "probabilityCol": "p",
+        "eps": 0.05
+      },
+      "value": 0.5,
+      "larger": true
+    },
+    {
+      "name": "MulticlassClassificationEvaluator-1-weightedTruePositiveRate",
+      "class": "MulticlassClassificationEvaluator",
+      "dataset": "multiclass",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "weightedTruePositiveRate",
+        "metricLabel": 1.0,
+        "beta": 2.0,
+        "probabilityCol": "p",
+        "eps": 0.05
+      },
+      "value": 0.5,
+      "larger": true
+    },
+    {
+      "name": "MulticlassClassificationEvaluator-1-weightedFalsePositiveRate",
+      "class": "MulticlassClassificationEvaluator",
+      "dataset": "multiclass",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "weightedFalsePositiveRate",
+        "metricLabel": 1.0,
+        "beta": 2.0,
+        "probabilityCol": "p",
+        "eps": 0.05
+      },
+      "value": 0.25,
+      "larger": false
+    },
+    {
+      "name": "MulticlassClassificationEvaluator-1-weightedFMeasure",
+      "class": "MulticlassClassificationEvaluator",
+      "dataset": "multiclass",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "weightedFMeasure",
+        "metricLabel": 1.0,
+        "beta": 2.0,
+        "probabilityCol": "p",
+        "eps": 0.05
+      },
+      "value": 0.5,
+      "larger": true
+    },
+    {
+      "name": "MulticlassClassificationEvaluator-1-truePositiveRateByLabel",
+      "class": "MulticlassClassificationEvaluator",
+      "dataset": "multiclass",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "truePositiveRateByLabel",
+        "metricLabel": 1.0,
+        "beta": 2.0,
+        "probabilityCol": "p",
+        "eps": 0.05
+      },
+      "value": 0.5,
+      "larger": true
+    },
+    {
+      "name": "MulticlassClassificationEvaluator-1-falsePositiveRateByLabel",
+      "class": "MulticlassClassificationEvaluator",
+      "dataset": "multiclass",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "falsePositiveRateByLabel",
+        "metricLabel": 1.0,
+        "beta": 2.0,
+        "probabilityCol": "p",
+        "eps": 0.05
+      },
+      "value": 0.25,
+      "larger": false
+    },
+    {
+      "name": "MulticlassClassificationEvaluator-1-precisionByLabel",
+      "class": "MulticlassClassificationEvaluator",
+      "dataset": "multiclass",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "precisionByLabel",
+        "metricLabel": 1.0,
+        "beta": 2.0,
+        "probabilityCol": "p",
+        "eps": 0.05
+      },
+      "value": 0.5,
+      "larger": true
+    },
+    {
+      "name": "MulticlassClassificationEvaluator-1-recallByLabel",
+      "class": "MulticlassClassificationEvaluator",
+      "dataset": "multiclass",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "recallByLabel",
+        "metricLabel": 1.0,
+        "beta": 2.0,
+        "probabilityCol": "p",
+        "eps": 0.05
+      },
+      "value": 0.5,
+      "larger": true
+    },
+    {
+      "name": "MulticlassClassificationEvaluator-1-fMeasureByLabel",
+      "class": "MulticlassClassificationEvaluator",
+      "dataset": "multiclass",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "fMeasureByLabel",
+        "metricLabel": 1.0,
+        "beta": 2.0,
+        "probabilityCol": "p",
+        "eps": 0.05
+      },
+      "value": 0.5,
+      "larger": true
+    },
+    {
+      "name": "MulticlassClassificationEvaluator-1-logLoss",
+      "class": "MulticlassClassificationEvaluator",
+      "dataset": "multiclass",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "logLoss",
+        "metricLabel": 1.0,
+        "beta": 2.0,
+        "probabilityCol": "p",
+        "eps": 0.05
+      },
+      "value": 1.1952868041361002,
+      "larger": false
+    },
+    {
+      "name": "MulticlassClassificationEvaluator-1-hammingLoss",
+      "class": "MulticlassClassificationEvaluator",
+      "dataset": "multiclass",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "hammingLoss",
+        "metricLabel": 1.0,
+        "beta": 2.0,
+        "probabilityCol": "p",
+        "eps": 0.05
+      },
+      "value": 0.5,
+      "larger": false
+    },
+    {
+      "name": "MulticlassClassificationEvaluator-2-logLoss",
+      "class": "MulticlassClassificationEvaluator",
+      "dataset": "multiclass",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "logLoss",
+        "weightCol": "w",
+        "metricLabel": 1.0,
+        "beta": 2.0,
+        "probabilityCol": "p",
+        "eps": 1e-12
+      },
+      "value": 2.310795178374263,
+      "larger": false
+    },
+    {
+      "name": "MultilabelClassificationEvaluator-0-subsetAccuracy",
+      "class": "MultilabelClassificationEvaluator",
+      "dataset": "multilabel",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "subsetAccuracy",
+        "metricLabel": 1.0
+      },
+      "value": 0.2,
+      "larger": true
+    },
+    {
+      "name": "MultilabelClassificationEvaluator-0-accuracy",
+      "class": "MultilabelClassificationEvaluator",
+      "dataset": "multilabel",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "accuracy",
+        "metricLabel": 1.0
+      },
+      "value": 0.5,
+      "larger": true
+    },
+    {
+      "name": "MultilabelClassificationEvaluator-0-hammingLoss",
+      "class": "MultilabelClassificationEvaluator",
+      "dataset": "multilabel",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "hammingLoss",
+        "metricLabel": 1.0
+      },
+      "value": 0.3333333333333333,
+      "larger": false
+    },
+    {
+      "name": "MultilabelClassificationEvaluator-0-precision",
+      "class": "MultilabelClassificationEvaluator",
+      "dataset": "multilabel",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "precision",
+        "metricLabel": 1.0
+      },
+      "value": 0.6,
+      "larger": true
+    },
+    {
+      "name": "MultilabelClassificationEvaluator-0-recall",
+      "class": "MultilabelClassificationEvaluator",
+      "dataset": "multilabel",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "recall",
+        "metricLabel": 1.0
+      },
+      "value": 0.6333333333333333,
+      "larger": true
+    },
+    {
+      "name": "MultilabelClassificationEvaluator-0-f1Measure",
+      "class": "MultilabelClassificationEvaluator",
+      "dataset": "multilabel",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "f1Measure",
+        "metricLabel": 1.0
+      },
+      "value": 0.5933333333333334,
+      "larger": true
+    },
+    {
+      "name": "MultilabelClassificationEvaluator-0-precisionByLabel",
+      "class": "MultilabelClassificationEvaluator",
+      "dataset": "multilabel",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "precisionByLabel",
+        "metricLabel": 1.0
+      },
+      "value": 0.6666666666666666,
+      "larger": true
+    },
+    {
+      "name": "MultilabelClassificationEvaluator-0-recallByLabel",
+      "class": "MultilabelClassificationEvaluator",
+      "dataset": "multilabel",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "recallByLabel",
+        "metricLabel": 1.0
+      },
+      "value": 1.0,
+      "larger": true
+    },
+    {
+      "name": "MultilabelClassificationEvaluator-0-f1MeasureByLabel",
+      "class": "MultilabelClassificationEvaluator",
+      "dataset": "multilabel",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "f1MeasureByLabel",
+        "metricLabel": 1.0
+      },
+      "value": 0.8,
+      "larger": true
+    },
+    {
+      "name": "MultilabelClassificationEvaluator-0-microPrecision",
+      "class": "MultilabelClassificationEvaluator",
+      "dataset": "multilabel",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "microPrecision",
+        "metricLabel": 1.0
+      },
+      "value": 0.7142857142857143,
+      "larger": true
+    },
+    {
+      "name": "MultilabelClassificationEvaluator-0-microRecall",
+      "class": "MultilabelClassificationEvaluator",
+      "dataset": "multilabel",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "microRecall",
+        "metricLabel": 1.0
+      },
+      "value": 0.625,
+      "larger": true
+    },
+    {
+      "name": "MultilabelClassificationEvaluator-0-microF1Measure",
+      "class": "MultilabelClassificationEvaluator",
+      "dataset": "multilabel",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "microF1Measure",
+        "metricLabel": 1.0
+      },
+      "value": 0.6666666666666666,
+      "larger": true
+    },
+    {
+      "name": "ClusteringEvaluator-0-silhouette",
+      "class": "ClusteringEvaluator",
+      "dataset": "clustering",
+      "values": {
+        "predictionCol": "guess",
+        "featuresCol": "xs",
+        "metricName": "silhouette",
+        "distanceMeasure": "squaredEuclidean",
+        "weightCol": "w"
+      },
+      "value": 0.9626081110801434,
+      "larger": true
+    },
+    {
+      "name": "ClusteringEvaluator-1-silhouette",
+      "class": "ClusteringEvaluator",
+      "dataset": "clustering",
+      "values": {
+        "predictionCol": "guess",
+        "featuresCol": "xs",
+        "metricName": "silhouette",
+        "distanceMeasure": "squaredEuclidean"
+      },
+      "value": 0.9643562268648871,
+      "larger": true
+    },
+    {
+      "name": "ClusteringEvaluator-2-silhouette",
+      "class": "ClusteringEvaluator",
+      "dataset": "clustering",
+      "values": {
+        "predictionCol": "guess",
+        "featuresCol": "xs",
+        "metricName": "silhouette",
+        "distanceMeasure": "cosine",
+        "weightCol": "w"
+      },
+      "value": 0.9781436813926528,
+      "larger": true
+    },
+    {
+      "name": "ClusteringEvaluator-3-silhouette",
+      "class": "ClusteringEvaluator",
+      "dataset": "clustering",
+      "values": {
+        "predictionCol": "guess",
+        "featuresCol": "xs",
+        "metricName": "silhouette",
+        "distanceMeasure": "cosine"
+      },
+      "value": 0.9777820929143942,
+      "larger": true
+    },
+    {
+      "name": "RankingEvaluator-0-meanAveragePrecision",
+      "class": "RankingEvaluator",
+      "dataset": "ranking",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "meanAveragePrecision",
+        "k": 2
+      },
+      "value": 0.3177777777777777,
+      "larger": true
+    },
+    {
+      "name": "RankingEvaluator-0-meanAveragePrecisionAtK",
+      "class": "RankingEvaluator",
+      "dataset": "ranking",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "meanAveragePrecisionAtK",
+        "k": 2
+      },
+      "value": 0.2,
+      "larger": true
+    },
+    {
+      "name": "RankingEvaluator-0-precisionAtK",
+      "class": "RankingEvaluator",
+      "dataset": "ranking",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "precisionAtK",
+        "k": 2
+      },
+      "value": 0.2,
+      "larger": true
+    },
+    {
+      "name": "RankingEvaluator-0-ndcgAtK",
+      "class": "RankingEvaluator",
+      "dataset": "ranking",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "ndcgAtK",
+        "k": 2
+      },
+      "value": 0.24525887710618335,
+      "larger": true
+    },
+    {
+      "name": "RankingEvaluator-0-recallAtK",
+      "class": "RankingEvaluator",
+      "dataset": "ranking",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "recallAtK",
+        "k": 2
+      },
+      "value": 0.16666666666666666,
+      "larger": true
+    },
+    {
+      "name": "RankingEvaluator-1-meanAveragePrecision",
+      "class": "RankingEvaluator",
+      "dataset": "ranking",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "meanAveragePrecision",
+        "k": 1
+      },
+      "value": 0.31777777777777777,
+      "larger": true
+    },
+    {
+      "name": "RankingEvaluator-1-meanAveragePrecisionAtK",
+      "class": "RankingEvaluator",
+      "dataset": "ranking",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "meanAveragePrecisionAtK",
+        "k": 1
+      },
+      "value": 0.4,
+      "larger": true
+    },
+    {
+      "name": "RankingEvaluator-1-precisionAtK",
+      "class": "RankingEvaluator",
+      "dataset": "ranking",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "precisionAtK",
+        "k": 1
+      },
+      "value": 0.4,
+      "larger": true
+    },
+    {
+      "name": "RankingEvaluator-1-ndcgAtK",
+      "class": "RankingEvaluator",
+      "dataset": "ranking",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "ndcgAtK",
+        "k": 1
+      },
+      "value": 0.4,
+      "larger": true
+    },
+    {
+      "name": "RankingEvaluator-1-recallAtK",
+      "class": "RankingEvaluator",
+      "dataset": "ranking",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "recallAtK",
+        "k": 1
+      },
+      "value": 0.16666666666666666,
+      "larger": true
+    },
+    {
+      "name": "RankingEvaluator-2-meanAveragePrecision",
+      "class": "RankingEvaluator",
+      "dataset": "ranking",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "meanAveragePrecision",
+        "k": 5
+      },
+      "value": 0.31777777777777777,
+      "larger": true
+    },
+    {
+      "name": "RankingEvaluator-2-meanAveragePrecisionAtK",
+      "class": "RankingEvaluator",
+      "dataset": "ranking",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "meanAveragePrecisionAtK",
+        "k": 5
+      },
+      "value": 0.31777777777777777,
+      "larger": true
+    },
+    {
+      "name": "RankingEvaluator-2-precisionAtK",
+      "class": "RankingEvaluator",
+      "dataset": "ranking",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "precisionAtK",
+        "k": 5
+      },
+      "value": 0.2,
+      "larger": true
+    },
+    {
+      "name": "RankingEvaluator-2-ndcgAtK",
+      "class": "RankingEvaluator",
+      "dataset": "ranking",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "ndcgAtK",
+        "k": 5
+      },
+      "value": 0.36103613414393493,
+      "larger": true
+    },
+    {
+      "name": "RankingEvaluator-2-recallAtK",
+      "class": "RankingEvaluator",
+      "dataset": "ranking",
+      "values": {
+        "predictionCol": "guess",
+        "labelCol": "target",
+        "metricName": "recallAtK",
+        "k": 5
+      },
+      "value": 0.4,
+      "larger": true
+    }
+  ],
+  "inputs": [
+    {
+      "name": "regression-int",
+      "class": "RegressionEvaluator",
+      "values": {},
+      "sql": "SELECT 1 AS prediction, 1.0D AS label",
+      "accepted": false,
+      "type": "IllegalArgumentException",
+      "condition": null,
+      "message": "requirement failed: Column prediction must be of type equal to one of the following types: [double, float] but was actually of type int."
+    },
+    {
+      "name": "multiclass-int",
+      "class": "MulticlassClassificationEvaluator",
+      "values": {},
+      "sql": "SELECT 1 AS prediction, 1.0D AS label",
+      "accepted": false,
+      "type": "IllegalArgumentException",
+      "condition": null,
+      "message": "requirement failed: Column prediction must be of type class org.apache.spark.sql.types.DoubleType$:double but was actually class org.apache.spark.sql.types.IntegerType$:int."
+    },
+    {
+      "name": "binary-float",
+      "class": "BinaryClassificationEvaluator",
+      "values": {},
+      "sql": "SELECT 0.5F AS rawPrediction, 1.0D AS label",
+      "accepted": false,
+      "type": "IllegalArgumentException",
+      "condition": null,
+      "message": "requirement failed: Column rawPrediction must be of type equal to one of the following types: [double, struct<type:tinyint,size:int,indices:array<int>,values:array<double>>] but was actually of type float."
+    },
+    {
+      "name": "binary-array",
+      "class": "BinaryClassificationEvaluator",
+      "values": {},
+      "sql": "SELECT array(0.2D,0.8D) AS rawPrediction,1.0D AS label",
+      "accepted": false,
+      "type": "IllegalArgumentException",
+      "condition": null,
+      "message": "requirement failed: Column rawPrediction must be of type equal to one of the following types: [double, struct<type:tinyint,size:int,indices:array<int>,values:array<double>>] but was actually of type array<double>."
+    },
+    {
+      "name": "ranking-int-array",
+      "class": "RankingEvaluator",
+      "values": {},
+      "sql": "SELECT array(1,2) AS prediction,array(1) AS label",
+      "accepted": false,
+      "type": "IllegalArgumentException",
+      "condition": null,
+      "message": "requirement failed: Column prediction must be of type equal to one of the following types: [array<double>, array<double>] but was actually of type array<int>."
+    },
+    {
+      "name": "multilabel-int-array",
+      "class": "MultilabelClassificationEvaluator",
+      "values": {},
+      "sql": "SELECT array(1,2) AS prediction,array(1) AS label",
+      "accepted": false,
+      "type": "IllegalArgumentException",
+      "condition": null,
+      "message": "requirement failed: Column prediction must be of type equal to one of the following types: [array<double>, array<double>] but was actually of type array<int>."
+    },
+    {
+      "name": "clustering-array",
+      "class": "ClusteringEvaluator",
+      "values": {},
+      "sql": "SELECT * FROM VALUES (array(1.0D,0.0D),0.0D),(array(0.8D,0.2D),0.0D),(array(0.0D,1.0D),1.0D),(array(0.1D,0.9D),1.0D) AS t(features,prediction)",
+      "accepted": true,
+      "result": 0.9643562268648871
+    },
+    {
+      "name": "column-case",
+      "class": "RegressionEvaluator",
+      "values": {
+        "labelCol": "LABEL",
+        "predictionCol": "PREDICTION"
+      },
+      "sql": "SELECT 1.0D AS prediction,1.0D AS label",
+      "accepted": false,
+      "type": "IllegalArgumentException",
+      "condition": "FIELD_NOT_FOUND",
+      "message": "[FIELD_NOT_FOUND] No such struct field `PREDICTION` in `prediction`, `label`. SQLSTATE: 42704"
+    }
+  ]
+}

@@ -15,6 +15,9 @@ use uuid::Uuid;
 mod recommendation;
 pub use recommendation::*;
 
+mod evaluation;
+pub use evaluation::*;
+
 mod feature;
 pub use feature::*;
 mod fpm;
@@ -739,6 +742,11 @@ pub trait Evaluator: Send + Sync {
     /// implementation outside this crate needs no change.
     fn params_mut(&mut self) -> Option<&mut Params> {
         None
+    }
+
+    /// Whether the metric should be maximized. Implementations may override this per metric.
+    fn is_larger_better(&self) -> bool {
+        true
     }
 
     /// Evaluate a DataFrame and return a metric value.
@@ -7421,163 +7429,6 @@ impl PowerIterationClustering {
     }
 }
 
-/// RegressionEvaluator: evaluates regression models.
-#[derive(Debug, Clone)]
-pub struct RegressionEvaluator {
-    operator: MlOperator,
-    params: Params,
-}
-
-impl RegressionEvaluator {
-    pub fn new() -> Self {
-        RegressionEvaluator {
-            operator: MlOperator::new(
-                "org.apache.spark.ml.evaluation.RegressionEvaluator",
-                OperatorType::Evaluator,
-            ),
-            params: Params::new(),
-        }
-    }
-
-    pub fn set_label_col(mut self, col: &str) -> Self {
-        self.params = self.params.set_param_string("labelCol", col);
-        self
-    }
-
-    pub fn set_prediction_col(mut self, col: &str) -> Self {
-        self.params = self.params.set_param_string("predictionCol", col);
-        self
-    }
-
-    pub fn set_metric_name(mut self, metric: &str) -> Self {
-        self.params = self.params.set_param_string("metricName", metric);
-        self
-    }
-
-    /// The label column (default: "label").
-    pub fn label_col(&self) -> &str {
-        self.params.string_or("labelCol", "label")
-    }
-
-    /// The prediction column (default: "prediction").
-    pub fn prediction_col(&self) -> &str {
-        self.params.string_or("predictionCol", "prediction")
-    }
-
-    /// The metric (default: "rmse").
-    pub fn metric_name(&self) -> &str {
-        self.params.string_or("metricName", "rmse")
-    }
-
-    /// Get mutable parameters, as estimators and transformers have them.
-    pub fn params_mut(&mut self) -> &mut Params {
-        &mut self.params
-    }
-}
-
-impl Default for RegressionEvaluator {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Evaluator for RegressionEvaluator {
-    fn operator(&self) -> &MlOperator {
-        &self.operator
-    }
-
-    fn params(&self) -> &Params {
-        &self.params
-    }
-
-    fn params_mut(&mut self) -> Option<&mut Params> {
-        Some(&mut self.params)
-    }
-
-    fn evaluate(&self, df: &DataFrame) -> spark_connect_core::error::Result<f64> {
-        evaluate_via_command(&self.operator, &self.params, df)
-    }
-}
-
-/// BinaryClassificationEvaluator: evaluates binary classification models.
-#[derive(Debug, Clone)]
-pub struct BinaryClassificationEvaluator {
-    operator: MlOperator,
-    params: Params,
-}
-
-impl BinaryClassificationEvaluator {
-    pub fn new() -> Self {
-        BinaryClassificationEvaluator {
-            operator: MlOperator::new(
-                "org.apache.spark.ml.evaluation.BinaryClassificationEvaluator",
-                OperatorType::Evaluator,
-            ),
-            params: Params::new(),
-        }
-    }
-
-    pub fn set_label_col(mut self, col: &str) -> Self {
-        self.params = self.params.set_param_string("labelCol", col);
-        self
-    }
-
-    /// Set the column of the scores (a vector of raw predictions), the JVM `rawPredictionCol`.
-    pub fn set_raw_prediction_col(mut self, col: &str) -> Self {
-        self.params = self.params.set_param_string("rawPredictionCol", col);
-        self
-    }
-
-    pub fn set_metric_name(mut self, metric: &str) -> Self {
-        self.params = self.params.set_param_string("metricName", metric);
-        self
-    }
-
-    /// The label column (default: "label").
-    pub fn label_col(&self) -> &str {
-        self.params.string_or("labelCol", "label")
-    }
-
-    /// The column of the scores (default: "rawPrediction").
-    pub fn raw_prediction_col(&self) -> &str {
-        self.params.string_or("rawPredictionCol", "rawPrediction")
-    }
-
-    /// The metric (default: "areaUnderROC").
-    pub fn metric_name(&self) -> &str {
-        self.params.string_or("metricName", "areaUnderROC")
-    }
-
-    /// Get mutable parameters, as estimators and transformers have them.
-    pub fn params_mut(&mut self) -> &mut Params {
-        &mut self.params
-    }
-}
-
-impl Default for BinaryClassificationEvaluator {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Evaluator for BinaryClassificationEvaluator {
-    fn operator(&self) -> &MlOperator {
-        &self.operator
-    }
-
-    fn params(&self) -> &Params {
-        &self.params
-    }
-
-    fn params_mut(&mut self) -> Option<&mut Params> {
-        Some(&mut self.params)
-    }
-
-    fn evaluate(&self, df: &DataFrame) -> spark_connect_core::error::Result<f64> {
-        evaluate_via_command(&self.operator, &self.params, df)
-    }
-}
-
 /// Pipeline Estimator: chains multiple stages together.
 #[derive(Debug, Clone)]
 pub struct Pipeline {
@@ -7676,74 +7527,6 @@ impl Transformer for PipelineModel {
 impl Model for PipelineModel {
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
-    }
-}
-
-/// MulticlassClassificationEvaluator: metrics for multiclass classification.
-#[derive(Debug, Clone)]
-pub struct MulticlassClassificationEvaluator {
-    operator: MlOperator,
-    params: Params,
-}
-
-impl MulticlassClassificationEvaluator {
-    pub fn new() -> Self {
-        MulticlassClassificationEvaluator {
-            operator: MlOperator::new(
-                "org.apache.spark.ml.evaluation.MulticlassClassificationEvaluator",
-                OperatorType::Evaluator,
-            ),
-            params: Params::new(),
-        }
-    }
-    pub fn set_label_col(mut self, col: &str) -> Self {
-        self.params = self.params.set_param_string("labelCol", col);
-        self
-    }
-    pub fn set_prediction_col(mut self, col: &str) -> Self {
-        self.params = self.params.set_param_string("predictionCol", col);
-        self
-    }
-    pub fn set_metric_name(mut self, metric: &str) -> Self {
-        self.params = self.params.set_param_string("metricName", metric);
-        self
-    }
-    /// The label column (default: "label").
-    pub fn label_col(&self) -> &str {
-        self.params.string_or("labelCol", "label")
-    }
-    /// The prediction column (default: "prediction").
-    pub fn prediction_col(&self) -> &str {
-        self.params.string_or("predictionCol", "prediction")
-    }
-    /// The metric (default: "f1").
-    pub fn metric_name(&self) -> &str {
-        self.params.string_or("metricName", "f1")
-    }
-    /// Get mutable parameters, as estimators and transformers have them.
-    pub fn params_mut(&mut self) -> &mut Params {
-        &mut self.params
-    }
-}
-
-impl Default for MulticlassClassificationEvaluator {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Evaluator for MulticlassClassificationEvaluator {
-    fn operator(&self) -> &MlOperator {
-        &self.operator
-    }
-    fn params(&self) -> &Params {
-        &self.params
-    }
-    fn params_mut(&mut self) -> Option<&mut Params> {
-        Some(&mut self.params)
-    }
-    fn evaluate(&self, df: &DataFrame) -> spark_connect_core::error::Result<f64> {
-        evaluate_via_command(&self.operator, &self.params, df)
     }
 }
 

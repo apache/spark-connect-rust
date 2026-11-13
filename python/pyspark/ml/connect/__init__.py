@@ -5,6 +5,7 @@ Re-exports the estimator/transformer/evaluator/pipeline classes so that both
 `from pyspark.ml.connect import StandardScaler` and the submodule paths
 (`pyspark.ml.connect.feature`, `.classification`, `.evaluation`) work.
 """
+
 from pyspark.ml.connect.feature import (
     ArrayAssembler,
     StandardScaler,
@@ -32,9 +33,16 @@ from pyspark.ml.connect.regression import (
     RandomForestRegressor,
 )
 from pyspark.ml.connect.clustering import (
-    LDA, BisectingKMeans, GaussianMixture, KMeans, PowerIterationClustering,
+    LDA,
+    BisectingKMeans,
+    GaussianMixture,
+    KMeans,
+    PowerIterationClustering,
 )
 from pyspark.ml.connect.evaluation import (
+    ClusteringEvaluator,
+    MultilabelClassificationEvaluator,
+    RankingEvaluator,
     RegressionEvaluator,
     BinaryClassificationEvaluator,
     MulticlassClassificationEvaluator,
@@ -98,6 +106,9 @@ __all__ = [
     "PowerIterationClustering",
     "GaussianMixture",
     "BisectingKMeans",
+    "ClusteringEvaluator",
+    "MultilabelClassificationEvaluator",
+    "RankingEvaluator",
     "RegressionEvaluator",
     "BinaryClassificationEvaluator",
     "MulticlassClassificationEvaluator",
