@@ -127,6 +127,15 @@ def crate_artifacts() -> tuple[Path | None, list[Path]]:
         text=True,
     )
     if r.returncode != 0:
+        # With --message-format=json, cargo prints the errors of rustc on stdout, as JSON.
+        for line in r.stdout.splitlines():
+            try:
+                msg = json.loads(line)
+            except ValueError:
+                continue
+            message = msg.get("message") or {}
+            if msg.get("reason") == "compiler-message" and message.get("level") == "error":
+                print(message.get("rendered", ""), end="")
         print(r.stderr[-4000:])
         return None, []
     rlib = None
