@@ -6953,6 +6953,430 @@ impl Model for GaussianMixtureModel {
     }
 }
 
+/// Latent Dirichlet Allocation, fitted by Spark Connect using the online or EM optimizer.
+#[derive(Debug, Clone)]
+pub struct LDA {
+    operator: MlOperator,
+    params: Params,
+}
+
+impl LDA {
+    pub fn new() -> Self {
+        Self {
+            operator: MlOperator::new(
+                "org.apache.spark.ml.clustering.LDA",
+                OperatorType::Estimator,
+            ),
+            params: Params::new(),
+        }
+    }
+
+    /// Set `featuresCol`; Spark validates its value when the algorithm runs.
+    pub fn set_feature_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("featuresCol", value);
+        self
+    }
+
+    /// Read `featuresCol` from the current parameters; unset values use Spark defaults.
+    pub fn feature_col(&self) -> &str {
+        self.params.string_or("featuresCol", "features")
+    }
+
+    /// Set `maxIter`; Spark validates its value when the algorithm runs.
+    pub fn set_max_iter(mut self, value: i32) -> Self {
+        self.params = self.params.set_param_int32("maxIter", value);
+        self
+    }
+
+    /// Read `maxIter` from the current parameters; unset values use Spark defaults.
+    pub fn max_iter(&self) -> i32 {
+        self.params.int_or("maxIter", 20)
+    }
+
+    /// Set `seed`; Spark validates its value when the algorithm runs.
+    pub fn set_seed(mut self, value: i64) -> Self {
+        self.params = self.params.set_param_int_narrow("seed", value);
+        self
+    }
+
+    /// Read `seed` from the current parameters, if explicitly set.
+    pub fn seed(&self) -> Option<i64> {
+        self.params.long_opt("seed")
+    }
+
+    /// Set `checkpointInterval`; Spark validates its value when the algorithm runs.
+    pub fn set_checkpoint_interval(mut self, value: i32) -> Self {
+        self.params = self.params.set_param_int32("checkpointInterval", value);
+        self
+    }
+
+    /// Read `checkpointInterval` from the current parameters; unset values use Spark defaults.
+    pub fn checkpoint_interval(&self) -> i32 {
+        self.params.int_or("checkpointInterval", 10)
+    }
+
+    /// Set `k`; Spark validates its value when the algorithm runs.
+    pub fn set_k(mut self, value: i32) -> Self {
+        self.params = self.params.set_param_int32("k", value);
+        self
+    }
+
+    /// Read `k` from the current parameters; unset values use Spark defaults.
+    pub fn k(&self) -> i32 {
+        self.params.int_or("k", 10)
+    }
+
+    /// Set `optimizer`; Spark validates its value when the algorithm runs.
+    pub fn set_optimizer(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("optimizer", value);
+        self
+    }
+
+    /// Read `optimizer` from the current parameters; unset values use Spark defaults.
+    pub fn optimizer(&self) -> &str {
+        self.params.string_or("optimizer", "online")
+    }
+
+    /// Set `learningOffset`; Spark validates its value when the algorithm runs.
+    pub fn set_learning_offset(mut self, value: f64) -> Self {
+        self.params = self.params.set_param_double("learningOffset", value);
+        self
+    }
+
+    /// Read `learningOffset` from the current parameters; unset values use Spark defaults.
+    pub fn learning_offset(&self) -> f64 {
+        self.params.double_or("learningOffset", 1024.0)
+    }
+
+    /// Set `learningDecay`; Spark validates its value when the algorithm runs.
+    pub fn set_learning_decay(mut self, value: f64) -> Self {
+        self.params = self.params.set_param_double("learningDecay", value);
+        self
+    }
+
+    /// Read `learningDecay` from the current parameters; unset values use Spark defaults.
+    pub fn learning_decay(&self) -> f64 {
+        self.params.double_or("learningDecay", 0.51)
+    }
+
+    /// Set `subsamplingRate`; Spark validates its value when the algorithm runs.
+    pub fn set_subsampling_rate(mut self, value: f64) -> Self {
+        self.params = self.params.set_param_double("subsamplingRate", value);
+        self
+    }
+
+    /// Read `subsamplingRate` from the current parameters; unset values use Spark defaults.
+    pub fn subsampling_rate(&self) -> f64 {
+        self.params.double_or("subsamplingRate", 0.05)
+    }
+
+    /// Set `optimizeDocConcentration`; Spark validates its value when the algorithm runs.
+    pub fn set_optimize_doc_concentration(mut self, value: bool) -> Self {
+        self.params = self
+            .params
+            .set_param_bool("optimizeDocConcentration", value);
+        self
+    }
+
+    /// Read `optimizeDocConcentration` from the current parameters; unset values use Spark defaults.
+    pub fn optimize_doc_concentration(&self) -> bool {
+        self.params.bool_or("optimizeDocConcentration", true)
+    }
+
+    /// Set `docConcentration`; Spark validates its value when the algorithm runs.
+    pub fn set_doc_concentration(mut self, value: impl IntoIterator<Item = f64>) -> Self {
+        self.params = self
+            .params
+            .set_param_double_array("docConcentration", value);
+        self
+    }
+
+    /// Read `docConcentration` from the current parameters, if explicitly set.
+    pub fn doc_concentration(&self) -> Option<Vec<f64>> {
+        self.params.double_array_opt("docConcentration")
+    }
+
+    /// Set `topicConcentration`; Spark validates its value when the algorithm runs.
+    pub fn set_topic_concentration(mut self, value: f64) -> Self {
+        self.params = self.params.set_param_double("topicConcentration", value);
+        self
+    }
+
+    /// Read `topicConcentration` from the current parameters, if explicitly set.
+    pub fn topic_concentration(&self) -> Option<f64> {
+        use proto::expression::literal::LiteralType as L;
+        match self.params.literal("topicConcentration") {
+            Some(L::Double(value)) => Some(*value),
+            Some(L::Integer(value)) => Some(f64::from(*value)),
+            Some(L::Long(value)) => Some(*value as f64),
+            _ => None,
+        }
+    }
+
+    /// Set `topicDistributionCol`; Spark validates its value when the algorithm runs.
+    pub fn set_topic_distribution_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("topicDistributionCol", value);
+        self
+    }
+
+    /// Read `topicDistributionCol` from the current parameters; unset values use Spark defaults.
+    pub fn topic_distribution_col(&self) -> &str {
+        self.params
+            .string_or("topicDistributionCol", "topicDistribution")
+    }
+
+    /// Set `keepLastCheckpoint`; Spark validates its value when the algorithm runs.
+    pub fn set_keep_last_checkpoint(mut self, value: bool) -> Self {
+        self.params = self.params.set_param_bool("keepLastCheckpoint", value);
+        self
+    }
+
+    /// Read `keepLastCheckpoint` from the current parameters; unset values use Spark defaults.
+    pub fn keep_last_checkpoint(&self) -> bool {
+        self.params.bool_or("keepLastCheckpoint", true)
+    }
+
+    fn model_from_info(
+        &self,
+        info: proto::ml_command_result::MlOperatorInfo,
+        session: &SparkSession,
+    ) -> spark_connect_core::error::Result<LDAModel> {
+        let cached = CachedModel::from_info(&info, session, "LDA")?;
+        let name = if self.optimizer() == "em" {
+            "org.apache.spark.ml.clustering.DistributedLDAModel"
+        } else {
+            "org.apache.spark.ml.clustering.LocalLDAModel"
+        };
+        Ok(LDAModel {
+            operator: MlOperator::with_uid(
+                name,
+                info.uid.as_deref().unwrap_or(&self.operator.uid),
+                OperatorType::Model,
+            ),
+            params: self.params.clone(),
+            cached,
+        })
+    }
+}
+
+impl Default for LDA {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Estimator for LDA {
+    fn operator(&self) -> &MlOperator {
+        &self.operator
+    }
+    fn operator_mut(&mut self) -> &mut MlOperator {
+        &mut self.operator
+    }
+    fn params(&self) -> &Params {
+        &self.params
+    }
+    fn params_mut(&mut self) -> &mut Params {
+        &mut self.params
+    }
+
+    fn fit_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<Box<dyn Model>> {
+        let info = fit_via_command(&self.operator, &self.params, df)?;
+        Ok(Box::new(self.model_from_info(info, &df.session)?))
+    }
+}
+
+/// A LDA model fitted by Spark Connect.
+///
+/// Obtain it through [`Estimator::fit`]. The model, its clones and transformed
+/// DataFrames retain the cached server model until the last owner is dropped.
+#[derive(Debug, Clone)]
+pub struct LDAModel {
+    operator: MlOperator,
+    params: Params,
+    cached: CachedModel,
+}
+
+impl Transformer for LDAModel {
+    fn operator(&self) -> &MlOperator {
+        &self.operator
+    }
+    fn operator_mut(&mut self) -> &mut MlOperator {
+        &mut self.operator
+    }
+    fn params(&self) -> &Params {
+        &self.params
+    }
+    fn params_mut(&mut self) -> &mut Params {
+        &mut self.params
+    }
+
+    fn build_ml_relation(
+        &self,
+        input: &DataFrame,
+    ) -> spark_connect_core::error::Result<proto::MlRelation> {
+        self.cached.build_ml_relation(input, &self.params)
+    }
+
+    fn transform_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<DataFrame> {
+        self.cached.transform(df, &self.params)
+    }
+}
+
+impl Model for LDAModel {
+    fn clone_box(&self) -> Box<dyn Model> {
+        Box::new(self.clone())
+    }
+}
+
+/// Power Iteration Clustering of a graph's nonnegative edge similarities.
+///
+/// Like PySpark's class, this is not an estimator or transformer. Use
+/// [`PowerIterationClustering::assign_clusters`] to obtain `(id, cluster)` assignments.
+#[derive(Debug, Clone, Default)]
+pub struct PowerIterationClustering {
+    params: Params,
+}
+
+impl PowerIterationClustering {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn params(&self) -> &Params {
+        &self.params
+    }
+
+    pub fn params_mut(&mut self) -> &mut Params {
+        &mut self.params
+    }
+
+    /// Set `k`; Spark validates its value when the algorithm runs.
+    pub fn set_k(mut self, value: i32) -> Self {
+        self.params = self.params.set_param_int32("k", value);
+        self
+    }
+
+    /// Read `k` from the current parameters; unset values use Spark defaults.
+    pub fn k(&self) -> i32 {
+        self.params.int_or("k", 2)
+    }
+
+    /// Set `maxIter`; Spark validates its value when the algorithm runs.
+    pub fn set_max_iter(mut self, value: i32) -> Self {
+        self.params = self.params.set_param_int32("maxIter", value);
+        self
+    }
+
+    /// Read `maxIter` from the current parameters; unset values use Spark defaults.
+    pub fn max_iter(&self) -> i32 {
+        self.params.int_or("maxIter", 20)
+    }
+
+    /// Set `initMode`; Spark validates its value when the algorithm runs.
+    pub fn set_init_mode(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("initMode", value);
+        self
+    }
+
+    /// Read `initMode` from the current parameters; unset values use Spark defaults.
+    pub fn init_mode(&self) -> &str {
+        self.params.string_or("initMode", "random")
+    }
+
+    /// Set `srcCol`; Spark validates its value when the algorithm runs.
+    pub fn set_src_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("srcCol", value);
+        self
+    }
+
+    /// Read `srcCol` from the current parameters; unset values use Spark defaults.
+    pub fn src_col(&self) -> &str {
+        self.params.string_or("srcCol", "src")
+    }
+
+    /// Set `dstCol`; Spark validates its value when the algorithm runs.
+    pub fn set_dst_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("dstCol", value);
+        self
+    }
+
+    /// Read `dstCol` from the current parameters; unset values use Spark defaults.
+    pub fn dst_col(&self) -> &str {
+        self.params.string_or("dstCol", "dst")
+    }
+
+    /// Set `weightCol`; Spark validates its value when the algorithm runs.
+    pub fn set_weight_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("weightCol", value);
+        self
+    }
+
+    /// Read `weightCol` from the current parameters, if explicitly set.
+    pub fn weight_col(&self) -> Option<&str> {
+        self.params.string_opt("weightCol")
+    }
+
+    /// Build the lazy assignment relation using Spark Connect's ML helper. The input plan
+    /// is retained so cached models or other resources used by the graph remain alive.
+    pub fn assign_clusters(
+        &self,
+        dataset: &DataFrame,
+    ) -> spark_connect_core::error::Result<DataFrame> {
+        use proto::expression::literal::LiteralType as L;
+        use proto::fetch::method::args::ArgsType;
+
+        let mut params = self.params.to_proto().params;
+        let defaults = [
+            ("k", L::Integer(2)),
+            ("maxIter", L::Integer(20)),
+            ("initMode", L::String("random".into())),
+            ("srcCol", L::String("src".into())),
+            ("dstCol", L::String("dst".into())),
+            ("weightCol", L::String(String::new())),
+        ];
+        let mut args = vec![proto::fetch::method::Args {
+            args_type: Some(ArgsType::Input(dataset.relation()?)),
+        }];
+        for (name, default) in defaults {
+            // Preserve explicit nulls and integer widths, just as PySpark's helper call does.
+            let literal = params
+                .remove(name)
+                .unwrap_or_else(|| proto::expression::Literal {
+                    literal_type: Some(default),
+                    ..Default::default()
+                });
+            args.push(proto::fetch::method::Args {
+                args_type: Some(ArgsType::Param(literal)),
+            });
+        }
+        let relation = proto::Relation {
+            rel_type: Some(proto::relation::RelType::MlRelation(Box::new(
+                proto::MlRelation {
+                    ml_type: Some(proto::ml_relation::MlType::Fetch(proto::Fetch {
+                        obj_ref: Some(proto::ObjectRef {
+                            id: "______ML_CONNECT_HELPER______".into(),
+                        }),
+                        methods: vec![proto::fetch::Method {
+                            method: "powerIterationClusteringAssignClusters".into(),
+                            args,
+                        }],
+                    })),
+                    ..Default::default()
+                },
+            ))),
+            ..Default::default()
+        };
+        Ok(DataFrame::new(
+            dataset.session.clone(),
+            LogicalPlan::MlTransform {
+                ml_relation: relation,
+                input: dataset.plan.clone(),
+                owner: None,
+            },
+        ))
+    }
+}
+
 /// RegressionEvaluator: evaluates regression models.
 #[derive(Debug, Clone)]
 pub struct RegressionEvaluator {
@@ -10587,5 +11011,56 @@ mod tests {
             ("features", "label", "pred")
         );
         assert_eq!(model.operator().uid, "operator-uid");
+    }
+
+    #[test]
+    fn lda_selects_the_fitted_model_kind_and_pic_retains_its_input_owner() {
+        let session = offline_session();
+        for (optimizer, model_name) in [("online", "LocalLDAModel"), ("em", "DistributedLDAModel")]
+        {
+            let mut estimator = LDA::new()
+                .set_optimizer(optimizer)
+                .set_topic_distribution_col("topics");
+            assert!(estimator
+                .model_from_info(
+                    proto::ml_command_result::MlOperatorInfo::default(),
+                    &session
+                )
+                .is_err());
+            let info = proto::ml_command_result::MlOperatorInfo {
+                r#type: Some(proto::ml_command_result::ml_operator_info::Type::ObjRef(
+                    proto::ObjectRef {
+                        id: format!("{optimizer}-model"),
+                    },
+                )),
+                uid: Some("fitted-uid".into()),
+                ..Default::default()
+            };
+            let mut model = estimator.model_from_info(info, &session).unwrap();
+            assert_eq!(
+                model.operator().name,
+                format!("org.apache.spark.ml.clustering.{model_name}")
+            );
+            assert_eq!(model.operator().uid, "fitted-uid");
+            assert_eq!(model.operator().op_type, OperatorType::Model);
+            *estimator.params_mut() = estimator
+                .params()
+                .clone()
+                .set_param_string("topicDistributionCol", "changed");
+            assert_eq!(
+                model.params().string_or("topicDistributionCol", ""),
+                "topics"
+            );
+            let weak = Arc::downgrade(&model.cached.0);
+            let transformed = model.transform(&session.range(2).unwrap()).unwrap();
+            let assignments = PowerIterationClustering::new()
+                .assign_clusters(&transformed)
+                .unwrap();
+            drop(model);
+            drop(transformed);
+            assert!(weak.upgrade().is_some());
+            drop(assignments);
+            assert!(weak.upgrade().is_none());
+        }
     }
 }

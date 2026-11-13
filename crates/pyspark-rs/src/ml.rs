@@ -22,8 +22,8 @@ use spark_connect::ml::{
     GeneralizedLinearRegression, IsotonicRegression, KMeans, LinearRegression, LinearSVC,
     LogisticRegression, MlOperator, MlVector, Model, MulticlassClassificationEvaluator,
     MultilayerPerceptronClassifier, NaiveBayes, OneVsRest, Params, Pipeline,
-    RandomForestClassifier, RandomForestRegressor, RegressionEvaluator, StringIndexer, Transformer,
-    VectorAssembler,
+    PowerIterationClustering, RandomForestClassifier, RandomForestRegressor, RegressionEvaluator,
+    StringIndexer, Transformer, VectorAssembler, LDA,
 };
 use spark_connect::types::StructField;
 use spark_connect::DataFrame;
@@ -4895,6 +4895,249 @@ impl PyBinaryClassificationEvaluator {
     }
 }
 
+/// Native LDA backed by Spark Connect's JVM ML API.
+#[pyclass(name = "LDA", module = "pyspark.ml.connect.clustering")]
+pub struct PyLDA {
+    inner: LDA,
+    unsendable: Vec<&'static str>,
+}
+
+const LDA_PARAMS: &[(&str, Kind)] = &[
+    ("featuresCol", Kind::Str),
+    ("maxIter", Kind::Int),
+    ("seed", Kind::Int),
+    ("checkpointInterval", Kind::Int),
+    ("k", Kind::Int),
+    ("optimizer", Kind::Str),
+    ("learningOffset", Kind::Float),
+    ("learningDecay", Kind::Float),
+    ("subsamplingRate", Kind::Float),
+    ("optimizeDocConcentration", Kind::Bool),
+    ("docConcentration", Kind::FloatList),
+    ("topicConcentration", Kind::Float),
+    ("topicDistributionCol", Kind::Str),
+    ("keepLastCheckpoint", Kind::Bool),
+];
+
+#[pymethods]
+impl PyLDA {
+    #[new]
+    #[pyo3(signature = (*args, **kwargs), text_signature = "(*, featuresCol='features', maxIter=20, seed=None, checkpointInterval=10, k=10, optimizer='online', learningOffset=1024.0, learningDecay=0.51, subsamplingRate=0.05, optimizeDocConcentration=True, docConcentration=None, topicConcentration=None, topicDistributionCol='topicDistribution', keepLastCheckpoint=True)")]
+    fn new(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
+        let mut this = Self {
+            inner: LDA::new(),
+            unsendable: Vec::new(),
+        };
+        init_params(&mut this, "LDA", &[], LDA_PARAMS, args, kwargs)?;
+        Ok(this)
+    }
+
+    #[pyo3(name = "setFeaturesCol")]
+    fn set_feature_col<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "featuresCol", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setMaxIter")]
+    fn set_max_iter<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "maxIter", Kind::Int, value)
+    }
+
+    #[pyo3(name = "setSeed")]
+    fn set_seed<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "seed", Kind::Int, value)
+    }
+
+    #[pyo3(name = "setCheckpointInterval")]
+    fn set_checkpoint_interval<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "checkpointInterval", Kind::Int, value)
+    }
+
+    #[pyo3(name = "setK")]
+    fn set_k<'py>(slf: Bound<'py, Self>, value: &Bound<'py, PyAny>) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "k", Kind::Int, value)
+    }
+
+    #[pyo3(name = "setOptimizer")]
+    fn set_optimizer<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "optimizer", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setLearningOffset")]
+    fn set_learning_offset<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "learningOffset", Kind::Float, value)
+    }
+
+    #[pyo3(name = "setLearningDecay")]
+    fn set_learning_decay<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "learningDecay", Kind::Float, value)
+    }
+
+    #[pyo3(name = "setSubsamplingRate")]
+    fn set_subsampling_rate<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "subsamplingRate", Kind::Float, value)
+    }
+
+    #[pyo3(name = "setOptimizeDocConcentration")]
+    fn set_optimize_doc_concentration<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "optimizeDocConcentration", Kind::Bool, value)
+    }
+
+    #[pyo3(name = "setDocConcentration")]
+    fn set_doc_concentration<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "docConcentration", Kind::FloatList, value)
+    }
+
+    #[pyo3(name = "setTopicConcentration")]
+    fn set_topic_concentration<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "topicConcentration", Kind::Float, value)
+    }
+
+    #[pyo3(name = "setTopicDistributionCol")]
+    fn set_topic_distribution_col<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "topicDistributionCol", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setKeepLastCheckpoint")]
+    fn set_keep_last_checkpoint<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "keepLastCheckpoint", Kind::Bool, value)
+    }
+
+    fn fit(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<PyMLModel> {
+        fit_native(slf, dataset, None)
+    }
+}
+
+/// Native PowerIterationClustering backed by Spark Connect's JVM ML API.
+#[pyclass(
+    name = "PowerIterationClustering",
+    module = "pyspark.ml.connect.clustering"
+)]
+pub struct PyPowerIterationClustering {
+    inner: PowerIterationClustering,
+    unsendable: Vec<&'static str>,
+}
+
+const POWER_ITERATION_CLUSTERING_PARAMS: &[(&str, Kind)] = &[
+    ("k", Kind::Int),
+    ("maxIter", Kind::Int),
+    ("initMode", Kind::Str),
+    ("srcCol", Kind::Str),
+    ("dstCol", Kind::Str),
+    ("weightCol", Kind::Str),
+];
+
+#[pymethods]
+impl PyPowerIterationClustering {
+    #[new]
+    #[pyo3(signature = (*args, **kwargs), text_signature = "(*, k=2, maxIter=20, initMode='random', srcCol='src', dstCol='dst', weightCol=None)")]
+    fn new(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
+        let mut this = Self {
+            inner: PowerIterationClustering::new(),
+            unsendable: Vec::new(),
+        };
+        init_params(
+            &mut this,
+            "PowerIterationClustering",
+            &[],
+            POWER_ITERATION_CLUSTERING_PARAMS,
+            args,
+            kwargs,
+        )?;
+        Ok(this)
+    }
+
+    #[pyo3(name = "setK")]
+    fn set_k<'py>(slf: Bound<'py, Self>, value: &Bound<'py, PyAny>) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "k", Kind::Int, value)
+    }
+
+    #[pyo3(name = "setMaxIter")]
+    fn set_max_iter<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "maxIter", Kind::Int, value)
+    }
+
+    #[pyo3(name = "setInitMode")]
+    fn set_init_mode<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "initMode", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setSrcCol")]
+    fn set_src_col<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "srcCol", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setDstCol")]
+    fn set_dst_col<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "dstCol", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setWeightCol")]
+    fn set_weight_col<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "weightCol", Kind::Str, value)
+    }
+
+    #[pyo3(name = "assignClusters")]
+    fn assign_clusters(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        let df = dataset_of(dataset, "assignClusters", "select")?;
+        let algorithm = snapshot(slf)?;
+        Ok(PyDataFrame::new(algorithm.assign_clusters(&df).to_pyerr()?))
+    }
+}
+
 /// Gaussian mixture estimator fitted and cached by Spark Connect.
 #[pyclass(name = "GaussianMixture", module = "pyspark.ml.connect.clustering")]
 pub struct PyGaussianMixture {
@@ -5394,6 +5637,8 @@ native!(
     PyRandomForestClassifier => RandomForestClassifier,
     PyDecisionTreeRegressor => DecisionTreeRegressor,
     PyRandomForestRegressor => RandomForestRegressor,
+    PyLDA => LDA,
+    PyPowerIterationClustering => PowerIterationClustering,
     PyGaussianMixture => GaussianMixture,
     PyKMeans => KMeans,
     PyBisectingKMeans => BisectingKMeans,
