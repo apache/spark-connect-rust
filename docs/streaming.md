@@ -97,7 +97,7 @@ query.await_termination(None)?;
 
 Gracefully stop a streaming query:
 
-```rust,ignore
+```{.rust .no-run}
 query.stop()?;
 ```
 
