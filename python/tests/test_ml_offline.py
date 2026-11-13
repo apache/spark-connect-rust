@@ -1793,15 +1793,57 @@ def test_the_deletes_of_the_models_of_an_ended_test_are_not_recorded_in_a_later_
         del model
         gc.collect()
         deadline = time.time() + 5
-        while service.forgotten_requests == 0 and time.time() < deadline:
+        # Counted by kind: a late ReleaseExecute of the session can be counted too, so only the
+        # ExecutePlan of the Delete is waited for and checked.
+        while service.forgotten_requests["execute"] == 0 and time.time() < deadline:
             time.sleep(0.05)
-        assert service.forgotten_requests == 1
+        assert service.forgotten_requests["execute"] == 1
         assert service.execute_requests == []
         # The requests of a session that is not forgotten are still recorded.
         service.execute_payload = _operator_info("a")
         assert spark.client._delete_ml_cache(["a"]) == ["a"]
         (command,) = _commands(service)
         assert [ref.id for ref in command.ml_command.delete.obj_refs] == ["a"]
+    finally:
+        ended.stop()
+
+
+def test_the_requests_of_an_ended_test_are_answered_but_not_recorded_in_a_later_test(ml_mock):
+    # The fixture forgets the session of a test when the test ends, and the client sends some
+    # requests without waiting for them, such as the ReleaseExecute after an execution, which can
+    # reach the server during a later test. The server answers a request of a forgotten session
+    # of any kind, and records none of them; a request of a session that is not forgotten is
+    # recorded.
+    import time
+
+    from _mock_connect_server import parse_message
+
+    def sessions(requests):
+        return [parse_message(request).get(1, [b""])[0].decode() for request in requests]
+
+    spark, service = ml_mock
+    ended = SparkSession.builder.remote(service.remote).create()
+    try:
+        service.forget_session(ended.session_id)
+        service.reset()
+        ended.range(1).collect()
+        assert ended.range(1).schema.names == ["id"]
+        deadline = time.time() + 5
+        while service.forgotten_requests["release_execute"] == 0 and time.time() < deadline:
+            time.sleep(0.05)
+        assert service.forgotten_requests["release_execute"] > 0
+        assert service.forgotten_requests["execute"] == 1
+        assert service.forgotten_requests["analyze"] == 1
+        assert service.execute_requests == []
+        assert service.release_execute_requests == []
+        assert service.analyze_requests == []
+        spark.range(1).collect()
+        deadline = time.time() + 5
+        while not service.release_execute_requests and time.time() < deadline:
+            time.sleep(0.05)
+        assert sessions(service.execute_requests) == [spark.session_id]
+        released = sessions(service.release_execute_requests)
+        assert released and set(released) == {spark.session_id}
     finally:
         ended.stop()
 
