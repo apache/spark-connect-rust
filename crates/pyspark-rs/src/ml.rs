@@ -19,9 +19,9 @@ use spark_connect::ml::{
     BinaryClassificationEvaluator, BisectingKMeans, CrossValidator, DecisionTreeClassifier,
     DecisionTreeRegressor, Estimator, Evaluator, GBTClassifier, GBTRegressor, GaussianMixture,
     GeneralizedLinearRegression, KMeans, LinearRegression, LinearSVC, LogisticRegression,
-    MaxAbsScaler, MlOperator, Model, MulticlassClassificationEvaluator, NaiveBayes, Params,
-    Pipeline, RandomForestClassifier, RandomForestRegressor, RegressionEvaluator, StandardScaler,
-    StringIndexer, Transformer, VectorAssembler,
+    MlOperator, Model, MulticlassClassificationEvaluator, NaiveBayes, Params, Pipeline,
+    RandomForestClassifier, RandomForestRegressor, RegressionEvaluator, StringIndexer, Transformer,
+    VectorAssembler,
 };
 use spark_connect::DataFrame;
 
@@ -339,16 +339,13 @@ fn active_dataframe(pdf: &Bound<'_, PyAny>) -> PyResult<DataFrame> {
 }
 
 /// The columns that the fit of a class of PySpark's `pyspark.ml.connect` reads, as the params
-/// that name them, of their defaults: LogisticRegression's selects its features and its labels,
-/// and a scaler's its `inputCol`, which has no default.
+/// that name them, of their defaults: LogisticRegression's selects its features and its labels.
 type Reads = &'static [(&'static str, Option<&'static str>)];
 
 const LOGISTIC_REGRESSION_READS: Reads = &[
     ("featuresCol", Some("features")),
     ("labelCol", Some("label")),
 ];
-
-const SCALER_READS: Reads = &[("inputCol", None)];
 
 /// The string param `name` of `params` if it is set, else `default`. None when it is set to
 /// another value (a null), or is not set and has no default, which the server rejects.
@@ -376,7 +373,9 @@ fn read_columns(params: &Params, reads: Reads) -> Option<Vec<String>> {
 /// KeyError of pandas for a missing column, as PySpark's `aggregate_dataframe`. So the JVM
 /// estimator checks no other column, as PySpark's fit reads no other, and the dataset may have
 /// an output column (a `prediction`, say). The other estimators, of the classes that PySpark's
-/// `pyspark.ml.connect` does not have, fit the whole dataset, as their JVM estimators read it.
+/// `pyspark.ml.connect` does not have, fit the whole dataset, as their JVM estimators read it, and
+/// take vectors, arrays of numbers and pandas DataFrames, where classic `pyspark.ml` estimators
+/// take only a `VectorUDT` column.
 fn fit_native<T>(
     slf: &Bound<'_, T>,
     dataset: &Bound<'_, PyAny>,
@@ -386,9 +385,24 @@ where
     T: Native + PyClass,
     T::Core: Estimator,
 {
+    fit_native_checked(slf, dataset, reads, |_, _, _| Ok(()))
+}
+
+/// [`fit_native`], which first runs `check` on the DataFrame that the fit sends, of the estimator
+/// `estimator`: the checks that PySpark's `_fit` makes of its dataset before it fits.
+fn fit_native_checked<T>(
+    slf: &Bound<'_, T>,
+    dataset: &Bound<'_, PyAny>,
+    reads: Option<Reads>,
+    check: impl FnOnce(Python<'_>, &T::Core, &DataFrame) -> PyResult<()>,
+) -> PyResult<PyMLModel>
+where
+    T: Native + PyClass,
+    T::Core: Estimator,
+{
     let py = slf.py();
     let dataset = dataset_of(dataset, "fit", "select")?;
-    let mut estimator = snapshot(slf)?;
+    let estimator = snapshot(slf)?;
     let columns = reads.and_then(|reads| read_columns(estimator.params(), reads));
     let (df, select) = match dataset {
         Dataset::Spark(df) => (df, columns),
@@ -408,45 +422,59 @@ where
         Some(columns) => df.select(columns.iter().map(|name| exact_column(name))),
         None => df,
     };
+    check(py, &estimator, &df)?;
     let df = match array {
         Some(field) => df.with_column(&field.name, vector_of(&field)),
         None => df,
     };
-    // A scaler's JVM fit checks that its output column does not exist yet, and reads only its
-    // input column, as PySpark's scaler fit does. So the fit sends no outputCol, and the model
-    // keeps it.
-    let output = match vectors.output.is_some() {
-        true => take_output_col(estimator.params_mut()),
-        false => None,
-    };
-    let mut model = fit_core(py, estimator, &df)?;
-    keep_output_col(model.model.params_mut(), output);
-    Ok(model)
+    fit_core(py, estimator, &df)
 }
 
-/// The `outputCol` of the params of a scaler, as they hold it: a string or a null, or None when
-/// it is not set (see [`take_output_col`]).
-type OutputCol = Option<Option<String>>;
+/// The checks of the labels of a LogisticRegression fit, as PySpark's `_fit` makes them of the
+/// labels that its query collects: `collect_set` of the label column, which has the distinct
+/// labels and no null. There must be at least two, each an integer in `[0, numClasses)`, with
+/// PySpark's ValueErrors. PySpark's query also counts the rows and reads the size of the features,
+/// which these checks do not read, and array_size raises on the vector features that the native
+/// LogisticRegression takes, so that query is not sent.
+fn check_labels(py: Python<'_>, df: &DataFrame, label: &str) -> PyResult<()> {
+    use spark_connect::functions::{col, collect_set};
+    use spark_connect::row::Value;
 
-/// Take the `outputCol` off `params`, and return it (see [`fit_native`]).
-fn take_output_col(params: &mut Params) -> OutputCol {
-    // None when it is not set, so that there is no outputCol to keep.
-    params.get_param("outputCol")?;
-    let value = string_param(params, "outputCol");
-    *params = std::mem::take(params).clear_param("outputCol");
-    Some(value)
-}
-
-/// Set the `outputCol` of `params` back to `output`, as [`take_output_col`] took it.
-fn keep_output_col(params: &mut Params, output: OutputCol) {
-    let Some(value) = output else {
-        return;
+    let rows = interruptible(py, &df.spark_session(), || {
+        df.agg(vec![collect_set(col(label)).expression().clone()])
+            .collect()
+            .map_err(Box::new)
+    })?;
+    let classes = match rows.first().and_then(|row| row.get(0)) {
+        Some(Value::List(classes)) => classes.as_slice(),
+        _ => &[],
     };
-    let taken = std::mem::take(params);
-    *params = match value {
-        Some(value) => taken.set_param_string("outputCol", &value),
-        None => taken.set_param_null("outputCol"),
-    };
+    if classes.len() < 2 {
+        return Err(PyValueError::new_err(
+            "Training dataset distinct labels must >= 2.",
+        ));
+    }
+    // A label is in `range(0, numClasses)` as PySpark's `in` finds it: an integer, or a number
+    // that equals one (a bool is 0 or 1).
+    let integer = |value: i64| value >= 0 && value.unsigned_abs() < classes.len() as u64;
+    let number = |value: f64| value.fract() == 0.0 && value >= 0.0 && value < classes.len() as f64;
+    let in_range = classes.iter().all(|class| match class {
+        Value::Byte(v) => integer(i64::from(*v)),
+        Value::Short(v) => integer(i64::from(*v)),
+        Value::Integer(v) => integer(i64::from(*v)),
+        Value::Long(v) => integer(*v),
+        Value::Float(v) => number(f64::from(*v)),
+        Value::Double(v) => number(*v),
+        Value::Decimal { value, .. } => value.parse::<f64>().is_ok_and(number),
+        Value::Bool(v) => integer(i64::from(*v)),
+        _ => false,
+    });
+    if !in_range {
+        return Err(PyValueError::new_err(
+            "Training labels must be integers in [0, numClasses).",
+        ));
+    }
+    Ok(())
 }
 
 /// The fit of a native estimator whose core cannot fit it, as Pipeline and CrossValidator.
@@ -483,43 +511,31 @@ fn fit_core<C: Estimator>(py: Python<'_>, mut estimator: C, df: &DataFrame) -> P
     })
 }
 
-/// The columns of a native estimator, and of the model of its fit, that the JVM reads or writes
-/// as ML vectors, as their fit and transform send them, so that they take the columns of PySpark's
+/// The columns of a native estimator, and of the model of its fit, that the JVM reads as ML
+/// vectors, as their fit and transform send them, so that they take the columns of PySpark's
 /// `pyspark.ml.connect` classes, which compute with numpy and torch on arrays: an array of numbers
-/// of the `input` column is sent as a vector by `array_to_vector`, and a vector as it is, while the
-/// `output` vector of a scaler is converted to the `array<double>` that PySpark's scalers output
-/// (their `_output_columns`, see [`vector_array`]).
+/// of the `input` column is sent as a vector by `array_to_vector`, and a vector as it is.
 #[derive(Default)]
 struct Vectors {
     input: Option<String>,
-    output: Option<String>,
 }
 
 impl Vectors {
-    /// The vector columns of the JVM estimator or model `operator`, of the params `params`, as
-    /// Spark's ML classes read and write them: those of the classification, regression and
-    /// clustering packages read the vector of their `featuresCol` (`features` unless set). Of the
-    /// feature package, the scalers read the vector of their `inputCol` and write that of their
-    /// `outputCol` (`<uid>__output` unless set), and the others (StringIndexer) read no vector.
+    /// The vector column of the JVM estimator or model `operator`, of the params `params`, as
+    /// Spark's ML classes read it: those of the classification, regression and clustering packages
+    /// read the vector of their `featuresCol` (`features` unless set). Of the feature package, the
+    /// StringIndexer and the VectorAssembler read no vector.
     fn of(operator: &spark_connect::ml::MlOperator, params: &Params) -> Self {
         let class = operator
             .name
             .strip_suffix("Model")
             .unwrap_or(&operator.name);
         match class.strip_prefix("org.apache.spark.ml.feature.") {
-            Some(feature) if feature.ends_with("Scaler") => Self {
-                input: string_param(params, "inputCol"),
-                output: Some(
-                    string_param(params, "outputCol")
-                        .unwrap_or_else(|| format!("{}__output", operator.uid)),
-                ),
-            },
             Some(_) => Self::default(),
             None => Self {
                 input: Some(
                     string_param(params, "featuresCol").unwrap_or_else(|| "features".to_string()),
                 ),
-                output: None,
             },
         }
     }
@@ -733,11 +749,11 @@ fn evaluator_input(py: Python<'_>, df: DataFrame, inputs: EvaluatorInputs) -> Py
     Ok(df)
 }
 
-/// The model of a class of PySpark's `pyspark.ml.connect`, LogisticRegression, MaxAbsScaler or
-/// StandardScaler, whose transform outputs what PySpark's `Transformer._transform` outputs: the
-/// columns of its `_output_columns`, of their types and in their order, appended to the dataset,
-/// which may not have any of them already. The other native models, of the classes that PySpark's
-/// `pyspark.ml.connect` does not have, output what their JVM models output, which check it.
+/// The model of a class of PySpark's `pyspark.ml.connect`, LogisticRegression, whose transform
+/// outputs what PySpark's `Transformer._transform` outputs: the columns of its `_output_columns`,
+/// of their types and in their order, appended to the dataset, which may not have any of them
+/// already. The other native models, of the classes that PySpark's `pyspark.ml.connect` does not
+/// have, output what their JVM models output, which check it.
 enum PySparkModel {
     /// LogisticRegressionModel: of its `featuresCol`, and its `bigint` prediction, and its
     /// `array<double>` probability unless its `probabilityCol` is empty (PySpark's `if prob_col`),
@@ -747,12 +763,6 @@ enum PySparkModel {
         features: Option<String>,
         prediction: Option<String>,
         probability: Option<String>,
-    },
-    /// MaxAbsScalerModel or StandardScalerModel: of its `inputCol`, and its `array<double>`
-    /// `outputCol` (see [`Vectors`]).
-    Scaler {
-        input: Option<String>,
-        output: String,
     },
 }
 
@@ -770,14 +780,6 @@ impl PySparkModel {
                     probability: output("probabilityCol", "probability"),
                 })
             }
-            "org.apache.spark.ml.feature.MaxAbsScalerModel"
-            | "org.apache.spark.ml.feature.StandardScalerModel" => {
-                let vectors = Vectors::of(operator, params);
-                Some(Self::Scaler {
-                    input: vectors.input,
-                    output: vectors.output?,
-                })
-            }
             _ => None,
         }
     }
@@ -786,7 +788,6 @@ impl PySparkModel {
     fn input(&self) -> Option<&str> {
         match self {
             Self::LogisticRegression { features, .. } => features.as_deref(),
-            Self::Scaler { input, .. } => input.as_deref(),
         }
     }
 
@@ -798,32 +799,16 @@ impl PySparkModel {
                 probability,
                 ..
             } => prediction.iter().chain(probability).cloned().collect(),
-            Self::Scaler { output, .. } => vec![output.clone()],
         }
     }
 
     /// The transform of the empty pandas DataFrame `copy` (a shallow copy of it), as PySpark's
-    /// transform computes it locally. A scaler appends its `array<double>` output as an empty
-    /// object column, with the index of `copy`. A LogisticRegression model raises the ValueError of
+    /// transform computes it locally: a LogisticRegression model raises the ValueError of
     /// `np.stack` in PySpark's transform function, which has no array to stack.
-    fn transform_empty<'py>(&self, copy: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
-        let py = copy.py();
+    fn transform_empty<'py>(&self, _copy: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
         match self {
             Self::LogisticRegression { .. } => {
                 Err(PyValueError::new_err("need at least one array to stack"))
-            }
-            Self::Scaler { output, .. } => {
-                let kwargs = PyDict::new(py);
-                kwargs.set_item("dtype", "object")?;
-                kwargs.set_item("index", copy.getattr("index")?)?;
-                let column = py.import("pandas")?.call_method(
-                    "Series",
-                    (PyList::empty(py),),
-                    Some(&kwargs),
-                )?;
-                let at = copy.getattr("columns")?.len()?;
-                copy.call_method1("insert", (at, output, column))?;
-                Ok(copy.clone())
             }
         }
     }
@@ -932,9 +917,9 @@ impl PyMLModel {
 impl PyMLModel {
     /// The transform of the DataFrame `df`. As PySpark's models of `pyspark.ml.connect`, it takes
     /// an array of numbers where the JVM model reads a vector, and keeps that column as it is in
-    /// its output, and a scaler outputs an `array<double>` (see [`Vectors`]). A LogisticRegression
-    /// model outputs PySpark's `bigint` prediction, and then its `array<double>` probability, of
-    /// the vector that the JVM model outputs in a column of its own, before its prediction.
+    /// its output (see [`Vectors`]). A LogisticRegression model outputs PySpark's `bigint`
+    /// prediction, and then its `array<double>` probability, of the vector that the JVM model
+    /// outputs in a column of its own, before its prediction.
     fn transform_dataframe(
         &self,
         py: Python<'_>,
@@ -1001,9 +986,6 @@ impl PyMLModel {
             columns.push((field.name.clone(), exact_column(kept)));
             dropped.push(kept.as_str());
         }
-        if let Some(output) = &vectors.output {
-            columns.push((output.clone(), vector_array(output)));
-        }
         if let Some(PySparkModel::LogisticRegression {
             prediction: Some(prediction),
             ..
@@ -1031,93 +1013,7 @@ impl PyMLModel {
     }
 }
 
-/// StandardScaler estimator.
-#[pyclass(name = "StandardScaler", module = "pyspark.ml.connect.feature")]
-pub struct PyStandardScaler {
-    inner: StandardScaler,
-    unsendable: Vec<&'static str>,
-}
-
 const COLUMN_PARAMS: &[(&str, Kind)] = &[("inputCol", Kind::Str), ("outputCol", Kind::Str)];
-
-#[pymethods]
-impl PyStandardScaler {
-    #[new]
-    #[pyo3(signature = (*args, **kwargs), text_signature = "(*, inputCol=None, outputCol=None)")]
-    fn new(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
-        let mut this = Self {
-            inner: StandardScaler::new(),
-            unsendable: Vec::new(),
-        };
-        // As PySpark's, which scales the values to (x - mean) / std: the JVM scaler centers them
-        // only with `withMean`, false by default, a param that PySpark's scaler does not have.
-        apply(&mut this, "withMean", Converted::Bool(true));
-        init_params(
-            &mut this,
-            "StandardScaler",
-            &[],
-            COLUMN_PARAMS,
-            args,
-            kwargs,
-        )?;
-        Ok(this)
-    }
-    #[pyo3(name = "setInputCol")]
-    fn set_input_col<'py>(
-        slf: Bound<'py, Self>,
-        value: &Bound<'py, PyAny>,
-    ) -> PyResult<Bound<'py, Self>> {
-        set_param(slf, "inputCol", Kind::Str, value)
-    }
-    #[pyo3(name = "setOutputCol")]
-    fn set_output_col<'py>(
-        slf: Bound<'py, Self>,
-        value: &Bound<'py, PyAny>,
-    ) -> PyResult<Bound<'py, Self>> {
-        set_param(slf, "outputCol", Kind::Str, value)
-    }
-    fn fit(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<PyMLModel> {
-        fit_native(slf, dataset, Some(SCALER_READS))
-    }
-}
-
-/// MaxAbsScaler estimator.
-#[pyclass(name = "MaxAbsScaler", module = "pyspark.ml.connect.feature")]
-pub struct PyMaxAbsScaler {
-    inner: MaxAbsScaler,
-    unsendable: Vec<&'static str>,
-}
-
-#[pymethods]
-impl PyMaxAbsScaler {
-    #[new]
-    #[pyo3(signature = (*args, **kwargs), text_signature = "(*, inputCol=None, outputCol=None)")]
-    fn new(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
-        let mut this = Self {
-            inner: MaxAbsScaler::new(),
-            unsendable: Vec::new(),
-        };
-        init_params(&mut this, "MaxAbsScaler", &[], COLUMN_PARAMS, args, kwargs)?;
-        Ok(this)
-    }
-    #[pyo3(name = "setInputCol")]
-    fn set_input_col<'py>(
-        slf: Bound<'py, Self>,
-        value: &Bound<'py, PyAny>,
-    ) -> PyResult<Bound<'py, Self>> {
-        set_param(slf, "inputCol", Kind::Str, value)
-    }
-    #[pyo3(name = "setOutputCol")]
-    fn set_output_col<'py>(
-        slf: Bound<'py, Self>,
-        value: &Bound<'py, PyAny>,
-    ) -> PyResult<Bound<'py, Self>> {
-        set_param(slf, "outputCol", Kind::Str, value)
-    }
-    fn fit(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<PyMLModel> {
-        fit_native(slf, dataset, Some(SCALER_READS))
-    }
-}
 
 /// StringIndexer estimator.
 #[pyclass(name = "StringIndexer", module = "pyspark.ml.connect.feature")]
@@ -1309,7 +1205,12 @@ impl PyLogisticRegression {
                 "Fitting pandas dataframe is not supported yet.",
             ));
         }
-        fit_native(slf, dataset, Some(LOGISTIC_REGRESSION_READS))
+        fit_native_checked(
+            slf,
+            dataset,
+            Some(LOGISTIC_REGRESSION_READS),
+            |py, estimator, df| check_labels(py, df, estimator.label_col()),
+        )
     }
 }
 
@@ -3918,8 +3819,6 @@ impl PyCrossValidator {
 }
 
 native!(
-    PyStandardScaler => StandardScaler,
-    PyMaxAbsScaler => MaxAbsScaler,
     PyStringIndexer => StringIndexer,
     PyVectorAssembler => VectorAssembler,
     PyLogisticRegression => LogisticRegression,

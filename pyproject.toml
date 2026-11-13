@@ -175,6 +175,7 @@ extend-exclude = [
     "python/pyspark/sql/connect/proto/example_plugins_pb2.py",
     "python/pyspark/sql/connect/proto/example_plugins_pb2.pyi",
     "python/pyspark/ml/connect/base.py",
+    "python/pyspark/ml/connect/feature.py",
     "python/pyspark/ml/connect/functions.py",
     "python/pyspark/ml/param/__init__.py",
     "python/pyspark/ml/param/_shared_params_code_gen.py",

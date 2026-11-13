@@ -100,6 +100,17 @@ def _operator_info(ref_id):
     )
 
 
+def _labels_result(classes=(0, 1), double=False):
+    # The response of the label query of a LogisticRegression fit: the array of the distinct labels
+    # of its collect_set, which the fit checks before it fits: of doubles, or else of longs.
+    import pyarrow as pa
+
+    element = T.DoubleType() if double else T.LongType()
+    arrow = pa.float64() if double else pa.int64()
+    table = pa.table({"labels": pa.array([list(classes)], pa.list_(arrow))})
+    return _arrow_result(table, T.StructType([T.StructField("labels", T.ArrayType(element))]))
+
+
 def _arrow_result(table, schema):
     # The ExecutePlanResponse of the rows of the Arrow table, of the Spark schema `schema`, which
     # the mock server sends of an execution.
@@ -130,8 +141,13 @@ def _requests_but_deletes(service):
 def _commands_but_deletes(service, start=0):
     # The commands of the requests that the server received from the start-th on, but the
     # Deletes of models that earlier tests released: a release is sent without waiting for it,
-    # so it can reach the server between a request of a test and the check of that request.
-    return [c for c in _commands(service)[start:] if not c.ml_command.HasField("delete")]
+    # so it can reach the server between a request of a test and the check of that request. A
+    # request of a DataFrame's plan, such as the label query of a fit, has no command.
+    return [
+        c
+        for c in _commands(service)[start:]
+        if c.WhichOneof("command_type") and not c.ml_command.HasField("delete")
+    ]
 
 
 def _last_request_but_deletes(service):
@@ -191,96 +207,77 @@ def test_ml_cache_queries_are_those_of_pyspark(ml_mock):
     assert command.ml_command.get_model_size.model_ref == pb2.ObjectRef(id="ref-1")
 
 
-def test_ml_connect_fitted_scalers_transform_the_cached_model(ml_mock):
+def test_ml_connect_fitted_string_indexer_transforms_the_cached_model(ml_mock):
     # As the fitted models of PySpark Connect: fit sends an MlCommand.Fit of the estimator, and the
     # transform of the fitted model refers to the object that the server cached for the fit, not to
-    # a transformer of the estimator's name, which the server rejects.
-    from pyspark.ml.connect.feature import MaxAbsScaler, StandardScaler, StringIndexer
+    # a transformer of the estimator's name, which the server rejects. (The scalers of
+    # pyspark.ml.connect are PySpark's own classes, which fit and transform in Python, see
+    # test_ml_connect_scalers_are_pyspark_own_classes.)
+    from pyspark.ml.connect.feature import StringIndexer
 
     spark, service = ml_mock
-    df = spark.range(1).selectExpr("array(1.0D, 2.0D) AS f", "'a' AS s")
-    models = []  # Kept alive, so that no model is released during the checks.
-    for cls, name, column in [
-        (StandardScaler, "org.apache.spark.ml.feature.StandardScaler", "f"),
-        (MaxAbsScaler, "org.apache.spark.ml.feature.MaxAbsScaler", "f"),
-        (StringIndexer, "org.apache.spark.ml.feature.StringIndexer", "s"),
-    ]:
-        sent = len(service.execute_requests)
-        service.execute_payload = _operator_info("model-1")
-        estimator = cls(inputCol=column, outputCol="o")
-        models.append(estimator.fit(df))
-        fit = _commands_but_deletes(service, sent)[0].ml_command.fit
-        assert fit.estimator.name == name
-        assert fit.estimator.type == pb2.MlOperator.OPERATOR_TYPE_ESTIMATOR
-        # StandardScaler also sends withMean, as PySpark's scales to (x - mean) / std. A scaler's
-        # fit sends no outputCol (see _unsent_by_fit), and its transform sends it below.
-        outputs = (
-            {}
-            if _unsent_by_fit(cls.__name__)
-            else {"outputCol": pb2.Expression.Literal(string="o")}
-        )
-        assert dict(fit.params.params) == {
-            "inputCol": pb2.Expression.Literal(string=column),
-            **outputs,
-            **({"withMean": pb2.Expression.Literal(boolean=True)} if cls is StandardScaler else {}),
-        }
-        if cls is StringIndexer:
-            assert fit.dataset == _relation(df)
-        else:
-            # A scaler sends the select of its input column, the column that PySpark's fit reads.
-            assert fit.dataset.project.input == _relation(df)
-            assert [_text(e) for e in fit.dataset.project.expressions] == [_attribute(column)]
+    df = spark.range(1).selectExpr("'a' AS s")
+    sent = len(service.execute_requests)
+    service.execute_payload = _operator_info("model-1")
+    model = StringIndexer(inputCol="s", outputCol="o").fit(df)
+    fit = _commands_but_deletes(service, sent)[0].ml_command.fit
+    assert fit.estimator.name == "org.apache.spark.ml.feature.StringIndexer"
+    assert fit.estimator.type == pb2.MlOperator.OPERATOR_TYPE_ESTIMATOR
+    assert dict(fit.params.params) == {
+        "inputCol": pb2.Expression.Literal(string="s"),
+        "outputCol": pb2.Expression.Literal(string="o"),
+    }
+    assert fit.dataset == _relation(df)
 
-        scaled = models[-1].transform(df)
-        assert len(service.execute_requests) == sent + 1
-        relation = _relation(scaled)
-        if cls is not StringIndexer:
-            # The vector that the JVM scaler outputs is sent as the array<double> of PySpark's.
-            assert _aliases(relation.with_columns) == [(["o"], _vector_array("o"))]
-            relation = relation.with_columns.input
-        transform = relation.ml_relation.transform
-        assert transform.obj_ref == pb2.ObjectRef(id="model-1")
-        assert not transform.HasField("transformer")
-        assert transform.input == _relation(df)
-        assert transform.params.params["outputCol"] == pb2.Expression.Literal(string="o")
+    scaled = model.transform(df)
+    assert len(service.execute_requests) == sent + 1
+    transform = _relation(scaled).ml_relation.transform
+    assert transform.obj_ref == pb2.ObjectRef(id="model-1")
+    assert not transform.HasField("transformer")
+    assert transform.input == _relation(df)
+    assert transform.params.params["outputCol"] == pb2.Expression.Literal(string="o")
 
 
-def test_ml_connect_scaler_fit_with_its_input_as_output_takes_no_output_col_as_pyspark(ml_mock):
-    # As PySpark's scaler fit, which reads only its inputCol, the fit of a scaler whose outputCol is
-    # its inputCol succeeds. The JVM fit checks that the output column does not exist, so the fit
-    # sends no outputCol, and the model keeps it: its transform raises PySpark's ValueError of an
-    # output column that the DataFrame has, before any request, and sends the outputCol otherwise.
-    from _mock_connect_server import ddl_data_type
-    from pyspark.ml.connect.feature import MaxAbsScaler, StandardScaler
-
-    spark, service = ml_mock
-    x = spark.range(1).selectExpr("array(1.0D, 2.0D) AS x")
-    models = []  # Kept alive, so that no model is released during the checks.
-    message = (
-        "Transformers does not allow output column having the same name with existing columns."
+def test_ml_connect_scalers_are_pyspark_own_classes(ml_mock):
+    # The scalers of pyspark.ml.connect are the classes of PySpark's feature.py, which
+    # StandardScaler and MaxAbsScaler fit with summarize_dataframe and transform with closures on
+    # the server, so they send no MlCommand and have no setters, as PySpark's have none. The native
+    # StringIndexer and VectorAssembler are exported by the same module, beside them.
+    import numpy as np
+    import pandas as pd
+    import pyspark.ml.connect as connect
+    from pyspark.ml.connect import feature
+    from pyspark.ml.connect.feature import (
+        ArrayAssembler,
+        MaxAbsScaler,
+        StandardScaler,
+        StringIndexer,
+        VectorAssembler,
     )
-    for cls in (StandardScaler, MaxAbsScaler):
-        service.data_type = ddl_data_type("x array<double>")
-        sent = len(service.execute_requests)
-        service.execute_payload = _operator_info("model-1")
-        models.append(cls(inputCol="x", outputCol="x").fit(x))
-        fit = _commands_but_deletes(service, sent)[0].ml_command.fit
-        assert "outputCol" not in fit.params.params, cls
-        assert fit.params.params["inputCol"] == pb2.Expression.Literal(string="x"), cls
 
-        sent = _requests_but_deletes(service)
-        with pytest.raises(ValueError) as error:
-            models[-1].transform(x)
-        assert str(error.value) == message, cls
-        assert _requests_but_deletes(service) == sent, cls
-        # Of a DataFrame without x, the transform appends x, as PySpark's does.
-        y = spark.range(1).selectExpr("array(3.0D) AS y")
-        service.data_type = ddl_data_type("y array<double>")
-        assert _model_sent(models[-1], y) == {
-            "inputCol": ("string", "x"),
-            **({"withMean": ("boolean", True)} if cls is StandardScaler else {}),
-            "outputCol": ("string", "x"),
-        }, cls
+    spark, service = ml_mock
+    for scaler in (StandardScaler, MaxAbsScaler):
+        assert scaler.__module__ == "pyspark.ml.connect.feature"
+        assert getattr(connect, scaler.__name__) is scaler
+        assert not hasattr(scaler, "set" + "InputCol")
+    assert connect.ArrayAssembler is ArrayAssembler is feature.ArrayAssembler
+    assert StringIndexer is feature.StringIndexer and VectorAssembler is feature.VectorAssembler
+    assert feature.StringIndexer.__module__ == "pyspark.ml.connect.feature"
+
+    # The model of a fit, built from its statistics, transforms a pandas DataFrame locally, as
+    # (x - mean) / scale, with the scale of a zero standard deviation replaced by 1, and without a
+    # request to the server.
+    sent = _requests_but_deletes(service)
+    model = feature.StandardScalerModel(
+        np.array([2.0, 1.0]), np.array([1.0, 0.0]), 3
+    )
+    model._resetUid("StandardScaler_test")
+    model._set(inputCol="f", outputCol="o")
+    pdf = pd.DataFrame({"f": [np.array([3.0, 5.0]), np.array([2.0, 1.0])]})
+    transformed = model.transform(pdf)
+    assert list(transformed.columns) == ["f", "o"]
+    assert [value.tolist() for value in transformed["o"]] == [[1.0, 4.0], [0.0, 0.0]]
+    assert _requests_but_deletes(service) == sent
 
 
 def _attribute(name):
@@ -327,23 +324,21 @@ def _aliases(with_columns):
 
 
 def test_ml_connect_native_estimators_take_the_array_columns_of_pyspark(ml_mock):
-    # As PySpark's pyspark.ml.connect classes, which compute on arrays: the fit of a native scaler,
-    # or of an estimator of a featuresCol, and the transform of its model find the column in the
-    # schema of the DataFrame, which they read once, regardless of case as Spark resolves it, and
-    # send an array of numbers as PySpark's array_to_vector of it, the vector that the JVM reads.
-    # The transform keeps the array in a column of its own, which takes its place again in the
-    # output, as PySpark's transform keeps its input columns, and the vector that a scaler outputs
-    # is the array<double> of PySpark's, of vector_to_array of it. A vector, another type and the
-    # column of StringIndexer, which reads no vector, are sent as they are. The fit of
-    # LogisticRegression or of a scaler, whose fit in PySpark reads only its columns, is of the
-    # select of them.
+    # As PySpark's pyspark.ml.connect classes, which compute on arrays: the fit of an estimator of
+    # a featuresCol, and the transform of its model find the column in the schema of the
+    # DataFrame, which they read once, regardless of case as Spark resolves it, and send an array
+    # of numbers as PySpark's array_to_vector of it, the vector that the JVM reads. The transform
+    # keeps the array in a column of its own, which takes its place again in the output, as
+    # PySpark's transform keeps its input columns. A vector, another type and the column of
+    # StringIndexer, which reads no vector, are sent as they are. The fit of LogisticRegression,
+    # whose fit in PySpark reads only its columns, is of the select of them.
+    # (The scalers compute on arrays in Python, as PySpark's do: they send no request of their own.)
     import pyspark.ml.connect as connect
     from _mock_connect_server import ddl_data_type
     from pyspark.ml.linalg import VectorUDT
 
     spark, service = ml_mock
     models = []  # Kept alive, so that no model is released during the checks.
-    scalers = (connect.MaxAbsScaler, connect.StandardScaler)
 
     def selected(relation, df, columns):
         # Whether relation is the select of the columns of df, or df itself of no columns.
@@ -360,36 +355,29 @@ def test_ml_connect_native_estimators_take_the_array_columns_of_pyspark(ml_mock)
         analyzed = len(service.analyze_requests)
         sent = len(service.execute_requests)
         service.execute_payload = _operator_info("model-1")
+        service.query_payload = _labels_result()
         models.append(estimator.fit(df))
+        service.query_payload = None
         fit = _commands_but_deletes(service, sent)[0].ml_command.fit
         transformed = _relation(models[-1].transform(df))
         assert len(service.analyze_requests) == analyzed + reads, estimator
         return df, fit, transformed
 
     service.data_type = ddl_data_type(
-        "id bigint, Features array<int>, label double, s string, words array<string>, "
-        "d array<decimal(10,2)>"
+        "id bigint, Features array<int>, label double, s string, words array<string>"
     )
     # Every native estimator of a featuresCol, of its default "features" here.
     featured = [name for name, params in _NATIVE_PARAMS.items() if "featuresCol" in params]
     assert {"LogisticRegression", "KMeans"} <= set(featured)
-    estimators = [cls(inputCol="features", outputCol="o") for cls in scalers] + [
-        getattr(connect, name)() for name in featured
-    ]
-    reads = {
-        "MaxAbsScaler": ["features"],
-        "StandardScaler": ["features"],
-        "LogisticRegression": ["features", "label"],
-    }
+    estimators = [getattr(connect, name)() for name in featured]
+    reads = {"LogisticRegression": ["features", "label"]}
     for estimator in estimators:
         name = type(estimator).__name__
         df, fit, transformed = requests(estimator)
         # The params name the column as they were given, and the dataset has the vector of the
-        # array in its place. (The params that a class sends of itself: see _defaults_sent, and
-        # the outputCol that a scaler's fit does not send: see _unsent_by_fit.)
-        params = {"inputCol": "features"} if type(estimator) in scalers else {}
+        # array in its place. (The params that a class sends of itself: see _defaults_sent.)
         sent = {k: v.string for k, v in fit.params.params.items() if k not in _defaults_sent(name)}
-        assert sent == params, name
+        assert sent == {}, name
         assert _defaults_sent(name).keys() <= fit.params.params.keys(), name
         assert selected(fit.dataset.with_columns.input, df, reads.get(name)), name
         assert _aliases(fit.dataset.with_columns) == [
@@ -406,7 +394,7 @@ def test_ml_connect_native_estimators_take_the_array_columns_of_pyspark(ml_mock)
             (["Features"], _array_to_vector("Features")),
         ], name
         vectors = []
-        outputs = [(["o"], _vector_array("o"))] if type(estimator) in scalers else []
+        outputs = []
         if name == "LogisticRegression":
             # The probability vector of the JVM model, in a column of its own (see
             # test_ml_connect_logistic_regression_outputs_the_columns_of_pyspark).
@@ -417,15 +405,6 @@ def test_ml_connect_native_estimators_take_the_array_columns_of_pyspark(ml_mock)
             ]
         assert transformed.drop.column_names == [kept] + vectors, name
         assert _aliases(output) == [(["Features"], _attribute(kept))] + outputs, name
-
-    # An array of decimals, which array_to_vector does not take, is cast to an array<double>.
-    _, fit, _ = requests(connect.MaxAbsScaler(inputCol="d", outputCol="o"))
-    cast = (
-        f"cast {{ expr {{ {_attribute('d')} }} "
-        "type { array { element_type { double { } } contains_null: true } } }"
-    )
-    vector = f'unresolved_function {{ function_name: "array_to_vector" arguments {{ {cast} }} }}'
-    assert _aliases(fit.dataset.with_columns) == [(["d"], vector)]
 
     for estimator, columns, analyzed in [
         (connect.LogisticRegression(featuresCol="s"), ["s", "label"], 1),
@@ -441,14 +420,45 @@ def test_ml_connect_native_estimators_take_the_array_columns_of_pyspark(ml_mock)
     service.data_type = _data_type_proto(
         T.StructType([T.StructField("features", VectorUDT())])
     ).SerializeToString()
-    for estimator in [connect.MaxAbsScaler(inputCol="features", outputCol="o"), connect.KMeans()]:
-        df, fit, transformed = requests(estimator)
-        scaler = type(estimator) in scalers
-        assert selected(fit.dataset, df, ["features"] if scaler else None), estimator
-        if scaler:
-            assert _aliases(transformed.with_columns) == [(["o"], _vector_array("o"))]
-            transformed = transformed.with_columns.input
-        assert transformed.ml_relation.transform.input == _relation(df), estimator
+    df, fit, transformed = requests(connect.KMeans())
+    assert fit.dataset == _relation(df)
+    assert transformed.ml_relation.transform.input == _relation(df)
+
+
+def test_ml_connect_logistic_regression_checks_its_labels_before_its_fit_as_pyspark(ml_mock):
+    # As PySpark's LogisticRegression._fit, which checks the distinct labels of its query before it
+    # fits: at least two, each an integer in [0, numClasses), else its ValueError, with no fit sent.
+    # The e2e test checks the same cases against the server.
+    import pyspark.ml.connect as connect
+
+    spark, service = ml_mock
+    df = spark.range(1)
+    too_few = "Training dataset distinct labels must >= 2."
+    not_index = "Training labels must be integers in [0, numClasses)."
+    for classes, double, message in [
+        ((), False, too_few),
+        ((1,), False, too_few),
+        ((0, 2), False, not_index),
+        ((1, 2), False, not_index),
+        ((-1, 1), False, not_index),
+        ((0.5, 1.0), True, not_index),
+    ]:
+        sent = len(service.execute_requests)
+        service.query_payload = _labels_result(classes, double)
+        with pytest.raises(ValueError) as error:
+            connect.LogisticRegression().fit(df)
+        assert str(error.value) == message, classes
+        service.query_payload = None
+        # Only the label query is sent: no fit, whose command would be the only one of the ML.
+        assert len(service.execute_requests) == sent + 1, classes
+        assert _commands_but_deletes(service, sent) == [], classes
+
+    sent = len(service.execute_requests)
+    service.execute_payload = _operator_info("model-1")
+    service.query_payload = _labels_result((0, 1, 2))
+    connect.LogisticRegression().fit(df)
+    service.query_payload = None
+    assert len(_commands_but_deletes(service, sent)) == 1
 
 
 def test_ml_connect_logistic_regression_outputs_the_columns_of_pyspark(ml_mock):
@@ -477,6 +487,7 @@ def test_ml_connect_logistic_regression_outputs_the_columns_of_pyspark(ml_mock):
         assert not hasattr(LogisticRegression, "set" + param[0].upper() + param[1:])
 
     df = spark.range(1)
+    service.query_payload = _labels_result()
     models = []  # Kept alive, so that no model is released during the checks.
     for estimator, columns, outputs in [
         (LogisticRegression(), ["features", "label"], ["prediction", "probability"]),
@@ -518,11 +529,11 @@ def test_ml_connect_logistic_regression_outputs_the_columns_of_pyspark(ml_mock):
 
 
 def test_ml_connect_transforms_raise_the_value_error_of_pyspark_of_an_existing_output(ml_mock):
-    # As PySpark's Transformer._transform: the transform of a model of LogisticRegression or of a
-    # scaler raises its ValueError of an output column that the DataFrame has already, of its
-    # exact name, before any execution, as PySpark reads the dataset's columns first, and so does
-    # the transform of a pandas DataFrame. The other native models, which PySpark's
-    # pyspark.ml.connect does not have, leave their outputs to the checks of their JVM models.
+    # As PySpark's Transformer._transform: the transform of a model of LogisticRegression raises
+    # its ValueError of an output column that the DataFrame has already, of its exact name, before
+    # any execution, as PySpark reads the dataset's columns first, and so does the transform of a
+    # pandas DataFrame. The other native models, which PySpark's pyspark.ml.connect does not have,
+    # leave their outputs to the checks of their JVM models.
     import pandas as pd
     import pyspark.ml.connect as connect
     from _mock_connect_server import ddl_data_type
@@ -537,20 +548,18 @@ def test_ml_connect_transforms_raise_the_value_error_of_pyspark_of_an_existing_o
         # The model of estimator, and the uid of its fit.
         sent = len(service.execute_requests)
         service.execute_payload = _operator_info("model-1")
+        service.query_payload = _labels_result()
         models.append(estimator.fit(spark.range(1)))
+        service.query_payload = None
         return models[-1], _commands_but_deletes(service, sent)[0].ml_command.fit.estimator.uid
 
     lr, _ = fitted(connect.LogisticRegression())
     unprobable, _ = fitted(connect.LogisticRegression(probabilityCol=""))
-    scaler, _ = fitted(connect.MaxAbsScaler(inputCol="f", outputCol="o"))
-    unnamed, uid = fitted(connect.StandardScaler(inputCol="f"))
     kmeans, _ = fitted(connect.KMeans())
     for model, column in [
         (lr, "prediction"),
         (lr, "probability"),
         (unprobable, "prediction"),
-        (scaler, "o"),
-        (unnamed, f"{uid}__output"),
     ]:
         service.data_type = ddl_data_type(f"f array<double>, `{column}` double")
         sent = _requests_but_deletes(service)
@@ -565,7 +574,6 @@ def test_ml_connect_transforms_raise_the_value_error_of_pyspark_of_an_existing_o
     for model, column in [
         (lr, "Prediction"),
         (unprobable, "probability"),
-        (scaler, "O"),
         (kmeans, "prediction"),
     ]:
         service.data_type = ddl_data_type(f"f array<double>, `{column}` double")
@@ -579,8 +587,8 @@ def test_ml_connect_fit_and_transform_take_the_pandas_frames_of_pyspark(ml_mock)
     # whole of it of the other native classes. The transform is a shallow copy of the pandas
     # DataFrame, with the output columns of the server appended, of its index, as PySpark's
     # transform_dataframe_column makes it. PySpark's LogisticRegression fits no pandas DataFrame,
-    # a missing column raises the KeyError of pandas, as PySpark's, and an object that is not a
-    # DataFrame the AttributeError of PySpark's first access to it.
+    # and an object that is not a DataFrame raises the AttributeError of PySpark's first access
+    # to it. (The scalers compute on a pandas DataFrame locally, as PySpark's do: no request.)
     import pandas as pd
     import pyarrow as pa
     import pyspark.ml.connect as connect
@@ -604,10 +612,6 @@ def test_ml_connect_fit_and_transform_take_the_pandas_frames_of_pyspark(ml_mock)
         models.append(estimator.fit(pdf))
         return _commands_but_deletes(service, sent)[0].ml_command.fit
 
-    sent = fit(connect.MaxAbsScaler(inputCol="features", outputCol="o")).dataset.with_columns
-    assert _aliases(sent) == [(["features"], _array_to_vector("features"))]
-    assert list(sent.input.to_df.column_names) == ["features"]
-    scaler = models[-1]
     sent = fit(connect.KMeans()).dataset.with_columns
     assert list(sent.input.to_df.column_names) == ["features", "label"]
 
@@ -619,35 +623,12 @@ def test_ml_connect_fit_and_transform_take_the_pandas_frames_of_pyspark(ml_mock)
         with pytest.raises(PySparkNotImplementedError) as error:
             unimplemented.fit(pdf)
         assert error.value.getCondition() == "NOT_IMPLEMENTED"
-    with pytest.raises(KeyError):
-        connect.MaxAbsScaler(inputCol="f").fit(pdf)
-    with pytest.raises(KeyError) as error:
-        scaler.transform(pd.DataFrame({"x": [1]}))
-    assert error.value.args == ("features",)
     assert _requests_but_deletes(service) == sent
 
-    service.execute_payload = _arrow_result(
-        pa.table({"o": pa.array([[0.5, 1.0], [1.0, -0.5]], pa.list_(pa.float64()))}),
-        T.StructType([T.StructField("o", T.ArrayType(T.DoubleType()))]),
-    )
-    transformed = scaler.transform(pdf)
-    root = _last_request_but_deletes(service).plan.root
-    assert [_text(e) for e in root.project.expressions] == [_attribute("o")]
-    transform = root.project.input.drop.input.with_columns.input.ml_relation.transform
-    assert list(transform.input.with_columns.input.to_df.column_names) == ["features"]
-    assert transformed is not pdf and list(pdf.columns) == ["features", "label"]
-    assert list(transformed.columns) == ["features", "label", "o"]
-    assert list(transformed.index) == [7, 9]
-    assert transformed.dtypes.astype(str).to_dict() == {
-        "features": "object", "label": "int64", "o": "object",
-    }
-    assert [type(value) for value in transformed["o"]] == [np.ndarray, np.ndarray]
-    assert [value.tolist() for value in transformed["o"]] == [[0.5, 1.0], [1.0, -0.5]]
-    # A shallow copy, of the data of pdf.
-    assert np.shares_memory(transformed["label"].to_numpy(), pdf["label"].to_numpy())
-
     service.execute_payload = _operator_info("model-2")
+    service.query_payload = _labels_result()
     models.append(connect.LogisticRegression().fit(spark.range(1)))
+    service.query_payload = None
     service.execute_payload = _arrow_result(
         pa.table({
             "prediction": pa.array([1, 0], pa.int64()),
@@ -664,11 +645,19 @@ def test_ml_connect_fit_and_transform_take_the_pandas_frames_of_pyspark(ml_mock)
         _attribute("prediction"), _attribute("probability"),
     ]
     assert list(transformed.columns) == ["features", "label", "prediction", "probability"]
+    assert list(transformed.index) == [7, 9]
     assert transformed.dtypes.astype(str).to_dict() == {
         "features": "object", "label": "int64", "prediction": "int64", "probability": "object",
     }
     assert transformed["prediction"].tolist() == [1, 0]
     assert [value.tolist() for value in transformed["probability"]] == [[0.25, 0.75], [0.5, 0.5]]
+    # A shallow copy, of the data of pdf.
+    assert np.shares_memory(transformed["label"].to_numpy(), pdf["label"].to_numpy())
+    sent = _requests_but_deletes(service)
+    with pytest.raises(KeyError) as error:
+        models[-1].transform(pd.DataFrame({"x": [1]}))
+    assert error.value.args == ("features",)
+    assert _requests_but_deletes(service) == sent
 
     class Columns:
         # An object of the attributes that PySpark reads, which is not a DataFrame.
@@ -678,18 +667,14 @@ def test_ml_connect_fit_and_transform_take_the_pandas_frames_of_pyspark(ml_mock)
     for other in ([1], None):
         name = type(other).__name__
         with pytest.raises(AttributeError) as error:
-            scaler.transform(other)
+            models[-1].transform(other)
         assert str(error.value) == f"'{name}' object has no attribute 'columns'"
-        for estimator in (
-            connect.LogisticRegression(),
-            connect.MaxAbsScaler(inputCol="features"),
-            connect.KMeans(),
-        ):
+        for estimator in (connect.LogisticRegression(), connect.KMeans()):
             with pytest.raises(AttributeError) as error:
                 estimator.fit(other)
             assert str(error.value) == f"'{name}' object has no attribute 'select'"
     with pytest.raises(TypeError) as error:
-        scaler.transform(Columns())
+        models[-1].transform(Columns())
     assert str(error.value) == "transform() takes a DataFrame or a pandas DataFrame, not 'Columns'"
     with pytest.raises(TypeError) as error:
         connect.KMeans().fit(Columns())
@@ -717,57 +702,38 @@ def test_ml_connect_pandas_frames_send_their_nan_as_pyspark(ml_mock):
     )
     models = []  # Kept alive, so that no model is released during the checks.
 
-    def sent_data(estimator):
-        # The Arrow table of the local data that the fit of estimator sends.
-        sent = len(service.execute_requests)
-        service.execute_payload = _operator_info("model-1")
-        models.append(estimator.fit(pdf))
-        fit = _commands_but_deletes(service, sent)[0].ml_command.fit
-        return pa.ipc.open_stream(_local_data(fit.dataset)).read_all()
-
-    # A scaler fits its inputCol, and the NaN of its elements survives.
-    table = sent_data(connect.MaxAbsScaler(inputCol="x", outputCol="o"))
-    assert table.column_names == ["x"]
-    first, second = table.column("x").to_pylist()
-    assert math.isnan(first[0]) and first[1] == 1.0 and second == [2.0, 4.0]
     # The other native classes send the whole of the pandas DataFrame, and a NaN value survives,
     # while the NaN of a string column is a null, as pandas makes it.
-    table = sent_data(connect.KMeans())
+    sent = len(service.execute_requests)
+    service.execute_payload = _operator_info("model-1")
+    models.append(connect.KMeans().fit(pdf))
+    fit = _commands_but_deletes(service, sent)[0].ml_command.fit
+    table = pa.ipc.open_stream(_local_data(fit.dataset)).read_all()
     assert table.column_names == ["x", "y", "s"]
     assert math.isnan(table.column("y").to_pylist()[1])
     assert table.column("y").to_pylist()[0] == 1.5
     assert table.column("s").to_pylist() == ["a", None]
+    first, second = table.column("x").to_pylist()
+    assert math.isnan(first[0]) and first[1] == 1.0 and second == [2.0, 4.0]
 
 
-def test_ml_connect_empty_pandas_transforms_compute_locally_as_pyspark(ml_mock):
-    # As PySpark's transform of an empty pandas DataFrame, which computes locally: a scaler appends
-    # its output column, of object dtype, to the index of the DataFrame, and a LogisticRegression
-    # model raises the ValueError of its transform function, which stacks no array. Neither sends
-    # a request, as the server cannot infer the schema of no rows.
+def test_ml_connect_logistic_regression_transforms_an_empty_pandas_frame_as_pyspark(ml_mock):
+    # As PySpark's transform of an empty pandas DataFrame, which computes locally: a
+    # LogisticRegression model raises the ValueError of its transform function, which stacks no
+    # array. It sends no request, as the server cannot infer the schema of no rows.
     import pandas as pd
     import pyspark.ml.connect as connect
 
     spark, service = ml_mock
     features = spark.range(1).selectExpr("array(1.0D, 2.0D) AS features")
     models = []  # Kept alive, so that no model is released during the checks.
-    service.execute_payload = _operator_info("model-1")
-    models.append(connect.MaxAbsScaler(inputCol="features", outputCol="o").fit(features))
+    service.execute_payload = _operator_info("model-2")
+    service.query_payload = _labels_result()
+    models.append(connect.LogisticRegression().fit(features))
+    service.query_payload = None
     sent = _requests_but_deletes(service)
 
     empty = pd.DataFrame({"features": pd.Series([], dtype=object)})
-    transformed = models[-1].transform(empty)
-    assert transformed is not empty and list(empty.columns) == ["features"]
-    assert list(transformed.columns) == ["features", "o"]
-    assert transformed.dtypes.astype(str).to_dict() == {"features": "object", "o": "object"}
-    assert len(transformed) == 0 and transformed.index.equals(empty.index)
-    assert _requests_but_deletes(service) == sent
-    with pytest.raises(KeyError) as error:
-        models[-1].transform(pd.DataFrame({"x": pd.Series([], dtype=object)}))
-    assert error.value.args == ("features",)
-
-    service.execute_payload = _operator_info("model-2")
-    models.append(connect.LogisticRegression().fit(features))
-    sent = _requests_but_deletes(service)
     with pytest.raises(ValueError, match="need at least one array to stack"):
         models[-1].transform(empty)
     assert _requests_but_deletes(service) == sent
@@ -784,10 +750,8 @@ def test_ml_connect_setters_set_the_params_of_their_receiver_as_pyspark(ml_mock)
         LinearRegression,
         LinearSVC,
         LogisticRegression,
-        MaxAbsScaler,
         MulticlassClassificationEvaluator,
         RegressionEvaluator,
-        StandardScaler,
         StringIndexer,
         VectorAssembler,
     )
@@ -811,15 +775,15 @@ def test_ml_connect_setters_set_the_params_of_their_receiver_as_pyspark(ml_mock)
             params = _commands_but_deletes(service, sent)[0].ml_command.evaluate.params
         elif hasattr(obj, "fit"):
             service.execute_payload = _operator_info("model-1")
+            service.query_payload = _labels_result()
             models.append(obj.fit(df))
+            service.query_payload = None
             params = _commands_but_deletes(service, sent)[0].ml_command.fit.params
         else:
             params = _relation(obj.transform(df)).ml_relation.transform.params
         return {name: value(literal) for name, literal in params.params.items()}
 
     for cls, values in [
-        (StandardScaler, dict(inputCol="in", outputCol="out")),
-        (MaxAbsScaler, dict(inputCol="in", outputCol="out")),
         (StringIndexer, dict(inputCol="in", outputCol="out")),
         (VectorAssembler, dict(inputCols=["a", "b"], outputCol="out")),
         (
@@ -874,10 +838,6 @@ def test_ml_connect_setters_set_the_params_of_their_receiver_as_pyspark(ml_mock)
             assert getattr(receiver, setter)(value=values[name]) is receiver, (cls, setter)
         params = sent_params(receiver)
         sent_values = {_sent_name(cls.__name__, name): value for name, value in values.items()}
-        for name in _unsent_by_fit(cls.__name__):
-            # The fit sends no such param, and the transform of the model it fitted sends it.
-            assert _model_sent(models[-1], df)[name] == ("string", values[name]), (cls, name)
-            del sent_values[name]
         assert {name: params.get(name) for name in sent_values} == sent_values, cls
         assert params == sent_params(cls(**values)), cls
 
@@ -923,8 +883,6 @@ def test_ml_pipeline_and_cross_validator_fit_is_not_implemented(ml_mock):
 # param in PySpark. Their constructors take them all but thresholds, which PySpark's
 # RandomForestClassifier takes by its setter only.
 _NATIVE_PARAMS = {
-    "StandardScaler": dict(inputCol="str", outputCol="str"),
-    "MaxAbsScaler": dict(inputCol="str", outputCol="str"),
     "StringIndexer": dict(inputCol="str", outputCol="str"),
     "VectorAssembler": dict(inputCols="str_list", outputCol="str"),
     "LogisticRegression": dict(
@@ -1056,7 +1014,9 @@ def _native_request(spark, service, obj, models):
         return evaluate.evaluator, evaluate.params
     if hasattr(obj, "fit"):
         service.execute_payload = _operator_info("model-1")
+        service.query_payload = _labels_result()
         models.append(obj.fit(df))
+        service.query_payload = None
         fit = _commands_but_deletes(service, sent)[0].ml_command.fit
         return fit.estimator, fit.params
     transform = _relation(obj.transform(df)).ml_relation.transform
@@ -1081,32 +1041,15 @@ def _sent_name(name, param):
 def _defaults_sent(name):
     # The params that a native class sends unless it is given them: the metric of
     # MulticlassClassificationEvaluator and the probability column of
-    # BinaryClassificationEvaluator, which PySpark's constructor sets, the centering of
-    # StandardScaler, as PySpark's scales to (x - mean) / std, and the empty raw prediction column
-    # of LogisticRegression, as PySpark's outputs no raw prediction.
+    # BinaryClassificationEvaluator, which PySpark's constructor sets, and the empty raw prediction
+    # column of LogisticRegression, as PySpark's outputs no raw prediction.
     if name == "MulticlassClassificationEvaluator":
         return {"metricName": ("string", "accuracy")}
     if name == "BinaryClassificationEvaluator":
         return {"rawPredictionCol": ("string", "probability")}
-    if name == "StandardScaler":
-        return {"withMean": ("boolean", True)}
     if name == "LogisticRegression":
         return {"rawPredictionCol": ("string", "")}
     return {}
-
-
-def _unsent_by_fit(name):
-    # The params that the fit of a native class takes but does not send: the outputCol of a scaler,
-    # whose JVM fit checks that its output column does not exist yet, so that the fit reads no
-    # output column, and whose model keeps it, for the transform to send it.
-    return {"outputCol"} if name in ("StandardScaler", "MaxAbsScaler") else set()
-
-
-def _model_sent(model, df):
-    # The params that the transform of a fitted scaler sends: its output column is appended, so
-    # that its relation is the with_columns of the transform.
-    transform = _relation(model.transform(df)).with_columns.input.ml_relation.transform
-    return {name: _literal_value(literal) for name, literal in transform.params.params.items()}
 
 
 def _native_sent(spark, service, obj, models):
@@ -1175,12 +1118,6 @@ def test_ml_connect_params_convert_with_the_type_converters_of_pyspark(ml_mock):
                     if name in _NOT_FITTABLE:
                         continue  # Their params are sent by no request.
                     sent = _native_sent(spark, service, obj, models)
-                    if param in _unsent_by_fit(name):
-                        # The fit sends none of it, and the transform of its model sends it.
-                        assert sent == _defaults_sent(name), (name, param, value)
-                        model_sent = _model_sent(models[-1], spark.range(1))
-                        assert model_sent[param] == expected, (name, param, value)
-                        continue
                     assert sent == {
                         **_defaults_sent(name), _sent_name(name, param): expected
                     }, (name, param, value)
@@ -1325,8 +1262,7 @@ def test_ml_connect_unsendable_ints_none_and_uids_as_pyspark(ml_mock):
             assert getattr(obj, setter)(value) is obj
             assert getattr(obj, setter)(None) is obj
             sent_name = _sent_name(name, param)
-            # The params that the fit sends: a scaler's fit sends no outputCol (see _unsent_by_fit).
-            sent_names = {sent_name} - _unsent_by_fit(name)
+            sent_names = {sent_name}
             sent = _native_sent(spark, service, obj, models)
             assert sent.keys() == sent_names | _defaults_sent(name).keys(), (name, param)
             if sent_names:
@@ -1361,6 +1297,7 @@ def test_ml_connect_setters_run_while_a_fit_or_an_evaluate_waits_as_pyspark(ml_m
         obj = getattr(connect, name)()
         service.reset()
         service.block_execute = True
+        service.query_payload = _labels_result()
         if hasattr(obj, "evaluate"):
             service.execute_payload = _ml_result(param=pb2.Expression.Literal(double=0.5))
             call = obj.evaluate
@@ -1382,10 +1319,14 @@ def test_ml_connect_setters_run_while_a_fit_or_an_evaluate_waits_as_pyspark(ml_m
             assert getattr(obj, setter)("changed") is obj
         finally:
             service.release_response()
+            if name == "LogisticRegression":
+                # Its fit waits for the release of its label query, as its own execution.
+                assert service.wait_execute_started(2), name
+                service.release_response()
             waiting.join(10)
         models.append(outcome)
         assert len(outcome) == 1 and not isinstance(outcome[0], Exception), (name, outcome)
-        (command,) = _commands(service)
+        (command,) = [c for c in _commands(service) if c.WhichOneof("command_type")]
         held = command.ml_command.evaluate if hasattr(obj, "evaluate") else command.ml_command.fit
         assert set(held.params.params) == set(_defaults_sent(name)), name
         assert _native_sent(spark, service, obj, models) == {
