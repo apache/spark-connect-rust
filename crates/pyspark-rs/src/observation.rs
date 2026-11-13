@@ -1,7 +1,7 @@
 //! PyO3 wrapper for `spark_connect::observation::Observation` (`pyspark.sql.Observation`).
 
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyString};
+use pyo3::types::{PyDict, PyString, PyTuple};
 use spark_connect::dataframe::DataFrame;
 use spark_connect::expression::Expression;
 use spark_connect::observation::Observation;
@@ -177,6 +177,19 @@ impl PyObservation {
         copy.borrow_mut().restored = restored;
         copy_attributes(slf, &copy, Some(memo))?;
         Ok(copy)
+    }
+
+    /// The reduce of pickle, which an Observation has at every protocol: as
+    /// `object.__reduce_ex__` gives it at the protocols 2 and up, of its class, which pickle
+    /// makes by `copyreg.__newobj__`, and of the state of `__getstate__`. Below protocol 2, the
+    /// default reduce of a class with a native base fails, as copyreg's does, so an Observation
+    /// would not pickle at all there.
+    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyTuple>> {
+        let py = slf.py();
+        let newobj = py.import("copyreg")?.getattr("__newobj__")?;
+        let args = PyTuple::new(py, [slf.get_type()])?;
+        let state = Self::__getstate__(slf)?;
+        PyTuple::new(py, [newobj, args.into_any(), state.into_any()])
     }
 
     /// The state that a pickled Observation keeps, that of PySpark's, its `__dict__`: `_name`,
