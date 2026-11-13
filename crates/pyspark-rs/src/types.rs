@@ -1782,7 +1782,7 @@ impl PyArrayType {
         elementType: &Bound<'_, PyAny>,
         containsNull: bool,
     ) -> PyResult<pyo3::PyClassInitializer<Self>> {
-        let et = py_to_data_type(elementType)?;
+        let et = nested_data_type(elementType, "elementType")?;
         Ok(init_chain!(
             DataType::Array {
                 element_type: Box::new(et.clone()),
@@ -1924,8 +1924,8 @@ impl PyMapType {
         valueType: &Bound<'_, PyAny>,
         valueContainsNull: bool,
     ) -> PyResult<pyo3::PyClassInitializer<Self>> {
-        let kt = py_to_data_type(keyType)?;
-        let vt = py_to_data_type(valueType)?;
+        let kt = nested_data_type(keyType, "keyType")?;
+        let vt = nested_data_type(valueType, "valueType")?;
         Ok(init_chain!(
             DataType::Map {
                 key_type: Box::new(kt.clone()),
@@ -2251,7 +2251,7 @@ impl PyStructField {
         };
         let field = StructField {
             name,
-            data_type: py_to_data_type(dataType)?,
+            data_type: nested_data_type(dataType, "dataType")?,
             nullable,
             metadata: md,
         };
@@ -3932,6 +3932,21 @@ pub(crate) fn schema_data_type(
     py_to_data_type(schema)
 }
 
+/// The type of a constructor of a nested type (`ArrayType`, `MapType`, `StructField`), which
+/// PySpark asserts to be a `DataType` before it reads it: a type string, or any other value, is an
+/// `AssertionError` with PySpark's message, for the argument `name`.
+fn nested_data_type(obj: &Bound<'_, PyAny>, name: &str) -> PyResult<DataType> {
+    let data_type_class = obj.py().import("pyspark.sql.types")?.getattr("DataType")?;
+    if !obj.is_instance(&data_type_class)? {
+        return Err(pyo3::exceptions::PyAssertionError::new_err(format!(
+            "{name} {} should be an instance of {}",
+            obj.str()?,
+            data_type_class.str()?
+        )));
+    }
+    py_to_data_type(obj)
+}
+
 pub(crate) fn py_to_data_type(obj: &Bound<'_, PyAny>) -> PyResult<DataType> {
     if let Ok(g) = obj.extract::<PyRef<PyGeometryType>>() {
         return Ok(DataType::Geometry { srid: g.srid });
@@ -4096,7 +4111,8 @@ pub(crate) fn py_to_data_type(obj: &Bound<'_, PyAny>) -> PyResult<DataType> {
     if let Ok(s) = obj.extract::<String>() {
         return DataType::from_ddl(&s).map_err(|e| {
             PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                "invalid type string '{s}': {e:?}"
+                "invalid type string '{s}': {}",
+                e.message()
             ))
         });
     }

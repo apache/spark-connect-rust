@@ -1002,6 +1002,19 @@ impl DataFrame {
     /// (`ExecutePlanResponse.schema`), as the reference client's `_to_table` returns it.
     /// Unlike the Arrow schema of the rows, it has the user-defined types of the columns.
     pub fn collect_with_schema(&self) -> Result<(Vec<Row>, Option<DataType>)> {
+        self.collect_with_schema_checked(|_| Ok(()))
+    }
+
+    /// As [`DataFrame::collect_with_schema`], but `check` runs on the schema as soon as the server
+    /// sends it, before the rows and any later response are read: an error that it returns ends
+    /// the execution then. PySpark's client converts the schema of the response that carries it,
+    /// so a schema that it cannot convert raises before a later failure of the stream. Not a
+    /// stable API.
+    #[doc(hidden)]
+    pub fn collect_with_schema_checked(
+        &self,
+        check: impl Fn(&DataType) -> Result<()>,
+    ) -> Result<(Vec<Row>, Option<DataType>)> {
         let request = self.build_execute_request()?;
         let observations = self.plan.observations();
         let mut stream = self.session.execute_plan(request)?;
@@ -1018,7 +1031,9 @@ impl DataFrame {
             capture_execution(&mut resp, &mut info, &self.session, &observations)
                 .map_err(|error| stream.fail(error))?;
             if let Some(data_type) = resp.schema.take() {
-                schema = Some(DataType::from_proto(&data_type).map_err(|e| stream.fail(e))?);
+                let data_type = DataType::from_proto(&data_type).map_err(|e| stream.fail(e))?;
+                check(&data_type).map_err(|e| stream.fail(e))?;
+                schema = Some(data_type);
             }
             if let Some(proto::execute_plan_response::ResponseType::ArrowBatch(batch)) =
                 resp.response_type
@@ -1098,6 +1113,16 @@ impl DataFrame {
     pub fn collect_record_batches_with_schema(
         &self,
     ) -> Result<(Vec<arrow::record_batch::RecordBatch>, Option<DataType>)> {
+        self.collect_record_batches_with_schema_checked(|_| Ok(()))
+    }
+
+    /// As [`DataFrame::collect_record_batches_with_schema`], with `check` run on the schema as
+    /// [`DataFrame::collect_with_schema_checked`] runs it. Not a stable API.
+    #[doc(hidden)]
+    pub fn collect_record_batches_with_schema_checked(
+        &self,
+        check: impl Fn(&DataType) -> Result<()>,
+    ) -> Result<(Vec<arrow::record_batch::RecordBatch>, Option<DataType>)> {
         let request = self.build_execute_request()?;
         let observations = self.plan.observations();
         let mut stream = self.session.execute_plan(request)?;
@@ -1114,7 +1139,9 @@ impl DataFrame {
             capture_execution(&mut resp, &mut info, &self.session, &observations)
                 .map_err(|error| stream.fail(error))?;
             if let Some(data_type) = resp.schema.take() {
-                schema = Some(DataType::from_proto(&data_type).map_err(|e| stream.fail(e))?);
+                let data_type = DataType::from_proto(&data_type).map_err(|e| stream.fail(e))?;
+                check(&data_type).map_err(|e| stream.fail(e))?;
+                schema = Some(data_type);
             }
             if let Some(proto::execute_plan_response::ResponseType::ArrowBatch(batch)) =
                 resp.response_type
@@ -1496,7 +1523,17 @@ impl DataFrame {
 
     /// The first row, with the schema of the result, as [`DataFrame::collect_with_schema`].
     pub fn first_with_schema(&self) -> Result<(Option<Row>, Option<DataType>)> {
-        let (rows, schema) = self.limit(1).collect_with_schema()?;
+        self.first_with_schema_checked(|_| Ok(()))
+    }
+
+    /// The first row, with the schema of the result, as [`DataFrame::collect_with_schema_checked`]
+    /// checks it. Not a stable API.
+    #[doc(hidden)]
+    pub fn first_with_schema_checked(
+        &self,
+        check: impl Fn(&DataType) -> Result<()>,
+    ) -> Result<(Option<Row>, Option<DataType>)> {
+        let (rows, schema) = self.limit(1).collect_with_schema_checked(check)?;
         Ok((rows.into_iter().next(), schema))
     }
 
