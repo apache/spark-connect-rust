@@ -744,3 +744,41 @@ lazy evaluation. Models must transform data in their fitting session.
 These additions cover native estimator construction, parameters, fitting and
 DataFrame transforms. Model coefficient/weight inspection, training summaries,
 persistence and single-vector prediction remain separate API work.
+
+
+## Native AFTSurvivalRegression, IsotonicRegression and FMRegressor
+
+All eight regression estimators in PySpark 4.3.0 now have native Rust fit/transform
+implementations. The three additions are available under `spark_connect::ml` and
+`pyspark.ml.connect.regression`, and are re-exported from `pyspark.ml.connect`.
+They fit Spark's JVM estimators and retain the returned server-cached models for
+as long as a model clone or transformed DataFrame needs them.
+
+- **AFTSurvivalRegression** fits a Weibull accelerated failure time model. It
+  accepts positive survival times and a censor column (1 for observed events, 0
+  for censored observations), and can produce a vector of requested quantiles.
+  All 11 constructor parameters have Rust and Python setters, including
+  `quantileProbabilities`, `quantilesCol`, and the aggregation/block-size settings.
+- **IsotonicRegression** fits increasing or decreasing univariate regression.
+  It supports scalar features or a selected vector component (`featureIndex`),
+  instance weights, interpolation between fitted boundaries, and clamping beyond
+  the training range. All six constructor parameters have setters.
+- **FMRegressor** fits factorization machines with pairwise interactions and
+  optional intercept and linear terms, using either `adamW` or `gd`. All 14
+  constructor parameters have setters, including factor size, initialization,
+  mini-batch fraction, regularization and seed.
+
+Unset parameters use Spark's defaults. The Python wrappers preserve PySpark's
+keyword-only constructor signatures and type conversion; numeric arrays are
+converted to ML vectors by the existing native fit/transform adapter.
+
+This support covers construction, configuration, fitting and DataFrame
+transforms. Python returns the common `MLModel`. Specialized model inspection
+(e.g. AFT coefficients/scale, isotonic boundaries/predictions, FM factors),
+single-instance prediction and model persistence are not exposed by these
+native wrappers.
+
+Parameter goldens come from official PySpark 4.3.0. Native Rust and Python tests
+exercise censoring and quantiles, weighted isotonic interpolation, both FM
+solvers, validation errors and cached-model lifetimes. The Python behavior tests
+also run unchanged against the official client.

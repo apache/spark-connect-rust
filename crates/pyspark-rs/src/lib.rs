@@ -247,6 +247,9 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ml::PyOneVsRest>()?;
 
     m.add_class::<ml::PyLinearRegression>()?;
+    m.add_class::<ml::PyAFTSurvivalRegression>()?;
+    m.add_class::<ml::PyIsotonicRegression>()?;
+    m.add_class::<ml::PyFMRegressor>()?;
     m.add_class::<ml::PyGeneralizedLinearRegression>()?;
     m.add_class::<ml::PyDecisionTreeClassifier>()?;
     m.add_class::<ml::PyNaiveBayes>()?;

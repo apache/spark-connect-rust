@@ -444,13 +444,14 @@ def test_ml_connect_logistic_regression_checks_its_labels_before_its_fit_as_pysp
         ((0.5, 1.0), True, not_index),
     ]:
         sent = len(service.execute_requests)
+        sent_requests = _requests_but_deletes(service)
         service.query_payload = _labels_result(classes, double)
         with pytest.raises(ValueError) as error:
             connect.LogisticRegression().fit(df)
         assert str(error.value) == message, classes
         service.query_payload = None
         # Only the label query is sent: no fit, whose command would be the only one of the ML.
-        assert len(service.execute_requests) == sent + 1, classes
+        assert _requests_but_deletes(service) == sent_requests + 1, classes
         assert _commands_but_deletes(service, sent) == [], classes
 
     sent = len(service.execute_requests)
@@ -883,6 +884,10 @@ def test_ml_pipeline_and_cross_validator_fit_is_not_implemented(ml_mock):
 # param in PySpark. Their constructors take them all but thresholds, which PySpark's
 # RandomForestClassifier takes by its setter only.
 _NATIVE_PARAMS = {
+    'AFTSurvivalRegression': {'featuresCol': 'str', 'labelCol': 'str', 'predictionCol': 'str', 'fitIntercept': 'bool', 'maxIter': 'int', 'tol': 'float', 'censorCol': 'str', 'quantileProbabilities': 'float_list', 'quantilesCol': 'str', 'aggregationDepth': 'int', 'maxBlockSizeInMB': 'float'},
+    'IsotonicRegression': {'featuresCol': 'str', 'labelCol': 'str', 'predictionCol': 'str', 'weightCol': 'str', 'isotonic': 'bool', 'featureIndex': 'int'},
+    'FMRegressor': {'featuresCol': 'str', 'labelCol': 'str', 'predictionCol': 'str', 'factorSize': 'int', 'fitIntercept': 'bool', 'fitLinear': 'bool', 'regParam': 'float', 'miniBatchFraction': 'float', 'initStd': 'float', 'maxIter': 'int', 'stepSize': 'float', 'tol': 'float', 'solver': 'str', 'seed': 'int'},
+
     "StringIndexer": dict(inputCol="str", outputCol="str"),
     "VectorAssembler": dict(inputCols="str_list", outputCol="str"),
     "LogisticRegression": dict(
@@ -3646,3 +3651,38 @@ def test_one_vs_rest_defers_base_param_validation_until_fit():
     assert estimator.setClassifier(None) is estimator
     with pytest.raises(ValueError, match="classifier"):
         estimator.fit(None)
+
+
+@pytest.mark.parametrize("name", ["AFTSurvivalRegression", "IsotonicRegression", "FMRegressor"])
+@pytest.mark.parametrize("use_setters", [False, True])
+def test_remaining_regressor_native_parameters_match_official_fixture(ml_mock, name, use_setters):
+    import base64
+    import inspect
+    import json
+    from pathlib import Path
+
+    from pyspark import _pyspark as native
+    from pyspark.ml import connect
+    from pyspark.ml.connect import regression
+
+    cls = getattr(regression, name)
+    assert cls is getattr(native, name) is getattr(connect, name)
+    fixture = json.loads((Path(__file__).resolve().parents[2] / "tests/golden/remaining_regressors.json").read_text())
+    defaults = fixture["defaults"][name]
+    signature = inspect.signature(cls)
+    assert list(signature.parameters) == list(defaults)
+    for key, value in defaults.items():
+        assert signature.parameters[key].default == value
+        assert signature.parameters[key].kind == inspect.Parameter.KEYWORD_ONLY
+    spark, service = ml_mock
+    models = []
+    for case in fixture["cases"]:
+        if case["class"] != name:
+            continue
+        estimator = cls() if use_setters else cls(**case["values"])
+        if use_setters:
+            for key, value in case["values"].items():
+                assert getattr(estimator, "set" + key[0].upper() + key[1:])(value) is estimator
+        operator, params = _native_request(spark, service, estimator, models)
+        assert operator.name == "org.apache.spark.ml.regression." + name
+        assert params == pb2.MlParams.FromString(base64.b64decode(case["params_b64"]))

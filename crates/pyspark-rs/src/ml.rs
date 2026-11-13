@@ -16,13 +16,14 @@ use pyo3::pyclass::boolean_struct::False;
 use pyo3::types::{PyDict, PyList, PyTuple, PyType};
 use pyo3::PyClass;
 use spark_connect::ml::{
-    BinaryClassificationEvaluator, BisectingKMeans, Classifier, CrossValidator,
-    DecisionTreeClassifier, DecisionTreeRegressor, Estimator, Evaluator, FMClassifier,
-    GBTClassifier, GBTRegressor, GaussianMixture, GeneralizedLinearRegression, KMeans,
-    LinearRegression, LinearSVC, LogisticRegression, MlOperator, MlVector, Model,
-    MulticlassClassificationEvaluator, MultilayerPerceptronClassifier, NaiveBayes, OneVsRest,
-    Params, Pipeline, RandomForestClassifier, RandomForestRegressor, RegressionEvaluator,
-    StringIndexer, Transformer, VectorAssembler,
+    AFTSurvivalRegression, BinaryClassificationEvaluator, BisectingKMeans, Classifier,
+    CrossValidator, DecisionTreeClassifier, DecisionTreeRegressor, Estimator, Evaluator,
+    FMClassifier, FMRegressor, GBTClassifier, GBTRegressor, GaussianMixture,
+    GeneralizedLinearRegression, IsotonicRegression, KMeans, LinearRegression, LinearSVC,
+    LogisticRegression, MlOperator, MlVector, Model, MulticlassClassificationEvaluator,
+    MultilayerPerceptronClassifier, NaiveBayes, OneVsRest, Params, Pipeline,
+    RandomForestClassifier, RandomForestRegressor, RegressionEvaluator, StringIndexer, Transformer,
+    VectorAssembler,
 };
 use spark_connect::DataFrame;
 
@@ -2297,6 +2298,393 @@ impl PyGeneralizedLinearRegression {
     }
 }
 
+/// Weibull accelerated failure time regression using Spark's JVM implementation.
+#[pyclass(
+    name = "AFTSurvivalRegression",
+    module = "pyspark.ml.connect.regression"
+)]
+pub struct PyAFTSurvivalRegression {
+    inner: AFTSurvivalRegression,
+    unsendable: Vec<&'static str>,
+}
+
+const AFTSURVIVAL_REGRESSION_PARAMS: &[(&str, Kind)] = &[
+    ("featuresCol", Kind::Str),
+    ("labelCol", Kind::Str),
+    ("predictionCol", Kind::Str),
+    ("fitIntercept", Kind::Bool),
+    ("maxIter", Kind::Int),
+    ("tol", Kind::Float),
+    ("censorCol", Kind::Str),
+    ("quantileProbabilities", Kind::FloatList),
+    ("quantilesCol", Kind::Str),
+    ("aggregationDepth", Kind::Int),
+    ("maxBlockSizeInMB", Kind::Float),
+];
+
+#[pymethods]
+impl PyAFTSurvivalRegression {
+    #[new]
+    #[pyo3(signature = (*args, **kwargs), text_signature = "(*, featuresCol='features', labelCol='label', predictionCol='prediction', fitIntercept=True, maxIter=100, tol=1e-06, censorCol='censor', quantileProbabilities=[0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99], quantilesCol=None, aggregationDepth=2, maxBlockSizeInMB=0.0)")]
+    fn new(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
+        let mut this = Self {
+            inner: AFTSurvivalRegression::new(),
+            unsendable: Vec::new(),
+        };
+        init_params(
+            &mut this,
+            "AFTSurvivalRegression",
+            &[],
+            AFTSURVIVAL_REGRESSION_PARAMS,
+            args,
+            kwargs,
+        )?;
+        Ok(this)
+    }
+
+    #[pyo3(name = "setFeaturesCol")]
+    fn set_feature_col<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "featuresCol", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setLabelCol")]
+    fn set_label_col<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "labelCol", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setPredictionCol")]
+    fn set_prediction_col<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "predictionCol", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setFitIntercept")]
+    fn set_fit_intercept<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "fitIntercept", Kind::Bool, value)
+    }
+
+    #[pyo3(name = "setMaxIter")]
+    fn set_max_iter<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "maxIter", Kind::Int, value)
+    }
+
+    #[pyo3(name = "setTol")]
+    fn set_tol<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "tol", Kind::Float, value)
+    }
+
+    #[pyo3(name = "setCensorCol")]
+    fn set_censor_col<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "censorCol", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setQuantileProbabilities")]
+    fn set_quantile_probabilities<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "quantileProbabilities", Kind::FloatList, value)
+    }
+
+    #[pyo3(name = "setQuantilesCol")]
+    fn set_quantiles_col<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "quantilesCol", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setAggregationDepth")]
+    fn set_aggregation_depth<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "aggregationDepth", Kind::Int, value)
+    }
+
+    #[pyo3(name = "setMaxBlockSizeInMB")]
+    fn set_max_block_size_in_mb<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "maxBlockSizeInMB", Kind::Float, value)
+    }
+
+    fn fit(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<PyMLModel> {
+        fit_native(slf, dataset, None)
+    }
+}
+
+/// Univariate isotonic or antitonic regression using Spark's JVM implementation.
+#[pyclass(name = "IsotonicRegression", module = "pyspark.ml.connect.regression")]
+pub struct PyIsotonicRegression {
+    inner: IsotonicRegression,
+    unsendable: Vec<&'static str>,
+}
+
+const ISOTONIC_REGRESSION_PARAMS: &[(&str, Kind)] = &[
+    ("featuresCol", Kind::Str),
+    ("labelCol", Kind::Str),
+    ("predictionCol", Kind::Str),
+    ("weightCol", Kind::Str),
+    ("isotonic", Kind::Bool),
+    ("featureIndex", Kind::Int),
+];
+
+#[pymethods]
+impl PyIsotonicRegression {
+    #[new]
+    #[pyo3(signature = (*args, **kwargs), text_signature = "(*, featuresCol='features', labelCol='label', predictionCol='prediction', weightCol=None, isotonic=True, featureIndex=0)")]
+    fn new(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
+        let mut this = Self {
+            inner: IsotonicRegression::new(),
+            unsendable: Vec::new(),
+        };
+        init_params(
+            &mut this,
+            "IsotonicRegression",
+            &[],
+            ISOTONIC_REGRESSION_PARAMS,
+            args,
+            kwargs,
+        )?;
+        Ok(this)
+    }
+
+    #[pyo3(name = "setFeaturesCol")]
+    fn set_feature_col<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "featuresCol", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setLabelCol")]
+    fn set_label_col<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "labelCol", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setPredictionCol")]
+    fn set_prediction_col<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "predictionCol", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setWeightCol")]
+    fn set_weight_col<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "weightCol", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setIsotonic")]
+    fn set_isotonic<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "isotonic", Kind::Bool, value)
+    }
+
+    #[pyo3(name = "setFeatureIndex")]
+    fn set_feature_index<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "featureIndex", Kind::Int, value)
+    }
+
+    fn fit(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<PyMLModel> {
+        fit_native(slf, dataset, None)
+    }
+}
+
+/// Factorization machines regression using Spark's JVM implementation.
+#[pyclass(name = "FMRegressor", module = "pyspark.ml.connect.regression")]
+pub struct PyFMRegressor {
+    inner: FMRegressor,
+    unsendable: Vec<&'static str>,
+}
+
+const FMREGRESSOR_PARAMS: &[(&str, Kind)] = &[
+    ("featuresCol", Kind::Str),
+    ("labelCol", Kind::Str),
+    ("predictionCol", Kind::Str),
+    ("factorSize", Kind::Int),
+    ("fitIntercept", Kind::Bool),
+    ("fitLinear", Kind::Bool),
+    ("regParam", Kind::Float),
+    ("miniBatchFraction", Kind::Float),
+    ("initStd", Kind::Float),
+    ("maxIter", Kind::Int),
+    ("stepSize", Kind::Float),
+    ("tol", Kind::Float),
+    ("solver", Kind::Str),
+    ("seed", Kind::Int),
+];
+
+#[pymethods]
+impl PyFMRegressor {
+    #[new]
+    #[pyo3(signature = (*args, **kwargs), text_signature = "(*, featuresCol='features', labelCol='label', predictionCol='prediction', factorSize=8, fitIntercept=True, fitLinear=True, regParam=0.0, miniBatchFraction=1.0, initStd=0.01, maxIter=100, stepSize=1.0, tol=1e-06, solver='adamW', seed=None)")]
+    fn new(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
+        let mut this = Self {
+            inner: FMRegressor::new(),
+            unsendable: Vec::new(),
+        };
+        init_params(
+            &mut this,
+            "FMRegressor",
+            &[],
+            FMREGRESSOR_PARAMS,
+            args,
+            kwargs,
+        )?;
+        Ok(this)
+    }
+
+    #[pyo3(name = "setFeaturesCol")]
+    fn set_feature_col<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "featuresCol", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setLabelCol")]
+    fn set_label_col<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "labelCol", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setPredictionCol")]
+    fn set_prediction_col<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "predictionCol", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setFactorSize")]
+    fn set_factor_size<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "factorSize", Kind::Int, value)
+    }
+
+    #[pyo3(name = "setFitIntercept")]
+    fn set_fit_intercept<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "fitIntercept", Kind::Bool, value)
+    }
+
+    #[pyo3(name = "setFitLinear")]
+    fn set_fit_linear<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "fitLinear", Kind::Bool, value)
+    }
+
+    #[pyo3(name = "setRegParam")]
+    fn set_reg_param<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "regParam", Kind::Float, value)
+    }
+
+    #[pyo3(name = "setMiniBatchFraction")]
+    fn set_mini_batch_fraction<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "miniBatchFraction", Kind::Float, value)
+    }
+
+    #[pyo3(name = "setInitStd")]
+    fn set_init_std<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "initStd", Kind::Float, value)
+    }
+
+    #[pyo3(name = "setMaxIter")]
+    fn set_max_iter<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "maxIter", Kind::Int, value)
+    }
+
+    #[pyo3(name = "setStepSize")]
+    fn set_step_size<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "stepSize", Kind::Float, value)
+    }
+
+    #[pyo3(name = "setTol")]
+    fn set_tol<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "tol", Kind::Float, value)
+    }
+
+    #[pyo3(name = "setSolver")]
+    fn set_solver<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "solver", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setSeed")]
+    fn set_seed<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "seed", Kind::Int, value)
+    }
+
+    fn fit(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<PyMLModel> {
+        fit_native(slf, dataset, None)
+    }
+}
+
 /// Decision tree classifier fitted and cached by Spark Connect.
 #[pyclass(
     name = "DecisionTreeClassifier",
@@ -4413,6 +4801,9 @@ native!(
     PyMultilayerPerceptronClassifier => MultilayerPerceptronClassifier,
     PyOneVsRest => OneVsRest,
     PyLinearRegression => LinearRegression,
+    PyAFTSurvivalRegression => AFTSurvivalRegression,
+    PyIsotonicRegression => IsotonicRegression,
+    PyFMRegressor => FMRegressor,
     PyGeneralizedLinearRegression => GeneralizedLinearRegression,
     PyDecisionTreeClassifier => DecisionTreeClassifier,
     PyNaiveBayes => NaiveBayes,

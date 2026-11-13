@@ -1,0 +1,382 @@
+{
+  "source": "apache/spark v4.3.0 pyspark.ml.regression",
+  "defaults": {
+    "AFTSurvivalRegression": {
+      "featuresCol": "features",
+      "labelCol": "label",
+      "predictionCol": "prediction",
+      "fitIntercept": true,
+      "maxIter": 100,
+      "tol": 1e-06,
+      "censorCol": "censor",
+      "quantileProbabilities": [
+        0.01,
+        0.05,
+        0.1,
+        0.25,
+        0.5,
+        0.75,
+        0.9,
+        0.95,
+        0.99
+      ],
+      "quantilesCol": null,
+      "aggregationDepth": 2,
+      "maxBlockSizeInMB": 0.0
+    },
+    "IsotonicRegression": {
+      "featuresCol": "features",
+      "labelCol": "label",
+      "predictionCol": "prediction",
+      "weightCol": null,
+      "isotonic": true,
+      "featureIndex": 0
+    },
+    "FMRegressor": {
+      "featuresCol": "features",
+      "labelCol": "label",
+      "predictionCol": "prediction",
+      "factorSize": 8,
+      "fitIntercept": true,
+      "fitLinear": true,
+      "regParam": 0.0,
+      "miniBatchFraction": 1.0,
+      "initStd": 0.01,
+      "maxIter": 100,
+      "stepSize": 1.0,
+      "tol": 1e-06,
+      "solver": "adamW",
+      "seed": null
+    }
+  },
+  "cases": [
+    {
+      "class": "AFTSurvivalRegression",
+      "values": {},
+      "params_b64": ""
+    },
+    {
+      "class": "AFTSurvivalRegression",
+      "values": {
+        "featuresCol": "input",
+        "labelCol": "duration",
+        "predictionCol": "pred",
+        "fitIntercept": false,
+        "maxIter": 50,
+        "tol": 1e-08,
+        "censorCol": "observed",
+        "quantileProbabilities": [
+          0.2,
+          0.5,
+          0.8
+        ],
+        "quantilesCol": "quantiles",
+        "aggregationDepth": 3,
+        "maxBlockSizeInMB": 1.0
+      },
+      "params_b64": "ChYKEGFnZ3JlZ2F0aW9uRGVwdGgSAjADChcKCWNlbnNvckNvbBIKaghvYnNlcnZlZAoWCgtmZWF0dXJlc0NvbBIHagVpbnB1dAoSCgxmaXRJbnRlcmNlcHQSAhgAChYKCGxhYmVsQ29sEgpqCGR1cmF0aW9uCh0KEG1heEJsb2NrU2l6ZUluTUISCVkAAAAAAADwPwoNCgdtYXhJdGVyEgIwMgoXCg1wcmVkaWN0aW9uQ29sEgZqBHByZWQKQQoVcXVhbnRpbGVQcm9iYWJpbGl0aWVzEiiyASUKAkoAEglZmpmZmZmZyT8SCVkAAAAAAADgPxIJWZqZmZmZmek/ChsKDHF1YW50aWxlc0NvbBILaglxdWFudGlsZXMKEAoDdG9sEglZOoww4o55RT4="
+    },
+    {
+      "class": "IsotonicRegression",
+      "values": {},
+      "params_b64": ""
+    },
+    {
+      "class": "IsotonicRegression",
+      "values": {
+        "featuresCol": "input",
+        "labelCol": "target",
+        "predictionCol": "pred",
+        "weightCol": "weight",
+        "isotonic": false,
+        "featureIndex": 1
+      },
+      "params_b64": "ChIKDGZlYXR1cmVJbmRleBICMAEKFgoLZmVhdHVyZXNDb2wSB2oFaW5wdXQKDgoIaXNvdG9uaWMSAhgAChQKCGxhYmVsQ29sEghqBnRhcmdldAoXCg1wcmVkaWN0aW9uQ29sEgZqBHByZWQKFQoJd2VpZ2h0Q29sEghqBndlaWdodA=="
+    },
+    {
+      "class": "FMRegressor",
+      "values": {},
+      "params_b64": ""
+    },
+    {
+      "class": "FMRegressor",
+      "values": {
+        "featuresCol": "input",
+        "labelCol": "target",
+        "predictionCol": "pred",
+        "factorSize": 2,
+        "fitIntercept": false,
+        "fitLinear": false,
+        "regParam": 0.1,
+        "miniBatchFraction": 0.5,
+        "initStd": 0.2,
+        "maxIter": 50,
+        "stepSize": 0.3,
+        "tol": 1e-08,
+        "solver": "gd",
+        "seed": 8589934592
+      },
+      "params_b64": "ChAKCmZhY3RvclNpemUSAjACChYKC2ZlYXR1cmVzQ29sEgdqBWlucHV0ChIKDGZpdEludGVyY2VwdBICGAAKDwoJZml0TGluZWFyEgIYAAoUCgdpbml0U3RkEglZmpmZmZmZyT8KFAoIbGFiZWxDb2wSCGoGdGFyZ2V0Cg0KB21heEl0ZXISAjAyCh4KEW1pbmlCYXRjaEZyYWN0aW9uEglZAAAAAAAA4D8KFwoNcHJlZGljdGlvbkNvbBIGagRwcmVkChUKCHJlZ1BhcmFtEglZmpmZmZmZuT8KDgoEc2VlZBIGOICAgIAgCg4KBnNvbHZlchIEagJnZAoVCghzdGVwU2l6ZRIJWTMzMzMzM9M/ChAKA3RvbBIJWTqMMOKOeUU+"
+    }
+  ],
+  "aft_rows": [
+    [
+      1.218,
+      1.0,
+      [
+        1.56,
+        -0.605
+      ]
+    ],
+    [
+      2.949,
+      0.0,
+      [
+        0.346,
+        2.158
+      ]
+    ],
+    [
+      3.627,
+      0.0,
+      [
+        1.38,
+        0.231
+      ]
+    ],
+    [
+      0.273,
+      1.0,
+      [
+        0.52,
+        1.151
+      ]
+    ],
+    [
+      4.199,
+      0.0,
+      [
+        0.795,
+        -0.226
+      ]
+    ]
+  ],
+  "aft": [
+    {
+      "options": {
+        "featuresCol": "input",
+        "labelCol": "duration",
+        "predictionCol": "pred",
+        "censorCol": "observed",
+        "fitIntercept": false,
+        "maxIter": 100,
+        "tol": 1e-08,
+        "quantileProbabilities": [
+          0.2,
+          0.5,
+          0.8
+        ],
+        "quantilesCol": "quantiles",
+        "aggregationDepth": 2,
+        "maxBlockSizeInMB": 1.0
+      },
+      "censored": false,
+      "predictions": [
+        3.347853946502114,
+        2.172586958336815,
+        3.451043366483275,
+        2.0188076707510088,
+        1.8851713140385438
+      ],
+      "quantiles": [
+        [
+          0.9938656434747983,
+          2.4882036184517085,
+          4.921604152607021
+        ],
+        [
+          0.644968260221865,
+          1.6147176123924858,
+          3.1938708100519504
+        ],
+        [
+          1.0244991241845887,
+          2.5648964169685975,
+          5.07330057843677
+        ],
+        [
+          0.5993163431872977,
+          1.5004252370594129,
+          2.967803367307618
+        ],
+        [
+          0.5596441872993653,
+          1.4011035606535247,
+          2.7713475903695226
+        ]
+      ]
+    },
+    {
+      "options": {
+        "featuresCol": "input",
+        "labelCol": "duration",
+        "predictionCol": "pred",
+        "censorCol": "observed",
+        "fitIntercept": false,
+        "maxIter": 100,
+        "tol": 1e-08,
+        "quantileProbabilities": [
+          0.2,
+          0.5,
+          0.8
+        ],
+        "quantilesCol": "quantiles",
+        "aggregationDepth": 2,
+        "maxBlockSizeInMB": 1.0
+      },
+      "censored": true,
+      "predictions": [
+        10.04888424188614,
+        19.22775352978342,
+        17.43265547950875,
+        9.131650929569455,
+        3.5385170918695095
+      ],
+      "quantiles": [
+        [
+          0.7511731751298859,
+          5.331942944971888,
+          22.881421179088026
+        ],
+        [
+          1.4373110807047482,
+          10.202255525389965,
+          43.78180863192949
+        ],
+        [
+          1.303124093409809,
+          9.24977561276453,
+          39.69435040697685
+        ],
+        [
+          0.6826082436446662,
+          4.845258496153699,
+          20.7928707257823
+        ],
+        [
+          0.26451087057721795,
+          1.8775389177052328,
+          8.057242772384734
+        ]
+      ]
+    },
+    {
+      "options": {
+        "featuresCol": "input",
+        "labelCol": "duration",
+        "predictionCol": "pred",
+        "censorCol": "observed",
+        "fitIntercept": true,
+        "maxIter": 100,
+        "tol": 1e-08,
+        "quantileProbabilities": [
+          0.2,
+          0.5,
+          0.8
+        ],
+        "quantilesCol": "quantiles",
+        "aggregationDepth": 2,
+        "maxBlockSizeInMB": 1.0
+      },
+      "censored": false,
+      "predictions": [
+        2.7226847429456003,
+        2.463945478573775,
+        2.5491520298232717,
+        2.6891906278253086,
+        3.0095915123987047
+      ],
+      "quantiles": [
+        [
+          1.010262887644848,
+          2.1369214421194207,
+          3.729080775642416
+        ],
+        [
+          0.914256665459687,
+          1.933847809233013,
+          3.3747027599089536
+        ],
+        [
+          0.945872891588918,
+          2.0007228695373174,
+          3.4914045238743
+        ],
+        [
+          0.9978347644299927,
+          2.110633311269599,
+          3.683206106856082
+        ],
+        [
+          1.1167207734296583,
+          2.3621025722969304,
+          4.122037955551445
+        ]
+      ]
+    },
+    {
+      "options": {
+        "featuresCol": "input",
+        "labelCol": "duration",
+        "predictionCol": "pred",
+        "censorCol": "observed",
+        "fitIntercept": true,
+        "maxIter": 100,
+        "tol": 1e-08,
+        "quantileProbabilities": [
+          0.2,
+          0.5,
+          0.8
+        ],
+        "quantilesCol": "quantiles",
+        "aggregationDepth": 2,
+        "maxBlockSizeInMB": 1.0
+      },
+      "censored": true,
+      "predictions": [
+        5.718980229637453,
+        18.07651649667316,
+        7.381861947425865,
+        13.577610764536105,
+        9.013098221697321
+      ],
+      "quantiles": [
+        [
+          0.561598316570269,
+          3.2436818681150075,
+          11.942413250247904
+        ],
+        [
+          1.7750964029176055,
+          10.25260910941418,
+          37.747504180807354
+        ],
+        [
+          0.7248916898408828,
+          4.186832405488372,
+          15.414854116050694
+        ],
+        [
+          1.3333082196881851,
+          7.700927102530106,
+          28.352858759818407
+        ],
+        [
+          0.8850775112241616,
+          5.112034331881677,
+          18.821212752366424
+        ]
+      ]
+    }
+  ]
+}
