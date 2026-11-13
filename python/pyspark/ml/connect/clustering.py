@@ -1,4 +1,4 @@
-"""Native clustering estimators backed by Spark Connect's JVM ML API."""
-from pyspark._pyspark import BisectingKMeans, GaussianMixture, KMeans
+"""Native clustering algorithms backed by Spark Connect's JVM ML API."""
+from pyspark._pyspark import LDA, BisectingKMeans, GaussianMixture, KMeans, PowerIterationClustering
 
-__all__ = ["GaussianMixture", "BisectingKMeans", "KMeans"]
+__all__ = ["BisectingKMeans", "GaussianMixture", "KMeans", "LDA", "PowerIterationClustering"]

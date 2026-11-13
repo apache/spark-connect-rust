@@ -786,3 +786,35 @@ Parameter goldens come from official PySpark 4.3.0. Native Rust and Python tests
 exercise censoring and quantiles, weighted isotonic interpolation, both FM
 solvers, validation errors and cached-model lifetimes. The Python behavior tests
 also run unchanged against the official client.
+
+
+## Native LDA and PowerIterationClustering
+
+The native Rust and Python APIs now implement all five clustering algorithms in
+PySpark 4.3.0: KMeans, BisectingKMeans, GaussianMixture, LDA and PowerIterationClustering.
+This describes algorithm execution, not complete model-inspection or persistence parity.
+
+Rust `ml::LDA` supports online and EM training and cached-model DataFrame transforms.
+Python exposes `LDA` through `pyspark.ml.connect` and `pyspark.ml.connect.clustering`;
+`fit` returns the shared native `MLModel`. All 14 constructor parameters have Python
+setters and Rust builder setters/getters, including document/topic concentrations,
+learning settings, checkpoint settings, seed and topic-distribution output column.
+Both optimizers return a vector of topic probabilities per document; empty documents
+produce zero vectors. Python also accepts numeric array feature columns on Spark
+DataFrames and preserves those arrays in the transformed output.
+
+`ml::PowerIterationClustering::assign_clusters` and Python `assignClusters` build
+Spark Connect's `powerIterationClusteringAssignClusters` helper relation. This algorithm
+has no fit/transform API or fitted model. It accepts source/destination vertex columns
+and optional nonnegative edge weights, with `k`, `maxIter` and `initMode` settings, and
+returns a Spark DataFrame with `id: bigint` and `cluster: int`. Parameter values are
+captured when the relation is built. Omitting `weightCol` uses unweighted edges; an
+explicit null remains distinct from an omitted parameter and is validated by Spark.
+The lazy relation retains any cached models used by its input DataFrame.
+
+Both APIs require Spark DataFrames and reject pandas inputs. Reference-derived golden
+fixtures and live tests cover both LDA optimizers, dense/sparse inputs, graph initialization
+modes, weighted/unweighted graphs, custom columns, setters, validation and model lifetime.
+LDA topic matrices, likelihood/perplexity methods, topic descriptions, distributed-model
+inspection/conversion and persistence are outside this native surface. The vendored
+`pyspark.ml.clustering` API retains its existing implementation.

@@ -1,0 +1,696 @@
+{
+  "spark_version": "4.3.0",
+  "defaults": {
+    "LDA": {
+      "featuresCol": "features",
+      "maxIter": 20,
+      "seed": null,
+      "checkpointInterval": 10,
+      "k": 10,
+      "optimizer": "online",
+      "learningOffset": 1024.0,
+      "learningDecay": 0.51,
+      "subsamplingRate": 0.05,
+      "optimizeDocConcentration": true,
+      "docConcentration": null,
+      "topicConcentration": null,
+      "topicDistributionCol": "topicDistribution",
+      "keepLastCheckpoint": true
+    },
+    "PowerIterationClustering": {
+      "k": 2,
+      "maxIter": 20,
+      "initMode": "random",
+      "srcCol": "src",
+      "dstCol": "dst",
+      "weightCol": null
+    }
+  },
+  "params": [
+    {
+      "class": "LDA",
+      "values": {},
+      "params_b64": ""
+    },
+    {
+      "class": "LDA",
+      "values": {
+        "featuresCol": "input",
+        "maxIter": 10,
+        "seed": 42,
+        "checkpointInterval": -1,
+        "k": 2,
+        "optimizer": "online",
+        "learningOffset": 16.0,
+        "learningDecay": 0.7,
+        "subsamplingRate": 1.0,
+        "optimizeDocConcentration": false,
+        "docConcentration": [
+          0.5,
+          0.5
+        ],
+        "topicConcentration": 0.5,
+        "topicDistributionCol": "topics",
+        "keepLastCheckpoint": false
+      },
+      "params_b64": "CiEKEmNoZWNrcG9pbnRJbnRlcnZhbBILMP///////////wEKMQoQZG9jQ29uY2VudHJhdGlvbhIdsgEaCgJKABIJWQAAAAAAAOA/EglZAAAAAAAA4D8KFgoLZmVhdHVyZXNDb2wSB2oFaW5wdXQKGAoSa2VlcExhc3RDaGVja3BvaW50EgIYAAoHCgFrEgIwAgoaCg1sZWFybmluZ0RlY2F5EglZZmZmZmZm5j8KGwoObGVhcm5pbmdPZmZzZXQSCVkAAAAAAAAwQAoNCgdtYXhJdGVyEgIwCgoeChhvcHRpbWl6ZURvY0NvbmNlbnRyYXRpb24SAhgAChUKCW9wdGltaXplchIIagZvbmxpbmUKCgoEc2VlZBICMCoKHAoPc3Vic2FtcGxpbmdSYXRlEglZAAAAAAAA8D8KHwoSdG9waWNDb25jZW50cmF0aW9uEglZAAAAAAAA4D8KIAoUdG9waWNEaXN0cmlidXRpb25Db2wSCGoGdG9waWNz"
+    },
+    {
+      "class": "LDA",
+      "values": {
+        "featuresCol": "input",
+        "maxIter": 10,
+        "seed": 2147483647,
+        "checkpointInterval": -1,
+        "k": 2,
+        "optimizer": "online",
+        "learningOffset": 16.0,
+        "learningDecay": 0.7,
+        "subsamplingRate": 1.0,
+        "optimizeDocConcentration": false,
+        "docConcentration": [
+          0.5,
+          0.5
+        ],
+        "topicConcentration": 0.5,
+        "topicDistributionCol": "topics",
+        "keepLastCheckpoint": false
+      },
+      "params_b64": "CiEKEmNoZWNrcG9pbnRJbnRlcnZhbBILMP///////////wEKMQoQZG9jQ29uY2VudHJhdGlvbhIdsgEaCgJKABIJWQAAAAAAAOA/EglZAAAAAAAA4D8KFgoLZmVhdHVyZXNDb2wSB2oFaW5wdXQKGAoSa2VlcExhc3RDaGVja3BvaW50EgIYAAoHCgFrEgIwAgoaCg1sZWFybmluZ0RlY2F5EglZZmZmZmZm5j8KGwoObGVhcm5pbmdPZmZzZXQSCVkAAAAAAAAwQAoNCgdtYXhJdGVyEgIwCgoeChhvcHRpbWl6ZURvY0NvbmNlbnRyYXRpb24SAhgAChUKCW9wdGltaXplchIIagZvbmxpbmUKDgoEc2VlZBIGMP////8HChwKD3N1YnNhbXBsaW5nUmF0ZRIJWQAAAAAAAPA/Ch8KEnRvcGljQ29uY2VudHJhdGlvbhIJWQAAAAAAAOA/CiAKFHRvcGljRGlzdHJpYnV0aW9uQ29sEghqBnRvcGljcw=="
+    },
+    {
+      "class": "LDA",
+      "values": {
+        "featuresCol": "input",
+        "maxIter": 10,
+        "seed": 2147483648,
+        "checkpointInterval": -1,
+        "k": 2,
+        "optimizer": "online",
+        "learningOffset": 16.0,
+        "learningDecay": 0.7,
+        "subsamplingRate": 1.0,
+        "optimizeDocConcentration": false,
+        "docConcentration": [
+          0.5,
+          0.5
+        ],
+        "topicConcentration": 0.5,
+        "topicDistributionCol": "topics",
+        "keepLastCheckpoint": false
+      },
+      "params_b64": "CiEKEmNoZWNrcG9pbnRJbnRlcnZhbBILMP///////////wEKMQoQZG9jQ29uY2VudHJhdGlvbhIdsgEaCgJKABIJWQAAAAAAAOA/EglZAAAAAAAA4D8KFgoLZmVhdHVyZXNDb2wSB2oFaW5wdXQKGAoSa2VlcExhc3RDaGVja3BvaW50EgIYAAoHCgFrEgIwAgoaCg1sZWFybmluZ0RlY2F5EglZZmZmZmZm5j8KGwoObGVhcm5pbmdPZmZzZXQSCVkAAAAAAAAwQAoNCgdtYXhJdGVyEgIwCgoeChhvcHRpbWl6ZURvY0NvbmNlbnRyYXRpb24SAhgAChUKCW9wdGltaXplchIIagZvbmxpbmUKDgoEc2VlZBIGOICAgIAIChwKD3N1YnNhbXBsaW5nUmF0ZRIJWQAAAAAAAPA/Ch8KEnRvcGljQ29uY2VudHJhdGlvbhIJWQAAAAAAAOA/CiAKFHRvcGljRGlzdHJpYnV0aW9uQ29sEghqBnRvcGljcw=="
+    },
+    {
+      "class": "LDA",
+      "values": {
+        "featuresCol": "input",
+        "maxIter": 10,
+        "seed": -2147483649,
+        "checkpointInterval": -1,
+        "k": 2,
+        "optimizer": "online",
+        "learningOffset": 16.0,
+        "learningDecay": 0.7,
+        "subsamplingRate": 1.0,
+        "optimizeDocConcentration": false,
+        "docConcentration": [
+          0.5,
+          0.5
+        ],
+        "topicConcentration": 0.5,
+        "topicDistributionCol": "topics",
+        "keepLastCheckpoint": false
+      },
+      "params_b64": "CiEKEmNoZWNrcG9pbnRJbnRlcnZhbBILMP///////////wEKMQoQZG9jQ29uY2VudHJhdGlvbhIdsgEaCgJKABIJWQAAAAAAAOA/EglZAAAAAAAA4D8KFgoLZmVhdHVyZXNDb2wSB2oFaW5wdXQKGAoSa2VlcExhc3RDaGVja3BvaW50EgIYAAoHCgFrEgIwAgoaCg1sZWFybmluZ0RlY2F5EglZZmZmZmZm5j8KGwoObGVhcm5pbmdPZmZzZXQSCVkAAAAAAAAwQAoNCgdtYXhJdGVyEgIwCgoeChhvcHRpbWl6ZURvY0NvbmNlbnRyYXRpb24SAhgAChUKCW9wdGltaXplchIIagZvbmxpbmUKEwoEc2VlZBILOP/////3/////wEKHAoPc3Vic2FtcGxpbmdSYXRlEglZAAAAAAAA8D8KHwoSdG9waWNDb25jZW50cmF0aW9uEglZAAAAAAAA4D8KIAoUdG9waWNEaXN0cmlidXRpb25Db2wSCGoGdG9waWNz"
+    },
+    {
+      "class": "LDA",
+      "values": {
+        "featuresCol": "input",
+        "maxIter": 10,
+        "seed": 9223372036854775807,
+        "checkpointInterval": -1,
+        "k": 2,
+        "optimizer": "online",
+        "learningOffset": 16.0,
+        "learningDecay": 0.7,
+        "subsamplingRate": 1.0,
+        "optimizeDocConcentration": false,
+        "docConcentration": [
+          0.5,
+          0.5
+        ],
+        "topicConcentration": 0.5,
+        "topicDistributionCol": "topics",
+        "keepLastCheckpoint": false
+      },
+      "params_b64": "CiEKEmNoZWNrcG9pbnRJbnRlcnZhbBILMP///////////wEKMQoQZG9jQ29uY2VudHJhdGlvbhIdsgEaCgJKABIJWQAAAAAAAOA/EglZAAAAAAAA4D8KFgoLZmVhdHVyZXNDb2wSB2oFaW5wdXQKGAoSa2VlcExhc3RDaGVja3BvaW50EgIYAAoHCgFrEgIwAgoaCg1sZWFybmluZ0RlY2F5EglZZmZmZmZm5j8KGwoObGVhcm5pbmdPZmZzZXQSCVkAAAAAAAAwQAoNCgdtYXhJdGVyEgIwCgoeChhvcHRpbWl6ZURvY0NvbmNlbnRyYXRpb24SAhgAChUKCW9wdGltaXplchIIagZvbmxpbmUKEgoEc2VlZBIKOP//////////fwocCg9zdWJzYW1wbGluZ1JhdGUSCVkAAAAAAADwPwofChJ0b3BpY0NvbmNlbnRyYXRpb24SCVkAAAAAAADgPwogChR0b3BpY0Rpc3RyaWJ1dGlvbkNvbBIIagZ0b3BpY3M="
+    },
+    {
+      "class": "LDA",
+      "values": {
+        "featuresCol": "input",
+        "maxIter": 10,
+        "seed": -9223372036854775808,
+        "checkpointInterval": -1,
+        "k": 2,
+        "optimizer": "online",
+        "learningOffset": 16.0,
+        "learningDecay": 0.7,
+        "subsamplingRate": 1.0,
+        "optimizeDocConcentration": false,
+        "docConcentration": [
+          0.5,
+          0.5
+        ],
+        "topicConcentration": 0.5,
+        "topicDistributionCol": "topics",
+        "keepLastCheckpoint": false
+      },
+      "params_b64": "CiEKEmNoZWNrcG9pbnRJbnRlcnZhbBILMP///////////wEKMQoQZG9jQ29uY2VudHJhdGlvbhIdsgEaCgJKABIJWQAAAAAAAOA/EglZAAAAAAAA4D8KFgoLZmVhdHVyZXNDb2wSB2oFaW5wdXQKGAoSa2VlcExhc3RDaGVja3BvaW50EgIYAAoHCgFrEgIwAgoaCg1sZWFybmluZ0RlY2F5EglZZmZmZmZm5j8KGwoObGVhcm5pbmdPZmZzZXQSCVkAAAAAAAAwQAoNCgdtYXhJdGVyEgIwCgoeChhvcHRpbWl6ZURvY0NvbmNlbnRyYXRpb24SAhgAChUKCW9wdGltaXplchIIagZvbmxpbmUKEwoEc2VlZBILOICAgICAgICAgAEKHAoPc3Vic2FtcGxpbmdSYXRlEglZAAAAAAAA8D8KHwoSdG9waWNDb25jZW50cmF0aW9uEglZAAAAAAAA4D8KIAoUdG9waWNEaXN0cmlidXRpb25Db2wSCGoGdG9waWNz"
+    },
+    {
+      "class": "PowerIterationClustering",
+      "values": {},
+      "params_b64": ""
+    },
+    {
+      "class": "PowerIterationClustering",
+      "values": {
+        "k": 3,
+        "maxIter": 40,
+        "initMode": "degree",
+        "srcCol": "source",
+        "dstCol": "target",
+        "weightCol": "affinity"
+      },
+      "params_b64": "ChIKBmRzdENvbBIIagZ0YXJnZXQKFAoIaW5pdE1vZGUSCGoGZGVncmVlCgcKAWsSAjADCg0KB21heEl0ZXISAjAoChIKBnNyY0NvbBIIagZzb3VyY2UKFwoJd2VpZ2h0Q29sEgpqCGFmZmluaXR5"
+    },
+    {
+      "class": "PowerIterationClustering",
+      "values": {
+        "weightCol": null
+      },
+      "params_b64": "ChEKCXdlaWdodENvbBIECgIKAA=="
+    },
+    {
+      "class": "PowerIterationClustering",
+      "values": {
+        "k": 2147483648
+      },
+      "params_b64": "CgsKAWsSBjiAgICACA=="
+    },
+    {
+      "class": "PowerIterationClustering",
+      "values": {
+        "k": null
+      },
+      "params_b64": "CgkKAWsSBAoCCgA="
+    }
+  ],
+  "pic_fetch": [
+    {
+      "values": {},
+      "fetch_b64": "Ch8KHV9fX19fX01MX0NPTk5FQ1RfSEVMUEVSX19fX19fElwKJnBvd2VySXRlcmF0aW9uQ2x1c3RlcmluZ0Fzc2lnbkNsdXN0ZXJzEgISABIECgIwAhIECgIwFBIKCghqBnJhbmRvbRIHCgVqA3NyYxIHCgVqA2RzdBIECgJqAA=="
+    },
+    {
+      "values": {
+        "k": 3,
+        "maxIter": 40,
+        "initMode": "degree",
+        "srcCol": "source",
+        "dstCol": "target",
+        "weightCol": "affinity"
+      },
+      "fetch_b64": "Ch8KHV9fX19fX01MX0NPTk5FQ1RfSEVMUEVSX19fX19fEmoKJnBvd2VySXRlcmF0aW9uQ2x1c3RlcmluZ0Fzc2lnbkNsdXN0ZXJzEgISABIECgIwAxIECgIwKBIKCghqBmRlZ3JlZRIKCghqBnNvdXJjZRIKCghqBnRhcmdldBIMCgpqCGFmZmluaXR5"
+    },
+    {
+      "values": {
+        "weightCol": null
+      },
+      "fetch_b64": "Ch8KHV9fX19fX01MX0NPTk5FQ1RfSEVMUEVSX19fX19fEl4KJnBvd2VySXRlcmF0aW9uQ2x1c3RlcmluZ0Fzc2lnbkNsdXN0ZXJzEgISABIECgIwAhIECgIwFBIKCghqBnJhbmRvbRIHCgVqA3NyYxIHCgVqA2RzdBIGCgQKAgoA"
+    },
+    {
+      "values": {
+        "k": 2147483648
+      },
+      "fetch_b64": "Ch8KHV9fX19fX01MX0NPTk5FQ1RfSEVMUEVSX19fX19fEmAKJnBvd2VySXRlcmF0aW9uQ2x1c3RlcmluZ0Fzc2lnbkNsdXN0ZXJzEgISABIICgY4gICAgAgSBAoCMBQSCgoIagZyYW5kb20SBwoFagNzcmMSBwoFagNkc3QSBAoCagA="
+    },
+    {
+      "values": {
+        "k": null
+      },
+      "fetch_b64": "Ch8KHV9fX19fX01MX0NPTk5FQ1RfSEVMUEVSX19fX19fEl4KJnBvd2VySXRlcmF0aW9uQ2x1c3RlcmluZ0Fzc2lnbkNsdXN0ZXJzEgISABIGCgQKAgoAEgQKAjAUEgoKCGoGcmFuZG9tEgcKBWoDc3JjEgcKBWoDZHN0EgQKAmoA"
+    }
+  ],
+  "documents": [
+    [
+      10.0,
+      8.0,
+      2.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      8.0,
+      10.0,
+      1.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      9.0,
+      7.0,
+      3.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      12.0,
+      6.0,
+      2.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      7.0,
+      9.0,
+      3.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      11.0,
+      8.0,
+      1.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      0.0,
+      10.0,
+      8.0,
+      2.0
+    ],
+    [
+      0.0,
+      0.0,
+      0.0,
+      8.0,
+      10.0,
+      1.0
+    ],
+    [
+      0.0,
+      0.0,
+      0.0,
+      9.0,
+      7.0,
+      3.0
+    ],
+    [
+      0.0,
+      0.0,
+      0.0,
+      12.0,
+      6.0,
+      2.0
+    ],
+    [
+      0.0,
+      0.0,
+      0.0,
+      7.0,
+      9.0,
+      3.0
+    ],
+    [
+      0.0,
+      0.0,
+      0.0,
+      11.0,
+      8.0,
+      1.0
+    ]
+  ],
+  "held_out": [
+    [
+      8.0,
+      6.0,
+      1.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      10.0,
+      9.0,
+      2.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      0.0,
+      8.0,
+      6.0,
+      1.0
+    ],
+    [
+      0.0,
+      0.0,
+      0.0,
+      10.0,
+      9.0,
+      2.0
+    ],
+    [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ]
+  ],
+  "edges": [
+    [
+      1,
+      0,
+      0.5
+    ],
+    [
+      2,
+      0,
+      0.5
+    ],
+    [
+      2,
+      1,
+      0.7
+    ],
+    [
+      3,
+      0,
+      0.5
+    ],
+    [
+      3,
+      1,
+      0.7
+    ],
+    [
+      3,
+      2,
+      0.9
+    ],
+    [
+      4,
+      0,
+      0.5
+    ],
+    [
+      4,
+      1,
+      0.7
+    ],
+    [
+      4,
+      2,
+      0.9
+    ],
+    [
+      4,
+      3,
+      1.1
+    ],
+    [
+      5,
+      0,
+      0.5
+    ],
+    [
+      5,
+      1,
+      0.7
+    ],
+    [
+      5,
+      2,
+      0.9
+    ],
+    [
+      5,
+      3,
+      1.1
+    ],
+    [
+      5,
+      4,
+      1.3
+    ]
+  ],
+  "lda": [
+    {
+      "values": {
+        "featuresCol": "input",
+        "maxIter": 10,
+        "seed": 42,
+        "checkpointInterval": -1,
+        "k": 2,
+        "optimizer": "online",
+        "learningOffset": 16.0,
+        "learningDecay": 0.7,
+        "subsamplingRate": 1.0,
+        "optimizeDocConcentration": false,
+        "docConcentration": [
+          0.5,
+          0.5
+        ],
+        "topicConcentration": 0.5,
+        "topicDistributionCol": "topics",
+        "keepLastCheckpoint": false
+      },
+      "topics": [
+        [
+          0.9686723238078985,
+          0.03132767619210143
+        ],
+        [
+          0.9772109110415493,
+          0.02278908895845055
+        ],
+        [
+          0.031342638228196364,
+          0.9686573617718036
+        ],
+        [
+          0.022799305031864447,
+          0.9772006949681356
+        ],
+        [
+          0.0,
+          0.0
+        ]
+      ]
+    },
+    {
+      "values": {
+        "featuresCol": "input",
+        "maxIter": 10,
+        "seed": 42,
+        "checkpointInterval": -1,
+        "k": 2,
+        "optimizer": "em",
+        "learningOffset": 16.0,
+        "learningDecay": 0.7,
+        "subsamplingRate": 1.0,
+        "optimizeDocConcentration": false,
+        "docConcentration": [
+          2.0,
+          2.0
+        ],
+        "topicConcentration": 2.0,
+        "topicDistributionCol": "topics",
+        "keepLastCheckpoint": false
+      },
+      "topics": [
+        [
+          0.10526315789918282,
+          0.8947368421008172
+        ],
+        [
+          0.08000000000353698,
+          0.9199999999964631
+        ],
+        [
+          0.8947368421005992,
+          0.10526315789940072
+        ],
+        [
+          0.9199999999962896,
+          0.08000000000371045
+        ],
+        [
+          0.0,
+          0.0
+        ]
+      ]
+    }
+  ],
+  "pic": [
+    {
+      "values": {
+        "k": 2,
+        "maxIter": 40,
+        "initMode": "random",
+        "srcCol": "source",
+        "dstCol": "target"
+      },
+      "assignments": [
+        [
+          0,
+          1
+        ],
+        [
+          1,
+          0
+        ],
+        [
+          2,
+          0
+        ],
+        [
+          3,
+          0
+        ],
+        [
+          4,
+          1
+        ],
+        [
+          5,
+          1
+        ]
+      ]
+    },
+    {
+      "values": {
+        "k": 2,
+        "maxIter": 40,
+        "initMode": "random",
+        "srcCol": "source",
+        "dstCol": "target",
+        "weightCol": "affinity"
+      },
+      "assignments": [
+        [
+          0,
+          0
+        ],
+        [
+          1,
+          0
+        ],
+        [
+          2,
+          0
+        ],
+        [
+          3,
+          0
+        ],
+        [
+          4,
+          0
+        ],
+        [
+          5,
+          1
+        ]
+      ]
+    },
+    {
+      "values": {
+        "k": 2,
+        "maxIter": 40,
+        "initMode": "degree",
+        "srcCol": "source",
+        "dstCol": "target"
+      },
+      "assignments": [
+        [
+          0,
+          0
+        ],
+        [
+          1,
+          0
+        ],
+        [
+          2,
+          0
+        ],
+        [
+          3,
+          0
+        ],
+        [
+          4,
+          0
+        ],
+        [
+          5,
+          0
+        ]
+      ]
+    },
+    {
+      "values": {
+        "k": 2,
+        "maxIter": 40,
+        "initMode": "degree",
+        "srcCol": "source",
+        "dstCol": "target",
+        "weightCol": "affinity"
+      },
+      "assignments": [
+        [
+          0,
+          0
+        ],
+        [
+          1,
+          1
+        ],
+        [
+          2,
+          0
+        ],
+        [
+          3,
+          0
+        ],
+        [
+          4,
+          1
+        ],
+        [
+          5,
+          1
+        ]
+      ]
+    }
+  ]
+}
