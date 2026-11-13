@@ -291,6 +291,9 @@ def serve(connection):
         def __init__(self):
             self.listener_condition = Condition()
             self.listener_epoch = 0
+            # The sessions whose ExecutePlanRequests are answered but no longer recorded (see
+            # RemoteService.forget_session). A reset keeps them.
+            self.forgotten_sessions = set()
 
         def reset(self):
             # Back to the state of a new server: the tests of a module share one.
@@ -308,6 +311,8 @@ def serve(connection):
             self.local = None
             self.local_failure = False
             self.execute_requests = []
+            # The ExecutePlanRequests of forgotten sessions that were answered.
+            self.forgotten_requests = 0
             self.release_execute_requests = []
             self.execute_payload = b""
             self.execute_payloads = None
@@ -575,18 +580,23 @@ def serve(connection):
                 return reached and epoch == self.listener_epoch and self.execute_started >= count
 
         def execute(self, request, context):
+            fields = parse_message(request)
+            # ExecutePlanRequest.session_id=1.
+            request_session = fields.get(1, [b""])[0].decode()
             with self.listener_condition:
                 # Capture these before yielding: an earlier call can resume after reset.
                 block_result_complete = self.block_result_complete
                 result_complete_operations = self.result_complete_operations
-                # Counter waiters on another thread must see both records when ready.
-                self.execute_requests.append(request)
-                self.rpc_events.append("execute")
-                self.execute_calls += 1
+                if request_session in self.forgotten_sessions:
+                    self.forgotten_requests += 1
+                else:
+                    # Counter waiters on another thread must see both records when ready.
+                    self.execute_requests.append(request)
+                    self.rpc_events.append("execute")
+                    self.execute_calls += 1
                 execute_epoch = self.listener_epoch
                 response_gate = self.response_gate
                 blocked = self.block_execute
-            fields = parse_message(request)
             plan = parse_message(fields.get(3, [b""])[0])
             command = parse_message(plan.get(2, [b""])[0])
             listener = parse_message(command.get(11, [b""])[0])
@@ -930,6 +940,10 @@ def serve(connection):
                 elif command[0] == "reset":
                     service.reset()
                     connection.send(None)
+                elif command[0] == "forget_session":
+                    with service.listener_condition:
+                        service.forgotten_sessions.add(command[1])
+                    connection.send(None)
                 elif command[0] == "listener_event":
                     _, session_id, event_type, event_json = command
                     with service.listener_condition:
@@ -998,6 +1012,15 @@ class RemoteService:
 
     def reset(self):
         self.connection.send(("reset",))
+        assert self.connection.poll(10), "Mock server did not respond"
+        self.connection.recv()
+
+    def forget_session(self, session_id):
+        # From now on, the server answers the ExecutePlanRequests of the session but does not
+        # record them, for a test that ends with the session: a request that it sent without
+        # waiting for it, such as the Delete of a released model, can reach the server during a
+        # later test, which would count it as one of its own.
+        self.connection.send(("forget_session", session_id))
         assert self.connection.poll(10), "Mock server did not respond"
         self.connection.recv()
 

@@ -1455,6 +1455,14 @@ fn parse_json_type_string(s: &str) -> Result<DataType> {
         // that the drop-in's Python parser accepted before it delegated here.
         "null" => Ok(DataType::Null),
         "calendarinterval" => Ok(DataType::CalendarInterval),
+        // A bare spatial name is of the default CRS, `OGC:CRS84`, as Spark's JSON reader reads
+        // it; DDL names a spatial type with its SRID only.
+        "geometry" => Ok(DataType::Geometry {
+            srid: GeometryType::DEFAULT_SRID,
+        }),
+        "geography" => Ok(DataType::Geography {
+            srid: GeographyType::DEFAULT_SRID,
+        }),
         // The inverse of `json_value`, which writes `unparsed(<data_type_string>)`.
         s if s.starts_with("unparsed(") && s.ends_with(')') => Ok(DataType::Unparsed {
             data_type_string: s["unparsed(".len()..s.len() - 1].to_string(),
@@ -1592,6 +1600,7 @@ fn parse_json_object(
 /// | `interval <a> to <b>` | any two fields of one family, as `DayTimeIntervalType(a, b)` | `b` later than `a` |
 /// | `time` | not a type: the precision is required | `time(6)` |
 /// | `string collate <name>` | the name as written | the name in its canonical form, `system.builtin.` dropped |
+/// | `geometry(...)`, `geography(...)` | a CRS, and of a geography an algorithm too (`geography(OGC:CRS84, SPHERICAL)`), or either alone, as Spark's JSON reader; a bare `geometry` and `geography` are of `OGC:CRS84` | an SRID or `any` (`geometry(4326)`) |
 ///
 /// Neither checks the range of an argument, such as the precision of a decimal: PySpark's types
 /// take any, and the server refuses the type. A decimal that Arrow cannot hold is refused when it
@@ -1673,6 +1682,10 @@ fn parse_parameterized_type(s: &str, grammar: TypeStringGrammar) -> Option<Resul
                 precision: timestamp_nanos_precision(s, args)?,
             })
         }))
+    } else if let Some(args) = type_arguments(s, "geometry") {
+        Some(args.and_then(|args| parse_geometry(s, args, grammar)))
+    } else if let Some(args) = type_arguments(s, "geography") {
+        Some(args.and_then(|args| parse_geography(s, args, grammar)))
     } else if s.starts_with("interval") {
         Some(parse_interval_string(s, grammar))
     } else if s
@@ -1680,10 +1693,6 @@ fn parse_parameterized_type(s: &str, grammar: TypeStringGrammar) -> Option<Resul
         .is_some_and(|rest| rest.starts_with(char::is_whitespace))
     {
         Some(parse_collated_string(s, grammar))
-    } else if s.starts_with("geometry(") {
-        Some(parse_geometry(s))
-    } else if s.starts_with("geography(") {
-        Some(parse_geography(s))
     } else {
         None
     }
@@ -1831,11 +1840,7 @@ fn parse_collated_string(s: &str, grammar: TypeStringGrammar) -> Result<DataType
         }
         _ => return Err(invalid()),
     };
-    let is_word = |c: char| match grammar {
-        TypeStringGrammar::Json => c == '_' || c.is_alphanumeric(),
-        TypeStringGrammar::Ddl => c == '_' || c.is_ascii_alphanumeric(),
-    };
-    if name.is_empty() || !name.chars().all(is_word) {
+    if !is_word(name, grammar) {
         return Err(invalid());
     }
     Ok(DataType::String {
@@ -1844,6 +1849,17 @@ fn parse_collated_string(s: &str, grammar: TypeStringGrammar) -> Result<DataType
             TypeStringGrammar::Ddl => canonical_collation_name(name),
         },
     })
+}
+
+/// Whether `text` is a word: one or more letters, digits and underscores. Of JSON they are of any
+/// script, as the `\w` of PySpark's patterns reads them, and of DDL of ASCII, as Spark's lexer
+/// reads an unquoted identifier.
+fn is_word(text: &str, grammar: TypeStringGrammar) -> bool {
+    let is_word_char = |c: char| match grammar {
+        TypeStringGrammar::Json => c == '_' || c.is_alphanumeric(),
+        TypeStringGrammar::Ddl => c == '_' || c.is_ascii_alphanumeric(),
+    };
+    !text.is_empty() && text.chars().all(is_word_char)
 }
 
 /// The parts of the multipart identifier `name` of DDL, as Spark's `multipartIdentifier` reads
@@ -1879,36 +1895,55 @@ fn multipart_identifier(name: &str) -> Option<Vec<String>> {
     }
 }
 
-fn parse_geometry(s: &str) -> Result<DataType> {
-    let inner = s
-        .strip_prefix("geometry(")
-        .and_then(|s| s.strip_suffix(")"))
-        .ok_or_else(|| {
-            SparkError::value(
-                "INVALID_DATATYPE_FORMAT",
-                &[("detail", "Invalid geometry format")],
-            )
-        })?;
-
-    let srid = spatial_srid(inner, false)?;
+/// Parses the arguments `args` of `geometry(...)`, the type string `s`: in DDL its SRID (see
+/// [`spatial_ddl_srid`]), and in JSON its CRS, as the `geometry(<crs>)` of Spark's JSON reader
+/// (see [`spatial_json_crs`] and [`spatial_crs_srid`]).
+fn parse_geometry(s: &str, args: &str, grammar: TypeStringGrammar) -> Result<DataType> {
+    let srid = match grammar {
+        TypeStringGrammar::Ddl => spatial_ddl_srid(s, args, false)?,
+        TypeStringGrammar::Json => {
+            let crs =
+                spatial_json_crs(args).ok_or_else(|| invalid_type_string(s, "geometry type"))?;
+            spatial_crs_srid(crs, false)?
+        }
+    };
     Ok(DataType::Geometry { srid })
 }
 
-fn parse_geography(s: &str) -> Result<DataType> {
-    let inner = s
-        .strip_prefix("geography(")
-        .and_then(|s| s.strip_suffix(")"))
-        .ok_or_else(|| {
-            SparkError::value(
-                "INVALID_DATATYPE_FORMAT",
-                &[("detail", "Invalid geography format")],
-            )
-        })?;
-
-    // The JSON form also names the algorithm, as in `OGC:CRS84, SPHERICAL`.
-    let crs = inner.split(',').next().unwrap_or_default();
-    let srid = spatial_srid(crs, true)?;
-    Ok(DataType::Geography { srid })
+/// Parses the arguments `args` of `geography(...)`, the type string `s`: in DDL its SRID (see
+/// [`spatial_ddl_srid`]), and in JSON its CRS, its algorithm or both, as the patterns of Spark's
+/// JSON reader, `geography(<crs>)`, `geography(<alg>)` and `geography(<crs>, <alg>)`, of the
+/// default CRS `OGC:CRS84` and the default algorithm `SPHERICAL`. As Spark's
+/// `GeographyType(crs, algorithm)`, the algorithm is checked before the CRS: `SPHERICAL`, the one
+/// that Spark knows, is of any case, and another one is `ST_INVALID_ALGORITHM_VALUE`.
+fn parse_geography(s: &str, args: &str, grammar: TypeStringGrammar) -> Result<DataType> {
+    if grammar == TypeStringGrammar::Ddl {
+        return Ok(DataType::Geography {
+            srid: spatial_ddl_srid(s, args, true)?,
+        });
+    }
+    let invalid = || invalid_type_string(s, "geography type");
+    let (crs, algorithm) = match args.split_once(',') {
+        Some((crs, algorithm)) => (spatial_json_crs(crs).ok_or_else(invalid)?, Some(algorithm)),
+        None => match spatial_json_crs(args) {
+            Some(crs) => (crs, None),
+            None => (GeographyType::DEFAULT_CRS, Some(args)),
+        },
+    };
+    if let Some(algorithm) = algorithm.map(str::trim) {
+        if !is_word(algorithm, grammar) {
+            return Err(invalid());
+        }
+        if !algorithm.eq_ignore_ascii_case(GeographyType::DEFAULT_ALG) {
+            return Err(SparkError::value(
+                "ST_INVALID_ALGORITHM_VALUE",
+                &[("alg", algorithm)],
+            ));
+        }
+    }
+    Ok(DataType::Geography {
+        srid: spatial_crs_srid(crs, true)?,
+    })
 }
 
 /// The coordinate reference system that a spatial type's SRID is named by in its JSON, as
@@ -1925,31 +1960,51 @@ fn spatial_crs(srid: i32, geographic: bool) -> String {
     }
 }
 
-/// The SRID that a spatial type of the given kind names by `text`, the CRS of its JSON or the
-/// SRID of its DDL: `any` or `SRID:ANY` (of any case) for a mixed SRID, a string ID that Spark
-/// reads (its aliases included, and the match is exact), or an integer SRID. An integer that the
-/// type does not take is `ST_INVALID_SRID_VALUE`, and any other text that is no CRS of the type
-/// is `ST_INVALID_CRS_VALUE`, as the parsers of Spark raise them.
-fn spatial_srid(text: &str, geographic: bool) -> Result<i32> {
-    let text = text.trim();
-    if text.eq_ignore_ascii_case("any") || text.eq_ignore_ascii_case(SpatialType::MIXED_CRS) {
+/// The CRS `text` of the JSON of a spatial type, without the whitespace around it, if it is of
+/// the form of the patterns of Spark's JSON reader, `\w+:-?\w+`: a word, a colon, and a word that
+/// may follow a minus sign, as `EPSG:2154`, `OGC:CRS84` and `SRID:ANY`. `None` if it is not, as
+/// `4326`, `any` and `SPHERICAL` are not.
+fn spatial_json_crs(text: &str) -> Option<&str> {
+    let crs = text.trim();
+    let (authority, code) = crs.split_once(':')?;
+    let code = code.strip_prefix('-').unwrap_or(code);
+    (is_word(authority, TypeStringGrammar::Json) && is_word(code, TypeStringGrammar::Json))
+        .then_some(crs)
+}
+
+/// The SRID of the CRS `crs` of the JSON of a spatial type of the given kind, as Spark's
+/// `GeometryType.toSrid` and `GeographyType.toSrid` read it: `SRID:ANY`, of any case, is the mixed
+/// SRID, and another CRS is the SRID of the string ID of Spark's registry that it is (the aliases
+/// included, and the match is exact) if the type takes it, else `ST_INVALID_CRS_VALUE`.
+fn spatial_crs_srid(crs: &str, geographic: bool) -> Result<i32> {
+    if crs.eq_ignore_ascii_case(SpatialType::MIXED_CRS) {
         return Ok(SpatialType::MIXED_SRID);
     }
-    if let Some(srid) = srs::srid(text, geographic) {
-        return Ok(srid);
+    srs::srid(crs, geographic)
+        .ok_or_else(|| SparkError::value("ST_INVALID_CRS_VALUE", &[("crs", crs)]))
+}
+
+/// The SRID of the argument `args` of the DDL `s` of a spatial type of the given kind, as Spark's
+/// parser reads `GEOMETRY(<srid>)` and `GEOGRAPHY(<srid>)`, whose argument is the keyword `ANY` or
+/// an unsigned integer: `any`, of any case, is the mixed SRID, and an integer is an SRID that the
+/// type must take, else `ST_INVALID_SRID_VALUE`, as an integer out of the 32-bit range is too.
+/// Any other text, such as `-1`, `+5` or a CRS, is not of Spark's grammar, whose
+/// `PARSE_SYNTAX_ERROR` it is: the `INVALID_DATATYPE_FORMAT` of a malformed type of this parser.
+fn spatial_ddl_srid(s: &str, args: &str, geographic: bool) -> Result<i32> {
+    let text = args.trim();
+    if text.eq_ignore_ascii_case("any") {
+        return Ok(SpatialType::MIXED_SRID);
     }
-    let digits = text.strip_prefix(['+', '-']).unwrap_or(text);
-    if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) {
-        return match text.parse::<i32>() {
-            Ok(srid) if srs::is_supported(srid, geographic) => Ok(srid),
-            // An integer out of the 32-bit range is an SRID too, as in Spark's parser.
-            _ => Err(SparkError::value(
-                "ST_INVALID_SRID_VALUE",
-                &[("srid", text)],
-            )),
-        };
+    if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(invalid_type_string(s, "type argument"));
     }
-    Err(SparkError::value("ST_INVALID_CRS_VALUE", &[("crs", text)]))
+    let invalid_srid = |srid: &str| SparkError::value("ST_INVALID_SRID_VALUE", &[("srid", srid)]);
+    match text.parse::<i32>() {
+        Ok(srid) if srs::is_supported(srid, geographic) => Ok(srid),
+        // The SRID that the type is made of, as Spark's `GeometryType(srid)` names it.
+        Ok(srid) => Err(invalid_srid(&srid.to_string())),
+        Err(_) => Err(invalid_srid(text)),
+    }
 }
 
 /// Main DDL parser: parses DDL strings into DataType.
@@ -3788,7 +3843,8 @@ mod tests {
 
     #[test]
     fn test_from_json_geometry() {
-        let json_geom = serde_json::json!("geometry(any)");
+        // JSON names the mixed SRID by its CRS, `SRID:ANY`; `geometry(any)` is its DDL.
+        let json_geom = serde_json::json!("geometry(SRID:ANY)");
         let dt = DataType::from_json(&json_geom).unwrap();
         match dt {
             DataType::Geometry { srid } => {

@@ -121,7 +121,7 @@ impl PyDataFrame {
                 .collect_record_batches_with_schema()
                 .map_err(Box::new)
         })?;
-        check_nanosecond_timestamps(py, schema.as_ref())?;
+        check_schema_conversion(py, schema.as_ref())?;
         let table = crate::pyarrow_export::record_batches_to_pyarrow(py, batches)?;
         let schema = match &schema {
             Some(schema) => crate::types::data_type_to_py(py, schema)?,
@@ -210,6 +210,19 @@ impl PyDataFrame {
             is_empty: std::sync::OnceLock::new(),
             input_files: std::sync::OnceLock::new(),
         }
+    }
+
+    /// The DataFrame of `dataframe`, a copy of this one, with the `_support_repr_html` of this
+    /// one, as the state of PySpark's DataFrame carries it to its copies. Its other answers are
+    /// its own, as PySpark keeps them for each DataFrame.
+    fn copy_of(&self, dataframe: DataFrame) -> PyDataFrame {
+        let copy = PyDataFrame::new(dataframe);
+        copy.support_repr_html.store(
+            self.support_repr_html
+                .load(std::sync::atomic::Ordering::SeqCst),
+            std::sync::atomic::Ordering::SeqCst,
+        );
+        copy
     }
 
     /// The number of rows and the truncation of the eager evaluation, as PySpark's `int` of
@@ -686,9 +699,11 @@ impl PyDataFrame {
     }
 
     /// A DataFrame pickles, as PySpark Connect's, of its session, which gives back the active
-    /// session of its ID, and of its plan, here the bytes of its relation. The session unpickles
-    /// first: so on a Python worker of the server, which has no active session, a pickled
-    /// DataFrame raises `NO_ACTIVE_SESSION`, as PySpark's does.
+    /// session of its ID, of its plan, here the bytes of its relation, and of the
+    /// `_support_repr_html` of its state. The session unpickles first: so on a Python worker of
+    /// the server, which has no active session, a pickled DataFrame raises `NO_ACTIVE_SESSION`,
+    /// as PySpark's does. The unpickled DataFrame has copies of the Observations of this one
+    /// (see `DataFrame::from_sent_relation`).
     fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
         let py = slf.py();
         let this = slf.borrow();
@@ -698,38 +713,64 @@ impl PyDataFrame {
                 this.spark_session(py)?,
                 this._relation_bytes(py)?,
                 this.dataframe.plan_levels(),
+                this.support_repr_html
+                    .load(std::sync::atomic::Ordering::SeqCst),
             ))
     }
 
     /// The shallow copy of a DataFrame, as PySpark's `copy.copy` of its `__reduce__`: the same
     /// plan, and so the same Observations, as PySpark's copy shares its plan, with the
-    /// `_support_repr_html` that its state carries.
+    /// `_support_repr_html` and the schema that its state carries, and an `executionInfo` of its
+    /// own, None until it executes, as that of PySpark's `DataFrame(plan, session)`.
     fn __copy__(&self) -> PyDataFrame {
-        let copy = PyDataFrame::new(self.dataframe.clone());
-        copy.support_repr_html.store(
-            self.support_repr_html
-                .load(std::sync::atomic::Ordering::SeqCst),
-            std::sync::atomic::Ordering::SeqCst,
-        );
-        copy
+        self.copy_of(self.dataframe.shallow_copy())
     }
 
-    /// The deep copy of a DataFrame, as PySpark's `copy.deepcopy`: the same plan, whose
-    /// Observations are copies of its own, which the actions of the copy set. `copy.copy` and
-    /// pickling keep sharing them.
-    fn __deepcopy__(&self, _memo: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        let copy = crate::on_grown_stack(|| self.dataframe.detached_copy()).to_pyerr()?;
-        Ok(PyDataFrame::new(copy))
+    /// The deep copy of a DataFrame, as PySpark's `copy.deepcopy` of its `__reduce__`, which
+    /// copies its plan and then its session with the memo of the call: the same relation and
+    /// plan ID, with the `_support_repr_html` and the schema that its state carries and an
+    /// `executionInfo` of its own, whose Observations are the copies of those of this DataFrame
+    /// in `memo` (see `observation::deep_copy_in`). So an Observation that the call copies too,
+    /// in a tuple or an object that holds both, is copied once, and the actions of the copied
+    /// DataFrame set the copy; the Observations of this DataFrame stay as they are. The copy of
+    /// the session is that of its `__reduce__`, the active session of its ID, once in a call: so
+    /// a deep copy raises `NO_ACTIVE_SESSION` where no session is active, as on another thread,
+    /// and `PySparkAssertionError` where another one is, while `copy.copy` keeps the session.
+    fn __deepcopy__(&self, py: Python<'_>, memo: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        let observations = self
+            .dataframe
+            .observations()
+            .into_iter()
+            .map(|(name, observation)| {
+                Ok((
+                    name,
+                    crate::observation::deep_copy_in(py, &observation, memo)?,
+                ))
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        let session = py
+            .import("copy")?
+            .call_method1(
+                pyo3::intern!(py, "deepcopy"),
+                (self.spark_session(py)?, memo),
+            )?
+            .extract::<PyRef<'_, crate::session::PySparkSession>>()?
+            .session
+            .clone();
+        let copy = crate::on_grown_stack(|| self.dataframe.deep_copy_with(session, observations))
+            .to_pyerr()?;
+        Ok(self.copy_of(copy))
     }
 
     /// The DataFrame of `relation`, the bytes of a relation of `levels` levels of `session`, as a
-    /// pickled DataFrame unpickles.
+    /// pickled DataFrame unpickles, with the `_support_repr_html` of its state.
     #[staticmethod]
-    #[pyo3(signature = (session, relation, levels=1))]
+    #[pyo3(signature = (session, relation, levels=1, support_repr_html=false))]
     fn _of_relation(
         session: &Bound<'_, crate::session::PySparkSession>,
         relation: &[u8],
         levels: usize,
+        support_repr_html: bool,
     ) -> PyResult<PyDataFrame> {
         let session = session.borrow().session.clone();
         use prost::Message;
@@ -742,7 +783,11 @@ impl PyDataFrame {
         })
         .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?
         .to_pyerr()?;
-        Ok(PyDataFrame::new(dataframe))
+        let dataframe = PyDataFrame::new(dataframe);
+        dataframe
+            .support_repr_html
+            .store(support_repr_html, std::sync::atomic::Ordering::SeqCst);
+        Ok(dataframe)
     }
 
     /// The plan of this DataFrame, as PySpark Connect's `DataFrame._plan`, whose
@@ -1629,13 +1674,19 @@ impl PyDataFrame {
         Ok(slf)
     }
 
-    /// Mark the DataFrame as non-persistent.
-    #[pyo3(signature = (blocking=false))]
+    /// Mark the DataFrame as non-persistent. As PySpark's, which sets `blocking` in the bool
+    /// field of its request unless it is None, as [`crate::streaming::proto_bool`] converts it;
+    /// None unpersists as False does.
+    #[pyo3(signature = (blocking=None), text_signature = "($self, blocking=False)")]
     fn unpersist<'py>(
         slf: PyRef<'py, Self>,
         py: Python<'py>,
-        blocking: bool,
+        blocking: Option<&Bound<'py, PyAny>>,
     ) -> PyResult<PyRef<'py, Self>> {
+        let blocking = blocking
+            .map(crate::streaming::proto_bool)
+            .transpose()?
+            .unwrap_or(false);
         // As PySpark's, which returns the DataFrame itself.
         let df = slf.dataframe.clone();
         interruptible(py, &df.spark_session(), || {
@@ -1879,13 +1930,18 @@ impl PyDataFrame {
         })
     }
 
-    /// Deprecated alias for createOrReplaceTempView.
+    /// Deprecated alias for createOrReplaceTempView, as PySpark's, which warns that it is
+    /// deprecated and then replaces the view as `createOrReplaceTempView` does.
     #[pyo3(name = "registerTempTable")]
     fn register_temp_table(&self, py: Python<'_>, name: &Bound<'_, PyAny>) -> PyResult<()> {
-        let name = crate::str_argument(name)?;
-        interruptible(py, &self.dataframe.spark_session(), || {
-            self.dataframe.register_temp_table(&name).map_err(Box::new)
-        })
+        py.import("warnings")?.call_method1(
+            "warn",
+            (
+                "Deprecated in 2.0, use createOrReplaceTempView instead.",
+                py.get_type::<pyo3::exceptions::PyFutureWarning>(),
+            ),
+        )?;
+        self.create_or_replace_temp_view(py, name)
     }
 
     /// Reliable checkpoint (materialize + truncate lineage), at once if `eager`, as PySpark's.
@@ -2139,18 +2195,6 @@ impl PyDataFrame {
     #[getter]
     fn _session(&self, py: Python<'_>) -> PyResult<Py<crate::session::PySparkSession>> {
         self.spark_session(py)
-    }
-
-    /// Not supported on Spark Connect, as PySpark Connect's: `NOT_IMPLEMENTED` of `rdd`, which
-    /// needs the RDD API of a classic session.
-    #[getter]
-    fn rdd(&self, py: Python<'_>) -> PyResult<()> {
-        Err(crate::column::raise_pyspark(
-            py,
-            "PySparkNotImplementedError",
-            "NOT_IMPLEMENTED",
-            &[("feature", "rdd")],
-        ))
     }
 
     /// The EXISTS subquery of this DataFrame, as a Column. Mirrors `DataFrame.exists()`.
@@ -2411,7 +2455,7 @@ impl PyDataFrame {
                 .collect_record_batches_with_schema()
                 .map_err(Box::new)
         })?;
-        check_nanosecond_timestamps(py, schema.as_ref())?;
+        check_schema_conversion(py, schema.as_ref())?;
         let table = crate::pyarrow_export::record_batches_to_pyarrow(py, batches)?;
         let Some(schema) = schema else {
             return Ok(table);
@@ -2581,7 +2625,7 @@ impl PyDataFrame {
         let schema = interruptible(py, &self.dataframe.spark_session(), || {
             self.dataframe.schema()
         })?;
-        check_nanosecond_timestamps(py, Some(&schema))?;
+        check_schema_conversion(py, Some(&schema))?;
         crate::types::data_type_to_py(py, &schema)
     }
 
@@ -2623,7 +2667,7 @@ impl PyDataFrame {
         // The schema is cached, so the names come from it without another request.
         let session = self.dataframe.spark_session();
         let schema = interruptible(py, &session, || self.dataframe.schema())?;
-        check_nanosecond_timestamps(py, Some(&schema))?;
+        check_schema_conversion(py, Some(&schema))?;
         interruptible(py, &session, || self.dataframe.columns())
     }
 
@@ -2728,7 +2772,7 @@ impl PyDataFrame {
         let schema = interruptible(py, &self.dataframe.spark_session(), || {
             self.dataframe.schema()
         })?;
-        check_nanosecond_timestamps(py, Some(&schema))?;
+        check_schema_conversion(py, Some(&schema))?;
         let depth = level
             .map(crate::types::normalize_tree_depth)
             .transpose()?
@@ -2744,7 +2788,7 @@ impl PyDataFrame {
         let schema = interruptible(py, &self.dataframe.spark_session(), || {
             self.dataframe.schema()
         })?;
-        check_nanosecond_timestamps(py, Some(&schema))?;
+        check_schema_conversion(py, Some(&schema))?;
         let spark_connect::types::DataType::Struct { fields } = schema else {
             unreachable!("schema() validates struct responses")
         };
@@ -3910,16 +3954,18 @@ impl PyDataFrameWriter {
     }
 
     /// Insert into an existing table. `overwrite` maps to overwrite/append mode,
-    /// mirroring reference `DataFrameWriter.insertInto(tableName, overwrite=None)`.
+    /// mirroring reference `DataFrameWriter.insertInto(tableName, overwrite=None)`, of its
+    /// truth when it is not None (`"overwrite" if overwrite else "append"`).
     #[pyo3(name = "insertInto", signature = (tableName, overwrite=None))]
     fn insert_into(
         &self,
         py: Python<'_>,
         tableName: &Bound<'_, PyAny>,
-        overwrite: Option<bool>,
+        overwrite: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<()> {
         let mut w = self.inner.get();
         if let Some(ow) = overwrite {
+            let ow = ow.is_truthy()?;
             w = w.mode(if ow { "overwrite" } else { "append" });
         }
         // PySpark sets the overwrite/append mode on the writer itself.
@@ -4680,23 +4726,65 @@ pub(crate) fn nanosecond_timestamp_text(
     }
 }
 
-/// Raises as PySpark does for a schema with a nanosecond-precision timestamp, which PySpark cannot
-/// convert from the proto of the schema: the collecting APIs and every schema surface raise (the
-/// schema, columns, dtypes, printSchema, a DDL string of a schema), though the Rust core keeps
-/// these values, and count, show and describe work.
-pub(crate) fn check_nanosecond_timestamps(
+/// A type that PySpark's conversion of a schema from its proto, `proto_schema_to_pyspark_data_type`,
+/// fails to build.
+enum UnconvertibleType {
+    /// A nanosecond-precision timestamp, which PySpark has no type of: the proto text of it.
+    NanosecondTimestamp(String),
+    /// A spatial type of an SRID that PySpark's `GeometryType` or `GeographyType` does not take.
+    SpatialSrid(i32),
+}
+
+/// The first type of `data_type` that PySpark's conversion of a schema from its proto fails to
+/// build, in the order in which it converts them (the fields of a struct, the element of an
+/// array, the key and then the value of a map): a nanosecond-precision timestamp (see
+/// [`nanosecond_timestamp_text`]), or a spatial type of an SRID that PySpark does not take (see
+/// [`crate::types::pyspark_converts_srid`]). PySpark builds a user-defined type of its Python
+/// class, not of its SQL type, of which only a nanosecond timestamp counts.
+fn unconvertible_type(data_type: &spark_connect::types::DataType) -> Option<UnconvertibleType> {
+    use spark_connect::types::DataType;
+    let spatial = |srid: i32, geographic: bool| {
+        (!crate::types::pyspark_converts_srid(srid, geographic))
+            .then_some(UnconvertibleType::SpatialSrid(srid))
+    };
+    match data_type {
+        DataType::Geometry { srid } => spatial(*srid, false),
+        DataType::Geography { srid } => spatial(*srid, true),
+        DataType::Struct { fields } => fields
+            .iter()
+            .find_map(|field| unconvertible_type(&field.data_type)),
+        DataType::Array { element_type, .. } => unconvertible_type(element_type),
+        DataType::Map {
+            key_type,
+            value_type,
+            ..
+        } => unconvertible_type(key_type).or_else(|| unconvertible_type(value_type)),
+        _ => nanosecond_timestamp_text(data_type).map(UnconvertibleType::NanosecondTimestamp),
+    }
+}
+
+/// Raises as PySpark does for a schema that it cannot convert from the proto of the schema (see
+/// [`unconvertible_type`]): `UNSUPPORTED_OPERATION` for a nanosecond-precision timestamp, and
+/// `ST_INVALID_SRID_VALUE` for a spatial type of an SRID that PySpark does not take. The
+/// collecting APIs and every schema surface raise (the schema, columns, dtypes, printSchema,
+/// repr, a DDL string of a schema), though the Rust core keeps these values, and count, show and
+/// describe work.
+pub(crate) fn check_schema_conversion(
     py: Python<'_>,
     schema: Option<&spark_connect::types::DataType>,
 ) -> PyResult<()> {
-    if let Some(text) = schema.and_then(nanosecond_timestamp_text) {
-        return Err(crate::column::raise_pyspark(
+    match schema.and_then(unconvertible_type) {
+        Some(UnconvertibleType::NanosecondTimestamp(text)) => Err(crate::column::raise_pyspark(
             py,
             "PySparkValueError",
             "UNSUPPORTED_OPERATION",
             &[("operation", &format!("data type {text}"))],
-        ));
+        )),
+        Some(UnconvertibleType::SpatialSrid(srid)) => {
+            Err(crate::types::invalid_schema_srid(py, srid))
+        }
+        None => Ok(()),
     }
-    Ok(())
 }
 
 /// Raises as PySpark's Arrow conversion of the rows does for a result of `schema` with a
@@ -4760,7 +4848,7 @@ fn rows_to_py(
     rows: &[spark_connect::row::Row],
     schema: Option<&spark_connect::types::DataType>,
 ) -> PyResult<Vec<Py<PyAny>>> {
-    check_nanosecond_timestamps(py, schema)?;
+    check_schema_conversion(py, schema)?;
     check_arrow_schema(py, schema)?;
     let binary_as_bytes = read_binary_as_bytes(py, dataframe)?;
     check_collectable(py, schema)?;
@@ -4847,7 +4935,7 @@ impl PyLocalRowIterator {
         if self.converters.is_none() {
             if let Some(schema) = self.iterator.as_ref().and_then(LocalRowIterator::schema) {
                 // The result is known once its first message arrives, possibly with no rows.
-                check_nanosecond_timestamps(py, Some(&schema))?;
+                check_schema_conversion(py, Some(&schema))?;
                 check_collectable(py, Some(&schema))?;
                 self.converters = Some(udt_field_converters(py, Some(&schema))?);
                 self.nested_fields.note_udt_key_maps(&schema);

@@ -314,6 +314,83 @@ def test_schema_spatial_srids_are_those_of_pyspark(mock_connect):
         assert e.value.getMessageParameters() == {"srid": str(srid)}
 
 
+def test_schema_surfaces_raise_for_a_spatial_srid_that_pyspark_does_not_take(mock_connect):
+    # As PySpark, which converts the schema from its proto wherever it reads it: the schema, the
+    # columns, the dtypes, repr, printSchema, the columns of a projection and a DDL schema that
+    # the server parses raise ST_INVALID_SRID_VALUE for an SRID that PySpark does not take, also
+    # nested in an array, a map or a struct, while the SRIDs that it takes are read. The first
+    # type that the conversion fails on decides, a nanosecond timestamp's UNSUPPORTED_OPERATION
+    # included.
+    from pyspark.errors import IllegalArgumentException, PySparkValueError
+
+    spark, service = mock_connect
+    # repr reads the settings of the eager evaluation of the session, which the server has.
+    service.confs = {"spark.sql.repl.eagerEval.enabled": "false",
+                     "spark.sql.repl.eagerEval.maxNumRows": "20",
+                     "spark.sql.repl.eagerEval.truncate": "20"}
+
+    def spatial(kind, srid):
+        # DataType.geometry=26 or geography=27, with its srid=1.
+        return message_field(26 if kind == "geometry" else 27, varint_field(1, srid))
+
+    def struct(*fields):
+        # StructField: name=1, data_type=2, nullable=3; Struct.fields=1, and DataType.struct=21.
+        return message_field(21, b"".join(
+            message_field(1, message_field(1, name) + message_field(2, data_type)
+                          + varint_field(3, 1))
+            for name, data_type in fields))
+
+    # DataType.long=7, string=11, array=20 (Array.element_type=1) and map=22 (Map.key_type=1,
+    # value_type=2), and timestamp_ntz_nanos=29 (precision=1).
+    long_type, string_type = message_field(7, b""), message_field(11, b"")
+    nanos = message_field(29, varint_field(1, 9))
+    for schema, srid in [
+        (struct(("g", spatial("geometry", 2154))), 2154),
+        (struct(("i", long_type), ("g", message_field(20, message_field(
+            1, spatial("geography", 4269)) + varint_field(2, 1)))), 4269),
+        (struct(("g", message_field(22, message_field(1, string_type) + message_field(
+            2, spatial("geometry", 2154)) + varint_field(3, 1)))), 2154),
+        (struct(("s", struct(("g", spatial("geography", 3857))))), 3857),
+        (struct(("g", spatial("geometry", 2154)), ("t", nanos)), 2154),
+    ]:
+        service.data_type = schema
+        df = spark.range(1)
+        for surface in (
+                lambda: df.schema,
+                lambda: df.columns,
+                lambda: df.dtypes,
+                lambda: repr(df),
+                lambda: df.printSchema(),
+                lambda: df.select("g").columns,
+        ):
+            with pytest.raises(IllegalArgumentException) as e:
+                surface()
+            assert e.value.getCondition() == "ST_INVALID_SRID_VALUE"
+            assert e.value.getMessageParameters() == {"srid": str(srid)}
+    # A DDL schema, which the server parses (the mock parses these).
+    for ddl, srid in [("g geometry(2154)", 2154), ("g array<geography(4269)>", 4269)]:
+        with pytest.raises(IllegalArgumentException) as e:
+            spark.createDataFrame([], ddl)
+        assert e.value.getCondition() == "ST_INVALID_SRID_VALUE"
+        assert e.value.getMessageParameters() == {"srid": str(srid)}
+    # A nanosecond timestamp before the spatial type is the error of the timestamp.
+    service.data_type = struct(("t", nanos), ("g", spatial("geometry", 2154)))
+    with pytest.raises(PySparkValueError) as e:
+        spark.range(1).columns
+    assert e.value.getCondition() == "UNSUPPORTED_OPERATION"
+    for kind, srid, simple in [
+        ("geometry", 3857, "geometry(3857)"),
+        ("geometry", 0, "geometry(0)"),
+        ("geometry", -1, "geometry(any)"),
+        ("geography", 4326, "geography(4326)"),
+    ]:
+        service.data_type = struct(("g", spatial(kind, srid)))
+        df = spark.range(1)
+        assert df.columns == ["g"]
+        assert df.dtypes == [("g", simple)]
+        assert repr(df) == f"DataFrame[g: {simple}]"
+
+
 def test_json_forms_accept_trailing_whitespace_as_pyspark(mock_connect):
     # As PySpark's `_parse_datatype_json_value`, whose patterns match a prefix of the string: the
     # whitespace after a form with an argument or a field is not a part of it. A bare name is
@@ -7921,6 +7998,204 @@ def test_stream_writer_skips_a_false_path_and_table_as_pyspark(mock_connect):
     assert len(service.execute_requests) == requests
 
 
+def test_register_temp_table_warns_and_replaces_the_view_as_pyspark(mock_connect):
+    # As PySpark's registerTempTable, which warns that it is deprecated, and then replaces the view
+    # as createOrReplaceTempView does, which converts the name after the warning.
+    import warnings
+
+    spark, service = mock_connect
+    df = spark.range(1)
+    message = "Deprecated in 2.0, use createOrReplaceTempView instead."
+    with pytest.warns(FutureWarning) as record:
+        df.registerTempTable("v")
+    assert [str(w.message) for w in record] == [message]
+    # ExecutePlanRequest.plan=3 -> Plan.command=2 -> Command.create_dataframe_view=3:
+    # CreateDataFrameViewCommand.name=2 and replace=4, not is_global=3.
+    plan = parse_message(parse_message(service.execute_requests[-1])[3][0])
+    view = parse_message(parse_message(plan[2][0])[3][0])
+    assert (view[2], view[4], 3 in view) == ([b"v"], [1], False)
+    requests = len(service.execute_requests)
+    with pytest.warns(FutureWarning, match=re.escape(message)):
+        with pytest.raises(TypeError, match="^bad argument type for built-in operation$"):
+            df.registerTempTable(1)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", FutureWarning)
+        with pytest.raises(FutureWarning, match=re.escape(message)):
+            df.registerTempTable(1)
+    assert len(service.execute_requests) == requests
+
+
+def test_catalog_writer_and_unpersist_flags_convert_as_pyspark(mock_connect):
+    # As PySpark: the flags that the catalog passes to the constructor of its message (dropTable,
+    # dropView, createDatabase and dropDatabase) or sets in its plan (asSerde, noScan), and the
+    # `blocking` of unpersist, are converted as protobuf's default backend (upb) converts a bool
+    # field: an int by its truth, a NumPy bool, and the TypeError or OverflowError of another
+    # object; None leaves a field of a constructor unset, and is the TypeError of a field that the
+    # plan sets. insertInto takes the truth of an `overwrite` that is not None.
+    spark, service = mock_connect
+    catalog = spark.catalog
+    for call, operation, fields in [
+        (lambda: catalog.dropTable("t", ifExists=1, purge=np.bool_(True)), 27,
+         {1: [b"t"], 2: [1], 3: [1]}),
+        (lambda: catalog.dropTable("t", None, 0), 27, {1: [b"t"]}),
+        (lambda: catalog.dropView("v", ifExists=2), 28, {1: [b"v"], 2: [1]}),
+        (lambda: catalog.createDatabase("d", ifNotExists=-1), 29, {1: [b"d"], 2: [1]}),
+        (lambda: catalog.dropDatabase("d", 1, None), 30, {1: [b"d"], 2: [1]}),
+        (lambda: catalog.getCreateTableString("t", asSerde=1), 34, {1: [b"t"], 2: [1]}),
+        (lambda: catalog.analyzeTable("t", 1), 36, {1: [b"t"], 2: [1]}),
+    ]:
+        requests = len(service.execute_requests)
+        with contextlib.suppress(Exception):
+            call()
+        assert len(service.execute_requests) == requests + 1
+        assert _sent_catalog(service.execute_requests[-1], operation) == fields
+    requests = len(service.execute_requests)
+    for flag, error, message in [
+        ("x", TypeError, "'str' object cannot be interpreted as an integer"),
+        (1.5, TypeError, "'float' object cannot be interpreted as an integer"),
+        (np.array([1]), TypeError, "[1] has type ndarray, but expected one of: bool"),
+        (2**70, OverflowError, "Python int too large to convert to C long"),
+    ]:
+        for call in [
+            lambda: catalog.dropTable("t", ifExists=flag),
+            lambda: catalog.dropTable("t", purge=flag),
+            lambda: catalog.dropView("v", ifExists=flag),
+            lambda: catalog.createDatabase("d", ifNotExists=flag),
+            lambda: catalog.dropDatabase("d", cascade=flag),
+            lambda: catalog.getCreateTableString("t", asSerde=flag),
+            lambda: catalog.analyzeTable("t", noScan=flag),
+            lambda: spark.range(1).unpersist(flag),
+        ]:
+            with pytest.raises(error, match=f"^{re.escape(message)}$"):
+                call()
+    for call in [lambda: catalog.getCreateTableString("t", None),
+                 lambda: catalog.analyzeTable("t", noScan=None)]:
+        with pytest.raises(TypeError, match="^'NoneType' object cannot be interpreted as an "):
+            call()
+    # In the order of the fields: the name, and then each flag.
+    with pytest.raises(TypeError, match="^bad argument type for built-in operation$"):
+        catalog.dropTable(1, ifExists="x")
+    with pytest.raises(TypeError, match="^'str' object"):
+        catalog.dropTable("t", ifExists="x", purge=1.5)
+    assert len(service.execute_requests) == requests
+    # AnalyzePlanRequest.unpersist=15 -> Unpersist.blocking=2, which None does not set in PySpark,
+    # and unpersists without blocking as False does.
+    for blocking, sent in [(1, [1]), (np.bool_(False), [0])]:
+        spark.range(1).unpersist(blocking=blocking)
+        assert parse_message(parse_message(service.analyze_requests[-1])[15][0])[2] == sent
+    spark.range(1).unpersist(None)
+
+    def sent_mode():
+        # ExecutePlanRequest.plan=3 -> Plan.command=2 -> Command.write_operation=2 ->
+        # WriteOperation.mode=5 (SAVE_MODE_APPEND=1, SAVE_MODE_OVERWRITE=2).
+        plan = parse_message(parse_message(service.execute_requests[-1])[3][0])
+        return parse_message(parse_message(plan[2][0])[2][0]).get(5)
+
+    for overwrite, mode in [(1, [2]), ("x", [2]), ([1], [2]), (0, [1]), ("", [1]), ([], [1])]:
+        spark.range(1).write.insertInto("t", overwrite=overwrite)
+        assert sent_mode() == mode
+
+    class Ambiguous:
+        def __bool__(self):
+            raise ValueError("ambiguous")
+
+    requests = len(service.execute_requests)
+    with pytest.raises(ValueError, match="^ambiguous$"):
+        spark.range(1).write.insertInto(1, overwrite=Ambiguous())
+    assert len(service.execute_requests) == requests
+
+
+def test_create_database_takes_no_properties_of_a_false_value_as_pyspark(mock_connect):
+    # As PySpark's CreateDatabase, which takes `properties or {}`, before the constructor of its
+    # message converts the database and `ifNotExists`, and then sets each of the
+    # `properties.items()`.
+    import types
+
+    spark, service = mock_connect
+    catalog = spark.catalog
+    for properties in [[], 0, "", (), {}, None]:
+        catalog.createDatabase("d", properties=properties)
+        # Catalog.create_database=29: db_name=1, and properties=3, a map of key=1 and value=2.
+        assert _sent_catalog(service.execute_requests[-1], 29) == {1: [b"d"]}
+    catalog.createDatabase("d", properties=types.MappingProxyType({"k": "v"}))
+    assert _sent_catalog(service.execute_requests[-1], 29)[3] == [
+        message_field(1, "k") + message_field(2, "v")]
+
+    class Ambiguous:
+        def __bool__(self):
+            raise ValueError("ambiguous")
+
+    requests = len(service.execute_requests)
+    for properties, error, message in [
+        ([("k", "v")], AttributeError, "'list' object has no attribute 'items'"),
+        ("kv", AttributeError, "'str' object has no attribute 'items'"),
+    ]:
+        with pytest.raises(error, match=f"^{re.escape(message)}$"):
+            catalog.createDatabase("d", properties=properties)
+    with pytest.raises(ValueError, match="^ambiguous$"):
+        catalog.createDatabase(1, properties=Ambiguous())
+    with pytest.raises(TypeError, match="^bad argument type for built-in operation$"):
+        catalog.createDatabase(1, properties=[("k", "v")])
+    with pytest.raises(TypeError, match="^'str' object cannot be interpreted as an integer$"):
+        catalog.createDatabase("d", ifNotExists="x", properties=[("k", "v")])
+    assert len(service.execute_requests) == requests
+
+
+def test_create_table_and_create_external_table_bind_their_arguments_as_pyspark(mock_connect):
+    # As PySpark's createExternalTable(tableName, path=None, source=None, schema=None, **options),
+    # which takes no description but of the options, which it passes to createTable, and
+    # createTable(tableName, path=None, source=None, schema=None, description=None, **options):
+    # Python's binding raises its TypeErrors, which count self, before the method warns.
+    import inspect
+    import warnings
+
+    spark, service = mock_connect
+    catalog = spark.catalog
+    requests = len(service.execute_requests)
+    with warnings.catch_warnings(record=True) as record:
+        warnings.simplefilter("always")
+        for call, message in [
+            (lambda: catalog.createExternalTable("t", None, None, None, "d"),
+             "Catalog.createExternalTable() takes from 2 to 5 positional arguments but 6 were "
+             "given"),
+            (lambda: catalog.createTable("t", None, None, None, None, "x", "y"),
+             "Catalog.createTable() takes from 2 to 6 positional arguments but 8 were given"),
+            (lambda: catalog.createTable("t", None, None, 5, None, "x"),
+             "Catalog.createTable() takes from 2 to 6 positional arguments but 7 were given"),
+            (lambda: catalog.createExternalTable("t", None, None, None, 1, path="p"),
+             "Catalog.createExternalTable() got multiple values for argument 'path'"),
+            (lambda: catalog.createExternalTable(path="p"),
+             "Catalog.createExternalTable() missing 1 required positional argument: 'tableName'"),
+        ]:
+            with pytest.raises(TypeError, match=f"^{re.escape(message)}$"):
+                call()
+    assert record == [] and len(service.execute_requests) == requests
+    with pytest.warns(FutureWarning, match="createExternalTable is deprecated"):
+        catalog.createExternalTable("t", "/p", description="d", k="v")
+    # Catalog.create_table=14: table_name=1, path=2, description=4 and options=6.
+    create = _sent_catalog(service.execute_requests[-1], 14)
+    assert (create[1], create[2], create[4]) == ([b"t"], [b"/p"], [b"d"])
+    assert [parse_message(entry) for entry in create[6]] == [{1: [b"k"], 2: [b"v"]}]
+    with pytest.warns(FutureWarning):
+        catalog.createExternalTable("t", description=None)
+    assert _sent_catalog(service.execute_requests[-1], 14) == {1: [b"t"]}
+    catalog.createTable("t", "/p", "parquet", None, "d")
+    create = _sent_catalog(service.execute_requests[-1], 14)
+    assert (create[2], create[3], create[4]) == ([b"/p"], [b"parquet"], [b"d"])
+
+    def parameters(method):
+        signature = inspect.signature(method)
+        return [(p.name, p.kind.name, p.default) for p in signature.parameters.values()]
+
+    empty = inspect.Parameter.empty
+    head = [("tableName", "POSITIONAL_OR_KEYWORD", empty), ("path", "POSITIONAL_OR_KEYWORD", None),
+            ("source", "POSITIONAL_OR_KEYWORD", None), ("schema", "POSITIONAL_OR_KEYWORD", None)]
+    options = [("options", "VAR_KEYWORD", empty)]
+    assert parameters(catalog.createExternalTable) == head + options
+    assert parameters(catalog.createTable) == head + [
+        ("description", "POSITIONAL_OR_KEYWORD", None)] + options
+
+
 def test_readers_keep_their_settings_when_the_path_is_not_a_str_as_pyspark(mock_connect):
     # As PySpark, whose format readers set the options and the format before they check the path,
     # which is an AssertionError for a path that is not a str.
@@ -10717,6 +10992,204 @@ def test_a_deep_copy_of_a_join_sets_the_observations_of_its_copy_as_pyspark(mock
     assert first.get == {} and second.get == {}
     assert joined.count() == 3
     assert first.get == {"c": 3} and second.get == {"c": 5}
+
+
+def test_a_deep_copy_copies_an_observation_once_with_the_objects_of_its_call_as_pyspark(
+        mock_connect):
+    # As PySpark's DataFrame.__reduce__, whose deep copy copies the plan, and so the Observation of
+    # its CollectMetrics, with the memo of the call: an Observation that the call copies too, in a
+    # tuple, a list or an object that holds both, in either order, is copied once, with its
+    # attributes, and the actions of the copied DataFrame set that copy; so do those of another
+    # DataFrame of the call, and of one copied with the same memo of the caller. The Observation
+    # itself keeps its metrics.
+    import copy
+
+    from pyspark.sql import Observation
+    from pyspark.sql import functions as F
+
+    class Holder:
+        def __init__(self, df, observation):
+            self.df, self.observation = df, observation
+
+    spark, service = mock_connect
+    observation = Observation("o")
+    observation.tags = ["t"]
+    df = spark.range(3).observe(observation, F.count(F.lit(1)).alias("c"))
+    batch, observed = _count_batch_and_observed_metrics(service, df)
+
+    def count(frame, value):
+        service.execute_payload = batch + observed("o", varint_field(7, value), "c")
+        return frame.count()
+
+    holder = copy.deepcopy(Holder(df, observation))
+    pairs = [copy.deepcopy((df, observation)), copy.deepcopy([observation, df])[::-1],
+             (holder.df, holder.observation)]
+    for value, (copied, copied_observation) in enumerate(pairs, start=3):
+        assert copied_observation is not observation and copied_observation._name == "o"
+        assert copied_observation.tags == ["t"] and copied_observation.tags is not observation.tags
+        assert count(copied, value) == 3
+        assert copied_observation.get == {"c": value} and observation.get == {}
+
+    first, second, copied_observation = copy.deepcopy([df, df.where("id > 0"), observation])
+    assert count(first, 6) == 3 and copied_observation.get == {"c": 6}
+    assert count(second, 7) == 3 and copied_observation.get == {"c": 7}
+    memo = {}
+    copied = copy.deepcopy(df, memo)
+    copied_observation = copy.deepcopy(observation, memo)
+    assert copy.deepcopy(df, memo) is copied
+    assert count(copied, 8) == 3 and copied_observation.get == {"c": 8}
+    # A deep copy of the copies copies them so too, and a shallow copy of a copy shares its copy.
+    copied, copied_observation = copy.deepcopy((df, observation))
+    again, copied_again = copy.deepcopy((copied, copied_observation))
+    assert count(again, 9) == 3 and copied_again.get == {"c": 9}
+    assert copied_observation.get == {} and observation.get == {}
+    assert count(copy.copy(copied), 11) == 3 and copied_observation.get == {"c": 11}
+    assert copied_again.get == {"c": 9} and observation.get == {}
+    # An attribute of the Observation that refers to the DataFrame refers to a copy of it of its
+    # own, of the copied Observation, as the copy of the plan copies the Observation first.
+    observation.df = df
+    copied, copied_observation = copy.deepcopy((df, observation))
+    assert copied_observation.df is not copied and copied_observation.df is not df
+    assert count(copied_observation.df, 10) == 3 and copied_observation.get == {"c": 10}
+    assert observation.get == {}
+
+
+def test_a_deep_copy_copies_the_session_with_the_objects_of_its_call_as_pyspark(mock_connect):
+    # As PySpark's DataFrame.__reduce__, whose deep copy copies the session after the plan with
+    # the memo of the call, by SparkSession.__reduce__: the active session of its ID, once in a
+    # call, so the copies of two DataFrames of the session share it, and a memo of the caller that
+    # maps it to another session gives a copy of that one. Where no session is active, as on
+    # another thread, a deep copy raises NO_ACTIVE_SESSION, and where another one is,
+    # PySparkAssertionError; copy.copy keeps the session.
+    import copy
+    import threading
+
+    from pyspark.errors import PySparkAssertionError, PySparkRuntimeError
+    from pyspark.sql import SparkSession
+
+    spark, service = mock_connect
+    df = spark.range(3)
+    memo = {}
+    copies = copy.deepcopy([df, spark.range(5)], memo)
+    assert all(copied.sparkSession is spark for copied in copies)
+    assert memo[id(spark)] is spark
+    seen = []
+
+    def on_a_thread():
+        try:
+            copy.deepcopy(df)
+        except PySparkRuntimeError as error:
+            seen.append(error.getCondition())
+        seen.append(copy.copy(df).sparkSession is spark)
+
+    thread = threading.Thread(target=on_a_thread)
+    thread.start()
+    thread.join()
+    assert seen == ["NO_ACTIVE_SESSION", True]
+    other = SparkSession.builder.remote(service.remote).create()
+    try:
+        assert SparkSession.getActiveSession() is spark
+        with pytest.raises(PySparkAssertionError, match="Expected session ID does not match"):
+            copy.deepcopy(other.range(1))
+        assert copy.deepcopy(df, {id(spark): other}).sparkSession is other
+    finally:
+        other.stop()
+
+
+def test_a_copy_of_a_dataframe_has_an_execution_info_of_its_own_as_pyspark(mock_connect):
+    # As PySpark's copy.copy of a DataFrame, a DataFrame(plan, session) of its plan: its
+    # executionInfo is None until it executes, also of a DataFrame that executed, and then that of
+    # its own executions, which leave the DataFrame's as it is; so is that of a deep copy and of an
+    # unpickled DataFrame.
+    import copy
+
+    from pyspark.serializers import CloudPickleSerializer
+
+    spark, service = mock_connect
+    serializer = CloudPickleSerializer()
+    df = spark.range(3)
+    copied = copy.copy(df)
+    copied.collect()
+    assert df.executionInfo is None
+    first = copied.executionInfo.operation_id
+    assert first == _request_operation_id(service.execute_requests[-1])
+    df.collect()
+    original = df.executionInfo.operation_id
+    assert original not in (None, first)
+    copied.collect()
+    assert df.executionInfo.operation_id == original
+    assert copied.executionInfo.operation_id not in (first, original)
+    for later in (copy.copy(df), copy.copy(copied), copy.deepcopy(df),
+                  serializer.loads(serializer.dumps(df))):
+        assert later.executionInfo is None
+
+
+def test_copies_and_unpickled_dataframes_keep_support_repr_html_as_pyspark(mock_connect):
+    # As PySpark's DataFrame.__reduce__, whose state carries _support_repr_html to a copy, a deep
+    # copy and an unpickled DataFrame: once _repr_html_ was called, their repr is the string of the
+    # schema with eager evaluation, else the table of eager evaluation; the _repr_html_ of a copy
+    # leaves the DataFrame as it is.
+    import copy
+
+    import pyarrow as pa
+    from pyspark.serializers import CloudPickleSerializer
+
+    spark, service = mock_connect
+    service.confs = {"spark.sql.repl.eagerEval.enabled": "true",
+                     "spark.sql.repl.eagerEval.maxNumRows": "7",
+                     "spark.sql.repl.eagerEval.truncate": "3"}
+    table = pa.table({"html_string": ["<table/>"]})
+    sink = pa.BufferOutputStream()
+    with pa.ipc.new_stream(sink, table.schema) as writer:
+        writer.write_table(table)
+    # ExecutePlanResponse.arrow_batch=2: ArrowBatch.row_count=1, data=2.
+    service.execute_payload = message_field(
+        2, varint_field(1, 1) + message_field(2, sink.getvalue().to_pybytes()))
+    serializer = CloudPickleSerializer()
+
+    def copies(frame):
+        return [copy.copy(frame), copy.deepcopy(frame), serializer.loads(serializer.dumps(frame))]
+
+    df = spark.range(1)
+    assert [repr(copied) for copied in copies(df)] == ["<table/>"] * 3
+    for copied in copies(df):
+        assert copied._repr_html_() == "<table/>"
+    assert repr(df) == "<table/>"
+    assert df._repr_html_() == "<table/>"
+    assert [repr(copied) for copied in copies(df)] == ["DataFrame[id: bigint]"] * 3
+    assert [repr(copied) for copied in copies(copy.deepcopy(df))] == ["DataFrame[id: bigint]"] * 3
+
+
+def test_an_unpickled_dataframe_sets_copies_of_the_observations_as_pyspark(mock_connect):
+    # As PySpark's unpickled plan, which has copies of the Observations of the pickled one: the
+    # actions of an unpickled DataFrame, or of an unpickled deep copy, set the copies and not the
+    # Observations of the DataFrame, before and after its own actions, which still set them; and
+    # they raise for a metric that PySpark does not convert, as the copies are of their plan.
+    import copy
+
+    from pyspark.errors import PySparkTypeError
+    from pyspark.serializers import CloudPickleSerializer
+    from pyspark.sql import Observation
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+    serializer = CloudPickleSerializer()
+    observation = Observation("o")
+    df = spark.range(3).observe(observation, F.count(F.lit(1)).alias("c"))
+    batch, observed = _count_batch_and_observed_metrics(service, df)
+    # Literal.long=7, year_month_interval=20.
+    for unpickled in (serializer.loads(serializer.dumps(df)),
+                      serializer.loads(serializer.dumps(copy.deepcopy(df)))):
+        service.execute_payload = batch + observed("o", varint_field(7, 3), "c")
+        assert unpickled.count() == 3 and observation.get == {}
+        service.execute_payload = batch + observed("o", varint_field(20, 14), "c")
+        with pytest.raises(PySparkTypeError, match="UNSUPPORTED_LITERAL"):
+            unpickled.count()
+    service.execute_payload = batch + observed("o", varint_field(7, 4), "c")
+    assert df.count() == 3 and observation.get == {"c": 4}
+    unpickled = serializer.loads(serializer.dumps(df))
+    service.execute_payload = batch + observed("o", varint_field(7, 5), "c")
+    assert unpickled.count() == 3 and observation.get == {"c": 4}
 
 
 def test_an_observation_copies_as_the_plain_object_of_pyspark(mock_connect):
@@ -16436,7 +16909,6 @@ def test_dataframes_take_their_arguments_and_attributes_as_pyspark(mock_connect,
     # and JVM_ATTRIBUTE_NOT_SUPPORTED of those of a classic DataFrame.
     from pyspark.errors import (
         PySparkAttributeError,
-        PySparkNotImplementedError,
         PySparkTypeError,
         PySparkValueError,
     )
@@ -16462,13 +16934,14 @@ def test_dataframes_take_their_arguments_and_attributes_as_pyspark(mock_connect,
         assert e.value.getMessageParameters() == {
             "arg_name": arg_name, "expected_type": "str", "arg_type": arg_type}
     assert type(df._not_a_dunder).__name__ == "Column"
-    for name in ("_jseq", "_jdf", "_jmap", "_jcols"):
+    # `rdd` too: pyspark-client's DataFrame defines no `rdd` property (only a classic-capable
+    # PySpark does), so its `__getattr__` raises an AttributeError, and `hasattr` is False.
+    for name in ("_jseq", "_jdf", "_jmap", "_jcols", "rdd"):
         with pytest.raises(PySparkAttributeError) as e:
             getattr(df, name)
         assert e.value.getCondition() == "JVM_ATTRIBUTE_NOT_SUPPORTED"
-    with pytest.raises(PySparkNotImplementedError) as e:
-        df.rdd
-    assert e.value.getMessageParameters() == {"feature": "rdd"}
+        assert e.value.getMessageParameters() == {"attr_name": name}
+    assert not hasattr(df, "rdd")
     with pytest.raises(PySparkAttributeError) as e:
         df.__not_a_column__
     assert e.value.getCondition() == "ATTRIBUTE_NOT_SUPPORTED"

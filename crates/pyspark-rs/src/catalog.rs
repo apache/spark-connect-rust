@@ -42,6 +42,37 @@ fn constructor_name(name: &Bound<'_, PyAny>) -> PyResult<String> {
     crate::str_argument(name)
 }
 
+/// A flag of a catalog method that PySpark passes to the constructor of its message, which
+/// leaves the bool field unset (false) for None, as for an omitted argument, and converts any
+/// other value as protobuf's default (upb) backend does ([`crate::streaming::proto_bool`]). The
+/// flags that PySpark's plan sets instead are [`crate::streaming::ProtoBool`]s, of the
+/// `TypeError` of None.
+fn constructor_bool(flag: Option<&Bound<'_, PyAny>>) -> PyResult<bool> {
+    Ok(flag
+        .map(crate::streaming::proto_bool)
+        .transpose()?
+        .unwrap_or(false))
+}
+
+/// The `TypeError` that Python's binding of PySpark's `method` raises for the positional
+/// arguments `extra` beyond its `count` parameters, of which the first, the table name, is
+/// required, in Python's counts, which count `self`. PyO3 binds the other arguments, and raises
+/// their `TypeError`s, as Python does.
+fn check_extra_positional(
+    method: &str,
+    count: usize,
+    extra: &Bound<'_, pyo3::types::PyTuple>,
+) -> PyResult<()> {
+    if extra.is_empty() {
+        return Ok(());
+    }
+    Err(pyo3::exceptions::PyTypeError::new_err(format!(
+        "{method}() takes from 2 to {} positional arguments but {} were given",
+        count + 1,
+        count + extra.len() + 1
+    )))
+}
+
 /// The schema of `createTable`, a StructType, as PySpark's, else `NOT_EXPECTED_TYPE`.
 fn table_schema(
     schema: Option<&Bound<'_, PyAny>>,
@@ -456,7 +487,10 @@ impl PyCatalog {
 
     /// Create a table from a data source, as PySpark's: of a StructType `schema` and string
     /// `**options`, created on return.
-    #[pyo3(signature = (tableName, path=None, source=None, schema=None, description=None, **options))]
+    #[pyo3(
+        signature = (tableName, path=None, source=None, schema=None, description=None, *extra, **options),
+        text_signature = "($self, tableName, path=None, source=None, schema=None, description=None, **options)"
+    )]
     #[allow(non_snake_case, clippy::too_many_arguments)]
     fn createTable(
         &self,
@@ -466,9 +500,11 @@ impl PyCatalog {
         source: Option<&Bound<'_, PyAny>>,
         schema: Option<&Bound<'_, PyAny>>,
         description: Option<&Bound<'_, PyAny>>,
+        extra: &Bound<'_, pyo3::types::PyTuple>,
         options: Option<&Bound<'_, pyo3::types::PyDict>>,
     ) -> PyResult<PyDataFrame> {
         crate::options::check_keyword_keys(options)?;
+        check_extra_positional("Catalog.createTable", 5, extra)?;
         let schema = table_schema(schema)?;
         // In the order of PySpark's `CreateTable` plan, after its check of the schema, and
         // before the options.
@@ -492,9 +528,13 @@ impl PyCatalog {
         .map(PyDataFrame::new)
     }
 
-    /// Create an external table from a data source: deprecated, as PySpark's, which warns and
-    /// creates the table as `createTable` does.
-    #[pyo3(signature = (tableName, path=None, source=None, schema=None, description=None, **options))]
+    /// Create an external table from a data source: deprecated, as PySpark's
+    /// `createExternalTable(tableName, path=None, source=None, schema=None, **options)`, which
+    /// warns and creates the table as `createTable` does, of a `description` of the options.
+    #[pyo3(
+        signature = (tableName, path=None, source=None, schema=None, *extra, **options),
+        text_signature = "($self, tableName, path=None, source=None, schema=None, **options)"
+    )]
     #[allow(non_snake_case, clippy::too_many_arguments)]
     fn createExternalTable(
         &self,
@@ -503,10 +543,11 @@ impl PyCatalog {
         path: Option<&Bound<'_, PyAny>>,
         source: Option<&Bound<'_, PyAny>>,
         schema: Option<&Bound<'_, PyAny>>,
-        description: Option<&Bound<'_, PyAny>>,
+        extra: &Bound<'_, pyo3::types::PyTuple>,
         options: Option<&Bound<'_, pyo3::types::PyDict>>,
     ) -> PyResult<PyDataFrame> {
         crate::options::check_keyword_keys(options)?;
+        check_extra_positional("Catalog.createExternalTable", 4, extra)?;
         py.import("warnings")?.call_method1(
             "warn",
             (
@@ -515,7 +556,28 @@ impl PyCatalog {
                 py.get_type::<pyo3::exceptions::PyFutureWarning>(),
             ),
         )?;
-        self.createTable(py, tableName, path, source, schema, description, options)
+        // As PySpark's `self.createTable(tableName, path, source, schema, **options)`, which
+        // binds a `description` of the options to the parameter of createTable.
+        let options = options.map(|options| options.copy()).transpose()?;
+        let mut description = None;
+        if let Some(options) = &options {
+            description = options.get_item("description")?;
+            if description.is_some() {
+                options.del_item("description")?;
+            }
+        }
+        let description = description.filter(|description| !description.is_none());
+        let none = pyo3::types::PyTuple::empty(py);
+        self.createTable(
+            py,
+            tableName,
+            path,
+            source,
+            schema,
+            description.as_ref(),
+            &none,
+            options.as_ref(),
+        )
     }
 
     /// Register a Python function as a UDF, returning the registered UDF. Deprecated
@@ -546,20 +608,32 @@ impl PyCatalog {
     }
 
     /// Create a database, with the `properties` of PySpark's protobuf map of strings, whose keys
-    /// and values are converted as `crate::str_argument` converts them.
-    #[pyo3(signature = (dbName, ifNotExists=false, properties=None))]
+    /// and values are converted as `crate::str_argument` converts them. As PySpark's
+    /// `CreateDatabase`, which takes `properties or {}`, and then passes the database and
+    /// `ifNotExists` to the constructor of its message before it sets each of the
+    /// `properties.items()`.
+    #[pyo3(
+        signature = (dbName, ifNotExists=None, properties=None),
+        text_signature = "($self, dbName, ifNotExists=False, properties=None)"
+    )]
     #[allow(non_snake_case)]
     fn createDatabase(
         &self,
         py: Python<'_>,
         dbName: &Bound<'_, PyAny>,
-        ifNotExists: bool,
-        properties: Option<&Bound<'_, pyo3::types::PyDict>>,
+        ifNotExists: Option<&Bound<'_, PyAny>>,
+        properties: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<()> {
+        let properties = match properties {
+            Some(properties) if properties.is_truthy()? => Some(properties),
+            _ => None,
+        };
         let dbName = constructor_name(dbName)?;
+        let ifNotExists = constructor_bool(ifNotExists)?;
         let mut props = std::collections::HashMap::new();
-        if let Some(dict) = properties {
-            for (k, v) in dict.iter() {
+        if let Some(properties) = properties {
+            for item in properties.call_method0("items")?.try_iter()? {
+                let (k, v): (Bound<'_, PyAny>, Bound<'_, PyAny>) = item?.extract()?;
                 props.insert(crate::str_argument(&k)?, crate::str_argument(&v)?);
             }
         }
@@ -569,32 +643,40 @@ impl PyCatalog {
     }
 
     /// Drop a database.
-    #[pyo3(signature = (dbName, ifExists=false, cascade=false))]
+    #[pyo3(
+        signature = (dbName, ifExists=None, cascade=None),
+        text_signature = "($self, dbName, ifExists=False, cascade=False)"
+    )]
     #[allow(non_snake_case)]
     fn dropDatabase(
         &self,
         py: Python<'_>,
         dbName: &Bound<'_, PyAny>,
-        ifExists: bool,
-        cascade: bool,
+        ifExists: Option<&Bound<'_, PyAny>>,
+        cascade: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<()> {
         let dbName = constructor_name(dbName)?;
+        let (ifExists, cascade) = (constructor_bool(ifExists)?, constructor_bool(cascade)?);
         self.detached(py, |catalog| {
             { catalog.drop_database(&dbName, ifExists, cascade) }.map_err(Box::new)
         })
     }
 
     /// Drop a table.
-    #[pyo3(signature = (tableName, ifExists=false, purge=false))]
+    #[pyo3(
+        signature = (tableName, ifExists=None, purge=None),
+        text_signature = "($self, tableName, ifExists=False, purge=False)"
+    )]
     #[allow(non_snake_case)]
     fn dropTable(
         &self,
         py: Python<'_>,
         tableName: &Bound<'_, PyAny>,
-        ifExists: bool,
-        purge: bool,
+        ifExists: Option<&Bound<'_, PyAny>>,
+        purge: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<()> {
         let tableName = constructor_name(tableName)?;
+        let (ifExists, purge) = (constructor_bool(ifExists)?, constructor_bool(purge)?);
         self.detached(py, |catalog| {
             catalog
                 .drop_table(&tableName, ifExists, purge)
@@ -603,15 +685,19 @@ impl PyCatalog {
     }
 
     /// Drop a view.
-    #[pyo3(signature = (viewName, ifExists=false))]
+    #[pyo3(
+        signature = (viewName, ifExists=None),
+        text_signature = "($self, viewName, ifExists=False)"
+    )]
     #[allow(non_snake_case)]
     fn dropView(
         &self,
         py: Python<'_>,
         viewName: &Bound<'_, PyAny>,
-        ifExists: bool,
+        ifExists: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<()> {
         let viewName = constructor_name(viewName)?;
+        let ifExists = constructor_bool(ifExists)?;
         self.detached(py, |catalog| {
             catalog.drop_view(&viewName, ifExists).map_err(Box::new)
         })
@@ -626,31 +712,40 @@ impl PyCatalog {
         })
     }
 
-    /// Recover the statistics of a table.
-    #[pyo3(signature = (tableName, noScan=false))]
+    /// Recover the statistics of a table, of `noScan` as PySpark's plan sets it in its bool field.
+    #[pyo3(
+        signature = (tableName, noScan=crate::streaming::ProtoBool::default()),
+        text_signature = "($self, tableName, noScan=False)"
+    )]
     #[allow(non_snake_case)]
     fn analyzeTable(
         &self,
         py: Python<'_>,
         tableName: &Bound<'_, PyAny>,
-        noScan: bool,
+        noScan: crate::streaming::ProtoBool,
     ) -> PyResult<()> {
         let tableName = crate::str_argument(tableName)?;
+        let noScan = noScan.value(py)?;
         self.detached(py, |catalog| {
             catalog.analyze_table(&tableName, noScan).map_err(Box::new)
         })
     }
 
-    /// Get the `CREATE TABLE` string of a table.
-    #[pyo3(signature = (tableName, asSerde=false))]
+    /// Get the `CREATE TABLE` string of a table, of `asSerde` as PySpark's plan sets it in its
+    /// bool field.
+    #[pyo3(
+        signature = (tableName, asSerde=crate::streaming::ProtoBool::default()),
+        text_signature = "($self, tableName, asSerde=False)"
+    )]
     #[allow(non_snake_case)]
     fn getCreateTableString(
         &self,
         py: Python<'_>,
         tableName: &Bound<'_, PyAny>,
-        asSerde: bool,
+        asSerde: crate::streaming::ProtoBool,
     ) -> PyResult<String> {
         let tableName = crate::str_argument(tableName)?;
+        let asSerde = asSerde.value(py)?;
         self.detached(py, |catalog| {
             { catalog.get_create_table_string(&tableName, asSerde) }.map_err(Box::new)
         })

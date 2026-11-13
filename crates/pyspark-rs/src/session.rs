@@ -2958,7 +2958,7 @@ impl PySparkSession {
     /// `SparkSession._parse_ddl`, of a `DDLParse` of an `AnalyzePlanRequest`.
     fn _parse_ddl(&self, py: Python<'_>, ddl: &str) -> PyResult<Py<PyAny>> {
         let data_type = interruptible(py, &self.session, || self.session.parse_ddl(ddl))?;
-        crate::dataframe::check_nanosecond_timestamps(py, Some(&data_type))?;
+        crate::dataframe::check_schema_conversion(py, Some(&data_type))?;
         crate::types::data_type_to_py(py, &data_type)
     }
 

@@ -486,15 +486,6 @@ jobs:
           mkdir -p dist
           gh release download "${TAG}" --repo "${UPSTREAM_REPO}" --dir dist --pattern '*'
           ls -l dist
-      - name: Publish wheels + sdist to PyPI
-        env:
-          TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
-        run: |
-          set -euo pipefail
-          python -m pip install --upgrade twine
-          # --skip-existing makes a re-run after a partial upload safe.
-          twine upload --skip-existing dist/*
       - name: Install Rust toolchain
         run: |
           rustup toolchain install stable --profile minimal
@@ -517,6 +508,15 @@ jobs:
             done
           done
           echo "Every crate packages LICENSE and NOTICE."
+      - name: Publish wheels + sdist to PyPI
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade twine
+          # --skip-existing makes a re-run after a partial upload safe.
+          twine upload --skip-existing dist/*
       - name: Publish crates to crates.io (from the identical RC source)
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

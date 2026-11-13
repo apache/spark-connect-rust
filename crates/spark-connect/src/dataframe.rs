@@ -1301,9 +1301,10 @@ impl DataFrame {
     /// The DataFrame of `relation`, a relation that `session` sent, such as that of a DataFrame
     /// that was pickled, which keeps its plan ID, as PySpark Connect's pickled plans keep
     /// theirs: so it is sent as it is, and the columns of the DataFrame it was of resolve
-    /// against it. While the DataFrame that it was of is alive, it has its Observations, as a
-    /// copy of PySpark's DataFrame has those of its plan: the actions of this one set them, and
-    /// raise for their metrics that PySpark does not convert. Not a stable API.
+    /// against it. While the DataFrame that it was of is alive, it has copies of its
+    /// Observations, as PySpark's unpickled plan has copies of those of the pickled one: the
+    /// actions of this one set the copies, not the Observations of that DataFrame, and raise for
+    /// their metrics that PySpark does not convert. Not a stable API.
     #[doc(hidden)]
     pub fn from_sent_relation(session: SparkSession, relation: proto::Relation) -> DataFrame {
         // A relation of one level holds no plan, as a relation built without a pickled plan.
@@ -1335,7 +1336,12 @@ impl DataFrame {
         let plan_id = relation.common.as_ref().and_then(|common| common.plan_id);
         let observations = plan_id
             .and_then(|plan_id| session.plan_ids().node_of(plan_id))
-            .map(|node| node.observations())
+            .map(|node| {
+                node.observations()
+                    .into_iter()
+                    .map(|(name, observation)| (name, observation.detached()))
+                    .collect()
+            })
             .unwrap_or_default();
         DataFrame::from_sent_relation_with(session, relation, levels, observations)
     }
@@ -1360,25 +1366,52 @@ impl DataFrame {
         dataframe
     }
 
-    /// The copy of this DataFrame that PySpark's `copy.deepcopy` makes: the same relation and
-    /// plan ID, whose Observations are detached copies of those of this DataFrame, as PySpark's
-    /// deep copy of its plan copies its Observations. So the actions of the copy set the copies,
-    /// and those of this DataFrame stay as they are. Not a stable API.
+    /// The Observations of the plan of this DataFrame by their names, whose metrics its actions
+    /// set, as PySpark's `LogicalPlan.observations`. Not a stable API.
     #[doc(hidden)]
-    pub fn detached_copy(&self) -> Result<DataFrame> {
+    pub fn observations(&self) -> Vec<(String, crate::observation::Observation)> {
+        self.plan.observations()
+    }
+
+    /// The copy of this DataFrame that PySpark's `copy.copy` makes of its `__reduce__`: of the
+    /// same plan, and so of the same plan IDs and Observations, with the schema that this one
+    /// resolved, which the state of PySpark's DataFrame carries. The information of its last
+    /// execution is its own, empty until it executes, as that of PySpark's
+    /// `DataFrame(plan, session)`, and so is the answer of `is_local_on_server` that it keeps,
+    /// as PySpark's `isLocal` keeps one for each DataFrame. Not a stable API.
+    #[doc(hidden)]
+    pub fn shallow_copy(&self) -> DataFrame {
+        DataFrame {
+            session: self.session.clone(),
+            plan: Arc::clone(&self.plan),
+            schema_cache: Arc::new(Mutex::new(self.cached_schema())),
+            is_local_cache: Arc::new(Mutex::new(None)),
+            execution: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// The copy of this DataFrame that PySpark's `copy.deepcopy` makes, of `session`, the copy of
+    /// its session, whose Observations are `observations`, copies of those of this DataFrame
+    /// ([`DataFrame::observations`]) by their names: the same relation and plan ID, with the
+    /// schema that this one resolved, as the state of PySpark's DataFrame carries it, and an
+    /// information of executions of its own. PySpark's deep copy copies the plan, and so its
+    /// Observations, and then the session with the memo of the call, so that the copy of an
+    /// Observation or of the session that the call copies too is the one that the copied
+    /// DataFrame holds; [`Observation::detached`](crate::observation::Observation::detached)
+    /// gives a copy that nothing else shares, and the session of this DataFrame is its own copy
+    /// where nothing else is. So the actions of the copy set `observations`, and those of this
+    /// DataFrame its own. Not a stable API.
+    #[doc(hidden)]
+    pub fn deep_copy_with(
+        &self,
+        session: SparkSession,
+        observations: Vec<(String, crate::observation::Observation)>,
+    ) -> Result<DataFrame> {
         let relation = self.to_relation()?;
-        let observations = self
-            .plan
-            .observations()
-            .into_iter()
-            .map(|(name, observation)| (name, observation.detached()))
-            .collect();
-        Ok(DataFrame::from_sent_relation_with(
-            self.session.clone(),
-            relation,
-            self.plan_levels(),
-            observations,
-        ))
+        let mut copy =
+            DataFrame::from_sent_relation_with(session, relation, self.plan_levels(), observations);
+        copy.schema_cache = Arc::new(Mutex::new(self.cached_schema()));
+        Ok(copy)
     }
 
     /// The levels of the plan of this DataFrame, as a pickled DataFrame records them for
@@ -2044,14 +2077,17 @@ impl DataFrame {
         DataFrame::new(self.session.clone(), plan)
     }
 
-    /// Select with SQL expressions, mirroring `DataFrame.selectExpr`.
+    /// Select with SQL expressions, mirroring `DataFrame.selectExpr`, of any iterable of them.
     ///
     /// Each string is parsed as a SQL expression (e.g. `"id + 1 AS x"`), not treated
     /// as a bare column name - so it must go through `functions::expr` (an
     /// `ExpressionString` the server parses), not `col` (an unresolved attribute,
     /// which made `selectExpr("id + 1 AS x")` fail to resolve).
-    pub fn select_expr(&self, exprs: Vec<&str>) -> DataFrame {
-        let cols: Vec<Column> = exprs.iter().map(|e| crate::functions::expr(e)).collect();
+    pub fn select_expr<S: Into<String>>(&self, exprs: impl IntoIterator<Item = S>) -> DataFrame {
+        let cols: Vec<Column> = exprs
+            .into_iter()
+            .map(|e| crate::functions::expr(&e.into()))
+            .collect();
         self.select(cols)
     }
 
@@ -2132,10 +2168,15 @@ impl DataFrame {
         DataFrame::new(self.session.clone(), plan)
     }
 
-    /// Fill NA values per column from `(column, value)` pairs. Mirrors
-    /// `df.fillna({col: value, ...})`: the values are as those of [`DataFrame::fillna_value`],
-    /// and an empty map is a `CANNOT_BE_EMPTY` error, as PySpark raises.
-    pub fn fillna_map(&self, pairs: Vec<(String, crate::row::Value)>) -> Result<DataFrame> {
+    /// Fill NA values per column from `(column, value)` pairs, of any iterable of them, such as a
+    /// `Vec`, an array or a map of the names. Mirrors `df.fillna({col: value, ...})`: the values
+    /// are as those of [`DataFrame::fillna_value`], and an empty map is a `CANNOT_BE_EMPTY`
+    /// error, as PySpark raises.
+    pub fn fillna_map(
+        &self,
+        pairs: impl IntoIterator<Item = (String, crate::row::Value)>,
+    ) -> Result<DataFrame> {
+        let pairs: Vec<(String, crate::row::Value)> = pairs.into_iter().collect();
         if pairs.is_empty() {
             return Err(SparkError::classed(
                 SparkErrorKind::ValueError,
@@ -2239,12 +2280,12 @@ impl DataFrame {
         DataFrame::new(self.session.clone(), plan)
     }
 
-    /// Get summary statistics.
-    pub fn summary(&self, percentiles: Vec<&str>) -> DataFrame {
-        let percs = percentiles.iter().map(|s| s.to_string()).collect();
+    /// Get summary statistics, of any iterable of their names, such as `"count"` and `"25%"`, as
+    /// PySpark's `DataFrame.summary(*statistics)`.
+    pub fn summary<S: Into<String>>(&self, statistics: impl IntoIterator<Item = S>) -> DataFrame {
         let plan = LogicalPlan::Summary {
             input: Arc::clone(&self.plan),
-            percentiles: percs,
+            percentiles: statistics.into_iter().map(Into::into).collect(),
         };
         DataFrame::new(self.session.clone(), plan)
     }
@@ -5853,6 +5894,17 @@ mod plan_construction_tests {
         assert_eq!(error.get_error_class().as_deref(), Some("SESSION_NOT_SAME"));
     }
 
+    /// The deep copy of `df` whose Observations are detached copies of its own, as the Python
+    /// client copies those that no Python object holds.
+    fn detached_copy(df: &DataFrame) -> DataFrame {
+        let observations = df
+            .observations()
+            .into_iter()
+            .map(|(name, observation)| (name, observation.detached()))
+            .collect();
+        df.deep_copy_with(df.session.clone(), observations).unwrap()
+    }
+
     /// As PySpark's `copy.deepcopy` of a DataFrame: the copy keeps the plan ID, and its
     /// Observations are detached copies of those of the DataFrame, with their state as it is
     /// when it is copied. So the metrics that the actions of the copy observe set the copy's,
@@ -5899,7 +5951,7 @@ mod plan_construction_tests {
             capture_execution(&mut resp, &mut info, &spark, &df.plan.observations()).unwrap();
         };
 
-        let copy = df.detached_copy().unwrap();
+        let copy = detached_copy(&df);
         assert_eq!(
             spark.plan_ids().id_of(&copy.plan),
             spark.plan_ids().id_of(&df.plan)
@@ -5917,7 +5969,7 @@ mod plan_construction_tests {
         // The copy keeps the state of the Observation as it was when copied.
         assert!(value(&copied[0].1).is_empty());
         // A copy of the DataFrame after the action has the metrics of the action.
-        let later = df.detached_copy().unwrap();
+        let later = detached_copy(&df);
         assert_eq!(
             value(&later.plan.observations()[0].1),
             vec![("c".to_string(), Some(LiteralType::Long(5)))]
@@ -5932,14 +5984,157 @@ mod plan_construction_tests {
             value(&observation),
             vec![("c".to_string(), Some(LiteralType::Long(5)))]
         );
+    }
 
-        // A copy of the relation, as copy.copy and pickling make, shares the Observations of the
-        // DataFrame that the relation is of while it is alive, and then those of the first copy.
-        let shared = DataFrame::from_sent_relation(spark.clone(), df.to_relation().unwrap());
-        assert!(shared.plan.observations()[0].1.same(&observation));
-        std::mem::drop(df);
-        let shared = DataFrame::from_sent_relation(spark.clone(), copy.to_relation().unwrap());
-        assert!(shared.plan.observations()[0].1.same(&copied[0].1));
+    /// `df` observed by `observation` with `count(1)` by the name `c`, as `observe_with` makes
+    /// it.
+    fn observe_count(df: &DataFrame, observation: &crate::observation::Observation) -> DataFrame {
+        let count = crate::functions::count(crate::column::lit(1));
+        df.observed_with(
+            observation,
+            "c".to_string(),
+            vec![count.expression().clone()],
+        )
+    }
+
+    /// Set `value` as the metric `c` of an action of `df`, as the server reports it by the plan
+    /// ID of `df`, on the Observations of its plan.
+    fn report_count(df: &DataFrame, value: i64) {
+        let mut resp = proto::ExecutePlanResponse {
+            observed_metrics: vec![proto::execute_plan_response::ObservedMetrics {
+                name: "c".to_string(),
+                values: vec![proto::expression::Literal {
+                    literal_type: Some(proto::expression::literal::LiteralType::Long(value)),
+                    ..Default::default()
+                }],
+                keys: vec!["c".to_string()],
+                plan_id: df.session.plan_ids().id_of(&df.plan),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut info = ExecutionInfo::default();
+        capture_execution(&mut resp, &mut info, &df.session, &df.observations()).unwrap();
+    }
+
+    /// The values of the metrics of `observation`, which are longs.
+    fn counts(observation: &crate::observation::Observation) -> Vec<i64> {
+        use proto::expression::literal::LiteralType;
+        observation
+            .get()
+            .unwrap()
+            .into_iter()
+            .map(|(_, value)| match value.literal_type {
+                Some(LiteralType::Long(value)) => value,
+                other => panic!("not a long: {other:?}"),
+            })
+            .collect()
+    }
+
+    /// As PySpark's `copy.deepcopy` of a DataFrame, which copies the plan, and so its
+    /// Observations, and the session with the memo of the call: the copy is of the session and
+    /// holds the copies that it is given, which its actions set, and keeps the plan ID and the
+    /// schema that the DataFrame resolved, with an information of executions of its own.
+    #[test]
+    fn a_deep_copy_holds_the_given_copies_of_the_observations_as_pyspark_deep_copies() {
+        use crate::observation::Observation;
+        let spark = session();
+        let observation = Observation::new("c");
+        let df = observe_count(&spark.range(3).unwrap(), &observation);
+        let schema = DataType::Struct { fields: vec![] };
+        *df.schema_cache.lock().unwrap() = Some(Arc::new(schema.clone()));
+        df.record_execution(ExecutionInfo::default());
+
+        let given = observation.detached();
+        let copy = df
+            .deep_copy_with(spark.clone(), vec![("c".to_string(), given.clone())])
+            .unwrap();
+        assert!(copy.session.is_same_session(&spark));
+        assert_eq!(
+            spark.plan_ids().id_of(&copy.plan),
+            spark.plan_ids().id_of(&df.plan)
+        );
+        let held = copy.observations();
+        assert_eq!(held.len(), 1);
+        assert!(held[0].0 == "c" && held[0].1.same(&given));
+        assert_eq!(copy.cached_schema().as_deref(), Some(&schema));
+        assert!(copy.execution_info().is_err());
+
+        report_count(&copy, 3);
+        assert_eq!(counts(&given), [3]);
+        assert!(counts(&observation).is_empty());
+
+        // The copy of the session that a memo of the caller gives, as PySpark's copy is of it.
+        let other = spark.new_session();
+        let moved = df.deep_copy_with(other.clone(), Vec::new()).unwrap();
+        assert!(moved.session.is_same_session(&other) && !moved.session.is_same_session(&spark));
+        assert_eq!(
+            other.plan_ids().id_of(&moved.plan),
+            spark.plan_ids().id_of(&df.plan)
+        );
+    }
+
+    /// As PySpark's unpickled plan, which has copies of the Observations of the pickled one: a
+    /// DataFrame of a relation that the session sent has copies of the Observations of the
+    /// DataFrame that the relation is of, with their state as it is, which its actions set, and
+    /// not those of that DataFrame.
+    #[test]
+    fn a_dataframe_of_a_sent_relation_copies_the_observations_as_pysparks_unpickled_plan() {
+        use crate::observation::Observation;
+        let spark = session();
+        let observation = Observation::new("c");
+        let df = observe_count(&spark.range(3).unwrap(), &observation);
+        report_count(&df, 5);
+
+        let unpickled = DataFrame::from_sent_relation(spark.clone(), df.to_relation().unwrap());
+        let copies = unpickled.observations();
+        assert_eq!(copies.len(), 1);
+        assert!(copies[0].0 == "c" && !copies[0].1.same(&observation));
+        assert_eq!(counts(&copies[0].1), [5]);
+        report_count(&unpickled, 9);
+        assert_eq!(counts(&copies[0].1), [9]);
+        assert_eq!(counts(&observation), [5]);
+        report_count(&df, 7);
+        assert_eq!(counts(&copies[0].1), [9]);
+        assert_eq!(counts(&observation), [7]);
+    }
+
+    /// As PySpark's `copy.copy` of a DataFrame, of its `__reduce__`: the copy is of the same plan,
+    /// so of its plan ID and its Observations, and of the schema that the DataFrame resolved,
+    /// while the information of its last execution is its own, empty until it executes, as that
+    /// of PySpark's `DataFrame(plan, session)`. An exact clone shares it.
+    #[test]
+    fn a_shallow_copy_shares_the_plan_and_has_its_own_execution_as_pyspark_copies() {
+        use crate::observation::Observation;
+        let spark = session();
+        let observation = Observation::new("c");
+        let df = observe_count(&spark.range(3).unwrap(), &observation);
+        let schema = DataType::Struct { fields: vec![] };
+        *df.schema_cache.lock().unwrap() = Some(Arc::new(schema.clone()));
+        *df.is_local_cache.lock().unwrap() = Some(true);
+        let executed = |operation_id: &str| ExecutionInfo {
+            operation_id: Some(operation_id.to_string()),
+            ..Default::default()
+        };
+        let operation_id =
+            |df: &DataFrame| df.execution_info().ok().and_then(|info| info.operation_id);
+        df.record_execution(executed("original"));
+
+        let copy = df.shallow_copy();
+        assert!(Arc::ptr_eq(&copy.plan, &df.plan));
+        assert!(copy.observations()[0].1.same(&observation));
+        assert_eq!(copy.cached_schema().as_deref(), Some(&schema));
+        assert_eq!(*copy.is_local_cache.lock().unwrap(), None);
+        assert_eq!(operation_id(&copy), None);
+        copy.record_execution(executed("copy"));
+        assert_eq!(operation_id(&copy).as_deref(), Some("copy"));
+        assert_eq!(operation_id(&df).as_deref(), Some("original"));
+        report_count(&copy, 4);
+        assert_eq!(counts(&observation), [4]);
+
+        df.clone().record_execution(executed("clone"));
+        assert_eq!(operation_id(&df).as_deref(), Some("clone"));
+        assert_eq!(operation_id(&copy).as_deref(), Some("copy"));
     }
 
     /// As PySpark's client, which sets the metrics of `observations[name]`, of the Observations
@@ -6105,9 +6300,11 @@ mod plan_construction_tests {
         };
         let transformed = DataFrame::from_relation(spark.clone(), transform, None).unwrap();
         assert_observations(&transformed.limit(1), &[("m", &model_input)]);
-        // A copy, of a relation that the session sent, while the DataFrame it was of is alive.
+        // A copy, of a relation that the session sent, while the DataFrame it was of is alive:
+        // copies of its Observations, as PySpark's unpickled plan has.
         let copied = DataFrame::from_sent_relation(spark.clone(), input.to_relation().unwrap());
-        assert_observations(&copied.limit(1), &[("m", &model_input)]);
+        let copies = copied.limit(1).plan.observations();
+        assert!(copies.len() == 1 && copies[0].0 == "m" && !copies[0].1.same(&model_input));
         let sent = spark.range(1).unwrap().to_relation().unwrap();
         assert_observations(&DataFrame::from_sent_relation(spark.clone(), sent), &[]);
     }
@@ -6892,6 +7089,45 @@ mod plan_construction_tests {
             [
                 &df.agg([count_distinct_columns(col("id"), [col("id")])]),
                 &df.agg([count_distinct_columns(col("id"), ["id"])]),
+            ],
+        );
+    }
+
+    /// The SQL expressions of `select_expr`, the statistics of `summary` and the pairs of
+    /// `fillna_map` are of any iterable too: an array, a Vec and an iterator build the same plan,
+    /// and `fillna_map` takes a map of the names as well.
+    #[test]
+    fn expression_statistic_and_fill_lists_take_any_iterable_as_their_vec_does() {
+        use crate::row::Value;
+        use std::collections::BTreeMap;
+
+        let df = session().range(5).unwrap();
+        let same_as = |vec_form: &DataFrame, others: [&DataFrame; 2]| {
+            for other in others {
+                assert_eq!(other.plan.to_proto(), vec_form.plan.to_proto());
+            }
+        };
+
+        same_as(
+            &df.select_expr(vec!["id + 1 AS x", "id"]),
+            [
+                &df.select_expr(["id + 1 AS x", "id"]),
+                &df.select_expr(["id + 1 AS x", "id"].iter().map(|e| e.to_string())),
+            ],
+        );
+        same_as(
+            &df.summary(vec!["count", "25%"]),
+            [
+                &df.summary(["count", "25%"]),
+                &df.summary(["count", "25%"].iter().copied()),
+            ],
+        );
+        let pairs = || [("id".to_string(), Value::Long(0))];
+        same_as(
+            &df.fillna_map(pairs().to_vec()).unwrap(),
+            [
+                &df.fillna_map(pairs()).unwrap(),
+                &df.fillna_map(BTreeMap::from(pairs())).unwrap(),
             ],
         );
     }

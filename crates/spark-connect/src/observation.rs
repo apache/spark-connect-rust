@@ -29,6 +29,9 @@ struct ObservationState {
     result: Option<Arc<Mutex<Metrics>>>,
     /// The error of collecting the metrics, which the server reported.
     error: Option<SparkError>,
+    /// What a binding of another language keeps for this observation (see
+    /// [`Observation::set_handle`]), which no copy of it has.
+    handle: Option<Arc<dyn std::any::Any + Send + Sync>>,
 }
 
 impl std::fmt::Debug for Observation {
@@ -117,8 +120,25 @@ impl Observation {
                     .as_ref()
                     .map(|result| Arc::new(Mutex::new(lock_metrics(result).clone()))),
                 error: state.error.clone(),
+                handle: None,
             })),
         }
+    }
+
+    /// Keep `handle` for this observation, by which a binding of another language finds what
+    /// it made of it from the Observations of a plan: the Python client keeps a weak reference to
+    /// its Python Observation, which a deep copy of a DataFrame copies with the other objects of
+    /// the call, as PySpark's deep copy of a plan copies the Observation that the plan holds.
+    /// Not a stable API.
+    #[doc(hidden)]
+    pub fn set_handle(&self, handle: Arc<dyn std::any::Any + Send + Sync>) {
+        self.lock().handle = Some(handle);
+    }
+
+    /// The handle of [`Observation::set_handle`], if any. Not a stable API.
+    #[doc(hidden)]
+    pub fn handle(&self) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
+        self.lock().handle.clone()
     }
 
     /// A copy of this observation, of its name and of its state as it is now, as PySpark's
@@ -134,6 +154,7 @@ impl Observation {
                 name: state.name.clone(),
                 result: state.result.clone(),
                 error: state.error.clone(),
+                handle: None,
             })),
         }
     }
@@ -342,5 +363,18 @@ mod tests {
         assert_eq!(names(&copy), vec!["a", "b"]);
         let failed = obs.shallow_copy().get().unwrap_err();
         assert!(failed.message().contains("failed"));
+    }
+
+    #[test]
+    fn a_handle_is_kept_by_the_clones_of_an_observation_and_not_by_its_copies() {
+        // The handle of a binding, which finds its object by it from a clone of the observation
+        // that a plan holds; a copy is an observation of its own, which has none.
+        let obs = Observation::new("h");
+        assert!(obs.handle().is_none());
+        obs.set_handle(Arc::new("python"));
+        let kept = obs.clone().handle().unwrap();
+        assert_eq!(kept.downcast_ref::<&str>(), Some(&"python"));
+        assert!(obs.detached().handle().is_none());
+        assert!(obs.shallow_copy().handle().is_none());
     }
 }
