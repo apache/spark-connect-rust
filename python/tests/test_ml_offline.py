@@ -1120,8 +1120,7 @@ def test_ml_connect_params_argument_of_fit_transform_and_evaluate_as_pyspark(ml_
     # sends what it sends without the argument. A non-empty map raises TypeError here, as the
     # native classes take no param map (and a list or tuple to a fit of pyspark.ml, which PySpark
     # fits as one model per map). Any other value raises the TypeError that PySpark raises for it,
-    # before anything is sent. A connect LogisticRegression, Pipeline and CrossValidator take a
-    # list or tuple to their fit as any other value.
+    # before anything is sent. Every class follows pyspark.ml, as the native classes do.
     import pyspark.ml.connect as connect
     from pyspark.errors import PySparkNotImplementedError
 
@@ -1177,14 +1176,14 @@ def test_ml_connect_params_argument_of_fit_transform_and_evaluate_as_pyspark(ml_
                 lambda: estimator.fit(df, value),
                 fit_message.format(type(value)),
             )
-    # The fits of pyspark.ml.connect: a list or tuple is not a param map there either.
+    # LogisticRegression, as pyspark.ml's: a list or tuple is a fit of many models.
     logistic = connect.LogisticRegression()
     base = fitted(logistic)
     assert fitted(logistic, None) == base
     assert fitted(logistic, {}) == base
     refused(lambda: logistic.fit(df, {"maxIter": 2}), _NO_PARAM_MAP)
     for value in [[{}], ()]:
-        refused(lambda: logistic.fit(df, value), fit_message.format(type(value)))
+        refused(lambda: logistic.fit(df, value), _NO_PARAM_MAP)
     refused(lambda: logistic.fit(df, "x"), fit_message.format(str))
     assert fitted(logistic, None) == base
 
@@ -1196,14 +1195,14 @@ def test_ml_connect_params_argument_of_fit_transform_and_evaluate_as_pyspark(ml_
                 estimator.fit(df, *params)
         refused(lambda: estimator.fit(df, {"stages": []}), _NO_PARAM_MAP)
         refused(lambda: estimator.fit(df, "x"), fit_message.format(str))
-        refused(lambda: estimator.fit(df, [{}]), fit_message.format(list))
+        refused(lambda: estimator.fit(df, [{}]), _NO_PARAM_MAP)
 
     # The check of the params is before the dataset, as in PySpark's fit.
     with pytest.raises(TypeError) as error:
         connect.NaiveBayes().fit(object(), "x")
     assert str(error.value) == fit_message.format(str)
 
-    # The transforms: a transformer and a model of pyspark.ml.connect.
+    # The transforms: a transformer and a model.
     assembler = connect.VectorAssembler(inputCols=["id"], outputCol="out")
     base = transformed(assembler)
     assert transformed(assembler, None) == base

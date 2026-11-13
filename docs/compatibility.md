@@ -266,20 +266,19 @@ not given is not sent, so the server's default applies. A list param without ele
 accepted by its constructor and setters, and a fit, transform or evaluate raises PySpark's
 `CANNOT_INFER_ARRAY_ELEMENT_TYPE` for it, as PySpark's serialization does.
 
-A native class has a `setParams` where PySpark's class has one: the `pyspark.ml` classes, which all
-have it, and the `Pipeline` and `CrossValidator` of `pyspark.ml.connect`. LogisticRegression and the
-evaluators of `pyspark.ml.connect` have none, as in PySpark. It is keyword-only, takes the params of
-the constructor, sets the params that it is given, in order, and returns the object, as PySpark's
+A native class has the `setParams` of its `pyspark.ml` class, except `LogisticRegression` and the
+three evaluators, whose params are still those of the deprecated `pyspark.ml.connect` classes (see
+Native LogisticRegression), which have no `setParams`. It is keyword-only, takes the params of the
+constructor, sets the params that it is given, in order, and returns the object, as PySpark's
 `_set` does. Its signature is PySpark's for every class except `StringIndexer` and
 `VectorAssembler`, which take only the params of their constructors (`inputCol` and `outputCol`,
 and `inputCols` and `outputCol`), and `CrossValidator`, which takes `numFolds`, `parallelism` and
 `seed`, with a default of `None` for the first two. The `params` argument of a fit, transform or
-evaluate, which PySpark takes as a param map, is accepted: `None` and an empty dict leave the params
-as they are. The native classes have no Param objects to key a map by, so a non-empty map, and a
-list or tuple of maps to the fit of a `pyspark.ml` class (which PySpark fits as one model per map),
-raise a `TypeError` that says the native classes take no param map. Any other value raises the
-`TypeError` that PySpark raises for it. A connect transformer of PySpark returns `None` for a value
-that is not a map; the native classes raise the same `TypeError` as the others.
+evaluate, which `pyspark.ml` takes as a param map, is accepted: `None` and an empty dict leave the
+params as they are. The native classes have no Param objects to key a map by, so a non-empty map,
+and a list or tuple of maps to a fit (which `pyspark.ml` fits as one model per map), raise a
+`TypeError` that says the native classes take no param map. Any other value raises the `TypeError`
+that `pyspark.ml` raises for it.
 
 Their fit, transform and evaluate take a DataFrame or a pandas DataFrame, as PySpark's do, and run
 on the server, where PySpark's compute on a pandas DataFrame locally: a pandas DataFrame is sent

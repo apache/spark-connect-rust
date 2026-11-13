@@ -335,18 +335,17 @@ fn overrides_nothing(params: &Bound<'_, PyAny>) -> PyResult<bool> {
     }
 }
 
-/// Check the `params` of a fit, as PySpark's `Estimator.fit` checks it, before the fit. A fit of a
-/// class of `pyspark.ml` (`fit_multiple`) also takes a list or tuple of param maps, which it fits
-/// one model per map of: the native classes cannot, so it raises [`NO_PARAM_MAP`]. A fit of a
-/// class of `pyspark.ml.connect` raises PySpark's TypeError of any other value, a list included.
-fn check_fit_params(params: Option<&Bound<'_, PyAny>>, fit_multiple: bool) -> PyResult<()> {
+/// Check the `params` of a fit, as the `Estimator.fit` of `pyspark.ml` checks it, before the fit.
+/// It also takes a list or tuple of param maps, which it fits one model per map of: the native
+/// classes cannot, so it raises [`NO_PARAM_MAP`]. Any other value raises PySpark's TypeError.
+fn check_fit_params(params: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
     let Some(params) = params else {
         return Ok(());
     };
     if overrides_nothing(params)? {
         return Ok(());
     }
-    if fit_multiple && (params.is_instance_of::<PyList>() || params.is_instance_of::<PyTuple>()) {
+    if params.is_instance_of::<PyList>() || params.is_instance_of::<PyTuple>() {
         return Err(PyTypeError::new_err(NO_PARAM_MAP));
     }
     Err(PyTypeError::new_err(format!(
@@ -355,10 +354,9 @@ fn check_fit_params(params: Option<&Bound<'_, PyAny>>, fit_multiple: bool) -> Py
     )))
 }
 
-/// Check the `params` of a transform or an evaluate, as PySpark's `Transformer.transform` and
-/// `Evaluator.evaluate` check them, before the call. Any value that is not a param map raises
-/// PySpark's TypeError here. A connect transformer of PySpark returns None for it instead, which
-/// is not kept.
+/// Check the `params` of a transform or an evaluate, as the `Transformer.transform` and
+/// `Evaluator.evaluate` of `pyspark.ml` check them, before the call: any value that is not a param
+/// map raises PySpark's TypeError.
 fn check_params(params: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
     let Some(params) = params else {
         return Ok(());
@@ -1302,7 +1300,7 @@ impl PyStringIndexer {
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyMLModel> {
-        check_fit_params(params, true)?;
+        check_fit_params(params)?;
         fit_native(slf, dataset, None)
     }
 }
@@ -1489,7 +1487,7 @@ impl PyLogisticRegression {
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyMLModel> {
-        check_fit_params(params, false)?;
+        check_fit_params(params)?;
         if is_pandas(dataset)? {
             return Err(PyNotImplementedError::new_err(
                 "Fitting pandas dataframe is not supported yet.",
@@ -1662,7 +1660,7 @@ impl PyLinearSVC {
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyMLModel> {
-        check_fit_params(params, true)?;
+        check_fit_params(params)?;
         fit_native(slf, dataset, None)
     }
 }
@@ -1868,7 +1866,7 @@ impl PyFMClassifier {
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyMLModel> {
-        check_fit_params(params, true)?;
+        check_fit_params(params)?;
         fit_native(slf, dataset, None)
     }
 }
@@ -2055,7 +2053,7 @@ impl PyMultilayerPerceptronClassifier {
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyMLModel> {
-        check_fit_params(params, true)?;
+        check_fit_params(params)?;
         fit_native(slf, dataset, None)
     }
 }
@@ -2203,7 +2201,7 @@ impl PyOneVsRest {
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyMLModel> {
-        check_fit_params(params, true)?;
+        check_fit_params(params)?;
         let classifier = slf
             .try_borrow()?
             .classifier
@@ -2493,7 +2491,7 @@ impl PyLinearRegression {
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyMLModel> {
-        check_fit_params(params, true)?;
+        check_fit_params(params)?;
         fit_native(slf, dataset, None)
     }
 }
@@ -2699,7 +2697,7 @@ impl PyGeneralizedLinearRegression {
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyMLModel> {
-        check_fit_params(params, true)?;
+        check_fit_params(params)?;
         fit_native(slf, dataset, None)
     }
 }
@@ -2861,7 +2859,7 @@ impl PyAFTSurvivalRegression {
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyMLModel> {
-        check_fit_params(params, true)?;
+        check_fit_params(params)?;
         fit_native(slf, dataset, None)
     }
 }
@@ -2975,7 +2973,7 @@ impl PyIsotonicRegression {
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyMLModel> {
-        check_fit_params(params, true)?;
+        check_fit_params(params)?;
         fit_native(slf, dataset, None)
     }
 }
@@ -3155,7 +3153,7 @@ impl PyFMRegressor {
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyMLModel> {
-        check_fit_params(params, true)?;
+        check_fit_params(params)?;
         fit_native(slf, dataset, None)
     }
 }
@@ -3387,7 +3385,7 @@ impl PyDecisionTreeClassifier {
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyMLModel> {
-        check_fit_params(params, true)?;
+        check_fit_params(params)?;
         fit_native(slf, dataset, None)
     }
 }
@@ -3521,7 +3519,7 @@ impl PyNaiveBayes {
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyMLModel> {
-        check_fit_params(params, true)?;
+        check_fit_params(params)?;
         fit_native(slf, dataset, None)
     }
 }
@@ -3788,7 +3786,7 @@ impl PyGBTClassifier {
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyMLModel> {
-        check_fit_params(params, true)?;
+        check_fit_params(params)?;
         fit_native(slf, dataset, None)
     }
 }
@@ -4056,7 +4054,7 @@ impl PyRandomForestClassifier {
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyMLModel> {
-        check_fit_params(params, true)?;
+        check_fit_params(params)?;
         fit_native(slf, dataset, None)
     }
 }
@@ -4299,7 +4297,7 @@ impl PyGBTRegressor {
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyMLModel> {
-        check_fit_params(params, true)?;
+        check_fit_params(params)?;
         fit_native(slf, dataset, None)
     }
 }
@@ -4505,7 +4503,7 @@ impl PyDecisionTreeRegressor {
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyMLModel> {
-        check_fit_params(params, true)?;
+        check_fit_params(params)?;
         fit_native(slf, dataset, None)
     }
 }
@@ -4737,7 +4735,7 @@ impl PyRandomForestRegressor {
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyMLModel> {
-        check_fit_params(params, true)?;
+        check_fit_params(params)?;
         fit_native(slf, dataset, None)
     }
 }
@@ -4888,7 +4886,7 @@ impl PyKMeans {
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyMLModel> {
-        check_fit_params(params, true)?;
+        check_fit_params(params)?;
         fit_native(slf, dataset, None)
     }
 }
@@ -5201,7 +5199,7 @@ impl PyGaussianMixture {
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyMLModel> {
-        check_fit_params(params, true)?;
+        check_fit_params(params)?;
         fit_native(slf, dataset, None)
     }
 }
@@ -5329,7 +5327,7 @@ impl PyBisectingKMeans {
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyMLModel> {
-        check_fit_params(params, true)?;
+        check_fit_params(params)?;
         fit_native(slf, dataset, None)
     }
 }
@@ -5380,7 +5378,7 @@ impl PyPipeline {
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyMLModel> {
-        check_fit_params(params, false)?;
+        check_fit_params(params)?;
         fit_unimplemented(slf, dataset, "Pipeline.fit")
     }
 }
@@ -5544,7 +5542,7 @@ impl PyCrossValidator {
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyMLModel> {
-        check_fit_params(params, false)?;
+        check_fit_params(params)?;
         fit_unimplemented(slf, dataset, "CrossValidator.fit")
     }
 }
