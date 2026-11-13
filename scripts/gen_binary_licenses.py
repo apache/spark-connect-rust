@@ -114,12 +114,14 @@ SUPPLEMENTARY_NOTICES = {
         ("src/limb.rs", "David Judd"),
         ("src/polyfill/once_cell/LICENSE-MIT", None),
     ],
-    # zstd-sys: divsufsort.c (Yuta Mori, MIT) is compiled by the zdict_builder feature, which is
-    # a default. threading.c (Tino Reichardt) is compiled, but its code needs ZSTD_MULTITHREAD
-    # (the zstdmt feature), which the wheels do not enable.
+    # zstd-sys: divsufsort.c (Yuta Mori, MIT) is compiled by the zdict_builder feature, and the
+    # legacy decoders (zstd/lib/legacy, all of its .c files) by the legacy feature, both defaults.
+    # threading.c (Tino Reichardt) is compiled, but its code needs ZSTD_MULTITHREAD (the zstdmt
+    # feature), which the wheels do not enable.
     ("zstd-sys", "2.1.3+zstd.1.5.7"): [
         ("zstd/lib/dictBuilder/divsufsort.c", "Yuta Mori"),
         ("zstd/lib/common/threading.c", "Tino Reichardt"),
+        ("zstd/lib/legacy/*.c", "Yann Collet"),
     ],
     # rustls-webpki: ISC files of the two authors. The crate's LICENSE is Brian Smith's.
     ("rustls-webpki", "0.103.13"): [
@@ -140,12 +142,10 @@ SUPPLEMENTARY_NOTICES = {
     ("futures-channel", "0.3.32"): [("src/mpsc/queue.rs", "Dmitry Vyukov")],
     # pyo3: the MIT notice of Daniel Grunwald's buffer protocol code (rust-cpython).
     ("pyo3", "0.29.3"): [("src/buffer.rs", "Daniel Grunwald")],
-    # sha2-asm: the MIT notices of the assembly (Project Nayuki, Emmanuel Gil Peyrot). The
-    # 32-bit x86 files are not compiled for the wheels, and sha256_aarch64_apple.S is in the
-    # public domain (no notice).
+    # sha2-asm: the MIT notices of the assembly (Project Nayuki, Emmanuel Gil Peyrot). Only the
+    # aarch64 targets link sha2-asm, so only sha256_aarch64.S is compiled for the wheels. The
+    # x86 files are not, and sha256_aarch64_apple.S is in the public domain (no notice).
     ("sha2-asm", "0.6.4"): [
-        ("src/sha256_x64.S", "Copyright"),
-        ("src/sha512_x64.S", "Copyright"),
         ("src/sha256_aarch64.S", "Copyright"),
     ],
 }
