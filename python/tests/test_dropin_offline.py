@@ -7921,6 +7921,204 @@ def test_stream_writer_skips_a_false_path_and_table_as_pyspark(mock_connect):
     assert len(service.execute_requests) == requests
 
 
+def test_register_temp_table_warns_and_replaces_the_view_as_pyspark(mock_connect):
+    # As PySpark's registerTempTable, which warns that it is deprecated, and then replaces the view
+    # as createOrReplaceTempView does, which converts the name after the warning.
+    import warnings
+
+    spark, service = mock_connect
+    df = spark.range(1)
+    message = "Deprecated in 2.0, use createOrReplaceTempView instead."
+    with pytest.warns(FutureWarning) as record:
+        df.registerTempTable("v")
+    assert [str(w.message) for w in record] == [message]
+    # ExecutePlanRequest.plan=3 -> Plan.command=2 -> Command.create_dataframe_view=3:
+    # CreateDataFrameViewCommand.name=2 and replace=4, not is_global=3.
+    plan = parse_message(parse_message(service.execute_requests[-1])[3][0])
+    view = parse_message(parse_message(plan[2][0])[3][0])
+    assert (view[2], view[4], 3 in view) == ([b"v"], [1], False)
+    requests = len(service.execute_requests)
+    with pytest.warns(FutureWarning, match=re.escape(message)):
+        with pytest.raises(TypeError, match="^bad argument type for built-in operation$"):
+            df.registerTempTable(1)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", FutureWarning)
+        with pytest.raises(FutureWarning, match=re.escape(message)):
+            df.registerTempTable(1)
+    assert len(service.execute_requests) == requests
+
+
+def test_catalog_writer_and_unpersist_flags_convert_as_pyspark(mock_connect):
+    # As PySpark: the flags that the catalog passes to the constructor of its message (dropTable,
+    # dropView, createDatabase and dropDatabase) or sets in its plan (asSerde, noScan), and the
+    # `blocking` of unpersist, are converted as protobuf's default backend (upb) converts a bool
+    # field: an int by its truth, a NumPy bool, and the TypeError or OverflowError of another
+    # object; None leaves a field of a constructor unset, and is the TypeError of a field that the
+    # plan sets. insertInto takes the truth of an `overwrite` that is not None.
+    spark, service = mock_connect
+    catalog = spark.catalog
+    for call, operation, fields in [
+        (lambda: catalog.dropTable("t", ifExists=1, purge=np.bool_(True)), 27,
+         {1: [b"t"], 2: [1], 3: [1]}),
+        (lambda: catalog.dropTable("t", None, 0), 27, {1: [b"t"]}),
+        (lambda: catalog.dropView("v", ifExists=2), 28, {1: [b"v"], 2: [1]}),
+        (lambda: catalog.createDatabase("d", ifNotExists=-1), 29, {1: [b"d"], 2: [1]}),
+        (lambda: catalog.dropDatabase("d", 1, None), 30, {1: [b"d"], 2: [1]}),
+        (lambda: catalog.getCreateTableString("t", asSerde=1), 34, {1: [b"t"], 2: [1]}),
+        (lambda: catalog.analyzeTable("t", 1), 36, {1: [b"t"], 2: [1]}),
+    ]:
+        requests = len(service.execute_requests)
+        with contextlib.suppress(Exception):
+            call()
+        assert len(service.execute_requests) == requests + 1
+        assert _sent_catalog(service.execute_requests[-1], operation) == fields
+    requests = len(service.execute_requests)
+    for flag, error, message in [
+        ("x", TypeError, "'str' object cannot be interpreted as an integer"),
+        (1.5, TypeError, "'float' object cannot be interpreted as an integer"),
+        (np.array([1]), TypeError, "[1] has type ndarray, but expected one of: bool"),
+        (2**70, OverflowError, "Python int too large to convert to C long"),
+    ]:
+        for call in [
+            lambda: catalog.dropTable("t", ifExists=flag),
+            lambda: catalog.dropTable("t", purge=flag),
+            lambda: catalog.dropView("v", ifExists=flag),
+            lambda: catalog.createDatabase("d", ifNotExists=flag),
+            lambda: catalog.dropDatabase("d", cascade=flag),
+            lambda: catalog.getCreateTableString("t", asSerde=flag),
+            lambda: catalog.analyzeTable("t", noScan=flag),
+            lambda: spark.range(1).unpersist(flag),
+        ]:
+            with pytest.raises(error, match=f"^{re.escape(message)}$"):
+                call()
+    for call in [lambda: catalog.getCreateTableString("t", None),
+                 lambda: catalog.analyzeTable("t", noScan=None)]:
+        with pytest.raises(TypeError, match="^'NoneType' object cannot be interpreted as an "):
+            call()
+    # In the order of the fields: the name, and then each flag.
+    with pytest.raises(TypeError, match="^bad argument type for built-in operation$"):
+        catalog.dropTable(1, ifExists="x")
+    with pytest.raises(TypeError, match="^'str' object"):
+        catalog.dropTable("t", ifExists="x", purge=1.5)
+    assert len(service.execute_requests) == requests
+    # AnalyzePlanRequest.unpersist=15 -> Unpersist.blocking=2, which None does not set in PySpark,
+    # and unpersists without blocking as False does.
+    for blocking, sent in [(1, [1]), (np.bool_(False), [0])]:
+        spark.range(1).unpersist(blocking=blocking)
+        assert parse_message(parse_message(service.analyze_requests[-1])[15][0])[2] == sent
+    spark.range(1).unpersist(None)
+
+    def sent_mode():
+        # ExecutePlanRequest.plan=3 -> Plan.command=2 -> Command.write_operation=2 ->
+        # WriteOperation.mode=5 (SAVE_MODE_APPEND=1, SAVE_MODE_OVERWRITE=2).
+        plan = parse_message(parse_message(service.execute_requests[-1])[3][0])
+        return parse_message(parse_message(plan[2][0])[2][0]).get(5)
+
+    for overwrite, mode in [(1, [2]), ("x", [2]), ([1], [2]), (0, [1]), ("", [1]), ([], [1])]:
+        spark.range(1).write.insertInto("t", overwrite=overwrite)
+        assert sent_mode() == mode
+
+    class Ambiguous:
+        def __bool__(self):
+            raise ValueError("ambiguous")
+
+    requests = len(service.execute_requests)
+    with pytest.raises(ValueError, match="^ambiguous$"):
+        spark.range(1).write.insertInto(1, overwrite=Ambiguous())
+    assert len(service.execute_requests) == requests
+
+
+def test_create_database_takes_no_properties_of_a_false_value_as_pyspark(mock_connect):
+    # As PySpark's CreateDatabase, which takes `properties or {}`, before the constructor of its
+    # message converts the database and `ifNotExists`, and then sets each of the
+    # `properties.items()`.
+    import types
+
+    spark, service = mock_connect
+    catalog = spark.catalog
+    for properties in [[], 0, "", (), {}, None]:
+        catalog.createDatabase("d", properties=properties)
+        # Catalog.create_database=29: db_name=1, and properties=3, a map of key=1 and value=2.
+        assert _sent_catalog(service.execute_requests[-1], 29) == {1: [b"d"]}
+    catalog.createDatabase("d", properties=types.MappingProxyType({"k": "v"}))
+    assert _sent_catalog(service.execute_requests[-1], 29)[3] == [
+        message_field(1, "k") + message_field(2, "v")]
+
+    class Ambiguous:
+        def __bool__(self):
+            raise ValueError("ambiguous")
+
+    requests = len(service.execute_requests)
+    for properties, error, message in [
+        ([("k", "v")], AttributeError, "'list' object has no attribute 'items'"),
+        ("kv", AttributeError, "'str' object has no attribute 'items'"),
+    ]:
+        with pytest.raises(error, match=f"^{re.escape(message)}$"):
+            catalog.createDatabase("d", properties=properties)
+    with pytest.raises(ValueError, match="^ambiguous$"):
+        catalog.createDatabase(1, properties=Ambiguous())
+    with pytest.raises(TypeError, match="^bad argument type for built-in operation$"):
+        catalog.createDatabase(1, properties=[("k", "v")])
+    with pytest.raises(TypeError, match="^'str' object cannot be interpreted as an integer$"):
+        catalog.createDatabase("d", ifNotExists="x", properties=[("k", "v")])
+    assert len(service.execute_requests) == requests
+
+
+def test_create_table_and_create_external_table_bind_their_arguments_as_pyspark(mock_connect):
+    # As PySpark's createExternalTable(tableName, path=None, source=None, schema=None, **options),
+    # which takes no description but of the options, which it passes to createTable, and
+    # createTable(tableName, path=None, source=None, schema=None, description=None, **options):
+    # Python's binding raises its TypeErrors, which count self, before the method warns.
+    import inspect
+    import warnings
+
+    spark, service = mock_connect
+    catalog = spark.catalog
+    requests = len(service.execute_requests)
+    with warnings.catch_warnings(record=True) as record:
+        warnings.simplefilter("always")
+        for call, message in [
+            (lambda: catalog.createExternalTable("t", None, None, None, "d"),
+             "Catalog.createExternalTable() takes from 2 to 5 positional arguments but 6 were "
+             "given"),
+            (lambda: catalog.createTable("t", None, None, None, None, "x", "y"),
+             "Catalog.createTable() takes from 2 to 6 positional arguments but 8 were given"),
+            (lambda: catalog.createTable("t", None, None, 5, None, "x"),
+             "Catalog.createTable() takes from 2 to 6 positional arguments but 7 were given"),
+            (lambda: catalog.createExternalTable("t", None, None, None, 1, path="p"),
+             "Catalog.createExternalTable() got multiple values for argument 'path'"),
+            (lambda: catalog.createExternalTable(path="p"),
+             "Catalog.createExternalTable() missing 1 required positional argument: 'tableName'"),
+        ]:
+            with pytest.raises(TypeError, match=f"^{re.escape(message)}$"):
+                call()
+    assert record == [] and len(service.execute_requests) == requests
+    with pytest.warns(FutureWarning, match="createExternalTable is deprecated"):
+        catalog.createExternalTable("t", "/p", description="d", k="v")
+    # Catalog.create_table=14: table_name=1, path=2, description=4 and options=6.
+    create = _sent_catalog(service.execute_requests[-1], 14)
+    assert (create[1], create[2], create[4]) == ([b"t"], [b"/p"], [b"d"])
+    assert [parse_message(entry) for entry in create[6]] == [{1: [b"k"], 2: [b"v"]}]
+    with pytest.warns(FutureWarning):
+        catalog.createExternalTable("t", description=None)
+    assert _sent_catalog(service.execute_requests[-1], 14) == {1: [b"t"]}
+    catalog.createTable("t", "/p", "parquet", None, "d")
+    create = _sent_catalog(service.execute_requests[-1], 14)
+    assert (create[2], create[3], create[4]) == ([b"/p"], [b"parquet"], [b"d"])
+
+    def parameters(method):
+        signature = inspect.signature(method)
+        return [(p.name, p.kind.name, p.default) for p in signature.parameters.values()]
+
+    empty = inspect.Parameter.empty
+    head = [("tableName", "POSITIONAL_OR_KEYWORD", empty), ("path", "POSITIONAL_OR_KEYWORD", None),
+            ("source", "POSITIONAL_OR_KEYWORD", None), ("schema", "POSITIONAL_OR_KEYWORD", None)]
+    options = [("options", "VAR_KEYWORD", empty)]
+    assert parameters(catalog.createExternalTable) == head + options
+    assert parameters(catalog.createTable) == head + [
+        ("description", "POSITIONAL_OR_KEYWORD", None)] + options
+
+
 def test_readers_keep_their_settings_when_the_path_is_not_a_str_as_pyspark(mock_connect):
     # As PySpark, whose format readers set the options and the format before they check the path,
     # which is an AssertionError for a path that is not a str.

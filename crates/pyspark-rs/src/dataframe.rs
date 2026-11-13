@@ -1629,13 +1629,19 @@ impl PyDataFrame {
         Ok(slf)
     }
 
-    /// Mark the DataFrame as non-persistent.
-    #[pyo3(signature = (blocking=false))]
+    /// Mark the DataFrame as non-persistent. As PySpark's, which sets `blocking` in the bool
+    /// field of its request unless it is None, as [`crate::streaming::proto_bool`] converts it;
+    /// None unpersists as False does.
+    #[pyo3(signature = (blocking=None), text_signature = "($self, blocking=False)")]
     fn unpersist<'py>(
         slf: PyRef<'py, Self>,
         py: Python<'py>,
-        blocking: bool,
+        blocking: Option<&Bound<'py, PyAny>>,
     ) -> PyResult<PyRef<'py, Self>> {
+        let blocking = blocking
+            .map(crate::streaming::proto_bool)
+            .transpose()?
+            .unwrap_or(false);
         // As PySpark's, which returns the DataFrame itself.
         let df = slf.dataframe.clone();
         interruptible(py, &df.spark_session(), || {
@@ -1879,13 +1885,18 @@ impl PyDataFrame {
         })
     }
 
-    /// Deprecated alias for createOrReplaceTempView.
+    /// Deprecated alias for createOrReplaceTempView, as PySpark's, which warns that it is
+    /// deprecated and then replaces the view as `createOrReplaceTempView` does.
     #[pyo3(name = "registerTempTable")]
     fn register_temp_table(&self, py: Python<'_>, name: &Bound<'_, PyAny>) -> PyResult<()> {
-        let name = crate::str_argument(name)?;
-        interruptible(py, &self.dataframe.spark_session(), || {
-            self.dataframe.register_temp_table(&name).map_err(Box::new)
-        })
+        py.import("warnings")?.call_method1(
+            "warn",
+            (
+                "Deprecated in 2.0, use createOrReplaceTempView instead.",
+                py.get_type::<pyo3::exceptions::PyFutureWarning>(),
+            ),
+        )?;
+        self.create_or_replace_temp_view(py, name)
     }
 
     /// Reliable checkpoint (materialize + truncate lineage), at once if `eager`, as PySpark's.
@@ -3910,16 +3921,18 @@ impl PyDataFrameWriter {
     }
 
     /// Insert into an existing table. `overwrite` maps to overwrite/append mode,
-    /// mirroring reference `DataFrameWriter.insertInto(tableName, overwrite=None)`.
+    /// mirroring reference `DataFrameWriter.insertInto(tableName, overwrite=None)`, of its
+    /// truth when it is not None (`"overwrite" if overwrite else "append"`).
     #[pyo3(name = "insertInto", signature = (tableName, overwrite=None))]
     fn insert_into(
         &self,
         py: Python<'_>,
         tableName: &Bound<'_, PyAny>,
-        overwrite: Option<bool>,
+        overwrite: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<()> {
         let mut w = self.inner.get();
         if let Some(ow) = overwrite {
+            let ow = ow.is_truthy()?;
             w = w.mode(if ow { "overwrite" } else { "append" });
         }
         // PySpark sets the overwrite/append mode on the writer itself.
