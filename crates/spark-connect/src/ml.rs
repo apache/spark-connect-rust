@@ -14,6 +14,8 @@ use uuid::Uuid;
 
 mod feature;
 pub use feature::*;
+mod fpm;
+pub use fpm::*;
 
 use crate::dataframe::DataFrame;
 use crate::expression::LiteralExpression;
