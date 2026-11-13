@@ -1364,6 +1364,53 @@ def test_the_requests_of_an_ended_test_are_answered_but_not_recorded_in_a_later_
         ended.stop()
 
 
+def test_the_listener_requests_of_a_forgotten_session_are_answered_but_not_counted(ml_mock):
+    # The listener counters, which the tests of the listener bus wait on, count the listener
+    # requests of the sessions that are not forgotten only: a registration, a removal and the end
+    # of the listener stream of a forgotten session, which an ended test can leave behind, are
+    # answered, and counted in `forgotten_requests` only.
+    import time
+
+    from pyspark.sql.streaming.listener import StreamingQueryListener
+
+    class Plain(StreamingQueryListener):
+        def onQueryStarted(self, event):
+            pass
+
+        def onQueryProgress(self, event):
+            pass
+
+        def onQueryIdle(self, event):
+            pass
+
+        def onQueryTerminated(self, event):
+            pass
+
+    spark, service = ml_mock
+    service.listener_bus_enabled = True
+    ended = SparkSession.builder.remote(service.remote).create()
+    try:
+        service.forget_session(ended.session_id)
+        listener = Plain()
+        ended.streams.addListener(listener)
+        ended.streams.removeListener(listener)
+        assert service.forgotten_requests["execute"] == 2
+        # The server ends the listener stream within a poll of 0.1 s of the removal.
+        time.sleep(0.5)
+        assert service.listener_subscriptions == 0
+        assert service.listener_removals == 0
+        assert service.listener_streams_finished == 0
+        # The listener requests of a session that is not forgotten are still counted.
+        listener = Plain()
+        spark.streams.addListener(listener)
+        spark.streams.removeListener(listener)
+        assert service.wait_listener_streams_finished(1)
+        assert service.listener_subscriptions == 1
+        assert service.listener_removals == 1
+    finally:
+        ended.stop()
+
+
 @pytest.mark.parametrize(
     "value, expected",
     [
