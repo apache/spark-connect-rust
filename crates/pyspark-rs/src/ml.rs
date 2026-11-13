@@ -16,12 +16,13 @@ use pyo3::pyclass::boolean_struct::False;
 use pyo3::types::{PyDict, PyList, PyTuple, PyType};
 use pyo3::PyClass;
 use spark_connect::ml::{
-    BinaryClassificationEvaluator, BisectingKMeans, CrossValidator, DecisionTreeClassifier,
-    DecisionTreeRegressor, Estimator, Evaluator, GBTClassifier, GBTRegressor, GaussianMixture,
-    GeneralizedLinearRegression, KMeans, LinearRegression, LinearSVC, LogisticRegression,
-    MaxAbsScaler, MlOperator, Model, MulticlassClassificationEvaluator, NaiveBayes, Params,
-    Pipeline, RandomForestClassifier, RandomForestRegressor, RegressionEvaluator, StandardScaler,
-    StringIndexer, Transformer, VectorAssembler,
+    BinaryClassificationEvaluator, BisectingKMeans, Classifier, CrossValidator,
+    DecisionTreeClassifier, DecisionTreeRegressor, Estimator, Evaluator, FMClassifier,
+    GBTClassifier, GBTRegressor, GaussianMixture, GeneralizedLinearRegression, KMeans,
+    LinearRegression, LinearSVC, LogisticRegression, MaxAbsScaler, MlOperator, MlVector, Model,
+    MulticlassClassificationEvaluator, MultilayerPerceptronClassifier, NaiveBayes, OneVsRest,
+    Params, Pipeline, RandomForestClassifier, RandomForestRegressor, RegressionEvaluator,
+    StandardScaler, StringIndexer, Transformer, VectorAssembler,
 };
 use spark_connect::DataFrame;
 
@@ -45,6 +46,8 @@ enum Kind {
     StrList,
     /// `toListFloat`: an array literal of doubles.
     FloatList,
+    IntList,
+    Vector,
 }
 
 impl Kind {
@@ -56,6 +59,8 @@ impl Kind {
             Kind::Bool => "toBoolean",
             Kind::StrList => "toListString",
             Kind::FloatList => "toListFloat",
+            Kind::IntList => "toListInt",
+            Kind::Vector => "toVector",
         }
     }
 }
@@ -76,6 +81,8 @@ enum Converted {
     Bool(bool),
     StrList(Vec<String>),
     FloatList(Vec<f64>),
+    IntList(Vec<i64>),
+    Vector(MlVector),
 }
 
 /// Convert `value` of the param `name` with its `TypeConverters` method, raising PySpark's
@@ -107,6 +114,28 @@ fn convert(name: &str, kind: Kind, value: &Bound<'_, PyAny>) -> PyResult<Convert
         Kind::Bool => Converted::Bool(converted.extract()?),
         Kind::StrList => Converted::StrList(converted.extract()?),
         Kind::FloatList => Converted::FloatList(converted.extract()?),
+        Kind::IntList => converted
+            .extract::<Vec<i64>>()
+            .map_or(Converted::Unsendable, Converted::IntList),
+        Kind::Vector => {
+            let linalg = py.import("pyspark.ml.linalg")?;
+            let values = converted
+                .getattr("values")?
+                .call_method0("tolist")?
+                .extract()?;
+            if converted.is_instance(&linalg.getattr("SparseVector")?)? {
+                Converted::Vector(MlVector::Sparse {
+                    size: converted.getattr("size")?.extract()?,
+                    indices: converted
+                        .getattr("indices")?
+                        .call_method0("tolist")?
+                        .extract()?,
+                    values,
+                })
+            } else {
+                Converted::Vector(MlVector::Dense(values))
+            }
+        }
     })
 }
 
@@ -166,6 +195,8 @@ fn apply<T: Native>(target: &mut T, name: &'static str, value: Converted) {
         Converted::Bool(value) => params.set_param_bool(jvm, value),
         Converted::StrList(values) => params.set_param_string_array(jvm, values),
         Converted::FloatList(values) => params.set_param_double_array(jvm, values),
+        Converted::IntList(values) => params.set_param_int_array(jvm, values),
+        Converted::Vector(value) => params.set_param_vector(jvm, value),
     };
     *target.params_mut() = params;
 }
@@ -1456,6 +1487,561 @@ impl PyLinearSVC {
     fn fit(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<PyMLModel> {
         fit_native(slf, dataset, None)
     }
+}
+
+/// Native FMClassifier.
+#[pyclass(name = "FMClassifier", module = "pyspark.ml.connect.classification")]
+pub struct PyFMClassifier {
+    inner: FMClassifier,
+    unsendable: Vec<&'static str>,
+}
+
+const FMCLASSIFIER_PARAMS: &[(&str, Kind)] = &[
+    ("featuresCol", Kind::Str),
+    ("labelCol", Kind::Str),
+    ("predictionCol", Kind::Str),
+    ("probabilityCol", Kind::Str),
+    ("rawPredictionCol", Kind::Str),
+    ("factorSize", Kind::Int),
+    ("fitIntercept", Kind::Bool),
+    ("fitLinear", Kind::Bool),
+    ("regParam", Kind::Float),
+    ("miniBatchFraction", Kind::Float),
+    ("initStd", Kind::Float),
+    ("maxIter", Kind::Int),
+    ("stepSize", Kind::Float),
+    ("tol", Kind::Float),
+    ("solver", Kind::Str),
+    ("thresholds", Kind::FloatList),
+    ("seed", Kind::Int),
+];
+
+#[pymethods]
+impl PyFMClassifier {
+    #[new]
+    #[pyo3(signature = (*args, **kwargs), text_signature = "(*, featuresCol='features', labelCol='label', predictionCol='prediction', probabilityCol='probability', rawPredictionCol='rawPrediction', factorSize=8, fitIntercept=True, fitLinear=True, regParam=0.0, miniBatchFraction=1.0, initStd=0.01, maxIter=100, stepSize=1.0, tol=1e-06, solver='adamW', thresholds=None, seed=None)")]
+    fn new(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
+        let mut this = Self {
+            inner: FMClassifier::new(),
+            unsendable: Vec::new(),
+        };
+        init_params(
+            &mut this,
+            "FMClassifier",
+            &[],
+            FMCLASSIFIER_PARAMS,
+            args,
+            kwargs,
+        )?;
+        Ok(this)
+    }
+
+    #[pyo3(name = "setFeaturesCol")]
+    fn set_feature_col<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "featuresCol", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setLabelCol")]
+    fn set_label_col<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "labelCol", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setPredictionCol")]
+    fn set_prediction_col<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "predictionCol", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setProbabilityCol")]
+    fn set_probability_col<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "probabilityCol", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setRawPredictionCol")]
+    fn set_raw_prediction_col<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "rawPredictionCol", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setFactorSize")]
+    fn set_factor_size<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "factorSize", Kind::Int, value)
+    }
+
+    #[pyo3(name = "setFitIntercept")]
+    fn set_fit_intercept<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "fitIntercept", Kind::Bool, value)
+    }
+
+    #[pyo3(name = "setFitLinear")]
+    fn set_fit_linear<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "fitLinear", Kind::Bool, value)
+    }
+
+    #[pyo3(name = "setRegParam")]
+    fn set_reg_param<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "regParam", Kind::Float, value)
+    }
+
+    #[pyo3(name = "setMiniBatchFraction")]
+    fn set_mini_batch_fraction<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "miniBatchFraction", Kind::Float, value)
+    }
+
+    #[pyo3(name = "setInitStd")]
+    fn set_init_std<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "initStd", Kind::Float, value)
+    }
+
+    #[pyo3(name = "setMaxIter")]
+    fn set_max_iter<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "maxIter", Kind::Int, value)
+    }
+
+    #[pyo3(name = "setStepSize")]
+    fn set_step_size<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "stepSize", Kind::Float, value)
+    }
+
+    #[pyo3(name = "setTol")]
+    fn set_tol<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "tol", Kind::Float, value)
+    }
+
+    #[pyo3(name = "setSolver")]
+    fn set_solver<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "solver", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setThresholds")]
+    fn set_thresholds<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "thresholds", Kind::FloatList, value)
+    }
+
+    #[pyo3(name = "setSeed")]
+    fn set_seed<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "seed", Kind::Int, value)
+    }
+
+    fn fit(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<PyMLModel> {
+        fit_native(slf, dataset, None)
+    }
+}
+
+/// Native MultilayerPerceptronClassifier.
+#[pyclass(
+    name = "MultilayerPerceptronClassifier",
+    module = "pyspark.ml.connect.classification"
+)]
+pub struct PyMultilayerPerceptronClassifier {
+    inner: MultilayerPerceptronClassifier,
+    unsendable: Vec<&'static str>,
+}
+
+const MULTILAYER_PERCEPTRON_CLASSIFIER_PARAMS: &[(&str, Kind)] = &[
+    ("featuresCol", Kind::Str),
+    ("labelCol", Kind::Str),
+    ("predictionCol", Kind::Str),
+    ("maxIter", Kind::Int),
+    ("tol", Kind::Float),
+    ("seed", Kind::Int),
+    ("layers", Kind::IntList),
+    ("blockSize", Kind::Int),
+    ("stepSize", Kind::Float),
+    ("solver", Kind::Str),
+    ("initialWeights", Kind::Vector),
+    ("probabilityCol", Kind::Str),
+    ("rawPredictionCol", Kind::Str),
+];
+
+#[pymethods]
+impl PyMultilayerPerceptronClassifier {
+    #[new]
+    #[pyo3(signature = (*args, **kwargs), text_signature = "(*, featuresCol='features', labelCol='label', predictionCol='prediction', maxIter=100, tol=1e-06, seed=None, layers=None, blockSize=128, stepSize=0.03, solver='l-bfgs', initialWeights=None, probabilityCol='probability', rawPredictionCol='rawPrediction')")]
+    fn new(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
+        let mut this = Self {
+            inner: MultilayerPerceptronClassifier::new(),
+            unsendable: Vec::new(),
+        };
+        init_params(
+            &mut this,
+            "MultilayerPerceptronClassifier",
+            &[],
+            MULTILAYER_PERCEPTRON_CLASSIFIER_PARAMS,
+            args,
+            kwargs,
+        )?;
+        Ok(this)
+    }
+
+    #[pyo3(name = "setFeaturesCol")]
+    fn set_feature_col<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "featuresCol", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setLabelCol")]
+    fn set_label_col<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "labelCol", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setPredictionCol")]
+    fn set_prediction_col<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "predictionCol", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setMaxIter")]
+    fn set_max_iter<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "maxIter", Kind::Int, value)
+    }
+
+    #[pyo3(name = "setTol")]
+    fn set_tol<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "tol", Kind::Float, value)
+    }
+
+    #[pyo3(name = "setSeed")]
+    fn set_seed<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "seed", Kind::Int, value)
+    }
+
+    #[pyo3(name = "setLayers")]
+    fn set_layers<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "layers", Kind::IntList, value)
+    }
+
+    #[pyo3(name = "setBlockSize")]
+    fn set_block_size<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "blockSize", Kind::Int, value)
+    }
+
+    #[pyo3(name = "setStepSize")]
+    fn set_step_size<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "stepSize", Kind::Float, value)
+    }
+
+    #[pyo3(name = "setSolver")]
+    fn set_solver<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "solver", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setInitialWeights")]
+    fn set_initial_weights<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "initialWeights", Kind::Vector, value)
+    }
+
+    #[pyo3(name = "setProbabilityCol")]
+    fn set_probability_col<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "probabilityCol", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setRawPredictionCol")]
+    fn set_raw_prediction_col<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "rawPredictionCol", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setThresholds")]
+    fn set_thresholds<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "thresholds", Kind::FloatList, value)
+    }
+
+    fn fit(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<PyMLModel> {
+        fit_native(slf, dataset, None)
+    }
+}
+
+/// Native OneVsRest.
+#[pyclass(name = "OneVsRest", module = "pyspark.ml.connect.classification")]
+pub struct PyOneVsRest {
+    inner: OneVsRest,
+    unsendable: Vec<&'static str>,
+    classifier: Option<Py<PyAny>>,
+}
+
+const ONE_VS_REST_PARAMS: &[(&str, Kind)] = &[
+    ("featuresCol", Kind::Str),
+    ("labelCol", Kind::Str),
+    ("predictionCol", Kind::Str),
+    ("rawPredictionCol", Kind::Str),
+    ("weightCol", Kind::Str),
+    ("parallelism", Kind::Int),
+];
+
+#[pymethods]
+impl PyOneVsRest {
+    #[new]
+    #[pyo3(signature = (*args, **kwargs), text_signature = "(*, featuresCol='features', labelCol='label', predictionCol='prediction', rawPredictionCol='rawPrediction', classifier=None, weightCol=None, parallelism=1)")]
+    fn new(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
+        let mut this = Self {
+            inner: OneVsRest::new(),
+            unsendable: Vec::new(),
+            classifier: None,
+        };
+        let remaining = kwargs.map(|kw| kw.copy()).transpose()?;
+        if let Some(kw) = &remaining {
+            if let Some(classifier) = kw.get_item("classifier")? {
+                if !classifier.is_none() {
+                    native_classifier(&classifier, false)?;
+                    this.classifier = Some(classifier.unbind());
+                }
+                kw.del_item("classifier")?;
+            }
+        }
+        init_params(
+            &mut this,
+            "OneVsRest",
+            &[],
+            ONE_VS_REST_PARAMS,
+            args,
+            remaining.as_ref(),
+        )?;
+        Ok(this)
+    }
+
+    #[pyo3(name = "setFeaturesCol")]
+    fn set_feature_col<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "featuresCol", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setLabelCol")]
+    fn set_label_col<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "labelCol", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setPredictionCol")]
+    fn set_prediction_col<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "predictionCol", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setRawPredictionCol")]
+    fn set_raw_prediction_col<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "rawPredictionCol", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setWeightCol")]
+    fn set_weight_col<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "weightCol", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setParallelism")]
+    fn set_parallelism<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "parallelism", Kind::Int, value)
+    }
+
+    #[pyo3(name = "setClassifier")]
+    fn set_classifier<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        if value.is_none() {
+            slf.try_borrow_mut()?.classifier = None;
+        } else {
+            native_classifier(value, false)?;
+            slf.try_borrow_mut()?.classifier = Some(value.clone().unbind());
+        }
+        Ok(slf)
+    }
+
+    fn fit(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<PyMLModel> {
+        let classifier = slf
+            .try_borrow()?
+            .classifier
+            .as_ref()
+            .map(|x| x.clone_ref(slf.py()))
+            .ok_or_else(|| PyValueError::new_err("OneVsRest requires a native classifier"))?;
+        let classifier = native_classifier(classifier.bind(slf.py()), true)?;
+        {
+            let mut this = slf.try_borrow_mut()?;
+            if !classifier.supports_weight()
+                && this.inner.weight_col().is_some_and(|s| !s.is_empty())
+            {
+                slf.py().import("warnings")?.call_method1(
+                    "warn",
+                    ("weightCol is ignored, as it is not supported by this classifier",),
+                )?;
+            }
+            this.inner = this.inner.clone().set_classifier(classifier);
+        }
+        fit_native(slf, dataset, None)
+    }
+}
+
+// Snapshot at fit time, retaining PySpark's reference semantics for a classifier
+// mutated after it was assigned to OneVsRest.
+fn native_classifier(value: &Bound<'_, PyAny>, validate_params: bool) -> PyResult<Classifier> {
+    if let Ok(value) = value.cast::<PyLogisticRegression>() {
+        return Ok(if validate_params {
+            snapshot(value)?
+        } else {
+            value.try_borrow()?.inner.clone()
+        }
+        .into());
+    }
+    if let Ok(value) = value.cast::<PyLinearSVC>() {
+        return Ok(if validate_params {
+            snapshot(value)?
+        } else {
+            value.try_borrow()?.inner.clone()
+        }
+        .into());
+    }
+    if let Ok(value) = value.cast::<PyDecisionTreeClassifier>() {
+        return Ok(if validate_params {
+            snapshot(value)?
+        } else {
+            value.try_borrow()?.inner.clone()
+        }
+        .into());
+    }
+    if let Ok(value) = value.cast::<PyRandomForestClassifier>() {
+        return Ok(if validate_params {
+            snapshot(value)?
+        } else {
+            value.try_borrow()?.inner.clone()
+        }
+        .into());
+    }
+    if let Ok(value) = value.cast::<PyGBTClassifier>() {
+        return Ok(if validate_params {
+            snapshot(value)?
+        } else {
+            value.try_borrow()?.inner.clone()
+        }
+        .into());
+    }
+    if let Ok(value) = value.cast::<PyNaiveBayes>() {
+        return Ok(if validate_params {
+            snapshot(value)?
+        } else {
+            value.try_borrow()?.inner.clone()
+        }
+        .into());
+    }
+    if let Ok(value) = value.cast::<PyFMClassifier>() {
+        return Ok(if validate_params {
+            snapshot(value)?
+        } else {
+            value.try_borrow()?.inner.clone()
+        }
+        .into());
+    }
+    if let Ok(value) = value.cast::<PyMultilayerPerceptronClassifier>() {
+        return Ok(if validate_params {
+            snapshot(value)?
+        } else {
+            value.try_borrow()?.inner.clone()
+        }
+        .into());
+    }
+    Err(PyTypeError::new_err("classifier must be a native classification estimator from pyspark.ml.connect.classification"))
 }
 
 /// Linear regression backed by Spark Connect's JVM ML API.
@@ -3924,6 +4510,9 @@ native!(
     PyVectorAssembler => VectorAssembler,
     PyLogisticRegression => LogisticRegression,
     PyLinearSVC => LinearSVC,
+    PyFMClassifier => FMClassifier,
+    PyMultilayerPerceptronClassifier => MultilayerPerceptronClassifier,
+    PyOneVsRest => OneVsRest,
     PyLinearRegression => LinearRegression,
     PyGeneralizedLinearRegression => GeneralizedLinearRegression,
     PyDecisionTreeClassifier => DecisionTreeClassifier,

@@ -931,6 +931,8 @@ _NATIVE_PARAMS = {
         featuresCol="str", labelCol="str", predictionCol="str", probabilityCol="str",
         maxIter="int", tol="float",
     ),
+    "FMClassifier": dict(featuresCol="str", labelCol="str", predictionCol="str", probabilityCol="str", rawPredictionCol="str", factorSize="int", fitIntercept="bool", fitLinear="bool", regParam="float", miniBatchFraction="float", initStd="float", maxIter="int", stepSize="float", tol="float", solver="str", thresholds="float_list", seed="int"),
+    "MultilayerPerceptronClassifier": dict(featuresCol="str", labelCol="str", predictionCol="str", maxIter="int", tol="float", seed="int", blockSize="int", stepSize="float", solver="str", probabilityCol="str", rawPredictionCol="str", thresholds="float_list"),
     "LinearSVC": dict(
         featuresCol="str", labelCol="str", predictionCol="str", maxIter="int", regParam="float",
         tol="float", rawPredictionCol="str", fitIntercept="bool", standardization="bool",
@@ -3612,3 +3614,94 @@ def test_generalized_linear_regression_native_parameters_match_official_fixture(
         operator, params = _native_request(spark, service, estimator, models)
         assert operator.name == "org.apache.spark.ml.regression.GeneralizedLinearRegression"
         assert params == pb2.MlParams.FromString(base64.b64decode(case["params_b64"]))
+
+
+@pytest.mark.parametrize("name", ["FMClassifier", "MultilayerPerceptronClassifier"])
+@pytest.mark.parametrize("use_setters", [False, True])
+def test_remaining_classifier_native_parameters_match_official_fixture(ml_mock, name, use_setters):
+    import base64
+    import inspect
+    import json
+    from pathlib import Path
+
+    from pyspark import _pyspark as native
+    from pyspark.ml.connect import classification
+    from pyspark.ml.linalg import Vectors
+
+    cls = getattr(classification, name)
+    assert cls is getattr(native, name)
+    defaults = {'FMClassifier': {'featuresCol': 'features', 'labelCol': 'label', 'predictionCol': 'prediction', 'probabilityCol': 'probability', 'rawPredictionCol': 'rawPrediction', 'factorSize': 8, 'fitIntercept': True, 'fitLinear': True, 'regParam': 0.0, 'miniBatchFraction': 1.0, 'initStd': 0.01, 'maxIter': 100, 'stepSize': 1.0, 'tol': 1e-06, 'solver': 'adamW', 'thresholds': None, 'seed': None}, 'MultilayerPerceptronClassifier': {'featuresCol': 'features', 'labelCol': 'label', 'predictionCol': 'prediction', 'maxIter': 100, 'tol': 1e-06, 'seed': None, 'layers': None, 'blockSize': 128, 'stepSize': 0.03, 'solver': 'l-bfgs', 'initialWeights': None, 'probabilityCol': 'probability', 'rawPredictionCol': 'rawPrediction'}, 'OneVsRest': {'featuresCol': 'features', 'labelCol': 'label', 'predictionCol': 'prediction', 'rawPredictionCol': 'rawPrediction', 'classifier': None, 'weightCol': None, 'parallelism': 1}}[name]
+    signature = inspect.signature(cls)
+    assert list(signature.parameters) == list(defaults)
+    for key, value in defaults.items():
+        assert signature.parameters[key].default == value
+        assert signature.parameters[key].kind == inspect.Parameter.KEYWORD_ONLY
+    fixture = json.loads((Path(__file__).resolve().parents[2] / "tests/golden/remaining_classifiers.json").read_text())
+    spark, service = ml_mock
+    models = []
+    for case in fixture["cases"]:
+        if case["class"] != name:
+            continue
+        values = dict(case["values"])
+        if "initialWeights" in values:
+            vector = values["initialWeights"]
+            values["initialWeights"] = Vectors.dense(vector["dense"]) if "dense" in vector else Vectors.sparse(vector["size"], vector["indices"], vector["values"])
+        if use_setters:
+            estimator = cls()
+            for key, value in values.items():
+                assert getattr(estimator, "set" + key[0].upper() + key[1:])(value) is estimator
+        else:
+            thresholds = values.pop("thresholds", None) if name == "MultilayerPerceptronClassifier" else None
+            estimator = cls(**values)
+            if thresholds is not None:
+                estimator.setThresholds(thresholds)
+        operator, params = _native_request(spark, service, estimator, models)
+        assert operator.name == "org.apache.spark.ml.classification." + name
+        assert params == pb2.MlParams.FromString(base64.b64decode(case["params_b64"]))
+
+
+def test_one_vs_rest_signature_and_native_classifier_validation():
+    import inspect
+
+    from pyspark import _pyspark as native
+    from pyspark.ml.connect import OneVsRest as exported
+    from pyspark.ml.connect.classification import LinearSVC, OneVsRest
+
+    assert OneVsRest is exported is native.OneVsRest
+    defaults = {'FMClassifier': {'featuresCol': 'features', 'labelCol': 'label', 'predictionCol': 'prediction', 'probabilityCol': 'probability', 'rawPredictionCol': 'rawPrediction', 'factorSize': 8, 'fitIntercept': True, 'fitLinear': True, 'regParam': 0.0, 'miniBatchFraction': 1.0, 'initStd': 0.01, 'maxIter': 100, 'stepSize': 1.0, 'tol': 1e-06, 'solver': 'adamW', 'thresholds': None, 'seed': None}, 'MultilayerPerceptronClassifier': {'featuresCol': 'features', 'labelCol': 'label', 'predictionCol': 'prediction', 'maxIter': 100, 'tol': 1e-06, 'seed': None, 'layers': None, 'blockSize': 128, 'stepSize': 0.03, 'solver': 'l-bfgs', 'initialWeights': None, 'probabilityCol': 'probability', 'rawPredictionCol': 'rawPrediction'}, 'OneVsRest': {'featuresCol': 'features', 'labelCol': 'label', 'predictionCol': 'prediction', 'rawPredictionCol': 'rawPrediction', 'classifier': None, 'weightCol': None, 'parallelism': 1}}["OneVsRest"]
+    signature = inspect.signature(OneVsRest)
+    assert list(signature.parameters) == list(defaults)
+    for key, value in defaults.items():
+        assert signature.parameters[key].default == value
+        assert signature.parameters[key].kind == inspect.Parameter.KEYWORD_ONLY
+    estimator = OneVsRest()
+    assert estimator.setClassifier(LinearSVC()) is estimator
+    for key, value in dict(featuresCol="x", labelCol="y", predictionCol="p", rawPredictionCol="r", weightCol="w", parallelism=2).items():
+        assert getattr(estimator, "set" + key[0].upper() + key[1:])(value) is estimator
+    with pytest.raises(TypeError):
+        estimator.setClassifier(object())
+    with pytest.raises(TypeError):
+        OneVsRest(LinearSVC())
+    with pytest.raises(TypeError):
+        OneVsRest(unknown=True)
+    with pytest.raises(ValueError, match="classifier"):
+        OneVsRest().fit(None)
+
+
+@pytest.mark.parametrize("name,value", [("layers",[2,1.5]),("layers","abc"),("initialWeights","abc")])
+def test_multilayer_perceptron_rejects_invalid_parameter_types(name,value):
+    from pyspark.ml.connect.classification import MultilayerPerceptronClassifier
+    with pytest.raises(TypeError):
+        MultilayerPerceptronClassifier(**{name:value})
+
+
+def test_one_vs_rest_defers_base_param_validation_until_fit():
+    from pyspark.ml.connect.classification import MultilayerPerceptronClassifier, OneVsRest
+
+    base = MultilayerPerceptronClassifier(layers=[])
+    estimator = OneVsRest(classifier=base)
+    assert estimator.setClassifier(base) is estimator
+    base.setLayers([2, 2])
+    assert estimator.setClassifier(None) is estimator
+    with pytest.raises(ValueError, match="classifier"):
+        estimator.fit(None)

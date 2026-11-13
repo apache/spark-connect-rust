@@ -1,0 +1,142 @@
+{
+  "source": "apache/spark v4.3.0 pyspark.ml.classification",
+  "cases": [
+    {
+      "class": "FMClassifier",
+      "values": {},
+      "params_b64": ""
+    },
+    {
+      "class": "FMClassifier",
+      "values": {
+        "featuresCol": "input",
+        "labelCol": "target",
+        "predictionCol": "pred",
+        "probabilityCol": "prob",
+        "rawPredictionCol": "scores",
+        "factorSize": 2,
+        "fitIntercept": false,
+        "fitLinear": false,
+        "regParam": 0.1,
+        "miniBatchFraction": 0.5,
+        "initStd": 0.2,
+        "maxIter": 50,
+        "stepSize": 0.3,
+        "tol": 1e-08,
+        "solver": "gd",
+        "thresholds": [
+          1.0,
+          2.0
+        ],
+        "seed": 8589934592
+      },
+      "params_b64": "ChAKCmZhY3RvclNpemUSAjACChYKC2ZlYXR1cmVzQ29sEgdqBWlucHV0ChIKDGZpdEludGVyY2VwdBICGAAKDwoJZml0TGluZWFyEgIYAAoUCgdpbml0U3RkEglZmpmZmZmZyT8KFAoIbGFiZWxDb2wSCGoGdGFyZ2V0Cg0KB21heEl0ZXISAjAyCh4KEW1pbmlCYXRjaEZyYWN0aW9uEglZAAAAAAAA4D8KFwoNcHJlZGljdGlvbkNvbBIGagRwcmVkChgKDnByb2JhYmlsaXR5Q29sEgZqBHByb2IKHAoQcmF3UHJlZGljdGlvbkNvbBIIagZzY29yZXMKFQoIcmVnUGFyYW0SCVmamZmZmZm5PwoOCgRzZWVkEgY4gICAgCAKDgoGc29sdmVyEgRqAmdkChUKCHN0ZXBTaXplEglZMzMzMzMz0z8KKwoKdGhyZXNob2xkcxIdsgEaCgJKABIJWQAAAAAAAPA/EglZAAAAAAAAAEAKEAoDdG9sEglZOoww4o55RT4="
+    },
+    {
+      "class": "MultilayerPerceptronClassifier",
+      "values": {},
+      "params_b64": ""
+    },
+    {
+      "class": "MultilayerPerceptronClassifier",
+      "values": {
+        "featuresCol": "input",
+        "labelCol": "target",
+        "predictionCol": "pred",
+        "maxIter": 50,
+        "tol": 1e-08,
+        "seed": 8589934592,
+        "layers": [
+          2,
+          3,
+          2
+        ],
+        "blockSize": 4,
+        "stepSize": 0.1,
+        "solver": "gd",
+        "initialWeights": {
+          "dense": [
+            0.0,
+            0.01,
+            0.02,
+            0.03,
+            0.04,
+            0.05,
+            0.06,
+            0.07,
+            0.08,
+            0.09,
+            0.1,
+            0.11,
+            0.12,
+            0.13,
+            0.14,
+            0.15,
+            0.16
+          ]
+        },
+        "probabilityCol": "prob",
+        "rawPredictionCol": "scores",
+        "thresholds": [
+          1.0,
+          2.0
+        ]
+      },
+      "params_b64": "Cg8KCWJsb2NrU2l6ZRICMAQKFgoLZmVhdHVyZXNDb2wSB2oFaW5wdXQK7AEKDmluaXRpYWxXZWlnaHRzEtkBwgHVAQouugErCgN1ZHQSJG9yZy5hcGFjaGUuc3BhcmsubWwubGluYWxnLlZlY3RvclVEVBICIAESBAoCCgASBAoCCgASkgHKAY4BKosBCogBAAAAAAAAAAB7FK5H4XqEP3sUrkfhepQ/uB6F61G4nj97FK5H4XqkP5qZmZmZmak/uB6F61G4rj/sUbgeheuxP3sUrkfherQ/CtejcD0Ktz+amZmZmZm5Pylcj8L1KLw/uB6F61G4vj+kcD0K16PAP+xRuB6F68E/MzMzMzMzwz97FK5H4XrEPwoUCghsYWJlbENvbBIIagZ0YXJnZXQKHQoGbGF5ZXJzEhOyARAKAjIAEgIwAhICMAMSAjACCg0KB21heEl0ZXISAjAyChcKDXByZWRpY3Rpb25Db2wSBmoEcHJlZAoYCg5wcm9iYWJpbGl0eUNvbBIGagRwcm9iChwKEHJhd1ByZWRpY3Rpb25Db2wSCGoGc2NvcmVzCg4KBHNlZWQSBjiAgICAIAoOCgZzb2x2ZXISBGoCZ2QKFQoIc3RlcFNpemUSCVmamZmZmZm5PworCgp0aHJlc2hvbGRzEh2yARoKAkoAEglZAAAAAAAA8D8SCVkAAAAAAAAAQAoQCgN0b2wSCVk6jDDijnlFPg=="
+    },
+    {
+      "class": "MultilayerPerceptronClassifier",
+      "values": {
+        "featuresCol": "input",
+        "labelCol": "target",
+        "predictionCol": "pred",
+        "maxIter": 50,
+        "tol": 1e-08,
+        "seed": 8589934592,
+        "layers": [
+          2,
+          3,
+          2
+        ],
+        "blockSize": 4,
+        "stepSize": 0.1,
+        "solver": "gd",
+        "initialWeights": {
+          "size": 17,
+          "indices": [
+            0,
+            16
+          ],
+          "values": [
+            0.1,
+            -0.2
+          ]
+        },
+        "probabilityCol": "prob",
+        "rawPredictionCol": "scores",
+        "thresholds": [
+          1.0,
+          2.0
+        ]
+      },
+      "params_b64": "Cg8KCWJsb2NrU2l6ZRICMAQKFgoLZmVhdHVyZXNDb2wSB2oFaW5wdXQKcQoOaW5pdGlhbFdlaWdodHMSX8IBXAouugErCgN1ZHQSJG9yZy5hcGFjaGUuc3BhcmsubWwubGluYWxnLlZlY3RvclVEVBICIAASAjAREgnKAQYSBAoCABASF8oBFCoSChCamZmZmZm5P5qZmZmZmcm/ChQKCGxhYmVsQ29sEghqBnRhcmdldAodCgZsYXllcnMSE7IBEAoCMgASAjACEgIwAxICMAIKDQoHbWF4SXRlchICMDIKFwoNcHJlZGljdGlvbkNvbBIGagRwcmVkChgKDnByb2JhYmlsaXR5Q29sEgZqBHByb2IKHAoQcmF3UHJlZGljdGlvbkNvbBIIagZzY29yZXMKDgoEc2VlZBIGOICAgIAgCg4KBnNvbHZlchIEagJnZAoVCghzdGVwU2l6ZRIJWZqZmZmZmbk/CisKCnRocmVzaG9sZHMSHbIBGgoCSgASCVkAAAAAAADwPxIJWQAAAAAAAABAChAKA3RvbBIJWTqMMOKOeUU+"
+    },
+    {
+      "class": "OneVsRest",
+      "values": {},
+      "params_b64": ""
+    },
+    {
+      "class": "OneVsRest",
+      "values": {
+        "featuresCol": "input",
+        "labelCol": "target",
+        "predictionCol": "pred",
+        "rawPredictionCol": "scores",
+        "weightCol": "weight",
+        "parallelism": 3
+      },
+      "params_b64": "ChYKC2ZlYXR1cmVzQ29sEgdqBWlucHV0ChQKCGxhYmVsQ29sEghqBnRhcmdldAoRCgtwYXJhbGxlbGlzbRICMAMKFwoNcHJlZGljdGlvbkNvbBIGagRwcmVkChwKEHJhd1ByZWRpY3Rpb25Db2wSCGoGc2NvcmVzChUKCXdlaWdodENvbBIIagZ3ZWlnaHQ="
+    }
+  ]
+}
