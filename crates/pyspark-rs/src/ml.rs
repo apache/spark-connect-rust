@@ -4932,6 +4932,19 @@ impl PyLDA {
         Ok(this)
     }
 
+    #[pyo3(
+        name = "setParams",
+        signature = (*args, **kwargs),
+        text_signature = "(self, *, featuresCol='features', maxIter=20, seed=None, checkpointInterval=10, k=10, optimizer='online', learningOffset=1024.0, learningDecay=0.51, subsamplingRate=0.05, optimizeDocConcentration=True, docConcentration=None, topicConcentration=None, topicDistributionCol='topicDistribution', keepLastCheckpoint=True)"
+    )]
+    fn set_params<'py>(
+        slf: Bound<'py, Self>,
+        args: &Bound<'py, PyTuple>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_params_of(slf, "LDA", LDA_PARAMS, args, kwargs)
+    }
+
     #[pyo3(name = "setFeaturesCol")]
     fn set_feature_col<'py>(
         slf: Bound<'py, Self>,
@@ -5041,7 +5054,13 @@ impl PyLDA {
         set_param(slf, "keepLastCheckpoint", Kind::Bool, value)
     }
 
-    fn fit(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<PyMLModel> {
+    #[pyo3(signature = (dataset, params=None))]
+    fn fit(
+        slf: &Bound<'_, Self>,
+        dataset: &Bound<'_, PyAny>,
+        params: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyMLModel> {
+        check_fit_params(params)?;
         fit_native(slf, dataset, None)
     }
 }
@@ -5083,6 +5102,25 @@ impl PyPowerIterationClustering {
             kwargs,
         )?;
         Ok(this)
+    }
+
+    #[pyo3(
+        name = "setParams",
+        signature = (*args, **kwargs),
+        text_signature = "(self, *, k=2, maxIter=20, initMode='random', srcCol='src', dstCol='dst', weightCol=None)"
+    )]
+    fn set_params<'py>(
+        slf: Bound<'py, Self>,
+        args: &Bound<'py, PyTuple>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_params_of(
+            slf,
+            "PowerIterationClustering",
+            POWER_ITERATION_CLUSTERING_PARAMS,
+            args,
+            kwargs,
+        )
     }
 
     #[pyo3(name = "setK")]
