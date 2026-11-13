@@ -17,11 +17,11 @@ use pyo3::types::{PyDict, PyList, PyTuple, PyType};
 use pyo3::PyClass;
 use spark_connect::ml::{
     BinaryClassificationEvaluator, BisectingKMeans, CrossValidator, DecisionTreeClassifier,
-    DecisionTreeRegressor, Estimator, Evaluator, GBTClassifier, GBTRegressor, KMeans,
-    LinearRegression, LinearSVC, LogisticRegression, MaxAbsScaler, MlOperator, Model,
-    MulticlassClassificationEvaluator, NaiveBayes, Params, Pipeline, RandomForestClassifier,
-    RandomForestRegressor, RegressionEvaluator, StandardScaler, StringIndexer, Transformer,
-    VectorAssembler,
+    DecisionTreeRegressor, Estimator, Evaluator, GBTClassifier, GBTRegressor,
+    GeneralizedLinearRegression, KMeans, LinearRegression, LinearSVC, LogisticRegression,
+    MaxAbsScaler, MlOperator, Model, MulticlassClassificationEvaluator, NaiveBayes, Params,
+    Pipeline, RandomForestClassifier, RandomForestRegressor, RegressionEvaluator, StandardScaler,
+    StringIndexer, Transformer, VectorAssembler,
 };
 use spark_connect::DataFrame;
 
@@ -1535,6 +1535,188 @@ impl PyLinearRegression {
         value: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, Self>> {
         set_param(slf, "maxBlockSizeInMB", Kind::Float, value)
+    }
+
+    fn fit(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<PyMLModel> {
+        fit_native(slf, dataset, None)
+    }
+}
+
+/// Generalized linear regression fitted and cached by Spark Connect.
+#[pyclass(
+    name = "GeneralizedLinearRegression",
+    module = "pyspark.ml.connect.regression"
+)]
+pub struct PyGeneralizedLinearRegression {
+    inner: GeneralizedLinearRegression,
+    unsendable: Vec<&'static str>,
+}
+
+const GENERALIZED_LINEAR_REGRESSION_PARAMS: &[(&str, Kind)] = &[
+    ("labelCol", Kind::Str),
+    ("featuresCol", Kind::Str),
+    ("predictionCol", Kind::Str),
+    ("family", Kind::Str),
+    ("link", Kind::Str),
+    ("fitIntercept", Kind::Bool),
+    ("maxIter", Kind::Int),
+    ("tol", Kind::Float),
+    ("regParam", Kind::Float),
+    ("weightCol", Kind::Str),
+    ("solver", Kind::Str),
+    ("linkPredictionCol", Kind::Str),
+    ("variancePower", Kind::Float),
+    ("linkPower", Kind::Float),
+    ("offsetCol", Kind::Str),
+    ("aggregationDepth", Kind::Int),
+];
+
+#[pymethods]
+impl PyGeneralizedLinearRegression {
+    #[new]
+    #[pyo3(signature = (*args, **kwargs), text_signature = "(*, labelCol='label', featuresCol='features', predictionCol='prediction', family='gaussian', link=None, fitIntercept=True, maxIter=25, tol=1e-06, regParam=0.0, weightCol=None, solver='irls', linkPredictionCol=None, variancePower=0.0, linkPower=None, offsetCol=None, aggregationDepth=2)")]
+    fn new(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
+        let mut this = Self {
+            inner: GeneralizedLinearRegression::new(),
+            unsendable: Vec::new(),
+        };
+        init_params(
+            &mut this,
+            "GeneralizedLinearRegression",
+            &[],
+            GENERALIZED_LINEAR_REGRESSION_PARAMS,
+            args,
+            kwargs,
+        )?;
+        Ok(this)
+    }
+
+    #[pyo3(name = "setLabelCol")]
+    fn set_label_col<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "labelCol", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setFeaturesCol")]
+    fn set_feature_col<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "featuresCol", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setPredictionCol")]
+    fn set_prediction_col<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "predictionCol", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setFamily")]
+    fn set_family<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "family", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setLink")]
+    fn set_link<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "link", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setFitIntercept")]
+    fn set_fit_intercept<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "fitIntercept", Kind::Bool, value)
+    }
+
+    #[pyo3(name = "setMaxIter")]
+    fn set_max_iter<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "maxIter", Kind::Int, value)
+    }
+
+    #[pyo3(name = "setTol")]
+    fn set_tol<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "tol", Kind::Float, value)
+    }
+
+    #[pyo3(name = "setRegParam")]
+    fn set_reg_param<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "regParam", Kind::Float, value)
+    }
+
+    #[pyo3(name = "setWeightCol")]
+    fn set_weight_col<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "weightCol", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setSolver")]
+    fn set_solver<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "solver", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setLinkPredictionCol")]
+    fn set_link_prediction_col<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "linkPredictionCol", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setVariancePower")]
+    fn set_variance_power<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "variancePower", Kind::Float, value)
+    }
+
+    #[pyo3(name = "setLinkPower")]
+    fn set_link_power<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "linkPower", Kind::Float, value)
+    }
+
+    #[pyo3(name = "setOffsetCol")]
+    fn set_offset_col<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "offsetCol", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setAggregationDepth")]
+    fn set_aggregation_depth<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "aggregationDepth", Kind::Int, value)
     }
 
     fn fit(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<PyMLModel> {
@@ -3544,6 +3726,7 @@ native!(
     PyLogisticRegression => LogisticRegression,
     PyLinearSVC => LinearSVC,
     PyLinearRegression => LinearRegression,
+    PyGeneralizedLinearRegression => GeneralizedLinearRegression,
     PyDecisionTreeClassifier => DecisionTreeClassifier,
     PyNaiveBayes => NaiveBayes,
     PyGBTClassifier => GBTClassifier,

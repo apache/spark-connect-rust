@@ -1874,6 +1874,296 @@ impl Model for LinearRegressionModel {
     }
 }
 
+/// Generalized linear regression using Spark's JVM implementation and ML vector features.
+///
+/// Supports Gaussian, binomial, Poisson, Gamma and Tweedie families.
+/// Unset parameters, including the family-dependent link, use Spark's defaults.
+#[derive(Debug, Clone)]
+pub struct GeneralizedLinearRegression {
+    operator: MlOperator,
+    params: Params,
+}
+
+impl GeneralizedLinearRegression {
+    pub fn new() -> Self {
+        Self {
+            operator: MlOperator::new(
+                "org.apache.spark.ml.regression.GeneralizedLinearRegression",
+                OperatorType::Estimator,
+            ),
+            params: Params::new(),
+        }
+    }
+
+    /// Numeric label column.
+    pub fn set_label_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("labelCol", value);
+        self
+    }
+
+    /// Feature vector column.
+    pub fn set_feature_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("featuresCol", value);
+        self
+    }
+
+    /// Prediction output column.
+    pub fn set_prediction_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("predictionCol", value);
+        self
+    }
+
+    /// Distribution: gaussian, binomial, poisson, gamma or tweedie.
+    pub fn set_family(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("family", value);
+        self
+    }
+
+    /// Link function; when unset, Spark chooses the family default.
+    pub fn set_link(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("link", value);
+        self
+    }
+
+    /// Whether to fit an intercept.
+    pub fn set_fit_intercept(mut self, value: bool) -> Self {
+        self.params = self.params.set_param_bool("fitIntercept", value);
+        self
+    }
+
+    /// Maximum number of IRLS iterations.
+    pub fn set_max_iter(mut self, value: i32) -> Self {
+        self.params = self.params.set_param_int32("maxIter", value);
+        self
+    }
+
+    /// Convergence tolerance.
+    pub fn set_tol(mut self, value: f64) -> Self {
+        self.params = self.params.set_param_double("tol", value);
+        self
+    }
+
+    /// L2 regularization strength.
+    pub fn set_reg_param(mut self, value: f64) -> Self {
+        self.params = self.params.set_param_double("regParam", value);
+        self
+    }
+
+    /// Optional instance weight column.
+    pub fn set_weight_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("weightCol", value);
+        self
+    }
+
+    /// Solver algorithm: irls.
+    pub fn set_solver(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("solver", value);
+        self
+    }
+
+    /// Optional output column for the linear predictor.
+    pub fn set_link_prediction_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("linkPredictionCol", value);
+        self
+    }
+
+    /// Tweedie variance power: 0 or a value at least 1.
+    pub fn set_variance_power(mut self, value: f64) -> Self {
+        self.params = self.params.set_param_double("variancePower", value);
+        self
+    }
+
+    /// Tweedie link power; when unset, Spark uses 1 - variancePower.
+    pub fn set_link_power(mut self, value: f64) -> Self {
+        self.params = self.params.set_param_double("linkPower", value);
+        self
+    }
+
+    /// Optional offset column, added to the linear predictor.
+    pub fn set_offset_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("offsetCol", value);
+        self
+    }
+
+    /// Tree aggregation depth.
+    pub fn set_aggregation_depth(mut self, value: i32) -> Self {
+        self.params = self.params.set_param_int32("aggregationDepth", value);
+        self
+    }
+
+    /// Numeric label column.
+    pub fn label_col(&self) -> &str {
+        self.params.string_or("labelCol", "label")
+    }
+
+    /// Feature vector column.
+    pub fn feature_col(&self) -> &str {
+        self.params.string_or("featuresCol", "features")
+    }
+
+    /// Prediction output column.
+    pub fn prediction_col(&self) -> &str {
+        self.params.string_or("predictionCol", "prediction")
+    }
+
+    /// Distribution: gaussian, binomial, poisson, gamma or tweedie.
+    pub fn family(&self) -> &str {
+        self.params.string_or("family", "gaussian")
+    }
+
+    /// Link function; when unset, Spark chooses the family default.
+    pub fn link(&self) -> Option<&str> {
+        self.params.string_opt("link")
+    }
+
+    /// Whether to fit an intercept.
+    pub fn fit_intercept(&self) -> bool {
+        self.params.bool_or("fitIntercept", true)
+    }
+
+    /// Maximum number of IRLS iterations.
+    pub fn max_iter(&self) -> i32 {
+        self.params.int_or("maxIter", 25)
+    }
+
+    /// Convergence tolerance.
+    pub fn tol(&self) -> f64 {
+        self.params.double_or("tol", 1e-06)
+    }
+
+    /// L2 regularization strength.
+    pub fn reg_param(&self) -> f64 {
+        self.params.double_or("regParam", 0.0)
+    }
+
+    /// Optional instance weight column.
+    pub fn weight_col(&self) -> Option<&str> {
+        self.params.string_opt("weightCol")
+    }
+
+    /// Solver algorithm: irls.
+    pub fn solver(&self) -> &str {
+        self.params.string_or("solver", "irls")
+    }
+
+    /// Optional output column for the linear predictor.
+    pub fn link_prediction_col(&self) -> Option<&str> {
+        self.params.string_opt("linkPredictionCol")
+    }
+
+    /// Tweedie variance power: 0 or a value at least 1.
+    pub fn variance_power(&self) -> f64 {
+        self.params.double_or("variancePower", 0.0)
+    }
+
+    /// Tweedie link power; when unset, Spark uses 1 - variancePower.
+    pub fn link_power(&self) -> Option<f64> {
+        use proto::expression::literal::LiteralType as L;
+        match self.params.literal("linkPower") {
+            Some(L::Double(value)) => Some(*value),
+            Some(L::Integer(value)) => Some(f64::from(*value)),
+            Some(L::Long(value)) => Some(*value as f64),
+            _ => None,
+        }
+    }
+
+    /// Optional offset column, added to the linear predictor.
+    pub fn offset_col(&self) -> Option<&str> {
+        self.params.string_opt("offsetCol")
+    }
+
+    /// Tree aggregation depth.
+    pub fn aggregation_depth(&self) -> i32 {
+        self.params.int_or("aggregationDepth", 2)
+    }
+
+    fn model_from_info(
+        &self,
+        info: proto::ml_command_result::MlOperatorInfo,
+        session: &SparkSession,
+    ) -> spark_connect_core::error::Result<GeneralizedLinearRegressionModel> {
+        let cached = CachedModel::from_info(&info, session, "GeneralizedLinearRegression")?;
+        Ok(GeneralizedLinearRegressionModel {
+            operator: MlOperator::with_uid(
+                "org.apache.spark.ml.regression.GeneralizedLinearRegressionModel",
+                info.uid.as_deref().unwrap_or(&self.operator.uid),
+                OperatorType::Model,
+            ),
+            params: self.params.clone(),
+            cached,
+        })
+    }
+}
+
+impl Default for GeneralizedLinearRegression {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Estimator for GeneralizedLinearRegression {
+    fn operator(&self) -> &MlOperator {
+        &self.operator
+    }
+    fn operator_mut(&mut self) -> &mut MlOperator {
+        &mut self.operator
+    }
+    fn params(&self) -> &Params {
+        &self.params
+    }
+    fn params_mut(&mut self) -> &mut Params {
+        &mut self.params
+    }
+
+    fn fit_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<Box<dyn Model>> {
+        let info = fit_via_command(&self.operator, &self.params, df)?;
+        Ok(Box::new(self.model_from_info(info, &df.session)?))
+    }
+}
+
+/// A generalized linear regression model fitted by Spark Connect.
+///
+/// Obtain it through [`Estimator::fit`]. The model, its clones and transformed
+/// DataFrames retain the server-cached object until the last owner is dropped.
+#[derive(Debug, Clone)]
+pub struct GeneralizedLinearRegressionModel {
+    operator: MlOperator,
+    params: Params,
+    cached: CachedModel,
+}
+
+impl Transformer for GeneralizedLinearRegressionModel {
+    fn operator(&self) -> &MlOperator {
+        &self.operator
+    }
+    fn operator_mut(&mut self) -> &mut MlOperator {
+        &mut self.operator
+    }
+    fn params(&self) -> &Params {
+        &self.params
+    }
+    fn params_mut(&mut self) -> &mut Params {
+        &mut self.params
+    }
+
+    fn build_ml_relation(
+        &self,
+        input: &DataFrame,
+    ) -> spark_connect_core::error::Result<proto::MlRelation> {
+        self.cached.build_ml_relation(input, &self.params)
+    }
+
+    fn transform_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<DataFrame> {
+        self.cached.transform(df, &self.params)
+    }
+}
+
+impl Model for GeneralizedLinearRegressionModel {
+    fn clone_box(&self) -> Box<dyn Model> {
+        Box::new(self.clone())
+    }
+}
+
 /// Decision tree classification using Spark's JVM implementation and ML vector features.
 ///
 /// Supports binary and multiclass labels. Unset parameters use Spark's defaults. A single
@@ -5770,6 +6060,140 @@ mod tests {
             .transform(&session.new_session().range(2).unwrap())
             .is_err());
         assert!(model.clone_box().transform(&df).is_ok());
+    }
+
+    #[test]
+    fn generalized_linear_regression_model_validates_the_reference_and_retains_its_metadata() {
+        let session = offline_session();
+        let estimator = GeneralizedLinearRegression::default().set_prediction_col("pred");
+        assert_eq!(
+            estimator.operator().name,
+            "org.apache.spark.ml.regression.GeneralizedLinearRegression"
+        );
+        for kind in [
+            None,
+            Some(proto::ml_command_result::ml_operator_info::Type::Name(
+                "model".into(),
+            )),
+            Some(proto::ml_command_result::ml_operator_info::Type::ObjRef(
+                proto::ObjectRef::default(),
+            )),
+        ] {
+            assert!(estimator
+                .model_from_info(
+                    proto::ml_command_result::MlOperatorInfo {
+                        r#type: kind,
+                        ..Default::default()
+                    },
+                    &session
+                )
+                .is_err());
+        }
+        let mut model = estimator
+            .model_from_info(
+                proto::ml_command_result::MlOperatorInfo {
+                    r#type: Some(proto::ml_command_result::ml_operator_info::Type::ObjRef(
+                        proto::ObjectRef {
+                            id: "trained-model".into(),
+                        },
+                    )),
+                    uid: Some("returned-uid".into()),
+                    ..Default::default()
+                },
+                &session,
+            )
+            .unwrap();
+        assert_eq!(model.operator().uid, "returned-uid");
+        assert_eq!(
+            model.operator().name,
+            "org.apache.spark.ml.regression.GeneralizedLinearRegressionModel"
+        );
+        assert_eq!(model.operator().op_type, OperatorType::Model);
+        let df = session.range(2).unwrap();
+        let proto::ml_relation::MlType::Transform(t) =
+            model.build_ml_relation(&df).unwrap().ml_type.unwrap()
+        else {
+            panic!("transform")
+        };
+        assert_eq!(
+            t.operator,
+            Some(proto::ml_relation::transform::Operator::ObjRef(
+                proto::ObjectRef {
+                    id: "trained-model".into()
+                }
+            ))
+        );
+        assert_eq!(*t.input.unwrap(), df.relation().unwrap());
+        assert!(t.params.unwrap().params.contains_key("predictionCol"));
+        assert!(model
+            .transform(&session.new_session().range(2).unwrap())
+            .is_err());
+        assert!(model.clone_box().transform(&df).is_ok());
+    }
+
+    #[test]
+    fn generalized_linear_regression_getters_follow_defaults_and_params() {
+        let defaults = GeneralizedLinearRegression::default();
+        assert_eq!(defaults.label_col(), "label");
+        assert_eq!(defaults.feature_col(), "features");
+        assert_eq!(defaults.prediction_col(), "prediction");
+        assert_eq!(defaults.family(), "gaussian");
+        assert_eq!(defaults.link(), None);
+        assert_eq!(defaults.fit_intercept(), true);
+        assert_eq!(defaults.max_iter(), 25);
+        assert_eq!(defaults.tol(), 1e-06);
+        assert_eq!(defaults.reg_param(), 0.0);
+        assert_eq!(defaults.weight_col(), None);
+        assert_eq!(defaults.solver(), "irls");
+        assert_eq!(defaults.link_prediction_col(), None);
+        assert_eq!(defaults.variance_power(), 0.0);
+        assert_eq!(defaults.link_power(), None);
+        assert_eq!(defaults.offset_col(), None);
+        assert_eq!(defaults.aggregation_depth(), 2);
+        let mut configured = GeneralizedLinearRegression::new()
+            .set_label_col("target")
+            .set_feature_col("input")
+            .set_prediction_col("pred")
+            .set_family("tweedie")
+            .set_link("log")
+            .set_fit_intercept(false)
+            .set_max_iter(50)
+            .set_tol(1e-08)
+            .set_reg_param(0.25)
+            .set_weight_col("weight")
+            .set_solver("irls")
+            .set_link_prediction_col("eta")
+            .set_variance_power(1.5)
+            .set_link_power(0.0)
+            .set_offset_col("offset")
+            .set_aggregation_depth(3);
+        assert_eq!(configured.label_col(), "target");
+        assert_eq!(configured.feature_col(), "input");
+        assert_eq!(configured.prediction_col(), "pred");
+        assert_eq!(configured.family(), "tweedie");
+        assert_eq!(configured.link(), Some("log"));
+        assert_eq!(configured.fit_intercept(), false);
+        assert_eq!(configured.max_iter(), 50);
+        assert_eq!(configured.tol(), 1e-08);
+        assert_eq!(configured.reg_param(), 0.25);
+        assert_eq!(configured.weight_col(), Some("weight"));
+        assert_eq!(configured.solver(), "irls");
+        assert_eq!(configured.link_prediction_col(), Some("eta"));
+        assert_eq!(configured.variance_power(), 1.5);
+        assert_eq!(configured.link_power(), Some(0.0));
+        assert_eq!(configured.offset_col(), Some("offset"));
+        assert_eq!(configured.aggregation_depth(), 3);
+        *configured.params_mut() = Params::new()
+            .set_param_string("family", "poisson")
+            .set_param_int("linkPower", -1)
+            .set_param_null("link");
+        assert_eq!(configured.family(), "poisson");
+        assert_eq!(configured.link_power(), Some(-1.0));
+        assert_eq!(configured.link(), None);
+        *configured.params_mut() = Params::new().set_param_int32("linkPower", 2);
+        assert_eq!(configured.link_power(), Some(2.0));
+        *configured.params_mut() = Params::new().set_param_null("linkPower");
+        assert_eq!(configured.link_power(), None);
     }
 
     #[test]

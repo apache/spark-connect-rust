@@ -1,0 +1,30 @@
+{
+  "source": "apache/spark v4.3.0 pyspark.ml.regression.GeneralizedLinearRegression",
+  "cases": [
+    {
+      "values": {},
+      "params_b64": ""
+    },
+    {
+      "values": {
+        "labelCol": "target",
+        "featuresCol": "input",
+        "predictionCol": "pred",
+        "family": "tweedie",
+        "link": "log",
+        "fitIntercept": false,
+        "maxIter": 50,
+        "tol": 1e-08,
+        "regParam": 0.25,
+        "weightCol": "weight",
+        "solver": "irls",
+        "linkPredictionCol": "eta",
+        "variancePower": 1.5,
+        "linkPower": 0.0,
+        "offsetCol": "offset",
+        "aggregationDepth": 3
+      },
+      "params_b64": "ChYKEGFnZ3JlZ2F0aW9uRGVwdGgSAjADChMKBmZhbWlseRIJagd0d2VlZGllChYKC2ZlYXR1cmVzQ29sEgdqBWlucHV0ChIKDGZpdEludGVyY2VwdBICGAAKFAoIbGFiZWxDb2wSCGoGdGFyZ2V0ChYKCWxpbmtQb3dlchIJWQAAAAAAAAAAChoKEWxpbmtQcmVkaWN0aW9uQ29sEgVqA2V0YQoNCgRsaW5rEgVqA2xvZwoNCgdtYXhJdGVyEgIwMgoVCglvZmZzZXRDb2wSCGoGb2Zmc2V0ChcKDXByZWRpY3Rpb25Db2wSBmoEcHJlZAoVCghyZWdQYXJhbRIJWQAAAAAAANA/ChAKBnNvbHZlchIGagRpcmxzChAKA3RvbBIJWTqMMOKOeUU+ChoKDXZhcmlhbmNlUG93ZXISCVkAAAAAAAD4PwoVCgl3ZWlnaHRDb2wSCGoGd2VpZ2h0"
+    }
+  ]
+}

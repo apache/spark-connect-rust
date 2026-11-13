@@ -795,6 +795,7 @@ _NATIVE_PARAMS = {
         tol="float", rawPredictionCol="str", fitIntercept="bool", standardization="bool",
         threshold="float", weightCol="str", aggregationDepth="int", maxBlockSizeInMB="float",
     ),
+    "GeneralizedLinearRegression": dict(labelCol="str", featuresCol="str", predictionCol="str", family="str", link="str", fitIntercept="bool", maxIter="int", tol="float", regParam="float", weightCol="str", solver="str", linkPredictionCol="str", variancePower="float", linkPower="float", offsetCol="str", aggregationDepth="int"),
     "LinearRegression": dict(
         featuresCol="str", labelCol="str", predictionCol="str", maxIter="int", regParam="float",
         elasticNetParam="float", tol="float", fitIntercept="bool", standardization="bool",
@@ -3351,3 +3352,36 @@ def test_gbt_classifier_setter_only_columns_convert_as_pyspark(ml_mock, param):
         with pytest.raises(TypeError) as error:
             getattr(GBTClassifier(), setter)(value)
         assert str(error.value) == f'Invalid param value given for param "{param}". {message}'
+
+
+@pytest.mark.parametrize("use_setters", [False, True], ids=["constructor", "setters"])
+def test_generalized_linear_regression_native_parameters_match_official_fixture(ml_mock, use_setters):
+    import base64
+    import inspect
+    import json
+    from pathlib import Path
+
+    from pyspark import _pyspark as native
+    from pyspark.ml.connect import GeneralizedLinearRegression as exported
+    from pyspark.ml.connect.regression import GeneralizedLinearRegression
+
+    assert exported is GeneralizedLinearRegression is native.GeneralizedLinearRegression
+    defaults = {'labelCol': 'label', 'featuresCol': 'features', 'predictionCol': 'prediction', 'family': 'gaussian', 'link': None, 'fitIntercept': True, 'maxIter': 25, 'tol': 1e-06, 'regParam': 0.0, 'weightCol': None, 'solver': 'irls', 'linkPredictionCol': None, 'variancePower': 0.0, 'linkPower': None, 'offsetCol': None, 'aggregationDepth': 2}
+    signature = inspect.signature(GeneralizedLinearRegression)
+    assert list(signature.parameters) == list(defaults)
+    for name, value in defaults.items():
+        assert signature.parameters[name].kind == inspect.Parameter.KEYWORD_ONLY
+        assert signature.parameters[name].default == value
+    fixture = json.loads((Path(__file__).resolve().parents[2] / "tests/golden/generalized_linear_regression.json").read_text())
+    spark, service = ml_mock
+    models = []
+    for case in fixture["cases"]:
+        if use_setters:
+            estimator = GeneralizedLinearRegression()
+            for name, value in case["values"].items():
+                assert getattr(estimator, "set" + name[0].upper() + name[1:])(value) is estimator
+        else:
+            estimator = GeneralizedLinearRegression(**case["values"])
+        operator, params = _native_request(spark, service, estimator, models)
+        assert operator.name == "org.apache.spark.ml.regression.GeneralizedLinearRegression"
+        assert params == pb2.MlParams.FromString(base64.b64decode(case["params_b64"]))
