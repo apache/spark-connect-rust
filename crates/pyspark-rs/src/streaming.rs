@@ -427,12 +427,13 @@ impl PyDataStreamReader {
 
     /// Read the streaming CDC changes of a named table. Mirrors `DataStreamReader.changes`,
     /// which raises an `AnalysisException` of `_LEGACY_ERROR_TEMP_1189` for a reader of a
-    /// schema.
-    fn changes(&self, py: Python<'_>, tableName: &str) -> PyResult<PyDataFrame> {
+    /// schema, before it sets the name in its string field, as `table` does.
+    fn changes(&self, py: Python<'_>, tableName: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
         if !self.inner.get_schema().is_empty() {
             return Err(crate::readwriter::changes_of_schema_error(py));
         }
-        Ok(PyDataFrame::new(self.inner.clone().changes(tableName)))
+        let tableName = crate::str_argument(tableName)?;
+        Ok(PyDataFrame::new(self.inner.clone().changes(&tableName)))
     }
 
     /// Load an XML streaming source. Mirrors `DataStreamReader.xml(...)`: set each named
@@ -494,8 +495,10 @@ impl PyDataStreamReader {
         Ok(PyDataFrame::new(r.format("xml").load(Some(&path))))
     }
 
-    fn table(&self, tableName: &str) -> PyResult<PyDataFrame> {
-        let df = self.inner.clone().table(tableName);
+    /// Read a table by name, which PySpark's `Read` plan sets in its string field as it is, as
+    /// [`crate::str_argument`] converts it.
+    fn table(&self, tableName: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        let df = self.inner.clone().table(&crate::str_argument(tableName)?);
         Ok(PyDataFrame::new(df))
     }
 
@@ -996,8 +999,12 @@ impl PyDataStreamWriter {
         options: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyStreamingQuery> {
         let writer = self.apply_write_opts(format, outputMode, partitionBy, queryName, options)?;
-        // PySpark's start sets these on the writer before it checks the path.
-        let path = path.map(crate::readwriter::writer_path).transpose()?;
+        // PySpark's start sets these on the writer before it checks the path, which it sets in
+        // its string field only `if path:`, so that a false one, such as 0, is no path.
+        let path = match path {
+            Some(path) if path.is_truthy()? => Some(crate::readwriter::writer_path(path)?),
+            _ => None,
+        };
         // Memory/console/foreach sinks take no path; the core treats "" as unset.
         let query = interruptible(py, &writer.spark_session(), || {
             writer
@@ -1012,7 +1019,7 @@ impl PyDataStreamWriter {
     fn toTable(
         &self,
         py: Python<'_>,
-        tableName: &str,
+        tableName: &Bound<'_, PyAny>,
         format: Option<&str>,
         outputMode: Option<&str>,
         partitionBy: Option<&Bound<'_, PyAny>>,
@@ -1020,10 +1027,19 @@ impl PyDataStreamWriter {
         options: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyStreamingQuery> {
         let writer = self.apply_write_opts(format, outputMode, partitionBy, queryName, options)?;
+        // As the path of `start`, PySpark sets the table in its string field only `if
+        // tableName:`, so that a false one, such as "", starts the query as `start()` does.
+        let table = if tableName.is_truthy()? {
+            Some(crate::str_argument(tableName)?)
+        } else {
+            None
+        };
         let query = interruptible(py, &writer.spark_session(), || {
-            writer
-                .to_table_with_event_handler(tableName, post_started_event)
-                .map_err(Box::new)
+            match &table {
+                Some(table) => writer.to_table_with_event_handler(table, post_started_event),
+                None => writer.start_with_event_handler("", post_started_event),
+            }
+            .map_err(Box::new)
         })?;
         Ok(PyStreamingQuery::new(query))
     }
