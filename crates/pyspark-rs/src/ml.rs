@@ -419,16 +419,18 @@ where
     T: Native + PyClass,
     T::Core: Estimator,
 {
-    fit_native_checked(slf, dataset, reads, |_, _, _| Ok(()))
+    fit_native_checked(slf, dataset, reads, |_, _, _, _| Ok(()))
 }
 
-/// [`fit_native`], which first runs `check` on the DataFrame that the fit sends, of the estimator
-/// `estimator`: the checks that PySpark's `_fit` makes of its dataset before it fits.
+/// [`fit_native`], which first runs `check` of the estimator `estimator`, of the whole DataFrame
+/// of the dataset, whose schema the fit has read for its vector input (see [`Vectors`]), and of
+/// the DataFrame that the fit sends: the checks that PySpark's `_fit` makes of its dataset before
+/// it fits.
 fn fit_native_checked<T>(
     slf: &Bound<'_, T>,
     dataset: &Bound<'_, PyAny>,
     reads: Option<Reads>,
-    check: impl FnOnce(Python<'_>, &T::Core, &DataFrame) -> PyResult<()>,
+    check: impl FnOnce(Python<'_>, &T::Core, &DataFrame, &DataFrame) -> PyResult<()>,
 ) -> PyResult<PyMLModel>
 where
     T: Native + PyClass,
@@ -459,8 +461,12 @@ where
         Vec::new()
     };
     let array = vectors.input_field(&fields).filter(is_number_array);
+    // The checks read the columns by the names that the params give, as PySpark's `_fit` sends
+    // them, before they are spelled as the schema spells them for the JVM estimator.
+    let given = estimator.clone();
     let params = vectors.spell_features(std::mem::take(estimator.params_mut()), &fields);
     *estimator.params_mut() = spell_param(params, &fields, "labelCol", None);
+    let whole = df.clone();
     let df = match select {
         Some(columns) => df.select(
             columns
@@ -469,7 +475,7 @@ where
         ),
         None => df,
     };
-    check(py, &estimator, &df)?;
+    check(py, &given, &whole, &df)?;
     let df = match array {
         Some(field) => df.with_column(&field.name, vector_of(&field)),
         None => df,
@@ -477,22 +483,48 @@ where
     fit_core(py, estimator, &df)
 }
 
-/// The checks of the labels of a LogisticRegression fit, as PySpark's `_fit` makes them of the
-/// labels that its query collects: `collect_set` of the label column, which has the distinct
-/// labels and no null. There must be at least two, each an integer in `[0, numClasses)`, with
-/// PySpark's ValueErrors. PySpark's query also counts the rows and reads the size of the features,
-/// which these checks do not read, and array_size raises on the vector features that the native
-/// LogisticRegression takes, so that query is not sent.
-fn check_labels(py: Python<'_>, df: &DataFrame, label: &str) -> PyResult<()> {
-    use spark_connect::functions::{col, collect_set};
+/// The checks of the labels of a LogisticRegression fit, of its `features` and `label` columns, as
+/// PySpark's `_fit` makes them of the labels that its query of `df`, the DataFrame that the fit
+/// sends, collects: `collect_set` of the label column, which has the distinct labels and no null.
+/// There must be at least two, each an integer in `[0, numClasses)`, with PySpark's ValueErrors.
+/// PySpark's query also reads `first(array_size(featuresCol))`, whose analysis raises its
+/// DATATYPE_MISMATCH before the checks for features of a type that is neither an array nor null.
+/// So the query reads it too, before the labels, where the features in the schema of `dataset`,
+/// which the fit has read (and cached), are neither an array, which array_size takes, nor an ML
+/// vector, which the native LogisticRegression takes and array_size rejects. PySpark's query also
+/// counts the rows, which raises nothing and is not read.
+fn check_labels(
+    py: Python<'_>,
+    dataset: &DataFrame,
+    df: &DataFrame,
+    features: &str,
+    label: &str,
+) -> PyResult<()> {
+    use spark_connect::functions::{array_size, col, collect_set, first};
     use spark_connect::row::Value;
+    use spark_connect::types::DataType;
 
+    // Found regardless of case, as Spark resolves it, as the fit finds its vector input.
+    let sized = schema_fields(py, dataset)?
+        .iter()
+        .find(|field| field.name.eq_ignore_ascii_case(features))
+        .is_some_and(|field| match &field.data_type {
+            DataType::Array { .. } => false,
+            DataType::Udt {
+                jvm_class: Some(class),
+                ..
+            } => class != "org.apache.spark.ml.linalg.VectorUDT",
+            _ => true,
+        });
     let rows = interruptible(py, &df.spark_session(), || {
-        df.agg(vec![collect_set(col(label)).expression().clone()])
+        let size = sized.then(|| first(array_size(col(features))));
+        let labels = collect_set(col(label));
+        df.agg(size.into_iter().chain([labels]))
             .collect()
             .map_err(Box::new)
     })?;
-    let classes = match rows.first().and_then(|row| row.get(0)) {
+    // The labels are the last column, after the size that the server gives of null features.
+    let classes = match rows.first().and_then(|row| row.values().last()) {
         Some(Value::List(classes)) => classes.as_slice(),
         _ => &[],
     };
@@ -672,7 +704,8 @@ fn lazy_schema_fields(py: Python<'_>, df: &DataFrame) -> PyResult<Vec<StructFiel
 
 /// The ML vector of `field`, an array column of numbers: `array_to_vector` of it, which takes
 /// the arrays of the numbers that Spark casts up to doubles. An array of decimals, which it does
-/// not take, is cast to an `array<double>` first, as PySpark's MaxAbsScaler computes on decimals.
+/// not take, is cast to an `array<double>` first, so that the `featuresCol` of a native estimator,
+/// and of its model, takes an array of any numbers (see [`Vectors::array_input`]).
 fn vector_of(field: &spark_connect::types::StructField) -> spark_connect::Column {
     use spark_connect::types::DataType;
 
@@ -1336,7 +1369,7 @@ impl PyLogisticRegression {
             slf,
             dataset,
             Some(LOGISTIC_REGRESSION_READS),
-            |py, estimator, df| check_labels(py, df, estimator.label_col()),
+            |py, lr, dataset, df| check_labels(py, dataset, df, lr.feature_col(), lr.label_col()),
         )
     }
 }

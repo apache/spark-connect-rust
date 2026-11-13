@@ -273,7 +273,7 @@ of arrays and NaN values of floats stay NaN, as PySpark's local computation keep
 conversion would make them nulls); the other columns are converted as pandas converts them. The
 transform of a LogisticRegression model is a shallow copy of it (`copy(deep=False)`) with the output
 columns appended, of its index, as PySpark's makes it, of PySpark's dtypes and cells (an `int64`
-prediction, ndarrays of the probabilities and of the scaled values). The transform of an empty
+prediction, and ndarrays of the probabilities). The transform of an empty
 pandas DataFrame is computed without the server, which cannot infer the schema of no rows: a
 LogisticRegression model raises the `ValueError` of PySpark's transform function, which stacks no
 array. Another object raises the `AttributeError` that PySpark's raises, of its `select` in a fit or
@@ -290,8 +290,12 @@ JVM models check their output columns, which the transform of a pandas DataFrame
 The fit of `LogisticRegression` checks its labels before it fits, as PySpark's `_fit` does, on the
 distinct labels of the server's `collect_set` of the label column (a null label is not one of them):
 there must be at least two, each an integer in `[0, numClasses)`, else PySpark's `ValueError` is
-raised. The other checks of PySpark's fit (the row count, the size of the features) are not made, as
-they do not raise. The evaluators cast a prediction or a probability of another numeric type to a
+raised. PySpark's query also reads the size of the features (`first(array_size(featuresCol))`),
+whose analysis raises `DATATYPE_MISMATCH.UNEXPECTED_INPUT_TYPE` before those checks for features
+that are not an array (a string, say). The query of the native fit reads it too, for features that
+are neither an array nor a vector, so that the server raises that error first, but not for a vector,
+which the native fit takes and `array_size` rejects. PySpark's row count, which raises nothing,
+is not read. The evaluators cast a prediction or a probability of another numeric type to a
 double, and send an array of probabilities as a vector (`array_to_vector`), whose element 1 is
 scored, as PySpark's evaluator reads the column 1 of an array. The values are the JVM evaluators'
 doubles, where PySpark's are of float32 tensors (`0.6` where PySpark returns `0.6000000238418579`).
@@ -299,17 +303,20 @@ The native estimators of a `featuresCol` take vectors, arrays of numbers and pan
 alike: a fit, and the transform of its model, read the schema of the DataFrame, as PySpark's
 transform reads its columns, and send an array `featuresCol` as the vector (`array_to_vector`) that
 the JVM reads; the transform outputs the array column as it was. Classic `pyspark.ml` estimators
-take only a `VectorUDT` column, while the native estimators that PySpark's `pyspark.ml.connect` does
-not have (GBTRegressor, NaiveBayes, BisectingKMeans, GaussianMixture, GeneralizedLinearRegression,
-...) take the three kinds of input that the classes of `pyspark.ml.connect` take, as they exist only
-in this client.
+take only a `VectorUDT` column, and the classes of PySpark's `pyspark.ml.connect` take no vector
+(its LogisticRegression raises the `DATATYPE_MISMATCH` of `array_size` on one, and its scalers a
+`PythonException`), so the vectors that the native estimators take are an extension of this
+client. The native estimators that PySpark's `pyspark.ml.connect` does not have (GBTRegressor,
+NaiveBayes, BisectingKMeans, GaussianMixture, GeneralizedLinearRegression, ...) exist only in this
+client, and take the three kinds of input alike.
 
 The scalers of `pyspark.ml.connect`, `StandardScaler` and `MaxAbsScaler`, are PySpark's own classes
 (`pyspark.ml.connect.feature`), vendored unchanged: they fit with PySpark's `summarize_dataframe`
 and transform with PySpark's closures, on the server for a Spark DataFrame and locally for a pandas
 DataFrame, so their values, types and errors are PySpark's, and they send no ML request. The Rust API keeps its `StandardScaler` and `MaxAbsScaler`,
 the JVM's scalers, whose `StandardScaler::set_with_mean` centers the features (`withMean`, false by
-default).
+default) and `StandardScaler::set_with_std` scales them to unit standard deviation (`withStd`, true
+by default), as Spark's scaler does.
 
 ## Native RandomForestRegressor
 

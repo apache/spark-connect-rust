@@ -26,7 +26,6 @@ pyspark/sql/tests/connect/test_connect_plan.py  # tests the Python client's prot
 
 # --- whole files: the deprecated torch-based pyspark.ml.connect API, replaced by the native ML API ---
 pyspark/ml/tests/connect/test_connect_classification.py  # imports LogisticRegressionModel from the torch-based pyspark.ml.connect; this client has the native ML API (dev/parity/4.3.0-module-audit.md)
-pyspark/ml/tests/connect/test_connect_feature.py  # imports MaxAbsScalerModel from the torch-based pyspark.ml.connect; native ML API (module audit)
 pyspark/ml/tests/connect/test_legacy_mode_classification.py  # legacy mode of the torch-based pyspark.ml.connect (classic SparkContext); native ML API (module audit)
 pyspark/ml/tests/connect/test_legacy_mode_evaluation.py  # legacy mode of the torch-based pyspark.ml.connect (classic SparkContext); native ML API (module audit)
 pyspark/ml/tests/connect/test_legacy_mode_feature.py  # legacy mode of the torch-based pyspark.ml.connect (classic SparkContext); native ML API (module audit)

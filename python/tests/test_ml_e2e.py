@@ -681,6 +681,47 @@ def test_ml_connect_logistic_regression_checks_its_labels_as_pyspark(session):
     assert str(error.value) == too_few
 
 
+def test_ml_connect_logistic_regression_reads_the_size_of_its_features_as_pyspark(session):
+    # As PySpark's LogisticRegression._fit, whose query of the distinct labels also reads
+    # first(array_size(featuresCol)): features that are not an array raise the DATATYPE_MISMATCH
+    # of array_size, of PySpark 4.3.0, before the checks of the labels. Arrays, the null type,
+    # whose size the server takes, and the vectors that the native fit takes, which array_size
+    # rejects, still raise the ValueErrors of the labels.
+    from pyspark.errors import AnalysisException
+    from pyspark.ml.connect.classification import LogisticRegression
+    from pyspark.ml.functions import array_to_vector
+
+    def labeled(features, labels):
+        rows = ", ".join(f"({features}, {label})" for label in labels)
+        return session.sql(f"SELECT * FROM VALUES {rows} AS t(features, label)")
+
+    one_class = ["1.0D"] * 4
+    not_indices = ["0.0D", "2.0D"] * 2
+    for features in ("'a'", "1.0D", "named_struct('x', 1.0D)"):
+        for labels in (one_class, not_indices):
+            with pytest.raises(AnalysisException) as error:
+                LogisticRegression(maxIter=5).fit(labeled(features, labels))
+            assert error.value.getCondition() == "DATATYPE_MISMATCH.UNEXPECTED_INPUT_TYPE"
+            assert 'Cannot resolve "array_size(features)"' in str(error.value), features
+    # Of featuresCol as it is named, which Spark resolves regardless of case.
+    renamed = labeled("'a'", one_class).withColumnRenamed("features", "f")
+    with pytest.raises(AnalysisException) as error:
+        LogisticRegression(maxIter=5, featuresCol="F").fit(renamed)
+    assert 'Cannot resolve "array_size(F)"' in str(error.value)
+
+    too_few = "Training dataset distinct labels must >= 2."
+    not_index = "Training labels must be integers in [0, numClasses)."
+    vectors = labeled("array(1.0D, 2.0D)", not_indices)
+    for df, message in [
+        (labeled("array('a')", one_class), too_few),
+        (labeled("null", not_indices), not_index),
+        (vectors.withColumn("features", array_to_vector("features")), not_index),
+    ]:
+        with pytest.raises(ValueError) as error:
+            LogisticRegression(maxIter=5).fit(df)
+        assert str(error.value) == message
+
+
 def test_ml_connect_logistic_regression_and_scalers_output_the_columns_of_pyspark(session):
     # The schemas of the transforms of PySpark 4.3.0's LogisticRegression and scalers of
     # pyspark.ml.connect, of their pandas_udf: the columns of their _output_columns, nullable and
@@ -832,7 +873,8 @@ def test_ml_connect_scalers_transform_the_nan_of_pandas_frames_as_pyspark(sessio
     # stays NaN, and the scaled values of the other elements are PySpark's. The values are those of
     # PySpark 4.3.0. The fits of the scalers on a pandas DataFrame are local, as PySpark's are, so
     # a NaN propagates into their scales (the maximum of MaxAbsScaler too). The fit of a Spark
-    # DataFrame is the server's summary, which skips a NaN element of the maximum.
+    # DataFrame is the same numpy summary, of PySpark's summarize_dataframe in the server's Python
+    # workers, where a NaN propagates too: the Spark DataFrame fitted here has none.
     import numpy as np
     import pandas as pd
     from pyspark.ml.connect.feature import MaxAbsScaler, StandardScaler

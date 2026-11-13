@@ -1,5 +1,8 @@
 """
-pyspark.ml.connect - Spark-Connect ML API, backed by the Rust _pyspark extension.
+pyspark.ml.connect - Spark-Connect ML API. Its classification, regression and clustering
+estimators, StringIndexer, VectorAssembler, evaluators, Pipeline and CrossValidator are backed by
+the Rust _pyspark extension; its base classes and the scalers and ArrayAssembler of its `feature`
+module are PySpark's own (vendored).
 
 Re-exports the estimator/transformer/evaluator/pipeline classes so that both
 `from pyspark.ml.connect import StandardScaler` and the submodule paths
@@ -64,10 +67,11 @@ __all__ = [
     "Pipeline",
     "PipelineModel",
     "tuning",
-    # Fork-additional concrete estimators/evaluators (Rust-backed).
+    # Fork-additional: the classes of PySpark's own `feature` module.
     "StandardScaler",
     "MaxAbsScaler",
     "ArrayAssembler",
+    # Fork-additional concrete estimators/evaluators (Rust-backed).
     "StringIndexer",
     "VectorAssembler",
     "LogisticRegression",

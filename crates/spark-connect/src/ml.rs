@@ -743,7 +743,8 @@ fn evaluate_via_command(
 
 /// Concrete implementation: StandardScaler Estimator.
 ///
-/// Scales features to have mean 0 and standard deviation 1.
+/// Scales features to unit standard deviation, and centers them to mean 0 first with
+/// `set_with_mean(true)`: as in Spark, `withStd` is true and `withMean` false by default.
 #[derive(Debug, Clone)]
 pub struct StandardScaler {
     operator: MlOperator,
@@ -793,6 +794,17 @@ impl StandardScaler {
     /// Whether the features are centered to mean 0 before scaling (default: false).
     pub fn with_mean(&self) -> bool {
         self.params.bool_or("withMean", false)
+    }
+
+    /// Whether to scale the features to unit standard deviation (default: true, as in Spark).
+    pub fn set_with_std(mut self, value: bool) -> Self {
+        self.params = self.params.set_param_bool("withStd", value);
+        self
+    }
+
+    /// Whether the features are scaled to unit standard deviation (default: true).
+    pub fn with_std(&self) -> bool {
+        self.params.bool_or("withStd", true)
     }
 
     fn model_from_info(
@@ -7523,6 +7535,34 @@ mod tests {
 
         let scaler = scaler.set_with_mean(false);
         assert!(!scaler.with_mean());
+    }
+
+    #[test]
+    fn test_standard_scaler_with_std() {
+        // As Spark's default, the features are scaled to unit standard deviation unless the
+        // setter says otherwise, and the param is sent only when it is set.
+        let scaler = StandardScaler::new();
+        assert!(scaler.with_std());
+        assert!(scaler.params().get_param("withStd").is_none());
+
+        let scaler = StandardScaler::new().set_with_std(false);
+        assert!(!scaler.with_std());
+        let bool_param = scaler.params().get_param("withStd").unwrap();
+        let Some(proto::expression::ExprType::Literal(literal)) = &bool_param.expr_type else {
+            panic!("withStd is not a literal");
+        };
+        assert_eq!(
+            literal.literal_type,
+            Some(proto::expression::literal::LiteralType::Boolean(false))
+        );
+
+        // withStd and withMean are separate params.
+        let scaler = scaler.set_with_mean(true);
+        assert!(!scaler.with_std());
+        assert!(scaler.with_mean());
+        let scaler = scaler.set_with_std(true);
+        assert!(scaler.with_std());
+        assert!(scaler.with_mean());
     }
 
     #[test]
