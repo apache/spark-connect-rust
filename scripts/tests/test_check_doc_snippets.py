@@ -94,10 +94,129 @@ class SnippetsTests(unittest.TestCase):
                 "",
             ]
         )
+        checked, problems = checker.snippets(text)
         self.assertEqual(
-            checker.snippets(text),
-            ["let a = 1;", "let b = 2;\n    let c = 3;", "let d = 4;"],
+            [(block.line, block.code) for block in checked],
+            [(1, "let a = 1;"), (5, "let b = 2;\n    let c = 3;"), (10, "let d = 4;")],
         )
+        self.assertEqual(problems, [])
+
+    def test_refuses_a_rust_fence_that_would_be_skipped(self):
+        text = "\n".join(
+            [
+                "```rust,ignore",
+                "query.stop()?;",
+                "```",
+                "",
+                "```{.rust}",
+                "let a = 1;",
+                "```",
+                "",
+                "```rust no_run",
+                "let b = 2;",
+                "```",
+            ]
+        )
+        checked, problems = checker.snippets(text)
+        self.assertEqual(checked, [])
+        self.assertEqual([line for line, _ in problems], [1, 5, 9])
+        self.assertIn('"rust,ignore"', problems[0][1])
+
+    def test_no_run_form_is_skipped_without_a_problem(self):
+        text = '```{.rust .no-run}\nlet a: i32 = "bad";\n```\n```{.rust  .no-run}\n```\n'
+        self.assertEqual(checker.snippets(text), ([], []))
+
+    def test_no_run_marker_before_a_rust_fence_skips_it(self):
+        text = (
+            '<!-- snippet: no-run -->\n```rust\nlet a: i32 = "bad";\n```\n'
+            "```rust\nlet b = 2;\n```\n"
+        )
+        checked, problems = checker.snippets(text)
+        self.assertEqual([(block.line, block.code) for block in checked], [(5, "let b = 2;")])
+        self.assertEqual(problems, [])
+
+    def test_no_run_marker_not_directly_before_a_fence_does_nothing(self):
+        for text in (
+            "<!-- snippet: no-run -->\n\n```rust\nlet a = 1;\n```\n",
+            "<!-- snippet: no-run -->\nSome text.\n```rust\nlet a = 1;\n```\n",
+        ):
+            with self.subTest(text=text):
+                checked, problems = checker.snippets(text)
+                self.assertEqual([block.line for block in checked], [3])
+                self.assertEqual(problems, [])
+
+    def test_plain_and_non_rust_fences_are_not_refused(self):
+        text = "```python\nprint(1)\n```\n```\nplain\n```\n```bash\nls\n```\n"
+        self.assertEqual(checker.snippets(text), ([], []))
+
+    def test_tilde_fences_are_parsed_as_blocks(self):
+        checked, problems = checker.snippets("~~~rust\nlet a = 1;\n~~~\n")
+        self.assertEqual([(block.line, block.code) for block in checked], [(1, "let a = 1;")])
+        self.assertEqual(problems, [])
+
+    def test_crlf_line_endings_are_normalized(self):
+        checked, problems = checker.snippets("```rust\r\nlet a = 1;\r\n```\r\n")
+        self.assertEqual([block.code for block in checked], ["let a = 1;"])
+        self.assertEqual(problems, [])
+
+    def test_unclosed_fence_is_reported_at_its_line(self):
+        checked, problems = checker.snippets("text\n```rust\nlet a = 1;\n")
+        self.assertEqual(checked, [])
+        self.assertEqual(problems, [(2, "this fence is never closed")])
+
+    def test_fence_opened_inside_an_unclosed_fence_is_not_swallowed(self):
+        # The second fence has an info string, so it cannot close the first one. It is
+        # reported as a fence line that is not parsed, rather than passed over silently.
+        checked, problems = checker.snippets("```rust\nlet a = 1;\n```rust\nlet b = 2;\n```\n")
+        self.assertEqual([block.line for block in checked], [1])
+        self.assertEqual([line for line, _ in problems], [3])
+        self.assertIn("not parsed", problems[0][1])
+
+    def test_fence_in_a_blockquote_is_reported_not_skipped(self):
+        checked, problems = checker.snippets("> ```rust\n> let a = 1;\n> ```\n")
+        self.assertEqual(checked, [])
+        self.assertEqual([line for line, _ in problems], [1])
+        self.assertIn("2 fence line(s)", problems[0][1])
+
+    def test_nested_longer_fence_is_reported(self):
+        # The three-backtick lines are body of the four-backtick fence, not fences of their
+        # own, and the checker says so rather than compiling them as code.
+        _, problems = checker.snippets("````rust\n```\nlet a = 1;\n```\n````\n")
+        self.assertEqual([line for line, _ in problems], [2])
+
+
+class MarkdownFilesTests(unittest.TestCase):
+    def test_the_readme_is_checked_with_the_docs(self):
+        files = checker.markdown_files()
+        self.assertEqual(files[0], checker.REPO / "README.md")
+        self.assertIn(checker.REPO / "docs" / "udfs.md", files)
+
+
+class MainReportTests(unittest.TestCase):
+    def test_failures_are_reported_at_the_line_of_the_fence(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "docs").mkdir()
+            doc = root / "docs" / "a.md"
+            doc.write_text('Intro.\n\n```rust\nlet n: i64 = "bad";\n```\n\n```rust,ignore\n```\n')
+            rlib = root / "libspark_connect.rlib"
+            rlib.write_text("")
+            rustc_error = "error[E0308]: mismatched types\n --> snippet_1.rs:11:5\n"
+            with (
+                patch.object(checker, "REPO", root),
+                patch.object(checker, "markdown_files", return_value=[doc]),
+                patch.object(checker, "crate_artifacts", return_value=(rlib, [])),
+                patch.object(checker, "check_block", return_value=(False, rustc_error)),
+                patch("sys.stdout", new_callable=io.StringIO) as out,
+            ):
+                self.assertEqual(checker.main(), 1)
+        lines = out.getvalue().splitlines()
+        self.assertEqual(
+            lines[0], "Checked 1 rust snippet(s); 2 failed to compile or were refused."
+        )
+        self.assertEqual(lines[1], "  docs/a.md:3: error[E0308]: mismatched types")
+        self.assertTrue(lines[2].startswith('  docs/a.md:7: fence info "rust,ignore"'))
+        self.assertEqual(len(lines), 3)
 
 
 class CrateArtifactsTests(unittest.TestCase):

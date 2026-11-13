@@ -1140,8 +1140,9 @@ fn positive_timeout(timeout: Option<&Bound<'_, PyAny>>) -> PyResult<Option<f64>>
 }
 
 /// A bool argument that PySpark sets in a proto bool field, taken as it is (None when it is
-/// omitted) and converted in the call by [`ProtoBool::value`], as PyO3 would prefix the
-/// `TypeError` of the conversion of an argument with its name.
+/// omitted, its `default()`) and converted in the call by [`ProtoBool::value`], as PyO3 would
+/// prefix the `TypeError` of the conversion of an argument with its name.
+#[derive(Default)]
 pub(crate) struct ProtoBool(Option<Py<PyAny>>);
 
 impl<'a, 'py> FromPyObject<'a, 'py> for ProtoBool {
