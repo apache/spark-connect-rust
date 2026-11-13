@@ -16711,7 +16711,6 @@ def test_dataframes_take_their_arguments_and_attributes_as_pyspark(mock_connect,
     # and JVM_ATTRIBUTE_NOT_SUPPORTED of those of a classic DataFrame.
     from pyspark.errors import (
         PySparkAttributeError,
-        PySparkNotImplementedError,
         PySparkTypeError,
         PySparkValueError,
     )
@@ -16737,13 +16736,14 @@ def test_dataframes_take_their_arguments_and_attributes_as_pyspark(mock_connect,
         assert e.value.getMessageParameters() == {
             "arg_name": arg_name, "expected_type": "str", "arg_type": arg_type}
     assert type(df._not_a_dunder).__name__ == "Column"
-    for name in ("_jseq", "_jdf", "_jmap", "_jcols"):
+    # `rdd` too: pyspark-client's DataFrame defines no `rdd` property (only a classic-capable
+    # PySpark does), so its `__getattr__` raises an AttributeError, and `hasattr` is False.
+    for name in ("_jseq", "_jdf", "_jmap", "_jcols", "rdd"):
         with pytest.raises(PySparkAttributeError) as e:
             getattr(df, name)
         assert e.value.getCondition() == "JVM_ATTRIBUTE_NOT_SUPPORTED"
-    with pytest.raises(PySparkNotImplementedError) as e:
-        df.rdd
-    assert e.value.getMessageParameters() == {"feature": "rdd"}
+        assert e.value.getMessageParameters() == {"attr_name": name}
+    assert not hasattr(df, "rdd")
     with pytest.raises(PySparkAttributeError) as e:
         df.__not_a_column__
     assert e.value.getCondition() == "ATTRIBUTE_NOT_SUPPORTED"
