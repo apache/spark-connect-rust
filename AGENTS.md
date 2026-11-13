@@ -19,7 +19,7 @@ Maintainer- and agent-facing internals live under
 [`dev/design/`](./dev/design) (not published on the user docs site):
 
 - `dev/design/architecture.md` - system design, parity strategy, no-stub rule
-- `dev/design/ci.md` - the CI pipeline (golden-proto tests, parity gate)
+- `dev/design/ci.md` - the CI pipeline (its workflows and the parity gate)
 - `dev/design/official-tests.md` - the official Apache Spark Connect test suite approach
 - `dev/design/test-harness.md` - the official-test harness
 - `dev/design/acceptance.md` - acceptance criteria / definition of done
