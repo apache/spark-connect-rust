@@ -438,7 +438,7 @@ impl PyDataStreamReader {
 
     /// Load an XML streaming source. Mirrors `DataStreamReader.xml(...)`: set each named
     /// option, then `format("xml").load(path)`.
-    #[pyo3(signature = (path, rowTag=None, schema=None, excludeAttribute=None, attributePrefix=None, valueTag=None, ignoreSurroundingSpaces=None, rowValidationXSDPath=None, ignoreNamespace=None, wildcardColName=None, encoding=None, inferSchema=None, nullValue=None, dateFormat=None, timestampFormat=None, mode=None, columnNameOfCorruptRecord=None, multiLine=None, samplingRatio=None, locale=None))]
+    #[pyo3(signature = (path, rowTag=None, schema=None, excludeAttribute=None, attributePrefix=None, valueTag=None, ignoreSurroundingSpaces=None, rowValidationXSDPath=None, ignoreNamespace=None, wildcardColName=None, encoding=None, inferSchema=None, nullValue=None, dateFormat=None, timestampFormat=None, mode=None, columnNameOfCorruptRecord=None, multiLine=None, samplingRatio=None, locale=None, **unexpected), text_signature = "($self, path, rowTag=None, schema=None, excludeAttribute=None, attributePrefix=None, valueTag=None, ignoreSurroundingSpaces=None, rowValidationXSDPath=None, ignoreNamespace=None, wildcardColName=None, encoding=None, inferSchema=None, nullValue=None, dateFormat=None, timestampFormat=None, mode=None, columnNameOfCorruptRecord=None, multiLine=None, samplingRatio=None, locale=None)")]
     #[allow(non_snake_case, clippy::too_many_arguments)]
     fn xml(
         &mut self,
@@ -462,7 +462,9 @@ impl PyDataStreamReader {
         multiLine: Option<&Bound<'_, PyAny>>,
         samplingRatio: Option<&Bound<'_, PyAny>>,
         locale: Option<&Bound<'_, PyAny>>,
+        unexpected: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyDataFrame> {
+        crate::options::check_unexpected_keywords("DataStreamReader.xml", unexpected)?;
         let mut r = self.inner.clone();
         r = set_stream_option_skip_none(r, "rowTag", rowTag)?;
         if let Some(v) = schema {
@@ -502,7 +504,7 @@ impl PyDataStreamReader {
         Ok(PyDataFrame::new(df))
     }
 
-    #[pyo3(signature = (path, schema=None, primitivesAsString=None, prefersDecimal=None, allowComments=None, allowUnquotedFieldNames=None, allowSingleQuotes=None, allowNumericLeadingZero=None, allowBackslashEscapingAnyCharacter=None, mode=None, columnNameOfCorruptRecord=None, dateFormat=None, timestampFormat=None, multiLine=None, allowUnquotedControlChars=None, lineSep=None, locale=None, dropFieldIfAllNull=None, encoding=None, pathGlobFilter=None, recursiveFileLookup=None, allowNonNumericNumbers=None, useUnsafeRow=None))]
+    #[pyo3(signature = (path, schema=None, primitivesAsString=None, prefersDecimal=None, allowComments=None, allowUnquotedFieldNames=None, allowSingleQuotes=None, allowNumericLeadingZero=None, allowBackslashEscapingAnyCharacter=None, mode=None, columnNameOfCorruptRecord=None, dateFormat=None, timestampFormat=None, multiLine=None, allowUnquotedControlChars=None, lineSep=None, locale=None, dropFieldIfAllNull=None, encoding=None, pathGlobFilter=None, recursiveFileLookup=None, allowNonNumericNumbers=None, useUnsafeRow=None, **unexpected), text_signature = "($self, path, schema=None, primitivesAsString=None, prefersDecimal=None, allowComments=None, allowUnquotedFieldNames=None, allowSingleQuotes=None, allowNumericLeadingZero=None, allowBackslashEscapingAnyCharacter=None, mode=None, columnNameOfCorruptRecord=None, dateFormat=None, timestampFormat=None, multiLine=None, allowUnquotedControlChars=None, lineSep=None, locale=None, dropFieldIfAllNull=None, encoding=None, pathGlobFilter=None, recursiveFileLookup=None, allowNonNumericNumbers=None, useUnsafeRow=None)")]
     #[allow(non_snake_case, clippy::too_many_arguments)]
     fn json(
         &mut self,
@@ -529,7 +531,9 @@ impl PyDataStreamReader {
         recursiveFileLookup: Option<&Bound<'_, PyAny>>,
         allowNonNumericNumbers: Option<&Bound<'_, PyAny>>,
         useUnsafeRow: Option<&Bound<'_, PyAny>>,
+        unexpected: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyDataFrame> {
+        crate::options::check_unexpected_keywords("DataStreamReader.json", unexpected)?;
         let mut r = self.inner.clone();
         if let Some(v) = schema {
             r = apply_stream_schema(r, v)?;
@@ -568,7 +572,7 @@ impl PyDataStreamReader {
         Ok(PyDataFrame::new(r.json(&path)))
     }
 
-    #[pyo3(signature = (path, mergeSchema=None, pathGlobFilter=None, recursiveFileLookup=None, datetimeRebaseMode=None, int96RebaseMode=None))]
+    #[pyo3(signature = (path, mergeSchema=None, pathGlobFilter=None, recursiveFileLookup=None, datetimeRebaseMode=None, int96RebaseMode=None, **unexpected), text_signature = "($self, path, mergeSchema=None, pathGlobFilter=None, recursiveFileLookup=None, datetimeRebaseMode=None, int96RebaseMode=None)")]
     #[allow(non_snake_case, clippy::too_many_arguments)]
     fn parquet(
         &mut self,
@@ -578,7 +582,9 @@ impl PyDataStreamReader {
         recursiveFileLookup: Option<&Bound<'_, PyAny>>,
         datetimeRebaseMode: Option<&Bound<'_, PyAny>>,
         int96RebaseMode: Option<&Bound<'_, PyAny>>,
+        unexpected: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyDataFrame> {
+        crate::options::check_unexpected_keywords("DataStreamReader.parquet", unexpected)?;
         let mut r = self.inner.clone();
         r = set_stream_options_skip_none(
             r,
@@ -595,7 +601,7 @@ impl PyDataStreamReader {
         Ok(PyDataFrame::new(r.parquet(&path)))
     }
 
-    #[pyo3(signature = (path, schema=None, sep=None, encoding=None, quote=None, escape=None, comment=None, header=None, inferSchema=None, ignoreLeadingWhiteSpace=None, ignoreTrailingWhiteSpace=None, nullValue=None, nanValue=None, positiveInf=None, negativeInf=None, dateFormat=None, timestampFormat=None, maxColumns=None, maxCharsPerColumn=None, maxMalformedLogPerPartition=None, mode=None, columnNameOfCorruptRecord=None, multiLine=None, charToEscapeQuoteEscaping=None, enforceSchema=None, emptyValue=None, locale=None, lineSep=None, pathGlobFilter=None, recursiveFileLookup=None, unescapedQuoteHandling=None))]
+    #[pyo3(signature = (path, schema=None, sep=None, encoding=None, quote=None, escape=None, comment=None, header=None, inferSchema=None, ignoreLeadingWhiteSpace=None, ignoreTrailingWhiteSpace=None, nullValue=None, nanValue=None, positiveInf=None, negativeInf=None, dateFormat=None, timestampFormat=None, maxColumns=None, maxCharsPerColumn=None, maxMalformedLogPerPartition=None, mode=None, columnNameOfCorruptRecord=None, multiLine=None, charToEscapeQuoteEscaping=None, enforceSchema=None, emptyValue=None, locale=None, lineSep=None, pathGlobFilter=None, recursiveFileLookup=None, unescapedQuoteHandling=None, **unexpected), text_signature = "($self, path, schema=None, sep=None, encoding=None, quote=None, escape=None, comment=None, header=None, inferSchema=None, ignoreLeadingWhiteSpace=None, ignoreTrailingWhiteSpace=None, nullValue=None, nanValue=None, positiveInf=None, negativeInf=None, dateFormat=None, timestampFormat=None, maxColumns=None, maxCharsPerColumn=None, maxMalformedLogPerPartition=None, mode=None, columnNameOfCorruptRecord=None, multiLine=None, charToEscapeQuoteEscaping=None, enforceSchema=None, emptyValue=None, locale=None, lineSep=None, pathGlobFilter=None, recursiveFileLookup=None, unescapedQuoteHandling=None)")]
     #[allow(non_snake_case, clippy::too_many_arguments)]
     fn csv(
         &mut self,
@@ -630,7 +636,9 @@ impl PyDataStreamReader {
         pathGlobFilter: Option<&Bound<'_, PyAny>>,
         recursiveFileLookup: Option<&Bound<'_, PyAny>>,
         unescapedQuoteHandling: Option<&Bound<'_, PyAny>>,
+        unexpected: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyDataFrame> {
+        crate::options::check_unexpected_keywords("DataStreamReader.csv", unexpected)?;
         let mut r = self.inner.clone();
         if let Some(v) = schema {
             r = apply_stream_schema(r, v)?;
@@ -674,7 +682,7 @@ impl PyDataStreamReader {
         Ok(PyDataFrame::new(r.csv(&path)))
     }
 
-    #[pyo3(signature = (path, mergeSchema=None, pathGlobFilter=None, recursiveFileLookup=None))]
+    #[pyo3(signature = (path, mergeSchema=None, pathGlobFilter=None, recursiveFileLookup=None, **unexpected), text_signature = "($self, path, mergeSchema=None, pathGlobFilter=None, recursiveFileLookup=None)")]
     #[allow(non_snake_case)]
     fn orc(
         &mut self,
@@ -682,7 +690,9 @@ impl PyDataStreamReader {
         mergeSchema: Option<&Bound<'_, PyAny>>,
         pathGlobFilter: Option<&Bound<'_, PyAny>>,
         recursiveFileLookup: Option<&Bound<'_, PyAny>>,
+        unexpected: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyDataFrame> {
+        crate::options::check_unexpected_keywords("DataStreamReader.orc", unexpected)?;
         let mut r = self.inner.clone();
         r = set_stream_options_skip_none(
             r,
@@ -700,10 +710,10 @@ impl PyDataStreamReader {
     /// As PySpark's `wholetext=False`, an omitted `wholetext` sets `False`, also over an earlier
     /// `wholetext` option.
     #[pyo3(
-        signature = (path, wholetext=DefaultedOption::Omitted, lineSep=None, pathGlobFilter=None, recursiveFileLookup=None),
+        signature = (path, wholetext=DefaultedOption::Omitted, lineSep=None, pathGlobFilter=None, recursiveFileLookup=None, **unexpected),
         text_signature = "($self, path, wholetext=False, lineSep=None, pathGlobFilter=None, recursiveFileLookup=None)"
     )]
-    #[allow(non_snake_case)]
+    #[allow(non_snake_case, clippy::too_many_arguments)]
     fn text(
         &mut self,
         py: Python<'_>,
@@ -712,7 +722,9 @@ impl PyDataStreamReader {
         lineSep: Option<&Bound<'_, PyAny>>,
         pathGlobFilter: Option<&Bound<'_, PyAny>>,
         recursiveFileLookup: Option<&Bound<'_, PyAny>>,
+        unexpected: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyDataFrame> {
+        crate::options::check_unexpected_keywords("DataStreamReader.text", unexpected)?;
         let wholetext = wholetext.or_bool(py, false);
         let mut r = self.inner.clone();
         r = set_stream_options_skip_none(
