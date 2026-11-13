@@ -270,8 +270,11 @@ Their fit, transform and evaluate take a DataFrame or a pandas DataFrame, as PyS
 on the server, where PySpark's compute on a pandas DataFrame locally: a pandas DataFrame is sent
 through `createDataFrame` of the active session as an Arrow table of its columns, whose NaN elements
 of arrays and NaN values of floats stay NaN, as PySpark's local computation keeps them (pandas'
-conversion would make them nulls); the other columns are converted as pandas converts them. The
-transform of a LogisticRegression model is a shallow copy of it (`copy(deep=False)`) with the output
+conversion would make them nulls); the other columns are converted as pandas converts them. A
+column of `pyspark.ml.linalg` vectors (with or without None), as `toPandas()` returns a vector
+column, is sent as the arrays of their `toArray()`, which PySpark's local transform stacks (a
+SparseVector is densified). A frame with a column that Arrow cannot take is sent through
+`createDataFrame` as it is, which raises its error. The transform of a LogisticRegression model is a shallow copy of it (`copy(deep=False)`) with the output
 columns appended, of its index, as PySpark's makes it, of PySpark's dtypes and cells (an `int64`
 prediction, ndarrays of the probabilities and of the scaled values). The transform of an empty
 pandas DataFrame is computed without the server, which cannot infer the schema of no rows: a

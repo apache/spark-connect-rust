@@ -20,6 +20,7 @@ import gc
 import os
 
 import pytest
+from _native_classes import native_class
 from pyspark.ml.connect.functions import array_to_vector
 from pyspark.ml.linalg import Vectors
 from pyspark.sql import SparkSession
@@ -39,11 +40,7 @@ def session():
 
 
 def _estimator():
-    try:
-        from pyspark.ml.connect.clustering import BisectingKMeans
-    except ImportError:
-        from pyspark.ml.clustering import BisectingKMeans
-    return BisectingKMeans
+    return native_class("pyspark.ml.connect.clustering", "BisectingKMeans", "pyspark.ml.clustering")
 
 
 def _vectors(session, sql, name="features"):

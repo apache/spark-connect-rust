@@ -806,6 +806,33 @@ def test_ml_connect_estimators_fit_and_transform_the_pandas_frames_of_pyspark(se
         KMeans(k=2, seed=1).fit(pdf).transform(pdf.assign(prediction=0))
 
 
+def test_ml_connect_pandas_frames_of_vectors_fit_and_transform_as_their_arrays(session):
+    # A vector column of toPandas has pyspark.ml.linalg vectors, which PySpark's LogisticRegression
+    # transform stacks into the arrays that it computes on, a SparseVector densified. Its model,
+    # and the native estimators, which take arrays, fit and transform them as those arrays, and
+    # the transform keeps the vectors of the frame.
+    import numpy as np
+    import pandas as pd
+    from pyspark.ml.connect.classification import LogisticRegression
+    from pyspark.ml.connect.regression import IsotonicRegression, LinearRegression
+    from pyspark.ml.linalg import Vectors
+
+    cells = [Vectors.dense([1.0, 2.0]), Vectors.sparse(2, [0], [2.0]), Vectors.dense([-3.0, -2.0])]
+    vectors = pd.DataFrame({"features": cells, "label": [1, 1, 0]})
+    arrays = vectors.assign(features=[cell.toArray() for cell in cells])
+
+    model = LogisticRegression(maxIter=20).fit(session.createDataFrame(arrays))
+    transformed, expected = model.transform(vectors), model.transform(arrays)
+    assert transformed["features"].tolist() == cells
+    assert transformed["prediction"].tolist() == expected["prediction"].tolist()
+    assert np.allclose(np.stack(transformed["probability"]), np.stack(expected["probability"]))
+
+    for estimator in (LinearRegression, IsotonicRegression):
+        predicted = estimator().fit(vectors).transform(vectors)
+        expected = estimator().fit(arrays).transform(arrays)
+        assert predicted["prediction"].tolist() == pytest.approx(expected["prediction"].tolist())
+
+
 def test_ml_connect_scaler_fit_with_its_input_as_output_as_pyspark(session):
     # As PySpark's scaler fit, which reads only its inputCol: a scaler whose outputCol is its
     # inputCol fits, and its model keeps the outputCol, so that its transform raises PySpark's

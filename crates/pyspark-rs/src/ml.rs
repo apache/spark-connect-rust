@@ -343,20 +343,35 @@ fn dataset_of<'py>(
 /// columns are sent as Arrow arrays, built without pandas' conversion of NaN to null (which the
 /// non-nullable element type of an array rejects), so that a NaN element or value stays NaN, as
 /// PySpark computes on it locally. A column that Arrow takes only with that conversion, such as the
-/// strings with a NaN, is taken as pandas takes it. Its column names are the `str` of the labels
-/// of `pdf`, as createDataFrame names them (a label that is not a string, such as 0, is a name).
+/// strings with a NaN, is taken as pandas takes it. A column of `pyspark.ml.linalg` vectors, as
+/// `toPandas` returns a vector column, is sent as their arrays ([`vector_arrays`]). A frame with a
+/// column that Arrow cannot take at all is sent through createDataFrame as it is, which raises its
+/// own error for that column. Its column names are the `str` of the labels of `pdf`, as
+/// createDataFrame names them (a label that is not a string, such as 0, is a name).
 fn active_dataframe(pdf: &Bound<'_, PyAny>) -> PyResult<DataFrame> {
     let py = pdf.py();
     let pa = py.import("pyarrow")?;
     let kwargs = PyDict::new(py);
     kwargs.set_item("from_pandas", false)?;
+    let create = |data: &Bound<'_, PyAny>| -> PyResult<DataFrame> {
+        let df = py
+            .import("pyspark.sql")?
+            .getattr("SparkSession")?
+            .call_method0("active")?
+            .call_method1("createDataFrame", (data,))?;
+        Ok(df.extract::<PyRef<'_, PyDataFrame>>()?.dataframe.clone())
+    };
     let arrays = PyList::empty(py);
     let names = PyList::empty(py);
     for item in pdf.call_method0("items")?.try_iter()? {
         let (name, column): (Bound<'_, PyAny>, Bound<'_, PyAny>) = item?.extract()?;
+        let column = vector_arrays(&column)?.unwrap_or(column);
         let array = match pa.call_method("array", (&column,), Some(&kwargs)) {
             Ok(array) => array,
-            Err(_) => pa.call_method1("array", (column,))?,
+            Err(_) => match pa.call_method1("array", (&column,)) {
+                Ok(array) => array,
+                Err(_) => return create(pdf),
+            },
         };
         arrays.append(array)?;
         names.append(name.str()?)?;
@@ -364,12 +379,38 @@ fn active_dataframe(pdf: &Bound<'_, PyAny>) -> PyResult<DataFrame> {
     let table = pa
         .getattr("Table")?
         .call_method1("from_arrays", (arrays, names))?;
-    let df = py
-        .import("pyspark.sql")?
-        .getattr("SparkSession")?
-        .call_method0("active")?
-        .call_method1("createDataFrame", (table,))?;
-    Ok(df.extract::<PyRef<'_, PyDataFrame>>()?.dataframe.clone())
+    create(&table)
+}
+
+/// The cells of the pandas column `column` as the arrays of their `toArray()`, when each one is a
+/// `pyspark.ml.linalg` vector or None, and one at least is a vector. That is the column of vectors
+/// that `toPandas` returns, which PySpark's local transform stacks as these arrays (a SparseVector is
+/// densified). None for any other column, which is sent as it is.
+fn vector_arrays<'py>(column: &Bound<'py, PyAny>) -> PyResult<Option<Bound<'py, PyAny>>> {
+    let py = column.py();
+    if column
+        .getattr("dtype")?
+        .getattr("kind")?
+        .extract::<String>()?
+        != "O"
+    {
+        return Ok(None);
+    }
+    let vector = py.import("pyspark.ml.linalg")?.getattr("Vector")?;
+    let cells = PyList::empty(py);
+    let mut any_vector = false;
+    for cell in column.try_iter()? {
+        let cell = cell?;
+        if cell.is_none() {
+            cells.append(cell)?;
+        } else if cell.is_instance(&vector)? {
+            any_vector = true;
+            cells.append(cell.call_method0("toArray")?)?;
+        } else {
+            return Ok(None);
+        }
+    }
+    Ok(any_vector.then(|| cells.into_any()))
 }
 
 /// The columns that the fit of a class of PySpark's `pyspark.ml.connect` reads, as the params

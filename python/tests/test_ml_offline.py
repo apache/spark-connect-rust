@@ -723,6 +723,48 @@ def test_ml_connect_pandas_frames_send_their_nan_as_pyspark(ml_mock):
     assert math.isnan(first[0]) and first[1] == 1.0 and second == [2.0, 4.0]
 
 
+def test_ml_connect_pandas_frames_send_their_vectors_as_arrays_as_pyspark(ml_mock):
+    # As PySpark's local transform, which stacks the cells of its input column: a column of
+    # pyspark.ml.linalg vectors (or None), as toPandas returns a vector column, is sent as the arrays
+    # of the vectors, a SparseVector densified, and its NaN kept. A column of a vector and another
+    # object is sent through createDataFrame as it is, which raises its own error for that frame.
+    import math
+
+    import pandas as pd
+    import pyarrow as pa
+    import pyspark.ml.connect as connect
+    from pyspark.ml.linalg import Vectors
+
+    spark, service = ml_mock
+    pdf = pd.DataFrame(
+        {
+            "x": [Vectors.dense([np.nan, 1.0]), Vectors.sparse(2, [1], [4.0]), None],
+            "y": [1.5, 2.5, 3.5],
+        }
+    )
+    models = []  # Kept alive, so that no model is released during the checks.
+    sent = len(service.execute_requests)
+    service.execute_payload = _operator_info("model-1")
+    models.append(connect.KMeans().fit(pdf))
+    fit = _commands_but_deletes(service, sent)[0].ml_command.fit
+    table = pa.ipc.open_stream(_local_data(fit.dataset)).read_all()
+    assert table.column_names == ["x", "y"]
+    sent_type = table.schema.field("x").type
+    assert pa.types.is_list(sent_type) and sent_type.value_type == pa.float64()
+    first, second, third = table.column("x").to_pylist()
+    assert math.isnan(first[0]) and first[1] == 1.0
+    assert second == [0.0, 4.0] and third is None
+
+    mixed = pd.DataFrame({"x": [Vectors.dense([1.0]), "a"], "y": [1.0, 2.0]})
+    with pytest.raises(Exception) as expected:
+        spark.createDataFrame(mixed)
+    sent = len(service.execute_requests)
+    with pytest.raises(type(expected.value)) as error:
+        connect.KMeans().fit(mixed)
+    assert str(error.value) == str(expected.value)
+    assert _commands_but_deletes(service, sent) == []
+
+
 def test_ml_connect_pandas_frames_name_and_read_their_columns_as_pyspark(ml_mock):
     # As PySpark's evaluators, which take a pandas DataFrame and read only their input columns of
     # it (aggregate_dataframe selects them: dataframe[columns]): the columns of the frame are named
