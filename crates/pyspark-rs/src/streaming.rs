@@ -204,25 +204,15 @@ fn load_path(path: &Bound<'_, PyAny>) -> PyResult<String> {
     ))
 }
 
-/// Coerce a `partitionBy` argument (a single column name or a list of names) to a
-/// column-name vector, mirroring PySpark's `str | list[str]` acceptance.
-fn extract_partition_cols(v: &Bound<'_, PyAny>) -> PyResult<Vec<String>> {
-    if let Ok(s) = v.extract::<String>() {
-        return Ok(vec![s]);
-    }
-    v.extract::<Vec<String>>()
-}
-
-/// The column names of `partitionBy(*cols)` and `clusterBy(*cols)`, as PySpark's take them:
-/// the names, or a list or tuple of them alone.
-fn column_names(cols: &Bound<'_, PyTuple>) -> PyResult<Vec<String>> {
-    if cols.len() == 1 {
-        let only = cols.get_item(0)?;
-        if only.is_instance_of::<pyo3::types::PyList>() || only.is_instance_of::<PyTuple>() {
-            return only.extract();
-        }
-    }
-    cols.extract()
+/// The column names of a stream writer's `partitionBy` or `clusterBy`, which PySpark clears and then
+/// extends into its protobuf string field at the call, each one converted as [`crate::str_argument`]
+/// does. A list or tuple alone stands for its items. The extension is atomic, so a column that does
+/// not convert leaves none, and its error is raised.
+fn stream_column_names(cols: &[Bound<'_, PyAny>]) -> PyResult<Vec<String>> {
+    crate::readwriter::writer_column_items(cols)?
+        .iter()
+        .map(crate::str_argument)
+        .collect()
 }
 
 /// The name of a query, as PySpark's `queryName` checks it: a non-empty str, else
@@ -259,6 +249,25 @@ pub struct PyDataStreamReader {
     /// The options of the reader, which a shallow copy of it shares, as PySpark's `_options` dict
     /// is shared by the copies of a reader. The core reader holds none of them (see `state`).
     options: Arc<WriterState<HashMap<String, String>>>,
+    /// The format of `format` when it is not a str, which PySpark keeps as it is and whose
+    /// `DataSource` asserts at `load`, after the path ([`stream_reader_format`]).
+    unsent_format: Option<Py<PyAny>>,
+}
+
+/// The stream reader with the format `source` of PySpark's `format`, and the unsent format that it
+/// keeps: None unsets the format, a str sets it, and any other object is kept for `load`, as the
+/// batch reader keeps it.
+fn stream_reader_format(
+    reader: DataStreamReader,
+    source: Option<&Bound<'_, PyAny>>,
+) -> (DataStreamReader, Option<Py<PyAny>>) {
+    match source {
+        None => (reader.clear_format(), None),
+        Some(source) => match source.extract::<String>() {
+            Ok(text) => (reader.format(&text), None),
+            Err(_) => (reader.clear_format(), Some(source.clone().unbind())),
+        },
+    }
 }
 
 impl PyDataStreamReader {
@@ -267,6 +276,7 @@ impl PyDataStreamReader {
         PyDataStreamReader {
             inner: without_options(reader, &options),
             options: Arc::new(WriterState::new(options)),
+            unsent_format: None,
         }
     }
 
@@ -301,6 +311,7 @@ impl PyDataStreamReader {
             ));
         }
         self.set_state(reader.clone().format(format));
+        self.unsent_format = None;
         load_path(path)
     }
 }
@@ -308,18 +319,22 @@ impl PyDataStreamReader {
 #[pymethods]
 impl PyDataStreamReader {
     /// The shallow copy of a stream reader, as PySpark's `copy.copy`: the copy shares the
-    /// options of this reader.
-    fn __copy__(&self) -> PyDataStreamReader {
+    /// options of this reader, and has its own format, which is kept as it is.
+    fn __copy__(&self, py: Python<'_>) -> PyDataStreamReader {
         PyDataStreamReader {
             inner: self.state(),
             options: Arc::clone(&self.options),
+            unsent_format: self
+                .unsent_format
+                .as_ref()
+                .map(|format| format.clone_ref(py)),
         }
     }
 
     /// The reduce of a stream reader, as PySpark's pickle of its session and its state, which
     /// `_of_state` gives back.
     fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
-        use crate::reduce::{of_state_reduce, str_dict};
+        use crate::reduce::{of_state_reduce, optional_object, str_dict};
 
         let session = crate::session::session_object(py, &self.inner.spark_session())?;
         let args = PyTuple::new(
@@ -330,13 +345,14 @@ impl PyDataStreamReader {
                 self.inner.get_schema().into_pyobject(py)?.into_any(),
                 str_dict(py, &self.options.get())?.into_any(),
                 self.inner.get_source_name().into_pyobject(py)?.into_any(),
+                optional_object(py, self.unsent_format.as_ref()),
             ],
         )?;
         of_state_reduce::<PyDataStreamReader>(py, args)
     }
 
     /// A stream reader of its state, as `__reduce__` gives it: of the session `session`, the
-    /// format, the schema, the options and the source name.
+    /// format, the schema, the options, the source name and the format that is kept (`unsent`).
     #[staticmethod]
     fn _of_state(
         py: Python<'_>,
@@ -345,6 +361,7 @@ impl PyDataStreamReader {
         schema: String,
         options: HashMap<String, String>,
         source_name: Option<String>,
+        unsent: Option<Py<PyAny>>,
     ) -> PyResult<PyDataStreamReader> {
         let mut reader = session.borrow(py).session.read_stream();
         if let Some(format) = format {
@@ -357,7 +374,10 @@ impl PyDataStreamReader {
         if let Some(source_name) = source_name {
             reader = reader.name(&source_name);
         }
-        Ok(PyDataStreamReader::new(reader))
+        Ok(PyDataStreamReader {
+            unsent_format: unsent,
+            ..PyDataStreamReader::new(reader)
+        })
     }
 
     /// Set the schema, if any, and the options of `options` that are not None, through its own
@@ -375,13 +395,11 @@ impl PyDataStreamReader {
     /// default source.
     fn format<'py>(
         mut slf: PyRefMut<'py, Self>,
-        source: Option<&str>,
+        source: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyRefMut<'py, Self>> {
-        let state = match source {
-            Some(source) => slf.state().format(source),
-            None => slf.state().clear_format(),
-        };
-        slf.set_state(state);
+        let (reader, unsent) = stream_reader_format(slf.state(), source);
+        slf.set_state(reader);
+        slf.unsent_format = unsent;
         Ok(slf)
     }
 
@@ -431,6 +449,17 @@ impl PyDataStreamReader {
         Ok(slf)
     }
 
+    fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
+        if let Some(format) = &self.unsent_format {
+            visit.call(format)?;
+        }
+        Ok(())
+    }
+
+    fn __clear__(&mut self) {
+        self.unsent_format = None;
+    }
+
     /// The configured source format (PySpark Connect's `DataStreamReader._format`).
     #[getter]
     fn _format(&self) -> Option<String> {
@@ -453,25 +482,34 @@ impl PyDataStreamReader {
     fn load(
         &mut self,
         path: Option<&Bound<'_, PyAny>>,
-        format: Option<&str>,
+        format: Option<&Bound<'_, PyAny>>,
         schema: Option<&Bound<'_, PyAny>>,
         options: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyDataFrame> {
+        // As PySpark's load, which sets the format, the schema and the options on the reader in
+        // turn, each one kept when a later one fails.
         crate::options::check_keyword_keys(options)?;
         let mut r = self.state();
         if let Some(fmt) = format {
-            r = r.format(fmt);
+            let (reader, unsent) = stream_reader_format(r, Some(fmt));
+            r = reader;
+            self.unsent_format = unsent;
         }
+        self.set_state(r.clone());
         if let Some(v) = schema {
             r = apply_stream_schema(r, v)?;
         }
+        self.set_state(r.clone());
         if options.is_some() {
             let opts = crate::options::kwargs_skip_none(options)?;
             r = r.options(opts);
         }
-        // PySpark's one-shot load sets format/schema/options on the reader itself.
+        // Then the path is checked, and the `DataSource` of PySpark asserts the format after that.
         self.set_state(r.clone());
         let path = path.map(load_path).transpose()?;
+        if self.unsent_format.is_some() {
+            return Err(pyo3::exceptions::PyAssertionError::new_err(()));
+        }
         Ok(PyDataFrame::new(r.load(path.as_deref())))
     }
 
@@ -941,39 +979,76 @@ impl PyDataStreamWriter {
         functions.push((kind.to_string(), function.clone().unbind()));
     }
 
+    /// The steps of PySpark's `_start_internal` on the writer `w`, in its order: the options, the output
+    /// mode, the partitioning columns, the format and the query name. Each step sets its part of the
+    /// writer in place, so a step that fails keeps the steps before it, and the writer is returned with
+    /// the error of that step. The clear of the columns precedes their extension, which leaves none
+    /// when it fails.
+    fn start_steps(
+        mut w: DataStreamWriter,
+        format: Option<&Bound<'_, PyAny>>,
+        output_mode: Option<&Bound<'_, PyAny>>,
+        partition_by: Option<&Bound<'_, PyAny>>,
+        query_name: Option<&Bound<'_, PyAny>>,
+        options: Option<&Bound<'_, PyDict>>,
+    ) -> (DataStreamWriter, PyResult<()>) {
+        if options.is_some() {
+            match crate::options::kwargs_skip_none(options) {
+                Ok(opts) => w = w.options(opts),
+                Err(error) => return (w, Err(error)),
+            }
+        }
+        if let Some(m) = output_mode {
+            match crate::str_argument(m) {
+                Ok(mode) => w = w.output_mode(&mode),
+                Err(error) => return (w, Err(error)),
+            }
+        }
+        if let Some(pb) = partition_by {
+            match stream_column_names(std::slice::from_ref(pb)) {
+                Ok(names) => w = w.partition_by(names),
+                Err(error) => return (w.partition_by(Vec::<String>::new()), Err(error)),
+            }
+        }
+        if let Some(fmt) = format {
+            match crate::str_argument(fmt) {
+                Ok(source) => w = w.format(&source),
+                Err(error) => return (w, Err(error)),
+            }
+        }
+        if let Some(qn) = query_name {
+            match query_name_of(qn) {
+                Ok(name) => w = w.query_name(&name),
+                Err(error) => return (w, Err(error)),
+            }
+        }
+        (w, Ok(()))
+    }
+
     /// Apply the one-shot writer options accepted by `start`/`toTable`
     /// (`format`, `outputMode`, `partitionBy`, `queryName`, `**options`) before
     /// terminating the stream. Mirrors the reference, where these are keyword args.
     fn apply_write_opts(
         &self,
-        format: Option<&str>,
-        output_mode: Option<&str>,
+        format: Option<&Bound<'_, PyAny>>,
+        output_mode: Option<&Bound<'_, PyAny>>,
         partition_by: Option<&Bound<'_, PyAny>>,
         query_name: Option<&Bound<'_, PyAny>>,
         options: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<DataStreamWriter> {
         crate::options::check_keyword_keys(options)?;
-        let mut w = self.inner.get();
-        if let Some(fmt) = format {
-            w = w.format(fmt);
-        }
-        if let Some(m) = output_mode {
-            w = w.output_mode(m);
-        }
-        if let Some(pb) = partition_by {
-            let cols = extract_partition_cols(pb)?;
-            let refs: Vec<&str> = cols.iter().map(|s| s.as_str()).collect();
-            w = w.partition_by(refs);
-        }
-        if let Some(qn) = query_name {
-            w = w.query_name(&query_name_of(qn)?);
-        }
-        if options.is_some() {
-            let opts = crate::options::kwargs_skip_none(options)?;
-            w = w.options(opts);
-        }
-        // PySpark's start/toTable set these on the writer itself before starting.
+        let (w, applied) = Self::start_steps(
+            self.inner.get(),
+            format,
+            output_mode,
+            partition_by,
+            query_name,
+            options,
+        );
+        // PySpark's start/toTable set these on the writer itself before starting, and keep each
+        // step before a failing one.
         self.inner.set(w.clone());
+        applied?;
         Ok(w)
     }
 }
@@ -1095,13 +1170,25 @@ impl PyDataStreamWriter {
         Ok(restored)
     }
 
-    fn outputMode<'py>(slf: &Bound<'py, Self>, outputMode: &str) -> PyResult<Bound<'py, Self>> {
-        slf.borrow().inner.update(|w| w.output_mode(outputMode));
+    /// The output mode, which PySpark sets in its protobuf string field at once, as
+    /// [`crate::str_argument`] converts it.
+    fn outputMode<'py>(
+        slf: &Bound<'py, Self>,
+        outputMode: &Bound<'_, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        let outputMode = crate::str_argument(outputMode)?;
+        slf.borrow().inner.update(|w| w.output_mode(&outputMode));
         Ok(slf.clone())
     }
 
-    fn format<'py>(slf: &Bound<'py, Self>, source: &str) -> PyResult<Bound<'py, Self>> {
-        slf.borrow().inner.update(|w| w.format(source));
+    /// The format, which PySpark sets in its protobuf string field at once, as
+    /// [`crate::str_argument`] converts it.
+    fn format<'py>(
+        slf: &Bound<'py, Self>,
+        source: &Bound<'_, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        let source = crate::str_argument(source)?;
+        slf.borrow().inner.update(|w| w.format(&source));
         Ok(slf.clone())
     }
 
@@ -1141,9 +1228,13 @@ impl PyDataStreamWriter {
         slf: &Bound<'py, Self>,
         cols: &Bound<'_, PyTuple>,
     ) -> PyResult<Bound<'py, Self>> {
-        let cols = column_names(cols)?;
-        let col_refs: Vec<&str> = cols.iter().map(|s| s.as_str()).collect();
-        slf.borrow().inner.update(|w| w.partition_by(col_refs));
+        let items: Vec<Bound<'_, PyAny>> = cols.iter().collect();
+        let writer = slf.borrow();
+        let names = stream_column_names(&items);
+        writer
+            .inner
+            .update(|w| w.partition_by(names.as_deref().unwrap_or_default()));
+        names?;
         Ok(slf.clone())
     }
 
@@ -1153,9 +1244,13 @@ impl PyDataStreamWriter {
         slf: &Bound<'py, Self>,
         cols: &Bound<'_, PyTuple>,
     ) -> PyResult<Bound<'py, Self>> {
-        let cols = column_names(cols)?;
-        let col_refs: Vec<&str> = cols.iter().map(|s| s.as_str()).collect();
-        slf.borrow().inner.update(|w| w.cluster_by(col_refs));
+        let items: Vec<Bound<'_, PyAny>> = cols.iter().collect();
+        let writer = slf.borrow();
+        let names = stream_column_names(&items);
+        writer
+            .inner
+            .update(|w| w.cluster_by(names.as_deref().unwrap_or_default()));
+        names?;
         Ok(slf.clone())
     }
 
@@ -1256,8 +1351,8 @@ impl PyDataStreamWriter {
         &self,
         py: Python<'_>,
         path: Option<&Bound<'_, PyAny>>,
-        format: Option<&str>,
-        outputMode: Option<&str>,
+        format: Option<&Bound<'_, PyAny>>,
+        outputMode: Option<&Bound<'_, PyAny>>,
         partitionBy: Option<&Bound<'_, PyAny>>,
         queryName: Option<&Bound<'_, PyAny>>,
         options: Option<&Bound<'_, PyDict>>,
@@ -1284,8 +1379,8 @@ impl PyDataStreamWriter {
         &self,
         py: Python<'_>,
         tableName: &Bound<'_, PyAny>,
-        format: Option<&str>,
-        outputMode: Option<&str>,
+        format: Option<&Bound<'_, PyAny>>,
+        outputMode: Option<&Bound<'_, PyAny>>,
         partitionBy: Option<&Bound<'_, PyAny>>,
         queryName: Option<&Bound<'_, PyAny>>,
         options: Option<&Bound<'_, PyDict>>,

@@ -16,20 +16,6 @@ use crate::stat_arguments::proto_int;
 use crate::streaming::{proto_bool, ProtoBool, PyDataStreamWriter};
 use crate::types::PyDataType;
 
-/// Flatten `*cols` args that are each a str or a list of str (pyspark
-/// partitionBy/bucketBy/sortBy accept both forms).
-fn flatten_str_cols(cols: Vec<Bound<'_, PyAny>>) -> PyResult<Vec<String>> {
-    let mut out = Vec::new();
-    for c in cols {
-        if let Ok(one) = c.extract::<String>() {
-            out.push(one);
-        } else {
-            out.extend(c.extract::<Vec<String>>()?);
-        }
-    }
-    Ok(out)
-}
-
 /// Python wrapper for a Spark DataFrame.
 #[pyclass(
     name = "DataFrame",
@@ -2865,6 +2851,8 @@ impl PyDataFrame {
             inner: std::sync::Arc::new(WriterState::new(slf.borrow().dataframe.write_to(&name))),
             unsent_table,
             frame: slf.clone().unbind(),
+            unsent_provider: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            unsent_clustering: std::sync::Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -3817,6 +3805,25 @@ pub struct PyDataFrameWriter {
     /// refuses, which PySpark keeps and fails each write with, as its `WriteOperation.command`
     /// sets it in the proto; the core writer then has no bucketing.
     refused_bucket_count: std::sync::Arc<std::sync::Mutex<Option<Py<PyAny>>>>,
+    /// The format, the partitioning columns and the save mode that PySpark keeps as they are,
+    /// and whose `WriteOperation.command` converts, or resolves, at each write ([`UnsentArgs`]).
+    unsent: std::sync::Arc<std::sync::Mutex<UnsentArgs>>,
+}
+
+/// The arguments of a writer that PySpark keeps as they are, and that its `WriteOperation.command`
+/// converts at the write, which fails with the first one that does not convert. Each one is
+/// replaced by the next call that sets the same argument, as PySpark's attribute is.
+#[derive(Default)]
+pub(crate) struct UnsentArgs {
+    /// The format, when it is not a str of UTF-8 (`format`, and the `format` of a write).
+    format: Option<Py<PyAny>>,
+    /// The first partitioning column that is not a str of UTF-8.
+    partition: Option<Py<PyAny>>,
+    /// The first clustering column that is not a str of UTF-8, which PySpark's command extends
+    /// after the partitioning columns.
+    clustering: Option<Py<PyAny>>,
+    /// The save mode, when it is not a str.
+    mode: Option<Py<PyAny>>,
 }
 
 impl PyDataFrameWriter {
@@ -3827,7 +3834,126 @@ impl PyDataFrameWriter {
         PyDataFrameWriter {
             inner: std::sync::Arc::new(WriterState::new(writer)),
             refused_bucket_count: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            unsent: std::sync::Arc::new(std::sync::Mutex::new(UnsentArgs::default())),
             frame,
+        }
+    }
+
+    fn unsent(&self) -> std::sync::MutexGuard<'_, UnsentArgs> {
+        self.unsent
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The writer `w` with the format `source` of PySpark's `format`, which sets it at once when it
+    /// is a str of UTF-8 (bytes too), and else keeps the object for the write. None unsets it.
+    fn with_format(
+        &self,
+        w: spark_connect::readwriter::DataFrameWriter,
+        source: Option<&Bound<'_, PyAny>>,
+    ) -> spark_connect::readwriter::DataFrameWriter {
+        let mut unsent = self.unsent();
+        match source.map(crate::str_argument) {
+            Some(Ok(text)) => {
+                unsent.format = None;
+                w.format(&text)
+            }
+            Some(Err(_)) => {
+                unsent.format = source.map(|source| source.clone().unbind());
+                w.clear_format()
+            }
+            None => {
+                unsent.format = None;
+                w.clear_format()
+            }
+        }
+    }
+
+    /// The writer `w` of a format method of PySpark, which sets the format `format` at once, over
+    /// a format that was kept.
+    fn with_fixed_format(
+        &self,
+        w: spark_connect::readwriter::DataFrameWriter,
+        format: &str,
+    ) -> spark_connect::readwriter::DataFrameWriter {
+        self.unsent().format = None;
+        w.format(format)
+    }
+
+    /// The writer `w` with the save mode `mode` of PySpark's `mode`: a str sets it at once, and any
+    /// other object is kept for the write, which resolves it ([`crate::readwriter::unsent_save_mode`]).
+    /// None leaves the mode as it is.
+    fn with_mode(
+        &self,
+        w: spark_connect::readwriter::DataFrameWriter,
+        mode: Option<&Bound<'_, PyAny>>,
+    ) -> spark_connect::readwriter::DataFrameWriter {
+        let Some(mode) = mode else {
+            return w;
+        };
+        match mode.extract::<String>() {
+            Ok(text) => {
+                self.unsent().mode = None;
+                w.mode(&text)
+            }
+            Err(_) => {
+                self.unsent().mode = Some(mode.clone().unbind());
+                w
+            }
+        }
+    }
+
+    /// The writer `w` with the partitioning columns `cols` of PySpark's `partitionBy`, which replace
+    /// those of an earlier call. A column that is not a str of UTF-8 is kept for the write.
+    fn with_partition_by(
+        &self,
+        w: spark_connect::readwriter::DataFrameWriter,
+        cols: &[Bound<'_, PyAny>],
+    ) -> PyResult<spark_connect::readwriter::DataFrameWriter> {
+        let (names, unsent) = crate::readwriter::writer_partition_columns(cols)?;
+        self.unsent().partition = unsent;
+        Ok(w.partition_by(names))
+    }
+
+    /// Fail a write whose format or partitioning columns were kept, as PySpark's
+    /// `WriteOperation.command` does after its input plan and before its bucketing. Each one fails
+    /// again at each write, as it does not convert.
+    fn check_unsent_source_and_partition(
+        &self,
+        py: Python<'_>,
+        w: spark_connect::readwriter::DataFrameWriter,
+    ) -> PyResult<spark_connect::readwriter::DataFrameWriter> {
+        let (format, partition, clustering) = {
+            let unsent = self.unsent();
+            (
+                unsent.format.as_ref().map(|f| f.clone_ref(py)),
+                unsent.partition.as_ref().map(|p| p.clone_ref(py)),
+                unsent.clustering.as_ref().map(|c| c.clone_ref(py)),
+            )
+        };
+        if let Some(format) = format {
+            crate::str_argument(format.bind(py))?;
+        }
+        if let Some(column) = partition {
+            crate::str_argument(column.bind(py))?;
+        }
+        if let Some(column) = clustering {
+            crate::str_argument(column.bind(py))?;
+        }
+        Ok(w)
+    }
+
+    /// The writer `w` with the kept save mode resolved, after its path, as PySpark's
+    /// `WriteOperation.command` does last ([`crate::readwriter::unsent_save_mode`]).
+    fn check_unsent_mode(
+        &self,
+        py: Python<'_>,
+        w: spark_connect::readwriter::DataFrameWriter,
+    ) -> PyResult<spark_connect::readwriter::DataFrameWriter> {
+        let mode = self.unsent().mode.as_ref().map(|m| m.clone_ref(py));
+        match mode {
+            Some(mode) => Ok(w.mode(&crate::readwriter::unsent_save_mode(mode.bind(py))?)),
+            None => Ok(w),
         }
     }
 
@@ -3854,36 +3980,33 @@ impl PyDataFrameWriter {
     }
 }
 
-/// Apply the shared `format` / `mode` / `partitionBy` / `**options` arguments that
-/// reference `DataFrameWriter.save` and `.saveAsTable` accept inline, mirroring
-/// `.format().mode().partitionBy().options()` chaining.
-fn apply_write_common(
-    mut w: spark_connect::readwriter::DataFrameWriter,
-    format: Option<&str>,
-    mode: Option<&str>,
-    partitionBy: Option<&Bound<'_, PyAny>>,
-    options: Option<&Bound<'_, PyDict>>,
-) -> PyResult<spark_connect::readwriter::DataFrameWriter> {
-    crate::options::check_keyword_keys(options)?;
-    if let Some(f) = format {
-        w = w.format(f);
+impl PyDataFrameWriter {
+    /// Apply the shared `format` / `mode` / `partitionBy` / `**options` arguments that reference
+    /// `DataFrameWriter.save` and `.saveAsTable` accept inline, mirroring
+    /// `.format().mode().partitionBy().options()` chaining. None of them fails here, as PySpark
+    /// sets each as it is and its command fails with it at the write.
+    fn apply_write_common(
+        &self,
+        mut w: spark_connect::readwriter::DataFrameWriter,
+        format: Option<&Bound<'_, PyAny>>,
+        mode: Option<&Bound<'_, PyAny>>,
+        partitionBy: Option<&Bound<'_, PyAny>>,
+        options: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<spark_connect::readwriter::DataFrameWriter> {
+        crate::options::check_keyword_keys(options)?;
+        if let Some(f) = format {
+            w = self.with_format(w, Some(f));
+        }
+        w = self.with_mode(w, mode);
+        if let Some(pb) = partitionBy {
+            w = self.with_partition_by(w, std::slice::from_ref(pb))?;
+        }
+        if options.is_some() {
+            let map = crate::options::kwargs_skip_none(options)?;
+            w = w.options(map);
+        }
+        Ok(w)
     }
-    if let Some(m) = mode {
-        w = w.mode(m);
-    }
-    if let Some(pb) = partitionBy {
-        let cols: Vec<String> = if let Ok(one) = pb.extract::<String>() {
-            vec![one]
-        } else {
-            pb.extract::<Vec<String>>()?
-        };
-        w = w.partition_by(cols);
-    }
-    if options.is_some() {
-        let map = crate::options::kwargs_skip_none(options)?;
-        w = w.options(map);
-    }
-    Ok(w)
 }
 
 #[pymethods]
@@ -3895,6 +4018,7 @@ impl PyDataFrameWriter {
         PyDataFrameWriter {
             inner: std::sync::Arc::clone(&self.inner),
             refused_bucket_count: std::sync::Arc::clone(&self.refused_bucket_count),
+            unsent: std::sync::Arc::clone(&self.unsent),
             frame: self.frame.clone_ref(py),
         }
     }
@@ -3913,6 +4037,16 @@ impl PyDataFrameWriter {
             .refused_bucket_count()
             .as_ref()
             .map(|n| n.clone_ref(py));
+        let (kept_format, kept_partition, kept_clustering, kept_mode) = {
+            let unsent = self.unsent();
+            let kept = |object: &Option<Py<PyAny>>| object.as_ref().map(|o| o.clone_ref(py));
+            (
+                kept(&unsent.format),
+                kept(&unsent.partition),
+                kept(&unsent.clustering),
+                kept(&unsent.mode),
+            )
+        };
         let args = PyTuple::new(
             py,
             [
@@ -3926,6 +4060,10 @@ impl PyDataFrameWriter {
                 PyList::new(py, writer.get_sort_cols())?.into_any(),
                 PyList::new(py, writer.get_cluster_cols())?.into_any(),
                 optional_object(py, refused.as_ref()),
+                optional_object(py, kept_format.as_ref()),
+                optional_object(py, kept_partition.as_ref()),
+                optional_object(py, kept_clustering.as_ref()),
+                optional_object(py, kept_mode.as_ref()),
             ],
         )?;
         of_state_reduce::<PyDataFrameWriter>(py, args)
@@ -3947,7 +4085,11 @@ impl PyDataFrameWriter {
             bucket_cols,
             sort_cols,
             cluster_cols,
-            refused
+            refused,
+            kept_format,
+            kept_partition,
+            kept_clustering,
+            kept_mode
         )
     )]
     fn _of_state(
@@ -3962,6 +4104,10 @@ impl PyDataFrameWriter {
         sort_cols: Vec<String>,
         cluster_cols: Vec<String>,
         refused: Option<Py<PyAny>>,
+        kept_format: Option<Py<PyAny>>,
+        kept_partition: Option<Py<PyAny>>,
+        kept_clustering: Option<Py<PyAny>>,
+        kept_mode: Option<Py<PyAny>>,
     ) -> PyResult<PyDataFrameWriter> {
         let mut writer = frame.borrow(py).dataframe.write();
         if let Some(format) = format {
@@ -3982,6 +4128,12 @@ impl PyDataFrameWriter {
         }
         let restored = PyDataFrameWriter::new(writer, frame);
         *restored.refused_bucket_count() = refused;
+        *restored.unsent() = UnsentArgs {
+            format: kept_format,
+            partition: kept_partition,
+            clustering: kept_clustering,
+            mode: kept_mode,
+        };
         Ok(restored)
     }
 
@@ -3997,20 +4149,23 @@ impl PyDataFrameWriter {
     }
 
     /// The save mode, as PySpark's: `None` keeps the default, "error".
-    fn mode<'py>(slf: &Bound<'py, Self>, saveMode: Option<&str>) -> PyResult<Bound<'py, Self>> {
-        if let Some(save_mode) = saveMode {
-            slf.borrow().inner.update(|w| w.mode(save_mode));
-        }
+    fn mode<'py>(
+        slf: &Bound<'py, Self>,
+        saveMode: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Bound<'py, Self>> {
+        let writer = slf.borrow();
+        writer.inner.update(|w| writer.with_mode(w, saveMode));
         Ok(slf.clone())
     }
 
     /// The format of the write. As PySpark's, None unsets it, so that the server writes its
     /// default source.
-    fn format<'py>(slf: &Bound<'py, Self>, source: Option<&str>) -> PyResult<Bound<'py, Self>> {
-        match source {
-            Some(source) => slf.borrow().inner.update(|w| w.format(source)),
-            None => slf.borrow().inner.update(|w| w.clear_format()),
-        }
+    fn format<'py>(
+        slf: &Bound<'py, Self>,
+        source: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Bound<'py, Self>> {
+        let writer = slf.borrow();
+        writer.inner.update(|w| writer.with_format(w, source));
         Ok(slf.clone())
     }
 
@@ -4048,8 +4203,10 @@ impl PyDataFrameWriter {
         slf: &Bound<'py, Self>,
         cols: Vec<Bound<'_, PyAny>>,
     ) -> PyResult<Bound<'py, Self>> {
-        let cols = flatten_str_cols(cols)?;
-        slf.borrow().inner.update(|w| w.partition_by(cols));
+        let writer = slf.borrow();
+        let (cols, unsent) = crate::readwriter::writer_partition_columns(&cols)?;
+        writer.unsent().partition = unsent;
+        writer.inner.update(|w| w.partition_by(cols));
         Ok(slf.clone())
     }
 
@@ -4103,18 +4260,18 @@ impl PyDataFrameWriter {
         slf: &Bound<'py, Self>,
         cols: Vec<Bound<'_, PyAny>>,
     ) -> PyResult<Bound<'py, Self>> {
-        let cols: Vec<String> = match cols.as_slice() {
-            [only] if only.is_instance_of::<PyList>() || only.is_instance_of::<PyTuple>() => {
-                only.extract()?
-            }
-            _ => cols.iter().map(|c| c.extract()).collect::<PyResult<_>>()?,
-        };
-        if cols.is_empty() {
+        // As PySpark's, which asserts the count after unpacking, and keeps the columns as they are:
+        // a column that does not convert fails each write, after the partitioning columns.
+        let items = crate::readwriter::writer_column_items(&cols)?;
+        if items.is_empty() {
             return Err(pyo3::exceptions::PyAssertionError::new_err(
                 "clusterBy needs one or more clustering columns.",
             ));
         }
-        slf.borrow().inner.update(|w| w.cluster_by(cols));
+        let (names, unsent) = crate::readwriter::writer_columns_kept(&items);
+        let writer = slf.borrow();
+        writer.unsent().clustering = unsent;
+        writer.inner.update(|w| w.cluster_by(names));
         Ok(slf.clone())
     }
 
@@ -4124,17 +4281,15 @@ impl PyDataFrameWriter {
     fn jdbc(
         &self,
         py: Python<'_>,
-        url: &str,
-        table: &str,
-        mode: Option<&str>,
+        url: &Bound<'_, PyAny>,
+        table: &Bound<'_, PyAny>,
+        mode: Option<&Bound<'_, PyAny>>,
         properties: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<()> {
         // Same order as PySpark: format, mode, properties, then url/dbtable (which
         // win over same-named properties), all kept on the writer, then save.
-        let mut w = self.inner.get().format("jdbc");
-        if let Some(m) = mode {
-            w = w.mode(m);
-        }
+        let mut w = self.with_fixed_format(self.inner.get(), "jdbc");
+        w = self.with_mode(w, mode);
         if let Some(props) = properties {
             // As PySpark's `options(**properties)`, whose unpacking raises for a key that is not
             // a str before any property is set, with the format and the mode kept on the writer.
@@ -4154,9 +4309,13 @@ impl PyDataFrameWriter {
                 }
             }
         }
-        w = w.option("url", url).option("dbtable", table);
+        // As PySpark's `options(url=url, dbtable=table)`, which skips a None.
+        w = set_option_skip_none(w, "url", Some(url))?;
+        w = set_option_skip_none(w, "dbtable", Some(table))?;
         self.inner.set(w.clone());
+        let w = self.check_unsent_source_and_partition(py, w)?;
         self.check_bucket_count(py)?;
+        let w = self.check_unsent_mode(py, w)?;
         interruptible(py, &w.spark_session(), || w.save(None).map_err(Box::new))
     }
 
@@ -4166,17 +4325,20 @@ impl PyDataFrameWriter {
         &self,
         py: Python<'_>,
         path: Option<&Bound<'_, PyAny>>,
-        format: Option<&str>,
-        mode: Option<&str>,
+        format: Option<&Bound<'_, PyAny>>,
+        mode: Option<&Bound<'_, PyAny>>,
         partitionBy: Option<&Bound<'_, PyAny>>,
         options: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<()> {
-        let w = apply_write_common(self.inner.get(), format, mode, partitionBy, options)?;
-        // PySpark sets the inline format/mode/partitionBy/options on the writer itself, before
-        // its command sets the bucket count and then the path.
+        let w = self.apply_write_common(self.inner.get(), format, mode, partitionBy, options)?;
+        // PySpark sets the inline format/mode/partitionBy/options on the writer itself, before its
+        // command sets the source and the partitioning columns, the bucket count, the path, and
+        // last the save mode.
         self.inner.set(w.clone());
+        let w = self.check_unsent_source_and_partition(py, w)?;
         self.check_bucket_count(py)?;
         let path = path.map(crate::readwriter::writer_path).transpose()?;
+        let w = self.check_unsent_mode(py, w)?;
         interruptible(py, &w.spark_session(), || {
             w.save(path.as_deref()).map_err(Box::new)
         })
@@ -4188,15 +4350,17 @@ impl PyDataFrameWriter {
         &self,
         py: Python<'_>,
         name: &Bound<'_, PyAny>,
-        format: Option<&str>,
-        mode: Option<&str>,
+        format: Option<&Bound<'_, PyAny>>,
+        mode: Option<&Bound<'_, PyAny>>,
         partitionBy: Option<&Bound<'_, PyAny>>,
         options: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<()> {
-        let w = apply_write_common(self.inner.get(), format, mode, partitionBy, options)?;
+        let w = self.apply_write_common(self.inner.get(), format, mode, partitionBy, options)?;
         self.inner.set(w.clone());
+        let w = self.check_unsent_source_and_partition(py, w)?;
         self.check_bucket_count(py)?;
         let name = crate::readwriter::writer_table_name(name)?;
+        let w = self.check_unsent_mode(py, w)?;
         interruptible(py, &w.spark_session(), || {
             match &name {
                 Some(name) => w.save_as_table(name),
@@ -4219,12 +4383,15 @@ impl PyDataFrameWriter {
         let mut w = self.inner.get();
         if let Some(ow) = overwrite {
             let ow = ow.is_truthy()?;
+            self.unsent().mode = None;
             w = w.mode(if ow { "overwrite" } else { "append" });
         }
         // PySpark sets the overwrite/append mode on the writer itself.
         self.inner.set(w.clone());
+        let w = self.check_unsent_source_and_partition(py, w)?;
         self.check_bucket_count(py)?;
         let tableName = crate::readwriter::writer_table_name(tableName)?;
+        let w = self.check_unsent_mode(py, w)?;
         interruptible(py, &w.spark_session(), || {
             match &tableName {
                 Some(name) => w.insert_into(name),
@@ -4249,22 +4416,17 @@ impl PyDataFrameWriter {
     ) -> PyResult<()> {
         crate::options::check_unexpected_keywords("DataFrameWriter.parquet", unexpected)?;
         let mut w = self.inner.get();
-        if let Some(m) = mode {
-            w = w.mode(&m.str()?.to_string());
-        }
+        w = self.with_mode(w, mode);
         if let Some(pb) = partitionBy {
-            let cols: Vec<String> = if let Ok(one) = pb.extract::<String>() {
-                vec![one]
-            } else {
-                pb.extract::<Vec<String>>()?
-            };
-            w = w.partition_by(cols);
+            w = self.with_partition_by(w, std::slice::from_ref(pb))?;
         }
         w = set_option_skip_none(w, "compression", compression)?;
         // PySpark sets the mode/options/format on the writer itself, then saves.
-        self.inner.set(w.clone().format("parquet"));
+        self.inner.set(self.with_fixed_format(w.clone(), "parquet"));
+        let w = self.check_unsent_source_and_partition(py, w)?;
         self.check_bucket_count(py)?;
         let path = crate::readwriter::writer_path(path)?;
+        let w = self.check_unsent_mode(py, w)?;
         interruptible(py, &w.spark_session(), || {
             w.parquet(&path).map_err(Box::new)
         })
@@ -4289,9 +4451,7 @@ impl PyDataFrameWriter {
     ) -> PyResult<()> {
         crate::options::check_unexpected_keywords("DataFrameWriter.json", unexpected)?;
         let mut w = self.inner.get();
-        if let Some(m) = mode {
-            w = w.mode(&m.str()?.to_string());
-        }
+        w = self.with_mode(w, mode);
         w = set_options_skip_none(
             w,
             &[
@@ -4304,9 +4464,11 @@ impl PyDataFrameWriter {
             ],
         )?;
         // PySpark sets the mode/options/format on the writer itself, then saves.
-        self.inner.set(w.clone().format("json"));
+        self.inner.set(self.with_fixed_format(w.clone(), "json"));
+        let w = self.check_unsent_source_and_partition(py, w)?;
         self.check_bucket_count(py)?;
         let path = crate::readwriter::writer_path(path)?;
+        let w = self.check_unsent_mode(py, w)?;
         interruptible(py, &w.spark_session(), || w.json(&path).map_err(Box::new))
     }
 
@@ -4339,9 +4501,7 @@ impl PyDataFrameWriter {
     ) -> PyResult<()> {
         crate::options::check_unexpected_keywords("DataFrameWriter.csv", unexpected)?;
         let mut w = self.inner.get();
-        if let Some(m) = mode {
-            w = w.mode(&m.str()?.to_string());
-        }
+        w = self.with_mode(w, mode);
         w = set_options_skip_none(
             w,
             &[
@@ -4364,9 +4524,11 @@ impl PyDataFrameWriter {
             ],
         )?;
         // PySpark sets the mode/options/format on the writer itself, then saves.
-        self.inner.set(w.clone().format("csv"));
+        self.inner.set(self.with_fixed_format(w.clone(), "csv"));
+        let w = self.check_unsent_source_and_partition(py, w)?;
         self.check_bucket_count(py)?;
         let path = crate::readwriter::writer_path(path)?;
+        let w = self.check_unsent_mode(py, w)?;
         interruptible(py, &w.spark_session(), || w.csv(&path).map_err(Box::new))
     }
 
@@ -4385,22 +4547,17 @@ impl PyDataFrameWriter {
     ) -> PyResult<()> {
         crate::options::check_unexpected_keywords("DataFrameWriter.orc", unexpected)?;
         let mut w = self.inner.get();
-        if let Some(m) = mode {
-            w = w.mode(&m.str()?.to_string());
-        }
+        w = self.with_mode(w, mode);
         if let Some(pb) = partitionBy {
-            let cols: Vec<String> = if let Ok(one) = pb.extract::<String>() {
-                vec![one]
-            } else {
-                pb.extract::<Vec<String>>()?
-            };
-            w = w.partition_by(cols);
+            w = self.with_partition_by(w, std::slice::from_ref(pb))?;
         }
         w = set_option_skip_none(w, "compression", compression)?;
         // PySpark sets the mode/options/format on the writer itself, then saves.
-        self.inner.set(w.clone().format("orc"));
+        self.inner.set(self.with_fixed_format(w.clone(), "orc"));
+        let w = self.check_unsent_source_and_partition(py, w)?;
         self.check_bucket_count(py)?;
         let path = crate::readwriter::writer_path(path)?;
+        let w = self.check_unsent_mode(py, w)?;
         interruptible(py, &w.spark_session(), || w.orc(&path).map_err(Box::new))
     }
 
@@ -4420,9 +4577,11 @@ impl PyDataFrameWriter {
         let mut w = self.inner.get();
         w = set_options_skip_none(w, &[("compression", compression), ("lineSep", lineSep)])?;
         // PySpark sets the mode/options/format on the writer itself, then saves.
-        self.inner.set(w.clone().format("text"));
+        self.inner.set(self.with_fixed_format(w.clone(), "text"));
+        let w = self.check_unsent_source_and_partition(py, w)?;
         self.check_bucket_count(py)?;
         let path = crate::readwriter::writer_path(path)?;
+        let w = self.check_unsent_mode(py, w)?;
         interruptible(py, &w.spark_session(), || w.text(&path).map_err(Box::new))
     }
 
@@ -4452,9 +4611,7 @@ impl PyDataFrameWriter {
         crate::options::check_unexpected_keywords("DataFrameWriter.xml", unexpected)?;
         let mut w = self.inner.get();
         w = set_option_skip_none(w, "rowTag", rowTag)?;
-        if let Some(m) = mode {
-            w = w.mode(&m.str()?.to_string());
-        }
+        w = self.with_mode(w, mode);
         w = set_options_skip_none(
             w,
             &[
@@ -4472,10 +4629,40 @@ impl PyDataFrameWriter {
             ],
         )?;
         // PySpark sets the mode/options/format on the writer itself, then saves.
-        self.inner.set(w.clone().format("xml"));
+        self.inner.set(self.with_fixed_format(w.clone(), "xml"));
+        let w = self.check_unsent_source_and_partition(py, w)?;
         self.check_bucket_count(py)?;
         let path = crate::readwriter::writer_path(path)?;
+        let w = self.check_unsent_mode(py, w)?;
         interruptible(py, &w.spark_session(), || w.xml(&path).map_err(Box::new))
+    }
+
+    fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
+        // The kept arguments, which Python's garbage collector sees, as `exclusive_relation_owners`
+        // reports a DataFrame's owners: only when this writer holds them alone, so that a copy that
+        // shares them does not count one reference twice. A lock held elsewhere is skipped.
+        if std::sync::Arc::strong_count(&self.unsent) != 1 {
+            return Ok(());
+        }
+        if let Ok(unsent) = self.unsent.try_lock() {
+            for object in [
+                &unsent.format,
+                &unsent.partition,
+                &unsent.clustering,
+                &unsent.mode,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                visit.call(object)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Drop this writer's reference to the kept arguments; a copy's are kept.
+    fn __clear__(&mut self) {
+        self.unsent = std::sync::Arc::new(std::sync::Mutex::new(UnsentArgs::default()));
     }
 }
 
@@ -4494,9 +4681,48 @@ pub struct PyDataFrameWriterV2 {
     /// The table of `writeTo` that its string field does not take, which Python's garbage
     /// collector sees ([`written_table`]).
     unsent_table: Option<Py<PyAny>>,
+    /// The provider of `using` when it is not a str of UTF-8, which each write fails with after
+    /// its table, as PySpark's command sets it there. A lock, as the state of the writer, since
+    /// the writer's methods run on several threads ([`WriterState`]).
+    unsent_provider: std::sync::Arc<std::sync::Mutex<Option<Py<PyAny>>>>,
+    /// The first clustering column of `clusterBy` that is not a str of UTF-8, which each write
+    /// fails with after its provider, as PySpark's command extends the clustering columns there.
+    unsent_clustering: std::sync::Arc<std::sync::Mutex<Option<Py<PyAny>>>>,
 }
 
-impl PyDataFrameWriterV2 {}
+impl PyDataFrameWriterV2 {
+    fn unsent_provider(&self) -> std::sync::MutexGuard<'_, Option<Py<PyAny>>> {
+        self.unsent_provider
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn unsent_clustering(&self) -> std::sync::MutexGuard<'_, Option<Py<PyAny>>> {
+        self.unsent_clustering
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The error of a write whose clustering column is not text, which PySpark's command extends
+    /// after the provider and the partitioning columns.
+    fn check_unsent_clustering(&self, py: Python<'_>) -> PyResult<()> {
+        let column = self.unsent_clustering().as_ref().map(|c| c.clone_ref(py));
+        match column {
+            Some(column) => crate::str_argument(column.bind(py)).map(drop),
+            None => Ok(()),
+        }
+    }
+
+    /// The error of a write whose provider is not text, which PySpark's command sets after the
+    /// table ([`check_written_table`]).
+    fn check_unsent_provider(&self, py: Python<'_>) -> PyResult<()> {
+        let provider = self.unsent_provider().as_ref().map(|p| p.clone_ref(py));
+        match provider {
+            Some(provider) => crate::str_argument(provider.bind(py)).map(drop),
+            None => Ok(()),
+        }
+    }
+}
 
 #[pymethods]
 impl PyDataFrameWriterV2 {
@@ -4506,6 +4732,8 @@ impl PyDataFrameWriterV2 {
         PyDataFrameWriterV2 {
             inner: std::sync::Arc::clone(&self.inner),
             unsent_table: self.unsent_table.as_ref().map(|table| table.clone_ref(py)),
+            unsent_provider: std::sync::Arc::clone(&self.unsent_provider),
+            unsent_clustering: std::sync::Arc::clone(&self.unsent_clustering),
             frame: self.frame.clone_ref(py),
         }
     }
@@ -4513,9 +4741,19 @@ impl PyDataFrameWriterV2 {
     /// The reduce of a V2 writer, as PySpark's pickle of its DataFrame and its state, which
     /// `_of_state` gives back.
     fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
-        use crate::reduce::{column_list, of_state_reduce, str_dict};
+        use crate::reduce::{column_list, of_state_reduce, optional_object, str_dict};
 
         let writer = self.inner.get();
+        let (kept_provider, kept_clustering) = {
+            let kept = |object: &std::sync::Mutex<Option<Py<PyAny>>>| {
+                object
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .as_ref()
+                    .map(|o| o.clone_ref(py))
+            };
+            (kept(&self.unsent_provider), kept(&self.unsent_clustering))
+        };
         let args = PyTuple::new(
             py,
             [
@@ -4526,6 +4764,9 @@ impl PyDataFrameWriterV2 {
                 str_dict(py, writer.get_table_properties())?.into_any(),
                 column_list(py, writer.get_partition_cols())?.into_any(),
                 PyList::new(py, writer.get_cluster_cols())?.into_any(),
+                optional_object(py, self.unsent_table.as_ref()),
+                optional_object(py, kept_provider.as_ref()),
+                optional_object(py, kept_clustering.as_ref()),
             ],
         )?;
         of_state_reduce::<PyDataFrameWriterV2>(py, args)
@@ -4543,6 +4784,9 @@ impl PyDataFrameWriterV2 {
         table_properties: std::collections::HashMap<String, String>,
         partition_cols: &Bound<'_, PyAny>,
         cluster_cols: Vec<String>,
+        unsent_table: Option<Py<PyAny>>,
+        kept_provider: Option<Py<PyAny>>,
+        kept_clustering: Option<Py<PyAny>>,
     ) -> PyResult<PyDataFrameWriterV2> {
         let mut writer = frame.borrow(py).dataframe.write_to(table);
         if let Some(provider) = provider {
@@ -4561,7 +4805,9 @@ impl PyDataFrameWriterV2 {
         }
         Ok(PyDataFrameWriterV2 {
             inner: std::sync::Arc::new(WriterState::new(writer)),
-            unsent_table: None,
+            unsent_table,
+            unsent_provider: std::sync::Arc::new(std::sync::Mutex::new(kept_provider)),
+            unsent_clustering: std::sync::Arc::new(std::sync::Mutex::new(kept_clustering)),
             frame,
         })
     }
@@ -4577,8 +4823,27 @@ impl PyDataFrameWriterV2 {
         crate::options::set_opts(slf.as_any(), schema.as_ref(), options.as_ref())
     }
 
-    fn using<'py>(slf: &Bound<'py, Self>, provider: &str) -> PyResult<Bound<'py, Self>> {
-        slf.borrow().inner.update(|w| w.using(provider));
+    /// Set the provider of the write, as PySpark's `using`: a str of UTF-8 (bytes too) at once, else
+    /// kept for each write to fail with. None unsets it.
+    fn using<'py>(
+        slf: &Bound<'py, Self>,
+        provider: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Bound<'py, Self>> {
+        let writer = slf.borrow();
+        match provider.map(crate::str_argument) {
+            Some(Ok(text)) => {
+                *writer.unsent_provider() = None;
+                writer.inner.update(|w| w.using(&text));
+            }
+            Some(Err(_)) => {
+                *writer.unsent_provider() = provider.map(|p| p.clone().unbind());
+                writer.inner.update(|w| w.clear_provider());
+            }
+            None => {
+                *writer.unsent_provider() = None;
+                writer.inner.update(|w| w.clear_provider());
+            }
+        }
         Ok(slf.clone())
     }
 
@@ -4646,20 +4911,27 @@ impl PyDataFrameWriterV2 {
         Ok(slf.clone())
     }
 
+    /// The clustering columns of `clusterBy(col, *cols)`, which PySpark keeps as `[col, *cols]`:
+    /// each column is set in the string field of the command at each write, as
+    /// [`crate::str_argument`] converts it.
     #[pyo3(name = "clusterBy", signature = (col, *cols))]
     fn cluster_by<'py>(
         slf: &Bound<'py, Self>,
-        col: String,
-        cols: Vec<String>,
+        col: &Bound<'_, PyAny>,
+        cols: Vec<Bound<'_, PyAny>>,
     ) -> PyResult<Bound<'py, Self>> {
-        let mut all = vec![col];
-        all.extend(cols);
-        slf.borrow().inner.update(|w| w.cluster_by(all));
+        let items: Vec<Bound<'_, PyAny>> = std::iter::once(col.clone()).chain(cols).collect();
+        let (names, unsent) = crate::readwriter::writer_columns_kept(&items);
+        let writer = slf.borrow();
+        *writer.unsent_clustering() = unsent;
+        writer.inner.update(|w| w.cluster_by(names));
         Ok(slf.clone())
     }
 
     fn create(&self, py: Python<'_>) -> PyResult<()> {
         check_written_table(py, &self.unsent_table)?;
+        self.check_unsent_provider(py)?;
+        self.check_unsent_clustering(py)?;
         let writer = self.inner.get();
         interruptible(py, &writer.spark_session(), || {
             writer.create().map_err(Box::new)
@@ -4668,6 +4940,8 @@ impl PyDataFrameWriterV2 {
 
     fn replace(&self, py: Python<'_>) -> PyResult<()> {
         check_written_table(py, &self.unsent_table)?;
+        self.check_unsent_provider(py)?;
+        self.check_unsent_clustering(py)?;
         let writer = self.inner.get();
         interruptible(py, &writer.spark_session(), || {
             writer.replace().map_err(Box::new)
@@ -4677,6 +4951,8 @@ impl PyDataFrameWriterV2 {
     #[pyo3(name = "createOrReplace")]
     fn create_or_replace(&self, py: Python<'_>) -> PyResult<()> {
         check_written_table(py, &self.unsent_table)?;
+        self.check_unsent_provider(py)?;
+        self.check_unsent_clustering(py)?;
         let writer = self.inner.get();
         interruptible(py, &writer.spark_session(), || {
             writer.create_or_replace().map_err(Box::new)
@@ -4685,6 +4961,8 @@ impl PyDataFrameWriterV2 {
 
     fn append(&self, py: Python<'_>) -> PyResult<()> {
         check_written_table(py, &self.unsent_table)?;
+        self.check_unsent_provider(py)?;
+        self.check_unsent_clustering(py)?;
         let writer = self.inner.get();
         interruptible(py, &writer.spark_session(), || {
             writer.append().map_err(Box::new)
@@ -4696,6 +4974,8 @@ impl PyDataFrameWriterV2 {
     fn overwrite(&self, py: Python<'_>, condition: &Bound<'_, PyAny>) -> PyResult<()> {
         let (writer, condition) = (self.inner.get(), column_or_name(condition)?);
         check_written_table(py, &self.unsent_table)?;
+        self.check_unsent_provider(py)?;
+        self.check_unsent_clustering(py)?;
         interruptible(py, &writer.spark_session(), || {
             writer.overwrite(condition).map_err(Box::new)
         })
@@ -4704,6 +4984,8 @@ impl PyDataFrameWriterV2 {
     #[pyo3(name = "overwritePartitions")]
     fn overwrite_partitions(&self, py: Python<'_>) -> PyResult<()> {
         check_written_table(py, &self.unsent_table)?;
+        self.check_unsent_provider(py)?;
+        self.check_unsent_clustering(py)?;
         let writer = self.inner.get();
         interruptible(py, &writer.spark_session(), || {
             writer.overwrite_partitions().map_err(Box::new)
@@ -4714,11 +4996,26 @@ impl PyDataFrameWriterV2 {
         if let Some(table) = &self.unsent_table {
             visit.call(table)?;
         }
+        // The kept arguments that a copy shares are reported by no owner, as the writer's are, and a
+        // lock held elsewhere is skipped.
+        for kept in [&self.unsent_provider, &self.unsent_clustering] {
+            if std::sync::Arc::strong_count(kept) != 1 {
+                continue;
+            }
+            if let Ok(kept) = kept.try_lock() {
+                if let Some(object) = &*kept {
+                    visit.call(object)?;
+                }
+            }
+        }
         Ok(())
     }
 
+    /// Drop this writer's references to the kept arguments; a copy's are kept.
     fn __clear__(&mut self) {
         self.unsent_table = None;
+        self.unsent_provider = std::sync::Arc::new(std::sync::Mutex::new(None));
+        self.unsent_clustering = std::sync::Arc::new(std::sync::Mutex::new(None));
     }
 }
 

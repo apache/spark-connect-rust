@@ -693,6 +693,12 @@ impl DataFrameWriterV2 {
         self
     }
 
+    /// Unset the provider, as PySpark's `using(None)`.
+    pub fn clear_provider(mut self) -> Self {
+        self.provider = None;
+        self
+    }
+
     /// Add a write option.
     pub fn option(mut self, key: &str, value: &str) -> Self {
         self.options.insert(key.to_string(), value.to_string());
