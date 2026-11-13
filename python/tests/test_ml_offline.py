@@ -803,21 +803,24 @@ def _user_sent(name, sent):
     return {key: value for key, value in sent.items() if not _renamed_by_fit(name, key)}
 
 
-def test_ml_connect_frequent_pattern_set_params_and_params_argument_as_pyspark(ml_mock):
-    # As pyspark.ml.fpm's: FPGrowth and PrefixSpan have the keyword-only setParams of their
-    # constructors, which returns the object, and FPGrowth's fit and its model's transform take
-    # the params argument; PrefixSpan.findFrequentSequentialPatterns takes none, as in PySpark.
+def test_ml_connect_fpm_and_als_set_params_and_params_argument_as_pyspark(ml_mock):
+    # As pyspark.ml.fpm's and pyspark.ml.recommendation's: FPGrowth, PrefixSpan and ALS have the
+    # keyword-only setParams of their constructors, which returns the object, and the fits of
+    # FPGrowth and ALS take the params argument; PrefixSpan.findFrequentSequentialPatterns takes
+    # none, as in PySpark.
     import inspect
 
     from pyspark.ml.connect import FPGrowth, PrefixSpan
+    from pyspark.ml.connect.recommendation import ALS
 
     spark, service = ml_mock
-    for cls in [FPGrowth, PrefixSpan]:
+    for cls in [FPGrowth, PrefixSpan, ALS]:
         assert str(inspect.signature(cls.setParams)) == (
             "(self, " + str(inspect.signature(cls))[1:]
         ), cls
         obj = cls()
-        assert obj.setParams(minSupport=0.5) is obj
+        name, value = ("maxIter", 5) if cls is ALS else ("minSupport", 0.5)
+        assert obj.setParams(**{name: value}) is obj
         with pytest.raises(TypeError) as error:
             obj.setParams(0.5)
         assert str(error.value) == "Method setParams forces keyword arguments."
@@ -831,11 +834,12 @@ def test_ml_connect_frequent_pattern_set_params_and_params_argument_as_pyspark(m
         "dataset",
     ]
     df = spark.range(1)
-    for value in [{"minSupport": 0.1}, [{}], "x"]:
-        sent = _requests_but_deletes(service)
-        with pytest.raises(TypeError):
-            FPGrowth().fit(df, value)
-        assert _requests_but_deletes(service) == sent
+    for estimator in [FPGrowth(), ALS()]:
+        for value in [{"minSupport": 0.1}, [{}], "x"]:
+            sent = _requests_but_deletes(service)
+            with pytest.raises(TypeError):
+                estimator.fit(df, value)
+            assert _requests_but_deletes(service) == sent
 
 
 def test_ml_connect_set_params_as_pyspark(ml_mock):
