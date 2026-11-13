@@ -189,6 +189,14 @@ as before. `None` sends no storage level, as PySpark's `persist(None)`, and the 
 caches at its `spark.sql.defaultCacheStorageLevel`. `cache` is unchanged and persists at
 `MEMORY_AND_DISK_DESER`.
 
+`DataType::from_json` reads the spatial types as the JSON reader of Spark does: a bare
+`geometry` or `geography` is of SRID 4326, `geography(<algorithm>)` is of the CRS `OGC:CRS84`, a
+CRS is of the form `<authority>:<code>`, and an algorithm other than `SPHERICAL` is
+`ST_INVALID_ALGORITHM_VALUE`. It no longer takes `geometry(<srid>)`, `geometry(any)` and their
+`geography` forms, which are of the DDL, not of the JSON, of Spark. `DataType::from_ddl` takes a
+number or `any` as an SRID, as the DDL parser of Spark does, and no longer takes such forms as
+`geometry(+5)`, `geometry(SRID:ANY)` or `geography(4326, SPHERICAL)`.
+
 ## Native LogisticRegression
 
 The native `spark_connect::ml::LogisticRegression` fits Spark's JVM

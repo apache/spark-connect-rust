@@ -3559,21 +3559,33 @@ fn pyspark_takes_srid(srid: i64, geographic: bool) -> bool {
     }
 }
 
-/// The SRID of a spatial type that the server sent in a schema, as PySpark's schema conversion
-/// builds it: the mixed SRID, or an SRID that PySpark takes, and `ST_INVALID_SRID_VALUE` for
-/// another one, which PySpark raises when it reads the schema.
-fn schema_spatial_srid(py: Python<'_>, srid: i32, geographic: bool) -> PyResult<i32> {
-    if srid == spark_connect::types::SpatialType::MIXED_SRID
+/// Whether PySpark's conversion of a schema from its proto builds the spatial type of the given
+/// kind of the SRID `srid` that the server sent, with `GeometryType(srid)` or
+/// `GeographyType(srid)`: the mixed SRID, or an SRID that PySpark takes.
+pub(crate) fn pyspark_converts_srid(srid: i32, geographic: bool) -> bool {
+    srid == spark_connect::types::SpatialType::MIXED_SRID
         || pyspark_takes_srid(i64::from(srid), geographic)
-    {
-        return Ok(srid);
-    }
-    Err(crate::column::raise_pyspark(
+}
+
+/// The `ST_INVALID_SRID_VALUE` that PySpark raises for the SRID `srid` of a spatial type of a
+/// schema that it does not convert (see [`pyspark_converts_srid`]).
+pub(crate) fn invalid_schema_srid(py: Python<'_>, srid: i32) -> PyErr {
+    crate::column::raise_pyspark(
         py,
         "IllegalArgumentException",
         "ST_INVALID_SRID_VALUE",
         &[("srid", &srid.to_string())],
-    ))
+    )
+}
+
+/// The SRID of a spatial type that the server sent in a schema, as PySpark's schema conversion
+/// builds it: the mixed SRID, or an SRID that PySpark takes, and `ST_INVALID_SRID_VALUE` for
+/// another one, which PySpark raises when it reads the schema.
+fn schema_spatial_srid(py: Python<'_>, srid: i32, geographic: bool) -> PyResult<i32> {
+    if pyspark_converts_srid(srid, geographic) {
+        return Ok(srid);
+    }
+    Err(invalid_schema_srid(py, srid))
 }
 
 /// Parse a non-UDT DataType's Spark JSON (e.g. `"string collate UTF8_LCASE"`,
@@ -3912,8 +3924,9 @@ pub(crate) fn schema_data_type(
     if schema.is_instance_of::<pyo3::types::PyString>() {
         let ddl: String = schema.extract()?;
         let parsed = crate::interrupt::interruptible(py, session, || session.parse_ddl(&ddl))?;
-        // As PySpark converts the parsed type from its proto, which fails for a nanosecond timestamp.
-        crate::dataframe::check_nanosecond_timestamps(py, Some(&parsed))?;
+        // As PySpark converts the parsed type from its proto, which fails for a nanosecond timestamp
+        // and for a spatial type of an SRID that PySpark does not take.
+        crate::dataframe::check_schema_conversion(py, Some(&parsed))?;
         return Ok(parsed);
     }
     py_to_data_type(schema)

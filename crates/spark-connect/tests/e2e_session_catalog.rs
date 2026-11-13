@@ -450,6 +450,89 @@ fn spatial_json_with_an_epsg_crs_is_read_by_the_server() {
     let _ = spark.stop();
 }
 
+/// `DataType::from_json` reads the spatial forms of JSON as the server's JSON reader does
+/// (`json_to_ddl`), and `from_ddl` those of DDL as the server's parser does (`parse_ddl`): the
+/// same type, or an error, which is the server's `ST_*` error with its parameters where the
+/// server raises one, and a format error where the server's grammar does not take the form.
+#[test]
+fn spatial_type_strings_are_read_as_the_server_reads_them() {
+    if !should_run() {
+        return;
+    }
+    use spark_connect::types::DataType;
+    use spark_connect::SparkError;
+    fn same_error(text: &str, ours: spark_connect::Result<DataType>, theirs: SparkError) {
+        let ours = ours.expect_err(text);
+        if theirs.error_class.starts_with("ST_") {
+            assert_eq!(ours.error_class, theirs.error_class, "{text}");
+            assert_eq!(ours.params, theirs.params, "{text}");
+        } else {
+            assert!(
+                matches!(
+                    ours.error_class.as_str(),
+                    "INVALID_DATATYPE_FORMAT" | "INVALID_DATATYPE_STRING"
+                ),
+                "{text}: {ours:?}, and the server's {theirs:?}"
+            );
+        }
+    }
+    let spark = session();
+    for json in [
+        "geometry",
+        "geography",
+        "geometry(EPSG:2154)",
+        "geometry( SRID:ANY )",
+        "geometry(EPSG:-5)",
+        "geometry(4326)",
+        "geometry(any)",
+        "geometry(a:b:c)",
+        "geography(spherical)",
+        "geography(PLANAR)",
+        "geography(4326)",
+        "geography(EPSG:4269)",
+        "geography(OGC:CRS84, Spherical)",
+        "geography(FOO:1, PLANAR)",
+        "geography(FOO:1, SPHERICAL)",
+        "geography(OGC:CRS84, SPHERICAL, X)",
+    ] {
+        let schema = serde_json::json!({
+            "type": "struct",
+            "fields": [{"name": "g", "type": json, "nullable": true, "metadata": {}}],
+        });
+        let ours = DataType::from_json(&serde_json::Value::String(json.to_string()));
+        match spark.json_to_ddl(&schema.to_string()) {
+            // The DDL of the field, as `g GEOMETRY(2154)`.
+            Ok(ddl) => {
+                let theirs = DataType::from_ddl(ddl.strip_prefix("g ").expect(&ddl)).expect(&ddl);
+                assert_eq!(ours.expect(json), theirs, "JSON {json}");
+            }
+            Err(theirs) => same_error(json, ours, theirs),
+        }
+    }
+    for ddl in [
+        "GEOMETRY(2154)",
+        "GEOMETRY( 04326 )",
+        "GEOMETRY(any)",
+        "GEOGRAPHY(4269)",
+        "GEOMETRY(99999)",
+        "GEOMETRY(099999)",
+        "GEOMETRY(99999999999)",
+        "GEOGRAPHY(3857)",
+        "GEOMETRY(-1)",
+        "GEOMETRY(+5)",
+        "GEOMETRY(SRID:ANY)",
+        "GEOMETRY(EPSG:2154)",
+        "GEOGRAPHY(4326, SPHERICAL)",
+        "GEOMETRY",
+    ] {
+        match spark.parse_ddl(ddl) {
+            Ok(theirs) => assert_eq!(DataType::from_ddl(ddl).expect(ddl), theirs, "DDL {ddl}"),
+            Err(theirs) => same_error(ddl, DataType::from_ddl(ddl), theirs),
+        }
+    }
+    let _ = spark.stop();
+}
+
 /// The execution that the calling thread waits for is the one that its wait interrupts, as
 /// PySpark's `KeyboardInterrupt` does: the wait ends with the server's cancellation, and the
 /// session goes on.

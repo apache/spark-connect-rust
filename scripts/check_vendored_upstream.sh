@@ -21,7 +21,8 @@
 # re-vendoring. Fails CI on drift.
 #
 # Extend VENDORED_DIRS (whole byte-identical trees) or VENDORED_FILES (individual
-# byte-identical files whose sibling files are fork-adapted) as more is vendored.
+# byte-identical files whose sibling files are fork-adapted) as more is vendored, and
+# VENDORED_MAPPED_FILES for a byte-identical copy outside python/pyspark.
 # Do NOT list Rust-backed shims here (anything importing `pyspark._pyspark`), nor
 # fork-adapted files (e.g. pipelines/api.py) — those intentionally differ from upstream.
 set -euo pipefail
@@ -266,6 +267,15 @@ VENDORED_FILES=(
   "testing/utils.py"
 )
 
+# Files vendored verbatim from upstream to a path of this repo outside python/pyspark, as
+# "<path in this repo>=<path in Apache Spark>". Keep these byte-identical to the tag.
+VENDORED_MAPPED_FILES=(
+  # Spark's spatial reference system registry, which the Rust crate embeds (srs.rs) to map the
+  # SRIDs of the spatial types to their CRS strings. Spark generates it from PROJ
+  # (dev/generate_srs_registry.py) and ships the same file in sql/api and in PySpark.
+  "crates/spark-connect/src/srs_registry.csv=python/pyspark/sql/srs_registry.csv"
+)
+
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -276,34 +286,45 @@ sparse_paths=("${VENDORED_DIRS[@]}")
 for f in "${VENDORED_FILES[@]}"; do
   sparse_paths+=("$(dirname "${f}")")
 done
+sparse_paths=("${sparse_paths[@]/#/python/pyspark/}")
+for m in "${VENDORED_MAPPED_FILES[@]}"; do
+  sparse_paths+=("$(dirname "${m#*=}")")
+done
 
 echo "Fetching Apache Spark ${SPARK_TAG} (sparse, blobless) ..."
 git clone --quiet --depth 1 --branch "${SPARK_TAG}" --filter=blob:none --sparse \
   "${SPARK_REPO}" "${WORK}/spark"
-( cd "${WORK}/spark" && git sparse-checkout set \
-    "${sparse_paths[@]/#/python/pyspark/}" >/dev/null )
+( cd "${WORK}/spark" && git sparse-checkout set "${sparse_paths[@]}" >/dev/null )
 
 status=0
-check_one() {
-  local p="$1" flag="$2" extra_exclude="${3:-}"
-  local ours="${REPO_ROOT}/python/pyspark/${p}"
-  local theirs="${WORK}/spark/python/pyspark/${p}"
+# Compare the path $1 of this repo with the path $2 of Apache Spark at the tag.
+check_paths() {
+  local ours_path="$1" theirs_path="$2" flag="$3" extra_exclude="${4:-}"
+  local ours="${REPO_ROOT}/${ours_path}"
+  local theirs="${WORK}/spark/${theirs_path}"
+  local name="${ours_path}"
+  [[ "${ours_path}" != "${theirs_path}" ]] && name="${ours_path} (upstream ${theirs_path})"
   # Always ignore __pycache__; a caller may add one more --exclude (e.g. `tests` for the
   # whole pandas tree, which upstream ships but we intentionally do not vendor).
   local excludes=(--exclude=__pycache__)
   [[ -n "${extra_exclude}" ]] && excludes+=(--exclude="${extra_exclude}")
   if [[ ! -e "${theirs}" ]]; then
-    echo "ERROR: upstream path python/pyspark/${p} not found at ${SPARK_TAG}"
+    echo "ERROR: upstream path ${theirs_path} not found at ${SPARK_TAG}"
     status=1
     return
   fi
   if diff ${flag} "${excludes[@]}" "${ours}" "${theirs}" >/dev/null; then
-    echo "OK    python/pyspark/${p} matches Apache Spark ${SPARK_TAG}"
+    echo "OK    ${name} matches Apache Spark ${SPARK_TAG}"
   else
-    echo "DRIFT python/pyspark/${p} differs from Apache Spark ${SPARK_TAG}:"
+    echo "DRIFT ${name} differs from Apache Spark ${SPARK_TAG}:"
     diff ${flag} "${excludes[@]}" "${ours}" "${theirs}" || true
     status=1
   fi
+}
+
+# Compare the path $1 under python/pyspark with the same path upstream.
+check_one() {
+  check_paths "python/pyspark/$1" "python/pyspark/$1" "$2" "${3:-}"
 }
 
 for p in "${VENDORED_DIRS[@]}"; do
@@ -316,6 +337,9 @@ for p in "${VENDORED_DIRS[@]}"; do
 done
 for p in "${VENDORED_FILES[@]}"; do
   check_one "${p}" ""
+done
+for m in "${VENDORED_MAPPED_FILES[@]}"; do
+  check_paths "${m%%=*}" "${m#*=}" ""
 done
 
 if [[ "${status}" -ne 0 ]]; then
