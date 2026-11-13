@@ -691,6 +691,9 @@ pub trait Evaluator: Send + Sync {
     /// Get the parameters of this evaluator.
     fn params(&self) -> &Params;
 
+    /// Get mutable parameters.
+    fn params_mut(&mut self) -> &mut Params;
+
     /// Evaluate a DataFrame and return a metric value.
     fn evaluate(&self, _df: &DataFrame) -> spark_connect_core::error::Result<f64>;
 }
@@ -6350,6 +6353,10 @@ impl Evaluator for RegressionEvaluator {
         &self.params
     }
 
+    fn params_mut(&mut self) -> &mut Params {
+        &mut self.params
+    }
+
     fn evaluate(&self, df: &DataFrame) -> spark_connect_core::error::Result<f64> {
         evaluate_via_command(&self.operator, &self.params, df)
     }
@@ -6423,6 +6430,10 @@ impl Evaluator for BinaryClassificationEvaluator {
 
     fn params(&self) -> &Params {
         &self.params
+    }
+
+    fn params_mut(&mut self) -> &mut Params {
+        &mut self.params
     }
 
     fn evaluate(&self, df: &DataFrame) -> spark_connect_core::error::Result<f64> {
@@ -6590,6 +6601,9 @@ impl Evaluator for MulticlassClassificationEvaluator {
     }
     fn params(&self) -> &Params {
         &self.params
+    }
+    fn params_mut(&mut self) -> &mut Params {
+        &mut self.params
     }
     fn evaluate(&self, df: &DataFrame) -> spark_connect_core::error::Result<f64> {
         evaluate_via_command(&self.operator, &self.params, df)
