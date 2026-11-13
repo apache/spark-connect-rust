@@ -22,25 +22,34 @@ Python `timedelta` map keys are not yet supported.
 
 `DataFrame::sort`, `order_by`, `sort_within_partitions`, `agg`, `observe`, `observe_with`,
 `hint_expressions`, `repartition_by_range`, `repartition_by_range_opt`,
-`repartition_by_expressions`, `drop_columns`, `with_columns`, `grouping_sets` and
-`grouping_sets_with_columns`, `GroupedData::agg`, the `partition_by` and `order_by` of `Window`
+`repartition_by_expressions`, `GroupedData::agg`, the `partition_by` and `order_by` of `Window`
 and `WindowSpec`, and `TableValuedFunction::udtf` take
 `impl IntoIterator<Item = impl Into<Column>>`, as `select` and `group_by` do: Columns, column
 names or expressions, such as `df.sort([col("x").desc()])` and
-`.agg([sum(col("id")).alias("total")])`, without `.expression().clone()`. The names of `drop`,
-`describe`, `to_df`, `to_schema`, `melt`, the numeric aggregates of `GroupedData` (`sum`, `avg`,
-`min`, `max`, `mean`, `numeric_agg`), the `freq_items` and `approx_quantile` of `StatFunctions`,
-`Column::drop_fields` and the `partition_by` and `cluster_by` of `DataStreamWriter` take any
-iterable of names. The `(name, Column)` pairs of `with_columns` and the `(old, new)` pairs of
-`with_columns_renamed` take any iterable of pairs, and `functions::count_distinct_columns` and
-`UserDefinedFunction::to_expression` (wasm) takes any Columns. A `Vec` or an array of them
-compiles as before. The `Vec<Expression>` that the sort and aggregate methods took still compiles,
-by the new `From<Expression> for Column`, and so does the `Vec<SortOrder>` of the `order_by` of a
-window, by `From<SortOrder> for Column`; there a Column that is not a sort order is sorted
-ascending, nulls first, as PySpark's `WindowSpec.orderBy` sorts it. An empty `vec![]` or `[]` has
-no item type to infer: pass `Vec::<Column>::new()` or `Vec::<&str>::new()` instead. The optional
-`subset` arguments of the null functions, and the optional `value_vars` of `melt`, stay
-`Option<Vec<&str>>`, so that `None` still infers its type.
+`.agg([sum(col("id")).alias("total")])`, without `.expression().clone()`. So does the first list
+of `drop_columns`, of column references: a name in it is `col(name)`, as in PySpark's
+`drop(F.col(name))`, so a name of several columns is `AMBIGUOUS_REFERENCE`, and a dotted name such
+as `a.b` refers to the field `b` of a column `a`, which drops nothing (``"`a.b`"`` refers to a
+column named `a.b`). Its second list is of plain names, as that of `drop`: a name drops every
+column of that name, and `a.b` the column named `a.b`. `grouping_sets` takes any iterable of
+grouping sets, each any iterable of Columns, such as `[[col("a")], [col("a"), col("b")]]`, and
+`grouping_sets_with_columns` takes such sets and any iterable of the grouping Columns. The names
+of `drop`, `describe`, `to_df`, `to_schema`, `melt`, the numeric aggregates of `GroupedData`
+(`sum`, `avg`, `min`, `max`, `mean`, `numeric_agg`), the `freq_items` and `approx_quantile` of
+`StatFunctions`, `Column::drop_fields` and the `partition_by` and `cluster_by` of
+`DataStreamWriter` take any iterable of names, as do the SQL expressions of `select_expr`, the
+statistics of `summary` and the paths of `DataFrameReader::load_paths`. The `(name, Column)`
+pairs of `with_columns` and the `(old, new)` pairs of `with_columns_renamed` take any iterable of
+pairs, and so do the `(String, Value)` pairs of `fillna_map`, such as a `BTreeMap<String, Value>`
+(its names stay `String`s, so that `vec![]` and `("id".into(), value)` still infer their type).
+`functions::count_distinct_columns` and `UserDefinedFunction::to_expression` (wasm) take any
+Columns. A `Vec` or an array of them compiles as before. The `Vec<Expression>` that the sort and
+aggregate methods took still compiles, by the new `From<Expression> for Column`, and so does the
+`Vec<SortOrder>` of the `order_by` of a window, by `From<SortOrder> for Column`; there a Column
+that is not a sort order is sorted ascending, nulls first, as PySpark's `WindowSpec.orderBy` sorts
+it. An empty `vec![]` or `[]` has no item type to infer: pass `Vec::<Column>::new()` or
+`Vec::<&str>::new()` instead. The optional `subset` arguments of the null functions, and the
+optional `value_vars` of `melt`, stay `Option<Vec<&str>>`, so that `None` still infers its type.
 
 `BinaryClassificationEvaluator::set_score_col` and `score_col`, and the Python
 `scoreCol=` argument and `setScoreCol` of v4.2.0 are removed, without an alias:
