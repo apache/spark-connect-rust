@@ -1,0 +1,595 @@
+// SPDX-License-Identifier: Apache-2.0
+//! Standard Spark ML feature stages. Fitting and transformation execute on Spark Connect.
+use super::*;
+
+macro_rules! feature_stage {
+    ($name:ident, $kind:ident) => {
+        #[doc = concat!("Spark ML `", stringify!($name), "` feature stage.")]
+        #[derive(Debug, Clone)]
+        pub struct $name {
+            operator: MlOperator,
+            params: Params,
+        }
+        impl $name {
+            pub fn new() -> Self {
+                Self {
+                    operator: MlOperator::new(
+                        concat!("org.apache.spark.ml.feature.", stringify!($name)),
+                        OperatorType::$kind,
+                    ),
+                    params: Params::new(),
+                }
+            }
+        }
+        impl Default for $name {
+            fn default() -> Self {
+                Self::new()
+            }
+        }
+    };
+}
+
+macro_rules! feature_estimator {
+    ($name:ident, $model:ident, $jvm_model:literal, [$($model_param:literal),* $(,)?]) => {
+        feature_stage!($name, Estimator);
+        impl Estimator for $name {
+            fn operator(&self) -> &MlOperator { &self.operator }
+            fn operator_mut(&mut self) -> &mut MlOperator { &mut self.operator }
+            fn params(&self) -> &Params { &self.params }
+            fn params_mut(&mut self) -> &mut Params { &mut self.params }
+            fn fit_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<Box<dyn Model>> {
+                let info = fit_via_command(&self.operator, &self.params, df)?;
+                let cached = CachedModel::from_info(&info, &df.session, stringify!($name))?;
+                // A model need not accept every training parameter (LSH seed, discretizer buckets).
+                let mut params = self.params.clone();
+                params.params.retain(|name, _| [$($model_param),*].contains(&name.as_str()));
+                Ok(Box::new($model {
+                    operator: MlOperator::with_uid(concat!("org.apache.spark.ml.feature.", $jvm_model), info.uid.as_deref().unwrap_or(&self.operator.uid), OperatorType::Model),
+                    params, cached,
+                }))
+            }
+        }
+        #[doc = concat!("A fitted `", stringify!($name), "`, cached in its Spark session.")]
+        #[derive(Debug, Clone)]
+        pub struct $model { operator: MlOperator, params: Params, cached: CachedModel }
+        impl Transformer for $model {
+            fn operator(&self) -> &MlOperator { &self.operator }
+            fn operator_mut(&mut self) -> &mut MlOperator { &mut self.operator }
+            fn params(&self) -> &Params { &self.params }
+            fn params_mut(&mut self) -> &mut Params { &mut self.params }
+            fn build_ml_relation(&self, df: &DataFrame) -> spark_connect_core::error::Result<proto::MlRelation> {
+                self.cached.build_ml_relation(df, &self.params)
+            }
+            fn transform_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<DataFrame> { self.cached.transform(df, &self.params) }
+        }
+        impl Model for $model { fn clone_box(&self) -> Box<dyn Model> { Box::new(self.clone()) } }
+    };
+}
+
+macro_rules! feature_transformer {
+    ($name:ident) => {
+        feature_stage!($name, Transformer);
+        impl Transformer for $name {
+            fn operator(&self) -> &MlOperator {
+                &self.operator
+            }
+            fn operator_mut(&mut self) -> &mut MlOperator {
+                &mut self.operator
+            }
+            fn params(&self) -> &Params {
+                &self.params
+            }
+            fn params_mut(&mut self) -> &mut Params {
+                &mut self.params
+            }
+            fn transform_impl(
+                &mut self,
+                df: &DataFrame,
+            ) -> spark_connect_core::error::Result<DataFrame> {
+                let ml_relation = proto::Relation {
+                    rel_type: Some(proto::relation::RelType::MlRelation(Box::new(
+                        self.build_ml_relation(df)?,
+                    ))),
+                    ..Default::default()
+                };
+                Ok(DataFrame::new(
+                    df.session.clone(),
+                    LogicalPlan::MlTransform {
+                        ml_relation,
+                        input: df.plan.clone(),
+                        owner: None,
+                    },
+                ))
+            }
+        }
+    };
+}
+
+// Each declaration spells the wire name, typed builder and getter; execution remains shared.
+macro_rules! feature_params {
+    ($name:ident { $( $set:ident($arg:ident: $ty:ty) => $wire:literal, $put:ident; $get:ident -> $ret:ty = |$this:ident| $body:expr; )* }) => {
+        impl $name { $(
+            #[doc = concat!("Set `", $wire, "`.")]
+            pub fn $set(mut self, $arg: $ty) -> Self { self.params = self.params.$put($wire, $arg); self }
+            #[doc = concat!("Get `", $wire, "` (or its default when defined).")]
+            pub fn $get(&self) -> $ret { let $this = self; $body }
+        )* }
+    };
+}
+
+feature_transformer!(Binarizer);
+feature_params! { Binarizer {
+    set_input_col(value: &str) => "inputCol", set_param_string; input_col -> Option<&str> = |this| this.params.string_opt("inputCol");
+    set_input_cols(value: impl IntoIterator<Item = impl Into<String>>) => "inputCols", set_param_string_array; input_cols -> Vec<String> = |this| this.params.string_array("inputCols");
+    set_output_col(value: &str) => "outputCol", set_param_string; output_col -> String = |this| this.params.output_col_or_default(&this.operator.uid);
+    set_output_cols(value: impl IntoIterator<Item = impl Into<String>>) => "outputCols", set_param_string_array; output_cols -> Vec<String> = |this| this.params.string_array("outputCols");
+    set_threshold(value: f64) => "threshold", set_param_double; threshold -> f64 = |this| this.params.double_or("threshold", 0.0);
+    set_thresholds(value: impl IntoIterator<Item = f64>) => "thresholds", set_param_double_array; thresholds -> Option<Vec<f64>> = |this| this.params.double_array_opt("thresholds");
+} }
+
+feature_estimator!(
+    BucketedRandomProjectionLSH,
+    BucketedRandomProjectionLSHModel,
+    "BucketedRandomProjectionLSHModel",
+    ["bucketLength", "inputCol", "numHashTables", "outputCol"]
+);
+feature_params! { BucketedRandomProjectionLSH {
+    set_bucket_length(value: f64) => "bucketLength", set_param_double; bucket_length -> Option<f64> = |this| this.params.get_param("bucketLength").map(|_| this.params.double_or("bucketLength", 0.0));
+    set_input_col(value: &str) => "inputCol", set_param_string; input_col -> Option<&str> = |this| this.params.string_opt("inputCol");
+    set_num_hash_tables(value: i32) => "numHashTables", set_param_int32; num_hash_tables -> i32 = |this| this.params.int_or("numHashTables", 1);
+    set_output_col(value: &str) => "outputCol", set_param_string; output_col -> String = |this| this.params.output_col_or_default(&this.operator.uid);
+    set_seed(value: i64) => "seed", set_param_int_narrow; seed -> Option<i64> = |this| this.params.long_opt("seed");
+} }
+
+feature_transformer!(Bucketizer);
+feature_params! { Bucketizer {
+    set_handle_invalid(value: &str) => "handleInvalid", set_param_string; handle_invalid -> &str = |this| this.params.string_or("handleInvalid", "error");
+    set_input_col(value: &str) => "inputCol", set_param_string; input_col -> Option<&str> = |this| this.params.string_opt("inputCol");
+    set_input_cols(value: impl IntoIterator<Item = impl Into<String>>) => "inputCols", set_param_string_array; input_cols -> Vec<String> = |this| this.params.string_array("inputCols");
+    set_output_col(value: &str) => "outputCol", set_param_string; output_col -> String = |this| this.params.output_col_or_default(&this.operator.uid);
+    set_output_cols(value: impl IntoIterator<Item = impl Into<String>>) => "outputCols", set_param_string_array; output_cols -> Vec<String> = |this| this.params.string_array("outputCols");
+    set_splits(value: impl IntoIterator<Item = f64>) => "splits", set_param_double_array; splits -> Option<Vec<f64>> = |this| this.params.double_array_opt("splits");
+    set_splits_array(value: impl IntoIterator<Item = impl IntoIterator<Item = f64>>) => "splitsArray", set_param_double_arrays; splits_array -> Option<Vec<Vec<f64>>> = |this| this.params.array_opt("splitsArray").map(|values| values.iter().map(|v| match &v.literal_type { Some(proto::expression::literal::LiteralType::Array(a)) => a.elements.iter().filter_map(|v| match v.literal_type { Some(proto::expression::literal::LiteralType::Double(v)) => Some(v), _ => None }).collect(), _ => Vec::new() }).collect());
+} }
+
+feature_estimator!(
+    ChiSqSelector,
+    ChiSqSelectorModel,
+    "ChiSqSelectorModel",
+    [
+        "fdr",
+        "featuresCol",
+        "fpr",
+        "fwe",
+        "labelCol",
+        "numTopFeatures",
+        "outputCol",
+        "percentile",
+        "selectorType"
+    ]
+);
+feature_params! { ChiSqSelector {
+    set_fdr(value: f64) => "fdr", set_param_double; fdr -> f64 = |this| this.params.double_or("fdr", 0.05);
+    set_features_col(value: &str) => "featuresCol", set_param_string; features_col -> &str = |this| this.params.string_or("featuresCol", "features");
+    set_fpr(value: f64) => "fpr", set_param_double; fpr -> f64 = |this| this.params.double_or("fpr", 0.05);
+    set_fwe(value: f64) => "fwe", set_param_double; fwe -> f64 = |this| this.params.double_or("fwe", 0.05);
+    set_label_col(value: &str) => "labelCol", set_param_string; label_col -> &str = |this| this.params.string_or("labelCol", "label");
+    set_num_top_features(value: i32) => "numTopFeatures", set_param_int32; num_top_features -> i32 = |this| this.params.int_or("numTopFeatures", 50);
+    set_output_col(value: &str) => "outputCol", set_param_string; output_col -> String = |this| this.params.output_col_or_default(&this.operator.uid);
+    set_percentile(value: f64) => "percentile", set_param_double; percentile -> f64 = |this| this.params.double_or("percentile", 0.1);
+    set_selector_type(value: &str) => "selectorType", set_param_string; selector_type -> &str = |this| this.params.string_or("selectorType", "numTopFeatures");
+} }
+
+feature_estimator!(
+    CountVectorizer,
+    CountVectorizerModel,
+    "CountVectorizerModel",
+    [
+        "binary",
+        "inputCol",
+        "maxDF",
+        "minDF",
+        "minTF",
+        "outputCol",
+        "vocabSize"
+    ]
+);
+feature_params! { CountVectorizer {
+    set_binary(value: bool) => "binary", set_param_bool; binary -> bool = |this| this.params.bool_or("binary", false);
+    set_input_col(value: &str) => "inputCol", set_param_string; input_col -> Option<&str> = |this| this.params.string_opt("inputCol");
+    set_max_df(value: f64) => "maxDF", set_param_double; max_df -> f64 = |this| this.params.double_or("maxDF", 9.223372036854776e+18);
+    set_min_df(value: f64) => "minDF", set_param_double; min_df -> f64 = |this| this.params.double_or("minDF", 1.0);
+    set_min_tf(value: f64) => "minTF", set_param_double; min_tf -> f64 = |this| this.params.double_or("minTF", 1.0);
+    set_output_col(value: &str) => "outputCol", set_param_string; output_col -> String = |this| this.params.output_col_or_default(&this.operator.uid);
+    set_vocab_size(value: i32) => "vocabSize", set_param_int32; vocab_size -> i32 = |this| this.params.int_or("vocabSize", 262144);
+} }
+
+feature_transformer!(DCT);
+feature_params! { DCT {
+    set_input_col(value: &str) => "inputCol", set_param_string; input_col -> Option<&str> = |this| this.params.string_opt("inputCol");
+    set_inverse(value: bool) => "inverse", set_param_bool; inverse -> bool = |this| this.params.bool_or("inverse", false);
+    set_output_col(value: &str) => "outputCol", set_param_string; output_col -> String = |this| this.params.output_col_or_default(&this.operator.uid);
+} }
+
+feature_transformer!(ElementwiseProduct);
+feature_params! { ElementwiseProduct {
+    set_input_col(value: &str) => "inputCol", set_param_string; input_col -> Option<&str> = |this| this.params.string_opt("inputCol");
+    set_output_col(value: &str) => "outputCol", set_param_string; output_col -> String = |this| this.params.output_col_or_default(&this.operator.uid);
+    set_scaling_vec(value: impl Into<MlVector>) => "scalingVec", set_param_vector; scaling_vec -> Option<MlVector> = |this| MlVector::from_literal(this.params.literal("scalingVec")?);
+} }
+
+feature_transformer!(FeatureHasher);
+feature_params! { FeatureHasher {
+    set_categorical_cols(value: impl IntoIterator<Item = impl Into<String>>) => "categoricalCols", set_param_string_array; categorical_cols -> Vec<String> = |this| this.params.string_array("categoricalCols");
+    set_input_cols(value: impl IntoIterator<Item = impl Into<String>>) => "inputCols", set_param_string_array; input_cols -> Vec<String> = |this| this.params.string_array("inputCols");
+    set_num_features(value: i32) => "numFeatures", set_param_int32; num_features -> i32 = |this| this.params.int_or("numFeatures", 262144);
+    set_output_col(value: &str) => "outputCol", set_param_string; output_col -> String = |this| this.params.output_col_or_default(&this.operator.uid);
+} }
+
+feature_transformer!(HashingTF);
+feature_params! { HashingTF {
+    set_binary(value: bool) => "binary", set_param_bool; binary -> bool = |this| this.params.bool_or("binary", false);
+    set_input_col(value: &str) => "inputCol", set_param_string; input_col -> Option<&str> = |this| this.params.string_opt("inputCol");
+    set_num_features(value: i32) => "numFeatures", set_param_int32; num_features -> i32 = |this| this.params.int_or("numFeatures", 262144);
+    set_output_col(value: &str) => "outputCol", set_param_string; output_col -> String = |this| this.params.output_col_or_default(&this.operator.uid);
+} }
+
+feature_estimator!(
+    IDF,
+    IDFModel,
+    "IDFModel",
+    ["inputCol", "minDocFreq", "outputCol"]
+);
+feature_params! { IDF {
+    set_input_col(value: &str) => "inputCol", set_param_string; input_col -> Option<&str> = |this| this.params.string_opt("inputCol");
+    set_min_doc_freq(value: i32) => "minDocFreq", set_param_int32; min_doc_freq -> i32 = |this| this.params.int_or("minDocFreq", 0);
+    set_output_col(value: &str) => "outputCol", set_param_string; output_col -> String = |this| this.params.output_col_or_default(&this.operator.uid);
+} }
+
+feature_estimator!(
+    Imputer,
+    ImputerModel,
+    "ImputerModel",
+    [
+        "inputCol",
+        "inputCols",
+        "missingValue",
+        "outputCol",
+        "outputCols",
+        "relativeError",
+        "strategy"
+    ]
+);
+feature_params! { Imputer {
+    set_input_col(value: &str) => "inputCol", set_param_string; input_col -> Option<&str> = |this| this.params.string_opt("inputCol");
+    set_input_cols(value: impl IntoIterator<Item = impl Into<String>>) => "inputCols", set_param_string_array; input_cols -> Vec<String> = |this| this.params.string_array("inputCols");
+    set_missing_value(value: f64) => "missingValue", set_param_double; missing_value -> f64 = |this| this.params.double_or("missingValue", f64::NAN);
+    set_output_col(value: &str) => "outputCol", set_param_string; output_col -> String = |this| this.params.output_col_or_default(&this.operator.uid);
+    set_output_cols(value: impl IntoIterator<Item = impl Into<String>>) => "outputCols", set_param_string_array; output_cols -> Vec<String> = |this| this.params.string_array("outputCols");
+    set_relative_error(value: f64) => "relativeError", set_param_double; relative_error -> f64 = |this| this.params.double_or("relativeError", 0.001);
+    set_strategy(value: &str) => "strategy", set_param_string; strategy -> &str = |this| this.params.string_or("strategy", "mean");
+} }
+
+feature_transformer!(IndexToString);
+feature_params! { IndexToString {
+    set_input_col(value: &str) => "inputCol", set_param_string; input_col -> Option<&str> = |this| this.params.string_opt("inputCol");
+    set_labels(value: impl IntoIterator<Item = impl Into<String>>) => "labels", set_param_string_array; labels -> Vec<String> = |this| this.params.string_array("labels");
+    set_output_col(value: &str) => "outputCol", set_param_string; output_col -> String = |this| this.params.output_col_or_default(&this.operator.uid);
+} }
+
+feature_transformer!(Interaction);
+feature_params! { Interaction {
+    set_input_cols(value: impl IntoIterator<Item = impl Into<String>>) => "inputCols", set_param_string_array; input_cols -> Vec<String> = |this| this.params.string_array("inputCols");
+    set_output_col(value: &str) => "outputCol", set_param_string; output_col -> String = |this| this.params.output_col_or_default(&this.operator.uid);
+} }
+
+feature_estimator!(
+    MinHashLSH,
+    MinHashLSHModel,
+    "MinHashLSHModel",
+    ["inputCol", "numHashTables", "outputCol"]
+);
+feature_params! { MinHashLSH {
+    set_input_col(value: &str) => "inputCol", set_param_string; input_col -> Option<&str> = |this| this.params.string_opt("inputCol");
+    set_num_hash_tables(value: i32) => "numHashTables", set_param_int32; num_hash_tables -> i32 = |this| this.params.int_or("numHashTables", 1);
+    set_output_col(value: &str) => "outputCol", set_param_string; output_col -> String = |this| this.params.output_col_or_default(&this.operator.uid);
+    set_seed(value: i64) => "seed", set_param_int_narrow; seed -> Option<i64> = |this| this.params.long_opt("seed");
+} }
+
+feature_estimator!(
+    MinMaxScaler,
+    MinMaxScalerModel,
+    "MinMaxScalerModel",
+    ["inputCol", "max", "min", "outputCol"]
+);
+feature_params! { MinMaxScaler {
+    set_input_col(value: &str) => "inputCol", set_param_string; input_col -> Option<&str> = |this| this.params.string_opt("inputCol");
+    set_max(value: f64) => "max", set_param_double; max -> f64 = |this| this.params.double_or("max", 1.0);
+    set_min(value: f64) => "min", set_param_double; min -> f64 = |this| this.params.double_or("min", 0.0);
+    set_output_col(value: &str) => "outputCol", set_param_string; output_col -> String = |this| this.params.output_col_or_default(&this.operator.uid);
+} }
+
+feature_transformer!(NGram);
+feature_params! { NGram {
+    set_input_col(value: &str) => "inputCol", set_param_string; input_col -> Option<&str> = |this| this.params.string_opt("inputCol");
+    set_n(value: i32) => "n", set_param_int32; n -> i32 = |this| this.params.int_or("n", 2);
+    set_output_col(value: &str) => "outputCol", set_param_string; output_col -> String = |this| this.params.output_col_or_default(&this.operator.uid);
+} }
+
+feature_transformer!(Normalizer);
+feature_params! { Normalizer {
+    set_input_col(value: &str) => "inputCol", set_param_string; input_col -> Option<&str> = |this| this.params.string_opt("inputCol");
+    set_output_col(value: &str) => "outputCol", set_param_string; output_col -> String = |this| this.params.output_col_or_default(&this.operator.uid);
+    set_p(value: f64) => "p", set_param_double; p -> f64 = |this| this.params.double_or("p", 2.0);
+} }
+
+feature_estimator!(
+    OneHotEncoder,
+    OneHotEncoderModel,
+    "OneHotEncoderModel",
+    [
+        "dropLast",
+        "handleInvalid",
+        "inputCol",
+        "inputCols",
+        "outputCol",
+        "outputCols"
+    ]
+);
+feature_params! { OneHotEncoder {
+    set_drop_last(value: bool) => "dropLast", set_param_bool; drop_last -> bool = |this| this.params.bool_or("dropLast", true);
+    set_handle_invalid(value: &str) => "handleInvalid", set_param_string; handle_invalid -> &str = |this| this.params.string_or("handleInvalid", "error");
+    set_input_col(value: &str) => "inputCol", set_param_string; input_col -> Option<&str> = |this| this.params.string_opt("inputCol");
+    set_input_cols(value: impl IntoIterator<Item = impl Into<String>>) => "inputCols", set_param_string_array; input_cols -> Vec<String> = |this| this.params.string_array("inputCols");
+    set_output_col(value: &str) => "outputCol", set_param_string; output_col -> String = |this| this.params.output_col_or_default(&this.operator.uid);
+    set_output_cols(value: impl IntoIterator<Item = impl Into<String>>) => "outputCols", set_param_string_array; output_cols -> Vec<String> = |this| this.params.string_array("outputCols");
+} }
+
+feature_estimator!(PCA, PCAModel, "PCAModel", ["inputCol", "k", "outputCol"]);
+feature_params! { PCA {
+    set_input_col(value: &str) => "inputCol", set_param_string; input_col -> Option<&str> = |this| this.params.string_opt("inputCol");
+    set_k(value: i32) => "k", set_param_int32; k -> Option<i32> = |this| this.params.long_opt("k").map(|v| v as i32);
+    set_output_col(value: &str) => "outputCol", set_param_string; output_col -> String = |this| this.params.output_col_or_default(&this.operator.uid);
+} }
+
+feature_transformer!(PolynomialExpansion);
+feature_params! { PolynomialExpansion {
+    set_degree(value: i32) => "degree", set_param_int32; degree -> i32 = |this| this.params.int_or("degree", 2);
+    set_input_col(value: &str) => "inputCol", set_param_string; input_col -> Option<&str> = |this| this.params.string_opt("inputCol");
+    set_output_col(value: &str) => "outputCol", set_param_string; output_col -> String = |this| this.params.output_col_or_default(&this.operator.uid);
+} }
+
+feature_estimator!(
+    QuantileDiscretizer,
+    QuantileDiscretizerModel,
+    "Bucketizer",
+    [
+        "handleInvalid",
+        "inputCol",
+        "inputCols",
+        "outputCol",
+        "outputCols",
+        "splits",
+        "splitsArray"
+    ]
+);
+feature_params! { QuantileDiscretizer {
+    set_handle_invalid(value: &str) => "handleInvalid", set_param_string; handle_invalid -> &str = |this| this.params.string_or("handleInvalid", "error");
+    set_input_col(value: &str) => "inputCol", set_param_string; input_col -> Option<&str> = |this| this.params.string_opt("inputCol");
+    set_input_cols(value: impl IntoIterator<Item = impl Into<String>>) => "inputCols", set_param_string_array; input_cols -> Vec<String> = |this| this.params.string_array("inputCols");
+    set_num_buckets(value: i32) => "numBuckets", set_param_int32; num_buckets -> i32 = |this| this.params.int_or("numBuckets", 2);
+    set_num_buckets_array(value: impl IntoIterator<Item = i64>) => "numBucketsArray", set_param_int_array; num_buckets_array -> Option<Vec<i64>> = |this| this.params.array_opt("numBucketsArray").map(|values| values.iter().filter_map(|v| match v.literal_type { Some(proto::expression::literal::LiteralType::Integer(v)) => Some(i64::from(v)), Some(proto::expression::literal::LiteralType::Long(v)) => Some(v), _ => None }).collect());
+    set_output_col(value: &str) => "outputCol", set_param_string; output_col -> String = |this| this.params.output_col_or_default(&this.operator.uid);
+    set_output_cols(value: impl IntoIterator<Item = impl Into<String>>) => "outputCols", set_param_string_array; output_cols -> Vec<String> = |this| this.params.string_array("outputCols");
+    set_relative_error(value: f64) => "relativeError", set_param_double; relative_error -> f64 = |this| this.params.double_or("relativeError", 0.001);
+} }
+
+feature_estimator!(
+    RobustScaler,
+    RobustScalerModel,
+    "RobustScalerModel",
+    [
+        "inputCol",
+        "lower",
+        "outputCol",
+        "relativeError",
+        "upper",
+        "withCentering",
+        "withScaling"
+    ]
+);
+feature_params! { RobustScaler {
+    set_input_col(value: &str) => "inputCol", set_param_string; input_col -> Option<&str> = |this| this.params.string_opt("inputCol");
+    set_lower(value: f64) => "lower", set_param_double; lower -> f64 = |this| this.params.double_or("lower", 0.25);
+    set_output_col(value: &str) => "outputCol", set_param_string; output_col -> String = |this| this.params.output_col_or_default(&this.operator.uid);
+    set_relative_error(value: f64) => "relativeError", set_param_double; relative_error -> f64 = |this| this.params.double_or("relativeError", 0.001);
+    set_upper(value: f64) => "upper", set_param_double; upper -> f64 = |this| this.params.double_or("upper", 0.75);
+    set_with_centering(value: bool) => "withCentering", set_param_bool; with_centering -> bool = |this| this.params.bool_or("withCentering", false);
+    set_with_scaling(value: bool) => "withScaling", set_param_bool; with_scaling -> bool = |this| this.params.bool_or("withScaling", true);
+} }
+
+feature_transformer!(RegexTokenizer);
+feature_params! { RegexTokenizer {
+    set_gaps(value: bool) => "gaps", set_param_bool; gaps -> bool = |this| this.params.bool_or("gaps", true);
+    set_input_col(value: &str) => "inputCol", set_param_string; input_col -> Option<&str> = |this| this.params.string_opt("inputCol");
+    set_min_token_length(value: i32) => "minTokenLength", set_param_int32; min_token_length -> i32 = |this| this.params.int_or("minTokenLength", 1);
+    set_output_col(value: &str) => "outputCol", set_param_string; output_col -> String = |this| this.params.output_col_or_default(&this.operator.uid);
+    set_pattern(value: &str) => "pattern", set_param_string; pattern -> &str = |this| this.params.string_or("pattern", "\\s+");
+    set_to_lowercase(value: bool) => "toLowercase", set_param_bool; to_lowercase -> bool = |this| this.params.bool_or("toLowercase", true);
+} }
+
+feature_estimator!(
+    RFormula,
+    RFormulaModel,
+    "RFormulaModel",
+    [
+        "featuresCol",
+        "forceIndexLabel",
+        "formula",
+        "handleInvalid",
+        "labelCol",
+        "stringIndexerOrderType"
+    ]
+);
+feature_params! { RFormula {
+    set_features_col(value: &str) => "featuresCol", set_param_string; features_col -> &str = |this| this.params.string_or("featuresCol", "features");
+    set_force_index_label(value: bool) => "forceIndexLabel", set_param_bool; force_index_label -> bool = |this| this.params.bool_or("forceIndexLabel", false);
+    set_formula(value: &str) => "formula", set_param_string; formula -> Option<&str> = |this| this.params.string_opt("formula");
+    set_handle_invalid(value: &str) => "handleInvalid", set_param_string; handle_invalid -> &str = |this| this.params.string_or("handleInvalid", "error");
+    set_label_col(value: &str) => "labelCol", set_param_string; label_col -> &str = |this| this.params.string_or("labelCol", "label");
+    set_string_indexer_order_type(value: &str) => "stringIndexerOrderType", set_param_string; string_indexer_order_type -> &str = |this| this.params.string_or("stringIndexerOrderType", "frequencyDesc");
+} }
+
+feature_transformer!(SQLTransformer);
+feature_params! { SQLTransformer {
+    set_statement(value: &str) => "statement", set_param_string; statement -> Option<&str> = |this| this.params.string_opt("statement");
+} }
+feature_params! { StandardScaler {
+    set_with_std(value: bool) => "withStd", set_param_bool; with_std -> bool = |this| this.params.bool_or("withStd", true);
+} }
+
+feature_transformer!(StopWordsRemover);
+feature_params! { StopWordsRemover {
+    set_case_sensitive(value: bool) => "caseSensitive", set_param_bool; case_sensitive -> bool = |this| this.params.bool_or("caseSensitive", false);
+    set_input_col(value: &str) => "inputCol", set_param_string; input_col -> Option<&str> = |this| this.params.string_opt("inputCol");
+    set_input_cols(value: impl IntoIterator<Item = impl Into<String>>) => "inputCols", set_param_string_array; input_cols -> Vec<String> = |this| this.params.string_array("inputCols");
+    set_locale(value: &str) => "locale", set_param_string; locale -> Option<&str> = |this| this.params.string_opt("locale");
+    set_output_col(value: &str) => "outputCol", set_param_string; output_col -> String = |this| this.params.output_col_or_default(&this.operator.uid);
+    set_output_cols(value: impl IntoIterator<Item = impl Into<String>>) => "outputCols", set_param_string_array; output_cols -> Vec<String> = |this| this.params.string_array("outputCols");
+    set_stop_words(value: impl IntoIterator<Item = impl Into<String>>) => "stopWords", set_param_string_array; stop_words -> Vec<String> = |this| this.params.string_array("stopWords");
+} }
+feature_params! { StringIndexer {
+    set_handle_invalid(value: &str) => "handleInvalid", set_param_string; handle_invalid -> &str = |this| this.params.string_or("handleInvalid", "error");
+    set_input_cols(value: impl IntoIterator<Item = impl Into<String>>) => "inputCols", set_param_string_array; input_cols -> Vec<String> = |this| this.params.string_array("inputCols");
+    set_output_cols(value: impl IntoIterator<Item = impl Into<String>>) => "outputCols", set_param_string_array; output_cols -> Vec<String> = |this| this.params.string_array("outputCols");
+    set_string_order_type(value: &str) => "stringOrderType", set_param_string; string_order_type -> &str = |this| this.params.string_or("stringOrderType", "frequencyDesc");
+} }
+
+feature_estimator!(
+    TargetEncoder,
+    TargetEncoderModel,
+    "TargetEncoderModel",
+    [
+        "handleInvalid",
+        "inputCol",
+        "inputCols",
+        "labelCol",
+        "outputCol",
+        "outputCols",
+        "smoothing",
+        "targetType"
+    ]
+);
+feature_params! { TargetEncoder {
+    set_handle_invalid(value: &str) => "handleInvalid", set_param_string; handle_invalid -> &str = |this| this.params.string_or("handleInvalid", "error");
+    set_input_col(value: &str) => "inputCol", set_param_string; input_col -> Option<&str> = |this| this.params.string_opt("inputCol");
+    set_input_cols(value: impl IntoIterator<Item = impl Into<String>>) => "inputCols", set_param_string_array; input_cols -> Vec<String> = |this| this.params.string_array("inputCols");
+    set_label_col(value: &str) => "labelCol", set_param_string; label_col -> &str = |this| this.params.string_or("labelCol", "label");
+    set_output_col(value: &str) => "outputCol", set_param_string; output_col -> String = |this| this.params.output_col_or_default(&this.operator.uid);
+    set_output_cols(value: impl IntoIterator<Item = impl Into<String>>) => "outputCols", set_param_string_array; output_cols -> Vec<String> = |this| this.params.string_array("outputCols");
+    set_smoothing(value: f64) => "smoothing", set_param_double; smoothing -> f64 = |this| this.params.double_or("smoothing", 0.0);
+    set_target_type(value: &str) => "targetType", set_param_string; target_type -> &str = |this| this.params.string_or("targetType", "binary");
+} }
+
+feature_transformer!(Tokenizer);
+feature_params! { Tokenizer {
+    set_input_col(value: &str) => "inputCol", set_param_string; input_col -> Option<&str> = |this| this.params.string_opt("inputCol");
+    set_output_col(value: &str) => "outputCol", set_param_string; output_col -> String = |this| this.params.output_col_or_default(&this.operator.uid);
+} }
+
+feature_estimator!(
+    UnivariateFeatureSelector,
+    UnivariateFeatureSelectorModel,
+    "UnivariateFeatureSelectorModel",
+    [
+        "featureType",
+        "featuresCol",
+        "labelCol",
+        "labelType",
+        "outputCol",
+        "selectionMode",
+        "selectionThreshold"
+    ]
+);
+feature_params! { UnivariateFeatureSelector {
+    set_feature_type(value: &str) => "featureType", set_param_string; feature_type -> Option<&str> = |this| this.params.string_opt("featureType");
+    set_features_col(value: &str) => "featuresCol", set_param_string; features_col -> &str = |this| this.params.string_or("featuresCol", "features");
+    set_label_col(value: &str) => "labelCol", set_param_string; label_col -> &str = |this| this.params.string_or("labelCol", "label");
+    set_label_type(value: &str) => "labelType", set_param_string; label_type -> Option<&str> = |this| this.params.string_opt("labelType");
+    set_output_col(value: &str) => "outputCol", set_param_string; output_col -> String = |this| this.params.output_col_or_default(&this.operator.uid);
+    set_selection_mode(value: &str) => "selectionMode", set_param_string; selection_mode -> &str = |this| this.params.string_or("selectionMode", "numTopFeatures");
+    set_selection_threshold(value: f64) => "selectionThreshold", set_param_double; selection_threshold -> Option<f64> = |this| this.params.get_param("selectionThreshold").map(|_| this.params.double_or("selectionThreshold", 0.0));
+} }
+
+feature_estimator!(
+    VarianceThresholdSelector,
+    VarianceThresholdSelectorModel,
+    "VarianceThresholdSelectorModel",
+    ["featuresCol", "outputCol", "varianceThreshold"]
+);
+feature_params! { VarianceThresholdSelector {
+    set_features_col(value: &str) => "featuresCol", set_param_string; features_col -> &str = |this| this.params.string_or("featuresCol", "features");
+    set_output_col(value: &str) => "outputCol", set_param_string; output_col -> String = |this| this.params.output_col_or_default(&this.operator.uid);
+    set_variance_threshold(value: f64) => "varianceThreshold", set_param_double; variance_threshold -> f64 = |this| this.params.double_or("varianceThreshold", 0.0);
+} }
+feature_params! { VectorAssembler {
+    set_handle_invalid(value: &str) => "handleInvalid", set_param_string; handle_invalid -> &str = |this| this.params.string_or("handleInvalid", "error");
+} }
+
+feature_estimator!(
+    VectorIndexer,
+    VectorIndexerModel,
+    "VectorIndexerModel",
+    ["handleInvalid", "inputCol", "maxCategories", "outputCol"]
+);
+feature_params! { VectorIndexer {
+    set_handle_invalid(value: &str) => "handleInvalid", set_param_string; handle_invalid -> &str = |this| this.params.string_or("handleInvalid", "error");
+    set_input_col(value: &str) => "inputCol", set_param_string; input_col -> Option<&str> = |this| this.params.string_opt("inputCol");
+    set_max_categories(value: i32) => "maxCategories", set_param_int32; max_categories -> i32 = |this| this.params.int_or("maxCategories", 20);
+    set_output_col(value: &str) => "outputCol", set_param_string; output_col -> String = |this| this.params.output_col_or_default(&this.operator.uid);
+} }
+
+feature_transformer!(VectorSizeHint);
+feature_params! { VectorSizeHint {
+    set_handle_invalid(value: &str) => "handleInvalid", set_param_string; handle_invalid -> &str = |this| this.params.string_or("handleInvalid", "error");
+    set_input_col(value: &str) => "inputCol", set_param_string; input_col -> Option<&str> = |this| this.params.string_opt("inputCol");
+    set_size(value: i32) => "size", set_param_int32; size -> Option<i32> = |this| this.params.long_opt("size").map(|v| v as i32);
+} }
+
+feature_transformer!(VectorSlicer);
+feature_params! { VectorSlicer {
+    set_indices(value: impl IntoIterator<Item = i64>) => "indices", set_param_int_array; indices -> Option<Vec<i64>> = |this| this.params.array_opt("indices").map(|values| values.iter().filter_map(|v| match v.literal_type { Some(proto::expression::literal::LiteralType::Integer(v)) => Some(i64::from(v)), Some(proto::expression::literal::LiteralType::Long(v)) => Some(v), _ => None }).collect());
+    set_input_col(value: &str) => "inputCol", set_param_string; input_col -> Option<&str> = |this| this.params.string_opt("inputCol");
+    set_names(value: impl IntoIterator<Item = impl Into<String>>) => "names", set_param_string_array; names -> Vec<String> = |this| this.params.string_array("names");
+    set_output_col(value: &str) => "outputCol", set_param_string; output_col -> String = |this| this.params.output_col_or_default(&this.operator.uid);
+} }
+
+feature_estimator!(
+    Word2Vec,
+    Word2VecModel,
+    "Word2VecModel",
+    [
+        "inputCol",
+        "maxIter",
+        "maxSentenceLength",
+        "minCount",
+        "numPartitions",
+        "outputCol",
+        "seed",
+        "stepSize",
+        "vectorSize",
+        "windowSize"
+    ]
+);
+feature_params! { Word2Vec {
+    set_input_col(value: &str) => "inputCol", set_param_string; input_col -> Option<&str> = |this| this.params.string_opt("inputCol");
+    set_max_iter(value: i32) => "maxIter", set_param_int32; max_iter -> i32 = |this| this.params.int_or("maxIter", 1);
+    set_max_sentence_length(value: i32) => "maxSentenceLength", set_param_int32; max_sentence_length -> i32 = |this| this.params.int_or("maxSentenceLength", 1000);
+    set_min_count(value: i32) => "minCount", set_param_int32; min_count -> i32 = |this| this.params.int_or("minCount", 5);
+    set_num_partitions(value: i32) => "numPartitions", set_param_int32; num_partitions -> i32 = |this| this.params.int_or("numPartitions", 1);
+    set_output_col(value: &str) => "outputCol", set_param_string; output_col -> String = |this| this.params.output_col_or_default(&this.operator.uid);
+    set_seed(value: i64) => "seed", set_param_int_narrow; seed -> Option<i64> = |this| this.params.long_opt("seed");
+    set_step_size(value: f64) => "stepSize", set_param_double; step_size -> f64 = |this| this.params.double_or("stepSize", 0.025);
+    set_vector_size(value: i32) => "vectorSize", set_param_int32; vector_size -> i32 = |this| this.params.int_or("vectorSize", 100);
+    set_window_size(value: i32) => "windowSize", set_param_int32; window_size -> i32 = |this| this.params.int_or("windowSize", 5);
+} }

@@ -272,8 +272,7 @@ to empty pandas DataFrames and to the native Pipeline and CrossValidator placeho
 Convert local data explicitly with `df = spark.createDataFrame(pdf)` before calling
 `estimator.fit(df)`, `model.transform(df)` or `evaluator.evaluate(df)`. Transforms return Spark
 DataFrames; call `toPandas()` explicitly when a local result is needed. The deprecated
-`pyspark.ml.connect` pandas contract is not the target for these native methods. The vendored
-Python scalers described below retain their upstream behavior.
+`pyspark.ml.connect` pandas contract is not the target for these native methods. The feature stages described below use the same Spark DataFrame contract.
 
 Other non-DataFrame objects retain their existing errors: a missing `select` in a fit or
 an evaluate, or `columns` in a transform, raises `AttributeError`; an object with that attribute
@@ -290,17 +289,16 @@ they do not raise. The evaluators cast a prediction or a probability of another 
 double, and send an array of probabilities as a vector (`array_to_vector`), whose element 1 is
 scored, as PySpark's evaluator reads the column 1 of an array. The values are the JVM evaluators'
 doubles, where PySpark's are of float32 tensors (`0.6` where PySpark returns `0.6000000238418579`).
-The native estimators accept Spark DataFrames with vector or numeric array feature columns.
+The native classification, regression and clustering estimators accept Spark DataFrames with
+vector or numeric array feature columns.
 A fit and the transform of its model read the DataFrame schema and send an array `featuresCol`
 as the vector (`array_to_vector`) that the JVM reads; the transform preserves the input array
 column in its output. Standard `pyspark.ml` estimators require a `VectorUDT` feature column.
 
-The scalers of `pyspark.ml.connect`, `StandardScaler` and `MaxAbsScaler`, are PySpark's own classes
-(`pyspark.ml.connect.feature`), vendored unchanged: they fit with PySpark's `summarize_dataframe`
-and transform with PySpark's closures, on the server for a Spark DataFrame and locally for a pandas
-DataFrame, so their values, types and errors are PySpark's, and they send no ML request. The Rust API keeps its `StandardScaler` and `MaxAbsScaler`,
-the JVM's scalers, whose `StandardScaler::set_with_mean` centers the features (`withMean`, false by
-default).
+The feature stages, including `StandardScaler` and `MaxAbsScaler`, use Spark's JVM
+implementations through Connect. Vector-valued inputs must use `VectorUDT`; convert numeric
+arrays explicitly with `pyspark.ml.functions.array_to_vector`. `StandardScaler` defaults to
+`withMean=False, withStd=True`, matching standard `pyspark.ml`.
 
 ## Native RandomForestRegressor
 
@@ -818,3 +816,44 @@ modes, weighted/unweighted graphs, custom columns, setters, validation and model
 LDA topic matrices, likelihood/perplexity methods, topic descriptions, distributed-model
 inspection/conversion and persistence are outside this native surface. The vendored
 `pyspark.ml.clustering` API retains its existing implementation.
+
+## Native feature stages
+
+All 38 standard `pyspark.ml.feature` estimators and transformers have native Rust execution
+and Python bindings. Rust exposes them as `spark_connect::ml::<Name>`, with typed builder
+setters/getters. Python exports them from `pyspark.ml.connect` and
+`pyspark.ml.connect.feature`, with standard `pyspark.ml.feature` keyword-only constructor
+signatures and named mutating setters. The vendored `pyspark.ml.feature` module is unchanged.
+
+| Area | Stages |
+| --- | --- |
+| Text and categorical features | CountVectorizer, HashingTF, IDF, Word2Vec, Tokenizer, RegexTokenizer, NGram, StopWordsRemover, StringIndexer, IndexToString, OneHotEncoder, TargetEncoder, FeatureHasher |
+| Scaling and numeric transforms | StandardScaler, MaxAbsScaler, MinMaxScaler, RobustScaler, Normalizer, Binarizer, Bucketizer, QuantileDiscretizer, Imputer, DCT, PolynomialExpansion, ElementwiseProduct |
+| Assembly and selection | VectorAssembler, VectorIndexer, VectorSizeHint, VectorSlicer, Interaction, PCA, ChiSqSelector, UnivariateFeatureSelector, VarianceThresholdSelector, RFormula, SQLTransformer |
+| Locality-sensitive hashing | BucketedRandomProjectionLSH, MinHashLSH |
+
+The 20 estimators fit through Spark Connect's ML command and return session-scoped cached
+models; Python returns the shared native `MLModel`. The 18 transformers build lazy ML
+relations. Transformed DataFrames retain their fitted models and upstream input plans.
+`QuantileDiscretizer` returns a cached JVM `Bucketizer`; its Rust model wrapper is named
+`QuantileDiscretizerModel`. Training-only parameters are omitted from model transforms.
+Multi-column parameters, nested Bucketizer splits, vector-valued ElementwiseProduct weights,
+NaN imputation values, and UnivariateFeatureSelector's setter-only parameters are supported.
+
+`StandardScaler` and `MaxAbsScaler` exports now refer to the native implementations. This
+changes the previous deprecated `pyspark.ml.connect` scaler behavior: pandas frames and
+array-valued feature columns are rejected; transforms return Spark DataFrames containing
+vectors. Mean centering is opt-in through `withMean=True`. Convert pandas data with
+`spark.createDataFrame` and array columns with `array_to_vector` before fitting.
+
+This covers constructor parameters, named setters, fit and DataFrame transform. Specialized
+model inspection (such as PCA components, vocabulary or scaler statistics), LSH similarity
+joins/nearest-neighbor methods, Word2Vec synonyms, persistence, and pipeline/tuning execution
+are separate from this native surface. Existing vendored helper classes remain available.
+
+Tests compare all 38 stages with official PySpark 4.3.0 parameter literals and Spark results,
+including 10 multi-column/parameter variants, both constructor and setter configuration,
+model lifetime, invalid inputs and pandas rejection. Schema checks compare class identifiers,
+nullability and ML metadata; Connect omits the backing SQL schema of JVM UDTs on the wire.
+Run `scripts/capture_ml_features_golden.py` with the official client to regenerate the fixture.
+Native live tests run in CI; set `FEATURE_REFERENCE=1` explicitly to run their reference mode.

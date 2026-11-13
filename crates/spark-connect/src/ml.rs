@@ -12,6 +12,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
 
+mod feature;
+pub use feature::*;
+
 use crate::dataframe::DataFrame;
 use crate::expression::LiteralExpression;
 use crate::plan::{LogicalPlan, RelationOwner};
@@ -349,17 +352,53 @@ impl Params {
     /// Whether a parameter is an array without elements. PySpark cannot infer the element type
     /// of such an array, so it cannot send the params that hold one.
     pub fn has_empty_array(&self) -> bool {
-        self.params.values().any(|expr| {
-            matches!(
-                &expr.expr_type,
-                Some(proto::expression::ExprType::Literal(lit))
-                    if matches!(
-                        &lit.literal_type,
-                        Some(proto::expression::literal::LiteralType::Array(array))
-                            if array.elements.is_empty()
-                    )
-            )
+        fn cannot_infer(lit: &proto::expression::Literal) -> bool {
+            match &lit.literal_type {
+                Some(proto::expression::literal::LiteralType::Array(array)) => {
+                    array.elements.first().is_none_or(cannot_infer)
+                }
+                _ => false,
+            }
+        }
+        self.params.values().any(|expr| match &expr.expr_type {
+            Some(proto::expression::ExprType::Literal(lit)) => cannot_infer(lit),
+            _ => false,
         })
+    }
+
+    /// Set a parameter to a literal, preserving its wire type.
+    pub fn set_param_literal(mut self, name: &str, literal: proto::expression::Literal) -> Self {
+        self.params.insert(
+            name.into(),
+            proto::Expression {
+                expr_type: Some(proto::expression::ExprType::Literal(literal)),
+                ..Default::default()
+            },
+        );
+        self
+    }
+
+    /// Set nested double arrays, such as Bucketizer's per-column splits.
+    pub fn set_param_double_arrays(
+        self,
+        name: &str,
+        values: impl IntoIterator<Item = impl IntoIterator<Item = f64>>,
+    ) -> Self {
+        let literal = LiteralExpression::Array {
+            element_type: Box::new(DataType::Array {
+                element_type: Box::new(DataType::Double),
+                contains_null: true,
+            }),
+            elements: values
+                .into_iter()
+                .map(|values| LiteralExpression::Array {
+                    element_type: Box::new(DataType::Double),
+                    elements: values.into_iter().map(LiteralExpression::Double).collect(),
+                })
+                .collect(),
+        }
+        .to_literal_proto();
+        self.set_param_literal(name, literal)
     }
 
     /// Get a parameter value.

@@ -244,8 +244,7 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // Register ML classes (pyspark.ml.connect)
     m.add_class::<ml::PyMLModel>()?;
-    m.add_class::<ml::PyStringIndexer>()?;
-    m.add_class::<ml::PyVectorAssembler>()?;
+    ml::feature::register(m)?;
     m.add_class::<ml::PyLogisticRegression>()?;
     m.add_class::<ml::PyLinearSVC>()?;
     m.add_class::<ml::PyFMClassifier>()?;
