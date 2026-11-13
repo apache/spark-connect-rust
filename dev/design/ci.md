@@ -2,129 +2,191 @@
 
 # CI/CD Strategy
 
-This document describes the GitHub Actions CI pipeline for the Spark Connect Rust Client, a Rust-backed drop-in replacement for the PySpark Spark Connect client.
+This document describes the GitHub Actions CI pipeline for the Spark Connect Rust Client, a
+Rust-backed drop-in replacement for the PySpark Spark Connect client.
 
 ## Overview
 
-The CI consists of three main workflows:
+The CI consists of these main workflows:
 
 1. **Rust CI** (`.github/workflows/rust.yml`) - Build and test the pure-Rust crates
-2. **Python Connect Tests** (`.github/workflows/build_python_connect.yml`) - Build the PyO3 wheel and run Spark Connect integration tests
-3. **Release wheel build checks** (`.github/workflows/wheel-build-checks.yml`) - Build Linux aarch64 and macOS universal2 wheels using the release recipe
+2. **Python Connect Parity** (`.github/workflows/build_python_connect.yml`) - Build the Rust
+   extension and run the official Spark 4.3.0 Connect test suites through it against a live server
+3. **Release wheel build checks** (`.github/workflows/wheel-build-checks.yml`) - Build Linux aarch64
+   and macOS universal2 wheels using the release recipe
+4. **Coverage** (`.github/workflows/coverage.yml`) - Rust and Python coverage, with regression
+   floors
 
-Rust CI and Python Connect Tests run on pushes and pull requests targeting `master` and `branch-*`. Release wheel build checks run for changes to packaged Python sources, protocol definitions, dependencies and build configuration, and can also be dispatched manually.
+The other workflows are `lint.yml` (rustfmt, clippy, ruff), `generated-drift.yml`,
+`vendor-drift.yml`, `docs.yml`, `pandas-parity.yml`, `pipelines-parity.yml` and `release.yml`.
+
+Most workflows run on pushes and pull requests targeting `master` and `branch-*`. Several also
+accept manual dispatch. `docs.yml` and `wheel-build-checks.yml` run only when files matching their
+path filters change. The release wheel build checks cover changes to packaged Python sources,
+protocol definitions, dependencies and build configuration. `release.yml` runs on a schedule and on
+manual dispatch.
 
 ## Rust CI (`rust.yml`)
 
-**Status**: Expected to be ✅ fully green.
+**Status**: Expected to be fully green.
 
 This workflow validates the pure-Rust implementation:
 
-- **Build**: Compiles `spark-connect`, `spark-connect-core`, and `spark-connect-proto` crates (pyspark-rs is excluded from default cargo operations because it requires maturin + Python environment)
-- **Test**: Runs `cargo test` on `spark-connect` and `spark-connect-core`
-- **No-stub audit**: Runs `scripts/audit_no_stubs.sh` to enforce the "100% coverage, zero stubs" rule (see [Design notes](architecture.md))
+- **Build**: `cargo build --release` builds the workspace `default-members`
+  (`apache-spark-connect-proto`, `apache-spark-connect-core`, `apache-spark-connect`,
+  `apache-spark-connect-macros` and `apache-spark-connect-build`). `pyspark-rs` is not a
+  default member, so the Python workflows build it separately.
+- **Test**: Runs `cargo test` on `apache-spark-connect` and `apache-spark-connect-core`, then
+  builds and tests `apache-spark-connect` with the `datafusion,polars` features
+- **No-stub audit**: Runs `scripts/audit_no_stubs.sh` to enforce the "100% coverage, zero stubs"
+  rule (see [Design notes](architecture.md))
+- **Warnings**: The workflow sets `RUSTFLAGS` to `-D warnings`
 
 ### Key steps
 
 1. Checkout
-2. Install Rust (stable channel) with caching
+2. Install Rust (stable channel, minimal profile) with caching
 3. Install system dependencies (protobuf-compiler)
-4. Build workspace (excluding pyspark-rs)
-5. Test spark-connect and spark-connect-core crates
+4. Build the default members
+5. Test `apache-spark-connect` and `apache-spark-connect-core`, then build and test with
+   `datafusion,polars`
 6. Audit for placeholder/deferred markers
+
+The same workflow has three more jobs:
+
+- **Core transport tests (aarch64 Linux)** (`ubuntu-24.04-arm`, 20-minute limit): runs
+  `cargo test --locked -p apache-spark-connect-core --release --lib` for `aarch64-unknown-linux-gnu`
+- **WASM UDF feature**: installs the `wasm32-unknown-unknown` target and the Python packages
+  `cloudpickle`, `pyspark`, `wasmtime` and `pyarrow`. It runs the `wasm-udf` feature tests, builds
+  the WASM examples, and runs the ignored packer test and the WASM runner tests.
+- **Minimum supported Rust**: `cargo +1.88 check --locked` on the published crates, with
+  `RUSTFLAGS` cleared
 
 This job should always pass; failures indicate incomplete implementation or test regressions.
 
-## Python Connect Tests (`build_python_connect.yml`)
+## Python Connect Parity (`build_python_connect.yml`)
 
-**Status**: Expected to start ⚠️ red and improve iteratively as parity features are implemented.
+**Status**: Gating. The parity and drop-in jobs pass only when every test that runs passes, except
+the entries in their known-failures manifests.
 
-This workflow builds the PyO3 extension and runs the official Apache Spark Connect test suite against our Rust-backed client.
+This workflow builds the Rust extension (`pyspark-rs`, a PyO3 module) and runs the official Apache
+Spark 4.3.0 Connect test suites against it. Its four jobs are:
+
+- `connect-parity` ("Connect parity"): the official `sql/tests/connect` files, run through our Rust
+  transport against a Spark 4.3.0 server
+- `connect-dropin` ("Connect drop-in"): the official Connect suites of `sql`, `ml`, `errors` and
+  `logger`, run against our drop-in package
+- `connect-e2e` ("Rust behavioral e2e"): the Rust `e2e_*` tests and the WASM UDF test, against a
+  second server with reattach settings
+- `connect-benchmark` ("E2E benchmark vs reference"): `scripts/benchmark_e2e.py`, comparing our
+  client with the pip-installed `pyspark==4.3.0`
 
 ### Strategy
 
-The job is matrix-tested across Python versions (3.9, 3.11) to ensure broad compatibility.
+Every job runs Python 3.11 and JDK 17 (Temurin). The parity job is a matrix with that single entry.
+The Spark version is pinned by `SPARK_VERSION: "4.3.0"`, and the test files come from the `v4.3.0`
+tag.
 
 **Expected behavior**:
-- Many tests will fail initially - this is intentional and documents the work remaining
-- Each failure corresponds to a gap in parity (see `dev/parity/inventory.csv`)
-- The workflow remains stable (doesn't flake) because it's deterministic (pinned Spark version)
-- As features are implemented and marked `verified` in the parity ledger, test failures will turn green
-- **Final goal**: 100% of Connect test suite passing
+- Each failure outside the manifest is a gap in parity or a regression. Fix the client. If the
+  failure is environmental, add it to `scripts/parity_known_failures.txt`, regenerated with
+  `scripts/gen_parity_skiplist.py`.
+- `scripts/dropin_known_failures.txt` holds only by-design and environmental entries
+- Only the event-timing-driven streaming files are retried (see
+  [official-tests.md](official-tests.md)). A failure elsewhere fails on its first occurrence.
+- The parity run reports manifest entries that now pass, so the manifest can shrink
 
 ### Key steps
 
 #### 1. Setup
 - Check out the repository
-- Set up Python (3.9, 3.11)
-- Install Rust (stable)
+- Set up Python 3.11 (pip cache) and JDK 17 (Temurin)
+- Install Rust (stable, minimal profile) and cache cargo
 - Install system dependencies (protobuf-compiler)
-- Install build tools (pip, setuptools, wheel, maturin)
 
 #### 2. Build the extension
 ```bash
-maturin build --release --out dist
+cargo build -p pyspark-rs --release
+cp target/release/lib_pyspark.so python/pyspark/_pyspark.so
 ```
-This produces a wheel (`pyspark_client_rust-4.3.0-*.whl`) containing:
-- The compiled PyO3 extension module (`_pyspark.so` / `.pyd`)
-- The pure-Python drop-in package (`python/pyspark/...`)
+The extension is copied into `python/pyspark/`, so `./python` is a working package. No wheel is
+built or installed, because the reference `pyspark` and ours both own the `pyspark` namespace.
 
 #### 3. Install dependencies
 ```bash
-pip install dist/pyspark_client_rust-*.whl
-pip install pytest pandas pyarrow numpy grpcio cloudpickle
+python -m pip install pytest 'pandas>=2.2,<3.0' pyarrow numpy grpcio grpcio-status \
+  googleapis-common-protos cloudpickle zstandard py4j 'plotly<6.0.0' graphviz==0.20.3
 ```
+The drop-in job installs the same list. The workflow comments give the reason for the
+pandas 2.x pin: Spark 4.2's tests and Python workers are not compatible with pandas 3.x.
 
 #### 4. Download & start Spark Connect server (4.3.0)
 - Downloads the official Spark 4.3.0 binary distribution with the Connect server bundled
-  (`spark-4.3.0-bin-hadoop3-connect.tgz`)
-- Starts the Connect server on `sc://localhost:15002`
-- Waits for readiness (nc connectivity check, up to 60 seconds)
+  (`spark-4.3.0-bin-hadoop3-connect.tgz`) from archive.apache.org into `~/spark-dist`, cached
+- Starts the server with `--driver-memory 3g` and
+  `spark.sql.session.localRelationSizeLimit=1073741824` on `sc://localhost:15002`
+- Waits for readiness (a `/dev/tcp` port check, up to 90 seconds)
 
 #### 5. Clone Apache Spark test suite
-- Clones Apache Spark at tag `v4.3.0`
-- Test files are discovered from `python/pyspark/**/tests/connect/**/test_*.py`
+- Clones Apache Spark at tag `v4.3.0` (`--depth 1`) into `~/spark-source`, cached
 
-#### 6. Run Connect test modules
+#### 6. Run the parity gate
 ```bash
-python scripts/run_official_connect_tests.py \
-  --spark <spark-source> \
-  --target-pyspark ./python \
+RUST_PYSPARK_SO=$PWD/python/pyspark/_pyspark.so \
+python scripts/run_official_tests.py \
+  --spark ~/spark-source \
   --remote sc://localhost:15002 \
-  test_connect_column \
-  test_connect_functions \
-  test_connect_dataframe \
-  test_connect_udf \
-  ...
+  --jobs 1 \
+  --exclude "test_artifact.py,test_artifact_localcluster.py,test_parity_resources.py"
 ```
 
-The script prepends our package to `PYTHONPATH` and runs pytest against official Spark test files.
+The runner injects our Rust transport into the official test files (see
+[official-tests.md](official-tests.md)). The same job then:
+- runs the drop-in-facing live-server pytest files under `python/tests`
+  (`test_arrow_e2e.py`, `test_dropin_e2e.py` and the ML e2e files)
+- restarts the server in `local-cluster[2, 4, 1024]` mode and runs the resource and artifact
+  files with `--only` and `--no-drift-check`
 
 #### 7. Artifact upload
-- Uploads Connect test log (`/tmp/connect-tests.log`)
-- Uploads Connect server log (`/tmp/connect-server.log`)
+- Uploads the parity logs (`/tmp/parity-test-logs/`, `/tmp/parity_ours.log`,
+  `/tmp/parity_localcluster.log`) and both server logs as the `parity-ours-py3.11` artifact
 
 These logs are available in the workflow run artifacts for debugging failures.
 
-### Expected test modules
+### Other jobs
 
-The workflow currently runs:
-- `test_connect_column` - Column and expression operations
-- `test_connect_functions` - SQL functions
-- `test_connect_dataframe` - DataFrame operations
-- `test_connect_udf` - Python and pandas UDFs
+- **connect-dropin**: the same setup, without the transport. It runs
+  `scripts/run_official_tests.py --dropin --jobs 1` against the server started from `SPARK_HOME`.
+  Its known failures are in `scripts/dropin_known_failures.txt`. Its logs are uploaded as the
+  `dropin-official-py3.11` artifact.
+- **connect-e2e**: starts a second server with
+  `spark.connect.execute.reattachable.senderMaxStreamSize=1048576`, so that results over
+  1 MiB exercise the reattach path. It runs `cargo test -p apache-spark-connect` on the `e2e_*`
+  tests and a set of other integration tests with `--test-threads=1`, then the
+  `e2e_wasm_udf` test in `tests/wasm-udf`.
+- **connect-benchmark**: builds the extension and starts a server with default settings. It runs
+  `scripts/benchmark_e2e.py --isolate` for the reference (pip-installed `pyspark==4.3.0`) and for
+  ours (`PYTHONPATH=$(pwd)/python`), then `--compare`.
 
-Additional modules can be added as parity improves (e.g., `test_connect_readwriter`, `test_connect_udf_batch`, etc.).
+### Test selection
+
+The parity job discovers every `test_*.py` under `<spark>/python` whose path contains
+`/sql/tests/connect/`, minus the three local-cluster-only basenames. The drop-in job discovers
+the Connect suites of `pyspark/sql`, `pyspark/ml`, `pyspark/errors` and `pyspark/logger`. Apart
+from the local-cluster phase's `--only` list, no module is named by hand. See
+[official-tests.md](official-tests.md) for the selection, skip and retry rules.
 
 ### Handling test failures
 
 Each failing test is a **gap in parity**. The fix process:
 
-1. **Identify the gap**: Read the test failure and corresponding official code
+1. **Identify the gap**: Read the test failure and corresponding official code. The job log
+   lists the unexpected failures at the end of the run.
 2. **Locate the ledger row**: Find the symbol in `dev/parity/inventory.csv`
 3. **Implement the feature**: Code the missing functionality in the Rust crate
-4. **Update ledger status**: Mark the row `done` (or `verified` if a golden proto is included)
-5. **Verify locally**: Run `scripts/run_official_connect_tests.py` with `--target-pyspark ./python`
+4. **Update ledger status**: Mark the row `done` (or `verified`; see Continuous improvement)
+5. **Verify locally**: Run `scripts/run_official_tests.py --only <module>` (see
+   [official-tests.md](official-tests.md))
 6. **Push & verify CI**: The workflow will show the test passing on the next run
 
 ## Release wheel build checks (`wheel-build-checks.yml`)
@@ -163,8 +225,10 @@ This workflow runs on pushes and pull requests targeting `master` and `branch-*`
 one job does three things:
 
 - **Rust coverage**: `cargo llvm-cov` over the unit and golden tests of
-  `apache-spark-connect` and `apache-spark-connect-core`, plus the behavioral e2e tests
-  against a live Connect server, merged into one report.
+  `apache-spark-connect` and `apache-spark-connect-core`, plus nine behavioral e2e test
+  files (`e2e_functions`, `e2e_columns`, `e2e_dataframe`, `e2e_coverage`, `e2e_integration`,
+  `e2e_streaming`, `e2e_new_methods`, `e2e_ops_breadth`, `e2e_session_catalog`) against a live
+  Connect server, merged into one report.
 - **Offline Python suite**: builds the extension and runs
   `python/tests/test_dropin_offline.py`, `test_arrow_handoff.py` and `test_ml_offline.py`
   under `coverage.py`. No other workflow runs these files, so this step is their gate: a
@@ -187,49 +251,57 @@ the README badges read.
 
 ## Continuous improvement
 
-The parity ledger (`dev/parity/inventory.csv`) is the source of truth:
-- **todo**: Not started
-- **wip**: In progress, not testable yet
+The parity ledger (`dev/parity/inventory.csv`) is the source of truth. Its status values in use are:
+- **todo**: Not started. `scripts/gen_parity_ledger.py` gives new rows this status.
 - **done**: Implemented, test(s) passing but not yet officially verified
 - **verified**: Backed by golden-proto match and/or all-green Connect test suite
+- **n/a**: Not applicable to the client. The notes column gives the reason, for example
+  `architecture-satisfied`.
 
-The CI workflow gates progress:
+The CI workflows gate progress:
 - Rust CI ensures the core crates are always buildable and testable
-- Connect CI documents which official tests are green (and which are red)
-- `audit_no_stubs.sh` enforces the "no TODOs" rule before claiming completion
+- The Connect parity and drop-in jobs fail on any official test outside their known-failures
+  manifests
+- `audit_no_stubs.sh` (run in Rust CI) fails on placeholder markers such as `TODO` or `FIXME` in
+  `crates/*/src`
 
 ## Running tests locally
 
 To run the Connect test suite locally:
 
-1. **Build and install the wheel**:
+1. **Build the extension**:
    ```bash
-   maturin build --release --out dist
-   pip install dist/pyspark_client_rust-*.whl
+   cargo build -p pyspark-rs --release
+   cp target/release/lib_pyspark.so python/pyspark/_pyspark.so
    ```
 
-2. **Start a Spark Connect server** (requires Java + Spark 4.3.0):
+2. **Start a Spark Connect server** (requires Java 17 and the Spark 4.3.0 bin-hadoop3-connect
+   distribution):
    ```bash
    # In one terminal:
    export SPARK_HOME=~/spark-dist/spark-4.3.0-bin-hadoop3-connect
-   ${SPARK_HOME}/sbin/start-connect-server.sh
+   ${SPARK_HOME}/sbin/start-connect-server.sh \
+     --driver-memory 3g \
+     --conf spark.sql.session.localRelationSizeLimit=1073741824
    ```
 
-3. **Run the test suite**:
+3. **Run a test module** (install the Python dependencies listed under Strategy first):
    ```bash
-   pip install pytest
-   python scripts/run_official_connect_tests.py \
+   RUST_PYSPARK_SO=$PWD/python/pyspark/_pyspark.so \
+   python scripts/run_official_tests.py \
      --spark /path/to/spark \
-     --target-pyspark ./python \
      --remote sc://localhost:15002 \
-     test_connect_column
+     --only pyspark.sql.tests.connect.test_parity_dataframe
    ```
+
+See [official-tests.md](official-tests.md) for the flags, the output format and the skip rules.
 
 ## References
 
 - [Design notes](architecture.md) - System design, parity strategy, no-stub rule
 - [Acceptance criteria](acceptance.md) - Acceptance criteria and definition of done
 - [pyproject.toml](https://github.com/apache/spark-connect-rust/blob/master/pyproject.toml) - Maturin build configuration
-- [scripts/run_official_connect_tests.py](https://github.com/apache/spark-connect-rust/blob/master/scripts/run_official_connect_tests.py) - Test runner utility
+- [Official tests](official-tests.md) - The official-test runner, its modes and its skip rules
+- [scripts/run_official_tests.py](https://github.com/apache/spark-connect-rust/blob/master/scripts/run_official_tests.py) - Test runner utility
 - [scripts/audit_no_stubs.sh](https://github.com/apache/spark-connect-rust/blob/master/scripts/audit_no_stubs.sh) - No-stub audit gate
 - [Apache Spark Workflow](https://github.com/apache/spark/blob/master/.github/workflows/build_python_connect.yml) - Reference implementation

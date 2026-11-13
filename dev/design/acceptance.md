@@ -36,9 +36,9 @@ parity mixins). Tracked as ledger items in the P10 Python-skin phase.
 
 ## Incremental measurement (don't wait until the end)
 
-`scripts/run_official_connect_tests.py` runs a chosen official connect test file
-against a *target* `pyspark` package on `PYTHONPATH`, pointed at our live dev
-server (`sc://localhost:15002`). As each feature area lands we run its
+`scripts/run_official_tests.py --only <file>` runs a chosen official connect test
+file against our client and a live dev server (see `dev/design/official-tests.md`
+for its modes and flags). As each feature area lands we run its
 corresponding official test file (e.g. `test_connect_column`,
 `test_connect_functions`, `test_connect_dataframe`) and record pass rate. Full
 green across all 371 = done.

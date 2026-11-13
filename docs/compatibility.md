@@ -244,20 +244,29 @@ not given is not sent, so the server's default applies. A list param without ele
 accepted by its constructor and setters, and a fit, transform or evaluate raises PySpark's
 `CANNOT_INFER_ARRAY_ELEMENT_TYPE` for it, as PySpark's serialization does.
 
-Their fit, transform and evaluate take a DataFrame or a pandas DataFrame, as PySpark's do, and
-run on the server, where PySpark's compute on a pandas DataFrame locally: a pandas DataFrame is
-sent through `createDataFrame` of the active session, and the transform of one is a shallow copy
-of it (`copy(deep=False)`) with the output columns appended, of its index, as PySpark's makes
-it, of PySpark's dtypes and cells (an `int64` prediction, ndarrays of the probabilities and of
-the scaled values). Another object raises the `AttributeError` that PySpark's raises, of its
+Their fit, transform and evaluate take a DataFrame or a pandas DataFrame, as PySpark's do, and run
+on the server, where PySpark's compute on a pandas DataFrame locally: a pandas DataFrame is sent
+through `createDataFrame` of the active session as an Arrow table of its columns, whose NaN elements
+of arrays and NaN values of floats stay NaN, as PySpark's local computation keeps them (pandas'
+conversion would make them nulls); the other columns are converted as pandas converts them. The
+statistics of a scaler's fit are Spark's, so the maximum of `MaxAbsScaler` skips a NaN element,
+where PySpark's local fit makes the scale of that feature NaN. The
+transform of one is a shallow copy of it (`copy(deep=False)`) with the output columns appended, of
+its index, as PySpark's makes it, of PySpark's dtypes and cells (an `int64` prediction, ndarrays of
+the probabilities and of the scaled values). The transform of an empty pandas DataFrame is computed
+without the server, which cannot infer the schema of no rows: a scaler appends an empty `object`
+column, and a LogisticRegression model raises the `ValueError` of PySpark's transform function,
+which stacks no array. Another object raises the `AttributeError` that PySpark's raises, of its
 `select` in a fit or an evaluate, and of its `columns` in a transform. The fit of
-`LogisticRegression` and of a scaler sends only the columns that PySpark's fit reads (the
-features and the labels, or the `inputCol`), so the JVM estimator checks no other column, and
-their models send only the column that PySpark's transform reads of a pandas DataFrame. An
-output column of the name of a column that the fit reads still raises the JVM's error at the
-fit, where PySpark's raises at the transform. The transform of the model of
-`LogisticRegression` or of a scaler raises PySpark's `ValueError` of an output column that the
-DataFrame has already, of its exact name, before any transform. The other native models, of the
+`LogisticRegression` and of a scaler sends only the columns that PySpark's fit reads (the features
+and the labels, or the `inputCol`), so the JVM estimator checks no other column, and their models
+send only the column that PySpark's transform reads of a pandas DataFrame. For LogisticRegression,
+an output column of the name of a column that the fit reads still raises the JVM's error at the fit,
+where PySpark's raises at the transform. The transform of the model of `LogisticRegression` or of a
+scaler raises PySpark's `ValueError` of an output column that the DataFrame has already, of its
+exact name, before any transform. The fit of a scaler sends no `outputCol`, which the JVM fit checks
+is absent, so a scaler whose `outputCol` is its `inputCol` fits, and its model keeps the `outputCol`
+for its transform, which raises that `ValueError`. The other native models, of the
 classes that PySpark's `pyspark.ml.connect` does not have, are sent the whole of a pandas
 DataFrame, and their JVM models check their output columns, which the transform of a pandas
 DataFrame appends. The evaluators cast a prediction or a probability of another
