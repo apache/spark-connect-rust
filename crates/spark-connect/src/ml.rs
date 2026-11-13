@@ -3391,6 +3391,672 @@ impl Model for GeneralizedLinearRegressionModel {
     }
 }
 
+/// Weibull accelerated failure time regression using Spark's JVM implementation.
+///
+/// Unset parameters use Spark's defaults.
+#[derive(Debug, Clone)]
+pub struct AFTSurvivalRegression {
+    operator: MlOperator,
+    params: Params,
+}
+
+impl AFTSurvivalRegression {
+    pub fn new() -> Self {
+        Self {
+            operator: MlOperator::new(
+                "org.apache.spark.ml.regression.AFTSurvivalRegression",
+                OperatorType::Estimator,
+            ),
+            params: Params::new(),
+        }
+    }
+
+    /// Set `featuresCol`.
+    pub fn set_feature_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("featuresCol", value);
+        self
+    }
+
+    /// Get `featuresCol`.
+    pub fn feature_col(&self) -> &str {
+        self.params.string_or("featuresCol", "features")
+    }
+
+    /// Set `labelCol`.
+    pub fn set_label_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("labelCol", value);
+        self
+    }
+
+    /// Get `labelCol`.
+    pub fn label_col(&self) -> &str {
+        self.params.string_or("labelCol", "label")
+    }
+
+    /// Set `predictionCol`.
+    pub fn set_prediction_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("predictionCol", value);
+        self
+    }
+
+    /// Get `predictionCol`.
+    pub fn prediction_col(&self) -> &str {
+        self.params.string_or("predictionCol", "prediction")
+    }
+
+    /// Set `fitIntercept`.
+    pub fn set_fit_intercept(mut self, value: bool) -> Self {
+        self.params = self.params.set_param_bool("fitIntercept", value);
+        self
+    }
+
+    /// Get `fitIntercept`.
+    pub fn fit_intercept(&self) -> bool {
+        self.params.bool_or("fitIntercept", true)
+    }
+
+    /// Set `maxIter`.
+    pub fn set_max_iter(mut self, value: i32) -> Self {
+        self.params = self.params.set_param_int32("maxIter", value);
+        self
+    }
+
+    /// Get `maxIter`.
+    pub fn max_iter(&self) -> i32 {
+        self.params.int_or("maxIter", 100)
+    }
+
+    /// Set `tol`.
+    pub fn set_tol(mut self, value: f64) -> Self {
+        self.params = self.params.set_param_double("tol", value);
+        self
+    }
+
+    /// Get `tol`.
+    pub fn tol(&self) -> f64 {
+        self.params.double_or("tol", 1e-06)
+    }
+
+    /// Set `censorCol`.
+    pub fn set_censor_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("censorCol", value);
+        self
+    }
+
+    /// Get `censorCol`.
+    pub fn censor_col(&self) -> &str {
+        self.params.string_or("censorCol", "censor")
+    }
+
+    /// Set `quantileProbabilities`.
+    pub fn set_quantile_probabilities(mut self, value: impl IntoIterator<Item = f64>) -> Self {
+        self.params = self
+            .params
+            .set_param_double_array("quantileProbabilities", value);
+        self
+    }
+
+    /// Get `quantileProbabilities`.
+    pub fn quantile_probabilities(&self) -> Vec<f64> {
+        self.params
+            .double_array_opt("quantileProbabilities")
+            .unwrap_or_else(|| vec![0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99])
+    }
+
+    /// Set `quantilesCol`.
+    pub fn set_quantiles_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("quantilesCol", value);
+        self
+    }
+
+    /// Get `quantilesCol`.
+    pub fn quantiles_col(&self) -> Option<&str> {
+        self.params.string_opt("quantilesCol")
+    }
+
+    /// Set `aggregationDepth`.
+    pub fn set_aggregation_depth(mut self, value: i32) -> Self {
+        self.params = self.params.set_param_int32("aggregationDepth", value);
+        self
+    }
+
+    /// Get `aggregationDepth`.
+    pub fn aggregation_depth(&self) -> i32 {
+        self.params.int_or("aggregationDepth", 2)
+    }
+
+    /// Set `maxBlockSizeInMB`.
+    pub fn set_max_block_size_in_mb(mut self, value: f64) -> Self {
+        self.params = self.params.set_param_double("maxBlockSizeInMB", value);
+        self
+    }
+
+    /// Get `maxBlockSizeInMB`.
+    pub fn max_block_size_in_mb(&self) -> f64 {
+        self.params.double_or("maxBlockSizeInMB", 0.0)
+    }
+
+    fn model_from_info(
+        &self,
+        info: proto::ml_command_result::MlOperatorInfo,
+        session: &SparkSession,
+    ) -> spark_connect_core::error::Result<AFTSurvivalRegressionModel> {
+        let cached = CachedModel::from_info(&info, session, "AFTSurvivalRegression")?;
+        Ok(AFTSurvivalRegressionModel {
+            operator: MlOperator::with_uid(
+                "org.apache.spark.ml.regression.AFTSurvivalRegressionModel",
+                info.uid.as_deref().unwrap_or(&self.operator.uid),
+                OperatorType::Model,
+            ),
+            params: self.params.clone(),
+            cached,
+        })
+    }
+}
+
+impl Default for AFTSurvivalRegression {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Estimator for AFTSurvivalRegression {
+    fn operator(&self) -> &MlOperator {
+        &self.operator
+    }
+    fn operator_mut(&mut self) -> &mut MlOperator {
+        &mut self.operator
+    }
+    fn params(&self) -> &Params {
+        &self.params
+    }
+    fn params_mut(&mut self) -> &mut Params {
+        &mut self.params
+    }
+
+    fn fit_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<Box<dyn Model>> {
+        let info = fit_via_command(&self.operator, &self.params, df)?;
+        Ok(Box::new(self.model_from_info(info, &df.session)?))
+    }
+}
+
+/// A fitted regression model fitted by Spark Connect.
+///
+/// Obtain it through [`Estimator::fit`]. The model, its clones and transformed
+/// DataFrames retain the server-cached object until the last owner is dropped.
+#[derive(Debug, Clone)]
+pub struct AFTSurvivalRegressionModel {
+    operator: MlOperator,
+    params: Params,
+    cached: CachedModel,
+}
+
+impl Transformer for AFTSurvivalRegressionModel {
+    fn operator(&self) -> &MlOperator {
+        &self.operator
+    }
+    fn operator_mut(&mut self) -> &mut MlOperator {
+        &mut self.operator
+    }
+    fn params(&self) -> &Params {
+        &self.params
+    }
+    fn params_mut(&mut self) -> &mut Params {
+        &mut self.params
+    }
+
+    fn build_ml_relation(
+        &self,
+        input: &DataFrame,
+    ) -> spark_connect_core::error::Result<proto::MlRelation> {
+        self.cached.build_ml_relation(input, &self.params)
+    }
+
+    fn transform_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<DataFrame> {
+        self.cached.transform(df, &self.params)
+    }
+}
+
+impl Model for AFTSurvivalRegressionModel {
+    fn clone_box(&self) -> Box<dyn Model> {
+        Box::new(self.clone())
+    }
+}
+
+/// Univariate isotonic or antitonic regression using Spark's JVM implementation.
+///
+/// Unset parameters use Spark's defaults.
+#[derive(Debug, Clone)]
+pub struct IsotonicRegression {
+    operator: MlOperator,
+    params: Params,
+}
+
+impl IsotonicRegression {
+    pub fn new() -> Self {
+        Self {
+            operator: MlOperator::new(
+                "org.apache.spark.ml.regression.IsotonicRegression",
+                OperatorType::Estimator,
+            ),
+            params: Params::new(),
+        }
+    }
+
+    /// Set `featuresCol`.
+    pub fn set_feature_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("featuresCol", value);
+        self
+    }
+
+    /// Get `featuresCol`.
+    pub fn feature_col(&self) -> &str {
+        self.params.string_or("featuresCol", "features")
+    }
+
+    /// Set `labelCol`.
+    pub fn set_label_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("labelCol", value);
+        self
+    }
+
+    /// Get `labelCol`.
+    pub fn label_col(&self) -> &str {
+        self.params.string_or("labelCol", "label")
+    }
+
+    /// Set `predictionCol`.
+    pub fn set_prediction_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("predictionCol", value);
+        self
+    }
+
+    /// Get `predictionCol`.
+    pub fn prediction_col(&self) -> &str {
+        self.params.string_or("predictionCol", "prediction")
+    }
+
+    /// Set `weightCol`.
+    pub fn set_weight_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("weightCol", value);
+        self
+    }
+
+    /// Get `weightCol`.
+    pub fn weight_col(&self) -> Option<&str> {
+        self.params.string_opt("weightCol")
+    }
+
+    /// Set `isotonic`.
+    pub fn set_isotonic(mut self, value: bool) -> Self {
+        self.params = self.params.set_param_bool("isotonic", value);
+        self
+    }
+
+    /// Get `isotonic`.
+    pub fn isotonic(&self) -> bool {
+        self.params.bool_or("isotonic", true)
+    }
+
+    /// Set `featureIndex`.
+    pub fn set_feature_index(mut self, value: i32) -> Self {
+        self.params = self.params.set_param_int32("featureIndex", value);
+        self
+    }
+
+    /// Get `featureIndex`.
+    pub fn feature_index(&self) -> i32 {
+        self.params.int_or("featureIndex", 0)
+    }
+
+    fn model_from_info(
+        &self,
+        info: proto::ml_command_result::MlOperatorInfo,
+        session: &SparkSession,
+    ) -> spark_connect_core::error::Result<IsotonicRegressionModel> {
+        let cached = CachedModel::from_info(&info, session, "IsotonicRegression")?;
+        Ok(IsotonicRegressionModel {
+            operator: MlOperator::with_uid(
+                "org.apache.spark.ml.regression.IsotonicRegressionModel",
+                info.uid.as_deref().unwrap_or(&self.operator.uid),
+                OperatorType::Model,
+            ),
+            params: self.params.clone(),
+            cached,
+        })
+    }
+}
+
+impl Default for IsotonicRegression {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Estimator for IsotonicRegression {
+    fn operator(&self) -> &MlOperator {
+        &self.operator
+    }
+    fn operator_mut(&mut self) -> &mut MlOperator {
+        &mut self.operator
+    }
+    fn params(&self) -> &Params {
+        &self.params
+    }
+    fn params_mut(&mut self) -> &mut Params {
+        &mut self.params
+    }
+
+    fn fit_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<Box<dyn Model>> {
+        let info = fit_via_command(&self.operator, &self.params, df)?;
+        Ok(Box::new(self.model_from_info(info, &df.session)?))
+    }
+}
+
+/// A fitted regression model fitted by Spark Connect.
+///
+/// Obtain it through [`Estimator::fit`]. The model, its clones and transformed
+/// DataFrames retain the server-cached object until the last owner is dropped.
+#[derive(Debug, Clone)]
+pub struct IsotonicRegressionModel {
+    operator: MlOperator,
+    params: Params,
+    cached: CachedModel,
+}
+
+impl Transformer for IsotonicRegressionModel {
+    fn operator(&self) -> &MlOperator {
+        &self.operator
+    }
+    fn operator_mut(&mut self) -> &mut MlOperator {
+        &mut self.operator
+    }
+    fn params(&self) -> &Params {
+        &self.params
+    }
+    fn params_mut(&mut self) -> &mut Params {
+        &mut self.params
+    }
+
+    fn build_ml_relation(
+        &self,
+        input: &DataFrame,
+    ) -> spark_connect_core::error::Result<proto::MlRelation> {
+        self.cached.build_ml_relation(input, &self.params)
+    }
+
+    fn transform_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<DataFrame> {
+        self.cached.transform(df, &self.params)
+    }
+}
+
+impl Model for IsotonicRegressionModel {
+    fn clone_box(&self) -> Box<dyn Model> {
+        Box::new(self.clone())
+    }
+}
+
+/// Factorization machines regression using Spark's JVM implementation.
+///
+/// Unset parameters use Spark's defaults.
+#[derive(Debug, Clone)]
+pub struct FMRegressor {
+    operator: MlOperator,
+    params: Params,
+}
+
+impl FMRegressor {
+    pub fn new() -> Self {
+        Self {
+            operator: MlOperator::new(
+                "org.apache.spark.ml.regression.FMRegressor",
+                OperatorType::Estimator,
+            ),
+            params: Params::new(),
+        }
+    }
+
+    /// Set `featuresCol`.
+    pub fn set_feature_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("featuresCol", value);
+        self
+    }
+
+    /// Get `featuresCol`.
+    pub fn feature_col(&self) -> &str {
+        self.params.string_or("featuresCol", "features")
+    }
+
+    /// Set `labelCol`.
+    pub fn set_label_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("labelCol", value);
+        self
+    }
+
+    /// Get `labelCol`.
+    pub fn label_col(&self) -> &str {
+        self.params.string_or("labelCol", "label")
+    }
+
+    /// Set `predictionCol`.
+    pub fn set_prediction_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("predictionCol", value);
+        self
+    }
+
+    /// Get `predictionCol`.
+    pub fn prediction_col(&self) -> &str {
+        self.params.string_or("predictionCol", "prediction")
+    }
+
+    /// Set `factorSize`.
+    pub fn set_factor_size(mut self, value: i32) -> Self {
+        self.params = self.params.set_param_int32("factorSize", value);
+        self
+    }
+
+    /// Get `factorSize`.
+    pub fn factor_size(&self) -> i32 {
+        self.params.int_or("factorSize", 8)
+    }
+
+    /// Set `fitIntercept`.
+    pub fn set_fit_intercept(mut self, value: bool) -> Self {
+        self.params = self.params.set_param_bool("fitIntercept", value);
+        self
+    }
+
+    /// Get `fitIntercept`.
+    pub fn fit_intercept(&self) -> bool {
+        self.params.bool_or("fitIntercept", true)
+    }
+
+    /// Set `fitLinear`.
+    pub fn set_fit_linear(mut self, value: bool) -> Self {
+        self.params = self.params.set_param_bool("fitLinear", value);
+        self
+    }
+
+    /// Get `fitLinear`.
+    pub fn fit_linear(&self) -> bool {
+        self.params.bool_or("fitLinear", true)
+    }
+
+    /// Set `regParam`.
+    pub fn set_reg_param(mut self, value: f64) -> Self {
+        self.params = self.params.set_param_double("regParam", value);
+        self
+    }
+
+    /// Get `regParam`.
+    pub fn reg_param(&self) -> f64 {
+        self.params.double_or("regParam", 0.0)
+    }
+
+    /// Set `miniBatchFraction`.
+    pub fn set_mini_batch_fraction(mut self, value: f64) -> Self {
+        self.params = self.params.set_param_double("miniBatchFraction", value);
+        self
+    }
+
+    /// Get `miniBatchFraction`.
+    pub fn mini_batch_fraction(&self) -> f64 {
+        self.params.double_or("miniBatchFraction", 1.0)
+    }
+
+    /// Set `initStd`.
+    pub fn set_init_std(mut self, value: f64) -> Self {
+        self.params = self.params.set_param_double("initStd", value);
+        self
+    }
+
+    /// Get `initStd`.
+    pub fn init_std(&self) -> f64 {
+        self.params.double_or("initStd", 0.01)
+    }
+
+    /// Set `maxIter`.
+    pub fn set_max_iter(mut self, value: i32) -> Self {
+        self.params = self.params.set_param_int32("maxIter", value);
+        self
+    }
+
+    /// Get `maxIter`.
+    pub fn max_iter(&self) -> i32 {
+        self.params.int_or("maxIter", 100)
+    }
+
+    /// Set `stepSize`.
+    pub fn set_step_size(mut self, value: f64) -> Self {
+        self.params = self.params.set_param_double("stepSize", value);
+        self
+    }
+
+    /// Get `stepSize`.
+    pub fn step_size(&self) -> f64 {
+        self.params.double_or("stepSize", 1.0)
+    }
+
+    /// Set `tol`.
+    pub fn set_tol(mut self, value: f64) -> Self {
+        self.params = self.params.set_param_double("tol", value);
+        self
+    }
+
+    /// Get `tol`.
+    pub fn tol(&self) -> f64 {
+        self.params.double_or("tol", 1e-06)
+    }
+
+    /// Set `solver`.
+    pub fn set_solver(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("solver", value);
+        self
+    }
+
+    /// Get `solver`.
+    pub fn solver(&self) -> &str {
+        self.params.string_or("solver", "adamW")
+    }
+
+    /// Set `seed`.
+    pub fn set_seed(mut self, value: i64) -> Self {
+        self.params = self.params.set_param_int_narrow("seed", value);
+        self
+    }
+
+    /// Get `seed`.
+    pub fn seed(&self) -> Option<i64> {
+        self.params.long_opt("seed")
+    }
+
+    fn model_from_info(
+        &self,
+        info: proto::ml_command_result::MlOperatorInfo,
+        session: &SparkSession,
+    ) -> spark_connect_core::error::Result<FMRegressionModel> {
+        let cached = CachedModel::from_info(&info, session, "FMRegressor")?;
+        Ok(FMRegressionModel {
+            operator: MlOperator::with_uid(
+                "org.apache.spark.ml.regression.FMRegressionModel",
+                info.uid.as_deref().unwrap_or(&self.operator.uid),
+                OperatorType::Model,
+            ),
+            params: self.params.clone(),
+            cached,
+        })
+    }
+}
+
+impl Default for FMRegressor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Estimator for FMRegressor {
+    fn operator(&self) -> &MlOperator {
+        &self.operator
+    }
+    fn operator_mut(&mut self) -> &mut MlOperator {
+        &mut self.operator
+    }
+    fn params(&self) -> &Params {
+        &self.params
+    }
+    fn params_mut(&mut self) -> &mut Params {
+        &mut self.params
+    }
+
+    fn fit_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<Box<dyn Model>> {
+        let info = fit_via_command(&self.operator, &self.params, df)?;
+        Ok(Box::new(self.model_from_info(info, &df.session)?))
+    }
+}
+
+/// A fitted regression model fitted by Spark Connect.
+///
+/// Obtain it through [`Estimator::fit`]. The model, its clones and transformed
+/// DataFrames retain the server-cached object until the last owner is dropped.
+#[derive(Debug, Clone)]
+pub struct FMRegressionModel {
+    operator: MlOperator,
+    params: Params,
+    cached: CachedModel,
+}
+
+impl Transformer for FMRegressionModel {
+    fn operator(&self) -> &MlOperator {
+        &self.operator
+    }
+    fn operator_mut(&mut self) -> &mut MlOperator {
+        &mut self.operator
+    }
+    fn params(&self) -> &Params {
+        &self.params
+    }
+    fn params_mut(&mut self) -> &mut Params {
+        &mut self.params
+    }
+
+    fn build_ml_relation(
+        &self,
+        input: &DataFrame,
+    ) -> spark_connect_core::error::Result<proto::MlRelation> {
+        self.cached.build_ml_relation(input, &self.params)
+    }
+
+    fn transform_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<DataFrame> {
+        self.cached.transform(df, &self.params)
+    }
+}
+
+impl Model for FMRegressionModel {
+    fn clone_box(&self) -> Box<dyn Model> {
+        Box::new(self.clone())
+    }
+}
+
 /// Decision tree classification using Spark's JVM implementation and ML vector features.
 ///
 /// Supports binary and multiclass labels. Unset parameters use Spark's defaults. A single

@@ -3,6 +3,8 @@
 //! from PROJ 9.8.1 (`dev/generate_srs_registry.py` in apache/spark) and adds its own entries. The
 //! registry is a copy of the file that Spark ships as `srs_registry.csv` (see its header); both
 //! name the same SRIDs by the same string IDs, so the JSON of a spatial type reads on either side.
+//! `scripts/check_vendored_upstream.sh` keeps the copy byte-identical to the file of the Spark tag
+//! that the client tracks, PySpark's `python/pyspark/sql/srs_registry.csv`.
 
 use std::collections::HashMap;
 use std::sync::OnceLock;

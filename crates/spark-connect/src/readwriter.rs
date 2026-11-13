@@ -89,13 +89,12 @@ impl DataFrameReader {
 
     /// Load data from the specified path(s) with the configured format, schema, and options.
     pub fn load(self, path: Option<&str>) -> DataFrame {
-        self.load_paths(path.map(|p| vec![p.to_string()]).unwrap_or_default())
+        self.load_paths(path)
     }
 
-    /// Load data from `paths`, mirroring `DataFrameReader.load` of a list of paths, with the
-    /// configured format, schema, and options.
-    pub fn load_paths(self, paths: Vec<String>) -> DataFrame {
-        let paths = Some(paths);
+    /// Load data from `paths`, any iterable of them, mirroring `DataFrameReader.load` of a list
+    /// of paths, with the configured format, schema, and options.
+    pub fn load_paths<S: Into<String>>(self, paths: impl IntoIterator<Item = S>) -> DataFrame {
         let plan = LogicalPlan::Read {
             read_type: ReadType::DataSource {
                 format: self.format,
@@ -105,7 +104,7 @@ impl DataFrameReader {
                     Some(self.schema)
                 },
                 options: self.options,
-                paths: paths.unwrap_or_default(),
+                paths: paths.into_iter().map(Into::into).collect(),
                 predicates: vec![],
                 source_name: None,
             },
@@ -1046,6 +1045,27 @@ mod tests {
             }
             _ => panic!("expected Read plan"),
         }
+    }
+
+    #[test]
+    fn load_paths_takes_any_iterable_of_paths_as_its_vec_does() {
+        // As the other list arguments of the Rust API: a Vec, an array and an iterator of the
+        // paths build the same plan, and `load` is `load_paths` of its path, if any.
+        let spark = session();
+        let read = || spark.read().format("csv");
+        let plan_of = |df: DataFrame| df.plan.to_proto();
+        let paths = ["/a.csv", "/b.csv"];
+        let vec_form = plan_of(read().load_paths(paths.map(String::from).to_vec()));
+        assert_eq!(plan_of(read().load_paths(paths)), vec_form);
+        assert_eq!(plan_of(read().load_paths(paths.iter().copied())), vec_form);
+        assert_eq!(
+            plan_of(read().load(Some("/a.csv"))),
+            plan_of(read().load_paths(["/a.csv"]))
+        );
+        assert_eq!(
+            plan_of(read().load(None)),
+            plan_of(read().load_paths(Vec::<String>::new()))
+        );
     }
 
     #[test]

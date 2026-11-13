@@ -135,8 +135,10 @@ does not decode. To read one as JSON, select `to_json` of it on the server.
 A spatial type has the SRID of the spatial reference system of its values, or allows any
 SRID, which is `srid: -1` (`SpatialType::MIXED_SRID`) and `any` in DDL. A value is collected as
 a struct of its SRID and its WKB (well-known binary) geometry, and `create_dataframe` takes the
-same struct. `from_ddl` checks the SRID as Spark's parser does: an SRID that the type does not
-take, such as 99999, or a geography of 3857, is `ST_INVALID_SRID_VALUE`.
+same struct. `from_ddl` reads the SRID as Spark's parser does, of digits or `any`: an SRID that
+the type does not take, such as 99999, or a geography of 3857, is `ST_INVALID_SRID_VALUE`, and
+another argument, such as `-1`, `+5` or a CRS (`EPSG:2154`), is not one of Spark's grammar, so it
+is an `INVALID_DATATYPE_FORMAT` error, where the server's parser raises `PARSE_SYNTAX_ERROR`.
 
 The SRIDs are those of Spark's spatial reference system registry (about 10,700 systems, embedded
 from Spark's `srs_registry.csv`). A geometry takes any of them, and a geography only a geographic
@@ -144,13 +146,21 @@ one. The JSON of a spatial type (`json()`) names its reference system by the str
 writes: `geometry(OGC:CRS84)` is SRID 4326, `geometry(EPSG:2154)` is SRID 2154 and
 `geometry(SRID:0)` is SRID 0; a geography also names its algorithm, as
 `geography(OGC:CRS83, SPHERICAL)` for SRID 4269. `DataType::from_json` and the server read these
-back, and the aliases of the OGC systems, such as `EPSG:4269`, too. A CRS that Spark does not
-know, or that the type does not take, is `ST_INVALID_CRS_VALUE`. DDL, and the protobuf form in
-which the server sends a schema, carry any SRID.
+back, and the aliases of the OGC systems, such as `EPSG:4269`, too. As Spark's JSON reader,
+`from_json` reads a bare `geometry` and `geography`, and a geography of its algorithm alone
+(`geography(SPHERICAL)`), as of `OGC:CRS84`. The algorithm is `SPHERICAL` of any case, and
+another one is `ST_INVALID_ALGORITHM_VALUE`. A CRS is of the form `<authority>:<code>`, and one
+that Spark does not know, or that the type does not take, is `ST_INVALID_CRS_VALUE`. The SRIDs
+and the `any` of DDL, as `geometry(4326)`, are not JSON. DDL, and the protobuf form in which the
+server sends a schema, carry any SRID.
 
 The drop-in is stricter, as PySpark 4.3.0 is: its `GeometryType` takes the SRIDs 0, 3857 and 4326,
-and its `GeographyType` 4326, and it reads only the CRS names that those take, so a schema of the
-server with another SRID raises `ST_INVALID_SRID_VALUE` when its type is read.
+and its `GeographyType` 4326, and it reads only the CRS names that those take, and the algorithm
+`SPHERICAL` only in upper case. A schema of the server with another SRID raises
+`ST_INVALID_SRID_VALUE` wherever PySpark converts the schema, also of a type nested in an array, a
+map or a struct: `df.schema`, `columns`, `dtypes`, `repr(df)`, `printSchema()`, the collecting
+APIs (`collect`, `toPandas`, `toArrow`, ...) and a DDL schema, which the server parses. `count`
+and `show` read no schema, and work.
 
 ### Other types
 

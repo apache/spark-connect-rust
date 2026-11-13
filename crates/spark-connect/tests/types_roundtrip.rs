@@ -1214,8 +1214,106 @@ fn spatial_json_rejects_a_crs_that_spark_does_not_take() {
     }
 }
 
+/// The JSON of a spatial type is read as Spark's JSON reader reads it: a bare `geometry` or
+/// `geography`, and a geography of an algorithm alone, are of `OGC:CRS84`; a CRS is of the form
+/// `\w+:-?\w+`; and the algorithm is `SPHERICAL`, of any case, checked before the CRS. The SRID
+/// and the `any` of DDL are not JSON.
+#[test]
+fn spatial_json_reads_the_forms_of_the_json_reader_of_spark() {
+    let json = |text: &str| serde_json::Value::String(text.to_string());
+    for (text, expected) in [
+        ("geometry", DataType::Geometry { srid: 4326 }),
+        ("geography", DataType::Geography { srid: 4326 }),
+        ("geography(SPHERICAL)", DataType::Geography { srid: 4326 }),
+        ("geography( Spherical )", DataType::Geography { srid: 4326 }),
+        ("geography(OGC:CRS83)", DataType::Geography { srid: 4269 }),
+        (
+            "geography(OGC:CRS84, spherical)",
+            DataType::Geography { srid: 4326 },
+        ),
+        (
+            "geography( srid:any , spherical )",
+            DataType::Geography { srid: -1 },
+        ),
+        ("geometry( EPSG:2154 )", DataType::Geometry { srid: 2154 }),
+    ] {
+        let read = DataType::from_json(&json(text)).expect(text);
+        assert_eq!(read, expected, "{text}");
+    }
+    // An algorithm that Spark does not know, which is checked before the CRS, and a CRS of the
+    // form of the patterns that Spark does not know.
+    for (text, error_class, param) in [
+        (
+            "geography(OGC:CRS84, PLANAR)",
+            "ST_INVALID_ALGORITHM_VALUE",
+            ("alg", "PLANAR"),
+        ),
+        (
+            "geography(FOO:1, PLANAR)",
+            "ST_INVALID_ALGORITHM_VALUE",
+            ("alg", "PLANAR"),
+        ),
+        (
+            "geography(PLANAR)",
+            "ST_INVALID_ALGORITHM_VALUE",
+            ("alg", "PLANAR"),
+        ),
+        (
+            "geography(4326)",
+            "ST_INVALID_ALGORITHM_VALUE",
+            ("alg", "4326"),
+        ),
+        (
+            "geography(any)",
+            "ST_INVALID_ALGORITHM_VALUE",
+            ("alg", "any"),
+        ),
+        (
+            "geography(FOO:1, SPHERICAL)",
+            "ST_INVALID_CRS_VALUE",
+            ("crs", "FOO:1"),
+        ),
+        (
+            "geometry(EPSG:-5)",
+            "ST_INVALID_CRS_VALUE",
+            ("crs", "EPSG:-5"),
+        ),
+    ] {
+        let error = DataType::from_json(&json(text)).expect_err(text);
+        assert_eq!(error.error_class, error_class, "{text}");
+        let expected = BTreeMap::from([(param.0.to_string(), param.1.to_string())]);
+        assert_eq!(error.params, expected, "{text}");
+    }
+    // No form of the patterns: the SRID and the `any` of DDL, a CRS that is not `\w+:-?\w+`, an
+    // algorithm of a geometry, a third argument, an empty one, and whitespace after a bare name.
+    for text in [
+        "geometry(4326)",
+        "geometry(any)",
+        "geometry(a:b:c)",
+        "geometry(EPSG:2154, SPHERICAL)",
+        "geography(OGC:CRS84, SPHERICAL, X)",
+        "geography(OGC:CRS84,)",
+        "geography(, SPHERICAL)",
+        "geometry()",
+        "geography()",
+        "geometry ",
+        "geography ",
+    ] {
+        let error = DataType::from_json(&json(text)).expect_err(text);
+        assert!(
+            matches!(
+                error.error_class.as_str(),
+                "INVALID_DATATYPE_FORMAT" | "INVALID_DATATYPE_STRING"
+            ),
+            "{text}: {error:?}"
+        );
+    }
+}
+
 /// The DDL of a spatial type names its SRID by its number, or `any`, and Spark's parser rejects an
-/// SRID that the type does not take with `ST_INVALID_SRID_VALUE`.
+/// SRID that the type does not take with `ST_INVALID_SRID_VALUE`, which names the SRID as the
+/// type would. Its grammar takes no other argument: a signed number or a CRS is a syntax error,
+/// which is the format error of `from_ddl`.
 #[test]
 fn spatial_ddl_checks_the_srid_as_spark_does() {
     assert_eq!(
@@ -1226,15 +1324,36 @@ fn spatial_ddl_checks_the_srid_as_spark_does() {
         DataType::from_ddl("geography(4269)").unwrap(),
         DataType::Geography { srid: 4269 }
     );
-    for ddl in [
-        "geometry(99999)",
-        "geometry(-1)",
-        "geometry(99999999999)",
-        "geography(3857)",
-        "geography(0)",
+    assert_eq!(
+        DataType::from_ddl("GEOMETRY( 04326 )").unwrap(),
+        DataType::Geometry { srid: 4326 }
+    );
+    for (ddl, srid) in [
+        ("geometry(99999)", "99999"),
+        ("geometry(099999)", "99999"),
+        ("geometry(99999999999)", "99999999999"),
+        ("geography(3857)", "3857"),
+        ("geography(0)", "0"),
     ] {
         let error = DataType::from_ddl(ddl).expect_err(ddl);
         assert_eq!(error.error_class, "ST_INVALID_SRID_VALUE", "{ddl}");
+        let expected = BTreeMap::from([("srid".to_string(), srid.to_string())]);
+        assert_eq!(error.params, expected, "{ddl}");
+    }
+    for ddl in [
+        "geometry(-1)",
+        "geometry(+5)",
+        "geometry(SRID:ANY)",
+        "geometry(EPSG:2154)",
+        "geometry(5L)",
+        "geography(-1)",
+        "geography(4326, SPHERICAL)",
+        "geography(OGC:CRS84)",
+        "geometry",
+        "geography",
+    ] {
+        let error = DataType::from_ddl(ddl).expect_err(ddl);
+        assert_eq!(error.error_class, "INVALID_DATATYPE_FORMAT", "{ddl}");
     }
     // An SRID that Spark does not know is written `SRID:<srid>` in JSON, which Spark rejects too.
     assert_eq!(
@@ -1354,6 +1473,8 @@ fn json_and_ddl_parsers_agree_on_the_atomic_and_parameterized_forms() {
         start_field,
         end_field,
     };
+    let geometry = |srid| DataType::Geometry { srid };
+    let geography = |srid| DataType::Geography { srid };
 
     // The same type of both parsers.
     let same: Vec<(&str, DataType)> = vec![
@@ -1424,10 +1545,6 @@ fn json_and_ddl_parsers_agree_on_the_atomic_and_parameterized_forms() {
             "string collate sr_Cyrl_SRB_CI_AI",
             string("sr_Cyrl_SRB_CI_AI"),
         ),
-        // The spatial types, of an SRID or of a CRS.
-        ("geometry(4326)", DataType::Geometry { srid: 4326 }),
-        ("geometry(any)", DataType::Geometry { srid: -1 }),
-        ("geography(4326)", DataType::Geography { srid: 4326 }),
     ];
     for (text, expected) in &same {
         assert_eq!(
@@ -1496,6 +1613,17 @@ fn json_and_ddl_parsers_agree_on_the_atomic_and_parameterized_forms() {
         "string collate sys tem.builtin.utf8_lcase",
         "string collate system . . utf8_lcase",
         "char(5) collate UNICODE",
+        // A spatial type of a signed SRID, of an algorithm that is not SPHERICAL or of more than a
+        // CRS and an algorithm, of an SRID that the type does not take, or of no argument.
+        "geometry(-1)",
+        "geometry(+5)",
+        "geography(-1)",
+        "geography(OGC:CRS84, PLANAR)",
+        "geography(OGC:CRS84, SPHERICAL, X)",
+        "geometry(99999)",
+        "geography(3857)",
+        "geometry()",
+        "geography()",
         // Not a type.
         "",
         "foo",
@@ -1632,6 +1760,28 @@ fn json_and_ddl_parsers_agree_on_the_atomic_and_parameterized_forms() {
             }),
             None,
         ),
+        // The JSON of a spatial type names its CRS, and that of a geography its algorithm too, or
+        // either alone, as Spark's JSON reader reads them: a bare name is of `OGC:CRS84`, and the
+        // algorithm is of any case. Its DDL names the SRID, or `any`, of any case.
+        ("geometry", Some(geometry(4326)), None),
+        ("geography", Some(geography(4326)), None),
+        ("geometry(OGC:CRS84)", Some(geometry(4326)), None),
+        ("geometry(EPSG:2154)", Some(geometry(2154)), None),
+        ("geometry(SRID:ANY)", Some(geometry(-1)), None),
+        ("geometry(srid:any)", Some(geometry(-1)), None),
+        ("geography(SPHERICAL)", Some(geography(4326)), None),
+        ("geography(OGC:CRS83)", Some(geography(4269)), None),
+        (
+            "geography(OGC:CRS84, spherical)",
+            Some(geography(4326)),
+            None,
+        ),
+        ("geometry(4326)", None, Some(geometry(4326))),
+        ("geometry( 2154 )", None, Some(geometry(2154))),
+        ("geometry(any)", None, Some(geometry(-1))),
+        ("GEOMETRY(ANY)", None, Some(geometry(-1))),
+        ("geography(4326)", None, Some(geography(4326))),
+        ("geography(any)", None, Some(geography(-1))),
     ];
     for (text, json, ddl) in &differ {
         assert_ne!(json, ddl, "{text:?} is not a difference");
@@ -1674,6 +1824,8 @@ fn json_and_ddl_parsers_agree_on_the_atomic_and_parameterized_forms() {
         "interval ",
         "string ",
         "time ",
+        "geometry ",
+        "geography ",
     ] {
         assert_eq!(parsed_as_json(text), None, "JSON {text:?}");
     }
