@@ -698,6 +698,87 @@ def test_ml_connect_estimators_fit_and_transform_the_pandas_frames_of_pyspark(se
         KMeans(k=2, seed=1).fit(pdf).transform(pdf.assign(prediction=0))
 
 
+def test_ml_connect_scaler_fit_with_its_input_as_output_as_pyspark(session):
+    # As PySpark's scaler fit, which reads only its inputCol: a scaler whose outputCol is its
+    # inputCol fits, and its model keeps the outputCol, so that its transform raises PySpark's
+    # ValueError of an output column that the DataFrame has, of the DataFrame and of a pandas one.
+    import pandas as pd
+    from pyspark.ml.connect.feature import MaxAbsScaler, StandardScaler
+
+    df = session.createDataFrame([([1.0, 2.0],), ([3.0, 4.0],), ([5.0, 9.0],)], ["x"])
+    message = (
+        "Transformers does not allow output column having the same name with existing columns."
+    )
+    for cls in (StandardScaler, MaxAbsScaler):
+        model = cls(inputCol="x", outputCol="x").fit(df)
+        with pytest.raises(ValueError) as error:
+            model.transform(df)
+        assert str(error.value) == message, cls
+        with pytest.raises(ValueError) as error:
+            model.transform(pd.DataFrame({"x": [[1.0, 2.0]]}))
+        assert str(error.value) == message, cls
+
+
+def test_ml_connect_scalers_transform_the_nan_of_pandas_frames_as_pyspark(session):
+    # As PySpark computes the transform of a pandas DataFrame locally, a NaN element of its arrays
+    # stays NaN, and the scaled values of the other elements are PySpark's. The values are those of
+    # PySpark 4.3.0. The fit of a StandardScaler on a pandas DataFrame with a NaN propagates it, as
+    # PySpark's numpy does. The fit of a MaxAbsScaler skips the NaN, as the JVM's summarizer does,
+    # which PySpark's numpy does not, so that fit is not checked here.
+    import numpy as np
+    import pandas as pd
+    from pyspark.ml.connect.feature import MaxAbsScaler, StandardScaler
+
+    nan = float("nan")
+    fitted = session.createDataFrame([([1.0, 1.0],), ([2.0, 4.0],), ([3.0, 8.0],)], ["x"])
+    pdf = pd.DataFrame({"x": [np.array([nan, 1.0]), np.array([2.0, 4.0]), np.array([3.0, 8.0])]})
+
+    def check(transformed, expected):
+        assert list(transformed.columns) == ["x", "o"]
+        assert transformed.dtypes.astype(str).tolist() == ["object", "object"]
+        assert [type(value) for value in transformed["o"]] == [np.ndarray] * 3
+        np.testing.assert_allclose(
+            np.array([value.tolist() for value in transformed["o"]]),
+            np.array(expected),
+            rtol=1e-12,
+            equal_nan=True,
+        )
+
+    check(
+        MaxAbsScaler(inputCol="x", outputCol="o").fit(fitted).transform(pdf.copy()),
+        [[nan, 0.125], [2 / 3, 0.5], [1.0, 1.0]],
+    )
+    check(
+        StandardScaler(inputCol="x", outputCol="o").fit(fitted).transform(pdf.copy()),
+        [[nan, -0.9491579957524987], [0.0, -0.0949157995752498], [1.0, 1.0440737953277488]],
+    )
+    check(
+        StandardScaler(inputCol="x", outputCol="o").fit(pdf).transform(pdf.copy()),
+        [[nan, -0.9491579957524987], [nan, -0.0949157995752498], [nan, 1.0440737953277488]],
+    )
+
+
+def test_ml_connect_empty_pandas_transforms_as_pyspark(session):
+    # As PySpark's transform of an empty pandas DataFrame, which computes locally: a scaler appends
+    # its output column, of object dtype, and a LogisticRegression model raises the ValueError of
+    # its transform function, which stacks no array. The server is not asked for them.
+    import pandas as pd
+    from pyspark.ml.connect.classification import LogisticRegression
+    from pyspark.ml.connect.feature import MaxAbsScaler, StandardScaler
+
+    fitted = session.createDataFrame([([1.0, 1.0],), ([2.0, 4.0],), ([3.0, 8.0],)], ["x"])
+    for cls in (MaxAbsScaler, StandardScaler):
+        empty = pd.DataFrame({"x": pd.Series([], dtype=object)})
+        transformed = cls(inputCol="x", outputCol="o").fit(fitted).transform(empty)
+        assert list(transformed.columns) == ["x", "o"], cls
+        assert transformed.dtypes.astype(str).tolist() == ["object", "object"], cls
+        assert len(transformed) == 0, cls
+
+    model = LogisticRegression(maxIter=5).fit(_labeled(session))
+    with pytest.raises(ValueError, match="need at least one array to stack"):
+        model.transform(pd.DataFrame({"features": pd.Series([], dtype=object)}))
+
+
 def test_ml_connect_setters_change_the_next_evaluate_and_fit_as_pyspark(session):
     # As PySpark's Params._set: a setter of pyspark.ml.connect sets the param of the evaluator or
     # estimator itself and returns it, so the next evaluate or fit uses the value of a setter whose
