@@ -10551,6 +10551,38 @@ def test_an_observation_pickles_as_the_plain_object_of_pyspark(mock_connect):
     assert type(on_worker(failed)["_error"]) is type(raised.value)
 
 
+def test_an_observation_pickles_at_every_protocol_as_pyspark(mock_connect):
+    # As pickle of PySpark's Observation, a plain object, at each protocol: the protocols 0 and 1
+    # pickle it too, as the protocols 2 and up do, before and after the observed DataFrame ran,
+    # and an unpickled one pickles again with the metrics that it keeps.
+    from pyspark.errors import PySparkAssertionError
+    from pyspark.sql import Observation
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+    protocols = range(pickle.HIGHEST_PROTOCOL + 1)
+    observation = Observation("o")
+    for protocol in protocols:
+        unused = pickle.loads(pickle.dumps(observation, protocol=protocol))
+        assert type(unused) is Observation and unused._name == "o"
+        again = pickle.loads(pickle.dumps(unused, protocol=protocol))
+        assert type(again) is Observation and again._name == "o"
+        spark.range(1).observe(again, F.count(F.lit(1)).alias("c"))
+
+    df = spark.range(3).observe(observation, F.count(F.lit(1)).alias("c"))
+    batch, observed = _count_batch_and_observed_metrics(service, df)
+    service.execute_payload = batch + observed("o", varint_field(7, 3), "c")
+    assert df.count() == 3
+    for protocol in protocols:
+        restored = pickle.loads(pickle.dumps(observation, protocol=protocol))
+        assert type(restored) is Observation and restored._name == "o"
+        assert restored.get == {"c": 3}
+        twice = pickle.loads(pickle.dumps(restored, protocol=protocol))
+        assert twice._name == "o" and twice.get == {"c": 3}
+        with pytest.raises(PySparkAssertionError, match="REUSE_OBSERVATION"):
+            spark.range(1).observe(twice, F.count(F.lit(1)).alias("c"))
+
+
 def test_a_failing_action_keeps_the_metrics_of_the_earlier_actions_as_pyspark(mock_connect):
     # As PySpark's client, which converts the metrics of an Observation before it updates the
     # Observation with them: the Observation of a metric that it does not convert, and those
