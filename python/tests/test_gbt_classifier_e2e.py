@@ -21,6 +21,7 @@ import math
 import os
 
 import pytest
+from _native_classes import native_class
 from pyspark.ml.connect.functions import array_to_vector, vector_to_array
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
@@ -39,11 +40,7 @@ def session():
 
 
 def _classifier():
-    try:
-        from pyspark.ml.connect.classification import GBTClassifier
-    except ImportError:
-        from pyspark.ml.classification import GBTClassifier
-    return GBTClassifier
+    return native_class("pyspark.ml.connect.classification", "GBTClassifier", "pyspark.ml.classification")
 
 
 def _vectors(session, sql, name="features"):

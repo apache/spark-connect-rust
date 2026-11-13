@@ -21,6 +21,7 @@ import math
 import os
 
 import pytest
+from _native_classes import native_class
 from pyspark.ml.connect.functions import array_to_vector, vector_to_array
 from pyspark.ml.linalg import Vectors
 from pyspark.sql import SparkSession
@@ -40,11 +41,7 @@ def session():
 
 
 def _estimator():
-    try:
-        from pyspark.ml.connect.clustering import GaussianMixture
-    except ImportError:
-        from pyspark.ml.clustering import GaussianMixture
-    return GaussianMixture
+    return native_class("pyspark.ml.connect.clustering", "GaussianMixture", "pyspark.ml.clustering")
 
 
 def _vectors(session, sql, name="features"):
