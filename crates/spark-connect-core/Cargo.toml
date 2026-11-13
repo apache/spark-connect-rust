@@ -19,7 +19,7 @@ name = "spark_connect_core"
 spark-connect-proto = { package = "apache-spark-connect-proto", path = "../spark-connect-proto", version = "4.3.0" }
 tonic = { workspace = true, features = ["tls-ring", "tls-native-roots"] }
 prost.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["net", "io-util"] }
 tokio-stream.workspace = true
 futures.workspace = true
 bytes.workspace = true
@@ -36,6 +36,8 @@ sha2 = "0.10"
 # Transport errors that tonic keeps as a status's source, for `RetryPolicy::can_retry`.
 h2 = "0.4"
 hyper = "1"
+# The tokio stream of a channel through a proxy, as tonic's own connector gives it to hyper.
+hyper-util = { version = "0.1", features = ["tokio"] }
 # Grows the stack for the clones and drops of the requests of deep plans.
 stacker = "0.1"
 
