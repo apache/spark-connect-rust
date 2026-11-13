@@ -9,8 +9,8 @@ use spark_connect::readwriter::DataFrameReader;
 use crate::dataframe::PyDataFrame;
 use crate::errors::{not_expected_type, ResultExt};
 use crate::options::{
-    check_keyword_keys, set_option_skip_none, set_options_skip_none, set_reader_kwargs_unset_none,
-    set_reader_option_unset_none, DefaultedOption,
+    check_keyword_keys, coerce_option_value, set_option_skip_none, set_options_skip_none,
+    set_reader_kwargs_unset_none, set_reader_option_unset_none, DefaultedOption,
 };
 
 /// Python wrapper for the batch DataFrameReader.
@@ -30,6 +30,9 @@ pub struct PyDataFrameReader {
     /// The options of the reader, which a shallow copy of it shares, as PySpark's `_options` dict
     /// is shared by the copies of a reader. The core reader holds none of them (see `state`).
     options: std::sync::Arc<crate::dataframe::WriterState<HashMap<String, String>>>,
+    /// The format of `format` when it is not a str, which PySpark keeps as it is and whose
+    /// `DataSource` asserts at `load` ([`reader_format`]). Any other format replaces it.
+    unsent_format: Option<Py<PyAny>>,
 }
 
 impl PyDataFrameReader {
@@ -38,6 +41,7 @@ impl PyDataFrameReader {
         PyDataFrameReader {
             inner: without_options(reader, &options),
             options: std::sync::Arc::new(crate::dataframe::WriterState::new(options)),
+            unsent_format: None,
         }
     }
 
@@ -59,6 +63,7 @@ impl PyDataFrameReader {
     /// Called before the path is checked, as PySpark's `load` sets the format first.
     fn commit(&mut self, r: &DataFrameReader, format: &str) {
         self.set_state(r.clone().format(format));
+        self.unsent_format = None;
     }
 
     /// The DataFrame of `r`, this reader with the options of a call of `json`, `csv` or `xml`
@@ -75,6 +80,8 @@ impl PyDataFrameReader {
         parse_format: spark_connect::plan::ParseFormat,
         path: &Bound<'_, PyAny>,
     ) -> PyResult<PyDataFrame> {
+        // As PySpark's, this sets the format of the reader, which replaces an unsent one.
+        self.unsent_format = None;
         if let Ok(df) = path.extract::<PyRef<'_, PyDataFrame>>() {
             let r = apply_optional_schema(r, schema)?;
             let parsed = r
@@ -105,6 +112,22 @@ fn without_options(reader: DataFrameReader, options: &HashMap<String, String>) -
     options
         .keys()
         .fold(reader, |reader, key| reader.unset_option(key))
+}
+
+/// The reader with the format `source` of PySpark's `format`, and the unsent format that it keeps.
+/// None unsets the format. A str sets it. Any other object is kept as it is, and `load` fails its
+/// `DataSource` assertion with it, as PySpark's `DataSource` takes only a str.
+fn reader_format(
+    reader: DataFrameReader,
+    source: Option<&Bound<'_, PyAny>>,
+) -> (DataFrameReader, Option<Py<PyAny>>) {
+    match source {
+        None => (reader.clear_format(), None),
+        Some(source) => match source.extract::<String>() {
+            Ok(text) => (reader.format(&text), None),
+            Err(_) => (reader.clear_format(), Some(source.clone().unbind())),
+        },
+    }
 }
 
 /// The paths of `path`, a path or a list of them, or None for none, as PySpark's `load` takes
@@ -169,6 +192,70 @@ pub(crate) fn writer_table_name(name: &Bound<'_, PyAny>) -> PyResult<Option<Stri
         return Ok(None);
     }
     crate::str_argument(name).map(Some)
+}
+
+/// The column items of `partitionBy(*cols)` and `clusterBy(*cols)` of a writer, as PySpark's take
+/// them: a list or tuple alone stands for its items, else the arguments are the items.
+pub(crate) fn writer_column_items<'py>(
+    cols: &[Bound<'py, PyAny>],
+) -> PyResult<Vec<Bound<'py, PyAny>>> {
+    match cols {
+        [only]
+            if only.is_instance_of::<pyo3::types::PyList>()
+                || only.is_instance_of::<pyo3::types::PyTuple>() =>
+        {
+            only.try_iter()?.collect::<PyResult<_>>()
+        }
+        _ => Ok(cols.to_vec()),
+    }
+}
+
+/// The column names of the items of a writer column argument, as [`crate::str_argument`] converts
+/// each one, which PySpark sets in a string field of its command at the write. The names that
+/// convert are returned with the first item that does not, which the write fails with.
+pub(crate) fn writer_columns_kept(items: &[Bound<'_, PyAny>]) -> (Vec<String>, Option<Py<PyAny>>) {
+    let mut names = Vec::new();
+    let mut unsent = None;
+    for item in items {
+        match crate::str_argument(item) {
+            Ok(name) => names.push(name),
+            Err(_) => {
+                unsent.get_or_insert_with(|| item.clone().unbind());
+            }
+        }
+    }
+    (names, unsent)
+}
+
+/// The partitioning columns of `partitionBy(*cols)` of a writer, as [`writer_columns_kept`].
+pub(crate) fn writer_partition_columns(
+    cols: &[Bound<'_, PyAny>],
+) -> PyResult<(Vec<String>, Option<Py<PyAny>>)> {
+    Ok(writer_columns_kept(&writer_column_items(cols)?))
+}
+
+/// The save mode of a write whose `mode` is not a str, as PySpark's `WriteOperation.command`
+/// resolves it: `mode.lower()` is one of the four modes, or else UNSUPPORTED_OPERATION of the
+/// mode, as for the bytes of `b"append"`. An object without `lower` raises its AttributeError.
+pub(crate) fn unsent_save_mode(mode: &Bound<'_, PyAny>) -> PyResult<String> {
+    let lowered = mode.call_method0("lower")?;
+    if let Ok(text) = lowered.extract::<String>() {
+        if ["append", "overwrite", "error", "ignore"].contains(&text.as_str()) {
+            return Ok(text);
+        }
+    }
+    // The operation is the mode object itself, which PySpark's message formats as it is.
+    let py = mode.py();
+    let params = PyDict::new(py);
+    params.set_item("operation", mode)?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("errorClass", "UNSUPPORTED_OPERATION")?;
+    kwargs.set_item("messageParameters", params)?;
+    let error = py
+        .import("pyspark.errors")?
+        .getattr("PySparkValueError")?
+        .call((), Some(&kwargs))?;
+    Err(PyErr::from_value(error))
 }
 
 /// The columns of `df.write.bucketBy(numBuckets, col, *cols)` and `sortBy(col, *cols)`, as
@@ -318,18 +405,23 @@ fn apply_optional_schema(
 
 #[pymethods]
 impl PyDataFrameReader {
-    /// The shallow copy of a reader, as PySpark's `copy.copy`: the copy has the same state.
-    fn __copy__(&self) -> PyDataFrameReader {
+    /// The shallow copy of a reader, as PySpark's `copy.copy`: the copy shares the options of
+    /// this reader, and has its own format, which is kept as it is.
+    fn __copy__(&self, py: Python<'_>) -> PyDataFrameReader {
         PyDataFrameReader {
             inner: self.state(),
             options: std::sync::Arc::clone(&self.options),
+            unsent_format: self
+                .unsent_format
+                .as_ref()
+                .map(|format| format.clone_ref(py)),
         }
     }
 
     /// The reduce of a reader, as PySpark's pickle of its session and its state, which
     /// `_of_state` gives back.
     fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyTuple>> {
-        use crate::reduce::{of_state_reduce, str_dict};
+        use crate::reduce::{of_state_reduce, optional_object, str_dict};
 
         let session = crate::session::session_object(py, &self.inner.spark_session())?;
         let args = pyo3::types::PyTuple::new(
@@ -339,13 +431,14 @@ impl PyDataFrameReader {
                 self.inner.get_format().into_pyobject(py)?.into_any(),
                 self.inner.get_schema().into_pyobject(py)?.into_any(),
                 str_dict(py, &self.options.get())?.into_any(),
+                optional_object(py, self.unsent_format.as_ref()),
             ],
         )?;
         of_state_reduce::<PyDataFrameReader>(py, args)
     }
 
     /// A reader of its state, as `__reduce__` gives it: of the session `session`, the format,
-    /// the schema and the options.
+    /// the schema, the options and the format that is kept (`unsent`).
     #[staticmethod]
     fn _of_state(
         py: Python<'_>,
@@ -353,6 +446,7 @@ impl PyDataFrameReader {
         format: Option<String>,
         schema: String,
         options: HashMap<String, String>,
+        unsent: Option<Py<PyAny>>,
     ) -> PyDataFrameReader {
         let mut reader = session.borrow(py).session.read();
         if let Some(format) = format {
@@ -361,7 +455,10 @@ impl PyDataFrameReader {
         if !schema.is_empty() {
             reader = reader.schema(schema);
         }
-        PyDataFrameReader::new(reader.options(options))
+        PyDataFrameReader {
+            unsent_format: unsent,
+            ..PyDataFrameReader::new(reader.options(options))
+        }
     }
 
     /// Set the schema, if any, and the options of `options` that are not None, through its own
@@ -376,13 +473,15 @@ impl PyDataFrameReader {
     }
 
     /// Set the source format (e.g. "parquet", "json", "csv"). As PySpark's, None unsets it, so
-    /// that the server reads its default source.
-    fn format<'py>(mut slf: PyRefMut<'py, Self>, source: Option<&str>) -> PyRefMut<'py, Self> {
-        let state = match source {
-            Some(source) => slf.state().format(source),
-            None => slf.state().clear_format(),
-        };
-        slf.set_state(state);
+    /// that the server reads its default source, and an object that is not a str is kept until
+    /// `load` fails its assertion.
+    fn format<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        source: Option<&Bound<'_, PyAny>>,
+    ) -> PyRefMut<'py, Self> {
+        let (reader, unsent) = reader_format(slf.state(), source);
+        slf.set_state(reader);
+        slf.unsent_format = unsent;
         slf
     }
 
@@ -433,6 +532,17 @@ impl PyDataFrameReader {
         Ok(slf)
     }
 
+    fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
+        if let Some(format) = &self.unsent_format {
+            visit.call(format)?;
+        }
+        Ok(())
+    }
+
+    fn __clear__(&mut self) {
+        self.unsent_format = None;
+    }
+
     /// The configured source format (PySpark Connect's `DataFrameReader._format`).
     #[getter]
     fn _format(&self) -> Option<String> {
@@ -471,20 +581,30 @@ impl PyDataFrameReader {
     fn load(
         &mut self,
         path: Option<&Bound<'_, PyAny>>,
-        format: Option<&str>,
+        format: Option<&Bound<'_, PyAny>>,
         schema: Option<&Bound<'_, PyAny>>,
         options: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyDataFrame> {
-        let mut r = set_reader_kwargs_unset_none(self.state(), options)?;
+        // As PySpark's load, which sets the format, the schema and the options on the reader in
+        // turn, each one kept when a later one fails. CPython checks the keyword keys first.
+        check_keyword_keys(options)?;
+        let mut r = self.state();
         if let Some(f) = format {
-            r = r.format(f);
+            let (reader, unsent) = reader_format(r, Some(f));
+            r = reader;
+            self.unsent_format = unsent;
         }
+        self.set_state(r.clone());
         if let Some(s) = schema {
             r = apply_reader_schema(r, s)?;
         }
-        // PySpark's one-shot load sets format/schema/options on the reader itself, before it
-        // checks the path.
         self.set_state(r.clone());
+        r = set_reader_kwargs_unset_none(r, options)?;
+        // Then its `DataSource` asserts the format, which precedes the check of the paths.
+        self.set_state(r.clone());
+        if self.unsent_format.is_some() {
+            return Err(pyo3::exceptions::PyAssertionError::new_err(()));
+        }
         let paths = path.map(paths_of).transpose()?.unwrap_or_default();
         Ok(PyDataFrame::new(r.load_paths(paths)))
     }
@@ -845,8 +965,8 @@ impl PyDataFrameReader {
     #[allow(non_snake_case, clippy::too_many_arguments)]
     fn jdbc(
         &mut self,
-        url: &str,
-        table: &str,
+        url: &Bound<'_, PyAny>,
+        table: &Bound<'_, PyAny>,
         column: Option<&Bound<'_, PyAny>>,
         lowerBound: Option<&Bound<'_, PyAny>>,
         upperBound: Option<&Bound<'_, PyAny>>,
@@ -855,6 +975,7 @@ impl PyDataFrameReader {
         properties: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyDataFrame> {
         self.set_state(self.state().format("jdbc"));
+        self.unsent_format = None;
         let mut r = self.state();
         let predicates = match column {
             Some(column) => {
@@ -894,9 +1015,25 @@ impl PyDataFrameReader {
                 r = set_option_skip_none(r, &crate::str_argument(&key)?, Some(&value))?;
             }
         }
-        // PySpark's jdbc also leaves url/dbtable on the reader, before it asserts the predicates.
-        self.set_state(r.clone().option("url", url).option("dbtable", table));
+        // PySpark's jdbc also sets url and dbtable as options, `options(url=url, dbtable=table)`,
+        // which leaves an option of None unset, before it asserts the predicates.
+        r = set_reader_option_unset_none(r, "url", url)?;
+        r = set_reader_option_unset_none(r, "dbtable", table)?;
+        self.set_state(r.clone());
         let predicates = predicates.map(jdbc_predicates).transpose()?;
-        Ok(PyDataFrame::new(r.jdbc(url, table, predicates)))
+        let url = coerce_option_value(url)?;
+        let table = coerce_option_value(table)?;
+        Ok(PyDataFrame::new(match (url, table, predicates) {
+            (Some(url), Some(table), predicates) => r.jdbc(&url, &table, predicates),
+            // Without predicates, the read is that of the options alone, which leave a None url or
+            // dbtable unset, as the core's `jdbc` needs both as strs.
+            (_, _, None) => r.load_paths(Vec::<String>::new()),
+            // Known residual: with predicates, the core's `jdbc` sets a None url or dbtable as "".
+            (url, table, predicates) => r.jdbc(
+                &url.unwrap_or_default(),
+                &table.unwrap_or_default(),
+                predicates,
+            ),
+        }))
     }
 }

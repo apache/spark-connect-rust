@@ -1931,6 +1931,13 @@ def test_bool_stream_options_and_bytes_table_options_are_read_by_the_server(sess
         session.sql("DROP TABLE IF EXISTS e2e_bytes_table_option")
 
 
+def test_writer_format_takes_bytes_and_writes_as_its_str(session):
+    # As PySpark's WriteOperation, which sends the source as its UTF-8 text, so that the noop
+    # source of bytes is written by the server as that of a str.
+    session.range(1).write.format(b"noop").mode("overwrite").save()
+    session.range(1).write.format("noop").mode("overwrite").save()
+
+
 def test_reader_none_unsets_an_option_and_external_description_is_the_comment(session, tmp_path):
     # As PySpark's: DataFrameReader.option, options and load unset an option given None, while
     # the format methods skip None and keep it. createExternalTable's description is the
