@@ -20,6 +20,7 @@ import json
 import multiprocessing
 import re
 import time
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from queue import Empty, Queue
@@ -291,9 +292,20 @@ def serve(connection):
         def __init__(self):
             self.listener_condition = Condition()
             self.listener_epoch = 0
-            # The sessions whose ExecutePlanRequests are answered but no longer recorded (see
+            # The sessions whose requests are answered but no longer recorded (see
             # RemoteService.forget_session). A reset keeps them.
             self.forgotten_sessions = set()
+
+        def is_recorded(self, request, kind):
+            # Whether the server records the request, of the kind that it counts it by. A request
+            # of a forgotten session is answered, and only counted in `forgotten_requests`.
+            # Each request message has session_id=1, as base.proto declares.
+            session_id = parse_message(request).get(1, [b""])[0].decode()
+            with self.listener_condition:
+                if session_id not in self.forgotten_sessions:
+                    return True
+                self.forgotten_requests[kind] += 1
+                return False
 
         def reset(self):
             # Back to the state of a new server: the tests of a module share one.
@@ -311,8 +323,10 @@ def serve(connection):
             self.local = None
             self.local_failure = False
             self.execute_requests = []
-            # The ExecutePlanRequests of forgotten sessions that were answered.
-            self.forgotten_requests = 0
+            # The requests of forgotten sessions that were answered, by kind: "execute", "analyze",
+            # "config", "release_session", "release_execute", "reattach", "interrupt", "clone",
+            # "fetch_error_details".
+            self.forgotten_requests = Counter()
             self.release_execute_requests = []
             self.execute_payload = b""
             self.execute_payloads = None
@@ -392,8 +406,9 @@ def serve(connection):
             return message_field(1, session_id) + self._analyze(request, context)
 
         def _analyze(self, request, context):
-            self.calls += 1
-            self.analyze_requests.append(request)
+            if self.is_recorded(request, "analyze"):
+                self.calls += 1
+                self.analyze_requests.append(request)
             with self.listener_condition:
                 response_gate = self.response_gate
                 blocked = self.block_response
@@ -532,7 +547,8 @@ def serve(connection):
 
         def release_session(self, request, context):
             with self.listener_condition:
-                self.release_session_calls += 1
+                if self.is_recorded(request, "release_session"):
+                    self.release_session_calls += 1
                 # Opt in only for the terminal callback-RPC regression. Ordinary tests
                 # retain independent response and session-release behavior.
                 if self.release_session_unblocks_execute:
@@ -581,16 +597,13 @@ def serve(connection):
 
         def execute(self, request, context):
             fields = parse_message(request)
-            # ExecutePlanRequest.session_id=1.
-            request_session = fields.get(1, [b""])[0].decode()
             with self.listener_condition:
                 # Capture these before yielding: an earlier call can resume after reset.
                 block_result_complete = self.block_result_complete
                 result_complete_operations = self.result_complete_operations
-                if request_session in self.forgotten_sessions:
-                    self.forgotten_requests += 1
-                else:
-                    # Counter waiters on another thread must see both records when ready.
+                # Counter waiters on another thread must see both records when ready.
+                recorded = self.is_recorded(request, "execute")
+                if recorded:
                     self.execute_requests.append(request)
                     self.rpc_events.append("execute")
                     self.execute_calls += 1
@@ -677,7 +690,7 @@ def serve(connection):
                 return
             if blocked:
                 with self.listener_condition:
-                    if execute_epoch == self.listener_epoch:
+                    if recorded and execute_epoch == self.listener_epoch:
                         self.execute_started += 1
                         self.listener_condition.notify_all()
                 # ExecutePlanRequest.operation_id=6.
@@ -767,12 +780,14 @@ def serve(connection):
             return b"".join(message_field(3, warning) for warning in self.config_warnings)
 
         def reattach_execute(self, request, context):
-            self.reattach_requests.append(request)
+            if self.is_recorded(request, "reattach"):
+                self.reattach_requests.append(request)
             # ExecutePlanResponse.result_complete=14.
             yield message_field(14, b"")
 
         def release_execute(self, request, context):
-            self.release_execute_requests.append(request)
+            if self.is_recorded(request, "release_execute"):
+                self.release_execute_requests.append(request)
             return b""
 
         def wait_for_response(self, gate, operation_id, timeout):
@@ -790,7 +805,8 @@ def serve(connection):
             # InterruptRequest.session_id=1, interrupt_type=4, operation_id=6; InterruptResponse
             # .session_id=1, interrupted_ids=2.
             fields = parse_message(request)
-            self.interrupt_requests.append(request)
+            if self.is_recorded(request, "interrupt"):
+                self.interrupt_requests.append(request)
             if self.interrupt_failure:
                 code, message = self.interrupt_failure
                 context.abort(getattr(grpc.StatusCode, code), message)
@@ -802,7 +818,8 @@ def serve(connection):
 
         def fetch_error_details(self, request, context):
             # FetchErrorDetailsRequest.error_id=3.
-            self.fetched_error_ids.append(parse_message(request)[3][0].decode())
+            if self.is_recorded(request, "fetch_error_details"):
+                self.fetched_error_ids.append(parse_message(request)[3][0].decode())
             return self.error_details
 
         # CloneSession records the requests and answers with the new session id, the one
@@ -811,7 +828,8 @@ def serve(connection):
         cloned_session_id = "00000000-0000-4000-8000-000000000002"
 
         def clone_session(self, request, context):
-            self.clone_requests.append(request)
+            if self.is_recorded(request, "clone"):
+                self.clone_requests.append(request)
             # CloneSessionRequest.session_id=1, new_session_id=4; CloneSessionResponse
             # .session_id=1, new_session_id=3.
             fields = parse_message(request)
@@ -827,7 +845,9 @@ def serve(connection):
             lookup = PLAN_COMPRESSION_LOOKUP in request
             if lookup:
                 self.plan_compression_lookups += 1
-            if not lookup:
+            # The requests of a forgotten session are answered, but not recorded below.
+            recorded = not lookup and self.is_recorded(request, "config")
+            if recorded:
                 self.config_requests.append(request)
                 self.rpc_events.append("config")
             if lookup and self.plan_compression_lookup_delay:
@@ -854,12 +874,14 @@ def serve(connection):
                     value = pair.get(2, [None])[0]
                     value = None if value is None else value.decode()
                     pairs.append((pair.get(1, [b""])[0].decode(), value))
-                self.set_confs.append((pairs, set_request.get(2, [None])[0]))
+                if recorded:
+                    self.set_confs.append((pairs, set_request.get(2, [None])[0]))
                 return message_field(1, request[1][0]) + self.warnings_fields()
             if 6 in operation:
                 # Operation.unset=6: Unset.keys=1.
                 keys = parse_message(operation[6][0]).get(1, [])
-                self.unset_confs.append([key.decode() for key in keys])
+                if recorded:
+                    self.unset_confs.append([key.decode() for key in keys])
                 return message_field(1, request[1][0]) + self.warnings_fields()
             if 3 in operation:
                 # Operation.get_with_default=3: GetWithDefault.pairs=1 (KeyValue.key=1,
@@ -869,7 +891,8 @@ def serve(connection):
                 for pair in parse_message(operation[3][0]).get(1, []):
                     pair = parse_message(pair)
                     key = pair[1][0].decode()
-                    self.read_confs.append(key)
+                    if recorded:
+                        self.read_confs.append(key)
                     default = pair.get(2, [None])[0]
                     default = None if default is None else default.decode()
                     value = self.confs.get(key, default)
@@ -884,7 +907,7 @@ def serve(connection):
                     "only Get, GetWithDefault, Set and Unset are served",
                 )
             keys = [key.decode() for key in parse_message(operation[2][0]).get(1, [])]
-            if not lookup:
+            if recorded:
                 self.read_confs.extend(keys)
             confs = {**self.default_confs, **self.confs}
             if any(key not in confs for key in keys):
@@ -1016,10 +1039,11 @@ class RemoteService:
         self.connection.recv()
 
     def forget_session(self, session_id):
-        # From now on, the server answers the ExecutePlanRequests of the session but does not
+        # From now on, the server answers the requests of the session of every kind but does not
         # record them, for a test that ends with the session: a request that it sent without
-        # waiting for it, such as the Delete of a released model, can reach the server during a
-        # later test, which would count it as one of its own.
+        # waiting for it, such as the Delete of a released model or a ReleaseExecute, can reach
+        # the server during a later test, which would count it as one of its own. The server
+        # counts them in `forgotten_requests`, by kind.
         self.connection.send(("forget_session", session_id))
         assert self.connection.poll(10), "Mock server did not respond"
         self.connection.recv()
