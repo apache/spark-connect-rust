@@ -69,7 +69,7 @@ use std::process::{Command, Stdio};
 use base64::Engine as _;
 
 use crate::column::{expressions_of, Column};
-use crate::expression::ExpressionNode;
+use crate::expression::ExpressionSpec;
 use crate::types::DataType;
 use crate::udf::{eval_type, CommonInlineUserDefinedFunctionExpression, PythonUDFPayload};
 use spark_connect_core::error::{Result, SparkError};
@@ -461,7 +461,7 @@ impl UserDefinedFunction {
     pub fn call<C: Into<Column>>(&self, args: impl IntoIterator<Item = C>) -> Result<Column> {
         let expr = self.to_expression(args)?;
         Ok(Column::new(
-            ExpressionNode::CommonInlineUserDefinedFunction(Box::new(expr)).into(),
+            ExpressionSpec::CommonInlineUserDefinedFunction(Box::new(expr)).into(),
         ))
     }
 

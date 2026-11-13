@@ -7,8 +7,8 @@ use std::ops::{Add, BitAnd, BitOr, Div, Mul, Not, Rem, Sub};
 use spark_connect_proto as proto;
 
 use crate::expression::{
-    Alias, CaseWhen, Cast, CastEvalMode, Expression, ExpressionNode, ExtractValue, FrameBoundary,
-    LiteralExpression, SortOrder, UpdateFieldsExpr, WindowExpressionWrapper,
+    Alias, CaseWhen, Cast, CastEvalMode, Expression, ExpressionKind, ExpressionSpec, ExtractValue,
+    FrameBoundary, LiteralExpression, SortOrder, UpdateFieldsExpr, WindowExpressionWrapper,
 };
 use crate::types::DataType;
 use crate::window::WindowSpec;
@@ -36,7 +36,7 @@ impl Column {
     /// Mirrors `pyspark.sql.column.Column.alias`.
     pub fn alias(self, name: &str) -> Column {
         Column {
-            expr: ExpressionNode::Alias(Box::new(Alias::new(self.expr, name))).into(),
+            expr: ExpressionSpec::Alias(Box::new(Alias::new(self.expr, name))).into(),
         }
     }
 
@@ -49,7 +49,7 @@ impl Column {
     ) -> Column {
         let json = serde_json::to_string(&metadata).unwrap_or_else(|_| "{}".to_string());
         Column {
-            expr: ExpressionNode::Alias(Box::new(Alias::new(self.expr, name).with_metadata(json)))
+            expr: ExpressionSpec::Alias(Box::new(Alias::new(self.expr, name).with_metadata(json)))
                 .into(),
         }
     }
@@ -58,7 +58,7 @@ impl Column {
     /// `explode`. Mirrors Scala's `Column.as(aliases: Seq[String])`.
     pub fn aliases<S: Into<String>>(self, names: impl IntoIterator<Item = S>) -> Column {
         Column {
-            expr: ExpressionNode::Alias(Box::new(Alias::with_names(self.expr, names))).into(),
+            expr: ExpressionSpec::Alias(Box::new(Alias::with_names(self.expr, names))).into(),
         }
     }
 
@@ -70,7 +70,7 @@ impl Column {
     /// Mirrors `pyspark.sql.column.Column.cast`.
     pub fn cast(self, to_type: DataType) -> Column {
         Column {
-            expr: ExpressionNode::Cast(Box::new(Cast::new(self.expr, to_type))).into(),
+            expr: ExpressionSpec::Cast(Box::new(Cast::new(self.expr, to_type))).into(),
         }
     }
 
@@ -83,14 +83,14 @@ impl Column {
     /// `col("x").cast("string")` → `cast { type_str: "string" }`.
     pub fn cast_str(self, type_name: &str) -> Column {
         Column {
-            expr: ExpressionNode::Cast(Box::new(Cast::new_str(self.expr, type_name))).into(),
+            expr: ExpressionSpec::Cast(Box::new(Cast::new_str(self.expr, type_name))).into(),
         }
     }
 
     /// Mirrors `pyspark.sql.column.Column.try_cast`.
     pub fn try_cast(self, to_type: DataType) -> Column {
         Column {
-            expr: ExpressionNode::Cast(Box::new(
+            expr: ExpressionSpec::Cast(Box::new(
                 Cast::new(self.expr, to_type).with_eval_mode(CastEvalMode::Try),
             ))
             .into(),
@@ -100,7 +100,7 @@ impl Column {
     /// `Column.try_cast` with a DDL type string.
     pub fn try_cast_str(self, type_name: &str) -> Column {
         Column {
-            expr: ExpressionNode::Cast(Box::new(
+            expr: ExpressionSpec::Cast(Box::new(
                 Cast::new_str(self.expr, type_name).with_eval_mode(CastEvalMode::Try),
             ))
             .into(),
@@ -235,16 +235,16 @@ impl Column {
     /// `struct(...)` of columns, whether they are in the rows of `df` of as many columns.
     /// Mirrors `Column.isin(df)`.
     pub fn isin_subquery(self, df: &crate::dataframe::DataFrame) -> Column {
-        let values = match self.expr.node() {
-            ExpressionNode::UnresolvedFunction(function) if function.name == "struct" => {
-                function.args.clone()
+        let values = match self.expr.node().kind() {
+            ExpressionKind::UnresolvedFunction { name, .. } if name == "struct" => {
+                self.expr.node().children().to_vec()
             }
             _ => vec![self.expr],
         };
         let mut subquery = df.subquery(crate::expression::SubqueryType::In);
         subquery.in_subquery_values = values;
         Column {
-            expr: ExpressionNode::Subquery(Box::new(subquery)).into(),
+            expr: ExpressionSpec::Subquery(Box::new(subquery)).into(),
         }
     }
 
@@ -252,7 +252,7 @@ impl Column {
     /// a struct-typed column.
     pub fn with_field(self, field_name: &str, value: Column) -> Column {
         Column {
-            expr: ExpressionNode::UpdateFields(Box::new(UpdateFieldsExpr::new(
+            expr: ExpressionSpec::UpdateFields(Box::new(UpdateFieldsExpr::new(
                 self.expr,
                 field_name,
                 Some(value.expr),
@@ -266,7 +266,7 @@ impl Column {
     pub fn drop_fields<S: Into<String>>(self, field_names: impl IntoIterator<Item = S>) -> Column {
         let mut expr = self.expr;
         for name in field_names {
-            expr = ExpressionNode::UpdateFields(Box::new(UpdateFieldsExpr::new(expr, name, None)))
+            expr = ExpressionSpec::UpdateFields(Box::new(UpdateFieldsExpr::new(expr, name, None)))
                 .into();
         }
         Column { expr }
@@ -294,14 +294,14 @@ impl Column {
     /// Mirrors `pyspark.sql.column.Column.asc_nulls_first`.
     pub fn asc_nulls_first(self) -> Column {
         Column {
-            expr: ExpressionNode::SortOrder(Box::new(SortOrder::asc_nulls_first(self.expr))).into(),
+            expr: ExpressionSpec::SortOrder(Box::new(SortOrder::asc_nulls_first(self.expr))).into(),
         }
     }
 
     /// Mirrors `pyspark.sql.column.Column.asc_nulls_last`.
     pub fn asc_nulls_last(self) -> Column {
         Column {
-            expr: ExpressionNode::SortOrder(Box::new(SortOrder::asc_nulls_last(self.expr))).into(),
+            expr: ExpressionSpec::SortOrder(Box::new(SortOrder::asc_nulls_last(self.expr))).into(),
         }
     }
 
@@ -313,7 +313,7 @@ impl Column {
     /// Mirrors `pyspark.sql.column.Column.desc_nulls_first`.
     pub fn desc_nulls_first(self) -> Column {
         Column {
-            expr: ExpressionNode::SortOrder(Box::new(SortOrder::desc_nulls_first(self.expr)))
+            expr: ExpressionSpec::SortOrder(Box::new(SortOrder::desc_nulls_first(self.expr)))
                 .into(),
         }
     }
@@ -321,27 +321,23 @@ impl Column {
     /// Mirrors `pyspark.sql.column.Column.desc_nulls_last`.
     pub fn desc_nulls_last(self) -> Column {
         Column {
-            expr: ExpressionNode::SortOrder(Box::new(SortOrder::desc_nulls_last(self.expr))).into(),
+            expr: ExpressionSpec::SortOrder(Box::new(SortOrder::desc_nulls_last(self.expr))).into(),
         }
     }
 
     /// Mirrors `pyspark.sql.column.Column.when`.
     pub fn when(self, condition: Column, value: Column) -> Column {
-        // If we already have a CaseWhen, add a branch
-        if let ExpressionNode::CaseWhen(case_when) = self.expr.node() {
-            let mut branches = case_when.branches.clone();
-            branches.push((condition.expr, value.expr));
+        if matches!(self.expr.node().kind(), ExpressionKind::CaseWhen { .. }) {
+            let ExpressionSpec::CaseWhen(mut case_when) = self.expr.to_spec() else {
+                unreachable!("CaseWhen kind reconstructs a CaseWhen specification");
+            };
+            case_when.branches.push((condition.expr, value.expr));
             Column {
-                expr: ExpressionNode::CaseWhen(Box::new(CaseWhen {
-                    branches,
-                    else_expr: case_when.else_expr.clone(),
-                }))
-                .into(),
+                expr: ExpressionSpec::CaseWhen(case_when).into(),
             }
         } else {
-            // Start a new CaseWhen
             Column {
-                expr: ExpressionNode::CaseWhen(Box::new(CaseWhen {
+                expr: ExpressionSpec::CaseWhen(Box::new(CaseWhen {
                     branches: vec![(condition.expr, value.expr)],
                     else_expr: None,
                 }))
@@ -352,13 +348,13 @@ impl Column {
 
     /// Mirrors `pyspark.sql.column.Column.otherwise`.
     pub fn otherwise(self, value: Column) -> Column {
-        if let ExpressionNode::CaseWhen(case_when) = self.expr.node() {
+        if matches!(self.expr.node().kind(), ExpressionKind::CaseWhen { .. }) {
+            let ExpressionSpec::CaseWhen(mut case_when) = self.expr.to_spec() else {
+                unreachable!("CaseWhen kind reconstructs a CaseWhen specification");
+            };
+            case_when.else_expr = Some(value.expr);
             Column {
-                expr: ExpressionNode::CaseWhen(Box::new(CaseWhen {
-                    branches: case_when.branches.clone(),
-                    else_expr: Some(value.expr),
-                }))
-                .into(),
+                expr: ExpressionSpec::CaseWhen(case_when).into(),
             }
         } else {
             Column { expr: self.expr }
@@ -370,7 +366,7 @@ impl Column {
     pub fn get_field(self, name: &str) -> Column {
         let extraction = Expression::literal(LiteralExpression::string(name));
         Column {
-            expr: ExpressionNode::UnresolvedExtractValue(Box::new(ExtractValue::new(
+            expr: ExpressionSpec::UnresolvedExtractValue(Box::new(ExtractValue::new(
                 self.expr, extraction,
             )))
             .into(),
@@ -381,7 +377,7 @@ impl Column {
     /// extraction. Builds an `UnresolvedExtractValue`.
     pub fn get_item(self, key: Column) -> Column {
         Column {
-            expr: ExpressionNode::UnresolvedExtractValue(Box::new(ExtractValue::new(
+            expr: ExpressionSpec::UnresolvedExtractValue(Box::new(ExtractValue::new(
                 self.expr, key.expr,
             )))
             .into(),
@@ -454,7 +450,7 @@ impl Column {
         );
 
         Column {
-            expr: ExpressionNode::WindowExpression(Box::new(window_expr)).into(),
+            expr: ExpressionSpec::WindowExpression(Box::new(window_expr)).into(),
         }
     }
 
@@ -673,7 +669,7 @@ impl From<Expression> for Column {
 impl From<SortOrder> for Column {
     fn from(sort: SortOrder) -> Column {
         Column {
-            expr: ExpressionNode::SortOrder(Box::new(sort)).into(),
+            expr: ExpressionSpec::SortOrder(Box::new(sort)).into(),
         }
     }
 }
@@ -734,7 +730,7 @@ pub fn lit_boolean(value: bool) -> Column {
 /// branches with `Column::when` and finish with `Column::otherwise`.
 pub fn when(condition: Column, value: Column) -> Column {
     Column {
-        expr: ExpressionNode::CaseWhen(Box::new(CaseWhen::new(vec![(condition.expr, value.expr)])))
+        expr: ExpressionSpec::CaseWhen(Box::new(CaseWhen::new(vec![(condition.expr, value.expr)])))
             .into(),
     }
 }
@@ -759,13 +755,16 @@ mod tests {
     #[test]
     fn test_col_creation() {
         let c = col("x");
-        assert!(matches!(c.expr.node(), ExpressionNode::ColumnReference(_)));
+        assert!(matches!(
+            c.expr.node().kind(),
+            ExpressionKind::ColumnReference(_)
+        ));
     }
 
     #[test]
     fn test_lit_creation() {
         let c = lit(42);
-        assert!(matches!(c.expr.node(), ExpressionNode::Literal(_)));
+        assert!(matches!(c.expr.node().kind(), ExpressionKind::Literal(_)));
     }
 
     #[test]
@@ -774,8 +773,8 @@ mod tests {
         let c2 = lit(1);
         let result = c1.add(c2);
         assert!(matches!(
-            result.expr.node(),
-            ExpressionNode::UnresolvedFunction(_)
+            result.expr.node().kind(),
+            ExpressionKind::UnresolvedFunction { .. }
         ));
     }
 
@@ -783,7 +782,10 @@ mod tests {
     fn test_alias() {
         let c = col("x");
         let aliased = c.alias("y");
-        assert!(matches!(aliased.expr.node(), ExpressionNode::Alias(_)));
+        assert!(matches!(
+            aliased.expr.node().kind(),
+            ExpressionKind::Alias { .. }
+        ));
     }
 
     #[test]
@@ -792,7 +794,10 @@ mod tests {
         let casted = c.cast(DataType::String {
             collation: "UTF8_BINARY".to_string(),
         });
-        assert!(matches!(casted.expr.node(), ExpressionNode::Cast(_)));
+        assert!(matches!(
+            casted.expr.node().kind(),
+            ExpressionKind::Cast { .. }
+        ));
     }
 
     #[test]
@@ -803,43 +808,43 @@ mod tests {
         // Test eq
         let result = c1.clone().eq(c2.clone());
         assert!(matches!(
-            result.expr.node(),
-            ExpressionNode::UnresolvedFunction(_)
+            result.expr.node().kind(),
+            ExpressionKind::UnresolvedFunction { .. }
         ));
 
         // Test ne
         let result = col("a").ne(col("b"));
         assert!(matches!(
-            result.expr.node(),
-            ExpressionNode::UnresolvedFunction(_)
+            result.expr.node().kind(),
+            ExpressionKind::UnresolvedFunction { .. }
         ));
 
         // Test gt
         let result = col("a").gt(col("b"));
         assert!(matches!(
-            result.expr.node(),
-            ExpressionNode::UnresolvedFunction(_)
+            result.expr.node().kind(),
+            ExpressionKind::UnresolvedFunction { .. }
         ));
 
         // Test lt
         let result = col("a").lt(col("b"));
         assert!(matches!(
-            result.expr.node(),
-            ExpressionNode::UnresolvedFunction(_)
+            result.expr.node().kind(),
+            ExpressionKind::UnresolvedFunction { .. }
         ));
 
         // Test ge
         let result = col("a").ge(col("b"));
         assert!(matches!(
-            result.expr.node(),
-            ExpressionNode::UnresolvedFunction(_)
+            result.expr.node().kind(),
+            ExpressionKind::UnresolvedFunction { .. }
         ));
 
         // Test le
         let result = col("a").le(col("b"));
         assert!(matches!(
-            result.expr.node(),
-            ExpressionNode::UnresolvedFunction(_)
+            result.expr.node().kind(),
+            ExpressionKind::UnresolvedFunction { .. }
         ));
     }
 
@@ -848,29 +853,29 @@ mod tests {
         // Test sub
         let result = col("a").sub(col("b"));
         assert!(matches!(
-            result.expr.node(),
-            ExpressionNode::UnresolvedFunction(_)
+            result.expr.node().kind(),
+            ExpressionKind::UnresolvedFunction { .. }
         ));
 
         // Test mul
         let result = col("a").mul(col("b"));
         assert!(matches!(
-            result.expr.node(),
-            ExpressionNode::UnresolvedFunction(_)
+            result.expr.node().kind(),
+            ExpressionKind::UnresolvedFunction { .. }
         ));
 
         // Test div
         let result = col("a").div(col("b"));
         assert!(matches!(
-            result.expr.node(),
-            ExpressionNode::UnresolvedFunction(_)
+            result.expr.node().kind(),
+            ExpressionKind::UnresolvedFunction { .. }
         ));
 
         // Test modulo
         let result = col("a").modulo(col("b"));
         assert!(matches!(
-            result.expr.node(),
-            ExpressionNode::UnresolvedFunction(_)
+            result.expr.node().kind(),
+            ExpressionKind::UnresolvedFunction { .. }
         ));
     }
 
@@ -879,29 +884,29 @@ mod tests {
         // Test and
         let result = col("a").and(col("b"));
         assert!(matches!(
-            result.expr.node(),
-            ExpressionNode::UnresolvedFunction(_)
+            result.expr.node().kind(),
+            ExpressionKind::UnresolvedFunction { .. }
         ));
 
         // Test or
         let result = col("a").or(col("b"));
         assert!(matches!(
-            result.expr.node(),
-            ExpressionNode::UnresolvedFunction(_)
+            result.expr.node().kind(),
+            ExpressionKind::UnresolvedFunction { .. }
         ));
 
         // Test not
         let result = col("a").not();
         assert!(matches!(
-            result.expr.node(),
-            ExpressionNode::UnresolvedFunction(_)
+            result.expr.node().kind(),
+            ExpressionKind::UnresolvedFunction { .. }
         ));
 
         // Test neg
         let result = col("a").neg();
         assert!(matches!(
-            result.expr.node(),
-            ExpressionNode::UnresolvedFunction(_)
+            result.expr.node().kind(),
+            ExpressionKind::UnresolvedFunction { .. }
         ));
     }
 
@@ -913,57 +918,57 @@ mod tests {
         // Test Add trait
         let result = c1.clone() + c2.clone();
         assert!(matches!(
-            result.expr.node(),
-            ExpressionNode::UnresolvedFunction(_)
+            result.expr.node().kind(),
+            ExpressionKind::UnresolvedFunction { .. }
         ));
 
         // Test Sub trait
         let result = col("a") - col("b");
         assert!(matches!(
-            result.expr.node(),
-            ExpressionNode::UnresolvedFunction(_)
+            result.expr.node().kind(),
+            ExpressionKind::UnresolvedFunction { .. }
         ));
 
         // Test Mul trait
         let result = col("a") * col("b");
         assert!(matches!(
-            result.expr.node(),
-            ExpressionNode::UnresolvedFunction(_)
+            result.expr.node().kind(),
+            ExpressionKind::UnresolvedFunction { .. }
         ));
 
         // Test Div trait
         let result = col("a") / col("b");
         assert!(matches!(
-            result.expr.node(),
-            ExpressionNode::UnresolvedFunction(_)
+            result.expr.node().kind(),
+            ExpressionKind::UnresolvedFunction { .. }
         ));
 
         // Test Rem trait
         let result = col("a") % col("b");
         assert!(matches!(
-            result.expr.node(),
-            ExpressionNode::UnresolvedFunction(_)
+            result.expr.node().kind(),
+            ExpressionKind::UnresolvedFunction { .. }
         ));
 
         // Test BitAnd trait
         let result = col("a") & col("b");
         assert!(matches!(
-            result.expr.node(),
-            ExpressionNode::UnresolvedFunction(_)
+            result.expr.node().kind(),
+            ExpressionKind::UnresolvedFunction { .. }
         ));
 
         // Test BitOr trait
         let result = col("a") | col("b");
         assert!(matches!(
-            result.expr.node(),
-            ExpressionNode::UnresolvedFunction(_)
+            result.expr.node().kind(),
+            ExpressionKind::UnresolvedFunction { .. }
         ));
 
         // Test Not trait
         let result = !col("a");
         assert!(matches!(
-            result.expr.node(),
-            ExpressionNode::UnresolvedFunction(_)
+            result.expr.node().kind(),
+            ExpressionKind::UnresolvedFunction { .. }
         ));
     }
 
@@ -971,16 +976,25 @@ mod tests {
     fn test_from_implementations() {
         // Test From<&str>
         let c1: Column = "x".into();
-        assert!(matches!(c1.expr.node(), ExpressionNode::ColumnReference(_)));
+        assert!(matches!(
+            c1.expr.node().kind(),
+            ExpressionKind::ColumnReference(_)
+        ));
 
         // Test From<String>
         let c2: Column = "y".to_string().into();
-        assert!(matches!(c2.expr.node(), ExpressionNode::ColumnReference(_)));
+        assert!(matches!(
+            c2.expr.node().kind(),
+            ExpressionKind::ColumnReference(_)
+        ));
 
         // Test From<&String>
         let s = "z".to_string();
         let c3: Column = (&s).into();
-        assert!(matches!(c3.expr.node(), ExpressionNode::ColumnReference(_)));
+        assert!(matches!(
+            c3.expr.node().kind(),
+            ExpressionKind::ColumnReference(_)
+        ));
     }
 
     #[test]
@@ -1022,36 +1036,36 @@ mod tests {
         // Test lit with small number (fits in i32)
         let c = lit(42);
         assert!(matches!(
-            c.expr.node(),
-            ExpressionNode::Literal(LiteralExpression::Integer(_))
+            c.expr.node().kind(),
+            ExpressionKind::Literal(LiteralExpression::Integer(_))
         ));
 
         // Test lit with large number (needs i64)
         let c = lit(5_000_000_000i64);
         assert!(matches!(
-            c.expr.node(),
-            ExpressionNode::Literal(LiteralExpression::Long(_))
+            c.expr.node().kind(),
+            ExpressionKind::Literal(LiteralExpression::Long(_))
         ));
 
         // Test lit_string
         let c = lit_string("hello");
         assert!(matches!(
-            c.expr.node(),
-            ExpressionNode::Literal(LiteralExpression::String(_))
+            c.expr.node().kind(),
+            ExpressionKind::Literal(LiteralExpression::String(_))
         ));
 
         // Test lit_double
         let c = lit_double(3.14);
         assert!(matches!(
-            c.expr.node(),
-            ExpressionNode::Literal(LiteralExpression::Double(_))
+            c.expr.node().kind(),
+            ExpressionKind::Literal(LiteralExpression::Double(_))
         ));
 
         // Test lit_boolean
         let c = lit_boolean(true);
         assert!(matches!(
-            c.expr.node(),
-            ExpressionNode::Literal(LiteralExpression::Boolean(_))
+            c.expr.node().kind(),
+            ExpressionKind::Literal(LiteralExpression::Boolean(_))
         ));
     }
 
@@ -1060,18 +1074,24 @@ mod tests {
         // Test when
         let cond = col("x").gt(lit(5));
         let result = when(cond, lit(1));
-        assert!(matches!(result.expr.node(), ExpressionNode::CaseWhen(_)));
+        assert!(matches!(
+            result.expr.node().kind(),
+            ExpressionKind::CaseWhen { .. }
+        ));
 
         // Test when with otherwise
         let cond2 = col("y").lt(lit(10));
         let result2 = result.when(cond2, lit(2));
-        assert!(matches!(result2.expr.node(), ExpressionNode::CaseWhen(_)));
+        assert!(matches!(
+            result2.expr.node().kind(),
+            ExpressionKind::CaseWhen { .. }
+        ));
 
         // Test otherwise
         let final_result = result2.otherwise(lit(99));
         assert!(matches!(
-            final_result.expr.node(),
-            ExpressionNode::CaseWhen(_)
+            final_result.expr.node().kind(),
+            ExpressionKind::CaseWhen { .. }
         ));
     }
 
@@ -1080,15 +1100,15 @@ mod tests {
         // Test is_null
         let result = col("a").is_null();
         assert!(matches!(
-            result.expr.node(),
-            ExpressionNode::UnresolvedFunction(_)
+            result.expr.node().kind(),
+            ExpressionKind::UnresolvedFunction { .. }
         ));
 
         // Test is_not_null
         let result = col("a").is_not_null();
         assert!(matches!(
-            result.expr.node(),
-            ExpressionNode::UnresolvedFunction(_)
+            result.expr.node().kind(),
+            ExpressionKind::UnresolvedFunction { .. }
         ));
     }
 
@@ -1097,8 +1117,8 @@ mod tests {
         // Test get_item
         let result = col("array").get_item(lit(0));
         assert!(matches!(
-            result.expr.node(),
-            ExpressionNode::UnresolvedExtractValue(_)
+            result.expr.node().kind(),
+            ExpressionKind::UnresolvedExtractValue
         ));
     }
 
@@ -1106,8 +1126,8 @@ mod tests {
     fn test_between() {
         let result = col("a").between(lit(1), lit(10));
         assert!(matches!(
-            result.expr.node(),
-            ExpressionNode::UnresolvedFunction(_)
+            result.expr.node().kind(),
+            ExpressionKind::UnresolvedFunction { .. }
         ));
     }
 
@@ -1115,8 +1135,8 @@ mod tests {
     fn test_substring() {
         let result = col("a").substr(lit(1), lit(3));
         assert!(matches!(
-            result.expr.node(),
-            ExpressionNode::UnresolvedFunction(_)
+            result.expr.node().kind(),
+            ExpressionKind::UnresolvedFunction { .. }
         ));
     }
 
@@ -1124,31 +1144,52 @@ mod tests {
     fn test_various_methods() {
         // Test cast_str
         let result = col("a").cast_str("int");
-        assert!(matches!(result.expr.node(), ExpressionNode::Cast(_)));
+        assert!(matches!(
+            result.expr.node().kind(),
+            ExpressionKind::Cast { .. }
+        ));
 
         // Test desc
         let result = col("a").desc();
-        assert!(matches!(result.expr.node(), ExpressionNode::SortOrder(_)));
+        assert!(matches!(
+            result.expr.node().kind(),
+            ExpressionKind::SortOrder { .. }
+        ));
 
         // Test desc_nulls_first
         let result = col("a").desc_nulls_first();
-        assert!(matches!(result.expr.node(), ExpressionNode::SortOrder(_)));
+        assert!(matches!(
+            result.expr.node().kind(),
+            ExpressionKind::SortOrder { .. }
+        ));
 
         // Test desc_nulls_last
         let result = col("a").desc_nulls_last();
-        assert!(matches!(result.expr.node(), ExpressionNode::SortOrder(_)));
+        assert!(matches!(
+            result.expr.node().kind(),
+            ExpressionKind::SortOrder { .. }
+        ));
 
         // Test asc
         let result = col("a").asc();
-        assert!(matches!(result.expr.node(), ExpressionNode::SortOrder(_)));
+        assert!(matches!(
+            result.expr.node().kind(),
+            ExpressionKind::SortOrder { .. }
+        ));
 
         // Test asc_nulls_first
         let result = col("a").asc_nulls_first();
-        assert!(matches!(result.expr.node(), ExpressionNode::SortOrder(_)));
+        assert!(matches!(
+            result.expr.node().kind(),
+            ExpressionKind::SortOrder { .. }
+        ));
 
         // Test asc_nulls_last
         let result = col("a").asc_nulls_last();
-        assert!(matches!(result.expr.node(), ExpressionNode::SortOrder(_)));
+        assert!(matches!(
+            result.expr.node().kind(),
+            ExpressionKind::SortOrder { .. }
+        ));
     }
 
     #[test]
@@ -1156,8 +1197,8 @@ mod tests {
         // Test get_field
         let result = col("struct").get_field("field_name");
         assert!(matches!(
-            result.expr.node(),
-            ExpressionNode::UnresolvedExtractValue(_)
+            result.expr.node().kind(),
+            ExpressionKind::UnresolvedExtractValue
         ));
     }
 
@@ -1166,36 +1207,36 @@ mod tests {
         // Test contains
         let result = col("a").contains(col("b"));
         assert!(matches!(
-            result.expr.node(),
-            ExpressionNode::UnresolvedFunction(_)
+            result.expr.node().kind(),
+            ExpressionKind::UnresolvedFunction { .. }
         ));
 
         // Test startswith
         let result = col("a").startswith(col("b"));
         assert!(matches!(
-            result.expr.node(),
-            ExpressionNode::UnresolvedFunction(_)
+            result.expr.node().kind(),
+            ExpressionKind::UnresolvedFunction { .. }
         ));
 
         // Test endswith
         let result = col("a").endswith(col("b"));
         assert!(matches!(
-            result.expr.node(),
-            ExpressionNode::UnresolvedFunction(_)
+            result.expr.node().kind(),
+            ExpressionKind::UnresolvedFunction { .. }
         ));
 
         // Test like
         let result = col("a").like("%pattern%");
         assert!(matches!(
-            result.expr.node(),
-            ExpressionNode::UnresolvedFunction(_)
+            result.expr.node().kind(),
+            ExpressionKind::UnresolvedFunction { .. }
         ));
 
         // Test rlike
         let result = col("a").rlike("[0-9]+");
         assert!(matches!(
-            result.expr.node(),
-            ExpressionNode::UnresolvedFunction(_)
+            result.expr.node().kind(),
+            ExpressionKind::UnresolvedFunction { .. }
         ));
     }
 }

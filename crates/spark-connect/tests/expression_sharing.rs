@@ -15,18 +15,17 @@
 
 //! Server-free checks for immutable expression sharing and unchanged serialization.
 
-use std::ptr;
-
 use spark_connect::column::{col, lit, when, Column};
 use spark_connect::expression::{
-    Alias, CallFunctionWrapper, Expression, ExpressionNode, LiteralExpression, SortOrder,
+    Alias, CallFunctionWrapper, Expression, ExpressionKind, ExpressionSpec, LiteralExpression,
+    SortOrder,
 };
 use spark_connect::functions;
 use spark_connect::window::{FrameBound, WindowSpec};
 use spark_connect_proto as proto;
 
 fn assert_shared(left: &Expression, right: &Expression) {
-    assert!(ptr::eq(left.node(), right.node()));
+    assert!(left.ptr_eq(right));
 }
 
 #[test]
@@ -37,12 +36,13 @@ fn clones_and_arithmetic_share_existing_nodes() {
     assert_shared(source.expression(), &source.expression().clone());
 
     let incremented = source.clone() + lit(1);
-    let ExpressionNode::UnresolvedFunction(function) = incremented.expression().node() else {
+    let expression = incremented.expression();
+    let ExpressionKind::UnresolvedFunction { name, .. } = expression.kind() else {
         panic!("expected addition");
     };
-    assert_eq!(function.name, "+");
-    assert_eq!(function.args.len(), 2);
-    assert_shared(&function.args[0], source.expression());
+    assert_eq!(name, "+");
+    assert_eq!(expression.children().len(), 2);
+    assert_shared(&expression.children()[0], source.expression());
 }
 
 #[test]
@@ -52,17 +52,19 @@ fn aliases_and_function_arguments_share_reused_subtrees() {
     let left = source.clone().alias("left");
     let right = source.clone().alias("right");
     for alias in [&left, &right] {
-        let ExpressionNode::Alias(alias) = alias.expression().node() else {
+        let expression = alias.expression();
+        let ExpressionKind::Alias { .. } = expression.kind() else {
             panic!("expected alias");
         };
-        assert_shared(&alias.child, source.expression());
+        assert_shared(&expression.children()[0], source.expression());
     }
     let function = functions::call_function("greatest", vec![source.clone(), source.clone()]);
-    let ExpressionNode::CallFunction(function) = function.expression().node() else {
+    let expression = function.expression();
+    let ExpressionKind::CallFunction { .. } = expression.kind() else {
         panic!("expected function call");
     };
-    assert_eq!(function.arguments.len(), 2);
-    for argument in &function.arguments {
+    assert_eq!(expression.children().len(), 2);
+    for argument in expression.children() {
         assert_shared(argument, source.expression());
     }
     assert_eq!(source.to_proto(), before);
@@ -78,24 +80,30 @@ fn case_branches_share_children_without_mutating_the_original() {
     let before = original.to_proto();
     let extended = original.clone().when(col("value").lt(lit(0)), lit(-1));
     let completed = original.clone().otherwise(lit(0));
-    let ExpressionNode::CaseWhen(original_case) = original.expression().node() else {
-        panic!("expected CASE");
-    };
-    let ExpressionNode::CaseWhen(extended_case) = extended.expression().node() else {
-        panic!("expected extended CASE");
-    };
-    let ExpressionNode::CaseWhen(completed_case) = completed.expression().node() else {
-        panic!("expected completed CASE");
-    };
-    assert_eq!(original_case.branches.len(), 1);
-    assert!(original_case.else_expr.is_none());
-    assert_eq!(extended_case.branches.len(), 2);
-    assert!(extended_case.else_expr.is_none());
-    assert_eq!(completed_case.branches.len(), 1);
-    assert!(completed_case.else_expr.is_some());
-    for case in [original_case, extended_case, completed_case] {
-        assert_shared(&case.branches[0].0, condition.expression());
-        assert_shared(&case.branches[0].1, value.expression());
+    assert!(matches!(
+        original.expression().kind(),
+        ExpressionKind::CaseWhen {
+            branch_count: 1,
+            has_else: false
+        }
+    ));
+    assert!(matches!(
+        extended.expression().kind(),
+        ExpressionKind::CaseWhen {
+            branch_count: 2,
+            has_else: false
+        }
+    ));
+    assert!(matches!(
+        completed.expression().kind(),
+        ExpressionKind::CaseWhen {
+            branch_count: 1,
+            has_else: true
+        }
+    ));
+    for case in [&original, &extended, &completed] {
+        assert_shared(&case.expression().children()[0], condition.expression());
+        assert_shared(&case.expression().children()[1], value.expression());
     }
     assert_eq!(original.to_proto(), before);
     assert_eq!(
@@ -124,19 +132,30 @@ fn window_builders_share_expressions_without_mutating_the_specification() {
     assert_shared(&original.order_spec[0].child, &extended.order_spec[0].child);
 
     let windowed = source.clone().over(extended);
-    let ExpressionNode::WindowExpression(window) = windowed.expression().node() else {
+    let expression = windowed.expression();
+    let ExpressionKind::WindowExpression {
+        partition_count,
+        order_spec,
+        ..
+    } = expression.kind()
+    else {
         panic!("expected window expression");
     };
-    assert_shared(&window.window_function, source.expression());
-    assert_shared(&window.partition_spec[0], source.expression());
-    assert_shared(&window.order_spec[0].child, source.expression());
+    assert_eq!(*partition_count, 2);
+    assert_eq!(order_spec.len(), 1);
+    assert_shared(&expression.children()[0], source.expression());
+    assert_shared(&expression.children()[1], source.expression());
+    assert_shared(
+        &expression.children()[1 + *partition_count],
+        source.expression(),
+    );
 }
 
 #[test]
 fn equality_remains_structural_and_does_not_shortcut_nan() {
     let left = (col("value") + lit(1)).expression().clone();
     let right = (col("value") + lit(1)).expression().clone();
-    assert!(!ptr::eq(left.node(), right.node()));
+    assert!(!left.ptr_eq(&right));
     assert_eq!(left, right);
     assert_ne!(left, (col("value") + lit(2)).expression().clone());
 
@@ -144,7 +163,7 @@ fn equality_remains_structural_and_does_not_shortcut_nan() {
         LiteralExpression::Float(f32::NAN),
         LiteralExpression::Double(f64::NAN),
     ] {
-        let expression: Expression = ExpressionNode::Literal(literal).into();
+        let expression: Expression = ExpressionSpec::Literal(literal).into();
         let cloned = expression.clone();
         assert_shared(&expression, &cloned);
         assert_ne!(expression, cloned);
@@ -154,14 +173,15 @@ fn equality_remains_structural_and_does_not_shortcut_nan() {
 }
 
 #[test]
-fn debug_render_and_proto_keep_the_existing_representation() {
-    let argument: Expression = ExpressionNode::Literal(LiteralExpression::Integer(7)).into();
+fn debug_shows_canonical_structure_while_render_and_proto_stay_unchanged() {
+    let argument: Expression = ExpressionSpec::Literal(LiteralExpression::Integer(7)).into();
     let wrapper = CallFunctionWrapper::new("f", vec![argument]);
     let expected_proto = wrapper.to_proto();
-    let call: Expression = ExpressionNode::CallFunction(Box::new(wrapper)).into();
+    let call: Expression = ExpressionSpec::CallFunction(Box::new(wrapper)).into();
     let expected_debug = concat!(
-        "CallFunction(CallFunctionWrapper { function_name: \"f\", ",
-        "arguments: [Literal(Integer(7))] })"
+        "ExpressionNode { kind: CallFunction { function_name: \"f\" }, ",
+        "children: [ExpressionNode { kind: Literal(Integer(7)), children: [], ",
+        "ty: Unresolved, .. }], ty: Unresolved, .. }"
     );
     assert_eq!(format!("{call:?}"), expected_debug);
     // The render is PySpark's `CallFunction.__repr__`.
@@ -181,10 +201,11 @@ fn debug_render_and_proto_keep_the_existing_representation() {
 fn shared_occurrences_expand_into_proto_trees() {
     let source = col("value") + lit(1);
     let combined = source.clone() + source.clone();
-    let ExpressionNode::UnresolvedFunction(function) = combined.expression().node() else {
+    let expression = combined.expression();
+    let ExpressionKind::UnresolvedFunction { .. } = expression.kind() else {
         panic!("expected addition");
     };
-    assert_shared(&function.args[0], &function.args[1]);
+    assert_shared(&expression.children()[0], &expression.children()[1]);
     let expected = ((col("value") + lit(1)) + (col("value") + lit(1))).to_proto();
     let encoded = combined.to_proto();
     assert_eq!(encoded, expected);

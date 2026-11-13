@@ -12,7 +12,9 @@ use std::sync::{Arc, LazyLock, Mutex, Weak};
 use spark_connect_core::error::{Result, SparkError};
 
 use crate::column::Column;
-use crate::expression::{Expression, ExpressionNode, LiteralExpression};
+#[cfg(test)]
+use crate::expression::ExpressionSpec;
+use crate::expression::{Expression, ExpressionKind, LiteralExpression};
 use crate::types::DataType;
 use crate::udf::CommonInlineUserDefinedFunctionExpression;
 
@@ -2406,15 +2408,19 @@ impl LogicalPlan {
                 sort.input = Some(Box::new(relation_of(input, plan_ids)));
                 for expr in order {
                     // Extract SortOrder from Expression if it's SortOrder type
-                    if let ExpressionNode::SortOrder(so) = expr.node() {
+                    if let ExpressionKind::SortOrder {
+                        ascending,
+                        null_ordering,
+                    } = expr.node().kind()
+                    {
                         let mut sort_order = proto::expression::SortOrder::default();
-                        sort_order.child = Some(Box::new(so.child.to_proto()));
-                        sort_order.direction = if so.ascending {
+                        sort_order.child = Some(Box::new(expr.node().children()[0].to_proto()));
+                        sort_order.direction = if *ascending {
                             SortDirection::Ascending as i32
                         } else {
                             SortDirection::Descending as i32
                         };
-                        sort_order.null_ordering = match so.null_ordering {
+                        sort_order.null_ordering = match null_ordering {
                             crate::expression::NullOrdering::First => {
                                 PbNulls::SortNullsFirst as i32
                             }
@@ -4471,7 +4477,7 @@ mod deep_plan_tests {
         );
         let mut plan = Arc::new(LogicalPlan::from_builder(
             LogicalPlanKind::Filter {
-                condition: crate::column::Column::new(Expression::new(ExpressionNode::Subquery(
+                condition: crate::column::Column::new(Expression::new(ExpressionSpec::Subquery(
                     Box::new(subquery),
                 ))),
             },
@@ -4660,7 +4666,7 @@ mod deep_plan_tests {
             let filter = Arc::new(LogicalPlan::from_builder(
                 LogicalPlanKind::Filter {
                     condition: crate::column::Column::new(Expression::new(
-                        ExpressionNode::Subquery(Box::new(subquery)),
+                        ExpressionSpec::Subquery(Box::new(subquery)),
                     )),
                 },
                 [Arc::new(range(0, 10, 1))],

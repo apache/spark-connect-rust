@@ -98,31 +98,52 @@ plans to share immutable nodes. This is a breaking change for code that directly
 constructs or matches these representations. The `Column` and `DataFrame` APIs,
 Python APIs, and Spark Connect protocol are unchanged by this representation change.
 
-`Expression` is now a shared handle; its previous enum variants live in
-`ExpressionNode`. Construct an `ExpressionNode` and convert it with `.into()` (or
-pass it to `Expression::new`). Match on `expression.node()`, which borrows an
-`&ExpressionNode`. Cloning an `Expression` shares its immutable node instead of
-recursively copying its children. To change an expression, construct a new node.
-Common nodes also have `Expression::literal`, `Expression::column`, and
-`Expression::function` constructors.
+`Expression` is a shared handle to an immutable `ExpressionNode` struct.
+The former `ExpressionNode` construction enum is now `ExpressionSpec`: pass
+it to `Expression::new` or convert it with `.into()`. Match stored payloads on
+`expression.kind()` (`&ExpressionKind`) and read their ordered inputs through
+`expression.children()`. `expression.node()` now borrows the enclosing struct,
+so existing enum matches on that method must change. The `literal`, `column`
+and `function` convenience constructors remain.
 
-For example, replace direct `Expression::Literal(...)` construction and matching
-with:
+`Debug` output now uses `ExpressionNode { kind: ..., children: ..., ty: ..., .. }`;
+its format is not a stable API.
+
+For example, construction through the former `ExpressionNode::Literal` and
+matching on `.node()` become:
 
 ```rust
-use spark_connect::expression::{Expression, ExpressionNode, LiteralExpression};
+use spark_connect::expression::{
+    Expression, ExpressionKind, ExpressionSpec, LiteralExpression,
+};
 
-let expression: Expression = ExpressionNode::Literal(LiteralExpression::Long(1)).into();
+let expression: Expression = ExpressionSpec::Literal(LiteralExpression::Long(1)).into();
 let shared = expression.clone();
-match shared.node() {
-    ExpressionNode::Literal(LiteralExpression::Long(value)) => assert_eq!(*value, 1),
+assert!(expression.ptr_eq(&shared));
+match shared.kind() {
+    ExpressionKind::Literal(LiteralExpression::Long(value)) => assert_eq!(*value, 1),
     _ => panic!("expected a long literal"),
 }
 ```
 
-Child expressions are handles too: `ExpressionNode::DirectShufflePartitionId`
-takes an `Expression`, and `CaseWhen::else_expr` is `Option<Expression>`, without
-the previous extra `Box`.
+`ExpressionKind` separates structural inputs from payloads. For example,
+`UnresolvedFunction { name, is_distinct }` keeps its arguments in `children()`,
+and `SortOrder { ascending, null_ordering }` has its base expression at input 0.
+`try_new(kind, children)` and `with_children(children)` accept
+`IntoIterator<Item = Expression>` and return `InvalidExpressionInputs` for an
+invalid layout. `with_children` preserves the payload and origin but creates a
+new root allocation. `Expression::clone` preserves root identity; `to_spec()`
+reconstructs an owned builder specification with shared child handles.
+
+`ty()` exposes declared types only: typed nulls, explicit type casts and Python
+UDF outputs can be `ExpressionType::Known`; other expressions remain
+`Unresolved`. Name resolution and type inference remain server operations.
+`visit` visits each allocation once; `visit_all_paths` visits every occurrence.
+`try_transform_up` rewrites bottom-up and retains unchanged node identities.
+These operations follow expression children, excluding subquery-owned plans
+and opaque `Sent` protobufs. Structural traversal and destruction are
+iterative; recursive payload, debug and protobuf operations retain their
+existing limits.
 
 `LogicalPlan` is now a checked node. Its former enum variants live in
 `LogicalPlanKind`, without their child fields. Pass the kind and its ordered

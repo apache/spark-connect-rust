@@ -13,6 +13,16 @@ use crate::plan::LogicalPlan;
 use crate::types::DataType;
 use crate::udf::CommonInlineUserDefinedFunctionExpression;
 
+mod opaque;
+mod structure;
+#[cfg(test)]
+mod structure_tests;
+pub use opaque::SentExpressionPayload;
+pub use structure::{
+    ExpressionKind, ExpressionNode, ExpressionType, InvalidExpressionInputs, SortOrderProperties,
+    SubqueryPlan,
+};
+
 /// Thread-local counter for generating unique lambda variable names.
 static LAMBDA_VAR_COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -138,13 +148,14 @@ fn with_expression_levels<T>(serialize: impl FnOnce() -> T) -> Result<(T, usize)
 ///
 /// Cloning a handle shares its node rather than copying the expression subtree.
 /// Build common expressions with [`Expression::literal`], [`Expression::column`],
-/// and [`Expression::function`], or use [`Expression::new`] for other node types.
-/// Inspect expressions with [`Expression::node`]. An expression keeps the origin in user code
-/// of its construction, if any, as PySpark's does (see [`crate::origin`]).
+/// and [`Expression::function`], or pass an operator payload and ordered inputs to
+/// [`Expression::try_new`]. [`Expression::new`] accepts an owned [`ExpressionSpec`].
+/// Inspect expressions with [`Expression::kind`] and [`Expression::children`]. An expression
+/// keeps the origin in user code of its construction, if any, as PySpark's does
+/// (see [`crate::origin`]).
 #[derive(Clone)]
 pub struct Expression {
     node: Arc<ExpressionNode>,
-    origin: Option<Arc<crate::origin::Origin>>,
 }
 
 impl std::fmt::Debug for Expression {
@@ -160,34 +171,18 @@ impl PartialEq for Expression {
     }
 }
 
-/// The node that a dropped expression holds once its own node has gone, which has no levels
-/// below it.
-static DROPPED_NODE: std::sync::LazyLock<Arc<ExpressionNode>> =
-    std::sync::LazyLock::new(|| Arc::new(ExpressionNode::SQLExpression(String::new())));
-
-impl Drop for Expression {
-    /// The last owner of a node drops the levels below it, each in turn: give them the stack
-    /// that an expression of many levels needs, as for serializing it.
-    fn drop(&mut self) {
-        if Arc::strong_count(&self.node) == 1 {
-            let node = std::mem::replace(&mut self.node, Arc::clone(&DROPPED_NODE));
-            with_stack_for_a_level(move || drop(node));
-        }
+impl From<ExpressionSpec> for Expression {
+    fn from(spec: ExpressionSpec) -> Self {
+        Self::new(spec)
     }
 }
 
-impl From<ExpressionNode> for Expression {
-    fn from(node: ExpressionNode) -> Self {
-        Self::new(node)
-    }
-}
-
-/// The contents of one expression node.
+/// A typed construction specification, normalized into payload and inputs by [`Expression::new`].
 ///
-/// Child expressions are shared [`Expression`] handles. Direct enum construction
-/// and matching use this type; the public Column API continues to use Expression.
+/// Child expressions are shared handles. Inspect stored nodes through [`Expression::kind`]
+/// and [`Expression::children`]; specifications are owned builders, not the stored node.
 #[derive(Debug, Clone, PartialEq)]
-pub enum ExpressionNode {
+pub enum ExpressionSpec {
     /// `pyspark.sql.connect.expressions.LiteralExpression` - a constant value.
     Literal(LiteralExpression),
     /// `pyspark.sql.connect.expressions.ColumnReference` - a reference to a column.
@@ -239,10 +234,10 @@ pub enum ExpressionNode {
     Sent(Box<SentExpression>),
 }
 
-/// An expression of [`ExpressionNode::Sent`]: the `spark.connect.Expression` of a Column as it
+/// An expression of [`ExpressionSpec::Sent`]: the `spark.connect.Expression` of a Column as it
 /// was sent, its rendering, as `Column<'...'>` shows it, and its levels, as
 /// [`Expression::try_to_proto_with_levels`] counts them when the Column was pickled.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub struct SentExpression {
     pub expression: proto::Expression,
     pub rendered: String,
@@ -323,6 +318,53 @@ impl SubqueryExpression {
         }
     }
 
+    /// Serialize the subquery and register its plan dependency.
+    #[cfg(test)]
+    fn to_proto(&self) -> proto::Expression {
+        SubqueryExpressionRef::from(self).to_proto()
+    }
+}
+
+/// Borrowed input segments shared by typed builders and structural subquery nodes.
+struct SubqueryExpressionRef<'a> {
+    plan: &'a Arc<LogicalPlan>,
+    plan_id: i64,
+    subquery_type: SubqueryType,
+    partition_spec: &'a [Expression],
+    order_spec: &'a [Expression],
+    with_single_partition: Option<bool>,
+    in_subquery_values: &'a [Expression],
+}
+
+impl<'a> From<&'a SubqueryExpression> for SubqueryExpressionRef<'a> {
+    fn from(subquery: &'a SubqueryExpression) -> Self {
+        Self {
+            plan: &subquery.plan,
+            plan_id: subquery.plan_id,
+            subquery_type: subquery.subquery_type,
+            partition_spec: &subquery.partition_spec,
+            order_spec: &subquery.order_spec,
+            with_single_partition: subquery.with_single_partition,
+            in_subquery_values: &subquery.in_subquery_values,
+        }
+    }
+}
+
+impl<'a> SubqueryExpressionRef<'a> {
+    fn from_inputs(subquery: &'a SubqueryPlan, children: &'a [Expression]) -> Self {
+        let (partition_spec, rest) = children.split_at(subquery.partition_count);
+        let (order_spec, in_subquery_values) = rest.split_at(subquery.order_count);
+        Self {
+            plan: &subquery.plan,
+            plan_id: subquery.plan_id,
+            subquery_type: subquery.subquery_type,
+            partition_spec,
+            order_spec,
+            with_single_partition: subquery.with_single_partition,
+            in_subquery_values,
+        }
+    }
+
     /// As `SubqueryExpression.__repr__`, but with the plan ID of the plan, which PySpark
     /// shows as the address of its plan object.
     fn render(&self) -> String {
@@ -337,17 +379,17 @@ impl SubqueryExpression {
         match self.subquery_type {
             SubqueryType::TableArg => {
                 if !self.partition_spec.is_empty() {
-                    parts.push(format!("partition_spec={}", list(&self.partition_spec)));
+                    parts.push(format!("partition_spec={}", list(self.partition_spec)));
                 }
                 if !self.order_spec.is_empty() {
-                    parts.push(format!("order_spec={}", list(&self.order_spec)));
+                    parts.push(format!("order_spec={}", list(self.order_spec)));
                 }
                 if let Some(single) = self.with_single_partition {
                     let single = if single { "True" } else { "False" };
                     parts.push(format!("with_single_partition={single}"));
                 }
             }
-            SubqueryType::In => parts.push(format!("values={}", list(&self.in_subquery_values))),
+            SubqueryType::In => parts.push(format!("values={}", list(self.in_subquery_values))),
             SubqueryType::Scalar | SubqueryType::Exists => {}
         }
         format!("SubqueryExpression({})", parts.join(", "))
@@ -358,7 +400,7 @@ impl SubqueryExpression {
     fn to_proto(&self) -> proto::Expression {
         use proto::subquery_expression::SubqueryType as ProtoType;
 
-        crate::plan::refer_to(&self.plan);
+        crate::plan::refer_to(self.plan);
         let subquery_type = match self.subquery_type {
             SubqueryType::Scalar => ProtoType::Scalar,
             SubqueryType::Exists => ProtoType::Exists,
@@ -403,14 +445,12 @@ impl SubqueryExpression {
 /// The sort order of an ordering expression of a table argument: an explicit sort order
 /// as it is, and another expression ascending, nulls first, as PySpark's `_sort_col`.
 fn sort_order_proto(expr: &Expression) -> proto::expression::SortOrder {
-    let wrapped = match expr.node() {
-        ExpressionNode::SortOrder(_) => expr.to_proto(),
-        _ => SortOrder::asc_nulls_first(expr.clone()).to_proto(),
-    };
-    match wrapped.expr_type {
-        Some(proto::expression::ExprType::SortOrder(sort)) => *sort,
-        // SortOrder::to_proto always yields a SortOrder expr_type.
-        _ => unreachable!("expected a SortOrder expression"),
+    match expr.kind() {
+        ExpressionKind::SortOrder { .. } => match expr.to_proto().expr_type {
+            Some(proto::expression::ExprType::SortOrder(sort)) => *sort,
+            _ => unreachable!("expected a SortOrder expression"),
+        },
+        _ => sort_order_parts_proto(expr, true, NullOrdering::First),
     }
 }
 
@@ -437,31 +477,30 @@ impl NamedArgument {
 impl Expression {
     /// Allocate an immutable expression node, of the current origin, as PySpark's
     /// `Expression.__init__` takes it.
-    pub fn new(node: ExpressionNode) -> Self {
-        Self {
-            node: Arc::new(node),
-            origin: crate::origin::current(),
-        }
+    pub fn new(spec: ExpressionSpec) -> Self {
+        Self::from_spec(spec)
     }
 
     /// The origin in user code of this expression, if any.
     pub fn origin(&self) -> Option<&crate::origin::Origin> {
-        self.origin.as_deref()
+        self.node.origin.as_deref()
     }
 
     /// Create a literal expression.
+    #[inline]
     pub fn literal(value: LiteralExpression) -> Self {
-        Self::new(ExpressionNode::Literal(value))
+        Self::new_leaf(ExpressionKind::Literal(value))
     }
 
     /// Create an unbound column reference.
+    #[inline]
     pub fn column(name: impl Into<String>) -> Self {
-        Self::new(ExpressionNode::ColumnReference(ColumnReference::new(name)))
+        Self::new_leaf(ExpressionKind::ColumnReference(ColumnReference::new(name)))
     }
 
     /// Create a non-distinct unresolved function call.
     pub fn function(name: impl Into<String>, args: Vec<Expression>) -> Self {
-        Self::new(ExpressionNode::UnresolvedFunction(UnresolvedFunction::new(
+        Self::new(ExpressionSpec::UnresolvedFunction(UnresolvedFunction::new(
             name, args,
         )))
     }
@@ -484,76 +523,131 @@ impl Expression {
     }
 
     fn render_node(&self) -> String {
-        match self.node() {
-            ExpressionNode::Literal(lit) => lit.render(),
-            ExpressionNode::ColumnReference(col_ref) => col_ref.name.clone(),
-            ExpressionNode::UnresolvedFunction(func) => func.render(),
-            ExpressionNode::UnresolvedStar(target, _) => match target {
-                Some(t) => format!("unresolvedstar({t})"),
+        // Keep this path aligned with the retained typed builder renderers, including
+        // UnresolvedFunction::render, SortOrder::render and CaseWhen::render. The structural
+        // parity fixtures check their representations; Window and Subquery share helpers below.
+        let children = self.children();
+        match self.kind() {
+            ExpressionKind::Literal(lit) => lit.render(),
+            ExpressionKind::ColumnReference(reference) => reference.name.clone(),
+            ExpressionKind::UnresolvedFunction { name, is_distinct } => {
+                let args: Vec<String> = children.iter().map(Expression::render).collect();
+                if *is_distinct {
+                    format!("{name}(distinct {})", args.join(", "))
+                } else {
+                    format!("{name}({})", args.join(", "))
+                }
+            }
+            ExpressionKind::UnresolvedStar(target, _) => match target {
+                Some(target) => format!("unresolvedstar({target})"),
                 None => "unresolvedstar()".to_string(),
             },
-            // As `ColumnAlias.__repr__`: the names joined by commas.
-            ExpressionNode::Alias(alias) => {
-                format!("{} AS {}", alias.child.render(), alias.names.join(","))
+            ExpressionKind::Alias { names, .. } => {
+                format!("{} AS {}", children[0].render(), names.join(","))
             }
-            // As `CastExpression.__repr__`: the type in upper case.
-            ExpressionNode::Cast(cast) => {
-                let type_str = match &cast.target {
-                    CastTarget::Type(dt) => dt.simple_string(),
-                    CastTarget::TypeStr(s) => s.clone(),
+            ExpressionKind::Cast { target, eval_mode } => {
+                let type_str = match target {
+                    CastTarget::Type(data_type) => data_type.simple_string(),
+                    CastTarget::TypeStr(value) => value.clone(),
                 }
                 .to_uppercase();
-                let name = if cast.eval_mode == Some(CastEvalMode::Try) {
+                let name = if *eval_mode == Some(CastEvalMode::Try) {
                     "TRY_CAST"
                 } else {
                     "CAST"
                 };
-                format!("{name}({} AS {type_str})", cast.child.render())
+                format!("{name}({} AS {type_str})", children[0].render())
             }
-            ExpressionNode::DirectShufflePartitionId(child) => {
-                format!("DirectShufflePartitionID(child={})", child.render())
+            ExpressionKind::DirectShufflePartitionId => {
+                format!("DirectShufflePartitionID(child={})", children[0].render())
             }
-            ExpressionNode::UnresolvedRegex(col_name, _) => format!("UnresolvedRegex({col_name})"),
-            ExpressionNode::SortOrder(sort) => sort.render(),
-            ExpressionNode::CaseWhen(case_when) => case_when.render(),
-            ExpressionNode::UnresolvedExtractValue(ev) => {
-                format!("{}['{}']", ev.child.render(), ev.extraction.render())
+            ExpressionKind::UnresolvedRegex(name, _) => format!("UnresolvedRegex({name})"),
+            ExpressionKind::SortOrder {
+                ascending,
+                null_ordering,
+            } => render_sort_order(&children[0], *ascending, *null_ordering),
+            ExpressionKind::CaseWhen {
+                branch_count,
+                has_else,
+            } => {
+                let mut parts = vec!["CASE".to_string()];
+                for [condition, value] in children[..branch_count * 2].as_chunks::<2>().0 {
+                    parts.push(format!(
+                        "WHEN {} THEN {}",
+                        condition.render(),
+                        value.render()
+                    ));
+                }
+                if *has_else {
+                    parts.push(format!("ELSE {}", children[branch_count * 2].render()));
+                }
+                parts.push("END".to_string());
+                parts.join(" ")
             }
-            ExpressionNode::UpdateFields(uf) => match &uf.value_expression {
-                Some(v) => format!(
-                    "update_field({}, {}, {})",
-                    uf.struct_expression.render(),
-                    uf.field_name,
-                    v.render()
-                ),
-                None => format!(
-                    "drop_field({}, {})",
-                    uf.struct_expression.render(),
-                    uf.field_name
-                ),
-            },
-            ExpressionNode::SQLExpression(sql) => sql.clone(),
-            ExpressionNode::CallFunction(cf) => cf.render(),
-            ExpressionNode::WindowExpression(we) => we.render(),
-            // As `LambdaFunction.__repr__` and `UnresolvedNamedLambdaVariable.__repr__`.
-            ExpressionNode::LambdaFunction(lf) => {
-                let args: Vec<&str> = lf.arguments.iter().map(|a| a.name_parts.as_str()).collect();
+            ExpressionKind::UnresolvedExtractValue => {
+                format!("{}['{}']", children[0].render(), children[1].render())
+            }
+            ExpressionKind::UpdateFields {
+                field_name,
+                has_value,
+            } => {
+                if *has_value {
+                    format!(
+                        "update_field({}, {}, {})",
+                        children[0].render(),
+                        field_name,
+                        children[1].render()
+                    )
+                } else {
+                    format!("drop_field({}, {})", children[0].render(), field_name)
+                }
+            }
+            ExpressionKind::SQLExpression(sql) => sql.clone(),
+            ExpressionKind::CallFunction { function_name } => {
+                if children.is_empty() {
+                    format!("CallFunction('{function_name}')")
+                } else {
+                    let args: Vec<String> = children.iter().map(Expression::render).collect();
+                    format!("CallFunction('{function_name}', {})", args.join(", "))
+                }
+            }
+            ExpressionKind::WindowExpression {
+                partition_count,
+                order_spec,
+                frame_spec,
+            } => {
+                let (partitions, order_bases) = children[1..].split_at(*partition_count);
+                render_window_expression(
+                    &children[0],
+                    partitions,
+                    order_bases
+                        .iter()
+                        .zip(order_spec.iter())
+                        .map(|(base, order)| (base, order.ascending, order.null_ordering)),
+                    frame_spec.as_ref(),
+                )
+            }
+            ExpressionKind::LambdaFunction { arguments } => {
+                let args: Vec<&str> = arguments
+                    .iter()
+                    .map(|argument| argument.name_parts.as_str())
+                    .collect();
                 format!(
                     "LambdaFunction({}, {})",
-                    lf.function.render(),
+                    children[0].render(),
                     args.join(", ")
                 )
             }
-            ExpressionNode::UnresolvedNamedLambdaVariable(var) => var.name_parts.clone(),
-            // As `CommonInlineUserDefinedFunction.__repr__`.
-            ExpressionNode::CommonInlineUserDefinedFunction(udf) => {
-                let args: Vec<String> = udf.arguments.iter().map(Expression::render).collect();
-                format!("{}({})", udf.function_name, args.join(", "))
+            ExpressionKind::UnresolvedNamedLambdaVariable(variable) => variable.name_parts.clone(),
+            ExpressionKind::CommonInlineUserDefinedFunction { function_name, .. } => {
+                let args: Vec<String> = children.iter().map(Expression::render).collect();
+                format!("{function_name}({})", args.join(", "))
             }
-            // As `NamedArgumentExpression.__repr__`.
-            ExpressionNode::NamedArgument(arg) => format!("{} => {}", arg.key, arg.value.render()),
-            ExpressionNode::Subquery(subquery) => subquery.render(),
-            ExpressionNode::Sent(sent) => sent.rendered.clone(),
+            ExpressionKind::NamedArgument { key } => format!("{key} => {}", children[0].render()),
+            ExpressionKind::Subquery(subquery) => {
+                SubqueryExpressionRef::from_inputs(subquery, children).render()
+            }
+            ExpressionKind::Sent(sent) => sent.rendered().to_owned(),
         }
     }
 
@@ -565,9 +659,9 @@ impl Expression {
         with_stack_for_a_level(|| {
             let level = ExpressionLevel::enter();
             // A sent expression has the levels that it was pickled with, below this one.
-            let deepest = match self.node() {
-                ExpressionNode::Sent(sent) => {
-                    let deepest = level.0 + sent.levels.saturating_sub(1);
+            let deepest = match self.kind() {
+                ExpressionKind::Sent(sent) => {
+                    let deepest = level.0 + sent.levels().saturating_sub(1);
                     DEEPEST_EXPRESSION_LEVEL
                         .with(|current| current.set(current.get().max(deepest)));
                     deepest
@@ -616,7 +710,7 @@ impl Expression {
                  levels; an expression may be at most {MAX_EXPRESSION_DEPTH} levels deep"
             )));
         }
-        Ok(Expression::new(ExpressionNode::Sent(Box::new(
+        Ok(Expression::new(ExpressionSpec::Sent(Box::new(
             SentExpression {
                 expression,
                 rendered,
@@ -627,7 +721,7 @@ impl Expression {
 
     fn to_proto_with_origin(&self) -> proto::Expression {
         let mut expr = self.node_to_proto();
-        if let Some(origin) = &self.origin {
+        if let Some(origin) = &self.node.origin {
             expr.common = Some(proto::ExpressionCommon {
                 origin: Some(proto::Origin {
                     function: Some(proto::origin::Function::PythonOrigin(proto::PythonOrigin {
@@ -641,74 +735,179 @@ impl Expression {
     }
 
     fn node_to_proto(&self) -> proto::Expression {
-        match self.node() {
-            ExpressionNode::Literal(lit) => lit.to_proto(),
-            ExpressionNode::ColumnReference(col_ref) => col_ref.to_proto(),
-            ExpressionNode::UnresolvedFunction(func) => func.to_proto(),
-            ExpressionNode::UnresolvedStar(target, plan_id) => proto::Expression {
-                expr_type: Some(proto::expression::ExprType::UnresolvedStar(
-                    proto::expression::UnresolvedStar {
-                        unparsed_target: target.clone(),
-                        plan_id: *plan_id,
-                    },
-                )),
-                ..Default::default()
-            },
-            ExpressionNode::Alias(alias) => alias.to_proto(),
-            ExpressionNode::Cast(cast) => cast.to_proto(),
-            ExpressionNode::DirectShufflePartitionId(child) => {
-                let mut expr = proto::Expression::default();
-                expr.expr_type = Some(proto::expression::ExprType::DirectShufflePartitionId(
-                    Box::new(proto::expression::DirectShufflePartitionId {
-                        child: Some(Box::new(child.to_proto())),
-                    }),
-                ));
-                expr
+        // The retained typed serializers (including Alias::to_proto, Cast::to_proto and
+        // CaseWhen::to_proto) are the wire parity oracle in structure_tests::builder_wire.
+        // Keep option handling synchronized when adding structural serialization branches.
+        let children = self.children();
+        let expr_type = match self.kind() {
+            ExpressionKind::Literal(literal) => return literal.to_proto(),
+            ExpressionKind::ColumnReference(reference) => return reference.to_proto(),
+            ExpressionKind::UnresolvedFunction { name, is_distinct } => {
+                let function = proto::expression::UnresolvedFunction {
+                    function_name: name.clone(),
+                    is_distinct: *is_distinct,
+                    arguments: children.iter().map(Expression::to_proto).collect(),
+                    ..Default::default()
+                };
+                proto::expression::ExprType::UnresolvedFunction(function)
             }
-            ExpressionNode::UnresolvedRegex(col_name, plan_id) => proto::Expression {
-                expr_type: Some(proto::expression::ExprType::UnresolvedRegex(
-                    proto::expression::UnresolvedRegex {
-                        col_name: col_name.clone(),
-                        plan_id: *plan_id,
-                    },
-                )),
-                ..Default::default()
-            },
-            ExpressionNode::SortOrder(sort) => sort.to_proto(),
-            ExpressionNode::CaseWhen(case_when) => case_when.to_proto(),
-            ExpressionNode::UnresolvedExtractValue(ev) => ev.to_proto(),
-            ExpressionNode::UpdateFields(uf) => uf.to_proto(),
-            ExpressionNode::SQLExpression(sql) => {
-                let mut expr = proto::Expression::default();
-                expr.expr_type = Some(proto::expression::ExprType::ExpressionString(
-                    proto::expression::ExpressionString {
-                        expression: sql.clone(),
-                    },
-                ));
-                expr
+            ExpressionKind::UnresolvedStar(target, plan_id) => {
+                proto::expression::ExprType::UnresolvedStar(proto::expression::UnresolvedStar {
+                    unparsed_target: target.clone(),
+                    plan_id: *plan_id,
+                })
             }
-            ExpressionNode::CallFunction(cf) => cf.to_proto(),
-            ExpressionNode::WindowExpression(we) => we.to_proto(),
-            ExpressionNode::LambdaFunction(lf) => lf.to_proto(),
-            ExpressionNode::UnresolvedNamedLambdaVariable(var) => var.to_proto(),
-            ExpressionNode::CommonInlineUserDefinedFunction(udf) => {
-                let mut expr = proto::Expression::default();
-                expr.expr_type = Some(
-                    proto::expression::ExprType::CommonInlineUserDefinedFunction(udf.to_proto()),
+            ExpressionKind::Alias { names, metadata } => {
+                let alias = proto::expression::Alias {
+                    expr: Some(Box::new(children[0].to_proto())),
+                    name: names.clone(),
+                    metadata: metadata.clone(),
+                };
+                proto::expression::ExprType::Alias(Box::new(alias))
+            }
+            ExpressionKind::Cast { target, eval_mode } => {
+                let mut cast = proto::expression::Cast::default();
+                cast.expr = Some(Box::new(children[0].to_proto()));
+                cast.cast_to_type = Some(match target {
+                    CastTarget::Type(data_type) => {
+                        proto::expression::cast::CastToType::Type(data_type.to_proto())
+                    }
+                    CastTarget::TypeStr(value) => {
+                        proto::expression::cast::CastToType::TypeStr(value.clone())
+                    }
+                });
+                if let Some(mode) = eval_mode {
+                    cast.eval_mode = match mode {
+                        CastEvalMode::Legacy => 1,
+                        CastEvalMode::Ansi => 2,
+                        CastEvalMode::Try => 3,
+                    };
+                }
+                proto::expression::ExprType::Cast(Box::new(cast))
+            }
+            ExpressionKind::DirectShufflePartitionId => {
+                proto::expression::ExprType::DirectShufflePartitionId(Box::new(
+                    proto::expression::DirectShufflePartitionId {
+                        child: Some(Box::new(children[0].to_proto())),
+                    },
+                ))
+            }
+            ExpressionKind::UnresolvedRegex(name, plan_id) => {
+                proto::expression::ExprType::UnresolvedRegex(proto::expression::UnresolvedRegex {
+                    col_name: name.clone(),
+                    plan_id: *plan_id,
+                })
+            }
+            ExpressionKind::SortOrder {
+                ascending,
+                null_ordering,
+            } => proto::expression::ExprType::SortOrder(Box::new(sort_order_parts_proto(
+                &children[0],
+                *ascending,
+                *null_ordering,
+            ))),
+            ExpressionKind::CaseWhen { .. } => {
+                let function = proto::expression::UnresolvedFunction {
+                    function_name: "when".to_string(),
+                    arguments: children.iter().map(Expression::to_proto).collect(),
+                    ..Default::default()
+                };
+                proto::expression::ExprType::UnresolvedFunction(function)
+            }
+            ExpressionKind::UnresolvedExtractValue => {
+                proto::expression::ExprType::UnresolvedExtractValue(Box::new(
+                    proto::expression::UnresolvedExtractValue {
+                        child: Some(Box::new(children[0].to_proto())),
+                        extraction: Some(Box::new(children[1].to_proto())),
+                    },
+                ))
+            }
+            ExpressionKind::UpdateFields {
+                field_name,
+                has_value,
+            } => proto::expression::ExprType::UpdateFields(Box::new(
+                proto::expression::UpdateFields {
+                    struct_expression: Some(Box::new(children[0].to_proto())),
+                    field_name: field_name.clone(),
+                    value_expression: has_value.then(|| Box::new(children[1].to_proto())),
+                },
+            )),
+            ExpressionKind::SQLExpression(sql) => {
+                proto::expression::ExprType::ExpressionString(proto::expression::ExpressionString {
+                    expression: sql.clone(),
+                })
+            }
+            ExpressionKind::CallFunction { function_name } => {
+                proto::expression::ExprType::CallFunction(proto::CallFunction {
+                    function_name: function_name.clone(),
+                    arguments: children.iter().map(Expression::to_proto).collect(),
+                })
+            }
+            ExpressionKind::WindowExpression {
+                partition_count,
+                order_spec,
+                frame_spec,
+            } => {
+                let (partitions, order_bases) = children[1..].split_at(*partition_count);
+                return window_expression_proto(
+                    &children[0],
+                    partitions,
+                    order_bases
+                        .iter()
+                        .zip(order_spec.iter())
+                        .map(|(base, order)| (base, order.ascending, order.null_ordering)),
+                    frame_spec.as_ref(),
                 );
-                expr
             }
-            ExpressionNode::NamedArgument(arg) => proto::Expression {
-                expr_type: Some(proto::expression::ExprType::NamedArgumentExpression(
-                    Box::new(proto::NamedArgumentExpression {
-                        key: arg.key.clone(),
-                        value: Some(Box::new(arg.value.to_proto())),
-                    }),
-                )),
-                ..Default::default()
-            },
-            ExpressionNode::Subquery(subquery) => subquery.to_proto(),
-            ExpressionNode::Sent(sent) => sent.expression.clone(),
+            ExpressionKind::LambdaFunction { arguments } => {
+                let lambda = proto::expression::LambdaFunction {
+                    function: Some(Box::new(children[0].to_proto())),
+                    arguments: arguments
+                        .iter()
+                        .map(
+                            |argument| proto::expression::UnresolvedNamedLambdaVariable {
+                                name_parts: vec![argument.name_parts.clone()],
+                            },
+                        )
+                        .collect(),
+                };
+                proto::expression::ExprType::LambdaFunction(Box::new(lambda))
+            }
+            ExpressionKind::UnresolvedNamedLambdaVariable(variable) => return variable.to_proto(),
+            ExpressionKind::CommonInlineUserDefinedFunction {
+                function_name,
+                deterministic,
+                python_udf,
+            } => {
+                let udf = proto::CommonInlineUserDefinedFunction {
+                    function_name: function_name.clone(),
+                    deterministic: *deterministic,
+                    arguments: children.iter().map(Expression::to_proto).collect(),
+                    is_distinct: false,
+                    function: Some(
+                        proto::common_inline_user_defined_function::Function::PythonUdf(
+                            python_udf.to_proto(),
+                        ),
+                    ),
+                };
+                proto::expression::ExprType::CommonInlineUserDefinedFunction(udf)
+            }
+            ExpressionKind::NamedArgument { key } => {
+                proto::expression::ExprType::NamedArgumentExpression(Box::new(
+                    proto::NamedArgumentExpression {
+                        key: key.clone(),
+                        value: Some(Box::new(children[0].to_proto())),
+                    },
+                ))
+            }
+            ExpressionKind::Subquery(subquery) => {
+                return SubqueryExpressionRef::from_inputs(subquery, children).to_proto();
+            }
+            ExpressionKind::Sent(sent) => return sent.clone_proto(),
+        };
+        proto::Expression {
+            expr_type: Some(expr_type),
+            ..Default::default()
         }
     }
 }
@@ -1206,15 +1405,34 @@ pub enum NullOrdering {
     Last,
 }
 
+fn render_sort_order(child: &Expression, ascending: bool, null_ordering: NullOrdering) -> String {
+    let direction = if ascending { "ASC" } else { "DESC" };
+    let nulls = match null_ordering {
+        NullOrdering::First => "NULLS FIRST",
+        NullOrdering::Last => "NULLS LAST",
+    };
+    format!("{} {direction} {nulls}", child.render())
+}
+
+fn sort_order_parts_proto(
+    child: &Expression,
+    ascending: bool,
+    null_ordering: NullOrdering,
+) -> proto::expression::SortOrder {
+    proto::expression::SortOrder {
+        child: Some(Box::new(child.to_proto())),
+        direction: if ascending { 1 } else { 2 },
+        null_ordering: match null_ordering {
+            NullOrdering::First => 1,
+            NullOrdering::Last => 2,
+        },
+    }
+}
+
 impl SortOrder {
     /// Render this sort order, mirroring `SortOrder.__repr__`.
     pub fn render(&self) -> String {
-        let dir = if self.ascending { "ASC" } else { "DESC" };
-        let nulls = match self.null_ordering {
-            NullOrdering::First => "NULLS FIRST",
-            NullOrdering::Last => "NULLS LAST",
-        };
-        format!("{} {} {}", self.child.render(), dir, nulls)
+        render_sort_order(&self.child, self.ascending, self.null_ordering)
     }
 
     pub fn asc_nulls_first(child: Expression) -> Self {
@@ -1250,16 +1468,12 @@ impl SortOrder {
     }
 
     pub fn to_proto(&self) -> proto::Expression {
-        let mut expr = proto::Expression::default();
-        let mut sort = proto::expression::SortOrder::default();
-        sort.child = Some(Box::new(self.child.to_proto()));
-        sort.direction = if self.ascending { 1i32 } else { 2i32 };
-        sort.null_ordering = match self.null_ordering {
-            NullOrdering::First => 1i32,
-            NullOrdering::Last => 2i32,
-        };
-        expr.expr_type = Some(proto::expression::ExprType::SortOrder(Box::new(sort)));
-        expr
+        proto::Expression {
+            expr_type: Some(proto::expression::ExprType::SortOrder(Box::new(
+                self.to_proto_sort_order(),
+            ))),
+            ..Default::default()
+        }
     }
 }
 
@@ -1396,13 +1610,29 @@ pub fn window_spec_repr(
     order_spec: &[SortOrder],
     frame_spec: Option<&(u32, FrameBoundary, FrameBoundary)>,
 ) -> String {
+    window_spec_repr_from_inputs(
+        partition_spec,
+        order_spec
+            .iter()
+            .map(|order| (&order.child, order.ascending, order.null_ordering)),
+        frame_spec,
+    )
+}
+
+fn window_spec_repr_from_inputs<'a>(
+    partition_spec: &[Expression],
+    order_spec: impl Iterator<Item = (&'a Expression, bool, NullOrdering)>,
+    frame_spec: Option<&(u32, FrameBoundary, FrameBoundary)>,
+) -> String {
     let mut parts = Vec::new();
     if !partition_spec.is_empty() {
         let partitions: Vec<String> = partition_spec.iter().map(Expression::render).collect();
         parts.push(format!("PartitionBy({})", partitions.join(", ")));
     }
-    if !order_spec.is_empty() {
-        let orders: Vec<String> = order_spec.iter().map(SortOrder::render).collect();
+    let orders: Vec<String> = order_spec
+        .map(|(child, ascending, null_ordering)| render_sort_order(child, ascending, null_ordering))
+        .collect();
+    if !orders.is_empty() {
         parts.push(format!("OrderBy({})", orders.join(", ")));
     }
     if let Some((frame_type, lower, upper)) = frame_spec {
@@ -1418,6 +1648,44 @@ pub fn window_spec_repr(
         ));
     }
     format!("WindowSpec({})", parts.join(", "))
+}
+
+fn render_window_expression<'a>(
+    window_function: &Expression,
+    partition_spec: &[Expression],
+    order_spec: impl Iterator<Item = (&'a Expression, bool, NullOrdering)>,
+    frame_spec: Option<&(u32, FrameBoundary, FrameBoundary)>,
+) -> String {
+    let spec = window_spec_repr_from_inputs(partition_spec, order_spec, frame_spec);
+    format!("WindowExpression({}, ({spec}))", window_function.render())
+}
+
+fn window_expression_proto<'a>(
+    window_function: &Expression,
+    partition_spec: &[Expression],
+    order_spec: impl Iterator<Item = (&'a Expression, bool, NullOrdering)>,
+    frame_spec: Option<&(u32, FrameBoundary, FrameBoundary)>,
+) -> proto::Expression {
+    let mut window = proto::expression::Window::default();
+    window.window_function = Some(Box::new(window_function.to_proto()));
+    window.partition_spec = partition_spec.iter().map(Expression::to_proto).collect();
+    window.order_spec = order_spec
+        .map(|(child, ascending, null_ordering)| {
+            sort_order_parts_proto(child, ascending, null_ordering)
+        })
+        .collect();
+    if let Some((frame_type, lower, upper)) = frame_spec {
+        let rows = *frame_type == 1;
+        window.frame_spec = Some(Box::new(proto::expression::window::WindowFrame {
+            frame_type: *frame_type as i32,
+            lower: Some(Box::new(to_proto_frame_boundary(lower, rows))),
+            upper: Some(Box::new(to_proto_frame_boundary(upper, rows))),
+        }));
+    }
+    proto::Expression {
+        expr_type: Some(proto::expression::ExprType::Window(Box::new(window))),
+        ..Default::default()
+    }
 }
 
 impl WindowExpressionWrapper {
@@ -1436,50 +1704,28 @@ impl WindowExpressionWrapper {
         }
     }
 
-    /// Convert to protobuf.
     /// As `WindowExpression.__repr__`.
     pub fn render(&self) -> String {
-        let spec = window_spec_repr(
+        render_window_expression(
+            &self.window_function,
             &self.partition_spec,
-            &self.order_spec,
+            self.order_spec
+                .iter()
+                .map(|order| (&order.child, order.ascending, order.null_ordering)),
             self.frame_spec.as_ref(),
-        );
-        format!(
-            "WindowExpression({}, ({spec}))",
-            self.window_function.render()
         )
     }
 
+    /// Convert to protobuf.
     pub fn to_proto(&self) -> proto::Expression {
-        let mut expr = proto::Expression::default();
-        let mut window = proto::expression::Window::default();
-
-        // Set the window function
-        window.window_function = Some(Box::new(self.window_function.to_proto()));
-
-        // Set partition spec
-        window.partition_spec = self.partition_spec.iter().map(|e| e.to_proto()).collect();
-
-        // Set order spec
-        window.order_spec = self
-            .order_spec
-            .iter()
-            .map(|s| s.to_proto_sort_order())
-            .collect();
-
-        // Set frame spec if present
-        if let Some((frame_type, lower, upper)) = &self.frame_spec {
-            let mut frame = proto::expression::window::WindowFrame::default();
-            frame.frame_type = *frame_type as i32;
-            // A frame type of 1 is a row frame, and another a range frame.
-            let rows = *frame_type == 1;
-            frame.lower = Some(Box::new(to_proto_frame_boundary(lower, rows)));
-            frame.upper = Some(Box::new(to_proto_frame_boundary(upper, rows)));
-            window.frame_spec = Some(Box::new(frame));
-        }
-
-        expr.expr_type = Some(proto::expression::ExprType::Window(Box::new(window)));
-        expr
+        window_expression_proto(
+            &self.window_function,
+            &self.partition_spec,
+            self.order_spec
+                .iter()
+                .map(|order| (&order.child, order.ascending, order.null_ordering)),
+            self.frame_spec.as_ref(),
+        )
     }
 }
 
@@ -1524,14 +1770,7 @@ fn to_proto_frame_boundary(
 impl SortOrder {
     /// Convert to proto SortOrder (used by window).
     pub fn to_proto_sort_order(&self) -> proto::expression::SortOrder {
-        let mut sort = proto::expression::SortOrder::default();
-        sort.child = Some(Box::new(self.child.to_proto()));
-        sort.direction = if self.ascending { 1i32 } else { 2i32 };
-        sort.null_ordering = match self.null_ordering {
-            NullOrdering::First => 1i32,
-            NullOrdering::Last => 2i32,
-        };
-        sort
+        sort_order_parts_proto(&self.child, self.ascending, self.null_ordering)
     }
 }
 
@@ -1785,11 +2024,11 @@ mod tests {
 
         // Alias, cast, star.
         assert_eq!(
-            Expression::from(ExpressionNode::Alias(Box::new(Alias::new(col("x"), "y")))).render(),
+            Expression::from(ExpressionSpec::Alias(Box::new(Alias::new(col("x"), "y")))).render(),
             "x AS y"
         );
         assert_eq!(
-            Expression::from(ExpressionNode::Cast(Box::new(Cast {
+            Expression::from(ExpressionSpec::Cast(Box::new(Cast {
                 child: col("x"),
                 target: CastTarget::TypeStr("int".to_string()),
                 eval_mode: None,
@@ -1798,7 +2037,7 @@ mod tests {
             "CAST(x AS INT)"
         );
         assert_eq!(
-            Expression::from(ExpressionNode::UnresolvedStar(None, None)).render(),
+            Expression::from(ExpressionSpec::UnresolvedStar(None, None)).render(),
             "unresolvedstar()"
         );
 
@@ -1870,7 +2109,9 @@ mod tests {
                 assert!(rendered.ends_with(", 1), 1), 1)"));
                 assert_eq!(rendered.len(), "id".len() + 10_000 * "+(, 1)".len());
                 assert!(deep == deep.clone());
-                assert!(format!("{deep:?}").starts_with("UnresolvedFunction("));
+                assert!(
+                    format!("{deep:?}").starts_with("ExpressionNode { kind: UnresolvedFunction")
+                );
                 std::mem::drop(deep);
 
                 // The deepest level is counted again for each serialization.
@@ -2093,8 +2334,8 @@ mod tests {
             "+",
             vec![col("a"), Expression::literal(LiteralExpression::Long(1))],
         );
-        let original = Expression::new(ExpressionNode::Alias(Box::new(Alias::new(sum, "b"))));
-        let sent = Expression::new(ExpressionNode::Sent(Box::new(SentExpression {
+        let original = Expression::new(ExpressionSpec::Alias(Box::new(Alias::new(sum, "b"))));
+        let sent = Expression::new(ExpressionSpec::Sent(Box::new(SentExpression {
             expression: original.to_proto(),
             rendered: original.render(),
             levels: 3,
@@ -2207,20 +2448,20 @@ mod tests {
     #[test]
     fn test_expression_render_unresolved_star_with_target() {
         let expr: Expression =
-            ExpressionNode::UnresolvedStar(Some("table.*".to_string()), None).into();
+            ExpressionSpec::UnresolvedStar(Some("table.*".to_string()), None).into();
         assert_eq!(expr.render(), "unresolvedstar(table.*)");
     }
 
     #[test]
     fn test_expression_render_unresolved_regex() {
-        let expr: Expression = ExpressionNode::UnresolvedRegex("`col_.*`".to_string(), None).into();
+        let expr: Expression = ExpressionSpec::UnresolvedRegex("`col_.*`".to_string(), None).into();
         assert_eq!(expr.render(), "UnresolvedRegex(`col_.*`)");
     }
 
     #[test]
     fn test_expression_render_direct_shuffle_partition_id() {
         let child = col("x");
-        let expr: Expression = ExpressionNode::DirectShufflePartitionId(child).into();
+        let expr: Expression = ExpressionSpec::DirectShufflePartitionId(child).into();
         assert_eq!(expr.render(), "DirectShufflePartitionID(child=x)");
     }
 
@@ -2229,7 +2470,7 @@ mod tests {
         let child = col("struct_col");
         let extraction = Expression::literal(LiteralExpression::string("field"));
         let ev = ExtractValue::new(child, extraction);
-        let expr: Expression = ExpressionNode::UnresolvedExtractValue(Box::new(ev)).into();
+        let expr: Expression = ExpressionSpec::UnresolvedExtractValue(Box::new(ev)).into();
         assert_eq!(expr.render(), "struct_col['field']");
     }
 
@@ -2238,7 +2479,7 @@ mod tests {
         let struct_expr = col("s");
         let value_expr = Expression::literal(LiteralExpression::int(42));
         let uf = UpdateFieldsExpr::new(struct_expr, "f1", Some(value_expr));
-        let expr: Expression = ExpressionNode::UpdateFields(Box::new(uf)).into();
+        let expr: Expression = ExpressionSpec::UpdateFields(Box::new(uf)).into();
         assert_eq!(expr.render(), "update_field(s, f1, 42)");
     }
 
@@ -2246,7 +2487,7 @@ mod tests {
     fn test_expression_render_update_fields_drop() {
         let struct_expr = col("s");
         let uf = UpdateFieldsExpr::new(struct_expr, "f1", None);
-        let expr: Expression = ExpressionNode::UpdateFields(Box::new(uf)).into();
+        let expr: Expression = ExpressionSpec::UpdateFields(Box::new(uf)).into();
         assert_eq!(expr.render(), "drop_field(s, f1)");
     }
 
@@ -2277,7 +2518,7 @@ mod tests {
     #[test]
     fn test_expression_render_sort_order() {
         let sort = SortOrder::asc_nulls_first(col("a"));
-        let expr: Expression = ExpressionNode::SortOrder(Box::new(sort)).into();
+        let expr: Expression = ExpressionSpec::SortOrder(Box::new(sort)).into();
         assert_eq!(expr.render(), "a ASC NULLS FIRST");
     }
 
@@ -2321,7 +2562,7 @@ mod tests {
             col("cond"),
             Expression::literal(LiteralExpression::int(1)),
         )]);
-        let expr: Expression = ExpressionNode::CaseWhen(Box::new(cw)).into();
+        let expr: Expression = ExpressionSpec::CaseWhen(Box::new(cw)).into();
         assert_eq!(expr.render(), "CASE WHEN cond THEN 1 END");
     }
 
@@ -2357,11 +2598,11 @@ mod tests {
             names: vec!["a".to_string(), "b".to_string()],
             metadata: None,
         };
-        let expr: Expression = ExpressionNode::Alias(Box::new(alias)).into();
+        let expr: Expression = ExpressionSpec::Alias(Box::new(alias)).into();
         // As `ColumnAlias.__repr__`: the names joined by commas.
         assert_eq!(expr.render(), "x AS a,b");
         let none: Expression =
-            ExpressionNode::Alias(Box::new(Alias::with_names(col("x"), Vec::<String>::new())))
+            ExpressionSpec::Alias(Box::new(Alias::with_names(col("x"), Vec::<String>::new())))
                 .into();
         assert_eq!(none.render(), "x AS ");
     }
@@ -2374,14 +2615,14 @@ mod tests {
                 collation: "".to_string(),
             },
         );
-        let expr: Expression = ExpressionNode::Cast(Box::new(cast)).into();
+        let expr: Expression = ExpressionSpec::Cast(Box::new(cast)).into();
         assert_eq!(expr.render(), "CAST(x AS STRING)");
     }
 
     #[test]
     fn test_sql_expression_render() {
         let expr: Expression =
-            ExpressionNode::SQLExpression("SELECT * FROM table".to_string()).into();
+            ExpressionSpec::SQLExpression("SELECT * FROM table".to_string()).into();
         assert_eq!(expr.render(), "SELECT * FROM table");
     }
 
@@ -2467,7 +2708,7 @@ mod tests {
         // As NamedArgumentExpression: `key => value`, sent as a named_argument_expression.
         let value = Expression::column("x");
         let arg: Expression =
-            ExpressionNode::NamedArgument(Box::new(NamedArgument::new("b", value.clone()))).into();
+            ExpressionSpec::NamedArgument(Box::new(NamedArgument::new("b", value.clone()))).into();
         assert_eq!(arg.render(), "b => x");
         let Some(proto::expression::ExprType::NamedArgumentExpression(named)) =
             arg.to_proto().expr_type
@@ -2495,11 +2736,11 @@ mod tests {
     #[test]
     fn test_call_function_wrapper_render() {
         let cf = CallFunctionWrapper::new("my_func", vec![col("a"), col("b")]);
-        let expr: Expression = ExpressionNode::CallFunction(Box::new(cf)).into();
+        let expr: Expression = ExpressionSpec::CallFunction(Box::new(cf)).into();
         // As `CallFunction.__repr__` in PySpark Connect.
         assert_eq!(expr.render(), "CallFunction('my_func', a, b)");
         let no_args = CallFunctionWrapper::new("current_date", vec![]);
-        let expr: Expression = ExpressionNode::CallFunction(Box::new(no_args)).into();
+        let expr: Expression = ExpressionSpec::CallFunction(Box::new(no_args)).into();
         assert_eq!(expr.render(), "CallFunction('current_date')");
     }
 
@@ -2511,7 +2752,7 @@ mod tests {
             vec![],
             None,
         );
-        let expr: Expression = ExpressionNode::WindowExpression(Box::new(we)).into();
+        let expr: Expression = ExpressionSpec::WindowExpression(Box::new(we)).into();
         // As WindowExpression.__repr__.
         assert_eq!(
             expr.render(),
@@ -2522,14 +2763,14 @@ mod tests {
     #[test]
     fn test_lambda_function_render() {
         let lf = LambdaFunction::new(col("x"), vec![UnresolvedNamedLambdaVariable::new("x")]);
-        let expr: Expression = ExpressionNode::LambdaFunction(Box::new(lf)).into();
+        let expr: Expression = ExpressionSpec::LambdaFunction(Box::new(lf)).into();
         assert_eq!(expr.render(), "LambdaFunction(x, x)");
     }
 
     #[test]
     fn test_unresolved_named_lambda_variable_render() {
         let var = UnresolvedNamedLambdaVariable::new("x");
-        let expr: Expression = ExpressionNode::UnresolvedNamedLambdaVariable(var).into();
+        let expr: Expression = ExpressionSpec::UnresolvedNamedLambdaVariable(var).into();
         assert_eq!(expr.render(), "x");
     }
 
@@ -2623,7 +2864,7 @@ mod tests {
 
     #[test]
     fn test_to_proto_unresolved_star_none() {
-        let expr: Expression = ExpressionNode::UnresolvedStar(None, None).into();
+        let expr: Expression = ExpressionSpec::UnresolvedStar(None, None).into();
         let proto = expr.to_proto();
         assert!(proto.expr_type.is_some());
         if let Some(proto::expression::ExprType::UnresolvedStar(star)) = proto.expr_type {
@@ -2636,7 +2877,7 @@ mod tests {
     #[test]
     fn test_to_proto_unresolved_star_with_target() {
         let expr: Expression =
-            ExpressionNode::UnresolvedStar(Some("table.*".to_string()), None).into();
+            ExpressionSpec::UnresolvedStar(Some("table.*".to_string()), None).into();
         let proto = expr.to_proto();
         assert!(proto.expr_type.is_some());
         if let Some(proto::expression::ExprType::UnresolvedStar(star)) = proto.expr_type {
@@ -2648,7 +2889,7 @@ mod tests {
 
     #[test]
     fn test_to_proto_unresolved_regex() {
-        let expr: Expression = ExpressionNode::UnresolvedRegex("`col_.*`".to_string(), None).into();
+        let expr: Expression = ExpressionSpec::UnresolvedRegex("`col_.*`".to_string(), None).into();
         let proto = expr.to_proto();
         assert!(proto.expr_type.is_some());
         if let Some(proto::expression::ExprType::UnresolvedRegex(regex)) = proto.expr_type {
@@ -2661,7 +2902,7 @@ mod tests {
     #[test]
     fn test_to_proto_direct_shuffle_partition_id() {
         let child = col("x");
-        let expr: Expression = ExpressionNode::DirectShufflePartitionId(child).into();
+        let expr: Expression = ExpressionSpec::DirectShufflePartitionId(child).into();
         let proto = expr.to_proto();
         assert!(proto.expr_type.is_some());
         if let Some(proto::expression::ExprType::DirectShufflePartitionId(dspi)) = proto.expr_type {
@@ -2676,7 +2917,7 @@ mod tests {
         let child = col("struct_col");
         let extraction = Expression::literal(LiteralExpression::string("field"));
         let ev = ExtractValue::new(child, extraction);
-        let expr: Expression = ExpressionNode::UnresolvedExtractValue(Box::new(ev)).into();
+        let expr: Expression = ExpressionSpec::UnresolvedExtractValue(Box::new(ev)).into();
         let proto = expr.to_proto();
         assert!(proto.expr_type.is_some());
         if let Some(proto::expression::ExprType::UnresolvedExtractValue(uev)) = proto.expr_type {
@@ -2692,7 +2933,7 @@ mod tests {
         let struct_expr = col("s");
         let value_expr = Expression::literal(LiteralExpression::int(42));
         let uf = UpdateFieldsExpr::new(struct_expr, "f1", Some(value_expr));
-        let expr: Expression = ExpressionNode::UpdateFields(Box::new(uf)).into();
+        let expr: Expression = ExpressionSpec::UpdateFields(Box::new(uf)).into();
         let proto = expr.to_proto();
         assert!(proto.expr_type.is_some());
         if let Some(proto::expression::ExprType::UpdateFields(uf_proto)) = proto.expr_type {
@@ -2706,7 +2947,7 @@ mod tests {
     #[test]
     fn test_to_proto_alias_with_metadata() {
         let alias = Alias::new(col("x"), "y").with_metadata("metadata_str".to_string());
-        let expr: Expression = ExpressionNode::Alias(Box::new(alias)).into();
+        let expr: Expression = ExpressionSpec::Alias(Box::new(alias)).into();
         let proto = expr.to_proto();
         assert!(proto.expr_type.is_some());
         if let Some(proto::expression::ExprType::Alias(alias_proto)) = proto.expr_type {
@@ -2720,7 +2961,7 @@ mod tests {
     #[test]
     fn test_to_proto_cast_with_datatype() {
         let cast = Cast::new(col("x"), DataType::Integer);
-        let expr: Expression = ExpressionNode::Cast(Box::new(cast)).into();
+        let expr: Expression = ExpressionSpec::Cast(Box::new(cast)).into();
         let proto = expr.to_proto();
         assert!(proto.expr_type.is_some());
         if let Some(proto::expression::ExprType::Cast(cast_proto)) = proto.expr_type {
@@ -2734,7 +2975,7 @@ mod tests {
     #[test]
     fn test_to_proto_cast_with_eval_mode_legacy() {
         let cast = Cast::new(col("x"), DataType::Integer).with_eval_mode(CastEvalMode::Legacy);
-        let expr: Expression = ExpressionNode::Cast(Box::new(cast)).into();
+        let expr: Expression = ExpressionSpec::Cast(Box::new(cast)).into();
         let proto = expr.to_proto();
         assert!(proto.expr_type.is_some());
         if let Some(proto::expression::ExprType::Cast(cast_proto)) = proto.expr_type {
@@ -2747,7 +2988,7 @@ mod tests {
     #[test]
     fn test_to_proto_cast_with_eval_mode_ansi() {
         let cast = Cast::new(col("x"), DataType::Integer).with_eval_mode(CastEvalMode::Ansi);
-        let expr: Expression = ExpressionNode::Cast(Box::new(cast)).into();
+        let expr: Expression = ExpressionSpec::Cast(Box::new(cast)).into();
         let proto = expr.to_proto();
         assert!(proto.expr_type.is_some());
         if let Some(proto::expression::ExprType::Cast(cast_proto)) = proto.expr_type {
@@ -2760,7 +3001,7 @@ mod tests {
     #[test]
     fn test_to_proto_cast_with_eval_mode_try() {
         let cast = Cast::new(col("x"), DataType::Integer).with_eval_mode(CastEvalMode::Try);
-        let expr: Expression = ExpressionNode::Cast(Box::new(cast)).into();
+        let expr: Expression = ExpressionSpec::Cast(Box::new(cast)).into();
         let proto = expr.to_proto();
         assert!(proto.expr_type.is_some());
         if let Some(proto::expression::ExprType::Cast(cast_proto)) = proto.expr_type {
@@ -2773,7 +3014,7 @@ mod tests {
     #[test]
     fn test_to_proto_cast_str() {
         let cast = Cast::new_str(col("x"), "integer");
-        let expr: Expression = ExpressionNode::Cast(Box::new(cast)).into();
+        let expr: Expression = ExpressionSpec::Cast(Box::new(cast)).into();
         let proto = expr.to_proto();
         assert!(proto.expr_type.is_some());
         if let Some(proto::expression::ExprType::Cast(cast_proto)) = proto.expr_type {
@@ -2786,7 +3027,7 @@ mod tests {
     #[test]
     fn test_to_proto_sort_order() {
         let sort = SortOrder::asc_nulls_first(col("x"));
-        let expr: Expression = ExpressionNode::SortOrder(Box::new(sort)).into();
+        let expr: Expression = ExpressionSpec::SortOrder(Box::new(sort)).into();
         let proto = expr.to_proto();
         assert!(proto.expr_type.is_some());
         if let Some(proto::expression::ExprType::SortOrder(sort_proto)) = proto.expr_type {
@@ -2804,7 +3045,7 @@ mod tests {
             Expression::literal(LiteralExpression::int(1)),
         )])
         .with_else(Expression::literal(LiteralExpression::int(99)));
-        let expr: Expression = ExpressionNode::CaseWhen(Box::new(cw)).into();
+        let expr: Expression = ExpressionSpec::CaseWhen(Box::new(cw)).into();
         let proto = expr.to_proto();
         assert!(proto.expr_type.is_some());
         if let Some(proto::expression::ExprType::UnresolvedFunction(func_proto)) = proto.expr_type {
@@ -2818,7 +3059,7 @@ mod tests {
     #[test]
     fn test_to_proto_sql_expression() {
         let expr: Expression =
-            ExpressionNode::SQLExpression("SELECT * FROM table".to_string()).into();
+            ExpressionSpec::SQLExpression("SELECT * FROM table".to_string()).into();
         let proto = expr.to_proto();
         assert!(proto.expr_type.is_some());
         if let Some(proto::expression::ExprType::ExpressionString(es)) = proto.expr_type {
@@ -2831,7 +3072,7 @@ mod tests {
     #[test]
     fn test_to_proto_call_function() {
         let cf = CallFunctionWrapper::new("my_func", vec![col("a"), col("b")]);
-        let expr: Expression = ExpressionNode::CallFunction(Box::new(cf)).into();
+        let expr: Expression = ExpressionSpec::CallFunction(Box::new(cf)).into();
         let proto = expr.to_proto();
         assert!(proto.expr_type.is_some());
         if let Some(proto::expression::ExprType::CallFunction(cf_proto)) = proto.expr_type {
@@ -2845,7 +3086,7 @@ mod tests {
     #[test]
     fn test_to_proto_lambda_function() {
         let lf = LambdaFunction::new(col("x"), vec![UnresolvedNamedLambdaVariable::new("x")]);
-        let expr: Expression = ExpressionNode::LambdaFunction(Box::new(lf)).into();
+        let expr: Expression = ExpressionSpec::LambdaFunction(Box::new(lf)).into();
         let proto = expr.to_proto();
         assert!(proto.expr_type.is_some());
         if let Some(proto::expression::ExprType::LambdaFunction(lf_proto)) = proto.expr_type {
@@ -2859,7 +3100,7 @@ mod tests {
     #[test]
     fn test_to_proto_unresolved_named_lambda_variable() {
         let var = UnresolvedNamedLambdaVariable::new("x");
-        let expr: Expression = ExpressionNode::UnresolvedNamedLambdaVariable(var).into();
+        let expr: Expression = ExpressionSpec::UnresolvedNamedLambdaVariable(var).into();
         let proto = expr.to_proto();
         assert!(proto.expr_type.is_some());
         if let Some(proto::expression::ExprType::UnresolvedNamedLambdaVariable(var_proto)) =
@@ -2883,7 +3124,7 @@ mod tests {
                 FrameBoundary::CurrentRow,
             )),
         );
-        let expr: Expression = ExpressionNode::WindowExpression(Box::new(we)).into();
+        let expr: Expression = ExpressionSpec::WindowExpression(Box::new(we)).into();
         let proto = expr.to_proto();
         assert!(proto.expr_type.is_some());
         if let Some(proto::expression::ExprType::Window(window_proto)) = proto.expr_type {

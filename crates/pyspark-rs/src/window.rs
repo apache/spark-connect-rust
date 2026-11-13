@@ -3,7 +3,7 @@
 use pyo3::prelude::*;
 use pyo3::types::PyTuple;
 use spark_connect::column::Column;
-use spark_connect::expression::{Expression, ExpressionNode, NullOrdering, SortOrder};
+use spark_connect::expression::{Expression, ExpressionKind, NullOrdering, SortOrder};
 use spark_connect::window::{FrameBound, FrameType, WindowSpec};
 
 use crate::column::PyColumn;
@@ -61,8 +61,16 @@ fn to_partition_exprs(cols: Vec<Bound<'_, PyAny>>) -> PyResult<Vec<Expression>> 
 fn to_sort_orders(cols: Vec<Bound<'_, PyAny>>) -> PyResult<Vec<SortOrder>> {
     let mut sort_orders = Vec::new();
     for column in window_columns(cols)? {
-        if let ExpressionNode::SortOrder(sort) = column.expression().node() {
-            sort_orders.push((**sort).clone());
+        if let ExpressionKind::SortOrder {
+            ascending,
+            null_ordering,
+        } = column.expression().kind()
+        {
+            sort_orders.push(SortOrder {
+                child: column.expression().children()[0].clone(),
+                ascending: *ascending,
+                null_ordering: *null_ordering,
+            });
         } else {
             sort_orders.push(SortOrder::asc_nulls_first(column.expression().clone()));
         }

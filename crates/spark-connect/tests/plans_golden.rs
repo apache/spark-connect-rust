@@ -11,7 +11,7 @@ mod common;
 use std::collections::HashMap;
 
 use spark_connect::column::col;
-use spark_connect::expression::{Expression, ExpressionNode};
+use spark_connect::expression::{Expression, ExpressionSpec};
 use spark_connect::plan::{self, AggregateGroupType, JoinType, LogicalPlan, SetOpType};
 use spark_connect_proto as proto;
 
@@ -278,7 +278,7 @@ fn build(name: &str) -> Option<LogicalPlan> {
         "select_star" => {
             let range = plan::range(0, 10, 1);
             let star_col = spark_connect::column::Column::new(
-                ExpressionNode::UnresolvedStar(None, None).into(),
+                ExpressionSpec::UnresolvedStar(None, None).into(),
             );
             plan::project(range, vec![star_col])
         }
@@ -290,10 +290,10 @@ fn build(name: &str) -> Option<LogicalPlan> {
         "select_expr" => {
             let range = plan::range(0, 10, 1);
             let expr1 = spark_connect::column::Column::new(
-                ExpressionNode::SQLExpression("id * 2 as x".to_string()).into(),
+                ExpressionSpec::SQLExpression("id * 2 as x".to_string()).into(),
             );
             let expr2 = spark_connect::column::Column::new(
-                ExpressionNode::SQLExpression("id + 1 as y".to_string()).into(),
+                ExpressionSpec::SQLExpression("id + 1 as y".to_string()).into(),
             );
             plan::project(range, vec![expr1, expr2])
         }
@@ -352,7 +352,7 @@ fn build(name: &str) -> Option<LogicalPlan> {
         }
         "sort" => {
             let range = plan::range(0, 10, 1);
-            let order_expr: Expression = ExpressionNode::SortOrder(Box::new(
+            let order_expr: Expression = ExpressionSpec::SortOrder(Box::new(
                 spark_connect::expression::SortOrder::desc_nulls_last(Expression::column("id")),
             ))
             .into();
@@ -360,7 +360,7 @@ fn build(name: &str) -> Option<LogicalPlan> {
         }
         "order_by_multi" => {
             let range = plan::range(0, 10, 1);
-            let order_expr: Expression = ExpressionNode::SortOrder(Box::new(
+            let order_expr: Expression = ExpressionSpec::SortOrder(Box::new(
                 spark_connect::expression::SortOrder::asc_nulls_last(Expression::column("id")),
             ))
             .into();
@@ -374,7 +374,7 @@ fn build(name: &str) -> Option<LogicalPlan> {
                 .clone();
             let agg_count = spark_connect::column::Column::new(Expression::function(
                 "count",
-                vec![ExpressionNode::UnresolvedStar(None, None).into()],
+                vec![ExpressionSpec::UnresolvedStar(None, None).into()],
             ))
             .alias("c")
             .expression()
@@ -585,7 +585,7 @@ fn build(name: &str) -> Option<LogicalPlan> {
         "col_regex" => {
             let range = plan::range(0, 10, 1);
             let regex_col = spark_connect::column::Column::new(
-                ExpressionNode::UnresolvedRegex("`id`".to_string(), None).into(),
+                ExpressionSpec::UnresolvedRegex("`id`".to_string(), None).into(),
             );
             plan::project(range, vec![regex_col])
         }

@@ -4,7 +4,7 @@
 
 use crate::column::Column;
 use crate::dataframe::DataFrame;
-use crate::expression::{ExpressionNode, SubqueryExpression, SubqueryType};
+use crate::expression::{ExpressionSpec, SubqueryExpression, SubqueryType};
 #[cfg(test)]
 use crate::plan::{LogicalPlan, LogicalPlanKind};
 use spark_connect_core::error::{Result, SparkError, SparkErrorKind};
@@ -150,7 +150,7 @@ impl TableArg {
     /// This table argument as a Column, the argument of a UDTF call that passes the rows of
     /// the DataFrame. As the `_subquery_expr` of a PySpark `TableArg`.
     pub fn to_column(&self) -> Column {
-        Column::new(ExpressionNode::Subquery(Box::new(self.subquery.clone())).into())
+        Column::new(ExpressionSpec::Subquery(Box::new(self.subquery.clone())).into())
     }
 }
 

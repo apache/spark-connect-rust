@@ -11,7 +11,7 @@ use spark_connect_core::runtime::{block_on, get_runtime};
 use spark_connect_proto as proto;
 
 use crate::column::{columns_of, expressions_of, Column};
-use crate::expression::{Expression, ExpressionNode, SortOrder};
+use crate::expression::{Expression, ExpressionKind, ExpressionSpec, SortOrder};
 use crate::plan::{
     AggregateGroupType, AsOfJoinDirection, AsOfJoinType, JoinType, LogicalPlan, LogicalPlanKind,
     OpaqueRelation, RelationOwner, SetOpType,
@@ -1919,10 +1919,10 @@ impl DataFrame {
         let partition_exprs = columns
             .into_iter()
             .map(|expr| {
-                if matches!(expr.node(), ExpressionNode::SortOrder(_)) {
+                if matches!(expr.node().kind(), ExpressionKind::SortOrder { .. }) {
                     expr
                 } else {
-                    ExpressionNode::SortOrder(Box::new(SortOrder::asc_nulls_first(expr))).into()
+                    ExpressionSpec::SortOrder(Box::new(SortOrder::asc_nulls_first(expr))).into()
                 }
             })
             .collect();
@@ -2326,19 +2326,19 @@ impl DataFrame {
     /// same column names. Mirrors `df[name]`, `df.name` and `DataFrame._col` of PySpark Connect.
     pub fn col(&self, name: &str) -> Column {
         let reference = crate::expression::ColumnReference::new(name).with_plan_id(self.plan_id());
-        Column::new(ExpressionNode::ColumnReference(reference).into())
+        Column::new(ExpressionSpec::ColumnReference(reference).into())
     }
 
     /// The star of the columns of this DataFrame, as `df["*"]` of PySpark Connect.
     pub fn star(&self) -> Column {
-        Column::new(ExpressionNode::UnresolvedStar(None, Some(self.plan_id())).into())
+        Column::new(ExpressionSpec::UnresolvedStar(None, Some(self.plan_id())).into())
     }
 
     /// The columns of this DataFrame whose names match the regex `col_name`, in backticks, as
     /// a Column. Mirrors `DataFrame.colRegex`.
     pub fn col_regex(&self, col_name: &str) -> Column {
         Column::new(
-            ExpressionNode::UnresolvedRegex(col_name.to_string(), Some(self.plan_id())).into(),
+            ExpressionSpec::UnresolvedRegex(col_name.to_string(), Some(self.plan_id())).into(),
         )
     }
 
@@ -2348,7 +2348,7 @@ impl DataFrame {
         let reference = crate::expression::ColumnReference::new(name)
             .with_plan_id(self.plan_id())
             .metadata();
-        Column::new(ExpressionNode::ColumnReference(reference).into())
+        Column::new(ExpressionSpec::ColumnReference(reference).into())
     }
 
     /// Group by with rollup.
@@ -2843,7 +2843,7 @@ impl DataFrame {
     /// expression and used as the sole repartition expression.
     pub fn repartition_by_id(&self, num_partitions: i32, partition_id_col: Column) -> DataFrame {
         let direct: Expression =
-            ExpressionNode::DirectShufflePartitionId(partition_id_col.expression().clone()).into();
+            ExpressionSpec::DirectShufflePartitionId(partition_id_col.expression().clone()).into();
         self.repartition_by_expressions(num_partitions, vec![direct])
     }
 
@@ -2851,7 +2851,7 @@ impl DataFrame {
     /// `DataFrame.zipWithIndex(indexColName="index")`:
     /// `self.select(col("*"), distributed_sequence_id().alias(indexColName))`.
     pub fn zip_with_index(&self, index_col_name: &str) -> DataFrame {
-        let star = Column::new(ExpressionNode::UnresolvedStar(None, None).into());
+        let star = Column::new(ExpressionSpec::UnresolvedStar(None, None).into());
         let seq = Column::new(Expression::function("distributed_sequence_id", vec![]))
             .alias(index_col_name);
         self.select(vec![star, seq])
@@ -2889,14 +2889,14 @@ impl DataFrame {
     /// referred to as `col(...).outer()`.
     pub fn scalar(&self) -> Column {
         let subquery = self.subquery(crate::expression::SubqueryType::Scalar);
-        Column::new(ExpressionNode::Subquery(Box::new(subquery)).into())
+        Column::new(ExpressionSpec::Subquery(Box::new(subquery)).into())
     }
 
     /// The EXISTS subquery of this DataFrame, as a Column of whether it returns a row.
     /// Mirrors `DataFrame.exists()`.
     pub fn exists(&self) -> Column {
         let subquery = self.subquery(crate::expression::SubqueryType::Exists);
-        Column::new(ExpressionNode::Subquery(Box::new(subquery)).into())
+        Column::new(ExpressionSpec::Subquery(Box::new(subquery)).into())
     }
 
     /// The first value of the first row, if any, of the whole result, as PySpark's `cov` and

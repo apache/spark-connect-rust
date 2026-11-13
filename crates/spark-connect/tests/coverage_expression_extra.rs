@@ -5,7 +5,7 @@
 //! else, and window frame boundaries. No server required.
 
 use spark_connect::expression::{
-    Alias, CaseWhen, Cast, CastEvalMode, ColumnReference, Expression, ExpressionNode,
+    Alias, CaseWhen, Cast, CastEvalMode, ColumnReference, Expression, ExpressionSpec,
     FrameBoundary, LiteralExpression, SortOrder, WindowExpressionWrapper,
 };
 use spark_connect::types::DataType;
@@ -64,7 +64,7 @@ fn inline_udf_expression_to_proto() {
         vec![col_expr("x")],
         payload,
     );
-    let expr: Expression = ExpressionNode::CommonInlineUserDefinedFunction(Box::new(udf)).into();
+    let expr: Expression = ExpressionSpec::CommonInlineUserDefinedFunction(Box::new(udf)).into();
     assert!(expr.to_proto().expr_type.is_some());
 }
 

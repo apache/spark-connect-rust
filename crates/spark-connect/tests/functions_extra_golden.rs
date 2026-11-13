@@ -6,7 +6,7 @@
 //! Connect server and descriptor files.
 
 use spark_connect::column::Column;
-use spark_connect::expression::{Expression, ExpressionNode};
+use spark_connect::expression::{Expression, ExpressionKind};
 use spark_connect::functions::*;
 
 #[test]
@@ -16,9 +16,9 @@ fn test_protobuf_from_protobuf_basic() {
 
     // Verify the expression is an UnresolvedFunction with correct name
     let expr = result.expression();
-    if let ExpressionNode::UnresolvedFunction(func) = expr.node() {
-        assert_eq!(func.name, "from_protobuf");
-        assert_eq!(func.args.len(), 2);
+    if let ExpressionKind::UnresolvedFunction { name, .. } = expr.kind() {
+        assert_eq!(name, "from_protobuf");
+        assert_eq!(expr.children().len(), 2);
     } else {
         panic!("Expected UnresolvedFunction");
     }
@@ -31,9 +31,9 @@ fn test_protobuf_from_protobuf_with_descriptor() {
     let result = from_protobuf_with_descriptor(data, "MyMessage", descriptor);
 
     let expr = result.expression();
-    if let ExpressionNode::UnresolvedFunction(func) = expr.node() {
-        assert_eq!(func.name, "from_protobuf");
-        assert_eq!(func.args.len(), 3);
+    if let ExpressionKind::UnresolvedFunction { name, .. } = expr.kind() {
+        assert_eq!(name, "from_protobuf");
+        assert_eq!(expr.children().len(), 3);
     } else {
         panic!("Expected UnresolvedFunction");
     }
@@ -47,9 +47,9 @@ fn test_protobuf_from_protobuf_with_descriptor_and_options() {
     let result = from_protobuf_with_descriptor_and_options(data, "MyMessage", descriptor, options);
 
     let expr = result.expression();
-    if let ExpressionNode::UnresolvedFunction(func) = expr.node() {
-        assert_eq!(func.name, "from_protobuf");
-        assert_eq!(func.args.len(), 4);
+    if let ExpressionKind::UnresolvedFunction { name, .. } = expr.kind() {
+        assert_eq!(name, "from_protobuf");
+        assert_eq!(expr.children().len(), 4);
     } else {
         panic!("Expected UnresolvedFunction");
     }
@@ -62,9 +62,9 @@ fn test_protobuf_from_protobuf_with_options() {
     let result = from_protobuf_with_options(data, "MyMessage", options);
 
     let expr = result.expression();
-    if let ExpressionNode::UnresolvedFunction(func) = expr.node() {
-        assert_eq!(func.name, "from_protobuf");
-        assert_eq!(func.args.len(), 3);
+    if let ExpressionKind::UnresolvedFunction { name, .. } = expr.kind() {
+        assert_eq!(name, "from_protobuf");
+        assert_eq!(expr.children().len(), 3);
     } else {
         panic!("Expected UnresolvedFunction");
     }
@@ -76,9 +76,9 @@ fn test_protobuf_to_protobuf_basic() {
     let result = to_protobuf(data, "MyMessage");
 
     let expr = result.expression();
-    if let ExpressionNode::UnresolvedFunction(func) = expr.node() {
-        assert_eq!(func.name, "to_protobuf");
-        assert_eq!(func.args.len(), 2);
+    if let ExpressionKind::UnresolvedFunction { name, .. } = expr.kind() {
+        assert_eq!(name, "to_protobuf");
+        assert_eq!(expr.children().len(), 2);
     } else {
         panic!("Expected UnresolvedFunction");
     }
@@ -91,9 +91,9 @@ fn test_protobuf_to_protobuf_with_descriptor() {
     let result = to_protobuf_with_descriptor(data, "MyMessage", descriptor);
 
     let expr = result.expression();
-    if let ExpressionNode::UnresolvedFunction(func) = expr.node() {
-        assert_eq!(func.name, "to_protobuf");
-        assert_eq!(func.args.len(), 3);
+    if let ExpressionKind::UnresolvedFunction { name, .. } = expr.kind() {
+        assert_eq!(name, "to_protobuf");
+        assert_eq!(expr.children().len(), 3);
     } else {
         panic!("Expected UnresolvedFunction");
     }
@@ -107,9 +107,9 @@ fn test_protobuf_to_protobuf_with_descriptor_and_options() {
     let result = to_protobuf_with_descriptor_and_options(data, "MyMessage", descriptor, options);
 
     let expr = result.expression();
-    if let ExpressionNode::UnresolvedFunction(func) = expr.node() {
-        assert_eq!(func.name, "to_protobuf");
-        assert_eq!(func.args.len(), 4);
+    if let ExpressionKind::UnresolvedFunction { name, .. } = expr.kind() {
+        assert_eq!(name, "to_protobuf");
+        assert_eq!(expr.children().len(), 4);
     } else {
         panic!("Expected UnresolvedFunction");
     }
@@ -122,9 +122,9 @@ fn test_protobuf_to_protobuf_with_options() {
     let result = to_protobuf_with_options(data, "MyMessage", options);
 
     let expr = result.expression();
-    if let ExpressionNode::UnresolvedFunction(func) = expr.node() {
-        assert_eq!(func.name, "to_protobuf");
-        assert_eq!(func.args.len(), 3);
+    if let ExpressionKind::UnresolvedFunction { name, .. } = expr.kind() {
+        assert_eq!(name, "to_protobuf");
+        assert_eq!(expr.children().len(), 3);
     } else {
         panic!("Expected UnresolvedFunction");
     }
@@ -139,9 +139,9 @@ fn test_avro_from_avro_basic() {
     );
 
     let expr = result.expression();
-    if let ExpressionNode::UnresolvedFunction(func) = expr.node() {
-        assert_eq!(func.name, "from_avro");
-        assert_eq!(func.args.len(), 2);
+    if let ExpressionKind::UnresolvedFunction { name, .. } = expr.kind() {
+        assert_eq!(name, "from_avro");
+        assert_eq!(expr.children().len(), 2);
     } else {
         panic!("Expected UnresolvedFunction");
     }
@@ -154,9 +154,9 @@ fn test_avro_from_avro_with_options() {
     let result = from_avro_with_options(data, r#"{"type":"record"}"#, options);
 
     let expr = result.expression();
-    if let ExpressionNode::UnresolvedFunction(func) = expr.node() {
-        assert_eq!(func.name, "from_avro");
-        assert_eq!(func.args.len(), 3);
+    if let ExpressionKind::UnresolvedFunction { name, .. } = expr.kind() {
+        assert_eq!(name, "from_avro");
+        assert_eq!(expr.children().len(), 3);
     } else {
         panic!("Expected UnresolvedFunction");
     }
@@ -168,9 +168,9 @@ fn test_avro_to_avro_basic() {
     let result = to_avro(data);
 
     let expr = result.expression();
-    if let ExpressionNode::UnresolvedFunction(func) = expr.node() {
-        assert_eq!(func.name, "to_avro");
-        assert_eq!(func.args.len(), 1);
+    if let ExpressionKind::UnresolvedFunction { name, .. } = expr.kind() {
+        assert_eq!(name, "to_avro");
+        assert_eq!(expr.children().len(), 1);
     } else {
         panic!("Expected UnresolvedFunction");
     }
@@ -182,9 +182,9 @@ fn test_avro_to_avro_with_schema() {
     let result = to_avro_with_schema(data, r#"{"type":"record"}"#);
 
     let expr = result.expression();
-    if let ExpressionNode::UnresolvedFunction(func) = expr.node() {
-        assert_eq!(func.name, "to_avro");
-        assert_eq!(func.args.len(), 2);
+    if let ExpressionKind::UnresolvedFunction { name, .. } = expr.kind() {
+        assert_eq!(name, "to_avro");
+        assert_eq!(expr.children().len(), 2);
     } else {
         panic!("Expected UnresolvedFunction");
     }

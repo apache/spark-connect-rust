@@ -740,11 +740,11 @@ impl StatFunctions {
         fractions: Vec<(Expression, f64)>,
         seed: Option<i64>,
     ) -> Result<DataFrame> {
-        use crate::expression::{ExpressionNode, LiteralExpression};
+        use crate::expression::{ExpressionKind, LiteralExpression};
         for (stratum, _) in &fractions {
             // The Python name of the type of the value that a literal stands for.
-            let item_type = match stratum.node() {
-                ExpressionNode::Literal(literal) => match literal {
+            let item_type = match stratum.node().kind() {
+                ExpressionKind::Literal(literal) => match literal {
                     LiteralExpression::Boolean(_)
                     | LiteralExpression::Byte(_)
                     | LiteralExpression::Short(_)

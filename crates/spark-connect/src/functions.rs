@@ -11,7 +11,7 @@
 use crate::column::{expressions_of, Column};
 use crate::dataframe::DataFrame;
 use crate::expression::{
-    CallFunctionWrapper, Expression, ExpressionNode, LiteralExpression, UnresolvedFunction,
+    CallFunctionWrapper, Expression, ExpressionSpec, LiteralExpression, UnresolvedFunction,
 };
 
 /// Build an `UnresolvedFunction` Column from a proto function name and args.
@@ -22,7 +22,7 @@ fn func(name: &str, args: Vec<Expression>) -> Column {
 /// Build an `UnresolvedFunction` Column with the `is_distinct` flag set.
 fn func_distinct(name: &str, args: Vec<Expression>) -> Column {
     Column::new(
-        ExpressionNode::UnresolvedFunction(UnresolvedFunction::new_distinct(name, args)).into(),
+        ExpressionSpec::UnresolvedFunction(UnresolvedFunction::new_distinct(name, args)).into(),
     )
 }
 
@@ -75,9 +75,9 @@ fn lit_binary(b: Vec<u8>) -> Expression {
 /// `select("*")`, `col("t.*")` resolve on the server), matching pyspark.
 pub fn col(name: &str) -> Column {
     if name == "*" {
-        Column::new(ExpressionNode::UnresolvedStar(None, None).into())
+        Column::new(ExpressionSpec::UnresolvedStar(None, None).into())
     } else if let Some(prefix) = name.strip_suffix(".*") {
-        Column::new(ExpressionNode::UnresolvedStar(Some(format!("{prefix}.*")), None).into())
+        Column::new(ExpressionSpec::UnresolvedStar(Some(format!("{prefix}.*")), None).into())
     } else {
         Column::new(Expression::column(name))
     }
@@ -95,7 +95,7 @@ pub fn lit(col: Column) -> Column {
 
 /// Mirrors `pyspark.sql.functions.expr`.
 pub fn expr(expr_str: &str) -> Column {
-    Column::new(ExpressionNode::SQLExpression(expr_str.to_string()).into())
+    Column::new(ExpressionSpec::SQLExpression(expr_str.to_string()).into())
 }
 
 /// Mirrors `pyspark.sql.functions.cast` (returns the cast target column).
@@ -109,7 +109,7 @@ pub fn call_function<C: Into<Column>>(name: &str, args: impl IntoIterator<Item =
     let args: Vec<Column> = args.into_iter().map(Into::into).collect();
     let arg_exprs = args.iter().map(|c| c.expression().clone()).collect();
     Column::new(
-        ExpressionNode::CallFunction(Box::new(CallFunctionWrapper::new(name, arg_exprs))).into(),
+        ExpressionSpec::CallFunction(Box::new(CallFunctionWrapper::new(name, arg_exprs))).into(),
     )
 }
 
@@ -3333,7 +3333,7 @@ where
         let var = UnresolvedNamedLambdaVariable::new(var_name.clone());
         arg_exprs.push(var.clone());
         vars.push(Column::new(
-            ExpressionNode::UnresolvedNamedLambdaVariable(var).into(),
+            ExpressionSpec::UnresolvedNamedLambdaVariable(var).into(),
         ));
     }
 
@@ -3351,7 +3351,7 @@ where
         "transform",
         vec![
             col.expression().clone(),
-            ExpressionNode::LambdaFunction(Box::new(lambda)).into(),
+            ExpressionSpec::LambdaFunction(Box::new(lambda)).into(),
         ],
     )
 }
@@ -3366,7 +3366,7 @@ where
         "transform",
         vec![
             col.expression().clone(),
-            ExpressionNode::LambdaFunction(Box::new(lambda)).into(),
+            ExpressionSpec::LambdaFunction(Box::new(lambda)).into(),
         ],
     )
 }
@@ -3381,7 +3381,7 @@ where
         "filter",
         vec![
             col.expression().clone(),
-            ExpressionNode::LambdaFunction(Box::new(lambda)).into(),
+            ExpressionSpec::LambdaFunction(Box::new(lambda)).into(),
         ],
     )
 }
@@ -3396,7 +3396,7 @@ where
         "exists",
         vec![
             col.expression().clone(),
-            ExpressionNode::LambdaFunction(Box::new(lambda)).into(),
+            ExpressionSpec::LambdaFunction(Box::new(lambda)).into(),
         ],
     )
 }
@@ -3411,7 +3411,7 @@ where
         "forall",
         vec![
             col.expression().clone(),
-            ExpressionNode::LambdaFunction(Box::new(lambda)).into(),
+            ExpressionSpec::LambdaFunction(Box::new(lambda)).into(),
         ],
     )
 }
@@ -3428,7 +3428,7 @@ where
         vec![
             col.expression().clone(),
             init.expression().clone(),
-            ExpressionNode::LambdaFunction(Box::new(lambda)).into(),
+            ExpressionSpec::LambdaFunction(Box::new(lambda)).into(),
         ],
     )
 }
@@ -3447,8 +3447,8 @@ where
         vec![
             col.expression().clone(),
             init.expression().clone(),
-            ExpressionNode::LambdaFunction(Box::new(merge_lambda)).into(),
-            ExpressionNode::LambdaFunction(Box::new(finish_lambda)).into(),
+            ExpressionSpec::LambdaFunction(Box::new(merge_lambda)).into(),
+            ExpressionSpec::LambdaFunction(Box::new(finish_lambda)).into(),
         ],
     )
 }
@@ -3465,7 +3465,7 @@ where
         vec![
             col1.expression().clone(),
             col2.expression().clone(),
-            ExpressionNode::LambdaFunction(Box::new(lambda)).into(),
+            ExpressionSpec::LambdaFunction(Box::new(lambda)).into(),
         ],
     )
 }
@@ -3481,7 +3481,7 @@ where
         "transform_keys",
         vec![
             col.expression().clone(),
-            ExpressionNode::LambdaFunction(Box::new(lambda)).into(),
+            ExpressionSpec::LambdaFunction(Box::new(lambda)).into(),
         ],
     )
 }
@@ -3497,7 +3497,7 @@ where
         "transform_values",
         vec![
             col.expression().clone(),
-            ExpressionNode::LambdaFunction(Box::new(lambda)).into(),
+            ExpressionSpec::LambdaFunction(Box::new(lambda)).into(),
         ],
     )
 }
@@ -3513,7 +3513,7 @@ where
         "map_filter",
         vec![
             col.expression().clone(),
-            ExpressionNode::LambdaFunction(Box::new(lambda)).into(),
+            ExpressionSpec::LambdaFunction(Box::new(lambda)).into(),
         ],
     )
 }
@@ -3530,7 +3530,7 @@ where
         vec![
             col1.expression().clone(),
             col2.expression().clone(),
-            ExpressionNode::LambdaFunction(Box::new(lambda)).into(),
+            ExpressionSpec::LambdaFunction(Box::new(lambda)).into(),
         ],
     )
 }
@@ -4604,6 +4604,7 @@ pub fn tuple_union_theta_integer(col1: Column, col2: Column) -> Column {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::expression::ExpressionKind;
 
     #[test]
     fn test_zero_arg_functions() {
@@ -4804,20 +4805,20 @@ mod tests {
     #[test]
     fn test_col_patterns() {
         let c_col = col("my_column");
-        match c_col.expression().node() {
-            ExpressionNode::ColumnReference(_) => {}
+        match c_col.expression().node().kind() {
+            ExpressionKind::ColumnReference(_) => {}
             _ => panic!("Expected ColumnReference"),
         }
 
         let star = col("*");
-        match star.expression().node() {
-            ExpressionNode::UnresolvedStar(None, None) => {}
+        match star.expression().node().kind() {
+            ExpressionKind::UnresolvedStar(None, None) => {}
             _ => panic!("Expected UnresolvedStar(None)"),
         }
 
         let table_star = col("t.*");
-        match table_star.expression().node() {
-            ExpressionNode::UnresolvedStar(Some(_), None) => {}
+        match table_star.expression().node().kind() {
+            ExpressionKind::UnresolvedStar(Some(_), None) => {}
             _ => panic!("Expected UnresolvedStar with prefix"),
         }
     }
@@ -4825,8 +4826,8 @@ mod tests {
     #[test]
     fn test_expr_function_serialize() {
         let e = expr("SELECT 1");
-        match e.expression().node() {
-            ExpressionNode::SQLExpression(s) => {
+        match e.expression().node().kind() {
+            ExpressionKind::SQLExpression(s) => {
                 assert_eq!(s, "SELECT 1");
             }
             _ => panic!("Expected SQLExpression"),

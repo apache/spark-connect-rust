@@ -2,7 +2,9 @@
 
 use pyo3::prelude::*;
 use spark_connect::column::Column;
-use spark_connect::expression::{Expression, ExpressionNode, LiteralExpression, NamedArgument};
+use spark_connect::expression::{
+    Expression, ExpressionKind, ExpressionSpec, LiteralExpression, NamedArgument,
+};
 use spark_connect::functions as spark_funcs;
 use spark_connect::udf::{CommonInlineUserDefinedFunctionExpression, PythonUDFPayload};
 
@@ -57,7 +59,7 @@ fn pyfunc_make_udf(
         CommonInlineUserDefinedFunctionExpression::new(name, deterministic, arg_exprs, python_udf);
 
     Ok(PyColumn::new(Column::new(
-        ExpressionNode::CommonInlineUserDefinedFunction(Box::new(udf_expr)).into(),
+        ExpressionSpec::CommonInlineUserDefinedFunction(Box::new(udf_expr)).into(),
     )))
 }
 
@@ -90,7 +92,7 @@ fn udf_arguments(
     for (key, value) in named_args {
         let value = argument(&value)?.expression().clone();
         columns.push(Column::new(
-            ExpressionNode::NamedArgument(Box::new(NamedArgument::new(key, value))).into(),
+            ExpressionSpec::NamedArgument(Box::new(NamedArgument::new(key, value))).into(),
         ));
     }
     Ok(columns)
@@ -634,8 +636,8 @@ fn is_numpy_scalar(obj: &Bound<'_, PyAny>, classes: &[&str]) -> PyResult<bool> {
 
 /// The literal of a value that is not a list, as `to_column` builds it.
 fn scalar_literal_of(obj: &Bound<'_, PyAny>) -> PyResult<LiteralExpression> {
-    match to_column(obj)?.expression().node() {
-        ExpressionNode::Literal(literal) => Ok(literal.clone()),
+    match to_column(obj)?.expression().kind() {
+        ExpressionKind::Literal(literal) => Ok(literal.clone()),
         _ => {
             let type_name = obj
                 .get_type()
@@ -890,8 +892,8 @@ fn pyfunc_sum(col: &PyColumn) -> PyColumn {
 fn pyfunc_count(col: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
     let column = if let Ok(column) = col.extract::<PyRef<'_, PyColumn>>() {
         if matches!(
-            column.column.expression().node(),
-            ExpressionNode::UnresolvedStar(..)
+            column.column.expression().kind(),
+            ExpressionKind::UnresolvedStar(..)
         ) {
             spark_connect::column::lit(1)
         } else {
@@ -975,7 +977,7 @@ use spark_connect::expression::{
 #[pyfunction]
 fn pyfunc_named_lambda_variable(name: String) -> PyColumn {
     PyColumn::new(Column::new(
-        ExpressionNode::UnresolvedNamedLambdaVariable(UnresolvedNamedLambdaVariable::new(name))
+        ExpressionSpec::UnresolvedNamedLambdaVariable(UnresolvedNamedLambdaVariable::new(name))
             .into(),
     ))
 }
@@ -990,7 +992,7 @@ fn pyfunc_lambda_function(body: &PyColumn, arg_names: Vec<String>) -> PyColumn {
         .collect();
     let lambda = LambdaFunction::new(body.column.expression().clone(), args);
     PyColumn::new(Column::new(
-        ExpressionNode::LambdaFunction(Box::new(lambda)).into(),
+        ExpressionSpec::LambdaFunction(Box::new(lambda)).into(),
     ))
 }
 
@@ -1004,7 +1006,7 @@ fn pyfunc_call_named_function(name: String, args: Vec<Bound<'_, PyAny>>) -> PyRe
         arg_exprs.push(to_column(&arg)?.expression().clone());
     }
     let result = Column::new(
-        ExpressionNode::CallFunction(Box::new(CallFunctionWrapper::new(name, arg_exprs))).into(),
+        ExpressionSpec::CallFunction(Box::new(CallFunctionWrapper::new(name, arg_exprs))).into(),
     );
     Ok(PyColumn::new(result))
 }

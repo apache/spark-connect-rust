@@ -4,7 +4,7 @@
 //! ordering, and frame boundaries used with `Column.over()`.
 
 use crate::column::{expressions_of, Column};
-use crate::expression::{Expression, ExpressionNode, SortOrder};
+use crate::expression::{Expression, ExpressionKind, SortOrder};
 
 /// Frame bound value used in window frame definitions.
 #[derive(Debug, Clone, PartialEq)]
@@ -84,14 +84,19 @@ impl WindowSpec {
     /// [`Column::desc`] and their nulls variants, or a [`SortOrder`], sorts as it says; any
     /// other column is sorted ascending, nulls first, as PySpark's `WindowSpec.orderBy` sorts it.
     pub fn order_by<C: Into<Column>>(mut self, cols: impl IntoIterator<Item = C>) -> Self {
-        self.order_spec.extend(
-            expressions_of(cols)
-                .into_iter()
-                .map(|expr| match expr.node() {
-                    ExpressionNode::SortOrder(sort) => (**sort).clone(),
-                    _ => SortOrder::asc_nulls_first(expr),
-                }),
-        );
+        self.order_spec.extend(expressions_of(cols).into_iter().map(
+            |expr| match expr.node().kind() {
+                ExpressionKind::SortOrder {
+                    ascending,
+                    null_ordering,
+                } => SortOrder {
+                    child: expr.node().children()[0].clone(),
+                    ascending: *ascending,
+                    null_ordering: *null_ordering,
+                },
+                _ => SortOrder::asc_nulls_first(expr),
+            },
+        ));
         self
     }
 

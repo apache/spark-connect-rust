@@ -4,8 +4,9 @@
 
 `LogicalPlan` is an unresolved query node. It stores the operator payload in
 `LogicalPlanKind` and its ordered inputs as shared `Arc<LogicalPlan>` nodes.
-Expressions keep their existing representation; name resolution, type inference
-and function binding remain server operations.
+Expressions use a shared node with a separate kind and ordered inputs, described
+in [Expression representation](expression-representation.md). Name resolution,
+type inference and function binding remain server operations.
 
 DataFrames, writers and table arguments share the root node. A transformation
 adds its own root and shares the input nodes. Cloning a DataFrame preserves its

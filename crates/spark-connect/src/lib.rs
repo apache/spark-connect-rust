@@ -56,8 +56,8 @@ pub use column::{col, lit, lit_boolean, lit_double, lit_string, Column};
 pub use dataframe::{DataFrame, LocalRowIterator};
 pub use datasource::{CommonInlineUserDefinedDataSourceExpression, PythonDataSourcePayload};
 pub use expression::{
-    Alias, CaseWhen, Cast, ColumnReference, Expression, ExpressionNode, LiteralExpression,
-    SortOrder, UnresolvedFunction,
+    Alias, CaseWhen, Cast, ColumnReference, Expression, ExpressionKind, ExpressionNode,
+    ExpressionSpec, LiteralExpression, SortOrder, UnresolvedFunction,
 };
 pub use group::{CoGroupedData, GroupedData};
 pub use merge::MergeIntoWriter;
