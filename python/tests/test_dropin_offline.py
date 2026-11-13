@@ -24966,8 +24966,8 @@ UNEXPECTED_KEYWORD_CALLS = [
     ("DataFrameWriter.orc", lambda s, kw: s.range(1).write.orc("p", **kw)),
     ("DataFrameWriter.text", lambda s, kw: s.range(1).write.text("p", **kw)),
     ("DataFrameWriter.xml", lambda s, kw: s.range(1).write.xml("p", **kw)),
-    # PyO3 words the class of the builder as `Builder`, as it did before the catch-all.
-    ("Builder.config", lambda s, kw: s.builder.config(**kw)),
+    # CPython names a method by its qualified name, which is that of the builder's class in PySpark.
+    ("SparkSession.Builder.config", lambda s, kw: s.builder.config(**kw)),
 ]
 
 
@@ -24986,6 +24986,11 @@ def test_unexpected_keywords_are_keywords_as_pyspark(offline_spark, method, call
     with pytest.raises(TypeError) as error:
         call(offline_spark, {"foo": 1})
     assert str(error.value) == f"{method}() got an unexpected keyword argument 'foo'"
+    # A str key need not have UTF-8, such as one with a lone surrogate, which CPython's message
+    # keeps as it is.
+    with pytest.raises(TypeError) as error:
+        call(offline_spark, {"\ud800": 1})
+    assert str(error.value) == f"{method}() got an unexpected keyword argument '\ud800'"
 
 
 def test_known_keywords_still_bind_with_the_unexpected_catch_all(offline_spark):

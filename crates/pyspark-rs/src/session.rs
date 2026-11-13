@@ -107,7 +107,7 @@ impl PySparkSessionBuilder {
         conf: Option<&Bound<'_, PyAny>>,
         unexpected: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyRefMut<'py, Self>> {
-        crate::options::check_unexpected_keywords("Builder.config", unexpected)?;
+        crate::options::check_unexpected_keywords("SparkSession.Builder.config", unexpected)?;
         let py = slf.py();
         // PySpark keeps the options in a dict, and sends each in a `KeyValue` of the key as it
         // is, whose constructor leaves a key of None unset, the empty key.

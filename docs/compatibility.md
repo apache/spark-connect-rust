@@ -605,6 +605,15 @@ A warning that the Rust core raises, such as the
 `FutureWarning` of `registerTempTable`, is attributed to the caller's frame and module, so a
 `warnings.filterwarnings(..., module="pyspark")` does not match it, as it matches PySpark's.
 
+The `TypeError` for a bad keyword argument of a method that takes no `**options` is PyO3's, which
+CPython words differently in two cases. For a key that is not a str, as `df.limit(1, **{1: 2})`,
+CPython says "keywords must be strings", where the drop-in says "DataFrame.limit() got an
+unexpected keyword argument '1'". For a method that takes no arguments, as `df.count(foo=1)`,
+CPython says "DataFrame.count() got an unexpected keyword argument 'foo'", where the drop-in says
+"DataFrame.count() takes no keyword arguments". The methods that take `**options`, and the
+readers', writers' and `SparkSession.builder.config`'s that take named options, word both as
+CPython does.
+
 ## Native NaiveBayes
 
 The Rust `ml::NaiveBayes` and `ml::NaiveBayesModel` train and predict through Spark
