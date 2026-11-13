@@ -1438,16 +1438,21 @@ impl SparkSession {
         let released = if self.client.is_closed() {
             Ok(())
         } else {
+            let interrupted = || {
+                SparkError::connect_msg(
+                    "the release of the session was interrupted; the session is still open",
+                )
+            };
             match spark_connect_core::runtime::block_on_abortable(self.client.release_session()) {
+                Some(Err(error)) if spark_connect_core::client::is_wait_aborted(&error) => {
+                    return Err(interrupted());
+                }
                 Some(released) => released,
                 // The wait was stopped, by a signal of the process in the Python client: as
                 // PySpark's `stop()`, which the exception of the signal leaves before it closes
-                // the client, the session stays open, and a later `stop()` releases it.
-                None => {
-                    return Err(SparkError::connect_msg(
-                        "the release of the session was interrupted; the session is still open",
-                    ));
-                }
+                // the client, the session stays open, and a later `stop()` releases it. The
+                // release of an interrupted backoff gives the same error, which leaves it so.
+                None => return Err(interrupted()),
             }
         };
         // Before the listener bus is cancelled: an add of a listener that the cancellation ends
@@ -3467,6 +3472,94 @@ mod tests {
             .expect("the second stop ends with its release")
             .expect_err("the release of the second stop fails as its connection closes");
         assert!(spark.is_stopped());
+    }
+
+    /// A signal that interrupts the stop in the backoff of its release makes the stop raise, and
+    /// leaves the session open for a later stop to release, as PySpark's `stop()` does. The
+    /// server closes each connection at once, so the release fails as UNAVAILABLE and backs off
+    /// for a minute, unless the signal ends the backoff first.
+    #[test]
+    fn a_stop_that_a_signal_interrupts_in_its_backoff_leaves_the_session_open() {
+        use spark_connect_core::runtime::{with_wait_watch, WaitWatch, Watch};
+        use std::sync::mpsc::channel;
+        use std::time::{Duration, Instant};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a local port");
+        listener
+            .set_nonblocking(true)
+            .expect("a nonblocking listener");
+        let port = listener.local_addr().expect("the local address").port();
+        let accepted = Arc::new(AtomicU64::new(0));
+        let ended = Arc::new(AtomicBool::new(false));
+        let (taken, done) = (Arc::clone(&accepted), Arc::clone(&ended));
+        std::thread::spawn(move || {
+            while !done.load(Ordering::SeqCst) {
+                match listener.accept() {
+                    // The connection is dropped at once, which closes it.
+                    Ok(_) => {
+                        taken.fetch_add(1, Ordering::SeqCst);
+                    }
+                    Err(_) => std::thread::sleep(Duration::from_millis(5)),
+                }
+            }
+        });
+        let builder = ChannelBuilder::parse(&format!("sc://127.0.0.1:{port}")).expect("valid URL");
+        let mut client =
+            block_on(SparkConnectClient::connect(&builder)).expect("failed to build client");
+        client.set_retry_policy(spark_connect_core::retries::RetryPolicy {
+            initial_backoff_ms: 60_000,
+            max_backoff_ms: Some(60_000),
+            ..spark_connect_core::retries::RetryPolicy::default()
+        });
+        let spark = SparkSession::new(client);
+        // One interrupt, once the release has connected, and half a second later, so that the
+        // failed release is backing off by then.
+        let watch: Arc<WaitWatch> = {
+            let taken = Arc::clone(&accepted);
+            let interrupted = Arc::new(AtomicBool::new(false));
+            let since: Arc<Mutex<Option<Instant>>> = Arc::default();
+            Arc::new(move || {
+                if taken.load(Ordering::SeqCst) == 0 {
+                    return Watch::Continue;
+                }
+                let first = since
+                    .lock()
+                    .unwrap()
+                    .get_or_insert_with(Instant::now)
+                    .to_owned();
+                if first.elapsed() >= Duration::from_millis(500)
+                    && !interrupted.swap(true, Ordering::SeqCst)
+                {
+                    Watch::Interrupt(Box::pin(async {}))
+                } else {
+                    Watch::Continue
+                }
+            })
+        };
+        let (stopped, outcome) = channel();
+        let stopping = spark.clone();
+        std::thread::spawn(move || {
+            let _ = stopped.send(with_wait_watch(watch, || stopping.stop()));
+        });
+        let stop = outcome
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the signal ends the backoff of the release");
+        let error = stop.expect_err("the interrupted stop raises");
+        assert!(
+            error
+                .to_string()
+                .contains("the release of the session was interrupted; the session is still open"),
+            "the interrupted stop raises the error of an interrupted release: {error}"
+        );
+        assert!(
+            !spark.is_stopped(),
+            "an interrupted stop marked the session stopped"
+        );
+        assert!(
+            !spark.client.is_closed(),
+            "an interrupted stop closed the client"
+        );
+        ended.store(true, Ordering::SeqCst);
     }
 
     /// As PySpark's `stop()`, whose `SparkSession._lock` is one lock of the class: the `stop()` of
