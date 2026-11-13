@@ -150,7 +150,7 @@ by_cat.create_or_replace_temp_view("category_stats")?;
 // DataFrame API: filter and order
 let result = spark.sql("SELECT * FROM category_stats")?
     .filter(f::col("avg_price").gt(lit(50)))
-    .order_by(vec![f::col("count").desc().expression().clone()]);
+    .order_by([f::col("count").desc()]);
 result.show(10)?;
 ```
 

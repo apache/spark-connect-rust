@@ -42,7 +42,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         (lit_double(3.0) + F::col("age_int")).alias("addition"),
     ]);
 
-    let df = df.sort(vec![F::col("name").desc().expression().clone()]);
+    let df = df.sort([F::col("name").desc()]);
 
     df.show(5)?;
 

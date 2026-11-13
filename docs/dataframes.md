@@ -53,7 +53,7 @@ let df = df.drop(vec!["temp_col"]);
 let df = df.distinct();
 
 // Sort
-let df = df.order_by(vec![f::col("id").expression().clone()]);
+let df = df.order_by([f::col("id")]);
 
 // Limit
 let df = df.limit(5);
@@ -68,14 +68,14 @@ use spark_connect::{functions as f, lit};
 
 // Group by one column
 let agg_df = df.group_by([f::col("category")])
-    .agg(vec![f::count(lit(1)).expression().clone()]);
+    .agg([f::count(lit(1))]);
 
 // Group by multiple columns with multiple aggregates
 let agg_df = df.group_by([f::col("category"), f::col("year")])
-    .agg(vec![
-        f::sum(f::col("amount")).expression().clone(),
-        f::avg(f::col("value")).expression().clone(),
-        f::min(f::col("price")).alias("min_price").expression().clone(),
+    .agg([
+        f::sum(f::col("amount")),
+        f::avg(f::col("value")),
+        f::min(f::col("price")).alias("min_price"),
     ]);
 ```
 
@@ -145,7 +145,7 @@ let result = spark.range(101)?
     .with_column("squared", f::col("id") * f::col("id"))
     .filter(f::col("squared").gt(lit(100)))
     .select([f::col("id"), f::col("squared")])
-    .order_by(vec![f::col("id").expression().clone()])
+    .order_by([f::col("id")])
     .limit(10);
 result.show(10)?;
 ```
