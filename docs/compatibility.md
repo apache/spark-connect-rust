@@ -581,7 +581,6 @@ transform. Model coefficient/statistic inspection, single-vector prediction and
 persistence are outside this surface. The vendored `pyspark.ml.classification`
 API continues to use its existing implementation.
 
-
 ## Native BisectingKMeans
 
 The Rust `ml::BisectingKMeans` and `ml::BisectingKMeansModel` support training and
@@ -606,6 +605,34 @@ Cluster-center/summary/cost inspection, single-vector prediction and persistence
 are outside this surface. The vendored `pyspark.ml.clustering` API retains its
 existing implementation.
 
+## Native GeneralizedLinearRegression
+
+`spark_connect::ml::GeneralizedLinearRegression` fits Spark's JVM estimator and
+returns a cached `GeneralizedLinearRegressionModel`. Python exposes it from
+`pyspark.ml.connect` and `pyspark.ml.connect.regression`; `fit` returns the shared
+native `MLModel`.
+
+All 16 PySpark constructor parameters and named setters are available:
+`labelCol`, `featuresCol`, `predictionCol`, `family`, `link`, `fitIntercept`,
+`maxIter`, `tol`, `regParam`, `weightCol`, `solver`, `linkPredictionCol`,
+`variancePower`, `linkPower`, `offsetCol` and `aggregationDepth`. Rust provides
+builder setters and getters for each parameter. Unset optional parameters stay
+unset: Spark chooses the family default link, or the Tweedie link power from
+`variancePower`.
+
+Fitting accepts ML vector features and numeric labels. Transform produces
+predictions and, when requested, the linear predictor in `linkPredictionCol`.
+Instance weights, offsets and L2 regularization are handled by Spark. The same
+numerical tests run against official PySpark and the native Python client,
+covering all five families (Gaussian, binomial, Poisson, Gamma and Tweedie),
+default and explicit links, dense/sparse features, weights, offsets, independent
+fitted models, lazy model ownership and rejected inputs. Official PySpark golden
+fixtures verify the parameter encoding, and live Rust tests exercise fitting
+and prediction directly.
+
+This native API covers construction, setters, fitting and DataFrame transforms.
+Coefficient/intercept access, model summaries, evaluation, persistence and
+single-vector prediction are not exposed by this addition.
 
 ## Native GaussianMixture
 
