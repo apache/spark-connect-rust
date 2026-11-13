@@ -12,6 +12,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
 
+mod recommendation;
+pub use recommendation::*;
+
 mod feature;
 pub use feature::*;
 mod fpm;

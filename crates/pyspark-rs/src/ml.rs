@@ -31,6 +31,8 @@ use spark_connect::DataFrame;
 pub(crate) mod feature;
 pub(crate) mod fpm;
 
+pub(crate) mod recommendation;
+
 use crate::dataframe::PyDataFrame;
 use crate::errors::ResultExt;
 use crate::interrupt::interruptible;

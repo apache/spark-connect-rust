@@ -39,6 +39,7 @@ from pyspark.ml.connect.evaluation import (
     BinaryClassificationEvaluator,
     MulticlassClassificationEvaluator,
 )
+from pyspark.ml.connect.recommendation import ALS, ALSModel
 from pyspark.ml.connect.pipeline import Pipeline, PipelineModel
 from pyspark.ml.connect.tuning import CrossValidator, CrossValidatorModel
 from pyspark.ml.connect.fpm import FPGrowth, FPGrowthModel, PrefixSpan
@@ -91,6 +92,8 @@ __all__ = [
     "DecisionTreeRegressor",
     "RandomForestRegressor",
     "KMeans",
+    "ALS",
+    "ALSModel",
     "LDA",
     "PowerIterationClustering",
     "GaussianMixture",

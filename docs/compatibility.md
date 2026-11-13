@@ -904,3 +904,27 @@ Spark 4.3.0's Connect helper currently rejects `Long` argument literals: PrefixS
 PySpark. The client preserves PySpark's integer widths and explicit null parameters.
 Tests cover this limitation, typed string/integer itemsets, association rules, held-out
 predictions, model setters, sequence-length limits, invalid data, and model lifetime.
+
+## Native ALS recommendation
+
+`ml::ALS` / `ml::ALSModel` in Rust and `pyspark.ml.connect.recommendation.ALS` /
+`ALSModel` in the Rust-backed Python package run Spark's standard ALS over Connect.
+The estimator exposes all 18 parameters, including explicit/implicit feedback,
+nonnegative factors, regularization, block counts, storage levels and seed.
+Python mirrors the 17 official constructor keywords; use `setPredictionCol` for
+an alternate prediction column, and `setNumBlocks` to set both block counts.
+
+The fitted model supports transform, rank, user/item factor tables, recommendations
+for all users/items, and recommendations for a subset of users/items. Rust uses
+`user_factors`, `item_factors`, and `recommend_for_*`; Python exposes `userFactors`,
+`itemFactors`, and `recommendFor*`. Model setters control transform parameters,
+including `coldStartStrategy="drop"` to remove predictions for unknown IDs.
+Factor and recommendation relations access the fitted server model, matching
+PySpark Connect. Lazy results retain their cached model and any models referenced
+by the subset DataFrame until evaluation completes.
+
+Fit, transform and subset recommendation inputs must be Spark DataFrames; pandas
+DataFrames are rejected before conversion or RPC. Model operations must use the
+fit session. Official PySpark 4.3.0 fixtures cover explicit and implicit ratings,
+predictions, cold starts, factors, and all four recommendation methods, with live
+Rust and native Python tests. Model persistence is separate from these APIs.

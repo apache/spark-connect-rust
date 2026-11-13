@@ -269,6 +269,7 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ml::PyKMeans>()?;
     m.add_class::<ml::PyGaussianMixture>()?;
     m.add_class::<ml::PyBisectingKMeans>()?;
+    ml::recommendation::register(m)?;
     m.add_class::<ml::PyRegressionEvaluator>()?;
     m.add_class::<ml::PyBinaryClassificationEvaluator>()?;
     m.add_class::<ml::PyPipeline>()?;

@@ -1,0 +1,1380 @@
+{
+  "spark_version": "4.3.0",
+  "train": "SELECT * FROM VALUES (0,0,5.0D),(0,1,1.0D),(0,2,2.0D),(1,0,1.0D),(1,1,5.0D),(1,3,3.0D),(2,0,3.0D),(2,2,5.0D),(2,3,1.0D),(3,1,2.0D),(3,2,1.0D),(3,3,5.0D) AS t(u,i,r)",
+  "held": "SELECT * FROM VALUES (0,0,3),(1,1,2),(2,2,1),(3,3,0),(4,99,0),(5,0,99),(6,99,99) AS t(id,u,i)",
+  "users": "SELECT * FROM VALUES (0),(0),(2),(99) AS t(u)",
+  "items": "SELECT * FROM VALUES (1),(3),(3),(99) AS t(i)",
+  "defaults": {
+    "rank": 10,
+    "maxIter": 10,
+    "regParam": 0.1,
+    "numUserBlocks": 10,
+    "numItemBlocks": 10,
+    "implicitPrefs": false,
+    "alpha": 1.0,
+    "userCol": "user",
+    "itemCol": "item",
+    "seed": null,
+    "ratingCol": "rating",
+    "nonnegative": false,
+    "checkpointInterval": 10,
+    "intermediateStorageLevel": "MEMORY_AND_DISK",
+    "finalStorageLevel": "MEMORY_AND_DISK",
+    "coldStartStrategy": "nan",
+    "blockSize": 4096
+  },
+  "params": [
+    {
+      "values": {},
+      "params_b64": ""
+    },
+    {
+      "values": {
+        "rank": 2,
+        "maxIter": 8,
+        "regParam": 0.1,
+        "numUserBlocks": 1,
+        "numItemBlocks": 1,
+        "implicitPrefs": false,
+        "alpha": 1.0,
+        "userCol": "u",
+        "itemCol": "i",
+        "seed": 42,
+        "ratingCol": "r",
+        "nonnegative": false,
+        "checkpointInterval": -1,
+        "intermediateStorageLevel": "MEMORY_AND_DISK",
+        "finalStorageLevel": "MEMORY_AND_DISK",
+        "coldStartStrategy": "nan",
+        "blockSize": 2,
+        "predictionCol": "score"
+      },
+      "params_b64": "ChIKBWFscGhhEglZAAAAAAAA8D8KDwoJYmxvY2tTaXplEgIwAgohChJjaGVja3BvaW50SW50ZXJ2YWwSCzD///////////8BChoKEWNvbGRTdGFydFN0cmF0ZWd5EgVqA25hbgomChFmaW5hbFN0b3JhZ2VMZXZlbBIRag9NRU1PUllfQU5EX0RJU0sKEwoNaW1wbGljaXRQcmVmcxICGAAKLQoYaW50ZXJtZWRpYXRlU3RvcmFnZUxldmVsEhFqD01FTU9SWV9BTkRfRElTSwoOCgdpdGVtQ29sEgNqAWkKDQoHbWF4SXRlchICMAgKEQoLbm9ubmVnYXRpdmUSAhgAChMKDW51bUl0ZW1CbG9ja3MSAjABChMKDW51bVVzZXJCbG9ja3MSAjABChgKDXByZWRpY3Rpb25Db2wSB2oFc2NvcmUKCgoEcmFuaxICMAIKEAoJcmF0aW5nQ29sEgNqAXIKFQoIcmVnUGFyYW0SCVmamZmZmZm5PwoKCgRzZWVkEgIwKgoOCgd1c2VyQ29sEgNqAXU="
+    },
+    {
+      "values": {
+        "rank": null,
+        "maxIter": null,
+        "regParam": null,
+        "numUserBlocks": null,
+        "numItemBlocks": null,
+        "implicitPrefs": null,
+        "alpha": null,
+        "userCol": null,
+        "itemCol": null,
+        "seed": null,
+        "ratingCol": null,
+        "nonnegative": null,
+        "checkpointInterval": null,
+        "intermediateStorageLevel": null,
+        "finalStorageLevel": null,
+        "coldStartStrategy": null,
+        "blockSize": null,
+        "predictionCol": null
+      },
+      "params_b64": "Cg0KBWFscGhhEgQKAgoAChEKCWJsb2NrU2l6ZRIECgIKAAoaChJjaGVja3BvaW50SW50ZXJ2YWwSBAoCCgAKGQoRY29sZFN0YXJ0U3RyYXRlZ3kSBAoCCgAKGQoRZmluYWxTdG9yYWdlTGV2ZWwSBAoCCgAKFQoNaW1wbGljaXRQcmVmcxIECgIKAAogChhpbnRlcm1lZGlhdGVTdG9yYWdlTGV2ZWwSBAoCCgAKDwoHaXRlbUNvbBIECgIKAAoPCgdtYXhJdGVyEgQKAgoAChMKC25vbm5lZ2F0aXZlEgQKAgoAChUKDW51bUl0ZW1CbG9ja3MSBAoCCgAKFQoNbnVtVXNlckJsb2NrcxIECgIKAAoVCg1wcmVkaWN0aW9uQ29sEgQKAgoACgwKBHJhbmsSBAoCCgAKEQoJcmF0aW5nQ29sEgQKAgoAChAKCHJlZ1BhcmFtEgQKAgoACgwKBHNlZWQSBAoCCgAKDwoHdXNlckNvbBIECgIKAA=="
+    },
+    {
+      "values": {
+        "rank": 2,
+        "maxIter": 8,
+        "regParam": 0.1,
+        "numUserBlocks": 1,
+        "numItemBlocks": 1,
+        "implicitPrefs": false,
+        "alpha": 1.0,
+        "userCol": "u",
+        "itemCol": "i",
+        "seed": 2147483647,
+        "ratingCol": "r",
+        "nonnegative": false,
+        "checkpointInterval": -1,
+        "intermediateStorageLevel": "MEMORY_AND_DISK",
+        "finalStorageLevel": "MEMORY_AND_DISK",
+        "coldStartStrategy": "nan",
+        "blockSize": 2,
+        "predictionCol": "score"
+      },
+      "params_b64": "ChIKBWFscGhhEglZAAAAAAAA8D8KDwoJYmxvY2tTaXplEgIwAgohChJjaGVja3BvaW50SW50ZXJ2YWwSCzD///////////8BChoKEWNvbGRTdGFydFN0cmF0ZWd5EgVqA25hbgomChFmaW5hbFN0b3JhZ2VMZXZlbBIRag9NRU1PUllfQU5EX0RJU0sKEwoNaW1wbGljaXRQcmVmcxICGAAKLQoYaW50ZXJtZWRpYXRlU3RvcmFnZUxldmVsEhFqD01FTU9SWV9BTkRfRElTSwoOCgdpdGVtQ29sEgNqAWkKDQoHbWF4SXRlchICMAgKEQoLbm9ubmVnYXRpdmUSAhgAChMKDW51bUl0ZW1CbG9ja3MSAjABChMKDW51bVVzZXJCbG9ja3MSAjABChgKDXByZWRpY3Rpb25Db2wSB2oFc2NvcmUKCgoEcmFuaxICMAIKEAoJcmF0aW5nQ29sEgNqAXIKFQoIcmVnUGFyYW0SCVmamZmZmZm5PwoOCgRzZWVkEgYw/////wcKDgoHdXNlckNvbBIDagF1"
+    },
+    {
+      "values": {
+        "rank": 2,
+        "maxIter": 8,
+        "regParam": 0.1,
+        "numUserBlocks": 1,
+        "numItemBlocks": 1,
+        "implicitPrefs": false,
+        "alpha": 1.0,
+        "userCol": "u",
+        "itemCol": "i",
+        "seed": 2147483648,
+        "ratingCol": "r",
+        "nonnegative": false,
+        "checkpointInterval": -1,
+        "intermediateStorageLevel": "MEMORY_AND_DISK",
+        "finalStorageLevel": "MEMORY_AND_DISK",
+        "coldStartStrategy": "nan",
+        "blockSize": 2,
+        "predictionCol": "score"
+      },
+      "params_b64": "ChIKBWFscGhhEglZAAAAAAAA8D8KDwoJYmxvY2tTaXplEgIwAgohChJjaGVja3BvaW50SW50ZXJ2YWwSCzD///////////8BChoKEWNvbGRTdGFydFN0cmF0ZWd5EgVqA25hbgomChFmaW5hbFN0b3JhZ2VMZXZlbBIRag9NRU1PUllfQU5EX0RJU0sKEwoNaW1wbGljaXRQcmVmcxICGAAKLQoYaW50ZXJtZWRpYXRlU3RvcmFnZUxldmVsEhFqD01FTU9SWV9BTkRfRElTSwoOCgdpdGVtQ29sEgNqAWkKDQoHbWF4SXRlchICMAgKEQoLbm9ubmVnYXRpdmUSAhgAChMKDW51bUl0ZW1CbG9ja3MSAjABChMKDW51bVVzZXJCbG9ja3MSAjABChgKDXByZWRpY3Rpb25Db2wSB2oFc2NvcmUKCgoEcmFuaxICMAIKEAoJcmF0aW5nQ29sEgNqAXIKFQoIcmVnUGFyYW0SCVmamZmZmZm5PwoOCgRzZWVkEgY4gICAgAgKDgoHdXNlckNvbBIDagF1"
+    },
+    {
+      "values": {
+        "rank": 2,
+        "maxIter": 8,
+        "regParam": 0.1,
+        "numUserBlocks": 1,
+        "numItemBlocks": 1,
+        "implicitPrefs": false,
+        "alpha": 1.0,
+        "userCol": "u",
+        "itemCol": "i",
+        "seed": 9223372036854775807,
+        "ratingCol": "r",
+        "nonnegative": false,
+        "checkpointInterval": -1,
+        "intermediateStorageLevel": "MEMORY_AND_DISK",
+        "finalStorageLevel": "MEMORY_AND_DISK",
+        "coldStartStrategy": "nan",
+        "blockSize": 2,
+        "predictionCol": "score"
+      },
+      "params_b64": "ChIKBWFscGhhEglZAAAAAAAA8D8KDwoJYmxvY2tTaXplEgIwAgohChJjaGVja3BvaW50SW50ZXJ2YWwSCzD///////////8BChoKEWNvbGRTdGFydFN0cmF0ZWd5EgVqA25hbgomChFmaW5hbFN0b3JhZ2VMZXZlbBIRag9NRU1PUllfQU5EX0RJU0sKEwoNaW1wbGljaXRQcmVmcxICGAAKLQoYaW50ZXJtZWRpYXRlU3RvcmFnZUxldmVsEhFqD01FTU9SWV9BTkRfRElTSwoOCgdpdGVtQ29sEgNqAWkKDQoHbWF4SXRlchICMAgKEQoLbm9ubmVnYXRpdmUSAhgAChMKDW51bUl0ZW1CbG9ja3MSAjABChMKDW51bVVzZXJCbG9ja3MSAjABChgKDXByZWRpY3Rpb25Db2wSB2oFc2NvcmUKCgoEcmFuaxICMAIKEAoJcmF0aW5nQ29sEgNqAXIKFQoIcmVnUGFyYW0SCVmamZmZmZm5PwoSCgRzZWVkEgo4//////////9/Cg4KB3VzZXJDb2wSA2oBdQ=="
+    },
+    {
+      "values": {
+        "rank": 2,
+        "maxIter": 8,
+        "regParam": 0.1,
+        "numUserBlocks": 1,
+        "numItemBlocks": 1,
+        "implicitPrefs": false,
+        "alpha": 1.0,
+        "userCol": "u",
+        "itemCol": "i",
+        "seed": -9223372036854775808,
+        "ratingCol": "r",
+        "nonnegative": false,
+        "checkpointInterval": -1,
+        "intermediateStorageLevel": "MEMORY_AND_DISK",
+        "finalStorageLevel": "MEMORY_AND_DISK",
+        "coldStartStrategy": "nan",
+        "blockSize": 2,
+        "predictionCol": "score"
+      },
+      "params_b64": "ChIKBWFscGhhEglZAAAAAAAA8D8KDwoJYmxvY2tTaXplEgIwAgohChJjaGVja3BvaW50SW50ZXJ2YWwSCzD///////////8BChoKEWNvbGRTdGFydFN0cmF0ZWd5EgVqA25hbgomChFmaW5hbFN0b3JhZ2VMZXZlbBIRag9NRU1PUllfQU5EX0RJU0sKEwoNaW1wbGljaXRQcmVmcxICGAAKLQoYaW50ZXJtZWRpYXRlU3RvcmFnZUxldmVsEhFqD01FTU9SWV9BTkRfRElTSwoOCgdpdGVtQ29sEgNqAWkKDQoHbWF4SXRlchICMAgKEQoLbm9ubmVnYXRpdmUSAhgAChMKDW51bUl0ZW1CbG9ja3MSAjABChMKDW51bVVzZXJCbG9ja3MSAjABChgKDXByZWRpY3Rpb25Db2wSB2oFc2NvcmUKCgoEcmFuaxICMAIKEAoJcmF0aW5nQ29sEgNqAXIKFQoIcmVnUGFyYW0SCVmamZmZmZm5PwoTCgRzZWVkEgs4gICAgICAgICAAQoOCgd1c2VyQ29sEgNqAXU="
+    }
+  ],
+  "cases": [
+    {
+      "name": "explicit",
+      "values": {
+        "rank": 2,
+        "maxIter": 8,
+        "regParam": 0.1,
+        "numUserBlocks": 1,
+        "numItemBlocks": 1,
+        "implicitPrefs": false,
+        "alpha": 1.0,
+        "userCol": "u",
+        "itemCol": "i",
+        "seed": 42,
+        "ratingCol": "r",
+        "nonnegative": false,
+        "checkpointInterval": -1,
+        "intermediateStorageLevel": "MEMORY_AND_DISK",
+        "finalStorageLevel": "MEMORY_AND_DISK",
+        "coldStartStrategy": "nan",
+        "blockSize": 2,
+        "predictionCol": "score"
+      },
+      "rank": 2,
+      "predictions": {
+        "schema": {
+          "type": "struct",
+          "fields": [
+            {
+              "name": "id",
+              "type": "integer",
+              "nullable": false,
+              "metadata": {}
+            },
+            {
+              "name": "u",
+              "type": "integer",
+              "nullable": true,
+              "metadata": {}
+            },
+            {
+              "name": "i",
+              "type": "integer",
+              "nullable": true,
+              "metadata": {}
+            },
+            {
+              "name": "score",
+              "type": "float",
+              "nullable": false,
+              "metadata": {}
+            }
+          ]
+        },
+        "rows": [
+          {
+            "id": 0,
+            "u": 0,
+            "i": 3,
+            "score": -2.1525332927703857
+          },
+          {
+            "id": 1,
+            "u": 1,
+            "i": 2,
+            "score": -10.773255348205566
+          },
+          {
+            "id": 2,
+            "u": 2,
+            "i": 1,
+            "score": -2.197770595550537
+          },
+          {
+            "id": 3,
+            "u": 3,
+            "i": 0,
+            "score": -11.028754234313965
+          },
+          {
+            "id": 4,
+            "u": 99,
+            "i": 0,
+            "score": {
+              "float": "nan"
+            }
+          },
+          {
+            "id": 5,
+            "u": 0,
+            "i": 99,
+            "score": {
+              "float": "nan"
+            }
+          },
+          {
+            "id": 6,
+            "u": 99,
+            "i": 99,
+            "score": {
+              "float": "nan"
+            }
+          }
+        ]
+      },
+      "user_factors": {
+        "schema": {
+          "type": "struct",
+          "fields": [
+            {
+              "name": "id",
+              "type": "integer",
+              "nullable": false,
+              "metadata": {}
+            },
+            {
+              "name": "features",
+              "type": {
+                "type": "array",
+                "elementType": "float",
+                "containsNull": false
+              },
+              "nullable": true,
+              "metadata": {}
+            }
+          ]
+        },
+        "rows": [
+          {
+            "id": 0,
+            "features": [
+              -0.6108363270759583,
+              -1.2426494359970093
+            ]
+          },
+          {
+            "id": 1,
+            "features": [
+              3.107534885406494,
+              -1.2144067287445068
+            ]
+          },
+          {
+            "id": 2,
+            "features": [
+              -1.3985501527786255,
+              -0.10068392008543015
+            ]
+          },
+          {
+            "id": 3,
+            "features": [
+              0.5775889754295349,
+              3.2558352947235107
+            ]
+          }
+        ]
+      },
+      "item_factors": {
+        "schema": {
+          "type": "struct",
+          "fields": [
+            {
+              "name": "id",
+              "type": "integer",
+              "nullable": false,
+              "metadata": {}
+            },
+            {
+              "name": "features",
+              "type": {
+                "type": "array",
+                "elementType": "float",
+                "containsNull": false
+              },
+              "nullable": true,
+              "metadata": {}
+            }
+          ]
+        },
+        "rows": [
+          {
+            "id": 0,
+            "features": [
+              -1.1050530672073364,
+              -3.191343069076538
+            ]
+          },
+          {
+            "id": 1,
+            "features": [
+              1.5673274993896484,
+              0.05745118111371994
+            ]
+          },
+          {
+            "id": 2,
+            "features": [
+              -3.190537452697754,
+              0.7069698572158813
+            ]
+          },
+          {
+            "id": 3,
+            "features": [
+              1.0637704133987427,
+              1.2093061208724976
+            ]
+          }
+        ]
+      },
+      "all_users": {
+        "schema": {
+          "type": "struct",
+          "fields": [
+            {
+              "name": "u",
+              "type": "integer",
+              "nullable": false,
+              "metadata": {}
+            },
+            {
+              "name": "recommendations",
+              "type": {
+                "type": "array",
+                "elementType": {
+                  "type": "struct",
+                  "fields": [
+                    {
+                      "name": "i",
+                      "type": "integer",
+                      "nullable": true,
+                      "metadata": {}
+                    },
+                    {
+                      "name": "rating",
+                      "type": "float",
+                      "nullable": true,
+                      "metadata": {}
+                    }
+                  ]
+                },
+                "containsNull": true
+              },
+              "nullable": true,
+              "metadata": {}
+            }
+          ]
+        },
+        "rows": [
+          {
+            "u": 0,
+            "recommendations": [
+              {
+                "i": 0,
+                "rating": 4.6407270431518555
+              },
+              {
+                "i": 2,
+                "rating": 1.070380449295044
+              }
+            ]
+          },
+          {
+            "u": 1,
+            "recommendations": [
+              {
+                "i": 1,
+                "rating": 4.800755977630615
+              },
+              {
+                "i": 3,
+                "rating": 1.8371140956878662
+              }
+            ]
+          },
+          {
+            "u": 2,
+            "recommendations": [
+              {
+                "i": 2,
+                "rating": 4.390946388244629
+              },
+              {
+                "i": 0,
+                "rating": 1.8667891025543213
+              }
+            ]
+          },
+          {
+            "u": 3,
+            "recommendations": [
+              {
+                "i": 3,
+                "rating": 4.551723480224609
+              },
+              {
+                "i": 1,
+                "rating": 1.0923227071762085
+              }
+            ]
+          }
+        ]
+      },
+      "all_items": {
+        "schema": {
+          "type": "struct",
+          "fields": [
+            {
+              "name": "i",
+              "type": "integer",
+              "nullable": false,
+              "metadata": {}
+            },
+            {
+              "name": "recommendations",
+              "type": {
+                "type": "array",
+                "elementType": {
+                  "type": "struct",
+                  "fields": [
+                    {
+                      "name": "u",
+                      "type": "integer",
+                      "nullable": true,
+                      "metadata": {}
+                    },
+                    {
+                      "name": "rating",
+                      "type": "float",
+                      "nullable": true,
+                      "metadata": {}
+                    }
+                  ]
+                },
+                "containsNull": true
+              },
+              "nullable": true,
+              "metadata": {}
+            }
+          ]
+        },
+        "rows": [
+          {
+            "i": 0,
+            "recommendations": [
+              {
+                "u": 0,
+                "rating": 4.6407270431518555
+              },
+              {
+                "u": 2,
+                "rating": 1.8667891025543213
+              }
+            ]
+          },
+          {
+            "i": 1,
+            "recommendations": [
+              {
+                "u": 1,
+                "rating": 4.800755977630615
+              },
+              {
+                "u": 3,
+                "rating": 1.0923227071762085
+              }
+            ]
+          },
+          {
+            "i": 2,
+            "recommendations": [
+              {
+                "u": 2,
+                "rating": 4.390946388244629
+              },
+              {
+                "u": 0,
+                "rating": 1.070380449295044
+              }
+            ]
+          },
+          {
+            "i": 3,
+            "recommendations": [
+              {
+                "u": 3,
+                "rating": 4.551723480224609
+              },
+              {
+                "u": 1,
+                "rating": 1.8371140956878662
+              }
+            ]
+          }
+        ]
+      },
+      "user_subset": {
+        "schema": {
+          "type": "struct",
+          "fields": [
+            {
+              "name": "u",
+              "type": "integer",
+              "nullable": false,
+              "metadata": {}
+            },
+            {
+              "name": "recommendations",
+              "type": {
+                "type": "array",
+                "elementType": {
+                  "type": "struct",
+                  "fields": [
+                    {
+                      "name": "i",
+                      "type": "integer",
+                      "nullable": true,
+                      "metadata": {}
+                    },
+                    {
+                      "name": "rating",
+                      "type": "float",
+                      "nullable": true,
+                      "metadata": {}
+                    }
+                  ]
+                },
+                "containsNull": true
+              },
+              "nullable": true,
+              "metadata": {}
+            }
+          ]
+        },
+        "rows": [
+          {
+            "u": 0,
+            "recommendations": [
+              {
+                "i": 0,
+                "rating": 4.6407270431518555
+              },
+              {
+                "i": 2,
+                "rating": 1.070380449295044
+              }
+            ]
+          },
+          {
+            "u": 2,
+            "recommendations": [
+              {
+                "i": 2,
+                "rating": 4.390946388244629
+              },
+              {
+                "i": 0,
+                "rating": 1.8667891025543213
+              }
+            ]
+          }
+        ]
+      },
+      "item_subset": {
+        "schema": {
+          "type": "struct",
+          "fields": [
+            {
+              "name": "i",
+              "type": "integer",
+              "nullable": false,
+              "metadata": {}
+            },
+            {
+              "name": "recommendations",
+              "type": {
+                "type": "array",
+                "elementType": {
+                  "type": "struct",
+                  "fields": [
+                    {
+                      "name": "u",
+                      "type": "integer",
+                      "nullable": true,
+                      "metadata": {}
+                    },
+                    {
+                      "name": "rating",
+                      "type": "float",
+                      "nullable": true,
+                      "metadata": {}
+                    }
+                  ]
+                },
+                "containsNull": true
+              },
+              "nullable": true,
+              "metadata": {}
+            }
+          ]
+        },
+        "rows": [
+          {
+            "i": 1,
+            "recommendations": [
+              {
+                "u": 1,
+                "rating": 4.800755977630615
+              },
+              {
+                "u": 3,
+                "rating": 1.0923227071762085
+              }
+            ]
+          },
+          {
+            "i": 3,
+            "recommendations": [
+              {
+                "u": 3,
+                "rating": 4.551723480224609
+              },
+              {
+                "u": 1,
+                "rating": 1.8371140956878662
+              }
+            ]
+          }
+        ]
+      },
+      "drop_predictions": {
+        "schema": {
+          "type": "struct",
+          "fields": [
+            {
+              "name": "id",
+              "type": "integer",
+              "nullable": false,
+              "metadata": {}
+            },
+            {
+              "name": "u",
+              "type": "integer",
+              "nullable": true,
+              "metadata": {}
+            },
+            {
+              "name": "i",
+              "type": "integer",
+              "nullable": true,
+              "metadata": {}
+            },
+            {
+              "name": "filtered",
+              "type": "float",
+              "nullable": false,
+              "metadata": {}
+            }
+          ]
+        },
+        "rows": [
+          {
+            "id": 0,
+            "u": 0,
+            "i": 3,
+            "filtered": -2.1525332927703857
+          },
+          {
+            "id": 1,
+            "u": 1,
+            "i": 2,
+            "filtered": -10.773255348205566
+          },
+          {
+            "id": 2,
+            "u": 2,
+            "i": 1,
+            "filtered": -2.197770595550537
+          },
+          {
+            "id": 3,
+            "u": 3,
+            "i": 0,
+            "filtered": -11.028754234313965
+          }
+        ]
+      }
+    },
+    {
+      "name": "implicit-nonnegative",
+      "values": {
+        "rank": 2,
+        "maxIter": 8,
+        "regParam": 0.1,
+        "numUserBlocks": 1,
+        "numItemBlocks": 1,
+        "implicitPrefs": true,
+        "alpha": 2.0,
+        "userCol": "u",
+        "itemCol": "i",
+        "seed": 42,
+        "ratingCol": "r",
+        "nonnegative": true,
+        "checkpointInterval": -1,
+        "intermediateStorageLevel": "MEMORY_AND_DISK",
+        "finalStorageLevel": "MEMORY_AND_DISK",
+        "coldStartStrategy": "nan",
+        "blockSize": 2,
+        "predictionCol": "score"
+      },
+      "rank": 2,
+      "predictions": {
+        "schema": {
+          "type": "struct",
+          "fields": [
+            {
+              "name": "id",
+              "type": "integer",
+              "nullable": false,
+              "metadata": {}
+            },
+            {
+              "name": "u",
+              "type": "integer",
+              "nullable": true,
+              "metadata": {}
+            },
+            {
+              "name": "i",
+              "type": "integer",
+              "nullable": true,
+              "metadata": {}
+            },
+            {
+              "name": "score",
+              "type": "float",
+              "nullable": false,
+              "metadata": {}
+            }
+          ]
+        },
+        "rows": [
+          {
+            "id": 0,
+            "u": 0,
+            "i": 3,
+            "score": 0.24526400864124298
+          },
+          {
+            "id": 1,
+            "u": 1,
+            "i": 2,
+            "score": 0.8590666055679321
+          },
+          {
+            "id": 2,
+            "u": 2,
+            "i": 1,
+            "score": 0.9728904366493225
+          },
+          {
+            "id": 3,
+            "u": 3,
+            "i": 0,
+            "score": 0.7668248414993286
+          },
+          {
+            "id": 4,
+            "u": 99,
+            "i": 0,
+            "score": {
+              "float": "nan"
+            }
+          },
+          {
+            "id": 5,
+            "u": 0,
+            "i": 99,
+            "score": {
+              "float": "nan"
+            }
+          },
+          {
+            "id": 6,
+            "u": 99,
+            "i": 99,
+            "score": {
+              "float": "nan"
+            }
+          }
+        ]
+      },
+      "user_factors": {
+        "schema": {
+          "type": "struct",
+          "fields": [
+            {
+              "name": "id",
+              "type": "integer",
+              "nullable": false,
+              "metadata": {}
+            },
+            {
+              "name": "features",
+              "type": {
+                "type": "array",
+                "elementType": "float",
+                "containsNull": false
+              },
+              "nullable": true,
+              "metadata": {}
+            }
+          ]
+        },
+        "rows": [
+          {
+            "id": 0,
+            "features": [
+              1.1611719131469727,
+              0.30443644523620605
+            ]
+          },
+          {
+            "id": 1,
+            "features": [
+              0.5052933692932129,
+              1.2656439542770386
+            ]
+          },
+          {
+            "id": 2,
+            "features": [
+              0.734376847743988,
+              1.058652639389038
+            ]
+          },
+          {
+            "id": 3,
+            "features": [
+              0.42252495884895325,
+              1.2884759902954102
+            ]
+          }
+        ]
+      },
+      "item_factors": {
+        "schema": {
+          "type": "struct",
+          "fields": [
+            {
+              "name": "id",
+              "type": "integer",
+              "nullable": false,
+              "metadata": {}
+            },
+            {
+              "name": "features",
+              "type": {
+                "type": "array",
+                "elementType": "float",
+                "containsNull": false
+              },
+              "nullable": true,
+              "metadata": {}
+            }
+          ]
+        },
+        "rows": [
+          {
+            "id": 0,
+            "features": [
+              0.7716313004493713,
+              0.34210288524627686
+            ]
+          },
+          {
+            "id": 1,
+            "features": [
+              0.5928774476051331,
+              0.5077160596847534
+            ]
+          },
+          {
+            "id": 2,
+            "features": [
+              0.7440823316574097,
+              0.38169243931770325
+            ]
+          },
+          {
+            "id": 3,
+            "features": [
+              0.013430888764560223,
+              0.7544052004814148
+            ]
+          }
+        ]
+      },
+      "all_users": {
+        "schema": {
+          "type": "struct",
+          "fields": [
+            {
+              "name": "u",
+              "type": "integer",
+              "nullable": false,
+              "metadata": {}
+            },
+            {
+              "name": "recommendations",
+              "type": {
+                "type": "array",
+                "elementType": {
+                  "type": "struct",
+                  "fields": [
+                    {
+                      "name": "i",
+                      "type": "integer",
+                      "nullable": true,
+                      "metadata": {}
+                    },
+                    {
+                      "name": "rating",
+                      "type": "float",
+                      "nullable": true,
+                      "metadata": {}
+                    }
+                  ]
+                },
+                "containsNull": true
+              },
+              "nullable": true,
+              "metadata": {}
+            }
+          ]
+        },
+        "rows": [
+          {
+            "u": 0,
+            "recommendations": [
+              {
+                "i": 0,
+                "rating": 1.0001451969146729
+              },
+              {
+                "i": 2,
+                "rating": 0.9802086353302002
+              }
+            ]
+          },
+          {
+            "u": 1,
+            "recommendations": [
+              {
+                "i": 3,
+                "rating": 0.9615948796272278
+              },
+              {
+                "i": 1,
+                "rating": 0.9421648383140564
+              }
+            ]
+          },
+          {
+            "u": 2,
+            "recommendations": [
+              {
+                "i": 1,
+                "rating": 0.9728904366493225
+              },
+              {
+                "i": 2,
+                "rating": 0.9505165815353394
+              }
+            ]
+          },
+          {
+            "u": 3,
+            "recommendations": [
+              {
+                "i": 3,
+                "rating": 0.9777078628540039
+              },
+              {
+                "i": 1,
+                "rating": 0.9046854376792908
+              }
+            ]
+          }
+        ]
+      },
+      "all_items": {
+        "schema": {
+          "type": "struct",
+          "fields": [
+            {
+              "name": "i",
+              "type": "integer",
+              "nullable": false,
+              "metadata": {}
+            },
+            {
+              "name": "recommendations",
+              "type": {
+                "type": "array",
+                "elementType": {
+                  "type": "struct",
+                  "fields": [
+                    {
+                      "name": "u",
+                      "type": "integer",
+                      "nullable": true,
+                      "metadata": {}
+                    },
+                    {
+                      "name": "rating",
+                      "type": "float",
+                      "nullable": true,
+                      "metadata": {}
+                    }
+                  ]
+                },
+                "containsNull": true
+              },
+              "nullable": true,
+              "metadata": {}
+            }
+          ]
+        },
+        "rows": [
+          {
+            "i": 0,
+            "recommendations": [
+              {
+                "u": 0,
+                "rating": 1.0001451969146729
+              },
+              {
+                "u": 2,
+                "rating": 0.9288362860679626
+              }
+            ]
+          },
+          {
+            "i": 1,
+            "recommendations": [
+              {
+                "u": 2,
+                "rating": 0.9728904366493225
+              },
+              {
+                "u": 1,
+                "rating": 0.9421648383140564
+              }
+            ]
+          },
+          {
+            "i": 2,
+            "recommendations": [
+              {
+                "u": 0,
+                "rating": 0.9802086353302002
+              },
+              {
+                "u": 2,
+                "rating": 0.9505165815353394
+              }
+            ]
+          },
+          {
+            "i": 3,
+            "recommendations": [
+              {
+                "u": 3,
+                "rating": 0.9777078628540039
+              },
+              {
+                "u": 1,
+                "rating": 0.9615948796272278
+              }
+            ]
+          }
+        ]
+      },
+      "user_subset": {
+        "schema": {
+          "type": "struct",
+          "fields": [
+            {
+              "name": "u",
+              "type": "integer",
+              "nullable": false,
+              "metadata": {}
+            },
+            {
+              "name": "recommendations",
+              "type": {
+                "type": "array",
+                "elementType": {
+                  "type": "struct",
+                  "fields": [
+                    {
+                      "name": "i",
+                      "type": "integer",
+                      "nullable": true,
+                      "metadata": {}
+                    },
+                    {
+                      "name": "rating",
+                      "type": "float",
+                      "nullable": true,
+                      "metadata": {}
+                    }
+                  ]
+                },
+                "containsNull": true
+              },
+              "nullable": true,
+              "metadata": {}
+            }
+          ]
+        },
+        "rows": [
+          {
+            "u": 0,
+            "recommendations": [
+              {
+                "i": 0,
+                "rating": 1.0001451969146729
+              },
+              {
+                "i": 2,
+                "rating": 0.9802086353302002
+              }
+            ]
+          },
+          {
+            "u": 2,
+            "recommendations": [
+              {
+                "i": 1,
+                "rating": 0.9728904366493225
+              },
+              {
+                "i": 2,
+                "rating": 0.9505165815353394
+              }
+            ]
+          }
+        ]
+      },
+      "item_subset": {
+        "schema": {
+          "type": "struct",
+          "fields": [
+            {
+              "name": "i",
+              "type": "integer",
+              "nullable": false,
+              "metadata": {}
+            },
+            {
+              "name": "recommendations",
+              "type": {
+                "type": "array",
+                "elementType": {
+                  "type": "struct",
+                  "fields": [
+                    {
+                      "name": "u",
+                      "type": "integer",
+                      "nullable": true,
+                      "metadata": {}
+                    },
+                    {
+                      "name": "rating",
+                      "type": "float",
+                      "nullable": true,
+                      "metadata": {}
+                    }
+                  ]
+                },
+                "containsNull": true
+              },
+              "nullable": true,
+              "metadata": {}
+            }
+          ]
+        },
+        "rows": [
+          {
+            "i": 1,
+            "recommendations": [
+              {
+                "u": 2,
+                "rating": 0.9728904366493225
+              },
+              {
+                "u": 1,
+                "rating": 0.9421648383140564
+              }
+            ]
+          },
+          {
+            "i": 3,
+            "recommendations": [
+              {
+                "u": 3,
+                "rating": 0.9777078628540039
+              },
+              {
+                "u": 1,
+                "rating": 0.9615948796272278
+              }
+            ]
+          }
+        ]
+      },
+      "drop_predictions": {
+        "schema": {
+          "type": "struct",
+          "fields": [
+            {
+              "name": "id",
+              "type": "integer",
+              "nullable": false,
+              "metadata": {}
+            },
+            {
+              "name": "u",
+              "type": "integer",
+              "nullable": true,
+              "metadata": {}
+            },
+            {
+              "name": "i",
+              "type": "integer",
+              "nullable": true,
+              "metadata": {}
+            },
+            {
+              "name": "filtered",
+              "type": "float",
+              "nullable": false,
+              "metadata": {}
+            }
+          ]
+        },
+        "rows": [
+          {
+            "id": 0,
+            "u": 0,
+            "i": 3,
+            "filtered": 0.24526400864124298
+          },
+          {
+            "id": 1,
+            "u": 1,
+            "i": 2,
+            "filtered": 0.8590666055679321
+          },
+          {
+            "id": 2,
+            "u": 2,
+            "i": 1,
+            "filtered": 0.9728904366493225
+          },
+          {
+            "id": 3,
+            "u": 3,
+            "i": 0,
+            "filtered": 0.7668248414993286
+          }
+        ]
+      }
+    }
+  ],
+  "fetches": [
+    {
+      "count": 2,
+      "method": "recommendForAllUsers",
+      "arg_b64": "MAI="
+    },
+    {
+      "count": 2147483648,
+      "method": "recommendForAllUsers",
+      "arg_b64": "OICAgIAI"
+    },
+    {
+      "count": null,
+      "method": "recommendForAllUsers",
+      "arg_b64": "CgIKAA=="
+    },
+    {
+      "count": true,
+      "method": "recommendForAllUsers",
+      "arg_b64": "GAE="
+    },
+    {
+      "count": 2.0,
+      "method": "recommendForAllUsers",
+      "arg_b64": "WQAAAAAAAABA"
+    },
+    {
+      "count": "2",
+      "method": "recommendForAllUsers",
+      "arg_b64": "agEy"
+    }
+  ]
+}
