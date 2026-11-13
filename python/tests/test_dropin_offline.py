@@ -1030,6 +1030,28 @@ def test_storage_levels_are_converted_as_pyspark(mock_connect):
     assert parse_message(_sent_catalog(service.execute_requests[-1], 19)[2][0]) == {2: [1], 5: [1]}
 
 
+def test_persist_of_none_sends_no_storage_level_as_pyspark(mock_connect):
+    # As PySpark's persist, whose omitted storageLevel is its default MEMORY_AND_DISK_DESER,
+    # while its client sends no storage level for a given None (`if kwargs.get("storage_level",
+    # None) is not None`), so that the server caches at its spark.sql.defaultCacheStorageLevel.
+    from pyspark.storagelevel import StorageLevel
+
+    spark, service = mock_connect
+    df = spark.range(1)
+
+    def sent():
+        # AnalyzePlanRequest.persist=14 -> Persist.storage_level=2: use_disk=1, use_memory=2,
+        # deserialized=4 and replication=5, where false and 0 are not sent.
+        persist = parse_message(parse_message(service.analyze_requests[-1])[14][0])
+        return parse_message(persist[2][0]) if 2 in persist else None
+
+    assert df.persist() is df and sent() == {1: [1], 2: [1], 4: [1], 5: [1]}
+    for call in (lambda: df.persist(None), lambda: df.persist(storageLevel=None)):
+        assert call() is df and sent() is None
+    df.persist(StorageLevel.DISK_ONLY)
+    assert sent() == {1: [1], 5: [1]}
+
+
 # --------------------------------------------------------------------------- session builder
 
 def test_session_builder_chaining_offline():

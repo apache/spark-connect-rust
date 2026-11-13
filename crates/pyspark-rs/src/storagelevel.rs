@@ -119,6 +119,41 @@ pub(crate) fn storage_level_proto(
     })
 }
 
+/// The `storageLevel` argument of `DataFrame.persist`, where PySpark tells an omitted one, its
+/// default `MEMORY_AND_DISK_DESER`, apart from a given None, for which its client sends no storage
+/// level (`if kwargs.get("storage_level", None) is not None`), so that the server caches at its
+/// `spark.sql.defaultCacheStorageLevel`.
+pub(crate) enum PersistLevel {
+    Omitted,
+    Given(Py<PyAny>),
+}
+
+impl<'a, 'py> FromPyObject<'a, 'py> for PersistLevel {
+    type Error = PyErr;
+
+    fn extract(obj: Borrowed<'a, 'py, PyAny>) -> PyResult<Self> {
+        Ok(PersistLevel::Given(obj.to_owned().unbind()))
+    }
+}
+
+impl PersistLevel {
+    /// The storage level that `persist` sends: `MEMORY_AND_DISK_DESER` when it is omitted, none
+    /// for None, and else the proto of [`storage_level_proto`].
+    pub(crate) fn proto(
+        &self,
+        py: Python<'_>,
+    ) -> PyResult<Option<spark_connect_proto::StorageLevel>> {
+        use spark_connect::storage::StorageLevelExt;
+        match self {
+            PersistLevel::Omitted => Ok(Some(
+                spark_connect_proto::StorageLevel::memory_and_disk_deser(),
+            )),
+            PersistLevel::Given(level) if level.is_none(py) => Ok(None),
+            PersistLevel::Given(level) => storage_level_proto(level.bind(py)).map(Some),
+        }
+    }
+}
+
 #[pymethods]
 impl PyStorageLevel {
     /// As the `object.__new__` of PySpark's plain class: of any arguments, which `__init__`

@@ -1580,17 +1580,30 @@ impl DataFrame {
         self.persist(Self::memory_and_disk_deser())
     }
 
-    /// Persist this DataFrame with the given storage level.
+    /// Persist this DataFrame with the given storage level, or, of `None`, with the server's
+    /// default, `spark.sql.defaultCacheStorageLevel`.
     ///
-    /// Mirrors `pyspark.sql.DataFrame.persist(storageLevel)`.
-    pub fn persist(&self, storage_level: proto::StorageLevel) -> Result<DataFrame> {
-        let persist = proto::analyze_plan_request::Persist {
-            relation: Some(self.relation()?),
-            storage_level: Some(storage_level),
-        };
-        let request = self.analyze_request(proto::analyze_plan_request::Analyze::Persist(persist));
+    /// Mirrors `pyspark.sql.DataFrame.persist(storageLevel)`, whose `None` sends no storage
+    /// level.
+    pub fn persist(
+        &self,
+        storage_level: impl Into<Option<proto::StorageLevel>>,
+    ) -> Result<DataFrame> {
+        let request = self.persist_request(storage_level.into())?;
         block_on(self.session.client().analyze_plan(request))?;
         Ok(self.clone())
+    }
+
+    /// The request of [`Self::persist`], of no storage level for `None`.
+    fn persist_request(
+        &self,
+        storage_level: Option<proto::StorageLevel>,
+    ) -> Result<proto::AnalyzePlanRequest> {
+        let persist = proto::analyze_plan_request::Persist {
+            relation: Some(self.relation()?),
+            storage_level,
+        };
+        Ok(self.analyze_request(proto::analyze_plan_request::Analyze::Persist(persist)))
     }
 
     /// Remove this DataFrame from cache. Mirrors `DataFrame.unpersist(blocking)`.
@@ -5313,6 +5326,27 @@ mod plan_construction_tests {
             .remote("sc://localhost:15002")
             .get_or_create()
             .expect("failed to build session")
+    }
+
+    #[test]
+    fn persist_of_no_storage_level_sends_none_as_pyspark() {
+        // As PySpark's persist(None), which sends no storage level, so that the server caches at
+        // spark.sql.defaultCacheStorageLevel; a storage level is sent as it is given.
+        let df = session().range(1).unwrap();
+        let sent = |level: Option<proto::StorageLevel>| match df.persist_request(level) {
+            Ok(proto::AnalyzePlanRequest {
+                analyze: Some(proto::analyze_plan_request::Analyze::Persist(persist)),
+                ..
+            }) => persist.storage_level,
+            other => panic!("not a persist request: {other:?}"),
+        };
+        assert_eq!(sent(None), None);
+        let disk = proto::StorageLevel {
+            use_disk: true,
+            replication: 1,
+            ..Default::default()
+        };
+        assert_eq!(sent(Some(disk.clone())), Some(disk));
     }
 
     #[test]

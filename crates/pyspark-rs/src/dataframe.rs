@@ -2233,19 +2233,16 @@ impl PyDataFrame {
         self.unpivot(ids, values, variableColumnName, valueColumnName)
     }
 
-    /// Persist the DataFrame at `storageLevel`, MEMORY_AND_DISK_DESER by default, as
-    /// PySpark's `DataFrame.persist()`.
-    #[pyo3(signature = (storageLevel=None))]
+    /// Persist the DataFrame at `storageLevel`, as PySpark's `DataFrame.persist()`:
+    /// MEMORY_AND_DISK_DESER when it is omitted, and no storage level for None, so that the
+    /// server caches at its `spark.sql.defaultCacheStorageLevel`.
+    #[pyo3(signature = (storageLevel=crate::storagelevel::PersistLevel::Omitted))]
     fn persist<'py>(
         slf: PyRef<'py, Self>,
         py: Python<'py>,
-        storageLevel: Option<Bound<'_, PyAny>>,
+        storageLevel: crate::storagelevel::PersistLevel,
     ) -> PyResult<PyRef<'py, Self>> {
-        use spark_connect::storage::StorageLevelExt;
-        let level = match storageLevel {
-            Some(level) => crate::storagelevel::storage_level_proto(&level)?,
-            None => spark_connect_proto::StorageLevel::memory_and_disk_deser(),
-        };
+        let level = storageLevel.proto(py)?;
         // As PySpark's, which returns the DataFrame itself.
         let df = slf.dataframe.clone();
         interruptible(py, &df.spark_session(), || {
