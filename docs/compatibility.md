@@ -857,3 +857,34 @@ model lifetime, invalid inputs and pandas rejection. Schema checks compare class
 nullability and ML metadata; Connect omits the backing SQL schema of JVM UDTs on the wire.
 Run `scripts/capture_ml_features_golden.py` with the official client to regenerate the fixture.
 Native live tests run in CI; set `FEATURE_REFERENCE=1` explicitly to run their reference mode.
+
+
+## Native FPGrowth and PrefixSpan
+
+Rust `ml::FPGrowth` fits Spark's frequent-itemset model and returns a typed
+`FPGrowthModel`. The model exposes lazy `freq_itemsets()` and `association_rules()`
+DataFrames and `transform()` predictions. The Python classes are exported from
+`pyspark.ml.connect` and `pyspark.ml.connect.fpm`; fitted models expose
+`freqItemsets` and `associationRules` as properties. All five estimator constructor
+parameters have named setters; model setters cover the item column, prediction
+column and minimum confidence. Parameters for prediction are captured when its lazy
+plan is built. The itemset/rule properties fetch the fitted server model, matching
+standard PySpark's Connect attribute relations.
+
+Rust `ml::PrefixSpan::find_frequent_sequential_patterns` and Python
+`PrefixSpan.findFrequentSequentialPatterns` mine arrays of itemsets directly through
+the Connect helper, with all four constructor parameters and named setters. They
+return sequence/frequency DataFrames and have no fit/transform model.
+
+These APIs accept Spark DataFrames and reject pandas frames before requests. Lazy
+model tables retain their cached model; PrefixSpan retains its input plan, including
+any upstream fitted models. Fitted-model transforms require the fitting session.
+Persistence is outside this native addition. The vendored `pyspark.ml.fpm` module is
+unchanged.
+
+Spark 4.3.0's Connect helper currently rejects `Long` argument literals: PrefixSpan's
+`maxLocalProjDBSize` works within the signed 32-bit range, including its default
+32,000,000; larger values raise the same `LONG not supported` server error as official
+PySpark. The client preserves PySpark's integer widths and explicit null parameters.
+Tests cover this limitation, typed string/integer itemsets, association rules, held-out
+predictions, model setters, sequence-length limits, invalid data, and model lifetime.

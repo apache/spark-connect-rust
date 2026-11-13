@@ -29,6 +29,7 @@ use spark_connect::types::StructField;
 use spark_connect::DataFrame;
 
 pub(crate) mod feature;
+pub(crate) mod fpm;
 
 use crate::dataframe::PyDataFrame;
 use crate::errors::ResultExt;

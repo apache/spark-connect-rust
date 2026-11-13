@@ -1,0 +1,1178 @@
+{
+  "spark_version": "4.3.0",
+  "defaults": {
+    "FPGrowth": {
+      "minSupport": 0.3,
+      "minConfidence": 0.8,
+      "itemsCol": "items",
+      "predictionCol": "prediction",
+      "numPartitions": null
+    },
+    "PrefixSpan": {
+      "minSupport": 0.1,
+      "maxPatternLength": 10,
+      "maxLocalProjDBSize": 32000000,
+      "sequenceCol": "sequence"
+    }
+  },
+  "params": [
+    {
+      "name": "FPGrowth",
+      "values": {},
+      "params_b64": ""
+    },
+    {
+      "name": "FPGrowth",
+      "values": {
+        "minSupport": 0.4,
+        "minConfidence": 0.7,
+        "itemsCol": "basket",
+        "predictionCol": "suggested",
+        "numPartitions": 2
+      },
+      "params_b64": "ChQKCGl0ZW1zQ29sEghqBmJhc2tldAoaCg1taW5Db25maWRlbmNlEglZZmZmZmZm5j8KFwoKbWluU3VwcG9ydBIJWZqZmZmZmdk/ChMKDW51bVBhcnRpdGlvbnMSAjACChwKDXByZWRpY3Rpb25Db2wSC2oJc3VnZ2VzdGVk"
+    },
+    {
+      "name": "FPGrowth",
+      "values": {
+        "minSupport": null,
+        "minConfidence": null,
+        "itemsCol": null,
+        "predictionCol": null,
+        "numPartitions": null
+      },
+      "params_b64": "ChAKCGl0ZW1zQ29sEgQKAgoAChUKDW1pbkNvbmZpZGVuY2USBAoCCgAKEgoKbWluU3VwcG9ydBIECgIKAAoVCg1udW1QYXJ0aXRpb25zEgQKAgoAChUKDXByZWRpY3Rpb25Db2wSBAoCCgA="
+    },
+    {
+      "name": "PrefixSpan",
+      "values": {},
+      "params_b64": "",
+      "helper": "prefixSpanFindFrequentSequentialPatterns",
+      "args_b64": [
+        "WZqZmZmZmbk/",
+        "MAo=",
+        "MICQoQ8=",
+        "aghzZXF1ZW5jZQ=="
+      ]
+    },
+    {
+      "name": "PrefixSpan",
+      "values": {
+        "minSupport": 0.5,
+        "maxPatternLength": 5,
+        "maxLocalProjDBSize": 2147483648,
+        "sequenceCol": "events"
+      },
+      "params_b64": "ChwKEm1heExvY2FsUHJvakRCU2l6ZRIGOICAgIAIChYKEG1heFBhdHRlcm5MZW5ndGgSAjAFChcKCm1pblN1cHBvcnQSCVkAAAAAAADgPwoXCgtzZXF1ZW5jZUNvbBIIagZldmVudHM=",
+      "helper": "prefixSpanFindFrequentSequentialPatterns",
+      "args_b64": [
+        "WQAAAAAAAOA/",
+        "MAU=",
+        "OICAgIAI",
+        "agZldmVudHM="
+      ]
+    },
+    {
+      "name": "PrefixSpan",
+      "values": {
+        "minSupport": null,
+        "maxPatternLength": null,
+        "maxLocalProjDBSize": null,
+        "sequenceCol": null
+      },
+      "params_b64": "ChoKEm1heExvY2FsUHJvakRCU2l6ZRIECgIKAAoYChBtYXhQYXR0ZXJuTGVuZ3RoEgQKAgoAChIKCm1pblN1cHBvcnQSBAoCCgAKEwoLc2VxdWVuY2VDb2wSBAoCCgA=",
+      "helper": "prefixSpanFindFrequentSequentialPatterns",
+      "args_b64": [
+        "CgIKAA==",
+        "CgIKAA==",
+        "CgIKAA==",
+        "CgIKAA=="
+      ]
+    },
+    {
+      "name": "PrefixSpan",
+      "values": {
+        "minSupport": 0.5,
+        "maxPatternLength": 5,
+        "maxLocalProjDBSize": 2147483647,
+        "sequenceCol": "events"
+      },
+      "params_b64": "ChwKEm1heExvY2FsUHJvakRCU2l6ZRIGMP////8HChYKEG1heFBhdHRlcm5MZW5ndGgSAjAFChcKCm1pblN1cHBvcnQSCVkAAAAAAADgPwoXCgtzZXF1ZW5jZUNvbBIIagZldmVudHM=",
+      "helper": "prefixSpanFindFrequentSequentialPatterns",
+      "args_b64": [
+        "WQAAAAAAAOA/",
+        "MAU=",
+        "MP////8H",
+        "agZldmVudHM="
+      ]
+    },
+    {
+      "name": "PrefixSpan",
+      "values": {
+        "minSupport": 0.5,
+        "maxPatternLength": 5,
+        "maxLocalProjDBSize": 9223372036854775807,
+        "sequenceCol": "events"
+      },
+      "params_b64": "CiAKEm1heExvY2FsUHJvakRCU2l6ZRIKOP//////////fwoWChBtYXhQYXR0ZXJuTGVuZ3RoEgIwBQoXCgptaW5TdXBwb3J0EglZAAAAAAAA4D8KFwoLc2VxdWVuY2VDb2wSCGoGZXZlbnRz",
+      "helper": "prefixSpanFindFrequentSequentialPatterns",
+      "args_b64": [
+        "WQAAAAAAAOA/",
+        "MAU=",
+        "OP//////////fw==",
+        "agZldmVudHM="
+      ]
+    }
+  ],
+  "fpgrowth": [
+    {
+      "id": "strings",
+      "sql": "SELECT * FROM VALUES (0,array('a','b')), (1,array('b','c')), (2,array('a','b','c')), (3,array('a','c')), (4,array('a','b')), (5,array('b')) AS t(id,basket)",
+      "held": "SELECT * FROM VALUES (10,array('a')), (11,array('b')), (12,array('a','b')), (13,array('z')), (14,CAST(array() AS ARRAY<STRING>)) AS t(id,basket)",
+      "values": {
+        "minSupport": 0.3,
+        "minConfidence": 0.5,
+        "itemsCol": "basket",
+        "predictionCol": "suggested",
+        "numPartitions": 2
+      },
+      "itemsets": {
+        "rows": [
+          [
+            [
+              "a",
+              "b"
+            ],
+            3
+          ],
+          [
+            [
+              "a",
+              "c"
+            ],
+            2
+          ],
+          [
+            [
+              "a"
+            ],
+            4
+          ],
+          [
+            [
+              "b",
+              "c"
+            ],
+            2
+          ],
+          [
+            [
+              "b"
+            ],
+            5
+          ],
+          [
+            [
+              "c"
+            ],
+            3
+          ]
+        ],
+        "schema": {
+          "type": "struct",
+          "fields": [
+            {
+              "name": "items",
+              "type": {
+                "type": "array",
+                "elementType": "string",
+                "containsNull": false
+              },
+              "nullable": false,
+              "metadata": {}
+            },
+            {
+              "name": "freq",
+              "type": "long",
+              "nullable": false,
+              "metadata": {}
+            }
+          ]
+        }
+      },
+      "rules": {
+        "rows": [
+          [
+            [
+              "a"
+            ],
+            [
+              "b"
+            ],
+            0.75,
+            0.8999999999999999,
+            0.5
+          ],
+          [
+            [
+              "a"
+            ],
+            [
+              "c"
+            ],
+            0.5,
+            1.0,
+            0.3333333333333333
+          ],
+          [
+            [
+              "b"
+            ],
+            [
+              "a"
+            ],
+            0.6,
+            0.9,
+            0.5
+          ],
+          [
+            [
+              "c"
+            ],
+            [
+              "a"
+            ],
+            0.6666666666666666,
+            1.0,
+            0.3333333333333333
+          ],
+          [
+            [
+              "c"
+            ],
+            [
+              "b"
+            ],
+            0.6666666666666666,
+            0.7999999999999999,
+            0.3333333333333333
+          ]
+        ],
+        "schema": {
+          "type": "struct",
+          "fields": [
+            {
+              "name": "antecedent",
+              "type": {
+                "type": "array",
+                "elementType": "string",
+                "containsNull": false
+              },
+              "nullable": false,
+              "metadata": {}
+            },
+            {
+              "name": "consequent",
+              "type": {
+                "type": "array",
+                "elementType": "string",
+                "containsNull": false
+              },
+              "nullable": false,
+              "metadata": {}
+            },
+            {
+              "name": "confidence",
+              "type": "double",
+              "nullable": false,
+              "metadata": {}
+            },
+            {
+              "name": "lift",
+              "type": "double",
+              "nullable": true,
+              "metadata": {}
+            },
+            {
+              "name": "support",
+              "type": "double",
+              "nullable": false,
+              "metadata": {}
+            }
+          ]
+        }
+      },
+      "predictions": {
+        "rows": [
+          [
+            10,
+            [
+              "a"
+            ],
+            [
+              "b",
+              "c"
+            ]
+          ],
+          [
+            11,
+            [
+              "b"
+            ],
+            [
+              "a"
+            ]
+          ],
+          [
+            12,
+            [
+              "a",
+              "b"
+            ],
+            [
+              "c"
+            ]
+          ],
+          [
+            13,
+            [
+              "z"
+            ],
+            []
+          ],
+          [
+            14,
+            [],
+            []
+          ]
+        ],
+        "schema": {
+          "type": "struct",
+          "fields": [
+            {
+              "name": "id",
+              "type": "integer",
+              "nullable": false,
+              "metadata": {}
+            },
+            {
+              "name": "basket",
+              "type": {
+                "type": "array",
+                "elementType": "string",
+                "containsNull": true
+              },
+              "nullable": false,
+              "metadata": {}
+            },
+            {
+              "name": "suggested",
+              "type": {
+                "type": "array",
+                "elementType": "string",
+                "containsNull": true
+              },
+              "nullable": true,
+              "metadata": {}
+            }
+          ]
+        }
+      },
+      "changed_predictions": {
+        "rows": [
+          [
+            10,
+            [
+              "a"
+            ],
+            []
+          ],
+          [
+            11,
+            [
+              "b"
+            ],
+            []
+          ],
+          [
+            12,
+            [
+              "a",
+              "b"
+            ],
+            []
+          ],
+          [
+            13,
+            [
+              "z"
+            ],
+            []
+          ],
+          [
+            14,
+            [],
+            []
+          ]
+        ],
+        "schema": {
+          "type": "struct",
+          "fields": [
+            {
+              "name": "id",
+              "type": "integer",
+              "nullable": false,
+              "metadata": {}
+            },
+            {
+              "name": "basket",
+              "type": {
+                "type": "array",
+                "elementType": "string",
+                "containsNull": true
+              },
+              "nullable": false,
+              "metadata": {}
+            },
+            {
+              "name": "changed",
+              "type": {
+                "type": "array",
+                "elementType": "string",
+                "containsNull": true
+              },
+              "nullable": true,
+              "metadata": {}
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "high-confidence",
+      "sql": "SELECT * FROM VALUES (0,array('a','b')), (1,array('b','c')), (2,array('a','b','c')), (3,array('a','c')), (4,array('a','b')), (5,array('b')) AS t(id,basket)",
+      "held": "SELECT * FROM VALUES (10,array('a')), (11,array('b')), (12,array('a','b')), (13,array('z')), (14,CAST(array() AS ARRAY<STRING>)) AS t(id,basket)",
+      "values": {
+        "minSupport": 0.5,
+        "minConfidence": 0.9,
+        "itemsCol": "basket",
+        "predictionCol": "suggested",
+        "numPartitions": 1
+      },
+      "itemsets": {
+        "rows": [
+          [
+            [
+              "a",
+              "b"
+            ],
+            3
+          ],
+          [
+            [
+              "a"
+            ],
+            4
+          ],
+          [
+            [
+              "b"
+            ],
+            5
+          ],
+          [
+            [
+              "c"
+            ],
+            3
+          ]
+        ],
+        "schema": {
+          "type": "struct",
+          "fields": [
+            {
+              "name": "items",
+              "type": {
+                "type": "array",
+                "elementType": "string",
+                "containsNull": false
+              },
+              "nullable": false,
+              "metadata": {}
+            },
+            {
+              "name": "freq",
+              "type": "long",
+              "nullable": false,
+              "metadata": {}
+            }
+          ]
+        }
+      },
+      "rules": {
+        "rows": [],
+        "schema": {
+          "type": "struct",
+          "fields": [
+            {
+              "name": "antecedent",
+              "type": {
+                "type": "array",
+                "elementType": "string",
+                "containsNull": false
+              },
+              "nullable": false,
+              "metadata": {}
+            },
+            {
+              "name": "consequent",
+              "type": {
+                "type": "array",
+                "elementType": "string",
+                "containsNull": false
+              },
+              "nullable": false,
+              "metadata": {}
+            },
+            {
+              "name": "confidence",
+              "type": "double",
+              "nullable": false,
+              "metadata": {}
+            },
+            {
+              "name": "lift",
+              "type": "double",
+              "nullable": true,
+              "metadata": {}
+            },
+            {
+              "name": "support",
+              "type": "double",
+              "nullable": false,
+              "metadata": {}
+            }
+          ]
+        }
+      },
+      "predictions": {
+        "rows": [
+          [
+            10,
+            [
+              "a"
+            ],
+            []
+          ],
+          [
+            11,
+            [
+              "b"
+            ],
+            []
+          ],
+          [
+            12,
+            [
+              "a",
+              "b"
+            ],
+            []
+          ],
+          [
+            13,
+            [
+              "z"
+            ],
+            []
+          ],
+          [
+            14,
+            [],
+            []
+          ]
+        ],
+        "schema": {
+          "type": "struct",
+          "fields": [
+            {
+              "name": "id",
+              "type": "integer",
+              "nullable": false,
+              "metadata": {}
+            },
+            {
+              "name": "basket",
+              "type": {
+                "type": "array",
+                "elementType": "string",
+                "containsNull": true
+              },
+              "nullable": false,
+              "metadata": {}
+            },
+            {
+              "name": "suggested",
+              "type": {
+                "type": "array",
+                "elementType": "string",
+                "containsNull": true
+              },
+              "nullable": true,
+              "metadata": {}
+            }
+          ]
+        }
+      },
+      "changed_predictions": {
+        "rows": [
+          [
+            10,
+            [
+              "a"
+            ],
+            []
+          ],
+          [
+            11,
+            [
+              "b"
+            ],
+            []
+          ],
+          [
+            12,
+            [
+              "a",
+              "b"
+            ],
+            []
+          ],
+          [
+            13,
+            [
+              "z"
+            ],
+            []
+          ],
+          [
+            14,
+            [],
+            []
+          ]
+        ],
+        "schema": {
+          "type": "struct",
+          "fields": [
+            {
+              "name": "id",
+              "type": "integer",
+              "nullable": false,
+              "metadata": {}
+            },
+            {
+              "name": "basket",
+              "type": {
+                "type": "array",
+                "elementType": "string",
+                "containsNull": true
+              },
+              "nullable": false,
+              "metadata": {}
+            },
+            {
+              "name": "changed",
+              "type": {
+                "type": "array",
+                "elementType": "string",
+                "containsNull": true
+              },
+              "nullable": true,
+              "metadata": {}
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "integers",
+      "sql": "SELECT * FROM VALUES (0,array(1,2)), (1,array(2,3)), (2,array(1,2,3)), (3,array(1,3)), (4,array(1,2)), (5,array(2)) AS t(id,basket)",
+      "held": "SELECT * FROM VALUES (0,array(1,2)), (1,array(2,3)), (2,array(1,2,3)), (3,array(1,3)), (4,array(1,2)), (5,array(2)) AS t(id,basket)",
+      "values": {
+        "minSupport": 0.3,
+        "minConfidence": 0.6,
+        "itemsCol": "basket",
+        "predictionCol": "suggested",
+        "numPartitions": 2
+      },
+      "itemsets": {
+        "rows": [
+          [
+            [
+              1,
+              2
+            ],
+            3
+          ],
+          [
+            [
+              1,
+              3
+            ],
+            2
+          ],
+          [
+            [
+              1
+            ],
+            4
+          ],
+          [
+            [
+              2,
+              3
+            ],
+            2
+          ],
+          [
+            [
+              2
+            ],
+            5
+          ],
+          [
+            [
+              3
+            ],
+            3
+          ]
+        ],
+        "schema": {
+          "type": "struct",
+          "fields": [
+            {
+              "name": "items",
+              "type": {
+                "type": "array",
+                "elementType": "integer",
+                "containsNull": false
+              },
+              "nullable": false,
+              "metadata": {}
+            },
+            {
+              "name": "freq",
+              "type": "long",
+              "nullable": false,
+              "metadata": {}
+            }
+          ]
+        }
+      },
+      "rules": {
+        "rows": [
+          [
+            [
+              1
+            ],
+            [
+              2
+            ],
+            0.75,
+            0.8999999999999999,
+            0.5
+          ],
+          [
+            [
+              2
+            ],
+            [
+              1
+            ],
+            0.6,
+            0.9,
+            0.5
+          ],
+          [
+            [
+              3
+            ],
+            [
+              1
+            ],
+            0.6666666666666666,
+            1.0,
+            0.3333333333333333
+          ],
+          [
+            [
+              3
+            ],
+            [
+              2
+            ],
+            0.6666666666666666,
+            0.7999999999999999,
+            0.3333333333333333
+          ]
+        ],
+        "schema": {
+          "type": "struct",
+          "fields": [
+            {
+              "name": "antecedent",
+              "type": {
+                "type": "array",
+                "elementType": "integer",
+                "containsNull": false
+              },
+              "nullable": false,
+              "metadata": {}
+            },
+            {
+              "name": "consequent",
+              "type": {
+                "type": "array",
+                "elementType": "integer",
+                "containsNull": false
+              },
+              "nullable": false,
+              "metadata": {}
+            },
+            {
+              "name": "confidence",
+              "type": "double",
+              "nullable": false,
+              "metadata": {}
+            },
+            {
+              "name": "lift",
+              "type": "double",
+              "nullable": true,
+              "metadata": {}
+            },
+            {
+              "name": "support",
+              "type": "double",
+              "nullable": false,
+              "metadata": {}
+            }
+          ]
+        }
+      },
+      "predictions": {
+        "rows": [
+          [
+            0,
+            [
+              1,
+              2
+            ],
+            []
+          ],
+          [
+            1,
+            [
+              2,
+              3
+            ],
+            [
+              1
+            ]
+          ],
+          [
+            2,
+            [
+              1,
+              2,
+              3
+            ],
+            []
+          ],
+          [
+            3,
+            [
+              1,
+              3
+            ],
+            [
+              2
+            ]
+          ],
+          [
+            4,
+            [
+              1,
+              2
+            ],
+            []
+          ],
+          [
+            5,
+            [
+              2
+            ],
+            [
+              1
+            ]
+          ]
+        ],
+        "schema": {
+          "type": "struct",
+          "fields": [
+            {
+              "name": "id",
+              "type": "integer",
+              "nullable": false,
+              "metadata": {}
+            },
+            {
+              "name": "basket",
+              "type": {
+                "type": "array",
+                "elementType": "integer",
+                "containsNull": false
+              },
+              "nullable": false,
+              "metadata": {}
+            },
+            {
+              "name": "suggested",
+              "type": {
+                "type": "array",
+                "elementType": "integer",
+                "containsNull": false
+              },
+              "nullable": true,
+              "metadata": {}
+            }
+          ]
+        }
+      },
+      "changed_predictions": {
+        "rows": [
+          [
+            0,
+            [
+              1,
+              2
+            ],
+            []
+          ],
+          [
+            1,
+            [
+              2,
+              3
+            ],
+            []
+          ],
+          [
+            2,
+            [
+              1,
+              2,
+              3
+            ],
+            []
+          ],
+          [
+            3,
+            [
+              1,
+              3
+            ],
+            []
+          ],
+          [
+            4,
+            [
+              1,
+              2
+            ],
+            []
+          ],
+          [
+            5,
+            [
+              2
+            ],
+            []
+          ]
+        ],
+        "schema": {
+          "type": "struct",
+          "fields": [
+            {
+              "name": "id",
+              "type": "integer",
+              "nullable": false,
+              "metadata": {}
+            },
+            {
+              "name": "basket",
+              "type": {
+                "type": "array",
+                "elementType": "integer",
+                "containsNull": false
+              },
+              "nullable": false,
+              "metadata": {}
+            },
+            {
+              "name": "changed",
+              "type": {
+                "type": "array",
+                "elementType": "integer",
+                "containsNull": false
+              },
+              "nullable": true,
+              "metadata": {}
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "prefixspan": [
+    {
+      "values": {
+        "minSupport": 0.5,
+        "maxPatternLength": 5,
+        "maxLocalProjDBSize": 32000000,
+        "sequenceCol": "events"
+      },
+      "rows": [
+        [
+          [
+            [
+              1,
+              2
+            ]
+          ],
+          3
+        ],
+        [
+          [
+            [
+              1
+            ],
+            [
+              3
+            ]
+          ],
+          2
+        ],
+        [
+          [
+            [
+              1
+            ]
+          ],
+          3
+        ],
+        [
+          [
+            [
+              2
+            ]
+          ],
+          3
+        ],
+        [
+          [
+            [
+              3
+            ]
+          ],
+          2
+        ]
+      ],
+      "schema": {
+        "type": "struct",
+        "fields": [
+          {
+            "name": "sequence",
+            "type": {
+              "type": "array",
+              "elementType": {
+                "type": "array",
+                "elementType": "integer",
+                "containsNull": false
+              },
+              "containsNull": false
+            },
+            "nullable": false,
+            "metadata": {}
+          },
+          {
+            "name": "freq",
+            "type": "long",
+            "nullable": false,
+            "metadata": {}
+          }
+        ]
+      }
+    },
+    {
+      "values": {
+        "minSupport": 0.5,
+        "maxPatternLength": 1,
+        "maxLocalProjDBSize": 1024,
+        "sequenceCol": "events"
+      },
+      "rows": [
+        [
+          [
+            [
+              1
+            ]
+          ],
+          3
+        ],
+        [
+          [
+            [
+              2
+            ]
+          ],
+          3
+        ],
+        [
+          [
+            [
+              3
+            ]
+          ],
+          2
+        ]
+      ],
+      "schema": {
+        "type": "struct",
+        "fields": [
+          {
+            "name": "sequence",
+            "type": {
+              "type": "array",
+              "elementType": {
+                "type": "array",
+                "elementType": "integer",
+                "containsNull": false
+              },
+              "containsNull": false
+            },
+            "nullable": false,
+            "metadata": {}
+          },
+          {
+            "name": "freq",
+            "type": "long",
+            "nullable": false,
+            "metadata": {}
+          }
+        ]
+      }
+    }
+  ],
+  "sequences": "SELECT * FROM VALUES (0,array(array(1,2),array(3))), (1,array(array(1),array(3,2),array(1,2))), (2,array(array(1,2),array(5))), (3,array(array(6))) AS t(id,events)"
+}
