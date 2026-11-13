@@ -18,6 +18,113 @@ use crate::plan::{LogicalPlan, RelationOwner};
 use crate::session::SparkSession;
 use crate::types::DataType;
 
+/// A dense or sparse ML vector used as an estimator parameter.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MlVector {
+    Dense(Vec<f64>),
+    Sparse {
+        size: i32,
+        indices: Vec<i32>,
+        values: Vec<f64>,
+    },
+}
+
+impl From<Vec<f64>> for MlVector {
+    fn from(values: Vec<f64>) -> Self {
+        Self::Dense(values)
+    }
+}
+
+impl<const N: usize> From<[f64; N]> for MlVector {
+    fn from(values: [f64; N]) -> Self {
+        Self::Dense(values.into())
+    }
+}
+
+impl MlVector {
+    #[allow(deprecated)] // PySpark's ML serializer uses struct_type for vector UDTs.
+    fn to_literal(&self) -> proto::expression::Literal {
+        use proto::expression::literal::{specialized_array::ValueType as A, LiteralType as L};
+        let lit = |value| proto::expression::Literal {
+            literal_type: Some(value),
+            ..Default::default()
+        };
+        let null = || lit(L::Null(DataType::Null.to_proto()));
+        let doubles = |values: Vec<f64>| {
+            lit(L::SpecializedArray(
+                proto::expression::literal::SpecializedArray {
+                    value_type: Some(A::Doubles(proto::Doubles { values })),
+                },
+            ))
+        };
+        let elements = match self {
+            Self::Dense(values) => vec![lit(L::Byte(1)), null(), null(), doubles(values.clone())],
+            Self::Sparse {
+                size,
+                indices,
+                values,
+            } => vec![
+                lit(L::Byte(0)),
+                lit(L::Integer(*size)),
+                lit(L::SpecializedArray(
+                    proto::expression::literal::SpecializedArray {
+                        value_type: Some(A::Ints(proto::Ints {
+                            values: indices.clone(),
+                        })),
+                    },
+                )),
+                doubles(values.clone()),
+            ],
+        };
+        lit(L::Struct(proto::expression::literal::Struct {
+            struct_type: Some(proto::DataType {
+                kind: Some(proto::data_type::Kind::Udt(Box::new(
+                    proto::data_type::Udt {
+                        r#type: "udt".into(),
+                        jvm_class: Some("org.apache.spark.ml.linalg.VectorUDT".into()),
+                        ..Default::default()
+                    },
+                ))),
+            }),
+            elements,
+        }))
+    }
+
+    fn from_literal(value: &proto::expression::literal::LiteralType) -> Option<Self> {
+        use proto::expression::literal::{specialized_array::ValueType as A, LiteralType as L};
+        let L::Struct(value) = value else {
+            return None;
+        };
+        let fields = &value.elements;
+        let L::SpecializedArray(array) = fields.get(3)?.literal_type.as_ref()? else {
+            return None;
+        };
+        let A::Doubles(values) = array.value_type.as_ref()? else {
+            return None;
+        };
+        match fields.first()?.literal_type.as_ref()? {
+            L::Byte(1) => Some(Self::Dense(values.values.clone())),
+            L::Byte(0) => {
+                let L::Integer(size) = fields.get(1)?.literal_type.as_ref()? else {
+                    return None;
+                };
+                let L::SpecializedArray(array) = fields.get(2)?.literal_type.as_ref()? else {
+                    return None;
+                };
+                let A::Ints(indices) = array.value_type.as_ref()? else {
+                    return None;
+                };
+                Some(Self::Sparse {
+                    size: *size,
+                    indices: indices.values.clone(),
+                    values: values.values.clone(),
+                })
+            }
+            _ => None,
+        }
+    }
+}
+
 /// ML parameter handling: stores name -> literal value mappings.
 ///
 /// Mirrors the structure of parameter handling in `pyspark.ml.param.Params`.
@@ -117,6 +224,65 @@ impl Params {
             name.to_string(),
             proto::Expression {
                 expr_type: Some(proto::expression::ExprType::Literal(literal)),
+                ..Default::default()
+            },
+        );
+        self
+    }
+
+    /// Set a parameter to an integer array, preserving PySpark's literal width.
+    #[allow(deprecated)] // Matches the array representation of PySpark's ML parameters.
+    pub fn set_param_int_array(
+        mut self,
+        name: &str,
+        values: impl IntoIterator<Item = i64>,
+    ) -> Self {
+        use proto::expression::literal::LiteralType as L;
+        let values: Vec<i64> = values.into_iter().collect();
+        let narrow = values.iter().all(|v| i32::try_from(*v).is_ok());
+        let elements = values
+            .into_iter()
+            .map(|v| proto::expression::Literal {
+                literal_type: Some(if narrow {
+                    L::Integer(v as i32)
+                } else {
+                    L::Long(v)
+                }),
+                ..Default::default()
+            })
+            .collect();
+        let literal = proto::expression::Literal {
+            literal_type: Some(L::Array(proto::expression::literal::Array {
+                element_type: Some(
+                    if narrow {
+                        DataType::Integer
+                    } else {
+                        DataType::Long
+                    }
+                    .to_proto(),
+                ),
+                elements,
+            })),
+            ..Default::default()
+        };
+        self.params.insert(
+            name.into(),
+            proto::Expression {
+                expr_type: Some(proto::expression::ExprType::Literal(literal)),
+                ..Default::default()
+            },
+        );
+        self
+    }
+
+    /// Set a vector parameter using Spark's VectorUDT representation.
+    pub fn set_param_vector(mut self, name: &str, value: impl Into<MlVector>) -> Self {
+        self.params.insert(
+            name.into(),
+            proto::Expression {
+                expr_type: Some(proto::expression::ExprType::Literal(
+                    value.into().to_literal(),
+                )),
                 ..Default::default()
             },
         );
@@ -1597,6 +1763,1050 @@ impl Transformer for LinearSVCModel {
 }
 
 impl Model for LinearSVCModel {
+    fn clone_box(&self) -> Box<dyn Model> {
+        Box::new(self.clone())
+    }
+}
+
+/// FMClassifier using Spark's JVM implementation and ML vectors.
+/// Unset parameters use Spark's defaults.
+#[derive(Debug, Clone)]
+pub struct FMClassifier {
+    operator: MlOperator,
+    params: Params,
+}
+
+impl FMClassifier {
+    pub fn new() -> Self {
+        Self {
+            operator: MlOperator::new(
+                "org.apache.spark.ml.classification.FMClassifier",
+                OperatorType::Estimator,
+            ),
+            params: Params::new(),
+        }
+    }
+
+    /// Set `featuresCol`.
+    pub fn set_feature_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("featuresCol", value);
+        self
+    }
+
+    /// Get `featuresCol` (default: "features").
+    pub fn feature_col(&self) -> &str {
+        self.params.string_or("featuresCol", "features")
+    }
+
+    /// Set `labelCol`.
+    pub fn set_label_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("labelCol", value);
+        self
+    }
+
+    /// Get `labelCol` (default: "label").
+    pub fn label_col(&self) -> &str {
+        self.params.string_or("labelCol", "label")
+    }
+
+    /// Set `predictionCol`.
+    pub fn set_prediction_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("predictionCol", value);
+        self
+    }
+
+    /// Get `predictionCol` (default: "prediction").
+    pub fn prediction_col(&self) -> &str {
+        self.params.string_or("predictionCol", "prediction")
+    }
+
+    /// Set `probabilityCol`.
+    pub fn set_probability_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("probabilityCol", value);
+        self
+    }
+
+    /// Get `probabilityCol` (default: "probability").
+    pub fn probability_col(&self) -> &str {
+        self.params.string_or("probabilityCol", "probability")
+    }
+
+    /// Set `rawPredictionCol`.
+    pub fn set_raw_prediction_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("rawPredictionCol", value);
+        self
+    }
+
+    /// Get `rawPredictionCol` (default: "rawPrediction").
+    pub fn raw_prediction_col(&self) -> &str {
+        self.params.string_or("rawPredictionCol", "rawPrediction")
+    }
+
+    /// Set `factorSize`.
+    pub fn set_factor_size(mut self, value: i32) -> Self {
+        self.params = self.params.set_param_int32("factorSize", value);
+        self
+    }
+
+    /// Get `factorSize` (default: 8).
+    pub fn factor_size(&self) -> i32 {
+        self.params.int_or("factorSize", 8)
+    }
+
+    /// Set `fitIntercept`.
+    pub fn set_fit_intercept(mut self, value: bool) -> Self {
+        self.params = self.params.set_param_bool("fitIntercept", value);
+        self
+    }
+
+    /// Get `fitIntercept` (default: true).
+    pub fn fit_intercept(&self) -> bool {
+        self.params.bool_or("fitIntercept", true)
+    }
+
+    /// Set `fitLinear`.
+    pub fn set_fit_linear(mut self, value: bool) -> Self {
+        self.params = self.params.set_param_bool("fitLinear", value);
+        self
+    }
+
+    /// Get `fitLinear` (default: true).
+    pub fn fit_linear(&self) -> bool {
+        self.params.bool_or("fitLinear", true)
+    }
+
+    /// Set `regParam`.
+    pub fn set_reg_param(mut self, value: f64) -> Self {
+        self.params = self.params.set_param_double("regParam", value);
+        self
+    }
+
+    /// Get `regParam` (default: 0.0).
+    pub fn reg_param(&self) -> f64 {
+        self.params.double_or("regParam", 0.0)
+    }
+
+    /// Set `miniBatchFraction`.
+    pub fn set_mini_batch_fraction(mut self, value: f64) -> Self {
+        self.params = self.params.set_param_double("miniBatchFraction", value);
+        self
+    }
+
+    /// Get `miniBatchFraction` (default: 1.0).
+    pub fn mini_batch_fraction(&self) -> f64 {
+        self.params.double_or("miniBatchFraction", 1.0)
+    }
+
+    /// Set `initStd`.
+    pub fn set_init_std(mut self, value: f64) -> Self {
+        self.params = self.params.set_param_double("initStd", value);
+        self
+    }
+
+    /// Get `initStd` (default: 0.01).
+    pub fn init_std(&self) -> f64 {
+        self.params.double_or("initStd", 0.01)
+    }
+
+    /// Set `maxIter`.
+    pub fn set_max_iter(mut self, value: i32) -> Self {
+        self.params = self.params.set_param_int32("maxIter", value);
+        self
+    }
+
+    /// Get `maxIter` (default: 100).
+    pub fn max_iter(&self) -> i32 {
+        self.params.int_or("maxIter", 100)
+    }
+
+    /// Set `stepSize`.
+    pub fn set_step_size(mut self, value: f64) -> Self {
+        self.params = self.params.set_param_double("stepSize", value);
+        self
+    }
+
+    /// Get `stepSize` (default: 1.0).
+    pub fn step_size(&self) -> f64 {
+        self.params.double_or("stepSize", 1.0)
+    }
+
+    /// Set `tol`.
+    pub fn set_tol(mut self, value: f64) -> Self {
+        self.params = self.params.set_param_double("tol", value);
+        self
+    }
+
+    /// Get `tol` (default: 1e-06).
+    pub fn tol(&self) -> f64 {
+        self.params.double_or("tol", 1e-06)
+    }
+
+    /// Set `solver`.
+    pub fn set_solver(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("solver", value);
+        self
+    }
+
+    /// Get `solver` (default: "adamW").
+    pub fn solver(&self) -> &str {
+        self.params.string_or("solver", "adamW")
+    }
+
+    /// Set `thresholds`.
+    pub fn set_thresholds(mut self, value: impl IntoIterator<Item = f64>) -> Self {
+        self.params = self.params.set_param_double_array("thresholds", value);
+        self
+    }
+
+    /// Get `thresholds` (unset by default).
+    pub fn thresholds(&self) -> Option<Vec<f64>> {
+        self.params.double_array_opt("thresholds")
+    }
+
+    /// Set `seed`.
+    pub fn set_seed(mut self, value: i64) -> Self {
+        self.params = self.params.set_param_int_narrow("seed", value);
+        self
+    }
+
+    /// Get `seed` (unset by default).
+    pub fn seed(&self) -> Option<i64> {
+        self.params.long_opt("seed")
+    }
+
+    fn model_from_info(
+        &self,
+        info: proto::ml_command_result::MlOperatorInfo,
+        session: &SparkSession,
+    ) -> spark_connect_core::error::Result<FMClassificationModel> {
+        let cached = CachedModel::from_info(&info, session, "FMClassifier")?;
+        Ok(FMClassificationModel {
+            operator: MlOperator::with_uid(
+                "org.apache.spark.ml.classification.FMClassificationModel",
+                info.uid.as_deref().unwrap_or(&self.operator.uid),
+                OperatorType::Model,
+            ),
+            params: self.params.clone(),
+            cached,
+        })
+    }
+}
+
+impl Default for FMClassifier {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Estimator for FMClassifier {
+    fn operator(&self) -> &MlOperator {
+        &self.operator
+    }
+    fn operator_mut(&mut self) -> &mut MlOperator {
+        &mut self.operator
+    }
+    fn params(&self) -> &Params {
+        &self.params
+    }
+    fn params_mut(&mut self) -> &mut Params {
+        &mut self.params
+    }
+
+    fn fit_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<Box<dyn Model>> {
+        let info = fit_via_command(&self.operator, &self.params, df)?;
+        Ok(Box::new(self.model_from_info(info, &df.session)?))
+    }
+}
+
+/// A FMClassifier model fitted by Spark Connect.
+///
+/// Obtain it through [`Estimator::fit`]. The model, its clones and transformed
+/// DataFrames retain the server-cached object until the last owner is dropped.
+#[derive(Debug, Clone)]
+pub struct FMClassificationModel {
+    operator: MlOperator,
+    params: Params,
+    cached: CachedModel,
+}
+
+impl Transformer for FMClassificationModel {
+    fn operator(&self) -> &MlOperator {
+        &self.operator
+    }
+    fn operator_mut(&mut self) -> &mut MlOperator {
+        &mut self.operator
+    }
+    fn params(&self) -> &Params {
+        &self.params
+    }
+    fn params_mut(&mut self) -> &mut Params {
+        &mut self.params
+    }
+
+    fn build_ml_relation(
+        &self,
+        input: &DataFrame,
+    ) -> spark_connect_core::error::Result<proto::MlRelation> {
+        self.cached.build_ml_relation(input, &self.params)
+    }
+
+    fn transform_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<DataFrame> {
+        self.cached.transform(df, &self.params)
+    }
+}
+
+impl Model for FMClassificationModel {
+    fn clone_box(&self) -> Box<dyn Model> {
+        Box::new(self.clone())
+    }
+}
+
+/// MultilayerPerceptronClassifier using Spark's JVM implementation and ML vectors.
+/// Unset parameters use Spark's defaults.
+#[derive(Debug, Clone)]
+pub struct MultilayerPerceptronClassifier {
+    operator: MlOperator,
+    params: Params,
+}
+
+impl MultilayerPerceptronClassifier {
+    pub fn new() -> Self {
+        Self {
+            operator: MlOperator::new(
+                "org.apache.spark.ml.classification.MultilayerPerceptronClassifier",
+                OperatorType::Estimator,
+            ),
+            params: Params::new(),
+        }
+    }
+
+    /// Set `featuresCol`.
+    pub fn set_feature_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("featuresCol", value);
+        self
+    }
+
+    /// Get `featuresCol` (default: "features").
+    pub fn feature_col(&self) -> &str {
+        self.params.string_or("featuresCol", "features")
+    }
+
+    /// Set `labelCol`.
+    pub fn set_label_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("labelCol", value);
+        self
+    }
+
+    /// Get `labelCol` (default: "label").
+    pub fn label_col(&self) -> &str {
+        self.params.string_or("labelCol", "label")
+    }
+
+    /// Set `predictionCol`.
+    pub fn set_prediction_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("predictionCol", value);
+        self
+    }
+
+    /// Get `predictionCol` (default: "prediction").
+    pub fn prediction_col(&self) -> &str {
+        self.params.string_or("predictionCol", "prediction")
+    }
+
+    /// Set `maxIter`.
+    pub fn set_max_iter(mut self, value: i32) -> Self {
+        self.params = self.params.set_param_int32("maxIter", value);
+        self
+    }
+
+    /// Get `maxIter` (default: 100).
+    pub fn max_iter(&self) -> i32 {
+        self.params.int_or("maxIter", 100)
+    }
+
+    /// Set `tol`.
+    pub fn set_tol(mut self, value: f64) -> Self {
+        self.params = self.params.set_param_double("tol", value);
+        self
+    }
+
+    /// Get `tol` (default: 1e-06).
+    pub fn tol(&self) -> f64 {
+        self.params.double_or("tol", 1e-06)
+    }
+
+    /// Set `seed`.
+    pub fn set_seed(mut self, value: i64) -> Self {
+        self.params = self.params.set_param_int_narrow("seed", value);
+        self
+    }
+
+    /// Get `seed` (unset by default).
+    pub fn seed(&self) -> Option<i64> {
+        self.params.long_opt("seed")
+    }
+
+    /// Set `layers`.
+    pub fn set_layers(mut self, value: impl IntoIterator<Item = i32>) -> Self {
+        self.params = self
+            .params
+            .set_param_int_array("layers", value.into_iter().map(i64::from));
+        self
+    }
+
+    /// Get `layers` (unset by default).
+    pub fn layers(&self) -> Option<Vec<i32>> {
+        self.params
+            .array_opt("layers")?
+            .iter()
+            .map(|lit| match lit.literal_type.as_ref()? {
+                proto::expression::literal::LiteralType::Integer(v) => Some(*v),
+                proto::expression::literal::LiteralType::Long(v) => Some(*v as i32),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Set `blockSize`.
+    pub fn set_block_size(mut self, value: i32) -> Self {
+        self.params = self.params.set_param_int32("blockSize", value);
+        self
+    }
+
+    /// Get `blockSize` (default: 128).
+    pub fn block_size(&self) -> i32 {
+        self.params.int_or("blockSize", 128)
+    }
+
+    /// Set `stepSize`.
+    pub fn set_step_size(mut self, value: f64) -> Self {
+        self.params = self.params.set_param_double("stepSize", value);
+        self
+    }
+
+    /// Get `stepSize` (default: 0.03).
+    pub fn step_size(&self) -> f64 {
+        self.params.double_or("stepSize", 0.03)
+    }
+
+    /// Set `solver`.
+    pub fn set_solver(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("solver", value);
+        self
+    }
+
+    /// Get `solver` (default: "l-bfgs").
+    pub fn solver(&self) -> &str {
+        self.params.string_or("solver", "l-bfgs")
+    }
+
+    /// Set `initialWeights`.
+    pub fn set_initial_weights(mut self, value: impl Into<MlVector>) -> Self {
+        self.params = self.params.set_param_vector("initialWeights", value);
+        self
+    }
+
+    /// Get `initialWeights` (unset by default).
+    pub fn initial_weights(&self) -> Option<MlVector> {
+        MlVector::from_literal(self.params.literal("initialWeights")?)
+    }
+
+    /// Set `probabilityCol`.
+    pub fn set_probability_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("probabilityCol", value);
+        self
+    }
+
+    /// Get `probabilityCol` (default: "probability").
+    pub fn probability_col(&self) -> &str {
+        self.params.string_or("probabilityCol", "probability")
+    }
+
+    /// Set `rawPredictionCol`.
+    pub fn set_raw_prediction_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("rawPredictionCol", value);
+        self
+    }
+
+    /// Get `rawPredictionCol` (default: "rawPrediction").
+    pub fn raw_prediction_col(&self) -> &str {
+        self.params.string_or("rawPredictionCol", "rawPrediction")
+    }
+
+    /// Set `thresholds`.
+    pub fn set_thresholds(mut self, value: impl IntoIterator<Item = f64>) -> Self {
+        self.params = self.params.set_param_double_array("thresholds", value);
+        self
+    }
+
+    /// Get `thresholds` (unset by default).
+    pub fn thresholds(&self) -> Option<Vec<f64>> {
+        self.params.double_array_opt("thresholds")
+    }
+
+    fn model_from_info(
+        &self,
+        info: proto::ml_command_result::MlOperatorInfo,
+        session: &SparkSession,
+    ) -> spark_connect_core::error::Result<MultilayerPerceptronClassificationModel> {
+        let cached = CachedModel::from_info(&info, session, "MultilayerPerceptronClassifier")?;
+        Ok(MultilayerPerceptronClassificationModel {
+            operator: MlOperator::with_uid(
+                "org.apache.spark.ml.classification.MultilayerPerceptronClassificationModel",
+                info.uid.as_deref().unwrap_or(&self.operator.uid),
+                OperatorType::Model,
+            ),
+            params: self.params.clone(),
+            cached,
+        })
+    }
+}
+
+impl Default for MultilayerPerceptronClassifier {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Estimator for MultilayerPerceptronClassifier {
+    fn operator(&self) -> &MlOperator {
+        &self.operator
+    }
+    fn operator_mut(&mut self) -> &mut MlOperator {
+        &mut self.operator
+    }
+    fn params(&self) -> &Params {
+        &self.params
+    }
+    fn params_mut(&mut self) -> &mut Params {
+        &mut self.params
+    }
+
+    fn fit_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<Box<dyn Model>> {
+        let info = fit_via_command(&self.operator, &self.params, df)?;
+        Ok(Box::new(self.model_from_info(info, &df.session)?))
+    }
+}
+
+/// A MultilayerPerceptronClassifier model fitted by Spark Connect.
+///
+/// Obtain it through [`Estimator::fit`]. The model, its clones and transformed
+/// DataFrames retain the server-cached object until the last owner is dropped.
+#[derive(Debug, Clone)]
+pub struct MultilayerPerceptronClassificationModel {
+    operator: MlOperator,
+    params: Params,
+    cached: CachedModel,
+}
+
+impl Transformer for MultilayerPerceptronClassificationModel {
+    fn operator(&self) -> &MlOperator {
+        &self.operator
+    }
+    fn operator_mut(&mut self) -> &mut MlOperator {
+        &mut self.operator
+    }
+    fn params(&self) -> &Params {
+        &self.params
+    }
+    fn params_mut(&mut self) -> &mut Params {
+        &mut self.params
+    }
+
+    fn build_ml_relation(
+        &self,
+        input: &DataFrame,
+    ) -> spark_connect_core::error::Result<proto::MlRelation> {
+        self.cached.build_ml_relation(input, &self.params)
+    }
+
+    fn transform_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<DataFrame> {
+        self.cached.transform(df, &self.params)
+    }
+}
+
+impl Model for MultilayerPerceptronClassificationModel {
+    fn clone_box(&self) -> Box<dyn Model> {
+        Box::new(self.clone())
+    }
+}
+
+/// A native binary classifier that can be fitted independently for each OneVsRest class.
+#[derive(Debug, Clone)]
+pub enum Classifier {
+    LogisticRegression(LogisticRegression),
+    LinearSVC(LinearSVC),
+    DecisionTreeClassifier(DecisionTreeClassifier),
+    RandomForestClassifier(RandomForestClassifier),
+    GBTClassifier(GBTClassifier),
+    NaiveBayes(NaiveBayes),
+    FMClassifier(FMClassifier),
+    MultilayerPerceptronClassifier(MultilayerPerceptronClassifier),
+}
+
+macro_rules! classifier_from {
+    ($($name:ident),* $(,)?) => {$(
+        impl From<$name> for Classifier {
+            fn from(value: $name) -> Self { Self::$name(value) }
+        }
+    )*};
+}
+classifier_from!(
+    LogisticRegression,
+    LinearSVC,
+    DecisionTreeClassifier,
+    RandomForestClassifier,
+    GBTClassifier,
+    NaiveBayes,
+    FMClassifier,
+    MultilayerPerceptronClassifier
+);
+
+impl Classifier {
+    fn estimator_mut(&mut self) -> &mut dyn Estimator {
+        match self {
+            Self::LogisticRegression(x) => x,
+            Self::LinearSVC(x) => x,
+            Self::DecisionTreeClassifier(x) => x,
+            Self::RandomForestClassifier(x) => x,
+            Self::GBTClassifier(x) => x,
+            Self::NaiveBayes(x) => x,
+            Self::FMClassifier(x) => x,
+            Self::MultilayerPerceptronClassifier(x) => x,
+        }
+    }
+
+    /// Whether this classifier accepts instance weights.
+    pub fn supports_weight(&self) -> bool {
+        !matches!(
+            self,
+            Self::FMClassifier(_) | Self::MultilayerPerceptronClassifier(_)
+        )
+    }
+}
+
+/// Multiclass reduction that fits one native binary classifier per class.
+///
+/// As in PySpark, class indices run from zero through the maximum label. Fits use
+/// independent snapshots of the base classifier and at most `parallelism` threads.
+#[derive(Debug, Clone)]
+pub struct OneVsRest {
+    operator: MlOperator,
+    params: Params,
+    classifier: Option<Classifier>,
+}
+
+impl OneVsRest {
+    pub fn new() -> Self {
+        Self {
+            operator: MlOperator::new(
+                "org.apache.spark.ml.classification.OneVsRest",
+                OperatorType::Estimator,
+            ),
+            params: Params::new(),
+            classifier: None,
+        }
+    }
+
+    /// Set the native binary classifier. Fits do not mutate the supplied estimator.
+    pub fn set_classifier(mut self, classifier: impl Into<Classifier>) -> Self {
+        self.classifier = Some(classifier.into());
+        self
+    }
+
+    pub fn classifier(&self) -> Option<&Classifier> {
+        self.classifier.as_ref()
+    }
+    pub fn set_feature_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("featuresCol", value);
+        self
+    }
+    pub fn feature_col(&self) -> &str {
+        self.params.string_or("featuresCol", "features")
+    }
+    pub fn set_label_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("labelCol", value);
+        self
+    }
+    pub fn label_col(&self) -> &str {
+        self.params.string_or("labelCol", "label")
+    }
+    pub fn set_prediction_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("predictionCol", value);
+        self
+    }
+    pub fn prediction_col(&self) -> &str {
+        self.params.string_or("predictionCol", "prediction")
+    }
+    pub fn set_raw_prediction_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("rawPredictionCol", value);
+        self
+    }
+    pub fn raw_prediction_col(&self) -> &str {
+        self.params.string_or("rawPredictionCol", "rawPrediction")
+    }
+    pub fn set_weight_col(mut self, value: &str) -> Self {
+        self.params = self.params.set_param_string("weightCol", value);
+        self
+    }
+    pub fn weight_col(&self) -> Option<&str> {
+        self.params.string_opt("weightCol")
+    }
+    pub fn set_parallelism(mut self, value: i32) -> Self {
+        self.params = self.params.set_param_int32("parallelism", value);
+        self
+    }
+    pub fn parallelism(&self) -> i32 {
+        self.params.int_or("parallelism", 1)
+    }
+}
+
+impl Default for OneVsRest {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// Release only the cache created for this fit, including after a failed binary fit.
+struct OneVsRestTrainingCache(Option<DataFrame>);
+impl Drop for OneVsRestTrainingCache {
+    fn drop(&mut self) {
+        if let Some(df) = &self.0 {
+            let _ = df.unpersist(false);
+        }
+    }
+}
+
+fn ml_exact_column(name: &str) -> crate::column::Column {
+    crate::column::col(&format!("`{}`", name.replace('`', "``")))
+}
+
+impl Estimator for OneVsRest {
+    fn operator(&self) -> &MlOperator {
+        &self.operator
+    }
+    fn operator_mut(&mut self) -> &mut MlOperator {
+        &mut self.operator
+    }
+    fn params(&self) -> &Params {
+        &self.params
+    }
+    fn params_mut(&mut self) -> &mut Params {
+        &mut self.params
+    }
+    fn fit_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<Box<dyn Model>> {
+        use crate::column::{lit_double, when};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        for name in [
+            "featuresCol",
+            "labelCol",
+            "predictionCol",
+            "rawPredictionCol",
+            "parallelism",
+        ] {
+            if matches!(
+                self.params.literal(name),
+                Some(proto::expression::literal::LiteralType::Null(_))
+            ) {
+                return Err(SparkError::value_msg(format!(
+                    "OneVsRest parameter {name} cannot be null"
+                )));
+            }
+        }
+        let classifier = self
+            .classifier
+            .as_ref()
+            .ok_or_else(|| SparkError::value_msg("OneVsRest requires a native classifier"))?;
+        if self.parallelism() < 1 {
+            return Err(SparkError::value_msg("parallelism must be at least 1"));
+        }
+        let rows = df
+            .agg([crate::functions::max(
+                ml_exact_column(self.label_col()).cast(DataType::Double),
+            )])
+            .collect()?;
+        let max = rows
+            .first()
+            .and_then(|r| r.get(0))
+            .and_then(|v| v.as_f64())
+            .ok_or_else(|| {
+                SparkError::value_msg("OneVsRest cannot fit an empty or null-labeled dataset")
+            })?;
+        if !max.is_finite() || max < 0.0 || max >= i32::MAX as f64 {
+            return Err(SparkError::value_msg(
+                "OneVsRest requires a finite nonnegative maximum class label",
+            ));
+        }
+        let count = max as usize + 1;
+        let weight = self
+            .weight_col()
+            .filter(|name| !name.is_empty() && classifier.supports_weight());
+        let mut columns = vec![
+            ml_exact_column(self.label_col()),
+            ml_exact_column(self.feature_col()),
+        ];
+        if let Some(weight) = weight {
+            columns.push(ml_exact_column(weight));
+        }
+        let training = df.select(columns);
+        let level = df.storage_level()?;
+        let _cache = OneVsRestTrainingCache(if !level.use_memory && !level.use_disk {
+            Some(training.persist(proto::StorageLevel {
+                use_memory: true,
+                use_disk: true,
+                replication: 1,
+                ..Default::default()
+            })?)
+        } else {
+            None
+        });
+        let next = AtomicUsize::new(0);
+        let results = std::thread::scope(|scope| {
+            let mut workers = Vec::new();
+            for _ in 0..(self.parallelism() as usize).min(count) {
+                let next = &next;
+                let training = &training;
+                let this = &self;
+                workers.push(scope.spawn(move || {
+                    let mut results = Vec::new();
+                    loop {
+                        let index = next.fetch_add(1, Ordering::Relaxed);
+                        if index >= count {
+                            break;
+                        }
+                        let binary_label = format!("{}_label_{}", this.operator.uid, index);
+                        let binary = training.with_column(
+                            &binary_label,
+                            when(
+                                ml_exact_column(this.label_col()).eq(lit_double(index as f64)),
+                                lit_double(1.0),
+                            )
+                            .otherwise(lit_double(0.0)),
+                        );
+                        let mut base = classifier.clone();
+                        let estimator = base.estimator_mut();
+                        let mut params = std::mem::take(estimator.params_mut())
+                            .set_param_string("labelCol", &binary_label)
+                            .set_param_string("featuresCol", this.feature_col())
+                            .set_param_string("predictionCol", this.prediction_col());
+                        if let Some(weight) = weight {
+                            params = params.set_param_string("weightCol", weight);
+                        }
+                        *estimator.params_mut() = params;
+                        results.push((index, estimator.fit(&binary)));
+                    }
+                    results
+                }));
+            }
+            let mut results = Vec::new();
+            for worker in workers {
+                results.extend(
+                    worker
+                        .join()
+                        .map_err(|_| SparkError::connect_msg("OneVsRest worker panicked"))?,
+                );
+            }
+            Ok::<_, SparkError>(results)
+        })?;
+        let mut results = results;
+        results.sort_by_key(|(index, _)| *index);
+        let models = results
+            .into_iter()
+            .map(|(_, model)| model)
+            .collect::<spark_connect_core::error::Result<Vec<_>>>()?;
+        Ok(Box::new(OneVsRestModel {
+            operator: MlOperator::with_uid(
+                "org.apache.spark.ml.classification.OneVsRestModel",
+                &self.operator.uid,
+                OperatorType::Model,
+            ),
+            params: self.params.clone(),
+            models,
+            session_id: df.session.session_id().to_string(),
+        }))
+    }
+}
+
+/// A composite model whose submodels remain alive through lazy transformed DataFrames.
+pub struct OneVsRestModel {
+    operator: MlOperator,
+    params: Params,
+    models: Vec<Box<dyn Model>>,
+    session_id: String,
+}
+
+impl Clone for OneVsRestModel {
+    fn clone(&self) -> Self {
+        Self {
+            operator: self.operator.clone(),
+            params: self.params.clone(),
+            models: self.models.iter().map(|m| m.clone_box()).collect(),
+            session_id: self.session_id.clone(),
+        }
+    }
+}
+
+impl OneVsRestModel {
+    pub fn num_classes(&self) -> usize {
+        self.models.len()
+    }
+
+    fn transformed(&self, df: &DataFrame) -> spark_connect_core::error::Result<DataFrame> {
+        use crate::column::{lit, Column};
+        use crate::expression::Expression;
+        use crate::functions::{array, array_append, get};
+        if df.session.session_id() != self.session_id {
+            return Err(SparkError::value_msg(
+                "A fitted ML model must transform data from its fitting session",
+            ));
+        }
+        let original = df.columns()?;
+        let uid = Uuid::new_v4().to_string();
+        let acc = format!("{uid}_scores");
+        let raw = format!("{uid}_raw");
+        let mut result = df.clone();
+        for (index, base) in self.models.iter().enumerate() {
+            let mut model = base.clone_box();
+            let mut params = std::mem::take(model.params_mut())
+                .set_param_string(
+                    "featuresCol",
+                    self.params.string_or("featuresCol", "features"),
+                )
+                .set_param_string("rawPredictionCol", &raw)
+                .set_param_string("predictionCol", "");
+            if !model.operator().name.ends_with("LinearSVCModel") {
+                params = params.set_param_string("probabilityCol", "");
+            }
+            *model.params_mut() = params;
+            let transformed = model.transform(&result)?;
+            let values = Column::new(Expression::function(
+                "vector_to_array",
+                vec![
+                    ml_exact_column(&raw).expression().clone(),
+                    crate::column::lit_string("float64").expression().clone(),
+                ],
+            ));
+            let score = get(values, lit(1));
+            result = transformed
+                .with_column(
+                    &acc,
+                    if index == 0 {
+                        array([score])
+                    } else {
+                        array_append(ml_exact_column(&acc), score)
+                    },
+                )
+                .select(
+                    original
+                        .iter()
+                        .map(|name| ml_exact_column(name))
+                        .chain(std::iter::once(ml_exact_column(&acc))),
+                );
+        }
+        let raw_output = self.params.string_or("rawPredictionCol", "rawPrediction");
+        if !raw_output.is_empty() {
+            result = result.with_column(
+                raw_output,
+                Column::new(Expression::function(
+                    "array_to_vector",
+                    vec![ml_exact_column(&acc).expression().clone()],
+                )),
+            );
+        }
+        let prediction = self.params.string_or("predictionCol", "prediction");
+        if !prediction.is_empty() {
+            result = result.with_column(prediction, one_vs_rest_prediction(ml_exact_column(&acc)));
+        }
+        Ok(result.drop_columns(std::iter::empty::<Column>(), [acc]))
+    }
+}
+
+// PySpark's array_argmax ignores NaN/null, keeps the first tie and returns -1
+// when no score exceeds negative infinity.
+fn one_vs_rest_prediction(scores: crate::column::Column) -> crate::column::Column {
+    use crate::column::{lit, lit_double, when};
+    use crate::functions::{aggregate_with_finish, r#struct};
+    aggregate_with_finish(
+        scores,
+        r#struct([
+            lit_double(f64::NEG_INFINITY).alias("v"),
+            lit(-1).alias("i"),
+            lit(0).alias("j"),
+        ]),
+        |args| {
+            let value = args[1].clone();
+            let best = args[0].clone().get_field("v");
+            let index = args[0].clone().get_field("i");
+            let current = args[0].clone().get_field("j");
+            when(
+                value
+                    .clone()
+                    .is_nan()
+                    .not()
+                    .and(value.clone().is_null().not())
+                    .and(value.clone().gt(best.clone())),
+                r#struct([
+                    value.alias("v"),
+                    current.clone().alias("i"),
+                    (current.clone() + lit(1)).alias("j"),
+                ]),
+            )
+            .otherwise(r#struct([
+                best.alias("v"),
+                index.alias("i"),
+                (current + lit(1)).alias("j"),
+            ]))
+        },
+        |args| args[0].clone().get_field("i"),
+    )
+    .cast(DataType::Double)
+}
+
+impl Transformer for OneVsRestModel {
+    fn operator(&self) -> &MlOperator {
+        &self.operator
+    }
+    fn operator_mut(&mut self) -> &mut MlOperator {
+        &mut self.operator
+    }
+    fn params(&self) -> &Params {
+        &self.params
+    }
+    fn params_mut(&mut self) -> &mut Params {
+        &mut self.params
+    }
+    fn transform_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<DataFrame> {
+        self.transformed(df)
+    }
+    fn build_ml_relation(
+        &self,
+        df: &DataFrame,
+    ) -> spark_connect_core::error::Result<proto::MlRelation> {
+        // The composite transform is a SQL plan, represented as the input of an identity
+        // SQLTransformer when a caller specifically requests an MlRelation.
+        Ok(proto::MlRelation {
+            ml_type: Some(proto::ml_relation::MlType::Transform(Box::new(
+                proto::ml_relation::Transform {
+                    operator: Some(proto::ml_relation::transform::Operator::Transformer(
+                        MlOperator::new(
+                            "org.apache.spark.ml.feature.SQLTransformer",
+                            OperatorType::Transformer,
+                        )
+                        .to_proto(),
+                    )),
+                    input: Some(Box::new(self.transformed(df)?.relation()?)),
+                    params: Some(
+                        Params::new()
+                            .set_param_string("statement", "SELECT * FROM __THIS__")
+                            .to_proto(),
+                    ),
+                },
+            ))),
+            ..Default::default()
+        })
+    }
+}
+impl Model for OneVsRestModel {
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }
@@ -6267,6 +7477,299 @@ mod tests {
             .transform(&session.new_session().range(2).unwrap())
             .is_err());
         assert!(model.clone_box().transform(&df).is_ok());
+    }
+
+    #[test]
+    fn fmclassifier_model_validates_the_reference_and_retains_its_metadata() {
+        let session = offline_session();
+        let estimator = FMClassifier::default().set_prediction_col("pred");
+        assert_eq!(
+            estimator.operator().name,
+            "org.apache.spark.ml.classification.FMClassifier"
+        );
+        for kind in [
+            None,
+            Some(proto::ml_command_result::ml_operator_info::Type::Name(
+                "model".into(),
+            )),
+            Some(proto::ml_command_result::ml_operator_info::Type::ObjRef(
+                proto::ObjectRef::default(),
+            )),
+        ] {
+            assert!(estimator
+                .model_from_info(
+                    proto::ml_command_result::MlOperatorInfo {
+                        r#type: kind,
+                        ..Default::default()
+                    },
+                    &session
+                )
+                .is_err());
+        }
+        let mut model = estimator
+            .model_from_info(
+                proto::ml_command_result::MlOperatorInfo {
+                    r#type: Some(proto::ml_command_result::ml_operator_info::Type::ObjRef(
+                        proto::ObjectRef {
+                            id: "trained-model".into(),
+                        },
+                    )),
+                    uid: Some("returned-uid".into()),
+                    ..Default::default()
+                },
+                &session,
+            )
+            .unwrap();
+        assert_eq!(model.operator().uid, "returned-uid");
+        assert_eq!(
+            model.operator().name,
+            "org.apache.spark.ml.classification.FMClassificationModel"
+        );
+        assert_eq!(model.operator().op_type, OperatorType::Model);
+        let df = session.range(2).unwrap();
+        let proto::ml_relation::MlType::Transform(t) =
+            model.build_ml_relation(&df).unwrap().ml_type.unwrap()
+        else {
+            panic!("transform")
+        };
+        assert_eq!(
+            t.operator,
+            Some(proto::ml_relation::transform::Operator::ObjRef(
+                proto::ObjectRef {
+                    id: "trained-model".into()
+                }
+            ))
+        );
+        assert_eq!(*t.input.unwrap(), df.relation().unwrap());
+        assert!(t.params.unwrap().params.contains_key("predictionCol"));
+        assert!(model
+            .transform(&session.new_session().range(2).unwrap())
+            .is_err());
+        assert!(model.clone_box().transform(&df).is_ok());
+    }
+
+    #[test]
+    fn multilayer_perceptron_classifier_model_validates_the_reference_and_retains_its_metadata() {
+        let session = offline_session();
+        let estimator = MultilayerPerceptronClassifier::default().set_prediction_col("pred");
+        assert_eq!(
+            estimator.operator().name,
+            "org.apache.spark.ml.classification.MultilayerPerceptronClassifier"
+        );
+        for kind in [
+            None,
+            Some(proto::ml_command_result::ml_operator_info::Type::Name(
+                "model".into(),
+            )),
+            Some(proto::ml_command_result::ml_operator_info::Type::ObjRef(
+                proto::ObjectRef::default(),
+            )),
+        ] {
+            assert!(estimator
+                .model_from_info(
+                    proto::ml_command_result::MlOperatorInfo {
+                        r#type: kind,
+                        ..Default::default()
+                    },
+                    &session
+                )
+                .is_err());
+        }
+        let mut model = estimator
+            .model_from_info(
+                proto::ml_command_result::MlOperatorInfo {
+                    r#type: Some(proto::ml_command_result::ml_operator_info::Type::ObjRef(
+                        proto::ObjectRef {
+                            id: "trained-model".into(),
+                        },
+                    )),
+                    uid: Some("returned-uid".into()),
+                    ..Default::default()
+                },
+                &session,
+            )
+            .unwrap();
+        assert_eq!(model.operator().uid, "returned-uid");
+        assert_eq!(
+            model.operator().name,
+            "org.apache.spark.ml.classification.MultilayerPerceptronClassificationModel"
+        );
+        assert_eq!(model.operator().op_type, OperatorType::Model);
+        let df = session.range(2).unwrap();
+        let proto::ml_relation::MlType::Transform(t) =
+            model.build_ml_relation(&df).unwrap().ml_type.unwrap()
+        else {
+            panic!("transform")
+        };
+        assert_eq!(
+            t.operator,
+            Some(proto::ml_relation::transform::Operator::ObjRef(
+                proto::ObjectRef {
+                    id: "trained-model".into()
+                }
+            ))
+        );
+        assert_eq!(*t.input.unwrap(), df.relation().unwrap());
+        assert!(t.params.unwrap().params.contains_key("predictionCol"));
+        assert!(model
+            .transform(&session.new_session().range(2).unwrap())
+            .is_err());
+        assert!(model.clone_box().transform(&df).is_ok());
+    }
+
+    #[test]
+    fn fmclassifier_defaults_and_configured_getters() {
+        let default = FMClassifier::new();
+        assert_eq!(default.feature_col(), "features");
+        assert_eq!(default.label_col(), "label");
+        assert_eq!(default.prediction_col(), "prediction");
+        assert_eq!(default.probability_col(), "probability");
+        assert_eq!(default.raw_prediction_col(), "rawPrediction");
+        assert_eq!(default.factor_size(), 8);
+        assert!(default.fit_intercept());
+        assert!(default.fit_linear());
+        assert_eq!(default.reg_param(), 0.0);
+        assert_eq!(default.mini_batch_fraction(), 1.0);
+        assert_eq!(default.init_std(), 0.01);
+        assert_eq!(default.max_iter(), 100);
+        assert_eq!(default.step_size(), 1.0);
+        assert_eq!(default.tol(), 1e-06);
+        assert_eq!(default.solver(), "adamW");
+        assert_eq!(default.thresholds(), None);
+        assert_eq!(default.seed(), None);
+        let configured = FMClassifier::new()
+            .set_feature_col("input")
+            .set_label_col("target")
+            .set_prediction_col("pred")
+            .set_probability_col("prob")
+            .set_raw_prediction_col("scores")
+            .set_factor_size(2)
+            .set_fit_intercept(false)
+            .set_fit_linear(false)
+            .set_reg_param(0.1)
+            .set_mini_batch_fraction(0.5)
+            .set_init_std(0.2)
+            .set_max_iter(50)
+            .set_step_size(0.3)
+            .set_tol(1e-08)
+            .set_solver("gd")
+            .set_thresholds([1.0, 2.0])
+            .set_seed(8589934592);
+        assert_eq!(configured.feature_col(), "input");
+        assert_eq!(configured.label_col(), "target");
+        assert_eq!(configured.prediction_col(), "pred");
+        assert_eq!(configured.probability_col(), "prob");
+        assert_eq!(configured.raw_prediction_col(), "scores");
+        assert_eq!(configured.factor_size(), 2);
+        assert!(!configured.fit_intercept());
+        assert!(!configured.fit_linear());
+        assert_eq!(configured.reg_param(), 0.1);
+        assert_eq!(configured.mini_batch_fraction(), 0.5);
+        assert_eq!(configured.init_std(), 0.2);
+        assert_eq!(configured.max_iter(), 50);
+        assert_eq!(configured.step_size(), 0.3);
+        assert_eq!(configured.tol(), 1e-08);
+        assert_eq!(configured.solver(), "gd");
+        assert_eq!(configured.thresholds(), Some(vec![1.0, 2.0]));
+        assert_eq!(configured.seed(), Some(8589934592));
+    }
+
+    #[test]
+    fn multilayer_perceptron_classifier_defaults_and_configured_getters() {
+        let default = MultilayerPerceptronClassifier::new();
+        assert_eq!(default.feature_col(), "features");
+        assert_eq!(default.label_col(), "label");
+        assert_eq!(default.prediction_col(), "prediction");
+        assert_eq!(default.max_iter(), 100);
+        assert_eq!(default.tol(), 1e-06);
+        assert_eq!(default.seed(), None);
+        assert_eq!(default.layers(), None);
+        assert_eq!(default.block_size(), 128);
+        assert_eq!(default.step_size(), 0.03);
+        assert_eq!(default.solver(), "l-bfgs");
+        assert_eq!(default.initial_weights(), None);
+        assert_eq!(default.probability_col(), "probability");
+        assert_eq!(default.raw_prediction_col(), "rawPrediction");
+        assert_eq!(default.thresholds(), None);
+        let configured = MultilayerPerceptronClassifier::new()
+            .set_feature_col("input")
+            .set_label_col("target")
+            .set_prediction_col("pred")
+            .set_max_iter(50)
+            .set_tol(1e-08)
+            .set_seed(8589934592)
+            .set_layers([2, 3, 2])
+            .set_block_size(4)
+            .set_step_size(0.1)
+            .set_solver("gd")
+            .set_initial_weights(MlVector::Dense(vec![
+                0.0, 0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.1, 0.11, 0.12, 0.13,
+                0.14, 0.15, 0.16,
+            ]))
+            .set_probability_col("prob")
+            .set_raw_prediction_col("scores")
+            .set_thresholds([1.0, 2.0]);
+        assert_eq!(configured.feature_col(), "input");
+        assert_eq!(configured.label_col(), "target");
+        assert_eq!(configured.prediction_col(), "pred");
+        assert_eq!(configured.max_iter(), 50);
+        assert_eq!(configured.tol(), 1e-08);
+        assert_eq!(configured.seed(), Some(8589934592));
+        assert_eq!(configured.layers(), Some(vec![2, 3, 2]));
+        assert_eq!(configured.block_size(), 4);
+        assert_eq!(configured.step_size(), 0.1);
+        assert_eq!(configured.solver(), "gd");
+        assert_eq!(
+            configured.initial_weights(),
+            Some(MlVector::Dense(vec![
+                0.0, 0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.1, 0.11, 0.12, 0.13,
+                0.14, 0.15, 0.16
+            ]))
+        );
+        assert_eq!(configured.probability_col(), "prob");
+        assert_eq!(configured.raw_prediction_col(), "scores");
+        assert_eq!(configured.thresholds(), Some(vec![1.0, 2.0]));
+    }
+
+    #[test]
+    fn one_vs_rest_rejects_null_client_parameters_before_requests() {
+        let session = offline_session();
+        let df = session.range(1).unwrap();
+        for name in [
+            "featuresCol",
+            "labelCol",
+            "predictionCol",
+            "rawPredictionCol",
+            "parallelism",
+        ] {
+            let mut estimator = OneVsRest::new().set_classifier(LinearSVC::new());
+            *estimator.params_mut() = Params::new().set_param_null(name);
+            assert!(estimator.fit(&df).is_err());
+        }
+    }
+
+    #[test]
+    fn one_vs_rest_defaults_and_configured_getters() {
+        let default = OneVsRest::new();
+        assert_eq!(default.feature_col(), "features");
+        assert_eq!(default.label_col(), "label");
+        assert_eq!(default.prediction_col(), "prediction");
+        assert_eq!(default.raw_prediction_col(), "rawPrediction");
+        assert_eq!(default.weight_col(), None);
+        assert_eq!(default.parallelism(), 1);
+        let configured = OneVsRest::new()
+            .set_feature_col("input")
+            .set_label_col("target")
+            .set_prediction_col("pred")
+            .set_raw_prediction_col("scores")
+            .set_weight_col("weight")
+            .set_parallelism(3);
+        assert_eq!(configured.feature_col(), "input");
+        assert_eq!(configured.label_col(), "target");
+        assert_eq!(configured.prediction_col(), "pred");
+        assert_eq!(configured.raw_prediction_col(), "scores");
+        assert_eq!(configured.weight_col(), Some("weight"));
+        assert_eq!(configured.parallelism(), 3);
     }
 
     #[test]
