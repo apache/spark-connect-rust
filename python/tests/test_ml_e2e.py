@@ -246,14 +246,17 @@ def _native_estimators():
     # Every native pyspark.ml.connect estimator, with the class of the model that the server
     # caches for its fit, and data that it fits.
     from pyspark.ml.connect import (
+        AFTSurvivalRegression,
         BisectingKMeans,
         DecisionTreeClassifier,
         DecisionTreeRegressor,
         FMClassifier,
+        FMRegressor,
         GaussianMixture,
         GBTClassifier,
         GBTRegressor,
         GeneralizedLinearRegression,
+        IsotonicRegression,
         KMeans,
         LinearRegression,
         LinearSVC,
@@ -269,6 +272,9 @@ def _native_estimators():
 
     ml = "org.apache.spark.ml."
     return [
+        (AFTSurvivalRegression(labelCol="duration", maxIter=2), ml + "regression.AFTSurvivalRegressionModel"),
+        (IsotonicRegression(), ml + "regression.IsotonicRegressionModel"),
+        (FMRegressor(maxIter=2, seed=42), ml + "regression.FMRegressionModel"),
         (GaussianMixture(k=2, seed=1, maxIter=2), ml + "clustering.GaussianMixtureModel"),
         (BisectingKMeans(k=2, seed=1), ml + "clustering.BisectingKMeansModel"),
         (NaiveBayes(), ml + "classification.NaiveBayesModel"),
@@ -294,8 +300,8 @@ def _native_estimators():
 def _native_training(session):
     from pyspark.ml.linalg import Vectors
 
-    rows = [(float(i % 2), Vectors.dense([float(i), float(i % 3)]), "ab"[i % 2]) for i in range(8)]
-    return session.createDataFrame(rows, ["label", "features", "s"])
+    rows = [(float(i % 2), Vectors.dense([float(i), float(i % 3)]), "ab"[i % 2], float(i + 1), 1.0) for i in range(8)]
+    return session.createDataFrame(rows, ["label", "features", "s", "duration", "censor"])
 
 
 def test_native_models_are_released_once_their_last_owner_is_gone_as_pyspark(session):
