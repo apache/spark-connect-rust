@@ -22,11 +22,17 @@ the normal dependencies of pyspark-rs. ASF policy asks a binary artifact to carr
 that lists every bundled third-party component with its license, the texts of the licenses
 that are not Apache's, and a NOTICE with the notices that Apache-2.0 components require.
 
-The set is taken from `cargo metadata --locked`, so it follows Cargo.lock:
+The set is the union, over the targets of the wheel jobs, of `cargo tree` for pyspark-rs with
+the features that maturin builds it with. cargo tree resolves the features of pyspark-rs alone,
+so the crates that only the examples enable (wasm-udf) are not listed. It follows Cargo.lock
+(--locked), and it takes the normal (not dev, not build) edges, which excludes the proc-macro
+crates, whose dependencies are not linked either. The workspace's own crates are not listed:
+they are Apache-2.0 and ASF's. `cargo metadata` gives the license and the source directory of
+each crate.
 
-- the normal (not dev, not build) edges from pyspark-rs, for every target platform;
-- not the workspace's own crates (they are Apache-2.0 and ASF's);
-- not the proc-macro crates, which run at compile time and are not linked into the wheel.
+Some crates compile source files with their own notices (for example ring's ISC-licensed C and
+Rust files, or the SunPro notices of libm). Those notices are reproduced from the files, as
+listed in SUPPLEMENTARY_NOTICES.
 
 A component whose license expression offers Apache-2.0 as one option (`MIT OR Apache-2.0`,
 `Apache-2.0 OR BSL-1.0`, ...) is used under Apache-2.0 and is listed with the Apache-2.0
@@ -47,11 +53,13 @@ regenerating the files.
 """
 
 import argparse
+import glob
 import json
 import os
 import re
 import subprocess
 import sys
+import textwrap
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ROOT_PACKAGE = "pyspark-rs"
@@ -63,6 +71,84 @@ SEPARATOR = "-" * 84
 # license of the same release: (name, version) -> (package name, package version). tonic-prost
 # is part of the tonic repository, which ships MIT's LICENSE with tonic 0.14.6.
 LICENSE_FALLBACK = {("tonic-prost", "0.14.6"): ("tonic", "0.14.6")}
+
+# The targets of the wheel jobs in .github/workflows/release.yml. universal2-apple-darwin is
+# built from its two architectures. The features are the ones that [tool.maturin] in
+# pyproject.toml builds pyspark-rs with.
+WHEEL_TARGETS = (
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+)
+WHEEL_FEATURES = ("pyo3/abi3-py39", "pyo3/extension-module")
+
+# Notices that the source files of a linked crate carry, which its LICENSE files do not
+# reproduce: (crate, version) -> [(path, marker)]. The path is relative to the crate's source
+# directory and may be a glob. The notice of a file is the comment block that holds a line
+# matching the marker regex, or the whole file when the marker is None (a license file). The
+# text is copied from the file at generation time, so --check fails when the crate changes.
+# A glob skips the files without a matching notice; a plain path must have one. A crate that
+# is not linked by the wheels is an error, so the table cannot go stale silently.
+#
+# Each entry is listed only if the wheels compile the file for one of their targets, checked
+# from build.rs and the cfg attributes of the crate; the other files are not listed. A notice
+# under a holder of the crate's own (its LICENSE already has it) is not listed either.
+SUPPLEMENTARY_NOTICES = {
+    # ring: the Google and Intel ISC files of BoringSSL, and the ISC files of ring's authors
+    # and contributors. crypto/poly1305/poly1305_arm.c and src/aead/poly1305/ffi_arm_neon.rs
+    # are for 32-bit ARM only, and src/aead/chacha/fallback.rs is for 32-bit x86 and tests only.
+    ("ring", "0.17.14"): [
+        ("crypto/poly1305/poly1305.c", "Google Inc"),
+        ("crypto/fipsmodule/aes/aes_nohw.c", "Google Inc"),
+        ("crypto/fipsmodule/ec/ecp_nistz.h", "Google Inc"),
+        ("crypto/fipsmodule/ec/ecp_nistz.c", "Intel Corporation"),
+        ("crypto/fipsmodule/ec/ecp_nistz384.h", "Intel Corporation"),
+        ("crypto/fipsmodule/ec/ecp_nistz384.inl", "Intel Corporation"),
+        ("src/aead/chacha.rs", "Google Inc"),
+        ("src/aead/gcm/fallback.rs", "Google Inc"),
+        ("src/aead/poly1305/ffi_fallback.rs", "Google Inc"),
+        ("src/debug.rs", "Trent Clarke"),
+        ("src/digest/sha1.rs", "Simon Sapin"),
+        ("src/limb.rs", "David Judd"),
+        ("src/polyfill/once_cell/LICENSE-MIT", None),
+    ],
+    # zstd-sys: divsufsort.c (Yuta Mori, MIT) is compiled by the zdict_builder feature, which is
+    # a default. threading.c (Tino Reichardt) is compiled, but its code needs ZSTD_MULTITHREAD
+    # (the zstdmt feature), which the wheels do not enable.
+    ("zstd-sys", "2.1.3+zstd.1.5.7"): [
+        ("zstd/lib/dictBuilder/divsufsort.c", "Yuta Mori"),
+        ("zstd/lib/common/threading.c", "Tino Reichardt"),
+    ],
+    # rustls-webpki: ISC files of the two authors. The crate's LICENSE is Brian Smith's.
+    ("rustls-webpki", "0.103.13"): [
+        ("src/subject_name/mod.rs", "Rafael Fern"),
+        ("src/crl/mod.rs", "Daniel McCarney"),
+    ],
+    # libm: the SunPro files (fdlibm), a FreeBSD BSD-2-Clause file, and a file of Alexei
+    # Sibidanov's (MIT). The crate's LICENSE.txt lists the holders but not the notices.
+    ("libm", "0.2.16"): [
+        ("src/**/*.rs", "Sun Microsystems"),
+        ("src/**/*.rs", "David Schultz"),
+        ("src/**/*.rs", "Alexei Sibidanov"),
+    ],
+    # lexical-parse-float and lexical-util: fdlibm code under the SunPro notice.
+    ("lexical-parse-float", "1.0.6"): [("src/libm.rs", "Sun Microsystems")],
+    ("lexical-util", "1.0.7"): [("src/libm.rs", "Sun Microsystems")],
+    # futures-channel: the BSD-2-Clause notice of Dmitry Vyukov's queue.
+    ("futures-channel", "0.3.32"): [("src/mpsc/queue.rs", "Dmitry Vyukov")],
+    # pyo3: the MIT notice of Daniel Grunwald's buffer protocol code (rust-cpython).
+    ("pyo3", "0.29.3"): [("src/buffer.rs", "Daniel Grunwald")],
+    # sha2-asm: the MIT notices of the assembly (Project Nayuki, Emmanuel Gil Peyrot). The
+    # 32-bit x86 files are not compiled for the wheels, and sha256_aarch64_apple.S is in the
+    # public domain (no notice).
+    ("sha2-asm", "0.6.4"): [
+        ("src/sha256_x64.S", "Copyright"),
+        ("src/sha512_x64.S", "Copyright"),
+        ("src/sha256_aarch64.S", "Copyright"),
+    ],
+}
 
 LICENSE_FILE = re.compile(r"^(LICENSE|LICENCE|COPYING|UNLICENSE)", re.IGNORECASE)
 NOTICE_FILE = re.compile(r"^NOTICE", re.IGNORECASE)
@@ -80,6 +166,7 @@ class Component:
         self.mentions_apache = False
         self.license_files = []  # (file name, text) of the non-Apache license texts
         self.notice = None  # text of the NOTICE file, if it mentions Apache-2.0
+        self.source_notices = []  # (files, text) of SUPPLEMENTARY_NOTICES, copied from the files
 
     @property
     def coordinates(self):
@@ -171,30 +258,30 @@ def _is_proc_macro(package):
     return "proc-macro" in kinds and not kinds & {"lib", "rlib", "dylib", "cdylib", "staticlib"}
 
 
-def linked_packages(meta):
-    """The registry packages that pyspark-rs links, by normal edges, for all platforms."""
-    packages = {p["id"]: p for p in meta["packages"]}
-    nodes = {n["id"]: n for n in meta["resolve"]["nodes"]}
-    roots = [p["id"] for p in meta["packages"] if p["name"] == ROOT_PACKAGE and p["source"] is None]
-    if len(roots) != 1:
-        raise SystemExit(f"expected one {ROOT_PACKAGE} package in cargo metadata")
-    seen = set()
-    stack = [roots[0]]
-    while stack:
-        pkg_id = stack.pop()
-        if pkg_id in seen:
-            continue
-        seen.add(pkg_id)
-        if _is_proc_macro(packages[pkg_id]):
-            continue  # compile-time only: its dependencies are not linked either
-        for dep in nodes[pkg_id]["deps"]:
-            if any(kind["kind"] in (None, "normal") for kind in dep["dep_kinds"]):
-                stack.append(dep["pkg"])
-    return [
-        packages[i]
-        for i in seen
-        if packages[i]["source"] is not None and not _is_proc_macro(packages[i])
-    ]
+def wheel_packages(meta, tree_outputs):
+    """The registry packages that the wheels link, from the `cargo tree` output of each target.
+
+    Each output lists the normal, non-proc-macro dependencies of pyspark-rs for one target. A
+    crate is linked when any target lists it. Proc-macro crates are dropped even when a normal
+    edge reaches them.
+    """
+    registry = {(p["name"], p["version"]): p for p in meta["packages"] if p["source"] is not None}
+    linked = {}
+    for output in tree_outputs:
+        for raw in output.splitlines():
+            line = raw.strip()
+            if line.endswith(" (*)"):
+                line = line[: -len(" (*)")]
+            if not line or " (" in line:
+                continue  # blank, or a workspace path package such as "pyspark-rs v4.3.0 (/...)"
+            parts = line.split()
+            if len(parts) != 2 or not parts[1].startswith("v"):
+                raise SystemExit(f"unexpected cargo tree line: {raw!r}")
+            key = (parts[0], parts[1][1:])
+            if key not in registry:
+                raise SystemExit(f"{key[0]} {key[1]} is not a registry package in cargo metadata")
+            linked[key] = registry[key]
+    return [p for key, p in linked.items() if not _is_proc_macro(p)]
 
 
 def _read(path):
@@ -206,6 +293,82 @@ def _is_apache_text(text):
     return APACHE_TEXT_MARKER in text[:400]
 
 
+def _comment_blocks(lines):
+    """Yield (first, last) line indices of the comment blocks: each /* */ block, and each run of
+    // or perl-style # comment lines."""
+    i = 0
+    while i < len(lines):
+        s = lines[i].lstrip()
+        if s.startswith("/*"):
+            last, rest = i, lines[i].split("/*", 1)[1]
+            while "*/" not in rest and last + 1 < len(lines):
+                last += 1
+                rest = lines[last]
+            yield i, last
+            i = last + 1
+        elif _is_line_comment(s):
+            last = i
+            while last + 1 < len(lines) and _is_line_comment(lines[last + 1].lstrip()):
+                last += 1
+            yield i, last
+            i = last + 1
+        else:
+            i += 1
+
+
+def _is_line_comment(stripped):
+    return stripped.startswith("//") or stripped == "#" or stripped.startswith("# ")
+
+
+def _notice_block(text, marker):
+    """The first comment block of the file that has a line matching `marker`, or None."""
+    lines = text.split("\n")
+    pattern = re.compile(marker)
+    for first, last in _comment_blocks(lines):
+        if any(pattern.search(line) for line in lines[first : last + 1]):
+            return "\n".join(lines[first : last + 1]).rstrip() + "\n"
+    return None
+
+
+def _notice_key(notice):
+    """The words of a notice without its comment markers and its `origin:` lines, so that one
+    notice in two comment styles, or in files of different origin, is one notice."""
+    words = []
+    for line in notice.split("\n"):
+        if "origin:" in line:
+            continue
+        line = re.sub(r"\*/\s*$", "", line)
+        line = re.sub(r"^\s*(/\*+|\*+|//+!?|#)", "", line)
+        words.extend(line.split())
+    return " ".join(words)
+
+
+def _source_notices(source_dir, coords, entries):
+    """Copy the notices of a crate's files for SUPPLEMENTARY_NOTICES.
+
+    Returns [(files, text)], one item per distinct notice, with the relative paths of its files
+    and the text of the first of them.
+    """
+    groups = {}  # _notice_key -> [text, [files]]
+    for path, marker in entries:
+        matches = sorted(glob.glob(os.path.join(source_dir, path), recursive=True))
+        if not matches:
+            raise SystemExit(f"{coords}: no file matches {path}")
+        for full in matches:
+            rel = os.path.relpath(full, source_dir).replace(os.sep, "/")
+            text = _read(full)
+            if marker is None:
+                notice = text.rstrip() + "\n"
+            else:
+                notice = _notice_block(text, marker)
+            if notice is None:
+                if any(c in path for c in "*?["):
+                    continue
+                raise SystemExit(f"{coords}: {rel} has no notice that matches {marker!r}")
+            groups.setdefault(_notice_key(notice), [notice, []])[1].append(rel)
+    return [(files, text) for text, files in sorted(groups.values(), key=lambda g: g[1][0])]
+
+
 def _find_package(meta, key):
     for p in meta["packages"]:
         if (p["name"], p["version"]) == key:
@@ -213,10 +376,17 @@ def _find_package(meta, key):
     raise SystemExit(f"fallback package {key} is not in cargo metadata")
 
 
-def collect_components(meta):
+def collect_components(meta, tree_outputs):
     """Build a Component for each linked registry package, sorted by name and version."""
+    packages = wheel_packages(meta, tree_outputs)
+    keys = {(p["name"], p["version"]) for p in packages}
+    unlinked = sorted(f"{n} {v}" for n, v in SUPPLEMENTARY_NOTICES if (n, v) not in keys)
+    if unlinked:
+        raise SystemExit(
+            "SUPPLEMENTARY_NOTICES names crates that the wheels do not link: " + ", ".join(unlinked)
+        )
     components = []
-    for package in sorted(linked_packages(meta), key=lambda p: (p["name"], p["version"])):
+    for package in sorted(packages, key=lambda p: (p["name"], p["version"])):
         coords = f"{package['name']} {package['version']}"
         expr = package["license"]
         if not expr:
@@ -227,9 +397,13 @@ def collect_components(meta):
             package["name"], package["version"], expr, source_dir, permits_apache(node)
         )
         component.mentions_apache = mentions_apache(node)
+        key = (package["name"], package["version"])
+        if key in SUPPLEMENTARY_NOTICES:
+            component.source_notices = _source_notices(
+                source_dir, coords, SUPPLEMENTARY_NOTICES[key]
+            )
         if not component.elected:
             lic_dir = source_dir
-            key = (package["name"], package["version"])
             if key in LICENSE_FALLBACK:
                 other = _find_package(meta, LICENSE_FALLBACK[key])
                 lic_dir = os.path.dirname(other["manifest_path"])
@@ -306,6 +480,13 @@ def render_license(components, apache_text):
                 f"\n{SEPARATOR}\nThe license of {c.coordinates} ({c.license}), "
                 f"from {name}:\n\n{text.rstrip()}\n"
             )
+    for c in components:
+        for files, text in c.source_notices:
+            names = textwrap.fill(", ".join(files), width=76, subsequent_indent="  ")
+            out.append(
+                f"\n{SEPARATOR}\nThe notice in the source of {c.coordinates} ({c.license}), "
+                f"in {names}:\n\n{text}"
+            )
     return "".join(out)
 
 
@@ -326,9 +507,9 @@ def render_notice(root_notice, components):
     return "".join(out)
 
 
-def build_outputs(meta, license_text, notice_text):
+def build_outputs(meta, license_text, notice_text, tree_outputs):
     """Return {relative path: text} of the two generated files."""
-    components = collect_components(meta)
+    components = collect_components(meta, tree_outputs)
     return {
         "LICENSE-binary": render_license(components, _apache_text(license_text)),
         "NOTICE-binary": render_notice(notice_text, components),
@@ -348,11 +529,30 @@ def cargo_metadata(root):
     return json.loads(result.stdout)
 
 
+def cargo_tree(root, target):
+    """The normal, non-proc-macro dependencies of pyspark-rs for one target, as `cargo tree`
+    prints them."""
+    args = ["cargo", "tree", "--locked", "-e", "normal,no-proc-macro", "-p", ROOT_PACKAGE]
+    args += ["--features", ",".join(WHEEL_FEATURES), "--target", target]
+    args += ["--prefix", "none", "--format", "{p}"]
+    result = subprocess.run(
+        args,
+        cwd=root,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        sys.stderr.write(result.stderr.decode(errors="replace"))
+        raise SystemExit(f"cargo tree failed for {target}")
+    return result.stdout.decode(errors="replace")
+
+
 def generate(root):
     return build_outputs(
         cargo_metadata(root),
         _read(os.path.join(root, "LICENSE")),
         _read(os.path.join(root, "NOTICE")),
+        [cargo_tree(root, target) for target in WHEEL_TARGETS],
     )
 
 

@@ -206,7 +206,6 @@ License Version 2.0. Each is listed with its license expression. The components
 whose expression offers Apache-2.0 as an option are used under Apache-2.0.
 
 ahash 0.8.12 (MIT OR Apache-2.0)
-android_system_properties 0.1.5 (MIT/Apache-2.0)
 arrow 59.3.2 (Apache-2.0)
 arrow-arith 59.3.2 (Apache-2.0)
 arrow-buffer 59.3.2 (Apache-2.0)
@@ -220,14 +219,12 @@ arrow-schema 59.3.2 (Apache-2.0)
 arrow-select 59.3.2 (Apache-2.0)
 arrow-string 59.3.2 (Apache-2.0)
 atomic-waker 1.1.2 (Apache-2.0 OR MIT)
-base64 0.21.7 (MIT OR Apache-2.0)
 base64 0.22.1 (MIT OR Apache-2.0)
 base64 0.23.1 (MIT OR Apache-2.0)
 bitflags 2.13.0 (MIT OR Apache-2.0)
 block-buffer 0.10.4 (MIT OR Apache-2.0)
 cfg-if 1.0.4 (MIT OR Apache-2.0)
 chrono 0.4.45 (MIT OR Apache-2.0)
-const-random 0.1.18 (MIT OR Apache-2.0)
 core-foundation 0.10.1 (MIT OR Apache-2.0)
 core-foundation-sys 0.8.7 (MIT OR Apache-2.0)
 cpufeatures 0.2.17 (MIT OR Apache-2.0)
@@ -255,10 +252,8 @@ httparse 1.10.1 (MIT OR Apache-2.0)
 httpdate 1.0.3 (MIT OR Apache-2.0)
 hyper-timeout 0.5.2 (MIT OR Apache-2.0)
 iana-time-zone 0.1.65 (MIT OR Apache-2.0)
-iana-time-zone-haiku 0.1.2 (MIT OR Apache-2.0)
 indexmap 2.14.0 (Apache-2.0 OR MIT)
 itoa 1.0.18 (MIT OR Apache-2.0)
-js-sys 0.3.100 (MIT OR Apache-2.0)
 lexical-core 1.0.6 (MIT/Apache-2.0)
 lexical-parse-float 1.0.6 (MIT/Apache-2.0)
 lexical-parse-integer 1.0.6 (MIT/Apache-2.0)
@@ -277,14 +272,11 @@ openssl-probe 0.2.1 (MIT OR Apache-2.0)
 percent-encoding 2.3.2 (MIT OR Apache-2.0)
 pin-project 1.1.13 (Apache-2.0 OR MIT)
 pin-project-lite 0.2.17 (Apache-2.0 OR MIT)
-portable-atomic 1.13.1 (Apache-2.0 OR MIT)
 prost 0.14.4 (Apache-2.0)
 prost-types 0.14.4 (Apache-2.0)
 psm 0.1.31 (MIT OR Apache-2.0)
 pyo3 0.29.3 (MIT OR Apache-2.0)
 pyo3-ffi 0.29.3 (MIT OR Apache-2.0)
-r-efi 5.3.0 (MIT OR Apache-2.0 OR LGPL-2.1-or-later)
-r-efi 6.0.0 (MIT OR Apache-2.0 OR LGPL-2.1-or-later)
 regex 1.12.4 (MIT OR Apache-2.0)
 regex-automata 0.4.14 (MIT OR Apache-2.0)
 regex-syntax 0.8.11 (MIT OR Apache-2.0)
@@ -308,28 +300,8 @@ typenum 1.20.1 (MIT OR Apache-2.0)
 unicode-segmentation 1.13.3 (MIT OR Apache-2.0)
 unicode-width 0.2.2 (MIT OR Apache-2.0)
 uuid 1.23.3 (Apache-2.0 OR MIT)
-wasi 0.11.1+wasi-snapshot-preview1 (Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT)
-wasip2 1.0.3+wasi-0.2.9 (Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT)
-wasip3 0.4.0+wasi-0.3.0-rc-2026-01-06 (Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT)
-wasm-bindgen 0.2.123 (MIT OR Apache-2.0)
-wasm-bindgen-shared 0.2.123 (MIT OR Apache-2.0)
-windows-core 0.62.2 (MIT OR Apache-2.0)
 windows-link 0.2.1 (MIT OR Apache-2.0)
-windows-result 0.4.1 (MIT OR Apache-2.0)
-windows-strings 0.5.1 (MIT OR Apache-2.0)
-windows-sys 0.52.0 (MIT OR Apache-2.0)
 windows-sys 0.61.2 (MIT OR Apache-2.0)
-windows-targets 0.52.6 (MIT OR Apache-2.0)
-windows_aarch64_gnullvm 0.52.6 (MIT OR Apache-2.0)
-windows_aarch64_msvc 0.52.6 (MIT OR Apache-2.0)
-windows_i686_gnu 0.52.6 (MIT OR Apache-2.0)
-windows_i686_gnullvm 0.52.6 (MIT OR Apache-2.0)
-windows_i686_msvc 0.52.6 (MIT OR Apache-2.0)
-windows_x86_64_gnu 0.52.6 (MIT OR Apache-2.0)
-windows_x86_64_gnullvm 0.52.6 (MIT OR Apache-2.0)
-windows_x86_64_msvc 0.52.6 (MIT OR Apache-2.0)
-wit-bindgen 0.51.0 (Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT)
-wit-bindgen 0.57.1 (Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT)
 zerocopy 0.8.52 (BSD-2-Clause OR Apache-2.0 OR MIT)
 zeroize 1.8.2 (Apache-2.0 OR MIT)
 zstd-safe 7.2.4 (MIT OR Apache-2.0)
@@ -338,10 +310,6 @@ zstd-safe 7.2.4 (MIT OR Apache-2.0)
 This product bundles various third-party components under other open source
 licenses. This section summarizes those components and their licenses. Their
 license texts follow the summary.
-
-(MIT OR Apache-2.0) AND Unicode-3.0
------------------------------------
-unicode-ident 1.0.24
 
 Apache-2.0 AND ISC
 ------------------
@@ -371,7 +339,6 @@ axum 0.8.9
 axum-core 0.5.6
 bytes 1.11.1
 comfy-table 7.2.2
-crunchy 0.2.4
 generic-array 0.14.7
 h2 0.4.14
 http-body 1.0.1
@@ -621,31 +588,6 @@ The license of comfy-table 7.2.2 (MIT), from LICENSE:
 MIT License
 
 Copyright (c) 2019 Arne Beer
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
-------------------------------------------------------------------------------------
-The license of crunchy 0.2.4 (MIT), from LICENSE:
-
-The MIT License (MIT)
-
-Copyright 2017-2023 Eira Fransham.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -1722,76 +1664,6 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 ------------------------------------------------------------------------------------
-The license of unicode-ident 1.0.24 ((MIT OR Apache-2.0) AND Unicode-3.0), from LICENSE-MIT:
-
-Permission is hereby granted, free of charge, to any
-person obtaining a copy of this software and associated
-documentation files (the "Software"), to deal in the
-Software without restriction, including without
-limitation the rights to use, copy, modify, merge,
-publish, distribute, sublicense, and/or sell copies of
-the Software, and to permit persons to whom the Software
-is furnished to do so, subject to the following
-conditions:
-
-The above copyright notice and this permission notice
-shall be included in all copies or substantial portions
-of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
-ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
-TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
-PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
-SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
-CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
-OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
-IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-DEALINGS IN THE SOFTWARE.
-
-------------------------------------------------------------------------------------
-The license of unicode-ident 1.0.24 ((MIT OR Apache-2.0) AND Unicode-3.0), from LICENSE-UNICODE:
-
-UNICODE LICENSE V3
-
-COPYRIGHT AND PERMISSION NOTICE
-
-Copyright © 1991-2023 Unicode, Inc.
-
-NOTICE TO USER: Carefully read the following legal agreement. BY
-DOWNLOADING, INSTALLING, COPYING OR OTHERWISE USING DATA FILES, AND/OR
-SOFTWARE, YOU UNEQUIVOCALLY ACCEPT, AND AGREE TO BE BOUND BY, ALL OF THE
-TERMS AND CONDITIONS OF THIS AGREEMENT. IF YOU DO NOT AGREE, DO NOT
-DOWNLOAD, INSTALL, COPY, DISTRIBUTE OR USE THE DATA FILES OR SOFTWARE.
-
-Permission is hereby granted, free of charge, to any person obtaining a
-copy of data files and any associated documentation (the "Data Files") or
-software and any associated documentation (the "Software") to deal in the
-Data Files or Software without restriction, including without limitation
-the rights to use, copy, modify, merge, publish, distribute, and/or sell
-copies of the Data Files or Software, and to permit persons to whom the
-Data Files or Software are furnished to do so, provided that either (a)
-this copyright and permission notice appear with all copies of the Data
-Files or Software, or (b) this copyright and permission notice appear in
-associated Documentation.
-
-THE DATA FILES AND SOFTWARE ARE PROVIDED "AS IS", WITHOUT WARRANTY OF ANY
-KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
-MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT OF
-THIRD PARTY RIGHTS.
-
-IN NO EVENT SHALL THE COPYRIGHT HOLDER OR HOLDERS INCLUDED IN THIS NOTICE
-BE LIABLE FOR ANY CLAIM, OR ANY SPECIAL INDIRECT OR CONSEQUENTIAL DAMAGES,
-OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS,
-WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION,
-ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THE DATA
-FILES OR SOFTWARE.
-
-Except as contained in this notice, the name of a copyright holder shall
-not be used in advertising or otherwise to promote the sale, use or other
-dealings in these Data Files or Software without prior written
-authorization of the copyright holder.
-
-------------------------------------------------------------------------------------
 The license of untrusted 0.9.0 (ISC), from LICENSE.txt:
 
 // Copyright 2015-2016 Brian Smith.
@@ -1970,3 +1842,559 @@ LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
 ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+------------------------------------------------------------------------------------
+The notice in the source of futures-channel 0.3.32 (MIT OR Apache-2.0), in src/mpsc/queue.rs:
+
+/* Copyright (c) 2010-2011 Dmitry Vyukov. All rights reserved.
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *
+ *    1. Redistributions of source code must retain the above copyright notice,
+ *       this list of conditions and the following disclaimer.
+ *
+ *    2. Redistributions in binary form must reproduce the above copyright
+ *       notice, this list of conditions and the following disclaimer in the
+ *       documentation and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY DMITRY VYUKOV "AS IS" AND ANY EXPRESS OR IMPLIED
+ * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
+ * MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT
+ * SHALL DMITRY VYUKOV OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
+ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+ * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+ * PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+ * LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE
+ * OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
+ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *
+ * The views and conclusions contained in the software and documentation are
+ * those of the authors and should not be interpreted as representing official
+ * policies, either expressed or implied, of Dmitry Vyukov.
+ */
+
+------------------------------------------------------------------------------------
+The notice in the source of lexical-parse-float 1.0.6 (MIT/Apache-2.0), in src/libm.rs:
+
+/*
+ * ====================================================
+ * Copyright (C) 1993 by Sun Microsystems, Inc. All rights reserved.
+ *
+ * Developed at SunPro, a Sun Microsystems, Inc. business.
+ * Permission to use, copy, modify, and distribute this
+ * software is freely granted, provided that this notice
+ * is preserved.
+ * ====================================================
+ */
+
+------------------------------------------------------------------------------------
+The notice in the source of lexical-util 1.0.7 (MIT/Apache-2.0), in src/libm.rs:
+
+/*
+ * ====================================================
+ * Copyright (C) 1993 by Sun Microsystems, Inc. All rights reserved.
+ *
+ * Developed at SunSoft, a Sun Microsystems, Inc. business.
+ * Permission to use, copy, modify, and distribute this
+ * software is freely granted, provided that this notice
+ * is preserved.
+ * ====================================================
+ */
+
+------------------------------------------------------------------------------------
+The notice in the source of libm 0.2.16 (MIT), in src/math/acos.rs, src/math/asin.rs, src/math/atan2.rs, src/math/j0.rs,
+  src/math/j1.rs, src/math/jn.rs, src/math/k_cos.rs, src/math/k_sin.rs,
+  src/math/lgamma_r.rs, src/math/log.rs, src/math/log10.rs,
+  src/math/log2.rs, src/math/rem_pio2_large.rs:
+
+/*
+ * ====================================================
+ * Copyright (C) 1993 by Sun Microsystems, Inc. All rights reserved.
+ *
+ * Developed at SunSoft, a Sun Microsystems, Inc. business.
+ * Permission to use, copy, modify, and distribute this
+ * software is freely granted, provided that this notice
+ * is preserved.
+ * ====================================================
+ */
+
+------------------------------------------------------------------------------------
+The notice in the source of libm 0.2.16 (MIT), in src/math/acosf.rs, src/math/asinf.rs, src/math/atan.rs, src/math/atan2f.rs,
+  src/math/atanf.rs, src/math/cbrtf.rs, src/math/cos.rs, src/math/cosf.rs,
+  src/math/erf.rs, src/math/erff.rs, src/math/expf.rs, src/math/expm1.rs,
+  src/math/expm1f.rs, src/math/j0f.rs, src/math/j1f.rs, src/math/jnf.rs,
+  src/math/k_cosf.rs, src/math/k_sinf.rs, src/math/lgammaf_r.rs,
+  src/math/log10f.rs, src/math/log1p.rs, src/math/log1pf.rs,
+  src/math/log2f.rs, src/math/logf.rs, src/math/powf.rs,
+  src/math/rem_pio2f.rs, src/math/sin.rs, src/math/sincos.rs,
+  src/math/sincosf.rs, src/math/sinf.rs, src/math/tan.rs, src/math/tanf.rs:
+
+/*
+ * ====================================================
+ * Copyright (C) 1993 by Sun Microsystems, Inc. All rights reserved.
+ *
+ * Developed at SunPro, a Sun Microsystems, Inc. business.
+ * Permission to use, copy, modify, and distribute this
+ * software is freely granted, provided that this notice
+ * is preserved.
+ * ====================================================
+ */
+
+------------------------------------------------------------------------------------
+The notice in the source of libm 0.2.16 (MIT), in src/math/cbrt.rs:
+
+/* origin: core-math/src/binary64/cbrt/cbrt.c
+ * Copyright (c) 2021-2022 Alexei Sibidanov.
+ * Ported to Rust in 2025 by Trevor Gross.
+ */
+
+------------------------------------------------------------------------------------
+The notice in the source of libm 0.2.16 (MIT), in src/math/exp.rs, src/math/pow.rs:
+
+/*
+ * ====================================================
+ * Copyright (C) 2004 by Sun Microsystems, Inc. All rights reserved.
+ *
+ * Permission to use, copy, modify, and distribute this
+ * software is freely granted, provided that this notice
+ * is preserved.
+ * ====================================================
+ */
+
+------------------------------------------------------------------------------------
+The notice in the source of libm 0.2.16 (MIT), in src/math/exp2.rs, src/math/exp2f.rs:
+
+// origin: FreeBSD /usr/src/lib/msun/src/s_exp2.c */
+//-
+// Copyright (c) 2005 David Schultz <das@FreeBSD.ORG>
+// All rights reserved.
+//
+// Redistribution and use in source and binary forms, with or without
+// modification, are permitted provided that the following conditions
+// are met:
+// 1. Redistributions of source code must retain the above copyright
+//    notice, this list of conditions and the following disclaimer.
+// 2. Redistributions in binary form must reproduce the above copyright
+//    notice, this list of conditions and the following disclaimer in the
+//    documentation and/or other materials provided with the distribution.
+//
+// THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
+// ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+// IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+// ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
+// FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+// DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+// OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+// HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+// LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+// OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+// SUCH DAMAGE.
+
+------------------------------------------------------------------------------------
+The notice in the source of libm 0.2.16 (MIT), in src/math/k_tan.rs, src/math/k_tanf.rs:
+
+// origin: FreeBSD /usr/src/lib/msun/src/k_tan.c */
+//
+// ====================================================
+// Copyright 2004 Sun Microsystems, Inc.  All Rights Reserved.
+//
+// Permission to use, copy, modify, and distribute this
+// software is freely granted, provided that this notice
+// is preserved.
+// ====================================================
+
+------------------------------------------------------------------------------------
+The notice in the source of libm 0.2.16 (MIT), in src/math/rem_pio2.rs:
+
+// origin: FreeBSD /usr/src/lib/msun/src/e_rem_pio2.c
+//
+// ====================================================
+// Copyright (C) 1993 by Sun Microsystems, Inc. All rights reserved.
+//
+// Developed at SunPro, a Sun Microsystems, Inc. business.
+// Permission to use, copy, modify, and distribute this
+// software is freely granted, provided that this notice
+// is preserved.
+// ====================================================
+//
+// Optimized by Bruce D. Evans. */
+
+------------------------------------------------------------------------------------
+The notice in the source of pyo3 0.29.3 (MIT OR Apache-2.0), in src/buffer.rs:
+
+// Copyright (c) 2017 Daniel Grunwald
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy of this
+// software and associated documentation files (the "Software"), to deal in the Software
+// without restriction, including without limitation the rights to use, copy, modify, merge,
+// publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons
+// to whom the Software is furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all copies or
+// substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+// PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE
+// FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+// OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+// DEALINGS IN THE SOFTWARE.
+
+------------------------------------------------------------------------------------
+The notice in the source of ring 0.17.14 (Apache-2.0 AND ISC), in crypto/fipsmodule/aes/aes_nohw.c:
+
+/* Copyright (c) 2019, Google Inc.
+ *
+ * Permission to use, copy, modify, and/or distribute this software for any
+ * purpose with or without fee is hereby granted, provided that the above
+ * copyright notice and this permission notice appear in all copies.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+ * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+ * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY
+ * SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+ * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION
+ * OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
+ * CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE. */
+
+------------------------------------------------------------------------------------
+The notice in the source of ring 0.17.14 (Apache-2.0 AND ISC), in crypto/fipsmodule/ec/ecp_nistz.c, crypto/fipsmodule/ec/ecp_nistz384.h,
+  crypto/fipsmodule/ec/ecp_nistz384.inl:
+
+/* Copyright (c) 2014, Intel Corporation.
+ *
+ * Permission to use, copy, modify, and/or distribute this software for any
+ * purpose with or without fee is hereby granted, provided that the above
+ * copyright notice and this permission notice appear in all copies.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+ * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+ * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY
+ * SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+ * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION
+ * OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
+ * CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE. */
+
+------------------------------------------------------------------------------------
+The notice in the source of ring 0.17.14 (Apache-2.0 AND ISC), in crypto/fipsmodule/ec/ecp_nistz.h:
+
+/* Copyright (c) 2015, Google Inc.
+ *
+ * Permission to use, copy, modify, and/or distribute this software for any
+ * purpose with or without fee is hereby granted, provided that the above
+ * copyright notice and this permission notice appear in all copies.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+ * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+ * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY
+ * SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+ * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION
+ * OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
+ * CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE. */
+
+------------------------------------------------------------------------------------
+The notice in the source of ring 0.17.14 (Apache-2.0 AND ISC), in crypto/poly1305/poly1305.c:
+
+/* Copyright (c) 2014, Google Inc.
+ *
+ * Permission to use, copy, modify, and/or distribute this software for any
+ * purpose with or without fee is hereby granted, provided that the above
+ * copyright notice and this permission notice appear in all copies.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+ * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+ * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY
+ * SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+ * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION
+ * OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
+ * CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE. */
+
+------------------------------------------------------------------------------------
+The notice in the source of ring 0.17.14 (Apache-2.0 AND ISC), in src/aead/chacha.rs:
+
+// Copyright 2016 Brian Smith.
+// Portions Copyright (c) 2016, Google Inc.
+//
+// Permission to use, copy, modify, and/or distribute this software for any
+// purpose with or without fee is hereby granted, provided that the above
+// copyright notice and this permission notice appear in all copies.
+//
+// THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+// WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+// MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY
+// SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+// WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION
+// OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
+// CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+------------------------------------------------------------------------------------
+The notice in the source of ring 0.17.14 (Apache-2.0 AND ISC), in src/aead/gcm/fallback.rs:
+
+// Copyright (c) 2019, Google Inc.
+// Portions Copyright 2020-2024 Brian Smith.
+//
+// Permission to use, copy, modify, and/or distribute this software for any
+// purpose with or without fee is hereby granted, provided that the above
+// copyright notice and this permission notice appear in all copies.
+//
+// THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+// WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+// MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY
+// SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+// WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION
+// OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
+// CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+------------------------------------------------------------------------------------
+The notice in the source of ring 0.17.14 (Apache-2.0 AND ISC), in src/aead/poly1305/ffi_fallback.rs:
+
+// Copyright 2015-2025 Brian Smith.
+// Portions Copyright (c) 2014, 2015, Google Inc.
+//
+// Permission to use, copy, modify, and/or distribute this software for any
+// purpose with or without fee is hereby granted, provided that the above
+// copyright notice and this permission notice appear in all copies.
+//
+// THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+// WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+// MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY
+// SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+// WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION
+// OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
+// CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+------------------------------------------------------------------------------------
+The notice in the source of ring 0.17.14 (Apache-2.0 AND ISC), in src/debug.rs:
+
+// Copyright 2018 Trent Clarke.
+//
+// Permission to use, copy, modify, and/or distribute this software for any
+// purpose with or without fee is hereby granted, provided that the above
+// copyright notice and this permission notice appear in all copies.
+//
+// THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+// WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+// MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY
+// SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+// WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION
+// OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
+// CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+------------------------------------------------------------------------------------
+The notice in the source of ring 0.17.14 (Apache-2.0 AND ISC), in src/digest/sha1.rs:
+
+// Copyright 2015-2025 Brian Smith.
+// Copyright 2016 Simon Sapin.
+//
+// Permission to use, copy, modify, and/or distribute this software for any
+// purpose with or without fee is hereby granted, provided that the above
+// copyright notice and this permission notice appear in all copies.
+//
+// THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+// WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+// MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY
+// SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+// WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION
+// OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
+// CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+------------------------------------------------------------------------------------
+The notice in the source of ring 0.17.14 (Apache-2.0 AND ISC), in src/limb.rs:
+
+// Copyright 2016 David Judd.
+// Copyright 2016 Brian Smith.
+//
+// Permission to use, copy, modify, and/or distribute this software for any
+// purpose with or without fee is hereby granted, provided that the above
+// copyright notice and this permission notice appear in all copies.
+//
+// THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+// WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+// MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY
+// SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+// WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION
+// OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
+// CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+------------------------------------------------------------------------------------
+The notice in the source of ring 0.17.14 (Apache-2.0 AND ISC), in src/polyfill/once_cell/LICENSE-MIT:
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHOR OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+------------------------------------------------------------------------------------
+The notice in the source of rustls-webpki 0.103.13 (ISC), in src/crl/mod.rs:
+
+// Copyright 2023 Daniel McCarney.
+//
+// Permission to use, copy, modify, and/or distribute this software for any
+// purpose with or without fee is hereby granted, provided that the above
+// copyright notice and this permission notice appear in all copies.
+//
+// THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHORS DISCLAIM ALL WARRANTIES
+// WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+// MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR
+// ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+// WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+// ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+// OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+------------------------------------------------------------------------------------
+The notice in the source of rustls-webpki 0.103.13 (ISC), in src/subject_name/mod.rs:
+
+// Copyright 2022 Rafael Fernández López.
+//
+// Permission to use, copy, modify, and/or distribute this software for any
+// purpose with or without fee is hereby granted, provided that the above
+// copyright notice and this permission notice appear in all copies.
+//
+// THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHORS DISCLAIM ALL WARRANTIES
+// WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+// MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR
+// ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+// WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+// ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+// OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+------------------------------------------------------------------------------------
+The notice in the source of sha2-asm 0.6.4 (MIT), in src/sha256_aarch64.S:
+
+/*
+ * SHA-256 hash in AArch64 assembly
+ *
+ * Copyright (c) 2020 Emmanuel Gil Peyrot <linkmauve@linkmauve.fr>. (MIT License)
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy of
+ * this software and associated documentation files (the "Software"), to deal in
+ * the Software without restriction, including without limitation the rights to
+ * use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+ * the Software, and to permit persons to whom the Software is furnished to do so,
+ * subject to the following conditions:
+ * - The above copyright notice and this permission notice shall be included in
+ *   all copies or substantial portions of the Software.
+ * - The Software is provided "as is", without warranty of any kind, express or
+ *   implied, including but not limited to the warranties of merchantability,
+ *   fitness for a particular purpose and noninfringement. In no event shall the
+ *   authors or copyright holders be liable for any claim, damages or other
+ *   liability, whether in an action of contract, tort or otherwise, arising from,
+ *   out of or in connection with the Software or the use or other dealings in the
+ *   Software.
+ */
+
+------------------------------------------------------------------------------------
+The notice in the source of sha2-asm 0.6.4 (MIT), in src/sha256_x64.S:
+
+/* 
+ * SHA-256 hash in x86-64 assembly
+ * 
+ * Copyright (c) 2015 Project Nayuki. (MIT License)
+ * https://www.nayuki.io/page/fast-sha2-hashes-in-x86-assembly
+ * 
+ * Permission is hereby granted, free of charge, to any person obtaining a copy of
+ * this software and associated documentation files (the "Software"), to deal in
+ * the Software without restriction, including without limitation the rights to
+ * use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+ * the Software, and to permit persons to whom the Software is furnished to do so,
+ * subject to the following conditions:
+ * - The above copyright notice and this permission notice shall be included in
+ *   all copies or substantial portions of the Software.
+ * - The Software is provided "as is", without warranty of any kind, express or
+ *   implied, including but not limited to the warranties of merchantability,
+ *   fitness for a particular purpose and noninfringement. In no event shall the
+ *   authors or copyright holders be liable for any claim, damages or other
+ *   liability, whether in an action of contract, tort or otherwise, arising from,
+ *   out of or in connection with the Software or the use or other dealings in the
+ *   Software.
+ */
+
+------------------------------------------------------------------------------------
+The notice in the source of sha2-asm 0.6.4 (MIT), in src/sha512_x64.S:
+
+/* 
+ * SHA-512 hash in x86-64 assembly
+ * 
+ * Copyright (c) 2017 Project Nayuki. (MIT License)
+ * https://www.nayuki.io/page/fast-sha2-hashes-in-x86-assembly
+ * 
+ * Permission is hereby granted, free of charge, to any person obtaining a copy of
+ * this software and associated documentation files (the "Software"), to deal in
+ * the Software without restriction, including without limitation the rights to
+ * use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+ * the Software, and to permit persons to whom the Software is furnished to do so,
+ * subject to the following conditions:
+ * - The above copyright notice and this permission notice shall be included in
+ *   all copies or substantial portions of the Software.
+ * - The Software is provided "as is", without warranty of any kind, express or
+ *   implied, including but not limited to the warranties of merchantability,
+ *   fitness for a particular purpose and noninfringement. In no event shall the
+ *   authors or copyright holders be liable for any claim, damages or other
+ *   liability, whether in an action of contract, tort or otherwise, arising from,
+ *   out of or in connection with the Software or the use or other dealings in the
+ *   Software.
+ */
+
+------------------------------------------------------------------------------------
+The notice in the source of zstd-sys 2.1.3+zstd.1.5.7 (BSD-3-Clause AND BSD-2-Clause), in zstd/lib/common/threading.c:
+
+/**
+ * Copyright (c) 2016 Tino Reichardt
+ * All rights reserved.
+ *
+ * You can contact the author at:
+ * - zstdmt source repository: https://github.com/mcmilk/zstdmt
+ *
+ * This source code is licensed under both the BSD-style license (found in the
+ * LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ * in the COPYING file in the root directory of this source tree).
+ * You may select, at your option, one of the above-listed licenses.
+ */
+
+------------------------------------------------------------------------------------
+The notice in the source of zstd-sys 2.1.3+zstd.1.5.7 (BSD-3-Clause AND BSD-2-Clause), in zstd/lib/dictBuilder/divsufsort.c:
+
+/*
+ * divsufsort.c for libdivsufsort-lite
+ * Copyright (c) 2003-2008 Yuta Mori All Rights Reserved.
+ *
+ * Permission is hereby granted, free of charge, to any person
+ * obtaining a copy of this software and associated documentation
+ * files (the "Software"), to deal in the Software without
+ * restriction, including without limitation the rights to use,
+ * copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following
+ * conditions:
+ *
+ * The above copyright notice and this permission notice shall be
+ * included in all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
+ * OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+ * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+ * HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+ * WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+ * OTHER DEALINGS IN THE SOFTWARE.
+ */
