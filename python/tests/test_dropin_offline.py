@@ -314,6 +314,83 @@ def test_schema_spatial_srids_are_those_of_pyspark(mock_connect):
         assert e.value.getMessageParameters() == {"srid": str(srid)}
 
 
+def test_schema_surfaces_raise_for_a_spatial_srid_that_pyspark_does_not_take(mock_connect):
+    # As PySpark, which converts the schema from its proto wherever it reads it: the schema, the
+    # columns, the dtypes, repr, printSchema, the columns of a projection and a DDL schema that
+    # the server parses raise ST_INVALID_SRID_VALUE for an SRID that PySpark does not take, also
+    # nested in an array, a map or a struct, while the SRIDs that it takes are read. The first
+    # type that the conversion fails on decides, a nanosecond timestamp's UNSUPPORTED_OPERATION
+    # included.
+    from pyspark.errors import IllegalArgumentException, PySparkValueError
+
+    spark, service = mock_connect
+    # repr reads the settings of the eager evaluation of the session, which the server has.
+    service.confs = {"spark.sql.repl.eagerEval.enabled": "false",
+                     "spark.sql.repl.eagerEval.maxNumRows": "20",
+                     "spark.sql.repl.eagerEval.truncate": "20"}
+
+    def spatial(kind, srid):
+        # DataType.geometry=26 or geography=27, with its srid=1.
+        return message_field(26 if kind == "geometry" else 27, varint_field(1, srid))
+
+    def struct(*fields):
+        # StructField: name=1, data_type=2, nullable=3; Struct.fields=1, and DataType.struct=21.
+        return message_field(21, b"".join(
+            message_field(1, message_field(1, name) + message_field(2, data_type)
+                          + varint_field(3, 1))
+            for name, data_type in fields))
+
+    # DataType.long=7, string=11, array=20 (Array.element_type=1) and map=22 (Map.key_type=1,
+    # value_type=2), and timestamp_ntz_nanos=29 (precision=1).
+    long_type, string_type = message_field(7, b""), message_field(11, b"")
+    nanos = message_field(29, varint_field(1, 9))
+    for schema, srid in [
+        (struct(("g", spatial("geometry", 2154))), 2154),
+        (struct(("i", long_type), ("g", message_field(20, message_field(
+            1, spatial("geography", 4269)) + varint_field(2, 1)))), 4269),
+        (struct(("g", message_field(22, message_field(1, string_type) + message_field(
+            2, spatial("geometry", 2154)) + varint_field(3, 1)))), 2154),
+        (struct(("s", struct(("g", spatial("geography", 3857))))), 3857),
+        (struct(("g", spatial("geometry", 2154)), ("t", nanos)), 2154),
+    ]:
+        service.data_type = schema
+        df = spark.range(1)
+        for surface in (
+                lambda: df.schema,
+                lambda: df.columns,
+                lambda: df.dtypes,
+                lambda: repr(df),
+                lambda: df.printSchema(),
+                lambda: df.select("g").columns,
+        ):
+            with pytest.raises(IllegalArgumentException) as e:
+                surface()
+            assert e.value.getCondition() == "ST_INVALID_SRID_VALUE"
+            assert e.value.getMessageParameters() == {"srid": str(srid)}
+    # A DDL schema, which the server parses (the mock parses these).
+    for ddl, srid in [("g geometry(2154)", 2154), ("g array<geography(4269)>", 4269)]:
+        with pytest.raises(IllegalArgumentException) as e:
+            spark.createDataFrame([], ddl)
+        assert e.value.getCondition() == "ST_INVALID_SRID_VALUE"
+        assert e.value.getMessageParameters() == {"srid": str(srid)}
+    # A nanosecond timestamp before the spatial type is the error of the timestamp.
+    service.data_type = struct(("t", nanos), ("g", spatial("geometry", 2154)))
+    with pytest.raises(PySparkValueError) as e:
+        spark.range(1).columns
+    assert e.value.getCondition() == "UNSUPPORTED_OPERATION"
+    for kind, srid, simple in [
+        ("geometry", 3857, "geometry(3857)"),
+        ("geometry", 0, "geometry(0)"),
+        ("geometry", -1, "geometry(any)"),
+        ("geography", 4326, "geography(4326)"),
+    ]:
+        service.data_type = struct(("g", spatial(kind, srid)))
+        df = spark.range(1)
+        assert df.columns == ["g"]
+        assert df.dtypes == [("g", simple)]
+        assert repr(df) == f"DataFrame[g: {simple}]"
+
+
 def test_json_forms_accept_trailing_whitespace_as_pyspark(mock_connect):
     # As PySpark's `_parse_datatype_json_value`, whose patterns match a prefix of the string: the
     # whitespace after a form with an argument or a field is not a part of it. A bare name is

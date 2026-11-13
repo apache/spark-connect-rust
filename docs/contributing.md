@@ -180,10 +180,12 @@ listed tests that now pass, to be removed from the list.
 ### Vendored and generated code
 
 Many modules under `python/pyspark` are verbatim copies of PySpark 4.3.0, such as
-`pyspark.pandas`, `pyspark.cloudpickle` and much of `pyspark.ml` and `pyspark.errors`.
-Do not edit them: they are listed in `scripts/check_vendored_upstream.sh` and in the ruff
-excludes of `pyproject.toml`, and CI fails when one that the script lists differs from
-the `v4.3.0` tag (the script fetches it from GitHub):
+`pyspark.pandas`, `pyspark.cloudpickle` and much of `pyspark.ml` and `pyspark.errors`, and so
+is Spark's spatial reference system registry that the Rust crate embeds,
+`crates/spark-connect/src/srs_registry.csv`. Do not edit them: they are listed in
+`scripts/check_vendored_upstream.sh` (and the Python ones in the ruff excludes of
+`pyproject.toml`), and CI fails when one that the script lists differs from the `v4.3.0` tag
+(the script fetches it from GitHub):
 
 ```bash
 bash scripts/check_vendored_upstream.sh
