@@ -421,6 +421,29 @@ For every method matching a pyspark name:
   proto carrying the pickled object: `registerDataSource`, `GroupedData.transformWithState[InPandas]`,
   `createDataFrame(..., udf)`, etc. General rule: proto-building → Rust; cloudpickled Python code that
   runs server-side → vendored Python.
+- **Native ML classes follow `pyspark.ml`, not the deprecated `pyspark.ml.connect`.** The
+  Rust-backed estimators, models, transformers and evaluators that the drop-in exports from
+  `pyspark.ml.connect` mirror the standard `pyspark.ml` API over Spark Connect
+  (`python/pyspark/ml/*.py` of the pinned version), never PySpark's deprecated `pyspark.ml.connect`
+  (pandas and PyTorch based, deprecated since Spark 4.0): their params, defaults, outputs and errors
+  are those of the `pyspark.ml` class and its JVM estimator. Check them against the reference
+  client's `pyspark.ml` classes. In particular:
+  - `fit`, `transform` and `evaluate` take Spark DataFrames only, with no implicit conversion
+    (`dataset_of`): a pandas DataFrame raises the `TypeError` of `reject_pandas`, and another
+    object the `AttributeError` of `sparkSession`, which `pyspark.ml` reads of the dataset first.
+    A helper call that `pyspark.ml` sends with its literal serialization of the dataset, such as
+    `Correlation.corr`, raises what that serialization raises (`helper_dataset_of`);
+  - a features column must be a `VectorUDT` column, as the JVM checks it, with no implicit
+    `array_to_vector`;
+  - column params are sent as given, with no client-side respelling or casting;
+  - every class has the keyword-only `setParams` of its `pyspark.ml` class (`set_params_of`), and
+    its `fit`, `transform` or `evaluate` takes `params=None` (`check_fit_params`, `check_params`).
+    Add a new class to `_NATIVE_PARAMS` in `python/tests/test_ml_offline.py` (or to the golden
+    `api` of the feature stages), whose tests check its setters, `setParams` and `params` against
+    PySpark's.
+
+  The vendored `pyspark.ml.connect` modules (`base.py`, `feature.py`, ...) stay byte-identical to
+  PySpark's.
 - **Row materialization:** `crates/pyspark-rs/src/row.py` embeds PySpark's Python `Row(tuple)`
   class, exported as `pyspark._pyspark.Row` and re-exported by `pyspark.sql.types`,
   `pyspark.sql`, and `pyspark`. Embedding avoids importing the partially initialized
