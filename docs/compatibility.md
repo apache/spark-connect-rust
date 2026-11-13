@@ -48,8 +48,15 @@ aggregate methods took still compiles, by the new `From<Expression> for Column`,
 `Vec<SortOrder>` of the `order_by` of a window, by `From<SortOrder> for Column`; there a Column
 that is not a sort order is sorted ascending, nulls first, as PySpark's `WindowSpec.orderBy` sorts
 it. An empty `vec![]` or `[]` has no item type to infer: pass `Vec::<Column>::new()` or
-`Vec::<&str>::new()` instead. The optional `subset` arguments of the null functions, and the
-optional `value_vars` of `melt`, stay `Option<Vec<&str>>`, so that `None` still infers its type.
+`Vec::<&str>::new()` instead. This breaks a caller of v4.2.0 that passes an empty literal to
+`select_expr` or `summary`, which took a `Vec<&str>` there: `df.summary(vec![])`, for the default
+statistics, becomes `df.summary(Vec::<&str>::new())`. The same goes for `load_paths`. The optional
+`subset` arguments of the null functions, the optional `value_vars` of `melt` and the optional
+`column_names` of `drop_duplicates` and `drop_duplicates_within_watermark` stay
+`Option<Vec<&str>>`, as in v4.2.0, so that `None` still infers its type. The optional `values` of
+`unpivot` takes any iterable, as in v4.2.0, so its `None` has no item type to infer, unlike that
+of `melt`: pass `None::<Vec<Column>>` or `None::<[&str; 0]>` to unpivot every column that is not
+an id.
 
 `BinaryClassificationEvaluator::set_score_col` and `score_col`, and the Python
 `scoreCol=` argument and `setScoreCol` of v4.2.0 are removed, without an alias:
