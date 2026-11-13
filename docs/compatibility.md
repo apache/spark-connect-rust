@@ -20,6 +20,17 @@ microseconds. Downstream exhaustive matches on these public enums must handle
 the new variant. Rust interval map keys are stringified as raw microseconds;
 Python `timedelta` map keys are not yet supported.
 
+`DataFrame::sort`, `order_by`, `sort_within_partitions`, `agg`, `observe`, `observe_with`,
+`hint_expressions`, `repartition_by_range`, `repartition_by_range_opt` and
+`repartition_by_expressions`, `GroupedData::agg`, and the `partition_by` and `order_by` of
+`Window` and `WindowSpec` take `impl IntoIterator<Item = impl Into<Column>>`, as `select` and
+`group_by` do: Columns, column names or expressions, such as `df.sort([col("x").desc()])` and
+`.agg([sum(col("id")).alias("total")])`, without `.expression().clone()`. The `Vec<Expression>`
+that they took still compiles, by the new `From<Expression> for Column`, and so does the
+`Vec<SortOrder>` of the `order_by` of a window, by `From<SortOrder> for Column`; there a Column
+that is not a sort order is sorted ascending, nulls first, as PySpark's `WindowSpec.orderBy`
+sorts it. An empty `vec![]` has no item type to infer: pass `Vec::<Column>::new()` instead.
+
 `BinaryClassificationEvaluator::set_score_col` and `score_col`, and the Python
 `scoreCol=` argument and `setScoreCol` of v4.2.0 are removed, without an alias:
 Spark's evaluator has no `scoreCol` param, so no value of it worked on the server.

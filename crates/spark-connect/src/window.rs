@@ -3,7 +3,8 @@
 //! Provides the `Window` static builder and `WindowSpec` for defining window partitions,
 //! ordering, and frame boundaries used with `Column.over()`.
 
-use crate::expression::{Expression, SortOrder};
+use crate::column::{expressions_of, Column};
+use crate::expression::{Expression, ExpressionNode, SortOrder};
 
 /// Frame bound value used in window frame definitions.
 #[derive(Debug, Clone, PartialEq)]
@@ -74,14 +75,23 @@ impl WindowSpec {
     }
 
     /// Add partition columns to this window specification.
-    pub fn partition_by(mut self, cols: Vec<Expression>) -> Self {
-        self.partition_spec.extend(cols);
+    pub fn partition_by<C: Into<Column>>(mut self, cols: impl IntoIterator<Item = C>) -> Self {
+        self.partition_spec.extend(expressions_of(cols));
         self
     }
 
-    /// Set ordering for this window specification.
-    pub fn order_by(mut self, sorts: Vec<SortOrder>) -> Self {
-        self.order_spec.extend(sorts);
+    /// Set ordering for this window specification. A sort order, of [`Column::asc`],
+    /// [`Column::desc`] and their nulls variants, or a [`SortOrder`], sorts as it says; any
+    /// other column is sorted ascending, nulls first, as PySpark's `WindowSpec.orderBy` sorts it.
+    pub fn order_by<C: Into<Column>>(mut self, cols: impl IntoIterator<Item = C>) -> Self {
+        self.order_spec.extend(
+            expressions_of(cols)
+                .into_iter()
+                .map(|expr| match expr.node() {
+                    ExpressionNode::SortOrder(sort) => (**sort).clone(),
+                    _ => SortOrder::asc_nulls_first(expr),
+                }),
+        );
         self
     }
 
@@ -126,13 +136,13 @@ impl Window {
     }
 
     /// Create a WindowSpec partitioned by the given columns.
-    pub fn partition_by(cols: Vec<Expression>) -> WindowSpec {
+    pub fn partition_by<C: Into<Column>>(cols: impl IntoIterator<Item = C>) -> WindowSpec {
         WindowSpec::new().partition_by(cols)
     }
 
-    /// Create a WindowSpec ordered by the given sort orders.
-    pub fn order_by(sorts: Vec<SortOrder>) -> WindowSpec {
-        WindowSpec::new().order_by(sorts)
+    /// Create a WindowSpec ordered by the given columns, as [`WindowSpec::order_by`] orders it.
+    pub fn order_by<C: Into<Column>>(cols: impl IntoIterator<Item = C>) -> WindowSpec {
+        WindowSpec::new().order_by(cols)
     }
 
     /// Create a WindowSpec with a ROWS frame between the given bounds.
@@ -241,6 +251,44 @@ mod tests {
             Window::range_between(FrameBound::CurrentRow, FrameBound::Following(3)),
             WindowSpec::new().range_between(FrameBound::CurrentRow, FrameBound::Following(3))
         );
+    }
+
+    /// `partition_by` and `order_by` take Columns, as `DataFrame::select` does, and the
+    /// `Vec<Expression>` and `Vec<SortOrder>` that they took before, which they keep as they
+    /// kept them. A Column of `order_by` that is not a sort order is ascending, nulls first,
+    /// as PySpark's `WindowSpec.orderBy` sorts it.
+    #[test]
+    fn spec_builders_take_columns_and_expressions_alike() {
+        use crate::column::col as column;
+
+        let before = WindowSpec {
+            partition_spec: vec![col("a"), col("b")],
+            order_spec: vec![SortOrder::desc_nulls_last(col("c")), sort("d")],
+            frame_spec: None,
+        };
+        let of_columns = || {
+            WindowSpec::new()
+                .partition_by([column("a"), column("b")])
+                .order_by([column("c").desc(), column("d")])
+        };
+        assert_eq!(of_columns(), before);
+        assert_eq!(
+            WindowSpec::new()
+                .partition_by(vec![col("a"), col("b")])
+                .order_by(vec![SortOrder::desc_nulls_last(col("c")), sort("d")]),
+            before
+        );
+        assert_eq!(
+            Window::partition_by(["a", "b"]).order_by([column("c").desc(), column("d")]),
+            before
+        );
+        assert_eq!(
+            Window::order_by([column("c").desc(), column("d")]).partition_by(["a", "b"]),
+            before
+        );
+        // And so are the window expressions over them.
+        let over = |spec| crate::functions::sum(column("x")).over(spec).to_proto();
+        assert_eq!(over(of_columns()), over(before));
     }
 
     #[test]

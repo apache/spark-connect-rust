@@ -47,11 +47,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let grouped = df.group_by([col("pickup_zip")]);
 
     // average the fare amount and order by the top 10 zip codes
-    let df = grouped.agg(vec![avg(col("fare_amount"))
-        .alias("avg_fare_amount")
-        .expression()
-        .clone()]);
-    let df = df.sort(vec![col("avg_fare_amount").desc().expression().clone()]);
+    let df = grouped.agg([avg(col("fare_amount")).alias("avg_fare_amount")]);
+    let df = df.sort([col("avg_fare_amount").desc()]);
     let df = df.limit(10);
 
     df.show(10)?;
