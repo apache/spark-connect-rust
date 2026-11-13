@@ -162,6 +162,11 @@ two runs, were equal. For reproducible values, use the `_with_seed` variants
 its write sends none, as PySpark's `bucketBy` of a count that is not positive, the last
 `bucketBy` winning. `bucket_by` is unchanged and sends the count it is given.
 
+`DataFrame::persist` takes `impl Into<Option<StorageLevel>>`, so a `StorageLevel` is passed
+as before. `None` sends no storage level, as PySpark's `persist(None)`, and the server then
+caches at its `spark.sql.defaultCacheStorageLevel`. `cache` is unchanged and persists at
+`MEMORY_AND_DISK_DESER`.
+
 ## Native LogisticRegression
 
 The native `spark_connect::ml::LogisticRegression` fits Spark's JVM

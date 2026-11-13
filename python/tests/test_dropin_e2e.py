@@ -4760,6 +4760,22 @@ def test_persist_cache_and_unpersist_return_the_dataframe_itself_as_pyspark(sess
         df.unpersist()
 
 
+def test_persist_of_none_caches_at_the_default_storage_level_of_the_server_as_pyspark(session):
+    # As PySpark's persist(None), which sends no storage level, so that the server caches at its
+    # spark.sql.defaultCacheStorageLevel, while an omitted level is MEMORY_AND_DISK_DESER.
+    from pyspark.storagelevel import StorageLevel
+
+    session.conf.set("spark.sql.defaultCacheStorageLevel", "DISK_ONLY")
+    given, omitted = session.range(5), session.range(6)
+    try:
+        assert given.persist(None) is given and given.storageLevel == StorageLevel.DISK_ONLY
+        assert omitted.persist().storageLevel == StorageLevel.MEMORY_AND_DISK_DESER
+    finally:
+        given.unpersist()
+        omitted.unpersist()
+        session.conf.unset("spark.sql.defaultCacheStorageLevel")
+
+
 def test_values_of_local_rows_convert_and_raise_as_pyarrow(session):
     # As PySpark Connect's: PyArrow takes the __int__ of a Decimal in an int or a date field,
     # raises its own errors, and takes the days of a date out of the dates of Python, which
