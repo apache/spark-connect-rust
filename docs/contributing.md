@@ -207,13 +207,16 @@ python scripts/gen_fn_dispatch.py --pyspark-src "$SPARK_HOME/python"
 ## Style
 
 ```bash
-cargo fmt --all                          # format (CI runs it with --check)
-cargo clippy --workspace --all-targets   # lint (advisory in CI)
+cargo fmt --all                                         # format (CI runs it with --check)
+cargo clippy --workspace --all-targets -- -D warnings   # lint (blocking in CI)
 ```
 
-Rust CI builds with `RUSTFLAGS="-D warnings"`, so a compiler warning fails it. Clippy
-is advisory there: the tree still has findings to clean up (and `pyspark-rs` denies
-warnings, so they show as errors), but don't add new ones. CI also fails on deferral
+Rust CI builds with `RUSTFLAGS="-D warnings"`, so a compiler warning fails it, and so
+does any clippy finding. Clippy over the workspace needs the `wasm32-unknown-unknown`
+target (`rustup target add wasm32-unknown-unknown`), because it builds
+`examples/wasm-udfs`. The lints this codebase triggers by design are allowed once, with
+a reason, in `[workspace.lints.clippy]` of the root `Cargo.toml`; a targeted `#[allow]`
+needs a comment saying why. CI also fails on deferral
 markers such as `TODO`, `FIXME`, `todo!()` or "for now" in `crates/*/src`
 (`bash scripts/audit_no_stubs.sh`). Match the surrounding code, keep changes focused,
 and add or update golden tests when you change plan or expression building.

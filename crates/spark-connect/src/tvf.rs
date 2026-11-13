@@ -278,7 +278,7 @@ mod tests {
         );
         let of_iter = spark.tvf().udtf(
             "myudtf",
-            vec![col("a")].into_iter(),
+            vec![col("a")],
             None,
             300,
             vec![],

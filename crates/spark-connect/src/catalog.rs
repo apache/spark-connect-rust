@@ -943,7 +943,6 @@ impl Catalog {
         self.execute_catalog_as_dataframe(&catalog_msg)
     }
 
-    /// Helper: execute a catalog operation and return results as Rows.
     // ---- Typed catalog results (mirror pyspark's List[Table]/List[Database]/... ) ----
     // Each reuses the DataFrame-returning method, collects the rows, and parses them
     // into the metadata structs above (column order matches the reference client).

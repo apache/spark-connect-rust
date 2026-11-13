@@ -201,8 +201,8 @@ mod tests {
         let proto = udf_expr.to_proto();
 
         assert_eq!(proto.function_name, "my_udf");
-        assert_eq!(proto.deterministic, true);
-        assert_eq!(proto.is_distinct, false);
+        assert!(proto.deterministic);
+        assert!(!proto.is_distinct);
         assert_eq!(proto.arguments.len(), 0);
         assert!(proto.function.is_some());
 

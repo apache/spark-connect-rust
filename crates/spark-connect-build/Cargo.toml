@@ -23,5 +23,8 @@ rust-version.workspace = true
 license.workspace = true
 description = "build.rs helper that compiles Rust WASM UDFs for the Spark Connect client"
 
+[lints]
+workspace = true
+
 [lib]
 name = "spark_connect_build"

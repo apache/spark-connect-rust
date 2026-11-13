@@ -708,10 +708,9 @@ mod tests {
         let i = Value::Integer(42);
         assert_eq!(i.as_i64(), Some(42));
 
-        #[allow(clippy::approx_constant)]
-        let d = Value::Double(3.14);
+        let d = Value::Double(1.25);
 
-        assert_eq!(d.as_f64(), Some(3.14));
+        assert_eq!(d.as_f64(), Some(1.25));
 
         let s = Value::String("test".to_string());
         assert_eq!(s.as_str(), Some("test"));

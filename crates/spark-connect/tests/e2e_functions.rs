@@ -164,8 +164,8 @@ fn optional_arg_function_variants() {
 
     // round/bround with an explicit scale.
     assert_eq!(
-        v(f::round_scale(lit_double(3.14159), lit(2))).as_f64(),
-        Some(3.14)
+        v(f::round_scale(lit_double(1.23456), lit(2))).as_f64(),
+        Some(1.23)
     );
     assert_eq!(
         v(f::bround_scale(lit_double(2.5), lit(0))).as_f64(),
