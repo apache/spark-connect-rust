@@ -4025,8 +4025,8 @@ impl PyDataFrameWriter {
 
     /// The reduce of a writer, as PySpark's pickle of its DataFrame and its state, which
     /// `_of_state` gives back.
-    fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
-        use crate::reduce::{of_state_reduce, optional_object, save_mode_name, str_dict};
+    fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        use crate::reduce::{optional_object, save_mode_name, state_reduce, str_dict};
 
         let writer = self.inner.get();
         let mode = match writer.get_unsupported_mode() {
@@ -4066,7 +4066,7 @@ impl PyDataFrameWriter {
                 optional_object(py, kept_mode.as_ref()),
             ],
         )?;
-        of_state_reduce::<PyDataFrameWriter>(py, args)
+        state_reduce(py, "writer_reduce", args)
     }
 
     /// A writer of its state, as `__reduce__` gives it: of the DataFrame `frame`, the format,
@@ -4740,8 +4740,8 @@ impl PyDataFrameWriterV2 {
 
     /// The reduce of a V2 writer, as PySpark's pickle of its DataFrame and its state, which
     /// `_of_state` gives back.
-    fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
-        use crate::reduce::{column_list, of_state_reduce, optional_object, str_dict};
+    fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        use crate::reduce::{column_list, optional_object, state_reduce, str_dict};
 
         let writer = self.inner.get();
         let (kept_provider, kept_clustering) = {
@@ -4769,7 +4769,7 @@ impl PyDataFrameWriterV2 {
                 optional_object(py, kept_clustering.as_ref()),
             ],
         )?;
-        of_state_reduce::<PyDataFrameWriterV2>(py, args)
+        state_reduce(py, "writer_v2_reduce", args)
     }
 
     /// A V2 writer of its state, as `__reduce__` gives it: of the DataFrame `frame`, the table,
