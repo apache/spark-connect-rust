@@ -3533,14 +3533,9 @@ pub(crate) fn spatial_type_srid(srid: &Bound<'_, PyAny>, geographic: bool) -> Py
             return Ok(spark_connect::types::SpatialType::MIXED_SRID);
         }
     }
-    let known: &[i64] = if geographic {
-        &[4326]
-    } else {
-        &[0, 3857, 4326]
-    };
     if srid.is_instance_of::<PyInt>() {
         if let Ok(value) = srid.extract::<i64>() {
-            if known.contains(&value) {
+            if pyspark_takes_srid(value, geographic) {
                 return Ok(value as i32);
             }
         }
@@ -3551,6 +3546,33 @@ pub(crate) fn spatial_type_srid(srid: &Bound<'_, PyAny>, geographic: bool) -> Py
         "IllegalArgumentException",
         "ST_INVALID_SRID_VALUE",
         &[("srid", &srid_str)],
+    ))
+}
+
+/// Whether PySpark 4.3.0 takes the SRID `srid` in a spatial type of the given kind: its
+/// `geo_utils` maps 0, 3857 and 4326 of a geometry, and 4326 of a geography, and no other SRID.
+fn pyspark_takes_srid(srid: i64, geographic: bool) -> bool {
+    if geographic {
+        srid == 4326
+    } else {
+        matches!(srid, 0 | 3857 | 4326)
+    }
+}
+
+/// The SRID of a spatial type that the server sent in a schema, as PySpark's schema conversion
+/// builds it: the mixed SRID, or an SRID that PySpark takes, and `ST_INVALID_SRID_VALUE` for
+/// another one, which PySpark raises when it reads the schema.
+fn schema_spatial_srid(py: Python<'_>, srid: i32, geographic: bool) -> PyResult<i32> {
+    if srid == spark_connect::types::SpatialType::MIXED_SRID
+        || pyspark_takes_srid(i64::from(srid), geographic)
+    {
+        return Ok(srid);
+    }
+    Err(crate::column::raise_pyspark(
+        py,
+        "IllegalArgumentException",
+        "ST_INVALID_SRID_VALUE",
+        &[("srid", &srid.to_string())],
     ))
 }
 
@@ -3837,7 +3859,7 @@ pub(crate) fn data_type_to_py(py: Python<'_>, dt: &DataType) -> PyResult<Py<PyAn
             [PyAtomicType]
         )),
         DataType::Geometry { srid } => {
-            let srid = *srid;
+            let srid = schema_spatial_srid(py, *srid, false)?;
             obj!(init_chain!(
                 DataType::Geometry { srid },
                 PyGeometryType { srid },
@@ -3846,7 +3868,7 @@ pub(crate) fn data_type_to_py(py: Python<'_>, dt: &DataType) -> PyResult<Py<PyAn
             ))
         }
         DataType::Geography { srid } => {
-            let srid = *srid;
+            let srid = schema_spatial_srid(py, *srid, true)?;
             obj!(init_chain!(
                 DataType::Geography { srid },
                 PyGeographyType { srid },

@@ -182,8 +182,11 @@ Gotchas:
 - New DataTypes: add proto `to_proto`/`from_proto`, `json`/`from_json`,
   `simple_string`/`type_name`, `#[new]` + picklability, and a variant to
   `tests/types_roundtrip.rs` (proto round-trip, json idempotence, accessors).
-- Known lossy case to watch: Geometry/Geography JSON encodes a fixed CRS token,
-  not the numeric srid, so JSON does not round-trip (proto does).
+- Geometry/Geography JSON names the SRID by its CRS string ID from Spark's registry
+  (`crates/spark-connect/src/srs.rs`, which embeds `srs_registry.csv`), so it round-trips for
+  every SRID that Spark knows, and the server reads it. An SRID outside the registry is written
+  `SRID:<n>`, which Spark rejects too. The drop-in takes only the SRIDs of PySpark 4.3.0 (see
+  `docs/types.md`), whose `geo_utils.py` is vendored and must not be edited.
 
 ## 5. Vendored upstream code — use `git subtree`, pin the version tag
 
