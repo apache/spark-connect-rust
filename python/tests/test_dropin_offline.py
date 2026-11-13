@@ -24163,6 +24163,60 @@ def test_show_counts_are_proto_int32_as_pyspark(mock_connect):
     assert (len(service.execute_requests), len(service.analyze_requests)) == sent
 
 
+# Each method takes a catch-all of the keywords it does not name, which its visible signature does
+# not show. The keywords are passed as a dict argument, so that the lambda is not refused itself.
+UNEXPECTED_KEYWORD_CALLS = [
+    ("DataFrameReader.json", lambda s, kw: s.read.json("p", **kw)),
+    ("DataFrameReader.csv", lambda s, kw: s.read.csv("p", **kw)),
+    ("DataFrameReader.orc", lambda s, kw: s.read.orc("p", **kw)),
+    ("DataFrameReader.text", lambda s, kw: s.read.text("p", **kw)),
+    ("DataFrameReader.xml", lambda s, kw: s.read.xml("p", **kw)),
+    ("DataStreamReader.json", lambda s, kw: s.readStream.json("p", **kw)),
+    ("DataStreamReader.parquet", lambda s, kw: s.readStream.parquet("p", **kw)),
+    ("DataStreamReader.csv", lambda s, kw: s.readStream.csv("p", **kw)),
+    ("DataStreamReader.text", lambda s, kw: s.readStream.text("p", **kw)),
+    ("DataStreamReader.orc", lambda s, kw: s.readStream.orc("p", **kw)),
+    ("DataStreamReader.xml", lambda s, kw: s.readStream.xml("p", **kw)),
+    ("DataFrameWriter.parquet", lambda s, kw: s.range(1).write.parquet("p", **kw)),
+    ("DataFrameWriter.json", lambda s, kw: s.range(1).write.json("p", **kw)),
+    ("DataFrameWriter.csv", lambda s, kw: s.range(1).write.csv("p", **kw)),
+    ("DataFrameWriter.orc", lambda s, kw: s.range(1).write.orc("p", **kw)),
+    ("DataFrameWriter.text", lambda s, kw: s.range(1).write.text("p", **kw)),
+    ("DataFrameWriter.xml", lambda s, kw: s.range(1).write.xml("p", **kw)),
+    # PyO3 words the class of the builder as `Builder`, as it did before the catch-all.
+    ("Builder.config", lambda s, kw: s.builder.config(**kw)),
+]
+
+
+@pytest.mark.parametrize(
+    "method, call", UNEXPECTED_KEYWORD_CALLS, ids=[method for method, _ in UNEXPECTED_KEYWORD_CALLS]
+)
+def test_unexpected_keywords_are_keywords_as_pyspark(offline_spark, method, call):
+    # As PySpark's methods, which are Python functions with no **kwargs: a key that is not a str
+    # raises `keywords must be strings`, and a str key that the method does not take raises the
+    # unexpected keyword argument of the method. Both are raised before the call does anything.
+    # The lazy session has no server, so a call that sent a request would fail with a connection
+    # error instead of these TypeErrors, which is how the lack of a request is checked here.
+    with pytest.raises(TypeError) as error:
+        call(offline_spark, {1: "1"})
+    assert str(error.value) == "keywords must be strings"
+    with pytest.raises(TypeError) as error:
+        call(offline_spark, {"foo": 1})
+    assert str(error.value) == f"{method}() got an unexpected keyword argument 'foo'"
+
+
+def test_known_keywords_still_bind_with_the_unexpected_catch_all(offline_spark):
+    # The catch-all takes only the keywords that the method does not name: those bind as before.
+    from pyspark.sql import DataFrame
+
+    reader = offline_spark.read
+    assert isinstance(reader.json("p", multiLine=True), DataFrame)
+    assert reader._format == "json" and reader._options == {"multiLine": "true"}
+    reader = offline_spark.read
+    reader.csv("p", sep=";", header=True)
+    assert reader._format == "csv" and reader._options == {"sep": ";", "header": "true"}
+
+
 def test_reader_paths_are_checked_as_pyspark(offline_spark):
     from pyspark.errors import PySparkTypeError
 

@@ -431,7 +431,7 @@ impl PyDataFrameReader {
 
     /// Read JSON file(s) - full pyspark signature; each named option is
     /// applied as a read option when provided.
-    #[pyo3(signature = (path, schema=None, primitivesAsString=None, prefersDecimal=None, allowComments=None, allowUnquotedFieldNames=None, allowSingleQuotes=None, allowNumericLeadingZero=None, allowBackslashEscapingAnyCharacter=None, mode=None, columnNameOfCorruptRecord=None, dateFormat=None, timestampFormat=None, multiLine=None, allowUnquotedControlChars=None, lineSep=None, samplingRatio=None, dropFieldIfAllNull=None, encoding=None, locale=None, pathGlobFilter=None, recursiveFileLookup=None, modifiedBefore=None, modifiedAfter=None, allowNonNumericNumbers=None, useUnsafeRow=None))]
+    #[pyo3(signature = (path, schema=None, primitivesAsString=None, prefersDecimal=None, allowComments=None, allowUnquotedFieldNames=None, allowSingleQuotes=None, allowNumericLeadingZero=None, allowBackslashEscapingAnyCharacter=None, mode=None, columnNameOfCorruptRecord=None, dateFormat=None, timestampFormat=None, multiLine=None, allowUnquotedControlChars=None, lineSep=None, samplingRatio=None, dropFieldIfAllNull=None, encoding=None, locale=None, pathGlobFilter=None, recursiveFileLookup=None, modifiedBefore=None, modifiedAfter=None, allowNonNumericNumbers=None, useUnsafeRow=None, **unexpected), text_signature = "($self, path, schema=None, primitivesAsString=None, prefersDecimal=None, allowComments=None, allowUnquotedFieldNames=None, allowSingleQuotes=None, allowNumericLeadingZero=None, allowBackslashEscapingAnyCharacter=None, mode=None, columnNameOfCorruptRecord=None, dateFormat=None, timestampFormat=None, multiLine=None, allowUnquotedControlChars=None, lineSep=None, samplingRatio=None, dropFieldIfAllNull=None, encoding=None, locale=None, pathGlobFilter=None, recursiveFileLookup=None, modifiedBefore=None, modifiedAfter=None, allowNonNumericNumbers=None, useUnsafeRow=None)")]
     #[allow(non_snake_case, clippy::too_many_arguments)]
     fn json(
         &mut self,
@@ -461,7 +461,9 @@ impl PyDataFrameReader {
         modifiedAfter: Option<&Bound<'_, PyAny>>,
         allowNonNumericNumbers: Option<&Bound<'_, PyAny>>,
         useUnsafeRow: Option<&Bound<'_, PyAny>>,
+        unexpected: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyDataFrame> {
+        crate::options::check_unexpected_keywords("DataFrameReader.json", unexpected)?;
         let mut r = self.inner.clone();
         r = set_options_skip_none(
             r,
@@ -535,7 +537,7 @@ impl PyDataFrameReader {
 
     /// Read CSV file(s) - full pyspark signature; each named option is
     /// applied as a read option when provided.
-    #[pyo3(signature = (path, schema=None, sep=None, encoding=None, quote=None, escape=None, comment=None, header=None, inferSchema=None, ignoreLeadingWhiteSpace=None, ignoreTrailingWhiteSpace=None, nullValue=None, nanValue=None, positiveInf=None, negativeInf=None, dateFormat=None, timestampFormat=None, maxColumns=None, maxCharsPerColumn=None, maxMalformedLogPerPartition=None, mode=None, columnNameOfCorruptRecord=None, multiLine=None, charToEscapeQuoteEscaping=None, samplingRatio=None, enforceSchema=None, emptyValue=None, locale=None, lineSep=None, pathGlobFilter=None, recursiveFileLookup=None, modifiedBefore=None, modifiedAfter=None, unescapedQuoteHandling=None))]
+    #[pyo3(signature = (path, schema=None, sep=None, encoding=None, quote=None, escape=None, comment=None, header=None, inferSchema=None, ignoreLeadingWhiteSpace=None, ignoreTrailingWhiteSpace=None, nullValue=None, nanValue=None, positiveInf=None, negativeInf=None, dateFormat=None, timestampFormat=None, maxColumns=None, maxCharsPerColumn=None, maxMalformedLogPerPartition=None, mode=None, columnNameOfCorruptRecord=None, multiLine=None, charToEscapeQuoteEscaping=None, samplingRatio=None, enforceSchema=None, emptyValue=None, locale=None, lineSep=None, pathGlobFilter=None, recursiveFileLookup=None, modifiedBefore=None, modifiedAfter=None, unescapedQuoteHandling=None, **unexpected), text_signature = "($self, path, schema=None, sep=None, encoding=None, quote=None, escape=None, comment=None, header=None, inferSchema=None, ignoreLeadingWhiteSpace=None, ignoreTrailingWhiteSpace=None, nullValue=None, nanValue=None, positiveInf=None, negativeInf=None, dateFormat=None, timestampFormat=None, maxColumns=None, maxCharsPerColumn=None, maxMalformedLogPerPartition=None, mode=None, columnNameOfCorruptRecord=None, multiLine=None, charToEscapeQuoteEscaping=None, samplingRatio=None, enforceSchema=None, emptyValue=None, locale=None, lineSep=None, pathGlobFilter=None, recursiveFileLookup=None, modifiedBefore=None, modifiedAfter=None, unescapedQuoteHandling=None)")]
     #[allow(non_snake_case, clippy::too_many_arguments)]
     fn csv(
         &mut self,
@@ -573,7 +575,9 @@ impl PyDataFrameReader {
         modifiedBefore: Option<&Bound<'_, PyAny>>,
         modifiedAfter: Option<&Bound<'_, PyAny>>,
         unescapedQuoteHandling: Option<&Bound<'_, PyAny>>,
+        unexpected: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyDataFrame> {
+        crate::options::check_unexpected_keywords("DataFrameReader.csv", unexpected)?;
         let mut r = self.inner.clone();
         r = set_options_skip_none(
             r,
@@ -623,7 +627,7 @@ impl PyDataFrameReader {
 
     /// Read ORC file(s) - full pyspark signature; each named option is
     /// applied as a read option when provided.
-    #[pyo3(signature = (path, mergeSchema=None, pathGlobFilter=None, recursiveFileLookup=None, modifiedBefore=None, modifiedAfter=None))]
+    #[pyo3(signature = (path, mergeSchema=None, pathGlobFilter=None, recursiveFileLookup=None, modifiedBefore=None, modifiedAfter=None, **unexpected), text_signature = "($self, path, mergeSchema=None, pathGlobFilter=None, recursiveFileLookup=None, modifiedBefore=None, modifiedAfter=None)")]
     #[allow(non_snake_case, clippy::too_many_arguments)]
     fn orc(
         &mut self,
@@ -633,7 +637,9 @@ impl PyDataFrameReader {
         recursiveFileLookup: Option<&Bound<'_, PyAny>>,
         modifiedBefore: Option<&Bound<'_, PyAny>>,
         modifiedAfter: Option<&Bound<'_, PyAny>>,
+        unexpected: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyDataFrame> {
+        crate::options::check_unexpected_keywords("DataFrameReader.orc", unexpected)?;
         let mut r = self.inner.clone();
         r = set_options_skip_none(
             r,
@@ -654,7 +660,7 @@ impl PyDataFrameReader {
     /// applied as a read option when provided. As PySpark's `wholetext=False`, an omitted
     /// `wholetext` sets `false`, also over an earlier `wholetext` option.
     #[pyo3(
-        signature = (paths, wholetext=DefaultedOption::Omitted, lineSep=None, pathGlobFilter=None, recursiveFileLookup=None, modifiedBefore=None, modifiedAfter=None),
+        signature = (paths, wholetext=DefaultedOption::Omitted, lineSep=None, pathGlobFilter=None, recursiveFileLookup=None, modifiedBefore=None, modifiedAfter=None, **unexpected),
         text_signature = "($self, paths, wholetext=False, lineSep=None, pathGlobFilter=None, recursiveFileLookup=None, modifiedBefore=None, modifiedAfter=None)"
     )]
     #[allow(non_snake_case, clippy::too_many_arguments)]
@@ -668,7 +674,9 @@ impl PyDataFrameReader {
         recursiveFileLookup: Option<&Bound<'_, PyAny>>,
         modifiedBefore: Option<&Bound<'_, PyAny>>,
         modifiedAfter: Option<&Bound<'_, PyAny>>,
+        unexpected: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyDataFrame> {
+        crate::options::check_unexpected_keywords("DataFrameReader.text", unexpected)?;
         let wholetext = wholetext.or_bool(py, false);
         let mut r = self.inner.clone();
         r = set_options_skip_none(
@@ -689,7 +697,7 @@ impl PyDataFrameReader {
 
     /// Read XML file(s) - full pyspark signature; each named option is
     /// applied as a read option when provided.
-    #[pyo3(signature = (path, rowTag=None, schema=None, excludeAttribute=None, attributePrefix=None, valueTag=None, ignoreSurroundingSpaces=None, rowValidationXSDPath=None, ignoreNamespace=None, wildcardColName=None, encoding=None, inferSchema=None, nullValue=None, dateFormat=None, timestampFormat=None, mode=None, columnNameOfCorruptRecord=None, multiLine=None, samplingRatio=None, locale=None))]
+    #[pyo3(signature = (path, rowTag=None, schema=None, excludeAttribute=None, attributePrefix=None, valueTag=None, ignoreSurroundingSpaces=None, rowValidationXSDPath=None, ignoreNamespace=None, wildcardColName=None, encoding=None, inferSchema=None, nullValue=None, dateFormat=None, timestampFormat=None, mode=None, columnNameOfCorruptRecord=None, multiLine=None, samplingRatio=None, locale=None, **unexpected), text_signature = "($self, path, rowTag=None, schema=None, excludeAttribute=None, attributePrefix=None, valueTag=None, ignoreSurroundingSpaces=None, rowValidationXSDPath=None, ignoreNamespace=None, wildcardColName=None, encoding=None, inferSchema=None, nullValue=None, dateFormat=None, timestampFormat=None, mode=None, columnNameOfCorruptRecord=None, multiLine=None, samplingRatio=None, locale=None)")]
     #[allow(non_snake_case, clippy::too_many_arguments)]
     fn xml(
         &mut self,
@@ -713,7 +721,9 @@ impl PyDataFrameReader {
         multiLine: Option<&Bound<'_, PyAny>>,
         samplingRatio: Option<&Bound<'_, PyAny>>,
         locale: Option<&Bound<'_, PyAny>>,
+        unexpected: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyDataFrame> {
+        crate::options::check_unexpected_keywords("DataFrameReader.xml", unexpected)?;
         let mut r = self.inner.clone();
         r = set_option_skip_none(r, "rowTag", rowTag)?;
         if let Some(v) = schema {

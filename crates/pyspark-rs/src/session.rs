@@ -98,14 +98,16 @@ impl PySparkSessionBuilder {
     /// `SparkSession.Builder.config(key=None, value=None, *, map=None, conf=None)`.
     /// `spark.remote` sets the connect endpoint; other keys are applied as runtime confs
     /// on connect. `conf` accepts a `SparkConf` (its `getAll()` pairs are applied).
-    #[pyo3(signature = (key=None, value=None, map=None, conf=None))]
+    #[pyo3(signature = (key=None, value=None, map=None, conf=None, **unexpected), text_signature = "($self, key=None, value=None, map=None, conf=None)")]
     fn config<'py>(
         mut slf: PyRefMut<'py, Self>,
         key: Option<&Bound<'_, PyAny>>,
         value: Option<&Bound<'_, PyAny>>,
         map: Option<&Bound<'_, PyDict>>,
         conf: Option<&Bound<'_, PyAny>>,
+        unexpected: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyRefMut<'py, Self>> {
+        crate::options::check_unexpected_keywords("Builder.config", unexpected)?;
         let py = slf.py();
         // PySpark keeps the options in a dict, and sends each in a `KeyValue` of the key as it
         // is, whose constructor leaves a key of None unset, the empty key.
