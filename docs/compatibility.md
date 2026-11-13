@@ -269,10 +269,9 @@ A native class has the `setParams` of its `pyspark.ml` class, except `LogisticRe
 three evaluators, whose params are still those of the deprecated `pyspark.ml.connect` classes (see
 Native LogisticRegression), which have no `setParams`. It is keyword-only, takes the params of the
 constructor, sets the params that it is given, in order, and returns the object, as PySpark's
-`_set` does. Its signature is PySpark's for every class except `StringIndexer` and
-`VectorAssembler`, which take only the params of their constructors (`inputCol` and `outputCol`,
-and `inputCols` and `outputCol`), and `CrossValidator`, which takes `numFolds`, `parallelism` and
-`seed`, with a default of `None` for the first two. The `params` argument of a fit, transform or
+`_set` does. Its signature is PySpark's for every class, the feature stages included, except
+`CrossValidator`, which takes `numFolds`, `parallelism` and `seed`, with a default of `None` for
+the first two. The `params` argument of a fit, transform or
 evaluate, which `pyspark.ml` takes as a param map, is accepted: `None` and an empty dict leave the
 params as they are. The native classes have no Param objects to key a map by, so a non-empty map,
 and a list or tuple of maps to a fit (which `pyspark.ml` fits as one model per map), raise a
