@@ -17,8 +17,8 @@ use pyo3::types::{PyDict, PyList, PyTuple, PyType};
 use pyo3::PyClass;
 use spark_connect::ml::{
     BinaryClassificationEvaluator, BisectingKMeans, CrossValidator, DecisionTreeClassifier,
-    DecisionTreeRegressor, Estimator, Evaluator, GBTClassifier, GBTRegressor, KMeans,
-    LinearRegression, LinearSVC, LogisticRegression, MaxAbsScaler, MlOperator, Model,
+    DecisionTreeRegressor, Estimator, Evaluator, GBTClassifier, GBTRegressor, GaussianMixture,
+    KMeans, LinearRegression, LinearSVC, LogisticRegression, MaxAbsScaler, MlOperator, Model,
     MulticlassClassificationEvaluator, NaiveBayes, Params, Pipeline, RandomForestClassifier,
     RandomForestRegressor, RegressionEvaluator, StandardScaler, StringIndexer, Transformer,
     VectorAssembler,
@@ -3269,6 +3269,119 @@ impl PyBinaryClassificationEvaluator {
     }
 }
 
+/// Gaussian mixture estimator fitted and cached by Spark Connect.
+#[pyclass(name = "GaussianMixture", module = "pyspark.ml.connect.clustering")]
+pub struct PyGaussianMixture {
+    inner: GaussianMixture,
+    unsendable: Vec<&'static str>,
+}
+
+const GAUSSIAN_MIXTURE_PARAMS: &[(&str, Kind)] = &[
+    ("featuresCol", Kind::Str),
+    ("predictionCol", Kind::Str),
+    ("k", Kind::Int),
+    ("probabilityCol", Kind::Str),
+    ("tol", Kind::Float),
+    ("maxIter", Kind::Int),
+    ("seed", Kind::Int),
+    ("aggregationDepth", Kind::Int),
+    ("weightCol", Kind::Str),
+];
+
+#[pymethods]
+impl PyGaussianMixture {
+    #[new]
+    #[pyo3(signature = (*args, **kwargs), text_signature = "(*, featuresCol='features', predictionCol='prediction', k=2, probabilityCol='probability', tol=0.01, maxIter=100, seed=None, aggregationDepth=2, weightCol=None)")]
+    fn new(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
+        let mut this = Self {
+            inner: GaussianMixture::new(),
+            unsendable: Vec::new(),
+        };
+        init_params(
+            &mut this,
+            "GaussianMixture",
+            &[],
+            GAUSSIAN_MIXTURE_PARAMS,
+            args,
+            kwargs,
+        )?;
+        Ok(this)
+    }
+
+    #[pyo3(name = "setFeaturesCol")]
+    fn set_feature_col<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "featuresCol", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setPredictionCol")]
+    fn set_prediction_col<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "predictionCol", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setK")]
+    fn set_k<'py>(slf: Bound<'py, Self>, value: &Bound<'py, PyAny>) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "k", Kind::Int, value)
+    }
+
+    #[pyo3(name = "setProbabilityCol")]
+    fn set_probability_col<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "probabilityCol", Kind::Str, value)
+    }
+
+    #[pyo3(name = "setTol")]
+    fn set_tol<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "tol", Kind::Float, value)
+    }
+
+    #[pyo3(name = "setMaxIter")]
+    fn set_max_iter<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "maxIter", Kind::Int, value)
+    }
+
+    #[pyo3(name = "setSeed")]
+    fn set_seed<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "seed", Kind::Int, value)
+    }
+
+    #[pyo3(name = "setAggregationDepth")]
+    fn set_aggregation_depth<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "aggregationDepth", Kind::Int, value)
+    }
+
+    #[pyo3(name = "setWeightCol")]
+    fn set_weight_col<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "weightCol", Kind::Str, value)
+    }
+
+    fn fit(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<PyMLModel> {
+        fit_native(slf, dataset, None)
+    }
+}
+
 /// Bisecting K-means fitted and cached by Spark Connect.
 #[pyclass(name = "BisectingKMeans", module = "pyspark.ml.connect.clustering")]
 pub struct PyBisectingKMeans {
@@ -3551,6 +3664,7 @@ native!(
     PyRandomForestClassifier => RandomForestClassifier,
     PyDecisionTreeRegressor => DecisionTreeRegressor,
     PyRandomForestRegressor => RandomForestRegressor,
+    PyGaussianMixture => GaussianMixture,
     PyKMeans => KMeans,
     PyBisectingKMeans => BisectingKMeans,
     PyRegressionEvaluator => RegressionEvaluator,
