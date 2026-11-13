@@ -619,6 +619,10 @@ impl DataFrame {
     /// Sort rows by `columns`. A sort order, of [`Column::asc`], [`Column::desc`] and their
     /// nulls variants, sorts as it says; any other column is sorted ascending, nulls first,
     /// as PySpark's `sort` sorts it.
+    ///
+    /// An empty `columns` builds a sort that the server rejects when the DataFrame runs, with
+    /// `CONNECT_INVALID_PLAN.ASSERTION_FAILURE`, as with the Scala client. PySpark's `df.sort()`
+    /// raises `CANNOT_BE_EMPTY` at the call instead.
     pub fn sort<C: Into<Column>>(&self, columns: impl IntoIterator<Item = C>) -> DataFrame {
         let plan = LogicalPlan::Sort {
             input: Arc::clone(&self.plan),
@@ -628,7 +632,8 @@ impl DataFrame {
         self.with_cached_schema(plan)
     }
 
-    /// Alias for sort().
+    /// Alias for [`DataFrame::sort`]. An empty `columns` fails as it does for
+    /// [`DataFrame::sort`], when the DataFrame runs.
     pub fn order_by<C: Into<Column>>(&self, columns: impl IntoIterator<Item = C>) -> DataFrame {
         self.sort(columns)
     }
@@ -2325,6 +2330,8 @@ impl DataFrame {
     }
 
     /// Sort within partitions (local sort), by `columns` as [`DataFrame::sort`] sorts by them.
+    /// An empty `columns` fails as it does for [`DataFrame::sort`], when the DataFrame runs,
+    /// where PySpark's `df.sortWithinPartitions()` raises `CANNOT_BE_EMPTY` at the call.
     pub fn sort_within_partitions<C: Into<Column>>(
         &self,
         columns: impl IntoIterator<Item = C>,
