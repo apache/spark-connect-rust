@@ -42,13 +42,14 @@ class SQLContext:
     _instantiatedContext: ClassVar[Optional[Any]] = None
 
     def __init__(self, sparkContext: Any, sparkSession: Any = None, jsqlContext: Any = None):
-        raise PySparkNotImplementedError(
-            errorClass="NOT_IMPLEMENTED",
-            messageParameters={
-                "feature": f"{type(self).__name__}(sparkContext) in Spark Connect; "
-                f"use {type(self).__name__}.getOrCreate()"
-            },
-        )
+        if sparkSession is None:
+            warnings.warn(
+                "Deprecated in 3.0.0. Use SparkSession.builder.getOrCreate() instead.",
+                FutureWarning,
+            )
+        # As in PySpark, the first thing the constructor reads is the JVM SparkContext, which
+        # a Spark Connect session does not have: this raises JVM_ATTRIBUTE_NOT_SUPPORTED.
+        self._jsc = sparkContext._jsc
 
     @classmethod
     def getOrCreate(cls, sc: Any = None) -> Any:
@@ -93,6 +94,14 @@ class HiveContext(SQLContext):
     .. deprecated:: 2.0.0
         Use SparkSession.builder.enableHiveSupport().getOrCreate().
     """
+
+    def __init__(self, sparkContext: Any, sparkSession: Any = None, jhiveContext: Any = None):
+        warnings.warn(
+            "HiveContext is deprecated in Spark 2.0.0. Please use "
+            + "SparkSession.builder.enableHiveSupport().getOrCreate() instead.",
+            FutureWarning,
+        )
+        super().__init__(sparkContext, sparkSession, jhiveContext)
 
 
 def _get_active_session_or_create() -> Any:
