@@ -458,7 +458,12 @@ impl GroupedData {
     /// group, mirroring `GroupedData._numeric_agg` of `min`, `max`, `avg`, `mean` and `sum`:
     /// every numeric column of the DataFrame without columns, and `NOT_NUMERIC_COLUMNS` for a
     /// column that is not a numeric one of its schema.
-    pub fn numeric_agg(&self, function: &str, columns: Vec<&str>) -> Result<DataFrame> {
+    pub fn numeric_agg<S: Into<String>>(
+        &self,
+        function: &str,
+        columns: impl IntoIterator<Item = S>,
+    ) -> Result<DataFrame> {
+        let columns: Vec<String> = columns.into_iter().map(Into::into).collect();
         let schema = self.dataframe.schema()?;
         let names: Vec<String> = if columns.is_empty() {
             match &schema {
@@ -498,27 +503,27 @@ impl GroupedData {
     }
 
     /// Sum values in each group, as `GroupedData.sum`: every numeric column without `columns`.
-    pub fn sum(&self, columns: Vec<&str>) -> Result<DataFrame> {
+    pub fn sum<S: Into<String>>(&self, columns: impl IntoIterator<Item = S>) -> Result<DataFrame> {
         self.numeric_agg("sum", columns)
     }
 
     /// Average values in each group, as `GroupedData.avg`: every numeric column without `columns`.
-    pub fn avg(&self, columns: Vec<&str>) -> Result<DataFrame> {
+    pub fn avg<S: Into<String>>(&self, columns: impl IntoIterator<Item = S>) -> Result<DataFrame> {
         self.numeric_agg("avg", columns)
     }
 
     /// Minimum values in each group, as `GroupedData.min`: every numeric column without `columns`.
-    pub fn min(&self, columns: Vec<&str>) -> Result<DataFrame> {
+    pub fn min<S: Into<String>>(&self, columns: impl IntoIterator<Item = S>) -> Result<DataFrame> {
         self.numeric_agg("min", columns)
     }
 
     /// Maximum values in each group, as `GroupedData.max`: every numeric column without `columns`.
-    pub fn max(&self, columns: Vec<&str>) -> Result<DataFrame> {
+    pub fn max<S: Into<String>>(&self, columns: impl IntoIterator<Item = S>) -> Result<DataFrame> {
         self.numeric_agg("max", columns)
     }
 
     /// Mean (alias for avg).
-    pub fn mean(&self, columns: Vec<&str>) -> Result<DataFrame> {
+    pub fn mean<S: Into<String>>(&self, columns: impl IntoIterator<Item = S>) -> Result<DataFrame> {
         self.avg(columns)
     }
 }
@@ -644,25 +649,29 @@ impl StatFunctions {
     }
 
     /// Find frequent items.
-    pub fn freq_items(&self, columns: Vec<&str>, support: f64) -> DataFrame {
+    pub fn freq_items<S: Into<String>>(
+        &self,
+        columns: impl IntoIterator<Item = S>,
+        support: f64,
+    ) -> DataFrame {
         let plan = LogicalPlan::StatFreqItems {
             input: Arc::clone(&self.dataframe.plan),
-            columns: columns.iter().map(|s| s.to_string()).collect(),
+            columns: columns.into_iter().map(Into::into).collect(),
             support,
         };
         DataFrame::new(self.dataframe.session.clone(), plan)
     }
 
     /// Compute approximate quantiles.
-    pub fn approx_quantile(
+    pub fn approx_quantile<S: Into<String>>(
         &self,
-        columns: Vec<&str>,
+        columns: impl IntoIterator<Item = S>,
         probabilities: Vec<f64>,
         relative_error: f64,
     ) -> DataFrame {
         let plan = LogicalPlan::StatApproxQuantile {
             input: Arc::clone(&self.dataframe.plan),
-            columns: columns.iter().map(|s| s.to_string()).collect(),
+            columns: columns.into_iter().map(Into::into).collect(),
             probabilities,
             relative_error,
         };

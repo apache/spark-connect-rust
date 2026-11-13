@@ -3,7 +3,7 @@
 //! Provides table-valued functions that return DataFrames, such as explode, inline,
 //! range, and other TVF operations.
 
-use crate::column::Column;
+use crate::column::{expressions_of, Column};
 use crate::dataframe::DataFrame;
 use crate::expression::Expression;
 use crate::plan::LogicalPlan;
@@ -30,17 +30,17 @@ impl TableValuedFunction {
     /// cloudpickles the handler and sets `eval_type` (300 SQL_TABLE_UDF,
     /// 301 SQL_ARROW_TABLE_UDF, 302 SQL_ARROW_UDTF); `command` is the pickled payload.
     #[allow(clippy::too_many_arguments)]
-    pub fn udtf(
+    pub fn udtf<C: Into<Column>>(
         &self,
         name: &str,
-        arguments: Vec<Column>,
+        arguments: impl IntoIterator<Item = C>,
         return_type: Option<DataType>,
         eval_type: i32,
         command: Vec<u8>,
         python_ver: String,
         deterministic: bool,
     ) -> DataFrame {
-        let args: Vec<Expression> = arguments.iter().map(|c| c.expression().clone()).collect();
+        let args: Vec<Expression> = expressions_of(arguments);
         let plan = LogicalPlan::CommonInlineUdtf {
             function_name: name.to_string(),
             deterministic,
@@ -250,6 +250,43 @@ mod tests {
             .remote("sc://localhost:15002")
             .get_or_create()
             .expect("failed to build session")
+    }
+
+    /// `udtf` takes its arguments as any Columns, as a Vec of them, and sends the same plan.
+    #[test]
+    fn udtf_takes_any_columns_as_a_vec_does() {
+        use crate::column::col;
+
+        let spark = session();
+        let of_vec = spark.tvf().udtf(
+            "myudtf",
+            vec![col("a")],
+            None,
+            300,
+            vec![],
+            "3.11".to_string(),
+            true,
+        );
+        let of_array = spark.tvf().udtf(
+            "myudtf",
+            [col("a")],
+            None,
+            300,
+            vec![],
+            "3.11".to_string(),
+            true,
+        );
+        let of_iter = spark.tvf().udtf(
+            "myudtf",
+            vec![col("a")].into_iter(),
+            None,
+            300,
+            vec![],
+            "3.11".to_string(),
+            true,
+        );
+        assert_eq!(of_array.plan.to_proto(), of_vec.plan.to_proto());
+        assert_eq!(of_iter.plan.to_proto(), of_vec.plan.to_proto());
     }
 
     #[test]

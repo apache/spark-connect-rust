@@ -120,31 +120,35 @@ fn group_numeric_aggregates_follow_pyspark() {
     };
 
     // Every numeric column, in schema order, with PySpark's names (`sum(i)`, ...).
-    let (cols, got) = named_rows(&df.group_by(vec![col("k")]).sum(vec![]).unwrap());
+    let (cols, got) = named_rows(&df.group_by(vec![col("k")]).sum(Vec::<&str>::new()).unwrap());
     assert_eq!(cols, names(&["k", "sum(i)", "sum(l)", "sum(d)"]));
     assert_eq!(
         got,
         rows(&[&["a", "3", "30", "4"], &["b", "3", "30", "NULL"]])
     );
-    let (cols, got) = named_rows(&df.group_by(vec![col("k")]).avg(vec![]).unwrap());
+    let (cols, got) = named_rows(&df.group_by(vec![col("k")]).avg(Vec::<&str>::new()).unwrap());
     assert_eq!(cols, names(&["k", "avg(i)", "avg(l)", "avg(d)"]));
     assert_eq!(
         got,
         rows(&[&["a", "1.5", "15", "2"], &["b", "3", "30", "NULL"]])
     );
-    let (cols, got) = named_rows(&df.group_by(vec![col("k")]).mean(vec![]).unwrap());
+    let (cols, got) = named_rows(
+        &df.group_by(vec![col("k")])
+            .mean(Vec::<&str>::new())
+            .unwrap(),
+    );
     assert_eq!(cols, names(&["k", "avg(i)", "avg(l)", "avg(d)"]));
     assert_eq!(
         got,
         rows(&[&["a", "1.5", "15", "2"], &["b", "3", "30", "NULL"]])
     );
-    let (cols, got) = named_rows(&df.group_by(vec![col("k")]).min(vec![]).unwrap());
+    let (cols, got) = named_rows(&df.group_by(vec![col("k")]).min(Vec::<&str>::new()).unwrap());
     assert_eq!(cols, names(&["k", "min(i)", "min(l)", "min(d)"]));
     assert_eq!(
         got,
         rows(&[&["a", "1", "10", "1.5"], &["b", "3", "30", "NULL"]])
     );
-    let (cols, got) = named_rows(&df.group_by(vec![col("k")]).max(vec![]).unwrap());
+    let (cols, got) = named_rows(&df.group_by(vec![col("k")]).max(Vec::<&str>::new()).unwrap());
     assert_eq!(cols, names(&["k", "max(i)", "max(l)", "max(d)"]));
     assert_eq!(
         got,
@@ -157,7 +161,7 @@ fn group_numeric_aggregates_follow_pyspark() {
     assert_eq!(got, rows(&[&["a", "4", "3"], &["b", "NULL", "3"]]));
 
     // Rollup, cube and grouping sets (`GROUPING SETS ((k), ())` is `ROLLUP(k)`).
-    let (cols, got) = named_rows(&df.rollup(vec![col("k")]).sum(vec![]).unwrap());
+    let (cols, got) = named_rows(&df.rollup(vec![col("k")]).sum(Vec::<&str>::new()).unwrap());
     assert_eq!(cols, names(&["k", "sum(i)", "sum(l)", "sum(d)"]));
     assert_eq!(
         got,
@@ -169,16 +173,16 @@ fn group_numeric_aggregates_follow_pyspark() {
     );
     // With one grouping column, a cube is a rollup.
     assert_eq!(
-        named_rows(&df.cube(vec![col("k")]).sum(vec![]).unwrap()),
-        named_rows(&df.rollup(vec![col("k")]).sum(vec![]).unwrap())
+        named_rows(&df.cube(vec![col("k")]).sum(Vec::<&str>::new()).unwrap()),
+        named_rows(&df.rollup(vec![col("k")]).sum(Vec::<&str>::new()).unwrap())
     );
     let grouping_sets = df
         .grouping_sets(vec![vec![col("k")], vec![]])
-        .sum(vec![])
+        .sum(Vec::<&str>::new())
         .unwrap();
     assert_eq!(
         named_rows(&grouping_sets).1,
-        named_rows(&df.rollup(vec![col("k")]).sum(vec![]).unwrap()).1
+        named_rows(&df.rollup(vec![col("k")]).sum(Vec::<&str>::new()).unwrap()).1
     );
 
     // Pivot: the numeric columns of each pivot value, or the given one.
@@ -190,7 +194,11 @@ fn group_numeric_aggregates_follow_pyspark() {
             )
             .unwrap()
     };
-    let (cols, got) = named_rows(&pivot(df.group_by(vec![col("k")])).sum(vec![]).unwrap());
+    let (cols, got) = named_rows(
+        &pivot(df.group_by(vec![col("k")]))
+            .sum(Vec::<&str>::new())
+            .unwrap(),
+    );
     assert_eq!(
         cols,
         names(&["k", "p_sum(i)", "p_sum(l)", "p_sum(d)", "q_sum(i)", "q_sum(l)", "q_sum(d)"])
@@ -243,6 +251,63 @@ fn group_numeric_aggregates_follow_pyspark() {
             .err()
             .expect("a string column of a rollup"),
         "['s']",
+    );
+}
+
+/// The numeric aggregates and the list methods take the names of their columns, and the
+/// columns of their lists, as any iterable of them, as a Vec does: the server runs each form to
+/// the same rows.
+#[test]
+fn list_methods_take_any_iterable_on_the_server() {
+    if !should_run() {
+        return;
+    }
+    let s = session();
+    let df = s
+        .sql("SELECT * FROM VALUES ('a', 1, 10L, 'x'), ('a', 2, 20L, 'y'), ('b', 3, 30L, 'x') AS t(k, i, l, s)")
+        .unwrap();
+
+    let grouped = df.group_by(vec![col("k")]);
+    let sums = named_rows(&grouped.sum(vec!["i", "l"]).unwrap());
+    assert_eq!(
+        sums.1,
+        vec![
+            vec!["a".to_string(), "3".to_string(), "30".to_string()],
+            vec!["b".to_string(), "3".to_string(), "30".to_string()],
+        ]
+    );
+    assert_eq!(named_rows(&grouped.sum(["i", "l"]).unwrap()), sums);
+    assert_eq!(
+        named_rows(&grouped.sum(["i", "l"].iter().copied()).unwrap()),
+        sums
+    );
+    assert_eq!(
+        named_rows(&grouped.sum(["i", "l"].map(String::from)).unwrap()),
+        sums
+    );
+
+    let dropped = named_rows(&df.drop(vec!["s"]));
+    assert_eq!(dropped.0, vec!["k", "i", "l"]);
+    assert_eq!(named_rows(&df.drop(["s"])), dropped);
+    assert_eq!(named_rows(&df.drop(["s"].map(String::from))), dropped);
+    let of_columns = named_rows(&df.drop_columns(vec![col("s")], vec!["i"]));
+    assert_eq!(of_columns.0, vec!["k", "l"]);
+    assert_eq!(named_rows(&df.drop_columns([col("s")], ["i"])), of_columns);
+    assert_eq!(
+        named_rows(&df.drop_columns(vec![col("s")].into_iter(), ["i"].into_iter())),
+        of_columns
+    );
+
+    let with_columns = named_rows(&df.with_columns(vec![("p".to_string(), lit(1))]));
+    assert_eq!(with_columns.0, vec!["k", "i", "l", "s", "p"]);
+    assert_eq!(named_rows(&df.with_columns([("p", lit(1))])), with_columns);
+
+    let renamed = named_rows(&df.to_df(vec!["a", "b", "c", "d"]));
+    assert_eq!(renamed.0, vec!["a", "b", "c", "d"]);
+    assert_eq!(named_rows(&df.to_df(["a", "b", "c", "d"])), renamed);
+    assert_eq!(
+        named_rows(&df.to_df(["a", "b", "c", "d"].iter().copied())),
+        renamed
     );
 }
 

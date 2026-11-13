@@ -263,7 +263,7 @@ impl Column {
 
     /// Mirrors `pyspark.sql.column.Column.dropFields`: drop one or more fields
     /// from a struct-typed column (chained `UpdateFields`, one per field).
-    pub fn drop_fields(self, field_names: Vec<&str>) -> Column {
+    pub fn drop_fields<S: Into<String>>(self, field_names: impl IntoIterator<Item = S>) -> Column {
         let mut expr = self.expr;
         for name in field_names {
             expr = ExpressionNode::UpdateFields(Box::new(UpdateFieldsExpr::new(expr, name, None)))
@@ -688,6 +688,11 @@ pub(crate) fn expressions_of<C: Into<Column>>(
         .collect()
 }
 
+/// The Columns of `columns`, for the APIs that keep a list of them.
+pub(crate) fn columns_of<C: Into<Column>>(columns: impl IntoIterator<Item = C>) -> Vec<Column> {
+    columns.into_iter().map(Into::into).collect()
+}
+
 /// Mirrors `pyspark.sql.functions.lit` for an integer value.
 ///
 /// PySpark infers `IntegerType` for a Python int that fits in i32 and `LongType`
@@ -1002,6 +1007,14 @@ mod tests {
             expressions_of(vec![Expression::column("a"), Expression::column("b")])
         );
         assert!(expressions_of(Vec::<Column>::new()).is_empty());
+    }
+
+    #[test]
+    fn drop_fields_takes_any_names_as_a_vec_does() {
+        let of_vec = col("s").drop_fields(vec!["a", "b"]);
+        assert_eq!(col("s").drop_fields(["a", "b"]), of_vec);
+        assert_eq!(col("s").drop_fields(["a", "b"].iter().copied()), of_vec);
+        assert_eq!(col("s").drop_fields(["a", "b"].map(String::from)), of_vec);
     }
 
     #[test]
