@@ -88,6 +88,20 @@ pub(crate) fn warn_all(py: Python<'_>, warnings: &[String]) -> PyResult<()> {
 // whole call.
 #[pymethods]
 impl PyRuntimeConf {
+    /// The shallow copy of the runtime configuration, as PySpark's `copy.copy`: of the same
+    /// session.
+    fn __copy__(&self) -> PyRuntimeConf {
+        PyRuntimeConf::new(self.session.clone())
+    }
+
+    /// The runtime configuration does not pickle, as PySpark's, whose client holds a
+    /// thread-local state that pickle cannot copy.
+    fn __reduce__(&self) -> PyResult<()> {
+        Err(pyo3::exceptions::PyTypeError::new_err(
+            "cannot pickle '_thread._local' object",
+        ))
+    }
+
     /// Set a configuration value, as PySpark's: a bool as "true" or "false", an int as its
     /// `str()`, a str as it is, and None as no value, which the server rejects. Warns each
     /// warning of the server.

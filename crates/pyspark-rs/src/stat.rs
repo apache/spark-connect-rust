@@ -27,6 +27,21 @@ impl PyStatFunctions {
 
 #[pymethods]
 impl PyStatFunctions {
+    /// The shallow copy of the statistics functions, as PySpark's `copy.copy`: of the same
+    /// DataFrame.
+    fn __copy__(&self, py: Python<'_>) -> PyStatFunctions {
+        let frame = self.frame.clone_ref(py);
+        let stat = frame.borrow(py).dataframe.stat();
+        PyStatFunctions::new(stat, frame)
+    }
+
+    /// The reduce of the statistics functions, as PySpark's: `stat` of their DataFrame, which
+    /// unpickles with it.
+    fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyTuple>> {
+        let frame = self.frame.clone_ref(py).into_any().into_bound(py);
+        crate::reduce::getattr_reduce(py, frame, "stat")
+    }
+
     /// The DataFrame of these functions, as PySpark's `DataFrameStatFunctions.df`: `df.stat.df`
     /// is `df`.
     #[getter(df)]

@@ -25496,3 +25496,244 @@ def test_a_non_nullable_column_with_nulls_is_read_with_its_nulls_as_pyarrow_read
     )
     assert spark.range(3).collect() == [Row(id=None), Row(id=None), Row(id=None)]
     assert list(spark.range(3).toLocalIterator()) == [Row(id=None), Row(id=None), Row(id=None)]
+
+
+# The objects of PySpark's plain classes that a copy or a pickle keeps: as PySpark's, a copy of
+# each works, and a deep copy and a pickle work for each except those below, which hold a client
+# or a lock that cannot be copied; the merge actions hold their merge builder, and so its client.
+_COPYABLE_OBJECTS = (
+    "reader",
+    "readStream",
+    "writer",
+    "writerV2",
+    "writeStream",
+    "groupBy",
+    "pivot",
+    "cogroup",
+    "na",
+    "stat",
+    "catalog",
+    "tvf",
+    "dataSource",
+    "udf",
+    "udtf",
+    "df",
+    "session",
+)
+_UNCOPYABLE_MESSAGES = {
+    "conf": "cannot pickle '_thread._local' object",
+    "merge": "cannot pickle '_thread._local' object",
+    "streams": "cannot pickle '_thread.lock' object",
+    "whenMatched": "cannot pickle '_thread._local' object",
+    "whenNotMatched": "cannot pickle '_thread._local' object",
+    "whenNotMatchedBySource": "cannot pickle '_thread._local' object",
+}
+
+
+def _copy_objects(spark):
+    # Each object of the classes, built afresh, from a DataFrame of the session.
+    df = spark.range(3)
+    return {
+        "reader": lambda: spark.read.format("json").option("a", "1"),
+        "readStream": lambda: spark.readStream.format("rate").option("b", "2"),
+        "writer": lambda: df.write.format("parquet").option("c", "3"),
+        "writerV2": lambda: df.writeTo("t").using("parquet").option("d", "4"),
+        "writeStream": lambda: df.writeStream.format("memory").queryName("q"),
+        "groupBy": lambda: df.groupBy("id"),
+        "pivot": lambda: df.groupBy("id").pivot("id"),
+        "cogroup": lambda: df.groupby("id").cogroup(df.groupby("id")),
+        "na": lambda: df.na,
+        "stat": lambda: df.stat,
+        "conf": lambda: spark.conf,
+        "catalog": lambda: spark.catalog,
+        "merge": lambda: df.mergeInto("t", df.id == df.id),
+        "whenMatched": lambda: df.mergeInto("t", df.id == df.id).whenMatched(),
+        "whenNotMatched": lambda: df.mergeInto("t", df.id == df.id).whenNotMatched(),
+        "whenNotMatchedBySource": lambda: (
+            df.mergeInto("t", df.id == df.id).whenNotMatchedBySource()
+        ),
+        "streams": lambda: spark.streams,
+        "tvf": lambda: spark.tvf,
+        "dataSource": lambda: spark.dataSource,
+        "udf": lambda: spark.udf,
+        "udtf": lambda: spark.udtf,
+        "df": lambda: df,
+        "session": lambda: spark,
+    }
+
+
+@pytest.mark.parametrize("name", _COPYABLE_OBJECTS + tuple(_UNCOPYABLE_MESSAGES))
+def test_copies_of_the_objects_as_pyspark(mock_connect, name):
+    # As PySpark's copy.copy and copy.deepcopy of these plain objects: a copy has the class of
+    # the object, and a deep copy does too, except the conf, merge builder and stream manager,
+    # whose deep copy raises the TypeError of the client or lock that they hold.
+    import copy
+
+    spark, _ = mock_connect
+    obj = _copy_objects(spark)[name]()
+    assert type(copy.copy(obj)) is type(obj)
+    if name in _UNCOPYABLE_MESSAGES:
+        with pytest.raises(TypeError, match=re.escape(_UNCOPYABLE_MESSAGES[name])):
+            copy.deepcopy(obj)
+    else:
+        assert type(copy.deepcopy(obj)) is type(obj)
+
+
+@pytest.mark.parametrize("protocol", range(6))
+@pytest.mark.parametrize("name", _COPYABLE_OBJECTS + tuple(_UNCOPYABLE_MESSAGES))
+def test_pickles_of_the_objects_at_every_protocol_as_pyspark(mock_connect, name, protocol):
+    # As PySpark's cloudpickle of these objects at every protocol: each pickles and unpickles
+    # with the active session, except the conf, merge builder and stream manager, which raise
+    # the TypeError that their deep copy raises.
+    import cloudpickle
+
+    spark, _ = mock_connect
+    obj = _copy_objects(spark)[name]()
+    if name in _UNCOPYABLE_MESSAGES:
+        with pytest.raises(TypeError, match=re.escape(_UNCOPYABLE_MESSAGES[name])):
+            cloudpickle.dumps(obj, protocol)
+        return
+    data = cloudpickle.dumps(obj, protocol)
+    assert type(pickle.loads(data)) is type(obj)
+
+
+@pytest.mark.parametrize("name", _COPYABLE_OBJECTS)
+def test_unpickled_objects_need_an_active_session_as_pyspark(mock_connect, name):
+    # As PySpark: the session of an object unpickles first, so on a thread without an active
+    # session, as on a Python worker, an unpickled object raises NO_ACTIVE_SESSION.
+    import threading
+
+    import cloudpickle
+    from pyspark.errors import PySparkRuntimeError
+
+    spark, _ = mock_connect
+    data = cloudpickle.dumps(_copy_objects(spark)[name]())
+    seen = []
+
+    def on_a_thread():
+        try:
+            pickle.loads(data)
+        except PySparkRuntimeError as error:
+            seen.append(error.getCondition())
+
+    thread = threading.Thread(target=on_a_thread)
+    thread.start()
+    thread.join()
+    assert seen == ["NO_ACTIVE_SESSION"]
+
+
+def test_a_deep_copy_keeps_grouped_data_on_the_copied_dataframe_as_pyspark(mock_connect):
+    # As PySpark, where the grouped data of a copied DataFrame is grouped by the copy: a deep
+    # copy of a dict of both copies the DataFrame once, through the memo of the call, and the
+    # grouped data of the copy holds that copy, as GroupedData._df does.
+    import copy
+
+    spark, _ = mock_connect
+    df = spark.range(3)
+    grouped = df.groupBy("id")
+    copied = copy.deepcopy({"df": df, "g": grouped})
+    assert copied["df"] is not df
+    assert copied["g"]._df is copied["df"]
+    assert copy.deepcopy(grouped, {id(df): copied["df"]})._df is copied["df"]
+    assert copy.copy(grouped)._df is df
+
+
+def test_shallow_copies_of_writers_share_their_settings_as_pyspark(mock_connect):
+    # As PySpark, where the writer keeps its settings in one object that a shallow copy shares,
+    # so a setter of the copy is seen by the writer, and a deep copy keeps its own.
+    import copy
+
+    spark, service = mock_connect
+
+    def sent_write():
+        # ExecutePlanRequest.plan=3, Plan.command=2, Command.write_operation=2.
+        plan = parse_message(parse_message(service.execute_requests[-1])[3][0])
+        return parse_message(parse_message(plan[2][0])[2][0])
+
+    writer = spark.range(1).write
+    copied = copy.copy(writer)
+    copied.format("json").option("k", "v").mode("overwrite")
+    writer.save("p")
+    # WriteOperation.source=2, mode=5 (SAVE_MODE_OVERWRITE=2), and options=9.
+    assert sent_write()[2] == [b"json"] and sent_write()[5] == [2]
+    options = {parse_message(entry)[1][0]: parse_message(entry)[2][0] for entry in sent_write()[9]}
+    assert options == {b"k": b"v"}
+
+    deep = copy.deepcopy(writer)
+    deep.format("orc")
+    writer.save("p")
+    assert sent_write()[2] == [b"json"]
+
+
+def test_shallow_copies_of_readers_share_their_options_as_pyspark(mock_connect):
+    # As PySpark, where the options of a reader are one dict that a shallow copy shares, while
+    # its format is set on the copy alone, and a deep copy shares nothing.
+    import copy
+
+    spark, _ = mock_connect
+    reader = spark.read
+    copied = copy.copy(reader)
+    copied.option("k", "v").format("json")
+    assert reader._options == {"k": "v"}
+    assert reader._format is None and copied._format == "json"
+
+    deep = copy.deepcopy(reader)
+    deep.option("z", "9")
+    assert reader._options == {"k": "v"} and deep._options == {"k": "v", "z": "9"}
+
+    stream = spark.readStream
+    copied_stream = copy.copy(stream)
+    copied_stream.option("a", "1").format("rate")
+    assert stream._options == {"a": "1"} and stream._format is None
+
+
+def test_unpickled_writers_and_readers_keep_their_settings_as_pyspark(mock_connect):
+    # As PySpark's pickle of a writer and a reader, which keeps the format, the save mode, the
+    # options and the schema, and sends them with the session that unpickles with it.
+    import cloudpickle
+
+    spark, service = mock_connect
+
+    def sent_write():
+        plan = parse_message(parse_message(service.execute_requests[-1])[3][0])
+        return parse_message(parse_message(plan[2][0])[2][0])
+
+    writer = spark.range(1).write.format("json").mode("overwrite").option("a", "1")
+    copied = cloudpickle.loads(cloudpickle.dumps(writer))
+    copied.save("p")
+    assert sent_write()[2] == [b"json"] and sent_write()[5] == [2]
+    options = {parse_message(entry)[1][0]: parse_message(entry)[2][0] for entry in sent_write()[9]}
+    assert options == {b"a": b"1"}
+
+    reader = spark.read.format("json").option("a", "1").schema("id LONG")
+    copied = cloudpickle.loads(cloudpickle.dumps(reader))
+    assert copied._format == "json"
+    assert copied._options == {"a": "1"}
+    assert copied._schema == reader._schema
+
+
+def test_a_shallow_copy_of_a_merge_builder_keeps_its_schema_evolution_as_pyspark(mock_connect):
+    # As PySpark, where withSchemaEvolution sets the attribute of the builder it is called on,
+    # so a copy that sets it sends it alone, while the clauses that the copy adds are shared.
+    import copy
+
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+
+    def sent_schema_evolution():
+        # ExecutePlanRequest.plan=3, Plan.command=2, Command.merge_into_table_command=16, and
+        # MergeIntoTableCommand.with_schema_evolution=7.
+        command = parse_message(parse_message(service.execute_requests[-1])[3][0])
+        merge = parse_message(parse_message(command[2][0])[16][0])
+        return bool(merge.get(7))
+
+    builder = spark.range(1).mergeInto("t", F.col("id") == 1).whenMatched().updateAll()
+    copied = copy.copy(builder)
+    copied.withSchemaEvolution()
+    copied.whenNotMatched().insertAll()
+    builder.merge()
+    assert sent_schema_evolution() is False
+    copied.merge()
+    assert sent_schema_evolution() is True
+    assert len(service.execute_requests) >= 2

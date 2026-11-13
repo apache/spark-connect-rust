@@ -139,9 +139,55 @@ impl GroupedData {
         &self.dataframe
     }
 
+    /// The pivot column, as PySpark Connect's `GroupedData._pivot_col`, or None. Not a stable API.
+    #[doc(hidden)]
+    pub fn pivot_column(&self) -> Option<Column> {
+        self.pivot_col.clone().map(Column::new)
+    }
+
+    /// The pivot values, as PySpark Connect's `GroupedData._pivot_values`: literal columns.
+    /// Not a stable API.
+    #[doc(hidden)]
+    pub fn pivot_value_columns(&self) -> Vec<Column> {
+        self.pivot_values.iter().cloned().map(Column::new).collect()
+    }
+
+    /// The explicit grouping sets, as PySpark Connect's `GroupedData._grouping_sets`.
+    /// Not a stable API.
+    #[doc(hidden)]
+    pub fn grouping_set_columns(&self) -> &[Vec<Column>] {
+        &self.grouping_sets
+    }
+
+    /// A GroupedData of its parts, as a pickled GroupedData gives them back: the DataFrame, the
+    /// grouping columns, the type of the grouping, the pivot column and values, and the grouping
+    /// sets, as they are. Not a stable API.
+    #[doc(hidden)]
+    pub fn from_parts(
+        dataframe: DataFrame,
+        group_cols: Vec<Column>,
+        group_type: AggregateGroupType,
+        pivot_col: Option<Column>,
+        pivot_values: Vec<Column>,
+        grouping_sets: Vec<Vec<Column>>,
+    ) -> Self {
+        GroupedData {
+            dataframe,
+            group_cols,
+            group_type,
+            pivot_col: pivot_col.map(|column| column.expression().clone()),
+            pivot_values: pivot_values
+                .iter()
+                .map(|column| column.expression().clone())
+                .collect(),
+            grouping_sets,
+        }
+    }
+
     /// Create a new GroupedData.
     pub(crate) fn new(
         dataframe: DataFrame,
+
         group_cols: Vec<Column>,
         group_type: AggregateGroupType,
     ) -> Self {
