@@ -64,6 +64,10 @@ jobs:
         run: cargo clippy --workspace --all-targets || true
       - name: Tooling unit tests
         run: python3 -m unittest discover -s scripts/tests
+      - name: LICENSE-binary and NOTICE-binary are up to date
+        # They list the Rust dependencies that the wheels link, from Cargo.lock. A change of
+        # dependencies without regenerating them (python3 scripts/gen_binary_licenses.py) fails.
+        run: python3 scripts/gen_binary_licenses.py --check
 
   python-ruff:
     name: ruff (our scripts, tests and hand-written pyspark shim)
