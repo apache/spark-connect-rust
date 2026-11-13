@@ -51,6 +51,33 @@ fn temp_views_and_register() {
 }
 
 #[test]
+fn register_temp_table_replaces_existing_view() {
+    if !should_run() {
+        return;
+    }
+    let spark = session();
+    spark
+        .range_full(0, 5, 1, None)
+        .expect("range")
+        .create_temp_view("e2e_rtt_rep")
+        .expect("create_temp_view");
+
+    // registerTempTable is createOrReplaceTempView in PySpark, so it replaces the view.
+    spark
+        .range_full(0, 2, 1, None)
+        .expect("range")
+        .register_temp_table("e2e_rtt_rep")
+        .expect("register_temp_table over an existing view");
+    let rows = spark
+        .sql("SELECT count(*) AS c FROM e2e_rtt_rep")
+        .expect("sql")
+        .collect()
+        .expect("collect");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].get(0), Some(&spark_connect::row::Value::Long(2)));
+}
+
+#[test]
 fn checkpoints_and_input_files_local() {
     if !should_run() {
         return;

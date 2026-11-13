@@ -7335,7 +7335,8 @@ def test_functions_bucket():
     from pyspark.sql import functions as F
 
     c = F.col("x")
-    result = F.bucket(10, c)
+    with pytest.warns(FutureWarning, match="Deprecated in 4.0.0, use partitioning.bucket instead"):
+        result = F.bucket(10, c)
     assert type(result).__name__ == "Column"
 
 
@@ -20491,7 +20492,7 @@ def test_sql_context_connect_backed():
             HiveContext.getOrCreate()
         with pytest.raises(PySparkNotImplementedError):
             cctx.HiveContext(spark)
-        with pytest.raises(PySparkNotImplementedError):
+        with pytest.raises(AttributeError, match="'NoneType' object has no attribute '_jsc'"):
             SQLContext(None)
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
@@ -20507,6 +20508,27 @@ def test_sql_context_connect_backed():
         assert cctx.SQLContext._instantiatedContext is None
     finally:
         cctx.SQLContext._instantiatedContext = None
+        spark.stop()
+
+
+def test_classic_sql_context_on_session_raises_jvm_attribute():
+    from pyspark.errors import PySparkAttributeError
+    from pyspark.sql import HiveContext, SQLContext
+
+    spark = _offline_session()
+    try:
+        # As PySpark 4.3.0: the constructor reads sparkContext._jsc, which a session lacks.
+        with pytest.warns(FutureWarning, match="Deprecated in 3.0.0"):
+            with pytest.raises(PySparkAttributeError) as e:
+                SQLContext(spark)
+        assert e.value.getCondition() == "JVM_ATTRIBUTE_NOT_SUPPORTED"
+        assert e.value.getMessageParameters() == {"attr_name": "_jsc"}
+        with pytest.warns(FutureWarning, match="HiveContext is deprecated in Spark 2.0.0"):
+            with pytest.raises(PySparkAttributeError) as e:
+                HiveContext(spark, spark)
+        assert e.value.getCondition() == "JVM_ATTRIBUTE_NOT_SUPPORTED"
+        assert e.value.getMessageParameters() == {"attr_name": "_jsc"}
+    finally:
         spark.stop()
 
 

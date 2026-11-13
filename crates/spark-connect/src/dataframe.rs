@@ -2935,9 +2935,9 @@ impl DataFrame {
         Ok(DataFrame::new(self.session.clone(), plan))
     }
 
-    /// Register this DataFrame as a temporary table (deprecated - use createTempView).
+    /// Deprecated alias for create_or_replace_temp_view, as PySpark's registerTempTable.
     pub fn register_temp_table(&self, name: &str) -> Result<()> {
-        self.create_temp_view(name)?;
+        self.create_or_replace_temp_view(name)?;
         Ok(())
     }
 
