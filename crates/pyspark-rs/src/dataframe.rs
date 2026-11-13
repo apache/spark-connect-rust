@@ -157,6 +157,7 @@ impl PyDataFrame {
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<String> {
+        crate::options::check_keyword_keys(kwargs)?;
         let [n, truncate, vertical] = bind_arguments(
             function,
             args,
@@ -176,18 +177,22 @@ impl PyDataFrame {
         }
         let truncate =
             if truncate.is_instance_of::<pyo3::types::PyBool>() && truncate.is_truthy()? {
-                20
+                20i32.into_pyobject(py)?.into_any()
             } else {
                 // As `int(truncate)`, whose ValueError is PySpark's NOT_EXPECTED_TYPE.
                 match py.import("builtins")?.getattr("int")?.call1((&truncate,)) {
-                    Ok(value) => value.extract::<i32>()?,
+                    Ok(value) => value,
                     Err(err) if err.is_instance_of::<pyo3::exceptions::PyValueError>(py) => {
                         return Err(not_expected_type(&truncate, "truncate", "bool"));
                     }
                     Err(err) => return Err(err),
                 }
             };
-        let (n, vertical) = (n.extract::<i32>()?, vertical.extract::<bool>()?);
+        // The proto's int32 fields, as PySpark's `ShowString` sets them: `num_rows`, then
+        // `truncate`.
+        let n = proto_int::<i32>(&n, "spark.connect.ShowString.num_rows")?;
+        let truncate = proto_int::<i32>(&truncate, "spark.connect.ShowString.truncate")?;
+        let vertical = vertical.extract::<bool>()?;
         interruptible(py, &self.dataframe.spark_session(), || {
             self.dataframe
                 .show_string(n, truncate, vertical)
@@ -293,6 +298,7 @@ impl PyDataFrame {
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Vec<spark_connect::expression::Expression>> {
         use pyo3::types::{PyBool, PyString};
+        crate::options::check_keyword_keys(kwargs)?;
         if cols.is_empty() {
             return Err(crate::column::raise_pyspark(
                 py,
@@ -2454,6 +2460,7 @@ impl PyDataFrame {
         py: Python<'_>,
         kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
     ) -> PyResult<Py<PyAny>> {
+        crate::options::check_keyword_keys(kwargs)?;
         let mode = match kwargs {
             Some(kwargs) => kwargs.get_item("pandasStructHandlingMode")?,
             None => None,
@@ -3603,6 +3610,7 @@ fn apply_write_common(
     partitionBy: Option<&Bound<'_, PyAny>>,
     options: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<spark_connect::readwriter::DataFrameWriter> {
+    crate::options::check_keyword_keys(options)?;
     if let Some(f) = format {
         w = w.format(f);
     }

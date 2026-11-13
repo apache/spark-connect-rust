@@ -23295,6 +23295,90 @@ def test_jdbc_properties_are_keywords_as_pyspark(mock_connect):
     assert (len(service.execute_requests), len(service.analyze_requests)) == sent
 
 
+def test_option_keys_that_are_not_str_are_keywords_as_pyspark(mock_connect):
+    # As PySpark's `**options` methods, which are Python functions: CPython unpacks a key that is
+    # not a str as the TypeError `keywords must be strings`, before the method does anything, so
+    # no option is set (bytes and int keys used to be set as their str()), and nothing is sent.
+    import warnings
+
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+    df = spark.range(1)
+    sent = len(service.execute_requests), len(service.analyze_requests)
+    for key in (1, b"multiLine"):
+        kwargs = {key: True}
+        reader = spark.read.format("json")
+        with pytest.raises(TypeError, match="^keywords must be strings$"):
+            reader.options(**kwargs)
+        assert reader._format == "json" and reader._options == {}
+        calls = [
+            lambda: spark.read.load("p", **kwargs),
+            lambda: spark.read.parquet("p", **kwargs),
+            lambda: spark.read._set_opts(**kwargs),
+            lambda: spark.readStream.options(**kwargs),
+            lambda: spark.readStream.load("p", **kwargs),
+            lambda: spark.range(1).write.options(**kwargs),
+            lambda: spark.range(1).write.save("p", **kwargs),
+            lambda: spark.range(1).write.saveAsTable("t", **kwargs),
+            lambda: spark.range(1).writeTo("t").options(**kwargs),
+            lambda: spark.range(1).writeStream.options(**kwargs),
+            lambda: spark.range(1).writeStream.start("p", **kwargs),
+            lambda: spark.range(1).writeStream.toTable("t", **kwargs),
+            lambda: df.show(**kwargs),
+            lambda: df._show_string(**kwargs),
+            lambda: df.sort("id", **kwargs),
+            lambda: df.orderBy("id", **kwargs),
+            lambda: df.sortWithinPartitions("id", **kwargs),
+            lambda: df._to_pandas(**kwargs),
+            lambda: df.select(F.col("id").alias("x", **kwargs)),
+            lambda: df.select(F.col("id").name("x", **kwargs)),
+            lambda: spark.catalog.createTable("t", "p", "json", **kwargs),
+            lambda: spark.catalog.createExternalTable("t", "p", "json", **kwargs),
+        ]
+        for call in calls:
+            with pytest.raises(TypeError, match="^keywords must be strings$"):
+                call()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with pytest.raises(TypeError, match="^keywords must be strings$"):
+                spark.catalog.createExternalTable("t", "p", "json", **kwargs)
+        assert not caught
+    assert (len(service.execute_requests), len(service.analyze_requests)) == sent
+
+
+def test_jdbc_predicates_are_checked_as_pyspark(mock_connect):
+    # As PySpark's jdbc, whose DataSource plan asserts that the predicates are a list of str,
+    # after the reader has its format, url and dbtable: a bare AssertionError for any other value.
+    # The predicates are not checked when a column is given, which reads its partitions instead.
+    spark, service = mock_connect
+    sent = len(service.execute_requests), len(service.analyze_requests)
+    for predicates in (("a=1",), "a=1", [1], [None], [b"a=1"], ["a=1", 2], ()):
+        reader = spark.read
+        with pytest.raises(AssertionError) as error:
+            reader.jdbc("jdbc:x", "t", predicates=predicates)
+        assert str(error.value) == ""
+        assert reader._format == "jdbc" and reader._options == {"url": "jdbc:x", "dbtable": "t"}
+    assert (len(service.execute_requests), len(service.analyze_requests)) == sent
+    spark.read.jdbc("jdbc:x", "t", column="c", lowerBound=1, upperBound=2, numPartitions=2,
+                    predicates="a=1").columns
+
+
+def test_show_counts_are_proto_int32_as_pyspark(mock_connect):
+    # As PySpark's ShowString, whose num_rows and truncate are proto int32 fields that protobuf
+    # converts: an int out of their range raises the ValueError of the value, not an OverflowError.
+    spark, service = mock_connect
+    df = spark.range(1)
+    sent = len(service.execute_requests), len(service.analyze_requests)
+    for value in (2**31, -(2**31) - 1, 2**70):
+        for kwargs in ({"n": value}, {"truncate": value}):
+            with pytest.raises(ValueError, match=f"^Value out of range: {value}$"):
+                df._show_string(**kwargs)
+        with pytest.raises(ValueError, match=f"^Value out of range: {value}$"):
+            df.show(n=value)
+    assert (len(service.execute_requests), len(service.analyze_requests)) == sent
+
+
 def test_reader_paths_are_checked_as_pyspark(offline_spark):
     from pyspark.errors import PySparkTypeError
 

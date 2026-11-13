@@ -60,6 +60,24 @@ pub(crate) fn str_argument(v: &Bound<'_, PyAny>) -> PyResult<String> {
     ))
 }
 
+/// The keys of the `**options` of a call, which PySpark's Python function takes: a key that is not
+/// a str raises the `TypeError` of CPython's unpacking, `keywords must be strings`, before the call
+/// does anything. Every method that takes `**options` checks its keys first, with this.
+pub(crate) fn check_keyword_keys(options: Option<&Bound<'_, PyDict>>) -> PyResult<()> {
+    if let Some(options) = options {
+        if options
+            .keys()
+            .iter()
+            .any(|key| !key.is_instance_of::<PyString>())
+        {
+            return Err(pyo3::exceptions::PyTypeError::new_err(
+                "keywords must be strings",
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// The key of an option that PySpark keeps in a dict, which raises the `TypeError` of an
 /// unhashable key, and sends in a protobuf string field as it is, as [`str_argument`] converts it:
 /// the options of the writers, and of `SparkSession.builder.config`.
@@ -133,6 +151,7 @@ pub(crate) fn set_options_skip_none<B: OptionBuilder>(
 pub(crate) fn kwargs_skip_none(
     options: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<HashMap<String, String>> {
+    check_keyword_keys(options)?;
     let mut map = HashMap::new();
     if let Some(options) = options {
         for (key, value) in options.iter() {
@@ -163,6 +182,7 @@ pub(crate) fn set_reader_kwargs_unset_none(
     mut reader: DataFrameReader,
     options: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<DataFrameReader> {
+    check_keyword_keys(options)?;
     if let Some(options) = options {
         for (key, value) in options.iter() {
             let key = str_text(&key)?;
@@ -179,6 +199,7 @@ pub(crate) fn set_reader_kwargs_unset_none(
 pub(crate) fn str_kwargs_skip_none(
     options: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<HashMap<String, String>> {
+    check_keyword_keys(options)?;
     let mut map = HashMap::new();
     for (key, value) in options.into_iter().flat_map(|options| options.iter()) {
         if value.is_none() {
@@ -199,6 +220,7 @@ pub(crate) fn set_opts(
     schema: Option<&Bound<'_, PyAny>>,
     options: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<()> {
+    check_keyword_keys(options)?;
     if let Some(schema) = schema.filter(|schema| !schema.is_none()) {
         slf.call_method1("schema", (schema,))?;
     }
