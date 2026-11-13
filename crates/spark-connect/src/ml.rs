@@ -136,6 +136,105 @@ impl MlVector {
     }
 }
 
+/// A dense or sparse ML matrix used as an estimator parameter, such as the
+/// `lowerBoundsOnCoefficients` of `LogisticRegression`. As Spark's `Matrix`, its values are in
+/// column-major order, or in row-major order when it `is_transposed`; a sparse matrix is of the
+/// compressed sparse column format (of rows, when it `is_transposed`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum MlMatrix {
+    Dense {
+        num_rows: i32,
+        num_cols: i32,
+        values: Vec<f64>,
+        is_transposed: bool,
+    },
+    Sparse {
+        num_rows: i32,
+        num_cols: i32,
+        col_ptrs: Vec<i32>,
+        row_indices: Vec<i32>,
+        values: Vec<f64>,
+        is_transposed: bool,
+    },
+}
+
+impl MlMatrix {
+    /// The literal of the matrix, as PySpark's ML serializer (`serialize_param` of
+    /// `pyspark.ml.connect.serialize`) sends a `DenseMatrix` or a `SparseMatrix`: a struct of the
+    /// MatrixUDT, of its type (1 dense, 0 sparse), its shape, its column pointers and row indices
+    /// (nulls of a dense matrix), its values and whether it is transposed.
+    #[allow(deprecated)] // PySpark's ML serializer uses struct_type for matrix UDTs.
+    fn to_literal(&self) -> proto::expression::Literal {
+        use proto::expression::literal::{specialized_array::ValueType as A, LiteralType as L};
+        let lit = |value| proto::expression::Literal {
+            literal_type: Some(value),
+            ..Default::default()
+        };
+        let null = || lit(L::Null(DataType::Null.to_proto()));
+        let array = |value| {
+            lit(L::SpecializedArray(
+                proto::expression::literal::SpecializedArray {
+                    value_type: Some(value),
+                },
+            ))
+        };
+        let ints = |values: &[i32]| {
+            array(A::Ints(proto::Ints {
+                values: values.to_vec(),
+            }))
+        };
+        let doubles = |values: &[f64]| {
+            array(A::Doubles(proto::Doubles {
+                values: values.to_vec(),
+            }))
+        };
+        let elements = match self {
+            Self::Dense {
+                num_rows,
+                num_cols,
+                values,
+                is_transposed,
+            } => vec![
+                lit(L::Byte(1)),
+                lit(L::Integer(*num_rows)),
+                lit(L::Integer(*num_cols)),
+                null(),
+                null(),
+                doubles(values),
+                lit(L::Boolean(*is_transposed)),
+            ],
+            Self::Sparse {
+                num_rows,
+                num_cols,
+                col_ptrs,
+                row_indices,
+                values,
+                is_transposed,
+            } => vec![
+                lit(L::Byte(0)),
+                lit(L::Integer(*num_rows)),
+                lit(L::Integer(*num_cols)),
+                ints(col_ptrs),
+                ints(row_indices),
+                doubles(values),
+                lit(L::Boolean(*is_transposed)),
+            ],
+        };
+        lit(L::Struct(proto::expression::literal::Struct {
+            struct_type: Some(proto::DataType {
+                kind: Some(proto::data_type::Kind::Udt(Box::new(
+                    proto::data_type::Udt {
+                        r#type: "udt".into(),
+                        jvm_class: Some("org.apache.spark.ml.linalg.MatrixUDT".into()),
+                        ..Default::default()
+                    },
+                ))),
+            }),
+            elements,
+        }))
+    }
+}
+
 /// ML parameter handling: stores name -> literal value mappings.
 ///
 /// Mirrors the structure of parameter handling in `pyspark.ml.param.Params`.
@@ -288,6 +387,21 @@ impl Params {
 
     /// Set a vector parameter using Spark's VectorUDT representation.
     pub fn set_param_vector(mut self, name: &str, value: impl Into<MlVector>) -> Self {
+        self.params.insert(
+            name.into(),
+            proto::Expression {
+                expr_type: Some(proto::expression::ExprType::Literal(
+                    value.into().to_literal(),
+                )),
+                ..Default::default()
+            },
+        );
+        self
+    }
+
+    /// Set a matrix parameter using Spark's MatrixUDT representation, as PySpark sends a
+    /// `DenseMatrix` or a `SparseMatrix` (see [`MlMatrix`]).
+    pub fn set_param_matrix(mut self, name: &str, value: impl Into<MlMatrix>) -> Self {
         self.params.insert(
             name.into(),
             proto::Expression {
@@ -7731,6 +7845,48 @@ mod tests {
             panic!("expected a string element type");
         };
         assert_eq!(string.collation, "UTF8_BINARY");
+    }
+
+    #[test]
+    fn test_matrix_params_are_the_literals_of_pyspark() {
+        // The bytes of `serialize_param` of PySpark 4.3.0 (`pyspark.ml.connect.serialize`) of
+        // `DenseMatrix(1, 2, [0.0, -1.0])` and of
+        // `SparseMatrix(2, 2, [0, 1, 2], [0, 1], [1.0, 2.0], True)`.
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        use prost::Message;
+
+        let dense =
+            "wgFlCi66ASsKA3VkdBIkb3JnLmFwYWNoZS5zcGFyay5tbC5saW5hbGcuTWF0cml4VURUEgIgARICMA\
+            ESAjACEgQKAgoAEgQKAgoAEhfKARQqEgoQAAAAAAAAAAAAAAAAAADwvxICGAA=";
+        let sparse =
+            "wgFwCi66ASsKA3VkdBIkb3JnLmFwYWNoZS5zcGFyay5tbC5saW5hbGcuTWF0cml4VURUEgIgABICM\
+            AISAjACEgrKAQcSBQoDAAECEgnKAQYSBAoCAAESF8oBFCoSChAAAAAAAADwPwAAAAAAAABAEgIYAQ==";
+        for (matrix, expected) in [
+            (
+                MlMatrix::Dense {
+                    num_rows: 1,
+                    num_cols: 2,
+                    values: vec![0.0, -1.0],
+                    is_transposed: false,
+                },
+                dense,
+            ),
+            (
+                MlMatrix::Sparse {
+                    num_rows: 2,
+                    num_cols: 2,
+                    col_ptrs: vec![0, 1, 2],
+                    row_indices: vec![0, 1],
+                    values: vec![1.0, 2.0],
+                    is_transposed: true,
+                },
+                sparse,
+            ),
+        ] {
+            let params = Params::new().set_param_matrix("lowerBoundsOnCoefficients", matrix);
+            let literal = params.to_proto().params["lowerBoundsOnCoefficients"].clone();
+            assert_eq!(STANDARD.encode(literal.encode_to_vec()), expected);
+        }
     }
 
     #[test]

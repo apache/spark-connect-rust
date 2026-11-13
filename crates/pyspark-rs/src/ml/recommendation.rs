@@ -233,7 +233,7 @@ impl PyALS {
         params: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyALSModel> {
         check_fit_params(params)?;
-        let input = dataset_of(dataset, "fit", "select")?;
+        let input = dataset_of(dataset, "fit")?;
         let mut estimator = snapshot(slf)?;
         let session = input.spark_session();
         let inner = interruptible(slf.py(), &session, || {
@@ -313,7 +313,7 @@ impl PyALSModel {
         params: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
         check_params(params)?;
-        let input = dataset_of(dataset, "transform", "columns")?;
+        let input = dataset_of(dataset, "transform")?;
         let mut model = snapshot(slf)?;
         Ok(PyDataFrame::new(model.transform(&input).to_pyerr()?))
     }
@@ -364,7 +364,7 @@ impl PyALSModel {
         dataset: &Bound<'_, PyAny>,
         numItems: &Bound<'_, PyAny>,
     ) -> PyResult<PyDataFrame> {
-        let input = dataset_of(dataset, "recommendForUserSubset", "select")?;
+        let input = helper_dataset_of(dataset, "recommendForUserSubset")?;
         let count = count_literal(numItems)?;
         let model = slf.try_borrow()?.inner.clone();
         Ok(PyDataFrame::new(
@@ -380,7 +380,7 @@ impl PyALSModel {
         dataset: &Bound<'_, PyAny>,
         numUsers: &Bound<'_, PyAny>,
     ) -> PyResult<PyDataFrame> {
-        let input = dataset_of(dataset, "recommendForItemSubset", "select")?;
+        let input = helper_dataset_of(dataset, "recommendForItemSubset")?;
         let count = count_literal(numUsers)?;
         let model = slf.try_borrow()?.inner.clone();
         Ok(PyDataFrame::new(

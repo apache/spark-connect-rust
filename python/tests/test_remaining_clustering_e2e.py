@@ -116,13 +116,13 @@ def test_lda_repeated_fits_keep_independent_topic_counts(session, optimizer):
 
 
 @pytest.mark.skipif(REFERENCE, reason="Numeric array features are a native client extension")
-def test_lda_native_array_features_are_preserved(session):
+def test_lda_native_array_features_are_sent_as_they_are_as_pyspark_ml(session):
+    # As pyspark.ml's LDA, the array features of createDataFrame (whose elements may be null) are
+    # sent as they are, and the JVM, which takes a vector or an array of non-null elements, rejects
+    # them, where the deprecated pyspark.ml.connect converted them.
     train = _documents(session, GOLDEN["documents"], arrays=True)
-    model = _algorithm("LDA")(**GOLDEN["lda"][0]["values"]).fit(train)
-    out = model.transform(train).orderBy("id").select("input", vector_to_array("topics").alias("p")).collect()
-    for row, features in zip(out, GOLDEN["documents"]):
-        assert list(row.input) == features
-        assert sum(row.p) == pytest.approx(1.0)
+    with pytest.raises(PySparkException, match="must be of type equal to one of"):
+        _algorithm("LDA")(**GOLDEN["lda"][0]["values"]).fit(train)
 
 
 @pytest.mark.parametrize("options", [{"k": 1}, {"maxIter": -1}, {"optimizer": "unknown"}, {"learningDecay": 0.0}])

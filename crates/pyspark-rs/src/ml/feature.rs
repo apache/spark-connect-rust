@@ -16,7 +16,7 @@ where
     T::Core: Transformer,
 {
     check_params(params)?;
-    let input = dataset_of(dataset, "transform", "columns")?;
+    let input = dataset_of(dataset, "transform")?;
     let mut transformer = snapshot(slf)?;
     let output = slf
         .py()
