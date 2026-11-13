@@ -1710,12 +1710,14 @@ impl PyDataFrame {
         })
     }
 
-    /// Register this DataFrame as a temporary view.
+    /// Register this DataFrame as a temporary view, of a name that PySpark's `CreateView` sets in
+    /// its string field as it is, as [`crate::str_argument`] converts it, as the other views do.
     #[pyo3(name = "createOrReplaceTempView")]
-    fn create_or_replace_temp_view(&self, py: Python<'_>, name: &str) -> PyResult<()> {
+    fn create_or_replace_temp_view(&self, py: Python<'_>, name: &Bound<'_, PyAny>) -> PyResult<()> {
+        let name = crate::str_argument(name)?;
         interruptible(py, &self.dataframe.spark_session(), || {
             self.dataframe
-                .create_or_replace_temp_view(name)
+                .create_or_replace_temp_view(&name)
                 .map_err(Box::new)
         })
     }
@@ -1844,37 +1846,45 @@ impl PyDataFrame {
 
     /// Register as a temporary view (session-scoped).
     #[pyo3(name = "createTempView")]
-    fn create_temp_view(&self, py: Python<'_>, name: &str) -> PyResult<()> {
+    fn create_temp_view(&self, py: Python<'_>, name: &Bound<'_, PyAny>) -> PyResult<()> {
+        let name = crate::str_argument(name)?;
         interruptible(py, &self.dataframe.spark_session(), || {
-            self.dataframe.create_temp_view(name).map_err(Box::new)
+            self.dataframe.create_temp_view(&name).map_err(Box::new)
         })
     }
 
     /// Register as a global temporary view.
     #[pyo3(name = "createGlobalTempView")]
-    fn create_global_temp_view(&self, py: Python<'_>, name: &str) -> PyResult<()> {
+    fn create_global_temp_view(&self, py: Python<'_>, name: &Bound<'_, PyAny>) -> PyResult<()> {
+        let name = crate::str_argument(name)?;
         interruptible(py, &self.dataframe.spark_session(), || {
             self.dataframe
-                .create_global_temp_view(name)
+                .create_global_temp_view(&name)
                 .map_err(Box::new)
         })
     }
 
     /// Register as (or replace) a global temporary view.
     #[pyo3(name = "createOrReplaceGlobalTempView")]
-    fn create_or_replace_global_temp_view(&self, py: Python<'_>, name: &str) -> PyResult<()> {
+    fn create_or_replace_global_temp_view(
+        &self,
+        py: Python<'_>,
+        name: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        let name = crate::str_argument(name)?;
         interruptible(py, &self.dataframe.spark_session(), || {
             self.dataframe
-                .create_or_replace_global_temp_view(name)
+                .create_or_replace_global_temp_view(&name)
                 .map_err(Box::new)
         })
     }
 
     /// Deprecated alias for createOrReplaceTempView.
     #[pyo3(name = "registerTempTable")]
-    fn register_temp_table(&self, py: Python<'_>, name: &str) -> PyResult<()> {
+    fn register_temp_table(&self, py: Python<'_>, name: &Bound<'_, PyAny>) -> PyResult<()> {
+        let name = crate::str_argument(name)?;
         interruptible(py, &self.dataframe.spark_session(), || {
-            self.dataframe.register_temp_table(name).map_err(Box::new)
+            self.dataframe.register_temp_table(&name).map_err(Box::new)
         })
     }
 
@@ -2761,11 +2771,14 @@ impl PyDataFrame {
         PyDataFrameWriter::new(self.dataframe.write())
     }
 
-    /// The V2 writer interface (`df.writeTo("table")`).
+    /// The V2 writer interface (`df.writeTo("table")`), of the table as [`written_table`] takes
+    /// it.
     #[pyo3(name = "writeTo")]
-    fn write_to(&self, table: &str) -> PyDataFrameWriterV2 {
+    fn write_to(&self, table: &Bound<'_, PyAny>) -> PyDataFrameWriterV2 {
+        let (name, unsent_table) = written_table(table);
         PyDataFrameWriterV2 {
-            inner: WriterState::new(self.dataframe.write_to(table)),
+            inner: WriterState::new(self.dataframe.write_to(&name)),
+            unsent_table,
         }
     }
 
@@ -2787,11 +2800,14 @@ impl PyDataFrame {
         }
     }
 
-    /// Merge-into (`df.mergeInto("table", cond)`), returning a V2 merge builder.
+    /// Merge-into (`df.mergeInto("table", cond)`), returning a V2 merge builder, of the table as
+    /// [`written_table`] takes it.
     #[pyo3(name = "mergeInto")]
-    fn merge_into(&self, table: &str, condition: &PyColumn) -> PyMergeIntoWriter {
+    fn merge_into(&self, table: &Bound<'_, PyAny>, condition: &PyColumn) -> PyMergeIntoWriter {
+        let (name, unsent_table) = written_table(table);
         PyMergeIntoWriter {
-            inner: WriterState::new(self.dataframe.merge_into(table, condition.column.clone())),
+            inner: WriterState::new(self.dataframe.merge_into(&name, condition.column.clone())),
+            unsent_table,
         }
     }
 
@@ -3338,6 +3354,29 @@ pub(crate) fn column_or_name(col: &Bound<'_, PyAny>) -> PyResult<spark_connect::
     Err(not_expected_type(col, "col", "Column or str"))
 }
 
+/// The table of `writeTo` and `mergeInto`, which PySpark keeps as it is given and sets in the
+/// string field of the command of each write, which leaves the field unset for None: its name,
+/// as [`crate::str_argument`] converts it, or "" with the table that the field does not take,
+/// whose error each write raises again with [`check_written_table`], and not the call.
+fn written_table(table: &Bound<'_, PyAny>) -> (String, Option<Py<PyAny>>) {
+    if table.is_none() {
+        return (String::new(), None);
+    }
+    match crate::str_argument(table) {
+        Ok(name) => (name, None),
+        Err(_) => (String::new(), Some(table.clone().unbind())),
+    }
+}
+
+/// The error of a write of a table that its string field does not take ([`written_table`]),
+/// which PySpark's command raises after its input plan, before it sets the other fields.
+fn check_written_table(py: Python<'_>, unsent_table: &Option<Py<PyAny>>) -> PyResult<()> {
+    match unsent_table {
+        Some(table) => crate::str_argument(table.bind(py)).map(drop),
+        None => Ok(()),
+    }
+}
+
 /// Python wrapper for `MergeIntoWriter` (`df.mergeInto(...)`).
 ///
 /// Mirrors PySpark's mutable writer: `withSchemaEvolution` and every clause action
@@ -3347,6 +3386,9 @@ pub(crate) fn column_or_name(col: &Bound<'_, PyAny>) -> PyResult<spark_connect::
 #[pyclass(name = "MergeIntoWriter", module = "pyspark.sql.merge", weakref, dict)]
 pub struct PyMergeIntoWriter {
     inner: WriterState<spark_connect::MergeIntoWriter>,
+    /// The table of `mergeInto` that its string field does not take, which Python's garbage
+    /// collector sees ([`written_table`]).
+    unsent_table: Option<Py<PyAny>>,
 }
 
 /// Apply a clause action to the parent writer in place and return that same writer
@@ -3432,10 +3474,22 @@ impl PyMergeIntoWriter {
     }
 
     fn merge(&self, py: Python<'_>) -> PyResult<()> {
+        check_written_table(py, &self.unsent_table)?;
         let writer = self.inner.get();
         interruptible(py, &writer.spark_session(), || {
             writer.merge().map_err(Box::new)
         })
+    }
+
+    fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
+        if let Some(table) = &self.unsent_table {
+            visit.call(table)?;
+        }
+        Ok(())
+    }
+
+    fn __clear__(&mut self) {
+        self.unsent_table = None;
     }
 }
 
@@ -3836,7 +3890,7 @@ impl PyDataFrameWriter {
     fn save_as_table(
         &self,
         py: Python<'_>,
-        name: &str,
+        name: &Bound<'_, PyAny>,
         format: Option<&str>,
         mode: Option<&str>,
         partitionBy: Option<&Bound<'_, PyAny>>,
@@ -3845,8 +3899,13 @@ impl PyDataFrameWriter {
         let w = apply_write_common(self.inner.get(), format, mode, partitionBy, options)?;
         self.inner.set(w.clone());
         self.check_bucket_count(py)?;
+        let name = crate::readwriter::writer_table_name(name)?;
         interruptible(py, &w.spark_session(), || {
-            w.save_as_table(name).map_err(Box::new)
+            match &name {
+                Some(name) => w.save_as_table(name),
+                None => w.save(None),
+            }
+            .map_err(Box::new)
         })
     }
 
@@ -3856,7 +3915,7 @@ impl PyDataFrameWriter {
     fn insert_into(
         &self,
         py: Python<'_>,
-        tableName: &str,
+        tableName: &Bound<'_, PyAny>,
         overwrite: Option<bool>,
     ) -> PyResult<()> {
         let mut w = self.inner.get();
@@ -3866,8 +3925,13 @@ impl PyDataFrameWriter {
         // PySpark sets the overwrite/append mode on the writer itself.
         self.inner.set(w.clone());
         self.check_bucket_count(py)?;
+        let tableName = crate::readwriter::writer_table_name(tableName)?;
         interruptible(py, &w.spark_session(), || {
-            w.insert_into(tableName).map_err(Box::new)
+            match &tableName {
+                Some(name) => w.insert_into(name),
+                None => w.save(None),
+            }
+            .map_err(Box::new)
         })
     }
 
@@ -4113,6 +4177,9 @@ impl PyDataFrameWriter {
 )]
 pub struct PyDataFrameWriterV2 {
     inner: WriterState<spark_connect::readwriter::DataFrameWriterV2>,
+    /// The table of `writeTo` that its string field does not take, which Python's garbage
+    /// collector sees ([`written_table`]).
+    unsent_table: Option<Py<PyAny>>,
 }
 
 impl PyDataFrameWriterV2 {}
@@ -4212,6 +4279,7 @@ impl PyDataFrameWriterV2 {
     }
 
     fn create(&self, py: Python<'_>) -> PyResult<()> {
+        check_written_table(py, &self.unsent_table)?;
         let writer = self.inner.get();
         interruptible(py, &writer.spark_session(), || {
             writer.create().map_err(Box::new)
@@ -4219,6 +4287,7 @@ impl PyDataFrameWriterV2 {
     }
 
     fn replace(&self, py: Python<'_>) -> PyResult<()> {
+        check_written_table(py, &self.unsent_table)?;
         let writer = self.inner.get();
         interruptible(py, &writer.spark_session(), || {
             writer.replace().map_err(Box::new)
@@ -4227,6 +4296,7 @@ impl PyDataFrameWriterV2 {
 
     #[pyo3(name = "createOrReplace")]
     fn create_or_replace(&self, py: Python<'_>) -> PyResult<()> {
+        check_written_table(py, &self.unsent_table)?;
         let writer = self.inner.get();
         interruptible(py, &writer.spark_session(), || {
             writer.create_or_replace().map_err(Box::new)
@@ -4234,6 +4304,7 @@ impl PyDataFrameWriterV2 {
     }
 
     fn append(&self, py: Python<'_>) -> PyResult<()> {
+        check_written_table(py, &self.unsent_table)?;
         let writer = self.inner.get();
         interruptible(py, &writer.spark_session(), || {
             writer.append().map_err(Box::new)
@@ -4241,9 +4312,10 @@ impl PyDataFrameWriterV2 {
     }
 
     /// Overwrite the rows of `condition`, a Column or a column name, as PySpark's `F._to_col`,
-    /// else `NOT_EXPECTED_TYPE` of `col`.
+    /// else `NOT_EXPECTED_TYPE` of `col`, before the command sets the table.
     fn overwrite(&self, py: Python<'_>, condition: &Bound<'_, PyAny>) -> PyResult<()> {
         let (writer, condition) = (self.inner.get(), column_or_name(condition)?);
+        check_written_table(py, &self.unsent_table)?;
         interruptible(py, &writer.spark_session(), || {
             writer.overwrite(condition).map_err(Box::new)
         })
@@ -4251,10 +4323,22 @@ impl PyDataFrameWriterV2 {
 
     #[pyo3(name = "overwritePartitions")]
     fn overwrite_partitions(&self, py: Python<'_>) -> PyResult<()> {
+        check_written_table(py, &self.unsent_table)?;
         let writer = self.inner.get();
         interruptible(py, &writer.spark_session(), || {
             writer.overwrite_partitions().map_err(Box::new)
         })
+    }
+
+    fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
+        if let Some(table) = &self.unsent_table {
+            visit.call(table)?;
+        }
+        Ok(())
+    }
+
+    fn __clear__(&mut self) {
+        self.unsent_table = None;
     }
 }
 

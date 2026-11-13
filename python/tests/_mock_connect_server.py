@@ -311,6 +311,7 @@ def serve(connection):
             self.release_execute_requests = []
             self.execute_payload = b""
             self.execute_payloads = None
+            self.query_payload = None
             self.execute_failure = None
             self.execute_error = None
             self.stream_failure = None
@@ -454,6 +455,10 @@ def serve(connection):
         # With `execute_payloads` set (a list of raw ExecutePlanResponse fields), the execution
         # streams one response of each, r1, r2, ..., instead of `execute_payload`.
         execute_payloads = None
+        # With `query_payload` set (raw ExecutePlanResponse fields), the execution of a DataFrame's
+        # query, a plan with no command, such as the label query of a LogisticRegression fit,
+        # streams it instead of the payloads of a command.
+        query_payload = None
         execute_failure = None
         # With `stream_failure` set to a status code name, or a (name, delay in ms) of a failure
         # with that RetryInfo delay, ExecutePlan streams its responses and then fails with it,
@@ -719,6 +724,10 @@ def serve(connection):
             payloads = (
                 [self.execute_payload] if self.execute_payloads is None else self.execute_payloads
             )
+            # ExecutePlanRequest.plan=3, of which Plan.command=2 is set for a command only.
+            plan = parse_message(parse_message(request).get(3, [b""])[0])
+            if self.query_payload is not None and 2 not in plan:
+                payloads = [self.query_payload]
             for index, payload in enumerate(payloads, 1):
                 yield header + message_field(13, f"r{index}") + payload
             if self.stream_failure:

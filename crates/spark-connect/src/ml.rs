@@ -778,6 +778,17 @@ impl StandardScaler {
         self.params.output_col_or_default(&self.operator.uid)
     }
 
+    /// Whether to center the features to mean 0 before scaling (default: false, as in Spark).
+    pub fn set_with_mean(mut self, value: bool) -> Self {
+        self.params = self.params.set_param_bool("withMean", value);
+        self
+    }
+
+    /// Whether the features are centered to mean 0 before scaling (default: false).
+    pub fn with_mean(&self) -> bool {
+        self.params.bool_or("withMean", false)
+    }
+
     fn model_from_info(
         &self,
         info: proto::ml_command_result::MlOperatorInfo,
@@ -7440,6 +7451,28 @@ mod tests {
 
         assert_eq!(scaler.input_col(), Some("my_features"));
         assert_eq!(scaler.output_col(), "my_scaled");
+    }
+
+    #[test]
+    fn test_standard_scaler_with_mean() {
+        // As Spark's default, the features are not centered unless the setter says so.
+        let scaler = StandardScaler::new();
+        assert!(!scaler.with_mean());
+        assert!(scaler.params().get_param("withMean").is_none());
+
+        let scaler = StandardScaler::new().set_with_mean(true);
+        assert!(scaler.with_mean());
+        let bool_param = scaler.params().get_param("withMean").unwrap();
+        let Some(proto::expression::ExprType::Literal(literal)) = &bool_param.expr_type else {
+            panic!("withMean is not a literal");
+        };
+        assert_eq!(
+            literal.literal_type,
+            Some(proto::expression::literal::LiteralType::Boolean(true))
+        );
+
+        let scaler = scaler.set_with_mean(false);
+        assert!(!scaler.with_mean());
     }
 
     #[test]

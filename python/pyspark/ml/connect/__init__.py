@@ -6,10 +6,9 @@ Re-exports the estimator/transformer/evaluator/pipeline classes so that both
 (`pyspark.ml.connect.feature`, `.classification`, `.evaluation`) work.
 """
 from pyspark.ml.connect.feature import (
+    ArrayAssembler,
     StandardScaler,
     MaxAbsScaler,
-    StringIndexer,
-    VectorAssembler,
 )
 from pyspark.ml.connect.classification import (
     GBTClassifier,
@@ -47,6 +46,13 @@ from pyspark._pyspark import MLModel
 from pyspark.ml.connect.base import Estimator, Transformer, Evaluator, Model
 from pyspark.ml.connect import feature, evaluation, tuning
 
+# feature.py is the byte-identical upstream module, so the native StringIndexer and VectorAssembler
+# of the drop-in are set on it here, where `from pyspark.ml.connect.feature import ...` finds them.
+from pyspark._pyspark import StringIndexer, VectorAssembler
+
+feature.StringIndexer = StringIndexer
+feature.VectorAssembler = VectorAssembler
+
 __all__ = [
     # Reference `pyspark.ml.connect` public surface.
     "Estimator",
@@ -61,6 +67,7 @@ __all__ = [
     # Fork-additional concrete estimators/evaluators (Rust-backed).
     "StandardScaler",
     "MaxAbsScaler",
+    "ArrayAssembler",
     "StringIndexer",
     "VectorAssembler",
     "LogisticRegression",

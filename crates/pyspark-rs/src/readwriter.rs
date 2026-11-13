@@ -134,6 +134,16 @@ pub(crate) fn writer_path(path: &Bound<'_, PyAny>) -> PyResult<String> {
     crate::str_argument(path)
 }
 
+/// The table of `saveAsTable` and `insertInto`, which PySpark's `WriteOperation` sets in its
+/// string field after the bucket count and before it checks the save mode, as [`writer_path`]
+/// converts a path. None sets no table, so that the write is that of `save()` without a path.
+pub(crate) fn writer_table_name(name: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
+    if name.is_none() {
+        return Ok(None);
+    }
+    crate::str_argument(name).map(Some)
+}
+
 /// The columns of `df.write.bucketBy(numBuckets, col, *cols)` and `sortBy(col, *cols)`, as
 /// PySpark's: column names, or a list or tuple of them alone.
 pub(crate) fn writer_columns(
@@ -401,19 +411,22 @@ impl PyDataFrameReader {
         Ok(PyDataFrame::new(r.load_paths(paths)))
     }
 
-    /// Read a table by name.
-    fn table(&self, tableName: &str) -> PyResult<PyDataFrame> {
-        Ok(PyDataFrame::new(self.inner.clone().table(tableName)))
+    /// Read a table by name, which PySpark's `Read` plan sets in its string field as it is, as
+    /// [`crate::str_argument`] converts it, as `changes` and those of the stream reader do.
+    fn table(&self, tableName: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        let tableName = crate::str_argument(tableName)?;
+        Ok(PyDataFrame::new(self.inner.clone().table(&tableName)))
     }
 
     /// Read the CDC changes of a named table. Mirrors `DataFrameReader.changes`, which raises an
     /// `AnalysisException` of `_LEGACY_ERROR_TEMP_1189` for a reader of a schema.
     #[allow(non_snake_case)]
-    fn changes(&self, py: Python<'_>, tableName: &str) -> PyResult<PyDataFrame> {
+    fn changes(&self, py: Python<'_>, tableName: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
         if !self.inner.get_schema().is_empty() {
             return Err(changes_of_schema_error(py));
         }
-        Ok(PyDataFrame::new(self.inner.clone().changes(tableName)))
+        let tableName = crate::str_argument(tableName)?;
+        Ok(PyDataFrame::new(self.inner.clone().changes(&tableName)))
     }
 
     /// Read JSON file(s) - full pyspark signature; each named option is

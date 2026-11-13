@@ -7610,6 +7610,317 @@ def test_writers_take_a_bytes_path_as_pyspark(mock_connect):
     assert parse_message(sent_command()[6][0])[11] == [b"s"]
 
 
+def test_catalog_takes_bytes_names_and_paths_as_pyspark(mock_connect):
+    # As PySpark's catalog, which sets each name, pattern and path in a string field of its plan
+    # as it is, which protobuf's default backend (upb) converts: bytes are sent decoded, bytes
+    # that are not UTF-8 raise the UnicodeDecodeError of their decoding, and another object the
+    # TypeError of the field, before any request. The mock answers each request with no rows.
+    spark, service = mock_connect
+    catalog = spark.catalog
+    # Relation.catalog=200 -> the Catalog operation of each call, of these string fields.
+    for call, operation, fields in [
+        (lambda: catalog.setCurrentCatalog(b"c"), 25, {1: [b"c"]}),
+        (lambda: catalog.listCatalogs(b"c*"), 26, {1: [b"c*"]}),
+        (lambda: catalog.setCurrentDatabase(b"d"), 2, {1: [b"d"]}),
+        (lambda: catalog.listDatabases(b"d*"), 3, {1: [b"d*"]}),
+        (lambda: catalog.getDatabase(b"d"), 7, {1: [b"d"]}),
+        (lambda: catalog.databaseExists(b"d"), 10, {1: [b"d"]}),
+        (lambda: catalog.listTables(b"d", b"t*"), 4, {1: [b"d"], 2: [b"t*"]}),
+        (lambda: catalog.getTable(b"t"), 8, {1: [b"t"]}),
+        (lambda: catalog.tableExists(b"t"), 11, {1: [b"t"]}),
+        (lambda: catalog.listFunctions(b"d", b"f*"), 5, {1: [b"d"], 2: [b"f*"]}),
+        (lambda: catalog.getFunction(b"f"), 9, {1: [b"f"]}),
+        (lambda: catalog.functionExists(b"f"), 12, {1: [b"f"]}),
+        (lambda: catalog.listColumns(b"t"), 6, {1: [b"t"]}),
+        (lambda: catalog.dropTempView(b"v"), 15, {1: [b"v"]}),
+        (lambda: catalog.dropGlobalTempView(b"v"), 16, {1: [b"v"]}),
+        (lambda: catalog.recoverPartitions(b"t"), 17, {1: [b"t"]}),
+        (lambda: catalog.isCached(b"t"), 18, {1: [b"t"]}),
+        (lambda: catalog.cacheTable(b"t"), 19, {1: [b"t"]}),
+        (lambda: catalog.uncacheTable(b"t"), 20, {1: [b"t"]}),
+        (lambda: catalog.refreshTable(b"t"), 22, {1: [b"t"]}),
+        (lambda: catalog.refreshByPath(b"/p"), 23, {1: [b"/p"]}),
+        (lambda: catalog.dropTable(b"t"), 27, {1: [b"t"]}),
+        (lambda: catalog.dropView(b"v"), 28, {1: [b"v"]}),
+        # CreateDatabase.properties=3, a map of strings, of entries of key=1 and value=2.
+        (lambda: catalog.createDatabase(b"d", properties={b"k": b"v"}), 29,
+         {1: [b"d"], 3: [message_field(1, "k") + message_field(2, "v")]}),
+        (lambda: catalog.dropDatabase(b"d"), 30, {1: [b"d"]}),
+        (lambda: catalog.listPartitions(b"t"), 31, {1: [b"t"]}),
+        (lambda: catalog.listViews(b"d", b"v*"), 32, {1: [b"d"], 2: [b"v*"]}),
+        (lambda: catalog.getTableProperties(b"t"), 33, {1: [b"t"]}),
+        (lambda: catalog.getCreateTableString(b"t"), 34, {1: [b"t"]}),
+        (lambda: catalog.truncateTable(b"t"), 35, {1: [b"t"]}),
+        (lambda: catalog.analyzeTable(b"t"), 36, {1: [b"t"]}),
+    ]:
+        requests = len(service.execute_requests)
+        with contextlib.suppress(Exception):
+            call()
+        assert len(service.execute_requests) == requests + 1
+        assert _sent_catalog(service.execute_requests[-1], operation) == fields
+    requests = len(service.execute_requests)
+    for name, error in [(b"\xff", UnicodeDecodeError), (1, TypeError)]:
+        for call in [
+            lambda: catalog.setCurrentDatabase(name),
+            lambda: catalog.listTables(pattern=name),
+            lambda: catalog.getTable(name),
+            lambda: catalog.cacheTable(name),
+            lambda: catalog.refreshByPath(name),
+            lambda: catalog.dropTable(name),
+            lambda: catalog.createDatabase("d", properties={"k": name}),
+            lambda: catalog.listViews(name),
+        ]:
+            with pytest.raises(error) as e:
+                call()
+            assert type(e.value) is error
+    # None is the TypeError of a field that PySpark's plan sets, while the constructor of the
+    # message of cacheTable, dropTable, dropView, createDatabase and dropDatabase leaves it unset.
+    with pytest.raises(TypeError, match="^bad argument type for built-in operation$"):
+        catalog.getTable(None)
+    assert len(service.execute_requests) == requests
+    for call, operation in [
+        (lambda: catalog.cacheTable(None), 19),
+        (lambda: catalog.dropTable(None), 27),
+        (lambda: catalog.dropView(None), 28),
+        (lambda: catalog.createDatabase(None), 29),
+        (lambda: catalog.dropDatabase(None), 30),
+    ]:
+        with contextlib.suppress(Exception):
+            call()
+        assert _sent_catalog(service.execute_requests[-1], operation) == {}
+
+
+def test_catalog_converts_its_names_in_the_order_of_pyspark(mock_connect):
+    from pyspark.errors import PySparkTypeError
+
+    spark, service = mock_connect
+    catalog = spark.catalog
+    requests = len(service.execute_requests)
+    # createTable checks the schema, and then its plan sets the table, the path, the source and
+    # the description, in this order, before the options.
+    with pytest.raises(PySparkTypeError) as error:
+        catalog.createTable(1, schema=5)
+    assert error.value.getCondition() == "NOT_EXPECTED_TYPE"
+    for kwargs, error in [
+        ({"tableName": b"\xff", "path": 1}, UnicodeDecodeError),
+        ({"tableName": "t", "path": b"\xff", "source": 1}, UnicodeDecodeError),
+        ({"tableName": "t", "path": 1, "source": b"\xff"}, TypeError),
+        ({"tableName": "t", "source": 1, "description": b"\xff"}, TypeError),
+        ({"tableName": "t", "description": b"\xff", "k": 1}, UnicodeDecodeError),
+    ]:
+        with pytest.raises(error) as e:
+            catalog.createTable(**kwargs)
+        assert type(e.value) is error
+    # createExternalTable warns first, and the deprecated dbName warns before the names are set.
+    with pytest.warns(FutureWarning, match="createExternalTable is deprecated"):
+        with pytest.raises(UnicodeDecodeError):
+            catalog.createExternalTable(b"\xff")
+    for call in [
+        lambda: catalog.tableExists(1, 2),
+        lambda: catalog.functionExists(1, 2),
+        lambda: catalog.listColumns(1, 2),
+    ]:
+        with pytest.warns(FutureWarning, match="`dbName` has been deprecated"):
+            with pytest.raises(TypeError, match="^bad argument type for built-in operation$"):
+                call()
+    # cacheTable sets the table before it converts the storage level.
+    with pytest.raises(UnicodeDecodeError):
+        catalog.cacheTable(b"\xff", "not a level")
+    assert len(service.execute_requests) == requests
+    # listViews of a pattern without a database asks for the current database first.
+    with contextlib.suppress(Exception):
+        catalog.listViews(pattern=1)
+    assert len(service.execute_requests) == requests + 1
+    assert _sent_catalog(service.execute_requests[-1], 1) == {}
+    catalog.createTable(b"t", path=b"/p", source=b"parquet", description=b"d")
+    # Catalog.create_table=14: table_name=1, path=2, source=3 and description=4.
+    create = _sent_catalog(service.execute_requests[-1], 14)
+    assert (create[1], create[2], create[3], create[4]) == ([b"t"], [b"/p"], [b"parquet"], [b"d"])
+    with pytest.warns(FutureWarning):
+        catalog.createExternalTable(b"e", path=b"/e")
+    create = _sent_catalog(service.execute_requests[-1], 14)
+    assert (create[1], create[2]) == ([b"e"], [b"/e"])
+
+
+def test_tables_of_the_writers_readers_and_views_take_bytes_as_pyspark(mock_connect):
+    # As PySpark, which sets the table of saveAsTable, insertInto, read.table, changes and the
+    # stream reader's, and the name of a view, in a string field of its plan as it is: bytes are
+    # sent decoded, as protobuf's default backend (upb) converts them.
+    from pyspark.errors import AnalysisException, PySparkTypeError
+
+    spark, service = mock_connect
+    df = spark.range(1)
+
+    def sent_command():
+        # ExecutePlanRequest.plan=3 -> Plan.command=2.
+        plan = parse_message(parse_message(service.execute_requests[-1])[3][0])
+        return parse_message(plan[2][0])
+
+    # Command.write_operation=2 -> WriteOperation.table=4 -> SaveTable.table_name=1 and
+    # save_method=2 (TABLE_SAVE_METHOD_SAVE_AS_TABLE=1, TABLE_SAVE_METHOD_INSERT_INTO=2).
+    df.write.saveAsTable(b"t")
+    assert parse_message(parse_message(sent_command()[2][0])[4][0]) == {1: [b"t"], 2: [1]}
+    df.write.insertInto(b"t")
+    assert parse_message(parse_message(sent_command()[2][0])[4][0]) == {1: [b"t"], 2: [2]}
+    # The table of None is no table, so that the write is that of save() without a path
+    # (WriteOperation.path=3), here of WriteOperation.source=2.
+    for write in [df.write.format("noop").saveAsTable, df.write.format("noop").insertInto]:
+        write(None)
+        operation = parse_message(sent_command()[2][0])
+        assert 3 not in operation and 4 not in operation and operation[2] == [b"noop"]
+    # Command.create_dataframe_view=3 -> CreateDataFrameViewCommand.name=2.
+    for create in [df.createTempView, df.createOrReplaceTempView, df.createGlobalTempView,
+                   df.createOrReplaceGlobalTempView, df.registerTempTable]:
+        create(b"v")
+        assert parse_message(sent_command()[3][0])[2] == [b"v"]
+    # Relation.read=2 -> Read.named_table=1 -> NamedTable.unparsed_identifier=1, and
+    # Relation.relation_changes=46 -> RelationChanges.unparsed_identifier=1, in the requests of
+    # the schema.
+    for read in [spark.read.table, spark.readStream.table]:
+        assert read(b"t").schema is not None
+        named_table = parse_message(_sent_relation(service.analyze_requests[-1], 2)[1][0])
+        assert named_table[1] == [b"t"]
+    for changes in [spark.read.changes, spark.readStream.changes]:
+        assert changes(b"t").schema is not None
+        assert _sent_relation(service.analyze_requests[-1], 46)[1] == [b"t"]
+    requests = (len(service.analyze_requests), len(service.execute_requests))
+    for name, error in [(b"\xff", UnicodeDecodeError), (1, TypeError)]:
+        for call in [
+            lambda: df.write.saveAsTable(name),
+            lambda: df.write.insertInto(name),
+            lambda: df.createTempView(name),
+            lambda: df.createOrReplaceGlobalTempView(name),
+            lambda: df.registerTempTable(name),
+            lambda: spark.read.table(name),
+            lambda: spark.readStream.table(name),
+            lambda: spark.read.changes(name),
+            lambda: spark.readStream.changes(name),
+        ]:
+            with pytest.raises(error) as e:
+                call()
+            assert type(e.value) is error
+    # The write sets the table after the bucket count and before it checks the save mode.
+    with pytest.raises(UnicodeDecodeError):
+        df.write.mode("bogus").insertInto(b"\xff")
+    with pytest.raises(TypeError, match="^Field spark.connect.WriteOperation.BucketBy.num_buckets"):
+        df.write.bucketBy(True, "id").saveAsTable(b"\xff")
+    # changes checks the schema of its reader first.
+    for reader in [spark.read, spark.readStream]:
+        with pytest.raises(AnalysisException) as error:
+            reader.schema("a INT").changes(b"\xff")
+        assert error.value.getCondition() == "_LEGACY_ERROR_TEMP_1189"
+    # spark.table still raises NOT_EXPECTED_TYPE for a name that is not a str, as PySpark's.
+    with pytest.raises(PySparkTypeError) as error:
+        spark.table(b"t")
+    assert error.value.getCondition() == "NOT_EXPECTED_TYPE"
+    assert (len(service.analyze_requests), len(service.execute_requests)) == requests
+
+
+def test_write_to_and_merge_into_set_their_table_at_each_write_as_pyspark(mock_connect):
+    # As PySpark's DataFrameWriterV2 and MergeIntoWriter, which keep the table as it is given and
+    # set it in the string field of the command of each write: bytes are sent decoded, None
+    # leaves the field unset, and a table that the field does not take fails each write, and
+    # not the call that gives it.
+    import gc
+    import weakref
+
+    from pyspark.errors import PySparkTypeError
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+    df = spark.range(1)
+
+    def sent_command():
+        # ExecutePlanRequest.plan=3 -> Plan.command=2.
+        plan = parse_message(parse_message(service.execute_requests[-1])[3][0])
+        return parse_message(plan[2][0])
+
+    # Command.write_operation_v2=4 -> WriteOperationV2.table_name=2, mode=7 (MODE_APPEND=4).
+    df.writeTo(b"t").append()
+    operation = parse_message(sent_command()[4][0])
+    assert operation[2] == [b"t"] and operation[7] == [4]
+    df.writeTo(None).append()
+    assert 2 not in parse_message(sent_command()[4][0])
+    # Command.merge_into_table_command=16 -> MergeIntoTableCommand.target_table_name=1.
+    df.mergeInto(b"t", F.lit(True)).whenMatched().delete().merge()
+    assert parse_message(sent_command()[16][0])[1] == [b"t"]
+    requests = len(service.execute_requests)
+    message = "^bad argument type for built-in operation$"
+    writer = df.writeTo(1).option("k", "v")
+    for write in [writer.create, writer.replace, writer.createOrReplace, writer.append,
+                  writer.overwritePartitions, lambda: writer.overwrite(F.lit(True))]:
+        with pytest.raises(TypeError, match=message):
+            write()
+    writer = df.writeTo(b"\xff")
+    with pytest.raises(UnicodeDecodeError):
+        writer.append()
+    # overwrite converts its condition before the command sets the table.
+    with pytest.raises(PySparkTypeError) as error:
+        writer.overwrite(123)
+    assert error.value.getCondition() == "NOT_EXPECTED_TYPE"
+    merge = df.mergeInto(1, F.lit(True)).whenNotMatched().insertAll()
+    for _ in range(2):
+        with pytest.raises(TypeError, match=message):
+            merge.merge()
+    with pytest.raises(UnicodeDecodeError):
+        df.mergeInto(b"\xff", F.lit(True)).whenMatched().delete().merge()
+    assert len(service.execute_requests) == requests
+
+    # The writers keep such a table where Python's garbage collector sees it, which frees a
+    # reference cycle through it.
+    class Table:
+        pass
+
+    for write in [lambda table: df.writeTo(table), lambda table: df.mergeInto(table, F.lit(1))]:
+        table = Table()
+        table.writer = write(table)
+        ref = weakref.ref(table.writer)
+        del table
+        gc.collect()
+        assert ref() is None
+
+
+def test_stream_writer_skips_a_false_path_and_table_as_pyspark(mock_connect):
+    # As PySpark's `_start_internal`, which sets the path of start and the table of toTable in
+    # the string fields of its command only `if path:` and `if tableName:`: a false one, such as
+    # 0 or "", starts the query on the sink of its format, and another is converted as protobuf's
+    # default backend (upb) converts a string field.
+    spark, service = mock_connect
+    # ExecutePlanResponse.write_stream_operation_start_result=8: query_id=1 (id=1, run_id=2).
+    service.execute_payload = message_field(
+        8, message_field(1, message_field(1, "q") + message_field(2, "r")))
+    stream = spark.readStream.format("rate").load().writeStream.format("noop")
+
+    def sent_start():
+        # ExecutePlanRequest.plan=3 -> Plan.command=2 -> Command.write_stream_operation_start=6.
+        plan = parse_message(parse_message(service.execute_requests[-1])[3][0])
+        return parse_message(parse_message(plan[2][0])[6][0])
+
+    for false in [0, False, [], {}, "", b"", None]:
+        for start in [stream.start, stream.toTable]:
+            start(false)
+            # WriteStreamOperationStart.path=11 and table_name=12.
+            assert not {11, 12} & set(sent_start())
+    stream.toTable(b"t")
+    assert sent_start()[12] == [b"t"]
+    requests = len(service.execute_requests)
+    for call in [lambda: stream.start([1]), lambda: stream.toTable(1),
+                 lambda: stream.toTable([1])]:
+        with pytest.raises(TypeError, match="^bad argument type for built-in operation$"):
+            call()
+    with pytest.raises(UnicodeDecodeError):
+        stream.toTable(b"\xff")
+
+    class Ambiguous:
+        def __bool__(self):
+            raise ValueError("ambiguous")
+
+    for start in [stream.start, stream.toTable]:
+        with pytest.raises(ValueError, match="^ambiguous$"):
+            start(Ambiguous())
+    assert len(service.execute_requests) == requests
+
+
 def test_readers_keep_their_settings_when_the_path_is_not_a_str_as_pyspark(mock_connect):
     # As PySpark, whose format readers set the options and the format before they check the path,
     # which is an AssertionError for a path that is not a str.

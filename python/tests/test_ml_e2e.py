@@ -75,26 +75,27 @@ def test_ml_connect_random_forest_null_bootstrap_fits_as_pyspark(session):
 
 
 def test_ml_connect_scalers_fit_and_transform_as_pyspark(session):
-    # pyspark.ml.connect's StandardScaler, MaxAbsScaler and StringIndexer: the server fits each one
-    # and caches the model, and the transform of the model gives the values of Spark's scalers.
-    # The scalers take a vector too, which PySpark's do not, and output an array<double>, as
-    # PySpark's do (see test_ml_connect_scalers_and_estimators_take_the_array_columns_of_pyspark).
+    # pyspark.ml.connect's StandardScaler and MaxAbsScaler, which are PySpark's own classes: they
+    # fit with summarize_dataframe and transform with closures on the server, and output an
+    # array<double>, of the values of PySpark 4.3.0. The native StringIndexer is fitted and cached
+    # by the server, and its transform gives its indexes.
     from pyspark.ml.connect.feature import MaxAbsScaler, StandardScaler, StringIndexer
-    from pyspark.ml.connect.functions import array_to_vector
 
     rows = [(1, [2.0, 4.0], "a"), (2, [4.0, 2.0], "b"), (3, [6.0, 6.0], "a")]
     df = session.createDataFrame(rows, "x int, f array<double>, s string")
-    df = df.withColumn("v", array_to_vector("f"))
 
     def rows(frame, column):
         return [row[column] for row in frame.orderBy("x").collect()]
 
     # (x - mean) / std, of the means 4 and the standard deviations 2 of the columns.
-    scaled = StandardScaler(inputCol="v", outputCol="o").fit(df).transform(df)
+    scaled = StandardScaler(inputCol="f", outputCol="o").fit(df).transform(df)
     assert scaled.schema["o"].dataType.simpleString() == "array<double>"
-    assert rows(scaled, "o") == [[-1.0, 0.0], [0.0, -1.0], [1.0, 1.0]]
+    # The values of PySpark 4.3.0, of its float64 arithmetic: (x - mean) / std, which rounds.
+    expected = [[-0.9999999999999998, 0.0], [0.0, -0.9999999999999998], [1.0, 1.0]]
+    for got, want in zip(rows(scaled, "o"), expected):
+        assert got == pytest.approx(want, rel=1e-12, abs=1e-12)
 
-    maxabs = MaxAbsScaler(inputCol="v", outputCol="o").fit(df).transform(df)
+    maxabs = MaxAbsScaler(inputCol="f", outputCol="o").fit(df).transform(df)
     assert maxabs.schema["o"].dataType.simpleString() == "array<double>"
     values = rows(maxabs, "o")
     assert values[0] == pytest.approx([1 / 3, 2 / 3]) and values[2] == [1.0, 1.0]
@@ -261,12 +262,10 @@ def _native_estimators():
         LinearRegression,
         LinearSVC,
         LogisticRegression,
-        MaxAbsScaler,
         MultilayerPerceptronClassifier,
         NaiveBayes,
         RandomForestClassifier,
         RandomForestRegressor,
-        StandardScaler,
         StringIndexer,
     )
 
@@ -291,8 +290,6 @@ def _native_estimators():
         (LogisticRegression(maxIter=2), ml + "classification.LogisticRegressionModel"),
         (RandomForestClassifier(numTrees=2), ml + "classification.RandomForestClassificationModel"),
         (RandomForestRegressor(numTrees=2), ml + "regression.RandomForestRegressionModel"),
-        (StandardScaler(inputCol="features", outputCol="o"), ml + "feature.StandardScalerModel"),
-        (MaxAbsScaler(inputCol="features", outputCol="o"), ml + "feature.MaxAbsScalerModel"),
         (StringIndexer(inputCol="s", outputCol="o"), ml + "feature.StringIndexerModel"),
     ]
 
@@ -499,10 +496,10 @@ def test_ml_connect_evaluators_take_the_columns_and_the_pandas_frames_of_pyspark
 
 def test_ml_connect_scalers_and_estimators_take_the_array_columns_of_pyspark(session):
     # The examples of PySpark's MaxAbsScaler, StandardScaler and LogisticRegression, whose
-    # pyspark.ml.connect classes compute on arrays: an array of numbers is sent as the vector that
-    # the JVM estimators and models read, the transform keeps the array as it is, and a scaler
-    # outputs an array<double>, as PySpark's, with the values of PySpark 4.3.0. StandardScaler
-    # scales to (x - mean) / std, as PySpark's, with the withMean of the JVM scaler.
+    # pyspark.ml.connect classes compute on arrays: the scalers are PySpark's own, and output an
+    # array<double>, with the values of PySpark 4.3.0 (StandardScaler scales to (x - mean) / std).
+    # An array of numbers is sent to the JVM estimator that LogisticRegression is, as the vector
+    # that it reads, and the transform keeps the array as it is.
     from pyspark.ml.connect.classification import LogisticRegression
     from pyspark.ml.connect.clustering import KMeans
     from pyspark.ml.connect.feature import MaxAbsScaler, StandardScaler
@@ -527,11 +524,14 @@ def test_ml_connect_scalers_and_estimators_take_the_array_columns_of_pyspark(ses
         assert transformed.schema.simpleString() == (
             f"struct<features:array<{element}>,scaled_features:array<double>>"
         )
-        assert [row.scaled_features for row in transformed.collect()] == [
+        # The values of PySpark 4.3.0, which the decimals of the fit give with their rounding.
+        expected = [
             [0.3333333333333333, 1.0],
             [0.6666666666666666, -0.5],
             [-1.0, -1.0],
-        ], element
+        ]
+        for row, want in zip(transformed.collect(), expected):
+            assert row.scaled_features == pytest.approx(want, rel=1e-12), element
 
     scaler = StandardScaler(inputCol="features", outputCol="scaled_features")
     transformed = scaler.fit(dataset).transform(dataset)
@@ -581,6 +581,40 @@ def test_ml_connect_scalers_and_estimators_take_the_array_columns_of_pyspark(ses
     clusters = KMeans(featuresCol="scaled", k=2, seed=1).fit(scaled).transform(scaled)
     assert clusters.schema["scaled"].dataType.simpleString() == "array<double>"
     assert len({row.prediction for row in clusters.collect()}) == 2
+
+
+def test_ml_connect_logistic_regression_checks_its_labels_as_pyspark(session):
+    # As PySpark's LogisticRegression._fit, of the distinct labels of its query, which skips a
+    # null label: at least two, each an integer in [0, numClasses). The ValueErrors are those of
+    # PySpark 4.3.0, raised before the fit, which the JVM estimator would otherwise fit or reject.
+    from pyspark.ml.connect.classification import LogisticRegression
+
+    features = [[1.0, 2.0], [2.0, -1.0], [-3.0, -2.0], [-1.0, -2.0]]
+
+    def labeled(labels, label_type="double"):
+        rows = [(f, label) for f, label in zip(features, labels)]
+        return session.createDataFrame(rows, f"features array<double>, label {label_type}")
+
+    too_few = "Training dataset distinct labels must >= 2."
+    not_index = "Training labels must be integers in [0, numClasses)."
+    for labels, message in [
+        ([1.0, 1.0, 1.0, 1.0], too_few),
+        ([0.0, 0.0, 0.0, 0.0], too_few),
+        ([0.0, 0.0, 2.0, 2.0], not_index),
+        ([1.0, 1.0, 2.0, 2.0], not_index),
+        ([-1.0, -1.0, 1.0, 1.0], not_index),
+        ([0.5, 0.5, 1.0, 1.0], not_index),
+    ]:
+        with pytest.raises(ValueError) as error:
+            LogisticRegression(maxIter=5).fit(labeled(labels))
+        assert str(error.value) == message, labels
+    with pytest.raises(ValueError) as error:
+        LogisticRegression(maxIter=5).fit(labeled(["a", "a", "b", "b"], "string"))
+    assert str(error.value) == not_index
+    # The labels of a DataFrame of no rows have no distinct labels.
+    with pytest.raises(ValueError) as error:
+        LogisticRegression(maxIter=5).fit(labeled([], "double"))
+    assert str(error.value) == too_few
 
 
 def test_ml_connect_logistic_regression_and_scalers_output_the_columns_of_pyspark(session):
@@ -647,8 +681,8 @@ def test_ml_connect_estimators_fit_and_transform_the_pandas_frames_of_pyspark(se
     # As PySpark's pyspark.ml.connect classes, whose fit and transform take a pandas DataFrame:
     # here it is sent with createDataFrame of the active session, and the transform is a shallow
     # copy of it with the output columns appended, of its index, of the dtypes and the cells of
-    # PySpark's (an int64 prediction, ndarrays of probabilities and of scaled values), of the
-    # values of the JVM. PySpark's LogisticRegression fits no pandas DataFrame. The native classes
+    # PySpark's (an int64 prediction, ndarrays of probabilities and of scaled values). PySpark's
+    # LogisticRegression fits no pandas DataFrame. The native classes
     # that PySpark's pyspark.ml.connect does not have are sent the whole pandas DataFrame, and
     # append the columns that their JVM models append, which check them.
     import numpy as np
@@ -732,9 +766,9 @@ def test_ml_connect_scaler_fit_with_its_input_as_output_as_pyspark(session):
 def test_ml_connect_scalers_transform_the_nan_of_pandas_frames_as_pyspark(session):
     # As PySpark computes the transform of a pandas DataFrame locally, a NaN element of its arrays
     # stays NaN, and the scaled values of the other elements are PySpark's. The values are those of
-    # PySpark 4.3.0. The fit of a StandardScaler on a pandas DataFrame with a NaN propagates it, as
-    # PySpark's numpy does. The fit of a MaxAbsScaler skips the NaN, as the JVM's summarizer does,
-    # which PySpark's numpy does not, so that fit is not checked here.
+    # PySpark 4.3.0. The fits of the scalers on a pandas DataFrame are local, as PySpark's are, so
+    # a NaN propagates into their scales (the maximum of MaxAbsScaler too). The fit of a Spark
+    # DataFrame is the server's summary, which skips a NaN element of the maximum.
     import numpy as np
     import pandas as pd
     from pyspark.ml.connect.feature import MaxAbsScaler, StandardScaler
@@ -765,6 +799,10 @@ def test_ml_connect_scalers_transform_the_nan_of_pandas_frames_as_pyspark(sessio
     check(
         StandardScaler(inputCol="x", outputCol="o").fit(pdf).transform(pdf.copy()),
         [[nan, -0.9491579957524987], [nan, -0.0949157995752498], [nan, 1.0440737953277488]],
+    )
+    check(
+        MaxAbsScaler(inputCol="x", outputCol="o").fit(pdf).transform(pdf.copy()),
+        [[nan, 0.125], [nan, 0.5], [nan, 1.0]],
     )
 
 
