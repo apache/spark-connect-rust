@@ -605,3 +605,29 @@ This native API covers construction, setters, fit and DataFrame transform.
 Cluster-center/summary/cost inspection, single-vector prediction and persistence
 are outside this surface. The vendored `pyspark.ml.clustering` API retains its
 existing implementation.
+
+
+## Native GaussianMixture
+
+Rust `ml::GaussianMixture` and `ml::GaussianMixtureModel` train Gaussian mixture
+models and produce cluster assignments and component probabilities through Spark
+Connect's cached-model protocol. Python exports the native estimator from
+`pyspark.ml.connect` and `pyspark.ml.connect.clustering`; `fit` returns the shared
+native `MLModel`.
+
+All nine constructor parameters and named setters are supported: `featuresCol`,
+`predictionCol`, `k`, `probabilityCol`, `tol`, `maxIter`, `seed`, `aggregationDepth`
+and `weightCol`. Rust also provides corresponding getters. The keyword-only
+Python constructor matches official PySpark's order/defaults and conversions.
+Unset values are omitted so the server uses its defaults.
+
+Live tests cover one- and two-dimensional mixtures, two/three components,
+normalized probabilities and assignments, dense/sparse vectors, weights, seeded
+reproducibility, independent fits, disabled probability output, server validation,
+session isolation and lazy model lifetime. Golden fixtures compare all nine
+parameters at six signed seed/integer-width boundaries with official PySpark.
+
+The native surface covers construction, parameter setters, fit and DataFrame
+transform. Component/weight/covariance inspection, training summaries,
+single-vector prediction and persistence are outside this surface. The vendored
+`pyspark.ml.clustering` API retains its existing implementation.

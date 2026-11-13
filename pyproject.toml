@@ -315,8 +315,9 @@ manifest-path = "crates/pyspark-rs/Cargo.toml"
 # crates/pyspark-rs/, so a root-level file outside it is not packaged. The metadata
 # still declares `License-File: LICENSE` in both artifacts, so PyPI (PEP 639) rejects
 # the sdist with "License-File LICENSE does not exist in distribution file". Ship the
-# LICENSE in the sdist so it satisfies the declared metadata.
-include = [{ path = "LICENSE", format = "sdist" }]
+# LICENSE in the sdist so it satisfies the declared metadata. The same holds for NOTICE, which
+# ASF releases carry next to LICENSE.
+include = [{ path = "LICENSE", format = "sdist" }, { path = "NOTICE", format = "sdist" }]
 # Use abi3 for a stable ABI compatible across Python 3.9+.
 features = ["pyo3/abi3-py39", "pyo3/extension-module"]
 # Keep tests out of the built wheel/sdist: our own offline suite lives outside the package
