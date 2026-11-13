@@ -92,7 +92,7 @@ pub(crate) fn create_dataframe(
     // As in PySpark, column names are applied with toDF only when there are any.
     let dataframe = match names {
         Some(names) if !names.is_empty() => {
-            dataframe.to_df(names.iter().map(String::as_str).collect())
+            dataframe.to_df(names.iter().map(String::as_str).collect::<Vec<_>>())
         }
         _ => dataframe,
     };

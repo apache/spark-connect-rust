@@ -227,7 +227,7 @@ jobs:
         env:
           SPARK_REMOTE: sc://localhost:15002
           PYTHONPATH: ${{ github.workspace }}/python
-        run: python -m pytest tests/test_arrow_e2e.py tests/test_dropin_e2e.py tests/test_ml_e2e.py tests/test_gbt_classifier_e2e.py tests/test_gbt_regressor_e2e.py tests/test_naive_bayes_e2e.py tests/test_bisecting_kmeans_e2e.py tests/test_generalized_linear_regression_e2e.py -q
+        run: python -m pytest tests/test_arrow_e2e.py tests/test_dropin_e2e.py tests/test_ml_e2e.py tests/test_gbt_classifier_e2e.py tests/test_gbt_regressor_e2e.py tests/test_naive_bayes_e2e.py tests/test_bisecting_kmeans_e2e.py tests/test_gaussian_mixture_e2e.py tests/test_generalized_linear_regression_e2e.py -q
 
       - name: Restart Connect server in local-cluster mode
         # Resource profiles and artifact distribution across executors can only be
@@ -556,7 +556,7 @@ jobs:
         run: |
           cargo test -p apache-spark-connect \
             --test e2e_functions --test e2e_columns --test e2e_dataframe \
-            --test e2e_coverage --test e2e_linear_svc --test e2e_linear_regression --test e2e_generalized_linear_regression --test e2e_kmeans --test e2e_bisecting_kmeans --test e2e_decision_tree_regressor --test e2e_decision_tree_classifier --test e2e_gbt_regressor --test e2e_naive_bayes --test e2e_gbt_classifier --test e2e_random_forest --test e2e_random_forest_regressor --test e2e_integration \
+            --test e2e_coverage --test e2e_linear_svc --test e2e_linear_regression --test e2e_generalized_linear_regression --test e2e_kmeans --test e2e_bisecting_kmeans --test e2e_gaussian_mixture --test e2e_decision_tree_regressor --test e2e_decision_tree_classifier --test e2e_gbt_regressor --test e2e_naive_bayes --test e2e_gbt_classifier --test e2e_random_forest --test e2e_random_forest_regressor --test e2e_integration \
             --test arrow_map_input --test array_literal --test execute_plan_hook --test raw_relation \
             --test types_roundtrip \
             --test e2e_reattach_drop \

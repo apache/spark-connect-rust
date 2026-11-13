@@ -219,7 +219,8 @@ fn column_membership_conditional_window() {
     let _ = one(&df, lit_double(1.5));
     let _ = one(&df, lit_boolean(true));
     // sort-order builders + window (over)
-    let w = Window::partition_by(vec![col("id").expression().clone()]).order_by(vec![]);
+    let w =
+        Window::partition_by(vec![col("id").expression().clone()]).order_by(Vec::<Column>::new());
     let _ = one(&df, f::sum(col("val")).over(w));
     // asc/desc builders exercised through order_by
     let _ = df

@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use spark_connect_core::error::{Result, SparkError, SparkErrorKind};
 
-use crate::column::Column;
+use crate::column::{expressions_of, Column};
 use crate::dataframe::DataFrame;
 use crate::expression::Expression;
 use crate::plan::{AggregateGroupType, LogicalPlan};
@@ -412,7 +412,7 @@ impl GroupedData {
 
     /// Perform an aggregation. With no `expressions`, the result is the distinct grouping keys,
     /// as of the Scala client, where PySpark's `agg` raises an `AssertionError`.
-    pub fn agg(&self, expressions: Vec<Expression>) -> DataFrame {
+    pub fn agg<C: Into<Column>>(&self, expressions: impl IntoIterator<Item = C>) -> DataFrame {
         // Convert group columns to expressions
         let grouping_expressions = self
             .group_cols
@@ -431,7 +431,7 @@ impl GroupedData {
             input: Arc::clone(&self.dataframe.plan),
             group_type: self.group_type,
             grouping_expressions,
-            aggregate_expressions: expressions,
+            aggregate_expressions: expressions_of(expressions),
             pivot_col: self.pivot_col.clone(),
             pivot_values: self.pivot_values.clone(),
             grouping_sets,
@@ -458,7 +458,12 @@ impl GroupedData {
     /// group, mirroring `GroupedData._numeric_agg` of `min`, `max`, `avg`, `mean` and `sum`:
     /// every numeric column of the DataFrame without columns, and `NOT_NUMERIC_COLUMNS` for a
     /// column that is not a numeric one of its schema.
-    pub fn numeric_agg(&self, function: &str, columns: Vec<&str>) -> Result<DataFrame> {
+    pub fn numeric_agg<S: Into<String>>(
+        &self,
+        function: &str,
+        columns: impl IntoIterator<Item = S>,
+    ) -> Result<DataFrame> {
+        let columns: Vec<String> = columns.into_iter().map(Into::into).collect();
         let schema = self.dataframe.schema()?;
         let names: Vec<String> = if columns.is_empty() {
             match &schema {
@@ -485,7 +490,7 @@ impl GroupedData {
             }
             columns.iter().map(|column| column.to_string()).collect()
         };
-        let expressions = names
+        let expressions: Vec<Expression> = names
             .iter()
             .map(|name| {
                 Expression::function(
@@ -498,27 +503,27 @@ impl GroupedData {
     }
 
     /// Sum values in each group, as `GroupedData.sum`: every numeric column without `columns`.
-    pub fn sum(&self, columns: Vec<&str>) -> Result<DataFrame> {
+    pub fn sum<S: Into<String>>(&self, columns: impl IntoIterator<Item = S>) -> Result<DataFrame> {
         self.numeric_agg("sum", columns)
     }
 
     /// Average values in each group, as `GroupedData.avg`: every numeric column without `columns`.
-    pub fn avg(&self, columns: Vec<&str>) -> Result<DataFrame> {
+    pub fn avg<S: Into<String>>(&self, columns: impl IntoIterator<Item = S>) -> Result<DataFrame> {
         self.numeric_agg("avg", columns)
     }
 
     /// Minimum values in each group, as `GroupedData.min`: every numeric column without `columns`.
-    pub fn min(&self, columns: Vec<&str>) -> Result<DataFrame> {
+    pub fn min<S: Into<String>>(&self, columns: impl IntoIterator<Item = S>) -> Result<DataFrame> {
         self.numeric_agg("min", columns)
     }
 
     /// Maximum values in each group, as `GroupedData.max`: every numeric column without `columns`.
-    pub fn max(&self, columns: Vec<&str>) -> Result<DataFrame> {
+    pub fn max<S: Into<String>>(&self, columns: impl IntoIterator<Item = S>) -> Result<DataFrame> {
         self.numeric_agg("max", columns)
     }
 
     /// Mean (alias for avg).
-    pub fn mean(&self, columns: Vec<&str>) -> Result<DataFrame> {
+    pub fn mean<S: Into<String>>(&self, columns: impl IntoIterator<Item = S>) -> Result<DataFrame> {
         self.avg(columns)
     }
 }
@@ -644,25 +649,29 @@ impl StatFunctions {
     }
 
     /// Find frequent items.
-    pub fn freq_items(&self, columns: Vec<&str>, support: f64) -> DataFrame {
+    pub fn freq_items<S: Into<String>>(
+        &self,
+        columns: impl IntoIterator<Item = S>,
+        support: f64,
+    ) -> DataFrame {
         let plan = LogicalPlan::StatFreqItems {
             input: Arc::clone(&self.dataframe.plan),
-            columns: columns.iter().map(|s| s.to_string()).collect(),
+            columns: columns.into_iter().map(Into::into).collect(),
             support,
         };
         DataFrame::new(self.dataframe.session.clone(), plan)
     }
 
     /// Compute approximate quantiles.
-    pub fn approx_quantile(
+    pub fn approx_quantile<S: Into<String>>(
         &self,
-        columns: Vec<&str>,
+        columns: impl IntoIterator<Item = S>,
         probabilities: Vec<f64>,
         relative_error: f64,
     ) -> DataFrame {
         let plan = LogicalPlan::StatApproxQuantile {
             input: Arc::clone(&self.dataframe.plan),
-            columns: columns.iter().map(|s| s.to_string()).collect(),
+            columns: columns.into_iter().map(Into::into).collect(),
             probabilities,
             relative_error,
         };
@@ -1111,6 +1120,36 @@ mod tests {
             }
             _ => panic!("expected Aggregate plan"),
         }
+    }
+
+    /// `agg` takes Columns, as `DataFrame::group_by` does, and the `Vec<Expression>` that it
+    /// took before, of which it builds the plan that it built of the expressions.
+    #[test]
+    fn group_agg_takes_columns_and_expressions_alike() {
+        use crate::column::col;
+        use crate::functions::{max, sum};
+
+        let df = session().range(10).unwrap();
+        let grouped = df.group_by(["id"]);
+        let expressions = || {
+            vec![
+                sum(col("id")).alias("total").expression().clone(),
+                max(col("id")).expression().clone(),
+            ]
+        };
+        let before = LogicalPlan::Aggregate {
+            input: Arc::clone(&df.plan),
+            group_type: AggregateGroupType::GroupBy,
+            grouping_expressions: vec![col("id").expression().clone()],
+            aggregate_expressions: expressions(),
+            pivot_col: None,
+            pivot_values: vec![],
+            grouping_sets: vec![],
+        }
+        .to_proto();
+        let of_columns = grouped.agg([sum(col("id")).alias("total"), max(col("id"))]);
+        assert_eq!(of_columns.plan.to_proto(), before);
+        assert_eq!(grouped.agg(expressions()).plan.to_proto(), before);
     }
 
     #[test]

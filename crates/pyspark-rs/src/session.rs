@@ -1063,7 +1063,9 @@ impl PySparkSession {
         // them, so this only changes the plan, which the server resolves into a Project that
         // is not local; it keeps isLocal() as in pyspark and is not redundant.
         Ok(PyDataFrame::new(match cols.take() {
-            Some(cols) if !cols.is_empty() => df.to_df(cols.iter().map(String::as_str).collect()),
+            Some(cols) if !cols.is_empty() => {
+                df.to_df(cols.iter().map(String::as_str).collect::<Vec<_>>())
+            }
             _ => df,
         }))
     }
@@ -1138,9 +1140,14 @@ impl PySparkSession {
                 .map_err(Box::new)
         })?;
         // As the other pandas paths, the explicit names are applied with toDF.
-        Ok(Some(PyDataFrame::new(df.to_df(
-            fields.iter().map(|field| field.name.as_str()).collect(),
-        ))))
+        Ok(Some(PyDataFrame::new(
+            df.to_df(
+                fields
+                    .iter()
+                    .map(|field| field.name.as_str())
+                    .collect::<Vec<_>>(),
+            ),
+        )))
     }
 
     /// A DataFrame of a pandas DataFrame without a schema, or of names, as PySpark Connect
@@ -1228,7 +1235,7 @@ impl PySparkSession {
         Ok(Some(PyDataFrame::new(if columns.is_empty() {
             df
         } else {
-            df.to_df(columns.iter().map(String::as_str).collect())
+            df.to_df(columns.iter().map(String::as_str).collect::<Vec<_>>())
         })))
     }
 
@@ -1713,7 +1720,7 @@ impl PySparkSession {
         };
         Ok(PyDataFrame::new(match names {
             Some(names) if !names.is_empty() => {
-                df.to_df(names.iter().map(String::as_str).collect())
+                df.to_df(names.iter().map(String::as_str).collect::<Vec<_>>())
             }
             _ => df,
         }))
@@ -2142,9 +2149,12 @@ impl PySparkSession {
                 return Ok(match &spec {
                     Spec::Struct(fields) if !fields.is_empty() && table.len()? > 0 => {
                         PyDataFrame::new(
-                            frame
-                                .dataframe
-                                .to_df(fields.iter().map(|field| field.name.as_str()).collect()),
+                            frame.dataframe.to_df(
+                                fields
+                                    .iter()
+                                    .map(|field| field.name.as_str())
+                                    .collect::<Vec<_>>(),
+                            ),
                         )
                     }
                     _ => frame,
@@ -2175,7 +2185,10 @@ impl PySparkSession {
                         Spec::Struct(fields) if !fields.is_empty() && table.len()? > 0 => {
                             PyDataFrame::new(
                                 frame.dataframe.to_df(
-                                    fields.iter().map(|field| field.name.as_str()).collect(),
+                                    fields
+                                        .iter()
+                                        .map(|field| field.name.as_str())
+                                        .collect::<Vec<_>>(),
                                 ),
                             )
                         }
@@ -2208,7 +2221,12 @@ impl PySparkSession {
                 // Match pandas row input: explicit nonempty field names travel
                 // through toDF as well as the local relation's logical schema.
                 return Ok(PyDataFrame::new(
-                    frame.to_df(fields.iter().map(|field| field.name.as_str()).collect()),
+                    frame.to_df(
+                        fields
+                            .iter()
+                            .map(|field| field.name.as_str())
+                            .collect::<Vec<_>>(),
+                    ),
                 ));
             }
             let ipc = py
@@ -2223,9 +2241,12 @@ impl PySparkSession {
                 return Ok(match &spec {
                     Spec::Struct(fields) if !fields.is_empty() && ipc.len()? > 0 => {
                         PyDataFrame::new(
-                            frame
-                                .dataframe
-                                .to_df(fields.iter().map(|field| field.name.as_str()).collect()),
+                            frame.dataframe.to_df(
+                                fields
+                                    .iter()
+                                    .map(|field| field.name.as_str())
+                                    .collect::<Vec<_>>(),
+                            ),
                         )
                     }
                     _ => frame,
@@ -2252,7 +2273,12 @@ impl PySparkSession {
                 // Match pandas row input: explicit nonempty field names travel
                 // through toDF as well as the local relation's logical schema.
                 return Ok(PyDataFrame::new(
-                    frame.to_df(fields.iter().map(|field| field.name.as_str()).collect()),
+                    frame.to_df(
+                        fields
+                            .iter()
+                            .map(|field| field.name.as_str())
+                            .collect::<Vec<_>>(),
+                    ),
                 ));
             }
             let table = py
@@ -2265,9 +2291,12 @@ impl PySparkSession {
                 return Ok(match &spec {
                     Spec::Struct(fields) if !fields.is_empty() && table.len()? > 0 => {
                         PyDataFrame::new(
-                            frame
-                                .dataframe
-                                .to_df(fields.iter().map(|field| field.name.as_str()).collect()),
+                            frame.dataframe.to_df(
+                                fields
+                                    .iter()
+                                    .map(|field| field.name.as_str())
+                                    .collect::<Vec<_>>(),
+                            ),
                         )
                     }
                     _ => frame,

@@ -263,7 +263,7 @@ impl Column {
 
     /// Mirrors `pyspark.sql.column.Column.dropFields`: drop one or more fields
     /// from a struct-typed column (chained `UpdateFields`, one per field).
-    pub fn drop_fields(self, field_names: Vec<&str>) -> Column {
+    pub fn drop_fields<S: Into<String>>(self, field_names: impl IntoIterator<Item = S>) -> Column {
         let mut expr = self.expr;
         for name in field_names {
             expr = ExpressionNode::UpdateFields(Box::new(UpdateFieldsExpr::new(expr, name, None)))
@@ -659,6 +659,40 @@ impl From<&String> for Column {
     }
 }
 
+// An expression is accepted anywhere a `Column` is, as the Column of it, so the APIs of
+// `impl IntoIterator<Item = impl Into<Column>>` take the `Vec<Expression>` that some of them
+// took before, such as `df.sort(vec![col("x").expression().clone()])`.
+impl From<Expression> for Column {
+    fn from(expr: Expression) -> Column {
+        Column::new(expr)
+    }
+}
+
+// A sort order is accepted as the Column of it that `asc` and `desc` make, so
+// `WindowSpec::order_by` takes the `Vec<SortOrder>` that it took before.
+impl From<SortOrder> for Column {
+    fn from(sort: SortOrder) -> Column {
+        Column {
+            expr: ExpressionNode::SortOrder(Box::new(sort)).into(),
+        }
+    }
+}
+
+/// The expressions of `columns`, as the plans of the APIs that take Columns hold them.
+pub(crate) fn expressions_of<C: Into<Column>>(
+    columns: impl IntoIterator<Item = C>,
+) -> Vec<Expression> {
+    columns
+        .into_iter()
+        .map(|column| column.into().expr)
+        .collect()
+}
+
+/// The Columns of `columns`, for the APIs that keep a list of them.
+pub(crate) fn columns_of<C: Into<Column>>(columns: impl IntoIterator<Item = C>) -> Vec<Column> {
+    columns.into_iter().map(Into::into).collect()
+}
+
 /// Mirrors `pyspark.sql.functions.lit` for an integer value.
 ///
 /// PySpark infers `IntegerType` for a Python int that fits in i32 and `LongType`
@@ -947,6 +981,40 @@ mod tests {
         let s = "z".to_string();
         let c3: Column = (&s).into();
         assert!(matches!(c3.expr.node(), ExpressionNode::ColumnReference(_)));
+    }
+
+    #[test]
+    fn expressions_and_sort_orders_are_the_columns_of_them() {
+        // An expression is the Column of it, which shares its node.
+        let expression = (col("x") + lit(1)).expression().clone();
+        let column = Column::from(expression.clone());
+        assert_eq!(column, Column::new(expression.clone()));
+        assert!(std::ptr::eq(column.expression().node(), expression.node()));
+        // A sort order is the Column of it that `asc` and `desc` make.
+        let sort = SortOrder::desc_nulls_first(col("x").expression().clone());
+        assert_eq!(Column::from(sort), col("x").desc_nulls_first());
+        // The expressions that the APIs of columns take, of Columns, names and expressions
+        // alike, in their order.
+        assert_eq!(
+            expressions_of([col("a"), col("b").desc()]),
+            vec![
+                col("a").expression().clone(),
+                col("b").desc().expression().clone()
+            ]
+        );
+        assert_eq!(
+            expressions_of(["a", "b"]),
+            expressions_of(vec![Expression::column("a"), Expression::column("b")])
+        );
+        assert!(expressions_of(Vec::<Column>::new()).is_empty());
+    }
+
+    #[test]
+    fn drop_fields_takes_any_names_as_a_vec_does() {
+        let of_vec = col("s").drop_fields(vec!["a", "b"]);
+        assert_eq!(col("s").drop_fields(["a", "b"]), of_vec);
+        assert_eq!(col("s").drop_fields(["a", "b"].iter().copied()), of_vec);
+        assert_eq!(col("s").drop_fields(["a", "b"].map(String::from)), of_vec);
     }
 
     #[test]

@@ -352,14 +352,14 @@ impl DataStreamWriter {
     }
 
     /// Set partitioning columns.
-    pub fn partition_by(mut self, columns: Vec<&str>) -> Self {
-        self.partitioning_columns = columns.iter().map(|s| s.to_string()).collect();
+    pub fn partition_by<S: Into<String>>(mut self, columns: impl IntoIterator<Item = S>) -> Self {
+        self.partitioning_columns = columns.into_iter().map(Into::into).collect();
         self
     }
 
     /// Set clustering columns.
-    pub fn cluster_by(mut self, columns: Vec<&str>) -> Self {
-        self.clustering_columns = columns.iter().map(|s| s.to_string()).collect();
+    pub fn cluster_by<S: Into<String>>(mut self, columns: impl IntoIterator<Item = S>) -> Self {
+        self.clustering_columns = columns.into_iter().map(Into::into).collect();
         self
     }
 
@@ -3251,6 +3251,29 @@ mod tests {
         let writer = df.write_stream();
         let writer = writer.cluster_by(vec!["user_id", "session_id"]);
         assert_eq!(writer.clustering_columns, vec!["user_id", "session_id"]);
+    }
+
+    /// The partitioning and clustering columns of a writer are names of any iterable, as a Vec.
+    #[test]
+    fn stream_writer_takes_names_as_any_iterable() {
+        let spark = session();
+        let df = spark.read_stream().format("kafka").load(None);
+        let of_vec = df
+            .write_stream()
+            .partition_by(vec!["date", "region"])
+            .cluster_by(vec!["user_id"]);
+        let of_array = df
+            .write_stream()
+            .partition_by(["date", "region"])
+            .cluster_by(["user_id"]);
+        let of_iter = df
+            .write_stream()
+            .partition_by(["date", "region"].map(String::from))
+            .cluster_by(["user_id"].iter().copied());
+        for writer in [&of_array, &of_iter] {
+            assert_eq!(writer.partitioning_columns, of_vec.partitioning_columns);
+            assert_eq!(writer.clustering_columns, of_vec.clustering_columns);
+        }
     }
 
     #[test]

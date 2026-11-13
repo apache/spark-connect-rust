@@ -26,7 +26,7 @@ from pyspark.ml.connect.regression import (
     LinearRegression,
     RandomForestRegressor,
 )
-from pyspark.ml.connect.clustering import BisectingKMeans, KMeans
+from pyspark.ml.connect.clustering import BisectingKMeans, GaussianMixture, KMeans
 from pyspark.ml.connect.evaluation import (
     RegressionEvaluator,
     BinaryClassificationEvaluator,
@@ -69,6 +69,7 @@ __all__ = [
     "DecisionTreeRegressor",
     "RandomForestRegressor",
     "KMeans",
+    "GaussianMixture",
     "BisectingKMeans",
     "RegressionEvaluator",
     "BinaryClassificationEvaluator",

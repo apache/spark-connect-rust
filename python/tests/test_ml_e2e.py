@@ -249,6 +249,7 @@ def _native_estimators():
         BisectingKMeans,
         DecisionTreeClassifier,
         DecisionTreeRegressor,
+        GaussianMixture,
         GBTClassifier,
         GBTRegressor,
         GeneralizedLinearRegression,
@@ -266,6 +267,7 @@ def _native_estimators():
 
     ml = "org.apache.spark.ml."
     return [
+        (GaussianMixture(k=2, seed=1, maxIter=2), ml + "clustering.GaussianMixtureModel"),
         (BisectingKMeans(k=2, seed=1), ml + "clustering.BisectingKMeansModel"),
         (NaiveBayes(), ml + "classification.NaiveBayesModel"),
         (GBTRegressor(maxIter=2), ml + "regression.GBTRegressionModel"),

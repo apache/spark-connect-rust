@@ -8,7 +8,7 @@
 //! PySpark's camelCase spelling on purpose, so `non_snake_case` is allowed here.
 #![allow(non_snake_case)]
 
-use crate::column::Column;
+use crate::column::{expressions_of, Column};
 use crate::dataframe::DataFrame;
 use crate::expression::{
     CallFunctionWrapper, Expression, ExpressionNode, LiteralExpression, UnresolvedFunction,
@@ -858,9 +858,12 @@ pub fn count_distinct(col1: Column) -> Column {
 
 /// Mirrors `pyspark.sql.functions.count_distinct(col, *cols)`: the number of distinct
 /// combinations of the columns.
-pub fn count_distinct_columns(col1: Column, cols: impl IntoIterator<Item = Column>) -> Column {
+pub fn count_distinct_columns<C: Into<Column>>(
+    col1: Column,
+    cols: impl IntoIterator<Item = C>,
+) -> Column {
     let mut args = vec![col1.expression().clone()];
-    args.extend(cols.into_iter().map(|c| c.expression().clone()));
+    args.extend(expressions_of(cols));
     func_distinct("count", args)
 }
 
@@ -4915,7 +4918,7 @@ mod tests {
         assert_eq!(counted.expression().render(), "count(distinct a, b, c)");
         assert_eq!(distinct(counted), ("count".to_string(), 3, true));
         assert_eq!(
-            distinct(count_distinct_columns(col("a"), [])),
+            distinct(count_distinct_columns(col("a"), Vec::<Column>::new())),
             distinct(count_distinct(col("a")))
         );
         let delimiter = || Column::new(lit_str(","));

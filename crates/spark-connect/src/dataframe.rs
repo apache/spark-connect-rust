@@ -10,7 +10,7 @@ use spark_connect_core::error::{Result, SparkError, SparkErrorKind};
 use spark_connect_core::runtime::{block_on, get_runtime};
 use spark_connect_proto as proto;
 
-use crate::column::Column;
+use crate::column::{columns_of, expressions_of, Column};
 use crate::expression::{Expression, ExpressionNode, SortOrder};
 use crate::plan::{
     AggregateGroupType, AsOfJoinDirection, AsOfJoinType, JoinType, LogicalPlan, RelationOwner,
@@ -499,9 +499,15 @@ impl DataFrame {
         DataFrame::new(self.session.clone(), plan)
     }
 
-    /// Add or replace multiple columns.
-    pub fn with_columns(&self, columns: Vec<(String, Column)>) -> DataFrame {
-        let (names, cols) = columns.into_iter().unzip();
+    /// Add or replace multiple columns, of their names and Columns.
+    pub fn with_columns<N: Into<String>, C: Into<Column>>(
+        &self,
+        columns: impl IntoIterator<Item = (N, C)>,
+    ) -> DataFrame {
+        let (names, cols): (Vec<String>, Vec<Column>) = columns
+            .into_iter()
+            .map(|(name, column)| (name.into(), column.into()))
+            .unzip();
         let plan = LogicalPlan::WithColumns {
             input: Arc::clone(&self.plan),
             column_names: names,
@@ -522,26 +528,36 @@ impl DataFrame {
     /// Rename multiple columns, of old and new names in their order, in which the server
     /// applies them, as PySpark's `withColumnsRenamed` of a dict sends them: so
     /// `[("id", "a"), ("a", "b")]` renames `id` to `b`.
-    pub fn with_columns_renamed(&self, renames: Vec<(String, String)>) -> DataFrame {
+    pub fn with_columns_renamed<O: Into<String>, N: Into<String>>(
+        &self,
+        renames: impl IntoIterator<Item = (O, N)>,
+    ) -> DataFrame {
         let plan = LogicalPlan::WithColumnsRenamed {
             input: Arc::clone(&self.plan),
-            renames,
+            renames: renames
+                .into_iter()
+                .map(|(old, new)| (old.into(), new.into()))
+                .collect(),
         };
         DataFrame::new(self.session.clone(), plan)
     }
 
-    /// Drop columns.
-    pub fn drop(&self, columns: Vec<&str>) -> DataFrame {
-        self.drop_columns(Vec::new(), columns)
+    /// Drop columns, of their names.
+    pub fn drop<S: Into<String>>(&self, columns: impl IntoIterator<Item = S>) -> DataFrame {
+        self.drop_columns(Vec::<Column>::new(), columns)
     }
 
     /// Drop `columns` and the columns of `column_names`, mirroring `pyspark.sql.DataFrame.drop`
     /// of Columns and column names: a Column is sent as its expression, and a name as it is.
-    pub fn drop_columns(&self, columns: Vec<Column>, column_names: Vec<&str>) -> DataFrame {
+    pub fn drop_columns<C: Into<Column>, S: Into<String>>(
+        &self,
+        columns: impl IntoIterator<Item = C>,
+        column_names: impl IntoIterator<Item = S>,
+    ) -> DataFrame {
         let plan = LogicalPlan::Drop {
             input: Arc::clone(&self.plan),
-            columns: column_names.iter().map(|s| s.to_string()).collect(),
-            expressions: columns.iter().map(|c| c.expression().clone()).collect(),
+            columns: column_names.into_iter().map(Into::into).collect(),
+            expressions: expressions_of(columns),
         };
         DataFrame::new(self.session.clone(), plan)
     }
@@ -600,18 +616,20 @@ impl DataFrame {
         self.with_cached_schema(plan)
     }
 
-    /// Sort rows.
-    pub fn sort(&self, columns: Vec<Expression>) -> DataFrame {
+    /// Sort rows by `columns`. A sort order, of [`Column::asc`], [`Column::desc`] and their
+    /// nulls variants, sorts as it says; any other column is sorted ascending, nulls first,
+    /// as PySpark's `sort` sorts it.
+    pub fn sort<C: Into<Column>>(&self, columns: impl IntoIterator<Item = C>) -> DataFrame {
         let plan = LogicalPlan::Sort {
             input: Arc::clone(&self.plan),
-            order: columns,
+            order: expressions_of(columns),
             is_global: true,
         };
         self.with_cached_schema(plan)
     }
 
     /// Alias for sort().
-    pub fn order_by(&self, columns: Vec<Expression>) -> DataFrame {
+    pub fn order_by<C: Into<Column>>(&self, columns: impl IntoIterator<Item = C>) -> DataFrame {
         self.sort(columns)
     }
 
@@ -809,20 +827,25 @@ impl DataFrame {
         name: &str,
         parameters: impl IntoIterator<Item = S>,
     ) -> DataFrame {
-        let parameters = parameters
+        let parameters: Vec<Expression> = parameters
             .into_iter()
             .map(|p| crate::plan::hint_parameter(&p.into()))
             .collect();
         self.hint_expressions(name, parameters)
     }
 
-    /// Specify a hint of parameters given as expressions, mirroring `pyspark.sql.DataFrame.hint`,
-    /// which sends `lit` of each parameter: a literal, or a Column.
-    pub fn hint_expressions(&self, name: &str, parameters: Vec<Expression>) -> DataFrame {
+    /// Specify a hint of parameters given as Columns, mirroring `pyspark.sql.DataFrame.hint`,
+    /// which sends `lit` of each parameter: a literal, or a Column. A name is the column of that
+    /// name, as everywhere a Column is taken: [`DataFrame::hint`] sends strings as literals.
+    pub fn hint_expressions<C: Into<Column>>(
+        &self,
+        name: &str,
+        parameters: impl IntoIterator<Item = C>,
+    ) -> DataFrame {
         let plan = LogicalPlan::Hint {
             input: Arc::clone(&self.plan),
             name: name.to_string(),
-            parameters,
+            parameters: expressions_of(parameters),
         };
         self.with_cached_schema(plan)
     }
@@ -834,8 +857,8 @@ impl DataFrame {
     }
 
     /// Convert to DataFrame with new column names.
-    pub fn to_df(&self, column_names: Vec<&str>) -> DataFrame {
-        let names = column_names.iter().map(|s| s.to_string()).collect();
+    pub fn to_df<S: Into<String>>(&self, column_names: impl IntoIterator<Item = S>) -> DataFrame {
+        let names: Vec<String> = column_names.into_iter().map(Into::into).collect();
         let plan = LogicalPlan::ToDF {
             input: Arc::clone(&self.plan),
             column_names: names,
@@ -1803,10 +1826,10 @@ impl DataFrame {
     /// Mirrors `DataFrame.repartitionByRange(numPartitions, *cols)`: as PySpark's, a count that
     /// is not positive is a `VALUE_NOT_POSITIVE` error, and no columns a `CANNOT_BE_EMPTY` one
     /// (the server would split the rows round-robin instead).
-    pub fn repartition_by_range(
+    pub fn repartition_by_range<C: Into<Column>>(
         &self,
         num_partitions: i32,
-        columns: Vec<Expression>,
+        columns: impl IntoIterator<Item = C>,
     ) -> Result<DataFrame> {
         self.repartition_by_range_opt(Some(num_partitions), columns)
     }
@@ -1815,10 +1838,10 @@ impl DataFrame {
     /// sends no count, so the server picks it. Mirrors `DataFrame.repartitionByRange(col)`
     /// and `repartitionByRange(col, *cols)`, which PySpark sends with `numPartitions=None`.
     /// The errors are those of [`DataFrame::repartition_by_range`].
-    pub fn repartition_by_range_opt(
+    pub fn repartition_by_range_opt<C: Into<Column>>(
         &self,
         num_partitions: Option<i32>,
-        columns: Vec<Expression>,
+        columns: impl IntoIterator<Item = C>,
     ) -> Result<DataFrame> {
         if let Some(n) = num_partitions.filter(|n| *n <= 0) {
             return Err(SparkError::classed(
@@ -1827,6 +1850,7 @@ impl DataFrame {
                 &[("arg_name", "numPartitions"), ("arg_value", &n.to_string())],
             ));
         }
+        let columns = expressions_of(columns);
         if columns.is_empty() {
             return Err(SparkError::classed(
                 SparkErrorKind::ValueError,
@@ -1856,33 +1880,37 @@ impl DataFrame {
 
     /// Repartition into `num_partitions` by hashing the given column expressions.
     /// Mirrors `df.repartition(numPartitions, *cols)`.
-    pub fn repartition_by_expressions(
+    pub fn repartition_by_expressions<C: Into<Column>>(
         &self,
         num_partitions: i32,
-        columns: Vec<Expression>,
+        columns: impl IntoIterator<Item = C>,
     ) -> DataFrame {
         let plan = LogicalPlan::RepartitionByExpression {
             input: Arc::clone(&self.plan),
             num_partitions,
-            expressions: columns,
+            expressions: expressions_of(columns),
         };
         self.with_cached_schema(plan)
     }
 
     /// Alias for to_df().
-    pub fn to_schema(&self, column_names: Vec<&str>) -> DataFrame {
+    pub fn to_schema<S: Into<String>>(
+        &self,
+        column_names: impl IntoIterator<Item = S>,
+    ) -> DataFrame {
         self.to_df(column_names)
     }
 
     /// Melt (unpivot) this DataFrame.
-    pub fn melt(
+    pub fn melt<S: Into<String>>(
         &self,
-        id_vars: Vec<&str>,
+        id_vars: impl IntoIterator<Item = S>,
         value_vars: Option<Vec<&str>>,
         var_name: &str,
         value_name: &str,
     ) -> DataFrame {
         use crate::column::col;
+        let id_vars: Vec<String> = id_vars.into_iter().map(Into::into).collect();
         let ids: Vec<Column> = id_vars.iter().map(|name| col(name)).collect();
         let vals: Option<Vec<Column>> =
             value_vars.map(|v| v.iter().map(|name| col(name)).collect());
@@ -1918,11 +1946,15 @@ impl DataFrame {
     /// Observe metrics on this DataFrame. With no `exprs`, the action fails on the server, where
     /// PySpark's `observe` raises `CANNOT_BE_EMPTY` at the call, as
     /// [`DataFrame::observe_with`] does.
-    pub fn observe(&self, name: &str, exprs: Vec<Expression>) -> DataFrame {
+    pub fn observe<C: Into<Column>>(
+        &self,
+        name: &str,
+        exprs: impl IntoIterator<Item = C>,
+    ) -> DataFrame {
         let plan = LogicalPlan::Observe {
             input: Arc::clone(&self.plan),
             name: name.to_string(),
-            exprs,
+            exprs: expressions_of(exprs),
             observation: None,
         };
         self.with_cached_schema(plan)
@@ -1934,11 +1966,12 @@ impl DataFrame {
     /// whose metrics each action that runs the DataFrame sets in the observation.
     /// `REUSE_OBSERVATION` for an observation used already, and `UNSUPPORTED_OPERATION` for a
     /// streaming DataFrame.
-    pub fn observe_with(
+    pub fn observe_with<C: Into<Column>>(
         &self,
         observation: &crate::observation::Observation,
-        exprs: Vec<Expression>,
+        exprs: impl IntoIterator<Item = C>,
     ) -> Result<DataFrame> {
+        let exprs = expressions_of(exprs);
         // As PySpark's `observe`, which checks this first.
         if exprs.is_empty() {
             return Err(SparkError::classed(
@@ -1992,12 +2025,12 @@ impl DataFrame {
     /// Perform aggregation without grouping. With no `expressions`, the result is one row of
     /// no columns, as of the Scala client's `agg(Map.empty)`, where PySpark's `agg` raises
     /// `CANNOT_BE_EMPTY`.
-    pub fn agg(&self, expressions: Vec<Expression>) -> DataFrame {
+    pub fn agg<C: Into<Column>>(&self, expressions: impl IntoIterator<Item = C>) -> DataFrame {
         let plan = LogicalPlan::Aggregate {
             input: Arc::clone(&self.plan),
             group_type: AggregateGroupType::GroupBy,
             grouping_expressions: vec![],
-            aggregate_expressions: expressions,
+            aggregate_expressions: expressions_of(expressions),
             pivot_col: None,
             pivot_values: vec![],
             grouping_sets: vec![],
@@ -2191,8 +2224,8 @@ impl DataFrame {
     }
 
     /// Describe this DataFrame (show statistics).
-    pub fn describe(&self, columns: Vec<&str>) -> DataFrame {
-        let col_names = columns.iter().map(|s| s.to_string()).collect();
+    pub fn describe<S: Into<String>>(&self, columns: impl IntoIterator<Item = S>) -> DataFrame {
+        let col_names = columns.into_iter().map(Into::into).collect();
         let plan = LogicalPlan::Describe {
             input: Arc::clone(&self.plan),
             columns: col_names,
@@ -2266,7 +2299,11 @@ impl DataFrame {
     /// Group by with grouping sets. Each inner `Vec<Column>` is one grouping set;
     /// the sets are preserved on the wire (`GROUP_TYPE_GROUPING_SETS` + the
     /// `grouping_sets` field) rather than flattened into a single group-by.
-    pub fn grouping_sets(&self, group_cols: Vec<Vec<Column>>) -> crate::group::GroupedData {
+    pub fn grouping_sets<C: Into<Column>>(
+        &self,
+        group_cols: impl IntoIterator<Item = impl IntoIterator<Item = C>>,
+    ) -> crate::group::GroupedData {
+        let group_cols: Vec<Vec<Column>> = group_cols.into_iter().map(columns_of).collect();
         crate::group::GroupedData::new_grouping_sets(self.clone(), group_cols)
     }
 
@@ -2274,19 +2311,27 @@ impl DataFrame {
     /// which are the columns of the result besides the aggregations, mirroring PySpark's
     /// `DataFrame.groupingSets(groupingSets, *cols)`: a column of the grouping columns that
     /// a set does not hold is null in the rows of that set.
-    pub fn grouping_sets_with_columns(
+    pub fn grouping_sets_with_columns<C: Into<Column>, D: Into<Column>>(
         &self,
-        grouping_sets: Vec<Vec<Column>>,
-        group_cols: Vec<Column>,
+        grouping_sets: impl IntoIterator<Item = impl IntoIterator<Item = C>>,
+        group_cols: impl IntoIterator<Item = D>,
     ) -> crate::group::GroupedData {
-        crate::group::GroupedData::new_grouping_sets_of(self.clone(), grouping_sets, group_cols)
+        let grouping_sets: Vec<Vec<Column>> = grouping_sets.into_iter().map(columns_of).collect();
+        crate::group::GroupedData::new_grouping_sets_of(
+            self.clone(),
+            grouping_sets,
+            columns_of(group_cols),
+        )
     }
 
-    /// Sort within partitions (local sort).
-    pub fn sort_within_partitions(&self, columns: Vec<Expression>) -> DataFrame {
+    /// Sort within partitions (local sort), by `columns` as [`DataFrame::sort`] sorts by them.
+    pub fn sort_within_partitions<C: Into<Column>>(
+        &self,
+        columns: impl IntoIterator<Item = C>,
+    ) -> DataFrame {
         let plan = LogicalPlan::Sort {
             input: Arc::clone(&self.plan),
-            order: columns,
+            order: expressions_of(columns),
             is_global: false,
         };
         self.with_cached_schema(plan)
@@ -5310,7 +5355,7 @@ mod plan_construction_tests {
         let Err(error) = session()
             .range(3)
             .unwrap()
-            .observe_with(&observation, vec![])
+            .observe_with(&observation, Vec::<Column>::new())
         else {
             panic!("no exprs must be rejected");
         };
@@ -5319,6 +5364,24 @@ mod plan_construction_tests {
             error.message(),
             "[CANNOT_BE_EMPTY] At least one exprs must be specified."
         );
+    }
+
+    /// `observe_with` takes Columns, as `observe` does, and the `Vec<Expression>` that it took
+    /// before: no expressions of either, or of an iterator, are `CANNOT_BE_EMPTY`.
+    #[test]
+    fn observe_with_takes_columns_and_expressions_alike() {
+        let df = session().range(3).unwrap();
+        let observation = crate::observation::Observation::new("metrics");
+        for result in [
+            df.observe_with(&observation, [] as [Column; 0]),
+            df.observe_with(&observation, Vec::<Expression>::new()),
+            df.observe_with(&observation, std::iter::empty::<&str>()),
+        ] {
+            let Err(error) = result else {
+                panic!("no exprs must be rejected");
+            };
+            assert_eq!(error.get_condition().as_deref(), Some("CANNOT_BE_EMPTY"));
+        }
     }
 
     fn session() -> SparkSession {
@@ -5424,7 +5487,7 @@ mod plan_construction_tests {
         assert!(local.is_local());
         assert!(cached.is_local());
         // As in PySpark, where the server resolves toDF into a Project.
-        assert!(!local.to_df(vec![]).is_local());
+        assert!(!local.to_df(Vec::<&str>::new()).is_local());
         assert!(!cached.to_df(vec!["x"]).is_local());
         assert!(!spark.range(1).unwrap().is_local());
     }
@@ -6349,6 +6412,51 @@ mod plan_construction_tests {
         }
     }
 
+    /// Both range repartitions take Columns, as `select` does, and the `Vec<Expression>` that
+    /// they took before, of which they build the plan that they built of the expressions.
+    #[test]
+    fn repartition_by_range_takes_columns_and_expressions_alike() {
+        use crate::functions::col;
+
+        let df = session().range(5).unwrap();
+        let columns = || [col("id"), col("id").desc_nulls_last()];
+        let expressions = || {
+            vec![
+                col("id").expression().clone(),
+                col("id").desc_nulls_last().expression().clone(),
+            ]
+        };
+        let before = |num_partitions| {
+            LogicalPlan::RepartitionByRange {
+                input: Arc::clone(&df.plan),
+                num_partitions,
+                partition_exprs: vec![
+                    col("id").asc_nulls_first().expression().clone(),
+                    col("id").desc_nulls_last().expression().clone(),
+                ],
+            }
+            .to_proto()
+        };
+        for (num_partitions, of_columns, of_expressions) in [
+            (
+                Some(3),
+                df.repartition_by_range(3, columns()),
+                df.repartition_by_range(3, expressions()),
+            ),
+            (
+                None,
+                df.repartition_by_range_opt(None, columns()),
+                df.repartition_by_range_opt(None, expressions()),
+            ),
+        ] {
+            assert_eq!(of_columns.unwrap().plan.to_proto(), before(num_partitions));
+            assert_eq!(
+                of_expressions.unwrap().plan.to_proto(),
+                before(num_partitions)
+            );
+        }
+    }
+
     /// As PySpark's `repartitionByRange(numPartitions, *cols)`: a count that is not positive,
     /// then no columns, are errors, where the server would split the rows round-robin.
     #[test]
@@ -6359,8 +6467,8 @@ mod plan_construction_tests {
         let id = || vec![col("id").expression().clone()];
         let error = |result: Result<DataFrame>| result.err().expect("an error");
         for empty in [
-            error(df.repartition_by_range(2, vec![])),
-            error(df.repartition_by_range_opt(None, vec![])),
+            error(df.repartition_by_range(2, Vec::<Column>::new())),
+            error(df.repartition_by_range_opt(None, Vec::<Column>::new())),
         ] {
             assert_eq!(empty.kind, SparkErrorKind::ValueError);
             assert_eq!(empty.get_condition().as_deref(), Some("CANNOT_BE_EMPTY"));
@@ -6372,7 +6480,7 @@ mod plan_construction_tests {
         for n in [0, -1] {
             for result in [
                 df.repartition_by_range(n, id()),
-                df.repartition_by_range(n, vec![]),
+                df.repartition_by_range(n, Vec::<Column>::new()),
             ] {
                 let not_positive = error(result);
                 assert_eq!(
@@ -6459,6 +6567,232 @@ mod plan_construction_tests {
         ser(&df.replace(vec![("a".to_string(), "b".to_string())], None));
         ser(&df.stat().crosstab("id", "id"));
         ser(&df.stat().freq_items(vec!["id"], 0.5));
+    }
+
+    /// The methods of lists of columns take Columns, as `select` does, and the
+    /// `Vec<Expression>` that they took before, of which they build the plans that they built
+    /// of the expressions.
+    #[test]
+    fn column_list_methods_take_columns_and_expressions_alike() {
+        use crate::column::lit;
+        use crate::functions::{col, count, sum};
+
+        let df = session().range(5).unwrap();
+        let input = || Arc::clone(&df.plan);
+        let order = || [col("id").desc(), col("id")];
+        let order_expressions = || {
+            vec![
+                col("id").desc().expression().clone(),
+                col("id").expression().clone(),
+            ]
+        };
+        let metrics = || [sum(col("id")).alias("total"), count(lit(1))];
+        let metric_expressions = || {
+            vec![
+                sum(col("id")).alias("total").expression().clone(),
+                count(lit(1)).expression().clone(),
+            ]
+        };
+        let parameters = || [lit(3), col("id")];
+        let parameter_expressions =
+            || vec![lit(3).expression().clone(), col("id").expression().clone()];
+        let keys = || [col("id"), col("id") % lit(2)];
+        let key_expressions = || {
+            vec![
+                col("id").expression().clone(),
+                (col("id") % lit(2)).expression().clone(),
+            ]
+        };
+        let sorted = |is_global| LogicalPlan::Sort {
+            input: input(),
+            order: order_expressions(),
+            is_global,
+        };
+        let cases = [
+            (sorted(true), df.sort(order()), df.sort(order_expressions())),
+            (
+                sorted(true),
+                df.order_by(order()),
+                df.order_by(order_expressions()),
+            ),
+            (
+                sorted(false),
+                df.sort_within_partitions(order()),
+                df.sort_within_partitions(order_expressions()),
+            ),
+            (
+                LogicalPlan::Aggregate {
+                    input: input(),
+                    group_type: AggregateGroupType::GroupBy,
+                    grouping_expressions: vec![],
+                    aggregate_expressions: metric_expressions(),
+                    pivot_col: None,
+                    pivot_values: vec![],
+                    grouping_sets: vec![],
+                },
+                df.agg(metrics()),
+                df.agg(metric_expressions()),
+            ),
+            (
+                LogicalPlan::Observe {
+                    input: input(),
+                    name: "metrics".to_string(),
+                    exprs: metric_expressions(),
+                    observation: None,
+                },
+                df.observe("metrics", metrics()),
+                df.observe("metrics", metric_expressions()),
+            ),
+            (
+                LogicalPlan::Hint {
+                    input: input(),
+                    name: "rebalance".to_string(),
+                    parameters: parameter_expressions(),
+                },
+                df.hint_expressions("rebalance", parameters()),
+                df.hint_expressions("rebalance", parameter_expressions()),
+            ),
+            (
+                LogicalPlan::RepartitionByExpression {
+                    input: input(),
+                    num_partitions: 3,
+                    expressions: key_expressions(),
+                },
+                df.repartition_by_expressions(3, keys()),
+                df.repartition_by_expressions(3, key_expressions()),
+            ),
+        ];
+        for (before, of_columns, of_expressions) in &cases {
+            assert_eq!(of_columns.plan.to_proto(), before.to_proto());
+            assert_eq!(of_expressions.plan.to_proto(), before.to_proto());
+        }
+        // A name is the column of it, as in `select`.
+        assert_eq!(
+            df.sort(["id"]).plan.to_proto(),
+            df.sort([col("id")]).plan.to_proto()
+        );
+    }
+
+    /// The methods of lists of columns and of names take any iterable of them, as `select`
+    /// does, and build the plans that their `Vec` builds: an array, a `Vec` and an iterator alike.
+    #[test]
+    fn list_methods_take_any_iterable_as_their_vec_does() {
+        use crate::column::{col, lit};
+        use crate::functions::{count, count_distinct_columns};
+
+        let df = session().range(5).unwrap();
+        let aggregates = || [count(lit(1)).alias("rows")];
+        let same_as = |vec_form: &DataFrame, others: [&DataFrame; 2]| {
+            for other in others {
+                assert_eq!(other.plan.to_proto(), vec_form.plan.to_proto());
+            }
+        };
+
+        same_as(
+            &df.drop(vec!["id"]),
+            [&df.drop(["id"]), &df.drop(["id"].iter().copied())],
+        );
+        same_as(
+            &df.drop(vec![String::from("id")]),
+            [
+                &df.drop(["id"].map(String::from)),
+                &df.drop(["id"].into_iter().map(String::from)),
+            ],
+        );
+        same_as(
+            &df.drop_columns(vec![col("id")], vec!["x"]),
+            [
+                &df.drop_columns([col("id")], ["x"]),
+                &df.drop_columns(vec![col("id")].into_iter(), ["x"].into_iter()),
+            ],
+        );
+        same_as(
+            &df.with_columns(vec![("p".to_string(), lit(1))]),
+            [
+                &df.with_columns([("p", lit(1))]),
+                &df.with_columns(vec![("p", lit(1))].into_iter()),
+            ],
+        );
+        same_as(
+            &df.with_columns_renamed(vec![("id".to_string(), "x".to_string())]),
+            [
+                &df.with_columns_renamed([("id", "x")]),
+                &df.with_columns_renamed(vec![("id", "x")].into_iter()),
+            ],
+        );
+        same_as(
+            &df.describe(vec!["id"]),
+            [&df.describe(["id"]), &df.describe(["id"].iter().copied())],
+        );
+        same_as(
+            &df.to_df(vec!["x"]),
+            [&df.to_df(["x"]), &df.to_df(["x"].iter().copied())],
+        );
+        same_as(
+            &df.to_schema(vec!["x"]),
+            [&df.to_schema(["x"]), &df.to_schema(["x"].iter().copied())],
+        );
+        same_as(
+            &df.melt(vec!["id"], None, "variable", "value"),
+            [
+                &df.melt(["id"], None, "variable", "value"),
+                &df.melt(["id"].iter().copied(), None, "variable", "value"),
+            ],
+        );
+        same_as(
+            &df.stat().freq_items(vec!["id"], 0.5),
+            [
+                &df.stat().freq_items(["id"], 0.5),
+                &df.stat().freq_items(["id"].iter().copied(), 0.5),
+            ],
+        );
+        same_as(
+            &df.stat().approx_quantile(vec!["id"], vec![0.5], 0.1),
+            [
+                &df.stat().approx_quantile(["id"], vec![0.5], 0.1),
+                &df.stat()
+                    .approx_quantile(["id"].iter().copied(), vec![0.5], 0.1),
+            ],
+        );
+        // The grouping sets, and the grouping columns of `grouping_sets_with_columns`, of arrays,
+        // Vecs and iterators.
+        same_as(
+            &df.grouping_sets(vec![vec![col("id")], vec![col("id") % lit(2)]])
+                .agg(aggregates()),
+            [
+                &df.grouping_sets([[col("id")], [col("id") % lit(2)]])
+                    .agg(aggregates()),
+                &df.grouping_sets(
+                    vec![col("id"), col("id") % lit(2)]
+                        .into_iter()
+                        .map(|column| [column]),
+                )
+                .agg(aggregates()),
+            ],
+        );
+        same_as(
+            &df.grouping_sets_with_columns(
+                vec![vec![col("id")]],
+                vec![col("id"), col("id") % lit(2)],
+            )
+            .agg(aggregates()),
+            [
+                &df.grouping_sets_with_columns([[col("id")]], [col("id"), col("id") % lit(2)])
+                    .agg(aggregates()),
+                &df.grouping_sets_with_columns(
+                    (0..1).map(|_| vec![col("id")]),
+                    vec![col("id"), col("id") % lit(2)].into_iter(),
+                )
+                .agg(aggregates()),
+            ],
+        );
+        same_as(
+            &df.agg([count_distinct_columns(col("id"), vec![col("id")])]),
+            [
+                &df.agg([count_distinct_columns(col("id"), [col("id")])]),
+                &df.agg([count_distinct_columns(col("id"), ["id"])]),
+            ],
+        );
     }
 
     /// Streaming reader terminal builders (serialize their plans) + the writer builder
@@ -6601,7 +6935,7 @@ mod plan_construction_tests {
 
         let udtf_df = spark.tvf().udtf(
             "myudtf",
-            vec![],
+            Vec::<Column>::new(),
             Some(DataType::Integer),
             300,
             vec![1, 2],
