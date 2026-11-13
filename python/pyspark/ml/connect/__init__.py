@@ -48,12 +48,12 @@ from pyspark._pyspark import MLModel
 from pyspark.ml.connect.base import Estimator, Transformer, Evaluator, Model
 from pyspark.ml.connect import feature, evaluation, tuning
 
-# feature.py is the byte-identical upstream module, so the native StringIndexer and VectorAssembler
-# of the drop-in are set on it here, where `from pyspark.ml.connect.feature import ...` finds them.
-from pyspark._pyspark import StringIndexer, VectorAssembler
+# Keep the vendored feature module intact; install the native standard-ML stages here.
+from pyspark import _pyspark as _native
 
-feature.StringIndexer = StringIndexer
-feature.VectorAssembler = VectorAssembler
+for _name in _native._ml_feature_names:
+    globals()[_name] = getattr(_native, _name)
+    setattr(feature, _name, globals()[_name])
 
 __all__ = [
     # Reference `pyspark.ml.connect` public surface.
@@ -101,3 +101,5 @@ __all__ = [
     "CrossValidatorModel",
     "MLModel",
 ]
+
+__all__ += [name for name in _native._ml_feature_names if name not in __all__]

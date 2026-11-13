@@ -241,46 +241,13 @@ def test_ml_connect_fitted_string_indexer_transforms_the_cached_model(ml_mock):
     assert transform.params.params["outputCol"] == pb2.Expression.Literal(string="o")
 
 
-def test_ml_connect_scalers_are_pyspark_own_classes(ml_mock):
-    # The scalers of pyspark.ml.connect are the classes of PySpark's feature.py, which
-    # StandardScaler and MaxAbsScaler fit with summarize_dataframe and transform with closures on
-    # the server, so they send no MlCommand and have no setters, as PySpark's have none. The native
-    # StringIndexer and VectorAssembler are exported by the same module, beside them.
-    import numpy as np
-    import pandas as pd
-    import pyspark.ml.connect as connect
-    from pyspark.ml.connect import feature
-    from pyspark.ml.connect.feature import (
-        ArrayAssembler,
-        MaxAbsScaler,
-        StandardScaler,
-        StringIndexer,
-        VectorAssembler,
-    )
+def test_ml_connect_feature_exports_preserve_array_assembler():
+    from pyspark import _pyspark
+    from pyspark.ml.connect import ArrayAssembler, MaxAbsScaler, StandardScaler, feature
 
-    spark, service = ml_mock
-    for scaler in (StandardScaler, MaxAbsScaler):
-        assert scaler.__module__ == "pyspark.ml.connect.feature"
-        assert getattr(connect, scaler.__name__) is scaler
-        assert not hasattr(scaler, "set" + "InputCol")
-    assert connect.ArrayAssembler is ArrayAssembler is feature.ArrayAssembler
-    assert StringIndexer is feature.StringIndexer and VectorAssembler is feature.VectorAssembler
-    assert feature.StringIndexer.__module__ == "pyspark.ml.connect.feature"
-
-    # The model of a fit, built from its statistics, transforms a pandas DataFrame locally, as
-    # (x - mean) / scale, with the scale of a zero standard deviation replaced by 1, and without a
-    # request to the server.
-    sent = _requests_but_deletes(service)
-    model = feature.StandardScalerModel(
-        np.array([2.0, 1.0]), np.array([1.0, 0.0]), 3
-    )
-    model._resetUid("StandardScaler_test")
-    model._set(inputCol="f", outputCol="o")
-    pdf = pd.DataFrame({"f": [np.array([3.0, 5.0]), np.array([2.0, 1.0])]})
-    transformed = model.transform(pdf)
-    assert list(transformed.columns) == ["f", "o"]
-    assert [value.tolist() for value in transformed["o"]] == [[1.0, 4.0], [0.0, 0.0]]
-    assert _requests_but_deletes(service) == sent
+    assert StandardScaler is feature.StandardScaler is _pyspark.StandardScaler
+    assert MaxAbsScaler is feature.MaxAbsScaler is _pyspark.MaxAbsScaler
+    assert ArrayAssembler is feature.ArrayAssembler
 
 
 def _attribute(name):
@@ -716,8 +683,8 @@ def test_ml_connect_setters_set_the_params_of_their_receiver_as_pyspark(ml_mock)
         return {name: value(literal) for name, literal in params.params.items()}
 
     for cls, values in [
-        (StringIndexer, dict(inputCol="in", outputCol="out")),
-        (VectorAssembler, dict(inputCols=["a", "b"], outputCol="out")),
+        (StringIndexer, dict(inputCol="in", outputCol="out", inputCols=["a", "b"], outputCols=["c", "d"], handleInvalid="keep", stringOrderType="alphabetAsc")),
+        (VectorAssembler, dict(inputCols=["a", "b"], outputCol="out", handleInvalid="keep")),
         (
             LogisticRegression,
             dict(
@@ -820,8 +787,8 @@ _NATIVE_PARAMS = {
     'IsotonicRegression': {'featuresCol': 'str', 'labelCol': 'str', 'predictionCol': 'str', 'weightCol': 'str', 'isotonic': 'bool', 'featureIndex': 'int'},
     'FMRegressor': {'featuresCol': 'str', 'labelCol': 'str', 'predictionCol': 'str', 'factorSize': 'int', 'fitIntercept': 'bool', 'fitLinear': 'bool', 'regParam': 'float', 'miniBatchFraction': 'float', 'initStd': 'float', 'maxIter': 'int', 'stepSize': 'float', 'tol': 'float', 'solver': 'str', 'seed': 'int'},
 
-    "StringIndexer": dict(inputCol="str", outputCol="str"),
-    "VectorAssembler": dict(inputCols="str_list", outputCol="str"),
+    "StringIndexer": dict(inputCol="str", outputCol="str", inputCols="str_list", outputCols="str_list", handleInvalid="str", stringOrderType="str"),
+    "VectorAssembler": dict(inputCols="str_list", outputCol="str", handleInvalid="str"),
     "LogisticRegression": dict(
         featuresCol="str", labelCol="str", predictionCol="str", probabilityCol="str",
         maxIter="int", tol="float",

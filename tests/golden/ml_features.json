@@ -1,0 +1,7453 @@
+{
+  "spark_version": "4.3.0",
+  "sql": "SELECT *, words AS words2 FROM VALUES (0, 0.0D, 8.0D, 0.0D, 'a', 0.0D, array(0.0D,3.0D,0.0D,1.0D), array('the','alpha','alpha','beta','beta','gamma','delta'), 'the alpha alpha beta beta gamma delta', CAST('NaN' AS DOUBLE)), (1, 1.0D, 7.0D, 1.0D, 'b', 1.0D, array(2.0D,7.0D,1.0D,2.0D), array('alpha','alpha','beta','gamma'), 'alpha alpha beta gamma', CAST(NULL AS DOUBLE)), (2, 2.0D, 6.0D, 0.0D, 'c', 2.0D, array(0.0D,3.0D,2.0D,3.0D), array('alpha','beta','gamma'), 'alpha beta gamma', 2.0D), (3, 3.0D, 5.0D, 1.0D, 'a', 0.0D, array(2.0D,7.0D,0.0D,4.0D), array('alpha','beta'), 'alpha beta', 3.0D), (4, 4.0D, 4.0D, 0.0D, 'b', 1.0D, array(0.0D,3.0D,1.0D,5.0D), array('alpha','beta'), 'alpha beta', 4.0D), (5, 5.0D, 3.0D, 1.0D, 'c', 2.0D, array(2.0D,7.0D,2.0D,6.0D), array('alpha'), 'alpha', 5.0D), (6, 6.0D, 2.0D, 0.0D, 'a', 0.0D, array(0.0D,3.0D,0.0D,7.0D), array('alpha'), 'alpha', 6.0D), (7, 7.0D, 1.0D, 1.0D, 'b', 1.0D, array(2.0D,7.0D,1.0D,8.0D), array('alpha','delta'), 'alpha delta', 7.0D) AS t(id, x, y, label, category, index, xs, words, text, missing)",
+  "api": {
+    "Binarizer": {
+      "defaults": {
+        "threshold": 0.0,
+        "inputCol": null,
+        "outputCol": null,
+        "thresholds": null,
+        "inputCols": null,
+        "outputCols": null
+      },
+      "params": {
+        "inputCol": "toString",
+        "inputCols": "toListString",
+        "outputCol": "toString",
+        "outputCols": "toListString",
+        "threshold": "toFloat",
+        "thresholds": "toListFloat"
+      },
+      "estimator": false,
+      "model_params": []
+    },
+    "BucketedRandomProjectionLSH": {
+      "defaults": {
+        "inputCol": null,
+        "outputCol": null,
+        "seed": null,
+        "numHashTables": 1,
+        "bucketLength": null
+      },
+      "params": {
+        "bucketLength": "toFloat",
+        "inputCol": "toString",
+        "numHashTables": "toInt",
+        "outputCol": "toString",
+        "seed": "toInt"
+      },
+      "estimator": true,
+      "model_params": [
+        "bucketLength",
+        "inputCol",
+        "numHashTables",
+        "outputCol"
+      ]
+    },
+    "Bucketizer": {
+      "defaults": {
+        "splits": null,
+        "inputCol": null,
+        "outputCol": null,
+        "handleInvalid": "error",
+        "splitsArray": null,
+        "inputCols": null,
+        "outputCols": null
+      },
+      "params": {
+        "handleInvalid": "toString",
+        "inputCol": "toString",
+        "inputCols": "toListString",
+        "outputCol": "toString",
+        "outputCols": "toListString",
+        "splits": "toListFloat",
+        "splitsArray": "toListListFloat"
+      },
+      "estimator": false,
+      "model_params": []
+    },
+    "ChiSqSelector": {
+      "defaults": {
+        "numTopFeatures": 50,
+        "featuresCol": "features",
+        "outputCol": null,
+        "labelCol": "label",
+        "selectorType": "numTopFeatures",
+        "percentile": 0.1,
+        "fpr": 0.05,
+        "fdr": 0.05,
+        "fwe": 0.05
+      },
+      "params": {
+        "fdr": "toFloat",
+        "featuresCol": "toString",
+        "fpr": "toFloat",
+        "fwe": "toFloat",
+        "labelCol": "toString",
+        "numTopFeatures": "toInt",
+        "outputCol": "toString",
+        "percentile": "toFloat",
+        "selectorType": "toString"
+      },
+      "estimator": true,
+      "model_params": [
+        "fdr",
+        "featuresCol",
+        "fpr",
+        "fwe",
+        "labelCol",
+        "numTopFeatures",
+        "outputCol",
+        "percentile",
+        "selectorType"
+      ]
+    },
+    "CountVectorizer": {
+      "defaults": {
+        "minTF": 1.0,
+        "minDF": 1.0,
+        "maxDF": 9223372036854775807,
+        "vocabSize": 262144,
+        "binary": false,
+        "inputCol": null,
+        "outputCol": null
+      },
+      "params": {
+        "binary": "toBoolean",
+        "inputCol": "toString",
+        "maxDF": "toFloat",
+        "minDF": "toFloat",
+        "minTF": "toFloat",
+        "outputCol": "toString",
+        "vocabSize": "toInt"
+      },
+      "estimator": true,
+      "model_params": [
+        "binary",
+        "inputCol",
+        "maxDF",
+        "minDF",
+        "minTF",
+        "outputCol",
+        "vocabSize"
+      ]
+    },
+    "DCT": {
+      "defaults": {
+        "inverse": false,
+        "inputCol": null,
+        "outputCol": null
+      },
+      "params": {
+        "inputCol": "toString",
+        "inverse": "toBoolean",
+        "outputCol": "toString"
+      },
+      "estimator": false,
+      "model_params": []
+    },
+    "ElementwiseProduct": {
+      "defaults": {
+        "scalingVec": null,
+        "inputCol": null,
+        "outputCol": null
+      },
+      "params": {
+        "inputCol": "toString",
+        "outputCol": "toString",
+        "scalingVec": "toVector"
+      },
+      "estimator": false,
+      "model_params": []
+    },
+    "FeatureHasher": {
+      "defaults": {
+        "numFeatures": 262144,
+        "inputCols": null,
+        "outputCol": null,
+        "categoricalCols": null
+      },
+      "params": {
+        "categoricalCols": "toListString",
+        "inputCols": "toListString",
+        "numFeatures": "toInt",
+        "outputCol": "toString"
+      },
+      "estimator": false,
+      "model_params": []
+    },
+    "HashingTF": {
+      "defaults": {
+        "numFeatures": 262144,
+        "binary": false,
+        "inputCol": null,
+        "outputCol": null
+      },
+      "params": {
+        "binary": "toBoolean",
+        "inputCol": "toString",
+        "numFeatures": "toInt",
+        "outputCol": "toString"
+      },
+      "estimator": false,
+      "model_params": []
+    },
+    "IDF": {
+      "defaults": {
+        "minDocFreq": 0,
+        "inputCol": null,
+        "outputCol": null
+      },
+      "params": {
+        "inputCol": "toString",
+        "minDocFreq": "toInt",
+        "outputCol": "toString"
+      },
+      "estimator": true,
+      "model_params": [
+        "inputCol",
+        "minDocFreq",
+        "outputCol"
+      ]
+    },
+    "Imputer": {
+      "defaults": {
+        "strategy": "mean",
+        "missingValue": {
+          "float": "nan"
+        },
+        "inputCols": null,
+        "outputCols": null,
+        "inputCol": null,
+        "outputCol": null,
+        "relativeError": 0.001
+      },
+      "params": {
+        "inputCol": "toString",
+        "inputCols": "toListString",
+        "missingValue": "toFloat",
+        "outputCol": "toString",
+        "outputCols": "toListString",
+        "relativeError": "toFloat",
+        "strategy": "toString"
+      },
+      "estimator": true,
+      "model_params": [
+        "inputCol",
+        "inputCols",
+        "missingValue",
+        "outputCol",
+        "outputCols",
+        "relativeError",
+        "strategy"
+      ]
+    },
+    "IndexToString": {
+      "defaults": {
+        "inputCol": null,
+        "outputCol": null,
+        "labels": null
+      },
+      "params": {
+        "inputCol": "toString",
+        "labels": "toListString",
+        "outputCol": "toString"
+      },
+      "estimator": false,
+      "model_params": []
+    },
+    "Interaction": {
+      "defaults": {
+        "inputCols": null,
+        "outputCol": null
+      },
+      "params": {
+        "inputCols": "toListString",
+        "outputCol": "toString"
+      },
+      "estimator": false,
+      "model_params": []
+    },
+    "MaxAbsScaler": {
+      "defaults": {
+        "inputCol": null,
+        "outputCol": null
+      },
+      "params": {
+        "inputCol": "toString",
+        "outputCol": "toString"
+      },
+      "estimator": true,
+      "model_params": [
+        "inputCol",
+        "outputCol"
+      ]
+    },
+    "MinHashLSH": {
+      "defaults": {
+        "inputCol": null,
+        "outputCol": null,
+        "seed": null,
+        "numHashTables": 1
+      },
+      "params": {
+        "inputCol": "toString",
+        "numHashTables": "toInt",
+        "outputCol": "toString",
+        "seed": "toInt"
+      },
+      "estimator": true,
+      "model_params": [
+        "inputCol",
+        "numHashTables",
+        "outputCol"
+      ]
+    },
+    "MinMaxScaler": {
+      "defaults": {
+        "min": 0.0,
+        "max": 1.0,
+        "inputCol": null,
+        "outputCol": null
+      },
+      "params": {
+        "inputCol": "toString",
+        "max": "toFloat",
+        "min": "toFloat",
+        "outputCol": "toString"
+      },
+      "estimator": true,
+      "model_params": [
+        "inputCol",
+        "max",
+        "min",
+        "outputCol"
+      ]
+    },
+    "NGram": {
+      "defaults": {
+        "n": 2,
+        "inputCol": null,
+        "outputCol": null
+      },
+      "params": {
+        "inputCol": "toString",
+        "n": "toInt",
+        "outputCol": "toString"
+      },
+      "estimator": false,
+      "model_params": []
+    },
+    "Normalizer": {
+      "defaults": {
+        "p": 2.0,
+        "inputCol": null,
+        "outputCol": null
+      },
+      "params": {
+        "inputCol": "toString",
+        "outputCol": "toString",
+        "p": "toFloat"
+      },
+      "estimator": false,
+      "model_params": []
+    },
+    "OneHotEncoder": {
+      "defaults": {
+        "inputCols": null,
+        "outputCols": null,
+        "handleInvalid": "error",
+        "dropLast": true,
+        "inputCol": null,
+        "outputCol": null
+      },
+      "params": {
+        "dropLast": "toBoolean",
+        "handleInvalid": "toString",
+        "inputCol": "toString",
+        "inputCols": "toListString",
+        "outputCol": "toString",
+        "outputCols": "toListString"
+      },
+      "estimator": true,
+      "model_params": [
+        "dropLast",
+        "handleInvalid",
+        "inputCol",
+        "inputCols",
+        "outputCol",
+        "outputCols"
+      ]
+    },
+    "PCA": {
+      "defaults": {
+        "k": null,
+        "inputCol": null,
+        "outputCol": null
+      },
+      "params": {
+        "inputCol": "toString",
+        "k": "toInt",
+        "outputCol": "toString"
+      },
+      "estimator": true,
+      "model_params": [
+        "inputCol",
+        "k",
+        "outputCol"
+      ]
+    },
+    "PolynomialExpansion": {
+      "defaults": {
+        "degree": 2,
+        "inputCol": null,
+        "outputCol": null
+      },
+      "params": {
+        "degree": "toInt",
+        "inputCol": "toString",
+        "outputCol": "toString"
+      },
+      "estimator": false,
+      "model_params": []
+    },
+    "QuantileDiscretizer": {
+      "defaults": {
+        "numBuckets": 2,
+        "inputCol": null,
+        "outputCol": null,
+        "relativeError": 0.001,
+        "handleInvalid": "error",
+        "numBucketsArray": null,
+        "inputCols": null,
+        "outputCols": null
+      },
+      "params": {
+        "handleInvalid": "toString",
+        "inputCol": "toString",
+        "inputCols": "toListString",
+        "numBuckets": "toInt",
+        "numBucketsArray": "toListInt",
+        "outputCol": "toString",
+        "outputCols": "toListString",
+        "relativeError": "toFloat"
+      },
+      "estimator": true,
+      "model_params": [
+        "handleInvalid",
+        "inputCol",
+        "inputCols",
+        "outputCol",
+        "outputCols",
+        "splits",
+        "splitsArray"
+      ]
+    },
+    "RobustScaler": {
+      "defaults": {
+        "lower": 0.25,
+        "upper": 0.75,
+        "withCentering": false,
+        "withScaling": true,
+        "inputCol": null,
+        "outputCol": null,
+        "relativeError": 0.001
+      },
+      "params": {
+        "inputCol": "toString",
+        "lower": "toFloat",
+        "outputCol": "toString",
+        "relativeError": "toFloat",
+        "upper": "toFloat",
+        "withCentering": "toBoolean",
+        "withScaling": "toBoolean"
+      },
+      "estimator": true,
+      "model_params": [
+        "inputCol",
+        "lower",
+        "outputCol",
+        "relativeError",
+        "upper",
+        "withCentering",
+        "withScaling"
+      ]
+    },
+    "RegexTokenizer": {
+      "defaults": {
+        "minTokenLength": 1,
+        "gaps": true,
+        "pattern": "\\s+",
+        "inputCol": null,
+        "outputCol": null,
+        "toLowercase": true
+      },
+      "params": {
+        "gaps": "identity",
+        "inputCol": "toString",
+        "minTokenLength": "toInt",
+        "outputCol": "toString",
+        "pattern": "toString",
+        "toLowercase": "toBoolean"
+      },
+      "estimator": false,
+      "model_params": []
+    },
+    "RFormula": {
+      "defaults": {
+        "formula": null,
+        "featuresCol": "features",
+        "labelCol": "label",
+        "forceIndexLabel": false,
+        "stringIndexerOrderType": "frequencyDesc",
+        "handleInvalid": "error"
+      },
+      "params": {
+        "featuresCol": "toString",
+        "forceIndexLabel": "toBoolean",
+        "formula": "toString",
+        "handleInvalid": "toString",
+        "labelCol": "toString",
+        "stringIndexerOrderType": "toString"
+      },
+      "estimator": true,
+      "model_params": [
+        "featuresCol",
+        "forceIndexLabel",
+        "formula",
+        "handleInvalid",
+        "labelCol",
+        "stringIndexerOrderType"
+      ]
+    },
+    "SQLTransformer": {
+      "defaults": {
+        "statement": null
+      },
+      "params": {
+        "statement": "toString"
+      },
+      "estimator": false,
+      "model_params": []
+    },
+    "StandardScaler": {
+      "defaults": {
+        "withMean": false,
+        "withStd": true,
+        "inputCol": null,
+        "outputCol": null
+      },
+      "params": {
+        "inputCol": "toString",
+        "outputCol": "toString",
+        "withMean": "toBoolean",
+        "withStd": "toBoolean"
+      },
+      "estimator": true,
+      "model_params": [
+        "inputCol",
+        "outputCol",
+        "withMean",
+        "withStd"
+      ]
+    },
+    "StopWordsRemover": {
+      "defaults": {
+        "inputCol": null,
+        "outputCol": null,
+        "stopWords": null,
+        "caseSensitive": false,
+        "locale": null,
+        "inputCols": null,
+        "outputCols": null
+      },
+      "params": {
+        "caseSensitive": "toBoolean",
+        "inputCol": "toString",
+        "inputCols": "toListString",
+        "locale": "toString",
+        "outputCol": "toString",
+        "outputCols": "toListString",
+        "stopWords": "toListString"
+      },
+      "estimator": false,
+      "model_params": []
+    },
+    "StringIndexer": {
+      "defaults": {
+        "inputCol": null,
+        "outputCol": null,
+        "inputCols": null,
+        "outputCols": null,
+        "handleInvalid": "error",
+        "stringOrderType": "frequencyDesc"
+      },
+      "params": {
+        "handleInvalid": "toString",
+        "inputCol": "toString",
+        "inputCols": "toListString",
+        "outputCol": "toString",
+        "outputCols": "toListString",
+        "stringOrderType": "toString"
+      },
+      "estimator": true,
+      "model_params": [
+        "handleInvalid",
+        "inputCol",
+        "inputCols",
+        "outputCol",
+        "outputCols",
+        "stringOrderType"
+      ]
+    },
+    "TargetEncoder": {
+      "defaults": {
+        "inputCols": null,
+        "outputCols": null,
+        "labelCol": "label",
+        "handleInvalid": "error",
+        "targetType": "binary",
+        "smoothing": 0.0,
+        "inputCol": null,
+        "outputCol": null
+      },
+      "params": {
+        "handleInvalid": "toString",
+        "inputCol": "toString",
+        "inputCols": "toListString",
+        "labelCol": "toString",
+        "outputCol": "toString",
+        "outputCols": "toListString",
+        "smoothing": "toFloat",
+        "targetType": "toString"
+      },
+      "estimator": true,
+      "model_params": [
+        "handleInvalid",
+        "inputCol",
+        "inputCols",
+        "labelCol",
+        "outputCol",
+        "outputCols",
+        "smoothing",
+        "targetType"
+      ]
+    },
+    "Tokenizer": {
+      "defaults": {
+        "inputCol": null,
+        "outputCol": null
+      },
+      "params": {
+        "inputCol": "toString",
+        "outputCol": "toString"
+      },
+      "estimator": false,
+      "model_params": []
+    },
+    "UnivariateFeatureSelector": {
+      "defaults": {
+        "featuresCol": "features",
+        "outputCol": null,
+        "labelCol": "label",
+        "selectionMode": "numTopFeatures"
+      },
+      "params": {
+        "featureType": "toString",
+        "featuresCol": "toString",
+        "labelCol": "toString",
+        "labelType": "toString",
+        "outputCol": "toString",
+        "selectionMode": "toString",
+        "selectionThreshold": "toFloat"
+      },
+      "estimator": true,
+      "model_params": [
+        "featureType",
+        "featuresCol",
+        "labelCol",
+        "labelType",
+        "outputCol",
+        "selectionMode",
+        "selectionThreshold"
+      ]
+    },
+    "VarianceThresholdSelector": {
+      "defaults": {
+        "featuresCol": "features",
+        "outputCol": null,
+        "varianceThreshold": 0.0
+      },
+      "params": {
+        "featuresCol": "toString",
+        "outputCol": "toString",
+        "varianceThreshold": "toFloat"
+      },
+      "estimator": true,
+      "model_params": [
+        "featuresCol",
+        "outputCol",
+        "varianceThreshold"
+      ]
+    },
+    "VectorAssembler": {
+      "defaults": {
+        "inputCols": null,
+        "outputCol": null,
+        "handleInvalid": "error"
+      },
+      "params": {
+        "handleInvalid": "toString",
+        "inputCols": "toListString",
+        "outputCol": "toString"
+      },
+      "estimator": false,
+      "model_params": []
+    },
+    "VectorIndexer": {
+      "defaults": {
+        "maxCategories": 20,
+        "inputCol": null,
+        "outputCol": null,
+        "handleInvalid": "error"
+      },
+      "params": {
+        "handleInvalid": "toString",
+        "inputCol": "toString",
+        "maxCategories": "toInt",
+        "outputCol": "toString"
+      },
+      "estimator": true,
+      "model_params": [
+        "handleInvalid",
+        "inputCol",
+        "maxCategories",
+        "outputCol"
+      ]
+    },
+    "VectorSizeHint": {
+      "defaults": {
+        "inputCol": null,
+        "size": null,
+        "handleInvalid": "error"
+      },
+      "params": {
+        "handleInvalid": "toString",
+        "inputCol": "toString",
+        "size": "toInt"
+      },
+      "estimator": false,
+      "model_params": []
+    },
+    "VectorSlicer": {
+      "defaults": {
+        "inputCol": null,
+        "outputCol": null,
+        "indices": null,
+        "names": null
+      },
+      "params": {
+        "indices": "toListInt",
+        "inputCol": "toString",
+        "names": "toListString",
+        "outputCol": "toString"
+      },
+      "estimator": false,
+      "model_params": []
+    },
+    "Word2Vec": {
+      "defaults": {
+        "vectorSize": 100,
+        "minCount": 5,
+        "numPartitions": 1,
+        "stepSize": 0.025,
+        "maxIter": 1,
+        "seed": null,
+        "inputCol": null,
+        "outputCol": null,
+        "windowSize": 5,
+        "maxSentenceLength": 1000
+      },
+      "params": {
+        "inputCol": "toString",
+        "maxIter": "toInt",
+        "maxSentenceLength": "toInt",
+        "minCount": "toInt",
+        "numPartitions": "toInt",
+        "outputCol": "toString",
+        "seed": "toInt",
+        "stepSize": "toFloat",
+        "vectorSize": "toInt",
+        "windowSize": "toInt"
+      },
+      "estimator": true,
+      "model_params": [
+        "inputCol",
+        "maxIter",
+        "maxSentenceLength",
+        "minCount",
+        "numPartitions",
+        "outputCol",
+        "seed",
+        "stepSize",
+        "vectorSize",
+        "windowSize"
+      ]
+    }
+  },
+  "cases": [
+    {
+      "name": "Binarizer",
+      "id": "Binarizer",
+      "values": {
+        "inputCol": "x",
+        "outputCol": "out",
+        "threshold": 2.5
+      },
+      "columns": [
+        "out"
+      ],
+      "rows": [
+        [
+          0.0
+        ],
+        [
+          0.0
+        ],
+        [
+          0.0
+        ],
+        [
+          1.0
+        ],
+        [
+          1.0
+        ],
+        [
+          1.0
+        ],
+        [
+          1.0
+        ],
+        [
+          1.0
+        ]
+      ],
+      "schema": {
+        "type": "struct",
+        "fields": [
+          {
+            "name": "out",
+            "type": "double",
+            "nullable": false,
+            "metadata": {
+              "ml_attr": {
+                "type": "binary"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "BucketedRandomProjectionLSH",
+      "id": "BucketedRandomProjectionLSH",
+      "values": {
+        "inputCol": "features",
+        "outputCol": "out",
+        "numHashTables": 2,
+        "bucketLength": 1.5,
+        "seed": 42
+      },
+      "columns": [
+        "out"
+      ],
+      "rows": [
+        [
+          [
+            [
+              0.0
+            ],
+            [
+              0.0
+            ]
+          ]
+        ],
+        [
+          [
+            [
+              1.0
+            ],
+            [
+              0.0
+            ]
+          ]
+        ],
+        [
+          [
+            [
+              -1.0
+            ],
+            [
+              -2.0
+            ]
+          ]
+        ],
+        [
+          [
+            [
+              1.0
+            ],
+            [
+              -1.0
+            ]
+          ]
+        ],
+        [
+          [
+            [
+              -2.0
+            ],
+            [
+              -3.0
+            ]
+          ]
+        ],
+        [
+          [
+            [
+              0.0
+            ],
+            [
+              -2.0
+            ]
+          ]
+        ],
+        [
+          [
+            [
+              -2.0
+            ],
+            [
+              -3.0
+            ]
+          ]
+        ],
+        [
+          [
+            [
+              -1.0
+            ],
+            [
+              -3.0
+            ]
+          ]
+        ]
+      ],
+      "schema": {
+        "type": "struct",
+        "fields": [
+          {
+            "name": "out",
+            "type": {
+              "type": "array",
+              "elementType": {
+                "type": "udt",
+                "class": "org.apache.spark.ml.linalg.VectorUDT",
+                "pyClass": "pyspark.ml.linalg.VectorUDT",
+                "sqlType": {
+                  "type": "struct",
+                  "fields": [
+                    {
+                      "name": "type",
+                      "type": "byte",
+                      "nullable": false,
+                      "metadata": {}
+                    },
+                    {
+                      "name": "size",
+                      "type": "integer",
+                      "nullable": true,
+                      "metadata": {}
+                    },
+                    {
+                      "name": "indices",
+                      "type": {
+                        "type": "array",
+                        "elementType": "integer",
+                        "containsNull": false
+                      },
+                      "nullable": true,
+                      "metadata": {}
+                    },
+                    {
+                      "name": "values",
+                      "type": {
+                        "type": "array",
+                        "elementType": "double",
+                        "containsNull": false
+                      },
+                      "nullable": true,
+                      "metadata": {}
+                    }
+                  ]
+                }
+              },
+              "containsNull": true
+            },
+            "nullable": true,
+            "metadata": {}
+          }
+        ]
+      }
+    },
+    {
+      "name": "Bucketizer",
+      "id": "Bucketizer",
+      "values": {
+        "inputCol": "x",
+        "outputCol": "out",
+        "splits": [
+          {
+            "float": "-inf"
+          },
+          2.0,
+          5.0,
+          {
+            "float": "inf"
+          }
+        ]
+      },
+      "columns": [
+        "out"
+      ],
+      "rows": [
+        [
+          0.0
+        ],
+        [
+          0.0
+        ],
+        [
+          1.0
+        ],
+        [
+          1.0
+        ],
+        [
+          1.0
+        ],
+        [
+          2.0
+        ],
+        [
+          2.0
+        ],
+        [
+          2.0
+        ]
+      ],
+      "schema": {
+        "type": "struct",
+        "fields": [
+          {
+            "name": "out",
+            "type": "double",
+            "nullable": false,
+            "metadata": {
+              "ml_attr": {
+                "ord": true,
+                "vals": [
+                  "-Infinity, 2.0",
+                  "2.0, 5.0",
+                  "5.0, Infinity"
+                ],
+                "type": "nominal"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "ChiSqSelector",
+      "id": "ChiSqSelector",
+      "values": {
+        "featuresCol": "features",
+        "outputCol": "out",
+        "labelCol": "label",
+        "numTopFeatures": 2
+      },
+      "columns": [
+        "out"
+      ],
+      "rows": [
+        [
+          [
+            0.0,
+            3.0
+          ]
+        ],
+        [
+          [
+            2.0,
+            7.0
+          ]
+        ],
+        [
+          [
+            0.0,
+            3.0
+          ]
+        ],
+        [
+          [
+            2.0,
+            7.0
+          ]
+        ],
+        [
+          [
+            0.0,
+            3.0
+          ]
+        ],
+        [
+          [
+            2.0,
+            7.0
+          ]
+        ],
+        [
+          [
+            0.0,
+            3.0
+          ]
+        ],
+        [
+          [
+            2.0,
+            7.0
+          ]
+        ]
+      ],
+      "schema": {
+        "type": "struct",
+        "fields": [
+          {
+            "name": "out",
+            "type": {
+              "type": "udt",
+              "class": "org.apache.spark.ml.linalg.VectorUDT",
+              "pyClass": "pyspark.ml.linalg.VectorUDT",
+              "sqlType": {
+                "type": "struct",
+                "fields": [
+                  {
+                    "name": "type",
+                    "type": "byte",
+                    "nullable": false,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "size",
+                    "type": "integer",
+                    "nullable": true,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "indices",
+                    "type": {
+                      "type": "array",
+                      "elementType": "integer",
+                      "containsNull": false
+                    },
+                    "nullable": true,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "values",
+                    "type": {
+                      "type": "array",
+                      "elementType": "double",
+                      "containsNull": false
+                    },
+                    "nullable": true,
+                    "metadata": {}
+                  }
+                ]
+              }
+            },
+            "nullable": true,
+            "metadata": {
+              "ml_attr": {
+                "num_attrs": 2,
+                "attrs": {
+                  "nominal": [
+                    {
+                      "idx": 0
+                    },
+                    {
+                      "idx": 1
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "CountVectorizer",
+      "id": "CountVectorizer",
+      "values": {
+        "inputCol": "words",
+        "outputCol": "out",
+        "vocabSize": 4
+      },
+      "columns": [
+        "out"
+      ],
+      "rows": [
+        [
+          [
+            2.0,
+            2.0,
+            1.0,
+            1.0
+          ]
+        ],
+        [
+          [
+            2.0,
+            1.0,
+            1.0,
+            0.0
+          ]
+        ],
+        [
+          [
+            1.0,
+            1.0,
+            1.0,
+            0.0
+          ]
+        ],
+        [
+          [
+            1.0,
+            1.0,
+            0.0,
+            0.0
+          ]
+        ],
+        [
+          [
+            1.0,
+            1.0,
+            0.0,
+            0.0
+          ]
+        ],
+        [
+          [
+            1.0,
+            0.0,
+            0.0,
+            0.0
+          ]
+        ],
+        [
+          [
+            1.0,
+            0.0,
+            0.0,
+            0.0
+          ]
+        ],
+        [
+          [
+            1.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        ]
+      ],
+      "schema": {
+        "type": "struct",
+        "fields": [
+          {
+            "name": "out",
+            "type": {
+              "type": "udt",
+              "class": "org.apache.spark.ml.linalg.VectorUDT",
+              "pyClass": "pyspark.ml.linalg.VectorUDT",
+              "sqlType": {
+                "type": "struct",
+                "fields": [
+                  {
+                    "name": "type",
+                    "type": "byte",
+                    "nullable": false,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "size",
+                    "type": "integer",
+                    "nullable": true,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "indices",
+                    "type": {
+                      "type": "array",
+                      "elementType": "integer",
+                      "containsNull": false
+                    },
+                    "nullable": true,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "values",
+                    "type": {
+                      "type": "array",
+                      "elementType": "double",
+                      "containsNull": false
+                    },
+                    "nullable": true,
+                    "metadata": {}
+                  }
+                ]
+              }
+            },
+            "nullable": true,
+            "metadata": {
+              "ml_attr": {
+                "num_attrs": 4,
+                "attrs": {}
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "DCT",
+      "id": "DCT",
+      "values": {
+        "inputCol": "features",
+        "outputCol": "out"
+      },
+      "columns": [
+        "out"
+      ],
+      "rows": [
+        [
+          [
+            2.0,
+            0.15851266778110737,
+            -1.0000000000000002,
+            -2.2304424973876635
+          ]
+        ],
+        [
+          [
+            6.0,
+            1.6235883004385914,
+            -2.0000000000000004,
+            -3.9196888946291293
+          ]
+        ],
+        [
+          [
+            4.0,
+            -1.6892463972414664,
+            -1.0000000000000002,
+            -1.4650756326574839
+          ]
+        ],
+        [
+          [
+            6.500000000000001,
+            0.5876233856353135,
+            -0.5000000000000001,
+            -5.114166477213515
+          ]
+        ],
+        [
+          [
+            4.5,
+            -2.725211312044744,
+            0.5000000000000001,
+            -2.659553215241869
+          ]
+        ],
+        [
+          [
+            8.5,
+            -1.2601356793872602,
+            -0.5000000000000001,
+            -4.348799612483336
+          ]
+        ],
+        [
+          [
+            5.0,
+            -3.761176226848022,
+            2.0000000000000004,
+            -3.8540307978262547
+          ]
+        ],
+        [
+          [
+            9.0,
+            -2.2961005941905386,
+            1.0000000000000002,
+            -5.543277195067721
+          ]
+        ]
+      ],
+      "schema": {
+        "type": "struct",
+        "fields": [
+          {
+            "name": "out",
+            "type": {
+              "type": "udt",
+              "class": "org.apache.spark.ml.linalg.VectorUDT",
+              "pyClass": "pyspark.ml.linalg.VectorUDT",
+              "sqlType": {
+                "type": "struct",
+                "fields": [
+                  {
+                    "name": "type",
+                    "type": "byte",
+                    "nullable": false,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "size",
+                    "type": "integer",
+                    "nullable": true,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "indices",
+                    "type": {
+                      "type": "array",
+                      "elementType": "integer",
+                      "containsNull": false
+                    },
+                    "nullable": true,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "values",
+                    "type": {
+                      "type": "array",
+                      "elementType": "double",
+                      "containsNull": false
+                    },
+                    "nullable": true,
+                    "metadata": {}
+                  }
+                ]
+              }
+            },
+            "nullable": true,
+            "metadata": {}
+          }
+        ]
+      }
+    },
+    {
+      "name": "ElementwiseProduct",
+      "id": "ElementwiseProduct",
+      "values": {
+        "inputCol": "features",
+        "outputCol": "out",
+        "scalingVec": {
+          "vector": [
+            2.0,
+            1.0,
+            0.0,
+            -1.0
+          ]
+        }
+      },
+      "columns": [
+        "out"
+      ],
+      "rows": [
+        [
+          [
+            0.0,
+            3.0,
+            0.0,
+            -1.0
+          ]
+        ],
+        [
+          [
+            4.0,
+            7.0,
+            0.0,
+            -2.0
+          ]
+        ],
+        [
+          [
+            0.0,
+            3.0,
+            0.0,
+            -3.0
+          ]
+        ],
+        [
+          [
+            4.0,
+            7.0,
+            0.0,
+            -4.0
+          ]
+        ],
+        [
+          [
+            0.0,
+            3.0,
+            0.0,
+            -5.0
+          ]
+        ],
+        [
+          [
+            4.0,
+            7.0,
+            0.0,
+            -6.0
+          ]
+        ],
+        [
+          [
+            0.0,
+            3.0,
+            0.0,
+            -7.0
+          ]
+        ],
+        [
+          [
+            4.0,
+            7.0,
+            0.0,
+            -8.0
+          ]
+        ]
+      ],
+      "schema": {
+        "type": "struct",
+        "fields": [
+          {
+            "name": "out",
+            "type": {
+              "type": "udt",
+              "class": "org.apache.spark.ml.linalg.VectorUDT",
+              "pyClass": "pyspark.ml.linalg.VectorUDT",
+              "sqlType": {
+                "type": "struct",
+                "fields": [
+                  {
+                    "name": "type",
+                    "type": "byte",
+                    "nullable": false,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "size",
+                    "type": "integer",
+                    "nullable": true,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "indices",
+                    "type": {
+                      "type": "array",
+                      "elementType": "integer",
+                      "containsNull": false
+                    },
+                    "nullable": true,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "values",
+                    "type": {
+                      "type": "array",
+                      "elementType": "double",
+                      "containsNull": false
+                    },
+                    "nullable": true,
+                    "metadata": {}
+                  }
+                ]
+              }
+            },
+            "nullable": true,
+            "metadata": {
+              "ml_attr": {
+                "num_attrs": 4
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "FeatureHasher",
+      "id": "FeatureHasher",
+      "values": {
+        "inputCols": [
+          "x",
+          "y",
+          "category"
+        ],
+        "outputCol": "out",
+        "numFeatures": 8
+      },
+      "columns": [
+        "out"
+      ],
+      "rows": [
+        [
+          [
+            0.0,
+            0.0,
+            0.0,
+            8.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ]
+        ],
+        [
+          [
+            1.0,
+            0.0,
+            1.0,
+            7.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ]
+        ],
+        [
+          [
+            0.0,
+            0.0,
+            3.0,
+            6.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ]
+        ],
+        [
+          [
+            0.0,
+            0.0,
+            3.0,
+            5.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ]
+        ],
+        [
+          [
+            1.0,
+            0.0,
+            4.0,
+            4.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ]
+        ],
+        [
+          [
+            0.0,
+            0.0,
+            6.0,
+            3.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ]
+        ],
+        [
+          [
+            0.0,
+            0.0,
+            6.0,
+            2.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ]
+        ],
+        [
+          [
+            1.0,
+            0.0,
+            7.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ]
+        ]
+      ],
+      "schema": {
+        "type": "struct",
+        "fields": [
+          {
+            "name": "out",
+            "type": {
+              "type": "udt",
+              "class": "org.apache.spark.ml.linalg.VectorUDT",
+              "pyClass": "pyspark.ml.linalg.VectorUDT",
+              "sqlType": {
+                "type": "struct",
+                "fields": [
+                  {
+                    "name": "type",
+                    "type": "byte",
+                    "nullable": false,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "size",
+                    "type": "integer",
+                    "nullable": true,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "indices",
+                    "type": {
+                      "type": "array",
+                      "elementType": "integer",
+                      "containsNull": false
+                    },
+                    "nullable": true,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "values",
+                    "type": {
+                      "type": "array",
+                      "elementType": "double",
+                      "containsNull": false
+                    },
+                    "nullable": true,
+                    "metadata": {}
+                  }
+                ]
+              }
+            },
+            "nullable": true,
+            "metadata": {
+              "ml_attr": {
+                "num_attrs": 8
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "HashingTF",
+      "id": "HashingTF",
+      "values": {
+        "inputCol": "words",
+        "outputCol": "out",
+        "numFeatures": 8
+      },
+      "columns": [
+        "out"
+      ],
+      "rows": [
+        [
+          [
+            2.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            2.0,
+            1.0,
+            1.0
+          ]
+        ],
+        [
+          [
+            2.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            1.0
+          ]
+        ],
+        [
+          [
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            1.0
+          ]
+        ],
+        [
+          [
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0
+          ]
+        ],
+        [
+          [
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0
+          ]
+        ],
+        [
+          [
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ]
+        ],
+        [
+          [
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ]
+        ],
+        [
+          [
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ]
+        ]
+      ],
+      "schema": {
+        "type": "struct",
+        "fields": [
+          {
+            "name": "out",
+            "type": {
+              "type": "udt",
+              "class": "org.apache.spark.ml.linalg.VectorUDT",
+              "pyClass": "pyspark.ml.linalg.VectorUDT",
+              "sqlType": {
+                "type": "struct",
+                "fields": [
+                  {
+                    "name": "type",
+                    "type": "byte",
+                    "nullable": false,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "size",
+                    "type": "integer",
+                    "nullable": true,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "indices",
+                    "type": {
+                      "type": "array",
+                      "elementType": "integer",
+                      "containsNull": false
+                    },
+                    "nullable": true,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "values",
+                    "type": {
+                      "type": "array",
+                      "elementType": "double",
+                      "containsNull": false
+                    },
+                    "nullable": true,
+                    "metadata": {}
+                  }
+                ]
+              }
+            },
+            "nullable": true,
+            "metadata": {
+              "ml_attr": {
+                "num_attrs": 8
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "IDF",
+      "id": "IDF",
+      "values": {
+        "inputCol": "features",
+        "outputCol": "out"
+      },
+      "columns": [
+        "out"
+      ],
+      "rows": [
+        [
+          [
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ]
+        ],
+        [
+          [
+            1.1755733298042381,
+            0.0,
+            0.4054651081081644,
+            0.0
+          ]
+        ],
+        [
+          [
+            0.0,
+            0.0,
+            0.8109302162163288,
+            0.0
+          ]
+        ],
+        [
+          [
+            1.1755733298042381,
+            0.0,
+            0.0,
+            0.0
+          ]
+        ],
+        [
+          [
+            0.0,
+            0.0,
+            0.4054651081081644,
+            0.0
+          ]
+        ],
+        [
+          [
+            1.1755733298042381,
+            0.0,
+            0.8109302162163288,
+            0.0
+          ]
+        ],
+        [
+          [
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ]
+        ],
+        [
+          [
+            1.1755733298042381,
+            0.0,
+            0.4054651081081644,
+            0.0
+          ]
+        ]
+      ],
+      "schema": {
+        "type": "struct",
+        "fields": [
+          {
+            "name": "out",
+            "type": {
+              "type": "udt",
+              "class": "org.apache.spark.ml.linalg.VectorUDT",
+              "pyClass": "pyspark.ml.linalg.VectorUDT",
+              "sqlType": {
+                "type": "struct",
+                "fields": [
+                  {
+                    "name": "type",
+                    "type": "byte",
+                    "nullable": false,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "size",
+                    "type": "integer",
+                    "nullable": true,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "indices",
+                    "type": {
+                      "type": "array",
+                      "elementType": "integer",
+                      "containsNull": false
+                    },
+                    "nullable": true,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "values",
+                    "type": {
+                      "type": "array",
+                      "elementType": "double",
+                      "containsNull": false
+                    },
+                    "nullable": true,
+                    "metadata": {}
+                  }
+                ]
+              }
+            },
+            "nullable": true,
+            "metadata": {
+              "ml_attr": {
+                "num_attrs": 4
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "Imputer",
+      "id": "Imputer",
+      "values": {
+        "inputCol": "missing",
+        "outputCol": "out",
+        "missingValue": {
+          "float": "nan"
+        }
+      },
+      "columns": [
+        "out"
+      ],
+      "rows": [
+        [
+          4.5
+        ],
+        [
+          4.5
+        ],
+        [
+          2.0
+        ],
+        [
+          3.0
+        ],
+        [
+          4.0
+        ],
+        [
+          5.0
+        ],
+        [
+          6.0
+        ],
+        [
+          7.0
+        ]
+      ],
+      "schema": {
+        "type": "struct",
+        "fields": [
+          {
+            "name": "out",
+            "type": "double",
+            "nullable": true,
+            "metadata": {}
+          }
+        ]
+      }
+    },
+    {
+      "name": "IndexToString",
+      "id": "IndexToString",
+      "values": {
+        "inputCol": "index",
+        "outputCol": "out",
+        "labels": [
+          "a",
+          "b",
+          "c"
+        ]
+      },
+      "columns": [
+        "out"
+      ],
+      "rows": [
+        [
+          "a"
+        ],
+        [
+          "b"
+        ],
+        [
+          "c"
+        ],
+        [
+          "a"
+        ],
+        [
+          "b"
+        ],
+        [
+          "c"
+        ],
+        [
+          "a"
+        ],
+        [
+          "b"
+        ]
+      ],
+      "schema": {
+        "type": "struct",
+        "fields": [
+          {
+            "name": "out",
+            "type": "string",
+            "nullable": true,
+            "metadata": {}
+          }
+        ]
+      }
+    },
+    {
+      "name": "Interaction",
+      "id": "Interaction",
+      "values": {
+        "inputCols": [
+          "x",
+          "y"
+        ],
+        "outputCol": "out"
+      },
+      "columns": [
+        "out"
+      ],
+      "rows": [
+        [
+          [
+            0.0
+          ]
+        ],
+        [
+          [
+            7.0
+          ]
+        ],
+        [
+          [
+            12.0
+          ]
+        ],
+        [
+          [
+            15.0
+          ]
+        ],
+        [
+          [
+            16.0
+          ]
+        ],
+        [
+          [
+            15.0
+          ]
+        ],
+        [
+          [
+            12.0
+          ]
+        ],
+        [
+          [
+            7.0
+          ]
+        ]
+      ],
+      "schema": {
+        "type": "struct",
+        "fields": [
+          {
+            "name": "out",
+            "type": {
+              "type": "udt",
+              "class": "org.apache.spark.ml.linalg.VectorUDT",
+              "pyClass": "pyspark.ml.linalg.VectorUDT",
+              "sqlType": {
+                "type": "struct",
+                "fields": [
+                  {
+                    "name": "type",
+                    "type": "byte",
+                    "nullable": false,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "size",
+                    "type": "integer",
+                    "nullable": true,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "indices",
+                    "type": {
+                      "type": "array",
+                      "elementType": "integer",
+                      "containsNull": false
+                    },
+                    "nullable": true,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "values",
+                    "type": {
+                      "type": "array",
+                      "elementType": "double",
+                      "containsNull": false
+                    },
+                    "nullable": true,
+                    "metadata": {}
+                  }
+                ]
+              }
+            },
+            "nullable": true,
+            "metadata": {
+              "ml_attr": {
+                "num_attrs": 1,
+                "attrs": {
+                  "numeric": [
+                    {
+                      "name": "x:y",
+                      "idx": 0
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "MaxAbsScaler",
+      "id": "MaxAbsScaler",
+      "values": {
+        "inputCol": "features",
+        "outputCol": "out"
+      },
+      "columns": [
+        "out"
+      ],
+      "rows": [
+        [
+          [
+            0.0,
+            0.42857142857142855,
+            0.0,
+            0.125
+          ]
+        ],
+        [
+          [
+            1.0,
+            1.0,
+            0.5,
+            0.25
+          ]
+        ],
+        [
+          [
+            0.0,
+            0.42857142857142855,
+            1.0,
+            0.375
+          ]
+        ],
+        [
+          [
+            1.0,
+            1.0,
+            0.0,
+            0.5
+          ]
+        ],
+        [
+          [
+            0.0,
+            0.42857142857142855,
+            0.5,
+            0.625
+          ]
+        ],
+        [
+          [
+            1.0,
+            1.0,
+            1.0,
+            0.75
+          ]
+        ],
+        [
+          [
+            0.0,
+            0.42857142857142855,
+            0.0,
+            0.875
+          ]
+        ],
+        [
+          [
+            1.0,
+            1.0,
+            0.5,
+            1.0
+          ]
+        ]
+      ],
+      "schema": {
+        "type": "struct",
+        "fields": [
+          {
+            "name": "out",
+            "type": {
+              "type": "udt",
+              "class": "org.apache.spark.ml.linalg.VectorUDT",
+              "pyClass": "pyspark.ml.linalg.VectorUDT",
+              "sqlType": {
+                "type": "struct",
+                "fields": [
+                  {
+                    "name": "type",
+                    "type": "byte",
+                    "nullable": false,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "size",
+                    "type": "integer",
+                    "nullable": true,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "indices",
+                    "type": {
+                      "type": "array",
+                      "elementType": "integer",
+                      "containsNull": false
+                    },
+                    "nullable": true,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "values",
+                    "type": {
+                      "type": "array",
+                      "elementType": "double",
+                      "containsNull": false
+                    },
+                    "nullable": true,
+                    "metadata": {}
+                  }
+                ]
+              }
+            },
+            "nullable": true,
+            "metadata": {
+              "ml_attr": {
+                "num_attrs": 4
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "MinHashLSH",
+      "id": "MinHashLSH",
+      "values": {
+        "inputCol": "features",
+        "outputCol": "out",
+        "numHashTables": 2,
+        "seed": 42
+      },
+      "columns": [
+        "out"
+      ],
+      "rows": [
+        [
+          [
+            [
+              252893058.0
+            ],
+            [
+              999296639.0
+            ]
+          ]
+        ],
+        [
+          [
+            [
+              252893058.0
+            ],
+            [
+              428433145.0
+            ]
+          ]
+        ],
+        [
+          [
+            [
+              252893058.0
+            ],
+            [
+              428433145.0
+            ]
+          ]
+        ],
+        [
+          [
+            [
+              252893058.0
+            ],
+            [
+              999296639.0
+            ]
+          ]
+        ],
+        [
+          [
+            [
+              252893058.0
+            ],
+            [
+              428433145.0
+            ]
+          ]
+        ],
+        [
+          [
+            [
+              252893058.0
+            ],
+            [
+              428433145.0
+            ]
+          ]
+        ],
+        [
+          [
+            [
+              252893058.0
+            ],
+            [
+              999296639.0
+            ]
+          ]
+        ],
+        [
+          [
+            [
+              252893058.0
+            ],
+            [
+              428433145.0
+            ]
+          ]
+        ]
+      ],
+      "schema": {
+        "type": "struct",
+        "fields": [
+          {
+            "name": "out",
+            "type": {
+              "type": "array",
+              "elementType": {
+                "type": "udt",
+                "class": "org.apache.spark.ml.linalg.VectorUDT",
+                "pyClass": "pyspark.ml.linalg.VectorUDT",
+                "sqlType": {
+                  "type": "struct",
+                  "fields": [
+                    {
+                      "name": "type",
+                      "type": "byte",
+                      "nullable": false,
+                      "metadata": {}
+                    },
+                    {
+                      "name": "size",
+                      "type": "integer",
+                      "nullable": true,
+                      "metadata": {}
+                    },
+                    {
+                      "name": "indices",
+                      "type": {
+                        "type": "array",
+                        "elementType": "integer",
+                        "containsNull": false
+                      },
+                      "nullable": true,
+                      "metadata": {}
+                    },
+                    {
+                      "name": "values",
+                      "type": {
+                        "type": "array",
+                        "elementType": "double",
+                        "containsNull": false
+                      },
+                      "nullable": true,
+                      "metadata": {}
+                    }
+                  ]
+                }
+              },
+              "containsNull": true
+            },
+            "nullable": true,
+            "metadata": {}
+          }
+        ]
+      }
+    },
+    {
+      "name": "MinMaxScaler",
+      "id": "MinMaxScaler",
+      "values": {
+        "inputCol": "features",
+        "outputCol": "out",
+        "min": -1.0,
+        "max": 1.0
+      },
+      "columns": [
+        "out"
+      ],
+      "rows": [
+        [
+          [
+            -1.0,
+            -1.0,
+            -1.0,
+            -1.0
+          ]
+        ],
+        [
+          [
+            1.0,
+            1.0,
+            0.0,
+            -0.7142857142857143
+          ]
+        ],
+        [
+          [
+            -1.0,
+            -1.0,
+            1.0,
+            -0.4285714285714286
+          ]
+        ],
+        [
+          [
+            1.0,
+            1.0,
+            -1.0,
+            -0.1428571428571429
+          ]
+        ],
+        [
+          [
+            -1.0,
+            -1.0,
+            0.0,
+            0.1428571428571428
+          ]
+        ],
+        [
+          [
+            1.0,
+            1.0,
+            1.0,
+            0.4285714285714284
+          ]
+        ],
+        [
+          [
+            -1.0,
+            -1.0,
+            -1.0,
+            0.7142857142857142
+          ]
+        ],
+        [
+          [
+            1.0,
+            1.0,
+            0.0,
+            1.0
+          ]
+        ]
+      ],
+      "schema": {
+        "type": "struct",
+        "fields": [
+          {
+            "name": "out",
+            "type": {
+              "type": "udt",
+              "class": "org.apache.spark.ml.linalg.VectorUDT",
+              "pyClass": "pyspark.ml.linalg.VectorUDT",
+              "sqlType": {
+                "type": "struct",
+                "fields": [
+                  {
+                    "name": "type",
+                    "type": "byte",
+                    "nullable": false,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "size",
+                    "type": "integer",
+                    "nullable": true,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "indices",
+                    "type": {
+                      "type": "array",
+                      "elementType": "integer",
+                      "containsNull": false
+                    },
+                    "nullable": true,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "values",
+                    "type": {
+                      "type": "array",
+                      "elementType": "double",
+                      "containsNull": false
+                    },
+                    "nullable": true,
+                    "metadata": {}
+                  }
+                ]
+              }
+            },
+            "nullable": true,
+            "metadata": {
+              "ml_attr": {
+                "num_attrs": 4
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "NGram",
+      "id": "NGram",
+      "values": {
+        "inputCol": "words",
+        "outputCol": "out",
+        "n": 2
+      },
+      "columns": [
+        "out"
+      ],
+      "rows": [
+        [
+          [
+            "the alpha",
+            "alpha alpha",
+            "alpha beta",
+            "beta beta",
+            "beta gamma",
+            "gamma delta"
+          ]
+        ],
+        [
+          [
+            "alpha alpha",
+            "alpha beta",
+            "beta gamma"
+          ]
+        ],
+        [
+          [
+            "alpha beta",
+            "beta gamma"
+          ]
+        ],
+        [
+          [
+            "alpha beta"
+          ]
+        ],
+        [
+          [
+            "alpha beta"
+          ]
+        ],
+        [
+          []
+        ],
+        [
+          []
+        ],
+        [
+          [
+            "alpha delta"
+          ]
+        ]
+      ],
+      "schema": {
+        "type": "struct",
+        "fields": [
+          {
+            "name": "out",
+            "type": {
+              "type": "array",
+              "elementType": "string",
+              "containsNull": true
+            },
+            "nullable": true,
+            "metadata": {}
+          }
+        ]
+      }
+    },
+    {
+      "name": "Normalizer",
+      "id": "Normalizer",
+      "values": {
+        "inputCol": "features",
+        "outputCol": "out",
+        "p": 1.0
+      },
+      "columns": [
+        "out"
+      ],
+      "rows": [
+        [
+          [
+            0.0,
+            0.75,
+            0.0,
+            0.25
+          ]
+        ],
+        [
+          [
+            0.16666666666666666,
+            0.5833333333333334,
+            0.08333333333333333,
+            0.16666666666666666
+          ]
+        ],
+        [
+          [
+            0.0,
+            0.375,
+            0.25,
+            0.375
+          ]
+        ],
+        [
+          [
+            0.15384615384615385,
+            0.5384615384615384,
+            0.0,
+            0.3076923076923077
+          ]
+        ],
+        [
+          [
+            0.0,
+            0.3333333333333333,
+            0.1111111111111111,
+            0.5555555555555556
+          ]
+        ],
+        [
+          [
+            0.11764705882352941,
+            0.4117647058823529,
+            0.11764705882352941,
+            0.35294117647058826
+          ]
+        ],
+        [
+          [
+            0.0,
+            0.3,
+            0.0,
+            0.7
+          ]
+        ],
+        [
+          [
+            0.1111111111111111,
+            0.3888888888888889,
+            0.05555555555555555,
+            0.4444444444444444
+          ]
+        ]
+      ],
+      "schema": {
+        "type": "struct",
+        "fields": [
+          {
+            "name": "out",
+            "type": {
+              "type": "udt",
+              "class": "org.apache.spark.ml.linalg.VectorUDT",
+              "pyClass": "pyspark.ml.linalg.VectorUDT",
+              "sqlType": {
+                "type": "struct",
+                "fields": [
+                  {
+                    "name": "type",
+                    "type": "byte",
+                    "nullable": false,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "size",
+                    "type": "integer",
+                    "nullable": true,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "indices",
+                    "type": {
+                      "type": "array",
+                      "elementType": "integer",
+                      "containsNull": false
+                    },
+                    "nullable": true,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "values",
+                    "type": {
+                      "type": "array",
+                      "elementType": "double",
+                      "containsNull": false
+                    },
+                    "nullable": true,
+                    "metadata": {}
+                  }
+                ]
+              }
+            },
+            "nullable": true,
+            "metadata": {}
+          }
+        ]
+      }
+    },
+    {
+      "name": "OneHotEncoder",
+      "id": "OneHotEncoder",
+      "values": {
+        "inputCol": "index",
+        "outputCol": "out",
+        "dropLast": false
+      },
+      "columns": [
+        "out"
+      ],
+      "rows": [
+        [
+          [
+            1.0,
+            0.0,
+            0.0
+          ]
+        ],
+        [
+          [
+            0.0,
+            1.0,
+            0.0
+          ]
+        ],
+        [
+          [
+            0.0,
+            0.0,
+            1.0
+          ]
+        ],
+        [
+          [
+            1.0,
+            0.0,
+            0.0
+          ]
+        ],
+        [
+          [
+            0.0,
+            1.0,
+            0.0
+          ]
+        ],
+        [
+          [
+            0.0,
+            0.0,
+            1.0
+          ]
+        ],
+        [
+          [
+            1.0,
+            0.0,
+            0.0
+          ]
+        ],
+        [
+          [
+            0.0,
+            1.0,
+            0.0
+          ]
+        ]
+      ],
+      "schema": {
+        "type": "struct",
+        "fields": [
+          {
+            "name": "out",
+            "type": {
+              "type": "udt",
+              "class": "org.apache.spark.ml.linalg.VectorUDT",
+              "pyClass": "pyspark.ml.linalg.VectorUDT",
+              "sqlType": {
+                "type": "struct",
+                "fields": [
+                  {
+                    "name": "type",
+                    "type": "byte",
+                    "nullable": false,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "size",
+                    "type": "integer",
+                    "nullable": true,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "indices",
+                    "type": {
+                      "type": "array",
+                      "elementType": "integer",
+                      "containsNull": false
+                    },
+                    "nullable": true,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "values",
+                    "type": {
+                      "type": "array",
+                      "elementType": "double",
+                      "containsNull": false
+                    },
+                    "nullable": true,
+                    "metadata": {}
+                  }
+                ]
+              }
+            },
+            "nullable": true,
+            "metadata": {
+              "ml_attr": {
+                "num_attrs": 3,
+                "attrs": {
+                  "binary": [
+                    {
+                      "name": "0",
+                      "idx": 0
+                    },
+                    {
+                      "name": "1",
+                      "idx": 1
+                    },
+                    {
+                      "name": "2",
+                      "idx": 2
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "PCA",
+      "id": "PCA",
+      "values": {
+        "inputCol": "features",
+        "outputCol": "out",
+        "k": 2
+      },
+      "columns": [
+        "out"
+      ],
+      "rows": [
+        [
+          [
+            -2.5328225078480253,
+            -1.3240311976141772
+          ]
+        ],
+        [
+          [
+            -6.316608719409913,
+            -4.001024787300727
+          ]
+        ],
+        [
+          [
+            -4.133351371919404,
+            -0.03429603996885344
+          ]
+        ],
+        [
+          [
+            -7.74447260777114,
+            -2.6386358556493397
+          ]
+        ],
+        [
+          [
+            -5.561215260280631,
+            1.3280928916825339
+          ]
+        ],
+        [
+          [
+            -9.345001471842519,
+            -1.348900698004016
+          ]
+        ],
+        [
+          [
+            -6.989079148641858,
+            2.6904818233339203
+          ]
+        ],
+        [
+          [
+            -10.772865360203745,
+            0.013488233647371395
+          ]
+        ]
+      ],
+      "schema": {
+        "type": "struct",
+        "fields": [
+          {
+            "name": "out",
+            "type": {
+              "type": "udt",
+              "class": "org.apache.spark.ml.linalg.VectorUDT",
+              "pyClass": "pyspark.ml.linalg.VectorUDT",
+              "sqlType": {
+                "type": "struct",
+                "fields": [
+                  {
+                    "name": "type",
+                    "type": "byte",
+                    "nullable": false,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "size",
+                    "type": "integer",
+                    "nullable": true,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "indices",
+                    "type": {
+                      "type": "array",
+                      "elementType": "integer",
+                      "containsNull": false
+                    },
+                    "nullable": true,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "values",
+                    "type": {
+                      "type": "array",
+                      "elementType": "double",
+                      "containsNull": false
+                    },
+                    "nullable": true,
+                    "metadata": {}
+                  }
+                ]
+              }
+            },
+            "nullable": true,
+            "metadata": {
+              "ml_attr": {
+                "num_attrs": 2
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "PolynomialExpansion",
+      "id": "PolynomialExpansion",
+      "values": {
+        "inputCol": "features",
+        "outputCol": "out",
+        "degree": 2
+      },
+      "columns": [
+        "out"
+      ],
+      "rows": [
+        [
+          [
+            0.0,
+            0.0,
+            3.0,
+            0.0,
+            9.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            3.0,
+            0.0,
+            1.0
+          ]
+        ],
+        [
+          [
+            2.0,
+            4.0,
+            7.0,
+            14.0,
+            49.0,
+            1.0,
+            2.0,
+            7.0,
+            1.0,
+            2.0,
+            4.0,
+            14.0,
+            2.0,
+            4.0
+          ]
+        ],
+        [
+          [
+            0.0,
+            0.0,
+            3.0,
+            0.0,
+            9.0,
+            2.0,
+            0.0,
+            6.0,
+            4.0,
+            3.0,
+            0.0,
+            9.0,
+            6.0,
+            9.0
+          ]
+        ],
+        [
+          [
+            2.0,
+            4.0,
+            7.0,
+            14.0,
+            49.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            4.0,
+            8.0,
+            28.0,
+            0.0,
+            16.0
+          ]
+        ],
+        [
+          [
+            0.0,
+            0.0,
+            3.0,
+            0.0,
+            9.0,
+            1.0,
+            0.0,
+            3.0,
+            1.0,
+            5.0,
+            0.0,
+            15.0,
+            5.0,
+            25.0
+          ]
+        ],
+        [
+          [
+            2.0,
+            4.0,
+            7.0,
+            14.0,
+            49.0,
+            2.0,
+            4.0,
+            14.0,
+            4.0,
+            6.0,
+            12.0,
+            42.0,
+            12.0,
+            36.0
+          ]
+        ],
+        [
+          [
+            0.0,
+            0.0,
+            3.0,
+            0.0,
+            9.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            7.0,
+            0.0,
+            21.0,
+            0.0,
+            49.0
+          ]
+        ],
+        [
+          [
+            2.0,
+            4.0,
+            7.0,
+            14.0,
+            49.0,
+            1.0,
+            2.0,
+            7.0,
+            1.0,
+            8.0,
+            16.0,
+            56.0,
+            8.0,
+            64.0
+          ]
+        ]
+      ],
+      "schema": {
+        "type": "struct",
+        "fields": [
+          {
+            "name": "out",
+            "type": {
+              "type": "udt",
+              "class": "org.apache.spark.ml.linalg.VectorUDT",
+              "pyClass": "pyspark.ml.linalg.VectorUDT",
+              "sqlType": {
+                "type": "struct",
+                "fields": [
+                  {
+                    "name": "type",
+                    "type": "byte",
+                    "nullable": false,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "size",
+                    "type": "integer",
+                    "nullable": true,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "indices",
+                    "type": {
+                      "type": "array",
+                      "elementType": "integer",
+                      "containsNull": false
+                    },
+                    "nullable": true,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "values",
+                    "type": {
+                      "type": "array",
+                      "elementType": "double",
+                      "containsNull": false
+                    },
+                    "nullable": true,
+                    "metadata": {}
+                  }
+                ]
+              }
+            },
+            "nullable": true,
+            "metadata": {}
+          }
+        ]
+      }
+    },
+    {
+      "name": "QuantileDiscretizer",
+      "id": "QuantileDiscretizer",
+      "values": {
+        "inputCol": "x",
+        "outputCol": "out",
+        "numBuckets": 3,
+        "relativeError": 0.0
+      },
+      "columns": [
+        "out"
+      ],
+      "rows": [
+        [
+          0.0
+        ],
+        [
+          0.0
+        ],
+        [
+          1.0
+        ],
+        [
+          1.0
+        ],
+        [
+          1.0
+        ],
+        [
+          2.0
+        ],
+        [
+          2.0
+        ],
+        [
+          2.0
+        ]
+      ],
+      "schema": {
+        "type": "struct",
+        "fields": [
+          {
+            "name": "out",
+            "type": "double",
+            "nullable": false,
+            "metadata": {
+              "ml_attr": {
+                "ord": true,
+                "vals": [
+                  "-Infinity, 2.0",
+                  "2.0, 5.0",
+                  "5.0, Infinity"
+                ],
+                "type": "nominal"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "RobustScaler",
+      "id": "RobustScaler",
+      "values": {
+        "inputCol": "features",
+        "outputCol": "out",
+        "withCentering": true,
+        "relativeError": 0.0
+      },
+      "columns": [
+        "out"
+      ],
+      "rows": [
+        [
+          [
+            0.0,
+            0.0,
+            -1.0,
+            -0.75
+          ]
+        ],
+        [
+          [
+            1.0,
+            1.0,
+            0.0,
+            -0.5
+          ]
+        ],
+        [
+          [
+            0.0,
+            0.0,
+            1.0,
+            -0.25
+          ]
+        ],
+        [
+          [
+            1.0,
+            1.0,
+            -1.0,
+            0.0
+          ]
+        ],
+        [
+          [
+            0.0,
+            0.0,
+            0.0,
+            0.25
+          ]
+        ],
+        [
+          [
+            1.0,
+            1.0,
+            1.0,
+            0.5
+          ]
+        ],
+        [
+          [
+            0.0,
+            0.0,
+            -1.0,
+            0.75
+          ]
+        ],
+        [
+          [
+            1.0,
+            1.0,
+            0.0,
+            1.0
+          ]
+        ]
+      ],
+      "schema": {
+        "type": "struct",
+        "fields": [
+          {
+            "name": "out",
+            "type": {
+              "type": "udt",
+              "class": "org.apache.spark.ml.linalg.VectorUDT",
+              "pyClass": "pyspark.ml.linalg.VectorUDT",
+              "sqlType": {
+                "type": "struct",
+                "fields": [
+                  {
+                    "name": "type",
+                    "type": "byte",
+                    "nullable": false,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "size",
+                    "type": "integer",
+                    "nullable": true,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "indices",
+                    "type": {
+                      "type": "array",
+                      "elementType": "integer",
+                      "containsNull": false
+                    },
+                    "nullable": true,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "values",
+                    "type": {
+                      "type": "array",
+                      "elementType": "double",
+                      "containsNull": false
+                    },
+                    "nullable": true,
+                    "metadata": {}
+                  }
+                ]
+              }
+            },
+            "nullable": true,
+            "metadata": {
+              "ml_attr": {
+                "num_attrs": 4
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "RegexTokenizer",
+      "id": "RegexTokenizer",
+      "values": {
+        "inputCol": "text",
+        "outputCol": "out",
+        "pattern": "\\s+",
+        "gaps": true
+      },
+      "columns": [
+        "out"
+      ],
+      "rows": [
+        [
+          [
+            "the",
+            "alpha",
+            "alpha",
+            "beta",
+            "beta",
+            "gamma",
+            "delta"
+          ]
+        ],
+        [
+          [
+            "alpha",
+            "alpha",
+            "beta",
+            "gamma"
+          ]
+        ],
+        [
+          [
+            "alpha",
+            "beta",
+            "gamma"
+          ]
+        ],
+        [
+          [
+            "alpha",
+            "beta"
+          ]
+        ],
+        [
+          [
+            "alpha",
+            "beta"
+          ]
+        ],
+        [
+          [
+            "alpha"
+          ]
+        ],
+        [
+          [
+            "alpha"
+          ]
+        ],
+        [
+          [
+            "alpha",
+            "delta"
+          ]
+        ]
+      ],
+      "schema": {
+        "type": "struct",
+        "fields": [
+          {
+            "name": "out",
+            "type": {
+              "type": "array",
+              "elementType": "string",
+              "containsNull": true
+            },
+            "nullable": true,
+            "metadata": {}
+          }
+        ]
+      }
+    },
+    {
+      "name": "RFormula",
+      "id": "RFormula",
+      "values": {
+        "formula": "label ~ x + category",
+        "featuresCol": "out",
+        "labelCol": "target",
+        "stringIndexerOrderType": "alphabetAsc"
+      },
+      "columns": [
+        "out",
+        "target"
+      ],
+      "rows": [
+        [
+          [
+            0.0,
+            1.0,
+            0.0
+          ],
+          0.0
+        ],
+        [
+          [
+            1.0,
+            0.0,
+            1.0
+          ],
+          1.0
+        ],
+        [
+          [
+            2.0,
+            0.0,
+            0.0
+          ],
+          0.0
+        ],
+        [
+          [
+            3.0,
+            1.0,
+            0.0
+          ],
+          1.0
+        ],
+        [
+          [
+            4.0,
+            0.0,
+            1.0
+          ],
+          0.0
+        ],
+        [
+          [
+            5.0,
+            0.0,
+            0.0
+          ],
+          1.0
+        ],
+        [
+          [
+            6.0,
+            1.0,
+            0.0
+          ],
+          0.0
+        ],
+        [
+          [
+            7.0,
+            0.0,
+            1.0
+          ],
+          1.0
+        ]
+      ],
+      "schema": {
+        "type": "struct",
+        "fields": [
+          {
+            "name": "out",
+            "type": {
+              "type": "udt",
+              "class": "org.apache.spark.ml.linalg.VectorUDT",
+              "pyClass": "pyspark.ml.linalg.VectorUDT",
+              "sqlType": {
+                "type": "struct",
+                "fields": [
+                  {
+                    "name": "type",
+                    "type": "byte",
+                    "nullable": false,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "size",
+                    "type": "integer",
+                    "nullable": true,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "indices",
+                    "type": {
+                      "type": "array",
+                      "elementType": "integer",
+                      "containsNull": false
+                    },
+                    "nullable": true,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "values",
+                    "type": {
+                      "type": "array",
+                      "elementType": "double",
+                      "containsNull": false
+                    },
+                    "nullable": true,
+                    "metadata": {}
+                  }
+                ]
+              }
+            },
+            "nullable": true,
+            "metadata": {
+              "ml_attr": {
+                "num_attrs": 3,
+                "attrs": {
+                  "binary": [
+                    {
+                      "name": "category_a",
+                      "idx": 1
+                    },
+                    {
+                      "name": "category_b",
+                      "idx": 2
+                    }
+                  ],
+                  "numeric": [
+                    {
+                      "name": "x",
+                      "idx": 0
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "name": "target",
+            "type": "double",
+            "nullable": false,
+            "metadata": {}
+          }
+        ]
+      }
+    },
+    {
+      "name": "SQLTransformer",
+      "id": "SQLTransformer",
+      "values": {
+        "statement": "SELECT *, x + y AS out FROM __THIS__"
+      },
+      "columns": [
+        "out"
+      ],
+      "rows": [
+        [
+          8.0
+        ],
+        [
+          8.0
+        ],
+        [
+          8.0
+        ],
+        [
+          8.0
+        ],
+        [
+          8.0
+        ],
+        [
+          8.0
+        ],
+        [
+          8.0
+        ],
+        [
+          8.0
+        ]
+      ],
+      "schema": {
+        "type": "struct",
+        "fields": [
+          {
+            "name": "out",
+            "type": "double",
+            "nullable": false,
+            "metadata": {}
+          }
+        ]
+      }
+    },
+    {
+      "name": "StandardScaler",
+      "id": "StandardScaler",
+      "values": {
+        "inputCol": "features",
+        "outputCol": "out",
+        "withMean": true,
+        "withStd": true
+      },
+      "columns": [
+        "out"
+      ],
+      "rows": [
+        [
+          [
+            -0.9354143466934853,
+            -0.9354143466934853,
+            -1.0485032066517368,
+            -1.4288690166235207
+          ]
+        ],
+        [
+          [
+            0.9354143466934853,
+            0.9354143466934853,
+            0.14978617237881953,
+            -1.0206207261596576
+          ]
+        ],
+        [
+          [
+            -0.9354143466934853,
+            -0.9354143466934853,
+            1.3480755514093756,
+            -0.6123724356957946
+          ]
+        ],
+        [
+          [
+            0.9354143466934853,
+            0.9354143466934853,
+            -1.0485032066517368,
+            -0.20412414523193154
+          ]
+        ],
+        [
+          [
+            -0.9354143466934853,
+            -0.9354143466934853,
+            0.14978617237881953,
+            0.20412414523193154
+          ]
+        ],
+        [
+          [
+            0.9354143466934853,
+            0.9354143466934853,
+            1.3480755514093756,
+            0.6123724356957946
+          ]
+        ],
+        [
+          [
+            -0.9354143466934853,
+            -0.9354143466934853,
+            -1.0485032066517368,
+            1.0206207261596576
+          ]
+        ],
+        [
+          [
+            0.9354143466934853,
+            0.9354143466934853,
+            0.14978617237881953,
+            1.4288690166235207
+          ]
+        ]
+      ],
+      "schema": {
+        "type": "struct",
+        "fields": [
+          {
+            "name": "out",
+            "type": {
+              "type": "udt",
+              "class": "org.apache.spark.ml.linalg.VectorUDT",
+              "pyClass": "pyspark.ml.linalg.VectorUDT",
+              "sqlType": {
+                "type": "struct",
+                "fields": [
+                  {
+                    "name": "type",
+                    "type": "byte",
+                    "nullable": false,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "size",
+                    "type": "integer",
+                    "nullable": true,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "indices",
+                    "type": {
+                      "type": "array",
+                      "elementType": "integer",
+                      "containsNull": false
+                    },
+                    "nullable": true,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "values",
+                    "type": {
+                      "type": "array",
+                      "elementType": "double",
+                      "containsNull": false
+                    },
+                    "nullable": true,
+                    "metadata": {}
+                  }
+                ]
+              }
+            },
+            "nullable": true,
+            "metadata": {
+              "ml_attr": {
+                "num_attrs": 4
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "StopWordsRemover",
+      "id": "StopWordsRemover",
+      "values": {
+        "inputCol": "words",
+        "outputCol": "out",
+        "stopWords": [
+          "the",
+          "gamma"
+        ]
+      },
+      "columns": [
+        "out"
+      ],
+      "rows": [
+        [
+          [
+            "alpha",
+            "alpha",
+            "beta",
+            "beta",
+            "delta"
+          ]
+        ],
+        [
+          [
+            "alpha",
+            "alpha",
+            "beta"
+          ]
+        ],
+        [
+          [
+            "alpha",
+            "beta"
+          ]
+        ],
+        [
+          [
+            "alpha",
+            "beta"
+          ]
+        ],
+        [
+          [
+            "alpha",
+            "beta"
+          ]
+        ],
+        [
+          [
+            "alpha"
+          ]
+        ],
+        [
+          [
+            "alpha"
+          ]
+        ],
+        [
+          [
+            "alpha",
+            "delta"
+          ]
+        ]
+      ],
+      "schema": {
+        "type": "struct",
+        "fields": [
+          {
+            "name": "out",
+            "type": {
+              "type": "array",
+              "elementType": "string",
+              "containsNull": true
+            },
+            "nullable": true,
+            "metadata": {}
+          }
+        ]
+      }
+    },
+    {
+      "name": "StringIndexer",
+      "id": "StringIndexer",
+      "values": {
+        "inputCol": "category",
+        "outputCol": "out",
+        "stringOrderType": "alphabetAsc"
+      },
+      "columns": [
+        "out"
+      ],
+      "rows": [
+        [
+          0.0
+        ],
+        [
+          1.0
+        ],
+        [
+          2.0
+        ],
+        [
+          0.0
+        ],
+        [
+          1.0
+        ],
+        [
+          2.0
+        ],
+        [
+          0.0
+        ],
+        [
+          1.0
+        ]
+      ],
+      "schema": {
+        "type": "struct",
+        "fields": [
+          {
+            "name": "out",
+            "type": "double",
+            "nullable": false,
+            "metadata": {
+              "ml_attr": {
+                "vals": [
+                  "a",
+                  "b",
+                  "c"
+                ],
+                "name": "out",
+                "type": "nominal"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "TargetEncoder",
+      "id": "TargetEncoder",
+      "values": {
+        "inputCol": "index",
+        "outputCol": "out",
+        "labelCol": "label",
+        "smoothing": 1.0
+      },
+      "columns": [
+        "out"
+      ],
+      "rows": [
+        [
+          0.375
+        ],
+        [
+          0.625
+        ],
+        [
+          0.5
+        ],
+        [
+          0.375
+        ],
+        [
+          0.625
+        ],
+        [
+          0.5
+        ],
+        [
+          0.375
+        ],
+        [
+          0.625
+        ]
+      ],
+      "schema": {
+        "type": "struct",
+        "fields": [
+          {
+            "name": "out",
+            "type": "double",
+            "nullable": true,
+            "metadata": {
+              "ml_attr": {
+                "vals": [
+                  "0.375",
+                  "0.5",
+                  "0.625"
+                ],
+                "name": "out",
+                "type": "nominal"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "Tokenizer",
+      "id": "Tokenizer",
+      "values": {
+        "inputCol": "text",
+        "outputCol": "out"
+      },
+      "columns": [
+        "out"
+      ],
+      "rows": [
+        [
+          [
+            "the",
+            "alpha",
+            "alpha",
+            "beta",
+            "beta",
+            "gamma",
+            "delta"
+          ]
+        ],
+        [
+          [
+            "alpha",
+            "alpha",
+            "beta",
+            "gamma"
+          ]
+        ],
+        [
+          [
+            "alpha",
+            "beta",
+            "gamma"
+          ]
+        ],
+        [
+          [
+            "alpha",
+            "beta"
+          ]
+        ],
+        [
+          [
+            "alpha",
+            "beta"
+          ]
+        ],
+        [
+          [
+            "alpha"
+          ]
+        ],
+        [
+          [
+            "alpha"
+          ]
+        ],
+        [
+          [
+            "alpha",
+            "delta"
+          ]
+        ]
+      ],
+      "schema": {
+        "type": "struct",
+        "fields": [
+          {
+            "name": "out",
+            "type": {
+              "type": "array",
+              "elementType": "string",
+              "containsNull": true
+            },
+            "nullable": true,
+            "metadata": {}
+          }
+        ]
+      }
+    },
+    {
+      "name": "UnivariateFeatureSelector",
+      "id": "UnivariateFeatureSelector",
+      "values": {
+        "featuresCol": "features",
+        "outputCol": "out",
+        "labelCol": "label",
+        "featureType": "categorical",
+        "labelType": "categorical",
+        "selectionThreshold": 2.0
+      },
+      "columns": [
+        "out"
+      ],
+      "rows": [
+        [
+          [
+            0.0,
+            3.0
+          ]
+        ],
+        [
+          [
+            2.0,
+            7.0
+          ]
+        ],
+        [
+          [
+            0.0,
+            3.0
+          ]
+        ],
+        [
+          [
+            2.0,
+            7.0
+          ]
+        ],
+        [
+          [
+            0.0,
+            3.0
+          ]
+        ],
+        [
+          [
+            2.0,
+            7.0
+          ]
+        ],
+        [
+          [
+            0.0,
+            3.0
+          ]
+        ],
+        [
+          [
+            2.0,
+            7.0
+          ]
+        ]
+      ],
+      "schema": {
+        "type": "struct",
+        "fields": [
+          {
+            "name": "out",
+            "type": {
+              "type": "udt",
+              "class": "org.apache.spark.ml.linalg.VectorUDT",
+              "pyClass": "pyspark.ml.linalg.VectorUDT",
+              "sqlType": {
+                "type": "struct",
+                "fields": [
+                  {
+                    "name": "type",
+                    "type": "byte",
+                    "nullable": false,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "size",
+                    "type": "integer",
+                    "nullable": true,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "indices",
+                    "type": {
+                      "type": "array",
+                      "elementType": "integer",
+                      "containsNull": false
+                    },
+                    "nullable": true,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "values",
+                    "type": {
+                      "type": "array",
+                      "elementType": "double",
+                      "containsNull": false
+                    },
+                    "nullable": true,
+                    "metadata": {}
+                  }
+                ]
+              }
+            },
+            "nullable": true,
+            "metadata": {
+              "ml_attr": {
+                "num_attrs": 2,
+                "attrs": {}
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "VarianceThresholdSelector",
+      "id": "VarianceThresholdSelector",
+      "values": {
+        "featuresCol": "features",
+        "outputCol": "out",
+        "varianceThreshold": 1.0
+      },
+      "columns": [
+        "out"
+      ],
+      "rows": [
+        [
+          [
+            0.0,
+            3.0,
+            1.0
+          ]
+        ],
+        [
+          [
+            2.0,
+            7.0,
+            2.0
+          ]
+        ],
+        [
+          [
+            0.0,
+            3.0,
+            3.0
+          ]
+        ],
+        [
+          [
+            2.0,
+            7.0,
+            4.0
+          ]
+        ],
+        [
+          [
+            0.0,
+            3.0,
+            5.0
+          ]
+        ],
+        [
+          [
+            2.0,
+            7.0,
+            6.0
+          ]
+        ],
+        [
+          [
+            0.0,
+            3.0,
+            7.0
+          ]
+        ],
+        [
+          [
+            2.0,
+            7.0,
+            8.0
+          ]
+        ]
+      ],
+      "schema": {
+        "type": "struct",
+        "fields": [
+          {
+            "name": "out",
+            "type": {
+              "type": "udt",
+              "class": "org.apache.spark.ml.linalg.VectorUDT",
+              "pyClass": "pyspark.ml.linalg.VectorUDT",
+              "sqlType": {
+                "type": "struct",
+                "fields": [
+                  {
+                    "name": "type",
+                    "type": "byte",
+                    "nullable": false,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "size",
+                    "type": "integer",
+                    "nullable": true,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "indices",
+                    "type": {
+                      "type": "array",
+                      "elementType": "integer",
+                      "containsNull": false
+                    },
+                    "nullable": true,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "values",
+                    "type": {
+                      "type": "array",
+                      "elementType": "double",
+                      "containsNull": false
+                    },
+                    "nullable": true,
+                    "metadata": {}
+                  }
+                ]
+              }
+            },
+            "nullable": true,
+            "metadata": {
+              "ml_attr": {
+                "num_attrs": 3,
+                "attrs": {}
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "VectorAssembler",
+      "id": "VectorAssembler",
+      "values": {
+        "inputCols": [
+          "x",
+          "y"
+        ],
+        "outputCol": "out",
+        "handleInvalid": "error"
+      },
+      "columns": [
+        "out"
+      ],
+      "rows": [
+        [
+          [
+            0.0,
+            8.0
+          ]
+        ],
+        [
+          [
+            1.0,
+            7.0
+          ]
+        ],
+        [
+          [
+            2.0,
+            6.0
+          ]
+        ],
+        [
+          [
+            3.0,
+            5.0
+          ]
+        ],
+        [
+          [
+            4.0,
+            4.0
+          ]
+        ],
+        [
+          [
+            5.0,
+            3.0
+          ]
+        ],
+        [
+          [
+            6.0,
+            2.0
+          ]
+        ],
+        [
+          [
+            7.0,
+            1.0
+          ]
+        ]
+      ],
+      "schema": {
+        "type": "struct",
+        "fields": [
+          {
+            "name": "out",
+            "type": {
+              "type": "udt",
+              "class": "org.apache.spark.ml.linalg.VectorUDT",
+              "pyClass": "pyspark.ml.linalg.VectorUDT",
+              "sqlType": {
+                "type": "struct",
+                "fields": [
+                  {
+                    "name": "type",
+                    "type": "byte",
+                    "nullable": false,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "size",
+                    "type": "integer",
+                    "nullable": true,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "indices",
+                    "type": {
+                      "type": "array",
+                      "elementType": "integer",
+                      "containsNull": false
+                    },
+                    "nullable": true,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "values",
+                    "type": {
+                      "type": "array",
+                      "elementType": "double",
+                      "containsNull": false
+                    },
+                    "nullable": true,
+                    "metadata": {}
+                  }
+                ]
+              }
+            },
+            "nullable": true,
+            "metadata": {
+              "ml_attr": {
+                "num_attrs": 2,
+                "attrs": {
+                  "numeric": [
+                    {
+                      "name": "x",
+                      "idx": 0
+                    },
+                    {
+                      "name": "y",
+                      "idx": 1
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "VectorIndexer",
+      "id": "VectorIndexer",
+      "values": {
+        "inputCol": "features",
+        "outputCol": "out",
+        "maxCategories": 2
+      },
+      "columns": [
+        "out"
+      ],
+      "rows": [
+        [
+          [
+            0.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        ],
+        [
+          [
+            1.0,
+            1.0,
+            1.0,
+            2.0
+          ]
+        ],
+        [
+          [
+            0.0,
+            0.0,
+            2.0,
+            3.0
+          ]
+        ],
+        [
+          [
+            1.0,
+            1.0,
+            0.0,
+            4.0
+          ]
+        ],
+        [
+          [
+            0.0,
+            0.0,
+            1.0,
+            5.0
+          ]
+        ],
+        [
+          [
+            1.0,
+            1.0,
+            2.0,
+            6.0
+          ]
+        ],
+        [
+          [
+            0.0,
+            0.0,
+            0.0,
+            7.0
+          ]
+        ],
+        [
+          [
+            1.0,
+            1.0,
+            1.0,
+            8.0
+          ]
+        ]
+      ],
+      "schema": {
+        "type": "struct",
+        "fields": [
+          {
+            "name": "out",
+            "type": {
+              "type": "udt",
+              "class": "org.apache.spark.ml.linalg.VectorUDT",
+              "pyClass": "pyspark.ml.linalg.VectorUDT",
+              "sqlType": {
+                "type": "struct",
+                "fields": [
+                  {
+                    "name": "type",
+                    "type": "byte",
+                    "nullable": false,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "size",
+                    "type": "integer",
+                    "nullable": true,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "indices",
+                    "type": {
+                      "type": "array",
+                      "elementType": "integer",
+                      "containsNull": false
+                    },
+                    "nullable": true,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "values",
+                    "type": {
+                      "type": "array",
+                      "elementType": "double",
+                      "containsNull": false
+                    },
+                    "nullable": true,
+                    "metadata": {}
+                  }
+                ]
+              }
+            },
+            "nullable": true,
+            "metadata": {
+              "ml_attr": {
+                "num_attrs": 4,
+                "attrs": {
+                  "binary": [
+                    {
+                      "vals": [
+                        "0.0",
+                        "2.0"
+                      ],
+                      "idx": 0
+                    },
+                    {
+                      "vals": [
+                        "3.0",
+                        "7.0"
+                      ],
+                      "idx": 1
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "VectorSizeHint",
+      "id": "VectorSizeHint",
+      "values": {
+        "inputCol": "rawFeatures",
+        "size": 4
+      },
+      "columns": [
+        "rawFeatures"
+      ],
+      "rows": [
+        [
+          [
+            0.0,
+            3.0,
+            0.0,
+            1.0
+          ]
+        ],
+        [
+          [
+            2.0,
+            7.0,
+            1.0,
+            2.0
+          ]
+        ],
+        [
+          [
+            0.0,
+            3.0,
+            2.0,
+            3.0
+          ]
+        ],
+        [
+          [
+            2.0,
+            7.0,
+            0.0,
+            4.0
+          ]
+        ],
+        [
+          [
+            0.0,
+            3.0,
+            1.0,
+            5.0
+          ]
+        ],
+        [
+          [
+            2.0,
+            7.0,
+            2.0,
+            6.0
+          ]
+        ],
+        [
+          [
+            0.0,
+            3.0,
+            0.0,
+            7.0
+          ]
+        ],
+        [
+          [
+            2.0,
+            7.0,
+            1.0,
+            8.0
+          ]
+        ]
+      ],
+      "schema": {
+        "type": "struct",
+        "fields": [
+          {
+            "name": "rawFeatures",
+            "type": {
+              "type": "udt",
+              "class": "org.apache.spark.ml.linalg.VectorUDT",
+              "pyClass": "pyspark.ml.linalg.VectorUDT",
+              "sqlType": {
+                "type": "struct",
+                "fields": [
+                  {
+                    "name": "type",
+                    "type": "byte",
+                    "nullable": false,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "size",
+                    "type": "integer",
+                    "nullable": true,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "indices",
+                    "type": {
+                      "type": "array",
+                      "elementType": "integer",
+                      "containsNull": false
+                    },
+                    "nullable": true,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "values",
+                    "type": {
+                      "type": "array",
+                      "elementType": "double",
+                      "containsNull": false
+                    },
+                    "nullable": true,
+                    "metadata": {}
+                  }
+                ]
+              }
+            },
+            "nullable": true,
+            "metadata": {
+              "ml_attr": {
+                "num_attrs": 4
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "VectorSlicer",
+      "id": "VectorSlicer",
+      "values": {
+        "inputCol": "features",
+        "outputCol": "out",
+        "indices": [
+          0,
+          2
+        ]
+      },
+      "columns": [
+        "out"
+      ],
+      "rows": [
+        [
+          [
+            0.0,
+            0.0
+          ]
+        ],
+        [
+          [
+            2.0,
+            1.0
+          ]
+        ],
+        [
+          [
+            0.0,
+            2.0
+          ]
+        ],
+        [
+          [
+            2.0,
+            0.0
+          ]
+        ],
+        [
+          [
+            0.0,
+            1.0
+          ]
+        ],
+        [
+          [
+            2.0,
+            2.0
+          ]
+        ],
+        [
+          [
+            0.0,
+            0.0
+          ]
+        ],
+        [
+          [
+            2.0,
+            1.0
+          ]
+        ]
+      ],
+      "schema": {
+        "type": "struct",
+        "fields": [
+          {
+            "name": "out",
+            "type": {
+              "type": "udt",
+              "class": "org.apache.spark.ml.linalg.VectorUDT",
+              "pyClass": "pyspark.ml.linalg.VectorUDT",
+              "sqlType": {
+                "type": "struct",
+                "fields": [
+                  {
+                    "name": "type",
+                    "type": "byte",
+                    "nullable": false,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "size",
+                    "type": "integer",
+                    "nullable": true,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "indices",
+                    "type": {
+                      "type": "array",
+                      "elementType": "integer",
+                      "containsNull": false
+                    },
+                    "nullable": true,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "values",
+                    "type": {
+                      "type": "array",
+                      "elementType": "double",
+                      "containsNull": false
+                    },
+                    "nullable": true,
+                    "metadata": {}
+                  }
+                ]
+              }
+            },
+            "nullable": true,
+            "metadata": {
+              "ml_attr": {
+                "num_attrs": 2
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "Word2Vec",
+      "id": "Word2Vec",
+      "values": {
+        "inputCol": "words",
+        "outputCol": "out",
+        "vectorSize": 3,
+        "minCount": 1,
+        "seed": 42,
+        "numPartitions": 1,
+        "maxIter": 2,
+        "windowSize": 2
+      },
+      "columns": [
+        "out"
+      ],
+      "rows": [
+        [
+          [
+            -0.023197569219129424,
+            0.04474840951817376,
+            -0.08501165453344584
+          ]
+        ],
+        [
+          [
+            -0.054102831054478884,
+            0.09096629451960325,
+            -0.09712014999240637
+          ]
+        ],
+        [
+          [
+            -0.06906986515969038,
+            0.07689656689763069,
+            -0.07842962816357613
+          ]
+        ],
+        [
+          [
+            -0.028778423089534044,
+            0.03763092868030071,
+            -0.1475820243358612
+          ]
+        ],
+        [
+          [
+            -0.028778423089534044,
+            0.03763092868030071,
+            -0.1475820243358612
+          ]
+        ],
+        [
+          [
+            -0.009201728738844395,
+            0.13317547738552094,
+            -0.1531917154788971
+          ]
+        ],
+        [
+          [
+            -0.009201728738844395,
+            0.13317547738552094,
+            -0.1531917154788971
+          ]
+        ],
+        [
+          [
+            -0.036239192355424166,
+            -0.005251958966255188,
+            -0.07221349095925689
+          ]
+        ]
+      ],
+      "schema": {
+        "type": "struct",
+        "fields": [
+          {
+            "name": "out",
+            "type": {
+              "type": "udt",
+              "class": "org.apache.spark.ml.linalg.VectorUDT",
+              "pyClass": "pyspark.ml.linalg.VectorUDT",
+              "sqlType": {
+                "type": "struct",
+                "fields": [
+                  {
+                    "name": "type",
+                    "type": "byte",
+                    "nullable": false,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "size",
+                    "type": "integer",
+                    "nullable": true,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "indices",
+                    "type": {
+                      "type": "array",
+                      "elementType": "integer",
+                      "containsNull": false
+                    },
+                    "nullable": true,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "values",
+                    "type": {
+                      "type": "array",
+                      "elementType": "double",
+                      "containsNull": false
+                    },
+                    "nullable": true,
+                    "metadata": {}
+                  }
+                ]
+              }
+            },
+            "nullable": true,
+            "metadata": {
+              "ml_attr": {
+                "num_attrs": 3
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "Binarizer",
+      "id": "Binarizer-multi",
+      "values": {
+        "inputCols": [
+          "x",
+          "y"
+        ],
+        "outputCols": [
+          "out",
+          "other"
+        ],
+        "thresholds": [
+          2.0,
+          4.0
+        ]
+      },
+      "columns": [
+        "out",
+        "other"
+      ],
+      "rows": [
+        [
+          0.0,
+          1.0
+        ],
+        [
+          0.0,
+          1.0
+        ],
+        [
+          0.0,
+          1.0
+        ],
+        [
+          1.0,
+          1.0
+        ],
+        [
+          1.0,
+          0.0
+        ],
+        [
+          1.0,
+          0.0
+        ],
+        [
+          1.0,
+          0.0
+        ],
+        [
+          1.0,
+          0.0
+        ]
+      ],
+      "schema": {
+        "type": "struct",
+        "fields": [
+          {
+            "name": "out",
+            "type": "double",
+            "nullable": false,
+            "metadata": {
+              "ml_attr": {
+                "type": "binary"
+              }
+            }
+          },
+          {
+            "name": "other",
+            "type": "double",
+            "nullable": false,
+            "metadata": {
+              "ml_attr": {
+                "type": "binary"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "Bucketizer",
+      "id": "Bucketizer-multi",
+      "values": {
+        "inputCols": [
+          "x",
+          "y"
+        ],
+        "outputCols": [
+          "out",
+          "other"
+        ],
+        "splitsArray": [
+          [
+            {
+              "float": "-inf"
+            },
+            3.0,
+            {
+              "float": "inf"
+            }
+          ],
+          [
+            {
+              "float": "-inf"
+            },
+            5.0,
+            {
+              "float": "inf"
+            }
+          ]
+        ]
+      },
+      "columns": [
+        "out",
+        "other"
+      ],
+      "rows": [
+        [
+          0.0,
+          1.0
+        ],
+        [
+          0.0,
+          1.0
+        ],
+        [
+          0.0,
+          1.0
+        ],
+        [
+          1.0,
+          1.0
+        ],
+        [
+          1.0,
+          0.0
+        ],
+        [
+          1.0,
+          0.0
+        ],
+        [
+          1.0,
+          0.0
+        ],
+        [
+          1.0,
+          0.0
+        ]
+      ],
+      "schema": {
+        "type": "struct",
+        "fields": [
+          {
+            "name": "out",
+            "type": "double",
+            "nullable": false,
+            "metadata": {
+              "ml_attr": {
+                "ord": true,
+                "vals": [
+                  "-Infinity, 3.0",
+                  "3.0, Infinity"
+                ],
+                "type": "nominal"
+              }
+            }
+          },
+          {
+            "name": "other",
+            "type": "double",
+            "nullable": false,
+            "metadata": {
+              "ml_attr": {
+                "ord": true,
+                "vals": [
+                  "-Infinity, 5.0",
+                  "5.0, Infinity"
+                ],
+                "type": "nominal"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "Imputer",
+      "id": "Imputer-multi",
+      "values": {
+        "inputCols": [
+          "missing",
+          "x"
+        ],
+        "outputCols": [
+          "out",
+          "other"
+        ],
+        "strategy": "median"
+      },
+      "columns": [
+        "out",
+        "other"
+      ],
+      "rows": [
+        [
+          4.0,
+          0.0
+        ],
+        [
+          4.0,
+          1.0
+        ],
+        [
+          2.0,
+          2.0
+        ],
+        [
+          3.0,
+          3.0
+        ],
+        [
+          4.0,
+          4.0
+        ],
+        [
+          5.0,
+          5.0
+        ],
+        [
+          6.0,
+          6.0
+        ],
+        [
+          7.0,
+          7.0
+        ]
+      ],
+      "schema": {
+        "type": "struct",
+        "fields": [
+          {
+            "name": "out",
+            "type": "double",
+            "nullable": true,
+            "metadata": {}
+          },
+          {
+            "name": "other",
+            "type": "double",
+            "nullable": false,
+            "metadata": {}
+          }
+        ]
+      }
+    },
+    {
+      "name": "OneHotEncoder",
+      "id": "OneHotEncoder-multi",
+      "values": {
+        "inputCols": [
+          "index",
+          "label"
+        ],
+        "outputCols": [
+          "out",
+          "other"
+        ],
+        "dropLast": false
+      },
+      "columns": [
+        "out",
+        "other"
+      ],
+      "rows": [
+        [
+          [
+            1.0,
+            0.0,
+            0.0
+          ],
+          [
+            1.0,
+            0.0
+          ]
+        ],
+        [
+          [
+            0.0,
+            1.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0
+          ]
+        ],
+        [
+          [
+            0.0,
+            0.0,
+            1.0
+          ],
+          [
+            1.0,
+            0.0
+          ]
+        ],
+        [
+          [
+            1.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0
+          ]
+        ],
+        [
+          [
+            0.0,
+            1.0,
+            0.0
+          ],
+          [
+            1.0,
+            0.0
+          ]
+        ],
+        [
+          [
+            0.0,
+            0.0,
+            1.0
+          ],
+          [
+            0.0,
+            1.0
+          ]
+        ],
+        [
+          [
+            1.0,
+            0.0,
+            0.0
+          ],
+          [
+            1.0,
+            0.0
+          ]
+        ],
+        [
+          [
+            0.0,
+            1.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0
+          ]
+        ]
+      ],
+      "schema": {
+        "type": "struct",
+        "fields": [
+          {
+            "name": "out",
+            "type": {
+              "type": "udt",
+              "class": "org.apache.spark.ml.linalg.VectorUDT",
+              "pyClass": "pyspark.ml.linalg.VectorUDT",
+              "sqlType": {
+                "type": "struct",
+                "fields": [
+                  {
+                    "name": "type",
+                    "type": "byte",
+                    "nullable": false,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "size",
+                    "type": "integer",
+                    "nullable": true,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "indices",
+                    "type": {
+                      "type": "array",
+                      "elementType": "integer",
+                      "containsNull": false
+                    },
+                    "nullable": true,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "values",
+                    "type": {
+                      "type": "array",
+                      "elementType": "double",
+                      "containsNull": false
+                    },
+                    "nullable": true,
+                    "metadata": {}
+                  }
+                ]
+              }
+            },
+            "nullable": true,
+            "metadata": {
+              "ml_attr": {
+                "num_attrs": 3,
+                "attrs": {
+                  "binary": [
+                    {
+                      "name": "0",
+                      "idx": 0
+                    },
+                    {
+                      "name": "1",
+                      "idx": 1
+                    },
+                    {
+                      "name": "2",
+                      "idx": 2
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "name": "other",
+            "type": {
+              "type": "udt",
+              "class": "org.apache.spark.ml.linalg.VectorUDT",
+              "pyClass": "pyspark.ml.linalg.VectorUDT",
+              "sqlType": {
+                "type": "struct",
+                "fields": [
+                  {
+                    "name": "type",
+                    "type": "byte",
+                    "nullable": false,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "size",
+                    "type": "integer",
+                    "nullable": true,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "indices",
+                    "type": {
+                      "type": "array",
+                      "elementType": "integer",
+                      "containsNull": false
+                    },
+                    "nullable": true,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "values",
+                    "type": {
+                      "type": "array",
+                      "elementType": "double",
+                      "containsNull": false
+                    },
+                    "nullable": true,
+                    "metadata": {}
+                  }
+                ]
+              }
+            },
+            "nullable": true,
+            "metadata": {
+              "ml_attr": {
+                "num_attrs": 2,
+                "attrs": {
+                  "binary": [
+                    {
+                      "name": "0",
+                      "idx": 0
+                    },
+                    {
+                      "name": "1",
+                      "idx": 1
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "StopWordsRemover",
+      "id": "StopWordsRemover-multi",
+      "values": {
+        "inputCols": [
+          "words",
+          "words2"
+        ],
+        "outputCols": [
+          "out",
+          "other"
+        ],
+        "stopWords": [
+          "the",
+          "gamma"
+        ]
+      },
+      "columns": [
+        "out",
+        "other"
+      ],
+      "rows": [
+        [
+          [
+            "alpha",
+            "alpha",
+            "beta",
+            "beta",
+            "delta"
+          ],
+          [
+            "alpha",
+            "alpha",
+            "beta",
+            "beta",
+            "delta"
+          ]
+        ],
+        [
+          [
+            "alpha",
+            "alpha",
+            "beta"
+          ],
+          [
+            "alpha",
+            "alpha",
+            "beta"
+          ]
+        ],
+        [
+          [
+            "alpha",
+            "beta"
+          ],
+          [
+            "alpha",
+            "beta"
+          ]
+        ],
+        [
+          [
+            "alpha",
+            "beta"
+          ],
+          [
+            "alpha",
+            "beta"
+          ]
+        ],
+        [
+          [
+            "alpha",
+            "beta"
+          ],
+          [
+            "alpha",
+            "beta"
+          ]
+        ],
+        [
+          [
+            "alpha"
+          ],
+          [
+            "alpha"
+          ]
+        ],
+        [
+          [
+            "alpha"
+          ],
+          [
+            "alpha"
+          ]
+        ],
+        [
+          [
+            "alpha",
+            "delta"
+          ],
+          [
+            "alpha",
+            "delta"
+          ]
+        ]
+      ],
+      "schema": {
+        "type": "struct",
+        "fields": [
+          {
+            "name": "out",
+            "type": {
+              "type": "array",
+              "elementType": "string",
+              "containsNull": true
+            },
+            "nullable": true,
+            "metadata": {}
+          },
+          {
+            "name": "other",
+            "type": {
+              "type": "array",
+              "elementType": "string",
+              "containsNull": true
+            },
+            "nullable": true,
+            "metadata": {}
+          }
+        ]
+      }
+    },
+    {
+      "name": "StringIndexer",
+      "id": "StringIndexer-multi",
+      "values": {
+        "inputCols": [
+          "category",
+          "text"
+        ],
+        "outputCols": [
+          "out",
+          "other"
+        ],
+        "stringOrderType": "alphabetAsc"
+      },
+      "columns": [
+        "out",
+        "other"
+      ],
+      "rows": [
+        [
+          0.0,
+          5.0
+        ],
+        [
+          1.0,
+          1.0
+        ],
+        [
+          2.0,
+          3.0
+        ],
+        [
+          0.0,
+          2.0
+        ],
+        [
+          1.0,
+          2.0
+        ],
+        [
+          2.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0
+        ],
+        [
+          1.0,
+          4.0
+        ]
+      ],
+      "schema": {
+        "type": "struct",
+        "fields": [
+          {
+            "name": "out",
+            "type": "double",
+            "nullable": false,
+            "metadata": {
+              "ml_attr": {
+                "vals": [
+                  "a",
+                  "b",
+                  "c"
+                ],
+                "name": "out",
+                "type": "nominal"
+              }
+            }
+          },
+          {
+            "name": "other",
+            "type": "double",
+            "nullable": false,
+            "metadata": {
+              "ml_attr": {
+                "vals": [
+                  "alpha",
+                  "alpha alpha beta gamma",
+                  "alpha beta",
+                  "alpha beta gamma",
+                  "alpha delta",
+                  "the alpha alpha beta beta gamma delta"
+                ],
+                "name": "other",
+                "type": "nominal"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "TargetEncoder",
+      "id": "TargetEncoder-multi",
+      "values": {
+        "inputCols": [
+          "index",
+          "label"
+        ],
+        "outputCols": [
+          "out",
+          "other"
+        ],
+        "labelCol": "x",
+        "targetType": "continuous"
+      },
+      "columns": [
+        "out",
+        "other"
+      ],
+      "rows": [
+        [
+          3.0,
+          3.0
+        ],
+        [
+          4.0,
+          4.0
+        ],
+        [
+          3.5,
+          3.0
+        ],
+        [
+          3.0,
+          4.0
+        ],
+        [
+          4.0,
+          3.0
+        ],
+        [
+          3.5,
+          4.0
+        ],
+        [
+          3.0,
+          3.0
+        ],
+        [
+          4.0,
+          4.0
+        ]
+      ],
+      "schema": {
+        "type": "struct",
+        "fields": [
+          {
+            "name": "out",
+            "type": "double",
+            "nullable": true,
+            "metadata": {
+              "ml_attr": {
+                "vals": [
+                  "3.0",
+                  "3.5",
+                  "4.0"
+                ],
+                "name": "out",
+                "type": "nominal"
+              }
+            }
+          },
+          {
+            "name": "other",
+            "type": "double",
+            "nullable": true,
+            "metadata": {
+              "ml_attr": {
+                "vals": [
+                  "3.0",
+                  "3.5",
+                  "4.0"
+                ],
+                "name": "other",
+                "type": "nominal"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "QuantileDiscretizer",
+      "id": "QuantileDiscretizer-multi",
+      "values": {
+        "inputCols": [
+          "x",
+          "y"
+        ],
+        "outputCols": [
+          "out",
+          "other"
+        ],
+        "numBucketsArray": [
+          2,
+          3
+        ],
+        "relativeError": 0.0
+      },
+      "columns": [
+        "out",
+        "other"
+      ],
+      "rows": [
+        [
+          0.0,
+          2.0
+        ],
+        [
+          0.0,
+          2.0
+        ],
+        [
+          0.0,
+          2.0
+        ],
+        [
+          1.0,
+          1.0
+        ],
+        [
+          1.0,
+          1.0
+        ],
+        [
+          1.0,
+          1.0
+        ],
+        [
+          1.0,
+          0.0
+        ],
+        [
+          1.0,
+          0.0
+        ]
+      ],
+      "schema": {
+        "type": "struct",
+        "fields": [
+          {
+            "name": "out",
+            "type": "double",
+            "nullable": false,
+            "metadata": {
+              "ml_attr": {
+                "ord": true,
+                "vals": [
+                  "-Infinity, 3.0",
+                  "3.0, Infinity"
+                ],
+                "type": "nominal"
+              }
+            }
+          },
+          {
+            "name": "other",
+            "type": "double",
+            "nullable": false,
+            "metadata": {
+              "ml_attr": {
+                "ord": true,
+                "vals": [
+                  "-Infinity, 3.0",
+                  "3.0, 6.0",
+                  "6.0, Infinity"
+                ],
+                "type": "nominal"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "StandardScaler",
+      "id": "StandardScaler-variant",
+      "values": {
+        "inputCol": "features",
+        "outputCol": "out",
+        "withMean": false,
+        "withStd": false
+      },
+      "columns": [
+        "out"
+      ],
+      "rows": [
+        [
+          [
+            0.0,
+            3.0,
+            0.0,
+            1.0
+          ]
+        ],
+        [
+          [
+            2.0,
+            7.0,
+            1.0,
+            2.0
+          ]
+        ],
+        [
+          [
+            0.0,
+            3.0,
+            2.0,
+            3.0
+          ]
+        ],
+        [
+          [
+            2.0,
+            7.0,
+            0.0,
+            4.0
+          ]
+        ],
+        [
+          [
+            0.0,
+            3.0,
+            1.0,
+            5.0
+          ]
+        ],
+        [
+          [
+            2.0,
+            7.0,
+            2.0,
+            6.0
+          ]
+        ],
+        [
+          [
+            0.0,
+            3.0,
+            0.0,
+            7.0
+          ]
+        ],
+        [
+          [
+            2.0,
+            7.0,
+            1.0,
+            8.0
+          ]
+        ]
+      ],
+      "schema": {
+        "type": "struct",
+        "fields": [
+          {
+            "name": "out",
+            "type": {
+              "type": "udt",
+              "class": "org.apache.spark.ml.linalg.VectorUDT",
+              "pyClass": "pyspark.ml.linalg.VectorUDT",
+              "sqlType": {
+                "type": "struct",
+                "fields": [
+                  {
+                    "name": "type",
+                    "type": "byte",
+                    "nullable": false,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "size",
+                    "type": "integer",
+                    "nullable": true,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "indices",
+                    "type": {
+                      "type": "array",
+                      "elementType": "integer",
+                      "containsNull": false
+                    },
+                    "nullable": true,
+                    "metadata": {}
+                  },
+                  {
+                    "name": "values",
+                    "type": {
+                      "type": "array",
+                      "elementType": "double",
+                      "containsNull": false
+                    },
+                    "nullable": true,
+                    "metadata": {}
+                  }
+                ]
+              }
+            },
+            "nullable": true,
+            "metadata": {
+              "ml_attr": {
+                "num_attrs": 4
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "RegexTokenizer",
+      "id": "RegexTokenizer-variant",
+      "values": {
+        "inputCol": "text",
+        "outputCol": "out",
+        "pattern": "[a-z]+",
+        "gaps": false,
+        "toLowercase": false
+      },
+      "columns": [
+        "out"
+      ],
+      "rows": [
+        [
+          [
+            "the",
+            "alpha",
+            "alpha",
+            "beta",
+            "beta",
+            "gamma",
+            "delta"
+          ]
+        ],
+        [
+          [
+            "alpha",
+            "alpha",
+            "beta",
+            "gamma"
+          ]
+        ],
+        [
+          [
+            "alpha",
+            "beta",
+            "gamma"
+          ]
+        ],
+        [
+          [
+            "alpha",
+            "beta"
+          ]
+        ],
+        [
+          [
+            "alpha",
+            "beta"
+          ]
+        ],
+        [
+          [
+            "alpha"
+          ]
+        ],
+        [
+          [
+            "alpha"
+          ]
+        ],
+        [
+          [
+            "alpha",
+            "delta"
+          ]
+        ]
+      ],
+      "schema": {
+        "type": "struct",
+        "fields": [
+          {
+            "name": "out",
+            "type": {
+              "type": "array",
+              "elementType": "string",
+              "containsNull": true
+            },
+            "nullable": true,
+            "metadata": {}
+          }
+        ]
+      }
+    }
+  ],
+  "params": [
+    {
+      "name": "Binarizer",
+      "values": {},
+      "params_b64": ""
+    },
+    {
+      "name": "Binarizer",
+      "values": {
+        "inputCol": "sample",
+        "inputCols": [
+          "x",
+          "y"
+        ],
+        "outputCol": "sample",
+        "outputCols": [
+          "x",
+          "y"
+        ],
+        "threshold": 0.0,
+        "thresholds": [
+          0.0,
+          1.0
+        ]
+      },
+      "params_b64": "CisKCWlucHV0Q29scxIesgEbCg9aDRILVVRGOF9CSU5BUlkSA2oBeBIDagF5ChQKCGlucHV0Q29sEghqBnNhbXBsZQosCgpvdXRwdXRDb2xzEh6yARsKD1oNEgtVVEY4X0JJTkFSWRIDagF4EgNqAXkKFQoJb3V0cHV0Q29sEghqBnNhbXBsZQorCgp0aHJlc2hvbGRzEh2yARoKAkoAEglZAAAAAAAAAAASCVkAAAAAAADwPwoWCgl0aHJlc2hvbGQSCVkAAAAAAAAAAA=="
+    },
+    {
+      "name": "Binarizer",
+      "values": {
+        "inputCol": null,
+        "inputCols": null,
+        "outputCol": null,
+        "outputCols": null,
+        "threshold": null,
+        "thresholds": null
+      },
+      "params_b64": "ChEKCWlucHV0Q29scxIECgIKAAoQCghpbnB1dENvbBIECgIKAAoSCgpvdXRwdXRDb2xzEgQKAgoAChEKCW91dHB1dENvbBIECgIKAAoSCgp0aHJlc2hvbGRzEgQKAgoAChEKCXRocmVzaG9sZBIECgIKAA=="
+    },
+    {
+      "name": "BucketedRandomProjectionLSH",
+      "values": {},
+      "params_b64": ""
+    },
+    {
+      "name": "BucketedRandomProjectionLSH",
+      "values": {
+        "bucketLength": 0.5,
+        "inputCol": "sample",
+        "numHashTables": 1,
+        "outputCol": "sample",
+        "seed": 42
+      },
+      "params_b64": "ChkKDGJ1Y2tldExlbmd0aBIJWQAAAAAAAOA/ChQKCGlucHV0Q29sEghqBnNhbXBsZQoTCg1udW1IYXNoVGFibGVzEgIwAQoVCglvdXRwdXRDb2wSCGoGc2FtcGxlCgoKBHNlZWQSAjAq"
+    },
+    {
+      "name": "BucketedRandomProjectionLSH",
+      "values": {
+        "bucketLength": null,
+        "inputCol": null,
+        "numHashTables": null,
+        "outputCol": null,
+        "seed": null
+      },
+      "params_b64": "ChQKDGJ1Y2tldExlbmd0aBIECgIKAAoQCghpbnB1dENvbBIECgIKAAoVCg1udW1IYXNoVGFibGVzEgQKAgoAChEKCW91dHB1dENvbBIECgIKAAoMCgRzZWVkEgQKAgoA"
+    },
+    {
+      "name": "Bucketizer",
+      "values": {},
+      "params_b64": ""
+    },
+    {
+      "name": "Bucketizer",
+      "values": {
+        "handleInvalid": "error",
+        "inputCol": "sample",
+        "inputCols": [
+          "x",
+          "y"
+        ],
+        "outputCol": "sample",
+        "outputCols": [
+          "x",
+          "y"
+        ],
+        "splits": [
+          0.0,
+          1.0
+        ],
+        "splitsArray": [
+          [
+            0.0,
+            1.0
+          ],
+          [
+            2.0,
+            3.0
+          ]
+        ]
+      },
+      "params_b64": "ChgKDWhhbmRsZUludmFsaWQSB2oFZXJyb3IKKwoJaW5wdXRDb2xzEh6yARsKD1oNEgtVVEY4X0JJTkFSWRIDagF4EgNqAXkKFAoIaW5wdXRDb2wSCGoGc2FtcGxlCiwKCm91dHB1dENvbHMSHrIBGwoPWg0SC1VURjhfQklOQVJZEgNqAXgSA2oBeQoVCglvdXRwdXRDb2wSCGoGc2FtcGxlClsKC3NwbGl0c0FycmF5EkyyAUkKCaIBBgoCSgAQARIdsgEaCgJKABIJWQAAAAAAAAAAEglZAAAAAAAA8D8SHbIBGgoCSgASCVkAAAAAAAAAQBIJWQAAAAAAAAhACicKBnNwbGl0cxIdsgEaCgJKABIJWQAAAAAAAAAAEglZAAAAAAAA8D8="
+    },
+    {
+      "name": "Bucketizer",
+      "values": {
+        "handleInvalid": null,
+        "inputCol": null,
+        "inputCols": null,
+        "outputCol": null,
+        "outputCols": null,
+        "splits": null,
+        "splitsArray": null
+      },
+      "params_b64": "ChUKDWhhbmRsZUludmFsaWQSBAoCCgAKEQoJaW5wdXRDb2xzEgQKAgoAChAKCGlucHV0Q29sEgQKAgoAChIKCm91dHB1dENvbHMSBAoCCgAKEQoJb3V0cHV0Q29sEgQKAgoAChMKC3NwbGl0c0FycmF5EgQKAgoACg4KBnNwbGl0cxIECgIKAA=="
+    },
+    {
+      "name": "ChiSqSelector",
+      "values": {},
+      "params_b64": ""
+    },
+    {
+      "name": "ChiSqSelector",
+      "values": {
+        "fdr": 0.05,
+        "featuresCol": "features",
+        "fpr": 0.05,
+        "fwe": 0.05,
+        "labelCol": "label",
+        "numTopFeatures": 50,
+        "outputCol": "sample",
+        "percentile": 0.1,
+        "selectorType": "numTopFeatures"
+      },
+      "params_b64": "ChAKA2ZkchIJWZqZmZmZmak/ChkKC2ZlYXR1cmVzQ29sEgpqCGZlYXR1cmVzChAKA2ZwchIJWZqZmZmZmak/ChAKA2Z3ZRIJWZqZmZmZmak/ChMKCGxhYmVsQ29sEgdqBWxhYmVsChQKDm51bVRvcEZlYXR1cmVzEgIwMgoVCglvdXRwdXRDb2wSCGoGc2FtcGxlChcKCnBlcmNlbnRpbGUSCVmamZmZmZm5PwogCgxzZWxlY3RvclR5cGUSEGoObnVtVG9wRmVhdHVyZXM="
+    },
+    {
+      "name": "ChiSqSelector",
+      "values": {
+        "fdr": null,
+        "featuresCol": null,
+        "fpr": null,
+        "fwe": null,
+        "labelCol": null,
+        "numTopFeatures": null,
+        "outputCol": null,
+        "percentile": null,
+        "selectorType": null
+      },
+      "params_b64": "CgsKA2ZkchIECgIKAAoTCgtmZWF0dXJlc0NvbBIECgIKAAoLCgNmcHISBAoCCgAKCwoDZndlEgQKAgoAChAKCGxhYmVsQ29sEgQKAgoAChYKDm51bVRvcEZlYXR1cmVzEgQKAgoAChEKCW91dHB1dENvbBIECgIKAAoSCgpwZXJjZW50aWxlEgQKAgoAChQKDHNlbGVjdG9yVHlwZRIECgIKAA=="
+    },
+    {
+      "name": "CountVectorizer",
+      "values": {},
+      "params_b64": ""
+    },
+    {
+      "name": "CountVectorizer",
+      "values": {
+        "binary": false,
+        "inputCol": "sample",
+        "maxDF": 9223372036854775807,
+        "minDF": 1.0,
+        "minTF": 1.0,
+        "outputCol": "sample",
+        "vocabSize": 262144
+      },
+      "params_b64": "CgwKBmJpbmFyeRICGAAKFAoIaW5wdXRDb2wSCGoGc2FtcGxlChIKBW1heERGEglZAAAAAAAA4EMKEgoFbWluREYSCVkAAAAAAADwPwoSCgVtaW5URhIJWQAAAAAAAPA/ChUKCW91dHB1dENvbBIIagZzYW1wbGUKEQoJdm9jYWJTaXplEgQwgIAQ"
+    },
+    {
+      "name": "CountVectorizer",
+      "values": {
+        "binary": null,
+        "inputCol": null,
+        "maxDF": null,
+        "minDF": null,
+        "minTF": null,
+        "outputCol": null,
+        "vocabSize": null
+      },
+      "params_b64": "Cg4KBmJpbmFyeRIECgIKAAoQCghpbnB1dENvbBIECgIKAAoNCgVtYXhERhIECgIKAAoNCgVtaW5ERhIECgIKAAoNCgVtaW5URhIECgIKAAoRCglvdXRwdXRDb2wSBAoCCgAKEQoJdm9jYWJTaXplEgQKAgoA"
+    },
+    {
+      "name": "DCT",
+      "values": {},
+      "params_b64": ""
+    },
+    {
+      "name": "DCT",
+      "values": {
+        "inputCol": "sample",
+        "inverse": false,
+        "outputCol": "sample"
+      },
+      "params_b64": "ChQKCGlucHV0Q29sEghqBnNhbXBsZQoNCgdpbnZlcnNlEgIYAAoVCglvdXRwdXRDb2wSCGoGc2FtcGxl"
+    },
+    {
+      "name": "DCT",
+      "values": {
+        "inputCol": null,
+        "inverse": null,
+        "outputCol": null
+      },
+      "params_b64": "ChAKCGlucHV0Q29sEgQKAgoACg8KB2ludmVyc2USBAoCCgAKEQoJb3V0cHV0Q29sEgQKAgoA"
+    },
+    {
+      "name": "ElementwiseProduct",
+      "values": {},
+      "params_b64": ""
+    },
+    {
+      "name": "ElementwiseProduct",
+      "values": {
+        "inputCol": "sample",
+        "outputCol": "sample",
+        "scalingVec": {
+          "vector": [
+            2.0,
+            -1.0
+          ]
+        }
+      },
+      "params_b64": "ChQKCGlucHV0Q29sEghqBnNhbXBsZQoVCglvdXRwdXRDb2wSCGoGc2FtcGxlCmoKCnNjYWxpbmdWZWMSXMIBWQouugErCgN1ZHQSJG9yZy5hcGFjaGUuc3BhcmsubWwubGluYWxnLlZlY3RvclVEVBICIAESBAoCCgASBAoCCgASF8oBFCoSChAAAAAAAAAAQAAAAAAAAPC/"
+    },
+    {
+      "name": "ElementwiseProduct",
+      "values": {
+        "inputCol": null,
+        "outputCol": null,
+        "scalingVec": null
+      },
+      "params_b64": "ChAKCGlucHV0Q29sEgQKAgoAChEKCW91dHB1dENvbBIECgIKAAoSCgpzY2FsaW5nVmVjEgQKAgoA"
+    },
+    {
+      "name": "FeatureHasher",
+      "values": {},
+      "params_b64": ""
+    },
+    {
+      "name": "FeatureHasher",
+      "values": {
+        "categoricalCols": [
+          "x",
+          "y"
+        ],
+        "inputCols": [
+          "x",
+          "y"
+        ],
+        "numFeatures": 262144,
+        "outputCol": "sample"
+      },
+      "params_b64": "CjEKD2NhdGVnb3JpY2FsQ29scxIesgEbCg9aDRILVVRGOF9CSU5BUlkSA2oBeBIDagF5CisKCWlucHV0Q29scxIesgEbCg9aDRILVVRGOF9CSU5BUlkSA2oBeBIDagF5ChMKC251bUZlYXR1cmVzEgQwgIAQChUKCW91dHB1dENvbBIIagZzYW1wbGU="
+    },
+    {
+      "name": "FeatureHasher",
+      "values": {
+        "categoricalCols": null,
+        "inputCols": null,
+        "numFeatures": null,
+        "outputCol": null
+      },
+      "params_b64": "ChcKD2NhdGVnb3JpY2FsQ29scxIECgIKAAoRCglpbnB1dENvbHMSBAoCCgAKEwoLbnVtRmVhdHVyZXMSBAoCCgAKEQoJb3V0cHV0Q29sEgQKAgoA"
+    },
+    {
+      "name": "HashingTF",
+      "values": {},
+      "params_b64": ""
+    },
+    {
+      "name": "HashingTF",
+      "values": {
+        "binary": false,
+        "inputCol": "sample",
+        "numFeatures": 262144,
+        "outputCol": "sample"
+      },
+      "params_b64": "CgwKBmJpbmFyeRICGAAKFAoIaW5wdXRDb2wSCGoGc2FtcGxlChMKC251bUZlYXR1cmVzEgQwgIAQChUKCW91dHB1dENvbBIIagZzYW1wbGU="
+    },
+    {
+      "name": "HashingTF",
+      "values": {
+        "binary": null,
+        "inputCol": null,
+        "numFeatures": null,
+        "outputCol": null
+      },
+      "params_b64": "Cg4KBmJpbmFyeRIECgIKAAoQCghpbnB1dENvbBIECgIKAAoTCgtudW1GZWF0dXJlcxIECgIKAAoRCglvdXRwdXRDb2wSBAoCCgA="
+    },
+    {
+      "name": "IDF",
+      "values": {},
+      "params_b64": ""
+    },
+    {
+      "name": "IDF",
+      "values": {
+        "inputCol": "sample",
+        "minDocFreq": 0,
+        "outputCol": "sample"
+      },
+      "params_b64": "ChQKCGlucHV0Q29sEghqBnNhbXBsZQoQCgptaW5Eb2NGcmVxEgIwAAoVCglvdXRwdXRDb2wSCGoGc2FtcGxl"
+    },
+    {
+      "name": "IDF",
+      "values": {
+        "inputCol": null,
+        "minDocFreq": null,
+        "outputCol": null
+      },
+      "params_b64": "ChAKCGlucHV0Q29sEgQKAgoAChIKCm1pbkRvY0ZyZXESBAoCCgAKEQoJb3V0cHV0Q29sEgQKAgoA"
+    },
+    {
+      "name": "Imputer",
+      "values": {},
+      "params_b64": ""
+    },
+    {
+      "name": "Imputer",
+      "values": {
+        "inputCol": "sample",
+        "inputCols": [
+          "x",
+          "y"
+        ],
+        "missingValue": {
+          "float": "nan"
+        },
+        "outputCol": "sample",
+        "outputCols": [
+          "x",
+          "y"
+        ],
+        "relativeError": 0.001,
+        "strategy": "mean"
+      },
+      "params_b64": "CisKCWlucHV0Q29scxIesgEbCg9aDRILVVRGOF9CSU5BUlkSA2oBeBIDagF5ChQKCGlucHV0Q29sEghqBnNhbXBsZQoZCgxtaXNzaW5nVmFsdWUSCVkAAAAAAAD4fwosCgpvdXRwdXRDb2xzEh6yARsKD1oNEgtVVEY4X0JJTkFSWRIDagF4EgNqAXkKFQoJb3V0cHV0Q29sEghqBnNhbXBsZQoaCg1yZWxhdGl2ZUVycm9yEglZ/Knx0k1iUD8KEgoIc3RyYXRlZ3kSBmoEbWVhbg=="
+    },
+    {
+      "name": "Imputer",
+      "values": {
+        "inputCol": null,
+        "inputCols": null,
+        "missingValue": null,
+        "outputCol": null,
+        "outputCols": null,
+        "relativeError": null,
+        "strategy": null
+      },
+      "params_b64": "ChEKCWlucHV0Q29scxIECgIKAAoQCghpbnB1dENvbBIECgIKAAoUCgxtaXNzaW5nVmFsdWUSBAoCCgAKEgoKb3V0cHV0Q29scxIECgIKAAoRCglvdXRwdXRDb2wSBAoCCgAKFQoNcmVsYXRpdmVFcnJvchIECgIKAAoQCghzdHJhdGVneRIECgIKAA=="
+    },
+    {
+      "name": "IndexToString",
+      "values": {},
+      "params_b64": ""
+    },
+    {
+      "name": "IndexToString",
+      "values": {
+        "inputCol": "sample",
+        "labels": [
+          "x",
+          "y"
+        ],
+        "outputCol": "sample"
+      },
+      "params_b64": "ChQKCGlucHV0Q29sEghqBnNhbXBsZQooCgZsYWJlbHMSHrIBGwoPWg0SC1VURjhfQklOQVJZEgNqAXgSA2oBeQoVCglvdXRwdXRDb2wSCGoGc2FtcGxl"
+    },
+    {
+      "name": "IndexToString",
+      "values": {
+        "inputCol": null,
+        "labels": null,
+        "outputCol": null
+      },
+      "params_b64": "ChAKCGlucHV0Q29sEgQKAgoACg4KBmxhYmVscxIECgIKAAoRCglvdXRwdXRDb2wSBAoCCgA="
+    },
+    {
+      "name": "Interaction",
+      "values": {},
+      "params_b64": ""
+    },
+    {
+      "name": "Interaction",
+      "values": {
+        "inputCols": [
+          "x",
+          "y"
+        ],
+        "outputCol": "sample"
+      },
+      "params_b64": "CisKCWlucHV0Q29scxIesgEbCg9aDRILVVRGOF9CSU5BUlkSA2oBeBIDagF5ChUKCW91dHB1dENvbBIIagZzYW1wbGU="
+    },
+    {
+      "name": "Interaction",
+      "values": {
+        "inputCols": null,
+        "outputCol": null
+      },
+      "params_b64": "ChEKCWlucHV0Q29scxIECgIKAAoRCglvdXRwdXRDb2wSBAoCCgA="
+    },
+    {
+      "name": "MaxAbsScaler",
+      "values": {},
+      "params_b64": ""
+    },
+    {
+      "name": "MaxAbsScaler",
+      "values": {
+        "inputCol": "sample",
+        "outputCol": "sample"
+      },
+      "params_b64": "ChQKCGlucHV0Q29sEghqBnNhbXBsZQoVCglvdXRwdXRDb2wSCGoGc2FtcGxl"
+    },
+    {
+      "name": "MaxAbsScaler",
+      "values": {
+        "inputCol": null,
+        "outputCol": null
+      },
+      "params_b64": "ChAKCGlucHV0Q29sEgQKAgoAChEKCW91dHB1dENvbBIECgIKAA=="
+    },
+    {
+      "name": "MinHashLSH",
+      "values": {},
+      "params_b64": ""
+    },
+    {
+      "name": "MinHashLSH",
+      "values": {
+        "inputCol": "sample",
+        "numHashTables": 1,
+        "outputCol": "sample",
+        "seed": 42
+      },
+      "params_b64": "ChQKCGlucHV0Q29sEghqBnNhbXBsZQoTCg1udW1IYXNoVGFibGVzEgIwAQoVCglvdXRwdXRDb2wSCGoGc2FtcGxlCgoKBHNlZWQSAjAq"
+    },
+    {
+      "name": "MinHashLSH",
+      "values": {
+        "inputCol": null,
+        "numHashTables": null,
+        "outputCol": null,
+        "seed": null
+      },
+      "params_b64": "ChAKCGlucHV0Q29sEgQKAgoAChUKDW51bUhhc2hUYWJsZXMSBAoCCgAKEQoJb3V0cHV0Q29sEgQKAgoACgwKBHNlZWQSBAoCCgA="
+    },
+    {
+      "name": "MinMaxScaler",
+      "values": {},
+      "params_b64": ""
+    },
+    {
+      "name": "MinMaxScaler",
+      "values": {
+        "inputCol": "sample",
+        "max": 1.0,
+        "min": 0.0,
+        "outputCol": "sample"
+      },
+      "params_b64": "ChQKCGlucHV0Q29sEghqBnNhbXBsZQoQCgNtYXgSCVkAAAAAAADwPwoQCgNtaW4SCVkAAAAAAAAAAAoVCglvdXRwdXRDb2wSCGoGc2FtcGxl"
+    },
+    {
+      "name": "MinMaxScaler",
+      "values": {
+        "inputCol": null,
+        "max": null,
+        "min": null,
+        "outputCol": null
+      },
+      "params_b64": "ChAKCGlucHV0Q29sEgQKAgoACgsKA21heBIECgIKAAoLCgNtaW4SBAoCCgAKEQoJb3V0cHV0Q29sEgQKAgoA"
+    },
+    {
+      "name": "NGram",
+      "values": {},
+      "params_b64": ""
+    },
+    {
+      "name": "NGram",
+      "values": {
+        "inputCol": "sample",
+        "n": 2,
+        "outputCol": "sample"
+      },
+      "params_b64": "ChQKCGlucHV0Q29sEghqBnNhbXBsZQoHCgFuEgIwAgoVCglvdXRwdXRDb2wSCGoGc2FtcGxl"
+    },
+    {
+      "name": "NGram",
+      "values": {
+        "inputCol": null,
+        "n": null,
+        "outputCol": null
+      },
+      "params_b64": "ChAKCGlucHV0Q29sEgQKAgoACgkKAW4SBAoCCgAKEQoJb3V0cHV0Q29sEgQKAgoA"
+    },
+    {
+      "name": "Normalizer",
+      "values": {},
+      "params_b64": ""
+    },
+    {
+      "name": "Normalizer",
+      "values": {
+        "inputCol": "sample",
+        "outputCol": "sample",
+        "p": 2.0
+      },
+      "params_b64": "ChQKCGlucHV0Q29sEghqBnNhbXBsZQoVCglvdXRwdXRDb2wSCGoGc2FtcGxlCg4KAXASCVkAAAAAAAAAQA=="
+    },
+    {
+      "name": "Normalizer",
+      "values": {
+        "inputCol": null,
+        "outputCol": null,
+        "p": null
+      },
+      "params_b64": "ChAKCGlucHV0Q29sEgQKAgoAChEKCW91dHB1dENvbBIECgIKAAoJCgFwEgQKAgoA"
+    },
+    {
+      "name": "OneHotEncoder",
+      "values": {},
+      "params_b64": ""
+    },
+    {
+      "name": "OneHotEncoder",
+      "values": {
+        "dropLast": true,
+        "handleInvalid": "error",
+        "inputCol": "sample",
+        "inputCols": [
+          "x",
+          "y"
+        ],
+        "outputCol": "sample",
+        "outputCols": [
+          "x",
+          "y"
+        ]
+      },
+      "params_b64": "Cg4KCGRyb3BMYXN0EgIYAQoYCg1oYW5kbGVJbnZhbGlkEgdqBWVycm9yCisKCWlucHV0Q29scxIesgEbCg9aDRILVVRGOF9CSU5BUlkSA2oBeBIDagF5ChQKCGlucHV0Q29sEghqBnNhbXBsZQosCgpvdXRwdXRDb2xzEh6yARsKD1oNEgtVVEY4X0JJTkFSWRIDagF4EgNqAXkKFQoJb3V0cHV0Q29sEghqBnNhbXBsZQ=="
+    },
+    {
+      "name": "OneHotEncoder",
+      "values": {
+        "dropLast": null,
+        "handleInvalid": null,
+        "inputCol": null,
+        "inputCols": null,
+        "outputCol": null,
+        "outputCols": null
+      },
+      "params_b64": "ChAKCGRyb3BMYXN0EgQKAgoAChUKDWhhbmRsZUludmFsaWQSBAoCCgAKEQoJaW5wdXRDb2xzEgQKAgoAChAKCGlucHV0Q29sEgQKAgoAChIKCm91dHB1dENvbHMSBAoCCgAKEQoJb3V0cHV0Q29sEgQKAgoA"
+    },
+    {
+      "name": "PCA",
+      "values": {},
+      "params_b64": ""
+    },
+    {
+      "name": "PCA",
+      "values": {
+        "inputCol": "sample",
+        "k": 42,
+        "outputCol": "sample"
+      },
+      "params_b64": "ChQKCGlucHV0Q29sEghqBnNhbXBsZQoHCgFrEgIwKgoVCglvdXRwdXRDb2wSCGoGc2FtcGxl"
+    },
+    {
+      "name": "PCA",
+      "values": {
+        "inputCol": null,
+        "k": null,
+        "outputCol": null
+      },
+      "params_b64": "ChAKCGlucHV0Q29sEgQKAgoACgkKAWsSBAoCCgAKEQoJb3V0cHV0Q29sEgQKAgoA"
+    },
+    {
+      "name": "PolynomialExpansion",
+      "values": {},
+      "params_b64": ""
+    },
+    {
+      "name": "PolynomialExpansion",
+      "values": {
+        "degree": 2,
+        "inputCol": "sample",
+        "outputCol": "sample"
+      },
+      "params_b64": "CgwKBmRlZ3JlZRICMAIKFAoIaW5wdXRDb2wSCGoGc2FtcGxlChUKCW91dHB1dENvbBIIagZzYW1wbGU="
+    },
+    {
+      "name": "PolynomialExpansion",
+      "values": {
+        "degree": null,
+        "inputCol": null,
+        "outputCol": null
+      },
+      "params_b64": "Cg4KBmRlZ3JlZRIECgIKAAoQCghpbnB1dENvbBIECgIKAAoRCglvdXRwdXRDb2wSBAoCCgA="
+    },
+    {
+      "name": "QuantileDiscretizer",
+      "values": {},
+      "params_b64": ""
+    },
+    {
+      "name": "QuantileDiscretizer",
+      "values": {
+        "handleInvalid": "error",
+        "inputCol": "sample",
+        "inputCols": [
+          "x",
+          "y"
+        ],
+        "numBuckets": 2,
+        "numBucketsArray": [
+          0,
+          2
+        ],
+        "outputCol": "sample",
+        "outputCols": [
+          "x",
+          "y"
+        ],
+        "relativeError": 0.001
+      },
+      "params_b64": "ChgKDWhhbmRsZUludmFsaWQSB2oFZXJyb3IKKwoJaW5wdXRDb2xzEh6yARsKD1oNEgtVVEY4X0JJTkFSWRIDagF4EgNqAXkKFAoIaW5wdXRDb2wSCGoGc2FtcGxlCiIKD251bUJ1Y2tldHNBcnJheRIPsgEMCgIyABICMAASAjACChAKCm51bUJ1Y2tldHMSAjACCiwKCm91dHB1dENvbHMSHrIBGwoPWg0SC1VURjhfQklOQVJZEgNqAXgSA2oBeQoVCglvdXRwdXRDb2wSCGoGc2FtcGxlChoKDXJlbGF0aXZlRXJyb3ISCVn8qfHSTWJQPw=="
+    },
+    {
+      "name": "QuantileDiscretizer",
+      "values": {
+        "handleInvalid": null,
+        "inputCol": null,
+        "inputCols": null,
+        "numBuckets": null,
+        "numBucketsArray": null,
+        "outputCol": null,
+        "outputCols": null,
+        "relativeError": null
+      },
+      "params_b64": "ChUKDWhhbmRsZUludmFsaWQSBAoCCgAKEQoJaW5wdXRDb2xzEgQKAgoAChAKCGlucHV0Q29sEgQKAgoAChcKD251bUJ1Y2tldHNBcnJheRIECgIKAAoSCgpudW1CdWNrZXRzEgQKAgoAChIKCm91dHB1dENvbHMSBAoCCgAKEQoJb3V0cHV0Q29sEgQKAgoAChUKDXJlbGF0aXZlRXJyb3ISBAoCCgA="
+    },
+    {
+      "name": "RobustScaler",
+      "values": {},
+      "params_b64": ""
+    },
+    {
+      "name": "RobustScaler",
+      "values": {
+        "inputCol": "sample",
+        "lower": 0.25,
+        "outputCol": "sample",
+        "relativeError": 0.001,
+        "upper": 0.75,
+        "withCentering": false,
+        "withScaling": true
+      },
+      "params_b64": "ChQKCGlucHV0Q29sEghqBnNhbXBsZQoSCgVsb3dlchIJWQAAAAAAANA/ChUKCW91dHB1dENvbBIIagZzYW1wbGUKGgoNcmVsYXRpdmVFcnJvchIJWfyp8dJNYlA/ChIKBXVwcGVyEglZAAAAAAAA6D8KEwoNd2l0aENlbnRlcmluZxICGAAKEQoLd2l0aFNjYWxpbmcSAhgB"
+    },
+    {
+      "name": "RobustScaler",
+      "values": {
+        "inputCol": null,
+        "lower": null,
+        "outputCol": null,
+        "relativeError": null,
+        "upper": null,
+        "withCentering": null,
+        "withScaling": null
+      },
+      "params_b64": "ChAKCGlucHV0Q29sEgQKAgoACg0KBWxvd2VyEgQKAgoAChEKCW91dHB1dENvbBIECgIKAAoVCg1yZWxhdGl2ZUVycm9yEgQKAgoACg0KBXVwcGVyEgQKAgoAChUKDXdpdGhDZW50ZXJpbmcSBAoCCgAKEwoLd2l0aFNjYWxpbmcSBAoCCgA="
+    },
+    {
+      "name": "RegexTokenizer",
+      "values": {},
+      "params_b64": ""
+    },
+    {
+      "name": "RegexTokenizer",
+      "values": {
+        "gaps": true,
+        "inputCol": "sample",
+        "minTokenLength": 1,
+        "outputCol": "sample",
+        "pattern": "\\s+",
+        "toLowercase": true
+      },
+      "params_b64": "CgoKBGdhcHMSAhgBChQKCGlucHV0Q29sEghqBnNhbXBsZQoUCg5taW5Ub2tlbkxlbmd0aBICMAEKFQoJb3V0cHV0Q29sEghqBnNhbXBsZQoQCgdwYXR0ZXJuEgVqA1xzKwoRCgt0b0xvd2VyY2FzZRICGAE="
+    },
+    {
+      "name": "RegexTokenizer",
+      "values": {
+        "gaps": null,
+        "inputCol": null,
+        "minTokenLength": null,
+        "outputCol": null,
+        "pattern": null,
+        "toLowercase": null
+      },
+      "params_b64": "CgwKBGdhcHMSBAoCCgAKEAoIaW5wdXRDb2wSBAoCCgAKFgoObWluVG9rZW5MZW5ndGgSBAoCCgAKEQoJb3V0cHV0Q29sEgQKAgoACg8KB3BhdHRlcm4SBAoCCgAKEwoLdG9Mb3dlcmNhc2USBAoCCgA="
+    },
+    {
+      "name": "RFormula",
+      "values": {},
+      "params_b64": ""
+    },
+    {
+      "name": "RFormula",
+      "values": {
+        "featuresCol": "features",
+        "forceIndexLabel": false,
+        "formula": "sample",
+        "handleInvalid": "error",
+        "labelCol": "label",
+        "stringIndexerOrderType": "frequencyDesc"
+      },
+      "params_b64": "ChkKC2ZlYXR1cmVzQ29sEgpqCGZlYXR1cmVzChUKD2ZvcmNlSW5kZXhMYWJlbBICGAAKEwoHZm9ybXVsYRIIagZzYW1wbGUKGAoNaGFuZGxlSW52YWxpZBIHagVlcnJvcgoTCghsYWJlbENvbBIHagVsYWJlbAopChZzdHJpbmdJbmRleGVyT3JkZXJUeXBlEg9qDWZyZXF1ZW5jeURlc2M="
+    },
+    {
+      "name": "RFormula",
+      "values": {
+        "featuresCol": null,
+        "forceIndexLabel": null,
+        "formula": null,
+        "handleInvalid": null,
+        "labelCol": null,
+        "stringIndexerOrderType": null
+      },
+      "params_b64": "ChMKC2ZlYXR1cmVzQ29sEgQKAgoAChcKD2ZvcmNlSW5kZXhMYWJlbBIECgIKAAoPCgdmb3JtdWxhEgQKAgoAChUKDWhhbmRsZUludmFsaWQSBAoCCgAKEAoIbGFiZWxDb2wSBAoCCgAKHgoWc3RyaW5nSW5kZXhlck9yZGVyVHlwZRIECgIKAA=="
+    },
+    {
+      "name": "SQLTransformer",
+      "values": {},
+      "params_b64": ""
+    },
+    {
+      "name": "SQLTransformer",
+      "values": {
+        "statement": "sample"
+      },
+      "params_b64": "ChUKCXN0YXRlbWVudBIIagZzYW1wbGU="
+    },
+    {
+      "name": "SQLTransformer",
+      "values": {
+        "statement": null
+      },
+      "params_b64": "ChEKCXN0YXRlbWVudBIECgIKAA=="
+    },
+    {
+      "name": "StandardScaler",
+      "values": {},
+      "params_b64": ""
+    },
+    {
+      "name": "StandardScaler",
+      "values": {
+        "inputCol": "sample",
+        "outputCol": "sample",
+        "withMean": false,
+        "withStd": true
+      },
+      "params_b64": "ChQKCGlucHV0Q29sEghqBnNhbXBsZQoVCglvdXRwdXRDb2wSCGoGc2FtcGxlCg4KCHdpdGhNZWFuEgIYAAoNCgd3aXRoU3RkEgIYAQ=="
+    },
+    {
+      "name": "StandardScaler",
+      "values": {
+        "inputCol": null,
+        "outputCol": null,
+        "withMean": null,
+        "withStd": null
+      },
+      "params_b64": "ChAKCGlucHV0Q29sEgQKAgoAChEKCW91dHB1dENvbBIECgIKAAoQCgh3aXRoTWVhbhIECgIKAAoPCgd3aXRoU3RkEgQKAgoA"
+    },
+    {
+      "name": "StopWordsRemover",
+      "values": {},
+      "params_b64": ""
+    },
+    {
+      "name": "StopWordsRemover",
+      "values": {
+        "caseSensitive": false,
+        "inputCol": "sample",
+        "inputCols": [
+          "x",
+          "y"
+        ],
+        "locale": "sample",
+        "outputCol": "sample",
+        "outputCols": [
+          "x",
+          "y"
+        ],
+        "stopWords": [
+          "x",
+          "y"
+        ]
+      },
+      "params_b64": "ChMKDWNhc2VTZW5zaXRpdmUSAhgACisKCWlucHV0Q29scxIesgEbCg9aDRILVVRGOF9CSU5BUlkSA2oBeBIDagF5ChQKCGlucHV0Q29sEghqBnNhbXBsZQoSCgZsb2NhbGUSCGoGc2FtcGxlCiwKCm91dHB1dENvbHMSHrIBGwoPWg0SC1VURjhfQklOQVJZEgNqAXgSA2oBeQoVCglvdXRwdXRDb2wSCGoGc2FtcGxlCisKCXN0b3BXb3JkcxIesgEbCg9aDRILVVRGOF9CSU5BUlkSA2oBeBIDagF5"
+    },
+    {
+      "name": "StopWordsRemover",
+      "values": {
+        "caseSensitive": null,
+        "inputCol": null,
+        "inputCols": null,
+        "locale": null,
+        "outputCol": null,
+        "outputCols": null,
+        "stopWords": null
+      },
+      "params_b64": "ChUKDWNhc2VTZW5zaXRpdmUSBAoCCgAKEQoJaW5wdXRDb2xzEgQKAgoAChAKCGlucHV0Q29sEgQKAgoACg4KBmxvY2FsZRIECgIKAAoSCgpvdXRwdXRDb2xzEgQKAgoAChEKCW91dHB1dENvbBIECgIKAAoRCglzdG9wV29yZHMSBAoCCgA="
+    },
+    {
+      "name": "StringIndexer",
+      "values": {},
+      "params_b64": ""
+    },
+    {
+      "name": "StringIndexer",
+      "values": {
+        "handleInvalid": "error",
+        "inputCol": "sample",
+        "inputCols": [
+          "x",
+          "y"
+        ],
+        "outputCol": "sample",
+        "outputCols": [
+          "x",
+          "y"
+        ],
+        "stringOrderType": "frequencyDesc"
+      },
+      "params_b64": "ChgKDWhhbmRsZUludmFsaWQSB2oFZXJyb3IKKwoJaW5wdXRDb2xzEh6yARsKD1oNEgtVVEY4X0JJTkFSWRIDagF4EgNqAXkKFAoIaW5wdXRDb2wSCGoGc2FtcGxlCiwKCm91dHB1dENvbHMSHrIBGwoPWg0SC1VURjhfQklOQVJZEgNqAXgSA2oBeQoVCglvdXRwdXRDb2wSCGoGc2FtcGxlCiIKD3N0cmluZ09yZGVyVHlwZRIPag1mcmVxdWVuY3lEZXNj"
+    },
+    {
+      "name": "StringIndexer",
+      "values": {
+        "handleInvalid": null,
+        "inputCol": null,
+        "inputCols": null,
+        "outputCol": null,
+        "outputCols": null,
+        "stringOrderType": null
+      },
+      "params_b64": "ChUKDWhhbmRsZUludmFsaWQSBAoCCgAKEQoJaW5wdXRDb2xzEgQKAgoAChAKCGlucHV0Q29sEgQKAgoAChIKCm91dHB1dENvbHMSBAoCCgAKEQoJb3V0cHV0Q29sEgQKAgoAChcKD3N0cmluZ09yZGVyVHlwZRIECgIKAA=="
+    },
+    {
+      "name": "TargetEncoder",
+      "values": {},
+      "params_b64": ""
+    },
+    {
+      "name": "TargetEncoder",
+      "values": {
+        "handleInvalid": "error",
+        "inputCol": "sample",
+        "inputCols": [
+          "x",
+          "y"
+        ],
+        "labelCol": "label",
+        "outputCol": "sample",
+        "outputCols": [
+          "x",
+          "y"
+        ],
+        "smoothing": 0.0,
+        "targetType": "binary"
+      },
+      "params_b64": "ChgKDWhhbmRsZUludmFsaWQSB2oFZXJyb3IKKwoJaW5wdXRDb2xzEh6yARsKD1oNEgtVVEY4X0JJTkFSWRIDagF4EgNqAXkKFAoIaW5wdXRDb2wSCGoGc2FtcGxlChMKCGxhYmVsQ29sEgdqBWxhYmVsCiwKCm91dHB1dENvbHMSHrIBGwoPWg0SC1VURjhfQklOQVJZEgNqAXgSA2oBeQoVCglvdXRwdXRDb2wSCGoGc2FtcGxlChYKCXNtb290aGluZxIJWQAAAAAAAAAAChYKCnRhcmdldFR5cGUSCGoGYmluYXJ5"
+    },
+    {
+      "name": "TargetEncoder",
+      "values": {
+        "handleInvalid": null,
+        "inputCol": null,
+        "inputCols": null,
+        "labelCol": null,
+        "outputCol": null,
+        "outputCols": null,
+        "smoothing": null,
+        "targetType": null
+      },
+      "params_b64": "ChUKDWhhbmRsZUludmFsaWQSBAoCCgAKEQoJaW5wdXRDb2xzEgQKAgoAChAKCGlucHV0Q29sEgQKAgoAChAKCGxhYmVsQ29sEgQKAgoAChIKCm91dHB1dENvbHMSBAoCCgAKEQoJb3V0cHV0Q29sEgQKAgoAChEKCXNtb290aGluZxIECgIKAAoSCgp0YXJnZXRUeXBlEgQKAgoA"
+    },
+    {
+      "name": "Tokenizer",
+      "values": {},
+      "params_b64": ""
+    },
+    {
+      "name": "Tokenizer",
+      "values": {
+        "inputCol": "sample",
+        "outputCol": "sample"
+      },
+      "params_b64": "ChQKCGlucHV0Q29sEghqBnNhbXBsZQoVCglvdXRwdXRDb2wSCGoGc2FtcGxl"
+    },
+    {
+      "name": "Tokenizer",
+      "values": {
+        "inputCol": null,
+        "outputCol": null
+      },
+      "params_b64": "ChAKCGlucHV0Q29sEgQKAgoAChEKCW91dHB1dENvbBIECgIKAA=="
+    },
+    {
+      "name": "UnivariateFeatureSelector",
+      "values": {},
+      "params_b64": ""
+    },
+    {
+      "name": "UnivariateFeatureSelector",
+      "values": {
+        "featureType": "sample",
+        "featuresCol": "features",
+        "labelCol": "label",
+        "labelType": "sample",
+        "outputCol": "sample",
+        "selectionMode": "numTopFeatures",
+        "selectionThreshold": 0.5
+      },
+      "params_b64": "ChcKC2ZlYXR1cmVUeXBlEghqBnNhbXBsZQoZCgtmZWF0dXJlc0NvbBIKaghmZWF0dXJlcwoTCghsYWJlbENvbBIHagVsYWJlbAoVCglsYWJlbFR5cGUSCGoGc2FtcGxlChUKCW91dHB1dENvbBIIagZzYW1wbGUKIQoNc2VsZWN0aW9uTW9kZRIQag5udW1Ub3BGZWF0dXJlcwofChJzZWxlY3Rpb25UaHJlc2hvbGQSCVkAAAAAAADgPw=="
+    },
+    {
+      "name": "UnivariateFeatureSelector",
+      "values": {
+        "featureType": null,
+        "featuresCol": null,
+        "labelCol": null,
+        "labelType": null,
+        "outputCol": null,
+        "selectionMode": null,
+        "selectionThreshold": null
+      },
+      "params_b64": "ChMKC2ZlYXR1cmVUeXBlEgQKAgoAChMKC2ZlYXR1cmVzQ29sEgQKAgoAChAKCGxhYmVsQ29sEgQKAgoAChEKCWxhYmVsVHlwZRIECgIKAAoRCglvdXRwdXRDb2wSBAoCCgAKFQoNc2VsZWN0aW9uTW9kZRIECgIKAAoaChJzZWxlY3Rpb25UaHJlc2hvbGQSBAoCCgA="
+    },
+    {
+      "name": "VarianceThresholdSelector",
+      "values": {},
+      "params_b64": ""
+    },
+    {
+      "name": "VarianceThresholdSelector",
+      "values": {
+        "featuresCol": "features",
+        "outputCol": "sample",
+        "varianceThreshold": 0.0
+      },
+      "params_b64": "ChkKC2ZlYXR1cmVzQ29sEgpqCGZlYXR1cmVzChUKCW91dHB1dENvbBIIagZzYW1wbGUKHgoRdmFyaWFuY2VUaHJlc2hvbGQSCVkAAAAAAAAAAA=="
+    },
+    {
+      "name": "VarianceThresholdSelector",
+      "values": {
+        "featuresCol": null,
+        "outputCol": null,
+        "varianceThreshold": null
+      },
+      "params_b64": "ChMKC2ZlYXR1cmVzQ29sEgQKAgoAChEKCW91dHB1dENvbBIECgIKAAoZChF2YXJpYW5jZVRocmVzaG9sZBIECgIKAA=="
+    },
+    {
+      "name": "VectorAssembler",
+      "values": {},
+      "params_b64": ""
+    },
+    {
+      "name": "VectorAssembler",
+      "values": {
+        "handleInvalid": "error",
+        "inputCols": [
+          "x",
+          "y"
+        ],
+        "outputCol": "sample"
+      },
+      "params_b64": "ChgKDWhhbmRsZUludmFsaWQSB2oFZXJyb3IKKwoJaW5wdXRDb2xzEh6yARsKD1oNEgtVVEY4X0JJTkFSWRIDagF4EgNqAXkKFQoJb3V0cHV0Q29sEghqBnNhbXBsZQ=="
+    },
+    {
+      "name": "VectorAssembler",
+      "values": {
+        "handleInvalid": null,
+        "inputCols": null,
+        "outputCol": null
+      },
+      "params_b64": "ChUKDWhhbmRsZUludmFsaWQSBAoCCgAKEQoJaW5wdXRDb2xzEgQKAgoAChEKCW91dHB1dENvbBIECgIKAA=="
+    },
+    {
+      "name": "VectorIndexer",
+      "values": {},
+      "params_b64": ""
+    },
+    {
+      "name": "VectorIndexer",
+      "values": {
+        "handleInvalid": "error",
+        "inputCol": "sample",
+        "maxCategories": 20,
+        "outputCol": "sample"
+      },
+      "params_b64": "ChgKDWhhbmRsZUludmFsaWQSB2oFZXJyb3IKFAoIaW5wdXRDb2wSCGoGc2FtcGxlChMKDW1heENhdGVnb3JpZXMSAjAUChUKCW91dHB1dENvbBIIagZzYW1wbGU="
+    },
+    {
+      "name": "VectorIndexer",
+      "values": {
+        "handleInvalid": null,
+        "inputCol": null,
+        "maxCategories": null,
+        "outputCol": null
+      },
+      "params_b64": "ChUKDWhhbmRsZUludmFsaWQSBAoCCgAKEAoIaW5wdXRDb2wSBAoCCgAKFQoNbWF4Q2F0ZWdvcmllcxIECgIKAAoRCglvdXRwdXRDb2wSBAoCCgA="
+    },
+    {
+      "name": "VectorSizeHint",
+      "values": {},
+      "params_b64": ""
+    },
+    {
+      "name": "VectorSizeHint",
+      "values": {
+        "handleInvalid": "error",
+        "inputCol": "sample",
+        "size": 42
+      },
+      "params_b64": "ChgKDWhhbmRsZUludmFsaWQSB2oFZXJyb3IKFAoIaW5wdXRDb2wSCGoGc2FtcGxlCgoKBHNpemUSAjAq"
+    },
+    {
+      "name": "VectorSizeHint",
+      "values": {
+        "handleInvalid": null,
+        "inputCol": null,
+        "size": null
+      },
+      "params_b64": "ChUKDWhhbmRsZUludmFsaWQSBAoCCgAKEAoIaW5wdXRDb2wSBAoCCgAKDAoEc2l6ZRIECgIKAA=="
+    },
+    {
+      "name": "VectorSlicer",
+      "values": {},
+      "params_b64": ""
+    },
+    {
+      "name": "VectorSlicer",
+      "values": {
+        "indices": [
+          0,
+          2
+        ],
+        "inputCol": "sample",
+        "names": [
+          "x",
+          "y"
+        ],
+        "outputCol": "sample"
+      },
+      "params_b64": "ChoKB2luZGljZXMSD7IBDAoCMgASAjAAEgIwAgoUCghpbnB1dENvbBIIagZzYW1wbGUKJwoFbmFtZXMSHrIBGwoPWg0SC1VURjhfQklOQVJZEgNqAXgSA2oBeQoVCglvdXRwdXRDb2wSCGoGc2FtcGxl"
+    },
+    {
+      "name": "VectorSlicer",
+      "values": {
+        "indices": null,
+        "inputCol": null,
+        "names": null,
+        "outputCol": null
+      },
+      "params_b64": "Cg8KB2luZGljZXMSBAoCCgAKEAoIaW5wdXRDb2wSBAoCCgAKDQoFbmFtZXMSBAoCCgAKEQoJb3V0cHV0Q29sEgQKAgoA"
+    },
+    {
+      "name": "Word2Vec",
+      "values": {},
+      "params_b64": ""
+    },
+    {
+      "name": "Word2Vec",
+      "values": {
+        "inputCol": "sample",
+        "maxIter": 1,
+        "maxSentenceLength": 1000,
+        "minCount": 5,
+        "numPartitions": 1,
+        "outputCol": "sample",
+        "seed": 42,
+        "stepSize": 0.025,
+        "vectorSize": 100,
+        "windowSize": 5
+      },
+      "params_b64": "ChQKCGlucHV0Q29sEghqBnNhbXBsZQoNCgdtYXhJdGVyEgIwAQoYChFtYXhTZW50ZW5jZUxlbmd0aBIDMOgHCg4KCG1pbkNvdW50EgIwBQoTCg1udW1QYXJ0aXRpb25zEgIwAQoVCglvdXRwdXRDb2wSCGoGc2FtcGxlCgoKBHNlZWQSAjAqChUKCHN0ZXBTaXplEglZmpmZmZmZmT8KEAoKdmVjdG9yU2l6ZRICMGQKEAoKd2luZG93U2l6ZRICMAU="
+    },
+    {
+      "name": "Word2Vec",
+      "values": {
+        "inputCol": null,
+        "maxIter": null,
+        "maxSentenceLength": null,
+        "minCount": null,
+        "numPartitions": null,
+        "outputCol": null,
+        "seed": null,
+        "stepSize": null,
+        "vectorSize": null,
+        "windowSize": null
+      },
+      "params_b64": "ChAKCGlucHV0Q29sEgQKAgoACg8KB21heEl0ZXISBAoCCgAKGQoRbWF4U2VudGVuY2VMZW5ndGgSBAoCCgAKEAoIbWluQ291bnQSBAoCCgAKFQoNbnVtUGFydGl0aW9ucxIECgIKAAoRCglvdXRwdXRDb2wSBAoCCgAKDAoEc2VlZBIECgIKAAoQCghzdGVwU2l6ZRIECgIKAAoSCgp2ZWN0b3JTaXplEgQKAgoAChIKCndpbmRvd1NpemUSBAoCCgA="
+    }
+  ]
+}

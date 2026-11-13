@@ -1,0 +1,754 @@
+// SPDX-License-Identifier: Apache-2.0
+//! Native bindings for standard pyspark.ml.feature stages.
+use super::*;
+use spark_connect::ml as core;
+
+fn transform_native<T>(slf: &Bound<'_, T>, dataset: &Bound<'_, PyAny>) -> PyResult<PyDataFrame>
+where
+    T: Native + PyClass,
+    T::Core: Transformer,
+{
+    let input = dataset_of(dataset, "transform", "columns")?;
+    let mut transformer = snapshot(slf)?;
+    let output = slf
+        .py()
+        .detach(|| transformer.transform(&input).map_err(Box::new))
+        .to_pyerr()?;
+    Ok(PyDataFrame::new(output))
+}
+fn fit_feature<T>(slf: &Bound<'_, T>, dataset: &Bound<'_, PyAny>) -> PyResult<PyMLModel>
+where
+    T: Native + PyClass,
+    T::Core: Estimator,
+{
+    fit_native(slf, dataset, None)
+}
+
+// inspect cannot parse a textual NaN default; construct a Signature with the real float.
+fn signature(py: Python<'_>, defaults: &str) -> PyResult<Py<PyAny>> {
+    let inspect = py.import("inspect")?;
+    let parameter = inspect.getattr("Parameter")?;
+    let values = py.import("json")?.call_method1("loads", (defaults,))?;
+    let parameters = PyList::empty(py);
+    for (key, value) in values.cast::<PyDict>()?.iter() {
+        let kw = PyDict::new(py);
+        kw.set_item(
+            "default",
+            if value.is_instance_of::<PyDict>() {
+                py.import("builtins")?
+                    .getattr("float")?
+                    .call1((value.get_item("float")?,))?
+            } else {
+                value
+            },
+        )?;
+        parameters.append(parameter.call((key, parameter.getattr("KEYWORD_ONLY")?), Some(&kw))?)?;
+    }
+    Ok(inspect.getattr("Signature")?.call1((parameters,))?.unbind())
+}
+
+macro_rules! feature_wrapper {
+    ($wrapper:ident, $core:ident, $name:literal, $defaults:literal, $op:ident, $run:ident, $result:ty,
+     [$(($param:literal, $kind:ident)),* $(,)?],
+     [$(($setter:ident, $pysetter:literal, $wire:literal, $setter_kind:ident)),* $(,)?]) => {
+        #[pyclass(name = $name, module = "pyspark.ml.connect.feature")]
+        pub struct $wrapper { inner: core::$core, unsendable: Vec<&'static str>, raw: Vec<(&'static str, Py<PyAny>)> }
+        impl Native for $wrapper {
+            type Core = core::$core;
+            fn inner(&self) -> &Self::Core { &self.inner }
+            fn params(&self) -> &Params { self.inner.params() }
+            fn params_mut(&mut self) -> &mut Params { self.inner.params_mut() }
+            fn unsendable(&self) -> &[&'static str] { &self.unsendable }
+            fn unsendable_mut(&mut self) -> &mut Vec<&'static str> { &mut self.unsendable }
+            fn raw_params_mut(&mut self) -> Option<&mut Vec<(&'static str, Py<PyAny>)>> { Some(&mut self.raw) }
+            fn snapshot_core(&self, py: Python<'_>) -> PyResult<Self::Core> {
+                let mut inner = self.inner.clone();
+                for (name, value) in &self.raw {
+                    let column = crate::functions::to_value_column(value.bind(py))?;
+                    let spark_connect::expression::ExpressionNode::Literal(lit) = column.expression().node() else {
+                        return Err(crate::column::raise_pyspark(py, "PySparkTypeError", "UNSUPPORTED_DATA_TYPE", &[("data_type", &value.bind(py).get_type().name()?.to_string())]));
+                    };
+                    *inner.params_mut() = std::mem::take(inner.params_mut()).set_param_literal(name, lit.to_literal_proto());
+                }
+                Ok(inner)
+            }
+        }
+        #[pymethods]
+        impl $wrapper {
+            #[new]
+            #[pyo3(signature = (*args, **kwargs))]
+            fn new(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
+                let mut this = Self { inner: core::$core::new(), unsendable: Vec::new(), raw: Vec::new() };
+                init_params(&mut this, $name, &[], &[$(($param, Kind::$kind)),*], args, kwargs)?;
+                Ok(this)
+            }
+            #[classattr]
+            fn __signature__(py: Python<'_>) -> PyResult<Py<PyAny>> { signature(py, $defaults) }
+            $(
+                #[pyo3(name = $pysetter)]
+                fn $setter<'py>(slf: Bound<'py, Self>, value: &Bound<'py, PyAny>) -> PyResult<Bound<'py, Self>> { set_param(slf, $wire, Kind::$setter_kind, value) }
+            )*
+            fn $op(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<$result> { $run(slf, dataset) }
+        }
+    };
+}
+
+feature_wrapper!(PyBinarizer, Binarizer, "Binarizer", "{\"threshold\": 0.0, \"inputCol\": null, \"outputCol\": null, \"thresholds\": null, \"inputCols\": null, \"outputCols\": null}", transform, transform_native, PyDataFrame,
+    [("threshold", Float), ("inputCol", Str), ("outputCol", Str), ("thresholds", FloatList), ("inputCols", StrList), ("outputCols", StrList)],
+    [
+        (set_input_col, "setInputCol", "inputCol", Str),
+        (set_input_cols, "setInputCols", "inputCols", StrList),
+        (set_output_col, "setOutputCol", "outputCol", Str),
+        (set_output_cols, "setOutputCols", "outputCols", StrList),
+        (set_threshold, "setThreshold", "threshold", Float),
+        (set_thresholds, "setThresholds", "thresholds", FloatList),
+    ]);
+
+feature_wrapper!(PyBucketedRandomProjectionLSH, BucketedRandomProjectionLSH, "BucketedRandomProjectionLSH", "{\"inputCol\": null, \"outputCol\": null, \"seed\": null, \"numHashTables\": 1, \"bucketLength\": null}", fit, fit_feature, PyMLModel,
+    [("inputCol", Str), ("outputCol", Str), ("seed", Int), ("numHashTables", Int), ("bucketLength", Float)],
+    [
+        (set_bucket_length, "setBucketLength", "bucketLength", Float),
+        (set_input_col, "setInputCol", "inputCol", Str),
+        (set_num_hash_tables, "setNumHashTables", "numHashTables", Int),
+        (set_output_col, "setOutputCol", "outputCol", Str),
+        (set_seed, "setSeed", "seed", Int),
+    ]);
+
+feature_wrapper!(PyBucketizer, Bucketizer, "Bucketizer", "{\"splits\": null, \"inputCol\": null, \"outputCol\": null, \"handleInvalid\": \"error\", \"splitsArray\": null, \"inputCols\": null, \"outputCols\": null}", transform, transform_native, PyDataFrame,
+    [("splits", FloatList), ("inputCol", Str), ("outputCol", Str), ("handleInvalid", Str), ("splitsArray", FloatListList), ("inputCols", StrList), ("outputCols", StrList)],
+    [
+        (set_handle_invalid, "setHandleInvalid", "handleInvalid", Str),
+        (set_input_col, "setInputCol", "inputCol", Str),
+        (set_input_cols, "setInputCols", "inputCols", StrList),
+        (set_output_col, "setOutputCol", "outputCol", Str),
+        (set_output_cols, "setOutputCols", "outputCols", StrList),
+        (set_splits, "setSplits", "splits", FloatList),
+        (set_splits_array, "setSplitsArray", "splitsArray", FloatListList),
+    ]);
+
+feature_wrapper!(PyChiSqSelector, ChiSqSelector, "ChiSqSelector", "{\"numTopFeatures\": 50, \"featuresCol\": \"features\", \"outputCol\": null, \"labelCol\": \"label\", \"selectorType\": \"numTopFeatures\", \"percentile\": 0.1, \"fpr\": 0.05, \"fdr\": 0.05, \"fwe\": 0.05}", fit, fit_feature, PyMLModel,
+    [("numTopFeatures", Int), ("featuresCol", Str), ("outputCol", Str), ("labelCol", Str), ("selectorType", Str), ("percentile", Float), ("fpr", Float), ("fdr", Float), ("fwe", Float)],
+    [
+        (set_fdr, "setFdr", "fdr", Float),
+        (set_features_col, "setFeaturesCol", "featuresCol", Str),
+        (set_fpr, "setFpr", "fpr", Float),
+        (set_fwe, "setFwe", "fwe", Float),
+        (set_label_col, "setLabelCol", "labelCol", Str),
+        (set_num_top_features, "setNumTopFeatures", "numTopFeatures", Int),
+        (set_output_col, "setOutputCol", "outputCol", Str),
+        (set_percentile, "setPercentile", "percentile", Float),
+        (set_selector_type, "setSelectorType", "selectorType", Str),
+    ]);
+
+feature_wrapper!(PyCountVectorizer, CountVectorizer, "CountVectorizer", "{\"minTF\": 1.0, \"minDF\": 1.0, \"maxDF\": 9223372036854775807, \"vocabSize\": 262144, \"binary\": false, \"inputCol\": null, \"outputCol\": null}", fit, fit_feature, PyMLModel,
+    [("minTF", Float), ("minDF", Float), ("maxDF", Float), ("vocabSize", Int), ("binary", Bool), ("inputCol", Str), ("outputCol", Str)],
+    [
+        (set_binary, "setBinary", "binary", Bool),
+        (set_input_col, "setInputCol", "inputCol", Str),
+        (set_max_df, "setMaxDF", "maxDF", Float),
+        (set_min_df, "setMinDF", "minDF", Float),
+        (set_min_tf, "setMinTF", "minTF", Float),
+        (set_output_col, "setOutputCol", "outputCol", Str),
+        (set_vocab_size, "setVocabSize", "vocabSize", Int),
+    ]);
+
+feature_wrapper!(
+    PyDCT,
+    DCT,
+    "DCT",
+    "{\"inverse\": false, \"inputCol\": null, \"outputCol\": null}",
+    transform,
+    transform_native,
+    PyDataFrame,
+    [("inverse", Bool), ("inputCol", Str), ("outputCol", Str)],
+    [
+        (set_input_col, "setInputCol", "inputCol", Str),
+        (set_inverse, "setInverse", "inverse", Bool),
+        (set_output_col, "setOutputCol", "outputCol", Str),
+    ]
+);
+
+feature_wrapper!(
+    PyElementwiseProduct,
+    ElementwiseProduct,
+    "ElementwiseProduct",
+    "{\"scalingVec\": null, \"inputCol\": null, \"outputCol\": null}",
+    transform,
+    transform_native,
+    PyDataFrame,
+    [
+        ("scalingVec", Vector),
+        ("inputCol", Str),
+        ("outputCol", Str)
+    ],
+    [
+        (set_input_col, "setInputCol", "inputCol", Str),
+        (set_output_col, "setOutputCol", "outputCol", Str),
+        (set_scaling_vec, "setScalingVec", "scalingVec", Vector),
+    ]
+);
+
+feature_wrapper!(PyFeatureHasher, FeatureHasher, "FeatureHasher", "{\"numFeatures\": 262144, \"inputCols\": null, \"outputCol\": null, \"categoricalCols\": null}", transform, transform_native, PyDataFrame,
+    [("numFeatures", Int), ("inputCols", StrList), ("outputCol", Str), ("categoricalCols", StrList)],
+    [
+        (set_categorical_cols, "setCategoricalCols", "categoricalCols", StrList),
+        (set_input_cols, "setInputCols", "inputCols", StrList),
+        (set_num_features, "setNumFeatures", "numFeatures", Int),
+        (set_output_col, "setOutputCol", "outputCol", Str),
+    ]);
+
+feature_wrapper!(
+    PyHashingTF,
+    HashingTF,
+    "HashingTF",
+    "{\"numFeatures\": 262144, \"binary\": false, \"inputCol\": null, \"outputCol\": null}",
+    transform,
+    transform_native,
+    PyDataFrame,
+    [
+        ("numFeatures", Int),
+        ("binary", Bool),
+        ("inputCol", Str),
+        ("outputCol", Str)
+    ],
+    [
+        (set_binary, "setBinary", "binary", Bool),
+        (set_input_col, "setInputCol", "inputCol", Str),
+        (set_num_features, "setNumFeatures", "numFeatures", Int),
+        (set_output_col, "setOutputCol", "outputCol", Str),
+    ]
+);
+
+feature_wrapper!(
+    PyIDF,
+    IDF,
+    "IDF",
+    "{\"minDocFreq\": 0, \"inputCol\": null, \"outputCol\": null}",
+    fit,
+    fit_feature,
+    PyMLModel,
+    [("minDocFreq", Int), ("inputCol", Str), ("outputCol", Str)],
+    [
+        (set_input_col, "setInputCol", "inputCol", Str),
+        (set_min_doc_freq, "setMinDocFreq", "minDocFreq", Int),
+        (set_output_col, "setOutputCol", "outputCol", Str),
+    ]
+);
+
+feature_wrapper!(PyImputer, Imputer, "Imputer", "{\"strategy\": \"mean\", \"missingValue\": {\"float\": \"nan\"}, \"inputCols\": null, \"outputCols\": null, \"inputCol\": null, \"outputCol\": null, \"relativeError\": 0.001}", fit, fit_feature, PyMLModel,
+    [("strategy", Str), ("missingValue", Float), ("inputCols", StrList), ("outputCols", StrList), ("inputCol", Str), ("outputCol", Str), ("relativeError", Float)],
+    [
+        (set_input_col, "setInputCol", "inputCol", Str),
+        (set_input_cols, "setInputCols", "inputCols", StrList),
+        (set_missing_value, "setMissingValue", "missingValue", Float),
+        (set_output_col, "setOutputCol", "outputCol", Str),
+        (set_output_cols, "setOutputCols", "outputCols", StrList),
+        (set_relative_error, "setRelativeError", "relativeError", Float),
+        (set_strategy, "setStrategy", "strategy", Str),
+    ]);
+
+feature_wrapper!(
+    PyIndexToString,
+    IndexToString,
+    "IndexToString",
+    "{\"inputCol\": null, \"outputCol\": null, \"labels\": null}",
+    transform,
+    transform_native,
+    PyDataFrame,
+    [("inputCol", Str), ("outputCol", Str), ("labels", StrList)],
+    [
+        (set_input_col, "setInputCol", "inputCol", Str),
+        (set_labels, "setLabels", "labels", StrList),
+        (set_output_col, "setOutputCol", "outputCol", Str),
+    ]
+);
+
+feature_wrapper!(
+    PyInteraction,
+    Interaction,
+    "Interaction",
+    "{\"inputCols\": null, \"outputCol\": null}",
+    transform,
+    transform_native,
+    PyDataFrame,
+    [("inputCols", StrList), ("outputCol", Str)],
+    [
+        (set_input_cols, "setInputCols", "inputCols", StrList),
+        (set_output_col, "setOutputCol", "outputCol", Str),
+    ]
+);
+
+feature_wrapper!(
+    PyMaxAbsScaler,
+    MaxAbsScaler,
+    "MaxAbsScaler",
+    "{\"inputCol\": null, \"outputCol\": null}",
+    fit,
+    fit_feature,
+    PyMLModel,
+    [("inputCol", Str), ("outputCol", Str)],
+    [
+        (set_input_col, "setInputCol", "inputCol", Str),
+        (set_output_col, "setOutputCol", "outputCol", Str),
+    ]
+);
+
+feature_wrapper!(
+    PyMinHashLSH,
+    MinHashLSH,
+    "MinHashLSH",
+    "{\"inputCol\": null, \"outputCol\": null, \"seed\": null, \"numHashTables\": 1}",
+    fit,
+    fit_feature,
+    PyMLModel,
+    [
+        ("inputCol", Str),
+        ("outputCol", Str),
+        ("seed", Int),
+        ("numHashTables", Int)
+    ],
+    [
+        (set_input_col, "setInputCol", "inputCol", Str),
+        (
+            set_num_hash_tables,
+            "setNumHashTables",
+            "numHashTables",
+            Int
+        ),
+        (set_output_col, "setOutputCol", "outputCol", Str),
+        (set_seed, "setSeed", "seed", Int),
+    ]
+);
+
+feature_wrapper!(
+    PyMinMaxScaler,
+    MinMaxScaler,
+    "MinMaxScaler",
+    "{\"min\": 0.0, \"max\": 1.0, \"inputCol\": null, \"outputCol\": null}",
+    fit,
+    fit_feature,
+    PyMLModel,
+    [
+        ("min", Float),
+        ("max", Float),
+        ("inputCol", Str),
+        ("outputCol", Str)
+    ],
+    [
+        (set_input_col, "setInputCol", "inputCol", Str),
+        (set_max, "setMax", "max", Float),
+        (set_min, "setMin", "min", Float),
+        (set_output_col, "setOutputCol", "outputCol", Str),
+    ]
+);
+
+feature_wrapper!(
+    PyNGram,
+    NGram,
+    "NGram",
+    "{\"n\": 2, \"inputCol\": null, \"outputCol\": null}",
+    transform,
+    transform_native,
+    PyDataFrame,
+    [("n", Int), ("inputCol", Str), ("outputCol", Str)],
+    [
+        (set_input_col, "setInputCol", "inputCol", Str),
+        (set_n, "setN", "n", Int),
+        (set_output_col, "setOutputCol", "outputCol", Str),
+    ]
+);
+
+feature_wrapper!(
+    PyNormalizer,
+    Normalizer,
+    "Normalizer",
+    "{\"p\": 2.0, \"inputCol\": null, \"outputCol\": null}",
+    transform,
+    transform_native,
+    PyDataFrame,
+    [("p", Float), ("inputCol", Str), ("outputCol", Str)],
+    [
+        (set_input_col, "setInputCol", "inputCol", Str),
+        (set_output_col, "setOutputCol", "outputCol", Str),
+        (set_p, "setP", "p", Float),
+    ]
+);
+
+feature_wrapper!(PyOneHotEncoder, OneHotEncoder, "OneHotEncoder", "{\"inputCols\": null, \"outputCols\": null, \"handleInvalid\": \"error\", \"dropLast\": true, \"inputCol\": null, \"outputCol\": null}", fit, fit_feature, PyMLModel,
+    [("inputCols", StrList), ("outputCols", StrList), ("handleInvalid", Str), ("dropLast", Bool), ("inputCol", Str), ("outputCol", Str)],
+    [
+        (set_drop_last, "setDropLast", "dropLast", Bool),
+        (set_handle_invalid, "setHandleInvalid", "handleInvalid", Str),
+        (set_input_col, "setInputCol", "inputCol", Str),
+        (set_input_cols, "setInputCols", "inputCols", StrList),
+        (set_output_col, "setOutputCol", "outputCol", Str),
+        (set_output_cols, "setOutputCols", "outputCols", StrList),
+    ]);
+
+feature_wrapper!(
+    PyPCA,
+    PCA,
+    "PCA",
+    "{\"k\": null, \"inputCol\": null, \"outputCol\": null}",
+    fit,
+    fit_feature,
+    PyMLModel,
+    [("k", Int), ("inputCol", Str), ("outputCol", Str)],
+    [
+        (set_input_col, "setInputCol", "inputCol", Str),
+        (set_k, "setK", "k", Int),
+        (set_output_col, "setOutputCol", "outputCol", Str),
+    ]
+);
+
+feature_wrapper!(
+    PyPolynomialExpansion,
+    PolynomialExpansion,
+    "PolynomialExpansion",
+    "{\"degree\": 2, \"inputCol\": null, \"outputCol\": null}",
+    transform,
+    transform_native,
+    PyDataFrame,
+    [("degree", Int), ("inputCol", Str), ("outputCol", Str)],
+    [
+        (set_degree, "setDegree", "degree", Int),
+        (set_input_col, "setInputCol", "inputCol", Str),
+        (set_output_col, "setOutputCol", "outputCol", Str),
+    ]
+);
+
+feature_wrapper!(PyQuantileDiscretizer, QuantileDiscretizer, "QuantileDiscretizer", "{\"numBuckets\": 2, \"inputCol\": null, \"outputCol\": null, \"relativeError\": 0.001, \"handleInvalid\": \"error\", \"numBucketsArray\": null, \"inputCols\": null, \"outputCols\": null}", fit, fit_feature, PyMLModel,
+    [("numBuckets", Int), ("inputCol", Str), ("outputCol", Str), ("relativeError", Float), ("handleInvalid", Str), ("numBucketsArray", IntList), ("inputCols", StrList), ("outputCols", StrList)],
+    [
+        (set_handle_invalid, "setHandleInvalid", "handleInvalid", Str),
+        (set_input_col, "setInputCol", "inputCol", Str),
+        (set_input_cols, "setInputCols", "inputCols", StrList),
+        (set_num_buckets, "setNumBuckets", "numBuckets", Int),
+        (set_num_buckets_array, "setNumBucketsArray", "numBucketsArray", IntList),
+        (set_output_col, "setOutputCol", "outputCol", Str),
+        (set_output_cols, "setOutputCols", "outputCols", StrList),
+        (set_relative_error, "setRelativeError", "relativeError", Float),
+    ]);
+
+feature_wrapper!(PyRobustScaler, RobustScaler, "RobustScaler", "{\"lower\": 0.25, \"upper\": 0.75, \"withCentering\": false, \"withScaling\": true, \"inputCol\": null, \"outputCol\": null, \"relativeError\": 0.001}", fit, fit_feature, PyMLModel,
+    [("lower", Float), ("upper", Float), ("withCentering", Bool), ("withScaling", Bool), ("inputCol", Str), ("outputCol", Str), ("relativeError", Float)],
+    [
+        (set_input_col, "setInputCol", "inputCol", Str),
+        (set_lower, "setLower", "lower", Float),
+        (set_output_col, "setOutputCol", "outputCol", Str),
+        (set_relative_error, "setRelativeError", "relativeError", Float),
+        (set_upper, "setUpper", "upper", Float),
+        (set_with_centering, "setWithCentering", "withCentering", Bool),
+        (set_with_scaling, "setWithScaling", "withScaling", Bool),
+    ]);
+
+feature_wrapper!(PyRegexTokenizer, RegexTokenizer, "RegexTokenizer", "{\"minTokenLength\": 1, \"gaps\": true, \"pattern\": \"\\\\s+\", \"inputCol\": null, \"outputCol\": null, \"toLowercase\": true}", transform, transform_native, PyDataFrame,
+    [("minTokenLength", Int), ("gaps", Identity), ("pattern", Str), ("inputCol", Str), ("outputCol", Str), ("toLowercase", Bool)],
+    [
+        (set_gaps, "setGaps", "gaps", Identity),
+        (set_input_col, "setInputCol", "inputCol", Str),
+        (set_min_token_length, "setMinTokenLength", "minTokenLength", Int),
+        (set_output_col, "setOutputCol", "outputCol", Str),
+        (set_pattern, "setPattern", "pattern", Str),
+        (set_to_lowercase, "setToLowercase", "toLowercase", Bool),
+    ]);
+
+feature_wrapper!(PyRFormula, RFormula, "RFormula", "{\"formula\": null, \"featuresCol\": \"features\", \"labelCol\": \"label\", \"forceIndexLabel\": false, \"stringIndexerOrderType\": \"frequencyDesc\", \"handleInvalid\": \"error\"}", fit, fit_feature, PyMLModel,
+    [("formula", Str), ("featuresCol", Str), ("labelCol", Str), ("forceIndexLabel", Bool), ("stringIndexerOrderType", Str), ("handleInvalid", Str)],
+    [
+        (set_features_col, "setFeaturesCol", "featuresCol", Str),
+        (set_force_index_label, "setForceIndexLabel", "forceIndexLabel", Bool),
+        (set_formula, "setFormula", "formula", Str),
+        (set_handle_invalid, "setHandleInvalid", "handleInvalid", Str),
+        (set_label_col, "setLabelCol", "labelCol", Str),
+        (set_string_indexer_order_type, "setStringIndexerOrderType", "stringIndexerOrderType", Str),
+    ]);
+
+feature_wrapper!(
+    PySQLTransformer,
+    SQLTransformer,
+    "SQLTransformer",
+    "{\"statement\": null}",
+    transform,
+    transform_native,
+    PyDataFrame,
+    [("statement", Str)],
+    [(set_statement, "setStatement", "statement", Str),]
+);
+
+feature_wrapper!(
+    PyStandardScaler,
+    StandardScaler,
+    "StandardScaler",
+    "{\"withMean\": false, \"withStd\": true, \"inputCol\": null, \"outputCol\": null}",
+    fit,
+    fit_feature,
+    PyMLModel,
+    [
+        ("withMean", Bool),
+        ("withStd", Bool),
+        ("inputCol", Str),
+        ("outputCol", Str)
+    ],
+    [
+        (set_input_col, "setInputCol", "inputCol", Str),
+        (set_output_col, "setOutputCol", "outputCol", Str),
+        (set_with_mean, "setWithMean", "withMean", Bool),
+        (set_with_std, "setWithStd", "withStd", Bool),
+    ]
+);
+
+feature_wrapper!(PyStopWordsRemover, StopWordsRemover, "StopWordsRemover", "{\"inputCol\": null, \"outputCol\": null, \"stopWords\": null, \"caseSensitive\": false, \"locale\": null, \"inputCols\": null, \"outputCols\": null}", transform, transform_native, PyDataFrame,
+    [("inputCol", Str), ("outputCol", Str), ("stopWords", StrList), ("caseSensitive", Bool), ("locale", Str), ("inputCols", StrList), ("outputCols", StrList)],
+    [
+        (set_case_sensitive, "setCaseSensitive", "caseSensitive", Bool),
+        (set_input_col, "setInputCol", "inputCol", Str),
+        (set_input_cols, "setInputCols", "inputCols", StrList),
+        (set_locale, "setLocale", "locale", Str),
+        (set_output_col, "setOutputCol", "outputCol", Str),
+        (set_output_cols, "setOutputCols", "outputCols", StrList),
+        (set_stop_words, "setStopWords", "stopWords", StrList),
+    ]);
+
+feature_wrapper!(PyStringIndexer, StringIndexer, "StringIndexer", "{\"inputCol\": null, \"outputCol\": null, \"inputCols\": null, \"outputCols\": null, \"handleInvalid\": \"error\", \"stringOrderType\": \"frequencyDesc\"}", fit, fit_feature, PyMLModel,
+    [("inputCol", Str), ("outputCol", Str), ("inputCols", StrList), ("outputCols", StrList), ("handleInvalid", Str), ("stringOrderType", Str)],
+    [
+        (set_handle_invalid, "setHandleInvalid", "handleInvalid", Str),
+        (set_input_col, "setInputCol", "inputCol", Str),
+        (set_input_cols, "setInputCols", "inputCols", StrList),
+        (set_output_col, "setOutputCol", "outputCol", Str),
+        (set_output_cols, "setOutputCols", "outputCols", StrList),
+        (set_string_order_type, "setStringOrderType", "stringOrderType", Str),
+    ]);
+
+feature_wrapper!(PyTargetEncoder, TargetEncoder, "TargetEncoder", "{\"inputCols\": null, \"outputCols\": null, \"labelCol\": \"label\", \"handleInvalid\": \"error\", \"targetType\": \"binary\", \"smoothing\": 0.0, \"inputCol\": null, \"outputCol\": null}", fit, fit_feature, PyMLModel,
+    [("inputCols", StrList), ("outputCols", StrList), ("labelCol", Str), ("handleInvalid", Str), ("targetType", Str), ("smoothing", Float), ("inputCol", Str), ("outputCol", Str)],
+    [
+        (set_handle_invalid, "setHandleInvalid", "handleInvalid", Str),
+        (set_input_col, "setInputCol", "inputCol", Str),
+        (set_input_cols, "setInputCols", "inputCols", StrList),
+        (set_label_col, "setLabelCol", "labelCol", Str),
+        (set_output_col, "setOutputCol", "outputCol", Str),
+        (set_output_cols, "setOutputCols", "outputCols", StrList),
+        (set_smoothing, "setSmoothing", "smoothing", Float),
+        (set_target_type, "setTargetType", "targetType", Str),
+    ]);
+
+feature_wrapper!(
+    PyTokenizer,
+    Tokenizer,
+    "Tokenizer",
+    "{\"inputCol\": null, \"outputCol\": null}",
+    transform,
+    transform_native,
+    PyDataFrame,
+    [("inputCol", Str), ("outputCol", Str)],
+    [
+        (set_input_col, "setInputCol", "inputCol", Str),
+        (set_output_col, "setOutputCol", "outputCol", Str),
+    ]
+);
+
+feature_wrapper!(PyUnivariateFeatureSelector, UnivariateFeatureSelector, "UnivariateFeatureSelector", "{\"featuresCol\": \"features\", \"outputCol\": null, \"labelCol\": \"label\", \"selectionMode\": \"numTopFeatures\"}", fit, fit_feature, PyMLModel,
+    [("featuresCol", Str), ("outputCol", Str), ("labelCol", Str), ("selectionMode", Str)],
+    [
+        (set_feature_type, "setFeatureType", "featureType", Str),
+        (set_features_col, "setFeaturesCol", "featuresCol", Str),
+        (set_label_col, "setLabelCol", "labelCol", Str),
+        (set_label_type, "setLabelType", "labelType", Str),
+        (set_output_col, "setOutputCol", "outputCol", Str),
+        (set_selection_mode, "setSelectionMode", "selectionMode", Str),
+        (set_selection_threshold, "setSelectionThreshold", "selectionThreshold", Float),
+    ]);
+
+feature_wrapper!(
+    PyVarianceThresholdSelector,
+    VarianceThresholdSelector,
+    "VarianceThresholdSelector",
+    "{\"featuresCol\": \"features\", \"outputCol\": null, \"varianceThreshold\": 0.0}",
+    fit,
+    fit_feature,
+    PyMLModel,
+    [
+        ("featuresCol", Str),
+        ("outputCol", Str),
+        ("varianceThreshold", Float)
+    ],
+    [
+        (set_features_col, "setFeaturesCol", "featuresCol", Str),
+        (set_output_col, "setOutputCol", "outputCol", Str),
+        (
+            set_variance_threshold,
+            "setVarianceThreshold",
+            "varianceThreshold",
+            Float
+        ),
+    ]
+);
+
+feature_wrapper!(
+    PyVectorAssembler,
+    VectorAssembler,
+    "VectorAssembler",
+    "{\"inputCols\": null, \"outputCol\": null, \"handleInvalid\": \"error\"}",
+    transform,
+    transform_native,
+    PyDataFrame,
+    [
+        ("inputCols", StrList),
+        ("outputCol", Str),
+        ("handleInvalid", Str)
+    ],
+    [
+        (set_handle_invalid, "setHandleInvalid", "handleInvalid", Str),
+        (set_input_cols, "setInputCols", "inputCols", StrList),
+        (set_output_col, "setOutputCol", "outputCol", Str),
+    ]
+);
+
+feature_wrapper!(PyVectorIndexer, VectorIndexer, "VectorIndexer", "{\"maxCategories\": 20, \"inputCol\": null, \"outputCol\": null, \"handleInvalid\": \"error\"}", fit, fit_feature, PyMLModel,
+    [("maxCategories", Int), ("inputCol", Str), ("outputCol", Str), ("handleInvalid", Str)],
+    [
+        (set_handle_invalid, "setHandleInvalid", "handleInvalid", Str),
+        (set_input_col, "setInputCol", "inputCol", Str),
+        (set_max_categories, "setMaxCategories", "maxCategories", Int),
+        (set_output_col, "setOutputCol", "outputCol", Str),
+    ]);
+
+feature_wrapper!(
+    PyVectorSizeHint,
+    VectorSizeHint,
+    "VectorSizeHint",
+    "{\"inputCol\": null, \"size\": null, \"handleInvalid\": \"error\"}",
+    transform,
+    transform_native,
+    PyDataFrame,
+    [("inputCol", Str), ("size", Int), ("handleInvalid", Str)],
+    [
+        (set_handle_invalid, "setHandleInvalid", "handleInvalid", Str),
+        (set_input_col, "setInputCol", "inputCol", Str),
+        (set_size, "setSize", "size", Int),
+    ]
+);
+
+feature_wrapper!(
+    PyVectorSlicer,
+    VectorSlicer,
+    "VectorSlicer",
+    "{\"inputCol\": null, \"outputCol\": null, \"indices\": null, \"names\": null}",
+    transform,
+    transform_native,
+    PyDataFrame,
+    [
+        ("inputCol", Str),
+        ("outputCol", Str),
+        ("indices", IntList),
+        ("names", StrList)
+    ],
+    [
+        (set_indices, "setIndices", "indices", IntList),
+        (set_input_col, "setInputCol", "inputCol", Str),
+        (set_names, "setNames", "names", StrList),
+        (set_output_col, "setOutputCol", "outputCol", Str),
+    ]
+);
+
+feature_wrapper!(PyWord2Vec, Word2Vec, "Word2Vec", "{\"vectorSize\": 100, \"minCount\": 5, \"numPartitions\": 1, \"stepSize\": 0.025, \"maxIter\": 1, \"seed\": null, \"inputCol\": null, \"outputCol\": null, \"windowSize\": 5, \"maxSentenceLength\": 1000}", fit, fit_feature, PyMLModel,
+    [("vectorSize", Int), ("minCount", Int), ("numPartitions", Int), ("stepSize", Float), ("maxIter", Int), ("seed", Int), ("inputCol", Str), ("outputCol", Str), ("windowSize", Int), ("maxSentenceLength", Int)],
+    [
+        (set_input_col, "setInputCol", "inputCol", Str),
+        (set_max_iter, "setMaxIter", "maxIter", Int),
+        (set_max_sentence_length, "setMaxSentenceLength", "maxSentenceLength", Int),
+        (set_min_count, "setMinCount", "minCount", Int),
+        (set_num_partitions, "setNumPartitions", "numPartitions", Int),
+        (set_output_col, "setOutputCol", "outputCol", Str),
+        (set_seed, "setSeed", "seed", Int),
+        (set_step_size, "setStepSize", "stepSize", Float),
+        (set_vector_size, "setVectorSize", "vectorSize", Int),
+        (set_window_size, "setWindowSize", "windowSize", Int),
+    ]);
+
+pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_class::<PyBinarizer>()?;
+    m.add_class::<PyBucketedRandomProjectionLSH>()?;
+    m.add_class::<PyBucketizer>()?;
+    m.add_class::<PyChiSqSelector>()?;
+    m.add_class::<PyCountVectorizer>()?;
+    m.add_class::<PyDCT>()?;
+    m.add_class::<PyElementwiseProduct>()?;
+    m.add_class::<PyFeatureHasher>()?;
+    m.add_class::<PyHashingTF>()?;
+    m.add_class::<PyIDF>()?;
+    m.add_class::<PyImputer>()?;
+    m.add_class::<PyIndexToString>()?;
+    m.add_class::<PyInteraction>()?;
+    m.add_class::<PyMaxAbsScaler>()?;
+    m.add_class::<PyMinHashLSH>()?;
+    m.add_class::<PyMinMaxScaler>()?;
+    m.add_class::<PyNGram>()?;
+    m.add_class::<PyNormalizer>()?;
+    m.add_class::<PyOneHotEncoder>()?;
+    m.add_class::<PyPCA>()?;
+    m.add_class::<PyPolynomialExpansion>()?;
+    m.add_class::<PyQuantileDiscretizer>()?;
+    m.add_class::<PyRobustScaler>()?;
+    m.add_class::<PyRegexTokenizer>()?;
+    m.add_class::<PyRFormula>()?;
+    m.add_class::<PySQLTransformer>()?;
+    m.add_class::<PyStandardScaler>()?;
+    m.add_class::<PyStopWordsRemover>()?;
+    m.add_class::<PyStringIndexer>()?;
+    m.add_class::<PyTargetEncoder>()?;
+    m.add_class::<PyTokenizer>()?;
+    m.add_class::<PyUnivariateFeatureSelector>()?;
+    m.add_class::<PyVarianceThresholdSelector>()?;
+    m.add_class::<PyVectorAssembler>()?;
+    m.add_class::<PyVectorIndexer>()?;
+    m.add_class::<PyVectorSizeHint>()?;
+    m.add_class::<PyVectorSlicer>()?;
+    m.add_class::<PyWord2Vec>()?;
+    m.add(
+        "_ml_feature_names",
+        vec![
+            "Binarizer",
+            "BucketedRandomProjectionLSH",
+            "Bucketizer",
+            "ChiSqSelector",
+            "CountVectorizer",
+            "DCT",
+            "ElementwiseProduct",
+            "FeatureHasher",
+            "HashingTF",
+            "IDF",
+            "Imputer",
+            "IndexToString",
+            "Interaction",
+            "MaxAbsScaler",
+            "MinHashLSH",
+            "MinMaxScaler",
+            "NGram",
+            "Normalizer",
+            "OneHotEncoder",
+            "PCA",
+            "PolynomialExpansion",
+            "QuantileDiscretizer",
+            "RobustScaler",
+            "RegexTokenizer",
+            "RFormula",
+            "SQLTransformer",
+            "StandardScaler",
+            "StopWordsRemover",
+            "StringIndexer",
+            "TargetEncoder",
+            "Tokenizer",
+            "UnivariateFeatureSelector",
+            "VarianceThresholdSelector",
+            "VectorAssembler",
+            "VectorIndexer",
+            "VectorSizeHint",
+            "VectorSlicer",
+            "Word2Vec",
+        ],
+    )?;
+    Ok(())
+}
