@@ -30,6 +30,19 @@ impl PyDataSourceRegistration {
 
 #[pymethods]
 impl PyDataSourceRegistration {
+    /// The shallow copy of the data source registration, as PySpark's `copy.copy`: of the same
+    /// session.
+    fn __copy__(&self, py: Python<'_>) -> PyDataSourceRegistration {
+        PyDataSourceRegistration::new(self.session.clone_ref(py))
+    }
+
+    /// The reduce of the data source registration, as PySpark's: `dataSource` of its session,
+    /// which unpickles with it.
+    fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyTuple>> {
+        let session = self.session.clone_ref(py).into_bound(py).into_any();
+        crate::reduce::getattr_reduce(py, session, "dataSource")
+    }
+
     /// The session of the registration, as PySpark's `DataSourceRegistration.sparkSession`.
     #[getter(sparkSession)]
     fn spark_session(&self, py: Python<'_>) -> Py<PySparkSession> {

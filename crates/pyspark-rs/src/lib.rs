@@ -35,6 +35,8 @@ mod progress;
 mod pyarrow_export;
 mod pyarrow_import;
 mod readwriter;
+mod reduce;
+
 mod resource;
 mod row;
 mod session;

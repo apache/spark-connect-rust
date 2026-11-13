@@ -1494,26 +1494,46 @@ impl PyDataFrame {
 
     /// Group by columns for aggregation.
     #[pyo3(signature = (*cols))]
-    fn groupBy(&self, py: Python<'_>, cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyGroupedData> {
-        let columns = self.grouping_columns(py, cols, "cols")?;
-        Ok(PyGroupedData::new(self.dataframe.group_by(columns)))
+    fn groupBy(
+        slf: &Bound<'_, Self>,
+        py: Python<'_>,
+        cols: Vec<Bound<'_, PyAny>>,
+    ) -> PyResult<PyGroupedData> {
+        let this = slf.borrow();
+        let columns = this.grouping_columns(py, cols, "cols")?;
+        Ok(PyGroupedData::new(
+            this.dataframe.group_by(columns),
+            slf.clone().unbind(),
+        ))
     }
 
     /// Rollup multi-dimensional aggregation.
     #[pyo3(signature = (*cols))]
-    fn rollup(&self, py: Python<'_>, cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyGroupedData> {
+    fn rollup(
+        slf: &Bound<'_, Self>,
+        py: Python<'_>,
+        cols: Vec<Bound<'_, PyAny>>,
+    ) -> PyResult<PyGroupedData> {
+        let this = slf.borrow();
         Ok(PyGroupedData::new(
-            self.dataframe
-                .rollup(self.grouping_columns(py, cols, "cols")?),
+            this.dataframe
+                .rollup(this.grouping_columns(py, cols, "cols")?),
+            slf.clone().unbind(),
         ))
     }
 
     /// Cube multi-dimensional aggregation.
     #[pyo3(signature = (*cols))]
-    fn cube(&self, py: Python<'_>, cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyGroupedData> {
+    fn cube(
+        slf: &Bound<'_, Self>,
+        py: Python<'_>,
+        cols: Vec<Bound<'_, PyAny>>,
+    ) -> PyResult<PyGroupedData> {
+        let this = slf.borrow();
         Ok(PyGroupedData::new(
-            self.dataframe
-                .cube(self.grouping_columns(py, cols, "cols")?),
+            this.dataframe
+                .cube(this.grouping_columns(py, cols, "cols")?),
+            slf.clone().unbind(),
         ))
     }
 
@@ -1523,11 +1543,13 @@ impl PyDataFrame {
     /// aggregations, of Columns, names and ordinals, as are those of the sets.
     #[pyo3(name = "groupingSets", signature = (groupingSets, *cols))]
     fn grouping_sets(
-        &self,
+        slf: &Bound<'_, Self>,
         py: Python<'_>,
         groupingSets: &Bound<'_, PyAny>,
         cols: Vec<Bound<'_, PyAny>>,
     ) -> PyResult<PyGroupedData> {
+        let this = slf.borrow();
+
         use pyo3::types::{PyInt, PyString};
         // As PySpark's `_to_cols(grouping_set)`: a set is a sequence of columns, or one column.
         let mut sets = Vec::new();
@@ -1546,12 +1568,13 @@ impl PyDataFrame {
             } else {
                 vec![set]
             };
-            sets.push(self.grouping_column_list(py, items, "groupingSets")?);
+            sets.push(this.grouping_column_list(py, items, "groupingSets")?);
         }
         // As PySpark's `_to_cols(cols)`, of the columns themselves, not a list of them.
-        let columns = self.grouping_column_list(py, cols, "cols")?;
+        let columns = this.grouping_column_list(py, cols, "cols")?;
         Ok(PyGroupedData::new(
-            self.dataframe.grouping_sets_with_columns(sets, columns),
+            this.dataframe.grouping_sets_with_columns(sets, columns),
+            slf.clone().unbind(),
         ))
     }
 
@@ -2233,8 +2256,12 @@ impl PyDataFrame {
 
     /// Alias for groupBy.
     #[pyo3(signature = (*cols))]
-    fn groupby(&self, py: Python<'_>, cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyGroupedData> {
-        self.groupBy(py, cols)
+    fn groupby(
+        slf: &Bound<'_, Self>,
+        py: Python<'_>,
+        cols: Vec<Bound<'_, PyAny>>,
+    ) -> PyResult<PyGroupedData> {
+        Self::groupBy(slf, py, cols)
     }
 
     /// Apply a function to this DataFrame and return its result:
@@ -2824,27 +2851,29 @@ impl PyDataFrame {
 
     /// The V1 writer interface (`df.write`).
     #[getter]
-    fn write(&self) -> PyDataFrameWriter {
-        PyDataFrameWriter::new(self.dataframe.write())
+    fn write(slf: &Bound<'_, Self>) -> PyDataFrameWriter {
+        let this = slf.borrow();
+        PyDataFrameWriter::new(this.dataframe.write(), slf.clone().unbind())
     }
 
     /// The V2 writer interface (`df.writeTo("table")`), of the table as [`written_table`] takes
     /// it.
     #[pyo3(name = "writeTo")]
-    fn write_to(&self, table: &Bound<'_, PyAny>) -> PyDataFrameWriterV2 {
+    fn write_to(slf: &Bound<'_, Self>, table: &Bound<'_, PyAny>) -> PyDataFrameWriterV2 {
         let (name, unsent_table) = written_table(table);
         PyDataFrameWriterV2 {
-            inner: WriterState::new(self.dataframe.write_to(&name)),
+            inner: std::sync::Arc::new(WriterState::new(slf.borrow().dataframe.write_to(&name))),
             unsent_table,
+            frame: slf.clone().unbind(),
         }
     }
 
     /// The streaming writer interface (`df.writeStream`).
     #[getter]
     #[pyo3(name = "writeStream")]
-    fn write_stream(&self) -> PyDataStreamWriter {
-        let writer = self.dataframe.write_stream();
-        PyDataStreamWriter::new(writer)
+    fn write_stream(slf: &Bound<'_, Self>) -> PyDataStreamWriter {
+        let writer = slf.borrow().dataframe.write_stream();
+        PyDataStreamWriter::new(writer, slf.clone().unbind())
     }
 
     /// Null-handling functions (`df.na.drop()/fill()/replace()`), of this DataFrame, their
@@ -2863,7 +2892,11 @@ impl PyDataFrame {
     fn merge_into(&self, table: &Bound<'_, PyAny>, condition: &PyColumn) -> PyMergeIntoWriter {
         let (name, unsent_table) = written_table(table);
         PyMergeIntoWriter {
-            inner: WriterState::new(self.dataframe.merge_into(&name, condition.column.clone())),
+            inner: std::sync::Arc::new(WriterState::new(
+                self.dataframe.merge_into(&name, condition.column.clone()),
+            )),
+            schema_evolution: std::sync::atomic::AtomicBool::new(false),
+
             unsent_table,
         }
     }
@@ -3152,6 +3185,21 @@ pub struct PyDataFrameNaFunctions {
 
 #[pymethods]
 impl PyDataFrameNaFunctions {
+    /// The shallow copy of the null functions, as PySpark's `copy.copy`: of the same DataFrame.
+    fn __copy__(&self, py: Python<'_>) -> PyDataFrameNaFunctions {
+        PyDataFrameNaFunctions {
+            df: self.df.clone(),
+            frame: self.frame.clone_ref(py),
+        }
+    }
+
+    /// The reduce of the null functions, as PySpark's: `na` of their DataFrame, which unpickles
+    /// with it.
+    fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        let frame = self.frame.clone_ref(py).into_any().into_bound(py);
+        crate::reduce::getattr_reduce(py, frame, "na")
+    }
+
     /// The DataFrame of these functions, as PySpark's `DataFrameNaFunctions.df`: `df.na.df` is
     /// `df`.
     #[getter(df)]
@@ -3442,7 +3490,12 @@ fn check_written_table(py: Python<'_>, unsent_table: &Option<Py<PyAny>>) -> PyRe
 /// replaced in place and `merge` runs on a clone.
 #[pyclass(name = "MergeIntoWriter", module = "pyspark.sql.merge", weakref, dict)]
 pub struct PyMergeIntoWriter {
-    inner: WriterState<spark_connect::MergeIntoWriter>,
+    inner: std::sync::Arc<WriterState<spark_connect::MergeIntoWriter>>,
+    /// Whether `withSchemaEvolution` was called on this builder, as PySpark's
+    /// `_schema_evolution_enabled` attribute, which a shallow copy takes by value and then
+    /// keeps apart from the copied builder.
+    schema_evolution: std::sync::atomic::AtomicBool,
+
     /// The table of `mergeInto` that its string field does not take, which Python's garbage
     /// collector sees ([`written_table`]).
     unsent_table: Option<Py<PyAny>>,
@@ -3478,6 +3531,29 @@ fn check_merge_clause(
 
 #[pymethods]
 impl PyMergeIntoWriter {
+    /// The shallow copy of a merge builder, as PySpark's `copy.copy`: the copy shares the state
+    /// of this one, its table, its condition and its actions, as the copy of PySpark's shares
+    /// its attributes.
+    fn __copy__(&self, py: Python<'_>) -> PyMergeIntoWriter {
+        PyMergeIntoWriter {
+            inner: std::sync::Arc::clone(&self.inner),
+            schema_evolution: std::sync::atomic::AtomicBool::new(
+                self.schema_evolution
+                    .load(std::sync::atomic::Ordering::SeqCst),
+            ),
+
+            unsent_table: self.unsent_table.as_ref().map(|table| table.clone_ref(py)),
+        }
+    }
+
+    /// A merge builder does not pickle, as PySpark's, whose client holds a thread-local state
+    /// that pickle cannot copy.
+    fn __reduce__(&self) -> PyResult<()> {
+        Err(pyo3::exceptions::PyTypeError::new_err(
+            "cannot pickle '_thread._local' object",
+        ))
+    }
+
     /// Nested builder-class references, mirroring pyspark's `MergeIntoWriter.WhenMatched`
     /// etc. (the objects returned by `whenMatched()` / `whenNotMatched()` /
     /// `whenNotMatchedBySource()`).
@@ -3526,13 +3602,22 @@ impl PyMergeIntoWriter {
 
     #[pyo3(name = "withSchemaEvolution")]
     fn with_schema_evolution<'py>(slf: &Bound<'py, Self>) -> Bound<'py, Self> {
-        slf.borrow().inner.update(|w| w.with_schema_evolution());
+        slf.borrow()
+            .schema_evolution
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
         slf.clone()
     }
 
     fn merge(&self, py: Python<'_>) -> PyResult<()> {
         check_written_table(py, &self.unsent_table)?;
-        let writer = self.inner.get();
+        let mut writer = self.inner.get();
+        if self
+            .schema_evolution
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            writer = writer.with_schema_evolution();
+        }
         interruptible(py, &writer.spark_session(), || {
             writer.merge().map_err(Box::new)
         })
@@ -3570,6 +3655,23 @@ pub struct PyWhenMatched {
 
 #[pymethods]
 impl PyWhenMatched {
+    /// The shallow copy of a merge action, as PySpark's `copy.copy`: of the same merge builder
+    /// and condition.
+    fn __copy__(&self, py: Python<'_>) -> PyWhenMatched {
+        PyWhenMatched {
+            writer: self.writer.clone_ref(py),
+            condition: self.condition.clone(),
+        }
+    }
+
+    /// A merge action does not pickle, as PySpark's, whose merge builder holds a client with a
+    /// thread-local state that pickle cannot copy.
+    fn __reduce__(&self) -> PyResult<()> {
+        Err(pyo3::exceptions::PyTypeError::new_err(
+            "cannot pickle '_thread._local' object",
+        ))
+    }
+
     #[pyo3(name = "updateAll")]
     fn update_all(&self, py: Python<'_>) -> PyResult<Py<PyMergeIntoWriter>> {
         let cond = self.condition.clone();
@@ -3605,6 +3707,23 @@ pub struct PyWhenNotMatched {
 
 #[pymethods]
 impl PyWhenNotMatched {
+    /// The shallow copy of a merge action, as PySpark's `copy.copy`: of the same merge builder
+    /// and condition.
+    fn __copy__(&self, py: Python<'_>) -> PyWhenNotMatched {
+        PyWhenNotMatched {
+            writer: self.writer.clone_ref(py),
+            condition: self.condition.clone(),
+        }
+    }
+
+    /// A merge action does not pickle, as PySpark's, whose merge builder holds a client with a
+    /// thread-local state that pickle cannot copy.
+    fn __reduce__(&self) -> PyResult<()> {
+        Err(pyo3::exceptions::PyTypeError::new_err(
+            "cannot pickle '_thread._local' object",
+        ))
+    }
+
     #[pyo3(name = "insertAll")]
     fn insert_all(&self, py: Python<'_>) -> PyResult<Py<PyMergeIntoWriter>> {
         let cond = self.condition.clone();
@@ -3634,6 +3753,23 @@ pub struct PyWhenNotMatchedBySource {
 
 #[pymethods]
 impl PyWhenNotMatchedBySource {
+    /// The shallow copy of a merge action, as PySpark's `copy.copy`: of the same merge builder
+    /// and condition.
+    fn __copy__(&self, py: Python<'_>) -> PyWhenNotMatchedBySource {
+        PyWhenNotMatchedBySource {
+            writer: self.writer.clone_ref(py),
+            condition: self.condition.clone(),
+        }
+    }
+
+    /// A merge action does not pickle, as PySpark's, whose merge builder holds a client with a
+    /// thread-local state that pickle cannot copy.
+    fn __reduce__(&self) -> PyResult<()> {
+        Err(pyo3::exceptions::PyTypeError::new_err(
+            "cannot pickle '_thread._local' object",
+        ))
+    }
+
     #[pyo3(name = "updateAll")]
     fn update_all(&self, py: Python<'_>) -> PyResult<Py<PyMergeIntoWriter>> {
         let cond = self.condition.clone();
@@ -3673,18 +3809,25 @@ impl PyWhenNotMatchedBySource {
     dict
 )]
 pub struct PyDataFrameWriter {
-    inner: WriterState<spark_connect::readwriter::DataFrameWriter>,
+    inner: std::sync::Arc<WriterState<spark_connect::readwriter::DataFrameWriter>>,
+    /// The DataFrame that is written, as the Python object of `df.write`, as PySpark's `_df`.
+    frame: Py<PyDataFrame>,
+
     /// The `numBuckets` of the last `bucketBy` when it is a positive count that the proto
     /// refuses, which PySpark keeps and fails each write with, as its `WriteOperation.command`
     /// sets it in the proto; the core writer then has no bucketing.
-    refused_bucket_count: std::sync::Mutex<Option<Py<PyAny>>>,
+    refused_bucket_count: std::sync::Arc<std::sync::Mutex<Option<Py<PyAny>>>>,
 }
 
 impl PyDataFrameWriter {
-    pub(crate) fn new(writer: spark_connect::readwriter::DataFrameWriter) -> Self {
+    pub(crate) fn new(
+        writer: spark_connect::readwriter::DataFrameWriter,
+        frame: Py<PyDataFrame>,
+    ) -> Self {
         PyDataFrameWriter {
-            inner: WriterState::new(writer),
-            refused_bucket_count: std::sync::Mutex::new(None),
+            inner: std::sync::Arc::new(WriterState::new(writer)),
+            refused_bucket_count: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            frame,
         }
     }
 
@@ -3745,6 +3888,103 @@ fn apply_write_common(
 
 #[pymethods]
 impl PyDataFrameWriter {
+    /// The shallow copy of a writer, as PySpark's `copy.copy`: the copy shares the state of
+    /// this writer, as its `_write` is the same object, so that a setter of either one is seen
+    /// by both, and the same DataFrame.
+    fn __copy__(&self, py: Python<'_>) -> PyDataFrameWriter {
+        PyDataFrameWriter {
+            inner: std::sync::Arc::clone(&self.inner),
+            refused_bucket_count: std::sync::Arc::clone(&self.refused_bucket_count),
+            frame: self.frame.clone_ref(py),
+        }
+    }
+
+    /// The reduce of a writer, as PySpark's pickle of its DataFrame and its state, which
+    /// `_of_state` gives back.
+    fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        use crate::reduce::{of_state_reduce, optional_object, save_mode_name, str_dict};
+
+        let writer = self.inner.get();
+        let mode = match writer.get_unsupported_mode() {
+            Some(mode) => mode.to_string(),
+            None => save_mode_name(writer.get_save_mode()).to_string(),
+        };
+        let refused = self
+            .refused_bucket_count()
+            .as_ref()
+            .map(|n| n.clone_ref(py));
+        let args = PyTuple::new(
+            py,
+            [
+                self.frame.clone_ref(py).into_any().into_bound(py),
+                writer.get_format().into_pyobject(py)?.into_any(),
+                mode.into_pyobject(py)?.into_any(),
+                str_dict(py, writer.get_options())?.into_any(),
+                PyList::new(py, writer.get_partition_cols())?.into_any(),
+                writer.get_num_buckets().into_pyobject(py)?.into_any(),
+                PyList::new(py, writer.get_bucket_cols())?.into_any(),
+                PyList::new(py, writer.get_sort_cols())?.into_any(),
+                PyList::new(py, writer.get_cluster_cols())?.into_any(),
+                optional_object(py, refused.as_ref()),
+            ],
+        )?;
+        of_state_reduce::<PyDataFrameWriter>(py, args)
+    }
+
+    /// A writer of its state, as `__reduce__` gives it: of the DataFrame `frame`, the format,
+    /// the save mode (or the last mode that is not one), the options, the partitioning, the
+    /// buckets (their number, None if there is none, and their columns), the sorting and the
+    /// clustering columns, and the number of buckets that the proto refuses.
+    #[staticmethod]
+    #[pyo3(
+        signature = (
+            frame,
+            format,
+            mode,
+            options,
+            partition_cols,
+            num_buckets,
+            bucket_cols,
+            sort_cols,
+            cluster_cols,
+            refused
+        )
+    )]
+    fn _of_state(
+        py: Python<'_>,
+        frame: Py<PyDataFrame>,
+        format: Option<String>,
+        mode: String,
+        options: std::collections::HashMap<String, String>,
+        partition_cols: Vec<String>,
+        num_buckets: Option<i32>,
+        bucket_cols: Vec<String>,
+        sort_cols: Vec<String>,
+        cluster_cols: Vec<String>,
+        refused: Option<Py<PyAny>>,
+    ) -> PyResult<PyDataFrameWriter> {
+        let mut writer = frame.borrow(py).dataframe.write();
+        if let Some(format) = format {
+            writer = writer.format(&format);
+        }
+        writer = writer.mode(&mode).options(options);
+        if !partition_cols.is_empty() {
+            writer = writer.partition_by(partition_cols);
+        }
+        if let Some(num_buckets) = num_buckets {
+            writer = writer.bucket_by(num_buckets, bucket_cols);
+        }
+        if !sort_cols.is_empty() {
+            writer = writer.sort_by(sort_cols);
+        }
+        if !cluster_cols.is_empty() {
+            writer = writer.cluster_by(cluster_cols);
+        }
+        let restored = PyDataFrameWriter::new(writer, frame);
+        *restored.refused_bucket_count() = refused;
+        Ok(restored)
+    }
+
     /// Set the schema, if any, and the options of `options` that are not None, through its own
     /// `schema` and `option`, as PySpark's `OptionUtils._set_opts`, which pandas-on-Spark calls.
     #[pyo3(signature = (schema=None, **options))]
@@ -4247,7 +4487,10 @@ impl PyDataFrameWriter {
     dict
 )]
 pub struct PyDataFrameWriterV2 {
-    inner: WriterState<spark_connect::readwriter::DataFrameWriterV2>,
+    inner: std::sync::Arc<WriterState<spark_connect::readwriter::DataFrameWriterV2>>,
+    /// The DataFrame that is written, as the Python object of `df.writeTo`, as PySpark's `_df`.
+    frame: Py<PyDataFrame>,
+
     /// The table of `writeTo` that its string field does not take, which Python's garbage
     /// collector sees ([`written_table`]).
     unsent_table: Option<Py<PyAny>>,
@@ -4257,6 +4500,72 @@ impl PyDataFrameWriterV2 {}
 
 #[pymethods]
 impl PyDataFrameWriterV2 {
+    /// The shallow copy of a V2 writer, as PySpark's `copy.copy`: the copy shares the state of
+    /// this writer, as its `_write` is the same object, and the same DataFrame.
+    fn __copy__(&self, py: Python<'_>) -> PyDataFrameWriterV2 {
+        PyDataFrameWriterV2 {
+            inner: std::sync::Arc::clone(&self.inner),
+            unsent_table: self.unsent_table.as_ref().map(|table| table.clone_ref(py)),
+            frame: self.frame.clone_ref(py),
+        }
+    }
+
+    /// The reduce of a V2 writer, as PySpark's pickle of its DataFrame and its state, which
+    /// `_of_state` gives back.
+    fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        use crate::reduce::{column_list, of_state_reduce, str_dict};
+
+        let writer = self.inner.get();
+        let args = PyTuple::new(
+            py,
+            [
+                self.frame.clone_ref(py).into_any().into_bound(py),
+                writer.get_table_name().into_pyobject(py)?.into_any(),
+                writer.get_provider().into_pyobject(py)?.into_any(),
+                str_dict(py, writer.get_options())?.into_any(),
+                str_dict(py, writer.get_table_properties())?.into_any(),
+                column_list(py, writer.get_partition_cols())?.into_any(),
+                PyList::new(py, writer.get_cluster_cols())?.into_any(),
+            ],
+        )?;
+        of_state_reduce::<PyDataFrameWriterV2>(py, args)
+    }
+
+    /// A V2 writer of its state, as `__reduce__` gives it: of the DataFrame `frame`, the table,
+    /// the provider, the options, the table properties, the partitioning and the clustering.
+    #[staticmethod]
+    fn _of_state(
+        py: Python<'_>,
+        frame: Py<PyDataFrame>,
+        table: &str,
+        provider: Option<String>,
+        options: std::collections::HashMap<String, String>,
+        table_properties: std::collections::HashMap<String, String>,
+        partition_cols: &Bound<'_, PyAny>,
+        cluster_cols: Vec<String>,
+    ) -> PyResult<PyDataFrameWriterV2> {
+        let mut writer = frame.borrow(py).dataframe.write_to(table);
+        if let Some(provider) = provider {
+            writer = writer.using(&provider);
+        }
+        writer = writer.options(options);
+        for (property, value) in &table_properties {
+            writer = writer.table_property(property, value);
+        }
+        let partition_cols = crate::reduce::columns_of(partition_cols)?;
+        if !partition_cols.is_empty() {
+            writer = writer.partition_by(partition_cols);
+        }
+        if !cluster_cols.is_empty() {
+            writer = writer.cluster_by(cluster_cols);
+        }
+        Ok(PyDataFrameWriterV2 {
+            inner: std::sync::Arc::new(WriterState::new(writer)),
+            unsent_table: None,
+            frame,
+        })
+    }
+
     /// Set the schema, if any, and the options of `options` that are not None, through its own
     /// `schema` and `option`, as PySpark's `OptionUtils._set_opts`, which pandas-on-Spark calls.
     #[pyo3(signature = (schema=None, **options))]

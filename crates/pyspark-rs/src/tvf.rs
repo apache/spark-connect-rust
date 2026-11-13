@@ -32,6 +32,19 @@ fn cols(items: Vec<Bound<'_, PyAny>>) -> PyResult<Vec<spark_connect::column::Col
 
 #[pymethods]
 impl PyTableValuedFunction {
+    /// The shallow copy of the table-valued functions, as PySpark's `copy.copy`: of the same
+    /// session.
+    fn __copy__(&self) -> PyTableValuedFunction {
+        PyTableValuedFunction::new(self.inner.clone())
+    }
+
+    /// The reduce of the table-valued functions, as PySpark's: `tvf` of their session, which
+    /// unpickles with it.
+    fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyTuple>> {
+        let session = crate::session::session_object(py, self.inner.spark_session())?;
+        crate::reduce::getattr_reduce(py, session.into_bound(py).into_any(), "tvf")
+    }
+
     /// Each argument is taken by its `int()`, as PySpark's `spark.tvf.range` takes them, which
     /// is `spark.range`.
     #[pyo3(signature = (start, end=None, step=crate::session::RangeStep::Omitted, numPartitions=None))]

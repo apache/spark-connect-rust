@@ -14,12 +14,18 @@ use spark_connect_core::error::Result;
 /// Table-valued functions for Spark SQL.
 ///
 /// Mirrors `pyspark.sql.connect.tvf.TableValuedFunction`.
+#[derive(Clone)]
 pub struct TableValuedFunction {
     /// The session this TVF is bound to
     session: SparkSession,
 }
 
 impl TableValuedFunction {
+    /// The session this TVF is bound to, as PySpark's `_sparkSession`.
+    pub fn spark_session(&self) -> &SparkSession {
+        &self.session
+    }
+
     /// Create a new TableValuedFunction instance.
     pub(crate) fn new(session: SparkSession) -> Self {
         TableValuedFunction { session }

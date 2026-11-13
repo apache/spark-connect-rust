@@ -1,7 +1,8 @@
 //! PyO3 wrappers for Structured Streaming.
 
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyTuple};
+use pyo3::types::{PyDict, PyList, PyTuple};
+
 use spark_connect::streaming::{
     DataStreamReader, DataStreamWriter, ListenerEventStream, StreamingQuery,
     StreamingQueryListener, StreamingQueryListenerEvent, StreamingQueryManager, Trigger,
@@ -255,11 +256,31 @@ fn query_name_of(name: &Bound<'_, PyAny>) -> PyResult<String> {
 )]
 pub struct PyDataStreamReader {
     inner: DataStreamReader,
+    /// The options of the reader, which a shallow copy of it shares, as PySpark's `_options` dict
+    /// is shared by the copies of a reader. The core reader holds none of them (see `state`).
+    options: Arc<WriterState<HashMap<String, String>>>,
 }
 
 impl PyDataStreamReader {
     pub fn new(reader: DataStreamReader) -> Self {
-        PyDataStreamReader { inner: reader }
+        let options = reader.get_options().clone();
+        PyDataStreamReader {
+            inner: without_options(reader, &options),
+            options: Arc::new(WriterState::new(options)),
+        }
+    }
+
+    /// The core reader of this reader, with its options, which the copies of this reader share.
+    fn state(&self) -> DataStreamReader {
+        self.inner.clone().options(self.options.get())
+    }
+
+    /// Keep `reader` as the state of this reader: its options are shared by the copies of this
+    /// reader, and its format, schema and source name are this reader's own.
+    fn set_state(&mut self, reader: DataStreamReader) {
+        let options = reader.get_options().clone();
+        self.inner = without_options(reader, &options);
+        self.options.set(options);
     }
 
     /// The path of a format reader, such as `json`, as PySpark's takes it, and the state that
@@ -273,19 +294,72 @@ impl PyDataStreamReader {
         format: &str,
         path: &Bound<'_, PyAny>,
     ) -> PyResult<String> {
-        self.inner = reader.clone();
+        self.set_state(reader.clone());
         if !path.is_instance_of::<pyo3::types::PyString>() {
             return Err(crate::stat_arguments::not_expected_type(
                 path, "path", "str",
             ));
         }
-        self.inner = reader.clone().format(format);
+        self.set_state(reader.clone().format(format));
         load_path(path)
     }
 }
 
 #[pymethods]
 impl PyDataStreamReader {
+    /// The shallow copy of a stream reader, as PySpark's `copy.copy`: the copy shares the
+    /// options of this reader.
+    fn __copy__(&self) -> PyDataStreamReader {
+        PyDataStreamReader {
+            inner: self.state(),
+            options: Arc::clone(&self.options),
+        }
+    }
+
+    /// The reduce of a stream reader, as PySpark's pickle of its session and its state, which
+    /// `_of_state` gives back.
+    fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        use crate::reduce::{of_state_reduce, str_dict};
+
+        let session = crate::session::session_object(py, &self.inner.spark_session())?;
+        let args = PyTuple::new(
+            py,
+            [
+                session.into_bound(py).into_any(),
+                self.inner.get_format().into_pyobject(py)?.into_any(),
+                self.inner.get_schema().into_pyobject(py)?.into_any(),
+                str_dict(py, &self.options.get())?.into_any(),
+                self.inner.get_source_name().into_pyobject(py)?.into_any(),
+            ],
+        )?;
+        of_state_reduce::<PyDataStreamReader>(py, args)
+    }
+
+    /// A stream reader of its state, as `__reduce__` gives it: of the session `session`, the
+    /// format, the schema, the options and the source name.
+    #[staticmethod]
+    fn _of_state(
+        py: Python<'_>,
+        session: Py<crate::session::PySparkSession>,
+        format: Option<String>,
+        schema: String,
+        options: HashMap<String, String>,
+        source_name: Option<String>,
+    ) -> PyResult<PyDataStreamReader> {
+        let mut reader = session.borrow(py).session.read_stream();
+        if let Some(format) = format {
+            reader = reader.format(&format);
+        }
+        if !schema.is_empty() {
+            reader = reader.schema(schema);
+        }
+        reader = reader.options(options);
+        if let Some(source_name) = source_name {
+            reader = reader.name(&source_name);
+        }
+        Ok(PyDataStreamReader::new(reader))
+    }
+
     /// Set the schema, if any, and the options of `options` that are not None, through its own
     /// `schema` and `option`, as PySpark's `OptionUtils._set_opts`, which pandas-on-Spark calls.
     #[pyo3(signature = (schema=None, **options))]
@@ -303,10 +377,11 @@ impl PyDataStreamReader {
         mut slf: PyRefMut<'py, Self>,
         source: Option<&str>,
     ) -> PyResult<PyRefMut<'py, Self>> {
-        slf.inner = match source {
-            Some(source) => slf.inner.clone().format(source),
-            None => slf.inner.clone().clear_format(),
+        let state = match source {
+            Some(source) => slf.state().format(source),
+            None => slf.state().clear_format(),
         };
+        slf.set_state(state);
         Ok(slf)
     }
 
@@ -316,7 +391,8 @@ impl PyDataStreamReader {
         schema: &Bound<'_, PyAny>,
     ) -> PyResult<PyRefMut<'py, Self>> {
         let schema = crate::readwriter::reader_schema(schema)?;
-        slf.inner = slf.inner.clone().schema(&schema);
+        let state = slf.state().schema(&schema);
+        slf.set_state(state);
         Ok(slf)
     }
 
@@ -334,7 +410,8 @@ impl PyDataStreamReader {
         let key = crate::options::reader_option_key(key)?;
         match crate::options::stream_option_value(value)? {
             Some(v) => {
-                slf.inner = slf.inner.clone().option(&key, &v);
+                let state = slf.state().option(&key, &v);
+                slf.set_state(state);
                 Ok(slf)
             }
             None => Ok(slf),
@@ -349,7 +426,8 @@ impl PyDataStreamReader {
         options: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyRefMut<'py, Self>> {
         let opts = crate::options::kwargs_skip_none(options)?;
-        slf.inner = slf.inner.clone().options(opts);
+        let state = slf.state().options(opts);
+        slf.set_state(state);
         Ok(slf)
     }
 
@@ -368,7 +446,7 @@ impl PyDataStreamReader {
     /// The configured read options (`DataStreamReader._options`); a copy.
     #[getter]
     fn _options(&self) -> HashMap<String, String> {
-        self.inner.get_options().clone()
+        self.options.get()
     }
 
     #[pyo3(signature = (path=None, format=None, schema=None, **options))]
@@ -380,7 +458,7 @@ impl PyDataStreamReader {
         options: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyDataFrame> {
         crate::options::check_keyword_keys(options)?;
-        let mut r = self.inner.clone();
+        let mut r = self.state();
         if let Some(fmt) = format {
             r = r.format(fmt);
         }
@@ -392,7 +470,7 @@ impl PyDataStreamReader {
             r = r.options(opts);
         }
         // PySpark's one-shot load sets format/schema/options on the reader itself.
-        self.inner = r.clone();
+        self.set_state(r.clone());
         let path = path.map(load_path).transpose()?;
         Ok(PyDataFrame::new(r.load(path.as_deref())))
     }
@@ -421,7 +499,8 @@ impl PyDataStreamReader {
                 &[("source_name", &name)],
             ));
         }
-        slf.inner = slf.inner.clone().name(&name);
+        let state = slf.state().name(&name);
+        slf.set_state(state);
         Ok(slf)
     }
 
@@ -433,7 +512,7 @@ impl PyDataStreamReader {
             return Err(crate::readwriter::changes_of_schema_error(py));
         }
         let tableName = crate::str_argument(tableName)?;
-        Ok(PyDataFrame::new(self.inner.clone().changes(&tableName)))
+        Ok(PyDataFrame::new(self.state().changes(&tableName)))
     }
 
     /// Load an XML streaming source. Mirrors `DataStreamReader.xml(...)`: set each named
@@ -465,7 +544,7 @@ impl PyDataStreamReader {
         unexpected: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyDataFrame> {
         crate::options::check_unexpected_keywords("DataStreamReader.xml", unexpected)?;
-        let mut r = self.inner.clone();
+        let mut r = self.state();
         r = set_stream_option_skip_none(r, "rowTag", rowTag)?;
         if let Some(v) = schema {
             r = apply_stream_schema(r, v)?;
@@ -500,7 +579,7 @@ impl PyDataStreamReader {
     /// Read a table by name, which PySpark's `Read` plan sets in its string field as it is, as
     /// [`crate::str_argument`] converts it.
     fn table(&self, tableName: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        let df = self.inner.clone().table(&crate::str_argument(tableName)?);
+        let df = self.state().table(&crate::str_argument(tableName)?);
         Ok(PyDataFrame::new(df))
     }
 
@@ -534,7 +613,7 @@ impl PyDataStreamReader {
         unexpected: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyDataFrame> {
         crate::options::check_unexpected_keywords("DataStreamReader.json", unexpected)?;
-        let mut r = self.inner.clone();
+        let mut r = self.state();
         if let Some(v) = schema {
             r = apply_stream_schema(r, v)?;
         }
@@ -585,7 +664,7 @@ impl PyDataStreamReader {
         unexpected: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyDataFrame> {
         crate::options::check_unexpected_keywords("DataStreamReader.parquet", unexpected)?;
-        let mut r = self.inner.clone();
+        let mut r = self.state();
         r = set_stream_options_skip_none(
             r,
             &[
@@ -639,7 +718,7 @@ impl PyDataStreamReader {
         unexpected: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyDataFrame> {
         crate::options::check_unexpected_keywords("DataStreamReader.csv", unexpected)?;
-        let mut r = self.inner.clone();
+        let mut r = self.state();
         if let Some(v) = schema {
             r = apply_stream_schema(r, v)?;
         }
@@ -693,7 +772,7 @@ impl PyDataStreamReader {
         unexpected: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyDataFrame> {
         crate::options::check_unexpected_keywords("DataStreamReader.orc", unexpected)?;
-        let mut r = self.inner.clone();
+        let mut r = self.state();
         r = set_stream_options_skip_none(
             r,
             &[
@@ -726,7 +805,7 @@ impl PyDataStreamReader {
     ) -> PyResult<PyDataFrame> {
         crate::options::check_unexpected_keywords("DataStreamReader.text", unexpected)?;
         let wholetext = wholetext.or_bool(py, false);
-        let mut r = self.inner.clone();
+        let mut r = self.state();
         r = set_stream_options_skip_none(
             r,
             &[
@@ -786,6 +865,42 @@ impl PyTrigger {
     }
 }
 
+/// The reader without the options of `options`, which the reader keeps apart from its core state.
+fn without_options(
+    reader: DataStreamReader,
+    options: &HashMap<String, String>,
+) -> DataStreamReader {
+    options
+        .keys()
+        .fold(reader, |reader, key| reader.unset_option(key))
+}
+
+/// The kind and the value of a trigger, which a pickle keeps as a pair of Python values.
+fn trigger_pair(trigger: &Trigger) -> (&'static str, Option<String>) {
+    match trigger {
+        Trigger::ProcessingTime(interval) => ("processingTime", Some(interval.clone())),
+        Trigger::Once => ("once", None),
+        Trigger::AvailableNow => ("availableNow", None),
+        Trigger::Continuous(interval) => ("continuous", Some(interval.clone())),
+        Trigger::RealTime(interval) => ("realTime", Some(interval.clone())),
+    }
+}
+
+/// The trigger of a kind and a value, as `trigger_pair` gives them.
+fn trigger_of(kind: &str, value: Option<String>) -> PyResult<Trigger> {
+    let value = value.unwrap_or_default();
+    match kind {
+        "processingTime" => Ok(Trigger::ProcessingTime(value)),
+        "once" => Ok(Trigger::Once),
+        "availableNow" => Ok(Trigger::AvailableNow),
+        "continuous" => Ok(Trigger::Continuous(value)),
+        "realTime" => Ok(Trigger::RealTime(value)),
+        _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "unknown trigger: {kind}"
+        ))),
+    }
+}
+
 /// Python wrapper for DataStreamWriter.
 #[pyclass(
     name = "DataStreamWriter",
@@ -794,14 +909,36 @@ impl PyTrigger {
     dict
 )]
 pub struct PyDataStreamWriter {
-    inner: WriterState<DataStreamWriter>,
+    /// The state of the writer, which a shallow copy of it shares, as PySpark's `_write_stream`.
+    inner: Arc<WriterState<DataStreamWriter>>,
+    /// The DataFrame that is streamed, as the Python object of `df.writeStream`, as PySpark's
+    /// plan of its writer.
+    frame: Py<PyDataFrame>,
+    /// The functions of `foreachBatch` and `foreach` that the writer applied, in order, with
+    /// the kind of each, which a pickle keeps, as PySpark's pickle keeps the functions.
+    functions: AppliedFunctions,
 }
 
+/// The functions of `foreachBatch` and `foreach` that a stream writer applied, in order, each with
+/// its kind, shared by the shallow copies of the writer.
+type AppliedFunctions = Arc<std::sync::Mutex<Vec<(String, Py<PyAny>)>>>;
+
 impl PyDataStreamWriter {
-    pub fn new(writer: DataStreamWriter) -> Self {
+    pub fn new(writer: DataStreamWriter, frame: Py<PyDataFrame>) -> Self {
         PyDataStreamWriter {
-            inner: WriterState::new(writer),
+            inner: Arc::new(WriterState::new(writer)),
+            frame,
+            functions: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
+    }
+
+    /// Keep a function that the writer applied, as `kind` of `foreachBatch` or `foreach`.
+    fn record(&self, kind: &str, function: &Bound<'_, PyAny>) {
+        let mut functions = self
+            .functions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        functions.push((kind.to_string(), function.clone().unbind()));
     }
 
     /// Apply the one-shot writer options accepted by `start`/`toTable`
@@ -843,6 +980,121 @@ impl PyDataStreamWriter {
 
 #[pymethods]
 impl PyDataStreamWriter {
+    /// The shallow copy of a stream writer, as PySpark's `copy.copy`: the copy shares the state
+    /// of this writer, as its `_write_stream` is the same object, and its functions.
+    fn __copy__(&self, py: Python<'_>) -> PyDataStreamWriter {
+        PyDataStreamWriter {
+            inner: Arc::clone(&self.inner),
+            frame: self.frame.clone_ref(py),
+            functions: Arc::clone(&self.functions),
+        }
+    }
+
+    /// The reduce of a stream writer, as PySpark's pickle of its DataFrame and its state, which
+    /// `_of_state` gives back, with the functions that it applied.
+    fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        use crate::reduce::{of_state_reduce, str_dict};
+
+        let writer = self.inner.get();
+
+        let trigger = match writer.get_trigger() {
+            Some(trigger) => {
+                let (kind, value) = trigger_pair(trigger);
+                PyTuple::new(
+                    py,
+                    [
+                        kind.into_pyobject(py)?.into_any(),
+                        value.into_pyobject(py)?.into_any(),
+                    ],
+                )?
+                .into_any()
+            }
+            None => py.None().into_bound(py),
+        };
+        let functions = {
+            let functions = self
+                .functions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let pairs = functions
+                .iter()
+                .map(|(kind, function)| {
+                    PyTuple::new(
+                        py,
+                        [
+                            kind.into_pyobject(py)?.into_any(),
+                            function.clone_ref(py).into_bound(py),
+                        ],
+                    )
+                })
+                .collect::<PyResult<Vec<_>>>()?;
+            PyList::new(py, pairs)?
+        };
+        let args = PyTuple::new(
+            py,
+            [
+                self.frame.clone_ref(py).into_any().into_bound(py),
+                writer.get_format().into_pyobject(py)?.into_any(),
+                writer.get_output_mode().into_pyobject(py)?.into_any(),
+                str_dict(py, writer.get_options())?.into_any(),
+                PyList::new(py, writer.get_partition_cols())?.into_any(),
+                PyList::new(py, writer.get_cluster_cols())?.into_any(),
+                writer.get_query_name().into_pyobject(py)?.into_any(),
+                trigger,
+                functions.into_any(),
+            ],
+        )?;
+        of_state_reduce::<PyDataStreamWriter>(py, args)
+    }
+
+    /// A stream writer of its state, as `__reduce__` gives it: of the DataFrame `frame`, the
+    /// format, the output mode, the options, the partitioning and clustering columns, the query
+    /// name, the trigger (a kind and its value, or None), and the functions that were applied,
+    /// which are applied again, in order, to the writer.
+    #[staticmethod]
+    fn _of_state<'py>(
+        py: Python<'py>,
+        frame: Py<PyDataFrame>,
+        format: Option<String>,
+        output_mode: Option<String>,
+        options: HashMap<String, String>,
+        partition_cols: Vec<String>,
+        cluster_cols: Vec<String>,
+        query_name: Option<String>,
+        trigger: Option<(String, Option<String>)>,
+        functions: Vec<(String, Py<PyAny>)>,
+    ) -> PyResult<Bound<'py, PyDataStreamWriter>> {
+        let mut writer = frame.borrow(py).dataframe.write_stream();
+        if let Some(format) = format {
+            writer = writer.format(&format);
+        }
+        if let Some(output_mode) = output_mode {
+            writer = writer.output_mode(&output_mode);
+        }
+        writer = writer.options(options);
+        if !partition_cols.is_empty() {
+            writer = writer.partition_by(partition_cols);
+        }
+        if !cluster_cols.is_empty() {
+            writer = writer.cluster_by(cluster_cols);
+        }
+        if let Some(query_name) = query_name {
+            writer = writer.query_name(&query_name);
+        }
+        if let Some((kind, value)) = trigger {
+            writer = writer.trigger(trigger_of(&kind, value)?);
+        }
+        let restored = Bound::new(py, PyDataStreamWriter::new(writer, frame))?;
+        for (kind, function) in functions {
+            let function = function.into_bound(py);
+            match kind.as_str() {
+                "foreachBatch" => PyDataStreamWriter::foreachBatch(&restored, py, &function)?,
+                _ => PyDataStreamWriter::foreach(&restored, py, &function)?,
+            };
+        }
+        Ok(restored)
+    }
+
     fn outputMode<'py>(slf: &Bound<'py, Self>, outputMode: &str) -> PyResult<Bound<'py, Self>> {
         slf.borrow().inner.update(|w| w.output_mode(outputMode));
         Ok(slf.clone())
@@ -1072,7 +1324,10 @@ impl PyDataStreamWriter {
             command,
             crate::dataframe::py_version(py),
         );
+        slf.borrow().record("foreachBatch", func);
+
         slf.borrow().inner.update(|w| w.foreach_batch(payload));
+
         Ok(slf.clone())
     }
 
@@ -1114,7 +1369,10 @@ impl PyDataStreamWriter {
             command,
             crate::dataframe::py_version(py),
         );
+        slf.borrow().record("foreach", f);
+
         slf.borrow().inner.update(|w| w.foreach(payload));
+
         Ok(slf.clone())
     }
 }
@@ -1245,6 +1503,44 @@ impl PyStreamingQuery {
 
 #[pymethods]
 impl PyStreamingQuery {
+    /// The shallow copy of a streaming query, as PySpark's `copy.copy`: of the same query.
+    fn __copy__(&self) -> PyStreamingQuery {
+        PyStreamingQuery::new(self.inner.clone())
+    }
+
+    /// The reduce of a streaming query, as PySpark's pickle of its session and its state, which
+    /// `_of_state` gives back.
+    fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        use crate::reduce::of_state_reduce;
+
+        let session = crate::session::session_object(py, &self.inner.spark_session())?;
+
+        let args = PyTuple::new(
+            py,
+            [
+                session.into_bound(py).into_any(),
+                self.inner.id().into_pyobject(py)?.into_any(),
+                self.inner.run_id().into_pyobject(py)?.into_any(),
+                self.inner.name().into_pyobject(py)?.into_any(),
+            ],
+        )?;
+        of_state_reduce::<PyStreamingQuery>(py, args)
+    }
+
+    /// A streaming query of its state, as `__reduce__` gives it: of the session `session`, the
+    /// query ID, the run ID and the name.
+    #[staticmethod]
+    fn _of_state(
+        py: Python<'_>,
+        session: Py<crate::session::PySparkSession>,
+        query_id: String,
+        run_id: String,
+        name: Option<String>,
+    ) -> PyStreamingQuery {
+        let session = session.borrow(py).session.clone();
+        PyStreamingQuery::new(StreamingQuery::from_parts(session, query_id, run_id, name))
+    }
+
     #[getter]
     fn id(&self) -> String {
         self.inner.id().to_string()
@@ -1426,6 +1722,23 @@ impl PyStreamingQueryListenerBus {
 
 #[pymethods]
 impl PyStreamingQueryManager {
+    /// The shallow copy of a streaming query manager, as PySpark's `copy.copy`: of the same
+    /// session and listener bus.
+    fn __copy__(&self) -> PyStreamingQueryManager {
+        PyStreamingQueryManager {
+            inner: self.inner.clone(),
+            session: self.session.clone(),
+        }
+    }
+
+    /// A streaming query manager does not pickle, as PySpark's, whose listener bus holds a lock
+    /// that pickle cannot copy.
+    fn __reduce__(&self) -> PyResult<()> {
+        Err(pyo3::exceptions::PyTypeError::new_err(
+            "cannot pickle '_thread.lock' object",
+        ))
+    }
+
     #[getter]
     fn active(&self, py: Python<'_>) -> PyResult<Vec<PyStreamingQuery>> {
         let queries = interruptible(py, &self.inner.spark_session(), || {

@@ -25,6 +25,11 @@ pub struct DataFrameReader {
 }
 
 impl DataFrameReader {
+    /// The session of this reader, whose reads it runs.
+    pub fn spark_session(&self) -> SparkSession {
+        self.session.clone()
+    }
+
     /// Create a new DataFrameReader.
     pub(crate) fn new(session: SparkSession) -> Self {
         DataFrameReader {
@@ -305,6 +310,61 @@ impl DataFrameWriter {
     pub fn spark_session(&self) -> SparkSession {
         self.session.clone()
     }
+
+    /// The format of this writer, as set by `format`, if any. Not a stable API.
+    #[doc(hidden)]
+    pub fn get_format(&self) -> Option<&str> {
+        self.format.as_deref()
+    }
+
+    /// The save mode of this writer. Not a stable API.
+    #[doc(hidden)]
+    pub fn get_save_mode(&self) -> SaveMode {
+        self.mode
+    }
+
+    /// The last mode set when it is not a save mode, if any. Not a stable API.
+    #[doc(hidden)]
+    pub fn get_unsupported_mode(&self) -> Option<&str> {
+        self.unsupported_mode.as_deref()
+    }
+
+    /// The options of this writer. Not a stable API.
+    #[doc(hidden)]
+    pub fn get_options(&self) -> &HashMap<String, String> {
+        &self.options
+    }
+
+    /// The partitioning columns of this writer. Not a stable API.
+    #[doc(hidden)]
+    pub fn get_partition_cols(&self) -> &[String] {
+        &self.partition_cols
+    }
+
+    /// The bucketing columns of this writer. Not a stable API.
+    #[doc(hidden)]
+    pub fn get_bucket_cols(&self) -> &[String] {
+        &self.bucket_cols
+    }
+
+    /// The number of buckets of this writer, if it buckets. Not a stable API.
+    #[doc(hidden)]
+    pub fn get_num_buckets(&self) -> Option<i32> {
+        self.num_buckets
+    }
+
+    /// The sorting columns of this writer. Not a stable API.
+    #[doc(hidden)]
+    pub fn get_sort_cols(&self) -> &[String] {
+        &self.sort_cols
+    }
+
+    /// The clustering columns of this writer. Not a stable API.
+    #[doc(hidden)]
+    pub fn get_cluster_cols(&self) -> &[String] {
+        &self.cluster_cols
+    }
+
     #[cfg(test)]
     pub(crate) fn plan(&self) -> &LogicalPlan {
         self.input_plan.as_ref()
@@ -539,6 +599,43 @@ impl DataFrameWriterV2 {
     pub fn spark_session(&self) -> SparkSession {
         self.session.clone()
     }
+
+    /// The table of this writer, as `writeTo` gives it. Not a stable API.
+    #[doc(hidden)]
+    pub fn get_table_name(&self) -> &str {
+        &self.table_name
+    }
+
+    /// The provider of this writer, as set by `using`, if any. Not a stable API.
+    #[doc(hidden)]
+    pub fn get_provider(&self) -> Option<&str> {
+        self.provider.as_deref()
+    }
+
+    /// The options of this writer. Not a stable API.
+    #[doc(hidden)]
+    pub fn get_options(&self) -> &HashMap<String, String> {
+        &self.options
+    }
+
+    /// The table properties of this writer. Not a stable API.
+    #[doc(hidden)]
+    pub fn get_table_properties(&self) -> &HashMap<String, String> {
+        &self.table_properties
+    }
+
+    /// The partitioning columns of this writer. Not a stable API.
+    #[doc(hidden)]
+    pub fn get_partition_cols(&self) -> &[Column] {
+        &self.partition_cols
+    }
+
+    /// The clustering columns of this writer. Not a stable API.
+    #[doc(hidden)]
+    pub fn get_cluster_cols(&self) -> &[String] {
+        &self.cluster_cols
+    }
+
     #[cfg(test)]
     pub(crate) fn plan(&self) -> &LogicalPlan {
         self.input_plan.as_ref()
