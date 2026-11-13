@@ -444,13 +444,14 @@ def test_ml_connect_logistic_regression_checks_its_labels_before_its_fit_as_pysp
         ((0.5, 1.0), True, not_index),
     ]:
         sent = len(service.execute_requests)
+        sent_requests = _requests_but_deletes(service)
         service.query_payload = _labels_result(classes, double)
         with pytest.raises(ValueError) as error:
             connect.LogisticRegression().fit(df)
         assert str(error.value) == message, classes
         service.query_payload = None
         # Only the label query is sent: no fit, whose command would be the only one of the ML.
-        assert len(service.execute_requests) == sent + 1, classes
+        assert _requests_but_deletes(service) == sent_requests + 1, classes
         assert _commands_but_deletes(service, sent) == [], classes
 
     sent = len(service.execute_requests)
