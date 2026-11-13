@@ -21,6 +21,7 @@ import math
 import os
 
 import pytest
+from _native_classes import native_class
 from pyspark.ml.connect.functions import array_to_vector, vector_to_array
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
@@ -39,11 +40,7 @@ def session():
 
 
 def _regressor():
-    try:
-        from pyspark.ml.connect.regression import GBTRegressor
-    except ImportError:
-        from pyspark.ml.regression import GBTRegressor
-    return GBTRegressor
+    return native_class("pyspark.ml.connect.regression", "GBTRegressor", "pyspark.ml.regression")
 
 
 def _vectors(session, sql, name="features"):

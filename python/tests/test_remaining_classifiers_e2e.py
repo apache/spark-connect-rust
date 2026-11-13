@@ -24,6 +24,7 @@ import math
 import os
 
 import pytest
+from _native_classes import native_class
 from pyspark.ml.linalg import Vectors
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
@@ -42,13 +43,7 @@ def session():
 
 
 def _classifier(name):
-    from pyspark.ml.connect import classification as native
-
-    if hasattr(native, "FMClassifier"):
-        return getattr(native, name)
-    from pyspark.ml import classification as official
-
-    return getattr(official, name)
+    return native_class("pyspark.ml.connect.classification", name, "pyspark.ml.classification")
 
 
 def _triangles(session, names=("features", "label")):

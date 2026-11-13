@@ -21,6 +21,7 @@ import math
 import os
 
 import pytest
+from _native_classes import native_class
 from pyspark.ml.connect.functions import array_to_vector
 from pyspark.ml.linalg import Vectors
 from pyspark.sql import SparkSession
@@ -40,11 +41,7 @@ def session():
 
 
 def _estimator():
-    try:
-        from pyspark.ml.connect.regression import GeneralizedLinearRegression
-    except ImportError:
-        from pyspark.ml.regression import GeneralizedLinearRegression
-    return GeneralizedLinearRegression
+    return native_class("pyspark.ml.connect.regression", "GeneralizedLinearRegression", "pyspark.ml.regression")
 
 
 def _vectors(session, sql):
