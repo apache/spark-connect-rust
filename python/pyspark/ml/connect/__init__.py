@@ -41,6 +41,7 @@ from pyspark.ml.connect.evaluation import (
 )
 from pyspark.ml.connect.pipeline import Pipeline, PipelineModel
 from pyspark.ml.connect.tuning import CrossValidator, CrossValidatorModel
+from pyspark.ml.connect.fpm import FPGrowth, FPGrowthModel, PrefixSpan
 from pyspark._pyspark import MLModel
 
 # Base ABCs (vendored from upstream base.py) and the submodules, matching the reference
@@ -100,6 +101,9 @@ __all__ = [
     "CrossValidator",
     "CrossValidatorModel",
     "MLModel",
+    "FPGrowth",
+    "FPGrowthModel",
+    "PrefixSpan",
 ]
 
 __all__ += [name for name in _native._ml_feature_names if name not in __all__]
