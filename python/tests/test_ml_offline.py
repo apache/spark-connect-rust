@@ -63,6 +63,9 @@ def ml_mock(_ml_mock_server):
     service.reset()
     spark = SparkSession.builder.remote(service.remote).getOrCreate()
     yield spark, service
+    # A model sends its Delete without waiting for it, so the Delete of a model of this test can
+    # reach the server during a later test, which would count it as a request of its own.
+    service.forget_session(spark.session_id)
     spark.stop()
 
 
@@ -1384,6 +1387,38 @@ def test_native_models_released_while_their_session_stops_send_their_delete_as_p
     gc.collect()
     time.sleep(0.5)
     assert "model-released-once-stopped" not in deleted()
+
+
+def test_the_deletes_of_the_models_of_an_ended_test_are_not_recorded_in_a_later_test(ml_mock):
+    # The fixture forgets the session of a test when the test ends. A model sends its Delete
+    # without waiting for it, so the Delete of a model of the session can reach the server while
+    # a later test runs: the server answers it and does not record it, so the later test counts
+    # only its own requests.
+    import time
+
+    from pyspark.ml.connect import KMeans
+
+    spark, service = ml_mock
+    ended = SparkSession.builder.remote(service.remote).create()
+    try:
+        service.execute_payload = _operator_info("model-of-an-ended-test")
+        model = KMeans(k=2).fit(ended.range(1))
+        service.forget_session(ended.session_id)
+        service.reset()
+        del model
+        gc.collect()
+        deadline = time.time() + 5
+        while service.forgotten_requests == 0 and time.time() < deadline:
+            time.sleep(0.05)
+        assert service.forgotten_requests == 1
+        assert service.execute_requests == []
+        # The requests of a session that is not forgotten are still recorded.
+        service.execute_payload = _operator_info("a")
+        assert spark.client._delete_ml_cache(["a"]) == ["a"]
+        (command,) = _commands(service)
+        assert [ref.id for ref in command.ml_command.delete.obj_refs] == ["a"]
+    finally:
+        ended.stop()
 
 
 @pytest.mark.parametrize(
