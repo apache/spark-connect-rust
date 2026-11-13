@@ -6,7 +6,7 @@
 mod common;
 
 use common::{session, should_run};
-use spark_connect::column::{col, lit};
+use spark_connect::column::{col, lit, Column};
 use spark_connect::dataframe::DataFrame;
 use spark_connect::functions as f;
 use spark_connect::plan::JoinType;
@@ -309,6 +309,41 @@ fn list_methods_take_any_iterable_on_the_server() {
         named_rows(&df.to_df(["a", "b", "c", "d"].iter().copied())),
         renamed
     );
+}
+
+/// A sort of no columns keeps the cached schema of its input, as PySpark's `sort([])` does, so its
+/// `schema()` returns that schema without an error, while the server rejects the sort when it runs.
+#[test]
+fn an_empty_sort_keeps_the_cached_schema_and_fails_when_it_runs() {
+    if !should_run() {
+        return;
+    }
+    let s = session();
+    let df = s.range(3).unwrap();
+    let schema = df.schema().unwrap();
+
+    let empty = || Vec::<Column>::new();
+    let sorts = [
+        ("sort", df.sort(empty())),
+        ("order_by", df.order_by(empty())),
+        ("sort_within_partitions", df.sort_within_partitions(empty())),
+    ];
+    for (name, sorted) in sorts {
+        assert_eq!(sorted.schema().unwrap(), schema, "{name} of no columns");
+        let err = sorted
+            .collect()
+            .err()
+            .unwrap_or_else(|| panic!("{name} of no columns runs"));
+        assert_eq!(
+            err.get_condition().as_deref(),
+            Some("CONNECT_INVALID_PLAN.ASSERTION_FAILURE"),
+            "{name}: {err}"
+        );
+    }
+
+    let sorted = df.sort(["id"]);
+    assert_eq!(sorted.schema().unwrap(), schema);
+    assert_eq!(sorted.count().unwrap(), 3);
 }
 
 /// A pivot on a date, timestamp or decimal column takes typed values. The counts match those
