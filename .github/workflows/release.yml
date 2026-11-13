@@ -329,6 +329,22 @@ jobs:
           rustup default stable
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Verify every published crate ships LICENSE and NOTICE
+        # ASF releases carry LICENSE and NOTICE in every artifact. cargo packages only the files
+        # under each crate's directory, so each crate links the root ones; `cargo package --list`
+        # shows whether the packaged crate has them.
+        run: |
+          set -euo pipefail
+          for c in apache-spark-connect-proto apache-spark-connect-core apache-spark-connect; do
+            files=$(cargo package --list --allow-dirty -p "$c")
+            for f in LICENSE NOTICE; do
+              if ! grep -qx "$f" <<<"$files"; then
+                echo "::error::the crate $c does not package $f"
+                exit 1
+              fi
+            done
+          done
+          echo "Every crate packages LICENSE and NOTICE."
       - name: cargo publish --dry-run (dependency-ordered)
         run: |
           set -euo pipefail
@@ -485,6 +501,22 @@ jobs:
           rustup default stable
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Verify every published crate ships LICENSE and NOTICE
+        # ASF releases carry LICENSE and NOTICE in every artifact. cargo packages only the files
+        # under each crate's directory, so each crate links the root ones; `cargo package --list`
+        # shows whether the packaged crate has them.
+        run: |
+          set -euo pipefail
+          for c in apache-spark-connect-proto apache-spark-connect-core apache-spark-connect; do
+            files=$(cargo package --list --allow-dirty -p "$c")
+            for f in LICENSE NOTICE; do
+              if ! grep -qx "$f" <<<"$files"; then
+                echo "::error::the crate $c does not package $f"
+                exit 1
+              fi
+            done
+          done
+          echo "Every crate packages LICENSE and NOTICE."
       - name: Publish crates to crates.io (from the identical RC source)
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
