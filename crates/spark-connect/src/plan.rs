@@ -706,10 +706,12 @@ impl PlanIds {
     /// relation within the `WithRelations` that sends it), and of each node that was given it
     /// (`assign`): each DataFrame of a relation that the session sent, such as each unpickled
     /// copy of a DataFrame, or a deep copy of one, is a node of its own with the plan ID of the
-    /// DataFrame it was of, which may be alive too. A deep copy has Observations of its own
-    /// (`DataFrame::detached_copy`), so the nodes of an ID may differ in them: the first given
-    /// the ID is taken, which is the DataFrame that the copies were made of, as long as it is
-    /// alive, so that a copy of a relation shares its Observations as PySpark's `copy.copy` does.
+    /// DataFrame it was of, which may be alive too. Each copy has Observations of its own
+    /// (`DataFrame::deep_copy_with`, `DataFrame::from_sent_relation`), so the nodes of an ID may
+    /// differ in them: the first given the ID is taken, which is the DataFrame that the copies
+    /// were made of, as long as it is alive, so that an unpickled DataFrame copies the
+    /// Observations of the DataFrame that was pickled, as PySpark's unpickled plan has copies of
+    /// those of the pickled one.
     ///
     /// This scans every node of the session, once for each DataFrame made of a sent relation,
     /// which costs less than keeping a second map by plan ID in step with the first on every

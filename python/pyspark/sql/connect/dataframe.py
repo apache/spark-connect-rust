@@ -53,18 +53,20 @@ _local_rows.__code__ = _local_rows.__code__.replace(
 
 
 def _reduce_dataframe(
-    session: Any, relation: bytes, levels: int = 1
+    session: Any, relation: bytes, levels: int = 1, support_repr_html: bool = False
 ) -> tuple[Callable[..., Any], tuple[Any, ...]]:
     """The ``__reduce__`` of a DataFrame of ``session`` and the bytes of its ``relation`` of
-    ``levels`` levels, as PySpark Connect's, of its session and its plan: a function, which
-    cloudpickle pickles by value, of the session, which unpickles first, and of the relation.
+    ``levels`` levels, as PySpark Connect's, of its session, its plan and its state: a function,
+    which cloudpickle pickles by value, of the session, which unpickles first, of the relation,
+    and of ``support_repr_html``, the ``_support_repr_html`` of the state, which the DataFrame
+    that it gives back keeps.
 
     On a Python worker of the server, whose PySpark has no Rust client, such as the worker of a
     ``foreachBatch`` function, which has the active session of the query, the function gives
     back PySpark Connect's DataFrame of the relation, as PySpark's DataFrame of its plan unpickles
     there. So everything that it calls there is of PySpark, which the worker has."""
 
-    def creator(session: Any, relation: bytes, levels: int) -> Any:
+    def creator(session: Any, relation: bytes, levels: int, support_repr_html: bool) -> Any:
         try:
             from pyspark import _pyspark
         except ImportError:
@@ -89,8 +91,10 @@ def _reduce_dataframe(
                     sent.CopyFrom(self._relation)
                     return sent
 
-            return ConnectDataFrame(Relation(parse_deep(proto.Relation, relation)), session)
+            df = ConnectDataFrame(Relation(parse_deep(proto.Relation, relation)), session)
+            df._support_repr_html = support_repr_html
+            return df
 
-        return _pyspark.DataFrame._of_relation(session, relation, levels)
+        return _pyspark.DataFrame._of_relation(session, relation, levels, support_repr_html)
 
-    return creator, (session, relation, levels)
+    return creator, (session, relation, levels, support_repr_html)

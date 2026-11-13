@@ -3962,6 +3962,43 @@ def test_a_deep_copy_of_a_dataframe_sets_its_own_observations_as_pyspark(session
     assert first.get == {"c": 3} and second.get == {"c": 5}
 
 
+def test_copies_of_a_dataframe_set_the_copies_of_its_call_or_their_own_as_pyspark(session):
+    # As PySpark's DataFrame.__reduce__: a deep copy copies the plan with the memo of the call, so
+    # the copy of an Observation that the call copies too, in a tuple, a list or an object that
+    # holds both, is the one whose metrics the actions of the copied DataFrame set; an unpickled
+    # DataFrame, or an unpickled deep copy, sets copies of its own; the Observation keeps its
+    # metrics. A shallow copy has an executionInfo of its own.
+    import copy
+    import pickle
+
+    from pyspark import cloudpickle
+    from pyspark.sql import Observation
+
+    class Holder:
+        def __init__(self, df, observation):
+            self.df, self.observation = df, observation
+
+    observation = Observation("of_the_call")
+    df = session.range(3).observe(observation, F.count(F.lit(1)).alias("c"))
+    holder = copy.deepcopy(Holder(df, observation))
+    pairs = [copy.deepcopy((df, observation)), copy.deepcopy([observation, df])[::-1],
+             (holder.df, holder.observation)]
+    for copied, copied_observation in pairs:
+        assert copied.count() == 3 and copied_observation.get == {"c": 3}
+    assert observation.get == {}
+    for unpickled in (pickle.loads(cloudpickle.dumps(df)),
+                      pickle.loads(cloudpickle.dumps(copy.deepcopy(df)))):
+        assert unpickled.count() == 3
+    assert observation.get == {}
+
+    named = session.range(3).observe("named_of_a_copy", F.count(F.lit(1)).alias("c"))
+    shallow = copy.copy(named)
+    assert shallow.collect() == [Row(id=0), Row(id=1), Row(id=2)]
+    assert named.executionInfo is None
+    assert shallow.executionInfo.flows == [("named_of_a_copy", {"c": 3})]
+    assert copy.copy(shallow).executionInfo is None
+
+
 def test_an_observation_copies_and_pickles_as_the_plain_object_of_pyspark(session):
     # As PySpark's Observation, a plain object: a shallow copy shares the metrics that the actions
     # set later, a deep copy keeps those that it had, and one pickled into the server's Python

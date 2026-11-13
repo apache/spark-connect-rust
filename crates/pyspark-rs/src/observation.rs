@@ -157,6 +157,9 @@ impl PyObservation {
                 restored: Restored::default(),
             },
         )?;
+        // The copy is the Observation of the state that the deep copy of a DataFrame of the call
+        // holds, which a deep copy of that DataFrame copies with the copy.
+        keep_handle(&copy)?;
         // As copy.deepcopy of a plain object, which records the copy in `memo` before it copies
         // the attributes, so that an attribute that refers to this observation refers to the copy.
         memo.set_item(slf.as_ptr() as usize, &copy)?;
@@ -283,6 +286,54 @@ fn metrics_dict(
     Ok(result)
 }
 
+/// Keep a weak reference to `observation` on its state, by which the deep copy of a DataFrame
+/// whose plan holds the state finds it (see [`deep_copy_in`]).
+fn keep_handle(observation: &Bound<'_, PyObservation>) -> PyResult<()> {
+    let weak = pyo3::types::PyWeakrefReference::new(observation.as_any())?.unbind();
+    observation
+        .borrow()
+        .inner
+        .set_handle(std::sync::Arc::new(weak));
+    Ok(())
+}
+
+/// The Python Observation of `observation`, a state that a plan holds, while it is alive: the
+/// one of [`keep_handle`], if it still has this state.
+fn python_observation<'py>(
+    py: Python<'py>,
+    observation: &Observation,
+) -> Option<Bound<'py, PyObservation>> {
+    let handle = observation.handle()?;
+    let weak = handle.downcast_ref::<Py<pyo3::types::PyWeakrefReference>>()?;
+    let python = weak.bind(py).upgrade_as::<PyObservation>().ok().flatten()?;
+    // `__setstate__` gives an Observation a state of its own.
+    let same = python.borrow().inner.same(observation);
+    same.then_some(python)
+}
+
+/// The copy of `observation`, an Observation of the plan of a DataFrame that `copy.deepcopy`
+/// copies with `memo`, as PySpark's deep copy of a plan copies the Observation that it holds,
+/// with the memo of the call: the deep copy of its Python Observation in `memo`, the copy that
+/// the call made already, of the Observation itself or for another DataFrame, or that it makes
+/// now and gives to the objects that it copies later. So in the copy of a tuple of a DataFrame
+/// and its Observation, or of an object that holds both, the actions of the copied DataFrame
+/// set the copied Observation. A state that no Python Observation holds any more, which no
+/// other object of the call can refer to, has a copy of its own.
+pub(crate) fn deep_copy_in(
+    py: Python<'_>,
+    observation: &Observation,
+    memo: &Bound<'_, PyAny>,
+) -> PyResult<Observation> {
+    let Some(python) = python_observation(py, observation) else {
+        return Ok(observation.detached());
+    };
+    let copy = py
+        .import("copy")?
+        .call_method1(pyo3::intern!(py, "deepcopy"), (python, memo))?;
+    let copy = copy.extract::<PyRef<'_, PyObservation>>()?;
+    Ok(copy.inner.clone())
+}
+
 /// Set the attributes of `observation` on `copy`, as `copy` sets the `__dict__` of the copy of a
 /// plain object: the same values, or, of a deep copy, their deep copies of `memo`.
 fn copy_attributes(
@@ -324,6 +375,9 @@ pub(crate) fn observe(
     let observed = crate::interrupt::interruptible(py, &df.spark_session(), || {
         df.observe_with(&inner, exprs)
     })?;
+    // The plan holds the state of the Observation, as PySpark's holds the Observation itself,
+    // which a deep copy of the plan copies with the memo of the call.
+    keep_handle(observation)?;
     Ok(PyDataFrame::new(observed))
 }
 

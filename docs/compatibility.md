@@ -565,6 +565,11 @@ decodes server responses deeper than 100 nested messages, such as the schema of 
 34 levels deep, which PySpark's client rejects with "Exception deserializing response!". The
 server is trusted, as SECURITY.md sets out, so this is not a bound on the responses.
 
+An `Observation` that PySpark pickled at protocol 0 or 1 raises a `TypeError` when the drop-in
+unpickles it, as CPython's `copyreg._reconstructor` cannot create the drop-in's `Observation`, a
+class with a native base; protocols 2 and up, pickle's default, load in both clients, and PySpark
+loads the drop-in's at every protocol.
+
 ## Native NaiveBayes
 
 The Rust `ml::NaiveBayes` and `ml::NaiveBayesModel` train and predict through Spark

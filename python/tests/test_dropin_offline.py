@@ -10719,6 +10719,204 @@ def test_a_deep_copy_of_a_join_sets_the_observations_of_its_copy_as_pyspark(mock
     assert first.get == {"c": 3} and second.get == {"c": 5}
 
 
+def test_a_deep_copy_copies_an_observation_once_with_the_objects_of_its_call_as_pyspark(
+        mock_connect):
+    # As PySpark's DataFrame.__reduce__, whose deep copy copies the plan, and so the Observation of
+    # its CollectMetrics, with the memo of the call: an Observation that the call copies too, in a
+    # tuple, a list or an object that holds both, in either order, is copied once, with its
+    # attributes, and the actions of the copied DataFrame set that copy; so do those of another
+    # DataFrame of the call, and of one copied with the same memo of the caller. The Observation
+    # itself keeps its metrics.
+    import copy
+
+    from pyspark.sql import Observation
+    from pyspark.sql import functions as F
+
+    class Holder:
+        def __init__(self, df, observation):
+            self.df, self.observation = df, observation
+
+    spark, service = mock_connect
+    observation = Observation("o")
+    observation.tags = ["t"]
+    df = spark.range(3).observe(observation, F.count(F.lit(1)).alias("c"))
+    batch, observed = _count_batch_and_observed_metrics(service, df)
+
+    def count(frame, value):
+        service.execute_payload = batch + observed("o", varint_field(7, value), "c")
+        return frame.count()
+
+    holder = copy.deepcopy(Holder(df, observation))
+    pairs = [copy.deepcopy((df, observation)), copy.deepcopy([observation, df])[::-1],
+             (holder.df, holder.observation)]
+    for value, (copied, copied_observation) in enumerate(pairs, start=3):
+        assert copied_observation is not observation and copied_observation._name == "o"
+        assert copied_observation.tags == ["t"] and copied_observation.tags is not observation.tags
+        assert count(copied, value) == 3
+        assert copied_observation.get == {"c": value} and observation.get == {}
+
+    first, second, copied_observation = copy.deepcopy([df, df.where("id > 0"), observation])
+    assert count(first, 6) == 3 and copied_observation.get == {"c": 6}
+    assert count(second, 7) == 3 and copied_observation.get == {"c": 7}
+    memo = {}
+    copied = copy.deepcopy(df, memo)
+    copied_observation = copy.deepcopy(observation, memo)
+    assert copy.deepcopy(df, memo) is copied
+    assert count(copied, 8) == 3 and copied_observation.get == {"c": 8}
+    # A deep copy of the copies copies them so too, and a shallow copy of a copy shares its copy.
+    copied, copied_observation = copy.deepcopy((df, observation))
+    again, copied_again = copy.deepcopy((copied, copied_observation))
+    assert count(again, 9) == 3 and copied_again.get == {"c": 9}
+    assert copied_observation.get == {} and observation.get == {}
+    assert count(copy.copy(copied), 11) == 3 and copied_observation.get == {"c": 11}
+    assert copied_again.get == {"c": 9} and observation.get == {}
+    # An attribute of the Observation that refers to the DataFrame refers to a copy of it of its
+    # own, of the copied Observation, as the copy of the plan copies the Observation first.
+    observation.df = df
+    copied, copied_observation = copy.deepcopy((df, observation))
+    assert copied_observation.df is not copied and copied_observation.df is not df
+    assert count(copied_observation.df, 10) == 3 and copied_observation.get == {"c": 10}
+    assert observation.get == {}
+
+
+def test_a_deep_copy_copies_the_session_with_the_objects_of_its_call_as_pyspark(mock_connect):
+    # As PySpark's DataFrame.__reduce__, whose deep copy copies the session after the plan with
+    # the memo of the call, by SparkSession.__reduce__: the active session of its ID, once in a
+    # call, so the copies of two DataFrames of the session share it, and a memo of the caller that
+    # maps it to another session gives a copy of that one. Where no session is active, as on
+    # another thread, a deep copy raises NO_ACTIVE_SESSION, and where another one is,
+    # PySparkAssertionError; copy.copy keeps the session.
+    import copy
+    import threading
+
+    from pyspark.errors import PySparkAssertionError, PySparkRuntimeError
+    from pyspark.sql import SparkSession
+
+    spark, service = mock_connect
+    df = spark.range(3)
+    memo = {}
+    copies = copy.deepcopy([df, spark.range(5)], memo)
+    assert all(copied.sparkSession is spark for copied in copies)
+    assert memo[id(spark)] is spark
+    seen = []
+
+    def on_a_thread():
+        try:
+            copy.deepcopy(df)
+        except PySparkRuntimeError as error:
+            seen.append(error.getCondition())
+        seen.append(copy.copy(df).sparkSession is spark)
+
+    thread = threading.Thread(target=on_a_thread)
+    thread.start()
+    thread.join()
+    assert seen == ["NO_ACTIVE_SESSION", True]
+    other = SparkSession.builder.remote(service.remote).create()
+    try:
+        assert SparkSession.getActiveSession() is spark
+        with pytest.raises(PySparkAssertionError, match="Expected session ID does not match"):
+            copy.deepcopy(other.range(1))
+        assert copy.deepcopy(df, {id(spark): other}).sparkSession is other
+    finally:
+        other.stop()
+
+
+def test_a_copy_of_a_dataframe_has_an_execution_info_of_its_own_as_pyspark(mock_connect):
+    # As PySpark's copy.copy of a DataFrame, a DataFrame(plan, session) of its plan: its
+    # executionInfo is None until it executes, also of a DataFrame that executed, and then that of
+    # its own executions, which leave the DataFrame's as it is; so is that of a deep copy and of an
+    # unpickled DataFrame.
+    import copy
+
+    from pyspark.serializers import CloudPickleSerializer
+
+    spark, service = mock_connect
+    serializer = CloudPickleSerializer()
+    df = spark.range(3)
+    copied = copy.copy(df)
+    copied.collect()
+    assert df.executionInfo is None
+    first = copied.executionInfo.operation_id
+    assert first == _request_operation_id(service.execute_requests[-1])
+    df.collect()
+    original = df.executionInfo.operation_id
+    assert original not in (None, first)
+    copied.collect()
+    assert df.executionInfo.operation_id == original
+    assert copied.executionInfo.operation_id not in (first, original)
+    for later in (copy.copy(df), copy.copy(copied), copy.deepcopy(df),
+                  serializer.loads(serializer.dumps(df))):
+        assert later.executionInfo is None
+
+
+def test_copies_and_unpickled_dataframes_keep_support_repr_html_as_pyspark(mock_connect):
+    # As PySpark's DataFrame.__reduce__, whose state carries _support_repr_html to a copy, a deep
+    # copy and an unpickled DataFrame: once _repr_html_ was called, their repr is the string of the
+    # schema with eager evaluation, else the table of eager evaluation; the _repr_html_ of a copy
+    # leaves the DataFrame as it is.
+    import copy
+
+    import pyarrow as pa
+    from pyspark.serializers import CloudPickleSerializer
+
+    spark, service = mock_connect
+    service.confs = {"spark.sql.repl.eagerEval.enabled": "true",
+                     "spark.sql.repl.eagerEval.maxNumRows": "7",
+                     "spark.sql.repl.eagerEval.truncate": "3"}
+    table = pa.table({"html_string": ["<table/>"]})
+    sink = pa.BufferOutputStream()
+    with pa.ipc.new_stream(sink, table.schema) as writer:
+        writer.write_table(table)
+    # ExecutePlanResponse.arrow_batch=2: ArrowBatch.row_count=1, data=2.
+    service.execute_payload = message_field(
+        2, varint_field(1, 1) + message_field(2, sink.getvalue().to_pybytes()))
+    serializer = CloudPickleSerializer()
+
+    def copies(frame):
+        return [copy.copy(frame), copy.deepcopy(frame), serializer.loads(serializer.dumps(frame))]
+
+    df = spark.range(1)
+    assert [repr(copied) for copied in copies(df)] == ["<table/>"] * 3
+    for copied in copies(df):
+        assert copied._repr_html_() == "<table/>"
+    assert repr(df) == "<table/>"
+    assert df._repr_html_() == "<table/>"
+    assert [repr(copied) for copied in copies(df)] == ["DataFrame[id: bigint]"] * 3
+    assert [repr(copied) for copied in copies(copy.deepcopy(df))] == ["DataFrame[id: bigint]"] * 3
+
+
+def test_an_unpickled_dataframe_sets_copies_of_the_observations_as_pyspark(mock_connect):
+    # As PySpark's unpickled plan, which has copies of the Observations of the pickled one: the
+    # actions of an unpickled DataFrame, or of an unpickled deep copy, set the copies and not the
+    # Observations of the DataFrame, before and after its own actions, which still set them; and
+    # they raise for a metric that PySpark does not convert, as the copies are of their plan.
+    import copy
+
+    from pyspark.errors import PySparkTypeError
+    from pyspark.serializers import CloudPickleSerializer
+    from pyspark.sql import Observation
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+    serializer = CloudPickleSerializer()
+    observation = Observation("o")
+    df = spark.range(3).observe(observation, F.count(F.lit(1)).alias("c"))
+    batch, observed = _count_batch_and_observed_metrics(service, df)
+    # Literal.long=7, year_month_interval=20.
+    for unpickled in (serializer.loads(serializer.dumps(df)),
+                      serializer.loads(serializer.dumps(copy.deepcopy(df)))):
+        service.execute_payload = batch + observed("o", varint_field(7, 3), "c")
+        assert unpickled.count() == 3 and observation.get == {}
+        service.execute_payload = batch + observed("o", varint_field(20, 14), "c")
+        with pytest.raises(PySparkTypeError, match="UNSUPPORTED_LITERAL"):
+            unpickled.count()
+    service.execute_payload = batch + observed("o", varint_field(7, 4), "c")
+    assert df.count() == 3 and observation.get == {"c": 4}
+    unpickled = serializer.loads(serializer.dumps(df))
+    service.execute_payload = batch + observed("o", varint_field(7, 5), "c")
+    assert unpickled.count() == 3 and observation.get == {"c": 4}
+
+
 def test_an_observation_copies_as_the_plain_object_of_pyspark(mock_connect):
     # As copy.copy and copy.deepcopy of PySpark's Observation, a plain object: a copy of an unused
     # one is of its name and is used on its own; a shallow copy of a used one shares its result
