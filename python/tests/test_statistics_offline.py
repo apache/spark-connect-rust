@@ -44,11 +44,11 @@ def clean(message):
 
 
 def test_native_exports_and_reference_signatures():
-    import pyspark.ml.connect as connect
+    import pyspark.ml.stat as public
 
     stat = api()
     for name in stat.__all__:
-        assert getattr(stat, name) is getattr(connect, name) is getattr(_pyspark, name)
+        assert getattr(stat, name) is getattr(public, name) is getattr(_pyspark, name)
     for key, expected in FIXTURE["signatures"].items():
         cls, method = key.split(".")
         target = getattr(stat, cls) if method == "__init__" else getattr(getattr(stat, cls), method)

@@ -15,14 +15,14 @@ REFERENCE = os.environ.get("STATISTICS_REFERENCE") == "1"
 
 
 def api():
-    if REFERENCE:
-        from pyspark.ml import stat
-    else:
+    from pyspark.ml import stat
+
+    if not REFERENCE:
         from pyspark import _pyspark
-        from pyspark.ml.connect import stat
 
         for name in stat.__all__:
             assert getattr(stat, name) is getattr(_pyspark, name)
+            assert getattr(stat, name).__module__ == "pyspark.ml.stat"
     return stat
 
 

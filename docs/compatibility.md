@@ -947,8 +947,10 @@ persistence remain separate work.
 
 Rust's `ml::{ChiSquareTest, Correlation, KolmogorovSmirnovTest, Summarizer,
 SummaryBuilder, MultivariateGaussian}` and the native Python classes in
-`pyspark.ml.connect.stat` cover the standard `pyspark.ml.stat` APIs from PySpark
-4.3.0. The standard vendored `pyspark.ml.stat` module remains unchanged.
+`pyspark.ml.stat` cover the standard ML statistics APIs from PySpark 4.3.0.
+The Python module is a Rust-backed shim, replacing its vendored implementation.
+The deprecated `pyspark.ml.connect` public API is excluded from statistics parity
+work; statistics have no new export under that namespace.
 
 The statistical tests return lazy Spark DataFrames. Chi-square supports both the
 vector result and one row per feature (`flatten=True`); correlation supports

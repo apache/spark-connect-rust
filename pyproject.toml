@@ -142,7 +142,6 @@ extend-exclude = [
     "python/pyspark/ml/pipeline.py",
     "python/pyspark/ml/recommendation.py",
     "python/pyspark/ml/regression.py",
-    "python/pyspark/ml/stat.py",
     "python/pyspark/ml/tree.py",
     "python/pyspark/ml/tuning.py",
     "python/pyspark/ml/wrapper.py",

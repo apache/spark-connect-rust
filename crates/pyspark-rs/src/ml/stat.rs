@@ -7,7 +7,7 @@ use spark_connect::ml::{
     ChiSquareTest, Correlation, KolmogorovSmirnovTest, Summarizer, SummaryBuilder,
 };
 
-#[pyclass(name = "ChiSquareTest", module = "pyspark.ml.connect.stat")]
+#[pyclass(name = "ChiSquareTest", module = "pyspark.ml.stat")]
 pub struct PyChiSquareTest;
 #[pymethods]
 impl PyChiSquareTest {
@@ -33,7 +33,7 @@ impl PyChiSquareTest {
     }
 }
 
-#[pyclass(name = "Correlation", module = "pyspark.ml.connect.stat")]
+#[pyclass(name = "Correlation", module = "pyspark.ml.stat")]
 pub struct PyCorrelation;
 #[pymethods]
 impl PyCorrelation {
@@ -51,7 +51,7 @@ impl PyCorrelation {
     }
 }
 
-#[pyclass(name = "KolmogorovSmirnovTest", module = "pyspark.ml.connect.stat")]
+#[pyclass(name = "KolmogorovSmirnovTest", module = "pyspark.ml.stat")]
 pub struct PyKolmogorovSmirnovTest;
 #[pymethods]
 impl PyKolmogorovSmirnovTest {
@@ -83,7 +83,7 @@ impl PyKolmogorovSmirnovTest {
     }
 }
 
-#[pyclass(name = "SummaryBuilder", module = "pyspark.ml.connect.stat")]
+#[pyclass(name = "SummaryBuilder", module = "pyspark.ml.stat")]
 pub struct PySummaryBuilder {
     metrics: Vec<Py<PyAny>>,
 }
@@ -122,7 +122,7 @@ impl PySummaryBuilder {
     }
 }
 
-#[pyclass(name = "Summarizer", module = "pyspark.ml.connect.stat")]
+#[pyclass(name = "Summarizer", module = "pyspark.ml.stat")]
 pub struct PySummarizer;
 fn columns(
     col: &Bound<'_, PyAny>,
@@ -174,11 +174,7 @@ metrics!(
 );
 
 // PySpark's holder keeps the original Python objects, with no type/shape validation.
-#[pyclass(
-    name = "MultivariateGaussian",
-    module = "pyspark.ml.connect.stat",
-    dict
-)]
+#[pyclass(name = "MultivariateGaussian", module = "pyspark.ml.stat", dict)]
 pub struct PyMultivariateGaussian {
     #[pyo3(get, set)]
     mean: Py<PyAny>,

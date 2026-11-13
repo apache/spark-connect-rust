@@ -128,7 +128,7 @@ def test_lazy_statistics_retain_upstream_model(frames):
     if REFERENCE:
         from pyspark.ml.feature import StandardScaler
     else:
-        from pyspark.ml.connect.feature import StandardScaler
+        from pyspark._pyspark import StandardScaler
     stat = api()
     model = StandardScaler(
         inputCol="features", outputCol="scaled", withStd=False, withMean=False
