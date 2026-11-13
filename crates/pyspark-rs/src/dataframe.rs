@@ -2197,18 +2197,6 @@ impl PyDataFrame {
         self.spark_session(py)
     }
 
-    /// Not supported on Spark Connect, as PySpark Connect's: `NOT_IMPLEMENTED` of `rdd`, which
-    /// needs the RDD API of a classic session.
-    #[getter]
-    fn rdd(&self, py: Python<'_>) -> PyResult<()> {
-        Err(crate::column::raise_pyspark(
-            py,
-            "PySparkNotImplementedError",
-            "NOT_IMPLEMENTED",
-            &[("feature", "rdd")],
-        ))
-    }
-
     /// The EXISTS subquery of this DataFrame, as a Column. Mirrors `DataFrame.exists()`.
     fn exists(&self) -> PyColumn {
         PyColumn::new(self.dataframe.exists())
