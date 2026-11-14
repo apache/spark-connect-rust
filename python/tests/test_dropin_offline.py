@@ -26622,6 +26622,10 @@ def test_session_builders_copy_and_pickle_as_pyspark(mock_connect):
     rebuilt = cloudpickle.loads(cloudpickle.dumps(builder))
     assert type(rebuilt) is type(builder)
     assert pickle.loads(cloudpickle.dumps(copied)) is not None
+    # A plain pickle of a builder succeeds, as of PySpark's, and keeps the options.
+    rebuilt = pickle.loads(pickle.dumps(builder))
+    assert type(rebuilt) is type(builder)
+    assert ("k", "v") in rebuilt.__reduce__()[1][0]
 
 
 def test_pivot_values_are_the_literal_columns_as_pyspark(mock_connect):

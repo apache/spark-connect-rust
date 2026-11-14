@@ -402,38 +402,41 @@ def stream_writer_reduce(
     )
 
 
+def _builder_of(
+    options: list[tuple[str, Optional[str]]],
+    channel_builder: Any,
+    hook_factories: list[Any],
+) -> Any:
+    """The builder of its options, its channel builder and its hook factories: the drop-in's, or
+    PySpark Connect's on a Python worker, which is built through the same calls: ``config``,
+    ``channelBuilder`` and ``_registerHook``. A function of the module, so that a plain pickle of
+    a builder pickles it by its name, as a plain pickle of PySpark's Builder succeeds."""
+    try:
+        from pyspark import _pyspark
+
+        builder = _pyspark.Builder()
+    except ImportError:
+        from pyspark.sql.connect.session import SparkSession
+
+        builder = SparkSession.Builder()
+    for key, value in options:
+        builder.config(key, value)
+    if channel_builder is not None:
+        builder.channelBuilder(channel_builder)
+    for hook_factory in hook_factories:
+        builder._registerHook(hook_factory)
+    return builder
+
+
 def builder_reduce(
     options: list[tuple[str, Optional[str]]],
     channel_builder: Any,
     hook_factories: list[Any],
 ) -> tuple[Callable[..., Any], tuple[Any, ...]]:
     """The reduce of a session Builder of its options, its channel builder and its hook
-    factories, as PySpark's Builder keeps them in its ``__dict__``. The builder that the function
-    gives back is the drop-in's, or PySpark Connect's on a Python worker, which is built through
-    the same calls: ``config``, ``channelBuilder`` and ``_registerHook``."""
-
-    def creator(
-        options: list[tuple[str, Optional[str]]],
-        channel_builder: Any,
-        hook_factories: list[Any],
-    ) -> Any:
-        try:
-            from pyspark import _pyspark
-
-            builder = _pyspark.Builder()
-        except ImportError:
-            from pyspark.sql.connect.session import SparkSession
-
-            builder = SparkSession.Builder()
-        for key, value in options:
-            builder.config(key, value)
-        if channel_builder is not None:
-            builder.channelBuilder(channel_builder)
-        for hook_factory in hook_factories:
-            builder._registerHook(hook_factory)
-        return builder
-
-    return creator, (options, channel_builder, hook_factories)
+    factories, as PySpark's Builder keeps them in its ``__dict__``, which ``_builder_of`` gives
+    back."""
+    return _builder_of, (options, channel_builder, hook_factories)
 
 
 def _worker_streaming_query(  # pragma: no cover - only the server's worker runs it
