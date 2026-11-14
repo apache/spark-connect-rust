@@ -167,9 +167,10 @@ pub(super) trait ParamsHolder: PyClass<Frozen = False> {
 
 /// The defaults that an object holds itself, by param, where PySpark's `_defaultParamMap` has one
 /// that is not the default of its class: a fitted model has the defaults of its estimator, which
-/// `_copyValues` copies to it (a seed of the name of the estimator's class, or the `coldStartStrategy`
-/// that ALS has and ALSModel does not); and a loaded object has the defaults that it derived from
-/// the uid that it was made of, which `_resetUid` keeps (an `outputCol` of that uid).
+/// `_copyValues` copies to it (a seed of the name of the estimator's class, or the
+/// `coldStartStrategy` that ALS has and ALSModel does not); and a loaded object has the defaults
+/// that it derived from the uid that it was made of, which `_resetUid` keeps (an `outputCol` of
+/// that uid).
 pub(super) type OwnDefaults = Vec<(&'static str, Py<PyAny>)>;
 
 /// The default of the param `name` of `defaults`.
@@ -404,8 +405,8 @@ pub(super) fn is_set<T: ParamsHolder>(
 }
 
 /// The default of the class of `slf` of `default` (of `ml_params.json`), as PySpark derives it of
-/// the instance where it does: `{"uid_suffix": s}` is the uid of `slf` and `s` (`HasOutputCol`), and
-/// `{"class_name_hash": true}` the `hash` of the name of the class of `slf` (`HasSeed`).
+/// the instance where it does: `{"uid_suffix": s}` is the uid of `slf` and `s` (`HasOutputCol`),
+/// and `{"class_name_hash": true}` the `hash` of the name of the class of `slf` (`HasSeed`).
 fn class_default(slf: &Bound<'_, PyAny>, default: &serde_json::Value) -> PyResult<Py<PyAny>> {
     let py = slf.py();
     if let Some(suffix) = default
@@ -480,9 +481,19 @@ pub(super) fn copy_defaults<M: ParamsHolder + PyTypeInfo>(
     Ok(())
 }
 
+/// A uid of the class `class`, as PySpark's `Identifiable._randomUID`: the name of the class and
+/// the last 12 hex digits of a uuid4.
+pub(super) fn random_uid(py: Python<'_>, class: &str) -> PyResult<String> {
+    let hex: String = py
+        .import("uuid")?
+        .call_method0("uuid4")?
+        .getattr("hex")?
+        .extract()?;
+    Ok(format!("{class}_{}", &hex[hex.len() - 12..]))
+}
+
 /// The defaults that an object of the class `class` derives from the uid that it is made of, as a
-/// loaded one keeps them after `_resetUid`: of a uid of PySpark's `Identifiable._randomUID` (the
-/// name of the class and the last 12 hex digits of a uuid4).
+/// loaded one keeps them after `_resetUid`: of a uid of [`random_uid`].
 pub(super) fn uid_defaults(py: Python<'_>, class: &str) -> PyResult<OwnDefaults> {
     let Some(params) = all_params().get(class) else {
         return Ok(Vec::new());
@@ -497,12 +508,7 @@ pub(super) fn uid_defaults(py: Python<'_>, class: &str) -> PyResult<OwnDefaults>
         else {
             continue;
         };
-        let hex: String = py
-            .import("uuid")?
-            .call_method0("uuid4")?
-            .getattr("hex")?
-            .extract()?;
-        let uid = format!("{class}_{}", &hex[hex.len() - 12..]);
+        let uid = random_uid(py, class)?;
         defaults.push((
             meta.name.as_str(),
             PyString::new(py, &format!("{uid}{suffix}"))

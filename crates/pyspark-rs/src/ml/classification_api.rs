@@ -7,14 +7,26 @@ native_model! {
     PyLinearSVCModel = "LinearSVCModel" in "pyspark.ml.connect.classification",
         jvm: "org.apache.spark.ml.classification.LinearSVCModel";
     params: [
-        "aggregationDepth" => ("getAggregationDepth", get_aggregation_depth, param_aggregation_depth),
+        "aggregationDepth" => (
+            "getAggregationDepth",
+            get_aggregation_depth,
+            param_aggregation_depth
+        ),
         "featuresCol" => ("getFeaturesCol", get_features_col, param_features_col),
         "fitIntercept" => ("getFitIntercept", get_fit_intercept, param_fit_intercept),
         "labelCol" => ("getLabelCol", get_label_col, param_label_col),
-        "maxBlockSizeInMB" => ("getMaxBlockSizeInMB", get_max_block_size_in_mb, param_max_block_size_in_mb),
+        "maxBlockSizeInMB" => (
+            "getMaxBlockSizeInMB",
+            get_max_block_size_in_mb,
+            param_max_block_size_in_mb
+        ),
         "maxIter" => ("getMaxIter", get_max_iter, param_max_iter),
         "predictionCol" => ("getPredictionCol", get_prediction_col, param_prediction_col),
-        "rawPredictionCol" => ("getRawPredictionCol", get_raw_prediction_col, param_raw_prediction_col),
+        "rawPredictionCol" => (
+            "getRawPredictionCol",
+            get_raw_prediction_col,
+            param_raw_prediction_col
+        ),
         "regParam" => ("getRegParam", get_reg_param, param_reg_param),
         "standardization" => ("getStandardization", get_standardization, param_standardization),
         "threshold" => ("getThreshold", get_threshold, param_threshold),
@@ -34,19 +46,20 @@ native_model! {
         "numFeatures" => (num_features, "numFeatures"),
     ];
     methods: [
-        "predict" => (predict, "predict", (value: &Bound<'py, PyAny>)),
-        "predictRaw" => (predict_raw, "predictRaw", (value: &Bound<'py, PyAny>)),
+        "predict" => (predict, "predict", (value)),
+        "predictRaw" => (predict_raw, "predictRaw", (value)),
     ];
     relations: [];
+    relation_methods: [];
+    summary: Some(linear_svc_training_summary);
+    cached: [];
 
     /// The training summary of the fit, as `LinearSVCModel.summary()` (a method in PySpark 4.3.0,
     /// of `HasTrainingSummary.summary`): the same object on every call, of a model that this
     /// client fitted, else PySpark's RuntimeError.
     fn summary(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
-        let py = slf.py();
-        slf.try_borrow()?.core.summary_object(slf.as_any(), |target| {
-            Ok(Py::new(py, PyLinearSVCTrainingSummary::from(target))?.into_any())
-        })
+        let this = slf.try_borrow()?;
+        this.core.summary_object(slf.as_any(), linear_svc_training_summary)
     }
 
     /// Whether the model has a training summary, as `HasTrainingSummary.hasSummary` over Spark
@@ -59,7 +72,10 @@ native_model! {
 
     /// The summary of the model on `dataset`, as `LinearSVCModel.evaluate`: of the summary that
     /// the server returns of it, which this client does not release, as PySpark does not.
-    fn evaluate(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<Py<PyLinearSVCSummary>> {
+    fn evaluate(
+        slf: &Bound<'_, Self>,
+        dataset: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyLinearSVCSummary>> {
         let py = slf.py();
         if dataset.extract::<PyRef<'_, PyDataFrame>>().is_err() {
             return Err(PyTypeError::new_err(format!(
@@ -94,8 +110,12 @@ native_summary! {
         "weightedTruePositiveRate" => (weighted_true_positive_rate, "weightedTruePositiveRate"),
     ];
     methods: [
-        "fMeasureByLabel" => (f_measure_by_label, "fMeasureByLabel", (beta: f64 = 1.0)),
-        "weightedFMeasure" => (weighted_f_measure, "weightedFMeasure", (beta: f64 = 1.0)),
+        "fMeasureByLabel" => (
+            f_measure_by_label, "fMeasureByLabel", (beta = 1.0), "($self, beta=1.0)"
+        ),
+        "weightedFMeasure" => (
+            weighted_f_measure, "weightedFMeasure", (beta = 1.0), "($self, beta=1.0)"
+        ),
     ];
     relations: [
         "fMeasureByThreshold" => (f_measure_by_threshold, "fMeasureByThreshold"),
@@ -105,6 +125,7 @@ native_summary! {
         "recallByThreshold" => (recall_by_threshold, "recallByThreshold"),
         "roc" => (roc, "roc"),
     ];
+    relation_methods: [];
 }
 
 native_summary! {
@@ -129,8 +150,12 @@ native_summary! {
         "weightedTruePositiveRate" => (weighted_true_positive_rate, "weightedTruePositiveRate"),
     ];
     methods: [
-        "fMeasureByLabel" => (f_measure_by_label, "fMeasureByLabel", (beta: f64 = 1.0)),
-        "weightedFMeasure" => (weighted_f_measure, "weightedFMeasure", (beta: f64 = 1.0)),
+        "fMeasureByLabel" => (
+            f_measure_by_label, "fMeasureByLabel", (beta = 1.0), "($self, beta=1.0)"
+        ),
+        "weightedFMeasure" => (
+            weighted_f_measure, "weightedFMeasure", (beta = 1.0), "($self, beta=1.0)"
+        ),
     ];
     relations: [
         "fMeasureByThreshold" => (f_measure_by_threshold, "fMeasureByThreshold"),
@@ -140,6 +165,16 @@ native_summary! {
         "recallByThreshold" => (recall_by_threshold, "recallByThreshold"),
         "roc" => (roc, "roc"),
     ];
+    relation_methods: [];
+}
+
+/// The training summary object of a LinearSVCModel, as `_summaryCls` makes it (of no fetch).
+fn linear_svc_training_summary(
+    py: Python<'_>,
+    _model: &object::ModelCore,
+    target: spark_connect::ml::MlTarget,
+) -> PyResult<Py<PyAny>> {
+    Ok(Py::new(py, PyLinearSVCTrainingSummary::from(target))?.into_any())
 }
 
 /// Register the typed classification models and summaries.

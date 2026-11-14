@@ -898,7 +898,18 @@
      1.0
     ]
    ],
+   "summary_fMeasureByLabel_bool": [
+    "UnknownException",
+    "(java.lang.NoSuchMethodException) No method: org.apache.spark.ml.classification.LinearSVCTrainingSummaryImpl.fMeasureByLabel(boolean)"
+   ],
    "summary_fMeasureByLabel_half": [
+    "ok",
+    [
+     1.0,
+     1.0
+    ]
+   ],
+   "summary_fMeasureByLabel_int": [
     "ok",
     [
      1.0,
@@ -976,6 +987,10 @@
     "'weightCol'"
    ],
    "summary_weightedFMeasure": [
+    "ok",
+    1.0
+   ],
+   "summary_weightedFMeasure_keyword": [
     "ok",
     1.0
    ],

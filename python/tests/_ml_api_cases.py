@@ -196,6 +196,11 @@ def _linear_svc_live(rec, model, df):
         rec("summary_" + a, lambda a=a: getattr(s, a))
     rec("summary_fMeasureByLabel", lambda: s.fMeasureByLabel())
     rec("summary_fMeasureByLabel_half", lambda: s.fMeasureByLabel(0.5))
+    # The arguments are sent as given: an int as an int, a bool as a boolean (which the server's
+    # method does not take), and by keyword.
+    rec("summary_fMeasureByLabel_int", lambda: s.fMeasureByLabel(1))
+    rec("summary_fMeasureByLabel_bool", lambda: s.fMeasureByLabel(True))
+    rec("summary_weightedFMeasure_keyword", lambda: s.weightedFMeasure(beta=0.5))
     rec("summary_weightedFMeasure", lambda: s.weightedFMeasure())
     for a in [
         "roc",

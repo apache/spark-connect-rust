@@ -1139,14 +1139,26 @@ native_pymethods! {
     PyLinearSVC;
     jvm: "org.apache.spark.ml.classification.LinearSVC", op: Estimator;
     params: [
-        "aggregationDepth" => ("getAggregationDepth", get_aggregation_depth, param_aggregation_depth),
+        "aggregationDepth" => (
+            "getAggregationDepth",
+            get_aggregation_depth,
+            param_aggregation_depth
+        ),
         "featuresCol" => ("getFeaturesCol", get_features_col, param_features_col),
         "fitIntercept" => ("getFitIntercept", get_fit_intercept, param_fit_intercept),
         "labelCol" => ("getLabelCol", get_label_col, param_label_col),
-        "maxBlockSizeInMB" => ("getMaxBlockSizeInMB", get_max_block_size_in_mb, param_max_block_size_in_mb),
+        "maxBlockSizeInMB" => (
+            "getMaxBlockSizeInMB",
+            get_max_block_size_in_mb,
+            param_max_block_size_in_mb
+        ),
         "maxIter" => ("getMaxIter", get_max_iter, param_max_iter),
         "predictionCol" => ("getPredictionCol", get_prediction_col, param_prediction_col),
-        "rawPredictionCol" => ("getRawPredictionCol", get_raw_prediction_col, param_raw_prediction_col),
+        "rawPredictionCol" => (
+            "getRawPredictionCol",
+            get_raw_prediction_col,
+            param_raw_prediction_col
+        ),
         "regParam" => ("getRegParam", get_reg_param, param_reg_param),
         "standardization" => ("getStandardization", get_standardization, param_standardization),
         "threshold" => ("getThreshold", get_threshold, param_threshold),
@@ -4465,9 +4477,17 @@ native_pymethods! {
         "featuresCol" => ("getFeaturesCol", get_features_col, param_features_col),
         "initMode" => ("getInitMode", get_init_mode, param_init_mode),
         "initSteps" => ("getInitSteps", get_init_steps, param_init_steps),
-        "intermediateStorageLevel" => ("getIntermediateStorageLevel", get_intermediate_storage_level, param_intermediate_storage_level),
+        "intermediateStorageLevel" => (
+            "getIntermediateStorageLevel",
+            get_intermediate_storage_level,
+            param_intermediate_storage_level
+        ),
         "k" => ("getK", get_k, param_k),
-        "maxBlockSizeInMB" => ("getMaxBlockSizeInMB", get_max_block_size_in_mb, param_max_block_size_in_mb),
+        "maxBlockSizeInMB" => (
+            "getMaxBlockSizeInMB",
+            get_max_block_size_in_mb,
+            param_max_block_size_in_mb
+        ),
         "maxIter" => ("getMaxIter", get_max_iter, param_max_iter),
         "predictionCol" => ("getPredictionCol", get_prediction_col, param_prediction_col),
         "seed" => ("getSeed", get_seed, param_seed),

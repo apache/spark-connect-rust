@@ -11,9 +11,17 @@ native_model! {
         "featuresCol" => ("getFeaturesCol", get_features_col, param_features_col),
         "initMode" => ("getInitMode", get_init_mode, param_init_mode),
         "initSteps" => ("getInitSteps", get_init_steps, param_init_steps),
-        "intermediateStorageLevel" => ("getIntermediateStorageLevel", get_intermediate_storage_level, param_intermediate_storage_level),
+        "intermediateStorageLevel" => (
+            "getIntermediateStorageLevel",
+            get_intermediate_storage_level,
+            param_intermediate_storage_level
+        ),
         "k" => ("getK", get_k, param_k),
-        "maxBlockSizeInMB" => ("getMaxBlockSizeInMB", get_max_block_size_in_mb, param_max_block_size_in_mb),
+        "maxBlockSizeInMB" => (
+            "getMaxBlockSizeInMB",
+            get_max_block_size_in_mb,
+            param_max_block_size_in_mb
+        ),
         "maxIter" => ("getMaxIter", get_max_iter, param_max_iter),
         "predictionCol" => ("getPredictionCol", get_prediction_col, param_prediction_col),
         "seed" => ("getSeed", get_seed, param_seed),
@@ -29,9 +37,12 @@ native_model! {
         "numFeatures" => (num_features, "numFeatures"),
     ];
     methods: [
-        "predict" => (predict, "predict", (value: &Bound<'py, PyAny>)),
+        "predict" => (predict, "predict", (value)),
     ];
     relations: [];
+    relation_methods: [];
+    summary: Some(kmeans_summary);
+    cached: [];
 
     /// The cluster centers, as `KMeansModel.clusterCenters`: the rows of the server's
     /// `clusterCenterMatrix`, as NumPy arrays.
@@ -51,10 +62,7 @@ native_model! {
     /// same object on every call, of a model that this client fitted, else PySpark's RuntimeError.
     #[getter]
     fn summary(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
-        let py = slf.py();
-        slf.try_borrow()?.core.summary_object(slf.as_any(), |target| {
-            Ok(Py::new(py, PyKMeansSummary::from(target))?.into_any())
-        })
+        slf.try_borrow()?.core.summary_object(slf.as_any(), kmeans_summary)
     }
 
     /// Whether the model has a training summary, as `HasTrainingSummary.hasSummary` over Spark
@@ -81,6 +89,16 @@ native_summary! {
         "cluster" => (cluster, "cluster"),
         "predictions" => (predictions, "predictions"),
     ];
+    relation_methods: [];
+}
+
+/// The training summary object of a KMeansModel, as `_summaryCls` makes it (of no fetch).
+fn kmeans_summary(
+    py: Python<'_>,
+    _model: &object::ModelCore,
+    target: spark_connect::ml::MlTarget,
+) -> PyResult<Py<PyAny>> {
+    Ok(Py::new(py, PyKMeansSummary::from(target))?.into_any())
 }
 
 /// Register the typed clustering models and summaries.

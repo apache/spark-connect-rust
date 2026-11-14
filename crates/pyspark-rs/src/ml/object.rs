@@ -446,10 +446,31 @@ pub(super) struct ModelCore {
     pub(super) model: Box<dyn Model>,
     pub(super) session_id: String,
     pub(super) summary: Option<MlTarget>,
-    /// The object of the training summary of a class whose `summary` is PySpark's `_summary`
-    /// itself, made once (see [`ModelCore::summary_object`]).
+    /// The object of the training summary, PySpark's `_summary`, which the fit makes (see
+    /// [`ModelCore::summary_object`]).
     summary_object: std::sync::OnceLock<Py<PyAny>>,
     pub(super) own_defaults: params_api::OwnDefaults,
+    /// The values of the `functools.cached_property` members, by name (see [`ModelCore::cached`]).
+    cache: std::sync::Mutex<Vec<(&'static str, Py<PyAny>)>>,
+}
+
+/// The maker of the training summary object of a model, of the model and of the target of its
+/// summary (`model._summaryCls(...)` of `try_remote_fit`, which may fetch, as of `numClasses`).
+pub(super) type SummaryMaker = fn(Python<'_>, &ModelCore, MlTarget) -> PyResult<Py<PyAny>>;
+
+/// The maker of the value of a `functools.cached_property` member of a model (`trees`).
+#[allow(dead_code)] // The tree ensembles' `trees` use it.
+pub(super) type CachedMaker = fn(Python<'_>, &ModelCore) -> PyResult<Py<PyAny>>;
+
+/// The Python value of the Python literal `text`, the default of an argument of a method of a
+/// model or a summary (see the macros).
+pub(crate) fn py_default(text: &str) -> Py<PyAny> {
+    Python::attach(|py| {
+        let code = std::ffi::CString::new(text).expect("a Python literal has no NUL");
+        py.eval(&code, None, None)
+            .expect("the default of an argument is a Python literal")
+            .unbind()
+    })
 }
 
 impl ModelCore {
@@ -461,6 +482,7 @@ impl ModelCore {
         model: Box<dyn Model>,
         df: &DataFrame,
         summary: SummaryDataset,
+        make_summary: Option<SummaryMaker>,
     ) -> PyResult<Self> {
         let session_id = df.spark_session().session_id().to_string();
         let summary = match (summary, model.ml_ref()) {
@@ -475,18 +497,52 @@ impl ModelCore {
                 Some(spark_connect::ml::training_summary(object, &dataset))
             }
         };
-        Ok(Self {
+        let core = Self {
             model,
             session_id,
             summary,
             summary_object: std::sync::OnceLock::new(),
             own_defaults: Vec::new(),
+            cache: Default::default(),
+        };
+        // The summary object, of the fit, as `try_remote_fit` sets `_summary` right after it.
+        if let (Some(make), Some(target)) = (make_summary, core.summary.clone()) {
+            let object = make(py, &core, target)?;
+            let _ = core.summary_object.set(object);
+        }
+        Ok(core)
+    }
+
+    /// The model of the server-side object `object` that a fetch returns, of the model's JVM class
+    /// `jvm_class`: of a new uid of the class `class` (`Identifiable._randomUID`), without set
+    /// params, a training summary, own defaults or cached members, as PySpark makes a model of a
+    /// bare object (the trees of an ensemble, the models of a OneVsRestModel).
+    pub(super) fn of_object(
+        py: Python<'_>,
+        jvm_class: &str,
+        class: &str,
+        object: spark_connect::ml::MlRef,
+    ) -> PyResult<Self> {
+        let session_id = object.session().session_id().to_string();
+        let uid = params_api::random_uid(py, class)?;
+        let operator = MlOperator::with_uid(jvm_class, &uid, OperatorType::Model);
+        Ok(Self {
+            model: Box::new(spark_connect::ml::ObjectModel::new(
+                object,
+                operator,
+                Params::new(),
+            )),
+            session_id,
+            summary: None,
+            summary_object: std::sync::OnceLock::new(),
+            own_defaults: Vec::new(),
+            cache: Default::default(),
         })
     }
 
     /// The model that a `Read` loads: of its object, the model's JVM class `jvm_class`, its uid and
-    /// params, without a training summary, as PySpark's loaded models have none, and of the defaults
-    /// that a model of the class `class` derives from the uid that it is made of (see
+    /// params, without a training summary, as PySpark's loaded models have none, and of the
+    /// defaults that a model of the class `class` derives from the uid that it is made of (see
     /// [`params_api::uid_defaults`]).
     pub(super) fn loaded(
         py: Python<'_>,
@@ -509,6 +565,7 @@ impl ModelCore {
             summary: None,
             summary_object: std::sync::OnceLock::new(),
             own_defaults: params_api::uid_defaults(py, class)?,
+            cache: Default::default(),
         })
     }
 
@@ -524,12 +581,41 @@ impl ModelCore {
                 None => std::sync::OnceLock::new(),
             },
             own_defaults: params_api::clone_own_defaults(py, &self.own_defaults),
+            // A copy shares the values cached before it, as of the `__dict__` that `copy.copy`
+            // copies.
+            cache: std::sync::Mutex::new(params_api::clone_own_defaults(
+                py,
+                &self.cache.lock().expect("the cache is not poisoned"),
+            )),
         }
     }
 
+    /// The value of the cached member `key`, as a `functools.cached_property`: made by `make`
+    /// once, and the same object after.
+    #[allow(dead_code)] // The tree ensembles' `trees` use it.
+    pub(super) fn cached(
+        &self,
+        py: Python<'_>,
+        key: &'static str,
+        make: impl FnOnce() -> PyResult<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let lock = || self.cache.lock().expect("the cache is not poisoned");
+        if let Some(value) = params_api::own_default_of(py, &lock(), key) {
+            return Ok(value);
+        }
+        // Made without the lock, as `make` runs Python.
+        let value = make()?;
+        let mut cache = lock();
+        if let Some(existing) = params_api::own_default_of(py, &cache, key) {
+            return Ok(existing);
+        }
+        cache.push((key, value.clone_ref(py)));
+        Ok(value)
+    }
+
     /// The target of the training summary of the model `slf`, or the RuntimeError of
-    /// `HasTrainingSummary.summary` over Spark Connect of a model without one (a loaded one), of the
-    /// name of the class of `slf`.
+    /// `HasTrainingSummary.summary` over Spark Connect of a model without one (a loaded one), of
+    /// the name of the class of `slf`.
     pub(super) fn training_summary_target(&self, slf: &Bound<'_, PyAny>) -> PyResult<MlTarget> {
         match &self.summary {
             Some(target) => Ok(target.clone()),
@@ -541,18 +627,19 @@ impl ModelCore {
     }
 
     /// The training summary of the model `slf`, as `HasTrainingSummary.summary` over Spark Connect
-    /// returns `_summary`: made of the summary's target by `make` once, and the same object on
-    /// every call after (see [`ModelCore::training_summary_target`] of a model without one).
+    /// returns `_summary`: the object that the fit made, the same on every call (of `make`, if the
+    /// class makes none at the fit), or PySpark's RuntimeError of a model without one (see
+    /// [`ModelCore::training_summary_target`]).
     pub(super) fn summary_object(
         &self,
         slf: &Bound<'_, PyAny>,
-        make: impl FnOnce(MlTarget) -> PyResult<Py<PyAny>>,
+        make: SummaryMaker,
     ) -> PyResult<Py<PyAny>> {
         let py = slf.py();
         if let Some(object) = self.summary_object.get() {
             return Ok(object.clone_ref(py));
         }
-        let object = make(self.training_summary_target(slf)?)?;
+        let object = make(py, self, self.training_summary_target(slf)?)?;
         Ok(self.summary_object.get_or_init(|| object).clone_ref(py))
     }
 

@@ -7,8 +7,9 @@
 //!   `RemoteModelRef`;
 //! - [`MlTarget`] and [`fetch`]: a method of an object, or of an object that a method chain reaches
 //!   (`<model>.summary`), whose value the server returns (`try_remote_call` of `pyspark.ml.util`);
-//! - [`attribute_relation`]: a method whose value is a DataFrame (`invoke_remote_attribute_relation`);
-//! - [`MlValue`]: the value of a fetch, as `pyspark.ml.connect.serialize.deserialize_param` reads it;
+//! - [`attribute_relation`]: a method whose value is a DataFrame
+//!   (`invoke_remote_attribute_relation`);
+//! - [`MlValue`]: the value of a fetch, as PySpark's `deserialize_param` reads it;
 //! - [`write_operator`], [`write_object`] and [`read`]: the `Write` and `Read` commands of
 //!   `pyspark.ml.connect.readwrite`.
 
@@ -998,8 +999,8 @@ pub fn read(
 }
 
 /// A model of a server-side object, of its operator and params, which transforms as every cached
-/// model does: the model of an object that `read_model` loads, or that a fetch returns (a tree of an
-/// ensemble), whose class this client does not otherwise model.
+/// model does: the model of an object that `read_model` loads, or that a fetch returns (a tree of
+/// an ensemble), whose class this client does not otherwise model.
 #[derive(Debug, Clone)]
 pub struct ObjectModel {
     operator: MlOperator,
@@ -1061,8 +1062,8 @@ impl Model for ObjectModel {
 /// The target of the training summary of the fitted model `object` (`"<id>.summary"`), of the
 /// summary dataset `dataset`, as PySpark's `try_remote_fit` makes it: `dataset` is the training
 /// dataset itself for the models whose `_summary_dataset` returns it (the classification models,
-/// LinearRegression and GeneralizedLinearRegression), and [`summary_transform`] of it for the others
-/// (the clustering models, of the default `_summary_dataset`).
+/// LinearRegression and GeneralizedLinearRegression), and [`summary_transform`] of it for the
+/// others (the clustering models, of the default `_summary_dataset`).
 pub fn training_summary(object: &MlRef, dataset: &DataFrame) -> MlTarget {
     MlTarget::object(object)
         .child("summary")
