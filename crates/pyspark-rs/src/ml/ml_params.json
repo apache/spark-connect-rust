@@ -1,0 +1,7202 @@
+{
+"AFTSurvivalRegression": [
+{
+"converter": "toInt",
+"default": {
+"int": 2
+},
+"doc": "suggested depth for treeAggregate (>= 2).",
+"name": "aggregationDepth"
+},
+{
+"converter": "toString",
+"default": "censor",
+"doc": "censor column name. The value of this column could be 0 or 1. If the value is 1, it means the event has occurred i.e. uncensored; otherwise censored.",
+"name": "censorCol"
+},
+{
+"converter": "toString",
+"default": "features",
+"doc": "features column name.",
+"name": "featuresCol"
+},
+{
+"converter": "toBoolean",
+"default": true,
+"doc": "whether to fit an intercept term.",
+"name": "fitIntercept"
+},
+{
+"converter": "toString",
+"default": "label",
+"doc": "label column name.",
+"name": "labelCol"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.0"
+},
+"doc": "maximum memory in MB for stacking input data into blocks. Data is stacked within partitions. If more than remaining data size in a partition then it is adjusted to the data size. Default 0.0 represents choosing optimal value, depends on specific algorithm. Must be >= 0.",
+"name": "maxBlockSizeInMB"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 100
+},
+"doc": "max number of iterations (>= 0).",
+"name": "maxIter"
+},
+{
+"converter": "toString",
+"default": "prediction",
+"doc": "prediction column name.",
+"name": "predictionCol"
+},
+{
+"converter": "toListFloat",
+"default": {
+"list": [
+{
+"float": "0.01"
+},
+{
+"float": "0.05"
+},
+{
+"float": "0.1"
+},
+{
+"float": "0.25"
+},
+{
+"float": "0.5"
+},
+{
+"float": "0.75"
+},
+{
+"float": "0.9"
+},
+{
+"float": "0.95"
+},
+{
+"float": "0.99"
+}
+]
+},
+"doc": "quantile probabilities array. Values of the quantile probabilities array should be in the range (0, 1) and the array should be non-empty.",
+"name": "quantileProbabilities"
+},
+{
+"converter": "toString",
+"doc": "quantiles column name. This column will output quantiles of corresponding quantileProbabilities if it is set.",
+"name": "quantilesCol"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "1e-06"
+},
+"doc": "the convergence tolerance for iterative algorithms (>= 0).",
+"name": "tol"
+}
+],
+"AFTSurvivalRegressionModel": [
+{
+"converter": "toInt",
+"default": {
+"int": 2
+},
+"doc": "suggested depth for treeAggregate (>= 2).",
+"name": "aggregationDepth"
+},
+{
+"converter": "toString",
+"default": "censor",
+"doc": "censor column name. The value of this column could be 0 or 1. If the value is 1, it means the event has occurred i.e. uncensored; otherwise censored.",
+"name": "censorCol"
+},
+{
+"converter": "toString",
+"default": "features",
+"doc": "features column name.",
+"name": "featuresCol"
+},
+{
+"converter": "toBoolean",
+"default": true,
+"doc": "whether to fit an intercept term.",
+"name": "fitIntercept"
+},
+{
+"converter": "toString",
+"default": "label",
+"doc": "label column name.",
+"name": "labelCol"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.0"
+},
+"doc": "maximum memory in MB for stacking input data into blocks. Data is stacked within partitions. If more than remaining data size in a partition then it is adjusted to the data size. Default 0.0 represents choosing optimal value, depends on specific algorithm. Must be >= 0.",
+"name": "maxBlockSizeInMB"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 100
+},
+"doc": "max number of iterations (>= 0).",
+"name": "maxIter"
+},
+{
+"converter": "toString",
+"default": "prediction",
+"doc": "prediction column name.",
+"name": "predictionCol"
+},
+{
+"converter": "toListFloat",
+"default": {
+"list": [
+{
+"float": "0.01"
+},
+{
+"float": "0.05"
+},
+{
+"float": "0.1"
+},
+{
+"float": "0.25"
+},
+{
+"float": "0.5"
+},
+{
+"float": "0.75"
+},
+{
+"float": "0.9"
+},
+{
+"float": "0.95"
+},
+{
+"float": "0.99"
+}
+]
+},
+"doc": "quantile probabilities array. Values of the quantile probabilities array should be in the range (0, 1) and the array should be non-empty.",
+"name": "quantileProbabilities"
+},
+{
+"converter": "toString",
+"doc": "quantiles column name. This column will output quantiles of corresponding quantileProbabilities if it is set.",
+"name": "quantilesCol"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "1e-06"
+},
+"doc": "the convergence tolerance for iterative algorithms (>= 0).",
+"name": "tol"
+}
+],
+"ALS": [
+{
+"converter": "toFloat",
+"default": {
+"float": "1.0"
+},
+"doc": "alpha for implicit preference",
+"name": "alpha"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 4096
+},
+"doc": "block size for stacking input data in matrices. Data is stacked within partitions. If block size is more than remaining data in a partition then it is adjusted to the size of this data.",
+"name": "blockSize"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 10
+},
+"doc": "set checkpoint interval (>= 1) or disable checkpoint (-1). E.g. 10 means that the cache will get checkpointed every 10 iterations. Note: this setting will be ignored if the checkpoint directory is not set in the SparkContext.",
+"name": "checkpointInterval"
+},
+{
+"converter": "toString",
+"default": "nan",
+"doc": "strategy for dealing with unknown or new users/items at prediction time. This may be useful in cross-validation or production scenarios, for handling user/item ids the model has not seen in the training data. Supported values: 'nan', 'drop'.",
+"name": "coldStartStrategy"
+},
+{
+"converter": "toString",
+"default": "MEMORY_AND_DISK",
+"doc": "StorageLevel for ALS model factors.",
+"name": "finalStorageLevel"
+},
+{
+"converter": "toBoolean",
+"default": false,
+"doc": "whether to use implicit preference",
+"name": "implicitPrefs"
+},
+{
+"converter": "toString",
+"default": "MEMORY_AND_DISK",
+"doc": "StorageLevel for intermediate datasets. Cannot be 'NONE'.",
+"name": "intermediateStorageLevel"
+},
+{
+"converter": "toString",
+"default": "item",
+"doc": "column name for item ids. Ids must be within the integer value range.",
+"name": "itemCol"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 10
+},
+"doc": "max number of iterations (>= 0).",
+"name": "maxIter"
+},
+{
+"converter": "toBoolean",
+"default": false,
+"doc": "whether to use nonnegative constraint for least squares",
+"name": "nonnegative"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 10
+},
+"doc": "number of item blocks",
+"name": "numItemBlocks"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 10
+},
+"doc": "number of user blocks",
+"name": "numUserBlocks"
+},
+{
+"converter": "toString",
+"default": "prediction",
+"doc": "prediction column name.",
+"name": "predictionCol"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 10
+},
+"doc": "rank of the factorization",
+"name": "rank"
+},
+{
+"converter": "toString",
+"default": "rating",
+"doc": "column name for ratings",
+"name": "ratingCol"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.1"
+},
+"doc": "regularization parameter (>= 0).",
+"name": "regParam"
+},
+{
+"converter": "toInt",
+"default": {
+"class_name_hash": true
+},
+"doc": "random seed.",
+"name": "seed"
+},
+{
+"converter": "toString",
+"default": "user",
+"doc": "column name for user ids. Ids must be within the integer value range.",
+"name": "userCol"
+}
+],
+"ALSModel": [
+{
+"converter": "toInt",
+"default": {
+"int": 4096
+},
+"doc": "block size for stacking input data in matrices. Data is stacked within partitions. If block size is more than remaining data in a partition then it is adjusted to the size of this data.",
+"name": "blockSize"
+},
+{
+"converter": "toString",
+"doc": "strategy for dealing with unknown or new users/items at prediction time. This may be useful in cross-validation or production scenarios, for handling user/item ids the model has not seen in the training data. Supported values: 'nan', 'drop'.",
+"name": "coldStartStrategy"
+},
+{
+"converter": "toString",
+"doc": "column name for item ids. Ids must be within the integer value range.",
+"name": "itemCol"
+},
+{
+"converter": "toString",
+"default": "prediction",
+"doc": "prediction column name.",
+"name": "predictionCol"
+},
+{
+"converter": "toString",
+"doc": "column name for user ids. Ids must be within the integer value range.",
+"name": "userCol"
+}
+],
+"Binarizer": [
+{
+"converter": "toString",
+"doc": "input column name.",
+"name": "inputCol"
+},
+{
+"converter": "toListString",
+"doc": "input column names.",
+"name": "inputCols"
+},
+{
+"converter": "toString",
+"default": {
+"uid_suffix": "__output"
+},
+"doc": "output column name.",
+"name": "outputCol"
+},
+{
+"converter": "toListString",
+"doc": "output column names.",
+"name": "outputCols"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.0"
+},
+"doc": "Param for threshold used to binarize continuous features. The features greater than the threshold will be binarized to 1.0. The features equal to or less than the threshold will be binarized to 0.0",
+"name": "threshold"
+},
+{
+"converter": "toListFloat",
+"doc": "Param for array of threshold used to binarize continuous features. This is for multiple columns input. If transforming multiple columns and thresholds is not set, but threshold is set, then threshold will be applied across all columns.",
+"name": "thresholds"
+}
+],
+"BinaryClassificationEvaluator": [
+{
+"converter": "toString",
+"default": "label",
+"doc": "label column name.",
+"name": "labelCol"
+},
+{
+"converter": "toString",
+"default": "areaUnderROC",
+"doc": "metric name in evaluation (areaUnderROC|areaUnderPR)",
+"name": "metricName"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 1000
+},
+"doc": "Number of bins to down-sample the curves (ROC curve, PR curve) in area computation. If 0, no down-sampling will occur. Must be >= 0.",
+"name": "numBins"
+},
+{
+"converter": "toString",
+"default": "rawPrediction",
+"doc": "raw prediction (a.k.a. confidence) column name.",
+"name": "rawPredictionCol"
+},
+{
+"converter": "toString",
+"doc": "weight column name. If this is not set or empty, we treat all instance weights as 1.0.",
+"name": "weightCol"
+}
+],
+"BinaryLogisticRegressionSummary": [],
+"BinaryLogisticRegressionTrainingSummary": [],
+"BinaryRandomForestClassificationSummary": [],
+"BinaryRandomForestClassificationTrainingSummary": [],
+"BisectingKMeans": [
+{
+"converter": "toString",
+"default": "euclidean",
+"doc": "the distance measure. Supported options: 'euclidean' and 'cosine'.",
+"name": "distanceMeasure"
+},
+{
+"converter": "toString",
+"default": "features",
+"doc": "features column name.",
+"name": "featuresCol"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 4
+},
+"doc": "The desired number of leaf clusters. Must be > 1.",
+"name": "k"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 20
+},
+"doc": "max number of iterations (>= 0).",
+"name": "maxIter"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "1.0"
+},
+"doc": "The minimum number of points (if >= 1.0) or the minimum proportion of points (if < 1.0) of a divisible cluster.",
+"name": "minDivisibleClusterSize"
+},
+{
+"converter": "toString",
+"default": "prediction",
+"doc": "prediction column name.",
+"name": "predictionCol"
+},
+{
+"converter": "toInt",
+"default": {
+"class_name_hash": true
+},
+"doc": "random seed.",
+"name": "seed"
+},
+{
+"converter": "toString",
+"doc": "weight column name. If this is not set or empty, we treat all instance weights as 1.0.",
+"name": "weightCol"
+}
+],
+"BisectingKMeansModel": [
+{
+"converter": "toString",
+"default": "euclidean",
+"doc": "the distance measure. Supported options: 'euclidean' and 'cosine'.",
+"name": "distanceMeasure"
+},
+{
+"converter": "toString",
+"default": "features",
+"doc": "features column name.",
+"name": "featuresCol"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 4
+},
+"doc": "The desired number of leaf clusters. Must be > 1.",
+"name": "k"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 20
+},
+"doc": "max number of iterations (>= 0).",
+"name": "maxIter"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "1.0"
+},
+"doc": "The minimum number of points (if >= 1.0) or the minimum proportion of points (if < 1.0) of a divisible cluster.",
+"name": "minDivisibleClusterSize"
+},
+{
+"converter": "toString",
+"default": "prediction",
+"doc": "prediction column name.",
+"name": "predictionCol"
+},
+{
+"converter": "toInt",
+"default": {
+"class_name_hash": true
+},
+"doc": "random seed.",
+"name": "seed"
+},
+{
+"converter": "toString",
+"doc": "weight column name. If this is not set or empty, we treat all instance weights as 1.0.",
+"name": "weightCol"
+}
+],
+"BisectingKMeansSummary": [],
+"BucketedRandomProjectionLSH": [
+{
+"converter": "toFloat",
+"doc": "the length of each hash bucket, a larger bucket lowers the false negative rate.",
+"name": "bucketLength"
+},
+{
+"converter": "toString",
+"doc": "input column name.",
+"name": "inputCol"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 1
+},
+"doc": "number of hash tables, where increasing number of hash tables lowers the false negative rate, and decreasing it improves the running performance.",
+"name": "numHashTables"
+},
+{
+"converter": "toString",
+"default": {
+"uid_suffix": "__output"
+},
+"doc": "output column name.",
+"name": "outputCol"
+},
+{
+"converter": "toInt",
+"default": {
+"class_name_hash": true
+},
+"doc": "random seed.",
+"name": "seed"
+}
+],
+"BucketedRandomProjectionLSHModel": [
+{
+"converter": "toFloat",
+"doc": "the length of each hash bucket, a larger bucket lowers the false negative rate.",
+"name": "bucketLength"
+},
+{
+"converter": "toString",
+"doc": "input column name.",
+"name": "inputCol"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 1
+},
+"doc": "number of hash tables, where increasing number of hash tables lowers the false negative rate, and decreasing it improves the running performance.",
+"name": "numHashTables"
+},
+{
+"converter": "toString",
+"default": {
+"uid_suffix": "__output"
+},
+"doc": "output column name.",
+"name": "outputCol"
+}
+],
+"Bucketizer": [
+{
+"converter": "toString",
+"default": "error",
+"doc": "how to handle invalid entries containing NaN values. Values outside the splits will always be treated as errors. Options are 'skip' (filter out rows with invalid values), 'error' (throw an error), or 'keep' (keep invalid values in a special additional bucket). Note that in the multiple column case, the invalid handling is applied to all columns. That said for 'error' it will throw an error if any invalids are found in any column, for 'skip' it will skip rows with any invalids in any columns, etc.",
+"name": "handleInvalid"
+},
+{
+"converter": "toString",
+"doc": "input column name.",
+"name": "inputCol"
+},
+{
+"converter": "toListString",
+"doc": "input column names.",
+"name": "inputCols"
+},
+{
+"converter": "toString",
+"default": {
+"uid_suffix": "__output"
+},
+"doc": "output column name.",
+"name": "outputCol"
+},
+{
+"converter": "toListString",
+"doc": "output column names.",
+"name": "outputCols"
+},
+{
+"converter": "toListFloat",
+"doc": "Split points for mapping continuous features into buckets. With n+1 splits, there are n buckets. A bucket defined by splits x,y holds values in the range [x,y) except the last bucket, which also includes y. The splits should be of length >= 3 and strictly increasing. Values at -inf, inf must be explicitly provided to cover all Double values; otherwise, values outside the splits specified will be treated as errors.",
+"name": "splits"
+},
+{
+"converter": "toListListFloat",
+"doc": "The array of split points for mapping continuous features into buckets for multiple columns. For each input column, with n+1 splits, there are n buckets. A bucket defined by splits x,y holds values in the range [x,y) except the last bucket, which also includes y. The splits should be of length >= 3 and strictly increasing. Values at -inf, inf must be explicitly provided to cover all Double values; otherwise, values outside the splits specified will be treated as errors.",
+"name": "splitsArray"
+}
+],
+"ChiSqSelector": [
+{
+"converter": "toFloat",
+"default": {
+"float": "0.05"
+},
+"doc": "The upper bound of the expected false discovery rate.",
+"name": "fdr"
+},
+{
+"converter": "toString",
+"default": "features",
+"doc": "features column name.",
+"name": "featuresCol"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.05"
+},
+"doc": "The highest p-value for features to be kept.",
+"name": "fpr"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.05"
+},
+"doc": "The upper bound of the expected family-wise error rate.",
+"name": "fwe"
+},
+{
+"converter": "toString",
+"default": "label",
+"doc": "label column name.",
+"name": "labelCol"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 50
+},
+"doc": "Number of features that selector will select, ordered by ascending p-value. If the number of features is < numTopFeatures, then this will select all features.",
+"name": "numTopFeatures"
+},
+{
+"converter": "toString",
+"default": {
+"uid_suffix": "__output"
+},
+"doc": "output column name.",
+"name": "outputCol"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.1"
+},
+"doc": "Percentile of features that selector will select, ordered by ascending p-value.",
+"name": "percentile"
+},
+{
+"converter": "toString",
+"default": "numTopFeatures",
+"doc": "The selector type. Supported options: numTopFeatures (default), percentile, fpr, fdr, fwe.",
+"name": "selectorType"
+}
+],
+"ChiSqSelectorModel": [
+{
+"converter": "toFloat",
+"default": {
+"float": "0.05"
+},
+"doc": "The upper bound of the expected false discovery rate.",
+"name": "fdr"
+},
+{
+"converter": "toString",
+"default": "features",
+"doc": "features column name.",
+"name": "featuresCol"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.05"
+},
+"doc": "The highest p-value for features to be kept.",
+"name": "fpr"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.05"
+},
+"doc": "The upper bound of the expected family-wise error rate.",
+"name": "fwe"
+},
+{
+"converter": "toString",
+"default": "label",
+"doc": "label column name.",
+"name": "labelCol"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 50
+},
+"doc": "Number of features that selector will select, ordered by ascending p-value. If the number of features is < numTopFeatures, then this will select all features.",
+"name": "numTopFeatures"
+},
+{
+"converter": "toString",
+"default": {
+"uid_suffix": "__output"
+},
+"doc": "output column name.",
+"name": "outputCol"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.1"
+},
+"doc": "Percentile of features that selector will select, ordered by ascending p-value.",
+"name": "percentile"
+},
+{
+"converter": "toString",
+"default": "numTopFeatures",
+"doc": "The selector type. Supported options: numTopFeatures (default), percentile, fpr, fdr, fwe.",
+"name": "selectorType"
+}
+],
+"ClusteringEvaluator": [
+{
+"converter": "toString",
+"default": "squaredEuclidean",
+"doc": "The distance measure. Supported options: 'squaredEuclidean' and 'cosine'.",
+"name": "distanceMeasure"
+},
+{
+"converter": "toString",
+"default": "features",
+"doc": "features column name.",
+"name": "featuresCol"
+},
+{
+"converter": "toString",
+"default": "silhouette",
+"doc": "metric name in evaluation (silhouette)",
+"name": "metricName"
+},
+{
+"converter": "toString",
+"default": "prediction",
+"doc": "prediction column name.",
+"name": "predictionCol"
+},
+{
+"converter": "toString",
+"doc": "weight column name. If this is not set or empty, we treat all instance weights as 1.0.",
+"name": "weightCol"
+}
+],
+"CountVectorizer": [
+{
+"converter": "toBoolean",
+"default": false,
+"doc": "Binary toggle to control the output vector values. If True, all nonzero counts (after minTF filter applied) are set to 1. This is useful for discrete probabilistic models that model binary events rather than integer counts. Default False",
+"name": "binary"
+},
+{
+"converter": "toString",
+"doc": "input column name.",
+"name": "inputCol"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "9.223372036854776e+18"
+},
+"doc": "Specifies the maximum number of different documents a term could appear in to be included in the vocabulary. A term that appears more than the threshold will be ignored. If this is an integer >= 1, this specifies the maximum number of documents the term could appear in; if this is a double in [0,1), then this specifies the maximum fraction of documents the term could appear in. Default (2^63) - 1",
+"name": "maxDF"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "1.0"
+},
+"doc": "Specifies the minimum number of different documents a term must appear in to be included in the vocabulary. If this is an integer >= 1, this specifies the number of documents the term must appear in; if this is a double in [0,1), then this specifies the fraction of documents. Default 1.0",
+"name": "minDF"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "1.0"
+},
+"doc": "Filter to ignore rare words in a document. For each document, terms with frequency/count less than the given threshold are ignored. If this is an integer >= 1, then this specifies a count (of times the term must appear in the document); if this is a double in [0,1), then this specifies a fraction (out of the document's token count). Note that the parameter is only used in transform of CountVectorizerModel and does not affect fitting. Default 1.0",
+"name": "minTF"
+},
+{
+"converter": "toString",
+"default": {
+"uid_suffix": "__output"
+},
+"doc": "output column name.",
+"name": "outputCol"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 262144
+},
+"doc": "max size of the vocabulary. Default 1 << 18.",
+"name": "vocabSize"
+}
+],
+"CountVectorizerModel": [
+{
+"converter": "toBoolean",
+"default": false,
+"doc": "Binary toggle to control the output vector values. If True, all nonzero counts (after minTF filter applied) are set to 1. This is useful for discrete probabilistic models that model binary events rather than integer counts. Default False",
+"name": "binary"
+},
+{
+"converter": "toString",
+"doc": "input column name.",
+"name": "inputCol"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "9.223372036854776e+18"
+},
+"doc": "Specifies the maximum number of different documents a term could appear in to be included in the vocabulary. A term that appears more than the threshold will be ignored. If this is an integer >= 1, this specifies the maximum number of documents the term could appear in; if this is a double in [0,1), then this specifies the maximum fraction of documents the term could appear in. Default (2^63) - 1",
+"name": "maxDF"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "1.0"
+},
+"doc": "Specifies the minimum number of different documents a term must appear in to be included in the vocabulary. If this is an integer >= 1, this specifies the number of documents the term must appear in; if this is a double in [0,1), then this specifies the fraction of documents. Default 1.0",
+"name": "minDF"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "1.0"
+},
+"doc": "Filter to ignore rare words in a document. For each document, terms with frequency/count less than the given threshold are ignored. If this is an integer >= 1, then this specifies a count (of times the term must appear in the document); if this is a double in [0,1), then this specifies a fraction (out of the document's token count). Note that the parameter is only used in transform of CountVectorizerModel and does not affect fitting. Default 1.0",
+"name": "minTF"
+},
+{
+"converter": "toString",
+"default": {
+"uid_suffix": "__output"
+},
+"doc": "output column name.",
+"name": "outputCol"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 262144
+},
+"doc": "max size of the vocabulary. Default 1 << 18.",
+"name": "vocabSize"
+}
+],
+"CrossValidator": [
+{
+"converter": "toBoolean",
+"default": false,
+"doc": "Param for whether to collect a list of sub-models trained during tuning. If set to false, then only the single best sub-model will be available after fitting. If set to true, then all sub-models will be available. Warning: For large models, collecting all sub-models can cause OOMs on the Spark driver.",
+"name": "collectSubModels"
+},
+{
+"converter": "identity",
+"doc": "estimator to be cross-validated",
+"name": "estimator"
+},
+{
+"converter": "identity",
+"doc": "estimator param maps",
+"name": "estimatorParamMaps"
+},
+{
+"converter": "identity",
+"doc": "evaluator used to select hyper-parameters that maximize the validator metric",
+"name": "evaluator"
+},
+{
+"converter": "toString",
+"default": "",
+"doc": "Param for the column name of user specified fold number. Once this is specified, :py:class:`CrossValidator` won't do random k-fold split. Note that this column should be integer type with range [0, numFolds) and Spark will throw exception on out-of-range fold numbers.",
+"name": "foldCol"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 3
+},
+"doc": "number of folds for cross validation",
+"name": "numFolds"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 1
+},
+"doc": "the number of threads to use when running parallel algorithms (>= 1).",
+"name": "parallelism"
+},
+{
+"converter": "toInt",
+"default": {
+"class_name_hash": true
+},
+"doc": "random seed.",
+"name": "seed"
+}
+],
+"CrossValidatorModel": [
+{
+"converter": "identity",
+"doc": "estimator to be cross-validated",
+"name": "estimator"
+},
+{
+"converter": "identity",
+"doc": "estimator param maps",
+"name": "estimatorParamMaps"
+},
+{
+"converter": "identity",
+"doc": "evaluator used to select hyper-parameters that maximize the validator metric",
+"name": "evaluator"
+},
+{
+"converter": "toString",
+"doc": "Param for the column name of user specified fold number. Once this is specified, :py:class:`CrossValidator` won't do random k-fold split. Note that this column should be integer type with range [0, numFolds) and Spark will throw exception on out-of-range fold numbers.",
+"name": "foldCol"
+},
+{
+"converter": "toInt",
+"doc": "number of folds for cross validation",
+"name": "numFolds"
+},
+{
+"converter": "toInt",
+"doc": "random seed.",
+"name": "seed"
+}
+],
+"DCT": [
+{
+"converter": "toString",
+"doc": "input column name.",
+"name": "inputCol"
+},
+{
+"converter": "toBoolean",
+"default": false,
+"doc": "Set transformer to perform inverse DCT, default False.",
+"name": "inverse"
+},
+{
+"converter": "toString",
+"default": {
+"uid_suffix": "__output"
+},
+"doc": "output column name.",
+"name": "outputCol"
+}
+],
+"DecisionTreeClassificationModel": [
+{
+"converter": "toBoolean",
+"default": false,
+"doc": "If false, the algorithm will pass trees to executors to match instances with nodes. If true, the algorithm will cache node IDs for each instance. Caching can speed up training of deeper trees. Users can set how often should the cache be checkpointed or disable it by setting checkpointInterval.",
+"name": "cacheNodeIds"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 10
+},
+"doc": "set checkpoint interval (>= 1) or disable checkpoint (-1). E.g. 10 means that the cache will get checkpointed every 10 iterations. Note: this setting will be ignored if the checkpoint directory is not set in the SparkContext.",
+"name": "checkpointInterval"
+},
+{
+"converter": "toString",
+"default": "features",
+"doc": "features column name.",
+"name": "featuresCol"
+},
+{
+"converter": "toString",
+"default": "gini",
+"doc": "Criterion used for information gain calculation (case-insensitive). Supported options: entropy, gini",
+"name": "impurity"
+},
+{
+"converter": "toString",
+"default": "label",
+"doc": "label column name.",
+"name": "labelCol"
+},
+{
+"converter": "toString",
+"default": "",
+"doc": "Leaf indices column name. Predicted leaf index of each instance in each tree by preorder.",
+"name": "leafCol"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 32
+},
+"doc": "Max number of bins for discretizing continuous features.  Must be >=2 and >= number of categories for any categorical feature.",
+"name": "maxBins"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 5
+},
+"doc": "Maximum depth of the tree. (>= 0) E.g., depth 0 means 1 leaf node; depth 1 means 1 internal node + 2 leaf nodes. Must be in range [0, 30].",
+"name": "maxDepth"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 256
+},
+"doc": "Maximum memory in MB allocated to histogram aggregation. If too small, then 1 node will be split per iteration, and its aggregates may exceed this size.",
+"name": "maxMemoryInMB"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.0"
+},
+"doc": "Minimum information gain for a split to be considered at a tree node.",
+"name": "minInfoGain"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 1
+},
+"doc": "Minimum number of instances each child must have after split. If a split causes the left or right child to have fewer than minInstancesPerNode, the split will be discarded as invalid. Should be >= 1.",
+"name": "minInstancesPerNode"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.0"
+},
+"doc": "Minimum fraction of the weighted sample count that each child must have after split. If a split causes the fraction of the total weight in the left or right child to be less than minWeightFractionPerNode, the split will be discarded as invalid. Should be in interval [0.0, 0.5).",
+"name": "minWeightFractionPerNode"
+},
+{
+"converter": "toString",
+"default": "prediction",
+"doc": "prediction column name.",
+"name": "predictionCol"
+},
+{
+"converter": "toString",
+"default": "probability",
+"doc": "Column name for predicted class conditional probabilities. Note: Not all models output well-calibrated probability estimates! These probabilities should be treated as confidences, not precise probabilities.",
+"name": "probabilityCol"
+},
+{
+"converter": "toBoolean",
+"default": true,
+"doc": "If true, the trained tree will undergo a pruning process after training, in which sibling leaf nodes with the same prediction are merged into their parent. The resulting tree will be smaller and have faster predictions. Class probabilities remain available after pruning. If false, no pruning is applied after training.",
+"name": "pruneTree"
+},
+{
+"converter": "toString",
+"default": "rawPrediction",
+"doc": "raw prediction (a.k.a. confidence) column name.",
+"name": "rawPredictionCol"
+},
+{
+"converter": "toInt",
+"default": {
+"class_name_hash": true
+},
+"doc": "random seed.",
+"name": "seed"
+},
+{
+"converter": "toListFloat",
+"doc": "Thresholds in multi-class classification to adjust the probability of predicting each class. Array must have length equal to the number of classes, with values > 0, excepting that at most one value may be 0. The class with largest value p/t is predicted, where p is the original probability of that class and t is the class's threshold.",
+"name": "thresholds"
+},
+{
+"converter": "toString",
+"doc": "weight column name. If this is not set or empty, we treat all instance weights as 1.0.",
+"name": "weightCol"
+}
+],
+"DecisionTreeClassifier": [
+{
+"converter": "toBoolean",
+"default": false,
+"doc": "If false, the algorithm will pass trees to executors to match instances with nodes. If true, the algorithm will cache node IDs for each instance. Caching can speed up training of deeper trees. Users can set how often should the cache be checkpointed or disable it by setting checkpointInterval.",
+"name": "cacheNodeIds"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 10
+},
+"doc": "set checkpoint interval (>= 1) or disable checkpoint (-1). E.g. 10 means that the cache will get checkpointed every 10 iterations. Note: this setting will be ignored if the checkpoint directory is not set in the SparkContext.",
+"name": "checkpointInterval"
+},
+{
+"converter": "toString",
+"default": "features",
+"doc": "features column name.",
+"name": "featuresCol"
+},
+{
+"converter": "toString",
+"default": "gini",
+"doc": "Criterion used for information gain calculation (case-insensitive). Supported options: entropy, gini",
+"name": "impurity"
+},
+{
+"converter": "toString",
+"default": "label",
+"doc": "label column name.",
+"name": "labelCol"
+},
+{
+"converter": "toString",
+"default": "",
+"doc": "Leaf indices column name. Predicted leaf index of each instance in each tree by preorder.",
+"name": "leafCol"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 32
+},
+"doc": "Max number of bins for discretizing continuous features.  Must be >=2 and >= number of categories for any categorical feature.",
+"name": "maxBins"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 5
+},
+"doc": "Maximum depth of the tree. (>= 0) E.g., depth 0 means 1 leaf node; depth 1 means 1 internal node + 2 leaf nodes. Must be in range [0, 30].",
+"name": "maxDepth"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 256
+},
+"doc": "Maximum memory in MB allocated to histogram aggregation. If too small, then 1 node will be split per iteration, and its aggregates may exceed this size.",
+"name": "maxMemoryInMB"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.0"
+},
+"doc": "Minimum information gain for a split to be considered at a tree node.",
+"name": "minInfoGain"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 1
+},
+"doc": "Minimum number of instances each child must have after split. If a split causes the left or right child to have fewer than minInstancesPerNode, the split will be discarded as invalid. Should be >= 1.",
+"name": "minInstancesPerNode"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.0"
+},
+"doc": "Minimum fraction of the weighted sample count that each child must have after split. If a split causes the fraction of the total weight in the left or right child to be less than minWeightFractionPerNode, the split will be discarded as invalid. Should be in interval [0.0, 0.5).",
+"name": "minWeightFractionPerNode"
+},
+{
+"converter": "toString",
+"default": "prediction",
+"doc": "prediction column name.",
+"name": "predictionCol"
+},
+{
+"converter": "toString",
+"default": "probability",
+"doc": "Column name for predicted class conditional probabilities. Note: Not all models output well-calibrated probability estimates! These probabilities should be treated as confidences, not precise probabilities.",
+"name": "probabilityCol"
+},
+{
+"converter": "toBoolean",
+"default": true,
+"doc": "If true, the trained tree will undergo a pruning process after training, in which sibling leaf nodes with the same prediction are merged into their parent. The resulting tree will be smaller and have faster predictions. Class probabilities remain available after pruning. If false, no pruning is applied after training.",
+"name": "pruneTree"
+},
+{
+"converter": "toString",
+"default": "rawPrediction",
+"doc": "raw prediction (a.k.a. confidence) column name.",
+"name": "rawPredictionCol"
+},
+{
+"converter": "toInt",
+"default": {
+"class_name_hash": true
+},
+"doc": "random seed.",
+"name": "seed"
+},
+{
+"converter": "toListFloat",
+"doc": "Thresholds in multi-class classification to adjust the probability of predicting each class. Array must have length equal to the number of classes, with values > 0, excepting that at most one value may be 0. The class with largest value p/t is predicted, where p is the original probability of that class and t is the class's threshold.",
+"name": "thresholds"
+},
+{
+"converter": "toString",
+"doc": "weight column name. If this is not set or empty, we treat all instance weights as 1.0.",
+"name": "weightCol"
+}
+],
+"DecisionTreeRegressionModel": [
+{
+"converter": "toBoolean",
+"default": false,
+"doc": "If false, the algorithm will pass trees to executors to match instances with nodes. If true, the algorithm will cache node IDs for each instance. Caching can speed up training of deeper trees. Users can set how often should the cache be checkpointed or disable it by setting checkpointInterval.",
+"name": "cacheNodeIds"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 10
+},
+"doc": "set checkpoint interval (>= 1) or disable checkpoint (-1). E.g. 10 means that the cache will get checkpointed every 10 iterations. Note: this setting will be ignored if the checkpoint directory is not set in the SparkContext.",
+"name": "checkpointInterval"
+},
+{
+"converter": "toString",
+"default": "features",
+"doc": "features column name.",
+"name": "featuresCol"
+},
+{
+"converter": "toString",
+"default": "variance",
+"doc": "Criterion used for information gain calculation (case-insensitive). Supported options: variance",
+"name": "impurity"
+},
+{
+"converter": "toString",
+"default": "label",
+"doc": "label column name.",
+"name": "labelCol"
+},
+{
+"converter": "toString",
+"default": "",
+"doc": "Leaf indices column name. Predicted leaf index of each instance in each tree by preorder.",
+"name": "leafCol"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 32
+},
+"doc": "Max number of bins for discretizing continuous features.  Must be >=2 and >= number of categories for any categorical feature.",
+"name": "maxBins"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 5
+},
+"doc": "Maximum depth of the tree. (>= 0) E.g., depth 0 means 1 leaf node; depth 1 means 1 internal node + 2 leaf nodes. Must be in range [0, 30].",
+"name": "maxDepth"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 256
+},
+"doc": "Maximum memory in MB allocated to histogram aggregation. If too small, then 1 node will be split per iteration, and its aggregates may exceed this size.",
+"name": "maxMemoryInMB"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.0"
+},
+"doc": "Minimum information gain for a split to be considered at a tree node.",
+"name": "minInfoGain"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 1
+},
+"doc": "Minimum number of instances each child must have after split. If a split causes the left or right child to have fewer than minInstancesPerNode, the split will be discarded as invalid. Should be >= 1.",
+"name": "minInstancesPerNode"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.0"
+},
+"doc": "Minimum fraction of the weighted sample count that each child must have after split. If a split causes the fraction of the total weight in the left or right child to be less than minWeightFractionPerNode, the split will be discarded as invalid. Should be in interval [0.0, 0.5).",
+"name": "minWeightFractionPerNode"
+},
+{
+"converter": "toString",
+"default": "prediction",
+"doc": "prediction column name.",
+"name": "predictionCol"
+},
+{
+"converter": "toInt",
+"default": {
+"class_name_hash": true
+},
+"doc": "random seed.",
+"name": "seed"
+},
+{
+"converter": "toString",
+"doc": "column name for the biased sample variance of prediction.",
+"name": "varianceCol"
+},
+{
+"converter": "toString",
+"doc": "weight column name. If this is not set or empty, we treat all instance weights as 1.0.",
+"name": "weightCol"
+}
+],
+"DecisionTreeRegressor": [
+{
+"converter": "toBoolean",
+"default": false,
+"doc": "If false, the algorithm will pass trees to executors to match instances with nodes. If true, the algorithm will cache node IDs for each instance. Caching can speed up training of deeper trees. Users can set how often should the cache be checkpointed or disable it by setting checkpointInterval.",
+"name": "cacheNodeIds"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 10
+},
+"doc": "set checkpoint interval (>= 1) or disable checkpoint (-1). E.g. 10 means that the cache will get checkpointed every 10 iterations. Note: this setting will be ignored if the checkpoint directory is not set in the SparkContext.",
+"name": "checkpointInterval"
+},
+{
+"converter": "toString",
+"default": "features",
+"doc": "features column name.",
+"name": "featuresCol"
+},
+{
+"converter": "toString",
+"default": "variance",
+"doc": "Criterion used for information gain calculation (case-insensitive). Supported options: variance",
+"name": "impurity"
+},
+{
+"converter": "toString",
+"default": "label",
+"doc": "label column name.",
+"name": "labelCol"
+},
+{
+"converter": "toString",
+"default": "",
+"doc": "Leaf indices column name. Predicted leaf index of each instance in each tree by preorder.",
+"name": "leafCol"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 32
+},
+"doc": "Max number of bins for discretizing continuous features.  Must be >=2 and >= number of categories for any categorical feature.",
+"name": "maxBins"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 5
+},
+"doc": "Maximum depth of the tree. (>= 0) E.g., depth 0 means 1 leaf node; depth 1 means 1 internal node + 2 leaf nodes. Must be in range [0, 30].",
+"name": "maxDepth"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 256
+},
+"doc": "Maximum memory in MB allocated to histogram aggregation. If too small, then 1 node will be split per iteration, and its aggregates may exceed this size.",
+"name": "maxMemoryInMB"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.0"
+},
+"doc": "Minimum information gain for a split to be considered at a tree node.",
+"name": "minInfoGain"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 1
+},
+"doc": "Minimum number of instances each child must have after split. If a split causes the left or right child to have fewer than minInstancesPerNode, the split will be discarded as invalid. Should be >= 1.",
+"name": "minInstancesPerNode"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.0"
+},
+"doc": "Minimum fraction of the weighted sample count that each child must have after split. If a split causes the fraction of the total weight in the left or right child to be less than minWeightFractionPerNode, the split will be discarded as invalid. Should be in interval [0.0, 0.5).",
+"name": "minWeightFractionPerNode"
+},
+{
+"converter": "toString",
+"default": "prediction",
+"doc": "prediction column name.",
+"name": "predictionCol"
+},
+{
+"converter": "toInt",
+"default": {
+"class_name_hash": true
+},
+"doc": "random seed.",
+"name": "seed"
+},
+{
+"converter": "toString",
+"doc": "column name for the biased sample variance of prediction.",
+"name": "varianceCol"
+},
+{
+"converter": "toString",
+"doc": "weight column name. If this is not set or empty, we treat all instance weights as 1.0.",
+"name": "weightCol"
+}
+],
+"DistributedLDAModel": [
+{
+"converter": "toInt",
+"default": {
+"int": 10
+},
+"doc": "set checkpoint interval (>= 1) or disable checkpoint (-1). E.g. 10 means that the cache will get checkpointed every 10 iterations. Note: this setting will be ignored if the checkpoint directory is not set in the SparkContext.",
+"name": "checkpointInterval"
+},
+{
+"converter": "toListFloat",
+"doc": "Concentration parameter (commonly named \"alpha\") for the prior placed on documents' distributions over topics (\"theta\").",
+"name": "docConcentration"
+},
+{
+"converter": "toString",
+"default": "features",
+"doc": "features column name.",
+"name": "featuresCol"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 10
+},
+"doc": "The number of topics (clusters) to infer. Must be > 1.",
+"name": "k"
+},
+{
+"converter": "toBoolean",
+"default": true,
+"doc": "(For EM optimizer) If using checkpointing, this indicates whether to keep the last checkpoint. If false, then the checkpoint will be deleted. Deleting the checkpoint can cause failures if a data partition is lost, so set this bit with care.",
+"name": "keepLastCheckpoint"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.51"
+},
+"doc": "Learning rate, set as anexponential decay rate. This should be between (0.5, 1.0] to guarantee asymptotic convergence.",
+"name": "learningDecay"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "1024.0"
+},
+"doc": "A (positive) learning parameter that downweights early iterations. Larger values make early iterations count less",
+"name": "learningOffset"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 20
+},
+"doc": "max number of iterations (>= 0).",
+"name": "maxIter"
+},
+{
+"converter": "toBoolean",
+"default": true,
+"doc": "Indicates whether the docConcentration (Dirichlet parameter for document-topic distribution) will be optimized during training.",
+"name": "optimizeDocConcentration"
+},
+{
+"converter": "toString",
+"default": "online",
+"doc": "Optimizer or inference algorithm used to estimate the LDA model.  Supported: online, em",
+"name": "optimizer"
+},
+{
+"converter": "toInt",
+"default": {
+"class_name_hash": true
+},
+"doc": "random seed.",
+"name": "seed"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.05"
+},
+"doc": "Fraction of the corpus to be sampled and used in each iteration of mini-batch gradient descent, in range (0, 1].",
+"name": "subsamplingRate"
+},
+{
+"converter": "toFloat",
+"doc": "Concentration parameter (commonly named \"beta\" or \"eta\") for the prior placed on topic' distributions over terms.",
+"name": "topicConcentration"
+},
+{
+"converter": "toString",
+"default": "topicDistribution",
+"doc": "Output column with estimates of the topic mixture distribution for each document (often called \"theta\" in the literature). Returns a vector of zeros for an empty document.",
+"name": "topicDistributionCol"
+}
+],
+"ElementwiseProduct": [
+{
+"converter": "toString",
+"doc": "input column name.",
+"name": "inputCol"
+},
+{
+"converter": "toString",
+"default": {
+"uid_suffix": "__output"
+},
+"doc": "output column name.",
+"name": "outputCol"
+},
+{
+"converter": "toVector",
+"doc": "Vector for hadamard product.",
+"name": "scalingVec"
+}
+],
+"Evaluator": [],
+"FMClassificationModel": [
+{
+"converter": "toInt",
+"default": {
+"int": 8
+},
+"doc": "Dimensionality of the factor vectors, which are used to get pairwise interactions between variables",
+"name": "factorSize"
+},
+{
+"converter": "toString",
+"default": "features",
+"doc": "features column name.",
+"name": "featuresCol"
+},
+{
+"converter": "toBoolean",
+"default": true,
+"doc": "whether to fit an intercept term.",
+"name": "fitIntercept"
+},
+{
+"converter": "toBoolean",
+"default": true,
+"doc": "whether to fit linear term (aka 1-way term)",
+"name": "fitLinear"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.01"
+},
+"doc": "standard deviation of initial coefficients",
+"name": "initStd"
+},
+{
+"converter": "toString",
+"default": "label",
+"doc": "label column name.",
+"name": "labelCol"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 100
+},
+"doc": "max number of iterations (>= 0).",
+"name": "maxIter"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "1.0"
+},
+"doc": "fraction of the input data set that should be used for one iteration of gradient descent",
+"name": "miniBatchFraction"
+},
+{
+"converter": "toString",
+"default": "prediction",
+"doc": "prediction column name.",
+"name": "predictionCol"
+},
+{
+"converter": "toString",
+"default": "probability",
+"doc": "Column name for predicted class conditional probabilities. Note: Not all models output well-calibrated probability estimates! These probabilities should be treated as confidences, not precise probabilities.",
+"name": "probabilityCol"
+},
+{
+"converter": "toString",
+"default": "rawPrediction",
+"doc": "raw prediction (a.k.a. confidence) column name.",
+"name": "rawPredictionCol"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.0"
+},
+"doc": "regularization parameter (>= 0).",
+"name": "regParam"
+},
+{
+"converter": "toInt",
+"default": {
+"class_name_hash": true
+},
+"doc": "random seed.",
+"name": "seed"
+},
+{
+"converter": "toString",
+"default": "adamW",
+"doc": "The solver algorithm for optimization. Supported options: gd, adamW. (Default adamW)",
+"name": "solver"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "1.0"
+},
+"doc": "Step size to be used for each iteration of optimization (>= 0).",
+"name": "stepSize"
+},
+{
+"converter": "toListFloat",
+"doc": "Thresholds in multi-class classification to adjust the probability of predicting each class. Array must have length equal to the number of classes, with values > 0, excepting that at most one value may be 0. The class with largest value p/t is predicted, where p is the original probability of that class and t is the class's threshold.",
+"name": "thresholds"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "1e-06"
+},
+"doc": "the convergence tolerance for iterative algorithms (>= 0).",
+"name": "tol"
+},
+{
+"converter": "toString",
+"doc": "weight column name. If this is not set or empty, we treat all instance weights as 1.0.",
+"name": "weightCol"
+}
+],
+"FMClassificationSummary": [],
+"FMClassificationTrainingSummary": [],
+"FMClassifier": [
+{
+"converter": "toInt",
+"default": {
+"int": 8
+},
+"doc": "Dimensionality of the factor vectors, which are used to get pairwise interactions between variables",
+"name": "factorSize"
+},
+{
+"converter": "toString",
+"default": "features",
+"doc": "features column name.",
+"name": "featuresCol"
+},
+{
+"converter": "toBoolean",
+"default": true,
+"doc": "whether to fit an intercept term.",
+"name": "fitIntercept"
+},
+{
+"converter": "toBoolean",
+"default": true,
+"doc": "whether to fit linear term (aka 1-way term)",
+"name": "fitLinear"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.01"
+},
+"doc": "standard deviation of initial coefficients",
+"name": "initStd"
+},
+{
+"converter": "toString",
+"default": "label",
+"doc": "label column name.",
+"name": "labelCol"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 100
+},
+"doc": "max number of iterations (>= 0).",
+"name": "maxIter"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "1.0"
+},
+"doc": "fraction of the input data set that should be used for one iteration of gradient descent",
+"name": "miniBatchFraction"
+},
+{
+"converter": "toString",
+"default": "prediction",
+"doc": "prediction column name.",
+"name": "predictionCol"
+},
+{
+"converter": "toString",
+"default": "probability",
+"doc": "Column name for predicted class conditional probabilities. Note: Not all models output well-calibrated probability estimates! These probabilities should be treated as confidences, not precise probabilities.",
+"name": "probabilityCol"
+},
+{
+"converter": "toString",
+"default": "rawPrediction",
+"doc": "raw prediction (a.k.a. confidence) column name.",
+"name": "rawPredictionCol"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.0"
+},
+"doc": "regularization parameter (>= 0).",
+"name": "regParam"
+},
+{
+"converter": "toInt",
+"default": {
+"class_name_hash": true
+},
+"doc": "random seed.",
+"name": "seed"
+},
+{
+"converter": "toString",
+"default": "adamW",
+"doc": "The solver algorithm for optimization. Supported options: gd, adamW. (Default adamW)",
+"name": "solver"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "1.0"
+},
+"doc": "Step size to be used for each iteration of optimization (>= 0).",
+"name": "stepSize"
+},
+{
+"converter": "toListFloat",
+"doc": "Thresholds in multi-class classification to adjust the probability of predicting each class. Array must have length equal to the number of classes, with values > 0, excepting that at most one value may be 0. The class with largest value p/t is predicted, where p is the original probability of that class and t is the class's threshold.",
+"name": "thresholds"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "1e-06"
+},
+"doc": "the convergence tolerance for iterative algorithms (>= 0).",
+"name": "tol"
+},
+{
+"converter": "toString",
+"doc": "weight column name. If this is not set or empty, we treat all instance weights as 1.0.",
+"name": "weightCol"
+}
+],
+"FMRegressionModel": [
+{
+"converter": "toInt",
+"default": {
+"int": 8
+},
+"doc": "Dimensionality of the factor vectors, which are used to get pairwise interactions between variables",
+"name": "factorSize"
+},
+{
+"converter": "toString",
+"default": "features",
+"doc": "features column name.",
+"name": "featuresCol"
+},
+{
+"converter": "toBoolean",
+"default": true,
+"doc": "whether to fit an intercept term.",
+"name": "fitIntercept"
+},
+{
+"converter": "toBoolean",
+"default": true,
+"doc": "whether to fit linear term (aka 1-way term)",
+"name": "fitLinear"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.01"
+},
+"doc": "standard deviation of initial coefficients",
+"name": "initStd"
+},
+{
+"converter": "toString",
+"default": "label",
+"doc": "label column name.",
+"name": "labelCol"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 100
+},
+"doc": "max number of iterations (>= 0).",
+"name": "maxIter"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "1.0"
+},
+"doc": "fraction of the input data set that should be used for one iteration of gradient descent",
+"name": "miniBatchFraction"
+},
+{
+"converter": "toString",
+"default": "prediction",
+"doc": "prediction column name.",
+"name": "predictionCol"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.0"
+},
+"doc": "regularization parameter (>= 0).",
+"name": "regParam"
+},
+{
+"converter": "toInt",
+"default": {
+"class_name_hash": true
+},
+"doc": "random seed.",
+"name": "seed"
+},
+{
+"converter": "toString",
+"default": "adamW",
+"doc": "The solver algorithm for optimization. Supported options: gd, adamW. (Default adamW)",
+"name": "solver"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "1.0"
+},
+"doc": "Step size to be used for each iteration of optimization (>= 0).",
+"name": "stepSize"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "1e-06"
+},
+"doc": "the convergence tolerance for iterative algorithms (>= 0).",
+"name": "tol"
+},
+{
+"converter": "toString",
+"doc": "weight column name. If this is not set or empty, we treat all instance weights as 1.0.",
+"name": "weightCol"
+}
+],
+"FMRegressor": [
+{
+"converter": "toInt",
+"default": {
+"int": 8
+},
+"doc": "Dimensionality of the factor vectors, which are used to get pairwise interactions between variables",
+"name": "factorSize"
+},
+{
+"converter": "toString",
+"default": "features",
+"doc": "features column name.",
+"name": "featuresCol"
+},
+{
+"converter": "toBoolean",
+"default": true,
+"doc": "whether to fit an intercept term.",
+"name": "fitIntercept"
+},
+{
+"converter": "toBoolean",
+"default": true,
+"doc": "whether to fit linear term (aka 1-way term)",
+"name": "fitLinear"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.01"
+},
+"doc": "standard deviation of initial coefficients",
+"name": "initStd"
+},
+{
+"converter": "toString",
+"default": "label",
+"doc": "label column name.",
+"name": "labelCol"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 100
+},
+"doc": "max number of iterations (>= 0).",
+"name": "maxIter"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "1.0"
+},
+"doc": "fraction of the input data set that should be used for one iteration of gradient descent",
+"name": "miniBatchFraction"
+},
+{
+"converter": "toString",
+"default": "prediction",
+"doc": "prediction column name.",
+"name": "predictionCol"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.0"
+},
+"doc": "regularization parameter (>= 0).",
+"name": "regParam"
+},
+{
+"converter": "toInt",
+"default": {
+"class_name_hash": true
+},
+"doc": "random seed.",
+"name": "seed"
+},
+{
+"converter": "toString",
+"default": "adamW",
+"doc": "The solver algorithm for optimization. Supported options: gd, adamW. (Default adamW)",
+"name": "solver"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "1.0"
+},
+"doc": "Step size to be used for each iteration of optimization (>= 0).",
+"name": "stepSize"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "1e-06"
+},
+"doc": "the convergence tolerance for iterative algorithms (>= 0).",
+"name": "tol"
+},
+{
+"converter": "toString",
+"doc": "weight column name. If this is not set or empty, we treat all instance weights as 1.0.",
+"name": "weightCol"
+}
+],
+"FPGrowth": [
+{
+"converter": "toString",
+"default": "items",
+"doc": "items column name",
+"name": "itemsCol"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.8"
+},
+"doc": "Minimal confidence for generating Association Rule. [0.0, 1.0]. minConfidence will not affect the mining for frequent itemsets, but will affect the association rules generation.",
+"name": "minConfidence"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.3"
+},
+"doc": "Minimal support level of the frequent pattern. [0.0, 1.0]. Any pattern that appears more than (minSupport * size-of-the-dataset) times will be output in the frequent itemsets.",
+"name": "minSupport"
+},
+{
+"converter": "toInt",
+"doc": "Number of partitions (at least 1) used by parallel FP-growth. By default the param is not set, and partition number of the input dataset is used.",
+"name": "numPartitions"
+},
+{
+"converter": "toString",
+"default": "prediction",
+"doc": "prediction column name.",
+"name": "predictionCol"
+}
+],
+"FPGrowthModel": [
+{
+"converter": "toString",
+"default": "items",
+"doc": "items column name",
+"name": "itemsCol"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.8"
+},
+"doc": "Minimal confidence for generating Association Rule. [0.0, 1.0]. minConfidence will not affect the mining for frequent itemsets, but will affect the association rules generation.",
+"name": "minConfidence"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.3"
+},
+"doc": "Minimal support level of the frequent pattern. [0.0, 1.0]. Any pattern that appears more than (minSupport * size-of-the-dataset) times will be output in the frequent itemsets.",
+"name": "minSupport"
+},
+{
+"converter": "toInt",
+"doc": "Number of partitions (at least 1) used by parallel FP-growth. By default the param is not set, and partition number of the input dataset is used.",
+"name": "numPartitions"
+},
+{
+"converter": "toString",
+"default": "prediction",
+"doc": "prediction column name.",
+"name": "predictionCol"
+}
+],
+"FeatureHasher": [
+{
+"converter": "toListString",
+"doc": "numeric columns to treat as categorical",
+"name": "categoricalCols"
+},
+{
+"converter": "toListString",
+"doc": "input column names.",
+"name": "inputCols"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 262144
+},
+"doc": "Number of features. Should be greater than 0.",
+"name": "numFeatures"
+},
+{
+"converter": "toString",
+"default": {
+"uid_suffix": "__output"
+},
+"doc": "output column name.",
+"name": "outputCol"
+}
+],
+"GBTClassificationModel": [
+{
+"converter": "toBoolean",
+"default": false,
+"doc": "If false, the algorithm will pass trees to executors to match instances with nodes. If true, the algorithm will cache node IDs for each instance. Caching can speed up training of deeper trees. Users can set how often should the cache be checkpointed or disable it by setting checkpointInterval.",
+"name": "cacheNodeIds"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 10
+},
+"doc": "set checkpoint interval (>= 1) or disable checkpoint (-1). E.g. 10 means that the cache will get checkpointed every 10 iterations. Note: this setting will be ignored if the checkpoint directory is not set in the SparkContext.",
+"name": "checkpointInterval"
+},
+{
+"converter": "toString",
+"default": "all",
+"doc": "The number of features to consider for splits at each tree node. Supported options: 'auto' (choose automatically for task: If numTrees == 1, set to 'all'. If numTrees > 1 (forest), set to 'sqrt' for classification and to 'onethird' for regression), 'all' (use all features), 'onethird' (use 1/3 of the features), 'sqrt' (use sqrt(number of features)), 'log2' (use log2(number of features)), 'n' (when n is in the range (0, 1.0], use n * number of features. When n is in the range (1, number of features), use n features). default = 'auto'",
+"name": "featureSubsetStrategy"
+},
+{
+"converter": "toString",
+"default": "features",
+"doc": "features column name.",
+"name": "featuresCol"
+},
+{
+"converter": "toString",
+"default": "variance",
+"doc": "Criterion used for information gain calculation (case-insensitive). Supported options: variance",
+"name": "impurity"
+},
+{
+"converter": "toString",
+"default": "label",
+"doc": "label column name.",
+"name": "labelCol"
+},
+{
+"converter": "toString",
+"default": "",
+"doc": "Leaf indices column name. Predicted leaf index of each instance in each tree by preorder.",
+"name": "leafCol"
+},
+{
+"converter": "toString",
+"default": "logistic",
+"doc": "Loss function which GBT tries to minimize (case-insensitive). Supported options: logistic",
+"name": "lossType"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 32
+},
+"doc": "Max number of bins for discretizing continuous features.  Must be >=2 and >= number of categories for any categorical feature.",
+"name": "maxBins"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 5
+},
+"doc": "Maximum depth of the tree. (>= 0) E.g., depth 0 means 1 leaf node; depth 1 means 1 internal node + 2 leaf nodes. Must be in range [0, 30].",
+"name": "maxDepth"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 20
+},
+"doc": "max number of iterations (>= 0).",
+"name": "maxIter"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 256
+},
+"doc": "Maximum memory in MB allocated to histogram aggregation. If too small, then 1 node will be split per iteration, and its aggregates may exceed this size.",
+"name": "maxMemoryInMB"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.0"
+},
+"doc": "Minimum information gain for a split to be considered at a tree node.",
+"name": "minInfoGain"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 1
+},
+"doc": "Minimum number of instances each child must have after split. If a split causes the left or right child to have fewer than minInstancesPerNode, the split will be discarded as invalid. Should be >= 1.",
+"name": "minInstancesPerNode"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.0"
+},
+"doc": "Minimum fraction of the weighted sample count that each child must have after split. If a split causes the fraction of the total weight in the left or right child to be less than minWeightFractionPerNode, the split will be discarded as invalid. Should be in interval [0.0, 0.5).",
+"name": "minWeightFractionPerNode"
+},
+{
+"converter": "toString",
+"default": "prediction",
+"doc": "prediction column name.",
+"name": "predictionCol"
+},
+{
+"converter": "toString",
+"default": "probability",
+"doc": "Column name for predicted class conditional probabilities. Note: Not all models output well-calibrated probability estimates! These probabilities should be treated as confidences, not precise probabilities.",
+"name": "probabilityCol"
+},
+{
+"converter": "toString",
+"default": "rawPrediction",
+"doc": "raw prediction (a.k.a. confidence) column name.",
+"name": "rawPredictionCol"
+},
+{
+"converter": "toInt",
+"default": {
+"class_name_hash": true
+},
+"doc": "random seed.",
+"name": "seed"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.1"
+},
+"doc": "Step size (a.k.a. learning rate) in interval (0, 1] for shrinking the contribution of each estimator.",
+"name": "stepSize"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "1.0"
+},
+"doc": "Fraction of the training data used for learning each decision tree, in range (0, 1].",
+"name": "subsamplingRate"
+},
+{
+"converter": "toListFloat",
+"doc": "Thresholds in multi-class classification to adjust the probability of predicting each class. Array must have length equal to the number of classes, with values > 0, excepting that at most one value may be 0. The class with largest value p/t is predicted, where p is the original probability of that class and t is the class's threshold.",
+"name": "thresholds"
+},
+{
+"converter": "toString",
+"doc": "name of the column that indicates whether each row is for training or for validation. False indicates training; true indicates validation.",
+"name": "validationIndicatorCol"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.01"
+},
+"doc": "Threshold for stopping early when fit with validation is used. If the error rate on the validation input changes by less than the validationTol, then learning will stop early (before `maxIter`). This parameter is ignored when fit without validation is used.",
+"name": "validationTol"
+},
+{
+"converter": "toString",
+"doc": "weight column name. If this is not set or empty, we treat all instance weights as 1.0.",
+"name": "weightCol"
+}
+],
+"GBTClassifier": [
+{
+"converter": "toBoolean",
+"default": false,
+"doc": "If false, the algorithm will pass trees to executors to match instances with nodes. If true, the algorithm will cache node IDs for each instance. Caching can speed up training of deeper trees. Users can set how often should the cache be checkpointed or disable it by setting checkpointInterval.",
+"name": "cacheNodeIds"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 10
+},
+"doc": "set checkpoint interval (>= 1) or disable checkpoint (-1). E.g. 10 means that the cache will get checkpointed every 10 iterations. Note: this setting will be ignored if the checkpoint directory is not set in the SparkContext.",
+"name": "checkpointInterval"
+},
+{
+"converter": "toString",
+"default": "all",
+"doc": "The number of features to consider for splits at each tree node. Supported options: 'auto' (choose automatically for task: If numTrees == 1, set to 'all'. If numTrees > 1 (forest), set to 'sqrt' for classification and to 'onethird' for regression), 'all' (use all features), 'onethird' (use 1/3 of the features), 'sqrt' (use sqrt(number of features)), 'log2' (use log2(number of features)), 'n' (when n is in the range (0, 1.0], use n * number of features. When n is in the range (1, number of features), use n features). default = 'auto'",
+"name": "featureSubsetStrategy"
+},
+{
+"converter": "toString",
+"default": "features",
+"doc": "features column name.",
+"name": "featuresCol"
+},
+{
+"converter": "toString",
+"default": "variance",
+"doc": "Criterion used for information gain calculation (case-insensitive). Supported options: variance",
+"name": "impurity"
+},
+{
+"converter": "toString",
+"default": "label",
+"doc": "label column name.",
+"name": "labelCol"
+},
+{
+"converter": "toString",
+"default": "",
+"doc": "Leaf indices column name. Predicted leaf index of each instance in each tree by preorder.",
+"name": "leafCol"
+},
+{
+"converter": "toString",
+"default": "logistic",
+"doc": "Loss function which GBT tries to minimize (case-insensitive). Supported options: logistic",
+"name": "lossType"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 32
+},
+"doc": "Max number of bins for discretizing continuous features.  Must be >=2 and >= number of categories for any categorical feature.",
+"name": "maxBins"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 5
+},
+"doc": "Maximum depth of the tree. (>= 0) E.g., depth 0 means 1 leaf node; depth 1 means 1 internal node + 2 leaf nodes. Must be in range [0, 30].",
+"name": "maxDepth"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 20
+},
+"doc": "max number of iterations (>= 0).",
+"name": "maxIter"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 256
+},
+"doc": "Maximum memory in MB allocated to histogram aggregation. If too small, then 1 node will be split per iteration, and its aggregates may exceed this size.",
+"name": "maxMemoryInMB"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.0"
+},
+"doc": "Minimum information gain for a split to be considered at a tree node.",
+"name": "minInfoGain"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 1
+},
+"doc": "Minimum number of instances each child must have after split. If a split causes the left or right child to have fewer than minInstancesPerNode, the split will be discarded as invalid. Should be >= 1.",
+"name": "minInstancesPerNode"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.0"
+},
+"doc": "Minimum fraction of the weighted sample count that each child must have after split. If a split causes the fraction of the total weight in the left or right child to be less than minWeightFractionPerNode, the split will be discarded as invalid. Should be in interval [0.0, 0.5).",
+"name": "minWeightFractionPerNode"
+},
+{
+"converter": "toString",
+"default": "prediction",
+"doc": "prediction column name.",
+"name": "predictionCol"
+},
+{
+"converter": "toString",
+"default": "probability",
+"doc": "Column name for predicted class conditional probabilities. Note: Not all models output well-calibrated probability estimates! These probabilities should be treated as confidences, not precise probabilities.",
+"name": "probabilityCol"
+},
+{
+"converter": "toString",
+"default": "rawPrediction",
+"doc": "raw prediction (a.k.a. confidence) column name.",
+"name": "rawPredictionCol"
+},
+{
+"converter": "toInt",
+"default": {
+"class_name_hash": true
+},
+"doc": "random seed.",
+"name": "seed"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.1"
+},
+"doc": "Step size (a.k.a. learning rate) in interval (0, 1] for shrinking the contribution of each estimator.",
+"name": "stepSize"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "1.0"
+},
+"doc": "Fraction of the training data used for learning each decision tree, in range (0, 1].",
+"name": "subsamplingRate"
+},
+{
+"converter": "toListFloat",
+"doc": "Thresholds in multi-class classification to adjust the probability of predicting each class. Array must have length equal to the number of classes, with values > 0, excepting that at most one value may be 0. The class with largest value p/t is predicted, where p is the original probability of that class and t is the class's threshold.",
+"name": "thresholds"
+},
+{
+"converter": "toString",
+"doc": "name of the column that indicates whether each row is for training or for validation. False indicates training; true indicates validation.",
+"name": "validationIndicatorCol"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.01"
+},
+"doc": "Threshold for stopping early when fit with validation is used. If the error rate on the validation input changes by less than the validationTol, then learning will stop early (before `maxIter`). This parameter is ignored when fit without validation is used.",
+"name": "validationTol"
+},
+{
+"converter": "toString",
+"doc": "weight column name. If this is not set or empty, we treat all instance weights as 1.0.",
+"name": "weightCol"
+}
+],
+"GBTRegressionModel": [
+{
+"converter": "toBoolean",
+"default": false,
+"doc": "If false, the algorithm will pass trees to executors to match instances with nodes. If true, the algorithm will cache node IDs for each instance. Caching can speed up training of deeper trees. Users can set how often should the cache be checkpointed or disable it by setting checkpointInterval.",
+"name": "cacheNodeIds"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 10
+},
+"doc": "set checkpoint interval (>= 1) or disable checkpoint (-1). E.g. 10 means that the cache will get checkpointed every 10 iterations. Note: this setting will be ignored if the checkpoint directory is not set in the SparkContext.",
+"name": "checkpointInterval"
+},
+{
+"converter": "toString",
+"default": "all",
+"doc": "The number of features to consider for splits at each tree node. Supported options: 'auto' (choose automatically for task: If numTrees == 1, set to 'all'. If numTrees > 1 (forest), set to 'sqrt' for classification and to 'onethird' for regression), 'all' (use all features), 'onethird' (use 1/3 of the features), 'sqrt' (use sqrt(number of features)), 'log2' (use log2(number of features)), 'n' (when n is in the range (0, 1.0], use n * number of features. When n is in the range (1, number of features), use n features). default = 'auto'",
+"name": "featureSubsetStrategy"
+},
+{
+"converter": "toString",
+"default": "features",
+"doc": "features column name.",
+"name": "featuresCol"
+},
+{
+"converter": "toString",
+"default": "variance",
+"doc": "Criterion used for information gain calculation (case-insensitive). Supported options: variance",
+"name": "impurity"
+},
+{
+"converter": "toString",
+"default": "label",
+"doc": "label column name.",
+"name": "labelCol"
+},
+{
+"converter": "toString",
+"default": "",
+"doc": "Leaf indices column name. Predicted leaf index of each instance in each tree by preorder.",
+"name": "leafCol"
+},
+{
+"converter": "toString",
+"default": "squared",
+"doc": "Loss function which GBT tries to minimize (case-insensitive). Supported options: squared, absolute",
+"name": "lossType"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 32
+},
+"doc": "Max number of bins for discretizing continuous features.  Must be >=2 and >= number of categories for any categorical feature.",
+"name": "maxBins"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 5
+},
+"doc": "Maximum depth of the tree. (>= 0) E.g., depth 0 means 1 leaf node; depth 1 means 1 internal node + 2 leaf nodes. Must be in range [0, 30].",
+"name": "maxDepth"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 20
+},
+"doc": "max number of iterations (>= 0).",
+"name": "maxIter"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 256
+},
+"doc": "Maximum memory in MB allocated to histogram aggregation. If too small, then 1 node will be split per iteration, and its aggregates may exceed this size.",
+"name": "maxMemoryInMB"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.0"
+},
+"doc": "Minimum information gain for a split to be considered at a tree node.",
+"name": "minInfoGain"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 1
+},
+"doc": "Minimum number of instances each child must have after split. If a split causes the left or right child to have fewer than minInstancesPerNode, the split will be discarded as invalid. Should be >= 1.",
+"name": "minInstancesPerNode"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.0"
+},
+"doc": "Minimum fraction of the weighted sample count that each child must have after split. If a split causes the fraction of the total weight in the left or right child to be less than minWeightFractionPerNode, the split will be discarded as invalid. Should be in interval [0.0, 0.5).",
+"name": "minWeightFractionPerNode"
+},
+{
+"converter": "toString",
+"default": "prediction",
+"doc": "prediction column name.",
+"name": "predictionCol"
+},
+{
+"converter": "toInt",
+"default": {
+"class_name_hash": true
+},
+"doc": "random seed.",
+"name": "seed"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.1"
+},
+"doc": "Step size (a.k.a. learning rate) in interval (0, 1] for shrinking the contribution of each estimator.",
+"name": "stepSize"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "1.0"
+},
+"doc": "Fraction of the training data used for learning each decision tree, in range (0, 1].",
+"name": "subsamplingRate"
+},
+{
+"converter": "toString",
+"doc": "name of the column that indicates whether each row is for training or for validation. False indicates training; true indicates validation.",
+"name": "validationIndicatorCol"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.01"
+},
+"doc": "Threshold for stopping early when fit with validation is used. If the error rate on the validation input changes by less than the validationTol, then learning will stop early (before `maxIter`). This parameter is ignored when fit without validation is used.",
+"name": "validationTol"
+},
+{
+"converter": "toString",
+"doc": "weight column name. If this is not set or empty, we treat all instance weights as 1.0.",
+"name": "weightCol"
+}
+],
+"GBTRegressor": [
+{
+"converter": "toBoolean",
+"default": false,
+"doc": "If false, the algorithm will pass trees to executors to match instances with nodes. If true, the algorithm will cache node IDs for each instance. Caching can speed up training of deeper trees. Users can set how often should the cache be checkpointed or disable it by setting checkpointInterval.",
+"name": "cacheNodeIds"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 10
+},
+"doc": "set checkpoint interval (>= 1) or disable checkpoint (-1). E.g. 10 means that the cache will get checkpointed every 10 iterations. Note: this setting will be ignored if the checkpoint directory is not set in the SparkContext.",
+"name": "checkpointInterval"
+},
+{
+"converter": "toString",
+"default": "all",
+"doc": "The number of features to consider for splits at each tree node. Supported options: 'auto' (choose automatically for task: If numTrees == 1, set to 'all'. If numTrees > 1 (forest), set to 'sqrt' for classification and to 'onethird' for regression), 'all' (use all features), 'onethird' (use 1/3 of the features), 'sqrt' (use sqrt(number of features)), 'log2' (use log2(number of features)), 'n' (when n is in the range (0, 1.0], use n * number of features. When n is in the range (1, number of features), use n features). default = 'auto'",
+"name": "featureSubsetStrategy"
+},
+{
+"converter": "toString",
+"default": "features",
+"doc": "features column name.",
+"name": "featuresCol"
+},
+{
+"converter": "toString",
+"default": "variance",
+"doc": "Criterion used for information gain calculation (case-insensitive). Supported options: variance",
+"name": "impurity"
+},
+{
+"converter": "toString",
+"default": "label",
+"doc": "label column name.",
+"name": "labelCol"
+},
+{
+"converter": "toString",
+"default": "",
+"doc": "Leaf indices column name. Predicted leaf index of each instance in each tree by preorder.",
+"name": "leafCol"
+},
+{
+"converter": "toString",
+"default": "squared",
+"doc": "Loss function which GBT tries to minimize (case-insensitive). Supported options: squared, absolute",
+"name": "lossType"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 32
+},
+"doc": "Max number of bins for discretizing continuous features.  Must be >=2 and >= number of categories for any categorical feature.",
+"name": "maxBins"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 5
+},
+"doc": "Maximum depth of the tree. (>= 0) E.g., depth 0 means 1 leaf node; depth 1 means 1 internal node + 2 leaf nodes. Must be in range [0, 30].",
+"name": "maxDepth"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 20
+},
+"doc": "max number of iterations (>= 0).",
+"name": "maxIter"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 256
+},
+"doc": "Maximum memory in MB allocated to histogram aggregation. If too small, then 1 node will be split per iteration, and its aggregates may exceed this size.",
+"name": "maxMemoryInMB"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.0"
+},
+"doc": "Minimum information gain for a split to be considered at a tree node.",
+"name": "minInfoGain"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 1
+},
+"doc": "Minimum number of instances each child must have after split. If a split causes the left or right child to have fewer than minInstancesPerNode, the split will be discarded as invalid. Should be >= 1.",
+"name": "minInstancesPerNode"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.0"
+},
+"doc": "Minimum fraction of the weighted sample count that each child must have after split. If a split causes the fraction of the total weight in the left or right child to be less than minWeightFractionPerNode, the split will be discarded as invalid. Should be in interval [0.0, 0.5).",
+"name": "minWeightFractionPerNode"
+},
+{
+"converter": "toString",
+"default": "prediction",
+"doc": "prediction column name.",
+"name": "predictionCol"
+},
+{
+"converter": "toInt",
+"default": {
+"class_name_hash": true
+},
+"doc": "random seed.",
+"name": "seed"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.1"
+},
+"doc": "Step size (a.k.a. learning rate) in interval (0, 1] for shrinking the contribution of each estimator.",
+"name": "stepSize"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "1.0"
+},
+"doc": "Fraction of the training data used for learning each decision tree, in range (0, 1].",
+"name": "subsamplingRate"
+},
+{
+"converter": "toString",
+"doc": "name of the column that indicates whether each row is for training or for validation. False indicates training; true indicates validation.",
+"name": "validationIndicatorCol"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.01"
+},
+"doc": "Threshold for stopping early when fit with validation is used. If the error rate on the validation input changes by less than the validationTol, then learning will stop early (before `maxIter`). This parameter is ignored when fit without validation is used.",
+"name": "validationTol"
+},
+{
+"converter": "toString",
+"doc": "weight column name. If this is not set or empty, we treat all instance weights as 1.0.",
+"name": "weightCol"
+}
+],
+"GaussianMixture": [
+{
+"converter": "toInt",
+"default": {
+"int": 2
+},
+"doc": "suggested depth for treeAggregate (>= 2).",
+"name": "aggregationDepth"
+},
+{
+"converter": "toString",
+"default": "features",
+"doc": "features column name.",
+"name": "featuresCol"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 2
+},
+"doc": "Number of independent Gaussians in the mixture model. Must be > 1.",
+"name": "k"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 100
+},
+"doc": "max number of iterations (>= 0).",
+"name": "maxIter"
+},
+{
+"converter": "toString",
+"default": "prediction",
+"doc": "prediction column name.",
+"name": "predictionCol"
+},
+{
+"converter": "toString",
+"default": "probability",
+"doc": "Column name for predicted class conditional probabilities. Note: Not all models output well-calibrated probability estimates! These probabilities should be treated as confidences, not precise probabilities.",
+"name": "probabilityCol"
+},
+{
+"converter": "toInt",
+"default": {
+"class_name_hash": true
+},
+"doc": "random seed.",
+"name": "seed"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.01"
+},
+"doc": "the convergence tolerance for iterative algorithms (>= 0).",
+"name": "tol"
+},
+{
+"converter": "toString",
+"doc": "weight column name. If this is not set or empty, we treat all instance weights as 1.0.",
+"name": "weightCol"
+}
+],
+"GaussianMixtureModel": [
+{
+"converter": "toInt",
+"default": {
+"int": 2
+},
+"doc": "suggested depth for treeAggregate (>= 2).",
+"name": "aggregationDepth"
+},
+{
+"converter": "toString",
+"default": "features",
+"doc": "features column name.",
+"name": "featuresCol"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 2
+},
+"doc": "Number of independent Gaussians in the mixture model. Must be > 1.",
+"name": "k"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 100
+},
+"doc": "max number of iterations (>= 0).",
+"name": "maxIter"
+},
+{
+"converter": "toString",
+"default": "prediction",
+"doc": "prediction column name.",
+"name": "predictionCol"
+},
+{
+"converter": "toString",
+"default": "probability",
+"doc": "Column name for predicted class conditional probabilities. Note: Not all models output well-calibrated probability estimates! These probabilities should be treated as confidences, not precise probabilities.",
+"name": "probabilityCol"
+},
+{
+"converter": "toInt",
+"default": {
+"class_name_hash": true
+},
+"doc": "random seed.",
+"name": "seed"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.01"
+},
+"doc": "the convergence tolerance for iterative algorithms (>= 0).",
+"name": "tol"
+},
+{
+"converter": "toString",
+"doc": "weight column name. If this is not set or empty, we treat all instance weights as 1.0.",
+"name": "weightCol"
+}
+],
+"GaussianMixtureSummary": [],
+"GeneralizedLinearRegression": [
+{
+"converter": "toInt",
+"default": {
+"int": 2
+},
+"doc": "suggested depth for treeAggregate (>= 2).",
+"name": "aggregationDepth"
+},
+{
+"converter": "toString",
+"default": "gaussian",
+"doc": "The name of family which is a description of the error distribution to be used in the model. Supported options: gaussian (default), binomial, poisson, gamma and tweedie.",
+"name": "family"
+},
+{
+"converter": "toString",
+"default": "features",
+"doc": "features column name.",
+"name": "featuresCol"
+},
+{
+"converter": "toBoolean",
+"default": true,
+"doc": "whether to fit an intercept term.",
+"name": "fitIntercept"
+},
+{
+"converter": "toString",
+"default": "label",
+"doc": "label column name.",
+"name": "labelCol"
+},
+{
+"converter": "toString",
+"doc": "The name of link function which provides the relationship between the linear predictor and the mean of the distribution function. Supported options: identity, log, inverse, logit, probit, cloglog and sqrt.",
+"name": "link"
+},
+{
+"converter": "toFloat",
+"doc": "The index in the power link function. Only applicable to the Tweedie family.",
+"name": "linkPower"
+},
+{
+"converter": "toString",
+"doc": "link prediction (linear predictor) column name",
+"name": "linkPredictionCol"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 25
+},
+"doc": "max number of iterations (>= 0).",
+"name": "maxIter"
+},
+{
+"converter": "toString",
+"doc": "The offset column name. If this is not set or empty, we treat all instance offsets as 0.0",
+"name": "offsetCol"
+},
+{
+"converter": "toString",
+"default": "prediction",
+"doc": "prediction column name.",
+"name": "predictionCol"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.0"
+},
+"doc": "regularization parameter (>= 0).",
+"name": "regParam"
+},
+{
+"converter": "toString",
+"default": "irls",
+"doc": "The solver algorithm for optimization. Supported options: irls.",
+"name": "solver"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "1e-06"
+},
+"doc": "the convergence tolerance for iterative algorithms (>= 0).",
+"name": "tol"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.0"
+},
+"doc": "The power in the variance function of the Tweedie distribution which characterizes the relationship between the variance and mean of the distribution. Only applicable for the Tweedie family. Supported values: 0 and [1, Inf).",
+"name": "variancePower"
+},
+{
+"converter": "toString",
+"doc": "weight column name. If this is not set or empty, we treat all instance weights as 1.0.",
+"name": "weightCol"
+}
+],
+"GeneralizedLinearRegressionModel": [
+{
+"converter": "toInt",
+"default": {
+"int": 2
+},
+"doc": "suggested depth for treeAggregate (>= 2).",
+"name": "aggregationDepth"
+},
+{
+"converter": "toString",
+"default": "gaussian",
+"doc": "The name of family which is a description of the error distribution to be used in the model. Supported options: gaussian (default), binomial, poisson, gamma and tweedie.",
+"name": "family"
+},
+{
+"converter": "toString",
+"default": "features",
+"doc": "features column name.",
+"name": "featuresCol"
+},
+{
+"converter": "toBoolean",
+"default": true,
+"doc": "whether to fit an intercept term.",
+"name": "fitIntercept"
+},
+{
+"converter": "toString",
+"default": "label",
+"doc": "label column name.",
+"name": "labelCol"
+},
+{
+"converter": "toString",
+"doc": "The name of link function which provides the relationship between the linear predictor and the mean of the distribution function. Supported options: identity, log, inverse, logit, probit, cloglog and sqrt.",
+"name": "link"
+},
+{
+"converter": "toFloat",
+"doc": "The index in the power link function. Only applicable to the Tweedie family.",
+"name": "linkPower"
+},
+{
+"converter": "toString",
+"doc": "link prediction (linear predictor) column name",
+"name": "linkPredictionCol"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 25
+},
+"doc": "max number of iterations (>= 0).",
+"name": "maxIter"
+},
+{
+"converter": "toString",
+"doc": "The offset column name. If this is not set or empty, we treat all instance offsets as 0.0",
+"name": "offsetCol"
+},
+{
+"converter": "toString",
+"default": "prediction",
+"doc": "prediction column name.",
+"name": "predictionCol"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.0"
+},
+"doc": "regularization parameter (>= 0).",
+"name": "regParam"
+},
+{
+"converter": "toString",
+"default": "irls",
+"doc": "The solver algorithm for optimization. Supported options: irls.",
+"name": "solver"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "1e-06"
+},
+"doc": "the convergence tolerance for iterative algorithms (>= 0).",
+"name": "tol"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.0"
+},
+"doc": "The power in the variance function of the Tweedie distribution which characterizes the relationship between the variance and mean of the distribution. Only applicable for the Tweedie family. Supported values: 0 and [1, Inf).",
+"name": "variancePower"
+},
+{
+"converter": "toString",
+"doc": "weight column name. If this is not set or empty, we treat all instance weights as 1.0.",
+"name": "weightCol"
+}
+],
+"GeneralizedLinearRegressionSummary": [],
+"GeneralizedLinearRegressionTrainingSummary": [],
+"HashingTF": [
+{
+"converter": "toBoolean",
+"default": false,
+"doc": "If True, all non zero counts are set to 1. This is useful for discrete probabilistic models that model binary events rather than integer counts. Default False.",
+"name": "binary"
+},
+{
+"converter": "toString",
+"doc": "input column name.",
+"name": "inputCol"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 262144
+},
+"doc": "Number of features. Should be greater than 0.",
+"name": "numFeatures"
+},
+{
+"converter": "toString",
+"default": {
+"uid_suffix": "__output"
+},
+"doc": "output column name.",
+"name": "outputCol"
+}
+],
+"IDF": [
+{
+"converter": "toString",
+"doc": "input column name.",
+"name": "inputCol"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 0
+},
+"doc": "minimum number of documents in which a term should appear for filtering",
+"name": "minDocFreq"
+},
+{
+"converter": "toString",
+"default": {
+"uid_suffix": "__output"
+},
+"doc": "output column name.",
+"name": "outputCol"
+}
+],
+"IDFModel": [
+{
+"converter": "toString",
+"doc": "input column name.",
+"name": "inputCol"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 0
+},
+"doc": "minimum number of documents in which a term should appear for filtering",
+"name": "minDocFreq"
+},
+{
+"converter": "toString",
+"default": {
+"uid_suffix": "__output"
+},
+"doc": "output column name.",
+"name": "outputCol"
+}
+],
+"Imputer": [
+{
+"converter": "toString",
+"doc": "input column name.",
+"name": "inputCol"
+},
+{
+"converter": "toListString",
+"doc": "input column names.",
+"name": "inputCols"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "nan"
+},
+"doc": "The placeholder for the missing values. All occurrences of missingValue will be imputed.",
+"name": "missingValue"
+},
+{
+"converter": "toString",
+"default": {
+"uid_suffix": "__output"
+},
+"doc": "output column name.",
+"name": "outputCol"
+},
+{
+"converter": "toListString",
+"doc": "output column names.",
+"name": "outputCols"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.001"
+},
+"doc": "the relative target precision for the approximate quantile algorithm. Must be in the range [0, 1]",
+"name": "relativeError"
+},
+{
+"converter": "toString",
+"default": "mean",
+"doc": "strategy for imputation. If mean, then replace missing values using the mean value of the feature. If median, then replace missing values using the median value of the feature. If mode, then replace missing using the most frequent value of the feature.",
+"name": "strategy"
+}
+],
+"ImputerModel": [
+{
+"converter": "toString",
+"doc": "input column name.",
+"name": "inputCol"
+},
+{
+"converter": "toListString",
+"doc": "input column names.",
+"name": "inputCols"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "nan"
+},
+"doc": "The placeholder for the missing values. All occurrences of missingValue will be imputed.",
+"name": "missingValue"
+},
+{
+"converter": "toString",
+"default": {
+"uid_suffix": "__output"
+},
+"doc": "output column name.",
+"name": "outputCol"
+},
+{
+"converter": "toListString",
+"doc": "output column names.",
+"name": "outputCols"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.001"
+},
+"doc": "the relative target precision for the approximate quantile algorithm. Must be in the range [0, 1]",
+"name": "relativeError"
+},
+{
+"converter": "toString",
+"default": "mean",
+"doc": "strategy for imputation. If mean, then replace missing values using the mean value of the feature. If median, then replace missing values using the median value of the feature. If mode, then replace missing using the most frequent value of the feature.",
+"name": "strategy"
+}
+],
+"IndexToString": [
+{
+"converter": "toString",
+"doc": "input column name.",
+"name": "inputCol"
+},
+{
+"converter": "toListString",
+"doc": "Optional array of labels specifying index-string mapping. If not provided or if empty, then metadata from inputCol is used instead.",
+"name": "labels"
+},
+{
+"converter": "toString",
+"default": {
+"uid_suffix": "__output"
+},
+"doc": "output column name.",
+"name": "outputCol"
+}
+],
+"Interaction": [
+{
+"converter": "toListString",
+"doc": "input column names.",
+"name": "inputCols"
+},
+{
+"converter": "toString",
+"default": {
+"uid_suffix": "__output"
+},
+"doc": "output column name.",
+"name": "outputCol"
+}
+],
+"IsotonicRegression": [
+{
+"converter": "toInt",
+"default": {
+"int": 0
+},
+"doc": "The index of the feature if featuresCol is a vector column, no effect otherwise.",
+"name": "featureIndex"
+},
+{
+"converter": "toString",
+"default": "features",
+"doc": "features column name.",
+"name": "featuresCol"
+},
+{
+"converter": "toBoolean",
+"default": true,
+"doc": "whether the output sequence should be isotonic/increasing (true) orantitonic/decreasing (false).",
+"name": "isotonic"
+},
+{
+"converter": "toString",
+"default": "label",
+"doc": "label column name.",
+"name": "labelCol"
+},
+{
+"converter": "toString",
+"default": "prediction",
+"doc": "prediction column name.",
+"name": "predictionCol"
+},
+{
+"converter": "toString",
+"doc": "weight column name. If this is not set or empty, we treat all instance weights as 1.0.",
+"name": "weightCol"
+}
+],
+"IsotonicRegressionModel": [
+{
+"converter": "toInt",
+"default": {
+"int": 0
+},
+"doc": "The index of the feature if featuresCol is a vector column, no effect otherwise.",
+"name": "featureIndex"
+},
+{
+"converter": "toString",
+"default": "features",
+"doc": "features column name.",
+"name": "featuresCol"
+},
+{
+"converter": "toBoolean",
+"default": true,
+"doc": "whether the output sequence should be isotonic/increasing (true) orantitonic/decreasing (false).",
+"name": "isotonic"
+},
+{
+"converter": "toString",
+"default": "label",
+"doc": "label column name.",
+"name": "labelCol"
+},
+{
+"converter": "toString",
+"default": "prediction",
+"doc": "prediction column name.",
+"name": "predictionCol"
+},
+{
+"converter": "toString",
+"doc": "weight column name. If this is not set or empty, we treat all instance weights as 1.0.",
+"name": "weightCol"
+}
+],
+"KMeans": [
+{
+"converter": "toString",
+"default": "euclidean",
+"doc": "the distance measure. Supported options: 'euclidean' and 'cosine'.",
+"name": "distanceMeasure"
+},
+{
+"converter": "toString",
+"default": "features",
+"doc": "features column name.",
+"name": "featuresCol"
+},
+{
+"converter": "toString",
+"default": "k-means||",
+"doc": "The initialization algorithm. This can be either \"random\" to choose random points as initial cluster centers, or \"k-means||\" to use a parallel variant of k-means++",
+"name": "initMode"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 2
+},
+"doc": "The number of steps for k-means|| initialization mode. Must be > 0.",
+"name": "initSteps"
+},
+{
+"converter": "toString",
+"default": "MEMORY_AND_DISK",
+"doc": "StorageLevel for intermediate datasets. Cannot be 'NONE'.",
+"name": "intermediateStorageLevel"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 2
+},
+"doc": "The number of clusters to create. Must be > 1.",
+"name": "k"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.0"
+},
+"doc": "maximum memory in MB for stacking input data into blocks. Data is stacked within partitions. If more than remaining data size in a partition then it is adjusted to the data size. Default 0.0 represents choosing optimal value, depends on specific algorithm. Must be >= 0.",
+"name": "maxBlockSizeInMB"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 20
+},
+"doc": "max number of iterations (>= 0).",
+"name": "maxIter"
+},
+{
+"converter": "toString",
+"default": "prediction",
+"doc": "prediction column name.",
+"name": "predictionCol"
+},
+{
+"converter": "toInt",
+"default": {
+"class_name_hash": true
+},
+"doc": "random seed.",
+"name": "seed"
+},
+{
+"converter": "toString",
+"default": "auto",
+"doc": "The solver algorithm for optimization. Supported options: auto, row, block.",
+"name": "solver"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.0001"
+},
+"doc": "the convergence tolerance for iterative algorithms (>= 0).",
+"name": "tol"
+},
+{
+"converter": "toString",
+"doc": "weight column name. If this is not set or empty, we treat all instance weights as 1.0.",
+"name": "weightCol"
+}
+],
+"KMeansModel": [
+{
+"converter": "toString",
+"default": "euclidean",
+"doc": "the distance measure. Supported options: 'euclidean' and 'cosine'.",
+"name": "distanceMeasure"
+},
+{
+"converter": "toString",
+"default": "features",
+"doc": "features column name.",
+"name": "featuresCol"
+},
+{
+"converter": "toString",
+"default": "k-means||",
+"doc": "The initialization algorithm. This can be either \"random\" to choose random points as initial cluster centers, or \"k-means||\" to use a parallel variant of k-means++",
+"name": "initMode"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 2
+},
+"doc": "The number of steps for k-means|| initialization mode. Must be > 0.",
+"name": "initSteps"
+},
+{
+"converter": "toString",
+"default": "MEMORY_AND_DISK",
+"doc": "StorageLevel for intermediate datasets. Cannot be 'NONE'.",
+"name": "intermediateStorageLevel"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 2
+},
+"doc": "The number of clusters to create. Must be > 1.",
+"name": "k"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.0"
+},
+"doc": "maximum memory in MB for stacking input data into blocks. Data is stacked within partitions. If more than remaining data size in a partition then it is adjusted to the data size. Default 0.0 represents choosing optimal value, depends on specific algorithm. Must be >= 0.",
+"name": "maxBlockSizeInMB"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 20
+},
+"doc": "max number of iterations (>= 0).",
+"name": "maxIter"
+},
+{
+"converter": "toString",
+"default": "prediction",
+"doc": "prediction column name.",
+"name": "predictionCol"
+},
+{
+"converter": "toInt",
+"default": {
+"class_name_hash": true
+},
+"doc": "random seed.",
+"name": "seed"
+},
+{
+"converter": "toString",
+"default": "auto",
+"doc": "The solver algorithm for optimization. Supported options: auto, row, block.",
+"name": "solver"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.0001"
+},
+"doc": "the convergence tolerance for iterative algorithms (>= 0).",
+"name": "tol"
+},
+{
+"converter": "toString",
+"doc": "weight column name. If this is not set or empty, we treat all instance weights as 1.0.",
+"name": "weightCol"
+}
+],
+"KMeansSummary": [],
+"LDA": [
+{
+"converter": "toInt",
+"default": {
+"int": 10
+},
+"doc": "set checkpoint interval (>= 1) or disable checkpoint (-1). E.g. 10 means that the cache will get checkpointed every 10 iterations. Note: this setting will be ignored if the checkpoint directory is not set in the SparkContext.",
+"name": "checkpointInterval"
+},
+{
+"converter": "toListFloat",
+"doc": "Concentration parameter (commonly named \"alpha\") for the prior placed on documents' distributions over topics (\"theta\").",
+"name": "docConcentration"
+},
+{
+"converter": "toString",
+"default": "features",
+"doc": "features column name.",
+"name": "featuresCol"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 10
+},
+"doc": "The number of topics (clusters) to infer. Must be > 1.",
+"name": "k"
+},
+{
+"converter": "toBoolean",
+"default": true,
+"doc": "(For EM optimizer) If using checkpointing, this indicates whether to keep the last checkpoint. If false, then the checkpoint will be deleted. Deleting the checkpoint can cause failures if a data partition is lost, so set this bit with care.",
+"name": "keepLastCheckpoint"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.51"
+},
+"doc": "Learning rate, set as anexponential decay rate. This should be between (0.5, 1.0] to guarantee asymptotic convergence.",
+"name": "learningDecay"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "1024.0"
+},
+"doc": "A (positive) learning parameter that downweights early iterations. Larger values make early iterations count less",
+"name": "learningOffset"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 20
+},
+"doc": "max number of iterations (>= 0).",
+"name": "maxIter"
+},
+{
+"converter": "toBoolean",
+"default": true,
+"doc": "Indicates whether the docConcentration (Dirichlet parameter for document-topic distribution) will be optimized during training.",
+"name": "optimizeDocConcentration"
+},
+{
+"converter": "toString",
+"default": "online",
+"doc": "Optimizer or inference algorithm used to estimate the LDA model.  Supported: online, em",
+"name": "optimizer"
+},
+{
+"converter": "toInt",
+"default": {
+"class_name_hash": true
+},
+"doc": "random seed.",
+"name": "seed"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.05"
+},
+"doc": "Fraction of the corpus to be sampled and used in each iteration of mini-batch gradient descent, in range (0, 1].",
+"name": "subsamplingRate"
+},
+{
+"converter": "toFloat",
+"doc": "Concentration parameter (commonly named \"beta\" or \"eta\") for the prior placed on topic' distributions over terms.",
+"name": "topicConcentration"
+},
+{
+"converter": "toString",
+"default": "topicDistribution",
+"doc": "Output column with estimates of the topic mixture distribution for each document (often called \"theta\" in the literature). Returns a vector of zeros for an empty document.",
+"name": "topicDistributionCol"
+}
+],
+"LDAModel": [
+{
+"converter": "toInt",
+"default": {
+"int": 10
+},
+"doc": "set checkpoint interval (>= 1) or disable checkpoint (-1). E.g. 10 means that the cache will get checkpointed every 10 iterations. Note: this setting will be ignored if the checkpoint directory is not set in the SparkContext.",
+"name": "checkpointInterval"
+},
+{
+"converter": "toListFloat",
+"doc": "Concentration parameter (commonly named \"alpha\") for the prior placed on documents' distributions over topics (\"theta\").",
+"name": "docConcentration"
+},
+{
+"converter": "toString",
+"default": "features",
+"doc": "features column name.",
+"name": "featuresCol"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 10
+},
+"doc": "The number of topics (clusters) to infer. Must be > 1.",
+"name": "k"
+},
+{
+"converter": "toBoolean",
+"default": true,
+"doc": "(For EM optimizer) If using checkpointing, this indicates whether to keep the last checkpoint. If false, then the checkpoint will be deleted. Deleting the checkpoint can cause failures if a data partition is lost, so set this bit with care.",
+"name": "keepLastCheckpoint"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.51"
+},
+"doc": "Learning rate, set as anexponential decay rate. This should be between (0.5, 1.0] to guarantee asymptotic convergence.",
+"name": "learningDecay"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "1024.0"
+},
+"doc": "A (positive) learning parameter that downweights early iterations. Larger values make early iterations count less",
+"name": "learningOffset"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 20
+},
+"doc": "max number of iterations (>= 0).",
+"name": "maxIter"
+},
+{
+"converter": "toBoolean",
+"default": true,
+"doc": "Indicates whether the docConcentration (Dirichlet parameter for document-topic distribution) will be optimized during training.",
+"name": "optimizeDocConcentration"
+},
+{
+"converter": "toString",
+"default": "online",
+"doc": "Optimizer or inference algorithm used to estimate the LDA model.  Supported: online, em",
+"name": "optimizer"
+},
+{
+"converter": "toInt",
+"default": {
+"class_name_hash": true
+},
+"doc": "random seed.",
+"name": "seed"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.05"
+},
+"doc": "Fraction of the corpus to be sampled and used in each iteration of mini-batch gradient descent, in range (0, 1].",
+"name": "subsamplingRate"
+},
+{
+"converter": "toFloat",
+"doc": "Concentration parameter (commonly named \"beta\" or \"eta\") for the prior placed on topic' distributions over terms.",
+"name": "topicConcentration"
+},
+{
+"converter": "toString",
+"default": "topicDistribution",
+"doc": "Output column with estimates of the topic mixture distribution for each document (often called \"theta\" in the literature). Returns a vector of zeros for an empty document.",
+"name": "topicDistributionCol"
+}
+],
+"LinearRegression": [
+{
+"converter": "toInt",
+"default": {
+"int": 2
+},
+"doc": "suggested depth for treeAggregate (>= 2).",
+"name": "aggregationDepth"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.0"
+},
+"doc": "the ElasticNet mixing parameter, in range [0, 1]. For alpha = 0, the penalty is an L2 penalty. For alpha = 1, it is an L1 penalty.",
+"name": "elasticNetParam"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "1.35"
+},
+"doc": "The shape parameter to control the amount of robustness. Must be > 1.0. Only valid when loss is huber",
+"name": "epsilon"
+},
+{
+"converter": "toString",
+"default": "features",
+"doc": "features column name.",
+"name": "featuresCol"
+},
+{
+"converter": "toBoolean",
+"default": true,
+"doc": "whether to fit an intercept term.",
+"name": "fitIntercept"
+},
+{
+"converter": "toString",
+"default": "label",
+"doc": "label column name.",
+"name": "labelCol"
+},
+{
+"converter": "toString",
+"default": "squaredError",
+"doc": "The loss function to be optimized. Supported options: squaredError, huber.",
+"name": "loss"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.0"
+},
+"doc": "maximum memory in MB for stacking input data into blocks. Data is stacked within partitions. If more than remaining data size in a partition then it is adjusted to the data size. Default 0.0 represents choosing optimal value, depends on specific algorithm. Must be >= 0.",
+"name": "maxBlockSizeInMB"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 100
+},
+"doc": "max number of iterations (>= 0).",
+"name": "maxIter"
+},
+{
+"converter": "toString",
+"default": "prediction",
+"doc": "prediction column name.",
+"name": "predictionCol"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.0"
+},
+"doc": "regularization parameter (>= 0).",
+"name": "regParam"
+},
+{
+"converter": "toString",
+"default": "auto",
+"doc": "The solver algorithm for optimization. Supported options: auto, normal, l-bfgs.",
+"name": "solver"
+},
+{
+"converter": "toBoolean",
+"default": true,
+"doc": "whether to standardize the training features before fitting the model.",
+"name": "standardization"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "1e-06"
+},
+"doc": "the convergence tolerance for iterative algorithms (>= 0).",
+"name": "tol"
+},
+{
+"converter": "toString",
+"doc": "weight column name. If this is not set or empty, we treat all instance weights as 1.0.",
+"name": "weightCol"
+}
+],
+"LinearRegressionModel": [
+{
+"converter": "toInt",
+"default": {
+"int": 2
+},
+"doc": "suggested depth for treeAggregate (>= 2).",
+"name": "aggregationDepth"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.0"
+},
+"doc": "the ElasticNet mixing parameter, in range [0, 1]. For alpha = 0, the penalty is an L2 penalty. For alpha = 1, it is an L1 penalty.",
+"name": "elasticNetParam"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "1.35"
+},
+"doc": "The shape parameter to control the amount of robustness. Must be > 1.0. Only valid when loss is huber",
+"name": "epsilon"
+},
+{
+"converter": "toString",
+"default": "features",
+"doc": "features column name.",
+"name": "featuresCol"
+},
+{
+"converter": "toBoolean",
+"default": true,
+"doc": "whether to fit an intercept term.",
+"name": "fitIntercept"
+},
+{
+"converter": "toString",
+"default": "label",
+"doc": "label column name.",
+"name": "labelCol"
+},
+{
+"converter": "toString",
+"default": "squaredError",
+"doc": "The loss function to be optimized. Supported options: squaredError, huber.",
+"name": "loss"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.0"
+},
+"doc": "maximum memory in MB for stacking input data into blocks. Data is stacked within partitions. If more than remaining data size in a partition then it is adjusted to the data size. Default 0.0 represents choosing optimal value, depends on specific algorithm. Must be >= 0.",
+"name": "maxBlockSizeInMB"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 100
+},
+"doc": "max number of iterations (>= 0).",
+"name": "maxIter"
+},
+{
+"converter": "toString",
+"default": "prediction",
+"doc": "prediction column name.",
+"name": "predictionCol"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.0"
+},
+"doc": "regularization parameter (>= 0).",
+"name": "regParam"
+},
+{
+"converter": "toString",
+"default": "auto",
+"doc": "The solver algorithm for optimization. Supported options: auto, normal, l-bfgs.",
+"name": "solver"
+},
+{
+"converter": "toBoolean",
+"default": true,
+"doc": "whether to standardize the training features before fitting the model.",
+"name": "standardization"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "1e-06"
+},
+"doc": "the convergence tolerance for iterative algorithms (>= 0).",
+"name": "tol"
+},
+{
+"converter": "toString",
+"doc": "weight column name. If this is not set or empty, we treat all instance weights as 1.0.",
+"name": "weightCol"
+}
+],
+"LinearRegressionSummary": [],
+"LinearRegressionTrainingSummary": [],
+"LinearSVC": [
+{
+"converter": "toInt",
+"default": {
+"int": 2
+},
+"doc": "suggested depth for treeAggregate (>= 2).",
+"name": "aggregationDepth"
+},
+{
+"converter": "toString",
+"default": "features",
+"doc": "features column name.",
+"name": "featuresCol"
+},
+{
+"converter": "toBoolean",
+"default": true,
+"doc": "whether to fit an intercept term.",
+"name": "fitIntercept"
+},
+{
+"converter": "toString",
+"default": "label",
+"doc": "label column name.",
+"name": "labelCol"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.0"
+},
+"doc": "maximum memory in MB for stacking input data into blocks. Data is stacked within partitions. If more than remaining data size in a partition then it is adjusted to the data size. Default 0.0 represents choosing optimal value, depends on specific algorithm. Must be >= 0.",
+"name": "maxBlockSizeInMB"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 100
+},
+"doc": "max number of iterations (>= 0).",
+"name": "maxIter"
+},
+{
+"converter": "toString",
+"default": "prediction",
+"doc": "prediction column name.",
+"name": "predictionCol"
+},
+{
+"converter": "toString",
+"default": "rawPrediction",
+"doc": "raw prediction (a.k.a. confidence) column name.",
+"name": "rawPredictionCol"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.0"
+},
+"doc": "regularization parameter (>= 0).",
+"name": "regParam"
+},
+{
+"converter": "toBoolean",
+"default": true,
+"doc": "whether to standardize the training features before fitting the model.",
+"name": "standardization"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.0"
+},
+"doc": "The threshold in binary classification applied to the linear model prediction.  This threshold can be any real number, where Inf will make all predictions 0.0 and -Inf will make all predictions 1.0.",
+"name": "threshold"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "1e-06"
+},
+"doc": "the convergence tolerance for iterative algorithms (>= 0).",
+"name": "tol"
+},
+{
+"converter": "toString",
+"doc": "weight column name. If this is not set or empty, we treat all instance weights as 1.0.",
+"name": "weightCol"
+}
+],
+"LinearSVCModel": [
+{
+"converter": "toInt",
+"default": {
+"int": 2
+},
+"doc": "suggested depth for treeAggregate (>= 2).",
+"name": "aggregationDepth"
+},
+{
+"converter": "toString",
+"default": "features",
+"doc": "features column name.",
+"name": "featuresCol"
+},
+{
+"converter": "toBoolean",
+"default": true,
+"doc": "whether to fit an intercept term.",
+"name": "fitIntercept"
+},
+{
+"converter": "toString",
+"default": "label",
+"doc": "label column name.",
+"name": "labelCol"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.0"
+},
+"doc": "maximum memory in MB for stacking input data into blocks. Data is stacked within partitions. If more than remaining data size in a partition then it is adjusted to the data size. Default 0.0 represents choosing optimal value, depends on specific algorithm. Must be >= 0.",
+"name": "maxBlockSizeInMB"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 100
+},
+"doc": "max number of iterations (>= 0).",
+"name": "maxIter"
+},
+{
+"converter": "toString",
+"default": "prediction",
+"doc": "prediction column name.",
+"name": "predictionCol"
+},
+{
+"converter": "toString",
+"default": "rawPrediction",
+"doc": "raw prediction (a.k.a. confidence) column name.",
+"name": "rawPredictionCol"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.0"
+},
+"doc": "regularization parameter (>= 0).",
+"name": "regParam"
+},
+{
+"converter": "toBoolean",
+"default": true,
+"doc": "whether to standardize the training features before fitting the model.",
+"name": "standardization"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.0"
+},
+"doc": "The threshold in binary classification applied to the linear model prediction.  This threshold can be any real number, where Inf will make all predictions 0.0 and -Inf will make all predictions 1.0.",
+"name": "threshold"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "1e-06"
+},
+"doc": "the convergence tolerance for iterative algorithms (>= 0).",
+"name": "tol"
+},
+{
+"converter": "toString",
+"doc": "weight column name. If this is not set or empty, we treat all instance weights as 1.0.",
+"name": "weightCol"
+}
+],
+"LinearSVCSummary": [],
+"LinearSVCTrainingSummary": [],
+"LocalLDAModel": [
+{
+"converter": "toInt",
+"default": {
+"int": 10
+},
+"doc": "set checkpoint interval (>= 1) or disable checkpoint (-1). E.g. 10 means that the cache will get checkpointed every 10 iterations. Note: this setting will be ignored if the checkpoint directory is not set in the SparkContext.",
+"name": "checkpointInterval"
+},
+{
+"converter": "toListFloat",
+"doc": "Concentration parameter (commonly named \"alpha\") for the prior placed on documents' distributions over topics (\"theta\").",
+"name": "docConcentration"
+},
+{
+"converter": "toString",
+"default": "features",
+"doc": "features column name.",
+"name": "featuresCol"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 10
+},
+"doc": "The number of topics (clusters) to infer. Must be > 1.",
+"name": "k"
+},
+{
+"converter": "toBoolean",
+"default": true,
+"doc": "(For EM optimizer) If using checkpointing, this indicates whether to keep the last checkpoint. If false, then the checkpoint will be deleted. Deleting the checkpoint can cause failures if a data partition is lost, so set this bit with care.",
+"name": "keepLastCheckpoint"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.51"
+},
+"doc": "Learning rate, set as anexponential decay rate. This should be between (0.5, 1.0] to guarantee asymptotic convergence.",
+"name": "learningDecay"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "1024.0"
+},
+"doc": "A (positive) learning parameter that downweights early iterations. Larger values make early iterations count less",
+"name": "learningOffset"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 20
+},
+"doc": "max number of iterations (>= 0).",
+"name": "maxIter"
+},
+{
+"converter": "toBoolean",
+"default": true,
+"doc": "Indicates whether the docConcentration (Dirichlet parameter for document-topic distribution) will be optimized during training.",
+"name": "optimizeDocConcentration"
+},
+{
+"converter": "toString",
+"default": "online",
+"doc": "Optimizer or inference algorithm used to estimate the LDA model.  Supported: online, em",
+"name": "optimizer"
+},
+{
+"converter": "toInt",
+"default": {
+"class_name_hash": true
+},
+"doc": "random seed.",
+"name": "seed"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.05"
+},
+"doc": "Fraction of the corpus to be sampled and used in each iteration of mini-batch gradient descent, in range (0, 1].",
+"name": "subsamplingRate"
+},
+{
+"converter": "toFloat",
+"doc": "Concentration parameter (commonly named \"beta\" or \"eta\") for the prior placed on topic' distributions over terms.",
+"name": "topicConcentration"
+},
+{
+"converter": "toString",
+"default": "topicDistribution",
+"doc": "Output column with estimates of the topic mixture distribution for each document (often called \"theta\" in the literature). Returns a vector of zeros for an empty document.",
+"name": "topicDistributionCol"
+}
+],
+"LogisticRegression": [
+{
+"converter": "toInt",
+"default": {
+"int": 2
+},
+"doc": "suggested depth for treeAggregate (>= 2).",
+"name": "aggregationDepth"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.0"
+},
+"doc": "the ElasticNet mixing parameter, in range [0, 1]. For alpha = 0, the penalty is an L2 penalty. For alpha = 1, it is an L1 penalty.",
+"name": "elasticNetParam"
+},
+{
+"converter": "toString",
+"default": "auto",
+"doc": "The name of family which is a description of the label distribution to be used in the model. Supported options: auto, binomial, multinomial",
+"name": "family"
+},
+{
+"converter": "toString",
+"default": "features",
+"doc": "features column name.",
+"name": "featuresCol"
+},
+{
+"converter": "toBoolean",
+"default": true,
+"doc": "whether to fit an intercept term.",
+"name": "fitIntercept"
+},
+{
+"converter": "toString",
+"default": "label",
+"doc": "label column name.",
+"name": "labelCol"
+},
+{
+"converter": "toMatrix",
+"doc": "The lower bounds on coefficients if fitting under bound constrained optimization. The bound matrix must be compatible with the shape (1, number of features) for binomial regression, or (number of classes, number of features) for multinomial regression.",
+"name": "lowerBoundsOnCoefficients"
+},
+{
+"converter": "toVector",
+"doc": "The lower bounds on intercepts if fitting under bound constrained optimization. The bounds vector size must beequal with 1 for binomial regression, or the number oflasses for multinomial regression.",
+"name": "lowerBoundsOnIntercepts"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.0"
+},
+"doc": "maximum memory in MB for stacking input data into blocks. Data is stacked within partitions. If more than remaining data size in a partition then it is adjusted to the data size. Default 0.0 represents choosing optimal value, depends on specific algorithm. Must be >= 0.",
+"name": "maxBlockSizeInMB"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 100
+},
+"doc": "max number of iterations (>= 0).",
+"name": "maxIter"
+},
+{
+"converter": "toString",
+"default": "prediction",
+"doc": "prediction column name.",
+"name": "predictionCol"
+},
+{
+"converter": "toString",
+"default": "probability",
+"doc": "Column name for predicted class conditional probabilities. Note: Not all models output well-calibrated probability estimates! These probabilities should be treated as confidences, not precise probabilities.",
+"name": "probabilityCol"
+},
+{
+"converter": "toString",
+"default": "rawPrediction",
+"doc": "raw prediction (a.k.a. confidence) column name.",
+"name": "rawPredictionCol"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.0"
+},
+"doc": "regularization parameter (>= 0).",
+"name": "regParam"
+},
+{
+"converter": "toBoolean",
+"default": true,
+"doc": "whether to standardize the training features before fitting the model.",
+"name": "standardization"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.5"
+},
+"doc": "Threshold in binary classification prediction, in range [0, 1]. If threshold and thresholds are both set, they must match.e.g. if threshold is p, then thresholds must be equal to [1-p, p].",
+"name": "threshold"
+},
+{
+"converter": "toListFloat",
+"doc": "Thresholds in multi-class classification to adjust the probability of predicting each class. Array must have length equal to the number of classes, with values > 0, excepting that at most one value may be 0. The class with largest value p/t is predicted, where p is the original probability of that class and t is the class's threshold.",
+"name": "thresholds"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "1e-06"
+},
+"doc": "the convergence tolerance for iterative algorithms (>= 0).",
+"name": "tol"
+},
+{
+"converter": "toMatrix",
+"doc": "The upper bounds on coefficients if fitting under bound constrained optimization. The bound matrix must be compatible with the shape (1, number of features) for binomial regression, or (number of classes, number of features) for multinomial regression.",
+"name": "upperBoundsOnCoefficients"
+},
+{
+"converter": "toVector",
+"doc": "The upper bounds on intercepts if fitting under bound constrained optimization. The bound vector size must be equal with 1 for binomial regression, or the number of classes for multinomial regression.",
+"name": "upperBoundsOnIntercepts"
+},
+{
+"converter": "toString",
+"doc": "weight column name. If this is not set or empty, we treat all instance weights as 1.0.",
+"name": "weightCol"
+}
+],
+"LogisticRegressionModel": [
+{
+"converter": "toInt",
+"default": {
+"int": 2
+},
+"doc": "suggested depth for treeAggregate (>= 2).",
+"name": "aggregationDepth"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.0"
+},
+"doc": "the ElasticNet mixing parameter, in range [0, 1]. For alpha = 0, the penalty is an L2 penalty. For alpha = 1, it is an L1 penalty.",
+"name": "elasticNetParam"
+},
+{
+"converter": "toString",
+"default": "auto",
+"doc": "The name of family which is a description of the label distribution to be used in the model. Supported options: auto, binomial, multinomial",
+"name": "family"
+},
+{
+"converter": "toString",
+"default": "features",
+"doc": "features column name.",
+"name": "featuresCol"
+},
+{
+"converter": "toBoolean",
+"default": true,
+"doc": "whether to fit an intercept term.",
+"name": "fitIntercept"
+},
+{
+"converter": "toString",
+"default": "label",
+"doc": "label column name.",
+"name": "labelCol"
+},
+{
+"converter": "toMatrix",
+"doc": "The lower bounds on coefficients if fitting under bound constrained optimization. The bound matrix must be compatible with the shape (1, number of features) for binomial regression, or (number of classes, number of features) for multinomial regression.",
+"name": "lowerBoundsOnCoefficients"
+},
+{
+"converter": "toVector",
+"doc": "The lower bounds on intercepts if fitting under bound constrained optimization. The bounds vector size must beequal with 1 for binomial regression, or the number oflasses for multinomial regression.",
+"name": "lowerBoundsOnIntercepts"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.0"
+},
+"doc": "maximum memory in MB for stacking input data into blocks. Data is stacked within partitions. If more than remaining data size in a partition then it is adjusted to the data size. Default 0.0 represents choosing optimal value, depends on specific algorithm. Must be >= 0.",
+"name": "maxBlockSizeInMB"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 100
+},
+"doc": "max number of iterations (>= 0).",
+"name": "maxIter"
+},
+{
+"converter": "toString",
+"default": "prediction",
+"doc": "prediction column name.",
+"name": "predictionCol"
+},
+{
+"converter": "toString",
+"default": "probability",
+"doc": "Column name for predicted class conditional probabilities. Note: Not all models output well-calibrated probability estimates! These probabilities should be treated as confidences, not precise probabilities.",
+"name": "probabilityCol"
+},
+{
+"converter": "toString",
+"default": "rawPrediction",
+"doc": "raw prediction (a.k.a. confidence) column name.",
+"name": "rawPredictionCol"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.0"
+},
+"doc": "regularization parameter (>= 0).",
+"name": "regParam"
+},
+{
+"converter": "toBoolean",
+"default": true,
+"doc": "whether to standardize the training features before fitting the model.",
+"name": "standardization"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.5"
+},
+"doc": "Threshold in binary classification prediction, in range [0, 1]. If threshold and thresholds are both set, they must match.e.g. if threshold is p, then thresholds must be equal to [1-p, p].",
+"name": "threshold"
+},
+{
+"converter": "toListFloat",
+"doc": "Thresholds in multi-class classification to adjust the probability of predicting each class. Array must have length equal to the number of classes, with values > 0, excepting that at most one value may be 0. The class with largest value p/t is predicted, where p is the original probability of that class and t is the class's threshold.",
+"name": "thresholds"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "1e-06"
+},
+"doc": "the convergence tolerance for iterative algorithms (>= 0).",
+"name": "tol"
+},
+{
+"converter": "toMatrix",
+"doc": "The upper bounds on coefficients if fitting under bound constrained optimization. The bound matrix must be compatible with the shape (1, number of features) for binomial regression, or (number of classes, number of features) for multinomial regression.",
+"name": "upperBoundsOnCoefficients"
+},
+{
+"converter": "toVector",
+"doc": "The upper bounds on intercepts if fitting under bound constrained optimization. The bound vector size must be equal with 1 for binomial regression, or the number of classes for multinomial regression.",
+"name": "upperBoundsOnIntercepts"
+},
+{
+"converter": "toString",
+"doc": "weight column name. If this is not set or empty, we treat all instance weights as 1.0.",
+"name": "weightCol"
+}
+],
+"LogisticRegressionSummary": [],
+"LogisticRegressionTrainingSummary": [],
+"MaxAbsScaler": [
+{
+"converter": "toString",
+"doc": "input column name.",
+"name": "inputCol"
+},
+{
+"converter": "toString",
+"default": {
+"uid_suffix": "__output"
+},
+"doc": "output column name.",
+"name": "outputCol"
+}
+],
+"MaxAbsScalerModel": [
+{
+"converter": "toString",
+"doc": "input column name.",
+"name": "inputCol"
+},
+{
+"converter": "toString",
+"default": {
+"uid_suffix": "__output"
+},
+"doc": "output column name.",
+"name": "outputCol"
+}
+],
+"MinHashLSH": [
+{
+"converter": "toString",
+"doc": "input column name.",
+"name": "inputCol"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 1
+},
+"doc": "number of hash tables, where increasing number of hash tables lowers the false negative rate, and decreasing it improves the running performance.",
+"name": "numHashTables"
+},
+{
+"converter": "toString",
+"default": {
+"uid_suffix": "__output"
+},
+"doc": "output column name.",
+"name": "outputCol"
+},
+{
+"converter": "toInt",
+"default": {
+"class_name_hash": true
+},
+"doc": "random seed.",
+"name": "seed"
+}
+],
+"MinHashLSHModel": [
+{
+"converter": "toString",
+"doc": "input column name.",
+"name": "inputCol"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 1
+},
+"doc": "number of hash tables, where increasing number of hash tables lowers the false negative rate, and decreasing it improves the running performance.",
+"name": "numHashTables"
+},
+{
+"converter": "toString",
+"default": {
+"uid_suffix": "__output"
+},
+"doc": "output column name.",
+"name": "outputCol"
+}
+],
+"MinMaxScaler": [
+{
+"converter": "toString",
+"doc": "input column name.",
+"name": "inputCol"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "1.0"
+},
+"doc": "Upper bound of the output feature range",
+"name": "max"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.0"
+},
+"doc": "Lower bound of the output feature range",
+"name": "min"
+},
+{
+"converter": "toString",
+"default": {
+"uid_suffix": "__output"
+},
+"doc": "output column name.",
+"name": "outputCol"
+}
+],
+"MinMaxScalerModel": [
+{
+"converter": "toString",
+"doc": "input column name.",
+"name": "inputCol"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "1.0"
+},
+"doc": "Upper bound of the output feature range",
+"name": "max"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.0"
+},
+"doc": "Lower bound of the output feature range",
+"name": "min"
+},
+{
+"converter": "toString",
+"default": {
+"uid_suffix": "__output"
+},
+"doc": "output column name.",
+"name": "outputCol"
+}
+],
+"MulticlassClassificationEvaluator": [
+{
+"converter": "toFloat",
+"default": {
+"float": "1.0"
+},
+"doc": "The beta value used in weightedFMeasure|fMeasureByLabel. Must be > 0. The default value is 1.",
+"name": "beta"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "1e-15"
+},
+"doc": "log-loss is undefined for p=0 or p=1, so probabilities are clipped to max(eps, min(1 - eps, p)). Must be in range (0, 0.5). The default value is 1e-15.",
+"name": "eps"
+},
+{
+"converter": "toString",
+"default": "label",
+"doc": "label column name.",
+"name": "labelCol"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.0"
+},
+"doc": "The class whose metric will be computed in truePositiveRateByLabel|falsePositiveRateByLabel|precisionByLabel|recallByLabel|fMeasureByLabel. Must be >= 0. The default value is 0.",
+"name": "metricLabel"
+},
+{
+"converter": "toString",
+"default": "f1",
+"doc": "metric name in evaluation (f1|accuracy|weightedPrecision|weightedRecall|weightedTruePositiveRate| weightedFalsePositiveRate|weightedFMeasure|truePositiveRateByLabel| falsePositiveRateByLabel|precisionByLabel|recallByLabel|fMeasureByLabel| logLoss|hammingLoss)",
+"name": "metricName"
+},
+{
+"converter": "toString",
+"default": "prediction",
+"doc": "prediction column name.",
+"name": "predictionCol"
+},
+{
+"converter": "toString",
+"default": "probability",
+"doc": "Column name for predicted class conditional probabilities. Note: Not all models output well-calibrated probability estimates! These probabilities should be treated as confidences, not precise probabilities.",
+"name": "probabilityCol"
+},
+{
+"converter": "toString",
+"doc": "weight column name. If this is not set or empty, we treat all instance weights as 1.0.",
+"name": "weightCol"
+}
+],
+"MultilabelClassificationEvaluator": [
+{
+"converter": "toString",
+"default": "label",
+"doc": "label column name.",
+"name": "labelCol"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.0"
+},
+"doc": "The class whose metric will be computed in precisionByLabel|recallByLabel|f1MeasureByLabel. Must be >= 0. The default value is 0.",
+"name": "metricLabel"
+},
+{
+"converter": "toString",
+"default": "f1Measure",
+"doc": "metric name in evaluation (subsetAccuracy|accuracy|hammingLoss|precision|recall|f1Measure|precisionByLabel|recallByLabel|f1MeasureByLabel|microPrecision|microRecall|microF1Measure)",
+"name": "metricName"
+},
+{
+"converter": "toString",
+"default": "prediction",
+"doc": "prediction column name.",
+"name": "predictionCol"
+}
+],
+"MultilayerPerceptronClassificationModel": [
+{
+"converter": "toInt",
+"default": {
+"int": 128
+},
+"doc": "block size for stacking input data in matrices. Data is stacked within partitions. If block size is more than remaining data in a partition then it is adjusted to the size of this data.",
+"name": "blockSize"
+},
+{
+"converter": "toString",
+"default": "features",
+"doc": "features column name.",
+"name": "featuresCol"
+},
+{
+"converter": "toVector",
+"doc": "The initial weights of the model.",
+"name": "initialWeights"
+},
+{
+"converter": "toString",
+"default": "label",
+"doc": "label column name.",
+"name": "labelCol"
+},
+{
+"converter": "toListInt",
+"doc": "Sizes of layers from input layer to output layer E.g., Array(780, 100, 10) means 780 inputs, one hidden layer with 100 neurons and output layer of 10 neurons.",
+"name": "layers"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 100
+},
+"doc": "max number of iterations (>= 0).",
+"name": "maxIter"
+},
+{
+"converter": "toString",
+"default": "prediction",
+"doc": "prediction column name.",
+"name": "predictionCol"
+},
+{
+"converter": "toString",
+"default": "probability",
+"doc": "Column name for predicted class conditional probabilities. Note: Not all models output well-calibrated probability estimates! These probabilities should be treated as confidences, not precise probabilities.",
+"name": "probabilityCol"
+},
+{
+"converter": "toString",
+"default": "rawPrediction",
+"doc": "raw prediction (a.k.a. confidence) column name.",
+"name": "rawPredictionCol"
+},
+{
+"converter": "toInt",
+"default": {
+"class_name_hash": true
+},
+"doc": "random seed.",
+"name": "seed"
+},
+{
+"converter": "toString",
+"default": "l-bfgs",
+"doc": "The solver algorithm for optimization. Supported options: l-bfgs, gd.",
+"name": "solver"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.03"
+},
+"doc": "Step size to be used for each iteration of optimization (>= 0).",
+"name": "stepSize"
+},
+{
+"converter": "toListFloat",
+"doc": "Thresholds in multi-class classification to adjust the probability of predicting each class. Array must have length equal to the number of classes, with values > 0, excepting that at most one value may be 0. The class with largest value p/t is predicted, where p is the original probability of that class and t is the class's threshold.",
+"name": "thresholds"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "1e-06"
+},
+"doc": "the convergence tolerance for iterative algorithms (>= 0).",
+"name": "tol"
+}
+],
+"MultilayerPerceptronClassificationSummary": [],
+"MultilayerPerceptronClassificationTrainingSummary": [],
+"MultilayerPerceptronClassifier": [
+{
+"converter": "toInt",
+"default": {
+"int": 128
+},
+"doc": "block size for stacking input data in matrices. Data is stacked within partitions. If block size is more than remaining data in a partition then it is adjusted to the size of this data.",
+"name": "blockSize"
+},
+{
+"converter": "toString",
+"default": "features",
+"doc": "features column name.",
+"name": "featuresCol"
+},
+{
+"converter": "toVector",
+"doc": "The initial weights of the model.",
+"name": "initialWeights"
+},
+{
+"converter": "toString",
+"default": "label",
+"doc": "label column name.",
+"name": "labelCol"
+},
+{
+"converter": "toListInt",
+"doc": "Sizes of layers from input layer to output layer E.g., Array(780, 100, 10) means 780 inputs, one hidden layer with 100 neurons and output layer of 10 neurons.",
+"name": "layers"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 100
+},
+"doc": "max number of iterations (>= 0).",
+"name": "maxIter"
+},
+{
+"converter": "toString",
+"default": "prediction",
+"doc": "prediction column name.",
+"name": "predictionCol"
+},
+{
+"converter": "toString",
+"default": "probability",
+"doc": "Column name for predicted class conditional probabilities. Note: Not all models output well-calibrated probability estimates! These probabilities should be treated as confidences, not precise probabilities.",
+"name": "probabilityCol"
+},
+{
+"converter": "toString",
+"default": "rawPrediction",
+"doc": "raw prediction (a.k.a. confidence) column name.",
+"name": "rawPredictionCol"
+},
+{
+"converter": "toInt",
+"default": {
+"class_name_hash": true
+},
+"doc": "random seed.",
+"name": "seed"
+},
+{
+"converter": "toString",
+"default": "l-bfgs",
+"doc": "The solver algorithm for optimization. Supported options: l-bfgs, gd.",
+"name": "solver"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.03"
+},
+"doc": "Step size to be used for each iteration of optimization (>= 0).",
+"name": "stepSize"
+},
+{
+"converter": "toListFloat",
+"doc": "Thresholds in multi-class classification to adjust the probability of predicting each class. Array must have length equal to the number of classes, with values > 0, excepting that at most one value may be 0. The class with largest value p/t is predicted, where p is the original probability of that class and t is the class's threshold.",
+"name": "thresholds"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "1e-06"
+},
+"doc": "the convergence tolerance for iterative algorithms (>= 0).",
+"name": "tol"
+}
+],
+"NGram": [
+{
+"converter": "toString",
+"doc": "input column name.",
+"name": "inputCol"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 2
+},
+"doc": "number of elements per n-gram (>=1)",
+"name": "n"
+},
+{
+"converter": "toString",
+"default": {
+"uid_suffix": "__output"
+},
+"doc": "output column name.",
+"name": "outputCol"
+}
+],
+"NaiveBayes": [
+{
+"converter": "toString",
+"default": "features",
+"doc": "features column name.",
+"name": "featuresCol"
+},
+{
+"converter": "toString",
+"default": "label",
+"doc": "label column name.",
+"name": "labelCol"
+},
+{
+"converter": "toString",
+"default": "multinomial",
+"doc": "The model type which is a string (case-sensitive). Supported options: multinomial (default), bernoulli and gaussian.",
+"name": "modelType"
+},
+{
+"converter": "toString",
+"default": "prediction",
+"doc": "prediction column name.",
+"name": "predictionCol"
+},
+{
+"converter": "toString",
+"default": "probability",
+"doc": "Column name for predicted class conditional probabilities. Note: Not all models output well-calibrated probability estimates! These probabilities should be treated as confidences, not precise probabilities.",
+"name": "probabilityCol"
+},
+{
+"converter": "toString",
+"default": "rawPrediction",
+"doc": "raw prediction (a.k.a. confidence) column name.",
+"name": "rawPredictionCol"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "1.0"
+},
+"doc": "The smoothing parameter, should be >= 0, default is 1.0",
+"name": "smoothing"
+},
+{
+"converter": "toListFloat",
+"doc": "Thresholds in multi-class classification to adjust the probability of predicting each class. Array must have length equal to the number of classes, with values > 0, excepting that at most one value may be 0. The class with largest value p/t is predicted, where p is the original probability of that class and t is the class's threshold.",
+"name": "thresholds"
+},
+{
+"converter": "toString",
+"doc": "weight column name. If this is not set or empty, we treat all instance weights as 1.0.",
+"name": "weightCol"
+}
+],
+"NaiveBayesModel": [
+{
+"converter": "toString",
+"default": "features",
+"doc": "features column name.",
+"name": "featuresCol"
+},
+{
+"converter": "toString",
+"default": "label",
+"doc": "label column name.",
+"name": "labelCol"
+},
+{
+"converter": "toString",
+"default": "multinomial",
+"doc": "The model type which is a string (case-sensitive). Supported options: multinomial (default), bernoulli and gaussian.",
+"name": "modelType"
+},
+{
+"converter": "toString",
+"default": "prediction",
+"doc": "prediction column name.",
+"name": "predictionCol"
+},
+{
+"converter": "toString",
+"default": "probability",
+"doc": "Column name for predicted class conditional probabilities. Note: Not all models output well-calibrated probability estimates! These probabilities should be treated as confidences, not precise probabilities.",
+"name": "probabilityCol"
+},
+{
+"converter": "toString",
+"default": "rawPrediction",
+"doc": "raw prediction (a.k.a. confidence) column name.",
+"name": "rawPredictionCol"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "1.0"
+},
+"doc": "The smoothing parameter, should be >= 0, default is 1.0",
+"name": "smoothing"
+},
+{
+"converter": "toListFloat",
+"doc": "Thresholds in multi-class classification to adjust the probability of predicting each class. Array must have length equal to the number of classes, with values > 0, excepting that at most one value may be 0. The class with largest value p/t is predicted, where p is the original probability of that class and t is the class's threshold.",
+"name": "thresholds"
+},
+{
+"converter": "toString",
+"doc": "weight column name. If this is not set or empty, we treat all instance weights as 1.0.",
+"name": "weightCol"
+}
+],
+"Normalizer": [
+{
+"converter": "toString",
+"doc": "input column name.",
+"name": "inputCol"
+},
+{
+"converter": "toString",
+"default": {
+"uid_suffix": "__output"
+},
+"doc": "output column name.",
+"name": "outputCol"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "2.0"
+},
+"doc": "the p norm value.",
+"name": "p"
+}
+],
+"OneHotEncoder": [
+{
+"converter": "toBoolean",
+"default": true,
+"doc": "whether to drop the last category",
+"name": "dropLast"
+},
+{
+"converter": "toString",
+"default": "error",
+"doc": "How to handle invalid data during transform(). Options are 'keep' (invalid data presented as an extra categorical feature) or error (throw an error). Note that this Param is only used during transform; during fitting, invalid data will result in an error.",
+"name": "handleInvalid"
+},
+{
+"converter": "toString",
+"doc": "input column name.",
+"name": "inputCol"
+},
+{
+"converter": "toListString",
+"doc": "input column names.",
+"name": "inputCols"
+},
+{
+"converter": "toString",
+"default": {
+"uid_suffix": "__output"
+},
+"doc": "output column name.",
+"name": "outputCol"
+},
+{
+"converter": "toListString",
+"doc": "output column names.",
+"name": "outputCols"
+}
+],
+"OneHotEncoderModel": [
+{
+"converter": "toBoolean",
+"default": true,
+"doc": "whether to drop the last category",
+"name": "dropLast"
+},
+{
+"converter": "toString",
+"default": "error",
+"doc": "How to handle invalid data during transform(). Options are 'keep' (invalid data presented as an extra categorical feature) or error (throw an error). Note that this Param is only used during transform; during fitting, invalid data will result in an error.",
+"name": "handleInvalid"
+},
+{
+"converter": "toString",
+"doc": "input column name.",
+"name": "inputCol"
+},
+{
+"converter": "toListString",
+"doc": "input column names.",
+"name": "inputCols"
+},
+{
+"converter": "toString",
+"default": {
+"uid_suffix": "__output"
+},
+"doc": "output column name.",
+"name": "outputCol"
+},
+{
+"converter": "toListString",
+"doc": "output column names.",
+"name": "outputCols"
+}
+],
+"OneVsRest": [
+{
+"converter": "identity",
+"doc": "base binary classifier",
+"name": "classifier"
+},
+{
+"converter": "toString",
+"default": "features",
+"doc": "features column name.",
+"name": "featuresCol"
+},
+{
+"converter": "toString",
+"default": "label",
+"doc": "label column name.",
+"name": "labelCol"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 1
+},
+"doc": "the number of threads to use when running parallel algorithms (>= 1).",
+"name": "parallelism"
+},
+{
+"converter": "toString",
+"default": "prediction",
+"doc": "prediction column name.",
+"name": "predictionCol"
+},
+{
+"converter": "toString",
+"default": "rawPrediction",
+"doc": "raw prediction (a.k.a. confidence) column name.",
+"name": "rawPredictionCol"
+},
+{
+"converter": "toString",
+"doc": "weight column name. If this is not set or empty, we treat all instance weights as 1.0.",
+"name": "weightCol"
+}
+],
+"OneVsRestModel": [
+{
+"converter": "identity",
+"doc": "base binary classifier",
+"name": "classifier"
+},
+{
+"converter": "toString",
+"doc": "features column name.",
+"name": "featuresCol"
+},
+{
+"converter": "toString",
+"doc": "label column name.",
+"name": "labelCol"
+},
+{
+"converter": "toString",
+"doc": "prediction column name.",
+"name": "predictionCol"
+},
+{
+"converter": "toString",
+"doc": "raw prediction (a.k.a. confidence) column name.",
+"name": "rawPredictionCol"
+},
+{
+"converter": "toString",
+"doc": "weight column name. If this is not set or empty, we treat all instance weights as 1.0.",
+"name": "weightCol"
+}
+],
+"PCA": [
+{
+"converter": "toString",
+"doc": "input column name.",
+"name": "inputCol"
+},
+{
+"converter": "toInt",
+"doc": "the number of principal components",
+"name": "k"
+},
+{
+"converter": "toString",
+"default": {
+"uid_suffix": "__output"
+},
+"doc": "output column name.",
+"name": "outputCol"
+}
+],
+"PCAModel": [
+{
+"converter": "toString",
+"doc": "input column name.",
+"name": "inputCol"
+},
+{
+"converter": "toInt",
+"doc": "the number of principal components",
+"name": "k"
+},
+{
+"converter": "toString",
+"default": {
+"uid_suffix": "__output"
+},
+"doc": "output column name.",
+"name": "outputCol"
+}
+],
+"ParamGridBuilder": [],
+"Pipeline": [
+{
+"converter": "identity",
+"doc": "a list of pipeline stages",
+"name": "stages"
+}
+],
+"PipelineModel": [],
+"PolynomialExpansion": [
+{
+"converter": "toInt",
+"default": {
+"int": 2
+},
+"doc": "the polynomial degree to expand (>= 1)",
+"name": "degree"
+},
+{
+"converter": "toString",
+"doc": "input column name.",
+"name": "inputCol"
+},
+{
+"converter": "toString",
+"default": {
+"uid_suffix": "__output"
+},
+"doc": "output column name.",
+"name": "outputCol"
+}
+],
+"PowerIterationClustering": [
+{
+"converter": "toString",
+"default": "dst",
+"doc": "Name of the input column for destination vertex IDs.",
+"name": "dstCol"
+},
+{
+"converter": "toString",
+"default": "random",
+"doc": "The initialization algorithm. This can be either 'random' to use a random vector as vertex properties, or 'degree' to use a normalized sum of similarities with other vertices.  Supported options: 'random' and 'degree'.",
+"name": "initMode"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 2
+},
+"doc": "The number of clusters to create. Must be > 1.",
+"name": "k"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 20
+},
+"doc": "max number of iterations (>= 0).",
+"name": "maxIter"
+},
+{
+"converter": "toString",
+"default": "src",
+"doc": "Name of the input column for source vertex IDs.",
+"name": "srcCol"
+},
+{
+"converter": "toString",
+"doc": "weight column name. If this is not set or empty, we treat all instance weights as 1.0.",
+"name": "weightCol"
+}
+],
+"PrefixSpan": [
+{
+"converter": "toInt",
+"default": {
+"int": 32000000
+},
+"doc": "The maximum number of items (including delimiters used in the internal storage format) allowed in a projected database before local processing. If a projected database exceeds this size, another iteration of distributed prefix growth is run. Must be > 0.",
+"name": "maxLocalProjDBSize"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 10
+},
+"doc": "The maximal length of the sequential pattern. Must be > 0.",
+"name": "maxPatternLength"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.1"
+},
+"doc": "The minimal support level of the sequential pattern. Sequential pattern that appears more than (minSupport * size-of-the-dataset) times will be output. Must be >= 0.",
+"name": "minSupport"
+},
+{
+"converter": "toString",
+"default": "sequence",
+"doc": "The name of the sequence column in dataset, rows with nulls in this column are ignored.",
+"name": "sequenceCol"
+}
+],
+"QuantileDiscretizer": [
+{
+"converter": "toString",
+"default": "error",
+"doc": "how to handle invalid entries. Options are skip (filter out rows with invalid values), error (throw an error), or keep (keep invalid values in a special additional bucket). Note that in the multiple columns case, the invalid handling is applied to all columns. That said for 'error' it will throw an error if any invalids are found in any columns, for 'skip' it will skip rows with any invalids in any columns, etc.",
+"name": "handleInvalid"
+},
+{
+"converter": "toString",
+"doc": "input column name.",
+"name": "inputCol"
+},
+{
+"converter": "toListString",
+"doc": "input column names.",
+"name": "inputCols"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 2
+},
+"doc": "Maximum number of buckets (quantiles, or categories) into which data points are grouped. Must be >= 2.",
+"name": "numBuckets"
+},
+{
+"converter": "toListInt",
+"doc": "Array of number of buckets (quantiles, or categories) into which data points are grouped. This is for multiple columns input. If transforming multiple columns and numBucketsArray is not set, but numBuckets is set, then numBuckets will be applied across all columns.",
+"name": "numBucketsArray"
+},
+{
+"converter": "toString",
+"default": {
+"uid_suffix": "__output"
+},
+"doc": "output column name.",
+"name": "outputCol"
+},
+{
+"converter": "toListString",
+"doc": "output column names.",
+"name": "outputCols"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.001"
+},
+"doc": "the relative target precision for the approximate quantile algorithm. Must be in the range [0, 1]",
+"name": "relativeError"
+}
+],
+"RFormula": [
+{
+"converter": "toString",
+"default": "features",
+"doc": "features column name.",
+"name": "featuresCol"
+},
+{
+"converter": "toBoolean",
+"default": false,
+"doc": "Force to index label whether it is numeric or string",
+"name": "forceIndexLabel"
+},
+{
+"converter": "toString",
+"doc": "R model formula",
+"name": "formula"
+},
+{
+"converter": "toString",
+"default": "error",
+"doc": "how to handle invalid entries. Options are 'skip' (filter out rows with invalid values), 'error' (throw an error), or 'keep' (put invalid data in a special additional bucket, at index numLabels).",
+"name": "handleInvalid"
+},
+{
+"converter": "toString",
+"default": "label",
+"doc": "label column name.",
+"name": "labelCol"
+},
+{
+"converter": "toString",
+"default": "frequencyDesc",
+"doc": "How to order categories of a string feature column used by StringIndexer. The last category after ordering is dropped when encoding strings. Supported options: frequencyDesc, frequencyAsc, alphabetDesc, alphabetAsc. The default value is frequencyDesc. When the ordering is set to alphabetDesc, RFormula drops the same category as R when encoding strings.",
+"name": "stringIndexerOrderType"
+}
+],
+"RFormulaModel": [
+{
+"converter": "toString",
+"default": "features",
+"doc": "features column name.",
+"name": "featuresCol"
+},
+{
+"converter": "toBoolean",
+"default": false,
+"doc": "Force to index label whether it is numeric or string",
+"name": "forceIndexLabel"
+},
+{
+"converter": "toString",
+"doc": "R model formula",
+"name": "formula"
+},
+{
+"converter": "toString",
+"default": "error",
+"doc": "how to handle invalid entries. Options are 'skip' (filter out rows with invalid values), 'error' (throw an error), or 'keep' (put invalid data in a special additional bucket, at index numLabels).",
+"name": "handleInvalid"
+},
+{
+"converter": "toString",
+"default": "label",
+"doc": "label column name.",
+"name": "labelCol"
+},
+{
+"converter": "toString",
+"default": "frequencyDesc",
+"doc": "How to order categories of a string feature column used by StringIndexer. The last category after ordering is dropped when encoding strings. Supported options: frequencyDesc, frequencyAsc, alphabetDesc, alphabetAsc. The default value is frequencyDesc. When the ordering is set to alphabetDesc, RFormula drops the same category as R when encoding strings.",
+"name": "stringIndexerOrderType"
+}
+],
+"RandomForestClassificationModel": [
+{
+"converter": "toBoolean",
+"default": true,
+"doc": "Whether bootstrap samples are used when building trees.",
+"name": "bootstrap"
+},
+{
+"converter": "toBoolean",
+"default": false,
+"doc": "If false, the algorithm will pass trees to executors to match instances with nodes. If true, the algorithm will cache node IDs for each instance. Caching can speed up training of deeper trees. Users can set how often should the cache be checkpointed or disable it by setting checkpointInterval.",
+"name": "cacheNodeIds"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 10
+},
+"doc": "set checkpoint interval (>= 1) or disable checkpoint (-1). E.g. 10 means that the cache will get checkpointed every 10 iterations. Note: this setting will be ignored if the checkpoint directory is not set in the SparkContext.",
+"name": "checkpointInterval"
+},
+{
+"converter": "toString",
+"default": "auto",
+"doc": "The number of features to consider for splits at each tree node. Supported options: 'auto' (choose automatically for task: If numTrees == 1, set to 'all'. If numTrees > 1 (forest), set to 'sqrt' for classification and to 'onethird' for regression), 'all' (use all features), 'onethird' (use 1/3 of the features), 'sqrt' (use sqrt(number of features)), 'log2' (use log2(number of features)), 'n' (when n is in the range (0, 1.0], use n * number of features. When n is in the range (1, number of features), use n features). default = 'auto'",
+"name": "featureSubsetStrategy"
+},
+{
+"converter": "toString",
+"default": "features",
+"doc": "features column name.",
+"name": "featuresCol"
+},
+{
+"converter": "toString",
+"default": "gini",
+"doc": "Criterion used for information gain calculation (case-insensitive). Supported options: entropy, gini",
+"name": "impurity"
+},
+{
+"converter": "toString",
+"default": "label",
+"doc": "label column name.",
+"name": "labelCol"
+},
+{
+"converter": "toString",
+"default": "",
+"doc": "Leaf indices column name. Predicted leaf index of each instance in each tree by preorder.",
+"name": "leafCol"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 32
+},
+"doc": "Max number of bins for discretizing continuous features.  Must be >=2 and >= number of categories for any categorical feature.",
+"name": "maxBins"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 5
+},
+"doc": "Maximum depth of the tree. (>= 0) E.g., depth 0 means 1 leaf node; depth 1 means 1 internal node + 2 leaf nodes. Must be in range [0, 30].",
+"name": "maxDepth"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 256
+},
+"doc": "Maximum memory in MB allocated to histogram aggregation. If too small, then 1 node will be split per iteration, and its aggregates may exceed this size.",
+"name": "maxMemoryInMB"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.0"
+},
+"doc": "Minimum information gain for a split to be considered at a tree node.",
+"name": "minInfoGain"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 1
+},
+"doc": "Minimum number of instances each child must have after split. If a split causes the left or right child to have fewer than minInstancesPerNode, the split will be discarded as invalid. Should be >= 1.",
+"name": "minInstancesPerNode"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.0"
+},
+"doc": "Minimum fraction of the weighted sample count that each child must have after split. If a split causes the fraction of the total weight in the left or right child to be less than minWeightFractionPerNode, the split will be discarded as invalid. Should be in interval [0.0, 0.5).",
+"name": "minWeightFractionPerNode"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 20
+},
+"doc": "Number of trees to train (>= 1).",
+"name": "numTrees"
+},
+{
+"converter": "toString",
+"default": "prediction",
+"doc": "prediction column name.",
+"name": "predictionCol"
+},
+{
+"converter": "toString",
+"default": "probability",
+"doc": "Column name for predicted class conditional probabilities. Note: Not all models output well-calibrated probability estimates! These probabilities should be treated as confidences, not precise probabilities.",
+"name": "probabilityCol"
+},
+{
+"converter": "toBoolean",
+"default": true,
+"doc": "If true, the trained tree will undergo a pruning process after training, in which sibling leaf nodes with the same prediction are merged into their parent. The resulting tree will be smaller and have faster predictions. Class probabilities remain available after pruning. If false, no pruning is applied after training.",
+"name": "pruneTree"
+},
+{
+"converter": "toString",
+"default": "rawPrediction",
+"doc": "raw prediction (a.k.a. confidence) column name.",
+"name": "rawPredictionCol"
+},
+{
+"converter": "toInt",
+"default": {
+"class_name_hash": true
+},
+"doc": "random seed.",
+"name": "seed"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "1.0"
+},
+"doc": "Fraction of the training data used for learning each decision tree, in range (0, 1].",
+"name": "subsamplingRate"
+},
+{
+"converter": "toListFloat",
+"doc": "Thresholds in multi-class classification to adjust the probability of predicting each class. Array must have length equal to the number of classes, with values > 0, excepting that at most one value may be 0. The class with largest value p/t is predicted, where p is the original probability of that class and t is the class's threshold.",
+"name": "thresholds"
+},
+{
+"converter": "toString",
+"doc": "weight column name. If this is not set or empty, we treat all instance weights as 1.0.",
+"name": "weightCol"
+}
+],
+"RandomForestClassificationSummary": [],
+"RandomForestClassificationTrainingSummary": [],
+"RandomForestClassifier": [
+{
+"converter": "toBoolean",
+"default": true,
+"doc": "Whether bootstrap samples are used when building trees.",
+"name": "bootstrap"
+},
+{
+"converter": "toBoolean",
+"default": false,
+"doc": "If false, the algorithm will pass trees to executors to match instances with nodes. If true, the algorithm will cache node IDs for each instance. Caching can speed up training of deeper trees. Users can set how often should the cache be checkpointed or disable it by setting checkpointInterval.",
+"name": "cacheNodeIds"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 10
+},
+"doc": "set checkpoint interval (>= 1) or disable checkpoint (-1). E.g. 10 means that the cache will get checkpointed every 10 iterations. Note: this setting will be ignored if the checkpoint directory is not set in the SparkContext.",
+"name": "checkpointInterval"
+},
+{
+"converter": "toString",
+"default": "auto",
+"doc": "The number of features to consider for splits at each tree node. Supported options: 'auto' (choose automatically for task: If numTrees == 1, set to 'all'. If numTrees > 1 (forest), set to 'sqrt' for classification and to 'onethird' for regression), 'all' (use all features), 'onethird' (use 1/3 of the features), 'sqrt' (use sqrt(number of features)), 'log2' (use log2(number of features)), 'n' (when n is in the range (0, 1.0], use n * number of features. When n is in the range (1, number of features), use n features). default = 'auto'",
+"name": "featureSubsetStrategy"
+},
+{
+"converter": "toString",
+"default": "features",
+"doc": "features column name.",
+"name": "featuresCol"
+},
+{
+"converter": "toString",
+"default": "gini",
+"doc": "Criterion used for information gain calculation (case-insensitive). Supported options: entropy, gini",
+"name": "impurity"
+},
+{
+"converter": "toString",
+"default": "label",
+"doc": "label column name.",
+"name": "labelCol"
+},
+{
+"converter": "toString",
+"default": "",
+"doc": "Leaf indices column name. Predicted leaf index of each instance in each tree by preorder.",
+"name": "leafCol"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 32
+},
+"doc": "Max number of bins for discretizing continuous features.  Must be >=2 and >= number of categories for any categorical feature.",
+"name": "maxBins"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 5
+},
+"doc": "Maximum depth of the tree. (>= 0) E.g., depth 0 means 1 leaf node; depth 1 means 1 internal node + 2 leaf nodes. Must be in range [0, 30].",
+"name": "maxDepth"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 256
+},
+"doc": "Maximum memory in MB allocated to histogram aggregation. If too small, then 1 node will be split per iteration, and its aggregates may exceed this size.",
+"name": "maxMemoryInMB"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.0"
+},
+"doc": "Minimum information gain for a split to be considered at a tree node.",
+"name": "minInfoGain"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 1
+},
+"doc": "Minimum number of instances each child must have after split. If a split causes the left or right child to have fewer than minInstancesPerNode, the split will be discarded as invalid. Should be >= 1.",
+"name": "minInstancesPerNode"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.0"
+},
+"doc": "Minimum fraction of the weighted sample count that each child must have after split. If a split causes the fraction of the total weight in the left or right child to be less than minWeightFractionPerNode, the split will be discarded as invalid. Should be in interval [0.0, 0.5).",
+"name": "minWeightFractionPerNode"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 20
+},
+"doc": "Number of trees to train (>= 1).",
+"name": "numTrees"
+},
+{
+"converter": "toString",
+"default": "prediction",
+"doc": "prediction column name.",
+"name": "predictionCol"
+},
+{
+"converter": "toString",
+"default": "probability",
+"doc": "Column name for predicted class conditional probabilities. Note: Not all models output well-calibrated probability estimates! These probabilities should be treated as confidences, not precise probabilities.",
+"name": "probabilityCol"
+},
+{
+"converter": "toBoolean",
+"default": true,
+"doc": "If true, the trained tree will undergo a pruning process after training, in which sibling leaf nodes with the same prediction are merged into their parent. The resulting tree will be smaller and have faster predictions. Class probabilities remain available after pruning. If false, no pruning is applied after training.",
+"name": "pruneTree"
+},
+{
+"converter": "toString",
+"default": "rawPrediction",
+"doc": "raw prediction (a.k.a. confidence) column name.",
+"name": "rawPredictionCol"
+},
+{
+"converter": "toInt",
+"default": {
+"class_name_hash": true
+},
+"doc": "random seed.",
+"name": "seed"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "1.0"
+},
+"doc": "Fraction of the training data used for learning each decision tree, in range (0, 1].",
+"name": "subsamplingRate"
+},
+{
+"converter": "toListFloat",
+"doc": "Thresholds in multi-class classification to adjust the probability of predicting each class. Array must have length equal to the number of classes, with values > 0, excepting that at most one value may be 0. The class with largest value p/t is predicted, where p is the original probability of that class and t is the class's threshold.",
+"name": "thresholds"
+},
+{
+"converter": "toString",
+"doc": "weight column name. If this is not set or empty, we treat all instance weights as 1.0.",
+"name": "weightCol"
+}
+],
+"RandomForestRegressionModel": [
+{
+"converter": "toBoolean",
+"default": true,
+"doc": "Whether bootstrap samples are used when building trees.",
+"name": "bootstrap"
+},
+{
+"converter": "toBoolean",
+"default": false,
+"doc": "If false, the algorithm will pass trees to executors to match instances with nodes. If true, the algorithm will cache node IDs for each instance. Caching can speed up training of deeper trees. Users can set how often should the cache be checkpointed or disable it by setting checkpointInterval.",
+"name": "cacheNodeIds"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 10
+},
+"doc": "set checkpoint interval (>= 1) or disable checkpoint (-1). E.g. 10 means that the cache will get checkpointed every 10 iterations. Note: this setting will be ignored if the checkpoint directory is not set in the SparkContext.",
+"name": "checkpointInterval"
+},
+{
+"converter": "toString",
+"default": "auto",
+"doc": "The number of features to consider for splits at each tree node. Supported options: 'auto' (choose automatically for task: If numTrees == 1, set to 'all'. If numTrees > 1 (forest), set to 'sqrt' for classification and to 'onethird' for regression), 'all' (use all features), 'onethird' (use 1/3 of the features), 'sqrt' (use sqrt(number of features)), 'log2' (use log2(number of features)), 'n' (when n is in the range (0, 1.0], use n * number of features. When n is in the range (1, number of features), use n features). default = 'auto'",
+"name": "featureSubsetStrategy"
+},
+{
+"converter": "toString",
+"default": "features",
+"doc": "features column name.",
+"name": "featuresCol"
+},
+{
+"converter": "toString",
+"default": "variance",
+"doc": "Criterion used for information gain calculation (case-insensitive). Supported options: variance",
+"name": "impurity"
+},
+{
+"converter": "toString",
+"default": "label",
+"doc": "label column name.",
+"name": "labelCol"
+},
+{
+"converter": "toString",
+"default": "",
+"doc": "Leaf indices column name. Predicted leaf index of each instance in each tree by preorder.",
+"name": "leafCol"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 32
+},
+"doc": "Max number of bins for discretizing continuous features.  Must be >=2 and >= number of categories for any categorical feature.",
+"name": "maxBins"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 5
+},
+"doc": "Maximum depth of the tree. (>= 0) E.g., depth 0 means 1 leaf node; depth 1 means 1 internal node + 2 leaf nodes. Must be in range [0, 30].",
+"name": "maxDepth"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 256
+},
+"doc": "Maximum memory in MB allocated to histogram aggregation. If too small, then 1 node will be split per iteration, and its aggregates may exceed this size.",
+"name": "maxMemoryInMB"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.0"
+},
+"doc": "Minimum information gain for a split to be considered at a tree node.",
+"name": "minInfoGain"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 1
+},
+"doc": "Minimum number of instances each child must have after split. If a split causes the left or right child to have fewer than minInstancesPerNode, the split will be discarded as invalid. Should be >= 1.",
+"name": "minInstancesPerNode"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.0"
+},
+"doc": "Minimum fraction of the weighted sample count that each child must have after split. If a split causes the fraction of the total weight in the left or right child to be less than minWeightFractionPerNode, the split will be discarded as invalid. Should be in interval [0.0, 0.5).",
+"name": "minWeightFractionPerNode"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 20
+},
+"doc": "Number of trees to train (>= 1).",
+"name": "numTrees"
+},
+{
+"converter": "toString",
+"default": "prediction",
+"doc": "prediction column name.",
+"name": "predictionCol"
+},
+{
+"converter": "toInt",
+"default": {
+"class_name_hash": true
+},
+"doc": "random seed.",
+"name": "seed"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "1.0"
+},
+"doc": "Fraction of the training data used for learning each decision tree, in range (0, 1].",
+"name": "subsamplingRate"
+},
+{
+"converter": "toString",
+"doc": "weight column name. If this is not set or empty, we treat all instance weights as 1.0.",
+"name": "weightCol"
+}
+],
+"RandomForestRegressor": [
+{
+"converter": "toBoolean",
+"default": true,
+"doc": "Whether bootstrap samples are used when building trees.",
+"name": "bootstrap"
+},
+{
+"converter": "toBoolean",
+"default": false,
+"doc": "If false, the algorithm will pass trees to executors to match instances with nodes. If true, the algorithm will cache node IDs for each instance. Caching can speed up training of deeper trees. Users can set how often should the cache be checkpointed or disable it by setting checkpointInterval.",
+"name": "cacheNodeIds"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 10
+},
+"doc": "set checkpoint interval (>= 1) or disable checkpoint (-1). E.g. 10 means that the cache will get checkpointed every 10 iterations. Note: this setting will be ignored if the checkpoint directory is not set in the SparkContext.",
+"name": "checkpointInterval"
+},
+{
+"converter": "toString",
+"default": "auto",
+"doc": "The number of features to consider for splits at each tree node. Supported options: 'auto' (choose automatically for task: If numTrees == 1, set to 'all'. If numTrees > 1 (forest), set to 'sqrt' for classification and to 'onethird' for regression), 'all' (use all features), 'onethird' (use 1/3 of the features), 'sqrt' (use sqrt(number of features)), 'log2' (use log2(number of features)), 'n' (when n is in the range (0, 1.0], use n * number of features. When n is in the range (1, number of features), use n features). default = 'auto'",
+"name": "featureSubsetStrategy"
+},
+{
+"converter": "toString",
+"default": "features",
+"doc": "features column name.",
+"name": "featuresCol"
+},
+{
+"converter": "toString",
+"default": "variance",
+"doc": "Criterion used for information gain calculation (case-insensitive). Supported options: variance",
+"name": "impurity"
+},
+{
+"converter": "toString",
+"default": "label",
+"doc": "label column name.",
+"name": "labelCol"
+},
+{
+"converter": "toString",
+"default": "",
+"doc": "Leaf indices column name. Predicted leaf index of each instance in each tree by preorder.",
+"name": "leafCol"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 32
+},
+"doc": "Max number of bins for discretizing continuous features.  Must be >=2 and >= number of categories for any categorical feature.",
+"name": "maxBins"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 5
+},
+"doc": "Maximum depth of the tree. (>= 0) E.g., depth 0 means 1 leaf node; depth 1 means 1 internal node + 2 leaf nodes. Must be in range [0, 30].",
+"name": "maxDepth"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 256
+},
+"doc": "Maximum memory in MB allocated to histogram aggregation. If too small, then 1 node will be split per iteration, and its aggregates may exceed this size.",
+"name": "maxMemoryInMB"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.0"
+},
+"doc": "Minimum information gain for a split to be considered at a tree node.",
+"name": "minInfoGain"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 1
+},
+"doc": "Minimum number of instances each child must have after split. If a split causes the left or right child to have fewer than minInstancesPerNode, the split will be discarded as invalid. Should be >= 1.",
+"name": "minInstancesPerNode"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.0"
+},
+"doc": "Minimum fraction of the weighted sample count that each child must have after split. If a split causes the fraction of the total weight in the left or right child to be less than minWeightFractionPerNode, the split will be discarded as invalid. Should be in interval [0.0, 0.5).",
+"name": "minWeightFractionPerNode"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 20
+},
+"doc": "Number of trees to train (>= 1).",
+"name": "numTrees"
+},
+{
+"converter": "toString",
+"default": "prediction",
+"doc": "prediction column name.",
+"name": "predictionCol"
+},
+{
+"converter": "toInt",
+"default": {
+"class_name_hash": true
+},
+"doc": "random seed.",
+"name": "seed"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "1.0"
+},
+"doc": "Fraction of the training data used for learning each decision tree, in range (0, 1].",
+"name": "subsamplingRate"
+},
+{
+"converter": "toString",
+"doc": "weight column name. If this is not set or empty, we treat all instance weights as 1.0.",
+"name": "weightCol"
+}
+],
+"RankingEvaluator": [
+{
+"converter": "toInt",
+"default": {
+"int": 10
+},
+"doc": "The ranking position value used in meanAveragePrecisionAtK|precisionAtK|ndcgAtK|recallAtK. Must be > 0. The default value is 10.",
+"name": "k"
+},
+{
+"converter": "toString",
+"default": "label",
+"doc": "label column name.",
+"name": "labelCol"
+},
+{
+"converter": "toString",
+"default": "meanAveragePrecision",
+"doc": "metric name in evaluation (meanAveragePrecision|meanAveragePrecisionAtK|precisionAtK|ndcgAtK|recallAtK)",
+"name": "metricName"
+},
+{
+"converter": "toString",
+"default": "prediction",
+"doc": "prediction column name.",
+"name": "predictionCol"
+}
+],
+"RegexTokenizer": [
+{
+"converter": "identity",
+"default": true,
+"doc": "whether regex splits on gaps (True) or matches tokens (False)",
+"name": "gaps"
+},
+{
+"converter": "toString",
+"doc": "input column name.",
+"name": "inputCol"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 1
+},
+"doc": "minimum token length (>= 0)",
+"name": "minTokenLength"
+},
+{
+"converter": "toString",
+"default": {
+"uid_suffix": "__output"
+},
+"doc": "output column name.",
+"name": "outputCol"
+},
+{
+"converter": "toString",
+"default": "\\s+",
+"doc": "regex pattern (Java dialect) used for tokenizing",
+"name": "pattern"
+},
+{
+"converter": "toBoolean",
+"default": true,
+"doc": "whether to convert all characters to lowercase before tokenizing",
+"name": "toLowercase"
+}
+],
+"RegressionEvaluator": [
+{
+"converter": "toString",
+"default": "label",
+"doc": "label column name.",
+"name": "labelCol"
+},
+{
+"converter": "toString",
+"default": "rmse",
+"doc": "metric name in evaluation - one of:\n                       rmse - root mean squared error (default)\n                       mse - mean squared error\n                       r2 - r^2 metric\n                       mae - mean absolute error\n                       var - explained variance.",
+"name": "metricName"
+},
+{
+"converter": "toString",
+"default": "prediction",
+"doc": "prediction column name.",
+"name": "predictionCol"
+},
+{
+"converter": "toBoolean",
+"default": false,
+"doc": "whether the regression is through the origin.",
+"name": "throughOrigin"
+},
+{
+"converter": "toString",
+"doc": "weight column name. If this is not set or empty, we treat all instance weights as 1.0.",
+"name": "weightCol"
+}
+],
+"RobustScaler": [
+{
+"converter": "toString",
+"doc": "input column name.",
+"name": "inputCol"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.25"
+},
+"doc": "Lower quantile to calculate quantile range",
+"name": "lower"
+},
+{
+"converter": "toString",
+"default": {
+"uid_suffix": "__output"
+},
+"doc": "output column name.",
+"name": "outputCol"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.001"
+},
+"doc": "the relative target precision for the approximate quantile algorithm. Must be in the range [0, 1]",
+"name": "relativeError"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.75"
+},
+"doc": "Upper quantile to calculate quantile range",
+"name": "upper"
+},
+{
+"converter": "toBoolean",
+"default": false,
+"doc": "Whether to center data with median",
+"name": "withCentering"
+},
+{
+"converter": "toBoolean",
+"default": true,
+"doc": "Whether to scale the data to quantile range",
+"name": "withScaling"
+}
+],
+"RobustScalerModel": [
+{
+"converter": "toString",
+"doc": "input column name.",
+"name": "inputCol"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.25"
+},
+"doc": "Lower quantile to calculate quantile range",
+"name": "lower"
+},
+{
+"converter": "toString",
+"default": {
+"uid_suffix": "__output"
+},
+"doc": "output column name.",
+"name": "outputCol"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.001"
+},
+"doc": "the relative target precision for the approximate quantile algorithm. Must be in the range [0, 1]",
+"name": "relativeError"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.75"
+},
+"doc": "Upper quantile to calculate quantile range",
+"name": "upper"
+},
+{
+"converter": "toBoolean",
+"default": false,
+"doc": "Whether to center data with median",
+"name": "withCentering"
+},
+{
+"converter": "toBoolean",
+"default": true,
+"doc": "Whether to scale the data to quantile range",
+"name": "withScaling"
+}
+],
+"SQLTransformer": [
+{
+"converter": "toString",
+"doc": "SQL statement",
+"name": "statement"
+}
+],
+"StandardScaler": [
+{
+"converter": "toString",
+"doc": "input column name.",
+"name": "inputCol"
+},
+{
+"converter": "toString",
+"default": {
+"uid_suffix": "__output"
+},
+"doc": "output column name.",
+"name": "outputCol"
+},
+{
+"converter": "toBoolean",
+"default": false,
+"doc": "Center data with mean",
+"name": "withMean"
+},
+{
+"converter": "toBoolean",
+"default": true,
+"doc": "Scale to unit standard deviation",
+"name": "withStd"
+}
+],
+"StandardScalerModel": [
+{
+"converter": "toString",
+"doc": "input column name.",
+"name": "inputCol"
+},
+{
+"converter": "toString",
+"default": {
+"uid_suffix": "__output"
+},
+"doc": "output column name.",
+"name": "outputCol"
+},
+{
+"converter": "toBoolean",
+"default": false,
+"doc": "Center data with mean",
+"name": "withMean"
+},
+{
+"converter": "toBoolean",
+"default": true,
+"doc": "Scale to unit standard deviation",
+"name": "withStd"
+}
+],
+"StopWordsRemover": [
+{
+"converter": "toBoolean",
+"doc": "whether to do a case sensitive comparison over the stop words",
+"name": "caseSensitive"
+},
+{
+"converter": "toString",
+"doc": "input column name.",
+"name": "inputCol"
+},
+{
+"converter": "toListString",
+"doc": "input column names.",
+"name": "inputCols"
+},
+{
+"converter": "toString",
+"doc": "locale of the input. ignored when case sensitive is true",
+"name": "locale"
+},
+{
+"converter": "toString",
+"doc": "output column name.",
+"name": "outputCol"
+},
+{
+"converter": "toListString",
+"doc": "output column names.",
+"name": "outputCols"
+},
+{
+"converter": "toListString",
+"doc": "The words to be filtered out",
+"name": "stopWords"
+}
+],
+"StringIndexer": [
+{
+"converter": "toString",
+"default": "error",
+"doc": "how to handle invalid data (unseen or NULL values) in features and label column of string type. Options are 'skip' (filter out rows with invalid data), error (throw an error), or 'keep' (put invalid data in a special additional bucket, at index numLabels).",
+"name": "handleInvalid"
+},
+{
+"converter": "toString",
+"doc": "input column name.",
+"name": "inputCol"
+},
+{
+"converter": "toListString",
+"doc": "input column names.",
+"name": "inputCols"
+},
+{
+"converter": "toString",
+"default": {
+"uid_suffix": "__output"
+},
+"doc": "output column name.",
+"name": "outputCol"
+},
+{
+"converter": "toListString",
+"doc": "output column names.",
+"name": "outputCols"
+},
+{
+"converter": "toString",
+"default": "frequencyDesc",
+"doc": "How to order labels of string column. The first label after ordering is assigned an index of 0. Supported options: frequencyDesc, frequencyAsc, alphabetDesc, alphabetAsc. Default is frequencyDesc. In case of equal frequency when under frequencyDesc/Asc, the strings are further sorted alphabetically",
+"name": "stringOrderType"
+}
+],
+"StringIndexerModel": [
+{
+"converter": "toString",
+"default": "error",
+"doc": "how to handle invalid data (unseen or NULL values) in features and label column of string type. Options are 'skip' (filter out rows with invalid data), error (throw an error), or 'keep' (put invalid data in a special additional bucket, at index numLabels).",
+"name": "handleInvalid"
+},
+{
+"converter": "toString",
+"doc": "input column name.",
+"name": "inputCol"
+},
+{
+"converter": "toListString",
+"doc": "input column names.",
+"name": "inputCols"
+},
+{
+"converter": "toString",
+"default": {
+"uid_suffix": "__output"
+},
+"doc": "output column name.",
+"name": "outputCol"
+},
+{
+"converter": "toListString",
+"doc": "output column names.",
+"name": "outputCols"
+},
+{
+"converter": "toString",
+"default": "frequencyDesc",
+"doc": "How to order labels of string column. The first label after ordering is assigned an index of 0. Supported options: frequencyDesc, frequencyAsc, alphabetDesc, alphabetAsc. Default is frequencyDesc. In case of equal frequency when under frequencyDesc/Asc, the strings are further sorted alphabetically",
+"name": "stringOrderType"
+}
+],
+"TargetEncoder": [
+{
+"converter": "toString",
+"default": "error",
+"doc": "How to handle invalid data during transform(). Options are 'keep' (invalid data presented as an extra categorical feature) or error (throw an error).",
+"name": "handleInvalid"
+},
+{
+"converter": "toString",
+"doc": "input column name.",
+"name": "inputCol"
+},
+{
+"converter": "toListString",
+"doc": "input column names.",
+"name": "inputCols"
+},
+{
+"converter": "toString",
+"default": "label",
+"doc": "label column name.",
+"name": "labelCol"
+},
+{
+"converter": "toString",
+"default": {
+"uid_suffix": "__output"
+},
+"doc": "output column name.",
+"name": "outputCol"
+},
+{
+"converter": "toListString",
+"doc": "output column names.",
+"name": "outputCols"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.0"
+},
+"doc": "value to smooth in-category averages with overall averages.",
+"name": "smoothing"
+},
+{
+"converter": "toString",
+"default": "binary",
+"doc": "whether the label is 'binary' or 'continuous'",
+"name": "targetType"
+}
+],
+"TargetEncoderModel": [
+{
+"converter": "toString",
+"default": "error",
+"doc": "How to handle invalid data during transform(). Options are 'keep' (invalid data presented as an extra categorical feature) or error (throw an error).",
+"name": "handleInvalid"
+},
+{
+"converter": "toString",
+"doc": "input column name.",
+"name": "inputCol"
+},
+{
+"converter": "toListString",
+"doc": "input column names.",
+"name": "inputCols"
+},
+{
+"converter": "toString",
+"default": "label",
+"doc": "label column name.",
+"name": "labelCol"
+},
+{
+"converter": "toString",
+"default": {
+"uid_suffix": "__output"
+},
+"doc": "output column name.",
+"name": "outputCol"
+},
+{
+"converter": "toListString",
+"doc": "output column names.",
+"name": "outputCols"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.0"
+},
+"doc": "value to smooth in-category averages with overall averages.",
+"name": "smoothing"
+},
+{
+"converter": "toString",
+"default": "binary",
+"doc": "whether the label is 'binary' or 'continuous'",
+"name": "targetType"
+}
+],
+"Tokenizer": [
+{
+"converter": "toString",
+"doc": "input column name.",
+"name": "inputCol"
+},
+{
+"converter": "toString",
+"default": {
+"uid_suffix": "__output"
+},
+"doc": "output column name.",
+"name": "outputCol"
+}
+],
+"TrainValidationSplit": [
+{
+"converter": "toBoolean",
+"default": false,
+"doc": "Param for whether to collect a list of sub-models trained during tuning. If set to false, then only the single best sub-model will be available after fitting. If set to true, then all sub-models will be available. Warning: For large models, collecting all sub-models can cause OOMs on the Spark driver.",
+"name": "collectSubModels"
+},
+{
+"converter": "identity",
+"doc": "estimator to be cross-validated",
+"name": "estimator"
+},
+{
+"converter": "identity",
+"doc": "estimator param maps",
+"name": "estimatorParamMaps"
+},
+{
+"converter": "identity",
+"doc": "evaluator used to select hyper-parameters that maximize the validator metric",
+"name": "evaluator"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 1
+},
+"doc": "the number of threads to use when running parallel algorithms (>= 1).",
+"name": "parallelism"
+},
+{
+"converter": "toInt",
+"default": {
+"class_name_hash": true
+},
+"doc": "random seed.",
+"name": "seed"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.75"
+},
+"doc": "Param for ratio between train and     validation data. Must be between 0 and 1.",
+"name": "trainRatio"
+}
+],
+"TrainValidationSplitModel": [
+{
+"converter": "identity",
+"doc": "estimator to be cross-validated",
+"name": "estimator"
+},
+{
+"converter": "identity",
+"doc": "estimator param maps",
+"name": "estimatorParamMaps"
+},
+{
+"converter": "identity",
+"doc": "evaluator used to select hyper-parameters that maximize the validator metric",
+"name": "evaluator"
+},
+{
+"converter": "toInt",
+"doc": "random seed.",
+"name": "seed"
+},
+{
+"converter": "toFloat",
+"doc": "Param for ratio between train and     validation data. Must be between 0 and 1.",
+"name": "trainRatio"
+}
+],
+"UnivariateFeatureSelector": [
+{
+"converter": "toString",
+"doc": "The feature type. Supported options: categorical, continuous.",
+"name": "featureType"
+},
+{
+"converter": "toString",
+"default": "features",
+"doc": "features column name.",
+"name": "featuresCol"
+},
+{
+"converter": "toString",
+"default": "label",
+"doc": "label column name.",
+"name": "labelCol"
+},
+{
+"converter": "toString",
+"doc": "The label type. Supported options: categorical, continuous.",
+"name": "labelType"
+},
+{
+"converter": "toString",
+"default": {
+"uid_suffix": "__output"
+},
+"doc": "output column name.",
+"name": "outputCol"
+},
+{
+"converter": "toString",
+"default": "numTopFeatures",
+"doc": "The selection mode. Supported options: numTopFeatures (default), percentile, fpr, fdr, fwe.",
+"name": "selectionMode"
+},
+{
+"converter": "toFloat",
+"doc": "The upper bound of the features that selector will select.",
+"name": "selectionThreshold"
+}
+],
+"UnivariateFeatureSelectorModel": [
+{
+"converter": "toString",
+"doc": "The feature type. Supported options: categorical, continuous.",
+"name": "featureType"
+},
+{
+"converter": "toString",
+"default": "features",
+"doc": "features column name.",
+"name": "featuresCol"
+},
+{
+"converter": "toString",
+"default": "label",
+"doc": "label column name.",
+"name": "labelCol"
+},
+{
+"converter": "toString",
+"doc": "The label type. Supported options: categorical, continuous.",
+"name": "labelType"
+},
+{
+"converter": "toString",
+"default": {
+"uid_suffix": "__output"
+},
+"doc": "output column name.",
+"name": "outputCol"
+},
+{
+"converter": "toString",
+"default": "numTopFeatures",
+"doc": "The selection mode. Supported options: numTopFeatures (default), percentile, fpr, fdr, fwe.",
+"name": "selectionMode"
+},
+{
+"converter": "toFloat",
+"doc": "The upper bound of the features that selector will select.",
+"name": "selectionThreshold"
+}
+],
+"VarianceThresholdSelector": [
+{
+"converter": "toString",
+"default": "features",
+"doc": "features column name.",
+"name": "featuresCol"
+},
+{
+"converter": "toString",
+"default": {
+"uid_suffix": "__output"
+},
+"doc": "output column name.",
+"name": "outputCol"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.0"
+},
+"doc": "Param for variance threshold. Features with a variance not greater than this threshold will be removed. The default value is 0.0.",
+"name": "varianceThreshold"
+}
+],
+"VarianceThresholdSelectorModel": [
+{
+"converter": "toString",
+"default": "features",
+"doc": "features column name.",
+"name": "featuresCol"
+},
+{
+"converter": "toString",
+"default": {
+"uid_suffix": "__output"
+},
+"doc": "output column name.",
+"name": "outputCol"
+},
+{
+"converter": "toFloat",
+"doc": "Param for variance threshold. Features with a variance not greater than this threshold will be removed. The default value is 0.0.",
+"name": "varianceThreshold"
+}
+],
+"VectorAssembler": [
+{
+"converter": "toString",
+"default": "error",
+"doc": "How to handle invalid data (NULL and NaN values). Options are 'skip' (filter out rows with invalid data), 'error' (throw an error), or 'keep' (return relevant number of NaN in the output). Column lengths are taken from the size of ML Attribute Group, which can be set using `VectorSizeHint` in a pipeline before `VectorAssembler`. Column lengths can also be inferred from first rows of the data since it is safe to do so but only in case of 'error' or 'skip').",
+"name": "handleInvalid"
+},
+{
+"converter": "toListString",
+"doc": "input column names.",
+"name": "inputCols"
+},
+{
+"converter": "toString",
+"default": {
+"uid_suffix": "__output"
+},
+"doc": "output column name.",
+"name": "outputCol"
+}
+],
+"VectorIndexer": [
+{
+"converter": "toString",
+"default": "error",
+"doc": "How to handle invalid data (unseen labels or NULL values). Options are 'skip' (filter out rows with invalid data), 'error' (throw an error), or 'keep' (put invalid data in a special additional bucket, at index of the number of categories of the feature).",
+"name": "handleInvalid"
+},
+{
+"converter": "toString",
+"doc": "input column name.",
+"name": "inputCol"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 20
+},
+"doc": "Threshold for the number of values a categorical feature can take (>= 2). If a feature is found to have > maxCategories values, then it is declared continuous.",
+"name": "maxCategories"
+},
+{
+"converter": "toString",
+"default": {
+"uid_suffix": "__output"
+},
+"doc": "output column name.",
+"name": "outputCol"
+}
+],
+"VectorIndexerModel": [
+{
+"converter": "toString",
+"default": "error",
+"doc": "How to handle invalid data (unseen labels or NULL values). Options are 'skip' (filter out rows with invalid data), 'error' (throw an error), or 'keep' (put invalid data in a special additional bucket, at index of the number of categories of the feature).",
+"name": "handleInvalid"
+},
+{
+"converter": "toString",
+"doc": "input column name.",
+"name": "inputCol"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 20
+},
+"doc": "Threshold for the number of values a categorical feature can take (>= 2). If a feature is found to have > maxCategories values, then it is declared continuous.",
+"name": "maxCategories"
+},
+{
+"converter": "toString",
+"default": {
+"uid_suffix": "__output"
+},
+"doc": "output column name.",
+"name": "outputCol"
+}
+],
+"VectorSizeHint": [
+{
+"converter": "toString",
+"default": "error",
+"doc": "How to handle invalid vectors in inputCol. Invalid vectors include nulls and vectors with the wrong size. The options are `skip` (filter out rows with invalid vectors), `error` (throw an error) and `optimistic` (do not check the vector size, and keep all rows). `error` by default.",
+"name": "handleInvalid"
+},
+{
+"converter": "toString",
+"doc": "input column name.",
+"name": "inputCol"
+},
+{
+"converter": "toInt",
+"doc": "Size of vectors in column.",
+"name": "size"
+}
+],
+"VectorSlicer": [
+{
+"converter": "toListInt",
+"default": {
+"list": []
+},
+"doc": "An array of indices to select features from a vector column. There can be no overlap with names.",
+"name": "indices"
+},
+{
+"converter": "toString",
+"doc": "input column name.",
+"name": "inputCol"
+},
+{
+"converter": "toListString",
+"default": {
+"list": []
+},
+"doc": "An array of feature names to select features from a vector column. These names must be specified by ML org.apache.spark.ml.attribute.Attribute. There can be no overlap with indices.",
+"name": "names"
+},
+{
+"converter": "toString",
+"default": {
+"uid_suffix": "__output"
+},
+"doc": "output column name.",
+"name": "outputCol"
+}
+],
+"Word2Vec": [
+{
+"converter": "toString",
+"doc": "input column name.",
+"name": "inputCol"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 1
+},
+"doc": "max number of iterations (>= 0).",
+"name": "maxIter"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 1000
+},
+"doc": "Maximum length (in words) of each sentence in the input data. Any sentence longer than this threshold will be divided into chunks up to the size.",
+"name": "maxSentenceLength"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 5
+},
+"doc": "the minimum number of times a token must appear to be included in the word2vec model's vocabulary",
+"name": "minCount"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 1
+},
+"doc": "number of partitions for sentences of words",
+"name": "numPartitions"
+},
+{
+"converter": "toString",
+"default": {
+"uid_suffix": "__output"
+},
+"doc": "output column name.",
+"name": "outputCol"
+},
+{
+"converter": "toInt",
+"default": {
+"class_name_hash": true
+},
+"doc": "random seed.",
+"name": "seed"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.025"
+},
+"doc": "Step size to be used for each iteration of optimization (>= 0).",
+"name": "stepSize"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 100
+},
+"doc": "the dimension of codes after transforming from words",
+"name": "vectorSize"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 5
+},
+"doc": "the window size (context words from [-window, window]). Default value is 5",
+"name": "windowSize"
+}
+],
+"Word2VecModel": [
+{
+"converter": "toString",
+"doc": "input column name.",
+"name": "inputCol"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 1
+},
+"doc": "max number of iterations (>= 0).",
+"name": "maxIter"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 1000
+},
+"doc": "Maximum length (in words) of each sentence in the input data. Any sentence longer than this threshold will be divided into chunks up to the size.",
+"name": "maxSentenceLength"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 5
+},
+"doc": "the minimum number of times a token must appear to be included in the word2vec model's vocabulary",
+"name": "minCount"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 1
+},
+"doc": "number of partitions for sentences of words",
+"name": "numPartitions"
+},
+{
+"converter": "toString",
+"default": {
+"uid_suffix": "__output"
+},
+"doc": "output column name.",
+"name": "outputCol"
+},
+{
+"converter": "toInt",
+"default": {
+"class_name_hash": true
+},
+"doc": "random seed.",
+"name": "seed"
+},
+{
+"converter": "toFloat",
+"default": {
+"float": "0.025"
+},
+"doc": "Step size to be used for each iteration of optimization (>= 0).",
+"name": "stepSize"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 100
+},
+"doc": "the dimension of codes after transforming from words",
+"name": "vectorSize"
+},
+{
+"converter": "toInt",
+"default": {
+"int": 5
+},
+"doc": "the window size (context words from [-window, window]). Default value is 5",
+"name": "windowSize"
+}
+]
+}

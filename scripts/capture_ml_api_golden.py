@@ -3,6 +3,8 @@
 
 Run with official pyspark-client 4.3.0, which needs no server for this:
     python scripts/capture_ml_api_golden.py > tests/golden/ml_api.json
+It also writes the params alone to crates/pyspark-rs/src/ml/ml_params.json, which the extension
+embeds.
 
 For every public class of pyspark.ml.{classification, regression, clustering, feature, fpm,
 recommendation, evaluation, stat, tuning} and Pipeline/PipelineModel, it records:
@@ -172,6 +174,23 @@ def main():
     for name in ["Pipeline", "PipelineModel"]:
         out[name] = capture(getattr(ml, name))
     print(json.dumps(out, indent=1, sort_keys=True))
+    # The params alone, which the extension embeds, as the source of its Param objects, their docs,
+    # converters and defaults (a file of its crate, which its packages include).
+    params = {name: entry["params"] for name, entry in out.items()}
+    with open(PARAMS_PATH, "w") as f:
+        json.dump(params, f, indent=0, sort_keys=True)
+        f.write("\n")
+
+
+PARAMS_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "..",
+    "crates",
+    "pyspark-rs",
+    "src",
+    "ml",
+    "ml_params.json",
+)
 
 
 if __name__ == "__main__":

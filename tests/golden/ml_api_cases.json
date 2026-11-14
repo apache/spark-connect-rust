@@ -1,0 +1,1446 @@
+{
+ "KMeans": {
+  "live": {
+   "clusterCenters": [
+    "ok",
+    [
+     [
+      0.1,
+      0.1
+     ],
+     [
+      9.1,
+      9.1
+     ]
+    ]
+   ],
+   "clusterCenters_type": [
+    "ok",
+    "'ndarray'"
+   ],
+   "copy_summary_is_summary": [
+    "ok",
+    "True"
+   ],
+   "est_loaded_isSet_maxIter": [
+    "ok",
+    "True"
+   ],
+   "est_loaded_params": [
+    "ok",
+    [
+     "('distanceMeasure', \"'euclidean'\")",
+     "('featuresCol', \"'features'\")",
+     "('initMode', \"'k-means||'\")",
+     "('initSteps', '2')",
+     "('intermediateStorageLevel', \"'MEMORY_AND_DISK'\")",
+     "('k', '2')",
+     "('maxBlockSizeInMB', '0.0')",
+     "('maxIter', '10')",
+     "('predictionCol', \"'prediction'\")",
+     "('seed', '<hash KMeans>')",
+     "('solver', \"'auto'\")",
+     "('tol', '0.0001')"
+    ]
+   ],
+   "est_loaded_uid": [
+    "ok",
+    "True"
+   ],
+   "est_save": [
+    "ok",
+    "None"
+   ],
+   "fitMultiple": [
+    "ok",
+    [
+     "(0, 2)",
+     "(1, 3)"
+    ]
+   ],
+   "fit_class_param": [
+    "ok",
+    "10"
+   ],
+   "fit_list": [
+    "ok",
+    [
+     "2",
+     "10"
+    ]
+   ],
+   "fit_map": [
+    "ok",
+    "2"
+   ],
+   "hasSummary": [
+    "ok",
+    "True"
+   ],
+   "isinstance_model": [
+    "ok",
+    "(True, True)"
+   ],
+   "loaded_explainParams": [
+    "ok",
+    "'distanceMeasure: the distance measure. Supported options: \\'euclidean\\' and \\'cosine\\'. (default: euclidean)\\nfeaturesCol: features column name. (default: features)\\ninitMode: The initialization algorithm. This can be either \"random\" to choose random points as initial cluster centers, or \"k-means||\" to use a parallel variant of k-means++ (default: k-means||)\\ninitSteps: The number of steps for k-means|| initialization mode. Must be > 0. (default: 2)\\nintermediateStorageLevel: StorageLevel for intermediate datasets. Cannot be \\'NONE\\'. (default: MEMORY_AND_DISK)\\nk: The number of clusters to create. Must be > 1. (default: 2, current: 2)\\nmaxBlockSizeInMB: maximum memory in MB for stacking input data into blocks. Data is stacked within partitions. If more than remaining data size in a partition then it is adjusted to the data size. Default 0.0 represents choosing optimal value, depends on specific algorithm. Must be >= 0. (default: 0.0)\\nmaxIter: max number of iterations (>= 0). (default: 20, current: 10)\\npredictionCol: prediction column name. (default: prediction)\\nseed: random seed. (default: <hash KMeansModel>)\\nsolver: The solver algorithm for optimization. Supported options: auto, row, block. (default: auto)\\ntol: the convergence tolerance for iterative algorithms (>= 0). (default: 0.0001)\\nweightCol: weight column name. If this is not set or empty, we treat all instance weights as 1.0. (undefined)'"
+   ],
+   "loaded_getMaxIter": [
+    "ok",
+    "10"
+   ],
+   "loaded_hasSummary": [
+    "ok",
+    "False"
+   ],
+   "loaded_isSet_maxIter": [
+    "ok",
+    "True"
+   ],
+   "loaded_summary": [
+    "RuntimeError",
+    "No training summary available for this KMeansModel"
+   ],
+   "loaded_transform": [
+    "ok",
+    {
+     "columns": [
+      "features",
+      "prediction"
+     ],
+     "rows": [
+      "(DenseVector([0.0, 0.0]), 0)",
+      "(DenseVector([0.1, 0.2]), 0)",
+      "(DenseVector([0.2, 0.1]), 0)",
+      "(DenseVector([9.0, 9.0]), 1)",
+      "(DenseVector([9.1, 9.2]), 1)",
+      "(DenseVector([9.2, 9.1]), 1)"
+     ]
+    }
+   ],
+   "loaded_uid": [
+    "ok",
+    "True"
+   ],
+   "model_class": [
+    "ok",
+    "('KMeansModel', 'clustering')"
+   ],
+   "model_copy_seed": [
+    "ok",
+    "True"
+   ],
+   "model_explainParam_seed": [
+    "ok",
+    "'seed: random seed. (default: <hash KMeans>)'"
+   ],
+   "model_explainParams": [
+    "ok",
+    "'distanceMeasure: the distance measure. Supported options: \\'euclidean\\' and \\'cosine\\'. (default: euclidean)\\nfeaturesCol: features column name. (default: features)\\ninitMode: The initialization algorithm. This can be either \"random\" to choose random points as initial cluster centers, or \"k-means||\" to use a parallel variant of k-means++ (default: k-means||)\\ninitSteps: The number of steps for k-means|| initialization mode. Must be > 0. (default: 2)\\nintermediateStorageLevel: StorageLevel for intermediate datasets. Cannot be \\'NONE\\'. (default: MEMORY_AND_DISK)\\nk: The number of clusters to create. Must be > 1. (default: 2, current: 2)\\nmaxBlockSizeInMB: maximum memory in MB for stacking input data into blocks. Data is stacked within partitions. If more than remaining data size in a partition then it is adjusted to the data size. Default 0.0 represents choosing optimal value, depends on specific algorithm. Must be >= 0. (default: 0.0)\\nmaxIter: max number of iterations (>= 0). (default: 20, current: 10)\\npredictionCol: prediction column name. (default: prediction)\\nseed: random seed. (default: <hash KMeans>)\\nsolver: The solver algorithm for optimization. Supported options: auto, row, block. (default: auto)\\ntol: the convergence tolerance for iterative algorithms (>= 0). (default: 0.0001)\\nweightCol: weight column name. If this is not set or empty, we treat all instance weights as 1.0. (undefined)'"
+   ],
+   "model_extract": [
+    "ok",
+    [
+     "('distanceMeasure', \"'euclidean'\")",
+     "('featuresCol', \"'features'\")",
+     "('initMode', \"'k-means||'\")",
+     "('initSteps', '2')",
+     "('intermediateStorageLevel', \"'MEMORY_AND_DISK'\")",
+     "('k', '2')",
+     "('maxBlockSizeInMB', '0.0')",
+     "('maxIter', '10')",
+     "('predictionCol', \"'prediction'\")",
+     "('seed', '<hash KMeans>')",
+     "('solver', \"'auto'\")",
+     "('tol', '0.0001')"
+    ]
+   ],
+   "model_getK": [
+    "ok",
+    "2"
+   ],
+   "model_hasDefault_seed": [
+    "ok",
+    "True"
+   ],
+   "model_isSet_k": [
+    "ok",
+    "True"
+   ],
+   "model_isSet_seed": [
+    "ok",
+    "False"
+   ],
+   "model_no_attribute": [
+    "AttributeError",
+    "'KMeansModel' object has no attribute 'fooBarBaz'"
+   ],
+   "model_save": [
+    "ok",
+    "None"
+   ],
+   "model_save_again": [
+    "UnknownException",
+    "(java.io.IOException) Path <path>/model already exists. To overwrite it, please use write.overwrite().save(path) for Scala and use write().overwrite().save(path) for Java and Python."
+   ],
+   "model_seed_is_estimator_hash": [
+    "ok",
+    "True"
+   ],
+   "model_setPredictionCol": [
+    "ok",
+    "'p'"
+   ],
+   "model_uid_is_estimator_uid": [
+    "ok",
+    "True"
+   ],
+   "numFeatures": [
+    "ok",
+    "2"
+   ],
+   "predict_apart": [
+    "ok",
+    "True"
+   ],
+   "predict_type": [
+    "ok",
+    "'int'"
+   ],
+   "repr_prefix": [
+    "ok",
+    "'KMeansModel'"
+   ],
+   "summary_clusterSizes": [
+    "ok",
+    [
+     "3",
+     "3"
+    ]
+   ],
+   "summary_df_cluster_count": [
+    "ok",
+    "6"
+   ],
+   "summary_df_predictions": [
+    "ok",
+    {
+     "columns": [
+      "features"
+     ],
+     "rows": [
+      "(DenseVector([0.0, 0.0]),)",
+      "(DenseVector([0.1, 0.2]),)",
+      "(DenseVector([0.2, 0.1]),)",
+      "(DenseVector([9.0, 9.0]),)",
+      "(DenseVector([9.1, 9.2]),)",
+      "(DenseVector([9.2, 9.1]),)"
+     ]
+    }
+   ],
+   "summary_featuresCol": [
+    "ok",
+    "'features'"
+   ],
+   "summary_is_summary": [
+    "ok",
+    "True"
+   ],
+   "summary_k": [
+    "ok",
+    "2"
+   ],
+   "summary_numIter": [
+    "ok",
+    "1"
+   ],
+   "summary_predictionCol": [
+    "ok",
+    "'prediction'"
+   ],
+   "summary_trainingCost": [
+    "ok",
+    0.08
+   ],
+   "transform": [
+    "ok",
+    {
+     "columns": [
+      "features",
+      "prediction"
+     ],
+     "rows": [
+      "(DenseVector([0.0, 0.0]), 0)",
+      "(DenseVector([0.1, 0.2]), 0)",
+      "(DenseVector([0.2, 0.1]), 0)",
+      "(DenseVector([9.0, 9.0]), 1)",
+      "(DenseVector([9.1, 9.2]), 1)",
+      "(DenseVector([9.2, 9.1]), 1)"
+     ]
+    }
+   ],
+   "transform_map": [
+    "ok",
+    [
+     "'features'",
+     "'q'"
+    ]
+   ]
+  },
+  "params_api": {
+   "big_int": [
+    "ok",
+    "1180591620717411303424"
+   ],
+   "big_int_explain": [
+    "ok",
+    "'maxIter: max number of iterations (>= 0). (default: 20, current: 1180591620717411303424)'"
+   ],
+   "class_param": [
+    "ok",
+    "('Param', 'undefined', 'maxIter', True, False)"
+   ],
+   "clear": [
+    "ok",
+    "(None, 7, True)"
+   ],
+   "copy_bad_extra": [
+    "TypeError",
+    "Expecting a valid instance of Param, but received: maxIter"
+   ],
+   "copy_class_param": [
+    "ok",
+    "5"
+   ],
+   "copy_explainParams": [
+    "ok",
+    "'distanceMeasure: the distance measure. Supported options: \\'euclidean\\' and \\'cosine\\'. (default: euclidean)\\nfeaturesCol: features column name. (default: features)\\ninitMode: The initialization algorithm. This can be either \"random\" to choose random points as initial cluster centers, or \"k-means||\" to use a parallel variant of k-means++ (default: k-means||)\\ninitSteps: The number of steps for k-means|| initialization mode. Must be > 0. (default: 2)\\nintermediateStorageLevel: StorageLevel for intermediate datasets. Cannot be \\'NONE\\'. (default: MEMORY_AND_DISK)\\nk: The number of clusters to create. Must be > 1. (default: 2, current: 3)\\nmaxBlockSizeInMB: maximum memory in MB for stacking input data into blocks. Data is stacked within partitions. If more than remaining data size in a partition then it is adjusted to the data size. Default 0.0 represents choosing optimal value, depends on specific algorithm. Must be >= 0. (default: 0.0)\\nmaxIter: max number of iterations (>= 0). (default: 20, current: 10)\\npredictionCol: prediction column name. (default: prediction)\\nseed: random seed. (default: <hash KMeans>)\\nsolver: The solver algorithm for optimization. Supported options: auto, row, block. (default: auto)\\ntol: the convergence tolerance for iterative algorithms (>= 0). (default: 0.0001)\\nweightCol: weight column name. If this is not set or empty, we treat all instance weights as 1.0. (undefined)'"
+   ],
+   "copy_list": [
+    "TypeError",
+    "Expecting a dict, but received an object of type <class 'list'>."
+   ],
+   "copy_maxIter": [
+    "ok",
+    "10"
+   ],
+   "copy_same_uid": [
+    "ok",
+    "True"
+   ],
+   "copy_seed": [
+    "ok",
+    "True"
+   ],
+   "explainParam_param": [
+    "ok",
+    "'tol: the convergence tolerance for iterative algorithms (>= 0). (default: 0.0001)'"
+   ],
+   "explainParam_seed": [
+    "ok",
+    "'seed: random seed. (default: <hash KMeans>)'"
+   ],
+   "explainParam_str": [
+    "ok",
+    "'maxIter: max number of iterations (>= 0). (default: 20, current: 5)'"
+   ],
+   "explainParams": [
+    "ok",
+    "'distanceMeasure: the distance measure. Supported options: \\'euclidean\\' and \\'cosine\\'. (default: euclidean)\\nfeaturesCol: features column name. (default: features)\\ninitMode: The initialization algorithm. This can be either \"random\" to choose random points as initial cluster centers, or \"k-means||\" to use a parallel variant of k-means++ (default: k-means||)\\ninitSteps: The number of steps for k-means|| initialization mode. Must be > 0. (default: 2)\\nintermediateStorageLevel: StorageLevel for intermediate datasets. Cannot be \\'NONE\\'. (default: MEMORY_AND_DISK)\\nk: The number of clusters to create. Must be > 1. (default: 2, current: 3)\\nmaxBlockSizeInMB: maximum memory in MB for stacking input data into blocks. Data is stacked within partitions. If more than remaining data size in a partition then it is adjusted to the data size. Default 0.0 represents choosing optimal value, depends on specific algorithm. Must be >= 0. (default: 0.0)\\nmaxIter: max number of iterations (>= 0). (default: 20, current: 5)\\npredictionCol: prediction column name. (default: prediction)\\nseed: random seed. (default: <hash KMeans>)\\nsolver: The solver algorithm for optimization. Supported options: auto, row, block. (default: auto)\\ntol: the convergence tolerance for iterative algorithms (>= 0). (default: 0.0001)\\nweightCol: weight column name. If this is not set or empty, we treat all instance weights as 1.0. (undefined)'"
+   ],
+   "extract": [
+    "ok",
+    [
+     "('distanceMeasure', \"'euclidean'\")",
+     "('featuresCol', \"'features'\")",
+     "('initMode', \"'k-means||'\")",
+     "('initSteps', '2')",
+     "('intermediateStorageLevel', \"'MEMORY_AND_DISK'\")",
+     "('k', '3')",
+     "('maxBlockSizeInMB', '0.0')",
+     "('maxIter', '5')",
+     "('predictionCol', \"'prediction'\")",
+     "('seed', '<hash KMeans>')",
+     "('solver', \"'auto'\")",
+     "('tol', '0.0001')"
+    ]
+   ],
+   "extract_extra": [
+    "ok",
+    [
+     "('distanceMeasure', \"'euclidean'\")",
+     "('featuresCol', \"'features'\")",
+     "('initMode', \"'k-means||'\")",
+     "('initSteps', '2')",
+     "('intermediateStorageLevel', \"'MEMORY_AND_DISK'\")",
+     "('k', '3')",
+     "('maxBlockSizeInMB', '0.0')",
+     "('maxIter', '5')",
+     "('predictionCol', \"'prediction'\")",
+     "('seed', '<hash KMeans>')",
+     "('solver', \"'auto'\")",
+     "('tol', '0.5')"
+    ]
+   ],
+   "getDistanceMeasure": [
+    "ok",
+    "'euclidean'"
+   ],
+   "getFeaturesCol": [
+    "ok",
+    "'features'"
+   ],
+   "getInitMode": [
+    "ok",
+    "'k-means||'"
+   ],
+   "getInitSteps": [
+    "ok",
+    "2"
+   ],
+   "getIntermediateStorageLevel": [
+    "ok",
+    "'MEMORY_AND_DISK'"
+   ],
+   "getK": [
+    "ok",
+    "3"
+   ],
+   "getMaxBlockSizeInMB": [
+    "ok",
+    0.0
+   ],
+   "getMaxIter": [
+    "ok",
+    "5"
+   ],
+   "getOrDefault_maxIter": [
+    "ok",
+    "5"
+   ],
+   "getOrDefault_weightCol": [
+    "KeyError",
+    "Param(parent='KMeans_<uid>', name='weightCol', doc='weight column name. If this is not set or empty, we treat all instance weights as 1.0.')"
+   ],
+   "getParam_method": [
+    "ValueError",
+    "Cannot find param with name fit."
+   ],
+   "getParam_nope": [
+    "AttributeError",
+    "'KMeans' object has no attribute 'nope'"
+   ],
+   "getPredictionCol": [
+    "ok",
+    "'prediction'"
+   ],
+   "getSeed": [
+    "ok",
+    "<hash KMeans>"
+   ],
+   "getSolver": [
+    "ok",
+    "'auto'"
+   ],
+   "getTol": [
+    "ok",
+    0.0001
+   ],
+   "getWeightCol": [
+    "KeyError",
+    "Param(parent='KMeans_<uid>', name='weightCol', doc='weight column name. If this is not set or empty, we treat all instance weights as 1.0.')"
+   ],
+   "grid_of_class_param": [
+    "ok",
+    [
+     [
+      "('undefined', 'maxIter', 1)"
+     ],
+     [
+      "('undefined', 'maxIter', 2)"
+     ]
+    ]
+   ],
+   "hasDefault_seed": [
+    "ok",
+    "True"
+   ],
+   "hasDefault_tol": [
+    "ok",
+    "True"
+   ],
+   "hasDefault_weightCol": [
+    "ok",
+    "False"
+   ],
+   "hasParam_int": [
+    "TypeError",
+    "hasParam(): paramName must be a string"
+   ],
+   "hasParam_nope": [
+    "ok",
+    "False"
+   ],
+   "hasParam_tol": [
+    "ok",
+    "True"
+   ],
+   "isDefined_weightCol": [
+    "ok",
+    "False"
+   ],
+   "isSet_foreign": [
+    "ValueError",
+    "Param Param(parent='KMeans_<uid>', name='maxIter', doc='max number of iterations (>= 0).') does not belong to KMeans_<uid>."
+   ],
+   "isSet_maxIter": [
+    "ok",
+    "True"
+   ],
+   "isSet_nope": [
+    "AttributeError",
+    "'KMeans' object has no attribute 'nope'"
+   ],
+   "isSet_seed": [
+    "ok",
+    "False"
+   ],
+   "isSet_tol": [
+    "ok",
+    "False"
+   ],
+   "isinstance_estimator": [
+    "ok",
+    "True"
+   ],
+   "isinstance_params": [
+    "ok",
+    "True"
+   ],
+   "no_attribute": [
+    "AttributeError",
+    "'KMeans' object has no attribute 'fooBarBaz'"
+   ],
+   "orig_maxIter": [
+    "ok",
+    "5"
+   ],
+   "param_docs": [
+    "ok",
+    [
+     "\"the distance measure. Supported options: 'euclidean' and 'cosine'.\"",
+     "'features column name.'",
+     "'The initialization algorithm. This can be either \"random\" to choose random points as initial cluster centers, or \"k-means||\" to use a parallel variant of k-means++'",
+     "'The number of steps for k-means|| initialization mode. Must be > 0.'",
+     "\"StorageLevel for intermediate datasets. Cannot be 'NONE'.\"",
+     "'The number of clusters to create. Must be > 1.'",
+     "'maximum memory in MB for stacking input data into blocks. Data is stacked within partitions. If more than remaining data size in a partition then it is adjusted to the data size. Default 0.0 represents choosing optimal value, depends on specific algorithm. Must be >= 0.'",
+     "'max number of iterations (>= 0).'",
+     "'prediction column name.'",
+     "'random seed.'",
+     "'The solver algorithm for optimization. Supported options: auto, row, block.'",
+     "'the convergence tolerance for iterative algorithms (>= 0).'",
+     "'weight column name. If this is not set or empty, we treat all instance weights as 1.0.'"
+    ]
+   ],
+   "param_names": [
+    "ok",
+    [
+     "'distanceMeasure'",
+     "'featuresCol'",
+     "'initMode'",
+     "'initSteps'",
+     "'intermediateStorageLevel'",
+     "'k'",
+     "'maxBlockSizeInMB'",
+     "'maxIter'",
+     "'predictionCol'",
+     "'seed'",
+     "'solver'",
+     "'tol'",
+     "'weightCol'"
+    ]
+   ],
+   "param_parents_are_uid": [
+    "ok",
+    "True"
+   ],
+   "reader_class": [
+    "ok",
+    "('RemoteMLReader', 'pyspark.ml.connect.readwrite')"
+   ],
+   "repr_is_uid": [
+    "ok",
+    "True"
+   ],
+   "resolve_int": [
+    "TypeError",
+    "Cannot resolve 5 as a param."
+   ],
+   "seed_is_class_name_hash": [
+    "ok",
+    "True"
+   ],
+   "seed_kwarg": [
+    "ok",
+    "'seed: random seed. (default: <hash KMeans>, current: 7)'"
+   ],
+   "setSeed": [
+    "ok",
+    "42"
+   ],
+   "set_bad_type": [
+    "TypeError",
+    "Could not convert x to int"
+   ],
+   "set_ok": [
+    "ok",
+    "7"
+   ],
+   "set_str_param": [
+    "AttributeError",
+    "'str' object has no attribute 'parent'"
+   ],
+   "writer_class": [
+    "ok",
+    "('RemoteMLWriter', 'pyspark.ml.connect.readwrite')"
+   ],
+   "writer_no_attribute": [
+    "AttributeError",
+    "'RemoteMLWriter' object has no attribute 'fooBarBaz'"
+   ],
+   "writer_option_map": [
+    "ok",
+    [
+     "('key', '1')",
+     "('x', 'y')"
+    ]
+   ],
+   "writer_should_overwrite": [
+    "ok",
+    "True"
+   ]
+  }
+ },
+ "LinearSVC": {
+  "live": {
+   "coefficients": [
+    "ok",
+    "DenseVector([1.026, 0.0])"
+   ],
+   "copy_threshold": [
+    "ok",
+    100.0
+   ],
+   "est_loaded_isSet_maxIter": [
+    "ok",
+    "True"
+   ],
+   "est_loaded_params": [
+    "ok",
+    [
+     "('aggregationDepth', '2')",
+     "('featuresCol', \"'features'\")",
+     "('fitIntercept', 'True')",
+     "('labelCol', \"'label'\")",
+     "('maxBlockSizeInMB', '0.0')",
+     "('maxIter', '5')",
+     "('predictionCol', \"'prediction'\")",
+     "('rawPredictionCol', \"'rawPrediction'\")",
+     "('regParam', '0.01')",
+     "('standardization', 'True')",
+     "('threshold', '0.0')",
+     "('tol', '1e-06')"
+    ]
+   ],
+   "est_loaded_uid": [
+    "ok",
+    "True"
+   ],
+   "est_save": [
+    "ok",
+    "None"
+   ],
+   "evaluate_accuracy": [
+    "ok",
+    1.0
+   ],
+   "evaluate_areaUnderROC": [
+    "ok",
+    1.0
+   ],
+   "evaluate_bad": [
+    "TypeError",
+    "dataset must be a DataFrame but got <class 'int'>."
+   ],
+   "evaluate_roc": [
+    "ok",
+    {
+     "columns": [
+      "FPR",
+      "TPR"
+     ],
+     "rows": [
+      "(0.0, 0.0)",
+      "(0.0, 0.25)",
+      "(0.0, 0.5)",
+      "(0.0, 0.75)",
+      "(0.0, 1.0)",
+      "(0.25, 1.0)",
+      "(0.5, 1.0)",
+      "(0.75, 1.0)",
+      "(1.0, 1.0)",
+      "(1.0, 1.0)"
+     ]
+    }
+   ],
+   "fitMultiple": [
+    "ok",
+    [
+     "(0, 2)",
+     "(1, 3)"
+    ]
+   ],
+   "fit_class_param": [
+    "ok",
+    "5"
+   ],
+   "fit_list": [
+    "ok",
+    [
+     "2",
+     "5"
+    ]
+   ],
+   "fit_map": [
+    "ok",
+    "2"
+   ],
+   "hasSummary": [
+    "ok",
+    "True"
+   ],
+   "intercept": [
+    "ok",
+    0.0
+   ],
+   "isinstance_model": [
+    "ok",
+    "(True, True)"
+   ],
+   "loaded_explainParams": [
+    "ok",
+    "'aggregationDepth: suggested depth for treeAggregate (>= 2). (default: 2)\\nfeaturesCol: features column name. (default: features)\\nfitIntercept: whether to fit an intercept term. (default: True)\\nlabelCol: label column name. (default: label)\\nmaxBlockSizeInMB: maximum memory in MB for stacking input data into blocks. Data is stacked within partitions. If more than remaining data size in a partition then it is adjusted to the data size. Default 0.0 represents choosing optimal value, depends on specific algorithm. Must be >= 0. (default: 0.0)\\nmaxIter: max number of iterations (>= 0). (default: 100, current: 5)\\npredictionCol: prediction column name. (default: prediction)\\nrawPredictionCol: raw prediction (a.k.a. confidence) column name. (default: rawPrediction)\\nregParam: regularization parameter (>= 0). (default: 0.0, current: 0.01)\\nstandardization: whether to standardize the training features before fitting the model. (default: True)\\nthreshold: The threshold in binary classification applied to the linear model prediction.  This threshold can be any real number, where Inf will make all predictions 0.0 and -Inf will make all predictions 1.0. (default: 0.0)\\ntol: the convergence tolerance for iterative algorithms (>= 0). (default: 1e-06)\\nweightCol: weight column name. If this is not set or empty, we treat all instance weights as 1.0. (undefined)'"
+   ],
+   "loaded_getMaxIter": [
+    "ok",
+    "5"
+   ],
+   "loaded_hasSummary": [
+    "ok",
+    "False"
+   ],
+   "loaded_isSet_maxIter": [
+    "ok",
+    "True"
+   ],
+   "loaded_summary": [
+    "RuntimeError",
+    "No training summary available for this LinearSVCModel"
+   ],
+   "loaded_transform": [
+    "ok",
+    {
+     "columns": [
+      "label",
+      "features",
+      "rawPrediction",
+      "prediction"
+     ],
+     "rows": [
+      "(0.0, DenseVector([-1.0, 1.0]), DenseVector([1.026, -1.026]), 0.0)",
+      "(0.0, DenseVector([-2.0, 1.0]), DenseVector([2.052, -2.052]), 0.0)",
+      "(0.0, DenseVector([-3.0, 1.0]), DenseVector([3.0779, -3.0779]), 0.0)",
+      "(0.0, DenseVector([-4.0, 1.0]), DenseVector([4.1039, -4.1039]), 0.0)",
+      "(1.0, DenseVector([1.0, 1.0]), DenseVector([-1.026, 1.026]), 1.0)",
+      "(1.0, DenseVector([2.0, 1.0]), DenseVector([-2.052, 2.052]), 1.0)",
+      "(1.0, DenseVector([3.0, 1.0]), DenseVector([-3.0779, 3.0779]), 1.0)",
+      "(1.0, DenseVector([4.0, 1.0]), DenseVector([-4.1039, 4.1039]), 1.0)"
+     ]
+    }
+   ],
+   "loaded_uid": [
+    "ok",
+    "True"
+   ],
+   "model_class": [
+    "ok",
+    "('LinearSVCModel', 'classification')"
+   ],
+   "model_explainParams": [
+    "ok",
+    "'aggregationDepth: suggested depth for treeAggregate (>= 2). (default: 2)\\nfeaturesCol: features column name. (default: features)\\nfitIntercept: whether to fit an intercept term. (default: True)\\nlabelCol: label column name. (default: label)\\nmaxBlockSizeInMB: maximum memory in MB for stacking input data into blocks. Data is stacked within partitions. If more than remaining data size in a partition then it is adjusted to the data size. Default 0.0 represents choosing optimal value, depends on specific algorithm. Must be >= 0. (default: 0.0)\\nmaxIter: max number of iterations (>= 0). (default: 100, current: 5)\\npredictionCol: prediction column name. (default: prediction)\\nrawPredictionCol: raw prediction (a.k.a. confidence) column name. (default: rawPrediction)\\nregParam: regularization parameter (>= 0). (default: 0.0, current: 0.01)\\nstandardization: whether to standardize the training features before fitting the model. (default: True)\\nthreshold: The threshold in binary classification applied to the linear model prediction.  This threshold can be any real number, where Inf will make all predictions 0.0 and -Inf will make all predictions 1.0. (default: 0.0)\\ntol: the convergence tolerance for iterative algorithms (>= 0). (default: 1e-06)\\nweightCol: weight column name. If this is not set or empty, we treat all instance weights as 1.0. (undefined)'"
+   ],
+   "model_extract": [
+    "ok",
+    [
+     "('aggregationDepth', '2')",
+     "('featuresCol', \"'features'\")",
+     "('fitIntercept', 'True')",
+     "('labelCol', \"'label'\")",
+     "('maxBlockSizeInMB', '0.0')",
+     "('maxIter', '5')",
+     "('predictionCol', \"'prediction'\")",
+     "('rawPredictionCol', \"'rawPrediction'\")",
+     "('regParam', '0.01')",
+     "('standardization', 'True')",
+     "('threshold', '0.0')",
+     "('tol', '1e-06')"
+    ]
+   ],
+   "model_getMaxIter": [
+    "ok",
+    "5"
+   ],
+   "model_isSet_maxIter": [
+    "ok",
+    "True"
+   ],
+   "model_isSet_tol": [
+    "ok",
+    "False"
+   ],
+   "model_no_attribute": [
+    "AttributeError",
+    "'LinearSVCModel' object has no attribute 'fooBarBaz'"
+   ],
+   "model_save": [
+    "ok",
+    "None"
+   ],
+   "model_save_again": [
+    "UnknownException",
+    "(java.io.IOException) Path <path>/model already exists. To overwrite it, please use write.overwrite().save(path) for Scala and use write().overwrite().save(path) for Java and Python."
+   ],
+   "model_setThreshold": [
+    "ok",
+    0.5
+   ],
+   "model_uid_is_estimator_uid": [
+    "ok",
+    "True"
+   ],
+   "numClasses": [
+    "ok",
+    "2"
+   ],
+   "numFeatures": [
+    "ok",
+    "2"
+   ],
+   "predict": [
+    "ok",
+    1.0
+   ],
+   "predictRaw": [
+    "ok",
+    "DenseVector([-3.0779, 3.0779])"
+   ],
+   "repr_prefix": [
+    "ok",
+    "'LinearSVCModel'"
+   ],
+   "summary_accuracy": [
+    "ok",
+    1.0
+   ],
+   "summary_areaUnderROC": [
+    "ok",
+    1.0
+   ],
+   "summary_df_fMeasureByThreshold": [
+    "ok",
+    {
+     "columns": [
+      "threshold",
+      "F-Measure"
+     ],
+     "rows": [
+      "(-1.0259810186060438, 0.888888888888889)",
+      "(-2.051962037212088, 0.8)",
+      "(-3.077943055818132, 0.7272727272727273)",
+      "(-4.103924074424176, 0.6666666666666666)",
+      "(1.0259810186060443, 1.0)",
+      "(2.051962037212088, 0.8571428571428571)",
+      "(3.077943055818132, 0.6666666666666666)",
+      "(4.103924074424176, 0.4)"
+     ]
+    }
+   ],
+   "summary_df_pr": [
+    "ok",
+    {
+     "columns": [
+      "recall",
+      "precision"
+     ],
+     "rows": [
+      "(0.0, 1.0)",
+      "(0.25, 1.0)",
+      "(0.5, 1.0)",
+      "(0.75, 1.0)",
+      "(1.0, 0.5)",
+      "(1.0, 0.5714285714285714)",
+      "(1.0, 0.6666666666666666)",
+      "(1.0, 0.8)",
+      "(1.0, 1.0)"
+     ]
+    }
+   ],
+   "summary_df_precisionByThreshold": [
+    "ok",
+    {
+     "columns": [
+      "threshold",
+      "precision"
+     ],
+     "rows": [
+      "(-1.0259810186060438, 0.8)",
+      "(-2.051962037212088, 0.6666666666666666)",
+      "(-3.077943055818132, 0.5714285714285714)",
+      "(-4.103924074424176, 0.5)",
+      "(1.0259810186060443, 1.0)",
+      "(2.051962037212088, 1.0)",
+      "(3.077943055818132, 1.0)",
+      "(4.103924074424176, 1.0)"
+     ]
+    }
+   ],
+   "summary_df_predictions": [
+    "ok",
+    {
+     "columns": [
+      "label",
+      "features",
+      "rawPrediction",
+      "prediction"
+     ],
+     "rows": [
+      "(0.0, DenseVector([-1.0, 1.0]), DenseVector([1.026, -1.026]), 0.0)",
+      "(0.0, DenseVector([-2.0, 1.0]), DenseVector([2.052, -2.052]), 0.0)",
+      "(0.0, DenseVector([-3.0, 1.0]), DenseVector([3.0779, -3.0779]), 0.0)",
+      "(0.0, DenseVector([-4.0, 1.0]), DenseVector([4.1039, -4.1039]), 0.0)",
+      "(1.0, DenseVector([1.0, 1.0]), DenseVector([-1.026, 1.026]), 1.0)",
+      "(1.0, DenseVector([2.0, 1.0]), DenseVector([-2.052, 2.052]), 1.0)",
+      "(1.0, DenseVector([3.0, 1.0]), DenseVector([-3.0779, 3.0779]), 1.0)",
+      "(1.0, DenseVector([4.0, 1.0]), DenseVector([-4.1039, 4.1039]), 1.0)"
+     ]
+    }
+   ],
+   "summary_df_recallByThreshold": [
+    "ok",
+    {
+     "columns": [
+      "threshold",
+      "recall"
+     ],
+     "rows": [
+      "(-1.0259810186060438, 1.0)",
+      "(-2.051962037212088, 1.0)",
+      "(-3.077943055818132, 1.0)",
+      "(-4.103924074424176, 1.0)",
+      "(1.0259810186060443, 1.0)",
+      "(2.051962037212088, 0.75)",
+      "(3.077943055818132, 0.5)",
+      "(4.103924074424176, 0.25)"
+     ]
+    }
+   ],
+   "summary_df_roc": [
+    "ok",
+    {
+     "columns": [
+      "FPR",
+      "TPR"
+     ],
+     "rows": [
+      "(0.0, 0.0)",
+      "(0.0, 0.25)",
+      "(0.0, 0.5)",
+      "(0.0, 0.75)",
+      "(0.0, 1.0)",
+      "(0.25, 1.0)",
+      "(0.5, 1.0)",
+      "(0.75, 1.0)",
+      "(1.0, 1.0)",
+      "(1.0, 1.0)"
+     ]
+    }
+   ],
+   "summary_fMeasureByLabel": [
+    "ok",
+    [
+     1.0,
+     1.0
+    ]
+   ],
+   "summary_fMeasureByLabel_bool": [
+    "UnknownException",
+    "(java.lang.NoSuchMethodException) No method: org.apache.spark.ml.classification.LinearSVCTrainingSummaryImpl.fMeasureByLabel(boolean)"
+   ],
+   "summary_fMeasureByLabel_half": [
+    "ok",
+    [
+     1.0,
+     1.0
+    ]
+   ],
+   "summary_fMeasureByLabel_int": [
+    "ok",
+    [
+     1.0,
+     1.0
+    ]
+   ],
+   "summary_falsePositiveRateByLabel": [
+    "ok",
+    [
+     0.0,
+     0.0
+    ]
+   ],
+   "summary_is_summary": [
+    "ok",
+    "True"
+   ],
+   "summary_labelCol": [
+    "ok",
+    "'label'"
+   ],
+   "summary_labels": [
+    "ok",
+    [
+     0.0,
+     1.0
+    ]
+   ],
+   "summary_objectiveHistory": [
+    "ok",
+    [
+     1.0,
+     0.256518549,
+     0.121474226,
+     0.053609689,
+     0.048103906,
+     0.045113016
+    ]
+   ],
+   "summary_precisionByLabel": [
+    "ok",
+    [
+     1.0,
+     1.0
+    ]
+   ],
+   "summary_predictionCol": [
+    "ok",
+    "'prediction'"
+   ],
+   "summary_recallByLabel": [
+    "ok",
+    [
+     1.0,
+     1.0
+    ]
+   ],
+   "summary_scoreCol": [
+    "ok",
+    "'rawPrediction'"
+   ],
+   "summary_totalIterations": [
+    "ok",
+    "5"
+   ],
+   "summary_truePositiveRateByLabel": [
+    "ok",
+    [
+     1.0,
+     1.0
+    ]
+   ],
+   "summary_weightCol": [
+    "ok",
+    "'weightCol'"
+   ],
+   "summary_weightedFMeasure": [
+    "ok",
+    1.0
+   ],
+   "summary_weightedFMeasure_keyword": [
+    "ok",
+    1.0
+   ],
+   "summary_weightedFalsePositiveRate": [
+    "ok",
+    0.0
+   ],
+   "summary_weightedPrecision": [
+    "ok",
+    1.0
+   ],
+   "summary_weightedRecall": [
+    "ok",
+    1.0
+   ],
+   "summary_weightedTruePositiveRate": [
+    "ok",
+    1.0
+   ],
+   "transform": [
+    "ok",
+    {
+     "columns": [
+      "label",
+      "features",
+      "rawPrediction",
+      "prediction"
+     ],
+     "rows": [
+      "(0.0, DenseVector([-1.0, 1.0]), DenseVector([1.026, -1.026]), 0.0)",
+      "(0.0, DenseVector([-2.0, 1.0]), DenseVector([2.052, -2.052]), 0.0)",
+      "(0.0, DenseVector([-3.0, 1.0]), DenseVector([3.0779, -3.0779]), 0.0)",
+      "(0.0, DenseVector([-4.0, 1.0]), DenseVector([4.1039, -4.1039]), 0.0)",
+      "(1.0, DenseVector([1.0, 1.0]), DenseVector([-1.026, 1.026]), 1.0)",
+      "(1.0, DenseVector([2.0, 1.0]), DenseVector([-2.052, 2.052]), 1.0)",
+      "(1.0, DenseVector([3.0, 1.0]), DenseVector([-3.0779, 3.0779]), 1.0)",
+      "(1.0, DenseVector([4.0, 1.0]), DenseVector([-4.1039, 4.1039]), 1.0)"
+     ]
+    }
+   ],
+   "transform_map": [
+    "ok",
+    {
+     "columns": [
+      "prediction"
+     ],
+     "rows": [
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)"
+     ]
+    }
+   ]
+  },
+  "params_api": {
+   "big_int": [
+    "ok",
+    "1180591620717411303424"
+   ],
+   "big_int_explain": [
+    "ok",
+    "'maxIter: max number of iterations (>= 0). (default: 100, current: 1180591620717411303424)'"
+   ],
+   "class_param": [
+    "ok",
+    "('Param', 'undefined', 'maxIter', True, False)"
+   ],
+   "clear": [
+    "ok",
+    "(None, 7, True)"
+   ],
+   "copy_bad_extra": [
+    "TypeError",
+    "Expecting a valid instance of Param, but received: maxIter"
+   ],
+   "copy_class_param": [
+    "ok",
+    "5"
+   ],
+   "copy_explainParams": [
+    "ok",
+    "'aggregationDepth: suggested depth for treeAggregate (>= 2). (default: 2)\\nfeaturesCol: features column name. (default: features)\\nfitIntercept: whether to fit an intercept term. (default: True)\\nlabelCol: label column name. (default: label)\\nmaxBlockSizeInMB: maximum memory in MB for stacking input data into blocks. Data is stacked within partitions. If more than remaining data size in a partition then it is adjusted to the data size. Default 0.0 represents choosing optimal value, depends on specific algorithm. Must be >= 0. (default: 0.0)\\nmaxIter: max number of iterations (>= 0). (default: 100, current: 10)\\npredictionCol: prediction column name. (default: prediction)\\nrawPredictionCol: raw prediction (a.k.a. confidence) column name. (default: rawPrediction)\\nregParam: regularization parameter (>= 0). (default: 0.0, current: 0.1)\\nstandardization: whether to standardize the training features before fitting the model. (default: True)\\nthreshold: The threshold in binary classification applied to the linear model prediction.  This threshold can be any real number, where Inf will make all predictions 0.0 and -Inf will make all predictions 1.0. (default: 0.0)\\ntol: the convergence tolerance for iterative algorithms (>= 0). (default: 1e-06)\\nweightCol: weight column name. If this is not set or empty, we treat all instance weights as 1.0. (undefined)'"
+   ],
+   "copy_list": [
+    "TypeError",
+    "Expecting a dict, but received an object of type <class 'list'>."
+   ],
+   "copy_maxIter": [
+    "ok",
+    "10"
+   ],
+   "copy_same_uid": [
+    "ok",
+    "True"
+   ],
+   "explainParam_param": [
+    "ok",
+    "'tol: the convergence tolerance for iterative algorithms (>= 0). (default: 1e-06)'"
+   ],
+   "explainParam_str": [
+    "ok",
+    "'maxIter: max number of iterations (>= 0). (default: 100, current: 5)'"
+   ],
+   "explainParams": [
+    "ok",
+    "'aggregationDepth: suggested depth for treeAggregate (>= 2). (default: 2)\\nfeaturesCol: features column name. (default: features)\\nfitIntercept: whether to fit an intercept term. (default: True)\\nlabelCol: label column name. (default: label)\\nmaxBlockSizeInMB: maximum memory in MB for stacking input data into blocks. Data is stacked within partitions. If more than remaining data size in a partition then it is adjusted to the data size. Default 0.0 represents choosing optimal value, depends on specific algorithm. Must be >= 0. (default: 0.0)\\nmaxIter: max number of iterations (>= 0). (default: 100, current: 5)\\npredictionCol: prediction column name. (default: prediction)\\nrawPredictionCol: raw prediction (a.k.a. confidence) column name. (default: rawPrediction)\\nregParam: regularization parameter (>= 0). (default: 0.0, current: 0.1)\\nstandardization: whether to standardize the training features before fitting the model. (default: True)\\nthreshold: The threshold in binary classification applied to the linear model prediction.  This threshold can be any real number, where Inf will make all predictions 0.0 and -Inf will make all predictions 1.0. (default: 0.0)\\ntol: the convergence tolerance for iterative algorithms (>= 0). (default: 1e-06)\\nweightCol: weight column name. If this is not set or empty, we treat all instance weights as 1.0. (undefined)'"
+   ],
+   "extract": [
+    "ok",
+    [
+     "('aggregationDepth', '2')",
+     "('featuresCol', \"'features'\")",
+     "('fitIntercept', 'True')",
+     "('labelCol', \"'label'\")",
+     "('maxBlockSizeInMB', '0.0')",
+     "('maxIter', '5')",
+     "('predictionCol', \"'prediction'\")",
+     "('rawPredictionCol', \"'rawPrediction'\")",
+     "('regParam', '0.1')",
+     "('standardization', 'True')",
+     "('threshold', '0.0')",
+     "('tol', '1e-06')"
+    ]
+   ],
+   "extract_extra": [
+    "ok",
+    [
+     "('aggregationDepth', '2')",
+     "('featuresCol', \"'features'\")",
+     "('fitIntercept', 'True')",
+     "('labelCol', \"'label'\")",
+     "('maxBlockSizeInMB', '0.0')",
+     "('maxIter', '5')",
+     "('predictionCol', \"'prediction'\")",
+     "('rawPredictionCol', \"'rawPrediction'\")",
+     "('regParam', '0.1')",
+     "('standardization', 'True')",
+     "('threshold', '0.0')",
+     "('tol', '0.5')"
+    ]
+   ],
+   "getAggregationDepth": [
+    "ok",
+    "2"
+   ],
+   "getFeaturesCol": [
+    "ok",
+    "'features'"
+   ],
+   "getFitIntercept": [
+    "ok",
+    "True"
+   ],
+   "getLabelCol": [
+    "ok",
+    "'label'"
+   ],
+   "getMaxBlockSizeInMB": [
+    "ok",
+    0.0
+   ],
+   "getMaxIter": [
+    "ok",
+    "5"
+   ],
+   "getOrDefault_maxIter": [
+    "ok",
+    "5"
+   ],
+   "getOrDefault_weightCol": [
+    "KeyError",
+    "Param(parent='LinearSVC_<uid>', name='weightCol', doc='weight column name. If this is not set or empty, we treat all instance weights as 1.0.')"
+   ],
+   "getParam_method": [
+    "ValueError",
+    "Cannot find param with name fit."
+   ],
+   "getParam_nope": [
+    "AttributeError",
+    "'LinearSVC' object has no attribute 'nope'"
+   ],
+   "getPredictionCol": [
+    "ok",
+    "'prediction'"
+   ],
+   "getRawPredictionCol": [
+    "ok",
+    "'rawPrediction'"
+   ],
+   "getRegParam": [
+    "ok",
+    0.1
+   ],
+   "getStandardization": [
+    "ok",
+    "True"
+   ],
+   "getThreshold": [
+    "ok",
+    0.0
+   ],
+   "getTol": [
+    "ok",
+    1e-06
+   ],
+   "getWeightCol": [
+    "KeyError",
+    "Param(parent='LinearSVC_<uid>', name='weightCol', doc='weight column name. If this is not set or empty, we treat all instance weights as 1.0.')"
+   ],
+   "grid_of_class_param": [
+    "ok",
+    [
+     [
+      "('undefined', 'maxIter', 1)"
+     ],
+     [
+      "('undefined', 'maxIter', 2)"
+     ]
+    ]
+   ],
+   "hasDefault_tol": [
+    "ok",
+    "True"
+   ],
+   "hasDefault_weightCol": [
+    "ok",
+    "False"
+   ],
+   "hasParam_int": [
+    "TypeError",
+    "hasParam(): paramName must be a string"
+   ],
+   "hasParam_nope": [
+    "ok",
+    "False"
+   ],
+   "hasParam_tol": [
+    "ok",
+    "True"
+   ],
+   "isDefined_weightCol": [
+    "ok",
+    "False"
+   ],
+   "isSet_foreign": [
+    "ValueError",
+    "Param Param(parent='LinearSVC_<uid>', name='maxIter', doc='max number of iterations (>= 0).') does not belong to LinearSVC_<uid>."
+   ],
+   "isSet_maxIter": [
+    "ok",
+    "True"
+   ],
+   "isSet_nope": [
+    "AttributeError",
+    "'LinearSVC' object has no attribute 'nope'"
+   ],
+   "isSet_tol": [
+    "ok",
+    "False"
+   ],
+   "isinstance_estimator": [
+    "ok",
+    "True"
+   ],
+   "isinstance_params": [
+    "ok",
+    "True"
+   ],
+   "no_attribute": [
+    "AttributeError",
+    "'LinearSVC' object has no attribute 'fooBarBaz'"
+   ],
+   "orig_maxIter": [
+    "ok",
+    "5"
+   ],
+   "param_docs": [
+    "ok",
+    [
+     "'suggested depth for treeAggregate (>= 2).'",
+     "'features column name.'",
+     "'whether to fit an intercept term.'",
+     "'label column name.'",
+     "'maximum memory in MB for stacking input data into blocks. Data is stacked within partitions. If more than remaining data size in a partition then it is adjusted to the data size. Default 0.0 represents choosing optimal value, depends on specific algorithm. Must be >= 0.'",
+     "'max number of iterations (>= 0).'",
+     "'prediction column name.'",
+     "'raw prediction (a.k.a. confidence) column name.'",
+     "'regularization parameter (>= 0).'",
+     "'whether to standardize the training features before fitting the model.'",
+     "'The threshold in binary classification applied to the linear model prediction.  This threshold can be any real number, where Inf will make all predictions 0.0 and -Inf will make all predictions 1.0.'",
+     "'the convergence tolerance for iterative algorithms (>= 0).'",
+     "'weight column name. If this is not set or empty, we treat all instance weights as 1.0.'"
+    ]
+   ],
+   "param_names": [
+    "ok",
+    [
+     "'aggregationDepth'",
+     "'featuresCol'",
+     "'fitIntercept'",
+     "'labelCol'",
+     "'maxBlockSizeInMB'",
+     "'maxIter'",
+     "'predictionCol'",
+     "'rawPredictionCol'",
+     "'regParam'",
+     "'standardization'",
+     "'threshold'",
+     "'tol'",
+     "'weightCol'"
+    ]
+   ],
+   "param_parents_are_uid": [
+    "ok",
+    "True"
+   ],
+   "reader_class": [
+    "ok",
+    "('RemoteMLReader', 'pyspark.ml.connect.readwrite')"
+   ],
+   "repr_is_uid": [
+    "ok",
+    "True"
+   ],
+   "resolve_int": [
+    "TypeError",
+    "Cannot resolve 5 as a param."
+   ],
+   "set_bad_type": [
+    "TypeError",
+    "Could not convert x to int"
+   ],
+   "set_ok": [
+    "ok",
+    "7"
+   ],
+   "set_str_param": [
+    "AttributeError",
+    "'str' object has no attribute 'parent'"
+   ],
+   "writer_class": [
+    "ok",
+    "('RemoteMLWriter', 'pyspark.ml.connect.readwrite')"
+   ],
+   "writer_no_attribute": [
+    "AttributeError",
+    "'RemoteMLWriter' object has no attribute 'fooBarBaz'"
+   ],
+   "writer_option_map": [
+    "ok",
+    [
+     "('key', '1')",
+     "('x', 'y')"
+    ]
+   ],
+   "writer_should_overwrite": [
+    "ok",
+    "True"
+   ]
+  }
+ }
+}

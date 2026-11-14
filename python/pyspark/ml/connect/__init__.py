@@ -121,3 +121,28 @@ __all__ = [
 ]
 
 __all__ += [name for name in _native._ml_feature_names if name not in __all__]
+
+
+def _register_native_classes() -> None:
+    """Register the native ML classes as virtual subclasses of PySpark's ML base classes (ABCs), so
+    that the `isinstance` checks of pyspark.ml hold of them as of PySpark's own classes: a stage of
+    a Pipeline, the estimator and evaluator of a validator, and `Params`. Run at the import of
+    pyspark.ml.connect, which the import of any of its modules runs first."""
+    from pyspark.ml.base import Estimator as _Estimator
+    from pyspark.ml.base import Model as _Model
+    from pyspark.ml.base import Transformer as _Transformer
+    from pyspark.ml.evaluation import Evaluator as _Evaluator
+
+    for name in dir(_native):
+        cls = getattr(_native, name)
+        if not isinstance(cls, type) or not cls.__module__.startswith("pyspark.ml.connect"):
+            continue
+        if hasattr(cls, "fit"):
+            _Estimator.register(cls)
+        elif hasattr(cls, "evaluate") and hasattr(cls, "isLargerBetter"):
+            _Evaluator.register(cls)
+        elif hasattr(cls, "transform"):
+            (_Model if name.endswith("Model") else _Transformer).register(cls)
+
+
+_register_native_classes()

@@ -111,6 +111,7 @@ macro_rules! feature_wrapper {
             fn unsendable(&self) -> &[&'static str] { &self.unsendable }
             fn unsendable_mut(&mut self) -> &mut Vec<&'static str> { &mut self.unsendable }
             fn raw_params_mut(&mut self) -> Option<&mut Vec<(&'static str, Py<PyAny>)>> { Some(&mut self.raw) }
+            fn raw_params(&self) -> Option<&[(&'static str, Py<PyAny>)]> { Some(&self.raw) }
             fn snapshot_core(&self, py: Python<'_>) -> PyResult<Self::Core> {
                 let mut inner = self.inner.clone();
                 for (name, value) in &self.raw {

@@ -248,6 +248,64 @@ classes to build on:
   its concrete model type. `Model::describe()` is the server's description of a model (PySpark's
   `__repr__` of a model, its `toString`). `PredictionModel` gives `num_features()` and
   `predict(&vector)`, the members of every prediction model of `pyspark.ml`.
+- `ObjectModel` is a model of a server-side object, of its operator and params, which transforms
+  as every cached model does: the model of an object that `read_model` loads, or of one that a
+  fetch returns. `training_summary(&model_ref, &dataset)` is the target of the training summary of
+  a fitted model, of its summary dataset (the training dataset itself for the models whose
+  `_summary_dataset` returns it, the classification models and the linear regressions;
+  `summary_transform` of it, the transform of the dataset by the model of no params, for the
+  others, as PySpark's default `_summary_dataset`). `evaluated_summary` is the target of the
+  summary of an `evaluate`, of the id that the server returns, which the client does not release,
+  as PySpark does not.
+
+## Native ML classes of the full pyspark.ml API (Python)
+
+The native Python classes of `pyspark.ml.connect` follow the API of `pyspark.ml` 4.3.0 over Spark
+Connect, class by class. `LinearSVC` (with `LinearSVCModel`, `LinearSVCSummary` and
+`LinearSVCTrainingSummary`) and `KMeans` (with `KMeansModel` and `KMeansSummary`) follow it in
+full; the other native classes follow as they are completed. A class that follows it has:
+
+- **The Params API of `pyspark.ml.param.Params`**: `params`, `getParam`, `hasParam`, `isSet`,
+  `isDefined`, `hasDefault`, `getOrDefault`, `explainParam(s)`, `extractParamMap`, `set`, `clear`
+  (which does nothing over Spark Connect, as PySpark's `JavaParams.clear`) and `copy`, with
+  PySpark's errors and keywords (`getParam(paramName=...)`). The Param objects are PySpark's own
+  `pyspark.ml.param.Param`, of the docs, converters and defaults of the official class
+  (`crates/pyspark-rs/src/ml/ml_params.json`, captured from pyspark-client 4.3.0 by
+  `scripts/capture_ml_api_golden.py`), and a getter per param (`getMaxIter`).
+- **PySpark's types and class Params**: the classes are virtual subclasses of PySpark's base
+  classes (`pyspark.ml.base.Estimator`, `Transformer` and `Model`, and
+  `pyspark.ml.evaluation.Evaluator`), so `isinstance(LinearSVC(), Params)` holds, and a Pipeline
+  of `pyspark.ml` fits native stages. The Param of a class (`LinearSVC.maxIter`) is PySpark's, of
+  the parent `undefined`, so `ParamGridBuilder().addGrid(LinearSVC.maxIter, ...)` builds.
+  `MLWriter`s and `MLReader`s are `RemoteMLWriter` and `RemoteMLReader`, as over Spark Connect, of
+  the attributes `shouldOverwrite` and `optionMap`, and the AttributeError of a missing attribute
+  names the class as PySpark's does.
+- **PySpark's defaults of each instance**: the default `seed` is the `hash` of the name of the
+  class, and the default `outputCol` the uid of the instance and `__output`; a fitted model has the
+  defaults of its estimator, which PySpark's `_copyValues` copies to it (a seed of the name of the
+  estimator's class), and a loaded object keeps the defaults of the uid that it was made of, as
+  PySpark's `_resetUid` keeps them.
+- **The members of the model**: its properties and methods (`coefficients`, `numFeatures`,
+  `predict(vector)`, `clusterCenters()`, ...), which read the server's model object as PySpark's
+  `_call_java` does, its setters, and `__repr__`, the server's description of the model.
+- **Summaries**: the training summary of a fit (`summary`, `hasSummary`), the same object on every
+  call as PySpark's `_summary`, and the summary of `evaluate`; a loaded model has none, and raises
+  PySpark's `RuntimeError`. Their DataFrames (`predictions`, `roc`, `cluster`, ...) are of the
+  summary dataset of the fit.
+- **Fits of param maps**: `fit(dataset, paramMap)` fits a copy of the estimator with the map, a
+  list or tuple of maps fits once per map, and `fitMultiple(dataset, paramMaps)` returns PySpark's
+  `_FitMultipleIterator`. `transform(dataset, paramMap)` transforms of a copy of the model.
+- **Persistence**: `write()` (an `MLWriter` of `pyspark.ml.util`, with `overwrite()`, `option`,
+  `optionMap`, `session` and `save`), `save(path)`, `read()` (an `MLReader`) and `load(path)`, as
+  `RemoteMLWriter` and `RemoteMLReader` save and load them, so that this client and PySpark load
+  what each other saves.
+
+`tests/golden/ml_api.json` holds the API of every public class of `pyspark.ml`, and
+`python/tests/test_ml_api_offline.py` compares each class that follows it with it: the members, the
+kinds of the members, and the parameters of each method and keyword-only constructor.
+`tests/golden/ml_api_cases.json` holds the results of PySpark 4.3.0 of the cases of
+`python/tests/_ml_api_cases.py` (the Params API, the models, summaries, transforms and persistence),
+which `test_ml_api_offline.py` and `test_ml_api_e2e.py` compare with.
 
 ## Native LogisticRegression
 
@@ -515,9 +573,12 @@ The native Python binding is available as `pyspark.ml.connect.clustering.KMeans`
 and `pyspark.ml.connect.KMeans`, with the upstream keyword-only constructor and
 mutating parameter setters. Fitted models expose DataFrame `transform` in the
 fitting session. Models, clones and transformed DataFrames keep the cached server
-model alive until the last owner is dropped. Cluster-center access, training
-summaries, single-vector prediction and persistence are not exposed by this native
-addition. The vendored `pyspark.ml.clustering` API is unchanged.
+model alive until the last owner is dropped. In Python, `KMeans`, its `KMeansModel` and
+`KMeansSummary` follow the full API of `pyspark.ml` (see "Native ML classes of the full
+pyspark.ml API"): the Params API, `clusterCenters()`, `numFeatures`, `predict` of a vector,
+the training summary (`k`, `clusterSizes`, `trainingCost`, `numIter`, `predictions` and
+`cluster`, of the transform of the training dataset, as PySpark's), and save and load. The
+vendored `pyspark.ml.clustering` API is unchanged.
 
 ## Native LinearRegression
 
@@ -550,9 +611,10 @@ parameters and mutating `setFeaturesCol`, `setRegParam`, etc. methods.
 Clones and lazy prediction DataFrames keep the cached model usable while they are
 alive. When the last of the model, its clones and the DataFrames it transformed is
 dropped, the server deletes the cached model, as `pyspark.ml` does.
-The Python model uses the existing `MLModel.transform` interface. Model inspection
-(coefficients, intercept and summaries), single-vector prediction and model
-persistence are not exposed by this addition.
+In Python, `LinearSVC`, its `LinearSVCModel` and their summaries follow the full API of
+`pyspark.ml` (see "Native ML classes of the full pyspark.ml API"): the Params API,
+`coefficients`, `intercept`, `numClasses`, `numFeatures`, `predict` and `predictRaw` of a
+vector, `summary()`, `evaluate`, and save and load.
 
 ## Native Pipeline and CrossValidator: fit is not implemented
 
