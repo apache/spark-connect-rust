@@ -8549,6 +8549,32 @@ def test_writer_formats_take_bytes_and_fail_the_write_as_pyspark(mock_connect):
     assert len(service.execute_requests) == requests
 
 
+def test_writer_without_a_mode_sends_it_unspecified_as_pyspark(mock_connect):
+    # As PySpark's WriteOperation, whose mode is None until a mode is set, and which sends none
+    # then: the protobuf default, UNSPECIFIED=0, which the server writes as an error when the path
+    # exists. mode(None) leaves the mode as it is, so it is unspecified too, and a mode set
+    # before it stays.
+    spark, service = mock_connect
+    df = spark.range(1)
+
+    def sent_mode():
+        # ExecutePlanRequest.plan=3 -> Plan.command=2 -> Command.write_operation=2 -> mode=5.
+        plan = parse_message(parse_message(service.execute_requests[-1])[3][0])
+        operation = parse_message(parse_message(plan[2][0])[2][0])
+        return operation.get(5, [0])[0]
+
+    df.write.format("noop").save()
+    assert sent_mode() == 0
+    df.write.format("noop").mode(None).save()
+    assert sent_mode() == 0
+    df.write.format("noop").mode("error").save()
+    assert sent_mode() == 3
+    df.write.format("noop").mode("error").mode(None).save()
+    assert sent_mode() == 3
+    df.write.format("noop").mode("overwrite").save()
+    assert sent_mode() == 2
+
+
 def test_writer_modes_take_any_object_and_fail_the_write_as_pyspark(mock_connect):
     # As PySpark's WriteOperation, which resolves a mode that is not a str at the write, after its
     # path: `lower()` of it is one of the four modes, else UNSUPPORTED_OPERATION of the mode, and
@@ -8631,6 +8657,62 @@ def test_reader_formats_are_kept_until_load_as_pyspark(mock_connect):
     # Read.data_source=2 -> DataSource.format=1.
     data_source = parse_message(_sent_relation(service.analyze_requests[-1], 2)[2][0])
     assert data_source[1] == [b"parquet"]
+
+
+def test_reader_strings_that_utf8_cannot_encode_fail_the_plan_as_pyspark(mock_connect):
+    # As PySpark's DataSource, which builds its plan at a request: its format is set before its
+    # paths, and protobuf's string fields raise the UnicodeEncodeError of a str that UTF-8 cannot
+    # encode, so that load, and every reader of a path, returns a DataFrame that fails at its
+    # first request, with no request sent, and a format or a path that a later call replaces
+    # does not fail.
+    import copy
+
+    import cloudpickle
+
+    spark, service = mock_connect
+    bad = "\ud800"
+    message = re.escape(
+        "'utf-8' codec can't encode character '\\ud800' in position 0: surrogates not allowed")
+    for build in [
+        lambda: spark.read.format(bad).load("p"),
+        lambda: spark.read.format(bad).load(),
+        lambda: spark.read.load("p", format=bad),
+        lambda: spark.read.format("noop").load(bad),
+        lambda: spark.read.format("noop").load(["p", bad]),
+        lambda: spark.read.load(bad),
+        lambda: spark.read.load([bad]),
+        lambda: spark.read.parquet(bad),
+        lambda: spark.read.parquet("p", bad),
+        lambda: spark.read.json(bad),
+        lambda: spark.read.csv(bad),
+        lambda: spark.read.orc(bad),
+        lambda: spark.read.text(bad),
+        lambda: copy.copy(spark.read.format(bad)).load("p"),
+        lambda: copy.deepcopy(spark.read.format(bad)).load("p"),
+        lambda: cloudpickle.loads(cloudpickle.dumps(spark.read.format(bad))).load("p"),
+    ]:
+        df = build()
+        with pytest.raises(UnicodeEncodeError, match=message) as error:
+            df.schema
+        assert type(error.value) is UnicodeEncodeError
+        with pytest.raises(UnicodeEncodeError, match=message):
+            df.count()
+    assert service.analyze_requests == [] and service.execute_requests == []
+    # The error of the format precedes the one of a path, as PySpark's DataSource sets its format
+    # before its paths, and a later format replaces the one that fails.
+    with pytest.raises(UnicodeEncodeError) as error:
+        spark.read.format(bad).load("x\udfff").schema
+    assert str(error.value).startswith(
+        "'utf-8' codec can't encode character '\\ud800' in position 0")
+    with pytest.raises(UnicodeEncodeError) as error:
+        spark.read.load(["p", "x\udfff"]).schema
+    assert str(error.value).startswith(
+        "'utf-8' codec can't encode character '\\udfff' in position 1")
+    assert spark.read.format(bad).format("parquet").load("p").schema is not None
+    assert spark.read.format(bad).parquet("p").schema is not None
+    # A format that is not a str still fails the assertion at load, as before.
+    with pytest.raises(AssertionError):
+        spark.read.format(5).load(bad)
 
 
 def test_stream_reader_formats_are_kept_until_load_as_pyspark(mock_connect):

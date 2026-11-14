@@ -293,7 +293,9 @@ pub struct DataFrameWriter {
     session: SparkSession,
     input_plan: Arc<LogicalPlan>,
     format: Option<String>,
-    mode: SaveMode,
+    /// The save mode, or None when none is set, which the proto sends as unspecified, as PySpark's
+    /// `WriteOperation` does, and the server writes as an error when a path exists.
+    mode: Option<SaveMode>,
     /// The last mode set when it is not a save mode, which fails the write.
     unsupported_mode: Option<String>,
     options: HashMap<String, String>,
@@ -317,9 +319,9 @@ impl DataFrameWriter {
         self.format.as_deref()
     }
 
-    /// The save mode of this writer. Not a stable API.
+    /// The save mode of this writer, if one is set. Not a stable API.
     #[doc(hidden)]
-    pub fn get_save_mode(&self) -> SaveMode {
+    pub fn get_save_mode(&self) -> Option<SaveMode> {
         self.mode
     }
 
@@ -376,7 +378,7 @@ impl DataFrameWriter {
             session,
             input_plan,
             format: None,
-            mode: SaveMode::ErrorIfExists,
+            mode: None,
             unsupported_mode: None,
             options: HashMap::new(),
             partition_cols: vec![],
@@ -421,7 +423,7 @@ impl DataFrameWriter {
     pub fn mode(mut self, mode: &str) -> Self {
         match SaveMode::from_str(mode) {
             Some(m) => {
-                self.mode = m;
+                self.mode = Some(m);
                 self.unsupported_mode = None;
             }
             None => self.unsupported_mode = Some(mode.to_string()),
@@ -500,7 +502,7 @@ impl DataFrameWriter {
         let mut op = proto::WriteOperation::default();
         op.input = Some(build_input_relation(&self.input_plan, &self.session)?);
         op.source = self.format.clone();
-        op.mode = self.mode.to_proto();
+        op.mode = self.mode.map_or(0, |mode| mode.to_proto());
         op.sort_column_names = self.sort_cols.clone();
         op.partitioning_columns = self.partition_cols.clone();
         op.clustering_columns = self.cluster_cols.clone();

@@ -64,6 +64,7 @@ fn kind_to_pyspark_class_name(kind: SparkErrorKind) -> &'static str {
         SparkErrorKind::RuntimeError => "PySparkRuntimeError",
         SparkErrorKind::RecursionError => "RecursionError",
         SparkErrorKind::UnicodeDecode => "UnicodeDecodeError",
+        SparkErrorKind::UnicodeEncode => "UnicodeEncodeError",
         SparkErrorKind::NotImplementedError => "PySparkNotImplementedError",
         SparkErrorKind::AssertionError => "PySparkAssertionError",
         SparkErrorKind::PicklingError => "PySparkPicklingError",
@@ -307,6 +308,19 @@ fn unicode_decode_error(value: &[u8], err: &SparkError) -> PyErr {
     )
 }
 
+/// The UnicodeEncodeError of a str that UTF-8 cannot encode, as PySpark raises it when it builds
+/// the plan: the error of Python's own encoder of the str, which the UTF-32 bytes of `err` give
+/// back.
+fn unicode_encode_error(utf32le: &[u8], err: &SparkError) -> PyErr {
+    Python::attach(|py| {
+        let text = PyBytes::new(py, utf32le).call_method1("decode", ("utf-32-le", "surrogatepass"));
+        match text.and_then(|text| text.call_method1("encode", ("utf-8",))) {
+            Err(exception) => exception,
+            Ok(_) => exceptions::PyRuntimeError::new_err(err.message()),
+        }
+    })
+}
+
 /// Maps a SparkError to a Python exception, attempting to raise the correct typed
 /// exception based on the error kind. Falls back to PyRuntimeError if import fails.
 pub fn spark_error_to_py_exception(err: SparkError) -> PyErr {
@@ -331,6 +345,9 @@ pub fn spark_error_to_py_exception(err: SparkError) -> PyErr {
     }
     if let Some(value) = err.invalid_utf8_value() {
         return unicode_decode_error(&value, &err);
+    }
+    if let Some(value) = err.unencodable_value() {
+        return unicode_encode_error(&value, &err);
     }
     let msg = err.message();
     let operation_id = err.operation_id.clone();

@@ -3,8 +3,10 @@
 use std::collections::HashMap;
 
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyBytes, PyDict, PyList, PyString};
+use spark_connect::dataframe::DataFrame;
 use spark_connect::readwriter::DataFrameReader;
+use spark_connect_core::error::SparkError;
 
 use crate::dataframe::PyDataFrame;
 use crate::errors::{not_expected_type, ResultExt};
@@ -30,9 +32,9 @@ pub struct PyDataFrameReader {
     /// The options of the reader, which a shallow copy of it shares, as PySpark's `_options` dict
     /// is shared by the copies of a reader. The core reader holds none of them (see `state`).
     options: std::sync::Arc<crate::dataframe::WriterState<HashMap<String, String>>>,
-    /// The format of `format` when it is not a str, which PySpark keeps as it is and whose
-    /// `DataSource` asserts at `load` ([`reader_format`]). Any other format replaces it.
-    unsent_format: Option<Py<PyAny>>,
+    /// The format of `format` when it is not a format of the core reader, which PySpark keeps as it
+    /// is ([`UnsentFormat`]). Any other format replaces it.
+    unsent_format: Option<UnsentFormat>,
 }
 
 impl PyDataFrameReader {
@@ -92,18 +94,68 @@ impl PyDataFrameReader {
             self.set_state(r);
             return Ok(parsed);
         }
-        if path.is_instance_of::<pyo3::types::PyString>()
-            || path.is_instance_of::<pyo3::types::PyList>()
+        if path.is_instance_of::<PyString>()
+            || path.is_instance_of::<PyList>()
             || parse_format == spark_connect::plan::ParseFormat::Csv
         {
             let r = apply_optional_schema(r, schema)?;
             self.commit(&r, format);
-            let paths = paths_of(path)?;
-            return Ok(PyDataFrame::new(r.format(format).load_paths(paths)));
+            let (paths, error) = paths_of(path)?;
+            let df = r.format(format).load_paths(paths);
+            return Ok(PyDataFrame::new(with_plan_error(df, error)));
         }
         // PySpark's options are set before the path is checked, so they stay on this reader.
         self.set_state(r);
         Err(not_expected_type(path, "path", "str, list, or DataFrame"))
+    }
+}
+
+/// The format that a reader keeps when it is not a str that the core reader takes, as PySpark
+/// keeps the object as it is. Another object fails the assertion of its `DataSource` at `load`.
+/// A str that UTF-8 cannot encode, such as one with a lone surrogate, fails the plan that `load`
+/// builds, with the error of its encoding, when PySpark sends the plan.
+struct UnsentFormat {
+    object: Py<PyAny>,
+    /// The error of the plan, for a str that UTF-8 cannot encode, and None for any other object.
+    unencodable: Option<SparkError>,
+}
+
+impl UnsentFormat {
+    fn of(source: &Bound<'_, PyAny>) -> Self {
+        UnsentFormat {
+            object: source.clone().unbind(),
+            unencodable: unencodable_str(source),
+        }
+    }
+
+    fn clone_ref(&self, py: Python<'_>) -> Self {
+        UnsentFormat {
+            object: self.object.clone_ref(py),
+            unencodable: self.unencodable.clone(),
+        }
+    }
+}
+
+/// The error that PySpark's plan raises when it sends `text`, a str that UTF-8 cannot encode, such
+/// as a lone surrogate, which protobuf's string field encodes. None for any other object, or a str
+/// that encodes.
+fn unencodable_str(text: &Bound<'_, PyAny>) -> Option<SparkError> {
+    if !text.is_instance_of::<PyString>() || text.extract::<String>().is_ok() {
+        return None;
+    }
+    let utf32le = text
+        .call_method1("encode", ("utf-32-le", "surrogatepass"))
+        .ok()?;
+    let utf32le = utf32le.cast::<PyBytes>().ok()?;
+    Some(SparkError::unencodable_str(utf32le.as_bytes()))
+}
+
+/// The DataFrame `df`, which fails each request with `error` when it is one: the error of the plan
+/// that PySpark raises when it sends the plan of a read, whose arguments it converts there.
+fn with_plan_error(df: DataFrame, error: Option<SparkError>) -> DataFrame {
+    match error {
+        Some(error) => df.unbuildable(error),
+        None => df,
     }
 }
 
@@ -115,48 +167,54 @@ fn without_options(reader: DataFrameReader, options: &HashMap<String, String>) -
 }
 
 /// The reader with the format `source` of PySpark's `format`, and the unsent format that it keeps.
-/// None unsets the format. A str sets it. Any other object is kept as it is, and `load` fails its
-/// `DataSource` assertion with it, as PySpark's `DataSource` takes only a str.
+/// None unsets the format. A str sets it. Any other object is kept as it is ([`UnsentFormat`]).
 fn reader_format(
     reader: DataFrameReader,
     source: Option<&Bound<'_, PyAny>>,
-) -> (DataFrameReader, Option<Py<PyAny>>) {
+) -> (DataFrameReader, Option<UnsentFormat>) {
     match source {
         None => (reader.clear_format(), None),
         Some(source) => match source.extract::<String>() {
             Ok(text) => (reader.format(&text), None),
-            Err(_) => (reader.clear_format(), Some(source.clone().unbind())),
+            Err(_) => (reader.clear_format(), Some(UnsentFormat::of(source))),
         },
     }
 }
 
 /// The paths of `path`, a path or a list of them, or None for none, as PySpark's `load` takes
-/// them: anything else fails its assertion.
-fn paths_of(path: &Bound<'_, PyAny>) -> PyResult<Vec<String>> {
+/// them, and the error of the plan for the first str that UTF-8 cannot encode. Anything else fails
+/// its assertion.
+fn paths_of(path: &Bound<'_, PyAny>) -> PyResult<(Vec<String>, Option<SparkError>)> {
     if path.is_none() {
-        return Ok(vec![]);
+        return Ok((vec![], None));
     }
-    if path.is_instance_of::<pyo3::types::PyString>() {
-        return Ok(vec![path.extract()?]);
+    if path.is_instance_of::<PyString>() {
+        return path_list(std::slice::from_ref(path));
     }
-    if !path.is_instance_of::<pyo3::types::PyList>() {
+    if !path.is_instance_of::<PyList>() {
         return Err(pyo3::exceptions::PyAssertionError::new_err(()));
     }
     path_list(&path.try_iter()?.collect::<PyResult<Vec<_>>>()?)
 }
 
-/// The paths of `paths`, strings, as PySpark's `load` asserts them.
-fn path_list(paths: &[Bound<'_, PyAny>]) -> PyResult<Vec<String>> {
-    paths
-        .iter()
-        .map(|path| {
-            if path.is_instance_of::<pyo3::types::PyString>() {
-                path.extract()
-            } else {
-                Err(pyo3::exceptions::PyAssertionError::new_err(()))
+/// The paths of `paths`, which PySpark's `load` asserts to be strings, and the error of the plan
+/// for the first one that UTF-8 cannot encode. The other paths are sent as they are.
+fn path_list(paths: &[Bound<'_, PyAny>]) -> PyResult<(Vec<String>, Option<SparkError>)> {
+    if paths.iter().any(|path| !path.is_instance_of::<PyString>()) {
+        return Err(pyo3::exceptions::PyAssertionError::new_err(()));
+    }
+    let mut texts = Vec::with_capacity(paths.len());
+    let mut error = None;
+    for path in paths {
+        match path.extract::<String>() {
+            Ok(text) => texts.push(text),
+            Err(_) => {
+                texts.push(String::new());
+                error = error.or_else(|| unencodable_str(path));
             }
-        })
-        .collect()
+        }
+    }
+    Ok((texts, error))
 }
 
 /// The `predicates` of `jdbc`, which PySpark's `DataSource` plan asserts to be a list, and each of
@@ -432,7 +490,7 @@ impl PyDataFrameReader {
                 self.inner.get_format().into_pyobject(py)?.into_any(),
                 self.inner.get_schema().into_pyobject(py)?.into_any(),
                 str_dict(py, &self.options.get())?.into_any(),
-                optional_object(py, self.unsent_format.as_ref()),
+                optional_object(py, self.unsent_format.as_ref().map(|f| &f.object)),
             ],
         )?;
         state_reduce(py, "reader_reduce", args)
@@ -457,7 +515,7 @@ impl PyDataFrameReader {
             reader = reader.schema(schema);
         }
         PyDataFrameReader {
-            unsent_format: unsent,
+            unsent_format: unsent.map(|object| UnsentFormat::of(object.bind(py))),
             ..PyDataFrameReader::new(reader.options(options))
         }
     }
@@ -535,7 +593,7 @@ impl PyDataFrameReader {
 
     fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
         if let Some(format) = &self.unsent_format {
-            visit.call(format)?;
+            visit.call(&format.object)?;
         }
         Ok(())
     }
@@ -603,11 +661,22 @@ impl PyDataFrameReader {
         r = set_reader_kwargs_unset_none(r, options)?;
         // Then its `DataSource` asserts the format, which precedes the check of the paths.
         self.set_state(r.clone());
-        if self.unsent_format.is_some() {
-            return Err(pyo3::exceptions::PyAssertionError::new_err(()));
-        }
-        let paths = path.map(paths_of).transpose()?.unwrap_or_default();
-        Ok(PyDataFrame::new(r.load_paths(paths)))
+        // A format that is not a str fails the assertion, and a str that UTF-8 cannot encode fails
+        // the plan, which precedes the paths in the plan of PySpark's `DataSource`.
+        let format_error = match &self.unsent_format {
+            None => None,
+            Some(UnsentFormat {
+                unencodable: Some(error),
+                ..
+            }) => Some(error.clone()),
+            Some(_) => return Err(pyo3::exceptions::PyAssertionError::new_err(())),
+        };
+        let (paths, path_error) = path.map(paths_of).transpose()?.unwrap_or_default();
+        let df = r.load_paths(paths);
+        Ok(PyDataFrame::new(with_plan_error(
+            df,
+            format_error.or(path_error),
+        )))
     }
 
     /// Read a table by name, which PySpark's `Read` plan sets in its string field as it is, as
@@ -730,8 +799,9 @@ impl PyDataFrameReader {
             r = set_option_skip_none(r, name, value.as_ref())?;
         }
         self.commit(&r, "parquet");
-        let paths = path_list(&paths)?;
-        Ok(PyDataFrame::new(r.format("parquet").load_paths(paths)))
+        let (paths, error) = path_list(&paths)?;
+        let df = r.format("parquet").load_paths(paths);
+        Ok(PyDataFrame::new(with_plan_error(df, error)))
     }
 
     /// Read CSV file(s) - full pyspark signature; each named option is
@@ -851,8 +921,9 @@ impl PyDataFrameReader {
             ],
         )?;
         self.commit(&r, "orc");
-        let paths = paths_of(path)?;
-        Ok(PyDataFrame::new(r.format("orc").load_paths(paths)))
+        let (paths, error) = paths_of(path)?;
+        let df = r.format("orc").load_paths(paths);
+        Ok(PyDataFrame::new(with_plan_error(df, error)))
     }
 
     /// Read TEXT file(s) - full pyspark signature; each named option is
@@ -890,8 +961,9 @@ impl PyDataFrameReader {
             ],
         )?;
         self.commit(&r, "text");
-        let paths = paths_of(paths)?;
-        Ok(PyDataFrame::new(r.format("text").load_paths(paths)))
+        let (paths, error) = paths_of(paths)?;
+        let df = r.format("text").load_paths(paths);
+        Ok(PyDataFrame::new(with_plan_error(df, error)))
     }
 
     /// Read XML file(s) - full pyspark signature; each named option is

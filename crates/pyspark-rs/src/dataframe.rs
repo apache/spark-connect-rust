@@ -4120,8 +4120,10 @@ impl PyDataFrameWriter {
 
         let writer = self.inner.get();
         let mode = match writer.get_unsupported_mode() {
-            Some(mode) => mode.to_string(),
-            None => save_mode_name(writer.get_save_mode()).to_string(),
+            Some(mode) => Some(mode.to_string()),
+            None => writer
+                .get_save_mode()
+                .map(|mode| save_mode_name(mode).to_string()),
         };
         let refused = self
             .refused_bucket_count()
@@ -4165,9 +4167,9 @@ impl PyDataFrameWriter {
     }
 
     /// A writer of its state, as `__reduce__` gives it: of the DataFrame `frame`, the format,
-    /// the save mode (or the last mode that is not one), the options, the partitioning, the
-    /// buckets (their number, None if there is none, and their columns), the sorting and the
-    /// clustering columns, and the number of buckets that the proto refuses.
+    /// the save mode, if one is set (or the last mode that is not one), the options, the
+    /// partitioning, the buckets (their number, None if there is none, and their columns), the
+    /// sorting and the clustering columns, and the number of buckets that the proto refuses.
     #[staticmethod]
     #[pyo3(
         signature = (
@@ -4191,7 +4193,7 @@ impl PyDataFrameWriter {
         py: Python<'_>,
         frame: Py<PyDataFrame>,
         format: Option<String>,
-        mode: String,
+        mode: Option<String>,
         options: std::collections::HashMap<String, String>,
         partition_cols: Vec<String>,
         num_buckets: Option<i32>,
@@ -4208,7 +4210,10 @@ impl PyDataFrameWriter {
         if let Some(format) = format {
             writer = writer.format(&format);
         }
-        writer = writer.mode(&mode).options(options);
+        if let Some(mode) = mode {
+            writer = writer.mode(&mode);
+        }
+        writer = writer.options(options);
         if !partition_cols.is_empty() {
             writer = writer.partition_by(partition_cols);
         }
