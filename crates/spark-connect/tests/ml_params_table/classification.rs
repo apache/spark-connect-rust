@@ -14,28 +14,46 @@ pub const CONVERTED: &[(&str, &[&str])] = &[
         LogisticRegressionModel::PARAM_NAMES,
     ),
     // NaiveBayes, MultilayerPerceptron, FM and OneVsRest.
+    ("FMClassificationModel", FMClassificationModel::PARAM_NAMES),
+    ("FMClassifier", FMClassifier::PARAM_NAMES),
+    (
+        "MultilayerPerceptronClassificationModel",
+        MultilayerPerceptronClassificationModel::PARAM_NAMES,
+    ),
+    (
+        "MultilayerPerceptronClassifier",
+        MultilayerPerceptronClassifier::PARAM_NAMES,
+    ),
+    ("NaiveBayes", NaiveBayes::PARAM_NAMES),
+    ("NaiveBayesModel", NaiveBayesModel::PARAM_NAMES),
+    ("OneVsRest", OneVsRest::PARAM_NAMES),
+    ("OneVsRestModel", OneVsRestModel::PARAM_NAMES),
     // The decision tree, random forest and gradient-boosted tree classifiers.
+    (
+        "DecisionTreeClassificationModel",
+        DecisionTreeClassificationModel::PARAM_NAMES,
+    ),
+    (
+        "DecisionTreeClassifier",
+        DecisionTreeClassifier::PARAM_NAMES,
+    ),
+    (
+        "GBTClassificationModel",
+        GBTClassificationModel::PARAM_NAMES,
+    ),
+    ("GBTClassifier", GBTClassifier::PARAM_NAMES),
+    (
+        "RandomForestClassificationModel",
+        RandomForestClassificationModel::PARAM_NAMES,
+    ),
+    (
+        "RandomForestClassifier",
+        RandomForestClassifier::PARAM_NAMES,
+    ),
 ];
 
 /// Golden classes of this area that are not converted, each with its reason.
 pub const EXCLUDED: &[(&str, &str)] = &[
     // NaiveBayes, MultilayerPerceptron, FM and OneVsRest.
-    ("FMClassificationModel", "pending: classification"),
-    ("FMClassifier", "pending: classification"),
-    (
-        "MultilayerPerceptronClassificationModel",
-        "pending: classification",
-    ),
-    ("MultilayerPerceptronClassifier", "pending: classification"),
-    ("NaiveBayes", "pending: classification"),
-    ("NaiveBayesModel", "pending: classification"),
-    ("OneVsRest", "pending: classification"),
-    ("OneVsRestModel", "pending: classification"),
     // The decision tree, random forest and gradient-boosted tree classifiers.
-    ("DecisionTreeClassificationModel", "pending: classification"),
-    ("DecisionTreeClassifier", "pending: classification"),
-    ("GBTClassificationModel", "pending: classification"),
-    ("GBTClassifier", "pending: classification"),
-    ("RandomForestClassificationModel", "pending: classification"),
-    ("RandomForestClassifier", "pending: classification"),
 ];

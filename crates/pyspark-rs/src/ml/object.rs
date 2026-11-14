@@ -201,6 +201,21 @@ pub(super) fn attribute_relation_py(
 
 /// The session of the active Spark session of Python, which PySpark's `RemoteMLWriter.save` and
 /// `RemoteMLReader.load` use (`SparkSession.getActiveSession()`), or of `session` if given.
+/// The active session, as the Python object that `SparkSession.getActiveSession()` returns: of
+/// the saves and loads of PySpark's Python format, which `RemoteMLWriter` and `RemoteMLReader`
+/// make of it.
+fn active_spark(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
+    let spark = py
+        .import("pyspark.sql")?
+        .getattr("SparkSession")?
+        .call_method0("getActiveSession")?;
+    if spark.is_none() {
+        // As PySpark's `assert session is not None` of no active session.
+        return Err(pyo3::exceptions::PyAssertionError::new_err(()));
+    }
+    Ok(spark)
+}
+
 fn session_of(py: Python<'_>, session: Option<&Py<PyAny>>) -> PyResult<SparkSession> {
     if let Some(session) = session {
         return Ok(session
@@ -217,12 +232,30 @@ fn session_of(py: Python<'_>, session: Option<&Py<PyAny>>) -> PyResult<SparkSess
 }
 
 /// What a writer saves: an operator that is not fitted (an estimator, a transformer or an
-/// evaluator), of its params, or a fitted model's object, of its params.
-#[derive(Clone)]
+/// evaluator), of its params, a fitted model's object, of its params, or an object of PySpark's
+/// Python format.
 pub(super) enum WriteTarget {
     Operator(MlOperator, Params),
     Object(MlRef, Params),
+    /// An object of PySpark's Python format (a Pipeline, a validator), which its `PythonSave`
+    /// saves.
+    Python(Py<PyAny>, PythonSave),
 }
+
+/// The save of an object `instance` of PySpark's Python format to `path`, of the Python session
+/// `spark` and its client `session`, and of the writer's options, as its `MLWriter.saveImpl`.
+pub(super) type PythonSave = for<'py> fn(
+    &Bound<'py, PyAny>,
+    &Bound<'py, PyAny>,
+    &SparkSession,
+    &str,
+    &HashMap<String, String>,
+) -> PyResult<()>;
+
+/// The load of an object of PySpark's Python format from `path`, of the Python session `spark` and
+/// its client `session`, as its `MLReader.load`.
+pub(super) type PythonLoad =
+    for<'py> fn(Python<'py>, &Bound<'py, PyAny>, &SparkSession, &str) -> PyResult<Py<PyAny>>;
 
 /// PySpark's `MLWriter` of a native class (`RemoteMLWriter` over Spark Connect): `overwrite()`,
 /// `option(key, value)` (of its lowercase key and string value), `session(spark)` and
@@ -308,6 +341,18 @@ impl PyMLWriter {
                     .map_err(Box::new)
                 })
             }
+            WriteTarget::Python(instance, save) => {
+                // As `RemoteMLWriter.saveInstance` of a meta-algorithm: the ML helper deletes the
+                // path of an overwrite, then the Python writer saves of the active session.
+                let spark = active_spark(py)?;
+                let session = session_of(py, None)?;
+                if self.shouldOverwrite {
+                    interruptible(py, &session, || {
+                        spark_connect::ml::handle_overwrite(&session, path).map_err(Box::new)
+                    })?;
+                }
+                save(instance.bind(py), &spark, &session, path, &options)
+            }
         }
     }
 
@@ -367,18 +412,28 @@ pub(super) type FromRead =
 /// sends the `Read` of the JVM class, and `session(spark)` sets the session to load with.
 #[pyclass(name = "RemoteMLReader", module = "pyspark.ml.connect.readwrite")]
 pub struct PyMLReader {
-    jvm_class: &'static str,
-    op_type: OperatorType,
-    from_read: FromRead,
+    kind: ReaderKind,
     session: Option<Py<PyAny>>,
+}
+
+/// What a reader loads: a `Read` of a JVM class, or an object of PySpark's Python format.
+enum ReaderKind {
+    Jvm(&'static str, OperatorType, FromRead),
+    Python(PythonLoad),
 }
 
 impl PyMLReader {
     pub(super) fn new(jvm_class: &'static str, op_type: OperatorType, from_read: FromRead) -> Self {
         Self {
-            jvm_class,
-            op_type,
-            from_read,
+            kind: ReaderKind::Jvm(jvm_class, op_type, from_read),
+            session: None,
+        }
+    }
+
+    /// The reader of an object of PySpark's Python format, which `load` loads.
+    pub(super) fn python(load: PythonLoad) -> Self {
+        Self {
+            kind: ReaderKind::Python(load),
             session: None,
         }
     }
@@ -395,10 +450,18 @@ impl PyMLReader {
     /// `session` sets, which `RemoteMLReader.load` does not read).
     fn load(&self, py: Python<'_>, path: &str) -> PyResult<Py<PyAny>> {
         let session = session_of(py, None)?;
-        let read = interruptible(py, &session, || {
-            spark_connect::ml::read(&session, self.jvm_class, self.op_type, path).map_err(Box::new)
-        })?;
-        (self.from_read)(py, read)
+        match &self.kind {
+            ReaderKind::Jvm(jvm_class, op_type, from_read) => {
+                let read = interruptible(py, &session, || {
+                    spark_connect::ml::read(&session, jvm_class, *op_type, path).map_err(Box::new)
+                })?;
+                from_read(py, read)
+            }
+            ReaderKind::Python(load) => {
+                let spark = active_spark(py)?;
+                load(py, &spark, &session, path)
+            }
+        }
     }
 
     /// The session to load with, as `BaseReadWrite.session`.

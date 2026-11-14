@@ -15,6 +15,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -38,13 +39,43 @@ INSTANCE_ATTRIBUTES = {
 FULL = [
     (f"pyspark.ml.connect.{module}", name, f"pyspark.ml.{module}")
     for module, name in [
+        ("classification", "BinaryLogisticRegressionSummary"),
+        ("classification", "BinaryLogisticRegressionTrainingSummary"),
         ("classification", "LinearSVC"),
         ("classification", "LinearSVCModel"),
         ("classification", "LinearSVCSummary"),
         ("classification", "LinearSVCTrainingSummary"),
+        ("classification", "LogisticRegression"),
+        ("classification", "LogisticRegressionModel"),
+        ("classification", "LogisticRegressionSummary"),
+        ("classification", "LogisticRegressionTrainingSummary"),
         ("clustering", "KMeans"),
         ("clustering", "KMeansModel"),
         ("clustering", "KMeansSummary"),
+        ("feature", "Binarizer"),
+        ("feature", "Bucketizer"),
+        ("feature", "DCT"),
+        ("feature", "ElementwiseProduct"),
+        ("feature", "FeatureHasher"),
+        ("feature", "HashingTF"),
+        ("feature", "IndexToString"),
+        ("feature", "Interaction"),
+        ("feature", "NGram"),
+        ("feature", "Normalizer"),
+        ("feature", "PolynomialExpansion"),
+        ("feature", "RegexTokenizer"),
+        ("feature", "SQLTransformer"),
+        ("feature", "StopWordsRemover"),
+        ("feature", "Tokenizer"),
+        ("feature", "VectorAssembler"),
+        ("feature", "VectorSizeHint"),
+        ("feature", "VectorSlicer"),
+        ("pipeline", "Pipeline"),
+        ("pipeline", "PipelineModel"),
+        ("tuning", "CrossValidator"),
+        ("tuning", "CrossValidatorModel"),
+        ("tuning", "TrainValidationSplit"),
+        ("tuning", "TrainValidationSplitModel"),
     ]
 ]
 
@@ -135,6 +166,19 @@ def test_params_are_pyspark_mls(spec):
     ]
 
 
+def test_param_grid_builder_is_pysparks():
+    # The ParamGridBuilder of the native validators is PySpark's own class, whose param maps of
+    # the Params of any class they take.
+    try:
+        import pyspark._pyspark  # noqa: F401
+    except ImportError:
+        pytest.skip("of this client's native classes")
+    from pyspark.ml import tuning
+    from pyspark.ml.connect import tuning as native
+
+    assert native.ParamGridBuilder is tuning.ParamGridBuilder
+
+
 @pytest.mark.parametrize("name", list(CLASSES))
 def test_params_api_cases_are_pyspark_mls(name):
     ours = params_api_cases(name)
@@ -159,8 +203,15 @@ from pyspark.ml.param import Params
 print(isinstance(module.LinearSVC(), Estimator), isinstance(module.LinearSVC(), Params),
       issubclass(module.LinearSVCModel, Model))
 """
+    # Of the path of this process (ours or official PySpark) and a directory without a pyspark:
+    # the directory of the tests' cwd would put the drop-in first on the path of an official run.
+    env = dict(os.environ, PYTHONPATH=os.pathsep.join(p for p in sys.path if p))
     out = subprocess.run(
-        [sys.executable, "-c", code], capture_output=True, text=True, env=dict(os.environ)
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=tempfile.gettempdir(),
     )
     assert out.returncode == 0, out.stderr
     assert out.stdout.split() == ["True", "True", "True"]

@@ -1,5 +1,18 @@
-"""Tuning (pyspark.ml.connect.tuning)."""
-from pyspark._pyspark import CrossValidator
-from pyspark._pyspark import MLModel as CrossValidatorModel
+"""Tuning (pyspark.ml.connect.tuning): PySpark's validators of pyspark.ml.tuning, natively, and
+PySpark's ParamGridBuilder, whose param maps they take."""
 
-__all__ = ["CrossValidator", "CrossValidatorModel"]
+from pyspark._pyspark import (
+    CrossValidator,
+    CrossValidatorModel,
+    TrainValidationSplit,
+    TrainValidationSplitModel,
+)
+from pyspark.ml.tuning import ParamGridBuilder
+
+__all__ = [
+    "ParamGridBuilder",
+    "CrossValidator",
+    "CrossValidatorModel",
+    "TrainValidationSplit",
+    "TrainValidationSplitModel",
+]

@@ -261,9 +261,8 @@ classes to build on:
 ## Native ML classes of the full pyspark.ml API (Python)
 
 The native Python classes of `pyspark.ml.connect` follow the API of `pyspark.ml` 4.3.0 over Spark
-Connect, class by class. `LinearSVC` (with `LinearSVCModel`, `LinearSVCSummary` and
-`LinearSVCTrainingSummary`) and `KMeans` (with `KMeansModel` and `KMeansSummary`) follow it in
-full; the other native classes follow as they are completed. A class that follows it has:
+Connect, class by class: the section of each class says when it follows it in full, and the other
+native classes follow as they are completed. A class that follows it has:
 
 - **The Params API of `pyspark.ml.param.Params`**: `params`, `getParam`, `hasParam`, `isSet`,
   `isDefined`, `hasDefault`, `getOrDefault`, `explainParam(s)`, `extractParamMap`, `set`, `clear`
@@ -279,7 +278,11 @@ full; the other native classes follow as they are completed. A class that follow
   the parent `undefined`, so `ParamGridBuilder().addGrid(LinearSVC.maxIter, ...)` builds.
   `MLWriter`s and `MLReader`s are `RemoteMLWriter` and `RemoteMLReader`, as over Spark Connect, of
   the attributes `shouldOverwrite` and `optionMap`, and the AttributeError of a missing attribute
-  names the class as PySpark's does.
+  names the class as PySpark's does. A missing attribute of the class itself
+  (`DecisionTreeRegressor.maxIter`) raises CPython's message of the type's full name, cut at 50
+  characters (`type object 'pyspark.ml.connect.regression.DecisionTreeRegresso' has no attribute
+  'maxIter'`, where PySpark's names `DecisionTreeRegressor`): the error of a missing class attribute
+  comes from the metaclass, which a PyO3 class cannot replace.
 - **PySpark's defaults of each instance**: the default `seed` is the `hash` of the name of the
   class, and the default `outputCol` the uid of the instance and `__output`; a fitted model has the
   defaults of its estimator, which PySpark's `_copyValues` copies to it (a seed of the name of the
@@ -422,6 +425,13 @@ not given is not sent, so the server's default applies. A list param without ele
 accepted by its constructor and setters, and a fit, transform or evaluate raises PySpark's
 `CANNOT_INFER_ARRAY_ELEMENT_TYPE` for it, as PySpark's serialization does.
 
+The `getThreshold`, `getThresholds`, `setThreshold` and `setThresholds` methods of the estimator
+and of its model, and their `threshold` and `thresholds` Param objects, are PySpark's
+`_LogisticRegressionParams` methods, in Python, so they match its errors: the `ValueError` of
+the equivalent threshold when `thresholds` has a length other than two, and of an inconsistent
+pair, the `ZeroDivisionError` and `TypeError` of their arithmetic, and the `KeyError` of an unset
+`thresholds`. The `%g` values of the inconsistency message are formatted by Python.
+
 A native class has the `setParams` of its `pyspark.ml` class. It is keyword-only, takes the params
 of the constructor, sets the params that it is given, in order, and returns the object, as
 PySpark's `_set` does. As PySpark's, the `setParams` of `LogisticRegression` then checks its
@@ -429,8 +439,11 @@ PySpark's `_set` does. As PySpark's, the `setParams` of `LogisticRegression` the
 `CrossValidator`, which takes `numFolds`, `parallelism` and `seed`, with a default of `None` for
 the first two. The `params` argument of a fit, transform or
 evaluate, which `pyspark.ml` takes as a param map, is accepted: `None` and an empty dict leave the
-params as they are. The native classes have no Param objects to key a map by, so a non-empty
-map raises a `TypeError` that says the native classes take no param map. A list or tuple of maps to
+params as they are. A non-empty map of a class that has the Params API's `copy` (see above) is
+copied with the map, as `Estimator.fit` and `Transformer.transform` copy it, so a key that is not a
+Param raises PySpark's `TypeError` of that copy. The other native classes have no Param objects to
+key a map by, so a non-empty map raises a `TypeError` that says the native classes take no param
+map. A list or tuple of maps to
 a fit is fitted as `pyspark.ml` fits it: one model per map, in order, returned as a list,
 so that `[]` fits nothing and does not read the dataset. Any other value raises the `TypeError` that
 `pyspark.ml` raises for it. The `params` argument is checked first, before the dataset, as
@@ -565,9 +578,13 @@ validate early stopping; the resulting ensemble can contain fewer than `maxIter`
 trees. DataFrame transforms expose predictions, probabilities, raw margins and an
 optional vector of leaf IDs, one per fitted tree. Instance weights are supported.
 Models, clones and lazy transformed DataFrames retain the cached model in its
-fitting session until the last owner is dropped. Multiclass training, model
-inspection, per-iteration evaluation, single-vector prediction and persistence
-are outside this native addition.
+fitting session until the last owner is dropped. The Rust model has the typed
+accessors of PySpark's `GBTClassificationModel`: `trees` (regression tree models),
+`tree_weights`, `get_num_trees`, `total_num_nodes`, `feature_importances`,
+`to_debug_string`, `predict`, `predict_leaf`, `predict_raw`, `predict_probability`,
+`evaluate_each_iteration(&df)` and the supported-value lists. It has `load`, and
+`write().save(path)`. Unlike PySpark, the fit does not fetch the trees up front; they
+are fetched when asked. The native Python model class is not covered by this section.
 
 ## Native DecisionTreeRegressor
 
@@ -608,8 +625,11 @@ etc. methods and `setThresholds` return the estimator.
 Fitted models expose DataFrame `transform`, including prediction, probability,
 raw per-leaf weighted class counts and an optional scalar double leaf index.
 Models, clones and lazy transformed DataFrames retain the cached model in its
-fitting session until the last owner is dropped. Tree inspection, feature
-importances, single-vector prediction and persistence are outside this addition.
+fitting session until the last owner is dropped. The Rust model has the typed
+accessors of PySpark's `DecisionTreeClassificationModel`: `depth`, `num_nodes`,
+`feature_importances`, `to_debug_string`, `predict`, `predict_leaf`, `predict_raw`,
+`predict_probability` and `supported_impurities`, and `load`; `write().save(path)`
+saves it. The native Python model class is not covered by this section.
 
 ## Native RandomForestClassifier
 
@@ -630,8 +650,16 @@ PySpark's parameter names and defaults, with mutating `setFeaturesCol`,
 Fitted models expose DataFrame `transform`, including prediction, probability,
 raw prediction and optional per-tree leaf index columns. Models, clones and lazy
 transformed DataFrames retain the cached model in its fitting session until the
-last owner is dropped. Tree inspection, feature importances, training summaries,
-single-vector prediction and persistence are not exposed by this native addition.
+last owner is dropped. The Rust model has the typed accessors of PySpark's
+`RandomForestClassificationModel`: `trees` (decision tree models), `tree_weights`,
+`get_num_trees`, `total_num_nodes`, `feature_importances`, `to_debug_string`,
+`predict`, `predict_leaf`, `predict_raw`, `predict_probability`, `has_summary`,
+`summary()` (the binary or multiclass training summary, chosen by `numClasses`),
+`evaluate(&df)` (the binary or multiclass summary of a dataset), the supported-value
+lists, and `load`; `write().save(path)` saves it. A loaded model has no training
+summary. The fit does not fetch `numClasses` and the trees up front as PySpark does;
+`summary()` and `trees()` fetch them when asked. The native Python model class is
+not covered by this section.
 
 ## Native KMeans
 
@@ -704,20 +732,94 @@ rather than a Python object, `fit_multiple` returns a `Vec` rather than an itera
 is `load`, with no reader object. The summary's DataFrames are built on the training DataFrame,
 as PySpark builds them.
 
-## Native Pipeline and CrossValidator: fit is not implemented
+In Python, `LogisticRegression` and its model follow the full API of `pyspark.ml` in the same way,
+with `coefficientMatrix`, `interceptVector`, `predictProbability`, the `summary` property and
+`hasSummary`. The fit of a LogisticRegression is followed by a `numClasses` request, which its
+training summary reads, as PySpark's does: the summary is the binary one of two classes or fewer,
+else the multinomial one.
 
-`spark_connect::ml::Pipeline` and `spark_connect::ml::CrossValidator`, and their Python
-classes `pyspark.ml.connect.Pipeline` and `pyspark.ml.connect.CrossValidator`, do not fit.
-Their `fit` raises `NOT_IMPLEMENTED` (`PySparkNotImplementedError` in Python), naming
-`Pipeline.fit` or `CrossValidator.fit`, before any request is sent, and returns no model.
-The Connect ML protocol cannot run either one: the native Pipeline holds stage names, which
-the server cannot fit, and it has no pipeline model to transform; the native CrossValidator
-holds its numeric params only, without the estimator, evaluator or param grid. Their
-constructors and setters still set the params, as before.
+## Native Pipeline and PipelineModel
 
-To fit a pipeline or to tune a model from Python, use the vendored `pyspark.ml.Pipeline` and
-`pyspark.ml.tuning.CrossValidator`, which take the estimator and transformer objects, as
-PySpark does. The Rust API has no way to fit a pipeline or to tune a model.
+`pyspark.ml.connect.Pipeline` and `pyspark.ml.connect.PipelineModel` are PySpark's `Pipeline` and
+`PipelineModel` of `pyspark.ml.pipeline`, natively and in full, as PySpark 4.3.0 has them over
+Spark Connect:
+
+- **Stages:** the stages are any estimators and transformers: the native classes,
+  `pyspark.ml`'s, or the user's.
+- **Fit:** `fit` is `Pipeline._fit`. Up to the last estimator, a transformer transforms and an
+  estimator fits, and its model transforms for the stages after it. The stages after the last
+  estimator are kept as they are, in a `PipelineModel` of a new uid.
+- **Transform:** `PipelineModel.transform` transforms by each stage in order.
+- **Copy:** `Pipeline.copy` keeps the uid and copies each stage with the extra params, while
+  `PipelineModel.copy` is of a new uid.
+- **Persistence:** `write`, `save`, `read` and `load` are of PySpark's Python format:
+  - the metadata of `pyspark.ml.pipeline.Pipeline` (or `PipelineModel`), of the `stageUids`;
+  - each stage, saved by its own writer at `stages/<index>_<uid>`.
+
+  PySpark loads what this client saves, and this client loads what PySpark saves. A stage loads
+  as the native class of `pyspark.ml.connect` of its name where one loads, else as PySpark's
+  class. An overwrite deletes the path by the ML helper first, as `RemoteMLWriter` does.
+
+To save native stages, use the native `Pipeline` (or the native validators). The vendored
+`pyspark.ml.Pipeline` fits and transforms them, but its save raises the `ValueError` of a stage
+that is not `MLWritable`: the native classes are not subclasses of `pyspark.ml.util.MLWritable`, a
+plain class (not an ABC) that they cannot be registered with. The native meta-algorithms take an
+object of a native class as writable, and any other object only if it is an `MLWritable`, as
+PySpark does.
+
+## Native validators
+
+`pyspark.ml.connect.tuning` has PySpark's validators of `pyspark.ml.tuning`, natively and in full,
+as PySpark 4.3.0 has them over Spark Connect: `CrossValidator`, `CrossValidatorModel`,
+`TrainValidationSplit` and `TrainValidationSplitModel`. Its `ParamGridBuilder` is PySpark's own
+class.
+
+- **Estimators and evaluators:** any estimator and evaluator, of the native classes, of
+  `pyspark.ml`, or of the user's. A Pipeline is an estimator too.
+- **Fit:** `fit` is the `_fit` of PySpark's class, on the client:
+  - The splits are those of PySpark's: of `CrossValidator`, `numFolds` folds of a column
+    `<uid>_rand` of `rand(seed)`, or the folds of the numbers of `foldCol`; of
+    `TrainValidationSplit`, the rows of `rand(seed)` below `trainRatio` train. A fold number out
+    of `[0, numFolds)` fails the fit, and so does an empty fold, as PySpark raises them.
+  - Each split is cached while its models are fitted and evaluated, as `_cache_spark_dataset`
+    caches it.
+  - The fits of the param maps run in a pool of `parallelism` threads, of the estimator's
+    `fitMultiple`, as PySpark's `_parallelFitTasks`.
+  - `collectSubModels` keeps the model of each fold and param map.
+  - The metrics are PySpark's: the mean and standard deviation of numpy over the folds
+    (`avgMetrics`, `stdMetrics`), or the metric of each param map (`validationMetrics`), and the
+    best of them by `isLargerBetter`.
+  - The best param map is fitted on the whole dataset, in a model of a new uid that gets the
+    params of the validator, as `_copyValues` gives them.
+- **Models:** `bestModel`, the metrics and `subModels` are attributes of the instance, as
+  PySpark's. `transform` transforms by the best model. `copy` copies the best model and the
+  sub-models, and a model of no sub-models fails as PySpark's `assert` does.
+- **Copy:** `CrossValidator.copy` and `TrainValidationSplit.copy` keep the uid and copy the
+  estimator and the evaluator with the extra params. The param maps stay the same.
+- **Persistence:** of PySpark's Python format (`_ValidatorSharedReadWrite`):
+  - the metadata of `pyspark.ml.tuning.CrossValidator` (or the others) and of its params, in
+    PySpark's order. The param maps are of the JSON of each value, or the path of a value that is
+    a stage (`epm_<name><n>`).
+  - the estimator and the evaluator at `estimator` and `evaluator`, and a model's best model at
+    `bestModel`. The sub-models are at `subModels`, of the writer's option `persistSubModels`
+    (by default of whether the model has them).
+
+  PySpark loads what this client saves, and this client loads what PySpark saves. A load of a
+  model of a cross validation repeats one list of the sub-models for each fold, as PySpark's
+  reader does.
+- **Checks of a save:** as PySpark's, a validator saves only if its estimator, the stages that
+  the estimator nests, and its evaluator write, and each param of its param maps is a param of one
+  of them. A nested validator is refused.
+
+The native Pipeline, PipelineModel and validators are registered as virtual subclasses of
+PySpark's classes of them (`pyspark.ml.Pipeline`, `pyspark.ml.tuning.CrossValidator`, ...). So
+`isinstance` checks of PySpark's classes hold of them, and PySpark's `MetaAlgorithmReadWrite`
+reads the nested stages of a native Pipeline.
+
+The Rust API has the splits of the validators, `k_fold` and `train_validation_split`.
+`spark_connect::ml::CrossValidator`, which holds its numeric params only, and
+`spark_connect::ml::Pipeline`, which holds stage names, do not fit yet: their `fit` raises
+`NOT_IMPLEMENTED`.
 
 ## pyspark.ml
 
@@ -847,10 +949,13 @@ columns, smoothing and instance weights, threshold decisions, suppressed vector
 outputs, independent fits, session isolation and lazy model lifetime. A golden
 fixture captures all nine parameters for each model type from official PySpark.
 
-This native surface covers construction, parameter setters, fit and DataFrame
-transform. Model coefficient/statistic inspection, single-vector prediction and
-persistence are outside this surface. The vendored `pyspark.ml.classification`
-API continues to use its existing implementation.
+The Rust `NaiveBayesModel` has PySpark 4.3.0's model members: `pi`, `theta` and `sigma` (a
+0 by 0 matrix for multinomial, complement and Bernoulli models), `numClasses`, `numFeatures`,
+`predict`, `predictRaw` and `predictProbability` of one vector, and `NaiveBayesModel::load`. The
+estimator's `fit` returns this typed model. PySpark 4.3.0 gives the model no training summary. The
+Rust param accessors are generated from PySpark's param table: `features_col` and
+`set_features_col` replace the former `feature_col` and `set_feature_col`. The Python binding
+is unchanged in this change and still returns the shared `MLModel`.
 
 ## Native BisectingKMeans
 
@@ -934,15 +1039,22 @@ vendored `pyspark.ml.clustering` API retains its existing implementation.
 
 `spark_connect::ml::FMClassifier` and
 `pyspark.ml.connect.classification.FMClassifier` fit Spark's binary factorization
-machine classifier. All 17 PySpark constructor parameters have Rust builder
+machine classifier. All 18 PySpark constructor parameters have Rust builder
 setters/getters and named Python setters. Fitted models produce prediction,
 probability and raw-prediction columns, with configurable thresholds. Both the
 `gd` and `adamW` solvers run on the Spark server.
 
+The Rust `FMClassificationModel` has `factors`, `linear`, `intercept`, `predict`, `predictRaw`
+and `predictProbability` of one vector, `numClasses`, `numFeatures`, and `load`. Its `summary()`
+is the binary training summary of a fitted model, and `has_summary()` says whether one exists;
+`summary()` fails for a loaded model, as PySpark does. `evaluate(&df)` returns the binary summary
+of a DataFrame, with the ROC, PR and threshold DataFrames. The Python binding is unchanged in
+this change.
+
 ## Native MultilayerPerceptronClassifier
 
 `spark_connect::ml::MultilayerPerceptronClassifier` and its native Python binding
-support all 13 PySpark constructor parameters plus `setThresholds`. Configure
+support all 14 PySpark constructor parameters, including `thresholds`. Configure
 `layers` before fitting; input and output sizes must match the feature dimension
 and number of classes. `initialWeights` accepts dense or sparse ML vectors:
 Rust uses `MlVector` (a `Vec<f64>` or array also converts to a dense vector), and
@@ -953,6 +1065,12 @@ fixtures captured with official PySpark.
 The fitted model produces multiclass prediction, probability and raw-prediction
 columns. Both `l-bfgs` and `gd` are supported. As in PySpark, fitting an empty
 DataFrame can return a model; the native client preserves that server behavior.
+
+The Rust `MultilayerPerceptronClassificationModel` has `weights`, `predict`, `predictRaw` and
+`predictProbability` of one vector, `numClasses`, `numFeatures`, and `load`. Its `summary()` is
+the multiclass training summary of a fitted model, and `has_summary()` says whether one exists.
+`summary()` fails for a loaded model, as PySpark does. `evaluate(&df)` returns the summary of
+a DataFrame. The param accessors are generated from PySpark's param table.
 
 ## Native OneVsRest
 
@@ -979,9 +1097,11 @@ does. It produces no probability column. Temporary columns and fit-created
 caches are cleaned up, and transformed DataFrames retain the binary models for
 lazy evaluation. Models must transform data in their fitting session.
 
-These additions cover native estimator construction, parameters, fitting and
-DataFrame transforms. Model coefficient/weight inspection, training summaries,
-persistence and single-vector prediction remain separate API work.
+Rust `OneVsRest::fit` returns the typed `OneVsRestModel`. Its `models()` gives each binary
+submodel as its typed model, one `SubModel` variant per native classifier, and `classifier()`
+gives the classifier. Single-vector prediction is on the submodels. Persistence is not yet
+available for `OneVsRest` and `OneVsRestModel`: their save and load remain pending with the
+persistence of the meta-estimators, whose writers PySpark runs on the client.
 
 
 ## Native AFTSurvivalRegression, IsotonicRegression and FMRegressor
@@ -1068,7 +1188,12 @@ signatures and named mutating setters. The vendored `pyspark.ml.feature` module 
 
 The 20 estimators fit through Spark Connect's ML command and return session-scoped cached
 models; Python returns the shared native `MLModel`. The 18 transformers build lazy ML
-relations. Transformed DataFrames retain their fitted models and upstream input plans.
+relations, and in Python each is a typed class with PySpark's Params API (`params`, `getParam`,
+the getters and setters, `copy`, `extractParamMap`), `write`/`save`/`read`/`load` and
+`transform`, which applies a non-empty param map to a copy as PySpark does. `HashingTF.indexOf`
+fails at PySpark's JVM import, as the official one does over Spark Connect. Their outputCol
+default keeps the uid that a loaded stage was made of. The estimators and their typed models
+are still pending. Transformed DataFrames retain their fitted models and upstream input plans.
 `QuantileDiscretizer` returns a cached JVM `Bucketizer`; its Rust model wrapper is named
 `QuantileDiscretizerModel`. Training-only parameters are omitted from model transforms.
 Multi-column parameters, nested Bucketizer splits, vector-valued ElementwiseProduct weights,

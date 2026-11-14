@@ -4,7 +4,7 @@ mod common;
 use common::live_session;
 use spark_connect::column::{col, lit_double, lit_string};
 use spark_connect::expression::Expression;
-use spark_connect::ml::{Estimator, NaiveBayes};
+use spark_connect::ml::{Model, NaiveBayes, Transformer};
 use spark_connect::{Column, DataFrame, SparkSession};
 
 fn vectors(s: &SparkSession, sql: &str, name: &str) -> DataFrame {
@@ -68,7 +68,7 @@ fn naive_bayes_model_types_learn_multiclass_labels_and_keep_independent_cached_m
         let training = vectors(&s, training_sql, "input");
         let held_out = vectors(&s, test_sql, "input");
         let mut estimator = NaiveBayes::new()
-            .set_feature_col("input")
+            .set_features_col("input")
             .set_label_col("target")
             .set_prediction_col("class")
             .set_probability_col("probs")
@@ -93,7 +93,7 @@ fn naive_bayes_model_types_learn_multiclass_labels_and_keep_independent_cached_m
             };
             r.id
         };
-        assert_ne!(object_id(first.as_ref()), object_id(second.as_ref()));
+        assert_ne!(object_id(&first), object_id(&second));
         assert!(first.transform(&s.new_session().range(1).unwrap()).is_err());
         let mut cloned = first.clone_box();
         let lazy = cloned.transform(&held_out).unwrap();
@@ -199,8 +199,8 @@ fn naive_bayes_thresholds_and_optional_vector_outputs() {
             .collect()
             .unwrap()
     };
-    let a = outputs(normal.as_mut());
-    let b = outputs(adjusted.as_mut());
+    let a = outputs(&mut normal);
+    let b = outputs(&mut adjusted);
     assert_eq!(a[0].get(0).unwrap().as_f64(), Some(1.0));
     assert_eq!(b[0].get(0).unwrap().as_f64(), Some(0.0));
     assert_eq!(a[0].get(1), b[0].get(1));

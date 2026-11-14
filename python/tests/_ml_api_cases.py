@@ -29,6 +29,24 @@ CLASSES = {
         ("pyspark.ml.connect.clustering", "KMeans", "pyspark.ml.clustering"),
         ("pyspark.ml.connect.clustering", "KMeansModel", "pyspark.ml.clustering"),
     ],
+    "Pipeline": [
+        ("pyspark.ml.connect.pipeline", "Pipeline", "pyspark.ml.pipeline"),
+        ("pyspark.ml.connect.pipeline", "PipelineModel", "pyspark.ml.pipeline"),
+    ],
+    "CrossValidator": [
+        ("pyspark.ml.connect.tuning", "CrossValidator", "pyspark.ml.tuning"),
+        ("pyspark.ml.connect.tuning", "CrossValidatorModel", "pyspark.ml.tuning"),
+    ],
+    "TrainValidationSplit": [
+        ("pyspark.ml.connect.tuning", "TrainValidationSplit", "pyspark.ml.tuning"),
+        ("pyspark.ml.connect.tuning", "TrainValidationSplitModel", "pyspark.ml.tuning"),
+    ],
+}
+
+# The params of the validators that only one of them has, with a value of each to set.
+_VALIDATOR_OWN = {
+    "CrossValidator": [("numFolds", 2), ("foldCol", "fold")],
+    "TrainValidationSplit": [("trainRatio", 0.5)],
 }
 
 # The names of the classes of pyspark.ml, whose hash is a default seed (the longest first).
@@ -168,9 +186,230 @@ def params_api_common_cases(rec, est, other):
     rec("big_int_explain", lambda: est.explainParam("maxIter"))
 
 
+def _stages():
+    """A KMeans and a LinearSVC, the stages of the cases of the Pipeline."""
+    kmeans = classes("KMeans")[0](k=2, predictionCol="cluster")
+    svc = classes("LinearSVC")[0](maxIter=5)
+    return kmeans, svc
+
+
+def _pipeline_params_api_cases(rec):
+    """The cases of PySpark's `Params` API of the Pipeline and the PipelineModel, as PySpark's
+    Python classes have it, without a server."""
+    from pyspark.ml.base import Estimator, Model
+
+    pipeline_class, model_class = classes("Pipeline")
+    kmeans, svc = _stages()
+    stages = [kmeans, svc]
+    pipeline = pipeline_class(stages=stages)
+    rec(
+        "isinstance",
+        lambda: (isinstance(pipeline, Estimator), isinstance(model_class([]), Model)),
+    )
+    rec("param_names", lambda: [p.name for p in pipeline.params])
+    rec("explainParams_unset", lambda: pipeline_class().explainParams())
+    rec("explainParams", lambda: pipeline.explainParams())
+    rec("getStages_is_stages", lambda: pipeline.getStages() is stages)
+    rec("getStages_unset", lambda: pipeline_class().getStages())
+    rec(
+        "isSet",
+        lambda: (
+            pipeline.isSet("stages"),
+            pipeline_class().isSet("stages"),
+            pipeline.hasDefault("stages"),
+        ),
+    )
+    rec("extract", lambda: sorted((p.name, repr(v)) for p, v in pipeline.extractParamMap().items()))
+    rec("positional", lambda: pipeline_class(stages))
+    rec("unexpected_keyword", lambda: pipeline_class(foo=1))
+    rec("setStages_none", lambda: pipeline_class().setStages(None).getStages())
+    rec("setParams", lambda: pipeline_class().setParams(stages=[svc]).getStages()[0] is svc)
+    copy = pipeline.copy({svc.maxIter: 7})
+    rec(
+        "copy",
+        lambda: (
+            copy.uid == pipeline.uid,
+            [s.uid == t.uid for s, t in zip(copy.getStages(), stages)],
+            copy.getStages()[0] is kmeans,
+            copy.getStages()[1].getMaxIter(),
+            svc.getMaxIter(),
+        ),
+    )
+    rec("copy_unset", lambda: pipeline_class().copy())
+    rec("copy_bad_extra", lambda: pipeline.copy({"x": 1}))
+    cleared = pipeline_class(stages=[svc])
+    rec("clear", lambda: (cleared.clear(cleared.stages), cleared.isSet("stages"))[1])
+    rec("fit_bad_stage", lambda: pipeline_class(stages=[1]).fit("not a DataFrame"))
+    rec("fit_bad_params", lambda: pipeline.fit("not a DataFrame", 5))
+    rec(
+        "class_param",
+        lambda: (
+            type(pipeline_class.stages).__name__,
+            pipeline_class.stages.parent,
+            pipeline_class.stages.name,
+        ),
+    )
+    rec("repr_is_uid", lambda: repr(pipeline) == pipeline.uid)
+    rec("no_attribute", lambda: pipeline.fooBarBaz)
+    rec("write_class", lambda: type(pipeline.write()).__name__)
+    model = model_class([kmeans, svc])
+    rec("model_stages", lambda: model.stages[0] is kmeans)
+    rec("model_params", lambda: (model.params, model.explainParams(), model.extractParamMap()))
+    rec(
+        "model_copy",
+        lambda: (lambda c: (c.uid != model.uid, c.stages[0] is kmeans, len(c.stages)))(
+            model.copy()
+        ),
+    )
+    rec("model_transform_bad_params", lambda: model.transform("not a DataFrame", 5))
+    rec("model_uid_prefix", lambda: model.uid.split("_")[0])
+    rec("model_no_attribute", lambda: model.fooBarBaz)
+    rec("model_set_stages", lambda: (setattr(model, "stages", [svc]), len(model.stages))[1])
+
+
+def _validator_params_api_cases(rec, name):
+    """The cases of PySpark's `Params` API of a validator and its model, as PySpark's Python
+    classes have it, without a server: of the case set `name` (CrossValidator or
+    TrainValidationSplit)."""
+    from pyspark.ml import tuning
+    from pyspark.ml.base import Estimator, Model
+    from pyspark.ml.evaluation import BinaryClassificationEvaluator
+    from pyspark.ml.param import Params
+    from pyspark.ml.util import MetaAlgorithmReadWrite
+
+    cls, model_class = classes(name)
+    svc = classes("LinearSVC")[0](maxIter=3)
+    # PySpark's evaluator, of both clients: a validator takes any evaluator, and PySpark's writes.
+    evaluator = BinaryClassificationEvaluator()
+    grid = tuning.ParamGridBuilder().addGrid(svc.regParam, [0.1, 1.0]).build()
+    own = _VALIDATOR_OWN[name]
+    v = cls(estimator=svc, estimatorParamMaps=grid, evaluator=evaluator, seed=7)
+    rec(
+        "isinstance",
+        lambda: (
+            isinstance(v, Estimator),
+            isinstance(v, Params),
+            isinstance(v, getattr(tuning, name)),
+            isinstance(model_class(None), Model),
+            isinstance(model_class(None), getattr(tuning, name + "Model")),
+            MetaAlgorithmReadWrite.isMetaEstimator(v),
+        ),
+    )
+    rec("param_names", lambda: [p.name for p in v.params])
+    rec("explainParams_default", lambda: cls().explainParams())
+    rec("explainParams", lambda: v.explainParams())
+    for p in cls().params:
+        getter = "get" + p.name[0].upper() + p.name[1:]
+        rec("default_" + getter, lambda getter=getter: getattr(cls(), getter)())
+    rec("seed_is_class_name_hash", lambda: cls().getSeed() == hash(name))
+    rec("set_params", lambda: [p.name for p in v.params if v.isSet(p)])
+    rec("getEstimator_is", lambda: v.getEstimator() is svc)
+    rec("getEstimatorParamMaps_is", lambda: v.getEstimatorParamMaps() is grid)
+    rec("getEvaluator_is", lambda: v.getEvaluator() is evaluator)
+    rec("extract", lambda: sorted((p.name, repr(x)) for p, x in v.extractParamMap().items()))
+    rec("kwargs", lambda: cls(**dict(own), parallelism=2, collectSubModels=True).explainParams())
+    rec("kwarg_none", lambda: cls(seed=None).getSeed())
+    rec("kwarg_bad_type", lambda: cls(parallelism="x"))
+    rec("kwarg_unknown", lambda: cls(foo=1))
+    rec("positional", lambda: cls(svc))
+    for param, value in own + [("seed", 3), ("parallelism", 4), ("collectSubModels", True)]:
+        setter = "set" + param[0].upper() + param[1:]
+        getter = "get" + param[0].upper() + param[1:]
+        rec(
+            setter,
+            lambda setter=setter, getter=getter, value=value: getattr(
+                getattr(cls(), setter)(value), getter
+            )(),
+        )
+    rec("setEstimator", lambda: cls().setEstimator(svc).getEstimator() is svc)
+    rec("setEstimatorParamMaps", lambda: cls().setEstimatorParamMaps(grid).isSet("estimatorParamMaps"))
+    rec("setEvaluator", lambda: cls().setEvaluator(evaluator).getEvaluator() is evaluator)
+    rec("setParams", lambda: cls().setParams(**dict(own), seed=5).explainParams())
+    rec("setParallelism_bad", lambda: cls().setParallelism("x"))
+    rec("setSeed_big", lambda: cls().setSeed(2**70).getSeed())
+    rec("set_param", lambda: (v.set(v.parallelism, 3), v.getParallelism())[1])
+    rec("clear", lambda: (v.clear(v.parallelism), v.isSet("parallelism"), v.getParallelism()))
+    rec("getEstimator_unset", lambda: cls().getEstimator())
+    copy = v.copy({v.seed: 9, svc.maxIter: 7})
+    rec(
+        "copy",
+        lambda: (
+            copy.uid == v.uid,
+            copy.getSeed(),
+            v.getSeed(),
+            copy.getEstimator() is svc,
+            copy.getEstimator().uid == svc.uid,
+            copy.getEstimator().getMaxIter(),
+            svc.getMaxIter(),
+            copy.getEvaluator() is evaluator,
+            copy.getEvaluator().uid == evaluator.uid,
+            copy.getEstimatorParamMaps() is grid,
+            [p.name for p in copy.params if copy.isSet(p)],
+        ),
+    )
+    rec("copy_unset", lambda: cls().copy().explainParams())
+    rec("copy_bad_extra", lambda: v.copy({"seed": 1}))
+    rec("class_param", lambda: (cls.seed.parent, cls.seed.name, cls.seed is cls.seed))
+    rec("repr_is_uid", lambda: repr(v) == v.uid)
+    rec("no_attribute", lambda: v.fooBarBaz)
+    rec("write_class", lambda: type(v.write()).__name__)
+    rec("fit_bad_params", lambda: v.fit("not a DataFrame", 5))
+    rec("fit_unset_estimator", lambda: cls().fit("not a DataFrame"))
+    rec("fit_unset_evaluator", lambda: cls(estimator=svc, estimatorParamMaps=grid).fit("x"))
+    rec("fit_no_maps", lambda: cls(estimator=svc, estimatorParamMaps=[], evaluator=evaluator).fit("x"))
+    rec("fit_not_a_dataframe", lambda: v.fit("not a DataFrame"))
+    if name == "CrossValidator":
+        rec("fit_zero_folds", lambda: v.copy({v.numFolds: 0}).fit("not a DataFrame"))
+    # The model, of a stand-in best model of no server (a PipelineModel of no stages).
+    stand_in = classes("Pipeline")[1]([])
+    rec("model_param_names", lambda: [p.name for p in model_class(None).params])
+    rec("model_explainParams", lambda: model_class(None).explainParams())
+    rec("model_seed_is_class_name_hash", lambda: model_class(None).getSeed() == hash(name + "Model"))
+    metrics = "avgMetrics" if name == "CrossValidator" else "validationMetrics"
+    rec(
+        "model_attributes",
+        lambda: [repr(getattr(model_class(None), a)) for a in ("bestModel", metrics, "subModels")],
+    )
+    rec("model_falsy_metrics", lambda: getattr(model_class(stand_in, 0), metrics))
+    model = model_class(stand_in, [0.5, 0.25], [[stand_in]] if name == "CrossValidator" else [stand_in])
+    rec("model_metrics_is", lambda: getattr(model, metrics) == [0.5, 0.25])
+    rec("model_transform", lambda: model.transform("not a DataFrame"))
+    rec("model_transform_bad_params", lambda: model.transform("x", 5))
+    copied = model.copy()
+    rec(
+        "model_copy",
+        lambda: (
+            copied.uid != model.uid,
+            copied.uid.split("_")[0],
+            getattr(copied, metrics),
+            getattr(copied, metrics) is getattr(model, metrics),
+            type(copied.bestModel).__name__,
+            copied.bestModel is stand_in,
+        ),
+    )
+    rec("model_copy_no_sub_models", lambda: model_class(stand_in, [0.5]).copy())
+    rec("model_copy_none", lambda: model_class(None).copy())
+    rec(
+        "model_set_attributes",
+        lambda: (setattr(model, "bestModel", None), setattr(model, metrics, [1.0]), model.bestModel)[2],
+    )
+    rec("model_no_attribute", lambda: model.fooBarBaz)
+    rec("model_repr_is_uid", lambda: repr(model) == model.uid)
+    if name == "CrossValidator":
+        rec("model_std_metrics", lambda: model_class(None, [0.5], None, [0.1]).stdMetrics)
+
+
 def params_api_cases(name):
     """The cases of PySpark's `Params` API of the estimator of the case set `name`, without a
     server."""
+    if name == "Pipeline":
+        rec = Recorder()
+        _pipeline_params_api_cases(rec)
+        return rec.out
+    if name in _VALIDATOR_OWN:
+        rec = Recorder()
+        _validator_params_api_cases(rec, name)
+        return rec.out
     estimator = classes(name)[0]
     rec = Recorder()
     if name == "LinearSVC":
@@ -291,16 +530,21 @@ def _kmeans_live(rec, model, df):
     rec("transform_map", lambda: model.transform(df, {model.predictionCol: "q"}).columns)
 
 
-def model_cases(rec, est, model):
-    """The cases of any fitted model `model` of the estimator `est`: its uid, its params and its
-    description."""
+def model_cases(rec, est, model, df, class_param="maxIter", value=3):
+    """The cases of any fitted model `model` of the estimator `est` of the DataFrame `df`: its uid,
+    its params and its description. A fit of a map of the Param `class_param` of the class (of
+    the parent "undefined") to `value` ignores it, as a Param of another parent."""
     from pyspark.ml.base import Model, Transformer
 
     rec("model_uid_is_estimator_uid", lambda: model.uid == est.uid)
     rec("isinstance_model", lambda: (isinstance(model, Model), isinstance(model, Transformer)))
     rec("model_no_attribute", lambda: model.fooBarBaz)
     rec("model_class", lambda: (type(model).__name__, type(model).__module__.split(".")[-1]))
-    rec("fit_class_param", lambda: est.fit(model_cases.df, {type(est).maxIter: 3}).getMaxIter())
+    getter = "get" + class_param[0].upper() + class_param[1:]
+    rec(
+        "fit_class_param",
+        lambda: getattr(est.fit(df, {getattr(type(est), class_param): value}), getter)(),
+    )
     rec("model_explainParams", lambda: model.explainParams())
     rec(
         "model_extract",
@@ -347,9 +591,303 @@ def persistence_cases(rec, est, model, model_class, df, base, summary_property=T
     shutil.rmtree(base, ignore_errors=True)
 
 
+def _metadata(path):
+    """The metadata that a save wrote at `path` (of the server's file system, which is this one's),
+    without its timestamp."""
+    import glob
+
+    metadata = json.loads(open(glob.glob(path + "/metadata/part-*")[0]).read())
+    metadata.pop("timestamp")
+    return metadata
+
+
+def _pipeline_live_cases(rec, spark, base):
+    """The fit, transform and persistence cases of the Pipeline and the PipelineModel."""
+    import os
+
+    pipeline_class, model_class = classes("Pipeline")
+    df = _linear_svc_frame(spark)
+    kmeans, svc = _stages()
+    pipeline = pipeline_class(stages=[kmeans, svc])
+    model = pipeline.fit(df)
+    rec("fit_stages", lambda: [type(s).__name__ for s in model.stages])
+    rec("fit_new_uid", lambda: model.uid != pipeline.uid)
+    rec("fit_stage_uids", lambda: [s.uid for s in model.stages] == [kmeans.uid, svc.uid])
+    rec("transform", lambda: model.transform(df).select("cluster", "prediction"))
+    rec(
+        "transform_map",
+        lambda: model.transform(df, {model.stages[1].threshold: 100.0}).select("prediction"),
+    )
+    rec("fit_map", lambda: pipeline.fit(df, {svc.maxIter: 2}).stages[1].getMaxIter())
+    rec(
+        "fit_list",
+        lambda: [m.stages[1].getMaxIter() for m in pipeline.fit(df, [{svc.maxIter: 2}, {}])],
+    )
+    rec(
+        "fitMultiple",
+        lambda: sorted(
+            (i, m.stages[1].getMaxIter())
+            for i, m in pipeline.fitMultiple(df, [{svc.maxIter: 2}, {svc.maxIter: 3}])
+        ),
+    )
+    # A stage after the last estimator is kept as it is.
+    trailing = pipeline_class(stages=[svc, model.stages[0]])
+    rec(
+        "fit_trailing_transformer",
+        lambda: (lambda m: (type(m.stages[1]).__name__, m.stages[1] is model.stages[0]))(
+            trailing.fit(df)
+        ),
+    )
+    shutil.rmtree(base, ignore_errors=True)
+    rec("save", lambda: pipeline.write().overwrite().save(base + "/pipeline"))
+    rec("save_again", lambda: pipeline.save(base + "/pipeline"))
+    rec("metadata", lambda: _metadata(base + "/pipeline"))
+    rec(
+        "stage_dirs",
+        lambda: sorted(d.split("_", 1) for d in os.listdir(base + "/pipeline/stages")),
+    )
+    rec("stage_metadata", lambda: _metadata(base + "/pipeline/stages/1_" + svc.uid))
+    # A directory of another object has no stageUids in its params.
+    rec("load_not_a_pipeline", lambda: pipeline_class.load(base + "/pipeline/stages/1_" + svc.uid))
+    rec(
+        "model_load_not_a_pipeline",
+        lambda: model_class.load(base + "/pipeline/stages/1_" + svc.uid),
+    )
+    loaded = pipeline_class.load(base + "/pipeline")
+    rec(
+        "load",
+        lambda: (
+            loaded.uid == pipeline.uid,
+            [type(s).__name__ for s in loaded.getStages()],
+            [s.uid for s in loaded.getStages()] == [kmeans.uid, svc.uid],
+            loaded.getStages()[1].getMaxIter(),
+        ),
+    )
+    rec("model_save", lambda: model.write().overwrite().save(base + "/model"))
+    rec("model_metadata", lambda: _metadata(base + "/model"))
+    loaded_model = model_class.load(base + "/model")
+    rec(
+        "model_load",
+        lambda: (loaded_model.uid == model.uid, [type(s).__name__ for s in loaded_model.stages]),
+    )
+    rec("model_load_transform", lambda: loaded_model.transform(df).select("cluster", "prediction"))
+    from pyspark.ml.base import Transformer
+
+    class WriteOnly(Transformer):
+        """A transformer of the user's that has a `write`, but is no `MLWritable`."""
+
+        def _transform(self, dataset):
+            return dataset
+
+        def write(self):
+            raise AssertionError("not reached")
+
+    rec(
+        "save_unwritable_stage",
+        lambda: pipeline_class(stages=[WriteOnly()]).write().overwrite().save(base + "/unwritable"),
+    )
+    shutil.rmtree(base, ignore_errors=True)
+
+
+def _tuning_frame(spark):
+    """A DataFrame of 40 rows of two features, a binary label and a fold of each row, of one
+    partition (of which `rand` of a seed is the same on each run)."""
+    from pyspark.ml.linalg import Vectors
+
+    rows = [
+        (Vectors.dense([float(i % 7), float(i % 3)]), float(i % 2), i % 3 % 2)
+        for i in range(40)
+    ]
+    return spark.createDataFrame(rows, ["features", "label", "fold"]).coalesce(1)
+
+
+def _metrics(model, name):
+    """The metrics of a validator's model, and the type of each."""
+    metrics = model.avgMetrics if name == "CrossValidator" else model.validationMetrics
+    return [round(m, 9) for m in metrics], sorted({type(m).__name__ for m in metrics})
+
+
+def _validator_live_cases(rec, spark, base, name):
+    """The fit, transform, copy and persistence cases of a validator and its model, of the case
+    set `name` (CrossValidator or TrainValidationSplit)."""
+    import os
+
+    from pyspark.ml import tuning
+    from pyspark.ml.evaluation import BinaryClassificationEvaluator
+
+    cls, model_class = classes(name)
+    svc_class, svc_model_class = classes("LinearSVC")
+    pipeline_class = classes("Pipeline")[0]
+    df = _tuning_frame(spark)
+    svc = svc_class(maxIter=3)
+    grid = tuning.ParamGridBuilder().addGrid(svc.regParam, [0.1, 1.0]).build()
+    evaluator = BinaryClassificationEvaluator()
+    own = dict(numFolds=2) if name == "CrossValidator" else {}
+    v = cls(estimator=svc, estimatorParamMaps=grid, evaluator=evaluator, seed=7, **own)
+    model = v.fit(df)
+    rec("fit_class", lambda: (type(model).__name__, model.uid.split("_")[0], model.uid != v.uid))
+    rec("metrics", lambda: _metrics(model, name))
+    if name == "CrossValidator":
+        rec("std_metrics", lambda: [round(m, 9) for m in model.stdMetrics])
+    rec("sub_models_none", lambda: model.subModels is None)
+    rec(
+        "best_model",
+        lambda: (type(model.bestModel).__name__, model.bestModel.getRegParam()),
+    )
+    rec("model_params", lambda: [p.name for p in model.params if model.isSet(p)])
+    rec("model_explainParams", lambda: model.explainParams())
+    rec(
+        "model_estimator_is",
+        lambda: (model.getEstimator() is svc, model.getEvaluator() is evaluator),
+    )
+    rec(
+        "model_extract",
+        lambda: sorted((p.name, repr(x)) for p, x in model.extractParamMap().items()),
+    )
+    rec("transform", lambda: model.transform(df).select("prediction"))
+    rec("transform_map_needs_sub_models", lambda: model.transform(df, {svc.maxIter: 1}))
+    rec("copy_needs_sub_models", lambda: model.copy())
+    rec("fit_map", lambda: _metrics(v.fit(df, {v.parallelism: 2}), name))
+    rec("fit_list", lambda: [_metrics(m, name) for m in v.fit(df, [{v.seed: 7}, {v.seed: 8}])])
+    rec(
+        "fitMultiple",
+        lambda: sorted((i, _metrics(m, name)) for i, m in v.fitMultiple(df, [{}, {v.seed: 8}])),
+    )
+    collected = v.copy({v.collectSubModels: True}).fit(df)
+    if name == "CrossValidator":
+        rec(
+            "sub_models",
+            lambda: [[s.getRegParam() for s in fold] for fold in collected.subModels],
+        )
+    else:
+        rec("sub_models", lambda: [s.getRegParam() for s in collected.subModels])
+    copied = collected.copy({collected.bestModel.threshold: 100.0})
+    rec(
+        "model_copy",
+        lambda: (
+            copied.uid != collected.uid,
+            _metrics(copied, name),
+            copied.bestModel.getThreshold(),
+            collected.bestModel.getThreshold(),
+            [p.name for p in copied.params if copied.isSet(p)],
+        ),
+    )
+    rec(
+        "transform_map",
+        lambda: collected.transform(df, {collected.bestModel.threshold: 100.0}).select(
+            "prediction"
+        ),
+    )
+    pipeline = pipeline_class(stages=[svc])
+    rec(
+        "fit_pipeline",
+        lambda: _metrics(
+            cls(
+                estimator=pipeline, estimatorParamMaps=grid, evaluator=evaluator, seed=7, **own
+            ).fit(df),
+            name,
+        ),
+    )
+    if name == "CrossValidator":
+        rec("fold_col", lambda: _metrics(v.copy({v.foldCol: "fold"}).fit(df), name))
+        rec("fold_col_out_of_range", lambda: v.copy({v.foldCol: "fold", v.numFolds: 1}).fit(df))
+        rec("fold_col_empty_fold", lambda: v.copy({v.foldCol: "fold", v.numFolds: 3}).fit(df))
+    shutil.rmtree(base, ignore_errors=True)
+    path = base + "/validator"
+    rec("save", lambda: v.save(path))
+    rec("save_again", lambda: v.save(path))
+    rec("save_overwrite", lambda: v.write().overwrite().save(path))
+    rec("metadata", lambda: _metadata(path))
+    rec("dirs", lambda: sorted(os.listdir(path)))
+    loaded = cls.load(path)
+    rec(
+        "load",
+        lambda: (
+            type(loaded).__name__,
+            loaded.uid == v.uid,
+            [p.name for p in loaded.params if loaded.isSet(p)],
+            type(loaded.getEstimator()).__name__,
+            loaded.getEstimator().uid == svc.uid,
+            type(loaded.getEvaluator()).__name__,
+            repr(loaded.getEstimatorParamMaps()),
+            loaded.explainParams(),
+        ),
+    )
+    rec("load_fit", lambda: _metrics(loaded.fit(df), name))
+    model_path = base + "/model"
+    rec("model_save", lambda: collected.save(model_path))
+    rec("model_metadata", lambda: _metadata(model_path))
+    rec("model_dirs", lambda: sorted(os.listdir(model_path)))
+    rec("model_sub_dirs", lambda: sorted(os.listdir(model_path + "/subModels")))
+    loaded_model = model_class.load(model_path)
+    sub_models = loaded_model.subModels
+    if name == "CrossValidator":
+        rec(
+            "model_load_sub_models",
+            lambda: (
+                [[s.getRegParam() for s in fold] for fold in sub_models],
+                # PySpark's reader repeats one list of the models for each fold.
+                sub_models[0] is sub_models[1],
+            ),
+        )
+    else:
+        rec("model_load_sub_models", lambda: [s.getRegParam() for s in sub_models])
+    rec(
+        "model_load",
+        lambda: (
+            type(loaded_model).__name__,
+            loaded_model.uid == collected.uid,
+            _metrics(loaded_model, name),
+            type(loaded_model.bestModel).__name__,
+            [p.name for p in loaded_model.params if loaded_model.isSet(p)],
+            loaded_model.explainParams(),
+        ),
+    )
+    rec("model_load_transform", lambda: loaded_model.transform(df).select("prediction"))
+    rec(
+        "model_save_no_sub_models",
+        lambda: collected.write().option("persistSubModels", "false").overwrite().save(model_path),
+    )
+    rec("model_dirs_no_sub_models", lambda: sorted(os.listdir(model_path)))
+    rec("model_load_no_sub_models", lambda: model_class.load(model_path).subModels)
+    rec(
+        "model_save_bad_option",
+        lambda: collected.write().option("persistSubModels", "maybe").overwrite().save(model_path),
+    )
+    rec(
+        "model_save_none_persisted",
+        lambda: model.write().option("persistSubModels", True).overwrite().save(model_path),
+    )
+    rec("model_save_none_dirs", lambda: sorted(os.listdir(model_path)))
+    nested = cls(estimator=v, estimatorParamMaps=[{}], evaluator=evaluator)
+    rec("save_nested", lambda: nested.write().overwrite().save(base + "/nested"))
+    pipeline_path = base + "/pipeline"
+    of_pipeline = cls(estimator=pipeline, estimatorParamMaps=grid, evaluator=evaluator, **own)
+    rec("save_pipeline", lambda: of_pipeline.save(pipeline_path))
+    rec(
+        "load_pipeline",
+        lambda: (lambda w: (type(w.getEstimator()).__name__, repr(w.getEstimatorParamMaps())))(
+            cls.load(pipeline_path)
+        ),
+    )
+    foreign = cls(
+        estimator=svc, estimatorParamMaps=[{svc_class().maxIter: 1}], evaluator=evaluator
+    )
+    rec("save_foreign_param", lambda: foreign.write().overwrite().save(base + "/foreign"))
+    shutil.rmtree(base, ignore_errors=True)
+
+
 def live_cases(name, spark, base):
     """The model, summary, transform and persistence cases of the case set `name`, against a
     server; `base` is a scratch directory of the server's file system."""
+    if name == "Pipeline":
+        rec = Recorder(base)
+        _pipeline_live_cases(rec, spark, base)
+        return rec.out
+    if name in _VALIDATOR_OWN:
+        rec = Recorder(base)
+        _validator_live_cases(rec, spark, base, name)
+        return rec.out
     estimator, model_class = classes(name)
     rec = Recorder(base)
     if name == "LinearSVC":
@@ -359,8 +897,7 @@ def live_cases(name, spark, base):
         df = _kmeans_frame(spark)
         est = estimator(k=2, maxIter=10)
     model = est.fit(df)
-    model_cases.df = df
-    model_cases(rec, est, model)
+    model_cases(rec, est, model, df)
     if name == "LinearSVC":
         _linear_svc_live(rec, model, df)
     else:

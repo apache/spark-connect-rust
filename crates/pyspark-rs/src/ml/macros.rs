@@ -159,19 +159,22 @@ macro_rules! params_api_block {
 /// `RemoteMLWriter` and `RemoteMLReader`. Of `persistence: python`, the class has its own `copy`
 /// and persistence, in PySpark's Python format (a Pipeline or a validator).
 macro_rules! native_pymethods {
+    // The arms of `params_only` come first, each of a section that is not optional: an optional
+    // one before the body of any tokens is ambiguous ("local ambiguity"). The arms without it give
+    // an empty one.
     (
         $ty:ty;
         jvm: $jvm:literal, op: $op:ident;
         params: [
             $( $param:literal => ($getter_py:literal, $getter:ident, $attr:ident) ),* $(,)?
         ];
-        $( params_only: [ $( $po:literal => $po_attr:ident ),* $(,)? ]; )?
+        params_only: [ $( $po:literal => $po_attr:ident ),* $(,)? ];
         $($body:tt)*
     ) => {
         params_api_block! {
             $ty;
             params: [ $( $param => ($getter_py, $getter, $attr) ),* ];
-            params_only: [ $( $( $po => $po_attr ),* )? ];
+            params_only: [ $( $po => $po_attr ),* ];
             {
                 $($body)*
 
@@ -249,17 +252,33 @@ macro_rules! native_pymethods {
     };
     (
         $ty:ty;
+        jvm: $jvm:literal, op: $op:ident;
+        params: [
+            $( $param:literal => ($getter_py:literal, $getter:ident, $attr:ident) ),* $(,)?
+        ];
+        $($body:tt)*
+    ) => {
+        native_pymethods! {
+            $ty;
+            jvm: $jvm, op: $op;
+            params: [ $( $param => ($getter_py, $getter, $attr) ),* ];
+            params_only: [];
+            $($body)*
+        }
+    };
+    (
+        $ty:ty;
         persistence: python;
         params: [
             $( $param:literal => ($getter_py:literal, $getter:ident, $attr:ident) ),* $(,)?
         ];
-        $( params_only: [ $( $po:literal => $po_attr:ident ),* $(,)? ]; )?
+        params_only: [ $( $po:literal => $po_attr:ident ),* $(,)? ];
         $($body:tt)*
     ) => {
         params_api_block! {
             $ty;
             params: [ $( $param => ($getter_py, $getter, $attr) ),* ];
-            params_only: [ $( $( $po => $po_attr ),* )? ];
+            params_only: [ $( $po => $po_attr ),* ];
             {
                 $($body)*
 
@@ -283,6 +302,22 @@ macro_rules! native_pymethods {
             }
         }
     };
+    (
+        $ty:ty;
+        persistence: python;
+        params: [
+            $( $param:literal => ($getter_py:literal, $getter:ident, $attr:ident) ),* $(,)?
+        ];
+        $($body:tt)*
+    ) => {
+        native_pymethods! {
+            $ty;
+            persistence: python;
+            params: [ $( $param => ($getter_py, $getter, $attr) ),* ];
+            params_only: [];
+            $($body)*
+        }
+    };
 }
 
 /// A native model class `$ty` of PySpark's model class `$name` (of the module `$module`) and of
@@ -300,8 +335,8 @@ macro_rules! native_pymethods {
 /// - the `functools.cached_property` members of `$cached` (`"trees" => (trees, make)`, of a
 ///   [`CachedMaker`](super::object::CachedMaker)), which PySpark's `params` walk of `_resetUid`
 ///   reads at a fit (after the summary) and at a load, and which a copy shares, and the methods of
-///   `functools.cache` of the optional `cached_methods` (`"toLocal" => (to_local, make)`), which a
-///   copy does not share;
+///   `functools.cache` of the optional `cached_methods` (`"toLocal" => (to_local, make)`, a section
+///   before `cached`), which a copy does not share;
 /// - `transform`, `copy`, `__repr__` (the server's `toString`, as `JavaModel.__repr__`), `write`,
 ///   `save`, `read` and `load`, `fitted` (of a fit), `of_object` (of an object that a fetch
 ///   returns), and the class's own methods `$body`.
@@ -332,8 +367,9 @@ macro_rules! native_model {
             ),* $(,)?
         ];
         summary: $summary:expr;
-        cached: [ $( $c_py:literal => ($c:ident, $c_make:expr) ),* $(,)? ];
+        // Before `cached`: an optional section before the body of any tokens is ambiguous.
         $( cached_methods: [ $( $cm_py:literal => ($cm:ident, $cm_make:expr) ),* $(,)? ]; )?
+        cached: [ $( $c_py:literal => ($c:ident, $c_make:expr) ),* $(,)? ];
         $($body:tt)*
     ) => {
         #[pyclass(name = $name, module = $module)]

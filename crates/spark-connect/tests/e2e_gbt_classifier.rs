@@ -4,7 +4,7 @@ mod common;
 use common::live_session;
 use spark_connect::column::{col, lit_double, lit_string};
 use spark_connect::expression::Expression;
-use spark_connect::ml::{Estimator, GBTClassifier};
+use spark_connect::ml::{Estimator, GBTClassifier, Model, Transformer};
 use spark_connect::{Column, DataFrame, SparkSession};
 
 fn vectors(s: &SparkSession, sql: &str, name: &str) -> DataFrame {
@@ -62,7 +62,7 @@ fn gbt_classifier_learns_nonlinear_labels_and_keeps_cached_models_alive() {
         "input",
     );
     let mut estimator = deterministic()
-        .set_feature_col("input")
+        .set_features_col("input")
         .set_label_col("target")
         .set_prediction_col("class")
         .set_probability_col("probs")
@@ -95,7 +95,7 @@ fn gbt_classifier_learns_nonlinear_labels_and_keeps_cached_models_alive() {
         };
         r.id
     };
-    assert_ne!(object_id(first.as_ref()), object_id(second.as_ref()));
+    assert_ne!(object_id(&first), object_id(&second));
     let mut cloned = first.clone_box();
     let delayed = first
         .transform(&held_out)

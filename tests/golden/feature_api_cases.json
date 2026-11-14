@@ -1,0 +1,5068 @@
+{
+ "Binarizer": {
+  "live": {
+   "copy_map": [
+    "ok",
+    "'Binarizer_<uid>__output'"
+   ],
+   "load_missing": [
+    "AnalysisException",
+    "[PATH_NOT_FOUND] Path does not exist: file:<path>/missing/metadata. SQLSTATE: 42K03"
+   ],
+   "loaded_output_default": [
+    "ok",
+    "'Binarizer_<uid>__output'"
+   ],
+   "loaded_output_is_set": [
+    "ok",
+    "False"
+   ],
+   "loaded_params": [
+    "ok",
+    [
+     [
+      "'inputCol'",
+      "\"'x'\""
+     ],
+     [
+      "'outputCol'",
+      "\"'Binarizer_<uid>__output'\""
+     ],
+     [
+      "'threshold'",
+      "'0.5'"
+     ]
+    ]
+   ],
+   "loaded_transform": [
+    "ok",
+    "{'columns': ['x', 'a', 'b', 's', 'tokens', 'v', 'i', 'Binarizer_<uid>__output'], 'rows': [\"(0.2, 3.0, 5.0, 'a  quick test', ['a', 'quick', 'test'], DenseVector([0.5, -1.0]), 0.0, 0.0)\", \"(0.7, 1.0, 2.0, 'Hello big World', ['hello', 'big', 'world'], DenseVector([3.0, 4.0]), 1.0, 1.0)\"]}"
+   ],
+   "loaded_uid": [
+    "ok",
+    "True"
+   ],
+   "save": [
+    "ok",
+    "None"
+   ],
+   "save_again": [
+    "UnknownException",
+    "(java.io.IOException) Path <path>/stage already exists. To overwrite it, please use write.overwrite().save(path) for Scala and use write().overwrite().save(path) for Java and Python."
+   ],
+   "transform": [
+    "ok",
+    "{'columns': ['x', 'a', 'b', 's', 'tokens', 'v', 'i', 'Binarizer_<uid>__output'], 'rows': [\"(0.2, 3.0, 5.0, 'a  quick test', ['a', 'quick', 'test'], DenseVector([0.5, -1.0]), 0.0, 0.0)\", \"(0.7, 1.0, 2.0, 'Hello big World', ['hello', 'big', 'world'], DenseVector([3.0, 4.0]), 1.0, 1.0)\"]}"
+   ],
+   "transform_bad_params": [
+    "TypeError",
+    "Params must be a param map but got <class 'int'>."
+   ],
+   "transform_columns": [
+    "ok",
+    [
+     "'x'",
+     "'a'",
+     "'b'",
+     "'s'",
+     "'tokens'",
+     "'v'",
+     "'i'",
+     "'Binarizer_<uid>__output'"
+    ]
+   ],
+   "transform_map": [
+    "ok",
+    [
+     "'x'",
+     "'a'",
+     "'b'",
+     "'s'",
+     "'tokens'",
+     "'v'",
+     "'i'",
+     "'Binarizer_<uid>__output'"
+    ]
+   ]
+  },
+  "offline": {
+   "class": [
+    "ok",
+    [
+     "'Binarizer'",
+     "'feature'"
+    ]
+   ],
+   "copy_extract": [
+    "ok",
+    [
+     [
+      "'inputCol'",
+      "\"'x'\""
+     ],
+     [
+      "'outputCol'",
+      "\"'Binarizer_<uid>__output'\""
+     ],
+     [
+      "'threshold'",
+      "'0.5'"
+     ]
+    ]
+   ],
+   "copy_same_uid": [
+    "ok",
+    "True"
+   ],
+   "explainParam_inputCol": [
+    "ok",
+    "'inputCol: input column name. (current: x)'"
+   ],
+   "explainParam_inputCols": [
+    "ok",
+    "'inputCols: input column names. (undefined)'"
+   ],
+   "explainParam_outputCol": [
+    "ok",
+    "'outputCol: output column name. (default: Binarizer_<uid>__output)'"
+   ],
+   "explainParam_outputCols": [
+    "ok",
+    "'outputCols: output column names. (undefined)'"
+   ],
+   "explainParam_threshold": [
+    "ok",
+    "'threshold: Param for threshold used to binarize continuous features. The features greater than the threshold will be binarized to 1.0. The features equal to or less than the threshold will be binarized to 0.0 (default: 0.0, current: 0.5)'"
+   ],
+   "explainParam_thresholds": [
+    "ok",
+    "'thresholds: Param for array of threshold used to binarize continuous features. This is for multiple columns input. If transforming multiple columns and thresholds is not set, but threshold is set, then threshold will be applied across all columns. (undefined)'"
+   ],
+   "explainParams": [
+    "ok",
+    "'inputCol: input column name. (current: x)\\ninputCols: input column names. (undefined)\\noutputCol: output column name. (default: Binarizer_<uid>__output)\\noutputCols: output column names. (undefined)\\nthreshold: Param for threshold used to binarize continuous features. The features greater than the threshold will be binarized to 1.0. The features equal to or less than the threshold will be binarized to 0.0 (default: 0.0, current: 0.5)\\nthresholds: Param for array of threshold used to binarize continuous features. This is for multiple columns input. If transforming multiple columns and thresholds is not set, but threshold is set, then threshold will be applied across all columns. (undefined)'"
+   ],
+   "extract": [
+    "ok",
+    [
+     [
+      "'inputCol'",
+      "\"'x'\""
+     ],
+     [
+      "'outputCol'",
+      "\"'Binarizer_<uid>__output'\""
+     ],
+     [
+      "'threshold'",
+      "'0.5'"
+     ]
+    ]
+   ],
+   "getInputCol": [
+    "ok",
+    "'x'"
+   ],
+   "getInputCols": [
+    "KeyError",
+    "Param(parent='Binarizer_<uid>', name='inputCols', doc='input column names.')"
+   ],
+   "getOutputCol": [
+    "ok",
+    "'Binarizer_<uid>__output'"
+   ],
+   "getOutputCols": [
+    "KeyError",
+    "Param(parent='Binarizer_<uid>', name='outputCols', doc='output column names.')"
+   ],
+   "getParam_nope": [
+    "AttributeError",
+    "'Binarizer' object has no attribute 'nope'"
+   ],
+   "getThreshold": [
+    "ok",
+    "'0.5'"
+   ],
+   "getThresholds": [
+    "KeyError",
+    "Param(parent='Binarizer_<uid>', name='thresholds', doc='Param for array of threshold used to binarize continuous features. This is for multiple columns input. If transforming multiple columns and thre"
+   ],
+   "hasDefault_inputCol": [
+    "ok",
+    "False"
+   ],
+   "hasDefault_inputCols": [
+    "ok",
+    "False"
+   ],
+   "hasDefault_outputCol": [
+    "ok",
+    "True"
+   ],
+   "hasDefault_outputCols": [
+    "ok",
+    "False"
+   ],
+   "hasDefault_threshold": [
+    "ok",
+    "True"
+   ],
+   "hasDefault_thresholds": [
+    "ok",
+    "False"
+   ],
+   "isDefined_inputCol": [
+    "ok",
+    "True"
+   ],
+   "isDefined_inputCols": [
+    "ok",
+    "False"
+   ],
+   "isDefined_outputCol": [
+    "ok",
+    "True"
+   ],
+   "isDefined_outputCols": [
+    "ok",
+    "False"
+   ],
+   "isDefined_threshold": [
+    "ok",
+    "True"
+   ],
+   "isDefined_thresholds": [
+    "ok",
+    "False"
+   ],
+   "isSet_inputCol": [
+    "ok",
+    "True"
+   ],
+   "isSet_inputCols": [
+    "ok",
+    "False"
+   ],
+   "isSet_outputCol": [
+    "ok",
+    "False"
+   ],
+   "isSet_outputCols": [
+    "ok",
+    "False"
+   ],
+   "isSet_threshold": [
+    "ok",
+    "True"
+   ],
+   "isSet_thresholds": [
+    "ok",
+    "False"
+   ],
+   "isinstance_params": [
+    "ok",
+    "True"
+   ],
+   "isinstance_transformer": [
+    "ok",
+    "True"
+   ],
+   "no_attribute": [
+    "AttributeError",
+    "'Binarizer' object has no attribute 'fooBarBaz'"
+   ],
+   "param_docs": [
+    "ok",
+    [
+     "'input column name.'",
+     "'input column names.'",
+     "'output column name.'",
+     "'output column names.'",
+     "'Param for threshold used to binarize continuous features. The features greater than the threshold will be binarized to 1.0. The features equal to or less than the threshold will be binarized to 0.0'",
+     "'Param for array of threshold used to binarize continuous features. This is for multiple columns input. If transforming multiple columns and thresholds is not set, but threshold is set, then threshold will be applied across all columns.'"
+    ]
+   ],
+   "param_names": [
+    "ok",
+    [
+     "'inputCol'",
+     "'inputCols'",
+     "'outputCol'",
+     "'outputCols'",
+     "'threshold'",
+     "'thresholds'"
+    ]
+   ],
+   "param_parents": [
+    "ok",
+    [
+     "'Binarizer_<uid>'",
+     "'Binarizer_<uid>'",
+     "'Binarizer_<uid>'",
+     "'Binarizer_<uid>'",
+     "'Binarizer_<uid>'",
+     "'Binarizer_<uid>'"
+    ]
+   ],
+   "read_class": [
+    "ok",
+    "'RemoteMLReader'"
+   ],
+   "repr": [
+    "ok",
+    "'Binarizer_<uid>'"
+   ],
+   "setParams_returns_self": [
+    "ok",
+    "True"
+   ],
+   "set_bad_name": [
+    "AttributeError",
+    "'str' object has no attribute 'parent'"
+   ],
+   "uid_class": [
+    "ok",
+    "'Binarizer'"
+   ],
+   "write_class": [
+    "ok",
+    "'RemoteMLWriter'"
+   ],
+   "writer_no_attribute": [
+    "AttributeError",
+    "'RemoteMLWriter' object has no attribute 'fooBarBaz'"
+   ]
+  }
+ },
+ "Bucketizer": {
+  "live": {
+   "copy_map": [
+    "ok",
+    "'Bucketizer_<uid>__output'"
+   ],
+   "load_missing": [
+    "AnalysisException",
+    "[PATH_NOT_FOUND] Path does not exist: file:<path>/missing/metadata. SQLSTATE: 42K03"
+   ],
+   "loaded_output_default": [
+    "ok",
+    "'Bucketizer_<uid>__output'"
+   ],
+   "loaded_output_is_set": [
+    "ok",
+    "False"
+   ],
+   "loaded_params": [
+    "ok",
+    [
+     [
+      "'handleInvalid'",
+      "\"'error'\""
+     ],
+     [
+      "'inputCol'",
+      "\"'x'\""
+     ],
+     [
+      "'outputCol'",
+      "\"'Bucketizer_<uid>__output'\""
+     ],
+     [
+      "'splits'",
+      "'[0.0, 0.5, 1.0]'"
+     ]
+    ]
+   ],
+   "loaded_transform": [
+    "ok",
+    "{'columns': ['x', 'a', 'b', 's', 'tokens', 'v', 'i', 'Bucketizer_<uid>__output'], 'rows': [\"(0.2, 3.0, 5.0, 'a  quick test', ['a', 'quick', 'test'], DenseVector([0.5, -1.0]), 0.0, 0.0)\", \"(0.7, 1.0, 2.0, 'Hello big World', ['hello', 'big', 'world'], DenseVector([3.0, 4.0]), 1.0, 1.0)\"]}"
+   ],
+   "loaded_uid": [
+    "ok",
+    "True"
+   ],
+   "save": [
+    "ok",
+    "None"
+   ],
+   "save_again": [
+    "UnknownException",
+    "(java.io.IOException) Path <path>/stage already exists. To overwrite it, please use write.overwrite().save(path) for Scala and use write().overwrite().save(path) for Java and Python."
+   ],
+   "transform": [
+    "ok",
+    "{'columns': ['x', 'a', 'b', 's', 'tokens', 'v', 'i', 'Bucketizer_<uid>__output'], 'rows': [\"(0.2, 3.0, 5.0, 'a  quick test', ['a', 'quick', 'test'], DenseVector([0.5, -1.0]), 0.0, 0.0)\", \"(0.7, 1.0, 2.0, 'Hello big World', ['hello', 'big', 'world'], DenseVector([3.0, 4.0]), 1.0, 1.0)\"]}"
+   ],
+   "transform_bad_params": [
+    "TypeError",
+    "Params must be a param map but got <class 'int'>."
+   ],
+   "transform_columns": [
+    "ok",
+    [
+     "'x'",
+     "'a'",
+     "'b'",
+     "'s'",
+     "'tokens'",
+     "'v'",
+     "'i'",
+     "'Bucketizer_<uid>__output'"
+    ]
+   ],
+   "transform_map": [
+    "ok",
+    [
+     "'x'",
+     "'a'",
+     "'b'",
+     "'s'",
+     "'tokens'",
+     "'v'",
+     "'i'",
+     "'Bucketizer_<uid>__output'"
+    ]
+   ]
+  },
+  "offline": {
+   "class": [
+    "ok",
+    [
+     "'Bucketizer'",
+     "'feature'"
+    ]
+   ],
+   "copy_extract": [
+    "ok",
+    [
+     [
+      "'handleInvalid'",
+      "\"'error'\""
+     ],
+     [
+      "'inputCol'",
+      "\"'x'\""
+     ],
+     [
+      "'outputCol'",
+      "\"'Bucketizer_<uid>__output'\""
+     ],
+     [
+      "'splits'",
+      "'[0.0, 0.5, 1.0]'"
+     ]
+    ]
+   ],
+   "copy_same_uid": [
+    "ok",
+    "True"
+   ],
+   "explainParam_handleInvalid": [
+    "ok",
+    "\"handleInvalid: how to handle invalid entries containing NaN values. Values outside the splits will always be treated as errors. Options are 'skip' (filter out rows with invalid values), 'error' (throw an error), or 'keep' (keep invalid values in a special additional bucket). Note that in the multiple column case, the invalid handling is applied to all columns. That said for 'error' it will throw an error if any invalids are found in any column, for 'skip' it will skip rows with any invalids in any columns, etc. (default: error)\""
+   ],
+   "explainParam_inputCol": [
+    "ok",
+    "'inputCol: input column name. (current: x)'"
+   ],
+   "explainParam_inputCols": [
+    "ok",
+    "'inputCols: input column names. (undefined)'"
+   ],
+   "explainParam_outputCol": [
+    "ok",
+    "'outputCol: output column name. (default: Bucketizer_<uid>__output)'"
+   ],
+   "explainParam_outputCols": [
+    "ok",
+    "'outputCols: output column names. (undefined)'"
+   ],
+   "explainParam_splits": [
+    "ok",
+    "'splits: Split points for mapping continuous features into buckets. With n+1 splits, there are n buckets. A bucket defined by splits x,y holds values in the range [x,y) except the last bucket, which also includes y. The splits should be of length >= 3 and strictly increasing. Values at -inf, inf must be explicitly provided to cover all Double values; otherwise, values outside the splits specified will be treated as errors. (current: [0.0, 0.5, 1.0])'"
+   ],
+   "explainParam_splitsArray": [
+    "ok",
+    "'splitsArray: The array of split points for mapping continuous features into buckets for multiple columns. For each input column, with n+1 splits, there are n buckets. A bucket defined by splits x,y holds values in the range [x,y) except the last bucket, which also includes y. The splits should be of length >= 3 and strictly increasing. Values at -inf, inf must be explicitly provided to cover all Double values; otherwise, values outside the splits specified will be treated as errors. (undefined)'"
+   ],
+   "explainParams": [
+    "ok",
+    "\"handleInvalid: how to handle invalid entries containing NaN values. Values outside the splits will always be treated as errors. Options are 'skip' (filter out rows with invalid values), 'error' (throw an error), or 'keep' (keep invalid values in a special additional bucket). Note that in the multiple column case, the invalid handling is applied to all columns. That said for 'error' it will throw an error if any invalids are found in any column, for 'skip' it will skip rows with any invalids in any columns, etc. (default: error)\\ninputCol: input column name. (current: x)\\ninputCols: input column names. (undefined)\\noutputCol: output column name. (default: Bucketizer_<uid>__output)\\noutputCols: output column names. (undefined)\\nsplits: Split points for mapping continuous features into buckets. With n+1 splits, there are n buckets. A bucket defined by splits x,y holds values in the range [x,y) except the last bucket, which also includes y. The splits should be of length >= 3 and strictly increasing. Values at -inf, inf must be explicitly provided to cover all Double values; otherwise, values outside the splits specified will be treated as errors. (current: [0.0, 0.5, 1.0])\\nsplitsArray: The array of split points for mapping continuous features into buckets for multiple columns. For each input column, with n+1 splits, there are n buckets. A bucket defined by splits x,y holds values in the range [x,y) except the last bucket, which also includes y. The splits should be of length >= 3 and strictly increasing. Values at -inf, inf must be explicitly provided to cover all Double values; otherwise, values outside the splits specified will be treated as errors. (undefined)\""
+   ],
+   "extract": [
+    "ok",
+    [
+     [
+      "'handleInvalid'",
+      "\"'error'\""
+     ],
+     [
+      "'inputCol'",
+      "\"'x'\""
+     ],
+     [
+      "'outputCol'",
+      "\"'Bucketizer_<uid>__output'\""
+     ],
+     [
+      "'splits'",
+      "'[0.0, 0.5, 1.0]'"
+     ]
+    ]
+   ],
+   "getHandleInvalid": [
+    "ok",
+    "'error'"
+   ],
+   "getInputCol": [
+    "ok",
+    "'x'"
+   ],
+   "getInputCols": [
+    "KeyError",
+    "Param(parent='Bucketizer_<uid>', name='inputCols', doc='input column names.')"
+   ],
+   "getOutputCol": [
+    "ok",
+    "'Bucketizer_<uid>__output'"
+   ],
+   "getOutputCols": [
+    "KeyError",
+    "Param(parent='Bucketizer_<uid>', name='outputCols', doc='output column names.')"
+   ],
+   "getParam_nope": [
+    "AttributeError",
+    "'Bucketizer' object has no attribute 'nope'"
+   ],
+   "getSplits": [
+    "ok",
+    "'[0.0, 0.5, 1.0]'"
+   ],
+   "getSplitsArray": [
+    "KeyError",
+    "Param(parent='Bucketizer_<uid>', name='splitsArray', doc='The array of split points for mapping continuous features into buckets for multiple columns. For each input column, with n+1 splits, there are"
+   ],
+   "hasDefault_handleInvalid": [
+    "ok",
+    "True"
+   ],
+   "hasDefault_inputCol": [
+    "ok",
+    "False"
+   ],
+   "hasDefault_inputCols": [
+    "ok",
+    "False"
+   ],
+   "hasDefault_outputCol": [
+    "ok",
+    "True"
+   ],
+   "hasDefault_outputCols": [
+    "ok",
+    "False"
+   ],
+   "hasDefault_splits": [
+    "ok",
+    "False"
+   ],
+   "hasDefault_splitsArray": [
+    "ok",
+    "False"
+   ],
+   "isDefined_handleInvalid": [
+    "ok",
+    "True"
+   ],
+   "isDefined_inputCol": [
+    "ok",
+    "True"
+   ],
+   "isDefined_inputCols": [
+    "ok",
+    "False"
+   ],
+   "isDefined_outputCol": [
+    "ok",
+    "True"
+   ],
+   "isDefined_outputCols": [
+    "ok",
+    "False"
+   ],
+   "isDefined_splits": [
+    "ok",
+    "True"
+   ],
+   "isDefined_splitsArray": [
+    "ok",
+    "False"
+   ],
+   "isSet_handleInvalid": [
+    "ok",
+    "False"
+   ],
+   "isSet_inputCol": [
+    "ok",
+    "True"
+   ],
+   "isSet_inputCols": [
+    "ok",
+    "False"
+   ],
+   "isSet_outputCol": [
+    "ok",
+    "False"
+   ],
+   "isSet_outputCols": [
+    "ok",
+    "False"
+   ],
+   "isSet_splits": [
+    "ok",
+    "True"
+   ],
+   "isSet_splitsArray": [
+    "ok",
+    "False"
+   ],
+   "isinstance_params": [
+    "ok",
+    "True"
+   ],
+   "isinstance_transformer": [
+    "ok",
+    "True"
+   ],
+   "no_attribute": [
+    "AttributeError",
+    "'Bucketizer' object has no attribute 'fooBarBaz'"
+   ],
+   "param_docs": [
+    "ok",
+    [
+     "\"how to handle invalid entries containing NaN values. Values outside the splits will always be treated as errors. Options are 'skip' (filter out rows with invalid values), 'error' (throw an error), or 'keep' (keep invalid values in a special additional bucket). Note that in the multiple column case, the invalid handling is applied to all columns. That said for 'error' it will throw an error if any invalids are found in any column, for 'skip' it will skip rows with any invalids in any columns, etc.\"",
+     "'input column name.'",
+     "'input column names.'",
+     "'output column name.'",
+     "'output column names.'",
+     "'Split points for mapping continuous features into buckets. With n+1 splits, there are n buckets. A bucket defined by splits x,y holds values in the range [x,y) except the last bucket, which also includes y. The splits should be of length >= 3 and strictly increasing. Values at -inf, inf must be explicitly provided to cover all Double values; otherwise, values outside the splits specified will be treated as errors.'",
+     "'The array of split points for mapping continuous features into buckets for multiple columns. For each input column, with n+1 splits, there are n buckets. A bucket defined by splits x,y holds values in the range [x,y) except the last bucket, which also includes y. The splits should be of length >= 3 and strictly increasing. Values at -inf, inf must be explicitly provided to cover all Double values; otherwise, values outside the splits specified will be treated as errors.'"
+    ]
+   ],
+   "param_names": [
+    "ok",
+    [
+     "'handleInvalid'",
+     "'inputCol'",
+     "'inputCols'",
+     "'outputCol'",
+     "'outputCols'",
+     "'splits'",
+     "'splitsArray'"
+    ]
+   ],
+   "param_parents": [
+    "ok",
+    [
+     "'Bucketizer_<uid>'",
+     "'Bucketizer_<uid>'",
+     "'Bucketizer_<uid>'",
+     "'Bucketizer_<uid>'",
+     "'Bucketizer_<uid>'",
+     "'Bucketizer_<uid>'",
+     "'Bucketizer_<uid>'"
+    ]
+   ],
+   "read_class": [
+    "ok",
+    "'RemoteMLReader'"
+   ],
+   "repr": [
+    "ok",
+    "'Bucketizer_<uid>'"
+   ],
+   "setParams_returns_self": [
+    "ok",
+    "True"
+   ],
+   "set_bad_name": [
+    "AttributeError",
+    "'str' object has no attribute 'parent'"
+   ],
+   "uid_class": [
+    "ok",
+    "'Bucketizer'"
+   ],
+   "write_class": [
+    "ok",
+    "'RemoteMLWriter'"
+   ],
+   "writer_no_attribute": [
+    "AttributeError",
+    "'RemoteMLWriter' object has no attribute 'fooBarBaz'"
+   ]
+  }
+ },
+ "DCT": {
+  "live": {
+   "copy_map": [
+    "ok",
+    "'DCT_<uid>__output'"
+   ],
+   "load_missing": [
+    "AnalysisException",
+    "[PATH_NOT_FOUND] Path does not exist: file:<path>/missing/metadata. SQLSTATE: 42K03"
+   ],
+   "loaded_output_default": [
+    "ok",
+    "'DCT_<uid>__output'"
+   ],
+   "loaded_output_is_set": [
+    "ok",
+    "False"
+   ],
+   "loaded_params": [
+    "ok",
+    [
+     [
+      "'inputCol'",
+      "\"'v'\""
+     ],
+     [
+      "'inverse'",
+      "'False'"
+     ],
+     [
+      "'outputCol'",
+      "\"'DCT_<uid>__output'\""
+     ]
+    ]
+   ],
+   "loaded_transform": [
+    "ok",
+    "{'columns': ['x', 'a', 'b', 's', 'tokens', 'v', 'i', 'DCT_<uid>__output'], 'rows': [\"(0.2, 3.0, 5.0, 'a  quick test', ['a', 'quick', 'test'], DenseVector([0.5, -1.0]), 0.0, DenseVector([-0.3536, 1.0607]))\", \"(0.7, 1.0, 2.0, 'Hello big World', ['hello', 'big', 'world'], DenseVector([3.0, 4.0]), 1.0, DenseVector([4.9497, -0.7071]))\"]}"
+   ],
+   "loaded_uid": [
+    "ok",
+    "True"
+   ],
+   "save": [
+    "ok",
+    "None"
+   ],
+   "save_again": [
+    "UnknownException",
+    "(java.io.IOException) Path <path>/stage already exists. To overwrite it, please use write.overwrite().save(path) for Scala and use write().overwrite().save(path) for Java and Python."
+   ],
+   "transform": [
+    "ok",
+    "{'columns': ['x', 'a', 'b', 's', 'tokens', 'v', 'i', 'DCT_<uid>__output'], 'rows': [\"(0.2, 3.0, 5.0, 'a  quick test', ['a', 'quick', 'test'], DenseVector([0.5, -1.0]), 0.0, DenseVector([-0.3536, 1.0607]))\", \"(0.7, 1.0, 2.0, 'Hello big World', ['hello', 'big', 'world'], DenseVector([3.0, 4.0]), 1.0, DenseVector([4.9497, -0.7071]))\"]}"
+   ],
+   "transform_bad_params": [
+    "TypeError",
+    "Params must be a param map but got <class 'int'>."
+   ],
+   "transform_columns": [
+    "ok",
+    [
+     "'x'",
+     "'a'",
+     "'b'",
+     "'s'",
+     "'tokens'",
+     "'v'",
+     "'i'",
+     "'DCT_<uid>__output'"
+    ]
+   ],
+   "transform_map": [
+    "ok",
+    [
+     "'x'",
+     "'a'",
+     "'b'",
+     "'s'",
+     "'tokens'",
+     "'v'",
+     "'i'",
+     "'DCT_<uid>__output'"
+    ]
+   ]
+  },
+  "offline": {
+   "class": [
+    "ok",
+    [
+     "'DCT'",
+     "'feature'"
+    ]
+   ],
+   "copy_extract": [
+    "ok",
+    [
+     [
+      "'inputCol'",
+      "\"'v'\""
+     ],
+     [
+      "'inverse'",
+      "'False'"
+     ],
+     [
+      "'outputCol'",
+      "\"'DCT_<uid>__output'\""
+     ]
+    ]
+   ],
+   "copy_same_uid": [
+    "ok",
+    "True"
+   ],
+   "explainParam_inputCol": [
+    "ok",
+    "'inputCol: input column name. (current: v)'"
+   ],
+   "explainParam_inverse": [
+    "ok",
+    "'inverse: Set transformer to perform inverse DCT, default False. (default: False)'"
+   ],
+   "explainParam_outputCol": [
+    "ok",
+    "'outputCol: output column name. (default: DCT_<uid>__output)'"
+   ],
+   "explainParams": [
+    "ok",
+    "'inputCol: input column name. (current: v)\\ninverse: Set transformer to perform inverse DCT, default False. (default: False)\\noutputCol: output column name. (default: DCT_<uid>__output)'"
+   ],
+   "extract": [
+    "ok",
+    [
+     [
+      "'inputCol'",
+      "\"'v'\""
+     ],
+     [
+      "'inverse'",
+      "'False'"
+     ],
+     [
+      "'outputCol'",
+      "\"'DCT_<uid>__output'\""
+     ]
+    ]
+   ],
+   "getInputCol": [
+    "ok",
+    "'v'"
+   ],
+   "getInverse": [
+    "ok",
+    "'False'"
+   ],
+   "getOutputCol": [
+    "ok",
+    "'DCT_<uid>__output'"
+   ],
+   "getParam_nope": [
+    "AttributeError",
+    "'DCT' object has no attribute 'nope'"
+   ],
+   "hasDefault_inputCol": [
+    "ok",
+    "False"
+   ],
+   "hasDefault_inverse": [
+    "ok",
+    "True"
+   ],
+   "hasDefault_outputCol": [
+    "ok",
+    "True"
+   ],
+   "isDefined_inputCol": [
+    "ok",
+    "True"
+   ],
+   "isDefined_inverse": [
+    "ok",
+    "True"
+   ],
+   "isDefined_outputCol": [
+    "ok",
+    "True"
+   ],
+   "isSet_inputCol": [
+    "ok",
+    "True"
+   ],
+   "isSet_inverse": [
+    "ok",
+    "False"
+   ],
+   "isSet_outputCol": [
+    "ok",
+    "False"
+   ],
+   "isinstance_params": [
+    "ok",
+    "True"
+   ],
+   "isinstance_transformer": [
+    "ok",
+    "True"
+   ],
+   "no_attribute": [
+    "AttributeError",
+    "'DCT' object has no attribute 'fooBarBaz'"
+   ],
+   "param_docs": [
+    "ok",
+    [
+     "'input column name.'",
+     "'Set transformer to perform inverse DCT, default False.'",
+     "'output column name.'"
+    ]
+   ],
+   "param_names": [
+    "ok",
+    [
+     "'inputCol'",
+     "'inverse'",
+     "'outputCol'"
+    ]
+   ],
+   "param_parents": [
+    "ok",
+    [
+     "'DCT_<uid>'",
+     "'DCT_<uid>'",
+     "'DCT_<uid>'"
+    ]
+   ],
+   "read_class": [
+    "ok",
+    "'RemoteMLReader'"
+   ],
+   "repr": [
+    "ok",
+    "'DCT_<uid>'"
+   ],
+   "setParams_returns_self": [
+    "ok",
+    "True"
+   ],
+   "set_bad_name": [
+    "AttributeError",
+    "'str' object has no attribute 'parent'"
+   ],
+   "uid_class": [
+    "ok",
+    "'DCT'"
+   ],
+   "write_class": [
+    "ok",
+    "'RemoteMLWriter'"
+   ],
+   "writer_no_attribute": [
+    "AttributeError",
+    "'RemoteMLWriter' object has no attribute 'fooBarBaz'"
+   ]
+  }
+ },
+ "ElementwiseProduct": {
+  "live": {
+   "copy_map": [
+    "ok",
+    "'ElementwiseProduct_<uid>__output'"
+   ],
+   "load_missing": [
+    "AnalysisException",
+    "[PATH_NOT_FOUND] Path does not exist: file:<path>/missing/metadata. SQLSTATE: 42K03"
+   ],
+   "loaded_output_default": [
+    "ok",
+    "'ElementwiseProduct_<uid>__output'"
+   ],
+   "loaded_output_is_set": [
+    "ok",
+    "False"
+   ],
+   "loaded_params": [
+    "ok",
+    [
+     [
+      "'inputCol'",
+      "\"'v'\""
+     ],
+     [
+      "'outputCol'",
+      "\"'ElementwiseProduct_<uid>__output'\""
+     ],
+     [
+      "'scalingVec'",
+      "'DenseVector([1.0, 2.0])'"
+     ]
+    ]
+   ],
+   "loaded_transform": [
+    "ok",
+    "{'columns': ['x', 'a', 'b', 's', 'tokens', 'v', 'i', 'ElementwiseProduct_<uid>__output'], 'rows': [\"(0.2, 3.0, 5.0, 'a  quick test', ['a', 'quick', 'test'], DenseVector([0.5, -1.0]), 0.0, DenseVector([0.5, -2.0]))\", \"(0.7, 1.0, 2.0, 'Hello big World', ['hello', 'big', 'world'], DenseVector([3.0, 4.0]), 1.0, DenseVector([3.0, 8.0]))\"]}"
+   ],
+   "loaded_uid": [
+    "ok",
+    "True"
+   ],
+   "save": [
+    "ok",
+    "None"
+   ],
+   "save_again": [
+    "UnknownException",
+    "(java.io.IOException) Path <path>/stage already exists. To overwrite it, please use write.overwrite().save(path) for Scala and use write().overwrite().save(path) for Java and Python."
+   ],
+   "transform": [
+    "ok",
+    "{'columns': ['x', 'a', 'b', 's', 'tokens', 'v', 'i', 'ElementwiseProduct_<uid>__output'], 'rows': [\"(0.2, 3.0, 5.0, 'a  quick test', ['a', 'quick', 'test'], DenseVector([0.5, -1.0]), 0.0, DenseVector([0.5, -2.0]))\", \"(0.7, 1.0, 2.0, 'Hello big World', ['hello', 'big', 'world'], DenseVector([3.0, 4.0]), 1.0, DenseVector([3.0, 8.0]))\"]}"
+   ],
+   "transform_bad_params": [
+    "TypeError",
+    "Params must be a param map but got <class 'int'>."
+   ],
+   "transform_columns": [
+    "ok",
+    [
+     "'x'",
+     "'a'",
+     "'b'",
+     "'s'",
+     "'tokens'",
+     "'v'",
+     "'i'",
+     "'ElementwiseProduct_<uid>__output'"
+    ]
+   ],
+   "transform_map": [
+    "ok",
+    [
+     "'x'",
+     "'a'",
+     "'b'",
+     "'s'",
+     "'tokens'",
+     "'v'",
+     "'i'",
+     "'ElementwiseProduct_<uid>__output'"
+    ]
+   ]
+  },
+  "offline": {
+   "class": [
+    "ok",
+    [
+     "'ElementwiseProduct'",
+     "'feature'"
+    ]
+   ],
+   "copy_extract": [
+    "ok",
+    [
+     [
+      "'inputCol'",
+      "\"'v'\""
+     ],
+     [
+      "'outputCol'",
+      "\"'ElementwiseProduct_<uid>__output'\""
+     ],
+     [
+      "'scalingVec'",
+      "'DenseVector([1.0, 2.0])'"
+     ]
+    ]
+   ],
+   "copy_same_uid": [
+    "ok",
+    "True"
+   ],
+   "explainParam_inputCol": [
+    "ok",
+    "'inputCol: input column name. (current: v)'"
+   ],
+   "explainParam_outputCol": [
+    "ok",
+    "'outputCol: output column name. (default: ElementwiseProduct_<uid>__output)'"
+   ],
+   "explainParam_scalingVec": [
+    "ok",
+    "'scalingVec: Vector for hadamard product. (current: [1.0,2.0])'"
+   ],
+   "explainParams": [
+    "ok",
+    "'inputCol: input column name. (current: v)\\noutputCol: output column name. (default: ElementwiseProduct_<uid>__output)\\nscalingVec: Vector for hadamard product. (current: [1.0,2.0])'"
+   ],
+   "extract": [
+    "ok",
+    [
+     [
+      "'inputCol'",
+      "\"'v'\""
+     ],
+     [
+      "'outputCol'",
+      "\"'ElementwiseProduct_<uid>__output'\""
+     ],
+     [
+      "'scalingVec'",
+      "'DenseVector([1.0, 2.0])'"
+     ]
+    ]
+   ],
+   "getInputCol": [
+    "ok",
+    "'v'"
+   ],
+   "getOutputCol": [
+    "ok",
+    "'ElementwiseProduct_<uid>__output'"
+   ],
+   "getParam_nope": [
+    "AttributeError",
+    "'ElementwiseProduct' object has no attribute 'nope'"
+   ],
+   "getScalingVec": [
+    "ok",
+    "'[1.0,2.0]'"
+   ],
+   "hasDefault_inputCol": [
+    "ok",
+    "False"
+   ],
+   "hasDefault_outputCol": [
+    "ok",
+    "True"
+   ],
+   "hasDefault_scalingVec": [
+    "ok",
+    "False"
+   ],
+   "isDefined_inputCol": [
+    "ok",
+    "True"
+   ],
+   "isDefined_outputCol": [
+    "ok",
+    "True"
+   ],
+   "isDefined_scalingVec": [
+    "ok",
+    "True"
+   ],
+   "isSet_inputCol": [
+    "ok",
+    "True"
+   ],
+   "isSet_outputCol": [
+    "ok",
+    "False"
+   ],
+   "isSet_scalingVec": [
+    "ok",
+    "True"
+   ],
+   "isinstance_params": [
+    "ok",
+    "True"
+   ],
+   "isinstance_transformer": [
+    "ok",
+    "True"
+   ],
+   "no_attribute": [
+    "AttributeError",
+    "'ElementwiseProduct' object has no attribute 'fooBarBaz'"
+   ],
+   "param_docs": [
+    "ok",
+    [
+     "'input column name.'",
+     "'output column name.'",
+     "'Vector for hadamard product.'"
+    ]
+   ],
+   "param_names": [
+    "ok",
+    [
+     "'inputCol'",
+     "'outputCol'",
+     "'scalingVec'"
+    ]
+   ],
+   "param_parents": [
+    "ok",
+    [
+     "'ElementwiseProduct_<uid>'",
+     "'ElementwiseProduct_<uid>'",
+     "'ElementwiseProduct_<uid>'"
+    ]
+   ],
+   "read_class": [
+    "ok",
+    "'RemoteMLReader'"
+   ],
+   "repr": [
+    "ok",
+    "'ElementwiseProduct_<uid>'"
+   ],
+   "setParams_returns_self": [
+    "ok",
+    "True"
+   ],
+   "set_bad_name": [
+    "AttributeError",
+    "'str' object has no attribute 'parent'"
+   ],
+   "uid_class": [
+    "ok",
+    "'ElementwiseProduct'"
+   ],
+   "write_class": [
+    "ok",
+    "'RemoteMLWriter'"
+   ],
+   "writer_no_attribute": [
+    "AttributeError",
+    "'RemoteMLWriter' object has no attribute 'fooBarBaz'"
+   ]
+  }
+ },
+ "FeatureHasher": {
+  "live": {
+   "copy_map": [
+    "ok",
+    "'FeatureHasher_<uid>__output'"
+   ],
+   "load_missing": [
+    "AnalysisException",
+    "[PATH_NOT_FOUND] Path does not exist: file:<path>/missing/metadata. SQLSTATE: 42K03"
+   ],
+   "loaded_output_default": [
+    "ok",
+    "'FeatureHasher_<uid>__output'"
+   ],
+   "loaded_output_is_set": [
+    "ok",
+    "False"
+   ],
+   "loaded_params": [
+    "ok",
+    [
+     [
+      "'inputCols'",
+      "\"['a', 'b']\""
+     ],
+     [
+      "'numFeatures'",
+      "'16'"
+     ],
+     [
+      "'outputCol'",
+      "\"'FeatureHasher_<uid>__output'\""
+     ]
+    ]
+   ],
+   "loaded_transform": [
+    "ok",
+    "{'columns': ['x', 'a', 'b', 's', 'tokens', 'v', 'i', 'FeatureHasher_<uid>__output'], 'rows': [\"(0.2, 3.0, 5.0, 'a  quick test', ['a', 'quick', 'test'], DenseVector([0.5, -1.0]), 0.0, SparseVector(16, {3: 3.0, 5: 5.0}))\", \"(0.7, 1.0, 2.0, 'Hello big World', ['hello', 'big', 'world'], DenseVector([3.0, 4.0]), 1.0, SparseVector(16, {3: 1.0, 5: 2.0}))\"]}"
+   ],
+   "loaded_uid": [
+    "ok",
+    "True"
+   ],
+   "save": [
+    "ok",
+    "None"
+   ],
+   "save_again": [
+    "UnknownException",
+    "(java.io.IOException) Path <path>/stage already exists. To overwrite it, please use write.overwrite().save(path) for Scala and use write().overwrite().save(path) for Java and Python."
+   ],
+   "transform": [
+    "ok",
+    "{'columns': ['x', 'a', 'b', 's', 'tokens', 'v', 'i', 'FeatureHasher_<uid>__output'], 'rows': [\"(0.2, 3.0, 5.0, 'a  quick test', ['a', 'quick', 'test'], DenseVector([0.5, -1.0]), 0.0, SparseVector(16, {3: 3.0, 5: 5.0}))\", \"(0.7, 1.0, 2.0, 'Hello big World', ['hello', 'big', 'world'], DenseVector([3.0, 4.0]), 1.0, SparseVector(16, {3: 1.0, 5: 2.0}))\"]}"
+   ],
+   "transform_bad_params": [
+    "TypeError",
+    "Params must be a param map but got <class 'int'>."
+   ],
+   "transform_columns": [
+    "ok",
+    [
+     "'x'",
+     "'a'",
+     "'b'",
+     "'s'",
+     "'tokens'",
+     "'v'",
+     "'i'",
+     "'FeatureHasher_<uid>__output'"
+    ]
+   ],
+   "transform_map": [
+    "ok",
+    [
+     "'x'",
+     "'a'",
+     "'b'",
+     "'s'",
+     "'tokens'",
+     "'v'",
+     "'i'",
+     "'FeatureHasher_<uid>__output'"
+    ]
+   ]
+  },
+  "offline": {
+   "class": [
+    "ok",
+    [
+     "'FeatureHasher'",
+     "'feature'"
+    ]
+   ],
+   "copy_extract": [
+    "ok",
+    [
+     [
+      "'inputCols'",
+      "\"['a', 'b']\""
+     ],
+     [
+      "'numFeatures'",
+      "'16'"
+     ],
+     [
+      "'outputCol'",
+      "\"'FeatureHasher_<uid>__output'\""
+     ]
+    ]
+   ],
+   "copy_same_uid": [
+    "ok",
+    "True"
+   ],
+   "explainParam_categoricalCols": [
+    "ok",
+    "'categoricalCols: numeric columns to treat as categorical (undefined)'"
+   ],
+   "explainParam_inputCols": [
+    "ok",
+    "\"inputCols: input column names. (current: ['a', 'b'])\""
+   ],
+   "explainParam_numFeatures": [
+    "ok",
+    "'numFeatures: Number of features. Should be greater than 0. (default: 262144, current: 16)'"
+   ],
+   "explainParam_outputCol": [
+    "ok",
+    "'outputCol: output column name. (default: FeatureHasher_<uid>__output)'"
+   ],
+   "explainParams": [
+    "ok",
+    "\"categoricalCols: numeric columns to treat as categorical (undefined)\\ninputCols: input column names. (current: ['a', 'b'])\\nnumFeatures: Number of features. Should be greater than 0. (default: 262144, current: 16)\\noutputCol: output column name. (default: FeatureHasher_<uid>__output)\""
+   ],
+   "extract": [
+    "ok",
+    [
+     [
+      "'inputCols'",
+      "\"['a', 'b']\""
+     ],
+     [
+      "'numFeatures'",
+      "'16'"
+     ],
+     [
+      "'outputCol'",
+      "\"'FeatureHasher_<uid>__output'\""
+     ]
+    ]
+   ],
+   "getCategoricalCols": [
+    "KeyError",
+    "Param(parent='FeatureHasher_<uid>', name='categoricalCols', doc='numeric columns to treat as categorical')"
+   ],
+   "getInputCols": [
+    "ok",
+    "\"['a', 'b']\""
+   ],
+   "getNumFeatures": [
+    "ok",
+    "'16'"
+   ],
+   "getOutputCol": [
+    "ok",
+    "'FeatureHasher_<uid>__output'"
+   ],
+   "getParam_nope": [
+    "AttributeError",
+    "'FeatureHasher' object has no attribute 'nope'"
+   ],
+   "hasDefault_categoricalCols": [
+    "ok",
+    "False"
+   ],
+   "hasDefault_inputCols": [
+    "ok",
+    "False"
+   ],
+   "hasDefault_numFeatures": [
+    "ok",
+    "True"
+   ],
+   "hasDefault_outputCol": [
+    "ok",
+    "True"
+   ],
+   "isDefined_categoricalCols": [
+    "ok",
+    "False"
+   ],
+   "isDefined_inputCols": [
+    "ok",
+    "True"
+   ],
+   "isDefined_numFeatures": [
+    "ok",
+    "True"
+   ],
+   "isDefined_outputCol": [
+    "ok",
+    "True"
+   ],
+   "isSet_categoricalCols": [
+    "ok",
+    "False"
+   ],
+   "isSet_inputCols": [
+    "ok",
+    "True"
+   ],
+   "isSet_numFeatures": [
+    "ok",
+    "True"
+   ],
+   "isSet_outputCol": [
+    "ok",
+    "False"
+   ],
+   "isinstance_params": [
+    "ok",
+    "True"
+   ],
+   "isinstance_transformer": [
+    "ok",
+    "True"
+   ],
+   "no_attribute": [
+    "AttributeError",
+    "'FeatureHasher' object has no attribute 'fooBarBaz'"
+   ],
+   "param_docs": [
+    "ok",
+    [
+     "'numeric columns to treat as categorical'",
+     "'input column names.'",
+     "'Number of features. Should be greater than 0.'",
+     "'output column name.'"
+    ]
+   ],
+   "param_names": [
+    "ok",
+    [
+     "'categoricalCols'",
+     "'inputCols'",
+     "'numFeatures'",
+     "'outputCol'"
+    ]
+   ],
+   "param_parents": [
+    "ok",
+    [
+     "'FeatureHasher_<uid>'",
+     "'FeatureHasher_<uid>'",
+     "'FeatureHasher_<uid>'",
+     "'FeatureHasher_<uid>'"
+    ]
+   ],
+   "read_class": [
+    "ok",
+    "'RemoteMLReader'"
+   ],
+   "repr": [
+    "ok",
+    "'FeatureHasher_<uid>'"
+   ],
+   "setParams_returns_self": [
+    "ok",
+    "True"
+   ],
+   "set_bad_name": [
+    "AttributeError",
+    "'str' object has no attribute 'parent'"
+   ],
+   "uid_class": [
+    "ok",
+    "'FeatureHasher'"
+   ],
+   "write_class": [
+    "ok",
+    "'RemoteMLWriter'"
+   ],
+   "writer_no_attribute": [
+    "AttributeError",
+    "'RemoteMLWriter' object has no attribute 'fooBarBaz'"
+   ]
+  }
+ },
+ "HashingTF": {
+  "live": {
+   "copy_map": [
+    "ok",
+    "'HashingTF_<uid>__output'"
+   ],
+   "load_missing": [
+    "AnalysisException",
+    "[PATH_NOT_FOUND] Path does not exist: file:<path>/missing/metadata. SQLSTATE: 42K03"
+   ],
+   "loaded_output_default": [
+    "ok",
+    "'HashingTF_<uid>__output'"
+   ],
+   "loaded_output_is_set": [
+    "ok",
+    "False"
+   ],
+   "loaded_params": [
+    "ok",
+    [
+     [
+      "'binary'",
+      "'False'"
+     ],
+     [
+      "'inputCol'",
+      "\"'tokens'\""
+     ],
+     [
+      "'numFeatures'",
+      "'16'"
+     ],
+     [
+      "'outputCol'",
+      "\"'HashingTF_<uid>__output'\""
+     ]
+    ]
+   ],
+   "loaded_transform": [
+    "ok",
+    "{'columns': ['x', 'a', 'b', 's', 'tokens', 'v', 'i', 'HashingTF_<uid>__output'], 'rows': [\"(0.2, 3.0, 5.0, 'a  quick test', ['a', 'quick', 'test'], DenseVector([0.5, -1.0]), 0.0, SparseVector(16, {3: 1.0, 10: 1.0, 12: 1.0}))\", \"(0.7, 1.0, 2.0, 'Hello big World', ['hello', 'big', 'world'], DenseVector([3.0, 4.0]), 1.0, SparseVector(16, {0: 1.0, 1: 1.0, 8: 1.0}))\"]}"
+   ],
+   "loaded_uid": [
+    "ok",
+    "True"
+   ],
+   "save": [
+    "ok",
+    "None"
+   ],
+   "save_again": [
+    "UnknownException",
+    "(java.io.IOException) Path <path>/stage already exists. To overwrite it, please use write.overwrite().save(path) for Scala and use write().overwrite().save(path) for Java and Python."
+   ],
+   "transform": [
+    "ok",
+    "{'columns': ['x', 'a', 'b', 's', 'tokens', 'v', 'i', 'HashingTF_<uid>__output'], 'rows': [\"(0.2, 3.0, 5.0, 'a  quick test', ['a', 'quick', 'test'], DenseVector([0.5, -1.0]), 0.0, SparseVector(16, {3: 1.0, 10: 1.0, 12: 1.0}))\", \"(0.7, 1.0, 2.0, 'Hello big World', ['hello', 'big', 'world'], DenseVector([3.0, 4.0]), 1.0, SparseVector(16, {0: 1.0, 1: 1.0, 8: 1.0}))\"]}"
+   ],
+   "transform_bad_params": [
+    "TypeError",
+    "Params must be a param map but got <class 'int'>."
+   ],
+   "transform_columns": [
+    "ok",
+    [
+     "'x'",
+     "'a'",
+     "'b'",
+     "'s'",
+     "'tokens'",
+     "'v'",
+     "'i'",
+     "'HashingTF_<uid>__output'"
+    ]
+   ],
+   "transform_map": [
+    "ok",
+    [
+     "'x'",
+     "'a'",
+     "'b'",
+     "'s'",
+     "'tokens'",
+     "'v'",
+     "'i'",
+     "'HashingTF_<uid>__output'"
+    ]
+   ]
+  },
+  "offline": {
+   "class": [
+    "ok",
+    [
+     "'HashingTF'",
+     "'feature'"
+    ]
+   ],
+   "copy_extract": [
+    "ok",
+    [
+     [
+      "'binary'",
+      "'False'"
+     ],
+     [
+      "'inputCol'",
+      "\"'tokens'\""
+     ],
+     [
+      "'numFeatures'",
+      "'16'"
+     ],
+     [
+      "'outputCol'",
+      "\"'HashingTF_<uid>__output'\""
+     ]
+    ]
+   ],
+   "copy_same_uid": [
+    "ok",
+    "True"
+   ],
+   "explainParam_binary": [
+    "ok",
+    "'binary: If True, all non zero counts are set to 1. This is useful for discrete probabilistic models that model binary events rather than integer counts. Default False. (default: False)'"
+   ],
+   "explainParam_inputCol": [
+    "ok",
+    "'inputCol: input column name. (current: tokens)'"
+   ],
+   "explainParam_numFeatures": [
+    "ok",
+    "'numFeatures: Number of features. Should be greater than 0. (default: 262144, current: 16)'"
+   ],
+   "explainParam_outputCol": [
+    "ok",
+    "'outputCol: output column name. (default: HashingTF_<uid>__output)'"
+   ],
+   "explainParams": [
+    "ok",
+    "'binary: If True, all non zero counts are set to 1. This is useful for discrete probabilistic models that model binary events rather than integer counts. Default False. (default: False)\\ninputCol: input column name. (current: tokens)\\nnumFeatures: Number of features. Should be greater than 0. (default: 262144, current: 16)\\noutputCol: output column name. (default: HashingTF_<uid>__output)'"
+   ],
+   "extract": [
+    "ok",
+    [
+     [
+      "'binary'",
+      "'False'"
+     ],
+     [
+      "'inputCol'",
+      "\"'tokens'\""
+     ],
+     [
+      "'numFeatures'",
+      "'16'"
+     ],
+     [
+      "'outputCol'",
+      "\"'HashingTF_<uid>__output'\""
+     ]
+    ]
+   ],
+   "getBinary": [
+    "ok",
+    "'False'"
+   ],
+   "getInputCol": [
+    "ok",
+    "'tokens'"
+   ],
+   "getNumFeatures": [
+    "ok",
+    "'16'"
+   ],
+   "getOutputCol": [
+    "ok",
+    "'HashingTF_<uid>__output'"
+   ],
+   "getParam_nope": [
+    "AttributeError",
+    "'HashingTF' object has no attribute 'nope'"
+   ],
+   "hasDefault_binary": [
+    "ok",
+    "True"
+   ],
+   "hasDefault_inputCol": [
+    "ok",
+    "False"
+   ],
+   "hasDefault_numFeatures": [
+    "ok",
+    "True"
+   ],
+   "hasDefault_outputCol": [
+    "ok",
+    "True"
+   ],
+   "isDefined_binary": [
+    "ok",
+    "True"
+   ],
+   "isDefined_inputCol": [
+    "ok",
+    "True"
+   ],
+   "isDefined_numFeatures": [
+    "ok",
+    "True"
+   ],
+   "isDefined_outputCol": [
+    "ok",
+    "True"
+   ],
+   "isSet_binary": [
+    "ok",
+    "False"
+   ],
+   "isSet_inputCol": [
+    "ok",
+    "True"
+   ],
+   "isSet_numFeatures": [
+    "ok",
+    "True"
+   ],
+   "isSet_outputCol": [
+    "ok",
+    "False"
+   ],
+   "isinstance_params": [
+    "ok",
+    "True"
+   ],
+   "isinstance_transformer": [
+    "ok",
+    "True"
+   ],
+   "no_attribute": [
+    "AttributeError",
+    "'HashingTF' object has no attribute 'fooBarBaz'"
+   ],
+   "param_docs": [
+    "ok",
+    [
+     "'If True, all non zero counts are set to 1. This is useful for discrete probabilistic models that model binary events rather than integer counts. Default False.'",
+     "'input column name.'",
+     "'Number of features. Should be greater than 0.'",
+     "'output column name.'"
+    ]
+   ],
+   "param_names": [
+    "ok",
+    [
+     "'binary'",
+     "'inputCol'",
+     "'numFeatures'",
+     "'outputCol'"
+    ]
+   ],
+   "param_parents": [
+    "ok",
+    [
+     "'HashingTF_<uid>'",
+     "'HashingTF_<uid>'",
+     "'HashingTF_<uid>'",
+     "'HashingTF_<uid>'"
+    ]
+   ],
+   "read_class": [
+    "ok",
+    "'RemoteMLReader'"
+   ],
+   "repr": [
+    "ok",
+    "'HashingTF_<uid>'"
+   ],
+   "setParams_returns_self": [
+    "ok",
+    "True"
+   ],
+   "set_bad_name": [
+    "AttributeError",
+    "'str' object has no attribute 'parent'"
+   ],
+   "uid_class": [
+    "ok",
+    "'HashingTF'"
+   ],
+   "write_class": [
+    "ok",
+    "'RemoteMLWriter'"
+   ],
+   "writer_no_attribute": [
+    "AttributeError",
+    "'RemoteMLWriter' object has no attribute 'fooBarBaz'"
+   ]
+  }
+ },
+ "IndexToString": {
+  "live": {
+   "copy_map": [
+    "ok",
+    "'IndexToString_<uid>__output'"
+   ],
+   "load_missing": [
+    "AnalysisException",
+    "[PATH_NOT_FOUND] Path does not exist: file:<path>/missing/metadata. SQLSTATE: 42K03"
+   ],
+   "loaded_output_default": [
+    "ok",
+    "'IndexToString_<uid>__output'"
+   ],
+   "loaded_output_is_set": [
+    "ok",
+    "False"
+   ],
+   "loaded_params": [
+    "ok",
+    [
+     [
+      "'inputCol'",
+      "\"'i'\""
+     ],
+     [
+      "'labels'",
+      "\"['zero', 'one']\""
+     ],
+     [
+      "'outputCol'",
+      "\"'IndexToString_<uid>__output'\""
+     ]
+    ]
+   ],
+   "loaded_transform": [
+    "ok",
+    "{'columns': ['x', 'a', 'b', 's', 'tokens', 'v', 'i', 'IndexToString_<uid>__output'], 'rows': [\"(0.2, 3.0, 5.0, 'a  quick test', ['a', 'quick', 'test'], DenseVector([0.5, -1.0]), 0.0, 'zero')\", \"(0.7, 1.0, 2.0, 'Hello big World', ['hello', 'big', 'world'], DenseVector([3.0, 4.0]), 1.0, 'one')\"]}"
+   ],
+   "loaded_uid": [
+    "ok",
+    "True"
+   ],
+   "save": [
+    "ok",
+    "None"
+   ],
+   "save_again": [
+    "UnknownException",
+    "(java.io.IOException) Path <path>/stage already exists. To overwrite it, please use write.overwrite().save(path) for Scala and use write().overwrite().save(path) for Java and Python."
+   ],
+   "transform": [
+    "ok",
+    "{'columns': ['x', 'a', 'b', 's', 'tokens', 'v', 'i', 'IndexToString_<uid>__output'], 'rows': [\"(0.2, 3.0, 5.0, 'a  quick test', ['a', 'quick', 'test'], DenseVector([0.5, -1.0]), 0.0, 'zero')\", \"(0.7, 1.0, 2.0, 'Hello big World', ['hello', 'big', 'world'], DenseVector([3.0, 4.0]), 1.0, 'one')\"]}"
+   ],
+   "transform_bad_params": [
+    "TypeError",
+    "Params must be a param map but got <class 'int'>."
+   ],
+   "transform_columns": [
+    "ok",
+    [
+     "'x'",
+     "'a'",
+     "'b'",
+     "'s'",
+     "'tokens'",
+     "'v'",
+     "'i'",
+     "'IndexToString_<uid>__output'"
+    ]
+   ],
+   "transform_map": [
+    "ok",
+    [
+     "'x'",
+     "'a'",
+     "'b'",
+     "'s'",
+     "'tokens'",
+     "'v'",
+     "'i'",
+     "'IndexToString_<uid>__output'"
+    ]
+   ]
+  },
+  "offline": {
+   "class": [
+    "ok",
+    [
+     "'IndexToString'",
+     "'feature'"
+    ]
+   ],
+   "copy_extract": [
+    "ok",
+    [
+     [
+      "'inputCol'",
+      "\"'i'\""
+     ],
+     [
+      "'labels'",
+      "\"['zero', 'one']\""
+     ],
+     [
+      "'outputCol'",
+      "\"'IndexToString_<uid>__output'\""
+     ]
+    ]
+   ],
+   "copy_same_uid": [
+    "ok",
+    "True"
+   ],
+   "explainParam_inputCol": [
+    "ok",
+    "'inputCol: input column name. (current: i)'"
+   ],
+   "explainParam_labels": [
+    "ok",
+    "\"labels: Optional array of labels specifying index-string mapping. If not provided or if empty, then metadata from inputCol is used instead. (current: ['zero', 'one'])\""
+   ],
+   "explainParam_outputCol": [
+    "ok",
+    "'outputCol: output column name. (default: IndexToString_<uid>__output)'"
+   ],
+   "explainParams": [
+    "ok",
+    "\"inputCol: input column name. (current: i)\\nlabels: Optional array of labels specifying index-string mapping. If not provided or if empty, then metadata from inputCol is used instead. (current: ['zero', 'one'])\\noutputCol: output column name. (default: IndexToString_<uid>__output)\""
+   ],
+   "extract": [
+    "ok",
+    [
+     [
+      "'inputCol'",
+      "\"'i'\""
+     ],
+     [
+      "'labels'",
+      "\"['zero', 'one']\""
+     ],
+     [
+      "'outputCol'",
+      "\"'IndexToString_<uid>__output'\""
+     ]
+    ]
+   ],
+   "getInputCol": [
+    "ok",
+    "'i'"
+   ],
+   "getLabels": [
+    "ok",
+    "\"['zero', 'one']\""
+   ],
+   "getOutputCol": [
+    "ok",
+    "'IndexToString_<uid>__output'"
+   ],
+   "getParam_nope": [
+    "AttributeError",
+    "'IndexToString' object has no attribute 'nope'"
+   ],
+   "hasDefault_inputCol": [
+    "ok",
+    "False"
+   ],
+   "hasDefault_labels": [
+    "ok",
+    "False"
+   ],
+   "hasDefault_outputCol": [
+    "ok",
+    "True"
+   ],
+   "isDefined_inputCol": [
+    "ok",
+    "True"
+   ],
+   "isDefined_labels": [
+    "ok",
+    "True"
+   ],
+   "isDefined_outputCol": [
+    "ok",
+    "True"
+   ],
+   "isSet_inputCol": [
+    "ok",
+    "True"
+   ],
+   "isSet_labels": [
+    "ok",
+    "True"
+   ],
+   "isSet_outputCol": [
+    "ok",
+    "False"
+   ],
+   "isinstance_params": [
+    "ok",
+    "True"
+   ],
+   "isinstance_transformer": [
+    "ok",
+    "True"
+   ],
+   "no_attribute": [
+    "AttributeError",
+    "'IndexToString' object has no attribute 'fooBarBaz'"
+   ],
+   "param_docs": [
+    "ok",
+    [
+     "'input column name.'",
+     "'Optional array of labels specifying index-string mapping. If not provided or if empty, then metadata from inputCol is used instead.'",
+     "'output column name.'"
+    ]
+   ],
+   "param_names": [
+    "ok",
+    [
+     "'inputCol'",
+     "'labels'",
+     "'outputCol'"
+    ]
+   ],
+   "param_parents": [
+    "ok",
+    [
+     "'IndexToString_<uid>'",
+     "'IndexToString_<uid>'",
+     "'IndexToString_<uid>'"
+    ]
+   ],
+   "read_class": [
+    "ok",
+    "'RemoteMLReader'"
+   ],
+   "repr": [
+    "ok",
+    "'IndexToString_<uid>'"
+   ],
+   "setParams_returns_self": [
+    "ok",
+    "True"
+   ],
+   "set_bad_name": [
+    "AttributeError",
+    "'str' object has no attribute 'parent'"
+   ],
+   "uid_class": [
+    "ok",
+    "'IndexToString'"
+   ],
+   "write_class": [
+    "ok",
+    "'RemoteMLWriter'"
+   ],
+   "writer_no_attribute": [
+    "AttributeError",
+    "'RemoteMLWriter' object has no attribute 'fooBarBaz'"
+   ]
+  }
+ },
+ "Interaction": {
+  "live": {
+   "copy_map": [
+    "ok",
+    "'Interaction_<uid>__output'"
+   ],
+   "load_missing": [
+    "AnalysisException",
+    "[PATH_NOT_FOUND] Path does not exist: file:<path>/missing/metadata. SQLSTATE: 42K03"
+   ],
+   "loaded_output_default": [
+    "ok",
+    "'Interaction_<uid>__output'"
+   ],
+   "loaded_output_is_set": [
+    "ok",
+    "False"
+   ],
+   "loaded_params": [
+    "ok",
+    [
+     [
+      "'inputCols'",
+      "\"['a', 'b']\""
+     ],
+     [
+      "'outputCol'",
+      "\"'Interaction_<uid>__output'\""
+     ]
+    ]
+   ],
+   "loaded_transform": [
+    "IllegalArgumentException",
+    "requirement failed: Output col must be defined first."
+   ],
+   "loaded_uid": [
+    "ok",
+    "True"
+   ],
+   "save": [
+    "ok",
+    "None"
+   ],
+   "save_again": [
+    "UnknownException",
+    "(java.io.IOException) Path <path>/stage already exists. To overwrite it, please use write.overwrite().save(path) for Scala and use write().overwrite().save(path) for Java and Python."
+   ],
+   "transform": [
+    "IllegalArgumentException",
+    "requirement failed: Output col must be defined first."
+   ],
+   "transform_bad_params": [
+    "TypeError",
+    "Params must be a param map but got <class 'int'>."
+   ],
+   "transform_columns": [
+    "IllegalArgumentException",
+    "requirement failed: Output col must be defined first."
+   ],
+   "transform_map": [
+    "IllegalArgumentException",
+    "requirement failed: Output col must be defined first."
+   ]
+  },
+  "offline": {
+   "class": [
+    "ok",
+    [
+     "'Interaction'",
+     "'feature'"
+    ]
+   ],
+   "copy_extract": [
+    "ok",
+    [
+     [
+      "'inputCols'",
+      "\"['a', 'b']\""
+     ],
+     [
+      "'outputCol'",
+      "\"'Interaction_<uid>__output'\""
+     ]
+    ]
+   ],
+   "copy_same_uid": [
+    "ok",
+    "True"
+   ],
+   "explainParam_inputCols": [
+    "ok",
+    "\"inputCols: input column names. (current: ['a', 'b'])\""
+   ],
+   "explainParam_outputCol": [
+    "ok",
+    "'outputCol: output column name. (default: Interaction_<uid>__output)'"
+   ],
+   "explainParams": [
+    "ok",
+    "\"inputCols: input column names. (current: ['a', 'b'])\\noutputCol: output column name. (default: Interaction_<uid>__output)\""
+   ],
+   "extract": [
+    "ok",
+    [
+     [
+      "'inputCols'",
+      "\"['a', 'b']\""
+     ],
+     [
+      "'outputCol'",
+      "\"'Interaction_<uid>__output'\""
+     ]
+    ]
+   ],
+   "getInputCols": [
+    "ok",
+    "\"['a', 'b']\""
+   ],
+   "getOutputCol": [
+    "ok",
+    "'Interaction_<uid>__output'"
+   ],
+   "getParam_nope": [
+    "AttributeError",
+    "'Interaction' object has no attribute 'nope'"
+   ],
+   "hasDefault_inputCols": [
+    "ok",
+    "False"
+   ],
+   "hasDefault_outputCol": [
+    "ok",
+    "True"
+   ],
+   "isDefined_inputCols": [
+    "ok",
+    "True"
+   ],
+   "isDefined_outputCol": [
+    "ok",
+    "True"
+   ],
+   "isSet_inputCols": [
+    "ok",
+    "True"
+   ],
+   "isSet_outputCol": [
+    "ok",
+    "False"
+   ],
+   "isinstance_params": [
+    "ok",
+    "True"
+   ],
+   "isinstance_transformer": [
+    "ok",
+    "True"
+   ],
+   "no_attribute": [
+    "AttributeError",
+    "'Interaction' object has no attribute 'fooBarBaz'"
+   ],
+   "param_docs": [
+    "ok",
+    [
+     "'input column names.'",
+     "'output column name.'"
+    ]
+   ],
+   "param_names": [
+    "ok",
+    [
+     "'inputCols'",
+     "'outputCol'"
+    ]
+   ],
+   "param_parents": [
+    "ok",
+    [
+     "'Interaction_<uid>'",
+     "'Interaction_<uid>'"
+    ]
+   ],
+   "read_class": [
+    "ok",
+    "'RemoteMLReader'"
+   ],
+   "repr": [
+    "ok",
+    "'Interaction_<uid>'"
+   ],
+   "setParams_returns_self": [
+    "ok",
+    "True"
+   ],
+   "set_bad_name": [
+    "AttributeError",
+    "'str' object has no attribute 'parent'"
+   ],
+   "uid_class": [
+    "ok",
+    "'Interaction'"
+   ],
+   "write_class": [
+    "ok",
+    "'RemoteMLWriter'"
+   ],
+   "writer_no_attribute": [
+    "AttributeError",
+    "'RemoteMLWriter' object has no attribute 'fooBarBaz'"
+   ]
+  }
+ },
+ "NGram": {
+  "live": {
+   "copy_map": [
+    "ok",
+    "'NGram_<uid>__output'"
+   ],
+   "load_missing": [
+    "AnalysisException",
+    "[PATH_NOT_FOUND] Path does not exist: file:<path>/missing/metadata. SQLSTATE: 42K03"
+   ],
+   "loaded_output_default": [
+    "ok",
+    "'NGram_<uid>__output'"
+   ],
+   "loaded_output_is_set": [
+    "ok",
+    "False"
+   ],
+   "loaded_params": [
+    "ok",
+    [
+     [
+      "'inputCol'",
+      "\"'tokens'\""
+     ],
+     [
+      "'n'",
+      "'2'"
+     ],
+     [
+      "'outputCol'",
+      "\"'NGram_<uid>__output'\""
+     ]
+    ]
+   ],
+   "loaded_transform": [
+    "ok",
+    "{'columns': ['x', 'a', 'b', 's', 'tokens', 'v', 'i', 'NGram_<uid>__output'], 'rows': [\"(0.2, 3.0, 5.0, 'a  quick test', ['a', 'quick', 'test'], DenseVector([0.5, -1.0]), 0.0, ['a quick', 'quick test'])\", \"(0.7, 1.0, 2.0, 'Hello big World', ['hello', 'big', 'world'], DenseVector([3.0, 4.0]), 1.0, ['hello big', 'big world'])\"]}"
+   ],
+   "loaded_uid": [
+    "ok",
+    "True"
+   ],
+   "save": [
+    "ok",
+    "None"
+   ],
+   "save_again": [
+    "UnknownException",
+    "(java.io.IOException) Path <path>/stage already exists. To overwrite it, please use write.overwrite().save(path) for Scala and use write().overwrite().save(path) for Java and Python."
+   ],
+   "transform": [
+    "ok",
+    "{'columns': ['x', 'a', 'b', 's', 'tokens', 'v', 'i', 'NGram_<uid>__output'], 'rows': [\"(0.2, 3.0, 5.0, 'a  quick test', ['a', 'quick', 'test'], DenseVector([0.5, -1.0]), 0.0, ['a quick', 'quick test'])\", \"(0.7, 1.0, 2.0, 'Hello big World', ['hello', 'big', 'world'], DenseVector([3.0, 4.0]), 1.0, ['hello big', 'big world'])\"]}"
+   ],
+   "transform_bad_params": [
+    "TypeError",
+    "Params must be a param map but got <class 'int'>."
+   ],
+   "transform_columns": [
+    "ok",
+    [
+     "'x'",
+     "'a'",
+     "'b'",
+     "'s'",
+     "'tokens'",
+     "'v'",
+     "'i'",
+     "'NGram_<uid>__output'"
+    ]
+   ],
+   "transform_map": [
+    "ok",
+    [
+     "'x'",
+     "'a'",
+     "'b'",
+     "'s'",
+     "'tokens'",
+     "'v'",
+     "'i'",
+     "'NGram_<uid>__output'"
+    ]
+   ]
+  },
+  "offline": {
+   "class": [
+    "ok",
+    [
+     "'NGram'",
+     "'feature'"
+    ]
+   ],
+   "copy_extract": [
+    "ok",
+    [
+     [
+      "'inputCol'",
+      "\"'tokens'\""
+     ],
+     [
+      "'n'",
+      "'2'"
+     ],
+     [
+      "'outputCol'",
+      "\"'NGram_<uid>__output'\""
+     ]
+    ]
+   ],
+   "copy_same_uid": [
+    "ok",
+    "True"
+   ],
+   "explainParam_inputCol": [
+    "ok",
+    "'inputCol: input column name. (current: tokens)'"
+   ],
+   "explainParam_n": [
+    "ok",
+    "'n: number of elements per n-gram (>=1) (default: 2, current: 2)'"
+   ],
+   "explainParam_outputCol": [
+    "ok",
+    "'outputCol: output column name. (default: NGram_<uid>__output)'"
+   ],
+   "explainParams": [
+    "ok",
+    "'inputCol: input column name. (current: tokens)\\nn: number of elements per n-gram (>=1) (default: 2, current: 2)\\noutputCol: output column name. (default: NGram_<uid>__output)'"
+   ],
+   "extract": [
+    "ok",
+    [
+     [
+      "'inputCol'",
+      "\"'tokens'\""
+     ],
+     [
+      "'n'",
+      "'2'"
+     ],
+     [
+      "'outputCol'",
+      "\"'NGram_<uid>__output'\""
+     ]
+    ]
+   ],
+   "getInputCol": [
+    "ok",
+    "'tokens'"
+   ],
+   "getN": [
+    "ok",
+    "'2'"
+   ],
+   "getOutputCol": [
+    "ok",
+    "'NGram_<uid>__output'"
+   ],
+   "getParam_nope": [
+    "AttributeError",
+    "'NGram' object has no attribute 'nope'"
+   ],
+   "hasDefault_inputCol": [
+    "ok",
+    "False"
+   ],
+   "hasDefault_n": [
+    "ok",
+    "True"
+   ],
+   "hasDefault_outputCol": [
+    "ok",
+    "True"
+   ],
+   "isDefined_inputCol": [
+    "ok",
+    "True"
+   ],
+   "isDefined_n": [
+    "ok",
+    "True"
+   ],
+   "isDefined_outputCol": [
+    "ok",
+    "True"
+   ],
+   "isSet_inputCol": [
+    "ok",
+    "True"
+   ],
+   "isSet_n": [
+    "ok",
+    "True"
+   ],
+   "isSet_outputCol": [
+    "ok",
+    "False"
+   ],
+   "isinstance_params": [
+    "ok",
+    "True"
+   ],
+   "isinstance_transformer": [
+    "ok",
+    "True"
+   ],
+   "no_attribute": [
+    "AttributeError",
+    "'NGram' object has no attribute 'fooBarBaz'"
+   ],
+   "param_docs": [
+    "ok",
+    [
+     "'input column name.'",
+     "'number of elements per n-gram (>=1)'",
+     "'output column name.'"
+    ]
+   ],
+   "param_names": [
+    "ok",
+    [
+     "'inputCol'",
+     "'n'",
+     "'outputCol'"
+    ]
+   ],
+   "param_parents": [
+    "ok",
+    [
+     "'NGram_<uid>'",
+     "'NGram_<uid>'",
+     "'NGram_<uid>'"
+    ]
+   ],
+   "read_class": [
+    "ok",
+    "'RemoteMLReader'"
+   ],
+   "repr": [
+    "ok",
+    "'NGram_<uid>'"
+   ],
+   "setParams_returns_self": [
+    "ok",
+    "True"
+   ],
+   "set_bad_name": [
+    "AttributeError",
+    "'str' object has no attribute 'parent'"
+   ],
+   "uid_class": [
+    "ok",
+    "'NGram'"
+   ],
+   "write_class": [
+    "ok",
+    "'RemoteMLWriter'"
+   ],
+   "writer_no_attribute": [
+    "AttributeError",
+    "'RemoteMLWriter' object has no attribute 'fooBarBaz'"
+   ]
+  }
+ },
+ "Normalizer": {
+  "live": {
+   "copy_map": [
+    "ok",
+    "'Normalizer_<uid>__output'"
+   ],
+   "load_missing": [
+    "AnalysisException",
+    "[PATH_NOT_FOUND] Path does not exist: file:<path>/missing/metadata. SQLSTATE: 42K03"
+   ],
+   "loaded_output_default": [
+    "ok",
+    "'Normalizer_<uid>__output'"
+   ],
+   "loaded_output_is_set": [
+    "ok",
+    "False"
+   ],
+   "loaded_params": [
+    "ok",
+    [
+     [
+      "'inputCol'",
+      "\"'v'\""
+     ],
+     [
+      "'outputCol'",
+      "\"'Normalizer_<uid>__output'\""
+     ],
+     [
+      "'p'",
+      "'1.0'"
+     ]
+    ]
+   ],
+   "loaded_transform": [
+    "ok",
+    "{'columns': ['x', 'a', 'b', 's', 'tokens', 'v', 'i', 'Normalizer_<uid>__output'], 'rows': [\"(0.2, 3.0, 5.0, 'a  quick test', ['a', 'quick', 'test'], DenseVector([0.5, -1.0]), 0.0, DenseVector([0.3333, -0.6667]))\", \"(0.7, 1.0, 2.0, 'Hello big World', ['hello', 'big', 'world'], DenseVector([3.0, 4.0]), 1.0, DenseVector([0.4286, 0.5714]))\"]}"
+   ],
+   "loaded_uid": [
+    "ok",
+    "True"
+   ],
+   "save": [
+    "ok",
+    "None"
+   ],
+   "save_again": [
+    "UnknownException",
+    "(java.io.IOException) Path <path>/stage already exists. To overwrite it, please use write.overwrite().save(path) for Scala and use write().overwrite().save(path) for Java and Python."
+   ],
+   "transform": [
+    "ok",
+    "{'columns': ['x', 'a', 'b', 's', 'tokens', 'v', 'i', 'Normalizer_<uid>__output'], 'rows': [\"(0.2, 3.0, 5.0, 'a  quick test', ['a', 'quick', 'test'], DenseVector([0.5, -1.0]), 0.0, DenseVector([0.3333, -0.6667]))\", \"(0.7, 1.0, 2.0, 'Hello big World', ['hello', 'big', 'world'], DenseVector([3.0, 4.0]), 1.0, DenseVector([0.4286, 0.5714]))\"]}"
+   ],
+   "transform_bad_params": [
+    "TypeError",
+    "Params must be a param map but got <class 'int'>."
+   ],
+   "transform_columns": [
+    "ok",
+    [
+     "'x'",
+     "'a'",
+     "'b'",
+     "'s'",
+     "'tokens'",
+     "'v'",
+     "'i'",
+     "'Normalizer_<uid>__output'"
+    ]
+   ],
+   "transform_map": [
+    "ok",
+    [
+     "'x'",
+     "'a'",
+     "'b'",
+     "'s'",
+     "'tokens'",
+     "'v'",
+     "'i'",
+     "'Normalizer_<uid>__output'"
+    ]
+   ]
+  },
+  "offline": {
+   "class": [
+    "ok",
+    [
+     "'Normalizer'",
+     "'feature'"
+    ]
+   ],
+   "copy_extract": [
+    "ok",
+    [
+     [
+      "'inputCol'",
+      "\"'v'\""
+     ],
+     [
+      "'outputCol'",
+      "\"'Normalizer_<uid>__output'\""
+     ],
+     [
+      "'p'",
+      "'1.0'"
+     ]
+    ]
+   ],
+   "copy_same_uid": [
+    "ok",
+    "True"
+   ],
+   "explainParam_inputCol": [
+    "ok",
+    "'inputCol: input column name. (current: v)'"
+   ],
+   "explainParam_outputCol": [
+    "ok",
+    "'outputCol: output column name. (default: Normalizer_<uid>__output)'"
+   ],
+   "explainParam_p": [
+    "ok",
+    "'p: the p norm value. (default: 2.0, current: 1.0)'"
+   ],
+   "explainParams": [
+    "ok",
+    "'inputCol: input column name. (current: v)\\noutputCol: output column name. (default: Normalizer_<uid>__output)\\np: the p norm value. (default: 2.0, current: 1.0)'"
+   ],
+   "extract": [
+    "ok",
+    [
+     [
+      "'inputCol'",
+      "\"'v'\""
+     ],
+     [
+      "'outputCol'",
+      "\"'Normalizer_<uid>__output'\""
+     ],
+     [
+      "'p'",
+      "'1.0'"
+     ]
+    ]
+   ],
+   "getInputCol": [
+    "ok",
+    "'v'"
+   ],
+   "getOutputCol": [
+    "ok",
+    "'Normalizer_<uid>__output'"
+   ],
+   "getP": [
+    "ok",
+    "'1.0'"
+   ],
+   "getParam_nope": [
+    "AttributeError",
+    "'Normalizer' object has no attribute 'nope'"
+   ],
+   "hasDefault_inputCol": [
+    "ok",
+    "False"
+   ],
+   "hasDefault_outputCol": [
+    "ok",
+    "True"
+   ],
+   "hasDefault_p": [
+    "ok",
+    "True"
+   ],
+   "isDefined_inputCol": [
+    "ok",
+    "True"
+   ],
+   "isDefined_outputCol": [
+    "ok",
+    "True"
+   ],
+   "isDefined_p": [
+    "ok",
+    "True"
+   ],
+   "isSet_inputCol": [
+    "ok",
+    "True"
+   ],
+   "isSet_outputCol": [
+    "ok",
+    "False"
+   ],
+   "isSet_p": [
+    "ok",
+    "True"
+   ],
+   "isinstance_params": [
+    "ok",
+    "True"
+   ],
+   "isinstance_transformer": [
+    "ok",
+    "True"
+   ],
+   "no_attribute": [
+    "AttributeError",
+    "'Normalizer' object has no attribute 'fooBarBaz'"
+   ],
+   "param_docs": [
+    "ok",
+    [
+     "'input column name.'",
+     "'output column name.'",
+     "'the p norm value.'"
+    ]
+   ],
+   "param_names": [
+    "ok",
+    [
+     "'inputCol'",
+     "'outputCol'",
+     "'p'"
+    ]
+   ],
+   "param_parents": [
+    "ok",
+    [
+     "'Normalizer_<uid>'",
+     "'Normalizer_<uid>'",
+     "'Normalizer_<uid>'"
+    ]
+   ],
+   "read_class": [
+    "ok",
+    "'RemoteMLReader'"
+   ],
+   "repr": [
+    "ok",
+    "'Normalizer_<uid>'"
+   ],
+   "setParams_returns_self": [
+    "ok",
+    "True"
+   ],
+   "set_bad_name": [
+    "AttributeError",
+    "'str' object has no attribute 'parent'"
+   ],
+   "uid_class": [
+    "ok",
+    "'Normalizer'"
+   ],
+   "write_class": [
+    "ok",
+    "'RemoteMLWriter'"
+   ],
+   "writer_no_attribute": [
+    "AttributeError",
+    "'RemoteMLWriter' object has no attribute 'fooBarBaz'"
+   ]
+  }
+ },
+ "PolynomialExpansion": {
+  "live": {
+   "copy_map": [
+    "ok",
+    "'PolynomialExpansion_<uid>__output'"
+   ],
+   "load_missing": [
+    "AnalysisException",
+    "[PATH_NOT_FOUND] Path does not exist: file:<path>/missing/metadata. SQLSTATE: 42K03"
+   ],
+   "loaded_output_default": [
+    "ok",
+    "'PolynomialExpansion_<uid>__output'"
+   ],
+   "loaded_output_is_set": [
+    "ok",
+    "False"
+   ],
+   "loaded_params": [
+    "ok",
+    [
+     [
+      "'degree'",
+      "'2'"
+     ],
+     [
+      "'inputCol'",
+      "\"'v'\""
+     ],
+     [
+      "'outputCol'",
+      "\"'PolynomialExpansion_<uid>__output'\""
+     ]
+    ]
+   ],
+   "loaded_transform": [
+    "ok",
+    "{'columns': ['x', 'a', 'b', 's', 'tokens', 'v', 'i', 'PolynomialExpansion_<uid>__output'], 'rows': [\"(0.2, 3.0, 5.0, 'a  quick test', ['a', 'quick', 'test'], DenseVector([0.5, -1.0]), 0.0, DenseVector([0.5, 0.25, -1.0, -0.5, 1.0]))\", \"(0.7, 1.0, 2.0, 'Hello big World', ['hello', 'big', 'world'], DenseVector([3.0, 4.0]), 1.0, DenseVector([3.0, 9.0, 4.0, 12.0, 16.0]))\"]}"
+   ],
+   "loaded_uid": [
+    "ok",
+    "True"
+   ],
+   "save": [
+    "ok",
+    "None"
+   ],
+   "save_again": [
+    "UnknownException",
+    "(java.io.IOException) Path <path>/stage already exists. To overwrite it, please use write.overwrite().save(path) for Scala and use write().overwrite().save(path) for Java and Python."
+   ],
+   "transform": [
+    "ok",
+    "{'columns': ['x', 'a', 'b', 's', 'tokens', 'v', 'i', 'PolynomialExpansion_<uid>__output'], 'rows': [\"(0.2, 3.0, 5.0, 'a  quick test', ['a', 'quick', 'test'], DenseVector([0.5, -1.0]), 0.0, DenseVector([0.5, 0.25, -1.0, -0.5, 1.0]))\", \"(0.7, 1.0, 2.0, 'Hello big World', ['hello', 'big', 'world'], DenseVector([3.0, 4.0]), 1.0, DenseVector([3.0, 9.0, 4.0, 12.0, 16.0]))\"]}"
+   ],
+   "transform_bad_params": [
+    "TypeError",
+    "Params must be a param map but got <class 'int'>."
+   ],
+   "transform_columns": [
+    "ok",
+    [
+     "'x'",
+     "'a'",
+     "'b'",
+     "'s'",
+     "'tokens'",
+     "'v'",
+     "'i'",
+     "'PolynomialExpansion_<uid>__output'"
+    ]
+   ],
+   "transform_map": [
+    "ok",
+    [
+     "'x'",
+     "'a'",
+     "'b'",
+     "'s'",
+     "'tokens'",
+     "'v'",
+     "'i'",
+     "'PolynomialExpansion_<uid>__output'"
+    ]
+   ]
+  },
+  "offline": {
+   "class": [
+    "ok",
+    [
+     "'PolynomialExpansion'",
+     "'feature'"
+    ]
+   ],
+   "copy_extract": [
+    "ok",
+    [
+     [
+      "'degree'",
+      "'2'"
+     ],
+     [
+      "'inputCol'",
+      "\"'v'\""
+     ],
+     [
+      "'outputCol'",
+      "\"'PolynomialExpansion_<uid>__output'\""
+     ]
+    ]
+   ],
+   "copy_same_uid": [
+    "ok",
+    "True"
+   ],
+   "explainParam_degree": [
+    "ok",
+    "'degree: the polynomial degree to expand (>= 1) (default: 2, current: 2)'"
+   ],
+   "explainParam_inputCol": [
+    "ok",
+    "'inputCol: input column name. (current: v)'"
+   ],
+   "explainParam_outputCol": [
+    "ok",
+    "'outputCol: output column name. (default: PolynomialExpansion_<uid>__output)'"
+   ],
+   "explainParams": [
+    "ok",
+    "'degree: the polynomial degree to expand (>= 1) (default: 2, current: 2)\\ninputCol: input column name. (current: v)\\noutputCol: output column name. (default: PolynomialExpansion_<uid>__output)'"
+   ],
+   "extract": [
+    "ok",
+    [
+     [
+      "'degree'",
+      "'2'"
+     ],
+     [
+      "'inputCol'",
+      "\"'v'\""
+     ],
+     [
+      "'outputCol'",
+      "\"'PolynomialExpansion_<uid>__output'\""
+     ]
+    ]
+   ],
+   "getDegree": [
+    "ok",
+    "'2'"
+   ],
+   "getInputCol": [
+    "ok",
+    "'v'"
+   ],
+   "getOutputCol": [
+    "ok",
+    "'PolynomialExpansion_<uid>__output'"
+   ],
+   "getParam_nope": [
+    "AttributeError",
+    "'PolynomialExpansion' object has no attribute 'nope'"
+   ],
+   "hasDefault_degree": [
+    "ok",
+    "True"
+   ],
+   "hasDefault_inputCol": [
+    "ok",
+    "False"
+   ],
+   "hasDefault_outputCol": [
+    "ok",
+    "True"
+   ],
+   "isDefined_degree": [
+    "ok",
+    "True"
+   ],
+   "isDefined_inputCol": [
+    "ok",
+    "True"
+   ],
+   "isDefined_outputCol": [
+    "ok",
+    "True"
+   ],
+   "isSet_degree": [
+    "ok",
+    "True"
+   ],
+   "isSet_inputCol": [
+    "ok",
+    "True"
+   ],
+   "isSet_outputCol": [
+    "ok",
+    "False"
+   ],
+   "isinstance_params": [
+    "ok",
+    "True"
+   ],
+   "isinstance_transformer": [
+    "ok",
+    "True"
+   ],
+   "no_attribute": [
+    "AttributeError",
+    "'PolynomialExpansion' object has no attribute 'fooBarBaz'"
+   ],
+   "param_docs": [
+    "ok",
+    [
+     "'the polynomial degree to expand (>= 1)'",
+     "'input column name.'",
+     "'output column name.'"
+    ]
+   ],
+   "param_names": [
+    "ok",
+    [
+     "'degree'",
+     "'inputCol'",
+     "'outputCol'"
+    ]
+   ],
+   "param_parents": [
+    "ok",
+    [
+     "'PolynomialExpansion_<uid>'",
+     "'PolynomialExpansion_<uid>'",
+     "'PolynomialExpansion_<uid>'"
+    ]
+   ],
+   "read_class": [
+    "ok",
+    "'RemoteMLReader'"
+   ],
+   "repr": [
+    "ok",
+    "'PolynomialExpansion_<uid>'"
+   ],
+   "setParams_returns_self": [
+    "ok",
+    "True"
+   ],
+   "set_bad_name": [
+    "AttributeError",
+    "'str' object has no attribute 'parent'"
+   ],
+   "uid_class": [
+    "ok",
+    "'PolynomialExpansion'"
+   ],
+   "write_class": [
+    "ok",
+    "'RemoteMLWriter'"
+   ],
+   "writer_no_attribute": [
+    "AttributeError",
+    "'RemoteMLWriter' object has no attribute 'fooBarBaz'"
+   ]
+  }
+ },
+ "RegexTokenizer": {
+  "live": {
+   "copy_map": [
+    "ok",
+    "'RegexTokenizer_<uid>__output'"
+   ],
+   "load_missing": [
+    "AnalysisException",
+    "[PATH_NOT_FOUND] Path does not exist: file:<path>/missing/metadata. SQLSTATE: 42K03"
+   ],
+   "loaded_output_default": [
+    "ok",
+    "'RegexTokenizer_<uid>__output'"
+   ],
+   "loaded_output_is_set": [
+    "ok",
+    "False"
+   ],
+   "loaded_params": [
+    "ok",
+    [
+     [
+      "'gaps'",
+      "'True'"
+     ],
+     [
+      "'inputCol'",
+      "\"'s'\""
+     ],
+     [
+      "'minTokenLength'",
+      "'1'"
+     ],
+     [
+      "'outputCol'",
+      "\"'RegexTokenizer_<uid>__output'\""
+     ],
+     [
+      "'pattern'",
+      "\"'\\\\\\\\W+'\""
+     ],
+     [
+      "'toLowercase'",
+      "'True'"
+     ]
+    ]
+   ],
+   "loaded_transform": [
+    "ok",
+    "{'columns': ['x', 'a', 'b', 's', 'tokens', 'v', 'i', 'RegexTokenizer_<uid>__output'], 'rows': [\"(0.2, 3.0, 5.0, 'a  quick test', ['a', 'quick', 'test'], DenseVector([0.5, -1.0]), 0.0, ['a', 'quick', 'test'])\", \"(0.7, 1.0, 2.0, 'Hello big World', ['hello', 'big', 'world'], DenseVector([3.0, 4.0]), 1.0, ['hello', 'big', 'world'])\"]}"
+   ],
+   "loaded_uid": [
+    "ok",
+    "True"
+   ],
+   "save": [
+    "ok",
+    "None"
+   ],
+   "save_again": [
+    "UnknownException",
+    "(java.io.IOException) Path <path>/stage already exists. To overwrite it, please use write.overwrite().save(path) for Scala and use write().overwrite().save(path) for Java and Python."
+   ],
+   "transform": [
+    "ok",
+    "{'columns': ['x', 'a', 'b', 's', 'tokens', 'v', 'i', 'RegexTokenizer_<uid>__output'], 'rows': [\"(0.2, 3.0, 5.0, 'a  quick test', ['a', 'quick', 'test'], DenseVector([0.5, -1.0]), 0.0, ['a', 'quick', 'test'])\", \"(0.7, 1.0, 2.0, 'Hello big World', ['hello', 'big', 'world'], DenseVector([3.0, 4.0]), 1.0, ['hello', 'big', 'world'])\"]}"
+   ],
+   "transform_bad_params": [
+    "TypeError",
+    "Params must be a param map but got <class 'int'>."
+   ],
+   "transform_columns": [
+    "ok",
+    [
+     "'x'",
+     "'a'",
+     "'b'",
+     "'s'",
+     "'tokens'",
+     "'v'",
+     "'i'",
+     "'RegexTokenizer_<uid>__output'"
+    ]
+   ],
+   "transform_map": [
+    "ok",
+    [
+     "'x'",
+     "'a'",
+     "'b'",
+     "'s'",
+     "'tokens'",
+     "'v'",
+     "'i'",
+     "'RegexTokenizer_<uid>__output'"
+    ]
+   ]
+  },
+  "offline": {
+   "class": [
+    "ok",
+    [
+     "'RegexTokenizer'",
+     "'feature'"
+    ]
+   ],
+   "copy_extract": [
+    "ok",
+    [
+     [
+      "'gaps'",
+      "'True'"
+     ],
+     [
+      "'inputCol'",
+      "\"'s'\""
+     ],
+     [
+      "'minTokenLength'",
+      "'1'"
+     ],
+     [
+      "'outputCol'",
+      "\"'RegexTokenizer_<uid>__output'\""
+     ],
+     [
+      "'pattern'",
+      "\"'\\\\\\\\W+'\""
+     ],
+     [
+      "'toLowercase'",
+      "'True'"
+     ]
+    ]
+   ],
+   "copy_same_uid": [
+    "ok",
+    "True"
+   ],
+   "explainParam_gaps": [
+    "ok",
+    "'gaps: whether regex splits on gaps (True) or matches tokens (False) (default: True)'"
+   ],
+   "explainParam_inputCol": [
+    "ok",
+    "'inputCol: input column name. (current: s)'"
+   ],
+   "explainParam_minTokenLength": [
+    "ok",
+    "'minTokenLength: minimum token length (>= 0) (default: 1)'"
+   ],
+   "explainParam_outputCol": [
+    "ok",
+    "'outputCol: output column name. (default: RegexTokenizer_<uid>__output)'"
+   ],
+   "explainParam_pattern": [
+    "ok",
+    "'pattern: regex pattern (Java dialect) used for tokenizing (default: \\\\s+, current: \\\\W+)'"
+   ],
+   "explainParam_toLowercase": [
+    "ok",
+    "'toLowercase: whether to convert all characters to lowercase before tokenizing (default: True)'"
+   ],
+   "explainParams": [
+    "ok",
+    "'gaps: whether regex splits on gaps (True) or matches tokens (False) (default: True)\\ninputCol: input column name. (current: s)\\nminTokenLength: minimum token length (>= 0) (default: 1)\\noutputCol: output column name. (default: RegexTokenizer_<uid>__output)\\npattern: regex pattern (Java dialect) used for tokenizing (default: \\\\s+, current: \\\\W+)\\ntoLowercase: whether to convert all characters to lowercase before tokenizing (default: True)'"
+   ],
+   "extract": [
+    "ok",
+    [
+     [
+      "'gaps'",
+      "'True'"
+     ],
+     [
+      "'inputCol'",
+      "\"'s'\""
+     ],
+     [
+      "'minTokenLength'",
+      "'1'"
+     ],
+     [
+      "'outputCol'",
+      "\"'RegexTokenizer_<uid>__output'\""
+     ],
+     [
+      "'pattern'",
+      "\"'\\\\\\\\W+'\""
+     ],
+     [
+      "'toLowercase'",
+      "'True'"
+     ]
+    ]
+   ],
+   "getGaps": [
+    "ok",
+    "'True'"
+   ],
+   "getInputCol": [
+    "ok",
+    "'s'"
+   ],
+   "getMinTokenLength": [
+    "ok",
+    "'1'"
+   ],
+   "getOutputCol": [
+    "ok",
+    "'RegexTokenizer_<uid>__output'"
+   ],
+   "getParam_nope": [
+    "AttributeError",
+    "'RegexTokenizer' object has no attribute 'nope'"
+   ],
+   "getPattern": [
+    "ok",
+    "'\\\\W+'"
+   ],
+   "getToLowercase": [
+    "ok",
+    "'True'"
+   ],
+   "hasDefault_gaps": [
+    "ok",
+    "True"
+   ],
+   "hasDefault_inputCol": [
+    "ok",
+    "False"
+   ],
+   "hasDefault_minTokenLength": [
+    "ok",
+    "True"
+   ],
+   "hasDefault_outputCol": [
+    "ok",
+    "True"
+   ],
+   "hasDefault_pattern": [
+    "ok",
+    "True"
+   ],
+   "hasDefault_toLowercase": [
+    "ok",
+    "True"
+   ],
+   "isDefined_gaps": [
+    "ok",
+    "True"
+   ],
+   "isDefined_inputCol": [
+    "ok",
+    "True"
+   ],
+   "isDefined_minTokenLength": [
+    "ok",
+    "True"
+   ],
+   "isDefined_outputCol": [
+    "ok",
+    "True"
+   ],
+   "isDefined_pattern": [
+    "ok",
+    "True"
+   ],
+   "isDefined_toLowercase": [
+    "ok",
+    "True"
+   ],
+   "isSet_gaps": [
+    "ok",
+    "False"
+   ],
+   "isSet_inputCol": [
+    "ok",
+    "True"
+   ],
+   "isSet_minTokenLength": [
+    "ok",
+    "False"
+   ],
+   "isSet_outputCol": [
+    "ok",
+    "False"
+   ],
+   "isSet_pattern": [
+    "ok",
+    "True"
+   ],
+   "isSet_toLowercase": [
+    "ok",
+    "False"
+   ],
+   "isinstance_params": [
+    "ok",
+    "True"
+   ],
+   "isinstance_transformer": [
+    "ok",
+    "True"
+   ],
+   "no_attribute": [
+    "AttributeError",
+    "'RegexTokenizer' object has no attribute 'fooBarBaz'"
+   ],
+   "param_docs": [
+    "ok",
+    [
+     "'whether regex splits on gaps (True) or matches tokens (False)'",
+     "'input column name.'",
+     "'minimum token length (>= 0)'",
+     "'output column name.'",
+     "'regex pattern (Java dialect) used for tokenizing'",
+     "'whether to convert all characters to lowercase before tokenizing'"
+    ]
+   ],
+   "param_names": [
+    "ok",
+    [
+     "'gaps'",
+     "'inputCol'",
+     "'minTokenLength'",
+     "'outputCol'",
+     "'pattern'",
+     "'toLowercase'"
+    ]
+   ],
+   "param_parents": [
+    "ok",
+    [
+     "'RegexTokenizer_<uid>'",
+     "'RegexTokenizer_<uid>'",
+     "'RegexTokenizer_<uid>'",
+     "'RegexTokenizer_<uid>'",
+     "'RegexTokenizer_<uid>'",
+     "'RegexTokenizer_<uid>'"
+    ]
+   ],
+   "read_class": [
+    "ok",
+    "'RemoteMLReader'"
+   ],
+   "repr": [
+    "ok",
+    "'RegexTokenizer_<uid>'"
+   ],
+   "setParams_returns_self": [
+    "ok",
+    "True"
+   ],
+   "set_bad_name": [
+    "AttributeError",
+    "'str' object has no attribute 'parent'"
+   ],
+   "uid_class": [
+    "ok",
+    "'RegexTokenizer'"
+   ],
+   "write_class": [
+    "ok",
+    "'RemoteMLWriter'"
+   ],
+   "writer_no_attribute": [
+    "AttributeError",
+    "'RemoteMLWriter' object has no attribute 'fooBarBaz'"
+   ]
+  }
+ },
+ "SQLTransformer": {
+  "live": {
+   "load_missing": [
+    "AnalysisException",
+    "[PATH_NOT_FOUND] Path does not exist: file:<path>/missing/metadata. SQLSTATE: 42K03"
+   ],
+   "loaded_params": [
+    "ok",
+    [
+     [
+      "'statement'",
+      "\"'SELECT *, a + b AS c FROM __THIS__'\""
+     ]
+    ]
+   ],
+   "loaded_transform": [
+    "ok",
+    "{'columns': ['x', 'a', 'b', 's', 'tokens', 'v', 'i', 'c'], 'rows': [\"(0.2, 3.0, 5.0, 'a  quick test', ['a', 'quick', 'test'], DenseVector([0.5, -1.0]), 0.0, 8.0)\", \"(0.7, 1.0, 2.0, 'Hello big World', ['hello', 'big', 'world'], DenseVector([3.0, 4.0]), 1.0, 3.0)\"]}"
+   ],
+   "loaded_uid": [
+    "ok",
+    "True"
+   ],
+   "save": [
+    "ok",
+    "None"
+   ],
+   "save_again": [
+    "UnknownException",
+    "(java.io.IOException) Path <path>/stage already exists. To overwrite it, please use write.overwrite().save(path) for Scala and use write().overwrite().save(path) for Java and Python."
+   ],
+   "transform": [
+    "ok",
+    "{'columns': ['x', 'a', 'b', 's', 'tokens', 'v', 'i', 'c'], 'rows': [\"(0.2, 3.0, 5.0, 'a  quick test', ['a', 'quick', 'test'], DenseVector([0.5, -1.0]), 0.0, 8.0)\", \"(0.7, 1.0, 2.0, 'Hello big World', ['hello', 'big', 'world'], DenseVector([3.0, 4.0]), 1.0, 3.0)\"]}"
+   ],
+   "transform_bad_params": [
+    "TypeError",
+    "Params must be a param map but got <class 'int'>."
+   ],
+   "transform_columns": [
+    "ok",
+    [
+     "'x'",
+     "'a'",
+     "'b'",
+     "'s'",
+     "'tokens'",
+     "'v'",
+     "'i'",
+     "'c'"
+    ]
+   ]
+  },
+  "offline": {
+   "class": [
+    "ok",
+    [
+     "'SQLTransformer'",
+     "'feature'"
+    ]
+   ],
+   "copy_extract": [
+    "ok",
+    [
+     [
+      "'statement'",
+      "\"'SELECT *, a + b AS c FROM __THIS__'\""
+     ]
+    ]
+   ],
+   "copy_same_uid": [
+    "ok",
+    "True"
+   ],
+   "explainParam_statement": [
+    "ok",
+    "'statement: SQL statement (current: SELECT *, a + b AS c FROM __THIS__)'"
+   ],
+   "explainParams": [
+    "ok",
+    "'statement: SQL statement (current: SELECT *, a + b AS c FROM __THIS__)'"
+   ],
+   "extract": [
+    "ok",
+    [
+     [
+      "'statement'",
+      "\"'SELECT *, a + b AS c FROM __THIS__'\""
+     ]
+    ]
+   ],
+   "getParam_nope": [
+    "AttributeError",
+    "'SQLTransformer' object has no attribute 'nope'"
+   ],
+   "getStatement": [
+    "ok",
+    "'SELECT *, a + b AS c FROM __THIS__'"
+   ],
+   "hasDefault_statement": [
+    "ok",
+    "False"
+   ],
+   "isDefined_statement": [
+    "ok",
+    "True"
+   ],
+   "isSet_statement": [
+    "ok",
+    "True"
+   ],
+   "isinstance_params": [
+    "ok",
+    "True"
+   ],
+   "isinstance_transformer": [
+    "ok",
+    "True"
+   ],
+   "no_attribute": [
+    "AttributeError",
+    "'SQLTransformer' object has no attribute 'fooBarBaz'"
+   ],
+   "param_docs": [
+    "ok",
+    [
+     "'SQL statement'"
+    ]
+   ],
+   "param_names": [
+    "ok",
+    [
+     "'statement'"
+    ]
+   ],
+   "param_parents": [
+    "ok",
+    [
+     "'SQLTransformer_<uid>'"
+    ]
+   ],
+   "read_class": [
+    "ok",
+    "'RemoteMLReader'"
+   ],
+   "repr": [
+    "ok",
+    "'SQLTransformer_<uid>'"
+   ],
+   "setParams_returns_self": [
+    "ok",
+    "True"
+   ],
+   "set_bad_name": [
+    "AttributeError",
+    "'str' object has no attribute 'parent'"
+   ],
+   "uid_class": [
+    "ok",
+    "'SQLTransformer'"
+   ],
+   "write_class": [
+    "ok",
+    "'RemoteMLWriter'"
+   ],
+   "writer_no_attribute": [
+    "AttributeError",
+    "'RemoteMLWriter' object has no attribute 'fooBarBaz'"
+   ]
+  }
+ },
+ "StopWordsRemover": {
+  "live": {
+   "copy_map": [
+    "ok",
+    "'StopWordsRemover_<uid>__output'"
+   ],
+   "load_missing": [
+    "AnalysisException",
+    "[PATH_NOT_FOUND] Path does not exist: file:<path>/missing/metadata. SQLSTATE: 42K03"
+   ],
+   "loaded_output_default": [
+    "ok",
+    "'StopWordsRemover_<uid>__output'"
+   ],
+   "loaded_output_is_set": [
+    "ok",
+    "False"
+   ],
+   "loaded_params": [
+    "ok",
+    [
+     [
+      "'caseSensitive'",
+      "'False'"
+     ],
+     [
+      "'inputCol'",
+      "\"'tokens'\""
+     ],
+     [
+      "'locale'",
+      "\"'en_US'\""
+     ],
+     [
+      "'outputCol'",
+      "\"'StopWordsRemover_<uid>__output'\""
+     ],
+     [
+      "'stopWords'",
+      "\"['big']\""
+     ]
+    ]
+   ],
+   "loaded_transform": [
+    "ok",
+    "{'columns': ['x', 'a', 'b', 's', 'tokens', 'v', 'i', 'StopWordsRemover_<uid>__output'], 'rows': [\"(0.2, 3.0, 5.0, 'a  quick test', ['a', 'quick', 'test'], DenseVector([0.5, -1.0]), 0.0, ['a', 'quick', 'test'])\", \"(0.7, 1.0, 2.0, 'Hello big World', ['hello', 'big', 'world'], DenseVector([3.0, 4.0]), 1.0, ['hello', 'world'])\"]}"
+   ],
+   "loaded_uid": [
+    "ok",
+    "True"
+   ],
+   "save": [
+    "ok",
+    "None"
+   ],
+   "save_again": [
+    "UnknownException",
+    "(java.io.IOException) Path <path>/stage already exists. To overwrite it, please use write.overwrite().save(path) for Scala and use write().overwrite().save(path) for Java and Python."
+   ],
+   "transform": [
+    "ok",
+    "{'columns': ['x', 'a', 'b', 's', 'tokens', 'v', 'i', 'StopWordsRemover_<uid>__output'], 'rows': [\"(0.2, 3.0, 5.0, 'a  quick test', ['a', 'quick', 'test'], DenseVector([0.5, -1.0]), 0.0, ['a', 'quick', 'test'])\", \"(0.7, 1.0, 2.0, 'Hello big World', ['hello', 'big', 'world'], DenseVector([3.0, 4.0]), 1.0, ['hello', 'world'])\"]}"
+   ],
+   "transform_bad_params": [
+    "TypeError",
+    "Params must be a param map but got <class 'int'>."
+   ],
+   "transform_columns": [
+    "ok",
+    [
+     "'x'",
+     "'a'",
+     "'b'",
+     "'s'",
+     "'tokens'",
+     "'v'",
+     "'i'",
+     "'StopWordsRemover_<uid>__output'"
+    ]
+   ],
+   "transform_map": [
+    "ok",
+    [
+     "'x'",
+     "'a'",
+     "'b'",
+     "'s'",
+     "'tokens'",
+     "'v'",
+     "'i'",
+     "'StopWordsRemover_<uid>__output'"
+    ]
+   ]
+  },
+  "offline": {
+   "class": [
+    "ok",
+    [
+     "'StopWordsRemover'",
+     "'feature'"
+    ]
+   ],
+   "copy_extract": [
+    "ok",
+    [
+     [
+      "'caseSensitive'",
+      "'False'"
+     ],
+     [
+      "'inputCol'",
+      "\"'tokens'\""
+     ],
+     [
+      "'locale'",
+      "\"'en_US'\""
+     ],
+     [
+      "'outputCol'",
+      "\"'StopWordsRemover_<uid>__output'\""
+     ],
+     [
+      "'stopWords'",
+      "\"['big']\""
+     ]
+    ]
+   ],
+   "copy_same_uid": [
+    "ok",
+    "True"
+   ],
+   "explainParam_caseSensitive": [
+    "ok",
+    "'caseSensitive: whether to do a case sensitive comparison over the stop words (default: False)'"
+   ],
+   "explainParam_inputCol": [
+    "ok",
+    "'inputCol: input column name. (current: tokens)'"
+   ],
+   "explainParam_inputCols": [
+    "ok",
+    "'inputCols: input column names. (undefined)'"
+   ],
+   "explainParam_locale": [
+    "ok",
+    "'locale: locale of the input. ignored when case sensitive is true (default: en_US)'"
+   ],
+   "explainParam_outputCol": [
+    "ok",
+    "'outputCol: output column name. (default: StopWordsRemover_<uid>__output)'"
+   ],
+   "explainParam_outputCols": [
+    "ok",
+    "'outputCols: output column names. (undefined)'"
+   ],
+   "explainParam_stopWords": [
+    "ok",
+    "'stopWords: The words to be filtered out (default: [\\'i\\', \\'me\\', \\'my\\', \\'myself\\', \\'we\\', \\'our\\', \\'ours\\', \\'ourselves\\', \\'you\\', \\'your\\', \\'yours\\', \\'yourself\\', \\'yourselves\\', \\'he\\', \\'him\\', \\'his\\', \\'himself\\', \\'she\\', \\'her\\', \\'hers\\', \\'herself\\', \\'it\\', \\'its\\', \\'itself\\', \\'they\\', \\'them\\', \\'their\\', \\'theirs\\', \\'themselves\\', \\'what\\', \\'which\\', \\'who\\', \\'whom\\', \\'this\\', \\'that\\', \\'these\\', \\'those\\', \\'am\\', \\'is\\', \\'are\\', \\'was\\', \\'were\\', \\'be\\', \\'been\\', \\'being\\', \\'have\\', \\'has\\', \\'had\\', \\'having\\', \\'do\\', \\'does\\', \\'did\\', \\'doing\\', \\'a\\', \\'an\\', \\'the\\', \\'and\\', \\'but\\', \\'if\\', \\'or\\', \\'because\\', \\'as\\', \\'until\\', \\'while\\', \\'of\\', \\'at\\', \\'by\\', \\'for\\', \\'with\\', \\'about\\', \\'against\\', \\'between\\', \\'into\\', \\'through\\', \\'during\\', \\'before\\', \\'after\\', \\'above\\', \\'below\\', \\'to\\', \\'from\\', \\'up\\', \\'down\\', \\'in\\', \\'out\\', \\'on\\', \\'off\\', \\'over\\', \\'under\\', \\'again\\', \\'further\\', \\'then\\', \\'once\\', \\'here\\', \\'there\\', \\'when\\', \\'where\\', \\'why\\', \\'how\\', \\'all\\', \\'any\\', \\'both\\', \\'each\\', \\'few\\', \\'more\\', \\'most\\', \\'other\\', \\'some\\', \\'such\\', \\'no\\', \\'nor\\', \\'not\\', \\'only\\', \\'own\\', \\'same\\', \\'so\\', \\'than\\', \\'too\\', \\'very\\', \\'s\\', \\'t\\', \\'can\\', \\'will\\', \\'just\\', \\'don\\', \\'should\\', \\'now\\', \"i\\'ll\", \"you\\'ll\", \"he\\'ll\", \"she\\'ll\", \"we\\'ll\", \"they\\'ll\", \"i\\'d\", \"you\\'d\", \"he\\'d\", \"she\\'d\", \"we\\'d\", \"they\\'d\", \"i\\'m\", \"you\\'re\", \"he\\'s\", \"she\\'s\", \"it\\'s\", \"we\\'re\", \"they\\'re\", \"i\\'ve\", \"we\\'ve\", \"you\\'ve\", \"they\\'ve\", \"isn\\'t\", \"aren\\'t\", \"wasn\\'t\", \"weren\\'t\", \"haven\\'t\", \"hasn\\'t\", \"hadn\\'t\", \"don\\'t\", \"doesn\\'t\", \"didn\\'t\", \"won\\'t\", \"wouldn\\'t\", \"shan\\'t\", \"shouldn\\'t\", \"mustn\\'t\", \"can\\'t\", \"couldn\\'t\", \\'cannot\\', \\'could\\', \"here\\'s\", \"how\\'s\", \"let\\'s\", \\'ought\\', \"that\\'s\", \"there\\'s\", \"what\\'s\", \"when\\'s\", \"where\\'s\", \"who\\'s\", \"why\\'s\", \\'would\\'], current: [\\'big\\'])'"
+   ],
+   "explainParams": [
+    "ok",
+    "'caseSensitive: whether to do a case sensitive comparison over the stop words (default: False)\\ninputCol: input column name. (current: tokens)\\ninputCols: input column names. (undefined)\\nlocale: locale of the input. ignored when case sensitive is true (default: en_US)\\noutputCol: output column name. (default: StopWordsRemover_<uid>__output)\\noutputCols: output column names. (undefined)\\nstopWords: The words to be filtered out (default: [\\'i\\', \\'me\\', \\'my\\', \\'myself\\', \\'we\\', \\'our\\', \\'ours\\', \\'ourselves\\', \\'you\\', \\'your\\', \\'yours\\', \\'yourself\\', \\'yourselves\\', \\'he\\', \\'him\\', \\'his\\', \\'himself\\', \\'she\\', \\'her\\', \\'hers\\', \\'herself\\', \\'it\\', \\'its\\', \\'itself\\', \\'they\\', \\'them\\', \\'their\\', \\'theirs\\', \\'themselves\\', \\'what\\', \\'which\\', \\'who\\', \\'whom\\', \\'this\\', \\'that\\', \\'these\\', \\'those\\', \\'am\\', \\'is\\', \\'are\\', \\'was\\', \\'were\\', \\'be\\', \\'been\\', \\'being\\', \\'have\\', \\'has\\', \\'had\\', \\'having\\', \\'do\\', \\'does\\', \\'did\\', \\'doing\\', \\'a\\', \\'an\\', \\'the\\', \\'and\\', \\'but\\', \\'if\\', \\'or\\', \\'because\\', \\'as\\', \\'until\\', \\'while\\', \\'of\\', \\'at\\', \\'by\\', \\'for\\', \\'with\\', \\'about\\', \\'against\\', \\'between\\', \\'into\\', \\'through\\', \\'during\\', \\'before\\', \\'after\\', \\'above\\', \\'below\\', \\'to\\', \\'from\\', \\'up\\', \\'down\\', \\'in\\', \\'out\\', \\'on\\', \\'off\\', \\'over\\', \\'under\\', \\'again\\', \\'further\\', \\'then\\', \\'once\\', \\'here\\', \\'there\\', \\'when\\', \\'where\\', \\'why\\', \\'how\\', \\'all\\', \\'any\\', \\'both\\', \\'each\\', \\'few\\', \\'more\\', \\'most\\', \\'other\\', \\'some\\', \\'such\\', \\'no\\', \\'nor\\', \\'not\\', \\'only\\', \\'own\\', \\'same\\', \\'so\\', \\'than\\', \\'too\\', \\'very\\', \\'s\\', \\'t\\', \\'can\\', \\'will\\', \\'just\\', \\'don\\', \\'should\\', \\'now\\', \"i\\'ll\", \"you\\'ll\", \"he\\'ll\", \"she\\'ll\", \"we\\'ll\", \"they\\'ll\", \"i\\'d\", \"you\\'d\", \"he\\'d\", \"she\\'d\", \"we\\'d\", \"they\\'d\", \"i\\'m\", \"you\\'re\", \"he\\'s\", \"she\\'s\", \"it\\'s\", \"we\\'re\", \"they\\'re\", \"i\\'ve\", \"we\\'ve\", \"you\\'ve\", \"they\\'ve\", \"isn\\'t\", \"aren\\'t\", \"wasn\\'t\", \"weren\\'t\", \"haven\\'t\", \"hasn\\'t\", \"hadn\\'t\", \"don\\'t\", \"doesn\\'t\", \"didn\\'t\", \"won\\'t\", \"wouldn\\'t\", \"shan\\'t\", \"shouldn\\'t\", \"mustn\\'t\", \"can\\'t\", \"couldn\\'t\", \\'cannot\\', \\'could\\', \"here\\'s\", \"how\\'s\", \"let\\'s\", \\'ought\\', \"that\\'s\", \"there\\'s\", \"what\\'s\", \"when\\'s\", \"where\\'s\", \"who\\'s\", \"why\\'s\", \\'would\\'], current: [\\'big\\'])'"
+   ],
+   "extract": [
+    "ok",
+    [
+     [
+      "'caseSensitive'",
+      "'False'"
+     ],
+     [
+      "'inputCol'",
+      "\"'tokens'\""
+     ],
+     [
+      "'locale'",
+      "\"'en_US'\""
+     ],
+     [
+      "'outputCol'",
+      "\"'StopWordsRemover_<uid>__output'\""
+     ],
+     [
+      "'stopWords'",
+      "\"['big']\""
+     ]
+    ]
+   ],
+   "getCaseSensitive": [
+    "ok",
+    "'False'"
+   ],
+   "getInputCol": [
+    "ok",
+    "'tokens'"
+   ],
+   "getInputCols": [
+    "KeyError",
+    "Param(parent='StopWordsRemover_<uid>', name='inputCols', doc='input column names.')"
+   ],
+   "getLocale": [
+    "ok",
+    "'en_US'"
+   ],
+   "getOutputCol": [
+    "ok",
+    "'StopWordsRemover_<uid>__output'"
+   ],
+   "getOutputCols": [
+    "KeyError",
+    "Param(parent='StopWordsRemover_<uid>', name='outputCols', doc='output column names.')"
+   ],
+   "getParam_nope": [
+    "AttributeError",
+    "'StopWordsRemover' object has no attribute 'nope'"
+   ],
+   "getStopWords": [
+    "ok",
+    "\"['big']\""
+   ],
+   "hasDefault_caseSensitive": [
+    "ok",
+    "True"
+   ],
+   "hasDefault_inputCol": [
+    "ok",
+    "False"
+   ],
+   "hasDefault_inputCols": [
+    "ok",
+    "False"
+   ],
+   "hasDefault_locale": [
+    "ok",
+    "True"
+   ],
+   "hasDefault_outputCol": [
+    "ok",
+    "True"
+   ],
+   "hasDefault_outputCols": [
+    "ok",
+    "False"
+   ],
+   "hasDefault_stopWords": [
+    "ok",
+    "True"
+   ],
+   "isDefined_caseSensitive": [
+    "ok",
+    "True"
+   ],
+   "isDefined_inputCol": [
+    "ok",
+    "True"
+   ],
+   "isDefined_inputCols": [
+    "ok",
+    "False"
+   ],
+   "isDefined_locale": [
+    "ok",
+    "True"
+   ],
+   "isDefined_outputCol": [
+    "ok",
+    "True"
+   ],
+   "isDefined_outputCols": [
+    "ok",
+    "False"
+   ],
+   "isDefined_stopWords": [
+    "ok",
+    "True"
+   ],
+   "isSet_caseSensitive": [
+    "ok",
+    "False"
+   ],
+   "isSet_inputCol": [
+    "ok",
+    "True"
+   ],
+   "isSet_inputCols": [
+    "ok",
+    "False"
+   ],
+   "isSet_locale": [
+    "ok",
+    "False"
+   ],
+   "isSet_outputCol": [
+    "ok",
+    "False"
+   ],
+   "isSet_outputCols": [
+    "ok",
+    "False"
+   ],
+   "isSet_stopWords": [
+    "ok",
+    "True"
+   ],
+   "isinstance_params": [
+    "ok",
+    "True"
+   ],
+   "isinstance_transformer": [
+    "ok",
+    "True"
+   ],
+   "no_attribute": [
+    "AttributeError",
+    "'StopWordsRemover' object has no attribute 'fooBarBaz'"
+   ],
+   "param_docs": [
+    "ok",
+    [
+     "'whether to do a case sensitive comparison over the stop words'",
+     "'input column name.'",
+     "'input column names.'",
+     "'locale of the input. ignored when case sensitive is true'",
+     "'output column name.'",
+     "'output column names.'",
+     "'The words to be filtered out'"
+    ]
+   ],
+   "param_names": [
+    "ok",
+    [
+     "'caseSensitive'",
+     "'inputCol'",
+     "'inputCols'",
+     "'locale'",
+     "'outputCol'",
+     "'outputCols'",
+     "'stopWords'"
+    ]
+   ],
+   "param_parents": [
+    "ok",
+    [
+     "'StopWordsRemover_<uid>'",
+     "'StopWordsRemover_<uid>'",
+     "'StopWordsRemover_<uid>'",
+     "'StopWordsRemover_<uid>'",
+     "'StopWordsRemover_<uid>'",
+     "'StopWordsRemover_<uid>'",
+     "'StopWordsRemover_<uid>'"
+    ]
+   ],
+   "read_class": [
+    "ok",
+    "'RemoteMLReader'"
+   ],
+   "repr": [
+    "ok",
+    "'StopWordsRemover_<uid>'"
+   ],
+   "setParams_returns_self": [
+    "ok",
+    "True"
+   ],
+   "set_bad_name": [
+    "AttributeError",
+    "'str' object has no attribute 'parent'"
+   ],
+   "uid_class": [
+    "ok",
+    "'StopWordsRemover'"
+   ],
+   "write_class": [
+    "ok",
+    "'RemoteMLWriter'"
+   ],
+   "writer_no_attribute": [
+    "AttributeError",
+    "'RemoteMLWriter' object has no attribute 'fooBarBaz'"
+   ]
+  }
+ },
+ "Tokenizer": {
+  "live": {
+   "copy_map": [
+    "ok",
+    "'Tokenizer_<uid>__output'"
+   ],
+   "load_missing": [
+    "AnalysisException",
+    "[PATH_NOT_FOUND] Path does not exist: file:<path>/missing/metadata. SQLSTATE: 42K03"
+   ],
+   "loaded_output_default": [
+    "ok",
+    "'Tokenizer_<uid>__output'"
+   ],
+   "loaded_output_is_set": [
+    "ok",
+    "False"
+   ],
+   "loaded_params": [
+    "ok",
+    [
+     [
+      "'inputCol'",
+      "\"'s'\""
+     ],
+     [
+      "'outputCol'",
+      "\"'Tokenizer_<uid>__output'\""
+     ]
+    ]
+   ],
+   "loaded_transform": [
+    "ok",
+    "{'columns': ['x', 'a', 'b', 's', 'tokens', 'v', 'i', 'Tokenizer_<uid>__output'], 'rows': [\"(0.2, 3.0, 5.0, 'a  quick test', ['a', 'quick', 'test'], DenseVector([0.5, -1.0]), 0.0, ['a', '', 'quick', 'test'])\", \"(0.7, 1.0, 2.0, 'Hello big World', ['hello', 'big', 'world'], DenseVector([3.0, 4.0]), 1.0, ['hello', 'big', 'world'])\"]}"
+   ],
+   "loaded_uid": [
+    "ok",
+    "True"
+   ],
+   "save": [
+    "ok",
+    "None"
+   ],
+   "save_again": [
+    "UnknownException",
+    "(java.io.IOException) Path <path>/stage already exists. To overwrite it, please use write.overwrite().save(path) for Scala and use write().overwrite().save(path) for Java and Python."
+   ],
+   "transform": [
+    "ok",
+    "{'columns': ['x', 'a', 'b', 's', 'tokens', 'v', 'i', 'Tokenizer_<uid>__output'], 'rows': [\"(0.2, 3.0, 5.0, 'a  quick test', ['a', 'quick', 'test'], DenseVector([0.5, -1.0]), 0.0, ['a', '', 'quick', 'test'])\", \"(0.7, 1.0, 2.0, 'Hello big World', ['hello', 'big', 'world'], DenseVector([3.0, 4.0]), 1.0, ['hello', 'big', 'world'])\"]}"
+   ],
+   "transform_bad_params": [
+    "TypeError",
+    "Params must be a param map but got <class 'int'>."
+   ],
+   "transform_columns": [
+    "ok",
+    [
+     "'x'",
+     "'a'",
+     "'b'",
+     "'s'",
+     "'tokens'",
+     "'v'",
+     "'i'",
+     "'Tokenizer_<uid>__output'"
+    ]
+   ],
+   "transform_map": [
+    "ok",
+    [
+     "'x'",
+     "'a'",
+     "'b'",
+     "'s'",
+     "'tokens'",
+     "'v'",
+     "'i'",
+     "'Tokenizer_<uid>__output'"
+    ]
+   ]
+  },
+  "offline": {
+   "class": [
+    "ok",
+    [
+     "'Tokenizer'",
+     "'feature'"
+    ]
+   ],
+   "copy_extract": [
+    "ok",
+    [
+     [
+      "'inputCol'",
+      "\"'s'\""
+     ],
+     [
+      "'outputCol'",
+      "\"'Tokenizer_<uid>__output'\""
+     ]
+    ]
+   ],
+   "copy_same_uid": [
+    "ok",
+    "True"
+   ],
+   "explainParam_inputCol": [
+    "ok",
+    "'inputCol: input column name. (current: s)'"
+   ],
+   "explainParam_outputCol": [
+    "ok",
+    "'outputCol: output column name. (default: Tokenizer_<uid>__output)'"
+   ],
+   "explainParams": [
+    "ok",
+    "'inputCol: input column name. (current: s)\\noutputCol: output column name. (default: Tokenizer_<uid>__output)'"
+   ],
+   "extract": [
+    "ok",
+    [
+     [
+      "'inputCol'",
+      "\"'s'\""
+     ],
+     [
+      "'outputCol'",
+      "\"'Tokenizer_<uid>__output'\""
+     ]
+    ]
+   ],
+   "getInputCol": [
+    "ok",
+    "'s'"
+   ],
+   "getOutputCol": [
+    "ok",
+    "'Tokenizer_<uid>__output'"
+   ],
+   "getParam_nope": [
+    "AttributeError",
+    "'Tokenizer' object has no attribute 'nope'"
+   ],
+   "hasDefault_inputCol": [
+    "ok",
+    "False"
+   ],
+   "hasDefault_outputCol": [
+    "ok",
+    "True"
+   ],
+   "isDefined_inputCol": [
+    "ok",
+    "True"
+   ],
+   "isDefined_outputCol": [
+    "ok",
+    "True"
+   ],
+   "isSet_inputCol": [
+    "ok",
+    "True"
+   ],
+   "isSet_outputCol": [
+    "ok",
+    "False"
+   ],
+   "isinstance_params": [
+    "ok",
+    "True"
+   ],
+   "isinstance_transformer": [
+    "ok",
+    "True"
+   ],
+   "no_attribute": [
+    "AttributeError",
+    "'Tokenizer' object has no attribute 'fooBarBaz'"
+   ],
+   "param_docs": [
+    "ok",
+    [
+     "'input column name.'",
+     "'output column name.'"
+    ]
+   ],
+   "param_names": [
+    "ok",
+    [
+     "'inputCol'",
+     "'outputCol'"
+    ]
+   ],
+   "param_parents": [
+    "ok",
+    [
+     "'Tokenizer_<uid>'",
+     "'Tokenizer_<uid>'"
+    ]
+   ],
+   "read_class": [
+    "ok",
+    "'RemoteMLReader'"
+   ],
+   "repr": [
+    "ok",
+    "'Tokenizer_<uid>'"
+   ],
+   "setParams_returns_self": [
+    "ok",
+    "True"
+   ],
+   "set_bad_name": [
+    "AttributeError",
+    "'str' object has no attribute 'parent'"
+   ],
+   "uid_class": [
+    "ok",
+    "'Tokenizer'"
+   ],
+   "write_class": [
+    "ok",
+    "'RemoteMLWriter'"
+   ],
+   "writer_no_attribute": [
+    "AttributeError",
+    "'RemoteMLWriter' object has no attribute 'fooBarBaz'"
+   ]
+  }
+ },
+ "VectorAssembler": {
+  "live": {
+   "copy_map": [
+    "ok",
+    "'VectorAssembler_<uid>__output'"
+   ],
+   "load_missing": [
+    "AnalysisException",
+    "[PATH_NOT_FOUND] Path does not exist: file:<path>/missing/metadata. SQLSTATE: 42K03"
+   ],
+   "loaded_output_default": [
+    "ok",
+    "'VectorAssembler_<uid>__output'"
+   ],
+   "loaded_output_is_set": [
+    "ok",
+    "False"
+   ],
+   "loaded_params": [
+    "ok",
+    [
+     [
+      "'handleInvalid'",
+      "\"'error'\""
+     ],
+     [
+      "'inputCols'",
+      "\"['a', 'b']\""
+     ],
+     [
+      "'outputCol'",
+      "\"'VectorAssembler_<uid>__output'\""
+     ]
+    ]
+   ],
+   "loaded_transform": [
+    "ok",
+    "{'columns': ['x', 'a', 'b', 's', 'tokens', 'v', 'i', 'VectorAssembler_<uid>__output'], 'rows': [\"(0.2, 3.0, 5.0, 'a  quick test', ['a', 'quick', 'test'], DenseVector([0.5, -1.0]), 0.0, DenseVector([3.0, 5.0]))\", \"(0.7, 1.0, 2.0, 'Hello big World', ['hello', 'big', 'world'], DenseVector([3.0, 4.0]), 1.0, DenseVector([1.0, 2.0]))\"]}"
+   ],
+   "loaded_uid": [
+    "ok",
+    "True"
+   ],
+   "save": [
+    "ok",
+    "None"
+   ],
+   "save_again": [
+    "UnknownException",
+    "(java.io.IOException) Path <path>/stage already exists. To overwrite it, please use write.overwrite().save(path) for Scala and use write().overwrite().save(path) for Java and Python."
+   ],
+   "transform": [
+    "ok",
+    "{'columns': ['x', 'a', 'b', 's', 'tokens', 'v', 'i', 'VectorAssembler_<uid>__output'], 'rows': [\"(0.2, 3.0, 5.0, 'a  quick test', ['a', 'quick', 'test'], DenseVector([0.5, -1.0]), 0.0, DenseVector([3.0, 5.0]))\", \"(0.7, 1.0, 2.0, 'Hello big World', ['hello', 'big', 'world'], DenseVector([3.0, 4.0]), 1.0, DenseVector([1.0, 2.0]))\"]}"
+   ],
+   "transform_bad_params": [
+    "TypeError",
+    "Params must be a param map but got <class 'int'>."
+   ],
+   "transform_columns": [
+    "ok",
+    [
+     "'x'",
+     "'a'",
+     "'b'",
+     "'s'",
+     "'tokens'",
+     "'v'",
+     "'i'",
+     "'VectorAssembler_<uid>__output'"
+    ]
+   ],
+   "transform_map": [
+    "ok",
+    [
+     "'x'",
+     "'a'",
+     "'b'",
+     "'s'",
+     "'tokens'",
+     "'v'",
+     "'i'",
+     "'VectorAssembler_<uid>__output'"
+    ]
+   ]
+  },
+  "offline": {
+   "class": [
+    "ok",
+    [
+     "'VectorAssembler'",
+     "'feature'"
+    ]
+   ],
+   "copy_extract": [
+    "ok",
+    [
+     [
+      "'handleInvalid'",
+      "\"'error'\""
+     ],
+     [
+      "'inputCols'",
+      "\"['a', 'b']\""
+     ],
+     [
+      "'outputCol'",
+      "\"'VectorAssembler_<uid>__output'\""
+     ]
+    ]
+   ],
+   "copy_same_uid": [
+    "ok",
+    "True"
+   ],
+   "explainParam_handleInvalid": [
+    "ok",
+    "\"handleInvalid: How to handle invalid data (NULL and NaN values). Options are 'skip' (filter out rows with invalid data), 'error' (throw an error), or 'keep' (return relevant number of NaN in the output). Column lengths are taken from the size of ML Attribute Group, which can be set using `VectorSizeHint` in a pipeline before `VectorAssembler`. Column lengths can also be inferred from first rows of the data since it is safe to do so but only in case of 'error' or 'skip'). (default: error)\""
+   ],
+   "explainParam_inputCols": [
+    "ok",
+    "\"inputCols: input column names. (current: ['a', 'b'])\""
+   ],
+   "explainParam_outputCol": [
+    "ok",
+    "'outputCol: output column name. (default: VectorAssembler_<uid>__output)'"
+   ],
+   "explainParams": [
+    "ok",
+    "\"handleInvalid: How to handle invalid data (NULL and NaN values). Options are 'skip' (filter out rows with invalid data), 'error' (throw an error), or 'keep' (return relevant number of NaN in the output). Column lengths are taken from the size of ML Attribute Group, which can be set using `VectorSizeHint` in a pipeline before `VectorAssembler`. Column lengths can also be inferred from first rows of the data since it is safe to do so but only in case of 'error' or 'skip'). (default: error)\\ninputCols: input column names. (current: ['a', 'b'])\\noutputCol: output column name. (default: VectorAssembler_<uid>__output)\""
+   ],
+   "extract": [
+    "ok",
+    [
+     [
+      "'handleInvalid'",
+      "\"'error'\""
+     ],
+     [
+      "'inputCols'",
+      "\"['a', 'b']\""
+     ],
+     [
+      "'outputCol'",
+      "\"'VectorAssembler_<uid>__output'\""
+     ]
+    ]
+   ],
+   "getHandleInvalid": [
+    "ok",
+    "'error'"
+   ],
+   "getInputCols": [
+    "ok",
+    "\"['a', 'b']\""
+   ],
+   "getOutputCol": [
+    "ok",
+    "'VectorAssembler_<uid>__output'"
+   ],
+   "getParam_nope": [
+    "AttributeError",
+    "'VectorAssembler' object has no attribute 'nope'"
+   ],
+   "hasDefault_handleInvalid": [
+    "ok",
+    "True"
+   ],
+   "hasDefault_inputCols": [
+    "ok",
+    "False"
+   ],
+   "hasDefault_outputCol": [
+    "ok",
+    "True"
+   ],
+   "isDefined_handleInvalid": [
+    "ok",
+    "True"
+   ],
+   "isDefined_inputCols": [
+    "ok",
+    "True"
+   ],
+   "isDefined_outputCol": [
+    "ok",
+    "True"
+   ],
+   "isSet_handleInvalid": [
+    "ok",
+    "False"
+   ],
+   "isSet_inputCols": [
+    "ok",
+    "True"
+   ],
+   "isSet_outputCol": [
+    "ok",
+    "False"
+   ],
+   "isinstance_params": [
+    "ok",
+    "True"
+   ],
+   "isinstance_transformer": [
+    "ok",
+    "True"
+   ],
+   "no_attribute": [
+    "AttributeError",
+    "'VectorAssembler' object has no attribute 'fooBarBaz'"
+   ],
+   "param_docs": [
+    "ok",
+    [
+     "\"How to handle invalid data (NULL and NaN values). Options are 'skip' (filter out rows with invalid data), 'error' (throw an error), or 'keep' (return relevant number of NaN in the output). Column lengths are taken from the size of ML Attribute Group, which can be set using `VectorSizeHint` in a pipeline before `VectorAssembler`. Column lengths can also be inferred from first rows of the data since it is safe to do so but only in case of 'error' or 'skip').\"",
+     "'input column names.'",
+     "'output column name.'"
+    ]
+   ],
+   "param_names": [
+    "ok",
+    [
+     "'handleInvalid'",
+     "'inputCols'",
+     "'outputCol'"
+    ]
+   ],
+   "param_parents": [
+    "ok",
+    [
+     "'VectorAssembler_<uid>'",
+     "'VectorAssembler_<uid>'",
+     "'VectorAssembler_<uid>'"
+    ]
+   ],
+   "read_class": [
+    "ok",
+    "'RemoteMLReader'"
+   ],
+   "repr": [
+    "ok",
+    "'VectorAssembler_<uid>'"
+   ],
+   "setParams_returns_self": [
+    "ok",
+    "True"
+   ],
+   "set_bad_name": [
+    "AttributeError",
+    "'str' object has no attribute 'parent'"
+   ],
+   "uid_class": [
+    "ok",
+    "'VectorAssembler'"
+   ],
+   "write_class": [
+    "ok",
+    "'RemoteMLWriter'"
+   ],
+   "writer_no_attribute": [
+    "AttributeError",
+    "'RemoteMLWriter' object has no attribute 'fooBarBaz'"
+   ]
+  }
+ },
+ "VectorSizeHint": {
+  "live": {
+   "load_missing": [
+    "AnalysisException",
+    "[PATH_NOT_FOUND] Path does not exist: file:<path>/missing/metadata. SQLSTATE: 42K03"
+   ],
+   "loaded_params": [
+    "ok",
+    [
+     [
+      "'handleInvalid'",
+      "\"'skip'\""
+     ],
+     [
+      "'inputCol'",
+      "\"'v'\""
+     ],
+     [
+      "'size'",
+      "'2'"
+     ]
+    ]
+   ],
+   "loaded_transform": [
+    "ok",
+    "{'columns': ['x', 'a', 'b', 's', 'tokens', 'v', 'i'], 'rows': [\"(0.2, 3.0, 5.0, 'a  quick test', ['a', 'quick', 'test'], DenseVector([0.5, -1.0]), 0.0)\", \"(0.7, 1.0, 2.0, 'Hello big World', ['hello', 'big', 'world'], DenseVector([3.0, 4.0]), 1.0)\"]}"
+   ],
+   "loaded_uid": [
+    "ok",
+    "True"
+   ],
+   "save": [
+    "ok",
+    "None"
+   ],
+   "save_again": [
+    "UnknownException",
+    "(java.io.IOException) Path <path>/stage already exists. To overwrite it, please use write.overwrite().save(path) for Scala and use write().overwrite().save(path) for Java and Python."
+   ],
+   "transform": [
+    "ok",
+    "{'columns': ['x', 'a', 'b', 's', 'tokens', 'v', 'i'], 'rows': [\"(0.2, 3.0, 5.0, 'a  quick test', ['a', 'quick', 'test'], DenseVector([0.5, -1.0]), 0.0)\", \"(0.7, 1.0, 2.0, 'Hello big World', ['hello', 'big', 'world'], DenseVector([3.0, 4.0]), 1.0)\"]}"
+   ],
+   "transform_bad_params": [
+    "TypeError",
+    "Params must be a param map but got <class 'int'>."
+   ],
+   "transform_columns": [
+    "ok",
+    [
+     "'x'",
+     "'a'",
+     "'b'",
+     "'s'",
+     "'tokens'",
+     "'v'",
+     "'i'"
+    ]
+   ]
+  },
+  "offline": {
+   "class": [
+    "ok",
+    [
+     "'VectorSizeHint'",
+     "'feature'"
+    ]
+   ],
+   "copy_extract": [
+    "ok",
+    [
+     [
+      "'handleInvalid'",
+      "\"'skip'\""
+     ],
+     [
+      "'inputCol'",
+      "\"'v'\""
+     ],
+     [
+      "'size'",
+      "'2'"
+     ]
+    ]
+   ],
+   "copy_same_uid": [
+    "ok",
+    "True"
+   ],
+   "explainParam_handleInvalid": [
+    "ok",
+    "'handleInvalid: How to handle invalid vectors in inputCol. Invalid vectors include nulls and vectors with the wrong size. The options are `skip` (filter out rows with invalid vectors), `error` (throw an error) and `optimistic` (do not check the vector size, and keep all rows). `error` by default. (default: error, current: skip)'"
+   ],
+   "explainParam_inputCol": [
+    "ok",
+    "'inputCol: input column name. (current: v)'"
+   ],
+   "explainParam_size": [
+    "ok",
+    "'size: Size of vectors in column. (current: 2)'"
+   ],
+   "explainParams": [
+    "ok",
+    "'handleInvalid: How to handle invalid vectors in inputCol. Invalid vectors include nulls and vectors with the wrong size. The options are `skip` (filter out rows with invalid vectors), `error` (throw an error) and `optimistic` (do not check the vector size, and keep all rows). `error` by default. (default: error, current: skip)\\ninputCol: input column name. (current: v)\\nsize: Size of vectors in column. (current: 2)'"
+   ],
+   "extract": [
+    "ok",
+    [
+     [
+      "'handleInvalid'",
+      "\"'skip'\""
+     ],
+     [
+      "'inputCol'",
+      "\"'v'\""
+     ],
+     [
+      "'size'",
+      "'2'"
+     ]
+    ]
+   ],
+   "getHandleInvalid": [
+    "ok",
+    "'skip'"
+   ],
+   "getInputCol": [
+    "ok",
+    "'v'"
+   ],
+   "getParam_nope": [
+    "AttributeError",
+    "'VectorSizeHint' object has no attribute 'nope'"
+   ],
+   "getSize": [
+    "ok",
+    "'2'"
+   ],
+   "hasDefault_handleInvalid": [
+    "ok",
+    "True"
+   ],
+   "hasDefault_inputCol": [
+    "ok",
+    "False"
+   ],
+   "hasDefault_size": [
+    "ok",
+    "False"
+   ],
+   "isDefined_handleInvalid": [
+    "ok",
+    "True"
+   ],
+   "isDefined_inputCol": [
+    "ok",
+    "True"
+   ],
+   "isDefined_size": [
+    "ok",
+    "True"
+   ],
+   "isSet_handleInvalid": [
+    "ok",
+    "True"
+   ],
+   "isSet_inputCol": [
+    "ok",
+    "True"
+   ],
+   "isSet_size": [
+    "ok",
+    "True"
+   ],
+   "isinstance_params": [
+    "ok",
+    "True"
+   ],
+   "isinstance_transformer": [
+    "ok",
+    "True"
+   ],
+   "no_attribute": [
+    "AttributeError",
+    "'VectorSizeHint' object has no attribute 'fooBarBaz'"
+   ],
+   "param_docs": [
+    "ok",
+    [
+     "'How to handle invalid vectors in inputCol. Invalid vectors include nulls and vectors with the wrong size. The options are `skip` (filter out rows with invalid vectors), `error` (throw an error) and `optimistic` (do not check the vector size, and keep all rows). `error` by default.'",
+     "'input column name.'",
+     "'Size of vectors in column.'"
+    ]
+   ],
+   "param_names": [
+    "ok",
+    [
+     "'handleInvalid'",
+     "'inputCol'",
+     "'size'"
+    ]
+   ],
+   "param_parents": [
+    "ok",
+    [
+     "'VectorSizeHint_<uid>'",
+     "'VectorSizeHint_<uid>'",
+     "'VectorSizeHint_<uid>'"
+    ]
+   ],
+   "read_class": [
+    "ok",
+    "'RemoteMLReader'"
+   ],
+   "repr": [
+    "ok",
+    "'VectorSizeHint_<uid>'"
+   ],
+   "setParams_returns_self": [
+    "ok",
+    "True"
+   ],
+   "set_bad_name": [
+    "AttributeError",
+    "'str' object has no attribute 'parent'"
+   ],
+   "uid_class": [
+    "ok",
+    "'VectorSizeHint'"
+   ],
+   "write_class": [
+    "ok",
+    "'RemoteMLWriter'"
+   ],
+   "writer_no_attribute": [
+    "AttributeError",
+    "'RemoteMLWriter' object has no attribute 'fooBarBaz'"
+   ]
+  }
+ },
+ "VectorSlicer": {
+  "live": {
+   "copy_map": [
+    "ok",
+    "'VectorSlicer_<uid>__output'"
+   ],
+   "load_missing": [
+    "AnalysisException",
+    "[PATH_NOT_FOUND] Path does not exist: file:<path>/missing/metadata. SQLSTATE: 42K03"
+   ],
+   "loaded_output_default": [
+    "ok",
+    "'VectorSlicer_<uid>__output'"
+   ],
+   "loaded_output_is_set": [
+    "ok",
+    "False"
+   ],
+   "loaded_params": [
+    "ok",
+    [
+     [
+      "'indices'",
+      "'[1]'"
+     ],
+     [
+      "'inputCol'",
+      "\"'v'\""
+     ],
+     [
+      "'names'",
+      "'[]'"
+     ],
+     [
+      "'outputCol'",
+      "\"'VectorSlicer_<uid>__output'\""
+     ]
+    ]
+   ],
+   "loaded_transform": [
+    "ok",
+    "{'columns': ['x', 'a', 'b', 's', 'tokens', 'v', 'i', 'VectorSlicer_<uid>__output'], 'rows': [\"(0.2, 3.0, 5.0, 'a  quick test', ['a', 'quick', 'test'], DenseVector([0.5, -1.0]), 0.0, DenseVector([-1.0]))\", \"(0.7, 1.0, 2.0, 'Hello big World', ['hello', 'big', 'world'], DenseVector([3.0, 4.0]), 1.0, DenseVector([4.0]))\"]}"
+   ],
+   "loaded_uid": [
+    "ok",
+    "True"
+   ],
+   "save": [
+    "ok",
+    "None"
+   ],
+   "save_again": [
+    "UnknownException",
+    "(java.io.IOException) Path <path>/stage already exists. To overwrite it, please use write.overwrite().save(path) for Scala and use write().overwrite().save(path) for Java and Python."
+   ],
+   "transform": [
+    "ok",
+    "{'columns': ['x', 'a', 'b', 's', 'tokens', 'v', 'i', 'VectorSlicer_<uid>__output'], 'rows': [\"(0.2, 3.0, 5.0, 'a  quick test', ['a', 'quick', 'test'], DenseVector([0.5, -1.0]), 0.0, DenseVector([-1.0]))\", \"(0.7, 1.0, 2.0, 'Hello big World', ['hello', 'big', 'world'], DenseVector([3.0, 4.0]), 1.0, DenseVector([4.0]))\"]}"
+   ],
+   "transform_bad_params": [
+    "TypeError",
+    "Params must be a param map but got <class 'int'>."
+   ],
+   "transform_columns": [
+    "ok",
+    [
+     "'x'",
+     "'a'",
+     "'b'",
+     "'s'",
+     "'tokens'",
+     "'v'",
+     "'i'",
+     "'VectorSlicer_<uid>__output'"
+    ]
+   ],
+   "transform_map": [
+    "ok",
+    [
+     "'x'",
+     "'a'",
+     "'b'",
+     "'s'",
+     "'tokens'",
+     "'v'",
+     "'i'",
+     "'VectorSlicer_<uid>__output'"
+    ]
+   ]
+  },
+  "offline": {
+   "class": [
+    "ok",
+    [
+     "'VectorSlicer'",
+     "'feature'"
+    ]
+   ],
+   "copy_extract": [
+    "ok",
+    [
+     [
+      "'indices'",
+      "'[1]'"
+     ],
+     [
+      "'inputCol'",
+      "\"'v'\""
+     ],
+     [
+      "'names'",
+      "'[]'"
+     ],
+     [
+      "'outputCol'",
+      "\"'VectorSlicer_<uid>__output'\""
+     ]
+    ]
+   ],
+   "copy_same_uid": [
+    "ok",
+    "True"
+   ],
+   "explainParam_indices": [
+    "ok",
+    "'indices: An array of indices to select features from a vector column. There can be no overlap with names. (default: [], current: [1])'"
+   ],
+   "explainParam_inputCol": [
+    "ok",
+    "'inputCol: input column name. (current: v)'"
+   ],
+   "explainParam_names": [
+    "ok",
+    "'names: An array of feature names to select features from a vector column. These names must be specified by ML org.apache.spark.ml.attribute.Attribute. There can be no overlap with indices. (default: [])'"
+   ],
+   "explainParam_outputCol": [
+    "ok",
+    "'outputCol: output column name. (default: VectorSlicer_<uid>__output)'"
+   ],
+   "explainParams": [
+    "ok",
+    "'indices: An array of indices to select features from a vector column. There can be no overlap with names. (default: [], current: [1])\\ninputCol: input column name. (current: v)\\nnames: An array of feature names to select features from a vector column. These names must be specified by ML org.apache.spark.ml.attribute.Attribute. There can be no overlap with indices. (default: [])\\noutputCol: output column name. (default: VectorSlicer_<uid>__output)'"
+   ],
+   "extract": [
+    "ok",
+    [
+     [
+      "'indices'",
+      "'[1]'"
+     ],
+     [
+      "'inputCol'",
+      "\"'v'\""
+     ],
+     [
+      "'names'",
+      "'[]'"
+     ],
+     [
+      "'outputCol'",
+      "\"'VectorSlicer_<uid>__output'\""
+     ]
+    ]
+   ],
+   "getIndices": [
+    "ok",
+    "'[1]'"
+   ],
+   "getInputCol": [
+    "ok",
+    "'v'"
+   ],
+   "getNames": [
+    "ok",
+    "'[]'"
+   ],
+   "getOutputCol": [
+    "ok",
+    "'VectorSlicer_<uid>__output'"
+   ],
+   "getParam_nope": [
+    "AttributeError",
+    "'VectorSlicer' object has no attribute 'nope'"
+   ],
+   "hasDefault_indices": [
+    "ok",
+    "True"
+   ],
+   "hasDefault_inputCol": [
+    "ok",
+    "False"
+   ],
+   "hasDefault_names": [
+    "ok",
+    "True"
+   ],
+   "hasDefault_outputCol": [
+    "ok",
+    "True"
+   ],
+   "isDefined_indices": [
+    "ok",
+    "True"
+   ],
+   "isDefined_inputCol": [
+    "ok",
+    "True"
+   ],
+   "isDefined_names": [
+    "ok",
+    "True"
+   ],
+   "isDefined_outputCol": [
+    "ok",
+    "True"
+   ],
+   "isSet_indices": [
+    "ok",
+    "True"
+   ],
+   "isSet_inputCol": [
+    "ok",
+    "True"
+   ],
+   "isSet_names": [
+    "ok",
+    "False"
+   ],
+   "isSet_outputCol": [
+    "ok",
+    "False"
+   ],
+   "isinstance_params": [
+    "ok",
+    "True"
+   ],
+   "isinstance_transformer": [
+    "ok",
+    "True"
+   ],
+   "no_attribute": [
+    "AttributeError",
+    "'VectorSlicer' object has no attribute 'fooBarBaz'"
+   ],
+   "param_docs": [
+    "ok",
+    [
+     "'An array of indices to select features from a vector column. There can be no overlap with names.'",
+     "'input column name.'",
+     "'An array of feature names to select features from a vector column. These names must be specified by ML org.apache.spark.ml.attribute.Attribute. There can be no overlap with indices.'",
+     "'output column name.'"
+    ]
+   ],
+   "param_names": [
+    "ok",
+    [
+     "'indices'",
+     "'inputCol'",
+     "'names'",
+     "'outputCol'"
+    ]
+   ],
+   "param_parents": [
+    "ok",
+    [
+     "'VectorSlicer_<uid>'",
+     "'VectorSlicer_<uid>'",
+     "'VectorSlicer_<uid>'",
+     "'VectorSlicer_<uid>'"
+    ]
+   ],
+   "read_class": [
+    "ok",
+    "'RemoteMLReader'"
+   ],
+   "repr": [
+    "ok",
+    "'VectorSlicer_<uid>'"
+   ],
+   "setParams_returns_self": [
+    "ok",
+    "True"
+   ],
+   "set_bad_name": [
+    "AttributeError",
+    "'str' object has no attribute 'parent'"
+   ],
+   "uid_class": [
+    "ok",
+    "'VectorSlicer'"
+   ],
+   "write_class": [
+    "ok",
+    "'RemoteMLWriter'"
+   ],
+   "writer_no_attribute": [
+    "AttributeError",
+    "'RemoteMLWriter' object has no attribute 'fooBarBaz'"
+   ]
+  }
+ }
+}

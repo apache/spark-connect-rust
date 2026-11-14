@@ -233,6 +233,7 @@ jobs:
             tests/test_dropin_e2e.py \
             tests/test_ml_e2e.py \
             tests/test_ml_api_e2e.py \
+            tests/test_logistic_api_e2e.py \
             tests/test_gbt_classifier_e2e.py \
             tests/test_gbt_regressor_e2e.py \
             tests/test_naive_bayes_e2e.py \
@@ -243,6 +244,7 @@ jobs:
             tests/test_remaining_regressors_e2e.py \
             tests/test_remaining_clustering_e2e.py \
             tests/test_ml_features_e2e.py \
+            tests/test_feature_api_e2e.py \
             tests/test_frequent_patterns_e2e.py \
             tests/test_als_e2e.py \
             tests/test_evaluators_e2e.py \
@@ -593,7 +595,9 @@ jobs:
             --test e2e_functions --test e2e_columns --test e2e_dataframe \
             --test e2e_coverage --test e2e_linear_svc --test e2e_linear_regression --test e2e_generalized_linear_regression --test e2e_remaining_classifiers --test e2e_remaining_regressors --test e2e_kmeans --test e2e_bisecting_kmeans --test e2e_gaussian_mixture --test e2e_remaining_clustering --test e2e_ml_features --test e2e_frequent_patterns --test e2e_als --test e2e_evaluators --test e2e_statistics --test e2e_ml_object --test e2e_feature_models --test e2e_fpm_recommendation_evaluation --test e2e_ml_regression_api --test e2e_ml_clustering_api --test e2e_decision_tree_regressor --test e2e_decision_tree_classifier --test e2e_gbt_regressor --test e2e_naive_bayes --test e2e_gbt_classifier --test e2e_random_forest --test e2e_random_forest_regressor --test e2e_integration \
             --test arrow_map_input --test array_literal --test execute_plan_hook --test raw_relation \
+            --test e2e_tree_classification_api \
             --test types_roundtrip \
+            --test e2e_classification_misc_api \
             --test e2e_reattach_drop \
             --test e2e_lr_svc_api \
             -- --test-threads=1

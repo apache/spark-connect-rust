@@ -14,7 +14,7 @@ fn gbt_classifier_parameters_match_official_pyspark() {
             .unwrap();
         let expected = spark_connect_proto::MlParams::decode(bytes.as_slice()).unwrap();
         let estimator = GBTClassifier::new()
-            .set_feature_col("input")
+            .set_features_col("input")
             .set_label_col("target")
             .set_prediction_col("class")
             .set_probability_col("probs")
