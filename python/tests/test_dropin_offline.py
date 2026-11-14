@@ -606,6 +606,206 @@ def test_struct_field_nullable_is_kept_when_it_is_set():
     assert T.StructField("g", T.IntegerType()).nullable is True
 
 
+def test_struct_type_item_errors_name_the_type_as_python_does():
+    # As PySpark's `StructType.__init__`: the error of an item without a name, or of a struct that
+    # is not iterable, names the type by its `__name__`, not by its module and name.
+    import pyspark.sql.types as T
+
+    with pytest.raises(AttributeError) as e:
+        T.StructType([T.IntegerType()])
+    assert str(e.value) == "'IntegerType' object has no attribute 'name'"
+    with pytest.raises(TypeError) as e:
+        T.StructType(T.StructField("a", T.IntegerType()))
+    assert str(e.value) == "'StructField' object is not iterable"
+
+
+def test_tree_string_prints_nullable_flags_as_given_as_pyspark_prints_them():
+    # As PySpark's `_build_formatted_string`, which prints `str(flag).lower()` of each flag: a flag
+    # that is not a bool is printed as it is, and a bool as `true` or `false`.
+    import pyspark.sql.types as T
+
+    def tree(*args):
+        return T.StructType([T.StructField("a", *args)]).treeString()
+
+    assert tree(T.IntegerType(), 0) == "root\n |-- a: integer (nullable = 0)\n"
+    assert tree(T.IntegerType(), "x") == "root\n |-- a: integer (nullable = x)\n"
+    assert tree(T.IntegerType(), None) == "root\n |-- a: integer (nullable = none)\n"
+    assert tree(T.IntegerType(), True) == "root\n |-- a: integer (nullable = true)\n"
+    assert tree(T.ArrayType(T.IntegerType(), 1)) == (
+        "root\n |-- a: array (nullable = true)\n |    |-- element: integer (containsNull = 1)\n"
+    )
+    assert tree(T.MapType(T.IntegerType(), T.IntegerType(), 1)) == (
+        "root\n |-- a: map (nullable = true)\n |    |-- key: integer\n"
+        " |    |-- value: integer (valueContainsNull = 1)\n"
+    )
+    nested = T.StructType([T.StructField("b", T.IntegerType(), 0)])
+    assert T.StructType([T.StructField("a", nested)]).treeString() == (
+        "root\n |-- a: struct (nullable = true)\n |    |-- b: integer (nullable = 0)\n"
+    )
+    assert T.StructType([T.StructField("a", nested)]).treeString(1) == (
+        "root\n |-- a: struct (nullable = true)\n"
+    )
+
+
+def test_container_attributes_are_assignable_as_pyspark():
+    # As PySpark's plain classes: an assignment of `containsNull`, `elementType`, `keyType`,
+    # `valueType`, `valueContainsNull`, `fields`, `names` and a field's `name` is the attribute,
+    # and the JSON, repr, `simpleString`, equality and `treeString` follow it.
+    import pyspark.sql.types as T
+
+    array = T.ArrayType(T.IntegerType(), True)
+    array.containsNull = 0
+    assert array.containsNull == 0
+    assert array.json() == '{"containsNull":0,"elementType":"integer","type":"array"}'
+    assert repr(array) == "ArrayType(IntegerType(), 0)"
+    assert array.simpleString() == "array<int>"
+    assert array != T.ArrayType(T.IntegerType(), True)
+
+    element = T.ArrayType(T.IntegerType())
+    element.elementType = T.StringType()
+    assert element.json() == '{"containsNull":true,"elementType":"string","type":"array"}'
+    assert repr(element) == "ArrayType(StringType(), True)"
+    assert element == T.ArrayType(T.StringType())
+
+    the_map = T.MapType(T.StringType(), T.IntegerType())
+    the_map.valueContainsNull = "x"
+    assert repr(the_map) == "MapType(StringType(), IntegerType(), x)"
+    the_map.keyType = T.LongType()
+    the_map.valueType = T.DoubleType()
+    assert the_map.json() == (
+        '{"keyType":"long","type":"map","valueContainsNull":"x","valueType":"double"}'
+    )
+    assert the_map.simpleString() == "map<bigint,double>"
+
+    struct = T.StructType([T.StructField("a", T.IntegerType())])
+    struct.fields = [T.StructField("b", T.StringType())]
+    assert struct.json() == (
+        '{"fields":[{"metadata":{},"name":"b","nullable":true,"type":"string"}],"type":"struct"}'
+    )
+    assert struct.treeString() == "root\n |-- b: string (nullable = true)\n"
+    assert len(struct) == 1
+    # `names` is not recomputed by an assignment of `fields`, as in PySpark.
+    assert struct.names == ["a"]
+    assert struct.fieldNames() == ["a"]
+
+    named = T.StructType([T.StructField("a", T.IntegerType())])
+    named.names = ["zz"]
+    assert named.names == ["zz"]
+    assert named.fieldNames() == ["zz"]
+    assert named != T.StructType([T.StructField("a", T.IntegerType())])
+
+    field = T.StructField("a", T.IntegerType())
+    field.name = 5
+    assert field.name == 5
+    assert repr(field) == "StructField('5', IntegerType(), True)"
+    assert field.simpleString() == "5:int"
+    assert field.json() == '{"metadata":{},"name":5,"nullable":true,"type":"integer"}'
+
+
+def test_create_dataframe_asserts_the_nullable_flags_of_non_empty_rows(mock_connect):
+    # As PySpark's converters of local rows, which assert that each `nullable` is a bool, after the
+    # rows are taken apart; empty data is not converted, so it has no assertion.
+    import pyspark.sql.types as T
+
+    spark, _ = mock_connect
+    for flag in (0, None, "x"):
+        schema = T.StructType([T.StructField("x", T.IntegerType(), flag)])
+        with pytest.raises(AssertionError) as e:
+            spark.createDataFrame([(1,)], schema)
+        assert str(e.value) == ""
+        spark.createDataFrame([], schema)
+    with pytest.raises(AssertionError):
+        spark.createDataFrame([(1,)], T.StructType([
+            T.StructField("x", T.ArrayType(T.IntegerType(), 0)),
+        ]))
+    # The converter of a struct in an array is made, so its fields are asserted too.
+    inner = T.StructType([T.StructField("y", T.IntegerType(), 0)])
+    with pytest.raises(AssertionError):
+        spark.createDataFrame([([(1,)],)], T.StructType([
+            T.StructField("x", T.ArrayType(inner, True)),
+        ]))
+
+
+def test_struct_field_is_a_data_type_as_pyspark(mock_connect):
+    # As PySpark's `class StructField(DataType)`: a field is a type, which another type can hold.
+    import pickle
+
+    import pyspark.sql.types as T
+
+    nested = T.StructField("a", T.StructField("b", T.IntegerType()))
+    assert isinstance(nested, T.DataType)
+    assert repr(nested) == "StructField('a', StructField('b', IntegerType(), True), True)"
+    assert nested.json() == (
+        '{"metadata":{},"name":"a","nullable":true,'
+        '"type":{"metadata":{},"name":"b","nullable":true,"type":"integer"}}'
+    )
+    assert nested.jsonValue()["type"] == {
+        "name": "b", "type": "integer", "nullable": True, "metadata": {},
+    }
+    assert nested.simpleString() == "a:b:int"
+    assert nested.needConversion() is False
+    assert nested == T.StructField("a", T.StructField("b", T.IntegerType()))
+    assert hash(nested) == hash(T.StructField("a", T.StructField("b", T.IntegerType())))
+    assert pickle.loads(pickle.dumps(nested)) == nested
+
+    assert T.ArrayType(T.StructField("a", T.IntegerType())).json() == (
+        '{"containsNull":true,"elementType":{"metadata":{},"name":"a","nullable":true,'
+        '"type":"integer"},"type":"array"}'
+    )
+    assert T.MapType(T.StructField("a", T.IntegerType()), T.IntegerType()).simpleString() == (
+        "map<a:int,int>"
+    )
+    added = T.StructType().add("a", T.StructField("b", T.IntegerType()))
+    assert added.json() == (
+        '{"fields":[{"metadata":{},"name":"a","nullable":true,"type":{"metadata":{},'
+        '"name":"b","nullable":true,"type":"integer"}}],"type":"struct"}'
+    )
+    assert T.StructType([nested]).simpleString() == "struct<a:b:int>"
+    assert repr(T.ArrayType(T.StructField("a", T.IntegerType()))) == (
+        "ArrayType(StructField('a', IntegerType(), True), True)"
+    )
+
+
+def test_struct_field_as_a_type_fails_where_pyspark_fails(mock_connect):
+    # The client of PySpark has no Arrow type, nor a proto, for a StructField as a type, and no
+    # tree type name: each of its uses raises PySpark's error, at the same call.
+    import pyspark.sql.types as T
+    from pyspark.sql import functions as F
+
+    spark, _ = mock_connect
+    schema = T.StructType([T.StructField("x", T.StructField("b", T.IntegerType()))])
+    with pytest.raises(Exception) as e:
+        spark.createDataFrame([(1,)], schema)
+    assert str(e.value) == (
+        "[UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION] StructField('b', IntegerType(), True) is not "
+        "supported in conversion to Arrow."
+    )
+    # The plan of a `to` or of a column is sent with the action, where PySpark raises its error.
+    df = spark.range(1)
+    with pytest.raises(Exception) as e:
+        df.to(schema).collect()
+    assert str(e.value) == (
+        "[UNSUPPORTED_OPERATION] data type StructField('b', IntegerType(), True) is not supported."
+    )
+    with pytest.raises(Exception) as e:
+        schema.treeString()
+    assert str(e.value) == (
+        "[INVALID_TYPENAME_CALL] StructField does not have typeName. Use typeName on its type "
+        "explicitly instead."
+    )
+    with pytest.raises(Exception) as e:
+        df.select(F.col("id").cast(T.StructField("b", T.IntegerType()))).collect()
+    assert str(e.value) == (
+        "[UNSUPPORTED_OPERATION] data type StructField('b', IntegerType(), True) is not supported."
+    )
+    with pytest.raises(Exception) as e:
+        spark.createDataFrame([(1,)], T.StructField("a", T.IntegerType()))
+    assert str(e.value) == (
+        "[NOT_EXPECTED_TYPE] Argument `schema` should be list, None or StructType, "
+        "got StructField."
+    )
+
+
 def test_json_forms_accept_trailing_whitespace_as_pyspark(mock_connect):
     # As PySpark's `_parse_datatype_json_value`, whose patterns match a prefix of the string: the
     # whitespace after a form with an argument or a field is not a part of it. A bare name is

@@ -41,7 +41,7 @@ fn pyfunc_make_udf(
     named_args: Vec<(String, Bound<'_, PyAny>)>,
 ) -> PyResult<PyColumn> {
     // Accept any DataType object (our type classes / DataType) or a DDL string.
-    let return_data_type = crate::types::py_to_data_type(return_type)?;
+    let return_data_type = crate::types::py_to_proto_data_type(return_type)?;
 
     // The positional arguments, then the named ones, as PySpark's UDF call.
     let arg_exprs: Vec<Expression> = udf_arguments(args, named_args, false)?

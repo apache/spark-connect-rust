@@ -251,7 +251,7 @@ impl PyColumn {
         if let Ok(s) = dataType.extract::<String>() {
             Ok(PyColumn::new(self.column.clone().cast_str(&s)))
         } else {
-            let dt = crate::types::py_to_data_type(dataType)?;
+            let dt = crate::types::py_to_proto_data_type(dataType)?;
             Ok(PyColumn::new(self.column.clone().cast(dt)))
         }
     }
@@ -280,7 +280,7 @@ impl PyColumn {
         if let Ok(s) = dataType.extract::<String>() {
             Ok(PyColumn::new(self.column.clone().try_cast_str(&s)))
         } else {
-            let dt = crate::types::py_to_data_type(dataType)?;
+            let dt = crate::types::py_to_proto_data_type(dataType)?;
             Ok(PyColumn::new(self.column.clone().try_cast(dt)))
         }
     }
