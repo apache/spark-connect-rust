@@ -1,0 +1,6833 @@
+{
+ "datasets": {
+  "aft": {
+   "columns": [
+    [
+     "label",
+     "double"
+    ],
+    [
+     "censor",
+     "double"
+    ],
+    [
+     "features",
+     "vector"
+    ]
+   ],
+   "rows": [
+    [
+     1.218,
+     1.0,
+     [
+      1.56,
+      -0.605
+     ]
+    ],
+    [
+     2.949,
+     0.0,
+     [
+      0.346,
+      2.158
+     ]
+    ],
+    [
+     3.627,
+     0.0,
+     [
+      1.38,
+      0.231
+     ]
+    ],
+    [
+     0.273,
+     1.0,
+     [
+      0.52,
+      1.151
+     ]
+    ],
+    [
+     4.199,
+     0.0,
+     [
+      0.795,
+      -0.226
+     ]
+    ],
+    [
+     1.5,
+     1.0,
+     [
+      1.0,
+      0.5
+     ]
+    ],
+    [
+     2.2,
+     1.0,
+     [
+      0.3,
+      1.2
+     ]
+    ],
+    [
+     3.1,
+     0.0,
+     [
+      1.1,
+      -0.4
+     ]
+    ]
+   ]
+  },
+  "aft_held_out": {
+   "columns": [
+    [
+     "label",
+     "double"
+    ],
+    [
+     "censor",
+     "double"
+    ],
+    [
+     "features",
+     "vector"
+    ]
+   ],
+   "rows": [
+    [
+     2.0,
+     1.0,
+     [
+      0.9,
+      0.1
+     ]
+    ],
+    [
+     1.0,
+     0.0,
+     [
+      0.2,
+      1.0
+     ]
+    ]
+   ]
+  },
+  "counts": {
+   "columns": [
+    [
+     "label",
+     "double"
+    ],
+    [
+     "weight",
+     "double"
+    ],
+    [
+     "features",
+     "vector"
+    ]
+   ],
+   "rows": [
+    [
+     1.0,
+     1.0,
+     [
+      1.0,
+      0.0,
+      2.0
+     ]
+    ],
+    [
+     2.0,
+     2.0,
+     [
+      2.0,
+      1.0,
+      0.0
+     ]
+    ],
+    [
+     2.0,
+     1.0,
+     [
+      3.0,
+      1.0,
+      1.0
+     ]
+    ],
+    [
+     4.0,
+     1.5,
+     [
+      4.0,
+      0.0,
+      3.0
+     ]
+    ],
+    [
+     3.0,
+     1.0,
+     [
+      5.0,
+      2.0,
+      1.0
+     ]
+    ],
+    [
+     5.0,
+     0.5,
+     [
+      6.0,
+      1.0,
+      2.0
+     ]
+    ],
+    [
+     4.0,
+     1.0,
+     [
+      7.0,
+      3.0,
+      0.0
+     ]
+    ],
+    [
+     7.0,
+     2.0,
+     [
+      8.0,
+      2.0,
+      2.0
+     ]
+    ],
+    [
+     9.0,
+     1.0,
+     [
+      9.0,
+      1.0,
+      3.0
+     ]
+    ],
+    [
+     8.0,
+     1.0,
+     [
+      10.0,
+      3.0,
+      1.0
+     ]
+    ]
+   ]
+  },
+  "counts_held_out": {
+   "columns": [
+    [
+     "label",
+     "double"
+    ],
+    [
+     "weight",
+     "double"
+    ],
+    [
+     "features",
+     "vector"
+    ]
+   ],
+   "rows": [
+    [
+     3.0,
+     1.0,
+     [
+      2.5,
+      1.0,
+      1.5
+     ]
+    ],
+    [
+     3.0,
+     1.0,
+     [
+      6.5,
+      2.0,
+      0.5
+     ]
+    ],
+    [
+     3.0,
+     1.0,
+     [
+      9.5,
+      0.0,
+      2.5
+     ]
+    ]
+   ]
+  },
+  "isotonic": {
+   "columns": [
+    [
+     "label",
+     "double"
+    ],
+    [
+     "weight",
+     "double"
+    ],
+    [
+     "features",
+     "vector"
+    ]
+   ],
+   "rows": [
+    [
+     1.0,
+     1.0,
+     [
+      0.0,
+      1.0
+     ]
+    ],
+    [
+     2.0,
+     2.0,
+     [
+      0.0,
+      2.0
+     ]
+    ],
+    [
+     1.5,
+     1.0,
+     [
+      0.0,
+      3.0
+     ]
+    ],
+    [
+     3.0,
+     1.0,
+     [
+      0.0,
+      4.0
+     ]
+    ],
+    [
+     2.5,
+     0.5,
+     [
+      0.0,
+      5.0
+     ]
+    ],
+    [
+     4.0,
+     1.0,
+     [
+      0.0,
+      6.0
+     ]
+    ]
+   ]
+  },
+  "isotonic_held_out": {
+   "columns": [
+    [
+     "label",
+     "double"
+    ],
+    [
+     "weight",
+     "double"
+    ],
+    [
+     "features",
+     "vector"
+    ]
+   ],
+   "rows": [
+    [
+     2.0,
+     1.0,
+     [
+      0.0,
+      2.5
+     ]
+    ],
+    [
+     5.0,
+     1.0,
+     [
+      0.0,
+      8.0
+     ]
+    ]
+   ]
+  },
+  "rows": {
+   "columns": [
+    [
+     "label",
+     "double"
+    ],
+    [
+     "weight",
+     "double"
+    ],
+    [
+     "features",
+     "vector"
+    ]
+   ],
+   "rows": [
+    [
+     5.6,
+     1.0,
+     [
+      1.0,
+      0.0,
+      2.0
+     ]
+    ],
+    [
+     3.8,
+     2.0,
+     [
+      2.0,
+      1.0,
+      0.0
+     ]
+    ],
+    [
+     6.05,
+     1.0,
+     [
+      3.0,
+      1.0,
+      1.0
+     ]
+    ],
+    [
+     10.5,
+     1.5,
+     [
+      4.0,
+      0.0,
+      3.0
+     ]
+    ],
+    [
+     6.9,
+     1.0,
+     [
+      5.0,
+      2.0,
+      1.0
+     ]
+    ],
+    [
+     11.15,
+     0.5,
+     [
+      6.0,
+      1.0,
+      2.0
+     ]
+    ],
+    [
+     7.45,
+     1.0,
+     [
+      7.0,
+      3.0,
+      0.0
+     ]
+    ],
+    [
+     12.2,
+     2.0,
+     [
+      8.0,
+      2.0,
+      2.0
+     ]
+    ],
+    [
+     15.85,
+     1.0,
+     [
+      9.0,
+      1.0,
+      3.0
+     ]
+    ],
+    [
+     12.6,
+     1.0,
+     [
+      10.0,
+      3.0,
+      1.0
+     ]
+    ]
+   ]
+  },
+  "rows_held_out": {
+   "columns": [
+    [
+     "label",
+     "double"
+    ],
+    [
+     "weight",
+     "double"
+    ],
+    [
+     "features",
+     "vector"
+    ]
+   ],
+   "rows": [
+    [
+     6.0,
+     1.0,
+     [
+      2.5,
+      1.0,
+      1.5
+     ]
+    ],
+    [
+     4.5,
+     1.0,
+     [
+      6.5,
+      2.0,
+      0.5
+     ]
+    ],
+    [
+     18.0,
+     1.0,
+     [
+      9.5,
+      0.0,
+      2.5
+     ]
+    ]
+   ]
+  }
+ },
+ "encoding": "Floats are JSON numbers (Python repr); NaN and infinities are strings. Vectors and matrices as in scripts/ml_golden_common.py. DataFrames: schema and rows sorted by canonical JSON. Model and summary objects: {type, ref} with ref a placeholder: <idN> for an object id (<idN>.summary for a summary), numbered in order of first appearance. Errors: {class, condition, message}. commands: base64 of the MlCommand or MlRelation sent, results: base64 of the MlCommandResult received, both SerializeToString(deterministic=True) after normalization (object ids and uids -> placeholders, plan_id, origin and LocalRelation data cleared, paths -> <path>).",
+ "source": "apache/spark v4.3.0 pyspark.ml (official pyspark-client 4.3.0, Spark 4.3.0 Connect)",
+ "summaries": {
+  "GeneralizedLinearRegression.gamma.evaluate": {
+   "class": "GeneralizedLinearRegressionSummary",
+   "members": {
+    "aic": {
+     "call": "summary.aic",
+     "commands": [
+      "EhAKBwoFPGlkMD4SBQoDYWlj"
+     ],
+     "results": [
+      "CglZgyf05zhpN0A="
+     ],
+     "value": 23.411024567707056
+    },
+    "degreesOfFreedom": {
+     "call": "summary.degreesOfFreedom",
+     "commands": [
+      "Eh0KBwoFPGlkMD4SEgoQZGVncmVlc09mRnJlZWRvbQ=="
+     ],
+     "results": [
+      "Cgs4////////////AQ=="
+     ],
+     "value": -1
+    },
+    "deviance": {
+     "call": "summary.deviance",
+     "commands": [
+      "EhUKBwoFPGlkMD4SCgoIZGV2aWFuY2U="
+     ],
+     "results": [
+      "CglZ6BW7eslazz8="
+     ],
+     "value": 0.24495810024943343
+    },
+    "dispersion": {
+     "call": "summary.dispersion",
+     "commands": [
+      "EhcKBwoFPGlkMD4SDAoKZGlzcGVyc2lvbg=="
+     ],
+     "results": [
+      "CglZQyj2M2oKyL8="
+     ],
+     "value": -0.1878178361624255
+    },
+    "nullDeviance": {
+     "call": "summary.nullDeviance",
+     "commands": [
+      "EhkKBwoFPGlkMD4SDgoMbnVsbERldmlhbmNl"
+     ],
+     "results": [
+      "CglZ8F+NgVMq8j8="
+     ],
+     "value": 1.1353335438379837
+    },
+    "numInstances": {
+     "call": "summary.numInstances",
+     "commands": [
+      "EhkKBwoFPGlkMD4SDgoMbnVtSW5zdGFuY2Vz"
+     ],
+     "results": [
+      "CgI4Aw=="
+     ],
+     "value": 3
+    },
+    "predictionCol": {
+     "call": "summary.predictionCol",
+     "commands": [
+      "EhoKBwoFPGlkMD4SDwoNcHJlZGljdGlvbkNvbA=="
+     ],
+     "results": [
+      "CgxqCnByZWRpY3Rpb24="
+     ],
+     "value": "prediction"
+    },
+    "predictions": {
+     "call": "summary.predictions",
+     "commands": [
+      "EhgKBwoFPGlkMD4SDQoLcHJlZGljdGlvbnM="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        18.0,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          9.5,
+          0.0,
+          2.5
+         ]
+        },
+        15.371427595494518
+       ],
+       [
+        4.5,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          6.5,
+          2.0,
+          0.5
+         ]
+        },
+        7.462934049640866
+       ],
+       [
+        6.0,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          2.5,
+          1.0,
+          1.5
+         ]
+        },
+        6.190882258171412
+       ]
+      ],
+      "schema": "struct<label:double,weight:double,features:vector,prediction:double>"
+     }
+    },
+    "rank": {
+     "call": "summary.rank",
+     "commands": [
+      "EhEKBwoFPGlkMD4SBgoEcmFuaw=="
+     ],
+     "results": [
+      "CgI4BA=="
+     ],
+     "value": 4
+    },
+    "repr()": {
+     "call": "repr(summary)",
+     "commands": [],
+     "results": [],
+     "value": "<pyspark.ml.regression.GeneralizedLinearRegressionSummary object at 0x<addr>>"
+    },
+    "residualDegreeOfFreedom": {
+     "call": "summary.residualDegreeOfFreedom",
+     "commands": [
+      "EiQKBwoFPGlkMD4SGQoXcmVzaWR1YWxEZWdyZWVPZkZyZWVkb20="
+     ],
+     "results": [
+      "Cgs4////////////AQ=="
+     ],
+     "value": -1
+    },
+    "residualDegreeOfFreedomNull": {
+     "call": "summary.residualDegreeOfFreedomNull",
+     "commands": [
+      "EigKBwoFPGlkMD4SHQobcmVzaWR1YWxEZWdyZWVPZkZyZWVkb21OdWxs"
+     ],
+     "results": [
+      "CgI4Ag=="
+     ],
+     "value": 2
+    },
+    "residuals": {
+     "call": "summary.residuals()",
+     "commands": [
+      "EhYKBwoFPGlkMD4SCwoJcmVzaWR1YWxz"
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        -0.031155515669883727
+       ],
+       [
+        -0.46658600052083
+       ],
+       [
+        0.1621263032661669
+       ]
+      ],
+      "schema": "struct<devianceResiduals:double>"
+     }
+    },
+    "residuals-deviance": {
+     "call": "summary.residuals('deviance')",
+     "commands": [
+      "EiQKBwoFPGlkMD4SGQoJcmVzaWR1YWxzEgwKCmoIZGV2aWFuY2U="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        -0.031155515669883727
+       ],
+       [
+        -0.46658600052083
+       ],
+       [
+        0.1621263032661669
+       ]
+      ],
+      "schema": "struct<devianceResiduals:double>"
+     }
+    },
+    "residuals-pearson": {
+     "call": "summary.residuals('pearson')",
+     "commands": [
+      "EiMKBwoFPGlkMD4SGAoJcmVzaWR1YWxzEgsKCWoHcGVhcnNvbg=="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        -0.030832803825248663
+       ],
+       [
+        -0.3970199964159471
+       ],
+       [
+        0.1710037918193061
+       ]
+      ],
+      "schema": "struct<pearsonResiduals:double>"
+     }
+    },
+    "residuals-response": {
+     "call": "summary.residuals('response')",
+     "commands": [
+      "EiQKBwoFPGlkMD4SGQoJcmVzaWR1YWxzEgwKCmoIcmVzcG9uc2U="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        -0.19088225817141158
+       ],
+       [
+        -2.9629340496408663
+       ],
+       [
+        2.6285724045054817
+       ]
+      ],
+      "schema": "struct<responseResiduals:double>"
+     }
+    },
+    "residuals-working": {
+     "call": "summary.residuals('working')",
+     "commands": [
+      "EiMKBwoFPGlkMD4SGAoJcmVzaWR1YWxzEgsKCWoHd29ya2luZw=="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        -0.030832803825248663
+       ],
+       [
+        -0.39701999641594715
+       ],
+       [
+        0.1710037918193061
+       ]
+      ],
+      "schema": "struct<workingResiduals:double>"
+     }
+    },
+    "str()": {
+     "call": "str(summary)",
+     "commands": [],
+     "results": [],
+     "value": "<pyspark.ml.regression.GeneralizedLinearRegressionSummary object at 0x<addr>>"
+    }
+   },
+   "skipped": {},
+   "via": {
+    "call": "model.evaluate(rows_held_out)",
+    "commands": [
+     "EroDCgcKBTxpZDA+Eq4DCghldmFsdWF0ZRKhAxKeAwoAigGYAwqRAwoAGowDCtUCCgC6Ac8CCpgCCgBakwISkAJ7ImZpZWxkcyI6W3sibWV0YWRhdGEiOnt9LCJuYW1lIjoibGFiZWwiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoid2VpZ2h0IiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImZlYXR1cmVzIiwibnVsbGFibGUiOnRydWUsInR5cGUiOnsiY29udGFpbnNOdWxsIjp0cnVlLCJlbGVtZW50VHlwZSI6ImRvdWJsZSIsInR5cGUiOiJhcnJheSJ9fV0sInR5cGUiOiJzdHJ1Y3QifRIyCiYaJAoPYXJyYXlfdG9fdmVjdG9yEhESDAoIZmVhdHVyZXMYAJIBABIIZmVhdHVyZXMaDhIJCgVsYWJlbBgAkgEAGg8SCgoGd2VpZ2h0GACSAQAaERIMCghmZWF0dXJlcxgAkgEAEAEYAA=="
+    ],
+    "results": [
+     "EgU8aWQxPg=="
+    ],
+    "value": {
+     "ref": "<id1>",
+     "type": "GeneralizedLinearRegressionSummary"
+    }
+   }
+  },
+  "GeneralizedLinearRegression.gamma.training": {
+   "class": "GeneralizedLinearRegressionTrainingSummary",
+   "members": {
+    "aic": {
+     "call": "summary.aic",
+     "commands": [
+      "EhsKBwoFPGlkMD4SCQoHc3VtbWFyeRIFCgNhaWM="
+     ],
+     "results": [
+      "CglZALeISKKwOEA="
+     ],
+     "value": 24.689976247193954
+    },
+    "coefficientStandardErrors": {
+     "call": "summary.coefficientStandardErrors",
+     "commands": [
+      "EjEKBwoFPGlkMD4SCQoHc3VtbWFyeRIbChljb2VmZmljaWVudFN0YW5kYXJkRXJyb3Jz"
+     ],
+     "results": [
+      "CjOyATAKAkoAEglZPlsyqkQBnT8SCVnlDtQMw6a4PxIJWZAHKPFTI7I/EglZ/iybvur4uj8="
+     ],
+     "value": [
+      0.028325150382978885,
+      0.09629458487693972,
+      0.07085156095129563,
+      0.10536067155333126
+     ]
+    },
+    "degreesOfFreedom": {
+     "call": "summary.degreesOfFreedom",
+     "commands": [
+      "EigKBwoFPGlkMD4SCQoHc3VtbWFyeRISChBkZWdyZWVzT2ZGcmVlZG9t"
+     ],
+     "results": [
+      "CgI4Bg=="
+     ],
+     "value": 6
+    },
+    "deviance": {
+     "call": "summary.deviance",
+     "commands": [
+      "EiAKBwoFPGlkMD4SCQoHc3VtbWFyeRIKCghkZXZpYW5jZQ=="
+     ],
+     "results": [
+      "CglZzUWoSzMroj8="
+     ],
+     "value": 0.035485842690956206
+    },
+    "dispersion": {
+     "call": "summary.dispersion",
+     "commands": [
+      "EiIKBwoFPGlkMD4SCQoHc3VtbWFyeRIMCgpkaXNwZXJzaW9u"
+     ],
+     "results": [
+      "CglZfB4/ZsKeeD8="
+     ],
+     "value": 0.006010779736193347
+    },
+    "nullDeviance": {
+     "call": "summary.nullDeviance",
+     "commands": [
+      "EiQKBwoFPGlkMD4SCQoHc3VtbWFyeRIOCgxudWxsRGV2aWFuY2U="
+     ],
+     "results": [
+      "CglZfVOX39kD+z8="
+     ],
+     "value": 1.6884402021434817
+    },
+    "numInstances": {
+     "call": "summary.numInstances",
+     "commands": [
+      "EiQKBwoFPGlkMD4SCQoHc3VtbWFyeRIOCgxudW1JbnN0YW5jZXM="
+     ],
+     "results": [
+      "CgI4Cg=="
+     ],
+     "value": 10
+    },
+    "numIterations": {
+     "call": "summary.numIterations",
+     "commands": [
+      "EiUKBwoFPGlkMD4SCQoHc3VtbWFyeRIPCg1udW1JdGVyYXRpb25z"
+     ],
+     "results": [
+      "CgIwBA=="
+     ],
+     "value": 4
+    },
+    "pValues": {
+     "call": "summary.pValues",
+     "commands": [
+      "Eh8KBwoFPGlkMD4SCQoHc3VtbWFyeRIJCgdwVmFsdWVz"
+     ],
+     "results": [
+      "CjOyATAKAkoAEglZgB0/H7uuiT8SCVmylLZlgWbmPxIJWQDYKrH5EIk/EglZAABbRMCYAT8="
+     ],
+     "value": [
+      0.012540304080075115,
+      0.7000128733240187,
+      0.012239409178942395,
+      3.35630107151097e-05
+     ]
+    },
+    "predictionCol": {
+     "call": "summary.predictionCol",
+     "commands": [
+      "EiUKBwoFPGlkMD4SCQoHc3VtbWFyeRIPCg1wcmVkaWN0aW9uQ29s"
+     ],
+     "results": [
+      "CgxqCnByZWRpY3Rpb24="
+     ],
+     "value": "prediction"
+    },
+    "predictions": {
+     "call": "summary.predictions",
+     "commands": [
+      "EiMKBwoFPGlkMD4SCQoHc3VtbWFyeRINCgtwcmVkaWN0aW9ucxqeAwoAigGYAwqRAwoAGowDCtUCCgC6Ac8CCpgCCgBakwISkAJ7ImZpZWxkcyI6W3sibWV0YWRhdGEiOnt9LCJuYW1lIjoibGFiZWwiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoid2VpZ2h0IiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImZlYXR1cmVzIiwibnVsbGFibGUiOnRydWUsInR5cGUiOnsiY29udGFpbnNOdWxsIjp0cnVlLCJlbGVtZW50VHlwZSI6ImRvdWJsZSIsInR5cGUiOiJhcnJheSJ9fV0sInR5cGUiOiJzdHJ1Y3QifRIyCiYaJAoPYXJyYXlfdG9fdmVjdG9yEhESDAoIZmVhdHVyZXMYAJIBABIIZmVhdHVyZXMaDhIJCgVsYWJlbBgAkgEAGg8SCgoGd2VpZ2h0GACSAQAaERIMCghmZWF0dXJlcxgAkgEAEAEYAA=="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        10.5,
+        1.5,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          4.0,
+          0.0,
+          3.0
+         ]
+        },
+        10.07157062211672
+       ],
+       [
+        11.15,
+        0.5,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          6.0,
+          1.0,
+          2.0
+         ]
+        },
+        9.946887863487627
+       ],
+       [
+        12.2,
+        2.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          8.0,
+          2.0,
+          2.0
+         ]
+        },
+        12.622981839518136
+       ],
+       [
+        12.6,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          10.0,
+          3.0,
+          1.0
+         ]
+        },
+        12.466713442370626
+       ],
+       [
+        15.85,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          9.0,
+          1.0,
+          3.0
+         ]
+        },
+        17.235444863891214
+       ],
+       [
+        3.8,
+        2.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          2.0,
+          1.0,
+          0.0
+         ]
+        },
+        4.0437445310385804
+       ],
+       [
+        5.6,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          1.0,
+          0.0,
+          2.0
+         ]
+        },
+        5.812486093542798
+       ],
+       [
+        6.05,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          3.0,
+          1.0,
+          1.0
+         ]
+        },
+        5.740529411926056
+       ],
+       [
+        6.9,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          5.0,
+          2.0,
+          1.0
+         ]
+        },
+        7.284951786975826
+       ],
+       [
+        7.45,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          7.0,
+          3.0,
+          0.0
+         ]
+        },
+        7.19476646044041
+       ]
+      ],
+      "schema": "struct<label:double,weight:double,features:vector,prediction:double>"
+     }
+    },
+    "rank": {
+     "call": "summary.rank",
+     "commands": [
+      "EhwKBwoFPGlkMD4SCQoHc3VtbWFyeRIGCgRyYW5r"
+     ],
+     "results": [
+      "CgI4BA=="
+     ],
+     "value": 4
+    },
+    "repr()": {
+     "call": "repr(summary)",
+     "commands": [
+      "EiAKBwoFPGlkMD4SCQoHc3VtbWFyeRIKCgh0b1N0cmluZw=="
+     ],
+     "results": [
+      "CqgDaqUDQ29lZmZpY2llbnRzOgogICAgRmVhdHVyZSBFc3RpbWF0ZSBTdGQgRXJyb3IgVCBWYWx1ZSBQIFZhbHVlCihJbnRlcmNlcHQpICAgMS4xNTg5ICAgIDAuMTA1NCAxMC45OTk1ICAwLjAwMDAKIGZlYXR1cmVzXzAgICAwLjA5OTcgICAgMC4wMjgzICAzLjUxODYgIDAuMDEyNQogZmVhdHVyZXNfMSAgIDAuMDM4OSAgICAwLjA5NjMgIDAuNDA0MyAgMC43MDAwCiBmZWF0dXJlc18yICAgMC4yNTA3ICAgIDAuMDcwOSAgMy41Mzg2ICAwLjAxMjIKCihEaXNwZXJzaW9uIHBhcmFtZXRlciBmb3IgZ2FtbWEgZmFtaWx5IHRha2VuIHRvIGJlIDAuMDA2MCkKICAgIE51bGwgZGV2aWFuY2U6IDEuNjg4NCBvbiA2IGRlZ3JlZXMgb2YgZnJlZWRvbQpSZXNpZHVhbCBkZXZpYW5jZTogMC4wMzU1IG9uIDYgZGVncmVlcyBvZiBmcmVlZG9tCkFJQzogMjQuNjkwMA=="
+     ],
+     "value": "Coefficients:\n    Feature Estimate Std Error T Value P Value\n(Intercept)   1.1589    0.1054 10.9995  0.0000\n features_0   0.0997    0.0283  3.5186  0.0125\n features_1   0.0389    0.0963  0.4043  0.7000\n features_2   0.2507    0.0709  3.5386  0.0122\n\n(Dispersion parameter for gamma family taken to be 0.0060)\n    Null deviance: 1.6884 on 6 degrees of freedom\nResidual deviance: 0.0355 on 6 degrees of freedom\nAIC: 24.6900"
+    },
+    "residualDegreeOfFreedom": {
+     "call": "summary.residualDegreeOfFreedom",
+     "commands": [
+      "Ei8KBwoFPGlkMD4SCQoHc3VtbWFyeRIZChdyZXNpZHVhbERlZ3JlZU9mRnJlZWRvbQ=="
+     ],
+     "results": [
+      "CgI4Bg=="
+     ],
+     "value": 6
+    },
+    "residualDegreeOfFreedomNull": {
+     "call": "summary.residualDegreeOfFreedomNull",
+     "commands": [
+      "EjMKBwoFPGlkMD4SCQoHc3VtbWFyeRIdChtyZXNpZHVhbERlZ3JlZU9mRnJlZWRvbU51bGw="
+     ],
+     "results": [
+      "CgI4CQ=="
+     ],
+     "value": 9
+    },
+    "residuals": {
+     "call": "summary.residuals()",
+     "commands": [
+      "EiEKBwoFPGlkMD4SCQoHc3VtbWFyeRILCglyZXNpZHVhbHMangMKAIoBmAMKkQMKABqMAwrVAgoAugHPAgqYAgoAWpMCEpACeyJmaWVsZHMiOlt7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImxhYmVsIiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6IndlaWdodCIsIm51bGxhYmxlIjp0cnVlLCJ0eXBlIjoiZG91YmxlIn0seyJtZXRhZGF0YSI6e30sIm5hbWUiOiJmZWF0dXJlcyIsIm51bGxhYmxlIjp0cnVlLCJ0eXBlIjp7ImNvbnRhaW5zTnVsbCI6dHJ1ZSwiZWxlbWVudFR5cGUiOiJkb3VibGUiLCJ0eXBlIjoiYXJyYXkifX1dLCJ0eXBlIjoic3RydWN0In0SMgomGiQKD2FycmF5X3RvX3ZlY3RvchIREgwKCGZlYXR1cmVzGACSAQASCGZlYXR1cmVzGg4SCQoFbGFiZWwYAJIBABoPEgoKBndlaWdodBgAkgEAGhESDAoIZmVhdHVyZXMYAJIBABABGAA="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        -0.033890640918599044
+       ],
+       [
+        -0.037012049984168204
+       ],
+       [
+        -0.05380259927339949
+       ],
+       [
+        -0.0615324938981464
+       ],
+       [
+        -0.08264431065294929
+       ],
+       [
+        0.010653528890070553
+       ],
+       [
+        0.035063871768595
+       ],
+       [
+        0.04194985131649216
+       ],
+       [
+        0.05297037793005454
+       ],
+       [
+        0.11639459602192428
+       ]
+      ],
+      "schema": "struct<devianceResiduals:double>"
+     }
+    },
+    "residuals-deviance": {
+     "call": "summary.residuals('deviance')",
+     "commands": [
+      "Ei8KBwoFPGlkMD4SCQoHc3VtbWFyeRIZCglyZXNpZHVhbHMSDAoKaghkZXZpYW5jZRqeAwoAigGYAwqRAwoAGowDCtUCCgC6Ac8CCpgCCgBakwISkAJ7ImZpZWxkcyI6W3sibWV0YWRhdGEiOnt9LCJuYW1lIjoibGFiZWwiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoid2VpZ2h0IiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImZlYXR1cmVzIiwibnVsbGFibGUiOnRydWUsInR5cGUiOnsiY29udGFpbnNOdWxsIjp0cnVlLCJlbGVtZW50VHlwZSI6ImRvdWJsZSIsInR5cGUiOiJhcnJheSJ9fV0sInR5cGUiOiJzdHJ1Y3QifRIyCiYaJAoPYXJyYXlfdG9fdmVjdG9yEhESDAoIZmVhdHVyZXMYAJIBABIIZmVhdHVyZXMaDhIJCgVsYWJlbBgAkgEAGg8SCgoGd2VpZ2h0GACSAQAaERIMCghmZWF0dXJlcxgAkgEAEAEYAA=="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        -0.033890640918599044
+       ],
+       [
+        -0.037012049984168204
+       ],
+       [
+        -0.05380259927339949
+       ],
+       [
+        -0.0615324938981464
+       ],
+       [
+        -0.08264431065294929
+       ],
+       [
+        0.010653528890070553
+       ],
+       [
+        0.035063871768595
+       ],
+       [
+        0.04194985131649216
+       ],
+       [
+        0.05297037793005454
+       ],
+       [
+        0.11639459602192428
+       ]
+      ],
+      "schema": "struct<devianceResiduals:double>"
+     }
+    },
+    "residuals-pearson": {
+     "call": "summary.residuals('pearson')",
+     "commands": [
+      "Ei4KBwoFPGlkMD4SCQoHc3VtbWFyeRIYCglyZXNpZHVhbHMSCwoJagdwZWFyc29uGp4DCgCKAZgDCpEDCgAajAMK1QIKALoBzwIKmAIKAFqTAhKQAnsiZmllbGRzIjpbeyJtZXRhZGF0YSI6e30sIm5hbWUiOiJsYWJlbCIsIm51bGxhYmxlIjp0cnVlLCJ0eXBlIjoiZG91YmxlIn0seyJtZXRhZGF0YSI6e30sIm5hbWUiOiJ3ZWlnaHQiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoiZmVhdHVyZXMiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6eyJjb250YWluc051bGwiOnRydWUsImVsZW1lbnRUeXBlIjoiZG91YmxlIiwidHlwZSI6ImFycmF5In19XSwidHlwZSI6InN0cnVjdCJ9EjIKJhokCg9hcnJheV90b192ZWN0b3ISERIMCghmZWF0dXJlcxgAkgEAEghmZWF0dXJlcxoOEgkKBWxhYmVsGACSAQAaDxIKCgZ3ZWlnaHQYAJIBABoREgwKCGZlYXR1cmVzGACSAQAQARgA"
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        -0.03350886857762314
+       ],
+       [
+        -0.036556834738727964
+       ],
+       [
+        -0.05284205005502575
+       ],
+       [
+        -0.06027693618320101
+       ],
+       [
+        -0.08038346992677652
+       ],
+       [
+        0.010691394989185579
+       ],
+       [
+        0.03547488872126183
+       ],
+       [
+        0.04253848718912499
+       ],
+       [
+        0.053909764390547774
+       ],
+       [
+        0.12095362419120836
+       ]
+      ],
+      "schema": "struct<pearsonResiduals:double>"
+     }
+    },
+    "residuals-response": {
+     "call": "summary.residuals('response')",
+     "commands": [
+      "Ei8KBwoFPGlkMD4SCQoHc3VtbWFyeRIZCglyZXNpZHVhbHMSDAoKaghyZXNwb25zZRqeAwoAigGYAwqRAwoAGowDCtUCCgC6Ac8CCpgCCgBakwISkAJ7ImZpZWxkcyI6W3sibWV0YWRhdGEiOnt9LCJuYW1lIjoibGFiZWwiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoid2VpZ2h0IiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImZlYXR1cmVzIiwibnVsbGFibGUiOnRydWUsInR5cGUiOnsiY29udGFpbnNOdWxsIjp0cnVlLCJlbGVtZW50VHlwZSI6ImRvdWJsZSIsInR5cGUiOiJhcnJheSJ9fV0sInR5cGUiOiJzdHJ1Y3QifRIyCiYaJAoPYXJyYXlfdG9fdmVjdG9yEhESDAoIZmVhdHVyZXMYAJIBABIIZmVhdHVyZXMaDhIJCgVsYWJlbBgAkgEAGg8SCgoGd2VpZ2h0GACSAQAaERIMCghmZWF0dXJlcxgAkgEAEAEYAA=="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        -0.21248609354279857
+       ],
+       [
+        -0.24374453103858063
+       ],
+       [
+        -0.3849517869758259
+       ],
+       [
+        -0.42298183951813684
+       ],
+       [
+        -1.3854448638912142
+       ],
+       [
+        0.1332865576293738
+       ],
+       [
+        0.2552335395595904
+       ],
+       [
+        0.30947058807394345
+       ],
+       [
+        0.4284293778832797
+       ],
+       [
+        1.2031121365123738
+       ]
+      ],
+      "schema": "struct<responseResiduals:double>"
+     }
+    },
+    "residuals-working": {
+     "call": "summary.residuals('working')",
+     "commands": [
+      "Ei4KBwoFPGlkMD4SCQoHc3VtbWFyeRIYCglyZXNpZHVhbHMSCwoJagd3b3JraW5nGp4DCgCKAZgDCpEDCgAajAMK1QIKALoBzwIKmAIKAFqTAhKQAnsiZmllbGRzIjpbeyJtZXRhZGF0YSI6e30sIm5hbWUiOiJsYWJlbCIsIm51bGxhYmxlIjp0cnVlLCJ0eXBlIjoiZG91YmxlIn0seyJtZXRhZGF0YSI6e30sIm5hbWUiOiJ3ZWlnaHQiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoiZmVhdHVyZXMiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6eyJjb250YWluc051bGwiOnRydWUsImVsZW1lbnRUeXBlIjoiZG91YmxlIiwidHlwZSI6ImFycmF5In19XSwidHlwZSI6InN0cnVjdCJ9EjIKJhokCg9hcnJheV90b192ZWN0b3ISERIMCghmZWF0dXJlcxgAkgEAEghmZWF0dXJlcxoOEgkKBWxhYmVsGACSAQAaDxIKCgZ3ZWlnaHQYAJIBABoREgwKCGZlYXR1cmVzGACSAQAQARgA"
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        -0.03350886857762314
+       ],
+       [
+        -0.03655683473872797
+       ],
+       [
+        -0.05284205005502575
+       ],
+       [
+        -0.06027693618320101
+       ],
+       [
+        -0.08038346992677653
+       ],
+       [
+        0.010691394989185579
+       ],
+       [
+        0.03547488872126183
+       ],
+       [
+        0.04253848718912499
+       ],
+       [
+        0.053909764390547774
+       ],
+       [
+        0.12095362419120835
+       ]
+      ],
+      "schema": "struct<workingResiduals:double>"
+     }
+    },
+    "solver": {
+     "call": "summary.solver",
+     "commands": [
+      "Eh4KBwoFPGlkMD4SCQoHc3VtbWFyeRIICgZzb2x2ZXI="
+     ],
+     "results": [
+      "CgZqBGlybHM="
+     ],
+     "value": "irls"
+    },
+    "str()": {
+     "call": "str(summary)",
+     "commands": [
+      "EiAKBwoFPGlkMD4SCQoHc3VtbWFyeRIKCgh0b1N0cmluZw=="
+     ],
+     "results": [
+      "CqgDaqUDQ29lZmZpY2llbnRzOgogICAgRmVhdHVyZSBFc3RpbWF0ZSBTdGQgRXJyb3IgVCBWYWx1ZSBQIFZhbHVlCihJbnRlcmNlcHQpICAgMS4xNTg5ICAgIDAuMTA1NCAxMC45OTk1ICAwLjAwMDAKIGZlYXR1cmVzXzAgICAwLjA5OTcgICAgMC4wMjgzICAzLjUxODYgIDAuMDEyNQogZmVhdHVyZXNfMSAgIDAuMDM4OSAgICAwLjA5NjMgIDAuNDA0MyAgMC43MDAwCiBmZWF0dXJlc18yICAgMC4yNTA3ICAgIDAuMDcwOSAgMy41Mzg2ICAwLjAxMjIKCihEaXNwZXJzaW9uIHBhcmFtZXRlciBmb3IgZ2FtbWEgZmFtaWx5IHRha2VuIHRvIGJlIDAuMDA2MCkKICAgIE51bGwgZGV2aWFuY2U6IDEuNjg4NCBvbiA2IGRlZ3JlZXMgb2YgZnJlZWRvbQpSZXNpZHVhbCBkZXZpYW5jZTogMC4wMzU1IG9uIDYgZGVncmVlcyBvZiBmcmVlZG9tCkFJQzogMjQuNjkwMA=="
+     ],
+     "value": "Coefficients:\n    Feature Estimate Std Error T Value P Value\n(Intercept)   1.1589    0.1054 10.9995  0.0000\n features_0   0.0997    0.0283  3.5186  0.0125\n features_1   0.0389    0.0963  0.4043  0.7000\n features_2   0.2507    0.0709  3.5386  0.0122\n\n(Dispersion parameter for gamma family taken to be 0.0060)\n    Null deviance: 1.6884 on 6 degrees of freedom\nResidual deviance: 0.0355 on 6 degrees of freedom\nAIC: 24.6900"
+    },
+    "tValues": {
+     "call": "summary.tValues",
+     "commands": [
+      "Eh8KBwoFPGlkMD4SCQoHc3VtbWFyeRIJCgd0VmFsdWVz"
+     ],
+     "results": [
+      "CjOyATAKAkoAEglZ2c4bWQcmDEASCVl1QQin99/ZPxIJWa3229cUTwxAEglZaR4Nx7r/JUA="
+     ],
+     "value": [
+      3.518568702851422,
+      0.4042948847936921,
+      3.5386139739992672,
+      10.999471874572196
+     ]
+    }
+   },
+   "skipped": {},
+   "via": {
+    "call": "model.summary",
+    "commands": [],
+    "results": [],
+    "value": {
+     "ref": "<id0>.summary",
+     "type": "GeneralizedLinearRegressionTrainingSummary"
+    }
+   }
+  },
+  "GeneralizedLinearRegression.gaussian.evaluate": {
+   "class": "GeneralizedLinearRegressionSummary",
+   "members": {
+    "aic": {
+     "call": "summary.aic",
+     "commands": [
+      "EhAKBwoFPGlkMD4SBQoDYWlj"
+     ],
+     "results": [
+      "CglZqNfBgnEdOEA="
+     ],
+     "value": 24.115013286900336
+    },
+    "degreesOfFreedom": {
+     "call": "summary.degreesOfFreedom",
+     "commands": [
+      "Eh0KBwoFPGlkMD4SEgoQZGVncmVlc09mRnJlZWRvbQ=="
+     ],
+     "results": [
+      "Cgs4////////////AQ=="
+     ],
+     "value": -1
+    },
+    "deviance": {
+     "call": "summary.deviance",
+     "commands": [
+      "EhUKBwoFPGlkMD4SCgoIZGV2aWFuY2U="
+     ],
+     "results": [
+      "CglZzHcIwbdoM0A="
+     ],
+     "value": 19.40905386406648
+    },
+    "dispersion": {
+     "call": "summary.dispersion",
+     "commands": [
+      "EhcKBwoFPGlkMD4SDAoKZGlzcGVyc2lvbg=="
+     ],
+     "results": [
+      "CglZzHcIwbdoM8A="
+     ],
+     "value": -19.40905386406648
+    },
+    "nullDeviance": {
+     "call": "summary.nullDeviance",
+     "commands": [
+      "EhkKBwoFPGlkMD4SDgoMbnVsbERldmlhbmNl"
+     ],
+     "results": [
+      "CglZAAAAAABgW0A="
+     ],
+     "value": 109.5
+    },
+    "numInstances": {
+     "call": "summary.numInstances",
+     "commands": [
+      "EhkKBwoFPGlkMD4SDgoMbnVtSW5zdGFuY2Vz"
+     ],
+     "results": [
+      "CgI4Aw=="
+     ],
+     "value": 3
+    },
+    "predictionCol": {
+     "call": "summary.predictionCol",
+     "commands": [
+      "EhoKBwoFPGlkMD4SDwoNcHJlZGljdGlvbkNvbA=="
+     ],
+     "results": [
+      "CgxqCnByZWRpY3Rpb24="
+     ],
+     "value": "prediction"
+    },
+    "predictions": {
+     "call": "summary.predictions",
+     "commands": [
+      "EhgKBwoFPGlkMD4SDQoLcHJlZGljdGlvbnM="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        18.0,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          9.5,
+          0.0,
+          2.5
+         ]
+        },
+        18.071211538091287
+       ],
+       [
+        4.5,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          6.5,
+          2.0,
+          0.5
+         ]
+        },
+        8.886801239247948
+       ],
+       [
+        6.0,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          2.5,
+          1.0,
+          1.5
+         ]
+        },
+        5.600052918198141
+       ]
+      ],
+      "schema": "struct<label:double,weight:double,features:vector,prediction:double>"
+     }
+    },
+    "rank": {
+     "call": "summary.rank",
+     "commands": [
+      "EhEKBwoFPGlkMD4SBgoEcmFuaw=="
+     ],
+     "results": [
+      "CgI4BA=="
+     ],
+     "value": 4
+    },
+    "repr()": {
+     "call": "repr(summary)",
+     "commands": [],
+     "results": [],
+     "value": "<pyspark.ml.regression.GeneralizedLinearRegressionSummary object at 0x<addr>>"
+    },
+    "residualDegreeOfFreedom": {
+     "call": "summary.residualDegreeOfFreedom",
+     "commands": [
+      "EiQKBwoFPGlkMD4SGQoXcmVzaWR1YWxEZWdyZWVPZkZyZWVkb20="
+     ],
+     "results": [
+      "Cgs4////////////AQ=="
+     ],
+     "value": -1
+    },
+    "residualDegreeOfFreedomNull": {
+     "call": "summary.residualDegreeOfFreedomNull",
+     "commands": [
+      "EigKBwoFPGlkMD4SHQobcmVzaWR1YWxEZWdyZWVPZkZyZWVkb21OdWxs"
+     ],
+     "results": [
+      "CgI4Ag=="
+     ],
+     "value": 2
+    },
+    "residuals": {
+     "call": "summary.residuals()",
+     "commands": [
+      "EhYKBwoFPGlkMD4SCwoJcmVzaWR1YWxz"
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        -0.071211538091287
+       ],
+       [
+        -4.386801239247948
+       ],
+       [
+        0.3999470818018587
+       ]
+      ],
+      "schema": "struct<devianceResiduals:double>"
+     }
+    },
+    "residuals-deviance": {
+     "call": "summary.residuals('deviance')",
+     "commands": [
+      "EiQKBwoFPGlkMD4SGQoJcmVzaWR1YWxzEgwKCmoIZGV2aWFuY2U="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        -0.071211538091287
+       ],
+       [
+        -4.386801239247948
+       ],
+       [
+        0.3999470818018587
+       ]
+      ],
+      "schema": "struct<devianceResiduals:double>"
+     }
+    },
+    "residuals-pearson": {
+     "call": "summary.residuals('pearson')",
+     "commands": [
+      "EiMKBwoFPGlkMD4SGAoJcmVzaWR1YWxzEgsKCWoHcGVhcnNvbg=="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        -0.071211538091287
+       ],
+       [
+        -4.386801239247948
+       ],
+       [
+        0.3999470818018587
+       ]
+      ],
+      "schema": "struct<pearsonResiduals:double>"
+     }
+    },
+    "residuals-response": {
+     "call": "summary.residuals('response')",
+     "commands": [
+      "EiQKBwoFPGlkMD4SGQoJcmVzaWR1YWxzEgwKCmoIcmVzcG9uc2U="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        -0.071211538091287
+       ],
+       [
+        -4.386801239247948
+       ],
+       [
+        0.3999470818018587
+       ]
+      ],
+      "schema": "struct<responseResiduals:double>"
+     }
+    },
+    "residuals-working": {
+     "call": "summary.residuals('working')",
+     "commands": [
+      "EiMKBwoFPGlkMD4SGAoJcmVzaWR1YWxzEgsKCWoHd29ya2luZw=="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        -0.071211538091287
+       ],
+       [
+        -4.386801239247948
+       ],
+       [
+        0.3999470818018587
+       ]
+      ],
+      "schema": "struct<workingResiduals:double>"
+     }
+    },
+    "str()": {
+     "call": "str(summary)",
+     "commands": [],
+     "results": [],
+     "value": "<pyspark.ml.regression.GeneralizedLinearRegressionSummary object at 0x<addr>>"
+    }
+   },
+   "skipped": {},
+   "via": {
+    "call": "model.evaluate(rows_held_out)",
+    "commands": [
+     "EroDCgcKBTxpZDA+Eq4DCghldmFsdWF0ZRKhAxKeAwoAigGYAwqRAwoAGowDCtUCCgC6Ac8CCpgCCgBakwISkAJ7ImZpZWxkcyI6W3sibWV0YWRhdGEiOnt9LCJuYW1lIjoibGFiZWwiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoid2VpZ2h0IiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImZlYXR1cmVzIiwibnVsbGFibGUiOnRydWUsInR5cGUiOnsiY29udGFpbnNOdWxsIjp0cnVlLCJlbGVtZW50VHlwZSI6ImRvdWJsZSIsInR5cGUiOiJhcnJheSJ9fV0sInR5cGUiOiJzdHJ1Y3QifRIyCiYaJAoPYXJyYXlfdG9fdmVjdG9yEhESDAoIZmVhdHVyZXMYAJIBABIIZmVhdHVyZXMaDhIJCgVsYWJlbBgAkgEAGg8SCgoGd2VpZ2h0GACSAQAaERIMCghmZWF0dXJlcxgAkgEAEAEYAA=="
+    ],
+    "results": [
+     "EgU8aWQxPg=="
+    ],
+    "value": {
+     "ref": "<id1>",
+     "type": "GeneralizedLinearRegressionSummary"
+    }
+   }
+  },
+  "GeneralizedLinearRegression.gaussian.training": {
+   "class": "GeneralizedLinearRegressionTrainingSummary",
+   "members": {
+    "aic": {
+     "call": "summary.aic",
+     "commands": [
+      "EhsKBwoFPGlkMD4SCQoHc3VtbWFyeRIFCgNhaWM="
+     ],
+     "results": [
+      "CglZ4kRSBTqbHcA="
+     ],
+     "value": -7.4015885192359026
+    },
+    "coefficientStandardErrors": {
+     "call": "summary.coefficientStandardErrors",
+     "commands": [
+      "EjEKBwoFPGlkMD4SCQoHc3VtbWFyeRIbChljb2VmZmljaWVudFN0YW5kYXJkRXJyb3Jz"
+     ],
+     "results": [
+      "CjOyATAKAkoAEglZZENnWe1fqD8SCVne75Br9pjDPxIJWTTXXyPK47o/EglZGai5lapYwj8="
+     ],
+     "value": [
+      0.04760686603879696,
+      0.15310554744962607,
+      0.10503829349167121,
+      0.1433308821754629
+     ]
+    },
+    "degreesOfFreedom": {
+     "call": "summary.degreesOfFreedom",
+     "commands": [
+      "EigKBwoFPGlkMD4SCQoHc3VtbWFyeRISChBkZWdyZWVzT2ZGcmVlZG9t"
+     ],
+     "results": [
+      "CgI4Bg=="
+     ],
+     "value": 6
+    },
+    "deviance": {
+     "call": "summary.deviance",
+     "commands": [
+      "EiAKBwoFPGlkMD4SCQoHc3VtbWFyeRIKCghkZXZpYW5jZQ=="
+     ],
+     "results": [
+      "CglZvrf6sNFbvT8="
+     ],
+     "value": 0.1146822983816653
+    },
+    "dispersion": {
+     "call": "summary.dispersion",
+     "commands": [
+      "EiIKBwoFPGlkMD4SCQoHc3VtbWFyeRIMCgpkaXNwZXJzaW9u"
+     ],
+     "results": [
+      "CglZ1M9Ry4uSkz8="
+     ],
+     "value": 0.019113716396944216
+    },
+    "nullDeviance": {
+     "call": "summary.nullDeviance",
+     "commands": [
+      "EiQKBwoFPGlkMD4SCQoHc3VtbWFyeRIOCgxudWxsRGV2aWFuY2U="
+     ],
+     "results": [
+      "CglZ9ihcj2LmZEA="
+     ],
+     "value": 167.19953125
+    },
+    "numInstances": {
+     "call": "summary.numInstances",
+     "commands": [
+      "EiQKBwoFPGlkMD4SCQoHc3VtbWFyeRIOCgxudW1JbnN0YW5jZXM="
+     ],
+     "results": [
+      "CgI4Cg=="
+     ],
+     "value": 10
+    },
+    "numIterations": {
+     "call": "summary.numIterations",
+     "commands": [
+      "EiUKBwoFPGlkMD4SCQoHc3VtbWFyeRIPCg1udW1JdGVyYXRpb25z"
+     ],
+     "results": [
+      "CgIwAQ=="
+     ],
+     "value": 1
+    },
+    "pValues": {
+     "call": "summary.pValues",
+     "commands": [
+      "Eh8KBwoFPGlkMD4SCQoHc3VtbWFyeRIJCgdwVmFsdWVz"
+     ],
+     "results": [
+      "CjOyATAKAkoAEglZAAAAPvX8dz4SCVkAAJ20/WP+PhIJWQDIpGUOCkA/EglZAAAQcVXEuT4="
+     ],
+     "value": [
+      8.936269990655887e-08,
+      2.8982725132964404e-05,
+      0.0004894800470423011,
+      1.535828634269265e-06
+     ]
+    },
+    "predictionCol": {
+     "call": "summary.predictionCol",
+     "commands": [
+      "EiUKBwoFPGlkMD4SCQoHc3VtbWFyeRIPCg1wcmVkaWN0aW9uQ29s"
+     ],
+     "results": [
+      "CgxqCnByZWRpY3Rpb24="
+     ],
+     "value": "prediction"
+    },
+    "predictions": {
+     "call": "summary.predictions",
+     "commands": [
+      "EiMKBwoFPGlkMD4SCQoHc3VtbWFyeRINCgtwcmVkaWN0aW9ucxqeAwoAigGYAwqRAwoAGowDCtUCCgC6Ac8CCpgCCgBakwISkAJ7ImZpZWxkcyI6W3sibWV0YWRhdGEiOnt9LCJuYW1lIjoibGFiZWwiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoid2VpZ2h0IiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImZlYXR1cmVzIiwibnVsbGFibGUiOnRydWUsInR5cGUiOnsiY29udGFpbnNOdWxsIjp0cnVlLCJlbGVtZW50VHlwZSI6ImRvdWJsZSIsInR5cGUiOiJhcnJheSJ9fV0sInR5cGUiOiJzdHJ1Y3QifRIyCiYaJAoPYXJyYXlfdG9fdmVjdG9yEhESDAoIZmVhdHVyZXMYAJIBABIIZmVhdHVyZXMaDhIJCgVsYWJlbBgAkgEAGg8SCgoGd2VpZ2h0GACSAQAaERIMCghmZWF0dXJlcxgAkgEAEAEYAA=="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        10.5,
+        1.5,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          4.0,
+          0.0,
+          3.0
+         ]
+        },
+        10.55018377046973
+       ],
+       [
+        11.15,
+        0.5,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          6.0,
+          1.0,
+          2.0
+         ]
+        },
+        10.97185810225718
+       ],
+       [
+        12.2,
+        2.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          8.0,
+          2.0,
+          2.0
+         ]
+        },
+        12.109383839744467
+       ],
+       [
+        12.6,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          10.0,
+          3.0,
+          1.0
+         ]
+        },
+        12.531058171531917
+       ],
+       [
+        15.85,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          9.0,
+          1.0,
+          3.0
+         ]
+        },
+        15.985320491850551
+       ],
+       [
+        3.8,
+        2.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          2.0,
+          1.0,
+          0.0
+         ]
+        },
+        3.8100073123327984
+       ],
+       [
+        5.6,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          1.0,
+          0.0,
+          2.0
+         ]
+        },
+        5.536721380876362
+       ],
+       [
+        6.05,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          3.0,
+          1.0,
+          1.0
+         ]
+        },
+        5.958395712663812
+       ],
+       [
+        6.9,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          5.0,
+          2.0,
+          1.0
+         ]
+        },
+        7.095921450151098
+       ],
+       [
+        7.45,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          7.0,
+          3.0,
+          0.0
+         ]
+        },
+        7.517595781938548
+       ]
+      ],
+      "schema": "struct<label:double,weight:double,features:vector,prediction:double>"
+     }
+    },
+    "rank": {
+     "call": "summary.rank",
+     "commands": [
+      "EhwKBwoFPGlkMD4SCQoHc3VtbWFyeRIGCgRyYW5r"
+     ],
+     "results": [
+      "CgI4BA=="
+     ],
+     "value": 4
+    },
+    "repr()": {
+     "call": "repr(summary)",
+     "commands": [
+      "EiAKBwoFPGlkMD4SCQoHc3VtbWFyeRIKCgh0b1N0cmluZw=="
+     ],
+     "results": [
+      "CrADaq0DQ29lZmZpY2llbnRzOgogICAgRmVhdHVyZSBFc3RpbWF0ZSBTdGQgRXJyb3IgIFQgVmFsdWUgUCBWYWx1ZQooSW50ZXJjZXB0KSAgIDIuNjcyNSAgICAwLjE0MzMgIDE4LjY0NTUgIDAuMDAwMAogZmVhdHVyZXNfMCAgIDEuNDMyNSAgICAwLjA0NzYgIDMwLjA5MTAgIDAuMDAwMAogZmVhdHVyZXNfMSAgLTEuNzI3NSAgICAwLjE1MzEgLTExLjI4MzQgIDAuMDAwMAogZmVhdHVyZXNfMiAgIDAuNzE1OSAgICAwLjEwNTAgICA2LjgxNTEgIDAuMDAwNQoKKERpc3BlcnNpb24gcGFyYW1ldGVyIGZvciBnYXVzc2lhbiBmYW1pbHkgdGFrZW4gdG8gYmUgMC4wMTkxKQogIE51bGwgZGV2aWFuY2U6IDE2Ny4xOTk1IG9uIDYgZGVncmVlcyBvZiBmcmVlZG9tClJlc2lkdWFsIGRldmlhbmNlOiAwLjExNDcgb24gNiBkZWdyZWVzIG9mIGZyZWVkb20KQUlDOiAtNy40MDE2"
+     ],
+     "value": "Coefficients:\n    Feature Estimate Std Error  T Value P Value\n(Intercept)   2.6725    0.1433  18.6455  0.0000\n features_0   1.4325    0.0476  30.0910  0.0000\n features_1  -1.7275    0.1531 -11.2834  0.0000\n features_2   0.7159    0.1050   6.8151  0.0005\n\n(Dispersion parameter for gaussian family taken to be 0.0191)\n  Null deviance: 167.1995 on 6 degrees of freedom\nResidual deviance: 0.1147 on 6 degrees of freedom\nAIC: -7.4016"
+    },
+    "residualDegreeOfFreedom": {
+     "call": "summary.residualDegreeOfFreedom",
+     "commands": [
+      "Ei8KBwoFPGlkMD4SCQoHc3VtbWFyeRIZChdyZXNpZHVhbERlZ3JlZU9mRnJlZWRvbQ=="
+     ],
+     "results": [
+      "CgI4Bg=="
+     ],
+     "value": 6
+    },
+    "residualDegreeOfFreedomNull": {
+     "call": "summary.residualDegreeOfFreedomNull",
+     "commands": [
+      "EjMKBwoFPGlkMD4SCQoHc3VtbWFyeRIdChtyZXNpZHVhbERlZ3JlZU9mRnJlZWRvbU51bGw="
+     ],
+     "results": [
+      "CgI4CQ=="
+     ],
+     "value": 9
+    },
+    "residuals": {
+     "call": "summary.residuals()",
+     "commands": [
+      "EiEKBwoFPGlkMD4SCQoHc3VtbWFyeRILCglyZXNpZHVhbHMangMKAIoBmAMKkQMKABqMAwrVAgoAugHPAgqYAgoAWpMCEpACeyJmaWVsZHMiOlt7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImxhYmVsIiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6IndlaWdodCIsIm51bGxhYmxlIjp0cnVlLCJ0eXBlIjoiZG91YmxlIn0seyJtZXRhZGF0YSI6e30sIm5hbWUiOiJmZWF0dXJlcyIsIm51bGxhYmxlIjp0cnVlLCJ0eXBlIjp7ImNvbnRhaW5zTnVsbCI6dHJ1ZSwiZWxlbWVudFR5cGUiOiJkb3VibGUiLCJ0eXBlIjoiYXJyYXkifX1dLCJ0eXBlIjoic3RydWN0In0SMgomGiQKD2FycmF5X3RvX3ZlY3RvchIREgwKCGZlYXR1cmVzGACSAQASCGZlYXR1cmVzGg4SCQoFbGFiZWwYAJIBABoPEgoKBndlaWdodBgAkgEAGhESDAoIZmVhdHVyZXMYAJIBABABGAA="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        -0.014152476823947335
+       ],
+       [
+        -0.061462315509893804
+       ],
+       [
+        -0.06759578193854754
+       ],
+       [
+        -0.1353204918505515
+       ],
+       [
+        -0.19592145015109796
+       ],
+       [
+        0.06327861912363808
+       ],
+       [
+        0.06894182846808228
+       ],
+       [
+        0.09160428733618797
+       ],
+       [
+        0.125965343907389
+       ],
+       [
+        0.12815060280354748
+       ]
+      ],
+      "schema": "struct<devianceResiduals:double>"
+     }
+    },
+    "residuals-deviance": {
+     "call": "summary.residuals('deviance')",
+     "commands": [
+      "Ei8KBwoFPGlkMD4SCQoHc3VtbWFyeRIZCglyZXNpZHVhbHMSDAoKaghkZXZpYW5jZRqeAwoAigGYAwqRAwoAGowDCtUCCgC6Ac8CCpgCCgBakwISkAJ7ImZpZWxkcyI6W3sibWV0YWRhdGEiOnt9LCJuYW1lIjoibGFiZWwiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoid2VpZ2h0IiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImZlYXR1cmVzIiwibnVsbGFibGUiOnRydWUsInR5cGUiOnsiY29udGFpbnNOdWxsIjp0cnVlLCJlbGVtZW50VHlwZSI6ImRvdWJsZSIsInR5cGUiOiJhcnJheSJ9fV0sInR5cGUiOiJzdHJ1Y3QifRIyCiYaJAoPYXJyYXlfdG9fdmVjdG9yEhESDAoIZmVhdHVyZXMYAJIBABIIZmVhdHVyZXMaDhIJCgVsYWJlbBgAkgEAGg8SCgoGd2VpZ2h0GACSAQAaERIMCghmZWF0dXJlcxgAkgEAEAEYAA=="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        -0.014152476823947335
+       ],
+       [
+        -0.061462315509893804
+       ],
+       [
+        -0.06759578193854754
+       ],
+       [
+        -0.1353204918505515
+       ],
+       [
+        -0.19592145015109796
+       ],
+       [
+        0.06327861912363808
+       ],
+       [
+        0.06894182846808228
+       ],
+       [
+        0.09160428733618797
+       ],
+       [
+        0.125965343907389
+       ],
+       [
+        0.12815060280354748
+       ]
+      ],
+      "schema": "struct<devianceResiduals:double>"
+     }
+    },
+    "residuals-pearson": {
+     "call": "summary.residuals('pearson')",
+     "commands": [
+      "Ei4KBwoFPGlkMD4SCQoHc3VtbWFyeRIYCglyZXNpZHVhbHMSCwoJagdwZWFyc29uGp4DCgCKAZgDCpEDCgAajAMK1QIKALoBzwIKmAIKAFqTAhKQAnsiZmllbGRzIjpbeyJtZXRhZGF0YSI6e30sIm5hbWUiOiJsYWJlbCIsIm51bGxhYmxlIjp0cnVlLCJ0eXBlIjoiZG91YmxlIn0seyJtZXRhZGF0YSI6e30sIm5hbWUiOiJ3ZWlnaHQiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoiZmVhdHVyZXMiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6eyJjb250YWluc051bGwiOnRydWUsImVsZW1lbnRUeXBlIjoiZG91YmxlIiwidHlwZSI6ImFycmF5In19XSwidHlwZSI6InN0cnVjdCJ9EjIKJhokCg9hcnJheV90b192ZWN0b3ISERIMCghmZWF0dXJlcxgAkgEAEghmZWF0dXJlcxoOEgkKBWxhYmVsGACSAQAaDxIKCgZ3ZWlnaHQYAJIBABoREgwKCGZlYXR1cmVzGACSAQAQARgA"
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        -0.014152476823947335
+       ],
+       [
+        -0.0614623155098938
+       ],
+       [
+        -0.06759578193854754
+       ],
+       [
+        -0.1353204918505515
+       ],
+       [
+        -0.19592145015109796
+       ],
+       [
+        0.06327861912363808
+       ],
+       [
+        0.06894182846808228
+       ],
+       [
+        0.09160428733618797
+       ],
+       [
+        0.125965343907389
+       ],
+       [
+        0.12815060280354748
+       ]
+      ],
+      "schema": "struct<pearsonResiduals:double>"
+     }
+    },
+    "residuals-response": {
+     "call": "summary.residuals('response')",
+     "commands": [
+      "Ei8KBwoFPGlkMD4SCQoHc3VtbWFyeRIZCglyZXNpZHVhbHMSDAoKaghyZXNwb25zZRqeAwoAigGYAwqRAwoAGowDCtUCCgC6Ac8CCpgCCgBakwISkAJ7ImZpZWxkcyI6W3sibWV0YWRhdGEiOnt9LCJuYW1lIjoibGFiZWwiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoid2VpZ2h0IiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImZlYXR1cmVzIiwibnVsbGFibGUiOnRydWUsInR5cGUiOnsiY29udGFpbnNOdWxsIjp0cnVlLCJlbGVtZW50VHlwZSI6ImRvdWJsZSIsInR5cGUiOiJhcnJheSJ9fV0sInR5cGUiOiJzdHJ1Y3QifRIyCiYaJAoPYXJyYXlfdG9fdmVjdG9yEhESDAoIZmVhdHVyZXMYAJIBABIIZmVhdHVyZXMaDhIJCgVsYWJlbBgAkgEAGg8SCgoGd2VpZ2h0GACSAQAaERIMCghmZWF0dXJlcxgAkgEAEAEYAA=="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        -0.010007312332798612
+       ],
+       [
+        -0.05018377046972944
+       ],
+       [
+        -0.06759578193854754
+       ],
+       [
+        -0.1353204918505515
+       ],
+       [
+        -0.19592145015109796
+       ],
+       [
+        0.06327861912363808
+       ],
+       [
+        0.06894182846808228
+       ],
+       [
+        0.09061616025553221
+       ],
+       [
+        0.09160428733618797
+       ],
+       [
+        0.17814189774282063
+       ]
+      ],
+      "schema": "struct<responseResiduals:double>"
+     }
+    },
+    "residuals-working": {
+     "call": "summary.residuals('working')",
+     "commands": [
+      "Ei4KBwoFPGlkMD4SCQoHc3VtbWFyeRIYCglyZXNpZHVhbHMSCwoJagd3b3JraW5nGp4DCgCKAZgDCpEDCgAajAMK1QIKALoBzwIKmAIKAFqTAhKQAnsiZmllbGRzIjpbeyJtZXRhZGF0YSI6e30sIm5hbWUiOiJsYWJlbCIsIm51bGxhYmxlIjp0cnVlLCJ0eXBlIjoiZG91YmxlIn0seyJtZXRhZGF0YSI6e30sIm5hbWUiOiJ3ZWlnaHQiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoiZmVhdHVyZXMiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6eyJjb250YWluc051bGwiOnRydWUsImVsZW1lbnRUeXBlIjoiZG91YmxlIiwidHlwZSI6ImFycmF5In19XSwidHlwZSI6InN0cnVjdCJ9EjIKJhokCg9hcnJheV90b192ZWN0b3ISERIMCghmZWF0dXJlcxgAkgEAEghmZWF0dXJlcxoOEgkKBWxhYmVsGACSAQAaDxIKCgZ3ZWlnaHQYAJIBABoREgwKCGZlYXR1cmVzGACSAQAQARgA"
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        -0.010007312332798612
+       ],
+       [
+        -0.05018377046972944
+       ],
+       [
+        -0.06759578193854754
+       ],
+       [
+        -0.1353204918505515
+       ],
+       [
+        -0.19592145015109796
+       ],
+       [
+        0.06327861912363808
+       ],
+       [
+        0.06894182846808228
+       ],
+       [
+        0.09061616025553221
+       ],
+       [
+        0.09160428733618797
+       ],
+       [
+        0.17814189774282063
+       ]
+      ],
+      "schema": "struct<workingResiduals:double>"
+     }
+    },
+    "solver": {
+     "call": "summary.solver",
+     "commands": [
+      "Eh4KBwoFPGlkMD4SCQoHc3VtbWFyeRIICgZzb2x2ZXI="
+     ],
+     "results": [
+      "CgZqBGlybHM="
+     ],
+     "value": "irls"
+    },
+    "str()": {
+     "call": "str(summary)",
+     "commands": [
+      "EiAKBwoFPGlkMD4SCQoHc3VtbWFyeRIKCgh0b1N0cmluZw=="
+     ],
+     "results": [
+      "CrADaq0DQ29lZmZpY2llbnRzOgogICAgRmVhdHVyZSBFc3RpbWF0ZSBTdGQgRXJyb3IgIFQgVmFsdWUgUCBWYWx1ZQooSW50ZXJjZXB0KSAgIDIuNjcyNSAgICAwLjE0MzMgIDE4LjY0NTUgIDAuMDAwMAogZmVhdHVyZXNfMCAgIDEuNDMyNSAgICAwLjA0NzYgIDMwLjA5MTAgIDAuMDAwMAogZmVhdHVyZXNfMSAgLTEuNzI3NSAgICAwLjE1MzEgLTExLjI4MzQgIDAuMDAwMAogZmVhdHVyZXNfMiAgIDAuNzE1OSAgICAwLjEwNTAgICA2LjgxNTEgIDAuMDAwNQoKKERpc3BlcnNpb24gcGFyYW1ldGVyIGZvciBnYXVzc2lhbiBmYW1pbHkgdGFrZW4gdG8gYmUgMC4wMTkxKQogIE51bGwgZGV2aWFuY2U6IDE2Ny4xOTk1IG9uIDYgZGVncmVlcyBvZiBmcmVlZG9tClJlc2lkdWFsIGRldmlhbmNlOiAwLjExNDcgb24gNiBkZWdyZWVzIG9mIGZyZWVkb20KQUlDOiAtNy40MDE2"
+     ],
+     "value": "Coefficients:\n    Feature Estimate Std Error  T Value P Value\n(Intercept)   2.6725    0.1433  18.6455  0.0000\n features_0   1.4325    0.0476  30.0910  0.0000\n features_1  -1.7275    0.1531 -11.2834  0.0000\n features_2   0.7159    0.1050   6.8151  0.0005\n\n(Dispersion parameter for gaussian family taken to be 0.0191)\n  Null deviance: 167.1995 on 6 degrees of freedom\nResidual deviance: 0.1147 on 6 degrees of freedom\nAIC: -7.4016"
+    },
+    "tValues": {
+     "call": "summary.tValues",
+     "commands": [
+      "Eh8KBwoFPGlkMD4SCQoHc3VtbWFyeRIJCgd0VmFsdWVz"
+     ],
+     "results": [
+      "CjOyATAKAkoAEglZ2svDG0oXPkASCVmY5ldWF5EmwBIJWTOq6+G1QhtAEglZrLW8DUKlMkA="
+     ],
+     "value": [
+      30.09097455530341,
+      -11.283381174306939,
+      6.815146951683846,
+      18.645539148875898
+     ]
+    }
+   },
+   "skipped": {},
+   "via": {
+    "call": "model.summary",
+    "commands": [],
+    "results": [],
+    "value": {
+     "ref": "<id0>.summary",
+     "type": "GeneralizedLinearRegressionTrainingSummary"
+    }
+   }
+  },
+  "GeneralizedLinearRegression.no-intercept.evaluate": {
+   "class": "GeneralizedLinearRegressionSummary",
+   "members": {
+    "aic": {
+     "call": "summary.aic",
+     "commands": [
+      "EhAKBwoFPGlkMD4SBQoDYWlj"
+     ],
+     "results": [
+      "CglZW/K/qt93NkA="
+     ],
+     "value": 22.468256637441623
+    },
+    "degreesOfFreedom": {
+     "call": "summary.degreesOfFreedom",
+     "commands": [
+      "Eh0KBwoFPGlkMD4SEgoQZGVncmVlc09mRnJlZWRvbQ=="
+     ],
+     "results": [
+      "CgI4AA=="
+     ],
+     "value": 0
+    },
+    "deviance": {
+     "call": "summary.deviance",
+     "commands": [
+      "EhUKBwoFPGlkMD4SCgoIZGV2aWFuY2U="
+     ],
+     "results": [
+      "CglZ4jlYR5zVNUA="
+     ],
+     "value": 21.83441587356527
+    },
+    "dispersion": {
+     "call": "summary.dispersion",
+     "commands": [
+      "EhcKBwoFPGlkMD4SDAoKZGlzcGVyc2lvbg=="
+     ],
+     "results": [
+      "CglZAAAAAAAA8H8="
+     ],
+     "value": "Infinity"
+    },
+    "nullDeviance": {
+     "call": "summary.nullDeviance",
+     "commands": [
+      "EhkKBwoFPGlkMD4SDgoMbnVsbERldmlhbmNl"
+     ],
+     "results": [
+      "CglZAAAAAADEd0A="
+     ],
+     "value": 380.25
+    },
+    "numInstances": {
+     "call": "summary.numInstances",
+     "commands": [
+      "EhkKBwoFPGlkMD4SDgoMbnVtSW5zdGFuY2Vz"
+     ],
+     "results": [
+      "CgI4Aw=="
+     ],
+     "value": 3
+    },
+    "predictionCol": {
+     "call": "summary.predictionCol",
+     "commands": [
+      "EhoKBwoFPGlkMD4SDwoNcHJlZGljdGlvbkNvbA=="
+     ],
+     "results": [
+      "CgxqCnByZWRpY3Rpb24="
+     ],
+     "value": "prediction"
+    },
+    "predictions": {
+     "call": "summary.predictions",
+     "commands": [
+      "EhgKBwoFPGlkMD4SDQoLcHJlZGljdGlvbnM="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        18.0,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          9.5,
+          0.0,
+          2.5
+         ]
+        },
+        14.806141390205322
+       ],
+       [
+        4.5,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          6.5,
+          2.0,
+          0.5
+         ]
+        },
+        7.9100464060031515
+       ],
+       [
+        6.0,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          2.5,
+          1.0,
+          1.5
+         ]
+        },
+        6.07257109004741
+       ]
+      ],
+      "schema": "struct<label:double,weight:double,features:vector,prediction:double>"
+     }
+    },
+    "rank": {
+     "call": "summary.rank",
+     "commands": [
+      "EhEKBwoFPGlkMD4SBgoEcmFuaw=="
+     ],
+     "results": [
+      "CgI4Aw=="
+     ],
+     "value": 3
+    },
+    "repr()": {
+     "call": "repr(summary)",
+     "commands": [],
+     "results": [],
+     "value": "<pyspark.ml.regression.GeneralizedLinearRegressionSummary object at 0x<addr>>"
+    },
+    "residualDegreeOfFreedom": {
+     "call": "summary.residualDegreeOfFreedom",
+     "commands": [
+      "EiQKBwoFPGlkMD4SGQoXcmVzaWR1YWxEZWdyZWVPZkZyZWVkb20="
+     ],
+     "results": [
+      "CgI4AA=="
+     ],
+     "value": 0
+    },
+    "residualDegreeOfFreedomNull": {
+     "call": "summary.residualDegreeOfFreedomNull",
+     "commands": [
+      "EigKBwoFPGlkMD4SHQobcmVzaWR1YWxEZWdyZWVPZkZyZWVkb21OdWxs"
+     ],
+     "results": [
+      "CgI4Aw=="
+     ],
+     "value": 3
+    },
+    "residuals": {
+     "call": "summary.residuals()",
+     "commands": [
+      "EhYKBwoFPGlkMD4SCwoJcmVzaWR1YWxz"
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        -0.07257109004741036
+       ],
+       [
+        -3.4100464060031515
+       ],
+       [
+        3.1938586097946775
+       ]
+      ],
+      "schema": "struct<devianceResiduals:double>"
+     }
+    },
+    "residuals-deviance": {
+     "call": "summary.residuals('deviance')",
+     "commands": [
+      "EiQKBwoFPGlkMD4SGQoJcmVzaWR1YWxzEgwKCmoIZGV2aWFuY2U="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        -0.07257109004741036
+       ],
+       [
+        -3.4100464060031515
+       ],
+       [
+        3.1938586097946775
+       ]
+      ],
+      "schema": "struct<devianceResiduals:double>"
+     }
+    },
+    "residuals-pearson": {
+     "call": "summary.residuals('pearson')",
+     "commands": [
+      "EiMKBwoFPGlkMD4SGAoJcmVzaWR1YWxzEgsKCWoHcGVhcnNvbg=="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        -0.07257109004741036
+       ],
+       [
+        -3.4100464060031515
+       ],
+       [
+        3.1938586097946775
+       ]
+      ],
+      "schema": "struct<pearsonResiduals:double>"
+     }
+    },
+    "residuals-response": {
+     "call": "summary.residuals('response')",
+     "commands": [
+      "EiQKBwoFPGlkMD4SGQoJcmVzaWR1YWxzEgwKCmoIcmVzcG9uc2U="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        -0.07257109004741036
+       ],
+       [
+        -3.4100464060031515
+       ],
+       [
+        3.1938586097946775
+       ]
+      ],
+      "schema": "struct<responseResiduals:double>"
+     }
+    },
+    "residuals-working": {
+     "call": "summary.residuals('working')",
+     "commands": [
+      "EiMKBwoFPGlkMD4SGAoJcmVzaWR1YWxzEgsKCWoHd29ya2luZw=="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        -0.07257109004741036
+       ],
+       [
+        -3.4100464060031515
+       ],
+       [
+        3.1938586097946775
+       ]
+      ],
+      "schema": "struct<workingResiduals:double>"
+     }
+    },
+    "str()": {
+     "call": "str(summary)",
+     "commands": [],
+     "results": [],
+     "value": "<pyspark.ml.regression.GeneralizedLinearRegressionSummary object at 0x<addr>>"
+    }
+   },
+   "skipped": {},
+   "via": {
+    "call": "model.evaluate(rows_held_out)",
+    "commands": [
+     "EroDCgcKBTxpZDA+Eq4DCghldmFsdWF0ZRKhAxKeAwoAigGYAwqRAwoAGowDCtUCCgC6Ac8CCpgCCgBakwISkAJ7ImZpZWxkcyI6W3sibWV0YWRhdGEiOnt9LCJuYW1lIjoibGFiZWwiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoid2VpZ2h0IiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImZlYXR1cmVzIiwibnVsbGFibGUiOnRydWUsInR5cGUiOnsiY29udGFpbnNOdWxsIjp0cnVlLCJlbGVtZW50VHlwZSI6ImRvdWJsZSIsInR5cGUiOiJhcnJheSJ9fV0sInR5cGUiOiJzdHJ1Y3QifRIyCiYaJAoPYXJyYXlfdG9fdmVjdG9yEhESDAoIZmVhdHVyZXMYAJIBABIIZmVhdHVyZXMaDhIJCgVsYWJlbBgAkgEAGg8SCgoGd2VpZ2h0GACSAQAaERIMCghmZWF0dXJlcxgAkgEAEAEYAA=="
+    ],
+    "results": [
+     "EgU8aWQxPg=="
+    ],
+    "value": {
+     "ref": "<id1>",
+     "type": "GeneralizedLinearRegressionSummary"
+    }
+   }
+  },
+  "GeneralizedLinearRegression.no-intercept.training": {
+   "class": "GeneralizedLinearRegressionTrainingSummary",
+   "members": {
+    "aic": {
+     "call": "summary.aic",
+     "commands": [
+      "EhsKBwoFPGlkMD4SCQoHc3VtbWFyeRIFCgNhaWM="
+     ],
+     "results": [
+      "CglZkNhKZja3O0A="
+     ],
+     "value": 27.715673821709572
+    },
+    "coefficientStandardErrors": {
+     "call": "summary.coefficientStandardErrors",
+     "commands": [
+      "EjEKBwoFPGlkMD4SCQoHc3VtbWFyeRIbChljb2VmZmljaWVudFN0YW5kYXJkRXJyb3Jz"
+     ],
+     "results": [
+      "CiiyASUKAkoAEglZ3C07JvZDyz8SCVk6l8Z0a6nhPxIJWZHc7s99ztY/"
+     ],
+     "value": [
+      0.21301152102237964,
+      0.5519311219002028,
+      0.35635323816263403
+     ]
+    },
+    "degreesOfFreedom": {
+     "call": "summary.degreesOfFreedom",
+     "commands": [
+      "EigKBwoFPGlkMD4SCQoHc3VtbWFyeRISChBkZWdyZWVzT2ZGcmVlZG9t"
+     ],
+     "results": [
+      "CgI4Bw=="
+     ],
+     "value": 7
+    },
+    "deviance": {
+     "call": "summary.deviance",
+     "commands": [
+      "EiAKBwoFPGlkMD4SCQoHc3VtbWFyeRIKCghkZXZpYW5jZQ=="
+     ],
+     "results": [
+      "CglZfcPbv+zREEA="
+     ],
+     "value": 4.205004689968402
+    },
+    "dispersion": {
+     "call": "summary.dispersion",
+     "commands": [
+      "EiIKBwoFPGlkMD4SCQoHc3VtbWFyeRIMCgpkaXNwZXJzaW9u"
+     ],
+     "results": [
+      "CglZ2Lofkg454z8="
+     ],
+     "value": 0.6007149557097717
+    },
+    "nullDeviance": {
+     "call": "summary.nullDeviance",
+     "commands": [
+      "EiQKBwoFPGlkMD4SCQoHc3VtbWFyeRIOCgxudWxsRGV2aWFuY2U="
+     ],
+     "results": [
+      "CglZ4XoUrkeXjkA="
+     ],
+     "value": 978.91
+    },
+    "numInstances": {
+     "call": "summary.numInstances",
+     "commands": [
+      "EiQKBwoFPGlkMD4SCQoHc3VtbWFyeRIOCgxudW1JbnN0YW5jZXM="
+     ],
+     "results": [
+      "CgI4Cg=="
+     ],
+     "value": 10
+    },
+    "numIterations": {
+     "call": "summary.numIterations",
+     "commands": [
+      "EiUKBwoFPGlkMD4SCQoHc3VtbWFyeRIPCg1udW1JdGVyYXRpb25z"
+     ],
+     "results": [
+      "CgIwAQ=="
+     ],
+     "value": 1
+    },
+    "pValues": {
+     "call": "summary.pValues",
+     "commands": [
+      "Eh8KBwoFPGlkMD4SCQoHc3VtbWFyeRIJCgdwVmFsdWVz"
+     ],
+     "results": [
+      "CiiyASUKAkoAEglZAGQ8+C+cZj8SCVnsoSvgOLPkPxIJWQCAgNZOuTg/"
+     ],
+     "value": [
+      0.0027600228221555945,
+      0.6468777063683411,
+      0.00037725615266204215
+     ]
+    },
+    "predictionCol": {
+     "call": "summary.predictionCol",
+     "commands": [
+      "EiUKBwoFPGlkMD4SCQoHc3VtbWFyeRIPCg1wcmVkaWN0aW9uQ29s"
+     ],
+     "results": [
+      "CgxqCnByZWRpY3Rpb24="
+     ],
+     "value": "prediction"
+    },
+    "predictions": {
+     "call": "summary.predictions",
+     "commands": [
+      "EiMKBwoFPGlkMD4SCQoHc3VtbWFyeRINCgtwcmVkaWN0aW9ucxqeAwoAigGYAwqRAwoAGowDCtUCCgC6Ac8CCpgCCgBakwISkAJ7ImZpZWxkcyI6W3sibWV0YWRhdGEiOnt9LCJuYW1lIjoibGFiZWwiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoid2VpZ2h0IiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImZlYXR1cmVzIiwibnVsbGFibGUiOnRydWUsInR5cGUiOnsiY29udGFpbnNOdWxsIjp0cnVlLCJlbGVtZW50VHlwZSI6ImRvdWJsZSIsInR5cGUiOiJhcnJheSJ9fV0sInR5cGUiOiJzdHJ1Y3QifRIyCiYaJAoPYXJyYXlfdG9fdmVjdG9yEhESDAoIZmVhdHVyZXMYAJIBABIIZmVhdHVyZXMaDhIJCgVsYWJlbBgAkgEAGg8SCgoGd2VpZ2h0GACSAQAaERIMCghmZWF0dXJlcxgAkgEAEAEYAA=="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        10.5,
+        1.5,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          4.0,
+          0.0,
+          3.0
+         ]
+        },
+        10.655938981042658
+       ],
+       [
+        11.15,
+        0.5,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          6.0,
+          1.0,
+          2.0
+         ]
+        },
+        10.571406003159552
+       ],
+       [
+        12.2,
+        2.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          8.0,
+          2.0,
+          2.0
+         ]
+        },
+        12.75751382306477
+       ],
+       [
+        12.6,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          10.0,
+          3.0,
+          1.0
+         ]
+        },
+        12.672980845181662
+       ],
+       [
+        15.85,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          9.0,
+          1.0,
+          3.0
+         ]
+        },
+        15.725059241706143
+       ],
+       [
+        3.8,
+        2.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          2.0,
+          1.0,
+          0.0
+         ]
+        },
+        2.186107819905217
+       ],
+       [
+        5.6,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          1.0,
+          0.0,
+          2.0
+         ]
+        },
+        5.502285742496066
+       ],
+       [
+        6.05,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          3.0,
+          1.0,
+          1.0
+         ]
+        },
+        5.4177527646129615
+       ],
+       [
+        6.9,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          5.0,
+          2.0,
+          1.0
+         ]
+        },
+        7.603860584518177
+       ],
+       [
+        7.45,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          7.0,
+          3.0,
+          0.0
+         ]
+        },
+        7.519327606635073
+       ]
+      ],
+      "schema": "struct<label:double,weight:double,features:vector,prediction:double>"
+     }
+    },
+    "rank": {
+     "call": "summary.rank",
+     "commands": [
+      "EhwKBwoFPGlkMD4SCQoHc3VtbWFyeRIGCgRyYW5r"
+     ],
+     "results": [
+      "CgI4Aw=="
+     ],
+     "value": 3
+    },
+    "repr()": {
+     "call": "repr(summary)",
+     "commands": [
+      "EiAKBwoFPGlkMD4SCQoHc3VtbWFyeRIKCgh0b1N0cmluZw=="
+     ],
+     "results": [
+      "CvgCavUCQ29lZmZpY2llbnRzOgogICBGZWF0dXJlIEVzdGltYXRlIFN0ZCBFcnJvciBUIFZhbHVlIFAgVmFsdWUKZmVhdHVyZXNfMCAgIDAuOTYxMCAgICAwLjIxMzAgIDQuNTExNSAgMC4wMDI4CmZlYXR1cmVzXzEgICAwLjI2NDEgICAgMC41NTE5ICAwLjQ3ODUgIDAuNjQ2OQpmZWF0dXJlc18yICAgMi4yNzA2ICAgIDAuMzU2NCAgNi4zNzE5ICAwLjAwMDQKCihEaXNwZXJzaW9uIHBhcmFtZXRlciBmb3IgZ2F1c3NpYW4gZmFtaWx5IHRha2VuIHRvIGJlIDAuNjAwNykKICBOdWxsIGRldmlhbmNlOiA5NzguOTEwMCBvbiA3IGRlZ3JlZXMgb2YgZnJlZWRvbQpSZXNpZHVhbCBkZXZpYW5jZTogNC4yMDUwIG9uIDcgZGVncmVlcyBvZiBmcmVlZG9tCkFJQzogMjcuNzE1Nw=="
+     ],
+     "value": "Coefficients:\n   Feature Estimate Std Error T Value P Value\nfeatures_0   0.9610    0.2130  4.5115  0.0028\nfeatures_1   0.2641    0.5519  0.4785  0.6469\nfeatures_2   2.2706    0.3564  6.3719  0.0004\n\n(Dispersion parameter for gaussian family taken to be 0.6007)\n  Null deviance: 978.9100 on 7 degrees of freedom\nResidual deviance: 4.2050 on 7 degrees of freedom\nAIC: 27.7157"
+    },
+    "residualDegreeOfFreedom": {
+     "call": "summary.residualDegreeOfFreedom",
+     "commands": [
+      "Ei8KBwoFPGlkMD4SCQoHc3VtbWFyeRIZChdyZXNpZHVhbERlZ3JlZU9mRnJlZWRvbQ=="
+     ],
+     "results": [
+      "CgI4Bw=="
+     ],
+     "value": 7
+    },
+    "residualDegreeOfFreedomNull": {
+     "call": "summary.residualDegreeOfFreedomNull",
+     "commands": [
+      "EjMKBwoFPGlkMD4SCQoHc3VtbWFyeRIdChtyZXNpZHVhbERlZ3JlZU9mRnJlZWRvbU51bGw="
+     ],
+     "results": [
+      "CgI4Cg=="
+     ],
+     "value": 10
+    },
+    "residuals": {
+     "call": "summary.residuals()",
+     "commands": [
+      "EiEKBwoFPGlkMD4SCQoHc3VtbWFyeRILCglyZXNpZHVhbHMangMKAIoBmAMKkQMKABqMAwrVAgoAugHPAgqYAgoAWpMCEpACeyJmaWVsZHMiOlt7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImxhYmVsIiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6IndlaWdodCIsIm51bGxhYmxlIjp0cnVlLCJ0eXBlIjoiZG91YmxlIn0seyJtZXRhZGF0YSI6e30sIm5hbWUiOiJmZWF0dXJlcyIsIm51bGxhYmxlIjp0cnVlLCJ0eXBlIjp7ImNvbnRhaW5zTnVsbCI6dHJ1ZSwiZWxlbWVudFR5cGUiOiJkb3VibGUiLCJ0eXBlIjoiYXJyYXkifX1dLCJ0eXBlIjoic3RydWN0In0SMgomGiQKD2FycmF5X3RvX3ZlY3RvchIREgwKCGZlYXR1cmVzGACSAQASCGZlYXR1cmVzGg4SCQoFbGFiZWwYAJIBABoPEgoKBndlaWdodBgAkgEAGhESDAoIZmVhdHVyZXMYAJIBABABGAA="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        -0.0693276066350732
+       ],
+       [
+        -0.0729808451816627
+       ],
+       [
+        -0.1559389810426577
+       ],
+       [
+        -0.5575138230647703
+       ],
+       [
+        -0.7038605845181767
+       ],
+       [
+        0.09771425750393359
+       ],
+       [
+        0.12494075829385665
+       ],
+       [
+        0.5785939968404481
+       ],
+       [
+        0.6322472353870383
+       ],
+       [
+        1.613892180094783
+       ]
+      ],
+      "schema": "struct<devianceResiduals:double>"
+     }
+    },
+    "residuals-deviance": {
+     "call": "summary.residuals('deviance')",
+     "commands": [
+      "Ei8KBwoFPGlkMD4SCQoHc3VtbWFyeRIZCglyZXNpZHVhbHMSDAoKaghkZXZpYW5jZRqeAwoAigGYAwqRAwoAGowDCtUCCgC6Ac8CCpgCCgBakwISkAJ7ImZpZWxkcyI6W3sibWV0YWRhdGEiOnt9LCJuYW1lIjoibGFiZWwiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoid2VpZ2h0IiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImZlYXR1cmVzIiwibnVsbGFibGUiOnRydWUsInR5cGUiOnsiY29udGFpbnNOdWxsIjp0cnVlLCJlbGVtZW50VHlwZSI6ImRvdWJsZSIsInR5cGUiOiJhcnJheSJ9fV0sInR5cGUiOiJzdHJ1Y3QifRIyCiYaJAoPYXJyYXlfdG9fdmVjdG9yEhESDAoIZmVhdHVyZXMYAJIBABIIZmVhdHVyZXMaDhIJCgVsYWJlbBgAkgEAGg8SCgoGd2VpZ2h0GACSAQAaERIMCghmZWF0dXJlcxgAkgEAEAEYAA=="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        -0.0693276066350732
+       ],
+       [
+        -0.0729808451816627
+       ],
+       [
+        -0.1559389810426577
+       ],
+       [
+        -0.5575138230647703
+       ],
+       [
+        -0.7038605845181767
+       ],
+       [
+        0.09771425750393359
+       ],
+       [
+        0.12494075829385665
+       ],
+       [
+        0.5785939968404481
+       ],
+       [
+        0.6322472353870383
+       ],
+       [
+        1.613892180094783
+       ]
+      ],
+      "schema": "struct<devianceResiduals:double>"
+     }
+    },
+    "residuals-pearson": {
+     "call": "summary.residuals('pearson')",
+     "commands": [
+      "Ei4KBwoFPGlkMD4SCQoHc3VtbWFyeRIYCglyZXNpZHVhbHMSCwoJagdwZWFyc29uGp4DCgCKAZgDCpEDCgAajAMK1QIKALoBzwIKmAIKAFqTAhKQAnsiZmllbGRzIjpbeyJtZXRhZGF0YSI6e30sIm5hbWUiOiJsYWJlbCIsIm51bGxhYmxlIjp0cnVlLCJ0eXBlIjoiZG91YmxlIn0seyJtZXRhZGF0YSI6e30sIm5hbWUiOiJ3ZWlnaHQiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoiZmVhdHVyZXMiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6eyJjb250YWluc051bGwiOnRydWUsImVsZW1lbnRUeXBlIjoiZG91YmxlIiwidHlwZSI6ImFycmF5In19XSwidHlwZSI6InN0cnVjdCJ9EjIKJhokCg9hcnJheV90b192ZWN0b3ISERIMCghmZWF0dXJlcxgAkgEAEghmZWF0dXJlcxoOEgkKBWxhYmVsGACSAQAaDxIKCgZ3ZWlnaHQYAJIBABoREgwKCGZlYXR1cmVzGACSAQAQARgA"
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        -0.0693276066350732
+       ],
+       [
+        -0.0729808451816627
+       ],
+       [
+        -0.1559389810426577
+       ],
+       [
+        -0.5575138230647703
+       ],
+       [
+        -0.7038605845181767
+       ],
+       [
+        0.09771425750393359
+       ],
+       [
+        0.12494075829385665
+       ],
+       [
+        0.5785939968404481
+       ],
+       [
+        0.6322472353870383
+       ],
+       [
+        1.613892180094783
+       ]
+      ],
+      "schema": "struct<pearsonResiduals:double>"
+     }
+    },
+    "residuals-response": {
+     "call": "summary.residuals('response')",
+     "commands": [
+      "Ei8KBwoFPGlkMD4SCQoHc3VtbWFyeRIZCglyZXNpZHVhbHMSDAoKaghyZXNwb25zZRqeAwoAigGYAwqRAwoAGowDCtUCCgC6Ac8CCpgCCgBakwISkAJ7ImZpZWxkcyI6W3sibWV0YWRhdGEiOnt9LCJuYW1lIjoibGFiZWwiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoid2VpZ2h0IiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImZlYXR1cmVzIiwibnVsbGFibGUiOnRydWUsInR5cGUiOnsiY29udGFpbnNOdWxsIjp0cnVlLCJlbGVtZW50VHlwZSI6ImRvdWJsZSIsInR5cGUiOiJhcnJheSJ9fV0sInR5cGUiOiJzdHJ1Y3QifRIyCiYaJAoPYXJyYXlfdG9fdmVjdG9yEhESDAoIZmVhdHVyZXMYAJIBABIIZmVhdHVyZXMaDhIJCgVsYWJlbBgAkgEAGg8SCgoGd2VpZ2h0GACSAQAaERIMCghmZWF0dXJlcxgAkgEAEAEYAA=="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        -0.0693276066350732
+       ],
+       [
+        -0.0729808451816627
+       ],
+       [
+        -0.1559389810426577
+       ],
+       [
+        -0.5575138230647703
+       ],
+       [
+        -0.7038605845181767
+       ],
+       [
+        0.09771425750393359
+       ],
+       [
+        0.12494075829385665
+       ],
+       [
+        0.5785939968404481
+       ],
+       [
+        0.6322472353870383
+       ],
+       [
+        1.613892180094783
+       ]
+      ],
+      "schema": "struct<responseResiduals:double>"
+     }
+    },
+    "residuals-working": {
+     "call": "summary.residuals('working')",
+     "commands": [
+      "Ei4KBwoFPGlkMD4SCQoHc3VtbWFyeRIYCglyZXNpZHVhbHMSCwoJagd3b3JraW5nGp4DCgCKAZgDCpEDCgAajAMK1QIKALoBzwIKmAIKAFqTAhKQAnsiZmllbGRzIjpbeyJtZXRhZGF0YSI6e30sIm5hbWUiOiJsYWJlbCIsIm51bGxhYmxlIjp0cnVlLCJ0eXBlIjoiZG91YmxlIn0seyJtZXRhZGF0YSI6e30sIm5hbWUiOiJ3ZWlnaHQiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoiZmVhdHVyZXMiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6eyJjb250YWluc051bGwiOnRydWUsImVsZW1lbnRUeXBlIjoiZG91YmxlIiwidHlwZSI6ImFycmF5In19XSwidHlwZSI6InN0cnVjdCJ9EjIKJhokCg9hcnJheV90b192ZWN0b3ISERIMCghmZWF0dXJlcxgAkgEAEghmZWF0dXJlcxoOEgkKBWxhYmVsGACSAQAaDxIKCgZ3ZWlnaHQYAJIBABoREgwKCGZlYXR1cmVzGACSAQAQARgA"
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        -0.0693276066350732
+       ],
+       [
+        -0.0729808451816627
+       ],
+       [
+        -0.1559389810426577
+       ],
+       [
+        -0.5575138230647703
+       ],
+       [
+        -0.7038605845181767
+       ],
+       [
+        0.09771425750393359
+       ],
+       [
+        0.12494075829385665
+       ],
+       [
+        0.5785939968404481
+       ],
+       [
+        0.6322472353870383
+       ],
+       [
+        1.613892180094783
+       ]
+      ],
+      "schema": "struct<workingResiduals:double>"
+     }
+    },
+    "solver": {
+     "call": "summary.solver",
+     "commands": [
+      "Eh4KBwoFPGlkMD4SCQoHc3VtbWFyeRIICgZzb2x2ZXI="
+     ],
+     "results": [
+      "CgZqBGlybHM="
+     ],
+     "value": "irls"
+    },
+    "str()": {
+     "call": "str(summary)",
+     "commands": [
+      "EiAKBwoFPGlkMD4SCQoHc3VtbWFyeRIKCgh0b1N0cmluZw=="
+     ],
+     "results": [
+      "CvgCavUCQ29lZmZpY2llbnRzOgogICBGZWF0dXJlIEVzdGltYXRlIFN0ZCBFcnJvciBUIFZhbHVlIFAgVmFsdWUKZmVhdHVyZXNfMCAgIDAuOTYxMCAgICAwLjIxMzAgIDQuNTExNSAgMC4wMDI4CmZlYXR1cmVzXzEgICAwLjI2NDEgICAgMC41NTE5ICAwLjQ3ODUgIDAuNjQ2OQpmZWF0dXJlc18yICAgMi4yNzA2ICAgIDAuMzU2NCAgNi4zNzE5ICAwLjAwMDQKCihEaXNwZXJzaW9uIHBhcmFtZXRlciBmb3IgZ2F1c3NpYW4gZmFtaWx5IHRha2VuIHRvIGJlIDAuNjAwNykKICBOdWxsIGRldmlhbmNlOiA5NzguOTEwMCBvbiA3IGRlZ3JlZXMgb2YgZnJlZWRvbQpSZXNpZHVhbCBkZXZpYW5jZTogNC4yMDUwIG9uIDcgZGVncmVlcyBvZiBmcmVlZG9tCkFJQzogMjcuNzE1Nw=="
+     ],
+     "value": "Coefficients:\n   Feature Estimate Std Error T Value P Value\nfeatures_0   0.9610    0.2130  4.5115  0.0028\nfeatures_1   0.2641    0.5519  0.4785  0.6469\nfeatures_2   2.2706    0.3564  6.3719  0.0004\n\n(Dispersion parameter for gaussian family taken to be 0.6007)\n  Null deviance: 978.9100 on 7 degrees of freedom\nResidual deviance: 4.2050 on 7 degrees of freedom\nAIC: 27.7157"
+    },
+    "tValues": {
+     "call": "summary.tValues",
+     "commands": [
+      "Eh8KBwoFPGlkMD4SCQoHc3VtbWFyeRIJCgd0VmFsdWVz"
+     ],
+     "results": [
+      "CiiyASUKAkoAEglZQ00P8ckLEkASCVkFA9Ukwp/ePxIJWXHqLaXOfBlA"
+     ],
+     "value": [
+      4.5115125337209205,
+      0.4785008773506408,
+      6.371882039000966
+     ]
+    }
+   },
+   "skipped": {},
+   "via": {
+    "call": "model.summary",
+    "commands": [],
+    "results": [],
+    "value": {
+     "ref": "<id0>.summary",
+     "type": "GeneralizedLinearRegressionTrainingSummary"
+    }
+   }
+  },
+  "GeneralizedLinearRegression.poisson.evaluate": {
+   "class": "GeneralizedLinearRegressionSummary",
+   "members": {
+    "aic": {
+     "call": "summary.aic",
+     "commands": [
+      "EhAKBwoFPGlkMD4SBQoDYWlj"
+     ],
+     "results": [
+      "CglZMXUeYIRdO0A="
+     ],
+     "value": 27.365301139293653
+    },
+    "degreesOfFreedom": {
+     "call": "summary.degreesOfFreedom",
+     "commands": [
+      "Eh0KBwoFPGlkMD4SEgoQZGVncmVlc09mRnJlZWRvbQ=="
+     ],
+     "results": [
+      "Cgs4////////////AQ=="
+     ],
+     "value": -1
+    },
+    "deviance": {
+     "call": "summary.deviance",
+     "commands": [
+      "EhUKBwoFPGlkMD4SCgoIZGV2aWFuY2U="
+     ],
+     "results": [
+      "CglZOpmiWI/HJEA="
+     ],
+     "value": 10.3897655199513
+    },
+    "dispersion": {
+     "call": "summary.dispersion",
+     "commands": [
+      "EhcKBwoFPGlkMD4SDAoKZGlzcGVyc2lvbg=="
+     ],
+     "results": [
+      "CglZAAAAAAAA8D8="
+     ],
+     "value": 1.0
+    },
+    "nullDeviance": {
+     "call": "summary.nullDeviance",
+     "commands": [
+      "EhkKBwoFPGlkMD4SDgoMbnVsbERldmlhbmNl"
+     ],
+     "results": [
+      "CglZ/f//////1zw="
+     ],
+     "value": 1.3322676295501873e-15
+    },
+    "numInstances": {
+     "call": "summary.numInstances",
+     "commands": [
+      "EhkKBwoFPGlkMD4SDgoMbnVtSW5zdGFuY2Vz"
+     ],
+     "results": [
+      "CgI4Aw=="
+     ],
+     "value": 3
+    },
+    "predictionCol": {
+     "call": "summary.predictionCol",
+     "commands": [
+      "EhoKBwoFPGlkMD4SDwoNcHJlZGljdGlvbkNvbA=="
+     ],
+     "results": [
+      "CgxqCnByZWRpY3Rpb24="
+     ],
+     "value": "prediction"
+    },
+    "predictions": {
+     "call": "summary.predictions",
+     "commands": [
+      "EhgKBwoFPGlkMD4SDQoLcHJlZGljdGlvbnM="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        3.0,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          2.5,
+          1.0,
+          1.5
+         ]
+        },
+        2.022144814850545
+       ],
+       [
+        3.0,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          6.5,
+          2.0,
+          0.5
+         ]
+        },
+        4.201205338764153
+       ],
+       [
+        3.0,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          9.5,
+          0.0,
+          2.5
+         ]
+        },
+        11.943064940517358
+       ]
+      ],
+      "schema": "struct<label:double,weight:double,features:vector,prediction:double>"
+     }
+    },
+    "rank": {
+     "call": "summary.rank",
+     "commands": [
+      "EhEKBwoFPGlkMD4SBgoEcmFuaw=="
+     ],
+     "results": [
+      "CgI4BA=="
+     ],
+     "value": 4
+    },
+    "repr()": {
+     "call": "repr(summary)",
+     "commands": [],
+     "results": [],
+     "value": "<pyspark.ml.regression.GeneralizedLinearRegressionSummary object at 0x<addr>>"
+    },
+    "residualDegreeOfFreedom": {
+     "call": "summary.residualDegreeOfFreedom",
+     "commands": [
+      "EiQKBwoFPGlkMD4SGQoXcmVzaWR1YWxEZWdyZWVPZkZyZWVkb20="
+     ],
+     "results": [
+      "Cgs4////////////AQ=="
+     ],
+     "value": -1
+    },
+    "residualDegreeOfFreedomNull": {
+     "call": "summary.residualDegreeOfFreedomNull",
+     "commands": [
+      "EigKBwoFPGlkMD4SHQobcmVzaWR1YWxEZWdyZWVPZkZyZWVkb21OdWxs"
+     ],
+     "results": [
+      "CgI4Ag=="
+     ],
+     "value": 2
+    },
+    "residuals": {
+     "call": "summary.residuals()",
+     "commands": [
+      "EhYKBwoFPGlkMD4SCwoJcmVzaWR1YWxz"
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        -0.6179446514983695
+       ],
+       [
+        -3.097886213498782
+       ],
+       [
+        0.6411013460054795
+       ]
+      ],
+      "schema": "struct<devianceResiduals:double>"
+     }
+    },
+    "residuals-deviance": {
+     "call": "summary.residuals('deviance')",
+     "commands": [
+      "EiQKBwoFPGlkMD4SGQoJcmVzaWR1YWxzEgwKCmoIZGV2aWFuY2U="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        -0.6179446514983695
+       ],
+       [
+        -3.097886213498782
+       ],
+       [
+        0.6411013460054795
+       ]
+      ],
+      "schema": "struct<devianceResiduals:double>"
+     }
+    },
+    "residuals-pearson": {
+     "call": "summary.residuals('pearson')",
+     "commands": [
+      "EiMKBwoFPGlkMD4SGAoJcmVzaWR1YWxzEgsKCWoHcGVhcnNvbg=="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        -0.5860441018391936
+       ],
+       [
+        -2.587786765859954
+       ],
+       [
+        0.6876515336292244
+       ]
+      ],
+      "schema": "struct<pearsonResiduals:double>"
+     }
+    },
+    "residuals-response": {
+     "call": "summary.residuals('response')",
+     "commands": [
+      "EiQKBwoFPGlkMD4SGQoJcmVzaWR1YWxzEgwKCmoIcmVzcG9uc2U="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        -1.2012053387641526
+       ],
+       [
+        -8.943064940517358
+       ],
+       [
+        0.9778551851494548
+       ]
+      ],
+      "schema": "struct<responseResiduals:double>"
+     }
+    },
+    "residuals-working": {
+     "call": "summary.residuals('working')",
+     "commands": [
+      "EiMKBwoFPGlkMD4SGAoJcmVzaWR1YWxzEgsKCWoHd29ya2luZw=="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        -0.2859192164878818
+       ],
+       [
+        -0.7488081983191457
+       ],
+       [
+        0.48357327228402636
+       ]
+      ],
+      "schema": "struct<workingResiduals:double>"
+     }
+    },
+    "str()": {
+     "call": "str(summary)",
+     "commands": [],
+     "results": [],
+     "value": "<pyspark.ml.regression.GeneralizedLinearRegressionSummary object at 0x<addr>>"
+    }
+   },
+   "skipped": {},
+   "via": {
+    "call": "model.evaluate(counts_held_out)",
+    "commands": [
+     "EroDCgcKBTxpZDA+Eq4DCghldmFsdWF0ZRKhAxKeAwoAigGYAwqRAwoAGowDCtUCCgC6Ac8CCpgCCgBakwISkAJ7ImZpZWxkcyI6W3sibWV0YWRhdGEiOnt9LCJuYW1lIjoibGFiZWwiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoid2VpZ2h0IiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImZlYXR1cmVzIiwibnVsbGFibGUiOnRydWUsInR5cGUiOnsiY29udGFpbnNOdWxsIjp0cnVlLCJlbGVtZW50VHlwZSI6ImRvdWJsZSIsInR5cGUiOiJhcnJheSJ9fV0sInR5cGUiOiJzdHJ1Y3QifRIyCiYaJAoPYXJyYXlfdG9fdmVjdG9yEhESDAoIZmVhdHVyZXMYAJIBABIIZmVhdHVyZXMaDhIJCgVsYWJlbBgAkgEAGg8SCgoGd2VpZ2h0GACSAQAaERIMCghmZWF0dXJlcxgAkgEAEAEYAA=="
+    ],
+    "results": [
+     "EgU8aWQxPg=="
+    ],
+    "value": {
+     "ref": "<id1>",
+     "type": "GeneralizedLinearRegressionSummary"
+    }
+   }
+  },
+  "GeneralizedLinearRegression.poisson.training": {
+   "class": "GeneralizedLinearRegressionTrainingSummary",
+   "members": {
+    "aic": {
+     "call": "summary.aic",
+     "commands": [
+      "EhsKBwoFPGlkMD4SCQoHc3VtbWFyeRIFCgNhaWM="
+     ],
+     "results": [
+      "CglZNCJGZ1ZTREA="
+     ],
+     "value": 40.65107432293408
+    },
+    "coefficientStandardErrors": {
+     "call": "summary.coefficientStandardErrors",
+     "commands": [
+      "EjEKBwoFPGlkMD4SCQoHc3VtbWFyeRIbChljb2VmZmljaWVudFN0YW5kYXJkRXJyb3Jz"
+     ],
+     "results": [
+      "CjOyATAKAkoAEglZ1HL/VKAPyD8SCVmb1mDFM17lPxIJWfMn8+lpOuE/EglZ/AIGgkMA7D8="
+     ],
+     "value": [
+      0.18797687673840946,
+      0.6677492957157541,
+      0.5383805817921242,
+      0.8750321902772096
+     ]
+    },
+    "degreesOfFreedom": {
+     "call": "summary.degreesOfFreedom",
+     "commands": [
+      "EigKBwoFPGlkMD4SCQoHc3VtbWFyeRISChBkZWdyZWVzT2ZGcmVlZG9t"
+     ],
+     "results": [
+      "CgI4Bg=="
+     ],
+     "value": 6
+    },
+    "deviance": {
+     "call": "summary.deviance",
+     "commands": [
+      "EiAKBwoFPGlkMD4SCQoHc3VtbWFyeRIKCghkZXZpYW5jZQ=="
+     ],
+     "results": [
+      "CglZGysXuBna4z8="
+     ],
+     "value": 0.6203735919492347
+    },
+    "dispersion": {
+     "call": "summary.dispersion",
+     "commands": [
+      "EiIKBwoFPGlkMD4SCQoHc3VtbWFyeRIMCgpkaXNwZXJzaW9u"
+     ],
+     "results": [
+      "CglZAAAAAAAA8D8="
+     ],
+     "value": 1.0
+    },
+    "nullDeviance": {
+     "call": "summary.nullDeviance",
+     "commands": [
+      "EiQKBwoFPGlkMD4SCQoHc3VtbWFyeRIOCgxudWxsRGV2aWFuY2U="
+     ],
+     "results": [
+      "CglZp144t7c3LkA="
+     ],
+     "value": 15.108823514586517
+    },
+    "numInstances": {
+     "call": "summary.numInstances",
+     "commands": [
+      "EiQKBwoFPGlkMD4SCQoHc3VtbWFyeRIOCgxudW1JbnN0YW5jZXM="
+     ],
+     "results": [
+      "CgI4Cg=="
+     ],
+     "value": 10
+    },
+    "numIterations": {
+     "call": "summary.numIterations",
+     "commands": [
+      "EiUKBwoFPGlkMD4SCQoHc3VtbWFyeRIPCg1udW1JdGVyYXRpb25z"
+     ],
+     "results": [
+      "CgIwBA=="
+     ],
+     "value": 4
+    },
+    "pValues": {
+     "call": "summary.pValues",
+     "commands": [
+      "Eh8KBwoFPGlkMD4SCQoHc3VtbWFyeRIJCgdwVmFsdWVz"
+     ],
+     "results": [
+      "CjOyATAKAkoAEglZAENb3O/WzD8SCVmuVRVjre/qPxIJWUyYIcvhw+0/EglZnJW+M7NN6j8="
+     ],
+     "value": [
+      0.22530935535043994,
+      0.8417574820729692,
+      0.9301613776594961,
+      0.8219848642954051
+     ]
+    },
+    "predictionCol": {
+     "call": "summary.predictionCol",
+     "commands": [
+      "EiUKBwoFPGlkMD4SCQoHc3VtbWFyeRIPCg1wcmVkaWN0aW9uQ29s"
+     ],
+     "results": [
+      "CgxqCnByZWRpY3Rpb24="
+     ],
+     "value": "prediction"
+    },
+    "predictions": {
+     "call": "summary.predictions",
+     "commands": [
+      "EiMKBwoFPGlkMD4SCQoHc3VtbWFyeRINCgtwcmVkaWN0aW9ucxqeAwoAigGYAwqRAwoAGowDCtUCCgC6Ac8CCpgCCgBakwISkAJ7ImZpZWxkcyI6W3sibWV0YWRhdGEiOnt9LCJuYW1lIjoibGFiZWwiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoid2VpZ2h0IiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImZlYXR1cmVzIiwibnVsbGFibGUiOnRydWUsInR5cGUiOnsiY29udGFpbnNOdWxsIjp0cnVlLCJlbGVtZW50VHlwZSI6ImRvdWJsZSIsInR5cGUiOiJhcnJheSJ9fV0sInR5cGUiOiJzdHJ1Y3QifRIyCiYaJAoPYXJyYXlfdG9fdmVjdG9yEhESDAoIZmVhdHVyZXMYAJIBABIIZmVhdHVyZXMaDhIJCgVsYWJlbBgAkgEAGg8SCgoGd2VpZ2h0GACSAQAaERIMCghmZWF0dXJlcxgAkgEAEAEYAA=="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        1.0,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          1.0,
+          0.0,
+          2.0
+         ]
+        },
+        1.680637101342497
+       ],
+       [
+        2.0,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          3.0,
+          1.0,
+          1.0
+         ]
+        },
+        2.21340104880095
+       ],
+       [
+        2.0,
+        2.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          2.0,
+          1.0,
+          0.0
+         ]
+        },
+        1.6810488583648255
+       ],
+       [
+        3.0,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          5.0,
+          2.0,
+          1.0
+         ]
+        },
+        3.0558941460453513
+       ],
+       [
+        4.0,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          7.0,
+          3.0,
+          0.0
+         ]
+        },
+        4.024616202081001
+       ],
+       [
+        4.0,
+        1.5,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          4.0,
+          0.0,
+          3.0
+         ]
+        },
+        3.490834117695556
+       ],
+       [
+        5.0,
+        0.5,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          6.0,
+          1.0,
+          2.0
+         ]
+        },
+        4.597432658796742
+       ],
+       [
+        7.0,
+        2.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          8.0,
+          2.0,
+          2.0
+         ]
+        },
+        6.347366446069719
+       ],
+       [
+        8.0,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          10.0,
+          3.0,
+          1.0
+         ]
+        },
+        8.359489111380492
+       ],
+       [
+        9.0,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          9.0,
+          1.0,
+          3.0
+         ]
+        },
+        9.549280309422887
+       ]
+      ],
+      "schema": "struct<label:double,weight:double,features:vector,prediction:double>"
+     }
+    },
+    "rank": {
+     "call": "summary.rank",
+     "commands": [
+      "EhwKBwoFPGlkMD4SCQoHc3VtbWFyeRIGCgRyYW5r"
+     ],
+     "results": [
+      "CgI4BA=="
+     ],
+     "value": 4
+    },
+    "repr()": {
+     "call": "repr(summary)",
+     "commands": [
+      "EiAKBwoFPGlkMD4SCQoHc3VtbWFyeRIKCgh0b1N0cmluZw=="
+     ],
+     "results": [
+      "CqoDaqcDQ29lZmZpY2llbnRzOgogICAgRmVhdHVyZSBFc3RpbWF0ZSBTdGQgRXJyb3IgVCBWYWx1ZSBQIFZhbHVlCihJbnRlcmNlcHQpICAgMC4xOTY5ICAgIDAuODc1MCAgMC4yMjUwICAwLjgyMjAKIGZlYXR1cmVzXzAgICAwLjIyNzkgICAgMC4xODgwICAxLjIxMjUgIDAuMjI1MwogZmVhdHVyZXNfMSAgLTAuMTMzMyAgICAwLjY2NzcgLTAuMTk5NiAgMC44NDE4CiBmZWF0dXJlc18yICAgMC4wNDcyICAgIDAuNTM4NCAgMC4wODc2ICAwLjkzMDIKCihEaXNwZXJzaW9uIHBhcmFtZXRlciBmb3IgcG9pc3NvbiBmYW1pbHkgdGFrZW4gdG8gYmUgMS4wMDAwKQogICBOdWxsIGRldmlhbmNlOiAxNS4xMDg4IG9uIDYgZGVncmVlcyBvZiBmcmVlZG9tClJlc2lkdWFsIGRldmlhbmNlOiAwLjYyMDQgb24gNiBkZWdyZWVzIG9mIGZyZWVkb20KQUlDOiA0MC42NTEx"
+     ],
+     "value": "Coefficients:\n    Feature Estimate Std Error T Value P Value\n(Intercept)   0.1969    0.8750  0.2250  0.8220\n features_0   0.2279    0.1880  1.2125  0.2253\n features_1  -0.1333    0.6677 -0.1996  0.8418\n features_2   0.0472    0.5384  0.0876  0.9302\n\n(Dispersion parameter for poisson family taken to be 1.0000)\n   Null deviance: 15.1088 on 6 degrees of freedom\nResidual deviance: 0.6204 on 6 degrees of freedom\nAIC: 40.6511"
+    },
+    "residualDegreeOfFreedom": {
+     "call": "summary.residualDegreeOfFreedom",
+     "commands": [
+      "Ei8KBwoFPGlkMD4SCQoHc3VtbWFyeRIZChdyZXNpZHVhbERlZ3JlZU9mRnJlZWRvbQ=="
+     ],
+     "results": [
+      "CgI4Bg=="
+     ],
+     "value": 6
+    },
+    "residualDegreeOfFreedomNull": {
+     "call": "summary.residualDegreeOfFreedomNull",
+     "commands": [
+      "EjMKBwoFPGlkMD4SCQoHc3VtbWFyeRIdChtyZXNpZHVhbERlZ3JlZU9mRnJlZWRvbU51bGw="
+     ],
+     "results": [
+      "CgI4CQ=="
+     ],
+     "value": 9
+    },
+    "residuals": {
+     "call": "summary.residuals()",
+     "commands": [
+      "EiEKBwoFPGlkMD4SCQoHc3VtbWFyeRILCglyZXNpZHVhbHMangMKAIoBmAMKkQMKABqMAwrVAgoAugHPAgqYAgoAWpMCEpACeyJmaWVsZHMiOlt7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImxhYmVsIiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6IndlaWdodCIsIm51bGxhYmxlIjp0cnVlLCJ0eXBlIjoiZG91YmxlIn0seyJtZXRhZGF0YSI6e30sIm5hbWUiOiJmZWF0dXJlcyIsIm51bGxhYmxlIjp0cnVlLCJ0eXBlIjp7ImNvbnRhaW5zTnVsbCI6dHJ1ZSwiZWxlbWVudFR5cGUiOiJkb3VibGUiLCJ0eXBlIjoiYXJyYXkifX1dLCJ0eXBlIjoic3RydWN0In0SMgomGiQKD2FycmF5X3RvX3ZlY3RvchIREgwKCGZlYXR1cmVzGACSAQASCGZlYXR1cmVzGg4SCQoFbGFiZWwYAJIBABoPEgoKBndlaWdodBgAkgEAGhESDAoIZmVhdHVyZXMYAJIBABABGAA="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        -0.01228294306696857
+       ],
+       [
+        -0.03207223593981488
+       ],
+       [
+        -0.1252432163134615
+       ],
+       [
+        -0.14584150671747925
+       ],
+       [
+        -0.17949586625521247
+       ],
+       [
+        -0.5682678115574182
+       ],
+       [
+        0.1851057577957403
+       ],
+       [
+        0.23877764283010688
+       ],
+       [
+        0.2547843465360001
+       ],
+       [
+        0.266265742158325
+       ]
+      ],
+      "schema": "struct<devianceResiduals:double>"
+     }
+    },
+    "residuals-deviance": {
+     "call": "summary.residuals('deviance')",
+     "commands": [
+      "Ei8KBwoFPGlkMD4SCQoHc3VtbWFyeRIZCglyZXNpZHVhbHMSDAoKaghkZXZpYW5jZRqeAwoAigGYAwqRAwoAGowDCtUCCgC6Ac8CCpgCCgBakwISkAJ7ImZpZWxkcyI6W3sibWV0YWRhdGEiOnt9LCJuYW1lIjoibGFiZWwiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoid2VpZ2h0IiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImZlYXR1cmVzIiwibnVsbGFibGUiOnRydWUsInR5cGUiOnsiY29udGFpbnNOdWxsIjp0cnVlLCJlbGVtZW50VHlwZSI6ImRvdWJsZSIsInR5cGUiOiJhcnJheSJ9fV0sInR5cGUiOiJzdHJ1Y3QifRIyCiYaJAoPYXJyYXlfdG9fdmVjdG9yEhESDAoIZmVhdHVyZXMYAJIBABIIZmVhdHVyZXMaDhIJCgVsYWJlbBgAkgEAGg8SCgoGd2VpZ2h0GACSAQAaERIMCghmZWF0dXJlcxgAkgEAEAEYAA=="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        -0.01228294306696857
+       ],
+       [
+        -0.03207223593981488
+       ],
+       [
+        -0.1252432163134615
+       ],
+       [
+        -0.14584150671747925
+       ],
+       [
+        -0.17949586625521247
+       ],
+       [
+        -0.5682678115574182
+       ],
+       [
+        0.1851057577957403
+       ],
+       [
+        0.23877764283010688
+       ],
+       [
+        0.2547843465360001
+       ],
+       [
+        0.266265742158325
+       ]
+      ],
+      "schema": "struct<devianceResiduals:double>"
+     }
+    },
+    "residuals-pearson": {
+     "call": "summary.residuals('pearson')",
+     "commands": [
+      "Ei4KBwoFPGlkMD4SCQoHc3VtbWFyeRIYCglyZXNpZHVhbHMSCwoJagdwZWFyc29uGp4DCgCKAZgDCpEDCgAajAMK1QIKALoBzwIKmAIKAFqTAhKQAnsiZmllbGRzIjpbeyJtZXRhZGF0YSI6e30sIm5hbWUiOiJsYWJlbCIsIm51bGxhYmxlIjp0cnVlLCJ0eXBlIjoiZG91YmxlIn0seyJtZXRhZGF0YSI6e30sIm5hbWUiOiJ3ZWlnaHQiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoiZmVhdHVyZXMiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6eyJjb250YWluc051bGwiOnRydWUsImVsZW1lbnRUeXBlIjoiZG91YmxlIiwidHlwZSI6ImFycmF5In19XSwidHlwZSI6InN0cnVjdCJ9EjIKJhokCg9hcnJheV90b192ZWN0b3ISERIMCghmZWF0dXJlcxgAkgEAEghmZWF0dXJlcxoOEgkKBWxhYmVsGACSAQAaDxIKCgZ3ZWlnaHQYAJIBABoREgwKCGZlYXR1cmVzGACSAQAQARgA"
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        -0.012270402612259097
+       ],
+       [
+        -0.031974014833115634
+       ],
+       [
+        -0.12433570817480412
+       ],
+       [
+        -0.14343875063332948
+       ],
+       [
+        -0.17774963181949277
+       ],
+       [
+        -0.5250233821462066
+       ],
+       [
+        0.18775039137262048
+       ],
+       [
+        0.24599936890555402
+       ],
+       [
+        0.25904344828258996
+       ],
+       [
+        0.27251768387797004
+       ]
+      ],
+      "schema": "struct<pearsonResiduals:double>"
+     }
+    },
+    "residuals-response": {
+     "call": "summary.residuals('response')",
+     "commands": [
+      "Ei8KBwoFPGlkMD4SCQoHc3VtbWFyeRIZCglyZXNpZHVhbHMSDAoKaghyZXNwb25zZRqeAwoAigGYAwqRAwoAGowDCtUCCgC6Ac8CCpgCCgBakwISkAJ7ImZpZWxkcyI6W3sibWV0YWRhdGEiOnt9LCJuYW1lIjoibGFiZWwiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoid2VpZ2h0IiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImZlYXR1cmVzIiwibnVsbGFibGUiOnRydWUsInR5cGUiOnsiY29udGFpbnNOdWxsIjp0cnVlLCJlbGVtZW50VHlwZSI6ImRvdWJsZSIsInR5cGUiOiJhcnJheSJ9fV0sInR5cGUiOiJzdHJ1Y3QifRIyCiYaJAoPYXJyYXlfdG9fdmVjdG9yEhESDAoIZmVhdHVyZXMYAJIBABIIZmVhdHVyZXMaDhIJCgVsYWJlbBgAkgEAGg8SCgoGd2VpZ2h0GACSAQAaERIMCghmZWF0dXJlcxgAkgEAEAEYAA=="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        -0.024616202081000793
+       ],
+       [
+        -0.055894146045351256
+       ],
+       [
+        -0.21340104880095012
+       ],
+       [
+        -0.35948911138049233
+       ],
+       [
+        -0.5492803094228869
+       ],
+       [
+        -0.680637101342497
+       ],
+       [
+        0.31895114163517446
+       ],
+       [
+        0.402567341203258
+       ],
+       [
+        0.509165882304444
+       ],
+       [
+        0.652633553930281
+       ]
+      ],
+      "schema": "struct<responseResiduals:double>"
+     }
+    },
+    "residuals-working": {
+     "call": "summary.residuals('working')",
+     "commands": [
+      "Ei4KBwoFPGlkMD4SCQoHc3VtbWFyeRIYCglyZXNpZHVhbHMSCwoJagd3b3JraW5nGp4DCgCKAZgDCpEDCgAajAMK1QIKALoBzwIKmAIKAFqTAhKQAnsiZmllbGRzIjpbeyJtZXRhZGF0YSI6e30sIm5hbWUiOiJsYWJlbCIsIm51bGxhYmxlIjp0cnVlLCJ0eXBlIjoiZG91YmxlIn0seyJtZXRhZGF0YSI6e30sIm5hbWUiOiJ3ZWlnaHQiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoiZmVhdHVyZXMiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6eyJjb250YWluc051bGwiOnRydWUsImVsZW1lbnRUeXBlIjoiZG91YmxlIiwidHlwZSI6ImFycmF5In19XSwidHlwZSI6InN0cnVjdCJ9EjIKJhokCg9hcnJheV90b192ZWN0b3ISERIMCghmZWF0dXJlcxgAkgEAEghmZWF0dXJlcxoOEgkKBWxhYmVsGACSAQAaDxIKCgZ3ZWlnaHQYAJIBABoREgwKCGZlYXR1cmVzGACSAQAQARgA"
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        -0.006116409825183465
+       ],
+       [
+        -0.018290602806934318
+       ],
+       [
+        -0.04300371788164529
+       ],
+       [
+        -0.057520597534546844
+       ],
+       [
+        -0.09641318680884982
+       ],
+       [
+        -0.4049875495422554
+       ],
+       [
+        0.08756351013276603
+       ],
+       [
+        0.1028195802897737
+       ],
+       [
+        0.1458579425826643
+       ],
+       [
+        0.18973341556855264
+       ]
+      ],
+      "schema": "struct<workingResiduals:double>"
+     }
+    },
+    "solver": {
+     "call": "summary.solver",
+     "commands": [
+      "Eh4KBwoFPGlkMD4SCQoHc3VtbWFyeRIICgZzb2x2ZXI="
+     ],
+     "results": [
+      "CgZqBGlybHM="
+     ],
+     "value": "irls"
+    },
+    "str()": {
+     "call": "str(summary)",
+     "commands": [
+      "EiAKBwoFPGlkMD4SCQoHc3VtbWFyeRIKCgh0b1N0cmluZw=="
+     ],
+     "results": [
+      "CqoDaqcDQ29lZmZpY2llbnRzOgogICAgRmVhdHVyZSBFc3RpbWF0ZSBTdGQgRXJyb3IgVCBWYWx1ZSBQIFZhbHVlCihJbnRlcmNlcHQpICAgMC4xOTY5ICAgIDAuODc1MCAgMC4yMjUwICAwLjgyMjAKIGZlYXR1cmVzXzAgICAwLjIyNzkgICAgMC4xODgwICAxLjIxMjUgIDAuMjI1MwogZmVhdHVyZXNfMSAgLTAuMTMzMyAgICAwLjY2NzcgLTAuMTk5NiAgMC44NDE4CiBmZWF0dXJlc18yICAgMC4wNDcyICAgIDAuNTM4NCAgMC4wODc2ICAwLjkzMDIKCihEaXNwZXJzaW9uIHBhcmFtZXRlciBmb3IgcG9pc3NvbiBmYW1pbHkgdGFrZW4gdG8gYmUgMS4wMDAwKQogICBOdWxsIGRldmlhbmNlOiAxNS4xMDg4IG9uIDYgZGVncmVlcyBvZiBmcmVlZG9tClJlc2lkdWFsIGRldmlhbmNlOiAwLjYyMDQgb24gNiBkZWdyZWVzIG9mIGZyZWVkb20KQUlDOiA0MC42NTEx"
+     ],
+     "value": "Coefficients:\n    Feature Estimate Std Error T Value P Value\n(Intercept)   0.1969    0.8750  0.2250  0.8220\n features_0   0.2279    0.1880  1.2125  0.2253\n features_1  -0.1333    0.6677 -0.1996  0.8418\n features_2   0.0472    0.5384  0.0876  0.9302\n\n(Dispersion parameter for poisson family taken to be 1.0000)\n   Null deviance: 15.1088 on 6 degrees of freedom\nResidual deviance: 0.6204 on 6 degrees of freedom\nAIC: 40.6511"
+    },
+    "tValues": {
+     "call": "summary.tValues",
+     "commands": [
+      "Eh8KBwoFPGlkMD4SCQoHc3VtbWFyeRIJCgd0VmFsdWVz"
+     ],
+     "results": [
+      "CjOyATAKAkoAEglZZq5Gb4Zm8z8SCVn/a/qt/43JvxIJWVeEsmyxb7Y/EglZlSGzhZDMzD8="
+     ],
+     "value": [
+      1.212530550644169,
+      -0.19964595789937786,
+      0.08764180091613248,
+      0.22499281433398424
+     ]
+    }
+   },
+   "skipped": {},
+   "via": {
+    "call": "model.summary",
+    "commands": [],
+    "results": [],
+    "value": {
+     "ref": "<id0>.summary",
+     "type": "GeneralizedLinearRegressionTrainingSummary"
+    }
+   }
+  },
+  "GeneralizedLinearRegression.tweedie.evaluate": {
+   "class": "GeneralizedLinearRegressionSummary",
+   "members": {
+    "aic": {
+     "call": "summary.aic",
+     "commands": [
+      "EhAKBwoFPGlkMD4SBQoDYWlj"
+     ],
+     "error": {
+      "class": "UnsupportedOperationException",
+      "condition": null,
+      "message": "No AIC available for the tweedie family"
+     },
+     "results": []
+    },
+    "degreesOfFreedom": {
+     "call": "summary.degreesOfFreedom",
+     "commands": [
+      "Eh0KBwoFPGlkMD4SEgoQZGVncmVlc09mRnJlZWRvbQ=="
+     ],
+     "results": [
+      "Cgs4////////////AQ=="
+     ],
+     "value": -1
+    },
+    "deviance": {
+     "call": "summary.deviance",
+     "commands": [
+      "EhUKBwoFPGlkMD4SCgoIZGV2aWFuY2U="
+     ],
+     "results": [
+      "CglZ9Fy1be+35T8="
+     ],
+     "value": 0.678703035616222
+    },
+    "dispersion": {
+     "call": "summary.dispersion",
+     "commands": [
+      "EhcKBwoFPGlkMD4SDAoKZGlzcGVyc2lvbg=="
+     ],
+     "results": [
+      "CglZCvaWHFNI4r8="
+     ],
+     "value": -0.5713286932365815
+    },
+    "nullDeviance": {
+     "call": "summary.nullDeviance",
+     "commands": [
+      "EhkKBwoFPGlkMD4SDgoMbnVsbERldmlhbmNl"
+     ],
+     "results": [
+      "CglZkFrtoQ+5C0A="
+     ],
+     "value": 3.465361847930872
+    },
+    "numInstances": {
+     "call": "summary.numInstances",
+     "commands": [
+      "EhkKBwoFPGlkMD4SDgoMbnVtSW5zdGFuY2Vz"
+     ],
+     "results": [
+      "CgI4Aw=="
+     ],
+     "value": 3
+    },
+    "predictionCol": {
+     "call": "summary.predictionCol",
+     "commands": [
+      "EhoKBwoFPGlkMD4SDwoNcHJlZGljdGlvbkNvbA=="
+     ],
+     "results": [
+      "CgxqCnByZWRpY3Rpb24="
+     ],
+     "value": "prediction"
+    },
+    "predictions": {
+     "call": "summary.predictions",
+     "commands": [
+      "EhgKBwoFPGlkMD4SDQoLcHJlZGljdGlvbnM="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        18.0,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          9.5,
+          0.0,
+          2.5
+         ]
+        },
+        15.21704076996703
+       ],
+       [
+        4.5,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          6.5,
+          2.0,
+          0.5
+         ]
+        },
+        7.495965893954623
+       ],
+       [
+        6.0,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          2.5,
+          1.0,
+          1.5
+         ]
+        },
+        6.233495452881375
+       ]
+      ],
+      "schema": "struct<label:double,weight:double,features:vector,prediction:double>"
+     }
+    },
+    "rank": {
+     "call": "summary.rank",
+     "commands": [
+      "EhEKBwoFPGlkMD4SBgoEcmFuaw=="
+     ],
+     "results": [
+      "CgI4BA=="
+     ],
+     "value": 4
+    },
+    "repr()": {
+     "call": "repr(summary)",
+     "commands": [],
+     "results": [],
+     "value": "<pyspark.ml.regression.GeneralizedLinearRegressionSummary object at 0x<addr>>"
+    },
+    "residualDegreeOfFreedom": {
+     "call": "summary.residualDegreeOfFreedom",
+     "commands": [
+      "EiQKBwoFPGlkMD4SGQoXcmVzaWR1YWxEZWdyZWVPZkZyZWVkb20="
+     ],
+     "results": [
+      "Cgs4////////////AQ=="
+     ],
+     "value": -1
+    },
+    "residualDegreeOfFreedomNull": {
+     "call": "summary.residualDegreeOfFreedomNull",
+     "commands": [
+      "EigKBwoFPGlkMD4SHQobcmVzaWR1YWxEZWdyZWVPZkZyZWVkb21OdWxs"
+     ],
+     "results": [
+      "CgI4Ag=="
+     ],
+     "value": 2
+    },
+    "residuals": {
+     "call": "summary.residuals()",
+     "commands": [
+      "EhYKBwoFPGlkMD4SCwoJcmVzaWR1YWxz"
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        -0.05975235275520709
+       ],
+       [
+        -0.7452388684361716
+       ],
+       [
+        0.3460516159887334
+       ]
+      ],
+      "schema": "struct<devianceResiduals:double>"
+     }
+    },
+    "residuals-deviance": {
+     "call": "summary.residuals('deviance')",
+     "commands": [
+      "EiQKBwoFPGlkMD4SGQoJcmVzaWR1YWxzEgwKCmoIZGV2aWFuY2U="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        -0.05975235275520709
+       ],
+       [
+        -0.7452388684361716
+       ],
+       [
+        0.3460516159887334
+       ]
+      ],
+      "schema": "struct<devianceResiduals:double>"
+     }
+    },
+    "residuals-pearson": {
+     "call": "summary.residuals('pearson')",
+     "commands": [
+      "EiMKBwoFPGlkMD4SGAoJcmVzaWR1YWxzEgsKCWoHcGVhcnNvbg=="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        -0.059187458552677846
+       ],
+       [
+        -0.6613268623939104
+       ],
+       [
+        0.3612095223867755
+       ]
+      ],
+      "schema": "struct<pearsonResiduals:double>"
+     }
+    },
+    "residuals-response": {
+     "call": "summary.residuals('response')",
+     "commands": [
+      "EiQKBwoFPGlkMD4SGQoJcmVzaWR1YWxzEgwKCmoIcmVzcG9uc2U="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        -0.23349545288137463
+       ],
+       [
+        -2.995965893954623
+       ],
+       [
+        2.7829592300329704
+       ]
+      ],
+      "schema": "struct<responseResiduals:double>"
+     }
+    },
+    "residuals-working": {
+     "call": "summary.residuals('working')",
+     "commands": [
+      "EiMKBwoFPGlkMD4SGAoJcmVzaWR1YWxzEgsKCWoHd29ya2luZw=="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        -0.03745818933315232
+       ],
+       [
+        -0.39967709783349226
+       ],
+       [
+        0.18288439073683313
+       ]
+      ],
+      "schema": "struct<workingResiduals:double>"
+     }
+    },
+    "str()": {
+     "call": "str(summary)",
+     "commands": [],
+     "results": [],
+     "value": "<pyspark.ml.regression.GeneralizedLinearRegressionSummary object at 0x<addr>>"
+    }
+   },
+   "skipped": {},
+   "via": {
+    "call": "model.evaluate(rows_held_out)",
+    "commands": [
+     "EroDCgcKBTxpZDA+Eq4DCghldmFsdWF0ZRKhAxKeAwoAigGYAwqRAwoAGowDCtUCCgC6Ac8CCpgCCgBakwISkAJ7ImZpZWxkcyI6W3sibWV0YWRhdGEiOnt9LCJuYW1lIjoibGFiZWwiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoid2VpZ2h0IiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImZlYXR1cmVzIiwibnVsbGFibGUiOnRydWUsInR5cGUiOnsiY29udGFpbnNOdWxsIjp0cnVlLCJlbGVtZW50VHlwZSI6ImRvdWJsZSIsInR5cGUiOiJhcnJheSJ9fV0sInR5cGUiOiJzdHJ1Y3QifRIyCiYaJAoPYXJyYXlfdG9fdmVjdG9yEhESDAoIZmVhdHVyZXMYAJIBABIIZmVhdHVyZXMaDhIJCgVsYWJlbBgAkgEAGg8SCgoGd2VpZ2h0GACSAQAaERIMCghmZWF0dXJlcxgAkgEAEAEYAA=="
+    ],
+    "results": [
+     "EgU8aWQxPg=="
+    ],
+    "value": {
+     "ref": "<id1>",
+     "type": "GeneralizedLinearRegressionSummary"
+    }
+   }
+  },
+  "GeneralizedLinearRegression.tweedie.training": {
+   "class": "GeneralizedLinearRegressionTrainingSummary",
+   "members": {
+    "aic": {
+     "call": "summary.aic",
+     "commands": [
+      "EhsKBwoFPGlkMD4SCQoHc3VtbWFyeRIFCgNhaWM="
+     ],
+     "error": {
+      "class": "UnsupportedOperationException",
+      "condition": null,
+      "message": "No AIC available for the tweedie family"
+     },
+     "results": []
+    },
+    "coefficientStandardErrors": {
+     "call": "summary.coefficientStandardErrors",
+     "commands": [
+      "EjEKBwoFPGlkMD4SCQoHc3VtbWFyeRIbChljb2VmZmljaWVudFN0YW5kYXJkRXJyb3Jz"
+     ],
+     "results": [
+      "CjOyATAKAkoAEglZmbtg6NC0nT8SCVn27CXkkOi5PxIJWdqfq531zLM/EglZtG6PM+fCvj8="
+     ],
+     "value": [
+      0.029010070975512645,
+      0.10120492525122757,
+      0.07734618281722253,
+      0.12016148575588198
+     ]
+    },
+    "degreesOfFreedom": {
+     "call": "summary.degreesOfFreedom",
+     "commands": [
+      "EigKBwoFPGlkMD4SCQoHc3VtbWFyeRISChBkZWdyZWVzT2ZGcmVlZG9t"
+     ],
+     "results": [
+      "CgI4Bg=="
+     ],
+     "value": 6
+    },
+    "deviance": {
+     "call": "summary.deviance",
+     "commands": [
+      "EiAKBwoFPGlkMD4SCQoHc3VtbWFyeRIKCghkZXZpYW5jZQ=="
+     ],
+     "results": [
+      "CglZnzO8+Pymuz8="
+     ],
+     "value": 0.10801678726802642
+    },
+    "dispersion": {
+     "call": "summary.dispersion",
+     "commands": [
+      "EiIKBwoFPGlkMD4SCQoHc3VtbWFyeRIMCgpkaXNwZXJzaW9u"
+     ],
+     "results": [
+      "CglZ/OqZqbqykj8="
+     ],
+     "value": 0.01825992260135488
+    },
+    "nullDeviance": {
+     "call": "summary.nullDeviance",
+     "commands": [
+      "EiQKBwoFPGlkMD4SCQoHc3VtbWFyeRIOCgxudWxsRGV2aWFuY2U="
+     ],
+     "results": [
+      "CglZgRdZf+qdE0A="
+     ],
+     "value": 4.904214849293454
+    },
+    "numInstances": {
+     "call": "summary.numInstances",
+     "commands": [
+      "EiQKBwoFPGlkMD4SCQoHc3VtbWFyeRIOCgxudW1JbnN0YW5jZXM="
+     ],
+     "results": [
+      "CgI4Cg=="
+     ],
+     "value": 10
+    },
+    "numIterations": {
+     "call": "summary.numIterations",
+     "commands": [
+      "EiUKBwoFPGlkMD4SCQoHc3VtbWFyeRIPCg1udW1JdGVyYXRpb25z"
+     ],
+     "results": [
+      "CgIwBA=="
+     ],
+     "value": 4
+    },
+    "pValues": {
+     "call": "summary.pValues",
+     "commands": [
+      "Eh8KBwoFPGlkMD4SCQoHc3VtbWFyeRIJCgdwVmFsdWVz"
+     ],
+     "results": [
+      "CjOyATAKAkoAEglZAH7168+gjj8SCVkeU9pTxDTnPxIJWUBZ7m65BJQ/EglZAMCOzYC9ED8="
+     ],
+     "value": [
+      0.014955162418742951,
+      0.7251912725210763,
+      0.019549271960920267,
+      6.385897303462507e-05
+     ]
+    },
+    "predictionCol": {
+     "call": "summary.predictionCol",
+     "commands": [
+      "EiUKBwoFPGlkMD4SCQoHc3VtbWFyeRIPCg1wcmVkaWN0aW9uQ29s"
+     ],
+     "results": [
+      "CgxqCnByZWRpY3Rpb24="
+     ],
+     "value": "prediction"
+    },
+    "predictions": {
+     "call": "summary.predictions",
+     "commands": [
+      "EiMKBwoFPGlkMD4SCQoHc3VtbWFyeRINCgtwcmVkaWN0aW9ucxqeAwoAigGYAwqRAwoAGowDCtUCCgC6Ac8CCpgCCgBakwISkAJ7ImZpZWxkcyI6W3sibWV0YWRhdGEiOnt9LCJuYW1lIjoibGFiZWwiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoid2VpZ2h0IiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImZlYXR1cmVzIiwibnVsbGFibGUiOnRydWUsInR5cGUiOnsiY29udGFpbnNOdWxsIjp0cnVlLCJlbGVtZW50VHlwZSI6ImRvdWJsZSIsInR5cGUiOiJhcnJheSJ9fV0sInR5cGUiOiJzdHJ1Y3QifRIyCiYaJAoPYXJyYXlfdG9fdmVjdG9yEhESDAoIZmVhdHVyZXMYAJIBABIIZmVhdHVyZXMaDhIJCgVsYWJlbBgAkgEAGg8SCgoGd2VpZ2h0GACSAQAaERIMCghmZWF0dXJlcxgAkgEAEAEYAA=="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        10.5,
+        1.5,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          4.0,
+          0.0,
+          3.0
+         ]
+        },
+        10.036156751936064
+       ],
+       [
+        11.15,
+        0.5,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          6.0,
+          1.0,
+          2.0
+         ]
+        },
+        9.922658043162604
+       ],
+       [
+        12.2,
+        2.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          8.0,
+          2.0,
+          2.0
+         ]
+        },
+        12.527303210595777
+       ],
+       [
+        12.6,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          10.0,
+          3.0,
+          1.0
+         ]
+        },
+        12.385632173169821
+       ],
+       [
+        15.85,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          9.0,
+          1.0,
+          3.0
+         ]
+        },
+        16.996130181743663
+       ],
+       [
+        3.8,
+        2.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          2.0,
+          1.0,
+          0.0
+         ]
+        },
+        4.113574267725675
+       ],
+       [
+        5.6,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          1.0,
+          0.0,
+          2.0
+         ]
+        },
+        5.859295642722737
+       ],
+       [
+        6.05,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          3.0,
+          1.0,
+          1.0
+         ]
+        },
+        5.793032978018669
+       ],
+       [
+        6.9,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          5.0,
+          2.0,
+          1.0
+         ]
+        },
+        7.313673444045267
+       ],
+       [
+        7.45,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          7.0,
+          3.0,
+          0.0
+         ]
+        },
+        7.230963248020302
+       ]
+      ],
+      "schema": "struct<label:double,weight:double,features:vector,prediction:double>"
+     }
+    },
+    "rank": {
+     "call": "summary.rank",
+     "commands": [
+      "EhwKBwoFPGlkMD4SCQoHc3VtbWFyeRIGCgRyYW5r"
+     ],
+     "results": [
+      "CgI4BA=="
+     ],
+     "value": 4
+    },
+    "repr()": {
+     "call": "repr(summary)",
+     "commands": [
+      "EiAKBwoFPGlkMD4SCQoHc3VtbWFyeRIKCgh0b1N0cmluZw=="
+     ],
+     "results": [
+      "Cp0DapoDQ29lZmZpY2llbnRzOgogICAgRmVhdHVyZSBFc3RpbWF0ZSBTdGQgRXJyb3IgVCBWYWx1ZSBQIFZhbHVlCihJbnRlcmNlcHQpICAgMS4xODEyICAgIDAuMTIwMiAgOS44MzAxICAwLjAwMDEKIGZlYXR1cmVzXzAgICAwLjA5NzkgICAgMC4wMjkwICAzLjM3NDcgIDAuMDE1MAogZmVhdHVyZXNfMSAgIDAuMDM3MyAgICAwLjEwMTIgIDAuMzY4NCAgMC43MjUyCiBmZWF0dXJlc18yICAgMC4yNDQ1ICAgIDAuMDc3MyAgMy4xNjA2ICAwLjAxOTUKCihEaXNwZXJzaW9uIHBhcmFtZXRlciBmb3IgdHdlZWRpZSBmYW1pbHkgdGFrZW4gdG8gYmUgMC4wMTgzKQogICAgTnVsbCBkZXZpYW5jZTogNC45MDQyIG9uIDYgZGVncmVlcyBvZiBmcmVlZG9tClJlc2lkdWFsIGRldmlhbmNlOiAwLjEwODAgb24gNiBkZWdyZWVzIG9mIGZyZWVkb20="
+     ],
+     "value": "Coefficients:\n    Feature Estimate Std Error T Value P Value\n(Intercept)   1.1812    0.1202  9.8301  0.0001\n features_0   0.0979    0.0290  3.3747  0.0150\n features_1   0.0373    0.1012  0.3684  0.7252\n features_2   0.2445    0.0773  3.1606  0.0195\n\n(Dispersion parameter for tweedie family taken to be 0.0183)\n    Null deviance: 4.9042 on 6 degrees of freedom\nResidual deviance: 0.1080 on 6 degrees of freedom"
+    },
+    "residualDegreeOfFreedom": {
+     "call": "summary.residualDegreeOfFreedom",
+     "commands": [
+      "Ei8KBwoFPGlkMD4SCQoHc3VtbWFyeRIZChdyZXNpZHVhbERlZ3JlZU9mRnJlZWRvbQ=="
+     ],
+     "results": [
+      "CgI4Bg=="
+     ],
+     "value": 6
+    },
+    "residualDegreeOfFreedomNull": {
+     "call": "summary.residualDegreeOfFreedomNull",
+     "commands": [
+      "EjMKBwoFPGlkMD4SCQoHc3VtbWFyeRIdChtyZXNpZHVhbERlZ3JlZU9mRnJlZWRvbU51bGw="
+     ],
+     "results": [
+      "CgI4CQ=="
+     ],
+     "value": 9
+    },
+    "residuals": {
+     "call": "summary.residuals()",
+     "commands": [
+      "EiEKBwoFPGlkMD4SCQoHc3VtbWFyeRILCglyZXNpZHVhbHMangMKAIoBmAMKkQMKABqMAwrVAgoAugHPAgqYAgoAWpMCEpACeyJmaWVsZHMiOlt7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImxhYmVsIiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6IndlaWdodCIsIm51bGxhYmxlIjp0cnVlLCJ0eXBlIjoiZG91YmxlIn0seyJtZXRhZGF0YSI6e30sIm5hbWUiOiJmZWF0dXJlcyIsIm51bGxhYmxlIjp0cnVlLCJ0eXBlIjp7ImNvbnRhaW5zTnVsbCI6dHJ1ZSwiZWxlbWVudFR5cGUiOiJkb3VibGUiLCJ0eXBlIjoiYXJyYXkifX1dLCJ0eXBlIjoic3RydWN0In0SMgomGiQKD2FycmF5X3RvX3ZlY3RvchIREgwKCGZlYXR1cmVzGACSAQASCGZlYXR1cmVzGg4SCQoFbGFiZWwYAJIBABoPEgoKBndlaWdodBgAkgEAGhESDAoIZmVhdHVyZXMYAJIBABABGAA="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        -0.04947912385148604
+       ],
+       [
+        -0.06963020954517124
+       ],
+       [
+        -0.09436948380102693
+       ],
+       [
+        -0.11071323101353751
+       ],
+       [
+        -0.13931101580418886
+       ],
+       [
+        0.032329864441469694
+       ],
+       [
+        0.04930236580030686
+       ],
+       [
+        0.06807066323212907
+       ],
+       [
+        0.08133219492708367
+       ],
+       [
+        0.21313182502399067
+       ]
+      ],
+      "schema": "struct<devianceResiduals:double>"
+     }
+    },
+    "residuals-deviance": {
+     "call": "summary.residuals('deviance')",
+     "commands": [
+      "Ei8KBwoFPGlkMD4SCQoHc3VtbWFyeRIZCglyZXNpZHVhbHMSDAoKaghkZXZpYW5jZRqeAwoAigGYAwqRAwoAGowDCtUCCgC6Ac8CCpgCCgBakwISkAJ7ImZpZWxkcyI6W3sibWV0YWRhdGEiOnt9LCJuYW1lIjoibGFiZWwiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoid2VpZ2h0IiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImZlYXR1cmVzIiwibnVsbGFibGUiOnRydWUsInR5cGUiOnsiY29udGFpbnNOdWxsIjp0cnVlLCJlbGVtZW50VHlwZSI6ImRvdWJsZSIsInR5cGUiOiJhcnJheSJ9fV0sInR5cGUiOiJzdHJ1Y3QifRIyCiYaJAoPYXJyYXlfdG9fdmVjdG9yEhESDAoIZmVhdHVyZXMYAJIBABIIZmVhdHVyZXMaDhIJCgVsYWJlbBgAkgEAGg8SCgoGd2VpZ2h0GACSAQAaERIMCghmZWF0dXJlcxgAkgEAEAEYAA=="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        -0.04947912385148604
+       ],
+       [
+        -0.06963020954517124
+       ],
+       [
+        -0.09436948380102693
+       ],
+       [
+        -0.11071323101353751
+       ],
+       [
+        -0.13931101580418886
+       ],
+       [
+        0.032329864441469694
+       ],
+       [
+        0.04930236580030686
+       ],
+       [
+        0.06807066323212907
+       ],
+       [
+        0.08133219492708367
+       ],
+       [
+        0.21313182502399067
+       ]
+      ],
+      "schema": "struct<devianceResiduals:double>"
+     }
+    },
+    "residuals-pearson": {
+     "call": "summary.residuals('pearson')",
+     "commands": [
+      "Ei4KBwoFPGlkMD4SCQoHc3VtbWFyeRIYCglyZXNpZHVhbHMSCwoJagdwZWFyc29uGp4DCgCKAZgDCpEDCgAajAMK1QIKALoBzwIKmAIKAFqTAhKQAnsiZmllbGRzIjpbeyJtZXRhZGF0YSI6e30sIm5hbWUiOiJsYWJlbCIsIm51bGxhYmxlIjp0cnVlLCJ0eXBlIjoiZG91YmxlIn0seyJtZXRhZGF0YSI6e30sIm5hbWUiOiJ3ZWlnaHQiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoiZmVhdHVyZXMiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6eyJjb250YWluc051bGwiOnRydWUsImVsZW1lbnRUeXBlIjoiZG91YmxlIiwidHlwZSI6ImFycmF5In19XSwidHlwZSI6InN0cnVjdCJ9EjIKJhokCg9hcnJheV90b192ZWN0b3ISERIMCghmZWF0dXJlcxgAkgEAEghmZWF0dXJlcxoOEgkKBWxhYmVsGACSAQAaDxIKCgZ3ZWlnaHQYAJIBABoREgwKCGZlYXR1cmVzGACSAQAQARgA"
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        -0.049153797222600326
+       ],
+       [
+        -0.06885114388827314
+       ],
+       [
+        -0.09301563776930816
+       ],
+       [
+        -0.10856151860928782
+       ],
+       [
+        -0.13692142568209204
+       ],
+       [
+        0.0324691538940014
+       ],
+       [
+        0.049672941117820744
+       ],
+       [
+        0.06881734143344287
+       ],
+       [
+        0.08226131776544197
+       ],
+       [
+        0.21953034617665423
+       ]
+      ],
+      "schema": "struct<pearsonResiduals:double>"
+     }
+    },
+    "residuals-response": {
+     "call": "summary.residuals('response')",
+     "commands": [
+      "Ei8KBwoFPGlkMD4SCQoHc3VtbWFyeRIZCglyZXNpZHVhbHMSDAoKaghyZXNwb25zZRqeAwoAigGYAwqRAwoAGowDCtUCCgC6Ac8CCpgCCgBakwISkAJ7ImZpZWxkcyI6W3sibWV0YWRhdGEiOnt9LCJuYW1lIjoibGFiZWwiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoid2VpZ2h0IiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImZlYXR1cmVzIiwibnVsbGFibGUiOnRydWUsInR5cGUiOnsiY29udGFpbnNOdWxsIjp0cnVlLCJlbGVtZW50VHlwZSI6ImRvdWJsZSIsInR5cGUiOiJhcnJheSJ9fV0sInR5cGUiOiJzdHJ1Y3QifRIyCiYaJAoPYXJyYXlfdG9fdmVjdG9yEhESDAoIZmVhdHVyZXMYAJIBABIIZmVhdHVyZXMaDhIJCgVsYWJlbBgAkgEAGg8SCgoGd2VpZ2h0GACSAQAaERIMCghmZWF0dXJlcxgAkgEAEAEYAA=="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        -0.2592956427227371
+       ],
+       [
+        -0.3135742677256754
+       ],
+       [
+        -0.3273032105957778
+       ],
+       [
+        -0.4136734440452665
+       ],
+       [
+        -1.146130181743663
+       ],
+       [
+        0.21436782683017874
+       ],
+       [
+        0.21903675197969807
+       ],
+       [
+        0.2569670219813309
+       ],
+       [
+        0.4638432480639363
+       ],
+       [
+        1.227341956837396
+       ]
+      ],
+      "schema": "struct<responseResiduals:double>"
+     }
+    },
+    "residuals-working": {
+     "call": "summary.residuals('working')",
+     "commands": [
+      "Ei4KBwoFPGlkMD4SCQoHc3VtbWFyeRIYCglyZXNpZHVhbHMSCwoJagd3b3JraW5nGp4DCgCKAZgDCpEDCgAajAMK1QIKALoBzwIKmAIKAFqTAhKQAnsiZmllbGRzIjpbeyJtZXRhZGF0YSI6e30sIm5hbWUiOiJsYWJlbCIsIm51bGxhYmxlIjp0cnVlLCJ0eXBlIjoiZG91YmxlIn0seyJtZXRhZGF0YSI6e30sIm5hbWUiOiJ3ZWlnaHQiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoiZmVhdHVyZXMiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6eyJjb250YWluc051bGwiOnRydWUsImVsZW1lbnRUeXBlIjoiZG91YmxlIiwidHlwZSI6ImFycmF5In19XSwidHlwZSI6InN0cnVjdCJ9EjIKJhokCg9hcnJheV90b192ZWN0b3ISERIMCghmZWF0dXJlcxgAkgEAEghmZWF0dXJlcxoOEgkKBWxhYmVsGACSAQAaDxIKCgZ3ZWlnaHQYAJIBABoREgwKCGZlYXR1cmVzGACSAQAQARgA"
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        -0.02612718835758202
+       ],
+       [
+        -0.044253722381252955
+       ],
+       [
+        -0.05656165088722632
+       ],
+       [
+        -0.06743477306232774
+       ],
+       [
+        -0.07622914947371189
+       ],
+       [
+        0.017307782423455917
+       ],
+       [
+        0.030291503976273993
+       ],
+       [
+        0.044357942196493194
+       ],
+       [
+        0.04621721835646467
+       ],
+       [
+        0.12369084488234676
+       ]
+      ],
+      "schema": "struct<workingResiduals:double>"
+     }
+    },
+    "solver": {
+     "call": "summary.solver",
+     "commands": [
+      "Eh4KBwoFPGlkMD4SCQoHc3VtbWFyeRIICgZzb2x2ZXI="
+     ],
+     "results": [
+      "CgZqBGlybHM="
+     ],
+     "value": "irls"
+    },
+    "str()": {
+     "call": "str(summary)",
+     "commands": [
+      "EiAKBwoFPGlkMD4SCQoHc3VtbWFyeRIKCgh0b1N0cmluZw=="
+     ],
+     "results": [
+      "Cp0DapoDQ29lZmZpY2llbnRzOgogICAgRmVhdHVyZSBFc3RpbWF0ZSBTdGQgRXJyb3IgVCBWYWx1ZSBQIFZhbHVlCihJbnRlcmNlcHQpICAgMS4xODEyICAgIDAuMTIwMiAgOS44MzAxICAwLjAwMDEKIGZlYXR1cmVzXzAgICAwLjA5NzkgICAgMC4wMjkwICAzLjM3NDcgIDAuMDE1MAogZmVhdHVyZXNfMSAgIDAuMDM3MyAgICAwLjEwMTIgIDAuMzY4NCAgMC43MjUyCiBmZWF0dXJlc18yICAgMC4yNDQ1ICAgIDAuMDc3MyAgMy4xNjA2ICAwLjAxOTUKCihEaXNwZXJzaW9uIHBhcmFtZXRlciBmb3IgdHdlZWRpZSBmYW1pbHkgdGFrZW4gdG8gYmUgMC4wMTgzKQogICAgTnVsbCBkZXZpYW5jZTogNC45MDQyIG9uIDYgZGVncmVlcyBvZiBmcmVlZG9tClJlc2lkdWFsIGRldmlhbmNlOiAwLjEwODAgb24gNiBkZWdyZWVzIG9mIGZyZWVkb20="
+     ],
+     "value": "Coefficients:\n    Feature Estimate Std Error T Value P Value\n(Intercept)   1.1812    0.1202  9.8301  0.0001\n features_0   0.0979    0.0290  3.3747  0.0150\n features_1   0.0373    0.1012  0.3684  0.7252\n features_2   0.2445    0.0773  3.1606  0.0195\n\n(Dispersion parameter for tweedie family taken to be 0.0183)\n    Null deviance: 4.9042 on 6 degrees of freedom\nResidual deviance: 0.1080 on 6 degrees of freedom"
+    },
+    "tValues": {
+     "call": "summary.tValues",
+     "commands": [
+      "Eh8KBwoFPGlkMD4SCQoHc3VtbWFyeRIJCgd0VmFsdWVz"
+     ],
+     "results": [
+      "CjOyATAKAkoAEglZmkm/EWj/CkASCVkT3wVMnZTXPxIJWX7X5FL7SAlAEglZuy46WgapI0A="
+     ],
+     "value": [
+      3.374710215234882,
+      0.3684457056437946,
+      3.160635612114617,
+      9.830126590349542
+     ]
+    }
+   },
+   "skipped": {},
+   "via": {
+    "call": "model.summary",
+    "commands": [],
+    "results": [],
+    "value": {
+     "ref": "<id0>.summary",
+     "type": "GeneralizedLinearRegressionTrainingSummary"
+    }
+   }
+  },
+  "LinearRegression.huber.evaluate": {
+   "class": "LinearRegressionSummary",
+   "members": {
+    "coefficientStandardErrors": {
+     "call": "summary.coefficientStandardErrors",
+     "commands": [
+      "EiYKBwoFPGlkMD4SGwoZY29lZmZpY2llbnRTdGFuZGFyZEVycm9ycw=="
+     ],
+     "error": {
+      "class": "UnsupportedOperationException",
+      "condition": null,
+      "message": "No Std. Error of coefficients available for this LinearRegressionModel"
+     },
+     "results": []
+    },
+    "degreesOfFreedom": {
+     "call": "summary.degreesOfFreedom",
+     "commands": [
+      "Eh0KBwoFPGlkMD4SEgoQZGVncmVlc09mRnJlZWRvbQ=="
+     ],
+     "results": [
+      "Cgs4////////////AQ=="
+     ],
+     "value": -1
+    },
+    "devianceResiduals": {
+     "call": "summary.devianceResiduals",
+     "commands": [
+      "Eh4KBwoFPGlkMD4SEwoRZGV2aWFuY2VSZXNpZHVhbHM="
+     ],
+     "results": [
+      "Ch2yARoKAkoAEglZvFau4NOTEcASCVlA0RZN+XvYPw=="
+     ],
+     "value": [
+      -4.394362936631008,
+      0.3825667622397937
+     ]
+    },
+    "explainedVariance": {
+     "call": "summary.explainedVariance",
+     "commands": [
+      "Eh4KBwoFPGlkMD4SEwoRZXhwbGFpbmVkVmFyaWFuY2U="
+     ],
+     "results": [
+      "CglZlcShouyhPUA="
+     ],
+     "value": 29.632517017835728
+    },
+    "featuresCol": {
+     "call": "summary.featuresCol",
+     "commands": [
+      "EhgKBwoFPGlkMD4SDQoLZmVhdHVyZXNDb2w="
+     ],
+     "results": [
+      "CgpqCGZlYXR1cmVz"
+     ],
+     "value": "features"
+    },
+    "labelCol": {
+     "call": "summary.labelCol",
+     "commands": [
+      "EhUKBwoFPGlkMD4SCgoIbGFiZWxDb2w="
+     ],
+     "results": [
+      "CgdqBWxhYmVs"
+     ],
+     "value": "label"
+    },
+    "meanAbsoluteError": {
+     "call": "summary.meanAbsoluteError",
+     "commands": [
+      "Eh4KBwoFPGlkMD4SEwoRbWVhbkFic29sdXRlRXJyb3I="
+     ],
+     "results": [
+      "CglZoEoZ1pfa+T8="
+     ],
+     "value": 1.615867458651941
+    },
+    "meanSquaredError": {
+     "call": "summary.meanSquaredError",
+     "commands": [
+      "Eh0KBwoFPGlkMD4SEgoQbWVhblNxdWFyZWRFcnJvcg=="
+     ],
+     "results": [
+      "CglZTw3MEvTyGUA="
+     ],
+     "value": 6.487259191231103
+    },
+    "numInstances": {
+     "call": "summary.numInstances",
+     "commands": [
+      "EhkKBwoFPGlkMD4SDgoMbnVtSW5zdGFuY2Vz"
+     ],
+     "results": [
+      "CgI4Aw=="
+     ],
+     "value": 3
+    },
+    "pValues": {
+     "call": "summary.pValues",
+     "commands": [
+      "EhQKBwoFPGlkMD4SCQoHcFZhbHVlcw=="
+     ],
+     "error": {
+      "class": "UnsupportedOperationException",
+      "condition": null,
+      "message": "No p-value available for this LinearRegressionModel"
+     },
+     "results": []
+    },
+    "predictionCol": {
+     "call": "summary.predictionCol",
+     "commands": [
+      "EhoKBwoFPGlkMD4SDwoNcHJlZGljdGlvbkNvbA=="
+     ],
+     "results": [
+      "CgxqCnByZWRpY3Rpb24="
+     ],
+     "value": "prediction"
+    },
+    "predictions": {
+     "call": "summary.predictions",
+     "commands": [
+      "EhgKBwoFPGlkMD4SDQoLcHJlZGljdGlvbnM="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        18.0,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          9.5,
+          0.0,
+          2.5
+         ]
+        },
+        18.07067267708502
+       ],
+       [
+        4.5,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          6.5,
+          2.0,
+          0.5
+         ]
+        },
+        8.894362936631008
+       ],
+       [
+        6.0,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          2.5,
+          1.0,
+          1.5
+         ]
+        },
+        5.617433237760206
+       ]
+      ],
+      "schema": "struct<label:double,weight:double,features:vector,prediction:double>"
+     }
+    },
+    "r2": {
+     "call": "summary.r2",
+     "commands": [
+      "Eg8KBwoFPGlkMD4SBAoCcjI="
+     ],
+     "results": [
+      "CglZEvYxnQJQ6j8="
+     ],
+     "value": 0.8222668714731205
+    },
+    "r2adj": {
+     "call": "summary.r2adj",
+     "commands": [
+      "EhIKBwoFPGlkMD4SBwoFcjJhZGo="
+     ],
+     "results": [
+      "CglZ7gnOYv2v9T8="
+     ],
+     "value": 1.355466257053759
+    },
+    "repr()": {
+     "call": "repr(summary)",
+     "commands": [],
+     "results": [],
+     "value": "<pyspark.ml.regression.LinearRegressionSummary object at 0x<addr>>"
+    },
+    "residuals": {
+     "call": "summary.residuals",
+     "commands": [
+      "EhYKBwoFPGlkMD4SCwoJcmVzaWR1YWxz"
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        -0.07067267708502101
+       ],
+       [
+        -4.394362936631008
+       ],
+       [
+        0.3825667622397937
+       ]
+      ],
+      "schema": "struct<residuals:double>"
+     }
+    },
+    "rootMeanSquaredError": {
+     "call": "summary.rootMeanSquaredError",
+     "commands": [
+      "EiEKBwoFPGlkMD4SFgoUcm9vdE1lYW5TcXVhcmVkRXJyb3I="
+     ],
+     "results": [
+      "CglZenmps0ZgBEA="
+     ],
+     "value": 2.5470098529905814
+    },
+    "str()": {
+     "call": "str(summary)",
+     "commands": [],
+     "results": [],
+     "value": "<pyspark.ml.regression.LinearRegressionSummary object at 0x<addr>>"
+    },
+    "tValues": {
+     "call": "summary.tValues",
+     "commands": [
+      "EhQKBwoFPGlkMD4SCQoHdFZhbHVlcw=="
+     ],
+     "error": {
+      "class": "UnsupportedOperationException",
+      "condition": null,
+      "message": "No t-statistic available for this LinearRegressionModel"
+     },
+     "results": []
+    }
+   },
+   "skipped": {},
+   "via": {
+    "call": "model.evaluate(rows_held_out)",
+    "commands": [
+     "EroDCgcKBTxpZDA+Eq4DCghldmFsdWF0ZRKhAxKeAwoAigGYAwqRAwoAGowDCtUCCgC6Ac8CCpgCCgBakwISkAJ7ImZpZWxkcyI6W3sibWV0YWRhdGEiOnt9LCJuYW1lIjoibGFiZWwiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoid2VpZ2h0IiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImZlYXR1cmVzIiwibnVsbGFibGUiOnRydWUsInR5cGUiOnsiY29udGFpbnNOdWxsIjp0cnVlLCJlbGVtZW50VHlwZSI6ImRvdWJsZSIsInR5cGUiOiJhcnJheSJ9fV0sInR5cGUiOiJzdHJ1Y3QifRIyCiYaJAoPYXJyYXlfdG9fdmVjdG9yEhESDAoIZmVhdHVyZXMYAJIBABIIZmVhdHVyZXMaDhIJCgVsYWJlbBgAkgEAGg8SCgoGd2VpZ2h0GACSAQAaERIMCghmZWF0dXJlcxgAkgEAEAEYAA=="
+    ],
+    "results": [
+     "EgU8aWQxPg=="
+    ],
+    "value": {
+     "ref": "<id1>",
+     "type": "LinearRegressionSummary"
+    }
+   }
+  },
+  "LinearRegression.huber.training": {
+   "class": "LinearRegressionTrainingSummary",
+   "members": {
+    "coefficientStandardErrors": {
+     "call": "summary.coefficientStandardErrors",
+     "commands": [
+      "EjEKBwoFPGlkMD4SCQoHc3VtbWFyeRIbChljb2VmZmljaWVudFN0YW5kYXJkRXJyb3Jz"
+     ],
+     "error": {
+      "class": "UnsupportedOperationException",
+      "condition": null,
+      "message": "No Std. Error of coefficients available for this LinearRegressionModel"
+     },
+     "results": []
+    },
+    "degreesOfFreedom": {
+     "call": "summary.degreesOfFreedom",
+     "commands": [
+      "EigKBwoFPGlkMD4SCQoHc3VtbWFyeRISChBkZWdyZWVzT2ZGcmVlZG9t"
+     ],
+     "results": [
+      "CgI4Bg=="
+     ],
+     "value": 6
+    },
+    "devianceResiduals": {
+     "call": "summary.devianceResiduals",
+     "commands": [
+      "EikKBwoFPGlkMD4SCQoHc3VtbWFyeRITChFkZXZpYW5jZVJlc2lkdWFscw=="
+     ],
+     "results": [
+      "Ch2yARoKAkoAEglZAOptDZhjyr8SCVkAu6eCHtnFPw=="
+     ],
+     "value": [
+      -0.20616436629991597,
+      0.17068845157287882
+     ]
+    },
+    "explainedVariance": {
+     "call": "summary.explainedVariance",
+     "commands": [
+      "EikKBwoFPGlkMD4SCQoHc3VtbWFyeRITChFleHBsYWluZWRWYXJpYW5jZQ=="
+     ],
+     "results": [
+      "CglZmkOLB9sLKkA="
+     ],
+     "value": 13.023155437231072
+    },
+    "featuresCol": {
+     "call": "summary.featuresCol",
+     "commands": [
+      "EiMKBwoFPGlkMD4SCQoHc3VtbWFyeRINCgtmZWF0dXJlc0NvbA=="
+     ],
+     "results": [
+      "CgpqCGZlYXR1cmVz"
+     ],
+     "value": "features"
+    },
+    "labelCol": {
+     "call": "summary.labelCol",
+     "commands": [
+      "EiAKBwoFPGlkMD4SCQoHc3VtbWFyeRIKCghsYWJlbENvbA=="
+     ],
+     "results": [
+      "CgdqBWxhYmVs"
+     ],
+     "value": "label"
+    },
+    "meanAbsoluteError": {
+     "call": "summary.meanAbsoluteError",
+     "commands": [
+      "EikKBwoFPGlkMD4SCQoHc3VtbWFyeRITChFtZWFuQWJzb2x1dGVFcnJvcg=="
+     ],
+     "results": [
+      "CglZ4OAA9HB7uD8="
+     ],
+     "value": 0.09563356358637831
+    },
+    "meanSquaredError": {
+     "call": "summary.meanSquaredError",
+     "commands": [
+      "EigKBwoFPGlkMD4SCQoHc3VtbWFyeRISChBtZWFuU3F1YXJlZEVycm9y"
+     ],
+     "results": [
+      "CglZrgE5obqjiD8="
+     ],
+     "value": 0.012031038327337065
+    },
+    "numInstances": {
+     "call": "summary.numInstances",
+     "commands": [
+      "EiQKBwoFPGlkMD4SCQoHc3VtbWFyeRIOCgxudW1JbnN0YW5jZXM="
+     ],
+     "results": [
+      "CgI4Cg=="
+     ],
+     "value": 10
+    },
+    "objectiveHistory": {
+     "call": "summary.objectiveHistory",
+     "commands": [
+      "EigKBwoFPGlkMD4SCQoHc3VtbWFyeRISChBvYmplY3RpdmVIaXN0b3J5"
+     ],
+     "results": [
+      "Cu8BsgHrAQoCSgASCVmIrwPk+VkSQBIJWZYGvzKeZQhAEglZUSRguhPP9j8SCVmVEdMBMF7wPxIJWU9a9M7RTek/EglZTLqiG3mp4j8SCVnk8nMlLJPhPxIJWVE9sMw6qOA/EglZop/VH4pY3j8SCVk+IjC0BMzYPxIJWclk3rrPn8c/EglZ7JEJUnRMwD8SCVkjzIwqoTW9PxIJWdPlZ5ig9Ls/EglZGk7QSv2Buz8SCVkQ42ZUi2a7PxIJWVpo8+xuP7s/EglZOp8whXg5uz8SCVnSjU+Ewja7PxIJWch2hnm+Nrs/EglZNgwPOr42uz8="
+     ],
+     "value": [
+      4.587867319798427,
+      3.0496181454225946,
+      1.4255559234900554,
+      1.0229950019139313,
+      0.7907494585113656,
+      0.5831876315840616,
+      0.54921538653397,
+      0.5205358503170975,
+      0.47415402516207383,
+      0.38745229336248943,
+      0.18456455826234322,
+      0.1273332024167212,
+      0.11409957207506287,
+      0.10920146675916635,
+      0.10745223118311067,
+      0.107033451181348,
+      0.10643666539127264,
+      0.10634568454463258,
+      0.10630431871646032,
+      0.10630407778668449,
+      0.10630406300974546
+     ]
+    },
+    "pValues": {
+     "call": "summary.pValues",
+     "commands": [
+      "Eh8KBwoFPGlkMD4SCQoHc3VtbWFyeRIJCgdwVmFsdWVz"
+     ],
+     "error": {
+      "class": "UnsupportedOperationException",
+      "condition": null,
+      "message": "No p-value available for this LinearRegressionModel"
+     },
+     "results": []
+    },
+    "predictionCol": {
+     "call": "summary.predictionCol",
+     "commands": [
+      "EiUKBwoFPGlkMD4SCQoHc3VtbWFyeRIPCg1wcmVkaWN0aW9uQ29s"
+     ],
+     "results": [
+      "CgxqCnByZWRpY3Rpb24="
+     ],
+     "value": "prediction"
+    },
+    "predictions": {
+     "call": "summary.predictions",
+     "commands": [
+      "EiMKBwoFPGlkMD4SCQoHc3VtbWFyeRINCgtwcmVkaWN0aW9ucxqeAwoAigGYAwqRAwoAGowDCtUCCgC6Ac8CCpgCCgBakwISkAJ7ImZpZWxkcyI6W3sibWV0YWRhdGEiOnt9LCJuYW1lIjoibGFiZWwiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoid2VpZ2h0IiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImZlYXR1cmVzIiwibnVsbGFibGUiOnRydWUsInR5cGUiOnsiY29udGFpbnNOdWxsIjp0cnVlLCJlbGVtZW50VHlwZSI6ImRvdWJsZSIsInR5cGUiOiJhcnJheSJ9fV0sInR5cGUiOiJzdHJ1Y3QifRIyCiYaJAoPYXJyYXlfdG9fdmVjdG9yEhESDAoIZmVhdHVyZXMYAJIBABIIZmVhdHVyZXMaDhIJCgVsYWJlbBgAkgEAGg8SCgoGd2VpZ2h0GACSAQAaERIMCghmZWF0dXJlcxgAkgEAEAEYAA=="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        10.5,
+        1.5,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          4.0,
+          0.0,
+          3.0
+         ]
+        },
+        10.562412601955522
+       ],
+       [
+        11.15,
+        0.5,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          6.0,
+          1.0,
+          2.0
+         ]
+        },
+        10.979311548427122
+       ],
+       [
+        12.2,
+        2.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          8.0,
+          2.0,
+          2.0
+         ]
+        },
+        12.109859482835338
+       ],
+       [
+        12.6,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          10.0,
+          3.0,
+          1.0
+         ]
+        },
+        12.526758429306938
+       ],
+       [
+        15.85,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          9.0,
+          1.0,
+          3.0
+         ]
+        },
+        15.983006664962545
+       ],
+       [
+        3.8,
+        2.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          2.0,
+          1.0,
+          0.0
+         ]
+        },
+        3.8319520677554797
+       ],
+       [
+        5.6,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          1.0,
+          0.0,
+          2.0
+         ]
+        },
+        5.5587174854200985
+       ],
+       [
+        6.05,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          3.0,
+          1.0,
+          1.0
+         ]
+        },
+        5.975616431891698
+       ],
+       [
+        6.9,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          5.0,
+          2.0,
+          1.0
+         ]
+        },
+        7.106164366299916
+       ],
+       [
+        7.45,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          7.0,
+          3.0,
+          0.0
+         ]
+        },
+        7.523063312771515
+       ]
+      ],
+      "schema": "struct<label:double,weight:double,features:vector,prediction:double>"
+     }
+    },
+    "r2": {
+     "call": "summary.r2",
+     "commands": [
+      "EhoKBwoFPGlkMD4SCQoHc3VtbWFyeRIECgJyMg=="
+     ],
+     "results": [
+      "CglZZJnWGHX47z8="
+     ],
+     "value": 0.9990792737124079
+    },
+    "r2adj": {
+     "call": "summary.r2adj",
+     "commands": [
+      "Eh0KBwoFPGlkMD4SCQoHc3VtbWFyeRIHCgVyMmFkag=="
+     ],
+     "results": [
+      "CglZFuZBpa/07z8="
+     ],
+     "value": 0.9986189105686119
+    },
+    "repr()": {
+     "call": "repr(summary)",
+     "commands": [],
+     "results": [],
+     "value": "<pyspark.ml.regression.LinearRegressionTrainingSummary object at 0x<addr>>"
+    },
+    "residuals": {
+     "call": "summary.residuals",
+     "commands": [
+      "EiEKBwoFPGlkMD4SCQoHc3VtbWFyeRILCglyZXNpZHVhbHMangMKAIoBmAMKkQMKABqMAwrVAgoAugHPAgqYAgoAWpMCEpACeyJmaWVsZHMiOlt7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImxhYmVsIiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6IndlaWdodCIsIm51bGxhYmxlIjp0cnVlLCJ0eXBlIjoiZG91YmxlIn0seyJtZXRhZGF0YSI6e30sIm5hbWUiOiJmZWF0dXJlcyIsIm51bGxhYmxlIjp0cnVlLCJ0eXBlIjp7ImNvbnRhaW5zTnVsbCI6dHJ1ZSwiZWxlbWVudFR5cGUiOiJkb3VibGUiLCJ0eXBlIjoiYXJyYXkifX1dLCJ0eXBlIjoic3RydWN0In0SMgomGiQKD2FycmF5X3RvX3ZlY3RvchIREgwKCGZlYXR1cmVzGACSAQASCGZlYXR1cmVzGg4SCQoFbGFiZWwYAJIBABoPEgoKBndlaWdodBgAkgEAGhESDAoIZmVhdHVyZXMYAJIBABABGAA="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        -0.031952067755479874
+       ],
+       [
+        -0.06241260195552201
+       ],
+       [
+        -0.07306331277151479
+       ],
+       [
+        -0.13300666496254543
+       ],
+       [
+        -0.20616436629991597
+       ],
+       [
+        0.041282514579901175
+       ],
+       [
+        0.07324157069306203
+       ],
+       [
+        0.07438356810830182
+       ],
+       [
+        0.0901405171646612
+       ],
+       [
+        0.17068845157287882
+       ]
+      ],
+      "schema": "struct<residuals:double>"
+     }
+    },
+    "rootMeanSquaredError": {
+     "call": "summary.rootMeanSquaredError",
+     "commands": [
+      "EiwKBwoFPGlkMD4SCQoHc3VtbWFyeRIWChRyb290TWVhblNxdWFyZWRFcnJvcg=="
+     ],
+     "results": [
+      "CglZAWIjOWMUvD8="
+     ],
+     "value": 0.10968608994460995
+    },
+    "str()": {
+     "call": "str(summary)",
+     "commands": [],
+     "results": [],
+     "value": "<pyspark.ml.regression.LinearRegressionTrainingSummary object at 0x<addr>>"
+    },
+    "tValues": {
+     "call": "summary.tValues",
+     "commands": [
+      "Eh8KBwoFPGlkMD4SCQoHc3VtbWFyeRIJCgd0VmFsdWVz"
+     ],
+     "error": {
+      "class": "UnsupportedOperationException",
+      "condition": null,
+      "message": "No t-statistic available for this LinearRegressionModel"
+     },
+     "results": []
+    },
+    "totalIterations": {
+     "call": "summary.totalIterations",
+     "commands": [
+      "EicKBwoFPGlkMD4SCQoHc3VtbWFyeRIRCg90b3RhbEl0ZXJhdGlvbnM="
+     ],
+     "results": [
+      "CgIwFA=="
+     ],
+     "value": 20
+    }
+   },
+   "skipped": {},
+   "via": {
+    "call": "model.summary",
+    "commands": [],
+    "results": [],
+    "value": {
+     "ref": "<id0>.summary",
+     "type": "LinearRegressionTrainingSummary"
+    }
+   }
+  },
+  "LinearRegression.l-bfgs.evaluate": {
+   "class": "LinearRegressionSummary",
+   "members": {
+    "coefficientStandardErrors": {
+     "call": "summary.coefficientStandardErrors",
+     "commands": [
+      "EiYKBwoFPGlkMD4SGwoZY29lZmZpY2llbnRTdGFuZGFyZEVycm9ycw=="
+     ],
+     "error": {
+      "class": "UnsupportedOperationException",
+      "condition": null,
+      "message": "No Std. Error of coefficients available for this LinearRegressionModel"
+     },
+     "results": []
+    },
+    "degreesOfFreedom": {
+     "call": "summary.degreesOfFreedom",
+     "commands": [
+      "Eh0KBwoFPGlkMD4SEgoQZGVncmVlc09mRnJlZWRvbQ=="
+     ],
+     "results": [
+      "Cgs4////////////AQ=="
+     ],
+     "value": -1
+    },
+    "devianceResiduals": {
+     "call": "summary.devianceResiduals",
+     "commands": [
+      "Eh4KBwoFPGlkMD4SEwoRZGV2aWFuY2VSZXNpZHVhbHM="
+     ],
+     "results": [
+      "Ch2yARoKAkoAEglZpnI+G34KEMASCVkAmF63f23+Pw=="
+     ],
+     "value": [
+      -4.010246682821764,
+      1.9017331278678284
+     ]
+    },
+    "explainedVariance": {
+     "call": "summary.explainedVariance",
+     "commands": [
+      "Eh4KBwoFPGlkMD4SEwoRZXhwbGFpbmVkVmFyaWFuY2U="
+     ],
+     "results": [
+      "CglZFdnlg+qXMkA="
+     ],
+     "value": 18.593422168364743
+    },
+    "featuresCol": {
+     "call": "summary.featuresCol",
+     "commands": [
+      "EhgKBwoFPGlkMD4SDQoLZmVhdHVyZXNDb2w="
+     ],
+     "results": [
+      "CgpqCGZlYXR1cmVz"
+     ],
+     "value": "features"
+    },
+    "labelCol": {
+     "call": "summary.labelCol",
+     "commands": [
+      "EhUKBwoFPGlkMD4SCgoIbGFiZWxDb2w="
+     ],
+     "results": [
+      "CgdqBWxhYmVs"
+     ],
+     "value": "label"
+    },
+    "meanAbsoluteError": {
+     "call": "summary.meanAbsoluteError",
+     "commands": [
+      "Eh4KBwoFPGlkMD4SEwoRbWVhbkFic29sdXRlRXJyb3I="
+     ],
+     "results": [
+      "CglZVM+RhyImAEA="
+     ],
+     "value": 2.018620547425522
+    },
+    "meanSquaredError": {
+     "call": "summary.meanSquaredError",
+     "commands": [
+      "Eh0KBwoFPGlkMD4SEgoQbWVhblNxdWFyZWRFcnJvcg=="
+     ],
+     "results": [
+      "CglZPavNyOBKGkA="
+     ],
+     "value": 6.573123109391244
+    },
+    "numInstances": {
+     "call": "summary.numInstances",
+     "commands": [
+      "EhkKBwoFPGlkMD4SDgoMbnVtSW5zdGFuY2Vz"
+     ],
+     "results": [
+      "CgI4Aw=="
+     ],
+     "value": 3
+    },
+    "pValues": {
+     "call": "summary.pValues",
+     "commands": [
+      "EhQKBwoFPGlkMD4SCQoHcFZhbHVlcw=="
+     ],
+     "error": {
+      "class": "UnsupportedOperationException",
+      "condition": null,
+      "message": "No p-value available for this LinearRegressionModel"
+     },
+     "results": []
+    },
+    "predictionCol": {
+     "call": "summary.predictionCol",
+     "commands": [
+      "EhoKBwoFPGlkMD4SDwoNcHJlZGljdGlvbkNvbA=="
+     ],
+     "results": [
+      "CgxqCnByZWRpY3Rpb24="
+     ],
+     "value": "prediction"
+    },
+    "predictions": {
+     "call": "summary.predictions",
+     "commands": [
+      "EhgKBwoFPGlkMD4SDQoLcHJlZGljdGlvbnM="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        18.0,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          9.5,
+          0.0,
+          2.5
+         ]
+        },
+        16.09826687213217
+       ],
+       [
+        4.5,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          6.5,
+          2.0,
+          0.5
+         ]
+        },
+        8.510246682821764
+       ],
+       [
+        6.0,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          2.5,
+          1.0,
+          1.5
+         ]
+        },
+        6.143881831586974
+       ]
+      ],
+      "schema": "struct<label:double,weight:double,features:vector,prediction:double>"
+     }
+    },
+    "r2": {
+     "call": "summary.r2",
+     "commands": [
+      "Eg8KBwoFPGlkMD4SBAoCcjI="
+     ],
+     "results": [
+      "CglZt1isMr086j8="
+     ],
+     "value": 0.819914435359144
+    },
+    "r2adj": {
+     "call": "summary.r2adj",
+     "commands": [
+      "EhIKBwoFPGlkMD4SBwoFcjJhZGo="
+     ],
+     "results": [
+      "CglZSadTzULD9T8="
+     ],
+     "value": 1.360171129281712
+    },
+    "repr()": {
+     "call": "repr(summary)",
+     "commands": [],
+     "results": [],
+     "value": "<pyspark.ml.regression.LinearRegressionSummary object at 0x<addr>>"
+    },
+    "residuals": {
+     "call": "summary.residuals",
+     "commands": [
+      "EhYKBwoFPGlkMD4SCwoJcmVzaWR1YWxz"
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        -0.14388183158697387
+       ],
+       [
+        -4.010246682821764
+       ],
+       [
+        1.9017331278678284
+       ]
+      ],
+      "schema": "struct<residuals:double>"
+     }
+    },
+    "rootMeanSquaredError": {
+     "call": "summary.rootMeanSquaredError",
+     "commands": [
+      "EiEKBwoFPGlkMD4SFgoUcm9vdE1lYW5TcXVhcmVkRXJyb3I="
+     ],
+     "results": [
+      "CglZ9ZWx9a6CBEA="
+     ],
+     "value": 2.5638102717227818
+    },
+    "str()": {
+     "call": "str(summary)",
+     "commands": [],
+     "results": [],
+     "value": "<pyspark.ml.regression.LinearRegressionSummary object at 0x<addr>>"
+    },
+    "tValues": {
+     "call": "summary.tValues",
+     "commands": [
+      "EhQKBwoFPGlkMD4SCQoHdFZhbHVlcw=="
+     ],
+     "error": {
+      "class": "UnsupportedOperationException",
+      "condition": null,
+      "message": "No t-statistic available for this LinearRegressionModel"
+     },
+     "results": []
+    }
+   },
+   "skipped": {},
+   "via": {
+    "call": "model.evaluate(rows_held_out)",
+    "commands": [
+     "EroDCgcKBTxpZDA+Eq4DCghldmFsdWF0ZRKhAxKeAwoAigGYAwqRAwoAGowDCtUCCgC6Ac8CCpgCCgBakwISkAJ7ImZpZWxkcyI6W3sibWV0YWRhdGEiOnt9LCJuYW1lIjoibGFiZWwiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoid2VpZ2h0IiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImZlYXR1cmVzIiwibnVsbGFibGUiOnRydWUsInR5cGUiOnsiY29udGFpbnNOdWxsIjp0cnVlLCJlbGVtZW50VHlwZSI6ImRvdWJsZSIsInR5cGUiOiJhcnJheSJ9fV0sInR5cGUiOiJzdHJ1Y3QifRIyCiYaJAoPYXJyYXlfdG9fdmVjdG9yEhESDAoIZmVhdHVyZXMYAJIBABIIZmVhdHVyZXMaDhIJCgVsYWJlbBgAkgEAGg8SCgoGd2VpZ2h0GACSAQAaERIMCghmZWF0dXJlcxgAkgEAEAEYAA=="
+    ],
+    "results": [
+     "EgU8aWQxPg=="
+    ],
+    "value": {
+     "ref": "<id1>",
+     "type": "LinearRegressionSummary"
+    }
+   }
+  },
+  "LinearRegression.l-bfgs.training": {
+   "class": "LinearRegressionTrainingSummary",
+   "members": {
+    "coefficientStandardErrors": {
+     "call": "summary.coefficientStandardErrors",
+     "commands": [
+      "EjEKBwoFPGlkMD4SCQoHc3VtbWFyeRIbChljb2VmZmljaWVudFN0YW5kYXJkRXJyb3Jz"
+     ],
+     "error": {
+      "class": "UnsupportedOperationException",
+      "condition": null,
+      "message": "No Std. Error of coefficients available for this LinearRegressionModel"
+     },
+     "results": []
+    },
+    "degreesOfFreedom": {
+     "call": "summary.degreesOfFreedom",
+     "commands": [
+      "EigKBwoFPGlkMD4SCQoHc3VtbWFyeRISChBkZWdyZWVzT2ZGcmVlZG9t"
+     ],
+     "results": [
+      "CgI4Bg=="
+     ],
+     "value": 6
+    },
+    "devianceResiduals": {
+     "call": "summary.devianceResiduals",
+     "commands": [
+      "EikKBwoFPGlkMD4SCQoHc3VtbWFyeRITChFkZXZpYW5jZVJlc2lkdWFscw=="
+     ],
+     "results": [
+      "Ch2yARoKAkoAEglZIHG9jN3S478SCVkAHTRkzmDZPw=="
+     ],
+     "value": [
+      -0.619490408785655,
+      0.3965335825491394
+     ]
+    },
+    "explainedVariance": {
+     "call": "summary.explainedVariance",
+     "commands": [
+      "EikKBwoFPGlkMD4SCQoHc3VtbWFyeRITChFleHBsYWluZWRWYXJpYW5jZQ=="
+     ],
+     "results": [
+      "CglZphAUh8VwKEA="
+     ],
+     "value": 12.220257016372056
+    },
+    "featuresCol": {
+     "call": "summary.featuresCol",
+     "commands": [
+      "EiMKBwoFPGlkMD4SCQoHc3VtbWFyeRINCgtmZWF0dXJlc0NvbA=="
+     ],
+     "results": [
+      "CgpqCGZlYXR1cmVz"
+     ],
+     "value": "features"
+    },
+    "labelCol": {
+     "call": "summary.labelCol",
+     "commands": [
+      "EiAKBwoFPGlkMD4SCQoHc3VtbWFyeRIKCghsYWJlbENvbA=="
+     ],
+     "results": [
+      "CgdqBWxhYmVs"
+     ],
+     "value": "label"
+    },
+    "meanAbsoluteError": {
+     "call": "summary.meanAbsoluteError",
+     "commands": [
+      "EikKBwoFPGlkMD4SCQoHc3VtbWFyeRITChFtZWFuQWJzb2x1dGVFcnJvcg=="
+     ],
+     "results": [
+      "CglZKn4o1l6A0D8="
+     ],
+     "value": 0.25783511079677857
+    },
+    "meanSquaredError": {
+     "call": "summary.meanSquaredError",
+     "commands": [
+      "EigKBwoFPGlkMD4SCQoHc3VtbWFyeRISChBtZWFuU3F1YXJlZEVycm9y"
+     ],
+     "results": [
+      "CglZ9Lce8q0FuD8="
+     ],
+     "value": 0.09383666192181278
+    },
+    "numInstances": {
+     "call": "summary.numInstances",
+     "commands": [
+      "EiQKBwoFPGlkMD4SCQoHc3VtbWFyeRIOCgxudW1JbnN0YW5jZXM="
+     ],
+     "results": [
+      "CgI4Cg=="
+     ],
+     "value": 10
+    },
+    "objectiveHistory": {
+     "call": "summary.objectiveHistory",
+     "commands": [
+      "EigKBwoFPGlkMD4SCQoHc3VtbWFyeRISChBvYmplY3RpdmVIaXN0b3J5"
+     ],
+     "results": [
+      "CpcBsgGTAQoCSgASCVnNzMzMzMzcPxIJWWZx9Vg8U6I/EglZdWdnrUj1lT8SCVmO2fyyRq2UPxIJWRF/KLKfWZQ/EglZgpCHgZ0fkj8SCVm0JCs/sPSQPxIJWTIFaoK5lpA/EglZnNkQhjyVkD8SCVmXrmQONpWQPxIJWSt2mwM2lZA/EglZdGCWAzaVkD8SCVkMuJUDNpWQPw=="
+     ],
+     "value": [
+      0.45,
+      0.03579128824159987,
+      0.021443496307120797,
+      0.02019224612669173,
+      0.019873137711441894,
+      0.017698727637153862,
+      0.01655841241407492,
+      0.016199968895766755,
+      0.016194291765907573,
+      0.01619419539308228,
+      0.01619419476525345,
+      0.016194194764097294,
+      0.01619419476394772
+     ]
+    },
+    "pValues": {
+     "call": "summary.pValues",
+     "commands": [
+      "Eh8KBwoFPGlkMD4SCQoHc3VtbWFyeRIJCgdwVmFsdWVz"
+     ],
+     "error": {
+      "class": "UnsupportedOperationException",
+      "condition": null,
+      "message": "No p-value available for this LinearRegressionModel"
+     },
+     "results": []
+    },
+    "predictionCol": {
+     "call": "summary.predictionCol",
+     "commands": [
+      "EiUKBwoFPGlkMD4SCQoHc3VtbWFyeRIPCg1wcmVkaWN0aW9uQ29s"
+     ],
+     "results": [
+      "CgxqCnByZWRpY3Rpb24="
+     ],
+     "value": "prediction"
+    },
+    "predictions": {
+     "call": "summary.predictions",
+     "commands": [
+      "EiMKBwoFPGlkMD4SCQoHc3VtbWFyeRINCgtwcmVkaWN0aW9ucxqeAwoAigGYAwqRAwoAGowDCtUCCgC6Ac8CCpgCCgBakwISkAJ7ImZpZWxkcyI6W3sibWV0YWRhdGEiOnt9LCJuYW1lIjoibGFiZWwiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoid2VpZ2h0IiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImZlYXR1cmVzIiwibnVsbGFibGUiOnRydWUsInR5cGUiOnsiY29udGFpbnNOdWxsIjp0cnVlLCJlbGVtZW50VHlwZSI6ImRvdWJsZSIsInR5cGUiOiJhcnJheSJ9fV0sInR5cGUiOiJzdHJ1Y3QifRIyCiYaJAoPYXJyYXlfdG9fdmVjdG9yEhESDAoIZmVhdHVyZXMYAJIBABIIZmVhdHVyZXMaDhIJCgVsYWJlbBgAkgEAGg8SCgoGd2VpZ2h0GACSAQAaERIMCghmZWF0dXJlcxgAkgEAEAEYAA=="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        10.5,
+        1.5,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          4.0,
+          0.0,
+          3.0
+         ]
+        },
+        10.627237910176067
+       ],
+       [
+        11.15,
+        0.5,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          6.0,
+          1.0,
+          2.0
+         ]
+        },
+        10.753466417450861
+       ],
+       [
+        12.2,
+        2.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          8.0,
+          2.0,
+          2.0
+         ]
+        },
+        12.258386892593434
+       ],
+       [
+        12.6,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          10.0,
+          3.0,
+          1.0
+         ]
+        },
+        12.384615399868226
+       ],
+       [
+        15.85,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          9.0,
+          1.0,
+          3.0
+         ]
+        },
+        15.492362901258636
+       ],
+       [
+        3.8,
+        2.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          2.0,
+          1.0,
+          0.0
+         ]
+        },
+        3.515809793795304
+       ],
+       [
+        5.6,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          1.0,
+          0.0,
+          2.0
+         ]
+        },
+        5.8883414263682905
+       ],
+       [
+        6.05,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          3.0,
+          1.0,
+          1.0
+         ]
+        },
+        6.014569933643083
+       ],
+       [
+        6.9,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          5.0,
+          2.0,
+          1.0
+         ]
+        },
+        7.519490408785655
+       ],
+       [
+        7.45,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          7.0,
+          3.0,
+          0.0
+         ]
+        },
+        7.645718916060448
+       ]
+      ],
+      "schema": "struct<label:double,weight:double,features:vector,prediction:double>"
+     }
+    },
+    "r2": {
+     "call": "summary.r2",
+     "commands": [
+      "EhoKBwoFPGlkMD4SCQoHc3VtbWFyeRIECgJyMg=="
+     ],
+     "results": [
+      "CglZvIJT1CvF7z8="
+     ],
+     "value": 0.9928187510486945
+    },
+    "r2adj": {
+     "call": "summary.r2adj",
+     "commands": [
+      "Eh0KBwoFPGlkMD4SCQoHc3VtbWFyeRIHCgVyMmFkag=="
+     ],
+     "results": [
+      "CglZGkR9vsGn7z8="
+     ],
+     "value": 0.9892281265730418
+    },
+    "repr()": {
+     "call": "repr(summary)",
+     "commands": [],
+     "results": [],
+     "value": "<pyspark.ml.regression.LinearRegressionTrainingSummary object at 0x<addr>>"
+    },
+    "residuals": {
+     "call": "summary.residuals",
+     "commands": [
+      "EiEKBwoFPGlkMD4SCQoHc3VtbWFyeRILCglyZXNpZHVhbHMangMKAIoBmAMKkQMKABqMAwrVAgoAugHPAgqYAgoAWpMCEpACeyJmaWVsZHMiOlt7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImxhYmVsIiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6IndlaWdodCIsIm51bGxhYmxlIjp0cnVlLCJ0eXBlIjoiZG91YmxlIn0seyJtZXRhZGF0YSI6e30sIm5hbWUiOiJmZWF0dXJlcyIsIm51bGxhYmxlIjp0cnVlLCJ0eXBlIjp7ImNvbnRhaW5zTnVsbCI6dHJ1ZSwiZWxlbWVudFR5cGUiOiJkb3VibGUiLCJ0eXBlIjoiYXJyYXkifX1dLCJ0eXBlIjoic3RydWN0In0SMgomGiQKD2FycmF5X3RvX3ZlY3RvchIREgwKCGZlYXR1cmVzGACSAQASCGZlYXR1cmVzGg4SCQoFbGFiZWwYAJIBABoPEgoKBndlaWdodBgAkgEAGhESDAoIZmVhdHVyZXMYAJIBABABGAA="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        -0.058386892593434325
+       ],
+       [
+        -0.127237910176067
+       ],
+       [
+        -0.19571891606044822
+       ],
+       [
+        -0.28834142636829085
+       ],
+       [
+        -0.619490408785655
+       ],
+       [
+        0.035430066356917145
+       ],
+       [
+        0.21538460013177385
+       ],
+       [
+        0.2841902062046957
+       ],
+       [
+        0.35763709874136396
+       ],
+       [
+        0.3965335825491394
+       ]
+      ],
+      "schema": "struct<residuals:double>"
+     }
+    },
+    "rootMeanSquaredError": {
+     "call": "summary.rootMeanSquaredError",
+     "commands": [
+      "EiwKBwoFPGlkMD4SCQoHc3VtbWFyeRIWChRyb290TWVhblNxdWFyZWRFcnJvcg=="
+     ],
+     "results": [
+      "CglZg6gUg9+a0z8="
+     ],
+     "value": 0.3063277034840512
+    },
+    "str()": {
+     "call": "str(summary)",
+     "commands": [],
+     "results": [],
+     "value": "<pyspark.ml.regression.LinearRegressionTrainingSummary object at 0x<addr>>"
+    },
+    "tValues": {
+     "call": "summary.tValues",
+     "commands": [
+      "Eh8KBwoFPGlkMD4SCQoHc3VtbWFyeRIJCgd0VmFsdWVz"
+     ],
+     "error": {
+      "class": "UnsupportedOperationException",
+      "condition": null,
+      "message": "No t-statistic available for this LinearRegressionModel"
+     },
+     "results": []
+    },
+    "totalIterations": {
+     "call": "summary.totalIterations",
+     "commands": [
+      "EicKBwoFPGlkMD4SCQoHc3VtbWFyeRIRCg90b3RhbEl0ZXJhdGlvbnM="
+     ],
+     "results": [
+      "CgIwDA=="
+     ],
+     "value": 12
+    }
+   },
+   "skipped": {},
+   "via": {
+    "call": "model.summary",
+    "commands": [],
+    "results": [],
+    "value": {
+     "ref": "<id0>.summary",
+     "type": "LinearRegressionTrainingSummary"
+    }
+   }
+  },
+  "LinearRegression.normal.evaluate": {
+   "class": "LinearRegressionSummary",
+   "members": {
+    "coefficientStandardErrors": {
+     "call": "summary.coefficientStandardErrors",
+     "commands": [
+      "EiYKBwoFPGlkMD4SGwoZY29lZmZpY2llbnRTdGFuZGFyZEVycm9ycw=="
+     ],
+     "error": {
+      "class": "UnsupportedOperationException",
+      "condition": null,
+      "message": "No Std. Error of coefficients available for this LinearRegressionModel"
+     },
+     "results": []
+    },
+    "degreesOfFreedom": {
+     "call": "summary.degreesOfFreedom",
+     "commands": [
+      "Eh0KBwoFPGlkMD4SEgoQZGVncmVlc09mRnJlZWRvbQ=="
+     ],
+     "results": [
+      "Cgs4////////////AQ=="
+     ],
+     "value": -1
+    },
+    "devianceResiduals": {
+     "call": "summary.devianceResiduals",
+     "commands": [
+      "Eh4KBwoFPGlkMD4SEwoRZGV2aWFuY2VSZXNpZHVhbHM="
+     ],
+     "results": [
+      "Ch2yARoKAkoAEglZJH3CnxWMEcASCVlADh6lu5jZPw=="
+     ],
+     "value": [
+      -4.386801239247948,
+      0.3999470818018587
+     ]
+    },
+    "explainedVariance": {
+     "call": "summary.explainedVariance",
+     "commands": [
+      "Eh4KBwoFPGlkMD4SEwoRZXhwbGFpbmVkVmFyaWFuY2U="
+     ],
+     "results": [
+      "CglZgE+VnQqvPUA="
+     ],
+     "value": 29.683755730583925
+    },
+    "featuresCol": {
+     "call": "summary.featuresCol",
+     "commands": [
+      "EhgKBwoFPGlkMD4SDQoLZmVhdHVyZXNDb2w="
+     ],
+     "results": [
+      "CgpqCGZlYXR1cmVz"
+     ],
+     "value": "features"
+    },
+    "labelCol": {
+     "call": "summary.labelCol",
+     "commands": [
+      "EhUKBwoFPGlkMD4SCgoIbGFiZWxDb2w="
+     ],
+     "results": [
+      "CgdqBWxhYmVs"
+     ],
+     "value": "label"
+    },
+    "meanAbsoluteError": {
+     "call": "summary.meanAbsoluteError",
+     "commands": [
+      "Eh4KBwoFPGlkMD4SEwoRbWVhbkFic29sdXRlRXJyb3I="
+     ],
+     "results": [
+      "CglZW44BCrzo+T8="
+     ],
+     "value": 1.6193199530470312
+    },
+    "meanSquaredError": {
+     "call": "summary.meanSquaredError",
+     "commands": [
+      "Eh0KBwoFPGlkMD4SEgoQbWVhblNxdWFyZWRFcnJvcg=="
+     ],
+     "results": [
+      "CglZvJ9gAfXgGUA="
+     ],
+     "value": 6.469684621355494
+    },
+    "numInstances": {
+     "call": "summary.numInstances",
+     "commands": [
+      "EhkKBwoFPGlkMD4SDgoMbnVtSW5zdGFuY2Vz"
+     ],
+     "results": [
+      "CgI4Aw=="
+     ],
+     "value": 3
+    },
+    "pValues": {
+     "call": "summary.pValues",
+     "commands": [
+      "EhQKBwoFPGlkMD4SCQoHcFZhbHVlcw=="
+     ],
+     "error": {
+      "class": "UnsupportedOperationException",
+      "condition": null,
+      "message": "No p-value available for this LinearRegressionModel"
+     },
+     "results": []
+    },
+    "predictionCol": {
+     "call": "summary.predictionCol",
+     "commands": [
+      "EhoKBwoFPGlkMD4SDwoNcHJlZGljdGlvbkNvbA=="
+     ],
+     "results": [
+      "CgxqCnByZWRpY3Rpb24="
+     ],
+     "value": "prediction"
+    },
+    "predictions": {
+     "call": "summary.predictions",
+     "commands": [
+      "EhgKBwoFPGlkMD4SDQoLcHJlZGljdGlvbnM="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        18.0,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          9.5,
+          0.0,
+          2.5
+         ]
+        },
+        18.071211538091287
+       ],
+       [
+        4.5,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          6.5,
+          2.0,
+          0.5
+         ]
+        },
+        8.886801239247948
+       ],
+       [
+        6.0,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          2.5,
+          1.0,
+          1.5
+         ]
+        },
+        5.600052918198141
+       ]
+      ],
+      "schema": "struct<label:double,weight:double,features:vector,prediction:double>"
+     }
+    },
+    "r2": {
+     "call": "summary.r2",
+     "commands": [
+      "Eg8KBwoFPGlkMD4SBAoCcjI="
+     ],
+     "results": [
+      "CglZ9s7jYfRT6j8="
+     ],
+     "value": 0.8227483665382056
+    },
+    "r2adj": {
+     "call": "summary.r2adj",
+     "commands": [
+      "EhIKBwoFPGlkMD4SBwoFcjJhZGo="
+     ],
+     "results": [
+      "CglZCjEcngus9T8="
+     ],
+     "value": 1.3545032669235888
+    },
+    "repr()": {
+     "call": "repr(summary)",
+     "commands": [],
+     "results": [],
+     "value": "<pyspark.ml.regression.LinearRegressionSummary object at 0x<addr>>"
+    },
+    "residuals": {
+     "call": "summary.residuals",
+     "commands": [
+      "EhYKBwoFPGlkMD4SCwoJcmVzaWR1YWxz"
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        -0.071211538091287
+       ],
+       [
+        -4.386801239247948
+       ],
+       [
+        0.3999470818018587
+       ]
+      ],
+      "schema": "struct<residuals:double>"
+     }
+    },
+    "rootMeanSquaredError": {
+     "call": "summary.rootMeanSquaredError",
+     "commands": [
+      "EiEKBwoFPGlkMD4SFgoUcm9vdE1lYW5TcXVhcmVkRXJyb3I="
+     ],
+     "results": [
+      "CglZA9kjqTRZBEA="
+     ],
+     "value": 2.5435574735703326
+    },
+    "str()": {
+     "call": "str(summary)",
+     "commands": [],
+     "results": [],
+     "value": "<pyspark.ml.regression.LinearRegressionSummary object at 0x<addr>>"
+    },
+    "tValues": {
+     "call": "summary.tValues",
+     "commands": [
+      "EhQKBwoFPGlkMD4SCQoHdFZhbHVlcw=="
+     ],
+     "error": {
+      "class": "UnsupportedOperationException",
+      "condition": null,
+      "message": "No t-statistic available for this LinearRegressionModel"
+     },
+     "results": []
+    }
+   },
+   "skipped": {},
+   "via": {
+    "call": "model.evaluate(rows_held_out)",
+    "commands": [
+     "EroDCgcKBTxpZDA+Eq4DCghldmFsdWF0ZRKhAxKeAwoAigGYAwqRAwoAGowDCtUCCgC6Ac8CCpgCCgBakwISkAJ7ImZpZWxkcyI6W3sibWV0YWRhdGEiOnt9LCJuYW1lIjoibGFiZWwiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoid2VpZ2h0IiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImZlYXR1cmVzIiwibnVsbGFibGUiOnRydWUsInR5cGUiOnsiY29udGFpbnNOdWxsIjp0cnVlLCJlbGVtZW50VHlwZSI6ImRvdWJsZSIsInR5cGUiOiJhcnJheSJ9fV0sInR5cGUiOiJzdHJ1Y3QifRIyCiYaJAoPYXJyYXlfdG9fdmVjdG9yEhESDAoIZmVhdHVyZXMYAJIBABIIZmVhdHVyZXMaDhIJCgVsYWJlbBgAkgEAGg8SCgoGd2VpZ2h0GACSAQAaERIMCghmZWF0dXJlcxgAkgEAEAEYAA=="
+    ],
+    "results": [
+     "EgU8aWQxPg=="
+    ],
+    "value": {
+     "ref": "<id1>",
+     "type": "LinearRegressionSummary"
+    }
+   }
+  },
+  "LinearRegression.normal.training": {
+   "class": "LinearRegressionTrainingSummary",
+   "members": {
+    "coefficientStandardErrors": {
+     "call": "summary.coefficientStandardErrors",
+     "commands": [
+      "EjEKBwoFPGlkMD4SCQoHc3VtbWFyeRIbChljb2VmZmljaWVudFN0YW5kYXJkRXJyb3Jz"
+     ],
+     "results": [
+      "CjOyATAKAkoAEglZZENnWe1fqD8SCVne75Br9pjDPxIJWTTXXyPK47o/EglZGai5lapYwj8="
+     ],
+     "value": [
+      0.04760686603879696,
+      0.15310554744962607,
+      0.10503829349167121,
+      0.1433308821754629
+     ]
+    },
+    "degreesOfFreedom": {
+     "call": "summary.degreesOfFreedom",
+     "commands": [
+      "EigKBwoFPGlkMD4SCQoHc3VtbWFyeRISChBkZWdyZWVzT2ZGcmVlZG9t"
+     ],
+     "results": [
+      "CgI4Bg=="
+     ],
+     "value": 6
+    },
+    "devianceResiduals": {
+     "call": "summary.devianceResiduals",
+     "commands": [
+      "EikKBwoFPGlkMD4SCQoHc3VtbWFyeRITChFkZXZpYW5jZVJlc2lkdWFscw=="
+     ],
+     "results": [
+      "Ch2yARoKAkoAEglZIO99PvQTyb8SCVmHgAAsPWfAPw=="
+     ],
+     "value": [
+      -0.19592145015109796,
+      0.12815060280354748
+     ]
+    },
+    "explainedVariance": {
+     "call": "summary.explainedVariance",
+     "commands": [
+      "EikKBwoFPGlkMD4SCQoHc3VtbWFyeRITChFleHBsYWluZWRWYXJpYW5jZQ=="
+     ],
+     "results": [
+      "CglZVbcyHPTYK0A="
+     ],
+     "value": 13.923737412634788
+    },
+    "featuresCol": {
+     "call": "summary.featuresCol",
+     "commands": [
+      "EiMKBwoFPGlkMD4SCQoHc3VtbWFyeRINCgtmZWF0dXJlc0NvbA=="
+     ],
+     "results": [
+      "CgpqCGZlYXR1cmVz"
+     ],
+     "value": "features"
+    },
+    "labelCol": {
+     "call": "summary.labelCol",
+     "commands": [
+      "EiAKBwoFPGlkMD4SCQoHc3VtbWFyeRIKCghsYWJlbENvbA=="
+     ],
+     "results": [
+      "CgdqBWxhYmVs"
+     ],
+     "value": "label"
+    },
+    "meanAbsoluteError": {
+     "call": "summary.meanAbsoluteError",
+     "commands": [
+      "EikKBwoFPGlkMD4SCQoHc3VtbWFyeRITChFtZWFuQWJzb2x1dGVFcnJvcg=="
+     ],
+     "results": [
+      "CglZy4AXCzIVtT8="
+     ],
+     "value": 0.08235466738506429
+    },
+    "meanSquaredError": {
+     "call": "summary.meanSquaredError",
+     "commands": [
+      "EigKBwoFPGlkMD4SCQoHc3VtbWFyeRISChBtZWFuU3F1YXJlZEVycm9y"
+     ],
+     "results": [
+      "CglZ1c9Ry4uSgz8="
+     ],
+     "value": 0.00955685819847211
+    },
+    "numInstances": {
+     "call": "summary.numInstances",
+     "commands": [
+      "EiQKBwoFPGlkMD4SCQoHc3VtbWFyeRIOCgxudW1JbnN0YW5jZXM="
+     ],
+     "results": [
+      "CgI4Cg=="
+     ],
+     "value": 10
+    },
+    "objectiveHistory": {
+     "call": "summary.objectiveHistory",
+     "commands": [
+      "EigKBwoFPGlkMD4SCQoHc3VtbWFyeRISChBvYmplY3RpdmVIaXN0b3J5"
+     ],
+     "results": [
+      "ChKyAQ8KAkoAEglZAAAAAAAAAAA="
+     ],
+     "value": [
+      0.0
+     ]
+    },
+    "pValues": {
+     "call": "summary.pValues",
+     "commands": [
+      "Eh8KBwoFPGlkMD4SCQoHc3VtbWFyeRIJCgdwVmFsdWVz"
+     ],
+     "results": [
+      "CjOyATAKAkoAEglZAAAAPvX8dz4SCVkAAJ20/WP+PhIJWQDIpGUOCkA/EglZAAAQcVXEuT4="
+     ],
+     "value": [
+      8.936269990655887e-08,
+      2.8982725132964404e-05,
+      0.0004894800470423011,
+      1.535828634269265e-06
+     ]
+    },
+    "predictionCol": {
+     "call": "summary.predictionCol",
+     "commands": [
+      "EiUKBwoFPGlkMD4SCQoHc3VtbWFyeRIPCg1wcmVkaWN0aW9uQ29s"
+     ],
+     "results": [
+      "CgxqCnByZWRpY3Rpb24="
+     ],
+     "value": "prediction"
+    },
+    "predictions": {
+     "call": "summary.predictions",
+     "commands": [
+      "EiMKBwoFPGlkMD4SCQoHc3VtbWFyeRINCgtwcmVkaWN0aW9ucxqeAwoAigGYAwqRAwoAGowDCtUCCgC6Ac8CCpgCCgBakwISkAJ7ImZpZWxkcyI6W3sibWV0YWRhdGEiOnt9LCJuYW1lIjoibGFiZWwiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoid2VpZ2h0IiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImZlYXR1cmVzIiwibnVsbGFibGUiOnRydWUsInR5cGUiOnsiY29udGFpbnNOdWxsIjp0cnVlLCJlbGVtZW50VHlwZSI6ImRvdWJsZSIsInR5cGUiOiJhcnJheSJ9fV0sInR5cGUiOiJzdHJ1Y3QifRIyCiYaJAoPYXJyYXlfdG9fdmVjdG9yEhESDAoIZmVhdHVyZXMYAJIBABIIZmVhdHVyZXMaDhIJCgVsYWJlbBgAkgEAGg8SCgoGd2VpZ2h0GACSAQAaERIMCghmZWF0dXJlcxgAkgEAEAEYAA=="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        10.5,
+        1.5,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          4.0,
+          0.0,
+          3.0
+         ]
+        },
+        10.55018377046973
+       ],
+       [
+        11.15,
+        0.5,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          6.0,
+          1.0,
+          2.0
+         ]
+        },
+        10.97185810225718
+       ],
+       [
+        12.2,
+        2.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          8.0,
+          2.0,
+          2.0
+         ]
+        },
+        12.109383839744467
+       ],
+       [
+        12.6,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          10.0,
+          3.0,
+          1.0
+         ]
+        },
+        12.531058171531917
+       ],
+       [
+        15.85,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          9.0,
+          1.0,
+          3.0
+         ]
+        },
+        15.985320491850551
+       ],
+       [
+        3.8,
+        2.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          2.0,
+          1.0,
+          0.0
+         ]
+        },
+        3.8100073123327984
+       ],
+       [
+        5.6,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          1.0,
+          0.0,
+          2.0
+         ]
+        },
+        5.536721380876362
+       ],
+       [
+        6.05,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          3.0,
+          1.0,
+          1.0
+         ]
+        },
+        5.958395712663812
+       ],
+       [
+        6.9,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          5.0,
+          2.0,
+          1.0
+         ]
+        },
+        7.095921450151098
+       ],
+       [
+        7.45,
+        1.0,
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          7.0,
+          3.0,
+          0.0
+         ]
+        },
+        7.517595781938548
+       ]
+      ],
+      "schema": "struct<label:double,weight:double,features:vector,prediction:double>"
+     }
+    },
+    "r2": {
+     "call": "summary.r2",
+     "commands": [
+      "EhoKBwoFPGlkMD4SCQoHc3VtbWFyeRIECgJyMg=="
+     ],
+     "results": [
+      "CglZEopvmZL67z8="
+     ],
+     "value": 0.999337482146361
+    },
+    "r2adj": {
+     "call": "summary.r2adj",
+     "commands": [
+      "Eh0KBwoFPGlkMD4SCQoHc3VtbWFyeRIHCgVyMmFkag=="
+     ],
+     "results": [
+      "CglZG08n5tv37z8="
+     ],
+     "value": 0.9990062232195415
+    },
+    "repr()": {
+     "call": "repr(summary)",
+     "commands": [],
+     "results": [],
+     "value": "<pyspark.ml.regression.LinearRegressionTrainingSummary object at 0x<addr>>"
+    },
+    "residuals": {
+     "call": "summary.residuals",
+     "commands": [
+      "EiEKBwoFPGlkMD4SCQoHc3VtbWFyeRILCglyZXNpZHVhbHMangMKAIoBmAMKkQMKABqMAwrVAgoAugHPAgqYAgoAWpMCEpACeyJmaWVsZHMiOlt7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImxhYmVsIiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6IndlaWdodCIsIm51bGxhYmxlIjp0cnVlLCJ0eXBlIjoiZG91YmxlIn0seyJtZXRhZGF0YSI6e30sIm5hbWUiOiJmZWF0dXJlcyIsIm51bGxhYmxlIjp0cnVlLCJ0eXBlIjp7ImNvbnRhaW5zTnVsbCI6dHJ1ZSwiZWxlbWVudFR5cGUiOiJkb3VibGUiLCJ0eXBlIjoiYXJyYXkifX1dLCJ0eXBlIjoic3RydWN0In0SMgomGiQKD2FycmF5X3RvX3ZlY3RvchIREgwKCGZlYXR1cmVzGACSAQASCGZlYXR1cmVzGg4SCQoFbGFiZWwYAJIBABoPEgoKBndlaWdodBgAkgEAGhESDAoIZmVhdHVyZXMYAJIBABABGAA="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        -0.010007312332798612
+       ],
+       [
+        -0.05018377046972944
+       ],
+       [
+        -0.06759578193854754
+       ],
+       [
+        -0.1353204918505515
+       ],
+       [
+        -0.19592145015109796
+       ],
+       [
+        0.06327861912363808
+       ],
+       [
+        0.06894182846808228
+       ],
+       [
+        0.09061616025553221
+       ],
+       [
+        0.09160428733618797
+       ],
+       [
+        0.17814189774282063
+       ]
+      ],
+      "schema": "struct<residuals:double>"
+     }
+    },
+    "rootMeanSquaredError": {
+     "call": "summary.rootMeanSquaredError",
+     "commands": [
+      "EiwKBwoFPGlkMD4SCQoHc3VtbWFyeRIWChRyb290TWVhblNxdWFyZWRFcnJvcg=="
+     ],
+     "results": [
+      "CglZliZJ9b4GuT8="
+     ],
+     "value": 0.09775918472692022
+    },
+    "str()": {
+     "call": "str(summary)",
+     "commands": [],
+     "results": [],
+     "value": "<pyspark.ml.regression.LinearRegressionTrainingSummary object at 0x<addr>>"
+    },
+    "tValues": {
+     "call": "summary.tValues",
+     "commands": [
+      "Eh8KBwoFPGlkMD4SCQoHc3VtbWFyeRIJCgd0VmFsdWVz"
+     ],
+     "results": [
+      "CjOyATAKAkoAEglZ2svDG0oXPkASCVmY5ldWF5EmwBIJWTOq6+G1QhtAEglZrLW8DUKlMkA="
+     ],
+     "value": [
+      30.09097455530341,
+      -11.283381174306939,
+      6.815146951683846,
+      18.645539148875898
+     ]
+    },
+    "totalIterations": {
+     "call": "summary.totalIterations",
+     "commands": [
+      "EicKBwoFPGlkMD4SCQoHc3VtbWFyeRIRCg90b3RhbEl0ZXJhdGlvbnM="
+     ],
+     "results": [
+      "CgIwAA=="
+     ],
+     "value": 0
+    }
+   },
+   "skipped": {},
+   "via": {
+    "call": "model.summary",
+    "commands": [],
+    "results": [],
+    "value": {
+     "ref": "<id0>.summary",
+     "type": "LinearRegressionTrainingSummary"
+    }
+   }
+  }
+ }
+}

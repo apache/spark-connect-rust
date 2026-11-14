@@ -1,0 +1,4654 @@
+{
+ "datasets": {
+  "aft": {
+   "columns": [
+    [
+     "label",
+     "double"
+    ],
+    [
+     "censor",
+     "double"
+    ],
+    [
+     "features",
+     "vector"
+    ]
+   ],
+   "rows": [
+    [
+     1.218,
+     1.0,
+     [
+      1.56,
+      -0.605
+     ]
+    ],
+    [
+     2.949,
+     0.0,
+     [
+      0.346,
+      2.158
+     ]
+    ],
+    [
+     3.627,
+     0.0,
+     [
+      1.38,
+      0.231
+     ]
+    ],
+    [
+     0.273,
+     1.0,
+     [
+      0.52,
+      1.151
+     ]
+    ],
+    [
+     4.199,
+     0.0,
+     [
+      0.795,
+      -0.226
+     ]
+    ],
+    [
+     1.5,
+     1.0,
+     [
+      1.0,
+      0.5
+     ]
+    ],
+    [
+     2.2,
+     1.0,
+     [
+      0.3,
+      1.2
+     ]
+    ],
+    [
+     3.1,
+     0.0,
+     [
+      1.1,
+      -0.4
+     ]
+    ]
+   ]
+  },
+  "aft_held_out": {
+   "columns": [
+    [
+     "label",
+     "double"
+    ],
+    [
+     "censor",
+     "double"
+    ],
+    [
+     "features",
+     "vector"
+    ]
+   ],
+   "rows": [
+    [
+     2.0,
+     1.0,
+     [
+      0.9,
+      0.1
+     ]
+    ],
+    [
+     1.0,
+     0.0,
+     [
+      0.2,
+      1.0
+     ]
+    ]
+   ]
+  },
+  "counts": {
+   "columns": [
+    [
+     "label",
+     "double"
+    ],
+    [
+     "weight",
+     "double"
+    ],
+    [
+     "features",
+     "vector"
+    ]
+   ],
+   "rows": [
+    [
+     1.0,
+     1.0,
+     [
+      1.0,
+      0.0,
+      2.0
+     ]
+    ],
+    [
+     2.0,
+     2.0,
+     [
+      2.0,
+      1.0,
+      0.0
+     ]
+    ],
+    [
+     2.0,
+     1.0,
+     [
+      3.0,
+      1.0,
+      1.0
+     ]
+    ],
+    [
+     4.0,
+     1.5,
+     [
+      4.0,
+      0.0,
+      3.0
+     ]
+    ],
+    [
+     3.0,
+     1.0,
+     [
+      5.0,
+      2.0,
+      1.0
+     ]
+    ],
+    [
+     5.0,
+     0.5,
+     [
+      6.0,
+      1.0,
+      2.0
+     ]
+    ],
+    [
+     4.0,
+     1.0,
+     [
+      7.0,
+      3.0,
+      0.0
+     ]
+    ],
+    [
+     7.0,
+     2.0,
+     [
+      8.0,
+      2.0,
+      2.0
+     ]
+    ],
+    [
+     9.0,
+     1.0,
+     [
+      9.0,
+      1.0,
+      3.0
+     ]
+    ],
+    [
+     8.0,
+     1.0,
+     [
+      10.0,
+      3.0,
+      1.0
+     ]
+    ]
+   ]
+  },
+  "counts_held_out": {
+   "columns": [
+    [
+     "label",
+     "double"
+    ],
+    [
+     "weight",
+     "double"
+    ],
+    [
+     "features",
+     "vector"
+    ]
+   ],
+   "rows": [
+    [
+     3.0,
+     1.0,
+     [
+      2.5,
+      1.0,
+      1.5
+     ]
+    ],
+    [
+     3.0,
+     1.0,
+     [
+      6.5,
+      2.0,
+      0.5
+     ]
+    ],
+    [
+     3.0,
+     1.0,
+     [
+      9.5,
+      0.0,
+      2.5
+     ]
+    ]
+   ]
+  },
+  "isotonic": {
+   "columns": [
+    [
+     "label",
+     "double"
+    ],
+    [
+     "weight",
+     "double"
+    ],
+    [
+     "features",
+     "vector"
+    ]
+   ],
+   "rows": [
+    [
+     1.0,
+     1.0,
+     [
+      0.0,
+      1.0
+     ]
+    ],
+    [
+     2.0,
+     2.0,
+     [
+      0.0,
+      2.0
+     ]
+    ],
+    [
+     1.5,
+     1.0,
+     [
+      0.0,
+      3.0
+     ]
+    ],
+    [
+     3.0,
+     1.0,
+     [
+      0.0,
+      4.0
+     ]
+    ],
+    [
+     2.5,
+     0.5,
+     [
+      0.0,
+      5.0
+     ]
+    ],
+    [
+     4.0,
+     1.0,
+     [
+      0.0,
+      6.0
+     ]
+    ]
+   ]
+  },
+  "isotonic_held_out": {
+   "columns": [
+    [
+     "label",
+     "double"
+    ],
+    [
+     "weight",
+     "double"
+    ],
+    [
+     "features",
+     "vector"
+    ]
+   ],
+   "rows": [
+    [
+     2.0,
+     1.0,
+     [
+      0.0,
+      2.5
+     ]
+    ],
+    [
+     5.0,
+     1.0,
+     [
+      0.0,
+      8.0
+     ]
+    ]
+   ]
+  },
+  "rows": {
+   "columns": [
+    [
+     "label",
+     "double"
+    ],
+    [
+     "weight",
+     "double"
+    ],
+    [
+     "features",
+     "vector"
+    ]
+   ],
+   "rows": [
+    [
+     5.6,
+     1.0,
+     [
+      1.0,
+      0.0,
+      2.0
+     ]
+    ],
+    [
+     3.8,
+     2.0,
+     [
+      2.0,
+      1.0,
+      0.0
+     ]
+    ],
+    [
+     6.05,
+     1.0,
+     [
+      3.0,
+      1.0,
+      1.0
+     ]
+    ],
+    [
+     10.5,
+     1.5,
+     [
+      4.0,
+      0.0,
+      3.0
+     ]
+    ],
+    [
+     6.9,
+     1.0,
+     [
+      5.0,
+      2.0,
+      1.0
+     ]
+    ],
+    [
+     11.15,
+     0.5,
+     [
+      6.0,
+      1.0,
+      2.0
+     ]
+    ],
+    [
+     7.45,
+     1.0,
+     [
+      7.0,
+      3.0,
+      0.0
+     ]
+    ],
+    [
+     12.2,
+     2.0,
+     [
+      8.0,
+      2.0,
+      2.0
+     ]
+    ],
+    [
+     15.85,
+     1.0,
+     [
+      9.0,
+      1.0,
+      3.0
+     ]
+    ],
+    [
+     12.6,
+     1.0,
+     [
+      10.0,
+      3.0,
+      1.0
+     ]
+    ]
+   ]
+  },
+  "rows_held_out": {
+   "columns": [
+    [
+     "label",
+     "double"
+    ],
+    [
+     "weight",
+     "double"
+    ],
+    [
+     "features",
+     "vector"
+    ]
+   ],
+   "rows": [
+    [
+     6.0,
+     1.0,
+     [
+      2.5,
+      1.0,
+      1.5
+     ]
+    ],
+    [
+     4.5,
+     1.0,
+     [
+      6.5,
+      2.0,
+      0.5
+     ]
+    ],
+    [
+     18.0,
+     1.0,
+     [
+      9.5,
+      0.0,
+      2.5
+     ]
+    ]
+   ]
+  }
+ },
+ "encoding": "Floats are JSON numbers (Python repr); NaN and infinities are strings. Vectors and matrices as in scripts/ml_golden_common.py. DataFrames: schema and rows sorted by canonical JSON. Model and summary objects: {type, ref} with ref a placeholder: <idN> for an object id (<idN>.summary for a summary), numbered in order of first appearance. Errors: {class, condition, message}. commands: base64 of the MlCommand or MlRelation sent, results: base64 of the MlCommandResult received, both SerializeToString(deterministic=True) after normalization (object ids and uids -> placeholders, plan_id, origin and LocalRelation data cleared, paths -> <path>).",
+ "persistence": {
+  "AFTSurvivalRegression.default.estimator": {
+   "load": {
+    "call": "AFTSurvivalRegression.load(path)",
+    "commands": [
+     "KkIKOAo0b3JnLmFwYWNoZS5zcGFyay5tbC5yZWdyZXNzaW9uLkFGVFN1cnZpdmFsUmVncmVzc2lvbhgBEgY8cGF0aD4="
+    ],
+    "results": [
+     "GqABEjRvcmcuYXBhY2hlLnNwYXJrLm1sLnJlZ3Jlc3Npb24uQUZUU3Vydml2YWxSZWdyZXNzaW9uGgY8dWlkMD4iYApBChVxdWFudGlsZVByb2JhYmlsaXRpZXMSKLIBJQoCSgASCVmamZmZmZm5PxIJWQAAAAAAAOA/EglZzczMzMzM7D8KGwoMcXVhbnRpbGVzQ29sEgtqCXF1YW50aWxlcw=="
+    ],
+    "value": {
+     "type": "AFTSurvivalRegression",
+     "uid": "AFTSurvivalRegression_default"
+    }
+   },
+   "params_after": {
+    "aggregationDepth": 2,
+    "censorCol": "censor",
+    "featuresCol": "features",
+    "fitIntercept": true,
+    "labelCol": "label",
+    "maxBlockSizeInMB": 0.0,
+    "maxIter": 100,
+    "predictionCol": "prediction",
+    "quantileProbabilities": [
+     0.1,
+     0.5,
+     0.9
+    ],
+    "quantilesCol": "quantiles",
+    "tol": 1e-06
+   },
+   "params_before": {
+    "aggregationDepth": 2,
+    "censorCol": "censor",
+    "featuresCol": "features",
+    "fitIntercept": true,
+    "labelCol": "label",
+    "maxBlockSizeInMB": 0.0,
+    "maxIter": 100,
+    "predictionCol": "prediction",
+    "quantileProbabilities": [
+     0.1,
+     0.5,
+     0.9
+    ],
+    "quantilesCol": "quantiles",
+    "tol": 1e-06
+   },
+   "save": {
+    "call": "estimator.write().overwrite().save(path)",
+    "commands": [
+     "Iq4BCkAKNG9yZy5hcGFjaGUuc3BhcmsubWwucmVncmVzc2lvbi5BRlRTdXJ2aXZhbFJlZ3Jlc3Npb24SBjx1aWQwPhgBGmAKQQoVcXVhbnRpbGVQcm9iYWJpbGl0aWVzEiiyASUKAkoAEglZmpmZmZmZuT8SCVkAAAAAAADgPxIJWc3MzMzMzOw/ChsKDHF1YW50aWxlc0NvbBILaglxdWFudGlsZXMiBjxwYXRoPigB"
+    ],
+    "results": [
+     ""
+    ],
+    "value": null
+   },
+   "uid": "AFTSurvivalRegression_default",
+   "uid_same": true
+  },
+  "AFTSurvivalRegression.default.model": {
+   "load": {
+    "call": "AFTSurvivalRegressionModel.load(path)",
+    "commands": [
+     "KkcKPQo5b3JnLmFwYWNoZS5zcGFyay5tbC5yZWdyZXNzaW9uLkFGVFN1cnZpdmFsUmVncmVzc2lvbk1vZGVsGAQSBjxwYXRoPg=="
+    ],
+    "results": [
+     "GnMKBwoFPGlkMD4aBjx1aWQwPiJgCkEKFXF1YW50aWxlUHJvYmFiaWxpdGllcxIosgElCgJKABIJWZqZmZmZmbk/EglZAAAAAAAA4D8SCVnNzMzMzMzsPwobCgxxdWFudGlsZXNDb2wSC2oJcXVhbnRpbGVz"
+    ],
+    "value": {
+     "ref": "<id0>",
+     "type": "AFTSurvivalRegressionModel"
+    }
+   },
+   "members": {
+    "class": "AFTSurvivalRegressionModel",
+    "members": {
+     "predict-dense": {
+      "call": "loaded.predict(Vectors.dense([1.0, 0.5]))",
+      "commands": [
+       "EnQKBwoFPGlkMD4SaQoHcHJlZGljdBJeClzCAVkKLroBKwoDdWR0EiRvcmcuYXBhY2hlLnNwYXJrLm1sLmxpbmFsZy5WZWN0b3JVRFQSAiABEgQKAgoAEgQKAgoAEhfKARQqEgoQAAAAAAAA8D8AAAAAAADgPw=="
+      ],
+      "results": [
+       "CglZG3v4LB7gEkA="
+      ],
+      "value": 4.718865111032552
+     },
+     "repr()": {
+      "call": "repr(loaded)",
+      "commands": [
+       "EhUKBwoFPGlkMD4SCgoIdG9TdHJpbmc="
+      ],
+      "results": [
+       "Ck5qTEFGVFN1cnZpdmFsUmVncmVzc2lvbk1vZGVsOiB1aWQ9QUZUU3Vydml2YWxSZWdyZXNzaW9uX2RlZmF1bHQsIG51bUZlYXR1cmVzPTI="
+      ],
+      "value": "AFTSurvivalRegressionModel: uid=AFTSurvivalRegression_default, numFeatures=2"
+     },
+     "str()": {
+      "call": "str(loaded)",
+      "commands": [
+       "EhUKBwoFPGlkMD4SCgoIdG9TdHJpbmc="
+      ],
+      "results": [
+       "Ck5qTEFGVFN1cnZpdmFsUmVncmVzc2lvbk1vZGVsOiB1aWQ9QUZUU3Vydml2YWxSZWdyZXNzaW9uX2RlZmF1bHQsIG51bUZlYXR1cmVzPTI="
+      ],
+      "value": "AFTSurvivalRegressionModel: uid=AFTSurvivalRegression_default, numFeatures=2"
+     },
+     "transform": {
+      "call": "loaded.transform(aft_held_out)",
+      "commands": [
+       "CowECgcKBTxpZDA+Gp4DCgCKAZgDCpEDCgAajAMK1QIKALoBzwIKmAIKAFqTAhKQAnsiZmllbGRzIjpbeyJtZXRhZGF0YSI6e30sIm5hbWUiOiJsYWJlbCIsIm51bGxhYmxlIjp0cnVlLCJ0eXBlIjoiZG91YmxlIn0seyJtZXRhZGF0YSI6e30sIm5hbWUiOiJjZW5zb3IiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoiZmVhdHVyZXMiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6eyJjb250YWluc051bGwiOnRydWUsImVsZW1lbnRUeXBlIjoiZG91YmxlIiwidHlwZSI6ImFycmF5In19XSwidHlwZSI6InN0cnVjdCJ9EjIKJhokCg9hcnJheV90b192ZWN0b3ISERIMCghmZWF0dXJlcxgAkgEAEghmZWF0dXJlcxoOEgkKBWxhYmVsGACSAQAaDxIKCgZjZW5zb3IYAJIBABoREgwKCGZlYXR1cmVzGACSAQAQARgAImAKQQoVcXVhbnRpbGVQcm9iYWJpbGl0aWVzEiiyASUKAkoAEglZmpmZmZmZuT8SCVkAAAAAAADgPxIJWc3MzMzMzOw/ChsKDHF1YW50aWxlc0NvbBILaglxdWFudGlsZXM="
+      ],
+      "results": [],
+      "value": {
+       "rows": [
+        [
+         1.0,
+         0.0,
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           0.2,
+           1.0
+          ]
+         },
+         4.472481566346318,
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           0.4754349134169782,
+           3.1045842082076707,
+           10.264361493248142
+          ]
+         }
+        ],
+        [
+         2.0,
+         1.0,
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           0.9,
+           0.1
+          ]
+         },
+         5.091383766733996,
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           0.5412256181275336,
+           3.534196710628386,
+           11.68474429852272
+          ]
+         }
+        ]
+       ],
+       "schema": "struct<label:double,censor:double,features:vector,prediction:double,quantiles:vector>"
+      }
+     }
+    },
+    "skipped": {
+     "Param attribute (client side)": [
+      "aggregationDepth",
+      "censorCol",
+      "featuresCol",
+      "fitIntercept",
+      "labelCol",
+      "maxBlockSizeInMB",
+      "maxIter",
+      "predictionCol",
+      "quantileProbabilities",
+      "quantilesCol",
+      "tol"
+     ],
+     "Params API (client side)": [
+      "clear",
+      "copy",
+      "explainParam",
+      "explainParams",
+      "extractParamMap",
+      "getOrDefault",
+      "getParam",
+      "hasDefault",
+      "hasParam",
+      "isDefined",
+      "isSet",
+      "params",
+      "set",
+      "uid"
+     ],
+     "Params getter or setter (client side)": [
+      "getAggregationDepth",
+      "getCensorCol",
+      "getFeaturesCol",
+      "getFitIntercept",
+      "getLabelCol",
+      "getMaxBlockSizeInMB",
+      "getMaxIter",
+      "getPredictionCol",
+      "getQuantileProbabilities",
+      "getQuantilesCol",
+      "getTol",
+      "setFeaturesCol",
+      "setPredictionCol",
+      "setQuantileProbabilities",
+      "setQuantilesCol"
+     ],
+     "not captured on this copy (partial)": [
+      "coefficients",
+      "intercept",
+      "numFeatures",
+      "predictQuantiles",
+      "scale"
+     ],
+     "persistence (captured by Golden.persist)": [
+      "load",
+      "read",
+      "save",
+      "write"
+     ]
+    }
+   },
+   "params_after": {
+    "aggregationDepth": 2,
+    "censorCol": "censor",
+    "featuresCol": "features",
+    "fitIntercept": true,
+    "labelCol": "label",
+    "maxBlockSizeInMB": 0.0,
+    "maxIter": 100,
+    "predictionCol": "prediction",
+    "quantileProbabilities": [
+     0.1,
+     0.5,
+     0.9
+    ],
+    "quantilesCol": "quantiles",
+    "tol": 1e-06
+   },
+   "params_before": {
+    "aggregationDepth": 2,
+    "censorCol": "censor",
+    "featuresCol": "features",
+    "fitIntercept": true,
+    "labelCol": "label",
+    "maxBlockSizeInMB": 0.0,
+    "maxIter": 100,
+    "predictionCol": "prediction",
+    "quantileProbabilities": [
+     0.1,
+     0.5,
+     0.9
+    ],
+    "quantilesCol": "quantiles",
+    "tol": 1e-06
+   },
+   "save": {
+    "call": "model.write().overwrite().save(path)",
+    "commands": [
+     "InUSBwoFPGlkMD4aYApBChVxdWFudGlsZVByb2JhYmlsaXRpZXMSKLIBJQoCSgASCVmamZmZmZm5PxIJWQAAAAAAAOA/EglZzczMzMzM7D8KGwoMcXVhbnRpbGVzQ29sEgtqCXF1YW50aWxlcyIGPHBhdGg+KAE="
+    ],
+    "results": [
+     ""
+    ],
+    "value": null
+   },
+   "uid": "AFTSurvivalRegression_default",
+   "uid_same": true
+  },
+  "DecisionTreeRegressor.default.estimator": {
+   "load": {
+    "call": "DecisionTreeRegressor.load(path)",
+    "commands": [
+     "KkIKOAo0b3JnLmFwYWNoZS5zcGFyay5tbC5yZWdyZXNzaW9uLkRlY2lzaW9uVHJlZVJlZ3Jlc3NvchgBEgY8cGF0aD4="
+    ],
+    "results": [
+     "GlwSNG9yZy5hcGFjaGUuc3BhcmsubWwucmVncmVzc2lvbi5EZWNpc2lvblRyZWVSZWdyZXNzb3IaBjx1aWQwPiIcCg4KCG1heERlcHRoEgIwAwoKCgRzZWVkEgI4AQ=="
+    ],
+    "value": {
+     "type": "DecisionTreeRegressor",
+     "uid": "DecisionTreeRegressor_default"
+    }
+   },
+   "params_after": {
+    "cacheNodeIds": false,
+    "checkpointInterval": 10,
+    "featuresCol": "features",
+    "impurity": "variance",
+    "labelCol": "label",
+    "leafCol": "",
+    "maxBins": 32,
+    "maxDepth": 3,
+    "maxMemoryInMB": 256,
+    "minInfoGain": 0.0,
+    "minInstancesPerNode": 1,
+    "minWeightFractionPerNode": 0.0,
+    "predictionCol": "prediction",
+    "seed": 1
+   },
+   "params_before": {
+    "cacheNodeIds": false,
+    "checkpointInterval": 10,
+    "featuresCol": "features",
+    "impurity": "variance",
+    "labelCol": "label",
+    "leafCol": "",
+    "maxBins": 32,
+    "maxDepth": 3,
+    "maxMemoryInMB": 256,
+    "minInfoGain": 0.0,
+    "minInstancesPerNode": 1,
+    "minWeightFractionPerNode": 0.0,
+    "predictionCol": "prediction",
+    "seed": 1
+   },
+   "save": {
+    "call": "estimator.write().overwrite().save(path)",
+    "commands": [
+     "ImoKQAo0b3JnLmFwYWNoZS5zcGFyay5tbC5yZWdyZXNzaW9uLkRlY2lzaW9uVHJlZVJlZ3Jlc3NvchIGPHVpZDA+GAEaHAoOCghtYXhEZXB0aBICMAMKCgoEc2VlZBICMAEiBjxwYXRoPigB"
+    ],
+    "results": [
+     ""
+    ],
+    "value": null
+   },
+   "uid": "DecisionTreeRegressor_default",
+   "uid_same": true
+  },
+  "DecisionTreeRegressor.default.model": {
+   "load": {
+    "call": "DecisionTreeRegressionModel.load(path)",
+    "commands": [
+     "KkgKPgo6b3JnLmFwYWNoZS5zcGFyay5tbC5yZWdyZXNzaW9uLkRlY2lzaW9uVHJlZVJlZ3Jlc3Npb25Nb2RlbBgEEgY8cGF0aD4="
+    ],
+    "results": [
+     "Gi8KBwoFPGlkMD4aBjx1aWQwPiIcCg4KCG1heERlcHRoEgIwAwoKCgRzZWVkEgI4AQ=="
+    ],
+    "value": {
+     "ref": "<id0>",
+     "type": "DecisionTreeRegressionModel"
+    }
+   },
+   "members": {
+    "class": "DecisionTreeRegressionModel",
+    "members": {
+     "predict-dense": {
+      "call": "loaded.predict(Vectors.dense([2.5, 1.0, 1.5]))",
+      "commands": [
+       "EnwKBwoFPGlkMD4ScQoHcHJlZGljdBJmCmTCAWEKLroBKwoDdWR0EiRvcmcuYXBhY2hlLnNwYXJrLm1sLmxpbmFsZy5WZWN0b3JVRFQSAiABEgQKAgoAEgQKAgoAEh/KARwqGgoYAAAAAAAABEAAAAAAAADwPwAAAAAAAPg/"
+      ],
+      "results": [
+       "CglZzMzMzMxMF0A="
+      ],
+      "value": 5.824999999999999
+     },
+     "repr()": {
+      "call": "repr(loaded)",
+      "commands": [
+       "EhUKBwoFPGlkMD4SCgoIdG9TdHJpbmc="
+      ],
+      "results": [
+       "CmVqY0RlY2lzaW9uVHJlZVJlZ3Jlc3Npb25Nb2RlbDogdWlkPURlY2lzaW9uVHJlZVJlZ3Jlc3Nvcl9kZWZhdWx0LCBkZXB0aD0zLCBudW1Ob2Rlcz0xMywgbnVtRmVhdHVyZXM9Mw=="
+      ],
+      "value": "DecisionTreeRegressionModel: uid=DecisionTreeRegressor_default, depth=3, numNodes=13, numFeatures=3"
+     },
+     "str()": {
+      "call": "str(loaded)",
+      "commands": [
+       "EhUKBwoFPGlkMD4SCgoIdG9TdHJpbmc="
+      ],
+      "results": [
+       "CmVqY0RlY2lzaW9uVHJlZVJlZ3Jlc3Npb25Nb2RlbDogdWlkPURlY2lzaW9uVHJlZVJlZ3Jlc3Nvcl9kZWZhdWx0LCBkZXB0aD0zLCBudW1Ob2Rlcz0xMywgbnVtRmVhdHVyZXM9Mw=="
+      ],
+      "value": "DecisionTreeRegressionModel: uid=DecisionTreeRegressor_default, depth=3, numNodes=13, numFeatures=3"
+     },
+     "transform": {
+      "call": "loaded.transform(rows_held_out)",
+      "commands": [
+       "CsgDCgcKBTxpZDA+Gp4DCgCKAZgDCpEDCgAajAMK1QIKALoBzwIKmAIKAFqTAhKQAnsiZmllbGRzIjpbeyJtZXRhZGF0YSI6e30sIm5hbWUiOiJsYWJlbCIsIm51bGxhYmxlIjp0cnVlLCJ0eXBlIjoiZG91YmxlIn0seyJtZXRhZGF0YSI6e30sIm5hbWUiOiJ3ZWlnaHQiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoiZmVhdHVyZXMiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6eyJjb250YWluc051bGwiOnRydWUsImVsZW1lbnRUeXBlIjoiZG91YmxlIiwidHlwZSI6ImFycmF5In19XSwidHlwZSI6InN0cnVjdCJ9EjIKJhokCg9hcnJheV90b192ZWN0b3ISERIMCghmZWF0dXJlcxgAkgEAEghmZWF0dXJlcxoOEgkKBWxhYmVsGACSAQAaDxIKCgZ3ZWlnaHQYAJIBABoREgwKCGZlYXR1cmVzGACSAQAQARgAIhwKDgoIbWF4RGVwdGgSAjADCgoKBHNlZWQSAjAB"
+      ],
+      "results": [],
+      "value": {
+       "rows": [
+        [
+         18.0,
+         1.0,
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           9.5,
+           0.0,
+           2.5
+          ]
+         },
+         12.199999999999998
+        ],
+        [
+         4.5,
+         1.0,
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           6.5,
+           2.0,
+           0.5
+          ]
+         },
+         7.175000000000001
+        ],
+        [
+         6.0,
+         1.0,
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           2.5,
+           1.0,
+           1.5
+          ]
+         },
+         5.824999999999999
+        ]
+       ],
+       "schema": "struct<label:double,weight:double,features:vector,prediction:double>"
+      }
+     }
+    },
+    "skipped": {
+     "Param attribute (client side)": [
+      "cacheNodeIds",
+      "checkpointInterval",
+      "featuresCol",
+      "impurity",
+      "labelCol",
+      "leafCol",
+      "maxBins",
+      "maxDepth",
+      "maxMemoryInMB",
+      "minInfoGain",
+      "minInstancesPerNode",
+      "minWeightFractionPerNode",
+      "predictionCol",
+      "seed",
+      "varianceCol",
+      "weightCol"
+     ],
+     "Params API (client side)": [
+      "clear",
+      "copy",
+      "explainParam",
+      "explainParams",
+      "extractParamMap",
+      "getOrDefault",
+      "getParam",
+      "hasDefault",
+      "hasParam",
+      "isDefined",
+      "isSet",
+      "params",
+      "set",
+      "uid"
+     ],
+     "Params getter or setter (client side)": [
+      "getCacheNodeIds",
+      "getCheckpointInterval",
+      "getFeaturesCol",
+      "getImpurity",
+      "getLabelCol",
+      "getLeafCol",
+      "getMaxBins",
+      "getMaxDepth",
+      "getMaxMemoryInMB",
+      "getMinInfoGain",
+      "getMinInstancesPerNode",
+      "getMinWeightFractionPerNode",
+      "getPredictionCol",
+      "getSeed",
+      "getVarianceCol",
+      "getWeightCol",
+      "setFeaturesCol",
+      "setLeafCol",
+      "setPredictionCol",
+      "setVarianceCol"
+     ],
+     "not captured on this copy (partial)": [
+      "depth",
+      "featureImportances",
+      "numFeatures",
+      "numNodes",
+      "predictLeaf",
+      "supportedImpurities",
+      "toDebugString"
+     ],
+     "persistence (captured by Golden.persist)": [
+      "load",
+      "read",
+      "save",
+      "write"
+     ]
+    }
+   },
+   "params_after": {
+    "cacheNodeIds": false,
+    "checkpointInterval": 10,
+    "featuresCol": "features",
+    "impurity": "variance",
+    "labelCol": "label",
+    "leafCol": "",
+    "maxBins": 32,
+    "maxDepth": 3,
+    "maxMemoryInMB": 256,
+    "minInfoGain": 0.0,
+    "minInstancesPerNode": 1,
+    "minWeightFractionPerNode": 0.0,
+    "predictionCol": "prediction",
+    "seed": 1
+   },
+   "params_before": {
+    "cacheNodeIds": false,
+    "checkpointInterval": 10,
+    "featuresCol": "features",
+    "impurity": "variance",
+    "labelCol": "label",
+    "leafCol": "",
+    "maxBins": 32,
+    "maxDepth": 3,
+    "maxMemoryInMB": 256,
+    "minInfoGain": 0.0,
+    "minInstancesPerNode": 1,
+    "minWeightFractionPerNode": 0.0,
+    "predictionCol": "prediction",
+    "seed": 1
+   },
+   "save": {
+    "call": "model.write().overwrite().save(path)",
+    "commands": [
+     "IjESBwoFPGlkMD4aHAoOCghtYXhEZXB0aBICMAMKCgoEc2VlZBICMAEiBjxwYXRoPigB"
+    ],
+    "results": [
+     ""
+    ],
+    "value": null
+   },
+   "uid": "DecisionTreeRegressor_default",
+   "uid_same": true
+  },
+  "FMRegressor.default.estimator": {
+   "load": {
+    "call": "FMRegressor.load(path)",
+    "commands": [
+     "KjgKLgoqb3JnLmFwYWNoZS5zcGFyay5tbC5yZWdyZXNzaW9uLkZNUmVncmVzc29yGAESBjxwYXRoPg=="
+    ],
+    "results": [
+     "GmMSKm9yZy5hcGFjaGUuc3BhcmsubWwucmVncmVzc2lvbi5GTVJlZ3Jlc3NvchoGPHVpZDA+Ii0KEAoKZmFjdG9yU2l6ZRICMAIKDQoHbWF4SXRlchICMBQKCgoEc2VlZBICOAc="
+    ],
+    "value": {
+     "type": "FMRegressor",
+     "uid": "FMRegressor_default"
+    }
+   },
+   "params_after": {
+    "factorSize": 2,
+    "featuresCol": "features",
+    "fitIntercept": true,
+    "fitLinear": true,
+    "initStd": 0.01,
+    "labelCol": "label",
+    "maxIter": 20,
+    "miniBatchFraction": 1.0,
+    "predictionCol": "prediction",
+    "regParam": 0.0,
+    "seed": 7,
+    "solver": "adamW",
+    "stepSize": 1.0,
+    "tol": 1e-06
+   },
+   "params_before": {
+    "factorSize": 2,
+    "featuresCol": "features",
+    "fitIntercept": true,
+    "fitLinear": true,
+    "initStd": 0.01,
+    "labelCol": "label",
+    "maxIter": 20,
+    "miniBatchFraction": 1.0,
+    "predictionCol": "prediction",
+    "regParam": 0.0,
+    "seed": 7,
+    "solver": "adamW",
+    "stepSize": 1.0,
+    "tol": 1e-06
+   },
+   "save": {
+    "call": "estimator.write().overwrite().save(path)",
+    "commands": [
+     "InEKNgoqb3JnLmFwYWNoZS5zcGFyay5tbC5yZWdyZXNzaW9uLkZNUmVncmVzc29yEgY8dWlkMD4YARotChAKCmZhY3RvclNpemUSAjACCg0KB21heEl0ZXISAjAUCgoKBHNlZWQSAjAHIgY8cGF0aD4oAQ=="
+    ],
+    "results": [
+     ""
+    ],
+    "value": null
+   },
+   "uid": "FMRegressor_default",
+   "uid_same": true
+  },
+  "FMRegressor.default.model": {
+   "load": {
+    "call": "FMRegressionModel.load(path)",
+    "commands": [
+     "Kj4KNAowb3JnLmFwYWNoZS5zcGFyay5tbC5yZWdyZXNzaW9uLkZNUmVncmVzc2lvbk1vZGVsGAQSBjxwYXRoPg=="
+    ],
+    "results": [
+     "GkAKBwoFPGlkMD4aBjx1aWQwPiItChAKCmZhY3RvclNpemUSAjACCg0KB21heEl0ZXISAjAUCgoKBHNlZWQSAjgH"
+    ],
+    "value": {
+     "ref": "<id0>",
+     "type": "FMRegressionModel"
+    }
+   },
+   "members": {
+    "class": "FMRegressionModel",
+    "members": {
+     "predict-dense": {
+      "call": "loaded.predict(Vectors.dense([2.5, 1.0, 1.5]))",
+      "commands": [
+       "EnwKBwoFPGlkMD4ScQoHcHJlZGljdBJmCmTCAWEKLroBKwoDdWR0EiRvcmcuYXBhY2hlLnNwYXJrLm1sLmxpbmFsZy5WZWN0b3JVRFQSAiABEgQKAgoAEgQKAgoAEh/KARwqGgoYAAAAAAAABEAAAAAAAADwPwAAAAAAAPg/"
+      ],
+      "results": [
+       "CglZlCKf6z1f+L8="
+      ],
+      "value": -1.523252411267241
+     },
+     "repr()": {
+      "call": "repr(loaded)",
+      "commands": [
+       "EhUKBwoFPGlkMD4SCgoIdG9TdHJpbmc="
+      ],
+      "results": [
+       "CmxqakZNUmVncmVzc2lvbk1vZGVsOiB1aWQ9Rk1SZWdyZXNzb3JfZGVmYXVsdCwgbnVtRmVhdHVyZXM9MywgZmFjdG9yU2l6ZT0yLCBmaXRMaW5lYXI9dHJ1ZSwgZml0SW50ZXJjZXB0PXRydWU="
+      ],
+      "value": "FMRegressionModel: uid=FMRegressor_default, numFeatures=3, factorSize=2, fitLinear=true, fitIntercept=true"
+     },
+     "str()": {
+      "call": "str(loaded)",
+      "commands": [
+       "EhUKBwoFPGlkMD4SCgoIdG9TdHJpbmc="
+      ],
+      "results": [
+       "CmxqakZNUmVncmVzc2lvbk1vZGVsOiB1aWQ9Rk1SZWdyZXNzb3JfZGVmYXVsdCwgbnVtRmVhdHVyZXM9MywgZmFjdG9yU2l6ZT0yLCBmaXRMaW5lYXI9dHJ1ZSwgZml0SW50ZXJjZXB0PXRydWU="
+      ],
+      "value": "FMRegressionModel: uid=FMRegressor_default, numFeatures=3, factorSize=2, fitLinear=true, fitIntercept=true"
+     },
+     "transform": {
+      "call": "loaded.transform(rows_held_out)",
+      "commands": [
+       "CtkDCgcKBTxpZDA+Gp4DCgCKAZgDCpEDCgAajAMK1QIKALoBzwIKmAIKAFqTAhKQAnsiZmllbGRzIjpbeyJtZXRhZGF0YSI6e30sIm5hbWUiOiJsYWJlbCIsIm51bGxhYmxlIjp0cnVlLCJ0eXBlIjoiZG91YmxlIn0seyJtZXRhZGF0YSI6e30sIm5hbWUiOiJ3ZWlnaHQiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoiZmVhdHVyZXMiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6eyJjb250YWluc051bGwiOnRydWUsImVsZW1lbnRUeXBlIjoiZG91YmxlIiwidHlwZSI6ImFycmF5In19XSwidHlwZSI6InN0cnVjdCJ9EjIKJhokCg9hcnJheV90b192ZWN0b3ISERIMCghmZWF0dXJlcxgAkgEAEghmZWF0dXJlcxoOEgkKBWxhYmVsGACSAQAaDxIKCgZ3ZWlnaHQYAJIBABoREgwKCGZlYXR1cmVzGACSAQAQARgAIi0KEAoKZmFjdG9yU2l6ZRICMAIKDQoHbWF4SXRlchICMBQKCgoEc2VlZBICMAc="
+      ],
+      "results": [],
+      "value": {
+       "rows": [
+        [
+         18.0,
+         1.0,
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           9.5,
+           0.0,
+           2.5
+          ]
+         },
+         -9.68637969938186
+        ],
+        [
+         4.5,
+         1.0,
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           6.5,
+           2.0,
+           0.5
+          ]
+         },
+         -9.961612043234053
+        ],
+        [
+         6.0,
+         1.0,
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           2.5,
+           1.0,
+           1.5
+          ]
+         },
+         -1.523252411267241
+        ]
+       ],
+       "schema": "struct<label:double,weight:double,features:vector,prediction:double>"
+      }
+     }
+    },
+    "skipped": {
+     "Param attribute (client side)": [
+      "factorSize",
+      "featuresCol",
+      "fitIntercept",
+      "fitLinear",
+      "initStd",
+      "labelCol",
+      "maxIter",
+      "miniBatchFraction",
+      "predictionCol",
+      "regParam",
+      "seed",
+      "solver",
+      "stepSize",
+      "tol",
+      "weightCol"
+     ],
+     "Params API (client side)": [
+      "clear",
+      "copy",
+      "explainParam",
+      "explainParams",
+      "extractParamMap",
+      "getOrDefault",
+      "getParam",
+      "hasDefault",
+      "hasParam",
+      "isDefined",
+      "isSet",
+      "params",
+      "set",
+      "uid"
+     ],
+     "Params getter or setter (client side)": [
+      "getFactorSize",
+      "getFeaturesCol",
+      "getFitIntercept",
+      "getFitLinear",
+      "getInitStd",
+      "getLabelCol",
+      "getMaxIter",
+      "getMiniBatchFraction",
+      "getPredictionCol",
+      "getRegParam",
+      "getSeed",
+      "getSolver",
+      "getStepSize",
+      "getTol",
+      "getWeightCol",
+      "setFeaturesCol",
+      "setPredictionCol"
+     ],
+     "not captured on this copy (partial)": [
+      "factors",
+      "intercept",
+      "linear",
+      "numFeatures"
+     ],
+     "persistence (captured by Golden.persist)": [
+      "load",
+      "read",
+      "save",
+      "write"
+     ]
+    }
+   },
+   "params_after": {
+    "factorSize": 2,
+    "featuresCol": "features",
+    "fitIntercept": true,
+    "fitLinear": true,
+    "initStd": 0.01,
+    "labelCol": "label",
+    "maxIter": 20,
+    "miniBatchFraction": 1.0,
+    "predictionCol": "prediction",
+    "regParam": 0.0,
+    "seed": 7,
+    "solver": "adamW",
+    "stepSize": 1.0,
+    "tol": 1e-06
+   },
+   "params_before": {
+    "factorSize": 2,
+    "featuresCol": "features",
+    "fitIntercept": true,
+    "fitLinear": true,
+    "initStd": 0.01,
+    "labelCol": "label",
+    "maxIter": 20,
+    "miniBatchFraction": 1.0,
+    "predictionCol": "prediction",
+    "regParam": 0.0,
+    "seed": 7,
+    "solver": "adamW",
+    "stepSize": 1.0,
+    "tol": 1e-06
+   },
+   "save": {
+    "call": "model.write().overwrite().save(path)",
+    "commands": [
+     "IkISBwoFPGlkMD4aLQoQCgpmYWN0b3JTaXplEgIwAgoNCgdtYXhJdGVyEgIwFAoKCgRzZWVkEgIwByIGPHBhdGg+KAE="
+    ],
+    "results": [
+     ""
+    ],
+    "value": null
+   },
+   "uid": "FMRegressor_default",
+   "uid_same": true
+  },
+  "GBTRegressor.default.estimator": {
+   "load": {
+    "call": "GBTRegressor.load(path)",
+    "commands": [
+     "KjkKLworb3JnLmFwYWNoZS5zcGFyay5tbC5yZWdyZXNzaW9uLkdCVFJlZ3Jlc3NvchgBEgY8cGF0aD4="
+    ],
+    "results": [
+     "GmISK29yZy5hcGFjaGUuc3BhcmsubWwucmVncmVzc2lvbi5HQlRSZWdyZXNzb3IaBjx1aWQwPiIrCg4KCG1heERlcHRoEgIwAgoNCgdtYXhJdGVyEgIwAwoKCgRzZWVkEgI4AQ=="
+    ],
+    "value": {
+     "type": "GBTRegressor",
+     "uid": "GBTRegressor_default"
+    }
+   },
+   "params_after": {
+    "cacheNodeIds": false,
+    "checkpointInterval": 10,
+    "featureSubsetStrategy": "all",
+    "featuresCol": "features",
+    "impurity": "variance",
+    "labelCol": "label",
+    "leafCol": "",
+    "lossType": "squared",
+    "maxBins": 32,
+    "maxDepth": 2,
+    "maxIter": 3,
+    "maxMemoryInMB": 256,
+    "minInfoGain": 0.0,
+    "minInstancesPerNode": 1,
+    "minWeightFractionPerNode": 0.0,
+    "predictionCol": "prediction",
+    "seed": 1,
+    "stepSize": 0.1,
+    "subsamplingRate": 1.0,
+    "validationTol": 0.01
+   },
+   "params_before": {
+    "cacheNodeIds": false,
+    "checkpointInterval": 10,
+    "featureSubsetStrategy": "all",
+    "featuresCol": "features",
+    "impurity": "variance",
+    "labelCol": "label",
+    "leafCol": "",
+    "lossType": "squared",
+    "maxBins": 32,
+    "maxDepth": 2,
+    "maxIter": 3,
+    "maxMemoryInMB": 256,
+    "minInfoGain": 0.0,
+    "minInstancesPerNode": 1,
+    "minWeightFractionPerNode": 0.0,
+    "predictionCol": "prediction",
+    "seed": 1,
+    "stepSize": 0.1,
+    "subsamplingRate": 1.0,
+    "validationTol": 0.01
+   },
+   "save": {
+    "call": "estimator.write().overwrite().save(path)",
+    "commands": [
+     "InAKNworb3JnLmFwYWNoZS5zcGFyay5tbC5yZWdyZXNzaW9uLkdCVFJlZ3Jlc3NvchIGPHVpZDA+GAEaKwoOCghtYXhEZXB0aBICMAIKDQoHbWF4SXRlchICMAMKCgoEc2VlZBICMAEiBjxwYXRoPigB"
+    ],
+    "results": [
+     ""
+    ],
+    "value": null
+   },
+   "uid": "GBTRegressor_default",
+   "uid_same": true
+  },
+  "GBTRegressor.default.model": {
+   "load": {
+    "call": "GBTRegressionModel.load(path)",
+    "commands": [
+     "Kj8KNQoxb3JnLmFwYWNoZS5zcGFyay5tbC5yZWdyZXNzaW9uLkdCVFJlZ3Jlc3Npb25Nb2RlbBgEEgY8cGF0aD4=",
+     "EhIKBwoFPGlkMD4SBwoFdHJlZXM="
+    ],
+    "results": [
+     "Gj4KBwoFPGlkMD4aBjx1aWQwPiIrCg4KCG1heERlcHRoEgIwAgoNCgdtYXhJdGVyEgIwAwoKCgRzZWVkEgI4AQ==",
+     "GgkKBwoFPGlkMT4="
+    ],
+    "value": {
+     "ref": "<id0>",
+     "type": "GBTRegressionModel"
+    }
+   },
+   "members": {
+    "class": "GBTRegressionModel",
+    "members": {
+     "predict-dense": {
+      "call": "loaded.predict(Vectors.dense([2.5, 1.0, 1.5]))",
+      "commands": [
+       "EnwKBwoFPGlkMD4ScQoHcHJlZGljdBJmCmTCAWEKLroBKwoDdWR0EiRvcmcuYXBhY2hlLnNwYXJrLm1sLmxpbmFsZy5WZWN0b3JVRFQSAiABEgQKAgoAEgQKAgoAEh/KARwqGgoYAAAAAAAABEAAAAAAAADwPwAAAAAAAPg/"
+      ],
+      "results": [
+       "CglZarx0kxgEFUA="
+      ],
+      "value": 5.254
+     },
+     "repr()": {
+      "call": "repr(loaded)",
+      "commands": [
+       "EhUKBwoFPGlkMD4SCgoIdG9TdHJpbmc="
+      ],
+      "results": [
+       "CklqR0dCVFJlZ3Jlc3Npb25Nb2RlbDogdWlkPUdCVFJlZ3Jlc3Nvcl9kZWZhdWx0LCBudW1UcmVlcz0zLCBudW1GZWF0dXJlcz0z"
+      ],
+      "value": "GBTRegressionModel: uid=GBTRegressor_default, numTrees=3, numFeatures=3"
+     },
+     "str()": {
+      "call": "str(loaded)",
+      "commands": [
+       "EhUKBwoFPGlkMD4SCgoIdG9TdHJpbmc="
+      ],
+      "results": [
+       "CklqR0dCVFJlZ3Jlc3Npb25Nb2RlbDogdWlkPUdCVFJlZ3Jlc3Nvcl9kZWZhdWx0LCBudW1UcmVlcz0zLCBudW1GZWF0dXJlcz0z"
+      ],
+      "value": "GBTRegressionModel: uid=GBTRegressor_default, numTrees=3, numFeatures=3"
+     },
+     "transform": {
+      "call": "loaded.transform(rows_held_out)",
+      "commands": [
+       "CtcDCgcKBTxpZDA+Gp4DCgCKAZgDCpEDCgAajAMK1QIKALoBzwIKmAIKAFqTAhKQAnsiZmllbGRzIjpbeyJtZXRhZGF0YSI6e30sIm5hbWUiOiJsYWJlbCIsIm51bGxhYmxlIjp0cnVlLCJ0eXBlIjoiZG91YmxlIn0seyJtZXRhZGF0YSI6e30sIm5hbWUiOiJ3ZWlnaHQiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoiZmVhdHVyZXMiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6eyJjb250YWluc051bGwiOnRydWUsImVsZW1lbnRUeXBlIjoiZG91YmxlIiwidHlwZSI6ImFycmF5In19XSwidHlwZSI6InN0cnVjdCJ9EjIKJhokCg9hcnJheV90b192ZWN0b3ISERIMCghmZWF0dXJlcxgAkgEAEghmZWF0dXJlcxoOEgkKBWxhYmVsGACSAQAaDxIKCgZ3ZWlnaHQYAJIBABoREgwKCGZlYXR1cmVzGACSAQAQARgAIisKDgoIbWF4RGVwdGgSAjACCg0KB21heEl0ZXISAjADCgoKBHNlZWQSAjAB"
+      ],
+      "results": [],
+      "value": {
+       "rows": [
+        [
+         18.0,
+         1.0,
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           9.5,
+           0.0,
+           2.5
+          ]
+         },
+         12.550666666666666
+        ],
+        [
+         4.5,
+         1.0,
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           6.5,
+           2.0,
+           0.5
+          ]
+         },
+         8.380666666666668
+        ],
+        [
+         6.0,
+         1.0,
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           2.5,
+           1.0,
+           1.5
+          ]
+         },
+         5.254
+        ]
+       ],
+       "schema": "struct<label:double,weight:double,features:vector,prediction:double>"
+      }
+     }
+    },
+    "skipped": {
+     "Param attribute (client side)": [
+      "cacheNodeIds",
+      "checkpointInterval",
+      "featureSubsetStrategy",
+      "featuresCol",
+      "impurity",
+      "labelCol",
+      "leafCol",
+      "lossType",
+      "maxBins",
+      "maxDepth",
+      "maxIter",
+      "maxMemoryInMB",
+      "minInfoGain",
+      "minInstancesPerNode",
+      "minWeightFractionPerNode",
+      "predictionCol",
+      "seed",
+      "stepSize",
+      "subsamplingRate",
+      "validationIndicatorCol",
+      "validationTol",
+      "weightCol"
+     ],
+     "Params API (client side)": [
+      "clear",
+      "copy",
+      "explainParam",
+      "explainParams",
+      "extractParamMap",
+      "getOrDefault",
+      "getParam",
+      "hasDefault",
+      "hasParam",
+      "isDefined",
+      "isSet",
+      "params",
+      "set",
+      "uid"
+     ],
+     "Params getter or setter (client side)": [
+      "getCacheNodeIds",
+      "getCheckpointInterval",
+      "getFeatureSubsetStrategy",
+      "getFeaturesCol",
+      "getImpurity",
+      "getLabelCol",
+      "getLeafCol",
+      "getLossType",
+      "getMaxBins",
+      "getMaxDepth",
+      "getMaxIter",
+      "getMaxMemoryInMB",
+      "getMinInfoGain",
+      "getMinInstancesPerNode",
+      "getMinWeightFractionPerNode",
+      "getPredictionCol",
+      "getSeed",
+      "getStepSize",
+      "getSubsamplingRate",
+      "getValidationIndicatorCol",
+      "getValidationTol",
+      "getWeightCol",
+      "setFeaturesCol",
+      "setLeafCol",
+      "setPredictionCol"
+     ],
+     "not captured on this copy (partial)": [
+      "evaluateEachIteration",
+      "featureImportances",
+      "getNumTrees",
+      "numFeatures",
+      "predictLeaf",
+      "supportedFeatureSubsetStrategies",
+      "supportedImpurities",
+      "supportedLossTypes",
+      "toDebugString",
+      "totalNumNodes",
+      "treeWeights",
+      "trees"
+     ],
+     "persistence (captured by Golden.persist)": [
+      "load",
+      "read",
+      "save",
+      "write"
+     ]
+    }
+   },
+   "params_after": {
+    "cacheNodeIds": false,
+    "checkpointInterval": 10,
+    "featureSubsetStrategy": "all",
+    "featuresCol": "features",
+    "impurity": "variance",
+    "labelCol": "label",
+    "leafCol": "",
+    "lossType": "squared",
+    "maxBins": 32,
+    "maxDepth": 2,
+    "maxIter": 3,
+    "maxMemoryInMB": 256,
+    "minInfoGain": 0.0,
+    "minInstancesPerNode": 1,
+    "minWeightFractionPerNode": 0.0,
+    "predictionCol": "prediction",
+    "seed": 1,
+    "stepSize": 0.1,
+    "subsamplingRate": 1.0,
+    "validationTol": 0.01
+   },
+   "params_before": {
+    "cacheNodeIds": false,
+    "checkpointInterval": 10,
+    "featureSubsetStrategy": "all",
+    "featuresCol": "features",
+    "impurity": "variance",
+    "labelCol": "label",
+    "leafCol": "",
+    "lossType": "squared",
+    "maxBins": 32,
+    "maxDepth": 2,
+    "maxIter": 3,
+    "maxMemoryInMB": 256,
+    "minInfoGain": 0.0,
+    "minInstancesPerNode": 1,
+    "minWeightFractionPerNode": 0.0,
+    "predictionCol": "prediction",
+    "seed": 1,
+    "stepSize": 0.1,
+    "subsamplingRate": 1.0,
+    "validationTol": 0.01
+   },
+   "save": {
+    "call": "model.write().overwrite().save(path)",
+    "commands": [
+     "IkASBwoFPGlkMD4aKwoOCghtYXhEZXB0aBICMAIKDQoHbWF4SXRlchICMAMKCgoEc2VlZBICMAEiBjxwYXRoPigB"
+    ],
+    "results": [
+     ""
+    ],
+    "value": null
+   },
+   "uid": "GBTRegressor_default",
+   "uid_same": true
+  },
+  "GeneralizedLinearRegression.gamma.estimator": {
+   "load": {
+    "call": "GeneralizedLinearRegression.load(path)",
+    "commands": [
+     "KkgKPgo6b3JnLmFwYWNoZS5zcGFyay5tbC5yZWdyZXNzaW9uLkdlbmVyYWxpemVkTGluZWFyUmVncmVzc2lvbhgBEgY8cGF0aD4="
+    ],
+    "results": [
+     "GncSOm9yZy5hcGFjaGUuc3BhcmsubWwucmVncmVzc2lvbi5HZW5lcmFsaXplZExpbmVhclJlZ3Jlc3Npb24aBjx1aWQwPiIxChEKBmZhbWlseRIHagVnYW1tYQoNCgRsaW5rEgVqA2xvZwoNCgdtYXhJdGVyEgIwGQ=="
+    ],
+    "value": {
+     "type": "GeneralizedLinearRegression",
+     "uid": "GeneralizedLinearRegression_gamma"
+    }
+   },
+   "params_after": {
+    "aggregationDepth": 2,
+    "family": "gamma",
+    "featuresCol": "features",
+    "fitIntercept": true,
+    "labelCol": "label",
+    "link": "log",
+    "maxIter": 25,
+    "predictionCol": "prediction",
+    "regParam": 0.0,
+    "solver": "irls",
+    "tol": 1e-06,
+    "variancePower": 0.0
+   },
+   "params_before": {
+    "aggregationDepth": 2,
+    "family": "gamma",
+    "featuresCol": "features",
+    "fitIntercept": true,
+    "labelCol": "label",
+    "link": "log",
+    "maxIter": 25,
+    "predictionCol": "prediction",
+    "regParam": 0.0,
+    "solver": "irls",
+    "tol": 1e-06,
+    "variancePower": 0.0
+   },
+   "save": {
+    "call": "estimator.write().overwrite().save(path)",
+    "commands": [
+     "IoUBCkYKOm9yZy5hcGFjaGUuc3BhcmsubWwucmVncmVzc2lvbi5HZW5lcmFsaXplZExpbmVhclJlZ3Jlc3Npb24SBjx1aWQwPhgBGjEKEQoGZmFtaWx5EgdqBWdhbW1hCg0KBGxpbmsSBWoDbG9nCg0KB21heEl0ZXISAjAZIgY8cGF0aD4oAQ=="
+    ],
+    "results": [
+     ""
+    ],
+    "value": null
+   },
+   "uid": "GeneralizedLinearRegression_gamma",
+   "uid_same": true
+  },
+  "GeneralizedLinearRegression.gamma.model": {
+   "load": {
+    "call": "GeneralizedLinearRegressionModel.load(path)",
+    "commands": [
+     "Kk0KQwo/b3JnLmFwYWNoZS5zcGFyay5tbC5yZWdyZXNzaW9uLkdlbmVyYWxpemVkTGluZWFyUmVncmVzc2lvbk1vZGVsGAQSBjxwYXRoPg=="
+    ],
+    "results": [
+     "GkQKBwoFPGlkMD4aBjx1aWQwPiIxChEKBmZhbWlseRIHagVnYW1tYQoNCgRsaW5rEgVqA2xvZwoNCgdtYXhJdGVyEgIwGQ=="
+    ],
+    "value": {
+     "ref": "<id0>",
+     "type": "GeneralizedLinearRegressionModel"
+    }
+   },
+   "members": {
+    "class": "GeneralizedLinearRegressionModel",
+    "members": {
+     "predict-dense": {
+      "call": "loaded.predict(Vectors.dense([2.5, 1.0, 1.5]))",
+      "commands": [
+       "EnwKBwoFPGlkMD4ScQoHcHJlZGljdBJmCmTCAWEKLroBKwoDdWR0EiRvcmcuYXBhY2hlLnNwYXJrLm1sLmxpbmFsZy5WZWN0b3JVRFQSAiABEgQKAgoAEgQKAgoAEh/KARwqGgoYAAAAAAAABEAAAAAAAADwPwAAAAAAAPg/"
+      ],
+      "results": [
+       "CglZbu6Ao3bDGEA="
+      ],
+      "value": 6.190882258171412
+     },
+     "repr()": {
+      "call": "repr(loaded)",
+      "commands": [
+       "EhUKBwoFPGlkMD4SCgoIdG9TdHJpbmc="
+      ],
+      "results": [
+       "CnBqbkdlbmVyYWxpemVkTGluZWFyUmVncmVzc2lvbk1vZGVsOiB1aWQ9R2VuZXJhbGl6ZWRMaW5lYXJSZWdyZXNzaW9uX2dhbW1hLCBmYW1pbHk9Z2FtbWEsIGxpbms9bG9nLCBudW1GZWF0dXJlcz0z"
+      ],
+      "value": "GeneralizedLinearRegressionModel: uid=GeneralizedLinearRegression_gamma, family=gamma, link=log, numFeatures=3"
+     },
+     "str()": {
+      "call": "str(loaded)",
+      "commands": [
+       "EhUKBwoFPGlkMD4SCgoIdG9TdHJpbmc="
+      ],
+      "results": [
+       "CnBqbkdlbmVyYWxpemVkTGluZWFyUmVncmVzc2lvbk1vZGVsOiB1aWQ9R2VuZXJhbGl6ZWRMaW5lYXJSZWdyZXNzaW9uX2dhbW1hLCBmYW1pbHk9Z2FtbWEsIGxpbms9bG9nLCBudW1GZWF0dXJlcz0z"
+      ],
+      "value": "GeneralizedLinearRegressionModel: uid=GeneralizedLinearRegression_gamma, family=gamma, link=log, numFeatures=3"
+     },
+     "transform": {
+      "call": "loaded.transform(rows_held_out)",
+      "commands": [
+       "Ct0DCgcKBTxpZDA+Gp4DCgCKAZgDCpEDCgAajAMK1QIKALoBzwIKmAIKAFqTAhKQAnsiZmllbGRzIjpbeyJtZXRhZGF0YSI6e30sIm5hbWUiOiJsYWJlbCIsIm51bGxhYmxlIjp0cnVlLCJ0eXBlIjoiZG91YmxlIn0seyJtZXRhZGF0YSI6e30sIm5hbWUiOiJ3ZWlnaHQiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoiZmVhdHVyZXMiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6eyJjb250YWluc051bGwiOnRydWUsImVsZW1lbnRUeXBlIjoiZG91YmxlIiwidHlwZSI6ImFycmF5In19XSwidHlwZSI6InN0cnVjdCJ9EjIKJhokCg9hcnJheV90b192ZWN0b3ISERIMCghmZWF0dXJlcxgAkgEAEghmZWF0dXJlcxoOEgkKBWxhYmVsGACSAQAaDxIKCgZ3ZWlnaHQYAJIBABoREgwKCGZlYXR1cmVzGACSAQAQARgAIjEKEQoGZmFtaWx5EgdqBWdhbW1hCg0KBGxpbmsSBWoDbG9nCg0KB21heEl0ZXISAjAZ"
+      ],
+      "results": [],
+      "value": {
+       "rows": [
+        [
+         18.0,
+         1.0,
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           9.5,
+           0.0,
+           2.5
+          ]
+         },
+         15.371427595494518
+        ],
+        [
+         4.5,
+         1.0,
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           6.5,
+           2.0,
+           0.5
+          ]
+         },
+         7.462934049640866
+        ],
+        [
+         6.0,
+         1.0,
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           2.5,
+           1.0,
+           1.5
+          ]
+         },
+         6.190882258171412
+        ]
+       ],
+       "schema": "struct<label:double,weight:double,features:vector,prediction:double>"
+      }
+     }
+    },
+    "skipped": {
+     "Param attribute (client side)": [
+      "aggregationDepth",
+      "family",
+      "featuresCol",
+      "fitIntercept",
+      "labelCol",
+      "link",
+      "linkPower",
+      "linkPredictionCol",
+      "maxIter",
+      "offsetCol",
+      "predictionCol",
+      "regParam",
+      "solver",
+      "tol",
+      "variancePower",
+      "weightCol"
+     ],
+     "Params API (client side)": [
+      "clear",
+      "copy",
+      "explainParam",
+      "explainParams",
+      "extractParamMap",
+      "getOrDefault",
+      "getParam",
+      "hasDefault",
+      "hasParam",
+      "isDefined",
+      "isSet",
+      "params",
+      "set",
+      "uid"
+     ],
+     "Params getter or setter (client side)": [
+      "getAggregationDepth",
+      "getFamily",
+      "getFeaturesCol",
+      "getFitIntercept",
+      "getLabelCol",
+      "getLink",
+      "getLinkPower",
+      "getLinkPredictionCol",
+      "getMaxIter",
+      "getOffsetCol",
+      "getPredictionCol",
+      "getRegParam",
+      "getSolver",
+      "getTol",
+      "getVariancePower",
+      "getWeightCol",
+      "setFeaturesCol",
+      "setLinkPredictionCol",
+      "setPredictionCol"
+     ],
+     "not captured on this copy (partial)": [
+      "coefficients",
+      "evaluate",
+      "hasSummary",
+      "intercept",
+      "numFeatures",
+      "summary"
+     ],
+     "persistence (captured by Golden.persist)": [
+      "load",
+      "read",
+      "save",
+      "write"
+     ]
+    }
+   },
+   "params_after": {
+    "aggregationDepth": 2,
+    "family": "gamma",
+    "featuresCol": "features",
+    "fitIntercept": true,
+    "labelCol": "label",
+    "link": "log",
+    "maxIter": 25,
+    "predictionCol": "prediction",
+    "regParam": 0.0,
+    "solver": "irls",
+    "tol": 1e-06,
+    "variancePower": 0.0
+   },
+   "params_before": {
+    "aggregationDepth": 2,
+    "family": "gamma",
+    "featuresCol": "features",
+    "fitIntercept": true,
+    "labelCol": "label",
+    "link": "log",
+    "maxIter": 25,
+    "predictionCol": "prediction",
+    "regParam": 0.0,
+    "solver": "irls",
+    "tol": 1e-06,
+    "variancePower": 0.0
+   },
+   "save": {
+    "call": "model.write().overwrite().save(path)",
+    "commands": [
+     "IkYSBwoFPGlkMD4aMQoRCgZmYW1pbHkSB2oFZ2FtbWEKDQoEbGluaxIFagNsb2cKDQoHbWF4SXRlchICMBkiBjxwYXRoPigB"
+    ],
+    "results": [
+     ""
+    ],
+    "value": null
+   },
+   "uid": "GeneralizedLinearRegression_gamma",
+   "uid_same": true
+  },
+  "GeneralizedLinearRegression.gaussian.estimator": {
+   "load": {
+    "call": "GeneralizedLinearRegression.load(path)",
+    "commands": [
+     "KkgKPgo6b3JnLmFwYWNoZS5zcGFyay5tbC5yZWdyZXNzaW9uLkdlbmVyYWxpemVkTGluZWFyUmVncmVzc2lvbhgBEgY8cGF0aD4="
+    ],
+    "results": [
+     "GnMSOm9yZy5hcGFjaGUuc3BhcmsubWwucmVncmVzc2lvbi5HZW5lcmFsaXplZExpbmVhclJlZ3Jlc3Npb24aBjx1aWQwPiItChQKBmZhbWlseRIKaghnYXVzc2lhbgoVCgl3ZWlnaHRDb2wSCGoGd2VpZ2h0"
+    ],
+    "value": {
+     "type": "GeneralizedLinearRegression",
+     "uid": "GeneralizedLinearRegression_gaussian"
+    }
+   },
+   "params_after": {
+    "aggregationDepth": 2,
+    "family": "gaussian",
+    "featuresCol": "features",
+    "fitIntercept": true,
+    "labelCol": "label",
+    "maxIter": 25,
+    "predictionCol": "prediction",
+    "regParam": 0.0,
+    "solver": "irls",
+    "tol": 1e-06,
+    "variancePower": 0.0,
+    "weightCol": "weight"
+   },
+   "params_before": {
+    "aggregationDepth": 2,
+    "family": "gaussian",
+    "featuresCol": "features",
+    "fitIntercept": true,
+    "labelCol": "label",
+    "maxIter": 25,
+    "predictionCol": "prediction",
+    "regParam": 0.0,
+    "solver": "irls",
+    "tol": 1e-06,
+    "variancePower": 0.0,
+    "weightCol": "weight"
+   },
+   "save": {
+    "call": "estimator.write().overwrite().save(path)",
+    "commands": [
+     "IoEBCkYKOm9yZy5hcGFjaGUuc3BhcmsubWwucmVncmVzc2lvbi5HZW5lcmFsaXplZExpbmVhclJlZ3Jlc3Npb24SBjx1aWQwPhgBGi0KFAoGZmFtaWx5EgpqCGdhdXNzaWFuChUKCXdlaWdodENvbBIIagZ3ZWlnaHQiBjxwYXRoPigB"
+    ],
+    "results": [
+     ""
+    ],
+    "value": null
+   },
+   "uid": "GeneralizedLinearRegression_gaussian",
+   "uid_same": true
+  },
+  "GeneralizedLinearRegression.gaussian.model": {
+   "load": {
+    "call": "GeneralizedLinearRegressionModel.load(path)",
+    "commands": [
+     "Kk0KQwo/b3JnLmFwYWNoZS5zcGFyay5tbC5yZWdyZXNzaW9uLkdlbmVyYWxpemVkTGluZWFyUmVncmVzc2lvbk1vZGVsGAQSBjxwYXRoPg=="
+    ],
+    "results": [
+     "GkAKBwoFPGlkMD4aBjx1aWQwPiItChQKBmZhbWlseRIKaghnYXVzc2lhbgoVCgl3ZWlnaHRDb2wSCGoGd2VpZ2h0"
+    ],
+    "value": {
+     "ref": "<id0>",
+     "type": "GeneralizedLinearRegressionModel"
+    }
+   },
+   "members": {
+    "class": "GeneralizedLinearRegressionModel",
+    "members": {
+     "predict-dense": {
+      "call": "loaded.predict(Vectors.dense([2.5, 1.0, 1.5]))",
+      "commands": [
+       "EnwKBwoFPGlkMD4ScQoHcHJlZGljdBJmCmTCAWEKLroBKwoDdWR0EiRvcmcuYXBhY2hlLnNwYXJrLm1sLmxpbmFsZy5WZWN0b3JVRFQSAiABEgQKAgoAEgQKAgoAEh/KARwqGgoYAAAAAAAABEAAAAAAAADwPwAAAAAAAPg/"
+      ],
+      "results": [
+       "CglZHB+uRXRmFkA="
+      ],
+      "value": 5.600052918198141
+     },
+     "repr()": {
+      "call": "repr(loaded)",
+      "commands": [
+       "EhUKBwoFPGlkMD4SCgoIdG9TdHJpbmc="
+      ],
+      "error": {
+       "class": "UnknownException",
+       "condition": null,
+       "message": "(java.util.NoSuchElementException) Failed to find a default value for link"
+      },
+      "results": []
+     },
+     "str()": {
+      "call": "str(loaded)",
+      "commands": [
+       "EhUKBwoFPGlkMD4SCgoIdG9TdHJpbmc="
+      ],
+      "error": {
+       "class": "UnknownException",
+       "condition": null,
+       "message": "(java.util.NoSuchElementException) Failed to find a default value for link"
+      },
+      "results": []
+     },
+     "transform": {
+      "call": "loaded.transform(rows_held_out)",
+      "commands": [
+       "CtkDCgcKBTxpZDA+Gp4DCgCKAZgDCpEDCgAajAMK1QIKALoBzwIKmAIKAFqTAhKQAnsiZmllbGRzIjpbeyJtZXRhZGF0YSI6e30sIm5hbWUiOiJsYWJlbCIsIm51bGxhYmxlIjp0cnVlLCJ0eXBlIjoiZG91YmxlIn0seyJtZXRhZGF0YSI6e30sIm5hbWUiOiJ3ZWlnaHQiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoiZmVhdHVyZXMiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6eyJjb250YWluc051bGwiOnRydWUsImVsZW1lbnRUeXBlIjoiZG91YmxlIiwidHlwZSI6ImFycmF5In19XSwidHlwZSI6InN0cnVjdCJ9EjIKJhokCg9hcnJheV90b192ZWN0b3ISERIMCghmZWF0dXJlcxgAkgEAEghmZWF0dXJlcxoOEgkKBWxhYmVsGACSAQAaDxIKCgZ3ZWlnaHQYAJIBABoREgwKCGZlYXR1cmVzGACSAQAQARgAIi0KFAoGZmFtaWx5EgpqCGdhdXNzaWFuChUKCXdlaWdodENvbBIIagZ3ZWlnaHQ="
+      ],
+      "results": [],
+      "value": {
+       "rows": [
+        [
+         18.0,
+         1.0,
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           9.5,
+           0.0,
+           2.5
+          ]
+         },
+         18.071211538091287
+        ],
+        [
+         4.5,
+         1.0,
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           6.5,
+           2.0,
+           0.5
+          ]
+         },
+         8.886801239247948
+        ],
+        [
+         6.0,
+         1.0,
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           2.5,
+           1.0,
+           1.5
+          ]
+         },
+         5.600052918198141
+        ]
+       ],
+       "schema": "struct<label:double,weight:double,features:vector,prediction:double>"
+      }
+     }
+    },
+    "skipped": {
+     "Param attribute (client side)": [
+      "aggregationDepth",
+      "family",
+      "featuresCol",
+      "fitIntercept",
+      "labelCol",
+      "link",
+      "linkPower",
+      "linkPredictionCol",
+      "maxIter",
+      "offsetCol",
+      "predictionCol",
+      "regParam",
+      "solver",
+      "tol",
+      "variancePower",
+      "weightCol"
+     ],
+     "Params API (client side)": [
+      "clear",
+      "copy",
+      "explainParam",
+      "explainParams",
+      "extractParamMap",
+      "getOrDefault",
+      "getParam",
+      "hasDefault",
+      "hasParam",
+      "isDefined",
+      "isSet",
+      "params",
+      "set",
+      "uid"
+     ],
+     "Params getter or setter (client side)": [
+      "getAggregationDepth",
+      "getFamily",
+      "getFeaturesCol",
+      "getFitIntercept",
+      "getLabelCol",
+      "getLink",
+      "getLinkPower",
+      "getLinkPredictionCol",
+      "getMaxIter",
+      "getOffsetCol",
+      "getPredictionCol",
+      "getRegParam",
+      "getSolver",
+      "getTol",
+      "getVariancePower",
+      "getWeightCol",
+      "setFeaturesCol",
+      "setLinkPredictionCol",
+      "setPredictionCol"
+     ],
+     "not captured on this copy (partial)": [
+      "coefficients",
+      "evaluate",
+      "hasSummary",
+      "intercept",
+      "numFeatures",
+      "summary"
+     ],
+     "persistence (captured by Golden.persist)": [
+      "load",
+      "read",
+      "save",
+      "write"
+     ]
+    }
+   },
+   "params_after": {
+    "aggregationDepth": 2,
+    "family": "gaussian",
+    "featuresCol": "features",
+    "fitIntercept": true,
+    "labelCol": "label",
+    "maxIter": 25,
+    "predictionCol": "prediction",
+    "regParam": 0.0,
+    "solver": "irls",
+    "tol": 1e-06,
+    "variancePower": 0.0,
+    "weightCol": "weight"
+   },
+   "params_before": {
+    "aggregationDepth": 2,
+    "family": "gaussian",
+    "featuresCol": "features",
+    "fitIntercept": true,
+    "labelCol": "label",
+    "maxIter": 25,
+    "predictionCol": "prediction",
+    "regParam": 0.0,
+    "solver": "irls",
+    "tol": 1e-06,
+    "variancePower": 0.0,
+    "weightCol": "weight"
+   },
+   "save": {
+    "call": "model.write().overwrite().save(path)",
+    "commands": [
+     "IkISBwoFPGlkMD4aLQoUCgZmYW1pbHkSCmoIZ2F1c3NpYW4KFQoJd2VpZ2h0Q29sEghqBndlaWdodCIGPHBhdGg+KAE="
+    ],
+    "results": [
+     ""
+    ],
+    "value": null
+   },
+   "uid": "GeneralizedLinearRegression_gaussian",
+   "uid_same": true
+  },
+  "GeneralizedLinearRegression.no-intercept.estimator": {
+   "load": {
+    "call": "GeneralizedLinearRegression.load(path)",
+    "commands": [
+     "KkgKPgo6b3JnLmFwYWNoZS5zcGFyay5tbC5yZWdyZXNzaW9uLkdlbmVyYWxpemVkTGluZWFyUmVncmVzc2lvbhgBEgY8cGF0aD4="
+    ],
+    "results": [
+     "GnASOm9yZy5hcGFjaGUuc3BhcmsubWwucmVncmVzc2lvbi5HZW5lcmFsaXplZExpbmVhclJlZ3Jlc3Npb24aBjx1aWQwPiIqChQKBmZhbWlseRIKaghnYXVzc2lhbgoSCgxmaXRJbnRlcmNlcHQSAhgA"
+    ],
+    "value": {
+     "type": "GeneralizedLinearRegression",
+     "uid": "GeneralizedLinearRegression_no_intercept"
+    }
+   },
+   "params_after": {
+    "aggregationDepth": 2,
+    "family": "gaussian",
+    "featuresCol": "features",
+    "fitIntercept": false,
+    "labelCol": "label",
+    "maxIter": 25,
+    "predictionCol": "prediction",
+    "regParam": 0.0,
+    "solver": "irls",
+    "tol": 1e-06,
+    "variancePower": 0.0
+   },
+   "params_before": {
+    "aggregationDepth": 2,
+    "family": "gaussian",
+    "featuresCol": "features",
+    "fitIntercept": false,
+    "labelCol": "label",
+    "maxIter": 25,
+    "predictionCol": "prediction",
+    "regParam": 0.0,
+    "solver": "irls",
+    "tol": 1e-06,
+    "variancePower": 0.0
+   },
+   "save": {
+    "call": "estimator.write().overwrite().save(path)",
+    "commands": [
+     "In4KRgo6b3JnLmFwYWNoZS5zcGFyay5tbC5yZWdyZXNzaW9uLkdlbmVyYWxpemVkTGluZWFyUmVncmVzc2lvbhIGPHVpZDA+GAEaKgoUCgZmYW1pbHkSCmoIZ2F1c3NpYW4KEgoMZml0SW50ZXJjZXB0EgIYACIGPHBhdGg+KAE="
+    ],
+    "results": [
+     ""
+    ],
+    "value": null
+   },
+   "uid": "GeneralizedLinearRegression_no_intercept",
+   "uid_same": true
+  },
+  "GeneralizedLinearRegression.no-intercept.model": {
+   "load": {
+    "call": "GeneralizedLinearRegressionModel.load(path)",
+    "commands": [
+     "Kk0KQwo/b3JnLmFwYWNoZS5zcGFyay5tbC5yZWdyZXNzaW9uLkdlbmVyYWxpemVkTGluZWFyUmVncmVzc2lvbk1vZGVsGAQSBjxwYXRoPg=="
+    ],
+    "results": [
+     "Gj0KBwoFPGlkMD4aBjx1aWQwPiIqChQKBmZhbWlseRIKaghnYXVzc2lhbgoSCgxmaXRJbnRlcmNlcHQSAhgA"
+    ],
+    "value": {
+     "ref": "<id0>",
+     "type": "GeneralizedLinearRegressionModel"
+    }
+   },
+   "members": {
+    "class": "GeneralizedLinearRegressionModel",
+    "members": {
+     "predict-dense": {
+      "call": "loaded.predict(Vectors.dense([2.5, 1.0, 1.5]))",
+      "commands": [
+       "EnwKBwoFPGlkMD4ScQoHcHJlZGljdBJmCmTCAWEKLroBKwoDdWR0EiRvcmcuYXBhY2hlLnNwYXJrLm1sLmxpbmFsZy5WZWN0b3JVRFQSAiABEgQKAgoAEgQKAgoAEh/KARwqGgoYAAAAAAAABEAAAAAAAADwPwAAAAAAAPg/"
+      ],
+      "results": [
+       "CglZB45pE1BKGEA="
+      ],
+      "value": 6.07257109004741
+     },
+     "repr()": {
+      "call": "repr(loaded)",
+      "commands": [
+       "EhUKBwoFPGlkMD4SCgoIdG9TdHJpbmc="
+      ],
+      "error": {
+       "class": "UnknownException",
+       "condition": null,
+       "message": "(java.util.NoSuchElementException) Failed to find a default value for link"
+      },
+      "results": []
+     },
+     "str()": {
+      "call": "str(loaded)",
+      "commands": [
+       "EhUKBwoFPGlkMD4SCgoIdG9TdHJpbmc="
+      ],
+      "error": {
+       "class": "UnknownException",
+       "condition": null,
+       "message": "(java.util.NoSuchElementException) Failed to find a default value for link"
+      },
+      "results": []
+     },
+     "transform": {
+      "call": "loaded.transform(rows_held_out)",
+      "commands": [
+       "CtYDCgcKBTxpZDA+Gp4DCgCKAZgDCpEDCgAajAMK1QIKALoBzwIKmAIKAFqTAhKQAnsiZmllbGRzIjpbeyJtZXRhZGF0YSI6e30sIm5hbWUiOiJsYWJlbCIsIm51bGxhYmxlIjp0cnVlLCJ0eXBlIjoiZG91YmxlIn0seyJtZXRhZGF0YSI6e30sIm5hbWUiOiJ3ZWlnaHQiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoiZmVhdHVyZXMiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6eyJjb250YWluc051bGwiOnRydWUsImVsZW1lbnRUeXBlIjoiZG91YmxlIiwidHlwZSI6ImFycmF5In19XSwidHlwZSI6InN0cnVjdCJ9EjIKJhokCg9hcnJheV90b192ZWN0b3ISERIMCghmZWF0dXJlcxgAkgEAEghmZWF0dXJlcxoOEgkKBWxhYmVsGACSAQAaDxIKCgZ3ZWlnaHQYAJIBABoREgwKCGZlYXR1cmVzGACSAQAQARgAIioKFAoGZmFtaWx5EgpqCGdhdXNzaWFuChIKDGZpdEludGVyY2VwdBICGAA="
+      ],
+      "results": [],
+      "value": {
+       "rows": [
+        [
+         18.0,
+         1.0,
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           9.5,
+           0.0,
+           2.5
+          ]
+         },
+         14.806141390205322
+        ],
+        [
+         4.5,
+         1.0,
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           6.5,
+           2.0,
+           0.5
+          ]
+         },
+         7.9100464060031515
+        ],
+        [
+         6.0,
+         1.0,
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           2.5,
+           1.0,
+           1.5
+          ]
+         },
+         6.07257109004741
+        ]
+       ],
+       "schema": "struct<label:double,weight:double,features:vector,prediction:double>"
+      }
+     }
+    },
+    "skipped": {
+     "Param attribute (client side)": [
+      "aggregationDepth",
+      "family",
+      "featuresCol",
+      "fitIntercept",
+      "labelCol",
+      "link",
+      "linkPower",
+      "linkPredictionCol",
+      "maxIter",
+      "offsetCol",
+      "predictionCol",
+      "regParam",
+      "solver",
+      "tol",
+      "variancePower",
+      "weightCol"
+     ],
+     "Params API (client side)": [
+      "clear",
+      "copy",
+      "explainParam",
+      "explainParams",
+      "extractParamMap",
+      "getOrDefault",
+      "getParam",
+      "hasDefault",
+      "hasParam",
+      "isDefined",
+      "isSet",
+      "params",
+      "set",
+      "uid"
+     ],
+     "Params getter or setter (client side)": [
+      "getAggregationDepth",
+      "getFamily",
+      "getFeaturesCol",
+      "getFitIntercept",
+      "getLabelCol",
+      "getLink",
+      "getLinkPower",
+      "getLinkPredictionCol",
+      "getMaxIter",
+      "getOffsetCol",
+      "getPredictionCol",
+      "getRegParam",
+      "getSolver",
+      "getTol",
+      "getVariancePower",
+      "getWeightCol",
+      "setFeaturesCol",
+      "setLinkPredictionCol",
+      "setPredictionCol"
+     ],
+     "not captured on this copy (partial)": [
+      "coefficients",
+      "evaluate",
+      "hasSummary",
+      "intercept",
+      "numFeatures",
+      "summary"
+     ],
+     "persistence (captured by Golden.persist)": [
+      "load",
+      "read",
+      "save",
+      "write"
+     ]
+    }
+   },
+   "params_after": {
+    "aggregationDepth": 2,
+    "family": "gaussian",
+    "featuresCol": "features",
+    "fitIntercept": false,
+    "labelCol": "label",
+    "maxIter": 25,
+    "predictionCol": "prediction",
+    "regParam": 0.0,
+    "solver": "irls",
+    "tol": 1e-06,
+    "variancePower": 0.0
+   },
+   "params_before": {
+    "aggregationDepth": 2,
+    "family": "gaussian",
+    "featuresCol": "features",
+    "fitIntercept": false,
+    "labelCol": "label",
+    "maxIter": 25,
+    "predictionCol": "prediction",
+    "regParam": 0.0,
+    "solver": "irls",
+    "tol": 1e-06,
+    "variancePower": 0.0
+   },
+   "save": {
+    "call": "model.write().overwrite().save(path)",
+    "commands": [
+     "Ij8SBwoFPGlkMD4aKgoUCgZmYW1pbHkSCmoIZ2F1c3NpYW4KEgoMZml0SW50ZXJjZXB0EgIYACIGPHBhdGg+KAE="
+    ],
+    "results": [
+     ""
+    ],
+    "value": null
+   },
+   "uid": "GeneralizedLinearRegression_no_intercept",
+   "uid_same": true
+  },
+  "GeneralizedLinearRegression.poisson.estimator": {
+   "load": {
+    "call": "GeneralizedLinearRegression.load(path)",
+    "commands": [
+     "KkgKPgo6b3JnLmFwYWNoZS5zcGFyay5tbC5yZWdyZXNzaW9uLkdlbmVyYWxpemVkTGluZWFyUmVncmVzc2lvbhgBEgY8cGF0aD4="
+    ],
+    "results": [
+     "GnkSOm9yZy5hcGFjaGUuc3BhcmsubWwucmVncmVzc2lvbi5HZW5lcmFsaXplZExpbmVhclJlZ3Jlc3Npb24aBjx1aWQwPiIzChMKBmZhbWlseRIJagdwb2lzc29uCg0KBGxpbmsSBWoDbG9nCg0KB21heEl0ZXISAjAZ"
+    ],
+    "value": {
+     "type": "GeneralizedLinearRegression",
+     "uid": "GeneralizedLinearRegression_poisson"
+    }
+   },
+   "params_after": {
+    "aggregationDepth": 2,
+    "family": "poisson",
+    "featuresCol": "features",
+    "fitIntercept": true,
+    "labelCol": "label",
+    "link": "log",
+    "maxIter": 25,
+    "predictionCol": "prediction",
+    "regParam": 0.0,
+    "solver": "irls",
+    "tol": 1e-06,
+    "variancePower": 0.0
+   },
+   "params_before": {
+    "aggregationDepth": 2,
+    "family": "poisson",
+    "featuresCol": "features",
+    "fitIntercept": true,
+    "labelCol": "label",
+    "link": "log",
+    "maxIter": 25,
+    "predictionCol": "prediction",
+    "regParam": 0.0,
+    "solver": "irls",
+    "tol": 1e-06,
+    "variancePower": 0.0
+   },
+   "save": {
+    "call": "estimator.write().overwrite().save(path)",
+    "commands": [
+     "IocBCkYKOm9yZy5hcGFjaGUuc3BhcmsubWwucmVncmVzc2lvbi5HZW5lcmFsaXplZExpbmVhclJlZ3Jlc3Npb24SBjx1aWQwPhgBGjMKEwoGZmFtaWx5EglqB3BvaXNzb24KDQoEbGluaxIFagNsb2cKDQoHbWF4SXRlchICMBkiBjxwYXRoPigB"
+    ],
+    "results": [
+     ""
+    ],
+    "value": null
+   },
+   "uid": "GeneralizedLinearRegression_poisson",
+   "uid_same": true
+  },
+  "GeneralizedLinearRegression.poisson.model": {
+   "load": {
+    "call": "GeneralizedLinearRegressionModel.load(path)",
+    "commands": [
+     "Kk0KQwo/b3JnLmFwYWNoZS5zcGFyay5tbC5yZWdyZXNzaW9uLkdlbmVyYWxpemVkTGluZWFyUmVncmVzc2lvbk1vZGVsGAQSBjxwYXRoPg=="
+    ],
+    "results": [
+     "GkYKBwoFPGlkMD4aBjx1aWQwPiIzChMKBmZhbWlseRIJagdwb2lzc29uCg0KBGxpbmsSBWoDbG9nCg0KB21heEl0ZXISAjAZ"
+    ],
+    "value": {
+     "ref": "<id0>",
+     "type": "GeneralizedLinearRegressionModel"
+    }
+   },
+   "members": {
+    "class": "GeneralizedLinearRegressionModel",
+    "members": {
+     "predict-dense": {
+      "call": "loaded.predict(Vectors.dense([2.5, 1.0, 1.5]))",
+      "commands": [
+       "EnwKBwoFPGlkMD4ScQoHcHJlZGljdBJmCmTCAWEKLroBKwoDdWR0EiRvcmcuYXBhY2hlLnNwYXJrLm1sLmxpbmFsZy5WZWN0b3JVRFQSAiABEgQKAgoAEgQKAgoAEh/KARwqGgoYAAAAAAAABEAAAAAAAADwPwAAAAAAAPg/"
+      ],
+      "results": [
+       "CglZ+Hi8QlotAEA="
+      ],
+      "value": 2.022144814850545
+     },
+     "repr()": {
+      "call": "repr(loaded)",
+      "commands": [
+       "EhUKBwoFPGlkMD4SCgoIdG9TdHJpbmc="
+      ],
+      "results": [
+       "CnRqckdlbmVyYWxpemVkTGluZWFyUmVncmVzc2lvbk1vZGVsOiB1aWQ9R2VuZXJhbGl6ZWRMaW5lYXJSZWdyZXNzaW9uX3BvaXNzb24sIGZhbWlseT1wb2lzc29uLCBsaW5rPWxvZywgbnVtRmVhdHVyZXM9Mw=="
+      ],
+      "value": "GeneralizedLinearRegressionModel: uid=GeneralizedLinearRegression_poisson, family=poisson, link=log, numFeatures=3"
+     },
+     "str()": {
+      "call": "str(loaded)",
+      "commands": [
+       "EhUKBwoFPGlkMD4SCgoIdG9TdHJpbmc="
+      ],
+      "results": [
+       "CnRqckdlbmVyYWxpemVkTGluZWFyUmVncmVzc2lvbk1vZGVsOiB1aWQ9R2VuZXJhbGl6ZWRMaW5lYXJSZWdyZXNzaW9uX3BvaXNzb24sIGZhbWlseT1wb2lzc29uLCBsaW5rPWxvZywgbnVtRmVhdHVyZXM9Mw=="
+      ],
+      "value": "GeneralizedLinearRegressionModel: uid=GeneralizedLinearRegression_poisson, family=poisson, link=log, numFeatures=3"
+     },
+     "transform": {
+      "call": "loaded.transform(counts_held_out)",
+      "commands": [
+       "Ct8DCgcKBTxpZDA+Gp4DCgCKAZgDCpEDCgAajAMK1QIKALoBzwIKmAIKAFqTAhKQAnsiZmllbGRzIjpbeyJtZXRhZGF0YSI6e30sIm5hbWUiOiJsYWJlbCIsIm51bGxhYmxlIjp0cnVlLCJ0eXBlIjoiZG91YmxlIn0seyJtZXRhZGF0YSI6e30sIm5hbWUiOiJ3ZWlnaHQiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoiZmVhdHVyZXMiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6eyJjb250YWluc051bGwiOnRydWUsImVsZW1lbnRUeXBlIjoiZG91YmxlIiwidHlwZSI6ImFycmF5In19XSwidHlwZSI6InN0cnVjdCJ9EjIKJhokCg9hcnJheV90b192ZWN0b3ISERIMCghmZWF0dXJlcxgAkgEAEghmZWF0dXJlcxoOEgkKBWxhYmVsGACSAQAaDxIKCgZ3ZWlnaHQYAJIBABoREgwKCGZlYXR1cmVzGACSAQAQARgAIjMKEwoGZmFtaWx5EglqB3BvaXNzb24KDQoEbGluaxIFagNsb2cKDQoHbWF4SXRlchICMBk="
+      ],
+      "results": [],
+      "value": {
+       "rows": [
+        [
+         3.0,
+         1.0,
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           2.5,
+           1.0,
+           1.5
+          ]
+         },
+         2.022144814850545
+        ],
+        [
+         3.0,
+         1.0,
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           6.5,
+           2.0,
+           0.5
+          ]
+         },
+         4.201205338764153
+        ],
+        [
+         3.0,
+         1.0,
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           9.5,
+           0.0,
+           2.5
+          ]
+         },
+         11.943064940517358
+        ]
+       ],
+       "schema": "struct<label:double,weight:double,features:vector,prediction:double>"
+      }
+     }
+    },
+    "skipped": {
+     "Param attribute (client side)": [
+      "aggregationDepth",
+      "family",
+      "featuresCol",
+      "fitIntercept",
+      "labelCol",
+      "link",
+      "linkPower",
+      "linkPredictionCol",
+      "maxIter",
+      "offsetCol",
+      "predictionCol",
+      "regParam",
+      "solver",
+      "tol",
+      "variancePower",
+      "weightCol"
+     ],
+     "Params API (client side)": [
+      "clear",
+      "copy",
+      "explainParam",
+      "explainParams",
+      "extractParamMap",
+      "getOrDefault",
+      "getParam",
+      "hasDefault",
+      "hasParam",
+      "isDefined",
+      "isSet",
+      "params",
+      "set",
+      "uid"
+     ],
+     "Params getter or setter (client side)": [
+      "getAggregationDepth",
+      "getFamily",
+      "getFeaturesCol",
+      "getFitIntercept",
+      "getLabelCol",
+      "getLink",
+      "getLinkPower",
+      "getLinkPredictionCol",
+      "getMaxIter",
+      "getOffsetCol",
+      "getPredictionCol",
+      "getRegParam",
+      "getSolver",
+      "getTol",
+      "getVariancePower",
+      "getWeightCol",
+      "setFeaturesCol",
+      "setLinkPredictionCol",
+      "setPredictionCol"
+     ],
+     "not captured on this copy (partial)": [
+      "coefficients",
+      "evaluate",
+      "hasSummary",
+      "intercept",
+      "numFeatures",
+      "summary"
+     ],
+     "persistence (captured by Golden.persist)": [
+      "load",
+      "read",
+      "save",
+      "write"
+     ]
+    }
+   },
+   "params_after": {
+    "aggregationDepth": 2,
+    "family": "poisson",
+    "featuresCol": "features",
+    "fitIntercept": true,
+    "labelCol": "label",
+    "link": "log",
+    "maxIter": 25,
+    "predictionCol": "prediction",
+    "regParam": 0.0,
+    "solver": "irls",
+    "tol": 1e-06,
+    "variancePower": 0.0
+   },
+   "params_before": {
+    "aggregationDepth": 2,
+    "family": "poisson",
+    "featuresCol": "features",
+    "fitIntercept": true,
+    "labelCol": "label",
+    "link": "log",
+    "maxIter": 25,
+    "predictionCol": "prediction",
+    "regParam": 0.0,
+    "solver": "irls",
+    "tol": 1e-06,
+    "variancePower": 0.0
+   },
+   "save": {
+    "call": "model.write().overwrite().save(path)",
+    "commands": [
+     "IkgSBwoFPGlkMD4aMwoTCgZmYW1pbHkSCWoHcG9pc3NvbgoNCgRsaW5rEgVqA2xvZwoNCgdtYXhJdGVyEgIwGSIGPHBhdGg+KAE="
+    ],
+    "results": [
+     ""
+    ],
+    "value": null
+   },
+   "uid": "GeneralizedLinearRegression_poisson",
+   "uid_same": true
+  },
+  "GeneralizedLinearRegression.tweedie.estimator": {
+   "load": {
+    "call": "GeneralizedLinearRegression.load(path)",
+    "commands": [
+     "KkgKPgo6b3JnLmFwYWNoZS5zcGFyay5tbC5yZWdyZXNzaW9uLkdlbmVyYWxpemVkTGluZWFyUmVncmVzc2lvbhgBEgY8cGF0aD4="
+    ],
+    "results": [
+     "Gp4BEjpvcmcuYXBhY2hlLnNwYXJrLm1sLnJlZ3Jlc3Npb24uR2VuZXJhbGl6ZWRMaW5lYXJSZWdyZXNzaW9uGgY8dWlkMD4iWAoTCgZmYW1pbHkSCWoHdHdlZWRpZQoWCglsaW5rUG93ZXISCVkAAAAAAAAAAAoNCgdtYXhJdGVyEgIwGQoaCg12YXJpYW5jZVBvd2VyEglZAAAAAAAA+D8="
+    ],
+    "value": {
+     "type": "GeneralizedLinearRegression",
+     "uid": "GeneralizedLinearRegression_tweedie"
+    }
+   },
+   "params_after": {
+    "aggregationDepth": 2,
+    "family": "tweedie",
+    "featuresCol": "features",
+    "fitIntercept": true,
+    "labelCol": "label",
+    "linkPower": 0.0,
+    "maxIter": 25,
+    "predictionCol": "prediction",
+    "regParam": 0.0,
+    "solver": "irls",
+    "tol": 1e-06,
+    "variancePower": 1.5
+   },
+   "params_before": {
+    "aggregationDepth": 2,
+    "family": "tweedie",
+    "featuresCol": "features",
+    "fitIntercept": true,
+    "labelCol": "label",
+    "linkPower": 0.0,
+    "maxIter": 25,
+    "predictionCol": "prediction",
+    "regParam": 0.0,
+    "solver": "irls",
+    "tol": 1e-06,
+    "variancePower": 1.5
+   },
+   "save": {
+    "call": "estimator.write().overwrite().save(path)",
+    "commands": [
+     "IqwBCkYKOm9yZy5hcGFjaGUuc3BhcmsubWwucmVncmVzc2lvbi5HZW5lcmFsaXplZExpbmVhclJlZ3Jlc3Npb24SBjx1aWQwPhgBGlgKEwoGZmFtaWx5EglqB3R3ZWVkaWUKFgoJbGlua1Bvd2VyEglZAAAAAAAAAAAKDQoHbWF4SXRlchICMBkKGgoNdmFyaWFuY2VQb3dlchIJWQAAAAAAAPg/IgY8cGF0aD4oAQ=="
+    ],
+    "results": [
+     ""
+    ],
+    "value": null
+   },
+   "uid": "GeneralizedLinearRegression_tweedie",
+   "uid_same": true
+  },
+  "GeneralizedLinearRegression.tweedie.model": {
+   "load": {
+    "call": "GeneralizedLinearRegressionModel.load(path)",
+    "commands": [
+     "Kk0KQwo/b3JnLmFwYWNoZS5zcGFyay5tbC5yZWdyZXNzaW9uLkdlbmVyYWxpemVkTGluZWFyUmVncmVzc2lvbk1vZGVsGAQSBjxwYXRoPg=="
+    ],
+    "results": [
+     "GmsKBwoFPGlkMD4aBjx1aWQwPiJYChMKBmZhbWlseRIJagd0d2VlZGllChYKCWxpbmtQb3dlchIJWQAAAAAAAAAACg0KB21heEl0ZXISAjAZChoKDXZhcmlhbmNlUG93ZXISCVkAAAAAAAD4Pw=="
+    ],
+    "value": {
+     "ref": "<id0>",
+     "type": "GeneralizedLinearRegressionModel"
+    }
+   },
+   "members": {
+    "class": "GeneralizedLinearRegressionModel",
+    "members": {
+     "predict-dense": {
+      "call": "loaded.predict(Vectors.dense([2.5, 1.0, 1.5]))",
+      "commands": [
+       "EnwKBwoFPGlkMD4ScQoHcHJlZGljdBJmCmTCAWEKLroBKwoDdWR0EiRvcmcuYXBhY2hlLnNwYXJrLm1sLmxpbmFsZy5WZWN0b3JVRFQSAiABEgQKAgoAEgQKAgoAEh/KARwqGgoYAAAAAAAABEAAAAAAAADwPwAAAAAAAPg/"
+      ],
+      "results": [
+       "CglZlI+XbhnvGEA="
+      ],
+      "value": 6.233495452881375
+     },
+     "repr()": {
+      "call": "repr(loaded)",
+      "commands": [
+       "EhUKBwoFPGlkMD4SCgoIdG9TdHJpbmc="
+      ],
+      "error": {
+       "class": "UnknownException",
+       "condition": null,
+       "message": "(java.util.NoSuchElementException) Failed to find a default value for link"
+      },
+      "results": []
+     },
+     "str()": {
+      "call": "str(loaded)",
+      "commands": [
+       "EhUKBwoFPGlkMD4SCgoIdG9TdHJpbmc="
+      ],
+      "error": {
+       "class": "UnknownException",
+       "condition": null,
+       "message": "(java.util.NoSuchElementException) Failed to find a default value for link"
+      },
+      "results": []
+     },
+     "transform": {
+      "call": "loaded.transform(rows_held_out)",
+      "commands": [
+       "CoQECgcKBTxpZDA+Gp4DCgCKAZgDCpEDCgAajAMK1QIKALoBzwIKmAIKAFqTAhKQAnsiZmllbGRzIjpbeyJtZXRhZGF0YSI6e30sIm5hbWUiOiJsYWJlbCIsIm51bGxhYmxlIjp0cnVlLCJ0eXBlIjoiZG91YmxlIn0seyJtZXRhZGF0YSI6e30sIm5hbWUiOiJ3ZWlnaHQiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoiZmVhdHVyZXMiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6eyJjb250YWluc051bGwiOnRydWUsImVsZW1lbnRUeXBlIjoiZG91YmxlIiwidHlwZSI6ImFycmF5In19XSwidHlwZSI6InN0cnVjdCJ9EjIKJhokCg9hcnJheV90b192ZWN0b3ISERIMCghmZWF0dXJlcxgAkgEAEghmZWF0dXJlcxoOEgkKBWxhYmVsGACSAQAaDxIKCgZ3ZWlnaHQYAJIBABoREgwKCGZlYXR1cmVzGACSAQAQARgAIlgKEwoGZmFtaWx5EglqB3R3ZWVkaWUKFgoJbGlua1Bvd2VyEglZAAAAAAAAAAAKDQoHbWF4SXRlchICMBkKGgoNdmFyaWFuY2VQb3dlchIJWQAAAAAAAPg/"
+      ],
+      "results": [],
+      "value": {
+       "rows": [
+        [
+         18.0,
+         1.0,
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           9.5,
+           0.0,
+           2.5
+          ]
+         },
+         15.21704076996703
+        ],
+        [
+         4.5,
+         1.0,
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           6.5,
+           2.0,
+           0.5
+          ]
+         },
+         7.495965893954623
+        ],
+        [
+         6.0,
+         1.0,
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           2.5,
+           1.0,
+           1.5
+          ]
+         },
+         6.233495452881375
+        ]
+       ],
+       "schema": "struct<label:double,weight:double,features:vector,prediction:double>"
+      }
+     }
+    },
+    "skipped": {
+     "Param attribute (client side)": [
+      "aggregationDepth",
+      "family",
+      "featuresCol",
+      "fitIntercept",
+      "labelCol",
+      "link",
+      "linkPower",
+      "linkPredictionCol",
+      "maxIter",
+      "offsetCol",
+      "predictionCol",
+      "regParam",
+      "solver",
+      "tol",
+      "variancePower",
+      "weightCol"
+     ],
+     "Params API (client side)": [
+      "clear",
+      "copy",
+      "explainParam",
+      "explainParams",
+      "extractParamMap",
+      "getOrDefault",
+      "getParam",
+      "hasDefault",
+      "hasParam",
+      "isDefined",
+      "isSet",
+      "params",
+      "set",
+      "uid"
+     ],
+     "Params getter or setter (client side)": [
+      "getAggregationDepth",
+      "getFamily",
+      "getFeaturesCol",
+      "getFitIntercept",
+      "getLabelCol",
+      "getLink",
+      "getLinkPower",
+      "getLinkPredictionCol",
+      "getMaxIter",
+      "getOffsetCol",
+      "getPredictionCol",
+      "getRegParam",
+      "getSolver",
+      "getTol",
+      "getVariancePower",
+      "getWeightCol",
+      "setFeaturesCol",
+      "setLinkPredictionCol",
+      "setPredictionCol"
+     ],
+     "not captured on this copy (partial)": [
+      "coefficients",
+      "evaluate",
+      "hasSummary",
+      "intercept",
+      "numFeatures",
+      "summary"
+     ],
+     "persistence (captured by Golden.persist)": [
+      "load",
+      "read",
+      "save",
+      "write"
+     ]
+    }
+   },
+   "params_after": {
+    "aggregationDepth": 2,
+    "family": "tweedie",
+    "featuresCol": "features",
+    "fitIntercept": true,
+    "labelCol": "label",
+    "linkPower": 0.0,
+    "maxIter": 25,
+    "predictionCol": "prediction",
+    "regParam": 0.0,
+    "solver": "irls",
+    "tol": 1e-06,
+    "variancePower": 1.5
+   },
+   "params_before": {
+    "aggregationDepth": 2,
+    "family": "tweedie",
+    "featuresCol": "features",
+    "fitIntercept": true,
+    "labelCol": "label",
+    "linkPower": 0.0,
+    "maxIter": 25,
+    "predictionCol": "prediction",
+    "regParam": 0.0,
+    "solver": "irls",
+    "tol": 1e-06,
+    "variancePower": 1.5
+   },
+   "save": {
+    "call": "model.write().overwrite().save(path)",
+    "commands": [
+     "Im0SBwoFPGlkMD4aWAoTCgZmYW1pbHkSCWoHdHdlZWRpZQoWCglsaW5rUG93ZXISCVkAAAAAAAAAAAoNCgdtYXhJdGVyEgIwGQoaCg12YXJpYW5jZVBvd2VyEglZAAAAAAAA+D8iBjxwYXRoPigB"
+    ],
+    "results": [
+     ""
+    ],
+    "value": null
+   },
+   "uid": "GeneralizedLinearRegression_tweedie",
+   "uid_same": true
+  },
+  "IsotonicRegression.antitonic.estimator": {
+   "load": {
+    "call": "IsotonicRegression.load(path)",
+    "commands": [
+     "Kj8KNQoxb3JnLmFwYWNoZS5zcGFyay5tbC5yZWdyZXNzaW9uLklzb3RvbmljUmVncmVzc2lvbhgBEgY8cGF0aD4="
+    ],
+    "results": [
+     "GmESMW9yZy5hcGFjaGUuc3BhcmsubWwucmVncmVzc2lvbi5Jc290b25pY1JlZ3Jlc3Npb24aBjx1aWQwPiIkChIKDGZlYXR1cmVJbmRleBICMAEKDgoIaXNvdG9uaWMSAhgA"
+    ],
+    "value": {
+     "type": "IsotonicRegression",
+     "uid": "IsotonicRegression_antitonic"
+    }
+   },
+   "params_after": {
+    "featureIndex": 1,
+    "featuresCol": "features",
+    "isotonic": false,
+    "labelCol": "label",
+    "predictionCol": "prediction"
+   },
+   "params_before": {
+    "featureIndex": 1,
+    "featuresCol": "features",
+    "isotonic": false,
+    "labelCol": "label",
+    "predictionCol": "prediction"
+   },
+   "save": {
+    "call": "estimator.write().overwrite().save(path)",
+    "commands": [
+     "Im8KPQoxb3JnLmFwYWNoZS5zcGFyay5tbC5yZWdyZXNzaW9uLklzb3RvbmljUmVncmVzc2lvbhIGPHVpZDA+GAEaJAoSCgxmZWF0dXJlSW5kZXgSAjABCg4KCGlzb3RvbmljEgIYACIGPHBhdGg+KAE="
+    ],
+    "results": [
+     ""
+    ],
+    "value": null
+   },
+   "uid": "IsotonicRegression_antitonic",
+   "uid_same": true
+  },
+  "IsotonicRegression.antitonic.model": {
+   "load": {
+    "call": "IsotonicRegressionModel.load(path)",
+    "commands": [
+     "KkQKOgo2b3JnLmFwYWNoZS5zcGFyay5tbC5yZWdyZXNzaW9uLklzb3RvbmljUmVncmVzc2lvbk1vZGVsGAQSBjxwYXRoPg=="
+    ],
+    "results": [
+     "GjcKBwoFPGlkMD4aBjx1aWQwPiIkChIKDGZlYXR1cmVJbmRleBICMAEKDgoIaXNvdG9uaWMSAhgA"
+    ],
+    "value": {
+     "ref": "<id0>",
+     "type": "IsotonicRegressionModel"
+    }
+   },
+   "members": {
+    "class": "IsotonicRegressionModel",
+    "members": {
+     "predict-0.0": {
+      "call": "loaded.predict(0.0)",
+      "commands": [
+       "EiEKBwoFPGlkMD4SFgoHcHJlZGljdBILCglZAAAAAAAAAAA="
+      ],
+      "results": [
+       "CglZq6qqqqqqAkA="
+      ],
+      "value": 2.3333333333333335
+     },
+     "predict-2.5": {
+      "call": "loaded.predict(2.5)",
+      "commands": [
+       "EiEKBwoFPGlkMD4SFgoHcHJlZGljdBILCglZAAAAAAAABEA="
+      ],
+      "results": [
+       "CglZq6qqqqqqAkA="
+      ],
+      "value": 2.3333333333333335
+     },
+     "predict-7.0": {
+      "call": "loaded.predict(7.0)",
+      "commands": [
+       "EiEKBwoFPGlkMD4SFgoHcHJlZGljdBILCglZAAAAAAAAHEA="
+      ],
+      "results": [
+       "CglZq6qqqqqqAkA="
+      ],
+      "value": 2.3333333333333335
+     },
+     "repr()": {
+      "call": "repr(loaded)",
+      "commands": [
+       "EhUKBwoFPGlkMD4SCgoIdG9TdHJpbmc="
+      ],
+      "results": [
+       "CkpqSElzb3RvbmljUmVncmVzc2lvbk1vZGVsOiB1aWQ9SXNvdG9uaWNSZWdyZXNzaW9uX2FudGl0b25pYywgbnVtRmVhdHVyZXM9MQ=="
+      ],
+      "value": "IsotonicRegressionModel: uid=IsotonicRegression_antitonic, numFeatures=1"
+     },
+     "str()": {
+      "call": "str(loaded)",
+      "commands": [
+       "EhUKBwoFPGlkMD4SCgoIdG9TdHJpbmc="
+      ],
+      "results": [
+       "CkpqSElzb3RvbmljUmVncmVzc2lvbk1vZGVsOiB1aWQ9SXNvdG9uaWNSZWdyZXNzaW9uX2FudGl0b25pYywgbnVtRmVhdHVyZXM9MQ=="
+      ],
+      "value": "IsotonicRegressionModel: uid=IsotonicRegression_antitonic, numFeatures=1"
+     },
+     "transform": {
+      "call": "loaded.transform(isotonic_held_out)",
+      "commands": [
+       "CtADCgcKBTxpZDA+Gp4DCgCKAZgDCpEDCgAajAMK1QIKALoBzwIKmAIKAFqTAhKQAnsiZmllbGRzIjpbeyJtZXRhZGF0YSI6e30sIm5hbWUiOiJsYWJlbCIsIm51bGxhYmxlIjp0cnVlLCJ0eXBlIjoiZG91YmxlIn0seyJtZXRhZGF0YSI6e30sIm5hbWUiOiJ3ZWlnaHQiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoiZmVhdHVyZXMiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6eyJjb250YWluc051bGwiOnRydWUsImVsZW1lbnRUeXBlIjoiZG91YmxlIiwidHlwZSI6ImFycmF5In19XSwidHlwZSI6InN0cnVjdCJ9EjIKJhokCg9hcnJheV90b192ZWN0b3ISERIMCghmZWF0dXJlcxgAkgEAEghmZWF0dXJlcxoOEgkKBWxhYmVsGACSAQAaDxIKCgZ3ZWlnaHQYAJIBABoREgwKCGZlYXR1cmVzGACSAQAQARgAIiQKEgoMZmVhdHVyZUluZGV4EgIwAQoOCghpc290b25pYxICGAA="
+      ],
+      "results": [],
+      "value": {
+       "rows": [
+        [
+         2.0,
+         1.0,
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           0.0,
+           2.5
+          ]
+         },
+         2.3333333333333335
+        ],
+        [
+         5.0,
+         1.0,
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           0.0,
+           8.0
+          ]
+         },
+         2.3333333333333335
+        ]
+       ],
+       "schema": "struct<label:double,weight:double,features:vector,prediction:double>"
+      }
+     }
+    },
+    "skipped": {
+     "Param attribute (client side)": [
+      "featureIndex",
+      "featuresCol",
+      "isotonic",
+      "labelCol",
+      "predictionCol",
+      "weightCol"
+     ],
+     "Params API (client side)": [
+      "clear",
+      "copy",
+      "explainParam",
+      "explainParams",
+      "extractParamMap",
+      "getOrDefault",
+      "getParam",
+      "hasDefault",
+      "hasParam",
+      "isDefined",
+      "isSet",
+      "params",
+      "set",
+      "uid"
+     ],
+     "Params getter or setter (client side)": [
+      "getFeatureIndex",
+      "getFeaturesCol",
+      "getIsotonic",
+      "getLabelCol",
+      "getPredictionCol",
+      "getWeightCol",
+      "setFeatureIndex",
+      "setFeaturesCol",
+      "setPredictionCol"
+     ],
+     "not captured on this copy (partial)": [
+      "boundaries",
+      "numFeatures",
+      "predictions"
+     ],
+     "persistence (captured by Golden.persist)": [
+      "load",
+      "read",
+      "save",
+      "write"
+     ]
+    }
+   },
+   "params_after": {
+    "featureIndex": 1,
+    "featuresCol": "features",
+    "isotonic": false,
+    "labelCol": "label",
+    "predictionCol": "prediction"
+   },
+   "params_before": {
+    "featureIndex": 1,
+    "featuresCol": "features",
+    "isotonic": false,
+    "labelCol": "label",
+    "predictionCol": "prediction"
+   },
+   "save": {
+    "call": "model.write().overwrite().save(path)",
+    "commands": [
+     "IjkSBwoFPGlkMD4aJAoSCgxmZWF0dXJlSW5kZXgSAjABCg4KCGlzb3RvbmljEgIYACIGPHBhdGg+KAE="
+    ],
+    "results": [
+     ""
+    ],
+    "value": null
+   },
+   "uid": "IsotonicRegression_antitonic",
+   "uid_same": true
+  },
+  "IsotonicRegression.weighted.estimator": {
+   "load": {
+    "call": "IsotonicRegression.load(path)",
+    "commands": [
+     "Kj8KNQoxb3JnLmFwYWNoZS5zcGFyay5tbC5yZWdyZXNzaW9uLklzb3RvbmljUmVncmVzc2lvbhgBEgY8cGF0aD4="
+    ],
+    "results": [
+     "GmgSMW9yZy5hcGFjaGUuc3BhcmsubWwucmVncmVzc2lvbi5Jc290b25pY1JlZ3Jlc3Npb24aBjx1aWQwPiIrChIKDGZlYXR1cmVJbmRleBICMAEKFQoJd2VpZ2h0Q29sEghqBndlaWdodA=="
+    ],
+    "value": {
+     "type": "IsotonicRegression",
+     "uid": "IsotonicRegression_weighted"
+    }
+   },
+   "params_after": {
+    "featureIndex": 1,
+    "featuresCol": "features",
+    "isotonic": true,
+    "labelCol": "label",
+    "predictionCol": "prediction",
+    "weightCol": "weight"
+   },
+   "params_before": {
+    "featureIndex": 1,
+    "featuresCol": "features",
+    "isotonic": true,
+    "labelCol": "label",
+    "predictionCol": "prediction",
+    "weightCol": "weight"
+   },
+   "save": {
+    "call": "estimator.write().overwrite().save(path)",
+    "commands": [
+     "InYKPQoxb3JnLmFwYWNoZS5zcGFyay5tbC5yZWdyZXNzaW9uLklzb3RvbmljUmVncmVzc2lvbhIGPHVpZDA+GAEaKwoSCgxmZWF0dXJlSW5kZXgSAjABChUKCXdlaWdodENvbBIIagZ3ZWlnaHQiBjxwYXRoPigB"
+    ],
+    "results": [
+     ""
+    ],
+    "value": null
+   },
+   "uid": "IsotonicRegression_weighted",
+   "uid_same": true
+  },
+  "IsotonicRegression.weighted.model": {
+   "load": {
+    "call": "IsotonicRegressionModel.load(path)",
+    "commands": [
+     "KkQKOgo2b3JnLmFwYWNoZS5zcGFyay5tbC5yZWdyZXNzaW9uLklzb3RvbmljUmVncmVzc2lvbk1vZGVsGAQSBjxwYXRoPg=="
+    ],
+    "results": [
+     "Gj4KBwoFPGlkMD4aBjx1aWQwPiIrChIKDGZlYXR1cmVJbmRleBICMAEKFQoJd2VpZ2h0Q29sEghqBndlaWdodA=="
+    ],
+    "value": {
+     "ref": "<id0>",
+     "type": "IsotonicRegressionModel"
+    }
+   },
+   "members": {
+    "class": "IsotonicRegressionModel",
+    "members": {
+     "predict-0.0": {
+      "call": "loaded.predict(0.0)",
+      "commands": [
+       "EiEKBwoFPGlkMD4SFgoHcHJlZGljdBILCglZAAAAAAAAAAA="
+      ],
+      "results": [
+       "CglZAAAAAAAA8D8="
+      ],
+      "value": 1.0
+     },
+     "predict-2.5": {
+      "call": "loaded.predict(2.5)",
+      "commands": [
+       "EiEKBwoFPGlkMD4SFgoHcHJlZGljdBILCglZAAAAAAAABEA="
+      ],
+      "results": [
+       "CglZVVVVVVVV/T8="
+      ],
+      "value": 1.8333333333333333
+     },
+     "predict-7.0": {
+      "call": "loaded.predict(7.0)",
+      "commands": [
+       "EiEKBwoFPGlkMD4SFgoHcHJlZGljdBILCglZAAAAAAAAHEA="
+      ],
+      "results": [
+       "CglZAAAAAAAAEEA="
+      ],
+      "value": 4.0
+     },
+     "repr()": {
+      "call": "repr(loaded)",
+      "commands": [
+       "EhUKBwoFPGlkMD4SCgoIdG9TdHJpbmc="
+      ],
+      "results": [
+       "CklqR0lzb3RvbmljUmVncmVzc2lvbk1vZGVsOiB1aWQ9SXNvdG9uaWNSZWdyZXNzaW9uX3dlaWdodGVkLCBudW1GZWF0dXJlcz0x"
+      ],
+      "value": "IsotonicRegressionModel: uid=IsotonicRegression_weighted, numFeatures=1"
+     },
+     "str()": {
+      "call": "str(loaded)",
+      "commands": [
+       "EhUKBwoFPGlkMD4SCgoIdG9TdHJpbmc="
+      ],
+      "results": [
+       "CklqR0lzb3RvbmljUmVncmVzc2lvbk1vZGVsOiB1aWQ9SXNvdG9uaWNSZWdyZXNzaW9uX3dlaWdodGVkLCBudW1GZWF0dXJlcz0x"
+      ],
+      "value": "IsotonicRegressionModel: uid=IsotonicRegression_weighted, numFeatures=1"
+     },
+     "transform": {
+      "call": "loaded.transform(isotonic_held_out)",
+      "commands": [
+       "CtcDCgcKBTxpZDA+Gp4DCgCKAZgDCpEDCgAajAMK1QIKALoBzwIKmAIKAFqTAhKQAnsiZmllbGRzIjpbeyJtZXRhZGF0YSI6e30sIm5hbWUiOiJsYWJlbCIsIm51bGxhYmxlIjp0cnVlLCJ0eXBlIjoiZG91YmxlIn0seyJtZXRhZGF0YSI6e30sIm5hbWUiOiJ3ZWlnaHQiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoiZmVhdHVyZXMiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6eyJjb250YWluc051bGwiOnRydWUsImVsZW1lbnRUeXBlIjoiZG91YmxlIiwidHlwZSI6ImFycmF5In19XSwidHlwZSI6InN0cnVjdCJ9EjIKJhokCg9hcnJheV90b192ZWN0b3ISERIMCghmZWF0dXJlcxgAkgEAEghmZWF0dXJlcxoOEgkKBWxhYmVsGACSAQAaDxIKCgZ3ZWlnaHQYAJIBABoREgwKCGZlYXR1cmVzGACSAQAQARgAIisKEgoMZmVhdHVyZUluZGV4EgIwAQoVCgl3ZWlnaHRDb2wSCGoGd2VpZ2h0"
+      ],
+      "results": [],
+      "value": {
+       "rows": [
+        [
+         2.0,
+         1.0,
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           0.0,
+           2.5
+          ]
+         },
+         1.8333333333333333
+        ],
+        [
+         5.0,
+         1.0,
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           0.0,
+           8.0
+          ]
+         },
+         4.0
+        ]
+       ],
+       "schema": "struct<label:double,weight:double,features:vector,prediction:double>"
+      }
+     }
+    },
+    "skipped": {
+     "Param attribute (client side)": [
+      "featureIndex",
+      "featuresCol",
+      "isotonic",
+      "labelCol",
+      "predictionCol",
+      "weightCol"
+     ],
+     "Params API (client side)": [
+      "clear",
+      "copy",
+      "explainParam",
+      "explainParams",
+      "extractParamMap",
+      "getOrDefault",
+      "getParam",
+      "hasDefault",
+      "hasParam",
+      "isDefined",
+      "isSet",
+      "params",
+      "set",
+      "uid"
+     ],
+     "Params getter or setter (client side)": [
+      "getFeatureIndex",
+      "getFeaturesCol",
+      "getIsotonic",
+      "getLabelCol",
+      "getPredictionCol",
+      "getWeightCol",
+      "setFeatureIndex",
+      "setFeaturesCol",
+      "setPredictionCol"
+     ],
+     "not captured on this copy (partial)": [
+      "boundaries",
+      "numFeatures",
+      "predictions"
+     ],
+     "persistence (captured by Golden.persist)": [
+      "load",
+      "read",
+      "save",
+      "write"
+     ]
+    }
+   },
+   "params_after": {
+    "featureIndex": 1,
+    "featuresCol": "features",
+    "isotonic": true,
+    "labelCol": "label",
+    "predictionCol": "prediction",
+    "weightCol": "weight"
+   },
+   "params_before": {
+    "featureIndex": 1,
+    "featuresCol": "features",
+    "isotonic": true,
+    "labelCol": "label",
+    "predictionCol": "prediction",
+    "weightCol": "weight"
+   },
+   "save": {
+    "call": "model.write().overwrite().save(path)",
+    "commands": [
+     "IkASBwoFPGlkMD4aKwoSCgxmZWF0dXJlSW5kZXgSAjABChUKCXdlaWdodENvbBIIagZ3ZWlnaHQiBjxwYXRoPigB"
+    ],
+    "results": [
+     ""
+    ],
+    "value": null
+   },
+   "uid": "IsotonicRegression_weighted",
+   "uid_same": true
+  },
+  "LinearRegression.huber.estimator": {
+   "load": {
+    "call": "LinearRegression.load(path)",
+    "commands": [
+     "Kj0KMwovb3JnLmFwYWNoZS5zcGFyay5tbC5yZWdyZXNzaW9uLkxpbmVhclJlZ3Jlc3Npb24YARIGPHBhdGg+"
+    ],
+    "results": [
+     "GlsSL29yZy5hcGFjaGUuc3BhcmsubWwucmVncmVzc2lvbi5MaW5lYXJSZWdyZXNzaW9uGgY8dWlkMD4iIAoPCgRsb3NzEgdqBWh1YmVyCg0KB21heEl0ZXISAjAU"
+    ],
+    "value": {
+     "type": "LinearRegression",
+     "uid": "LinearRegression_huber"
+    }
+   },
+   "params_after": {
+    "aggregationDepth": 2,
+    "elasticNetParam": 0.0,
+    "epsilon": 1.35,
+    "featuresCol": "features",
+    "fitIntercept": true,
+    "labelCol": "label",
+    "loss": "huber",
+    "maxBlockSizeInMB": 0.0,
+    "maxIter": 20,
+    "predictionCol": "prediction",
+    "regParam": 0.0,
+    "solver": "auto",
+    "standardization": true,
+    "tol": 1e-06
+   },
+   "params_before": {
+    "aggregationDepth": 2,
+    "elasticNetParam": 0.0,
+    "epsilon": 1.35,
+    "featuresCol": "features",
+    "fitIntercept": true,
+    "labelCol": "label",
+    "loss": "huber",
+    "maxBlockSizeInMB": 0.0,
+    "maxIter": 20,
+    "predictionCol": "prediction",
+    "regParam": 0.0,
+    "solver": "auto",
+    "standardization": true,
+    "tol": 1e-06
+   },
+   "save": {
+    "call": "estimator.write().overwrite().save(path)",
+    "commands": [
+     "ImkKOwovb3JnLmFwYWNoZS5zcGFyay5tbC5yZWdyZXNzaW9uLkxpbmVhclJlZ3Jlc3Npb24SBjx1aWQwPhgBGiAKDwoEbG9zcxIHagVodWJlcgoNCgdtYXhJdGVyEgIwFCIGPHBhdGg+KAE="
+    ],
+    "results": [
+     ""
+    ],
+    "value": null
+   },
+   "uid": "LinearRegression_huber",
+   "uid_same": true
+  },
+  "LinearRegression.huber.model": {
+   "load": {
+    "call": "LinearRegressionModel.load(path)",
+    "commands": [
+     "KkIKOAo0b3JnLmFwYWNoZS5zcGFyay5tbC5yZWdyZXNzaW9uLkxpbmVhclJlZ3Jlc3Npb25Nb2RlbBgEEgY8cGF0aD4="
+    ],
+    "results": [
+     "GjMKBwoFPGlkMD4aBjx1aWQwPiIgCg8KBGxvc3MSB2oFaHViZXIKDQoHbWF4SXRlchICMBQ="
+    ],
+    "value": {
+     "ref": "<id0>",
+     "type": "LinearRegressionModel"
+    }
+   },
+   "members": {
+    "class": "LinearRegressionModel",
+    "members": {
+     "predict-dense": {
+      "call": "loaded.predict(Vectors.dense([2.5, 1.0, 1.5]))",
+      "commands": [
+       "EnwKBwoFPGlkMD4ScQoHcHJlZGljdBJmCmTCAWEKLroBKwoDdWR0EiRvcmcuYXBhY2hlLnNwYXJrLm1sLmxpbmFsZy5WZWN0b3JVRFQSAiABEgQKAgoAEgQKAgoAEh/KARwqGgoYAAAAAAAABEAAAAAAAADwPwAAAAAAAPg/"
+      ],
+      "results": [
+       "CglZ7JIua0B4FkA="
+      ],
+      "value": 5.617433237760206
+     },
+     "predict-sparse": {
+      "call": "loaded.predict(Vectors.sparse(3, [0, 2], [2.5, 1.5]))",
+      "commands": [
+       "EncKBwoFPGlkMD4SbAoHcHJlZGljdBJhCl/CAVwKLroBKwoDdWR0EiRvcmcuYXBhY2hlLnNwYXJrLm1sLmxpbmFsZy5WZWN0b3JVRFQSAiAAEgIwAxIJygEGEgQKAgACEhfKARQqEgoQAAAAAAAABEAAAAAAAAD4Pw=="
+      ],
+      "results": [
+       "CglZf6Jn9j1jHUA="
+      ],
+      "value": 7.346916055751193
+     },
+     "repr()": {
+      "call": "repr(loaded)",
+      "commands": [
+       "EhUKBwoFPGlkMD4SCgoIdG9TdHJpbmc="
+      ],
+      "results": [
+       "CkJqQExpbmVhclJlZ3Jlc3Npb25Nb2RlbDogdWlkPUxpbmVhclJlZ3Jlc3Npb25faHViZXIsIG51bUZlYXR1cmVzPTM="
+      ],
+      "value": "LinearRegressionModel: uid=LinearRegression_huber, numFeatures=3"
+     },
+     "str()": {
+      "call": "str(loaded)",
+      "commands": [
+       "EhUKBwoFPGlkMD4SCgoIdG9TdHJpbmc="
+      ],
+      "results": [
+       "CkJqQExpbmVhclJlZ3Jlc3Npb25Nb2RlbDogdWlkPUxpbmVhclJlZ3Jlc3Npb25faHViZXIsIG51bUZlYXR1cmVzPTM="
+      ],
+      "value": "LinearRegressionModel: uid=LinearRegression_huber, numFeatures=3"
+     },
+     "transform": {
+      "call": "loaded.transform(rows_held_out)",
+      "commands": [
+       "CswDCgcKBTxpZDA+Gp4DCgCKAZgDCpEDCgAajAMK1QIKALoBzwIKmAIKAFqTAhKQAnsiZmllbGRzIjpbeyJtZXRhZGF0YSI6e30sIm5hbWUiOiJsYWJlbCIsIm51bGxhYmxlIjp0cnVlLCJ0eXBlIjoiZG91YmxlIn0seyJtZXRhZGF0YSI6e30sIm5hbWUiOiJ3ZWlnaHQiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoiZmVhdHVyZXMiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6eyJjb250YWluc051bGwiOnRydWUsImVsZW1lbnRUeXBlIjoiZG91YmxlIiwidHlwZSI6ImFycmF5In19XSwidHlwZSI6InN0cnVjdCJ9EjIKJhokCg9hcnJheV90b192ZWN0b3ISERIMCghmZWF0dXJlcxgAkgEAEghmZWF0dXJlcxoOEgkKBWxhYmVsGACSAQAaDxIKCgZ3ZWlnaHQYAJIBABoREgwKCGZlYXR1cmVzGACSAQAQARgAIiAKDwoEbG9zcxIHagVodWJlcgoNCgdtYXhJdGVyEgIwFA=="
+      ],
+      "results": [],
+      "value": {
+       "rows": [
+        [
+         18.0,
+         1.0,
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           9.5,
+           0.0,
+           2.5
+          ]
+         },
+         18.07067267708502
+        ],
+        [
+         4.5,
+         1.0,
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           6.5,
+           2.0,
+           0.5
+          ]
+         },
+         8.894362936631008
+        ],
+        [
+         6.0,
+         1.0,
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           2.5,
+           1.0,
+           1.5
+          ]
+         },
+         5.617433237760206
+        ]
+       ],
+       "schema": "struct<label:double,weight:double,features:vector,prediction:double>"
+      }
+     }
+    },
+    "skipped": {
+     "Param attribute (client side)": [
+      "aggregationDepth",
+      "elasticNetParam",
+      "epsilon",
+      "featuresCol",
+      "fitIntercept",
+      "labelCol",
+      "loss",
+      "maxBlockSizeInMB",
+      "maxIter",
+      "predictionCol",
+      "regParam",
+      "solver",
+      "standardization",
+      "tol",
+      "weightCol"
+     ],
+     "Params API (client side)": [
+      "clear",
+      "copy",
+      "explainParam",
+      "explainParams",
+      "extractParamMap",
+      "getOrDefault",
+      "getParam",
+      "hasDefault",
+      "hasParam",
+      "isDefined",
+      "isSet",
+      "params",
+      "set",
+      "uid"
+     ],
+     "Params getter or setter (client side)": [
+      "getAggregationDepth",
+      "getElasticNetParam",
+      "getEpsilon",
+      "getFeaturesCol",
+      "getFitIntercept",
+      "getLabelCol",
+      "getLoss",
+      "getMaxBlockSizeInMB",
+      "getMaxIter",
+      "getPredictionCol",
+      "getRegParam",
+      "getSolver",
+      "getStandardization",
+      "getTol",
+      "getWeightCol",
+      "setFeaturesCol",
+      "setPredictionCol"
+     ],
+     "not captured on this copy (partial)": [
+      "coefficients",
+      "evaluate",
+      "hasSummary",
+      "intercept",
+      "numFeatures",
+      "scale",
+      "summary"
+     ],
+     "persistence (captured by Golden.persist)": [
+      "load",
+      "read",
+      "save",
+      "write"
+     ]
+    }
+   },
+   "params_after": {
+    "aggregationDepth": 2,
+    "elasticNetParam": 0.0,
+    "epsilon": 1.35,
+    "featuresCol": "features",
+    "fitIntercept": true,
+    "labelCol": "label",
+    "loss": "huber",
+    "maxBlockSizeInMB": 0.0,
+    "maxIter": 20,
+    "predictionCol": "prediction",
+    "regParam": 0.0,
+    "solver": "auto",
+    "standardization": true,
+    "tol": 1e-06
+   },
+   "params_before": {
+    "aggregationDepth": 2,
+    "elasticNetParam": 0.0,
+    "epsilon": 1.35,
+    "featuresCol": "features",
+    "fitIntercept": true,
+    "labelCol": "label",
+    "loss": "huber",
+    "maxBlockSizeInMB": 0.0,
+    "maxIter": 20,
+    "predictionCol": "prediction",
+    "regParam": 0.0,
+    "solver": "auto",
+    "standardization": true,
+    "tol": 1e-06
+   },
+   "save": {
+    "call": "model.write().overwrite().save(path)",
+    "commands": [
+     "IjUSBwoFPGlkMD4aIAoPCgRsb3NzEgdqBWh1YmVyCg0KB21heEl0ZXISAjAUIgY8cGF0aD4oAQ=="
+    ],
+    "results": [
+     ""
+    ],
+    "value": null
+   },
+   "uid": "LinearRegression_huber",
+   "uid_same": true
+  },
+  "LinearRegression.l-bfgs.estimator": {
+   "load": {
+    "call": "LinearRegression.load(path)",
+    "commands": [
+     "Kj0KMwovb3JnLmFwYWNoZS5zcGFyay5tbC5yZWdyZXNzaW9uLkxpbmVhclJlZ3Jlc3Npb24YARIGPHBhdGg+"
+    ],
+    "results": [
+     "GnUSL29yZy5hcGFjaGUuc3BhcmsubWwucmVncmVzc2lvbi5MaW5lYXJSZWdyZXNzaW9uGgY8dWlkMD4iOgoNCgdtYXhJdGVyEgIwFAoVCghyZWdQYXJhbRIJWZqZmZmZmbk/ChIKBnNvbHZlchIIagZsLWJmZ3M="
+    ],
+    "value": {
+     "type": "LinearRegression",
+     "uid": "LinearRegression_l_bfgs"
+    }
+   },
+   "params_after": {
+    "aggregationDepth": 2,
+    "elasticNetParam": 0.0,
+    "epsilon": 1.35,
+    "featuresCol": "features",
+    "fitIntercept": true,
+    "labelCol": "label",
+    "loss": "squaredError",
+    "maxBlockSizeInMB": 0.0,
+    "maxIter": 20,
+    "predictionCol": "prediction",
+    "regParam": 0.1,
+    "solver": "l-bfgs",
+    "standardization": true,
+    "tol": 1e-06
+   },
+   "params_before": {
+    "aggregationDepth": 2,
+    "elasticNetParam": 0.0,
+    "epsilon": 1.35,
+    "featuresCol": "features",
+    "fitIntercept": true,
+    "labelCol": "label",
+    "loss": "squaredError",
+    "maxBlockSizeInMB": 0.0,
+    "maxIter": 20,
+    "predictionCol": "prediction",
+    "regParam": 0.1,
+    "solver": "l-bfgs",
+    "standardization": true,
+    "tol": 1e-06
+   },
+   "save": {
+    "call": "estimator.write().overwrite().save(path)",
+    "commands": [
+     "IoMBCjsKL29yZy5hcGFjaGUuc3BhcmsubWwucmVncmVzc2lvbi5MaW5lYXJSZWdyZXNzaW9uEgY8dWlkMD4YARo6Cg0KB21heEl0ZXISAjAUChUKCHJlZ1BhcmFtEglZmpmZmZmZuT8KEgoGc29sdmVyEghqBmwtYmZncyIGPHBhdGg+KAE="
+    ],
+    "results": [
+     ""
+    ],
+    "value": null
+   },
+   "uid": "LinearRegression_l_bfgs",
+   "uid_same": true
+  },
+  "LinearRegression.l-bfgs.model": {
+   "load": {
+    "call": "LinearRegressionModel.load(path)",
+    "commands": [
+     "KkIKOAo0b3JnLmFwYWNoZS5zcGFyay5tbC5yZWdyZXNzaW9uLkxpbmVhclJlZ3Jlc3Npb25Nb2RlbBgEEgY8cGF0aD4="
+    ],
+    "results": [
+     "Gk0KBwoFPGlkMD4aBjx1aWQwPiI6Cg0KB21heEl0ZXISAjAUChUKCHJlZ1BhcmFtEglZmpmZmZmZuT8KEgoGc29sdmVyEghqBmwtYmZncw=="
+    ],
+    "value": {
+     "ref": "<id0>",
+     "type": "LinearRegressionModel"
+    }
+   },
+   "members": {
+    "class": "LinearRegressionModel",
+    "members": {
+     "predict-dense": {
+      "call": "loaded.predict(Vectors.dense([2.5, 1.0, 1.5]))",
+      "commands": [
+       "EnwKBwoFPGlkMD4ScQoHcHJlZGljdBJmCmTCAWEKLroBKwoDdWR0EiRvcmcuYXBhY2hlLnNwYXJrLm1sLmxpbmFsZy5WZWN0b3JVRFQSAiABEgQKAgoAEgQKAgoAEh/KARwqGgoYAAAAAAAABEAAAAAAAADwPwAAAAAAAPg/"
+      ],
+      "results": [
+       "CglZWJ5EwlWTGEA="
+      ],
+      "value": 6.143881831586974
+     },
+     "predict-sparse": {
+      "call": "loaded.predict(Vectors.sparse(3, [0, 2], [2.5, 1.5]))",
+      "commands": [
+       "EncKBwoFPGlkMD4SbAoHcHJlZGljdBJhCl/CAVwKLroBKwoDdWR0EiRvcmcuYXBhY2hlLnNwYXJrLm1sLmxpbmFsZy5WZWN0b3JVRFQSAiAAEgIwAxIJygEGEgQKAgACEhfKARQqEgoQAAAAAAAABEAAAAAAAAD4Pw=="
+      ],
+      "results": [
+       "CglZHucEMDKEG0A="
+      ],
+      "value": 6.879097700404399
+     },
+     "repr()": {
+      "call": "repr(loaded)",
+      "commands": [
+       "EhUKBwoFPGlkMD4SCgoIdG9TdHJpbmc="
+      ],
+      "results": [
+       "CkNqQUxpbmVhclJlZ3Jlc3Npb25Nb2RlbDogdWlkPUxpbmVhclJlZ3Jlc3Npb25fbF9iZmdzLCBudW1GZWF0dXJlcz0z"
+      ],
+      "value": "LinearRegressionModel: uid=LinearRegression_l_bfgs, numFeatures=3"
+     },
+     "str()": {
+      "call": "str(loaded)",
+      "commands": [
+       "EhUKBwoFPGlkMD4SCgoIdG9TdHJpbmc="
+      ],
+      "results": [
+       "CkNqQUxpbmVhclJlZ3Jlc3Npb25Nb2RlbDogdWlkPUxpbmVhclJlZ3Jlc3Npb25fbF9iZmdzLCBudW1GZWF0dXJlcz0z"
+      ],
+      "value": "LinearRegressionModel: uid=LinearRegression_l_bfgs, numFeatures=3"
+     },
+     "transform": {
+      "call": "loaded.transform(rows_held_out)",
+      "commands": [
+       "CuYDCgcKBTxpZDA+Gp4DCgCKAZgDCpEDCgAajAMK1QIKALoBzwIKmAIKAFqTAhKQAnsiZmllbGRzIjpbeyJtZXRhZGF0YSI6e30sIm5hbWUiOiJsYWJlbCIsIm51bGxhYmxlIjp0cnVlLCJ0eXBlIjoiZG91YmxlIn0seyJtZXRhZGF0YSI6e30sIm5hbWUiOiJ3ZWlnaHQiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoiZmVhdHVyZXMiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6eyJjb250YWluc051bGwiOnRydWUsImVsZW1lbnRUeXBlIjoiZG91YmxlIiwidHlwZSI6ImFycmF5In19XSwidHlwZSI6InN0cnVjdCJ9EjIKJhokCg9hcnJheV90b192ZWN0b3ISERIMCghmZWF0dXJlcxgAkgEAEghmZWF0dXJlcxoOEgkKBWxhYmVsGACSAQAaDxIKCgZ3ZWlnaHQYAJIBABoREgwKCGZlYXR1cmVzGACSAQAQARgAIjoKDQoHbWF4SXRlchICMBQKFQoIcmVnUGFyYW0SCVmamZmZmZm5PwoSCgZzb2x2ZXISCGoGbC1iZmdz"
+      ],
+      "results": [],
+      "value": {
+       "rows": [
+        [
+         18.0,
+         1.0,
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           9.5,
+           0.0,
+           2.5
+          ]
+         },
+         16.09826687213217
+        ],
+        [
+         4.5,
+         1.0,
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           6.5,
+           2.0,
+           0.5
+          ]
+         },
+         8.510246682821764
+        ],
+        [
+         6.0,
+         1.0,
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           2.5,
+           1.0,
+           1.5
+          ]
+         },
+         6.143881831586974
+        ]
+       ],
+       "schema": "struct<label:double,weight:double,features:vector,prediction:double>"
+      }
+     }
+    },
+    "skipped": {
+     "Param attribute (client side)": [
+      "aggregationDepth",
+      "elasticNetParam",
+      "epsilon",
+      "featuresCol",
+      "fitIntercept",
+      "labelCol",
+      "loss",
+      "maxBlockSizeInMB",
+      "maxIter",
+      "predictionCol",
+      "regParam",
+      "solver",
+      "standardization",
+      "tol",
+      "weightCol"
+     ],
+     "Params API (client side)": [
+      "clear",
+      "copy",
+      "explainParam",
+      "explainParams",
+      "extractParamMap",
+      "getOrDefault",
+      "getParam",
+      "hasDefault",
+      "hasParam",
+      "isDefined",
+      "isSet",
+      "params",
+      "set",
+      "uid"
+     ],
+     "Params getter or setter (client side)": [
+      "getAggregationDepth",
+      "getElasticNetParam",
+      "getEpsilon",
+      "getFeaturesCol",
+      "getFitIntercept",
+      "getLabelCol",
+      "getLoss",
+      "getMaxBlockSizeInMB",
+      "getMaxIter",
+      "getPredictionCol",
+      "getRegParam",
+      "getSolver",
+      "getStandardization",
+      "getTol",
+      "getWeightCol",
+      "setFeaturesCol",
+      "setPredictionCol"
+     ],
+     "not captured on this copy (partial)": [
+      "coefficients",
+      "evaluate",
+      "hasSummary",
+      "intercept",
+      "numFeatures",
+      "scale",
+      "summary"
+     ],
+     "persistence (captured by Golden.persist)": [
+      "load",
+      "read",
+      "save",
+      "write"
+     ]
+    }
+   },
+   "params_after": {
+    "aggregationDepth": 2,
+    "elasticNetParam": 0.0,
+    "epsilon": 1.35,
+    "featuresCol": "features",
+    "fitIntercept": true,
+    "labelCol": "label",
+    "loss": "squaredError",
+    "maxBlockSizeInMB": 0.0,
+    "maxIter": 20,
+    "predictionCol": "prediction",
+    "regParam": 0.1,
+    "solver": "l-bfgs",
+    "standardization": true,
+    "tol": 1e-06
+   },
+   "params_before": {
+    "aggregationDepth": 2,
+    "elasticNetParam": 0.0,
+    "epsilon": 1.35,
+    "featuresCol": "features",
+    "fitIntercept": true,
+    "labelCol": "label",
+    "loss": "squaredError",
+    "maxBlockSizeInMB": 0.0,
+    "maxIter": 20,
+    "predictionCol": "prediction",
+    "regParam": 0.1,
+    "solver": "l-bfgs",
+    "standardization": true,
+    "tol": 1e-06
+   },
+   "save": {
+    "call": "model.write().overwrite().save(path)",
+    "commands": [
+     "Ik8SBwoFPGlkMD4aOgoNCgdtYXhJdGVyEgIwFAoVCghyZWdQYXJhbRIJWZqZmZmZmbk/ChIKBnNvbHZlchIIagZsLWJmZ3MiBjxwYXRoPigB"
+    ],
+    "results": [
+     ""
+    ],
+    "value": null
+   },
+   "uid": "LinearRegression_l_bfgs",
+   "uid_same": true
+  },
+  "LinearRegression.normal.estimator": {
+   "load": {
+    "call": "LinearRegression.load(path)",
+    "commands": [
+     "Kj0KMwovb3JnLmFwYWNoZS5zcGFyay5tbC5yZWdyZXNzaW9uLkxpbmVhclJlZ3Jlc3Npb24YARIGPHBhdGg+"
+    ],
+    "results": [
+     "GmYSL29yZy5hcGFjaGUuc3BhcmsubWwucmVncmVzc2lvbi5MaW5lYXJSZWdyZXNzaW9uGgY8dWlkMD4iKwoSCgZzb2x2ZXISCGoGbm9ybWFsChUKCXdlaWdodENvbBIIagZ3ZWlnaHQ="
+    ],
+    "value": {
+     "type": "LinearRegression",
+     "uid": "LinearRegression_normal"
+    }
+   },
+   "params_after": {
+    "aggregationDepth": 2,
+    "elasticNetParam": 0.0,
+    "epsilon": 1.35,
+    "featuresCol": "features",
+    "fitIntercept": true,
+    "labelCol": "label",
+    "loss": "squaredError",
+    "maxBlockSizeInMB": 0.0,
+    "maxIter": 100,
+    "predictionCol": "prediction",
+    "regParam": 0.0,
+    "solver": "normal",
+    "standardization": true,
+    "tol": 1e-06,
+    "weightCol": "weight"
+   },
+   "params_before": {
+    "aggregationDepth": 2,
+    "elasticNetParam": 0.0,
+    "epsilon": 1.35,
+    "featuresCol": "features",
+    "fitIntercept": true,
+    "labelCol": "label",
+    "loss": "squaredError",
+    "maxBlockSizeInMB": 0.0,
+    "maxIter": 100,
+    "predictionCol": "prediction",
+    "regParam": 0.0,
+    "solver": "normal",
+    "standardization": true,
+    "tol": 1e-06,
+    "weightCol": "weight"
+   },
+   "save": {
+    "call": "estimator.write().overwrite().save(path)",
+    "commands": [
+     "InQKOwovb3JnLmFwYWNoZS5zcGFyay5tbC5yZWdyZXNzaW9uLkxpbmVhclJlZ3Jlc3Npb24SBjx1aWQwPhgBGisKEgoGc29sdmVyEghqBm5vcm1hbAoVCgl3ZWlnaHRDb2wSCGoGd2VpZ2h0IgY8cGF0aD4oAQ=="
+    ],
+    "results": [
+     ""
+    ],
+    "value": null
+   },
+   "uid": "LinearRegression_normal",
+   "uid_same": true
+  },
+  "LinearRegression.normal.model": {
+   "load": {
+    "call": "LinearRegressionModel.load(path)",
+    "commands": [
+     "KkIKOAo0b3JnLmFwYWNoZS5zcGFyay5tbC5yZWdyZXNzaW9uLkxpbmVhclJlZ3Jlc3Npb25Nb2RlbBgEEgY8cGF0aD4="
+    ],
+    "results": [
+     "Gj4KBwoFPGlkMD4aBjx1aWQwPiIrChIKBnNvbHZlchIIagZub3JtYWwKFQoJd2VpZ2h0Q29sEghqBndlaWdodA=="
+    ],
+    "value": {
+     "ref": "<id0>",
+     "type": "LinearRegressionModel"
+    }
+   },
+   "members": {
+    "class": "LinearRegressionModel",
+    "members": {
+     "predict-dense": {
+      "call": "loaded.predict(Vectors.dense([2.5, 1.0, 1.5]))",
+      "commands": [
+       "EnwKBwoFPGlkMD4ScQoHcHJlZGljdBJmCmTCAWEKLroBKwoDdWR0EiRvcmcuYXBhY2hlLnNwYXJrLm1sLmxpbmFsZy5WZWN0b3JVRFQSAiABEgQKAgoAEgQKAgoAEh/KARwqGgoYAAAAAAAABEAAAAAAAADwPwAAAAAAAPg/"
+      ],
+      "results": [
+       "CglZHB+uRXRmFkA="
+      ],
+      "value": 5.600052918198141
+     },
+     "predict-sparse": {
+      "call": "loaded.predict(Vectors.sparse(3, [0, 2], [2.5, 1.5]))",
+      "commands": [
+       "EncKBwoFPGlkMD4SbAoHcHJlZGljdBJhCl/CAVwKLroBKwoDdWR0EiRvcmcuYXBhY2hlLnNwYXJrLm1sLmxpbmFsZy5WZWN0b3JVRFQSAiAAEgIwAxIJygEGEgQKAgACEhfKARQqEgoQAAAAAAAABEAAAAAAAAD4Pw=="
+      ],
+      "results": [
+       "CglZQ6pcrnZPHUA="
+      ],
+      "value": 7.327601169973209
+     },
+     "repr()": {
+      "call": "repr(loaded)",
+      "commands": [
+       "EhUKBwoFPGlkMD4SCgoIdG9TdHJpbmc="
+      ],
+      "results": [
+       "CkNqQUxpbmVhclJlZ3Jlc3Npb25Nb2RlbDogdWlkPUxpbmVhclJlZ3Jlc3Npb25fbm9ybWFsLCBudW1GZWF0dXJlcz0z"
+      ],
+      "value": "LinearRegressionModel: uid=LinearRegression_normal, numFeatures=3"
+     },
+     "str()": {
+      "call": "str(loaded)",
+      "commands": [
+       "EhUKBwoFPGlkMD4SCgoIdG9TdHJpbmc="
+      ],
+      "results": [
+       "CkNqQUxpbmVhclJlZ3Jlc3Npb25Nb2RlbDogdWlkPUxpbmVhclJlZ3Jlc3Npb25fbm9ybWFsLCBudW1GZWF0dXJlcz0z"
+      ],
+      "value": "LinearRegressionModel: uid=LinearRegression_normal, numFeatures=3"
+     },
+     "transform": {
+      "call": "loaded.transform(rows_held_out)",
+      "commands": [
+       "CtcDCgcKBTxpZDA+Gp4DCgCKAZgDCpEDCgAajAMK1QIKALoBzwIKmAIKAFqTAhKQAnsiZmllbGRzIjpbeyJtZXRhZGF0YSI6e30sIm5hbWUiOiJsYWJlbCIsIm51bGxhYmxlIjp0cnVlLCJ0eXBlIjoiZG91YmxlIn0seyJtZXRhZGF0YSI6e30sIm5hbWUiOiJ3ZWlnaHQiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoiZmVhdHVyZXMiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6eyJjb250YWluc051bGwiOnRydWUsImVsZW1lbnRUeXBlIjoiZG91YmxlIiwidHlwZSI6ImFycmF5In19XSwidHlwZSI6InN0cnVjdCJ9EjIKJhokCg9hcnJheV90b192ZWN0b3ISERIMCghmZWF0dXJlcxgAkgEAEghmZWF0dXJlcxoOEgkKBWxhYmVsGACSAQAaDxIKCgZ3ZWlnaHQYAJIBABoREgwKCGZlYXR1cmVzGACSAQAQARgAIisKEgoGc29sdmVyEghqBm5vcm1hbAoVCgl3ZWlnaHRDb2wSCGoGd2VpZ2h0"
+      ],
+      "results": [],
+      "value": {
+       "rows": [
+        [
+         18.0,
+         1.0,
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           9.5,
+           0.0,
+           2.5
+          ]
+         },
+         18.071211538091287
+        ],
+        [
+         4.5,
+         1.0,
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           6.5,
+           2.0,
+           0.5
+          ]
+         },
+         8.886801239247948
+        ],
+        [
+         6.0,
+         1.0,
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           2.5,
+           1.0,
+           1.5
+          ]
+         },
+         5.600052918198141
+        ]
+       ],
+       "schema": "struct<label:double,weight:double,features:vector,prediction:double>"
+      }
+     }
+    },
+    "skipped": {
+     "Param attribute (client side)": [
+      "aggregationDepth",
+      "elasticNetParam",
+      "epsilon",
+      "featuresCol",
+      "fitIntercept",
+      "labelCol",
+      "loss",
+      "maxBlockSizeInMB",
+      "maxIter",
+      "predictionCol",
+      "regParam",
+      "solver",
+      "standardization",
+      "tol",
+      "weightCol"
+     ],
+     "Params API (client side)": [
+      "clear",
+      "copy",
+      "explainParam",
+      "explainParams",
+      "extractParamMap",
+      "getOrDefault",
+      "getParam",
+      "hasDefault",
+      "hasParam",
+      "isDefined",
+      "isSet",
+      "params",
+      "set",
+      "uid"
+     ],
+     "Params getter or setter (client side)": [
+      "getAggregationDepth",
+      "getElasticNetParam",
+      "getEpsilon",
+      "getFeaturesCol",
+      "getFitIntercept",
+      "getLabelCol",
+      "getLoss",
+      "getMaxBlockSizeInMB",
+      "getMaxIter",
+      "getPredictionCol",
+      "getRegParam",
+      "getSolver",
+      "getStandardization",
+      "getTol",
+      "getWeightCol",
+      "setFeaturesCol",
+      "setPredictionCol"
+     ],
+     "not captured on this copy (partial)": [
+      "coefficients",
+      "evaluate",
+      "hasSummary",
+      "intercept",
+      "numFeatures",
+      "scale",
+      "summary"
+     ],
+     "persistence (captured by Golden.persist)": [
+      "load",
+      "read",
+      "save",
+      "write"
+     ]
+    }
+   },
+   "params_after": {
+    "aggregationDepth": 2,
+    "elasticNetParam": 0.0,
+    "epsilon": 1.35,
+    "featuresCol": "features",
+    "fitIntercept": true,
+    "labelCol": "label",
+    "loss": "squaredError",
+    "maxBlockSizeInMB": 0.0,
+    "maxIter": 100,
+    "predictionCol": "prediction",
+    "regParam": 0.0,
+    "solver": "normal",
+    "standardization": true,
+    "tol": 1e-06,
+    "weightCol": "weight"
+   },
+   "params_before": {
+    "aggregationDepth": 2,
+    "elasticNetParam": 0.0,
+    "epsilon": 1.35,
+    "featuresCol": "features",
+    "fitIntercept": true,
+    "labelCol": "label",
+    "loss": "squaredError",
+    "maxBlockSizeInMB": 0.0,
+    "maxIter": 100,
+    "predictionCol": "prediction",
+    "regParam": 0.0,
+    "solver": "normal",
+    "standardization": true,
+    "tol": 1e-06,
+    "weightCol": "weight"
+   },
+   "save": {
+    "call": "model.write().overwrite().save(path)",
+    "commands": [
+     "IkASBwoFPGlkMD4aKwoSCgZzb2x2ZXISCGoGbm9ybWFsChUKCXdlaWdodENvbBIIagZ3ZWlnaHQiBjxwYXRoPigB"
+    ],
+    "results": [
+     ""
+    ],
+    "value": null
+   },
+   "uid": "LinearRegression_normal",
+   "uid_same": true
+  },
+  "RandomForestRegressor.default.estimator": {
+   "load": {
+    "call": "RandomForestRegressor.load(path)",
+    "commands": [
+     "KkIKOAo0b3JnLmFwYWNoZS5zcGFyay5tbC5yZWdyZXNzaW9uLlJhbmRvbUZvcmVzdFJlZ3Jlc3NvchgBEgY8cGF0aD4="
+    ],
+    "results": [
+     "GmwSNG9yZy5hcGFjaGUuc3BhcmsubWwucmVncmVzc2lvbi5SYW5kb21Gb3Jlc3RSZWdyZXNzb3IaBjx1aWQwPiIsCg4KCG1heERlcHRoEgIwAgoOCghudW1UcmVlcxICMAMKCgoEc2VlZBICOAE="
+    ],
+    "value": {
+     "type": "RandomForestRegressor",
+     "uid": "RandomForestRegressor_default"
+    }
+   },
+   "params_after": {
+    "bootstrap": true,
+    "cacheNodeIds": false,
+    "checkpointInterval": 10,
+    "featureSubsetStrategy": "auto",
+    "featuresCol": "features",
+    "impurity": "variance",
+    "labelCol": "label",
+    "leafCol": "",
+    "maxBins": 32,
+    "maxDepth": 2,
+    "maxMemoryInMB": 256,
+    "minInfoGain": 0.0,
+    "minInstancesPerNode": 1,
+    "minWeightFractionPerNode": 0.0,
+    "numTrees": 3,
+    "predictionCol": "prediction",
+    "seed": 1,
+    "subsamplingRate": 1.0
+   },
+   "params_before": {
+    "bootstrap": true,
+    "cacheNodeIds": false,
+    "checkpointInterval": 10,
+    "featureSubsetStrategy": "auto",
+    "featuresCol": "features",
+    "impurity": "variance",
+    "labelCol": "label",
+    "leafCol": "",
+    "maxBins": 32,
+    "maxDepth": 2,
+    "maxMemoryInMB": 256,
+    "minInfoGain": 0.0,
+    "minInstancesPerNode": 1,
+    "minWeightFractionPerNode": 0.0,
+    "numTrees": 3,
+    "predictionCol": "prediction",
+    "seed": 1,
+    "subsamplingRate": 1.0
+   },
+   "save": {
+    "call": "estimator.write().overwrite().save(path)",
+    "commands": [
+     "InoKQAo0b3JnLmFwYWNoZS5zcGFyay5tbC5yZWdyZXNzaW9uLlJhbmRvbUZvcmVzdFJlZ3Jlc3NvchIGPHVpZDA+GAEaLAoOCghtYXhEZXB0aBICMAIKDgoIbnVtVHJlZXMSAjADCgoKBHNlZWQSAjABIgY8cGF0aD4oAQ=="
+    ],
+    "results": [
+     ""
+    ],
+    "value": null
+   },
+   "uid": "RandomForestRegressor_default",
+   "uid_same": true
+  },
+  "RandomForestRegressor.default.model": {
+   "load": {
+    "call": "RandomForestRegressionModel.load(path)",
+    "commands": [
+     "KkgKPgo6b3JnLmFwYWNoZS5zcGFyay5tbC5yZWdyZXNzaW9uLlJhbmRvbUZvcmVzdFJlZ3Jlc3Npb25Nb2RlbBgEEgY8cGF0aD4=",
+     "EhIKBwoFPGlkMD4SBwoFdHJlZXM="
+    ],
+    "results": [
+     "Gj8KBwoFPGlkMD4aBjx1aWQwPiIsCg4KCG1heERlcHRoEgIwAgoOCghudW1UcmVlcxICMAMKCgoEc2VlZBICOAE=",
+     "GgkKBwoFPGlkMT4="
+    ],
+    "value": {
+     "ref": "<id0>",
+     "type": "RandomForestRegressionModel"
+    }
+   },
+   "members": {
+    "class": "RandomForestRegressionModel",
+    "members": {
+     "predict-dense": {
+      "call": "loaded.predict(Vectors.dense([2.5, 1.0, 1.5]))",
+      "commands": [
+       "EnwKBwoFPGlkMD4ScQoHcHJlZGljdBJmCmTCAWEKLroBKwoDdWR0EiRvcmcuYXBhY2hlLnNwYXJrLm1sLmxpbmFsZy5WZWN0b3JVRFQSAiABEgQKAgoAEgQKAgoAEh/KARwqGgoYAAAAAAAABEAAAAAAAADwPwAAAAAAAPg/"
+      ],
+      "results": [
+       "CglZMzMzMzNzGkA="
+      ],
+      "value": 6.6125
+     },
+     "repr()": {
+      "call": "repr(loaded)",
+      "commands": [
+       "EhUKBwoFPGlkMD4SCgoIdG9TdHJpbmc="
+      ],
+      "results": [
+       "CltqWVJhbmRvbUZvcmVzdFJlZ3Jlc3Npb25Nb2RlbDogdWlkPVJhbmRvbUZvcmVzdFJlZ3Jlc3Nvcl9kZWZhdWx0LCBudW1UcmVlcz0zLCBudW1GZWF0dXJlcz0z"
+      ],
+      "value": "RandomForestRegressionModel: uid=RandomForestRegressor_default, numTrees=3, numFeatures=3"
+     },
+     "str()": {
+      "call": "str(loaded)",
+      "commands": [
+       "EhUKBwoFPGlkMD4SCgoIdG9TdHJpbmc="
+      ],
+      "results": [
+       "CltqWVJhbmRvbUZvcmVzdFJlZ3Jlc3Npb25Nb2RlbDogdWlkPVJhbmRvbUZvcmVzdFJlZ3Jlc3Nvcl9kZWZhdWx0LCBudW1UcmVlcz0zLCBudW1GZWF0dXJlcz0z"
+      ],
+      "value": "RandomForestRegressionModel: uid=RandomForestRegressor_default, numTrees=3, numFeatures=3"
+     },
+     "transform": {
+      "call": "loaded.transform(rows_held_out)",
+      "commands": [
+       "CtgDCgcKBTxpZDA+Gp4DCgCKAZgDCpEDCgAajAMK1QIKALoBzwIKmAIKAFqTAhKQAnsiZmllbGRzIjpbeyJtZXRhZGF0YSI6e30sIm5hbWUiOiJsYWJlbCIsIm51bGxhYmxlIjp0cnVlLCJ0eXBlIjoiZG91YmxlIn0seyJtZXRhZGF0YSI6e30sIm5hbWUiOiJ3ZWlnaHQiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoiZmVhdHVyZXMiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6eyJjb250YWluc051bGwiOnRydWUsImVsZW1lbnRUeXBlIjoiZG91YmxlIiwidHlwZSI6ImFycmF5In19XSwidHlwZSI6InN0cnVjdCJ9EjIKJhokCg9hcnJheV90b192ZWN0b3ISERIMCghmZWF0dXJlcxgAkgEAEghmZWF0dXJlcxoOEgkKBWxhYmVsGACSAQAaDxIKCgZ3ZWlnaHQYAJIBABoREgwKCGZlYXR1cmVzGACSAQAQARgAIiwKDgoIbWF4RGVwdGgSAjACCg4KCG51bVRyZWVzEgIwAwoKCgRzZWVkEgIwAQ=="
+      ],
+      "results": [],
+      "value": {
+       "rows": [
+        [
+         18.0,
+         1.0,
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           9.5,
+           0.0,
+           2.5
+          ]
+         },
+         9.316666666666666
+        ],
+        [
+         4.5,
+         1.0,
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           6.5,
+           2.0,
+           0.5
+          ]
+         },
+         10.431944444444445
+        ],
+        [
+         6.0,
+         1.0,
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           2.5,
+           1.0,
+           1.5
+          ]
+         },
+         6.6125
+        ]
+       ],
+       "schema": "struct<label:double,weight:double,features:vector,prediction:double>"
+      }
+     }
+    },
+    "skipped": {
+     "Param attribute (client side)": [
+      "bootstrap",
+      "cacheNodeIds",
+      "checkpointInterval",
+      "featureSubsetStrategy",
+      "featuresCol",
+      "impurity",
+      "labelCol",
+      "leafCol",
+      "maxBins",
+      "maxDepth",
+      "maxMemoryInMB",
+      "minInfoGain",
+      "minInstancesPerNode",
+      "minWeightFractionPerNode",
+      "numTrees",
+      "predictionCol",
+      "seed",
+      "subsamplingRate",
+      "weightCol"
+     ],
+     "Params API (client side)": [
+      "clear",
+      "copy",
+      "explainParam",
+      "explainParams",
+      "extractParamMap",
+      "getOrDefault",
+      "getParam",
+      "hasDefault",
+      "hasParam",
+      "isDefined",
+      "isSet",
+      "params",
+      "set",
+      "uid"
+     ],
+     "Params getter or setter (client side)": [
+      "getBootstrap",
+      "getCacheNodeIds",
+      "getCheckpointInterval",
+      "getFeatureSubsetStrategy",
+      "getFeaturesCol",
+      "getImpurity",
+      "getLabelCol",
+      "getLeafCol",
+      "getMaxBins",
+      "getMaxDepth",
+      "getMaxMemoryInMB",
+      "getMinInfoGain",
+      "getMinInstancesPerNode",
+      "getMinWeightFractionPerNode",
+      "getNumTrees",
+      "getPredictionCol",
+      "getSeed",
+      "getSubsamplingRate",
+      "getWeightCol",
+      "setFeaturesCol",
+      "setLeafCol",
+      "setPredictionCol"
+     ],
+     "not captured on this copy (partial)": [
+      "featureImportances",
+      "numFeatures",
+      "predictLeaf",
+      "supportedFeatureSubsetStrategies",
+      "supportedImpurities",
+      "toDebugString",
+      "totalNumNodes",
+      "treeWeights",
+      "trees"
+     ],
+     "persistence (captured by Golden.persist)": [
+      "load",
+      "read",
+      "save",
+      "write"
+     ]
+    }
+   },
+   "params_after": {
+    "bootstrap": true,
+    "cacheNodeIds": false,
+    "checkpointInterval": 10,
+    "featureSubsetStrategy": "auto",
+    "featuresCol": "features",
+    "impurity": "variance",
+    "labelCol": "label",
+    "leafCol": "",
+    "maxBins": 32,
+    "maxDepth": 2,
+    "maxMemoryInMB": 256,
+    "minInfoGain": 0.0,
+    "minInstancesPerNode": 1,
+    "minWeightFractionPerNode": 0.0,
+    "numTrees": 3,
+    "predictionCol": "prediction",
+    "seed": 1,
+    "subsamplingRate": 1.0
+   },
+   "params_before": {
+    "bootstrap": true,
+    "cacheNodeIds": false,
+    "checkpointInterval": 10,
+    "featureSubsetStrategy": "auto",
+    "featuresCol": "features",
+    "impurity": "variance",
+    "labelCol": "label",
+    "leafCol": "",
+    "maxBins": 32,
+    "maxDepth": 2,
+    "maxMemoryInMB": 256,
+    "minInfoGain": 0.0,
+    "minInstancesPerNode": 1,
+    "minWeightFractionPerNode": 0.0,
+    "numTrees": 3,
+    "predictionCol": "prediction",
+    "seed": 1,
+    "subsamplingRate": 1.0
+   },
+   "save": {
+    "call": "model.write().overwrite().save(path)",
+    "commands": [
+     "IkESBwoFPGlkMD4aLAoOCghtYXhEZXB0aBICMAIKDgoIbnVtVHJlZXMSAjADCgoKBHNlZWQSAjABIgY8cGF0aD4oAQ=="
+    ],
+    "results": [
+     ""
+    ],
+    "value": null
+   },
+   "uid": "RandomForestRegressor_default",
+   "uid_same": true
+  }
+ },
+ "source": "apache/spark v4.3.0 pyspark.ml (official pyspark-client 4.3.0, Spark 4.3.0 Connect)"
+}

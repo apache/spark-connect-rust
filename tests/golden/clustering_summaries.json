@@ -1,0 +1,3204 @@
+{
+ "datasets": {
+  "documents": {
+   "columns": [
+    [
+     "id",
+     "int"
+    ],
+    [
+     "features",
+     "vector"
+    ]
+   ],
+   "rows": [
+    [
+     0,
+     [
+      10.0,
+      8.0,
+      2.0,
+      0.0,
+      0.0,
+      0.0
+     ]
+    ],
+    [
+     1,
+     [
+      8.0,
+      10.0,
+      1.0,
+      0.0,
+      0.0,
+      0.0
+     ]
+    ],
+    [
+     2,
+     [
+      9.0,
+      7.0,
+      3.0,
+      0.0,
+      0.0,
+      0.0
+     ]
+    ],
+    [
+     3,
+     [
+      12.0,
+      6.0,
+      2.0,
+      0.0,
+      0.0,
+      0.0
+     ]
+    ],
+    [
+     4,
+     [
+      7.0,
+      9.0,
+      3.0,
+      0.0,
+      0.0,
+      0.0
+     ]
+    ],
+    [
+     5,
+     [
+      11.0,
+      8.0,
+      1.0,
+      0.0,
+      0.0,
+      0.0
+     ]
+    ],
+    [
+     6,
+     [
+      0.0,
+      0.0,
+      0.0,
+      10.0,
+      8.0,
+      2.0
+     ]
+    ],
+    [
+     7,
+     [
+      0.0,
+      0.0,
+      0.0,
+      8.0,
+      10.0,
+      1.0
+     ]
+    ],
+    [
+     8,
+     [
+      0.0,
+      0.0,
+      0.0,
+      9.0,
+      7.0,
+      3.0
+     ]
+    ],
+    [
+     9,
+     [
+      0.0,
+      0.0,
+      0.0,
+      12.0,
+      6.0,
+      2.0
+     ]
+    ],
+    [
+     10,
+     [
+      0.0,
+      0.0,
+      0.0,
+      7.0,
+      9.0,
+      3.0
+     ]
+    ],
+    [
+     11,
+     [
+      0.0,
+      0.0,
+      0.0,
+      11.0,
+      8.0,
+      1.0
+     ]
+    ]
+   ]
+  },
+  "documents_held_out": {
+   "columns": [
+    [
+     "id",
+     "int"
+    ],
+    [
+     "features",
+     "vector"
+    ]
+   ],
+   "rows": [
+    [
+     0,
+     [
+      8.0,
+      6.0,
+      1.0,
+      0.0,
+      0.0,
+      0.0
+     ]
+    ],
+    [
+     1,
+     [
+      0.0,
+      0.0,
+      0.0,
+      10.0,
+      9.0,
+      2.0
+     ]
+    ],
+    [
+     2,
+     [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+     ]
+    ]
+   ]
+  },
+  "mixture": {
+   "columns": [
+    [
+     "weight",
+     "double"
+    ],
+    [
+     "features",
+     "vector"
+    ]
+   ],
+   "rows": [
+    [
+     1.0,
+     [
+      1.0,
+      1.0
+     ]
+    ],
+    [
+     2.0,
+     [
+      1.6,
+      1.3
+     ]
+    ],
+    [
+     1.0,
+     [
+      0.8,
+      1.7
+     ]
+    ],
+    [
+     1.0,
+     [
+      1.3,
+      0.6
+     ]
+    ],
+    [
+     0.5,
+     [
+      2.0,
+      1.4
+     ]
+    ],
+    [
+     1.0,
+     [
+      1.2,
+      2.1
+     ]
+    ],
+    [
+     1.0,
+     [
+      7.0,
+      7.0
+     ]
+    ],
+    [
+     2.0,
+     [
+      7.7,
+      6.4
+     ]
+    ],
+    [
+     1.0,
+     [
+      6.6,
+      7.9
+     ]
+    ],
+    [
+     1.0,
+     [
+      7.4,
+      7.6
+     ]
+    ],
+    [
+     1.5,
+     [
+      8.1,
+      6.9
+     ]
+    ],
+    [
+     1.0,
+     [
+      6.9,
+      6.2
+     ]
+    ]
+   ]
+  },
+  "mixture_held_out": {
+   "columns": [
+    [
+     "weight",
+     "double"
+    ],
+    [
+     "features",
+     "vector"
+    ]
+   ],
+   "rows": [
+    [
+     1.0,
+     [
+      1.2,
+      1.3
+     ]
+    ],
+    [
+     1.0,
+     [
+      6.1,
+      6.2
+     ]
+    ]
+   ]
+  },
+  "points": {
+   "columns": [
+    [
+     "weight",
+     "double"
+    ],
+    [
+     "features",
+     "vector"
+    ]
+   ],
+   "rows": [
+    [
+     1.0,
+     [
+      1.0,
+      1.0
+     ]
+    ],
+    [
+     2.0,
+     [
+      1.5,
+      1.2
+     ]
+    ],
+    [
+     1.0,
+     [
+      1.1,
+      1.6
+     ]
+    ],
+    [
+     1.0,
+     [
+      1.4,
+      1.4
+     ]
+    ],
+    [
+     0.5,
+     [
+      6.0,
+      6.0
+     ]
+    ],
+    [
+     1.0,
+     [
+      6.5,
+      5.8
+     ]
+    ],
+    [
+     1.0,
+     [
+      5.9,
+      6.6
+     ]
+    ],
+    [
+     2.0,
+     [
+      6.2,
+      6.3
+     ]
+    ],
+    [
+     1.0,
+     [
+      10.0,
+      1.5
+     ]
+    ],
+    [
+     1.0,
+     [
+      10.4,
+      1.1
+     ]
+    ],
+    [
+     1.5,
+     [
+      9.8,
+      1.9
+     ]
+    ]
+   ]
+  },
+  "points_held_out": {
+   "columns": [
+    [
+     "weight",
+     "double"
+    ],
+    [
+     "features",
+     "vector"
+    ]
+   ],
+   "rows": [
+    [
+     1.0,
+     [
+      1.2,
+      1.3
+     ]
+    ],
+    [
+     1.0,
+     [
+      6.1,
+      6.2
+     ]
+    ],
+    [
+     1.0,
+     [
+      10.1,
+      1.4
+     ]
+    ],
+    [
+     1.0,
+     [
+      4.0,
+      4.0
+     ]
+    ]
+   ]
+  }
+ },
+ "encoding": "Floats are JSON numbers (Python repr); NaN and infinities are strings. Vectors and matrices as in scripts/ml_golden_common.py. DataFrames: schema and rows sorted by canonical JSON. Model and summary objects: {type, ref} with ref a placeholder: <idN> for an object id (<idN>.summary for a summary), numbered in order of first appearance. Errors: {class, condition, message}. commands: base64 of the MlCommand or MlRelation sent, results: base64 of the MlCommandResult received, both SerializeToString(deterministic=True) after normalization (object ids and uids -> placeholders, plan_id, origin and LocalRelation data cleared, paths -> <path>).",
+ "source": "apache/spark v4.3.0 pyspark.ml (official pyspark-client 4.3.0, Spark 4.3.0 Connect)",
+ "summaries": {
+  "BisectingKMeans.cosine.training": {
+   "class": "BisectingKMeansSummary",
+   "members": {
+    "cluster": {
+     "call": "summary.cluster",
+     "commands": [
+      "Eh8KBwoFPGlkMD4SCQoHc3VtbWFyeRIJCgdjbHVzdGVyGuYCCgDiEuACCt0CCgcKBTxpZDA+Gs8CCgCKAckCCsICCgAavQIKlgIKALoBkAIK2QEKAFrUARLRAXsiZmllbGRzIjpbeyJtZXRhZGF0YSI6e30sIm5hbWUiOiJ3ZWlnaHQiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoiZmVhdHVyZXMiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6eyJjb250YWluc051bGwiOnRydWUsImVsZW1lbnRUeXBlIjoiZG91YmxlIiwidHlwZSI6ImFycmF5In19XSwidHlwZSI6InN0cnVjdCJ9EjIKJhokCg9hcnJheV90b192ZWN0b3ISERIMCghmZWF0dXJlcxgAkgEAEghmZWF0dXJlcxoPEgoKBndlaWdodBgAkgEAGhESDAoIZmVhdHVyZXMYAJIBABABGAAiAA=="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0
+       ],
+       [
+        0
+       ],
+       [
+        1
+       ],
+       [
+        1
+       ],
+       [
+        1
+       ],
+       [
+        1
+       ],
+       [
+        1
+       ],
+       [
+        1
+       ],
+       [
+        2
+       ],
+       [
+        2
+       ],
+       [
+        2
+       ]
+      ],
+      "schema": "struct<prediction:int>"
+     }
+    },
+    "clusterSizes": {
+     "call": "summary.clusterSizes",
+     "commands": [
+      "EiQKBwoFPGlkMD4SCQoHc3VtbWFyeRIOCgxjbHVzdGVyU2l6ZXM="
+     ],
+     "results": [
+      "ChOyARAKAjoAEgI4AhICOAYSAjgD"
+     ],
+     "value": [
+      2,
+      6,
+      3
+     ]
+    },
+    "featuresCol": {
+     "call": "summary.featuresCol",
+     "commands": [
+      "EiMKBwoFPGlkMD4SCQoHc3VtbWFyeRINCgtmZWF0dXJlc0NvbA=="
+     ],
+     "results": [
+      "CgpqCGZlYXR1cmVz"
+     ],
+     "value": "features"
+    },
+    "k": {
+     "call": "summary.k",
+     "commands": [
+      "EhkKBwoFPGlkMD4SCQoHc3VtbWFyeRIDCgFr"
+     ],
+     "results": [
+      "CgIwAw=="
+     ],
+     "value": 3
+    },
+    "numIter": {
+     "call": "summary.numIter",
+     "commands": [
+      "Eh8KBwoFPGlkMD4SCQoHc3VtbWFyeRIJCgdudW1JdGVy"
+     ],
+     "results": [
+      "CgIwFA=="
+     ],
+     "value": 20
+    },
+    "predictionCol": {
+     "call": "summary.predictionCol",
+     "commands": [
+      "EiUKBwoFPGlkMD4SCQoHc3VtbWFyeRIPCg1wcmVkaWN0aW9uQ29s"
+     ],
+     "results": [
+      "CgxqCnByZWRpY3Rpb24="
+     ],
+     "value": "prediction"
+    },
+    "predictions": {
+     "call": "summary.predictions",
+     "commands": [
+      "EiMKBwoFPGlkMD4SCQoHc3VtbWFyeRINCgtwcmVkaWN0aW9ucxrmAgoA4hLgAgrdAgoHCgU8aWQwPhrPAgoAigHJAgrCAgoAGr0CCpYCCgC6AZACCtkBCgBa1AES0QF7ImZpZWxkcyI6W3sibWV0YWRhdGEiOnt9LCJuYW1lIjoid2VpZ2h0IiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImZlYXR1cmVzIiwibnVsbGFibGUiOnRydWUsInR5cGUiOnsiY29udGFpbnNOdWxsIjp0cnVlLCJlbGVtZW50VHlwZSI6ImRvdWJsZSIsInR5cGUiOiJhcnJheSJ9fV0sInR5cGUiOiJzdHJ1Y3QifRIyCiYaJAoPYXJyYXlfdG9fdmVjdG9yEhESDAoIZmVhdHVyZXMYAJIBABIIZmVhdHVyZXMaDxIKCgZ3ZWlnaHQYAJIBABoREgwKCGZlYXR1cmVzGACSAQAQARgAIgA="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0.5,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          6.0,
+          6.0
+         ]
+        },
+        1
+       ],
+       [
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.0,
+          1.0
+         ]
+        },
+        1
+       ],
+       [
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.1,
+          1.6
+         ]
+        },
+        0
+       ],
+       [
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.4,
+          1.4
+         ]
+        },
+        1
+       ],
+       [
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          10.0,
+          1.5
+         ]
+        },
+        2
+       ],
+       [
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          10.4,
+          1.1
+         ]
+        },
+        2
+       ],
+       [
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          5.9,
+          6.6
+         ]
+        },
+        0
+       ],
+       [
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          6.5,
+          5.8
+         ]
+        },
+        1
+       ],
+       [
+        1.5,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          9.8,
+          1.9
+         ]
+        },
+        2
+       ],
+       [
+        2.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.5,
+          1.2
+         ]
+        },
+        1
+       ],
+       [
+        2.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          6.2,
+          6.3
+         ]
+        },
+        1
+       ]
+      ],
+      "schema": "struct<weight:double,features:vector,prediction:int>"
+     }
+    },
+    "repr()": {
+     "call": "repr(summary)",
+     "commands": [],
+     "results": [],
+     "value": "<pyspark.ml.clustering.BisectingKMeansSummary object at 0x<addr>>"
+    },
+    "str()": {
+     "call": "str(summary)",
+     "commands": [],
+     "results": [],
+     "value": "<pyspark.ml.clustering.BisectingKMeansSummary object at 0x<addr>>"
+    },
+    "trainingCost": {
+     "call": "summary.trainingCost",
+     "commands": [
+      "EiQKBwoFPGlkMD4SCQoHc3VtbWFyeRIOCgx0cmFpbmluZ0Nvc3Q="
+     ],
+     "results": [
+      "CglZAOVUk0Gkhz8="
+     ],
+     "value": 0.011543762501434518
+    }
+   },
+   "skipped": {},
+   "via": {
+    "call": "model.summary",
+    "commands": [],
+    "results": [],
+    "value": {
+     "ref": "<id0>.summary",
+     "type": "BisectingKMeansSummary"
+    }
+   }
+  },
+  "BisectingKMeans.default.training": {
+   "class": "BisectingKMeansSummary",
+   "members": {
+    "cluster": {
+     "call": "summary.cluster",
+     "commands": [
+      "Eh8KBwoFPGlkMD4SCQoHc3VtbWFyeRIJCgdjbHVzdGVyGuYCCgDiEuACCt0CCgcKBTxpZDA+Gs8CCgCKAckCCsICCgAavQIKlgIKALoBkAIK2QEKAFrUARLRAXsiZmllbGRzIjpbeyJtZXRhZGF0YSI6e30sIm5hbWUiOiJ3ZWlnaHQiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoiZmVhdHVyZXMiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6eyJjb250YWluc051bGwiOnRydWUsImVsZW1lbnRUeXBlIjoiZG91YmxlIiwidHlwZSI6ImFycmF5In19XSwidHlwZSI6InN0cnVjdCJ9EjIKJhokCg9hcnJheV90b192ZWN0b3ISERIMCghmZWF0dXJlcxgAkgEAEghmZWF0dXJlcxoPEgoKBndlaWdodBgAkgEAGhESDAoIZmVhdHVyZXMYAJIBABABGAAiAA=="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0
+       ],
+       [
+        0
+       ],
+       [
+        0
+       ],
+       [
+        0
+       ],
+       [
+        1
+       ],
+       [
+        1
+       ],
+       [
+        1
+       ],
+       [
+        2
+       ],
+       [
+        2
+       ],
+       [
+        2
+       ],
+       [
+        2
+       ]
+      ],
+      "schema": "struct<prediction:int>"
+     }
+    },
+    "clusterSizes": {
+     "call": "summary.clusterSizes",
+     "commands": [
+      "EiQKBwoFPGlkMD4SCQoHc3VtbWFyeRIOCgxjbHVzdGVyU2l6ZXM="
+     ],
+     "results": [
+      "ChOyARAKAjoAEgI4BBICOAMSAjgE"
+     ],
+     "value": [
+      4,
+      3,
+      4
+     ]
+    },
+    "featuresCol": {
+     "call": "summary.featuresCol",
+     "commands": [
+      "EiMKBwoFPGlkMD4SCQoHc3VtbWFyeRINCgtmZWF0dXJlc0NvbA=="
+     ],
+     "results": [
+      "CgpqCGZlYXR1cmVz"
+     ],
+     "value": "features"
+    },
+    "k": {
+     "call": "summary.k",
+     "commands": [
+      "EhkKBwoFPGlkMD4SCQoHc3VtbWFyeRIDCgFr"
+     ],
+     "results": [
+      "CgIwAw=="
+     ],
+     "value": 3
+    },
+    "numIter": {
+     "call": "summary.numIter",
+     "commands": [
+      "Eh8KBwoFPGlkMD4SCQoHc3VtbWFyeRIJCgdudW1JdGVy"
+     ],
+     "results": [
+      "CgIwFA=="
+     ],
+     "value": 20
+    },
+    "predictionCol": {
+     "call": "summary.predictionCol",
+     "commands": [
+      "EiUKBwoFPGlkMD4SCQoHc3VtbWFyeRIPCg1wcmVkaWN0aW9uQ29s"
+     ],
+     "results": [
+      "CgxqCnByZWRpY3Rpb24="
+     ],
+     "value": "prediction"
+    },
+    "predictions": {
+     "call": "summary.predictions",
+     "commands": [
+      "EiMKBwoFPGlkMD4SCQoHc3VtbWFyeRINCgtwcmVkaWN0aW9ucxrmAgoA4hLgAgrdAgoHCgU8aWQwPhrPAgoAigHJAgrCAgoAGr0CCpYCCgC6AZACCtkBCgBa1AES0QF7ImZpZWxkcyI6W3sibWV0YWRhdGEiOnt9LCJuYW1lIjoid2VpZ2h0IiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImZlYXR1cmVzIiwibnVsbGFibGUiOnRydWUsInR5cGUiOnsiY29udGFpbnNOdWxsIjp0cnVlLCJlbGVtZW50VHlwZSI6ImRvdWJsZSIsInR5cGUiOiJhcnJheSJ9fV0sInR5cGUiOiJzdHJ1Y3QifRIyCiYaJAoPYXJyYXlfdG9fdmVjdG9yEhESDAoIZmVhdHVyZXMYAJIBABIIZmVhdHVyZXMaDxIKCgZ3ZWlnaHQYAJIBABoREgwKCGZlYXR1cmVzGACSAQAQARgAIgA="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0.5,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          6.0,
+          6.0
+         ]
+        },
+        2
+       ],
+       [
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.0,
+          1.0
+         ]
+        },
+        0
+       ],
+       [
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.1,
+          1.6
+         ]
+        },
+        0
+       ],
+       [
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.4,
+          1.4
+         ]
+        },
+        0
+       ],
+       [
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          10.0,
+          1.5
+         ]
+        },
+        1
+       ],
+       [
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          10.4,
+          1.1
+         ]
+        },
+        1
+       ],
+       [
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          5.9,
+          6.6
+         ]
+        },
+        2
+       ],
+       [
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          6.5,
+          5.8
+         ]
+        },
+        2
+       ],
+       [
+        1.5,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          9.8,
+          1.9
+         ]
+        },
+        1
+       ],
+       [
+        2.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.5,
+          1.2
+         ]
+        },
+        0
+       ],
+       [
+        2.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          6.2,
+          6.3
+         ]
+        },
+        2
+       ]
+      ],
+      "schema": "struct<weight:double,features:vector,prediction:int>"
+     }
+    },
+    "repr()": {
+     "call": "repr(summary)",
+     "commands": [],
+     "results": [],
+     "value": "<pyspark.ml.clustering.BisectingKMeansSummary object at 0x<addr>>"
+    },
+    "str()": {
+     "call": "str(summary)",
+     "commands": [],
+     "results": [],
+     "value": "<pyspark.ml.clustering.BisectingKMeansSummary object at 0x<addr>>"
+    },
+    "trainingCost": {
+     "call": "summary.trainingCost",
+     "commands": [
+      "EiQKBwoFPGlkMD4SCQoHc3VtbWFyeRIOCgx0cmFpbmluZ0Nvc3Q="
+     ],
+     "results": [
+      "CglZ6EVERERE9z8="
+     ],
+     "value": 1.4541666666667599
+    }
+   },
+   "skipped": {},
+   "via": {
+    "call": "model.summary",
+    "commands": [],
+    "results": [],
+    "value": {
+     "ref": "<id0>.summary",
+     "type": "BisectingKMeansSummary"
+    }
+   }
+  },
+  "BisectingKMeans.min-divisible-2.training": {
+   "class": "BisectingKMeansSummary",
+   "members": {
+    "cluster": {
+     "call": "summary.cluster",
+     "commands": [
+      "Eh8KBwoFPGlkMD4SCQoHc3VtbWFyeRIJCgdjbHVzdGVyGuYCCgDiEuACCt0CCgcKBTxpZDA+Gs8CCgCKAckCCsICCgAavQIKlgIKALoBkAIK2QEKAFrUARLRAXsiZmllbGRzIjpbeyJtZXRhZGF0YSI6e30sIm5hbWUiOiJ3ZWlnaHQiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoiZmVhdHVyZXMiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6eyJjb250YWluc051bGwiOnRydWUsImVsZW1lbnRUeXBlIjoiZG91YmxlIiwidHlwZSI6ImFycmF5In19XSwidHlwZSI6InN0cnVjdCJ9EjIKJhokCg9hcnJheV90b192ZWN0b3ISERIMCghmZWF0dXJlcxgAkgEAEghmZWF0dXJlcxoPEgoKBndlaWdodBgAkgEAGhESDAoIZmVhdHVyZXMYAJIBABABGAAiAA=="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0
+       ],
+       [
+        0
+       ],
+       [
+        0
+       ],
+       [
+        0
+       ],
+       [
+        1
+       ],
+       [
+        1
+       ],
+       [
+        1
+       ],
+       [
+        2
+       ],
+       [
+        2
+       ],
+       [
+        2
+       ],
+       [
+        2
+       ]
+      ],
+      "schema": "struct<prediction:int>"
+     }
+    },
+    "clusterSizes": {
+     "call": "summary.clusterSizes",
+     "commands": [
+      "EiQKBwoFPGlkMD4SCQoHc3VtbWFyeRIOCgxjbHVzdGVyU2l6ZXM="
+     ],
+     "results": [
+      "ChOyARAKAjoAEgI4BBICOAMSAjgE"
+     ],
+     "value": [
+      4,
+      3,
+      4
+     ]
+    },
+    "featuresCol": {
+     "call": "summary.featuresCol",
+     "commands": [
+      "EiMKBwoFPGlkMD4SCQoHc3VtbWFyeRINCgtmZWF0dXJlc0NvbA=="
+     ],
+     "results": [
+      "CgpqCGZlYXR1cmVz"
+     ],
+     "value": "features"
+    },
+    "k": {
+     "call": "summary.k",
+     "commands": [
+      "EhkKBwoFPGlkMD4SCQoHc3VtbWFyeRIDCgFr"
+     ],
+     "results": [
+      "CgIwAw=="
+     ],
+     "value": 3
+    },
+    "numIter": {
+     "call": "summary.numIter",
+     "commands": [
+      "Eh8KBwoFPGlkMD4SCQoHc3VtbWFyeRIJCgdudW1JdGVy"
+     ],
+     "results": [
+      "CgIwFA=="
+     ],
+     "value": 20
+    },
+    "predictionCol": {
+     "call": "summary.predictionCol",
+     "commands": [
+      "EiUKBwoFPGlkMD4SCQoHc3VtbWFyeRIPCg1wcmVkaWN0aW9uQ29s"
+     ],
+     "results": [
+      "CgxqCnByZWRpY3Rpb24="
+     ],
+     "value": "prediction"
+    },
+    "predictions": {
+     "call": "summary.predictions",
+     "commands": [
+      "EiMKBwoFPGlkMD4SCQoHc3VtbWFyeRINCgtwcmVkaWN0aW9ucxrmAgoA4hLgAgrdAgoHCgU8aWQwPhrPAgoAigHJAgrCAgoAGr0CCpYCCgC6AZACCtkBCgBa1AES0QF7ImZpZWxkcyI6W3sibWV0YWRhdGEiOnt9LCJuYW1lIjoid2VpZ2h0IiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImZlYXR1cmVzIiwibnVsbGFibGUiOnRydWUsInR5cGUiOnsiY29udGFpbnNOdWxsIjp0cnVlLCJlbGVtZW50VHlwZSI6ImRvdWJsZSIsInR5cGUiOiJhcnJheSJ9fV0sInR5cGUiOiJzdHJ1Y3QifRIyCiYaJAoPYXJyYXlfdG9fdmVjdG9yEhESDAoIZmVhdHVyZXMYAJIBABIIZmVhdHVyZXMaDxIKCgZ3ZWlnaHQYAJIBABoREgwKCGZlYXR1cmVzGACSAQAQARgAIgA="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0.5,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          6.0,
+          6.0
+         ]
+        },
+        2
+       ],
+       [
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.0,
+          1.0
+         ]
+        },
+        0
+       ],
+       [
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.1,
+          1.6
+         ]
+        },
+        0
+       ],
+       [
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.4,
+          1.4
+         ]
+        },
+        0
+       ],
+       [
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          10.0,
+          1.5
+         ]
+        },
+        1
+       ],
+       [
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          10.4,
+          1.1
+         ]
+        },
+        1
+       ],
+       [
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          5.9,
+          6.6
+         ]
+        },
+        2
+       ],
+       [
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          6.5,
+          5.8
+         ]
+        },
+        2
+       ],
+       [
+        1.5,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          9.8,
+          1.9
+         ]
+        },
+        1
+       ],
+       [
+        2.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.5,
+          1.2
+         ]
+        },
+        0
+       ],
+       [
+        2.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          6.2,
+          6.3
+         ]
+        },
+        2
+       ]
+      ],
+      "schema": "struct<weight:double,features:vector,prediction:int>"
+     }
+    },
+    "repr()": {
+     "call": "repr(summary)",
+     "commands": [],
+     "results": [],
+     "value": "<pyspark.ml.clustering.BisectingKMeansSummary object at 0x<addr>>"
+    },
+    "str()": {
+     "call": "str(summary)",
+     "commands": [],
+     "results": [],
+     "value": "<pyspark.ml.clustering.BisectingKMeansSummary object at 0x<addr>>"
+    },
+    "trainingCost": {
+     "call": "summary.trainingCost",
+     "commands": [
+      "EiQKBwoFPGlkMD4SCQoHc3VtbWFyeRIOCgx0cmFpbmluZ0Nvc3Q="
+     ],
+     "results": [
+      "CglZ6EVERERE9z8="
+     ],
+     "value": 1.4541666666667599
+    }
+   },
+   "skipped": {},
+   "via": {
+    "call": "model.summary",
+    "commands": [],
+    "results": [],
+    "value": {
+     "ref": "<id0>.summary",
+     "type": "BisectingKMeansSummary"
+    }
+   }
+  },
+  "GaussianMixture.default.training": {
+   "class": "GaussianMixtureSummary",
+   "members": {
+    "cluster": {
+     "call": "summary.cluster",
+     "commands": [
+      "Eh8KBwoFPGlkMD4SCQoHc3VtbWFyeRIJCgdjbHVzdGVyGuYCCgDiEuACCt0CCgcKBTxpZDA+Gs8CCgCKAckCCsICCgAavQIKlgIKALoBkAIK2QEKAFrUARLRAXsiZmllbGRzIjpbeyJtZXRhZGF0YSI6e30sIm5hbWUiOiJ3ZWlnaHQiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoiZmVhdHVyZXMiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6eyJjb250YWluc051bGwiOnRydWUsImVsZW1lbnRUeXBlIjoiZG91YmxlIiwidHlwZSI6ImFycmF5In19XSwidHlwZSI6InN0cnVjdCJ9EjIKJhokCg9hcnJheV90b192ZWN0b3ISERIMCghmZWF0dXJlcxgAkgEAEghmZWF0dXJlcxoPEgoKBndlaWdodBgAkgEAGhESDAoIZmVhdHVyZXMYAJIBABABGAAiAA=="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0
+       ],
+       [
+        0
+       ],
+       [
+        0
+       ],
+       [
+        0
+       ],
+       [
+        0
+       ],
+       [
+        0
+       ],
+       [
+        1
+       ],
+       [
+        1
+       ],
+       [
+        1
+       ],
+       [
+        1
+       ],
+       [
+        1
+       ],
+       [
+        1
+       ]
+      ],
+      "schema": "struct<prediction:int>"
+     }
+    },
+    "clusterSizes": {
+     "call": "summary.clusterSizes",
+     "commands": [
+      "EiQKBwoFPGlkMD4SCQoHc3VtbWFyeRIOCgxjbHVzdGVyU2l6ZXM="
+     ],
+     "results": [
+      "Cg+yAQwKAjoAEgI4BhICOAY="
+     ],
+     "value": [
+      6,
+      6
+     ]
+    },
+    "featuresCol": {
+     "call": "summary.featuresCol",
+     "commands": [
+      "EiMKBwoFPGlkMD4SCQoHc3VtbWFyeRINCgtmZWF0dXJlc0NvbA=="
+     ],
+     "results": [
+      "CgpqCGZlYXR1cmVz"
+     ],
+     "value": "features"
+    },
+    "k": {
+     "call": "summary.k",
+     "commands": [
+      "EhkKBwoFPGlkMD4SCQoHc3VtbWFyeRIDCgFr"
+     ],
+     "results": [
+      "CgIwAg=="
+     ],
+     "value": 2
+    },
+    "logLikelihood": {
+     "call": "summary.logLikelihood",
+     "commands": [
+      "EiUKBwoFPGlkMD4SCQoHc3VtbWFyeRIPCg1sb2dMaWtlbGlob29k"
+     ],
+     "results": [
+      "CglZljyjt5HpOMA="
+     ],
+     "value": -24.912379720070554
+    },
+    "numIter": {
+     "call": "summary.numIter",
+     "commands": [
+      "Eh8KBwoFPGlkMD4SCQoHc3VtbWFyeRIJCgdudW1JdGVy"
+     ],
+     "results": [
+      "CgIwBg=="
+     ],
+     "value": 6
+    },
+    "predictionCol": {
+     "call": "summary.predictionCol",
+     "commands": [
+      "EiUKBwoFPGlkMD4SCQoHc3VtbWFyeRIPCg1wcmVkaWN0aW9uQ29s"
+     ],
+     "results": [
+      "CgxqCnByZWRpY3Rpb24="
+     ],
+     "value": "prediction"
+    },
+    "predictions": {
+     "call": "summary.predictions",
+     "commands": [
+      "EiMKBwoFPGlkMD4SCQoHc3VtbWFyeRINCgtwcmVkaWN0aW9ucxrmAgoA4hLgAgrdAgoHCgU8aWQwPhrPAgoAigHJAgrCAgoAGr0CCpYCCgC6AZACCtkBCgBa1AES0QF7ImZpZWxkcyI6W3sibWV0YWRhdGEiOnt9LCJuYW1lIjoid2VpZ2h0IiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImZlYXR1cmVzIiwibnVsbGFibGUiOnRydWUsInR5cGUiOnsiY29udGFpbnNOdWxsIjp0cnVlLCJlbGVtZW50VHlwZSI6ImRvdWJsZSIsInR5cGUiOiJhcnJheSJ9fV0sInR5cGUiOiJzdHJ1Y3QifRIyCiYaJAoPYXJyYXlfdG9fdmVjdG9yEhESDAoIZmVhdHVyZXMYAJIBABIIZmVhdHVyZXMaDxIKCgZ3ZWlnaHQYAJIBABoREgwKCGZlYXR1cmVzGACSAQAQARgAIgA="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0.5,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          2.0,
+          1.4
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.9999999999999976,
+          2.46896003846346e-15
+         ]
+        },
+        0
+       ],
+       [
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.8,
+          1.7
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.9999999999999986,
+          1.4720250835421415e-15
+         ]
+        },
+        0
+       ],
+       [
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.0,
+          1.0
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.999999999999999,
+          1.0149721116991865e-15
+         ]
+        },
+        0
+       ],
+       [
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.2,
+          2.1
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.9999999999999982,
+          1.795418012586776e-15
+         ]
+        },
+        0
+       ],
+       [
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.3,
+          0.6
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.9999999999999982,
+          1.8241249556755367e-15
+         ]
+        },
+        0
+       ],
+       [
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          6.6,
+          7.9
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          3.807731691101258e-15,
+          0.9999999999999962
+         ]
+        },
+        1
+       ],
+       [
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          6.9,
+          6.2
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          4.15964596516283e-15,
+          0.9999999999999959
+         ]
+        },
+        1
+       ],
+       [
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          7.0,
+          7.0
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          9.647805179350649e-16,
+          0.999999999999999
+         ]
+        },
+        1
+       ],
+       [
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          7.4,
+          7.6
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.5649824649131178e-15,
+          0.9999999999999984
+         ]
+        },
+        1
+       ],
+       [
+        1.5,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          8.1,
+          6.9
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          3.144288201919236e-15,
+          0.9999999999999969
+         ]
+        },
+        1
+       ],
+       [
+        2.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.6,
+          1.3
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.9999999999999993,
+          6.770635415968055e-16
+         ]
+        },
+        0
+       ],
+       [
+        2.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          7.7,
+          6.4
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.5405497327874075e-15,
+          0.9999999999999984
+         ]
+        },
+        1
+       ]
+      ],
+      "schema": "struct<weight:double,features:vector,probability:vector,prediction:int>"
+     }
+    },
+    "probability": {
+     "call": "summary.probability",
+     "commands": [
+      "EiMKBwoFPGlkMD4SCQoHc3VtbWFyeRINCgtwcm9iYWJpbGl0eRrmAgoA4hLgAgrdAgoHCgU8aWQwPhrPAgoAigHJAgrCAgoAGr0CCpYCCgC6AZACCtkBCgBa1AES0QF7ImZpZWxkcyI6W3sibWV0YWRhdGEiOnt9LCJuYW1lIjoid2VpZ2h0IiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImZlYXR1cmVzIiwibnVsbGFibGUiOnRydWUsInR5cGUiOnsiY29udGFpbnNOdWxsIjp0cnVlLCJlbGVtZW50VHlwZSI6ImRvdWJsZSIsInR5cGUiOiJhcnJheSJ9fV0sInR5cGUiOiJzdHJ1Y3QifRIyCiYaJAoPYXJyYXlfdG9fdmVjdG9yEhESDAoIZmVhdHVyZXMYAJIBABIIZmVhdHVyZXMaDxIKCgZ3ZWlnaHQYAJIBABoREgwKCGZlYXR1cmVzGACSAQAQARgAIgA="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.9999999999999976,
+          2.46896003846346e-15
+         ]
+        }
+       ],
+       [
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.9999999999999982,
+          1.795418012586776e-15
+         ]
+        }
+       ],
+       [
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.9999999999999982,
+          1.8241249556755367e-15
+         ]
+        }
+       ],
+       [
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.9999999999999986,
+          1.4720250835421415e-15
+         ]
+        }
+       ],
+       [
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.999999999999999,
+          1.0149721116991865e-15
+         ]
+        }
+       ],
+       [
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.9999999999999993,
+          6.770635415968055e-16
+         ]
+        }
+       ],
+       [
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.5405497327874075e-15,
+          0.9999999999999984
+         ]
+        }
+       ],
+       [
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.5649824649131178e-15,
+          0.9999999999999984
+         ]
+        }
+       ],
+       [
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          3.144288201919236e-15,
+          0.9999999999999969
+         ]
+        }
+       ],
+       [
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          3.807731691101258e-15,
+          0.9999999999999962
+         ]
+        }
+       ],
+       [
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          4.15964596516283e-15,
+          0.9999999999999959
+         ]
+        }
+       ],
+       [
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          9.647805179350649e-16,
+          0.999999999999999
+         ]
+        }
+       ]
+      ],
+      "schema": "struct<probability:vector>"
+     }
+    },
+    "probabilityCol": {
+     "call": "summary.probabilityCol",
+     "commands": [
+      "EiYKBwoFPGlkMD4SCQoHc3VtbWFyeRIQCg5wcm9iYWJpbGl0eUNvbA=="
+     ],
+     "results": [
+      "Cg1qC3Byb2JhYmlsaXR5"
+     ],
+     "value": "probability"
+    },
+    "repr()": {
+     "call": "repr(summary)",
+     "commands": [],
+     "results": [],
+     "value": "<pyspark.ml.clustering.GaussianMixtureSummary object at 0x<addr>>"
+    },
+    "str()": {
+     "call": "str(summary)",
+     "commands": [],
+     "results": [],
+     "value": "<pyspark.ml.clustering.GaussianMixtureSummary object at 0x<addr>>"
+    }
+   },
+   "skipped": {},
+   "via": {
+    "call": "model.summary",
+    "commands": [],
+    "results": [],
+    "value": {
+     "ref": "<id0>.summary",
+     "type": "GaussianMixtureSummary"
+    }
+   }
+  },
+  "GaussianMixture.weighted.training": {
+   "class": "GaussianMixtureSummary",
+   "members": {
+    "cluster": {
+     "call": "summary.cluster",
+     "commands": [
+      "Eh8KBwoFPGlkMD4SCQoHc3VtbWFyeRIJCgdjbHVzdGVyGuYCCgDiEuACCt0CCgcKBTxpZDA+Gs8CCgCKAckCCsICCgAavQIKlgIKALoBkAIK2QEKAFrUARLRAXsiZmllbGRzIjpbeyJtZXRhZGF0YSI6e30sIm5hbWUiOiJ3ZWlnaHQiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoiZmVhdHVyZXMiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6eyJjb250YWluc051bGwiOnRydWUsImVsZW1lbnRUeXBlIjoiZG91YmxlIiwidHlwZSI6ImFycmF5In19XSwidHlwZSI6InN0cnVjdCJ9EjIKJhokCg9hcnJheV90b192ZWN0b3ISERIMCghmZWF0dXJlcxgAkgEAEghmZWF0dXJlcxoPEgoKBndlaWdodBgAkgEAGhESDAoIZmVhdHVyZXMYAJIBABABGAAiAA=="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0
+       ],
+       [
+        0
+       ],
+       [
+        0
+       ],
+       [
+        0
+       ],
+       [
+        0
+       ],
+       [
+        0
+       ],
+       [
+        1
+       ],
+       [
+        1
+       ],
+       [
+        1
+       ],
+       [
+        1
+       ],
+       [
+        1
+       ],
+       [
+        1
+       ]
+      ],
+      "schema": "struct<prediction:int>"
+     }
+    },
+    "clusterSizes": {
+     "call": "summary.clusterSizes",
+     "commands": [
+      "EiQKBwoFPGlkMD4SCQoHc3VtbWFyeRIOCgxjbHVzdGVyU2l6ZXM="
+     ],
+     "results": [
+      "Cg+yAQwKAjoAEgI4BhICOAY="
+     ],
+     "value": [
+      6,
+      6
+     ]
+    },
+    "featuresCol": {
+     "call": "summary.featuresCol",
+     "commands": [
+      "EiMKBwoFPGlkMD4SCQoHc3VtbWFyeRINCgtmZWF0dXJlc0NvbA=="
+     ],
+     "results": [
+      "CgpqCGZlYXR1cmVz"
+     ],
+     "value": "features"
+    },
+    "k": {
+     "call": "summary.k",
+     "commands": [
+      "EhkKBwoFPGlkMD4SCQoHc3VtbWFyeRIDCgFr"
+     ],
+     "results": [
+      "CgIwAg=="
+     ],
+     "value": 2
+    },
+    "logLikelihood": {
+     "call": "summary.logLikelihood",
+     "commands": [
+      "EiUKBwoFPGlkMD4SCQoHc3VtbWFyeRIPCg1sb2dMaWtlbGlob29k"
+     ],
+     "results": [
+      "CglZWxdrNrmwO8A="
+     ],
+     "value": -27.6903261195615
+    },
+    "numIter": {
+     "call": "summary.numIter",
+     "commands": [
+      "Eh8KBwoFPGlkMD4SCQoHc3VtbWFyeRIJCgdudW1JdGVy"
+     ],
+     "results": [
+      "CgIwBg=="
+     ],
+     "value": 6
+    },
+    "predictionCol": {
+     "call": "summary.predictionCol",
+     "commands": [
+      "EiUKBwoFPGlkMD4SCQoHc3VtbWFyeRIPCg1wcmVkaWN0aW9uQ29s"
+     ],
+     "results": [
+      "CgxqCnByZWRpY3Rpb24="
+     ],
+     "value": "prediction"
+    },
+    "predictions": {
+     "call": "summary.predictions",
+     "commands": [
+      "EiMKBwoFPGlkMD4SCQoHc3VtbWFyeRINCgtwcmVkaWN0aW9ucxrmAgoA4hLgAgrdAgoHCgU8aWQwPhrPAgoAigHJAgrCAgoAGr0CCpYCCgC6AZACCtkBCgBa1AES0QF7ImZpZWxkcyI6W3sibWV0YWRhdGEiOnt9LCJuYW1lIjoid2VpZ2h0IiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImZlYXR1cmVzIiwibnVsbGFibGUiOnRydWUsInR5cGUiOnsiY29udGFpbnNOdWxsIjp0cnVlLCJlbGVtZW50VHlwZSI6ImRvdWJsZSIsInR5cGUiOiJhcnJheSJ9fV0sInR5cGUiOiJzdHJ1Y3QifRIyCiYaJAoPYXJyYXlfdG9fdmVjdG9yEhESDAoIZmVhdHVyZXMYAJIBABIIZmVhdHVyZXMaDxIKCgZ3ZWlnaHQYAJIBABoREgwKCGZlYXR1cmVzGACSAQAQARgAIgA="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0.5,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          2.0,
+          1.4
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.9999999999999961,
+          3.8878223851261015e-15
+         ]
+        },
+        0
+       ],
+       [
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.8,
+          1.7
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.9999999999999983,
+          1.6351507665113313e-15
+         ]
+        },
+        0
+       ],
+       [
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.0,
+          1.0
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.999999999999999,
+          1.0348048302010837e-15
+         ]
+        },
+        0
+       ],
+       [
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.2,
+          2.1
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.9999999999999981,
+          1.8601890111537932e-15
+         ]
+        },
+        0
+       ],
+       [
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.3,
+          0.6
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.9999999999999982,
+          1.774171071905872e-15
+         ]
+        },
+        0
+       ],
+       [
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          6.6,
+          7.9
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          5.151878614047452e-15,
+          0.9999999999999949
+         ]
+        },
+        1
+       ],
+       [
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          6.9,
+          6.2
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          4.792440162520891e-15,
+          0.9999999999999952
+         ]
+        },
+        1
+       ],
+       [
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          7.0,
+          7.0
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          9.721212773997956e-16,
+          0.999999999999999
+         ]
+        },
+        1
+       ],
+       [
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          7.4,
+          7.6
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.6295855627800108e-15,
+          0.9999999999999983
+         ]
+        },
+        1
+       ],
+       [
+        1.5,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          8.1,
+          6.9
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          2.1111553675852445e-15,
+          0.9999999999999979
+         ]
+        },
+        1
+       ],
+       [
+        2.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.6,
+          1.3
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.9999999999999993,
+          6.756808773694263e-16
+         ]
+        },
+        0
+       ],
+       [
+        2.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          7.7,
+          6.4
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.1162378362912744e-15,
+          0.9999999999999989
+         ]
+        },
+        1
+       ]
+      ],
+      "schema": "struct<weight:double,features:vector,probability:vector,prediction:int>"
+     }
+    },
+    "probability": {
+     "call": "summary.probability",
+     "commands": [
+      "EiMKBwoFPGlkMD4SCQoHc3VtbWFyeRINCgtwcm9iYWJpbGl0eRrmAgoA4hLgAgrdAgoHCgU8aWQwPhrPAgoAigHJAgrCAgoAGr0CCpYCCgC6AZACCtkBCgBa1AES0QF7ImZpZWxkcyI6W3sibWV0YWRhdGEiOnt9LCJuYW1lIjoid2VpZ2h0IiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImZlYXR1cmVzIiwibnVsbGFibGUiOnRydWUsInR5cGUiOnsiY29udGFpbnNOdWxsIjp0cnVlLCJlbGVtZW50VHlwZSI6ImRvdWJsZSIsInR5cGUiOiJhcnJheSJ9fV0sInR5cGUiOiJzdHJ1Y3QifRIyCiYaJAoPYXJyYXlfdG9fdmVjdG9yEhESDAoIZmVhdHVyZXMYAJIBABIIZmVhdHVyZXMaDxIKCgZ3ZWlnaHQYAJIBABoREgwKCGZlYXR1cmVzGACSAQAQARgAIgA="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.9999999999999961,
+          3.8878223851261015e-15
+         ]
+        }
+       ],
+       [
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.9999999999999981,
+          1.8601890111537932e-15
+         ]
+        }
+       ],
+       [
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.9999999999999982,
+          1.774171071905872e-15
+         ]
+        }
+       ],
+       [
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.9999999999999983,
+          1.6351507665113313e-15
+         ]
+        }
+       ],
+       [
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.999999999999999,
+          1.0348048302010837e-15
+         ]
+        }
+       ],
+       [
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.9999999999999993,
+          6.756808773694263e-16
+         ]
+        }
+       ],
+       [
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.1162378362912744e-15,
+          0.9999999999999989
+         ]
+        }
+       ],
+       [
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.6295855627800108e-15,
+          0.9999999999999983
+         ]
+        }
+       ],
+       [
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          2.1111553675852445e-15,
+          0.9999999999999979
+         ]
+        }
+       ],
+       [
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          4.792440162520891e-15,
+          0.9999999999999952
+         ]
+        }
+       ],
+       [
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          5.151878614047452e-15,
+          0.9999999999999949
+         ]
+        }
+       ],
+       [
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          9.721212773997956e-16,
+          0.999999999999999
+         ]
+        }
+       ]
+      ],
+      "schema": "struct<probability:vector>"
+     }
+    },
+    "probabilityCol": {
+     "call": "summary.probabilityCol",
+     "commands": [
+      "EiYKBwoFPGlkMD4SCQoHc3VtbWFyeRIQCg5wcm9iYWJpbGl0eUNvbA=="
+     ],
+     "results": [
+      "Cg1qC3Byb2JhYmlsaXR5"
+     ],
+     "value": "probability"
+    },
+    "repr()": {
+     "call": "repr(summary)",
+     "commands": [],
+     "results": [],
+     "value": "<pyspark.ml.clustering.GaussianMixtureSummary object at 0x<addr>>"
+    },
+    "str()": {
+     "call": "str(summary)",
+     "commands": [],
+     "results": [],
+     "value": "<pyspark.ml.clustering.GaussianMixtureSummary object at 0x<addr>>"
+    }
+   },
+   "skipped": {},
+   "via": {
+    "call": "model.summary",
+    "commands": [],
+    "results": [],
+    "value": {
+     "ref": "<id0>.summary",
+     "type": "GaussianMixtureSummary"
+    }
+   }
+  },
+  "KMeans.cosine-random.training": {
+   "class": "KMeansSummary",
+   "members": {
+    "cluster": {
+     "call": "summary.cluster",
+     "commands": [
+      "Eh8KBwoFPGlkMD4SCQoHc3VtbWFyeRIJCgdjbHVzdGVyGuYCCgDiEuACCt0CCgcKBTxpZDA+Gs8CCgCKAckCCsICCgAavQIKlgIKALoBkAIK2QEKAFrUARLRAXsiZmllbGRzIjpbeyJtZXRhZGF0YSI6e30sIm5hbWUiOiJ3ZWlnaHQiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoiZmVhdHVyZXMiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6eyJjb250YWluc051bGwiOnRydWUsImVsZW1lbnRUeXBlIjoiZG91YmxlIiwidHlwZSI6ImFycmF5In19XSwidHlwZSI6InN0cnVjdCJ9EjIKJhokCg9hcnJheV90b192ZWN0b3ISERIMCghmZWF0dXJlcxgAkgEAEghmZWF0dXJlcxoPEgoKBndlaWdodBgAkgEAGhESDAoIZmVhdHVyZXMYAJIBABABGAAiAA=="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0
+       ],
+       [
+        0
+       ],
+       [
+        0
+       ],
+       [
+        0
+       ],
+       [
+        0
+       ],
+       [
+        0
+       ],
+       [
+        0
+       ],
+       [
+        1
+       ],
+       [
+        1
+       ],
+       [
+        1
+       ],
+       [
+        2
+       ]
+      ],
+      "schema": "struct<prediction:int>"
+     }
+    },
+    "clusterSizes": {
+     "call": "summary.clusterSizes",
+     "commands": [
+      "EiQKBwoFPGlkMD4SCQoHc3VtbWFyeRIOCgxjbHVzdGVyU2l6ZXM="
+     ],
+     "results": [
+      "ChOyARAKAjoAEgI4BxICOAMSAjgB"
+     ],
+     "value": [
+      7,
+      3,
+      1
+     ]
+    },
+    "featuresCol": {
+     "call": "summary.featuresCol",
+     "commands": [
+      "EiMKBwoFPGlkMD4SCQoHc3VtbWFyeRINCgtmZWF0dXJlc0NvbA=="
+     ],
+     "results": [
+      "CgpqCGZlYXR1cmVz"
+     ],
+     "value": "features"
+    },
+    "k": {
+     "call": "summary.k",
+     "commands": [
+      "EhkKBwoFPGlkMD4SCQoHc3VtbWFyeRIDCgFr"
+     ],
+     "results": [
+      "CgIwAw=="
+     ],
+     "value": 3
+    },
+    "numIter": {
+     "call": "summary.numIter",
+     "commands": [
+      "Eh8KBwoFPGlkMD4SCQoHc3VtbWFyeRIJCgdudW1JdGVy"
+     ],
+     "results": [
+      "CgIwAw=="
+     ],
+     "value": 3
+    },
+    "predictionCol": {
+     "call": "summary.predictionCol",
+     "commands": [
+      "EiUKBwoFPGlkMD4SCQoHc3VtbWFyeRIPCg1wcmVkaWN0aW9uQ29s"
+     ],
+     "results": [
+      "CgxqCnByZWRpY3Rpb24="
+     ],
+     "value": "prediction"
+    },
+    "predictions": {
+     "call": "summary.predictions",
+     "commands": [
+      "EiMKBwoFPGlkMD4SCQoHc3VtbWFyeRINCgtwcmVkaWN0aW9ucxrmAgoA4hLgAgrdAgoHCgU8aWQwPhrPAgoAigHJAgrCAgoAGr0CCpYCCgC6AZACCtkBCgBa1AES0QF7ImZpZWxkcyI6W3sibWV0YWRhdGEiOnt9LCJuYW1lIjoid2VpZ2h0IiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImZlYXR1cmVzIiwibnVsbGFibGUiOnRydWUsInR5cGUiOnsiY29udGFpbnNOdWxsIjp0cnVlLCJlbGVtZW50VHlwZSI6ImRvdWJsZSIsInR5cGUiOiJhcnJheSJ9fV0sInR5cGUiOiJzdHJ1Y3QifRIyCiYaJAoPYXJyYXlfdG9fdmVjdG9yEhESDAoIZmVhdHVyZXMYAJIBABIIZmVhdHVyZXMaDxIKCgZ3ZWlnaHQYAJIBABoREgwKCGZlYXR1cmVzGACSAQAQARgAIgA="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0.5,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          6.0,
+          6.0
+         ]
+        },
+        0
+       ],
+       [
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.0,
+          1.0
+         ]
+        },
+        0
+       ],
+       [
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.1,
+          1.6
+         ]
+        },
+        2
+       ],
+       [
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.4,
+          1.4
+         ]
+        },
+        0
+       ],
+       [
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          10.0,
+          1.5
+         ]
+        },
+        1
+       ],
+       [
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          10.4,
+          1.1
+         ]
+        },
+        1
+       ],
+       [
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          5.9,
+          6.6
+         ]
+        },
+        0
+       ],
+       [
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          6.5,
+          5.8
+         ]
+        },
+        0
+       ],
+       [
+        1.5,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          9.8,
+          1.9
+         ]
+        },
+        1
+       ],
+       [
+        2.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.5,
+          1.2
+         ]
+        },
+        0
+       ],
+       [
+        2.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          6.2,
+          6.3
+         ]
+        },
+        0
+       ]
+      ],
+      "schema": "struct<weight:double,features:vector,prediction:int>"
+     }
+    },
+    "repr()": {
+     "call": "repr(summary)",
+     "commands": [],
+     "results": [],
+     "value": "<pyspark.ml.clustering.KMeansSummary object at 0x<addr>>"
+    },
+    "str()": {
+     "call": "str(summary)",
+     "commands": [],
+     "results": [],
+     "value": "<pyspark.ml.clustering.KMeansSummary object at 0x<addr>>"
+    },
+    "trainingCost": {
+     "call": "summary.trainingCost",
+     "commands": [
+      "EiQKBwoFPGlkMD4SCQoHc3VtbWFyeRIOCgx0cmFpbmluZ0Nvc3Q="
+     ],
+     "results": [
+      "CglZQFTAPEVWhT8="
+     ],
+     "value": 0.010418454090578178
+    }
+   },
+   "skipped": {},
+   "via": {
+    "call": "model.summary",
+    "commands": [],
+    "results": [],
+    "value": {
+     "ref": "<id0>.summary",
+     "type": "KMeansSummary"
+    }
+   }
+  },
+  "KMeans.default.training": {
+   "class": "KMeansSummary",
+   "members": {
+    "cluster": {
+     "call": "summary.cluster",
+     "commands": [
+      "Eh8KBwoFPGlkMD4SCQoHc3VtbWFyeRIJCgdjbHVzdGVyGuYCCgDiEuACCt0CCgcKBTxpZDA+Gs8CCgCKAckCCsICCgAavQIKlgIKALoBkAIK2QEKAFrUARLRAXsiZmllbGRzIjpbeyJtZXRhZGF0YSI6e30sIm5hbWUiOiJ3ZWlnaHQiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoiZmVhdHVyZXMiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6eyJjb250YWluc051bGwiOnRydWUsImVsZW1lbnRUeXBlIjoiZG91YmxlIiwidHlwZSI6ImFycmF5In19XSwidHlwZSI6InN0cnVjdCJ9EjIKJhokCg9hcnJheV90b192ZWN0b3ISERIMCghmZWF0dXJlcxgAkgEAEghmZWF0dXJlcxoPEgoKBndlaWdodBgAkgEAGhESDAoIZmVhdHVyZXMYAJIBABABGAAiAA=="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0
+       ],
+       [
+        0
+       ],
+       [
+        0
+       ],
+       [
+        0
+       ],
+       [
+        1
+       ],
+       [
+        1
+       ],
+       [
+        1
+       ],
+       [
+        2
+       ],
+       [
+        2
+       ],
+       [
+        2
+       ],
+       [
+        2
+       ]
+      ],
+      "schema": "struct<prediction:int>"
+     }
+    },
+    "clusterSizes": {
+     "call": "summary.clusterSizes",
+     "commands": [
+      "EiQKBwoFPGlkMD4SCQoHc3VtbWFyeRIOCgxjbHVzdGVyU2l6ZXM="
+     ],
+     "results": [
+      "ChOyARAKAjoAEgI4BBICOAMSAjgE"
+     ],
+     "value": [
+      4,
+      3,
+      4
+     ]
+    },
+    "featuresCol": {
+     "call": "summary.featuresCol",
+     "commands": [
+      "EiMKBwoFPGlkMD4SCQoHc3VtbWFyeRINCgtmZWF0dXJlc0NvbA=="
+     ],
+     "results": [
+      "CgpqCGZlYXR1cmVz"
+     ],
+     "value": "features"
+    },
+    "k": {
+     "call": "summary.k",
+     "commands": [
+      "EhkKBwoFPGlkMD4SCQoHc3VtbWFyeRIDCgFr"
+     ],
+     "results": [
+      "CgIwAw=="
+     ],
+     "value": 3
+    },
+    "numIter": {
+     "call": "summary.numIter",
+     "commands": [
+      "Eh8KBwoFPGlkMD4SCQoHc3VtbWFyeRIJCgdudW1JdGVy"
+     ],
+     "results": [
+      "CgIwAg=="
+     ],
+     "value": 2
+    },
+    "predictionCol": {
+     "call": "summary.predictionCol",
+     "commands": [
+      "EiUKBwoFPGlkMD4SCQoHc3VtbWFyeRIPCg1wcmVkaWN0aW9uQ29s"
+     ],
+     "results": [
+      "CgxqCnByZWRpY3Rpb24="
+     ],
+     "value": "prediction"
+    },
+    "predictions": {
+     "call": "summary.predictions",
+     "commands": [
+      "EiMKBwoFPGlkMD4SCQoHc3VtbWFyeRINCgtwcmVkaWN0aW9ucxrmAgoA4hLgAgrdAgoHCgU8aWQwPhrPAgoAigHJAgrCAgoAGr0CCpYCCgC6AZACCtkBCgBa1AES0QF7ImZpZWxkcyI6W3sibWV0YWRhdGEiOnt9LCJuYW1lIjoid2VpZ2h0IiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImZlYXR1cmVzIiwibnVsbGFibGUiOnRydWUsInR5cGUiOnsiY29udGFpbnNOdWxsIjp0cnVlLCJlbGVtZW50VHlwZSI6ImRvdWJsZSIsInR5cGUiOiJhcnJheSJ9fV0sInR5cGUiOiJzdHJ1Y3QifRIyCiYaJAoPYXJyYXlfdG9fdmVjdG9yEhESDAoIZmVhdHVyZXMYAJIBABIIZmVhdHVyZXMaDxIKCgZ3ZWlnaHQYAJIBABoREgwKCGZlYXR1cmVzGACSAQAQARgAIgA="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0.5,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          6.0,
+          6.0
+         ]
+        },
+        2
+       ],
+       [
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.0,
+          1.0
+         ]
+        },
+        0
+       ],
+       [
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.1,
+          1.6
+         ]
+        },
+        0
+       ],
+       [
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.4,
+          1.4
+         ]
+        },
+        0
+       ],
+       [
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          10.0,
+          1.5
+         ]
+        },
+        1
+       ],
+       [
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          10.4,
+          1.1
+         ]
+        },
+        1
+       ],
+       [
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          5.9,
+          6.6
+         ]
+        },
+        2
+       ],
+       [
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          6.5,
+          5.8
+         ]
+        },
+        2
+       ],
+       [
+        1.5,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          9.8,
+          1.9
+         ]
+        },
+        1
+       ],
+       [
+        2.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.5,
+          1.2
+         ]
+        },
+        0
+       ],
+       [
+        2.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          6.2,
+          6.3
+         ]
+        },
+        2
+       ]
+      ],
+      "schema": "struct<weight:double,features:vector,prediction:int>"
+     }
+    },
+    "repr()": {
+     "call": "repr(summary)",
+     "commands": [],
+     "results": [],
+     "value": "<pyspark.ml.clustering.KMeansSummary object at 0x<addr>>"
+    },
+    "str()": {
+     "call": "str(summary)",
+     "commands": [],
+     "results": [],
+     "value": "<pyspark.ml.clustering.KMeansSummary object at 0x<addr>>"
+    },
+    "trainingCost": {
+     "call": "summary.trainingCost",
+     "commands": [
+      "EiQKBwoFPGlkMD4SCQoHc3VtbWFyeRIOCgx0cmFpbmluZ0Nvc3Q="
+     ],
+     "results": [
+      "CglZQURERERE9z8="
+     ],
+     "value": 1.454166666666666
+    }
+   },
+   "skipped": {},
+   "via": {
+    "call": "model.summary",
+    "commands": [],
+    "results": [],
+    "value": {
+     "ref": "<id0>.summary",
+     "type": "KMeansSummary"
+    }
+   }
+  },
+  "KMeans.weighted.training": {
+   "class": "KMeansSummary",
+   "members": {
+    "cluster": {
+     "call": "summary.cluster",
+     "commands": [
+      "Eh8KBwoFPGlkMD4SCQoHc3VtbWFyeRIJCgdjbHVzdGVyGuYCCgDiEuACCt0CCgcKBTxpZDA+Gs8CCgCKAckCCsICCgAavQIKlgIKALoBkAIK2QEKAFrUARLRAXsiZmllbGRzIjpbeyJtZXRhZGF0YSI6e30sIm5hbWUiOiJ3ZWlnaHQiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoiZmVhdHVyZXMiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6eyJjb250YWluc051bGwiOnRydWUsImVsZW1lbnRUeXBlIjoiZG91YmxlIiwidHlwZSI6ImFycmF5In19XSwidHlwZSI6InN0cnVjdCJ9EjIKJhokCg9hcnJheV90b192ZWN0b3ISERIMCghmZWF0dXJlcxgAkgEAEghmZWF0dXJlcxoPEgoKBndlaWdodBgAkgEAGhESDAoIZmVhdHVyZXMYAJIBABABGAAiAA=="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0
+       ],
+       [
+        0
+       ],
+       [
+        0
+       ],
+       [
+        0
+       ],
+       [
+        1
+       ],
+       [
+        1
+       ],
+       [
+        1
+       ],
+       [
+        2
+       ],
+       [
+        2
+       ],
+       [
+        2
+       ],
+       [
+        2
+       ]
+      ],
+      "schema": "struct<prediction:int>"
+     }
+    },
+    "clusterSizes": {
+     "call": "summary.clusterSizes",
+     "commands": [
+      "EiQKBwoFPGlkMD4SCQoHc3VtbWFyeRIOCgxjbHVzdGVyU2l6ZXM="
+     ],
+     "results": [
+      "ChOyARAKAjoAEgI4BBICOAMSAjgE"
+     ],
+     "value": [
+      4,
+      3,
+      4
+     ]
+    },
+    "featuresCol": {
+     "call": "summary.featuresCol",
+     "commands": [
+      "EiMKBwoFPGlkMD4SCQoHc3VtbWFyeRINCgtmZWF0dXJlc0NvbA=="
+     ],
+     "results": [
+      "CgpqCGZlYXR1cmVz"
+     ],
+     "value": "features"
+    },
+    "k": {
+     "call": "summary.k",
+     "commands": [
+      "EhkKBwoFPGlkMD4SCQoHc3VtbWFyeRIDCgFr"
+     ],
+     "results": [
+      "CgIwAw=="
+     ],
+     "value": 3
+    },
+    "numIter": {
+     "call": "summary.numIter",
+     "commands": [
+      "Eh8KBwoFPGlkMD4SCQoHc3VtbWFyeRIJCgdudW1JdGVy"
+     ],
+     "results": [
+      "CgIwAg=="
+     ],
+     "value": 2
+    },
+    "predictionCol": {
+     "call": "summary.predictionCol",
+     "commands": [
+      "EiUKBwoFPGlkMD4SCQoHc3VtbWFyeRIPCg1wcmVkaWN0aW9uQ29s"
+     ],
+     "results": [
+      "CgxqCnByZWRpY3Rpb24="
+     ],
+     "value": "prediction"
+    },
+    "predictions": {
+     "call": "summary.predictions",
+     "commands": [
+      "EiMKBwoFPGlkMD4SCQoHc3VtbWFyeRINCgtwcmVkaWN0aW9ucxrmAgoA4hLgAgrdAgoHCgU8aWQwPhrPAgoAigHJAgrCAgoAGr0CCpYCCgC6AZACCtkBCgBa1AES0QF7ImZpZWxkcyI6W3sibWV0YWRhdGEiOnt9LCJuYW1lIjoid2VpZ2h0IiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImZlYXR1cmVzIiwibnVsbGFibGUiOnRydWUsInR5cGUiOnsiY29udGFpbnNOdWxsIjp0cnVlLCJlbGVtZW50VHlwZSI6ImRvdWJsZSIsInR5cGUiOiJhcnJheSJ9fV0sInR5cGUiOiJzdHJ1Y3QifRIyCiYaJAoPYXJyYXlfdG9fdmVjdG9yEhESDAoIZmVhdHVyZXMYAJIBABIIZmVhdHVyZXMaDxIKCgZ3ZWlnaHQYAJIBABoREgwKCGZlYXR1cmVzGACSAQAQARgAIgA="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0.5,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          6.0,
+          6.0
+         ]
+        },
+        2
+       ],
+       [
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.0,
+          1.0
+         ]
+        },
+        0
+       ],
+       [
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.1,
+          1.6
+         ]
+        },
+        0
+       ],
+       [
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.4,
+          1.4
+         ]
+        },
+        0
+       ],
+       [
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          10.0,
+          1.5
+         ]
+        },
+        1
+       ],
+       [
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          10.4,
+          1.1
+         ]
+        },
+        1
+       ],
+       [
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          5.9,
+          6.6
+         ]
+        },
+        2
+       ],
+       [
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          6.5,
+          5.8
+         ]
+        },
+        2
+       ],
+       [
+        1.5,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          9.8,
+          1.9
+         ]
+        },
+        1
+       ],
+       [
+        2.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.5,
+          1.2
+         ]
+        },
+        0
+       ],
+       [
+        2.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          6.2,
+          6.3
+         ]
+        },
+        2
+       ]
+      ],
+      "schema": "struct<weight:double,features:vector,prediction:int>"
+     }
+    },
+    "repr()": {
+     "call": "repr(summary)",
+     "commands": [],
+     "results": [],
+     "value": "<pyspark.ml.clustering.KMeansSummary object at 0x<addr>>"
+    },
+    "str()": {
+     "call": "str(summary)",
+     "commands": [],
+     "results": [],
+     "value": "<pyspark.ml.clustering.KMeansSummary object at 0x<addr>>"
+    },
+    "trainingCost": {
+     "call": "summary.trainingCost",
+     "commands": [
+      "EiQKBwoFPGlkMD4SCQoHc3VtbWFyeRIOCgx0cmFpbmluZ0Nvc3Q="
+     ],
+     "results": [
+      "CglZhV6MNqZt+T8="
+     ],
+     "value": 1.5892698412698405
+    }
+   },
+   "skipped": {},
+   "via": {
+    "call": "model.summary",
+    "commands": [],
+    "results": [],
+    "value": {
+     "ref": "<id0>.summary",
+     "type": "KMeansSummary"
+    }
+   }
+  }
+ }
+}
