@@ -26,7 +26,10 @@ fn frames(session: &SparkSession, fixture: &serde_json::Value) -> HashMap<String
                     )),
                 );
             }
-            (name.clone(), df)
+            // One partition, as scripts/capture_evaluators_golden.py captures it: a binned metric
+            // of BinaryClassificationMetrics depends on the partitioning, which local[*] takes from
+            // the server's cores.
+            (name.clone(), df.coalesce(1))
         })
         .collect()
 }
