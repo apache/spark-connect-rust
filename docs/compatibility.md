@@ -314,6 +314,10 @@ FMClassifier and OneVsRest, from `python/tests/_misc_api_cases.py` and
 `python/tests/_ml_api_cases.py` (the Params API, the models, summaries, transforms and persistence),
 which `test_ml_api_offline.py` and `test_ml_api_e2e.py` compare with.
 
+The tree classes have their own cases, `python/tests/_tree_api_cases.py` and
+`tests/golden/tree_api_cases.json`, with `test_tree_api_offline.py` and
+`test_tree_api_e2e.py`.
+
 ## Native regression models (Rust API)
 
 Each regression estimator of `spark_connect::ml` fits its typed model, as PySpark's `fit` returns
@@ -597,7 +601,9 @@ accessors of PySpark's `GBTClassificationModel`: `trees` (regression tree models
 `to_debug_string`, `predict`, `predict_leaf`, `predict_raw`, `predict_probability`,
 `evaluate_each_iteration(&df)` and the supported-value lists. It has `load`, and
 `write().save(path)`. Unlike PySpark, the fit does not fetch the trees up front; they
-are fetched when asked. The native Python model class is not covered by this section.
+are fetched when asked. In Python, `GBTClassifier` and its `GBTClassificationModel` follow the full API of
+`pyspark.ml` (see "Native ML classes of the full pyspark.ml API"); as PySpark's, its fit reads
+the trees right after the Fit.
 
 ## Native DecisionTreeRegressor
 
@@ -645,7 +651,8 @@ fitting session until the last owner is dropped. The Rust model has the typed
 accessors of PySpark's `DecisionTreeClassificationModel`: `depth`, `num_nodes`,
 `feature_importances`, `to_debug_string`, `predict`, `predict_leaf`, `predict_raw`,
 `predict_probability` and `supported_impurities`, and `load`; `write().save(path)`
-saves it. The native Python model class is not covered by this section.
+saves it. In Python, `DecisionTreeClassifier` and its `DecisionTreeClassificationModel` follow the full
+API of `pyspark.ml` (see "Native ML classes of the full pyspark.ml API").
 
 ## Native RandomForestClassifier
 
@@ -674,8 +681,10 @@ last owner is dropped. The Rust model has the typed accessors of PySpark's
 `evaluate(&df)` (the binary or multiclass summary of a dataset), the supported-value
 lists, and `load`; `write().save(path)` saves it. A loaded model has no training
 summary. The fit does not fetch `numClasses` and the trees up front as PySpark does;
-`summary()` and `trees()` fetch them when asked. The native Python model class is
-not covered by this section.
+`summary()` and `trees()` fetch them when asked. In Python, `RandomForestClassifier`, its `RandomForestClassificationModel` and the four
+random forest summaries follow the full API of `pyspark.ml` (see "Native ML classes of the
+full pyspark.ml API"); as PySpark's, its fit reads `numClasses` and then the trees right after
+the Fit.
 
 ## Native KMeans
 

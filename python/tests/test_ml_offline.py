@@ -100,11 +100,16 @@ def _ml_result(**fields):
 
 def _answer_fit(service, estimator, ref="model-1", fits=1):
     # The responses of the executions of `fits` fits of estimator: each fit's Fit, which returns the
-    # model of `ref`, and, of a LogisticRegression, the numClasses that its training summary reads
-    # after it (of a binary model). The others make one execution a fit.
-    if type(estimator).__name__ == "LogisticRegression":
-        numClasses = _ml_result(param=pb2.Expression.Literal(integer=2))
+    # model of `ref`; of a LogisticRegression, the numClasses that its training summary reads after
+    # it (of a binary model); and of a RandomForestClassifier, its numClasses and then its trees, as
+    # PySpark reads them after the Fit. The others are answered by the model of `ref`.
+    name = type(estimator).__name__
+    numClasses = _ml_result(param=pb2.Expression.Literal(integer=2))
+    if name == "LogisticRegression":
         service.execute_payload_queue = [_operator_info(ref), numClasses] * fits
+    elif name == "RandomForestClassifier":
+        trees = _operator_info("tree-1")
+        service.execute_payload_queue = [_operator_info(ref), numClasses, trees] * fits
     else:
         service.execute_payload = _operator_info(ref)
 
@@ -113,6 +118,8 @@ def _operator_info(ref_id):
     return _ml_result(
         operator_info=pb2.MlCommandResult.MlOperatorInfo(obj_ref=pb2.ObjectRef(id=ref_id))
     )
+
+
 
 
 def _label_query_result(obj):
@@ -287,6 +294,8 @@ def _session_analyses(service, spark):
 # of the model (its `trees`, a cached property).
 _FETCHES_AFTER_FIT = {
     "LogisticRegression": ["numClasses"],
+    "RandomForestClassifier": ["numClasses", "trees"],
+    "GBTClassifier": ["trees"],
     "RandomForestRegressor": ["trees"],
     "GBTRegressor": ["trees"],
 }
@@ -1380,6 +1389,7 @@ def _native_request(spark, service, obj, models):
         _answer_fit(service, obj)
         service.query_payload = _label_query_result(obj)
         models.append(obj.fit(df))
+        service.execute_payload_queue = None
         service.query_payload = None
         fit = _commands_but_deletes(service, sent)[0].ml_command.fit
         return fit.estimator, fit.params
