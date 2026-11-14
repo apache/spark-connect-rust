@@ -1,19 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 //! The typed accessors of LogisticRegression, LinearSVC and their models and summaries, against
 //! the entries that official PySpark 4.3.0 captured (`tests/golden/classification_*.json`). No
-//! Spark server is needed: a loopback Spark Connect service answers each ML command with the
-//! golden result of that command, in the golden order, and the test checks that the accessor sent
-//! the golden command and returned the golden value. The commands are compared after the golden's
-//! normalization: the operator uids, the paths and the datasets (whose data the golden clears)
-//! are cleared on both sides.
+//! Spark server is needed: the replay server of `common/ml_golden.rs` answers each ML command with
+//! the golden result of that command, and the test checks that the accessor sent the golden
+//! commands and returned the golden value. The commands are compared after the golden's
+//! normalization, per entry (see `normalize_commands`).
 
-use std::collections::VecDeque;
-use std::convert::Infallible;
-use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll};
+#[path = "common/ml_golden.rs"]
+mod ml_golden;
 
 use base64::{engine::general_purpose::STANDARD, Engine};
-use futures::stream;
+use ml_golden::{assert_commands, ReplayServer};
 use prost::Message;
 use serde_json::{json, Value};
 use spark_connect::ml::{
@@ -26,336 +23,12 @@ use spark_connect::ml::{
     TrainingSummary, Transformer,
 };
 use spark_connect::SparkSession;
-use spark_connect_core::bytes_codec::BytesCodec;
 use spark_connect_core::error::Result as CoreResult;
 use spark_connect_proto as proto;
-use tokio::net::TcpListener;
-use tonic::body::Body;
-use tonic::codegen::{http, BoxFuture, Service};
-use tonic::server::{NamedService, ServerStreamingService, UnaryService};
-use tonic::{Request, Response, Status};
 
-const SERVICE: &str = "/spark.connect.SparkConnectService/";
 const MODELS: &str = include_str!("../../../tests/golden/classification_models.json");
 const SUMMARIES: &str = include_str!("../../../tests/golden/classification_summaries.json");
 const PERSISTENCE: &str = include_str!("../../../tests/golden/classification_persistence.json");
-
-/// The reply to one ML command: its result, an error, or none.
-#[derive(Clone)]
-enum Reply {
-    Result(proto::MlCommandResult),
-    Error(String),
-    Empty,
-}
-
-/// One expected ML command, with its normalized command and its reply.
-struct Exchange {
-    command: proto::MlCommand,
-    reply: Reply,
-}
-
-/// The commands that the test expects, in order, and the requests that were not expected.
-#[derive(Default)]
-struct Script {
-    expected: VecDeque<Exchange>,
-    unexpected: Vec<String>,
-}
-
-impl Script {
-    fn answer(
-        &mut self,
-        command: proto::MlCommand,
-    ) -> Result<Option<proto::MlCommandResult>, Status> {
-        let command = normalize(command);
-        let Some(exchange) = self.expected.pop_front() else {
-            let message = format!("unexpected ML command {command:?}");
-            self.unexpected.push(message.clone());
-            return Err(Status::internal(message));
-        };
-        if exchange.command != command {
-            let message = format!(
-                "ML command differs from the golden\n golden: {:?}\n actual: {command:?}",
-                exchange.command
-            );
-            self.unexpected.push(message.clone());
-            return Err(Status::internal(message));
-        }
-        match exchange.reply {
-            Reply::Result(result) => Ok(Some(result)),
-            Reply::Empty => Ok(None),
-            Reply::Error(message) => Err(Status::internal(message)),
-        }
-    }
-}
-
-/// The golden's normalization of an ML command: the uids of operators, the paths and the datasets
-/// are cleared, as the golden clears them, and so are the inputs of fetches. The object ids are
-/// the golden's placeholders, which it numbers per entry, so they are not compared.
-fn normalize(mut command: proto::MlCommand) -> proto::MlCommand {
-    use proto::fetch::method::args::ArgsType;
-    use proto::ml_command::{write::Type as WriteType, Command};
-    match command.command.as_mut() {
-        Some(Command::Fit(fit)) => {
-            if let Some(operator) = fit.estimator.as_mut() {
-                operator.uid.clear();
-            }
-            fit.dataset = None;
-        }
-        Some(Command::Fetch(fetch)) => {
-            if let Some(object) = fetch.obj_ref.as_mut() {
-                object.id = "<obj>".into();
-            }
-            for method in &mut fetch.methods {
-                for arg in &mut method.args {
-                    if let Some(ArgsType::Input(relation)) = arg.args_type.as_mut() {
-                        *relation = proto::Relation::default();
-                    }
-                }
-            }
-        }
-        Some(Command::Read(read)) => {
-            if let Some(operator) = read.operator.as_mut() {
-                operator.uid.clear();
-            }
-            read.path.clear();
-        }
-        Some(Command::Write(write)) => {
-            match write.r#type.as_mut() {
-                Some(WriteType::Operator(operator)) => operator.uid.clear(),
-                Some(WriteType::ObjRef(object)) => object.id = "<obj>".into(),
-                None => {}
-            }
-            write.path.clear();
-        }
-        _ => {}
-    }
-    command
-}
-
-/// A loopback Spark Connect service that answers ExecutePlan with the expected replies.
-#[derive(Clone)]
-struct FakeService(Arc<Mutex<Script>>);
-
-impl NamedService for FakeService {
-    const NAME: &'static str = "spark.connect.SparkConnectService";
-}
-
-impl Service<http::Request<Body>> for FakeService {
-    type Response = http::Response<Body>;
-    type Error = Infallible;
-    type Future = BoxFuture<Self::Response, Self::Error>;
-
-    fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        Poll::Ready(Ok(()))
-    }
-
-    fn call(&mut self, request: http::Request<Body>) -> Self::Future {
-        let method = request.uri().path().trim_start_matches(SERVICE).to_string();
-        let script = self.0.clone();
-        Box::pin(async move {
-            let mut grpc = tonic::server::Grpc::new(BytesCodec);
-            Ok(match method.as_str() {
-                "ExecutePlan" => grpc.server_streaming(Execute(script), request).await,
-                "Config" => grpc.unary(Config, request).await,
-                "ReleaseExecute" => grpc.unary(Empty, request).await,
-                other => {
-                    eprintln!("unexpected RPC {other}");
-                    grpc.unary(Unimplemented, request).await
-                }
-            })
-        })
-    }
-}
-
-/// ExecutePlan: an ML command, answered from the script; the deletes of released objects are not
-/// part of the script and get an empty completion.
-struct Execute(Arc<Mutex<Script>>);
-
-impl ServerStreamingService<Vec<u8>> for Execute {
-    type Response = Vec<u8>;
-    type ResponseStream = futures::stream::Iter<std::vec::IntoIter<Result<Vec<u8>, Status>>>;
-    type Future = BoxFuture<Response<Self::ResponseStream>, Status>;
-
-    fn call(&mut self, request: Request<Vec<u8>>) -> Self::Future {
-        let request = proto::ExecutePlanRequest::decode(request.into_inner().as_slice()).unwrap();
-        let session_id = request.session_id.clone();
-        let command = match request.plan.and_then(|plan| plan.op_type) {
-            Some(proto::plan::OpType::Command(command)) => command.command_type,
-            _ => None,
-        };
-        let reply = match command {
-            Some(proto::command::CommandType::MlCommand(ml)) => {
-                if matches!(ml.command, Some(proto::ml_command::Command::Delete(_))) {
-                    Ok(None)
-                } else {
-                    self.0.lock().unwrap().answer(ml)
-                }
-            }
-            other => Err(Status::internal(format!("unexpected command {other:?}"))),
-        };
-        Box::pin(async move {
-            let result = reply?;
-            let mut frames = Vec::new();
-            if let Some(result) = result {
-                let response = proto::ExecutePlanResponse {
-                    session_id: session_id.clone(),
-                    response_id: "result".into(),
-                    response_type: Some(
-                        proto::execute_plan_response::ResponseType::MlCommandResult(result),
-                    ),
-                    ..Default::default()
-                };
-                frames.push(Ok(response.encode_to_vec()));
-            }
-            let complete = proto::ExecutePlanResponse {
-                session_id,
-                response_id: "complete".into(),
-                response_type: Some(proto::execute_plan_response::ResponseType::ResultComplete(
-                    proto::execute_plan_response::ResultComplete {},
-                )),
-                ..Default::default()
-            };
-            frames.push(Ok(complete.encode_to_vec()));
-            Ok(Response::new(stream::iter(frames)))
-        })
-    }
-}
-
-/// An RPC whose reply has no fields that the client reads: an empty message.
-struct Empty;
-
-impl UnaryService<Vec<u8>> for Empty {
-    type Response = Vec<u8>;
-    type Future = BoxFuture<Response<Vec<u8>>, Status>;
-
-    fn call(&mut self, _: Request<Vec<u8>>) -> Self::Future {
-        Box::pin(async { Ok(Response::new(Vec::new())) })
-    }
-}
-
-/// An RPC that the golden does not need: it fails.
-struct Unimplemented;
-
-impl UnaryService<Vec<u8>> for Unimplemented {
-    type Response = Vec<u8>;
-    type Future = BoxFuture<Response<Vec<u8>>, Status>;
-
-    fn call(&mut self, _: Request<Vec<u8>>) -> Self::Future {
-        Box::pin(async { Err(Status::unimplemented("not part of the golden")) })
-    }
-}
-
-/// Config: answers with no pairs.
-struct Config;
-
-impl UnaryService<Vec<u8>> for Config {
-    type Response = Vec<u8>;
-    type Future = BoxFuture<Response<Vec<u8>>, Status>;
-
-    fn call(&mut self, request: Request<Vec<u8>>) -> Self::Future {
-        let session_id = proto::ConfigRequest::decode(request.into_inner().as_slice())
-            .unwrap()
-            .session_id;
-        let body = proto::ConfigResponse {
-            session_id,
-            ..Default::default()
-        }
-        .encode_to_vec();
-        Box::pin(async { Ok(Response::new(body)) })
-    }
-}
-
-/// A server with its script, serving on a thread of its own, since a session blocks the thread
-/// that calls it, and the one session of the test.
-struct Server {
-    script: Arc<Mutex<Script>>,
-    session: SparkSession,
-}
-
-impl Server {
-    fn start() -> Self {
-        let script = Arc::new(Mutex::new(Script::default()));
-        let service = FakeService(script.clone());
-        let (sender, receiver) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let runtime = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .unwrap();
-            runtime.block_on(async move {
-                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-                sender.send(listener.local_addr().unwrap()).unwrap();
-                let incoming = stream::unfold(listener, |listener| async {
-                    Some((listener.accept().await.map(|(socket, _)| socket), listener))
-                });
-                tonic::transport::Server::builder()
-                    .add_service(service)
-                    .serve_with_incoming(incoming)
-                    .await
-                    .unwrap();
-            });
-        });
-        let url = format!("sc://{}", receiver.recv().unwrap());
-        let session = SparkSession::builder()
-            .remote(&url)
-            .get_or_create()
-            .unwrap();
-        Self { script, session }
-    }
-
-    fn session(&self) -> SparkSession {
-        self.session.clone()
-    }
-
-    /// Expect the golden entry's commands, each answered with its golden result or error.
-    fn expect(&self, entry: &Value) {
-        let commands = entry["commands"].as_array().unwrap();
-        let results = entry["results"].as_array().unwrap();
-        let mut script = self.script.lock().unwrap();
-        for (index, command) in commands.iter().enumerate() {
-            let command = proto::MlCommand::decode(
-                STANDARD
-                    .decode(command.as_str().unwrap())
-                    .unwrap()
-                    .as_slice(),
-            )
-            .unwrap();
-            let reply = if let Some(result) = results.get(index) {
-                let result = proto::MlCommandResult::decode(
-                    STANDARD
-                        .decode(result.as_str().unwrap())
-                        .unwrap()
-                        .as_slice(),
-                )
-                .unwrap();
-                Reply::Result(result)
-            } else if let Some(error) = entry.get("error") {
-                Reply::Error(error["message"].as_str().unwrap().to_string())
-            } else {
-                Reply::Empty
-            };
-            script.expected.push_back(Exchange {
-                command: normalize(command),
-                reply,
-            });
-        }
-    }
-
-    /// Assert that every expected command was sent, and that no other command was.
-    fn assert_consumed(&self, label: &str) {
-        let script = self.script.lock().unwrap();
-        assert!(
-            script.unexpected.is_empty(),
-            "{label}: {:?}",
-            script.unexpected
-        );
-        assert!(
-            script.expected.is_empty(),
-            "{label}: {} golden command(s) not sent",
-            script.expected.len()
-        );
-    }
-}
 
 fn golden(text: &str) -> Value {
     serde_json::from_str(text).unwrap()
@@ -510,10 +183,10 @@ const SKIPPED_MEMBERS: &[&str] = &[
     "roc-on-multiclass",
 ];
 
-/// Check every golden member of a summary: its commands, then its value, or its error. The
+/// Check every golden member of a summary: its value or its error, and its commands. The
 /// dispatch returns None for a member the summary does not have, which is a mistake here.
 fn check_summary_members(
-    server: &Server,
+    server: &ReplayServer,
     members: &Value,
     dispatch: &dyn Fn(&str) -> Option<Member>,
     label: &str,
@@ -525,7 +198,6 @@ fn check_summary_members(
         {
             continue;
         }
-        server.expect(entry);
         let Some(member) = dispatch(key) else {
             panic!("{label}: no accessor for {key}");
         };
@@ -533,8 +205,8 @@ fn check_summary_members(
     }
 }
 
-/// Check one member of a golden entry against its actual value or error.
-fn check_member(server: &Server, entry: &Value, actual: Member, label: &str) {
+/// Check one member of a golden entry against its actual value or error, and its commands.
+fn check_member(server: &ReplayServer, entry: &Value, actual: Member, label: &str) {
     match entry.get("error") {
         Some(error) => {
             let message = error["message"].as_str().unwrap();
@@ -550,7 +222,7 @@ fn check_member(server: &Server, entry: &Value, actual: Member, label: &str) {
             label,
         ),
     }
-    server.assert_consumed(label);
+    assert_commands(server, entry, label);
 }
 
 /// The summary class name of a golden entry, as PySpark names it.
@@ -560,7 +232,7 @@ fn class_of(value: &Value) -> &str {
 
 /// The model's members of a golden entry, for a model of the given family.
 fn check_model_members(
-    server: &Server,
+    server: &ReplayServer,
     members: &Value,
     model: &dyn Fn(&str) -> Option<Member>,
     label: &str,
@@ -572,7 +244,6 @@ fn check_model_members(
         if key == "summary" || key == "evaluate" || key.starts_with("summary") {
             continue;
         }
-        server.expect(entry);
         let Some(member) = model(key) else {
             panic!("{label}: no accessor for {key}");
         };
@@ -633,7 +304,11 @@ fn linear_svc_model_member(model: &LinearSVCModel, key: &str) -> Option<Member> 
 
 /// Fit a LogisticRegression on a dataset of the golden's fit, with the fit's own params, which
 /// the golden fit sent. Returns the model.
-fn fit_logistic(server: &Server, fit: &Value) -> LogisticRegressionModel {
+fn fit_logistic(
+    server: &ReplayServer,
+    session: &SparkSession,
+    fit: &Value,
+) -> LogisticRegressionModel {
     let fit_entry = &fit["fit"];
     let command = proto::MlCommand::decode(
         STANDARD
@@ -647,15 +322,13 @@ fn fit_logistic(server: &Server, fit: &Value) -> LogisticRegressionModel {
     };
     let mut estimator = LogisticRegression::new();
     *estimator.params_mut() = Params::from_proto(&sent.params.unwrap());
-    let session = server.session();
     let train = session.range(1).unwrap();
-    server.expect(fit_entry);
     let model = estimator.fit(&train).unwrap();
-    server.assert_consumed("fit");
+    assert_commands(server, fit_entry, "fit");
     model
 }
 
-fn fit_linear_svc(server: &Server, fit: &Value) -> LinearSVCModel {
+fn fit_linear_svc(server: &ReplayServer, session: &SparkSession, fit: &Value) -> LinearSVCModel {
     let fit_entry = &fit["fit"];
     let command = proto::MlCommand::decode(
         STANDARD
@@ -669,19 +342,22 @@ fn fit_linear_svc(server: &Server, fit: &Value) -> LinearSVCModel {
     };
     let mut estimator = LinearSVC::new();
     *estimator.params_mut() = Params::from_proto(&sent.params.unwrap());
-    let session = server.session();
     let train = session.range(1).unwrap();
-    server.expect(fit_entry);
     let model = estimator.fit(&train).unwrap();
-    server.assert_consumed("fit");
+    assert_commands(server, fit_entry, "fit");
     model
 }
 
 /// The members of a LogisticRegression model's golden entry, checked on a fitted model. The
 /// model's evaluate and summary are checked with their own summaries.
-fn check_logistic_model(server: &Server, models: &Value, family: &str) {
+fn check_logistic_model(
+    server: &ReplayServer,
+    session: &SparkSession,
+    models: &Value,
+    family: &str,
+) {
     let entry = &models["models"][family];
-    let model = fit_logistic(server, &models["fits"][family]);
+    let model = fit_logistic(server, session, &models["fits"][family]);
     check_model_members(
         server,
         &entry["members"],
@@ -718,11 +394,9 @@ fn check_logistic_model(server: &Server, models: &Value, family: &str) {
     // The evaluate of the model on a dataset: its own summary, binary or multiclass.
     let evaluate = &entry["members"]["evaluate"];
     let golden = golden_summary_members(&models_summaries(), family, "evaluate");
-    let session = server.session();
     let eval_df = session.range(1).unwrap();
-    server.expect(evaluate);
     let evaluated = model.evaluate(&eval_df).unwrap();
-    server.assert_consumed("evaluate");
+    assert_commands(server, evaluate, "evaluate");
     match evaluated {
         LogisticRegressionEvaluation::Binary(s) => {
             assert_eq!(
@@ -783,62 +457,6 @@ fn multiclass_evaluate_member(s: &LogisticRegressionSummary, key: &str) -> Optio
     classification(s, key).or_else(|| logistic(s, key))
 }
 
-#[test]
-fn logistic_regression_binomial_model_matches_official_pyspark() {
-    let models = golden(MODELS);
-    let server = Server::start();
-    check_logistic_model(&server, &models, "LogisticRegression.binomial");
-}
-
-#[test]
-fn logistic_regression_multinomial_model_matches_official_pyspark() {
-    let models = golden(MODELS);
-    let server = Server::start();
-    check_logistic_model(&server, &models, "LogisticRegression.multinomial");
-}
-
-#[test]
-fn linear_svc_model_matches_official_pyspark() {
-    let models = golden(MODELS);
-    let server = Server::start();
-    let family = "LinearSVC";
-    let entry = &models["models"][family];
-    let model = fit_linear_svc(&server, &models["fits"][family]);
-    check_model_members(
-        &server,
-        &entry["members"],
-        &|key| linear_svc_model_member(&model, key),
-        family,
-    );
-    let summaries = models_summaries();
-    assert_eq!(
-        class_of(&entry["members"]["summary()"]["value"]),
-        "LinearSVCTrainingSummary"
-    );
-    let training = model.summary().unwrap();
-    let golden_training = golden_summary_members(&summaries, family, "training");
-    check_summary_members(
-        &server,
-        &golden_training,
-        &|key| linear_svc_training_member(&training, key),
-        family,
-    );
-    let evaluate = &entry["members"]["evaluate"];
-    let golden_evaluate = golden_summary_members(&summaries, family, "evaluate");
-    let session = server.session();
-    let eval_df = session.range(1).unwrap();
-    server.expect(evaluate);
-    let evaluated = model.evaluate(&eval_df).unwrap();
-    server.assert_consumed("evaluate");
-    assert_eq!(class_of(&evaluate["value"]), "LinearSVCSummary");
-    check_summary_members(
-        &server,
-        &golden_evaluate,
-        &|key| linear_svc_evaluate_member(&evaluated, key),
-        family,
-    );
-}
-
 fn linear_svc_training_member(s: &LinearSVCTrainingSummary, key: &str) -> Option<Member> {
     classification(s, key)
         .or_else(|| binary(s, key))
@@ -847,6 +465,75 @@ fn linear_svc_training_member(s: &LinearSVCTrainingSummary, key: &str) -> Option
 
 fn linear_svc_evaluate_member(s: &LinearSVCSummary, key: &str) -> Option<Member> {
     classification(s, key).or_else(|| binary(s, key))
+}
+
+/// The golden entries of a family's model, which its test replays: the fit, the model entry with
+/// its members, and the training and evaluate summaries.
+fn model_entries<'a>(models: &'a Value, summaries: &'a Value, family: &str) -> [&'a Value; 4] {
+    [
+        &models["fits"][family]["fit"],
+        &models["models"][family],
+        &summaries["summaries"][format!("{family}.training").as_str()],
+        &summaries["summaries"][format!("{family}.evaluate").as_str()],
+    ]
+}
+
+/// The LogisticRegression model of `family`, against its golden entries.
+fn check_logistic_family(family: &str) {
+    let models = golden(MODELS);
+    let summaries = golden(SUMMARIES);
+    let (server, session) = ReplayServer::start(&model_entries(&models, &summaries, family));
+    check_logistic_model(&server, &session, &models, family);
+}
+
+#[test]
+fn logistic_regression_binomial_model_matches_official_pyspark() {
+    check_logistic_family("LogisticRegression.binomial");
+}
+
+#[test]
+fn logistic_regression_multinomial_model_matches_official_pyspark() {
+    check_logistic_family("LogisticRegression.multinomial");
+}
+
+#[test]
+fn linear_svc_model_matches_official_pyspark() {
+    let models = golden(MODELS);
+    let summaries = golden(SUMMARIES);
+    let family = "LinearSVC";
+    let (server, session) = ReplayServer::start(&model_entries(&models, &summaries, family));
+    let entry = &models["models"][family];
+    let model = fit_linear_svc(&server, &session, &models["fits"][family]);
+    check_model_members(
+        &server,
+        &entry["members"],
+        &|key| linear_svc_model_member(&model, key),
+        family,
+    );
+    assert_eq!(
+        class_of(&entry["members"]["summary()"]["value"]),
+        "LinearSVCTrainingSummary"
+    );
+    let training = model.summary().unwrap();
+    let golden_training = golden_summary_members(&summaries["summaries"], family, "training");
+    check_summary_members(
+        &server,
+        &golden_training,
+        &|key| linear_svc_training_member(&training, key),
+        family,
+    );
+    let evaluate = &entry["members"]["evaluate"];
+    let golden_evaluate = golden_summary_members(&summaries["summaries"], family, "evaluate");
+    let eval_df = session.range(1).unwrap();
+    let evaluated = model.evaluate(&eval_df).unwrap();
+    assert_commands(&server, evaluate, "evaluate");
+    assert_eq!(class_of(&evaluate["value"]), "LinearSVCSummary");
+    check_summary_members(
+        &server,
+        &golden_evaluate,
+        &|key| linear_svc_evaluate_member(&evaluated, key),
+        family,
+    );
 }
 
 /// The persistence of an estimator and of its model: `load`, then `save` of the loaded object,
@@ -858,12 +545,11 @@ fn logistic_regression_persistence_matches_official_pyspark() {
         "LogisticRegression.binomial",
         "LogisticRegression.multinomial",
     ] {
-        let server = Server::start();
-        let session = server.session();
         let estimator_entry = &persistence[format!("{family}.estimator").as_str()];
-        server.expect(&estimator_entry["load"]);
+        let model_entry = &persistence[format!("{family}.model").as_str()];
+        let (server, session) = ReplayServer::start(&[estimator_entry, model_entry]);
         let estimator = LogisticRegression::load(&session, "/unused/path").unwrap();
-        server.assert_consumed(family);
+        assert_commands(&server, &estimator_entry["load"], family);
         assert_eq!(
             estimator.operator().uid,
             result_uid(&estimator_entry["load"])
@@ -872,19 +558,16 @@ fn logistic_regression_persistence_matches_official_pyspark() {
             Estimator::params(&estimator).to_proto(),
             params_proto(&estimator_entry["load"])
         );
-        server.expect(&estimator_entry["save"]);
         estimator
             .write()
             .session(&session)
             .overwrite()
             .save("/unused/path")
             .unwrap();
-        server.assert_consumed(family);
+        assert_commands(&server, &estimator_entry["save"], family);
 
-        let model_entry = &persistence[format!("{family}.model").as_str()];
-        server.expect(&model_entry["load"]);
         let model = LogisticRegressionModel::load(&session, "/unused/path").unwrap();
-        server.assert_consumed(family);
+        assert_commands(&server, &model_entry["load"], family);
         assert_eq!(model.operator().uid, result_uid(&model_entry["load"]));
         assert!(!model.has_summary());
         check_model_members(
@@ -893,14 +576,13 @@ fn logistic_regression_persistence_matches_official_pyspark() {
             &|key| logistic_model_member(&model, key),
             family,
         );
-        server.expect(&model_entry["save"]);
         model
             .write()
             .unwrap()
             .overwrite()
             .save("/unused/path")
             .unwrap();
-        server.assert_consumed(family);
+        assert_commands(&server, &model_entry["save"], family);
     }
 }
 
@@ -908,29 +590,25 @@ fn logistic_regression_persistence_matches_official_pyspark() {
 fn linear_svc_persistence_matches_official_pyspark() {
     let persistence = golden(PERSISTENCE)["persistence"].clone();
     let family = "LinearSVC";
-    let server = Server::start();
-    let session = server.session();
     let estimator_entry = &persistence[format!("{family}.estimator").as_str()];
-    server.expect(&estimator_entry["load"]);
+    let model_entry = &persistence[format!("{family}.model").as_str()];
+    let (server, session) = ReplayServer::start(&[estimator_entry, model_entry]);
     let estimator = LinearSVC::load(&session, "/unused/path").unwrap();
-    server.assert_consumed(family);
+    assert_commands(&server, &estimator_entry["load"], family);
     assert_eq!(
         estimator.operator().uid,
         result_uid(&estimator_entry["load"])
     );
-    server.expect(&estimator_entry["save"]);
     estimator
         .write()
         .session(&session)
         .overwrite()
         .save("/unused/path")
         .unwrap();
-    server.assert_consumed(family);
+    assert_commands(&server, &estimator_entry["save"], family);
 
-    let model_entry = &persistence[format!("{family}.model").as_str()];
-    server.expect(&model_entry["load"]);
     let model = LinearSVCModel::load(&session, "/unused/path").unwrap();
-    server.assert_consumed(family);
+    assert_commands(&server, &model_entry["load"], family);
     assert_eq!(model.operator().uid, result_uid(&model_entry["load"]));
     check_model_members(
         &server,
@@ -938,14 +616,13 @@ fn linear_svc_persistence_matches_official_pyspark() {
         &|key| linear_svc_model_member(&model, key),
         family,
     );
-    server.expect(&model_entry["save"]);
     model
         .write()
         .unwrap()
         .overwrite()
         .save("/unused/path")
         .unwrap();
-    server.assert_consumed(family);
+    assert_commands(&server, &model_entry["save"], family);
 }
 
 /// The uid that a golden load read: the golden normalizes it to a placeholder, so the loaded
@@ -984,12 +661,11 @@ fn params_proto(load: &Value) -> proto::MlParams {
 fn model_setters_set_the_params_of_the_transform() {
     use spark_connect_proto::expression::literal::LiteralType;
     let persistence = golden(PERSISTENCE)["persistence"].clone();
-    let server = Server::start();
-    let session = server.session();
-    let entry = &persistence["LogisticRegression.binomial.model"];
-    server.expect(&entry["load"]);
+    let lr_entry = &persistence["LogisticRegression.binomial.model"];
+    let svc_entry = &persistence["LinearSVC.model"];
+    let (server, session) = ReplayServer::start(&[lr_entry, svc_entry]);
     let model = LogisticRegressionModel::load(&session, "/unused/path").unwrap();
-    server.assert_consumed("load");
+    assert_commands(&server, &lr_entry["load"], "load");
     let model = model
         .set_features_col("x")
         .set_prediction_col("p")
@@ -1028,10 +704,8 @@ fn model_setters_set_the_params_of_the_transform() {
     assert_eq!(model.thresholds().unwrap(), vec![1.0 - 0.6, 0.6]);
     assert!((model.threshold().unwrap() - 0.6).abs() < 1e-12);
 
-    let entry = &persistence["LinearSVC.model"];
-    server.expect(&entry["load"]);
     let svc = LinearSVCModel::load(&session, "/unused/path").unwrap();
-    server.assert_consumed("load");
+    assert_commands(&server, &svc_entry["load"], "load");
     let svc = svc
         .set_features_col("x")
         .set_prediction_col("p")
