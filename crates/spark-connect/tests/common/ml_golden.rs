@@ -192,11 +192,16 @@ pub fn normalized(mut v: Json) -> Json {
     v
 }
 
+/// Whether `actual` matches the golden's `expected`: numbers within a tolerance, arrays elementwise
+/// and objects by their keys. The server computes some values in single precision (the factors of
+/// ALS, the vectors and similarities of Word2Vec), whose last bits differ between the platforms of
+/// the capture and of the test, and which iterations accumulate: the tolerance is that of
+/// `e2e_als.rs`, which compares ALS of official PySpark across platforms.
 pub fn assert_matches(actual: &Json, expected: &Json, at: &str) {
     match (actual, expected) {
         (Json::Number(a), Json::Number(e)) => {
             let (a, e) = (a.as_f64().unwrap(), e.as_f64().unwrap());
-            assert!((a - e).abs() <= 1e-9 + 1e-9 * e.abs(), "{at}: {a} != {e}");
+            assert!((a - e).abs() <= 2e-5 + 2e-4 * e.abs(), "{at}: {a} != {e}");
         }
         (Json::Array(a), Json::Array(e)) => {
             assert_eq!(a.len(), e.len(), "{at}: {actual} != {expected}");
