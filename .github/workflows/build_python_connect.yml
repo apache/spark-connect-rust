@@ -233,6 +233,7 @@ jobs:
             tests/test_dropin_e2e.py \
             tests/test_ml_e2e.py \
             tests/test_ml_api_e2e.py \
+            tests/test_logistic_api_e2e.py \
             tests/test_gbt_classifier_e2e.py \
             tests/test_gbt_regressor_e2e.py \
             tests/test_naive_bayes_e2e.py \

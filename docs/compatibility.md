@@ -261,9 +261,8 @@ classes to build on:
 ## Native ML classes of the full pyspark.ml API (Python)
 
 The native Python classes of `pyspark.ml.connect` follow the API of `pyspark.ml` 4.3.0 over Spark
-Connect, class by class. `LinearSVC` (with `LinearSVCModel`, `LinearSVCSummary` and
-`LinearSVCTrainingSummary`) and `KMeans` (with `KMeansModel` and `KMeansSummary`) follow it in
-full; the other native classes follow as they are completed. A class that follows it has:
+Connect, class by class: the section of each class says when it follows it in full, and the other
+native classes follow as they are completed. A class that follows it has:
 
 - **The Params API of `pyspark.ml.param.Params`**: `params`, `getParam`, `hasParam`, `isSet`,
   `isDefined`, `hasDefault`, `getOrDefault`, `explainParam(s)`, `extractParamMap`, `set`, `clear`
@@ -427,6 +426,13 @@ not given is not sent, so the server's default applies. A list param without ele
 accepted by its constructor and setters, and a fit, transform or evaluate raises PySpark's
 `CANNOT_INFER_ARRAY_ELEMENT_TYPE` for it, as PySpark's serialization does.
 
+The `getThreshold`, `getThresholds`, `setThreshold` and `setThresholds` methods of the estimator
+and of its model, and their `threshold` and `thresholds` Param objects, are PySpark's
+`_LogisticRegressionParams` methods, in Python, so they match its errors: the `ValueError` of
+the equivalent threshold when `thresholds` has a length other than two, and of an inconsistent
+pair, the `ZeroDivisionError` and `TypeError` of their arithmetic, and the `KeyError` of an unset
+`thresholds`. The `%g` values of the inconsistency message are formatted by Python.
+
 A native class has the `setParams` of its `pyspark.ml` class. It is keyword-only, takes the params
 of the constructor, sets the params that it is given, in order, and returns the object, as
 PySpark's `_set` does. As PySpark's, the `setParams` of `LogisticRegression` then checks its
@@ -434,8 +440,11 @@ PySpark's `_set` does. As PySpark's, the `setParams` of `LogisticRegression` the
 `CrossValidator`, which takes `numFolds`, `parallelism` and `seed`, with a default of `None` for
 the first two. The `params` argument of a fit, transform or
 evaluate, which `pyspark.ml` takes as a param map, is accepted: `None` and an empty dict leave the
-params as they are. The native classes have no Param objects to key a map by, so a non-empty
-map raises a `TypeError` that says the native classes take no param map. A list or tuple of maps to
+params as they are. A non-empty map of a class that has the Params API's `copy` (see above) is
+copied with the map, as `Estimator.fit` and `Transformer.transform` copy it, so a key that is not a
+Param raises PySpark's `TypeError` of that copy. The other native classes have no Param objects to
+key a map by, so a non-empty map raises a `TypeError` that says the native classes take no param
+map. A list or tuple of maps to
 a fit is fitted as `pyspark.ml` fits it: one model per map, in order, returned as a list,
 so that `[]` fits nothing and does not read the dataset. Any other value raises the `TypeError` that
 `pyspark.ml` raises for it. The `params` argument is checked first, before the dataset, as
@@ -726,20 +735,44 @@ rather than a Python object, `fit_multiple` returns a `Vec` rather than an itera
 is `load`, with no reader object. The summary's DataFrames are built on the training DataFrame,
 as PySpark builds them.
 
-## Native Pipeline and CrossValidator: fit is not implemented
+In Python, `LogisticRegression` and its model follow the full API of `pyspark.ml` in the same way,
+with `coefficientMatrix`, `interceptVector`, `predictProbability`, the `summary` property and
+`hasSummary`. The fit of a LogisticRegression is followed by a `numClasses` request, which its
+training summary reads, as PySpark's does: the summary is the binary one of two classes or fewer,
+else the multinomial one.
 
-`spark_connect::ml::Pipeline` and `spark_connect::ml::CrossValidator`, and their Python
-classes `pyspark.ml.connect.Pipeline` and `pyspark.ml.connect.CrossValidator`, do not fit.
-Their `fit` raises `NOT_IMPLEMENTED` (`PySparkNotImplementedError` in Python), naming
-`Pipeline.fit` or `CrossValidator.fit`, before any request is sent, and returns no model.
-The Connect ML protocol cannot run either one: the native Pipeline holds stage names, which
-the server cannot fit, and it has no pipeline model to transform; the native CrossValidator
-holds its numeric params only, without the estimator, evaluator or param grid. Their
-constructors and setters still set the params, as before.
+## Native Pipeline and PipelineModel
 
-To fit a pipeline or to tune a model from Python, use the vendored `pyspark.ml.Pipeline` and
-`pyspark.ml.tuning.CrossValidator`, which take the estimator and transformer objects, as
-PySpark does. The Rust API has no way to fit a pipeline or to tune a model.
+`pyspark.ml.connect.Pipeline` and `pyspark.ml.connect.PipelineModel` are PySpark's `Pipeline` and
+`PipelineModel` of `pyspark.ml.pipeline`, natively, as PySpark 4.3.0 has them over Spark Connect:
+
+- **Stages:** the stages are any estimators and transformers: the native classes,
+  `pyspark.ml`'s, or the user's.
+- **Fit:** `fit` is `Pipeline._fit`. Up to the last estimator, a transformer transforms and an
+  estimator fits, and its model transforms for the stages after it. The stages after the last
+  estimator are kept as they are, in a `PipelineModel` of a new uid.
+- **Transform:** `PipelineModel.transform` transforms by each stage in order.
+- **Copy:** `Pipeline.copy` keeps the uid and copies each stage with the extra params, while
+  `PipelineModel.copy` is of a new uid.
+- **Persistence:** `write`, `save`, `read` and `load` are of PySpark's Python format:
+  - the metadata of `pyspark.ml.pipeline.Pipeline` (or `PipelineModel`), of the `stageUids`;
+  - each stage, saved by its own writer at `stages/<index>_<uid>`.
+
+  PySpark loads what this client saves, and this client loads what PySpark saves. A stage loads
+  as the native class of `pyspark.ml.connect` of its name where one loads, else as PySpark's
+  class. An overwrite deletes the path by the ML helper first, as `RemoteMLWriter` does.
+
+To save native stages, use the native `Pipeline`. The vendored `pyspark.ml.Pipeline` fits and
+transforms them, but its save raises the `ValueError` of a stage that is not `MLWritable`: the
+native classes are not subclasses of `pyspark.ml.util.MLWritable`, a plain class (not an ABC)
+that they cannot be registered with.
+
+`spark_connect::ml::CrossValidator` and `pyspark.ml.connect.CrossValidator` do not fit yet:
+- their `fit` raises `NOT_IMPLEMENTED` (`PySparkNotImplementedError` in Python), naming
+  `CrossValidator.fit`, before any request is sent;
+- to tune a model from Python, use the vendored `pyspark.ml.tuning.CrossValidator`.
+
+`spark_connect::ml::Pipeline`, which holds stage names, does not fit either.
 
 ## pyspark.ml
 

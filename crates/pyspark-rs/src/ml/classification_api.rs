@@ -3,6 +3,16 @@
 //! `pyspark.ml.classification` has them over Spark Connect (see [`super::object`]).
 use super::*;
 
+// The families of the other classifiers, each in its own file.
+mod fm;
+mod logistic;
+mod mlp;
+mod naive_bayes;
+mod one_vs_rest;
+mod tree;
+#[allow(unused_imports)]
+pub(crate) use {fm::*, logistic::*, mlp::*, naive_bayes::*, one_vs_rest::*, tree::*};
+
 native_model! {
     PyLinearSVCModel = "LinearSVCModel" in "pyspark.ml.connect.classification",
         jvm: "org.apache.spark.ml.classification.LinearSVCModel";
@@ -182,5 +192,11 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyLinearSVCModel>()?;
     m.add_class::<PyLinearSVCSummary>()?;
     m.add_class::<PyLinearSVCTrainingSummary>()?;
+    fm::register(m)?;
+    logistic::register(m)?;
+    mlp::register(m)?;
+    naive_bayes::register(m)?;
+    one_vs_rest::register(m)?;
+    tree::register(m)?;
     Ok(())
 }

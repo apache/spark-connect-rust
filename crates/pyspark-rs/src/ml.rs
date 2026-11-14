@@ -20,8 +20,8 @@ use spark_connect::ml::{
     DecisionTreeRegressor, Estimator, Evaluator, FMClassifier, FMRegressor, GBTClassifier,
     GBTRegressor, GaussianMixture, GeneralizedLinearRegression, IsotonicRegression, KMeans,
     LinearRegression, LinearSVC, LogisticRegression, MlMatrix, MlVector, Model,
-    MultilayerPerceptronClassifier, NaiveBayes, OneVsRest, Params, Pipeline,
-    PowerIterationClustering, RandomForestClassifier, RandomForestRegressor, Transformer, LDA,
+    MultilayerPerceptronClassifier, NaiveBayes, OneVsRest, Params, PowerIterationClustering,
+    RandomForestClassifier, RandomForestRegressor, Transformer, LDA,
 };
 use spark_connect::DataFrame;
 
@@ -35,6 +35,7 @@ pub(crate) mod params_api;
 // The typed models and summaries of each family, in the files of the areas that complete them.
 pub(crate) mod classification_api;
 pub(crate) mod clustering_api;
+pub(crate) mod pipeline_api;
 pub(crate) mod regression_api;
 
 pub(crate) mod evaluation;
@@ -819,90 +820,58 @@ const LOGISTIC_REGRESSION_PARAMS: &[(&str, Kind)] = &[
     ("maxBlockSizeInMB", Kind::Float),
 ];
 
-/// The value of the param `name` of `params` that is set, as PySpark's `getOrDefault` reads a set
-/// param: None when it is not set, `Some(None)` when it is set to None (a null).
-fn set_literal<'a>(
-    params: &'a Params,
-    name: &str,
-) -> Option<Option<&'a spark_connect_proto::expression::literal::LiteralType>> {
-    use spark_connect_proto::expression::{literal::LiteralType, ExprType};
-
-    match params.get_param(name)?.expr_type.as_ref() {
-        Some(ExprType::Literal(literal)) => match literal.literal_type.as_ref() {
-            Some(LiteralType::Null(_)) | None => Some(None),
-            value => Some(value),
-        },
-        _ => Some(None),
-    }
-}
-
-/// `_checkThresholdConsistency` of PySpark's LogisticRegression, which its constructor and its
-/// `setParams` make once they have set the params that they are given, of the params of `params`:
-/// when both `threshold` and `thresholds` are set, `thresholds` must have two values, whose
-/// equivalent threshold, `1 / (1 + thresholds[0] / thresholds[1])`, is `threshold` within 1e-5,
-/// else PySpark's ValueError, which leaves them set, as PySpark's `_set` does. A None of either,
-/// and a division by zero, raise the TypeError and the ZeroDivisionError of PySpark's arithmetic.
-/// (Its setters make no check, as PySpark's, whose `clear` of the other is a no-op over Connect.)
-fn check_threshold_consistency(py: Python<'_>, params: &Params) -> PyResult<()> {
-    use pyo3::exceptions::PyZeroDivisionError;
-    use spark_connect_proto::expression::literal::LiteralType;
-
-    let (Some(threshold), Some(thresholds)) = (
-        set_literal(params, "threshold"),
-        set_literal(params, "thresholds"),
-    ) else {
-        return Ok(());
-    };
-    let Some(LiteralType::Array(thresholds)) = thresholds else {
-        return Err(PyTypeError::new_err(
-            "object of type 'NoneType' has no len()",
-        ));
-    };
-    let ts: Vec<f64> = thresholds
-        .elements
-        .iter()
-        .filter_map(|element| match element.literal_type {
-            Some(LiteralType::Double(value)) => Some(value),
-            _ => None,
-        })
-        .collect();
-    if ts.len() != 2 {
-        return Err(PyValueError::new_err(format!(
-            "Logistic Regression getThreshold only applies to binary classification, but \
-             thresholds has length != 2. thresholds: {}",
-            PyList::new(py, &ts)?.str()?
-        )));
-    }
-    let division = || PyZeroDivisionError::new_err("float division by zero");
-    if ts[1] == 0.0 {
-        return Err(division());
-    }
-    let denominator = 1.0 + ts[0] / ts[1];
-    if denominator == 0.0 {
-        return Err(division());
-    }
-    let t = 1.0 / denominator;
-    let Some(&LiteralType::Double(t2)) = threshold else {
-        return Err(PyTypeError::new_err(
-            "unsupported operand type(s) for -: 'NoneType' and 'float'",
-        ));
-    };
-    if (t2 - t).abs() >= 1e-5 {
-        // Of PySpark's `%g`s.
-        let message = pyo3::types::PyString::new(
-            py,
-            "Logistic Regression getThreshold found inconsistent values for threshold (%g) and \
-             thresholds (equivalent to %g)",
-        )
-        .call_method1("__mod__", ((t2, t),))?
-        .extract::<String>()?;
-        return Err(PyValueError::new_err(message));
-    }
-    Ok(())
-}
-
-#[pymethods]
-impl PyLogisticRegression {
+native_pymethods! {
+    PyLogisticRegression;
+    jvm: "org.apache.spark.ml.classification.LogisticRegression", op: Estimator;
+    params: [
+        "aggregationDepth" => (
+            "getAggregationDepth",
+            get_aggregation_depth,
+            param_aggregation_depth
+        ),
+        "elasticNetParam" => ("getElasticNetParam", get_elastic_net_param, param_elastic_net_param),
+        "family" => ("getFamily", get_family, param_family),
+        "featuresCol" => ("getFeaturesCol", get_features_col, param_features_col),
+        "fitIntercept" => ("getFitIntercept", get_fit_intercept, param_fit_intercept),
+        "labelCol" => ("getLabelCol", get_label_col, param_label_col),
+        "lowerBoundsOnCoefficients" => (
+            "getLowerBoundsOnCoefficients",
+            get_lower_bounds_on_coefficients,
+            param_lower_bounds_on_coefficients
+        ),
+        "lowerBoundsOnIntercepts" => (
+            "getLowerBoundsOnIntercepts",
+            get_lower_bounds_on_intercepts,
+            param_lower_bounds_on_intercepts
+        ),
+        "maxBlockSizeInMB" => (
+            "getMaxBlockSizeInMB",
+            get_max_block_size_in_mb,
+            param_max_block_size_in_mb
+        ),
+        "maxIter" => ("getMaxIter", get_max_iter, param_max_iter),
+        "predictionCol" => ("getPredictionCol", get_prediction_col, param_prediction_col),
+        "probabilityCol" => ("getProbabilityCol", get_probability_col, param_probability_col),
+        "rawPredictionCol" => (
+            "getRawPredictionCol",
+            get_raw_prediction_col,
+            param_raw_prediction_col
+        ),
+        "regParam" => ("getRegParam", get_reg_param, param_reg_param),
+        "standardization" => ("getStandardization", get_standardization, param_standardization),
+        "tol" => ("getTol", get_tol, param_tol),
+        "upperBoundsOnCoefficients" => (
+            "getUpperBoundsOnCoefficients",
+            get_upper_bounds_on_coefficients,
+            param_upper_bounds_on_coefficients
+        ),
+        "upperBoundsOnIntercepts" => (
+            "getUpperBoundsOnIntercepts",
+            get_upper_bounds_on_intercepts,
+            param_upper_bounds_on_intercepts
+        ),
+        "weightCol" => ("getWeightCol", get_weight_col, param_weight_col),
+    ];
     #[new]
     #[pyo3(
         signature = (*args, **kwargs),
@@ -921,12 +890,13 @@ impl PyLogisticRegression {
             args,
             kwargs,
         )?;
-        check_threshold_consistency(args.py(), this.inner.params())?;
+        classification_api::check_threshold_consistency(args.py(), &this)?;
         Ok(this)
     }
+
     /// `setParams` of PySpark's LogisticRegression: as its constructor, it sets the params that it
     /// is given (see [`set_params_of`]), then checks `threshold` and `thresholds`, whichever call
-    /// set them (see [`check_threshold_consistency`]).
+    /// set them (see [`classification_api::check_threshold_consistency`]).
     #[pyo3(
         name = "setParams",
         signature = (*args, **kwargs),
@@ -944,9 +914,10 @@ impl PyLogisticRegression {
             args,
             kwargs,
         )?;
-        check_threshold_consistency(slf.py(), slf.try_borrow()?.inner.params())?;
+        classification_api::check_threshold_consistency(slf.py(), &*slf.try_borrow()?)?;
         Ok(slf)
     }
+
     #[pyo3(name = "setFeaturesCol")]
     fn set_features_col<'py>(
         slf: Bound<'py, Self>,
@@ -1099,16 +1070,86 @@ impl PyLogisticRegression {
     ) -> PyResult<Bound<'py, Self>> {
         set_param(slf, "tol", Kind::Float, value)
     }
+    /// `getThreshold()`, as PySpark's LogisticRegression (see
+    /// [`classification_api::threshold_of`]).
+    #[pyo3(name = "getThreshold")]
+    fn get_threshold(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        classification_api::threshold_of(slf)
+    }
+
+    /// `getThresholds()`, as PySpark's LogisticRegression (see
+    /// [`classification_api::thresholds_of`]).
+    #[pyo3(name = "getThresholds")]
+    fn get_thresholds(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        classification_api::thresholds_of(slf)
+    }
+
+    /// The Param attribute `threshold` of the class, as `params_only` of the macros makes it (the
+    /// class's Param, and of an instance, its Param of the uid).
+    #[classattr]
+    #[pyo3(name = "threshold")]
+    fn param_threshold() -> params_api::PyParamAttribute {
+        params_api::PyParamAttribute::new("threshold")
+    }
+
+    /// The Param attribute `thresholds` of the class (see `threshold`).
+    #[classattr]
+    #[pyo3(name = "thresholds")]
+    fn param_thresholds() -> params_api::PyParamAttribute {
+        params_api::PyParamAttribute::new("thresholds")
+    }
+
     /// Fit `dataset`, a Spark DataFrame, as PySpark's `pyspark.ml` fits it (see [`fit_native`]):
     /// its model outputs the JVM model's `rawPrediction` and `probability` vectors and `double`
-    /// prediction.
+    /// prediction, and its training summary is of the training dataset.
     #[pyo3(signature = (dataset, params=None))]
     fn fit(
         slf: &Bound<'_, Self>,
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Fitted<PyMLModel>> {
-        fit_with(slf, dataset, params, || fit_native(slf, dataset, None))
+    ) -> PyResult<Fitted<classification_api::PyLogisticRegressionModel>> {
+        fit_with(slf, dataset, params, || {
+            fit_native_model(slf, dataset, |py, model, df| {
+                classification_api::PyLogisticRegressionModel::fitted(
+                    py,
+                    model,
+                    df,
+                    object::SummaryDataset::Train,
+                )
+            })
+        })
+    }
+
+    /// The fits of a copy of the estimator, one per param map, as `Estimator.fitMultiple`, of
+    /// PySpark's keywords.
+    #[pyo3(name = "fitMultiple")]
+    #[allow(non_snake_case)]
+    fn fit_multiple<'py>(
+        slf: &Bound<'py, Self>,
+        dataset: &Bound<'py, PyAny>,
+        paramMaps: &Bound<'py, PyAny>,
+    ) -> PyResult<params_api::PyFitMultipleIterator> {
+        params_api::fit_multiple(slf.as_any(), dataset, paramMaps)
+    }
+}
+
+impl params_api::NativeInstance for PyLogisticRegression {
+    fn duplicate(&self, py: Python<'_>) -> PyResult<Py<Self>> {
+        Py::new(
+            py,
+            Self {
+                inner: self.inner.clone(),
+                unsendable: self.unsendable.clone(),
+            },
+        )
+    }
+
+    fn uid(&self) -> String {
+        Estimator::operator(&self.inner).uid.clone()
+    }
+
+    fn set_uid(&mut self, uid: &str) {
+        Estimator::operator_mut(&mut self.inner).uid = uid.to_string();
     }
 }
 
@@ -5481,58 +5522,6 @@ impl params_api::NativeInstance for PyBisectingKMeans {
     }
 }
 
-/// Pipeline estimator (chains stages by name).
-const PIPELINE_PARAMS: &[(&str, Kind)] = &[("stages", Kind::StrList)];
-
-#[pyclass(name = "Pipeline", module = "pyspark.ml.connect.pipeline")]
-pub struct PyPipeline {
-    inner: Pipeline,
-    unsendable: Vec<&'static str>,
-}
-
-#[pymethods]
-impl PyPipeline {
-    #[new]
-    #[pyo3(signature = (*args, **kwargs), text_signature = "(*, stages=None)")]
-    fn new(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
-        let mut this = Self {
-            inner: Pipeline::new(),
-            unsendable: Vec::new(),
-        };
-        init_params(&mut this, "Pipeline", &[], PIPELINE_PARAMS, args, kwargs)?;
-        Ok(this)
-    }
-    #[pyo3(
-        name = "setParams",
-        signature = (*args, **kwargs),
-        text_signature = "(self, *, stages=None)"
-    )]
-    fn set_params<'py>(
-        slf: Bound<'py, Self>,
-        args: &Bound<'py, PyTuple>,
-        kwargs: Option<&Bound<'py, PyDict>>,
-    ) -> PyResult<Bound<'py, Self>> {
-        set_params_of(slf, "Pipeline", PIPELINE_PARAMS, args, kwargs)
-    }
-    #[pyo3(name = "setStages")]
-    fn set_stages<'py>(
-        slf: Bound<'py, Self>,
-        value: &Bound<'py, PyAny>,
-    ) -> PyResult<Bound<'py, Self>> {
-        set_param(slf, "stages", Kind::StrList, value)
-    }
-    #[pyo3(signature = (dataset, params=None))]
-    fn fit(
-        slf: &Bound<'_, Self>,
-        dataset: &Bound<'_, PyAny>,
-        params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Fitted<PyMLModel>> {
-        fit_with(slf, dataset, params, || {
-            fit_unimplemented(slf, dataset, "Pipeline.fit")
-        })
-    }
-}
-
 /// CrossValidator (k-fold tuning).
 const CROSS_VALIDATOR_PARAMS: &[(&str, Kind)] = &[
     ("numFolds", Kind::Int),
@@ -5636,6 +5625,5 @@ native!(
     PyGaussianMixture => GaussianMixture,
     PyKMeans => KMeans,
     PyBisectingKMeans => BisectingKMeans,
-    PyPipeline => Pipeline,
     PyCrossValidator => CrossValidator,
 );

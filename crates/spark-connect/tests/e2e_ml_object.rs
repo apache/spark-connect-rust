@@ -9,9 +9,10 @@ use common::live_session;
 use spark_connect::column::col;
 use spark_connect::expression::Expression;
 use spark_connect::ml::{
-    attribute_relation, evaluated_summary, fetch, read, read_model, read_operator,
-    summary_transform, training_summary, write_object, write_operator, Estimator, FetchArg, KMeans,
-    LinearSVC, LinearSVCModel, MlTarget, MlValue, MlVector, Model, ObjectModel, OperatorType,
+    attribute_relation, evaluated_summary, fetch, handle_overwrite, json_object, load_metadata,
+    read, read_model, read_operator, save_metadata, stage_path, summary_transform,
+    training_summary, write_object, write_operator, Estimator, FetchArg, KMeans, LinearSVC,
+    LinearSVCModel, Metadata, MlTarget, MlValue, MlVector, Model, ObjectModel, OperatorType,
     RandomForestClassifier, Transformer,
 };
 use spark_connect::{Column, DataFrame, SparkSession};
@@ -299,5 +300,46 @@ fn ml_summaries_of_a_transform_and_of_an_evaluate_and_models_of_loaded_objects_a
         .unwrap()
         .contains(&"prediction".to_string()));
     assert_eq!(transformed.count().unwrap(), 8);
+    s.stop().unwrap();
+}
+
+#[test]
+fn ml_metadata_of_the_python_format_saves_loads_and_overwrites_as_pyspark() {
+    let Some(s) = live_session() else {
+        return;
+    };
+    // The metadata of a Pipeline, as `DefaultParamsWriter.saveMetadata` writes it: a text file of
+    // one line at `<path>/metadata`, which `loadMetadata` reads.
+    let path = scratch_path("metadata");
+    handle_overwrite(&s, &path).unwrap();
+    let param_map = json_object(&[
+        ("stageUids", "[\"KMeans_0123456789ab\"]".to_string()),
+        ("language", "\"Python\"".to_string()),
+    ]);
+    let version = s.version().unwrap();
+    let metadata = Metadata::new(
+        "pyspark.ml.pipeline.Pipeline",
+        "Pipeline_0123456789ab",
+        &version,
+        param_map,
+        "{}".to_string(),
+    );
+    save_metadata(&s, &path, &metadata.to_json()).unwrap();
+    let loaded = load_metadata(&s, &path, Some("pyspark.ml.pipeline.Pipeline")).unwrap();
+    assert_eq!(loaded["uid"], "Pipeline_0123456789ab");
+    assert_eq!(loaded["sparkVersion"], version.as_str());
+    assert_eq!(loaded["paramMap"]["stageUids"][0], "KMeans_0123456789ab");
+    // Another class is an error, as `_parseMetaData` raises it.
+    let error = load_metadata(&s, &path, Some("pyspark.ml.tuning.CrossValidator")).unwrap_err();
+    assert!(error.to_string().contains("Expected class name"), "{error}");
+    // A second save to the path fails, as the metadata's default save mode does, until the ML
+    // helper deletes the path of an overwrite.
+    assert!(save_metadata(&s, &path, &metadata.to_json()).is_err());
+    handle_overwrite(&s, &path).unwrap();
+    save_metadata(&s, &path, &metadata.to_json()).unwrap();
+    assert_eq!(
+        stage_path("KMeans_0123456789ab", 3, 12, &format!("{path}/stages")),
+        format!("{path}/stages/03_KMeans_0123456789ab")
+    );
     s.stop().unwrap();
 }

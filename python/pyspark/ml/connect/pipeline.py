@@ -1,5 +1,5 @@
 """Pipeline (pyspark.ml.connect.pipeline)."""
-from pyspark._pyspark import MLModel as PipelineModel
-from pyspark._pyspark import Pipeline
+
+from pyspark._pyspark import Pipeline, PipelineModel
 
 __all__ = ["Pipeline", "PipelineModel"]

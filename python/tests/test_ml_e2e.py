@@ -861,16 +861,13 @@ def test_ml_connect_setters_change_the_next_evaluate_and_fit_as_pyspark(session)
     predictions = estimator.fit(labeled).transform(labeled).orderBy("id").collect()
     assert [r.prediction for r in predictions] == labels
 
-    # The native Pipeline of stage names is not implemented: its fit raises NOT_IMPLEMENTED, as
-    # the server cannot fit the stages, and the setter still sets them.
-    from pyspark.errors import PySparkNotImplementedError
-
+    # The setter of a Pipeline sets the stages, and its fit, as `Pipeline._fit`, raises PySpark's
+    # TypeError of a stage that is neither an estimator nor a transformer, before any fit.
     pipeline = Pipeline()
     assert pipeline.setStages(["a", "b"]) is pipeline
-    with pytest.raises(PySparkNotImplementedError) as error:
+    with pytest.raises(TypeError) as error:
         pipeline.fit(labeled)
-    assert error.value.getCondition() == "NOT_IMPLEMENTED"
-    assert error.value.getMessageParameters() == {"feature": "Pipeline.fit"}
+    assert str(error.value) == "Cannot recognize a pipeline stage of type <class 'str'>."
 
 
 def test_ml_connect_set_params_fits_the_model_of_the_constructor_as_pyspark(session):

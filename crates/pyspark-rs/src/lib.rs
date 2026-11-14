@@ -278,7 +278,7 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     ml::recommendation::register(m)?;
     m.add_class::<ml::PyRegressionEvaluator>()?;
     m.add_class::<ml::PyBinaryClassificationEvaluator>()?;
-    m.add_class::<ml::PyPipeline>()?;
+    ml::pipeline_api::register(m)?;
     m.add_class::<ml::PyMulticlassClassificationEvaluator>()?;
     m.add_class::<ml::PyClusteringEvaluator>()?;
     m.add_class::<ml::PyMultilabelClassificationEvaluator>()?;

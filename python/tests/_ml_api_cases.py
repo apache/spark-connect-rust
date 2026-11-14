@@ -29,6 +29,10 @@ CLASSES = {
         ("pyspark.ml.connect.clustering", "KMeans", "pyspark.ml.clustering"),
         ("pyspark.ml.connect.clustering", "KMeansModel", "pyspark.ml.clustering"),
     ],
+    "Pipeline": [
+        ("pyspark.ml.connect.pipeline", "Pipeline", "pyspark.ml.pipeline"),
+        ("pyspark.ml.connect.pipeline", "PipelineModel", "pyspark.ml.pipeline"),
+    ],
 }
 
 # The names of the classes of pyspark.ml, whose hash is a default seed (the longest first).
@@ -168,9 +172,94 @@ def params_api_common_cases(rec, est, other):
     rec("big_int_explain", lambda: est.explainParam("maxIter"))
 
 
+def _stages():
+    """A KMeans and a LinearSVC, the stages of the cases of the Pipeline."""
+    kmeans = classes("KMeans")[0](k=2, predictionCol="cluster")
+    svc = classes("LinearSVC")[0](maxIter=5)
+    return kmeans, svc
+
+
+def _pipeline_params_api_cases(rec):
+    """The cases of PySpark's `Params` API of the Pipeline and the PipelineModel, as PySpark's
+    Python classes have it, without a server."""
+    from pyspark.ml.base import Estimator, Model
+
+    pipeline_class, model_class = classes("Pipeline")
+    kmeans, svc = _stages()
+    stages = [kmeans, svc]
+    pipeline = pipeline_class(stages=stages)
+    rec(
+        "isinstance",
+        lambda: (isinstance(pipeline, Estimator), isinstance(model_class([]), Model)),
+    )
+    rec("param_names", lambda: [p.name for p in pipeline.params])
+    rec("explainParams_unset", lambda: pipeline_class().explainParams())
+    rec("explainParams", lambda: pipeline.explainParams())
+    rec("getStages_is_stages", lambda: pipeline.getStages() is stages)
+    rec("getStages_unset", lambda: pipeline_class().getStages())
+    rec(
+        "isSet",
+        lambda: (
+            pipeline.isSet("stages"),
+            pipeline_class().isSet("stages"),
+            pipeline.hasDefault("stages"),
+        ),
+    )
+    rec("extract", lambda: sorted((p.name, repr(v)) for p, v in pipeline.extractParamMap().items()))
+    rec("positional", lambda: pipeline_class(stages))
+    rec("unexpected_keyword", lambda: pipeline_class(foo=1))
+    rec("setStages_none", lambda: pipeline_class().setStages(None).getStages())
+    rec("setParams", lambda: pipeline_class().setParams(stages=[svc]).getStages()[0] is svc)
+    copy = pipeline.copy({svc.maxIter: 7})
+    rec(
+        "copy",
+        lambda: (
+            copy.uid == pipeline.uid,
+            [s.uid == t.uid for s, t in zip(copy.getStages(), stages)],
+            copy.getStages()[0] is kmeans,
+            copy.getStages()[1].getMaxIter(),
+            svc.getMaxIter(),
+        ),
+    )
+    rec("copy_unset", lambda: pipeline_class().copy())
+    rec("copy_bad_extra", lambda: pipeline.copy({"x": 1}))
+    cleared = pipeline_class(stages=[svc])
+    rec("clear", lambda: (cleared.clear(cleared.stages), cleared.isSet("stages"))[1])
+    rec("fit_bad_stage", lambda: pipeline_class(stages=[1]).fit("not a DataFrame"))
+    rec("fit_bad_params", lambda: pipeline.fit("not a DataFrame", 5))
+    rec(
+        "class_param",
+        lambda: (
+            type(pipeline_class.stages).__name__,
+            pipeline_class.stages.parent,
+            pipeline_class.stages.name,
+        ),
+    )
+    rec("repr_is_uid", lambda: repr(pipeline) == pipeline.uid)
+    rec("no_attribute", lambda: pipeline.fooBarBaz)
+    rec("write_class", lambda: type(pipeline.write()).__name__)
+    model = model_class([kmeans, svc])
+    rec("model_stages", lambda: model.stages[0] is kmeans)
+    rec("model_params", lambda: (model.params, model.explainParams(), model.extractParamMap()))
+    rec(
+        "model_copy",
+        lambda: (lambda c: (c.uid != model.uid, c.stages[0] is kmeans, len(c.stages)))(
+            model.copy()
+        ),
+    )
+    rec("model_transform_bad_params", lambda: model.transform("not a DataFrame", 5))
+    rec("model_uid_prefix", lambda: model.uid.split("_")[0])
+    rec("model_no_attribute", lambda: model.fooBarBaz)
+    rec("model_set_stages", lambda: (setattr(model, "stages", [svc]), len(model.stages))[1])
+
+
 def params_api_cases(name):
     """The cases of PySpark's `Params` API of the estimator of the case set `name`, without a
     server."""
+    if name == "Pipeline":
+        rec = Recorder()
+        _pipeline_params_api_cases(rec)
+        return rec.out
     estimator = classes(name)[0]
     rec = Recorder()
     if name == "LinearSVC":
@@ -352,9 +441,96 @@ def persistence_cases(rec, est, model, model_class, df, base, summary_property=T
     shutil.rmtree(base, ignore_errors=True)
 
 
+def _metadata(path):
+    """The metadata that a save wrote at `path` (of the server's file system, which is this one's),
+    without its timestamp."""
+    import glob
+
+    metadata = json.loads(open(glob.glob(path + "/metadata/part-*")[0]).read())
+    metadata.pop("timestamp")
+    return metadata
+
+
+def _pipeline_live_cases(rec, spark, base):
+    """The fit, transform and persistence cases of the Pipeline and the PipelineModel."""
+    import os
+
+    pipeline_class, model_class = classes("Pipeline")
+    df = _linear_svc_frame(spark)
+    kmeans, svc = _stages()
+    pipeline = pipeline_class(stages=[kmeans, svc])
+    model = pipeline.fit(df)
+    rec("fit_stages", lambda: [type(s).__name__ for s in model.stages])
+    rec("fit_new_uid", lambda: model.uid != pipeline.uid)
+    rec("fit_stage_uids", lambda: [s.uid for s in model.stages] == [kmeans.uid, svc.uid])
+    rec("transform", lambda: model.transform(df).select("cluster", "prediction"))
+    rec(
+        "transform_map",
+        lambda: model.transform(df, {model.stages[1].threshold: 100.0}).select("prediction"),
+    )
+    rec("fit_map", lambda: pipeline.fit(df, {svc.maxIter: 2}).stages[1].getMaxIter())
+    rec(
+        "fit_list",
+        lambda: [m.stages[1].getMaxIter() for m in pipeline.fit(df, [{svc.maxIter: 2}, {}])],
+    )
+    rec(
+        "fitMultiple",
+        lambda: sorted(
+            (i, m.stages[1].getMaxIter())
+            for i, m in pipeline.fitMultiple(df, [{svc.maxIter: 2}, {svc.maxIter: 3}])
+        ),
+    )
+    # A stage after the last estimator is kept as it is.
+    trailing = pipeline_class(stages=[svc, model.stages[0]])
+    rec(
+        "fit_trailing_transformer",
+        lambda: (lambda m: (type(m.stages[1]).__name__, m.stages[1] is model.stages[0]))(
+            trailing.fit(df)
+        ),
+    )
+    shutil.rmtree(base, ignore_errors=True)
+    rec("save", lambda: pipeline.write().overwrite().save(base + "/pipeline"))
+    rec("save_again", lambda: pipeline.save(base + "/pipeline"))
+    rec("metadata", lambda: _metadata(base + "/pipeline"))
+    rec(
+        "stage_dirs",
+        lambda: sorted(d.split("_", 1) for d in os.listdir(base + "/pipeline/stages")),
+    )
+    rec("stage_metadata", lambda: _metadata(base + "/pipeline/stages/1_" + svc.uid))
+    # A directory of another object has no stageUids in its params.
+    rec("load_not_a_pipeline", lambda: pipeline_class.load(base + "/pipeline/stages/1_" + svc.uid))
+    rec(
+        "model_load_not_a_pipeline",
+        lambda: model_class.load(base + "/pipeline/stages/1_" + svc.uid),
+    )
+    loaded = pipeline_class.load(base + "/pipeline")
+    rec(
+        "load",
+        lambda: (
+            loaded.uid == pipeline.uid,
+            [type(s).__name__ for s in loaded.getStages()],
+            [s.uid for s in loaded.getStages()] == [kmeans.uid, svc.uid],
+            loaded.getStages()[1].getMaxIter(),
+        ),
+    )
+    rec("model_save", lambda: model.write().overwrite().save(base + "/model"))
+    rec("model_metadata", lambda: _metadata(base + "/model"))
+    loaded_model = model_class.load(base + "/model")
+    rec(
+        "model_load",
+        lambda: (loaded_model.uid == model.uid, [type(s).__name__ for s in loaded_model.stages]),
+    )
+    rec("model_load_transform", lambda: loaded_model.transform(df).select("cluster", "prediction"))
+    shutil.rmtree(base, ignore_errors=True)
+
+
 def live_cases(name, spark, base):
     """The model, summary, transform and persistence cases of the case set `name`, against a
     server; `base` is a scratch directory of the server's file system."""
+    if name == "Pipeline":
+        rec = Recorder(base)
+        _pipeline_live_cases(rec, spark, base)
+        return rec.out
     estimator, model_class = classes(name)
     rec = Recorder(base)
     if name == "LinearSVC":

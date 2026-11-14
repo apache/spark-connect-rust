@@ -1442,5 +1442,277 @@
     "True"
    ]
   }
+ },
+ "Pipeline": {
+  "live": {
+   "fitMultiple": [
+    "ok",
+    [
+     "(0, 2)",
+     "(1, 3)"
+    ]
+   ],
+   "fit_list": [
+    "ok",
+    [
+     "2",
+     "5"
+    ]
+   ],
+   "fit_map": [
+    "ok",
+    "2"
+   ],
+   "fit_new_uid": [
+    "ok",
+    "True"
+   ],
+   "fit_stage_uids": [
+    "ok",
+    "True"
+   ],
+   "fit_stages": [
+    "ok",
+    [
+     "'KMeansModel'",
+     "'LinearSVCModel'"
+    ]
+   ],
+   "fit_trailing_transformer": [
+    "ok",
+    "('KMeansModel', True)"
+   ],
+   "load": [
+    "ok",
+    "(True, ['KMeans', 'LinearSVC'], True, 5)"
+   ],
+   "load_not_a_pipeline": [
+    "KeyError",
+    "'stageUids'"
+   ],
+   "metadata": [
+    "ok",
+    "{'class': 'pyspark.ml.pipeline.Pipeline', 'sparkVersion': '4.3.0', 'uid': 'Pipeline_<uid>', 'paramMap': {'stageUids': ['KMeans_<uid>', 'LinearSVC_<uid>'], 'language': 'Python'}, 'defaultParamMap': {}}"
+   ],
+   "model_load": [
+    "ok",
+    "(True, ['KMeansModel', 'LinearSVCModel'])"
+   ],
+   "model_load_not_a_pipeline": [
+    "KeyError",
+    "'stageUids'"
+   ],
+   "model_load_transform": [
+    "ok",
+    {
+     "columns": [
+      "cluster",
+      "prediction"
+     ],
+     "rows": [
+      "(0, 1.0)",
+      "(0, 1.0)",
+      "(0, 1.0)",
+      "(0, 1.0)",
+      "(1, 0.0)",
+      "(1, 0.0)",
+      "(1, 0.0)",
+      "(1, 0.0)"
+     ]
+    }
+   ],
+   "model_metadata": [
+    "ok",
+    "{'class': 'pyspark.ml.pipeline.PipelineModel', 'sparkVersion': '4.3.0', 'uid': 'PipelineModel_<uid>', 'paramMap': {'stageUids': ['KMeans_<uid>', 'LinearSVC_<uid>'], 'language': 'Python'}, 'defaultParamMap': {}}"
+   ],
+   "model_save": [
+    "ok",
+    "None"
+   ],
+   "save": [
+    "ok",
+    "None"
+   ],
+   "save_again": [
+    "AnalysisException",
+    "[PATH_ALREADY_EXISTS] Path file:<path>/pipeline/metadata already exists. Set mode as \"overwrite\" to overwrite the existing path. SQLSTATE: 42K04"
+   ],
+   "stage_dirs": [
+    "ok",
+    [
+     [
+      "'0'",
+      "'KMeans_<uid>'"
+     ],
+     [
+      "'1'",
+      "'LinearSVC_<uid>'"
+     ]
+    ]
+   ],
+   "stage_metadata": [
+    "ok",
+    "{'class': 'org.apache.spark.ml.classification.LinearSVC', 'sparkVersion': '4.3.0', 'uid': 'LinearSVC_<uid>', 'paramMap': {'maxIter': 5}, 'defaultParamMap': {'aggregationDepth': 2, 'featuresCol': 'features', 'fitIntercept': True, 'labelCol': 'label', 'maxBlockSizeInMB': 0.0, 'maxIter': 100, 'predictionCol': 'prediction', 'rawPredictionCol': 'rawPrediction', 'regParam': 0.0, 'standardization': True, 'threshold': 0.0, 'tol': 1e-06}}"
+   ],
+   "transform": [
+    "ok",
+    {
+     "columns": [
+      "cluster",
+      "prediction"
+     ],
+     "rows": [
+      "(0, 1.0)",
+      "(0, 1.0)",
+      "(0, 1.0)",
+      "(0, 1.0)",
+      "(1, 0.0)",
+      "(1, 0.0)",
+      "(1, 0.0)",
+      "(1, 0.0)"
+     ]
+    }
+   ],
+   "transform_map": [
+    "ok",
+    {
+     "columns": [
+      "prediction"
+     ],
+     "rows": [
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)"
+     ]
+    }
+   ]
+  },
+  "params_api": {
+   "class_param": [
+    "ok",
+    "('Param', 'undefined', 'stages')"
+   ],
+   "clear": [
+    "ok",
+    "False"
+   ],
+   "copy": [
+    "ok",
+    "(True, [True, True], False, 7, 5)"
+   ],
+   "copy_bad_extra": [
+    "TypeError",
+    "Expecting a valid instance of Param, but received: x"
+   ],
+   "copy_unset": [
+    "KeyError",
+    "Param(parent='Pipeline_<uid>', name='stages', doc='a list of pipeline stages')"
+   ],
+   "explainParams": [
+    "ok",
+    "'stages: a list of pipeline stages (current: [KMeans_<uid>, LinearSVC_<uid>])'"
+   ],
+   "explainParams_unset": [
+    "ok",
+    "'stages: a list of pipeline stages (undefined)'"
+   ],
+   "extract": [
+    "ok",
+    [
+     "('stages', '[KMeans_<uid>, LinearSVC_<uid>]')"
+    ]
+   ],
+   "fit_bad_params": [
+    "TypeError",
+    "Params must be either a param map or a list/tuple of param maps, but got <class 'int'>."
+   ],
+   "fit_bad_stage": [
+    "TypeError",
+    "Cannot recognize a pipeline stage of type <class 'int'>."
+   ],
+   "getStages_is_stages": [
+    "ok",
+    "True"
+   ],
+   "getStages_unset": [
+    "KeyError",
+    "Param(parent='Pipeline_<uid>', name='stages', doc='a list of pipeline stages')"
+   ],
+   "isSet": [
+    "ok",
+    "(True, False, False)"
+   ],
+   "isinstance": [
+    "ok",
+    "(True, True)"
+   ],
+   "model_copy": [
+    "ok",
+    "(True, False, 2)"
+   ],
+   "model_no_attribute": [
+    "AttributeError",
+    "'PipelineModel' object has no attribute 'fooBarBaz'"
+   ],
+   "model_params": [
+    "ok",
+    "([], '', {})"
+   ],
+   "model_set_stages": [
+    "ok",
+    "1"
+   ],
+   "model_stages": [
+    "ok",
+    "True"
+   ],
+   "model_transform_bad_params": [
+    "TypeError",
+    "Params must be a param map but got <class 'int'>."
+   ],
+   "model_uid_prefix": [
+    "ok",
+    "'PipelineModel'"
+   ],
+   "no_attribute": [
+    "AttributeError",
+    "'Pipeline' object has no attribute 'fooBarBaz'"
+   ],
+   "param_names": [
+    "ok",
+    [
+     "'stages'"
+    ]
+   ],
+   "positional": [
+    "TypeError",
+    "Method __init__ forces keyword arguments."
+   ],
+   "repr_is_uid": [
+    "ok",
+    "True"
+   ],
+   "setParams": [
+    "ok",
+    "True"
+   ],
+   "setStages_none": [
+    "ok",
+    "None"
+   ],
+   "unexpected_keyword": [
+    "TypeError",
+    "Pipeline.__init__() got an unexpected keyword argument 'foo'"
+   ],
+   "write_class": [
+    "ok",
+    "'RemoteMLWriter'"
+   ]
+  }
  }
 }

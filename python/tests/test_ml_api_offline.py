@@ -39,10 +39,16 @@ INSTANCE_ATTRIBUTES = {
 FULL = [
     (f"pyspark.ml.connect.{module}", name, f"pyspark.ml.{module}")
     for module, name in [
+        ("classification", "BinaryLogisticRegressionSummary"),
+        ("classification", "BinaryLogisticRegressionTrainingSummary"),
         ("classification", "LinearSVC"),
         ("classification", "LinearSVCModel"),
         ("classification", "LinearSVCSummary"),
         ("classification", "LinearSVCTrainingSummary"),
+        ("classification", "LogisticRegression"),
+        ("classification", "LogisticRegressionModel"),
+        ("classification", "LogisticRegressionSummary"),
+        ("classification", "LogisticRegressionTrainingSummary"),
         ("clustering", "BisectingKMeans"),
         ("clustering", "BisectingKMeansModel"),
         ("clustering", "BisectingKMeansSummary"),
@@ -74,6 +80,8 @@ FULL = [
         ("feature", "VectorAssembler"),
         ("feature", "VectorSizeHint"),
         ("feature", "VectorSlicer"),
+        ("pipeline", "Pipeline"),
+        ("pipeline", "PipelineModel"),
     ]
 ]
 
