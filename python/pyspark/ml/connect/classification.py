@@ -1,6 +1,8 @@
 """Classification estimators (pyspark.ml.connect.classification)."""
 
 from pyspark._pyspark import (
+    BinaryLogisticRegressionSummary,
+    BinaryLogisticRegressionTrainingSummary,
     DecisionTreeClassifier,
     FMClassifier,
     GBTClassifier,
@@ -9,6 +11,9 @@ from pyspark._pyspark import (
     LinearSVCSummary,
     LinearSVCTrainingSummary,
     LogisticRegression,
+    LogisticRegressionModel,
+    LogisticRegressionSummary,
+    LogisticRegressionTrainingSummary,
     MultilayerPerceptronClassifier,
     NaiveBayes,
     OneVsRest,
@@ -27,5 +32,10 @@ __all__ = [
     "LinearSVCSummary",
     "LinearSVCTrainingSummary",
     "LogisticRegression",
+    "LogisticRegressionModel",
+    "LogisticRegressionSummary",
+    "LogisticRegressionTrainingSummary",
+    "BinaryLogisticRegressionSummary",
+    "BinaryLogisticRegressionTrainingSummary",
     "RandomForestClassifier",
 ]

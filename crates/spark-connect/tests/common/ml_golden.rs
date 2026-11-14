@@ -11,7 +11,9 @@
 //! call against an entry's `commands`, after [`normalize_commands`] has numbered their object ids
 //! and uids per entry, as the golden does. An entry is an object `{"commands", "results",
 //! "error"?}`; an object without `commands` registers the entries among its values, so a model
-//! entry registers its members. The replay serves any area's golden of that format.
+//! entry registers its members. The replay serves any area's golden of that format. The entry of
+//! a DataFrame member has an MlRelation as its command, which the client sends no ML command for:
+//! such entries are not replayed (see [`ReplayServer::start`]).
 #![allow(dead_code)] // every test binary compiles this module and uses only a part of it
 
 use std::collections::{BTreeSet, HashMap};
@@ -303,6 +305,7 @@ pub struct ReplayServer(Shared);
 impl ReplayServer {
     /// Serves the golden entries `entries` on a loopback port, and returns the server with a
     /// session of it. The session stays with the server's own thread for the rest of the test.
+    /// The relation entries (see [`golden_commands`]) are not registered: they are not replayed.
     pub fn start(entries: &[&Json]) -> (Self, SparkSession) {
         let mut replay = Replay::default();
         for entry in entries {
@@ -361,28 +364,41 @@ pub fn assert_commands(server: &ReplayServer, entry: &Json, at: &str) {
     }
 }
 
-/// The `commands` of a golden entry, decoded as they were sent, in order.
+/// The `commands` of a golden entry, decoded as they were sent, in order. A relation entry (the
+/// entry of a DataFrame member, whose command is an MlRelation) has no ML commands to check: it
+/// panics with a message saying so, since such entries are not replayed.
 pub fn golden_commands(entry: &Json) -> Vec<proto::MlCommand> {
-    entry["commands"]
+    let commands = entry["commands"]
         .as_array()
-        .unwrap_or_else(|| panic!("a golden entry without commands: {entry}"))
-        .iter()
-        .map(decode_command)
-        .collect()
+        .unwrap_or_else(|| panic!("a golden entry without commands: {entry}"));
+    if commands.iter().any(is_relation) {
+        panic!(
+            "a golden entry whose command is an MlRelation (the entry of a DataFrame member): \
+             relation entries are not replayed, so its commands cannot be checked"
+        );
+    }
+    commands.iter().map(decode_command).collect()
 }
 
 /// Normalizes the ML commands of one golden entry in place, as the golden normalizes them. The
 /// object ids and the uids are renumbered `<id0>`, `<id1>`, ... and `<uid0>`, ... in order of
 /// first appearance across `commands`, so a run's own ids and uids compare with the golden's
-/// whatever they are. A save path becomes `<path>`. The datasets of fits, evaluations and
-/// summaries, and the inputs of fetches, are cleared: the replay checks the operators, the
-/// methods and the params, not the data.
+/// whatever they are. A uid inside a string value (a model's uid, given to a helper fetch) is
+/// renumbered with the same counter, as the golden's Python normalizer does. A save path becomes
+/// `<path>`. A NaN value becomes [`NAN_MARKER`]. The datasets of fits, evaluations and summaries,
+/// and the inputs of fetches, are cleared: the replay checks the operators, the methods and the
+/// params, not the data.
 pub fn normalize_commands(commands: &mut [proto::MlCommand]) {
     let mut names = Placeholders::default();
     for command in commands {
         normalize_command(command, &mut names);
     }
 }
+
+/// What a NaN value is in a normalized command. NaN is not equal to itself, so a command with a
+/// NaN param (an Imputer's `missingValue`) would never equal its golden's; both sides hold the
+/// marker instead.
+const NAN_MARKER: &str = "<NaN>";
 
 /// The placeholders of a sequence of commands, numbered in order of first appearance.
 #[derive(Default)]
@@ -399,6 +415,58 @@ impl Placeholders {
     fn uid(&mut self, raw: &mut String) {
         rename(&mut self.uids, "uid", raw);
     }
+
+    /// A string value: its random uids (`Name_<12 hex>`) become uid placeholders.
+    fn text(&mut self, text: &mut String) {
+        *text = scrub_random_uids(text, &mut self.uids);
+    }
+}
+
+/// The text with each random uid of it, `[A-Za-z]+_[0-9a-f]{12}` as scripts/ml_golden_common.py
+/// matches them, replaced by its uid placeholder, numbered in `uids` as the uid fields are. The
+/// matches are found from the left, as a regex substitution finds them.
+fn scrub_random_uids(text: &str, uids: &mut HashMap<String, String>) -> String {
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    // The bytes of `text` before `copied` are in `out`.
+    let mut copied = 0;
+    let mut at = 0;
+    while at < bytes.len() {
+        if !bytes[at].is_ascii_alphabetic() {
+            at += 1;
+            continue;
+        }
+        // A run of letters, which only an underscore can end a uid's name with.
+        let start = at;
+        while at < bytes.len() && bytes[at].is_ascii_alphabetic() {
+            at += 1;
+        }
+        let hex = bytes.get(at + 1..at + 13);
+        let is_uid = bytes.get(at) == Some(&b'_')
+            && hex.is_some_and(|hex| {
+                hex.iter()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b))
+            });
+        if is_uid {
+            let end = at + 13;
+            let mut placeholder = text[start..end].to_string();
+            rename(uids, "uid", &mut placeholder);
+            out.push_str(&text[copied..start]);
+            out.push_str(&placeholder);
+            copied = end;
+            at = end;
+        }
+    }
+    out.push_str(&text[copied..]);
+    out
+}
+
+/// The values of a map in the order of its keys, so that the placeholders of a map's values are
+/// numbered the same whatever the order of the map's storage.
+fn values_in_key_order<V>(map: &mut HashMap<String, V>) -> Vec<&mut V> {
+    let mut entries: Vec<(&String, &mut V)> = map.iter_mut().collect();
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+    entries.into_iter().map(|(_, value)| value).collect()
 }
 
 /// Replaces `raw` with the placeholder of its kind, numbering a new one at the next index. An
@@ -417,20 +485,126 @@ fn clear_path(path: &mut String) {
     }
 }
 
+/// An operator: its name, then its uid.
+fn normalize_operator(operator: &mut proto::MlOperator, names: &mut Placeholders) {
+    names.text(&mut operator.name);
+    names.uid(&mut operator.uid);
+}
+
+/// The params of a command, in the order of their keys: each literal is normalized.
+fn normalize_params(params: Option<&mut proto::MlParams>, names: &mut Placeholders) {
+    if let Some(params) = params {
+        for literal in values_in_key_order(&mut params.params) {
+            normalize_literal(literal, names);
+        }
+    }
+}
+
+/// A literal: its strings are normalized, and a NaN value becomes [`NAN_MARKER`]. A specialized
+/// array of doubles or floats that has a NaN is first expanded to an array literal of its
+/// elements, so that its NaN is an element like those of an array literal.
+fn normalize_literal(literal: &mut proto::expression::Literal, names: &mut Placeholders) {
+    use proto::expression::literal::{Array, LiteralType, SpecializedArray};
+    if let Some(elements) = nan_array_elements(literal.literal_type.as_ref()) {
+        literal.literal_type = Some(LiteralType::Array(Array {
+            elements,
+            ..Default::default()
+        }));
+    }
+    if is_nan(literal.literal_type.as_ref()) {
+        literal.literal_type = Some(LiteralType::String(NAN_MARKER.into()));
+        return;
+    }
+    match literal.literal_type.as_mut() {
+        Some(LiteralType::String(text)) => names.text(text),
+        Some(LiteralType::Array(array)) => {
+            for element in &mut array.elements {
+                normalize_literal(element, names);
+            }
+        }
+        Some(LiteralType::Map(map)) => {
+            for key in &mut map.keys {
+                normalize_literal(key, names);
+            }
+            for value in &mut map.values {
+                normalize_literal(value, names);
+            }
+        }
+        Some(LiteralType::Struct(row)) => {
+            for element in &mut row.elements {
+                normalize_literal(element, names);
+            }
+        }
+        Some(LiteralType::SpecializedArray(SpecializedArray {
+            value_type:
+                Some(proto::expression::literal::specialized_array::ValueType::Strings(strings)),
+        })) => {
+            for value in &mut strings.values {
+                names.text(value);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Whether a literal is a NaN double or float.
+fn is_nan(literal_type: Option<&proto::expression::literal::LiteralType>) -> bool {
+    use proto::expression::literal::LiteralType;
+    matches!(literal_type, Some(LiteralType::Double(x)) if x.is_nan())
+        || matches!(literal_type, Some(LiteralType::Float(x)) if x.is_nan())
+}
+
+/// The elements of a specialized array of doubles or floats that has a NaN, as the literals of
+/// its values; None for any other literal.
+fn nan_array_elements(
+    literal_type: Option<&proto::expression::literal::LiteralType>,
+) -> Option<Vec<proto::expression::Literal>> {
+    use proto::expression::literal::{specialized_array::ValueType, LiteralType, SpecializedArray};
+    let element = |literal_type| proto::expression::Literal {
+        literal_type: Some(literal_type),
+        ..Default::default()
+    };
+    let Some(LiteralType::SpecializedArray(SpecializedArray {
+        value_type: Some(value_type),
+    })) = literal_type
+    else {
+        return None;
+    };
+    match value_type {
+        ValueType::Doubles(doubles) if doubles.values.iter().any(|x| x.is_nan()) => Some(
+            doubles
+                .values
+                .iter()
+                .map(|x| element(LiteralType::Double(*x)))
+                .collect(),
+        ),
+        ValueType::Floats(floats) if floats.values.iter().any(|x| x.is_nan()) => Some(
+            floats
+                .values
+                .iter()
+                .map(|x| element(LiteralType::Float(*x)))
+                .collect(),
+        ),
+        _ => None,
+    }
+}
+
 fn normalize_command(command: &mut proto::MlCommand, names: &mut Placeholders) {
     use proto::fetch::method::args::ArgsType;
     use proto::ml_command::{write::Type as WriteType, Command};
     match command.command.as_mut() {
         Some(Command::Fit(fit)) => {
             if let Some(estimator) = fit.estimator.as_mut() {
-                names.uid(&mut estimator.uid);
+                normalize_operator(estimator, names);
             }
+            normalize_params(fit.params.as_mut(), names);
             fit.dataset = None;
         }
         Some(Command::Evaluate(evaluate)) => {
             if let Some(evaluator) = evaluate.evaluator.as_mut() {
-                names.uid(&mut evaluator.uid);
+                normalize_operator(evaluator, names);
             }
+            normalize_params(evaluate.params.as_mut(), names);
             evaluate.dataset = None;
         }
         Some(Command::CreateSummary(summary)) => {
@@ -449,9 +623,12 @@ fn normalize_command(command: &mut proto::MlCommand, names: &mut Placeholders) {
                 names.id(&mut object.id);
             }
             for method in &mut fetch.methods {
+                names.text(&mut method.method);
                 for arg in &mut method.args {
-                    if let Some(ArgsType::Input(input)) = arg.args_type.as_mut() {
-                        *input = proto::Relation::default();
+                    match arg.args_type.as_mut() {
+                        Some(ArgsType::Param(param)) => normalize_literal(param, names),
+                        Some(ArgsType::Input(input)) => *input = proto::Relation::default(),
+                        None => {}
                     }
                 }
             }
@@ -463,24 +640,29 @@ fn normalize_command(command: &mut proto::MlCommand, names: &mut Placeholders) {
         }
         Some(Command::Read(read)) => {
             if let Some(operator) = read.operator.as_mut() {
-                names.uid(&mut operator.uid);
+                normalize_operator(operator, names);
             }
             clear_path(&mut read.path);
         }
         Some(Command::Write(write)) => {
             match write.r#type.as_mut() {
-                Some(WriteType::Operator(operator)) => names.uid(&mut operator.uid),
+                Some(WriteType::Operator(operator)) => normalize_operator(operator, names),
                 Some(WriteType::ObjRef(object)) => names.id(&mut object.id),
                 None => {}
             }
+            normalize_params(write.params.as_mut(), names);
             clear_path(&mut write.path);
+            for value in values_in_key_order(&mut write.options) {
+                names.text(value);
+            }
         }
         Some(Command::CleanCache(_) | Command::GetCacheInfo(_)) | None => {}
     }
 }
 
 /// Registers a golden entry: each of its commands with its reply. An object without `commands`
-/// registers its values that are entries.
+/// registers its values that are entries. A relation entry (the entry of a DataFrame member) is
+/// not replayed: the client sends no ML command for it, so it registers nothing.
 fn register(replay: &mut Replay, entry: &Json) {
     let Some(object) = entry.as_object() else {
         return;
@@ -491,6 +673,9 @@ fn register(replay: &mut Replay, entry: &Json) {
         }
         return;
     };
+    if commands.iter().any(is_relation) {
+        return;
+    }
     let results = object.get("results").and_then(Json::as_array);
     for (index, command) in commands.iter().enumerate() {
         let mut key = vec![decode_command(command)];
@@ -516,6 +701,12 @@ fn decode_bytes(b64: &Json) -> Vec<u8> {
 
 fn decode_command(b64: &Json) -> proto::MlCommand {
     proto::MlCommand::decode(decode_bytes(b64).as_slice()).expect("a golden ML command")
+}
+
+/// Whether a golden command is an MlRelation, the plan of a DataFrame that a member returns, rather
+/// than an ML command: no MlCommand decodes from it.
+fn is_relation(b64: &Json) -> bool {
+    proto::MlCommand::decode(decode_bytes(b64).as_slice()).is_err()
 }
 
 fn decode_result(b64: &Json) -> proto::MlCommandResult {
