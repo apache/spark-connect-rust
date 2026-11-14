@@ -448,7 +448,7 @@ For every method matching a pyspark name:
   class, exported as `pyspark._pyspark.Row` and re-exported by `pyspark.sql.types`,
   `pyspark.sql`, and `pyspark`. Embedding avoids importing the partially initialized
   `pyspark.sql.types` shim while the extension loads. Rust eagerly builds tuple values
-  through `pyspark.sql.types._create_row`; collected rows share a mutable `__fields__`
+  through `tuple.__new__` on the public `Row` class; collected rows share a mutable `__fields__`
   list across the result, and iterator rows share top-level names within each Arrow
   record batch. Nested names are shared by schema path across the execution, including
   iterator batches, while distinct sibling paths keep separate lists.
