@@ -1,0 +1,2578 @@
+{
+ "FMClassifier": {
+  "live": {
+   "copy_factorSize": [
+    "ok",
+    "4"
+   ],
+   "est_loaded_params": [
+    "ok",
+    [
+     "('factorSize', '2')",
+     "('featuresCol', \"'features'\")",
+     "('fitIntercept', 'True')",
+     "('fitLinear', 'True')",
+     "('initStd', '0.01')",
+     "('labelCol', \"'label'\")",
+     "('maxIter', '5')",
+     "('miniBatchFraction', '1.0')",
+     "('predictionCol', \"'prediction'\")",
+     "('probabilityCol', \"'probability'\")",
+     "('rawPredictionCol', \"'rawPrediction'\")",
+     "('regParam', '0.0')",
+     "('seed', '1')",
+     "('solver', \"'adamW'\")",
+     "('stepSize', '1.0')",
+     "('tol', '1e-06')"
+    ]
+   ],
+   "est_loaded_uid": [
+    "ok",
+    "True"
+   ],
+   "est_save": [
+    "ok",
+    "None"
+   ],
+   "evaluate_accuracy": [
+    "ok",
+    1.0
+   ],
+   "evaluate_areaUnderROC": [
+    "ok",
+    1.0
+   ],
+   "evaluate_bad": [
+    "TypeError",
+    "dataset must be a DataFrame but got <class 'int'>."
+   ],
+   "factors": [
+    "ok",
+    "DenseMatrix(2, 2, [1.0095, -3.6119, -0.8798, -3.6091], True)"
+   ],
+   "fitMultiple": [
+    "ok",
+    [
+     "(0, 2.0)",
+     "(1, 0.0)"
+    ]
+   ],
+   "fit_list": [
+    "ok",
+    [
+     0.0,
+     0.0
+    ]
+   ],
+   "fit_map": [
+    "ok",
+    2.0
+   ],
+   "hasSummary": [
+    "ok",
+    "True"
+   ],
+   "intercept": [
+    "ok",
+    -2.114574172
+   ],
+   "isinstance_model": [
+    "ok",
+    "(True, True)"
+   ],
+   "linear": [
+    "ok",
+    "DenseVector([3.6868, -2.0958])"
+   ],
+   "loaded_hasSummary": [
+    "ok",
+    "False"
+   ],
+   "loaded_regParam": [
+    "ok",
+    0.0
+   ],
+   "loaded_summary": [
+    "RuntimeError",
+    "No training summary available for this FMClassificationModel"
+   ],
+   "loaded_transform": [
+    "ok",
+    {
+     "columns": [
+      "label",
+      "features",
+      "rawPrediction",
+      "probability",
+      "prediction"
+     ],
+     "rows": [
+      "(0.0, DenseVector([0.0, 0.0]), DenseVector([2.1146, -2.1146]), DenseVector([0.8923, 0.1077]), 0.0)",
+      "(0.0, DenseVector([0.0, 1.0]), DenseVector([4.2104, -4.2104]), DenseVector([0.9854, 0.0146]), 0.0)",
+      "(1.0, DenseVector([1.0, 0.0]), DenseVector([-1.5723, 1.5723]), DenseVector([0.1719, 0.8281]), 1.0)",
+      "(1.0, DenseVector([1.0, 1.0]), DenseVector([-11.6241, 11.6241]), DenseVector([0.0, 1.0]), 1.0)"
+     ]
+    }
+   ],
+   "loaded_uid": [
+    "ok",
+    "True"
+   ],
+   "model_class": [
+    "ok",
+    "('FMClassificationModel', 'classification')"
+   ],
+   "model_explainParams": [
+    "ok",
+    "\"factorSize: Dimensionality of the factor vectors, which are used to get pairwise interactions between variables (default: 8, current: 2)\\nfeaturesCol: features column name. (default: features)\\nfitIntercept: whether to fit an intercept term. (default: True)\\nfitLinear: whether to fit linear term (aka 1-way term) (default: True)\\ninitStd: standard deviation of initial coefficients (default: 0.01)\\nlabelCol: label column name. (default: label)\\nmaxIter: max number of iterations (>= 0). (default: 100, current: 5)\\nminiBatchFraction: fraction of the input data set that should be used for one iteration of gradient descent (default: 1.0)\\npredictionCol: prediction column name. (default: prediction)\\nprobabilityCol: Column name for predicted class conditional probabilities. Note: Not all models output well-calibrated probability estimates! These probabilities should be treated as confidences, not precise probabilities. (default: probability)\\nrawPredictionCol: raw prediction (a.k.a. confidence) column name. (default: rawPrediction)\\nregParam: regularization parameter (>= 0). (default: 0.0)\\nseed: random seed. (default: <hash FMClassifier>, current: 1)\\nsolver: The solver algorithm for optimization. Supported options: gd, adamW. (Default adamW) (default: adamW)\\nstepSize: Step size to be used for each iteration of optimization (>= 0). (default: 1.0)\\nthresholds: Thresholds in multi-class classification to adjust the probability of predicting each class. Array must have length equal to the number of classes, with values > 0, excepting that at most one value may be 0. The class with largest value p/t is predicted, where p is the original probability of that class and t is the class's threshold. (undefined)\\ntol: the convergence tolerance for iterative algorithms (>= 0). (default: 1e-06)\\nweightCol: weight column name. If this is not set or empty, we treat all instance weights as 1.0. (undefined)\""
+   ],
+   "model_extract": [
+    "ok",
+    [
+     "('factorSize', '2')",
+     "('featuresCol', \"'features'\")",
+     "('fitIntercept', 'True')",
+     "('fitLinear', 'True')",
+     "('initStd', '0.01')",
+     "('labelCol', \"'label'\")",
+     "('maxIter', '5')",
+     "('miniBatchFraction', '1.0')",
+     "('predictionCol', \"'prediction'\")",
+     "('probabilityCol', \"'probability'\")",
+     "('rawPredictionCol', \"'rawPrediction'\")",
+     "('regParam', '0.0')",
+     "('seed', '1')",
+     "('solver', \"'adamW'\")",
+     "('stepSize', '1.0')",
+     "('tol', '1e-06')"
+    ]
+   ],
+   "model_getFactorSize": [
+    "ok",
+    "2"
+   ],
+   "model_getSolver": [
+    "ok",
+    "'adamW'"
+   ],
+   "model_no_attribute": [
+    "AttributeError",
+    "'FMClassificationModel' object has no attribute 'fooBarBaz'"
+   ],
+   "model_save": [
+    "ok",
+    "None"
+   ],
+   "model_save_again": [
+    "UnknownException",
+    "(java.io.IOException) Path <path>/model already exists. To overwrite it, please use write.overwrite().save(path) for Scala and use write().overwrite().save(path) for Java and Python."
+   ],
+   "model_uid_is_estimator_uid": [
+    "ok",
+    "True"
+   ],
+   "numClasses": [
+    "ok",
+    "2"
+   ],
+   "numFeatures": [
+    "ok",
+    "2"
+   ],
+   "predict": [
+    "ok",
+    1.0
+   ],
+   "predictProbability": [
+    "ok",
+    "DenseVector([0.1719, 0.8281])"
+   ],
+   "predictRaw": [
+    "ok",
+    "DenseVector([-1.5723, 1.5723])"
+   ],
+   "repr_prefix": [
+    "ok",
+    "'FMClassificationModel'"
+   ],
+   "summary_accuracy": [
+    "ok",
+    1.0
+   ],
+   "summary_areaUnderROC": [
+    "ok",
+    1.0
+   ],
+   "summary_df_fMeasureByThreshold": [
+    "ok",
+    "4"
+   ],
+   "summary_df_pr": [
+    "ok",
+    "5"
+   ],
+   "summary_df_precisionByThreshold": [
+    "ok",
+    "4"
+   ],
+   "summary_df_predictions": [
+    "ok",
+    "4"
+   ],
+   "summary_df_roc": [
+    "ok",
+    "6"
+   ],
+   "summary_fMeasureByLabel": [
+    "ok",
+    [
+     1.0,
+     1.0
+    ]
+   ],
+   "summary_falsePositiveRateByLabel": [
+    "ok",
+    [
+     0.0,
+     0.0
+    ]
+   ],
+   "summary_is_summary": [
+    "ok",
+    "True"
+   ],
+   "summary_labelCol": [
+    "ok",
+    "'label'"
+   ],
+   "summary_labels": [
+    "ok",
+    [
+     0.0,
+     1.0
+    ]
+   ],
+   "summary_objectiveHistory": [
+    "ok",
+    [
+     0.693163734,
+     0.902787344,
+     0.483905932,
+     0.213674114,
+     0.112652047,
+     0.079324114
+    ]
+   ],
+   "summary_precisionByLabel": [
+    "ok",
+    [
+     1.0,
+     1.0
+    ]
+   ],
+   "summary_predictionCol": [
+    "ok",
+    "'prediction'"
+   ],
+   "summary_recallByLabel": [
+    "ok",
+    [
+     1.0,
+     1.0
+    ]
+   ],
+   "summary_scoreCol": [
+    "ok",
+    "'probability'"
+   ],
+   "summary_totalIterations": [
+    "ok",
+    "5"
+   ],
+   "summary_truePositiveRateByLabel": [
+    "ok",
+    [
+     1.0,
+     1.0
+    ]
+   ],
+   "summary_weightCol": [
+    "ok",
+    "'weightCol'"
+   ],
+   "summary_weightedFMeasure": [
+    "ok",
+    1.0
+   ],
+   "summary_weightedFalsePositiveRate": [
+    "ok",
+    0.0
+   ],
+   "summary_weightedPrecision": [
+    "ok",
+    1.0
+   ],
+   "summary_weightedRecall": [
+    "ok",
+    1.0
+   ],
+   "summary_weightedTruePositiveRate": [
+    "ok",
+    1.0
+   ],
+   "transform": [
+    "ok",
+    {
+     "columns": [
+      "label",
+      "features",
+      "rawPrediction",
+      "probability",
+      "prediction"
+     ],
+     "rows": [
+      "(0.0, DenseVector([0.0, 0.0]), DenseVector([2.1146, -2.1146]), DenseVector([0.8923, 0.1077]), 0.0)",
+      "(0.0, DenseVector([0.0, 1.0]), DenseVector([4.2104, -4.2104]), DenseVector([0.9854, 0.0146]), 0.0)",
+      "(1.0, DenseVector([1.0, 0.0]), DenseVector([-1.5723, 1.5723]), DenseVector([0.1719, 0.8281]), 1.0)",
+      "(1.0, DenseVector([1.0, 1.0]), DenseVector([-11.6241, 11.6241]), DenseVector([0.0, 1.0]), 1.0)"
+     ]
+    }
+   ],
+   "transform_map": [
+    "ok",
+    [
+     "'label'",
+     "'features'",
+     "'rawPrediction'",
+     "'probability'",
+     "'q'"
+    ]
+   ]
+  },
+  "params_api": {
+   "clear": [
+    "ok",
+    "(None, True)"
+   ],
+   "copy_bad_extra": [
+    "TypeError",
+    "Expecting a valid instance of Param, but received: regParam"
+   ],
+   "copy_explainParams": [
+    "ok",
+    "\"factorSize: Dimensionality of the factor vectors, which are used to get pairwise interactions between variables (default: 8, current: 2)\\nfeaturesCol: features column name. (default: features)\\nfitIntercept: whether to fit an intercept term. (default: True)\\nfitLinear: whether to fit linear term (aka 1-way term) (default: True)\\ninitStd: standard deviation of initial coefficients (default: 0.01)\\nlabelCol: label column name. (default: label)\\nmaxIter: max number of iterations (>= 0). (default: 100, current: 5)\\nminiBatchFraction: fraction of the input data set that should be used for one iteration of gradient descent (default: 1.0)\\npredictionCol: prediction column name. (default: prediction)\\nprobabilityCol: Column name for predicted class conditional probabilities. Note: Not all models output well-calibrated probability estimates! These probabilities should be treated as confidences, not precise probabilities. (default: probability)\\nrawPredictionCol: raw prediction (a.k.a. confidence) column name. (default: rawPrediction)\\nregParam: regularization parameter (>= 0). (default: 0.0, current: 0.25)\\nseed: random seed. (default: <hash FMClassifier>, current: 1)\\nsolver: The solver algorithm for optimization. Supported options: gd, adamW. (Default adamW) (default: adamW)\\nstepSize: Step size to be used for each iteration of optimization (>= 0). (default: 1.0)\\nthresholds: Thresholds in multi-class classification to adjust the probability of predicting each class. Array must have length equal to the number of classes, with values > 0, excepting that at most one value may be 0. The class with largest value p/t is predicted, where p is the original probability of that class and t is the class's threshold. (undefined)\\ntol: the convergence tolerance for iterative algorithms (>= 0). (default: 1e-06)\\nweightCol: weight column name. If this is not set or empty, we treat all instance weights as 1.0. (undefined)\""
+   ],
+   "copy_list": [
+    "TypeError",
+    "Expecting a dict, but received an object of type <class 'list'>."
+   ],
+   "copy_same_uid": [
+    "ok",
+    "True"
+   ],
+   "copy_value": [
+    "ok",
+    0.25
+   ],
+   "explainParam_param": [
+    "ok",
+    "'regParam: regularization parameter (>= 0). (default: 0.0)'"
+   ],
+   "explainParam_str": [
+    "ok",
+    "'regParam: regularization parameter (>= 0). (default: 0.0)'"
+   ],
+   "explainParams": [
+    "ok",
+    "\"factorSize: Dimensionality of the factor vectors, which are used to get pairwise interactions between variables (default: 8, current: 2)\\nfeaturesCol: features column name. (default: features)\\nfitIntercept: whether to fit an intercept term. (default: True)\\nfitLinear: whether to fit linear term (aka 1-way term) (default: True)\\ninitStd: standard deviation of initial coefficients (default: 0.01)\\nlabelCol: label column name. (default: label)\\nmaxIter: max number of iterations (>= 0). (default: 100, current: 5)\\nminiBatchFraction: fraction of the input data set that should be used for one iteration of gradient descent (default: 1.0)\\npredictionCol: prediction column name. (default: prediction)\\nprobabilityCol: Column name for predicted class conditional probabilities. Note: Not all models output well-calibrated probability estimates! These probabilities should be treated as confidences, not precise probabilities. (default: probability)\\nrawPredictionCol: raw prediction (a.k.a. confidence) column name. (default: rawPrediction)\\nregParam: regularization parameter (>= 0). (default: 0.0)\\nseed: random seed. (default: <hash FMClassifier>, current: 1)\\nsolver: The solver algorithm for optimization. Supported options: gd, adamW. (Default adamW) (default: adamW)\\nstepSize: Step size to be used for each iteration of optimization (>= 0). (default: 1.0)\\nthresholds: Thresholds in multi-class classification to adjust the probability of predicting each class. Array must have length equal to the number of classes, with values > 0, excepting that at most one value may be 0. The class with largest value p/t is predicted, where p is the original probability of that class and t is the class's threshold. (undefined)\\ntol: the convergence tolerance for iterative algorithms (>= 0). (default: 1e-06)\\nweightCol: weight column name. If this is not set or empty, we treat all instance weights as 1.0. (undefined)\""
+   ],
+   "extract": [
+    "ok",
+    [
+     "('factorSize', '2')",
+     "('featuresCol', \"'features'\")",
+     "('fitIntercept', 'True')",
+     "('fitLinear', 'True')",
+     "('initStd', '0.01')",
+     "('labelCol', \"'label'\")",
+     "('maxIter', '5')",
+     "('miniBatchFraction', '1.0')",
+     "('predictionCol', \"'prediction'\")",
+     "('probabilityCol', \"'probability'\")",
+     "('rawPredictionCol', \"'rawPrediction'\")",
+     "('regParam', '0.0')",
+     "('seed', '1')",
+     "('solver', \"'adamW'\")",
+     "('stepSize', '1.0')",
+     "('tol', '1e-06')"
+    ]
+   ],
+   "extract_extra": [
+    "ok",
+    [
+     "('factorSize', '2')",
+     "('featuresCol', \"'features'\")",
+     "('fitIntercept', 'True')",
+     "('fitLinear', 'True')",
+     "('initStd', '0.01')",
+     "('labelCol', \"'label'\")",
+     "('maxIter', '5')",
+     "('miniBatchFraction', '1.0')",
+     "('predictionCol', \"'prediction'\")",
+     "('probabilityCol', \"'probability'\")",
+     "('rawPredictionCol', \"'rawPrediction'\")",
+     "('regParam', '0.25')",
+     "('seed', '1')",
+     "('solver', \"'adamW'\")",
+     "('stepSize', '1.0')",
+     "('tol', '1e-06')"
+    ]
+   ],
+   "factorSize_set": [
+    "ok",
+    "3"
+   ],
+   "getOrDefault_param": [
+    "ok",
+    0.0
+   ],
+   "getOrDefault_weight": [
+    "ok",
+    "'adamW'"
+   ],
+   "getParam_method": [
+    "ValueError",
+    "Cannot find param with name fit."
+   ],
+   "getParam_nope": [
+    "AttributeError",
+    "'FMClassifier' object has no attribute 'nope'"
+   ],
+   "get_factorSize": [
+    "ok",
+    "2"
+   ],
+   "get_featuresCol": [
+    "ok",
+    "'features'"
+   ],
+   "get_fitIntercept": [
+    "ok",
+    "True"
+   ],
+   "get_fitLinear": [
+    "ok",
+    "True"
+   ],
+   "get_initStd": [
+    "ok",
+    0.01
+   ],
+   "get_labelCol": [
+    "ok",
+    "'label'"
+   ],
+   "get_maxIter": [
+    "ok",
+    "5"
+   ],
+   "get_miniBatchFraction": [
+    "ok",
+    1.0
+   ],
+   "get_predictionCol": [
+    "ok",
+    "'prediction'"
+   ],
+   "get_probabilityCol": [
+    "ok",
+    "'probability'"
+   ],
+   "get_rawPredictionCol": [
+    "ok",
+    "'rawPrediction'"
+   ],
+   "get_regParam": [
+    "ok",
+    0.0
+   ],
+   "get_seed": [
+    "ok",
+    "1"
+   ],
+   "get_solver": [
+    "ok",
+    "'adamW'"
+   ],
+   "get_stepSize": [
+    "ok",
+    1.0
+   ],
+   "get_thresholds": [
+    "KeyError",
+    "Param(parent='FMClassifier_<uid>', name='thresholds', doc=\"Thresholds in multi-class classification to adjust the probability of predicting each class. Array must have length equal to the number of cl"
+   ],
+   "get_tol": [
+    "ok",
+    1e-06
+   ],
+   "get_weightCol": [
+    "KeyError",
+    "Param(parent='FMClassifier_<uid>', name='weightCol', doc='weight column name. If this is not set or empty, we treat all instance weights as 1.0.')"
+   ],
+   "hasDefault_param": [
+    "ok",
+    "True"
+   ],
+   "hasDefault_weight": [
+    "ok",
+    "True"
+   ],
+   "hasParam_int": [
+    "TypeError",
+    "hasParam(): paramName must be a string"
+   ],
+   "hasParam_nope": [
+    "ok",
+    "False"
+   ],
+   "hasParam_param": [
+    "ok",
+    "True"
+   ],
+   "isDefined_weight": [
+    "ok",
+    "True"
+   ],
+   "isSet_foreign": [
+    "ValueError",
+    "Param Param(parent='FMClassifier_<uid>', name='regParam', doc='regularization parameter (>= 0).') does not belong to FMClassifier_<uid>."
+   ],
+   "isSet_nope": [
+    "AttributeError",
+    "'FMClassifier' object has no attribute 'nope'"
+   ],
+   "isSet_param": [
+    "ok",
+    "False"
+   ],
+   "orig_value": [
+    "ok",
+    0.0
+   ],
+   "param_docs": [
+    "ok",
+    [
+     "'Dimensionality of the factor vectors, which are used to get pairwise interactions between variables'",
+     "'features column name.'",
+     "'whether to fit an intercept term.'",
+     "'whether to fit linear term (aka 1-way term)'",
+     "'standard deviation of initial coefficients'",
+     "'label column name.'",
+     "'max number of iterations (>= 0).'",
+     "'fraction of the input data set that should be used for one iteration of gradient descent'",
+     "'prediction column name.'",
+     "'Column name for predicted class conditional probabilities. Note: Not all models output well-calibrated probability estimates! These probabilities should be treated as confidences, not precise probabilities.'",
+     "'raw prediction (a.k.a. confidence) column name.'",
+     "'regularization parameter (>= 0).'",
+     "'random seed.'",
+     "'The solver algorithm for optimization. Supported options: gd, adamW. (Default adamW)'",
+     "'Step size to be used for each iteration of optimization (>= 0).'",
+     "\"Thresholds in multi-class classification to adjust the probability of predicting each class. Array must have length equal to the number of classes, with values > 0, excepting that at most one value may be 0. The class with largest value p/t is predicted, where p is the original probability of that class and t is the class's threshold.\"",
+     "'the convergence tolerance for iterative algorithms (>= 0).'",
+     "'weight column name. If this is not set or empty, we treat all instance weights as 1.0.'"
+    ]
+   ],
+   "param_names": [
+    "ok",
+    [
+     "'factorSize'",
+     "'featuresCol'",
+     "'fitIntercept'",
+     "'fitLinear'",
+     "'initStd'",
+     "'labelCol'",
+     "'maxIter'",
+     "'miniBatchFraction'",
+     "'predictionCol'",
+     "'probabilityCol'",
+     "'rawPredictionCol'",
+     "'regParam'",
+     "'seed'",
+     "'solver'",
+     "'stepSize'",
+     "'thresholds'",
+     "'tol'",
+     "'weightCol'"
+    ]
+   ],
+   "param_parents_are_uid": [
+    "ok",
+    "True"
+   ],
+   "repr_is_uid": [
+    "ok",
+    "True"
+   ],
+   "set_bad_type": [
+    "TypeError",
+    "Could not convert x to float"
+   ],
+   "set_ok": [
+    "ok",
+    0.25
+   ],
+   "set_str_param": [
+    "AttributeError",
+    "'str' object has no attribute 'parent'"
+   ],
+   "weightCol_no_setter": [
+    "ok",
+    "False"
+   ]
+  }
+ },
+ "MultilayerPerceptronClassifier": {
+  "live": {
+   "copy_maxIter": [
+    "ok",
+    "9"
+   ],
+   "est_loaded_params": [
+    "ok",
+    [
+     "('blockSize', '128')",
+     "('featuresCol', \"'features'\")",
+     "('labelCol', \"'label'\")",
+     "('layers', '[2, 4, 2]')",
+     "('maxIter', '5')",
+     "('predictionCol', \"'prediction'\")",
+     "('probabilityCol', \"'probability'\")",
+     "('rawPredictionCol', \"'rawPrediction'\")",
+     "('seed', '1')",
+     "('solver', \"'l-bfgs'\")",
+     "('stepSize', '0.03')",
+     "('tol', '1e-06')"
+    ]
+   ],
+   "est_loaded_uid": [
+    "ok",
+    "True"
+   ],
+   "est_save": [
+    "ok",
+    "None"
+   ],
+   "evaluate_accuracy": [
+    "ok",
+    0.75
+   ],
+   "evaluate_bad": [
+    "TypeError",
+    "dataset must be a DataFrame but got <class 'int'>."
+   ],
+   "evaluate_df_predictions": [
+    "ok",
+    {
+     "columns": [
+      "prediction"
+     ],
+     "rows": [
+      "(0.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)"
+     ]
+    }
+   ],
+   "evaluate_fMeasureByLabel": [
+    "ok",
+    [
+     0.555555556,
+     0.909090909
+    ]
+   ],
+   "evaluate_labels": [
+    "ok",
+    [
+     0.0,
+     1.0
+    ]
+   ],
+   "fitMultiple": [
+    "ok",
+    [
+     "(0, 2.0)",
+     "(1, 1e-06)"
+    ]
+   ],
+   "fit_list": [
+    "ok",
+    [
+     1e-06,
+     1e-06
+    ]
+   ],
+   "fit_map": [
+    "ok",
+    2.0
+   ],
+   "hasSummary": [
+    "ok",
+    "True"
+   ],
+   "isinstance_model": [
+    "ok",
+    "(True, True)"
+   ],
+   "loaded_hasSummary": [
+    "ok",
+    "False"
+   ],
+   "loaded_summary": [
+    "RuntimeError",
+    "No training summary available for this MultilayerPerceptronClassificationModel"
+   ],
+   "loaded_tol": [
+    "ok",
+    1e-06
+   ],
+   "loaded_transform": [
+    "ok",
+    {
+     "columns": [
+      "label",
+      "features",
+      "rawPrediction",
+      "probability",
+      "prediction"
+     ],
+     "rows": [
+      "(0.0, DenseVector([0.0, 0.0]), DenseVector([1.2417, -0.2903]), DenseVector([0.8223, 0.1777]), 0.0)",
+      "(0.0, DenseVector([0.0, 1.0]), DenseVector([0.468, 0.6407]), DenseVector([0.4569, 0.5431]), 1.0)",
+      "(1.0, DenseVector([1.0, 0.0]), DenseVector([-0.8641, 1.1907]), DenseVector([0.1136, 0.8864]), 1.0)",
+      "(1.0, DenseVector([1.0, 1.0]), DenseVector([-1.2054, 1.7745]), DenseVector([0.0483, 0.9517]), 1.0)"
+     ]
+    }
+   ],
+   "loaded_uid": [
+    "ok",
+    "True"
+   ],
+   "model_class": [
+    "ok",
+    "('MultilayerPerceptronClassificationModel', 'classification')"
+   ],
+   "model_explainParams": [
+    "ok",
+    "\"blockSize: block size for stacking input data in matrices. Data is stacked within partitions. If block size is more than remaining data in a partition then it is adjusted to the size of this data. (default: 128)\\nfeaturesCol: features column name. (default: features)\\ninitialWeights: The initial weights of the model. (undefined)\\nlabelCol: label column name. (default: label)\\nlayers: Sizes of layers from input layer to output layer E.g., Array(780, 100, 10) means 780 inputs, one hidden layer with 100 neurons and output layer of 10 neurons. (current: [2, 4, 2])\\nmaxIter: max number of iterations (>= 0). (default: 100, current: 5)\\npredictionCol: prediction column name. (default: prediction)\\nprobabilityCol: Column name for predicted class conditional probabilities. Note: Not all models output well-calibrated probability estimates! These probabilities should be treated as confidences, not precise probabilities. (default: probability)\\nrawPredictionCol: raw prediction (a.k.a. confidence) column name. (default: rawPrediction)\\nseed: random seed. (default: <hash MultilayerPerceptronClassifier>, current: 1)\\nsolver: The solver algorithm for optimization. Supported options: l-bfgs, gd. (default: l-bfgs)\\nstepSize: Step size to be used for each iteration of optimization (>= 0). (default: 0.03)\\nthresholds: Thresholds in multi-class classification to adjust the probability of predicting each class. Array must have length equal to the number of classes, with values > 0, excepting that at most one value may be 0. The class with largest value p/t is predicted, where p is the original probability of that class and t is the class's threshold. (undefined)\\ntol: the convergence tolerance for iterative algorithms (>= 0). (default: 1e-06)\""
+   ],
+   "model_extract": [
+    "ok",
+    [
+     "('blockSize', '128')",
+     "('featuresCol', \"'features'\")",
+     "('labelCol', \"'label'\")",
+     "('layers', '[2, 4, 2]')",
+     "('maxIter', '5')",
+     "('predictionCol', \"'prediction'\")",
+     "('probabilityCol', \"'probability'\")",
+     "('rawPredictionCol', \"'rawPrediction'\")",
+     "('seed', '1')",
+     "('solver', \"'l-bfgs'\")",
+     "('stepSize', '0.03')",
+     "('tol', '1e-06')"
+    ]
+   ],
+   "model_getLayers": [
+    "ok",
+    [
+     "2",
+     "4",
+     "2"
+    ]
+   ],
+   "model_getMaxIter": [
+    "ok",
+    "5"
+   ],
+   "model_isSet_maxIter": [
+    "ok",
+    "True"
+   ],
+   "model_no_attribute": [
+    "AttributeError",
+    "'MultilayerPerceptronClassificationModel' object has no attribute 'fooBarBaz'"
+   ],
+   "model_save": [
+    "ok",
+    "None"
+   ],
+   "model_save_again": [
+    "UnknownException",
+    "(java.io.IOException) Path <path>/model already exists. To overwrite it, please use write.overwrite().save(path) for Scala and use write().overwrite().save(path) for Java and Python."
+   ],
+   "model_setThresholds": [
+    "ok",
+    [
+     0.5,
+     0.5
+    ]
+   ],
+   "model_uid_is_estimator_uid": [
+    "ok",
+    "True"
+   ],
+   "numClasses": [
+    "ok",
+    "2"
+   ],
+   "numFeatures": [
+    "ok",
+    "2"
+   ],
+   "predict": [
+    "ok",
+    1.0
+   ],
+   "predictProbability": [
+    "ok",
+    "DenseVector([0.1136, 0.8864])"
+   ],
+   "predictRaw": [
+    "ok",
+    "DenseVector([-0.8641, 1.1907])"
+   ],
+   "repr_prefix": [
+    "ok",
+    "'MultilayerPerceptronClassificationModel'"
+   ],
+   "summary_accuracy": [
+    "ok",
+    0.75
+   ],
+   "summary_df_predictions": [
+    "ok",
+    {
+     "columns": [
+      "prediction"
+     ],
+     "rows": [
+      "(0.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)"
+     ]
+    }
+   ],
+   "summary_fMeasureByLabel": [
+    "ok",
+    [
+     0.666666667,
+     0.8
+    ]
+   ],
+   "summary_fMeasureByLabel_half": [
+    "ok",
+    [
+     0.833333333,
+     0.714285714
+    ]
+   ],
+   "summary_falsePositiveRateByLabel": [
+    "ok",
+    [
+     0.0,
+     0.5
+    ]
+   ],
+   "summary_is_summary": [
+    "ok",
+    "True"
+   ],
+   "summary_labelCol": [
+    "ok",
+    "'label'"
+   ],
+   "summary_labels": [
+    "ok",
+    [
+     0.0,
+     1.0
+    ]
+   ],
+   "summary_objectiveHistory": [
+    "ok",
+    [
+     1.321152212,
+     0.733747799,
+     0.691686437,
+     0.670233073,
+     0.508697327,
+     0.287248044
+    ]
+   ],
+   "summary_precisionByLabel": [
+    "ok",
+    [
+     1.0,
+     0.666666667
+    ]
+   ],
+   "summary_predictionCol": [
+    "ok",
+    "'prediction'"
+   ],
+   "summary_recallByLabel": [
+    "ok",
+    [
+     0.5,
+     1.0
+    ]
+   ],
+   "summary_totalIterations": [
+    "ok",
+    "5"
+   ],
+   "summary_truePositiveRateByLabel": [
+    "ok",
+    [
+     0.5,
+     1.0
+    ]
+   ],
+   "summary_weightCol": [
+    "ok",
+    "''"
+   ],
+   "summary_weightedFMeasure": [
+    "ok",
+    0.733333333
+   ],
+   "summary_weightedFMeasure_keyword": [
+    "ok",
+    0.773809524
+   ],
+   "summary_weightedFalsePositiveRate": [
+    "ok",
+    0.25
+   ],
+   "summary_weightedPrecision": [
+    "ok",
+    0.833333333
+   ],
+   "summary_weightedRecall": [
+    "ok",
+    0.75
+   ],
+   "summary_weightedTruePositiveRate": [
+    "ok",
+    0.75
+   ],
+   "transform": [
+    "ok",
+    {
+     "columns": [
+      "label",
+      "features",
+      "rawPrediction",
+      "probability",
+      "prediction"
+     ],
+     "rows": [
+      "(0.0, DenseVector([0.0, 0.0]), DenseVector([1.2417, -0.2903]), DenseVector([0.8223, 0.1777]), 0.0)",
+      "(0.0, DenseVector([0.0, 1.0]), DenseVector([0.468, 0.6407]), DenseVector([0.4569, 0.5431]), 1.0)",
+      "(1.0, DenseVector([1.0, 0.0]), DenseVector([-0.8641, 1.1907]), DenseVector([0.1136, 0.8864]), 1.0)",
+      "(1.0, DenseVector([1.0, 1.0]), DenseVector([-1.2054, 1.7745]), DenseVector([0.0483, 0.9517]), 1.0)"
+     ]
+    }
+   ],
+   "transform_map": [
+    "ok",
+    [
+     "'label'",
+     "'features'",
+     "'rawPrediction'",
+     "'probability'",
+     "'q'"
+    ]
+   ],
+   "weights": [
+    "ok",
+    "DenseVector([2.4588, -0.4659, -1.6465, -1.0361, 0.7962, 0.7758, -0.6785, -1.518, -0.7402, 0.3664, 0.3695, -2.108, -1.5536, 1.8287, 0.4816, 1.3744, 3.3005, -1.6639, 0.0387, -0.8733, -0.4969, -0.6141])"
+   ],
+   "weights_size": [
+    "ok",
+    "22"
+   ]
+  },
+  "params_api": {
+   "clear": [
+    "ok",
+    "(None, True)"
+   ],
+   "copy_bad_extra": [
+    "TypeError",
+    "Expecting a valid instance of Param, but received: tol"
+   ],
+   "copy_explainParams": [
+    "ok",
+    "\"blockSize: block size for stacking input data in matrices. Data is stacked within partitions. If block size is more than remaining data in a partition then it is adjusted to the size of this data. (default: 128)\\nfeaturesCol: features column name. (default: features)\\ninitialWeights: The initial weights of the model. (undefined)\\nlabelCol: label column name. (default: label)\\nlayers: Sizes of layers from input layer to output layer E.g., Array(780, 100, 10) means 780 inputs, one hidden layer with 100 neurons and output layer of 10 neurons. (current: [2, 4, 2])\\nmaxIter: max number of iterations (>= 0). (default: 100, current: 5)\\npredictionCol: prediction column name. (default: prediction)\\nprobabilityCol: Column name for predicted class conditional probabilities. Note: Not all models output well-calibrated probability estimates! These probabilities should be treated as confidences, not precise probabilities. (default: probability)\\nrawPredictionCol: raw prediction (a.k.a. confidence) column name. (default: rawPrediction)\\nseed: random seed. (default: <hash MultilayerPerceptronClassifier>, current: 1)\\nsolver: The solver algorithm for optimization. Supported options: l-bfgs, gd. (default: l-bfgs)\\nstepSize: Step size to be used for each iteration of optimization (>= 0). (default: 0.03)\\nthresholds: Thresholds in multi-class classification to adjust the probability of predicting each class. Array must have length equal to the number of classes, with values > 0, excepting that at most one value may be 0. The class with largest value p/t is predicted, where p is the original probability of that class and t is the class's threshold. (undefined)\\ntol: the convergence tolerance for iterative algorithms (>= 0). (default: 1e-06, current: 0.5)\""
+   ],
+   "copy_list": [
+    "TypeError",
+    "Expecting a dict, but received an object of type <class 'list'>."
+   ],
+   "copy_same_uid": [
+    "ok",
+    "True"
+   ],
+   "copy_value": [
+    "ok",
+    0.5
+   ],
+   "explainParam_param": [
+    "ok",
+    "'tol: the convergence tolerance for iterative algorithms (>= 0). (default: 1e-06)'"
+   ],
+   "explainParam_str": [
+    "ok",
+    "'tol: the convergence tolerance for iterative algorithms (>= 0). (default: 1e-06)'"
+   ],
+   "explainParams": [
+    "ok",
+    "\"blockSize: block size for stacking input data in matrices. Data is stacked within partitions. If block size is more than remaining data in a partition then it is adjusted to the size of this data. (default: 128)\\nfeaturesCol: features column name. (default: features)\\ninitialWeights: The initial weights of the model. (undefined)\\nlabelCol: label column name. (default: label)\\nlayers: Sizes of layers from input layer to output layer E.g., Array(780, 100, 10) means 780 inputs, one hidden layer with 100 neurons and output layer of 10 neurons. (current: [2, 4, 2])\\nmaxIter: max number of iterations (>= 0). (default: 100, current: 5)\\npredictionCol: prediction column name. (default: prediction)\\nprobabilityCol: Column name for predicted class conditional probabilities. Note: Not all models output well-calibrated probability estimates! These probabilities should be treated as confidences, not precise probabilities. (default: probability)\\nrawPredictionCol: raw prediction (a.k.a. confidence) column name. (default: rawPrediction)\\nseed: random seed. (default: <hash MultilayerPerceptronClassifier>, current: 1)\\nsolver: The solver algorithm for optimization. Supported options: l-bfgs, gd. (default: l-bfgs)\\nstepSize: Step size to be used for each iteration of optimization (>= 0). (default: 0.03)\\nthresholds: Thresholds in multi-class classification to adjust the probability of predicting each class. Array must have length equal to the number of classes, with values > 0, excepting that at most one value may be 0. The class with largest value p/t is predicted, where p is the original probability of that class and t is the class's threshold. (undefined)\\ntol: the convergence tolerance for iterative algorithms (>= 0). (default: 1e-06)\""
+   ],
+   "extract": [
+    "ok",
+    [
+     "('blockSize', '128')",
+     "('featuresCol', \"'features'\")",
+     "('labelCol', \"'label'\")",
+     "('layers', '[2, 4, 2]')",
+     "('maxIter', '5')",
+     "('predictionCol', \"'prediction'\")",
+     "('probabilityCol', \"'probability'\")",
+     "('rawPredictionCol', \"'rawPrediction'\")",
+     "('seed', '1')",
+     "('solver', \"'l-bfgs'\")",
+     "('stepSize', '0.03')",
+     "('tol', '1e-06')"
+    ]
+   ],
+   "extract_extra": [
+    "ok",
+    [
+     "('blockSize', '128')",
+     "('featuresCol', \"'features'\")",
+     "('labelCol', \"'label'\")",
+     "('layers', '[2, 4, 2]')",
+     "('maxIter', '5')",
+     "('predictionCol', \"'prediction'\")",
+     "('probabilityCol', \"'probability'\")",
+     "('rawPredictionCol', \"'rawPrediction'\")",
+     "('seed', '1')",
+     "('solver', \"'l-bfgs'\")",
+     "('stepSize', '0.03')",
+     "('tol', '0.5')"
+    ]
+   ],
+   "getOrDefault_param": [
+    "ok",
+    1e-06
+   ],
+   "getOrDefault_weight": [
+    "ok",
+    "1"
+   ],
+   "getParam_method": [
+    "ValueError",
+    "Cannot find param with name fit."
+   ],
+   "getParam_nope": [
+    "AttributeError",
+    "'MultilayerPerceptronClassifier' object has no attribute 'nope'"
+   ],
+   "get_blockSize": [
+    "ok",
+    "128"
+   ],
+   "get_featuresCol": [
+    "ok",
+    "'features'"
+   ],
+   "get_initialWeights": [
+    "KeyError",
+    "Param(parent='MultilayerPerceptronClassifier_<uid>', name='initialWeights', doc='The initial weights of the model.')"
+   ],
+   "get_labelCol": [
+    "ok",
+    "'label'"
+   ],
+   "get_layers": [
+    "ok",
+    [
+     "2",
+     "4",
+     "2"
+    ]
+   ],
+   "get_maxIter": [
+    "ok",
+    "5"
+   ],
+   "get_predictionCol": [
+    "ok",
+    "'prediction'"
+   ],
+   "get_probabilityCol": [
+    "ok",
+    "'probability'"
+   ],
+   "get_rawPredictionCol": [
+    "ok",
+    "'rawPrediction'"
+   ],
+   "get_seed": [
+    "ok",
+    "1"
+   ],
+   "get_solver": [
+    "ok",
+    "'l-bfgs'"
+   ],
+   "get_stepSize": [
+    "ok",
+    0.03
+   ],
+   "get_thresholds": [
+    "KeyError",
+    "Param(parent='MultilayerPerceptronClassifier_<uid>', name='thresholds', doc=\"Thresholds in multi-class classification to adjust the probability of predicting each class. Array must have length equal t"
+   ],
+   "get_tol": [
+    "ok",
+    1e-06
+   ],
+   "hasDefault_param": [
+    "ok",
+    "True"
+   ],
+   "hasDefault_weight": [
+    "ok",
+    "True"
+   ],
+   "hasParam_int": [
+    "TypeError",
+    "hasParam(): paramName must be a string"
+   ],
+   "hasParam_nope": [
+    "ok",
+    "False"
+   ],
+   "hasParam_param": [
+    "ok",
+    "True"
+   ],
+   "isDefined_weight": [
+    "ok",
+    "True"
+   ],
+   "isSet_foreign": [
+    "ValueError",
+    "Param Param(parent='MultilayerPerceptronClassifier_<uid>', name='tol', doc='the convergence tolerance for iterative algorithms (>= 0).') does not belong to MultilayerPerceptronClassifier_<uid>."
+   ],
+   "isSet_nope": [
+    "AttributeError",
+    "'MultilayerPerceptronClassifier' object has no attribute 'nope'"
+   ],
+   "isSet_param": [
+    "ok",
+    "False"
+   ],
+   "layers_set": [
+    "ok",
+    [
+     "3",
+     "2"
+    ]
+   ],
+   "orig_value": [
+    "ok",
+    1e-06
+   ],
+   "param_docs": [
+    "ok",
+    [
+     "'block size for stacking input data in matrices. Data is stacked within partitions. If block size is more than remaining data in a partition then it is adjusted to the size of this data.'",
+     "'features column name.'",
+     "'The initial weights of the model.'",
+     "'label column name.'",
+     "'Sizes of layers from input layer to output layer E.g., Array(780, 100, 10) means 780 inputs, one hidden layer with 100 neurons and output layer of 10 neurons.'",
+     "'max number of iterations (>= 0).'",
+     "'prediction column name.'",
+     "'Column name for predicted class conditional probabilities. Note: Not all models output well-calibrated probability estimates! These probabilities should be treated as confidences, not precise probabilities.'",
+     "'raw prediction (a.k.a. confidence) column name.'",
+     "'random seed.'",
+     "'The solver algorithm for optimization. Supported options: l-bfgs, gd.'",
+     "'Step size to be used for each iteration of optimization (>= 0).'",
+     "\"Thresholds in multi-class classification to adjust the probability of predicting each class. Array must have length equal to the number of classes, with values > 0, excepting that at most one value may be 0. The class with largest value p/t is predicted, where p is the original probability of that class and t is the class's threshold.\"",
+     "'the convergence tolerance for iterative algorithms (>= 0).'"
+    ]
+   ],
+   "param_names": [
+    "ok",
+    [
+     "'blockSize'",
+     "'featuresCol'",
+     "'initialWeights'",
+     "'labelCol'",
+     "'layers'",
+     "'maxIter'",
+     "'predictionCol'",
+     "'probabilityCol'",
+     "'rawPredictionCol'",
+     "'seed'",
+     "'solver'",
+     "'stepSize'",
+     "'thresholds'",
+     "'tol'"
+    ]
+   ],
+   "param_parents_are_uid": [
+    "ok",
+    "True"
+   ],
+   "repr_is_uid": [
+    "ok",
+    "True"
+   ],
+   "seed_set": [
+    "ok",
+    "7"
+   ],
+   "set_bad_type": [
+    "TypeError",
+    "Could not convert x to float"
+   ],
+   "set_ok": [
+    "ok",
+    0.5
+   ],
+   "set_str_param": [
+    "AttributeError",
+    "'str' object has no attribute 'parent'"
+   ]
+  }
+ },
+ "NaiveBayes": {
+  "live": {
+   "copy_smoothing": [
+    "ok",
+    3.0
+   ],
+   "est_loaded_params": [
+    "ok",
+    [
+     "('featuresCol', \"'features'\")",
+     "('labelCol', \"'label'\")",
+     "('modelType', \"'multinomial'\")",
+     "('predictionCol', \"'prediction'\")",
+     "('probabilityCol', \"'probability'\")",
+     "('rawPredictionCol', \"'rawPrediction'\")",
+     "('smoothing', '1.0')",
+     "('weightCol', \"'weight'\")"
+    ]
+   ],
+   "est_loaded_uid": [
+    "ok",
+    "True"
+   ],
+   "est_save": [
+    "ok",
+    "None"
+   ],
+   "fitMultiple": [
+    "ok",
+    [
+     "(0, 2.0)",
+     "(1, 1.0)"
+    ]
+   ],
+   "fit_list": [
+    "ok",
+    [
+     1.0,
+     1.0
+    ]
+   ],
+   "fit_map": [
+    "ok",
+    2.0
+   ],
+   "isinstance_model": [
+    "ok",
+    "(True, True)"
+   ],
+   "loaded_smoothing": [
+    "ok",
+    1.0
+   ],
+   "loaded_transform": [
+    "ok",
+    {
+     "columns": [
+      "label",
+      "weight",
+      "features",
+      "rawPrediction",
+      "probability",
+      "prediction"
+     ],
+     "rows": [
+      "(0.0, 0.1, DenseVector([0.0, 0.0]), DenseVector([-0.891, -0.5281]), DenseVector([0.4103, 0.5897]), 1.0)",
+      "(0.0, 0.5, DenseVector([0.0, 1.0]), DenseVector([-1.4018, -1.5466]), DenseVector([0.5361, 0.4639]), 0.0)",
+      "(1.0, 0.3, DenseVector([1.0, 1.0]), DenseVector([-2.3181, -1.9947]), DenseVector([0.4198, 0.5802]), 1.0)",
+      "(1.0, 1.0, DenseVector([1.0, 0.0]), DenseVector([-1.8073, -0.9761]), DenseVector([0.3034, 0.6966]), 1.0)"
+     ]
+    }
+   ],
+   "loaded_uid": [
+    "ok",
+    "True"
+   ],
+   "model_class": [
+    "ok",
+    "('NaiveBayesModel', 'classification')"
+   ],
+   "model_explainParams": [
+    "ok",
+    "\"featuresCol: features column name. (default: features)\\nlabelCol: label column name. (default: label)\\nmodelType: The model type which is a string (case-sensitive). Supported options: multinomial (default), bernoulli and gaussian. (default: multinomial)\\npredictionCol: prediction column name. (default: prediction)\\nprobabilityCol: Column name for predicted class conditional probabilities. Note: Not all models output well-calibrated probability estimates! These probabilities should be treated as confidences, not precise probabilities. (default: probability)\\nrawPredictionCol: raw prediction (a.k.a. confidence) column name. (default: rawPrediction)\\nsmoothing: The smoothing parameter, should be >= 0, default is 1.0 (default: 1.0, current: 1.0)\\nthresholds: Thresholds in multi-class classification to adjust the probability of predicting each class. Array must have length equal to the number of classes, with values > 0, excepting that at most one value may be 0. The class with largest value p/t is predicted, where p is the original probability of that class and t is the class's threshold. (undefined)\\nweightCol: weight column name. If this is not set or empty, we treat all instance weights as 1.0. (current: weight)\""
+   ],
+   "model_extract": [
+    "ok",
+    [
+     "('featuresCol', \"'features'\")",
+     "('labelCol', \"'label'\")",
+     "('modelType', \"'multinomial'\")",
+     "('predictionCol', \"'prediction'\")",
+     "('probabilityCol', \"'probability'\")",
+     "('rawPredictionCol', \"'rawPrediction'\")",
+     "('smoothing', '1.0')",
+     "('weightCol', \"'weight'\")"
+    ]
+   ],
+   "model_getModelType": [
+    "ok",
+    "'multinomial'"
+   ],
+   "model_getSmoothing": [
+    "ok",
+    1.0
+   ],
+   "model_getThresholds": [
+    "KeyError",
+    "Param(parent='NaiveBayes_<uid>', name='thresholds', doc=\"Thresholds in multi-class classification to adjust the probability of predicting each class. Array must have length equal to the number of clas"
+   ],
+   "model_hasSummary": [
+    "ok",
+    "False"
+   ],
+   "model_isSet_smoothing": [
+    "ok",
+    "True"
+   ],
+   "model_no_attribute": [
+    "AttributeError",
+    "'NaiveBayesModel' object has no attribute 'fooBarBaz'"
+   ],
+   "model_save": [
+    "ok",
+    "None"
+   ],
+   "model_save_again": [
+    "UnknownException",
+    "(java.io.IOException) Path <path>/model already exists. To overwrite it, please use write.overwrite().save(path) for Scala and use write().overwrite().save(path) for Java and Python."
+   ],
+   "model_setPredictionCol": [
+    "ok",
+    "'p'"
+   ],
+   "model_setThresholds": [
+    "ok",
+    [
+     0.5,
+     0.5
+    ]
+   ],
+   "model_uid_is_estimator_uid": [
+    "ok",
+    "True"
+   ],
+   "numClasses": [
+    "ok",
+    "2"
+   ],
+   "numFeatures": [
+    "ok",
+    "2"
+   ],
+   "pi": [
+    "ok",
+    "DenseVector([-0.891, -0.5281])"
+   ],
+   "predict": [
+    "ok",
+    1.0
+   ],
+   "predictProbability": [
+    "ok",
+    "DenseVector([0.3034, 0.6966])"
+   ],
+   "predictRaw": [
+    "ok",
+    "DenseVector([-1.8073, -0.9761])"
+   ],
+   "repr_prefix": [
+    "ok",
+    "'NaiveBayesModel'"
+   ],
+   "sigma": [
+    "ok",
+    "DenseMatrix(0, 0, [], False)"
+   ],
+   "theta": [
+    "ok",
+    "DenseMatrix(2, 2, [-0.9163, -0.5108, -0.448, -1.0186], True)"
+   ],
+   "transform": [
+    "ok",
+    {
+     "columns": [
+      "label",
+      "weight",
+      "features",
+      "rawPrediction",
+      "probability",
+      "prediction"
+     ],
+     "rows": [
+      "(0.0, 0.1, DenseVector([0.0, 0.0]), DenseVector([-0.891, -0.5281]), DenseVector([0.4103, 0.5897]), 1.0)",
+      "(0.0, 0.5, DenseVector([0.0, 1.0]), DenseVector([-1.4018, -1.5466]), DenseVector([0.5361, 0.4639]), 0.0)",
+      "(1.0, 0.3, DenseVector([1.0, 1.0]), DenseVector([-2.3181, -1.9947]), DenseVector([0.4198, 0.5802]), 1.0)",
+      "(1.0, 1.0, DenseVector([1.0, 0.0]), DenseVector([-1.8073, -0.9761]), DenseVector([0.3034, 0.6966]), 1.0)"
+     ]
+    }
+   ],
+   "transform_df": [
+    "ok",
+    {
+     "columns": [
+      "label",
+      "weight",
+      "features",
+      "rawPrediction",
+      "probability",
+      "prediction"
+     ],
+     "rows": [
+      "(0.0, 0.1, DenseVector([0.0, 0.0]), DenseVector([-0.891, -0.5281]), DenseVector([0.4103, 0.5897]), 1.0)",
+      "(0.0, 0.5, DenseVector([0.0, 1.0]), DenseVector([-1.4018, -1.5466]), DenseVector([0.5361, 0.4639]), 0.0)",
+      "(1.0, 0.3, DenseVector([1.0, 1.0]), DenseVector([-2.3181, -1.9947]), DenseVector([0.4198, 0.5802]), 1.0)",
+      "(1.0, 1.0, DenseVector([1.0, 0.0]), DenseVector([-1.8073, -0.9761]), DenseVector([0.3034, 0.6966]), 1.0)"
+     ]
+    }
+   ],
+   "transform_map": [
+    "ok",
+    [
+     "'label'",
+     "'weight'",
+     "'features'",
+     "'rawPrediction'",
+     "'probability'",
+     "'q'"
+    ]
+   ],
+   "transform_map_empty": [
+    "ok",
+    [
+     "'label'",
+     "'weight'",
+     "'features'",
+     "'rawPrediction'",
+     "'probability'",
+     "'prediction'"
+    ]
+   ]
+  },
+  "params_api": {
+   "clear": [
+    "ok",
+    "(None, True)"
+   ],
+   "copy_bad_extra": [
+    "TypeError",
+    "Expecting a valid instance of Param, but received: smoothing"
+   ],
+   "copy_explainParams": [
+    "ok",
+    "\"featuresCol: features column name. (default: features)\\nlabelCol: label column name. (default: label)\\nmodelType: The model type which is a string (case-sensitive). Supported options: multinomial (default), bernoulli and gaussian. (default: multinomial)\\npredictionCol: prediction column name. (default: prediction)\\nprobabilityCol: Column name for predicted class conditional probabilities. Note: Not all models output well-calibrated probability estimates! These probabilities should be treated as confidences, not precise probabilities. (default: probability)\\nrawPredictionCol: raw prediction (a.k.a. confidence) column name. (default: rawPrediction)\\nsmoothing: The smoothing parameter, should be >= 0, default is 1.0 (default: 1.0, current: 2.5)\\nthresholds: Thresholds in multi-class classification to adjust the probability of predicting each class. Array must have length equal to the number of classes, with values > 0, excepting that at most one value may be 0. The class with largest value p/t is predicted, where p is the original probability of that class and t is the class's threshold. (undefined)\\nweightCol: weight column name. If this is not set or empty, we treat all instance weights as 1.0. (current: weight)\""
+   ],
+   "copy_list": [
+    "TypeError",
+    "Expecting a dict, but received an object of type <class 'list'>."
+   ],
+   "copy_same_uid": [
+    "ok",
+    "True"
+   ],
+   "copy_value": [
+    "ok",
+    2.5
+   ],
+   "explainParam_param": [
+    "ok",
+    "'smoothing: The smoothing parameter, should be >= 0, default is 1.0 (default: 1.0, current: 1.0)'"
+   ],
+   "explainParam_str": [
+    "ok",
+    "'smoothing: The smoothing parameter, should be >= 0, default is 1.0 (default: 1.0, current: 1.0)'"
+   ],
+   "explainParams": [
+    "ok",
+    "\"featuresCol: features column name. (default: features)\\nlabelCol: label column name. (default: label)\\nmodelType: The model type which is a string (case-sensitive). Supported options: multinomial (default), bernoulli and gaussian. (default: multinomial)\\npredictionCol: prediction column name. (default: prediction)\\nprobabilityCol: Column name for predicted class conditional probabilities. Note: Not all models output well-calibrated probability estimates! These probabilities should be treated as confidences, not precise probabilities. (default: probability)\\nrawPredictionCol: raw prediction (a.k.a. confidence) column name. (default: rawPrediction)\\nsmoothing: The smoothing parameter, should be >= 0, default is 1.0 (default: 1.0, current: 1.0)\\nthresholds: Thresholds in multi-class classification to adjust the probability of predicting each class. Array must have length equal to the number of classes, with values > 0, excepting that at most one value may be 0. The class with largest value p/t is predicted, where p is the original probability of that class and t is the class's threshold. (undefined)\\nweightCol: weight column name. If this is not set or empty, we treat all instance weights as 1.0. (current: weight)\""
+   ],
+   "extract": [
+    "ok",
+    [
+     "('featuresCol', \"'features'\")",
+     "('labelCol', \"'label'\")",
+     "('modelType', \"'multinomial'\")",
+     "('predictionCol', \"'prediction'\")",
+     "('probabilityCol', \"'probability'\")",
+     "('rawPredictionCol', \"'rawPrediction'\")",
+     "('smoothing', '1.0')",
+     "('weightCol', \"'weight'\")"
+    ]
+   ],
+   "extract_extra": [
+    "ok",
+    [
+     "('featuresCol', \"'features'\")",
+     "('labelCol', \"'label'\")",
+     "('modelType', \"'multinomial'\")",
+     "('predictionCol', \"'prediction'\")",
+     "('probabilityCol', \"'probability'\")",
+     "('rawPredictionCol', \"'rawPrediction'\")",
+     "('smoothing', '2.5')",
+     "('weightCol', \"'weight'\")"
+    ]
+   ],
+   "getOrDefault_param": [
+    "ok",
+    1.0
+   ],
+   "getOrDefault_weight": [
+    "ok",
+    "'weight'"
+   ],
+   "getParam_method": [
+    "ValueError",
+    "Cannot find param with name fit."
+   ],
+   "getParam_nope": [
+    "AttributeError",
+    "'NaiveBayes' object has no attribute 'nope'"
+   ],
+   "get_featuresCol": [
+    "ok",
+    "'features'"
+   ],
+   "get_labelCol": [
+    "ok",
+    "'label'"
+   ],
+   "get_modelType": [
+    "ok",
+    "'multinomial'"
+   ],
+   "get_predictionCol": [
+    "ok",
+    "'prediction'"
+   ],
+   "get_probabilityCol": [
+    "ok",
+    "'probability'"
+   ],
+   "get_rawPredictionCol": [
+    "ok",
+    "'rawPrediction'"
+   ],
+   "get_smoothing": [
+    "ok",
+    1.0
+   ],
+   "get_thresholds": [
+    "KeyError",
+    "Param(parent='NaiveBayes_<uid>', name='thresholds', doc=\"Thresholds in multi-class classification to adjust the probability of predicting each class. Array must have length equal to the number of clas"
+   ],
+   "get_weightCol": [
+    "ok",
+    "'weight'"
+   ],
+   "hasDefault_param": [
+    "ok",
+    "True"
+   ],
+   "hasDefault_weight": [
+    "ok",
+    "False"
+   ],
+   "hasParam_int": [
+    "TypeError",
+    "hasParam(): paramName must be a string"
+   ],
+   "hasParam_nope": [
+    "ok",
+    "False"
+   ],
+   "hasParam_param": [
+    "ok",
+    "True"
+   ],
+   "isDefined_weight": [
+    "ok",
+    "True"
+   ],
+   "isSet_foreign": [
+    "ValueError",
+    "Param Param(parent='NaiveBayes_<uid>', name='smoothing', doc='The smoothing parameter, should be >= 0, default is 1.0') does not belong to NaiveBayes_<uid>."
+   ],
+   "isSet_nope": [
+    "AttributeError",
+    "'NaiveBayes' object has no attribute 'nope'"
+   ],
+   "isSet_param": [
+    "ok",
+    "True"
+   ],
+   "modelType_set": [
+    "ok",
+    "'bernoulli'"
+   ],
+   "orig_value": [
+    "ok",
+    1.0
+   ],
+   "param_docs": [
+    "ok",
+    [
+     "'features column name.'",
+     "'label column name.'",
+     "'The model type which is a string (case-sensitive). Supported options: multinomial (default), bernoulli and gaussian.'",
+     "'prediction column name.'",
+     "'Column name for predicted class conditional probabilities. Note: Not all models output well-calibrated probability estimates! These probabilities should be treated as confidences, not precise probabilities.'",
+     "'raw prediction (a.k.a. confidence) column name.'",
+     "'The smoothing parameter, should be >= 0, default is 1.0'",
+     "\"Thresholds in multi-class classification to adjust the probability of predicting each class. Array must have length equal to the number of classes, with values > 0, excepting that at most one value may be 0. The class with largest value p/t is predicted, where p is the original probability of that class and t is the class's threshold.\"",
+     "'weight column name. If this is not set or empty, we treat all instance weights as 1.0.'"
+    ]
+   ],
+   "param_names": [
+    "ok",
+    [
+     "'featuresCol'",
+     "'labelCol'",
+     "'modelType'",
+     "'predictionCol'",
+     "'probabilityCol'",
+     "'rawPredictionCol'",
+     "'smoothing'",
+     "'thresholds'",
+     "'weightCol'"
+    ]
+   ],
+   "param_parents_are_uid": [
+    "ok",
+    "True"
+   ],
+   "repr_is_uid": [
+    "ok",
+    "True"
+   ],
+   "set_bad_type": [
+    "TypeError",
+    "Could not convert x to float"
+   ],
+   "set_ok": [
+    "ok",
+    2.5
+   ],
+   "set_str_param": [
+    "AttributeError",
+    "'str' object has no attribute 'parent'"
+   ],
+   "thresholds_unset": [
+    "KeyError",
+    "Param(parent='NaiveBayes_<uid>', name='thresholds', doc=\"Thresholds in multi-class classification to adjust the probability of predicting each class. Array must have length equal to the number of clas"
+   ]
+  }
+ },
+ "OneVsRest": {
+  "live": {
+   "copy_classifier_type": [
+    "ok",
+    "'LinearSVC'"
+   ],
+   "copy_parallelism": [
+    "ok",
+    "1"
+   ],
+   "fitMultiple": [
+    "ok",
+    [
+     "(0, 6)",
+     "(1, 6)"
+    ]
+   ],
+   "fit_list": [
+    "ok",
+    [
+     "6",
+     "6"
+    ]
+   ],
+   "fit_map": [
+    "ok",
+    {
+     "columns": [
+      "label",
+      "features",
+      "rawPrediction",
+      "prediction"
+     ],
+     "rows": [
+      "(0.0, DenseVector([0.0, 0.0]), DenseVector([1.8621, -1.7576, -1.4334]), 0.0)",
+      "(0.0, DenseVector([0.1, 0.2]), DenseVector([1.1655, -1.0392, -1.605]), 0.0)",
+      "(1.0, DenseVector([1.0, 1.0]), DenseVector([-2.3795, 1.8431, -1.4948]), 1.0)",
+      "(1.0, DenseVector([1.2, 0.9]), DenseVector([-2.4105, 1.4884, -1.0106]), 1.0)",
+      "(2.0, DenseVector([2.0, 0.0]), DenseVector([-1.1728, -1.722, 1.7533]), 2.0)",
+      "(2.0, DenseVector([2.1, 0.2]), DenseVector([-1.8694, -1.0036, 1.5817]), 2.0)"
+     ]
+    }
+   ],
+   "fit_without_classifier": [
+    "KeyError",
+    "Param(parent='OneVsRest_<uid>', name='classifier', doc='base binary classifier')"
+   ],
+   "getClassifier_maxIter": [
+    "ok",
+    "5"
+   ],
+   "getClassifier_type": [
+    "ok",
+    "'LinearSVC'"
+   ],
+   "isSet_classifier": [
+    "ok",
+    "True"
+   ],
+   "isinstance_model": [
+    "ok",
+    "(True, True)"
+   ],
+   "model_class": [
+    "ok",
+    "('OneVsRestModel', 'classification')"
+   ],
+   "model_explainParams": [
+    "ok",
+    "'classifier: base binary classifier (current: LinearSVC_<uid>)\\nfeaturesCol: features column name. (default: features)\\nlabelCol: label column name. (default: label)\\npredictionCol: prediction column name. (default: prediction)\\nrawPredictionCol: raw prediction (a.k.a. confidence) column name. (default: rawPrediction)\\nweightCol: weight column name. If this is not set or empty, we treat all instance weights as 1.0. (undefined)'"
+   ],
+   "model_extract": [
+    "ok",
+    [
+     "('classifier', 'LinearSVC_<uid>')",
+     "('featuresCol', \"'features'\")",
+     "('labelCol', \"'label'\")",
+     "('predictionCol', \"'prediction'\")",
+     "('rawPredictionCol', \"'rawPrediction'\")"
+    ]
+   ],
+   "model_extract_classifier": [
+    "ok",
+    "True"
+   ],
+   "model_getFeaturesCol": [
+    "ok",
+    "'features'"
+   ],
+   "model_isSet_parallelism": [
+    "AttributeError",
+    "'OneVsRestModel' object has no attribute 'parallelism'"
+   ],
+   "model_no_attribute": [
+    "AttributeError",
+    "'OneVsRestModel' object has no attribute 'fooBarBaz'"
+   ],
+   "model_prefix": [
+    "ok",
+    "'OneVsRestModel'"
+   ],
+   "model_transform_map": [
+    "ok",
+    [
+     "'label'",
+     "'features'",
+     "'rawPrediction'",
+     "'q'"
+    ]
+   ],
+   "model_uid_is_estimator_uid": [
+    "ok",
+    "False"
+   ],
+   "ovr_fm_models_hasSummary": [
+    "ok",
+    [
+     "True",
+     "True",
+     "True"
+    ]
+   ],
+   "ovr_fm_models_isSet_labelCol": [
+    "ok",
+    [
+     "True",
+     "True",
+     "True"
+    ]
+   ],
+   "ovr_fm_models_labelCols": [
+    "ok",
+    [
+     "'mc2b$0'",
+     "'mc2b$1'",
+     "'mc2b$2'"
+    ]
+   ],
+   "ovr_fm_models_len": [
+    "ok",
+    "3"
+   ],
+   "ovr_fm_models_params": [
+    "ok",
+    [
+     [
+      "('factorSize', '2')",
+      "('featuresCol', \"'features'\")",
+      "('fitIntercept', 'True')",
+      "('fitLinear', 'True')",
+      "('initStd', '0.01')",
+      "('labelCol', \"'mc2b$0'\")",
+      "('maxIter', '5')",
+      "('miniBatchFraction', '1.0')",
+      "('predictionCol', \"'prediction'\")",
+      "('probabilityCol', \"'probability'\")",
+      "('rawPredictionCol', \"'rawPrediction'\")",
+      "('regParam', '0.0')",
+      "('seed', '1')",
+      "('solver', \"'adamW'\")",
+      "('stepSize', '1.0')",
+      "('tol', '1e-06')"
+     ],
+     [
+      "('factorSize', '2')",
+      "('featuresCol', \"'features'\")",
+      "('fitIntercept', 'True')",
+      "('fitLinear', 'True')",
+      "('initStd', '0.01')",
+      "('labelCol', \"'mc2b$1'\")",
+      "('maxIter', '5')",
+      "('miniBatchFraction', '1.0')",
+      "('predictionCol', \"'prediction'\")",
+      "('probabilityCol', \"'probability'\")",
+      "('rawPredictionCol', \"'rawPrediction'\")",
+      "('regParam', '0.0')",
+      "('seed', '1')",
+      "('solver', \"'adamW'\")",
+      "('stepSize', '1.0')",
+      "('tol', '1e-06')"
+     ],
+     [
+      "('factorSize', '2')",
+      "('featuresCol', \"'features'\")",
+      "('fitIntercept', 'True')",
+      "('fitLinear', 'True')",
+      "('initStd', '0.01')",
+      "('labelCol', \"'mc2b$2'\")",
+      "('maxIter', '5')",
+      "('miniBatchFraction', '1.0')",
+      "('predictionCol', \"'prediction'\")",
+      "('probabilityCol', \"'probability'\")",
+      "('rawPredictionCol', \"'rawPrediction'\")",
+      "('regParam', '0.0')",
+      "('seed', '1')",
+      "('solver', \"'adamW'\")",
+      "('stepSize', '1.0')",
+      "('tol', '1e-06')"
+     ]
+    ]
+   ],
+   "ovr_fm_models_same_list": [
+    "ok",
+    "True"
+   ],
+   "ovr_fm_models_summary_accuracy": [
+    "ok",
+    [
+     1.0,
+     1.0,
+     1.0
+    ]
+   ],
+   "ovr_fm_models_types": [
+    "ok",
+    [
+     "('FMClassificationModel', 'classification')",
+     "('FMClassificationModel', 'classification')",
+     "('FMClassificationModel', 'classification')"
+    ]
+   ],
+   "ovr_fm_models_uids_are_classifier": [
+    "ok",
+    [
+     "True",
+     "True",
+     "True"
+    ]
+   ],
+   "ovr_linear_svc_models_hasSummary": [
+    "ok",
+    [
+     "True",
+     "True",
+     "True"
+    ]
+   ],
+   "ovr_linear_svc_models_isSet_labelCol": [
+    "ok",
+    [
+     "True",
+     "True",
+     "True"
+    ]
+   ],
+   "ovr_linear_svc_models_labelCols": [
+    "ok",
+    [
+     "'mc2b$0'",
+     "'mc2b$1'",
+     "'mc2b$2'"
+    ]
+   ],
+   "ovr_linear_svc_models_len": [
+    "ok",
+    "3"
+   ],
+   "ovr_linear_svc_models_params": [
+    "ok",
+    [
+     [
+      "('aggregationDepth', '2')",
+      "('featuresCol', \"'features'\")",
+      "('fitIntercept', 'True')",
+      "('labelCol', \"'mc2b$0'\")",
+      "('maxBlockSizeInMB', '0.0')",
+      "('maxIter', '5')",
+      "('predictionCol', \"'prediction'\")",
+      "('rawPredictionCol', \"'rawPrediction'\")",
+      "('regParam', '0.01')",
+      "('standardization', 'True')",
+      "('threshold', '0.0')",
+      "('tol', '1e-06')"
+     ],
+     [
+      "('aggregationDepth', '2')",
+      "('featuresCol', \"'features'\")",
+      "('fitIntercept', 'True')",
+      "('labelCol', \"'mc2b$1'\")",
+      "('maxBlockSizeInMB', '0.0')",
+      "('maxIter', '5')",
+      "('predictionCol', \"'prediction'\")",
+      "('rawPredictionCol', \"'rawPrediction'\")",
+      "('regParam', '0.01')",
+      "('standardization', 'True')",
+      "('threshold', '0.0')",
+      "('tol', '1e-06')"
+     ],
+     [
+      "('aggregationDepth', '2')",
+      "('featuresCol', \"'features'\")",
+      "('fitIntercept', 'True')",
+      "('labelCol', \"'mc2b$2'\")",
+      "('maxBlockSizeInMB', '0.0')",
+      "('maxIter', '5')",
+      "('predictionCol', \"'prediction'\")",
+      "('rawPredictionCol', \"'rawPrediction'\")",
+      "('regParam', '0.01')",
+      "('standardization', 'True')",
+      "('threshold', '0.0')",
+      "('tol', '1e-06')"
+     ]
+    ]
+   ],
+   "ovr_linear_svc_models_same_list": [
+    "ok",
+    "True"
+   ],
+   "ovr_linear_svc_models_summary_accuracy": [
+    "ok",
+    [
+     1.0,
+     1.0,
+     1.0
+    ]
+   ],
+   "ovr_linear_svc_models_types": [
+    "ok",
+    [
+     "('LinearSVCModel', 'classification')",
+     "('LinearSVCModel', 'classification')",
+     "('LinearSVCModel', 'classification')"
+    ]
+   ],
+   "ovr_linear_svc_models_uids_are_classifier": [
+    "ok",
+    [
+     "True",
+     "True",
+     "True"
+    ]
+   ],
+   "ovr_lr_models_hasSummary": [
+    "ok",
+    [
+     "True",
+     "True",
+     "True"
+    ]
+   ],
+   "ovr_lr_models_isSet_labelCol": [
+    "ok",
+    [
+     "True",
+     "True",
+     "True"
+    ]
+   ],
+   "ovr_lr_models_labelCols": [
+    "ok",
+    [
+     "'mc2b$0'",
+     "'mc2b$1'",
+     "'mc2b$2'"
+    ]
+   ],
+   "ovr_lr_models_len": [
+    "ok",
+    "3"
+   ],
+   "ovr_lr_models_params": [
+    "ok",
+    [
+     [
+      "('aggregationDepth', '2')",
+      "('elasticNetParam', '0.0')",
+      "('family', \"'auto'\")",
+      "('featuresCol', \"'features'\")",
+      "('fitIntercept', 'True')",
+      "('labelCol', \"'mc2b$0'\")",
+      "('maxBlockSizeInMB', '0.0')",
+      "('maxIter', '5')",
+      "('predictionCol', \"'prediction'\")",
+      "('probabilityCol', \"'probability'\")",
+      "('rawPredictionCol', \"'rawPrediction'\")",
+      "('regParam', '0.01')",
+      "('standardization', 'True')",
+      "('threshold', '0.5')",
+      "('tol', '1e-06')"
+     ],
+     [
+      "('aggregationDepth', '2')",
+      "('elasticNetParam', '0.0')",
+      "('family', \"'auto'\")",
+      "('featuresCol', \"'features'\")",
+      "('fitIntercept', 'True')",
+      "('labelCol', \"'mc2b$1'\")",
+      "('maxBlockSizeInMB', '0.0')",
+      "('maxIter', '5')",
+      "('predictionCol', \"'prediction'\")",
+      "('probabilityCol', \"'probability'\")",
+      "('rawPredictionCol', \"'rawPrediction'\")",
+      "('regParam', '0.01')",
+      "('standardization', 'True')",
+      "('threshold', '0.5')",
+      "('tol', '1e-06')"
+     ],
+     [
+      "('aggregationDepth', '2')",
+      "('elasticNetParam', '0.0')",
+      "('family', \"'auto'\")",
+      "('featuresCol', \"'features'\")",
+      "('fitIntercept', 'True')",
+      "('labelCol', \"'mc2b$2'\")",
+      "('maxBlockSizeInMB', '0.0')",
+      "('maxIter', '5')",
+      "('predictionCol', \"'prediction'\")",
+      "('probabilityCol', \"'probability'\")",
+      "('rawPredictionCol', \"'rawPrediction'\")",
+      "('regParam', '0.01')",
+      "('standardization', 'True')",
+      "('threshold', '0.5')",
+      "('tol', '1e-06')"
+     ]
+    ]
+   ],
+   "ovr_lr_models_same_list": [
+    "ok",
+    "True"
+   ],
+   "ovr_lr_models_summary_accuracy": [
+    "ok",
+    [
+     1.0,
+     1.0,
+     1.0
+    ]
+   ],
+   "ovr_lr_models_types": [
+    "ok",
+    [
+     "('LogisticRegressionModel', 'classification')",
+     "('LogisticRegressionModel', 'classification')",
+     "('LogisticRegressionModel', 'classification')"
+    ]
+   ],
+   "ovr_lr_models_uids_are_classifier": [
+    "ok",
+    [
+     "True",
+     "True",
+     "True"
+    ]
+   ],
+   "ovr_mlp_models_hasSummary": [
+    "ok",
+    [
+     "True",
+     "True",
+     "True"
+    ]
+   ],
+   "ovr_mlp_models_isSet_labelCol": [
+    "ok",
+    [
+     "True",
+     "True",
+     "True"
+    ]
+   ],
+   "ovr_mlp_models_labelCols": [
+    "ok",
+    [
+     "'mc2b$0'",
+     "'mc2b$1'",
+     "'mc2b$2'"
+    ]
+   ],
+   "ovr_mlp_models_len": [
+    "ok",
+    "3"
+   ],
+   "ovr_mlp_models_params": [
+    "ok",
+    [
+     [
+      "('blockSize', '128')",
+      "('featuresCol', \"'features'\")",
+      "('labelCol', \"'mc2b$0'\")",
+      "('layers', '[2, 4, 2]')",
+      "('maxIter', '5')",
+      "('predictionCol', \"'prediction'\")",
+      "('probabilityCol', \"'probability'\")",
+      "('rawPredictionCol', \"'rawPrediction'\")",
+      "('seed', '1')",
+      "('solver', \"'l-bfgs'\")",
+      "('stepSize', '0.03')",
+      "('tol', '1e-06')"
+     ],
+     [
+      "('blockSize', '128')",
+      "('featuresCol', \"'features'\")",
+      "('labelCol', \"'mc2b$1'\")",
+      "('layers', '[2, 4, 2]')",
+      "('maxIter', '5')",
+      "('predictionCol', \"'prediction'\")",
+      "('probabilityCol', \"'probability'\")",
+      "('rawPredictionCol', \"'rawPrediction'\")",
+      "('seed', '1')",
+      "('solver', \"'l-bfgs'\")",
+      "('stepSize', '0.03')",
+      "('tol', '1e-06')"
+     ],
+     [
+      "('blockSize', '128')",
+      "('featuresCol', \"'features'\")",
+      "('labelCol', \"'mc2b$2'\")",
+      "('layers', '[2, 4, 2]')",
+      "('maxIter', '5')",
+      "('predictionCol', \"'prediction'\")",
+      "('probabilityCol', \"'probability'\")",
+      "('rawPredictionCol', \"'rawPrediction'\")",
+      "('seed', '1')",
+      "('solver', \"'l-bfgs'\")",
+      "('stepSize', '0.03')",
+      "('tol', '1e-06')"
+     ]
+    ]
+   ],
+   "ovr_mlp_models_same_list": [
+    "ok",
+    "True"
+   ],
+   "ovr_mlp_models_summary_accuracy": [
+    "ok",
+    [
+     1.0,
+     1.0,
+     1.0
+    ]
+   ],
+   "ovr_mlp_models_types": [
+    "ok",
+    [
+     "('MultilayerPerceptronClassificationModel', 'classification')",
+     "('MultilayerPerceptronClassificationModel', 'classification')",
+     "('MultilayerPerceptronClassificationModel', 'classification')"
+    ]
+   ],
+   "ovr_mlp_models_uids_are_classifier": [
+    "ok",
+    [
+     "True",
+     "True",
+     "True"
+    ]
+   ],
+   "ovr_nb_models_hasSummary": [
+    "ok",
+    [
+     "None",
+     "None",
+     "None"
+    ]
+   ],
+   "ovr_nb_models_isSet_labelCol": [
+    "ok",
+    [
+     "True",
+     "True",
+     "True"
+    ]
+   ],
+   "ovr_nb_models_labelCols": [
+    "ok",
+    [
+     "'mc2b$0'",
+     "'mc2b$1'",
+     "'mc2b$2'"
+    ]
+   ],
+   "ovr_nb_models_len": [
+    "ok",
+    "3"
+   ],
+   "ovr_nb_models_params": [
+    "ok",
+    [
+     [
+      "('featuresCol', \"'features'\")",
+      "('labelCol', \"'mc2b$0'\")",
+      "('modelType', \"'multinomial'\")",
+      "('predictionCol', \"'prediction'\")",
+      "('probabilityCol', \"'probability'\")",
+      "('rawPredictionCol', \"'rawPrediction'\")",
+      "('smoothing', '1.0')"
+     ],
+     [
+      "('featuresCol', \"'features'\")",
+      "('labelCol', \"'mc2b$1'\")",
+      "('modelType', \"'multinomial'\")",
+      "('predictionCol', \"'prediction'\")",
+      "('probabilityCol', \"'probability'\")",
+      "('rawPredictionCol', \"'rawPrediction'\")",
+      "('smoothing', '1.0')"
+     ],
+     [
+      "('featuresCol', \"'features'\")",
+      "('labelCol', \"'mc2b$2'\")",
+      "('modelType', \"'multinomial'\")",
+      "('predictionCol', \"'prediction'\")",
+      "('probabilityCol', \"'probability'\")",
+      "('rawPredictionCol', \"'rawPrediction'\")",
+      "('smoothing', '1.0')"
+     ]
+    ]
+   ],
+   "ovr_nb_models_same_list": [
+    "ok",
+    "True"
+   ],
+   "ovr_nb_models_summary_accuracy": [
+    "ok",
+    []
+   ],
+   "ovr_nb_models_types": [
+    "ok",
+    [
+     "('NaiveBayesModel', 'classification')",
+     "('NaiveBayesModel', 'classification')",
+     "('NaiveBayesModel', 'classification')"
+    ]
+   ],
+   "ovr_nb_models_uids_are_classifier": [
+    "ok",
+    [
+     "True",
+     "True",
+     "True"
+    ]
+   ],
+   "repr_prefix": [
+    "ok",
+    "'OneVsRestModel_<uid>'"
+   ],
+   "transform": [
+    "ok",
+    {
+     "columns": [
+      "label",
+      "features",
+      "rawPrediction",
+      "prediction"
+     ],
+     "rows": [
+      "(0.0, DenseVector([0.0, 0.0]), DenseVector([1.8621, -1.7576, -1.4334]), 0.0)",
+      "(0.0, DenseVector([0.1, 0.2]), DenseVector([1.1655, -1.0392, -1.605]), 0.0)",
+      "(1.0, DenseVector([1.0, 1.0]), DenseVector([-2.3795, 1.8431, -1.4948]), 1.0)",
+      "(1.0, DenseVector([1.2, 0.9]), DenseVector([-2.4105, 1.4884, -1.0106]), 1.0)",
+      "(2.0, DenseVector([2.0, 0.0]), DenseVector([-1.1728, -1.722, 1.7533]), 2.0)",
+      "(2.0, DenseVector([2.1, 0.2]), DenseVector([-1.8694, -1.0036, 1.5817]), 2.0)"
+     ]
+    }
+   ],
+   "transform_columns": [
+    "ok",
+    [
+     "'label'",
+     "'features'",
+     "'rawPrediction'",
+     "'prediction'"
+    ]
+   ]
+  },
+  "params_api": {
+   "classifier_none": [
+    "ok",
+    "True"
+   ],
+   "clear": [
+    "ok",
+    "(None, False)"
+   ],
+   "copy_bad_extra": [
+    "TypeError",
+    "Expecting a valid instance of Param, but received: parallelism"
+   ],
+   "copy_explainParams": [
+    "ok",
+    "'classifier: base binary classifier (current: LinearSVC_<uid>)\\nfeaturesCol: features column name. (default: features)\\nlabelCol: label column name. (default: label)\\nparallelism: the number of threads to use when running parallel algorithms (>= 1). (default: 1, current: 2)\\npredictionCol: prediction column name. (default: prediction)\\nrawPredictionCol: raw prediction (a.k.a. confidence) column name. (default: rawPrediction)\\nweightCol: weight column name. If this is not set or empty, we treat all instance weights as 1.0. (undefined)'"
+   ],
+   "copy_list": [
+    "TypeError",
+    "Expecting a dict, but received an object of type <class 'list'>."
+   ],
+   "copy_same_uid": [
+    "ok",
+    "True"
+   ],
+   "copy_value": [
+    "ok",
+    "2"
+   ],
+   "explainParam_param": [
+    "ok",
+    "'parallelism: the number of threads to use when running parallel algorithms (>= 1). (default: 1)'"
+   ],
+   "explainParam_str": [
+    "ok",
+    "'parallelism: the number of threads to use when running parallel algorithms (>= 1). (default: 1)'"
+   ],
+   "explainParams": [
+    "ok",
+    "'classifier: base binary classifier (current: LinearSVC_<uid>)\\nfeaturesCol: features column name. (default: features)\\nlabelCol: label column name. (default: label)\\nparallelism: the number of threads to use when running parallel algorithms (>= 1). (default: 1)\\npredictionCol: prediction column name. (default: prediction)\\nrawPredictionCol: raw prediction (a.k.a. confidence) column name. (default: rawPrediction)\\nweightCol: weight column name. If this is not set or empty, we treat all instance weights as 1.0. (undefined)'"
+   ],
+   "extract": [
+    "ok",
+    [
+     "('classifier', 'LinearSVC_<uid>')",
+     "('featuresCol', \"'features'\")",
+     "('labelCol', \"'label'\")",
+     "('parallelism', '1')",
+     "('predictionCol', \"'prediction'\")",
+     "('rawPredictionCol', \"'rawPrediction'\")"
+    ]
+   ],
+   "extract_extra": [
+    "ok",
+    [
+     "('classifier', 'LinearSVC_<uid>')",
+     "('featuresCol', \"'features'\")",
+     "('labelCol', \"'label'\")",
+     "('parallelism', '2')",
+     "('predictionCol', \"'prediction'\")",
+     "('rawPredictionCol', \"'rawPrediction'\")"
+    ]
+   ],
+   "getOrDefault_param": [
+    "ok",
+    "1"
+   ],
+   "getOrDefault_weight": [
+    "KeyError",
+    "Param(parent='OneVsRest_<uid>', name='weightCol', doc='weight column name. If this is not set or empty, we treat all instance weights as 1.0.')"
+   ],
+   "getParam_method": [
+    "ValueError",
+    "Cannot find param with name fit."
+   ],
+   "getParam_nope": [
+    "AttributeError",
+    "'OneVsRest' object has no attribute 'nope'"
+   ],
+   "get_classifier": [
+    "ok",
+    "LinearSVC_<uid>"
+   ],
+   "get_featuresCol": [
+    "ok",
+    "'features'"
+   ],
+   "get_labelCol": [
+    "ok",
+    "'label'"
+   ],
+   "get_parallelism": [
+    "ok",
+    "1"
+   ],
+   "get_predictionCol": [
+    "ok",
+    "'prediction'"
+   ],
+   "get_rawPredictionCol": [
+    "ok",
+    "'rawPrediction'"
+   ],
+   "get_weightCol": [
+    "KeyError",
+    "Param(parent='OneVsRest_<uid>', name='weightCol', doc='weight column name. If this is not set or empty, we treat all instance weights as 1.0.')"
+   ],
+   "hasDefault_param": [
+    "ok",
+    "True"
+   ],
+   "hasDefault_weight": [
+    "ok",
+    "False"
+   ],
+   "hasParam_int": [
+    "TypeError",
+    "hasParam(): paramName must be a string"
+   ],
+   "hasParam_nope": [
+    "ok",
+    "False"
+   ],
+   "hasParam_param": [
+    "ok",
+    "True"
+   ],
+   "isDefined_weight": [
+    "ok",
+    "False"
+   ],
+   "isSet_foreign": [
+    "ValueError",
+    "Param Param(parent='OneVsRest_<uid>', name='parallelism', doc='the number of threads to use when running parallel algorithms (>= 1).') does not belong to OneVsRest_<uid>."
+   ],
+   "isSet_nope": [
+    "AttributeError",
+    "'OneVsRest' object has no attribute 'nope'"
+   ],
+   "isSet_param": [
+    "ok",
+    "False"
+   ],
+   "orig_value": [
+    "ok",
+    "1"
+   ],
+   "param_docs": [
+    "ok",
+    [
+     "'base binary classifier'",
+     "'features column name.'",
+     "'label column name.'",
+     "'the number of threads to use when running parallel algorithms (>= 1).'",
+     "'prediction column name.'",
+     "'raw prediction (a.k.a. confidence) column name.'",
+     "'weight column name. If this is not set or empty, we treat all instance weights as 1.0.'"
+    ]
+   ],
+   "param_names": [
+    "ok",
+    [
+     "'classifier'",
+     "'featuresCol'",
+     "'labelCol'",
+     "'parallelism'",
+     "'predictionCol'",
+     "'rawPredictionCol'",
+     "'weightCol'"
+    ]
+   ],
+   "param_parents_are_uid": [
+    "ok",
+    "True"
+   ],
+   "repr_is_uid": [
+    "ok",
+    "True"
+   ],
+   "set_bad_type": [
+    "TypeError",
+    "Could not convert x to int"
+   ],
+   "set_ok": [
+    "ok",
+    "2"
+   ],
+   "set_str_param": [
+    "AttributeError",
+    "'str' object has no attribute 'parent'"
+   ]
+  }
+ }
+}
