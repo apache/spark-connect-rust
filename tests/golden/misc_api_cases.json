@@ -1832,6 +1832,120 @@
     "ok",
     "False"
    ],
+   "ovr_dt_models_hasSummary": [
+    "ok",
+    [
+     "None",
+     "None",
+     "None"
+    ]
+   ],
+   "ovr_dt_models_isSet_labelCol": [
+    "ok",
+    [
+     "True",
+     "True",
+     "True"
+    ]
+   ],
+   "ovr_dt_models_labelCols": [
+    "ok",
+    [
+     "'mc2b$0'",
+     "'mc2b$1'",
+     "'mc2b$2'"
+    ]
+   ],
+   "ovr_dt_models_len": [
+    "ok",
+    "3"
+   ],
+   "ovr_dt_models_params": [
+    "ok",
+    [
+     [
+      "('cacheNodeIds', 'False')",
+      "('checkpointInterval', '10')",
+      "('featuresCol', \"'features'\")",
+      "('impurity', \"'gini'\")",
+      "('labelCol', \"'mc2b$0'\")",
+      "('leafCol', \"''\")",
+      "('maxBins', '32')",
+      "('maxDepth', '3')",
+      "('maxMemoryInMB', '256')",
+      "('minInfoGain', '0.0')",
+      "('minInstancesPerNode', '1')",
+      "('minWeightFractionPerNode', '0.0')",
+      "('predictionCol', \"'prediction'\")",
+      "('probabilityCol', \"'probability'\")",
+      "('pruneTree', 'True')",
+      "('rawPredictionCol', \"'rawPrediction'\")",
+      "('seed', '1')"
+     ],
+     [
+      "('cacheNodeIds', 'False')",
+      "('checkpointInterval', '10')",
+      "('featuresCol', \"'features'\")",
+      "('impurity', \"'gini'\")",
+      "('labelCol', \"'mc2b$1'\")",
+      "('leafCol', \"''\")",
+      "('maxBins', '32')",
+      "('maxDepth', '3')",
+      "('maxMemoryInMB', '256')",
+      "('minInfoGain', '0.0')",
+      "('minInstancesPerNode', '1')",
+      "('minWeightFractionPerNode', '0.0')",
+      "('predictionCol', \"'prediction'\")",
+      "('probabilityCol', \"'probability'\")",
+      "('pruneTree', 'True')",
+      "('rawPredictionCol', \"'rawPrediction'\")",
+      "('seed', '1')"
+     ],
+     [
+      "('cacheNodeIds', 'False')",
+      "('checkpointInterval', '10')",
+      "('featuresCol', \"'features'\")",
+      "('impurity', \"'gini'\")",
+      "('labelCol', \"'mc2b$2'\")",
+      "('leafCol', \"''\")",
+      "('maxBins', '32')",
+      "('maxDepth', '3')",
+      "('maxMemoryInMB', '256')",
+      "('minInfoGain', '0.0')",
+      "('minInstancesPerNode', '1')",
+      "('minWeightFractionPerNode', '0.0')",
+      "('predictionCol', \"'prediction'\")",
+      "('probabilityCol', \"'probability'\")",
+      "('pruneTree', 'True')",
+      "('rawPredictionCol', \"'rawPrediction'\")",
+      "('seed', '1')"
+     ]
+    ]
+   ],
+   "ovr_dt_models_same_list": [
+    "ok",
+    "True"
+   ],
+   "ovr_dt_models_summary_accuracy": [
+    "ok",
+    []
+   ],
+   "ovr_dt_models_types": [
+    "ok",
+    [
+     "('DecisionTreeClassificationModel', 'classification')",
+     "('DecisionTreeClassificationModel', 'classification')",
+     "('DecisionTreeClassificationModel', 'classification')"
+    ]
+   ],
+   "ovr_dt_models_uids_are_classifier": [
+    "ok",
+    [
+     "True",
+     "True",
+     "True"
+    ]
+   ],
    "ovr_fm_models_hasSummary": [
     "ok",
     [
@@ -1940,6 +2054,135 @@
     ]
    ],
    "ovr_fm_models_uids_are_classifier": [
+    "ok",
+    [
+     "True",
+     "True",
+     "True"
+    ]
+   ],
+   "ovr_gbt_models_hasSummary": [
+    "ok",
+    [
+     "None",
+     "None",
+     "None"
+    ]
+   ],
+   "ovr_gbt_models_isSet_labelCol": [
+    "ok",
+    [
+     "True",
+     "True",
+     "True"
+    ]
+   ],
+   "ovr_gbt_models_labelCols": [
+    "ok",
+    [
+     "'mc2b$0'",
+     "'mc2b$1'",
+     "'mc2b$2'"
+    ]
+   ],
+   "ovr_gbt_models_len": [
+    "ok",
+    "3"
+   ],
+   "ovr_gbt_models_params": [
+    "ok",
+    [
+     [
+      "('cacheNodeIds', 'False')",
+      "('checkpointInterval', '10')",
+      "('featureSubsetStrategy', \"'all'\")",
+      "('featuresCol', \"'features'\")",
+      "('impurity', \"'variance'\")",
+      "('labelCol', \"'mc2b$0'\")",
+      "('leafCol', \"''\")",
+      "('lossType', \"'logistic'\")",
+      "('maxBins', '32')",
+      "('maxDepth', '2')",
+      "('maxIter', '3')",
+      "('maxMemoryInMB', '256')",
+      "('minInfoGain', '0.0')",
+      "('minInstancesPerNode', '1')",
+      "('minWeightFractionPerNode', '0.0')",
+      "('predictionCol', \"'prediction'\")",
+      "('probabilityCol', \"'probability'\")",
+      "('rawPredictionCol', \"'rawPrediction'\")",
+      "('seed', '1')",
+      "('stepSize', '0.1')",
+      "('subsamplingRate', '1.0')",
+      "('validationTol', '0.01')"
+     ],
+     [
+      "('cacheNodeIds', 'False')",
+      "('checkpointInterval', '10')",
+      "('featureSubsetStrategy', \"'all'\")",
+      "('featuresCol', \"'features'\")",
+      "('impurity', \"'variance'\")",
+      "('labelCol', \"'mc2b$1'\")",
+      "('leafCol', \"''\")",
+      "('lossType', \"'logistic'\")",
+      "('maxBins', '32')",
+      "('maxDepth', '2')",
+      "('maxIter', '3')",
+      "('maxMemoryInMB', '256')",
+      "('minInfoGain', '0.0')",
+      "('minInstancesPerNode', '1')",
+      "('minWeightFractionPerNode', '0.0')",
+      "('predictionCol', \"'prediction'\")",
+      "('probabilityCol', \"'probability'\")",
+      "('rawPredictionCol', \"'rawPrediction'\")",
+      "('seed', '1')",
+      "('stepSize', '0.1')",
+      "('subsamplingRate', '1.0')",
+      "('validationTol', '0.01')"
+     ],
+     [
+      "('cacheNodeIds', 'False')",
+      "('checkpointInterval', '10')",
+      "('featureSubsetStrategy', \"'all'\")",
+      "('featuresCol', \"'features'\")",
+      "('impurity', \"'variance'\")",
+      "('labelCol', \"'mc2b$2'\")",
+      "('leafCol', \"''\")",
+      "('lossType', \"'logistic'\")",
+      "('maxBins', '32')",
+      "('maxDepth', '2')",
+      "('maxIter', '3')",
+      "('maxMemoryInMB', '256')",
+      "('minInfoGain', '0.0')",
+      "('minInstancesPerNode', '1')",
+      "('minWeightFractionPerNode', '0.0')",
+      "('predictionCol', \"'prediction'\")",
+      "('probabilityCol', \"'probability'\")",
+      "('rawPredictionCol', \"'rawPrediction'\")",
+      "('seed', '1')",
+      "('stepSize', '0.1')",
+      "('subsamplingRate', '1.0')",
+      "('validationTol', '0.01')"
+     ]
+    ]
+   ],
+   "ovr_gbt_models_same_list": [
+    "ok",
+    "True"
+   ],
+   "ovr_gbt_models_summary_accuracy": [
+    "ok",
+    []
+   ],
+   "ovr_gbt_models_types": [
+    "ok",
+    [
+     "('GBTClassificationModel', 'classification')",
+     "('GBTClassificationModel', 'classification')",
+     "('GBTClassificationModel', 'classification')"
+    ]
+   ],
+   "ovr_gbt_models_uids_are_classifier": [
     "ok",
     [
      "True",
@@ -2342,6 +2585,136 @@
     ]
    ],
    "ovr_nb_models_uids_are_classifier": [
+    "ok",
+    [
+     "True",
+     "True",
+     "True"
+    ]
+   ],
+   "ovr_rf_models_hasSummary": [
+    "ok",
+    [
+     "True",
+     "True",
+     "True"
+    ]
+   ],
+   "ovr_rf_models_isSet_labelCol": [
+    "ok",
+    [
+     "True",
+     "True",
+     "True"
+    ]
+   ],
+   "ovr_rf_models_labelCols": [
+    "ok",
+    [
+     "'mc2b$0'",
+     "'mc2b$1'",
+     "'mc2b$2'"
+    ]
+   ],
+   "ovr_rf_models_len": [
+    "ok",
+    "3"
+   ],
+   "ovr_rf_models_params": [
+    "ok",
+    [
+     [
+      "('bootstrap', 'True')",
+      "('cacheNodeIds', 'False')",
+      "('checkpointInterval', '10')",
+      "('featureSubsetStrategy', \"'auto'\")",
+      "('featuresCol', \"'features'\")",
+      "('impurity', \"'gini'\")",
+      "('labelCol', \"'mc2b$0'\")",
+      "('leafCol', \"''\")",
+      "('maxBins', '32')",
+      "('maxDepth', '3')",
+      "('maxMemoryInMB', '256')",
+      "('minInfoGain', '0.0')",
+      "('minInstancesPerNode', '1')",
+      "('minWeightFractionPerNode', '0.0')",
+      "('numTrees', '3')",
+      "('predictionCol', \"'prediction'\")",
+      "('probabilityCol', \"'probability'\")",
+      "('pruneTree', 'True')",
+      "('rawPredictionCol', \"'rawPrediction'\")",
+      "('seed', '1')",
+      "('subsamplingRate', '1.0')"
+     ],
+     [
+      "('bootstrap', 'True')",
+      "('cacheNodeIds', 'False')",
+      "('checkpointInterval', '10')",
+      "('featureSubsetStrategy', \"'auto'\")",
+      "('featuresCol', \"'features'\")",
+      "('impurity', \"'gini'\")",
+      "('labelCol', \"'mc2b$1'\")",
+      "('leafCol', \"''\")",
+      "('maxBins', '32')",
+      "('maxDepth', '3')",
+      "('maxMemoryInMB', '256')",
+      "('minInfoGain', '0.0')",
+      "('minInstancesPerNode', '1')",
+      "('minWeightFractionPerNode', '0.0')",
+      "('numTrees', '3')",
+      "('predictionCol', \"'prediction'\")",
+      "('probabilityCol', \"'probability'\")",
+      "('pruneTree', 'True')",
+      "('rawPredictionCol', \"'rawPrediction'\")",
+      "('seed', '1')",
+      "('subsamplingRate', '1.0')"
+     ],
+     [
+      "('bootstrap', 'True')",
+      "('cacheNodeIds', 'False')",
+      "('checkpointInterval', '10')",
+      "('featureSubsetStrategy', \"'auto'\")",
+      "('featuresCol', \"'features'\")",
+      "('impurity', \"'gini'\")",
+      "('labelCol', \"'mc2b$2'\")",
+      "('leafCol', \"''\")",
+      "('maxBins', '32')",
+      "('maxDepth', '3')",
+      "('maxMemoryInMB', '256')",
+      "('minInfoGain', '0.0')",
+      "('minInstancesPerNode', '1')",
+      "('minWeightFractionPerNode', '0.0')",
+      "('numTrees', '3')",
+      "('predictionCol', \"'prediction'\")",
+      "('probabilityCol', \"'probability'\")",
+      "('pruneTree', 'True')",
+      "('rawPredictionCol', \"'rawPrediction'\")",
+      "('seed', '1')",
+      "('subsamplingRate', '1.0')"
+     ]
+    ]
+   ],
+   "ovr_rf_models_same_list": [
+    "ok",
+    "True"
+   ],
+   "ovr_rf_models_summary_accuracy": [
+    "ok",
+    [
+     1.0,
+     1.0,
+     0.833333333
+    ]
+   ],
+   "ovr_rf_models_types": [
+    "ok",
+    [
+     "('RandomForestClassificationModel', 'classification')",
+     "('RandomForestClassificationModel', 'classification')",
+     "('RandomForestClassificationModel', 'classification')"
+    ]
+   ],
+   "ovr_rf_models_uids_are_classifier": [
     "ok",
     [
      "True",
