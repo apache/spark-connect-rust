@@ -12,7 +12,9 @@ recommendation, evaluation, stat, tuning} and Pipeline/PipelineModel, it records
   the same on every run: `{"uid_suffix": "__output"}`, the uid of the instance and the suffix, and
   `{"class_name_hash": true}`, the `hash` of the name of its class in the Python process;
 - `members`: each public member that is not a Param, with its kind (property, method,
-  staticmethod, classmethod) and, of a method, its signature.
+  staticmethod, classmethod) and, of a method, its signature and its `parameters`, each as
+  [name, kind, repr of its default or None], without `self` (or `cls`);
+- `init`: the parameters of the constructor, in the same form.
 
 It is the API that the native classes of pyspark.ml.connect and the Rust API of
 spark_connect::ml follow: their Params, with the docs, converters and defaults, and their members.
@@ -83,25 +85,43 @@ def instance_of(cls):
         return None
 
 
+def parameters_of(func, bound):
+    """The parameters of `func`, without the first one of a `bound` function (`self`, `cls`):
+    each as [name, kind, repr of its default or None]."""
+    try:
+        parameters = list(inspect.signature(func).parameters.values())
+    except (TypeError, ValueError):
+        return None
+    if bound:
+        parameters = parameters[1:]
+    return [
+        [p.name, p.kind.name, None if p.default is inspect.Parameter.empty else repr(p.default)]
+        for p in parameters
+    ]
+
+
 def member_kind(cls, name):
+    """The kind of the member `name` of `cls`, its signature and its parameters, if it has any."""
     for klass in cls.__mro__:
         if name in klass.__dict__:
             raw = klass.__dict__[name]
             if isinstance(raw, property):
-                return "property", None
+                return "property", None, None
             if isinstance(raw, staticmethod):
-                return "staticmethod", str(inspect.signature(raw.__func__))
+                func = raw.__func__
+                return "staticmethod", str(inspect.signature(func)), parameters_of(func, False)
             if isinstance(raw, classmethod):
-                return "classmethod", str(inspect.signature(raw.__func__))
+                func = raw.__func__
+                return "classmethod", str(inspect.signature(func)), parameters_of(func, True)
             if inspect.isfunction(raw):
                 try:
-                    return "method", str(inspect.signature(raw))
+                    return "method", str(inspect.signature(raw)), parameters_of(raw, True)
                 except (TypeError, ValueError):
-                    return "method", None
+                    return "method", None, None
             if isinstance(raw, Param):
-                return "param", None
-            return type(raw).__name__, None
-    return "unknown", None
+                return "param", None, None
+            return type(raw).__name__, None, None
+    return "unknown", None, None
 
 
 def capture(cls):
@@ -124,11 +144,16 @@ def capture(cls):
     for name in sorted(dir(cls)):
         if name.startswith("_") or name in param_names:
             continue
-        kind, signature = member_kind(cls, name)
-        members[name] = {"kind": kind, **({"signature": signature} if signature else {})}
+        kind, signature, parameters = member_kind(cls, name)
+        members[name] = {
+            "kind": kind,
+            **({"signature": signature} if signature else {}),
+            **({"parameters": parameters} if parameters is not None else {}),
+        }
     return {
         "module": cls.__module__,
         "default_instance": instance is not None,
+        "init": parameters_of(cls.__init__, True),
         "params": params,
         "members": members,
     }
