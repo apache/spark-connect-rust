@@ -13,8 +13,8 @@ use crate::dataframe::DataFrame;
 use crate::ml::object::{fetch, read_model, FetchArg, MlTarget};
 use crate::ml::tree_api::{as_vector, fetch_value};
 use crate::ml::{
-    MlOperator, MlRef, MlVector, Model, MultilayerPerceptronClassificationModel, OperatorType,
-    Params, PredictionModel,
+    java_string_hash, MlOperator, MlRef, MlVector, Model, MultilayerPerceptronClassificationModel,
+    MultilayerPerceptronClassifier, OperatorType, Params, PredictionModel,
 };
 use crate::session::SparkSession;
 use spark_connect_core::error::{Result, SparkError};
@@ -119,3 +119,75 @@ impl MlSummary for MultilayerPerceptronClassificationTrainingSummary {
 impl ClassificationSummary for MultilayerPerceptronClassificationTrainingSummary {}
 
 impl TrainingSummary for MultilayerPerceptronClassificationTrainingSummary {}
+
+ml_params! {
+    MultilayerPerceptronClassifier {
+        set_block_size(value: i32) => "blockSize", set_param_int32;
+        block_size -> i32 = |this| this.params.int_or("blockSize", 128);
+        set_features_col(value: &str) => "featuresCol", set_param_string;
+        features_col -> &str = |this| this.params.string_or("featuresCol", "features");
+        set_initial_weights(value: impl Into<MlVector>) => "initialWeights", set_param_vector;
+        initial_weights -> Option<MlVector> =
+            |this| this.params.literal("initialWeights").and_then(MlVector::from_literal);
+        set_label_col(value: &str) => "labelCol", set_param_string;
+        label_col -> &str = |this| this.params.string_or("labelCol", "label");
+        set_layers(value: impl IntoIterator<Item = i32>) => "layers", set_param_int32_array;
+        layers -> Option<Vec<i32>> = |this| this.params.int_array_opt("layers");
+        set_max_iter(value: i32) => "maxIter", set_param_int32;
+        max_iter -> i32 = |this| this.params.int_or("maxIter", 100);
+        set_prediction_col(value: &str) => "predictionCol", set_param_string;
+        prediction_col -> &str = |this| this.params.string_or("predictionCol", "prediction");
+        set_probability_col(value: &str) => "probabilityCol", set_param_string;
+        probability_col -> &str = |this| this.params.string_or("probabilityCol", "probability");
+        set_raw_prediction_col(value: &str) => "rawPredictionCol", set_param_string;
+        raw_prediction_col -> &str =
+            |this| this.params.string_or("rawPredictionCol", "rawPrediction");
+        set_seed(value: i64) => "seed", set_param_int_narrow;
+        seed -> i64 = |this| {
+            this.params.long_opt("seed").unwrap_or(java_string_hash(
+                "org.apache.spark.ml.classification.MultilayerPerceptronClassifier",
+            ))
+        };
+        set_solver(value: &str) => "solver", set_param_string;
+        solver -> &str = |this| this.params.string_or("solver", "l-bfgs");
+        set_step_size(value: f64) => "stepSize", set_param_double;
+        step_size -> f64 = |this| this.params.double_or("stepSize", 0.03);
+        set_thresholds(value: impl IntoIterator<Item = f64>) =>
+            "thresholds", set_param_double_array;
+        thresholds -> Option<Vec<f64>> = |this| this.params.double_array_opt("thresholds");
+        set_tol(value: f64) => "tol", set_param_double;
+        tol -> f64 = |this| this.params.double_or("tol", 1e-06);
+    }
+}
+
+ml_params! {
+    MultilayerPerceptronClassificationModel {
+        block_size -> i32 = |this| this.params.int_or("blockSize", 128) => "blockSize";
+        set_features_col(value: &str) => "featuresCol", set_param_string;
+        features_col -> &str = |this| this.params.string_or("featuresCol", "features");
+        initial_weights -> Option<MlVector> =
+            |this| this.params.literal(
+                "initialWeights").and_then(MlVector::from_literal) => "initialWeights";
+        label_col -> &str = |this| this.params.string_or("labelCol", "label") => "labelCol";
+        layers -> Option<Vec<i32>> = |this| this.params.int_array_opt("layers") => "layers";
+        max_iter -> i32 = |this| this.params.int_or("maxIter", 100) => "maxIter";
+        set_prediction_col(value: &str) => "predictionCol", set_param_string;
+        prediction_col -> &str = |this| this.params.string_or("predictionCol", "prediction");
+        set_probability_col(value: &str) => "probabilityCol", set_param_string;
+        probability_col -> &str = |this| this.params.string_or("probabilityCol", "probability");
+        set_raw_prediction_col(value: &str) => "rawPredictionCol", set_param_string;
+        raw_prediction_col -> &str =
+            |this| this.params.string_or("rawPredictionCol", "rawPrediction");
+        seed -> i64 = |this| {
+            this.params.long_opt("seed").unwrap_or(java_string_hash(
+                "org.apache.spark.ml.classification.MultilayerPerceptronClassificationModel",
+            ))
+        } => "seed";
+        solver -> &str = |this| this.params.string_or("solver", "l-bfgs") => "solver";
+        step_size -> f64 = |this| this.params.double_or("stepSize", 0.03) => "stepSize";
+        set_thresholds(value: impl IntoIterator<Item = f64>) =>
+            "thresholds", set_param_double_array;
+        thresholds -> Option<Vec<f64>> = |this| this.params.double_array_opt("thresholds");
+        tol -> f64 = |this| this.params.double_or("tol", 1e-06) => "tol";
+    }
+}

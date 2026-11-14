@@ -13,8 +13,8 @@ use crate::dataframe::DataFrame;
 use crate::ml::object::{fetch, read_model, FetchArg, MlTarget};
 use crate::ml::tree_api::{as_f64, as_vector, fetch_value};
 use crate::ml::{
-    FMClassificationModel, MlMatrix, MlOperator, MlRef, MlVector, Model, OperatorType, Params,
-    PredictionModel,
+    java_string_hash, FMClassificationModel, FMClassifier, MlMatrix, MlOperator, MlRef, MlVector,
+    Model, OperatorType, Params, PredictionModel,
 };
 use crate::session::SparkSession;
 use spark_connect_core::error::{Result, SparkError};
@@ -139,3 +139,84 @@ impl ClassificationSummary for FMClassificationTrainingSummary {}
 impl BinaryClassificationSummary for FMClassificationTrainingSummary {}
 
 impl TrainingSummary for FMClassificationTrainingSummary {}
+
+ml_params! {
+    FMClassifier {
+        set_factor_size(value: i32) => "factorSize", set_param_int32;
+        factor_size -> i32 = |this| this.params.int_or("factorSize", 8);
+        set_features_col(value: &str) => "featuresCol", set_param_string;
+        features_col -> &str = |this| this.params.string_or("featuresCol", "features");
+        set_fit_intercept(value: bool) => "fitIntercept", set_param_bool;
+        fit_intercept -> bool = |this| this.params.bool_or("fitIntercept", true);
+        set_fit_linear(value: bool) => "fitLinear", set_param_bool;
+        fit_linear -> bool = |this| this.params.bool_or("fitLinear", true);
+        set_init_std(value: f64) => "initStd", set_param_double;
+        init_std -> f64 = |this| this.params.double_or("initStd", 0.01);
+        set_label_col(value: &str) => "labelCol", set_param_string;
+        label_col -> &str = |this| this.params.string_or("labelCol", "label");
+        set_max_iter(value: i32) => "maxIter", set_param_int32;
+        max_iter -> i32 = |this| this.params.int_or("maxIter", 100);
+        set_mini_batch_fraction(value: f64) => "miniBatchFraction", set_param_double;
+        mini_batch_fraction -> f64 = |this| this.params.double_or("miniBatchFraction", 1.0);
+        set_prediction_col(value: &str) => "predictionCol", set_param_string;
+        prediction_col -> &str = |this| this.params.string_or("predictionCol", "prediction");
+        set_probability_col(value: &str) => "probabilityCol", set_param_string;
+        probability_col -> &str = |this| this.params.string_or("probabilityCol", "probability");
+        set_raw_prediction_col(value: &str) => "rawPredictionCol", set_param_string;
+        raw_prediction_col -> &str =
+            |this| this.params.string_or("rawPredictionCol", "rawPrediction");
+        set_reg_param(value: f64) => "regParam", set_param_double;
+        reg_param -> f64 = |this| this.params.double_or("regParam", 0.0);
+        set_seed(value: i64) => "seed", set_param_int_narrow;
+        seed -> i64 = |this| {
+            this.params.long_opt("seed").unwrap_or(java_string_hash(
+                "org.apache.spark.ml.classification.FMClassifier",
+            ))
+        };
+        set_solver(value: &str) => "solver", set_param_string;
+        solver -> &str = |this| this.params.string_or("solver", "adamW");
+        set_step_size(value: f64) => "stepSize", set_param_double;
+        step_size -> f64 = |this| this.params.double_or("stepSize", 1.0);
+        set_thresholds(value: impl IntoIterator<Item = f64>) =>
+            "thresholds", set_param_double_array;
+        thresholds -> Option<Vec<f64>> = |this| this.params.double_array_opt("thresholds");
+        set_tol(value: f64) => "tol", set_param_double;
+        tol -> f64 = |this| this.params.double_or("tol", 1e-06);
+        weight_col -> Option<&str> = |this| this.params.string_opt("weightCol") => "weightCol";
+    }
+}
+
+ml_params! {
+    FMClassificationModel {
+        factor_size -> i32 = |this| this.params.int_or("factorSize", 8) => "factorSize";
+        set_features_col(value: &str) => "featuresCol", set_param_string;
+        features_col -> &str = |this| this.params.string_or("featuresCol", "features");
+        fit_intercept -> bool = |this| this.params.bool_or("fitIntercept", true) => "fitIntercept";
+        fit_linear -> bool = |this| this.params.bool_or("fitLinear", true) => "fitLinear";
+        init_std -> f64 = |this| this.params.double_or("initStd", 0.01) => "initStd";
+        label_col -> &str = |this| this.params.string_or("labelCol", "label") => "labelCol";
+        max_iter -> i32 = |this| this.params.int_or("maxIter", 100) => "maxIter";
+        mini_batch_fraction -> f64 =
+            |this| this.params.double_or("miniBatchFraction", 1.0) => "miniBatchFraction";
+        set_prediction_col(value: &str) => "predictionCol", set_param_string;
+        prediction_col -> &str = |this| this.params.string_or("predictionCol", "prediction");
+        set_probability_col(value: &str) => "probabilityCol", set_param_string;
+        probability_col -> &str = |this| this.params.string_or("probabilityCol", "probability");
+        set_raw_prediction_col(value: &str) => "rawPredictionCol", set_param_string;
+        raw_prediction_col -> &str =
+            |this| this.params.string_or("rawPredictionCol", "rawPrediction");
+        reg_param -> f64 = |this| this.params.double_or("regParam", 0.0) => "regParam";
+        seed -> i64 = |this| {
+            this.params.long_opt("seed").unwrap_or(java_string_hash(
+                "org.apache.spark.ml.classification.FMClassificationModel",
+            ))
+        } => "seed";
+        solver -> &str = |this| this.params.string_or("solver", "adamW") => "solver";
+        step_size -> f64 = |this| this.params.double_or("stepSize", 1.0) => "stepSize";
+        set_thresholds(value: impl IntoIterator<Item = f64>) =>
+            "thresholds", set_param_double_array;
+        thresholds -> Option<Vec<f64>> = |this| this.params.double_array_opt("thresholds");
+        tol -> f64 = |this| this.params.double_or("tol", 1e-06) => "tol";
+        weight_col -> Option<&str> = |this| this.params.string_opt("weightCol") => "weightCol";
+    }
+}

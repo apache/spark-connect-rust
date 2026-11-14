@@ -6,7 +6,9 @@
 use super::{ClassificationModel, ProbabilisticClassificationModel};
 use crate::ml::object::{read_model, MlValue};
 use crate::ml::tree_api::{as_vector, fetch_value};
-use crate::ml::{MlMatrix, MlOperator, MlRef, MlVector, Model, NaiveBayesModel, OperatorType};
+use crate::ml::{
+    MlMatrix, MlOperator, MlRef, MlVector, Model, NaiveBayes, NaiveBayesModel, OperatorType,
+};
 use crate::ml::{Params, PredictionModel};
 use crate::session::SparkSession;
 use spark_connect_core::error::{Result, SparkError};
@@ -70,4 +72,51 @@ pub(super) fn as_matrix(method: &str, value: MlValue) -> Result<MlMatrix> {
     value.as_matrix().cloned().ok_or_else(|| {
         SparkError::value_msg(format!("expected a matrix of `{method}`, got {value:?}"))
     })
+}
+
+ml_params! {
+    NaiveBayes {
+        set_features_col(value: &str) => "featuresCol", set_param_string;
+        features_col -> &str = |this| this.params.string_or("featuresCol", "features");
+        set_label_col(value: &str) => "labelCol", set_param_string;
+        label_col -> &str = |this| this.params.string_or("labelCol", "label");
+        set_model_type(value: &str) => "modelType", set_param_string;
+        model_type -> &str = |this| this.params.string_or("modelType", "multinomial");
+        set_prediction_col(value: &str) => "predictionCol", set_param_string;
+        prediction_col -> &str = |this| this.params.string_or("predictionCol", "prediction");
+        set_probability_col(value: &str) => "probabilityCol", set_param_string;
+        probability_col -> &str = |this| this.params.string_or("probabilityCol", "probability");
+        set_raw_prediction_col(value: &str) => "rawPredictionCol", set_param_string;
+        raw_prediction_col -> &str =
+            |this| this.params.string_or("rawPredictionCol", "rawPrediction");
+        set_smoothing(value: f64) => "smoothing", set_param_double;
+        smoothing -> f64 = |this| this.params.double_or("smoothing", 1.0);
+        set_thresholds(value: impl IntoIterator<Item = f64>) =>
+            "thresholds", set_param_double_array;
+        thresholds -> Option<Vec<f64>> = |this| this.params.double_array_opt("thresholds");
+        set_weight_col(value: &str) => "weightCol", set_param_string;
+        weight_col -> Option<&str> = |this| this.params.string_opt("weightCol");
+    }
+}
+
+ml_params! {
+    NaiveBayesModel {
+        set_features_col(value: &str) => "featuresCol", set_param_string;
+        features_col -> &str = |this| this.params.string_or("featuresCol", "features");
+        label_col -> &str = |this| this.params.string_or("labelCol", "label") => "labelCol";
+        model_type -> &str =
+            |this| this.params.string_or("modelType", "multinomial") => "modelType";
+        set_prediction_col(value: &str) => "predictionCol", set_param_string;
+        prediction_col -> &str = |this| this.params.string_or("predictionCol", "prediction");
+        set_probability_col(value: &str) => "probabilityCol", set_param_string;
+        probability_col -> &str = |this| this.params.string_or("probabilityCol", "probability");
+        set_raw_prediction_col(value: &str) => "rawPredictionCol", set_param_string;
+        raw_prediction_col -> &str =
+            |this| this.params.string_or("rawPredictionCol", "rawPrediction");
+        smoothing -> f64 = |this| this.params.double_or("smoothing", 1.0) => "smoothing";
+        set_thresholds(value: impl IntoIterator<Item = f64>) =>
+            "thresholds", set_param_double_array;
+        thresholds -> Option<Vec<f64>> = |this| this.params.double_array_opt("thresholds");
+        weight_col -> Option<&str> = |this| this.params.string_opt("weightCol") => "weightCol";
+    }
 }

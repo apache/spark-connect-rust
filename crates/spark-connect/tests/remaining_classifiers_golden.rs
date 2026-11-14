@@ -15,7 +15,7 @@ fn remaining_classifier_parameters_match_official_pyspark() {
         Box::new(FMClassifier::new()),
         Box::new(
             FMClassifier::new()
-                .set_feature_col("input")
+                .set_features_col("input")
                 .set_label_col("target")
                 .set_prediction_col("pred")
                 .set_probability_col("prob")
@@ -36,7 +36,7 @@ fn remaining_classifier_parameters_match_official_pyspark() {
         Box::new(MultilayerPerceptronClassifier::new()),
         Box::new(
             MultilayerPerceptronClassifier::new()
-                .set_feature_col("input")
+                .set_features_col("input")
                 .set_label_col("target")
                 .set_prediction_col("pred")
                 .set_max_iter(50)
@@ -56,7 +56,7 @@ fn remaining_classifier_parameters_match_official_pyspark() {
         ),
         Box::new(
             MultilayerPerceptronClassifier::new()
-                .set_feature_col("input")
+                .set_features_col("input")
                 .set_label_col("target")
                 .set_prediction_col("pred")
                 .set_max_iter(50)
@@ -78,7 +78,7 @@ fn remaining_classifier_parameters_match_official_pyspark() {
         Box::new(OneVsRest::new()),
         Box::new(
             OneVsRest::new()
-                .set_feature_col("input")
+                .set_features_col("input")
                 .set_label_col("target")
                 .set_prediction_col("pred")
                 .set_raw_prediction_col("scores")

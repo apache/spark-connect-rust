@@ -1807,7 +1807,7 @@ impl PyOneVsRest {
                     .map_err(Box::new)
             })?;
             Ok(PyMLModel {
-                model,
+                model: Box::new(model),
                 session_id: session.session_id().to_string(),
             })
         })

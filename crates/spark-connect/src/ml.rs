@@ -80,8 +80,6 @@ macro_rules! ml_params {
 
 /// The default `seed` of a class when the client sends none: Java's `String.hashCode` of the JVM
 /// class name, which the server takes as `getClass.getName.hashCode`, sign-extended to `Long`.
-// Read by the seed getters of the rows that scripts/gen_rust_params_table.py prints.
-#[allow(dead_code)]
 fn java_string_hash(class_name: &str) -> i64 {
     let mut hash: i32 = 0;
     for unit in class_name.encode_utf16() {
@@ -2346,193 +2344,6 @@ impl FMClassifier {
         }
     }
 
-    /// Set `featuresCol`.
-    pub fn set_feature_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("featuresCol", value);
-        self
-    }
-
-    /// Get `featuresCol` (default: "features").
-    pub fn feature_col(&self) -> &str {
-        self.params.string_or("featuresCol", "features")
-    }
-
-    /// Set `labelCol`.
-    pub fn set_label_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("labelCol", value);
-        self
-    }
-
-    /// Get `labelCol` (default: "label").
-    pub fn label_col(&self) -> &str {
-        self.params.string_or("labelCol", "label")
-    }
-
-    /// Set `predictionCol`.
-    pub fn set_prediction_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("predictionCol", value);
-        self
-    }
-
-    /// Get `predictionCol` (default: "prediction").
-    pub fn prediction_col(&self) -> &str {
-        self.params.string_or("predictionCol", "prediction")
-    }
-
-    /// Set `probabilityCol`.
-    pub fn set_probability_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("probabilityCol", value);
-        self
-    }
-
-    /// Get `probabilityCol` (default: "probability").
-    pub fn probability_col(&self) -> &str {
-        self.params.string_or("probabilityCol", "probability")
-    }
-
-    /// Set `rawPredictionCol`.
-    pub fn set_raw_prediction_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("rawPredictionCol", value);
-        self
-    }
-
-    /// Get `rawPredictionCol` (default: "rawPrediction").
-    pub fn raw_prediction_col(&self) -> &str {
-        self.params.string_or("rawPredictionCol", "rawPrediction")
-    }
-
-    /// Set `factorSize`.
-    pub fn set_factor_size(mut self, value: i32) -> Self {
-        self.params = self.params.set_param_int32("factorSize", value);
-        self
-    }
-
-    /// Get `factorSize` (default: 8).
-    pub fn factor_size(&self) -> i32 {
-        self.params.int_or("factorSize", 8)
-    }
-
-    /// Set `fitIntercept`.
-    pub fn set_fit_intercept(mut self, value: bool) -> Self {
-        self.params = self.params.set_param_bool("fitIntercept", value);
-        self
-    }
-
-    /// Get `fitIntercept` (default: true).
-    pub fn fit_intercept(&self) -> bool {
-        self.params.bool_or("fitIntercept", true)
-    }
-
-    /// Set `fitLinear`.
-    pub fn set_fit_linear(mut self, value: bool) -> Self {
-        self.params = self.params.set_param_bool("fitLinear", value);
-        self
-    }
-
-    /// Get `fitLinear` (default: true).
-    pub fn fit_linear(&self) -> bool {
-        self.params.bool_or("fitLinear", true)
-    }
-
-    /// Set `regParam`.
-    pub fn set_reg_param(mut self, value: f64) -> Self {
-        self.params = self.params.set_param_double("regParam", value);
-        self
-    }
-
-    /// Get `regParam` (default: 0.0).
-    pub fn reg_param(&self) -> f64 {
-        self.params.double_or("regParam", 0.0)
-    }
-
-    /// Set `miniBatchFraction`.
-    pub fn set_mini_batch_fraction(mut self, value: f64) -> Self {
-        self.params = self.params.set_param_double("miniBatchFraction", value);
-        self
-    }
-
-    /// Get `miniBatchFraction` (default: 1.0).
-    pub fn mini_batch_fraction(&self) -> f64 {
-        self.params.double_or("miniBatchFraction", 1.0)
-    }
-
-    /// Set `initStd`.
-    pub fn set_init_std(mut self, value: f64) -> Self {
-        self.params = self.params.set_param_double("initStd", value);
-        self
-    }
-
-    /// Get `initStd` (default: 0.01).
-    pub fn init_std(&self) -> f64 {
-        self.params.double_or("initStd", 0.01)
-    }
-
-    /// Set `maxIter`.
-    pub fn set_max_iter(mut self, value: i32) -> Self {
-        self.params = self.params.set_param_int32("maxIter", value);
-        self
-    }
-
-    /// Get `maxIter` (default: 100).
-    pub fn max_iter(&self) -> i32 {
-        self.params.int_or("maxIter", 100)
-    }
-
-    /// Set `stepSize`.
-    pub fn set_step_size(mut self, value: f64) -> Self {
-        self.params = self.params.set_param_double("stepSize", value);
-        self
-    }
-
-    /// Get `stepSize` (default: 1.0).
-    pub fn step_size(&self) -> f64 {
-        self.params.double_or("stepSize", 1.0)
-    }
-
-    /// Set `tol`.
-    pub fn set_tol(mut self, value: f64) -> Self {
-        self.params = self.params.set_param_double("tol", value);
-        self
-    }
-
-    /// Get `tol` (default: 1e-06).
-    pub fn tol(&self) -> f64 {
-        self.params.double_or("tol", 1e-06)
-    }
-
-    /// Set `solver`.
-    pub fn set_solver(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("solver", value);
-        self
-    }
-
-    /// Get `solver` (default: "adamW").
-    pub fn solver(&self) -> &str {
-        self.params.string_or("solver", "adamW")
-    }
-
-    /// Set `thresholds`.
-    pub fn set_thresholds(mut self, value: impl IntoIterator<Item = f64>) -> Self {
-        self.params = self.params.set_param_double_array("thresholds", value);
-        self
-    }
-
-    /// Get `thresholds` (unset by default).
-    pub fn thresholds(&self) -> Option<Vec<f64>> {
-        self.params.double_array_opt("thresholds")
-    }
-
-    /// Set `seed`.
-    pub fn set_seed(mut self, value: i64) -> Self {
-        self.params = self.params.set_param_int_narrow("seed", value);
-        self
-    }
-
-    /// Get `seed` (unset by default).
-    pub fn seed(&self) -> Option<i64> {
-        self.params.long_opt("seed")
-    }
-
     /// Fit the typed FM classification model, whose training summary the model holds.
     pub fn fit(
         &mut self,
@@ -2659,170 +2470,6 @@ impl MultilayerPerceptronClassifier {
             ),
             params: Params::new(),
         }
-    }
-
-    /// Set `featuresCol`.
-    pub fn set_feature_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("featuresCol", value);
-        self
-    }
-
-    /// Get `featuresCol` (default: "features").
-    pub fn feature_col(&self) -> &str {
-        self.params.string_or("featuresCol", "features")
-    }
-
-    /// Set `labelCol`.
-    pub fn set_label_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("labelCol", value);
-        self
-    }
-
-    /// Get `labelCol` (default: "label").
-    pub fn label_col(&self) -> &str {
-        self.params.string_or("labelCol", "label")
-    }
-
-    /// Set `predictionCol`.
-    pub fn set_prediction_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("predictionCol", value);
-        self
-    }
-
-    /// Get `predictionCol` (default: "prediction").
-    pub fn prediction_col(&self) -> &str {
-        self.params.string_or("predictionCol", "prediction")
-    }
-
-    /// Set `maxIter`.
-    pub fn set_max_iter(mut self, value: i32) -> Self {
-        self.params = self.params.set_param_int32("maxIter", value);
-        self
-    }
-
-    /// Get `maxIter` (default: 100).
-    pub fn max_iter(&self) -> i32 {
-        self.params.int_or("maxIter", 100)
-    }
-
-    /// Set `tol`.
-    pub fn set_tol(mut self, value: f64) -> Self {
-        self.params = self.params.set_param_double("tol", value);
-        self
-    }
-
-    /// Get `tol` (default: 1e-06).
-    pub fn tol(&self) -> f64 {
-        self.params.double_or("tol", 1e-06)
-    }
-
-    /// Set `seed`.
-    pub fn set_seed(mut self, value: i64) -> Self {
-        self.params = self.params.set_param_int_narrow("seed", value);
-        self
-    }
-
-    /// Get `seed` (unset by default).
-    pub fn seed(&self) -> Option<i64> {
-        self.params.long_opt("seed")
-    }
-
-    /// Set `layers`.
-    pub fn set_layers(mut self, value: impl IntoIterator<Item = i32>) -> Self {
-        self.params = self
-            .params
-            .set_param_int_array("layers", value.into_iter().map(i64::from));
-        self
-    }
-
-    /// Get `layers` (unset by default).
-    pub fn layers(&self) -> Option<Vec<i32>> {
-        self.params
-            .array_opt("layers")?
-            .iter()
-            .map(|lit| match lit.literal_type.as_ref()? {
-                proto::expression::literal::LiteralType::Integer(v) => Some(*v),
-                proto::expression::literal::LiteralType::Long(v) => Some(*v as i32),
-                _ => None,
-            })
-            .collect()
-    }
-
-    /// Set `blockSize`.
-    pub fn set_block_size(mut self, value: i32) -> Self {
-        self.params = self.params.set_param_int32("blockSize", value);
-        self
-    }
-
-    /// Get `blockSize` (default: 128).
-    pub fn block_size(&self) -> i32 {
-        self.params.int_or("blockSize", 128)
-    }
-
-    /// Set `stepSize`.
-    pub fn set_step_size(mut self, value: f64) -> Self {
-        self.params = self.params.set_param_double("stepSize", value);
-        self
-    }
-
-    /// Get `stepSize` (default: 0.03).
-    pub fn step_size(&self) -> f64 {
-        self.params.double_or("stepSize", 0.03)
-    }
-
-    /// Set `solver`.
-    pub fn set_solver(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("solver", value);
-        self
-    }
-
-    /// Get `solver` (default: "l-bfgs").
-    pub fn solver(&self) -> &str {
-        self.params.string_or("solver", "l-bfgs")
-    }
-
-    /// Set `initialWeights`.
-    pub fn set_initial_weights(mut self, value: impl Into<MlVector>) -> Self {
-        self.params = self.params.set_param_vector("initialWeights", value);
-        self
-    }
-
-    /// Get `initialWeights` (unset by default).
-    pub fn initial_weights(&self) -> Option<MlVector> {
-        MlVector::from_literal(self.params.literal("initialWeights")?)
-    }
-
-    /// Set `probabilityCol`.
-    pub fn set_probability_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("probabilityCol", value);
-        self
-    }
-
-    /// Get `probabilityCol` (default: "probability").
-    pub fn probability_col(&self) -> &str {
-        self.params.string_or("probabilityCol", "probability")
-    }
-
-    /// Set `rawPredictionCol`.
-    pub fn set_raw_prediction_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("rawPredictionCol", value);
-        self
-    }
-
-    /// Get `rawPredictionCol` (default: "rawPrediction").
-    pub fn raw_prediction_col(&self) -> &str {
-        self.params.string_or("rawPredictionCol", "rawPrediction")
-    }
-
-    /// Set `thresholds`.
-    pub fn set_thresholds(mut self, value: impl IntoIterator<Item = f64>) -> Self {
-        self.params = self.params.set_param_double_array("thresholds", value);
-        self
-    }
-
-    /// Get `thresholds` (unset by default).
-    pub fn thresholds(&self) -> Option<Vec<f64>> {
-        self.params.double_array_opt("thresholds")
     }
 
     /// Fit the typed MLP classification model, whose training summary the model holds.
@@ -3017,52 +2664,6 @@ impl OneVsRest {
         self
     }
 
-    pub fn classifier(&self) -> Option<&Classifier> {
-        self.classifier.as_ref()
-    }
-    pub fn set_feature_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("featuresCol", value);
-        self
-    }
-    pub fn feature_col(&self) -> &str {
-        self.params.string_or("featuresCol", "features")
-    }
-    pub fn set_label_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("labelCol", value);
-        self
-    }
-    pub fn label_col(&self) -> &str {
-        self.params.string_or("labelCol", "label")
-    }
-    pub fn set_prediction_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("predictionCol", value);
-        self
-    }
-    pub fn prediction_col(&self) -> &str {
-        self.params.string_or("predictionCol", "prediction")
-    }
-    pub fn set_raw_prediction_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("rawPredictionCol", value);
-        self
-    }
-    pub fn raw_prediction_col(&self) -> &str {
-        self.params.string_or("rawPredictionCol", "rawPrediction")
-    }
-    pub fn set_weight_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("weightCol", value);
-        self
-    }
-    pub fn weight_col(&self) -> Option<&str> {
-        self.params.string_opt("weightCol")
-    }
-    pub fn set_parallelism(mut self, value: i32) -> Self {
-        self.params = self.params.set_param_int32("parallelism", value);
-        self
-    }
-    pub fn parallelism(&self) -> i32 {
-        self.params.int_or("parallelism", 1)
-    }
-
     /// The `parallelism` that a fit reads, of either int width, unlike [`Self::parallelism`],
     /// which narrows it: None when it is set to a null.
     pub fn parallelism_i64(&self) -> Option<i64> {
@@ -3127,7 +2728,7 @@ impl OneVsRest {
             .filter(|name| !name.is_empty() && classifier.supports_weight());
         let mut columns = vec![
             ml_exact_column(self.label_col()),
-            ml_exact_column(self.feature_col()),
+            ml_exact_column(self.features_col()),
         ];
         if let Some(weight) = weight {
             columns.push(ml_exact_column(weight));
@@ -3171,7 +2772,7 @@ impl OneVsRest {
                         let estimator = base.estimator_mut();
                         let mut params = std::mem::take(estimator.params_mut())
                             .set_param_string("labelCol", &binary_label)
-                            .set_param_string("featuresCol", this.feature_col())
+                            .set_param_string("featuresCol", this.features_col())
                             .set_param_string("predictionCol", this.prediction_col());
                         if let Some(weight) = weight {
                             params = params.set_param_string("weightCol", weight);
@@ -3207,6 +2808,7 @@ impl OneVsRest {
             params: self.params.clone(),
             models,
             session_id: df.session.session_id().to_string(),
+            classifier: self.classifier.clone(),
         })
     }
 }
@@ -3286,6 +2888,8 @@ pub struct OneVsRestModel {
     params: Params,
     models: Vec<Box<dyn Model>>,
     session_id: String,
+    /// The classifier that fitted the models (`classifier` of PySpark's `_OneVsRestParams`).
+    classifier: Option<Classifier>,
 }
 
 impl Clone for OneVsRestModel {
@@ -3295,6 +2899,7 @@ impl Clone for OneVsRestModel {
             params: self.params.clone(),
             models: self.models.iter().map(|m| m.clone_box()).collect(),
             session_id: self.session_id.clone(),
+            classifier: self.classifier.clone(),
         }
     }
 }
@@ -5061,105 +4666,6 @@ impl NaiveBayes {
             ),
             params: Params::new(),
         }
-    }
-
-    /// Feature vector column.
-    pub fn set_feature_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("featuresCol", value);
-        self
-    }
-
-    /// Numeric label column of nonnegative integer class indices.
-    pub fn set_label_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("labelCol", value);
-        self
-    }
-
-    /// Predicted class output column.
-    pub fn set_prediction_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("predictionCol", value);
-        self
-    }
-
-    /// Class probability output column; empty disables it.
-    pub fn set_probability_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("probabilityCol", value);
-        self
-    }
-
-    /// Raw class prediction output column; empty disables it.
-    pub fn set_raw_prediction_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("rawPredictionCol", value);
-        self
-    }
-
-    /// Additive smoothing parameter, which must be nonnegative.
-    pub fn set_smoothing(mut self, value: f64) -> Self {
-        self.params = self.params.set_param_double("smoothing", value);
-        self
-    }
-
-    /// Model type: multinomial, bernoulli, complement or gaussian.
-    pub fn set_model_type(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("modelType", value);
-        self
-    }
-
-    /// Per-class thresholds: predictions maximize probability divided by threshold.
-    pub fn set_thresholds(mut self, value: impl IntoIterator<Item = f64>) -> Self {
-        self.params = self.params.set_param_double_array("thresholds", value);
-        self
-    }
-
-    /// Optional instance weight column.
-    pub fn set_weight_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("weightCol", value);
-        self
-    }
-
-    /// The featuresCol value; default: "features".
-    pub fn feature_col(&self) -> &str {
-        self.params.string_or("featuresCol", "features")
-    }
-
-    /// The labelCol value; default: "label".
-    pub fn label_col(&self) -> &str {
-        self.params.string_or("labelCol", "label")
-    }
-
-    /// The predictionCol value; default: "prediction".
-    pub fn prediction_col(&self) -> &str {
-        self.params.string_or("predictionCol", "prediction")
-    }
-
-    /// The probabilityCol value; default: "probability".
-    pub fn probability_col(&self) -> &str {
-        self.params.string_or("probabilityCol", "probability")
-    }
-
-    /// The rawPredictionCol value; default: "rawPrediction".
-    pub fn raw_prediction_col(&self) -> &str {
-        self.params.string_or("rawPredictionCol", "rawPrediction")
-    }
-
-    /// The smoothing value; default: 1.0.
-    pub fn smoothing(&self) -> f64 {
-        self.params.double_or("smoothing", 1.0)
-    }
-
-    /// The modelType value; default: "multinomial".
-    pub fn model_type(&self) -> &str {
-        self.params.string_or("modelType", "multinomial")
-    }
-
-    /// The thresholds value, if set.
-    pub fn thresholds(&self) -> Option<Vec<f64>> {
-        self.params.double_array_opt("thresholds")
-    }
-
-    /// The weightCol value, if set.
-    pub fn weight_col(&self) -> Option<&str> {
-        self.params.string_opt("weightCol")
     }
 
     /// Fit the typed Naive Bayes model, which holds the server-side model object.
@@ -9327,7 +8833,7 @@ mod tests {
     #[test]
     fn fmclassifier_defaults_and_configured_getters() {
         let default = FMClassifier::new();
-        assert_eq!(default.feature_col(), "features");
+        assert_eq!(default.features_col(), "features");
         assert_eq!(default.label_col(), "label");
         assert_eq!(default.prediction_col(), "prediction");
         assert_eq!(default.probability_col(), "probability");
@@ -9343,9 +8849,12 @@ mod tests {
         assert_eq!(default.tol(), 1e-06);
         assert_eq!(default.solver(), "adamW");
         assert_eq!(default.thresholds(), None);
-        assert_eq!(default.seed(), None);
+        assert_eq!(
+            default.seed(),
+            java_string_hash("org.apache.spark.ml.classification.FMClassifier")
+        );
         let configured = FMClassifier::new()
-            .set_feature_col("input")
+            .set_features_col("input")
             .set_label_col("target")
             .set_prediction_col("pred")
             .set_probability_col("prob")
@@ -9362,7 +8871,7 @@ mod tests {
             .set_solver("gd")
             .set_thresholds([1.0, 2.0])
             .set_seed(8589934592);
-        assert_eq!(configured.feature_col(), "input");
+        assert_eq!(configured.features_col(), "input");
         assert_eq!(configured.label_col(), "target");
         assert_eq!(configured.prediction_col(), "pred");
         assert_eq!(configured.probability_col(), "prob");
@@ -9378,18 +8887,21 @@ mod tests {
         assert_eq!(configured.tol(), 1e-08);
         assert_eq!(configured.solver(), "gd");
         assert_eq!(configured.thresholds(), Some(vec![1.0, 2.0]));
-        assert_eq!(configured.seed(), Some(8589934592));
+        assert_eq!(configured.seed(), 8589934592);
     }
 
     #[test]
     fn multilayer_perceptron_classifier_defaults_and_configured_getters() {
         let default = MultilayerPerceptronClassifier::new();
-        assert_eq!(default.feature_col(), "features");
+        assert_eq!(default.features_col(), "features");
         assert_eq!(default.label_col(), "label");
         assert_eq!(default.prediction_col(), "prediction");
         assert_eq!(default.max_iter(), 100);
         assert_eq!(default.tol(), 1e-06);
-        assert_eq!(default.seed(), None);
+        assert_eq!(
+            default.seed(),
+            java_string_hash("org.apache.spark.ml.classification.MultilayerPerceptronClassifier")
+        );
         assert_eq!(default.layers(), None);
         assert_eq!(default.block_size(), 128);
         assert_eq!(default.step_size(), 0.03);
@@ -9399,7 +8911,7 @@ mod tests {
         assert_eq!(default.raw_prediction_col(), "rawPrediction");
         assert_eq!(default.thresholds(), None);
         let configured = MultilayerPerceptronClassifier::new()
-            .set_feature_col("input")
+            .set_features_col("input")
             .set_label_col("target")
             .set_prediction_col("pred")
             .set_max_iter(50)
@@ -9416,12 +8928,12 @@ mod tests {
             .set_probability_col("prob")
             .set_raw_prediction_col("scores")
             .set_thresholds([1.0, 2.0]);
-        assert_eq!(configured.feature_col(), "input");
+        assert_eq!(configured.features_col(), "input");
         assert_eq!(configured.label_col(), "target");
         assert_eq!(configured.prediction_col(), "pred");
         assert_eq!(configured.max_iter(), 50);
         assert_eq!(configured.tol(), 1e-08);
-        assert_eq!(configured.seed(), Some(8589934592));
+        assert_eq!(configured.seed(), 8589934592);
         assert_eq!(configured.layers(), Some(vec![2, 3, 2]));
         assert_eq!(configured.block_size(), 4);
         assert_eq!(configured.step_size(), 0.1);
@@ -9458,20 +8970,20 @@ mod tests {
     #[test]
     fn one_vs_rest_defaults_and_configured_getters() {
         let default = OneVsRest::new();
-        assert_eq!(default.feature_col(), "features");
+        assert_eq!(default.features_col(), "features");
         assert_eq!(default.label_col(), "label");
         assert_eq!(default.prediction_col(), "prediction");
         assert_eq!(default.raw_prediction_col(), "rawPrediction");
         assert_eq!(default.weight_col(), None);
         assert_eq!(default.parallelism(), 1);
         let configured = OneVsRest::new()
-            .set_feature_col("input")
+            .set_features_col("input")
             .set_label_col("target")
             .set_prediction_col("pred")
             .set_raw_prediction_col("scores")
             .set_weight_col("weight")
             .set_parallelism(3);
-        assert_eq!(configured.feature_col(), "input");
+        assert_eq!(configured.features_col(), "input");
         assert_eq!(configured.label_col(), "target");
         assert_eq!(configured.prediction_col(), "pred");
         assert_eq!(configured.raw_prediction_col(), "scores");
@@ -10108,7 +9620,7 @@ mod tests {
     #[test]
     fn naive_bayes_getters_follow_defaults_builders_and_mutable_params() {
         let mut estimator = NaiveBayes::default();
-        assert_eq!(estimator.feature_col(), "features");
+        assert_eq!(estimator.features_col(), "features");
         assert_eq!(estimator.label_col(), "label");
         assert_eq!(estimator.prediction_col(), "prediction");
         assert_eq!(estimator.probability_col(), "probability");
@@ -10118,7 +9630,7 @@ mod tests {
         assert_eq!(estimator.thresholds(), None);
         assert_eq!(estimator.weight_col(), None);
         let built = NaiveBayes::new()
-            .set_feature_col("input")
+            .set_features_col("input")
             .set_label_col("target")
             .set_prediction_col("class")
             .set_probability_col("probs")
@@ -10131,8 +9643,8 @@ mod tests {
             .params()
             .clone()
             .set_param_string("featuresCol", "input");
-        assert_eq!(estimator.feature_col(), "input");
-        assert_eq!(built.feature_col(), estimator.feature_col());
+        assert_eq!(estimator.features_col(), "input");
+        assert_eq!(built.features_col(), estimator.features_col());
         *estimator.params_mut() = estimator
             .params()
             .clone()

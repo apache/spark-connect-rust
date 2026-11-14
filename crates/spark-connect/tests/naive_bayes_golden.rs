@@ -14,7 +14,7 @@ fn naive_bayes_parameters_match_official_pyspark() {
             .unwrap();
         let expected = spark_connect_proto::MlParams::decode(bytes.as_slice()).unwrap();
         let estimator = NaiveBayes::new()
-            .set_feature_col("input")
+            .set_features_col("input")
             .set_label_col("target")
             .set_prediction_col("class")
             .set_probability_col("probs")
