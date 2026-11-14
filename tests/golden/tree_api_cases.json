@@ -81,6 +81,22 @@
     "ok",
     "False"
    ],
+   "isinstance_estimator_is_not_model": [
+    "ok",
+    "False"
+   ],
+   "isinstance_model": [
+    "ok",
+    "True"
+   ],
+   "isinstance_params": [
+    "ok",
+    "True"
+   ],
+   "isinstance_transformer": [
+    "ok",
+    "True"
+   ],
    "loaded_explainParams": [
     "ok",
     "\"cacheNodeIds: If false, the algorithm will pass trees to executors to match instances with nodes. If true, the algorithm will cache node IDs for each instance. Caching can speed up training of deeper trees. Users can set how often should the cache be checkpointed or disable it by setting checkpointInterval. (default: False)\\ncheckpointInterval: set checkpoint interval (>= 1) or disable checkpoint (-1). E.g. 10 means that the cache will get checkpointed every 10 iterations. Note: this setting will be ignored if the checkpoint directory is not set in the SparkContext. (default: 10)\\nfeaturesCol: features column name. (default: features, current: features)\\nimpurity: Criterion used for information gain calculation (case-insensitive). Supported options: entropy, gini (default: gini)\\nlabelCol: label column name. (default: label)\\nleafCol: Leaf indices column name. Predicted leaf index of each instance in each tree by preorder. (default: )\\nmaxBins: Max number of bins for discretizing continuous features.  Must be >=2 and >= number of categories for any categorical feature. (default: 32)\\nmaxDepth: Maximum depth of the tree. (>= 0) E.g., depth 0 means 1 leaf node; depth 1 means 1 internal node + 2 leaf nodes. Must be in range [0, 30]. (default: 5, current: 3)\\nmaxMemoryInMB: Maximum memory in MB allocated to histogram aggregation. If too small, then 1 node will be split per iteration, and its aggregates may exceed this size. (default: 256)\\nminInfoGain: Minimum information gain for a split to be considered at a tree node. (default: 0.0)\\nminInstancesPerNode: Minimum number of instances each child must have after split. If a split causes the left or right child to have fewer than minInstancesPerNode, the split will be discarded as invalid. Should be >= 1. (default: 1)\\nminWeightFractionPerNode: Minimum fraction of the weighted sample count that each child must have after split. If a split causes the fraction of the total weight in the left or right child to be less than minWeightFractionPerNode, the split will be discarded as invalid. Should be in interval [0.0, 0.5). (default: 0.0)\\npredictionCol: prediction column name. (default: prediction)\\nprobabilityCol: Column name for predicted class conditional probabilities. Note: Not all models output well-calibrated probability estimates! These probabilities should be treated as confidences, not precise probabilities. (default: probability)\\npruneTree: If true, the trained tree will undergo a pruning process after training, in which sibling leaf nodes with the same prediction are merged into their parent. The resulting tree will be smaller and have faster predictions. Class probabilities remain available after pruning. If false, no pruning is applied after training. (default: True)\\nrawPredictionCol: raw prediction (a.k.a. confidence) column name. (default: rawPrediction)\\nseed: random seed. (default: <hash DecisionTreeClassificationModel>, current: 42)\\nthresholds: Thresholds in multi-class classification to adjust the probability of predicting each class. Array must have length equal to the number of classes, with values > 0, excepting that at most one value may be 0. The class with largest value p/t is predicted, where p is the original probability of that class and t is the class's threshold. (undefined)\\nweightCol: weight column name. If this is not set or empty, we treat all instance weights as 1.0. (undefined)\""
@@ -215,6 +231,10 @@
    "repr_prefix": [
     "ok",
     "'DecisionTreeClassificationModel'"
+   ],
+   "summary_absent": [
+    "AttributeError",
+    "'DecisionTreeClassificationModel' object has no attribute 'summary'"
    ],
    "supportedImpurities": [
     "ok",
@@ -480,6 +500,14 @@
     "ok",
     "True"
    ],
+   "isinstance_estimator": [
+    "ok",
+    "True"
+   ],
+   "isinstance_params": [
+    "ok",
+    "True"
+   ],
    "orig_impurity": [
     "ok",
     "'gini'"
@@ -664,6 +692,22 @@
     "ok",
     "False"
    ],
+   "isinstance_estimator_is_not_model": [
+    "ok",
+    "False"
+   ],
+   "isinstance_model": [
+    "ok",
+    "True"
+   ],
+   "isinstance_params": [
+    "ok",
+    "True"
+   ],
+   "isinstance_transformer": [
+    "ok",
+    "True"
+   ],
    "loaded_explainParams": [
     "ok",
     "\"cacheNodeIds: If false, the algorithm will pass trees to executors to match instances with nodes. If true, the algorithm will cache node IDs for each instance. Caching can speed up training of deeper trees. Users can set how often should the cache be checkpointed or disable it by setting checkpointInterval. (default: False)\\ncheckpointInterval: set checkpoint interval (>= 1) or disable checkpoint (-1). E.g. 10 means that the cache will get checkpointed every 10 iterations. Note: this setting will be ignored if the checkpoint directory is not set in the SparkContext. (default: 10)\\nfeatureSubsetStrategy: The number of features to consider for splits at each tree node. Supported options: 'auto' (choose automatically for task: If numTrees == 1, set to 'all'. If numTrees > 1 (forest), set to 'sqrt' for classification and to 'onethird' for regression), 'all' (use all features), 'onethird' (use 1/3 of the features), 'sqrt' (use sqrt(number of features)), 'log2' (use log2(number of features)), 'n' (when n is in the range (0, 1.0], use n * number of features. When n is in the range (1, number of features), use n features). default = 'auto' (default: all)\\nfeaturesCol: features column name. (default: features, current: features)\\nimpurity: Criterion used for information gain calculation (case-insensitive). Supported options: variance (default: variance)\\nlabelCol: label column name. (default: label)\\nleafCol: Leaf indices column name. Predicted leaf index of each instance in each tree by preorder. (default: )\\nlossType: Loss function which GBT tries to minimize (case-insensitive). Supported options: logistic (default: logistic)\\nmaxBins: Max number of bins for discretizing continuous features.  Must be >=2 and >= number of categories for any categorical feature. (default: 32)\\nmaxDepth: Maximum depth of the tree. (>= 0) E.g., depth 0 means 1 leaf node; depth 1 means 1 internal node + 2 leaf nodes. Must be in range [0, 30]. (default: 5, current: 2)\\nmaxIter: max number of iterations (>= 0). (default: 20, current: 3)\\nmaxMemoryInMB: Maximum memory in MB allocated to histogram aggregation. If too small, then 1 node will be split per iteration, and its aggregates may exceed this size. (default: 256)\\nminInfoGain: Minimum information gain for a split to be considered at a tree node. (default: 0.0)\\nminInstancesPerNode: Minimum number of instances each child must have after split. If a split causes the left or right child to have fewer than minInstancesPerNode, the split will be discarded as invalid. Should be >= 1. (default: 1)\\nminWeightFractionPerNode: Minimum fraction of the weighted sample count that each child must have after split. If a split causes the fraction of the total weight in the left or right child to be less than minWeightFractionPerNode, the split will be discarded as invalid. Should be in interval [0.0, 0.5). (default: 0.0)\\npredictionCol: prediction column name. (default: prediction)\\nprobabilityCol: Column name for predicted class conditional probabilities. Note: Not all models output well-calibrated probability estimates! These probabilities should be treated as confidences, not precise probabilities. (default: probability)\\nrawPredictionCol: raw prediction (a.k.a. confidence) column name. (default: rawPrediction)\\nseed: random seed. (default: <hash GBTClassificationModel>, current: 42)\\nstepSize: Step size (a.k.a. learning rate) in interval (0, 1] for shrinking the contribution of each estimator. (default: 0.1)\\nsubsamplingRate: Fraction of the training data used for learning each decision tree, in range (0, 1]. (default: 1.0)\\nthresholds: Thresholds in multi-class classification to adjust the probability of predicting each class. Array must have length equal to the number of classes, with values > 0, excepting that at most one value may be 0. The class with largest value p/t is predicted, where p is the original probability of that class and t is the class's threshold. (undefined)\\nvalidationIndicatorCol: name of the column that indicates whether each row is for training or for validation. False indicates training; true indicates validation. (undefined)\\nvalidationTol: Threshold for stopping early when fit with validation is used. If the error rate on the validation input changes by less than the validationTol, then learning will stop early (before `maxIter`). This parameter is ignored when fit without validation is used. (default: 0.01)\\nweightCol: weight column name. If this is not set or empty, we treat all instance weights as 1.0. (undefined)\""
@@ -787,6 +831,10 @@
    "numFeatures": [
     "ok",
     "2"
+   ],
+   "numTrees": [
+    "AttributeError",
+    "'GBTClassificationModel' object has no attribute 'numTrees'"
    ],
    "predict": [
     "ok",
@@ -1177,6 +1225,14 @@
     "ok",
     "True"
    ],
+   "isinstance_estimator": [
+    "ok",
+    "True"
+   ],
+   "isinstance_params": [
+    "ok",
+    "True"
+   ],
    "orig_impurity": [
     "ok",
     "'variance'"
@@ -1426,6 +1482,22 @@
     "True"
    ],
    "has_summary": [
+    "ok",
+    "True"
+   ],
+   "isinstance_estimator_is_not_model": [
+    "ok",
+    "False"
+   ],
+   "isinstance_model": [
+    "ok",
+    "True"
+   ],
+   "isinstance_params": [
+    "ok",
+    "True"
+   ],
+   "isinstance_transformer": [
     "ok",
     "True"
    ],
@@ -2333,6 +2405,14 @@
     "False"
    ],
    "isSet_maxDepth": [
+    "ok",
+    "True"
+   ],
+   "isinstance_estimator": [
+    "ok",
+    "True"
+   ],
+   "isinstance_params": [
     "ok",
     "True"
    ],

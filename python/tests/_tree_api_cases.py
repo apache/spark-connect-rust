@@ -94,6 +94,11 @@ def params_api_cases(name):
     rec("setThresholds", lambda: est.setThresholds([0.3, 0.7]).getThresholds())
     rec("setParams_chain", lambda: est.setParams(featuresCol="i").getFeaturesCol())
     rec("setter_chain", lambda: est.setFeaturesCol("j").getFeaturesCol())
+    from pyspark.ml.base import Estimator
+    from pyspark.ml.param import Params
+
+    rec("isinstance_estimator", lambda: isinstance(est, Estimator))
+    rec("isinstance_params", lambda: isinstance(est, Params))
     return rec.out
 
 
@@ -147,6 +152,14 @@ def _model_cases(rec, est, model, df):
     rec("has_summary", lambda: hasattr(model, "summary"))
     rec("has_hasSummary", lambda: hasattr(model, "hasSummary"))
     rec("supportedImpurities", lambda: model.supportedImpurities)
+    # The native classes are instances of PySpark's ML base classes, as the vendored ones are.
+    from pyspark.ml.base import Model, Transformer
+    from pyspark.ml.param import Params
+
+    rec("isinstance_model", lambda: isinstance(model, Model))
+    rec("isinstance_transformer", lambda: isinstance(model, Transformer))
+    rec("isinstance_params", lambda: isinstance(model, Params))
+    rec("isinstance_estimator_is_not_model", lambda: isinstance(est, Model))
 
 
 def _summary_cases(rec, model, summary, df, binary, tag=""):
@@ -223,10 +236,10 @@ def live_cases(name, spark, base):
     if name == "DecisionTree":
         rec("depth", lambda: model.depth)
         rec("numNodes", lambda: model.numNodes)
+        rec("summary_absent", lambda: model.summary)
     else:
         rec("getNumTrees", lambda: model.getNumTrees)
-        if name == "RandomForest":
-            rec("numTrees", lambda: model.numTrees)
+        rec("numTrees", lambda: model.numTrees)
         rec("treeWeights", lambda: model.treeWeights)
         rec("totalNumNodes", lambda: model.totalNumNodes)
         rec("trees_count", lambda: len(model.trees))
