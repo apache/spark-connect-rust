@@ -383,8 +383,9 @@ param set, as over Spark Connect, where the `clear` of `pyspark.ml` does nothing
 disagreement raises the getters' error.
 The model has the typed members of `LinearSVCModel` above, plus `coefficient_matrix()` and
 `intercept_vector()`; `coefficients()` and `intercept()` raise the server's error of a multinomial
-model, as PySpark does. The model's `summary()` is binary for at most two classes, a choice made
-at the fit, and `evaluate` makes it again on its dataset. `has_summary()` is client side. The
+model, as PySpark does. The model's `summary()` is binary for at most two classes, of the
+`numClasses` that it fetches when called (PySpark fetches it at the fit), and `evaluate` makes
+the same choice on its dataset. `has_summary()` is client side. The
 Rust API differs from `pyspark.ml` as the LinearSVC section says.
 
 ## Native RandomForestRegressor

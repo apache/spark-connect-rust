@@ -324,6 +324,10 @@ fn fit_logistic(
     *estimator.params_mut() = Params::from_proto(&sent.params.unwrap());
     let train = session.range(1).unwrap();
     let model = estimator.fit(&train).unwrap();
+    // PySpark's fit fetches numClasses for the class of its training summary, which the Rust
+    // model fetches when `summary()` is called: the fit and its first summary send the commands
+    // of the golden fit.
+    model.summary().unwrap();
     assert_commands(server, fit_entry, "fit");
     model
 }
@@ -367,6 +371,8 @@ fn check_logistic_model(
     // The summary of a fit: a Binary or a multiclass summary, as its numClasses decides.
     let summary = &entry["members"]["summary"];
     let fitted = model.summary().unwrap();
+    // That summary fetched numClasses again, which PySpark's `summary` (made at the fit) does not.
+    server.take_requests();
     match (&fitted, class_of(&summary["value"])) {
         (LogisticRegressionModelSummary::Binary(_), "BinaryLogisticRegressionTrainingSummary") => {}
         (LogisticRegressionModelSummary::Multiclass(_), "LogisticRegressionTrainingSummary") => {}

@@ -1930,7 +1930,6 @@ impl LogisticRegression {
             params: self.params.clone(),
             cached,
             summary: None,
-            binary_summary: false,
         })
     }
 }
@@ -1977,8 +1976,6 @@ pub struct LogisticRegressionModel {
     /// The target of the training summary, which a fit sets (`_summary`); None of a model that the
     /// server returns without a fit, such as a loaded one.
     summary: Option<MlTarget>,
-    /// Whether the training summary is the binary one, as `numClasses <= 2` at the fit chose it.
-    binary_summary: bool,
 }
 
 impl LogisticRegressionModel {}

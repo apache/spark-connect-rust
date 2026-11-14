@@ -4,8 +4,9 @@
 //!
 //! A model that a fit returns holds the target of its training summary (`_summary`), so that
 //! `has_summary` is client side. Its summary is the binary one when `numClasses` is at most 2, as
-//! PySpark chooses it at the fit (`_summaryCls`). The threshold getters are the Params logic of the
-//! estimator, which this file does not repeat.
+//! PySpark's `_summaryCls` chooses it. PySpark fetches `numClasses` at the fit; `summary()` fetches
+//! it when called. The threshold getters are the Params logic of the estimator, which this file
+//! does not repeat.
 
 use crate::dataframe::DataFrame;
 use crate::ml::tree_api::{as_f64, as_string, as_vector, fetch_value};
@@ -439,14 +440,12 @@ impl LogisticRegression {
         self.ensure_operator();
         let info = crate::ml::fit_via_command(&self.operator, &self.params, df)?;
         let mut model = self.model_from_info(info, &df.session)?;
-        let binary = model.num_classes()? <= 2;
         model.summary = Some(
             model
                 .model_target()?
                 .child("summary")
                 .with_summary_dataset(df),
         );
-        model.binary_summary = binary;
         Ok(model)
     }
 
@@ -485,7 +484,6 @@ impl LogisticRegressionModel {
             params,
             cached: ml_ref,
             summary: None,
-            binary_summary: false,
         }
     }
 
@@ -539,12 +537,13 @@ impl LogisticRegressionModel {
     }
 
     /// The training summary of the model (`summary`): binary when the model has at most two
-    /// classes. An error when the model has no training summary.
+    /// classes, of the `numClasses` that it fetches (PySpark's fit fetches it up front). An error
+    /// when the model has no training summary.
     pub fn summary(&self) -> Result<LogisticRegressionModelSummary> {
         let target = self.summary.clone().ok_or_else(|| {
             SparkError::value_msg("No training summary available for this LogisticRegressionModel")
         })?;
-        Ok(if self.binary_summary {
+        Ok(if self.num_classes()? <= 2 {
             LogisticRegressionModelSummary::Binary(
                 BinaryLogisticRegressionTrainingSummary::from_target(target),
             )
