@@ -177,12 +177,17 @@ The parity job discovers every `test_*.py` under `<spark>/python` whose path con
 `scripts/run_official_tests.py` names in `DROPIN_LOCAL_CLUSTER_ONLY`. The local-cluster phase
 names its four modules in `--only`. Outside the official-suite selection, the hand-named lists
 are `FLAKY_FILES` (the files that get retries) and `SLOW_FILE_TIMEOUTS` (per-file timeouts) in
-`scripts/run_official_tests.py`, and the e2e files that the `connect-dropin` and `connect-e2e` jobs
-of `build_python_connect.yml` run by name. A Rust live test returns early without `SPARK_REMOTE`,
-so the first step of `connect-e2e` fails when no workflow names a
-`crates/spark-connect/tests/e2e_*.rs` in a `--test`. The ML live tests of `connect-e2e` are also in
-the live pass of `coverage.yml`'s Rust coverage report, which has to be kept in sync by hand. See
-[official-tests.md](official-tests.md) for the selection, skip and retry rules.
+`scripts/run_official_tests.py`. The Python live-server files are named in the "Drop-in
+live-server tests" step of the `connect-parity` job of `build_python_connect.yml`, which runs the
+`tests/test_*_e2e.py` files of the drop-in and ML tests with `SPARK_REMOTE` set. The
+`connect-dropin` job names no e2e file. The Rust live tests are named in the `--test` lists of the
+`connect-e2e` job. A Rust live test returns early without `SPARK_REMOTE`, so the guard step at the
+start of `connect-e2e` fails when a `crates/spark-connect/tests/e2e_*.rs` file is named by no
+workflow's `--test` list. That check is a name match only. The ML live tests that `connect-e2e`
+runs are also in the `--test` list of the live pass of `coverage.yml`'s Rust coverage report,
+which has to be kept in sync by hand. The two lists are not the same otherwise: each also has
+targets that the other does not run. See [official-tests.md](official-tests.md) for the
+selection, skip and retry rules.
 
 ### Handling test failures
 
@@ -233,15 +238,15 @@ This workflow runs on pushes and pull requests targeting `master` and `branch-*`
 one job does three things:
 
 - **Rust coverage**: `cargo llvm-cov` over the unit and golden tests of
-  `apache-spark-connect` and `apache-spark-connect-core`, plus nine behavioral e2e test
-  files (`e2e_functions`, `e2e_columns`, `e2e_dataframe`, `e2e_coverage`, `e2e_integration`,
-  `e2e_streaming`, `e2e_new_methods`, `e2e_ops_breadth`, `e2e_session_catalog`) against a live
-  Connect server, merged into one report.
-- **Offline Python suite**: builds the extension and runs
-  `python/tests/test_dropin_offline.py`, `test_arrow_handoff.py` and `test_ml_offline.py`
-  under `coverage.py`. No other workflow runs these files, so this step is their gate: a
-  failing test fails the job. `-rs` prints every skipped test with its reason. The scope
-  of the Python number is the hand-written shim, as `python/.coveragerc` defines it.
+  `apache-spark-connect` and `apache-spark-connect-core`, plus the behavioral e2e test targets
+  of the live pass (the `--test` list of its "Generate Rust coverage report" step: the non-ML
+  `e2e_*` files, such as `e2e_functions` and `e2e_streaming`, and the `e2e_*` ML live tests, such
+  as `e2e_kmeans` and `e2e_random_forest`) against a live Connect server, merged into one report.
+- **Offline Python suite**: builds the extension and runs the offline test files that its step
+  names under `coverage.py`: `python/tests/test_dropin_offline.py`, `test_arrow_handoff.py`, and
+  the `*_offline.py` files of the ML suites. No other workflow runs these files, so this step is
+  their gate: a failing test fails the job. `-rs` prints every skipped test with its reason. The
+  scope of the Python number is the hand-written shim, as `python/.coveragerc` defines it.
 - **Coverage floors**: the last step fails the job when a number is below its floor,
   `RUST_COVERAGE_FLOOR` (Rust line coverage) or `PYTHON_COVERAGE_FLOOR` (Python line and
   branch coverage), both set in the `env` block of the workflow. The step runs after the
