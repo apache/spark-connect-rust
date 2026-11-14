@@ -3,10 +3,10 @@
 
 import base64
 import inspect
-from _statistics import FIXTURE, REFERENCE, api, helper, summary
 
 import pytest
 from _mock_connect_server import mock_connect_session
+from _statistics_cases import FIXTURE, REFERENCE, api, helper, summary
 from pyspark import _pyspark
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F

@@ -3,10 +3,10 @@
 
 import gc
 import os
-from _statistics import FIXTURE, REFERENCE, api, assert_frame, dataset, helper, summary
 
 import numpy as np
 import pytest
+from _statistics_cases import FIXTURE, REFERENCE, api, assert_frame, dataset, helper, summary
 from pyspark.ml.linalg import DenseMatrix, DenseVector, Vectors
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
