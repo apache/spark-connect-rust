@@ -238,17 +238,18 @@ impl PyALS {
         slf: &Bound<'_, Self>,
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<PyALSModel> {
-        check_fit_params(params)?;
-        let input = dataset_of(dataset, "fit")?;
-        let mut estimator = snapshot(slf)?;
-        let session = input.spark_session();
-        let inner = interruptible(slf.py(), &session, || {
-            estimator.fit(&input).map_err(Box::new)
-        })?;
-        Ok(PyALSModel {
-            inner,
-            unsendable: Vec::new(),
+    ) -> PyResult<Fitted<PyALSModel>> {
+        fit_with(slf, dataset, params, || -> PyResult<PyALSModel> {
+            let input = dataset_of(dataset, "fit")?;
+            let mut estimator = snapshot(slf)?;
+            let session = input.spark_session();
+            let inner = interruptible(slf.py(), &session, || {
+                estimator.fit(&input).map_err(Box::new)
+            })?;
+            Ok(PyALSModel {
+                inner,
+                unsendable: Vec::new(),
+            })
         })
     }
 }

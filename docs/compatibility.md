@@ -277,10 +277,11 @@ PySpark's `_set` does. As PySpark's, the `setParams` of `LogisticRegression` the
 `CrossValidator`, which takes `numFolds`, `parallelism` and `seed`, with a default of `None` for
 the first two. The `params` argument of a fit, transform or
 evaluate, which `pyspark.ml` takes as a param map, is accepted: `None` and an empty dict leave the
-params as they are. The native classes have no Param objects to key a map by, so a non-empty map,
-and a list or tuple of maps to a fit (which `pyspark.ml` fits as one model per map), raise a
-`TypeError` that says the native classes take no param map. Any other value raises the `TypeError`
-that `pyspark.ml` raises for it. The `params` argument is checked first, before the dataset, as
+params as they are. The native classes have no Param objects to key a map by, so a non-empty
+map raises a `TypeError` that says the native classes take no param map. A list or tuple of maps to
+a fit is fitted as `pyspark.ml` fits it: one model per map, in order, returned as a list,
+so that `[]` fits nothing and does not read the dataset. Any other value raises the `TypeError` that
+`pyspark.ml` raises for it. The `params` argument is checked first, before the dataset, as
 `pyspark.ml` checks it.
 
 Native `fit`, `transform` and `evaluate` require a Spark DataFrame, matching the dataset

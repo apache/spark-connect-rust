@@ -841,7 +841,7 @@ def test_ml_connect_fpm_and_als_set_params_and_params_argument_as_pyspark(ml_moc
     ]
     df = spark.range(1)
     for estimator in [FPGrowth(), ALS()]:
-        for value in [{"minSupport": 0.1}, [{}], "x"]:
+        for value in [{"minSupport": 0.1}, "x"]:
             sent = _requests_but_deletes(service)
             with pytest.raises(TypeError):
                 estimator.fit(df, value)
@@ -962,9 +962,10 @@ def test_ml_connect_params_argument_of_fit_transform_and_evaluate_as_pyspark(ml_
     # As PySpark's Estimator.fit, Transformer.transform and Evaluator.evaluate, whose params
     # argument is a param map: None and an empty dict leave the params as they are, so the call
     # sends what it sends without the argument. A non-empty map raises TypeError here, as the
-    # native classes take no param map (and a list or tuple to a fit of pyspark.ml, which PySpark
-    # fits as one model per map). Any other value raises the TypeError that PySpark raises for it,
-    # before anything is sent. Every class follows pyspark.ml, as the native classes do.
+    # native classes take no param map. A list or tuple of maps is fitted one model per map, as
+    # pyspark.ml fits it (see test_ml_connect_fit_of_a_list_of_param_maps_as_pyspark). Any other
+    # value raises the TypeError that PySpark raises for it, before anything is sent. Every class
+    # follows pyspark.ml, as the native classes do.
     import pyspark.ml.connect as connect
     from pyspark.errors import PySparkNotImplementedError
 
@@ -1013,8 +1014,7 @@ def test_ml_connect_params_argument_of_fit_transform_and_evaluate_as_pyspark(ml_
         assert fitted(estimator, None) == base, type(estimator)
         assert fitted(estimator, {}) == base, type(estimator)
         refused(lambda: estimator.fit(df, {"smoothing": 2.0}), _NO_PARAM_MAP)
-        for value in [[], [{}], ()]:
-            refused(lambda: estimator.fit(df, value), _NO_PARAM_MAP)
+        refused(lambda: estimator.fit(df, [{"smoothing": 2.0}]), _NO_PARAM_MAP)
         for value in ["x", 3]:
             refused(
                 lambda: estimator.fit(df, value),
@@ -1026,8 +1026,7 @@ def test_ml_connect_params_argument_of_fit_transform_and_evaluate_as_pyspark(ml_
     assert fitted(logistic, None) == base
     assert fitted(logistic, {}) == base
     refused(lambda: logistic.fit(df, {"maxIter": 2}), _NO_PARAM_MAP)
-    for value in [[{}], ()]:
-        refused(lambda: logistic.fit(df, value), _NO_PARAM_MAP)
+    refused(lambda: logistic.fit(df, [{"maxIter": 2}]), _NO_PARAM_MAP)
     refused(lambda: logistic.fit(df, "x"), fit_message.format(str))
     assert fitted(logistic, None) == base
 
@@ -1039,7 +1038,11 @@ def test_ml_connect_params_argument_of_fit_transform_and_evaluate_as_pyspark(ml_
                 estimator.fit(df, *params)
         refused(lambda: estimator.fit(df, {"stages": []}), _NO_PARAM_MAP)
         refused(lambda: estimator.fit(df, "x"), fit_message.format(str))
-        refused(lambda: estimator.fit(df, [{}]), _NO_PARAM_MAP)
+        # Each map of a list is fitted as the map alone is, so [{}] raises the same error.
+        for params in [[{}], [{}, {}]]:
+            with pytest.raises(PySparkNotImplementedError):
+                estimator.fit(df, params)
+        assert estimator.fit(df, []) == []
 
     # The check of the params is before the dataset, as in PySpark's fit.
     with pytest.raises(TypeError) as error:
@@ -1068,6 +1071,89 @@ def test_ml_connect_params_argument_of_fit_transform_and_evaluate_as_pyspark(ml_
     refused(lambda: evaluator.evaluate(df, {"labelCol": "y"}), _NO_PARAM_MAP)
     for value in [[], "x"]:
         refused(lambda: evaluator.evaluate(df, value), map_message.format(type(value)))
+
+
+def test_ml_connect_fit_of_a_list_of_param_maps_as_pyspark(ml_mock):
+    # As pyspark.ml's Estimator.fit: a list or tuple of param maps fits the estimator once per map,
+    # in order, and returns the list of the models. An empty list or tuple fits nothing, and does
+    # not read the dataset. An empty map fits as fit(df) does, and a non-empty map raises the
+    # TypeError of the native classes. A value that is not a map raises PySpark's TypeError, after
+    # the fits of the maps before it. A nested list is fitted as the list is.
+    import pandas as pd
+    import pyspark.ml.connect as connect
+    from pyspark.ml.connect import FPGrowth
+    from pyspark.ml.connect.recommendation import ALS
+
+    spark, service = ml_mock
+    df = spark.range(1)
+    fit_message = "Params must be either a param map or a list/tuple of param maps, but got {}."
+
+    def fitted(estimator, value):
+        # The result of fit(df, value), and the params of the fit requests that it sent, in order.
+        sent = len(service.execute_requests)
+        service.execute_payload = _operator_info("model-list")
+        service.query_payload = _label_query_result(estimator)
+        try:
+            models = estimator.fit(df, value)
+        finally:
+            service.query_payload = None
+        return models, [c.ml_command.fit.params for c in _commands_but_deletes(service, sent)]
+
+    def refused(call, message):
+        sent = _requests_but_deletes(service)
+        with pytest.raises(TypeError) as error:
+            call()
+        assert str(error.value) == message
+        assert _requests_but_deletes(service) == sent
+
+    classifier = connect.LinearSVC()
+    for estimator in [
+        connect.NaiveBayes(),
+        connect.KMeans(),
+        connect.OneVsRest(classifier=classifier),
+        connect.LogisticRegression(),
+        ALS(),
+        FPGrowth(),
+    ]:
+        # One fit sends one command, or one per class of a OneVsRest.
+        _, single = fitted(estimator, None)
+        assert single, type(estimator)
+        for value in [[], ()]:
+            sent = _requests_but_deletes(service)
+            assert estimator.fit(df, value) == []
+            assert _requests_but_deletes(service) == sent
+
+        models, params = fitted(estimator, [{}])
+        assert len(models) == 1 and params == single, type(estimator)
+        models, params = fitted(estimator, ({}, {}))
+        assert len(models) == 2 and params == single * 2, type(estimator)
+        models, params = fitted(estimator, [[{}], ({},)])
+        assert len(models) == 2 and params == single * 2, type(estimator)
+        assert all(isinstance(model, list) and len(model) == 1 for model in models)
+
+        refused(lambda: estimator.fit(df, [{"x": 1}]), _NO_PARAM_MAP)
+        refused(lambda: estimator.fit(df, [1]), fit_message.format(int))
+        refused(lambda: estimator.fit(df, [[1]]), fit_message.format(int))
+        # The fit of the first map is sent before the second element raises.
+        sent = len(service.execute_requests)
+        service.execute_payload = _operator_info("model-list")
+        service.query_payload = _label_query_result(estimator)
+        with pytest.raises(TypeError) as error:
+            estimator.fit(df, [{}, 1])
+        service.query_payload = None
+        assert str(error.value) == fit_message.format(int)
+        sent_params = [c.ml_command.fit.params for c in _commands_but_deletes(service, sent)]
+        assert sent_params == single
+
+        # The dataset of an empty list is not read, so a pandas DataFrame is no error for it.
+        pdf = pd.DataFrame({"x": [1.0]})
+        sent = _requests_but_deletes(service)
+        assert estimator.fit(pdf, []) == []
+        assert estimator.fit(pdf, ()) == []
+        assert _requests_but_deletes(service) == sent
+        # A map reads the dataset, which must be a Spark DataFrame, as fit(pdf) reads it.
+        with pytest.raises(TypeError):
+            estimator.fit(pdf, [{}])
 
 
 def test_ml_pipeline_and_cross_validator_fit_is_not_implemented(ml_mock):

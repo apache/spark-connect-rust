@@ -238,6 +238,20 @@ def test_models_whose_summary_keeps_their_transform_are_released_as_pyspark(sess
     assert released(ref_id)
 
 
+def test_ml_connect_fit_of_two_param_maps_returns_two_models_as_pyspark(session):
+    # As pyspark.ml's Estimator.fit: a list of two param maps fits the estimator once per map, and
+    # returns the two models in a list, each of which transforms the dataset.
+    LogisticRegression = native_class(
+        "pyspark.ml.connect", "LogisticRegression", "pyspark.ml.classification"
+    )
+
+    df = _labeled(session)
+    models = LogisticRegression(maxIter=5).fit(df, [{}, {}])
+    assert isinstance(models, list) and len(models) == 2
+    for model in models:
+        assert model.transform(df).count() == 8
+
+
 def _native_estimators():
     # Every native pyspark.ml.connect estimator, with the class of the model that the server
     # caches for its fit, and data that it fits.

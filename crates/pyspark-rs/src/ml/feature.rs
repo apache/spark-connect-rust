@@ -24,19 +24,17 @@ where
         .to_pyerr()?;
     Ok(PyDataFrame::new(output))
 }
-/// The fit of a feature stage, after the check of its `params` argument (see
-/// [`check_fit_params`]).
+/// The fit of a feature stage, with the `params` argument of its fit (see [`fit_with`]).
 fn fit_feature<T>(
     slf: &Bound<'_, T>,
     dataset: &Bound<'_, PyAny>,
     params: Option<&Bound<'_, PyAny>>,
-) -> PyResult<PyMLModel>
+) -> PyResult<Fitted<PyMLModel>>
 where
     T: Native + PyClass,
     T::Core: Estimator,
 {
-    check_fit_params(params)?;
-    fit_native(slf, dataset, None)
+    fit_with(slf, dataset, params, || fit_native(slf, dataset, None))
 }
 
 // inspect cannot parse a textual NaN default; construct a Signature with the real float. A method's
@@ -177,7 +175,7 @@ feature_wrapper!(PyBinarizer, Binarizer, "Binarizer", "{\"threshold\": 0.0, \"in
         (set_thresholds, "setThresholds", "thresholds", FloatList),
     ]);
 
-feature_wrapper!(PyBucketedRandomProjectionLSH, BucketedRandomProjectionLSH, "BucketedRandomProjectionLSH", "{\"inputCol\": null, \"outputCol\": null, \"seed\": null, \"numHashTables\": 1, \"bucketLength\": null}", fit, fit_feature, PyMLModel,
+feature_wrapper!(PyBucketedRandomProjectionLSH, BucketedRandomProjectionLSH, "BucketedRandomProjectionLSH", "{\"inputCol\": null, \"outputCol\": null, \"seed\": null, \"numHashTables\": 1, \"bucketLength\": null}", fit, fit_feature, Fitted<PyMLModel>,
     [("inputCol", Str), ("outputCol", Str), ("seed", Int), ("numHashTables", Int), ("bucketLength", Float)],
     [
         (set_bucket_length, "setBucketLength", "bucketLength", Float),
@@ -199,7 +197,7 @@ feature_wrapper!(PyBucketizer, Bucketizer, "Bucketizer", "{\"splits\": null, \"i
         (set_splits_array, "setSplitsArray", "splitsArray", FloatListList),
     ]);
 
-feature_wrapper!(PyChiSqSelector, ChiSqSelector, "ChiSqSelector", "{\"numTopFeatures\": 50, \"featuresCol\": \"features\", \"outputCol\": null, \"labelCol\": \"label\", \"selectorType\": \"numTopFeatures\", \"percentile\": 0.1, \"fpr\": 0.05, \"fdr\": 0.05, \"fwe\": 0.05}", fit, fit_feature, PyMLModel,
+feature_wrapper!(PyChiSqSelector, ChiSqSelector, "ChiSqSelector", "{\"numTopFeatures\": 50, \"featuresCol\": \"features\", \"outputCol\": null, \"labelCol\": \"label\", \"selectorType\": \"numTopFeatures\", \"percentile\": 0.1, \"fpr\": 0.05, \"fdr\": 0.05, \"fwe\": 0.05}", fit, fit_feature, Fitted<PyMLModel>,
     [("numTopFeatures", Int), ("featuresCol", Str), ("outputCol", Str), ("labelCol", Str), ("selectorType", Str), ("percentile", Float), ("fpr", Float), ("fdr", Float), ("fwe", Float)],
     [
         (set_fdr, "setFdr", "fdr", Float),
@@ -213,7 +211,7 @@ feature_wrapper!(PyChiSqSelector, ChiSqSelector, "ChiSqSelector", "{\"numTopFeat
         (set_selector_type, "setSelectorType", "selectorType", Str),
     ]);
 
-feature_wrapper!(PyCountVectorizer, CountVectorizer, "CountVectorizer", "{\"minTF\": 1.0, \"minDF\": 1.0, \"maxDF\": 9223372036854775807, \"vocabSize\": 262144, \"binary\": false, \"inputCol\": null, \"outputCol\": null}", fit, fit_feature, PyMLModel,
+feature_wrapper!(PyCountVectorizer, CountVectorizer, "CountVectorizer", "{\"minTF\": 1.0, \"minDF\": 1.0, \"maxDF\": 9223372036854775807, \"vocabSize\": 262144, \"binary\": false, \"inputCol\": null, \"outputCol\": null}", fit, fit_feature, Fitted<PyMLModel>,
     [("minTF", Float), ("minDF", Float), ("maxDF", Float), ("vocabSize", Int), ("binary", Bool), ("inputCol", Str), ("outputCol", Str)],
     [
         (set_binary, "setBinary", "binary", Bool),
@@ -299,7 +297,7 @@ feature_wrapper!(
     "{\"minDocFreq\": 0, \"inputCol\": null, \"outputCol\": null}",
     fit,
     fit_feature,
-    PyMLModel,
+    Fitted<PyMLModel>,
     [("minDocFreq", Int), ("inputCol", Str), ("outputCol", Str)],
     [
         (set_input_col, "setInputCol", "inputCol", Str),
@@ -308,7 +306,7 @@ feature_wrapper!(
     ]
 );
 
-feature_wrapper!(PyImputer, Imputer, "Imputer", "{\"strategy\": \"mean\", \"missingValue\": {\"float\": \"nan\"}, \"inputCols\": null, \"outputCols\": null, \"inputCol\": null, \"outputCol\": null, \"relativeError\": 0.001}", fit, fit_feature, PyMLModel,
+feature_wrapper!(PyImputer, Imputer, "Imputer", "{\"strategy\": \"mean\", \"missingValue\": {\"float\": \"nan\"}, \"inputCols\": null, \"outputCols\": null, \"inputCol\": null, \"outputCol\": null, \"relativeError\": 0.001}", fit, fit_feature, Fitted<PyMLModel>,
     [("strategy", Str), ("missingValue", Float), ("inputCols", StrList), ("outputCols", StrList), ("inputCol", Str), ("outputCol", Str), ("relativeError", Float)],
     [
         (set_input_col, "setInputCol", "inputCol", Str),
@@ -358,7 +356,7 @@ feature_wrapper!(
     "{\"inputCol\": null, \"outputCol\": null}",
     fit,
     fit_feature,
-    PyMLModel,
+    Fitted<PyMLModel>,
     [("inputCol", Str), ("outputCol", Str)],
     [
         (set_input_col, "setInputCol", "inputCol", Str),
@@ -373,7 +371,7 @@ feature_wrapper!(
     "{\"inputCol\": null, \"outputCol\": null, \"seed\": null, \"numHashTables\": 1}",
     fit,
     fit_feature,
-    PyMLModel,
+    Fitted<PyMLModel>,
     [
         ("inputCol", Str),
         ("outputCol", Str),
@@ -400,7 +398,7 @@ feature_wrapper!(
     "{\"min\": 0.0, \"max\": 1.0, \"inputCol\": null, \"outputCol\": null}",
     fit,
     fit_feature,
-    PyMLModel,
+    Fitted<PyMLModel>,
     [
         ("min", Float),
         ("max", Float),
@@ -447,7 +445,7 @@ feature_wrapper!(
     ]
 );
 
-feature_wrapper!(PyOneHotEncoder, OneHotEncoder, "OneHotEncoder", "{\"inputCols\": null, \"outputCols\": null, \"handleInvalid\": \"error\", \"dropLast\": true, \"inputCol\": null, \"outputCol\": null}", fit, fit_feature, PyMLModel,
+feature_wrapper!(PyOneHotEncoder, OneHotEncoder, "OneHotEncoder", "{\"inputCols\": null, \"outputCols\": null, \"handleInvalid\": \"error\", \"dropLast\": true, \"inputCol\": null, \"outputCol\": null}", fit, fit_feature, Fitted<PyMLModel>,
     [("inputCols", StrList), ("outputCols", StrList), ("handleInvalid", Str), ("dropLast", Bool), ("inputCol", Str), ("outputCol", Str)],
     [
         (set_drop_last, "setDropLast", "dropLast", Bool),
@@ -465,7 +463,7 @@ feature_wrapper!(
     "{\"k\": null, \"inputCol\": null, \"outputCol\": null}",
     fit,
     fit_feature,
-    PyMLModel,
+    Fitted<PyMLModel>,
     [("k", Int), ("inputCol", Str), ("outputCol", Str)],
     [
         (set_input_col, "setInputCol", "inputCol", Str),
@@ -490,7 +488,7 @@ feature_wrapper!(
     ]
 );
 
-feature_wrapper!(PyQuantileDiscretizer, QuantileDiscretizer, "QuantileDiscretizer", "{\"numBuckets\": 2, \"inputCol\": null, \"outputCol\": null, \"relativeError\": 0.001, \"handleInvalid\": \"error\", \"numBucketsArray\": null, \"inputCols\": null, \"outputCols\": null}", fit, fit_feature, PyMLModel,
+feature_wrapper!(PyQuantileDiscretizer, QuantileDiscretizer, "QuantileDiscretizer", "{\"numBuckets\": 2, \"inputCol\": null, \"outputCol\": null, \"relativeError\": 0.001, \"handleInvalid\": \"error\", \"numBucketsArray\": null, \"inputCols\": null, \"outputCols\": null}", fit, fit_feature, Fitted<PyMLModel>,
     [("numBuckets", Int), ("inputCol", Str), ("outputCol", Str), ("relativeError", Float), ("handleInvalid", Str), ("numBucketsArray", IntList), ("inputCols", StrList), ("outputCols", StrList)],
     [
         (set_handle_invalid, "setHandleInvalid", "handleInvalid", Str),
@@ -503,7 +501,7 @@ feature_wrapper!(PyQuantileDiscretizer, QuantileDiscretizer, "QuantileDiscretize
         (set_relative_error, "setRelativeError", "relativeError", Float),
     ]);
 
-feature_wrapper!(PyRobustScaler, RobustScaler, "RobustScaler", "{\"lower\": 0.25, \"upper\": 0.75, \"withCentering\": false, \"withScaling\": true, \"inputCol\": null, \"outputCol\": null, \"relativeError\": 0.001}", fit, fit_feature, PyMLModel,
+feature_wrapper!(PyRobustScaler, RobustScaler, "RobustScaler", "{\"lower\": 0.25, \"upper\": 0.75, \"withCentering\": false, \"withScaling\": true, \"inputCol\": null, \"outputCol\": null, \"relativeError\": 0.001}", fit, fit_feature, Fitted<PyMLModel>,
     [("lower", Float), ("upper", Float), ("withCentering", Bool), ("withScaling", Bool), ("inputCol", Str), ("outputCol", Str), ("relativeError", Float)],
     [
         (set_input_col, "setInputCol", "inputCol", Str),
@@ -526,7 +524,7 @@ feature_wrapper!(PyRegexTokenizer, RegexTokenizer, "RegexTokenizer", "{\"minToke
         (set_to_lowercase, "setToLowercase", "toLowercase", Bool),
     ]);
 
-feature_wrapper!(PyRFormula, RFormula, "RFormula", "{\"formula\": null, \"featuresCol\": \"features\", \"labelCol\": \"label\", \"forceIndexLabel\": false, \"stringIndexerOrderType\": \"frequencyDesc\", \"handleInvalid\": \"error\"}", fit, fit_feature, PyMLModel,
+feature_wrapper!(PyRFormula, RFormula, "RFormula", "{\"formula\": null, \"featuresCol\": \"features\", \"labelCol\": \"label\", \"forceIndexLabel\": false, \"stringIndexerOrderType\": \"frequencyDesc\", \"handleInvalid\": \"error\"}", fit, fit_feature, Fitted<PyMLModel>,
     [("formula", Str), ("featuresCol", Str), ("labelCol", Str), ("forceIndexLabel", Bool), ("stringIndexerOrderType", Str), ("handleInvalid", Str)],
     [
         (set_features_col, "setFeaturesCol", "featuresCol", Str),
@@ -556,7 +554,7 @@ feature_wrapper!(
     "{\"withMean\": false, \"withStd\": true, \"inputCol\": null, \"outputCol\": null}",
     fit,
     fit_feature,
-    PyMLModel,
+    Fitted<PyMLModel>,
     [
         ("withMean", Bool),
         ("withStd", Bool),
@@ -583,7 +581,7 @@ feature_wrapper!(PyStopWordsRemover, StopWordsRemover, "StopWordsRemover", "{\"i
         (set_stop_words, "setStopWords", "stopWords", StrList),
     ]);
 
-feature_wrapper!(PyStringIndexer, StringIndexer, "StringIndexer", "{\"inputCol\": null, \"outputCol\": null, \"inputCols\": null, \"outputCols\": null, \"handleInvalid\": \"error\", \"stringOrderType\": \"frequencyDesc\"}", fit, fit_feature, PyMLModel,
+feature_wrapper!(PyStringIndexer, StringIndexer, "StringIndexer", "{\"inputCol\": null, \"outputCol\": null, \"inputCols\": null, \"outputCols\": null, \"handleInvalid\": \"error\", \"stringOrderType\": \"frequencyDesc\"}", fit, fit_feature, Fitted<PyMLModel>,
     [("inputCol", Str), ("outputCol", Str), ("inputCols", StrList), ("outputCols", StrList), ("handleInvalid", Str), ("stringOrderType", Str)],
     [
         (set_handle_invalid, "setHandleInvalid", "handleInvalid", Str),
@@ -594,7 +592,7 @@ feature_wrapper!(PyStringIndexer, StringIndexer, "StringIndexer", "{\"inputCol\"
         (set_string_order_type, "setStringOrderType", "stringOrderType", Str),
     ]);
 
-feature_wrapper!(PyTargetEncoder, TargetEncoder, "TargetEncoder", "{\"inputCols\": null, \"outputCols\": null, \"labelCol\": \"label\", \"handleInvalid\": \"error\", \"targetType\": \"binary\", \"smoothing\": 0.0, \"inputCol\": null, \"outputCol\": null}", fit, fit_feature, PyMLModel,
+feature_wrapper!(PyTargetEncoder, TargetEncoder, "TargetEncoder", "{\"inputCols\": null, \"outputCols\": null, \"labelCol\": \"label\", \"handleInvalid\": \"error\", \"targetType\": \"binary\", \"smoothing\": 0.0, \"inputCol\": null, \"outputCol\": null}", fit, fit_feature, Fitted<PyMLModel>,
     [("inputCols", StrList), ("outputCols", StrList), ("labelCol", Str), ("handleInvalid", Str), ("targetType", Str), ("smoothing", Float), ("inputCol", Str), ("outputCol", Str)],
     [
         (set_handle_invalid, "setHandleInvalid", "handleInvalid", Str),
@@ -622,7 +620,7 @@ feature_wrapper!(
     ]
 );
 
-feature_wrapper!(PyUnivariateFeatureSelector, UnivariateFeatureSelector, "UnivariateFeatureSelector", "{\"featuresCol\": \"features\", \"outputCol\": null, \"labelCol\": \"label\", \"selectionMode\": \"numTopFeatures\"}", fit, fit_feature, PyMLModel,
+feature_wrapper!(PyUnivariateFeatureSelector, UnivariateFeatureSelector, "UnivariateFeatureSelector", "{\"featuresCol\": \"features\", \"outputCol\": null, \"labelCol\": \"label\", \"selectionMode\": \"numTopFeatures\"}", fit, fit_feature, Fitted<PyMLModel>,
     [("featuresCol", Str), ("outputCol", Str), ("labelCol", Str), ("selectionMode", Str)],
     [
         (set_feature_type, "setFeatureType", "featureType", Str),
@@ -641,7 +639,7 @@ feature_wrapper!(
     "{\"featuresCol\": \"features\", \"outputCol\": null, \"varianceThreshold\": 0.0}",
     fit,
     fit_feature,
-    PyMLModel,
+    Fitted<PyMLModel>,
     [
         ("featuresCol", Str),
         ("outputCol", Str),
@@ -679,7 +677,7 @@ feature_wrapper!(
     ]
 );
 
-feature_wrapper!(PyVectorIndexer, VectorIndexer, "VectorIndexer", "{\"maxCategories\": 20, \"inputCol\": null, \"outputCol\": null, \"handleInvalid\": \"error\"}", fit, fit_feature, PyMLModel,
+feature_wrapper!(PyVectorIndexer, VectorIndexer, "VectorIndexer", "{\"maxCategories\": 20, \"inputCol\": null, \"outputCol\": null, \"handleInvalid\": \"error\"}", fit, fit_feature, Fitted<PyMLModel>,
     [("maxCategories", Int), ("inputCol", Str), ("outputCol", Str), ("handleInvalid", Str)],
     [
         (set_handle_invalid, "setHandleInvalid", "handleInvalid", Str),
@@ -726,7 +724,7 @@ feature_wrapper!(
     ]
 );
 
-feature_wrapper!(PyWord2Vec, Word2Vec, "Word2Vec", "{\"vectorSize\": 100, \"minCount\": 5, \"numPartitions\": 1, \"stepSize\": 0.025, \"maxIter\": 1, \"seed\": null, \"inputCol\": null, \"outputCol\": null, \"windowSize\": 5, \"maxSentenceLength\": 1000}", fit, fit_feature, PyMLModel,
+feature_wrapper!(PyWord2Vec, Word2Vec, "Word2Vec", "{\"vectorSize\": 100, \"minCount\": 5, \"numPartitions\": 1, \"stepSize\": 0.025, \"maxIter\": 1, \"seed\": null, \"inputCol\": null, \"outputCol\": null, \"windowSize\": 5, \"maxSentenceLength\": 1000}", fit, fit_feature, Fitted<PyMLModel>,
     [("vectorSize", Int), ("minCount", Int), ("numPartitions", Int), ("stepSize", Float), ("maxIter", Int), ("seed", Int), ("inputCol", Str), ("outputCol", Str), ("windowSize", Int), ("maxSentenceLength", Int)],
     [
         (set_input_col, "setInputCol", "inputCol", Str),

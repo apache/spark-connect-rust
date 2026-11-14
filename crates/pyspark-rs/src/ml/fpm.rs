@@ -105,17 +105,18 @@ impl PyFPGrowth {
         slf: &Bound<'_, Self>,
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<PyFPGrowthModel> {
-        check_fit_params(params)?;
-        let input = dataset_of(dataset, "fit")?;
-        let mut estimator = snapshot(slf)?;
-        let session = input.spark_session();
-        let model = interruptible(slf.py(), &session, || {
-            estimator.fit(&input).map_err(Box::new)
-        })?;
-        Ok(PyFPGrowthModel {
-            inner: model,
-            unsendable: Vec::new(),
+    ) -> PyResult<Fitted<PyFPGrowthModel>> {
+        fit_with(slf, dataset, params, || -> PyResult<PyFPGrowthModel> {
+            let input = dataset_of(dataset, "fit")?;
+            let mut estimator = snapshot(slf)?;
+            let session = input.spark_session();
+            let model = interruptible(slf.py(), &session, || {
+                estimator.fit(&input).map_err(Box::new)
+            })?;
+            Ok(PyFPGrowthModel {
+                inner: model,
+                unsendable: Vec::new(),
+            })
         })
     }
 }
