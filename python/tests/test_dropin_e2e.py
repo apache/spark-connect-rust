@@ -2049,6 +2049,55 @@ def test_window_specs_captured_by_foreach_batch_functions_run_as_pyspark(session
         session.sql(f"DROP TABLE IF EXISTS {table}").collect()
 
 
+def test_udfs_captured_by_foreach_batch_functions_run_as_pyspark(session, tmp_path):
+    # As PySpark's: a UDF, a pandas UDF, a registered UDF and a UDTF that a foreachBatch function
+    # captures unpickle as PySpark Connect's classes on the Python worker of the server, which
+    # calls each of them on the batch, and collects the UDTF.
+    import pandas as pd
+
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "input.txt").write_text("1\n2\n")
+    echoed = tmp_path / "echoed.txt"
+    plus_one = F.udf(lambda x: int(x) + 1, IntegerType())
+
+    @F.pandas_udf("long")
+    def times_two(s: pd.Series) -> pd.Series:
+        return s * 2
+
+    registered = session.udf.register(
+        "foreach_batch_captured_plus_one", lambda x: int(x) + 1, IntegerType())
+
+    @F.udtf(returnType="x int")
+    class Echo:
+        def eval(self, n):
+            yield (n,)
+
+    table = "foreach_batch_captured_udfs"
+
+    def func(batch, batch_id):
+        number = F.col("value").cast("long")
+        batch.select(
+            plus_one(number).alias("plus"),
+            times_two(number).alias("twice"),
+            registered(number).alias("registered"),
+        ).write.mode("append").saveAsTable(table)
+        echoed.write_text(repr(Echo(F.lit(3)).collect()))
+
+    try:
+        query = (
+            session.readStream.format("text").load(str(source))
+            .writeStream.foreachBatch(func).trigger(availableNow=True).start()
+        )
+        query.awaitTermination()
+        rows = session.table(table).collect()
+        assert sorted((row.plus, row.twice, row.registered) for row in rows) == [
+            (2, 2, 2), (3, 4, 3)]
+        assert echoed.read_text() == "[Row(x=3)]"
+    finally:
+        session.sql(f"DROP TABLE IF EXISTS {table}").collect()
+
+
 def test_table_arguments_are_those_of_pyspark_sql_table_arg(session):
     # As the PySpark client: DataFrame.asTable() is a TableArg of pyspark.sql.table_arg, and a
     # TableValuedFunctionArgument of pyspark.sql.tvf_argument.

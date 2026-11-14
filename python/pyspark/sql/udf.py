@@ -60,6 +60,12 @@ class UserDefinedFunction:
     to create this instance.
     """
 
+    # As PySpark Connect's: the class is that of pyspark.sql.connect.udf. A UDF that a function
+    # captures is pickled by reference to that name, which the Python worker of the server has
+    # as the Connect class, not as the classic class of pyspark.sql.udf, which needs a
+    # SparkContext to be called. The name of pyspark.sql.udf stays an alias of this class.
+    __module__ = "pyspark.sql.connect.udf"
+
     def __init__(
         self,
         func: Callable[..., Any],
@@ -68,6 +74,9 @@ class UserDefinedFunction:
         evalType: int = PythonEvalType.SQL_BATCHED_UDF,
         deterministic: bool = True,
     ):
+        # cloudpickle pickles this class by reference only when its module is imported.
+        import pyspark.sql.connect.udf  # noqa: F401
+
         # The checks of PySpark Connect's UserDefinedFunction.
         if not callable(func):
             raise PySparkTypeError(

@@ -227,7 +227,7 @@ jobs:
         env:
           SPARK_REMOTE: sc://localhost:15002
           PYTHONPATH: ${{ github.workspace }}/python
-        run: python -m pytest tests/test_arrow_e2e.py tests/test_dropin_e2e.py tests/test_ml_e2e.py tests/test_gbt_classifier_e2e.py tests/test_gbt_regressor_e2e.py tests/test_naive_bayes_e2e.py tests/test_bisecting_kmeans_e2e.py tests/test_gaussian_mixture_e2e.py tests/test_generalized_linear_regression_e2e.py tests/test_remaining_classifiers_e2e.py tests/test_remaining_regressors_e2e.py tests/test_remaining_clustering_e2e.py tests/test_ml_features_e2e.py tests/test_frequent_patterns_e2e.py tests/test_als_e2e.py -q
+        run: python -m pytest tests/test_arrow_e2e.py tests/test_dropin_e2e.py tests/test_ml_e2e.py tests/test_gbt_classifier_e2e.py tests/test_gbt_regressor_e2e.py tests/test_naive_bayes_e2e.py tests/test_bisecting_kmeans_e2e.py tests/test_gaussian_mixture_e2e.py tests/test_generalized_linear_regression_e2e.py tests/test_remaining_classifiers_e2e.py tests/test_remaining_regressors_e2e.py tests/test_remaining_clustering_e2e.py tests/test_ml_features_e2e.py tests/test_frequent_patterns_e2e.py tests/test_als_e2e.py tests/test_evaluators_e2e.py -q
 
       - name: Restart Connect server in local-cluster mode
         # Resource profiles and artifact distribution across executors can only be
@@ -467,6 +467,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check that a workflow runs every Rust e2e test
+        # A live test returns early without SPARK_REMOTE, so one that no workflow names in a
+        # `cargo test --test` list passes without running.
+        run: |
+          missing=0
+          for f in crates/spark-connect/tests/e2e_*.rs; do
+            name=$(basename "$f" .rs)
+            if ! grep -qE -- "--test ${name}([^A-Za-z0-9_]|$)" .github/workflows/*.yml; then
+              echo "::error file=$f::$name is in no workflow's cargo test --test list"
+              missing=1
+            fi
+          done
+          exit $missing
+
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
@@ -551,12 +565,14 @@ jobs:
           done
 
       - name: Rust behavioral e2e tests (against the live server)
+        # The ML live tests of this list are also in the SPARK_REMOTE pass of coverage.yml's Rust
+        # coverage report: keep the two lists in sync.
         env:
           SPARK_REMOTE: sc://localhost:15002
         run: |
           cargo test -p apache-spark-connect \
             --test e2e_functions --test e2e_columns --test e2e_dataframe \
-            --test e2e_coverage --test e2e_linear_svc --test e2e_linear_regression --test e2e_generalized_linear_regression --test e2e_remaining_classifiers --test e2e_remaining_regressors --test e2e_kmeans --test e2e_bisecting_kmeans --test e2e_gaussian_mixture --test e2e_decision_tree_regressor --test e2e_decision_tree_classifier --test e2e_gbt_regressor --test e2e_naive_bayes --test e2e_gbt_classifier --test e2e_random_forest --test e2e_random_forest_regressor --test e2e_integration \
+            --test e2e_coverage --test e2e_linear_svc --test e2e_linear_regression --test e2e_generalized_linear_regression --test e2e_remaining_classifiers --test e2e_remaining_regressors --test e2e_kmeans --test e2e_bisecting_kmeans --test e2e_gaussian_mixture --test e2e_remaining_clustering --test e2e_ml_features --test e2e_frequent_patterns --test e2e_als --test e2e_evaluators --test e2e_decision_tree_regressor --test e2e_decision_tree_classifier --test e2e_gbt_regressor --test e2e_naive_bayes --test e2e_gbt_classifier --test e2e_random_forest --test e2e_random_forest_regressor --test e2e_integration \
             --test arrow_map_input --test array_literal --test execute_plan_hook --test raw_relation \
             --test types_roundtrip \
             --test e2e_reattach_drop \
