@@ -568,13 +568,15 @@ def serve(connection):
                 context.abort(grpc.StatusCode.INVALID_ARGUMENT, "session release failed")
             return b""
 
-        def finish_listener_stream(self, epoch, session_id, queue):
+        def finish_listener_stream(self, epoch, session_id, queue, recorded):
             with self.listener_condition:
                 if epoch != self.listener_epoch:
                     return
                 if self.listener_queues.get(session_id) is queue:
                     self.listener_queues.pop(session_id)
-                self.listener_streams_finished += 1
+                # The stream of a forgotten session is answered, but not counted.
+                if recorded:
+                    self.listener_streams_finished += 1
                 self.listener_condition.notify_all()
 
         def wait_listener_calls(self, counter, count, timeout):
@@ -620,7 +622,9 @@ def serve(connection):
                     queue = Queue()
                     with self.listener_condition:
                         epoch = self.listener_epoch
-                        self.listener_subscriptions += 1
+                        # A registration of a forgotten session is answered, but not counted.
+                        if recorded:
+                            self.listener_subscriptions += 1
                         registration_failed = self.listener_register_failure
                         if not registration_failed:
                             self.listener_queues[session_id] = queue
@@ -663,15 +667,17 @@ def serve(connection):
                             yield (header + message_field(13, f"event-{sequence}")
                                    + message_field(16, message_field(1, payload)))
                         # The client returns at ResultComplete, before server-side EOF/finally.
-                        self.finish_listener_stream(epoch, session_id, queue)
+                        self.finish_listener_stream(epoch, session_id, queue, recorded)
                         counted = True
                         yield header + message_field(13, "finished") + message_field(14, b"")
                     finally:
                         if not counted:
-                            self.finish_listener_stream(epoch, session_id, queue)
+                            self.finish_listener_stream(epoch, session_id, queue, recorded)
                     return
                 with self.listener_condition:
-                    self.listener_removals += 1
+                    # A removal of a forgotten session is answered, but not counted.
+                    if recorded:
+                        self.listener_removals += 1
                     # Keep an old, gated removal from closing a queue created after reset.
                     queue = self.listener_queues.get(session_id)
                     gate = self.listener_remove_gate
