@@ -35,6 +35,11 @@ jobs:
   rust-fmt-clippy:
     name: rustfmt + clippy
     runs-on: ubuntu-latest
+    env:
+      # The toolchain that this job pins (see "Install Rust toolchain"). The cache key names
+      # it, so that a bump does not restore the artifacts of another toolchain. A bump also
+      # updates the version that docs/contributing.md and AGENTS.md give.
+      LINT_TOOLCHAIN: 1.100.0
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust toolchain (rustfmt + clippy)
@@ -44,8 +49,8 @@ jobs:
         # it on purpose. The build and test jobs stay on floating stable, which catches a
         # toolchain release that breaks the build on the day that it ships.
         run: |
-          rustup toolchain install 1.100.0 --profile minimal --component rustfmt,clippy
-          rustup default 1.100.0
+          rustup toolchain install "$LINT_TOOLCHAIN" --profile minimal --component rustfmt,clippy
+          rustup default "$LINT_TOOLCHAIN"
           # `--workspace` reaches `examples/wasm-udfs` (a path dependency of the `examples`
           # member), whose build script compiles its UDFs to WASM.
           rustup target add wasm32-unknown-unknown
@@ -56,8 +61,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-lint-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-lint-
+          key: ${{ runner.os }}-cargo-lint-${{ env.LINT_TOOLCHAIN }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-lint-${{ env.LINT_TOOLCHAIN }}-
       - name: Install system dependencies
         run: |
           sudo apt-get update && sudo apt-get install -y protobuf-compiler
@@ -74,7 +79,9 @@ jobs:
           cargo clippy --workspace --all-targets -- -D warnings
           cargo clippy -p apache-spark-connect --all-targets -- -D warnings
           cargo clippy -p apache-spark-connect --all-targets --features datafusion,polars -- -D warnings
-          # They share the cached target directory of the workspace, which has their dependencies.
+          # They have no committed Cargo.lock, so each run resolves their dependencies afresh, as
+          # the workflows that build them do. They share the workspace's cached target directory,
+          # which already has the artifacts of the dependencies that resolve to the same versions.
           for crate in examples/wasm-udfs examples/wasm-udf-inline tests/wasm-udf; do
             CARGO_TARGET_DIR="$PWD/target" \
               cargo clippy --manifest-path "$crate/Cargo.toml" --all-targets -- -D warnings
