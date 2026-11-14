@@ -41,7 +41,7 @@ exclude = [
 # The `examples/wasm-udfs`, `examples/wasm-udf-inline` and `tests/wasm-udf` crates
 # are excluded from the workspace entirely because they require the
 # `wasm32-unknown-unknown` target, which may not be installed on every machine
-# (so workspace commands do not require that target). Build them explicitly with
+# (so `cargo test --workspace` stays green without it). Build them explicitly with
 # `cargo build --manifest-path examples/wasm-udfs/Cargo.toml` (etc) in CI or when
 # the target is installed locally.
 # The experimental Rust server and JNI host are also opt-in. Build them with

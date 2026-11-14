@@ -24,6 +24,9 @@ license.workspace = true
 publish = false
 description = "Experimental Spark Connect server frontend for an embedded Spark JVM engine"
 
+[lints]
+workspace = true
+
 [dependencies]
 spark-connect-proto = { package = "apache-spark-connect-proto", path = "../spark-connect-proto" }
 arrow.workspace = true

@@ -27,6 +27,9 @@ description = "JNI host for the Spark Connect Rust server and the direct Spark J
 [lib]
 crate-type = ["cdylib"]
 
+[lints]
+workspace = true
+
 [dependencies]
 spark-connect-server = { path = ".." }
 futures.workspace = true
