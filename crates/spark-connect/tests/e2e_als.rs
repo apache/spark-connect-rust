@@ -6,7 +6,7 @@ mod common;
 use common::live_session;
 use serde_json::{json, Value as Json};
 use spark_connect::column::col;
-use spark_connect::ml::{Estimator, StringIndexer, Transformer, ALS};
+use spark_connect::ml::{StringIndexer, Transformer, ALS};
 use spark_connect::row::Value;
 use spark_connect::DataFrame;
 

@@ -5,7 +5,7 @@ mod common;
 mod statistics;
 use spark_connect::column::col;
 use spark_connect::ml::{
-    ChiSquareTest, Correlation, Estimator, KolmogorovSmirnovTest, StandardScaler, Summarizer,
+    ChiSquareTest, Correlation, KolmogorovSmirnovTest, StandardScaler, Summarizer, Transformer,
 };
 
 #[test]

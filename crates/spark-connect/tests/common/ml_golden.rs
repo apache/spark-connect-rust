@@ -1,19 +1,41 @@
 // SPDX-License-Identifier: Apache-2.0
 //! The ML goldens of scripts/ml_golden_common.py, for the live tests that compare the Rust client
-//! with them: the datasets of their specs, the values of the Rust client as the helper renders those
-//! of official PySpark, and their comparison. A test file includes it with
+//! with them: the datasets of their specs, the values of the Rust client as the helper renders
+//! those of official PySpark, and their comparison. A test file includes it with
 //! `#[path = "common/ml_golden.rs"] mod ml_golden;`.
+//!
+//! The same goldens replayed offline, with no Spark server: [`ReplayServer::start`] serves a
+//! loopback Spark Connect service that answers each ML command of the golden entries it is given
+//! with the entry's result (or error), in the order that the client sends them, and records the
+//! ML commands that the client sends. [`assert_commands`] then checks the recorded commands of a
+//! call against an entry's `commands`, after [`normalize_commands`] has numbered their object ids
+//! and uids per entry, as the golden does. An entry is an object `{"commands", "results",
+//! "error"?}`; an object without `commands` registers the entries among its values, so a model
+//! entry registers its members. The replay serves any area's golden of that format.
 #![allow(dead_code)] // every test binary compiles this module and uses only a part of it
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
+use std::convert::Infallible;
 use std::error::Error;
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 
+use base64::{engine::general_purpose::STANDARD, Engine};
+use futures::stream;
+use prost::Message;
 use serde_json::{json, Value as Json};
 use spark_connect::column::col;
 use spark_connect::expression::Expression;
 use spark_connect::ml::{MlMatrix, MlValue, MlVector, Params};
 use spark_connect::row::Value;
 use spark_connect::{Column, DataFrame, SparkSession};
+use spark_connect_core::bytes_codec::BytesCodec;
+use spark_connect_proto as proto;
+use tokio::net::TcpListener;
+use tonic::body::Body;
+use tonic::codegen::{http, BoxFuture, Service};
+use tonic::server::{NamedService, ServerStreamingService, UnaryService};
+use tonic::{Request, Response, Status};
 
 pub type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
@@ -170,11 +192,16 @@ pub fn normalized(mut v: Json) -> Json {
     v
 }
 
+/// Whether `actual` matches the golden's `expected`: numbers within a tolerance, arrays elementwise
+/// and objects by their keys. The server computes some values in single precision (the factors of
+/// ALS, the vectors and similarities of Word2Vec), whose last bits differ between the platforms of
+/// the capture and of the test, and which iterations accumulate: the tolerance is that of
+/// `e2e_als.rs`, which compares ALS of official PySpark across platforms.
 pub fn assert_matches(actual: &Json, expected: &Json, at: &str) {
     match (actual, expected) {
         (Json::Number(a), Json::Number(e)) => {
             let (a, e) = (a.as_f64().unwrap(), e.as_f64().unwrap());
-            assert!((a - e).abs() <= 1e-9 + 1e-9 * e.abs(), "{at}: {a} != {e}");
+            assert!((a - e).abs() <= 2e-5 + 2e-4 * e.abs(), "{at}: {a} != {e}");
         }
         (Json::Array(a), Json::Array(e)) => {
             assert_eq!(a.len(), e.len(), "{at}: {actual} != {expected}");
@@ -234,4 +261,477 @@ pub fn assert_params(loaded: &Params, saved: &Params, at: &str) {
             "{at}: param {name}"
         );
     }
+}
+
+// The offline replay of the goldens.
+
+/// The name of the Spark Connect service in the paths of its RPCs.
+const SERVICE: &str = "/spark.connect.SparkConnectService/";
+
+/// The reply of the replay to a golden command.
+#[derive(Clone)]
+enum Reply {
+    /// The golden result, as the server sends it.
+    Result(proto::MlCommandResult),
+    /// The golden error, by its message.
+    Error(String),
+    /// No result: the command completes with no result of its own.
+    Empty,
+}
+
+/// A golden command, normalized on its own, with its reply.
+struct Exchange {
+    command: proto::MlCommand,
+    reply: Reply,
+    /// Whether a request has been answered with it. A request takes the first unused match.
+    used: bool,
+}
+
+/// The golden exchanges of a replay, and the ML commands that the client has sent.
+#[derive(Default)]
+struct Replay {
+    exchanges: Vec<Exchange>,
+    /// The ML commands sent since they were last taken, as they were sent.
+    received: Vec<proto::MlCommand>,
+}
+
+type Shared = Arc<Mutex<Replay>>;
+
+/// A loopback Spark Connect service that replays golden entries. See the module doc.
+pub struct ReplayServer(Shared);
+
+impl ReplayServer {
+    /// Serves the golden entries `entries` on a loopback port, and returns the server with a
+    /// session of it. The session stays with the server's own thread for the rest of the test.
+    pub fn start(entries: &[&Json]) -> (Self, SparkSession) {
+        let mut replay = Replay::default();
+        for entry in entries {
+            register(&mut replay, entry);
+        }
+        let shared = Arc::new(Mutex::new(replay));
+        let service = ReplayService(shared.clone());
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async move {
+                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                sender.send(listener.local_addr().unwrap()).unwrap();
+                let incoming = stream::unfold(listener, |listener| async {
+                    Some((listener.accept().await.map(|(socket, _)| socket), listener))
+                });
+                tonic::transport::Server::builder()
+                    .add_service(service)
+                    .serve_with_incoming(incoming)
+                    .await
+                    .unwrap();
+            });
+        });
+        let address = receiver.recv().unwrap();
+        let session = SparkSession::builder()
+            .remote(&format!("sc://{address}"))
+            .get_or_create()
+            .unwrap();
+        (Self(shared), session)
+    }
+
+    /// The ML commands that the client sent since they were last taken, in order, as they were
+    /// sent. Taking them clears them. A delete of a released object is not recorded.
+    pub fn take_requests(&self) -> Vec<proto::MlCommand> {
+        std::mem::take(&mut self.0.lock().unwrap().received)
+    }
+}
+
+/// Asserts that the ML commands that `server` received since they were last taken are the
+/// `commands` of the golden `entry`, normalized per entry as the golden is (see
+/// [`normalize_commands`]). The commands are taken, so the next check sees only later ones.
+/// `at` labels a failure.
+pub fn assert_commands(server: &ReplayServer, entry: &Json, at: &str) {
+    let mut actual = server.take_requests();
+    let mut expected = golden_commands(entry);
+    normalize_commands(&mut actual);
+    normalize_commands(&mut expected);
+    if actual != expected {
+        panic!(
+            "{at}: the ML commands differ from the golden\n{}",
+            first_difference(&expected, &actual)
+        );
+    }
+}
+
+/// The `commands` of a golden entry, decoded as they were sent, in order.
+pub fn golden_commands(entry: &Json) -> Vec<proto::MlCommand> {
+    entry["commands"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a golden entry without commands: {entry}"))
+        .iter()
+        .map(decode_command)
+        .collect()
+}
+
+/// Normalizes the ML commands of one golden entry in place, as the golden normalizes them. The
+/// object ids and the uids are renumbered `<id0>`, `<id1>`, ... and `<uid0>`, ... in order of
+/// first appearance across `commands`, so a run's own ids and uids compare with the golden's
+/// whatever they are. A save path becomes `<path>`. The datasets of fits, evaluations and
+/// summaries, and the inputs of fetches, are cleared: the replay checks the operators, the
+/// methods and the params, not the data.
+pub fn normalize_commands(commands: &mut [proto::MlCommand]) {
+    let mut names = Placeholders::default();
+    for command in commands {
+        normalize_command(command, &mut names);
+    }
+}
+
+/// The placeholders of a sequence of commands, numbered in order of first appearance.
+#[derive(Default)]
+struct Placeholders {
+    ids: HashMap<String, String>,
+    uids: HashMap<String, String>,
+}
+
+impl Placeholders {
+    fn id(&mut self, raw: &mut String) {
+        rename(&mut self.ids, "id", raw);
+    }
+
+    fn uid(&mut self, raw: &mut String) {
+        rename(&mut self.uids, "uid", raw);
+    }
+}
+
+/// Replaces `raw` with the placeholder of its kind, numbering a new one at the next index. An
+/// empty string is no object and stays.
+fn rename(table: &mut HashMap<String, String>, kind: &str, raw: &mut String) {
+    if raw.is_empty() {
+        return;
+    }
+    let next = format!("<{kind}{}>", table.len());
+    *raw = table.entry(raw.clone()).or_insert(next).clone();
+}
+
+fn clear_path(path: &mut String) {
+    if !path.is_empty() {
+        *path = "<path>".into();
+    }
+}
+
+fn normalize_command(command: &mut proto::MlCommand, names: &mut Placeholders) {
+    use proto::fetch::method::args::ArgsType;
+    use proto::ml_command::{write::Type as WriteType, Command};
+    match command.command.as_mut() {
+        Some(Command::Fit(fit)) => {
+            if let Some(estimator) = fit.estimator.as_mut() {
+                names.uid(&mut estimator.uid);
+            }
+            fit.dataset = None;
+        }
+        Some(Command::Evaluate(evaluate)) => {
+            if let Some(evaluator) = evaluate.evaluator.as_mut() {
+                names.uid(&mut evaluator.uid);
+            }
+            evaluate.dataset = None;
+        }
+        Some(Command::CreateSummary(summary)) => {
+            if let Some(model) = summary.model_ref.as_mut() {
+                names.id(&mut model.id);
+            }
+            summary.dataset = None;
+        }
+        Some(Command::GetModelSize(size)) => {
+            if let Some(model) = size.model_ref.as_mut() {
+                names.id(&mut model.id);
+            }
+        }
+        Some(Command::Fetch(fetch)) => {
+            if let Some(object) = fetch.obj_ref.as_mut() {
+                names.id(&mut object.id);
+            }
+            for method in &mut fetch.methods {
+                for arg in &mut method.args {
+                    if let Some(ArgsType::Input(input)) = arg.args_type.as_mut() {
+                        *input = proto::Relation::default();
+                    }
+                }
+            }
+        }
+        Some(Command::Delete(delete)) => {
+            for object in &mut delete.obj_refs {
+                names.id(&mut object.id);
+            }
+        }
+        Some(Command::Read(read)) => {
+            if let Some(operator) = read.operator.as_mut() {
+                names.uid(&mut operator.uid);
+            }
+            clear_path(&mut read.path);
+        }
+        Some(Command::Write(write)) => {
+            match write.r#type.as_mut() {
+                Some(WriteType::Operator(operator)) => names.uid(&mut operator.uid),
+                Some(WriteType::ObjRef(object)) => names.id(&mut object.id),
+                None => {}
+            }
+            clear_path(&mut write.path);
+        }
+        Some(Command::CleanCache(_) | Command::GetCacheInfo(_)) | None => {}
+    }
+}
+
+/// Registers a golden entry: each of its commands with its reply. An object without `commands`
+/// registers its values that are entries.
+fn register(replay: &mut Replay, entry: &Json) {
+    let Some(object) = entry.as_object() else {
+        return;
+    };
+    let Some(commands) = object.get("commands").and_then(Json::as_array) else {
+        for child in object.values() {
+            register(replay, child);
+        }
+        return;
+    };
+    let results = object.get("results").and_then(Json::as_array);
+    for (index, command) in commands.iter().enumerate() {
+        let mut key = vec![decode_command(command)];
+        normalize_commands(&mut key);
+        let reply = match (results.and_then(|r| r.get(index)), object.get("error")) {
+            (Some(result), _) => Reply::Result(decode_result(result)),
+            (None, Some(error)) => Reply::Error(error["message"].as_str().unwrap().to_string()),
+            (None, None) => Reply::Empty,
+        };
+        replay.exchanges.push(Exchange {
+            command: key.remove(0),
+            reply,
+            used: false,
+        });
+    }
+}
+
+fn decode_bytes(b64: &Json) -> Vec<u8> {
+    STANDARD
+        .decode(b64.as_str().expect("the base64 of a golden message"))
+        .expect("the base64 of a golden message")
+}
+
+fn decode_command(b64: &Json) -> proto::MlCommand {
+    proto::MlCommand::decode(decode_bytes(b64).as_slice()).expect("a golden ML command")
+}
+
+fn decode_result(b64: &Json) -> proto::MlCommandResult {
+    proto::MlCommandResult::decode(decode_bytes(b64).as_slice()).expect("a golden result")
+}
+
+/// Answers an ML command from the golden: the first unused exchange whose normalized command
+/// equals the command's, normalized on its own, or else the first that equals it. A delete of a
+/// released object is not part of the golden: it completes with no result, and is not recorded.
+fn answer(
+    shared: &Shared,
+    command: proto::MlCommand,
+) -> std::result::Result<Option<proto::MlCommandResult>, Status> {
+    let mut replay = shared.lock().unwrap();
+    if matches!(command.command, Some(proto::ml_command::Command::Delete(_))) {
+        return Ok(None);
+    }
+    replay.received.push(command.clone());
+    let mut single = vec![command];
+    normalize_commands(&mut single);
+    let key = single.remove(0);
+    let position = replay
+        .exchanges
+        .iter()
+        .position(|e| !e.used && e.command == key)
+        .or_else(|| replay.exchanges.iter().position(|e| e.command == key));
+    let Some(position) = position else {
+        return Err(Status::invalid_argument(format!(
+            "the golden has no command {key:?}"
+        )));
+    };
+    let exchange = &mut replay.exchanges[position];
+    exchange.used = true;
+    match &exchange.reply {
+        Reply::Result(result) => Ok(Some(result.clone())),
+        Reply::Empty => Ok(None),
+        Reply::Error(message) => Err(Status::internal(message.clone())),
+    }
+}
+
+/// The replay's service: ExecutePlan answers ML commands from the golden, and Config and
+/// ReleaseExecute answer as a session needs. Any other RPC is refused.
+#[derive(Clone)]
+struct ReplayService(Shared);
+
+impl NamedService for ReplayService {
+    const NAME: &'static str = "spark.connect.SparkConnectService";
+}
+
+impl Service<http::Request<Body>> for ReplayService {
+    type Response = http::Response<Body>;
+    type Error = Infallible;
+    type Future = BoxFuture<Self::Response, Self::Error>;
+
+    fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<std::result::Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, request: http::Request<Body>) -> Self::Future {
+        let method = request.uri().path().trim_start_matches(SERVICE).to_string();
+        let shared = self.0.clone();
+        Box::pin(async move {
+            let mut grpc = tonic::server::Grpc::new(BytesCodec);
+            Ok(match method.as_str() {
+                "ExecutePlan" => grpc.server_streaming(Execute(shared), request).await,
+                "Config" => grpc.unary(Config, request).await,
+                "ReleaseExecute" => grpc.unary(ReleaseExecute, request).await,
+                other => {
+                    eprintln!("the golden replay does not answer {other}");
+                    grpc.unary(Unsupported, request).await
+                }
+            })
+        })
+    }
+}
+
+/// ExecutePlan: an ML command of the golden, answered as the golden answers it.
+struct Execute(Shared);
+
+impl ServerStreamingService<Vec<u8>> for Execute {
+    type Response = Vec<u8>;
+    type ResponseStream = stream::Iter<std::vec::IntoIter<std::result::Result<Vec<u8>, Status>>>;
+    type Future = BoxFuture<Response<Self::ResponseStream>, Status>;
+
+    fn call(&mut self, request: Request<Vec<u8>>) -> Self::Future {
+        let request = proto::ExecutePlanRequest::decode(request.into_inner().as_slice()).unwrap();
+        let session_id = request.session_id.clone();
+        let operation_id = request.operation_id.clone().unwrap_or_default();
+        let command = match request.plan.and_then(|plan| plan.op_type) {
+            Some(proto::plan::OpType::Command(command)) => match command.command_type {
+                Some(proto::command::CommandType::MlCommand(ml)) => Some(ml),
+                _ => None,
+            },
+            _ => None,
+        };
+        let reply = match command {
+            Some(ml) => answer(&self.0, ml),
+            None => Err(Status::unimplemented(
+                "the golden replay answers ML commands only",
+            )),
+        };
+        Box::pin(async move {
+            let result = reply?;
+            let mut frames = Vec::new();
+            if let Some(result) = result {
+                frames.push(Ok(response(
+                    &session_id,
+                    &operation_id,
+                    proto::execute_plan_response::ResponseType::MlCommandResult(result),
+                )
+                .encode_to_vec()));
+            }
+            frames.push(Ok(response(
+                &session_id,
+                &operation_id,
+                proto::execute_plan_response::ResponseType::ResultComplete(
+                    proto::execute_plan_response::ResultComplete {},
+                ),
+            )
+            .encode_to_vec()));
+            Ok(Response::new(stream::iter(frames)))
+        })
+    }
+}
+
+fn response(
+    session_id: &str,
+    operation_id: &str,
+    response_type: proto::execute_plan_response::ResponseType,
+) -> proto::ExecutePlanResponse {
+    proto::ExecutePlanResponse {
+        session_id: session_id.to_string(),
+        operation_id: operation_id.to_string(),
+        response_id: "golden".into(),
+        response_type: Some(response_type),
+        ..Default::default()
+    }
+}
+
+/// Config: answers with no pairs, which leaves plan compression off.
+struct Config;
+
+impl UnaryService<Vec<u8>> for Config {
+    type Response = Vec<u8>;
+    type Future = BoxFuture<Response<Vec<u8>>, Status>;
+
+    fn call(&mut self, request: Request<Vec<u8>>) -> Self::Future {
+        let session_id = proto::ConfigRequest::decode(request.into_inner().as_slice())
+            .unwrap()
+            .session_id;
+        let body = proto::ConfigResponse {
+            session_id,
+            ..Default::default()
+        }
+        .encode_to_vec();
+        Box::pin(async { Ok(Response::new(body)) })
+    }
+}
+
+/// ReleaseExecute: the client releases an execution after it has read its responses.
+struct ReleaseExecute;
+
+impl UnaryService<Vec<u8>> for ReleaseExecute {
+    type Response = Vec<u8>;
+    type Future = BoxFuture<Response<Vec<u8>>, Status>;
+
+    fn call(&mut self, request: Request<Vec<u8>>) -> Self::Future {
+        let request =
+            proto::ReleaseExecuteRequest::decode(request.into_inner().as_slice()).unwrap();
+        let body = proto::ReleaseExecuteResponse {
+            session_id: request.session_id,
+            operation_id: Some(request.operation_id),
+            ..Default::default()
+        }
+        .encode_to_vec();
+        Box::pin(async { Ok(Response::new(body)) })
+    }
+}
+
+/// An RPC that the golden does not replay: refused.
+struct Unsupported;
+
+impl UnaryService<Vec<u8>> for Unsupported {
+    type Response = Vec<u8>;
+    type Future = BoxFuture<Response<Vec<u8>>, Status>;
+
+    fn call(&mut self, _request: Request<Vec<u8>>) -> Self::Future {
+        Box::pin(async { Err(Status::unimplemented("not replayed by the golden")) })
+    }
+}
+
+/// The first line where the pretty-printed `actual` differs from `expected`, with the lines
+/// around it.
+fn first_difference(expected: &[proto::MlCommand], actual: &[proto::MlCommand]) -> String {
+    let golden_text = format!("{expected:#?}");
+    let actual_text = format!("{actual:#?}");
+    let golden_lines: Vec<&str> = golden_text.lines().collect();
+    let actual_lines: Vec<&str> = actual_text.lines().collect();
+    let line = golden_lines
+        .iter()
+        .zip(&actual_lines)
+        .position(|(g, a)| g != a)
+        .unwrap_or(golden_lines.len().min(actual_lines.len()));
+    let window = |lines: &[&str]| {
+        lines
+            .iter()
+            .skip(line.saturating_sub(2))
+            .take(8)
+            .copied()
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    format!(
+        "first difference at line {}\n golden:\n{}\n actual:\n{}",
+        line + 1,
+        window(&golden_lines),
+        window(&actual_lines)
+    )
 }
