@@ -16,7 +16,7 @@ use pyo3::pyclass::boolean_struct::False;
 use pyo3::types::{PyDict, PyList, PyTuple, PyType};
 use pyo3::{IntoPyObjectExt, PyClass};
 use spark_connect::ml::{
-    AFTSurvivalRegression, BisectingKMeans, Classifier, CrossValidator, DecisionTreeClassifier,
+    AFTSurvivalRegression, BisectingKMeans, Classifier, DecisionTreeClassifier,
     DecisionTreeRegressor, Estimator, Evaluator, FMClassifier, FMRegressor, GBTClassifier,
     GBTRegressor, GaussianMixture, GeneralizedLinearRegression, IsotonicRegression, KMeans,
     LinearRegression, LinearSVC, LogisticRegression, MlMatrix, MlVector, Model,
@@ -37,6 +37,7 @@ pub(crate) mod classification_api;
 pub(crate) mod clustering_api;
 pub(crate) mod pipeline_api;
 pub(crate) mod regression_api;
+pub(crate) mod tuning_api;
 
 pub(crate) mod evaluation;
 pub use evaluation::{
@@ -686,32 +687,6 @@ where
     let mut model = model(py, fitted, &df)?;
     params_api::copy_defaults(py, defaults, &mut model)?;
     Ok(model)
-}
-
-/// The fit of a native estimator whose core cannot fit it, as Pipeline and CrossValidator.
-/// The core raises NOT_IMPLEMENTED of `feature` before any request, whatever its params are, so
-/// the params are not serialized first, and PySpark's serialization errors of them are not
-/// raised. Pandas inputs are rejected before reaching this unsupported operation.
-fn fit_unimplemented<T>(
-    slf: &Bound<'_, T>,
-    dataset: &Bound<'_, PyAny>,
-    feature: &str,
-) -> PyResult<PyMLModel>
-where
-    T: Native + PyClass,
-    T::Core: Estimator,
-{
-    let py = slf.py();
-    reject_pandas(dataset, "fit")?;
-    match dataset.extract::<PyRef<'_, PyDataFrame>>() {
-        Ok(df) => fit_core(py, slf.try_borrow()?.inner().clone(), &df.dataframe),
-        Err(_) => Err(crate::column::raise_pyspark(
-            py,
-            "PySparkNotImplementedError",
-            "NOT_IMPLEMENTED",
-            &[("feature", feature)],
-        )),
-    }
 }
 
 fn fit_core<C: Estimator>(py: Python<'_>, mut estimator: C, df: &DataFrame) -> PyResult<PyMLModel> {
@@ -5254,86 +5229,6 @@ impl PyBisectingKMeans {
     }
 }
 
-/// CrossValidator (k-fold tuning).
-const CROSS_VALIDATOR_PARAMS: &[(&str, Kind)] = &[
-    ("numFolds", Kind::Int),
-    ("parallelism", Kind::Int),
-    ("seed", Kind::Int),
-];
-
-#[pyclass(name = "CrossValidator", module = "pyspark.ml.connect.tuning")]
-pub struct PyCrossValidator {
-    inner: CrossValidator,
-    unsendable: Vec<&'static str>,
-}
-
-#[pymethods]
-impl PyCrossValidator {
-    #[new]
-    #[pyo3(
-        signature = (*args, **kwargs),
-        text_signature = "(*, numFolds=None, parallelism=None, seed=None)"
-    )]
-    fn new(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
-        let mut this = Self {
-            inner: CrossValidator::new(),
-            unsendable: Vec::new(),
-        };
-        init_params(
-            &mut this,
-            "CrossValidator",
-            &[],
-            CROSS_VALIDATOR_PARAMS,
-            args,
-            kwargs,
-        )?;
-        Ok(this)
-    }
-    #[pyo3(
-        name = "setParams",
-        signature = (*args, **kwargs),
-        text_signature = "(self, *, numFolds=None, parallelism=None, seed=None)"
-    )]
-    fn set_params<'py>(
-        slf: Bound<'py, Self>,
-        args: &Bound<'py, PyTuple>,
-        kwargs: Option<&Bound<'py, PyDict>>,
-    ) -> PyResult<Bound<'py, Self>> {
-        set_params_of(slf, "CrossValidator", CROSS_VALIDATOR_PARAMS, args, kwargs)
-    }
-    #[pyo3(name = "setNumFolds")]
-    fn set_num_folds<'py>(
-        slf: Bound<'py, Self>,
-        value: &Bound<'py, PyAny>,
-    ) -> PyResult<Bound<'py, Self>> {
-        set_param(slf, "numFolds", Kind::Int, value)
-    }
-    #[pyo3(name = "setParallelism")]
-    fn set_parallelism<'py>(
-        slf: Bound<'py, Self>,
-        value: &Bound<'py, PyAny>,
-    ) -> PyResult<Bound<'py, Self>> {
-        set_param(slf, "parallelism", Kind::Int, value)
-    }
-    #[pyo3(name = "setSeed")]
-    fn set_seed<'py>(
-        slf: Bound<'py, Self>,
-        value: &Bound<'py, PyAny>,
-    ) -> PyResult<Bound<'py, Self>> {
-        set_param(slf, "seed", Kind::Int, value)
-    }
-    #[pyo3(signature = (dataset, params=None))]
-    fn fit(
-        slf: &Bound<'_, Self>,
-        dataset: &Bound<'_, PyAny>,
-        params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Fitted<PyMLModel>> {
-        fit_with(slf, dataset, params, || {
-            fit_unimplemented(slf, dataset, "CrossValidator.fit")
-        })
-    }
-}
-
 native!(
     PyLogisticRegression => LogisticRegression,
     PyLinearSVC => LinearSVC,
@@ -5357,5 +5252,4 @@ native!(
     PyGaussianMixture => GaussianMixture,
     PyKMeans => KMeans,
     PyBisectingKMeans => BisectingKMeans,
-    PyCrossValidator => CrossValidator,
 );

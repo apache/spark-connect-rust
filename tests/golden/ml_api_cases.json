@@ -1,4 +1,682 @@
 {
+ "CrossValidator": {
+  "live": {
+   "best_model": [
+    "ok",
+    "('LinearSVCModel', 0.1)"
+   ],
+   "copy_needs_sub_models": [
+    "AssertionError",
+    ""
+   ],
+   "dirs": [
+    "ok",
+    [
+     "'estimator'",
+     "'evaluator'",
+     "'metadata'"
+    ]
+   ],
+   "fitMultiple": [
+    "ok",
+    [
+     "(0, ([np.float64(0.394444444), np.float64(0.394444444)], ['float64']))",
+     "(1, ([np.float64(0.477133977), np.float64(0.477133977)], ['float64']))"
+    ]
+   ],
+   "fit_class": [
+    "ok",
+    "('CrossValidatorModel', 'CrossValidatorModel', True)"
+   ],
+   "fit_list": [
+    "ok",
+    [
+     "([np.float64(0.394444444), np.float64(0.394444444)], ['float64'])",
+     "([np.float64(0.477133977), np.float64(0.477133977)], ['float64'])"
+    ]
+   ],
+   "fit_map": [
+    "ok",
+    "([np.float64(0.394444444), np.float64(0.394444444)], ['float64'])"
+   ],
+   "fit_pipeline": [
+    "ok",
+    "([np.float64(0.394444444), np.float64(0.394444444)], ['float64'])"
+   ],
+   "fold_col": [
+    "ok",
+    "([np.float64(0.45970696), np.float64(0.45970696)], ['float64'])"
+   ],
+   "fold_col_empty_fold": [
+    "ValueError",
+    "The validation data at fold 2 is empty."
+   ],
+   "fold_col_out_of_range": [
+    "SparkRuntimeException",
+    "[USER_RAISED_EXCEPTION] Fold number must be in range [0, 1), but got 1 SQLSTATE: P0001"
+   ],
+   "load": [
+    "ok",
+    "('CrossValidator', True, ['collectSubModels', 'estimator', 'estimatorParamMaps', 'evaluator', 'foldCol', 'numFolds', 'parallelism', 'seed'], 'LinearSVC', True, 'BinaryClassificationEvaluator', \"[{Param(parent='LinearSVC_<uid>', name='regParam', doc='regularization parameter (>= 0).'): 0.1}, {Param(parent='LinearSVC_<uid>', name='regParam', doc='regularization parameter (>= 0).'): 1.0}]\", \"collectSubModels: Param for whether to collect a list of sub-models trained during tuning. If set to false, then only the single best sub-model will be available after fitting. If set to true, then all sub-models will be available. Warning: For large models, collecting all sub-models can cause OOMs on the Spark driver. (default: False, current: False)\\nestimator: estimator to be cross-validated (current: LinearSVC_<uid>)\\nestimatorParamMaps: estimator param maps (current: [{Param(parent='LinearSVC_<uid>', name='regParam', doc='regularization parameter (>= 0).'): 0.1}, {Param(parent='LinearSVC_<uid>', name='regParam', doc='regularization parameter (>= 0).'): 1.0}])\\nevaluator: evaluator used to select hyper-parameters that maximize the validator metric (current: BinaryClassificationEvaluator_<uid>)\\nfoldCol: Param for the column name of user specified fold number. Once this is specified, :py:class:`CrossValidator` won't do random k-fold split. Note that this column should be integer type with range [0, numFolds) and Spark will throw exception on out-of-range fold numbers. (default: , current: )\\nnumFolds: number of folds for cross validation (default: 3, current: 2)\\nparallelism: the number of threads to use when running parallel algorithms (>= 1). (default: 1, current: 1)\\nseed: random seed. (default: <hash CrossValidator>, current: 7)\")"
+   ],
+   "load_fit": [
+    "ok",
+    "([np.float64(0.394444444), np.float64(0.394444444)], ['float64'])"
+   ],
+   "load_pipeline": [
+    "ok",
+    "('Pipeline', \"[{Param(parent='LinearSVC_<uid>', name='regParam', doc='regularization parameter (>= 0).'): 0.1}, {Param(parent='LinearSVC_<uid>', name='regParam', doc='regularization parameter (>= 0).'): 1.0}]\")"
+   ],
+   "metadata": [
+    "ok",
+    "{'class': 'pyspark.ml.tuning.CrossValidator', 'sparkVersion': '4.3.0', 'uid': 'CrossValidator_<uid>', 'paramMap': {'collectSubModels': False, 'parallelism': 1, 'seed': 7, 'numFolds': 2, 'foldCol': '', 'estimatorParamMaps': [[{'parent': 'LinearSVC_<uid>', 'name': 'regParam', 'value': '0.1', 'isJson': True}], [{'parent': 'LinearSVC_<uid>', 'name': 'regParam', 'value': '1.0', 'isJson': True}]]}, 'defaultParamMap': {'collectSubModels': False, 'parallelism': 1, 'seed': <hash CrossValidator>, 'numFolds': 3, 'foldCol': ''}}"
+   ],
+   "metrics": [
+    "ok",
+    "([np.float64(0.394444444), np.float64(0.394444444)], ['float64'])"
+   ],
+   "model_copy": [
+    "ok",
+    "(True, ([np.float64(0.394444444), np.float64(0.394444444)], ['float64']), 100.0, 0.0, ['estimator', 'estimatorParamMaps', 'evaluator', 'numFolds', 'seed'])"
+   ],
+   "model_dirs": [
+    "ok",
+    [
+     "'bestModel'",
+     "'estimator'",
+     "'evaluator'",
+     "'metadata'",
+     "'subModels'"
+    ]
+   ],
+   "model_dirs_no_sub_models": [
+    "ok",
+    [
+     "'bestModel'",
+     "'estimator'",
+     "'evaluator'",
+     "'metadata'"
+    ]
+   ],
+   "model_estimator_is": [
+    "ok",
+    "(True, True)"
+   ],
+   "model_explainParams": [
+    "ok",
+    "\"estimator: estimator to be cross-validated (current: LinearSVC_<uid>)\\nestimatorParamMaps: estimator param maps (current: [{Param(parent='LinearSVC_<uid>', name='regParam', doc='regularization parameter (>= 0).'): 0.1}, {Param(parent='LinearSVC_<uid>', name='regParam', doc='regularization parameter (>= 0).'): 1.0}])\\nevaluator: evaluator used to select hyper-parameters that maximize the validator metric (current: BinaryClassificationEvaluator_<uid>)\\nfoldCol: Param for the column name of user specified fold number. Once this is specified, :py:class:`CrossValidator` won't do random k-fold split. Note that this column should be integer type with range [0, numFolds) and Spark will throw exception on out-of-range fold numbers. (default: )\\nnumFolds: number of folds for cross validation (default: 3, current: 2)\\nseed: random seed. (default: <hash CrossValidator>, current: 7)\""
+   ],
+   "model_extract": [
+    "ok",
+    [
+     "('estimator', 'LinearSVC_<uid>')",
+     "('estimatorParamMaps', \"[{Param(parent='LinearSVC_<uid>', name='regParam', doc='regularization parameter (>= 0).'): 0.1}, {Param(parent='LinearSVC_<uid>', name='regParam', doc='regularization parameter (>= 0).'): 1.0}]\")",
+     "('evaluator', 'BinaryClassificationEvaluator_<uid>')",
+     "('foldCol', \"''\")",
+     "('numFolds', '2')",
+     "('seed', '7')"
+    ]
+   ],
+   "model_load": [
+    "ok",
+    "('CrossValidatorModel', True, ([0.394444444, 0.394444444], ['float']), 'LinearSVCModel', ['estimator', 'estimatorParamMaps', 'evaluator', 'foldCol', 'numFolds', 'seed'], \"estimator: estimator to be cross-validated (current: LinearSVC_<uid>)\\nestimatorParamMaps: estimator param maps (current: [{Param(parent='LinearSVC_<uid>', name='regParam', doc='regularization parameter (>= 0).'): 0.1}, {Param(parent='LinearSVC_<uid>', name='regParam', doc='regularization parameter (>= 0).'): 1.0}])\\nevaluator: evaluator used to select hyper-parameters that maximize the validator metric (current: BinaryClassificationEvaluator_<uid>)\\nfoldCol: Param for the column name of user specified fold number. Once this is specified, :py:class:`CrossValidator` won't do random k-fold split. Note that this column should be integer type with range [0, numFolds) and Spark will throw exception on out-of-range fold numbers. (default: , current: )\\nnumFolds: number of folds for cross validation (default: 3, current: 2)\\nseed: random seed. (default: <hash CrossValidator>, current: 7)\")"
+   ],
+   "model_load_no_sub_models": [
+    "ok",
+    "None"
+   ],
+   "model_load_sub_models": [
+    "ok",
+    "([[0.1, 1.0], [0.1, 1.0]], True)"
+   ],
+   "model_load_transform": [
+    "ok",
+    {
+     "columns": [
+      "prediction"
+     ],
+     "rows": [
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)"
+     ]
+    }
+   ],
+   "model_metadata": [
+    "ok",
+    "{'class': 'pyspark.ml.tuning.CrossValidatorModel', 'sparkVersion': '4.3.0', 'uid': 'CrossValidatorModel_<uid>', 'paramMap': {'seed': 7, 'numFolds': 2, 'foldCol': '', 'estimatorParamMaps': [[{'parent': 'LinearSVC_<uid>', 'name': 'regParam', 'value': '0.1', 'isJson': True}], [{'parent': 'LinearSVC_<uid>', 'name': 'regParam', 'value': '1.0', 'isJson': True}]]}, 'defaultParamMap': {'seed': <hash CrossValidator>, 'numFolds': 3, 'foldCol': ''}, 'avgMetrics': [0.3944444444444445, 0.3944444444444445], 'persistSubModels': True, 'stdMetrics': [0.005555555555555536, 0.005555555555555536]}"
+   ],
+   "model_params": [
+    "ok",
+    [
+     "'estimator'",
+     "'estimatorParamMaps'",
+     "'evaluator'",
+     "'numFolds'",
+     "'seed'"
+    ]
+   ],
+   "model_save": [
+    "ok",
+    "None"
+   ],
+   "model_save_bad_option": [
+    "ValueError",
+    "persistSubModels option value maybe is invalid, the possible values are True, 'True' or False, 'False'"
+   ],
+   "model_save_no_sub_models": [
+    "ok",
+    "None"
+   ],
+   "model_save_none_dirs": [
+    "ok",
+    [
+     "'bestModel'",
+     "'estimator'",
+     "'evaluator'",
+     "'metadata'"
+    ]
+   ],
+   "model_save_none_persisted": [
+    "ValueError",
+    "When persisting tuning models, you can only set persistSubModels to true if the tuning was done with collectSubModels set to true. To save the sub-models, try rerunning fitting with collectSubModels s"
+   ],
+   "model_sub_dirs": [
+    "ok",
+    [
+     "'fold0'",
+     "'fold1'"
+    ]
+   ],
+   "save": [
+    "ok",
+    "None"
+   ],
+   "save_again": [
+    "AnalysisException",
+    "[PATH_ALREADY_EXISTS] Path file:<path>/validator/metadata already exists. Set mode as \"overwrite\" to overwrite the existing path. SQLSTATE: 42K04"
+   ],
+   "save_foreign_param": [
+    "ValueError",
+    "Validator save requires all Params in estimatorParamMaps to apply to its Estimator, An extraneous Param was found: Param(parent='LinearSVC_<uid>', name='maxIter', doc='max number of iterations (>= 0)."
+   ],
+   "save_nested": [
+    "ValueError",
+    "PySpark does not support nested validator."
+   ],
+   "save_overwrite": [
+    "ok",
+    "None"
+   ],
+   "save_pipeline": [
+    "ok",
+    "None"
+   ],
+   "std_metrics": [
+    "ok",
+    [
+     0.005555556,
+     0.005555556
+    ]
+   ],
+   "sub_models": [
+    "ok",
+    [
+     [
+      0.1,
+      1.0
+     ],
+     [
+      0.1,
+      1.0
+     ]
+    ]
+   ],
+   "sub_models_none": [
+    "ok",
+    "True"
+   ],
+   "transform": [
+    "ok",
+    {
+     "columns": [
+      "prediction"
+     ],
+     "rows": [
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)"
+     ]
+    }
+   ],
+   "transform_map": [
+    "ok",
+    {
+     "columns": [
+      "prediction"
+     ],
+     "rows": [
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)"
+     ]
+    }
+   ],
+   "transform_map_needs_sub_models": [
+    "AssertionError",
+    ""
+   ]
+  },
+  "params_api": {
+   "class_param": [
+    "ok",
+    "('undefined', 'seed', True)"
+   ],
+   "clear": [
+    "ok",
+    "(None, False, 1)"
+   ],
+   "copy": [
+    "ok",
+    "(True, 9, 7, False, True, 7, 3, False, True, True, ['estimator', 'estimatorParamMaps', 'evaluator', 'seed'])"
+   ],
+   "copy_bad_extra": [
+    "TypeError",
+    "Expecting a valid instance of Param, but received: seed"
+   ],
+   "copy_unset": [
+    "ok",
+    "\"collectSubModels: Param for whether to collect a list of sub-models trained during tuning. If set to false, then only the single best sub-model will be available after fitting. If set to true, then all sub-models will be available. Warning: For large models, collecting all sub-models can cause OOMs on the Spark driver. (default: False)\\nestimator: estimator to be cross-validated (undefined)\\nestimatorParamMaps: estimator param maps (undefined)\\nevaluator: evaluator used to select hyper-parameters that maximize the validator metric (undefined)\\nfoldCol: Param for the column name of user specified fold number. Once this is specified, :py:class:`CrossValidator` won't do random k-fold split. Note that this column should be integer type with range [0, numFolds) and Spark will throw exception on out-of-range fold numbers. (default: )\\nnumFolds: number of folds for cross validation (default: 3)\\nparallelism: the number of threads to use when running parallel algorithms (>= 1). (default: 1)\\nseed: random seed. (default: <hash CrossValidator>)\""
+   ],
+   "default_getCollectSubModels": [
+    "ok",
+    "False"
+   ],
+   "default_getEstimator": [
+    "KeyError",
+    "Param(parent='CrossValidator_<uid>', name='estimator', doc='estimator to be cross-validated')"
+   ],
+   "default_getEstimatorParamMaps": [
+    "KeyError",
+    "Param(parent='CrossValidator_<uid>', name='estimatorParamMaps', doc='estimator param maps')"
+   ],
+   "default_getEvaluator": [
+    "KeyError",
+    "Param(parent='CrossValidator_<uid>', name='evaluator', doc='evaluator used to select hyper-parameters that maximize the validator metric')"
+   ],
+   "default_getFoldCol": [
+    "ok",
+    "''"
+   ],
+   "default_getNumFolds": [
+    "ok",
+    "3"
+   ],
+   "default_getParallelism": [
+    "ok",
+    "1"
+   ],
+   "default_getSeed": [
+    "ok",
+    "<hash CrossValidator>"
+   ],
+   "explainParams": [
+    "ok",
+    "\"collectSubModels: Param for whether to collect a list of sub-models trained during tuning. If set to false, then only the single best sub-model will be available after fitting. If set to true, then all sub-models will be available. Warning: For large models, collecting all sub-models can cause OOMs on the Spark driver. (default: False)\\nestimator: estimator to be cross-validated (current: LinearSVC_<uid>)\\nestimatorParamMaps: estimator param maps (current: [{Param(parent='LinearSVC_<uid>', name='regParam', doc='regularization parameter (>= 0).'): 0.1}, {Param(parent='LinearSVC_<uid>', name='regParam', doc='regularization parameter (>= 0).'): 1.0}])\\nevaluator: evaluator used to select hyper-parameters that maximize the validator metric (current: BinaryClassificationEvaluator_<uid>)\\nfoldCol: Param for the column name of user specified fold number. Once this is specified, :py:class:`CrossValidator` won't do random k-fold split. Note that this column should be integer type with range [0, numFolds) and Spark will throw exception on out-of-range fold numbers. (default: )\\nnumFolds: number of folds for cross validation (default: 3)\\nparallelism: the number of threads to use when running parallel algorithms (>= 1). (default: 1)\\nseed: random seed. (default: <hash CrossValidator>, current: 7)\""
+   ],
+   "explainParams_default": [
+    "ok",
+    "\"collectSubModels: Param for whether to collect a list of sub-models trained during tuning. If set to false, then only the single best sub-model will be available after fitting. If set to true, then all sub-models will be available. Warning: For large models, collecting all sub-models can cause OOMs on the Spark driver. (default: False)\\nestimator: estimator to be cross-validated (undefined)\\nestimatorParamMaps: estimator param maps (undefined)\\nevaluator: evaluator used to select hyper-parameters that maximize the validator metric (undefined)\\nfoldCol: Param for the column name of user specified fold number. Once this is specified, :py:class:`CrossValidator` won't do random k-fold split. Note that this column should be integer type with range [0, numFolds) and Spark will throw exception on out-of-range fold numbers. (default: )\\nnumFolds: number of folds for cross validation (default: 3)\\nparallelism: the number of threads to use when running parallel algorithms (>= 1). (default: 1)\\nseed: random seed. (default: <hash CrossValidator>)\""
+   ],
+   "extract": [
+    "ok",
+    [
+     "('collectSubModels', 'False')",
+     "('estimator', 'LinearSVC_<uid>')",
+     "('estimatorParamMaps', \"[{Param(parent='LinearSVC_<uid>', name='regParam', doc='regularization parameter (>= 0).'): 0.1}, {Param(parent='LinearSVC_<uid>', name='regParam', doc='regularization parameter (>= 0).'): 1.0}]\")",
+     "('evaluator', 'BinaryClassificationEvaluator_<uid>')",
+     "('foldCol', \"''\")",
+     "('numFolds', '3')",
+     "('parallelism', '1')",
+     "('seed', '7')"
+    ]
+   ],
+   "fit_bad_params": [
+    "TypeError",
+    "Params must be either a param map or a list/tuple of param maps, but got <class 'int'>."
+   ],
+   "fit_no_maps": [
+    "ValueError",
+    "Number of processes must be at least 1"
+   ],
+   "fit_not_a_dataframe": [
+    "AttributeError",
+    "'str' object has no attribute 'select'"
+   ],
+   "fit_unset_estimator": [
+    "KeyError",
+    "Param(parent='CrossValidator_<uid>', name='estimator', doc='estimator to be cross-validated')"
+   ],
+   "fit_unset_evaluator": [
+    "KeyError",
+    "Param(parent='CrossValidator_<uid>', name='evaluator', doc='evaluator used to select hyper-parameters that maximize the validator metric')"
+   ],
+   "fit_zero_folds": [
+    "ZeroDivisionError",
+    "float division by zero"
+   ],
+   "getEstimatorParamMaps_is": [
+    "ok",
+    "True"
+   ],
+   "getEstimator_is": [
+    "ok",
+    "True"
+   ],
+   "getEstimator_unset": [
+    "KeyError",
+    "Param(parent='CrossValidator_<uid>', name='estimator', doc='estimator to be cross-validated')"
+   ],
+   "getEvaluator_is": [
+    "ok",
+    "True"
+   ],
+   "isinstance": [
+    "ok",
+    "(True, True, True, True, True, True)"
+   ],
+   "kwarg_bad_type": [
+    "TypeError",
+    "Invalid param value given for param \"parallelism\". Could not convert x to int"
+   ],
+   "kwarg_none": [
+    "ok",
+    "None"
+   ],
+   "kwarg_unknown": [
+    "TypeError",
+    "CrossValidator.__init__() got an unexpected keyword argument 'foo'"
+   ],
+   "kwargs": [
+    "ok",
+    "\"collectSubModels: Param for whether to collect a list of sub-models trained during tuning. If set to false, then only the single best sub-model will be available after fitting. If set to true, then all sub-models will be available. Warning: For large models, collecting all sub-models can cause OOMs on the Spark driver. (default: False, current: True)\\nestimator: estimator to be cross-validated (undefined)\\nestimatorParamMaps: estimator param maps (undefined)\\nevaluator: evaluator used to select hyper-parameters that maximize the validator metric (undefined)\\nfoldCol: Param for the column name of user specified fold number. Once this is specified, :py:class:`CrossValidator` won't do random k-fold split. Note that this column should be integer type with range [0, numFolds) and Spark will throw exception on out-of-range fold numbers. (default: , current: fold)\\nnumFolds: number of folds for cross validation (default: 3, current: 2)\\nparallelism: the number of threads to use when running parallel algorithms (>= 1). (default: 1, current: 2)\\nseed: random seed. (default: <hash CrossValidator>)\""
+   ],
+   "model_attributes": [
+    "ok",
+    [
+     "'None'",
+     "'[]'",
+     "'None'"
+    ]
+   ],
+   "model_copy": [
+    "ok",
+    "(True, 'CrossValidatorModel', [0.5, 0.25], False, 'PipelineModel', False)"
+   ],
+   "model_copy_no_sub_models": [
+    "AssertionError",
+    ""
+   ],
+   "model_copy_none": [
+    "AttributeError",
+    "'NoneType' object has no attribute 'copy'"
+   ],
+   "model_explainParams": [
+    "ok",
+    "\"estimator: estimator to be cross-validated (undefined)\\nestimatorParamMaps: estimator param maps (undefined)\\nevaluator: evaluator used to select hyper-parameters that maximize the validator metric (undefined)\\nfoldCol: Param for the column name of user specified fold number. Once this is specified, :py:class:`CrossValidator` won't do random k-fold split. Note that this column should be integer type with range [0, numFolds) and Spark will throw exception on out-of-range fold numbers. (default: )\\nnumFolds: number of folds for cross validation (default: 3)\\nseed: random seed. (default: <hash CrossValidatorModel>)\""
+   ],
+   "model_falsy_metrics": [
+    "ok",
+    []
+   ],
+   "model_metrics_is": [
+    "ok",
+    "True"
+   ],
+   "model_no_attribute": [
+    "AttributeError",
+    "'CrossValidatorModel' object has no attribute 'fooBarBaz'"
+   ],
+   "model_param_names": [
+    "ok",
+    [
+     "'estimator'",
+     "'estimatorParamMaps'",
+     "'evaluator'",
+     "'foldCol'",
+     "'numFolds'",
+     "'seed'"
+    ]
+   ],
+   "model_repr_is_uid": [
+    "ok",
+    "True"
+   ],
+   "model_seed_is_class_name_hash": [
+    "ok",
+    "True"
+   ],
+   "model_set_attributes": [
+    "ok",
+    "None"
+   ],
+   "model_std_metrics": [
+    "ok",
+    [
+     0.1
+    ]
+   ],
+   "model_transform": [
+    "ok",
+    "'not a DataFrame'"
+   ],
+   "model_transform_bad_params": [
+    "TypeError",
+    "Params must be a param map but got <class 'int'>."
+   ],
+   "no_attribute": [
+    "AttributeError",
+    "'CrossValidator' object has no attribute 'fooBarBaz'"
+   ],
+   "param_names": [
+    "ok",
+    [
+     "'collectSubModels'",
+     "'estimator'",
+     "'estimatorParamMaps'",
+     "'evaluator'",
+     "'foldCol'",
+     "'numFolds'",
+     "'parallelism'",
+     "'seed'"
+    ]
+   ],
+   "positional": [
+    "TypeError",
+    "Method __init__ forces keyword arguments."
+   ],
+   "repr_is_uid": [
+    "ok",
+    "True"
+   ],
+   "seed_is_class_name_hash": [
+    "ok",
+    "True"
+   ],
+   "setCollectSubModels": [
+    "ok",
+    "True"
+   ],
+   "setEstimator": [
+    "ok",
+    "True"
+   ],
+   "setEstimatorParamMaps": [
+    "ok",
+    "True"
+   ],
+   "setEvaluator": [
+    "ok",
+    "True"
+   ],
+   "setFoldCol": [
+    "ok",
+    "'fold'"
+   ],
+   "setNumFolds": [
+    "ok",
+    "2"
+   ],
+   "setParallelism": [
+    "ok",
+    "4"
+   ],
+   "setParallelism_bad": [
+    "TypeError",
+    "Invalid param value given for param \"parallelism\". Could not convert x to int"
+   ],
+   "setParams": [
+    "ok",
+    "\"collectSubModels: Param for whether to collect a list of sub-models trained during tuning. If set to false, then only the single best sub-model will be available after fitting. If set to true, then all sub-models will be available. Warning: For large models, collecting all sub-models can cause OOMs on the Spark driver. (default: False)\\nestimator: estimator to be cross-validated (undefined)\\nestimatorParamMaps: estimator param maps (undefined)\\nevaluator: evaluator used to select hyper-parameters that maximize the validator metric (undefined)\\nfoldCol: Param for the column name of user specified fold number. Once this is specified, :py:class:`CrossValidator` won't do random k-fold split. Note that this column should be integer type with range [0, numFolds) and Spark will throw exception on out-of-range fold numbers. (default: , current: fold)\\nnumFolds: number of folds for cross validation (default: 3, current: 2)\\nparallelism: the number of threads to use when running parallel algorithms (>= 1). (default: 1)\\nseed: random seed. (default: <hash CrossValidator>, current: 5)\""
+   ],
+   "setSeed": [
+    "ok",
+    "3"
+   ],
+   "setSeed_big": [
+    "ok",
+    "1180591620717411303424"
+   ],
+   "set_param": [
+    "ok",
+    "3"
+   ],
+   "set_params": [
+    "ok",
+    [
+     "'estimator'",
+     "'estimatorParamMaps'",
+     "'evaluator'",
+     "'seed'"
+    ]
+   ],
+   "write_class": [
+    "ok",
+    "'RemoteMLWriter'"
+   ]
+  }
+ },
  "KMeans": {
   "live": {
    "clusterCenters": [
@@ -1537,6 +2215,10 @@
     "AnalysisException",
     "[PATH_ALREADY_EXISTS] Path file:<path>/pipeline/metadata already exists. Set mode as \"overwrite\" to overwrite the existing path. SQLSTATE: 42K04"
    ],
+   "save_unwritable_stage": [
+    "ValueError",
+    "('Pipeline write will fail on this pipeline because stage %s of type %s is not MLWritable', 'WriteOnly_<uid>', <class '_ml_api_cases._pipeline_live_cases.<locals>.WriteOnly'>)"
+   ],
    "stage_dirs": [
     "ok",
     [
@@ -1708,6 +2390,639 @@
    "unexpected_keyword": [
     "TypeError",
     "Pipeline.__init__() got an unexpected keyword argument 'foo'"
+   ],
+   "write_class": [
+    "ok",
+    "'RemoteMLWriter'"
+   ]
+  }
+ },
+ "TrainValidationSplit": {
+  "live": {
+   "best_model": [
+    "ok",
+    "('LinearSVCModel', 0.1)"
+   ],
+   "copy_needs_sub_models": [
+    "AssertionError",
+    ""
+   ],
+   "dirs": [
+    "ok",
+    [
+     "'estimator'",
+     "'evaluator'",
+     "'metadata'"
+    ]
+   ],
+   "fitMultiple": [
+    "ok",
+    [
+     "(0, ([0.404761905, 0.404761905], ['float']))",
+     "(1, ([0.444444444, 0.444444444], ['float']))"
+    ]
+   ],
+   "fit_class": [
+    "ok",
+    "('TrainValidationSplitModel', 'TrainValidationSplitModel', True)"
+   ],
+   "fit_list": [
+    "ok",
+    [
+     "([0.404761905, 0.404761905], ['float'])",
+     "([0.444444444, 0.444444444], ['float'])"
+    ]
+   ],
+   "fit_map": [
+    "ok",
+    "([0.404761905, 0.404761905], ['float'])"
+   ],
+   "fit_pipeline": [
+    "ok",
+    "([0.404761905, 0.404761905], ['float'])"
+   ],
+   "load": [
+    "ok",
+    "('TrainValidationSplit', True, ['collectSubModels', 'estimator', 'estimatorParamMaps', 'evaluator', 'parallelism', 'seed', 'trainRatio'], 'LinearSVC', True, 'BinaryClassificationEvaluator', \"[{Param(parent='LinearSVC_<uid>', name='regParam', doc='regularization parameter (>= 0).'): 0.1}, {Param(parent='LinearSVC_<uid>', name='regParam', doc='regularization parameter (>= 0).'): 1.0}]\", \"collectSubModels: Param for whether to collect a list of sub-models trained during tuning. If set to false, then only the single best sub-model will be available after fitting. If set to true, then all sub-models will be available. Warning: For large models, collecting all sub-models can cause OOMs on the Spark driver. (default: False, current: False)\\nestimator: estimator to be cross-validated (current: LinearSVC_<uid>)\\nestimatorParamMaps: estimator param maps (current: [{Param(parent='LinearSVC_<uid>', name='regParam', doc='regularization parameter (>= 0).'): 0.1}, {Param(parent='LinearSVC_<uid>', name='regParam', doc='regularization parameter (>= 0).'): 1.0}])\\nevaluator: evaluator used to select hyper-parameters that maximize the validator metric (current: BinaryClassificationEvaluator_<uid>)\\nparallelism: the number of threads to use when running parallel algorithms (>= 1). (default: 1, current: 1)\\nseed: random seed. (default: <hash TrainValidationSplit>, current: 7)\\ntrainRatio: Param for ratio between train and     validation data. Must be between 0 and 1. (default: 0.75, current: 0.75)\")"
+   ],
+   "load_fit": [
+    "ok",
+    "([0.404761905, 0.404761905], ['float'])"
+   ],
+   "load_pipeline": [
+    "ok",
+    "('Pipeline', \"[{Param(parent='LinearSVC_<uid>', name='regParam', doc='regularization parameter (>= 0).'): 0.1}, {Param(parent='LinearSVC_<uid>', name='regParam', doc='regularization parameter (>= 0).'): 1.0}]\")"
+   ],
+   "metadata": [
+    "ok",
+    "{'class': 'pyspark.ml.tuning.TrainValidationSplit', 'sparkVersion': '4.3.0', 'uid': 'TrainValidationSplit_<uid>', 'paramMap': {'collectSubModels': False, 'parallelism': 1, 'seed': 7, 'trainRatio': 0.75, 'estimatorParamMaps': [[{'parent': 'LinearSVC_<uid>', 'name': 'regParam', 'value': '0.1', 'isJson': True}], [{'parent': 'LinearSVC_<uid>', 'name': 'regParam', 'value': '1.0', 'isJson': True}]]}, 'defaultParamMap': {'collectSubModels': False, 'parallelism': 1, 'seed': <hash TrainValidationSplit>, 'trainRatio': 0.75}}"
+   ],
+   "metrics": [
+    "ok",
+    "([0.404761905, 0.404761905], ['float'])"
+   ],
+   "model_copy": [
+    "ok",
+    "(True, ([0.404761905, 0.404761905], ['float']), 100.0, 0.0, ['estimator', 'estimatorParamMaps', 'evaluator', 'seed'])"
+   ],
+   "model_dirs": [
+    "ok",
+    [
+     "'bestModel'",
+     "'estimator'",
+     "'evaluator'",
+     "'metadata'",
+     "'subModels'"
+    ]
+   ],
+   "model_dirs_no_sub_models": [
+    "ok",
+    [
+     "'bestModel'",
+     "'estimator'",
+     "'evaluator'",
+     "'metadata'"
+    ]
+   ],
+   "model_estimator_is": [
+    "ok",
+    "(True, True)"
+   ],
+   "model_explainParams": [
+    "ok",
+    "\"estimator: estimator to be cross-validated (current: LinearSVC_<uid>)\\nestimatorParamMaps: estimator param maps (current: [{Param(parent='LinearSVC_<uid>', name='regParam', doc='regularization parameter (>= 0).'): 0.1}, {Param(parent='LinearSVC_<uid>', name='regParam', doc='regularization parameter (>= 0).'): 1.0}])\\nevaluator: evaluator used to select hyper-parameters that maximize the validator metric (current: BinaryClassificationEvaluator_<uid>)\\nseed: random seed. (default: <hash TrainValidationSplit>, current: 7)\\ntrainRatio: Param for ratio between train and     validation data. Must be between 0 and 1. (default: 0.75)\""
+   ],
+   "model_extract": [
+    "ok",
+    [
+     "('estimator', 'LinearSVC_<uid>')",
+     "('estimatorParamMaps', \"[{Param(parent='LinearSVC_<uid>', name='regParam', doc='regularization parameter (>= 0).'): 0.1}, {Param(parent='LinearSVC_<uid>', name='regParam', doc='regularization parameter (>= 0).'): 1.0}]\")",
+     "('evaluator', 'BinaryClassificationEvaluator_<uid>')",
+     "('seed', '7')",
+     "('trainRatio', '0.75')"
+    ]
+   ],
+   "model_load": [
+    "ok",
+    "('TrainValidationSplitModel', True, ([0.404761905, 0.404761905], ['float']), 'LinearSVCModel', ['estimator', 'estimatorParamMaps', 'evaluator', 'seed', 'trainRatio'], \"estimator: estimator to be cross-validated (current: LinearSVC_<uid>)\\nestimatorParamMaps: estimator param maps (current: [{Param(parent='LinearSVC_<uid>', name='regParam', doc='regularization parameter (>= 0).'): 0.1}, {Param(parent='LinearSVC_<uid>', name='regParam', doc='regularization parameter (>= 0).'): 1.0}])\\nevaluator: evaluator used to select hyper-parameters that maximize the validator metric (current: BinaryClassificationEvaluator_<uid>)\\nseed: random seed. (default: <hash TrainValidationSplit>, current: 7)\\ntrainRatio: Param for ratio between train and     validation data. Must be between 0 and 1. (default: 0.75, current: 0.75)\")"
+   ],
+   "model_load_no_sub_models": [
+    "ok",
+    "None"
+   ],
+   "model_load_sub_models": [
+    "ok",
+    [
+     0.1,
+     1.0
+    ]
+   ],
+   "model_load_transform": [
+    "ok",
+    {
+     "columns": [
+      "prediction"
+     ],
+     "rows": [
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)"
+     ]
+    }
+   ],
+   "model_metadata": [
+    "ok",
+    "{'class': 'pyspark.ml.tuning.TrainValidationSplitModel', 'sparkVersion': '4.3.0', 'uid': 'TrainValidationSplitModel_<uid>', 'paramMap': {'seed': 7, 'trainRatio': 0.75, 'estimatorParamMaps': [[{'parent': 'LinearSVC_<uid>', 'name': 'regParam', 'value': '0.1', 'isJson': True}], [{'parent': 'LinearSVC_<uid>', 'name': 'regParam', 'value': '1.0', 'isJson': True}]]}, 'defaultParamMap': {'seed': <hash TrainValidationSplit>, 'trainRatio': 0.75}, 'validationMetrics': [0.40476190476190477, 0.40476190476190477], 'persistSubModels': True}"
+   ],
+   "model_params": [
+    "ok",
+    [
+     "'estimator'",
+     "'estimatorParamMaps'",
+     "'evaluator'",
+     "'seed'"
+    ]
+   ],
+   "model_save": [
+    "ok",
+    "None"
+   ],
+   "model_save_bad_option": [
+    "ValueError",
+    "persistSubModels option value maybe is invalid, the possible values are True, 'True' or False, 'False'"
+   ],
+   "model_save_no_sub_models": [
+    "ok",
+    "None"
+   ],
+   "model_save_none_dirs": [
+    "ok",
+    [
+     "'bestModel'",
+     "'estimator'",
+     "'evaluator'",
+     "'metadata'"
+    ]
+   ],
+   "model_save_none_persisted": [
+    "ValueError",
+    "When persisting tuning models, you can only set persistSubModels to true if the tuning was done with collectSubModels set to true. To save the sub-models, try rerunning fitting with collectSubModels s"
+   ],
+   "model_sub_dirs": [
+    "ok",
+    [
+     "'0'",
+     "'1'"
+    ]
+   ],
+   "save": [
+    "ok",
+    "None"
+   ],
+   "save_again": [
+    "AnalysisException",
+    "[PATH_ALREADY_EXISTS] Path file:<path>/validator/metadata already exists. Set mode as \"overwrite\" to overwrite the existing path. SQLSTATE: 42K04"
+   ],
+   "save_foreign_param": [
+    "ValueError",
+    "Validator save requires all Params in estimatorParamMaps to apply to its Estimator, An extraneous Param was found: Param(parent='LinearSVC_<uid>', name='maxIter', doc='max number of iterations (>= 0)."
+   ],
+   "save_nested": [
+    "ValueError",
+    "PySpark does not support nested validator."
+   ],
+   "save_overwrite": [
+    "ok",
+    "None"
+   ],
+   "save_pipeline": [
+    "ok",
+    "None"
+   ],
+   "sub_models": [
+    "ok",
+    [
+     0.1,
+     1.0
+    ]
+   ],
+   "sub_models_none": [
+    "ok",
+    "True"
+   ],
+   "transform": [
+    "ok",
+    {
+     "columns": [
+      "prediction"
+     ],
+     "rows": [
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)"
+     ]
+    }
+   ],
+   "transform_map": [
+    "ok",
+    {
+     "columns": [
+      "prediction"
+     ],
+     "rows": [
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)"
+     ]
+    }
+   ],
+   "transform_map_needs_sub_models": [
+    "AssertionError",
+    ""
+   ]
+  },
+  "params_api": {
+   "class_param": [
+    "ok",
+    "('undefined', 'seed', True)"
+   ],
+   "clear": [
+    "ok",
+    "(None, False, 1)"
+   ],
+   "copy": [
+    "ok",
+    "(True, 9, 7, False, True, 7, 3, False, True, True, ['estimator', 'estimatorParamMaps', 'evaluator', 'seed'])"
+   ],
+   "copy_bad_extra": [
+    "TypeError",
+    "Expecting a valid instance of Param, but received: seed"
+   ],
+   "copy_unset": [
+    "ok",
+    "'collectSubModels: Param for whether to collect a list of sub-models trained during tuning. If set to false, then only the single best sub-model will be available after fitting. If set to true, then all sub-models will be available. Warning: For large models, collecting all sub-models can cause OOMs on the Spark driver. (default: False)\\nestimator: estimator to be cross-validated (undefined)\\nestimatorParamMaps: estimator param maps (undefined)\\nevaluator: evaluator used to select hyper-parameters that maximize the validator metric (undefined)\\nparallelism: the number of threads to use when running parallel algorithms (>= 1). (default: 1)\\nseed: random seed. (default: <hash TrainValidationSplit>)\\ntrainRatio: Param for ratio between train and     validation data. Must be between 0 and 1. (default: 0.75)'"
+   ],
+   "default_getCollectSubModels": [
+    "ok",
+    "False"
+   ],
+   "default_getEstimator": [
+    "KeyError",
+    "Param(parent='TrainValidationSplit_<uid>', name='estimator', doc='estimator to be cross-validated')"
+   ],
+   "default_getEstimatorParamMaps": [
+    "KeyError",
+    "Param(parent='TrainValidationSplit_<uid>', name='estimatorParamMaps', doc='estimator param maps')"
+   ],
+   "default_getEvaluator": [
+    "KeyError",
+    "Param(parent='TrainValidationSplit_<uid>', name='evaluator', doc='evaluator used to select hyper-parameters that maximize the validator metric')"
+   ],
+   "default_getParallelism": [
+    "ok",
+    "1"
+   ],
+   "default_getSeed": [
+    "ok",
+    "<hash TrainValidationSplit>"
+   ],
+   "default_getTrainRatio": [
+    "ok",
+    0.75
+   ],
+   "explainParams": [
+    "ok",
+    "\"collectSubModels: Param for whether to collect a list of sub-models trained during tuning. If set to false, then only the single best sub-model will be available after fitting. If set to true, then all sub-models will be available. Warning: For large models, collecting all sub-models can cause OOMs on the Spark driver. (default: False)\\nestimator: estimator to be cross-validated (current: LinearSVC_<uid>)\\nestimatorParamMaps: estimator param maps (current: [{Param(parent='LinearSVC_<uid>', name='regParam', doc='regularization parameter (>= 0).'): 0.1}, {Param(parent='LinearSVC_<uid>', name='regParam', doc='regularization parameter (>= 0).'): 1.0}])\\nevaluator: evaluator used to select hyper-parameters that maximize the validator metric (current: BinaryClassificationEvaluator_<uid>)\\nparallelism: the number of threads to use when running parallel algorithms (>= 1). (default: 1)\\nseed: random seed. (default: <hash TrainValidationSplit>, current: 7)\\ntrainRatio: Param for ratio between train and     validation data. Must be between 0 and 1. (default: 0.75)\""
+   ],
+   "explainParams_default": [
+    "ok",
+    "'collectSubModels: Param for whether to collect a list of sub-models trained during tuning. If set to false, then only the single best sub-model will be available after fitting. If set to true, then all sub-models will be available. Warning: For large models, collecting all sub-models can cause OOMs on the Spark driver. (default: False)\\nestimator: estimator to be cross-validated (undefined)\\nestimatorParamMaps: estimator param maps (undefined)\\nevaluator: evaluator used to select hyper-parameters that maximize the validator metric (undefined)\\nparallelism: the number of threads to use when running parallel algorithms (>= 1). (default: 1)\\nseed: random seed. (default: <hash TrainValidationSplit>)\\ntrainRatio: Param for ratio between train and     validation data. Must be between 0 and 1. (default: 0.75)'"
+   ],
+   "extract": [
+    "ok",
+    [
+     "('collectSubModels', 'False')",
+     "('estimator', 'LinearSVC_<uid>')",
+     "('estimatorParamMaps', \"[{Param(parent='LinearSVC_<uid>', name='regParam', doc='regularization parameter (>= 0).'): 0.1}, {Param(parent='LinearSVC_<uid>', name='regParam', doc='regularization parameter (>= 0).'): 1.0}]\")",
+     "('evaluator', 'BinaryClassificationEvaluator_<uid>')",
+     "('parallelism', '1')",
+     "('seed', '7')",
+     "('trainRatio', '0.75')"
+    ]
+   ],
+   "fit_bad_params": [
+    "TypeError",
+    "Params must be either a param map or a list/tuple of param maps, but got <class 'int'>."
+   ],
+   "fit_no_maps": [
+    "AttributeError",
+    "'str' object has no attribute 'select'"
+   ],
+   "fit_not_a_dataframe": [
+    "AttributeError",
+    "'str' object has no attribute 'select'"
+   ],
+   "fit_unset_estimator": [
+    "KeyError",
+    "Param(parent='TrainValidationSplit_<uid>', name='estimator', doc='estimator to be cross-validated')"
+   ],
+   "fit_unset_evaluator": [
+    "KeyError",
+    "Param(parent='TrainValidationSplit_<uid>', name='evaluator', doc='evaluator used to select hyper-parameters that maximize the validator metric')"
+   ],
+   "getEstimatorParamMaps_is": [
+    "ok",
+    "True"
+   ],
+   "getEstimator_is": [
+    "ok",
+    "True"
+   ],
+   "getEstimator_unset": [
+    "KeyError",
+    "Param(parent='TrainValidationSplit_<uid>', name='estimator', doc='estimator to be cross-validated')"
+   ],
+   "getEvaluator_is": [
+    "ok",
+    "True"
+   ],
+   "isinstance": [
+    "ok",
+    "(True, True, True, True, True, True)"
+   ],
+   "kwarg_bad_type": [
+    "TypeError",
+    "Invalid param value given for param \"parallelism\". Could not convert x to int"
+   ],
+   "kwarg_none": [
+    "ok",
+    "None"
+   ],
+   "kwarg_unknown": [
+    "TypeError",
+    "TrainValidationSplit.__init__() got an unexpected keyword argument 'foo'"
+   ],
+   "kwargs": [
+    "ok",
+    "'collectSubModels: Param for whether to collect a list of sub-models trained during tuning. If set to false, then only the single best sub-model will be available after fitting. If set to true, then all sub-models will be available. Warning: For large models, collecting all sub-models can cause OOMs on the Spark driver. (default: False, current: True)\\nestimator: estimator to be cross-validated (undefined)\\nestimatorParamMaps: estimator param maps (undefined)\\nevaluator: evaluator used to select hyper-parameters that maximize the validator metric (undefined)\\nparallelism: the number of threads to use when running parallel algorithms (>= 1). (default: 1, current: 2)\\nseed: random seed. (default: <hash TrainValidationSplit>)\\ntrainRatio: Param for ratio between train and     validation data. Must be between 0 and 1. (default: 0.75, current: 0.5)'"
+   ],
+   "model_attributes": [
+    "ok",
+    [
+     "'None'",
+     "'[]'",
+     "'None'"
+    ]
+   ],
+   "model_copy": [
+    "ok",
+    "(True, 'TrainValidationSplitModel', [0.5, 0.25], False, 'PipelineModel', False)"
+   ],
+   "model_copy_no_sub_models": [
+    "AssertionError",
+    ""
+   ],
+   "model_copy_none": [
+    "AttributeError",
+    "'NoneType' object has no attribute 'copy'"
+   ],
+   "model_explainParams": [
+    "ok",
+    "'estimator: estimator to be cross-validated (undefined)\\nestimatorParamMaps: estimator param maps (undefined)\\nevaluator: evaluator used to select hyper-parameters that maximize the validator metric (undefined)\\nseed: random seed. (default: <hash TrainValidationSplitModel>)\\ntrainRatio: Param for ratio between train and     validation data. Must be between 0 and 1. (default: 0.75)'"
+   ],
+   "model_falsy_metrics": [
+    "ok",
+    []
+   ],
+   "model_metrics_is": [
+    "ok",
+    "True"
+   ],
+   "model_no_attribute": [
+    "AttributeError",
+    "'TrainValidationSplitModel' object has no attribute 'fooBarBaz'"
+   ],
+   "model_param_names": [
+    "ok",
+    [
+     "'estimator'",
+     "'estimatorParamMaps'",
+     "'evaluator'",
+     "'seed'",
+     "'trainRatio'"
+    ]
+   ],
+   "model_repr_is_uid": [
+    "ok",
+    "True"
+   ],
+   "model_seed_is_class_name_hash": [
+    "ok",
+    "True"
+   ],
+   "model_set_attributes": [
+    "ok",
+    "None"
+   ],
+   "model_transform": [
+    "ok",
+    "'not a DataFrame'"
+   ],
+   "model_transform_bad_params": [
+    "TypeError",
+    "Params must be a param map but got <class 'int'>."
+   ],
+   "no_attribute": [
+    "AttributeError",
+    "'TrainValidationSplit' object has no attribute 'fooBarBaz'"
+   ],
+   "param_names": [
+    "ok",
+    [
+     "'collectSubModels'",
+     "'estimator'",
+     "'estimatorParamMaps'",
+     "'evaluator'",
+     "'parallelism'",
+     "'seed'",
+     "'trainRatio'"
+    ]
+   ],
+   "positional": [
+    "TypeError",
+    "Method __init__ forces keyword arguments."
+   ],
+   "repr_is_uid": [
+    "ok",
+    "True"
+   ],
+   "seed_is_class_name_hash": [
+    "ok",
+    "True"
+   ],
+   "setCollectSubModels": [
+    "ok",
+    "True"
+   ],
+   "setEstimator": [
+    "ok",
+    "True"
+   ],
+   "setEstimatorParamMaps": [
+    "ok",
+    "True"
+   ],
+   "setEvaluator": [
+    "ok",
+    "True"
+   ],
+   "setParallelism": [
+    "ok",
+    "4"
+   ],
+   "setParallelism_bad": [
+    "TypeError",
+    "Invalid param value given for param \"parallelism\". Could not convert x to int"
+   ],
+   "setParams": [
+    "ok",
+    "'collectSubModels: Param for whether to collect a list of sub-models trained during tuning. If set to false, then only the single best sub-model will be available after fitting. If set to true, then all sub-models will be available. Warning: For large models, collecting all sub-models can cause OOMs on the Spark driver. (default: False)\\nestimator: estimator to be cross-validated (undefined)\\nestimatorParamMaps: estimator param maps (undefined)\\nevaluator: evaluator used to select hyper-parameters that maximize the validator metric (undefined)\\nparallelism: the number of threads to use when running parallel algorithms (>= 1). (default: 1)\\nseed: random seed. (default: <hash TrainValidationSplit>, current: 5)\\ntrainRatio: Param for ratio between train and     validation data. Must be between 0 and 1. (default: 0.75, current: 0.5)'"
+   ],
+   "setSeed": [
+    "ok",
+    "3"
+   ],
+   "setSeed_big": [
+    "ok",
+    "1180591620717411303424"
+   ],
+   "setTrainRatio": [
+    "ok",
+    0.5
+   ],
+   "set_param": [
+    "ok",
+    "3"
+   ],
+   "set_params": [
+    "ok",
+    [
+     "'estimator'",
+     "'estimatorParamMaps'",
+     "'evaluator'",
+     "'seed'"
+    ]
    ],
    "write_class": [
     "ok",

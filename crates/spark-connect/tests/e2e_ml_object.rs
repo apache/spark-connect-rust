@@ -9,11 +9,11 @@ use common::live_session;
 use spark_connect::column::col;
 use spark_connect::expression::Expression;
 use spark_connect::ml::{
-    attribute_relation, evaluated_summary, fetch, handle_overwrite, json_object, load_metadata,
-    read, read_model, read_operator, save_metadata, stage_path, summary_transform,
-    training_summary, write_object, write_operator, Estimator, FetchArg, KMeans, LinearSVC,
-    LinearSVCModel, Metadata, MlTarget, MlValue, MlVector, Model, ObjectModel, OperatorType,
-    RandomForestClassifier, Transformer,
+    attribute_relation, evaluated_summary, fetch, handle_overwrite, json_object, k_fold,
+    load_metadata, read, read_model, read_operator, save_metadata, stage_path, summary_transform,
+    train_validation_split, training_summary, write_object, write_operator, Estimator, FetchArg,
+    KMeans, LinearSVC, LinearSVCModel, Metadata, MlTarget, MlValue, MlVector, Model, ObjectModel,
+    OperatorType, RandomForestClassifier, Transformer,
 };
 use spark_connect::{Column, DataFrame, SparkSession};
 
@@ -341,5 +341,56 @@ fn ml_metadata_of_the_python_format_saves_loads_and_overwrites_as_pyspark() {
         stage_path("KMeans_0123456789ab", 3, 12, &format!("{path}/stages")),
         format!("{path}/stages/03_KMeans_0123456789ab")
     );
+    s.stop().unwrap();
+}
+
+#[test]
+fn ml_validators_split_their_datasets_as_pyspark() {
+    let Some(s) = live_session() else {
+        return;
+    };
+    let df = s
+        .sql("SELECT id, CAST(id % 2 AS INT) AS fold FROM range(20)")
+        .unwrap()
+        .coalesce(1);
+    let count = |df: &DataFrame| df.count().unwrap();
+    // A random split: each row is in the validation set of one fold, of `rand(seed)`.
+    let folds = k_fold(&df, 3, "", Some(7), "CrossValidator_0123456789ab").unwrap();
+    assert_eq!(folds.len(), 3);
+    let validated: i64 = folds.iter().map(|(_, validation)| count(validation)).sum();
+    assert_eq!(validated, 20);
+    for (train, validation) in &folds {
+        assert_eq!(count(train) + count(validation), 20);
+        assert!(train
+            .columns()
+            .unwrap()
+            .contains(&"CrossValidator_0123456789ab_rand".to_string()));
+    }
+    // The same seed splits the same rows.
+    let again = k_fold(&df, 3, "", Some(7), "CrossValidator_0123456789ab").unwrap();
+    assert_eq!(count(&folds[1].1), count(&again[1].1));
+    // A fold column: the rows of each fold number.
+    let folds = k_fold(&df, 2, "fold", None, "CrossValidator_0123456789ab").unwrap();
+    assert_eq!(count(&folds[0].1), 10);
+    assert_eq!(count(&folds[1].0), 10);
+    // A fold number out of the range fails the query of its fold, and an empty fold is an error.
+    let Err(error) = k_fold(&df, 1, "fold", None, "CrossValidator_0123456789ab") else {
+        panic!("a fold of a number out of the range is an error");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("Fold number must be in range [0, 1), but got 1"),
+        "{error}"
+    );
+    let Err(error) = k_fold(&df, 3, "fold", None, "CrossValidator_0123456789ab") else {
+        panic!("a fold of no rows is an error");
+    };
+    assert_eq!(error.message, "The validation data at fold 2 is empty.");
+    // A train validation split: the rows of `rand(seed)` of at least the ratio validate.
+    let (train, validation) = train_validation_split(&df, 0.75, Some(7), "TVS_0123456789ab");
+    assert_eq!(count(&train) + count(&validation), 20);
+    let (_, again) = train_validation_split(&df, 0.75, Some(7), "TVS_0123456789ab");
+    assert_eq!(count(&validation), count(&again));
     s.stop().unwrap();
 }

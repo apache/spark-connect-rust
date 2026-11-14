@@ -72,6 +72,10 @@ FULL = [
         ("feature", "VectorSlicer"),
         ("pipeline", "Pipeline"),
         ("pipeline", "PipelineModel"),
+        ("tuning", "CrossValidator"),
+        ("tuning", "CrossValidatorModel"),
+        ("tuning", "TrainValidationSplit"),
+        ("tuning", "TrainValidationSplitModel"),
     ]
 ]
 
@@ -160,6 +164,19 @@ def test_params_are_pyspark_mls(spec):
     assert [(p.parent, p.name, p.doc, p.typeConverter.__name__) for p in params] == [
         ("undefined", g["name"], g["doc"], g["converter"]) for g in golden
     ]
+
+
+def test_param_grid_builder_is_pysparks():
+    # The ParamGridBuilder of the native validators is PySpark's own class, whose param maps of
+    # the Params of any class they take.
+    try:
+        import pyspark._pyspark  # noqa: F401
+    except ImportError:
+        pytest.skip("of this client's native classes")
+    from pyspark.ml import tuning
+    from pyspark.ml.connect import tuning as native
+
+    assert native.ParamGridBuilder is tuning.ParamGridBuilder
 
 
 @pytest.mark.parametrize("name", list(CLASSES))
