@@ -20,8 +20,10 @@
 
 import hashlib
 import importlib.util
+import json
 from pathlib import Path
 import stat
+import shutil
 import struct
 import subprocess
 import sys
@@ -162,6 +164,67 @@ class NativePackagingTests(unittest.TestCase):
             for classifier, (filename, _, _) in packaging.PLATFORMS.items():
                 self.assertEqual(archive.read(f"META-INF/native/{classifier}/{filename}"),
                                  library_header(classifier))
+
+    def test_every_native_artifact_carries_jni_dependency_license_texts_and_notices(self):
+        jars = [self.package(classifier) for classifier in packaging.PLATFORMS]
+        jars.append(packaging.combine_jars(jars, self.output, self.version))
+        macos = [jar for jar in jars if jar.name.endswith(("macos-x86_64.jar", "macos-aarch64.jar"))]
+        jars.append(packaging.combine_jars(macos, self.output, self.version, macos_only=True))
+        for jar in jars:
+            with self.subTest(jar=jar.name), zipfile.ZipFile(jar) as archive:
+                license_text = archive.read("META-INF/LICENSE").decode("utf-8")
+                notice = archive.read("META-INF/NOTICE").decode("utf-8")
+                inventory = json.loads(archive.read("META-INF/native-dependencies.json"))
+                # These are actual linked components' obligations, independent of licenses().
+                self.assertIn("Copyright (c) Tokio Contributors", license_text)
+                self.assertIn("Copyright (c) 2025 Lucio Franco", license_text)
+                self.assertIn("Permission is hereby granted, free of charge", license_text)
+                self.assertIn("Redistribution and use in source and binary forms", license_text)
+                self.assertIn("Sun Microsystems", license_text)
+                self.assertIn("Dmitry Vyukov", license_text)
+                self.assertIn("Apache Arrow", notice)
+                self.assertNotIn("The Python and data components of the wheels", license_text)
+                self.assertEqual(inventory["root_package"], "spark-connect-jni")
+                self.assertEqual(set(inventory["targets"]), {
+                    "x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu",
+                    "x86_64-apple-darwin", "aarch64-apple-darwin",
+                })
+                for closure in inventory["targets"].values():
+                    names = {p[0] for p in closure["registry"]}
+                    self.assertTrue({"arrow", "tokio", "tonic", "tonic-prost", "zstd-sys"} <= names)
+                    self.assertFalse({"pyo3", "cc", "tonic-build", "prost-derive"} & names)
+                    self.assertEqual({p[0] for p in closure["workspace"]}, {
+                        "spark-connect-jni", "spark-connect-server", "apache-spark-connect-proto",
+                    })
+
+    def test_packaging_rejects_stale_cargo_inputs_before_creating_artifact(self):
+        root = self.directory / "source"
+        assets = packaging.native_licenses.OUTPUT
+        manifest = json.loads((packaging.REPOSITORY / assets / "dependencies.json").read_text())
+        for name in [*manifest["inputs"], *(str(assets / p) for p in
+                                          ["LICENSE-binary", "NOTICE-binary", "dependencies.json"])]:
+            destination = root / name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(packaging.REPOSITORY / name, destination)
+        (root / "Cargo.lock").write_text("changed dependency graph\n")
+        with patch.object(packaging, "REPOSITORY", root):
+            with self.assertRaisesRegex(ValueError, "stale native dependency licenses"):
+                self.package("linux-x86_64")
+        self.assertFalse(list(self.output.glob("*.jar")))
+
+    def test_combine_rejects_missing_or_changed_dependency_license_resources(self):
+        for resource in ("META-INF/LICENSE", "META-INF/NOTICE", "META-INF/native-dependencies.json"):
+            for missing in (False, True):
+                with self.subTest(resource=resource, missing=missing):
+                    jar = self.package("linux-x86_64")
+                    def change(entries):
+                        if missing:
+                            del entries[resource]
+                        else:
+                            entries[resource] = b"source-only license or stale dependency inventory"
+                    self.rewrite(jar, change)
+                    with self.assertRaisesRegex(ValueError, "license resources|missing resources"):
+                        packaging.combine_jars([jar], self.output, self.version)
 
     def test_combine_rejects_duplicate_platforms(self):
         jar = self.package("macos-aarch64")

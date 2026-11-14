@@ -51,6 +51,20 @@ class ShutdownEvidenceTest(unittest.TestCase):
         content = "Embedded Spark Engine shutdown failed: native stop incomplete\n"
         self.assertIsNotNone(shutdown_error(content, 128 + signal.SIGTERM))
 
+    def test_resource_cleanup_failure_is_rejected_even_with_marker(self):
+        for diagnostic in (
+            "JNI cleanup is incomplete; retained cleanup failed: cannot attach",
+            "Java engine handle cleanup failed: cannot enter Java engine context",
+        ):
+            with self.subTest(diagnostic=diagnostic):
+                content = diagnostic + "\n" + SHUTDOWN_COMPLETE + "\n"
+                self.assertIsNotNone(shutdown_error(content, 128 + signal.SIGTERM))
+
+    def test_successful_per_call_attachment_fallback_is_accepted(self):
+        content = ("JVM cleanup lane attachment failed; using per-call attachment: temporary failure\n"
+                   + SHUTDOWN_COMPLETE + "\n")
+        self.assertIsNone(shutdown_error(content, 128 + signal.SIGTERM))
+
     def test_abnormal_exit_is_rejected_even_with_marker(self):
         self.assertIsNotNone(shutdown_error(SHUTDOWN_COMPLETE + "\n", 1))
 

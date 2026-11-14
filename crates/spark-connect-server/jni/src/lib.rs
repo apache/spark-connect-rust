@@ -201,6 +201,7 @@ fn stop_server(id: i64) -> Result<(), String> {
         .stopping
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    server.backend.retry_failed_cleanup();
     if server
         .thread
         .lock()
@@ -228,16 +229,34 @@ fn stop_server(id: i64) -> Result<(), String> {
     {
         let _ = shutdown.send(());
     }
-    let result = match server.done.lock().unwrap_or_else(std::sync::PoisonError::into_inner).recv_timeout(Duration::from_secs(10)) {
-        Ok(result) => {
-            // Only the normal completion channel certifies that all activity
-            // drained before the runtime stopped. A joined thread alone cannot.
-            server.drained.store(true, Ordering::SeqCst);
-            result
-        },
-        Err(std_mpsc::RecvTimeoutError::Timeout) => return Err("JNI stop is incomplete; active JVM calls retained safely, retry close after they finish".into()),
-        Err(std_mpsc::RecvTimeoutError::Disconnected) => Err("JNI server completion channel closed without confirming teardown; drain state unknown".into()),
+    let completed = server
+        .done
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let result = loop {
+        if let Some(error) = server.backend.cleanup_failure() {
+            // The listener thread still owns the runtime and waits for the
+            // retained handles/leases. A later explicit close can retry them.
+            return Err(error);
+        }
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Err("JNI stop is incomplete; active JVM calls retained safely, retry close after they finish".into());
+        }
+        match completed.recv_timeout(remaining.min(Duration::from_millis(20))) {
+            Ok(result) => {
+                // Only this completion certifies drain and runtime stop.
+                server.drained.store(true, Ordering::SeqCst);
+                break result;
+            }
+            Err(std_mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std_mpsc::RecvTimeoutError::Disconnected) => {
+                break Err("JNI server completion channel closed without confirming teardown; drain state unknown".into());
+            }
+        }
     };
+    drop(completed);
     let mut result = result;
     if let Some(thread) = server
         .thread
@@ -466,6 +485,44 @@ mod tests {
         // Simulate the previously unfinished worker successfully detaching.
         core.set_worker_attachment_count_for_test(0);
         stop_server(id).unwrap();
+        assert!(find_server(id).is_err());
+    }
+
+    #[test]
+    fn failed_cleanup_preserves_the_listener_and_drain_state_until_explicit_retry() {
+        let core = engine::JvmEngine::new(ptr::null_mut());
+        let (shutdown, stopping) = oneshot::channel();
+        let (done, completed) = std_mpsc::channel();
+        let listener_core = core.clone();
+        let thread = std::thread::spawn(move || {
+            stopping.blocking_recv().unwrap();
+            // Failure arrives after stop_server's retry snapshot. The listener
+            // must keep waiting with its runtime alive until another close.
+            listener_core.fail_export_cleanup_for_test();
+            listener_core.wait_drained();
+            done.send(Ok(())).unwrap();
+        });
+        let id = -304;
+        servers().lock().unwrap().insert(
+            id,
+            Arc::new(ServerEntry {
+                address: "127.0.0.1:0".into(),
+                shutdown: Mutex::new(Some(shutdown)),
+                done: Mutex::new(completed),
+                thread: Mutex::new(Some(thread)),
+                stopping: Mutex::new(()),
+                drained: AtomicBool::new(false),
+                backend: core,
+            }),
+        );
+        let error = stop_server(id).unwrap_err();
+        assert!(error.starts_with("JNI cleanup is incomplete; retained cleanup failed:"));
+        let retained = find_server(id).unwrap();
+        assert!(!retained.drained.load(Ordering::SeqCst));
+        assert!(retained.thread.lock().unwrap().is_some());
+        stop_server(id).unwrap();
+        assert!(retained.drained.load(Ordering::SeqCst));
+        assert!(retained.thread.lock().unwrap().is_none());
         assert!(find_server(id).is_err());
     }
 }

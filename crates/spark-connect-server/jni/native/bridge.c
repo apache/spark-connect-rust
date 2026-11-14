@@ -151,15 +151,21 @@ static int exception_error(JNIEnv *env, BridgeBuffer *error) {
   return -1;
 }
 
-static void scope_leave(JavaScope *scope) {
-  if (scope->env == NULL) return;
+static void scope_restore_loader(JavaScope *scope) {
   JNIEnv *env = scope->env;
   if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
   if (scope->loader_changed) {
     (*env)->CallVoidMethod(env, scope->thread, scope->context->set_loader,
         scope->previous_loader);
     if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+    scope->loader_changed = 0;
   }
+}
+
+static void scope_leave(JavaScope *scope) {
+  if (scope->env == NULL) return;
+  JNIEnv *env = scope->env;
+  scope_restore_loader(scope);
   if (scope->previous_loader != NULL) (*env)->DeleteLocalRef(env, scope->previous_loader);
   if (scope->thread != NULL) (*env)->DeleteLocalRef(env, scope->thread);
   if (scope->framed) (*env)->PopLocalFrame(env, NULL);
@@ -210,20 +216,12 @@ failed:
 
 static void context_release(JavaContext *context) {
   if (atomic_fetch_sub_explicit(&context->references, 1, memory_order_acq_rel) != 1) return;
-  JavaScope scope;
-  if (scope_enter(context, &scope, NULL) == 0) {
-    JNIEnv *env = scope.env;
-    /* Restore before deleting the globals scope_leave uses. */
-    if (scope.loader_changed) {
-      (*env)->CallVoidMethod(env, scope.thread, context->set_loader, scope.previous_loader);
-      if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
-      scope.loader_changed = 0;
-    }
-    if (context->loader != NULL) (*env)->DeleteGlobalRef(env, context->loader);
-    (*env)->DeleteGlobalRef(env, context->thread_class);
-    scope_leave(&scope);
-  }
-  free(context);
+  // The factory cannot be freed while worker guards exist. Consequently detach
+  // never owns the last context reference, and must not reattach just to destroy it.
+  // Preserve an unexpected orphan rather than deleting globals without a valid env.
+  atomic_store_explicit(&context->references, 1, memory_order_release);
+  fputs("JNI cleanup is incomplete; retained cleanup failed: orphaned Java worker context\n",
+      stderr);
 }
 
 static jbyteArray byte_array(JNIEnv *env, const uint8_t *data, size_t len,
@@ -442,14 +440,17 @@ static void engine_delete_classes(JNIEnv *env, EngineApi *api) {
   }
 }
 
-static void engine_api_release(EngineApi *api) {
+static void engine_api_release(JNIEnv *env, EngineApi *api) {
   if (atomic_fetch_sub_explicit(&api->references, 1, memory_order_acq_rel) != 1) return;
-  JavaScope scope;
-  if (scope_enter(api->context, &scope, NULL) == 0) {
-    engine_delete_classes(scope.env, api);
-    scope_leave(&scope);
+  // Startup already supplies a valid Java environment. Do not risk another
+  // attachment after disposing the last handle.
+  engine_delete_classes(env, api);
+  JavaContext *context = api->context;
+  if (atomic_fetch_sub_explicit(&context->references, 1, memory_order_acq_rel) == 1) {
+    if (context->loader != NULL) (*env)->DeleteGlobalRef(env, context->loader);
+    (*env)->DeleteGlobalRef(env, context->thread_class);
+    free(context);
   }
-  context_release(api->context);
   free(api);
 }
 
@@ -583,7 +584,7 @@ static EngineHandle *engine_factory(JNIEnv *env, jobject factory, BridgeBuffer *
           "()[Lorg/apache/spark/sql/connect/nativebridge/engine/NativeArrowBatch$Node;", error) != 0)
     goto failed;
   EngineHandle *handle = engine_handle(env, api, factory, ENGINE_FACTORY, error);
-  engine_api_release(api);
+  engine_api_release(env, api);
   return handle;
 failed:
   (void) engine_exception(env, api, error);
@@ -807,11 +808,23 @@ typedef struct {
   int64_t *capacities;
 } ArrowNodePrivate;
 
-void spark_connect_engine_arrow_owner_free(void *raw_owner) {
+int spark_connect_engine_arrow_owner_free_checked(void *raw_owner, BridgeBuffer *error) {
+  clear_buffer(error);
   ArrowExportOwner *owner = raw_owner;
-  if (owner == NULL) return;
-  spark_connect_engine_free(owner->batch);
+  if (owner == NULL) return 0;
+  if (spark_connect_engine_free_checked(owner->batch, error) != 0) return -1;
   free(owner);
+  return 0;
+}
+
+void spark_connect_engine_arrow_owner_free(void *raw_owner) {
+  BridgeBuffer error = {0};
+  if (spark_connect_engine_arrow_owner_free_checked(raw_owner, &error) != 0) {
+    fputs("JNI cleanup is incomplete; retained cleanup failed: ", stderr);
+    (void) fwrite(error.data, 1, error.len, stderr);
+    fputc('\n', stderr);
+  }
+  spark_connect_buffer_free(&error);
 }
 
 static void arrow_owner_unref(ArrowExportOwner *owner) {
@@ -993,15 +1006,38 @@ int spark_connect_engine_next_arrow(void *raw_query, struct ArrowArray *out, voi
     void (*defer_release)(void *lease, void *owner), BridgeBuffer *error) {
   clear_buffer(error);
   EngineHandle *query = raw_query;
-  if (engine_check(query, ENGINE_QUERY, error) != 0) return -1;
-  if (out == NULL || out->release != NULL || lease == NULL || defer_release == NULL) {
+  if (lease == NULL || defer_release == NULL) {
     engine_error(error, 13, "invalid Java Arrow export destination or lease");
+    return -1;
+  }
+  if (engine_check(query, ENGINE_QUERY, error) != 0) {
+    defer_release(lease, NULL);
+    return -1;
+  }
+  if (out == NULL || out->release != NULL) {
+    engine_error(error, 13, "invalid Java Arrow export destination or lease");
+    defer_release(lease, NULL);
     return -1;
   }
   memset(out, 0, sizeof(*out));
   JavaScope scope;
-  if (engine_scope(query, &scope, error) != 0) return -1;
+  if (engine_scope(query, &scope, error) != 0) {
+    defer_release(lease, NULL);
+    return -1;
+  }
   JNIEnv *env = scope.env;
+  // Reserve the native owner before Java creates off-heap buffers. Every acquired
+  // batch then has a deferred cleanup slot, including descriptor-build failures.
+  ArrowExportOwner *owner = calloc(1, sizeof(*owner));
+  if (owner == NULL) {
+    engine_error(error, 8, "cannot allocate Java Arrow export owner");
+    scope_leave(&scope);
+    defer_release(lease, NULL);
+    return -1;
+  }
+  atomic_init(&owner->references, 1);
+  owner->lease = lease;
+  owner->defer_release = defer_release;
   jobject batch = (*env)->CallObjectMethod(env, query->object, query->api->next_arrow);
   int result = engine_exception(env, query->api, error);
   if (result != 0 || batch == NULL) {
@@ -1011,19 +1047,16 @@ int spark_connect_engine_next_arrow(void *raw_query, struct ArrowArray *out, voi
       (*env)->DeleteLocalRef(env, batch);
     }
     scope_leave(&scope);
+    arrow_owner_unref(owner);
     return result;
   }
   EngineHandle *batch_handle = engine_handle(env, query->api, batch, ENGINE_BATCH, error);
-  ArrowExportOwner *owner = NULL;
-  if (batch_handle != NULL) owner = calloc(1, sizeof(*owner));
-  if (batch_handle == NULL || owner == NULL) {
-    if (batch_handle != NULL) spark_connect_engine_free(batch_handle);
-    engine_error(error, 8, "cannot allocate Java Arrow export owner");
+  if (batch_handle == NULL) {
     (*env)->DeleteLocalRef(env, batch);
     scope_leave(&scope);
+    arrow_owner_unref(owner);
     return -1;
   }
-  atomic_init(&owner->references, 1); /* Temporary build owner. */
   owner->batch = batch_handle;
   jobject node = (*env)->CallObjectMethod(env, batch, query->api->descriptor);
   result = engine_exception(env, query->api, error);
@@ -1033,10 +1066,6 @@ int spark_connect_engine_next_arrow(void *raw_query, struct ArrowArray *out, voi
   if (node != NULL) (*env)->DeleteLocalRef(env, node);
   (*env)->DeleteLocalRef(env, batch);
   scope_leave(&scope);
-  if (result == 0) {
-    owner->lease = lease;
-    owner->defer_release = defer_release;
-  }
   arrow_owner_unref(owner);
   if (result != 0) {
     engine_normalize_error(error, "cannot export Java Arrow batch");
@@ -1117,26 +1146,57 @@ void spark_connect_engine_cancel(void *raw_task) {
   scope_leave(&scope);
 }
 
-void spark_connect_engine_free(void *raw_handle) {
+int spark_connect_engine_free_checked(void *raw_handle, BridgeBuffer *error) {
+  clear_buffer(error);
   EngineHandle *handle = raw_handle;
-  if (handle == NULL) return;
+  if (handle == NULL) return 0;
   EngineApi *api = handle->api;
-  JavaScope scope;
-  BridgeBuffer error = {0};
-  if (engine_scope(handle, &scope, &error) == 0) {
-    (*scope.env)->CallVoidMethod(scope.env, handle->object, api->close[handle->kind]);
-    (void) engine_exception(scope.env, api, &error);
-    (*scope.env)->DeleteGlobalRef(scope.env, handle->object);
-    scope_leave(&scope);
+  if (handle->kind == ENGINE_FACTORY
+      && atomic_load_explicit(&api->context->references, memory_order_acquire) != 1) {
+    engine_error(error, 13, "Java engine worker attachments remain during factory cleanup");
+    return -1;
   }
-  if (error.data != NULL) {
-    fputs("Java engine handle cleanup failed: ", stderr);
+  JavaScope scope;
+  if (engine_scope(handle, &scope, error) != 0) return -1;
+  JNIEnv *env = scope.env;
+  (*env)->CallVoidMethod(env, handle->object, api->close[handle->kind]);
+  if (engine_exception(env, api, error) != 0) {
+    scope_leave(&scope);
+    return -1;
+  }
+  (*env)->DeleteGlobalRef(env, handle->object);
+  // Delete final API/context globals in this valid scope, never by entering a
+  // second fallible JNI scope after ownership has already been consumed.
+  int final_api = atomic_fetch_sub_explicit(&api->references, 1, memory_order_acq_rel) == 1;
+  JavaContext *context = api->context;
+  int final_context = 0;
+  if (final_api) {
+    engine_delete_classes(env, api);
+    final_context = atomic_fetch_sub_explicit(&context->references, 1,
+        memory_order_acq_rel) == 1;
+    if (final_context) {
+      scope_restore_loader(&scope);
+      if (context->loader != NULL) (*env)->DeleteGlobalRef(env, context->loader);
+      (*env)->DeleteGlobalRef(env, context->thread_class);
+    }
+  }
+  scope_leave(&scope);
+  free(handle);
+  if (final_context) free(context);
+  if (final_api) free(api);
+  return 0;
+}
+
+void spark_connect_engine_free(void *raw_handle) {
+  BridgeBuffer error = {0};
+  if (spark_connect_engine_free_checked(raw_handle, &error) != 0) {
+    // Startup failures can have no registered Rust owner to retry. Preserve the
+    // C/Java resources for process lifetime and make the incomplete cleanup visible.
+    fputs("JNI cleanup is incomplete; retained cleanup failed: ", stderr);
     (void) fwrite(error.data, 1, error.len, stderr);
     fputc('\n', stderr);
-    spark_connect_buffer_free(&error);
   }
-  free(handle);
-  engine_api_release(api);
+  spark_connect_buffer_free(&error);
 }
 
 int64_t spark_connect_engine_native_start(void *raw_env, void *clazz, void *raw_address, void *raw_factory) {

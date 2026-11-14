@@ -87,7 +87,10 @@ extern "C" {
         defer_release: unsafe extern "C" fn(*mut c_void, *mut c_void),
         error: *mut BridgeBuffer,
     ) -> i32;
-    fn spark_connect_engine_arrow_owner_free(owner: *mut c_void);
+    fn spark_connect_engine_arrow_owner_free_checked(
+        owner: *mut c_void,
+        error: *mut BridgeBuffer,
+    ) -> i32;
     fn spark_connect_engine_analyze(
         session: *mut c_void,
         opcode: i32,
@@ -108,6 +111,7 @@ extern "C" {
     ) -> i32;
     fn spark_connect_engine_cancel(task: *mut c_void);
     fn spark_connect_engine_free(handle: *mut c_void);
+    fn spark_connect_engine_free_checked(handle: *mut c_void, error: *mut BridgeBuffer) -> i32;
 }
 
 fn engine_error(error: BridgeBuffer) -> Status {
@@ -132,6 +136,7 @@ struct Counts {
     exports: usize,
     handles: usize,
     tasks: HashMap<u64, Weak<Task>>,
+    failed_cleanup: Vec<FailedCleanup>,
 }
 pub(super) struct JvmEngine {
     factory: AtomicPtr<c_void>,
@@ -200,6 +205,16 @@ impl JvmEngine {
     pub(super) fn set_worker_attachment_count_for_test(&self, count: usize) {
         self.worker_attachments.store(count, Ordering::SeqCst);
     }
+    #[cfg(test)]
+    pub(super) fn fail_export_cleanup_for_test(self: &Arc<Self>) {
+        cleanup_with(
+            Cleanup::Arrow {
+                owner: 0,
+                lease: ExportLease::new(self.clone()),
+            },
+            |_, _| Err(Status::internal("injected Arrow cleanup failure")),
+        );
+    }
     pub(super) fn shutdown(&self) {
         let tasks = {
             let counts = self
@@ -231,6 +246,35 @@ impl JvmEngine {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
         }
     }
+    pub(super) fn cleanup_failure(&self) -> Option<String> {
+        let counts = self
+            .counts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        counts.failed_cleanup.first().map(|failure| {
+            format!(
+                "JNI cleanup is incomplete; retained cleanup failed: {} ({} pending); retry close after the failure is resolved",
+                failure.error,
+                counts.failed_cleanup.len()
+            )
+        })
+    }
+    fn take_failed_cleanup(&self) -> Vec<FailedCleanup> {
+        std::mem::take(
+            &mut self
+                .counts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .failed_cleanup,
+        )
+    }
+    /// Only an explicit owner close retries failed cleanup. Preserve each item's
+    /// original lane, Java ownership, admission and Arrow lease until success.
+    pub(super) fn retry_failed_cleanup(&self) {
+        for failure in self.take_failed_cleanup() {
+            queue(failure.item);
+        }
+    }
     fn take_factory_after_drain(&self) -> Result<*mut c_void, String> {
         if !self.closed.load(Ordering::SeqCst) {
             return Err("Spark engine factory release requires shutdown".into());
@@ -251,12 +295,27 @@ impl JvmEngine {
     /// The host holds its stopping mutex, serializing this synchronous release
     /// with retries, and retains the engine until the native free returns.
     pub(super) fn release_factory(&self) -> Result<(), String> {
+        self.release_factory_with(release_native)
+    }
+    fn release_factory_with(
+        &self,
+        release: impl FnOnce(CleanupResource, usize) -> Result<(), Status>,
+    ) -> Result<(), String> {
         let factory = self.take_factory_after_drain()?;
         // stop_server retains its own Arc throughout this call, so Drop cannot
         // race to free the factory. Cleanup workers may still hold harmless core
         // Arcs after publishing zero counters; their later drops see null.
-        unsafe { spark_connect_engine_free(factory) };
-        Ok(())
+        match release(CleanupResource::Handle, factory as usize) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                // The checked ABI did not consume the handle. The host stopping
+                // mutex excludes another close; retain the same factory for retry.
+                self.factory.store(factory, Ordering::SeqCst);
+                Err(format!(
+                    "JNI cleanup is incomplete; retained cleanup failed: {error}"
+                ))
+            }
+        }
     }
     async fn admit_session(
         self: &Arc<Self>,
@@ -455,6 +514,15 @@ enum Cleanup {
         action: Box<dyn FnOnce() + Send>,
     },
 }
+struct FailedCleanup {
+    item: Cleanup,
+    error: Status,
+}
+#[derive(Clone, Copy)]
+enum CleanupResource {
+    Handle,
+    Arrow,
+}
 impl Cleanup {
     fn core(&self) -> Option<&Arc<JvmEngine>> {
         match self {
@@ -622,27 +690,62 @@ fn cleanup_sender(lane: CleanupLane) -> &'static Result<mpsc::Sender<Cleanup>, S
         Ok(tx)
     })
 }
-fn cleanup(item: Cleanup) {
-    match item {
-        Cleanup::Arrow { owner, lease } => {
-            unsafe {
-                spark_connect_engine_arrow_owner_free(owner as *mut c_void);
+fn release_native(resource: CleanupResource, pointer: usize) -> Result<(), Status> {
+    let mut error = BridgeBuffer::default();
+    let result = unsafe {
+        match resource {
+            CleanupResource::Handle => {
+                spark_connect_engine_free_checked(pointer as *mut c_void, &mut error)
             }
+            CleanupResource::Arrow => {
+                spark_connect_engine_arrow_owner_free_checked(pointer as *mut c_void, &mut error)
+            }
+        }
+    };
+    if result != 0 {
+        Err(engine_error(error))
+    } else {
+        let _ = take_buffer(error);
+        Ok(())
+    }
+}
+fn cleanup(item: Cleanup) {
+    cleanup_with(item, release_native);
+}
+fn cleanup_with(item: Cleanup, release: impl FnOnce(CleanupResource, usize) -> Result<(), Status>) {
+    let result = match &item {
+        Cleanup::Arrow { owner, .. } => release(CleanupResource::Arrow, *owner),
+        Cleanup::Free { pointer, .. } => release(CleanupResource::Handle, *pointer),
+        _ => Ok(()),
+    };
+    if let Err(error) = result {
+        eprintln!("JNI cleanup is incomplete; retained cleanup failed: {error}");
+        // This deliberate core/item cycle retains the raw Java ownership and
+        // budgets even if the request disappears. Explicit close breaks it by
+        // requeuing the item; a permanent Java cleanup error remains retained.
+        let core = item.core().expect("native cleanup has an engine").clone();
+        core.counts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .failed_cleanup
+            .push(FailedCleanup { item, error });
+        core.drained.notify_all();
+        return;
+    }
+    match item {
+        Cleanup::Arrow { lease, .. } => {
             drop(lease);
         }
         Cleanup::Cancel(handle) => unsafe {
             spark_connect_engine_cancel(handle.pointer());
         },
         Cleanup::Free {
-            pointer,
+            pointer: _,
             core,
             permit,
             lane: _,
             retained_task,
         } => {
-            unsafe {
-                spark_connect_engine_free(pointer as *mut c_void);
-            }
             // Publish resource/admission release before reporting this handle
             // drained. Query dependencies may schedule their own Task free.
             drop(retained_task);
@@ -691,9 +794,9 @@ impl Drop for ExportLease {
         self.0.drained.notify_all();
     }
 }
-// C only invokes this after ownership was transferred on a successful export.
-// Normally queues Java cleanup instead of closing the allocator on the Buffer
-// drop thread. If the cleanup worker is unavailable, queue releases inline.
+// C consumes the lease on every result, and invokes this after EOF/error or the
+// final imported Buffer release. Java cleanup normally runs on its own lane;
+// if that worker is unavailable, queue releases inline.
 unsafe extern "C" fn defer_arrow_release(lease: *mut c_void, owner: *mut c_void) {
     let lease = unsafe { Box::from_raw(lease.cast::<ExportLease>()) };
     queue(Cleanup::Arrow {
@@ -1097,9 +1200,8 @@ impl PreparedQuery for JvmQuery {
                             )
                         };
                         if result != 1 {
-                            // C transfers the lease only on success. Partial C
-                            // descriptors are released by C before returning an error.
-                            drop(unsafe { Box::from_raw(lease_pointer) });
+                            // C consumes the lease on every outcome. Partial
+                            // exports retain it through deferred Java cleanup too.
                             if result < 0 {
                                 return Err(engine_error(error));
                             }
@@ -1850,6 +1952,147 @@ mod tests {
         queue(Cleanup::Arrow { owner: 0, lease });
         drained_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         waiter.join().unwrap();
+    }
+    #[test]
+    fn failed_cleanup_retains_session_admission_until_explicit_retry() {
+        let core = JvmEngine::new(std::ptr::null_mut());
+        let permit = core
+            .session_permits
+            .clone()
+            .try_acquire_many_owned(64)
+            .unwrap();
+        core.counts.lock().unwrap().handles += 1;
+        let item = Cleanup::Free {
+            pointer: 0,
+            core: core.clone(),
+            permit: Some(permit),
+            lane: CleanupLane::Session,
+            retained_task: None,
+        };
+        let attempts = AtomicUsize::new(0);
+        cleanup_with(item, |resource, pointer| {
+            assert!(matches!(resource, CleanupResource::Handle));
+            assert_eq!(pointer, 0);
+            attempts.fetch_add(1, Ordering::SeqCst);
+            Err(Status::internal("injected Java close failure"))
+        });
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(core.session_permits.available_permits(), 0);
+        assert_eq!(core.counts.lock().unwrap().handles, 1);
+        assert!(core
+            .cleanup_failure()
+            .unwrap()
+            .contains("injected Java close failure"));
+        let mut failed = core.take_failed_cleanup();
+        assert_eq!(failed.len(), 1);
+        assert!(matches!(failed[0].item.lane(), CleanupLane::Session));
+        cleanup_with(failed.pop().unwrap().item, |_, _| {
+            attempts.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(core.session_permits.available_permits(), 64);
+        assert_eq!(core.counts.lock().unwrap().handles, 0);
+        assert!(core.cleanup_failure().is_none());
+    }
+    #[test]
+    fn failed_query_cleanup_retains_its_task_and_retries_on_the_query_lane() {
+        let _serial = CLEANUP_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let core = JvmEngine::new(std::ptr::null_mut());
+        let permit = core.permits.clone().try_acquire_many_owned(64).unwrap();
+        let task = empty_handle(&core, HandleKind::Task, Some(permit), None);
+        core.counts.lock().unwrap().handles += 1;
+        cleanup_with(
+            Cleanup::Free {
+                pointer: 0,
+                core: core.clone(),
+                permit: None,
+                lane: CleanupLane::Query,
+                retained_task: Some(task),
+            },
+            |_, _| Err(Status::internal("injected query close failure")),
+        );
+        cleanup_fence(CleanupLane::Task);
+        assert_eq!(core.permits.available_permits(), 0);
+        assert_eq!(core.counts.lock().unwrap().handles, 2);
+        let blocked = block_cleanup(CleanupLane::Query);
+        core.retry_failed_cleanup();
+        cleanup_fence(CleanupLane::Task);
+        assert_eq!(core.permits.available_permits(), 0);
+        assert_eq!(core.counts.lock().unwrap().handles, 2);
+        drop(blocked);
+        cleanup_fence(CleanupLane::Query);
+        cleanup_fence(CleanupLane::Task);
+        assert_eq!(core.permits.available_permits(), 64);
+        assert_eq!(core.counts.lock().unwrap().handles, 0);
+        assert!(core.cleanup_failure().is_none());
+    }
+    #[test]
+    fn failed_arrow_cleanup_keeps_shutdown_pending_until_successful_retry() {
+        let core = JvmEngine::new(std::ptr::null_mut());
+        let lease = ExportLease::new(core.clone());
+        cleanup_with(Cleanup::Arrow { owner: 0, lease }, |resource, _| {
+            assert!(matches!(resource, CleanupResource::Arrow));
+            Err(Status::internal("injected Arrow allocator close failure"))
+        });
+        assert_eq!(core.counts.lock().unwrap().exports, 1);
+        core.shutdown();
+        let waiting = core.clone();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            waiting.wait_drained();
+            done_tx.send(()).unwrap();
+        });
+        started_rx.recv().unwrap();
+        assert!(done_rx.recv_timeout(Duration::from_millis(20)).is_err());
+        core.retry_failed_cleanup();
+        done_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        waiter.join().unwrap();
+        assert_eq!(core.counts.lock().unwrap().exports, 0);
+        assert!(core.cleanup_failure().is_none());
+    }
+    #[test]
+    fn cleanup_retry_snapshot_preserves_failures_arriving_during_retry() {
+        let core = JvmEngine::new(std::ptr::null_mut());
+        cleanup_with(empty_cleanup(&core), |_, _| Err(Status::internal("first")));
+        let mut retry = core.take_failed_cleanup();
+        cleanup_with(empty_cleanup(&core), |_, _| {
+            Err(Status::internal("concurrent"))
+        });
+        cleanup_with(retry.pop().unwrap().item, |_, _| Ok(()));
+        assert_eq!(core.counts.lock().unwrap().handles, 1);
+        assert!(core.cleanup_failure().unwrap().contains("concurrent"));
+        let mut remaining = core.take_failed_cleanup();
+        assert_eq!(remaining.len(), 1);
+        cleanup_with(remaining.pop().unwrap().item, |_, _| Ok(()));
+        assert_eq!(core.counts.lock().unwrap().handles, 0);
+    }
+    #[test]
+    fn failed_factory_cleanup_restores_the_same_handle_for_explicit_retry() {
+        let token = std::ptr::NonNull::<u8>::dangling().as_ptr().cast();
+        // Do not let an assertion unwind send the opaque token to real JNI.
+        let core = std::mem::ManuallyDrop::new(JvmEngine::new(token));
+        core.shutdown();
+        let error = core
+            .release_factory_with(|resource, pointer| {
+                assert!(matches!(resource, CleanupResource::Handle));
+                assert_eq!(pointer, token as usize);
+                Err(Status::internal("injected factory close failure"))
+            })
+            .unwrap_err();
+        assert!(error.starts_with("JNI cleanup is incomplete; retained cleanup failed:"));
+        assert_eq!(core.factory.load(Ordering::SeqCst), token);
+        core.release_factory_with(|_, pointer| {
+            assert_eq!(pointer, token as usize);
+            Ok(())
+        })
+        .unwrap();
+        assert!(core.factory.load(Ordering::SeqCst).is_null());
+        drop(std::mem::ManuallyDrop::into_inner(core));
     }
     struct CleanupBlock(mpsc::Sender<()>);
     impl Drop for CleanupBlock {

@@ -18,6 +18,7 @@
 package org.apache.spark.sql.connect.nativebridge.engine;
 
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -38,15 +39,20 @@ public final class NativeArrowBatch implements AutoCloseable {
   private final BufferAllocator allocator;
   private final Node descriptor;
   private final AtomicBoolean closed = new AtomicBoolean();
+  private final Set<NativeArrowBatch> owners;
+  private Throwable closeFailure;
+  private boolean closeComplete;
 
-  NativeArrowBatch(VectorSchemaRoot root, BufferAllocator allocator) {
+  NativeArrowBatch(VectorSchemaRoot root, BufferAllocator allocator, Set<NativeArrowBatch> owners) {
     this.root = root;
     this.allocator = allocator;
+    this.owners = owners;
     List<FieldVector> fields = root.getFieldVectors();
     Node[] children = new Node[fields.size()];
     for (int i = 0; i < fields.size(); i++) children[i] = node(fields.get(i));
     // A RecordBatch is exported as one non-null struct with the field arrays as children.
     descriptor = new Node(root.getRowCount(), 0, new long[] {0}, new long[] {0}, children);
+    owners.add(this);
     LIVE_BATCHES.incrementAndGet();
   }
 
@@ -89,25 +95,36 @@ public final class NativeArrowBatch implements AutoCloseable {
   }
 
   @Override
-  public void close() {
-    if (closed.compareAndSet(false, true)) {
-      Throwable failure = null;
-      try {
-        root.close();
-      } catch (Throwable error) {
-        failure = error;
-      }
-      try {
-        allocator.close();
-      } catch (Throwable error) {
-        if (failure == null) failure = error;
-        else if (failure != error) failure.addSuppressed(error);
-      } finally {
-        LIVE_BATCHES.decrementAndGet();
-      }
-      if (failure instanceof Error) throw (Error) failure;
-      if (failure instanceof RuntimeException) throw (RuntimeException) failure;
-      if (failure != null) throw new SparkJvmEngine.EngineException(13, "native Arrow batch cleanup failed", failure);
+  public synchronized void close() {
+    checkCloseFailure();
+    if (closeComplete) return;
+    closed.set(true);
+    Throwable failure = null;
+    try {
+      root.close();
+    } catch (Throwable error) {
+      failure = error;
+    }
+    try {
+      allocator.close();
+    } catch (Throwable error) {
+      if (failure == null) failure = error;
+      else if (failure != error) failure.addSuppressed(error);
+    }
+    // Arrow cleanup can partially release reference-counted buffers before throwing. Retain
+    // the owner and the original failure; repeating that cleanup could release them twice.
+    closeFailure = failure;
+    checkCloseFailure();
+    owners.remove(this);
+    LIVE_BATCHES.decrementAndGet();
+    closeComplete = true;
+  }
+
+  synchronized void checkCloseFailure() {
+    if (closeFailure instanceof Error) throw (Error) closeFailure;
+    if (closeFailure instanceof RuntimeException) throw (RuntimeException) closeFailure;
+    if (closeFailure != null) {
+      throw new SparkJvmEngine.EngineException(13, "native Arrow batch cleanup failed", closeFailure);
     }
   }
 

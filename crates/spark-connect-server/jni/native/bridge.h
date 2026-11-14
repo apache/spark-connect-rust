@@ -80,17 +80,23 @@ struct ArrowArray {
 };
 #endif
 
-/* Only success (1) transfers lease to the exported array. EOF/error leave it with caller.
- * defer_release runs on the final consumer thread and must queue owner disposal.
- * spark_connect_engine_arrow_owner_free closes Java buffers and is called by that queue's JNI worker. */
+/* A non-null lease/callback pair transfers ownership on every outcome, including EOF/error.
+ * defer_release runs on the final consumer thread (or immediately when no array is returned)
+ * and must queue owner disposal; owner may be NULL when no Java batch was acquired.
+ * Checked cleanup retains the owner on failure, so its caller can retry without losing the lease. */
 int spark_connect_engine_next_arrow(void *query, struct ArrowArray *out, void *lease,
     void (*defer_release)(void *lease, void *owner), BridgeBuffer *error);
 int64_t spark_connect_engine_arrow_buffer_size(const struct ArrowArray *array, int64_t index);
 void spark_connect_engine_arrow_owner_free(void *owner);
+int spark_connect_engine_arrow_owner_free_checked(void *owner, BridgeBuffer *error);
 int spark_connect_engine_config(void *session, int32_t opcode, const uint8_t *fields, size_t len,
     void *task, BridgeBuffer *out, BridgeBuffer *error);
 void spark_connect_engine_cancel(void *task);
 void spark_connect_engine_free(void *handle);
+/* Success consumes the handle. Failure retains its Java global reference and API ownership.
+ * Retrying is safe only when the Java owner's close contract permits it; the supplied adapter
+ * preserves non-retryable Java close errors rather than repeating partial side effects. */
+int spark_connect_engine_free_checked(void *handle, BridgeBuffer *error);
 
 int64_t spark_connect_engine_native_start(void *env, void *clazz, void *address, void *factory);
 void *spark_connect_engine_native_address(void *env, void *clazz, int64_t id);

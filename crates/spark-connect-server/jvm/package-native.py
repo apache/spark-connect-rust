@@ -20,6 +20,7 @@
 
 import argparse
 import hashlib
+import importlib.util
 import os
 from pathlib import Path
 import platform
@@ -32,6 +33,11 @@ import zipfile
 
 PROJECT = Path(__file__).resolve().parent.parent
 REPOSITORY = PROJECT.parent.parent
+LICENSE_SPEC = importlib.util.spec_from_file_location(
+    "native_binary_licenses", REPOSITORY / "scripts/gen_native_binary_licenses.py"
+)
+native_licenses = importlib.util.module_from_spec(LICENSE_SPEC)
+LICENSE_SPEC.loader.exec_module(native_licenses)
 ABI_VERSION = "1"
 MAX_LIBRARY_SIZE = 512 * 1024 * 1024
 MAX_METADATA_SIZE = 16 * 1024
@@ -131,11 +137,9 @@ def parse_properties(data):
 
 
 def licenses():
-    result = {"META-INF/LICENSE": (REPOSITORY / "LICENSE").read_bytes()}
-    notice = REPOSITORY / "NOTICE"
-    if notice.is_file():
-        result["META-INF/NOTICE"] = notice.read_bytes()
-    return result
+    # These assets cover spark-connect-jni's own normal dependency closure on all
+    # four targets. Check their Cargo/source and content hashes before packaging.
+    return native_licenses.load_bundle(REPOSITORY)
 
 
 def write_jar(path, entries):
@@ -250,7 +254,7 @@ def combine_jars(jars, output_dir, version, *, macos_only=False):
             if set(archive.namelist()) != expected_names:
                 raise ValueError("platform JAR contains unexpected or missing resources")
             for name, data in licenses().items():
-                if archive.read(name) != data:
+                if archive.getinfo(name).file_size != len(data) or archive.read(name) != data:
                     raise ValueError("platform JAR license resources do not match this source")
             info = archive.getinfo(library_name)
             if info.file_size > MAX_LIBRARY_SIZE:

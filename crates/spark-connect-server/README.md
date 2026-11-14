@@ -103,6 +103,14 @@ The native library is process-lived; unloading it while the JVM continues runnin
 is unsupported. A failed drain is reported, and resources can remain retained
 until teardown succeeds or the process exits.
 
+If `NativeEngineServer.close()` reports a JNI attachment failure, the server keeps
+its cleanup handles and admission reservations; a later explicit `close()` can
+retry after attachment recovers. A Java cleanup exception can occur after Spark
+or Arrow has released only part of a resource. Such failures retain their owners
+and the original error until JVM exit. Repeated `close()` calls report that error
+without replaying potentially non-idempotent cleanup or claiming a successful
+drain. Restart the hosting JVM to recover from a persistent cleanup failure.
+
 ## Bundle native libraries in JARs
 
 The Java adapter is shared across operating systems and CPU architectures for a
@@ -129,6 +137,14 @@ platform. Selecting another platform does not cross-compile the library.
 Native JAR entries use ZIP DEFLATE compression at level 9. Archive metadata is
 normalized for reproducible packaging with the same toolchain; compressed bytes
 can differ between zlib versions.
+
+Every platform, all-platform and macOS universal JAR includes the license and
+notice texts for the JNI library's normal, non-proc-macro dependencies across
+all four supported Cargo targets. They are stored in `META-INF/LICENSE`,
+`META-INF/NOTICE` and `META-INF/native-dependencies.json`. After changing dependency
+or manifest inputs, run `python3 scripts/gen_native_binary_licenses.py` and commit
+the regenerated `jvm/native-licenses/` assets. Packaging checks their recorded
+input and content hashes without running Cargo.
 
 For example, launch the packaged native library on macOS ARM64:
 
@@ -269,6 +285,15 @@ cleanup to drain, or by restarting the server. Releasing an operation or closing
 its result stream can also release its task capacity; it does not release the
 session. Abandoned sessions whose identifiers are lost remain until a restart.
 
+Deferred session closes run serially on one process-wide cleanup lane shared by
+all embedded engines using the native library. A slow or blocked session close
+therefore delays later session cleanup and session-capacity recovery in other
+engines too. Session permits remain reserved until the corresponding Java close
+completes successfully. Task cancellation and Arrow release use a separate lane,
+and query cleanup has its own lane, so session teardown does not directly block
+their task-capacity recovery. These lanes do not isolate engines from other
+shared Spark resources or from a query's own slow cleanup.
+
 The frontend limits each decoded gRPC request to 64 MiB. JNI byte payloads and
 the retained Arrow buffer capacities of one imported batch are also capped at
 64 MiB. Each Arrow IPC response payload is limited to 3 MiB; larger batches are
@@ -323,9 +348,10 @@ crates/spark-connect-server/jvm/test-engine.sh \
   --rust-example "$PWD/target/release/examples/rust_client"
 ```
 
-This compiles Java tests, checks direct planning, Arrow ownership and native
-lifecycle with `-Xcheck:jni`, then runs official PySpark and raw gRPC acceptance
-against `EmbeddedSparkEngine`. It checks JVM listener ownership, shutdown and
+This compiles Java tests, checks direct planning, Arrow ownership, native
+lifecycle and cleanup-failure retention with `-Xcheck:jni`, then runs official
+PySpark and raw gRPC acceptance against `EmbeddedSparkEngine`. It checks JVM
+listener ownership, shutdown and
 listener closure. The Python interpreter must have a compatible official PySpark
 Connect client, gRPC and PyArrow installed. Listener checks prefer `lsof` when it
 is installed and otherwise use Linux `/proc`; macOS requires `lsof`.

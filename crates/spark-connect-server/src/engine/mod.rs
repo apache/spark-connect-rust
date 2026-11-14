@@ -86,7 +86,11 @@ pub enum PreparedOperation {
 #[allow(clippy::double_must_use)]
 #[tonic::async_trait]
 pub trait PreparedQuery: Send {
-    /// The schema of every batch returned by execute.
+    /// The declared Spark schema. Batches must have the same field names and
+    /// Spark-visible types; equivalent Arrow representations are accepted.
+    /// Batch nullability and metadata may differ and remain in each IPC batch,
+    /// while the protocol schema header uses this declaration. The declared
+    /// fields must not contain metadata, which Spark schema conversion rejects.
     fn schema(&self) -> SchemaRef;
 
     /// Dropping this future or its returned stream must cancel backend work;

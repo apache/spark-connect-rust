@@ -63,7 +63,9 @@ public final class NativeEngineServer implements AutoCloseable {
 
   /**
    * Drain native work and close the owned engine. Repeated successful closes are harmless;
-   * failed teardown retains the handle and engine resources so the owner can retry.
+   * failed teardown retains the handle and engine resources. A later close can retry a JNI
+   * attachment failure. A partial Java cleanup failure keeps reporting its original error
+   * until JVM exit rather than replaying cleanup that may not be idempotent.
    */
   @Override
   public synchronized void close() {

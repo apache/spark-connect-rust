@@ -40,6 +40,9 @@ def shutdown_error(content, exit_code, marker=SHUTDOWN_COMPLETE):
     if re.search(r"shutdown failed|JNI stop is incomplete|native stop incomplete", content,
                  flags=re.IGNORECASE):
         return "embedded server reported failed or incomplete shutdown"
+    if re.search(r"JNI cleanup is incomplete|Java engine handle cleanup failed", content,
+                 flags=re.IGNORECASE):
+        return "embedded server reported failed resource cleanup"
     if marker not in content.splitlines():
         return "embedded server omitted successful cleanup marker"
     if exit_code not in (0, -signal.SIGTERM, 128 + signal.SIGTERM):
@@ -172,6 +175,11 @@ def main():
             str(tests_jar), str(library)])
         if "NATIVE_ENGINE_LIFECYCLE_OK" not in engine_lifecycle.stdout:
             raise RuntimeError("native engine lifecycle success marker missing")
+        cleanup_failure = run("cleanup-failure", common + ["--class",
+            "org.apache.spark.sql.connect.nativebridge.engine.CleanupFailureTest",
+            str(tests_jar), str(library)])
+        if "CLEANUP_FAILURE_OK" not in cleanup_failure.stdout:
+            raise RuntimeError("cleanup failure retention success marker missing")
         # A private JVM temp root lets the check prove extracted library cleanup at exit.
         native_temp = build / "native-temp"
         native_temp.mkdir()

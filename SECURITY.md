@@ -50,6 +50,12 @@ recover capacity, or restart the server. Abandoned sessions whose identifiers
 are lost remain until a restart. These admission bounds do not prevent one
 admitted query from consuming the hosting process's available resources.
 
+Failed JNI cleanup retains its handles, Arrow leases and admission permits and
+prevents a successful native shutdown. Retrying server close can recover from a
+temporary JNI attachment failure. A Java cleanup exception may follow partial
+Spark or Arrow teardown; it remains recorded and is rethrown without repeating
+those side effects. Such retained failures require restarting the hosting JVM.
+
 See the [server guide](crates/spark-connect-server/README.md) for its supported
 operations, platform requirements and lifecycle limits. Apache Spark's security
 configuration does not automatically apply to this experimental Rust listener.

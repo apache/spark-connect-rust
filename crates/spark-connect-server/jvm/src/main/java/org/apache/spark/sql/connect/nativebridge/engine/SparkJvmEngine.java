@@ -120,6 +120,9 @@ public final class SparkJvmEngine implements AutoCloseable {
   private final AtomicBoolean closed = new AtomicBoolean();
   private final Set<Session> sessions = ConcurrentHashMap.newKeySet();
   private final Set<Task> tasks = ConcurrentHashMap.newKeySet();
+  private final Set<NativeArrowBatch> batches = ConcurrentHashMap.newKeySet();
+  private boolean closeComplete;
+  private Throwable closeFailure;
 
   public SparkJvmEngine(SparkSession session) {
     this(session, ArrowUtils$.MODULE$.rootAllocator());
@@ -177,19 +180,30 @@ public final class SparkJvmEngine implements AutoCloseable {
   /**
    * Idempotently release this engine's tasks and sessions without stopping the shared
    * SparkContext. Once passed to NativeEngineServer, drain that server before calling this.
+   * A partial cleanup failure remains visible on later closes without replaying its side effects.
    */
   @Override
-  public void close() {
-    if (closed.compareAndSet(false, true)) {
-      Throwable failure = null;
-      for (Task task : tasks) {
-        try { task.cancel(); } catch (Throwable error) { failure = recordFailure(failure, error); }
-      }
-      for (Session session : sessions) {
-        try { session.close(); } catch (Throwable error) { failure = recordFailure(failure, error); }
-      }
-      throwFailure(failure);
+  public synchronized void close() {
+    throwFailure(closeFailure);
+    if (closeComplete) return;
+    closed.set(true);
+    Throwable failure = null;
+    for (Task task : tasks) {
+      try { task.close(); } catch (Throwable error) { failure = recordFailure(failure, error); }
     }
+    for (Session session : sessions) {
+      try { session.close(); } catch (Throwable error) { failure = recordFailure(failure, error); }
+    }
+    // Healthy leases remain independently owned by their native arrays. Failed batch cleanup
+    // must remain visible even if JNI could not acquire its initial global reference.
+    for (NativeArrowBatch batch : batches) {
+      try { batch.checkCloseFailure(); } catch (Throwable error) {
+        failure = recordFailure(failure, error);
+      }
+    }
+    closeFailure = failure;
+    throwFailure(failure);
+    closeComplete = true;
   }
 
   @FunctionalInterface
@@ -234,21 +248,30 @@ public final class SparkJvmEngine implements AutoCloseable {
     private boolean completed;
     private boolean executionStarted;
     private Thread running;
+    private final Object cancellation = new Object();
+    private Throwable cancellationFailure;
 
     private Task(String description) { this.description = description; }
 
     public void cancel() {
-      boolean cancelJobs;
-      synchronized (this) {
-        if (completed || cancelled) return;
-        cancelled = true;
-        if (running != null) running.interrupt();
-        cancelJobs = executionStarted || running != null;
+      synchronized (cancellation) {
+        throwFailure(cancellationFailure);
+        try {
+          boolean cancelJobs;
+          synchronized (this) {
+            if (completed || cancelled) return;
+            cancelled = true;
+            if (running != null) running.interrupt();
+            cancelJobs = executionStarted || running != null;
+          }
+          // Active preparation/analysis can submit Spark jobs too (for example, parallel file
+          // listing). An idle task that never began fetching has no scheduler work to cancel.
+          if (cancelJobs) sparkContext.cancelJobGroupAndFutureJobs(jobGroup);
+        } catch (Throwable error) {
+          cancellationFailure = error;
+          throw error;
+        }
       }
-      // Active preparation/analysis can submit Spark jobs too (for example, parallel file
-      // listing). Skip scheduler cancellation only for an idle task that never began fetching;
-      // this keeps completed user-error cleanup quiet without leaving active jobs behind.
-      if (cancelJobs) sparkContext.cancelJobGroupAndFutureJobs(jobGroup);
     }
 
     private synchronized boolean isCancelled() { return cancelled; }
@@ -327,11 +350,8 @@ public final class SparkJvmEngine implements AutoCloseable {
 
     @Override
     public void close() {
-      try {
-        cancel();
-      } finally {
-        tasks.remove(this);
-      }
+      cancel();
+      tasks.remove(this);
     }
   }
 
@@ -343,6 +363,8 @@ public final class SparkJvmEngine implements AutoCloseable {
     private final AtomicBoolean released = new AtomicBoolean();
     private final Set<Query> queries = ConcurrentHashMap.newKeySet();
     private final Set<Task> activeTasks = ConcurrentHashMap.newKeySet();
+    private boolean closeComplete;
+    private Throwable closeFailure;
 
     private Session(String userId, String sessionId) {
       spark = base.newSession();
@@ -553,15 +575,20 @@ public final class SparkJvmEngine implements AutoCloseable {
     }
 
     @Override
-    public void close() {
-      if (released.compareAndSet(false, true)) {
-        Throwable failure = null;
-        for (Task task : activeTasks) {
-          try { task.cancel(); } catch (Throwable error) { failure = recordFailure(failure, error); }
-        }
-        for (Query query : queries) {
-          try { query.close(); } catch (Throwable error) { failure = recordFailure(failure, error); }
-        }
+    public synchronized void close() {
+      throwFailure(closeFailure);
+      if (closeComplete) return;
+      released.set(true);
+      Throwable failure = null;
+      for (Task task : activeTasks) {
+        try { task.cancel(); } catch (Throwable error) { failure = recordFailure(failure, error); }
+      }
+      for (Query query : queries) {
+        try { query.close(); } catch (Throwable error) { failure = recordFailure(failure, error); }
+      }
+      // A partial Spark cleanup is not generally replayable (for example, artifact cache
+      // cleanup decrements reference counts). Preserve the failure and its owners instead.
+      if (failure == null) {
         catalog.writeLock().lock();
         try {
           // These resources belong to this newSession only. Never close SessionHolder or Spark.
@@ -576,11 +603,13 @@ public final class SparkJvmEngine implements AutoCloseable {
             failure = recordFailure(failure, error);
           }
         } finally {
-          sessions.remove(this);
           catalog.writeLock().unlock();
         }
-        throwFailure(failure);
       }
+      closeFailure = failure;
+      throwFailure(failure);
+      sessions.remove(this);
+      closeComplete = true;
     }
   }
 
@@ -618,6 +647,11 @@ public final class SparkJvmEngine implements AutoCloseable {
     private final boolean local;
     private final ReentrantLock cursor = new ReentrantLock();
     private boolean released;
+    private Throwable closeFailure;
+    // Construction can fail before a NativeArrowBatch owns these resources. Keep partial
+    // cleanup failures reachable through this query; their cleanup must not be replayed.
+    private VectorSchemaRoot failedBatchRoot;
+    private BufferAllocator failedBatchAllocator;
     private boolean ended;
     private SparkPlan plan;
     private Iterator<InternalRow> rows;
@@ -720,15 +754,36 @@ public final class SparkJvmEngine implements AutoCloseable {
           count++;
         }
         writer.finish();
-        NativeArrowBatch batch = new NativeArrowBatch(root, allocator);
+        NativeArrowBatch batch = new NativeArrowBatch(root, allocator, batches);
         root = null; // Ownership is now solely the returned immutable batch lease.
         return batch;
       } catch (Throwable error) {
-        if (root != null) {
-          try { root.close(); } catch (Throwable cleanup) { recordFailure(error, cleanup); }
-        }
-        try { allocator.close(); } catch (Throwable cleanup) { recordFailure(error, cleanup); }
+        cleanupFailedBatch(root, allocator, error);
         throw error;
+      }
+    }
+
+    // Also covers descriptor construction failures before the batch registers its owner.
+    // Package-local for deterministic resource-failure fixtures without exhausting Arrow memory.
+    void cleanupFailedBatch(VectorSchemaRoot root, BufferAllocator allocator, Throwable error) {
+      cursor.lock();
+      try {
+        Throwable failure = null;
+        if (root != null) {
+          try { root.close(); } catch (Throwable cleanup) { failure = cleanup; }
+        }
+        try { allocator.close(); } catch (Throwable cleanup) {
+          failure = recordFailure(failure, cleanup);
+        }
+        if (failure != null) {
+          failedBatchRoot = root;
+          failedBatchAllocator = allocator;
+          closeFailure = recordFailure(closeFailure, failure);
+          released = true;
+          recordFailure(error, failure);
+        }
+      } finally {
+        cursor.unlock();
       }
     }
 
@@ -738,6 +793,7 @@ public final class SparkJvmEngine implements AutoCloseable {
       try { task.close(); } catch (Throwable error) { failure = error; }
       cursor.lock();
       try {
+        throwFailure(closeFailure);
         if (!released) {
           released = true;
           try {
@@ -745,14 +801,14 @@ public final class SparkJvmEngine implements AutoCloseable {
             if (plan != null) plan.cleanupResources();
           } catch (Throwable error) {
             failure = recordFailure(failure, error);
-          } finally {
-            session.queries.remove(this);
           }
         }
+        closeFailure = failure;
+        throwFailure(failure);
+        session.queries.remove(this);
       } finally {
         cursor.unlock();
       }
-      throwFailure(failure);
     }
   }
 

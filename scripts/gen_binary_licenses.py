@@ -376,11 +376,13 @@ def _find_package(meta, key):
     raise SystemExit(f"fallback package {key} is not in cargo metadata")
 
 
-def collect_components(meta, tree_outputs):
+def collect_components(meta, tree_outputs, *, supplementary_notices=None):
     """Build a Component for each linked registry package, sorted by name and version."""
+    if supplementary_notices is None:
+        supplementary_notices = SUPPLEMENTARY_NOTICES
     packages = wheel_packages(meta, tree_outputs)
     keys = {(p["name"], p["version"]) for p in packages}
-    unlinked = sorted(f"{n} {v}" for n, v in SUPPLEMENTARY_NOTICES if (n, v) not in keys)
+    unlinked = sorted(f"{n} {v}" for n, v in supplementary_notices if (n, v) not in keys)
     if unlinked:
         raise SystemExit(
             "SUPPLEMENTARY_NOTICES names crates that the wheels do not link: " + ", ".join(unlinked)
@@ -398,9 +400,9 @@ def collect_components(meta, tree_outputs):
         )
         component.mentions_apache = mentions_apache(node)
         key = (package["name"], package["version"])
-        if key in SUPPLEMENTARY_NOTICES:
+        if key in supplementary_notices:
             component.source_notices = _source_notices(
-                source_dir, coords, SUPPLEMENTARY_NOTICES[key]
+                source_dir, coords, supplementary_notices[key]
             )
         if not component.elected:
             lic_dir = source_dir
@@ -441,7 +443,7 @@ def _apache_text(license_text):
     return "\n".join(lines[: idx - 1]).rstrip("\n") + "\n"
 
 
-def render_license(components, apache_text):
+def render_license(components, apache_text, *, include_wheel_sources=True):
     elected = [c for c in components if c.elected]
     others = [c for c in components if not c.elected]
     out = [apache_text, "\n", SEPARATOR, "\n"]
@@ -467,13 +469,14 @@ def render_license(components, apache_text):
             out.append(f"{c.coordinates}\n")
         out.append("\n")
     out.append(SEPARATOR + "\n")
-    out.append(
-        "The Python and data components of the wheels are not Rust dependencies. They are\n"
-        "listed in LICENSE: python/pyspark/loose_version.py (Python Software Foundation\n"
-        "License), python/pyspark/cloudpickle/*.py, python/pyspark/_globals.py (BSD\n"
-        "3-Clause), python/pyspark/errors/exceptions/tblib.py (BSD 2-Clause), and\n"
-        "crates/spark-connect/src/srs_registry.csv (MIT, PROJ).\n"
-    )
+    if include_wheel_sources:
+        out.append(
+            "The Python and data components of the wheels are not Rust dependencies. They are\n"
+            "listed in LICENSE: python/pyspark/loose_version.py (Python Software Foundation\n"
+            "License), python/pyspark/cloudpickle/*.py, python/pyspark/_globals.py (BSD\n"
+            "3-Clause), python/pyspark/errors/exceptions/tblib.py (BSD 2-Clause), and\n"
+            "crates/spark-connect/src/srs_registry.csv (MIT, PROJ).\n"
+        )
     for c in others:
         for name, text in c.license_files:
             out.append(

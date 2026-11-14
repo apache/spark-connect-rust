@@ -31,6 +31,11 @@ on:
       - ".github/native-server-protoc.txt"
       - "Cargo.toml"
       - "Cargo.lock"
+      - "LICENSE"
+      - "NOTICE"
+      - "scripts/gen_binary_licenses.py"
+      - "scripts/gen_native_binary_licenses.py"
+      - "scripts/tests/test_gen*binary_licenses.py"
       - ".cargo/**"
       - "crates/spark-connect-server/**"
       - "crates/spark-connect-proto/**"
@@ -43,6 +48,11 @@ on:
       - ".github/native-server-protoc.txt"
       - "Cargo.toml"
       - "Cargo.lock"
+      - "LICENSE"
+      - "NOTICE"
+      - "scripts/gen_binary_licenses.py"
+      - "scripts/gen_native_binary_licenses.py"
+      - "scripts/tests/test_gen*binary_licenses.py"
       - ".cargo/**"
       - "crates/spark-connect-server/**"
       - "crates/spark-connect-proto/**"
@@ -119,6 +129,13 @@ jobs:
 
       - name: Strict Clippy for native crates
         run: cargo clippy --locked -p spark-connect-server -p spark-connect-jni --all-targets --no-deps -- -D warnings
+
+      - name: JNI dependency licenses and notices are up to date
+        # Resolve the normal static-link closure for all four supported targets;
+        # Python wheel license assets describe a different dependency graph.
+        run: |
+          python3 -B -m unittest discover -s scripts/tests -p 'test_gen*binary_licenses.py'
+          python3 -B scripts/gen_native_binary_licenses.py --check
 
       - name: Test acceptance runner guards
         run: python3 -B crates/spark-connect-server/jvm/test_acceptance_guards.py

@@ -137,11 +137,22 @@ static char mock_worker_name[64];
 static uintmax_t mock_worker_index;
 static const char mock_exception_message[] = "injected child access failure";
 static jchar mock_exception_chars[sizeof(mock_exception_message)];
+static int mock_close_calls;
+static int mock_close_failure;
+static int mock_globals_deleted;
+static int mock_loader_deletions;
+static int mock_new_global_failure;
+static int mock_next_failure;
+static jobject mock_next_batch;
+static jobject mock_descriptor;
 
 #define MOCK_THROWABLE ((jthrowable) (uintptr_t) 20)
 #define MOCK_THROWABLE_CLASS ((jclass) (uintptr_t) 21)
 #define MOCK_DESCRIPTION ((jstring) (uintptr_t) 22)
 #define MOCK_DESCRIBE ((jmethodID) (uintptr_t) 14)
+#define MOCK_NEXT ((jmethodID) (uintptr_t) 15)
+#define MOCK_DESCRIPTOR ((jmethodID) (uintptr_t) 16)
+#define MOCK_CLOSE ((jmethodID) (uintptr_t) 17)
 
 typedef struct MockNode MockNode;
 typedef struct {
@@ -295,6 +306,11 @@ static jobject JNICALL mock_call_object(JNIEnv *env, jobject object, jmethodID m
     assert(!mock_exception_pending && object == MOCK_THROWABLE);
     return mock_new_local(MOCK_DESCRIPTION);
   }
+  if (method == MOCK_NEXT) {
+    if (mock_next_failure) mock_exception_pending = 1;
+    return mock_new_local(mock_next_batch);
+  }
+  if (method == MOCK_DESCRIPTOR) return mock_new_local(mock_descriptor);
   if (method == (jmethodID) (uintptr_t) 11)
     return mock_new_local((jobject) &((MockNode *) object)->buffers);
   if (method == (jmethodID) (uintptr_t) 12)
@@ -307,10 +323,32 @@ static jobject JNICALL mock_call_object(JNIEnv *env, jobject object, jmethodID m
 static void JNICALL mock_set_loader(JNIEnv *env, jobject object, jmethodID method, ...) {
   (void) object;
   assert(env == &mock_env);
+  if (method == MOCK_CLOSE) {
+    assert(!mock_exception_pending);
+    mock_close_calls++;
+    if (mock_close_failure) mock_exception_pending = 1;
+    return;
+  }
   va_list args;
   va_start(args, method);
   mock_loader = va_arg(args, jobject);
   va_end(args);
+}
+
+static jobject JNICALL mock_new_global(JNIEnv *env, jobject object) {
+  assert(env == &mock_env && object != NULL);
+  return mock_new_global_failure ? NULL : object;
+}
+
+static void JNICALL mock_delete_global(JNIEnv *env, jobject object) {
+  assert(env == &mock_env && object != NULL && mock_attached && mock_frame_depth > 0);
+  assert(!mock_exception_pending);
+  if (object == (jobject) (uintptr_t) 2) {
+    /* Final teardown must restore the caller's loader before deleting ours. */
+    assert(mock_loader == (jobject) (uintptr_t) 3);
+    mock_loader_deletions++;
+  }
+  mock_globals_deleted++;
 }
 
 static jboolean JNICALL mock_same_object(JNIEnv *env, jobject left, jobject right) {
@@ -372,7 +410,7 @@ static void *detach_on_wrong_thread(void *attachment) {
   return NULL;
 }
 
-static void worker_attachments(void) {
+static JavaVM *mock_vm(void) {
   static const struct JNIInvokeInterface_ invocation = {
     .GetEnv = mock_get_env,
     .AttachCurrentThreadAsDaemon = mock_attach,
@@ -394,14 +432,20 @@ static void worker_attachments(void) {
     .CallVoidMethod = mock_set_loader,
     .IsSameObject = mock_same_object,
     .DeleteLocalRef = mock_delete_local,
+    .NewGlobalRef = mock_new_global,
+    .DeleteGlobalRef = mock_delete_global,
     .IsInstanceOf = mock_node_instance,
     .CallLongMethod = mock_node_long,
     .GetArrayLength = mock_array_length,
     .GetObjectArrayElement = mock_array_child,
   };
   mock_env = &native;
-  JavaVM vm = &invocation;
-  JavaContext context = {.vm = &vm, .loader = (jobject) (uintptr_t) 2};
+  static JavaVM vm = &invocation;
+  return &vm;
+}
+
+static void worker_attachments(void) {
+  JavaContext context = {.vm = mock_vm(), .loader = (jobject) (uintptr_t) 2};
   /* Two external owners prevent stack-backed context finalization in this test. */
   atomic_init(&context.references, 2);
   EngineApi api = {.context = &context};
@@ -588,10 +632,169 @@ static void descriptor_reference_frames(void) {
   puts("C_ARROW_LOCAL_FRAMES_OK: depth128 bounded refs; depth, frame allocation and JNI exception failures unwind owners");
 }
 
+static EngineHandle *mock_handle(EngineKind kind) {
+  JavaContext *context = calloc(1, sizeof(*context));
+  EngineApi *api = calloc(1, sizeof(*api));
+  EngineHandle *handle = calloc(1, sizeof(*handle));
+  assert(context != NULL && api != NULL && handle != NULL);
+  context->vm = mock_vm();
+  context->loader = (jobject) (uintptr_t) 2;
+  context->thread_class = (jclass) (uintptr_t) 5;
+  atomic_init(&context->references, 1);
+  api->context = context;
+  atomic_init(&api->references, 1);
+  api->classes[ENGINE_NODE] = (jclass) (uintptr_t) 4;
+  for (int i = 0; i < ENGINE_EXCEPTION; i++) api->close[i] = MOCK_CLOSE;
+  api->next_arrow = MOCK_NEXT;
+  api->descriptor = MOCK_DESCRIPTOR;
+  api->node_buffers = (jmethodID) (uintptr_t) 11;
+  api->node_buffer_sizes = (jmethodID) (uintptr_t) 12;
+  api->node_children = (jmethodID) (uintptr_t) 13;
+  handle->api = api;
+  handle->kind = kind;
+  handle->object = (jobject) (uintptr_t) 30;
+  mock_loader = (jobject) (uintptr_t) 3;
+  mock_close_calls = mock_globals_deleted = mock_loader_deletions = 0;
+  mock_close_failure = mock_new_global_failure = mock_next_failure = 0;
+  mock_next_batch = mock_descriptor = NULL;
+  assert(!mock_attached && mock_frame_depth == 0 && !mock_exception_pending);
+  return handle;
+}
+
+static void checked_cleanup_ownership(void) {
+  EngineHandle *handle = mock_handle(ENGINE_FACTORY);
+  EngineApi *api = handle->api;
+  JavaContext *context = api->context;
+  BridgeBuffer error = {0};
+  int attaches = mock_attaches;
+  mock_attach_result = JNI_ERR;
+  assert(spark_connect_engine_free_checked(handle, &error) == -1);
+  attachment_error(&error, "JVM_ENGINE_ERROR:13:cannot attach Rust worker to JVM");
+  assert(mock_close_calls == 0 && mock_globals_deleted == 0);
+  assert(atomic_load(&api->references) == 1 && atomic_load(&context->references) == 1);
+  mock_attach_result = JNI_OK;
+
+  mock_push_result = JNI_ERR;
+  assert(spark_connect_engine_free_checked(handle, &error) == -1);
+  attachment_error(&error, "JVM_ENGINE_ERROR:13:cannot allocate Java local reference frame");
+  assert(mock_close_calls == 0 && mock_globals_deleted == 0);
+  assert(atomic_load(&api->references) == 1 && atomic_load(&context->references) == 1);
+  mock_push_result = JNI_OK;
+
+  mock_close_failure = 1;
+  assert(spark_connect_engine_free_checked(handle, &error) == -1);
+  attachment_error(&error, "JVM_ENGINE_ERROR:13:injected child access failure");
+  assert(mock_close_calls == 1 && mock_globals_deleted == 0);
+  assert(handle->api == api && handle->object == (jobject) (uintptr_t) 30);
+  assert(atomic_load(&api->references) == 1 && atomic_load(&context->references) == 1);
+  assert(!mock_attached && mock_frame_depth == 0);
+  mock_close_failure = 0;
+  assert(spark_connect_engine_free_checked(handle, &error) == 0 && error.data == NULL);
+  assert(mock_close_calls == 2 && mock_globals_deleted == 4 && mock_loader_deletions == 1);
+  /* Each attempt has one scope; final global deletion must not reattach. */
+  assert(mock_attaches == attaches + 3 && !mock_attached && mock_frame_depth == 0);
+
+  handle = mock_handle(ENGINE_FACTORY);
+  context = handle->api->context;
+  void *worker = spark_connect_engine_thread_attach(handle, &error);
+  assert(worker != NULL && atomic_load(&context->references) == 2);
+  assert(spark_connect_engine_free_checked(handle, &error) == -1);
+  attachment_error(&error,
+      "JVM_ENGINE_ERROR:13:Java engine worker attachments remain during factory cleanup");
+  assert(mock_close_calls == 0 && mock_globals_deleted == 0);
+  assert(spark_connect_engine_thread_detach(worker, &error) == 0);
+  assert(atomic_load(&context->references) == 1);
+  assert(spark_connect_engine_free_checked(handle, &error) == 0);
+  assert(mock_close_calls == 1 && mock_globals_deleted == 4);
+
+  ArrowExportOwner *shared = owner(1);
+  shared->batch = mock_handle(ENGINE_BATCH);
+  mock_close_failure = 1;
+  assert(spark_connect_engine_arrow_owner_free_checked(shared, &error) == -1);
+  attachment_error(&error, "JVM_ENGINE_ERROR:13:injected child access failure");
+  assert(shared->batch != NULL && mock_close_calls == 1 && mock_globals_deleted == 0);
+  mock_close_failure = 0;
+  assert(spark_connect_engine_arrow_owner_free_checked(shared, &error) == 0);
+  assert(mock_close_calls == 2 && mock_globals_deleted == 4);
+  puts("C_CHECKED_CLEANUP_OK: attach/Java failures retain owners; worker guards prevent factory free; final globals use the original scope");
+}
+
+static void arrow_export_error_ownership(void) {
+  EngineHandle *query = mock_handle(ENGINE_QUERY);
+  BridgeBuffer error = {0};
+  struct ArrowArray out = {0};
+  atomic_store(&finalizations, 0);
+  released_owner = (void *) (uintptr_t) 1;
+  assert(spark_connect_engine_next_arrow(NULL, &out, &finalizations, defer, &error) == -1);
+  attachment_error(&error, "JVM_ENGINE_ERROR:13:invalid Java engine handle");
+  assert(atomic_load(&finalizations) == 1 && released_owner == NULL);
+  assert(spark_connect_engine_next_arrow(query, NULL, &finalizations, defer, &error) == -1);
+  attachment_error(&error, "JVM_ENGINE_ERROR:13:invalid Java Arrow export destination or lease");
+  assert(atomic_load(&finalizations) == 2 && released_owner == NULL);
+  mock_attach_result = JNI_ERR;
+  assert(spark_connect_engine_next_arrow(query, &out, &finalizations, defer, &error) == -1);
+  attachment_error(&error, "JVM_ENGINE_ERROR:13:cannot attach Rust worker to JVM");
+  assert(atomic_load(&finalizations) == 3 && released_owner == NULL);
+  mock_attach_result = JNI_OK;
+
+  /* EOF and a Java next-batch failure both consume the caller's lease once. */
+  assert(spark_connect_engine_next_arrow(query, &out, &finalizations, defer, &error) == 0);
+  assert(error.data == NULL && out.release == NULL);
+  assert(atomic_load(&finalizations) == 4 && released_owner != NULL);
+  assert(spark_connect_engine_arrow_owner_free_checked(released_owner, &error) == 0);
+  mock_next_failure = 1;
+  assert(spark_connect_engine_next_arrow(query, &out, &finalizations, defer, &error) == -1);
+  attachment_error(&error, "JVM_ENGINE_ERROR:13:injected child access failure");
+  assert(atomic_load(&finalizations) == 5 && released_owner != NULL);
+  assert(spark_connect_engine_arrow_owner_free_checked(released_owner, &error) == 0);
+  mock_next_failure = 0;
+
+  MockNode invalid = {0};
+  MockNode root = {.valid = 1, .children = {.count = 1, .child = &invalid}};
+  mock_next_batch = (jobject) (uintptr_t) 31;
+  mock_descriptor = (jobject) &root;
+  assert(spark_connect_engine_next_arrow(query, &out, &finalizations, defer, &error) == -1);
+  attachment_error(&error, "JVM_ENGINE_ERROR:13:invalid Java Arrow node type");
+  assert(out.release == NULL && atomic_load(&finalizations) == 6);
+  ArrowExportOwner *retained = released_owner;
+  assert(retained != NULL && retained->batch != NULL);
+  assert(atomic_load(&query->api->references) == 2 && mock_close_calls == 0);
+  mock_close_failure = 1;
+  assert(spark_connect_engine_arrow_owner_free_checked(retained, &error) == -1);
+  attachment_error(&error, "JVM_ENGINE_ERROR:13:injected child access failure");
+  assert(retained->batch != NULL && atomic_load(&query->api->references) == 2);
+  mock_close_failure = 0;
+  assert(spark_connect_engine_arrow_owner_free_checked(retained, &error) == 0);
+  assert(atomic_load(&query->api->references) == 1);
+
+  /* Failure to retain a Java batch must also dispose its local reference and lease. */
+  mock_new_global_failure = 1;
+  assert(spark_connect_engine_next_arrow(query, &out, &finalizations, defer, &error) == -1);
+  attachment_error(&error, "JVM_ENGINE_ERROR:13:cannot retain Java engine handle");
+  assert(atomic_load(&finalizations) == 7 && released_owner != NULL);
+  assert(((ArrowExportOwner *) released_owner)->batch == NULL);
+  assert(spark_connect_engine_arrow_owner_free_checked(released_owner, &error) == 0);
+  mock_new_global_failure = 0;
+
+  /* Successful export transfers the same lease until the consumer releases it. */
+  root.children.count = 0;
+  assert(spark_connect_engine_next_arrow(query, &out, &finalizations, defer, &error) == 1);
+  assert(out.release != NULL && atomic_load(&finalizations) == 7);
+  out.release(&out);
+  assert(atomic_load(&finalizations) == 8 && released_owner != NULL);
+  assert(spark_connect_engine_arrow_owner_free_checked(released_owner, &error) == 0);
+  assert(spark_connect_engine_free_checked(query, &error) == 0);
+  assert(mock_close_calls == 5 && mock_globals_deleted == 6 && mock_frame_depth == 0);
+  atomic_store(&finalizations, 0);
+  puts("C_ARROW_ERROR_OWNERSHIP_OK: invalid destinations, attachment/Java failures, EOF and partial exports consume exactly one lease; failed batch close remains retryable");
+}
+
 int main(void) {
   analysis_preconditions();
   worker_attachments();
   descriptor_reference_frames();
+  checked_cleanup_ownership();
+  arrow_export_error_ownership();
   int64_t data[] = {7, 11, 13};
   ArrowExportOwner *shared = owner(2);
   struct ArrowArray parent = node(shared, data);
