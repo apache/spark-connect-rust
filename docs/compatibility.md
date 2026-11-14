@@ -849,7 +849,7 @@ Rust `OneVsRest::fit` returns the typed `OneVsRestModel`. Its `models()` gives e
 submodel as its typed model, one `SubModel` variant per native classifier, and `classifier()`
 gives the classifier. Single-vector prediction is on the submodels. Persistence is not yet
 available for `OneVsRest` and `OneVsRestModel`: their save and load remain pending with the
-meta-estimator persistence (Base D).
+persistence of the meta-estimators, whose writers PySpark runs on the client.
 
 
 ## Native AFTSurvivalRegression, IsotonicRegression and FMRegressor
