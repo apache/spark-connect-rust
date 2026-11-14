@@ -477,6 +477,8 @@ def render_license(components, apache_text, *, include_wheel_sources=True):
             "3-Clause), python/pyspark/errors/exceptions/tblib.py (BSD 2-Clause), and\n"
             "crates/spark-connect/src/srs_registry.csv (MIT, PROJ).\n"
         )
+    elif out[-1] == "\n":
+        out.pop()
     for c in others:
         for name, text in c.license_files:
             out.append(

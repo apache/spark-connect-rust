@@ -7,11 +7,11 @@
     "crates/spark-connect-proto/Cargo.toml": "13ca4fc9ee98c160fce2ab8cc39b17d2282b6764e4c6397e5ec5ec16f46d5d1b",
     "crates/spark-connect-server/Cargo.toml": "18d1c39a8ba0b6074444f7806f1df7298b9e7a44ee85cf8b33b6e0102cee68da",
     "crates/spark-connect-server/jni/Cargo.toml": "b16a2073620b35dbeb61b45f07d52efeb418b27b0421d771f1f0ae063419cad9",
-    "scripts/gen_binary_licenses.py": "fcc167130b906832db780a543808fd1b6a6a470a2273bac7fbf230fc75c45777",
+    "scripts/gen_binary_licenses.py": "59e36ee5da2b4e5cf17ede555cc6854e268e7f11137da72a1eac98ebf26f0608",
     "scripts/gen_native_binary_licenses.py": "018456a70b85ea09640d5410de56259ecb2906debd7617b99e1d79cd52ecbe0b"
   },
   "outputs": {
-    "LICENSE-binary": "a697297fbbaa9e82d4edd2d7d141d931f0e625e3dc27a7c858850cf3d2dfd33c",
+    "LICENSE-binary": "2743728e6fbc2cec206281e1039d6ae9abc37edd48de1297db8b30bd8a9a6aff",
     "NOTICE-binary": "56b4d3334d28705f5764f12c9dd72f8ae141fde0ecdc95565998a223583cf737"
   },
   "root_package": "spark-connect-jni",
