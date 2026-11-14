@@ -4,10 +4,17 @@ use super::*;
 use spark_connect::ml::{ALSModel, ALS};
 use spark_connect_proto as proto;
 
+/// The literal of a recommendation count, as PySpark's serialization of the argument,
+/// `LiteralExpression._from_value`, makes it: a Column is not a value it takes, not even a Column
+/// of a literal, so it raises the `UNSUPPORTED_DATA_TYPE` of `Column`, as another value that is
+/// not a literal does.
 fn count_literal(value: &Bound<'_, PyAny>) -> PyResult<proto::expression::Literal> {
-    let column = crate::functions::to_value_column(value)?;
-    match column.expression().node() {
-        spark_connect::expression::ExpressionNode::Literal(literal) => {
+    let column = match value.is_instance_of::<crate::column::PyColumn>() {
+        true => None,
+        false => Some(crate::functions::to_value_column(value)?),
+    };
+    match column.as_ref().map(|column| column.expression().node()) {
+        Some(spark_connect::expression::ExpressionNode::Literal(literal)) => {
             Ok(literal.to_literal_proto())
         }
         _ => Err(crate::column::raise_pyspark(
