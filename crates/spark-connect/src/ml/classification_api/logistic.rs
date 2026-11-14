@@ -68,7 +68,8 @@ ml_params! {
         set_standardization(value: bool) => "standardization", set_param_bool;
         standardization -> bool = |this| this.params.bool_or("standardization", true);
         threshold -> Result<f64> = |this| threshold_of(&this.params) => "threshold";
-        thresholds -> Result<Vec<f64>> = |this| thresholds_of(&this.operator.uid, &this.params) => "thresholds";
+        thresholds -> Result<Vec<f64>> =
+            |this| thresholds_of(&this.operator.uid, &this.params) => "thresholds";
         set_tol(value: f64) => "tol", set_param_double;
         tol -> f64 = |this| this.params.double_or("tol", 1e-06);
         set_upper_bounds_on_coefficients(value: impl Into<MlMatrix>) =>
@@ -121,7 +122,8 @@ ml_params! {
         standardization -> bool =
             |this| this.params.bool_or("standardization", true) => "standardization";
         threshold -> Result<f64> = |this| threshold_of(&this.params) => "threshold";
-        thresholds -> Result<Vec<f64>> = |this| thresholds_of(&this.operator.uid, &this.params) => "thresholds";
+        thresholds -> Result<Vec<f64>> =
+            |this| thresholds_of(&this.operator.uid, &this.params) => "thresholds";
         tol -> f64 = |this| this.params.double_or("tol", 1e-06) => "tol";
         upper_bounds_on_coefficients -> Option<MlMatrix> =
             |this| this.params.literal("upperBoundsOnCoefficients").and_then(MlMatrix::from_literal)
@@ -144,8 +146,9 @@ const BINARY_ONLY: &str =
 /// The doc of the `thresholds` param, as PySpark names it in the KeyError of an unset thresholds.
 const THRESHOLDS_DOC: &str = "Thresholds in multi-class classification to adjust the probability \
      of predicting each class. Array must have length equal to the number of classes, with values \
-     > 0, excepting that at most one value may be 0. The class with largest value p/t is predicted, \
-     where p is the original probability of that class and t is the class's threshold.";
+     > 0, excepting that at most one value may be 0. The class with largest value p/t is \
+     predicted, where p is the original probability of that class and t is the class's \
+     threshold.";
 
 /// The threshold of binary classification, as PySpark's `getThreshold` reads it: the equivalent
 /// of `thresholds` when they are set (`1 / (1 + thresholds(0) / thresholds(1))`), else the
