@@ -952,16 +952,27 @@ vectors. Mean centering is opt-in through `withMean=True`. Convert pandas data w
 
 This covers constructor parameters, named setters, fit and DataFrame transform, and
 `StopWordsRemover.loadDefaultStopWords`, which reads the server's default stop words through
-Spark Connect's ML helper, as PySpark does (Rust `StopWordsRemover::load_default_stop_words`). Specialized
-model inspection (such as PCA components, vocabulary or scaler statistics), LSH similarity
-joins/nearest-neighbor methods, Word2Vec synonyms, persistence, and pipeline/tuning execution
-are separate from this native surface. Existing vendored helper classes remain available.
+Spark Connect's ML helper, as PySpark does (Rust `StopWordsRemover::load_default_stop_words`).
+
+In Rust, each fitted model also has the members of its PySpark model class, which it reads of
+the server-side model as PySpark does: for example `CountVectorizerModel::vocabulary`,
+`PCAModel::pc`, the scaler statistics, `VectorIndexerModel::category_maps`, the LSH models'
+`approx_nearest_neighbors` and `approx_similarity_join`, and `Word2VecModel::get_vectors` and
+`find_synonyms`. `CountVectorizerModel::from_vocabulary` and `StringIndexerModel::from_labels`
+and `from_arrays_of_labels` build a model of given values, and
+`QuantileDiscretizer::fit_bucketizer` gives the `Bucketizer` of the fitted splits, as PySpark's
+fit does. Every stage and model saves with `write()` and loads with `load(session, path)`, as
+PySpark's `save` and `load`. The Python classes gain these members with the native model
+classes. Pipeline/tuning execution is separate from this native surface. Existing vendored
+helper classes remain available.
 
 Tests compare all 38 stages with official PySpark 4.3.0 parameter literals and Spark results,
 including 10 multi-column/parameter variants, both constructor and setter configuration,
 model lifetime, invalid inputs and pandas rejection. Schema checks compare class identifiers,
 nullability and ML metadata; Connect omits the backing SQL schema of JVM UDTs on the wire.
 Run `scripts/capture_ml_features_golden.py` with the official client to regenerate the fixture.
+`scripts/capture_feature_models_golden.py` captures the members of every fitted model, the class
+methods, and the save and load of every stage, which `e2e_feature_models.rs` compares.
 Native live tests run in CI; set `FEATURE_REFERENCE=1` explicitly to run their reference mode.
 
 

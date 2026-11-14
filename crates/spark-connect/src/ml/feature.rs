@@ -26,27 +26,56 @@ macro_rules! feature_stage {
                 Self::new()
             }
         }
+        impl $name {
+            #[doc = concat!("Load a `", stringify!($name), "` saved to `path`, as PySpark's `", stringify!($name), ".load(path)`.")]
+            pub fn load(session: &SparkSession, path: &str) -> spark_connect_core::error::Result<Self> {
+                let jvm_class = concat!("org.apache.spark.ml.feature.", stringify!($name));
+                let (operator, params) = read_operator(session, jvm_class, OperatorType::$kind, path)?;
+                Ok(Self { operator, params })
+            }
+        }
     };
 }
 
 macro_rules! feature_estimator {
+    ($name:ident, $model:ident, $jvm_model:literal, [$($model_param:literal),* $(,)?], no_model_load) => {
+        feature_estimator!(@stage $name, $model, $jvm_model, [$($model_param),*]);
+    };
     ($name:ident, $model:ident, $jvm_model:literal, [$($model_param:literal),* $(,)?]) => {
+        feature_estimator!(@stage $name, $model, $jvm_model, [$($model_param),*]);
+        impl $model {
+            #[doc = concat!("Load a `", stringify!($model), "` saved to `path`, as PySpark's `", stringify!($model), ".load(path)`: the server caches it, as a fitted model.")]
+            pub fn load(session: &SparkSession, path: &str) -> spark_connect_core::error::Result<Self> {
+                let jvm_class = concat!("org.apache.spark.ml.feature.", $jvm_model);
+                let (cached, operator, params) = read_model(session, jvm_class, path)?;
+                Ok(Self { operator, params, cached })
+            }
+        }
+    };
+    (@stage $name:ident, $model:ident, $jvm_model:literal, [$($model_param:literal),* $(,)?]) => {
         feature_stage!($name, Estimator);
+        impl $name {
+            #[doc = concat!("Fit a typed `", stringify!($model), "`, as `Estimator::fit` fits it, which boxes it.")]
+            pub fn fit(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<$model> {
+                self.ensure_operator();
+                let info = fit_via_command(&self.operator, &self.params, df)?;
+                let cached = CachedModel::from_info(&info, &df.session, stringify!($name))?;
+                // A model need not accept every training parameter (LSH seed, discretizer buckets).
+                let mut params = self.params.clone();
+                params.params.retain(|name, _| [$($model_param),*].contains(&name.as_str()));
+                Ok($model {
+                    operator: MlOperator::with_uid(concat!("org.apache.spark.ml.feature.", $jvm_model), info.uid.as_deref().unwrap_or(&self.operator.uid), OperatorType::Model),
+                    params, cached,
+                })
+            }
+        }
         impl Estimator for $name {
             fn operator(&self) -> &MlOperator { &self.operator }
             fn operator_mut(&mut self) -> &mut MlOperator { &mut self.operator }
             fn params(&self) -> &Params { &self.params }
             fn params_mut(&mut self) -> &mut Params { &mut self.params }
             fn fit_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<Box<dyn Model>> {
-                let info = fit_via_command(&self.operator, &self.params, df)?;
-                let cached = CachedModel::from_info(&info, &df.session, stringify!($name))?;
-                // A model need not accept every training parameter (LSH seed, discretizer buckets).
-                let mut params = self.params.clone();
-                params.params.retain(|name, _| [$($model_param),*].contains(&name.as_str()));
-                Ok(Box::new($model {
-                    operator: MlOperator::with_uid(concat!("org.apache.spark.ml.feature.", $jvm_model), info.uid.as_deref().unwrap_or(&self.operator.uid), OperatorType::Model),
-                    params, cached,
-                }))
+                Ok(Box::new(Self::fit(self, df)?))
             }
         }
         #[doc = concat!("A fitted `", stringify!($name), "`, cached in its Spark session.")]
@@ -62,13 +91,22 @@ macro_rules! feature_estimator {
             }
             fn transform_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<DataFrame> { self.cached.transform(df, &self.params) }
         }
-        impl Model for $model { fn clone_box(&self) -> Box<dyn Model> { Box::new(self.clone()) } }
+        impl Model for $model {
+            fn clone_box(&self) -> Box<dyn Model> { Box::new(self.clone()) }
+            fn ml_ref(&self) -> Option<&MlRef> { Some(&self.cached) }
+        }
     };
 }
 
 macro_rules! feature_transformer {
     ($name:ident) => {
         feature_stage!($name, Transformer);
+        impl $name {
+            #[doc = concat!("The writer of this `", stringify!($name), "`, as PySpark's `write()`, which saves it of the session that `MlWriter::session` gives it.")]
+            pub fn write(&self) -> MlWriter {
+                MlWriter::operator(&self.operator, &self.params)
+            }
+        }
         impl Transformer for $name {
             fn operator(&self) -> &MlOperator {
                 &self.operator
@@ -366,7 +404,9 @@ feature_estimator!(
         "outputCols",
         "splits",
         "splitsArray"
-    ]
+    ],
+    // A saved one is a Bucketizer, which `Bucketizer::load` reads, as PySpark's fit gives one.
+    no_model_load
 );
 feature_params! { QuantileDiscretizer {
     set_handle_invalid(value: &str) => "handleInvalid", set_param_string; handle_invalid -> &str = |this| this.params.string_or("handleInvalid", "error");
@@ -609,3 +649,659 @@ feature_params! { Word2Vec {
     set_vector_size(value: i32) => "vectorSize", set_param_int32; vector_size -> i32 = |this| this.params.int_or("vectorSize", 100);
     set_window_size(value: i32) => "windowSize", set_param_int32; window_size -> i32 = |this| this.params.int_or("windowSize", 5);
 } }
+
+// The attributes and methods of the fitted feature models, as pyspark.ml 4.3.0 reads them of the
+// server-side model over Spark Connect: `_call_java(name)` is a fetch of the method of the model's
+// object, and `try_remote_attribute_relation` a relation of that fetch. The class methods that
+// build a model call the ML helper, as `invoke_helper_attr` does.
+
+type MlResult<T> = spark_connect_core::error::Result<T>;
+
+/// The value of the method `name`, of no arguments, of the server-side model `object`, as
+/// PySpark's `_call_java(name)` fetches it.
+fn model_value(object: &MlRef, name: &str) -> MlResult<MlValue> {
+    fetch(&MlTarget::object(object), name, Vec::new())?.into_value()
+}
+
+/// The DataFrame of the method `name` of the server-side model `object`, of `args`, as PySpark's
+/// `try_remote_attribute_relation` reads it.
+fn model_relation(object: &MlRef, name: &str, args: Vec<FetchArg>) -> MlResult<DataFrame> {
+    attribute_relation(&MlTarget::object(object), name, args)
+}
+
+fn unexpected<T>(name: &str, expected: &str, value: &MlValue) -> MlResult<T> {
+    Err(SparkError::connect_msg(format!(
+        "{name}: the server returned {value:?}, not {expected}"
+    )))
+}
+
+fn vector_of(name: &str, value: MlValue) -> MlResult<MlVector> {
+    match value {
+        MlValue::Vector(vector) => Ok(vector),
+        other => unexpected(name, "a vector", &other),
+    }
+}
+
+fn matrix_of(name: &str, value: MlValue) -> MlResult<MlMatrix> {
+    match value {
+        MlValue::Matrix(matrix) => Ok(matrix),
+        other => unexpected(name, "a matrix", &other),
+    }
+}
+
+fn array_of(name: &str, value: MlValue) -> MlResult<Vec<MlValue>> {
+    match value {
+        MlValue::Array(values) => Ok(values),
+        other => unexpected(name, "an array", &other),
+    }
+}
+
+fn long_of(name: &str, value: &MlValue) -> MlResult<i64> {
+    value
+        .as_i64()
+        .map_or_else(|| unexpected(name, "an integer", value), Ok)
+}
+
+fn int_of(name: &str, value: &MlValue) -> MlResult<i32> {
+    i32::try_from(long_of(name, value)?)
+        .map_or_else(|_| unexpected(name, "a 32-bit integer", value), Ok)
+}
+
+fn strings_of(name: &str, value: MlValue) -> MlResult<Vec<String>> {
+    array_of(name, value)?
+        .into_iter()
+        .map(|value| match value {
+            MlValue::String(string) => Ok(string),
+            other => unexpected(name, "an array of strings", &other),
+        })
+        .collect()
+}
+
+fn ints_of(name: &str, value: MlValue) -> MlResult<Vec<i32>> {
+    array_of(name, value)?
+        .iter()
+        .map(|value| int_of(name, value))
+        .collect()
+}
+
+fn longs_of(name: &str, value: MlValue) -> MlResult<Vec<i64>> {
+    array_of(name, value)?
+        .iter()
+        .map(|value| long_of(name, value))
+        .collect()
+}
+
+fn doubles_of(name: &str, value: MlValue) -> MlResult<Vec<f64>> {
+    array_of(name, value)?
+        .iter()
+        .map(|value| {
+            value
+                .as_f64()
+                .map_or_else(|| unexpected(name, "an array of doubles", value), Ok)
+        })
+        .collect()
+}
+
+/// The value of an array argument of strings of a helper call.
+fn string_array(values: &[String]) -> MlValue {
+    MlValue::Array(values.iter().cloned().map(MlValue::String).collect())
+}
+
+/// `StringType()`, of PySpark's default collation.
+fn string_type() -> DataType {
+    DataType::String {
+        collation: "UTF8_BINARY".to_string(),
+    }
+}
+
+/// The `ArrayType` of `element_type`, the type that PySpark gives the labels of a helper call, so
+/// that an empty array has a type.
+fn array_type(element_type: DataType) -> DataType {
+    DataType::Array {
+        element_type: Box::new(element_type),
+        contains_null: true,
+    }
+}
+
+impl CountVectorizerModel {
+    /// The vocabulary, as `CountVectorizerModel.vocabulary`.
+    pub fn vocabulary(&self) -> MlResult<Vec<String>> {
+        strings_of("vocabulary", model_value(&self.cached, "vocabulary")?)
+    }
+
+    /// A model of the vocabulary `vocabulary`, which transforms `input_col`, as
+    /// `CountVectorizerModel.from_vocabulary`: the server builds it (the ML helper's
+    /// `countVectorizerModelFromVocabulary`, of the uid of the new model), and the model sets
+    /// `outputCol`, `minTF` and `binary` when they are given, and `vocabSize`, the size of the
+    /// vocabulary. An empty vocabulary raises PySpark's builtin `ValueError`.
+    pub fn from_vocabulary(
+        session: &SparkSession,
+        vocabulary: impl IntoIterator<Item = impl Into<String>>,
+        input_col: &str,
+        output_col: Option<&str>,
+        min_tf: Option<f64>,
+        binary: Option<bool>,
+    ) -> MlResult<Self> {
+        let vocabulary: Vec<String> = vocabulary.into_iter().map(Into::into).collect();
+        if vocabulary.is_empty() {
+            return Err(SparkError::builtin_value_msg(
+                "Vocabulary list cannot be empty",
+            ));
+        }
+        let operator = MlOperator::new(
+            "org.apache.spark.ml.feature.CountVectorizerModel",
+            OperatorType::Model,
+        );
+        let cached = fetch(
+            &MlTarget::helper(session),
+            "countVectorizerModelFromVocabulary",
+            vec![
+                FetchArg::Value(MlValue::String(operator.uid.clone())),
+                FetchArg::Value(string_array(&vocabulary)),
+            ],
+        )?
+        .into_object()?;
+        let mut params = Params::new().set_param_string("inputCol", input_col);
+        if let Some(output_col) = output_col {
+            params = params.set_param_string("outputCol", output_col);
+        }
+        if let Some(min_tf) = min_tf {
+            params = params.set_param_double("minTF", min_tf);
+        }
+        if let Some(binary) = binary {
+            params = params.set_param_bool("binary", binary);
+        }
+        params = params.set_param_int_narrow("vocabSize", vocabulary.len() as i64);
+        Ok(Self {
+            operator,
+            params,
+            cached,
+        })
+    }
+}
+
+impl StringIndexerModel {
+    /// The labels of a model of one column, as `StringIndexerModel.labels`. The server rejects it
+    /// of a model of several columns, whose labels are [`Self::labels_array`].
+    pub fn labels(&self) -> MlResult<Vec<String>> {
+        strings_of("labels", model_value(&self.cached, "labels")?)
+    }
+
+    /// The labels of each column, as `StringIndexerModel.labelsArray`.
+    pub fn labels_array(&self) -> MlResult<Vec<Vec<String>>> {
+        array_of("labelsArray", model_value(&self.cached, "labelsArray")?)?
+            .into_iter()
+            .map(|labels| strings_of("labelsArray", labels))
+            .collect()
+    }
+
+    /// A model of the labels `labels`, which indexes `input_col`, as
+    /// `StringIndexerModel.from_labels`: the server builds it (the ML helper's
+    /// `stringIndexerModelFromLabels`, of the uid of the new model and the labels typed as an array
+    /// of strings), and the model sets `outputCol` and `handleInvalid` when they are given.
+    pub fn from_labels(
+        session: &SparkSession,
+        labels: impl IntoIterator<Item = impl Into<String>>,
+        input_col: &str,
+        output_col: Option<&str>,
+        handle_invalid: Option<&str>,
+    ) -> MlResult<Self> {
+        let labels: Vec<String> = labels.into_iter().map(Into::into).collect();
+        let operator = MlOperator::new(
+            "org.apache.spark.ml.feature.StringIndexerModel",
+            OperatorType::Model,
+        );
+        let cached = fetch(
+            &MlTarget::helper(session),
+            "stringIndexerModelFromLabels",
+            vec![
+                FetchArg::Value(MlValue::String(operator.uid.clone())),
+                FetchArg::Typed(string_array(&labels), array_type(string_type())),
+            ],
+        )?
+        .into_object()?;
+        let mut params = Params::new().set_param_string("inputCol", input_col);
+        if let Some(output_col) = output_col {
+            params = params.set_param_string("outputCol", output_col);
+        }
+        if let Some(handle_invalid) = handle_invalid {
+            params = params.set_param_string("handleInvalid", handle_invalid);
+        }
+        Ok(Self {
+            operator,
+            params,
+            cached,
+        })
+    }
+
+    /// A model of the labels of each column of `array_of_labels`, which indexes `input_cols`, as
+    /// `StringIndexerModel.from_arrays_of_labels`: the server builds it (the ML helper's
+    /// `stringIndexerModelFromLabelsArray`, of the arrays typed as an array of arrays of strings),
+    /// and the model sets `outputCols` and `handleInvalid` when they are given.
+    pub fn from_arrays_of_labels(
+        session: &SparkSession,
+        array_of_labels: impl IntoIterator<Item = impl IntoIterator<Item = impl Into<String>>>,
+        input_cols: impl IntoIterator<Item = impl Into<String>>,
+        output_cols: Option<Vec<String>>,
+        handle_invalid: Option<&str>,
+    ) -> MlResult<Self> {
+        let arrays = MlValue::Array(
+            array_of_labels
+                .into_iter()
+                .map(|labels| {
+                    let labels: Vec<String> = labels.into_iter().map(Into::into).collect();
+                    string_array(&labels)
+                })
+                .collect(),
+        );
+        let operator = MlOperator::new(
+            "org.apache.spark.ml.feature.StringIndexerModel",
+            OperatorType::Model,
+        );
+        let cached = fetch(
+            &MlTarget::helper(session),
+            "stringIndexerModelFromLabelsArray",
+            vec![
+                FetchArg::Value(MlValue::String(operator.uid.clone())),
+                FetchArg::Typed(arrays, array_type(array_type(string_type()))),
+            ],
+        )?
+        .into_object()?;
+        let mut params = Params::new().set_param_string_array("inputCols", input_cols);
+        if let Some(output_cols) = output_cols {
+            params = params.set_param_string_array("outputCols", output_cols);
+        }
+        if let Some(handle_invalid) = handle_invalid {
+            params = params.set_param_string("handleInvalid", handle_invalid);
+        }
+        Ok(Self {
+            operator,
+            params,
+            cached,
+        })
+    }
+}
+
+impl IDFModel {
+    /// The inverse document frequencies, as `IDFModel.idf`.
+    pub fn idf(&self) -> MlResult<MlVector> {
+        vector_of("idf", model_value(&self.cached, "idf")?)
+    }
+
+    /// The document frequency of each term, as `IDFModel.docFreq`.
+    pub fn doc_freq(&self) -> MlResult<Vec<i64>> {
+        longs_of("docFreq", model_value(&self.cached, "docFreq")?)
+    }
+
+    /// The number of documents of the fit, as `IDFModel.numDocs`.
+    pub fn num_docs(&self) -> MlResult<i64> {
+        long_of("numDocs", &model_value(&self.cached, "numDocs")?)
+    }
+}
+
+impl ImputerModel {
+    /// The surrogate of each input column, as `ImputerModel.surrogateDF`.
+    pub fn surrogate_df(&self) -> MlResult<DataFrame> {
+        model_relation(&self.cached, "surrogateDF", Vec::new())
+    }
+}
+
+impl MaxAbsScalerModel {
+    /// The maximum absolute value of each feature, as `MaxAbsScalerModel.maxAbs`.
+    pub fn max_abs(&self) -> MlResult<MlVector> {
+        vector_of("maxAbs", model_value(&self.cached, "maxAbs")?)
+    }
+}
+
+impl MinMaxScalerModel {
+    /// The minimum of each feature, as `MinMaxScalerModel.originalMin`.
+    pub fn original_min(&self) -> MlResult<MlVector> {
+        vector_of("originalMin", model_value(&self.cached, "originalMin")?)
+    }
+
+    /// The maximum of each feature, as `MinMaxScalerModel.originalMax`.
+    pub fn original_max(&self) -> MlResult<MlVector> {
+        vector_of("originalMax", model_value(&self.cached, "originalMax")?)
+    }
+}
+
+impl OneHotEncoderModel {
+    /// The number of categories of each input column, as `OneHotEncoderModel.categorySizes`.
+    pub fn category_sizes(&self) -> MlResult<Vec<i32>> {
+        ints_of("categorySizes", model_value(&self.cached, "categorySizes")?)
+    }
+}
+
+impl PCAModel {
+    /// The principal components, one per column, as `PCAModel.pc`.
+    pub fn pc(&self) -> MlResult<MlMatrix> {
+        matrix_of("pc", model_value(&self.cached, "pc")?)
+    }
+
+    /// The proportion of variance that each principal component explains, as
+    /// `PCAModel.explainedVariance`.
+    pub fn explained_variance(&self) -> MlResult<MlVector> {
+        vector_of(
+            "explainedVariance",
+            model_value(&self.cached, "explainedVariance")?,
+        )
+    }
+}
+
+impl RobustScalerModel {
+    /// The median of each feature, as `RobustScalerModel.median`.
+    pub fn median(&self) -> MlResult<MlVector> {
+        vector_of("median", model_value(&self.cached, "median")?)
+    }
+
+    /// The quantile range of each feature, as `RobustScalerModel.range`.
+    pub fn range(&self) -> MlResult<MlVector> {
+        vector_of("range", model_value(&self.cached, "range")?)
+    }
+}
+
+impl StandardScalerModel {
+    /// The mean of each feature, as `StandardScalerModel.mean`.
+    pub fn mean(&self) -> MlResult<MlVector> {
+        vector_of("mean", model_value(&self.cached, "mean")?)
+    }
+
+    /// The standard deviation of each feature, as `StandardScalerModel.std`.
+    pub fn std(&self) -> MlResult<MlVector> {
+        vector_of("std", model_value(&self.cached, "std")?)
+    }
+}
+
+impl ChiSqSelectorModel {
+    /// The indices of the selected features, as `ChiSqSelectorModel.selectedFeatures`.
+    pub fn selected_features(&self) -> MlResult<Vec<i32>> {
+        ints_of(
+            "selectedFeatures",
+            model_value(&self.cached, "selectedFeatures")?,
+        )
+    }
+}
+
+impl UnivariateFeatureSelectorModel {
+    /// The indices of the selected features, as
+    /// `UnivariateFeatureSelectorModel.selectedFeatures`.
+    pub fn selected_features(&self) -> MlResult<Vec<i32>> {
+        ints_of(
+            "selectedFeatures",
+            model_value(&self.cached, "selectedFeatures")?,
+        )
+    }
+}
+
+impl VarianceThresholdSelectorModel {
+    /// The indices of the selected features, as
+    /// `VarianceThresholdSelectorModel.selectedFeatures`.
+    pub fn selected_features(&self) -> MlResult<Vec<i32>> {
+        ints_of(
+            "selectedFeatures",
+            model_value(&self.cached, "selectedFeatures")?,
+        )
+    }
+}
+
+impl VectorIndexerModel {
+    /// The length of the vectors that the model transforms, as `VectorIndexerModel.numFeatures`.
+    pub fn num_features(&self) -> MlResult<i32> {
+        int_of("numFeatures", &model_value(&self.cached, "numFeatures")?)
+    }
+
+    /// The category index of each value of each categorical feature, as
+    /// `VectorIndexerModel.categoryMaps`, which collects the rows of the model's `categoryMapsDF`
+    /// (featureIndex, originalValue, categoryIndex): of each feature index, its original values
+    /// and their category indices, ordered by the value. A feature that it has none of is
+    /// continuous.
+    pub fn category_maps(&self) -> MlResult<std::collections::BTreeMap<i32, Vec<(f64, i32)>>> {
+        let rows = model_relation(&self.cached, "categoryMapsDF", Vec::new())?.collect()?;
+        let mut maps: std::collections::BTreeMap<i32, Vec<(f64, i32)>> = Default::default();
+        for row in rows {
+            let field = |index: usize| row.get(index);
+            let (Some(feature), Some(value), Some(category)) = (
+                field(0).and_then(|v| v.as_i64()),
+                field(1).and_then(|v| v.as_f64()),
+                field(2).and_then(|v| v.as_i64()),
+            ) else {
+                return Err(SparkError::connect_msg(
+                    "categoryMapsDF: the server returned a row that is not (int, double, int)",
+                ));
+            };
+            maps.entry(feature as i32)
+                .or_default()
+                .push((value, category as i32));
+        }
+        for values in maps.values_mut() {
+            values.sort_by(|a, b| a.0.total_cmp(&b.0));
+        }
+        Ok(maps)
+    }
+}
+
+impl Word2VecModel {
+    /// The vector of each word, as `Word2VecModel.getVectors`: a DataFrame of `word` and `vector`.
+    pub fn get_vectors(&self) -> MlResult<DataFrame> {
+        model_relation(&self.cached, "getVectors", Vec::new())
+    }
+
+    /// The `num` words closest to `word`, as `Word2VecModel.findSynonyms` of a word: a DataFrame
+    /// of `word` and `similarity`. The server rejects a word out of the vocabulary.
+    pub fn find_synonyms(&self, word: &str, num: i32) -> MlResult<DataFrame> {
+        model_relation(
+            &self.cached,
+            "findSynonyms",
+            vec![
+                FetchArg::Value(MlValue::String(word.to_string())),
+                FetchArg::Value(MlValue::Int(num)),
+            ],
+        )
+    }
+
+    /// The `num` words closest to `vector`, as `Word2VecModel.findSynonyms` of a vector.
+    pub fn find_synonyms_of_vector(&self, vector: &MlVector, num: i32) -> MlResult<DataFrame> {
+        model_relation(
+            &self.cached,
+            "findSynonyms",
+            vec![
+                FetchArg::Value(MlValue::Vector(vector.clone())),
+                FetchArg::Value(MlValue::Int(num)),
+            ],
+        )
+    }
+
+    /// The words and similarities of [`Self::find_synonyms`], collected, as
+    /// `Word2VecModel.findSynonymsArray` of a word.
+    pub fn find_synonyms_array(&self, word: &str, num: i32) -> MlResult<Vec<(String, f64)>> {
+        synonyms_of(self.find_synonyms(word, num)?)
+    }
+
+    /// The words and similarities of [`Self::find_synonyms_of_vector`], collected, as
+    /// `Word2VecModel.findSynonymsArray` of a vector.
+    pub fn find_synonyms_array_of_vector(
+        &self,
+        vector: &MlVector,
+        num: i32,
+    ) -> MlResult<Vec<(String, f64)>> {
+        synonyms_of(self.find_synonyms_of_vector(vector, num)?)
+    }
+}
+
+/// The rows of a DataFrame of `word` and `similarity`, as `findSynonymsArray` collects them.
+fn synonyms_of(synonyms: DataFrame) -> MlResult<Vec<(String, f64)>> {
+    synonyms
+        .collect()?
+        .into_iter()
+        .map(|row| {
+            match (
+                row.get(0).and_then(|v| v.as_str()),
+                row.get(1).and_then(|v| v.as_f64()),
+            ) {
+                (Some(word), Some(similarity)) => Ok((word.to_string(), similarity)),
+                _ => Err(SparkError::connect_msg(
+                    "findSynonyms: the server returned a row that is not (string, double)",
+                )),
+            }
+        })
+        .collect()
+}
+
+/// The LSH methods of a model of `$model`, as `_LSHModel` of pyspark.ml has them.
+macro_rules! lsh_model_methods {
+    ($model:ident) => {
+        impl $model {
+            /// The `num_nearest_neighbors` rows of `dataset` nearest to `key`, with their distance
+            /// in `dist_col`, as `approxNearestNeighbors` (PySpark's `distCol` is "distCol").
+            pub fn approx_nearest_neighbors(
+                &self,
+                dataset: &DataFrame,
+                key: &MlVector,
+                num_nearest_neighbors: i32,
+                dist_col: &str,
+            ) -> MlResult<DataFrame> {
+                model_relation(
+                    &self.cached,
+                    "approxNearestNeighbors",
+                    vec![
+                        FetchArg::Input(dataset.clone()),
+                        FetchArg::Value(MlValue::Vector(key.clone())),
+                        FetchArg::Value(MlValue::Int(num_nearest_neighbors)),
+                        FetchArg::Value(MlValue::String(dist_col.to_string())),
+                    ],
+                )
+            }
+
+            /// The pairs of rows of `dataset_a` and `dataset_b` within `threshold`, as
+            /// `datasetA` and `datasetB` with their distance in `dist_col`, as
+            /// `approxSimilarityJoin` (PySpark's `distCol` is "distCol").
+            pub fn approx_similarity_join(
+                &self,
+                dataset_a: &DataFrame,
+                dataset_b: &DataFrame,
+                threshold: f64,
+                dist_col: &str,
+            ) -> MlResult<DataFrame> {
+                model_relation(
+                    &self.cached,
+                    "approxSimilarityJoin",
+                    vec![
+                        FetchArg::Input(dataset_a.clone()),
+                        FetchArg::Input(dataset_b.clone()),
+                        FetchArg::Value(MlValue::Double(threshold)),
+                        FetchArg::Value(MlValue::String(dist_col.to_string())),
+                    ],
+                )
+            }
+        }
+    };
+}
+
+lsh_model_methods!(BucketedRandomProjectionLSHModel);
+lsh_model_methods!(MinHashLSHModel);
+
+impl QuantileDiscretizerModel {
+    /// The splits of a discretizer of one column, as the `getSplits` of its server-side
+    /// `Bucketizer`.
+    pub fn splits(&self) -> MlResult<Vec<f64>> {
+        doubles_of("getSplits", model_value(&self.cached, "getSplits")?)
+    }
+
+    /// The splits of each column of a discretizer of several columns, as the `getSplitsArray` of
+    /// its server-side `Bucketizer`.
+    pub fn splits_array(&self) -> MlResult<Vec<Vec<f64>>> {
+        array_of(
+            "getSplitsArray",
+            model_value(&self.cached, "getSplitsArray")?,
+        )?
+        .into_iter()
+        .map(|splits| doubles_of("getSplitsArray", splits))
+        .collect()
+    }
+}
+
+impl QuantileDiscretizer {
+    /// Fit the discretizer and give the `Bucketizer` of its splits, as `QuantileDiscretizer.fit`
+    /// of pyspark.ml gives it: of `getSplits`, with the `inputCol`, `outputCol` and
+    /// `handleInvalid` of this discretizer, when its `inputCol` is set, and otherwise of
+    /// `getSplitsArray`, with its `inputCols` and `outputCols`. The bucketizer is a new stage,
+    /// of its own uid, which holds no server-side object.
+    pub fn fit_bucketizer(&mut self, df: &DataFrame) -> MlResult<Bucketizer> {
+        let model = Estimator::fit(self, df)?;
+        let object = model
+            .ml_ref()
+            .ok_or_else(|| SparkError::connect_msg("QuantileDiscretizer: no fitted model"))?
+            .clone();
+        let model = QuantileDiscretizerModel {
+            operator: MlOperator::new(
+                "org.apache.spark.ml.feature.Bucketizer",
+                OperatorType::Model,
+            ),
+            params: Params::new(),
+            cached: object,
+        };
+        let bucketizer = Bucketizer::new().set_handle_invalid(self.handle_invalid());
+        Ok(match self.input_col() {
+            Some(input_col) => bucketizer
+                .set_splits(model.splits()?)
+                .set_input_col(input_col)
+                .set_output_col(&self.output_col()),
+            None => bucketizer
+                .set_splits_array(model.splits_array()?)
+                .set_input_cols(self.input_cols())
+                .set_output_cols(self.output_cols()),
+        })
+    }
+}
+
+/// The typed fit and the loads of a feature estimator of `ml.rs`, which predates the
+/// `feature_estimator!` stages, as theirs: the fit is the estimator's own, of the model type.
+macro_rules! typed_feature_estimator {
+    ($name:ident, $model:ident) => {
+        impl $name {
+            #[doc = concat!("Fit a typed `", stringify!($model), "`, as `Estimator::fit` fits it, which boxes it.")]
+            pub fn fit(&mut self, df: &DataFrame) -> MlResult<$model> {
+                let model = Estimator::fit(self, df)?;
+                model.downcast_ref::<$model>().cloned().ok_or_else(|| {
+                    SparkError::connect_msg(concat!("the fit gave no ", stringify!($model)))
+                })
+            }
+
+            #[doc = concat!("Load a `", stringify!($name), "` saved to `path`, as PySpark's `", stringify!($name), ".load(path)`.")]
+            pub fn load(session: &SparkSession, path: &str) -> MlResult<Self> {
+                let jvm_class = concat!("org.apache.spark.ml.feature.", stringify!($name));
+                let (operator, params) = read_operator(session, jvm_class, OperatorType::Estimator, path)?;
+                Ok(Self { operator, params })
+            }
+        }
+
+        impl $model {
+            #[doc = concat!("Load a `", stringify!($model), "` saved to `path`, as PySpark's `", stringify!($model), ".load(path)`: the server caches it, as a fitted model.")]
+            pub fn load(session: &SparkSession, path: &str) -> MlResult<Self> {
+                let jvm_class = concat!("org.apache.spark.ml.feature.", stringify!($model));
+                let (cached, operator, params) = read_model(session, jvm_class, path)?;
+                Ok(Self { operator, params, cached })
+            }
+        }
+    };
+}
+
+typed_feature_estimator!(MaxAbsScaler, MaxAbsScalerModel);
+typed_feature_estimator!(StandardScaler, StandardScalerModel);
+typed_feature_estimator!(StringIndexer, StringIndexerModel);
+
+impl VectorAssembler {
+    /// The writer of this `VectorAssembler`, as PySpark's `write()`, which saves it of the
+    /// session that `MlWriter::session` gives it.
+    pub fn write(&self) -> MlWriter {
+        MlWriter::operator(&self.operator, &self.params)
+    }
+
+    /// Load a `VectorAssembler` saved to `path`, as PySpark's `VectorAssembler.load(path)`.
+    pub fn load(session: &SparkSession, path: &str) -> MlResult<Self> {
+        let jvm_class = "org.apache.spark.ml.feature.VectorAssembler";
+        let (operator, params) =
+            read_operator(session, jvm_class, OperatorType::Transformer, path)?;
+        Ok(Self { operator, params })
+    }
+}
