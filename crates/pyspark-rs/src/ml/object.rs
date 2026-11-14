@@ -469,11 +469,8 @@ impl ModelCore {
                 Some(spark_connect::ml::training_summary(object, df))
             }
             (SummaryDataset::Transformed, Some(object)) => {
-                let jvm = model.operator().name.clone();
                 let dataset = py
-                    .detach(|| {
-                        spark_connect::ml::summary_transform(object, &jvm, df).map_err(Box::new)
-                    })
+                    .detach(|| spark_connect::ml::summary_transform(object, df).map_err(Box::new))
                     .to_pyerr()?;
                 Some(spark_connect::ml::training_summary(object, &dataset))
             }

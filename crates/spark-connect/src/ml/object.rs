@@ -1069,20 +1069,15 @@ pub fn training_summary(object: &MlRef, dataset: &DataFrame) -> MlTarget {
         .with_summary_dataset(dataset)
 }
 
-/// The transform of `dataset` by the fitted model `object` of the JVM class `jvm_class`, of no
-/// params, as PySpark's default `_summary_dataset` (`self.transform(train_dataset)`) transforms the
-/// training dataset before the fit copies the estimator's params to the model.
+/// The transform of `dataset` by the fitted model `object`, of no params, as PySpark's default
+/// `_summary_dataset` (`self.transform(train_dataset)`) transforms the training dataset before the
+/// fit copies the estimator's params to the model: the server's model object transforms of its own
+/// params.
 pub fn summary_transform(
     object: &MlRef,
-    jvm_class: &str,
     dataset: &DataFrame,
 ) -> spark_connect_core::error::Result<DataFrame> {
-    let mut model = ObjectModel::new(
-        object.clone(),
-        MlOperator::with_uid(jvm_class, "", OperatorType::Model),
-        Params::new(),
-    );
-    model.transform(dataset)
+    object.transform(dataset, &Params::new())
 }
 
 /// The target of the summary of an `evaluate`, of the id of the `summary` result that the server

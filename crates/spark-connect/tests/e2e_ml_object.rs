@@ -264,8 +264,7 @@ fn ml_summaries_of_a_transform_and_of_an_evaluate_and_models_of_loaded_objects_a
     let object = model
         .ml_ref()
         .expect("a KMeans model is a server-side object");
-    let dataset =
-        summary_transform(object, "org.apache.spark.ml.clustering.KMeansModel", &train).unwrap();
+    let dataset = summary_transform(object, &train).unwrap();
     assert!(dataset
         .columns()
         .unwrap()
