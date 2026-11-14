@@ -58,8 +58,11 @@ fn ml_estimators_setters_getters_proto() {
     assert_eq!(mce.prediction_col(), "p");
     assert_eq!(mce.metric_name(), "f1");
 
-    let pl = Pipeline::new().set_stages(vec!["a", "b"]);
-    let _ = pl.stages();
+    let pl = Pipeline::new().set_stages(vec![
+        PipelineStage::transformer(VectorAssembler::new()),
+        PipelineStage::estimator(LinearSVC::new()),
+    ]);
+    assert_eq!(pl.stages().len(), 2);
 
     let cv = CrossValidator::new()
         .set_num_folds(3)

@@ -816,10 +816,44 @@ PySpark's classes of them (`pyspark.ml.Pipeline`, `pyspark.ml.tuning.CrossValida
 `isinstance` checks of PySpark's classes hold of them, and PySpark's `MetaAlgorithmReadWrite`
 reads the nested stages of a native Pipeline.
 
-The Rust API has the splits of the validators, `k_fold` and `train_validation_split`.
-`spark_connect::ml::CrossValidator`, which holds its numeric params only, and
-`spark_connect::ml::Pipeline`, which holds stage names, do not fit yet: their `fit` raises
-`NOT_IMPLEMENTED`.
+## Native meta-algorithms (Rust API)
+
+`spark_connect::ml` has PySpark's meta-algorithms, of the estimators, transformers, models and
+evaluators of the crate (or the user's), as PySpark 4.3.0 runs them over Spark Connect, on the
+client:
+
+- **Stages**: a `PipelineStage` is an estimator, a transformer or a fitted model
+  (`PipelineStage::estimator(LinearSVC::new())`), of any type that clones (`EstimatorStage`,
+  `TransformerStage`, `EvaluatorStage`).
+- **Param maps**: a `ParamMap` holds values of params of stages, by the uid of a stage and the
+  name of its param, as PySpark's `Param.parent` and `Param.name`. `ParamGridBuilder` builds
+  PySpark's grids (`add_grid`, `base_on`, `build`, the last param varying fastest), and
+  `apply_param_map` of an estimator, a transformer or an evaluator sets the values of its params,
+  as a copy of a param map of PySpark does. A pipeline applies them to its stages.
+- **`Pipeline` and `PipelineModel`**: `fit` (or `fit_pipeline`, of the typed model) is
+  `Pipeline._fit`; `PipelineModel` transforms by each stage in order. `copy` keeps the pipeline's
+  uid, and a pipeline model's copy has a new one.
+- **`CrossValidator` and `TrainValidationSplit`**: their fit (`fit_validator`, of the typed
+  model) splits the dataset with `k_fold` or `train_validation_split` and caches each split, as
+  `_cache_spark_dataset` does (of `SPARKML_TEMP_DFS_PATH` too). It fits a copy of the estimator
+  of each param map in `parallelism` threads and evaluates each with the evaluator. The metrics
+  are numpy's (the mean and the standard deviation of the population over the folds), and the
+  best is numpy's `argmax` or `argmin`, of the first NaN of any. The best param map is fitted on
+  the whole dataset. Their models have `best_model`, the metrics and `sub_models`
+  (`collect_sub_models`), and transform by the best model. A validator of no seed has a random
+  one, as PySpark's default seed differs between processes.
+- **Persistence**: `write()` and `load` are of PySpark's Python format, so that PySpark loads what
+  the Rust API saves and the Rust API loads what PySpark saves:
+  - the metadata of `pyspark.ml.pipeline.Pipeline` (and the others) in PySpark's order of its
+    keys, of NaN and Infinity floats as Python writes them;
+  - each stage, saved by its own writer;
+  - the validators' param maps, estimator, evaluator, best model and sub-models
+    (`persistSubModels`).
+
+  `load_stage` loads any saved stage, of its class: a meta-algorithm, or an estimator,
+  transformer or model of the server's class (`OperatorEstimator`, `OperatorTransformer`,
+  `ObjectModel`). The evaluator of a loaded validator is the evaluator of its class. A param map
+  of a value that is a saved stage, which PySpark writes of a stage-valued param, does not load.
 
 ## pyspark.ml
 

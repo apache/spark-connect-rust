@@ -75,11 +75,7 @@ pub const EXCLUDED: &[(&str, &str)] = &[
     ),
     (
         "ParamGridBuilder",
-        "no Rust type: builder, not a Params class",
-    ),
-    (
-        "PipelineModel",
-        "no Rust type: holder of fitted stages, no params",
+        "a builder of param maps (ml::ParamGridBuilder), not a Params class",
     ),
     (
         "RandomForestClassificationSummary",

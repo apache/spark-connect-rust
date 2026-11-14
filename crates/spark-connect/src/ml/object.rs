@@ -877,6 +877,24 @@ pub struct MlWriter {
 enum WriterTarget {
     Operator(MlOperator, Params),
     Object(MlRef, Params),
+    /// A meta-algorithm of PySpark's Python format (a pipeline, a validator, their models), which
+    /// its own save writes, of the session of the writer.
+    Meta(std::sync::Arc<dyn MetaSave>),
+}
+
+/// The save of a meta-algorithm of PySpark's Python format to a path, of a session and the
+/// writer's options, as its `MLWriter.saveImpl` (see [`MlWriter::meta`]).
+pub trait MetaSave: Send + Sync {
+    /// The uid of the meta-algorithm, of the writer's `Debug`.
+    fn name(&self) -> String;
+
+    /// Save the meta-algorithm to `path`, of `session`, of the writer's `options`.
+    fn save_meta(
+        &self,
+        session: &SparkSession,
+        path: &str,
+        options: &HashMap<String, String>,
+    ) -> spark_connect_core::error::Result<()>;
 }
 
 impl std::fmt::Debug for MlWriter {
@@ -884,6 +902,7 @@ impl std::fmt::Debug for MlWriter {
         let target = match &self.target {
             WriterTarget::Operator(operator, _) => operator.name.clone(),
             WriterTarget::Object(object, _) => object.id().to_string(),
+            WriterTarget::Meta(meta) => meta.name(),
         };
         f.debug_struct("MlWriter")
             .field("target", &target)
@@ -914,6 +933,17 @@ impl MlWriter {
         }
     }
 
+    /// The writer of a meta-algorithm of PySpark's Python format, which `meta` saves (see
+    /// [`MetaSave`]), of a session that [`Self::session`] sets.
+    pub fn meta(meta: std::sync::Arc<dyn MetaSave>) -> Self {
+        Self {
+            target: WriterTarget::Meta(meta),
+            session: None,
+            overwrite: false,
+            options: HashMap::new(),
+        }
+    }
+
     /// The session that saves, as `MLWriter.session` of PySpark.
     pub fn session(mut self, session: &SparkSession) -> Self {
         self.session = Some(session.clone());
@@ -937,6 +967,20 @@ impl MlWriter {
         match &self.target {
             WriterTarget::Object(object, params) => {
                 write_object(object, params, path, self.overwrite, &self.options)
+            }
+            WriterTarget::Meta(meta) => {
+                let session = self.session.as_ref().ok_or_else(|| {
+                    SparkError::value_msg(format!(
+                        "{} needs a session to save with: call .session(&spark) on its writer",
+                        meta.name()
+                    ))
+                })?;
+                // As `RemoteMLWriter.saveInstance` of a meta-algorithm: the ML helper deletes the
+                // path of an overwrite first.
+                if self.overwrite {
+                    handle_overwrite(session, path)?;
+                }
+                meta.save_meta(session, path, &self.options)
             }
             WriterTarget::Operator(operator, params) => {
                 let session = self.session.as_ref().ok_or_else(|| {
