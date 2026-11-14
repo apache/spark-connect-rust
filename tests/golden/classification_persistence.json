@@ -1,0 +1,5422 @@
+{
+ "datasets": {
+  "binary_eval": {
+   "columns": [
+    [
+     "label",
+     "double"
+    ],
+    [
+     "weight",
+     "double"
+    ],
+    [
+     "features",
+     "vector"
+    ]
+   ],
+   "rows": [
+    [
+     1.0,
+     1.0,
+     [
+      0.2,
+      1.0
+     ]
+    ],
+    [
+     0.0,
+     1.0,
+     [
+      2.2,
+      0.6
+     ]
+    ],
+    [
+     1.0,
+     2.0,
+     [
+      0.8,
+      2.2
+     ]
+    ],
+    [
+     0.0,
+     1.0,
+     [
+      2.9,
+      2.1
+     ]
+    ]
+   ]
+  },
+  "binary_train": {
+   "columns": [
+    [
+     "label",
+     "double"
+    ],
+    [
+     "weight",
+     "double"
+    ],
+    [
+     "features",
+     "vector"
+    ]
+   ],
+   "rows": [
+    [
+     1.0,
+     1.0,
+     [
+      0.0,
+      1.1
+     ]
+    ],
+    [
+     0.0,
+     2.0,
+     [
+      2.0,
+      1.0
+     ]
+    ],
+    [
+     1.0,
+     3.0,
+     [
+      0.5,
+      2.5
+     ]
+    ],
+    [
+     0.0,
+     1.0,
+     [
+      3.0,
+      0.2
+     ]
+    ],
+    [
+     1.0,
+     1.5,
+     [
+      1.0,
+      1.9
+     ]
+    ],
+    [
+     0.0,
+     0.5,
+     [
+      2.5,
+      3.0
+     ]
+    ],
+    [
+     1.0,
+     2.0,
+     [
+      0.1,
+      0.9
+     ]
+    ],
+    [
+     0.0,
+     1.0,
+     [
+      1.8,
+      0.4
+     ]
+    ]
+   ]
+  },
+  "multi_eval": {
+   "columns": [
+    [
+     "label",
+     "double"
+    ],
+    [
+     "weight",
+     "double"
+    ],
+    [
+     "features",
+     "vector"
+    ]
+   ],
+   "rows": [
+    [
+     0.0,
+     1.0,
+     [
+      0.1,
+      0.6
+     ]
+    ],
+    [
+     1.0,
+     1.0,
+     [
+      1.2,
+      0.1
+     ]
+    ],
+    [
+     2.0,
+     1.0,
+     [
+      2.1,
+      1.8
+     ]
+    ],
+    [
+     1.0,
+     2.0,
+     [
+      0.6,
+      0.6
+     ]
+    ]
+   ]
+  },
+  "multi_train": {
+   "columns": [
+    [
+     "label",
+     "double"
+    ],
+    [
+     "weight",
+     "double"
+    ],
+    [
+     "features",
+     "vector"
+    ]
+   ],
+   "rows": [
+    [
+     0.0,
+     1.0,
+     [
+      0.0,
+      0.5
+     ]
+    ],
+    [
+     1.0,
+     2.0,
+     [
+      1.0,
+      0.0
+     ]
+    ],
+    [
+     2.0,
+     1.0,
+     [
+      2.0,
+      1.5
+     ]
+    ],
+    [
+     0.0,
+     1.0,
+     [
+      0.2,
+      0.9
+     ]
+    ],
+    [
+     1.0,
+     1.0,
+     [
+      1.1,
+      0.4
+     ]
+    ],
+    [
+     2.0,
+     2.0,
+     [
+      2.4,
+      2.0
+     ]
+    ],
+    [
+     0.0,
+     0.5,
+     [
+      0.5,
+      0.1
+     ]
+    ],
+    [
+     1.0,
+     1.5,
+     [
+      0.9,
+      0.7
+     ]
+    ],
+    [
+     2.0,
+     1.0,
+     [
+      1.7,
+      2.2
+     ]
+    ]
+   ]
+  },
+  "nb_binary": {
+   "columns": [
+    [
+     "label",
+     "double"
+    ],
+    [
+     "weight",
+     "double"
+    ],
+    [
+     "features",
+     "vector"
+    ]
+   ],
+   "rows": [
+    [
+     0.0,
+     1.0,
+     [
+      1.0,
+      0.0
+     ]
+    ],
+    [
+     1.0,
+     1.0,
+     [
+      0.0,
+      1.0
+     ]
+    ],
+    [
+     0.0,
+     1.0,
+     [
+      1.0,
+      1.0
+     ]
+    ],
+    [
+     1.0,
+     2.0,
+     [
+      0.0,
+      0.0
+     ]
+    ],
+    [
+     0.0,
+     1.0,
+     [
+      1.0,
+      0.0
+     ]
+    ],
+    [
+     1.0,
+     1.0,
+     [
+      0.0,
+      1.0
+     ]
+    ]
+   ]
+  },
+  "nb_binary_eval": {
+   "columns": [
+    [
+     "label",
+     "double"
+    ],
+    [
+     "weight",
+     "double"
+    ],
+    [
+     "features",
+     "vector"
+    ]
+   ],
+   "rows": [
+    [
+     0.0,
+     1.0,
+     [
+      1.0,
+      1.0
+     ]
+    ],
+    [
+     1.0,
+     1.0,
+     [
+      0.0,
+      0.0
+     ]
+    ],
+    [
+     1.0,
+     1.0,
+     [
+      0.0,
+      1.0
+     ]
+    ]
+   ]
+  },
+  "nb_counts": {
+   "columns": [
+    [
+     "label",
+     "double"
+    ],
+    [
+     "weight",
+     "double"
+    ],
+    [
+     "features",
+     "vector"
+    ]
+   ],
+   "rows": [
+    [
+     0.0,
+     1.0,
+     [
+      2.0,
+      0.0
+     ]
+    ],
+    [
+     1.0,
+     1.0,
+     [
+      0.0,
+      3.0
+     ]
+    ],
+    [
+     2.0,
+     1.0,
+     [
+      1.0,
+      4.0
+     ]
+    ],
+    [
+     0.0,
+     1.0,
+     [
+      3.0,
+      1.0
+     ]
+    ],
+    [
+     1.0,
+     2.0,
+     [
+      0.0,
+      2.0
+     ]
+    ],
+    [
+     2.0,
+     1.0,
+     [
+      2.0,
+      2.0
+     ]
+    ]
+   ]
+  },
+  "nb_counts_eval": {
+   "columns": [
+    [
+     "label",
+     "double"
+    ],
+    [
+     "weight",
+     "double"
+    ],
+    [
+     "features",
+     "vector"
+    ]
+   ],
+   "rows": [
+    [
+     0.0,
+     1.0,
+     [
+      1.0,
+      0.0
+     ]
+    ],
+    [
+     1.0,
+     1.0,
+     [
+      0.0,
+      2.0
+     ]
+    ],
+    [
+     2.0,
+     1.0,
+     [
+      1.0,
+      3.0
+     ]
+    ]
+   ]
+  }
+ },
+ "encoding": "Floats are JSON numbers (Python repr); NaN and infinities are strings. Vectors and matrices as in scripts/ml_golden_common.py. DataFrames: schema and rows sorted by canonical JSON. Model and summary objects: {type, ref} with ref a placeholder: <idN> for an object id (<idN>.summary for a summary), numbered in order of first appearance. Errors: {class, condition, message}. commands: base64 of the MlCommand or MlRelation sent, results: base64 of the MlCommandResult received, both SerializeToString(deterministic=True) after normalization (object ids and uids -> placeholders, plan_id, origin and LocalRelation data cleared, paths -> <path>).",
+ "persistence": {
+  "DecisionTreeClassifier.estimator": {
+   "load": {
+    "call": "DecisionTreeClassifier.load(path)",
+    "commands": [
+     "KkcKPQo5b3JnLmFwYWNoZS5zcGFyay5tbC5jbGFzc2lmaWNhdGlvbi5EZWNpc2lvblRyZWVDbGFzc2lmaWVyGAESBjxwYXRoPg=="
+    ],
+    "results": [
+     "GngSOW9yZy5hcGFjaGUuc3BhcmsubWwuY2xhc3NpZmljYXRpb24uRGVjaXNpb25UcmVlQ2xhc3NpZmllchoGPHVpZDA+IjMKDgoIbWF4RGVwdGgSAjADCgoKBHNlZWQSAjgqChUKCXdlaWdodENvbBIIagZ3ZWlnaHQ="
+    ],
+    "value": {
+     "type": "DecisionTreeClassifier",
+     "uid": "DecisionTreeClassifier"
+    }
+   },
+   "params_after": {
+    "cacheNodeIds": false,
+    "checkpointInterval": 10,
+    "featuresCol": "features",
+    "impurity": "gini",
+    "labelCol": "label",
+    "leafCol": "",
+    "maxBins": 32,
+    "maxDepth": 3,
+    "maxMemoryInMB": 256,
+    "minInfoGain": 0.0,
+    "minInstancesPerNode": 1,
+    "minWeightFractionPerNode": 0.0,
+    "predictionCol": "prediction",
+    "probabilityCol": "probability",
+    "pruneTree": true,
+    "rawPredictionCol": "rawPrediction",
+    "seed": 42,
+    "weightCol": "weight"
+   },
+   "params_before": {
+    "cacheNodeIds": false,
+    "checkpointInterval": 10,
+    "featuresCol": "features",
+    "impurity": "gini",
+    "labelCol": "label",
+    "leafCol": "",
+    "maxBins": 32,
+    "maxDepth": 3,
+    "maxMemoryInMB": 256,
+    "minInfoGain": 0.0,
+    "minInstancesPerNode": 1,
+    "minWeightFractionPerNode": 0.0,
+    "predictionCol": "prediction",
+    "probabilityCol": "probability",
+    "pruneTree": true,
+    "rawPredictionCol": "rawPrediction",
+    "seed": 42,
+    "weightCol": "weight"
+   },
+   "save": {
+    "call": "estimator.write().overwrite().save(path)",
+    "commands": [
+     "IoYBCkUKOW9yZy5hcGFjaGUuc3BhcmsubWwuY2xhc3NpZmljYXRpb24uRGVjaXNpb25UcmVlQ2xhc3NpZmllchIGPHVpZDA+GAEaMwoOCghtYXhEZXB0aBICMAMKCgoEc2VlZBICMCoKFQoJd2VpZ2h0Q29sEghqBndlaWdodCIGPHBhdGg+KAE="
+    ],
+    "results": [
+     ""
+    ],
+    "value": null
+   },
+   "uid": "DecisionTreeClassifier",
+   "uid_same": true
+  },
+  "DecisionTreeClassifier.model": {
+   "load": {
+    "call": "DecisionTreeClassificationModel.load(path)",
+    "commands": [
+     "KlAKRgpCb3JnLmFwYWNoZS5zcGFyay5tbC5jbGFzc2lmaWNhdGlvbi5EZWNpc2lvblRyZWVDbGFzc2lmaWNhdGlvbk1vZGVsGAQSBjxwYXRoPg=="
+    ],
+    "results": [
+     "GkYKBwoFPGlkMD4aBjx1aWQwPiIzCg4KCG1heERlcHRoEgIwAwoKCgRzZWVkEgI4KgoVCgl3ZWlnaHRDb2wSCGoGd2VpZ2h0"
+    ],
+    "value": {
+     "ref": "<id0>",
+     "type": "DecisionTreeClassificationModel"
+    }
+   },
+   "members": {
+    "class": "DecisionTreeClassificationModel",
+    "members": {
+     "predict-dense": {
+      "call": "loaded.predict(Vectors.dense([0.5, 1.5]))",
+      "commands": [
+       "EnQKBwoFPGlkMD4SaQoHcHJlZGljdBJeClzCAVkKLroBKwoDdWR0EiRvcmcuYXBhY2hlLnNwYXJrLm1sLmxpbmFsZy5WZWN0b3JVRFQSAiABEgQKAgoAEgQKAgoAEhfKARQqEgoQAAAAAAAA4D8AAAAAAAD4Pw=="
+      ],
+      "results": [
+       "CglZAAAAAAAAAAA="
+      ],
+      "value": 0.0
+     },
+     "repr()": {
+      "call": "repr(loaded)",
+      "commands": [
+       "EhUKBwoFPGlkMD4SCgoIdG9TdHJpbmc="
+      ],
+      "results": [
+       "Cm9qbURlY2lzaW9uVHJlZUNsYXNzaWZpY2F0aW9uTW9kZWw6IHVpZD1EZWNpc2lvblRyZWVDbGFzc2lmaWVyLCBkZXB0aD0yLCBudW1Ob2Rlcz01LCBudW1DbGFzc2VzPTMsIG51bUZlYXR1cmVzPTI="
+      ],
+      "value": "DecisionTreeClassificationModel: uid=DecisionTreeClassifier, depth=2, numNodes=5, numClasses=3, numFeatures=2"
+     },
+     "str()": {
+      "call": "str(loaded)",
+      "commands": [
+       "EhUKBwoFPGlkMD4SCgoIdG9TdHJpbmc="
+      ],
+      "results": [
+       "Cm9qbURlY2lzaW9uVHJlZUNsYXNzaWZpY2F0aW9uTW9kZWw6IHVpZD1EZWNpc2lvblRyZWVDbGFzc2lmaWVyLCBkZXB0aD0yLCBudW1Ob2Rlcz01LCBudW1DbGFzc2VzPTMsIG51bUZlYXR1cmVzPTI="
+      ],
+      "value": "DecisionTreeClassificationModel: uid=DecisionTreeClassifier, depth=2, numNodes=5, numClasses=3, numFeatures=2"
+     },
+     "transform": {
+      "call": "loaded.transform(multi_eval)",
+      "commands": [
+       "Ct8DCgcKBTxpZDA+Gp4DCgCKAZgDCpEDCgAajAMK1QIKALoBzwIKmAIKAFqTAhKQAnsiZmllbGRzIjpbeyJtZXRhZGF0YSI6e30sIm5hbWUiOiJsYWJlbCIsIm51bGxhYmxlIjp0cnVlLCJ0eXBlIjoiZG91YmxlIn0seyJtZXRhZGF0YSI6e30sIm5hbWUiOiJ3ZWlnaHQiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoiZmVhdHVyZXMiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6eyJjb250YWluc051bGwiOnRydWUsImVsZW1lbnRUeXBlIjoiZG91YmxlIiwidHlwZSI6ImFycmF5In19XSwidHlwZSI6InN0cnVjdCJ9EjIKJhokCg9hcnJheV90b192ZWN0b3ISERIMCghmZWF0dXJlcxgAkgEAEghmZWF0dXJlcxoOEgkKBWxhYmVsGACSAQAaDxIKCgZ3ZWlnaHQYAJIBABoREgwKCGZlYXR1cmVzGACSAQAQARgAIjMKDgoIbWF4RGVwdGgSAjADCgoKBHNlZWQSAjAqChUKCXdlaWdodENvbBIIagZ3ZWlnaHQ="
+      ],
+      "results": [],
+      "value": {
+       "rows": [
+        [
+         0.0,
+         1.0,
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           0.1,
+           0.6
+          ]
+         },
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           2.5,
+           0.0,
+           0.0
+          ]
+         },
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           1.0,
+           0.0,
+           0.0
+          ]
+         },
+         0.0
+        ],
+        [
+         1.0,
+         1.0,
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           1.2,
+           0.1
+          ]
+         },
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           0.0,
+           4.5,
+           0.0
+          ]
+         },
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           0.0,
+           1.0,
+           0.0
+          ]
+         },
+         1.0
+        ],
+        [
+         1.0,
+         2.0,
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           0.6,
+           0.6
+          ]
+         },
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           2.5,
+           0.0,
+           0.0
+          ]
+         },
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           1.0,
+           0.0,
+           0.0
+          ]
+         },
+         0.0
+        ],
+        [
+         2.0,
+         1.0,
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           2.1,
+           1.8
+          ]
+         },
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           0.0,
+           0.0,
+           4.0
+          ]
+         },
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           0.0,
+           0.0,
+           1.0
+          ]
+         },
+         2.0
+        ]
+       ],
+       "schema": "struct<label:double,weight:double,features:vector,rawPrediction:vector,probability:vector,prediction:double>"
+      }
+     }
+    },
+    "skipped": {
+     "Param attribute (client side)": [
+      "cacheNodeIds",
+      "checkpointInterval",
+      "featuresCol",
+      "impurity",
+      "labelCol",
+      "leafCol",
+      "maxBins",
+      "maxDepth",
+      "maxMemoryInMB",
+      "minInfoGain",
+      "minInstancesPerNode",
+      "minWeightFractionPerNode",
+      "predictionCol",
+      "probabilityCol",
+      "pruneTree",
+      "rawPredictionCol",
+      "seed",
+      "thresholds",
+      "weightCol"
+     ],
+     "Params API (client side)": [
+      "clear",
+      "copy",
+      "explainParam",
+      "explainParams",
+      "extractParamMap",
+      "getOrDefault",
+      "getParam",
+      "hasDefault",
+      "hasParam",
+      "isDefined",
+      "isSet",
+      "params",
+      "set",
+      "uid"
+     ],
+     "Params getter or setter (client side)": [
+      "getCacheNodeIds",
+      "getCheckpointInterval",
+      "getFeaturesCol",
+      "getImpurity",
+      "getLabelCol",
+      "getLeafCol",
+      "getMaxBins",
+      "getMaxDepth",
+      "getMaxMemoryInMB",
+      "getMinInfoGain",
+      "getMinInstancesPerNode",
+      "getMinWeightFractionPerNode",
+      "getPredictionCol",
+      "getProbabilityCol",
+      "getPruneTree",
+      "getRawPredictionCol",
+      "getSeed",
+      "getThresholds",
+      "getWeightCol",
+      "setFeaturesCol",
+      "setLeafCol",
+      "setPredictionCol",
+      "setProbabilityCol",
+      "setRawPredictionCol",
+      "setThresholds"
+     ],
+     "not captured on this copy (partial)": [
+      "depth",
+      "featureImportances",
+      "numClasses",
+      "numFeatures",
+      "numNodes",
+      "predictLeaf",
+      "predictProbability",
+      "predictRaw",
+      "supportedImpurities",
+      "toDebugString"
+     ],
+     "persistence (captured by Golden.persist)": [
+      "load",
+      "read",
+      "save",
+      "write"
+     ]
+    }
+   },
+   "params_after": {
+    "cacheNodeIds": false,
+    "checkpointInterval": 10,
+    "featuresCol": "features",
+    "impurity": "gini",
+    "labelCol": "label",
+    "leafCol": "",
+    "maxBins": 32,
+    "maxDepth": 3,
+    "maxMemoryInMB": 256,
+    "minInfoGain": 0.0,
+    "minInstancesPerNode": 1,
+    "minWeightFractionPerNode": 0.0,
+    "predictionCol": "prediction",
+    "probabilityCol": "probability",
+    "pruneTree": true,
+    "rawPredictionCol": "rawPrediction",
+    "seed": 42,
+    "weightCol": "weight"
+   },
+   "params_before": {
+    "cacheNodeIds": false,
+    "checkpointInterval": 10,
+    "featuresCol": "features",
+    "impurity": "gini",
+    "labelCol": "label",
+    "leafCol": "",
+    "maxBins": 32,
+    "maxDepth": 3,
+    "maxMemoryInMB": 256,
+    "minInfoGain": 0.0,
+    "minInstancesPerNode": 1,
+    "minWeightFractionPerNode": 0.0,
+    "predictionCol": "prediction",
+    "probabilityCol": "probability",
+    "pruneTree": true,
+    "rawPredictionCol": "rawPrediction",
+    "seed": 42,
+    "weightCol": "weight"
+   },
+   "save": {
+    "call": "model.write().overwrite().save(path)",
+    "commands": [
+     "IkgSBwoFPGlkMD4aMwoOCghtYXhEZXB0aBICMAMKCgoEc2VlZBICMCoKFQoJd2VpZ2h0Q29sEghqBndlaWdodCIGPHBhdGg+KAE="
+    ],
+    "results": [
+     ""
+    ],
+    "value": null
+   },
+   "uid": "DecisionTreeClassifier",
+   "uid_same": true
+  },
+  "FMClassifier.estimator": {
+   "load": {
+    "call": "FMClassifier.load(path)",
+    "commands": [
+     "Kj0KMwovb3JnLmFwYWNoZS5zcGFyay5tbC5jbGFzc2lmaWNhdGlvbi5GTUNsYXNzaWZpZXIYARIGPHBhdGg+"
+    ],
+    "results": [
+     "GpYBEi9vcmcuYXBhY2hlLnNwYXJrLm1sLmNsYXNzaWZpY2F0aW9uLkZNQ2xhc3NpZmllchoGPHVpZDA+IlsKEAoKZmFjdG9yU2l6ZRICMAIKDQoHbWF4SXRlchICMBQKFQoIcmVnUGFyYW0SCVl7FK5H4XqEPwoKCgRzZWVkEgI4KgoVCghzdGVwU2l6ZRIJWZqZmZmZmbk/"
+    ],
+    "value": {
+     "type": "FMClassifier",
+     "uid": "FMClassifier"
+    }
+   },
+   "params_after": {
+    "factorSize": 2,
+    "featuresCol": "features",
+    "fitIntercept": true,
+    "fitLinear": true,
+    "initStd": 0.01,
+    "labelCol": "label",
+    "maxIter": 20,
+    "miniBatchFraction": 1.0,
+    "predictionCol": "prediction",
+    "probabilityCol": "probability",
+    "rawPredictionCol": "rawPrediction",
+    "regParam": 0.01,
+    "seed": 42,
+    "solver": "adamW",
+    "stepSize": 0.1,
+    "tol": 1e-06
+   },
+   "params_before": {
+    "factorSize": 2,
+    "featuresCol": "features",
+    "fitIntercept": true,
+    "fitLinear": true,
+    "initStd": 0.01,
+    "labelCol": "label",
+    "maxIter": 20,
+    "miniBatchFraction": 1.0,
+    "predictionCol": "prediction",
+    "probabilityCol": "probability",
+    "rawPredictionCol": "rawPrediction",
+    "regParam": 0.01,
+    "seed": 42,
+    "solver": "adamW",
+    "stepSize": 0.1,
+    "tol": 1e-06
+   },
+   "save": {
+    "call": "estimator.write().overwrite().save(path)",
+    "commands": [
+     "IqQBCjsKL29yZy5hcGFjaGUuc3BhcmsubWwuY2xhc3NpZmljYXRpb24uRk1DbGFzc2lmaWVyEgY8dWlkMD4YARpbChAKCmZhY3RvclNpemUSAjACCg0KB21heEl0ZXISAjAUChUKCHJlZ1BhcmFtEglZexSuR+F6hD8KCgoEc2VlZBICMCoKFQoIc3RlcFNpemUSCVmamZmZmZm5PyIGPHBhdGg+KAE="
+    ],
+    "results": [
+     ""
+    ],
+    "value": null
+   },
+   "uid": "FMClassifier",
+   "uid_same": true
+  },
+  "FMClassifier.model": {
+   "load": {
+    "call": "FMClassificationModel.load(path)",
+    "commands": [
+     "KkYKPAo4b3JnLmFwYWNoZS5zcGFyay5tbC5jbGFzc2lmaWNhdGlvbi5GTUNsYXNzaWZpY2F0aW9uTW9kZWwYBBIGPHBhdGg+"
+    ],
+    "results": [
+     "Gm4KBwoFPGlkMD4aBjx1aWQwPiJbChAKCmZhY3RvclNpemUSAjACCg0KB21heEl0ZXISAjAUChUKCHJlZ1BhcmFtEglZexSuR+F6hD8KCgoEc2VlZBICOCoKFQoIc3RlcFNpemUSCVmamZmZmZm5Pw=="
+    ],
+    "value": {
+     "ref": "<id0>",
+     "type": "FMClassificationModel"
+    }
+   },
+   "members": {
+    "class": "FMClassificationModel",
+    "members": {
+     "predict-dense": {
+      "call": "loaded.predict(Vectors.dense([0.5, 1.5]))",
+      "commands": [
+       "EnQKBwoFPGlkMD4SaQoHcHJlZGljdBJeClzCAVkKLroBKwoDdWR0EiRvcmcuYXBhY2hlLnNwYXJrLm1sLmxpbmFsZy5WZWN0b3JVRFQSAiABEgQKAgoAEgQKAgoAEhfKARQqEgoQAAAAAAAA4D8AAAAAAAD4Pw=="
+      ],
+      "results": [
+       "CglZAAAAAAAA8D8="
+      ],
+      "value": 1.0
+     },
+     "repr()": {
+      "call": "repr(loaded)",
+      "commands": [
+       "EhUKBwoFPGlkMD4SCgoIdG9TdHJpbmc="
+      ],
+      "results": [
+       "CndqdUZNQ2xhc3NpZmljYXRpb25Nb2RlbDogdWlkPUZNQ2xhc3NpZmllciwgbnVtQ2xhc3Nlcz0yLCBudW1GZWF0dXJlcz0yLCBmYWN0b3JTaXplPTIsIGZpdExpbmVhcj10cnVlLCBmaXRJbnRlcmNlcHQ9dHJ1ZQ=="
+      ],
+      "value": "FMClassificationModel: uid=FMClassifier, numClasses=2, numFeatures=2, factorSize=2, fitLinear=true, fitIntercept=true"
+     },
+     "str()": {
+      "call": "str(loaded)",
+      "commands": [
+       "EhUKBwoFPGlkMD4SCgoIdG9TdHJpbmc="
+      ],
+      "results": [
+       "CndqdUZNQ2xhc3NpZmljYXRpb25Nb2RlbDogdWlkPUZNQ2xhc3NpZmllciwgbnVtQ2xhc3Nlcz0yLCBudW1GZWF0dXJlcz0yLCBmYWN0b3JTaXplPTIsIGZpdExpbmVhcj10cnVlLCBmaXRJbnRlcmNlcHQ9dHJ1ZQ=="
+      ],
+      "value": "FMClassificationModel: uid=FMClassifier, numClasses=2, numFeatures=2, factorSize=2, fitLinear=true, fitIntercept=true"
+     },
+     "transform": {
+      "call": "loaded.transform(binary_eval)",
+      "commands": [
+       "CocECgcKBTxpZDA+Gp4DCgCKAZgDCpEDCgAajAMK1QIKALoBzwIKmAIKAFqTAhKQAnsiZmllbGRzIjpbeyJtZXRhZGF0YSI6e30sIm5hbWUiOiJsYWJlbCIsIm51bGxhYmxlIjp0cnVlLCJ0eXBlIjoiZG91YmxlIn0seyJtZXRhZGF0YSI6e30sIm5hbWUiOiJ3ZWlnaHQiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoiZmVhdHVyZXMiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6eyJjb250YWluc051bGwiOnRydWUsImVsZW1lbnRUeXBlIjoiZG91YmxlIiwidHlwZSI6ImFycmF5In19XSwidHlwZSI6InN0cnVjdCJ9EjIKJhokCg9hcnJheV90b192ZWN0b3ISERIMCghmZWF0dXJlcxgAkgEAEghmZWF0dXJlcxoOEgkKBWxhYmVsGACSAQAaDxIKCgZ3ZWlnaHQYAJIBABoREgwKCGZlYXR1cmVzGACSAQAQARgAIlsKEAoKZmFjdG9yU2l6ZRICMAIKDQoHbWF4SXRlchICMBQKFQoIcmVnUGFyYW0SCVl7FK5H4XqEPwoKCgRzZWVkEgIwKgoVCghzdGVwU2l6ZRIJWZqZmZmZmbk/"
+      ],
+      "results": [],
+      "value": {
+       "rows": [
+        [
+         0.0,
+         1.0,
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           2.2,
+           0.6
+          ]
+         },
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           2.2792598715099857,
+           -2.2792598715099857
+          ]
+         },
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           0.9071447222938409,
+           0.09285527770615915
+          ]
+         },
+         0.0
+        ],
+        [
+         0.0,
+         1.0,
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           2.9,
+           2.1
+          ]
+         },
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           5.8349718004729345,
+           -5.8349718004729345
+          ]
+         },
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           0.9970850162710814,
+           0.002914983728918654
+          ]
+         },
+         0.0
+        ],
+        [
+         1.0,
+         1.0,
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           0.2,
+           1.0
+          ]
+         },
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           -2.273466904763926,
+           2.273466904763926
+          ]
+         },
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           0.09334438992892624,
+           0.9066556100710738
+          ]
+         },
+         1.0
+        ],
+        [
+         1.0,
+         2.0,
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           0.8,
+           2.2
+          ]
+         },
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           -1.7660312552157431,
+           1.7660312552157431
+          ]
+         },
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           0.1460365757174792,
+           0.8539634242825208
+          ]
+         },
+         1.0
+        ]
+       ],
+       "schema": "struct<label:double,weight:double,features:vector,rawPrediction:vector,probability:vector,prediction:double>"
+      }
+     }
+    },
+    "skipped": {
+     "Param attribute (client side)": [
+      "factorSize",
+      "featuresCol",
+      "fitIntercept",
+      "fitLinear",
+      "initStd",
+      "labelCol",
+      "maxIter",
+      "miniBatchFraction",
+      "predictionCol",
+      "probabilityCol",
+      "rawPredictionCol",
+      "regParam",
+      "seed",
+      "solver",
+      "stepSize",
+      "thresholds",
+      "tol",
+      "weightCol"
+     ],
+     "Params API (client side)": [
+      "clear",
+      "copy",
+      "explainParam",
+      "explainParams",
+      "extractParamMap",
+      "getOrDefault",
+      "getParam",
+      "hasDefault",
+      "hasParam",
+      "isDefined",
+      "isSet",
+      "params",
+      "set",
+      "uid"
+     ],
+     "Params getter or setter (client side)": [
+      "getFactorSize",
+      "getFeaturesCol",
+      "getFitIntercept",
+      "getFitLinear",
+      "getInitStd",
+      "getLabelCol",
+      "getMaxIter",
+      "getMiniBatchFraction",
+      "getPredictionCol",
+      "getProbabilityCol",
+      "getRawPredictionCol",
+      "getRegParam",
+      "getSeed",
+      "getSolver",
+      "getStepSize",
+      "getThresholds",
+      "getTol",
+      "getWeightCol",
+      "setFeaturesCol",
+      "setPredictionCol",
+      "setProbabilityCol",
+      "setRawPredictionCol",
+      "setThresholds"
+     ],
+     "not captured on this copy (partial)": [
+      "evaluate",
+      "factors",
+      "hasSummary",
+      "intercept",
+      "linear",
+      "numClasses",
+      "numFeatures",
+      "predictProbability",
+      "predictRaw",
+      "summary"
+     ],
+     "persistence (captured by Golden.persist)": [
+      "load",
+      "read",
+      "save",
+      "write"
+     ]
+    }
+   },
+   "params_after": {
+    "factorSize": 2,
+    "featuresCol": "features",
+    "fitIntercept": true,
+    "fitLinear": true,
+    "initStd": 0.01,
+    "labelCol": "label",
+    "maxIter": 20,
+    "miniBatchFraction": 1.0,
+    "predictionCol": "prediction",
+    "probabilityCol": "probability",
+    "rawPredictionCol": "rawPrediction",
+    "regParam": 0.01,
+    "seed": 42,
+    "solver": "adamW",
+    "stepSize": 0.1,
+    "tol": 1e-06
+   },
+   "params_before": {
+    "factorSize": 2,
+    "featuresCol": "features",
+    "fitIntercept": true,
+    "fitLinear": true,
+    "initStd": 0.01,
+    "labelCol": "label",
+    "maxIter": 20,
+    "miniBatchFraction": 1.0,
+    "predictionCol": "prediction",
+    "probabilityCol": "probability",
+    "rawPredictionCol": "rawPrediction",
+    "regParam": 0.01,
+    "seed": 42,
+    "solver": "adamW",
+    "stepSize": 0.1,
+    "tol": 1e-06
+   },
+   "save": {
+    "call": "model.write().overwrite().save(path)",
+    "commands": [
+     "InASBwoFPGlkMD4aWwoQCgpmYWN0b3JTaXplEgIwAgoNCgdtYXhJdGVyEgIwFAoVCghyZWdQYXJhbRIJWXsUrkfheoQ/CgoKBHNlZWQSAjAqChUKCHN0ZXBTaXplEglZmpmZmZmZuT8iBjxwYXRoPigB"
+    ],
+    "results": [
+     ""
+    ],
+    "value": null
+   },
+   "uid": "FMClassifier",
+   "uid_same": true
+  },
+  "GBTClassifier.estimator": {
+   "load": {
+    "call": "GBTClassifier.load(path)",
+    "commands": [
+     "Kj4KNAowb3JnLmFwYWNoZS5zcGFyay5tbC5jbGFzc2lmaWNhdGlvbi5HQlRDbGFzc2lmaWVyGAESBjxwYXRoPg=="
+    ],
+    "results": [
+     "GpUBEjBvcmcuYXBhY2hlLnNwYXJrLm1sLmNsYXNzaWZpY2F0aW9uLkdCVENsYXNzaWZpZXIaBjx1aWQwPiJZCg4KCG1heERlcHRoEgIwAgoNCgdtYXhJdGVyEgIwAwoKCgRzZWVkEgI4KgoVCghzdGVwU2l6ZRIJWZqZmZmZmbk/ChUKCXdlaWdodENvbBIIagZ3ZWlnaHQ="
+    ],
+    "value": {
+     "type": "GBTClassifier",
+     "uid": "GBTClassifier"
+    }
+   },
+   "params_after": {
+    "cacheNodeIds": false,
+    "checkpointInterval": 10,
+    "featureSubsetStrategy": "all",
+    "featuresCol": "features",
+    "impurity": "variance",
+    "labelCol": "label",
+    "leafCol": "",
+    "lossType": "logistic",
+    "maxBins": 32,
+    "maxDepth": 2,
+    "maxIter": 3,
+    "maxMemoryInMB": 256,
+    "minInfoGain": 0.0,
+    "minInstancesPerNode": 1,
+    "minWeightFractionPerNode": 0.0,
+    "predictionCol": "prediction",
+    "probabilityCol": "probability",
+    "rawPredictionCol": "rawPrediction",
+    "seed": 42,
+    "stepSize": 0.1,
+    "subsamplingRate": 1.0,
+    "validationTol": 0.01,
+    "weightCol": "weight"
+   },
+   "params_before": {
+    "cacheNodeIds": false,
+    "checkpointInterval": 10,
+    "featureSubsetStrategy": "all",
+    "featuresCol": "features",
+    "impurity": "variance",
+    "labelCol": "label",
+    "leafCol": "",
+    "lossType": "logistic",
+    "maxBins": 32,
+    "maxDepth": 2,
+    "maxIter": 3,
+    "maxMemoryInMB": 256,
+    "minInfoGain": 0.0,
+    "minInstancesPerNode": 1,
+    "minWeightFractionPerNode": 0.0,
+    "predictionCol": "prediction",
+    "probabilityCol": "probability",
+    "rawPredictionCol": "rawPrediction",
+    "seed": 42,
+    "stepSize": 0.1,
+    "subsamplingRate": 1.0,
+    "validationTol": 0.01,
+    "weightCol": "weight"
+   },
+   "save": {
+    "call": "estimator.write().overwrite().save(path)",
+    "commands": [
+     "IqMBCjwKMG9yZy5hcGFjaGUuc3BhcmsubWwuY2xhc3NpZmljYXRpb24uR0JUQ2xhc3NpZmllchIGPHVpZDA+GAEaWQoOCghtYXhEZXB0aBICMAIKDQoHbWF4SXRlchICMAMKCgoEc2VlZBICMCoKFQoIc3RlcFNpemUSCVmamZmZmZm5PwoVCgl3ZWlnaHRDb2wSCGoGd2VpZ2h0IgY8cGF0aD4oAQ=="
+    ],
+    "results": [
+     ""
+    ],
+    "value": null
+   },
+   "uid": "GBTClassifier",
+   "uid_same": true
+  },
+  "GBTClassifier.model": {
+   "load": {
+    "call": "GBTClassificationModel.load(path)",
+    "commands": [
+     "KkcKPQo5b3JnLmFwYWNoZS5zcGFyay5tbC5jbGFzc2lmaWNhdGlvbi5HQlRDbGFzc2lmaWNhdGlvbk1vZGVsGAQSBjxwYXRoPg==",
+     "EhIKBwoFPGlkMD4SBwoFdHJlZXM="
+    ],
+    "results": [
+     "GmwKBwoFPGlkMD4aBjx1aWQwPiJZCg4KCG1heERlcHRoEgIwAgoNCgdtYXhJdGVyEgIwAwoKCgRzZWVkEgI4KgoVCghzdGVwU2l6ZRIJWZqZmZmZmbk/ChUKCXdlaWdodENvbBIIagZ3ZWlnaHQ=",
+     "GgkKBwoFPGlkMT4="
+    ],
+    "value": {
+     "ref": "<id0>",
+     "type": "GBTClassificationModel"
+    }
+   },
+   "members": {
+    "class": "GBTClassificationModel",
+    "members": {
+     "predict-dense": {
+      "call": "loaded.predict(Vectors.dense([0.5, 1.5]))",
+      "commands": [
+       "EnQKBwoFPGlkMD4SaQoHcHJlZGljdBJeClzCAVkKLroBKwoDdWR0EiRvcmcuYXBhY2hlLnNwYXJrLm1sLmxpbmFsZy5WZWN0b3JVRFQSAiABEgQKAgoAEgQKAgoAEhfKARQqEgoQAAAAAAAA4D8AAAAAAAD4Pw=="
+      ],
+      "results": [
+       "CglZAAAAAAAA8D8="
+      ],
+      "value": 1.0
+     },
+     "repr()": {
+      "call": "repr(loaded)",
+      "commands": [
+       "EhUKBwoFPGlkMD4SCgoIdG9TdHJpbmc="
+      ],
+      "results": [
+       "ClZqVEdCVENsYXNzaWZpY2F0aW9uTW9kZWw6IHVpZCA9IEdCVENsYXNzaWZpZXIsIG51bVRyZWVzPTMsIG51bUNsYXNzZXM9MiwgbnVtRmVhdHVyZXM9Mg=="
+      ],
+      "value": "GBTClassificationModel: uid = GBTClassifier, numTrees=3, numClasses=2, numFeatures=2"
+     },
+     "str()": {
+      "call": "str(loaded)",
+      "commands": [
+       "EhUKBwoFPGlkMD4SCgoIdG9TdHJpbmc="
+      ],
+      "results": [
+       "ClZqVEdCVENsYXNzaWZpY2F0aW9uTW9kZWw6IHVpZCA9IEdCVENsYXNzaWZpZXIsIG51bVRyZWVzPTMsIG51bUNsYXNzZXM9MiwgbnVtRmVhdHVyZXM9Mg=="
+      ],
+      "value": "GBTClassificationModel: uid = GBTClassifier, numTrees=3, numClasses=2, numFeatures=2"
+     },
+     "transform": {
+      "call": "loaded.transform(binary_eval)",
+      "commands": [
+       "CoUECgcKBTxpZDA+Gp4DCgCKAZgDCpEDCgAajAMK1QIKALoBzwIKmAIKAFqTAhKQAnsiZmllbGRzIjpbeyJtZXRhZGF0YSI6e30sIm5hbWUiOiJsYWJlbCIsIm51bGxhYmxlIjp0cnVlLCJ0eXBlIjoiZG91YmxlIn0seyJtZXRhZGF0YSI6e30sIm5hbWUiOiJ3ZWlnaHQiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoiZmVhdHVyZXMiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6eyJjb250YWluc051bGwiOnRydWUsImVsZW1lbnRUeXBlIjoiZG91YmxlIiwidHlwZSI6ImFycmF5In19XSwidHlwZSI6InN0cnVjdCJ9EjIKJhokCg9hcnJheV90b192ZWN0b3ISERIMCghmZWF0dXJlcxgAkgEAEghmZWF0dXJlcxoOEgkKBWxhYmVsGACSAQAaDxIKCgZ3ZWlnaHQYAJIBABoREgwKCGZlYXR1cmVzGACSAQAQARgAIlkKDgoIbWF4RGVwdGgSAjACCg0KB21heEl0ZXISAjADCgoKBHNlZWQSAjAqChUKCHN0ZXBTaXplEglZmpmZmZmZuT8KFQoJd2VpZ2h0Q29sEghqBndlaWdodA=="
+      ],
+      "results": [],
+      "value": {
+       "rows": [
+        [
+         0.0,
+         1.0,
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           2.2,
+           0.6
+          ]
+         },
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           1.091500526913119,
+           -1.091500526913119
+          ]
+         },
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           0.8987125799288505,
+           0.10128742007114955
+          ]
+         },
+         0.0
+        ],
+        [
+         0.0,
+         1.0,
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           2.9,
+           2.1
+          ]
+         },
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           1.091500526913119,
+           -1.091500526913119
+          ]
+         },
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           0.8987125799288505,
+           0.10128742007114955
+          ]
+         },
+         0.0
+        ],
+        [
+         1.0,
+         1.0,
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           0.2,
+           1.0
+          ]
+         },
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           -1.091500526913119,
+           1.091500526913119
+          ]
+         },
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           0.10128742007114958,
+           0.8987125799288505
+          ]
+         },
+         1.0
+        ],
+        [
+         1.0,
+         2.0,
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           0.8,
+           2.2
+          ]
+         },
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           -1.091500526913119,
+           1.091500526913119
+          ]
+         },
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           0.10128742007114958,
+           0.8987125799288505
+          ]
+         },
+         1.0
+        ]
+       ],
+       "schema": "struct<label:double,weight:double,features:vector,rawPrediction:vector,probability:vector,prediction:double>"
+      }
+     }
+    },
+    "skipped": {
+     "Param attribute (client side)": [
+      "cacheNodeIds",
+      "checkpointInterval",
+      "featureSubsetStrategy",
+      "featuresCol",
+      "impurity",
+      "labelCol",
+      "leafCol",
+      "lossType",
+      "maxBins",
+      "maxDepth",
+      "maxIter",
+      "maxMemoryInMB",
+      "minInfoGain",
+      "minInstancesPerNode",
+      "minWeightFractionPerNode",
+      "predictionCol",
+      "probabilityCol",
+      "rawPredictionCol",
+      "seed",
+      "stepSize",
+      "subsamplingRate",
+      "thresholds",
+      "validationIndicatorCol",
+      "validationTol",
+      "weightCol"
+     ],
+     "Params API (client side)": [
+      "clear",
+      "copy",
+      "explainParam",
+      "explainParams",
+      "extractParamMap",
+      "getOrDefault",
+      "getParam",
+      "hasDefault",
+      "hasParam",
+      "isDefined",
+      "isSet",
+      "params",
+      "set",
+      "uid"
+     ],
+     "Params getter or setter (client side)": [
+      "getCacheNodeIds",
+      "getCheckpointInterval",
+      "getFeatureSubsetStrategy",
+      "getFeaturesCol",
+      "getImpurity",
+      "getLabelCol",
+      "getLeafCol",
+      "getLossType",
+      "getMaxBins",
+      "getMaxDepth",
+      "getMaxIter",
+      "getMaxMemoryInMB",
+      "getMinInfoGain",
+      "getMinInstancesPerNode",
+      "getMinWeightFractionPerNode",
+      "getPredictionCol",
+      "getProbabilityCol",
+      "getRawPredictionCol",
+      "getSeed",
+      "getStepSize",
+      "getSubsamplingRate",
+      "getThresholds",
+      "getValidationIndicatorCol",
+      "getValidationTol",
+      "getWeightCol",
+      "setFeaturesCol",
+      "setLeafCol",
+      "setPredictionCol",
+      "setProbabilityCol",
+      "setRawPredictionCol",
+      "setThresholds"
+     ],
+     "not captured on this copy (partial)": [
+      "evaluateEachIteration",
+      "featureImportances",
+      "getNumTrees",
+      "numClasses",
+      "numFeatures",
+      "predictLeaf",
+      "predictProbability",
+      "predictRaw",
+      "supportedFeatureSubsetStrategies",
+      "supportedImpurities",
+      "supportedLossTypes",
+      "toDebugString",
+      "totalNumNodes",
+      "treeWeights",
+      "trees"
+     ],
+     "persistence (captured by Golden.persist)": [
+      "load",
+      "read",
+      "save",
+      "write"
+     ]
+    }
+   },
+   "params_after": {
+    "cacheNodeIds": false,
+    "checkpointInterval": 10,
+    "featureSubsetStrategy": "all",
+    "featuresCol": "features",
+    "impurity": "variance",
+    "labelCol": "label",
+    "leafCol": "",
+    "lossType": "logistic",
+    "maxBins": 32,
+    "maxDepth": 2,
+    "maxIter": 3,
+    "maxMemoryInMB": 256,
+    "minInfoGain": 0.0,
+    "minInstancesPerNode": 1,
+    "minWeightFractionPerNode": 0.0,
+    "predictionCol": "prediction",
+    "probabilityCol": "probability",
+    "rawPredictionCol": "rawPrediction",
+    "seed": 42,
+    "stepSize": 0.1,
+    "subsamplingRate": 1.0,
+    "validationTol": 0.01,
+    "weightCol": "weight"
+   },
+   "params_before": {
+    "cacheNodeIds": false,
+    "checkpointInterval": 10,
+    "featureSubsetStrategy": "all",
+    "featuresCol": "features",
+    "impurity": "variance",
+    "labelCol": "label",
+    "leafCol": "",
+    "lossType": "logistic",
+    "maxBins": 32,
+    "maxDepth": 2,
+    "maxIter": 3,
+    "maxMemoryInMB": 256,
+    "minInfoGain": 0.0,
+    "minInstancesPerNode": 1,
+    "minWeightFractionPerNode": 0.0,
+    "predictionCol": "prediction",
+    "probabilityCol": "probability",
+    "rawPredictionCol": "rawPrediction",
+    "seed": 42,
+    "stepSize": 0.1,
+    "subsamplingRate": 1.0,
+    "validationTol": 0.01,
+    "weightCol": "weight"
+   },
+   "save": {
+    "call": "model.write().overwrite().save(path)",
+    "commands": [
+     "Im4SBwoFPGlkMD4aWQoOCghtYXhEZXB0aBICMAIKDQoHbWF4SXRlchICMAMKCgoEc2VlZBICMCoKFQoIc3RlcFNpemUSCVmamZmZmZm5PwoVCgl3ZWlnaHRDb2wSCGoGd2VpZ2h0IgY8cGF0aD4oAQ=="
+    ],
+    "results": [
+     ""
+    ],
+    "value": null
+   },
+   "uid": "GBTClassifier",
+   "uid_same": true
+  },
+  "LinearSVC.estimator": {
+   "load": {
+    "call": "LinearSVC.load(path)",
+    "commands": [
+     "KjoKMAosb3JnLmFwYWNoZS5zcGFyay5tbC5jbGFzc2lmaWNhdGlvbi5MaW5lYXJTVkMYARIGPHBhdGg+"
+    ],
+    "results": [
+     "GnUSLG9yZy5hcGFjaGUuc3BhcmsubWwuY2xhc3NpZmljYXRpb24uTGluZWFyU1ZDGgY8dWlkMD4iPQoNCgdtYXhJdGVyEgIwFAoVCghyZWdQYXJhbRIJWXsUrkfheoQ/ChUKCXdlaWdodENvbBIIagZ3ZWlnaHQ="
+    ],
+    "value": {
+     "type": "LinearSVC",
+     "uid": "LinearSVC"
+    }
+   },
+   "params_after": {
+    "aggregationDepth": 2,
+    "featuresCol": "features",
+    "fitIntercept": true,
+    "labelCol": "label",
+    "maxBlockSizeInMB": 0.0,
+    "maxIter": 20,
+    "predictionCol": "prediction",
+    "rawPredictionCol": "rawPrediction",
+    "regParam": 0.01,
+    "standardization": true,
+    "threshold": 0.0,
+    "tol": 1e-06,
+    "weightCol": "weight"
+   },
+   "params_before": {
+    "aggregationDepth": 2,
+    "featuresCol": "features",
+    "fitIntercept": true,
+    "labelCol": "label",
+    "maxBlockSizeInMB": 0.0,
+    "maxIter": 20,
+    "predictionCol": "prediction",
+    "rawPredictionCol": "rawPrediction",
+    "regParam": 0.01,
+    "standardization": true,
+    "threshold": 0.0,
+    "tol": 1e-06,
+    "weightCol": "weight"
+   },
+   "save": {
+    "call": "estimator.write().overwrite().save(path)",
+    "commands": [
+     "IoMBCjgKLG9yZy5hcGFjaGUuc3BhcmsubWwuY2xhc3NpZmljYXRpb24uTGluZWFyU1ZDEgY8dWlkMD4YARo9Cg0KB21heEl0ZXISAjAUChUKCHJlZ1BhcmFtEglZexSuR+F6hD8KFQoJd2VpZ2h0Q29sEghqBndlaWdodCIGPHBhdGg+KAE="
+    ],
+    "results": [
+     ""
+    ],
+    "value": null
+   },
+   "uid": "LinearSVC",
+   "uid_same": true
+  },
+  "LinearSVC.model": {
+   "load": {
+    "call": "LinearSVCModel.load(path)",
+    "commands": [
+     "Kj8KNQoxb3JnLmFwYWNoZS5zcGFyay5tbC5jbGFzc2lmaWNhdGlvbi5MaW5lYXJTVkNNb2RlbBgEEgY8cGF0aD4="
+    ],
+    "results": [
+     "GlAKBwoFPGlkMD4aBjx1aWQwPiI9Cg0KB21heEl0ZXISAjAUChUKCHJlZ1BhcmFtEglZexSuR+F6hD8KFQoJd2VpZ2h0Q29sEghqBndlaWdodA=="
+    ],
+    "value": {
+     "ref": "<id0>",
+     "type": "LinearSVCModel"
+    }
+   },
+   "members": {
+    "class": "LinearSVCModel",
+    "members": {
+     "predict-dense": {
+      "call": "loaded.predict(Vectors.dense([0.5, 1.5]))",
+      "commands": [
+       "EnQKBwoFPGlkMD4SaQoHcHJlZGljdBJeClzCAVkKLroBKwoDdWR0EiRvcmcuYXBhY2hlLnNwYXJrLm1sLmxpbmFsZy5WZWN0b3JVRFQSAiABEgQKAgoAEgQKAgoAEhfKARQqEgoQAAAAAAAA4D8AAAAAAAD4Pw=="
+      ],
+      "results": [
+       "CglZAAAAAAAA8D8="
+      ],
+      "value": 1.0
+     },
+     "repr()": {
+      "call": "repr(loaded)",
+      "commands": [
+       "EhUKBwoFPGlkMD4SCgoIdG9TdHJpbmc="
+      ],
+      "results": [
+       "CjxqOkxpbmVhclNWQ01vZGVsOiB1aWQ9TGluZWFyU1ZDLCBudW1DbGFzc2VzPTIsIG51bUZlYXR1cmVzPTI="
+      ],
+      "value": "LinearSVCModel: uid=LinearSVC, numClasses=2, numFeatures=2"
+     },
+     "str()": {
+      "call": "str(loaded)",
+      "commands": [
+       "EhUKBwoFPGlkMD4SCgoIdG9TdHJpbmc="
+      ],
+      "results": [
+       "CjxqOkxpbmVhclNWQ01vZGVsOiB1aWQ9TGluZWFyU1ZDLCBudW1DbGFzc2VzPTIsIG51bUZlYXR1cmVzPTI="
+      ],
+      "value": "LinearSVCModel: uid=LinearSVC, numClasses=2, numFeatures=2"
+     },
+     "transform": {
+      "call": "loaded.transform(binary_eval)",
+      "commands": [
+       "CukDCgcKBTxpZDA+Gp4DCgCKAZgDCpEDCgAajAMK1QIKALoBzwIKmAIKAFqTAhKQAnsiZmllbGRzIjpbeyJtZXRhZGF0YSI6e30sIm5hbWUiOiJsYWJlbCIsIm51bGxhYmxlIjp0cnVlLCJ0eXBlIjoiZG91YmxlIn0seyJtZXRhZGF0YSI6e30sIm5hbWUiOiJ3ZWlnaHQiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoiZmVhdHVyZXMiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6eyJjb250YWluc051bGwiOnRydWUsImVsZW1lbnRUeXBlIjoiZG91YmxlIiwidHlwZSI6ImFycmF5In19XSwidHlwZSI6InN0cnVjdCJ9EjIKJhokCg9hcnJheV90b192ZWN0b3ISERIMCghmZWF0dXJlcxgAkgEAEghmZWF0dXJlcxoOEgkKBWxhYmVsGACSAQAaDxIKCgZ3ZWlnaHQYAJIBABoREgwKCGZlYXR1cmVzGACSAQAQARgAIj0KDQoHbWF4SXRlchICMBQKFQoIcmVnUGFyYW0SCVl7FK5H4XqEPwoVCgl3ZWlnaHRDb2wSCGoGd2VpZ2h0"
+      ],
+      "results": [],
+      "value": {
+       "rows": [
+        [
+         0.0,
+         1.0,
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           2.2,
+           0.6
+          ]
+         },
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           1.5788625673094596,
+           -1.5788625673094596
+          ]
+         },
+         0.0
+        ],
+        [
+         0.0,
+         1.0,
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           2.9,
+           2.1
+          ]
+         },
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           2.0693637391135757,
+           -2.0693637391135757
+          ]
+         },
+         0.0
+        ],
+        [
+         1.0,
+         1.0,
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           0.2,
+           1.0
+          ]
+         },
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           -1.9260848631014902,
+           1.9260848631014902
+          ]
+         },
+         1.0
+        ],
+        [
+         1.0,
+         2.0,
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           0.8,
+           2.2
+          ]
+         },
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           -1.4671763449955382,
+           1.4671763449955382
+          ]
+         },
+         1.0
+        ]
+       ],
+       "schema": "struct<label:double,weight:double,features:vector,rawPrediction:vector,prediction:double>"
+      }
+     }
+    },
+    "skipped": {
+     "Param attribute (client side)": [
+      "aggregationDepth",
+      "featuresCol",
+      "fitIntercept",
+      "labelCol",
+      "maxBlockSizeInMB",
+      "maxIter",
+      "predictionCol",
+      "rawPredictionCol",
+      "regParam",
+      "standardization",
+      "threshold",
+      "tol",
+      "weightCol"
+     ],
+     "Params API (client side)": [
+      "clear",
+      "copy",
+      "explainParam",
+      "explainParams",
+      "extractParamMap",
+      "getOrDefault",
+      "getParam",
+      "hasDefault",
+      "hasParam",
+      "isDefined",
+      "isSet",
+      "params",
+      "set",
+      "uid"
+     ],
+     "Params getter or setter (client side)": [
+      "getAggregationDepth",
+      "getFeaturesCol",
+      "getFitIntercept",
+      "getLabelCol",
+      "getMaxBlockSizeInMB",
+      "getMaxIter",
+      "getPredictionCol",
+      "getRawPredictionCol",
+      "getRegParam",
+      "getStandardization",
+      "getThreshold",
+      "getTol",
+      "getWeightCol",
+      "setFeaturesCol",
+      "setPredictionCol",
+      "setRawPredictionCol",
+      "setThreshold"
+     ],
+     "not captured on this copy (partial)": [
+      "coefficients",
+      "evaluate",
+      "hasSummary",
+      "intercept",
+      "numClasses",
+      "numFeatures",
+      "predictRaw",
+      "summary"
+     ],
+     "persistence (captured by Golden.persist)": [
+      "load",
+      "read",
+      "save",
+      "write"
+     ]
+    }
+   },
+   "params_after": {
+    "aggregationDepth": 2,
+    "featuresCol": "features",
+    "fitIntercept": true,
+    "labelCol": "label",
+    "maxBlockSizeInMB": 0.0,
+    "maxIter": 20,
+    "predictionCol": "prediction",
+    "rawPredictionCol": "rawPrediction",
+    "regParam": 0.01,
+    "standardization": true,
+    "threshold": 0.0,
+    "tol": 1e-06,
+    "weightCol": "weight"
+   },
+   "params_before": {
+    "aggregationDepth": 2,
+    "featuresCol": "features",
+    "fitIntercept": true,
+    "labelCol": "label",
+    "maxBlockSizeInMB": 0.0,
+    "maxIter": 20,
+    "predictionCol": "prediction",
+    "rawPredictionCol": "rawPrediction",
+    "regParam": 0.01,
+    "standardization": true,
+    "threshold": 0.0,
+    "tol": 1e-06,
+    "weightCol": "weight"
+   },
+   "save": {
+    "call": "model.write().overwrite().save(path)",
+    "commands": [
+     "IlISBwoFPGlkMD4aPQoNCgdtYXhJdGVyEgIwFAoVCghyZWdQYXJhbRIJWXsUrkfheoQ/ChUKCXdlaWdodENvbBIIagZ3ZWlnaHQiBjxwYXRoPigB"
+    ],
+    "results": [
+     ""
+    ],
+    "value": null
+   },
+   "uid": "LinearSVC",
+   "uid_same": true
+  },
+  "LogisticRegression.binomial.estimator": {
+   "load": {
+    "call": "LogisticRegression.load(path)",
+    "commands": [
+     "KkMKOQo1b3JnLmFwYWNoZS5zcGFyay5tbC5jbGFzc2lmaWNhdGlvbi5Mb2dpc3RpY1JlZ3Jlc3Npb24YARIGPHBhdGg+"
+    ],
+    "results": [
+     "GpQBEjVvcmcuYXBhY2hlLnNwYXJrLm1sLmNsYXNzaWZpY2F0aW9uLkxvZ2lzdGljUmVncmVzc2lvbhoGPHVpZDA+IlMKFAoGZmFtaWx5EgpqCGJpbm9taWFsCg0KB21heEl0ZXISAjAUChUKCHJlZ1BhcmFtEglZexSuR+F6hD8KFQoJd2VpZ2h0Q29sEghqBndlaWdodA=="
+    ],
+    "value": {
+     "type": "LogisticRegression",
+     "uid": "LogisticRegression_binomial"
+    }
+   },
+   "params_after": {
+    "aggregationDepth": 2,
+    "elasticNetParam": 0.0,
+    "family": "binomial",
+    "featuresCol": "features",
+    "fitIntercept": true,
+    "labelCol": "label",
+    "maxBlockSizeInMB": 0.0,
+    "maxIter": 20,
+    "predictionCol": "prediction",
+    "probabilityCol": "probability",
+    "rawPredictionCol": "rawPrediction",
+    "regParam": 0.01,
+    "standardization": true,
+    "threshold": 0.5,
+    "tol": 1e-06,
+    "weightCol": "weight"
+   },
+   "params_before": {
+    "aggregationDepth": 2,
+    "elasticNetParam": 0.0,
+    "family": "binomial",
+    "featuresCol": "features",
+    "fitIntercept": true,
+    "labelCol": "label",
+    "maxBlockSizeInMB": 0.0,
+    "maxIter": 20,
+    "predictionCol": "prediction",
+    "probabilityCol": "probability",
+    "rawPredictionCol": "rawPrediction",
+    "regParam": 0.01,
+    "standardization": true,
+    "threshold": 0.5,
+    "tol": 1e-06,
+    "weightCol": "weight"
+   },
+   "save": {
+    "call": "estimator.write().overwrite().save(path)",
+    "commands": [
+     "IqIBCkEKNW9yZy5hcGFjaGUuc3BhcmsubWwuY2xhc3NpZmljYXRpb24uTG9naXN0aWNSZWdyZXNzaW9uEgY8dWlkMD4YARpTChQKBmZhbWlseRIKaghiaW5vbWlhbAoNCgdtYXhJdGVyEgIwFAoVCghyZWdQYXJhbRIJWXsUrkfheoQ/ChUKCXdlaWdodENvbBIIagZ3ZWlnaHQiBjxwYXRoPigB"
+    ],
+    "results": [
+     ""
+    ],
+    "value": null
+   },
+   "uid": "LogisticRegression_binomial",
+   "uid_same": true
+  },
+  "LogisticRegression.binomial.model": {
+   "load": {
+    "call": "LogisticRegressionModel.load(path)",
+    "commands": [
+     "KkgKPgo6b3JnLmFwYWNoZS5zcGFyay5tbC5jbGFzc2lmaWNhdGlvbi5Mb2dpc3RpY1JlZ3Jlc3Npb25Nb2RlbBgEEgY8cGF0aD4="
+    ],
+    "results": [
+     "GmYKBwoFPGlkMD4aBjx1aWQwPiJTChQKBmZhbWlseRIKaghiaW5vbWlhbAoNCgdtYXhJdGVyEgIwFAoVCghyZWdQYXJhbRIJWXsUrkfheoQ/ChUKCXdlaWdodENvbBIIagZ3ZWlnaHQ="
+    ],
+    "value": {
+     "ref": "<id0>",
+     "type": "LogisticRegressionModel"
+    }
+   },
+   "members": {
+    "class": "LogisticRegressionModel",
+    "members": {
+     "predict-dense": {
+      "call": "loaded.predict(Vectors.dense([0.5, 1.5]))",
+      "commands": [
+       "EnQKBwoFPGlkMD4SaQoHcHJlZGljdBJeClzCAVkKLroBKwoDdWR0EiRvcmcuYXBhY2hlLnNwYXJrLm1sLmxpbmFsZy5WZWN0b3JVRFQSAiABEgQKAgoAEgQKAgoAEhfKARQqEgoQAAAAAAAA4D8AAAAAAAD4Pw=="
+      ],
+      "results": [
+       "CglZAAAAAAAA8D8="
+      ],
+      "value": 1.0
+     },
+     "repr()": {
+      "call": "repr(loaded)",
+      "commands": [
+       "EhUKBwoFPGlkMD4SCgoIdG9TdHJpbmc="
+      ],
+      "results": [
+       "CldqVUxvZ2lzdGljUmVncmVzc2lvbk1vZGVsOiB1aWQ9TG9naXN0aWNSZWdyZXNzaW9uX2Jpbm9taWFsLCBudW1DbGFzc2VzPTIsIG51bUZlYXR1cmVzPTI="
+      ],
+      "value": "LogisticRegressionModel: uid=LogisticRegression_binomial, numClasses=2, numFeatures=2"
+     },
+     "str()": {
+      "call": "str(loaded)",
+      "commands": [
+       "EhUKBwoFPGlkMD4SCgoIdG9TdHJpbmc="
+      ],
+      "results": [
+       "CldqVUxvZ2lzdGljUmVncmVzc2lvbk1vZGVsOiB1aWQ9TG9naXN0aWNSZWdyZXNzaW9uX2Jpbm9taWFsLCBudW1DbGFzc2VzPTIsIG51bUZlYXR1cmVzPTI="
+      ],
+      "value": "LogisticRegressionModel: uid=LogisticRegression_binomial, numClasses=2, numFeatures=2"
+     },
+     "transform": {
+      "call": "loaded.transform(binary_eval)",
+      "commands": [
+       "Cv8DCgcKBTxpZDA+Gp4DCgCKAZgDCpEDCgAajAMK1QIKALoBzwIKmAIKAFqTAhKQAnsiZmllbGRzIjpbeyJtZXRhZGF0YSI6e30sIm5hbWUiOiJsYWJlbCIsIm51bGxhYmxlIjp0cnVlLCJ0eXBlIjoiZG91YmxlIn0seyJtZXRhZGF0YSI6e30sIm5hbWUiOiJ3ZWlnaHQiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoiZmVhdHVyZXMiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6eyJjb250YWluc051bGwiOnRydWUsImVsZW1lbnRUeXBlIjoiZG91YmxlIiwidHlwZSI6ImFycmF5In19XSwidHlwZSI6InN0cnVjdCJ9EjIKJhokCg9hcnJheV90b192ZWN0b3ISERIMCghmZWF0dXJlcxgAkgEAEghmZWF0dXJlcxoOEgkKBWxhYmVsGACSAQAaDxIKCgZ3ZWlnaHQYAJIBABoREgwKCGZlYXR1cmVzGACSAQAQARgAIlMKFAoGZmFtaWx5EgpqCGJpbm9taWFsCg0KB21heEl0ZXISAjAUChUKCHJlZ1BhcmFtEglZexSuR+F6hD8KFQoJd2VpZ2h0Q29sEghqBndlaWdodA=="
+      ],
+      "results": [],
+      "value": {
+       "rows": [
+        [
+         0.0,
+         1.0,
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           2.2,
+           0.6
+          ]
+         },
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           3.598798919964509,
+           -3.598798919964509
+          ]
+         },
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           0.9733718932621986,
+           0.02662810673780136
+          ]
+         },
+         0.0
+        ],
+        [
+         0.0,
+         1.0,
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           2.9,
+           2.1
+          ]
+         },
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           4.0487426904266925,
+           -4.0487426904266925
+          ]
+         },
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           0.9828547923046047,
+           0.017145207695395293
+          ]
+         },
+         0.0
+        ],
+        [
+         1.0,
+         1.0,
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           0.2,
+           1.0
+          ]
+         },
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           -3.3822417883230904,
+           3.3822417883230904
+          ]
+         },
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           0.03285508591588462,
+           0.9671449140841154
+          ]
+         },
+         1.0
+        ],
+        [
+         1.0,
+         2.0,
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           0.8,
+           2.2
+          ]
+         },
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           -2.8923899601165597,
+           2.8923899601165597
+          ]
+         },
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           0.052531039175211645,
+           0.9474689608247884
+          ]
+         },
+         1.0
+        ]
+       ],
+       "schema": "struct<label:double,weight:double,features:vector,rawPrediction:vector,probability:vector,prediction:double>"
+      }
+     }
+    },
+    "skipped": {
+     "Param attribute (client side)": [
+      "aggregationDepth",
+      "elasticNetParam",
+      "family",
+      "featuresCol",
+      "fitIntercept",
+      "labelCol",
+      "lowerBoundsOnCoefficients",
+      "lowerBoundsOnIntercepts",
+      "maxBlockSizeInMB",
+      "maxIter",
+      "predictionCol",
+      "probabilityCol",
+      "rawPredictionCol",
+      "regParam",
+      "standardization",
+      "threshold",
+      "thresholds",
+      "tol",
+      "upperBoundsOnCoefficients",
+      "upperBoundsOnIntercepts",
+      "weightCol"
+     ],
+     "Params API (client side)": [
+      "clear",
+      "copy",
+      "explainParam",
+      "explainParams",
+      "extractParamMap",
+      "getOrDefault",
+      "getParam",
+      "hasDefault",
+      "hasParam",
+      "isDefined",
+      "isSet",
+      "params",
+      "set",
+      "uid"
+     ],
+     "Params getter or setter (client side)": [
+      "getAggregationDepth",
+      "getElasticNetParam",
+      "getFamily",
+      "getFeaturesCol",
+      "getFitIntercept",
+      "getLabelCol",
+      "getLowerBoundsOnCoefficients",
+      "getLowerBoundsOnIntercepts",
+      "getMaxBlockSizeInMB",
+      "getMaxIter",
+      "getPredictionCol",
+      "getProbabilityCol",
+      "getRawPredictionCol",
+      "getRegParam",
+      "getStandardization",
+      "getThreshold",
+      "getThresholds",
+      "getTol",
+      "getUpperBoundsOnCoefficients",
+      "getUpperBoundsOnIntercepts",
+      "getWeightCol",
+      "setFeaturesCol",
+      "setPredictionCol",
+      "setProbabilityCol",
+      "setRawPredictionCol",
+      "setThreshold",
+      "setThresholds"
+     ],
+     "not captured on this copy (partial)": [
+      "coefficientMatrix",
+      "coefficients",
+      "evaluate",
+      "hasSummary",
+      "intercept",
+      "interceptVector",
+      "numClasses",
+      "numFeatures",
+      "predictProbability",
+      "predictRaw",
+      "summary"
+     ],
+     "persistence (captured by Golden.persist)": [
+      "load",
+      "read",
+      "save",
+      "write"
+     ]
+    }
+   },
+   "params_after": {
+    "aggregationDepth": 2,
+    "elasticNetParam": 0.0,
+    "family": "binomial",
+    "featuresCol": "features",
+    "fitIntercept": true,
+    "labelCol": "label",
+    "maxBlockSizeInMB": 0.0,
+    "maxIter": 20,
+    "predictionCol": "prediction",
+    "probabilityCol": "probability",
+    "rawPredictionCol": "rawPrediction",
+    "regParam": 0.01,
+    "standardization": true,
+    "threshold": 0.5,
+    "tol": 1e-06,
+    "weightCol": "weight"
+   },
+   "params_before": {
+    "aggregationDepth": 2,
+    "elasticNetParam": 0.0,
+    "family": "binomial",
+    "featuresCol": "features",
+    "fitIntercept": true,
+    "labelCol": "label",
+    "maxBlockSizeInMB": 0.0,
+    "maxIter": 20,
+    "predictionCol": "prediction",
+    "probabilityCol": "probability",
+    "rawPredictionCol": "rawPrediction",
+    "regParam": 0.01,
+    "standardization": true,
+    "threshold": 0.5,
+    "tol": 1e-06,
+    "weightCol": "weight"
+   },
+   "save": {
+    "call": "model.write().overwrite().save(path)",
+    "commands": [
+     "ImgSBwoFPGlkMD4aUwoUCgZmYW1pbHkSCmoIYmlub21pYWwKDQoHbWF4SXRlchICMBQKFQoIcmVnUGFyYW0SCVl7FK5H4XqEPwoVCgl3ZWlnaHRDb2wSCGoGd2VpZ2h0IgY8cGF0aD4oAQ=="
+    ],
+    "results": [
+     ""
+    ],
+    "value": null
+   },
+   "uid": "LogisticRegression_binomial",
+   "uid_same": true
+  },
+  "LogisticRegression.multinomial.estimator": {
+   "load": {
+    "call": "LogisticRegression.load(path)",
+    "commands": [
+     "KkMKOQo1b3JnLmFwYWNoZS5zcGFyay5tbC5jbGFzc2lmaWNhdGlvbi5Mb2dpc3RpY1JlZ3Jlc3Npb24YARIGPHBhdGg+"
+    ],
+    "results": [
+     "GpcBEjVvcmcuYXBhY2hlLnNwYXJrLm1sLmNsYXNzaWZpY2F0aW9uLkxvZ2lzdGljUmVncmVzc2lvbhoGPHVpZDA+IlYKFwoGZmFtaWx5Eg1qC211bHRpbm9taWFsCg0KB21heEl0ZXISAjAUChUKCHJlZ1BhcmFtEglZexSuR+F6hD8KFQoJd2VpZ2h0Q29sEghqBndlaWdodA=="
+    ],
+    "value": {
+     "type": "LogisticRegression",
+     "uid": "LogisticRegression_multinomial"
+    }
+   },
+   "params_after": {
+    "aggregationDepth": 2,
+    "elasticNetParam": 0.0,
+    "family": "multinomial",
+    "featuresCol": "features",
+    "fitIntercept": true,
+    "labelCol": "label",
+    "maxBlockSizeInMB": 0.0,
+    "maxIter": 20,
+    "predictionCol": "prediction",
+    "probabilityCol": "probability",
+    "rawPredictionCol": "rawPrediction",
+    "regParam": 0.01,
+    "standardization": true,
+    "threshold": 0.5,
+    "tol": 1e-06,
+    "weightCol": "weight"
+   },
+   "params_before": {
+    "aggregationDepth": 2,
+    "elasticNetParam": 0.0,
+    "family": "multinomial",
+    "featuresCol": "features",
+    "fitIntercept": true,
+    "labelCol": "label",
+    "maxBlockSizeInMB": 0.0,
+    "maxIter": 20,
+    "predictionCol": "prediction",
+    "probabilityCol": "probability",
+    "rawPredictionCol": "rawPrediction",
+    "regParam": 0.01,
+    "standardization": true,
+    "threshold": 0.5,
+    "tol": 1e-06,
+    "weightCol": "weight"
+   },
+   "save": {
+    "call": "estimator.write().overwrite().save(path)",
+    "commands": [
+     "IqUBCkEKNW9yZy5hcGFjaGUuc3BhcmsubWwuY2xhc3NpZmljYXRpb24uTG9naXN0aWNSZWdyZXNzaW9uEgY8dWlkMD4YARpWChcKBmZhbWlseRINagttdWx0aW5vbWlhbAoNCgdtYXhJdGVyEgIwFAoVCghyZWdQYXJhbRIJWXsUrkfheoQ/ChUKCXdlaWdodENvbBIIagZ3ZWlnaHQiBjxwYXRoPigB"
+    ],
+    "results": [
+     ""
+    ],
+    "value": null
+   },
+   "uid": "LogisticRegression_multinomial",
+   "uid_same": true
+  },
+  "LogisticRegression.multinomial.model": {
+   "load": {
+    "call": "LogisticRegressionModel.load(path)",
+    "commands": [
+     "KkgKPgo6b3JnLmFwYWNoZS5zcGFyay5tbC5jbGFzc2lmaWNhdGlvbi5Mb2dpc3RpY1JlZ3Jlc3Npb25Nb2RlbBgEEgY8cGF0aD4="
+    ],
+    "results": [
+     "GmkKBwoFPGlkMD4aBjx1aWQwPiJWChcKBmZhbWlseRINagttdWx0aW5vbWlhbAoNCgdtYXhJdGVyEgIwFAoVCghyZWdQYXJhbRIJWXsUrkfheoQ/ChUKCXdlaWdodENvbBIIagZ3ZWlnaHQ="
+    ],
+    "value": {
+     "ref": "<id0>",
+     "type": "LogisticRegressionModel"
+    }
+   },
+   "members": {
+    "class": "LogisticRegressionModel",
+    "members": {
+     "predict-dense": {
+      "call": "loaded.predict(Vectors.dense([0.5, 1.5]))",
+      "commands": [
+       "EnQKBwoFPGlkMD4SaQoHcHJlZGljdBJeClzCAVkKLroBKwoDdWR0EiRvcmcuYXBhY2hlLnNwYXJrLm1sLmxpbmFsZy5WZWN0b3JVRFQSAiABEgQKAgoAEgQKAgoAEhfKARQqEgoQAAAAAAAA4D8AAAAAAAD4Pw=="
+      ],
+      "results": [
+       "CglZAAAAAAAAAAA="
+      ],
+      "value": 0.0
+     },
+     "repr()": {
+      "call": "repr(loaded)",
+      "commands": [
+       "EhUKBwoFPGlkMD4SCgoIdG9TdHJpbmc="
+      ],
+      "results": [
+       "ClpqWExvZ2lzdGljUmVncmVzc2lvbk1vZGVsOiB1aWQ9TG9naXN0aWNSZWdyZXNzaW9uX211bHRpbm9taWFsLCBudW1DbGFzc2VzPTMsIG51bUZlYXR1cmVzPTI="
+      ],
+      "value": "LogisticRegressionModel: uid=LogisticRegression_multinomial, numClasses=3, numFeatures=2"
+     },
+     "str()": {
+      "call": "str(loaded)",
+      "commands": [
+       "EhUKBwoFPGlkMD4SCgoIdG9TdHJpbmc="
+      ],
+      "results": [
+       "ClpqWExvZ2lzdGljUmVncmVzc2lvbk1vZGVsOiB1aWQ9TG9naXN0aWNSZWdyZXNzaW9uX211bHRpbm9taWFsLCBudW1DbGFzc2VzPTMsIG51bUZlYXR1cmVzPTI="
+      ],
+      "value": "LogisticRegressionModel: uid=LogisticRegression_multinomial, numClasses=3, numFeatures=2"
+     },
+     "transform": {
+      "call": "loaded.transform(multi_eval)",
+      "commands": [
+       "CoIECgcKBTxpZDA+Gp4DCgCKAZgDCpEDCgAajAMK1QIKALoBzwIKmAIKAFqTAhKQAnsiZmllbGRzIjpbeyJtZXRhZGF0YSI6e30sIm5hbWUiOiJsYWJlbCIsIm51bGxhYmxlIjp0cnVlLCJ0eXBlIjoiZG91YmxlIn0seyJtZXRhZGF0YSI6e30sIm5hbWUiOiJ3ZWlnaHQiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoiZmVhdHVyZXMiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6eyJjb250YWluc051bGwiOnRydWUsImVsZW1lbnRUeXBlIjoiZG91YmxlIiwidHlwZSI6ImFycmF5In19XSwidHlwZSI6InN0cnVjdCJ9EjIKJhokCg9hcnJheV90b192ZWN0b3ISERIMCghmZWF0dXJlcxgAkgEAEghmZWF0dXJlcxoOEgkKBWxhYmVsGACSAQAaDxIKCgZ3ZWlnaHQYAJIBABoREgwKCGZlYXR1cmVzGACSAQAQARgAIlYKFwoGZmFtaWx5Eg1qC211bHRpbm9taWFsCg0KB21heEl0ZXISAjAUChUKCHJlZ1BhcmFtEglZexSuR+F6hD8KFQoJd2VpZ2h0Q29sEghqBndlaWdodA=="
+      ],
+      "results": [],
+      "value": {
+       "rows": [
+        [
+         0.0,
+         1.0,
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           0.1,
+           0.6
+          ]
+         },
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           2.763002113614642,
+           0.4877419079688764,
+           -3.250744021583519
+          ]
+         },
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           0.9048012663477052,
+           0.0929865741491092,
+           0.0022121595031855098
+          ]
+         },
+         0.0
+        ],
+        [
+         1.0,
+         1.0,
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           1.2,
+           0.1
+          ]
+         },
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           -0.9082098544386459,
+           2.608232127789514,
+           -1.7000222733508679
+          ]
+         },
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           0.028475864024332716,
+           0.9586239151018701,
+           0.012900220873797134
+          ]
+         },
+         1.0
+        ],
+        [
+         1.0,
+         2.0,
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           0.6,
+           0.6
+          ]
+         },
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           0.964271713504044,
+           1.0852769514028984,
+           -2.0495486649069425
+          ]
+         },
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           0.45919278838978816,
+           0.5182591351379618,
+           0.02254807647225004
+          ]
+         },
+         1.0
+        ],
+        [
+         2.0,
+         1.0,
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           2.1,
+           1.8
+          ]
+         },
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           -5.118307276083815,
+           0.9436905834670688,
+           4.174616692616747
+          ]
+         },
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           8.856512033176027e-05,
+           0.03801499491644405,
+           0.9618964399632242
+          ]
+         },
+         2.0
+        ]
+       ],
+       "schema": "struct<label:double,weight:double,features:vector,rawPrediction:vector,probability:vector,prediction:double>"
+      }
+     }
+    },
+    "skipped": {
+     "Param attribute (client side)": [
+      "aggregationDepth",
+      "elasticNetParam",
+      "family",
+      "featuresCol",
+      "fitIntercept",
+      "labelCol",
+      "lowerBoundsOnCoefficients",
+      "lowerBoundsOnIntercepts",
+      "maxBlockSizeInMB",
+      "maxIter",
+      "predictionCol",
+      "probabilityCol",
+      "rawPredictionCol",
+      "regParam",
+      "standardization",
+      "threshold",
+      "thresholds",
+      "tol",
+      "upperBoundsOnCoefficients",
+      "upperBoundsOnIntercepts",
+      "weightCol"
+     ],
+     "Params API (client side)": [
+      "clear",
+      "copy",
+      "explainParam",
+      "explainParams",
+      "extractParamMap",
+      "getOrDefault",
+      "getParam",
+      "hasDefault",
+      "hasParam",
+      "isDefined",
+      "isSet",
+      "params",
+      "set",
+      "uid"
+     ],
+     "Params getter or setter (client side)": [
+      "getAggregationDepth",
+      "getElasticNetParam",
+      "getFamily",
+      "getFeaturesCol",
+      "getFitIntercept",
+      "getLabelCol",
+      "getLowerBoundsOnCoefficients",
+      "getLowerBoundsOnIntercepts",
+      "getMaxBlockSizeInMB",
+      "getMaxIter",
+      "getPredictionCol",
+      "getProbabilityCol",
+      "getRawPredictionCol",
+      "getRegParam",
+      "getStandardization",
+      "getThreshold",
+      "getThresholds",
+      "getTol",
+      "getUpperBoundsOnCoefficients",
+      "getUpperBoundsOnIntercepts",
+      "getWeightCol",
+      "setFeaturesCol",
+      "setPredictionCol",
+      "setProbabilityCol",
+      "setRawPredictionCol",
+      "setThreshold",
+      "setThresholds"
+     ],
+     "not captured on this copy (partial)": [
+      "coefficientMatrix",
+      "coefficients",
+      "evaluate",
+      "hasSummary",
+      "intercept",
+      "interceptVector",
+      "numClasses",
+      "numFeatures",
+      "predictProbability",
+      "predictRaw",
+      "summary"
+     ],
+     "persistence (captured by Golden.persist)": [
+      "load",
+      "read",
+      "save",
+      "write"
+     ]
+    }
+   },
+   "params_after": {
+    "aggregationDepth": 2,
+    "elasticNetParam": 0.0,
+    "family": "multinomial",
+    "featuresCol": "features",
+    "fitIntercept": true,
+    "labelCol": "label",
+    "maxBlockSizeInMB": 0.0,
+    "maxIter": 20,
+    "predictionCol": "prediction",
+    "probabilityCol": "probability",
+    "rawPredictionCol": "rawPrediction",
+    "regParam": 0.01,
+    "standardization": true,
+    "threshold": 0.5,
+    "tol": 1e-06,
+    "weightCol": "weight"
+   },
+   "params_before": {
+    "aggregationDepth": 2,
+    "elasticNetParam": 0.0,
+    "family": "multinomial",
+    "featuresCol": "features",
+    "fitIntercept": true,
+    "labelCol": "label",
+    "maxBlockSizeInMB": 0.0,
+    "maxIter": 20,
+    "predictionCol": "prediction",
+    "probabilityCol": "probability",
+    "rawPredictionCol": "rawPrediction",
+    "regParam": 0.01,
+    "standardization": true,
+    "threshold": 0.5,
+    "tol": 1e-06,
+    "weightCol": "weight"
+   },
+   "save": {
+    "call": "model.write().overwrite().save(path)",
+    "commands": [
+     "ImsSBwoFPGlkMD4aVgoXCgZmYW1pbHkSDWoLbXVsdGlub21pYWwKDQoHbWF4SXRlchICMBQKFQoIcmVnUGFyYW0SCVl7FK5H4XqEPwoVCgl3ZWlnaHRDb2wSCGoGd2VpZ2h0IgY8cGF0aD4oAQ=="
+    ],
+    "results": [
+     ""
+    ],
+    "value": null
+   },
+   "uid": "LogisticRegression_multinomial",
+   "uid_same": true
+  },
+  "MultilayerPerceptronClassifier.estimator": {
+   "load": {
+    "call": "MultilayerPerceptronClassifier.load(path)",
+    "commands": [
+     "Kk8KRQpBb3JnLmFwYWNoZS5zcGFyay5tbC5jbGFzc2lmaWNhdGlvbi5NdWx0aWxheWVyUGVyY2VwdHJvbkNsYXNzaWZpZXIYARIGPHBhdGg+"
+    ],
+    "results": [
+     "Gq8BEkFvcmcuYXBhY2hlLnNwYXJrLm1sLmNsYXNzaWZpY2F0aW9uLk11bHRpbGF5ZXJQZXJjZXB0cm9uQ2xhc3NpZmllchoGPHVpZDA+ImIKDwoJYmxvY2tTaXplEgIwBAodCgZsYXllcnMSE7IBEAoCMgASAjACEgIwBBICMAMKDQoHbWF4SXRlchICMB4KCgoEc2VlZBICOCoKFQoIc3RlcFNpemUSCVmamZmZmZm5Pw=="
+    ],
+    "value": {
+     "type": "MultilayerPerceptronClassifier",
+     "uid": "MultilayerPerceptronClassifier"
+    }
+   },
+   "params_after": {
+    "blockSize": 4,
+    "featuresCol": "features",
+    "labelCol": "label",
+    "layers": [
+     2,
+     4,
+     3
+    ],
+    "maxIter": 30,
+    "predictionCol": "prediction",
+    "probabilityCol": "probability",
+    "rawPredictionCol": "rawPrediction",
+    "seed": 42,
+    "solver": "l-bfgs",
+    "stepSize": 0.1,
+    "tol": 1e-06
+   },
+   "params_before": {
+    "blockSize": 4,
+    "featuresCol": "features",
+    "labelCol": "label",
+    "layers": [
+     2,
+     4,
+     3
+    ],
+    "maxIter": 30,
+    "predictionCol": "prediction",
+    "probabilityCol": "probability",
+    "rawPredictionCol": "rawPrediction",
+    "seed": 42,
+    "solver": "l-bfgs",
+    "stepSize": 0.1,
+    "tol": 1e-06
+   },
+   "save": {
+    "call": "estimator.write().overwrite().save(path)",
+    "commands": [
+     "Ir0BCk0KQW9yZy5hcGFjaGUuc3BhcmsubWwuY2xhc3NpZmljYXRpb24uTXVsdGlsYXllclBlcmNlcHRyb25DbGFzc2lmaWVyEgY8dWlkMD4YARpiCg8KCWJsb2NrU2l6ZRICMAQKHQoGbGF5ZXJzEhOyARAKAjIAEgIwAhICMAQSAjADCg0KB21heEl0ZXISAjAeCgoKBHNlZWQSAjAqChUKCHN0ZXBTaXplEglZmpmZmZmZuT8iBjxwYXRoPigB"
+    ],
+    "results": [
+     ""
+    ],
+    "value": null
+   },
+   "uid": "MultilayerPerceptronClassifier",
+   "uid_same": true
+  },
+  "MultilayerPerceptronClassifier.model": {
+   "load": {
+    "call": "MultilayerPerceptronClassificationModel.load(path)",
+    "commands": [
+     "KlgKTgpKb3JnLmFwYWNoZS5zcGFyay5tbC5jbGFzc2lmaWNhdGlvbi5NdWx0aWxheWVyUGVyY2VwdHJvbkNsYXNzaWZpY2F0aW9uTW9kZWwYBBIGPHBhdGg+"
+    ],
+    "results": [
+     "GnUKBwoFPGlkMD4aBjx1aWQwPiJiCg8KCWJsb2NrU2l6ZRICMAQKHQoGbGF5ZXJzEhOyARAKAjIAEgIwAhICMAQSAjADCg0KB21heEl0ZXISAjAeCgoKBHNlZWQSAjgqChUKCHN0ZXBTaXplEglZmpmZmZmZuT8="
+    ],
+    "value": {
+     "ref": "<id0>",
+     "type": "MultilayerPerceptronClassificationModel"
+    }
+   },
+   "members": {
+    "class": "MultilayerPerceptronClassificationModel",
+    "members": {
+     "predict-dense": {
+      "call": "loaded.predict(Vectors.dense([0.5, 1.5]))",
+      "commands": [
+       "EnQKBwoFPGlkMD4SaQoHcHJlZGljdBJeClzCAVkKLroBKwoDdWR0EiRvcmcuYXBhY2hlLnNwYXJrLm1sLmxpbmFsZy5WZWN0b3JVRFQSAiABEgQKAgoAEgQKAgoAEhfKARQqEgoQAAAAAAAA4D8AAAAAAAD4Pw=="
+      ],
+      "results": [
+       "CglZAAAAAAAAAAA="
+      ],
+      "value": 0.0
+     },
+     "repr()": {
+      "call": "repr(loaded)",
+      "commands": [
+       "EhUKBwoFPGlkMD4SCgoIdG9TdHJpbmc="
+      ],
+      "results": [
+       "CndqdU11bHRpbGF5ZXJQZXJjZXB0cm9uQ2xhc3NpZmljYXRpb25Nb2RlbDogdWlkPU11bHRpbGF5ZXJQZXJjZXB0cm9uQ2xhc3NpZmllciwgbnVtTGF5ZXJzPTMsIG51bUNsYXNzZXM9MywgbnVtRmVhdHVyZXM9Mg=="
+      ],
+      "value": "MultilayerPerceptronClassificationModel: uid=MultilayerPerceptronClassifier, numLayers=3, numClasses=3, numFeatures=2"
+     },
+     "str()": {
+      "call": "str(loaded)",
+      "commands": [
+       "EhUKBwoFPGlkMD4SCgoIdG9TdHJpbmc="
+      ],
+      "results": [
+       "CndqdU11bHRpbGF5ZXJQZXJjZXB0cm9uQ2xhc3NpZmljYXRpb25Nb2RlbDogdWlkPU11bHRpbGF5ZXJQZXJjZXB0cm9uQ2xhc3NpZmllciwgbnVtTGF5ZXJzPTMsIG51bUNsYXNzZXM9MywgbnVtRmVhdHVyZXM9Mg=="
+      ],
+      "value": "MultilayerPerceptronClassificationModel: uid=MultilayerPerceptronClassifier, numLayers=3, numClasses=3, numFeatures=2"
+     },
+     "transform": {
+      "call": "loaded.transform(multi_eval)",
+      "commands": [
+       "Co4ECgcKBTxpZDA+Gp4DCgCKAZgDCpEDCgAajAMK1QIKALoBzwIKmAIKAFqTAhKQAnsiZmllbGRzIjpbeyJtZXRhZGF0YSI6e30sIm5hbWUiOiJsYWJlbCIsIm51bGxhYmxlIjp0cnVlLCJ0eXBlIjoiZG91YmxlIn0seyJtZXRhZGF0YSI6e30sIm5hbWUiOiJ3ZWlnaHQiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoiZmVhdHVyZXMiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6eyJjb250YWluc051bGwiOnRydWUsImVsZW1lbnRUeXBlIjoiZG91YmxlIiwidHlwZSI6ImFycmF5In19XSwidHlwZSI6InN0cnVjdCJ9EjIKJhokCg9hcnJheV90b192ZWN0b3ISERIMCghmZWF0dXJlcxgAkgEAEghmZWF0dXJlcxoOEgkKBWxhYmVsGACSAQAaDxIKCgZ3ZWlnaHQYAJIBABoREgwKCGZlYXR1cmVzGACSAQAQARgAImIKDwoJYmxvY2tTaXplEgIwBAodCgZsYXllcnMSE7IBEAoCMgASAjACEgIwBBICMAMKDQoHbWF4SXRlchICMB4KCgoEc2VlZBICMCoKFQoIc3RlcFNpemUSCVmamZmZmZm5Pw=="
+      ],
+      "results": [],
+      "value": {
+       "rows": [
+        [
+         0.0,
+         1.0,
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           0.1,
+           0.6
+          ]
+         },
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           35.39867272089518,
+           11.534908635582743,
+           -46.20621412007594
+          ]
+         },
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           0.9999999999567388,
+           4.3261237688379044e-11,
+           3.626168230136823e-36
+          ]
+         },
+         0.0
+        ],
+        [
+         1.0,
+         1.0,
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           1.2,
+           0.1
+          ]
+         },
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           -7.901171519496765,
+           14.383858624256403,
+           -5.522889172341569
+          ]
+         },
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           2.0976565304264794e-10,
+           0.9999999975276264,
+           2.2626077909729528e-09
+          ]
+         },
+         1.0
+        ],
+        [
+         1.0,
+         2.0,
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           0.6,
+           0.6
+          ]
+         },
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           28.409115480951517,
+           15.660284865250592,
+           -42.85049719758432
+          ]
+         },
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           0.9999970942921214,
+           2.905707878581101e-06,
+           1.128085895384777e-31
+          ]
+         },
+         0.0
+        ],
+        [
+         2.0,
+         1.0,
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           2.1,
+           1.8
+          ]
+         },
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           -21.89497248193971,
+           0.6151888021563945,
+           21.132046916524683
+          ]
+         },
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           2.0587466332949314e-19,
+           1.2292542950548893e-09,
+           0.9999999987707457
+          ]
+         },
+         2.0
+        ]
+       ],
+       "schema": "struct<label:double,weight:double,features:vector,rawPrediction:vector,probability:vector,prediction:double>"
+      }
+     }
+    },
+    "skipped": {
+     "Param attribute (client side)": [
+      "blockSize",
+      "featuresCol",
+      "initialWeights",
+      "labelCol",
+      "layers",
+      "maxIter",
+      "predictionCol",
+      "probabilityCol",
+      "rawPredictionCol",
+      "seed",
+      "solver",
+      "stepSize",
+      "thresholds",
+      "tol"
+     ],
+     "Params API (client side)": [
+      "clear",
+      "copy",
+      "explainParam",
+      "explainParams",
+      "extractParamMap",
+      "getOrDefault",
+      "getParam",
+      "hasDefault",
+      "hasParam",
+      "isDefined",
+      "isSet",
+      "params",
+      "set",
+      "uid"
+     ],
+     "Params getter or setter (client side)": [
+      "getBlockSize",
+      "getFeaturesCol",
+      "getInitialWeights",
+      "getLabelCol",
+      "getLayers",
+      "getMaxIter",
+      "getPredictionCol",
+      "getProbabilityCol",
+      "getRawPredictionCol",
+      "getSeed",
+      "getSolver",
+      "getStepSize",
+      "getThresholds",
+      "getTol",
+      "setFeaturesCol",
+      "setPredictionCol",
+      "setProbabilityCol",
+      "setRawPredictionCol",
+      "setThresholds"
+     ],
+     "not captured on this copy (partial)": [
+      "evaluate",
+      "hasSummary",
+      "numClasses",
+      "numFeatures",
+      "predictProbability",
+      "predictRaw",
+      "summary",
+      "weights"
+     ],
+     "persistence (captured by Golden.persist)": [
+      "load",
+      "read",
+      "save",
+      "write"
+     ]
+    }
+   },
+   "params_after": {
+    "blockSize": 4,
+    "featuresCol": "features",
+    "labelCol": "label",
+    "layers": [
+     2,
+     4,
+     3
+    ],
+    "maxIter": 30,
+    "predictionCol": "prediction",
+    "probabilityCol": "probability",
+    "rawPredictionCol": "rawPrediction",
+    "seed": 42,
+    "solver": "l-bfgs",
+    "stepSize": 0.1,
+    "tol": 1e-06
+   },
+   "params_before": {
+    "blockSize": 4,
+    "featuresCol": "features",
+    "labelCol": "label",
+    "layers": [
+     2,
+     4,
+     3
+    ],
+    "maxIter": 30,
+    "predictionCol": "prediction",
+    "probabilityCol": "probability",
+    "rawPredictionCol": "rawPrediction",
+    "seed": 42,
+    "solver": "l-bfgs",
+    "stepSize": 0.1,
+    "tol": 1e-06
+   },
+   "save": {
+    "call": "model.write().overwrite().save(path)",
+    "commands": [
+     "IncSBwoFPGlkMD4aYgoPCglibG9ja1NpemUSAjAECh0KBmxheWVycxITsgEQCgIyABICMAISAjAEEgIwAwoNCgdtYXhJdGVyEgIwHgoKCgRzZWVkEgIwKgoVCghzdGVwU2l6ZRIJWZqZmZmZmbk/IgY8cGF0aD4oAQ=="
+    ],
+    "results": [
+     ""
+    ],
+    "value": null
+   },
+   "uid": "MultilayerPerceptronClassifier",
+   "uid_same": true
+  },
+  "NaiveBayes.bernoulli.estimator": {
+   "load": {
+    "call": "NaiveBayes.load(path)",
+    "commands": [
+     "KjsKMQotb3JnLmFwYWNoZS5zcGFyay5tbC5jbGFzc2lmaWNhdGlvbi5OYWl2ZUJheWVzGAESBjxwYXRoPg=="
+    ],
+    "results": [
+     "GmoSLW9yZy5hcGFjaGUuc3BhcmsubWwuY2xhc3NpZmljYXRpb24uTmFpdmVCYXllcxoGPHVpZDA+IjEKGAoJbW9kZWxUeXBlEgtqCWJlcm5vdWxsaQoVCgl3ZWlnaHRDb2wSCGoGd2VpZ2h0"
+    ],
+    "value": {
+     "type": "NaiveBayes",
+     "uid": "NaiveBayes_bernoulli"
+    }
+   },
+   "params_after": {
+    "featuresCol": "features",
+    "labelCol": "label",
+    "modelType": "bernoulli",
+    "predictionCol": "prediction",
+    "probabilityCol": "probability",
+    "rawPredictionCol": "rawPrediction",
+    "smoothing": 1.0,
+    "weightCol": "weight"
+   },
+   "params_before": {
+    "featuresCol": "features",
+    "labelCol": "label",
+    "modelType": "bernoulli",
+    "predictionCol": "prediction",
+    "probabilityCol": "probability",
+    "rawPredictionCol": "rawPrediction",
+    "smoothing": 1.0,
+    "weightCol": "weight"
+   },
+   "save": {
+    "call": "estimator.write().overwrite().save(path)",
+    "commands": [
+     "IngKOQotb3JnLmFwYWNoZS5zcGFyay5tbC5jbGFzc2lmaWNhdGlvbi5OYWl2ZUJheWVzEgY8dWlkMD4YARoxChgKCW1vZGVsVHlwZRILagliZXJub3VsbGkKFQoJd2VpZ2h0Q29sEghqBndlaWdodCIGPHBhdGg+KAE="
+    ],
+    "results": [
+     ""
+    ],
+    "value": null
+   },
+   "uid": "NaiveBayes_bernoulli",
+   "uid_same": true
+  },
+  "NaiveBayes.bernoulli.model": {
+   "load": {
+    "call": "NaiveBayesModel.load(path)",
+    "commands": [
+     "KkAKNgoyb3JnLmFwYWNoZS5zcGFyay5tbC5jbGFzc2lmaWNhdGlvbi5OYWl2ZUJheWVzTW9kZWwYBBIGPHBhdGg+"
+    ],
+    "results": [
+     "GkQKBwoFPGlkMD4aBjx1aWQwPiIxChgKCW1vZGVsVHlwZRILagliZXJub3VsbGkKFQoJd2VpZ2h0Q29sEghqBndlaWdodA=="
+    ],
+    "value": {
+     "ref": "<id0>",
+     "type": "NaiveBayesModel"
+    }
+   },
+   "members": {
+    "class": "NaiveBayesModel",
+    "members": {
+     "predict-dense": {
+      "call": "loaded.predict(Vectors.dense([1.0, 0.0]))",
+      "commands": [
+       "EnQKBwoFPGlkMD4SaQoHcHJlZGljdBJeClzCAVkKLroBKwoDdWR0EiRvcmcuYXBhY2hlLnNwYXJrLm1sLmxpbmFsZy5WZWN0b3JVRFQSAiABEgQKAgoAEgQKAgoAEhfKARQqEgoQAAAAAAAA8D8AAAAAAAAAAA=="
+      ],
+      "results": [
+       "CglZAAAAAAAAAAA="
+      ],
+      "value": 0.0
+     },
+     "repr()": {
+      "call": "repr(loaded)",
+      "commands": [
+       "EhUKBwoFPGlkMD4SCgoIdG9TdHJpbmc="
+      ],
+      "results": [
+       "Cl1qW05haXZlQmF5ZXNNb2RlbDogdWlkPU5haXZlQmF5ZXNfYmVybm91bGxpLCBtb2RlbFR5cGU9YmVybm91bGxpLCBudW1DbGFzc2VzPTIsIG51bUZlYXR1cmVzPTI="
+      ],
+      "value": "NaiveBayesModel: uid=NaiveBayes_bernoulli, modelType=bernoulli, numClasses=2, numFeatures=2"
+     },
+     "str()": {
+      "call": "str(loaded)",
+      "commands": [
+       "EhUKBwoFPGlkMD4SCgoIdG9TdHJpbmc="
+      ],
+      "results": [
+       "Cl1qW05haXZlQmF5ZXNNb2RlbDogdWlkPU5haXZlQmF5ZXNfYmVybm91bGxpLCBtb2RlbFR5cGU9YmVybm91bGxpLCBudW1DbGFzc2VzPTIsIG51bUZlYXR1cmVzPTI="
+      ],
+      "value": "NaiveBayesModel: uid=NaiveBayes_bernoulli, modelType=bernoulli, numClasses=2, numFeatures=2"
+     },
+     "transform": {
+      "call": "loaded.transform(nb_binary_eval)",
+      "commands": [
+       "Ct0DCgcKBTxpZDA+Gp4DCgCKAZgDCpEDCgAajAMK1QIKALoBzwIKmAIKAFqTAhKQAnsiZmllbGRzIjpbeyJtZXRhZGF0YSI6e30sIm5hbWUiOiJsYWJlbCIsIm51bGxhYmxlIjp0cnVlLCJ0eXBlIjoiZG91YmxlIn0seyJtZXRhZGF0YSI6e30sIm5hbWUiOiJ3ZWlnaHQiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoiZmVhdHVyZXMiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6eyJjb250YWluc051bGwiOnRydWUsImVsZW1lbnRUeXBlIjoiZG91YmxlIiwidHlwZSI6ImFycmF5In19XSwidHlwZSI6InN0cnVjdCJ9EjIKJhokCg9hcnJheV90b192ZWN0b3ISERIMCghmZWF0dXJlcxgAkgEAEghmZWF0dXJlcxoOEgkKBWxhYmVsGACSAQAaDxIKCgZ3ZWlnaHQYAJIBABoREgwKCGZlYXR1cmVzGACSAQAQARgAIjEKGAoJbW9kZWxUeXBlEgtqCWJlcm5vdWxsaQoVCgl3ZWlnaHRDb2wSCGoGd2VpZ2h0"
+      ],
+      "results": [],
+      "value": {
+       "rows": [
+        [
+         0.0,
+         1.0,
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           1.0,
+           1.0
+          ]
+         },
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           -1.9503644994046936,
+           -3.0726933146901194
+          ]
+         },
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           0.7544204322200393,
+           0.2455795677799607
+          ]
+         },
+         0.0
+        ],
+        [
+         1.0,
+         1.0,
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           0.0,
+           0.0
+          ]
+         },
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           -2.93119375241642,
+           -1.4632554022560191
+          ]
+         },
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           0.18725617685305587,
+           0.8127438231469442
+          ]
+         },
+         1.0
+        ],
+        [
+         1.0,
+         1.0,
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           0.0,
+           1.0
+          ]
+         },
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           -3.3366588605245844,
+           -1.4632554022560194
+          ]
+         },
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           0.13314840499306524,
+           0.8668515950069349
+          ]
+         },
+         1.0
+        ]
+       ],
+       "schema": "struct<label:double,weight:double,features:vector,rawPrediction:vector,probability:vector,prediction:double>"
+      }
+     }
+    },
+    "skipped": {
+     "Param attribute (client side)": [
+      "featuresCol",
+      "labelCol",
+      "modelType",
+      "predictionCol",
+      "probabilityCol",
+      "rawPredictionCol",
+      "smoothing",
+      "thresholds",
+      "weightCol"
+     ],
+     "Params API (client side)": [
+      "clear",
+      "copy",
+      "explainParam",
+      "explainParams",
+      "extractParamMap",
+      "getOrDefault",
+      "getParam",
+      "hasDefault",
+      "hasParam",
+      "isDefined",
+      "isSet",
+      "params",
+      "set",
+      "uid"
+     ],
+     "Params getter or setter (client side)": [
+      "getFeaturesCol",
+      "getLabelCol",
+      "getModelType",
+      "getPredictionCol",
+      "getProbabilityCol",
+      "getRawPredictionCol",
+      "getSmoothing",
+      "getThresholds",
+      "getWeightCol",
+      "setFeaturesCol",
+      "setPredictionCol",
+      "setProbabilityCol",
+      "setRawPredictionCol",
+      "setThresholds"
+     ],
+     "not captured on this copy (partial)": [
+      "numClasses",
+      "numFeatures",
+      "pi",
+      "predictProbability",
+      "predictRaw",
+      "sigma",
+      "theta"
+     ],
+     "persistence (captured by Golden.persist)": [
+      "load",
+      "read",
+      "save",
+      "write"
+     ]
+    }
+   },
+   "params_after": {
+    "featuresCol": "features",
+    "labelCol": "label",
+    "modelType": "bernoulli",
+    "predictionCol": "prediction",
+    "probabilityCol": "probability",
+    "rawPredictionCol": "rawPrediction",
+    "smoothing": 1.0,
+    "weightCol": "weight"
+   },
+   "params_before": {
+    "featuresCol": "features",
+    "labelCol": "label",
+    "modelType": "bernoulli",
+    "predictionCol": "prediction",
+    "probabilityCol": "probability",
+    "rawPredictionCol": "rawPrediction",
+    "smoothing": 1.0,
+    "weightCol": "weight"
+   },
+   "save": {
+    "call": "model.write().overwrite().save(path)",
+    "commands": [
+     "IkYSBwoFPGlkMD4aMQoYCgltb2RlbFR5cGUSC2oJYmVybm91bGxpChUKCXdlaWdodENvbBIIagZ3ZWlnaHQiBjxwYXRoPigB"
+    ],
+    "results": [
+     ""
+    ],
+    "value": null
+   },
+   "uid": "NaiveBayes_bernoulli",
+   "uid_same": true
+  },
+  "NaiveBayes.complement.estimator": {
+   "load": {
+    "call": "NaiveBayes.load(path)",
+    "commands": [
+     "KjsKMQotb3JnLmFwYWNoZS5zcGFyay5tbC5jbGFzc2lmaWNhdGlvbi5OYWl2ZUJheWVzGAESBjxwYXRoPg=="
+    ],
+    "results": [
+     "GmsSLW9yZy5hcGFjaGUuc3BhcmsubWwuY2xhc3NpZmljYXRpb24uTmFpdmVCYXllcxoGPHVpZDA+IjIKGQoJbW9kZWxUeXBlEgxqCmNvbXBsZW1lbnQKFQoJd2VpZ2h0Q29sEghqBndlaWdodA=="
+    ],
+    "value": {
+     "type": "NaiveBayes",
+     "uid": "NaiveBayes_complement"
+    }
+   },
+   "params_after": {
+    "featuresCol": "features",
+    "labelCol": "label",
+    "modelType": "complement",
+    "predictionCol": "prediction",
+    "probabilityCol": "probability",
+    "rawPredictionCol": "rawPrediction",
+    "smoothing": 1.0,
+    "weightCol": "weight"
+   },
+   "params_before": {
+    "featuresCol": "features",
+    "labelCol": "label",
+    "modelType": "complement",
+    "predictionCol": "prediction",
+    "probabilityCol": "probability",
+    "rawPredictionCol": "rawPrediction",
+    "smoothing": 1.0,
+    "weightCol": "weight"
+   },
+   "save": {
+    "call": "estimator.write().overwrite().save(path)",
+    "commands": [
+     "InkKOQotb3JnLmFwYWNoZS5zcGFyay5tbC5jbGFzc2lmaWNhdGlvbi5OYWl2ZUJheWVzEgY8dWlkMD4YARoyChkKCW1vZGVsVHlwZRIMagpjb21wbGVtZW50ChUKCXdlaWdodENvbBIIagZ3ZWlnaHQiBjxwYXRoPigB"
+    ],
+    "results": [
+     ""
+    ],
+    "value": null
+   },
+   "uid": "NaiveBayes_complement",
+   "uid_same": true
+  },
+  "NaiveBayes.complement.model": {
+   "load": {
+    "call": "NaiveBayesModel.load(path)",
+    "commands": [
+     "KkAKNgoyb3JnLmFwYWNoZS5zcGFyay5tbC5jbGFzc2lmaWNhdGlvbi5OYWl2ZUJheWVzTW9kZWwYBBIGPHBhdGg+"
+    ],
+    "results": [
+     "GkUKBwoFPGlkMD4aBjx1aWQwPiIyChkKCW1vZGVsVHlwZRIMagpjb21wbGVtZW50ChUKCXdlaWdodENvbBIIagZ3ZWlnaHQ="
+    ],
+    "value": {
+     "ref": "<id0>",
+     "type": "NaiveBayesModel"
+    }
+   },
+   "members": {
+    "class": "NaiveBayesModel",
+    "members": {
+     "predict-dense": {
+      "call": "loaded.predict(Vectors.dense([1.0, 0.0]))",
+      "commands": [
+       "EnQKBwoFPGlkMD4SaQoHcHJlZGljdBJeClzCAVkKLroBKwoDdWR0EiRvcmcuYXBhY2hlLnNwYXJrLm1sLmxpbmFsZy5WZWN0b3JVRFQSAiABEgQKAgoAEgQKAgoAEhfKARQqEgoQAAAAAAAA8D8AAAAAAAAAAA=="
+      ],
+      "results": [
+       "CglZAAAAAAAAAAA="
+      ],
+      "value": 0.0
+     },
+     "repr()": {
+      "call": "repr(loaded)",
+      "commands": [
+       "EhUKBwoFPGlkMD4SCgoIdG9TdHJpbmc="
+      ],
+      "results": [
+       "Cl9qXU5haXZlQmF5ZXNNb2RlbDogdWlkPU5haXZlQmF5ZXNfY29tcGxlbWVudCwgbW9kZWxUeXBlPWNvbXBsZW1lbnQsIG51bUNsYXNzZXM9MywgbnVtRmVhdHVyZXM9Mg=="
+      ],
+      "value": "NaiveBayesModel: uid=NaiveBayes_complement, modelType=complement, numClasses=3, numFeatures=2"
+     },
+     "str()": {
+      "call": "str(loaded)",
+      "commands": [
+       "EhUKBwoFPGlkMD4SCgoIdG9TdHJpbmc="
+      ],
+      "results": [
+       "Cl9qXU5haXZlQmF5ZXNNb2RlbDogdWlkPU5haXZlQmF5ZXNfY29tcGxlbWVudCwgbW9kZWxUeXBlPWNvbXBsZW1lbnQsIG51bUNsYXNzZXM9MywgbnVtRmVhdHVyZXM9Mg=="
+      ],
+      "value": "NaiveBayesModel: uid=NaiveBayes_complement, modelType=complement, numClasses=3, numFeatures=2"
+     },
+     "transform": {
+      "call": "loaded.transform(nb_counts_eval)",
+      "commands": [
+       "Ct4DCgcKBTxpZDA+Gp4DCgCKAZgDCpEDCgAajAMK1QIKALoBzwIKmAIKAFqTAhKQAnsiZmllbGRzIjpbeyJtZXRhZGF0YSI6e30sIm5hbWUiOiJsYWJlbCIsIm51bGxhYmxlIjp0cnVlLCJ0eXBlIjoiZG91YmxlIn0seyJtZXRhZGF0YSI6e30sIm5hbWUiOiJ3ZWlnaHQiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoiZmVhdHVyZXMiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6eyJjb250YWluc051bGwiOnRydWUsImVsZW1lbnRUeXBlIjoiZG91YmxlIiwidHlwZSI6ImFycmF5In19XSwidHlwZSI6InN0cnVjdCJ9EjIKJhokCg9hcnJheV90b192ZWN0b3ISERIMCghmZWF0dXJlcxgAkgEAEghmZWF0dXJlcxoOEgkKBWxhYmVsGACSAQAaDxIKCgZ3ZWlnaHQYAJIBABoREgwKCGZlYXR1cmVzGACSAQAQARgAIjIKGQoJbW9kZWxUeXBlEgxqCmNvbXBsZW1lbnQKFQoJd2VpZ2h0Q29sEghqBndlaWdodA=="
+      ],
+      "results": [],
+      "value": {
+       "rows": [
+        [
+         0.0,
+         1.0,
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           1.0,
+           0.0
+          ]
+         },
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           -0.6807246605613881,
+           -1.5488132906176655,
+           -1.268511325463507
+          ]
+         },
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           0.5062499999999999,
+           0.21249999999999997,
+           0.28125
+          ]
+         },
+         0.0
+        ],
+        [
+         1.0,
+         1.0,
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           0.0,
+           2.0
+          ]
+         },
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           -1.6886295141133632,
+           -0.6837147659224145,
+           -1.1696071231431944
+          ]
+         },
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           0.1847725787608166,
+           0.5047385200293065,
+           0.3104889012098768
+          ]
+         },
+         1.0
+        ],
+        [
+         2.0,
+         1.0,
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           1.0,
+           3.0
+          ]
+         },
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           -1.4122728959134676,
+           -0.7729894036833223,
+           -1.2215259743603335
+          ]
+         },
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           0.24358900103425993,
+           0.4616310021454755,
+           0.29477999682026473
+          ]
+         },
+         1.0
+        ]
+       ],
+       "schema": "struct<label:double,weight:double,features:vector,rawPrediction:vector,probability:vector,prediction:double>"
+      }
+     }
+    },
+    "skipped": {
+     "Param attribute (client side)": [
+      "featuresCol",
+      "labelCol",
+      "modelType",
+      "predictionCol",
+      "probabilityCol",
+      "rawPredictionCol",
+      "smoothing",
+      "thresholds",
+      "weightCol"
+     ],
+     "Params API (client side)": [
+      "clear",
+      "copy",
+      "explainParam",
+      "explainParams",
+      "extractParamMap",
+      "getOrDefault",
+      "getParam",
+      "hasDefault",
+      "hasParam",
+      "isDefined",
+      "isSet",
+      "params",
+      "set",
+      "uid"
+     ],
+     "Params getter or setter (client side)": [
+      "getFeaturesCol",
+      "getLabelCol",
+      "getModelType",
+      "getPredictionCol",
+      "getProbabilityCol",
+      "getRawPredictionCol",
+      "getSmoothing",
+      "getThresholds",
+      "getWeightCol",
+      "setFeaturesCol",
+      "setPredictionCol",
+      "setProbabilityCol",
+      "setRawPredictionCol",
+      "setThresholds"
+     ],
+     "not captured on this copy (partial)": [
+      "numClasses",
+      "numFeatures",
+      "pi",
+      "predictProbability",
+      "predictRaw",
+      "sigma",
+      "theta"
+     ],
+     "persistence (captured by Golden.persist)": [
+      "load",
+      "read",
+      "save",
+      "write"
+     ]
+    }
+   },
+   "params_after": {
+    "featuresCol": "features",
+    "labelCol": "label",
+    "modelType": "complement",
+    "predictionCol": "prediction",
+    "probabilityCol": "probability",
+    "rawPredictionCol": "rawPrediction",
+    "smoothing": 1.0,
+    "weightCol": "weight"
+   },
+   "params_before": {
+    "featuresCol": "features",
+    "labelCol": "label",
+    "modelType": "complement",
+    "predictionCol": "prediction",
+    "probabilityCol": "probability",
+    "rawPredictionCol": "rawPrediction",
+    "smoothing": 1.0,
+    "weightCol": "weight"
+   },
+   "save": {
+    "call": "model.write().overwrite().save(path)",
+    "commands": [
+     "IkcSBwoFPGlkMD4aMgoZCgltb2RlbFR5cGUSDGoKY29tcGxlbWVudAoVCgl3ZWlnaHRDb2wSCGoGd2VpZ2h0IgY8cGF0aD4oAQ=="
+    ],
+    "results": [
+     ""
+    ],
+    "value": null
+   },
+   "uid": "NaiveBayes_complement",
+   "uid_same": true
+  },
+  "NaiveBayes.gaussian.estimator": {
+   "load": {
+    "call": "NaiveBayes.load(path)",
+    "commands": [
+     "KjsKMQotb3JnLmFwYWNoZS5zcGFyay5tbC5jbGFzc2lmaWNhdGlvbi5OYWl2ZUJheWVzGAESBjxwYXRoPg=="
+    ],
+    "results": [
+     "GmkSLW9yZy5hcGFjaGUuc3BhcmsubWwuY2xhc3NpZmljYXRpb24uTmFpdmVCYXllcxoGPHVpZDA+IjAKFwoJbW9kZWxUeXBlEgpqCGdhdXNzaWFuChUKCXdlaWdodENvbBIIagZ3ZWlnaHQ="
+    ],
+    "value": {
+     "type": "NaiveBayes",
+     "uid": "NaiveBayes_gaussian"
+    }
+   },
+   "params_after": {
+    "featuresCol": "features",
+    "labelCol": "label",
+    "modelType": "gaussian",
+    "predictionCol": "prediction",
+    "probabilityCol": "probability",
+    "rawPredictionCol": "rawPrediction",
+    "smoothing": 1.0,
+    "weightCol": "weight"
+   },
+   "params_before": {
+    "featuresCol": "features",
+    "labelCol": "label",
+    "modelType": "gaussian",
+    "predictionCol": "prediction",
+    "probabilityCol": "probability",
+    "rawPredictionCol": "rawPrediction",
+    "smoothing": 1.0,
+    "weightCol": "weight"
+   },
+   "save": {
+    "call": "estimator.write().overwrite().save(path)",
+    "commands": [
+     "IncKOQotb3JnLmFwYWNoZS5zcGFyay5tbC5jbGFzc2lmaWNhdGlvbi5OYWl2ZUJheWVzEgY8dWlkMD4YARowChcKCW1vZGVsVHlwZRIKaghnYXVzc2lhbgoVCgl3ZWlnaHRDb2wSCGoGd2VpZ2h0IgY8cGF0aD4oAQ=="
+    ],
+    "results": [
+     ""
+    ],
+    "value": null
+   },
+   "uid": "NaiveBayes_gaussian",
+   "uid_same": true
+  },
+  "NaiveBayes.gaussian.model": {
+   "load": {
+    "call": "NaiveBayesModel.load(path)",
+    "commands": [
+     "KkAKNgoyb3JnLmFwYWNoZS5zcGFyay5tbC5jbGFzc2lmaWNhdGlvbi5OYWl2ZUJheWVzTW9kZWwYBBIGPHBhdGg+"
+    ],
+    "results": [
+     "GkMKBwoFPGlkMD4aBjx1aWQwPiIwChcKCW1vZGVsVHlwZRIKaghnYXVzc2lhbgoVCgl3ZWlnaHRDb2wSCGoGd2VpZ2h0"
+    ],
+    "value": {
+     "ref": "<id0>",
+     "type": "NaiveBayesModel"
+    }
+   },
+   "members": {
+    "class": "NaiveBayesModel",
+    "members": {
+     "predict-dense": {
+      "call": "loaded.predict(Vectors.dense([1.0, 0.0]))",
+      "commands": [
+       "EnQKBwoFPGlkMD4SaQoHcHJlZGljdBJeClzCAVkKLroBKwoDdWR0EiRvcmcuYXBhY2hlLnNwYXJrLm1sLmxpbmFsZy5WZWN0b3JVRFQSAiABEgQKAgoAEgQKAgoAEhfKARQqEgoQAAAAAAAA8D8AAAAAAAAAAA=="
+      ],
+      "results": [
+       "CglZAAAAAAAA8D8="
+      ],
+      "value": 1.0
+     },
+     "repr()": {
+      "call": "repr(loaded)",
+      "commands": [
+       "EhUKBwoFPGlkMD4SCgoIdG9TdHJpbmc="
+      ],
+      "results": [
+       "CltqWU5haXZlQmF5ZXNNb2RlbDogdWlkPU5haXZlQmF5ZXNfZ2F1c3NpYW4sIG1vZGVsVHlwZT1nYXVzc2lhbiwgbnVtQ2xhc3Nlcz0yLCBudW1GZWF0dXJlcz0y"
+      ],
+      "value": "NaiveBayesModel: uid=NaiveBayes_gaussian, modelType=gaussian, numClasses=2, numFeatures=2"
+     },
+     "str()": {
+      "call": "str(loaded)",
+      "commands": [
+       "EhUKBwoFPGlkMD4SCgoIdG9TdHJpbmc="
+      ],
+      "results": [
+       "CltqWU5haXZlQmF5ZXNNb2RlbDogdWlkPU5haXZlQmF5ZXNfZ2F1c3NpYW4sIG1vZGVsVHlwZT1nYXVzc2lhbiwgbnVtQ2xhc3Nlcz0yLCBudW1GZWF0dXJlcz0y"
+      ],
+      "value": "NaiveBayesModel: uid=NaiveBayes_gaussian, modelType=gaussian, numClasses=2, numFeatures=2"
+     },
+     "transform": {
+      "call": "loaded.transform(binary_eval)",
+      "commands": [
+       "CtwDCgcKBTxpZDA+Gp4DCgCKAZgDCpEDCgAajAMK1QIKALoBzwIKmAIKAFqTAhKQAnsiZmllbGRzIjpbeyJtZXRhZGF0YSI6e30sIm5hbWUiOiJsYWJlbCIsIm51bGxhYmxlIjp0cnVlLCJ0eXBlIjoiZG91YmxlIn0seyJtZXRhZGF0YSI6e30sIm5hbWUiOiJ3ZWlnaHQiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoiZmVhdHVyZXMiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6eyJjb250YWluc051bGwiOnRydWUsImVsZW1lbnRUeXBlIjoiZG91YmxlIiwidHlwZSI6ImFycmF5In19XSwidHlwZSI6InN0cnVjdCJ9EjIKJhokCg9hcnJheV90b192ZWN0b3ISERIMCghmZWF0dXJlcxgAkgEAEghmZWF0dXJlcxoOEgkKBWxhYmVsGACSAQAaDxIKCgZ3ZWlnaHQYAJIBABoREgwKCGZlYXR1cmVzGACSAQAQARgAIjAKFwoJbW9kZWxUeXBlEgpqCGdhdXNzaWFuChUKCXdlaWdodENvbBIIagZ3ZWlnaHQ="
+      ],
+      "results": [],
+      "value": {
+       "rows": [
+        [
+         0.0,
+         1.0,
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           2.2,
+           0.6
+          ]
+         },
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           -0.05458653611611042,
+           -13.502084721009766
+          ]
+         },
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           0.9999985551421715,
+           1.4448578285998972e-06
+          ]
+         },
+         0.0
+        ],
+        [
+         0.0,
+         1.0,
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           2.9,
+           2.1
+          ]
+         },
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           -2.1381697382572096,
+           -24.517378966235157
+          ]
+         },
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           0.999999999809088,
+           1.9091186614542145e-10
+          ]
+         },
+         0.0
+        ],
+        [
+         1.0,
+         1.0,
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           0.2,
+           1.0
+          ]
+         },
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           -10.095815876173297,
+           0.12886772397018564
+          ]
+         },
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           3.6262737338056726e-05,
+           0.999963737262662
+          ]
+         },
+         1.0
+        ],
+        [
+         1.0,
+         2.0,
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           0.8,
+           2.2
+          ]
+         },
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           -6.263731939223713,
+           0.18230809982550555
+          ]
+         },
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           0.0015842794593303035,
+           0.9984157205406697
+          ]
+         },
+         1.0
+        ]
+       ],
+       "schema": "struct<label:double,weight:double,features:vector,rawPrediction:vector,probability:vector,prediction:double>"
+      }
+     }
+    },
+    "skipped": {
+     "Param attribute (client side)": [
+      "featuresCol",
+      "labelCol",
+      "modelType",
+      "predictionCol",
+      "probabilityCol",
+      "rawPredictionCol",
+      "smoothing",
+      "thresholds",
+      "weightCol"
+     ],
+     "Params API (client side)": [
+      "clear",
+      "copy",
+      "explainParam",
+      "explainParams",
+      "extractParamMap",
+      "getOrDefault",
+      "getParam",
+      "hasDefault",
+      "hasParam",
+      "isDefined",
+      "isSet",
+      "params",
+      "set",
+      "uid"
+     ],
+     "Params getter or setter (client side)": [
+      "getFeaturesCol",
+      "getLabelCol",
+      "getModelType",
+      "getPredictionCol",
+      "getProbabilityCol",
+      "getRawPredictionCol",
+      "getSmoothing",
+      "getThresholds",
+      "getWeightCol",
+      "setFeaturesCol",
+      "setPredictionCol",
+      "setProbabilityCol",
+      "setRawPredictionCol",
+      "setThresholds"
+     ],
+     "not captured on this copy (partial)": [
+      "numClasses",
+      "numFeatures",
+      "pi",
+      "predictProbability",
+      "predictRaw",
+      "sigma",
+      "theta"
+     ],
+     "persistence (captured by Golden.persist)": [
+      "load",
+      "read",
+      "save",
+      "write"
+     ]
+    }
+   },
+   "params_after": {
+    "featuresCol": "features",
+    "labelCol": "label",
+    "modelType": "gaussian",
+    "predictionCol": "prediction",
+    "probabilityCol": "probability",
+    "rawPredictionCol": "rawPrediction",
+    "smoothing": 1.0,
+    "weightCol": "weight"
+   },
+   "params_before": {
+    "featuresCol": "features",
+    "labelCol": "label",
+    "modelType": "gaussian",
+    "predictionCol": "prediction",
+    "probabilityCol": "probability",
+    "rawPredictionCol": "rawPrediction",
+    "smoothing": 1.0,
+    "weightCol": "weight"
+   },
+   "save": {
+    "call": "model.write().overwrite().save(path)",
+    "commands": [
+     "IkUSBwoFPGlkMD4aMAoXCgltb2RlbFR5cGUSCmoIZ2F1c3NpYW4KFQoJd2VpZ2h0Q29sEghqBndlaWdodCIGPHBhdGg+KAE="
+    ],
+    "results": [
+     ""
+    ],
+    "value": null
+   },
+   "uid": "NaiveBayes_gaussian",
+   "uid_same": true
+  },
+  "NaiveBayes.multinomial.estimator": {
+   "load": {
+    "call": "NaiveBayes.load(path)",
+    "commands": [
+     "KjsKMQotb3JnLmFwYWNoZS5zcGFyay5tbC5jbGFzc2lmaWNhdGlvbi5OYWl2ZUJheWVzGAESBjxwYXRoPg=="
+    ],
+    "results": [
+     "GmwSLW9yZy5hcGFjaGUuc3BhcmsubWwuY2xhc3NpZmljYXRpb24uTmFpdmVCYXllcxoGPHVpZDA+IjMKGgoJbW9kZWxUeXBlEg1qC211bHRpbm9taWFsChUKCXdlaWdodENvbBIIagZ3ZWlnaHQ="
+    ],
+    "value": {
+     "type": "NaiveBayes",
+     "uid": "NaiveBayes_multinomial"
+    }
+   },
+   "params_after": {
+    "featuresCol": "features",
+    "labelCol": "label",
+    "modelType": "multinomial",
+    "predictionCol": "prediction",
+    "probabilityCol": "probability",
+    "rawPredictionCol": "rawPrediction",
+    "smoothing": 1.0,
+    "weightCol": "weight"
+   },
+   "params_before": {
+    "featuresCol": "features",
+    "labelCol": "label",
+    "modelType": "multinomial",
+    "predictionCol": "prediction",
+    "probabilityCol": "probability",
+    "rawPredictionCol": "rawPrediction",
+    "smoothing": 1.0,
+    "weightCol": "weight"
+   },
+   "save": {
+    "call": "estimator.write().overwrite().save(path)",
+    "commands": [
+     "InoKOQotb3JnLmFwYWNoZS5zcGFyay5tbC5jbGFzc2lmaWNhdGlvbi5OYWl2ZUJheWVzEgY8dWlkMD4YARozChoKCW1vZGVsVHlwZRINagttdWx0aW5vbWlhbAoVCgl3ZWlnaHRDb2wSCGoGd2VpZ2h0IgY8cGF0aD4oAQ=="
+    ],
+    "results": [
+     ""
+    ],
+    "value": null
+   },
+   "uid": "NaiveBayes_multinomial",
+   "uid_same": true
+  },
+  "NaiveBayes.multinomial.model": {
+   "load": {
+    "call": "NaiveBayesModel.load(path)",
+    "commands": [
+     "KkAKNgoyb3JnLmFwYWNoZS5zcGFyay5tbC5jbGFzc2lmaWNhdGlvbi5OYWl2ZUJheWVzTW9kZWwYBBIGPHBhdGg+"
+    ],
+    "results": [
+     "GkYKBwoFPGlkMD4aBjx1aWQwPiIzChoKCW1vZGVsVHlwZRINagttdWx0aW5vbWlhbAoVCgl3ZWlnaHRDb2wSCGoGd2VpZ2h0"
+    ],
+    "value": {
+     "ref": "<id0>",
+     "type": "NaiveBayesModel"
+    }
+   },
+   "members": {
+    "class": "NaiveBayesModel",
+    "members": {
+     "predict-dense": {
+      "call": "loaded.predict(Vectors.dense([1.0, 0.0]))",
+      "commands": [
+       "EnQKBwoFPGlkMD4SaQoHcHJlZGljdBJeClzCAVkKLroBKwoDdWR0EiRvcmcuYXBhY2hlLnNwYXJrLm1sLmxpbmFsZy5WZWN0b3JVRFQSAiABEgQKAgoAEgQKAgoAEhfKARQqEgoQAAAAAAAA8D8AAAAAAAAAAA=="
+      ],
+      "results": [
+       "CglZAAAAAAAAAAA="
+      ],
+      "value": 0.0
+     },
+     "repr()": {
+      "call": "repr(loaded)",
+      "commands": [
+       "EhUKBwoFPGlkMD4SCgoIdG9TdHJpbmc="
+      ],
+      "results": [
+       "CmFqX05haXZlQmF5ZXNNb2RlbDogdWlkPU5haXZlQmF5ZXNfbXVsdGlub21pYWwsIG1vZGVsVHlwZT1tdWx0aW5vbWlhbCwgbnVtQ2xhc3Nlcz0zLCBudW1GZWF0dXJlcz0y"
+      ],
+      "value": "NaiveBayesModel: uid=NaiveBayes_multinomial, modelType=multinomial, numClasses=3, numFeatures=2"
+     },
+     "str()": {
+      "call": "str(loaded)",
+      "commands": [
+       "EhUKBwoFPGlkMD4SCgoIdG9TdHJpbmc="
+      ],
+      "results": [
+       "CmFqX05haXZlQmF5ZXNNb2RlbDogdWlkPU5haXZlQmF5ZXNfbXVsdGlub21pYWwsIG1vZGVsVHlwZT1tdWx0aW5vbWlhbCwgbnVtQ2xhc3Nlcz0zLCBudW1GZWF0dXJlcz0y"
+      ],
+      "value": "NaiveBayesModel: uid=NaiveBayes_multinomial, modelType=multinomial, numClasses=3, numFeatures=2"
+     },
+     "transform": {
+      "call": "loaded.transform(nb_counts_eval)",
+      "commands": [
+       "Ct8DCgcKBTxpZDA+Gp4DCgCKAZgDCpEDCgAajAMK1QIKALoBzwIKmAIKAFqTAhKQAnsiZmllbGRzIjpbeyJtZXRhZGF0YSI6e30sIm5hbWUiOiJsYWJlbCIsIm51bGxhYmxlIjp0cnVlLCJ0eXBlIjoiZG91YmxlIn0seyJtZXRhZGF0YSI6e30sIm5hbWUiOiJ3ZWlnaHQiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoiZmVhdHVyZXMiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6eyJjb250YWluc051bGwiOnRydWUsImVsZW1lbnRUeXBlIjoiZG91YmxlIiwidHlwZSI6ImFycmF5In19XSwidHlwZSI6InN0cnVjdCJ9EjIKJhokCg9hcnJheV90b192ZWN0b3ISERIMCghmZWF0dXJlcxgAkgEAEghmZWF0dXJlcxoOEgkKBWxhYmVsGACSAQAaDxIKCgZ3ZWlnaHQYAJIBABoREgwKCGZlYXR1cmVzGACSAQAQARgAIjMKGgoJbW9kZWxUeXBlEg1qC211bHRpbm9taWFsChUKCXdlaWdodENvbBIIagZ3ZWlnaHQ="
+      ],
+      "results": [],
+      "value": {
+       "rows": [
+        [
+         0.0,
+         1.0,
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           1.0,
+           0.0
+          ]
+         },
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           -1.4916548767777171,
+           -3.113515309210375,
+           -2.2155737160044167
+          ]
+         },
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           0.5943962641761175,
+           0.11741160773849228,
+           0.28819212808539013
+          ]
+         },
+         0.0
+        ],
+        [
+         1.0,
+         1.0,
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           0.0,
+           2.0
+          ]
+         },
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           -3.976561526565717,
+           -1.151856803186923,
+           -2.107943051812051
+          ]
+         },
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           0.04109255923223458,
+           0.6926548255770889,
+           0.26625261519067667
+          ]
+         },
+         1.0
+        ],
+        [
+         2.0,
+         1.0,
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           1.0,
+           3.0
+          ]
+         },
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           -5.650537960137388,
+           -3.4668644161795266,
+           -3.5715290872335888
+          ]
+         },
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           0.055942795579007144,
+           0.4967084355116332,
+           0.44734876890935965
+          ]
+         },
+         1.0
+        ]
+       ],
+       "schema": "struct<label:double,weight:double,features:vector,rawPrediction:vector,probability:vector,prediction:double>"
+      }
+     }
+    },
+    "skipped": {
+     "Param attribute (client side)": [
+      "featuresCol",
+      "labelCol",
+      "modelType",
+      "predictionCol",
+      "probabilityCol",
+      "rawPredictionCol",
+      "smoothing",
+      "thresholds",
+      "weightCol"
+     ],
+     "Params API (client side)": [
+      "clear",
+      "copy",
+      "explainParam",
+      "explainParams",
+      "extractParamMap",
+      "getOrDefault",
+      "getParam",
+      "hasDefault",
+      "hasParam",
+      "isDefined",
+      "isSet",
+      "params",
+      "set",
+      "uid"
+     ],
+     "Params getter or setter (client side)": [
+      "getFeaturesCol",
+      "getLabelCol",
+      "getModelType",
+      "getPredictionCol",
+      "getProbabilityCol",
+      "getRawPredictionCol",
+      "getSmoothing",
+      "getThresholds",
+      "getWeightCol",
+      "setFeaturesCol",
+      "setPredictionCol",
+      "setProbabilityCol",
+      "setRawPredictionCol",
+      "setThresholds"
+     ],
+     "not captured on this copy (partial)": [
+      "numClasses",
+      "numFeatures",
+      "pi",
+      "predictProbability",
+      "predictRaw",
+      "sigma",
+      "theta"
+     ],
+     "persistence (captured by Golden.persist)": [
+      "load",
+      "read",
+      "save",
+      "write"
+     ]
+    }
+   },
+   "params_after": {
+    "featuresCol": "features",
+    "labelCol": "label",
+    "modelType": "multinomial",
+    "predictionCol": "prediction",
+    "probabilityCol": "probability",
+    "rawPredictionCol": "rawPrediction",
+    "smoothing": 1.0,
+    "weightCol": "weight"
+   },
+   "params_before": {
+    "featuresCol": "features",
+    "labelCol": "label",
+    "modelType": "multinomial",
+    "predictionCol": "prediction",
+    "probabilityCol": "probability",
+    "rawPredictionCol": "rawPrediction",
+    "smoothing": 1.0,
+    "weightCol": "weight"
+   },
+   "save": {
+    "call": "model.write().overwrite().save(path)",
+    "commands": [
+     "IkgSBwoFPGlkMD4aMwoaCgltb2RlbFR5cGUSDWoLbXVsdGlub21pYWwKFQoJd2VpZ2h0Q29sEghqBndlaWdodCIGPHBhdGg+KAE="
+    ],
+    "results": [
+     ""
+    ],
+    "value": null
+   },
+   "uid": "NaiveBayes_multinomial",
+   "uid_same": true
+  },
+  "OneVsRest.estimator": {
+   "load": {
+    "call": "OneVsRest.load(path)",
+    "commands": [
+     "KkMKOQo1b3JnLmFwYWNoZS5zcGFyay5tbC5jbGFzc2lmaWNhdGlvbi5Mb2dpc3RpY1JlZ3Jlc3Npb24YARIGPHBhdGg+"
+    ],
+    "results": [
+     "Gn4SNW9yZy5hcGFjaGUuc3BhcmsubWwuY2xhc3NpZmljYXRpb24uTG9naXN0aWNSZWdyZXNzaW9uGgY8dWlkMD4iPQoNCgdtYXhJdGVyEgIwFAoVCghyZWdQYXJhbRIJWXsUrkfheoQ/ChUKCXdlaWdodENvbBIIagZ3ZWlnaHQ="
+    ],
+    "value": {
+     "type": "OneVsRest",
+     "uid": "OneVsRest"
+    }
+   },
+   "params_after": {
+    "classifier": {
+     "type": "LogisticRegression",
+     "uid": "<uid0>"
+    },
+    "featuresCol": "features",
+    "labelCol": "label",
+    "parallelism": 1,
+    "predictionCol": "prediction",
+    "rawPredictionCol": "rawPrediction",
+    "weightCol": "weight"
+   },
+   "params_before": {
+    "classifier": {
+     "type": "LogisticRegression",
+     "uid": "<uid0>"
+    },
+    "featuresCol": "features",
+    "labelCol": "label",
+    "parallelism": 1,
+    "predictionCol": "prediction",
+    "rawPredictionCol": "rawPrediction",
+    "weightCol": "weight"
+   },
+   "save": {
+    "call": "estimator.write().overwrite().save(path)",
+    "commands": [
+     "EkEKBwoFPGlkMD4SNgoPaGFuZGxlT3ZlcndyaXRlEh0KG2oZPHRtcD4vT25lVnNSZXN0X2VzdGltYXRvchIECgIYAQ==",
+     "IowBCkEKNW9yZy5hcGFjaGUuc3BhcmsubWwuY2xhc3NpZmljYXRpb24uTG9naXN0aWNSZWdyZXNzaW9uEgY8dWlkMD4YARo9Cg0KB21heEl0ZXISAjAUChUKCHJlZ1BhcmFtEglZexSuR+F6hD8KFQoJd2VpZ2h0Q29sEghqBndlaWdodCIGPHBhdGg+KAA="
+    ],
+    "results": [
+     "CgIYAQ==",
+     ""
+    ],
+    "value": null
+   },
+   "uid": "OneVsRest",
+   "uid_same": true
+  },
+  "OneVsRest.model": {
+   "load": {
+    "call": "OneVsRestModel.load(path)",
+    "commands": [
+     "KkMKOQo1b3JnLmFwYWNoZS5zcGFyay5tbC5jbGFzc2lmaWNhdGlvbi5Mb2dpc3RpY1JlZ3Jlc3Npb24YARIGPHBhdGg+",
+     "KkgKPgo6b3JnLmFwYWNoZS5zcGFyay5tbC5jbGFzc2lmaWNhdGlvbi5Mb2dpc3RpY1JlZ3Jlc3Npb25Nb2RlbBgEEgY8cGF0aD4=",
+     "KkgKPgo6b3JnLmFwYWNoZS5zcGFyay5tbC5jbGFzc2lmaWNhdGlvbi5Mb2dpc3RpY1JlZ3Jlc3Npb25Nb2RlbBgEEgY8cGF0aD4=",
+     "KkgKPgo6b3JnLmFwYWNoZS5zcGFyay5tbC5jbGFzc2lmaWNhdGlvbi5Mb2dpc3RpY1JlZ3Jlc3Npb25Nb2RlbBgEEgY8cGF0aD4="
+    ],
+    "results": [
+     "Gn4SNW9yZy5hcGFjaGUuc3BhcmsubWwuY2xhc3NpZmljYXRpb24uTG9naXN0aWNSZWdyZXNzaW9uGgY8dWlkMD4iPQoNCgdtYXhJdGVyEgIwFAoVCghyZWdQYXJhbRIJWXsUrkfheoQ/ChUKCXdlaWdodENvbBIIagZ3ZWlnaHQ=",
+     "GqEBCgcKBTxpZDA+GgY8dWlkMD4ijQEKGQoLZmVhdHVyZXNDb2wSCmoIZmVhdHVyZXMKFAoIbGFiZWxDb2wSCGoGbWMyYiQwCg0KB21heEl0ZXISAjAUCh0KDXByZWRpY3Rpb25Db2wSDGoKcHJlZGljdGlvbgoVCghyZWdQYXJhbRIJWXsUrkfheoQ/ChUKCXdlaWdodENvbBIIagZ3ZWlnaHQ=",
+     "GqEBCgcKBTxpZDE+GgY8dWlkMD4ijQEKGQoLZmVhdHVyZXNDb2wSCmoIZmVhdHVyZXMKFAoIbGFiZWxDb2wSCGoGbWMyYiQxCg0KB21heEl0ZXISAjAUCh0KDXByZWRpY3Rpb25Db2wSDGoKcHJlZGljdGlvbgoVCghyZWdQYXJhbRIJWXsUrkfheoQ/ChUKCXdlaWdodENvbBIIagZ3ZWlnaHQ=",
+     "GqEBCgcKBTxpZDI+GgY8dWlkMD4ijQEKGQoLZmVhdHVyZXNDb2wSCmoIZmVhdHVyZXMKFAoIbGFiZWxDb2wSCGoGbWMyYiQyCg0KB21heEl0ZXISAjAUCh0KDXByZWRpY3Rpb25Db2wSDGoKcHJlZGljdGlvbgoVCghyZWdQYXJhbRIJWXsUrkfheoQ/ChUKCXdlaWdodENvbBIIagZ3ZWlnaHQ="
+    ],
+    "value": {
+     "type": "OneVsRestModel",
+     "uid": "<uid1>"
+    }
+   },
+   "members": {
+    "class": "OneVsRestModel",
+    "members": {
+     "repr()": {
+      "call": "repr(loaded)",
+      "commands": [],
+      "results": [],
+      "value": "<uid0>"
+     },
+     "str()": {
+      "call": "str(loaded)",
+      "commands": [],
+      "results": [],
+      "value": "<uid0>"
+     },
+     "transform": {
+      "call": "loaded.transform(multi_eval)",
+      "commands": [],
+      "results": [],
+      "value": {
+       "rows": [
+        [
+         0.0,
+         1.0,
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           0.1,
+           0.6
+          ]
+         },
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           1.9170202466217614,
+           -1.037310548798028,
+           -5.108883012654185
+          ]
+         },
+         0.0
+        ],
+        [
+         1.0,
+         1.0,
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           1.2,
+           0.1
+          ]
+         },
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           -3.110895176519381,
+           2.440194398526892,
+           -3.644527471095995
+          ]
+         },
+         1.0
+        ],
+        [
+         1.0,
+         2.0,
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           0.6,
+           0.6
+          ]
+         },
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           -0.3264570072802382,
+           -0.26998257890461297,
+           -3.8419816030991845
+          ]
+         },
+         1.0
+        ],
+        [
+         2.0,
+         1.0,
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           2.1,
+           1.8
+          ]
+         },
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           -6.835451654050056,
+           -2.2625188617669427,
+           3.133508768276565
+          ]
+         },
+         2.0
+        ]
+       ],
+       "schema": "struct<label:double,weight:double,features:vector,rawPrediction:vector,prediction:double>"
+      }
+     }
+    },
+    "skipped": {
+     "Param attribute (client side)": [
+      "classifier",
+      "featuresCol",
+      "labelCol",
+      "predictionCol",
+      "rawPredictionCol",
+      "weightCol"
+     ],
+     "Params API (client side)": [
+      "clear",
+      "copy",
+      "explainParam",
+      "explainParams",
+      "extractParamMap",
+      "getOrDefault",
+      "getParam",
+      "hasDefault",
+      "hasParam",
+      "isDefined",
+      "isSet",
+      "params",
+      "set",
+      "uid"
+     ],
+     "Params getter or setter (client side)": [
+      "getClassifier",
+      "getFeaturesCol",
+      "getLabelCol",
+      "getPredictionCol",
+      "getRawPredictionCol",
+      "getWeightCol",
+      "setFeaturesCol",
+      "setPredictionCol",
+      "setRawPredictionCol"
+     ],
+     "not captured on this copy (partial)": [
+      "models"
+     ],
+     "persistence (captured by Golden.persist)": [
+      "load",
+      "read",
+      "save",
+      "write"
+     ]
+    }
+   },
+   "params_after": {
+    "classifier": {
+     "type": "LogisticRegression",
+     "uid": "<uid0>"
+    },
+    "featuresCol": "features",
+    "labelCol": "label",
+    "predictionCol": "prediction",
+    "rawPredictionCol": "rawPrediction",
+    "weightCol": "weight"
+   },
+   "params_before": {
+    "classifier": {
+     "type": "LogisticRegression",
+     "uid": "<uid0>"
+    },
+    "featuresCol": "features",
+    "labelCol": "label",
+    "predictionCol": "prediction",
+    "rawPredictionCol": "rawPrediction",
+    "weightCol": "weight"
+   },
+   "save": {
+    "call": "model.write().overwrite().save(path)",
+    "commands": [
+     "Ej0KBwoFPGlkMD4SMgoPaGFuZGxlT3ZlcndyaXRlEhkKF2oVPHRtcD4vT25lVnNSZXN0X21vZGVsEgQKAhgB",
+     "IowBCkEKNW9yZy5hcGFjaGUuc3BhcmsubWwuY2xhc3NpZmljYXRpb24uTG9naXN0aWNSZWdyZXNzaW9uEgY8dWlkMD4YARo9Cg0KB21heEl0ZXISAjAUChUKCHJlZ1BhcmFtEglZexSuR+F6hD8KFQoJd2VpZ2h0Q29sEghqBndlaWdodCIGPHBhdGg+KAA=",
+     "IqMBEgcKBTxpZDE+Go0BChkKC2ZlYXR1cmVzQ29sEgpqCGZlYXR1cmVzChQKCGxhYmVsQ29sEghqBm1jMmIkMAoNCgdtYXhJdGVyEgIwFAodCg1wcmVkaWN0aW9uQ29sEgxqCnByZWRpY3Rpb24KFQoIcmVnUGFyYW0SCVl7FK5H4XqEPwoVCgl3ZWlnaHRDb2wSCGoGd2VpZ2h0IgY8cGF0aD4oAA==",
+     "IqMBEgcKBTxpZDI+Go0BChkKC2ZlYXR1cmVzQ29sEgpqCGZlYXR1cmVzChQKCGxhYmVsQ29sEghqBm1jMmIkMQoNCgdtYXhJdGVyEgIwFAodCg1wcmVkaWN0aW9uQ29sEgxqCnByZWRpY3Rpb24KFQoIcmVnUGFyYW0SCVl7FK5H4XqEPwoVCgl3ZWlnaHRDb2wSCGoGd2VpZ2h0IgY8cGF0aD4oAA==",
+     "IqMBEgcKBTxpZDM+Go0BChkKC2ZlYXR1cmVzQ29sEgpqCGZlYXR1cmVzChQKCGxhYmVsQ29sEghqBm1jMmIkMgoNCgdtYXhJdGVyEgIwFAodCg1wcmVkaWN0aW9uQ29sEgxqCnByZWRpY3Rpb24KFQoIcmVnUGFyYW0SCVl7FK5H4XqEPwoVCgl3ZWlnaHRDb2wSCGoGd2VpZ2h0IgY8cGF0aD4oAA=="
+    ],
+    "results": [
+     "CgIYAQ==",
+     "",
+     "",
+     "",
+     ""
+    ],
+    "value": null
+   },
+   "uid": "<uid0>",
+   "uid_same": true
+  },
+  "RandomForestClassifier.binary.estimator": {
+   "load": {
+    "call": "RandomForestClassifier.load(path)",
+    "commands": [
+     "KkcKPQo5b3JnLmFwYWNoZS5zcGFyay5tbC5jbGFzc2lmaWNhdGlvbi5SYW5kb21Gb3Jlc3RDbGFzc2lmaWVyGAESBjxwYXRoPg=="
+    ],
+    "results": [
+     "GogBEjlvcmcuYXBhY2hlLnNwYXJrLm1sLmNsYXNzaWZpY2F0aW9uLlJhbmRvbUZvcmVzdENsYXNzaWZpZXIaBjx1aWQwPiJDCg4KCG1heERlcHRoEgIwAwoOCghudW1UcmVlcxICMAMKCgoEc2VlZBICOCoKFQoJd2VpZ2h0Q29sEghqBndlaWdodA=="
+    ],
+    "value": {
+     "type": "RandomForestClassifier",
+     "uid": "RandomForestClassifier_binary"
+    }
+   },
+   "params_after": {
+    "bootstrap": true,
+    "cacheNodeIds": false,
+    "checkpointInterval": 10,
+    "featureSubsetStrategy": "auto",
+    "featuresCol": "features",
+    "impurity": "gini",
+    "labelCol": "label",
+    "leafCol": "",
+    "maxBins": 32,
+    "maxDepth": 3,
+    "maxMemoryInMB": 256,
+    "minInfoGain": 0.0,
+    "minInstancesPerNode": 1,
+    "minWeightFractionPerNode": 0.0,
+    "numTrees": 3,
+    "predictionCol": "prediction",
+    "probabilityCol": "probability",
+    "pruneTree": true,
+    "rawPredictionCol": "rawPrediction",
+    "seed": 42,
+    "subsamplingRate": 1.0,
+    "weightCol": "weight"
+   },
+   "params_before": {
+    "bootstrap": true,
+    "cacheNodeIds": false,
+    "checkpointInterval": 10,
+    "featureSubsetStrategy": "auto",
+    "featuresCol": "features",
+    "impurity": "gini",
+    "labelCol": "label",
+    "leafCol": "",
+    "maxBins": 32,
+    "maxDepth": 3,
+    "maxMemoryInMB": 256,
+    "minInfoGain": 0.0,
+    "minInstancesPerNode": 1,
+    "minWeightFractionPerNode": 0.0,
+    "numTrees": 3,
+    "predictionCol": "prediction",
+    "probabilityCol": "probability",
+    "pruneTree": true,
+    "rawPredictionCol": "rawPrediction",
+    "seed": 42,
+    "subsamplingRate": 1.0,
+    "weightCol": "weight"
+   },
+   "save": {
+    "call": "estimator.write().overwrite().save(path)",
+    "commands": [
+     "IpYBCkUKOW9yZy5hcGFjaGUuc3BhcmsubWwuY2xhc3NpZmljYXRpb24uUmFuZG9tRm9yZXN0Q2xhc3NpZmllchIGPHVpZDA+GAEaQwoOCghtYXhEZXB0aBICMAMKDgoIbnVtVHJlZXMSAjADCgoKBHNlZWQSAjAqChUKCXdlaWdodENvbBIIagZ3ZWlnaHQiBjxwYXRoPigB"
+    ],
+    "results": [
+     ""
+    ],
+    "value": null
+   },
+   "uid": "RandomForestClassifier_binary",
+   "uid_same": true
+  },
+  "RandomForestClassifier.binary.model": {
+   "load": {
+    "call": "RandomForestClassificationModel.load(path)",
+    "commands": [
+     "KlAKRgpCb3JnLmFwYWNoZS5zcGFyay5tbC5jbGFzc2lmaWNhdGlvbi5SYW5kb21Gb3Jlc3RDbGFzc2lmaWNhdGlvbk1vZGVsGAQSBjxwYXRoPg==",
+     "EhIKBwoFPGlkMD4SBwoFdHJlZXM="
+    ],
+    "results": [
+     "GlYKBwoFPGlkMD4aBjx1aWQwPiJDCg4KCG1heERlcHRoEgIwAwoOCghudW1UcmVlcxICMAMKCgoEc2VlZBICOCoKFQoJd2VpZ2h0Q29sEghqBndlaWdodA==",
+     "GgkKBwoFPGlkMT4="
+    ],
+    "value": {
+     "ref": "<id0>",
+     "type": "RandomForestClassificationModel"
+    }
+   },
+   "members": {
+    "class": "RandomForestClassificationModel",
+    "members": {
+     "predict-dense": {
+      "call": "loaded.predict(Vectors.dense([0.5, 1.5]))",
+      "commands": [
+       "EnQKBwoFPGlkMD4SaQoHcHJlZGljdBJeClzCAVkKLroBKwoDdWR0EiRvcmcuYXBhY2hlLnNwYXJrLm1sLmxpbmFsZy5WZWN0b3JVRFQSAiABEgQKAgoAEgQKAgoAEhfKARQqEgoQAAAAAAAA4D8AAAAAAAD4Pw=="
+      ],
+      "results": [
+       "CglZAAAAAAAA8D8="
+      ],
+      "value": 1.0
+     },
+     "repr()": {
+      "call": "repr(loaded)",
+      "commands": [
+       "EhUKBwoFPGlkMD4SCgoIdG9TdHJpbmc="
+      ],
+      "results": [
+       "Cm1qa1JhbmRvbUZvcmVzdENsYXNzaWZpY2F0aW9uTW9kZWw6IHVpZD1SYW5kb21Gb3Jlc3RDbGFzc2lmaWVyX2JpbmFyeSwgbnVtVHJlZXM9MywgbnVtQ2xhc3Nlcz0yLCBudW1GZWF0dXJlcz0y"
+      ],
+      "value": "RandomForestClassificationModel: uid=RandomForestClassifier_binary, numTrees=3, numClasses=2, numFeatures=2"
+     },
+     "str()": {
+      "call": "str(loaded)",
+      "commands": [
+       "EhUKBwoFPGlkMD4SCgoIdG9TdHJpbmc="
+      ],
+      "results": [
+       "Cm1qa1JhbmRvbUZvcmVzdENsYXNzaWZpY2F0aW9uTW9kZWw6IHVpZD1SYW5kb21Gb3Jlc3RDbGFzc2lmaWVyX2JpbmFyeSwgbnVtVHJlZXM9MywgbnVtQ2xhc3Nlcz0yLCBudW1GZWF0dXJlcz0y"
+      ],
+      "value": "RandomForestClassificationModel: uid=RandomForestClassifier_binary, numTrees=3, numClasses=2, numFeatures=2"
+     },
+     "transform": {
+      "call": "loaded.transform(binary_eval)",
+      "commands": [
+       "Cu8DCgcKBTxpZDA+Gp4DCgCKAZgDCpEDCgAajAMK1QIKALoBzwIKmAIKAFqTAhKQAnsiZmllbGRzIjpbeyJtZXRhZGF0YSI6e30sIm5hbWUiOiJsYWJlbCIsIm51bGxhYmxlIjp0cnVlLCJ0eXBlIjoiZG91YmxlIn0seyJtZXRhZGF0YSI6e30sIm5hbWUiOiJ3ZWlnaHQiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoiZmVhdHVyZXMiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6eyJjb250YWluc051bGwiOnRydWUsImVsZW1lbnRUeXBlIjoiZG91YmxlIiwidHlwZSI6ImFycmF5In19XSwidHlwZSI6InN0cnVjdCJ9EjIKJhokCg9hcnJheV90b192ZWN0b3ISERIMCghmZWF0dXJlcxgAkgEAEghmZWF0dXJlcxoOEgkKBWxhYmVsGACSAQAaDxIKCgZ3ZWlnaHQYAJIBABoREgwKCGZlYXR1cmVzGACSAQAQARgAIkMKDgoIbWF4RGVwdGgSAjADCg4KCG51bVRyZWVzEgIwAwoKCgRzZWVkEgIwKgoVCgl3ZWlnaHRDb2wSCGoGd2VpZ2h0"
+      ],
+      "results": [],
+      "value": {
+       "rows": [
+        [
+         0.0,
+         1.0,
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           2.2,
+           0.6
+          ]
+         },
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           3.0,
+           0.0
+          ]
+         },
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           1.0,
+           0.0
+          ]
+         },
+         0.0
+        ],
+        [
+         0.0,
+         1.0,
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           2.9,
+           2.1
+          ]
+         },
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           3.0,
+           0.0
+          ]
+         },
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           1.0,
+           0.0
+          ]
+         },
+         0.0
+        ],
+        [
+         1.0,
+         1.0,
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           0.2,
+           1.0
+          ]
+         },
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           0.0,
+           3.0
+          ]
+         },
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           0.0,
+           1.0
+          ]
+         },
+         1.0
+        ],
+        [
+         1.0,
+         2.0,
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           0.8,
+           2.2
+          ]
+         },
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           2.0,
+           1.0
+          ]
+         },
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           0.6666666666666666,
+           0.3333333333333333
+          ]
+         },
+         0.0
+        ]
+       ],
+       "schema": "struct<label:double,weight:double,features:vector,rawPrediction:vector,probability:vector,prediction:double>"
+      }
+     }
+    },
+    "skipped": {
+     "Param attribute (client side)": [
+      "bootstrap",
+      "cacheNodeIds",
+      "checkpointInterval",
+      "featureSubsetStrategy",
+      "featuresCol",
+      "impurity",
+      "labelCol",
+      "leafCol",
+      "maxBins",
+      "maxDepth",
+      "maxMemoryInMB",
+      "minInfoGain",
+      "minInstancesPerNode",
+      "minWeightFractionPerNode",
+      "numTrees",
+      "predictionCol",
+      "probabilityCol",
+      "pruneTree",
+      "rawPredictionCol",
+      "seed",
+      "subsamplingRate",
+      "thresholds",
+      "weightCol"
+     ],
+     "Params API (client side)": [
+      "clear",
+      "copy",
+      "explainParam",
+      "explainParams",
+      "extractParamMap",
+      "getOrDefault",
+      "getParam",
+      "hasDefault",
+      "hasParam",
+      "isDefined",
+      "isSet",
+      "params",
+      "set",
+      "uid"
+     ],
+     "Params getter or setter (client side)": [
+      "getBootstrap",
+      "getCacheNodeIds",
+      "getCheckpointInterval",
+      "getFeatureSubsetStrategy",
+      "getFeaturesCol",
+      "getImpurity",
+      "getLabelCol",
+      "getLeafCol",
+      "getMaxBins",
+      "getMaxDepth",
+      "getMaxMemoryInMB",
+      "getMinInfoGain",
+      "getMinInstancesPerNode",
+      "getMinWeightFractionPerNode",
+      "getNumTrees",
+      "getPredictionCol",
+      "getProbabilityCol",
+      "getPruneTree",
+      "getRawPredictionCol",
+      "getSeed",
+      "getSubsamplingRate",
+      "getThresholds",
+      "getWeightCol",
+      "setFeaturesCol",
+      "setLeafCol",
+      "setPredictionCol",
+      "setProbabilityCol",
+      "setRawPredictionCol",
+      "setThresholds"
+     ],
+     "not captured on this copy (partial)": [
+      "evaluate",
+      "featureImportances",
+      "hasSummary",
+      "numClasses",
+      "numFeatures",
+      "predictLeaf",
+      "predictProbability",
+      "predictRaw",
+      "summary",
+      "supportedFeatureSubsetStrategies",
+      "supportedImpurities",
+      "toDebugString",
+      "totalNumNodes",
+      "treeWeights",
+      "trees"
+     ],
+     "persistence (captured by Golden.persist)": [
+      "load",
+      "read",
+      "save",
+      "write"
+     ]
+    }
+   },
+   "params_after": {
+    "bootstrap": true,
+    "cacheNodeIds": false,
+    "checkpointInterval": 10,
+    "featureSubsetStrategy": "auto",
+    "featuresCol": "features",
+    "impurity": "gini",
+    "labelCol": "label",
+    "leafCol": "",
+    "maxBins": 32,
+    "maxDepth": 3,
+    "maxMemoryInMB": 256,
+    "minInfoGain": 0.0,
+    "minInstancesPerNode": 1,
+    "minWeightFractionPerNode": 0.0,
+    "numTrees": 3,
+    "predictionCol": "prediction",
+    "probabilityCol": "probability",
+    "pruneTree": true,
+    "rawPredictionCol": "rawPrediction",
+    "seed": 42,
+    "subsamplingRate": 1.0,
+    "weightCol": "weight"
+   },
+   "params_before": {
+    "bootstrap": true,
+    "cacheNodeIds": false,
+    "checkpointInterval": 10,
+    "featureSubsetStrategy": "auto",
+    "featuresCol": "features",
+    "impurity": "gini",
+    "labelCol": "label",
+    "leafCol": "",
+    "maxBins": 32,
+    "maxDepth": 3,
+    "maxMemoryInMB": 256,
+    "minInfoGain": 0.0,
+    "minInstancesPerNode": 1,
+    "minWeightFractionPerNode": 0.0,
+    "numTrees": 3,
+    "predictionCol": "prediction",
+    "probabilityCol": "probability",
+    "pruneTree": true,
+    "rawPredictionCol": "rawPrediction",
+    "seed": 42,
+    "subsamplingRate": 1.0,
+    "weightCol": "weight"
+   },
+   "save": {
+    "call": "model.write().overwrite().save(path)",
+    "commands": [
+     "IlgSBwoFPGlkMD4aQwoOCghtYXhEZXB0aBICMAMKDgoIbnVtVHJlZXMSAjADCgoKBHNlZWQSAjAqChUKCXdlaWdodENvbBIIagZ3ZWlnaHQiBjxwYXRoPigB"
+    ],
+    "results": [
+     ""
+    ],
+    "value": null
+   },
+   "uid": "RandomForestClassifier_binary",
+   "uid_same": true
+  },
+  "RandomForestClassifier.multiclass.estimator": {
+   "load": {
+    "call": "RandomForestClassifier.load(path)",
+    "commands": [
+     "KkcKPQo5b3JnLmFwYWNoZS5zcGFyay5tbC5jbGFzc2lmaWNhdGlvbi5SYW5kb21Gb3Jlc3RDbGFzc2lmaWVyGAESBjxwYXRoPg=="
+    ],
+    "results": [
+     "GogBEjlvcmcuYXBhY2hlLnNwYXJrLm1sLmNsYXNzaWZpY2F0aW9uLlJhbmRvbUZvcmVzdENsYXNzaWZpZXIaBjx1aWQwPiJDCg4KCG1heERlcHRoEgIwAwoOCghudW1UcmVlcxICMAMKCgoEc2VlZBICOCoKFQoJd2VpZ2h0Q29sEghqBndlaWdodA=="
+    ],
+    "value": {
+     "type": "RandomForestClassifier",
+     "uid": "RandomForestClassifier_multiclass"
+    }
+   },
+   "params_after": {
+    "bootstrap": true,
+    "cacheNodeIds": false,
+    "checkpointInterval": 10,
+    "featureSubsetStrategy": "auto",
+    "featuresCol": "features",
+    "impurity": "gini",
+    "labelCol": "label",
+    "leafCol": "",
+    "maxBins": 32,
+    "maxDepth": 3,
+    "maxMemoryInMB": 256,
+    "minInfoGain": 0.0,
+    "minInstancesPerNode": 1,
+    "minWeightFractionPerNode": 0.0,
+    "numTrees": 3,
+    "predictionCol": "prediction",
+    "probabilityCol": "probability",
+    "pruneTree": true,
+    "rawPredictionCol": "rawPrediction",
+    "seed": 42,
+    "subsamplingRate": 1.0,
+    "weightCol": "weight"
+   },
+   "params_before": {
+    "bootstrap": true,
+    "cacheNodeIds": false,
+    "checkpointInterval": 10,
+    "featureSubsetStrategy": "auto",
+    "featuresCol": "features",
+    "impurity": "gini",
+    "labelCol": "label",
+    "leafCol": "",
+    "maxBins": 32,
+    "maxDepth": 3,
+    "maxMemoryInMB": 256,
+    "minInfoGain": 0.0,
+    "minInstancesPerNode": 1,
+    "minWeightFractionPerNode": 0.0,
+    "numTrees": 3,
+    "predictionCol": "prediction",
+    "probabilityCol": "probability",
+    "pruneTree": true,
+    "rawPredictionCol": "rawPrediction",
+    "seed": 42,
+    "subsamplingRate": 1.0,
+    "weightCol": "weight"
+   },
+   "save": {
+    "call": "estimator.write().overwrite().save(path)",
+    "commands": [
+     "IpYBCkUKOW9yZy5hcGFjaGUuc3BhcmsubWwuY2xhc3NpZmljYXRpb24uUmFuZG9tRm9yZXN0Q2xhc3NpZmllchIGPHVpZDA+GAEaQwoOCghtYXhEZXB0aBICMAMKDgoIbnVtVHJlZXMSAjADCgoKBHNlZWQSAjAqChUKCXdlaWdodENvbBIIagZ3ZWlnaHQiBjxwYXRoPigB"
+    ],
+    "results": [
+     ""
+    ],
+    "value": null
+   },
+   "uid": "RandomForestClassifier_multiclass",
+   "uid_same": true
+  },
+  "RandomForestClassifier.multiclass.model": {
+   "load": {
+    "call": "RandomForestClassificationModel.load(path)",
+    "commands": [
+     "KlAKRgpCb3JnLmFwYWNoZS5zcGFyay5tbC5jbGFzc2lmaWNhdGlvbi5SYW5kb21Gb3Jlc3RDbGFzc2lmaWNhdGlvbk1vZGVsGAQSBjxwYXRoPg==",
+     "EhIKBwoFPGlkMD4SBwoFdHJlZXM="
+    ],
+    "results": [
+     "GlYKBwoFPGlkMD4aBjx1aWQwPiJDCg4KCG1heERlcHRoEgIwAwoOCghudW1UcmVlcxICMAMKCgoEc2VlZBICOCoKFQoJd2VpZ2h0Q29sEghqBndlaWdodA==",
+     "GgkKBwoFPGlkMT4="
+    ],
+    "value": {
+     "ref": "<id0>",
+     "type": "RandomForestClassificationModel"
+    }
+   },
+   "members": {
+    "class": "RandomForestClassificationModel",
+    "members": {
+     "predict-dense": {
+      "call": "loaded.predict(Vectors.dense([0.5, 1.5]))",
+      "commands": [
+       "EnQKBwoFPGlkMD4SaQoHcHJlZGljdBJeClzCAVkKLroBKwoDdWR0EiRvcmcuYXBhY2hlLnNwYXJrLm1sLmxpbmFsZy5WZWN0b3JVRFQSAiABEgQKAgoAEgQKAgoAEhfKARQqEgoQAAAAAAAA4D8AAAAAAAD4Pw=="
+      ],
+      "results": [
+       "CglZAAAAAAAAAAA="
+      ],
+      "value": 0.0
+     },
+     "repr()": {
+      "call": "repr(loaded)",
+      "commands": [
+       "EhUKBwoFPGlkMD4SCgoIdG9TdHJpbmc="
+      ],
+      "results": [
+       "CnFqb1JhbmRvbUZvcmVzdENsYXNzaWZpY2F0aW9uTW9kZWw6IHVpZD1SYW5kb21Gb3Jlc3RDbGFzc2lmaWVyX211bHRpY2xhc3MsIG51bVRyZWVzPTMsIG51bUNsYXNzZXM9MywgbnVtRmVhdHVyZXM9Mg=="
+      ],
+      "value": "RandomForestClassificationModel: uid=RandomForestClassifier_multiclass, numTrees=3, numClasses=3, numFeatures=2"
+     },
+     "str()": {
+      "call": "str(loaded)",
+      "commands": [
+       "EhUKBwoFPGlkMD4SCgoIdG9TdHJpbmc="
+      ],
+      "results": [
+       "CnFqb1JhbmRvbUZvcmVzdENsYXNzaWZpY2F0aW9uTW9kZWw6IHVpZD1SYW5kb21Gb3Jlc3RDbGFzc2lmaWVyX211bHRpY2xhc3MsIG51bVRyZWVzPTMsIG51bUNsYXNzZXM9MywgbnVtRmVhdHVyZXM9Mg=="
+      ],
+      "value": "RandomForestClassificationModel: uid=RandomForestClassifier_multiclass, numTrees=3, numClasses=3, numFeatures=2"
+     },
+     "transform": {
+      "call": "loaded.transform(multi_eval)",
+      "commands": [
+       "Cu8DCgcKBTxpZDA+Gp4DCgCKAZgDCpEDCgAajAMK1QIKALoBzwIKmAIKAFqTAhKQAnsiZmllbGRzIjpbeyJtZXRhZGF0YSI6e30sIm5hbWUiOiJsYWJlbCIsIm51bGxhYmxlIjp0cnVlLCJ0eXBlIjoiZG91YmxlIn0seyJtZXRhZGF0YSI6e30sIm5hbWUiOiJ3ZWlnaHQiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoiZmVhdHVyZXMiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6eyJjb250YWluc051bGwiOnRydWUsImVsZW1lbnRUeXBlIjoiZG91YmxlIiwidHlwZSI6ImFycmF5In19XSwidHlwZSI6InN0cnVjdCJ9EjIKJhokCg9hcnJheV90b192ZWN0b3ISERIMCghmZWF0dXJlcxgAkgEAEghmZWF0dXJlcxoOEgkKBWxhYmVsGACSAQAaDxIKCgZ3ZWlnaHQYAJIBABoREgwKCGZlYXR1cmVzGACSAQAQARgAIkMKDgoIbWF4RGVwdGgSAjADCg4KCG51bVRyZWVzEgIwAwoKCgRzZWVkEgIwKgoVCgl3ZWlnaHRDb2wSCGoGd2VpZ2h0"
+      ],
+      "results": [],
+      "value": {
+       "rows": [
+        [
+         0.0,
+         1.0,
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           0.1,
+           0.6
+          ]
+         },
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           3.0,
+           0.0,
+           0.0
+          ]
+         },
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           1.0,
+           0.0,
+           0.0
+          ]
+         },
+         0.0
+        ],
+        [
+         1.0,
+         1.0,
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           1.2,
+           0.1
+          ]
+         },
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           0.0,
+           1.0,
+           2.0
+          ]
+         },
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           0.0,
+           0.3333333333333333,
+           0.6666666666666666
+          ]
+         },
+         2.0
+        ],
+        [
+         1.0,
+         2.0,
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           0.6,
+           0.6
+          ]
+         },
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           3.0,
+           0.0,
+           0.0
+          ]
+         },
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           1.0,
+           0.0,
+           0.0
+          ]
+         },
+         0.0
+        ],
+        [
+         2.0,
+         1.0,
+         {
+          "size": 2,
+          "type": "dense",
+          "values": [
+           2.1,
+           1.8
+          ]
+         },
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           0.0,
+           0.0,
+           3.0
+          ]
+         },
+         {
+          "size": 3,
+          "type": "dense",
+          "values": [
+           0.0,
+           0.0,
+           1.0
+          ]
+         },
+         2.0
+        ]
+       ],
+       "schema": "struct<label:double,weight:double,features:vector,rawPrediction:vector,probability:vector,prediction:double>"
+      }
+     }
+    },
+    "skipped": {
+     "Param attribute (client side)": [
+      "bootstrap",
+      "cacheNodeIds",
+      "checkpointInterval",
+      "featureSubsetStrategy",
+      "featuresCol",
+      "impurity",
+      "labelCol",
+      "leafCol",
+      "maxBins",
+      "maxDepth",
+      "maxMemoryInMB",
+      "minInfoGain",
+      "minInstancesPerNode",
+      "minWeightFractionPerNode",
+      "numTrees",
+      "predictionCol",
+      "probabilityCol",
+      "pruneTree",
+      "rawPredictionCol",
+      "seed",
+      "subsamplingRate",
+      "thresholds",
+      "weightCol"
+     ],
+     "Params API (client side)": [
+      "clear",
+      "copy",
+      "explainParam",
+      "explainParams",
+      "extractParamMap",
+      "getOrDefault",
+      "getParam",
+      "hasDefault",
+      "hasParam",
+      "isDefined",
+      "isSet",
+      "params",
+      "set",
+      "uid"
+     ],
+     "Params getter or setter (client side)": [
+      "getBootstrap",
+      "getCacheNodeIds",
+      "getCheckpointInterval",
+      "getFeatureSubsetStrategy",
+      "getFeaturesCol",
+      "getImpurity",
+      "getLabelCol",
+      "getLeafCol",
+      "getMaxBins",
+      "getMaxDepth",
+      "getMaxMemoryInMB",
+      "getMinInfoGain",
+      "getMinInstancesPerNode",
+      "getMinWeightFractionPerNode",
+      "getNumTrees",
+      "getPredictionCol",
+      "getProbabilityCol",
+      "getPruneTree",
+      "getRawPredictionCol",
+      "getSeed",
+      "getSubsamplingRate",
+      "getThresholds",
+      "getWeightCol",
+      "setFeaturesCol",
+      "setLeafCol",
+      "setPredictionCol",
+      "setProbabilityCol",
+      "setRawPredictionCol",
+      "setThresholds"
+     ],
+     "not captured on this copy (partial)": [
+      "evaluate",
+      "featureImportances",
+      "hasSummary",
+      "numClasses",
+      "numFeatures",
+      "predictLeaf",
+      "predictProbability",
+      "predictRaw",
+      "summary",
+      "supportedFeatureSubsetStrategies",
+      "supportedImpurities",
+      "toDebugString",
+      "totalNumNodes",
+      "treeWeights",
+      "trees"
+     ],
+     "persistence (captured by Golden.persist)": [
+      "load",
+      "read",
+      "save",
+      "write"
+     ]
+    }
+   },
+   "params_after": {
+    "bootstrap": true,
+    "cacheNodeIds": false,
+    "checkpointInterval": 10,
+    "featureSubsetStrategy": "auto",
+    "featuresCol": "features",
+    "impurity": "gini",
+    "labelCol": "label",
+    "leafCol": "",
+    "maxBins": 32,
+    "maxDepth": 3,
+    "maxMemoryInMB": 256,
+    "minInfoGain": 0.0,
+    "minInstancesPerNode": 1,
+    "minWeightFractionPerNode": 0.0,
+    "numTrees": 3,
+    "predictionCol": "prediction",
+    "probabilityCol": "probability",
+    "pruneTree": true,
+    "rawPredictionCol": "rawPrediction",
+    "seed": 42,
+    "subsamplingRate": 1.0,
+    "weightCol": "weight"
+   },
+   "params_before": {
+    "bootstrap": true,
+    "cacheNodeIds": false,
+    "checkpointInterval": 10,
+    "featureSubsetStrategy": "auto",
+    "featuresCol": "features",
+    "impurity": "gini",
+    "labelCol": "label",
+    "leafCol": "",
+    "maxBins": 32,
+    "maxDepth": 3,
+    "maxMemoryInMB": 256,
+    "minInfoGain": 0.0,
+    "minInstancesPerNode": 1,
+    "minWeightFractionPerNode": 0.0,
+    "numTrees": 3,
+    "predictionCol": "prediction",
+    "probabilityCol": "probability",
+    "pruneTree": true,
+    "rawPredictionCol": "rawPrediction",
+    "seed": 42,
+    "subsamplingRate": 1.0,
+    "weightCol": "weight"
+   },
+   "save": {
+    "call": "model.write().overwrite().save(path)",
+    "commands": [
+     "IlgSBwoFPGlkMD4aQwoOCghtYXhEZXB0aBICMAMKDgoIbnVtVHJlZXMSAjADCgoKBHNlZWQSAjAqChUKCXdlaWdodENvbBIIagZ3ZWlnaHQiBjxwYXRoPigB"
+    ],
+    "results": [
+     ""
+    ],
+    "value": null
+   },
+   "uid": "RandomForestClassifier_multiclass",
+   "uid_same": true
+  }
+ },
+ "source": "apache/spark v4.3.0 pyspark.ml (official pyspark-client 4.3.0, Spark 4.3.0 Connect)"
+}
