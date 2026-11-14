@@ -4,7 +4,8 @@ use common::live_session;
 use spark_connect::column::{col, lit};
 use spark_connect::expression::Expression;
 use spark_connect::ml::{
-    Estimator, FMClassifier, LinearSVC, MlVector, MultilayerPerceptronClassifier, OneVsRest,
+    Estimator, FMClassifier, LinearSVC, MlVector, Model, MultilayerPerceptronClassifier, OneVsRest,
+    Transformer,
 };
 use spark_connect::{Column, DataFrame};
 use std::sync::Arc;
