@@ -105,15 +105,10 @@ macro_rules! feature_transformer {
     };
 }
 
-// Each declaration spells the wire name, typed builder and getter; execution remains shared.
+// The feature area's rows use the shared `ml_params!` macro of `ml.rs`.
 macro_rules! feature_params {
-    ($name:ident { $( $set:ident($arg:ident: $ty:ty) => $wire:literal, $put:ident; $get:ident -> $ret:ty = |$this:ident| $body:expr; )* }) => {
-        impl $name { $(
-            #[doc = concat!("Set `", $wire, "`.")]
-            pub fn $set(mut self, $arg: $ty) -> Self { self.params = self.params.$put($wire, $arg); self }
-            #[doc = concat!("Get `", $wire, "` (or its default when defined).")]
-            pub fn $get(&self) -> $ret { let $this = self; $body }
-        )* }
+    ($($t:tt)*) => {
+        ml_params! { $($t)* }
     };
 }
 
