@@ -108,6 +108,11 @@ mod persistence;
 pub use persistence::*;
 mod tuning;
 pub use tuning::*;
+mod meta;
+pub use meta::*;
+mod validators;
+pub use validators::*;
+mod stage_kinds;
 
 // The typed accessors, summaries and persistence of the models of each family, in the files of the
 // areas that complete them (see `object` for their server-side objects).
@@ -986,6 +991,14 @@ pub trait Estimator: Send + Sync {
     fn write(&self) -> MlWriter {
         MlWriter::operator(self.operator(), self.params())
     }
+
+    /// Set the values of `map` of the params of this estimator (of its uid), as PySpark's
+    /// `copy(extra)` of a param map sets them; a meta-algorithm sets them in its stages.
+    fn apply_param_map(&mut self, map: &ParamMap) -> spark_connect_core::error::Result<()> {
+        self.ensure_operator();
+        let uid = self.operator().uid.clone();
+        meta::apply_pairs(self.params_mut(), &uid, map)
+    }
 }
 
 /// Base trait for ML Transformers that apply transformations to data.
@@ -1019,6 +1032,14 @@ pub trait Transformer: Send + Sync {
     fn transform(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<DataFrame> {
         self.ensure_operator();
         self.transform_impl(df)
+    }
+
+    /// Set the values of `map` of the params of this transformer (of its uid), as PySpark's
+    /// `copy(extra)` of a param map sets them; a pipeline model sets them in its stages.
+    fn apply_param_map(&mut self, map: &ParamMap) -> spark_connect_core::error::Result<()> {
+        self.ensure_operator();
+        let uid = self.operator().uid.clone();
+        meta::apply_pairs(self.params_mut(), &uid, map)
     }
 
     /// Build the MlRelation for this transformation.
@@ -1152,6 +1173,16 @@ pub trait Evaluator: Send + Sync {
 
     /// Evaluate a DataFrame and return a metric value.
     fn evaluate(&self, _df: &DataFrame) -> spark_connect_core::error::Result<f64>;
+
+    /// Set the values of `map` of the params of this evaluator (of its uid), as PySpark's
+    /// `copy(extra)` of a param map sets them, of an evaluator whose params are mutable.
+    fn apply_param_map(&mut self, map: &ParamMap) -> spark_connect_core::error::Result<()> {
+        let uid = self.operator().uid.clone();
+        match self.params_mut() {
+            Some(params) => meta::apply_pairs(params, &uid, map),
+            None => Ok(()),
+        }
+    }
 
     /// A writer that saves the evaluator, of a session that [`MlWriter::session`] sets (see
     /// [`MlWriter`]), as `evaluator.write()` of PySpark.
@@ -1753,16 +1784,6 @@ ml_params! {
         set_output_col(value: &str) => "outputCol", set_param_string;
         output_col -> String = |this| this.params.output_col_or_default(&this.operator.uid);
     }
-}
-
-/// The NOT_IMPLEMENTED error of a `fit` that the Connect ML protocol cannot run, named by
-/// `feature` as PySpark's NOT_IMPLEMENTED names it.
-fn fit_not_implemented(feature: &str) -> SparkError {
-    SparkError::classed(
-        SparkErrorKind::NotImplementedError,
-        "NOT_IMPLEMENTED",
-        &[("feature", feature)],
-    )
 }
 
 /// Submit training data and parameters and read the fitted operator metadata.
@@ -5544,223 +5565,6 @@ ml_params! {
     }
 }
 
-/// Pipeline Estimator: chains multiple stages together.
-#[derive(Debug, Clone)]
-pub struct Pipeline {
-    operator: MlOperator,
-    params: Params,
-}
-
-impl Pipeline {
-    pub fn new() -> Self {
-        Pipeline {
-            operator: MlOperator::new("org.apache.spark.ml.Pipeline", OperatorType::Estimator),
-            params: Params::new(),
-        }
-    }
-
-    pub fn set_stages(mut self, stage_names: impl IntoIterator<Item = impl Into<String>>) -> Self {
-        self.params = self.params.set_param_string_array("stages", stage_names);
-        self
-    }
-
-    /// The names of the stages (default: none).
-    pub fn stages(&self) -> Vec<String> {
-        self.params.string_array("stages")
-    }
-}
-
-impl Default for Pipeline {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Estimator for Pipeline {
-    fn operator(&self) -> &MlOperator {
-        &self.operator
-    }
-
-    fn operator_mut(&mut self) -> &mut MlOperator {
-        &mut self.operator
-    }
-
-    fn params(&self) -> &Params {
-        &self.params
-    }
-
-    fn params_mut(&mut self) -> &mut Params {
-        &mut self.params
-    }
-
-    // The stages are names that the server cannot fit, and it has no PipelineModel to
-    // transform. This raises before any request, so no model that fails later is returned.
-    fn fit_impl(&mut self, _df: &DataFrame) -> spark_connect_core::error::Result<Box<dyn Model>> {
-        Err(fit_not_implemented("Pipeline.fit"))
-    }
-}
-
-/// PipelineModel: fitted model from Pipeline.
-#[derive(Debug, Clone)]
-pub struct PipelineModel {
-    pub operator: MlOperator,
-    pub params: Params,
-    pub stages: Vec<String>,
-}
-
-impl Transformer for PipelineModel {
-    fn operator(&self) -> &MlOperator {
-        &self.operator
-    }
-
-    fn operator_mut(&mut self) -> &mut MlOperator {
-        &mut self.operator
-    }
-
-    fn params(&self) -> &Params {
-        &self.params
-    }
-
-    fn params_mut(&mut self) -> &mut Params {
-        &mut self.params
-    }
-
-    fn transform_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<DataFrame> {
-        let ml_relation = self.build_ml_relation(df)?;
-        let mut relation = proto::Relation::default();
-        relation.common = Some(proto::RelationCommon::default());
-        relation.rel_type = Some(proto::relation::RelType::MlRelation(Box::new(ml_relation)));
-        let plan = LogicalPlan::MlTransform {
-            ml_relation: relation,
-            input: df.plan.clone(),
-            owner: None,
-        };
-        Ok(DataFrame::new(df.session.clone(), plan))
-    }
-}
-
-impl Model for PipelineModel {
-    fn clone_box(&self) -> Box<dyn Model> {
-        Box::new(self.clone())
-    }
-}
-
-/// CrossValidator: k-fold cross-validation for hyperparameter tuning.
-///
-/// The nested estimator/evaluator/estimatorParamMaps have no scalar-literal
-/// encoding, so this carries the numeric tuning params it can faithfully encode
-/// (numFolds, seed, parallelism). fit() raises NOT_IMPLEMENTED, as those nested
-/// params are not held for a server-side fit.
-#[derive(Debug, Clone)]
-pub struct CrossValidator {
-    operator: MlOperator,
-    params: Params,
-}
-
-impl CrossValidator {
-    pub fn new() -> Self {
-        CrossValidator {
-            operator: MlOperator::new(
-                "org.apache.spark.ml.tuning.CrossValidator",
-                OperatorType::Estimator,
-            ),
-            params: Params::new(),
-        }
-    }
-    pub fn set_num_folds(mut self, num_folds: i32) -> Self {
-        self.params = self.params.set_param_int32("numFolds", num_folds);
-        self
-    }
-    pub fn set_parallelism(mut self, parallelism: i32) -> Self {
-        self.params = self.params.set_param_int32("parallelism", parallelism);
-        self
-    }
-    /// The random seed of the folds, sent as the narrowest integer literal that holds it,
-    /// as PySpark sends a Python int.
-    pub fn set_seed(mut self, seed: i64) -> Self {
-        self.params = self.params.set_param_int_narrow("seed", seed);
-        self
-    }
-    /// The number of folds (default: 3).
-    pub fn num_folds(&self) -> i32 {
-        self.params.int_or("numFolds", 3)
-    }
-    /// The number of models fitted in parallel (default: 1).
-    pub fn parallelism(&self) -> i32 {
-        self.params.int_or("parallelism", 1)
-    }
-    /// The random seed of the folds, if one is set; else Spark's default seed applies.
-    pub fn seed(&self) -> Option<i64> {
-        self.params.long_opt("seed")
-    }
-}
-
-impl Default for CrossValidator {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Estimator for CrossValidator {
-    fn operator(&self) -> &MlOperator {
-        &self.operator
-    }
-    fn operator_mut(&mut self) -> &mut MlOperator {
-        &mut self.operator
-    }
-    fn params(&self) -> &Params {
-        &self.params
-    }
-    fn params_mut(&mut self) -> &mut Params {
-        &mut self.params
-    }
-    // The estimator, evaluator and param grid are not held, so the server cannot run the
-    // tuning. This raises before any request, so no model that fails later is returned.
-    fn fit_impl(&mut self, _df: &DataFrame) -> spark_connect_core::error::Result<Box<dyn Model>> {
-        Err(fit_not_implemented("CrossValidator.fit"))
-    }
-}
-
-/// CrossValidatorModel: the best model selected by CrossValidator.fit.
-#[derive(Debug, Clone)]
-pub struct CrossValidatorModel {
-    operator: MlOperator,
-    params: Params,
-}
-
-impl Transformer for CrossValidatorModel {
-    fn operator(&self) -> &MlOperator {
-        &self.operator
-    }
-    fn operator_mut(&mut self) -> &mut MlOperator {
-        &mut self.operator
-    }
-    fn params(&self) -> &Params {
-        &self.params
-    }
-    fn params_mut(&mut self) -> &mut Params {
-        &mut self.params
-    }
-    fn transform_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<DataFrame> {
-        let ml_relation = self.build_ml_relation(df)?;
-        let mut relation = proto::Relation::default();
-        relation.common = Some(proto::RelationCommon::default());
-        relation.rel_type = Some(proto::relation::RelType::MlRelation(Box::new(ml_relation)));
-        let plan = LogicalPlan::MlTransform {
-            ml_relation: relation,
-            input: df.plan.clone(),
-            owner: None,
-        };
-        Ok(DataFrame::new(df.session.clone(), plan))
-    }
-}
-
-impl Model for CrossValidatorModel {
-    fn clone_box(&self) -> Box<dyn Model> {
-        Box::new(self.clone())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6080,12 +5884,18 @@ mod tests {
 
     #[test]
     fn test_pipeline_creation() {
-        let pipeline = Pipeline::new().set_stages(vec!["stage1", "stage2", "stage3"]);
-
-        assert_eq!(pipeline.stages().len(), 3);
-        assert_eq!(pipeline.stages()[0], "stage1");
-        assert_eq!(pipeline.stages()[1], "stage2");
-        assert_eq!(pipeline.stages()[2], "stage3");
+        let assembler = VectorAssembler::new();
+        let svc = LinearSVC::new();
+        let pipeline = Pipeline::new().set_stages(vec![
+            PipelineStage::transformer(assembler.clone()),
+            PipelineStage::estimator(svc.clone()),
+        ]);
+        assert_eq!(pipeline.stages().len(), 2);
+        assert_eq!(pipeline.stages()[0].uid(), assembler.operator().uid);
+        assert!(!pipeline.stages()[0].is_estimator());
+        assert_eq!(pipeline.stages()[1].uid(), svc.operator().uid);
+        assert!(pipeline.stages()[1].is_estimator());
+        assert!(pipeline.uid().starts_with("Pipeline_"));
     }
 
     #[test]
@@ -6199,43 +6009,35 @@ mod tests {
     #[test]
     fn list_and_int_params_use_the_jvm_literal_types() {
         use proto::expression::literal::LiteralType as L;
-        // An Array[String] param (inputCols, Pipeline stages) is an array literal of string
+        // An Array[String] param (inputCols) is an array literal of string
         // elements, as PySpark sends a list; the server rejects a string ("not an array").
         let va = VectorAssembler::new().set_input_cols(vec!["a", "b"]);
-        let pipeline = Pipeline::new().set_stages(vec!["scaler", "lr"]);
-        for (name, params, expected) in [
-            ("inputCols", va.params(), vec!["a", "b"]),
-            ("stages", pipeline.params(), vec!["scaler", "lr"]),
-        ] {
-            let Some(L::Array(array)) = params.to_proto().params[name].literal_type.clone() else {
-                panic!("{name} is not an array literal");
-            };
-            #[allow(deprecated)]
-            let element_type = array.element_type.as_ref().and_then(|t| t.kind.clone());
-            assert!(
-                matches!(element_type, Some(proto::data_type::Kind::String(_))),
-                "{name} element type"
-            );
-            let elements: Vec<_> = array
-                .elements
-                .iter()
-                .map(|e| e.literal_type.clone())
-                .collect();
-            let expected: Vec<_> = expected
-                .iter()
-                .map(|s| Some(L::String(s.to_string())))
-                .collect();
-            assert_eq!(elements, expected, "{name}");
-        }
+        let (name, params, expected) = ("inputCols", va.params(), vec!["a", "b"]);
+        let Some(L::Array(array)) = params.to_proto().params[name].literal_type.clone() else {
+            panic!("{name} is not an array literal");
+        };
+        #[allow(deprecated)]
+        let element_type = array.element_type.as_ref().and_then(|t| t.kind.clone());
+        assert!(
+            matches!(element_type, Some(proto::data_type::Kind::String(_))),
+            "{name} element type"
+        );
+        let elements: Vec<_> = array
+            .elements
+            .iter()
+            .map(|e| e.literal_type.clone())
+            .collect();
+        let expected: Vec<_> = expected
+            .iter()
+            .map(|s| Some(L::String(s.to_string())))
+            .collect();
+        assert_eq!(elements, expected, "{name}");
 
         // Int params are Integer literals when the value fits 32 bits, as PySpark sends a Python
-        // int; the JVM param is an IntParam (maxIter, numFolds).
+        // int; the JVM param is an IntParam (maxIter).
         let lr = LogisticRegression::new().set_max_iter(5);
         let params = lr.params().to_proto().params;
         assert_eq!(params["maxIter"].literal_type, Some(L::Integer(5)));
-        let cv = CrossValidator::new().set_num_folds(3);
-        let params = cv.params().to_proto().params;
-        assert_eq!(params["numFolds"].literal_type, Some(L::Integer(3)));
     }
 
     #[test]
@@ -6328,56 +6130,57 @@ mod tests {
         );
     }
 
-    /// Asserts that `result` is the NOT_IMPLEMENTED error of the `fit` named `feature`, and
-    /// that no model is returned with it.
-    fn assert_fit_not_implemented(
-        result: spark_connect_core::error::Result<Box<dyn Model>>,
-        feature: &str,
-    ) {
-        let error = result
-            .err()
-            .expect("fit raises an error, and returns no model");
-        assert_eq!(error.kind, SparkErrorKind::NotImplementedError);
-        assert_eq!(error.get_condition().as_deref(), Some("NOT_IMPLEMENTED"));
-        assert_eq!(
-            error.message(),
-            format!("[NOT_IMPLEMENTED] {feature} is not implemented.")
-        );
-    }
-
     #[test]
-    fn cross_validator_creation_getters_and_fit() {
+    fn cross_validator_creation_getters_and_fit_errors() {
         let cv = CrossValidator::new()
             .set_num_folds(5)
             .set_parallelism(2)
             .set_seed(42);
-        assert_eq!(cv.num_folds(), 5);
-        assert_eq!(cv.parallelism(), 2);
+        assert_eq!((cv.num_folds(), cv.parallelism(), cv.seed()), (5, 2, 42));
         assert_eq!(cv.operator().op_type, OperatorType::Estimator);
         assert_eq!(
             cv.operator().name,
             "org.apache.spark.ml.tuning.CrossValidator"
         );
-        assert!(cv.params().get_param("numFolds").is_some());
-        assert!(cv.params().get_param("seed").is_some());
         assert_eq!(CrossValidator::default().num_folds(), 3);
-
-        // fit is not implemented: it raises NOT_IMPLEMENTED without a request, and returns no
-        // model that the server could not transform.
+        // A fit of no estimator, or of no param maps (PySpark's pool of no thread), raises before
+        // any request, and returns no model.
         let s = offline_session();
         let df = s.range(3).unwrap();
-        let mut cv2 = CrossValidator::new().set_num_folds(2);
-        assert_fit_not_implemented(cv2.fit(&df), "CrossValidator.fit");
-        assert_eq!(cv2.num_folds(), 2);
+        let error = CrossValidator::new().fit(&df).expect_err("no estimator");
+        assert!(error.to_string().contains("no estimator"), "{error}");
+        let mut cv = CrossValidator::new()
+            .set_estimator(LinearSVC::new())
+            .set_evaluator(BinaryClassificationEvaluator::new());
+        let error = cv.fit(&df).expect_err("no param maps");
+        assert!(
+            error
+                .to_string()
+                .contains("Number of processes must be at least 1"),
+            "{error}"
+        );
     }
 
     #[test]
-    fn pipeline_fit_is_not_implemented() {
+    fn pipelines_of_no_estimator_fit_without_a_request() {
+        // As `Pipeline._fit`: the stages after the last estimator (of none, all of them) are
+        // kept as they are, in a model of a new uid that transforms by each in order.
         let s = offline_session();
         let df = s.range(3).unwrap();
-        let mut pipeline = Pipeline::new().set_stages(vec!["a", "b"]);
-        assert_fit_not_implemented(pipeline.fit(&df), "Pipeline.fit");
-        assert_eq!(pipeline.stages(), ["a", "b"]);
+        let mut empty = Pipeline::new();
+        let mut model = empty.fit(&df).unwrap();
+        assert!(model.operator().uid.starts_with("PipelineModel_"));
+        assert_ne!(model.operator().uid, empty.uid());
+        assert_eq!(
+            format!("{:?}", model.transform(&df).unwrap().plan()),
+            format!("{:?}", df.plan())
+        );
+        let assembler = VectorAssembler::new().set_input_cols(vec!["id"]);
+        let mut only_transformers =
+            Pipeline::new().set_stages(vec![PipelineStage::transformer(assembler.clone())]);
+        let model = only_transformers.fit_pipeline(&df).unwrap();
+        assert_eq!(model.stages().len(), 1);
+        assert_eq!(model.stages()[0].uid(), assembler.operator().uid);
     }
 
     #[test]
@@ -8693,9 +8496,7 @@ mod tests {
             let gbt = GBTClassifier::new().set_seed(seed);
             assert_eq!(sent(gbt.params()), Some(expected.clone()));
             let gbtr = GBTRegressor::new().set_seed(seed);
-            assert_eq!(sent(gbtr.params()), Some(expected.clone()));
-            let cv = CrossValidator::new().set_seed(seed);
-            assert_eq!(sent(cv.params()), Some(expected));
+            assert_eq!(sent(gbtr.params()), Some(expected));
         }
     }
 
@@ -8734,8 +8535,6 @@ mod tests {
         // The list setters take any strings, as `set_param_string_array`.
         let assembler = assembler.set_input_cols(["a".to_string(), "b".to_string()]);
         assert_eq!(assembler.input_cols(), vec!["a", "b"]);
-        let pipeline = Pipeline::new().set_stages(vec!["s1"]);
-        assert_eq!(pipeline.stages(), vec!["s1"]);
     }
 
     #[test]
@@ -8991,12 +8790,12 @@ mod tests {
             ("features", "label", "prediction", 100)
         );
         let cv = CrossValidator::new();
-        assert_eq!((cv.num_folds(), cv.parallelism(), cv.seed()), (3, 1, None));
+        assert_eq!((cv.num_folds(), cv.parallelism()), (3, 1));
+        // The default seed is random of each validator, as PySpark's of the hash of the name of
+        // its class differs between processes.
+        assert_eq!(cv.seed(), cv.seed());
         let cv = cv.set_num_folds(5).set_parallelism(2).set_seed(9);
-        assert_eq!(
-            (cv.num_folds(), cv.parallelism(), cv.seed()),
-            (5, 2, Some(9))
-        );
+        assert_eq!((cv.num_folds(), cv.parallelism(), cv.seed()), (5, 2, 9));
     }
 
     #[test]
@@ -9023,8 +8822,6 @@ mod tests {
         let params = std::mem::take(va.params_mut());
         *va.params_mut() = params.set_param_string_array("inputCols", ["c"]);
         assert_eq!(va.input_cols(), ["c"]);
-        let pipeline = Pipeline::new().set_stages(vec!["s"]);
-        assert_eq!(pipeline.stages(), ["s"]);
     }
 
     #[test]

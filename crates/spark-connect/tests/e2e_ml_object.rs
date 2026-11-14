@@ -10,10 +10,12 @@ use spark_connect::column::col;
 use spark_connect::expression::Expression;
 use spark_connect::ml::{
     attribute_relation, evaluated_summary, fetch, handle_overwrite, json_object, k_fold,
-    load_metadata, read, read_model, read_operator, save_metadata, stage_path, summary_transform,
-    train_validation_split, training_summary, write_object, write_operator, Estimator, FetchArg,
+    load_metadata, load_stage, read, read_model, read_operator, save_metadata, stage_path,
+    summary_transform, train_validation_split, training_summary, write_object, write_operator,
+    BinaryClassificationEvaluator, CrossValidator, CrossValidatorModel, Estimator, FetchArg,
     KMeans, LinearSVC, LinearSVCModel, Metadata, MlTarget, MlValue, MlVector, Model, ObjectModel,
-    OperatorType, RandomForestClassifier, Transformer,
+    OperatorType, ParamGridBuilder, Pipeline, PipelineModel, PipelineStage, RandomForestClassifier,
+    TrainValidationSplit, TrainValidationSplitModel, Transformer,
 };
 use spark_connect::{Column, DataFrame, SparkSession};
 
@@ -392,5 +394,190 @@ fn ml_validators_split_their_datasets_as_pyspark() {
     assert_eq!(count(&train) + count(&validation), 20);
     let (_, again) = train_validation_split(&df, 0.75, Some(7), "TVS_0123456789ab");
     assert_eq!(count(&validation), count(&again));
+    s.stop().unwrap();
+}
+
+/// 40 rows of two features and a binary label, of one partition.
+fn tuning_frame(s: &SparkSession) -> DataFrame {
+    s.sql(
+        "SELECT array(CAST(id % 7 AS DOUBLE), CAST(id % 3 AS DOUBLE)) AS xs, \
+         CAST(id % 2 AS DOUBLE) AS label FROM range(40)",
+    )
+    .unwrap()
+    .with_column(
+        "features",
+        Column::new(Expression::function(
+            "array_to_vector",
+            vec![col("xs").expression().clone()],
+        )),
+    )
+    .coalesce(1)
+}
+
+#[test]
+fn ml_meta_algorithms_fit_transform_save_and_load_as_pyspark() {
+    let Some(s) = live_session() else {
+        return;
+    };
+    let df = tuning_frame(&s);
+    let rows = df.count().unwrap();
+    let svc = LinearSVC::new().set_max_iter(3);
+    let uid = svc.operator().uid.clone();
+    let grid = ParamGridBuilder::new()
+        .add_grid(
+            &uid,
+            "regParam",
+            [MlValue::Double(0.1), MlValue::Double(1.0)],
+        )
+        .build();
+
+    // A pipeline fits its estimator, into a model of a new uid that transforms.
+    let mut pipeline = Pipeline::new().set_stages(vec![PipelineStage::estimator(svc.clone())]);
+    let mut model = pipeline.fit_pipeline(&df).unwrap();
+    assert_ne!(model.uid(), pipeline.uid());
+    assert_eq!(model.stages()[0].uid(), uid);
+    let predicted = model.transform(&df).unwrap();
+    assert!(predicted
+        .columns()
+        .unwrap()
+        .contains(&"prediction".to_string()));
+    assert_eq!(predicted.count().unwrap(), rows);
+    // Of PySpark's Python format: its metadata, its stages at stages/<index>_<uid>.
+    let path = scratch_path("pipeline");
+    handle_overwrite(&s, &path).unwrap();
+    pipeline.write().session(&s).save(&path).unwrap();
+    let metadata = load_metadata(&s, &path, Some("pyspark.ml.pipeline.Pipeline")).unwrap();
+    assert_eq!(metadata["paramMap"]["stageUids"][0], uid.as_str());
+    assert_eq!(metadata["paramMap"]["language"], "Python");
+    assert!(std::path::Path::new(&format!("{path}/stages/0_{uid}/metadata")).exists());
+    let loaded = Pipeline::load(&s, &path).unwrap();
+    assert_eq!(loaded.uid(), pipeline.uid());
+    assert_eq!(loaded.stages()[0].uid(), uid);
+    assert!(loaded.stages()[0].is_estimator());
+    let model_path = scratch_path("pipeline-model");
+    model
+        .write()
+        .unwrap()
+        .session(&s)
+        .overwrite()
+        .save(&model_path)
+        .unwrap();
+    let mut loaded_model = PipelineModel::load(&s, &model_path).unwrap();
+    assert_eq!(loaded_model.uid(), model.uid());
+    assert_eq!(loaded_model.transform(&df).unwrap().count().unwrap(), rows);
+    assert!(matches!(
+        load_stage(&s, &model_path).unwrap(),
+        PipelineStage::Model(_)
+    ));
+
+    // A cross validation of two folds, of the sub-models of each fold and param map.
+    let mut cv = CrossValidator::new()
+        .set_estimator(svc.clone())
+        .set_estimator_param_maps(grid.clone())
+        .set_evaluator(BinaryClassificationEvaluator::new())
+        .set_num_folds(2)
+        .set_seed(7)
+        .set_parallelism(2)
+        .set_collect_sub_models(true);
+    let cv_model = cv.fit_validator(&df).unwrap();
+    assert_eq!(cv_model.avg_metrics().len(), 2);
+    assert_eq!(cv_model.std_metrics().len(), 2);
+    let folds = cv_model.sub_models().unwrap();
+    assert_eq!((folds.len(), folds[0].len()), (2, 2));
+    assert!(cv_model.uid().starts_with("CrossValidatorModel_"));
+    // The same seed splits and fits the same.
+    let again = cv.fit_validator(&df).unwrap();
+    assert_eq!(again.avg_metrics(), cv_model.avg_metrics());
+    // Of the trait: a model that downcasts to the typed model.
+    let boxed = cv.fit(&df).unwrap();
+    assert!(boxed.downcast_ref::<CrossValidatorModel>().is_some());
+    let cv_path = scratch_path("cv");
+    cv.write().session(&s).overwrite().save(&cv_path).unwrap();
+    let metadata = load_metadata(&s, &cv_path, Some("pyspark.ml.tuning.CrossValidator")).unwrap();
+    let keys: Vec<&String> = metadata["paramMap"].as_object().unwrap().keys().collect();
+    assert_eq!(
+        keys,
+        [
+            "collectSubModels",
+            "estimatorParamMaps",
+            "foldCol",
+            "numFolds",
+            "parallelism",
+            "seed"
+        ]
+    );
+    assert_eq!(metadata["paramMap"]["numFolds"], 2);
+    assert_eq!(
+        metadata["paramMap"]["estimatorParamMaps"][1][0]["value"],
+        "1.0"
+    );
+    let loaded_cv = CrossValidator::load(&s, &cv_path).unwrap();
+    assert_eq!(loaded_cv.uid(), cv.uid());
+    assert_eq!(
+        (
+            loaded_cv.num_folds(),
+            loaded_cv.seed(),
+            loaded_cv.parallelism()
+        ),
+        (2, 7, 2)
+    );
+    assert_eq!(loaded_cv.estimator_param_maps(), grid.as_slice());
+    let cv_model_path = scratch_path("cv-model");
+    cv_model
+        .write()
+        .unwrap()
+        .session(&s)
+        .overwrite()
+        .save(&cv_model_path)
+        .unwrap();
+    assert!(std::path::Path::new(&format!("{cv_model_path}/subModels/fold1/1/metadata")).exists());
+    let mut loaded_cv_model = CrossValidatorModel::load(&s, &cv_model_path).unwrap();
+    assert_eq!(loaded_cv_model.avg_metrics(), cv_model.avg_metrics());
+    assert_eq!(loaded_cv_model.sub_models().unwrap().len(), 2);
+    assert_eq!(
+        loaded_cv_model.transform(&df).unwrap().count().unwrap(),
+        rows
+    );
+    // persistSubModels=false saves none.
+    cv_model
+        .write()
+        .unwrap()
+        .session(&s)
+        .overwrite()
+        .option("persistSubModels", "false")
+        .save(&cv_model_path)
+        .unwrap();
+    assert!(CrossValidatorModel::load(&s, &cv_model_path)
+        .unwrap()
+        .sub_models()
+        .is_none());
+
+    // A train validation split, of a pipeline estimator.
+    let mut tvs = TrainValidationSplit::new()
+        .set_estimator(pipeline.clone())
+        .set_estimator_param_maps(grid.clone())
+        .set_evaluator(BinaryClassificationEvaluator::new())
+        .set_seed(7);
+    let tvs_model = tvs.fit_validator(&df).unwrap();
+    assert_eq!(tvs_model.validation_metrics().len(), 2);
+    assert!(tvs_model.sub_models().is_none());
+    let tvs_path = scratch_path("tvs-model");
+    tvs_model
+        .write()
+        .unwrap()
+        .session(&s)
+        .overwrite()
+        .save(&tvs_path)
+        .unwrap();
+    let loaded_tvs = TrainValidationSplitModel::load(&s, &tvs_path).unwrap();
+    assert_eq!(
+        loaded_tvs.validation_metrics(),
+        tvs_model.validation_metrics()
+    );
+    assert_eq!(loaded_tvs.train_ratio(), 0.75);
+    assert!(matches!(
+        load_stage(&s, &tvs_path).unwrap(),
+        PipelineStage::Model(_)
+    ));
     s.stop().unwrap();
 }
