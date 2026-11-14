@@ -14,7 +14,7 @@ use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::pyclass::boolean_struct::False;
 use pyo3::types::{PyDict, PyList, PyTuple, PyType};
-use pyo3::PyClass;
+use pyo3::{IntoPyObjectExt, PyClass};
 use spark_connect::ml::{
     AFTSurvivalRegression, BisectingKMeans, Classifier, CrossValidator, DecisionTreeClassifier,
     DecisionTreeRegressor, Estimator, Evaluator, FMClassifier, FMRegressor, GBTClassifier,
@@ -385,8 +385,7 @@ where
 
 /// The message of the TypeError of a fit, transform or evaluate whose `params` is a param map that
 /// the native classes cannot take. PySpark applies a non-empty map by copying the object with it,
-/// keyed by its Param objects, and the native classes have none; a list or tuple of maps is fitted
-/// as one model per map, which they do not do either.
+/// keyed by its Param objects, and the native classes have none.
 const NO_PARAM_MAP: &str = "The native ML classes take no param map: set their params with \
      the constructor or setParams instead.";
 
@@ -404,9 +403,10 @@ fn overrides_nothing(params: &Bound<'_, PyAny>) -> PyResult<bool> {
     }
 }
 
-/// Check the `params` of a fit, as the `Estimator.fit` of `pyspark.ml` checks it, before the fit.
-/// It also takes a list or tuple of param maps, which it fits one model per map of: the native
-/// classes cannot, so it raises [`NO_PARAM_MAP`]. Any other value raises PySpark's TypeError.
+/// Check the `params` of a fit, as the `Estimator.fit` of `pyspark.ml` checks it, before the fit:
+/// None and an empty dict pass, a non-empty dict raises [`NO_PARAM_MAP`], and any other value
+/// raises PySpark's TypeError. A list or tuple is not a param map, and [`fit_with`] fits it before
+/// this check.
 fn check_fit_params(params: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
     let Some(params) = params else {
         return Ok(());
@@ -414,13 +414,54 @@ fn check_fit_params(params: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
     if overrides_nothing(params)? {
         return Ok(());
     }
-    if params.is_instance_of::<PyList>() || params.is_instance_of::<PyTuple>() {
-        return Err(PyTypeError::new_err(NO_PARAM_MAP));
-    }
     Err(PyTypeError::new_err(format!(
         "Params must be either a param map or a list/tuple of param maps, but got {}.",
         params.get_type()
     )))
+}
+
+/// The result of a fit: the model of a fit of one param map, or the list of the models of a fit of
+/// a list or tuple of param maps, as `Estimator.fit` of `pyspark.ml` returns them.
+pub(crate) enum Fitted<M> {
+    One(M),
+    Many(Py<PyList>),
+}
+
+impl<'py, M: IntoPyObject<'py>> IntoPyObject<'py> for Fitted<M> {
+    type Target = PyAny;
+    type Output = Bound<'py, PyAny>;
+    type Error = PyErr;
+
+    fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
+        match self {
+            Fitted::One(model) => model.into_bound_py_any(py),
+            Fitted::Many(models) => Ok(models.into_bound(py).into_any()),
+        }
+    }
+}
+
+/// Fit a native estimator with the `params` of its `fit`, as `Estimator.fit` of `pyspark.ml` fits
+/// it. A list or tuple of param maps fits the estimator once per map, in order, by calling its
+/// `fit` with each map, so that each map gets the checks and the errors of a fit with that map
+/// alone, and the models are returned as a list. Any other `params` is checked by
+/// [`check_fit_params`], and then `fit` fits the estimator.
+pub(crate) fn fit_with<'py, T: PyClass, M>(
+    slf: &Bound<'py, T>,
+    dataset: &Bound<'py, PyAny>,
+    params: Option<&Bound<'py, PyAny>>,
+    fit: impl FnOnce() -> PyResult<M>,
+) -> PyResult<Fitted<M>> {
+    if let Some(maps) = params
+        .filter(|params| params.is_instance_of::<PyList>() || params.is_instance_of::<PyTuple>())
+    {
+        let models = PyList::empty(slf.py());
+        for map in maps.try_iter()? {
+            models.append(slf.as_any().call_method1("fit", (dataset, map?))?)?;
+        }
+        return Ok(Fitted::Many(models.unbind()));
+    }
+    check_fit_params(params)?;
+    fit().map(Fitted::One)
 }
 
 /// Check the `params` of a transform or an evaluate, as the `Transformer.transform` and
@@ -962,9 +1003,8 @@ impl PyLogisticRegression {
         slf: &Bound<'_, Self>,
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<PyMLModel> {
-        check_fit_params(params)?;
-        fit_native(slf, dataset, None)
+    ) -> PyResult<Fitted<PyMLModel>> {
+        fit_with(slf, dataset, params, || fit_native(slf, dataset, None))
     }
 }
 
@@ -1125,9 +1165,8 @@ impl PyLinearSVC {
         slf: &Bound<'_, Self>,
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<PyMLModel> {
-        check_fit_params(params)?;
-        fit_native(slf, dataset, None)
+    ) -> PyResult<Fitted<PyMLModel>> {
+        fit_with(slf, dataset, params, || fit_native(slf, dataset, None))
     }
 }
 
@@ -1331,9 +1370,8 @@ impl PyFMClassifier {
         slf: &Bound<'_, Self>,
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<PyMLModel> {
-        check_fit_params(params)?;
-        fit_native(slf, dataset, None)
+    ) -> PyResult<Fitted<PyMLModel>> {
+        fit_with(slf, dataset, params, || fit_native(slf, dataset, None))
     }
 }
 
@@ -1518,9 +1556,8 @@ impl PyMultilayerPerceptronClassifier {
         slf: &Bound<'_, Self>,
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<PyMLModel> {
-        check_fit_params(params)?;
-        fit_native(slf, dataset, None)
+    ) -> PyResult<Fitted<PyMLModel>> {
+        fit_with(slf, dataset, params, || fit_native(slf, dataset, None))
     }
 }
 
@@ -1666,36 +1703,37 @@ impl PyOneVsRest {
         slf: &Bound<'_, Self>,
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<PyMLModel> {
-        check_fit_params(params)?;
-        reject_pandas(dataset, "fit")?;
-        let classifier = slf
-            .try_borrow()?
-            .classifier
-            .as_ref()
-            .map(|x| x.clone_ref(slf.py()))
-            .ok_or_else(|| PyValueError::new_err("OneVsRest requires a native classifier"))?;
-        let classifier = native_classifier(classifier.bind(slf.py()), true)?;
-        {
-            let mut this = slf.try_borrow_mut()?;
-            if !classifier.supports_weight()
-                && this.inner.weight_col().is_some_and(|s| !s.is_empty())
+    ) -> PyResult<Fitted<PyMLModel>> {
+        fit_with(slf, dataset, params, || -> PyResult<PyMLModel> {
+            reject_pandas(dataset, "fit")?;
+            let classifier = slf
+                .try_borrow()?
+                .classifier
+                .as_ref()
+                .map(|x| x.clone_ref(slf.py()))
+                .ok_or_else(|| PyValueError::new_err("OneVsRest requires a native classifier"))?;
+            let classifier = native_classifier(classifier.bind(slf.py()), true)?;
             {
-                slf.py().import("warnings")?.call_method1(
-                    "warn",
-                    ("weightCol is ignored, as it is not supported by this classifier",),
-                )?;
+                let mut this = slf.try_borrow_mut()?;
+                if !classifier.supports_weight()
+                    && this.inner.weight_col().is_some_and(|s| !s.is_empty())
+                {
+                    slf.py().import("warnings")?.call_method1(
+                        "warn",
+                        ("weightCol is ignored, as it is not supported by this classifier",),
+                    )?;
+                }
+                // PySpark's fit trains the binary classifiers in a ThreadPool of `parallelism`
+                // processes, which raises this ValueError when there are fewer than one.
+                if this.inner.parallelism() < 1 {
+                    return Err(PyValueError::new_err(
+                        "Number of processes must be at least 1",
+                    ));
+                }
+                this.inner = this.inner.clone().set_classifier(classifier);
             }
-            // PySpark's fit trains the binary classifiers in a ThreadPool of `parallelism`
-            // processes, which raises this ValueError when there are fewer than one.
-            if this.inner.parallelism() < 1 {
-                return Err(PyValueError::new_err(
-                    "Number of processes must be at least 1",
-                ));
-            }
-            this.inner = this.inner.clone().set_classifier(classifier);
-        }
-        fit_native(slf, dataset, None)
+            fit_native(slf, dataset, None)
+        })
     }
 }
 
@@ -1957,9 +1995,8 @@ impl PyLinearRegression {
         slf: &Bound<'_, Self>,
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<PyMLModel> {
-        check_fit_params(params)?;
-        fit_native(slf, dataset, None)
+    ) -> PyResult<Fitted<PyMLModel>> {
+        fit_with(slf, dataset, params, || fit_native(slf, dataset, None))
     }
 }
 
@@ -2163,9 +2200,8 @@ impl PyGeneralizedLinearRegression {
         slf: &Bound<'_, Self>,
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<PyMLModel> {
-        check_fit_params(params)?;
-        fit_native(slf, dataset, None)
+    ) -> PyResult<Fitted<PyMLModel>> {
+        fit_with(slf, dataset, params, || fit_native(slf, dataset, None))
     }
 }
 
@@ -2325,9 +2361,8 @@ impl PyAFTSurvivalRegression {
         slf: &Bound<'_, Self>,
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<PyMLModel> {
-        check_fit_params(params)?;
-        fit_native(slf, dataset, None)
+    ) -> PyResult<Fitted<PyMLModel>> {
+        fit_with(slf, dataset, params, || fit_native(slf, dataset, None))
     }
 }
 
@@ -2439,9 +2474,8 @@ impl PyIsotonicRegression {
         slf: &Bound<'_, Self>,
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<PyMLModel> {
-        check_fit_params(params)?;
-        fit_native(slf, dataset, None)
+    ) -> PyResult<Fitted<PyMLModel>> {
+        fit_with(slf, dataset, params, || fit_native(slf, dataset, None))
     }
 }
 
@@ -2619,9 +2653,8 @@ impl PyFMRegressor {
         slf: &Bound<'_, Self>,
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<PyMLModel> {
-        check_fit_params(params)?;
-        fit_native(slf, dataset, None)
+    ) -> PyResult<Fitted<PyMLModel>> {
+        fit_with(slf, dataset, params, || fit_native(slf, dataset, None))
     }
 }
 
@@ -2851,9 +2884,8 @@ impl PyDecisionTreeClassifier {
         slf: &Bound<'_, Self>,
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<PyMLModel> {
-        check_fit_params(params)?;
-        fit_native(slf, dataset, None)
+    ) -> PyResult<Fitted<PyMLModel>> {
+        fit_with(slf, dataset, params, || fit_native(slf, dataset, None))
     }
 }
 
@@ -2985,9 +3017,8 @@ impl PyNaiveBayes {
         slf: &Bound<'_, Self>,
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<PyMLModel> {
-        check_fit_params(params)?;
-        fit_native(slf, dataset, None)
+    ) -> PyResult<Fitted<PyMLModel>> {
+        fit_with(slf, dataset, params, || fit_native(slf, dataset, None))
     }
 }
 
@@ -3252,9 +3283,8 @@ impl PyGBTClassifier {
         slf: &Bound<'_, Self>,
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<PyMLModel> {
-        check_fit_params(params)?;
-        fit_native(slf, dataset, None)
+    ) -> PyResult<Fitted<PyMLModel>> {
+        fit_with(slf, dataset, params, || fit_native(slf, dataset, None))
     }
 }
 
@@ -3520,9 +3550,8 @@ impl PyRandomForestClassifier {
         slf: &Bound<'_, Self>,
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<PyMLModel> {
-        check_fit_params(params)?;
-        fit_native(slf, dataset, None)
+    ) -> PyResult<Fitted<PyMLModel>> {
+        fit_with(slf, dataset, params, || fit_native(slf, dataset, None))
     }
 }
 
@@ -3763,9 +3792,8 @@ impl PyGBTRegressor {
         slf: &Bound<'_, Self>,
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<PyMLModel> {
-        check_fit_params(params)?;
-        fit_native(slf, dataset, None)
+    ) -> PyResult<Fitted<PyMLModel>> {
+        fit_with(slf, dataset, params, || fit_native(slf, dataset, None))
     }
 }
 
@@ -3969,9 +3997,8 @@ impl PyDecisionTreeRegressor {
         slf: &Bound<'_, Self>,
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<PyMLModel> {
-        check_fit_params(params)?;
-        fit_native(slf, dataset, None)
+    ) -> PyResult<Fitted<PyMLModel>> {
+        fit_with(slf, dataset, params, || fit_native(slf, dataset, None))
     }
 }
 /// Random forest regressor fitted and cached by Spark Connect.
@@ -4201,9 +4228,8 @@ impl PyRandomForestRegressor {
         slf: &Bound<'_, Self>,
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<PyMLModel> {
-        check_fit_params(params)?;
-        fit_native(slf, dataset, None)
+    ) -> PyResult<Fitted<PyMLModel>> {
+        fit_with(slf, dataset, params, || fit_native(slf, dataset, None))
     }
 }
 
@@ -4352,9 +4378,8 @@ impl PyKMeans {
         slf: &Bound<'_, Self>,
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<PyMLModel> {
-        check_fit_params(params)?;
-        fit_native(slf, dataset, None)
+    ) -> PyResult<Fitted<PyMLModel>> {
+        fit_with(slf, dataset, params, || fit_native(slf, dataset, None))
     }
 }
 
@@ -4522,9 +4547,8 @@ impl PyLDA {
         slf: &Bound<'_, Self>,
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<PyMLModel> {
-        check_fit_params(params)?;
-        fit_native(slf, dataset, None)
+    ) -> PyResult<Fitted<PyMLModel>> {
+        fit_with(slf, dataset, params, || fit_native(slf, dataset, None))
     }
 }
 
@@ -4770,9 +4794,8 @@ impl PyGaussianMixture {
         slf: &Bound<'_, Self>,
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<PyMLModel> {
-        check_fit_params(params)?;
-        fit_native(slf, dataset, None)
+    ) -> PyResult<Fitted<PyMLModel>> {
+        fit_with(slf, dataset, params, || fit_native(slf, dataset, None))
     }
 }
 
@@ -4898,9 +4921,8 @@ impl PyBisectingKMeans {
         slf: &Bound<'_, Self>,
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<PyMLModel> {
-        check_fit_params(params)?;
-        fit_native(slf, dataset, None)
+    ) -> PyResult<Fitted<PyMLModel>> {
+        fit_with(slf, dataset, params, || fit_native(slf, dataset, None))
     }
 }
 
@@ -4949,9 +4971,10 @@ impl PyPipeline {
         slf: &Bound<'_, Self>,
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<PyMLModel> {
-        check_fit_params(params)?;
-        fit_unimplemented(slf, dataset, "Pipeline.fit")
+    ) -> PyResult<Fitted<PyMLModel>> {
+        fit_with(slf, dataset, params, || {
+            fit_unimplemented(slf, dataset, "Pipeline.fit")
+        })
     }
 }
 
@@ -5028,9 +5051,10 @@ impl PyCrossValidator {
         slf: &Bound<'_, Self>,
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<PyMLModel> {
-        check_fit_params(params)?;
-        fit_unimplemented(slf, dataset, "CrossValidator.fit")
+    ) -> PyResult<Fitted<PyMLModel>> {
+        fit_with(slf, dataset, params, || {
+            fit_unimplemented(slf, dataset, "CrossValidator.fit")
+        })
     }
 }
 

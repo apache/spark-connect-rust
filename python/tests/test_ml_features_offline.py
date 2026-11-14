@@ -94,13 +94,16 @@ def test_feature_parameters_match_official_wire_and_filter_fitted_model(ml_mock,
 @pytest.mark.parametrize("name", GOLDEN["api"])
 def test_feature_stages_take_the_params_argument_of_pyspark_ml(ml_mock, name):
     # As pyspark.ml's fit and transform: None and an empty dict change nothing, and any other
-    # value raises a TypeError before any request (the native stages take no param map).
+    # value raises a TypeError before any request (the native stages take no param map). A list
+    # or tuple of maps is fitted one model per map, as pyspark.ml fits it, and a transform
+    # raises a TypeError for it.
     spark, service = ml_mock
     stage = getattr(feature, name)()
     estimator = GOLDEN["api"][name]["estimator"]
     method = stage.fit if estimator else stage.transform
     frame = spark.range(1)
-    for value in [{"x": 1}, [{}], ("x",), "x"]:
+    values = [{"x": 1}, ("x",), "x"] if estimator else [{"x": 1}, [{}], ("x",), "x"]
+    for value in values:
         sent = _requests_but_deletes(service)
         with pytest.raises(TypeError):
             method(frame, value)
@@ -111,6 +114,14 @@ def test_feature_stages_take_the_params_argument_of_pyspark_ml(ml_mock, name):
             sent = len(service.execute_requests)
             stage.fit(frame, value)
             assert len(_commands_but_deletes(service, sent)) == 1
+        for value in [[], ()]:
+            sent = _requests_but_deletes(service)
+            assert stage.fit(frame, value) == []
+            assert _requests_but_deletes(service) == sent
+        sent = len(service.execute_requests)
+        models = stage.fit(frame, [{}, {}])
+        assert len(models) == 2
+        assert len(_commands_but_deletes(service, sent)) == 2
     else:
         base = _relation(stage.transform(frame)).ml_relation.transform.params
         for value in [None, {}]:
