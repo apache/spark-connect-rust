@@ -436,6 +436,9 @@ pub struct MlTarget {
 enum TargetRoot {
     Object(MlRef),
     Helper(SparkSession),
+    /// An object of an id that this client does not release, as PySpark does not release the
+    /// summary that `evaluate` returns.
+    Unowned(SparkSession, String),
 }
 
 impl std::fmt::Debug for MlTarget {
@@ -452,6 +455,16 @@ impl MlTarget {
     pub fn object(object: &MlRef) -> Self {
         Self {
             root: TargetRoot::Object(object.clone()),
+            chain: Vec::new(),
+            summary_dataset: None,
+        }
+    }
+
+    /// The object of the id `id` of `session`, which this client does not release, as PySpark's
+    /// summary of an `evaluate` (a `summary` result of a fetch).
+    pub fn unowned(session: &SparkSession, id: &str) -> Self {
+        Self {
+            root: TargetRoot::Unowned(session.clone(), id.to_string()),
             chain: Vec::new(),
             summary_dataset: None,
         }
@@ -490,7 +503,7 @@ impl MlTarget {
     pub fn root(&self) -> Option<&MlRef> {
         match &self.root {
             TargetRoot::Object(object) => Some(object),
-            TargetRoot::Helper(_) => None,
+            TargetRoot::Helper(_) | TargetRoot::Unowned(..) => None,
         }
     }
 
@@ -499,6 +512,7 @@ impl MlTarget {
         let root = match &self.root {
             TargetRoot::Object(object) => object.id().to_string(),
             TargetRoot::Helper(_) => ML_CONNECT_HELPER_ID.to_string(),
+            TargetRoot::Unowned(_, id) => id.clone(),
         };
         std::iter::once(root)
             .chain(self.chain.iter().cloned())
@@ -509,7 +523,7 @@ impl MlTarget {
     pub fn session(&self) -> &SparkSession {
         match &self.root {
             TargetRoot::Object(object) => object.session(),
-            TargetRoot::Helper(session) => session,
+            TargetRoot::Helper(session) | TargetRoot::Unowned(session, _) => session,
         }
     }
 
@@ -519,6 +533,7 @@ impl MlTarget {
             TargetRoot::Helper(_) => proto::ObjectRef {
                 id: ML_CONNECT_HELPER_ID.to_string(),
             },
+            TargetRoot::Unowned(_, id) => proto::ObjectRef { id: id.clone() },
         }
     }
 
@@ -979,6 +994,41 @@ pub fn read(
             .map(Params::from_proto)
             .unwrap_or_default(),
     })
+}
+
+/// The estimator, transformer or evaluator of the JVM class `jvm_class` that `read` loads from
+/// `path`: its operator, of the uid that it was saved with, and its params.
+pub fn read_operator(
+    session: &SparkSession,
+    jvm_class: &str,
+    op_type: OperatorType,
+    path: &str,
+) -> spark_connect_core::error::Result<(MlOperator, Params)> {
+    let read = read(session, jvm_class, op_type, path)?;
+    Ok((
+        MlOperator::with_uid(jvm_class, &read.uid, op_type),
+        read.params,
+    ))
+}
+
+/// The model of the JVM class `jvm_class` that `read` loads from `path`: its object, its operator,
+/// of the uid that it was saved with, and its params.
+pub fn read_model(
+    session: &SparkSession,
+    jvm_class: &str,
+    path: &str,
+) -> spark_connect_core::error::Result<(MlRef, MlOperator, Params)> {
+    let read = read(session, jvm_class, OperatorType::Model, path)?;
+    let object = read.object.ok_or_else(|| {
+        SparkError::connect_msg(format!(
+            "the server returned no object of the read of {jvm_class}"
+        ))
+    })?;
+    Ok((
+        object,
+        MlOperator::with_uid(jvm_class, &read.uid, OperatorType::Model),
+        read.params,
+    ))
 }
 
 #[cfg(test)]

@@ -9,8 +9,9 @@ use common::live_session;
 use spark_connect::column::col;
 use spark_connect::expression::Expression;
 use spark_connect::ml::{
-    attribute_relation, fetch, read, write_object, write_operator, Estimator, FetchArg, LinearSVC,
-    LinearSVCModel, MlTarget, MlValue, MlVector, OperatorType, RandomForestClassifier,
+    attribute_relation, fetch, read, read_model, read_operator, write_object, write_operator,
+    Estimator, FetchArg, LinearSVC, LinearSVCModel, MlTarget, MlValue, MlVector, OperatorType,
+    RandomForestClassifier,
 };
 use spark_connect::{Column, DataFrame, SparkSession};
 
@@ -90,6 +91,16 @@ fn ml_objects_fetch_their_methods_summaries_and_helpers_as_pyspark() {
     assert_eq!(accuracy.unwrap(), MlValue::Double(1.0));
     let predictions = attribute_relation(&summary, "predictions", vec![]).unwrap();
     assert_eq!(predictions.count().unwrap(), 8);
+
+    // The summary of an evaluate, whose id the server returns, as LinearSVCModel.evaluate; the
+    // client does not release it, as PySpark does not.
+    let evaluated = fetch(&target, "evaluate", vec![FetchArg::Input(train.clone())])
+        .unwrap()
+        .into_string()
+        .unwrap();
+    let evaluation = MlTarget::unowned(&s, &evaluated);
+    let accuracy = fetch(&evaluation, "accuracy", vec![]).unwrap().into_value();
+    assert_eq!(accuracy.unwrap(), MlValue::Double(1.0));
 
     // A method of the ML helper, as StopWordsRemover.loadDefaultStopWords fetches it.
     let words = fetch(
@@ -177,6 +188,23 @@ fn ml_models_and_estimators_save_and_load_as_pyspark() {
     assert!(model.downcast_ref::<LinearSVCModel>().is_some());
     assert!(model.describe().unwrap().starts_with("LinearSVCModel"));
 
+    let (reloaded, operator, params) = read_model(
+        &s,
+        "org.apache.spark.ml.classification.LinearSVCModel",
+        &model_path,
+    )
+    .unwrap();
+    assert_eq!(operator.uid, model.operator().uid);
+    assert_eq!(operator.op_type, OperatorType::Model);
+    assert!(params.get_param("maxIter").is_some());
+    assert_eq!(
+        fetch(&MlTarget::object(&reloaded), "coefficients", vec![])
+            .unwrap()
+            .into_value()
+            .unwrap(),
+        expected
+    );
+
     let estimator_path = scratch_path("estimator");
     // An estimator saves of the session that its writer sets, as `MLWriter.session`.
     let unset = Estimator::write(&estimator)
@@ -206,6 +234,14 @@ fn ml_models_and_estimators_save_and_load_as_pyspark() {
     .unwrap();
     assert!(loaded.object.is_none());
     assert_eq!(loaded.uid, Estimator::operator(&estimator).uid);
+    let (operator, _) = read_operator(
+        &s,
+        "org.apache.spark.ml.classification.LinearSVC",
+        OperatorType::Estimator,
+        &estimator_path,
+    )
+    .unwrap();
+    assert_eq!(operator.uid, Estimator::operator(&estimator).uid);
     assert_eq!(
         loaded.params.get_param("maxIter").map(|e| format!("{e:?}")),
         Estimator::params(&estimator)
