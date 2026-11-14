@@ -831,6 +831,103 @@ pub fn write_object(
     Ok(())
 }
 
+/// A writer of an estimator, transformer, evaluator or fitted model, as PySpark's `MLWriter`:
+/// `.session(&spark)` sets the session that saves an operator (a model saves of its own session),
+/// `.overwrite()` replaces a saved one, `.option(key, value)` passes an option of the server's
+/// writer, and `.save(path)` sends the `Write`.
+#[derive(Clone)]
+pub struct MlWriter {
+    target: WriterTarget,
+    session: Option<SparkSession>,
+    overwrite: bool,
+    options: HashMap<String, String>,
+}
+
+#[derive(Clone)]
+enum WriterTarget {
+    Operator(MlOperator, Params),
+    Object(MlRef, Params),
+}
+
+impl std::fmt::Debug for MlWriter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let target = match &self.target {
+            WriterTarget::Operator(operator, _) => operator.name.clone(),
+            WriterTarget::Object(object, _) => object.id().to_string(),
+        };
+        f.debug_struct("MlWriter")
+            .field("target", &target)
+            .field("overwrite", &self.overwrite)
+            .field("options", &self.options)
+            .finish()
+    }
+}
+
+impl MlWriter {
+    /// The writer of the operator `operator` of the params `params`, which is not fitted.
+    pub fn operator(operator: &MlOperator, params: &Params) -> Self {
+        Self {
+            target: WriterTarget::Operator(operator.clone(), params.clone()),
+            session: None,
+            overwrite: false,
+            options: HashMap::new(),
+        }
+    }
+
+    /// The writer of the fitted model `object` of the params `params`, of its session.
+    pub fn object(object: &MlRef, params: &Params) -> Self {
+        Self {
+            target: WriterTarget::Object(object.clone(), params.clone()),
+            session: Some(object.session().clone()),
+            overwrite: false,
+            options: HashMap::new(),
+        }
+    }
+
+    /// The session that saves, as `MLWriter.session` of PySpark.
+    pub fn session(mut self, session: &SparkSession) -> Self {
+        self.session = Some(session.clone());
+        self
+    }
+
+    /// Replace a saved operator or model of the path, as `MLWriter.overwrite`.
+    pub fn overwrite(mut self) -> Self {
+        self.overwrite = true;
+        self
+    }
+
+    /// An option of the server's writer, as `MLWriter.option`.
+    pub fn option(mut self, key: &str, value: &str) -> Self {
+        self.options.insert(key.to_string(), value.to_string());
+        self
+    }
+
+    /// Save to `path`, as `MLWriter.save`.
+    pub fn save(&self, path: &str) -> spark_connect_core::error::Result<()> {
+        match &self.target {
+            WriterTarget::Object(object, params) => {
+                write_object(object, params, path, self.overwrite, &self.options)
+            }
+            WriterTarget::Operator(operator, params) => {
+                let session = self.session.as_ref().ok_or_else(|| {
+                    SparkError::value_msg(format!(
+                        "{} needs a session to save with: call .session(&spark) on its writer",
+                        operator.name
+                    ))
+                })?;
+                write_operator(
+                    session,
+                    operator,
+                    params,
+                    path,
+                    self.overwrite,
+                    &self.options,
+                )
+            }
+        }
+    }
+}
+
 /// What the server reads of a saved operator or model: the object of a model, which this client
 /// owns, the uid and the params.
 #[derive(Debug, Clone)]

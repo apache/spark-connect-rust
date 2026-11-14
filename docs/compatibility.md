@@ -239,6 +239,15 @@ classes to build on:
 - `write_operator` and `write_object` save an estimator, transformer or evaluator, or a fitted
   model (`Write`), and `read` loads one of its JVM class (`Read`), as `RemoteMLWriter` and
   `RemoteMLReader` of `pyspark.ml.connect.readwrite`. A loaded model is a new `MlRef`.
+- `Model::write()`, `Estimator::write()` and `Evaluator::write()` return an `MlWriter`, as
+  PySpark's `write()` returns an `MLWriter`: `.overwrite()`, `.option(key, value)` and
+  `.save(path)`. A model saves of the session that holds it. An estimator or an evaluator, which
+  holds no session, saves of the one that `.session(&spark)` sets (as `MLWriter.session`), since
+  the Rust client has no active session.
+- The fit of the `Estimator` trait returns a `Box<dyn Model>`; `model.downcast_ref::<M>()` gives
+  its concrete model type. `Model::describe()` is the server's description of a model (PySpark's
+  `__repr__` of a model, its `toString`). `PredictionModel` gives `num_features()` and
+  `predict(&vector)`, the members of every prediction model of `pyspark.ml`.
 
 ## Native LogisticRegression
 

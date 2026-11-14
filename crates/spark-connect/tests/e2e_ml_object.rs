@@ -10,7 +10,7 @@ use spark_connect::column::col;
 use spark_connect::expression::Expression;
 use spark_connect::ml::{
     attribute_relation, fetch, read, write_object, write_operator, Estimator, FetchArg, LinearSVC,
-    MlTarget, MlValue, MlVector, OperatorType, RandomForestClassifier,
+    LinearSVCModel, MlTarget, MlValue, MlVector, OperatorType, RandomForestClassifier,
 };
 use spark_connect::{Column, DataFrame, SparkSession};
 
@@ -165,8 +165,29 @@ fn ml_models_and_estimators_save_and_load_as_pyspark() {
     assert_eq!(coefficients, expected);
     // A second save to the same path without overwrite fails on the server, as with PySpark.
     assert!(write_object(object, model.params(), &model_path, false, &options).is_err());
+    // The writer of the model, of its own session, as `model.write().overwrite().save(path)`.
+    model
+        .write()
+        .unwrap()
+        .overwrite()
+        .save(&model_path)
+        .unwrap();
+    assert!(model.write().unwrap().save(&model_path).is_err());
+    // The typed model of the fit, and the server's description of it (PySpark's `__repr__`).
+    assert!(model.downcast_ref::<LinearSVCModel>().is_some());
+    assert!(model.describe().unwrap().starts_with("LinearSVCModel"));
 
     let estimator_path = scratch_path("estimator");
+    // An estimator saves of the session that its writer sets, as `MLWriter.session`.
+    let unset = Estimator::write(&estimator)
+        .save(&estimator_path)
+        .unwrap_err();
+    assert!(unset.to_string().contains("needs a session"), "{unset}");
+    Estimator::write(&estimator)
+        .session(&s)
+        .overwrite()
+        .save(&estimator_path)
+        .unwrap();
     write_operator(
         &s,
         Estimator::operator(&estimator),
