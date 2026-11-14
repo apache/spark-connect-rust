@@ -247,6 +247,7 @@ jobs:
             tests/test_feature_api_e2e.py \
             tests/test_frequent_patterns_e2e.py \
             tests/test_als_e2e.py \
+            tests/test_evaluation_api_e2e.py \
             tests/test_evaluators_e2e.py \
             tests/test_statistics_e2e.py
 

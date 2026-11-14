@@ -1349,8 +1349,11 @@ Official PySpark fixtures and live Rust/Python tests cover every supported metri
 weights, regression through the origin, binary score bins, multiclass log-loss
 clipping and beta, per-label metrics, both silhouette distances, ranking cutoffs,
 invalid inputs, and metric direction. In Rust, each evaluator saves with `write()` and
-loads with `load(session, path)`, as PySpark's. Generic parameter-map APIs and the Python
-persistence remain separate work.
+loads with `load(session, path)`, as PySpark's. In Python, each evaluator has PySpark's Params
+API, its getters and setters, `setParams`, and `write`/`save`/`read`/`load`, which keep its uid
+and params. `evaluate(dataset, params)` with a non-empty param map evaluates a copy of the
+evaluator, as PySpark's `Evaluator.evaluate` does, and leaves the evaluator as it was.
+`scripts/capture_evaluation_api_cases_golden.py` captures these cases from official PySpark.
 
 `scripts/capture_fpm_recommendation_evaluation_golden.py` captures the members of the FPGrowth
 and ALS models and of the evaluators, and their save and load, of the configurations of these

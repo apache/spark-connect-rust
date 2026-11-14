@@ -1,0 +1,2298 @@
+{
+ "BinaryClassificationEvaluator": {
+  "live": {
+   "alt_save": [
+    "ok",
+    "None"
+   ],
+   "evaluate": [
+    "ok",
+    0.59375
+   ],
+   "evaluate_after_map": [
+    "ok",
+    0.59375
+   ],
+   "evaluate_empty_map": [
+    "ok",
+    0.59375
+   ],
+   "evaluate_invalid_metric": [
+    "IllegalArgumentException",
+    "BinaryClassificationEvaluator_<uid> parameter metricName given invalid value invalid."
+   ],
+   "evaluate_invalid_metric_map": [
+    "IllegalArgumentException",
+    "BinaryClassificationEvaluator_<uid> parameter metricName given invalid value invalid."
+   ],
+   "evaluate_list_map": [
+    "TypeError",
+    "Params must be a param map but got <class 'list'>."
+   ],
+   "evaluate_map": [
+    "ok",
+    0.500595238
+   ],
+   "evaluate_map_isLargerBetter": [
+    "ok",
+    "True"
+   ],
+   "evaluate_none_map": [
+    "ok",
+    0.59375
+   ],
+   "evaluate_str_map": [
+    "TypeError",
+    "Params must be a param map but got <class 'str'>."
+   ],
+   "evaluate_string_key_map": [
+    "TypeError",
+    "Expecting a valid instance of Param, but received: metricName"
+   ],
+   "isLargerBetter": [
+    "ok",
+    "True"
+   ],
+   "loaded_alt_copy_uid": [
+    "ok",
+    "True"
+   ],
+   "loaded_alt_evaluate": [
+    "ok",
+    0.500595238
+   ],
+   "loaded_alt_isLargerBetter": [
+    "ok",
+    "True"
+   ],
+   "loaded_alt_params": [
+    "ok",
+    [
+     "('labelCol', \"'label'\")",
+     "('metricName', \"'areaUnderPR'\")",
+     "('numBins', '1000')",
+     "('rawPredictionCol', \"'rawPrediction'\")"
+    ]
+   ],
+   "loaded_alt_uid": [
+    "ok",
+    "True"
+   ],
+   "loaded_evaluate": [
+    "ok",
+    0.59375
+   ],
+   "loaded_isLargerBetter": [
+    "ok",
+    "True"
+   ],
+   "loaded_isSet_metric": [
+    "ok",
+    "False"
+   ],
+   "loaded_params": [
+    "ok",
+    [
+     "('labelCol', \"'label'\")",
+     "('metricName', \"'areaUnderROC'\")",
+     "('numBins', '1000')",
+     "('rawPredictionCol', \"'rawPrediction'\")"
+    ]
+   ],
+   "loaded_uid": [
+    "ok",
+    "True"
+   ],
+   "read_load_uid": [
+    "ok",
+    "True"
+   ],
+   "save": [
+    "ok",
+    "None"
+   ],
+   "save_again": [
+    "UnknownException",
+    "(java.io.IOException) Path <path>/evaluator already exists. To overwrite it, please use write.overwrite().save(path) for Scala and use write().overwrite().save(path) for Java and Python."
+   ],
+   "setParams_then_evaluate": [
+    "ok",
+    0.500595238
+   ],
+   "setter_then_evaluate": [
+    "ok",
+    0.500595238
+   ],
+   "setter_then_isLargerBetter": [
+    "ok",
+    "True"
+   ]
+  },
+  "params_api": {
+   "big_int": [
+    "ok",
+    "1180591620717411303424"
+   ],
+   "big_int_explain": [
+    "ok",
+    "'numBins: Number of bins to down-sample the curves (ROC curve, PR curve) in area computation. If 0, no down-sampling will occur. Must be >= 0. (default: 1000, current: 1180591620717411303424)'"
+   ],
+   "class_param": [
+    "ok",
+    "('Param', 'undefined', 'metricName', True, False)"
+   ],
+   "clear": [
+    "ok",
+    "(None, True)"
+   ],
+   "copy_bad_extra": [
+    "TypeError",
+    "Expecting a valid instance of Param, but received: metricName"
+   ],
+   "copy_class_param": [
+    "ok",
+    "'areaUnderROC'"
+   ],
+   "copy_explainParams": [
+    "ok",
+    "'labelCol: label column name. (default: label)\\nmetricName: metric name in evaluation (areaUnderROC|areaUnderPR) (default: areaUnderROC, current: areaUnderPR)\\nnumBins: Number of bins to down-sample the curves (ROC curve, PR curve) in area computation. If 0, no down-sampling will occur. Must be >= 0. (default: 1000)\\nrawPredictionCol: raw prediction (a.k.a. confidence) column name. (default: rawPrediction)\\nweightCol: weight column name. If this is not set or empty, we treat all instance weights as 1.0. (undefined)'"
+   ],
+   "copy_list": [
+    "TypeError",
+    "Expecting a dict, but received an object of type <class 'list'>."
+   ],
+   "copy_metric": [
+    "ok",
+    "'areaUnderPR'"
+   ],
+   "copy_same_uid": [
+    "ok",
+    "True"
+   ],
+   "evaluate_list_map": [
+    "TypeError",
+    "Params must be a param map but got <class 'list'>."
+   ],
+   "evaluate_map_of_a_non_dataframe": [
+    "AttributeError",
+    "'int' object has no attribute 'sparkSession'"
+   ],
+   "evaluate_not_a_dataframe": [
+    "AttributeError",
+    "'int' object has no attribute 'sparkSession'"
+   ],
+   "evaluate_str_map": [
+    "TypeError",
+    "Params must be a param map but got <class 'str'>."
+   ],
+   "explainParam_param": [
+    "ok",
+    "'metricName: metric name in evaluation (areaUnderROC|areaUnderPR) (default: areaUnderROC)'"
+   ],
+   "explainParam_str": [
+    "ok",
+    "'metricName: metric name in evaluation (areaUnderROC|areaUnderPR) (default: areaUnderROC)'"
+   ],
+   "explainParams": [
+    "ok",
+    "'labelCol: label column name. (default: label)\\nmetricName: metric name in evaluation (areaUnderROC|areaUnderPR) (default: areaUnderROC)\\nnumBins: Number of bins to down-sample the curves (ROC curve, PR curve) in area computation. If 0, no down-sampling will occur. Must be >= 0. (default: 1000)\\nrawPredictionCol: raw prediction (a.k.a. confidence) column name. (default: rawPrediction)\\nweightCol: weight column name. If this is not set or empty, we treat all instance weights as 1.0. (undefined)'"
+   ],
+   "extract": [
+    "ok",
+    [
+     "('labelCol', \"'label'\")",
+     "('metricName', \"'areaUnderROC'\")",
+     "('numBins', '1000')",
+     "('rawPredictionCol', \"'rawPrediction'\")"
+    ]
+   ],
+   "extract_extra": [
+    "ok",
+    [
+     "('labelCol', \"'label'\")",
+     "('metricName', \"'q'\")",
+     "('numBins', '1000')",
+     "('rawPredictionCol', \"'rawPrediction'\")"
+    ]
+   ],
+   "getLabelCol": [
+    "ok",
+    "'label'"
+   ],
+   "getMetricName": [
+    "ok",
+    "'areaUnderROC'"
+   ],
+   "getNumBins": [
+    "ok",
+    "1000"
+   ],
+   "getOrDefault_metric": [
+    "ok",
+    "'areaUnderROC'"
+   ],
+   "getParam_method": [
+    "ValueError",
+    "Cannot find param with name evaluate."
+   ],
+   "getParam_nope": [
+    "AttributeError",
+    "'BinaryClassificationEvaluator' object has no attribute 'nope'"
+   ],
+   "getRawPredictionCol": [
+    "ok",
+    "'rawPrediction'"
+   ],
+   "getWeightCol": [
+    "KeyError",
+    "Param(parent='BinaryClassificationEvaluator_<uid>', name='weightCol', doc='weight column name. If this is not set or empty, we treat all instance weights as 1.0.')"
+   ],
+   "hasDefault_metric": [
+    "ok",
+    "True"
+   ],
+   "hasParam_int": [
+    "TypeError",
+    "hasParam(): paramName must be a string"
+   ],
+   "hasParam_metric": [
+    "ok",
+    "True"
+   ],
+   "hasParam_nope": [
+    "ok",
+    "False"
+   ],
+   "isDefined_metric": [
+    "ok",
+    "True"
+   ],
+   "isLargerBetter": [
+    "ok",
+    "True"
+   ],
+   "isLargerBetter_alt": [
+    "ok",
+    "True"
+   ],
+   "isSet_foreign": [
+    "ValueError",
+    "Param Param(parent='BinaryClassificationEvaluator_<uid>', name='metricName', doc='metric name in evaluation (areaUnderROC|areaUnderPR)') does not belong to BinaryClassificationEvaluator_<uid>."
+   ],
+   "isSet_metric_before": [
+    "ok",
+    "False"
+   ],
+   "isSet_nope": [
+    "AttributeError",
+    "'BinaryClassificationEvaluator' object has no attribute 'nope'"
+   ],
+   "isinstance_evaluator": [
+    "ok",
+    "True"
+   ],
+   "isinstance_params": [
+    "ok",
+    "True"
+   ],
+   "no_attribute": [
+    "AttributeError",
+    "'BinaryClassificationEvaluator' object has no attribute 'fooBarBaz'"
+   ],
+   "orig_metric": [
+    "ok",
+    "'areaUnderROC'"
+   ],
+   "param_docs": [
+    "ok",
+    [
+     "'label column name.'",
+     "'metric name in evaluation (areaUnderROC|areaUnderPR)'",
+     "'Number of bins to down-sample the curves (ROC curve, PR curve) in area computation. If 0, no down-sampling will occur. Must be >= 0.'",
+     "'raw prediction (a.k.a. confidence) column name.'",
+     "'weight column name. If this is not set or empty, we treat all instance weights as 1.0.'"
+    ]
+   ],
+   "param_names": [
+    "ok",
+    [
+     "'labelCol'",
+     "'metricName'",
+     "'numBins'",
+     "'rawPredictionCol'",
+     "'weightCol'"
+    ]
+   ],
+   "param_parents_are_uid": [
+    "ok",
+    "True"
+   ],
+   "reader_class": [
+    "ok",
+    "('RemoteMLReader', 'pyspark.ml.connect.readwrite')"
+   ],
+   "repr_is_uid": [
+    "ok",
+    "True"
+   ],
+   "resolve_int": [
+    "TypeError",
+    "Cannot resolve 5 as a param."
+   ],
+   "setParams_forces_keywords": [
+    "TypeError",
+    "Method setParams forces keyword arguments."
+   ],
+   "setParams_returns_self": [
+    "ok",
+    "'areaUnderPR'"
+   ],
+   "setParams_unknown": [
+    "TypeError",
+    "BinaryClassificationEvaluator.setParams() got an unexpected keyword argument 'nope'"
+   ],
+   "set_bad_type": [
+    "TypeError",
+    "Could not convert <class 'float'> to string type"
+   ],
+   "set_ok": [
+    "ok",
+    "'areaUnderPR'"
+   ],
+   "set_str_param": [
+    "AttributeError",
+    "'str' object has no attribute 'parent'"
+   ],
+   "writer_class": [
+    "ok",
+    "('RemoteMLWriter', 'pyspark.ml.connect.readwrite')"
+   ],
+   "writer_no_attribute": [
+    "AttributeError",
+    "'RemoteMLWriter' object has no attribute 'fooBarBaz'"
+   ],
+   "writer_option_map": [
+    "ok",
+    [
+     "('key', '1')",
+     "('x', 'y')"
+    ]
+   ],
+   "writer_should_overwrite": [
+    "ok",
+    "True"
+   ]
+  }
+ },
+ "ClusteringEvaluator": {
+  "live": {
+   "alt_save": [
+    "ok",
+    "None"
+   ],
+   "evaluate": [
+    "ok",
+    0.769051861
+   ],
+   "evaluate_after_map": [
+    "ok",
+    0.769051861
+   ],
+   "evaluate_empty_map": [
+    "ok",
+    0.769051861
+   ],
+   "evaluate_invalid_metric": [
+    "IllegalArgumentException",
+    "ClusteringEvaluator_<uid> parameter metricName given invalid value invalid."
+   ],
+   "evaluate_invalid_metric_map": [
+    "IllegalArgumentException",
+    "ClusteringEvaluator_<uid> parameter metricName given invalid value invalid."
+   ],
+   "evaluate_list_map": [
+    "TypeError",
+    "Params must be a param map but got <class 'list'>."
+   ],
+   "evaluate_map": [
+    "ok",
+    0.787543006
+   ],
+   "evaluate_map_isLargerBetter": [
+    "ok",
+    "True"
+   ],
+   "evaluate_none_map": [
+    "ok",
+    0.769051861
+   ],
+   "evaluate_str_map": [
+    "TypeError",
+    "Params must be a param map but got <class 'str'>."
+   ],
+   "evaluate_string_key_map": [
+    "TypeError",
+    "Expecting a valid instance of Param, but received: distanceMeasure"
+   ],
+   "isLargerBetter": [
+    "ok",
+    "True"
+   ],
+   "loaded_alt_copy_uid": [
+    "ok",
+    "True"
+   ],
+   "loaded_alt_evaluate": [
+    "ok",
+    0.787543006
+   ],
+   "loaded_alt_isLargerBetter": [
+    "ok",
+    "True"
+   ],
+   "loaded_alt_params": [
+    "ok",
+    [
+     "('distanceMeasure', \"'cosine'\")",
+     "('featuresCol', \"'features'\")",
+     "('metricName', \"'silhouette'\")",
+     "('predictionCol', \"'prediction'\")"
+    ]
+   ],
+   "loaded_alt_uid": [
+    "ok",
+    "True"
+   ],
+   "loaded_evaluate": [
+    "ok",
+    0.769051861
+   ],
+   "loaded_isLargerBetter": [
+    "ok",
+    "True"
+   ],
+   "loaded_isSet_metric": [
+    "ok",
+    "False"
+   ],
+   "loaded_params": [
+    "ok",
+    [
+     "('distanceMeasure', \"'squaredEuclidean'\")",
+     "('featuresCol', \"'features'\")",
+     "('metricName', \"'silhouette'\")",
+     "('predictionCol', \"'prediction'\")"
+    ]
+   ],
+   "loaded_uid": [
+    "ok",
+    "True"
+   ],
+   "read_load_uid": [
+    "ok",
+    "True"
+   ],
+   "save": [
+    "ok",
+    "None"
+   ],
+   "save_again": [
+    "UnknownException",
+    "(java.io.IOException) Path <path>/evaluator already exists. To overwrite it, please use write.overwrite().save(path) for Scala and use write().overwrite().save(path) for Java and Python."
+   ],
+   "setParams_then_evaluate": [
+    "ok",
+    0.787543006
+   ],
+   "setter_then_evaluate": [
+    "ok",
+    0.769051861
+   ],
+   "setter_then_isLargerBetter": [
+    "ok",
+    "True"
+   ]
+  },
+  "params_api": {
+   "class_param": [
+    "ok",
+    "('Param', 'undefined', 'metricName', True, False)"
+   ],
+   "clear": [
+    "ok",
+    "(None, True)"
+   ],
+   "copy_bad_extra": [
+    "TypeError",
+    "Expecting a valid instance of Param, but received: metricName"
+   ],
+   "copy_class_param": [
+    "ok",
+    "'silhouette'"
+   ],
+   "copy_explainParams": [
+    "ok",
+    "\"distanceMeasure: The distance measure. Supported options: 'squaredEuclidean' and 'cosine'. (default: squaredEuclidean, current: cosine)\\nfeaturesCol: features column name. (default: features)\\nmetricName: metric name in evaluation (silhouette) (default: silhouette)\\npredictionCol: prediction column name. (default: prediction)\\nweightCol: weight column name. If this is not set or empty, we treat all instance weights as 1.0. (undefined)\""
+   ],
+   "copy_list": [
+    "TypeError",
+    "Expecting a dict, but received an object of type <class 'list'>."
+   ],
+   "copy_metric": [
+    "ok",
+    "'silhouette'"
+   ],
+   "copy_same_uid": [
+    "ok",
+    "True"
+   ],
+   "evaluate_list_map": [
+    "TypeError",
+    "Params must be a param map but got <class 'list'>."
+   ],
+   "evaluate_map_of_a_non_dataframe": [
+    "AttributeError",
+    "'int' object has no attribute 'sparkSession'"
+   ],
+   "evaluate_not_a_dataframe": [
+    "AttributeError",
+    "'int' object has no attribute 'sparkSession'"
+   ],
+   "evaluate_str_map": [
+    "TypeError",
+    "Params must be a param map but got <class 'str'>."
+   ],
+   "explainParam_param": [
+    "ok",
+    "'metricName: metric name in evaluation (silhouette) (default: silhouette)'"
+   ],
+   "explainParam_str": [
+    "ok",
+    "'metricName: metric name in evaluation (silhouette) (default: silhouette)'"
+   ],
+   "explainParams": [
+    "ok",
+    "\"distanceMeasure: The distance measure. Supported options: 'squaredEuclidean' and 'cosine'. (default: squaredEuclidean)\\nfeaturesCol: features column name. (default: features)\\nmetricName: metric name in evaluation (silhouette) (default: silhouette)\\npredictionCol: prediction column name. (default: prediction)\\nweightCol: weight column name. If this is not set or empty, we treat all instance weights as 1.0. (undefined)\""
+   ],
+   "extract": [
+    "ok",
+    [
+     "('distanceMeasure', \"'squaredEuclidean'\")",
+     "('featuresCol', \"'features'\")",
+     "('metricName', \"'silhouette'\")",
+     "('predictionCol', \"'prediction'\")"
+    ]
+   ],
+   "extract_extra": [
+    "ok",
+    [
+     "('distanceMeasure', \"'squaredEuclidean'\")",
+     "('featuresCol', \"'features'\")",
+     "('metricName', \"'q'\")",
+     "('predictionCol', \"'prediction'\")"
+    ]
+   ],
+   "getDistanceMeasure": [
+    "ok",
+    "'squaredEuclidean'"
+   ],
+   "getFeaturesCol": [
+    "ok",
+    "'features'"
+   ],
+   "getMetricName": [
+    "ok",
+    "'silhouette'"
+   ],
+   "getOrDefault_metric": [
+    "ok",
+    "'silhouette'"
+   ],
+   "getParam_method": [
+    "ValueError",
+    "Cannot find param with name evaluate."
+   ],
+   "getParam_nope": [
+    "AttributeError",
+    "'ClusteringEvaluator' object has no attribute 'nope'"
+   ],
+   "getPredictionCol": [
+    "ok",
+    "'prediction'"
+   ],
+   "getWeightCol": [
+    "KeyError",
+    "Param(parent='ClusteringEvaluator_<uid>', name='weightCol', doc='weight column name. If this is not set or empty, we treat all instance weights as 1.0.')"
+   ],
+   "hasDefault_metric": [
+    "ok",
+    "True"
+   ],
+   "hasParam_int": [
+    "TypeError",
+    "hasParam(): paramName must be a string"
+   ],
+   "hasParam_metric": [
+    "ok",
+    "True"
+   ],
+   "hasParam_nope": [
+    "ok",
+    "False"
+   ],
+   "isDefined_metric": [
+    "ok",
+    "True"
+   ],
+   "isLargerBetter": [
+    "ok",
+    "True"
+   ],
+   "isLargerBetter_alt": [
+    "ok",
+    "True"
+   ],
+   "isSet_foreign": [
+    "ValueError",
+    "Param Param(parent='ClusteringEvaluator_<uid>', name='metricName', doc='metric name in evaluation (silhouette)') does not belong to ClusteringEvaluator_<uid>."
+   ],
+   "isSet_metric_before": [
+    "ok",
+    "False"
+   ],
+   "isSet_nope": [
+    "AttributeError",
+    "'ClusteringEvaluator' object has no attribute 'nope'"
+   ],
+   "isinstance_evaluator": [
+    "ok",
+    "True"
+   ],
+   "isinstance_params": [
+    "ok",
+    "True"
+   ],
+   "no_attribute": [
+    "AttributeError",
+    "'ClusteringEvaluator' object has no attribute 'fooBarBaz'"
+   ],
+   "orig_metric": [
+    "ok",
+    "'silhouette'"
+   ],
+   "param_docs": [
+    "ok",
+    [
+     "\"The distance measure. Supported options: 'squaredEuclidean' and 'cosine'.\"",
+     "'features column name.'",
+     "'metric name in evaluation (silhouette)'",
+     "'prediction column name.'",
+     "'weight column name. If this is not set or empty, we treat all instance weights as 1.0.'"
+    ]
+   ],
+   "param_names": [
+    "ok",
+    [
+     "'distanceMeasure'",
+     "'featuresCol'",
+     "'metricName'",
+     "'predictionCol'",
+     "'weightCol'"
+    ]
+   ],
+   "param_parents_are_uid": [
+    "ok",
+    "True"
+   ],
+   "reader_class": [
+    "ok",
+    "('RemoteMLReader', 'pyspark.ml.connect.readwrite')"
+   ],
+   "repr_is_uid": [
+    "ok",
+    "True"
+   ],
+   "resolve_int": [
+    "TypeError",
+    "Cannot resolve 5 as a param."
+   ],
+   "setParams_forces_keywords": [
+    "TypeError",
+    "Method setParams forces keyword arguments."
+   ],
+   "setParams_returns_self": [
+    "ok",
+    "'silhouette'"
+   ],
+   "setParams_unknown": [
+    "TypeError",
+    "ClusteringEvaluator.setParams() got an unexpected keyword argument 'nope'"
+   ],
+   "set_bad_type": [
+    "TypeError",
+    "Could not convert <class 'float'> to string type"
+   ],
+   "set_ok": [
+    "ok",
+    "'silhouette'"
+   ],
+   "set_str_param": [
+    "AttributeError",
+    "'str' object has no attribute 'parent'"
+   ],
+   "writer_class": [
+    "ok",
+    "('RemoteMLWriter', 'pyspark.ml.connect.readwrite')"
+   ],
+   "writer_no_attribute": [
+    "AttributeError",
+    "'RemoteMLWriter' object has no attribute 'fooBarBaz'"
+   ],
+   "writer_option_map": [
+    "ok",
+    [
+     "('key', '1')",
+     "('x', 'y')"
+    ]
+   ],
+   "writer_should_overwrite": [
+    "ok",
+    "True"
+   ]
+  }
+ },
+ "MulticlassClassificationEvaluator": {
+  "live": {
+   "alt_save": [
+    "ok",
+    "None"
+   ],
+   "evaluate": [
+    "ok",
+    0.5
+   ],
+   "evaluate_after_map": [
+    "ok",
+    0.5
+   ],
+   "evaluate_empty_map": [
+    "ok",
+    0.5
+   ],
+   "evaluate_invalid_metric": [
+    "IllegalArgumentException",
+    "MulticlassClassificationEvaluator_<uid> parameter metricName given invalid value invalid."
+   ],
+   "evaluate_invalid_metric_map": [
+    "IllegalArgumentException",
+    "MulticlassClassificationEvaluator_<uid> parameter metricName given invalid value invalid."
+   ],
+   "evaluate_list_map": [
+    "TypeError",
+    "Params must be a param map but got <class 'list'>."
+   ],
+   "evaluate_map": [
+    "ok",
+    6.452460824
+   ],
+   "evaluate_map_isLargerBetter": [
+    "ok",
+    "True"
+   ],
+   "evaluate_none_map": [
+    "ok",
+    0.5
+   ],
+   "evaluate_str_map": [
+    "TypeError",
+    "Params must be a param map but got <class 'str'>."
+   ],
+   "evaluate_string_key_map": [
+    "TypeError",
+    "Expecting a valid instance of Param, but received: metricName"
+   ],
+   "isLargerBetter": [
+    "ok",
+    "True"
+   ],
+   "loaded_alt_copy_uid": [
+    "ok",
+    "True"
+   ],
+   "loaded_alt_evaluate": [
+    "ok",
+    6.452460824
+   ],
+   "loaded_alt_isLargerBetter": [
+    "ok",
+    "False"
+   ],
+   "loaded_alt_params": [
+    "ok",
+    [
+     "('beta', '1.0')",
+     "('eps', '1e-15')",
+     "('labelCol', \"'label'\")",
+     "('metricLabel', '0.0')",
+     "('metricName', \"'logLoss'\")",
+     "('predictionCol', \"'prediction'\")",
+     "('probabilityCol', \"'probability'\")"
+    ]
+   ],
+   "loaded_alt_uid": [
+    "ok",
+    "True"
+   ],
+   "loaded_evaluate": [
+    "ok",
+    0.5
+   ],
+   "loaded_isLargerBetter": [
+    "ok",
+    "True"
+   ],
+   "loaded_isSet_metric": [
+    "ok",
+    "False"
+   ],
+   "loaded_params": [
+    "ok",
+    [
+     "('beta', '1.0')",
+     "('eps', '1e-15')",
+     "('labelCol', \"'label'\")",
+     "('metricLabel', '0.0')",
+     "('metricName', \"'f1'\")",
+     "('predictionCol', \"'prediction'\")",
+     "('probabilityCol', \"'probability'\")"
+    ]
+   ],
+   "loaded_uid": [
+    "ok",
+    "True"
+   ],
+   "read_load_uid": [
+    "ok",
+    "True"
+   ],
+   "save": [
+    "ok",
+    "None"
+   ],
+   "save_again": [
+    "UnknownException",
+    "(java.io.IOException) Path <path>/evaluator already exists. To overwrite it, please use write.overwrite().save(path) for Scala and use write().overwrite().save(path) for Java and Python."
+   ],
+   "setParams_then_evaluate": [
+    "ok",
+    6.452460824
+   ],
+   "setter_then_evaluate": [
+    "ok",
+    6.452460824
+   ],
+   "setter_then_isLargerBetter": [
+    "ok",
+    "False"
+   ]
+  },
+  "params_api": {
+   "class_param": [
+    "ok",
+    "('Param', 'undefined', 'metricName', True, False)"
+   ],
+   "clear": [
+    "ok",
+    "(None, True)"
+   ],
+   "copy_bad_extra": [
+    "TypeError",
+    "Expecting a valid instance of Param, but received: metricName"
+   ],
+   "copy_class_param": [
+    "ok",
+    "'f1'"
+   ],
+   "copy_explainParams": [
+    "ok",
+    "'beta: The beta value used in weightedFMeasure|fMeasureByLabel. Must be > 0. The default value is 1. (default: 1.0)\\neps: log-loss is undefined for p=0 or p=1, so probabilities are clipped to max(eps, min(1 - eps, p)). Must be in range (0, 0.5). The default value is 1e-15. (default: 1e-15)\\nlabelCol: label column name. (default: label)\\nmetricLabel: The class whose metric will be computed in truePositiveRateByLabel|falsePositiveRateByLabel|precisionByLabel|recallByLabel|fMeasureByLabel. Must be >= 0. The default value is 0. (default: 0.0)\\nmetricName: metric name in evaluation (f1|accuracy|weightedPrecision|weightedRecall|weightedTruePositiveRate| weightedFalsePositiveRate|weightedFMeasure|truePositiveRateByLabel| falsePositiveRateByLabel|precisionByLabel|recallByLabel|fMeasureByLabel| logLoss|hammingLoss) (default: f1, current: logLoss)\\npredictionCol: prediction column name. (default: prediction)\\nprobabilityCol: Column name for predicted class conditional probabilities. Note: Not all models output well-calibrated probability estimates! These probabilities should be treated as confidences, not precise probabilities. (default: probability)\\nweightCol: weight column name. If this is not set or empty, we treat all instance weights as 1.0. (undefined)'"
+   ],
+   "copy_list": [
+    "TypeError",
+    "Expecting a dict, but received an object of type <class 'list'>."
+   ],
+   "copy_metric": [
+    "ok",
+    "'logLoss'"
+   ],
+   "copy_same_uid": [
+    "ok",
+    "True"
+   ],
+   "evaluate_list_map": [
+    "TypeError",
+    "Params must be a param map but got <class 'list'>."
+   ],
+   "evaluate_map_of_a_non_dataframe": [
+    "AttributeError",
+    "'int' object has no attribute 'sparkSession'"
+   ],
+   "evaluate_not_a_dataframe": [
+    "AttributeError",
+    "'int' object has no attribute 'sparkSession'"
+   ],
+   "evaluate_str_map": [
+    "TypeError",
+    "Params must be a param map but got <class 'str'>."
+   ],
+   "explainParam_param": [
+    "ok",
+    "'metricName: metric name in evaluation (f1|accuracy|weightedPrecision|weightedRecall|weightedTruePositiveRate| weightedFalsePositiveRate|weightedFMeasure|truePositiveRateByLabel| falsePositiveRateByLabel|precisionByLabel|recallByLabel|fMeasureByLabel| logLoss|hammingLoss) (default: f1)'"
+   ],
+   "explainParam_str": [
+    "ok",
+    "'metricName: metric name in evaluation (f1|accuracy|weightedPrecision|weightedRecall|weightedTruePositiveRate| weightedFalsePositiveRate|weightedFMeasure|truePositiveRateByLabel| falsePositiveRateByLabel|precisionByLabel|recallByLabel|fMeasureByLabel| logLoss|hammingLoss) (default: f1)'"
+   ],
+   "explainParams": [
+    "ok",
+    "'beta: The beta value used in weightedFMeasure|fMeasureByLabel. Must be > 0. The default value is 1. (default: 1.0)\\neps: log-loss is undefined for p=0 or p=1, so probabilities are clipped to max(eps, min(1 - eps, p)). Must be in range (0, 0.5). The default value is 1e-15. (default: 1e-15)\\nlabelCol: label column name. (default: label)\\nmetricLabel: The class whose metric will be computed in truePositiveRateByLabel|falsePositiveRateByLabel|precisionByLabel|recallByLabel|fMeasureByLabel. Must be >= 0. The default value is 0. (default: 0.0)\\nmetricName: metric name in evaluation (f1|accuracy|weightedPrecision|weightedRecall|weightedTruePositiveRate| weightedFalsePositiveRate|weightedFMeasure|truePositiveRateByLabel| falsePositiveRateByLabel|precisionByLabel|recallByLabel|fMeasureByLabel| logLoss|hammingLoss) (default: f1)\\npredictionCol: prediction column name. (default: prediction)\\nprobabilityCol: Column name for predicted class conditional probabilities. Note: Not all models output well-calibrated probability estimates! These probabilities should be treated as confidences, not precise probabilities. (default: probability)\\nweightCol: weight column name. If this is not set or empty, we treat all instance weights as 1.0. (undefined)'"
+   ],
+   "extract": [
+    "ok",
+    [
+     "('beta', '1.0')",
+     "('eps', '1e-15')",
+     "('labelCol', \"'label'\")",
+     "('metricLabel', '0.0')",
+     "('metricName', \"'f1'\")",
+     "('predictionCol', \"'prediction'\")",
+     "('probabilityCol', \"'probability'\")"
+    ]
+   ],
+   "extract_extra": [
+    "ok",
+    [
+     "('beta', '1.0')",
+     "('eps', '1e-15')",
+     "('labelCol', \"'label'\")",
+     "('metricLabel', '0.0')",
+     "('metricName', \"'q'\")",
+     "('predictionCol', \"'prediction'\")",
+     "('probabilityCol', \"'probability'\")"
+    ]
+   ],
+   "getBeta": [
+    "ok",
+    1.0
+   ],
+   "getEps": [
+    "ok",
+    0.0
+   ],
+   "getLabelCol": [
+    "ok",
+    "'label'"
+   ],
+   "getMetricLabel": [
+    "ok",
+    0.0
+   ],
+   "getMetricName": [
+    "ok",
+    "'f1'"
+   ],
+   "getOrDefault_metric": [
+    "ok",
+    "'f1'"
+   ],
+   "getParam_method": [
+    "ValueError",
+    "Cannot find param with name evaluate."
+   ],
+   "getParam_nope": [
+    "AttributeError",
+    "'MulticlassClassificationEvaluator' object has no attribute 'nope'"
+   ],
+   "getPredictionCol": [
+    "ok",
+    "'prediction'"
+   ],
+   "getProbabilityCol": [
+    "ok",
+    "'probability'"
+   ],
+   "getWeightCol": [
+    "KeyError",
+    "Param(parent='MulticlassClassificationEvaluator_<uid>', name='weightCol', doc='weight column name. If this is not set or empty, we treat all instance weights as 1.0.')"
+   ],
+   "hasDefault_metric": [
+    "ok",
+    "True"
+   ],
+   "hasParam_int": [
+    "TypeError",
+    "hasParam(): paramName must be a string"
+   ],
+   "hasParam_metric": [
+    "ok",
+    "True"
+   ],
+   "hasParam_nope": [
+    "ok",
+    "False"
+   ],
+   "isDefined_metric": [
+    "ok",
+    "True"
+   ],
+   "isLargerBetter": [
+    "ok",
+    "False"
+   ],
+   "isLargerBetter_alt": [
+    "ok",
+    "False"
+   ],
+   "isSet_foreign": [
+    "ValueError",
+    "Param Param(parent='MulticlassClassificationEvaluator_<uid>', name='metricName', doc='metric name in evaluation (f1|accuracy|weightedPrecision|weightedRecall|weightedTruePositiveRate| weightedFalsePos"
+   ],
+   "isSet_metric_before": [
+    "ok",
+    "False"
+   ],
+   "isSet_nope": [
+    "AttributeError",
+    "'MulticlassClassificationEvaluator' object has no attribute 'nope'"
+   ],
+   "isinstance_evaluator": [
+    "ok",
+    "True"
+   ],
+   "isinstance_params": [
+    "ok",
+    "True"
+   ],
+   "no_attribute": [
+    "AttributeError",
+    "'MulticlassClassificationEvaluator' object has no attribute 'fooBarBaz'"
+   ],
+   "orig_metric": [
+    "ok",
+    "'f1'"
+   ],
+   "param_docs": [
+    "ok",
+    [
+     "'The beta value used in weightedFMeasure|fMeasureByLabel. Must be > 0. The default value is 1.'",
+     "'log-loss is undefined for p=0 or p=1, so probabilities are clipped to max(eps, min(1 - eps, p)). Must be in range (0, 0.5). The default value is 1e-15.'",
+     "'label column name.'",
+     "'The class whose metric will be computed in truePositiveRateByLabel|falsePositiveRateByLabel|precisionByLabel|recallByLabel|fMeasureByLabel. Must be >= 0. The default value is 0.'",
+     "'metric name in evaluation (f1|accuracy|weightedPrecision|weightedRecall|weightedTruePositiveRate| weightedFalsePositiveRate|weightedFMeasure|truePositiveRateByLabel| falsePositiveRateByLabel|precisionByLabel|recallByLabel|fMeasureByLabel| logLoss|hammingLoss)'",
+     "'prediction column name.'",
+     "'Column name for predicted class conditional probabilities. Note: Not all models output well-calibrated probability estimates! These probabilities should be treated as confidences, not precise probabilities.'",
+     "'weight column name. If this is not set or empty, we treat all instance weights as 1.0.'"
+    ]
+   ],
+   "param_names": [
+    "ok",
+    [
+     "'beta'",
+     "'eps'",
+     "'labelCol'",
+     "'metricLabel'",
+     "'metricName'",
+     "'predictionCol'",
+     "'probabilityCol'",
+     "'weightCol'"
+    ]
+   ],
+   "param_parents_are_uid": [
+    "ok",
+    "True"
+   ],
+   "reader_class": [
+    "ok",
+    "('RemoteMLReader', 'pyspark.ml.connect.readwrite')"
+   ],
+   "repr_is_uid": [
+    "ok",
+    "True"
+   ],
+   "resolve_int": [
+    "TypeError",
+    "Cannot resolve 5 as a param."
+   ],
+   "setParams_forces_keywords": [
+    "TypeError",
+    "Method setParams forces keyword arguments."
+   ],
+   "setParams_returns_self": [
+    "ok",
+    "'logLoss'"
+   ],
+   "setParams_unknown": [
+    "TypeError",
+    "MulticlassClassificationEvaluator.setParams() got an unexpected keyword argument 'nope'"
+   ],
+   "set_bad_type": [
+    "TypeError",
+    "Could not convert <class 'float'> to string type"
+   ],
+   "set_ok": [
+    "ok",
+    "'logLoss'"
+   ],
+   "set_str_param": [
+    "AttributeError",
+    "'str' object has no attribute 'parent'"
+   ],
+   "writer_class": [
+    "ok",
+    "('RemoteMLWriter', 'pyspark.ml.connect.readwrite')"
+   ],
+   "writer_no_attribute": [
+    "AttributeError",
+    "'RemoteMLWriter' object has no attribute 'fooBarBaz'"
+   ],
+   "writer_option_map": [
+    "ok",
+    [
+     "('key', '1')",
+     "('x', 'y')"
+    ]
+   ],
+   "writer_should_overwrite": [
+    "ok",
+    "True"
+   ]
+  }
+ },
+ "MultilabelClassificationEvaluator": {
+  "live": {
+   "alt_save": [
+    "ok",
+    "None"
+   ],
+   "evaluate": [
+    "ok",
+    0.593333333
+   ],
+   "evaluate_after_map": [
+    "ok",
+    0.593333333
+   ],
+   "evaluate_empty_map": [
+    "ok",
+    0.593333333
+   ],
+   "evaluate_invalid_metric": [
+    "IllegalArgumentException",
+    "MultilabelClassificationEvaluator_<uid> parameter metricName given invalid value invalid."
+   ],
+   "evaluate_invalid_metric_map": [
+    "IllegalArgumentException",
+    "MultilabelClassificationEvaluator_<uid> parameter metricName given invalid value invalid."
+   ],
+   "evaluate_list_map": [
+    "TypeError",
+    "Params must be a param map but got <class 'list'>."
+   ],
+   "evaluate_map": [
+    "ok",
+    0.333333333
+   ],
+   "evaluate_map_isLargerBetter": [
+    "ok",
+    "True"
+   ],
+   "evaluate_none_map": [
+    "ok",
+    0.593333333
+   ],
+   "evaluate_str_map": [
+    "TypeError",
+    "Params must be a param map but got <class 'str'>."
+   ],
+   "evaluate_string_key_map": [
+    "TypeError",
+    "Expecting a valid instance of Param, but received: metricName"
+   ],
+   "isLargerBetter": [
+    "ok",
+    "True"
+   ],
+   "loaded_alt_copy_uid": [
+    "ok",
+    "True"
+   ],
+   "loaded_alt_evaluate": [
+    "ok",
+    0.333333333
+   ],
+   "loaded_alt_isLargerBetter": [
+    "ok",
+    "False"
+   ],
+   "loaded_alt_params": [
+    "ok",
+    [
+     "('labelCol', \"'label'\")",
+     "('metricLabel', '0.0')",
+     "('metricName', \"'hammingLoss'\")",
+     "('predictionCol', \"'prediction'\")"
+    ]
+   ],
+   "loaded_alt_uid": [
+    "ok",
+    "True"
+   ],
+   "loaded_evaluate": [
+    "ok",
+    0.593333333
+   ],
+   "loaded_isLargerBetter": [
+    "ok",
+    "True"
+   ],
+   "loaded_isSet_metric": [
+    "ok",
+    "False"
+   ],
+   "loaded_params": [
+    "ok",
+    [
+     "('labelCol', \"'label'\")",
+     "('metricLabel', '0.0')",
+     "('metricName', \"'f1Measure'\")",
+     "('predictionCol', \"'prediction'\")"
+    ]
+   ],
+   "loaded_uid": [
+    "ok",
+    "True"
+   ],
+   "read_load_uid": [
+    "ok",
+    "True"
+   ],
+   "save": [
+    "ok",
+    "None"
+   ],
+   "save_again": [
+    "UnknownException",
+    "(java.io.IOException) Path <path>/evaluator already exists. To overwrite it, please use write.overwrite().save(path) for Scala and use write().overwrite().save(path) for Java and Python."
+   ],
+   "setParams_then_evaluate": [
+    "ok",
+    0.333333333
+   ],
+   "setter_then_evaluate": [
+    "ok",
+    0.333333333
+   ],
+   "setter_then_isLargerBetter": [
+    "ok",
+    "False"
+   ]
+  },
+  "params_api": {
+   "class_param": [
+    "ok",
+    "('Param', 'undefined', 'metricName', True, False)"
+   ],
+   "clear": [
+    "ok",
+    "(None, True)"
+   ],
+   "copy_bad_extra": [
+    "TypeError",
+    "Expecting a valid instance of Param, but received: metricName"
+   ],
+   "copy_class_param": [
+    "ok",
+    "'f1Measure'"
+   ],
+   "copy_explainParams": [
+    "ok",
+    "'labelCol: label column name. (default: label)\\nmetricLabel: The class whose metric will be computed in precisionByLabel|recallByLabel|f1MeasureByLabel. Must be >= 0. The default value is 0. (default: 0.0)\\nmetricName: metric name in evaluation (subsetAccuracy|accuracy|hammingLoss|precision|recall|f1Measure|precisionByLabel|recallByLabel|f1MeasureByLabel|microPrecision|microRecall|microF1Measure) (default: f1Measure, current: hammingLoss)\\npredictionCol: prediction column name. (default: prediction)'"
+   ],
+   "copy_list": [
+    "TypeError",
+    "Expecting a dict, but received an object of type <class 'list'>."
+   ],
+   "copy_metric": [
+    "ok",
+    "'hammingLoss'"
+   ],
+   "copy_same_uid": [
+    "ok",
+    "True"
+   ],
+   "evaluate_list_map": [
+    "TypeError",
+    "Params must be a param map but got <class 'list'>."
+   ],
+   "evaluate_map_of_a_non_dataframe": [
+    "AttributeError",
+    "'int' object has no attribute 'sparkSession'"
+   ],
+   "evaluate_not_a_dataframe": [
+    "AttributeError",
+    "'int' object has no attribute 'sparkSession'"
+   ],
+   "evaluate_str_map": [
+    "TypeError",
+    "Params must be a param map but got <class 'str'>."
+   ],
+   "explainParam_param": [
+    "ok",
+    "'metricName: metric name in evaluation (subsetAccuracy|accuracy|hammingLoss|precision|recall|f1Measure|precisionByLabel|recallByLabel|f1MeasureByLabel|microPrecision|microRecall|microF1Measure) (default: f1Measure)'"
+   ],
+   "explainParam_str": [
+    "ok",
+    "'metricName: metric name in evaluation (subsetAccuracy|accuracy|hammingLoss|precision|recall|f1Measure|precisionByLabel|recallByLabel|f1MeasureByLabel|microPrecision|microRecall|microF1Measure) (default: f1Measure)'"
+   ],
+   "explainParams": [
+    "ok",
+    "'labelCol: label column name. (default: label)\\nmetricLabel: The class whose metric will be computed in precisionByLabel|recallByLabel|f1MeasureByLabel. Must be >= 0. The default value is 0. (default: 0.0)\\nmetricName: metric name in evaluation (subsetAccuracy|accuracy|hammingLoss|precision|recall|f1Measure|precisionByLabel|recallByLabel|f1MeasureByLabel|microPrecision|microRecall|microF1Measure) (default: f1Measure)\\npredictionCol: prediction column name. (default: prediction)'"
+   ],
+   "extract": [
+    "ok",
+    [
+     "('labelCol', \"'label'\")",
+     "('metricLabel', '0.0')",
+     "('metricName', \"'f1Measure'\")",
+     "('predictionCol', \"'prediction'\")"
+    ]
+   ],
+   "extract_extra": [
+    "ok",
+    [
+     "('labelCol', \"'label'\")",
+     "('metricLabel', '0.0')",
+     "('metricName', \"'q'\")",
+     "('predictionCol', \"'prediction'\")"
+    ]
+   ],
+   "getLabelCol": [
+    "ok",
+    "'label'"
+   ],
+   "getMetricLabel": [
+    "ok",
+    0.0
+   ],
+   "getMetricName": [
+    "ok",
+    "'f1Measure'"
+   ],
+   "getOrDefault_metric": [
+    "ok",
+    "'f1Measure'"
+   ],
+   "getParam_method": [
+    "ValueError",
+    "Cannot find param with name evaluate."
+   ],
+   "getParam_nope": [
+    "AttributeError",
+    "'MultilabelClassificationEvaluator' object has no attribute 'nope'"
+   ],
+   "getPredictionCol": [
+    "ok",
+    "'prediction'"
+   ],
+   "hasDefault_metric": [
+    "ok",
+    "True"
+   ],
+   "hasParam_int": [
+    "TypeError",
+    "hasParam(): paramName must be a string"
+   ],
+   "hasParam_metric": [
+    "ok",
+    "True"
+   ],
+   "hasParam_nope": [
+    "ok",
+    "False"
+   ],
+   "isDefined_metric": [
+    "ok",
+    "True"
+   ],
+   "isLargerBetter": [
+    "ok",
+    "False"
+   ],
+   "isLargerBetter_alt": [
+    "ok",
+    "False"
+   ],
+   "isSet_foreign": [
+    "ValueError",
+    "Param Param(parent='MultilabelClassificationEvaluator_<uid>', name='metricName', doc='metric name in evaluation (subsetAccuracy|accuracy|hammingLoss|precision|recall|f1Measure|precisionByLabel|recallB"
+   ],
+   "isSet_metric_before": [
+    "ok",
+    "False"
+   ],
+   "isSet_nope": [
+    "AttributeError",
+    "'MultilabelClassificationEvaluator' object has no attribute 'nope'"
+   ],
+   "isinstance_evaluator": [
+    "ok",
+    "True"
+   ],
+   "isinstance_params": [
+    "ok",
+    "True"
+   ],
+   "no_attribute": [
+    "AttributeError",
+    "'MultilabelClassificationEvaluator' object has no attribute 'fooBarBaz'"
+   ],
+   "orig_metric": [
+    "ok",
+    "'f1Measure'"
+   ],
+   "param_docs": [
+    "ok",
+    [
+     "'label column name.'",
+     "'The class whose metric will be computed in precisionByLabel|recallByLabel|f1MeasureByLabel. Must be >= 0. The default value is 0.'",
+     "'metric name in evaluation (subsetAccuracy|accuracy|hammingLoss|precision|recall|f1Measure|precisionByLabel|recallByLabel|f1MeasureByLabel|microPrecision|microRecall|microF1Measure)'",
+     "'prediction column name.'"
+    ]
+   ],
+   "param_names": [
+    "ok",
+    [
+     "'labelCol'",
+     "'metricLabel'",
+     "'metricName'",
+     "'predictionCol'"
+    ]
+   ],
+   "param_parents_are_uid": [
+    "ok",
+    "True"
+   ],
+   "reader_class": [
+    "ok",
+    "('RemoteMLReader', 'pyspark.ml.connect.readwrite')"
+   ],
+   "repr_is_uid": [
+    "ok",
+    "True"
+   ],
+   "resolve_int": [
+    "TypeError",
+    "Cannot resolve 5 as a param."
+   ],
+   "setParams_forces_keywords": [
+    "TypeError",
+    "Method setParams forces keyword arguments."
+   ],
+   "setParams_returns_self": [
+    "ok",
+    "'hammingLoss'"
+   ],
+   "setParams_unknown": [
+    "TypeError",
+    "MultilabelClassificationEvaluator.setParams() got an unexpected keyword argument 'nope'"
+   ],
+   "set_bad_type": [
+    "TypeError",
+    "Could not convert <class 'float'> to string type"
+   ],
+   "set_ok": [
+    "ok",
+    "'hammingLoss'"
+   ],
+   "set_str_param": [
+    "AttributeError",
+    "'str' object has no attribute 'parent'"
+   ],
+   "writer_class": [
+    "ok",
+    "('RemoteMLWriter', 'pyspark.ml.connect.readwrite')"
+   ],
+   "writer_no_attribute": [
+    "AttributeError",
+    "'RemoteMLWriter' object has no attribute 'fooBarBaz'"
+   ],
+   "writer_option_map": [
+    "ok",
+    [
+     "('key', '1')",
+     "('x', 'y')"
+    ]
+   ],
+   "writer_should_overwrite": [
+    "ok",
+    "True"
+   ]
+  }
+ },
+ "RankingEvaluator": {
+  "live": {
+   "alt_save": [
+    "ok",
+    "None"
+   ],
+   "evaluate": [
+    "ok",
+    0.317777778
+   ],
+   "evaluate_after_map": [
+    "ok",
+    0.317777778
+   ],
+   "evaluate_empty_map": [
+    "ok",
+    0.317777778
+   ],
+   "evaluate_invalid_metric": [
+    "IllegalArgumentException",
+    "RankingEvaluator_<uid> parameter metricName given invalid value invalid."
+   ],
+   "evaluate_invalid_metric_map": [
+    "IllegalArgumentException",
+    "RankingEvaluator_<uid> parameter metricName given invalid value invalid."
+   ],
+   "evaluate_list_map": [
+    "TypeError",
+    "Params must be a param map but got <class 'list'>."
+   ],
+   "evaluate_map": [
+    "ok",
+    0.2
+   ],
+   "evaluate_map_isLargerBetter": [
+    "ok",
+    "True"
+   ],
+   "evaluate_none_map": [
+    "ok",
+    0.317777778
+   ],
+   "evaluate_str_map": [
+    "TypeError",
+    "Params must be a param map but got <class 'str'>."
+   ],
+   "evaluate_string_key_map": [
+    "TypeError",
+    "Expecting a valid instance of Param, but received: metricName"
+   ],
+   "isLargerBetter": [
+    "ok",
+    "True"
+   ],
+   "loaded_alt_copy_uid": [
+    "ok",
+    "True"
+   ],
+   "loaded_alt_evaluate": [
+    "ok",
+    0.2
+   ],
+   "loaded_alt_isLargerBetter": [
+    "ok",
+    "True"
+   ],
+   "loaded_alt_params": [
+    "ok",
+    [
+     "('k', '2')",
+     "('labelCol', \"'label'\")",
+     "('metricName', \"'precisionAtK'\")",
+     "('predictionCol', \"'prediction'\")"
+    ]
+   ],
+   "loaded_alt_uid": [
+    "ok",
+    "True"
+   ],
+   "loaded_evaluate": [
+    "ok",
+    0.317777778
+   ],
+   "loaded_isLargerBetter": [
+    "ok",
+    "True"
+   ],
+   "loaded_isSet_metric": [
+    "ok",
+    "False"
+   ],
+   "loaded_params": [
+    "ok",
+    [
+     "('k', '10')",
+     "('labelCol', \"'label'\")",
+     "('metricName', \"'meanAveragePrecision'\")",
+     "('predictionCol', \"'prediction'\")"
+    ]
+   ],
+   "loaded_uid": [
+    "ok",
+    "True"
+   ],
+   "read_load_uid": [
+    "ok",
+    "True"
+   ],
+   "save": [
+    "ok",
+    "None"
+   ],
+   "save_again": [
+    "UnknownException",
+    "(java.io.IOException) Path <path>/evaluator already exists. To overwrite it, please use write.overwrite().save(path) for Scala and use write().overwrite().save(path) for Java and Python."
+   ],
+   "setParams_then_evaluate": [
+    "ok",
+    0.2
+   ],
+   "setter_then_evaluate": [
+    "ok",
+    0.1
+   ],
+   "setter_then_isLargerBetter": [
+    "ok",
+    "True"
+   ]
+  },
+  "params_api": {
+   "big_int": [
+    "ok",
+    "1180591620717411303424"
+   ],
+   "big_int_explain": [
+    "ok",
+    "'k: The ranking position value used in meanAveragePrecisionAtK|precisionAtK|ndcgAtK|recallAtK. Must be > 0. The default value is 10. (default: 10, current: 1180591620717411303424)'"
+   ],
+   "class_param": [
+    "ok",
+    "('Param', 'undefined', 'metricName', True, False)"
+   ],
+   "clear": [
+    "ok",
+    "(None, True)"
+   ],
+   "copy_bad_extra": [
+    "TypeError",
+    "Expecting a valid instance of Param, but received: metricName"
+   ],
+   "copy_class_param": [
+    "ok",
+    "'meanAveragePrecision'"
+   ],
+   "copy_explainParams": [
+    "ok",
+    "'k: The ranking position value used in meanAveragePrecisionAtK|precisionAtK|ndcgAtK|recallAtK. Must be > 0. The default value is 10. (default: 10, current: 2)\\nlabelCol: label column name. (default: label)\\nmetricName: metric name in evaluation (meanAveragePrecision|meanAveragePrecisionAtK|precisionAtK|ndcgAtK|recallAtK) (default: meanAveragePrecision, current: precisionAtK)\\npredictionCol: prediction column name. (default: prediction)'"
+   ],
+   "copy_list": [
+    "TypeError",
+    "Expecting a dict, but received an object of type <class 'list'>."
+   ],
+   "copy_metric": [
+    "ok",
+    "'precisionAtK'"
+   ],
+   "copy_same_uid": [
+    "ok",
+    "True"
+   ],
+   "evaluate_list_map": [
+    "TypeError",
+    "Params must be a param map but got <class 'list'>."
+   ],
+   "evaluate_map_of_a_non_dataframe": [
+    "AttributeError",
+    "'int' object has no attribute 'sparkSession'"
+   ],
+   "evaluate_not_a_dataframe": [
+    "AttributeError",
+    "'int' object has no attribute 'sparkSession'"
+   ],
+   "evaluate_str_map": [
+    "TypeError",
+    "Params must be a param map but got <class 'str'>."
+   ],
+   "explainParam_param": [
+    "ok",
+    "'metricName: metric name in evaluation (meanAveragePrecision|meanAveragePrecisionAtK|precisionAtK|ndcgAtK|recallAtK) (default: meanAveragePrecision)'"
+   ],
+   "explainParam_str": [
+    "ok",
+    "'metricName: metric name in evaluation (meanAveragePrecision|meanAveragePrecisionAtK|precisionAtK|ndcgAtK|recallAtK) (default: meanAveragePrecision)'"
+   ],
+   "explainParams": [
+    "ok",
+    "'k: The ranking position value used in meanAveragePrecisionAtK|precisionAtK|ndcgAtK|recallAtK. Must be > 0. The default value is 10. (default: 10)\\nlabelCol: label column name. (default: label)\\nmetricName: metric name in evaluation (meanAveragePrecision|meanAveragePrecisionAtK|precisionAtK|ndcgAtK|recallAtK) (default: meanAveragePrecision)\\npredictionCol: prediction column name. (default: prediction)'"
+   ],
+   "extract": [
+    "ok",
+    [
+     "('k', '10')",
+     "('labelCol', \"'label'\")",
+     "('metricName', \"'meanAveragePrecision'\")",
+     "('predictionCol', \"'prediction'\")"
+    ]
+   ],
+   "extract_extra": [
+    "ok",
+    [
+     "('k', '10')",
+     "('labelCol', \"'label'\")",
+     "('metricName', \"'q'\")",
+     "('predictionCol', \"'prediction'\")"
+    ]
+   ],
+   "getK": [
+    "ok",
+    "10"
+   ],
+   "getLabelCol": [
+    "ok",
+    "'label'"
+   ],
+   "getMetricName": [
+    "ok",
+    "'meanAveragePrecision'"
+   ],
+   "getOrDefault_metric": [
+    "ok",
+    "'meanAveragePrecision'"
+   ],
+   "getParam_method": [
+    "ValueError",
+    "Cannot find param with name evaluate."
+   ],
+   "getParam_nope": [
+    "AttributeError",
+    "'RankingEvaluator' object has no attribute 'nope'"
+   ],
+   "getPredictionCol": [
+    "ok",
+    "'prediction'"
+   ],
+   "hasDefault_metric": [
+    "ok",
+    "True"
+   ],
+   "hasParam_int": [
+    "TypeError",
+    "hasParam(): paramName must be a string"
+   ],
+   "hasParam_metric": [
+    "ok",
+    "True"
+   ],
+   "hasParam_nope": [
+    "ok",
+    "False"
+   ],
+   "isDefined_metric": [
+    "ok",
+    "True"
+   ],
+   "isLargerBetter": [
+    "ok",
+    "True"
+   ],
+   "isLargerBetter_alt": [
+    "ok",
+    "True"
+   ],
+   "isSet_foreign": [
+    "ValueError",
+    "Param Param(parent='RankingEvaluator_<uid>', name='metricName', doc='metric name in evaluation (meanAveragePrecision|meanAveragePrecisionAtK|precisionAtK|ndcgAtK|recallAtK)') does not belong to Rankin"
+   ],
+   "isSet_metric_before": [
+    "ok",
+    "False"
+   ],
+   "isSet_nope": [
+    "AttributeError",
+    "'RankingEvaluator' object has no attribute 'nope'"
+   ],
+   "isinstance_evaluator": [
+    "ok",
+    "True"
+   ],
+   "isinstance_params": [
+    "ok",
+    "True"
+   ],
+   "no_attribute": [
+    "AttributeError",
+    "'RankingEvaluator' object has no attribute 'fooBarBaz'"
+   ],
+   "orig_metric": [
+    "ok",
+    "'meanAveragePrecision'"
+   ],
+   "param_docs": [
+    "ok",
+    [
+     "'The ranking position value used in meanAveragePrecisionAtK|precisionAtK|ndcgAtK|recallAtK. Must be > 0. The default value is 10.'",
+     "'label column name.'",
+     "'metric name in evaluation (meanAveragePrecision|meanAveragePrecisionAtK|precisionAtK|ndcgAtK|recallAtK)'",
+     "'prediction column name.'"
+    ]
+   ],
+   "param_names": [
+    "ok",
+    [
+     "'k'",
+     "'labelCol'",
+     "'metricName'",
+     "'predictionCol'"
+    ]
+   ],
+   "param_parents_are_uid": [
+    "ok",
+    "True"
+   ],
+   "reader_class": [
+    "ok",
+    "('RemoteMLReader', 'pyspark.ml.connect.readwrite')"
+   ],
+   "repr_is_uid": [
+    "ok",
+    "True"
+   ],
+   "resolve_int": [
+    "TypeError",
+    "Cannot resolve 5 as a param."
+   ],
+   "setParams_forces_keywords": [
+    "TypeError",
+    "Method setParams forces keyword arguments."
+   ],
+   "setParams_returns_self": [
+    "ok",
+    "'precisionAtK'"
+   ],
+   "setParams_unknown": [
+    "TypeError",
+    "RankingEvaluator.setParams() got an unexpected keyword argument 'nope'"
+   ],
+   "set_bad_type": [
+    "TypeError",
+    "Could not convert <class 'float'> to string type"
+   ],
+   "set_ok": [
+    "ok",
+    "'precisionAtK'"
+   ],
+   "set_str_param": [
+    "AttributeError",
+    "'str' object has no attribute 'parent'"
+   ],
+   "writer_class": [
+    "ok",
+    "('RemoteMLWriter', 'pyspark.ml.connect.readwrite')"
+   ],
+   "writer_no_attribute": [
+    "AttributeError",
+    "'RemoteMLWriter' object has no attribute 'fooBarBaz'"
+   ],
+   "writer_option_map": [
+    "ok",
+    [
+     "('key', '1')",
+     "('x', 'y')"
+    ]
+   ],
+   "writer_should_overwrite": [
+    "ok",
+    "True"
+   ]
+  }
+ },
+ "RegressionEvaluator": {
+  "live": {
+   "alt_save": [
+    "ok",
+    "None"
+   ],
+   "evaluate": [
+    "ok",
+    0.394968353
+   ],
+   "evaluate_after_map": [
+    "ok",
+    0.394968353
+   ],
+   "evaluate_empty_map": [
+    "ok",
+    0.394968353
+   ],
+   "evaluate_invalid_metric": [
+    "IllegalArgumentException",
+    "RegressionEvaluator_<uid> parameter metricName given invalid value invalid."
+   ],
+   "evaluate_invalid_metric_map": [
+    "IllegalArgumentException",
+    "RegressionEvaluator_<uid> parameter metricName given invalid value invalid."
+   ],
+   "evaluate_list_map": [
+    "TypeError",
+    "Params must be a param map but got <class 'list'>."
+   ],
+   "evaluate_map": [
+    "ok",
+    0.885294118
+   ],
+   "evaluate_map_isLargerBetter": [
+    "ok",
+    "False"
+   ],
+   "evaluate_none_map": [
+    "ok",
+    0.394968353
+   ],
+   "evaluate_str_map": [
+    "TypeError",
+    "Params must be a param map but got <class 'str'>."
+   ],
+   "evaluate_string_key_map": [
+    "TypeError",
+    "Expecting a valid instance of Param, but received: metricName"
+   ],
+   "isLargerBetter": [
+    "ok",
+    "False"
+   ],
+   "loaded_alt_copy_uid": [
+    "ok",
+    "True"
+   ],
+   "loaded_alt_evaluate": [
+    "ok",
+    0.885294118
+   ],
+   "loaded_alt_isLargerBetter": [
+    "ok",
+    "True"
+   ],
+   "loaded_alt_params": [
+    "ok",
+    [
+     "('labelCol', \"'label'\")",
+     "('metricName', \"'r2'\")",
+     "('predictionCol', \"'prediction'\")",
+     "('throughOrigin', 'False')"
+    ]
+   ],
+   "loaded_alt_uid": [
+    "ok",
+    "True"
+   ],
+   "loaded_evaluate": [
+    "ok",
+    0.394968353
+   ],
+   "loaded_isLargerBetter": [
+    "ok",
+    "False"
+   ],
+   "loaded_isSet_metric": [
+    "ok",
+    "False"
+   ],
+   "loaded_params": [
+    "ok",
+    [
+     "('labelCol', \"'label'\")",
+     "('metricName', \"'rmse'\")",
+     "('predictionCol', \"'prediction'\")",
+     "('throughOrigin', 'False')"
+    ]
+   ],
+   "loaded_uid": [
+    "ok",
+    "True"
+   ],
+   "read_load_uid": [
+    "ok",
+    "True"
+   ],
+   "save": [
+    "ok",
+    "None"
+   ],
+   "save_again": [
+    "UnknownException",
+    "(java.io.IOException) Path <path>/evaluator already exists. To overwrite it, please use write.overwrite().save(path) for Scala and use write().overwrite().save(path) for Java and Python."
+   ],
+   "setParams_then_evaluate": [
+    "ok",
+    0.885294118
+   ],
+   "setter_then_evaluate": [
+    "ok",
+    0.885294118
+   ],
+   "setter_then_isLargerBetter": [
+    "ok",
+    "True"
+   ]
+  },
+  "params_api": {
+   "class_param": [
+    "ok",
+    "('Param', 'undefined', 'metricName', True, False)"
+   ],
+   "clear": [
+    "ok",
+    "(None, True)"
+   ],
+   "copy_bad_extra": [
+    "TypeError",
+    "Expecting a valid instance of Param, but received: metricName"
+   ],
+   "copy_class_param": [
+    "ok",
+    "'rmse'"
+   ],
+   "copy_explainParams": [
+    "ok",
+    "'labelCol: label column name. (default: label)\\nmetricName: metric name in evaluation - one of:\\n                       rmse - root mean squared error (default)\\n                       mse - mean squared error\\n                       r2 - r^2 metric\\n                       mae - mean absolute error\\n                       var - explained variance. (default: rmse, current: r2)\\npredictionCol: prediction column name. (default: prediction)\\nthroughOrigin: whether the regression is through the origin. (default: False)\\nweightCol: weight column name. If this is not set or empty, we treat all instance weights as 1.0. (undefined)'"
+   ],
+   "copy_list": [
+    "TypeError",
+    "Expecting a dict, but received an object of type <class 'list'>."
+   ],
+   "copy_metric": [
+    "ok",
+    "'r2'"
+   ],
+   "copy_same_uid": [
+    "ok",
+    "True"
+   ],
+   "evaluate_list_map": [
+    "TypeError",
+    "Params must be a param map but got <class 'list'>."
+   ],
+   "evaluate_map_of_a_non_dataframe": [
+    "AttributeError",
+    "'int' object has no attribute 'sparkSession'"
+   ],
+   "evaluate_not_a_dataframe": [
+    "AttributeError",
+    "'int' object has no attribute 'sparkSession'"
+   ],
+   "evaluate_str_map": [
+    "TypeError",
+    "Params must be a param map but got <class 'str'>."
+   ],
+   "explainParam_param": [
+    "ok",
+    "'metricName: metric name in evaluation - one of:\\n                       rmse - root mean squared error (default)\\n                       mse - mean squared error\\n                       r2 - r^2 metric\\n                       mae - mean absolute error\\n                       var - explained variance. (default: rmse)'"
+   ],
+   "explainParam_str": [
+    "ok",
+    "'metricName: metric name in evaluation - one of:\\n                       rmse - root mean squared error (default)\\n                       mse - mean squared error\\n                       r2 - r^2 metric\\n                       mae - mean absolute error\\n                       var - explained variance. (default: rmse)'"
+   ],
+   "explainParams": [
+    "ok",
+    "'labelCol: label column name. (default: label)\\nmetricName: metric name in evaluation - one of:\\n                       rmse - root mean squared error (default)\\n                       mse - mean squared error\\n                       r2 - r^2 metric\\n                       mae - mean absolute error\\n                       var - explained variance. (default: rmse)\\npredictionCol: prediction column name. (default: prediction)\\nthroughOrigin: whether the regression is through the origin. (default: False)\\nweightCol: weight column name. If this is not set or empty, we treat all instance weights as 1.0. (undefined)'"
+   ],
+   "extract": [
+    "ok",
+    [
+     "('labelCol', \"'label'\")",
+     "('metricName', \"'rmse'\")",
+     "('predictionCol', \"'prediction'\")",
+     "('throughOrigin', 'False')"
+    ]
+   ],
+   "extract_extra": [
+    "ok",
+    [
+     "('labelCol', \"'label'\")",
+     "('metricName', \"'q'\")",
+     "('predictionCol', \"'prediction'\")",
+     "('throughOrigin', 'False')"
+    ]
+   ],
+   "getLabelCol": [
+    "ok",
+    "'label'"
+   ],
+   "getMetricName": [
+    "ok",
+    "'rmse'"
+   ],
+   "getOrDefault_metric": [
+    "ok",
+    "'rmse'"
+   ],
+   "getParam_method": [
+    "ValueError",
+    "Cannot find param with name evaluate."
+   ],
+   "getParam_nope": [
+    "AttributeError",
+    "'RegressionEvaluator' object has no attribute 'nope'"
+   ],
+   "getPredictionCol": [
+    "ok",
+    "'prediction'"
+   ],
+   "getThroughOrigin": [
+    "ok",
+    "False"
+   ],
+   "getWeightCol": [
+    "KeyError",
+    "Param(parent='RegressionEvaluator_<uid>', name='weightCol', doc='weight column name. If this is not set or empty, we treat all instance weights as 1.0.')"
+   ],
+   "hasDefault_metric": [
+    "ok",
+    "True"
+   ],
+   "hasParam_int": [
+    "TypeError",
+    "hasParam(): paramName must be a string"
+   ],
+   "hasParam_metric": [
+    "ok",
+    "True"
+   ],
+   "hasParam_nope": [
+    "ok",
+    "False"
+   ],
+   "isDefined_metric": [
+    "ok",
+    "True"
+   ],
+   "isLargerBetter": [
+    "ok",
+    "True"
+   ],
+   "isLargerBetter_alt": [
+    "ok",
+    "True"
+   ],
+   "isSet_foreign": [
+    "ValueError",
+    "Param Param(parent='RegressionEvaluator_<uid>', name='metricName', doc='metric name in evaluation - one of:\\n                       rmse - root mean squared error (default)\\n                       mse"
+   ],
+   "isSet_metric_before": [
+    "ok",
+    "False"
+   ],
+   "isSet_nope": [
+    "AttributeError",
+    "'RegressionEvaluator' object has no attribute 'nope'"
+   ],
+   "isinstance_evaluator": [
+    "ok",
+    "True"
+   ],
+   "isinstance_params": [
+    "ok",
+    "True"
+   ],
+   "no_attribute": [
+    "AttributeError",
+    "'RegressionEvaluator' object has no attribute 'fooBarBaz'"
+   ],
+   "orig_metric": [
+    "ok",
+    "'rmse'"
+   ],
+   "param_docs": [
+    "ok",
+    [
+     "'label column name.'",
+     "'metric name in evaluation - one of:\\n                       rmse - root mean squared error (default)\\n                       mse - mean squared error\\n                       r2 - r^2 metric\\n                       mae - mean absolute error\\n                       var - explained variance.'",
+     "'prediction column name.'",
+     "'whether the regression is through the origin.'",
+     "'weight column name. If this is not set or empty, we treat all instance weights as 1.0.'"
+    ]
+   ],
+   "param_names": [
+    "ok",
+    [
+     "'labelCol'",
+     "'metricName'",
+     "'predictionCol'",
+     "'throughOrigin'",
+     "'weightCol'"
+    ]
+   ],
+   "param_parents_are_uid": [
+    "ok",
+    "True"
+   ],
+   "reader_class": [
+    "ok",
+    "('RemoteMLReader', 'pyspark.ml.connect.readwrite')"
+   ],
+   "repr_is_uid": [
+    "ok",
+    "True"
+   ],
+   "resolve_int": [
+    "TypeError",
+    "Cannot resolve 5 as a param."
+   ],
+   "setParams_forces_keywords": [
+    "TypeError",
+    "Method setParams forces keyword arguments."
+   ],
+   "setParams_returns_self": [
+    "ok",
+    "'r2'"
+   ],
+   "setParams_unknown": [
+    "TypeError",
+    "RegressionEvaluator.setParams() got an unexpected keyword argument 'nope'"
+   ],
+   "set_bad_type": [
+    "TypeError",
+    "Could not convert <class 'float'> to string type"
+   ],
+   "set_ok": [
+    "ok",
+    "'r2'"
+   ],
+   "set_str_param": [
+    "AttributeError",
+    "'str' object has no attribute 'parent'"
+   ],
+   "writer_class": [
+    "ok",
+    "('RemoteMLWriter', 'pyspark.ml.connect.readwrite')"
+   ],
+   "writer_no_attribute": [
+    "AttributeError",
+    "'RemoteMLWriter' object has no attribute 'fooBarBaz'"
+   ],
+   "writer_option_map": [
+    "ok",
+    [
+     "('key', '1')",
+     "('x', 'y')"
+    ]
+   ],
+   "writer_should_overwrite": [
+    "ok",
+    "True"
+   ]
+  }
+ }
+}

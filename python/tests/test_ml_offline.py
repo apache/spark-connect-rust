@@ -1098,7 +1098,8 @@ def test_ml_connect_params_argument_of_fit_transform_and_evaluate_as_pyspark(ml_
     base = evaluated(evaluator)
     assert evaluated(evaluator, None) == base
     assert evaluated(evaluator, {}) == base
-    refused(lambda: evaluator.evaluate(df, {"labelCol": "y"}), _NO_PARAM_MAP)
+    # A copy with a param map of Param keys, which the evaluate sends (see test_evaluation_api_offline).
+    refused(lambda: evaluator.evaluate(df, {"labelCol": "y"}), _no_param_map(evaluator, "labelCol"))
     for value in [[], "x"]:
         refused(lambda: evaluator.evaluate(df, value), map_message.format(type(value)))
 
