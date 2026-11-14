@@ -1,0 +1,1444 @@
+{
+ "ALS": {
+  "live": {
+   "est_loaded_isSet_rank": [
+    "ok",
+    "True"
+   ],
+   "est_loaded_params": [
+    "ok",
+    [
+     "('alpha', '1.0')",
+     "('blockSize', '4096')",
+     "('checkpointInterval', '10')",
+     "('coldStartStrategy', \"'nan'\")",
+     "('finalStorageLevel', \"'MEMORY_AND_DISK'\")",
+     "('implicitPrefs', 'False')",
+     "('intermediateStorageLevel', \"'MEMORY_AND_DISK'\")",
+     "('itemCol', \"'item'\")",
+     "('maxIter', '3')",
+     "('nonnegative', 'False')",
+     "('numItemBlocks', '10')",
+     "('numUserBlocks', '10')",
+     "('predictionCol', \"'prediction'\")",
+     "('rank', '2')",
+     "('ratingCol', \"'rating'\")",
+     "('regParam', '0.1')",
+     "('seed', '0')",
+     "('userCol', \"'user'\")"
+    ]
+   ],
+   "est_loaded_rank": [
+    "ok",
+    "2"
+   ],
+   "est_loaded_uid": [
+    "ok",
+    "True"
+   ],
+   "est_save": [
+    "ok",
+    "None"
+   ],
+   "fitMultiple": [
+    "ok",
+    [
+     "(0, 2)",
+     "(1, 3)"
+    ]
+   ],
+   "fit_bad": [
+    "AttributeError",
+    "'int' object has no attribute 'sparkSession'"
+   ],
+   "fit_map": [
+    "ok",
+    "'drop'"
+   ],
+   "isinstance_model": [
+    "ok",
+    "(True, True)"
+   ],
+   "itemFactors_columns": [
+    "ok",
+    [
+     "'id'",
+     "'features'"
+    ]
+   ],
+   "itemFactors_count": [
+    "ok",
+    "3"
+   ],
+   "loaded_explainParams": [
+    "ok",
+    "\"blockSize: block size for stacking input data in matrices. Data is stacked within partitions. If block size is more than remaining data in a partition then it is adjusted to the size of this data. (default: 4096, current: 4096)\\ncoldStartStrategy: strategy for dealing with unknown or new users/items at prediction time. This may be useful in cross-validation or production scenarios, for handling user/item ids the model has not seen in the training data. Supported values: 'nan', 'drop'. (undefined)\\nitemCol: column name for item ids. Ids must be within the integer value range. (current: item)\\npredictionCol: prediction column name. (default: prediction)\\nuserCol: column name for user ids. Ids must be within the integer value range. (current: user)\""
+   ],
+   "loaded_isSet_userCol": [
+    "ok",
+    "True"
+   ],
+   "loaded_rank": [
+    "ok",
+    "2"
+   ],
+   "loaded_transform": [
+    "ok",
+    {
+     "columns": [
+      "user",
+      "item",
+      "rating",
+      "prediction"
+     ],
+     "rows": [
+      "(0, 0, 4.0, 3.717475414276123)",
+      "(0, 1, 2.0, 2.330834150314331)",
+      "(1, 1, 3.0, 2.8548471927642822)",
+      "(1, 2, 5.0, 4.999820709228516)",
+      "(2, 0, 1.0, 1.097004771232605)",
+      "(2, 2, 4.0, 3.8933768272399902)"
+     ]
+    }
+   ],
+   "loaded_uid": [
+    "ok",
+    "True"
+   ],
+   "loaded_userCol": [
+    "ok",
+    "'user'"
+   ],
+   "loaded_userFactors_count": [
+    "ok",
+    "3"
+   ],
+   "model_class": [
+    "ok",
+    "('ALSModel', 'recommendation')"
+   ],
+   "model_explainParams": [
+    "ok",
+    "\"blockSize: block size for stacking input data in matrices. Data is stacked within partitions. If block size is more than remaining data in a partition then it is adjusted to the size of this data. (default: 4096)\\ncoldStartStrategy: strategy for dealing with unknown or new users/items at prediction time. This may be useful in cross-validation or production scenarios, for handling user/item ids the model has not seen in the training data. Supported values: 'nan', 'drop'. (default: nan)\\nitemCol: column name for item ids. Ids must be within the integer value range. (default: item, current: item)\\npredictionCol: prediction column name. (default: prediction)\\nuserCol: column name for user ids. Ids must be within the integer value range. (default: user, current: user)\""
+   ],
+   "model_extract": [
+    "ok",
+    [
+     "('blockSize', '4096')",
+     "('coldStartStrategy', \"'nan'\")",
+     "('itemCol', \"'item'\")",
+     "('predictionCol', \"'prediction'\")",
+     "('userCol', \"'user'\")"
+    ]
+   ],
+   "model_getBlockSize": [
+    "ok",
+    "4096"
+   ],
+   "model_getColdStartStrategy": [
+    "ok",
+    "'nan'"
+   ],
+   "model_getItemCol": [
+    "ok",
+    "'item'"
+   ],
+   "model_getPredictionCol": [
+    "ok",
+    "'prediction'"
+   ],
+   "model_getUserCol": [
+    "ok",
+    "'user'"
+   ],
+   "model_hasDefault_blockSize": [
+    "ok",
+    "True"
+   ],
+   "model_hasDefault_coldStartStrategy": [
+    "ok",
+    "True"
+   ],
+   "model_hasDefault_itemCol": [
+    "ok",
+    "True"
+   ],
+   "model_hasDefault_predictionCol": [
+    "ok",
+    "True"
+   ],
+   "model_hasDefault_userCol": [
+    "ok",
+    "True"
+   ],
+   "model_isSet_blockSize": [
+    "ok",
+    "False"
+   ],
+   "model_isSet_coldStartStrategy": [
+    "ok",
+    "False"
+   ],
+   "model_isSet_itemCol": [
+    "ok",
+    "True"
+   ],
+   "model_isSet_predictionCol": [
+    "ok",
+    "False"
+   ],
+   "model_isSet_userCol": [
+    "ok",
+    "True"
+   ],
+   "model_no_attribute": [
+    "AttributeError",
+    "'ALSModel' object has no attribute 'fooBarBaz'"
+   ],
+   "model_save": [
+    "ok",
+    "None"
+   ],
+   "model_save_again": [
+    "UnknownException",
+    "(java.io.IOException) Path <path>/model already exists. To overwrite it, please use write.overwrite().save(path) for Scala and use write().overwrite().save(path) for Java and Python."
+   ],
+   "model_uid_is_estimator_uid": [
+    "ok",
+    "True"
+   ],
+   "other_session_recommendForItemSubset": [
+    "ok",
+    {
+     "columns": [
+      "item",
+      "recommendations"
+     ],
+     "rows": [
+      "(1, [Row(user=1, rating=2.8548471927642822), Row(user=0, rating=2.330834150314331)])",
+      "(2, [Row(user=1, rating=4.999820709228516), Row(user=0, rating=4.329103946685791)])"
+     ]
+    }
+   ],
+   "other_session_recommendForUserSubset": [
+    "ok",
+    {
+     "columns": [
+      "user",
+      "recommendations"
+     ],
+     "rows": [
+      "(0, [Row(item=2, rating=4.329103946685791), Row(item=0, rating=3.717475414276123)])",
+      "(2, [Row(item=2, rating=3.8933768272399902), Row(item=0, rating=1.097004771232605)])"
+     ]
+    }
+   ],
+   "other_session_transform_collect": [
+    "ok",
+    "'condition CONNECT_ML.CACHE_INVALID'"
+   ],
+   "other_session_transform_columns": [
+    "ok",
+    "'condition CONNECT_ML.CACHE_INVALID'"
+   ],
+   "rank": [
+    "ok",
+    "2"
+   ],
+   "recommendForAllItems": [
+    "ok",
+    {
+     "columns": [
+      "item",
+      "recommendations"
+     ],
+     "rows": [
+      "(0, [Row(user=1, rating=4.543262004852295), Row(user=0, rating=3.717475414276123)])",
+      "(1, [Row(user=1, rating=2.8548471927642822), Row(user=0, rating=2.330834150314331)])",
+      "(2, [Row(user=1, rating=4.999820709228516), Row(user=0, rating=4.329103946685791)])"
+     ]
+    }
+   ],
+   "recommendForAllUsers": [
+    "ok",
+    {
+     "columns": [
+      "user",
+      "recommendations"
+     ],
+     "rows": [
+      "(0, [Row(item=2, rating=4.329103946685791), Row(item=0, rating=3.717475414276123)])",
+      "(1, [Row(item=2, rating=4.999820709228516), Row(item=0, rating=4.543262004852295)])",
+      "(2, [Row(item=2, rating=3.8933768272399902), Row(item=0, rating=1.097004771232605)])"
+     ]
+    }
+   ],
+   "recommendForAllUsers_column": [
+    "PySparkTypeError",
+    "[UNSUPPORTED_DATA_TYPE] Unsupported DataType `Column`."
+   ],
+   "recommendForAllUsers_list": [
+    "PySparkTypeError",
+    "[CANNOT_INFER_ARRAY_ELEMENT_TYPE] Can not infer the element data type, a non-empty list starting with a non-None value is required."
+   ],
+   "recommendForItemSubset": [
+    "ok",
+    {
+     "columns": [
+      "item",
+      "recommendations"
+     ],
+     "rows": [
+      "(1, [Row(user=1, rating=2.8548471927642822), Row(user=0, rating=2.330834150314331)])",
+      "(2, [Row(user=1, rating=4.999820709228516), Row(user=0, rating=4.329103946685791)])"
+     ]
+    }
+   ],
+   "recommendForUserSubset": [
+    "ok",
+    {
+     "columns": [
+      "user",
+      "recommendations"
+     ],
+     "rows": [
+      "(0, [Row(item=2, rating=4.329103946685791), Row(item=0, rating=3.717475414276123)])",
+      "(2, [Row(item=2, rating=3.8933768272399902), Row(item=0, rating=1.097004771232605)])"
+     ]
+    }
+   ],
+   "recommendForUserSubset_object": [
+    "PySparkTypeError",
+    "[UNSUPPORTED_DATA_TYPE] Unsupported DataType `object`."
+   ],
+   "repr_prefix": [
+    "ok",
+    "'ALSModel'"
+   ],
+   "setBlockSize_returns_self": [
+    "ok",
+    "True"
+   ],
+   "setColdStartStrategy_returns_self": [
+    "ok",
+    "True"
+   ],
+   "setItemCol_returns_self": [
+    "ok",
+    "True"
+   ],
+   "setNumBlocks": [
+    "ok",
+    "3"
+   ],
+   "setPredictionCol_returns_self": [
+    "ok",
+    "True"
+   ],
+   "setUserCol_returns_self": [
+    "ok",
+    "True"
+   ],
+   "transform": [
+    "ok",
+    {
+     "columns": [
+      "user",
+      "item",
+      "rating",
+      "prediction"
+     ],
+     "rows": [
+      "(0, 0, 4.0, 3.717475414276123)",
+      "(0, 1, 2.0, 2.330834150314331)",
+      "(1, 1, 3.0, 2.8548471927642822)",
+      "(1, 2, 5.0, 4.999820709228516)",
+      "(2, 0, 1.0, 1.097004771232605)",
+      "(2, 2, 4.0, 3.8933768272399902)"
+     ]
+    }
+   ],
+   "transform_bad": [
+    "AttributeError",
+    "'int' object has no attribute 'sparkSession'"
+   ],
+   "transform_map": [
+    "ok",
+    [
+     "'user'",
+     "'item'",
+     "'rating'",
+     "'q'"
+    ]
+   ],
+   "userFactors_columns": [
+    "ok",
+    [
+     "'id'",
+     "'features'"
+    ]
+   ],
+   "userFactors_count": [
+    "ok",
+    "3"
+   ]
+  },
+  "params_api": {
+   "big_int": [
+    "ok",
+    "True"
+   ],
+   "class_param": [
+    "ok",
+    "('Param', 'undefined', 'maxIter', True, False)"
+   ],
+   "clear": [
+    "ok",
+    "(None, True)"
+   ],
+   "copy_bad_extra": [
+    "TypeError",
+    "Expecting a valid instance of Param, but received: maxIter"
+   ],
+   "copy_class_param": [
+    "ok",
+    "5"
+   ],
+   "copy_explainParams": [
+    "ok",
+    "\"alpha: alpha for implicit preference (default: 1.0)\\nblockSize: block size for stacking input data in matrices. Data is stacked within partitions. If block size is more than remaining data in a partition then it is adjusted to the size of this data. (default: 4096)\\ncheckpointInterval: set checkpoint interval (>= 1) or disable checkpoint (-1). E.g. 10 means that the cache will get checkpointed every 10 iterations. Note: this setting will be ignored if the checkpoint directory is not set in the SparkContext. (default: 10)\\ncoldStartStrategy: strategy for dealing with unknown or new users/items at prediction time. This may be useful in cross-validation or production scenarios, for handling user/item ids the model has not seen in the training data. Supported values: 'nan', 'drop'. (default: nan)\\nfinalStorageLevel: StorageLevel for ALS model factors. (default: MEMORY_AND_DISK)\\nimplicitPrefs: whether to use implicit preference (default: False)\\nintermediateStorageLevel: StorageLevel for intermediate datasets. Cannot be 'NONE'. (default: MEMORY_AND_DISK)\\nitemCol: column name for item ids. Ids must be within the integer value range. (default: item)\\nmaxIter: max number of iterations (>= 0). (default: 10, current: 10)\\nnonnegative: whether to use nonnegative constraint for least squares (default: False)\\nnumItemBlocks: number of item blocks (default: 10)\\nnumUserBlocks: number of user blocks (default: 10)\\npredictionCol: prediction column name. (default: prediction)\\nrank: rank of the factorization (default: 10)\\nratingCol: column name for ratings (default: rating)\\nregParam: regularization parameter (>= 0). (default: 0.1, current: 0.25)\\nseed: random seed. (default: <hash ALS>)\\nuserCol: column name for user ids. Ids must be within the integer value range. (default: user)\""
+   ],
+   "copy_int": [
+    "ok",
+    "10"
+   ],
+   "copy_list": [
+    "TypeError",
+    "Expecting a dict, but received an object of type <class 'list'>."
+   ],
+   "copy_same_uid": [
+    "ok",
+    "True"
+   ],
+   "copy_seed": [
+    "ok",
+    "True"
+   ],
+   "explainParam_param": [
+    "ok",
+    "'regParam: regularization parameter (>= 0). (default: 0.1, current: 0.25)'"
+   ],
+   "explainParam_seed": [
+    "ok",
+    "'seed: random seed. (default: <hash ALS>)'"
+   ],
+   "explainParam_str": [
+    "ok",
+    "'maxIter: max number of iterations (>= 0). (default: 10, current: 5)'"
+   ],
+   "explainParams": [
+    "ok",
+    "\"alpha: alpha for implicit preference (default: 1.0)\\nblockSize: block size for stacking input data in matrices. Data is stacked within partitions. If block size is more than remaining data in a partition then it is adjusted to the size of this data. (default: 4096)\\ncheckpointInterval: set checkpoint interval (>= 1) or disable checkpoint (-1). E.g. 10 means that the cache will get checkpointed every 10 iterations. Note: this setting will be ignored if the checkpoint directory is not set in the SparkContext. (default: 10)\\ncoldStartStrategy: strategy for dealing with unknown or new users/items at prediction time. This may be useful in cross-validation or production scenarios, for handling user/item ids the model has not seen in the training data. Supported values: 'nan', 'drop'. (default: nan)\\nfinalStorageLevel: StorageLevel for ALS model factors. (default: MEMORY_AND_DISK)\\nimplicitPrefs: whether to use implicit preference (default: False)\\nintermediateStorageLevel: StorageLevel for intermediate datasets. Cannot be 'NONE'. (default: MEMORY_AND_DISK)\\nitemCol: column name for item ids. Ids must be within the integer value range. (default: item)\\nmaxIter: max number of iterations (>= 0). (default: 10, current: 5)\\nnonnegative: whether to use nonnegative constraint for least squares (default: False)\\nnumItemBlocks: number of item blocks (default: 10)\\nnumUserBlocks: number of user blocks (default: 10)\\npredictionCol: prediction column name. (default: prediction)\\nrank: rank of the factorization (default: 10)\\nratingCol: column name for ratings (default: rating)\\nregParam: regularization parameter (>= 0). (default: 0.1, current: 0.25)\\nseed: random seed. (default: <hash ALS>)\\nuserCol: column name for user ids. Ids must be within the integer value range. (default: user)\""
+   ],
+   "extract": [
+    "ok",
+    [
+     "('alpha', '1.0')",
+     "('blockSize', '4096')",
+     "('checkpointInterval', '10')",
+     "('coldStartStrategy', \"'nan'\")",
+     "('finalStorageLevel', \"'MEMORY_AND_DISK'\")",
+     "('implicitPrefs', 'False')",
+     "('intermediateStorageLevel', \"'MEMORY_AND_DISK'\")",
+     "('itemCol', \"'item'\")",
+     "('maxIter', '5')",
+     "('nonnegative', 'False')",
+     "('numItemBlocks', '10')",
+     "('numUserBlocks', '10')",
+     "('predictionCol', \"'prediction'\")",
+     "('rank', '10')",
+     "('ratingCol', \"'rating'\")",
+     "('regParam', '0.25')",
+     "('seed', '<hash ALS>')",
+     "('userCol', \"'user'\")"
+    ]
+   ],
+   "extract_extra": [
+    "ok",
+    [
+     "('alpha', '1.0')",
+     "('blockSize', '4096')",
+     "('checkpointInterval', '10')",
+     "('coldStartStrategy', \"'nan'\")",
+     "('finalStorageLevel', \"'MEMORY_AND_DISK'\")",
+     "('implicitPrefs', 'False')",
+     "('intermediateStorageLevel', \"'MEMORY_AND_DISK'\")",
+     "('itemCol', \"'item'\")",
+     "('maxIter', '5')",
+     "('nonnegative', 'False')",
+     "('numItemBlocks', '10')",
+     "('numUserBlocks', '10')",
+     "('predictionCol', \"'prediction'\")",
+     "('rank', '10')",
+     "('ratingCol', \"'rating'\")",
+     "('regParam', '0.5')",
+     "('seed', '<hash ALS>')",
+     "('userCol', \"'user'\")"
+    ]
+   ],
+   "getAlpha": [
+    "ok",
+    1.0
+   ],
+   "getBlockSize": [
+    "ok",
+    "4096"
+   ],
+   "getCheckpointInterval": [
+    "ok",
+    "10"
+   ],
+   "getColdStartStrategy": [
+    "ok",
+    "'nan'"
+   ],
+   "getFinalStorageLevel": [
+    "ok",
+    "'MEMORY_AND_DISK'"
+   ],
+   "getImplicitPrefs": [
+    "ok",
+    "False"
+   ],
+   "getIntermediateStorageLevel": [
+    "ok",
+    "'MEMORY_AND_DISK'"
+   ],
+   "getItemCol": [
+    "ok",
+    "'item'"
+   ],
+   "getMaxIter": [
+    "ok",
+    "5"
+   ],
+   "getNonnegative": [
+    "ok",
+    "False"
+   ],
+   "getNumItemBlocks": [
+    "ok",
+    "10"
+   ],
+   "getNumUserBlocks": [
+    "ok",
+    "10"
+   ],
+   "getOrDefault_int": [
+    "ok",
+    "5"
+   ],
+   "getOrDefault_str": [
+    "ok",
+    "'user'"
+   ],
+   "getParam_method": [
+    "ValueError",
+    "Cannot find param with name fit."
+   ],
+   "getParam_nope": [
+    "AttributeError",
+    "'ALS' object has no attribute 'nope'"
+   ],
+   "getPredictionCol": [
+    "ok",
+    "'prediction'"
+   ],
+   "getRank": [
+    "ok",
+    "10"
+   ],
+   "getRatingCol": [
+    "ok",
+    "'rating'"
+   ],
+   "getRegParam": [
+    "ok",
+    0.25
+   ],
+   "getSeed": [
+    "ok",
+    "<hash ALS>"
+   ],
+   "getUserCol": [
+    "ok",
+    "'user'"
+   ],
+   "grid_of_class_param": [
+    "ok",
+    [
+     [
+      "('undefined', 'maxIter', 1)"
+     ],
+     [
+      "('undefined', 'maxIter', 2)"
+     ]
+    ]
+   ],
+   "hasDefault_float": [
+    "ok",
+    "True"
+   ],
+   "hasDefault_seed": [
+    "ok",
+    "True"
+   ],
+   "hasDefault_str": [
+    "ok",
+    "True"
+   ],
+   "hasParam_float": [
+    "ok",
+    "True"
+   ],
+   "hasParam_int": [
+    "TypeError",
+    "hasParam(): paramName must be a string"
+   ],
+   "hasParam_nope": [
+    "ok",
+    "False"
+   ],
+   "isDefined_str": [
+    "ok",
+    "True"
+   ],
+   "isSet_float": [
+    "ok",
+    "True"
+   ],
+   "isSet_foreign": [
+    "ValueError",
+    "Param Param(parent='ALS_<uid>', name='maxIter', doc='max number of iterations (>= 0).') does not belong to ALS_<uid>."
+   ],
+   "isSet_int": [
+    "ok",
+    "True"
+   ],
+   "isSet_nope": [
+    "AttributeError",
+    "'ALS' object has no attribute 'nope'"
+   ],
+   "isSet_seed": [
+    "ok",
+    "False"
+   ],
+   "isinstance_estimator": [
+    "ok",
+    "True"
+   ],
+   "isinstance_params": [
+    "ok",
+    "True"
+   ],
+   "no_attribute": [
+    "AttributeError",
+    "'ALS' object has no attribute 'fooBarBaz'"
+   ],
+   "orig_int": [
+    "ok",
+    "5"
+   ],
+   "param_docs": [
+    "ok",
+    [
+     "'alpha for implicit preference'",
+     "'block size for stacking input data in matrices. Data is stacked within partitions. If block size is more than remaining data in a partition then it is adjusted to the size of this data.'",
+     "'set checkpoint interval (>= 1) or disable checkpoint (-1). E.g. 10 means that the cache will get checkpointed every 10 iterations. Note: this setting will be ignored if the checkpoint directory is not set in the SparkContext.'",
+     "\"strategy for dealing with unknown or new users/items at prediction time. This may be useful in cross-validation or production scenarios, for handling user/item ids the model has not seen in the training data. Supported values: 'nan', 'drop'.\"",
+     "'StorageLevel for ALS model factors.'",
+     "'whether to use implicit preference'",
+     "\"StorageLevel for intermediate datasets. Cannot be 'NONE'.\"",
+     "'column name for item ids. Ids must be within the integer value range.'",
+     "'max number of iterations (>= 0).'",
+     "'whether to use nonnegative constraint for least squares'",
+     "'number of item blocks'",
+     "'number of user blocks'",
+     "'prediction column name.'",
+     "'rank of the factorization'",
+     "'column name for ratings'",
+     "'regularization parameter (>= 0).'",
+     "'random seed.'",
+     "'column name for user ids. Ids must be within the integer value range.'"
+    ]
+   ],
+   "param_names": [
+    "ok",
+    [
+     "'alpha'",
+     "'blockSize'",
+     "'checkpointInterval'",
+     "'coldStartStrategy'",
+     "'finalStorageLevel'",
+     "'implicitPrefs'",
+     "'intermediateStorageLevel'",
+     "'itemCol'",
+     "'maxIter'",
+     "'nonnegative'",
+     "'numItemBlocks'",
+     "'numUserBlocks'",
+     "'predictionCol'",
+     "'rank'",
+     "'ratingCol'",
+     "'regParam'",
+     "'seed'",
+     "'userCol'"
+    ]
+   ],
+   "param_parents_are_uid": [
+    "ok",
+    "True"
+   ],
+   "repr_is_uid": [
+    "ok",
+    "True"
+   ],
+   "resolve_int": [
+    "TypeError",
+    "Cannot resolve 5 as a param."
+   ],
+   "seed_is_class_name_hash": [
+    "ok",
+    "True"
+   ],
+   "seed_kwarg": [
+    "ok",
+    "'seed: random seed. (default: <hash ALS>, current: 7)'"
+   ],
+   "setSeed": [
+    "ok",
+    "42"
+   ],
+   "set_bad_type": [
+    "TypeError",
+    "Could not convert x to int"
+   ],
+   "set_ok": [
+    "ok",
+    "7"
+   ],
+   "set_str_param": [
+    "AttributeError",
+    "'str' object has no attribute 'parent'"
+   ]
+  }
+ },
+ "FPGrowth": {
+  "live": {
+   "associationRules": [
+    "ok",
+    {
+     "columns": [
+      "antecedent",
+      "consequent",
+      "confidence",
+      "lift",
+      "support"
+     ],
+     "rows": [
+      "(['bread'], ['butter'], 0.5, 1.25, 0.4)",
+      "(['bread'], ['milk'], 0.75, 1.25, 0.6)",
+      "(['butter'], ['bread'], 1.0, 1.25, 0.4)",
+      "(['milk'], ['bread'], 1.0, 1.25, 0.6)"
+     ]
+    }
+   ],
+   "associationRules_count": [
+    "ok",
+    "4"
+   ],
+   "est_loaded_params": [
+    "ok",
+    [
+     "('itemsCol', \"'items'\")",
+     "('minConfidence', '0.5')",
+     "('minSupport', '0.4')",
+     "('predictionCol', \"'prediction'\")"
+    ]
+   ],
+   "est_loaded_uid": [
+    "ok",
+    "True"
+   ],
+   "est_save": [
+    "ok",
+    "None"
+   ],
+   "fitMultiple": [
+    "ok",
+    [
+     "(0, 0.4)",
+     "(1, 0.6)"
+    ]
+   ],
+   "fit_bad": [
+    "AttributeError",
+    "'int' object has no attribute 'sparkSession'"
+   ],
+   "fit_map": [
+    "ok",
+    0.6
+   ],
+   "freqItemsets": [
+    "ok",
+    {
+     "columns": [
+      "items",
+      "freq"
+     ],
+     "rows": [
+      "(['bread'], 4)",
+      "(['butter', 'bread'], 2)",
+      "(['butter'], 2)",
+      "(['milk', 'bread'], 3)",
+      "(['milk'], 3)"
+     ]
+    }
+   ],
+   "freqItemsets_count": [
+    "ok",
+    "5"
+   ],
+   "isinstance_model": [
+    "ok",
+    "(True, True)"
+   ],
+   "loaded_freqItemsets_count": [
+    "ok",
+    "5"
+   ],
+   "loaded_isSet_minSupport": [
+    "ok",
+    "True"
+   ],
+   "loaded_minSupport": [
+    "ok",
+    0.4
+   ],
+   "loaded_transform": [
+    "ok",
+    {
+     "columns": [
+      "items",
+      "prediction"
+     ],
+     "rows": [
+      "(['beer'], [])",
+      "(['bread', 'butter'], ['milk'])",
+      "(['milk', 'bread', 'butter'], [])",
+      "(['milk', 'bread'], ['butter'])",
+      "(['milk', 'bread'], ['butter'])"
+     ]
+    }
+   ],
+   "loaded_uid": [
+    "ok",
+    "True"
+   ],
+   "model_class": [
+    "ok",
+    "('FPGrowthModel', 'fpm')"
+   ],
+   "model_explainParams": [
+    "ok",
+    "'itemsCol: items column name (default: items, current: items)\\nminConfidence: Minimal confidence for generating Association Rule. [0.0, 1.0]. minConfidence will not affect the mining for frequent itemsets, but will affect the association rules generation. (default: 0.8, current: 0.5)\\nminSupport: Minimal support level of the frequent pattern. [0.0, 1.0]. Any pattern that appears more than (minSupport * size-of-the-dataset) times will be output in the frequent itemsets. (default: 0.3, current: 0.4)\\nnumPartitions: Number of partitions (at least 1) used by parallel FP-growth. By default the param is not set, and partition number of the input dataset is used. (undefined)\\npredictionCol: prediction column name. (default: prediction)'"
+   ],
+   "model_extract": [
+    "ok",
+    [
+     "('itemsCol', \"'items'\")",
+     "('minConfidence', '0.5')",
+     "('minSupport', '0.4')",
+     "('predictionCol', \"'prediction'\")"
+    ]
+   ],
+   "model_getItemsCol": [
+    "ok",
+    "'items'"
+   ],
+   "model_getMinConfidence": [
+    "ok",
+    0.5
+   ],
+   "model_getMinSupport": [
+    "ok",
+    0.4
+   ],
+   "model_getNumPartitions": [
+    "KeyError",
+    "Param(parent='FPGrowth_<uid>', name='numPartitions', doc='Number of partitions (at least 1) used by parallel FP-growth. By default the param is not set, and partition number of the input dataset is us"
+   ],
+   "model_getPredictionCol": [
+    "ok",
+    "'prediction'"
+   ],
+   "model_hasDefault_itemsCol": [
+    "ok",
+    "True"
+   ],
+   "model_hasDefault_minConfidence": [
+    "ok",
+    "True"
+   ],
+   "model_hasDefault_minSupport": [
+    "ok",
+    "True"
+   ],
+   "model_hasDefault_numPartitions": [
+    "ok",
+    "False"
+   ],
+   "model_hasDefault_predictionCol": [
+    "ok",
+    "True"
+   ],
+   "model_isSet_itemsCol": [
+    "ok",
+    "True"
+   ],
+   "model_isSet_minConfidence": [
+    "ok",
+    "True"
+   ],
+   "model_isSet_minSupport": [
+    "ok",
+    "True"
+   ],
+   "model_isSet_numPartitions": [
+    "ok",
+    "False"
+   ],
+   "model_isSet_predictionCol": [
+    "ok",
+    "False"
+   ],
+   "model_no_attribute": [
+    "AttributeError",
+    "'FPGrowthModel' object has no attribute 'fooBarBaz'"
+   ],
+   "model_save": [
+    "ok",
+    "None"
+   ],
+   "model_uid_is_estimator_uid": [
+    "ok",
+    "True"
+   ],
+   "other_session_transform_collect": [
+    "ok",
+    "'condition CONNECT_ML.CACHE_INVALID'"
+   ],
+   "other_session_transform_columns": [
+    "ok",
+    "'condition CONNECT_ML.CACHE_INVALID'"
+   ],
+   "repr_prefix": [
+    "ok",
+    "'FPGrowthModel'"
+   ],
+   "setItemsCol_returns_self": [
+    "ok",
+    "True"
+   ],
+   "setMinConfidence_returns_self": [
+    "ok",
+    "True"
+   ],
+   "setPredictionCol_returns_self": [
+    "ok",
+    "True"
+   ],
+   "transform": [
+    "ok",
+    {
+     "columns": [
+      "items",
+      "prediction"
+     ],
+     "rows": [
+      "(['beer'], [])",
+      "(['bread', 'butter'], ['milk'])",
+      "(['milk', 'bread', 'butter'], [])",
+      "(['milk', 'bread'], ['butter'])",
+      "(['milk', 'bread'], ['butter'])"
+     ]
+    }
+   ],
+   "transform_bad": [
+    "AttributeError",
+    "'int' object has no attribute 'sparkSession'"
+   ],
+   "transform_map": [
+    "ok",
+    [
+     "'items'",
+     "'q'"
+    ]
+   ]
+  },
+  "params_api": {
+   "big_int": [
+    "ok",
+    "True"
+   ],
+   "class_param": [
+    "ok",
+    "('Param', 'undefined', 'numPartitions', True, False)"
+   ],
+   "clear": [
+    "ok",
+    "(None, True)"
+   ],
+   "copy_bad_extra": [
+    "TypeError",
+    "Expecting a valid instance of Param, but received: numPartitions"
+   ],
+   "copy_class_param": [
+    "ok",
+    "3"
+   ],
+   "copy_explainParams": [
+    "ok",
+    "'itemsCol: items column name (default: items)\\nminConfidence: Minimal confidence for generating Association Rule. [0.0, 1.0]. minConfidence will not affect the mining for frequent itemsets, but will affect the association rules generation. (default: 0.8)\\nminSupport: Minimal support level of the frequent pattern. [0.0, 1.0]. Any pattern that appears more than (minSupport * size-of-the-dataset) times will be output in the frequent itemsets. (default: 0.3, current: 0.25)\\nnumPartitions: Number of partitions (at least 1) used by parallel FP-growth. By default the param is not set, and partition number of the input dataset is used. (current: 10)\\npredictionCol: prediction column name. (default: prediction)'"
+   ],
+   "copy_int": [
+    "ok",
+    "10"
+   ],
+   "copy_list": [
+    "TypeError",
+    "Expecting a dict, but received an object of type <class 'list'>."
+   ],
+   "copy_same_uid": [
+    "ok",
+    "True"
+   ],
+   "explainParam_param": [
+    "ok",
+    "'minSupport: Minimal support level of the frequent pattern. [0.0, 1.0]. Any pattern that appears more than (minSupport * size-of-the-dataset) times will be output in the frequent itemsets. (default: 0.3, current: 0.25)'"
+   ],
+   "explainParam_str": [
+    "ok",
+    "'numPartitions: Number of partitions (at least 1) used by parallel FP-growth. By default the param is not set, and partition number of the input dataset is used. (current: 3)'"
+   ],
+   "explainParams": [
+    "ok",
+    "'itemsCol: items column name (default: items)\\nminConfidence: Minimal confidence for generating Association Rule. [0.0, 1.0]. minConfidence will not affect the mining for frequent itemsets, but will affect the association rules generation. (default: 0.8)\\nminSupport: Minimal support level of the frequent pattern. [0.0, 1.0]. Any pattern that appears more than (minSupport * size-of-the-dataset) times will be output in the frequent itemsets. (default: 0.3, current: 0.25)\\nnumPartitions: Number of partitions (at least 1) used by parallel FP-growth. By default the param is not set, and partition number of the input dataset is used. (current: 3)\\npredictionCol: prediction column name. (default: prediction)'"
+   ],
+   "extract": [
+    "ok",
+    [
+     "('itemsCol', \"'items'\")",
+     "('minConfidence', '0.8')",
+     "('minSupport', '0.25')",
+     "('numPartitions', '3')",
+     "('predictionCol', \"'prediction'\")"
+    ]
+   ],
+   "extract_extra": [
+    "ok",
+    [
+     "('itemsCol', \"'items'\")",
+     "('minConfidence', '0.8')",
+     "('minSupport', '0.5')",
+     "('numPartitions', '3')",
+     "('predictionCol', \"'prediction'\")"
+    ]
+   ],
+   "getItemsCol": [
+    "ok",
+    "'items'"
+   ],
+   "getMinConfidence": [
+    "ok",
+    0.8
+   ],
+   "getMinSupport": [
+    "ok",
+    0.25
+   ],
+   "getNumPartitions": [
+    "ok",
+    "3"
+   ],
+   "getOrDefault_int": [
+    "ok",
+    "3"
+   ],
+   "getOrDefault_str": [
+    "ok",
+    "'items'"
+   ],
+   "getParam_method": [
+    "ValueError",
+    "Cannot find param with name fit."
+   ],
+   "getParam_nope": [
+    "AttributeError",
+    "'FPGrowth' object has no attribute 'nope'"
+   ],
+   "getPredictionCol": [
+    "ok",
+    "'prediction'"
+   ],
+   "grid_of_class_param": [
+    "ok",
+    [
+     [
+      "('undefined', 'numPartitions', 1)"
+     ],
+     [
+      "('undefined', 'numPartitions', 2)"
+     ]
+    ]
+   ],
+   "hasDefault_float": [
+    "ok",
+    "True"
+   ],
+   "hasDefault_str": [
+    "ok",
+    "True"
+   ],
+   "hasParam_float": [
+    "ok",
+    "True"
+   ],
+   "hasParam_int": [
+    "TypeError",
+    "hasParam(): paramName must be a string"
+   ],
+   "hasParam_nope": [
+    "ok",
+    "False"
+   ],
+   "isDefined_str": [
+    "ok",
+    "True"
+   ],
+   "isSet_float": [
+    "ok",
+    "True"
+   ],
+   "isSet_foreign": [
+    "ValueError",
+    "Param Param(parent='FPGrowth_<uid>', name='numPartitions', doc='Number of partitions (at least 1) used by parallel FP-growth. By default the param is not set, and partition number of the input dataset"
+   ],
+   "isSet_int": [
+    "ok",
+    "True"
+   ],
+   "isSet_nope": [
+    "AttributeError",
+    "'FPGrowth' object has no attribute 'nope'"
+   ],
+   "isinstance_estimator": [
+    "ok",
+    "True"
+   ],
+   "isinstance_params": [
+    "ok",
+    "True"
+   ],
+   "no_attribute": [
+    "AttributeError",
+    "'FPGrowth' object has no attribute 'fooBarBaz'"
+   ],
+   "orig_int": [
+    "ok",
+    "3"
+   ],
+   "param_docs": [
+    "ok",
+    [
+     "'items column name'",
+     "'Minimal confidence for generating Association Rule. [0.0, 1.0]. minConfidence will not affect the mining for frequent itemsets, but will affect the association rules generation.'",
+     "'Minimal support level of the frequent pattern. [0.0, 1.0]. Any pattern that appears more than (minSupport * size-of-the-dataset) times will be output in the frequent itemsets.'",
+     "'Number of partitions (at least 1) used by parallel FP-growth. By default the param is not set, and partition number of the input dataset is used.'",
+     "'prediction column name.'"
+    ]
+   ],
+   "param_names": [
+    "ok",
+    [
+     "'itemsCol'",
+     "'minConfidence'",
+     "'minSupport'",
+     "'numPartitions'",
+     "'predictionCol'"
+    ]
+   ],
+   "param_parents_are_uid": [
+    "ok",
+    "True"
+   ],
+   "repr_is_uid": [
+    "ok",
+    "True"
+   ],
+   "resolve_int": [
+    "TypeError",
+    "Cannot resolve 5 as a param."
+   ],
+   "set_bad_type": [
+    "TypeError",
+    "Could not convert x to int"
+   ],
+   "set_ok": [
+    "ok",
+    "7"
+   ],
+   "set_str_param": [
+    "AttributeError",
+    "'str' object has no attribute 'parent'"
+   ]
+  }
+ },
+ "PrefixSpan": {
+  "live": {
+   "findFrequentSequentialPatterns": [
+    "ok",
+    {
+     "columns": [
+      "sequence",
+      "freq"
+     ],
+     "rows": [
+      "([[1, 2]], 3)",
+      "([[1], [3]], 2)",
+      "([[1]], 3)",
+      "([[2]], 3)",
+      "([[3]], 2)"
+     ]
+    }
+   ],
+   "findFrequentSequentialPatterns_count": [
+    "ok",
+    "5"
+   ],
+   "findFrequentSequentialPatterns_setters": [
+    "ok",
+    0.25
+   ]
+  },
+  "params_api": {
+   "big_int": [
+    "ok",
+    "True"
+   ],
+   "class_param": [
+    "ok",
+    "('Param', 'undefined', 'maxPatternLength', True, False)"
+   ],
+   "clear": [
+    "ok",
+    "(None, True)"
+   ],
+   "copy_bad_extra": [
+    "TypeError",
+    "Expecting a valid instance of Param, but received: maxPatternLength"
+   ],
+   "copy_class_param": [
+    "ok",
+    "3"
+   ],
+   "copy_explainParams": [
+    "ok",
+    "'maxLocalProjDBSize: The maximum number of items (including delimiters used in the internal storage format) allowed in a projected database before local processing. If a projected database exceeds this size, another iteration of distributed prefix growth is run. Must be > 0. (default: 32000000)\\nmaxPatternLength: The maximal length of the sequential pattern. Must be > 0. (default: 10, current: 10)\\nminSupport: The minimal support level of the sequential pattern. Sequential pattern that appears more than (minSupport * size-of-the-dataset) times will be output. Must be >= 0. (default: 0.1, current: 0.25)\\nsequenceCol: The name of the sequence column in dataset, rows with nulls in this column are ignored. (default: sequence)'"
+   ],
+   "copy_int": [
+    "ok",
+    "10"
+   ],
+   "copy_list": [
+    "TypeError",
+    "Expecting a dict, but received an object of type <class 'list'>."
+   ],
+   "copy_same_uid": [
+    "ok",
+    "True"
+   ],
+   "explainParam_param": [
+    "ok",
+    "'minSupport: The minimal support level of the sequential pattern. Sequential pattern that appears more than (minSupport * size-of-the-dataset) times will be output. Must be >= 0. (default: 0.1, current: 0.25)'"
+   ],
+   "explainParam_str": [
+    "ok",
+    "'maxPatternLength: The maximal length of the sequential pattern. Must be > 0. (default: 10, current: 3)'"
+   ],
+   "explainParams": [
+    "ok",
+    "'maxLocalProjDBSize: The maximum number of items (including delimiters used in the internal storage format) allowed in a projected database before local processing. If a projected database exceeds this size, another iteration of distributed prefix growth is run. Must be > 0. (default: 32000000)\\nmaxPatternLength: The maximal length of the sequential pattern. Must be > 0. (default: 10, current: 3)\\nminSupport: The minimal support level of the sequential pattern. Sequential pattern that appears more than (minSupport * size-of-the-dataset) times will be output. Must be >= 0. (default: 0.1, current: 0.25)\\nsequenceCol: The name of the sequence column in dataset, rows with nulls in this column are ignored. (default: sequence)'"
+   ],
+   "extract": [
+    "ok",
+    [
+     "('maxLocalProjDBSize', '32000000')",
+     "('maxPatternLength', '3')",
+     "('minSupport', '0.25')",
+     "('sequenceCol', \"'sequence'\")"
+    ]
+   ],
+   "extract_extra": [
+    "ok",
+    [
+     "('maxLocalProjDBSize', '32000000')",
+     "('maxPatternLength', '3')",
+     "('minSupport', '0.5')",
+     "('sequenceCol', \"'sequence'\")"
+    ]
+   ],
+   "getMaxLocalProjDBSize": [
+    "ok",
+    "32000000"
+   ],
+   "getMaxPatternLength": [
+    "ok",
+    "3"
+   ],
+   "getMinSupport": [
+    "ok",
+    0.25
+   ],
+   "getOrDefault_int": [
+    "ok",
+    "3"
+   ],
+   "getOrDefault_str": [
+    "ok",
+    "'sequence'"
+   ],
+   "getParam_method": [
+    "AttributeError",
+    "'PrefixSpan' object has no attribute 'fit'"
+   ],
+   "getParam_nope": [
+    "AttributeError",
+    "'PrefixSpan' object has no attribute 'nope'"
+   ],
+   "getSequenceCol": [
+    "ok",
+    "'sequence'"
+   ],
+   "grid_of_class_param": [
+    "ok",
+    [
+     [
+      "('undefined', 'maxPatternLength', 1)"
+     ],
+     [
+      "('undefined', 'maxPatternLength', 2)"
+     ]
+    ]
+   ],
+   "hasDefault_float": [
+    "ok",
+    "True"
+   ],
+   "hasDefault_str": [
+    "ok",
+    "True"
+   ],
+   "hasParam_float": [
+    "ok",
+    "True"
+   ],
+   "hasParam_int": [
+    "TypeError",
+    "hasParam(): paramName must be a string"
+   ],
+   "hasParam_nope": [
+    "ok",
+    "False"
+   ],
+   "isDefined_str": [
+    "ok",
+    "True"
+   ],
+   "isSet_float": [
+    "ok",
+    "True"
+   ],
+   "isSet_foreign": [
+    "ValueError",
+    "Param Param(parent='PrefixSpan_<uid>', name='maxPatternLength', doc='The maximal length of the sequential pattern. Must be > 0.') does not belong to PrefixSpan_<uid>."
+   ],
+   "isSet_int": [
+    "ok",
+    "True"
+   ],
+   "isSet_nope": [
+    "AttributeError",
+    "'PrefixSpan' object has no attribute 'nope'"
+   ],
+   "isinstance_estimator": [
+    "ok",
+    "False"
+   ],
+   "isinstance_params": [
+    "ok",
+    "True"
+   ],
+   "no_attribute": [
+    "AttributeError",
+    "'PrefixSpan' object has no attribute 'fooBarBaz'"
+   ],
+   "orig_int": [
+    "ok",
+    "3"
+   ],
+   "param_docs": [
+    "ok",
+    [
+     "'The maximum number of items (including delimiters used in the internal storage format) allowed in a projected database before local processing. If a projected database exceeds this size, another iteration of distributed prefix growth is run. Must be > 0.'",
+     "'The maximal length of the sequential pattern. Must be > 0.'",
+     "'The minimal support level of the sequential pattern. Sequential pattern that appears more than (minSupport * size-of-the-dataset) times will be output. Must be >= 0.'",
+     "'The name of the sequence column in dataset, rows with nulls in this column are ignored.'"
+    ]
+   ],
+   "param_names": [
+    "ok",
+    [
+     "'maxLocalProjDBSize'",
+     "'maxPatternLength'",
+     "'minSupport'",
+     "'sequenceCol'"
+    ]
+   ],
+   "param_parents_are_uid": [
+    "ok",
+    "True"
+   ],
+   "repr_is_uid": [
+    "ok",
+    "True"
+   ],
+   "resolve_int": [
+    "TypeError",
+    "Cannot resolve 5 as a param."
+   ],
+   "set_bad_type": [
+    "TypeError",
+    "Could not convert x to int"
+   ],
+   "set_ok": [
+    "ok",
+    "7"
+   ],
+   "set_str_param": [
+    "AttributeError",
+    "'str' object has no attribute 'parent'"
+   ]
+  }
+ }
+}
