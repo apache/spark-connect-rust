@@ -156,6 +156,29 @@ def test_helper_arguments_are_serialized_as_pyspark(session, case):
     assert _requests_but_deletes(service) == sent
 
 
+def test_a_typed_pair_argument_raises_its_conversion_error(session):
+    # PySpark's serialize sends a (value, DataType) pair as a literal of that type, which the
+    # native classes do not convert: a pair raises the UNSUPPORTED_DATA_TYPE of a tuple, before any
+    # request (see docs/compatibility.md).
+    from pyspark.errors import PySparkTypeError
+    from pyspark.sql.types import IntegerType, StringType
+
+    spark, service = session
+    stat = api()
+    frame = spark.range(1)
+    sent = _requests_but_deletes(service)
+    for operation in [
+        lambda: stat.ChiSquareTest.test((1, IntegerType()), "features", "label"),
+        lambda: stat.ChiSquareTest.test(frame, ("features", StringType()), "label"),
+        lambda: stat.Correlation.corr(frame, "features", ("pearson", StringType())),
+    ]:
+        with pytest.raises(PySparkTypeError) as error:
+            operation()
+        assert error.value.getCondition() == "UNSUPPORTED_DATA_TYPE"
+        assert error.value.getMessageParameters() == {"data_type": "tuple"}
+    assert _requests_but_deletes(service) == sent
+
+
 @pytest.mark.parametrize("metric", FIXTURE["metrics"])
 @pytest.mark.parametrize(
     "features,weight", [("features", None), (None, None), (1, None), (F.col("features"), "weight")]

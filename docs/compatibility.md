@@ -1218,8 +1218,9 @@ PySpark's `UNSUPPORTED_DATA_TYPE`, and another argument that cannot be a literal
 its conversion. A literal of another type than the helper takes, such as a dataset that is not a
 DataFrame or a column name that is not a str, is sent as PySpark sends it, and the server rejects it
 when the result is analyzed or collected (`tests/golden/statistics_arguments.json` records these
-cases of official PySpark). The KS test converts its parameters with `float()` first, as PySpark
-does. Results retain any fitted models used by their input plans.
+cases of official PySpark). A `(value, DataType)` pair, which PySpark sends as a literal of that
+type, raises the `UNSUPPORTED_DATA_TYPE` of a tuple here. The KS test converts its parameters with
+`float()` first, as PySpark does. Results retain any fitted models used by their input plans.
 
 `Summarizer.metrics(...).summary(features, weight)` builds a SQL aggregate that
 works in `select` and grouped aggregations. All ten metrics are supported:
