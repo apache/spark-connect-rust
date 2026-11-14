@@ -468,8 +468,8 @@ def render_license(components, apache_text, *, include_wheel_sources=True):
         for c in headings[expr]:
             out.append(f"{c.coordinates}\n")
         out.append("\n")
-    out.append(SEPARATOR + "\n")
     if include_wheel_sources:
+        out.append(SEPARATOR + "\n")
         out.append(
             "The Python and data components of the wheels are not Rust dependencies. They are\n"
             "listed in LICENSE: python/pyspark/loose_version.py (Python Software Foundation\n"

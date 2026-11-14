@@ -141,10 +141,13 @@ can differ between zlib versions.
 Every platform, all-platform and macOS universal JAR includes the license and
 notice texts for the JNI library's normal, non-proc-macro dependencies across
 all four supported Cargo targets. They are stored in `META-INF/LICENSE`,
-`META-INF/NOTICE` and `META-INF/native-dependencies.json`. After changing dependency
-or manifest inputs, run `python3 scripts/gen_native_binary_licenses.py` and commit
-the regenerated `jvm/native-licenses/` assets. Packaging checks their recorded
-input and content hashes without running Cargo.
+`META-INF/NOTICE` and `META-INF/native-dependencies.json`. The inventory records
+whole-file hashes of `Cargo.lock`, root `Cargo.toml`, the `spark-connect-proto`,
+`spark-connect-server` and nested JNI `Cargo.toml` files, `LICENSE`, `NOTICE`,
+`scripts/gen_binary_licenses.py` and `scripts/gen_native_binary_licenses.py`.
+After any change to these files, run `python3 scripts/gen_native_binary_licenses.py`
+and commit the regenerated `jvm/native-licenses/` assets, even if the JNI dependency
+closure is unchanged. Packaging checks input and content hashes without running Cargo.
 
 For example, launch the packaged native library on macOS ARM64:
 
@@ -284,6 +287,11 @@ known sessions with `ReleaseSession` and allowing their owned work and deferred
 cleanup to drain, or by restarting the server. Releasing an operation or closing
 its result stream can also release its task capacity; it does not release the
 session. Abandoned sessions whose identifiers are lost remain until a restart.
+
+A cleanup failure while serving keeps its admission permits reserved and is not
+retried automatically. An explicit `NativeEngineServer.close()` can retry a
+transient JNI attachment failure while stopping the server; a partial Java cleanup
+failure remains retained until the hosting JVM restarts.
 
 Deferred session closes run serially on one process-wide cleanup lane shared by
 all embedded engines using the native library. A slow or blocked session close

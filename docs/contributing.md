@@ -254,6 +254,14 @@ vendored ones included.
 
 ## Pull requests
 
+Native JAR license assets record whole-file hashes of `Cargo.lock`, root
+`Cargo.toml`, the `spark-connect-proto`, `spark-connect-server` and nested JNI
+`Cargo.toml` files, `LICENSE`, `NOTICE`, `scripts/gen_binary_licenses.py` and
+`scripts/gen_native_binary_licenses.py`. After any change to these files, run
+`python3 scripts/gen_native_binary_licenses.py` and commit the regenerated
+`crates/spark-connect-server/jvm/native-licenses/` assets, even if the JNI dependency
+closure is unchanged. CI and native packaging reject stale assets.
+
 Open PRs against
 [`apache/spark-connect-rust`](https://github.com/apache/spark-connect-rust).
 Keep the PR description tied to its JIRA. Before you push, make sure `cargo test` and

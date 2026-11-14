@@ -82,7 +82,8 @@ struct ArrowArray {
 
 /* A non-null lease/callback pair transfers ownership on every outcome, including EOF/error.
  * defer_release runs on the final consumer thread (or immediately when no array is returned)
- * and must queue owner disposal; owner may be NULL when no Java batch was acquired.
+ * and must queue owner disposal. With no Java batch, owner may be NULL or a non-NULL
+ * owner without a batch; either form still consumes the lease exactly once.
  * Checked cleanup retains the owner on failure, so its caller can retry without losing the lease. */
 int spark_connect_engine_next_arrow(void *query, struct ArrowArray *out, void *lease,
     void (*defer_release)(void *lease, void *owner), BridgeBuffer *error);

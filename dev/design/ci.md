@@ -263,17 +263,29 @@ the README badges read.
 The WIP `spark-connect-server` and `spark-connect-jni` crates are optional
 workspace members, excluded from default Cargo builds. Their dedicated workflow
 runs on changes to these crates, their protocol/client dependencies, workspace
-dependencies and build configuration. Existing client workflows remain in place.
+dependencies and build configuration. Its path filters also include `LICENSE`,
+`NOTICE`, both `scripts/gen_binary_licenses.py` and
+`scripts/gen_native_binary_licenses.py`, and their generator tests. Existing client
+workflows remain in place.
 
 The workflow uses native Linux and macOS runners for x86-64 and ARM64. Each job
 installs Rust 1.88, JDK 21 and the hash-locked `protoc-wheel-0==30.2` compiler,
 then runs the server and JNI Rust tests, strict native Clippy, Python
 acceptance/launcher and packaging tests, and the C Arrow ownership tests with
-and without sanitizers. LeakSanitizer is enabled on Linux; macOS runs
+and without sanitizers. It also runs the license-generator tests and
+`python3 -B scripts/gen_native_binary_licenses.py --check` for the four-target JNI
+dependency license bundle. LeakSanitizer is enabled on Linux; macOS runs
 AddressSanitizer and UndefinedBehaviorSanitizer without leak
 detection. The Rust tests use deterministic engine fixtures, and the JDK provides
 the C adapter's JNI headers. Workspace-wide lint also installs JDK 21 because its
 `--workspace` Clippy command includes the JNI crate.
+
+The license inventory records whole-file hashes of `Cargo.lock`, root `Cargo.toml`,
+the `spark-connect-proto`, `spark-connect-server` and nested JNI `Cargo.toml` files,
+`LICENSE`, `NOTICE` and both generator scripts named above. After any change to
+these files, run `python3 scripts/gen_native_binary_licenses.py` and commit the
+regenerated `crates/spark-connect-server/jvm/native-licenses/` assets, even when
+the JNI dependency closure is unchanged. Both CI and packaging reject stale hashes.
 
 Each platform job builds a release library, validates its binary architecture,
 packages it in a platform JAR with ZIP DEFLATE compression, and runs the
