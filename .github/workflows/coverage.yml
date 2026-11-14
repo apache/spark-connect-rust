@@ -260,6 +260,7 @@ jobs:
             tests/test_ml_offline.py \
             tests/test_ml_api_offline.py \
             tests/test_logistic_api_offline.py \
+            tests/test_misc_api_offline.py \
             tests/test_ml_features_offline.py \
             tests/test_feature_api_offline.py \
             tests/test_frequent_patterns_offline.py \

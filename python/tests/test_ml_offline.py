@@ -969,7 +969,8 @@ def test_ml_connect_set_params_as_pyspark(ml_mock):
 
 def test_ml_connect_one_vs_rest_set_params_sets_its_classifier_as_its_constructor(ml_mock):
     # As the constructor, setParams takes the classifier by setClassifier: a classifier of None
-    # clears it, and the fit of a OneVsRest with none raises the ValueError of its fit.
+    # clears it, and the fit of a OneVsRest with none raises the TypeError of the max label, as
+    # PySpark's fit reads the max label before the classifier's first use (on an empty dataset).
     from pyspark.ml.connect.classification import LinearSVC, OneVsRest
 
     spark, service = ml_mock
@@ -981,7 +982,7 @@ def test_ml_connect_one_vs_rest_set_params_sets_its_classifier_as_its_constructo
         "OneVsRest", _native_sent(spark, service, OneVsRest(classifier=base, parallelism=2), models)
     )
     assert estimator.setParams(classifier=None) is estimator
-    with pytest.raises(ValueError, match="classifier"):
+    with pytest.raises(TypeError):
         estimator.fit(spark.range(1))
     with pytest.raises(TypeError) as error:
         OneVsRest().setParams(bogus=1)
@@ -4014,7 +4015,8 @@ def test_one_vs_rest_signature_and_native_classifier_validation():
         OneVsRest(LinearSVC())
     with pytest.raises(TypeError):
         OneVsRest(unknown=True)
-    with pytest.raises(ValueError, match="classifier"):
+    # PySpark's fit reads the classifier first, which raises its KeyError when it is unset.
+    with pytest.raises(KeyError, match="classifier"):
         OneVsRest().fit(None)
 
 
@@ -4033,7 +4035,8 @@ def test_one_vs_rest_defers_base_param_validation_until_fit():
     assert estimator.setClassifier(base) is estimator
     base.setLayers([2, 2])
     assert estimator.setClassifier(None) is estimator
-    with pytest.raises(ValueError, match="classifier"):
+    # The classifier of None passes, and the fit then reads the dataset's max label, as PySpark's.
+    with pytest.raises(AttributeError, match="agg"):
         estimator.fit(None)
 
 
