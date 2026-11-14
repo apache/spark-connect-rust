@@ -5487,39 +5487,50 @@ impl PowerIterationClustering {
         &mut self.params
     }
 
-    /// Build the lazy assignment relation using Spark Connect's ML helper. The input plan
-    /// is retained so cached models or other resources used by the graph remain alive.
-    pub fn assign_clusters(
-        &self,
-        dataset: &DataFrame,
-    ) -> spark_connect_core::error::Result<DataFrame> {
+    /// The arguments of the helper call of `assign_clusters` after the dataset, as PySpark's
+    /// `assignClusters` passes them: `k`, `maxIter`, `initMode`, `srcCol`, `dstCol` and `weightCol`
+    /// (an empty string when it is not set), each of its default when it is not set. A set param is
+    /// sent as it is, of its explicit null and its integer width, as PySpark's helper call does.
+    pub fn assign_clusters_arguments(&self) -> Vec<proto::expression::Literal> {
         use proto::expression::literal::LiteralType as L;
-        use proto::fetch::method::args::ArgsType;
 
         let mut params = self.params.to_proto().params;
-        let defaults = [
+        [
             ("k", L::Integer(2)),
             ("maxIter", L::Integer(20)),
             ("initMode", L::String("random".into())),
             ("srcCol", L::String("src".into())),
             ("dstCol", L::String("dst".into())),
             ("weightCol", L::String(String::new())),
-        ];
-        let mut args = vec![proto::fetch::method::Args {
-            args_type: Some(ArgsType::Input(dataset.relation()?)),
-        }];
-        for (name, default) in defaults {
-            // Preserve explicit nulls and integer widths, just as PySpark's helper call does.
-            let literal = params
+        ]
+        .into_iter()
+        .map(|(name, default)| {
+            params
                 .remove(name)
                 .unwrap_or_else(|| proto::expression::Literal {
                     literal_type: Some(default),
                     ..Default::default()
-                });
-            args.push(proto::fetch::method::Args {
+                })
+        })
+        .collect()
+    }
+
+    /// Build the lazy assignment relation using Spark Connect's ML helper. The input plan
+    /// is retained so cached models or other resources used by the graph remain alive.
+    pub fn assign_clusters(
+        &self,
+        dataset: &DataFrame,
+    ) -> spark_connect_core::error::Result<DataFrame> {
+        use proto::fetch::method::args::ArgsType;
+
+        let mut args = vec![proto::fetch::method::Args {
+            args_type: Some(ArgsType::Input(dataset.relation()?)),
+        }];
+        args.extend(self.assign_clusters_arguments().into_iter().map(|literal| {
+            proto::fetch::method::Args {
                 args_type: Some(ArgsType::Param(literal)),
-            });
-        }
+            }
+        }));
         let relation = proto::Relation {
             rel_type: Some(proto::relation::RelType::MlRelation(Box::new(
                 proto::MlRelation {

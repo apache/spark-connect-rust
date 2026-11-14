@@ -1,0 +1,858 @@
+{
+ "BisectingKMeans": {
+  "clusterCenters": [
+   "ok",
+   [
+    [
+     1.25,
+     1.3
+    ],
+    [
+     6.15,
+     6.175
+    ],
+    [
+     10.066666667,
+     1.5
+    ]
+   ]
+  ],
+  "clusterCenters_type": [
+   "ok",
+   "'ndarray'"
+  ],
+  "computeCost": [
+   "ok",
+   1.454166667
+  ],
+  "est_loaded_isSet_maxIter": [
+   "ok",
+   "False"
+  ],
+  "est_loaded_params": [
+   "ok",
+   [
+    "('distanceMeasure', \"'euclidean'\")",
+    "('featuresCol', \"'features'\")",
+    "('k', '3')",
+    "('maxIter', '20')",
+    "('minDivisibleClusterSize', '1.0')",
+    "('predictionCol', \"'prediction'\")",
+    "('seed', '5')"
+   ]
+  ],
+  "est_loaded_uid": [
+   "ok",
+   "True"
+  ],
+  "est_save": [
+   "ok",
+   "None"
+  ],
+  "fitMultiple": [
+   "ok",
+   [
+    "(0, 2)",
+    "(1, 3)"
+   ]
+  ],
+  "fit_class_param": [
+   "ok",
+   "20"
+  ],
+  "fit_list": [
+   "ok",
+   [
+    "2",
+    "20"
+   ]
+  ],
+  "fit_map": [
+   "ok",
+   "2"
+  ],
+  "hasSummary": [
+   "ok",
+   "True"
+  ],
+  "isinstance_model": [
+   "ok",
+   "(True, True)"
+  ],
+  "loaded_explainParams": [
+   "ok",
+   "\"distanceMeasure: the distance measure. Supported options: 'euclidean' and 'cosine'. (default: euclidean)\\nfeaturesCol: features column name. (default: features)\\nk: The desired number of leaf clusters. Must be > 1. (default: 4, current: 3)\\nmaxIter: max number of iterations (>= 0). (default: 20)\\nminDivisibleClusterSize: The minimum number of points (if >= 1.0) or the minimum proportion of points (if < 1.0) of a divisible cluster. (default: 1.0)\\npredictionCol: prediction column name. (default: prediction)\\nseed: random seed. (default: <hash BisectingKMeansModel>, current: 5)\\nweightCol: weight column name. If this is not set or empty, we treat all instance weights as 1.0. (undefined)\""
+  ],
+  "loaded_getMaxIter": [
+   "ok",
+   "20"
+  ],
+  "loaded_hasSummary": [
+   "ok",
+   "False"
+  ],
+  "loaded_isSet_maxIter": [
+   "ok",
+   "False"
+  ],
+  "loaded_summary": [
+   "RuntimeError",
+   "No training summary available for this BisectingKMeansModel"
+  ],
+  "loaded_transform": [
+   "ok",
+   {
+    "columns": [
+     "features",
+     "prediction"
+    ],
+    "rows": [
+     "(DenseVector([1.0, 1.0]), 0)",
+     "(DenseVector([1.1, 1.6]), 0)",
+     "(DenseVector([1.4, 1.4]), 0)",
+     "(DenseVector([1.5, 1.2]), 0)",
+     "(DenseVector([10.0, 1.5]), 1)",
+     "(DenseVector([10.4, 1.1]), 1)",
+     "(DenseVector([5.9, 6.6]), 2)",
+     "(DenseVector([6.0, 6.0]), 2)",
+     "(DenseVector([6.2, 6.3]), 2)",
+     "(DenseVector([6.5, 5.8]), 2)",
+     "(DenseVector([9.8, 1.9]), 1)"
+    ]
+   }
+  ],
+  "loaded_uid": [
+   "ok",
+   "True"
+  ],
+  "model_class": [
+   "ok",
+   "('BisectingKMeansModel', 'clustering')"
+  ],
+  "model_explainParams": [
+   "ok",
+   "\"distanceMeasure: the distance measure. Supported options: 'euclidean' and 'cosine'. (default: euclidean)\\nfeaturesCol: features column name. (default: features)\\nk: The desired number of leaf clusters. Must be > 1. (default: 4, current: 3)\\nmaxIter: max number of iterations (>= 0). (default: 20)\\nminDivisibleClusterSize: The minimum number of points (if >= 1.0) or the minimum proportion of points (if < 1.0) of a divisible cluster. (default: 1.0)\\npredictionCol: prediction column name. (default: prediction)\\nseed: random seed. (default: <hash BisectingKMeans>, current: 5)\\nweightCol: weight column name. If this is not set or empty, we treat all instance weights as 1.0. (undefined)\""
+  ],
+  "model_extract": [
+   "ok",
+   [
+    "('distanceMeasure', \"'euclidean'\")",
+    "('featuresCol', \"'features'\")",
+    "('k', '3')",
+    "('maxIter', '20')",
+    "('minDivisibleClusterSize', '1.0')",
+    "('predictionCol', \"'prediction'\")",
+    "('seed', '5')"
+   ]
+  ],
+  "model_no_attribute": [
+   "AttributeError",
+   "'BisectingKMeansModel' object has no attribute 'fooBarBaz'"
+  ],
+  "model_save": [
+   "ok",
+   "None"
+  ],
+  "model_save_again": [
+   "UnknownException",
+   "(java.io.IOException) Path <path>/model already exists. To overwrite it, please use write.overwrite().save(path) for Scala and use write().overwrite().save(path) for Java and Python."
+  ],
+  "model_uid_is_estimator_uid": [
+   "ok",
+   "True"
+  ],
+  "numFeatures": [
+   "ok",
+   "2"
+  ],
+  "repr_prefix": [
+   "ok",
+   "'BisectingKMeansModel'"
+  ],
+  "summary_clusterSizes": [
+   "ok",
+   [
+    "4",
+    "3",
+    "4"
+   ]
+  ],
+  "summary_df_cluster_count": [
+   "ok",
+   "11"
+  ],
+  "summary_df_predictions": [
+   "ok",
+   {
+    "columns": [
+     "features"
+    ],
+    "rows": [
+     "(DenseVector([1.0, 1.0]),)",
+     "(DenseVector([1.1, 1.6]),)",
+     "(DenseVector([1.4, 1.4]),)",
+     "(DenseVector([1.5, 1.2]),)",
+     "(DenseVector([10.0, 1.5]),)",
+     "(DenseVector([10.4, 1.1]),)",
+     "(DenseVector([5.9, 6.6]),)",
+     "(DenseVector([6.0, 6.0]),)",
+     "(DenseVector([6.2, 6.3]),)",
+     "(DenseVector([6.5, 5.8]),)",
+     "(DenseVector([9.8, 1.9]),)"
+    ]
+   }
+  ],
+  "summary_featuresCol": [
+   "ok",
+   "'features'"
+  ],
+  "summary_is_summary": [
+   "ok",
+   "True"
+  ],
+  "summary_k": [
+   "ok",
+   "3"
+  ],
+  "summary_numIter": [
+   "ok",
+   "20"
+  ],
+  "summary_predictionCol": [
+   "ok",
+   "'prediction'"
+  ],
+  "summary_trainingCost": [
+   "ok",
+   1.454166667
+  ],
+  "transform": [
+   "ok",
+   {
+    "columns": [
+     "features",
+     "prediction"
+    ],
+    "rows": [
+     "(DenseVector([1.0, 1.0]), 0)",
+     "(DenseVector([1.1, 1.6]), 0)",
+     "(DenseVector([1.4, 1.4]), 0)",
+     "(DenseVector([1.5, 1.2]), 0)",
+     "(DenseVector([10.0, 1.5]), 1)",
+     "(DenseVector([10.4, 1.1]), 1)",
+     "(DenseVector([5.9, 6.6]), 2)",
+     "(DenseVector([6.0, 6.0]), 2)",
+     "(DenseVector([6.2, 6.3]), 2)",
+     "(DenseVector([6.5, 5.8]), 2)",
+     "(DenseVector([9.8, 1.9]), 1)"
+    ]
+   }
+  ]
+ },
+ "GaussianMixture": {
+  "est_loaded_isSet_maxIter": [
+   "ok",
+   "True"
+  ],
+  "est_loaded_params": [
+   "ok",
+   [
+    "('aggregationDepth', '2')",
+    "('featuresCol', \"'features'\")",
+    "('k', '2')",
+    "('maxIter', '5')",
+    "('predictionCol', \"'prediction'\")",
+    "('probabilityCol', \"'probability'\")",
+    "('seed', '7')",
+    "('tol', '0.01')"
+   ]
+  ],
+  "est_loaded_uid": [
+   "ok",
+   "True"
+  ],
+  "est_save": [
+   "ok",
+   "None"
+  ],
+  "fitMultiple": [
+   "ok",
+   [
+    "(0, 2)",
+    "(1, 3)"
+   ]
+  ],
+  "fit_class_param": [
+   "ok",
+   "5"
+  ],
+  "fit_list": [
+   "ok",
+   [
+    "2",
+    "5"
+   ]
+  ],
+  "fit_map": [
+   "ok",
+   "2"
+  ],
+  "gaussiansDF_columns": [
+   "ok",
+   [
+    "'mean'",
+    "'cov'"
+   ]
+  ],
+  "gaussians_cov": [
+   "ok",
+   [
+    [
+     [
+      3.718834963,
+      -4.544435799
+     ],
+     [
+      -4.544435799,
+      5.556791336
+     ]
+    ],
+    [
+     [
+      4.81822818,
+      4.820982492
+     ],
+     [
+      4.820982492,
+      4.893779592
+     ]
+    ]
+   ]
+  ],
+  "gaussians_mean": [
+   "ok",
+   [
+    [
+     8.376931893,
+     3.562175125
+    ],
+    [
+     2.657025558,
+     2.716215854
+    ]
+   ]
+  ],
+  "gaussians_type": [
+   "ok",
+   [
+    "'MultivariateGaussian'",
+    "'MultivariateGaussian'"
+   ]
+  ],
+  "hasSummary": [
+   "ok",
+   "True"
+  ],
+  "isinstance_model": [
+   "ok",
+   "(True, True)"
+  ],
+  "loaded_explainParams": [
+   "ok",
+   "'aggregationDepth: suggested depth for treeAggregate (>= 2). (default: 2)\\nfeaturesCol: features column name. (default: features)\\nk: Number of independent Gaussians in the mixture model. Must be > 1. (default: 2, current: 2)\\nmaxIter: max number of iterations (>= 0). (default: 100, current: 5)\\npredictionCol: prediction column name. (default: prediction)\\nprobabilityCol: Column name for predicted class conditional probabilities. Note: Not all models output well-calibrated probability estimates! These probabilities should be treated as confidences, not precise probabilities. (default: probability)\\nseed: random seed. (default: <hash GaussianMixtureModel>, current: 7)\\ntol: the convergence tolerance for iterative algorithms (>= 0). (default: 0.01)\\nweightCol: weight column name. If this is not set or empty, we treat all instance weights as 1.0. (undefined)'"
+  ],
+  "loaded_getMaxIter": [
+   "ok",
+   "5"
+  ],
+  "loaded_hasSummary": [
+   "ok",
+   "False"
+  ],
+  "loaded_isSet_maxIter": [
+   "ok",
+   "True"
+  ],
+  "loaded_summary": [
+   "RuntimeError",
+   "No training summary available for this GaussianMixtureModel"
+  ],
+  "loaded_transform": [
+   "ok",
+   {
+    "columns": [
+     "features",
+     "probability",
+     "prediction"
+    ],
+    "rows": [
+     "(DenseVector([1.0, 1.0]), DenseVector([0.0, 1.0]), 1)",
+     "(DenseVector([1.1, 1.6]), DenseVector([0.0, 1.0]), 1)",
+     "(DenseVector([1.4, 1.4]), DenseVector([0.0, 1.0]), 1)",
+     "(DenseVector([1.5, 1.2]), DenseVector([0.0, 1.0]), 1)",
+     "(DenseVector([10.0, 1.5]), DenseVector([1.0, 0.0]), 0)",
+     "(DenseVector([10.4, 1.1]), DenseVector([1.0, 0.0]), 0)",
+     "(DenseVector([5.9, 6.6]), DenseVector([0.9913, 0.0087]), 0)",
+     "(DenseVector([6.0, 6.0]), DenseVector([0.0, 1.0]), 1)",
+     "(DenseVector([6.2, 6.3]), DenseVector([0.7996, 0.2004]), 0)",
+     "(DenseVector([6.5, 5.8]), DenseVector([0.9982, 0.0018]), 0)",
+     "(DenseVector([9.8, 1.9]), DenseVector([1.0, 0.0]), 0)"
+    ]
+   }
+  ],
+  "loaded_uid": [
+   "ok",
+   "True"
+  ],
+  "model_class": [
+   "ok",
+   "('GaussianMixtureModel', 'clustering')"
+  ],
+  "model_explainParams": [
+   "ok",
+   "'aggregationDepth: suggested depth for treeAggregate (>= 2). (default: 2)\\nfeaturesCol: features column name. (default: features)\\nk: Number of independent Gaussians in the mixture model. Must be > 1. (default: 2, current: 2)\\nmaxIter: max number of iterations (>= 0). (default: 100, current: 5)\\npredictionCol: prediction column name. (default: prediction)\\nprobabilityCol: Column name for predicted class conditional probabilities. Note: Not all models output well-calibrated probability estimates! These probabilities should be treated as confidences, not precise probabilities. (default: probability)\\nseed: random seed. (default: <hash GaussianMixture>, current: 7)\\ntol: the convergence tolerance for iterative algorithms (>= 0). (default: 0.01)\\nweightCol: weight column name. If this is not set or empty, we treat all instance weights as 1.0. (undefined)'"
+  ],
+  "model_extract": [
+   "ok",
+   [
+    "('aggregationDepth', '2')",
+    "('featuresCol', \"'features'\")",
+    "('k', '2')",
+    "('maxIter', '5')",
+    "('predictionCol', \"'prediction'\")",
+    "('probabilityCol', \"'probability'\")",
+    "('seed', '7')",
+    "('tol', '0.01')"
+   ]
+  ],
+  "model_no_attribute": [
+   "AttributeError",
+   "'GaussianMixtureModel' object has no attribute 'fooBarBaz'"
+  ],
+  "model_save": [
+   "ok",
+   "None"
+  ],
+  "model_save_again": [
+   "UnknownException",
+   "(java.io.IOException) Path <path>/model already exists. To overwrite it, please use write.overwrite().save(path) for Scala and use write().overwrite().save(path) for Java and Python."
+  ],
+  "model_uid_is_estimator_uid": [
+   "ok",
+   "True"
+  ],
+  "numFeatures": [
+   "ok",
+   "2"
+  ],
+  "predictProbability": [
+   "ok",
+   [
+    0.289972941,
+    0.710027059
+   ]
+  ],
+  "repr_prefix": [
+   "ok",
+   "'GaussianMixtureModel'"
+  ],
+  "summary_clusterSizes": [
+   "ok",
+   [
+    "6",
+    "5"
+   ]
+  ],
+  "summary_df_cluster_count": [
+   "ok",
+   "11"
+  ],
+  "summary_df_probability": [
+   "ok",
+   [
+    "'probability'"
+   ]
+  ],
+  "summary_featuresCol": [
+   "ok",
+   "'features'"
+  ],
+  "summary_is_summary": [
+   "ok",
+   "True"
+  ],
+  "summary_k": [
+   "ok",
+   "2"
+  ],
+  "summary_logLikelihood": [
+   "ok",
+   -25.230685757
+  ],
+  "summary_numIter": [
+   "ok",
+   "5"
+  ],
+  "summary_predictionCol": [
+   "ok",
+   "'prediction'"
+  ],
+  "summary_probabilityCol": [
+   "ok",
+   "'probability'"
+  ],
+  "transform": [
+   "ok",
+   {
+    "columns": [
+     "features",
+     "probability",
+     "prediction"
+    ],
+    "rows": [
+     "(DenseVector([1.0, 1.0]), DenseVector([0.0, 1.0]), 1)",
+     "(DenseVector([1.1, 1.6]), DenseVector([0.0, 1.0]), 1)",
+     "(DenseVector([1.4, 1.4]), DenseVector([0.0, 1.0]), 1)",
+     "(DenseVector([1.5, 1.2]), DenseVector([0.0, 1.0]), 1)",
+     "(DenseVector([10.0, 1.5]), DenseVector([1.0, 0.0]), 0)",
+     "(DenseVector([10.4, 1.1]), DenseVector([1.0, 0.0]), 0)",
+     "(DenseVector([5.9, 6.6]), DenseVector([0.9913, 0.0087]), 0)",
+     "(DenseVector([6.0, 6.0]), DenseVector([0.0, 1.0]), 1)",
+     "(DenseVector([6.2, 6.3]), DenseVector([0.7996, 0.2004]), 0)",
+     "(DenseVector([6.5, 5.8]), DenseVector([0.9982, 0.0018]), 0)",
+     "(DenseVector([9.8, 1.9]), DenseVector([1.0, 0.0]), 0)"
+    ]
+   }
+  ],
+  "weights": [
+   "ok",
+   [
+    0.485906222,
+    0.514093778
+   ]
+  ]
+ },
+ "LDA": {
+  "em_describeTopics_count": [
+   "ok",
+   "2"
+  ],
+  "em_fitMultiple": [
+   "ok",
+   [
+    "(0, 2)",
+    "(1, 3)"
+   ]
+  ],
+  "em_getCheckpointFiles_type": [
+   "ok",
+   "'list'"
+  ],
+  "em_has_summary": [
+   "ok",
+   "False"
+  ],
+  "em_isDistributed": [
+   "ok",
+   "True"
+  ],
+  "em_logPrior_type": [
+   "ok",
+   "'float'"
+  ],
+  "em_toLocal_is_same": [
+   "ok",
+   "True"
+  ],
+  "em_topicsMatrix_shape": [
+   "ok",
+   [
+    "6",
+    "2"
+   ]
+  ],
+  "em_trainingLogLikelihood_type": [
+   "ok",
+   "'float'"
+  ],
+  "em_transform_columns": [
+   "ok",
+   [
+    "'id'",
+    "'features'",
+    "'topicDistribution'"
+   ]
+  ],
+  "em_type": [
+   "ok",
+   "'DistributedLDAModel'"
+  ],
+  "em_vocabSize": [
+   "ok",
+   "6"
+  ],
+  "est_loaded_isSet_maxIter": [
+   "ok",
+   "True"
+  ],
+  "est_loaded_params": [
+   "ok",
+   [
+    "('checkpointInterval', '10')",
+    "('featuresCol', \"'features'\")",
+    "('k', '2')",
+    "('keepLastCheckpoint', 'True')",
+    "('learningDecay', '0.51')",
+    "('learningOffset', '1024.0')",
+    "('maxIter', '3')",
+    "('optimizeDocConcentration', 'True')",
+    "('optimizer', \"'em'\")",
+    "('seed', '42')",
+    "('subsamplingRate', '0.05')",
+    "('topicDistributionCol', \"'topicDistribution'\")"
+   ]
+  ],
+  "est_loaded_uid": [
+   "ok",
+   "True"
+  ],
+  "est_save": [
+   "ok",
+   "None"
+  ],
+  "fitMultiple": [
+   "ok",
+   [
+    "(0, 2)",
+    "(1, 3)"
+   ]
+  ],
+  "fit_list": [
+   "ok",
+   [
+    "2",
+    "3"
+   ]
+  ],
+  "fit_map": [
+   "ok",
+   "2"
+  ],
+  "loaded_explainParams": [
+   "ok",
+   "'checkpointInterval: set checkpoint interval (>= 1) or disable checkpoint (-1). E.g. 10 means that the cache will get checkpointed every 10 iterations. Note: this setting will be ignored if the checkpoint directory is not set in the SparkContext. (default: 10)\\ndocConcentration: Concentration parameter (commonly named \"alpha\") for the prior placed on documents\\' distributions over topics (\"theta\"). (undefined)\\nfeaturesCol: features column name. (default: features, current: features)\\nk: The number of topics (clusters) to infer. Must be > 1. (default: 10, current: 2)\\nkeepLastCheckpoint: (For EM optimizer) If using checkpointing, this indicates whether to keep the last checkpoint. If false, then the checkpoint will be deleted. Deleting the checkpoint can cause failures if a data partition is lost, so set this bit with care. (default: True)\\nlearningDecay: Learning rate, set as anexponential decay rate. This should be between (0.5, 1.0] to guarantee asymptotic convergence. (default: 0.51)\\nlearningOffset: A (positive) learning parameter that downweights early iterations. Larger values make early iterations count less (default: 1024.0)\\nmaxIter: max number of iterations (>= 0). (default: 20, current: 3)\\noptimizeDocConcentration: Indicates whether the docConcentration (Dirichlet parameter for document-topic distribution) will be optimized during training. (default: True)\\noptimizer: Optimizer or inference algorithm used to estimate the LDA model.  Supported: online, em (default: online, current: em)\\nseed: random seed. (default: <hash DistributedLDAModel>, current: 42)\\nsubsamplingRate: Fraction of the corpus to be sampled and used in each iteration of mini-batch gradient descent, in range (0, 1]. (default: 0.05)\\ntopicConcentration: Concentration parameter (commonly named \"beta\" or \"eta\") for the prior placed on topic\\' distributions over terms. (undefined)\\ntopicDistributionCol: Output column with estimates of the topic mixture distribution for each document (often called \"theta\" in the literature). Returns a vector of zeros for an empty document. (default: topicDistribution)'"
+  ],
+  "loaded_getMaxIter": [
+   "ok",
+   "3"
+  ],
+  "loaded_isSet_maxIter": [
+   "ok",
+   "True"
+  ],
+  "loaded_transform": [
+   "ok",
+   {
+    "columns": [
+     "id",
+     "features",
+     "topicDistribution"
+    ],
+    "rows": [
+     "(0, DenseVector([1.0, 2.0, 0.0, 0.0, 0.0, 0.0]), DenseVector([0.5065, 0.4935]))",
+     "(1, DenseVector([0.0, 1.0, 3.0, 0.0, 0.0, 1.0]), DenseVector([0.5112, 0.4888]))",
+     "(2, DenseVector([2.0, 0.0, 1.0, 1.0, 0.0, 0.0]), DenseVector([0.5052, 0.4948]))",
+     "(3, DenseVector([0.0, 0.0, 0.0, 2.0, 2.0, 1.0]), DenseVector([0.4757, 0.5243]))"
+    ]
+   }
+  ],
+  "loaded_uid": [
+   "ok",
+   "True"
+  ],
+  "model_save": [
+   "ok",
+   "None"
+  ],
+  "model_save_again": [
+   "UnknownException",
+   "(java.io.IOException) Path <path>/model already exists. To overwrite it, please use write.overwrite().save(path) for Scala and use write().overwrite().save(path) for Java and Python."
+  ],
+  "online_describeTopics": [
+   "ok",
+   {
+    "columns": [
+     "termIndices"
+    ],
+    "rows": [
+     "([0, 1, 5],)",
+     "([5, 1, 2],)"
+    ]
+   }
+  ],
+  "online_estimatedDocConcentration_len": [
+   "ok",
+   "2"
+  ],
+  "online_has_summary": [
+   "ok",
+   "False"
+  ],
+  "online_has_toLocal": [
+   "ok",
+   "False"
+  ],
+  "online_isDistributed": [
+   "ok",
+   "False"
+  ],
+  "online_logLikelihood": [
+   "ok",
+   "'float'"
+  ],
+  "online_logPerplexity": [
+   "ok",
+   "'float'"
+  ],
+  "online_transform_columns": [
+   "ok",
+   [
+    "'id'",
+    "'features'",
+    "'topicDistribution'"
+   ]
+  ],
+  "online_type": [
+   "ok",
+   "'LocalLDAModel'"
+  ],
+  "online_vocabSize": [
+   "ok",
+   "6"
+  ],
+  "toLocal_getK": [
+   "ok",
+   "10"
+  ],
+  "toLocal_isDistributed": [
+   "ok",
+   "False"
+  ],
+  "toLocal_isSet_k": [
+   "ok",
+   "False"
+  ],
+  "toLocal_type": [
+   "ok",
+   "'LocalLDAModel'"
+  ],
+  "toLocal_uid_is_fresh": [
+   "ok",
+   "True"
+  ],
+  "toLocal_vocabSize": [
+   "ok",
+   "6"
+  ],
+  "transform": [
+   "ok",
+   {
+    "columns": [
+     "id",
+     "features",
+     "topicDistribution"
+    ],
+    "rows": [
+     "(0, DenseVector([1.0, 2.0, 0.0, 0.0, 0.0, 0.0]), DenseVector([0.5065, 0.4935]))",
+     "(1, DenseVector([0.0, 1.0, 3.0, 0.0, 0.0, 1.0]), DenseVector([0.5112, 0.4888]))",
+     "(2, DenseVector([2.0, 0.0, 1.0, 1.0, 0.0, 0.0]), DenseVector([0.5052, 0.4948]))",
+     "(3, DenseVector([0.0, 0.0, 0.0, 2.0, 2.0, 1.0]), DenseVector([0.4757, 0.5243]))"
+    ]
+   }
+  ]
+ },
+ "PowerIterationClustering": {
+  "assignClusters_clusters": [
+   "ok",
+   [
+    "0",
+    "0",
+    "0",
+    "0",
+    "0",
+    "0"
+   ]
+  ],
+  "assignClusters_columns": [
+   "ok",
+   [
+    "'cluster'",
+    "'id'"
+   ]
+  ],
+  "assignClusters_count": [
+   "ok",
+   "6"
+  ],
+  "assignClusters_of_int": [
+   "UnknownException",
+   "(java.lang.NoSuchMethodException) No method: org.apache.spark.ml.util.ConnectHelper.powerIterationClusteringAssignClusters(int, int, int, java.lang.String, java.lang.String, java.lang.String, java.lan"
+  ],
+  "assignClusters_of_list": [
+   "SparkException",
+   "[CONNECT_ML.UNSUPPORTED_EXCEPTION] Generic Spark Connect ML error. Unsupported array array {"
+  ],
+  "assignClusters_of_none": [
+   "SparkException",
+   "[CONNECT_ML.UNSUPPORTED_EXCEPTION] Generic Spark Connect ML error. NULL not supported SQLSTATE: XX000"
+  ],
+  "assignClusters_of_object": [
+   "PySparkTypeError",
+   "[UNSUPPORTED_DATA_TYPE] Unsupported DataType `object`."
+  ],
+  "assignClusters_of_str": [
+   "UnknownException",
+   "(java.lang.NoSuchMethodException) No method: org.apache.spark.ml.util.ConnectHelper.powerIterationClusteringAssignClusters(java.lang.String, int, int, java.lang.String, java.lang.String, java.lang.Str"
+  ],
+  "loaded_assignClusters_count": [
+   "ok",
+   "6"
+  ],
+  "loaded_isSet_initMode": [
+   "ok",
+   "True"
+  ],
+  "loaded_params": [
+   "ok",
+   [
+    "2",
+    "5",
+    "'degree'"
+   ]
+  ],
+  "loaded_type": [
+   "ok",
+   "'PowerIterationClustering'"
+  ],
+  "loaded_uid_same": [
+   "ok",
+   "True"
+  ],
+  "params_getters": [
+   "ok",
+   [
+    "2",
+    "5",
+    "'degree'"
+   ]
+  ],
+  "save": [
+   "ok",
+   "None"
+  ],
+  "uid_prefix": [
+   "ok",
+   "'PowerIterationClustering'"
+  ]
+ }
+}

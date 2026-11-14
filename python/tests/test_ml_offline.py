@@ -604,9 +604,10 @@ def test_native_ml_other_invalid_inputs(ml_mock):
     # PowerIterationClustering.assignClusters, PrefixSpan.findFrequentSequentialPatterns and
     # ALSModel.recommendForUserSubset and recommendForItemSubset. A value that cannot be a literal
     # raises the error of LiteralExpression._from_value, a pandas DataFrame too (not the TypeError
-    # of a fit, transform or evaluate), and a value that PySpark sends for the server to reject
-    # (a vector, a matrix and a (value, DataType) pair as they are) raises a TypeError, before any
-    # request, as of official pyspark-client 4.3.0.
+    # of a fit, transform or evaluate). PySpark sends the others for the server to reject (a vector
+    # and a matrix as they are, and a (value, DataType) pair as a literal of that type), and so does
+    # assignClusters, in a lazy DataFrame, but for a (value, DataType) pair, which it does not
+    # convert. The other helper calls raise a TypeError of them before any request.
     import numpy as np
     import pandas as pd
     from pyspark.errors import PySparkTypeError, PySparkValueError
@@ -632,8 +633,8 @@ def test_native_ml_other_invalid_inputs(ml_mock):
         ([], PySparkTypeError, "CANNOT_INFER_ARRAY_ELEMENT_TYPE", None),
         (2**70, PySparkValueError, "VALUE_NOT_BETWEEN", None),
     ]
-    sendable = [5, None, [1], "x", Vectors.dense([1.0]), Matrices.dense(1, 1, [1.0]),
-                (1, IntegerType())]
+    sendable = [5, None, [1], "x", Vectors.dense([1.0]), Matrices.dense(1, 1, [1.0])]
+    pair = (1, IntegerType())
     sent = len(_session_requests(service, spark))
     for name, helper in helpers:
         for other, error_class, condition, parameters in unconvertible:
@@ -642,7 +643,17 @@ def test_native_ml_other_invalid_inputs(ml_mock):
             assert error.value.getCondition() == condition, (name, other)
             if parameters is not None:
                 assert error.value.getMessageParameters() == parameters, (name, other)
-        for other in sendable:
+        if name == "assignClusters":
+            for other in sendable:
+                # The dataset is the first argument of the helper call, a literal of the value.
+                (method,) = _relation(helper(other)).ml_relation.fetch.methods
+                assert method.method == "powerIterationClusteringAssignClusters"
+                assert method.args[0].HasField("param"), other
+            with pytest.raises(PySparkTypeError) as error:
+                helper(pair)
+            assert error.value.getMessageParameters() == {"data_type": "tuple"}
+            continue
+        for other in sendable + [pair]:
             with pytest.raises(TypeError) as error:
                 helper(other)
             assert str(error.value) == (
@@ -4167,10 +4178,21 @@ def test_stop_words_remover_load_default_stop_words_asserts_an_active_session():
     assert type(error.value) is AssertionError and str(error.value) == ""
 
 
-@pytest.mark.parametrize("name", [*_NATIVE_PARAMS, "OneVsRest", "PowerIterationClustering"])
+@pytest.mark.parametrize("name", [*_NATIVE_PARAMS, "OneVsRest"])
 def test_native_ml_rejects_pandas_without_active_session(name, pandas_ml_input):
     assert SparkSession.getActiveSession() is None
     _assert_rejects_pandas(_native_ml_method(name), pandas_ml_input)
+    assert SparkSession.getActiveSession() is None
+
+
+def test_assign_clusters_asserts_an_active_session_before_its_dataset(pandas_ml_input):
+    # As PySpark's invoke_helper_relation, which asserts the active session of the helper call
+    # before it serializes the arguments: without one, assignClusters raises that AssertionError,
+    # also of a pandas DataFrame (with one, the UNSUPPORTED_DATA_TYPE of its conversion).
+    assert SparkSession.getActiveSession() is None
+    with pytest.raises(AssertionError) as error:
+        _native_ml_method("PowerIterationClustering")(dataset=pandas_ml_input)
+    assert type(error.value) is AssertionError and str(error.value) == ""
     assert SparkSession.getActiveSession() is None
 
 

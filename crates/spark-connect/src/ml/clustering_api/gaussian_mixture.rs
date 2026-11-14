@@ -2,11 +2,9 @@
 //! The Gaussian mixture model, as PySpark's `GaussianMixtureModel`. Its prediction is a cluster
 //! index, so it is not a [`crate::ml::PredictionModel`].
 
-use super::{
-    matrix_of_value, transformed_summary_dataset, vector_of_value, GaussianMixtureSummary,
-};
+use super::{matrix_of_value, vector_of_value, GaussianMixtureSummary};
 use crate::dataframe::DataFrame;
-use crate::ml::object::{attribute_relation, FetchArg, MlValue};
+use crate::ml::object::{attribute_relation, summary_transform, FetchArg, MlValue};
 use crate::ml::regression_api::{summary_or_error, training_summary};
 use crate::ml::tree_api::{as_f64s, as_i32, as_vector, fetch_value};
 use crate::ml::{
@@ -26,7 +24,7 @@ impl GaussianMixture {
         self.ensure_operator();
         let info = fit_via_command(&self.operator, &self.params, df)?;
         let mut model = self.model_from_info(info, &df.session)?;
-        let summary_dataset = transformed_summary_dataset(&model.cached, df)?;
+        let summary_dataset = summary_transform(&model.cached, df)?;
         model.training_summary = Some(training_summary(&model.cached, &summary_dataset));
         Ok(model)
     }

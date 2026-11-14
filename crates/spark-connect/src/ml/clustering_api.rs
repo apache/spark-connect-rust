@@ -6,10 +6,9 @@
 //! fetches of its server-side object, as PySpark's `_call_java` of each member, and whose
 //! summaries implement [`ClusteringSummary`]. Each family has its own file.
 
-use crate::dataframe::DataFrame;
 use crate::ml::object::MlValue;
 use crate::ml::regression_api::{as_i64, unexpected};
-use crate::ml::{CachedModel, MlMatrix, MlVector, Params};
+use crate::ml::{MlMatrix, MlVector};
 use crate::row::Value;
 use spark_connect_core::error::Result;
 
@@ -49,13 +48,6 @@ fn as_strings(method: &str, value: MlValue) -> Result<Vec<String>> {
             .collect(),
         other => Err(unexpected(method, "an array of strings", &other)),
     }
-}
-
-/// The summary dataset of a model of the training dataset `train`, of a class that keeps PySpark's
-/// `HasTrainingSummary._summary_dataset`: the model's transform of `train`. PySpark transforms
-/// `train` before it copies the estimator's params to the model, so the transform has no params.
-fn transformed_summary_dataset(model: &CachedModel, train: &DataFrame) -> Result<DataFrame> {
-    model.transform(train, &Params::new())
 }
 
 /// The rows of `matrix`, as PySpark's `Matrix.toArray` lays out its values: a dense matrix of its

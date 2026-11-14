@@ -369,8 +369,9 @@ Each clustering estimator of `spark_connect::ml` fits its typed model, as the re
   the algorithm, and `write()` and `load` save and load it as PySpark does: the params of the
   server's `PowerIterationClusteringWrapper`.
 
-The native Python classes do not have these members yet: their fit still returns the common
-`MLModel`.
+The native Python classes of `pyspark.ml.connect.clustering` have them too, with PySpark's names:
+their fit returns the typed model. `LDAModel`, the base class of PySpark's two LDA models, is not a
+native class yet.
 
 ## Native LogisticRegression
 
@@ -475,9 +476,11 @@ methods that `pyspark.ml` runs as a helper or attribute call (`PowerIterationClu
 - One that cannot be a literal raises PySpark's error of the conversion. That includes a pandas
   DataFrame, which raises `UNSUPPORTED_DATA_TYPE` here rather than the `TypeError` above, as with
   `pyspark.ml`, and an empty list, which raises `CANNOT_INFER_ARRAY_ELEMENT_TYPE`.
-- PySpark sends the others for the server to reject. These include an ML vector or matrix and a
-  `(value, DataType)` pair, which it sends as they are. Here they raise a `TypeError` before any
-  request.
+- PySpark sends the others for the server to reject: an ML vector or matrix as they are, and a
+  `(value, DataType)` pair as a literal of that type. `assignClusters` sends them too, in a lazy
+  DataFrame that the server rejects when it is analyzed or collected, but for a `(value, DataType)`
+  pair, which raises the `UNSUPPORTED_DATA_TYPE` of a tuple here. The other helper calls raise a
+  `TypeError` of them before any request.
 
 As with
 `pyspark.ml`, a fit sends the DataFrame as it is, and the transform of a model is the transform of
@@ -1018,7 +1021,7 @@ and save and load. A NaiveBayes model has no training summary, as in PySpark. Th
 The Rust `ml::BisectingKMeans` and `ml::BisectingKMeansModel` support training and
 DataFrame cluster assignment through Spark Connect's cached-model protocol. Python
 exports the native estimator from `pyspark.ml.connect` and
-`pyspark.ml.connect.clustering`; `fit` returns the shared native `MLModel`.
+`pyspark.ml.connect.clustering`; `fit` returns its `BisectingKMeansModel`.
 
 All eight constructor parameters and named setters are supported: `featuresCol`,
 `predictionCol`, `maxIter`, `seed`, `k`, `minDivisibleClusterSize`, `distanceMeasure`
@@ -1032,10 +1035,13 @@ Euclidean/cosine distance, sparse/dense inputs, seeded reproducibility, independ
 fits, session isolation and lazy model lifetime. Golden fixtures compare all eight
 parameters at six signed seed/integer-width boundaries with official PySpark.
 
-This native API covers construction, setters, fit and DataFrame transform.
-The Rust model's members, summaries and persistence are in "Native clustering
-models (Rust API)"; the native Python model does not have them yet. The vendored
-`pyspark.ml.clustering` API retains its existing implementation.
+The Rust model's members, summaries and persistence are in "Native clustering models (Rust API)". In
+Python, `BisectingKMeans`, its `BisectingKMeansModel` and `BisectingKMeansSummary` follow the full
+API of `pyspark.ml` (see "Native ML classes of the full pyspark.ml API"): the Params API,
+`clusterCenters()`, `computeCost(dataset)`, `numFeatures`, `predict` of a vector, the training
+summary (`k`, `clusterSizes`, `trainingCost`, `numIter`, `predictions` and `cluster`, of the
+transform of the training dataset, as PySpark's), and save and load. The vendored
+`pyspark.ml.clustering` API is unchanged.
 
 ## Native GeneralizedLinearRegression
 
@@ -1076,8 +1082,7 @@ not set fails on the server.
 Rust `ml::GaussianMixture` and `ml::GaussianMixtureModel` train Gaussian mixture
 models and produce cluster assignments and component probabilities through Spark
 Connect's cached-model protocol. Python exports the native estimator from
-`pyspark.ml.connect` and `pyspark.ml.connect.clustering`; `fit` returns the shared
-native `MLModel`.
+`pyspark.ml.connect` and `pyspark.ml.connect.clustering`; `fit` returns its `GaussianMixtureModel`.
 
 All nine constructor parameters and named setters are supported: `featuresCol`,
 `predictionCol`, `k`, `probabilityCol`, `tol`, `maxIter`, `seed`, `aggregationDepth`
@@ -1091,10 +1096,14 @@ reproducibility, independent fits, disabled probability output, server validatio
 session isolation and lazy model lifetime. Golden fixtures compare all nine
 parameters at six signed seed/integer-width boundaries with official PySpark.
 
-The native surface covers construction, parameter setters, fit and DataFrame
-transform. The Rust model's members, summaries and persistence are in "Native
-clustering models (Rust API)"; the native Python model does not have them yet. The
-vendored `pyspark.ml.clustering` API retains its existing implementation.
+The Rust model's members, summaries and persistence are in "Native clustering models (Rust API)". In
+Python, `GaussianMixture`, its `GaussianMixtureModel` and `GaussianMixtureSummary` follow the full
+API of `pyspark.ml` (see "Native ML classes of the full pyspark.ml API"): the Params API, `weights`,
+`gaussiansDF`, `gaussians` (a `MultivariateGaussian` of each collected row of `gaussiansDF`, as
+PySpark builds them), `numFeatures`, `predict` and `predictProbability` of a vector, the training
+summary (`probability`, `probabilityCol`, `logLikelihood` and the members of a clustering summary,
+of the transform of the training dataset, as PySpark's), and save and load. The vendored
+`pyspark.ml.clustering` API is unchanged.
 
 ## Native FMClassifier
 
@@ -1241,9 +1250,10 @@ The Rust models' members and persistence are in "Native clustering models (Rust 
 
 Rust `ml::LDA` supports online and EM training and cached-model DataFrame transforms.
 Python exposes `LDA` through `pyspark.ml.connect` and `pyspark.ml.connect.clustering`;
-`fit` returns the shared native `MLModel`. All 14 constructor parameters have Python
-setters and Rust builder setters/getters, including document/topic concentrations,
-learning settings, checkpoint settings, seed and topic-distribution output column.
+`fit` returns a `DistributedLDAModel` of the `em` optimizer and a `LocalLDAModel` of the `online`
+one, as PySpark's. All 14 constructor parameters have Python setters and Rust builder
+setters/getters, including document/topic concentrations, learning settings, checkpoint settings,
+seed and topic-distribution output column.
 Both optimizers return a vector of topic probabilities per document; empty documents
 produce zero vectors. As with `pyspark.ml`, an array feature column is sent as it is, and the JVM
 rejects one whose elements may be null, such as the arrays of `createDataFrame`.
@@ -1260,9 +1270,16 @@ The lazy relation retains any cached models used by its input DataFrame.
 Both APIs require Spark DataFrames and reject pandas inputs. Reference-derived golden
 fixtures and live tests cover both LDA optimizers, dense/sparse inputs, graph initialization
 modes, weighted/unweighted graphs, custom columns, setters, validation and model lifetime.
-The Rust model's members, summaries and persistence are in "Native clustering
-models (Rust API)"; the native Python model does not have them yet. The vendored
-`pyspark.ml.clustering` API retains its existing implementation.
+The Rust models' members and persistence are in "Native clustering models (Rust API)". In Python,
+`LDA`, `LocalLDAModel` and `DistributedLDAModel` follow the full API of `pyspark.ml` (see "Native ML
+classes of the full pyspark.ml API"): the Params API, the members of an LDA model (`describeTopics`,
+`topicsMatrix`, `logLikelihood`, `logPerplexity`, `vocabSize`, `isDistributed` and
+`estimatedDocConcentration`), `toLocal` (the same `LocalLDAModel` on every call, as PySpark's),
+`trainingLogLikelihood`, `logPrior` and `getCheckpointFiles` of a distributed model, and save and
+load. `PowerIterationClustering` has its uid and the Params API, and saves and loads as PySpark's
+does: as the params of the server's `PowerIterationClusteringWrapper`. `LDAModel`, the base class of
+the two LDA models, is not a native class yet. The vendored `pyspark.ml.clustering` API is
+unchanged.
 
 ## Native feature stages
 

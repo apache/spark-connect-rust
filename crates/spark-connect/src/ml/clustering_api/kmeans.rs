@@ -2,9 +2,9 @@
 //! The k-means model, as PySpark's `KMeansModel`. Its prediction is a cluster index, so it is not
 //! a [`crate::ml::PredictionModel`].
 
-use super::{matrix_rows, transformed_summary_dataset, KMeansSummary};
+use super::{matrix_rows, KMeansSummary};
 use crate::dataframe::DataFrame;
-use crate::ml::object::{FetchArg, MlValue};
+use crate::ml::object::{summary_transform, FetchArg, MlValue};
 use crate::ml::regression_api::{as_matrix, summary_or_error, training_summary};
 use crate::ml::tree_api::{as_i32, fetch_value};
 use crate::ml::{
@@ -24,7 +24,7 @@ impl KMeans {
         self.ensure_operator();
         let info = fit_via_command(&self.operator, &self.params, df)?;
         let mut model = self.model_from_info(info, &df.session)?;
-        let summary_dataset = transformed_summary_dataset(&model.cached, df)?;
+        let summary_dataset = summary_transform(&model.cached, df)?;
         model.training_summary = Some(training_summary(&model.cached, &summary_dataset));
         Ok(model)
     }
