@@ -5784,6 +5784,10 @@ def test_udf_and_udtf_pickle_as_pyspark_connect_classes():
     assert "pyspark.sql.udtf" not in refs
     restored = CloudPickleSerializer().loads(CloudPickleSerializer().dumps(Echo))
     assert restored._name == "Echo" and restored.evalType == 300
+    # As PySpark's, a name can be set on a UDTF: it is an attribute of the object, and `_name`,
+    # the name that the plan sends, stays.
+    Echo.name = "renamed"
+    assert (Echo.name, Echo._name, vars(Echo)["name"]) == ("renamed", "Echo", "renamed")
 
 
 def test_udtf_call_without_session_raises():
