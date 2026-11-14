@@ -3,7 +3,7 @@
 
 import base64
 import inspect
-from _statistics import FIXTURE, api, helper, summary
+from _statistics import FIXTURE, REFERENCE, api, helper, summary
 
 import pytest
 from _mock_connect_server import mock_connect_session
@@ -142,6 +142,10 @@ def test_helper_arguments_are_serialized_as_pyspark(session):
         with pytest.raises(PySparkTypeError) as error:
             operation()
         assert error.value.getCondition() == condition
+    assert _requests_but_deletes(service) == sent
+    if REFERENCE:
+        # PySpark sends these, for the server to reject when the result is analyzed.
+        return
     refused = [
         (lambda: stat.ChiSquareTest.test(df, 1, "label"), "test() takes a str featuresCol, not 'int'"),
         (lambda: stat.Correlation.corr(df, None), "corr() takes a str column, not 'NoneType'"),
