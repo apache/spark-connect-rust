@@ -1277,6 +1277,12 @@ column and minimum confidence. Parameters for prediction are captured when its l
 plan is built. The itemset/rule properties fetch the fitted server model, matching
 standard PySpark's Connect attribute relations.
 
+The Python `FPGrowth` and `FPGrowthModel` follow `pyspark.ml.fpm` in full: the Params API
+(`params`, `getParam`, `extractParamMap`, `explainParams`, `copy`, `set`, `clear`, Param objects
+and getters), `setParams` and `fitMultiple` of the estimator, and `write`, `save`, `read` and
+`load` of both. A fitted model copies its estimator's defaults, as PySpark's `_copyValues` does.
+`PrefixSpan` has the same Params API, and no persistence, as Spark has none.
+
 Rust `ml::PrefixSpan::find_frequent_sequential_patterns` and Python
 `PrefixSpan.findFrequentSequentialPatterns` mine arrays of itemsets directly through
 the Connect helper, with all four constructor parameters and named setters. They
@@ -1284,7 +1290,8 @@ return sequence/frequency DataFrames and have no fit/transform model.
 
 These APIs accept Spark DataFrames and reject pandas frames before requests. Lazy
 model tables retain their cached model; PrefixSpan retains its input plan, including
-any upstream fitted models. Fitted-model transforms require the fitting session.
+any upstream fitted models. A fitted model's transform of a DataFrame of another session is lazy
+and fails with `CONNECT_ML.CACHE_INVALID` when the result is analyzed or collected, as PySpark's does.
 In Rust, `FPGrowth` and `FPGrowthModel` save with `write()` and load with
 `load(session, path)`, as PySpark's `save` and `load`; the Python classes gain persistence
 with the native model classes. The vendored `pyspark.ml.fpm` module is unchanged.
@@ -1314,10 +1321,19 @@ Factor and recommendation relations access the fitted server model, matching
 PySpark Connect. Lazy results retain their cached model and any models referenced
 by the subset DataFrame until evaluation completes.
 
+The Python `ALS` and `ALSModel` follow `pyspark.ml.recommendation` in full: the Params API,
+getters and setters, `setParams`, `setNumBlocks`, `fitMultiple`, `copy`, and `write`, `save`,
+`read` and `load`. A model's `coldStartStrategy`, `userCol`, `itemCol` and `blockSize` come from
+its estimator, as `_copyValues` gives them. The `rank` of a fitted model is that of its fit, with
+no request; a loaded model reads its rank from the server when accessed, as PySpark does.
+
 Fit, transform and subset recommendation inputs must be Spark DataFrames; pandas
 DataFrames are rejected before conversion or RPC. Model operations must use the
-fit session. Official PySpark 4.3.0 fixtures cover explicit and implicit ratings,
-predictions, cold starts, factors, and all four recommendation methods, with live
+fit session for transforms: another session's DataFrame fails with `CONNECT_ML.CACHE_INVALID` when
+the transform is analyzed or collected, as PySpark's does. The subset recommendations accept another
+session's DataFrame and run, as PySpark's do.
+Official PySpark 4.3.0 fixtures cover explicit and implicit ratings, predictions, cold starts,
+factors, and all four recommendation methods, with live
 Rust and native Python tests. In Rust, `ALS` and `ALSModel` save with `write()` and load
 with `load(session, path)`, and a loaded model reads its rank of the server, as PySpark's does;
 the Python classes gain persistence with the native model classes.

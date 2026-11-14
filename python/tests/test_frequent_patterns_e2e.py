@@ -7,6 +7,7 @@ import os
 import pytest
 from _frequent_patterns import GOLDEN, assert_values, configured, normalized
 from pyspark.errors import PySparkException
+from pyspark.errors.exceptions.connect import SparkException
 from pyspark.sql import SparkSession
 
 REFERENCE = os.environ.get("FPM_REFERENCE") == "1"
@@ -113,15 +114,17 @@ def test_prefixspan_composes_with_upstream_fitted_model(session):
     assert result.count() > 0
 
 
-def test_native_model_rejects_other_session_before_query(session):
-    if REFERENCE:
-        pytest.skip("Native fitted-session ownership contract")
+def test_model_transform_of_another_session_fails_at_collect_as_pyspark(session):
+    # As PySpark: the transform of a DataFrame of another session is a DataFrame, whose analysis
+    # and execution fail on the server of that session, which caches no such model.
     case = GOLDEN["fpgrowth"][0]
     model = algorithm("FPGrowth")(**case["values"]).fit(session.sql(case["sql"]))
     other = session.newSession()
     try:
-        with pytest.raises(ValueError, match="fitting session"):
-            model.transform(other.sql(case["held"]))
+        transformed = model.transform(other.sql(case["held"]))
+        with pytest.raises(SparkException) as error:
+            transformed.collect()
+        assert error.value.getCondition() == "CONNECT_ML.CACHE_INVALID"
     finally:
         other.stop()
 
