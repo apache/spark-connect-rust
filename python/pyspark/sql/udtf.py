@@ -199,6 +199,15 @@ def _validate_arrow_udtf_handler(cls: Any, returnType: Optional[Any]) -> None:
         )
 
 
+class _UDTFName:
+    """The ``name`` of a UDTF, its ``_name``, which PySpark Connect's UDTF does not have. It has
+    no setter, so that ``udtf.name = ...`` sets an attribute of the object, as it does on
+    PySpark's, which ``name`` then gives, and leaves ``_name``, the name that the plan sends."""
+
+    def __get__(self, obj: Any, objtype: Any = None) -> Any:
+        return self if obj is None else obj._name
+
+
 class UserDefinedTableFunction:
     """A user-defined table function: a Python handler class that yields rows.
 
@@ -239,10 +248,7 @@ class UserDefinedTableFunction:
         self.deterministic = deterministic
         self.python_ver = f"{sys.version_info.major}.{sys.version_info.minor}"
 
-    @property
-    def name(self) -> str:
-        """The name of the UDTF. PySpark Connect keeps it as ``_name``."""
-        return self._name
+    name = _UDTFName()
 
     @property
     def command(self) -> bytes:
