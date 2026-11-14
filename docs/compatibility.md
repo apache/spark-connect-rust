@@ -249,6 +249,38 @@ classes to build on:
   `__repr__` of a model, its `toString`). `PredictionModel` gives `num_features()` and
   `predict(&vector)`, the members of every prediction model of `pyspark.ml`.
 
+## Native regression models (Rust API)
+
+Each regression estimator of `spark_connect::ml` fits its typed model, as PySpark's `fit` returns
+one: `LinearRegression::fit` returns a `LinearRegressionModel` (the fit of the `Estimator` trait
+boxes it). A member of a model is a fetch of its server-side object, as `_call_java` of PySpark
+4.3.0 reads the member, and returns the type that PySpark returns:
+
+- `LinearRegressionModel` and `GeneralizedLinearRegressionModel`: `coefficients`, `intercept` (and
+  `scale` of a linear regression), `evaluate(&dataset)`, and the training summary of a fit,
+  `has_summary()` and `summary()`. As PySpark's fit over Spark Connect, the fit sets up the
+  training summary client-side, of the training dataset, so that the server can recreate a lost
+  summary. A loaded model has no training summary.
+- Their summaries implement `LinearRegressionSummaryApi` (and `TrainingSummary` of the training
+  summary) and `GeneralizedLinearRegressionSummaryApi`, whose training summary also has its solver,
+  its iterations, the statistics of the coefficients and `describe()`. A DataFrame member, such as
+  `predictions` or `residuals(residuals_type)`, is an attribute relation of the summary. The
+  summary of `evaluate` is its own server-side object, which the client does not release, as in
+  PySpark.
+- `AFTSurvivalRegressionModel` (`coefficients`, `intercept`, `scale`, `predict_quantiles`),
+  `IsotonicRegressionModel` (`boundaries`, `predictions`, `num_features`, and `predict` of a single
+  feature value) and `FMRegressionModel` (`intercept`, `linear`, `factors`).
+- `DecisionTreeRegressionModel` implements `DecisionTreeModel`, and `RandomForestRegressionModel`
+  and `GBTRegressionModel` implement `TreeEnsembleModel`, of trees that are each a
+  `DecisionTreeRegressionModel` of its own server-side object. `GBTRegressionModel` has
+  `evaluate_each_iteration(&dataset, loss)`.
+- Every model but the isotonic one implements `PredictionModel` (`num_features`, `predict`), and
+  every estimator and model has `load(&session, path)`, as PySpark's `load`, besides `write()`.
+
+The values are the server's, and the members are those that the server allows of each model
+(`MLUtils` of Spark 4.3.0). The native Python classes do not have these members yet: their fit
+still returns the common `MLModel`.
+
 ## Native LogisticRegression
 
 The native `spark_connect::ml::LogisticRegression` fits Spark's JVM
@@ -386,8 +418,8 @@ The native Python estimator is available from
 names, defaults and parameter conversions, with mutating setters. Fitted models
 expose DataFrame `transform` for the fitting session. Models, clones and lazy
 transformed DataFrames retain the cached server model until their last owner drops.
-Tree inspection, feature importances, single-vector prediction and persistence are
-not exposed by this native addition.
+The Rust model's members and persistence are in "Native regression models (Rust
+API)"; the native Python model does not have them yet.
 
 ## Native GBTRegressor
 
@@ -410,8 +442,8 @@ first. With `validationIndicatorCol`, false rows train and true rows validate;
 early stopping can fit fewer trees. DataFrame transforms expose predictions and
 an optional vector of leaf IDs, one per fitted tree. Models, clones and lazy
 transformed DataFrames retain the cached model in its fitting session until the
-last owner is dropped. Tree inspection, per-iteration evaluation, single-vector
-prediction and persistence are outside this native addition.
+last owner is dropped. The Rust model's members and persistence are in "Native
+regression models (Rust API)"; the native Python model does not have them yet.
 
 ## Native GBTClassifier
 
@@ -456,8 +488,8 @@ weighted label variance in the predicted leaf and optional scalar double leaf
 indices. Variance is computed within the predicted leaf; it is not a confidence
 interval for the prediction. Models, clones and lazy transformed DataFrames keep
 the cached server model alive in its fitting session until the last owner is
-dropped. Tree inspection, feature importances, single-vector prediction and
-persistence are outside this addition.
+dropped. The Rust model's members and persistence are in "Native
+regression models (Rust API)"; the native Python model does not have them yet.
 
 ## Native DecisionTreeClassifier
 
@@ -533,8 +565,8 @@ Its keyword-only constructor matches the JVM PySpark estimator's parameter names
 and defaults, with mutating `setFeaturesCol`, `setRegParam`, etc. methods.
 Fitted models expose `transform` on DataFrames from the fitting session. The model,
 its clones and transformed DataFrames keep the cached server model alive until
-the last owner is dropped. Model inspection (coefficients, intercept and summaries),
-single-vector prediction and persistence are not exposed by this native addition.
+the last owner is dropped. The Rust model's members and persistence are in "Native
+regression models (Rust API)"; the native Python model does not have them yet.
 
 ## Native LinearSVC
 
@@ -752,8 +784,8 @@ fixtures verify the parameter encoding, and live Rust tests exercise fitting
 and prediction directly.
 
 This native API covers construction, setters, fitting and DataFrame transforms.
-Coefficient/intercept access, model summaries, evaluation, persistence and
-single-vector prediction are not exposed by this addition.
+The Rust model's members and persistence are in "Native regression models (Rust
+API)"; the native Python model does not have them yet.
 
 ## Native GaussianMixture
 
@@ -861,10 +893,8 @@ keyword-only constructor signatures and type conversion, and take ML vector
 features, as `pyspark.ml`'s do.
 
 This support covers construction, configuration, fitting and DataFrame
-transforms. Python returns the common `MLModel`. Specialized model inspection
-(e.g. AFT coefficients/scale, isotonic boundaries/predictions, FM factors),
-single-instance prediction and model persistence are not exposed by these
-native wrappers.
+transforms. The Rust model's members and persistence are in "Native regression models (Rust
+API)"; the native Python model does not have them yet.
 
 Parameter goldens come from official PySpark 4.3.0. Native Rust and Python tests
 exercise censoring and quantiles, weighted isotonic interpolation, both FM

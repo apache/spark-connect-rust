@@ -172,7 +172,7 @@ jobs:
               --test e2e_coverage --test e2e_integration \
               --test e2e_streaming --test e2e_new_methods \
               --test e2e_ops_breadth --test e2e_session_catalog \
-              --test e2e_linear_svc --test e2e_linear_regression --test e2e_generalized_linear_regression --test e2e_remaining_classifiers --test e2e_remaining_regressors --test e2e_kmeans --test e2e_bisecting_kmeans --test e2e_gaussian_mixture --test e2e_remaining_clustering --test e2e_ml_features --test e2e_frequent_patterns --test e2e_als --test e2e_evaluators --test e2e_statistics --test e2e_ml_object --test e2e_feature_models --test e2e_decision_tree_regressor --test e2e_decision_tree_classifier --test e2e_gbt_regressor --test e2e_naive_bayes --test e2e_gbt_classifier --test e2e_random_forest --test e2e_random_forest_regressor \
+              --test e2e_linear_svc --test e2e_linear_regression --test e2e_generalized_linear_regression --test e2e_remaining_classifiers --test e2e_remaining_regressors --test e2e_kmeans --test e2e_bisecting_kmeans --test e2e_gaussian_mixture --test e2e_remaining_clustering --test e2e_ml_features --test e2e_frequent_patterns --test e2e_als --test e2e_evaluators --test e2e_statistics --test e2e_ml_object --test e2e_feature_models --test e2e_ml_regression_api --test e2e_decision_tree_regressor --test e2e_decision_tree_classifier --test e2e_gbt_regressor --test e2e_naive_bayes --test e2e_gbt_classifier --test e2e_random_forest --test e2e_random_forest_regressor \
               -- --test-threads=1
           cargo llvm-cov report --json --output-path coverage-rust-llvm.json
           # Per-file table into the job log, so coverage regressions are easy to see

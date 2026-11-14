@@ -3442,171 +3442,6 @@ impl LinearRegression {
         }
     }
 
-    /// Feature vector column.
-    pub fn set_feature_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("featuresCol", value);
-        self
-    }
-
-    /// Numeric label column.
-    pub fn set_label_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("labelCol", value);
-        self
-    }
-
-    /// Prediction output column.
-    pub fn set_prediction_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("predictionCol", value);
-        self
-    }
-
-    /// Maximum number of optimizer iterations.
-    pub fn set_max_iter(mut self, value: i32) -> Self {
-        self.params = self.params.set_param_int32("maxIter", value);
-        self
-    }
-
-    /// Regularization strength.
-    pub fn set_reg_param(mut self, value: f64) -> Self {
-        self.params = self.params.set_param_double("regParam", value);
-        self
-    }
-
-    /// Elastic-net mixing: 0 for L2, 1 for L1.
-    pub fn set_elastic_net_param(mut self, value: f64) -> Self {
-        self.params = self.params.set_param_double("elasticNetParam", value);
-        self
-    }
-
-    /// Convergence tolerance.
-    pub fn set_tol(mut self, value: f64) -> Self {
-        self.params = self.params.set_param_double("tol", value);
-        self
-    }
-
-    /// Whether to fit an intercept.
-    pub fn set_fit_intercept(mut self, value: bool) -> Self {
-        self.params = self.params.set_param_bool("fitIntercept", value);
-        self
-    }
-
-    /// Whether to standardize training features.
-    pub fn set_standardization(mut self, value: bool) -> Self {
-        self.params = self.params.set_param_bool("standardization", value);
-        self
-    }
-
-    /// Solver: auto, normal or l-bfgs.
-    pub fn set_solver(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("solver", value);
-        self
-    }
-
-    /// Optional instance weight column.
-    pub fn set_weight_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("weightCol", value);
-        self
-    }
-
-    /// Tree aggregation depth.
-    pub fn set_aggregation_depth(mut self, value: i32) -> Self {
-        self.params = self.params.set_param_int32("aggregationDepth", value);
-        self
-    }
-
-    /// Loss function: squaredError or huber.
-    pub fn set_loss(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("loss", value);
-        self
-    }
-
-    /// Huber loss shape parameter; must be greater than 1.
-    pub fn set_epsilon(mut self, value: f64) -> Self {
-        self.params = self.params.set_param_double("epsilon", value);
-        self
-    }
-
-    /// Maximum size in MB of stacked input blocks.
-    pub fn set_max_block_size_in_mb(mut self, value: f64) -> Self {
-        self.params = self.params.set_param_double("maxBlockSizeInMB", value);
-        self
-    }
-
-    /// The feature vector column (default: "features").
-    pub fn feature_col(&self) -> &str {
-        self.params.string_or("featuresCol", "features")
-    }
-
-    /// The label column (default: "label").
-    pub fn label_col(&self) -> &str {
-        self.params.string_or("labelCol", "label")
-    }
-
-    /// The prediction output column (default: "prediction").
-    pub fn prediction_col(&self) -> &str {
-        self.params.string_or("predictionCol", "prediction")
-    }
-
-    /// The maximum number of optimizer iterations (default: 100).
-    pub fn max_iter(&self) -> i32 {
-        self.params.int_or("maxIter", 100)
-    }
-
-    /// The regularization strength (default: 0).
-    pub fn reg_param(&self) -> f64 {
-        self.params.double_or("regParam", 0.0)
-    }
-
-    /// The elastic-net mixing parameter (default: 0, L2).
-    pub fn elastic_net_param(&self) -> f64 {
-        self.params.double_or("elasticNetParam", 0.0)
-    }
-
-    /// The convergence tolerance (default: 1e-6).
-    pub fn tol(&self) -> f64 {
-        self.params.double_or("tol", 1e-6)
-    }
-
-    /// Whether to fit an intercept (default: true).
-    pub fn fit_intercept(&self) -> bool {
-        self.params.bool_or("fitIntercept", true)
-    }
-
-    /// Whether to standardize training features (default: true).
-    pub fn standardization(&self) -> bool {
-        self.params.bool_or("standardization", true)
-    }
-
-    /// The solver (default: "auto").
-    pub fn solver(&self) -> &str {
-        self.params.string_or("solver", "auto")
-    }
-
-    /// The instance weight column, if one is set.
-    pub fn weight_col(&self) -> Option<&str> {
-        self.params.string_opt("weightCol")
-    }
-
-    /// The tree aggregation depth (default: 2).
-    pub fn aggregation_depth(&self) -> i32 {
-        self.params.int_or("aggregationDepth", 2)
-    }
-
-    /// The loss function (default: "squaredError").
-    pub fn loss(&self) -> &str {
-        self.params.string_or("loss", "squaredError")
-    }
-
-    /// The Huber loss shape parameter (default: 1.35).
-    pub fn epsilon(&self) -> f64 {
-        self.params.double_or("epsilon", 1.35)
-    }
-
-    /// The maximum size in MB of stacked input blocks (default: 0, chosen by Spark).
-    pub fn max_block_size_in_mb(&self) -> f64 {
-        self.params.double_or("maxBlockSizeInMB", 0.0)
-    }
-
     fn model_from_info(
         &self,
         info: proto::ml_command_result::MlOperatorInfo,
@@ -3621,7 +3456,43 @@ impl LinearRegression {
             ),
             params: self.params.clone(),
             cached,
+            training_summary: None,
         })
+    }
+}
+
+ml_params! {
+    LinearRegression {
+        set_aggregation_depth(value: i32) => "aggregationDepth", set_param_int32;
+        aggregation_depth -> i32 = |this| this.params.int_or("aggregationDepth", 2);
+        set_elastic_net_param(value: f64) => "elasticNetParam", set_param_double;
+        elastic_net_param -> f64 = |this| this.params.double_or("elasticNetParam", 0.0);
+        set_epsilon(value: f64) => "epsilon", set_param_double;
+        epsilon -> f64 = |this| this.params.double_or("epsilon", 1.35);
+        set_features_col(value: &str) => "featuresCol", set_param_string;
+        features_col -> &str = |this| this.params.string_or("featuresCol", "features");
+        set_fit_intercept(value: bool) => "fitIntercept", set_param_bool;
+        fit_intercept -> bool = |this| this.params.bool_or("fitIntercept", true);
+        set_label_col(value: &str) => "labelCol", set_param_string;
+        label_col -> &str = |this| this.params.string_or("labelCol", "label");
+        set_loss(value: &str) => "loss", set_param_string;
+        loss -> &str = |this| this.params.string_or("loss", "squaredError");
+        set_max_block_size_in_mb(value: f64) => "maxBlockSizeInMB", set_param_double;
+        max_block_size_in_mb -> f64 = |this| this.params.double_or("maxBlockSizeInMB", 0.0);
+        set_max_iter(value: i32) => "maxIter", set_param_int32;
+        max_iter -> i32 = |this| this.params.int_or("maxIter", 100);
+        set_prediction_col(value: &str) => "predictionCol", set_param_string;
+        prediction_col -> &str = |this| this.params.string_or("predictionCol", "prediction");
+        set_reg_param(value: f64) => "regParam", set_param_double;
+        reg_param -> f64 = |this| this.params.double_or("regParam", 0.0);
+        set_solver(value: &str) => "solver", set_param_string;
+        solver -> &str = |this| this.params.string_or("solver", "auto");
+        set_standardization(value: bool) => "standardization", set_param_bool;
+        standardization -> bool = |this| this.params.bool_or("standardization", true);
+        set_tol(value: f64) => "tol", set_param_double;
+        tol -> f64 = |this| this.params.double_or("tol", 1e-06);
+        set_weight_col(value: &str) => "weightCol", set_param_string;
+        weight_col -> Option<&str> = |this| this.params.string_opt("weightCol");
     }
 }
 
@@ -3646,8 +3517,7 @@ impl Estimator for LinearRegression {
     }
 
     fn fit_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<Box<dyn Model>> {
-        let info = fit_via_command(&self.operator, &self.params, df)?;
-        Ok(Box::new(self.model_from_info(info, &df.session)?))
+        Ok(Box::new(LinearRegression::fit(self, df)?))
     }
 }
 
@@ -3660,6 +3530,34 @@ pub struct LinearRegressionModel {
     operator: MlOperator,
     params: Params,
     cached: CachedModel,
+    /// The summary of the model of its training dataset, of a model that this client fitted.
+    training_summary: Option<MlTarget>,
+}
+
+ml_params! {
+    LinearRegressionModel {
+        aggregation_depth -> i32 = |this| this.params.int_or("aggregationDepth", 2) =>
+            "aggregationDepth";
+        elastic_net_param -> f64 = |this| this.params.double_or("elasticNetParam", 0.0) =>
+            "elasticNetParam";
+        epsilon -> f64 = |this| this.params.double_or("epsilon", 1.35) => "epsilon";
+        set_features_col(value: &str) => "featuresCol", set_param_string;
+        features_col -> &str = |this| this.params.string_or("featuresCol", "features");
+        fit_intercept -> bool = |this| this.params.bool_or("fitIntercept", true) => "fitIntercept";
+        label_col -> &str = |this| this.params.string_or("labelCol", "label") => "labelCol";
+        loss -> &str = |this| this.params.string_or("loss", "squaredError") => "loss";
+        max_block_size_in_mb -> f64 = |this| this.params.double_or("maxBlockSizeInMB", 0.0) =>
+            "maxBlockSizeInMB";
+        max_iter -> i32 = |this| this.params.int_or("maxIter", 100) => "maxIter";
+        set_prediction_col(value: &str) => "predictionCol", set_param_string;
+        prediction_col -> &str = |this| this.params.string_or("predictionCol", "prediction");
+        reg_param -> f64 = |this| this.params.double_or("regParam", 0.0) => "regParam";
+        solver -> &str = |this| this.params.string_or("solver", "auto") => "solver";
+        standardization -> bool = |this| this.params.bool_or("standardization", true) =>
+            "standardization";
+        tol -> f64 = |this| this.params.double_or("tol", 1e-06) => "tol";
+        weight_col -> Option<&str> = |this| this.params.string_opt("weightCol") => "weightCol";
+    }
 }
 
 impl Transformer for LinearRegressionModel {
@@ -3719,188 +3617,6 @@ impl GeneralizedLinearRegression {
         }
     }
 
-    /// Numeric label column.
-    pub fn set_label_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("labelCol", value);
-        self
-    }
-
-    /// Feature vector column.
-    pub fn set_feature_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("featuresCol", value);
-        self
-    }
-
-    /// Prediction output column.
-    pub fn set_prediction_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("predictionCol", value);
-        self
-    }
-
-    /// Distribution: gaussian, binomial, poisson, gamma or tweedie.
-    pub fn set_family(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("family", value);
-        self
-    }
-
-    /// Link function; when unset, Spark chooses the family default.
-    pub fn set_link(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("link", value);
-        self
-    }
-
-    /// Whether to fit an intercept.
-    pub fn set_fit_intercept(mut self, value: bool) -> Self {
-        self.params = self.params.set_param_bool("fitIntercept", value);
-        self
-    }
-
-    /// Maximum number of IRLS iterations.
-    pub fn set_max_iter(mut self, value: i32) -> Self {
-        self.params = self.params.set_param_int32("maxIter", value);
-        self
-    }
-
-    /// Convergence tolerance.
-    pub fn set_tol(mut self, value: f64) -> Self {
-        self.params = self.params.set_param_double("tol", value);
-        self
-    }
-
-    /// L2 regularization strength.
-    pub fn set_reg_param(mut self, value: f64) -> Self {
-        self.params = self.params.set_param_double("regParam", value);
-        self
-    }
-
-    /// Optional instance weight column.
-    pub fn set_weight_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("weightCol", value);
-        self
-    }
-
-    /// Solver algorithm: irls.
-    pub fn set_solver(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("solver", value);
-        self
-    }
-
-    /// Optional output column for the linear predictor.
-    pub fn set_link_prediction_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("linkPredictionCol", value);
-        self
-    }
-
-    /// Tweedie variance power: 0 or a value at least 1.
-    pub fn set_variance_power(mut self, value: f64) -> Self {
-        self.params = self.params.set_param_double("variancePower", value);
-        self
-    }
-
-    /// Tweedie link power; when unset, Spark uses 1 - variancePower.
-    pub fn set_link_power(mut self, value: f64) -> Self {
-        self.params = self.params.set_param_double("linkPower", value);
-        self
-    }
-
-    /// Optional offset column, added to the linear predictor.
-    pub fn set_offset_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("offsetCol", value);
-        self
-    }
-
-    /// Tree aggregation depth.
-    pub fn set_aggregation_depth(mut self, value: i32) -> Self {
-        self.params = self.params.set_param_int32("aggregationDepth", value);
-        self
-    }
-
-    /// Numeric label column.
-    pub fn label_col(&self) -> &str {
-        self.params.string_or("labelCol", "label")
-    }
-
-    /// Feature vector column.
-    pub fn feature_col(&self) -> &str {
-        self.params.string_or("featuresCol", "features")
-    }
-
-    /// Prediction output column.
-    pub fn prediction_col(&self) -> &str {
-        self.params.string_or("predictionCol", "prediction")
-    }
-
-    /// Distribution: gaussian, binomial, poisson, gamma or tweedie.
-    pub fn family(&self) -> &str {
-        self.params.string_or("family", "gaussian")
-    }
-
-    /// Link function; when unset, Spark chooses the family default.
-    pub fn link(&self) -> Option<&str> {
-        self.params.string_opt("link")
-    }
-
-    /// Whether to fit an intercept.
-    pub fn fit_intercept(&self) -> bool {
-        self.params.bool_or("fitIntercept", true)
-    }
-
-    /// Maximum number of IRLS iterations.
-    pub fn max_iter(&self) -> i32 {
-        self.params.int_or("maxIter", 25)
-    }
-
-    /// Convergence tolerance.
-    pub fn tol(&self) -> f64 {
-        self.params.double_or("tol", 1e-06)
-    }
-
-    /// L2 regularization strength.
-    pub fn reg_param(&self) -> f64 {
-        self.params.double_or("regParam", 0.0)
-    }
-
-    /// Optional instance weight column.
-    pub fn weight_col(&self) -> Option<&str> {
-        self.params.string_opt("weightCol")
-    }
-
-    /// Solver algorithm: irls.
-    pub fn solver(&self) -> &str {
-        self.params.string_or("solver", "irls")
-    }
-
-    /// Optional output column for the linear predictor.
-    pub fn link_prediction_col(&self) -> Option<&str> {
-        self.params.string_opt("linkPredictionCol")
-    }
-
-    /// Tweedie variance power: 0 or a value at least 1.
-    pub fn variance_power(&self) -> f64 {
-        self.params.double_or("variancePower", 0.0)
-    }
-
-    /// Tweedie link power; when unset, Spark uses 1 - variancePower.
-    pub fn link_power(&self) -> Option<f64> {
-        use proto::expression::literal::LiteralType as L;
-        match self.params.literal("linkPower") {
-            Some(L::Double(value)) => Some(*value),
-            Some(L::Integer(value)) => Some(f64::from(*value)),
-            Some(L::Long(value)) => Some(*value as f64),
-            _ => None,
-        }
-    }
-
-    /// Optional offset column, added to the linear predictor.
-    pub fn offset_col(&self) -> Option<&str> {
-        self.params.string_opt("offsetCol")
-    }
-
-    /// Tree aggregation depth.
-    pub fn aggregation_depth(&self) -> i32 {
-        self.params.int_or("aggregationDepth", 2)
-    }
-
     fn model_from_info(
         &self,
         info: proto::ml_command_result::MlOperatorInfo,
@@ -3915,7 +3631,45 @@ impl GeneralizedLinearRegression {
             ),
             params: self.params.clone(),
             cached,
+            training_summary: None,
         })
+    }
+}
+
+ml_params! {
+    GeneralizedLinearRegression {
+        set_aggregation_depth(value: i32) => "aggregationDepth", set_param_int32;
+        aggregation_depth -> i32 = |this| this.params.int_or("aggregationDepth", 2);
+        set_family(value: &str) => "family", set_param_string;
+        family -> &str = |this| this.params.string_or("family", "gaussian");
+        set_features_col(value: &str) => "featuresCol", set_param_string;
+        features_col -> &str = |this| this.params.string_or("featuresCol", "features");
+        set_fit_intercept(value: bool) => "fitIntercept", set_param_bool;
+        fit_intercept -> bool = |this| this.params.bool_or("fitIntercept", true);
+        set_label_col(value: &str) => "labelCol", set_param_string;
+        label_col -> &str = |this| this.params.string_or("labelCol", "label");
+        set_link(value: &str) => "link", set_param_string;
+        link -> Option<&str> = |this| this.params.string_opt("link");
+        set_link_power(value: f64) => "linkPower", set_param_double;
+        link_power -> Option<f64> = |this| this.params.double_opt("linkPower");
+        set_link_prediction_col(value: &str) => "linkPredictionCol", set_param_string;
+        link_prediction_col -> Option<&str> = |this| this.params.string_opt("linkPredictionCol");
+        set_max_iter(value: i32) => "maxIter", set_param_int32;
+        max_iter -> i32 = |this| this.params.int_or("maxIter", 25);
+        set_offset_col(value: &str) => "offsetCol", set_param_string;
+        offset_col -> Option<&str> = |this| this.params.string_opt("offsetCol");
+        set_prediction_col(value: &str) => "predictionCol", set_param_string;
+        prediction_col -> &str = |this| this.params.string_or("predictionCol", "prediction");
+        set_reg_param(value: f64) => "regParam", set_param_double;
+        reg_param -> f64 = |this| this.params.double_or("regParam", 0.0);
+        set_solver(value: &str) => "solver", set_param_string;
+        solver -> &str = |this| this.params.string_or("solver", "irls");
+        set_tol(value: f64) => "tol", set_param_double;
+        tol -> f64 = |this| this.params.double_or("tol", 1e-06);
+        set_variance_power(value: f64) => "variancePower", set_param_double;
+        variance_power -> f64 = |this| this.params.double_or("variancePower", 0.0);
+        set_weight_col(value: &str) => "weightCol", set_param_string;
+        weight_col -> Option<&str> = |this| this.params.string_opt("weightCol");
     }
 }
 
@@ -3940,8 +3694,7 @@ impl Estimator for GeneralizedLinearRegression {
     }
 
     fn fit_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<Box<dyn Model>> {
-        let info = fit_via_command(&self.operator, &self.params, df)?;
-        Ok(Box::new(self.model_from_info(info, &df.session)?))
+        Ok(Box::new(GeneralizedLinearRegression::fit(self, df)?))
     }
 }
 
@@ -3954,6 +3707,34 @@ pub struct GeneralizedLinearRegressionModel {
     operator: MlOperator,
     params: Params,
     cached: CachedModel,
+    /// The summary of the model of its training dataset, of a model that this client fitted.
+    training_summary: Option<MlTarget>,
+}
+
+ml_params! {
+    GeneralizedLinearRegressionModel {
+        aggregation_depth -> i32 = |this| this.params.int_or("aggregationDepth", 2) =>
+            "aggregationDepth";
+        family -> &str = |this| this.params.string_or("family", "gaussian") => "family";
+        set_features_col(value: &str) => "featuresCol", set_param_string;
+        features_col -> &str = |this| this.params.string_or("featuresCol", "features");
+        fit_intercept -> bool = |this| this.params.bool_or("fitIntercept", true) => "fitIntercept";
+        label_col -> &str = |this| this.params.string_or("labelCol", "label") => "labelCol";
+        link -> Option<&str> = |this| this.params.string_opt("link") => "link";
+        link_power -> Option<f64> = |this| this.params.double_opt("linkPower") => "linkPower";
+        set_link_prediction_col(value: &str) => "linkPredictionCol", set_param_string;
+        link_prediction_col -> Option<&str> = |this| this.params.string_opt("linkPredictionCol");
+        max_iter -> i32 = |this| this.params.int_or("maxIter", 25) => "maxIter";
+        offset_col -> Option<&str> = |this| this.params.string_opt("offsetCol") => "offsetCol";
+        set_prediction_col(value: &str) => "predictionCol", set_param_string;
+        prediction_col -> &str = |this| this.params.string_or("predictionCol", "prediction");
+        reg_param -> f64 = |this| this.params.double_or("regParam", 0.0) => "regParam";
+        solver -> &str = |this| this.params.string_or("solver", "irls") => "solver";
+        tol -> f64 = |this| this.params.double_or("tol", 1e-06) => "tol";
+        variance_power -> f64 = |this| this.params.double_or("variancePower", 0.0) =>
+            "variancePower";
+        weight_col -> Option<&str> = |this| this.params.string_opt("weightCol") => "weightCol";
+    }
 }
 
 impl Transformer for GeneralizedLinearRegressionModel {
@@ -4012,131 +3793,6 @@ impl AFTSurvivalRegression {
         }
     }
 
-    /// Set `featuresCol`.
-    pub fn set_feature_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("featuresCol", value);
-        self
-    }
-
-    /// Get `featuresCol`.
-    pub fn feature_col(&self) -> &str {
-        self.params.string_or("featuresCol", "features")
-    }
-
-    /// Set `labelCol`.
-    pub fn set_label_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("labelCol", value);
-        self
-    }
-
-    /// Get `labelCol`.
-    pub fn label_col(&self) -> &str {
-        self.params.string_or("labelCol", "label")
-    }
-
-    /// Set `predictionCol`.
-    pub fn set_prediction_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("predictionCol", value);
-        self
-    }
-
-    /// Get `predictionCol`.
-    pub fn prediction_col(&self) -> &str {
-        self.params.string_or("predictionCol", "prediction")
-    }
-
-    /// Set `fitIntercept`.
-    pub fn set_fit_intercept(mut self, value: bool) -> Self {
-        self.params = self.params.set_param_bool("fitIntercept", value);
-        self
-    }
-
-    /// Get `fitIntercept`.
-    pub fn fit_intercept(&self) -> bool {
-        self.params.bool_or("fitIntercept", true)
-    }
-
-    /// Set `maxIter`.
-    pub fn set_max_iter(mut self, value: i32) -> Self {
-        self.params = self.params.set_param_int32("maxIter", value);
-        self
-    }
-
-    /// Get `maxIter`.
-    pub fn max_iter(&self) -> i32 {
-        self.params.int_or("maxIter", 100)
-    }
-
-    /// Set `tol`.
-    pub fn set_tol(mut self, value: f64) -> Self {
-        self.params = self.params.set_param_double("tol", value);
-        self
-    }
-
-    /// Get `tol`.
-    pub fn tol(&self) -> f64 {
-        self.params.double_or("tol", 1e-06)
-    }
-
-    /// Set `censorCol`.
-    pub fn set_censor_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("censorCol", value);
-        self
-    }
-
-    /// Get `censorCol`.
-    pub fn censor_col(&self) -> &str {
-        self.params.string_or("censorCol", "censor")
-    }
-
-    /// Set `quantileProbabilities`.
-    pub fn set_quantile_probabilities(mut self, value: impl IntoIterator<Item = f64>) -> Self {
-        self.params = self
-            .params
-            .set_param_double_array("quantileProbabilities", value);
-        self
-    }
-
-    /// Get `quantileProbabilities`.
-    pub fn quantile_probabilities(&self) -> Vec<f64> {
-        self.params
-            .double_array_opt("quantileProbabilities")
-            .unwrap_or_else(|| vec![0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99])
-    }
-
-    /// Set `quantilesCol`.
-    pub fn set_quantiles_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("quantilesCol", value);
-        self
-    }
-
-    /// Get `quantilesCol`.
-    pub fn quantiles_col(&self) -> Option<&str> {
-        self.params.string_opt("quantilesCol")
-    }
-
-    /// Set `aggregationDepth`.
-    pub fn set_aggregation_depth(mut self, value: i32) -> Self {
-        self.params = self.params.set_param_int32("aggregationDepth", value);
-        self
-    }
-
-    /// Get `aggregationDepth`.
-    pub fn aggregation_depth(&self) -> i32 {
-        self.params.int_or("aggregationDepth", 2)
-    }
-
-    /// Set `maxBlockSizeInMB`.
-    pub fn set_max_block_size_in_mb(mut self, value: f64) -> Self {
-        self.params = self.params.set_param_double("maxBlockSizeInMB", value);
-        self
-    }
-
-    /// Get `maxBlockSizeInMB`.
-    pub fn max_block_size_in_mb(&self) -> f64 {
-        self.params.double_or("maxBlockSizeInMB", 0.0)
-    }
-
     fn model_from_info(
         &self,
         info: proto::ml_command_result::MlOperatorInfo,
@@ -4152,6 +3808,36 @@ impl AFTSurvivalRegression {
             params: self.params.clone(),
             cached,
         })
+    }
+}
+
+ml_params! {
+    AFTSurvivalRegression {
+        set_aggregation_depth(value: i32) => "aggregationDepth", set_param_int32;
+        aggregation_depth -> i32 = |this| this.params.int_or("aggregationDepth", 2);
+        set_censor_col(value: &str) => "censorCol", set_param_string;
+        censor_col -> &str = |this| this.params.string_or("censorCol", "censor");
+        set_features_col(value: &str) => "featuresCol", set_param_string;
+        features_col -> &str = |this| this.params.string_or("featuresCol", "features");
+        set_fit_intercept(value: bool) => "fitIntercept", set_param_bool;
+        fit_intercept -> bool = |this| this.params.bool_or("fitIntercept", true);
+        set_label_col(value: &str) => "labelCol", set_param_string;
+        label_col -> &str = |this| this.params.string_or("labelCol", "label");
+        set_max_block_size_in_mb(value: f64) => "maxBlockSizeInMB", set_param_double;
+        max_block_size_in_mb -> f64 = |this| this.params.double_or("maxBlockSizeInMB", 0.0);
+        set_max_iter(value: i32) => "maxIter", set_param_int32;
+        max_iter -> i32 = |this| this.params.int_or("maxIter", 100);
+        set_prediction_col(value: &str) => "predictionCol", set_param_string;
+        prediction_col -> &str = |this| this.params.string_or("predictionCol", "prediction");
+        set_quantile_probabilities(value: impl IntoIterator<Item = f64>) => "quantileProbabilities",
+            set_param_double_array;
+        quantile_probabilities -> Vec<f64> = |this| this.params.double_array_opt(
+            "quantileProbabilities").unwrap_or_else(|| vec![0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9,
+            0.95, 0.99]);
+        set_quantiles_col(value: &str) => "quantilesCol", set_param_string;
+        quantiles_col -> Option<&str> = |this| this.params.string_opt("quantilesCol");
+        set_tol(value: f64) => "tol", set_param_double;
+        tol -> f64 = |this| this.params.double_or("tol", 1e-06);
     }
 }
 
@@ -4176,8 +3862,7 @@ impl Estimator for AFTSurvivalRegression {
     }
 
     fn fit_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<Box<dyn Model>> {
-        let info = fit_via_command(&self.operator, &self.params, df)?;
-        Ok(Box::new(self.model_from_info(info, &df.session)?))
+        Ok(Box::new(AFTSurvivalRegression::fit(self, df)?))
     }
 }
 
@@ -4190,6 +3875,31 @@ pub struct AFTSurvivalRegressionModel {
     operator: MlOperator,
     params: Params,
     cached: CachedModel,
+}
+
+ml_params! {
+    AFTSurvivalRegressionModel {
+        aggregation_depth -> i32 = |this| this.params.int_or("aggregationDepth", 2) =>
+            "aggregationDepth";
+        censor_col -> &str = |this| this.params.string_or("censorCol", "censor") => "censorCol";
+        set_features_col(value: &str) => "featuresCol", set_param_string;
+        features_col -> &str = |this| this.params.string_or("featuresCol", "features");
+        fit_intercept -> bool = |this| this.params.bool_or("fitIntercept", true) => "fitIntercept";
+        label_col -> &str = |this| this.params.string_or("labelCol", "label") => "labelCol";
+        max_block_size_in_mb -> f64 = |this| this.params.double_or("maxBlockSizeInMB", 0.0) =>
+            "maxBlockSizeInMB";
+        max_iter -> i32 = |this| this.params.int_or("maxIter", 100) => "maxIter";
+        set_prediction_col(value: &str) => "predictionCol", set_param_string;
+        prediction_col -> &str = |this| this.params.string_or("predictionCol", "prediction");
+        set_quantile_probabilities(value: impl IntoIterator<Item = f64>) => "quantileProbabilities",
+            set_param_double_array;
+        quantile_probabilities -> Vec<f64> = |this| this.params.double_array_opt(
+            "quantileProbabilities").unwrap_or_else(|| vec![0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9,
+            0.95, 0.99]);
+        set_quantiles_col(value: &str) => "quantilesCol", set_param_string;
+        quantiles_col -> Option<&str> = |this| this.params.string_opt("quantilesCol");
+        tol -> f64 = |this| this.params.double_or("tol", 1e-06) => "tol";
+    }
 }
 
 impl Transformer for AFTSurvivalRegressionModel {
@@ -4248,72 +3958,6 @@ impl IsotonicRegression {
         }
     }
 
-    /// Set `featuresCol`.
-    pub fn set_feature_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("featuresCol", value);
-        self
-    }
-
-    /// Get `featuresCol`.
-    pub fn feature_col(&self) -> &str {
-        self.params.string_or("featuresCol", "features")
-    }
-
-    /// Set `labelCol`.
-    pub fn set_label_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("labelCol", value);
-        self
-    }
-
-    /// Get `labelCol`.
-    pub fn label_col(&self) -> &str {
-        self.params.string_or("labelCol", "label")
-    }
-
-    /// Set `predictionCol`.
-    pub fn set_prediction_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("predictionCol", value);
-        self
-    }
-
-    /// Get `predictionCol`.
-    pub fn prediction_col(&self) -> &str {
-        self.params.string_or("predictionCol", "prediction")
-    }
-
-    /// Set `weightCol`.
-    pub fn set_weight_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("weightCol", value);
-        self
-    }
-
-    /// Get `weightCol`.
-    pub fn weight_col(&self) -> Option<&str> {
-        self.params.string_opt("weightCol")
-    }
-
-    /// Set `isotonic`.
-    pub fn set_isotonic(mut self, value: bool) -> Self {
-        self.params = self.params.set_param_bool("isotonic", value);
-        self
-    }
-
-    /// Get `isotonic`.
-    pub fn isotonic(&self) -> bool {
-        self.params.bool_or("isotonic", true)
-    }
-
-    /// Set `featureIndex`.
-    pub fn set_feature_index(mut self, value: i32) -> Self {
-        self.params = self.params.set_param_int32("featureIndex", value);
-        self
-    }
-
-    /// Get `featureIndex`.
-    pub fn feature_index(&self) -> i32 {
-        self.params.int_or("featureIndex", 0)
-    }
-
     fn model_from_info(
         &self,
         info: proto::ml_command_result::MlOperatorInfo,
@@ -4329,6 +3973,23 @@ impl IsotonicRegression {
             params: self.params.clone(),
             cached,
         })
+    }
+}
+
+ml_params! {
+    IsotonicRegression {
+        set_feature_index(value: i32) => "featureIndex", set_param_int32;
+        feature_index -> i32 = |this| this.params.int_or("featureIndex", 0);
+        set_features_col(value: &str) => "featuresCol", set_param_string;
+        features_col -> &str = |this| this.params.string_or("featuresCol", "features");
+        set_isotonic(value: bool) => "isotonic", set_param_bool;
+        isotonic -> bool = |this| this.params.bool_or("isotonic", true);
+        set_label_col(value: &str) => "labelCol", set_param_string;
+        label_col -> &str = |this| this.params.string_or("labelCol", "label");
+        set_prediction_col(value: &str) => "predictionCol", set_param_string;
+        prediction_col -> &str = |this| this.params.string_or("predictionCol", "prediction");
+        set_weight_col(value: &str) => "weightCol", set_param_string;
+        weight_col -> Option<&str> = |this| this.params.string_opt("weightCol");
     }
 }
 
@@ -4353,8 +4014,7 @@ impl Estimator for IsotonicRegression {
     }
 
     fn fit_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<Box<dyn Model>> {
-        let info = fit_via_command(&self.operator, &self.params, df)?;
-        Ok(Box::new(self.model_from_info(info, &df.session)?))
+        Ok(Box::new(IsotonicRegression::fit(self, df)?))
     }
 }
 
@@ -4367,6 +4027,20 @@ pub struct IsotonicRegressionModel {
     operator: MlOperator,
     params: Params,
     cached: CachedModel,
+}
+
+ml_params! {
+    IsotonicRegressionModel {
+        set_feature_index(value: i32) => "featureIndex", set_param_int32;
+        feature_index -> i32 = |this| this.params.int_or("featureIndex", 0);
+        set_features_col(value: &str) => "featuresCol", set_param_string;
+        features_col -> &str = |this| this.params.string_or("featuresCol", "features");
+        isotonic -> bool = |this| this.params.bool_or("isotonic", true) => "isotonic";
+        label_col -> &str = |this| this.params.string_or("labelCol", "label") => "labelCol";
+        set_prediction_col(value: &str) => "predictionCol", set_param_string;
+        prediction_col -> &str = |this| this.params.string_or("predictionCol", "prediction");
+        weight_col -> Option<&str> = |this| this.params.string_opt("weightCol") => "weightCol";
+    }
 }
 
 impl Transformer for IsotonicRegressionModel {
@@ -4425,160 +4099,6 @@ impl FMRegressor {
         }
     }
 
-    /// Set `featuresCol`.
-    pub fn set_feature_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("featuresCol", value);
-        self
-    }
-
-    /// Get `featuresCol`.
-    pub fn feature_col(&self) -> &str {
-        self.params.string_or("featuresCol", "features")
-    }
-
-    /// Set `labelCol`.
-    pub fn set_label_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("labelCol", value);
-        self
-    }
-
-    /// Get `labelCol`.
-    pub fn label_col(&self) -> &str {
-        self.params.string_or("labelCol", "label")
-    }
-
-    /// Set `predictionCol`.
-    pub fn set_prediction_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("predictionCol", value);
-        self
-    }
-
-    /// Get `predictionCol`.
-    pub fn prediction_col(&self) -> &str {
-        self.params.string_or("predictionCol", "prediction")
-    }
-
-    /// Set `factorSize`.
-    pub fn set_factor_size(mut self, value: i32) -> Self {
-        self.params = self.params.set_param_int32("factorSize", value);
-        self
-    }
-
-    /// Get `factorSize`.
-    pub fn factor_size(&self) -> i32 {
-        self.params.int_or("factorSize", 8)
-    }
-
-    /// Set `fitIntercept`.
-    pub fn set_fit_intercept(mut self, value: bool) -> Self {
-        self.params = self.params.set_param_bool("fitIntercept", value);
-        self
-    }
-
-    /// Get `fitIntercept`.
-    pub fn fit_intercept(&self) -> bool {
-        self.params.bool_or("fitIntercept", true)
-    }
-
-    /// Set `fitLinear`.
-    pub fn set_fit_linear(mut self, value: bool) -> Self {
-        self.params = self.params.set_param_bool("fitLinear", value);
-        self
-    }
-
-    /// Get `fitLinear`.
-    pub fn fit_linear(&self) -> bool {
-        self.params.bool_or("fitLinear", true)
-    }
-
-    /// Set `regParam`.
-    pub fn set_reg_param(mut self, value: f64) -> Self {
-        self.params = self.params.set_param_double("regParam", value);
-        self
-    }
-
-    /// Get `regParam`.
-    pub fn reg_param(&self) -> f64 {
-        self.params.double_or("regParam", 0.0)
-    }
-
-    /// Set `miniBatchFraction`.
-    pub fn set_mini_batch_fraction(mut self, value: f64) -> Self {
-        self.params = self.params.set_param_double("miniBatchFraction", value);
-        self
-    }
-
-    /// Get `miniBatchFraction`.
-    pub fn mini_batch_fraction(&self) -> f64 {
-        self.params.double_or("miniBatchFraction", 1.0)
-    }
-
-    /// Set `initStd`.
-    pub fn set_init_std(mut self, value: f64) -> Self {
-        self.params = self.params.set_param_double("initStd", value);
-        self
-    }
-
-    /// Get `initStd`.
-    pub fn init_std(&self) -> f64 {
-        self.params.double_or("initStd", 0.01)
-    }
-
-    /// Set `maxIter`.
-    pub fn set_max_iter(mut self, value: i32) -> Self {
-        self.params = self.params.set_param_int32("maxIter", value);
-        self
-    }
-
-    /// Get `maxIter`.
-    pub fn max_iter(&self) -> i32 {
-        self.params.int_or("maxIter", 100)
-    }
-
-    /// Set `stepSize`.
-    pub fn set_step_size(mut self, value: f64) -> Self {
-        self.params = self.params.set_param_double("stepSize", value);
-        self
-    }
-
-    /// Get `stepSize`.
-    pub fn step_size(&self) -> f64 {
-        self.params.double_or("stepSize", 1.0)
-    }
-
-    /// Set `tol`.
-    pub fn set_tol(mut self, value: f64) -> Self {
-        self.params = self.params.set_param_double("tol", value);
-        self
-    }
-
-    /// Get `tol`.
-    pub fn tol(&self) -> f64 {
-        self.params.double_or("tol", 1e-06)
-    }
-
-    /// Set `solver`.
-    pub fn set_solver(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("solver", value);
-        self
-    }
-
-    /// Get `solver`.
-    pub fn solver(&self) -> &str {
-        self.params.string_or("solver", "adamW")
-    }
-
-    /// Set `seed`.
-    pub fn set_seed(mut self, value: i64) -> Self {
-        self.params = self.params.set_param_int_narrow("seed", value);
-        self
-    }
-
-    /// Get `seed`.
-    pub fn seed(&self) -> Option<i64> {
-        self.params.long_opt("seed")
-    }
-
     fn model_from_info(
         &self,
         info: proto::ml_command_result::MlOperatorInfo,
@@ -4594,6 +4114,41 @@ impl FMRegressor {
             params: self.params.clone(),
             cached,
         })
+    }
+}
+
+ml_params! {
+    FMRegressor {
+        set_factor_size(value: i32) => "factorSize", set_param_int32;
+        factor_size -> i32 = |this| this.params.int_or("factorSize", 8);
+        set_features_col(value: &str) => "featuresCol", set_param_string;
+        features_col -> &str = |this| this.params.string_or("featuresCol", "features");
+        set_fit_intercept(value: bool) => "fitIntercept", set_param_bool;
+        fit_intercept -> bool = |this| this.params.bool_or("fitIntercept", true);
+        set_fit_linear(value: bool) => "fitLinear", set_param_bool;
+        fit_linear -> bool = |this| this.params.bool_or("fitLinear", true);
+        set_init_std(value: f64) => "initStd", set_param_double;
+        init_std -> f64 = |this| this.params.double_or("initStd", 0.01);
+        set_label_col(value: &str) => "labelCol", set_param_string;
+        label_col -> &str = |this| this.params.string_or("labelCol", "label");
+        set_max_iter(value: i32) => "maxIter", set_param_int32;
+        max_iter -> i32 = |this| this.params.int_or("maxIter", 100);
+        set_mini_batch_fraction(value: f64) => "miniBatchFraction", set_param_double;
+        mini_batch_fraction -> f64 = |this| this.params.double_or("miniBatchFraction", 1.0);
+        set_prediction_col(value: &str) => "predictionCol", set_param_string;
+        prediction_col -> &str = |this| this.params.string_or("predictionCol", "prediction");
+        set_reg_param(value: f64) => "regParam", set_param_double;
+        reg_param -> f64 = |this| this.params.double_or("regParam", 0.0);
+        set_seed(value: i64) => "seed", set_param_int_narrow;
+        seed -> i64 = |this| this.params.long_opt("seed").unwrap_or(java_string_hash(
+            "org.apache.spark.ml.regression.FMRegressor"));
+        set_solver(value: &str) => "solver", set_param_string;
+        solver -> &str = |this| this.params.string_or("solver", "adamW");
+        set_step_size(value: f64) => "stepSize", set_param_double;
+        step_size -> f64 = |this| this.params.double_or("stepSize", 1.0);
+        set_tol(value: f64) => "tol", set_param_double;
+        tol -> f64 = |this| this.params.double_or("tol", 1e-06);
+        weight_col -> Option<&str> = |this| this.params.string_opt("weightCol") => "weightCol";
     }
 }
 
@@ -4618,8 +4173,7 @@ impl Estimator for FMRegressor {
     }
 
     fn fit_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<Box<dyn Model>> {
-        let info = fit_via_command(&self.operator, &self.params, df)?;
-        Ok(Box::new(self.model_from_info(info, &df.session)?))
+        Ok(Box::new(FMRegressor::fit(self, df)?))
     }
 }
 
@@ -4632,6 +4186,30 @@ pub struct FMRegressionModel {
     operator: MlOperator,
     params: Params,
     cached: CachedModel,
+}
+
+ml_params! {
+    FMRegressionModel {
+        factor_size -> i32 = |this| this.params.int_or("factorSize", 8) => "factorSize";
+        set_features_col(value: &str) => "featuresCol", set_param_string;
+        features_col -> &str = |this| this.params.string_or("featuresCol", "features");
+        fit_intercept -> bool = |this| this.params.bool_or("fitIntercept", true) => "fitIntercept";
+        fit_linear -> bool = |this| this.params.bool_or("fitLinear", true) => "fitLinear";
+        init_std -> f64 = |this| this.params.double_or("initStd", 0.01) => "initStd";
+        label_col -> &str = |this| this.params.string_or("labelCol", "label") => "labelCol";
+        max_iter -> i32 = |this| this.params.int_or("maxIter", 100) => "maxIter";
+        mini_batch_fraction -> f64 = |this| this.params.double_or("miniBatchFraction", 1.0) =>
+            "miniBatchFraction";
+        set_prediction_col(value: &str) => "predictionCol", set_param_string;
+        prediction_col -> &str = |this| this.params.string_or("predictionCol", "prediction");
+        reg_param -> f64 = |this| this.params.double_or("regParam", 0.0) => "regParam";
+        seed -> i64 = |this| this.params.long_opt("seed").unwrap_or(java_string_hash(
+            "org.apache.spark.ml.regression.FMRegressionModel")) => "seed";
+        solver -> &str = |this| this.params.string_or("solver", "adamW") => "solver";
+        step_size -> f64 = |this| this.params.double_or("stepSize", 1.0) => "stepSize";
+        tol -> f64 = |this| this.params.double_or("tol", 1e-06) => "tol";
+        weight_col -> Option<&str> = |this| this.params.string_opt("weightCol") => "weightCol";
+    }
 }
 
 impl Transformer for FMRegressionModel {
@@ -5993,252 +5571,6 @@ impl GBTRegressor {
         }
     }
 
-    /// Feature vector column.
-    pub fn set_feature_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("featuresCol", value);
-        self
-    }
-
-    /// Continuous numeric regression label column.
-    pub fn set_label_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("labelCol", value);
-        self
-    }
-
-    /// Regression prediction output column.
-    pub fn set_prediction_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("predictionCol", value);
-        self
-    }
-
-    /// Maximum tree depth, from 0 to 30.
-    pub fn set_max_depth(mut self, value: i32) -> Self {
-        self.params = self.params.set_param_int32("maxDepth", value);
-        self
-    }
-
-    /// Maximum number of bins for discretizing continuous features.
-    pub fn set_max_bins(mut self, value: i32) -> Self {
-        self.params = self.params.set_param_int32("maxBins", value);
-        self
-    }
-
-    /// Minimum number of training instances in each child node.
-    pub fn set_min_instances_per_node(mut self, value: i32) -> Self {
-        self.params = self.params.set_param_int32("minInstancesPerNode", value);
-        self
-    }
-
-    /// Minimum information gain for a split.
-    pub fn set_min_info_gain(mut self, value: f64) -> Self {
-        self.params = self.params.set_param_double("minInfoGain", value);
-        self
-    }
-
-    /// Maximum memory in MB for histogram aggregation.
-    pub fn set_max_memory_in_mb(mut self, value: i32) -> Self {
-        self.params = self.params.set_param_int32("maxMemoryInMB", value);
-        self
-    }
-
-    /// Whether to cache node IDs for training instances.
-    pub fn set_cache_node_ids(mut self, value: bool) -> Self {
-        self.params = self.params.set_param_bool("cacheNodeIds", value);
-        self
-    }
-
-    /// Node ID cache checkpoint interval; -1 disables checkpointing.
-    pub fn set_checkpoint_interval(mut self, value: i32) -> Self {
-        self.params = self.params.set_param_int32("checkpointInterval", value);
-        self
-    }
-
-    /// Impurity setting; Spark uses variance for the regression trees in GBT.
-    pub fn set_impurity(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("impurity", value);
-        self
-    }
-
-    /// Feature subset strategy: auto, all, onethird, sqrt, log2, or a numeric count/fraction.
-    pub fn set_feature_subset_strategy(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("featureSubsetStrategy", value);
-        self
-    }
-
-    /// Random seed for split-candidate row sampling, subsampling and feature sampling.
-    pub fn set_seed(mut self, value: i64) -> Self {
-        self.params = self.params.set_param_int_narrow("seed", value);
-        self
-    }
-
-    /// Fraction of training data used to train each tree, in (0, 1].
-    pub fn set_subsampling_rate(mut self, value: f64) -> Self {
-        self.params = self.params.set_param_double("subsamplingRate", value);
-        self
-    }
-
-    /// Optional output vector of leaf indices, one per tree; empty disables it.
-    pub fn set_leaf_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("leafCol", value);
-        self
-    }
-
-    /// Minimum fraction of total weight in each child node, in [0, 0.5).
-    pub fn set_min_weight_fraction_per_node(mut self, value: f64) -> Self {
-        self.params = self
-            .params
-            .set_param_double("minWeightFractionPerNode", value);
-        self
-    }
-
-    /// Optional instance weight column.
-    pub fn set_weight_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("weightCol", value);
-        self
-    }
-
-    /// The feature vector column (default: "features").
-    pub fn feature_col(&self) -> &str {
-        self.params.string_or("featuresCol", "features")
-    }
-
-    /// The label column (default: "label").
-    pub fn label_col(&self) -> &str {
-        self.params.string_or("labelCol", "label")
-    }
-
-    /// The regression prediction output column (default: "prediction").
-    pub fn prediction_col(&self) -> &str {
-        self.params.string_or("predictionCol", "prediction")
-    }
-
-    /// The maximum tree depth (default: 5).
-    pub fn max_depth(&self) -> i32 {
-        self.params.int_or("maxDepth", 5)
-    }
-
-    /// The maximum number of bins for continuous features (default: 32).
-    pub fn max_bins(&self) -> i32 {
-        self.params.int_or("maxBins", 32)
-    }
-
-    /// The minimum number of training instances in each child node (default: 1).
-    pub fn min_instances_per_node(&self) -> i32 {
-        self.params.int_or("minInstancesPerNode", 1)
-    }
-
-    /// The minimum information gain for a split (default: 0).
-    pub fn min_info_gain(&self) -> f64 {
-        self.params.double_or("minInfoGain", 0.0)
-    }
-
-    /// The maximum memory in MB for histogram aggregation (default: 256).
-    pub fn max_memory_in_mb(&self) -> i32 {
-        self.params.int_or("maxMemoryInMB", 256)
-    }
-
-    /// Whether to cache node IDs for training instances (default: false).
-    pub fn cache_node_ids(&self) -> bool {
-        self.params.bool_or("cacheNodeIds", false)
-    }
-
-    /// The node ID cache checkpoint interval (default: 10).
-    pub fn checkpoint_interval(&self) -> i32 {
-        self.params.int_or("checkpointInterval", 10)
-    }
-
-    /// The impurity measure (default: "variance").
-    pub fn impurity(&self) -> &str {
-        self.params.string_or("impurity", "variance")
-    }
-
-    /// The feature subset strategy (default: "all").
-    pub fn feature_subset_strategy(&self) -> &str {
-        self.params.string_or("featureSubsetStrategy", "all")
-    }
-
-    /// The random seed, if one is set; else Spark's default seed applies.
-    pub fn seed(&self) -> Option<i64> {
-        self.params.long_opt("seed")
-    }
-
-    /// The fraction of training data used to train each tree (default: 1).
-    pub fn subsampling_rate(&self) -> f64 {
-        self.params.double_or("subsamplingRate", 1.0)
-    }
-
-    /// The leaf index output column (default: empty, no column).
-    pub fn leaf_col(&self) -> &str {
-        self.params.string_or("leafCol", "")
-    }
-
-    /// The minimum fraction of total weight in each child node (default: 0).
-    pub fn min_weight_fraction_per_node(&self) -> f64 {
-        self.params.double_or("minWeightFractionPerNode", 0.0)
-    }
-
-    /// The instance weight column, if one is set.
-    pub fn weight_col(&self) -> Option<&str> {
-        self.params.string_opt("weightCol")
-    }
-
-    /// Loss function: squared or absolute.
-    pub fn set_loss_type(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("lossType", value);
-        self
-    }
-
-    /// The lossType value; default: "squared".
-    pub fn loss_type(&self) -> &str {
-        self.params.string_or("lossType", "squared")
-    }
-
-    /// Maximum number of boosting iterations (trees).
-    pub fn set_max_iter(mut self, value: i32) -> Self {
-        self.params = self.params.set_param_int32("maxIter", value);
-        self
-    }
-
-    /// The maxIter value; default: 20.
-    pub fn max_iter(&self) -> i32 {
-        self.params.int_or("maxIter", 20)
-    }
-
-    /// Learning rate for the contribution of each tree after the first, in (0, 1].
-    pub fn set_step_size(mut self, value: f64) -> Self {
-        self.params = self.params.set_param_double("stepSize", value);
-        self
-    }
-
-    /// The stepSize value; default: 0.1.
-    pub fn step_size(&self) -> f64 {
-        self.params.double_or("stepSize", 0.1)
-    }
-
-    /// Relative improvement tolerance for validation-set early stopping.
-    pub fn set_validation_tol(mut self, value: f64) -> Self {
-        self.params = self.params.set_param_double("validationTol", value);
-        self
-    }
-
-    /// The validationTol value; default: 0.01.
-    pub fn validation_tol(&self) -> f64 {
-        self.params.double_or("validationTol", 0.01)
-    }
-
-    /// Optional boolean column: false rows train; true rows validate early stopping.
-    pub fn set_validation_indicator_col(mut self, value: &str) -> Self {
-        self.params = self
-            .params
-            .set_param_string("validationIndicatorCol", value);
-        self
-    }
-
-    /// The validationIndicatorCol value; unset unless explicitly configured.
-    pub fn validation_indicator_col(&self) -> Option<&str> {
-        self.params.string_opt("validationIndicatorCol")
-    }
-
     fn model_from_info(
         &self,
         info: proto::ml_command_result::MlOperatorInfo,
@@ -6254,6 +5586,60 @@ impl GBTRegressor {
             params: self.params.clone(),
             cached,
         })
+    }
+}
+
+ml_params! {
+    GBTRegressor {
+        set_cache_node_ids(value: bool) => "cacheNodeIds", set_param_bool;
+        cache_node_ids -> bool = |this| this.params.bool_or("cacheNodeIds", false);
+        set_checkpoint_interval(value: i32) => "checkpointInterval", set_param_int32;
+        checkpoint_interval -> i32 = |this| this.params.int_or("checkpointInterval", 10);
+        set_feature_subset_strategy(value: &str) => "featureSubsetStrategy", set_param_string;
+        feature_subset_strategy -> &str = |this| this.params.string_or("featureSubsetStrategy",
+            "all");
+        set_features_col(value: &str) => "featuresCol", set_param_string;
+        features_col -> &str = |this| this.params.string_or("featuresCol", "features");
+        set_impurity(value: &str) => "impurity", set_param_string;
+        impurity -> &str = |this| this.params.string_or("impurity", "variance");
+        set_label_col(value: &str) => "labelCol", set_param_string;
+        label_col -> &str = |this| this.params.string_or("labelCol", "label");
+        set_leaf_col(value: &str) => "leafCol", set_param_string;
+        leaf_col -> &str = |this| this.params.string_or("leafCol", "");
+        set_loss_type(value: &str) => "lossType", set_param_string;
+        loss_type -> &str = |this| this.params.string_or("lossType", "squared");
+        set_max_bins(value: i32) => "maxBins", set_param_int32;
+        max_bins -> i32 = |this| this.params.int_or("maxBins", 32);
+        set_max_depth(value: i32) => "maxDepth", set_param_int32;
+        max_depth -> i32 = |this| this.params.int_or("maxDepth", 5);
+        set_max_iter(value: i32) => "maxIter", set_param_int32;
+        max_iter -> i32 = |this| this.params.int_or("maxIter", 20);
+        set_max_memory_in_mb(value: i32) => "maxMemoryInMB", set_param_int32;
+        max_memory_in_mb -> i32 = |this| this.params.int_or("maxMemoryInMB", 256);
+        set_min_info_gain(value: f64) => "minInfoGain", set_param_double;
+        min_info_gain -> f64 = |this| this.params.double_or("minInfoGain", 0.0);
+        set_min_instances_per_node(value: i32) => "minInstancesPerNode", set_param_int32;
+        min_instances_per_node -> i32 = |this| this.params.int_or("minInstancesPerNode", 1);
+        set_min_weight_fraction_per_node(value: f64) => "minWeightFractionPerNode",
+            set_param_double;
+        min_weight_fraction_per_node -> f64 = |this| this.params.double_or(
+            "minWeightFractionPerNode", 0.0);
+        set_prediction_col(value: &str) => "predictionCol", set_param_string;
+        prediction_col -> &str = |this| this.params.string_or("predictionCol", "prediction");
+        set_seed(value: i64) => "seed", set_param_int_narrow;
+        seed -> i64 = |this| this.params.long_opt("seed").unwrap_or(java_string_hash(
+            "org.apache.spark.ml.regression.GBTRegressor"));
+        set_step_size(value: f64) => "stepSize", set_param_double;
+        step_size -> f64 = |this| this.params.double_or("stepSize", 0.1);
+        set_subsampling_rate(value: f64) => "subsamplingRate", set_param_double;
+        subsampling_rate -> f64 = |this| this.params.double_or("subsamplingRate", 1.0);
+        set_validation_indicator_col(value: &str) => "validationIndicatorCol", set_param_string;
+        validation_indicator_col -> Option<&str> = |this| this.params.string_opt(
+            "validationIndicatorCol");
+        set_validation_tol(value: f64) => "validationTol", set_param_double;
+        validation_tol -> f64 = |this| this.params.double_or("validationTol", 0.01);
+        set_weight_col(value: &str) => "weightCol", set_param_string;
+        weight_col -> Option<&str> = |this| this.params.string_opt("weightCol");
     }
 }
 
@@ -6278,8 +5664,7 @@ impl Estimator for GBTRegressor {
     }
 
     fn fit_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<Box<dyn Model>> {
-        let info = fit_via_command(&self.operator, &self.params, df)?;
-        Ok(Box::new(self.model_from_info(info, &df.session)?))
+        Ok(Box::new(GBTRegressor::fit(self, df)?))
     }
 }
 
@@ -6292,6 +5677,46 @@ pub struct GBTRegressionModel {
     operator: MlOperator,
     params: Params,
     cached: CachedModel,
+}
+
+ml_params! {
+    GBTRegressionModel {
+        cache_node_ids -> bool = |this| this.params.bool_or("cacheNodeIds", false) =>
+            "cacheNodeIds";
+        checkpoint_interval -> i32 = |this| this.params.int_or("checkpointInterval", 10) =>
+            "checkpointInterval";
+        feature_subset_strategy -> &str = |this| this.params.string_or("featureSubsetStrategy",
+            "all") => "featureSubsetStrategy";
+        set_features_col(value: &str) => "featuresCol", set_param_string;
+        features_col -> &str = |this| this.params.string_or("featuresCol", "features");
+        impurity -> &str = |this| this.params.string_or("impurity", "variance") => "impurity";
+        label_col -> &str = |this| this.params.string_or("labelCol", "label") => "labelCol";
+        set_leaf_col(value: &str) => "leafCol", set_param_string;
+        leaf_col -> &str = |this| this.params.string_or("leafCol", "");
+        loss_type -> &str = |this| this.params.string_or("lossType", "squared") => "lossType";
+        max_bins -> i32 = |this| this.params.int_or("maxBins", 32) => "maxBins";
+        max_depth -> i32 = |this| this.params.int_or("maxDepth", 5) => "maxDepth";
+        max_iter -> i32 = |this| this.params.int_or("maxIter", 20) => "maxIter";
+        max_memory_in_mb -> i32 = |this| this.params.int_or("maxMemoryInMB", 256) =>
+            "maxMemoryInMB";
+        min_info_gain -> f64 = |this| this.params.double_or("minInfoGain", 0.0) => "minInfoGain";
+        min_instances_per_node -> i32 = |this| this.params.int_or("minInstancesPerNode", 1) =>
+            "minInstancesPerNode";
+        min_weight_fraction_per_node -> f64 = |this| this.params.double_or(
+            "minWeightFractionPerNode", 0.0) => "minWeightFractionPerNode";
+        set_prediction_col(value: &str) => "predictionCol", set_param_string;
+        prediction_col -> &str = |this| this.params.string_or("predictionCol", "prediction");
+        seed -> i64 = |this| this.params.long_opt("seed").unwrap_or(java_string_hash(
+            "org.apache.spark.ml.regression.GBTRegressionModel")) => "seed";
+        step_size -> f64 = |this| this.params.double_or("stepSize", 0.1) => "stepSize";
+        subsampling_rate -> f64 = |this| this.params.double_or("subsamplingRate", 1.0) =>
+            "subsamplingRate";
+        validation_indicator_col -> Option<&str> = |this| this.params.string_opt(
+            "validationIndicatorCol") => "validationIndicatorCol";
+        validation_tol -> f64 = |this| this.params.double_or("validationTol", 0.01) =>
+            "validationTol";
+        weight_col -> Option<&str> = |this| this.params.string_opt("weightCol") => "weightCol";
+    }
 }
 
 impl Transformer for GBTRegressionModel {
@@ -6354,184 +5779,6 @@ impl DecisionTreeRegressor {
         }
     }
 
-    /// Feature vector column.
-    pub fn set_feature_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("featuresCol", value);
-        self
-    }
-
-    /// Numeric regression label column.
-    pub fn set_label_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("labelCol", value);
-        self
-    }
-
-    /// Regression prediction output column.
-    pub fn set_prediction_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("predictionCol", value);
-        self
-    }
-
-    /// Optional output column for the weighted label variance in the predicted leaf.
-    pub fn set_variance_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("varianceCol", value);
-        self
-    }
-
-    /// Maximum tree depth, from 0 to 30.
-    pub fn set_max_depth(mut self, value: i32) -> Self {
-        self.params = self.params.set_param_int32("maxDepth", value);
-        self
-    }
-
-    /// Maximum number of bins for discretizing continuous features.
-    pub fn set_max_bins(mut self, value: i32) -> Self {
-        self.params = self.params.set_param_int32("maxBins", value);
-        self
-    }
-
-    /// Minimum number of training instances in each child node.
-    pub fn set_min_instances_per_node(mut self, value: i32) -> Self {
-        self.params = self.params.set_param_int32("minInstancesPerNode", value);
-        self
-    }
-
-    /// Minimum information gain for a split.
-    pub fn set_min_info_gain(mut self, value: f64) -> Self {
-        self.params = self.params.set_param_double("minInfoGain", value);
-        self
-    }
-
-    /// Maximum memory in MB for histogram aggregation.
-    pub fn set_max_memory_in_mb(mut self, value: i32) -> Self {
-        self.params = self.params.set_param_int32("maxMemoryInMB", value);
-        self
-    }
-
-    /// Whether to cache node IDs for training instances.
-    pub fn set_cache_node_ids(mut self, value: bool) -> Self {
-        self.params = self.params.set_param_bool("cacheNodeIds", value);
-        self
-    }
-
-    /// Node ID cache checkpoint interval; -1 disables checkpointing.
-    pub fn set_checkpoint_interval(mut self, value: i32) -> Self {
-        self.params = self.params.set_param_int32("checkpointInterval", value);
-        self
-    }
-
-    /// Impurity measure: variance.
-    pub fn set_impurity(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("impurity", value);
-        self
-    }
-
-    /// Random seed for sampling the rows that find the split candidates, on large inputs.
-    pub fn set_seed(mut self, value: i64) -> Self {
-        self.params = self.params.set_param_int_narrow("seed", value);
-        self
-    }
-
-    /// Optional scalar leaf index output column; empty disables it.
-    pub fn set_leaf_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("leafCol", value);
-        self
-    }
-
-    /// Minimum fraction of total weight in each child node, in [0, 0.5).
-    pub fn set_min_weight_fraction_per_node(mut self, value: f64) -> Self {
-        self.params = self
-            .params
-            .set_param_double("minWeightFractionPerNode", value);
-        self
-    }
-
-    /// Optional instance weight column.
-    pub fn set_weight_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("weightCol", value);
-        self
-    }
-
-    /// The feature vector column (default: "features").
-    pub fn feature_col(&self) -> &str {
-        self.params.string_or("featuresCol", "features")
-    }
-
-    /// The label column (default: "label").
-    pub fn label_col(&self) -> &str {
-        self.params.string_or("labelCol", "label")
-    }
-
-    /// The regression prediction output column (default: "prediction").
-    pub fn prediction_col(&self) -> &str {
-        self.params.string_or("predictionCol", "prediction")
-    }
-
-    /// The prediction variance output column, if one is set.
-    pub fn variance_col(&self) -> Option<&str> {
-        self.params.string_opt("varianceCol")
-    }
-
-    /// The maximum tree depth (default: 5).
-    pub fn max_depth(&self) -> i32 {
-        self.params.int_or("maxDepth", 5)
-    }
-
-    /// The maximum number of bins for continuous features (default: 32).
-    pub fn max_bins(&self) -> i32 {
-        self.params.int_or("maxBins", 32)
-    }
-
-    /// The minimum number of training instances in each child node (default: 1).
-    pub fn min_instances_per_node(&self) -> i32 {
-        self.params.int_or("minInstancesPerNode", 1)
-    }
-
-    /// The minimum information gain for a split (default: 0).
-    pub fn min_info_gain(&self) -> f64 {
-        self.params.double_or("minInfoGain", 0.0)
-    }
-
-    /// The maximum memory in MB for histogram aggregation (default: 256).
-    pub fn max_memory_in_mb(&self) -> i32 {
-        self.params.int_or("maxMemoryInMB", 256)
-    }
-
-    /// Whether to cache node IDs for training instances (default: false).
-    pub fn cache_node_ids(&self) -> bool {
-        self.params.bool_or("cacheNodeIds", false)
-    }
-
-    /// The node ID cache checkpoint interval (default: 10).
-    pub fn checkpoint_interval(&self) -> i32 {
-        self.params.int_or("checkpointInterval", 10)
-    }
-
-    /// The impurity measure (default: "variance").
-    pub fn impurity(&self) -> &str {
-        self.params.string_or("impurity", "variance")
-    }
-
-    /// The random seed, if one is set; else Spark's default seed applies.
-    pub fn seed(&self) -> Option<i64> {
-        self.params.long_opt("seed")
-    }
-
-    /// The leaf index output column (default: empty, no column).
-    pub fn leaf_col(&self) -> &str {
-        self.params.string_or("leafCol", "")
-    }
-
-    /// The minimum fraction of total weight in each child node (default: 0).
-    pub fn min_weight_fraction_per_node(&self) -> f64 {
-        self.params.double_or("minWeightFractionPerNode", 0.0)
-    }
-
-    /// The instance weight column, if one is set.
-    pub fn weight_col(&self) -> Option<&str> {
-        self.params.string_opt("weightCol")
-    }
-
     fn model_from_info(
         &self,
         info: proto::ml_command_result::MlOperatorInfo,
@@ -6547,6 +5794,46 @@ impl DecisionTreeRegressor {
             params: self.params.clone(),
             cached,
         })
+    }
+}
+
+ml_params! {
+    DecisionTreeRegressor {
+        set_cache_node_ids(value: bool) => "cacheNodeIds", set_param_bool;
+        cache_node_ids -> bool = |this| this.params.bool_or("cacheNodeIds", false);
+        set_checkpoint_interval(value: i32) => "checkpointInterval", set_param_int32;
+        checkpoint_interval -> i32 = |this| this.params.int_or("checkpointInterval", 10);
+        set_features_col(value: &str) => "featuresCol", set_param_string;
+        features_col -> &str = |this| this.params.string_or("featuresCol", "features");
+        set_impurity(value: &str) => "impurity", set_param_string;
+        impurity -> &str = |this| this.params.string_or("impurity", "variance");
+        set_label_col(value: &str) => "labelCol", set_param_string;
+        label_col -> &str = |this| this.params.string_or("labelCol", "label");
+        set_leaf_col(value: &str) => "leafCol", set_param_string;
+        leaf_col -> &str = |this| this.params.string_or("leafCol", "");
+        set_max_bins(value: i32) => "maxBins", set_param_int32;
+        max_bins -> i32 = |this| this.params.int_or("maxBins", 32);
+        set_max_depth(value: i32) => "maxDepth", set_param_int32;
+        max_depth -> i32 = |this| this.params.int_or("maxDepth", 5);
+        set_max_memory_in_mb(value: i32) => "maxMemoryInMB", set_param_int32;
+        max_memory_in_mb -> i32 = |this| this.params.int_or("maxMemoryInMB", 256);
+        set_min_info_gain(value: f64) => "minInfoGain", set_param_double;
+        min_info_gain -> f64 = |this| this.params.double_or("minInfoGain", 0.0);
+        set_min_instances_per_node(value: i32) => "minInstancesPerNode", set_param_int32;
+        min_instances_per_node -> i32 = |this| this.params.int_or("minInstancesPerNode", 1);
+        set_min_weight_fraction_per_node(value: f64) => "minWeightFractionPerNode",
+            set_param_double;
+        min_weight_fraction_per_node -> f64 = |this| this.params.double_or(
+            "minWeightFractionPerNode", 0.0);
+        set_prediction_col(value: &str) => "predictionCol", set_param_string;
+        prediction_col -> &str = |this| this.params.string_or("predictionCol", "prediction");
+        set_seed(value: i64) => "seed", set_param_int_narrow;
+        seed -> i64 = |this| this.params.long_opt("seed").unwrap_or(java_string_hash(
+            "org.apache.spark.ml.regression.DecisionTreeRegressor"));
+        set_variance_col(value: &str) => "varianceCol", set_param_string;
+        variance_col -> Option<&str> = |this| this.params.string_opt("varianceCol");
+        set_weight_col(value: &str) => "weightCol", set_param_string;
+        weight_col -> Option<&str> = |this| this.params.string_opt("weightCol");
     }
 }
 
@@ -6571,8 +5858,7 @@ impl Estimator for DecisionTreeRegressor {
     }
 
     fn fit_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<Box<dyn Model>> {
-        let info = fit_via_command(&self.operator, &self.params, df)?;
-        Ok(Box::new(self.model_from_info(info, &df.session)?))
+        Ok(Box::new(DecisionTreeRegressor::fit(self, df)?))
     }
 }
 
@@ -6585,6 +5871,37 @@ pub struct DecisionTreeRegressionModel {
     operator: MlOperator,
     params: Params,
     cached: CachedModel,
+}
+
+ml_params! {
+    DecisionTreeRegressionModel {
+        cache_node_ids -> bool = |this| this.params.bool_or("cacheNodeIds", false) =>
+            "cacheNodeIds";
+        checkpoint_interval -> i32 = |this| this.params.int_or("checkpointInterval", 10) =>
+            "checkpointInterval";
+        set_features_col(value: &str) => "featuresCol", set_param_string;
+        features_col -> &str = |this| this.params.string_or("featuresCol", "features");
+        impurity -> &str = |this| this.params.string_or("impurity", "variance") => "impurity";
+        label_col -> &str = |this| this.params.string_or("labelCol", "label") => "labelCol";
+        set_leaf_col(value: &str) => "leafCol", set_param_string;
+        leaf_col -> &str = |this| this.params.string_or("leafCol", "");
+        max_bins -> i32 = |this| this.params.int_or("maxBins", 32) => "maxBins";
+        max_depth -> i32 = |this| this.params.int_or("maxDepth", 5) => "maxDepth";
+        max_memory_in_mb -> i32 = |this| this.params.int_or("maxMemoryInMB", 256) =>
+            "maxMemoryInMB";
+        min_info_gain -> f64 = |this| this.params.double_or("minInfoGain", 0.0) => "minInfoGain";
+        min_instances_per_node -> i32 = |this| this.params.int_or("minInstancesPerNode", 1) =>
+            "minInstancesPerNode";
+        min_weight_fraction_per_node -> f64 = |this| this.params.double_or(
+            "minWeightFractionPerNode", 0.0) => "minWeightFractionPerNode";
+        set_prediction_col(value: &str) => "predictionCol", set_param_string;
+        prediction_col -> &str = |this| this.params.string_or("predictionCol", "prediction");
+        seed -> i64 = |this| this.params.long_opt("seed").unwrap_or(java_string_hash(
+            "org.apache.spark.ml.regression.DecisionTreeRegressionModel")) => "seed";
+        set_variance_col(value: &str) => "varianceCol", set_param_string;
+        variance_col -> Option<&str> = |this| this.params.string_opt("varianceCol");
+        weight_col -> Option<&str> = |this| this.params.string_opt("weightCol") => "weightCol";
+    }
 }
 
 impl Transformer for DecisionTreeRegressionModel {
@@ -6644,217 +5961,6 @@ impl RandomForestRegressor {
         }
     }
 
-    /// Feature vector column.
-    pub fn set_feature_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("featuresCol", value);
-        self
-    }
-
-    /// Numeric regression label column.
-    pub fn set_label_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("labelCol", value);
-        self
-    }
-
-    /// Regression prediction output column.
-    pub fn set_prediction_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("predictionCol", value);
-        self
-    }
-
-    /// Maximum tree depth, from 0 to 30.
-    pub fn set_max_depth(mut self, value: i32) -> Self {
-        self.params = self.params.set_param_int32("maxDepth", value);
-        self
-    }
-
-    /// Maximum number of bins for discretizing continuous features.
-    pub fn set_max_bins(mut self, value: i32) -> Self {
-        self.params = self.params.set_param_int32("maxBins", value);
-        self
-    }
-
-    /// Minimum number of training instances in each child node.
-    pub fn set_min_instances_per_node(mut self, value: i32) -> Self {
-        self.params = self.params.set_param_int32("minInstancesPerNode", value);
-        self
-    }
-
-    /// Minimum information gain for a split.
-    pub fn set_min_info_gain(mut self, value: f64) -> Self {
-        self.params = self.params.set_param_double("minInfoGain", value);
-        self
-    }
-
-    /// Maximum memory in MB for histogram aggregation.
-    pub fn set_max_memory_in_mb(mut self, value: i32) -> Self {
-        self.params = self.params.set_param_int32("maxMemoryInMB", value);
-        self
-    }
-
-    /// Whether to cache node IDs for training instances.
-    pub fn set_cache_node_ids(mut self, value: bool) -> Self {
-        self.params = self.params.set_param_bool("cacheNodeIds", value);
-        self
-    }
-
-    /// Node ID cache checkpoint interval; -1 disables checkpointing.
-    pub fn set_checkpoint_interval(mut self, value: i32) -> Self {
-        self.params = self.params.set_param_int32("checkpointInterval", value);
-        self
-    }
-
-    /// Impurity measure: variance.
-    pub fn set_impurity(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("impurity", value);
-        self
-    }
-
-    /// Number of trees in the forest; must be positive.
-    pub fn set_num_trees(mut self, value: i32) -> Self {
-        self.params = self.params.set_param_int32("numTrees", value);
-        self
-    }
-
-    /// Feature subset strategy: auto, all, onethird, sqrt, log2, or a numeric count/fraction.
-    pub fn set_feature_subset_strategy(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("featureSubsetStrategy", value);
-        self
-    }
-
-    /// Random seed for sampling.
-    pub fn set_seed(mut self, value: i64) -> Self {
-        self.params = self.params.set_param_int_narrow("seed", value);
-        self
-    }
-
-    /// Fraction of training data used to train each tree, in (0, 1].
-    pub fn set_subsampling_rate(mut self, value: f64) -> Self {
-        self.params = self.params.set_param_double("subsamplingRate", value);
-        self
-    }
-
-    /// Optional output vector of leaf indices, one per tree; empty disables it.
-    pub fn set_leaf_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("leafCol", value);
-        self
-    }
-
-    /// Minimum fraction of total weight in each child node, in [0, 0.5).
-    pub fn set_min_weight_fraction_per_node(mut self, value: f64) -> Self {
-        self.params = self
-            .params
-            .set_param_double("minWeightFractionPerNode", value);
-        self
-    }
-
-    /// Optional instance weight column.
-    pub fn set_weight_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("weightCol", value);
-        self
-    }
-
-    /// Whether each tree samples training instances with replacement.
-    pub fn set_bootstrap(mut self, value: bool) -> Self {
-        self.params = self.params.set_param_bool("bootstrap", value);
-        self
-    }
-
-    /// The feature vector column (default: "features").
-    pub fn feature_col(&self) -> &str {
-        self.params.string_or("featuresCol", "features")
-    }
-
-    /// The label column (default: "label").
-    pub fn label_col(&self) -> &str {
-        self.params.string_or("labelCol", "label")
-    }
-
-    /// The regression prediction output column (default: "prediction").
-    pub fn prediction_col(&self) -> &str {
-        self.params.string_or("predictionCol", "prediction")
-    }
-
-    /// The maximum tree depth (default: 5).
-    pub fn max_depth(&self) -> i32 {
-        self.params.int_or("maxDepth", 5)
-    }
-
-    /// The maximum number of bins for continuous features (default: 32).
-    pub fn max_bins(&self) -> i32 {
-        self.params.int_or("maxBins", 32)
-    }
-
-    /// The minimum number of training instances in each child node (default: 1).
-    pub fn min_instances_per_node(&self) -> i32 {
-        self.params.int_or("minInstancesPerNode", 1)
-    }
-
-    /// The minimum information gain for a split (default: 0).
-    pub fn min_info_gain(&self) -> f64 {
-        self.params.double_or("minInfoGain", 0.0)
-    }
-
-    /// The maximum memory in MB for histogram aggregation (default: 256).
-    pub fn max_memory_in_mb(&self) -> i32 {
-        self.params.int_or("maxMemoryInMB", 256)
-    }
-
-    /// Whether to cache node IDs for training instances (default: false).
-    pub fn cache_node_ids(&self) -> bool {
-        self.params.bool_or("cacheNodeIds", false)
-    }
-
-    /// The node ID cache checkpoint interval (default: 10).
-    pub fn checkpoint_interval(&self) -> i32 {
-        self.params.int_or("checkpointInterval", 10)
-    }
-
-    /// The impurity measure (default: "variance").
-    pub fn impurity(&self) -> &str {
-        self.params.string_or("impurity", "variance")
-    }
-
-    /// The number of trees (default: 20).
-    pub fn num_trees(&self) -> i32 {
-        self.params.int_or("numTrees", 20)
-    }
-
-    /// The feature subset strategy (default: "auto").
-    pub fn feature_subset_strategy(&self) -> &str {
-        self.params.string_or("featureSubsetStrategy", "auto")
-    }
-
-    /// The random seed, if one is set; else Spark's default seed applies.
-    pub fn seed(&self) -> Option<i64> {
-        self.params.long_opt("seed")
-    }
-
-    /// The fraction of training data used to train each tree (default: 1).
-    pub fn subsampling_rate(&self) -> f64 {
-        self.params.double_or("subsamplingRate", 1.0)
-    }
-
-    /// The leaf index output column (default: empty, no column).
-    pub fn leaf_col(&self) -> &str {
-        self.params.string_or("leafCol", "")
-    }
-
-    /// The minimum fraction of total weight in each child node (default: 0).
-    pub fn min_weight_fraction_per_node(&self) -> f64 {
-        self.params.double_or("minWeightFractionPerNode", 0.0)
-    }
-
-    /// The instance weight column, if one is set.
-    pub fn weight_col(&self) -> Option<&str> {
-        self.params.string_opt("weightCol")
-    }
-
-    /// Whether each tree samples training instances with replacement (default: true).
-    pub fn bootstrap(&self) -> bool {
-        self.params.bool_or("bootstrap", true)
-    }
-
     fn model_from_info(
         &self,
         info: proto::ml_command_result::MlOperatorInfo,
@@ -6870,6 +5976,53 @@ impl RandomForestRegressor {
             params: self.params.clone(),
             cached,
         })
+    }
+}
+
+ml_params! {
+    RandomForestRegressor {
+        set_bootstrap(value: bool) => "bootstrap", set_param_bool;
+        bootstrap -> bool = |this| this.params.bool_or("bootstrap", true);
+        set_cache_node_ids(value: bool) => "cacheNodeIds", set_param_bool;
+        cache_node_ids -> bool = |this| this.params.bool_or("cacheNodeIds", false);
+        set_checkpoint_interval(value: i32) => "checkpointInterval", set_param_int32;
+        checkpoint_interval -> i32 = |this| this.params.int_or("checkpointInterval", 10);
+        set_feature_subset_strategy(value: &str) => "featureSubsetStrategy", set_param_string;
+        feature_subset_strategy -> &str = |this| this.params.string_or("featureSubsetStrategy",
+            "auto");
+        set_features_col(value: &str) => "featuresCol", set_param_string;
+        features_col -> &str = |this| this.params.string_or("featuresCol", "features");
+        set_impurity(value: &str) => "impurity", set_param_string;
+        impurity -> &str = |this| this.params.string_or("impurity", "variance");
+        set_label_col(value: &str) => "labelCol", set_param_string;
+        label_col -> &str = |this| this.params.string_or("labelCol", "label");
+        set_leaf_col(value: &str) => "leafCol", set_param_string;
+        leaf_col -> &str = |this| this.params.string_or("leafCol", "");
+        set_max_bins(value: i32) => "maxBins", set_param_int32;
+        max_bins -> i32 = |this| this.params.int_or("maxBins", 32);
+        set_max_depth(value: i32) => "maxDepth", set_param_int32;
+        max_depth -> i32 = |this| this.params.int_or("maxDepth", 5);
+        set_max_memory_in_mb(value: i32) => "maxMemoryInMB", set_param_int32;
+        max_memory_in_mb -> i32 = |this| this.params.int_or("maxMemoryInMB", 256);
+        set_min_info_gain(value: f64) => "minInfoGain", set_param_double;
+        min_info_gain -> f64 = |this| this.params.double_or("minInfoGain", 0.0);
+        set_min_instances_per_node(value: i32) => "minInstancesPerNode", set_param_int32;
+        min_instances_per_node -> i32 = |this| this.params.int_or("minInstancesPerNode", 1);
+        set_min_weight_fraction_per_node(value: f64) => "minWeightFractionPerNode",
+            set_param_double;
+        min_weight_fraction_per_node -> f64 = |this| this.params.double_or(
+            "minWeightFractionPerNode", 0.0);
+        set_num_trees(value: i32) => "numTrees", set_param_int32;
+        num_trees -> i32 = |this| this.params.int_or("numTrees", 20);
+        set_prediction_col(value: &str) => "predictionCol", set_param_string;
+        prediction_col -> &str = |this| this.params.string_or("predictionCol", "prediction");
+        set_seed(value: i64) => "seed", set_param_int_narrow;
+        seed -> i64 = |this| this.params.long_opt("seed").unwrap_or(java_string_hash(
+            "org.apache.spark.ml.regression.RandomForestRegressor"));
+        set_subsampling_rate(value: f64) => "subsamplingRate", set_param_double;
+        subsampling_rate -> f64 = |this| this.params.double_or("subsamplingRate", 1.0);
+        set_weight_col(value: &str) => "weightCol", set_param_string;
+        weight_col -> Option<&str> = |this| this.params.string_opt("weightCol");
     }
 }
 
@@ -6894,8 +6047,7 @@ impl Estimator for RandomForestRegressor {
     }
 
     fn fit_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<Box<dyn Model>> {
-        let info = fit_via_command(&self.operator, &self.params, df)?;
-        Ok(Box::new(self.model_from_info(info, &df.session)?))
+        Ok(Box::new(RandomForestRegressor::fit(self, df)?))
     }
 }
 
@@ -6908,6 +6060,41 @@ pub struct RandomForestRegressionModel {
     operator: MlOperator,
     params: Params,
     cached: CachedModel,
+}
+
+ml_params! {
+    RandomForestRegressionModel {
+        bootstrap -> bool = |this| this.params.bool_or("bootstrap", true) => "bootstrap";
+        cache_node_ids -> bool = |this| this.params.bool_or("cacheNodeIds", false) =>
+            "cacheNodeIds";
+        checkpoint_interval -> i32 = |this| this.params.int_or("checkpointInterval", 10) =>
+            "checkpointInterval";
+        feature_subset_strategy -> &str = |this| this.params.string_or("featureSubsetStrategy",
+            "auto") => "featureSubsetStrategy";
+        set_features_col(value: &str) => "featuresCol", set_param_string;
+        features_col -> &str = |this| this.params.string_or("featuresCol", "features");
+        impurity -> &str = |this| this.params.string_or("impurity", "variance") => "impurity";
+        label_col -> &str = |this| this.params.string_or("labelCol", "label") => "labelCol";
+        set_leaf_col(value: &str) => "leafCol", set_param_string;
+        leaf_col -> &str = |this| this.params.string_or("leafCol", "");
+        max_bins -> i32 = |this| this.params.int_or("maxBins", 32) => "maxBins";
+        max_depth -> i32 = |this| this.params.int_or("maxDepth", 5) => "maxDepth";
+        max_memory_in_mb -> i32 = |this| this.params.int_or("maxMemoryInMB", 256) =>
+            "maxMemoryInMB";
+        min_info_gain -> f64 = |this| this.params.double_or("minInfoGain", 0.0) => "minInfoGain";
+        min_instances_per_node -> i32 = |this| this.params.int_or("minInstancesPerNode", 1) =>
+            "minInstancesPerNode";
+        min_weight_fraction_per_node -> f64 = |this| this.params.double_or(
+            "minWeightFractionPerNode", 0.0) => "minWeightFractionPerNode";
+        num_trees -> i32 = |this| this.params.int_or("numTrees", 20) => "numTrees";
+        set_prediction_col(value: &str) => "predictionCol", set_param_string;
+        prediction_col -> &str = |this| this.params.string_or("predictionCol", "prediction");
+        seed -> i64 = |this| this.params.long_opt("seed").unwrap_or(java_string_hash(
+            "org.apache.spark.ml.regression.RandomForestRegressionModel")) => "seed";
+        subsampling_rate -> f64 = |this| this.params.double_or("subsamplingRate", 1.0) =>
+            "subsamplingRate";
+        weight_col -> Option<&str> = |this| this.params.string_opt("weightCol") => "weightCol";
+    }
 }
 
 impl Transformer for RandomForestRegressionModel {
@@ -9504,7 +8691,7 @@ mod tests {
     fn generalized_linear_regression_getters_follow_defaults_and_params() {
         let defaults = GeneralizedLinearRegression::default();
         assert_eq!(defaults.label_col(), "label");
-        assert_eq!(defaults.feature_col(), "features");
+        assert_eq!(defaults.features_col(), "features");
         assert_eq!(defaults.prediction_col(), "prediction");
         assert_eq!(defaults.family(), "gaussian");
         assert_eq!(defaults.link(), None);
@@ -9521,7 +8708,7 @@ mod tests {
         assert_eq!(defaults.aggregation_depth(), 2);
         let mut configured = GeneralizedLinearRegression::new()
             .set_label_col("target")
-            .set_feature_col("input")
+            .set_features_col("input")
             .set_prediction_col("pred")
             .set_family("tweedie")
             .set_link("log")
@@ -9537,7 +8724,7 @@ mod tests {
             .set_offset_col("offset")
             .set_aggregation_depth(3);
         assert_eq!(configured.label_col(), "target");
-        assert_eq!(configured.feature_col(), "input");
+        assert_eq!(configured.features_col(), "input");
         assert_eq!(configured.prediction_col(), "pred");
         assert_eq!(configured.family(), "tweedie");
         assert_eq!(configured.link(), Some("log"));
@@ -10471,7 +9658,7 @@ mod tests {
     #[test]
     fn gbt_regressor_getters_follow_defaults_builders_and_mutable_params() {
         let mut tree = GBTRegressor::default();
-        assert_eq!(tree.feature_col(), "features");
+        assert_eq!(tree.features_col(), "features");
         assert_eq!(tree.label_col(), "label");
         assert_eq!(tree.prediction_col(), "prediction");
         assert_eq!(tree.max_depth(), 5);
@@ -10483,7 +9670,10 @@ mod tests {
         assert_eq!(tree.checkpoint_interval(), 10);
         assert_eq!(tree.impurity(), "variance");
         assert_eq!(tree.feature_subset_strategy(), "all");
-        assert_eq!(tree.seed(), None);
+        assert_eq!(
+            tree.seed(),
+            java_string_hash("org.apache.spark.ml.regression.GBTRegressor")
+        );
         assert_eq!(tree.subsampling_rate(), 1.0);
         assert_eq!(tree.leaf_col(), "");
         assert_eq!(tree.min_weight_fraction_per_node(), 0.0);
@@ -10494,7 +9684,7 @@ mod tests {
         assert_eq!(tree.validation_tol(), 0.01);
         assert_eq!(tree.validation_indicator_col(), None);
         let mut built = GBTRegressor::new()
-            .set_feature_col("input")
+            .set_features_col("input")
             .set_label_col("target")
             .set_prediction_col("value")
             .set_max_depth(3)
@@ -10520,8 +9710,8 @@ mod tests {
             .params()
             .clone()
             .set_param_string("featuresCol", "input");
-        assert_eq!(tree.feature_col(), "input");
-        assert_eq!(built.feature_col(), tree.feature_col());
+        assert_eq!(tree.features_col(), "input");
+        assert_eq!(built.features_col(), tree.features_col());
         *tree.params_mut() = tree.params().clone().set_param_string("labelCol", "target");
         assert_eq!(tree.label_col(), "target");
         assert_eq!(built.label_col(), tree.label_col());
@@ -10580,7 +9770,7 @@ mod tests {
             .params()
             .clone()
             .set_param_int_narrow("seed", 1_i64 << 33);
-        assert_eq!(tree.seed(), Some(1_i64 << 33));
+        assert_eq!(tree.seed(), 1_i64 << 33);
         assert_eq!(built.seed(), tree.seed());
         *tree.params_mut() = tree
             .params()
@@ -10847,7 +10037,7 @@ mod tests {
     #[test]
     fn decision_tree_regressor_getters_follow_defaults_builders_and_mutable_params() {
         let mut tree = DecisionTreeRegressor::default();
-        assert_eq!(tree.feature_col(), "features");
+        assert_eq!(tree.features_col(), "features");
         assert_eq!(tree.label_col(), "label");
         assert_eq!(tree.prediction_col(), "prediction");
         assert_eq!(tree.max_depth(), 5);
@@ -10858,13 +10048,16 @@ mod tests {
         assert!(!tree.cache_node_ids());
         assert_eq!(tree.checkpoint_interval(), 10);
         assert_eq!(tree.impurity(), "variance");
-        assert_eq!(tree.seed(), None);
+        assert_eq!(
+            tree.seed(),
+            java_string_hash("org.apache.spark.ml.regression.DecisionTreeRegressor")
+        );
         assert_eq!(tree.variance_col(), None);
         assert_eq!(tree.weight_col(), None);
         assert_eq!(tree.leaf_col(), "");
         assert_eq!(tree.min_weight_fraction_per_node(), 0.0);
         let mut built = DecisionTreeRegressor::new()
-            .set_feature_col("input")
+            .set_features_col("input")
             .set_label_col("target")
             .set_prediction_col("value")
             .set_max_depth(3)
@@ -10884,8 +10077,8 @@ mod tests {
             .params()
             .clone()
             .set_param_string("featuresCol", "input");
-        assert_eq!(tree.feature_col(), "input");
-        assert_eq!(built.feature_col(), tree.feature_col());
+        assert_eq!(tree.features_col(), "input");
+        assert_eq!(built.features_col(), tree.features_col());
         *tree.params_mut() = tree.params().clone().set_param_string("labelCol", "target");
         assert_eq!(tree.label_col(), "target");
         assert_eq!(built.label_col(), tree.label_col());
@@ -10935,7 +10128,7 @@ mod tests {
             .params()
             .clone()
             .set_param_int_narrow("seed", 1_i64 << 33);
-        assert_eq!(tree.seed(), Some(1_i64 << 33));
+        assert_eq!(tree.seed(), 1_i64 << 33);
         assert_eq!(built.seed(), tree.seed());
         *tree.params_mut() = tree
             .params()
@@ -11312,7 +10505,7 @@ mod tests {
                 let r: &LinearRegression = &$r;
                 (
                     (
-                        r.feature_col(),
+                        r.features_col(),
                         r.label_col(),
                         r.prediction_col(),
                         r.max_iter(),
@@ -11340,7 +10533,7 @@ mod tests {
             )
         );
         let lr = lr
-            .set_feature_col("f")
+            .set_features_col("f")
             .set_label_col("l")
             .set_prediction_col("p")
             .set_max_iter(5)

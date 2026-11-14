@@ -4,7 +4,7 @@ mod common;
 use common::live_session;
 use spark_connect::column::{col, lit};
 use spark_connect::expression::Expression;
-use spark_connect::ml::{Estimator, Evaluator, LinearRegression, RegressionEvaluator};
+use spark_connect::ml::{Evaluator, LinearRegression, Model, RegressionEvaluator, Transformer};
 use spark_connect::{Column, DataFrame};
 
 fn vectorize(df: DataFrame, name: &str) -> DataFrame {
@@ -56,7 +56,7 @@ fn linear_regression_fits_different_lines_and_keeps_lazy_predictions_alive() {
         "input",
     );
     let mut estimator = LinearRegression::new()
-        .set_feature_col("input")
+        .set_features_col("input")
         .set_label_col("target")
         .set_prediction_col("pred")
         .set_max_iter(100)
@@ -87,7 +87,7 @@ fn linear_regression_fits_different_lines_and_keeps_lazy_predictions_alive() {
         };
         r.id
     };
-    assert_ne!(object_id(first.as_ref()), object_id(second.as_ref()));
+    assert_ne!(object_id(&first), object_id(&second));
     let mut cloned = first.clone_box();
     let delayed =
         first
