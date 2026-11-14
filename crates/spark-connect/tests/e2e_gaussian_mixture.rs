@@ -4,7 +4,7 @@ mod common;
 use common::live_session;
 use spark_connect::column::{col, lit_double, lit_string};
 use spark_connect::expression::Expression;
-use spark_connect::ml::{Estimator, GaussianMixture};
+use spark_connect::ml::{GaussianMixture, Model, Transformer};
 use spark_connect::row::Value;
 use spark_connect::{Column, DataFrame, SparkSession};
 
@@ -73,7 +73,7 @@ fn gaussian_mixture_fits_independent_models_and_retains_lazy_predictions() {
         "input",
     );
     let mut estimator = GaussianMixture::new()
-        .set_feature_col("input")
+        .set_features_col("input")
         .set_prediction_col("cluster")
         .set_probability_col("probs")
         .set_k(2)
@@ -96,7 +96,7 @@ fn gaussian_mixture_fits_independent_models_and_retains_lazy_predictions() {
         };
         r.id
     };
-    assert_ne!(object_id(first.as_ref()), object_id(second.as_ref()));
+    assert_ne!(object_id(&first), object_id(&second));
     assert!(first.transform(&s.new_session().range(1).unwrap()).is_err());
     let mut cloned = first.clone_box();
     let lazy = cloned.transform(&held).unwrap();

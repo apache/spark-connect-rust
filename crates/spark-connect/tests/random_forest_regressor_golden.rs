@@ -16,7 +16,7 @@ fn random_forest_regressor_parameters_match_official_pyspark() {
             .unwrap();
         let expected = spark_connect_proto::MlParams::decode(bytes.as_slice()).unwrap();
         let estimator = RandomForestRegressor::new()
-            .set_feature_col("input")
+            .set_features_col("input")
             .set_label_col("target")
             .set_prediction_col("value")
             .set_max_depth(3)
@@ -47,7 +47,7 @@ fn random_forest_regressor_parameters_match_official_pyspark() {
 #[test]
 fn random_forest_regressor_getters_track_the_parameters() {
     let mut estimator = RandomForestRegressor::default();
-    assert_eq!(estimator.feature_col(), "features");
+    assert_eq!(estimator.features_col(), "features");
     assert_eq!(estimator.label_col(), "label");
     assert_eq!(estimator.prediction_col(), "prediction");
     assert_eq!(estimator.max_depth(), 5);
@@ -60,7 +60,8 @@ fn random_forest_regressor_getters_track_the_parameters() {
     assert_eq!(estimator.impurity(), "variance");
     assert_eq!(estimator.num_trees(), 20);
     assert_eq!(estimator.feature_subset_strategy(), "auto");
-    assert_eq!(estimator.seed(), None);
+    // Spark's default seed: String.hashCode of the JVM class name.
+    assert_eq!(estimator.seed(), 235498149);
     assert_eq!(estimator.subsampling_rate(), 1.0);
     assert_eq!(estimator.leaf_col(), "");
     assert_eq!(estimator.min_weight_fraction_per_node(), 0.0);

@@ -4,7 +4,9 @@ mod common;
 use common::live_session;
 use spark_connect::column::{col, lit, lit_double, lit_string};
 use spark_connect::expression::Expression;
-use spark_connect::ml::{AFTSurvivalRegression, Estimator, FMRegressor, IsotonicRegression};
+use spark_connect::ml::{
+    AFTSurvivalRegression, Estimator, FMRegressor, IsotonicRegression, Transformer,
+};
 use spark_connect::{Column, DataFrame};
 
 fn vectorize(df: DataFrame) -> DataFrame {
@@ -69,7 +71,7 @@ fn aft_matches_official_censoring_quantiles_and_intercept() {
             .join(",");
         let train = vectorize(s.sql(&format!("SELECT id, duration, observed, array(x,y) AS xs FROM VALUES {rows} AS t(id,duration,observed,x,y)")).unwrap());
         let mut estimator = AFTSurvivalRegression::new()
-            .set_feature_col("input")
+            .set_features_col("input")
             .set_label_col("duration")
             .set_prediction_col("pred")
             .set_censor_col("observed")
@@ -134,7 +136,7 @@ fn isotonic_interpolates_weighted_scalar_and_vector_features_in_both_directions(
                 (train, held)
             };
             let mut estimator = IsotonicRegression::new()
-                .set_feature_col("input")
+                .set_features_col("input")
                 .set_label_col("target")
                 .set_prediction_col("pred")
                 .set_weight_col("weight")
@@ -161,7 +163,7 @@ fn fm_regressor_learns_interactions_with_both_solvers_and_owns_each_fitted_model
     let held = vectorize(s.sql("SELECT id,array(x,y) AS xs FROM VALUES (0,0.5D,-2.0D),(1,-0.5D,-1.0D),(2,0.0D,1.5D) AS t(id,x,y)").unwrap());
     for solver in ["adamW", "gd"] {
         let mut estimator = FMRegressor::new()
-            .set_feature_col("input")
+            .set_features_col("input")
             .set_label_col("target")
             .set_prediction_col("pred")
             .set_factor_size(2)

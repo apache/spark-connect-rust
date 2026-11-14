@@ -5,7 +5,7 @@ use common::live_session;
 use serde_json::Value as Json;
 use spark_connect::column::{col, lit_string};
 use spark_connect::expression::Expression;
-use spark_connect::ml::{Estimator, PowerIterationClustering, LDA};
+use spark_connect::ml::{Model, PowerIterationClustering, Transformer, LDA};
 use spark_connect::row::Value;
 use spark_connect::{Column, DataFrame, SparkSession};
 
@@ -77,7 +77,7 @@ fn lda_online_and_em_match_official_and_retain_lazy_predictions() {
     for case in golden["lda"].as_array().unwrap() {
         let values = &case["values"];
         let mut estimator = LDA::new()
-            .set_feature_col("input")
+            .set_features_col("input")
             .set_topic_distribution_col("topics")
             .set_k(2)
             .set_max_iter(10)
