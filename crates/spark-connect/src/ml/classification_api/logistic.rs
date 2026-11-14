@@ -263,6 +263,24 @@ impl LogisticRegression {
         self.params = self.params.set_param_double_array("thresholds", values);
         self
     }
+
+    /// The features column: the name of v4.2.0 of [`Self::features_col`].
+    #[deprecated(
+        since = "4.3.0",
+        note = "use `features_col`, PySpark's `getFeaturesCol`"
+    )]
+    pub fn feature_col(&self) -> &str {
+        self.features_col()
+    }
+
+    /// Set the features column: the name of v4.2.0 of [`Self::set_features_col`].
+    #[deprecated(
+        since = "4.3.0",
+        note = "use `set_features_col`, PySpark's `setFeaturesCol`"
+    )]
+    pub fn set_feature_col(self, value: &str) -> Self {
+        self.set_features_col(value)
+    }
 }
 
 impl LogisticRegressionModel {

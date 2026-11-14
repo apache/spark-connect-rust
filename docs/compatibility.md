@@ -75,7 +75,7 @@ of its params (`KMeans::k`, `RandomForestClassifier::num_trees`, ...), which rea
 `Params`: the value that is set, else Spark's default (`None` for `seed`, `weight_col` and
 `thresholds`). The fields of `LogisticRegressionModel`, `StringIndexerModel` and
 `MaxAbsScalerModel` are private, as those of the other fitted models but `PipelineModel`: use
-`Transformer::operator` and `Transformer::params`, and `LogisticRegressionModel::feature_col`,
+`Transformer::operator` and `Transformer::params`, and `LogisticRegressionModel::features_col`,
 `label_col` and `prediction_col`. `VectorAssembler::input_cols` and `Pipeline::stages`
 return a `Vec<String>`, and `VectorAssembler::set_input_cols` and `Pipeline::set_stages` take
 `impl IntoIterator<Item = impl Into<String>>`. The `input_col` of `StandardScaler`,
@@ -374,7 +374,9 @@ arrays explicitly with `pyspark.ml.functions.array_to_vector`. `StandardScaler` 
 
 The Rust `LogisticRegression` and `LogisticRegressionModel` have the params of `pyspark.ml`, with one
 generated getter and setter per param (`set_max_iter` and `max_iter()`, `set_features_col` and
-`features_col()`, and so on), and `PARAM_NAMES` lists them. `threshold()`, `thresholds()`,
+`features_col()`, and so on), and `PARAM_NAMES` lists them. `LogisticRegression::feature_col`
+and `set_feature_col`, the names of v4.2.0, stay as deprecated aliases of `features_col` and
+`set_features_col`. `threshold()`, `thresholds()`,
 `set_threshold` and `set_thresholds` follow `_LogisticRegressionParams`: the getters check that
 the two agree to 1e-5 and `threshold()` requires two thresholds. The setters leave the other
 param set, as over Spark Connect, where the `clear` of `pyspark.ml` does nothing, so a

@@ -118,3 +118,18 @@ fn linear_svc_defaults_and_plain_threshold_are_pyspark_defaults() {
     let svc = svc.set_threshold(0.25);
     assert_eq!(svc.threshold(), 0.25);
 }
+
+#[test]
+#[allow(deprecated)]
+fn logistic_regression_keeps_the_feature_col_names_of_v4_2_0() {
+    // `feature_col` and `set_feature_col`, the names of v4.2.0, are aliases of PySpark's names.
+    assert_eq!(LogisticRegression::new().feature_col(), "features");
+    let lr = LogisticRegression::new().set_feature_col("f");
+    assert_eq!(lr.features_col(), "f");
+    assert_eq!(lr.feature_col(), "f");
+    assert_eq!(
+        lr.set_features_col("g").feature_col(),
+        "g",
+        "the alias reads the param that PySpark's name sets"
+    );
+}
