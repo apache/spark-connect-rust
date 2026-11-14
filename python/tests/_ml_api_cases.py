@@ -73,24 +73,57 @@ def _normalize(text, base=None):
     return text
 
 
-def _value(v):
+_ML_VALUES = ("DenseVector", "SparseVector", "DenseMatrix")
+
+
+def _rounded(x):
+    """A value with each float in it (and each value of an ML vector, a dense matrix or a list)
+    rounded to 9 decimals, as `_value` rounds a bare float, and -0.0 as 0.0: the last bits of a
+    float of a server's computation differ between platforms."""
+    if isinstance(x, float):
+        return round(x, 9) + 0.0
+    if isinstance(x, list):
+        return [_rounded(v) for v in x]
+    name = type(x).__name__
+    if name == "DenseVector":
+        return type(x)([_rounded(float(v)) for v in x])
+    if name == "SparseVector":
+        return type(x)(x.size, x.indices.tolist(), [_rounded(float(v)) for v in x.values])
+    if name == "DenseMatrix":
+        values = [_rounded(float(v)) for v in x.values]
+        return type(x)(x.numRows, x.numCols, values, x.isTransposed)
+    return x
+
+
+def _value(v, rounded=False):
     if hasattr(v, "collect") and hasattr(v, "columns"):
-        return {"columns": v.columns, "rows": sorted(repr(tuple(r)) for r in v.collect())}
+        rows = [tuple(r) for r in v.collect()]
+        if rounded:
+            rows = [tuple(_rounded(x) for x in r) for r in rows]
+        return {"columns": v.columns, "rows": sorted(repr(r) for r in rows)}
     if isinstance(v, list):
-        return [_value(x) for x in v]
+        return [_value(x, rounded) for x in v]
     if isinstance(v, float):
-        return round(v, 9)
+        return _rounded(v) if rounded else round(v, 9)
+    if rounded and type(v).__name__ in _ML_VALUES:
+        return repr(_rounded(v))
     return repr(v)
 
 
 class Recorder:
-    def __init__(self, base=None):
+    """The results of the cases, by tag: of a case's value (see `_value`), or of its error. With
+    `rounded`, the floats of a DataFrame's rows and of an ML vector or matrix are rounded as a bare
+    float is (see `_rounded`), for the cases whose server computations differ in their last bits
+    between platforms."""
+
+    def __init__(self, base=None, rounded=False):
         self.out = {}
         self.base = base
+        self.rounded = rounded
 
     def __call__(self, tag, f):
         try:
-            value = _value(f())
+            value = _value(f(), self.rounded)
             self.out[tag] = ["ok", json.loads(_normalize(json.dumps(value), self.base))]
         except Exception as e:  # noqa: BLE001 - every error is a case
             message = _normalize(str(e).split("\n")[0], self.base)[:200]

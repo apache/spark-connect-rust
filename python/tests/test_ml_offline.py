@@ -281,17 +281,27 @@ def _session_analyses(service, spark):
     return [request for request in requests if request.session_id == spark.session_id]
 
 
+# The Fetches that the fit of an estimator sends after its Fit, as PySpark's fit does: the
+# numClasses that the training summary of a LogisticRegression reads, and the trees of an ensemble,
+# which the _resetUid of a random forest or a gradient-boosted tree evaluates as it walks the params
+# of the model (its `trees`, a cached property).
+_FETCHES_AFTER_FIT = {
+    "LogisticRegression": ["numClasses"],
+    "RandomForestRegressor": ["trees"],
+    "GBTRegressor": ["trees"],
+}
+
+
 def _session_fit(service, spark, estimator, df, models):
-    # The Fit of estimator of df, the only request of the session that the fit sends. The model is
-    # kept in models, so that it is not released during the checks.
+    # The Fit of estimator of df, the first request of the session that the fit sends, and then
+    # only the Fetches of _FETCHES_AFTER_FIT. The model is kept in models, so that it is not
+    # released during the checks.
     sent = len(_session_requests(service, spark))
     _answer_fit(service, estimator)
     models.append(estimator.fit(df))
     request, *fetches = _session_requests(service, spark)[sent:]
-    # A LogisticRegression's fit is followed by the numClasses of its training summary.
     fetched = [r.plan.command.ml_command.fetch.methods[-1].method for r in fetches]
-    expected = ["numClasses"] if type(estimator).__name__ == "LogisticRegression" else []
-    assert fetched == expected
+    assert fetched == _FETCHES_AFTER_FIT.get(type(estimator).__name__, [])
     return request.plan.command.ml_command.fit
 
 
@@ -1592,8 +1602,8 @@ def test_ml_connect_setters_run_while_a_fit_or_an_evaluate_waits_as_pyspark(ml_m
             waiting.join(10)
         models.append(outcome)
         assert len(outcome) == 1 and not isinstance(outcome[0], Exception), (name, outcome)
-        # The request of the fit or the evaluate, and, of a LogisticRegression, the numClasses of
-        # its training summary, which follows the fit.
+        # The request of the fit or the evaluate, and the Fetches that follow a fit (see
+        # _FETCHES_AFTER_FIT).
         (command,) = [
             c
             for c in _commands(service)

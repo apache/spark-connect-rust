@@ -2376,8 +2376,30 @@ const LINEAR_REGRESSION_PARAMS: &[(&str, Kind)] = &[
     ("maxBlockSizeInMB", Kind::Float),
 ];
 
-#[pymethods]
-impl PyLinearRegression {
+native_pymethods! {
+    PyLinearRegression;
+    jvm: "org.apache.spark.ml.regression.LinearRegression", op: Estimator;
+    params: [
+    "aggregationDepth" => ("getAggregationDepth", get_aggregation_depth, param_aggregation_depth),
+    "elasticNetParam" => ("getElasticNetParam", get_elastic_net_param, param_elastic_net_param),
+    "epsilon" => ("getEpsilon", get_epsilon, param_epsilon),
+    "featuresCol" => ("getFeaturesCol", get_features_col, param_features_col),
+    "fitIntercept" => ("getFitIntercept", get_fit_intercept, param_fit_intercept),
+    "labelCol" => ("getLabelCol", get_label_col, param_label_col),
+    "loss" => ("getLoss", get_loss, param_loss),
+    "maxBlockSizeInMB" => (
+        "getMaxBlockSizeInMB",
+        get_max_block_size_in_mb,
+        param_max_block_size_in_mb
+    ),
+    "maxIter" => ("getMaxIter", get_max_iter, param_max_iter),
+    "predictionCol" => ("getPredictionCol", get_prediction_col, param_prediction_col),
+    "regParam" => ("getRegParam", get_reg_param, param_reg_param),
+    "solver" => ("getSolver", get_solver, param_solver),
+    "standardization" => ("getStandardization", get_standardization, param_standardization),
+    "tol" => ("getTol", get_tol, param_tol),
+    "weightCol" => ("getWeightCol", get_weight_col, param_weight_col),
+    ];
     #[new]
     #[pyo3(signature = (*args, **kwargs), text_signature = "(*, featuresCol='features', labelCol='label', predictionCol='prediction', maxIter=100, regParam=0.0, elasticNetParam=0.0, tol=1e-06, fitIntercept=True, standardization=True, solver='auto', weightCol=None, aggregationDepth=2, loss='squaredError', epsilon=1.35, maxBlockSizeInMB=0.0)")]
     fn new(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
@@ -2539,8 +2561,49 @@ impl PyLinearRegression {
         slf: &Bound<'_, Self>,
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Fitted<PyMLModel>> {
-        fit_with(slf, dataset, params, || fit_native(slf, dataset, None))
+    ) -> PyResult<Fitted<regression_api::PyLinearRegressionModel>> {
+        fit_with(slf, dataset, params, || {
+            fit_native_model(slf, dataset, |py, model, df| {
+                regression_api::PyLinearRegressionModel::fitted(
+                    py,
+                    model,
+                    df,
+                    object::SummaryDataset::Train,
+                )
+            })
+        })
+    }
+
+    /// The fits of a copy of the estimator, one per param map, as `Estimator.fitMultiple`, of
+    /// PySpark's keywords.
+    #[pyo3(name = "fitMultiple")]
+    #[allow(non_snake_case)]
+    fn fit_multiple<'py>(
+        slf: &Bound<'py, Self>,
+        dataset: &Bound<'py, PyAny>,
+        paramMaps: &Bound<'py, PyAny>,
+    ) -> PyResult<params_api::PyFitMultipleIterator> {
+        params_api::fit_multiple(slf.as_any(), dataset, paramMaps)
+    }
+}
+
+impl params_api::NativeInstance for PyLinearRegression {
+    fn duplicate(&self, py: Python<'_>) -> PyResult<Py<Self>> {
+        Py::new(
+            py,
+            Self {
+                inner: self.inner.clone(),
+                unsendable: self.unsendable.clone(),
+            },
+        )
+    }
+
+    fn uid(&self) -> String {
+        Estimator::operator(&self.inner).uid.clone()
+    }
+
+    fn set_uid(&mut self, uid: &str) {
+        Estimator::operator_mut(&mut self.inner).uid = uid.to_string();
     }
 }
 
@@ -2573,8 +2636,31 @@ const GENERALIZED_LINEAR_REGRESSION_PARAMS: &[(&str, Kind)] = &[
     ("aggregationDepth", Kind::Int),
 ];
 
-#[pymethods]
-impl PyGeneralizedLinearRegression {
+native_pymethods! {
+    PyGeneralizedLinearRegression;
+    jvm: "org.apache.spark.ml.regression.GeneralizedLinearRegression", op: Estimator;
+    params: [
+    "aggregationDepth" => ("getAggregationDepth", get_aggregation_depth, param_aggregation_depth),
+    "family" => ("getFamily", get_family, param_family),
+    "featuresCol" => ("getFeaturesCol", get_features_col, param_features_col),
+    "fitIntercept" => ("getFitIntercept", get_fit_intercept, param_fit_intercept),
+    "labelCol" => ("getLabelCol", get_label_col, param_label_col),
+    "link" => ("getLink", get_link, param_link),
+    "linkPower" => ("getLinkPower", get_link_power, param_link_power),
+    "linkPredictionCol" => (
+        "getLinkPredictionCol",
+        get_link_prediction_col,
+        param_link_prediction_col
+    ),
+    "maxIter" => ("getMaxIter", get_max_iter, param_max_iter),
+    "offsetCol" => ("getOffsetCol", get_offset_col, param_offset_col),
+    "predictionCol" => ("getPredictionCol", get_prediction_col, param_prediction_col),
+    "regParam" => ("getRegParam", get_reg_param, param_reg_param),
+    "solver" => ("getSolver", get_solver, param_solver),
+    "tol" => ("getTol", get_tol, param_tol),
+    "variancePower" => ("getVariancePower", get_variance_power, param_variance_power),
+    "weightCol" => ("getWeightCol", get_weight_col, param_weight_col),
+    ];
     #[new]
     #[pyo3(signature = (*args, **kwargs), text_signature = "(*, labelCol='label', featuresCol='features', predictionCol='prediction', family='gaussian', link=None, fitIntercept=True, maxIter=25, tol=1e-06, regParam=0.0, weightCol=None, solver='irls', linkPredictionCol=None, variancePower=0.0, linkPower=None, offsetCol=None, aggregationDepth=2)")]
     fn new(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
@@ -2744,8 +2830,49 @@ impl PyGeneralizedLinearRegression {
         slf: &Bound<'_, Self>,
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Fitted<PyMLModel>> {
-        fit_with(slf, dataset, params, || fit_native(slf, dataset, None))
+    ) -> PyResult<Fitted<regression_api::PyGeneralizedLinearRegressionModel>> {
+        fit_with(slf, dataset, params, || {
+            fit_native_model(slf, dataset, |py, model, df| {
+                regression_api::PyGeneralizedLinearRegressionModel::fitted(
+                    py,
+                    model,
+                    df,
+                    object::SummaryDataset::Train,
+                )
+            })
+        })
+    }
+
+    /// The fits of a copy of the estimator, one per param map, as `Estimator.fitMultiple`, of
+    /// PySpark's keywords.
+    #[pyo3(name = "fitMultiple")]
+    #[allow(non_snake_case)]
+    fn fit_multiple<'py>(
+        slf: &Bound<'py, Self>,
+        dataset: &Bound<'py, PyAny>,
+        paramMaps: &Bound<'py, PyAny>,
+    ) -> PyResult<params_api::PyFitMultipleIterator> {
+        params_api::fit_multiple(slf.as_any(), dataset, paramMaps)
+    }
+}
+
+impl params_api::NativeInstance for PyGeneralizedLinearRegression {
+    fn duplicate(&self, py: Python<'_>) -> PyResult<Py<Self>> {
+        Py::new(
+            py,
+            Self {
+                inner: self.inner.clone(),
+                unsendable: self.unsendable.clone(),
+            },
+        )
+    }
+
+    fn uid(&self) -> String {
+        Estimator::operator(&self.inner).uid.clone()
+    }
+
+    fn set_uid(&mut self, uid: &str) {
+        Estimator::operator_mut(&mut self.inner).uid = uid.to_string();
     }
 }
 
@@ -2773,8 +2900,30 @@ const AFTSURVIVAL_REGRESSION_PARAMS: &[(&str, Kind)] = &[
     ("maxBlockSizeInMB", Kind::Float),
 ];
 
-#[pymethods]
-impl PyAFTSurvivalRegression {
+native_pymethods! {
+    PyAFTSurvivalRegression;
+    jvm: "org.apache.spark.ml.regression.AFTSurvivalRegression", op: Estimator;
+    params: [
+    "aggregationDepth" => ("getAggregationDepth", get_aggregation_depth, param_aggregation_depth),
+    "censorCol" => ("getCensorCol", get_censor_col, param_censor_col),
+    "featuresCol" => ("getFeaturesCol", get_features_col, param_features_col),
+    "fitIntercept" => ("getFitIntercept", get_fit_intercept, param_fit_intercept),
+    "labelCol" => ("getLabelCol", get_label_col, param_label_col),
+    "maxBlockSizeInMB" => (
+        "getMaxBlockSizeInMB",
+        get_max_block_size_in_mb,
+        param_max_block_size_in_mb
+    ),
+    "maxIter" => ("getMaxIter", get_max_iter, param_max_iter),
+    "predictionCol" => ("getPredictionCol", get_prediction_col, param_prediction_col),
+    "quantileProbabilities" => (
+        "getQuantileProbabilities",
+        get_quantile_probabilities,
+        param_quantile_probabilities
+    ),
+    "quantilesCol" => ("getQuantilesCol", get_quantiles_col, param_quantiles_col),
+    "tol" => ("getTol", get_tol, param_tol),
+    ];
     #[new]
     #[pyo3(signature = (*args, **kwargs), text_signature = "(*, featuresCol='features', labelCol='label', predictionCol='prediction', fitIntercept=True, maxIter=100, tol=1e-06, censorCol='censor', quantileProbabilities=[0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99], quantilesCol=None, aggregationDepth=2, maxBlockSizeInMB=0.0)")]
     fn new(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
@@ -2905,8 +3054,49 @@ impl PyAFTSurvivalRegression {
         slf: &Bound<'_, Self>,
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Fitted<PyMLModel>> {
-        fit_with(slf, dataset, params, || fit_native(slf, dataset, None))
+    ) -> PyResult<Fitted<regression_api::PyAFTSurvivalRegressionModel>> {
+        fit_with(slf, dataset, params, || {
+            fit_native_model(slf, dataset, |py, model, df| {
+                regression_api::PyAFTSurvivalRegressionModel::fitted(
+                    py,
+                    model,
+                    df,
+                    object::SummaryDataset::None,
+                )
+            })
+        })
+    }
+
+    /// The fits of a copy of the estimator, one per param map, as `Estimator.fitMultiple`, of
+    /// PySpark's keywords.
+    #[pyo3(name = "fitMultiple")]
+    #[allow(non_snake_case)]
+    fn fit_multiple<'py>(
+        slf: &Bound<'py, Self>,
+        dataset: &Bound<'py, PyAny>,
+        paramMaps: &Bound<'py, PyAny>,
+    ) -> PyResult<params_api::PyFitMultipleIterator> {
+        params_api::fit_multiple(slf.as_any(), dataset, paramMaps)
+    }
+}
+
+impl params_api::NativeInstance for PyAFTSurvivalRegression {
+    fn duplicate(&self, py: Python<'_>) -> PyResult<Py<Self>> {
+        Py::new(
+            py,
+            Self {
+                inner: self.inner.clone(),
+                unsendable: self.unsendable.clone(),
+            },
+        )
+    }
+
+    fn uid(&self) -> String {
+        Estimator::operator(&self.inner).uid.clone()
+    }
+
+    fn set_uid(&mut self, uid: &str) {
+        Estimator::operator_mut(&mut self.inner).uid = uid.to_string();
     }
 }
 
@@ -2926,8 +3116,17 @@ const ISOTONIC_REGRESSION_PARAMS: &[(&str, Kind)] = &[
     ("featureIndex", Kind::Int),
 ];
 
-#[pymethods]
-impl PyIsotonicRegression {
+native_pymethods! {
+    PyIsotonicRegression;
+    jvm: "org.apache.spark.ml.regression.IsotonicRegression", op: Estimator;
+    params: [
+    "featureIndex" => ("getFeatureIndex", get_feature_index, param_feature_index),
+    "featuresCol" => ("getFeaturesCol", get_features_col, param_features_col),
+    "isotonic" => ("getIsotonic", get_isotonic, param_isotonic),
+    "labelCol" => ("getLabelCol", get_label_col, param_label_col),
+    "predictionCol" => ("getPredictionCol", get_prediction_col, param_prediction_col),
+    "weightCol" => ("getWeightCol", get_weight_col, param_weight_col),
+    ];
     #[new]
     #[pyo3(signature = (*args, **kwargs), text_signature = "(*, featuresCol='features', labelCol='label', predictionCol='prediction', weightCol=None, isotonic=True, featureIndex=0)")]
     fn new(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
@@ -3018,8 +3217,49 @@ impl PyIsotonicRegression {
         slf: &Bound<'_, Self>,
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Fitted<PyMLModel>> {
-        fit_with(slf, dataset, params, || fit_native(slf, dataset, None))
+    ) -> PyResult<Fitted<regression_api::PyIsotonicRegressionModel>> {
+        fit_with(slf, dataset, params, || {
+            fit_native_model(slf, dataset, |py, model, df| {
+                regression_api::PyIsotonicRegressionModel::fitted(
+                    py,
+                    model,
+                    df,
+                    object::SummaryDataset::None,
+                )
+            })
+        })
+    }
+
+    /// The fits of a copy of the estimator, one per param map, as `Estimator.fitMultiple`, of
+    /// PySpark's keywords.
+    #[pyo3(name = "fitMultiple")]
+    #[allow(non_snake_case)]
+    fn fit_multiple<'py>(
+        slf: &Bound<'py, Self>,
+        dataset: &Bound<'py, PyAny>,
+        paramMaps: &Bound<'py, PyAny>,
+    ) -> PyResult<params_api::PyFitMultipleIterator> {
+        params_api::fit_multiple(slf.as_any(), dataset, paramMaps)
+    }
+}
+
+impl params_api::NativeInstance for PyIsotonicRegression {
+    fn duplicate(&self, py: Python<'_>) -> PyResult<Py<Self>> {
+        Py::new(
+            py,
+            Self {
+                inner: self.inner.clone(),
+                unsendable: self.unsendable.clone(),
+            },
+        )
+    }
+
+    fn uid(&self) -> String {
+        Estimator::operator(&self.inner).uid.clone()
+    }
+
+    fn set_uid(&mut self, uid: &str) {
+        Estimator::operator_mut(&mut self.inner).uid = uid.to_string();
     }
 }
 
@@ -3047,8 +3287,30 @@ const FMREGRESSOR_PARAMS: &[(&str, Kind)] = &[
     ("seed", Kind::Int),
 ];
 
-#[pymethods]
-impl PyFMRegressor {
+native_pymethods! {
+    PyFMRegressor;
+    jvm: "org.apache.spark.ml.regression.FMRegressor", op: Estimator;
+    params: [
+    "factorSize" => ("getFactorSize", get_factor_size, param_factor_size),
+    "featuresCol" => ("getFeaturesCol", get_features_col, param_features_col),
+    "fitIntercept" => ("getFitIntercept", get_fit_intercept, param_fit_intercept),
+    "fitLinear" => ("getFitLinear", get_fit_linear, param_fit_linear),
+    "initStd" => ("getInitStd", get_init_std, param_init_std),
+    "labelCol" => ("getLabelCol", get_label_col, param_label_col),
+    "maxIter" => ("getMaxIter", get_max_iter, param_max_iter),
+    "miniBatchFraction" => (
+        "getMiniBatchFraction",
+        get_mini_batch_fraction,
+        param_mini_batch_fraction
+    ),
+    "predictionCol" => ("getPredictionCol", get_prediction_col, param_prediction_col),
+    "regParam" => ("getRegParam", get_reg_param, param_reg_param),
+    "seed" => ("getSeed", get_seed, param_seed),
+    "solver" => ("getSolver", get_solver, param_solver),
+    "stepSize" => ("getStepSize", get_step_size, param_step_size),
+    "tol" => ("getTol", get_tol, param_tol),
+    "weightCol" => ("getWeightCol", get_weight_col, param_weight_col),
+    ];
     #[new]
     #[pyo3(signature = (*args, **kwargs), text_signature = "(*, featuresCol='features', labelCol='label', predictionCol='prediction', factorSize=8, fitIntercept=True, fitLinear=True, regParam=0.0, miniBatchFraction=1.0, initStd=0.01, maxIter=100, stepSize=1.0, tol=1e-06, solver='adamW', seed=None)")]
     fn new(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
@@ -3197,8 +3459,49 @@ impl PyFMRegressor {
         slf: &Bound<'_, Self>,
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Fitted<PyMLModel>> {
-        fit_with(slf, dataset, params, || fit_native(slf, dataset, None))
+    ) -> PyResult<Fitted<regression_api::PyFMRegressionModel>> {
+        fit_with(slf, dataset, params, || {
+            fit_native_model(slf, dataset, |py, model, df| {
+                regression_api::PyFMRegressionModel::fitted(
+                    py,
+                    model,
+                    df,
+                    object::SummaryDataset::None,
+                )
+            })
+        })
+    }
+
+    /// The fits of a copy of the estimator, one per param map, as `Estimator.fitMultiple`, of
+    /// PySpark's keywords.
+    #[pyo3(name = "fitMultiple")]
+    #[allow(non_snake_case)]
+    fn fit_multiple<'py>(
+        slf: &Bound<'py, Self>,
+        dataset: &Bound<'py, PyAny>,
+        paramMaps: &Bound<'py, PyAny>,
+    ) -> PyResult<params_api::PyFitMultipleIterator> {
+        params_api::fit_multiple(slf.as_any(), dataset, paramMaps)
+    }
+}
+
+impl params_api::NativeInstance for PyFMRegressor {
+    fn duplicate(&self, py: Python<'_>) -> PyResult<Py<Self>> {
+        Py::new(
+            py,
+            Self {
+                inner: self.inner.clone(),
+                unsendable: self.unsendable.clone(),
+            },
+        )
+    }
+
+    fn uid(&self) -> String {
+        Estimator::operator(&self.inner).uid.clone()
+    }
+
+    fn set_uid(&mut self, uid: &str) {
+        Estimator::operator_mut(&mut self.inner).uid = uid.to_string();
     }
 }
 
@@ -4188,8 +4491,53 @@ const GBT_REGRESSOR_PARAMS: &[(&str, Kind)] = &[
     ("weightCol", Kind::Str),
 ];
 
-#[pymethods]
-impl PyGBTRegressor {
+native_pymethods! {
+    PyGBTRegressor;
+    jvm: "org.apache.spark.ml.regression.GBTRegressor", op: Estimator;
+    params: [
+    "cacheNodeIds" => ("getCacheNodeIds", get_cache_node_ids, param_cache_node_ids),
+    "checkpointInterval" => (
+        "getCheckpointInterval",
+        get_checkpoint_interval,
+        param_checkpoint_interval
+    ),
+    "featureSubsetStrategy" => (
+        "getFeatureSubsetStrategy",
+        get_feature_subset_strategy,
+        param_feature_subset_strategy
+    ),
+    "featuresCol" => ("getFeaturesCol", get_features_col, param_features_col),
+    "impurity" => ("getImpurity", get_impurity, param_impurity),
+    "labelCol" => ("getLabelCol", get_label_col, param_label_col),
+    "leafCol" => ("getLeafCol", get_leaf_col, param_leaf_col),
+    "lossType" => ("getLossType", get_loss_type, param_loss_type),
+    "maxBins" => ("getMaxBins", get_max_bins, param_max_bins),
+    "maxDepth" => ("getMaxDepth", get_max_depth, param_max_depth),
+    "maxIter" => ("getMaxIter", get_max_iter, param_max_iter),
+    "maxMemoryInMB" => ("getMaxMemoryInMB", get_max_memory_in_mb, param_max_memory_in_mb),
+    "minInfoGain" => ("getMinInfoGain", get_min_info_gain, param_min_info_gain),
+    "minInstancesPerNode" => (
+        "getMinInstancesPerNode",
+        get_min_instances_per_node,
+        param_min_instances_per_node
+    ),
+    "minWeightFractionPerNode" => (
+        "getMinWeightFractionPerNode",
+        get_min_weight_fraction_per_node,
+        param_min_weight_fraction_per_node
+    ),
+    "predictionCol" => ("getPredictionCol", get_prediction_col, param_prediction_col),
+    "seed" => ("getSeed", get_seed, param_seed),
+    "stepSize" => ("getStepSize", get_step_size, param_step_size),
+    "subsamplingRate" => ("getSubsamplingRate", get_subsampling_rate, param_subsampling_rate),
+    "validationIndicatorCol" => (
+        "getValidationIndicatorCol",
+        get_validation_indicator_col,
+        param_validation_indicator_col
+    ),
+    "validationTol" => ("getValidationTol", get_validation_tol, param_validation_tol),
+    "weightCol" => ("getWeightCol", get_weight_col, param_weight_col),
+    ];
     #[new]
     #[pyo3(signature = (*args, **kwargs), text_signature = "(*, featuresCol='features', labelCol='label', predictionCol='prediction', maxDepth=5, maxBins=32, minInstancesPerNode=1, minInfoGain=0.0, maxMemoryInMB=256, cacheNodeIds=False, subsamplingRate=1.0, checkpointInterval=10, lossType='squared', maxIter=20, stepSize=0.1, seed=None, impurity='variance', featureSubsetStrategy='all', validationTol=0.1, validationIndicatorCol=None, leafCol='', minWeightFractionPerNode=0.0, weightCol=None)")]
     fn new(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
@@ -4388,13 +4736,76 @@ impl PyGBTRegressor {
         set_param(slf, "validationIndicatorCol", Kind::Str, value)
     }
 
+    /// The supportedImpurities of the class, as PySpark's class attribute.
+    #[classattr]
+    #[allow(non_snake_case)]
+    fn supportedImpurities() -> Vec<&'static str> {
+        vec!["variance"]
+    }
+
+    /// The supportedFeatureSubsetStrategies of the class, as PySpark's class attribute.
+    #[classattr]
+    #[allow(non_snake_case)]
+    fn supportedFeatureSubsetStrategies() -> Vec<&'static str> {
+        vec!["auto", "all", "onethird", "sqrt", "log2"]
+    }
+
+    /// The supportedLossTypes of the class, as PySpark's class attribute.
+    #[classattr]
+    #[allow(non_snake_case)]
+    fn supportedLossTypes() -> Vec<&'static str> {
+        vec!["squared", "absolute"]
+    }
+
+
     #[pyo3(signature = (dataset, params=None))]
     fn fit(
         slf: &Bound<'_, Self>,
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Fitted<PyMLModel>> {
-        fit_with(slf, dataset, params, || fit_native(slf, dataset, None))
+    ) -> PyResult<Fitted<regression_api::PyGBTRegressionModel>> {
+        fit_with(slf, dataset, params, || {
+            fit_native_model(slf, dataset, |py, model, df| {
+                regression_api::PyGBTRegressionModel::fitted(
+                    py,
+                    model,
+                    df,
+                    object::SummaryDataset::None,
+                )
+            })
+        })
+    }
+
+    /// The fits of a copy of the estimator, one per param map, as `Estimator.fitMultiple`, of
+    /// PySpark's keywords.
+    #[pyo3(name = "fitMultiple")]
+    #[allow(non_snake_case)]
+    fn fit_multiple<'py>(
+        slf: &Bound<'py, Self>,
+        dataset: &Bound<'py, PyAny>,
+        paramMaps: &Bound<'py, PyAny>,
+    ) -> PyResult<params_api::PyFitMultipleIterator> {
+        params_api::fit_multiple(slf.as_any(), dataset, paramMaps)
+    }
+}
+
+impl params_api::NativeInstance for PyGBTRegressor {
+    fn duplicate(&self, py: Python<'_>) -> PyResult<Py<Self>> {
+        Py::new(
+            py,
+            Self {
+                inner: self.inner.clone(),
+                unsendable: self.unsendable.clone(),
+            },
+        )
+    }
+
+    fn uid(&self) -> String {
+        Estimator::operator(&self.inner).uid.clone()
+    }
+
+    fn set_uid(&mut self, uid: &str) {
+        Estimator::operator_mut(&mut self.inner).uid = uid.to_string();
     }
 }
 
@@ -4427,8 +4838,39 @@ const DECISION_TREE_REGRESSOR_PARAMS: &[(&str, Kind)] = &[
     ("weightCol", Kind::Str),
 ];
 
-#[pymethods]
-impl PyDecisionTreeRegressor {
+native_pymethods! {
+    PyDecisionTreeRegressor;
+    jvm: "org.apache.spark.ml.regression.DecisionTreeRegressor", op: Estimator;
+    params: [
+    "cacheNodeIds" => ("getCacheNodeIds", get_cache_node_ids, param_cache_node_ids),
+    "checkpointInterval" => (
+        "getCheckpointInterval",
+        get_checkpoint_interval,
+        param_checkpoint_interval
+    ),
+    "featuresCol" => ("getFeaturesCol", get_features_col, param_features_col),
+    "impurity" => ("getImpurity", get_impurity, param_impurity),
+    "labelCol" => ("getLabelCol", get_label_col, param_label_col),
+    "leafCol" => ("getLeafCol", get_leaf_col, param_leaf_col),
+    "maxBins" => ("getMaxBins", get_max_bins, param_max_bins),
+    "maxDepth" => ("getMaxDepth", get_max_depth, param_max_depth),
+    "maxMemoryInMB" => ("getMaxMemoryInMB", get_max_memory_in_mb, param_max_memory_in_mb),
+    "minInfoGain" => ("getMinInfoGain", get_min_info_gain, param_min_info_gain),
+    "minInstancesPerNode" => (
+        "getMinInstancesPerNode",
+        get_min_instances_per_node,
+        param_min_instances_per_node
+    ),
+    "minWeightFractionPerNode" => (
+        "getMinWeightFractionPerNode",
+        get_min_weight_fraction_per_node,
+        param_min_weight_fraction_per_node
+    ),
+    "predictionCol" => ("getPredictionCol", get_prediction_col, param_prediction_col),
+    "seed" => ("getSeed", get_seed, param_seed),
+    "varianceCol" => ("getVarianceCol", get_variance_col, param_variance_col),
+    "weightCol" => ("getWeightCol", get_weight_col, param_weight_col),
+    ];
     #[new]
     #[pyo3(signature = (*args, **kwargs), text_signature = "(*, featuresCol='features', labelCol='label', predictionCol='prediction', maxDepth=5, maxBins=32, minInstancesPerNode=1, minInfoGain=0.0, maxMemoryInMB=256, cacheNodeIds=False, checkpointInterval=10, impurity='variance', seed=None, varianceCol=None, weightCol=None, leafCol='', minWeightFractionPerNode=0.0)")]
     fn new(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
@@ -4593,13 +5035,62 @@ impl PyDecisionTreeRegressor {
         set_param(slf, "varianceCol", Kind::Str, value)
     }
 
+    /// The supportedImpurities of the class, as PySpark's class attribute.
+    #[classattr]
+    #[allow(non_snake_case)]
+    fn supportedImpurities() -> Vec<&'static str> {
+        vec!["variance"]
+    }
+
+
     #[pyo3(signature = (dataset, params=None))]
     fn fit(
         slf: &Bound<'_, Self>,
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Fitted<PyMLModel>> {
-        fit_with(slf, dataset, params, || fit_native(slf, dataset, None))
+    ) -> PyResult<Fitted<regression_api::PyDecisionTreeRegressionModel>> {
+        fit_with(slf, dataset, params, || {
+            fit_native_model(slf, dataset, |py, model, df| {
+                regression_api::PyDecisionTreeRegressionModel::fitted(
+                    py,
+                    model,
+                    df,
+                    object::SummaryDataset::None,
+                )
+            })
+        })
+    }
+
+    /// The fits of a copy of the estimator, one per param map, as `Estimator.fitMultiple`, of
+    /// PySpark's keywords.
+    #[pyo3(name = "fitMultiple")]
+    #[allow(non_snake_case)]
+    fn fit_multiple<'py>(
+        slf: &Bound<'py, Self>,
+        dataset: &Bound<'py, PyAny>,
+        paramMaps: &Bound<'py, PyAny>,
+    ) -> PyResult<params_api::PyFitMultipleIterator> {
+        params_api::fit_multiple(slf.as_any(), dataset, paramMaps)
+    }
+}
+
+impl params_api::NativeInstance for PyDecisionTreeRegressor {
+    fn duplicate(&self, py: Python<'_>) -> PyResult<Py<Self>> {
+        Py::new(
+            py,
+            Self {
+                inner: self.inner.clone(),
+                unsendable: self.unsendable.clone(),
+            },
+        )
+    }
+
+    fn uid(&self) -> String {
+        Estimator::operator(&self.inner).uid.clone()
+    }
+
+    fn set_uid(&mut self, uid: &str) {
+        Estimator::operator_mut(&mut self.inner).uid = uid.to_string();
     }
 }
 /// Random forest regressor fitted and cached by Spark Connect.
@@ -4634,8 +5125,46 @@ const RANDOM_FOREST_REGRESSOR_PARAMS: &[(&str, Kind)] = &[
     ("bootstrap", Kind::Bool),
 ];
 
-#[pymethods]
-impl PyRandomForestRegressor {
+native_pymethods! {
+    PyRandomForestRegressor;
+    jvm: "org.apache.spark.ml.regression.RandomForestRegressor", op: Estimator;
+    params: [
+    "bootstrap" => ("getBootstrap", get_bootstrap, param_bootstrap),
+    "cacheNodeIds" => ("getCacheNodeIds", get_cache_node_ids, param_cache_node_ids),
+    "checkpointInterval" => (
+        "getCheckpointInterval",
+        get_checkpoint_interval,
+        param_checkpoint_interval
+    ),
+    "featureSubsetStrategy" => (
+        "getFeatureSubsetStrategy",
+        get_feature_subset_strategy,
+        param_feature_subset_strategy
+    ),
+    "featuresCol" => ("getFeaturesCol", get_features_col, param_features_col),
+    "impurity" => ("getImpurity", get_impurity, param_impurity),
+    "labelCol" => ("getLabelCol", get_label_col, param_label_col),
+    "leafCol" => ("getLeafCol", get_leaf_col, param_leaf_col),
+    "maxBins" => ("getMaxBins", get_max_bins, param_max_bins),
+    "maxDepth" => ("getMaxDepth", get_max_depth, param_max_depth),
+    "maxMemoryInMB" => ("getMaxMemoryInMB", get_max_memory_in_mb, param_max_memory_in_mb),
+    "minInfoGain" => ("getMinInfoGain", get_min_info_gain, param_min_info_gain),
+    "minInstancesPerNode" => (
+        "getMinInstancesPerNode",
+        get_min_instances_per_node,
+        param_min_instances_per_node
+    ),
+    "minWeightFractionPerNode" => (
+        "getMinWeightFractionPerNode",
+        get_min_weight_fraction_per_node,
+        param_min_weight_fraction_per_node
+    ),
+    "numTrees" => ("getNumTrees", get_num_trees, param_num_trees),
+    "predictionCol" => ("getPredictionCol", get_prediction_col, param_prediction_col),
+    "seed" => ("getSeed", get_seed, param_seed),
+    "subsamplingRate" => ("getSubsamplingRate", get_subsampling_rate, param_subsampling_rate),
+    "weightCol" => ("getWeightCol", get_weight_col, param_weight_col),
+    ];
     #[new]
     #[pyo3(signature = (*args, **kwargs), text_signature = "(*, featuresCol='features', labelCol='label', predictionCol='prediction', maxDepth=5, maxBins=32, minInstancesPerNode=1, minInfoGain=0.0, maxMemoryInMB=256, cacheNodeIds=False, checkpointInterval=10, impurity='variance', subsamplingRate=1.0, seed=None, numTrees=20, featureSubsetStrategy='auto', leafCol='', minWeightFractionPerNode=0.0, weightCol=None, bootstrap=True)")]
     fn new(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
@@ -4824,13 +5353,69 @@ impl PyRandomForestRegressor {
         set_param(slf, "bootstrap", Kind::Bool, value)
     }
 
+    /// The supportedImpurities of the class, as PySpark's class attribute.
+    #[classattr]
+    #[allow(non_snake_case)]
+    fn supportedImpurities() -> Vec<&'static str> {
+        vec!["variance"]
+    }
+
+    /// The supportedFeatureSubsetStrategies of the class, as PySpark's class attribute.
+    #[classattr]
+    #[allow(non_snake_case)]
+    fn supportedFeatureSubsetStrategies() -> Vec<&'static str> {
+        vec!["auto", "all", "onethird", "sqrt", "log2"]
+    }
+
+
     #[pyo3(signature = (dataset, params=None))]
     fn fit(
         slf: &Bound<'_, Self>,
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Fitted<PyMLModel>> {
-        fit_with(slf, dataset, params, || fit_native(slf, dataset, None))
+    ) -> PyResult<Fitted<regression_api::PyRandomForestRegressionModel>> {
+        fit_with(slf, dataset, params, || {
+            fit_native_model(slf, dataset, |py, model, df| {
+                regression_api::PyRandomForestRegressionModel::fitted(
+                    py,
+                    model,
+                    df,
+                    object::SummaryDataset::None,
+                )
+            })
+        })
+    }
+
+    /// The fits of a copy of the estimator, one per param map, as `Estimator.fitMultiple`, of
+    /// PySpark's keywords.
+    #[pyo3(name = "fitMultiple")]
+    #[allow(non_snake_case)]
+    fn fit_multiple<'py>(
+        slf: &Bound<'py, Self>,
+        dataset: &Bound<'py, PyAny>,
+        paramMaps: &Bound<'py, PyAny>,
+    ) -> PyResult<params_api::PyFitMultipleIterator> {
+        params_api::fit_multiple(slf.as_any(), dataset, paramMaps)
+    }
+}
+
+impl params_api::NativeInstance for PyRandomForestRegressor {
+    fn duplicate(&self, py: Python<'_>) -> PyResult<Py<Self>> {
+        Py::new(
+            py,
+            Self {
+                inner: self.inner.clone(),
+                unsendable: self.unsendable.clone(),
+            },
+        )
+    }
+
+    fn uid(&self) -> String {
+        Estimator::operator(&self.inner).uid.clone()
+    }
+
+    fn set_uid(&mut self, uid: &str) {
+        Estimator::operator_mut(&mut self.inner).uid = uid.to_string();
     }
 }
 

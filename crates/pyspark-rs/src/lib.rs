@@ -249,6 +249,7 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ml::params_api::PyFitMultipleIterator>()?;
     ml::classification_api::register(m)?;
     ml::clustering_api::register(m)?;
+    ml::regression_api::register(m)?;
     ml::feature::register(m)?;
     ml::stat::register(m)?;
     ml::fpm::register(m)?;
