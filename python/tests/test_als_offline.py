@@ -139,20 +139,33 @@ def test_als_setters_validate_types(param):
 
 def test_pandas_is_rejected_before_requests_in_fit_transform_and_subsets(session):
     import pandas as pd
+    from pyspark.errors import PySparkTypeError
 
     spark, service = session
     model = fitted(spark, service)
     operations = [
         recommendation.ALS(rank=2**70).fit,
         model.transform,
+    ]
+    # The subsets send their dataset as an argument of an attribute call, which pyspark.ml's
+    # serialization converts to a literal before the count: a pandas DataFrame raises the
+    # UNSUPPORTED_DATA_TYPE of that conversion, as pyspark.ml's does.
+    subsets = [
         lambda x: model.recommendForUserSubset(x, object()),
         lambda x: model.recommendForItemSubset(x, object()),
     ]
-    for operation in operations:
-        for pdf in [pd.DataFrame(), pd.DataFrame({"u": [0]})]:
+    for pdf in [pd.DataFrame(), pd.DataFrame({"u": [0]})]:
+        for operation in operations:
             sent = _requests_but_deletes(service)
             with pytest.raises(TypeError, match="requires a Spark DataFrame"):
                 operation(pdf)
+            assert _requests_but_deletes(service) == sent
+        for subset in subsets:
+            sent = _requests_but_deletes(service)
+            with pytest.raises(PySparkTypeError) as error:
+                subset(pdf)
+            assert error.value.getCondition() == "UNSUPPORTED_DATA_TYPE"
+            assert error.value.getMessageParameters() == {"data_type": "DataFrame"}
             assert _requests_but_deletes(service) == sent
 
 

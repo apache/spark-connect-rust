@@ -101,20 +101,27 @@ def test_setters_validate_types(name, params):
 
 def test_rejects_pandas_before_validation_or_requests(session):
     import pandas as pd
+    from pyspark.errors import PySparkTypeError
 
     spark, service = session
     service.execute_payload = _operator_info("pandas-model")
     model = fpm.FPGrowth().fit(spark.range(1))
-    for method in [
-        fpm.FPGrowth(numPartitions=2**70).fit,
-        model.transform,
-        fpm.PrefixSpan(maxLocalProjDBSize=2**70).findFrequentSequentialPatterns,
-    ]:
-        for frame in [pd.DataFrame(), pd.DataFrame({"items": [["a"]]})]:
+    patterns = fpm.PrefixSpan(maxLocalProjDBSize=2**70).findFrequentSequentialPatterns
+    for frame in [pd.DataFrame(), pd.DataFrame({"items": [["a"]]})]:
+        for method in [fpm.FPGrowth(numPartitions=2**70).fit, model.transform]:
             sent = _requests_but_deletes(service)
             with pytest.raises(TypeError, match="requires a Spark DataFrame"):
                 method(frame)
             assert _requests_but_deletes(service) == sent
+        # The helper call sends its dataset first, which pyspark.ml's serialization converts to a
+        # literal before the params: a pandas DataFrame raises the UNSUPPORTED_DATA_TYPE of that
+        # conversion, as pyspark.ml's does.
+        sent = _requests_but_deletes(service)
+        with pytest.raises(PySparkTypeError) as error:
+            patterns(frame)
+        assert error.value.getCondition() == "UNSUPPORTED_DATA_TYPE"
+        assert error.value.getMessageParameters() == {"data_type": "DataFrame"}
+        assert _requests_but_deletes(service) == sent
 
 
 @pytest.mark.parametrize(
