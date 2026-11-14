@@ -480,10 +480,14 @@ methods that `pyspark.ml` runs as a helper or attribute call (`PowerIterationClu
 - One that cannot be a literal raises PySpark's error of the conversion. That includes a pandas
   DataFrame, which raises `UNSUPPORTED_DATA_TYPE` here rather than the `TypeError` above, as with
   `pyspark.ml`, and an empty list, which raises `CANNOT_INFER_ARRAY_ELEMENT_TYPE`.
+- A `(value, DataType)` pair is the literal of that type, as `LiteralExpression(value, dataType)`
+  makes it, whose asserts raise a bare `AssertionError` of a value that is not of the type
+  (`("x", IntegerType())`) and of a type that no literal has (a `MapType`, `StructType`,
+  `CharType`, `VarcharType`, `YearMonthIntervalType` or UDT), also with a None value, as with
+  `pyspark.ml` (`tests/golden/ml_fetch_pairs.json` records the pairs of official PySpark).
 - PySpark sends the others for the server to reject: an ML vector or matrix as they are, and a
   `(value, DataType)` pair as a literal of that type. `assignClusters` sends them too, in a lazy
-  DataFrame that the server rejects when it is analyzed or collected, but for a `(value, DataType)`
-  pair, which raises the `UNSUPPORTED_DATA_TYPE` of a tuple here. The other helper calls raise a
+  DataFrame that the server rejects when it is analyzed or collected. The other helper calls raise a
   `TypeError` of them before any request.
 
 As with
@@ -1494,8 +1498,9 @@ PySpark's `UNSUPPORTED_DATA_TYPE`, and another argument that cannot be a literal
 its conversion. A literal of another type than the helper takes, such as a dataset that is not a
 DataFrame or a column name that is not a str, is sent as PySpark sends it, and the server rejects it
 when the result is analyzed or collected (`tests/golden/statistics_arguments.json` records these
-cases of official PySpark). A `(value, DataType)` pair, which PySpark sends as a literal of that
-type, raises the `UNSUPPORTED_DATA_TYPE` of a tuple here. The KS test converts its parameters with
+cases of official PySpark). A `(value, DataType)` pair is sent as the literal of that type, as
+PySpark sends it, and raises the `AssertionError` of PySpark's `LiteralExpression(value, dataType)`
+of a value or type that a literal does not take. The KS test converts its parameters with
 `float()` first, as PySpark does. Results retain any fitted models used by their input plans.
 
 `Summarizer.metrics(...).summary(features, weight)` builds a SQL aggregate that

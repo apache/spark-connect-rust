@@ -30,6 +30,7 @@ import sys
 import textwrap
 import weakref
 
+import _ml_fetch_pair_cases
 import numpy as np
 import pytest
 from _mock_connect_server import mock_connect_session
@@ -613,10 +614,11 @@ def test_native_ml_other_invalid_inputs(ml_mock):
     # PowerIterationClustering.assignClusters, PrefixSpan.findFrequentSequentialPatterns and
     # ALSModel.recommendForUserSubset and recommendForItemSubset. A value that cannot be a literal
     # raises the error of LiteralExpression._from_value, a pandas DataFrame too (not the TypeError
-    # of a fit, transform or evaluate). PySpark sends the others for the server to reject (a vector
-    # and a matrix as they are, and a (value, DataType) pair as a literal of that type), and so does
-    # assignClusters, in a lazy DataFrame, but for a (value, DataType) pair, which it does not
-    # convert. The other helper calls raise a TypeError of them before any request.
+    # of a fit, transform or evaluate), and a (value, DataType) pair whose value is not of the type
+    # raises the bare AssertionError of LiteralExpression(value, dataType). PySpark sends the others
+    # for the server to reject (a vector and a matrix as they are, and a (value, DataType) pair as a
+    # literal of that type), and so does assignClusters, in a lazy DataFrame. The other helper calls
+    # raise a TypeError of them before any request.
     import numpy as np
     import pandas as pd
     from pyspark.errors import PySparkTypeError, PySparkValueError
@@ -652,15 +654,16 @@ def test_native_ml_other_invalid_inputs(ml_mock):
             assert error.value.getCondition() == condition, (name, other)
             if parameters is not None:
                 assert error.value.getMessageParameters() == parameters, (name, other)
+        with pytest.raises(AssertionError):
+            helper(("x", IntegerType()))
         if name == "assignClusters":
             for other in sendable:
                 # The dataset is the first argument of the helper call, a literal of the value.
                 (method,) = _relation(helper(other)).ml_relation.fetch.methods
                 assert method.method == "powerIterationClusteringAssignClusters"
                 assert method.args[0].HasField("param"), other
-            with pytest.raises(PySparkTypeError) as error:
-                helper(pair)
-            assert error.value.getMessageParameters() == {"data_type": "tuple"}
+            (method,) = _relation(helper(pair)).ml_relation.fetch.methods
+            assert method.args[0].param == pb2.Expression.Literal(integer=1)
             continue
         for other in sendable + [pair]:
             with pytest.raises(TypeError) as error:
@@ -668,6 +671,22 @@ def test_native_ml_other_invalid_inputs(ml_mock):
             assert str(error.value) == (
                 f"{name}() takes a Spark DataFrame, not '{type(other).__name__}'"
             ), (name, other)
+    assert len(_session_requests(service, spark)) == sent
+
+
+@pytest.mark.parametrize("case", _ml_fetch_pair_cases.golden()["cases"], ids=lambda c: c["value"])
+def test_ml_connect_native_typed_pairs_are_serialized_as_pyspark(ml_mock, case):
+    # As serialize of pyspark.ml.connect.serialize sends an argument of an ML call, a
+    # (value, DataType) pair is the literal of LiteralExpression(value, dataType), whose asserts
+    # raise a bare AssertionError, before any request, of a value that is not of the type and of a
+    # type that no literal has, as of official pyspark-client 4.3.0 (tests/golden/ml_fetch_pairs.json).
+    from pyspark.ml.stat import ChiSquareTest
+
+    spark, service = ml_mock
+    sent = len(_session_requests(service, spark))
+    expected = {key: value for key, value in case.items() if key != "value"}
+    test = lambda value: ChiSquareTest.test(value, "features", "label")  # noqa: E731
+    assert _ml_fetch_pair_cases.outcome(case["value"], test, _relation) == expected
     assert len(_session_requests(service, spark)) == sent
 
 

@@ -119,11 +119,17 @@ pub(super) fn ml_value_to_py(py: Python<'_>, value: &MlValue) -> PyResult<Py<PyA
 }
 
 /// The argument `value` of a fetch, as `serialize` of `pyspark.ml.connect.serialize` sends it: a
-/// DataFrame as its relation, an ML vector or matrix as itself, and another value as the literal
-/// of `LiteralExpression._from_value`, which raises PySpark's error of a value that cannot be one.
+/// DataFrame as its relation, a `(value, DataType)` pair as the literal of that type
+/// (`LiteralExpression(value, dataType)`, whose asserts raise PySpark's bare AssertionError of a
+/// value or type that it does not take), an ML vector or matrix as itself, and another value as
+/// the literal of `LiteralExpression._from_value`, which raises PySpark's error of a value that
+/// cannot be one.
 pub(super) fn fetch_arg_of(value: &Bound<'_, PyAny>) -> PyResult<FetchArg> {
     if let Ok(df) = value.extract::<PyRef<'_, PyDataFrame>>() {
         return Ok(FetchArg::Input(df.dataframe.clone()));
+    }
+    if let Some(literal) = crate::functions::typed_pair_literal(value)? {
+        return Ok(FetchArg::Literal(literal.to_literal_proto()));
     }
     let py = value.py();
     let linalg = py.import("pyspark.ml.linalg")?;

@@ -1,0 +1,282 @@
+{
+  "cases": [
+    {
+      "sent": "MAE=",
+      "value": "(1, IntegerType())"
+    },
+    {
+      "sent": "OICAgICAIA==",
+      "value": "(2**40, LongType())"
+    },
+    {
+      "sent": "KAc=",
+      "value": "(7, ShortType())"
+    },
+    {
+      "sent": "MAE=",
+      "value": "(True, IntegerType())"
+    },
+    {
+      "sent": "WQAAAAAAAPg/",
+      "value": "(1.5, DoubleType())"
+    },
+    {
+      "sent": "VQAAwD8=",
+      "value": "(1.5, FloatType())"
+    },
+    {
+      "sent": "GAE=",
+      "value": "(True, BooleanType())"
+    },
+    {
+      "sent": "YgkKAzEuNRAKGAI=",
+      "value": "(decimal.Decimal('1.5'), DecimalType(10, 2))"
+    },
+    {
+      "sent": "agFh",
+      "value": "('a', StringType())"
+    },
+    {
+      "sent": "agFh",
+      "value": "('a', StringType('UTF8_LCASE'))"
+    },
+    {
+      "sent": "EgJhYg==",
+      "value": "(b'ab', BinaryType())"
+    },
+    {
+      "sent": "EgJhYg==",
+      "value": "(bytearray(b'ab'), BinaryType())"
+    },
+    {
+      "sent": "gAHXjgE=",
+      "value": "(datetime.date(2020, 1, 2), DateType())"
+    },
+    {
+      "sent": "gAHXjgE=",
+      "value": "(datetime.datetime(2020, 1, 2, 3, 4, 5), DateType())"
+    },
+    {
+      "sent": "iAHA5puR9+PmAg==",
+      "value": "(datetime.datetime(2020, 1, 2, 3, 4, 5), TimestampType())"
+    },
+    {
+      "sent": "kAHA5puR9+PmAg==",
+      "value": "(datetime.datetime(2020, 1, 2, 3, 4, 5), TimestampNTZType())"
+    },
+    {
+      "sent": "0gEJCKD73qCtbBAG",
+      "value": "(datetime.time(1, 2, 3, 4), TimeType())"
+    },
+    {
+      "sent": "qAGAydfvwQI=",
+      "value": "(datetime.timedelta(days=1, seconds=2), DayTimeIntervalType())"
+    },
+    {
+      "sent": "CgIKAA==",
+      "value": "(None, NullType())"
+    },
+    {
+      "sent": "CgIyAA==",
+      "value": "(None, IntegerType())"
+    },
+    {
+      "sent": "MAE=",
+      "value": "(Color.RED, IntegerType())"
+    },
+    {
+      "sent": "IAE=",
+      "value": "(np.int8(1), ByteType())"
+    },
+    {
+      "sent": "VQAAwD8=",
+      "value": "(np.float32(1.5), FloatType())"
+    },
+    {
+      "sent": "GAE=",
+      "value": "(np.bool_(True), BooleanType())"
+    },
+    {
+      "sent": "agFh",
+      "value": "(np.str_('a'), StringType())"
+    },
+    {
+      "sent": "sgERCg9aDRILVVRGOF9CSU5BUlk=",
+      "value": "([], ArrayType(StringType()))"
+    },
+    {
+      "sent": "sgEpCg9aDRILVVRGOF9CSU5BUlkSA2oBYRIRCg9aDRILVVRGOF9CSU5BUlk=",
+      "value": "(['a', None], ArrayType(StringType()))"
+    },
+    {
+      "sent": "sgEyCgmiAQYKAjIAEAESD7IBDAoCMgASAjABEgIwAhIHsgEECgIyABILCgmiAQYKAjIAEAE=",
+      "value": "([[1, 2], [], None], ArrayType(ArrayType(IntegerType())))"
+    },
+    {
+      "sent": "sgEpCieyASQKD1oNEgtVVEY4X0JJTkFSWRIPWg0SC1VURjhfQklOQVJZGAE=",
+      "value": "([], ArrayType(MapType(StringType(), StringType())))"
+    },
+    {
+      "error": {
+        "class": "AssertionError",
+        "message": ""
+      },
+      "value": "('x', IntegerType())"
+    },
+    {
+      "error": {
+        "class": "AssertionError",
+        "message": ""
+      },
+      "value": "(1.0, IntegerType())"
+    },
+    {
+      "error": {
+        "class": "AssertionError",
+        "message": ""
+      },
+      "value": "(300, ByteType())"
+    },
+    {
+      "error": {
+        "class": "AssertionError",
+        "message": ""
+      },
+      "value": "(1, DoubleType())"
+    },
+    {
+      "error": {
+        "class": "AssertionError",
+        "message": ""
+      },
+      "value": "(1.5, DecimalType(10, 2))"
+    },
+    {
+      "error": {
+        "class": "AssertionError",
+        "message": ""
+      },
+      "value": "(datetime.date(2020, 1, 2), TimestampType())"
+    },
+    {
+      "error": {
+        "class": "AssertionError",
+        "message": ""
+      },
+      "value": "(1, NullType())"
+    },
+    {
+      "error": {
+        "class": "AssertionError",
+        "message": ""
+      },
+      "value": "(np.int64(1), IntegerType())"
+    },
+    {
+      "error": {
+        "class": "AssertionError",
+        "message": ""
+      },
+      "value": "([1, 'x'], ArrayType(IntegerType()))"
+    },
+    {
+      "error": {
+        "class": "AssertionError",
+        "message": ""
+      },
+      "value": "((1, 2), ArrayType(IntegerType()))"
+    },
+    {
+      "error": {
+        "class": "AssertionError",
+        "message": ""
+      },
+      "value": "([None], ArrayType(MapType(StringType(), StringType())))"
+    },
+    {
+      "error": {
+        "class": "AssertionError",
+        "message": ""
+      },
+      "value": "(None, StructType())"
+    },
+    {
+      "error": {
+        "class": "AssertionError",
+        "message": ""
+      },
+      "value": "(None, MapType(StringType(), StringType()))"
+    },
+    {
+      "error": {
+        "class": "AssertionError",
+        "message": ""
+      },
+      "value": "({'a': 'b'}, MapType(StringType(), StringType()))"
+    },
+    {
+      "error": {
+        "class": "AssertionError",
+        "message": ""
+      },
+      "value": "('a', CharType(3))"
+    },
+    {
+      "error": {
+        "class": "AssertionError",
+        "message": ""
+      },
+      "value": "('a', VarcharType(3))"
+    },
+    {
+      "error": {
+        "class": "AssertionError",
+        "message": ""
+      },
+      "value": "(1, YearMonthIntervalType())"
+    },
+    {
+      "error": {
+        "class": "AssertionError",
+        "message": ""
+      },
+      "value": "(None, VectorUDT())"
+    },
+    {
+      "error": {
+        "class": "AssertionError",
+        "message": ""
+      },
+      "value": "(None, StructField('a', IntegerType()))"
+    },
+    {
+      "error": {
+        "class": "PySparkTypeError",
+        "message": "[UNSUPPORTED_DATA_TYPE] Unsupported DataType `tuple`."
+      },
+      "value": "(1, IntegerType(), 2)"
+    },
+    {
+      "error": {
+        "class": "AssertionError",
+        "message": ""
+      },
+      "value": "[1, IntegerType()]"
+    },
+    {
+      "error": {
+        "class": "PySparkTypeError",
+        "message": "[UNSUPPORTED_DATA_TYPE] Unsupported DataType `tuple`."
+      },
+      "value": "(IntegerType(), 1)"
+    },
+    {
+      "error": {
+        "class": "PySparkTypeError",
+        "message": "[UNSUPPORTED_DATA_TYPE] Unsupported DataType `tuple`."
+      },
+      "value": "(1, IntegerType)"
+    }
+  ],
+  "source": "official pyspark-client 4.3.0, Spark 4.3.0"
+}

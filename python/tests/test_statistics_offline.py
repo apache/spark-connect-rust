@@ -156,26 +156,38 @@ def test_helper_arguments_are_serialized_as_pyspark(session, case):
     assert _requests_but_deletes(service) == sent
 
 
-def test_a_typed_pair_argument_raises_its_conversion_error(session):
-    # PySpark's serialize sends a (value, DataType) pair as a literal of that type, which the
-    # native classes do not convert: a pair raises the UNSUPPORTED_DATA_TYPE of a tuple, before any
-    # request (see docs/compatibility.md).
-    from pyspark.errors import PySparkTypeError
+def test_a_typed_pair_argument_is_sent_as_the_literal_of_its_type(session):
+    # PySpark's serialize sends a (value, DataType) pair as LiteralExpression(value, dataType), the
+    # literal of that type, in the lazy DataFrame of the helper call, and a value that is not of the
+    # type raises the bare AssertionError of that constructor, before any request
+    # (tests/golden/ml_fetch_pairs.json has more pairs of official PySpark).
     from pyspark.sql.types import IntegerType, StringType
 
     spark, service = session
     stat = api()
     frame = spark.range(1)
     sent = _requests_but_deletes(service)
-    for operation in [
-        lambda: stat.ChiSquareTest.test((1, IntegerType()), "features", "label"),
-        lambda: stat.ChiSquareTest.test(frame, ("features", StringType()), "label"),
-        lambda: stat.Correlation.corr(frame, "features", ("pearson", StringType())),
+    for operation, index, literal in [
+        (
+            lambda: stat.ChiSquareTest.test((1, IntegerType()), "features", "label"),
+            0,
+            pb2.Expression.Literal(integer=1),
+        ),
+        (
+            lambda: stat.ChiSquareTest.test(frame, ("features", StringType()), "label"),
+            1,
+            pb2.Expression.Literal(string="features"),
+        ),
+        (
+            lambda: stat.Correlation.corr(frame, "features", ("pearson", StringType())),
+            2,
+            pb2.Expression.Literal(string="pearson"),
+        ),
     ]:
-        with pytest.raises(PySparkTypeError) as error:
-            operation()
-        assert error.value.getCondition() == "UNSUPPORTED_DATA_TYPE"
-        assert error.value.getMessageParameters() == {"data_type": "tuple"}
+        (method,) = _relation(operation()).ml_relation.fetch.methods
+        assert method.args[index].param == literal
+    with pytest.raises(AssertionError):
+        stat.ChiSquareTest.test(frame, ("x", IntegerType()), "label")
     assert _requests_but_deletes(service) == sent
 
 
