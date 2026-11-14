@@ -46,6 +46,14 @@ WebAssembly](https://apache.github.io/spark-connect-rust/udfs/), and the
 The **Rust API reference** (generated from the crate) is on
 [docs.rs/apache-spark-connect](https://docs.rs/apache-spark-connect).
 
+## Experimental JVM server (WIP)
+
+The optional [native server prototype](crates/spark-connect-server/README.md)
+embeds a Rust Spark Connect frontend in a Spark JVM through JNI. Rust owns the
+protocol, sessions and operations; Spark plans and executes supported batch
+queries. This is a local experiment with a limited protocol surface and no
+authentication or TLS. Both server crates are unpublished, explicit opt-in builds.
+
 ## Install
 
 **Python** - a faster, drop-in replacement for the

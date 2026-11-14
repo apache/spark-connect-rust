@@ -259,7 +259,10 @@ Vendor the ones we don't have a Rust implementation for.
 
 ## 7. Pre-push discipline (mandatory)
 
-Run all of these green before pushing:
+Run all of these green before pushing. Workspace Clippy includes the experimental
+JNI host and requires macOS/Linux, a C compiler and `JAVA_HOME` pointing to a JDK
+with JNI headers (JDK 21 is used in CI). Client-only checks without a JDK can add
+`--exclude spark-connect-jni` to the workspace Clippy command.
 ```
 cargo test -p apache-spark-connect --release --lib
 cargo test -p apache-spark-connect --release --no-run              # compiles ALL integration tests
@@ -268,6 +271,13 @@ cargo fmt --all --check                                            # BLOCKING CI
 cargo clippy --workspace --all-targets -- -D warnings              # BLOCKING CI gate (needs the wasm32-unknown-unknown target)
 # CI's lint job pins Rust 1.100.0 and also lints datafusion,polars and the excluded crates
 ```
+Native JAR license assets bind whole-file hashes. After any change to `Cargo.lock`,
+root `Cargo.toml`, the `spark-connect-proto`, `spark-connect-server` or nested JNI
+`Cargo.toml`, `LICENSE`, `NOTICE`, `scripts/gen_binary_licenses.py` or
+`scripts/gen_native_binary_licenses.py`, run `python3 scripts/gen_native_binary_licenses.py`
+and commit the regenerated `crates/spark-connect-server/jvm/native-licenses/` assets.
+This also applies when the JNI dependency closure is unchanged.
+
 Then re-run the step-2 diff (0 user-facing gaps) and the parity gate
 `scripts/run_official_tests.py` (runs the official connect suite through our Rust
 transport; `FLAKY_FILES` = retry, not skip). Only then

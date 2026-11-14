@@ -1,0 +1,274 @@
+#
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+#
+
+name: Native JVM server CI
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+on:
+  push:
+    branches: [master, "branch-*"]
+    paths:
+      - ".github/workflows/native-server.yml"
+      - ".github/native-server-protoc.txt"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "LICENSE"
+      - "NOTICE"
+      - "scripts/gen_binary_licenses.py"
+      - "scripts/gen_native_binary_licenses.py"
+      - "scripts/tests/test_gen*binary_licenses.py"
+      - ".cargo/**"
+      - "crates/spark-connect-server/**"
+      - "crates/spark-connect-proto/**"
+      - "crates/spark-connect-core/**"
+      - "crates/spark-connect/**"
+  pull_request:
+    branches: [master, "branch-*"]
+    paths:
+      - ".github/workflows/native-server.yml"
+      - ".github/native-server-protoc.txt"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "LICENSE"
+      - "NOTICE"
+      - "scripts/gen_binary_licenses.py"
+      - "scripts/gen_native_binary_licenses.py"
+      - "scripts/tests/test_gen*binary_licenses.py"
+      - ".cargo/**"
+      - "crates/spark-connect-server/**"
+      - "crates/spark-connect-proto/**"
+      - "crates/spark-connect-core/**"
+      - "crates/spark-connect/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Bound parallel compilation and debug-artifact size on hosted runners.
+  CARGO_BUILD_JOBS: "2"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  MACOSX_DEPLOYMENT_TARGET: "11.0"
+
+jobs:
+  native-server:
+    name: Native JAR (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-22.04, platform: linux-x86_64, library: libspark_connect_jni.so }
+          - { runner: ubuntu-22.04-arm, platform: linux-aarch64, library: libspark_connect_jni.so }
+          - { runner: macos-15-intel, platform: macos-x86_64, library: libspark_connect_jni.dylib }
+          - { runner: macos-15, platform: macos-aarch64, library: libspark_connect_jni.dylib }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust MSRV
+        # Use runner-provided rustup to keep actions limited to actions/*.
+        run: |
+          rustup toolchain install 1.88.0 --profile minimal
+          rustup default 1.88.0
+          rustup component add clippy
+
+      - name: Set up JDK for JNI headers
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Python for packaging checks
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache cargo and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ matrix.platform }}-cargo-jvm-server-1.88.0-${{ hashFiles('.github/native-server-protoc.txt') }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ matrix.platform }}-cargo-jvm-server-1.88.0-${{ hashFiles('.github/native-server-protoc.txt') }}-
+
+      - name: Install protobuf compiler with proto3 optional support
+        # Ubuntu 22.04's protoc 3.12 requires an extra optional-field flag.
+        # Pin one compiler on every host while preserving the glibc baseline.
+        run: |
+          python3 -m pip install --require-hashes --only-binary=:all: --no-deps \
+            -r .github/native-server-protoc.txt
+          protoc_path="$(python3 -c 'import sysconfig; print(sysconfig.get_path("scripts"))')/protoc"
+          "$protoc_path" --version
+          echo "PROTOC=$protoc_path" >> "$GITHUB_ENV"
+
+      - name: Test frontend and JNI crates
+        # Deterministic engine fixtures; no Spark distribution is needed.
+        run: cargo test --locked -p spark-connect-server -p spark-connect-jni
+
+      - name: Strict Clippy for native crates
+        run: cargo clippy --locked -p spark-connect-server -p spark-connect-jni --all-targets --no-deps -- -D warnings
+
+      - name: JNI dependency licenses and notices are up to date
+        # Resolve the normal static-link closure for all four supported targets;
+        # Python wheel license assets describe a different dependency graph.
+        run: |
+          python3 -B -m unittest discover -s scripts/tests -p 'test_gen*binary_licenses.py'
+          python3 -B scripts/gen_native_binary_licenses.py --check
+
+      - name: Test acceptance runner guards
+        run: python3 -B crates/spark-connect-server/jvm/test_acceptance_guards.py
+
+      - name: Test native JAR packaging
+        run: python3 -B crates/spark-connect-server/jvm/test_package_native.py
+
+      # Java compile/live acceptance requires the documented Spark development
+      # assembly and is validated locally with jvm/test-engine.sh.
+      - name: Test C ownership
+        run: crates/spark-connect-server/jni/test-c-export.sh
+
+      - name: Test C ownership with sanitizers
+        env:
+          ASAN_OPTIONS: ${{ runner.os == 'Linux' && 'detect_leaks=1:halt_on_error=1' || 'detect_leaks=0:halt_on_error=1' }}
+          UBSAN_OPTIONS: halt_on_error=1
+        run: crates/spark-connect-server/jni/test-c-export.sh --sanitize
+
+      - name: Build release native library
+        run: cargo build --locked --release -p spark-connect-jni
+
+      - name: Package platform native JAR
+        run: |
+          python3 -B crates/spark-connect-server/jvm/package-native.py \
+            --library "$PWD/target/release/${{ matrix.library }}" \
+            --platform "${{ matrix.platform }}" --output-dir native-jars
+
+      - name: Test Java loader and load packaged release library
+        # This needs only a JDK: no selected Spark assembly or adapter compilation.
+        run: |
+          native_jar=(native-jars/spark-connect-native-*-${{ matrix.platform }}.jar)
+          crates/spark-connect-server/jvm/test-native-loader.sh --native-jar "${native_jar[0]}"
+
+      - name: Upload platform native JAR
+        uses: actions/upload-artifact@v4
+        with:
+          name: spark-connect-native-platform-${{ matrix.platform }}
+          path: native-jars/*
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 7
+
+  combine-native-jars:
+    name: Combine platform native JARs
+    needs: native-server
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Download validated platform JARs
+        uses: actions/download-artifact@v4
+        with:
+          pattern: spark-connect-native-platform-*
+          path: platform-jars
+          merge-multiple: true
+
+      - name: Build all-platform native JAR
+        run: |
+          native_jars=(platform-jars/*.jar)
+          test "${#native_jars[@]}" -eq 4
+          python3 -B crates/spark-connect-server/jvm/package-native.py \
+            --combine "${native_jars[@]}" --output-dir native-jars
+
+      - name: Load matching native library from all-platform JAR
+        run: |
+          native_jar=(native-jars/spark-connect-native-*-all.jar)
+          crates/spark-connect-server/jvm/test-native-loader.sh --native-jar "${native_jar[0]}"
+
+      - name: Build macOS universal native JAR
+        run: |
+          macos_jars=(platform-jars/*-macos-*.jar)
+          test "${#macos_jars[@]}" -eq 2
+          python3 -B crates/spark-connect-server/jvm/package-native.py \
+            --combine-macos "${macos_jars[@]}" --output-dir macos-native-jars
+
+      - name: Upload all-platform native JAR
+        uses: actions/upload-artifact@v4
+        with:
+          name: spark-connect-native-all
+          path: native-jars/*
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 7
+
+      - name: Upload macOS universal native JAR
+        uses: actions/upload-artifact@v4
+        with:
+          name: spark-connect-native-macos-universal
+          path: macos-native-jars/*
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 7
+
+  test-macos-universal:
+    name: Load macOS universal JAR (${{ matrix.platform }})
+    needs: combine-native-jars
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: macos-15-intel, platform: macos-x86_64 }
+          - { runner: macos-15, platform: macos-aarch64 }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Download macOS universal native JAR
+        uses: actions/download-artifact@v4
+        with:
+          name: spark-connect-native-macos-universal
+          path: native-jars
+
+      - name: Load matching native library from macOS universal JAR
+        run: |
+          native_jar=(native-jars/spark-connect-native-*-macos-universal.jar)
+          crates/spark-connect-server/jvm/test-native-loader.sh --native-jar "${native_jar[0]}"

@@ -54,6 +54,11 @@ jobs:
           # `--workspace` reaches `examples/wasm-udfs` (a path dependency of the `examples`
           # member), whose build script compiles its UDFs to WASM.
           rustup target add wasm32-unknown-unknown
+      - name: Set up JDK for workspace JNI headers
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
       - name: Cache cargo & target
         uses: actions/cache@v4
         with:

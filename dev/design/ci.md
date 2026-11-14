@@ -18,12 +18,13 @@ The CI consists of these main workflows:
    floors
 
 The other workflows are `lint.yml` (rustfmt, clippy, ruff), `generated-drift.yml`,
-`vendor-drift.yml`, `docs.yml`, `pandas-parity.yml`, `pipelines-parity.yml` and `release.yml`.
+`vendor-drift.yml`, `docs.yml`, `native-server.yml`, `pandas-parity.yml`,
+`pipelines-parity.yml` and `release.yml`.
 
 Most workflows run on pushes and pull requests targeting `master` and `branch-*`. Several also
-accept manual dispatch. `docs.yml` and `wheel-build-checks.yml` run only when files matching their
-path filters change. The release wheel build checks cover changes to packaged Python sources,
-protocol definitions, dependencies and build configuration. `release.yml` runs on a schedule and on
+accept manual dispatch. `docs.yml`, `native-server.yml` and `wheel-build-checks.yml` run only when
+files matching their path filters change. The release wheel build checks cover changes to packaged
+Python sources, protocol definitions, dependencies and build configuration. `release.yml` runs on a schedule and on
 manual dispatch.
 
 ## Rust CI (`rust.yml`)
@@ -261,6 +262,58 @@ value.
 
 On a push to `master` the job also publishes both numbers to the `badges` branch, which
 the README badges read.
+
+## Experimental JVM server CI (`native-server.yml`)
+
+The WIP `spark-connect-server` and `spark-connect-jni` crates are optional
+workspace members, excluded from default Cargo builds. Their dedicated workflow
+runs on changes to these crates, their protocol/client dependencies, workspace
+dependencies and build configuration. Its path filters also include `LICENSE`,
+`NOTICE`, both `scripts/gen_binary_licenses.py` and
+`scripts/gen_native_binary_licenses.py`, and their generator tests. Existing client
+workflows remain in place.
+
+The workflow uses native Linux and macOS runners for x86-64 and ARM64. Each job
+installs Rust 1.88, JDK 21 and the hash-locked `protoc-wheel-0==30.2` compiler,
+then runs the server and JNI Rust tests, strict native Clippy, Python
+acceptance/launcher and packaging tests, and the C Arrow ownership tests with
+and without sanitizers. It also runs the license-generator tests and
+`python3 -B scripts/gen_native_binary_licenses.py --check` for the four-target JNI
+dependency license bundle. LeakSanitizer is enabled on Linux; macOS runs
+AddressSanitizer and UndefinedBehaviorSanitizer without leak
+detection. The Rust tests use deterministic engine fixtures, and the JDK provides
+the C adapter's JNI headers. Workspace-wide lint also installs JDK 21 because its
+`--workspace` Clippy command includes the JNI crate.
+
+The license inventory records whole-file hashes of `Cargo.lock`, root `Cargo.toml`,
+the `spark-connect-proto`, `spark-connect-server` and nested JNI `Cargo.toml` files,
+`LICENSE`, `NOTICE` and both generator scripts named above. After any change to
+these files, run `python3 scripts/gen_native_binary_licenses.py` and commit the
+regenerated `crates/spark-connect-server/jvm/native-licenses/` assets, even when
+the JNI dependency closure is unchanged. Both CI and packaging reject stale hashes.
+
+Each platform job builds a release library, validates its binary architecture,
+packages it in a platform JAR with ZIP DEFLATE compression, and runs the
+dependency-free Java loader tests against a JNI fixture and the actual library. It
+uploads the JAR and SHA-256 sidecar as development CI artifacts. Linux builds use
+Ubuntu 22.04 and macOS builds set `MACOSX_DEPLOYMENT_TARGET=11.0`.
+
+A dependent job validates and combines all four artifacts into an all-platform
+native JAR and the two macOS artifacts into a macOS universal JAR. It checks
+loading the matching library from the all-platform JAR on Linux and uploads both
+JARs with checksum sidecars as separate artifacts. Two lightweight jobs then
+download the same macOS universal JAR and test loading it on native x86-64 and
+ARM64 macOS runners. The universal JAR retains both thin libraries under their
+platform resource paths; the existing loader selects the JVM's architecture.
+These jobs do not publish to Maven.
+
+CI compiles the dependency-free Java loader, but does not download a Spark
+snapshot, compile the full Spark-dependent adapter or run a live Spark JVM in
+this workflow. Those checks require the explicitly documented Spark
+assembly and are run locally with `jvm/test-engine.sh`. The
+[server guide](../../crates/spark-connect-server/README.md) records the tested
+assembly and reproducible local commands. A passing native CI job alone does not
+establish Spark-version compatibility or full protocol support.
 
 ## Continuous improvement
 

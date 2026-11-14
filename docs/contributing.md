@@ -226,6 +226,17 @@ markers such as `TODO`, `FIXME`, `todo!()` or "for now" in `crates/*/src`
 (`bash scripts/audit_no_stubs.sh`). Match the surrounding code, keep changes focused,
 and add or update golden tests when you change plan or expression building.
 
+Workspace builds, tests and Clippy include the experimental JNI crate. It needs
+macOS or Linux, a C compiler and `JAVA_HOME` set to a JDK with JNI headers.
+JDK 21 is the validated adapter and CI baseline.
+On Windows, or to build/test/lint the other crates without a JDK, exclude it:
+
+```bash
+cargo build --workspace --exclude spark-connect-jni
+cargo test --workspace --exclude spark-connect-jni
+cargo clippy --workspace --all-targets --exclude spark-connect-jni -- -D warnings
+```
+
 Python is checked with ruff 0.14.0, the version CI pins, within the scope and excludes
 of `pyproject.toml`. Run it from the repository root without paths, as CI does:
 
@@ -242,6 +253,14 @@ requests don't conflict. When you pass paths, for example from an editor, add
 vendored ones included.
 
 ## Pull requests
+
+Native JAR license assets record whole-file hashes of `Cargo.lock`, root
+`Cargo.toml`, the `spark-connect-proto`, `spark-connect-server` and nested JNI
+`Cargo.toml` files, `LICENSE`, `NOTICE`, `scripts/gen_binary_licenses.py` and
+`scripts/gen_native_binary_licenses.py`. After any change to these files, run
+`python3 scripts/gen_native_binary_licenses.py` and commit the regenerated
+`crates/spark-connect-server/jvm/native-licenses/` assets, even if the JNI dependency
+closure is unchanged. CI and native packaging reject stale assets.
 
 Open PRs against
 [`apache/spark-connect-rust`](https://github.com/apache/spark-connect-rust).
