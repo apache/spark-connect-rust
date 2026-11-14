@@ -452,15 +452,37 @@ def test_nested_types_assert_a_data_type_not_a_type_string_as_pyspark():
     assert T.StructType().add("g", T.LongType()).fields[0].dataType == T.LongType()
 
 
-def test_bad_type_strings_raise_their_message_not_a_debug_dump(mock_connect):
-    # A type string that does not parse, as the schema of `to`, raises a ValueError with the message
-    # of its error, not the Debug output of the error.
-    spark, _ = mock_connect
-    with pytest.raises(ValueError) as e:
-        spark.range(1).to("foo bar")
-    assert str(e.value) == (
-        "invalid type string 'foo bar': [INVALID_DATATYPE_FORMAT] Unknown type: foo bar"
-    )
+def test_to_keeps_a_type_string_unparsed_and_fails_at_the_action_as_pyspark(mock_connect):
+    # As PySpark's `DataFrame.to`, which keeps a str as the schema and does not parse it: `to`
+    # does not raise, the str is the schema, and each action fails when it builds the plan, with
+    # the UNSUPPORTED_OPERATION error of the str, before any request is sent.
+    from pyspark.errors import PySparkValueError
+
+    spark, service = mock_connect
+    df = spark.range(1)
+    sent = len(service.execute_requests)
+    for text in ["foo bar", "a bigint"]:
+        to_text = df.to(text)
+        assert to_text.schema == text
+        for read in (lambda: to_text.collect(), lambda: to_text.count()):
+            with pytest.raises(PySparkValueError) as e:
+                read()
+            assert e.value.getCondition() == "UNSUPPORTED_OPERATION"
+            assert e.value.getMessageParameters() == {"operation": f"data type {text}"}
+            assert str(e.value) == f"[UNSUPPORTED_OPERATION] data type {text} is not supported."
+    assert len(service.execute_requests) == sent
+    # The schema of a union of two equal ones is the same str, and of different ones is not.
+    same = df.to("a bigint").union(df.to("a bigint"))
+    assert same.schema == "a bigint"
+    with pytest.raises(PySparkValueError):
+        df.to("a bigint").union(df.to("a int")).schema
+    # None is an AssertionError at the call, and another object fails at the action as a str does.
+    with pytest.raises(AssertionError):
+        df.to(None)
+    assert df.to(5).schema == 5
+    with pytest.raises(PySparkValueError) as e:
+        df.to(5).collect()
+    assert str(e.value) == "[UNSUPPORTED_OPERATION] data type 5 is not supported."
 
 
 def test_struct_type_fields_raise_pyspark_errors_for_items_without_a_name():
@@ -1245,17 +1267,47 @@ def test_bool_arguments_of_checkpoints_and_union_convert_as_protobuf_does(mock_c
     # None is unset for the checkpoint command, which the constructor takes, as false.
     assert checkpoint_eager(lambda: df.checkpoint(eager=None)) == []
     assert checkpoint_eager(lambda: df.localCheckpoint(eager=None)) == []
-    with pytest.raises(TypeError) as e:
-        df.unionByName(other, None)
-    assert str(e.value) == "'NoneType' object cannot be interpreted as an integer"
     for value, message in [("x", "'str' object cannot be interpreted as an integer"),
                            (1.5, "'float' object cannot be interpreted as an integer")]:
         for make in (lambda: df.checkpoint(eager=value),
-                     lambda: df.localCheckpoint(eager=value),
-                     lambda: df.unionByName(other, value)):
+                     lambda: df.localCheckpoint(eager=value)):
             with pytest.raises(TypeError) as e:
                 make()
             assert str(e.value) == message
+    # A set operation takes its flag when a request sends its plan, so the call does not raise.
+    for value, message in [(None, "'NoneType' object cannot be interpreted as an integer"),
+                           ("x", "'str' object cannot be interpreted as an integer"),
+                           (1.5, "'float' object cannot be interpreted as an integer")]:
+        assert df.unionByName(other, value) is not None
+        with pytest.raises(TypeError) as e:
+            df.unionByName(other, value).collect()
+        assert str(e.value) == message
+
+
+def test_union_by_name_flag_that_protobuf_does_not_take_fails_at_each_action(mock_connect):
+    # As PySpark's `unionByName`, whose set operation sets the flag when the plan is built: the
+    # call does not raise, each action raises the builtin error of protobuf, and no request is
+    # sent. An int too big for a C long is an OverflowError, and an omitted flag is false.
+    spark, service = mock_connect
+    spark.range(1).unionByName(spark.range(1)).collect()
+    df = spark.range(1)
+    other = spark.range(1)
+    sent = len(service.execute_requests)
+    cases = [
+        (None, TypeError, "'NoneType' object cannot be interpreted as an integer"),
+        ("x", TypeError, "'str' object cannot be interpreted as an integer"),
+        ([1], TypeError, "'list' object cannot be interpreted as an integer"),
+        (2**70, OverflowError, "Python int too large to convert to C long"),
+    ]
+    for value, error, message in cases:
+        union = df.unionByName(other, allowMissingColumns=value)
+        assert len(service.execute_requests) == sent
+        for read in (lambda: union.collect(), lambda: union.count()):
+            with pytest.raises(error) as e:
+                read()
+            assert type(e.value) is error
+            assert str(e.value) == message
+        assert len(service.execute_requests) == sent
 
 
 def test_checkpoints_send_their_eager_and_storage_level_as_pyspark(mock_connect):

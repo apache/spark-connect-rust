@@ -41,6 +41,10 @@ pub struct PyDataFrame {
     semantic_hash: std::sync::OnceLock<i32>,
     is_empty: std::sync::OnceLock<bool>,
     input_files: std::sync::OnceLock<Vec<String>>,
+    /// The schema of a DataFrame of `to` that is not a DataType, such as a DDL string, which
+    /// PySpark keeps as the `_cached_schema` of the DataFrame: `schema` returns it, and the
+    /// DataFrame fails at each action, as the plan of the DataFrame does not build.
+    schema_object: Option<Py<PyAny>>,
 }
 
 /// The answer kept in `cell`, else that of `ask`, which is kept unless it fails, as
@@ -195,6 +199,7 @@ impl PyDataFrame {
             semantic_hash: std::sync::OnceLock::new(),
             is_empty: std::sync::OnceLock::new(),
             input_files: std::sync::OnceLock::new(),
+            schema_object: None,
         }
     }
 
@@ -209,6 +214,17 @@ impl PyDataFrame {
             std::sync::atomic::Ordering::SeqCst,
         );
         copy
+    }
+
+    /// The AttributeError that PySpark raises for `attribute` of the schema of this DataFrame when
+    /// that schema is not a DataType, as the attribute is then read from the object: `None` for a
+    /// DataType schema.
+    fn schema_object_error(&self, py: Python<'_>, attribute: &str) -> Option<PyErr> {
+        let object = self.schema_object.as_ref()?.bind(py);
+        let type_name = object.get_type().name().ok()?.to_string();
+        Some(pyo3::exceptions::PyAttributeError::new_err(format!(
+            "'{type_name}' object has no attribute '{attribute}'"
+        )))
     }
 
     /// The number of rows and the truncation of the eager evaluation, as PySpark's `int` of
@@ -656,6 +672,9 @@ impl PyDataFrame {
                 visit.call(object)?;
             }
         }
+        if let Some(schema) = &self.schema_object {
+            visit.call(schema)?;
+        }
         Ok(())
     }
 
@@ -664,6 +683,7 @@ impl PyDataFrame {
     fn __clear__(&mut self) {
         if self.gc_ready.load(std::sync::atomic::Ordering::Relaxed) {
             self.dataframe.clear_plan();
+            self.schema_object = None;
         }
     }
 
@@ -1355,9 +1375,10 @@ impl PyDataFrame {
     }
 
     /// Union with another DataFrame.
-    fn union(&self, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+    fn union(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
         let other = self.same_session(other)?;
-        Ok(PyDataFrame::new(self.dataframe.union(&other.dataframe)))
+        let dataframe = self.dataframe.union(&other.dataframe);
+        set_operation_result(py, self, &other, dataframe)
     }
 
     /// Union by name, optionally filling columns missing on one side with null. The flag is
@@ -1369,33 +1390,40 @@ impl PyDataFrame {
         other: &Bound<'_, PyAny>,
         allowMissingColumns: ProtoBool,
     ) -> PyResult<PyDataFrame> {
-        let allow_missing_columns = allowMissingColumns.value(py)?;
         let other = self.same_session(other)?;
-        Ok(PyDataFrame::new(self.dataframe.union_by_name_opt(
-            &other.dataframe,
-            allow_missing_columns,
-        )))
+        // As PySpark's set operation, which takes the flag when a request sends the plan: a
+        // flag that a protobuf bool does not take fails each request, not this call.
+        let dataframe = match allowMissingColumns.value(py) {
+            Ok(allow_missing_columns) => self
+                .dataframe
+                .union_by_name_opt(&other.dataframe, allow_missing_columns),
+            Err(err) => self
+                .dataframe
+                .union_by_name_unbuildable(&other.dataframe, unbuildable_bool_error(py, err)?),
+        };
+        set_operation_result(py, self, &other, dataframe)
     }
 
     /// Intersect with another DataFrame.
-    fn intersect(&self, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+    fn intersect(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
         let other = self.same_session(other)?;
-        Ok(PyDataFrame::new(self.dataframe.intersect(&other.dataframe)))
+        let dataframe = self.dataframe.intersect(&other.dataframe);
+        set_operation_result(py, self, &other, dataframe)
     }
 
     /// Intersect keeping duplicates (reference pyspark `intersectAll`).
     #[pyo3(name = "intersectAll")]
-    fn intersect_all(&self, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+    fn intersect_all(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
         let other = self.same_session(other)?;
-        Ok(PyDataFrame::new(
-            self.dataframe.intersect_all(&other.dataframe),
-        ))
+        let dataframe = self.dataframe.intersect_all(&other.dataframe);
+        set_operation_result(py, self, &other, dataframe)
     }
 
     /// Subtract another DataFrame.
-    fn subtract(&self, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+    fn subtract(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
         let other = self.same_session(other)?;
-        Ok(PyDataFrame::new(self.dataframe.subtract(&other.dataframe)))
+        let dataframe = self.dataframe.subtract(&other.dataframe);
+        set_operation_result(py, self, &other, dataframe)
     }
 
     /// Repartition. Mirrors reference `repartition(numPartitions, *cols)` where the
@@ -1625,11 +1653,10 @@ impl PyDataFrame {
 
     /// Except all (keeps duplicates).
     #[pyo3(name = "exceptAll")]
-    fn except_all(&self, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+    fn except_all(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
         let other = self.same_session(other)?;
-        Ok(PyDataFrame::new(
-            self.dataframe.except_all(&other.dataframe),
-        ))
+        let dataframe = self.dataframe.except_all(&other.dataframe);
+        set_operation_result(py, self, &other, dataframe)
     }
 
     /// Rename multiple columns from an {old: new} mapping.
@@ -2050,10 +2077,28 @@ impl PyDataFrame {
         replace_values(&self.dataframe, to_replace, value, subset)
     }
 
-    /// Reconcile to a target schema (StructType or DDL string).
+    /// Reconcile to a target schema (StructType or DDL string). As PySpark's, a schema that is
+    /// not a DataType is kept as it is, and the DataFrame fails at each action, which PySpark's
+    /// client raises when it builds the plan; a DDL string is not parsed.
     fn to(&self, schema: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        let dt = crate::types::py_to_data_type(schema)?;
-        Ok(PyDataFrame::new(self.dataframe.to(dt)))
+        if schema.is_none() {
+            // As PySpark's `assert schema is not None`.
+            return Err(pyo3::exceptions::PyAssertionError::new_err(()));
+        }
+        if !schema.is_instance_of::<pyo3::types::PyString>() {
+            if let Ok(dt) = crate::types::py_to_data_type(schema) {
+                return Ok(PyDataFrame::new(self.dataframe.to(dt)));
+            }
+        }
+        let text = schema.str()?.to_string();
+        let error = spark_connect_core::error::SparkError::classed(
+            spark_connect_core::error::SparkErrorKind::ValueError,
+            "UNSUPPORTED_OPERATION",
+            &[("operation", &format!("data type {text}"))],
+        );
+        let mut result = PyDataFrame::new(self.dataframe.unbuildable(error));
+        result.schema_object = Some(schema.clone().unbind());
+        Ok(result)
     }
 
     /// Set the metadata of a column, as PySpark's: a dict of any JSON values, which it sends as
@@ -2646,6 +2691,9 @@ impl PyDataFrame {
     /// `df.schema.fields`, `df.schema["c"]`, `df.schema.fieldNames()` all work.
     #[getter]
     fn schema(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        if let Some(schema) = &self.schema_object {
+            return Ok(schema.clone_ref(py));
+        }
         let schema = interruptible(py, &self.dataframe.spark_session(), || {
             self.dataframe.schema()
         })?;
@@ -2690,6 +2738,9 @@ impl PyDataFrame {
     /// Column names (a property, mirroring `DataFrame.columns`).
     #[getter]
     fn columns(&self, py: Python<'_>) -> PyResult<Vec<String>> {
+        if let Some(error) = self.schema_object_error(py, "fields") {
+            return Err(error);
+        }
         // The schema is cached, so the names come from it without another request.
         let session = self.dataframe.spark_session();
         let schema = interruptible(py, &session, || self.dataframe.schema())?;
@@ -2789,6 +2840,9 @@ impl PyDataFrame {
     /// Print the schema through Python stdout, honoring the maximum nesting depth.
     #[pyo3(signature = (level=None))]
     fn printSchema(&self, py: Python<'_>, level: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
+        if let Some(error) = self.schema_object_error(py, "treeString") {
+            return Err(error);
+        }
         // Reference's `if level:` selects the default for false values before
         // resolving the schema; positive fractional depths behave as ceil(level).
         let level = match level {
@@ -2811,6 +2865,9 @@ impl PyDataFrame {
     /// Get the schema as a list of (name, type) tuples.
     #[getter]
     fn dtypes(&self, py: Python<'_>) -> PyResult<Vec<(String, String)>> {
+        if let Some(error) = self.schema_object_error(py, "fields") {
+            return Err(error);
+        }
         let schema = interruptible(py, &self.dataframe.spark_session(), || {
             self.dataframe.schema()
         })?;
@@ -2830,9 +2887,10 @@ impl PyDataFrame {
     }
 
     /// Additional set operation: unionAll (alias for union).
-    fn unionAll(&self, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+    fn unionAll(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
         let other = self.same_session(other)?;
-        Ok(PyDataFrame::new(self.dataframe.union(&other.dataframe)))
+        let dataframe = self.dataframe.union(&other.dataframe);
+        set_operation_result(py, self, &other, dataframe)
     }
 
     /// The V1 writer interface (`df.write`).
@@ -2959,6 +3017,16 @@ impl PyDataFrame {
                         .map_err(Box::new)
                 });
             }
+        }
+        // As PySpark's, whose `dtypes` of a schema that is not a DataType is a Column, which
+        // the join of the representation iterates.
+        if self.schema_object.is_some() {
+            return Err(crate::column::raise_pyspark(
+                py,
+                "PySparkTypeError",
+                "NOT_ITERABLE",
+                &[("objectName", "Column")],
+            ));
         }
         let fields = self
             .dtypes(py)?
@@ -5439,6 +5507,45 @@ pub(crate) fn check_schema_conversion(
         }
         None => Ok(()),
     }
+}
+
+/// The result of a set operation of `this` and `other`, `dataframe`, which keeps the schema that
+/// PySpark's `_merge_cached_schema` keeps: that of `this` when both are the schemas of `to` that
+/// are not DataTypes and equal, else none.
+fn set_operation_result(
+    py: Python<'_>,
+    this: &PyDataFrame,
+    other: &PyDataFrame,
+    dataframe: DataFrame,
+) -> PyResult<PyDataFrame> {
+    let mut result = PyDataFrame::new(dataframe);
+    if let (Some(left), Some(right)) = (&this.schema_object, &other.schema_object) {
+        if left.bind(py).eq(right.bind(py))? {
+            result.schema_object = Some(left.clone_ref(py));
+        }
+    }
+    Ok(result)
+}
+
+/// The error of a flag that a protobuf bool does not take, which PySpark's set operation raises
+/// as a request sends its plan: a `TypeError` or an `OverflowError`, as a builtin of its message.
+/// Another error is raised at the call.
+fn unbuildable_bool_error(
+    py: Python<'_>,
+    err: PyErr,
+) -> PyResult<spark_connect_core::error::SparkError> {
+    let kind = if err.is_instance_of::<pyo3::exceptions::PyTypeError>(py) {
+        spark_connect_core::error::SparkErrorKind::BuiltinTypeError
+    } else if err.is_instance_of::<pyo3::exceptions::PyOverflowError>(py) {
+        spark_connect_core::error::SparkErrorKind::BuiltinOverflowError
+    } else {
+        return Err(err);
+    };
+    let message = err.value(py).str()?.to_string();
+    Ok(spark_connect_core::error::SparkError {
+        kind,
+        ..spark_connect_core::error::SparkError::value_msg(message)
+    })
 }
 
 /// The `eager` flag of a checkpoint, which PySpark passes to the constructor of its command: true

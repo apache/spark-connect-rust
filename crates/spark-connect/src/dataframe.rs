@@ -770,15 +770,30 @@ impl DataFrame {
     /// one side are filled with null rather than rejected). Mirrors
     /// `DataFrame.unionByName(other, allowMissingColumns=False)`.
     pub fn union_by_name_opt(&self, other: &DataFrame, allow_missing_columns: bool) -> DataFrame {
-        let plan = LogicalPlan::SetOperation {
+        self.with_merged_schema(other, self.union_by_name_plan(other, allow_missing_columns))
+    }
+
+    /// `unionByName` whose plan is [`LogicalPlan::Unbuildable`] with `error`, as PySpark's
+    /// client fails to build it when a request sends it: its schema is merged as
+    /// [`DataFrame::union_by_name_opt`] merges it. Not a stable API.
+    #[doc(hidden)]
+    pub fn union_by_name_unbuildable(&self, other: &DataFrame, error: SparkError) -> DataFrame {
+        let plan = LogicalPlan::Unbuildable {
+            input: Arc::new(self.union_by_name_plan(other, false)),
+            error,
+        };
+        self.with_merged_schema(other, plan)
+    }
+
+    fn union_by_name_plan(&self, other: &DataFrame, allow_missing_columns: bool) -> LogicalPlan {
+        LogicalPlan::SetOperation {
             left: Arc::clone(&self.plan),
             right: Arc::clone(&other.plan),
             set_op_type: SetOpType::Union,
             is_all: true,
             by_name: true,
             allow_missing_columns,
-        };
-        self.with_merged_schema(other, plan)
+        }
     }
 
     /// Intersect with another DataFrame.
@@ -2867,6 +2882,19 @@ impl DataFrame {
             schema: schema.clone(),
         };
         Self::new_with_schema(self.session.clone(), plan, Some(schema))
+    }
+
+    /// This DataFrame, whose plan is [`LogicalPlan::Unbuildable`] with `error`: each request of
+    /// it raises `error`, and it has no cached schema. Mirrors a `DataFrame.to` whose schema
+    /// PySpark's client does not convert, which it fails with when it builds the plan. Not a
+    /// stable API.
+    #[doc(hidden)]
+    pub fn unbuildable(&self, error: SparkError) -> DataFrame {
+        let plan = LogicalPlan::Unbuildable {
+            input: Arc::clone(&self.plan),
+            error,
+        };
+        DataFrame::new(self.session.clone(), plan)
     }
 
     /// A subquery of `subquery_type` of this DataFrame's plan, which refers to the plan by
