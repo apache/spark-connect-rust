@@ -178,7 +178,10 @@ The parity job discovers every `test_*.py` under `<spark>/python` whose path con
 names its four modules in `--only`. Outside the official-suite selection, the hand-named lists
 are `FLAKY_FILES` (the files that get retries) and `SLOW_FILE_TIMEOUTS` (per-file timeouts) in
 `scripts/run_official_tests.py`, and the e2e files that the `connect-dropin` and `connect-e2e` jobs
-of `build_python_connect.yml` run by name. See
+of `build_python_connect.yml` run by name. A Rust live test returns early without `SPARK_REMOTE`,
+so the first step of `connect-e2e` fails when no workflow names a
+`crates/spark-connect/tests/e2e_*.rs` in a `--test`. The ML live tests of `connect-e2e` are also in
+the live pass of `coverage.yml`'s Rust coverage report, which has to be kept in sync by hand. See
 [official-tests.md](official-tests.md) for the selection, skip and retry rules.
 
 ### Handling test failures
