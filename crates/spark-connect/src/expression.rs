@@ -708,9 +708,32 @@ impl Expression {
                 ..Default::default()
             },
             ExpressionNode::Subquery(subquery) => subquery.to_proto(),
-            ExpressionNode::Sent(sent) => sent.expression.clone(),
+            ExpressionNode::Sent(sent) => {
+                // The clone recurses for each level of the expression: grow the stack for them
+                // all, as the clone of a raw relation does.
+                let stack = sent_expression_stack(sent.levels);
+                stacker::maybe_grow(stack, stack, || sent.expression.clone())
+            }
         }
     }
+}
+
+/// The stack that the clone of the expression of a [`SentExpression`] takes for each of its
+/// levels: prost's `Clone` recurses through an `Expression` and its `ExprType` for each, with
+/// about 1.6 KiB of frames per level in a release build (measured on macOS x86_64) and several
+/// times that in a debug one, and this leaves more than as much again.
+const SENT_CLONE_STACK_PER_LEVEL: usize = if cfg!(debug_assertions) {
+    16 << 10
+} else {
+    4 << 10
+};
+
+/// The stack that the clone of the expression of a [`SentExpression`] of `levels` levels takes:
+/// see [`SENT_CLONE_STACK_PER_LEVEL`].
+fn sent_expression_stack(levels: usize) -> usize {
+    levels
+        .saturating_mul(SENT_CLONE_STACK_PER_LEVEL)
+        .saturating_add(64 << 10)
 }
 
 /// `pyspark.sql.connect.expressions.LiteralExpression`
@@ -1830,6 +1853,34 @@ mod tests {
             levels += 1;
         }
         levels
+    }
+
+    /// The expression of an unpickled Column, as it was sent, of as many levels as the client
+    /// sends, is serialized on a thread of 512 KiB: its clone, which recurses for each level, runs
+    /// on a stack grown for its levels, as the clone of a raw relation does.
+    #[test]
+    fn a_deep_sent_expression_is_serialized_on_a_small_stack() {
+        let protos = std::thread::Builder::new()
+            .stack_size(512 << 10)
+            .spawn(|| {
+                let proto = chained_additions(MAX_EXPRESSION_DEPTH - 1).to_proto();
+                assert_eq!(serialized_levels(&proto), MAX_EXPRESSION_DEPTH);
+                let sent = Expression::sent(proto, "deep".to_string(), MAX_EXPRESSION_DEPTH)
+                    .expect("at the bound");
+                let serialized = sent.to_proto();
+                assert_eq!(serialized_levels(&serialized), MAX_EXPRESSION_DEPTH);
+                (sent, serialized)
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        // The caller drops them: protos this deep need the stack of a big thread.
+        std::thread::Builder::new()
+            .stack_size(256 << 20)
+            .spawn(move || std::mem::drop(protos))
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     /// An expression of any number of levels is serialized, rendered, compared, formatted and
