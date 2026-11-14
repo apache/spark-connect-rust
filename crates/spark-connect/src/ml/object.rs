@@ -1047,12 +1047,39 @@ pub fn read(
     Ok(ReadResult {
         object,
         uid: info.uid.clone().unwrap_or_default(),
-        params: info
-            .params
-            .as_ref()
-            .map(Params::from_proto)
-            .unwrap_or_default(),
+        params: read_params(info.params.as_ref()),
     })
+}
+
+/// The params that a `Read` returns, as PySpark sends them again: its load turns each param into a
+/// Python value (`deserialize_param`), and its next save, fit or transform serializes that value
+/// with the inference of `serialize_param`, of Python's one int and one float. So an integral
+/// literal is an `Integer` when it fits in 32 bits, and a `Long` when it does not, and a `Float` is
+/// a `Double`: a `seed` that the server reads back as a `Long` is saved again as an `Integer`, as
+/// PySpark saves it. The other literals are kept as they are.
+fn read_params(params: Option<&proto::MlParams>) -> Params {
+    use proto::expression::literal::LiteralType as L;
+    let Some(params) = params else {
+        return Params::default();
+    };
+    let mut params = params.clone();
+    for literal in params.params.values_mut() {
+        let retyped = match literal.literal_type {
+            Some(L::Byte(value)) | Some(L::Short(value)) => L::Integer(value),
+            Some(L::Long(value)) => match i32::try_from(value) {
+                Ok(value) => L::Integer(value),
+                Err(_) => continue,
+            },
+            Some(L::Float(value)) => L::Double(f64::from(value)),
+            _ => continue,
+        };
+        // A literal of the new type, as PySpark builds it of the Python value.
+        *literal = proto::expression::Literal {
+            literal_type: Some(retyped),
+            ..Default::default()
+        };
+    }
+    Params::from_proto(&params)
 }
 
 /// A model of a server-side object, of its operator and params, which transforms as every cached
@@ -1187,6 +1214,62 @@ pub fn read_model(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_params_are_typed_as_pyspark_sends_them_again() {
+        use proto::expression::literal::LiteralType as L;
+        let literal = |literal_type| proto::expression::Literal {
+            literal_type: Some(literal_type),
+            ..Default::default()
+        };
+        // Just past the 32 bits of an Integer, on either side.
+        let (above, below) = (i64::from(i32::MAX) + 1, i64::from(i32::MIN) - 1);
+        let cases = [
+            ("seed", L::Long(7), L::Integer(7)),
+            ("max", L::Long(i64::from(i32::MAX)), L::Integer(i32::MAX)),
+            ("min", L::Long(i64::from(i32::MIN)), L::Integer(i32::MIN)),
+            ("above", L::Long(above), L::Long(above)),
+            ("below", L::Long(below), L::Long(below)),
+            ("short", L::Short(3), L::Integer(3)),
+            ("byte", L::Byte(-2), L::Integer(-2)),
+            ("int", L::Integer(5), L::Integer(5)),
+            ("float", L::Float(0.5), L::Double(0.5)),
+            ("double", L::Double(0.25), L::Double(0.25)),
+            ("string", L::String("s".into()), L::String("s".into())),
+            ("bool", L::Boolean(true), L::Boolean(true)),
+        ];
+        let mut sent = proto::MlParams::default();
+        for (name, read, _) in &cases {
+            sent.params.insert(name.to_string(), literal(read.clone()));
+        }
+        // A typed Long: PySpark's literal of the Python int has no type of its own.
+        sent.params.insert(
+            "typed".into(),
+            proto::expression::Literal {
+                literal_type: Some(L::Long(9)),
+                data_type: Some(DataType::Long.to_proto()),
+            },
+        );
+        // An array is kept as it is, elements and all.
+        let array = literal(L::Array(proto::expression::literal::Array {
+            elements: vec![literal(L::Long(1))],
+            ..Default::default()
+        }));
+        sent.params.insert("array".into(), array.clone());
+        let info = proto::ml_command_result::MlOperatorInfo {
+            params: Some(sent),
+            ..Default::default()
+        };
+
+        let params = read_params(info.params.as_ref()).to_proto();
+        for (name, _, expected) in cases {
+            assert_eq!(params.params[name], literal(expected), "{name}");
+        }
+        assert_eq!(params.params["typed"], literal(L::Integer(9)));
+        assert_eq!(params.params["array"], array);
+        assert_eq!(params.params.len(), 14);
+        assert_eq!(read_params(None).to_proto(), proto::MlParams::default());
+    }
 
     #[test]
     fn ml_values_round_trip_through_their_literals() {
