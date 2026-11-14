@@ -281,6 +281,9 @@ pub enum SparkErrorKind {
     RecursionError,
     /// ``UnicodeDecodeError``, a Python builtin: a string of the result is not valid UTF-8.
     UnicodeDecode,
+    /// ``UnicodeEncodeError``, a Python builtin: a str of a request that UTF-8 cannot encode, such
+    /// as a lone surrogate, which the reference client raises when it builds the plan.
+    UnicodeEncode,
     /// ``ValueError``, a Python builtin: a connection-string value that `int()` or `urllib`
     /// rejects, which the reference client raises unwrapped rather than as a `PySparkValueError`.
     BuiltinValueError,
@@ -427,6 +430,27 @@ impl SparkError {
     /// The bytes of the string of an error from `invalid_utf8`.
     pub fn invalid_utf8_value(&self) -> Option<Vec<u8>> {
         if self.kind != SparkErrorKind::UnicodeDecode {
+            return None;
+        }
+        hex_decode(self.params.get("value")?)
+    }
+
+    /// Create an UnicodeEncode-kind error for a str that UTF-8 cannot encode, given as the UTF-32
+    /// little-endian bytes of its code points, which keep the surrogates. The bytes are kept, so
+    /// that the Python client can raise the error of Python's own encoder for them.
+    pub fn unencodable_str(utf32le: &[u8]) -> Self {
+        let mut error = Self::classed(
+            SparkErrorKind::UnicodeEncode,
+            "",
+            &[("value", &hex_encode(utf32le))],
+        );
+        error.message = "A string that UTF-8 cannot encode".to_string();
+        error
+    }
+
+    /// The UTF-32 little-endian bytes of the str of an error from `unencodable_str`.
+    pub fn unencodable_value(&self) -> Option<Vec<u8>> {
+        if self.kind != SparkErrorKind::UnicodeEncode {
             return None;
         }
         hex_decode(self.params.get("value")?)
