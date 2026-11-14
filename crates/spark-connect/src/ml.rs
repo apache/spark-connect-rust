@@ -1915,47 +1915,6 @@ impl LogisticRegression {
         }
     }
 
-    pub fn set_feature_col(mut self, col: &str) -> Self {
-        self.params = self.params.set_param_string("featuresCol", col);
-        self
-    }
-
-    pub fn set_label_col(mut self, col: &str) -> Self {
-        self.params = self.params.set_param_string("labelCol", col);
-        self
-    }
-
-    pub fn set_prediction_col(mut self, col: &str) -> Self {
-        self.params = self.params.set_param_string("predictionCol", col);
-        self
-    }
-
-    /// Maximum number of optimizer iterations.
-    pub fn set_max_iter(mut self, max_iter: i32) -> Self {
-        self.params = self.params.set_param_int32("maxIter", max_iter);
-        self
-    }
-
-    /// The feature vector column (default: "features").
-    pub fn feature_col(&self) -> &str {
-        self.params.string_or("featuresCol", "features")
-    }
-
-    /// The label column (default: "label").
-    pub fn label_col(&self) -> &str {
-        self.params.string_or("labelCol", "label")
-    }
-
-    /// The prediction output column (default: "prediction").
-    pub fn prediction_col(&self) -> &str {
-        self.params.string_or("predictionCol", "prediction")
-    }
-
-    /// The maximum number of optimizer iterations (default: 100).
-    pub fn max_iter(&self) -> i32 {
-        self.params.int_or("maxIter", 100)
-    }
-
     fn model_from_info(
         &self,
         info: proto::ml_command_result::MlOperatorInfo,
@@ -1970,6 +1929,7 @@ impl LogisticRegression {
             ),
             params: self.params.clone(),
             cached,
+            summary: None,
         })
     }
 }
@@ -1998,8 +1958,7 @@ impl Estimator for LogisticRegression {
     }
 
     fn fit_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<Box<dyn Model>> {
-        let info = fit_via_command(&self.operator, &self.params, df)?;
-        Ok(Box::new(self.model_from_info(info, &df.session)?))
+        Ok(Box::new(self.fit(df)?))
     }
 }
 
@@ -2014,24 +1973,12 @@ pub struct LogisticRegressionModel {
     operator: MlOperator,
     params: Params,
     cached: CachedModel,
+    /// The target of the training summary, which a fit sets (`_summary`); None of a model that the
+    /// server returns without a fit, such as a loaded one.
+    summary: Option<MlTarget>,
 }
 
-impl LogisticRegressionModel {
-    /// The feature vector column of the estimator that fitted the model (default: "features").
-    pub fn feature_col(&self) -> &str {
-        self.params.string_or("featuresCol", "features")
-    }
-
-    /// The label column of the estimator that fitted the model (default: "label").
-    pub fn label_col(&self) -> &str {
-        self.params.string_or("labelCol", "label")
-    }
-
-    /// The prediction output column of the model (default: "prediction").
-    pub fn prediction_col(&self) -> &str {
-        self.params.string_or("predictionCol", "prediction")
-    }
-}
+impl LogisticRegressionModel {}
 
 impl Transformer for LogisticRegressionModel {
     fn operator(&self) -> &MlOperator {
@@ -2094,149 +2041,6 @@ impl LinearSVC {
         }
     }
 
-    /// Feature vector column.
-    pub fn set_feature_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("featuresCol", value);
-        self
-    }
-
-    /// Binary label column (0 or 1).
-    pub fn set_label_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("labelCol", value);
-        self
-    }
-
-    /// Prediction output column.
-    pub fn set_prediction_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("predictionCol", value);
-        self
-    }
-
-    /// Raw margin output column.
-    pub fn set_raw_prediction_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("rawPredictionCol", value);
-        self
-    }
-
-    /// Maximum number of optimizer iterations.
-    pub fn set_max_iter(mut self, value: i32) -> Self {
-        self.params = self.params.set_param_int32("maxIter", value);
-        self
-    }
-
-    /// L2 regularization strength.
-    pub fn set_reg_param(mut self, value: f64) -> Self {
-        self.params = self.params.set_param_double("regParam", value);
-        self
-    }
-
-    /// Convergence tolerance.
-    pub fn set_tol(mut self, value: f64) -> Self {
-        self.params = self.params.set_param_double("tol", value);
-        self
-    }
-
-    /// Whether to fit an intercept.
-    pub fn set_fit_intercept(mut self, value: bool) -> Self {
-        self.params = self.params.set_param_bool("fitIntercept", value);
-        self
-    }
-
-    /// Whether to standardize training features.
-    pub fn set_standardization(mut self, value: bool) -> Self {
-        self.params = self.params.set_param_bool("standardization", value);
-        self
-    }
-
-    /// Decision threshold applied to the model margin.
-    pub fn set_threshold(mut self, value: f64) -> Self {
-        self.params = self.params.set_param_double("threshold", value);
-        self
-    }
-
-    /// Optional instance weight column.
-    pub fn set_weight_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("weightCol", value);
-        self
-    }
-
-    /// Tree aggregation depth.
-    pub fn set_aggregation_depth(mut self, value: i32) -> Self {
-        self.params = self.params.set_param_int32("aggregationDepth", value);
-        self
-    }
-
-    /// Maximum size in MB of stacked input blocks.
-    pub fn set_max_block_size_in_mb(mut self, value: f64) -> Self {
-        self.params = self.params.set_param_double("maxBlockSizeInMB", value);
-        self
-    }
-
-    /// The feature vector column (default: "features").
-    pub fn feature_col(&self) -> &str {
-        self.params.string_or("featuresCol", "features")
-    }
-
-    /// The label column (default: "label").
-    pub fn label_col(&self) -> &str {
-        self.params.string_or("labelCol", "label")
-    }
-
-    /// The prediction output column (default: "prediction").
-    pub fn prediction_col(&self) -> &str {
-        self.params.string_or("predictionCol", "prediction")
-    }
-
-    /// The raw margin output column (default: "rawPrediction").
-    pub fn raw_prediction_col(&self) -> &str {
-        self.params.string_or("rawPredictionCol", "rawPrediction")
-    }
-
-    /// The maximum number of optimizer iterations (default: 100).
-    pub fn max_iter(&self) -> i32 {
-        self.params.int_or("maxIter", 100)
-    }
-
-    /// The L2 regularization strength (default: 0).
-    pub fn reg_param(&self) -> f64 {
-        self.params.double_or("regParam", 0.0)
-    }
-
-    /// The convergence tolerance (default: 1e-6).
-    pub fn tol(&self) -> f64 {
-        self.params.double_or("tol", 1e-6)
-    }
-
-    /// Whether to fit an intercept (default: true).
-    pub fn fit_intercept(&self) -> bool {
-        self.params.bool_or("fitIntercept", true)
-    }
-
-    /// Whether to standardize training features (default: true).
-    pub fn standardization(&self) -> bool {
-        self.params.bool_or("standardization", true)
-    }
-
-    /// The decision threshold applied to the model margin (default: 0).
-    pub fn threshold(&self) -> f64 {
-        self.params.double_or("threshold", 0.0)
-    }
-
-    /// The instance weight column, if one is set.
-    pub fn weight_col(&self) -> Option<&str> {
-        self.params.string_opt("weightCol")
-    }
-
-    /// The tree aggregation depth (default: 2).
-    pub fn aggregation_depth(&self) -> i32 {
-        self.params.int_or("aggregationDepth", 2)
-    }
-
-    /// The maximum size in MB of stacked input blocks (default: 0, chosen by Spark).
-    pub fn max_block_size_in_mb(&self) -> f64 {
-        self.params.double_or("maxBlockSizeInMB", 0.0)
-    }
-
     fn model_from_info(
         &self,
         info: proto::ml_command_result::MlOperatorInfo,
@@ -2251,6 +2055,7 @@ impl LinearSVC {
             ),
             params: self.params.clone(),
             cached,
+            summary: None,
         })
     }
 }
@@ -2276,8 +2081,7 @@ impl Estimator for LinearSVC {
     }
 
     fn fit_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<Box<dyn Model>> {
-        let info = fit_via_command(&self.operator, &self.params, df)?;
-        Ok(Box::new(self.model_from_info(info, &df.session)?))
+        Ok(Box::new(self.fit(df)?))
     }
 }
 
@@ -2289,6 +2093,9 @@ pub struct LinearSVCModel {
     operator: MlOperator,
     params: Params,
     cached: CachedModel,
+    /// The target of the training summary, which a fit sets (`_summary`); None of a model that the
+    /// server returns without a fit, such as a loaded one.
+    summary: Option<MlTarget>,
 }
 
 impl Transformer for LinearSVCModel {
@@ -8500,12 +8307,12 @@ mod tests {
     #[test]
     fn test_logistic_regression_creation() {
         let lr = LogisticRegression::new()
-            .set_feature_col("features")
+            .set_features_col("features")
             .set_label_col("label")
             .set_prediction_col("pred")
             .set_max_iter(50);
 
-        assert_eq!(lr.feature_col(), "features");
+        assert_eq!(lr.features_col(), "features");
         assert_eq!(lr.label_col(), "label");
         assert_eq!(lr.prediction_col(), "pred");
         assert_eq!(lr.max_iter(), 50);
@@ -8989,7 +8796,7 @@ mod tests {
     fn linear_svc_parameters_use_the_spark_names_and_literal_types() {
         use proto::expression::literal::LiteralType as L;
         let svc = LinearSVC::new()
-            .set_feature_col("input")
+            .set_features_col("input")
             .set_label_col("target")
             .set_prediction_col("pred")
             .set_raw_prediction_col("margin")
@@ -11262,7 +11069,7 @@ mod tests {
             ($s:expr) => {{
                 let s: &LinearSVC = &$s;
                 (
-                    (s.feature_col(), s.label_col(), s.prediction_col()),
+                    (s.features_col(), s.label_col(), s.prediction_col()),
                     (s.raw_prediction_col(), s.max_iter(), s.reg_param(), s.tol()),
                     (s.fit_intercept(), s.standardization(), s.threshold()),
                     (
@@ -11283,7 +11090,7 @@ mod tests {
             )
         );
         let svc = svc
-            .set_feature_col("f")
+            .set_features_col("f")
             .set_label_col("l")
             .set_prediction_col("p")
             .set_raw_prediction_col("r")
@@ -11440,7 +11247,7 @@ mod tests {
         let logistic = LogisticRegression::new();
         assert_eq!(
             (
-                logistic.feature_col(),
+                logistic.features_col(),
                 logistic.label_col(),
                 logistic.prediction_col(),
                 logistic.max_iter()
@@ -11490,7 +11297,7 @@ mod tests {
         let model = fitted_logistic_regression(&session);
         assert_eq!(
             (
-                model.feature_col(),
+                model.features_col(),
                 model.label_col(),
                 model.prediction_col()
             ),

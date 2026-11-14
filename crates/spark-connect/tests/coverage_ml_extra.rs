@@ -82,11 +82,11 @@ fn estimator_builders_and_accessors() {
 
     // LogisticRegression
     let mut e = LogisticRegression::new()
-        .set_feature_col("f")
+        .set_features_col("f")
         .set_label_col("l")
         .set_prediction_col("p")
         .set_max_iter(5);
-    assert_eq!(e.feature_col(), "f");
+    assert_eq!(e.features_col(), "f");
     assert_eq!(e.label_col(), "l");
     assert_eq!(e.prediction_col(), "p");
     assert_eq!(e.max_iter(), 5);

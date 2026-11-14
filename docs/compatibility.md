@@ -75,7 +75,7 @@ of its params (`KMeans::k`, `RandomForestClassifier::num_trees`, ...), which rea
 `Params`: the value that is set, else Spark's default (`None` for `seed`, `weight_col` and
 `thresholds`). The fields of `LogisticRegressionModel`, `StringIndexerModel` and
 `MaxAbsScalerModel` are private, as those of the other fitted models but `PipelineModel`: use
-`Transformer::operator` and `Transformer::params`, and `LogisticRegressionModel::feature_col`,
+`Transformer::operator` and `Transformer::params`, and `LogisticRegressionModel::features_col`,
 `label_col` and `prediction_col`. `VectorAssembler::input_cols` and `Pipeline::stages`
 return a `Vec<String>`, and `VectorAssembler::set_input_cols` and `Pipeline::set_stages` take
 `impl IntoIterator<Item = impl Into<String>>`. The `input_col` of `StandardScaler`,
@@ -372,6 +372,22 @@ implementations through Connect. Vector-valued inputs must use `VectorUDT`; conv
 arrays explicitly with `pyspark.ml.functions.array_to_vector`. `StandardScaler` defaults to
 `withMean=False, withStd=True`, matching standard `pyspark.ml`.
 
+The Rust `LogisticRegression` and `LogisticRegressionModel` have the params of `pyspark.ml`, with one
+generated getter and setter per param (`set_max_iter` and `max_iter()`, `set_features_col` and
+`features_col()`, and so on), and `PARAM_NAMES` lists them. `LogisticRegression::feature_col`
+and `set_feature_col`, the names of v4.2.0, stay as deprecated aliases of `features_col` and
+`set_features_col`. `threshold()`, `thresholds()`,
+`set_threshold` and `set_thresholds` follow `_LogisticRegressionParams`: the getters check that
+the two agree to 1e-5 and `threshold()` requires two thresholds. The setters leave the other
+param set, as over Spark Connect, where the `clear` of `pyspark.ml` does nothing, so a
+disagreement raises the getters' error.
+The model has the typed members of `LinearSVCModel` above, plus `coefficient_matrix()` and
+`intercept_vector()`; `coefficients()` and `intercept()` raise the server's error of a multinomial
+model, as PySpark does. The model's `summary()` is binary for at most two classes, of the
+`numClasses` that it fetches when called (PySpark fetches it at the fit), and `evaluate` makes
+the same choice on its dataset. `has_summary()` is client side. The
+Rust API differs from `pyspark.ml` as the LinearSVC section says.
+
 ## Native RandomForestRegressor
 
 `spark_connect::ml::RandomForestRegressor` fits Spark's JVM random forest regressor
@@ -550,9 +566,19 @@ parameters and mutating `setFeaturesCol`, `setRegParam`, etc. methods.
 Clones and lazy prediction DataFrames keep the cached model usable while they are
 alive. When the last of the model, its clones and the DataFrames it transformed is
 dropped, the server deletes the cached model, as `pyspark.ml` does.
-The Python model uses the existing `MLModel.transform` interface. Model inspection
-(coefficients, intercept and summaries), single-vector prediction and model
-persistence are not exposed by this addition.
+The Python model uses the existing `MLModel.transform` interface. The Rust
+`LinearSVCModel` has the typed members of `pyspark.ml`: `coefficients()`, `intercept()`,
+`num_classes()`, `num_features()`, `predict(&vector)` and `predict_raw(&vector)`, `has_summary()`
+(client side), `summary()` (the training summary, with `accuracy()`, `area_under_roc()`,
+`objective_history()`, `total_iterations()` and the curve DataFrames `roc()` and `pr()`),
+`evaluate(&df)` (the same summary members on a dataset), `LinearSVCModel::load(&session, path)`,
+and `model.write().overwrite().save(path)`. Its setters `set_features_col`,
+`set_prediction_col`, `set_raw_prediction_col` and `set_threshold` set the params of its
+transform. `LinearSVC::fit_multiple(&df, &maps)` fits one model per param map, and
+`LinearSVC::load` loads an estimator. Differences from `pyspark.ml`: `summary()` is a typed value
+rather than a Python object, `fit_multiple` returns a `Vec` rather than an iterator, and `read()`
+is `load`, with no reader object. The summary's DataFrames are built on the training DataFrame,
+as PySpark builds them.
 
 ## Native Pipeline and CrossValidator: fit is not implemented
 
