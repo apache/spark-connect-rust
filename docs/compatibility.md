@@ -896,7 +896,9 @@ array-valued feature columns are rejected; transforms return Spark DataFrames co
 vectors. Mean centering is opt-in through `withMean=True`. Convert pandas data with
 `spark.createDataFrame` and array columns with `array_to_vector` before fitting.
 
-This covers constructor parameters, named setters, fit and DataFrame transform. Specialized
+This covers constructor parameters, named setters, fit and DataFrame transform, and
+`StopWordsRemover.loadDefaultStopWords`, which reads the server's default stop words through
+Spark Connect's ML helper, as PySpark does (Rust `StopWordsRemover::load_default_stop_words`). Specialized
 model inspection (such as PCA components, vocabulary or scaler statistics), LSH similarity
 joins/nearest-neighbor methods, Word2Vec synonyms, persistence, and pipeline/tuning execution
 are separate from this native surface. Existing vendored helper classes remain available.

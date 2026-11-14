@@ -870,6 +870,67 @@ pub trait Evaluator: Send + Sync {
     fn evaluate(&self, _df: &DataFrame) -> spark_connect_core::error::Result<f64>;
 }
 
+/// The value of the method `method` of Spark Connect's ML helper, called with `args`, as PySpark's
+/// `invoke_helper_attr` reads it: a `Fetch` of the helper, run as an ML command, whose result is
+/// the literal of the value.
+pub fn ml_helper_attribute(
+    session: &SparkSession,
+    method: &str,
+    args: Vec<proto::expression::Literal>,
+) -> spark_connect_core::error::Result<proto::expression::Literal> {
+    use proto::fetch::method::args::ArgsType;
+    let fetch = proto::Fetch {
+        obj_ref: Some(proto::ObjectRef {
+            id: "______ML_CONNECT_HELPER______".into(),
+        }),
+        methods: vec![proto::fetch::Method {
+            method: method.into(),
+            args: args
+                .into_iter()
+                .map(|literal| proto::fetch::method::Args {
+                    args_type: Some(ArgsType::Param(literal)),
+                })
+                .collect(),
+        }],
+    };
+    let mut ml_command = proto::MlCommand::default();
+    ml_command.command = Some(proto::ml_command::Command::Fetch(fetch));
+    let responses = crate::dataframe::execute_command_collect(
+        session,
+        proto::command::CommandType::MlCommand(ml_command),
+    )?;
+    for resp in responses {
+        if let Some(proto::execute_plan_response::ResponseType::MlCommandResult(result)) =
+            resp.response_type
+        {
+            if let Some(proto::ml_command_result::ResultType::Param(literal)) = result.result_type {
+                return Ok(literal);
+            }
+        }
+    }
+    Err(SparkError::connect_msg(format!(
+        "{method}: server returned no value"
+    )))
+}
+
+/// The strings of `literal`, an array literal of strings, as the ML helper returns a `String[]`.
+pub fn ml_string_array(
+    literal: proto::expression::Literal,
+) -> spark_connect_core::error::Result<Vec<String>> {
+    use proto::expression::literal::LiteralType as L;
+    let Some(L::Array(array)) = literal.literal_type else {
+        return Err(SparkError::connect_msg("expected an array of strings"));
+    };
+    array
+        .elements
+        .into_iter()
+        .map(|element| match element.literal_type {
+            Some(L::String(value)) => Ok(value),
+            _ => Err(SparkError::connect_msg("expected an array of strings")),
+        })
+        .collect()
+}
+
 /// Run an evaluator against a dataset via the ML `Evaluate` command and return the
 /// scalar metric.
 ///
@@ -11107,5 +11168,31 @@ mod tests {
         assert_eq!(ovr.parallelism_i64(), Some(1 << 40));
         *ovr.params_mut() = ovr.params().clone().set_param_null("parallelism");
         assert_eq!(ovr.parallelism_i64(), None);
+    }
+
+    #[test]
+    fn ml_string_array_reads_an_array_of_strings() {
+        use proto::expression::literal::{Array, LiteralType as L};
+        let string = |value: &str| proto::expression::Literal {
+            literal_type: Some(L::String(value.into())),
+            ..Default::default()
+        };
+        let array = |elements| proto::expression::Literal {
+            literal_type: Some(L::Array(Array {
+                elements,
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        assert_eq!(
+            ml_string_array(array(vec![string("i"), string("me")])).unwrap(),
+            ["i", "me"]
+        );
+        assert!(ml_string_array(string("i")).is_err());
+        let long = proto::expression::Literal {
+            literal_type: Some(L::Long(1)),
+            ..Default::default()
+        };
+        assert!(ml_string_array(array(vec![long])).is_err());
     }
 }

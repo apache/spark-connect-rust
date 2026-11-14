@@ -616,7 +616,7 @@ fn unless_stopped(py: Python<'_>, session: &Py<PySparkSession>) -> Option<Py<PyS
 }
 
 /// The active session of this thread, unless it stopped.
-fn active_session(py: Python<'_>) -> Option<Py<PySparkSession>> {
+pub(crate) fn active_session(py: Python<'_>) -> Option<Py<PySparkSession>> {
     ACTIVE_SESSION.with(|active| {
         active
             .borrow()

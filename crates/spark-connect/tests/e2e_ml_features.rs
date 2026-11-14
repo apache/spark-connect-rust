@@ -487,3 +487,25 @@ fn all_feature_stages_match_official_results_and_retain_models() {
         );
     }
 }
+
+#[test]
+fn stop_words_remover_loads_the_default_stop_words_of_the_server() {
+    let Some(session) = live_session() else {
+        return;
+    };
+    // As PySpark's StopWordsRemover.loadDefaultStopWords, a call of the ML helper.
+    let english =
+        spark_connect::ml::StopWordsRemover::load_default_stop_words(&session, "english").unwrap();
+    assert_eq!(english.len(), 181);
+    assert_eq!(&english[..4], ["i", "me", "my", "myself"]);
+    let error = spark_connect::ml::StopWordsRemover::load_default_stop_words(&session, "klingon")
+        .err()
+        .unwrap();
+    assert!(
+        error
+            .to_string()
+            .contains("klingon is not in the supported language list"),
+        "{error}"
+    );
+    session.stop().unwrap();
+}

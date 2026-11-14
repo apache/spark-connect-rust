@@ -98,7 +98,9 @@ const SET_PARAMS_SOURCE: &std::ffi::CStr = c"def make_set_params(class_name, sig
 macro_rules! feature_wrapper {
     ($wrapper:ident, $core:ident, $name:literal, $defaults:literal, $op:ident, $run:ident, $result:ty,
      [$(($param:literal, $kind:ident)),* $(,)?],
-     [$(($setter:ident, $pysetter:literal, $wire:literal, $setter_kind:ident)),* $(,)?]) => {
+     [$(($setter:ident, $pysetter:literal, $wire:literal, $setter_kind:ident)),* $(,)?]
+     // The other methods of the class, if it has any, as StopWordsRemover's loadDefaultStopWords.
+     $(, { $($extra:tt)* })?) => {
         #[pyclass(name = $name, module = "pyspark.ml.connect.feature")]
         pub struct $wrapper { inner: core::$core, unsendable: Vec<&'static str>, raw: Vec<(&'static str, Py<PyAny>)> }
         impl Native for $wrapper {
@@ -160,6 +162,7 @@ macro_rules! feature_wrapper {
             ) -> PyResult<$result> {
                 $run(slf, dataset, params)
             }
+            $($($extra)*)?
         }
     };
 }
@@ -579,7 +582,43 @@ feature_wrapper!(PyStopWordsRemover, StopWordsRemover, "StopWordsRemover", "{\"i
         (set_output_col, "setOutputCol", "outputCol", Str),
         (set_output_cols, "setOutputCols", "outputCols", StrList),
         (set_stop_words, "setStopWords", "stopWords", StrList),
-    ]);
+    ], {
+        /// PySpark's `StopWordsRemover.loadDefaultStopWords`: the server's default stop words of
+        /// `language`, a call of Spark Connect's ML helper on the active session (as
+        /// `invoke_helper_attr`), which raises PySpark's bare AssertionError without one. The
+        /// language is sent as the literal of its value, which the server checks, as PySpark's
+        /// `serialize` sends an argument.
+        #[staticmethod]
+        #[pyo3(name = "loadDefaultStopWords")]
+        fn load_default_stop_words(
+            py: Python<'_>,
+            language: &Bound<'_, PyAny>,
+        ) -> PyResult<Vec<String>> {
+            let session = crate::session::active_session(py)
+                .ok_or_else(|| pyo3::exceptions::PyAssertionError::new_err(()))?;
+            let session = session.borrow(py).session.clone();
+            let column = crate::functions::to_value_column(language)?;
+            let spark_connect::expression::ExpressionNode::Literal(literal) =
+                column.expression().node()
+            else {
+                return Err(crate::column::raise_pyspark(
+                    py,
+                    "PySparkTypeError",
+                    "UNSUPPORTED_DATA_TYPE",
+                    &[("data_type", &language.get_type().name()?.to_string())],
+                ));
+            };
+            let literal = literal.to_literal_proto();
+            interruptible(py, &session, || {
+                core::ml_helper_attribute(
+                    &session,
+                    "stopWordsRemoverLoadDefaultStopWords",
+                    vec![literal],
+                )
+                .and_then(core::ml_string_array)
+            })
+        }
+    });
 
 feature_wrapper!(PyStringIndexer, StringIndexer, "StringIndexer", "{\"inputCol\": null, \"outputCol\": null, \"inputCols\": null, \"outputCols\": null, \"handleInvalid\": \"error\", \"stringOrderType\": \"frequencyDesc\"}", fit, fit_feature, Fitted<PyMLModel>,
     [("inputCol", Str), ("outputCol", Str), ("inputCols", StrList), ("outputCols", StrList), ("handleInvalid", Str), ("stringOrderType", Str)],
