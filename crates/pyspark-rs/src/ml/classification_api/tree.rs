@@ -193,6 +193,7 @@ native_model! {
         "thresholds" => ("getThresholds", get_thresholds, param_thresholds),
         "weightCol" => ("getWeightCol", get_weight_col, param_weight_col),
     ];
+    params_only: ["numTrees" => num_trees];
     setters: [
         "setFeaturesCol" => (set_features_col, "featuresCol"),
         "setLeafCol" => (set_leaf_col, "leafCol"),
@@ -220,14 +221,6 @@ native_model! {
     relation_methods: [];
     summary: Some(random_forest_training_summary);
     cached: [ "trees" => (trees, random_forest_trees) ];
-
-    /// The numTrees Param of the model, as `Params` of PySpark's class. Its `getNumTrees` is the
-    /// property of the ensemble, which shadows the getter of the param (see `get_num_trees`).
-    #[getter]
-    #[pyo3(name = "numTrees")]
-    fn num_trees<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
-        crate::ml::params_api::param(slf.as_any(), "numTrees")
-    }
 
     /// The supportedFeatureSubsetStrategies of the class, as PySpark's class attribute.
     #[classattr]
@@ -272,7 +265,7 @@ native_model! {
         }
         let target = slf.try_borrow()?.core.target()?;
         let output = object::fetch_py(py, &target, "evaluate", std::slice::from_ref(dataset))?;
-        let summary = spark_connect::ml::evaluated_summary(target.session(), output).to_pyerr()?;
+        let summary = spark_connect::ml::evaluated_summary(&target, output).to_pyerr()?;
         if fetch_num_classes(py, &target)? <= 2 {
             Ok(Py::new(py, PyBinaryRandomForestClassificationSummary::from(summary))?.into_any())
         } else {
