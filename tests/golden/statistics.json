@@ -1,0 +1,1223 @@
+{
+  "spark_version": "4.3.0",
+  "datasets": {
+    "categorical": "SELECT * FROM VALUES (0D,array(0D,1D)),(1D,array(1D,1D)),(1D,array(2D,1D)),(0D,array(0D,2D)),(1D,array(1D,2D)),(0D,array(2D,2D)) AS t(label,features)",
+    "numeric": "SELECT * FROM VALUES (0,array(1D,0D,-2D),0.5D,-1D),(0,array(2D,0D,3D),2D,0D),(1,array(-1D,0D,0D),0D,1D),(1,array(4D,0D,5D),1.5D,2D) AS t(group_id,features,weight,sample)"
+  },
+  "metrics": [
+    "mean",
+    "sum",
+    "variance",
+    "std",
+    "count",
+    "numNonZeros",
+    "max",
+    "min",
+    "normL1",
+    "normL2"
+  ],
+  "signatures": {
+    "ChiSquareTest.test": [
+      {
+        "name": "dataset",
+        "kind": "POSITIONAL_OR_KEYWORD"
+      },
+      {
+        "name": "featuresCol",
+        "kind": "POSITIONAL_OR_KEYWORD"
+      },
+      {
+        "name": "labelCol",
+        "kind": "POSITIONAL_OR_KEYWORD"
+      },
+      {
+        "name": "flatten",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "default": false
+      }
+    ],
+    "Correlation.corr": [
+      {
+        "name": "dataset",
+        "kind": "POSITIONAL_OR_KEYWORD"
+      },
+      {
+        "name": "column",
+        "kind": "POSITIONAL_OR_KEYWORD"
+      },
+      {
+        "name": "method",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "default": "pearson"
+      }
+    ],
+    "KolmogorovSmirnovTest.test": [
+      {
+        "name": "dataset",
+        "kind": "POSITIONAL_OR_KEYWORD"
+      },
+      {
+        "name": "sampleCol",
+        "kind": "POSITIONAL_OR_KEYWORD"
+      },
+      {
+        "name": "distName",
+        "kind": "POSITIONAL_OR_KEYWORD"
+      },
+      {
+        "name": "params",
+        "kind": "VAR_POSITIONAL"
+      }
+    ],
+    "Summarizer.metrics": [
+      {
+        "name": "metrics",
+        "kind": "VAR_POSITIONAL"
+      }
+    ],
+    "Summarizer.mean": [
+      {
+        "name": "col",
+        "kind": "POSITIONAL_OR_KEYWORD"
+      },
+      {
+        "name": "weightCol",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "default": null
+      }
+    ],
+    "Summarizer.sum": [
+      {
+        "name": "col",
+        "kind": "POSITIONAL_OR_KEYWORD"
+      },
+      {
+        "name": "weightCol",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "default": null
+      }
+    ],
+    "Summarizer.variance": [
+      {
+        "name": "col",
+        "kind": "POSITIONAL_OR_KEYWORD"
+      },
+      {
+        "name": "weightCol",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "default": null
+      }
+    ],
+    "Summarizer.std": [
+      {
+        "name": "col",
+        "kind": "POSITIONAL_OR_KEYWORD"
+      },
+      {
+        "name": "weightCol",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "default": null
+      }
+    ],
+    "Summarizer.count": [
+      {
+        "name": "col",
+        "kind": "POSITIONAL_OR_KEYWORD"
+      },
+      {
+        "name": "weightCol",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "default": null
+      }
+    ],
+    "Summarizer.numNonZeros": [
+      {
+        "name": "col",
+        "kind": "POSITIONAL_OR_KEYWORD"
+      },
+      {
+        "name": "weightCol",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "default": null
+      }
+    ],
+    "Summarizer.max": [
+      {
+        "name": "col",
+        "kind": "POSITIONAL_OR_KEYWORD"
+      },
+      {
+        "name": "weightCol",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "default": null
+      }
+    ],
+    "Summarizer.min": [
+      {
+        "name": "col",
+        "kind": "POSITIONAL_OR_KEYWORD"
+      },
+      {
+        "name": "weightCol",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "default": null
+      }
+    ],
+    "Summarizer.normL1": [
+      {
+        "name": "col",
+        "kind": "POSITIONAL_OR_KEYWORD"
+      },
+      {
+        "name": "weightCol",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "default": null
+      }
+    ],
+    "Summarizer.normL2": [
+      {
+        "name": "col",
+        "kind": "POSITIONAL_OR_KEYWORD"
+      },
+      {
+        "name": "weightCol",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "default": null
+      }
+    ],
+    "SummaryBuilder.summary": [
+      {
+        "name": "featuresCol",
+        "kind": "POSITIONAL_OR_KEYWORD"
+      },
+      {
+        "name": "weightCol",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "default": null
+      }
+    ],
+    "MultivariateGaussian.__init__": [
+      {
+        "name": "mean",
+        "kind": "POSITIONAL_OR_KEYWORD"
+      },
+      {
+        "name": "cov",
+        "kind": "POSITIONAL_OR_KEYWORD"
+      }
+    ]
+  },
+  "helpers": [
+    {
+      "op": "chi",
+      "dataset": "categorical",
+      "params": [
+        "features",
+        "label",
+        false
+      ],
+      "method": "chiSquareTest",
+      "args_b64": [
+        "aghmZWF0dXJlcw==",
+        "agVsYWJlbA==",
+        "GAA="
+      ],
+      "result": {
+        "columns": [
+          "pValues",
+          "degreesOfFreedom",
+          "statistics"
+        ],
+        "rows": [
+          {
+            "pValues": {
+              "type": 1,
+              "size": null,
+              "indices": null,
+              "values": [
+                0.1353352832366127,
+                0.4142161782425252
+              ]
+            },
+            "degreesOfFreedom": [
+              2,
+              1
+            ],
+            "statistics": {
+              "type": 1,
+              "size": null,
+              "indices": null,
+              "values": [
+                4.0,
+                0.6666666666666666
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "op": "chi",
+      "dataset": "categorical",
+      "params": [
+        "features",
+        "label",
+        true
+      ],
+      "method": "chiSquareTest",
+      "args_b64": [
+        "aghmZWF0dXJlcw==",
+        "agVsYWJlbA==",
+        "GAE="
+      ],
+      "result": {
+        "columns": [
+          "featureIndex",
+          "pValue",
+          "degreesOfFreedom",
+          "statistic"
+        ],
+        "rows": [
+          {
+            "featureIndex": 1,
+            "pValue": 0.4142161782425252,
+            "degreesOfFreedom": 1,
+            "statistic": 0.6666666666666666
+          },
+          {
+            "featureIndex": 0,
+            "pValue": 0.1353352832366127,
+            "degreesOfFreedom": 2,
+            "statistic": 4.0
+          }
+        ]
+      }
+    },
+    {
+      "op": "corr",
+      "dataset": "numeric",
+      "params": [
+        "features",
+        "pearson"
+      ],
+      "method": "correlation",
+      "args_b64": [
+        "aghmZWF0dXJlcw==",
+        "agdwZWFyc29u"
+      ],
+      "result": {
+        "columns": [
+          "pearson(features)"
+        ],
+        "rows": [
+          {
+            "pearson(features)": {
+              "type": 1,
+              "numRows": 3,
+              "numCols": 3,
+              "colPtrs": null,
+              "rowIndices": null,
+              "values": [
+                1.0,
+                {
+                  "float": "nan"
+                },
+                0.7725393039369072,
+                {
+                  "float": "nan"
+                },
+                1.0,
+                {
+                  "float": "nan"
+                },
+                0.7725393039369072,
+                {
+                  "float": "nan"
+                },
+                1.0
+              ],
+              "isTransposed": false
+            }
+          }
+        ]
+      }
+    },
+    {
+      "op": "corr",
+      "dataset": "numeric",
+      "params": [
+        "features",
+        "spearman"
+      ],
+      "method": "correlation",
+      "args_b64": [
+        "aghmZWF0dXJlcw==",
+        "aghzcGVhcm1hbg=="
+      ],
+      "result": {
+        "columns": [
+          "spearman(features)"
+        ],
+        "rows": [
+          {
+            "spearman(features)": {
+              "type": 1,
+              "numRows": 3,
+              "numCols": 3,
+              "colPtrs": null,
+              "rowIndices": null,
+              "values": [
+                1.0,
+                {
+                  "float": "nan"
+                },
+                0.8,
+                {
+                  "float": "nan"
+                },
+                1.0,
+                {
+                  "float": "nan"
+                },
+                0.8,
+                {
+                  "float": "nan"
+                },
+                1.0
+              ],
+              "isTransposed": false
+            }
+          }
+        ]
+      }
+    },
+    {
+      "op": "ks",
+      "dataset": "numeric",
+      "params": [
+        "sample",
+        "norm"
+      ],
+      "method": "kolmogorovSmirnovTest",
+      "args_b64": [
+        "agZzYW1wbGU=",
+        "agRub3Jt",
+        "sgEECgJKAA=="
+      ],
+      "result": {
+        "columns": [
+          "pValue",
+          "statistic"
+        ],
+        "rows": [
+          {
+            "pValue": 0.6347475581065742,
+            "statistic": 0.34134474606854304
+          }
+        ]
+      }
+    },
+    {
+      "op": "ks",
+      "dataset": "numeric",
+      "params": [
+        "sample",
+        "norm",
+        0.0,
+        1.0
+      ],
+      "method": "kolmogorovSmirnovTest",
+      "args_b64": [
+        "agZzYW1wbGU=",
+        "agRub3Jt",
+        "sgEaCgJKABIJWQAAAAAAAAAAEglZAAAAAAAA8D8="
+      ],
+      "result": {
+        "columns": [
+          "pValue",
+          "statistic"
+        ],
+        "rows": [
+          {
+            "pValue": 0.6347475581065742,
+            "statistic": 0.34134474606854304
+          }
+        ]
+      }
+    },
+    {
+      "op": "ks",
+      "dataset": "numeric",
+      "params": [
+        "sample",
+        "norm",
+        1.0,
+        2.0
+      ],
+      "method": "kolmogorovSmirnovTest",
+      "args_b64": [
+        "agZzYW1wbGU=",
+        "agRub3Jt",
+        "sgEaCgJKABIJWQAAAAAAAPA/EglZAAAAAAAAAEA="
+      ],
+      "result": {
+        "columns": [
+          "pValue",
+          "statistic"
+        ],
+        "rows": [
+          {
+            "pValue": 0.7439384867920584,
+            "statistic": 0.308537538725987
+          }
+        ]
+      }
+    },
+    {
+      "op": "ks",
+      "dataset": "numeric",
+      "params": [
+        "sample",
+        "norm",
+        "1",
+        "2"
+      ],
+      "method": "kolmogorovSmirnovTest",
+      "args_b64": [
+        "agZzYW1wbGU=",
+        "agRub3Jt",
+        "sgEaCgJKABIJWQAAAAAAAPA/EglZAAAAAAAAAEA="
+      ],
+      "result": {
+        "columns": [
+          "pValue",
+          "statistic"
+        ],
+        "rows": [
+          {
+            "pValue": 0.7439384867920584,
+            "statistic": 0.308537538725987
+          }
+        ]
+      }
+    }
+  ],
+  "summaries": [
+    {
+      "metric": null,
+      "weighted": false,
+      "expr_b64": "GqACChFhZ2dyZWdhdGVfbWV0cmljcxJ5GncKBWFycmF5EggKBmoEbWVhbhIHCgVqA3N1bRIMCgpqCHZhcmlhbmNlEgcKBWoDc3RkEgkKB2oFY291bnQSDwoNagtudW1Ob25aZXJvcxIHCgVqA21heBIHCgVqA21pbhIKCghqBm5vcm1MMRIKCghqBm5vcm1MMhKCARIMCghmZWF0dXJlcxgAkgFxCm8KbQoDY29sEmYvaG9tZS9ydWlmZW5nLnpoZW5nL3dvcmt0cmVlcy9zcGFyay1jb25uZWN0LXJ1c3QtbWwtc3RhdGlzdGljcy9zY3JpcHRzL2NhcHR1cmVfc3RhdGlzdGljc19nb2xkZW4ucHk6NjkSCwoJWQAAAAAAAPA/",
+      "result": {
+        "columns": [
+          "aggregate_metrics(features, 1.0)"
+        ],
+        "rows": [
+          {
+            "aggregate_metrics(features, 1.0)": {
+              "mean": {
+                "type": 1,
+                "size": null,
+                "indices": null,
+                "values": [
+                  1.5,
+                  0.0,
+                  1.5
+                ]
+              },
+              "sum": {
+                "type": 1,
+                "size": null,
+                "indices": null,
+                "values": [
+                  6.0,
+                  0.0,
+                  6.0
+                ]
+              },
+              "variance": {
+                "type": 1,
+                "size": null,
+                "indices": null,
+                "values": [
+                  4.333333333333333,
+                  0.0,
+                  9.666666666666666
+                ]
+              },
+              "std": {
+                "type": 1,
+                "size": null,
+                "indices": null,
+                "values": [
+                  2.0816659994661326,
+                  0.0,
+                  3.1091263510296048
+                ]
+              },
+              "count": 4,
+              "numNonZeros": {
+                "type": 1,
+                "size": null,
+                "indices": null,
+                "values": [
+                  4.0,
+                  0.0,
+                  3.0
+                ]
+              },
+              "max": {
+                "type": 1,
+                "size": null,
+                "indices": null,
+                "values": [
+                  4.0,
+                  0.0,
+                  5.0
+                ]
+              },
+              "min": {
+                "type": 1,
+                "size": null,
+                "indices": null,
+                "values": [
+                  -1.0,
+                  0.0,
+                  -2.0
+                ]
+              },
+              "normL1": {
+                "type": 1,
+                "size": null,
+                "indices": null,
+                "values": [
+                  8.0,
+                  0.0,
+                  10.0
+                ]
+              },
+              "normL2": {
+                "type": 1,
+                "size": null,
+                "indices": null,
+                "values": [
+                  4.69041575982343,
+                  0.0,
+                  6.164414002968976
+                ]
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "metric": "mean",
+      "weighted": false,
+      "expr_b64": "MtkDCsYDYscCCr0BGroBChFhZ2dyZWdhdGVfbWV0cmljcxITGhEKBWFycmF5EggKBmoEbWVhbhKCARIMCghmZWF0dXJlcxgAkgFxCm8KbQoDY29sEmYvaG9tZS9ydWlmZW5nLnpoZW5nL3dvcmt0cmVlcy9zcGFyay1jb25uZWN0LXJ1c3QtbWwtc3RhdGlzdGljcy9zY3JpcHRzL2NhcHR1cmVfc3RhdGlzdGljc19nb2xkZW4ucHk6NjkSCwoJWQAAAAAAAPA/EoQBCgZqBG1lYW6SAXkKdwp1CgtfX2dldGl0ZW1fXxJmL2hvbWUvcnVpZmVuZy56aGVuZy93b3JrdHJlZXMvc3BhcmstY29ubmVjdC1ydXN0LW1sLXN0YXRpc3RpY3Mvc2NyaXB0cy9jYXB0dXJlX3N0YXRpc3RpY3NfZ29sZGVuLnB5OjY5kgF5CncKdQoLX19nZXRpdGVtX18SZi9ob21lL3J1aWZlbmcuemhlbmcvd29ya3RyZWVzL3NwYXJrLWNvbm5lY3QtcnVzdC1tbC1zdGF0aXN0aWNzL3NjcmlwdHMvY2FwdHVyZV9zdGF0aXN0aWNzX2dvbGRlbi5weTo2ORIObWVhbihmZWF0dXJlcymSAXMKcQpvCgVhbGlhcxJmL2hvbWUvcnVpZmVuZy56aGVuZy93b3JrdHJlZXMvc3BhcmstY29ubmVjdC1ydXN0LW1sLXN0YXRpc3RpY3Mvc2NyaXB0cy9jYXB0dXJlX3N0YXRpc3RpY3NfZ29sZGVuLnB5OjY5",
+      "result": {
+        "columns": [
+          "mean(features)"
+        ],
+        "rows": [
+          {
+            "mean(features)": {
+              "type": 1,
+              "size": null,
+              "indices": null,
+              "values": [
+                1.5,
+                0.0,
+                1.5
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "metric": "sum",
+      "weighted": false,
+      "expr_b64": "MtYDCsQDYsUCCrwBGrkBChFhZ2dyZWdhdGVfbWV0cmljcxISGhAKBWFycmF5EgcKBWoDc3VtEoIBEgwKCGZlYXR1cmVzGACSAXEKbwptCgNjb2wSZi9ob21lL3J1aWZlbmcuemhlbmcvd29ya3RyZWVzL3NwYXJrLWNvbm5lY3QtcnVzdC1tbC1zdGF0aXN0aWNzL3NjcmlwdHMvY2FwdHVyZV9zdGF0aXN0aWNzX2dvbGRlbi5weTo2ORILCglZAAAAAAAA8D8SgwEKBWoDc3VtkgF5CncKdQoLX19nZXRpdGVtX18SZi9ob21lL3J1aWZlbmcuemhlbmcvd29ya3RyZWVzL3NwYXJrLWNvbm5lY3QtcnVzdC1tbC1zdGF0aXN0aWNzL3NjcmlwdHMvY2FwdHVyZV9zdGF0aXN0aWNzX2dvbGRlbi5weTo2OZIBeQp3CnUKC19fZ2V0aXRlbV9fEmYvaG9tZS9ydWlmZW5nLnpoZW5nL3dvcmt0cmVlcy9zcGFyay1jb25uZWN0LXJ1c3QtbWwtc3RhdGlzdGljcy9zY3JpcHRzL2NhcHR1cmVfc3RhdGlzdGljc19nb2xkZW4ucHk6NjkSDXN1bShmZWF0dXJlcymSAXMKcQpvCgVhbGlhcxJmL2hvbWUvcnVpZmVuZy56aGVuZy93b3JrdHJlZXMvc3BhcmstY29ubmVjdC1ydXN0LW1sLXN0YXRpc3RpY3Mvc2NyaXB0cy9jYXB0dXJlX3N0YXRpc3RpY3NfZ29sZGVuLnB5OjY5",
+      "result": {
+        "columns": [
+          "sum(features)"
+        ],
+        "rows": [
+          {
+            "sum(features)": {
+              "type": 1,
+              "size": null,
+              "indices": null,
+              "values": [
+                6.0,
+                0.0,
+                6.0
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "metric": "variance",
+      "weighted": false,
+      "expr_b64": "MuUDCs4DYs8CCsEBGr4BChFhZ2dyZWdhdGVfbWV0cmljcxIXGhUKBWFycmF5EgwKCmoIdmFyaWFuY2USggESDAoIZmVhdHVyZXMYAJIBcQpvCm0KA2NvbBJmL2hvbWUvcnVpZmVuZy56aGVuZy93b3JrdHJlZXMvc3BhcmstY29ubmVjdC1ydXN0LW1sLXN0YXRpc3RpY3Mvc2NyaXB0cy9jYXB0dXJlX3N0YXRpc3RpY3NfZ29sZGVuLnB5OjY5EgsKCVkAAAAAAADwPxKIAQoKagh2YXJpYW5jZZIBeQp3CnUKC19fZ2V0aXRlbV9fEmYvaG9tZS9ydWlmZW5nLnpoZW5nL3dvcmt0cmVlcy9zcGFyay1jb25uZWN0LXJ1c3QtbWwtc3RhdGlzdGljcy9zY3JpcHRzL2NhcHR1cmVfc3RhdGlzdGljc19nb2xkZW4ucHk6NjmSAXkKdwp1CgtfX2dldGl0ZW1fXxJmL2hvbWUvcnVpZmVuZy56aGVuZy93b3JrdHJlZXMvc3BhcmstY29ubmVjdC1ydXN0LW1sLXN0YXRpc3RpY3Mvc2NyaXB0cy9jYXB0dXJlX3N0YXRpc3RpY3NfZ29sZGVuLnB5OjY5EhJ2YXJpYW5jZShmZWF0dXJlcymSAXMKcQpvCgVhbGlhcxJmL2hvbWUvcnVpZmVuZy56aGVuZy93b3JrdHJlZXMvc3BhcmstY29ubmVjdC1ydXN0LW1sLXN0YXRpc3RpY3Mvc2NyaXB0cy9jYXB0dXJlX3N0YXRpc3RpY3NfZ29sZGVuLnB5OjY5",
+      "result": {
+        "columns": [
+          "variance(features)"
+        ],
+        "rows": [
+          {
+            "variance(features)": {
+              "type": 1,
+              "size": null,
+              "indices": null,
+              "values": [
+                4.333333333333333,
+                0.0,
+                9.666666666666666
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "metric": "std",
+      "weighted": false,
+      "expr_b64": "MtYDCsQDYsUCCrwBGrkBChFhZ2dyZWdhdGVfbWV0cmljcxISGhAKBWFycmF5EgcKBWoDc3RkEoIBEgwKCGZlYXR1cmVzGACSAXEKbwptCgNjb2wSZi9ob21lL3J1aWZlbmcuemhlbmcvd29ya3RyZWVzL3NwYXJrLWNvbm5lY3QtcnVzdC1tbC1zdGF0aXN0aWNzL3NjcmlwdHMvY2FwdHVyZV9zdGF0aXN0aWNzX2dvbGRlbi5weTo2ORILCglZAAAAAAAA8D8SgwEKBWoDc3RkkgF5CncKdQoLX19nZXRpdGVtX18SZi9ob21lL3J1aWZlbmcuemhlbmcvd29ya3RyZWVzL3NwYXJrLWNvbm5lY3QtcnVzdC1tbC1zdGF0aXN0aWNzL3NjcmlwdHMvY2FwdHVyZV9zdGF0aXN0aWNzX2dvbGRlbi5weTo2OZIBeQp3CnUKC19fZ2V0aXRlbV9fEmYvaG9tZS9ydWlmZW5nLnpoZW5nL3dvcmt0cmVlcy9zcGFyay1jb25uZWN0LXJ1c3QtbWwtc3RhdGlzdGljcy9zY3JpcHRzL2NhcHR1cmVfc3RhdGlzdGljc19nb2xkZW4ucHk6NjkSDXN0ZChmZWF0dXJlcymSAXMKcQpvCgVhbGlhcxJmL2hvbWUvcnVpZmVuZy56aGVuZy93b3JrdHJlZXMvc3BhcmstY29ubmVjdC1ydXN0LW1sLXN0YXRpc3RpY3Mvc2NyaXB0cy9jYXB0dXJlX3N0YXRpc3RpY3NfZ29sZGVuLnB5OjY5",
+      "result": {
+        "columns": [
+          "std(features)"
+        ],
+        "rows": [
+          {
+            "std(features)": {
+              "type": 1,
+              "size": null,
+              "indices": null,
+              "values": [
+                2.0816659994661326,
+                0.0,
+                3.1091263510296048
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "metric": "count",
+      "weighted": false,
+      "expr_b64": "MtwDCsgDYskCCr4BGrsBChFhZ2dyZWdhdGVfbWV0cmljcxIUGhIKBWFycmF5EgkKB2oFY291bnQSggESDAoIZmVhdHVyZXMYAJIBcQpvCm0KA2NvbBJmL2hvbWUvcnVpZmVuZy56aGVuZy93b3JrdHJlZXMvc3BhcmstY29ubmVjdC1ydXN0LW1sLXN0YXRpc3RpY3Mvc2NyaXB0cy9jYXB0dXJlX3N0YXRpc3RpY3NfZ29sZGVuLnB5OjY5EgsKCVkAAAAAAADwPxKFAQoHagVjb3VudJIBeQp3CnUKC19fZ2V0aXRlbV9fEmYvaG9tZS9ydWlmZW5nLnpoZW5nL3dvcmt0cmVlcy9zcGFyay1jb25uZWN0LXJ1c3QtbWwtc3RhdGlzdGljcy9zY3JpcHRzL2NhcHR1cmVfc3RhdGlzdGljc19nb2xkZW4ucHk6NjmSAXkKdwp1CgtfX2dldGl0ZW1fXxJmL2hvbWUvcnVpZmVuZy56aGVuZy93b3JrdHJlZXMvc3BhcmstY29ubmVjdC1ydXN0LW1sLXN0YXRpc3RpY3Mvc2NyaXB0cy9jYXB0dXJlX3N0YXRpc3RpY3NfZ29sZGVuLnB5OjY5Eg9jb3VudChmZWF0dXJlcymSAXMKcQpvCgVhbGlhcxJmL2hvbWUvcnVpZmVuZy56aGVuZy93b3JrdHJlZXMvc3BhcmstY29ubmVjdC1ydXN0LW1sLXN0YXRpc3RpY3Mvc2NyaXB0cy9jYXB0dXJlX3N0YXRpc3RpY3NfZ29sZGVuLnB5OjY5",
+      "result": {
+        "columns": [
+          "count(features)"
+        ],
+        "rows": [
+          {
+            "count(features)": 4
+          }
+        ]
+      }
+    },
+    {
+      "metric": "numNonZeros",
+      "weighted": false,
+      "expr_b64": "Mu4DCtQDYtUCCsQBGsEBChFhZ2dyZWdhdGVfbWV0cmljcxIaGhgKBWFycmF5Eg8KDWoLbnVtTm9uWmVyb3MSggESDAoIZmVhdHVyZXMYAJIBcQpvCm0KA2NvbBJmL2hvbWUvcnVpZmVuZy56aGVuZy93b3JrdHJlZXMvc3BhcmstY29ubmVjdC1ydXN0LW1sLXN0YXRpc3RpY3Mvc2NyaXB0cy9jYXB0dXJlX3N0YXRpc3RpY3NfZ29sZGVuLnB5OjY5EgsKCVkAAAAAAADwPxKLAQoNagtudW1Ob25aZXJvc5IBeQp3CnUKC19fZ2V0aXRlbV9fEmYvaG9tZS9ydWlmZW5nLnpoZW5nL3dvcmt0cmVlcy9zcGFyay1jb25uZWN0LXJ1c3QtbWwtc3RhdGlzdGljcy9zY3JpcHRzL2NhcHR1cmVfc3RhdGlzdGljc19nb2xkZW4ucHk6NjmSAXkKdwp1CgtfX2dldGl0ZW1fXxJmL2hvbWUvcnVpZmVuZy56aGVuZy93b3JrdHJlZXMvc3BhcmstY29ubmVjdC1ydXN0LW1sLXN0YXRpc3RpY3Mvc2NyaXB0cy9jYXB0dXJlX3N0YXRpc3RpY3NfZ29sZGVuLnB5OjY5EhVudW1Ob25aZXJvcyhmZWF0dXJlcymSAXMKcQpvCgVhbGlhcxJmL2hvbWUvcnVpZmVuZy56aGVuZy93b3JrdHJlZXMvc3BhcmstY29ubmVjdC1ydXN0LW1sLXN0YXRpc3RpY3Mvc2NyaXB0cy9jYXB0dXJlX3N0YXRpc3RpY3NfZ29sZGVuLnB5OjY5",
+      "result": {
+        "columns": [
+          "numNonZeros(features)"
+        ],
+        "rows": [
+          {
+            "numNonZeros(features)": {
+              "type": 1,
+              "size": null,
+              "indices": null,
+              "values": [
+                4.0,
+                0.0,
+                3.0
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "metric": "max",
+      "weighted": false,
+      "expr_b64": "MtYDCsQDYsUCCrwBGrkBChFhZ2dyZWdhdGVfbWV0cmljcxISGhAKBWFycmF5EgcKBWoDbWF4EoIBEgwKCGZlYXR1cmVzGACSAXEKbwptCgNjb2wSZi9ob21lL3J1aWZlbmcuemhlbmcvd29ya3RyZWVzL3NwYXJrLWNvbm5lY3QtcnVzdC1tbC1zdGF0aXN0aWNzL3NjcmlwdHMvY2FwdHVyZV9zdGF0aXN0aWNzX2dvbGRlbi5weTo2ORILCglZAAAAAAAA8D8SgwEKBWoDbWF4kgF5CncKdQoLX19nZXRpdGVtX18SZi9ob21lL3J1aWZlbmcuemhlbmcvd29ya3RyZWVzL3NwYXJrLWNvbm5lY3QtcnVzdC1tbC1zdGF0aXN0aWNzL3NjcmlwdHMvY2FwdHVyZV9zdGF0aXN0aWNzX2dvbGRlbi5weTo2OZIBeQp3CnUKC19fZ2V0aXRlbV9fEmYvaG9tZS9ydWlmZW5nLnpoZW5nL3dvcmt0cmVlcy9zcGFyay1jb25uZWN0LXJ1c3QtbWwtc3RhdGlzdGljcy9zY3JpcHRzL2NhcHR1cmVfc3RhdGlzdGljc19nb2xkZW4ucHk6NjkSDW1heChmZWF0dXJlcymSAXMKcQpvCgVhbGlhcxJmL2hvbWUvcnVpZmVuZy56aGVuZy93b3JrdHJlZXMvc3BhcmstY29ubmVjdC1ydXN0LW1sLXN0YXRpc3RpY3Mvc2NyaXB0cy9jYXB0dXJlX3N0YXRpc3RpY3NfZ29sZGVuLnB5OjY5",
+      "result": {
+        "columns": [
+          "max(features)"
+        ],
+        "rows": [
+          {
+            "max(features)": {
+              "type": 1,
+              "size": null,
+              "indices": null,
+              "values": [
+                4.0,
+                0.0,
+                5.0
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "metric": "min",
+      "weighted": false,
+      "expr_b64": "MtYDCsQDYsUCCrwBGrkBChFhZ2dyZWdhdGVfbWV0cmljcxISGhAKBWFycmF5EgcKBWoDbWluEoIBEgwKCGZlYXR1cmVzGACSAXEKbwptCgNjb2wSZi9ob21lL3J1aWZlbmcuemhlbmcvd29ya3RyZWVzL3NwYXJrLWNvbm5lY3QtcnVzdC1tbC1zdGF0aXN0aWNzL3NjcmlwdHMvY2FwdHVyZV9zdGF0aXN0aWNzX2dvbGRlbi5weTo2ORILCglZAAAAAAAA8D8SgwEKBWoDbWlukgF5CncKdQoLX19nZXRpdGVtX18SZi9ob21lL3J1aWZlbmcuemhlbmcvd29ya3RyZWVzL3NwYXJrLWNvbm5lY3QtcnVzdC1tbC1zdGF0aXN0aWNzL3NjcmlwdHMvY2FwdHVyZV9zdGF0aXN0aWNzX2dvbGRlbi5weTo2OZIBeQp3CnUKC19fZ2V0aXRlbV9fEmYvaG9tZS9ydWlmZW5nLnpoZW5nL3dvcmt0cmVlcy9zcGFyay1jb25uZWN0LXJ1c3QtbWwtc3RhdGlzdGljcy9zY3JpcHRzL2NhcHR1cmVfc3RhdGlzdGljc19nb2xkZW4ucHk6NjkSDW1pbihmZWF0dXJlcymSAXMKcQpvCgVhbGlhcxJmL2hvbWUvcnVpZmVuZy56aGVuZy93b3JrdHJlZXMvc3BhcmstY29ubmVjdC1ydXN0LW1sLXN0YXRpc3RpY3Mvc2NyaXB0cy9jYXB0dXJlX3N0YXRpc3RpY3NfZ29sZGVuLnB5OjY5",
+      "result": {
+        "columns": [
+          "min(features)"
+        ],
+        "rows": [
+          {
+            "min(features)": {
+              "type": 1,
+              "size": null,
+              "indices": null,
+              "values": [
+                -1.0,
+                0.0,
+                -2.0
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "metric": "normL1",
+      "weighted": false,
+      "expr_b64": "Mt8DCsoDYssCCr8BGrwBChFhZ2dyZWdhdGVfbWV0cmljcxIVGhMKBWFycmF5EgoKCGoGbm9ybUwxEoIBEgwKCGZlYXR1cmVzGACSAXEKbwptCgNjb2wSZi9ob21lL3J1aWZlbmcuemhlbmcvd29ya3RyZWVzL3NwYXJrLWNvbm5lY3QtcnVzdC1tbC1zdGF0aXN0aWNzL3NjcmlwdHMvY2FwdHVyZV9zdGF0aXN0aWNzX2dvbGRlbi5weTo2ORILCglZAAAAAAAA8D8ShgEKCGoGbm9ybUwxkgF5CncKdQoLX19nZXRpdGVtX18SZi9ob21lL3J1aWZlbmcuemhlbmcvd29ya3RyZWVzL3NwYXJrLWNvbm5lY3QtcnVzdC1tbC1zdGF0aXN0aWNzL3NjcmlwdHMvY2FwdHVyZV9zdGF0aXN0aWNzX2dvbGRlbi5weTo2OZIBeQp3CnUKC19fZ2V0aXRlbV9fEmYvaG9tZS9ydWlmZW5nLnpoZW5nL3dvcmt0cmVlcy9zcGFyay1jb25uZWN0LXJ1c3QtbWwtc3RhdGlzdGljcy9zY3JpcHRzL2NhcHR1cmVfc3RhdGlzdGljc19nb2xkZW4ucHk6NjkSEG5vcm1MMShmZWF0dXJlcymSAXMKcQpvCgVhbGlhcxJmL2hvbWUvcnVpZmVuZy56aGVuZy93b3JrdHJlZXMvc3BhcmstY29ubmVjdC1ydXN0LW1sLXN0YXRpc3RpY3Mvc2NyaXB0cy9jYXB0dXJlX3N0YXRpc3RpY3NfZ29sZGVuLnB5OjY5",
+      "result": {
+        "columns": [
+          "normL1(features)"
+        ],
+        "rows": [
+          {
+            "normL1(features)": {
+              "type": 1,
+              "size": null,
+              "indices": null,
+              "values": [
+                8.0,
+                0.0,
+                10.0
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "metric": "normL2",
+      "weighted": false,
+      "expr_b64": "Mt8DCsoDYssCCr8BGrwBChFhZ2dyZWdhdGVfbWV0cmljcxIVGhMKBWFycmF5EgoKCGoGbm9ybUwyEoIBEgwKCGZlYXR1cmVzGACSAXEKbwptCgNjb2wSZi9ob21lL3J1aWZlbmcuemhlbmcvd29ya3RyZWVzL3NwYXJrLWNvbm5lY3QtcnVzdC1tbC1zdGF0aXN0aWNzL3NjcmlwdHMvY2FwdHVyZV9zdGF0aXN0aWNzX2dvbGRlbi5weTo2ORILCglZAAAAAAAA8D8ShgEKCGoGbm9ybUwykgF5CncKdQoLX19nZXRpdGVtX18SZi9ob21lL3J1aWZlbmcuemhlbmcvd29ya3RyZWVzL3NwYXJrLWNvbm5lY3QtcnVzdC1tbC1zdGF0aXN0aWNzL3NjcmlwdHMvY2FwdHVyZV9zdGF0aXN0aWNzX2dvbGRlbi5weTo2OZIBeQp3CnUKC19fZ2V0aXRlbV9fEmYvaG9tZS9ydWlmZW5nLnpoZW5nL3dvcmt0cmVlcy9zcGFyay1jb25uZWN0LXJ1c3QtbWwtc3RhdGlzdGljcy9zY3JpcHRzL2NhcHR1cmVfc3RhdGlzdGljc19nb2xkZW4ucHk6NjkSEG5vcm1MMihmZWF0dXJlcymSAXMKcQpvCgVhbGlhcxJmL2hvbWUvcnVpZmVuZy56aGVuZy93b3JrdHJlZXMvc3BhcmstY29ubmVjdC1ydXN0LW1sLXN0YXRpc3RpY3Mvc2NyaXB0cy9jYXB0dXJlX3N0YXRpc3RpY3NfZ29sZGVuLnB5OjY5",
+      "result": {
+        "columns": [
+          "normL2(features)"
+        ],
+        "rows": [
+          {
+            "normL2(features)": {
+              "type": 1,
+              "size": null,
+              "indices": null,
+              "values": [
+                4.69041575982343,
+                0.0,
+                6.164414002968976
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "metric": null,
+      "weighted": true,
+      "expr_b64": "GpYDChFhZ2dyZWdhdGVfbWV0cmljcxJ5GncKBWFycmF5EggKBmoEbWVhbhIHCgVqA3N1bRIMCgpqCHZhcmlhbmNlEgcKBWoDc3RkEgkKB2oFY291bnQSDwoNagtudW1Ob25aZXJvcxIHCgVqA21heBIHCgVqA21pbhIKCghqBm5vcm1MMRIKCghqBm5vcm1MMhKCARIMCghmZWF0dXJlcxgAkgFxCm8KbQoDY29sEmYvaG9tZS9ydWlmZW5nLnpoZW5nL3dvcmt0cmVlcy9zcGFyay1jb25uZWN0LXJ1c3QtbWwtc3RhdGlzdGljcy9zY3JpcHRzL2NhcHR1cmVfc3RhdGlzdGljc19nb2xkZW4ucHk6NjkSgAESCgoGd2VpZ2h0GACSAXEKbwptCgNjb2wSZi9ob21lL3J1aWZlbmcuemhlbmcvd29ya3RyZWVzL3NwYXJrLWNvbm5lY3QtcnVzdC1tbC1zdGF0aXN0aWNzL3NjcmlwdHMvY2FwdHVyZV9zdGF0aXN0aWNzX2dvbGRlbi5weTo2Nw==",
+      "result": {
+        "columns": [
+          "aggregate_metrics(features, weight)"
+        ],
+        "rows": [
+          {
+            "aggregate_metrics(features, weight)": {
+              "mean": {
+                "type": 1,
+                "size": null,
+                "indices": null,
+                "values": [
+                  2.625,
+                  0.0,
+                  3.125
+                ]
+              },
+              "sum": {
+                "type": 1,
+                "size": null,
+                "indices": null,
+                "values": [
+                  10.5,
+                  0.0,
+                  12.5
+                ]
+              },
+              "variance": {
+                "type": 1,
+                "size": null,
+                "indices": null,
+                "values": [
+                  2.078947368421053,
+                  0.0,
+                  7.7631578947368425
+                ]
+              },
+              "std": {
+                "type": 1,
+                "size": null,
+                "indices": null,
+                "values": [
+                  1.4418555296634448,
+                  0.0,
+                  2.7862444068560897
+                ]
+              },
+              "count": 3,
+              "numNonZeros": {
+                "type": 1,
+                "size": null,
+                "indices": null,
+                "values": [
+                  3.0,
+                  0.0,
+                  3.0
+                ]
+              },
+              "max": {
+                "type": 1,
+                "size": null,
+                "indices": null,
+                "values": [
+                  4.0,
+                  0.0,
+                  5.0
+                ]
+              },
+              "min": {
+                "type": 1,
+                "size": null,
+                "indices": null,
+                "values": [
+                  1.0,
+                  0.0,
+                  -2.0
+                ]
+              },
+              "normL1": {
+                "type": 1,
+                "size": null,
+                "indices": null,
+                "values": [
+                  10.5,
+                  0.0,
+                  14.5
+                ]
+              },
+              "normL2": {
+                "type": 1,
+                "size": null,
+                "indices": null,
+                "values": [
+                  5.70087712549569,
+                  0.0,
+                  7.582875444051551
+                ]
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "metric": "mean",
+      "weighted": true,
+      "expr_b64": "Ms8ECrwEYr0DCrMCGrACChFhZ2dyZWdhdGVfbWV0cmljcxITGhEKBWFycmF5EggKBmoEbWVhbhKCARIMCghmZWF0dXJlcxgAkgFxCm8KbQoDY29sEmYvaG9tZS9ydWlmZW5nLnpoZW5nL3dvcmt0cmVlcy9zcGFyay1jb25uZWN0LXJ1c3QtbWwtc3RhdGlzdGljcy9zY3JpcHRzL2NhcHR1cmVfc3RhdGlzdGljc19nb2xkZW4ucHk6NjkSgAESCgoGd2VpZ2h0GACSAXEKbwptCgNjb2wSZi9ob21lL3J1aWZlbmcuemhlbmcvd29ya3RyZWVzL3NwYXJrLWNvbm5lY3QtcnVzdC1tbC1zdGF0aXN0aWNzL3NjcmlwdHMvY2FwdHVyZV9zdGF0aXN0aWNzX2dvbGRlbi5weTo2NxKEAQoGagRtZWFukgF5CncKdQoLX19nZXRpdGVtX18SZi9ob21lL3J1aWZlbmcuemhlbmcvd29ya3RyZWVzL3NwYXJrLWNvbm5lY3QtcnVzdC1tbC1zdGF0aXN0aWNzL3NjcmlwdHMvY2FwdHVyZV9zdGF0aXN0aWNzX2dvbGRlbi5weTo2OZIBeQp3CnUKC19fZ2V0aXRlbV9fEmYvaG9tZS9ydWlmZW5nLnpoZW5nL3dvcmt0cmVlcy9zcGFyay1jb25uZWN0LXJ1c3QtbWwtc3RhdGlzdGljcy9zY3JpcHRzL2NhcHR1cmVfc3RhdGlzdGljc19nb2xkZW4ucHk6NjkSDm1lYW4oZmVhdHVyZXMpkgFzCnEKbwoFYWxpYXMSZi9ob21lL3J1aWZlbmcuemhlbmcvd29ya3RyZWVzL3NwYXJrLWNvbm5lY3QtcnVzdC1tbC1zdGF0aXN0aWNzL3NjcmlwdHMvY2FwdHVyZV9zdGF0aXN0aWNzX2dvbGRlbi5weTo2OQ==",
+      "result": {
+        "columns": [
+          "mean(features)"
+        ],
+        "rows": [
+          {
+            "mean(features)": {
+              "type": 1,
+              "size": null,
+              "indices": null,
+              "values": [
+                2.625,
+                0.0,
+                3.125
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "metric": "sum",
+      "weighted": true,
+      "expr_b64": "MswECroEYrsDCrICGq8CChFhZ2dyZWdhdGVfbWV0cmljcxISGhAKBWFycmF5EgcKBWoDc3VtEoIBEgwKCGZlYXR1cmVzGACSAXEKbwptCgNjb2wSZi9ob21lL3J1aWZlbmcuemhlbmcvd29ya3RyZWVzL3NwYXJrLWNvbm5lY3QtcnVzdC1tbC1zdGF0aXN0aWNzL3NjcmlwdHMvY2FwdHVyZV9zdGF0aXN0aWNzX2dvbGRlbi5weTo2ORKAARIKCgZ3ZWlnaHQYAJIBcQpvCm0KA2NvbBJmL2hvbWUvcnVpZmVuZy56aGVuZy93b3JrdHJlZXMvc3BhcmstY29ubmVjdC1ydXN0LW1sLXN0YXRpc3RpY3Mvc2NyaXB0cy9jYXB0dXJlX3N0YXRpc3RpY3NfZ29sZGVuLnB5OjY3EoMBCgVqA3N1bZIBeQp3CnUKC19fZ2V0aXRlbV9fEmYvaG9tZS9ydWlmZW5nLnpoZW5nL3dvcmt0cmVlcy9zcGFyay1jb25uZWN0LXJ1c3QtbWwtc3RhdGlzdGljcy9zY3JpcHRzL2NhcHR1cmVfc3RhdGlzdGljc19nb2xkZW4ucHk6NjmSAXkKdwp1CgtfX2dldGl0ZW1fXxJmL2hvbWUvcnVpZmVuZy56aGVuZy93b3JrdHJlZXMvc3BhcmstY29ubmVjdC1ydXN0LW1sLXN0YXRpc3RpY3Mvc2NyaXB0cy9jYXB0dXJlX3N0YXRpc3RpY3NfZ29sZGVuLnB5OjY5Eg1zdW0oZmVhdHVyZXMpkgFzCnEKbwoFYWxpYXMSZi9ob21lL3J1aWZlbmcuemhlbmcvd29ya3RyZWVzL3NwYXJrLWNvbm5lY3QtcnVzdC1tbC1zdGF0aXN0aWNzL3NjcmlwdHMvY2FwdHVyZV9zdGF0aXN0aWNzX2dvbGRlbi5weTo2OQ==",
+      "result": {
+        "columns": [
+          "sum(features)"
+        ],
+        "rows": [
+          {
+            "sum(features)": {
+              "type": 1,
+              "size": null,
+              "indices": null,
+              "values": [
+                10.5,
+                0.0,
+                12.5
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "metric": "variance",
+      "weighted": true,
+      "expr_b64": "MtsECsQEYsUDCrcCGrQCChFhZ2dyZWdhdGVfbWV0cmljcxIXGhUKBWFycmF5EgwKCmoIdmFyaWFuY2USggESDAoIZmVhdHVyZXMYAJIBcQpvCm0KA2NvbBJmL2hvbWUvcnVpZmVuZy56aGVuZy93b3JrdHJlZXMvc3BhcmstY29ubmVjdC1ydXN0LW1sLXN0YXRpc3RpY3Mvc2NyaXB0cy9jYXB0dXJlX3N0YXRpc3RpY3NfZ29sZGVuLnB5OjY5EoABEgoKBndlaWdodBgAkgFxCm8KbQoDY29sEmYvaG9tZS9ydWlmZW5nLnpoZW5nL3dvcmt0cmVlcy9zcGFyay1jb25uZWN0LXJ1c3QtbWwtc3RhdGlzdGljcy9zY3JpcHRzL2NhcHR1cmVfc3RhdGlzdGljc19nb2xkZW4ucHk6NjcSiAEKCmoIdmFyaWFuY2WSAXkKdwp1CgtfX2dldGl0ZW1fXxJmL2hvbWUvcnVpZmVuZy56aGVuZy93b3JrdHJlZXMvc3BhcmstY29ubmVjdC1ydXN0LW1sLXN0YXRpc3RpY3Mvc2NyaXB0cy9jYXB0dXJlX3N0YXRpc3RpY3NfZ29sZGVuLnB5OjY5kgF5CncKdQoLX19nZXRpdGVtX18SZi9ob21lL3J1aWZlbmcuemhlbmcvd29ya3RyZWVzL3NwYXJrLWNvbm5lY3QtcnVzdC1tbC1zdGF0aXN0aWNzL3NjcmlwdHMvY2FwdHVyZV9zdGF0aXN0aWNzX2dvbGRlbi5weTo2ORISdmFyaWFuY2UoZmVhdHVyZXMpkgFzCnEKbwoFYWxpYXMSZi9ob21lL3J1aWZlbmcuemhlbmcvd29ya3RyZWVzL3NwYXJrLWNvbm5lY3QtcnVzdC1tbC1zdGF0aXN0aWNzL3NjcmlwdHMvY2FwdHVyZV9zdGF0aXN0aWNzX2dvbGRlbi5weTo2OQ==",
+      "result": {
+        "columns": [
+          "variance(features)"
+        ],
+        "rows": [
+          {
+            "variance(features)": {
+              "type": 1,
+              "size": null,
+              "indices": null,
+              "values": [
+                2.078947368421053,
+                0.0,
+                7.7631578947368425
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "metric": "std",
+      "weighted": true,
+      "expr_b64": "MswECroEYrsDCrICGq8CChFhZ2dyZWdhdGVfbWV0cmljcxISGhAKBWFycmF5EgcKBWoDc3RkEoIBEgwKCGZlYXR1cmVzGACSAXEKbwptCgNjb2wSZi9ob21lL3J1aWZlbmcuemhlbmcvd29ya3RyZWVzL3NwYXJrLWNvbm5lY3QtcnVzdC1tbC1zdGF0aXN0aWNzL3NjcmlwdHMvY2FwdHVyZV9zdGF0aXN0aWNzX2dvbGRlbi5weTo2ORKAARIKCgZ3ZWlnaHQYAJIBcQpvCm0KA2NvbBJmL2hvbWUvcnVpZmVuZy56aGVuZy93b3JrdHJlZXMvc3BhcmstY29ubmVjdC1ydXN0LW1sLXN0YXRpc3RpY3Mvc2NyaXB0cy9jYXB0dXJlX3N0YXRpc3RpY3NfZ29sZGVuLnB5OjY3EoMBCgVqA3N0ZJIBeQp3CnUKC19fZ2V0aXRlbV9fEmYvaG9tZS9ydWlmZW5nLnpoZW5nL3dvcmt0cmVlcy9zcGFyay1jb25uZWN0LXJ1c3QtbWwtc3RhdGlzdGljcy9zY3JpcHRzL2NhcHR1cmVfc3RhdGlzdGljc19nb2xkZW4ucHk6NjmSAXkKdwp1CgtfX2dldGl0ZW1fXxJmL2hvbWUvcnVpZmVuZy56aGVuZy93b3JrdHJlZXMvc3BhcmstY29ubmVjdC1ydXN0LW1sLXN0YXRpc3RpY3Mvc2NyaXB0cy9jYXB0dXJlX3N0YXRpc3RpY3NfZ29sZGVuLnB5OjY5Eg1zdGQoZmVhdHVyZXMpkgFzCnEKbwoFYWxpYXMSZi9ob21lL3J1aWZlbmcuemhlbmcvd29ya3RyZWVzL3NwYXJrLWNvbm5lY3QtcnVzdC1tbC1zdGF0aXN0aWNzL3NjcmlwdHMvY2FwdHVyZV9zdGF0aXN0aWNzX2dvbGRlbi5weTo2OQ==",
+      "result": {
+        "columns": [
+          "std(features)"
+        ],
+        "rows": [
+          {
+            "std(features)": {
+              "type": 1,
+              "size": null,
+              "indices": null,
+              "values": [
+                1.4418555296634448,
+                0.0,
+                2.7862444068560897
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "metric": "count",
+      "weighted": true,
+      "expr_b64": "MtIECr4EYr8DCrQCGrECChFhZ2dyZWdhdGVfbWV0cmljcxIUGhIKBWFycmF5EgkKB2oFY291bnQSggESDAoIZmVhdHVyZXMYAJIBcQpvCm0KA2NvbBJmL2hvbWUvcnVpZmVuZy56aGVuZy93b3JrdHJlZXMvc3BhcmstY29ubmVjdC1ydXN0LW1sLXN0YXRpc3RpY3Mvc2NyaXB0cy9jYXB0dXJlX3N0YXRpc3RpY3NfZ29sZGVuLnB5OjY5EoABEgoKBndlaWdodBgAkgFxCm8KbQoDY29sEmYvaG9tZS9ydWlmZW5nLnpoZW5nL3dvcmt0cmVlcy9zcGFyay1jb25uZWN0LXJ1c3QtbWwtc3RhdGlzdGljcy9zY3JpcHRzL2NhcHR1cmVfc3RhdGlzdGljc19nb2xkZW4ucHk6NjcShQEKB2oFY291bnSSAXkKdwp1CgtfX2dldGl0ZW1fXxJmL2hvbWUvcnVpZmVuZy56aGVuZy93b3JrdHJlZXMvc3BhcmstY29ubmVjdC1ydXN0LW1sLXN0YXRpc3RpY3Mvc2NyaXB0cy9jYXB0dXJlX3N0YXRpc3RpY3NfZ29sZGVuLnB5OjY5kgF5CncKdQoLX19nZXRpdGVtX18SZi9ob21lL3J1aWZlbmcuemhlbmcvd29ya3RyZWVzL3NwYXJrLWNvbm5lY3QtcnVzdC1tbC1zdGF0aXN0aWNzL3NjcmlwdHMvY2FwdHVyZV9zdGF0aXN0aWNzX2dvbGRlbi5weTo2ORIPY291bnQoZmVhdHVyZXMpkgFzCnEKbwoFYWxpYXMSZi9ob21lL3J1aWZlbmcuemhlbmcvd29ya3RyZWVzL3NwYXJrLWNvbm5lY3QtcnVzdC1tbC1zdGF0aXN0aWNzL3NjcmlwdHMvY2FwdHVyZV9zdGF0aXN0aWNzX2dvbGRlbi5weTo2OQ==",
+      "result": {
+        "columns": [
+          "count(features)"
+        ],
+        "rows": [
+          {
+            "count(features)": 3
+          }
+        ]
+      }
+    },
+    {
+      "metric": "numNonZeros",
+      "weighted": true,
+      "expr_b64": "MuQECsoEYssDCroCGrcCChFhZ2dyZWdhdGVfbWV0cmljcxIaGhgKBWFycmF5Eg8KDWoLbnVtTm9uWmVyb3MSggESDAoIZmVhdHVyZXMYAJIBcQpvCm0KA2NvbBJmL2hvbWUvcnVpZmVuZy56aGVuZy93b3JrdHJlZXMvc3BhcmstY29ubmVjdC1ydXN0LW1sLXN0YXRpc3RpY3Mvc2NyaXB0cy9jYXB0dXJlX3N0YXRpc3RpY3NfZ29sZGVuLnB5OjY5EoABEgoKBndlaWdodBgAkgFxCm8KbQoDY29sEmYvaG9tZS9ydWlmZW5nLnpoZW5nL3dvcmt0cmVlcy9zcGFyay1jb25uZWN0LXJ1c3QtbWwtc3RhdGlzdGljcy9zY3JpcHRzL2NhcHR1cmVfc3RhdGlzdGljc19nb2xkZW4ucHk6NjcSiwEKDWoLbnVtTm9uWmVyb3OSAXkKdwp1CgtfX2dldGl0ZW1fXxJmL2hvbWUvcnVpZmVuZy56aGVuZy93b3JrdHJlZXMvc3BhcmstY29ubmVjdC1ydXN0LW1sLXN0YXRpc3RpY3Mvc2NyaXB0cy9jYXB0dXJlX3N0YXRpc3RpY3NfZ29sZGVuLnB5OjY5kgF5CncKdQoLX19nZXRpdGVtX18SZi9ob21lL3J1aWZlbmcuemhlbmcvd29ya3RyZWVzL3NwYXJrLWNvbm5lY3QtcnVzdC1tbC1zdGF0aXN0aWNzL3NjcmlwdHMvY2FwdHVyZV9zdGF0aXN0aWNzX2dvbGRlbi5weTo2ORIVbnVtTm9uWmVyb3MoZmVhdHVyZXMpkgFzCnEKbwoFYWxpYXMSZi9ob21lL3J1aWZlbmcuemhlbmcvd29ya3RyZWVzL3NwYXJrLWNvbm5lY3QtcnVzdC1tbC1zdGF0aXN0aWNzL3NjcmlwdHMvY2FwdHVyZV9zdGF0aXN0aWNzX2dvbGRlbi5weTo2OQ==",
+      "result": {
+        "columns": [
+          "numNonZeros(features)"
+        ],
+        "rows": [
+          {
+            "numNonZeros(features)": {
+              "type": 1,
+              "size": null,
+              "indices": null,
+              "values": [
+                3.0,
+                0.0,
+                3.0
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "metric": "max",
+      "weighted": true,
+      "expr_b64": "MswECroEYrsDCrICGq8CChFhZ2dyZWdhdGVfbWV0cmljcxISGhAKBWFycmF5EgcKBWoDbWF4EoIBEgwKCGZlYXR1cmVzGACSAXEKbwptCgNjb2wSZi9ob21lL3J1aWZlbmcuemhlbmcvd29ya3RyZWVzL3NwYXJrLWNvbm5lY3QtcnVzdC1tbC1zdGF0aXN0aWNzL3NjcmlwdHMvY2FwdHVyZV9zdGF0aXN0aWNzX2dvbGRlbi5weTo2ORKAARIKCgZ3ZWlnaHQYAJIBcQpvCm0KA2NvbBJmL2hvbWUvcnVpZmVuZy56aGVuZy93b3JrdHJlZXMvc3BhcmstY29ubmVjdC1ydXN0LW1sLXN0YXRpc3RpY3Mvc2NyaXB0cy9jYXB0dXJlX3N0YXRpc3RpY3NfZ29sZGVuLnB5OjY3EoMBCgVqA21heJIBeQp3CnUKC19fZ2V0aXRlbV9fEmYvaG9tZS9ydWlmZW5nLnpoZW5nL3dvcmt0cmVlcy9zcGFyay1jb25uZWN0LXJ1c3QtbWwtc3RhdGlzdGljcy9zY3JpcHRzL2NhcHR1cmVfc3RhdGlzdGljc19nb2xkZW4ucHk6NjmSAXkKdwp1CgtfX2dldGl0ZW1fXxJmL2hvbWUvcnVpZmVuZy56aGVuZy93b3JrdHJlZXMvc3BhcmstY29ubmVjdC1ydXN0LW1sLXN0YXRpc3RpY3Mvc2NyaXB0cy9jYXB0dXJlX3N0YXRpc3RpY3NfZ29sZGVuLnB5OjY5Eg1tYXgoZmVhdHVyZXMpkgFzCnEKbwoFYWxpYXMSZi9ob21lL3J1aWZlbmcuemhlbmcvd29ya3RyZWVzL3NwYXJrLWNvbm5lY3QtcnVzdC1tbC1zdGF0aXN0aWNzL3NjcmlwdHMvY2FwdHVyZV9zdGF0aXN0aWNzX2dvbGRlbi5weTo2OQ==",
+      "result": {
+        "columns": [
+          "max(features)"
+        ],
+        "rows": [
+          {
+            "max(features)": {
+              "type": 1,
+              "size": null,
+              "indices": null,
+              "values": [
+                4.0,
+                0.0,
+                5.0
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "metric": "min",
+      "weighted": true,
+      "expr_b64": "MswECroEYrsDCrICGq8CChFhZ2dyZWdhdGVfbWV0cmljcxISGhAKBWFycmF5EgcKBWoDbWluEoIBEgwKCGZlYXR1cmVzGACSAXEKbwptCgNjb2wSZi9ob21lL3J1aWZlbmcuemhlbmcvd29ya3RyZWVzL3NwYXJrLWNvbm5lY3QtcnVzdC1tbC1zdGF0aXN0aWNzL3NjcmlwdHMvY2FwdHVyZV9zdGF0aXN0aWNzX2dvbGRlbi5weTo2ORKAARIKCgZ3ZWlnaHQYAJIBcQpvCm0KA2NvbBJmL2hvbWUvcnVpZmVuZy56aGVuZy93b3JrdHJlZXMvc3BhcmstY29ubmVjdC1ydXN0LW1sLXN0YXRpc3RpY3Mvc2NyaXB0cy9jYXB0dXJlX3N0YXRpc3RpY3NfZ29sZGVuLnB5OjY3EoMBCgVqA21pbpIBeQp3CnUKC19fZ2V0aXRlbV9fEmYvaG9tZS9ydWlmZW5nLnpoZW5nL3dvcmt0cmVlcy9zcGFyay1jb25uZWN0LXJ1c3QtbWwtc3RhdGlzdGljcy9zY3JpcHRzL2NhcHR1cmVfc3RhdGlzdGljc19nb2xkZW4ucHk6NjmSAXkKdwp1CgtfX2dldGl0ZW1fXxJmL2hvbWUvcnVpZmVuZy56aGVuZy93b3JrdHJlZXMvc3BhcmstY29ubmVjdC1ydXN0LW1sLXN0YXRpc3RpY3Mvc2NyaXB0cy9jYXB0dXJlX3N0YXRpc3RpY3NfZ29sZGVuLnB5OjY5Eg1taW4oZmVhdHVyZXMpkgFzCnEKbwoFYWxpYXMSZi9ob21lL3J1aWZlbmcuemhlbmcvd29ya3RyZWVzL3NwYXJrLWNvbm5lY3QtcnVzdC1tbC1zdGF0aXN0aWNzL3NjcmlwdHMvY2FwdHVyZV9zdGF0aXN0aWNzX2dvbGRlbi5weTo2OQ==",
+      "result": {
+        "columns": [
+          "min(features)"
+        ],
+        "rows": [
+          {
+            "min(features)": {
+              "type": 1,
+              "size": null,
+              "indices": null,
+              "values": [
+                1.0,
+                0.0,
+                -2.0
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "metric": "normL1",
+      "weighted": true,
+      "expr_b64": "MtUECsAEYsEDCrUCGrICChFhZ2dyZWdhdGVfbWV0cmljcxIVGhMKBWFycmF5EgoKCGoGbm9ybUwxEoIBEgwKCGZlYXR1cmVzGACSAXEKbwptCgNjb2wSZi9ob21lL3J1aWZlbmcuemhlbmcvd29ya3RyZWVzL3NwYXJrLWNvbm5lY3QtcnVzdC1tbC1zdGF0aXN0aWNzL3NjcmlwdHMvY2FwdHVyZV9zdGF0aXN0aWNzX2dvbGRlbi5weTo2ORKAARIKCgZ3ZWlnaHQYAJIBcQpvCm0KA2NvbBJmL2hvbWUvcnVpZmVuZy56aGVuZy93b3JrdHJlZXMvc3BhcmstY29ubmVjdC1ydXN0LW1sLXN0YXRpc3RpY3Mvc2NyaXB0cy9jYXB0dXJlX3N0YXRpc3RpY3NfZ29sZGVuLnB5OjY3EoYBCghqBm5vcm1MMZIBeQp3CnUKC19fZ2V0aXRlbV9fEmYvaG9tZS9ydWlmZW5nLnpoZW5nL3dvcmt0cmVlcy9zcGFyay1jb25uZWN0LXJ1c3QtbWwtc3RhdGlzdGljcy9zY3JpcHRzL2NhcHR1cmVfc3RhdGlzdGljc19nb2xkZW4ucHk6NjmSAXkKdwp1CgtfX2dldGl0ZW1fXxJmL2hvbWUvcnVpZmVuZy56aGVuZy93b3JrdHJlZXMvc3BhcmstY29ubmVjdC1ydXN0LW1sLXN0YXRpc3RpY3Mvc2NyaXB0cy9jYXB0dXJlX3N0YXRpc3RpY3NfZ29sZGVuLnB5OjY5EhBub3JtTDEoZmVhdHVyZXMpkgFzCnEKbwoFYWxpYXMSZi9ob21lL3J1aWZlbmcuemhlbmcvd29ya3RyZWVzL3NwYXJrLWNvbm5lY3QtcnVzdC1tbC1zdGF0aXN0aWNzL3NjcmlwdHMvY2FwdHVyZV9zdGF0aXN0aWNzX2dvbGRlbi5weTo2OQ==",
+      "result": {
+        "columns": [
+          "normL1(features)"
+        ],
+        "rows": [
+          {
+            "normL1(features)": {
+              "type": 1,
+              "size": null,
+              "indices": null,
+              "values": [
+                10.5,
+                0.0,
+                14.5
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "metric": "normL2",
+      "weighted": true,
+      "expr_b64": "MtUECsAEYsEDCrUCGrICChFhZ2dyZWdhdGVfbWV0cmljcxIVGhMKBWFycmF5EgoKCGoGbm9ybUwyEoIBEgwKCGZlYXR1cmVzGACSAXEKbwptCgNjb2wSZi9ob21lL3J1aWZlbmcuemhlbmcvd29ya3RyZWVzL3NwYXJrLWNvbm5lY3QtcnVzdC1tbC1zdGF0aXN0aWNzL3NjcmlwdHMvY2FwdHVyZV9zdGF0aXN0aWNzX2dvbGRlbi5weTo2ORKAARIKCgZ3ZWlnaHQYAJIBcQpvCm0KA2NvbBJmL2hvbWUvcnVpZmVuZy56aGVuZy93b3JrdHJlZXMvc3BhcmstY29ubmVjdC1ydXN0LW1sLXN0YXRpc3RpY3Mvc2NyaXB0cy9jYXB0dXJlX3N0YXRpc3RpY3NfZ29sZGVuLnB5OjY3EoYBCghqBm5vcm1MMpIBeQp3CnUKC19fZ2V0aXRlbV9fEmYvaG9tZS9ydWlmZW5nLnpoZW5nL3dvcmt0cmVlcy9zcGFyay1jb25uZWN0LXJ1c3QtbWwtc3RhdGlzdGljcy9zY3JpcHRzL2NhcHR1cmVfc3RhdGlzdGljc19nb2xkZW4ucHk6NjmSAXkKdwp1CgtfX2dldGl0ZW1fXxJmL2hvbWUvcnVpZmVuZy56aGVuZy93b3JrdHJlZXMvc3BhcmstY29ubmVjdC1ydXN0LW1sLXN0YXRpc3RpY3Mvc2NyaXB0cy9jYXB0dXJlX3N0YXRpc3RpY3NfZ29sZGVuLnB5OjY5EhBub3JtTDIoZmVhdHVyZXMpkgFzCnEKbwoFYWxpYXMSZi9ob21lL3J1aWZlbmcuemhlbmcvd29ya3RyZWVzL3NwYXJrLWNvbm5lY3QtcnVzdC1tbC1zdGF0aXN0aWNzL3NjcmlwdHMvY2FwdHVyZV9zdGF0aXN0aWNzX2dvbGRlbi5weTo2OQ==",
+      "result": {
+        "columns": [
+          "normL2(features)"
+        ],
+        "rows": [
+          {
+            "normL2(features)": {
+              "type": 1,
+              "size": null,
+              "indices": null,
+              "values": [
+                5.70087712549569,
+                0.0,
+                7.582875444051551
+              ]
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "grouped": {
+    "columns": [
+      "group_id",
+      "summary"
+    ],
+    "rows": [
+      {
+        "group_id": 0,
+        "summary": {
+          "mean": {
+            "type": 1,
+            "size": null,
+            "indices": null,
+            "values": [
+              1.8,
+              0.0,
+              2.0
+            ]
+          },
+          "count": 2
+        }
+      },
+      {
+        "group_id": 1,
+        "summary": {
+          "mean": {
+            "type": 1,
+            "size": null,
+            "indices": null,
+            "values": [
+              4.0,
+              0.0,
+              5.0
+            ]
+          },
+          "count": 1
+        }
+      }
+    ]
+  }
+}

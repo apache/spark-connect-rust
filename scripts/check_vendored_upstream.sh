@@ -146,7 +146,7 @@ VENDORED_FILES=(
   "ml/pipeline.py"
   "ml/recommendation.py"
   "ml/regression.py"
-  "ml/stat.py"
+  # ml/stat.py is a Rust-backed shim; it is not vendored.
   "ml/tree.py"
   "ml/tuning.py"
   "ml/wrapper.py"
