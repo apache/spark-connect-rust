@@ -310,7 +310,10 @@ native_pymethods! {
 }
 
 /// `extra`, or `dict()` of None, as `copy` takes it.
-fn extra_or_empty<'py>(py: Python<'py>, extra: Option<&Bound<'py, PyAny>>) -> Bound<'py, PyAny> {
+pub(super) fn extra_or_empty<'py>(
+    py: Python<'py>,
+    extra: Option<&Bound<'py, PyAny>>,
+) -> Bound<'py, PyAny> {
     match extra.filter(|extra| !extra.is_none()) {
         Some(extra) => extra.clone(),
         None => PyDict::new(py).into_any(),
@@ -424,8 +427,8 @@ pub(super) fn save_with_stages(
     let py = instance.py();
     let stages = stages.try_iter()?.collect::<PyResult<Vec<_>>>()?;
     for stage in &stages {
-        // As `validateStages`, whose `MLWritable` is an object that writes.
-        if !stage.hasattr("write")? {
+        // As `validateStages`.
+        if !writable(stage)? {
             return Err(PyValueError::new_err((
                 "Pipeline write will fail on this pipeline because stage %s of type %s is not \
                  MLWritable",
@@ -458,6 +461,29 @@ pub(super) fn save_with_stages(
             .call_method1("save", (stage_path,))?;
     }
     Ok(())
+}
+
+/// Whether `obj` writes, as PySpark's `isinstance(obj, MLWritable)`: an `MLWritable` of PySpark's,
+/// or an object of a native class (or of a Python subclass of one), which has PySpark's `write`
+/// but is no subclass of `MLWritable`, a plain class that no class can be registered with.
+pub(super) fn writable(obj: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let py = obj.py();
+    let ml_writable = py.import("pyspark.ml.util")?.getattr("MLWritable")?;
+    if obj.is_instance(&ml_writable)? {
+        return Ok(true);
+    }
+    let natives = py.import("pyspark._pyspark")?;
+    for class in obj.get_type().getattr("__mro__")?.try_iter()? {
+        let class = class?;
+        let name = class.getattr("__name__")?;
+        let native = natives
+            .getattr(name.cast::<pyo3::types::PyString>()?)
+            .is_ok_and(|native| native.is(&class));
+        if native {
+            return obj.hasattr("write");
+        }
+    }
+    Ok(false)
 }
 
 /// Load the pipeline at `path`, as `PipelineReader.load`: `Pipeline(stages=stages)._resetUid(uid)`.

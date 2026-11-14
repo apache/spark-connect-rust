@@ -81,10 +81,15 @@ def converter_name(param):
 
 
 def instance_of(cls):
-    try:
-        return cls()
-    except Exception:  # noqa: BLE001 - a class that needs arguments has no default instance
-        return None
+    """A default instance of `cls`: of no arguments, or of the model or the models that the
+    constructor of a model of a meta-algorithm takes (`CrossValidatorModel(None)`,
+    `OneVsRestModel([])`), whose defaults its class sets as well."""
+    for args in ((), (None,), ([],)):
+        try:
+            return cls(*args)
+        except Exception:  # noqa: BLE001 - a class that needs other arguments has none
+            continue
+    return None
 
 
 def parameters_of(func, bound):

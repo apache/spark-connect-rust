@@ -741,7 +741,8 @@ else the multinomial one.
 ## Native Pipeline and PipelineModel
 
 `pyspark.ml.connect.Pipeline` and `pyspark.ml.connect.PipelineModel` are PySpark's `Pipeline` and
-`PipelineModel` of `pyspark.ml.pipeline`, natively, as PySpark 4.3.0 has them over Spark Connect:
+`PipelineModel` of `pyspark.ml.pipeline`, natively and in full, as PySpark 4.3.0 has them over
+Spark Connect:
 
 - **Stages:** the stages are any estimators and transformers: the native classes,
   `pyspark.ml`'s, or the user's.
@@ -759,17 +760,66 @@ else the multinomial one.
   as the native class of `pyspark.ml.connect` of its name where one loads, else as PySpark's
   class. An overwrite deletes the path by the ML helper first, as `RemoteMLWriter` does.
 
-To save native stages, use the native `Pipeline`. The vendored `pyspark.ml.Pipeline` fits and
-transforms them, but its save raises the `ValueError` of a stage that is not `MLWritable`: the
-native classes are not subclasses of `pyspark.ml.util.MLWritable`, a plain class (not an ABC)
-that they cannot be registered with.
+To save native stages, use the native `Pipeline` (or the native validators). The vendored
+`pyspark.ml.Pipeline` fits and transforms them, but its save raises the `ValueError` of a stage
+that is not `MLWritable`: the native classes are not subclasses of `pyspark.ml.util.MLWritable`, a
+plain class (not an ABC) that they cannot be registered with. The native meta-algorithms take an
+object of a native class as writable, and any other object only if it is an `MLWritable`, as
+PySpark does.
 
-`spark_connect::ml::CrossValidator` and `pyspark.ml.connect.CrossValidator` do not fit yet:
-- their `fit` raises `NOT_IMPLEMENTED` (`PySparkNotImplementedError` in Python), naming
-  `CrossValidator.fit`, before any request is sent;
-- to tune a model from Python, use the vendored `pyspark.ml.tuning.CrossValidator`.
+## Native validators
 
-`spark_connect::ml::Pipeline`, which holds stage names, does not fit either.
+`pyspark.ml.connect.tuning` has PySpark's validators of `pyspark.ml.tuning`, natively and in full,
+as PySpark 4.3.0 has them over Spark Connect: `CrossValidator`, `CrossValidatorModel`,
+`TrainValidationSplit` and `TrainValidationSplitModel`. Its `ParamGridBuilder` is PySpark's own
+class.
+
+- **Estimators and evaluators:** any estimator and evaluator, of the native classes, of
+  `pyspark.ml`, or of the user's. A Pipeline is an estimator too.
+- **Fit:** `fit` is the `_fit` of PySpark's class, on the client:
+  - The splits are those of PySpark's: of `CrossValidator`, `numFolds` folds of a column
+    `<uid>_rand` of `rand(seed)`, or the folds of the numbers of `foldCol`; of
+    `TrainValidationSplit`, the rows of `rand(seed)` below `trainRatio` train. A fold number out
+    of `[0, numFolds)` fails the fit, and so does an empty fold, as PySpark raises them.
+  - Each split is cached while its models are fitted and evaluated, as `_cache_spark_dataset`
+    caches it.
+  - The fits of the param maps run in a pool of `parallelism` threads, of the estimator's
+    `fitMultiple`, as PySpark's `_parallelFitTasks`.
+  - `collectSubModels` keeps the model of each fold and param map.
+  - The metrics are PySpark's: the mean and standard deviation of numpy over the folds
+    (`avgMetrics`, `stdMetrics`), or the metric of each param map (`validationMetrics`), and the
+    best of them by `isLargerBetter`.
+  - The best param map is fitted on the whole dataset, in a model of a new uid that gets the
+    params of the validator, as `_copyValues` gives them.
+- **Models:** `bestModel`, the metrics and `subModels` are attributes of the instance, as
+  PySpark's. `transform` transforms by the best model. `copy` copies the best model and the
+  sub-models, and a model of no sub-models fails as PySpark's `assert` does.
+- **Copy:** `CrossValidator.copy` and `TrainValidationSplit.copy` keep the uid and copy the
+  estimator and the evaluator with the extra params. The param maps stay the same.
+- **Persistence:** of PySpark's Python format (`_ValidatorSharedReadWrite`):
+  - the metadata of `pyspark.ml.tuning.CrossValidator` (or the others) and of its params, in
+    PySpark's order. The param maps are of the JSON of each value, or the path of a value that is
+    a stage (`epm_<name><n>`).
+  - the estimator and the evaluator at `estimator` and `evaluator`, and a model's best model at
+    `bestModel`. The sub-models are at `subModels`, of the writer's option `persistSubModels`
+    (by default of whether the model has them).
+
+  PySpark loads what this client saves, and this client loads what PySpark saves. A load of a
+  model of a cross validation repeats one list of the sub-models for each fold, as PySpark's
+  reader does.
+- **Checks of a save:** as PySpark's, a validator saves only if its estimator, the stages that
+  the estimator nests, and its evaluator write, and each param of its param maps is a param of one
+  of them. A nested validator is refused.
+
+The native Pipeline, PipelineModel and validators are registered as virtual subclasses of
+PySpark's classes of them (`pyspark.ml.Pipeline`, `pyspark.ml.tuning.CrossValidator`, ...). So
+`isinstance` checks of PySpark's classes hold of them, and PySpark's `MetaAlgorithmReadWrite`
+reads the nested stages of a native Pipeline.
+
+The Rust API has the splits of the validators, `k_fold` and `train_validation_split`.
+`spark_connect::ml::CrossValidator`, which holds its numeric params only, and
+`spark_connect::ml::Pipeline`, which holds stage names, do not fit yet: their `fit` raises
+`NOT_IMPLEMENTED`.
 
 ## pyspark.ml
 

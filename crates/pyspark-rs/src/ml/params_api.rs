@@ -526,6 +526,15 @@ fn default_value<T: ParamsHolder>(
         .transpose()
 }
 
+/// The default of the param `name` of `slf`, as `_defaultParamMap[param]`: the one that `slf`
+/// holds itself, else the one of its class, if any.
+pub(super) fn default_of<T: ParamsHolder>(
+    slf: &Bound<'_, T>,
+    name: &str,
+) -> PyResult<Option<Py<PyAny>>> {
+    default_value(slf, get_param_meta(slf.as_any(), name)?)
+}
+
 /// The defaults of `slf`, of its params that have one, as `_defaultParamMap`.
 fn defaults_of<T: ParamsHolder>(slf: &Bound<'_, T>) -> PyResult<OwnDefaults> {
     let mut defaults = Vec::new();

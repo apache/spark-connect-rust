@@ -279,11 +279,11 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ml::PyRegressionEvaluator>()?;
     m.add_class::<ml::PyBinaryClassificationEvaluator>()?;
     ml::pipeline_api::register(m)?;
+    ml::tuning_api::register(m)?;
     m.add_class::<ml::PyMulticlassClassificationEvaluator>()?;
     m.add_class::<ml::PyClusteringEvaluator>()?;
     m.add_class::<ml::PyMultilabelClassificationEvaluator>()?;
     m.add_class::<ml::PyRankingEvaluator>()?;
-    m.add_class::<ml::PyCrossValidator>()?;
 
     // Register functions as a submodule
     let functions_module = PyModule::new(_py, "functions")?;
