@@ -2533,6 +2533,21 @@ impl FMClassifier {
         self.params.long_opt("seed")
     }
 
+    /// Fit the typed FM classification model, whose training summary the model holds.
+    pub fn fit(
+        &mut self,
+        df: &DataFrame,
+    ) -> spark_connect_core::error::Result<FMClassificationModel> {
+        let info = fit_via_command(&self.operator, &self.params, df)?;
+        let mut model = self.model_from_info(info, &df.session)?;
+        model.summary_target = Some(
+            MlTarget::object(&model.cached)
+                .child("summary")
+                .with_summary_dataset(df),
+        );
+        Ok(model)
+    }
+
     fn model_from_info(
         &self,
         info: proto::ml_command_result::MlOperatorInfo,
@@ -2547,6 +2562,7 @@ impl FMClassifier {
             ),
             params: self.params.clone(),
             cached,
+            summary_target: None,
         })
     }
 }
@@ -2572,8 +2588,7 @@ impl Estimator for FMClassifier {
     }
 
     fn fit_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<Box<dyn Model>> {
-        let info = fit_via_command(&self.operator, &self.params, df)?;
-        Ok(Box::new(self.model_from_info(info, &df.session)?))
+        Ok(Box::new(self.fit(df)?))
     }
 }
 
@@ -2586,6 +2601,9 @@ pub struct FMClassificationModel {
     operator: MlOperator,
     params: Params,
     cached: CachedModel,
+    /// The target of the training summary, which a fit sets (`hasSummary` of PySpark's
+    /// `HasTrainingSummary`); None of a loaded model.
+    summary_target: Option<MlTarget>,
 }
 
 impl Transformer for FMClassificationModel {
@@ -2807,6 +2825,21 @@ impl MultilayerPerceptronClassifier {
         self.params.double_array_opt("thresholds")
     }
 
+    /// Fit the typed MLP classification model, whose training summary the model holds.
+    pub fn fit(
+        &mut self,
+        df: &DataFrame,
+    ) -> spark_connect_core::error::Result<MultilayerPerceptronClassificationModel> {
+        let info = fit_via_command(&self.operator, &self.params, df)?;
+        let mut model = self.model_from_info(info, &df.session)?;
+        model.summary_target = Some(
+            MlTarget::object(&model.cached)
+                .child("summary")
+                .with_summary_dataset(df),
+        );
+        Ok(model)
+    }
+
     fn model_from_info(
         &self,
         info: proto::ml_command_result::MlOperatorInfo,
@@ -2821,6 +2854,7 @@ impl MultilayerPerceptronClassifier {
             ),
             params: self.params.clone(),
             cached,
+            summary_target: None,
         })
     }
 }
@@ -2846,8 +2880,7 @@ impl Estimator for MultilayerPerceptronClassifier {
     }
 
     fn fit_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<Box<dyn Model>> {
-        let info = fit_via_command(&self.operator, &self.params, df)?;
-        Ok(Box::new(self.model_from_info(info, &df.session)?))
+        Ok(Box::new(self.fit(df)?))
     }
 }
 
@@ -2860,6 +2893,9 @@ pub struct MultilayerPerceptronClassificationModel {
     operator: MlOperator,
     params: Params,
     cached: CachedModel,
+    /// The target of the training summary, which a fit sets (`hasSummary` of PySpark's
+    /// `HasTrainingSummary`); None of a loaded model.
+    summary_target: Option<MlTarget>,
 }
 
 impl Transformer for MultilayerPerceptronClassificationModel {
@@ -3078,7 +3114,7 @@ impl OneVsRest {
         df: &DataFrame,
         num_classes: usize,
         threads: usize,
-    ) -> spark_connect_core::error::Result<Box<dyn Model>> {
+    ) -> spark_connect_core::error::Result<OneVsRestModel> {
         use crate::column::{lit_double, when};
         use std::sync::atomic::{AtomicUsize, Ordering};
         let classifier = self
@@ -3162,7 +3198,7 @@ impl OneVsRest {
             .into_iter()
             .map(|(_, model)| model)
             .collect::<spark_connect_core::error::Result<Vec<_>>>()?;
-        Ok(Box::new(OneVsRestModel {
+        Ok(OneVsRestModel {
             operator: MlOperator::with_uid(
                 "org.apache.spark.ml.classification.OneVsRestModel",
                 &self.operator.uid,
@@ -3171,7 +3207,7 @@ impl OneVsRest {
             params: self.params.clone(),
             models,
             session_id: df.session.session_id().to_string(),
-        }))
+        })
     }
 }
 
@@ -3209,6 +3245,13 @@ impl Estimator for OneVsRest {
         &mut self.params
     }
     fn fit_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<Box<dyn Model>> {
+        Ok(Box::new(self.fit(df)?))
+    }
+}
+
+impl OneVsRest {
+    /// Fit the typed OneVsRest model, of one fitted binary classifier per class.
+    pub fn fit(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<OneVsRestModel> {
         // The params are checked before any request. The Python client, which raises PySpark's
         // errors in PySpark's order, reads the max label first, with `max_label` and `fit_classes`.
         self.check_required_params()?;
@@ -5119,6 +5162,12 @@ impl NaiveBayes {
         self.params.string_opt("weightCol")
     }
 
+    /// Fit the typed Naive Bayes model, which holds the server-side model object.
+    pub fn fit(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<NaiveBayesModel> {
+        let info = fit_via_command(&self.operator, &self.params, df)?;
+        self.model_from_info(info, &df.session)
+    }
+
     fn model_from_info(
         &self,
         info: proto::ml_command_result::MlOperatorInfo,
@@ -5158,8 +5207,7 @@ impl Estimator for NaiveBayes {
     }
 
     fn fit_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<Box<dyn Model>> {
-        let info = fit_via_command(&self.operator, &self.params, df)?;
-        Ok(Box::new(self.model_from_info(info, &df.session)?))
+        Ok(Box::new(self.fit(df)?))
     }
 }
 
