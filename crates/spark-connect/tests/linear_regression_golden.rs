@@ -12,7 +12,7 @@ fn linear_regression_parameters_match_official_pyspark() {
         .unwrap();
     let expected = spark_connect_proto::MlParams::decode(bytes.as_slice()).unwrap();
     let estimator = LinearRegression::new()
-        .set_feature_col("input")
+        .set_features_col("input")
         .set_label_col("target")
         .set_prediction_col("pred")
         .set_max_iter(50)

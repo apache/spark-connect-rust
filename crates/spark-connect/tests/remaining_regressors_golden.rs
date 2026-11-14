@@ -14,7 +14,7 @@ fn remaining_regressors_match_official_parameters() {
         Box::new(AFTSurvivalRegression::new()),
         Box::new(
             AFTSurvivalRegression::new()
-                .set_feature_col("input")
+                .set_features_col("input")
                 .set_label_col("duration")
                 .set_prediction_col("pred")
                 .set_fit_intercept(false)
@@ -29,7 +29,7 @@ fn remaining_regressors_match_official_parameters() {
         Box::new(IsotonicRegression::new()),
         Box::new(
             IsotonicRegression::new()
-                .set_feature_col("input")
+                .set_features_col("input")
                 .set_label_col("target")
                 .set_prediction_col("pred")
                 .set_weight_col("weight")
@@ -39,7 +39,7 @@ fn remaining_regressors_match_official_parameters() {
         Box::new(FMRegressor::new()),
         Box::new(
             FMRegressor::new()
-                .set_feature_col("input")
+                .set_features_col("input")
                 .set_label_col("target")
                 .set_prediction_col("pred")
                 .set_factor_size(2)

@@ -11,7 +11,7 @@ fn generalized_linear_regression_parameters_match_official_pyspark() {
     .unwrap();
     let configured = GeneralizedLinearRegression::new()
         .set_label_col("target")
-        .set_feature_col("input")
+        .set_features_col("input")
         .set_prediction_col("pred")
         .set_family("tweedie")
         .set_link("log")
