@@ -245,7 +245,7 @@ def writer_v2_reduce(
     )
 
 
-def _worker_grouped(
+def _worker_grouped(  # pragma: no cover - only the server's worker runs it
     frame: Any,
     group_type: str,
     cols: list[Any],
@@ -283,7 +283,9 @@ def grouped_reduce(
     )
 
 
-def _worker_cogrouped(left: Any, right: Any) -> Any:
+def _worker_cogrouped(  # pragma: no cover - only the server's worker runs it
+    left: Any, right: Any
+) -> Any:
     """PySpark's PandasCogroupedOps of the two grouped data ``left`` and ``right``."""
     from pyspark.sql.connect.group import PandasCogroupedOps
 
@@ -434,7 +436,7 @@ def builder_reduce(
     return creator, (options, channel_builder, hook_factories)
 
 
-def _worker_streaming_query(
+def _worker_streaming_query(  # pragma: no cover - only the server's worker runs it
     session: Any, query_id: str, run_id: str, name: Optional[str]
 ) -> Any:
     """PySpark's StreamingQuery of ``session``, of the ID of the query, of its run and of its

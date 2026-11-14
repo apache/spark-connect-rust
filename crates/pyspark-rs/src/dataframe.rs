@@ -3805,6 +3805,10 @@ pub struct PyDataFrameWriter {
     /// refuses, which PySpark keeps and fails each write with, as its `WriteOperation.command`
     /// sets it in the proto; the core writer then has no bucketing.
     refused_bucket_count: std::sync::Arc<std::sync::Mutex<Option<Py<PyAny>>>>,
+    /// The bucket columns of that `bucketBy`, which PySpark keeps with the count: a pickle
+    /// gives them back with it, so that PySpark's writer of the state on a Python worker of the
+    /// server, which replays `bucketBy`, takes them.
+    refused_bucket_cols: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     /// The format, the partitioning columns and the save mode that PySpark keeps as they are,
     /// and whose `WriteOperation.command` converts, or resolves, at each write ([`UnsentArgs`]).
     unsent: std::sync::Arc<std::sync::Mutex<UnsentArgs>>,
@@ -3834,6 +3838,7 @@ impl PyDataFrameWriter {
         PyDataFrameWriter {
             inner: std::sync::Arc::new(WriterState::new(writer)),
             refused_bucket_count: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            refused_bucket_cols: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             unsent: std::sync::Arc::new(std::sync::Mutex::new(UnsentArgs::default())),
             frame,
         }
@@ -3963,6 +3968,12 @@ impl PyDataFrameWriter {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    fn refused_bucket_cols(&self) -> std::sync::MutexGuard<'_, Vec<String>> {
+        self.refused_bucket_cols
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// Fail a write of a bucket count that the proto refuses, as PySpark's
     /// `WriteOperation.command`, which sets the count after the input plan and before the path,
     /// the table name and the save mode, so before any request; each write fails again.
@@ -4018,6 +4029,7 @@ impl PyDataFrameWriter {
         PyDataFrameWriter {
             inner: std::sync::Arc::clone(&self.inner),
             refused_bucket_count: std::sync::Arc::clone(&self.refused_bucket_count),
+            refused_bucket_cols: std::sync::Arc::clone(&self.refused_bucket_cols),
             unsent: std::sync::Arc::clone(&self.unsent),
             frame: self.frame.clone_ref(py),
         }
@@ -4037,6 +4049,11 @@ impl PyDataFrameWriter {
             .refused_bucket_count()
             .as_ref()
             .map(|n| n.clone_ref(py));
+        // The core writer has no bucketing of a refused count, whose columns are kept aside.
+        let bucket_cols = match refused {
+            Some(_) => self.refused_bucket_cols().clone(),
+            None => writer.get_bucket_cols().to_vec(),
+        };
         let (kept_format, kept_partition, kept_clustering, kept_mode) = {
             let unsent = self.unsent();
             let kept = |object: &Option<Py<PyAny>>| object.as_ref().map(|o| o.clone_ref(py));
@@ -4056,7 +4073,7 @@ impl PyDataFrameWriter {
                 str_dict(py, writer.get_options())?.into_any(),
                 PyList::new(py, writer.get_partition_cols())?.into_any(),
                 writer.get_num_buckets().into_pyobject(py)?.into_any(),
-                PyList::new(py, writer.get_bucket_cols())?.into_any(),
+                PyList::new(py, bucket_cols)?.into_any(),
                 PyList::new(py, writer.get_sort_cols())?.into_any(),
                 PyList::new(py, writer.get_cluster_cols())?.into_any(),
                 optional_object(py, refused.as_ref()),
@@ -4117,6 +4134,10 @@ impl PyDataFrameWriter {
         if !partition_cols.is_empty() {
             writer = writer.partition_by(partition_cols);
         }
+        let refused_cols = match refused {
+            Some(_) => bucket_cols.clone(),
+            None => Vec::new(),
+        };
         if let Some(num_buckets) = num_buckets {
             writer = writer.bucket_by(num_buckets, bucket_cols);
         }
@@ -4128,6 +4149,7 @@ impl PyDataFrameWriter {
         }
         let restored = PyDataFrameWriter::new(writer, frame);
         *restored.refused_bucket_count() = refused;
+        *restored.refused_bucket_cols() = refused_cols;
         *restored.unsent() = UnsentArgs {
             format: kept_format,
             partition: kept_partition,
@@ -4224,21 +4246,22 @@ impl PyDataFrameWriter {
         // As PySpark's, the last call wins: a count that is not positive, or one that the
         // proto refuses, leaves no bucketing of an earlier call on the writer.
         let writer = slf.borrow();
-        let refused = match num_buckets {
+        let (refused, refused_cols) = match num_buckets {
             BucketCount::Count(count) => {
                 writer.inner.update(|w| w.bucket_by(count, columns));
-                None
+                (None, Vec::new())
             }
             BucketCount::Unsent => {
                 writer.inner.update(|w| w.clear_bucket_by());
-                None
+                (None, Vec::new())
             }
             BucketCount::Refused(count) => {
                 writer.inner.update(|w| w.clear_bucket_by());
-                Some(count.unbind())
+                (Some(count.unbind()), columns)
             }
         };
         *writer.refused_bucket_count() = refused;
+        *writer.refused_bucket_cols() = refused_cols;
         Ok(slf.clone())
     }
 

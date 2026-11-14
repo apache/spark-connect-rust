@@ -26537,6 +26537,67 @@ def test_worker_reconstructors_rebuild_the_readers_writers_and_streams_as_pyspar
     assert type(rebuilt).__name__ == "DataStreamWriter"
 
 
+def test_worker_reconstructors_replay_every_setting_as_pyspark(mock_connect, monkeypatch):
+    # As the test above, for the settings that it does not set: with pyspark._pyspark hidden, the
+    # reconstructor of each object replays its buckets, its sorting, its clustering, the table
+    # settings of a V2 writer, the schema of a stream reader, and the partitioning, the trigger
+    # and the function of a stream writer, so that the rebuilt object has the same state. A
+    # bucket count that the proto refuses fails the write of the rebuilt writer, as PySpark's. A
+    # Column of the state, such as a V2 writer's partitioning, is rebuilt by PySpark's own
+    # Column classes, which only a worker has: the e2e tests of foreachBatch cover it.
+    import sys
+
+    import cloudpickle
+    import pyspark
+    from pyspark.sql import Column
+
+    def comparable(value):
+        # The state, without the DataFrame or session that it starts with, and with each Column
+        # and function as its text and name, which a copy keeps.
+        if isinstance(value, Column):
+            return str(value)
+        if callable(value):
+            return value.__name__
+        if isinstance(value, (list, tuple)):
+            return [comparable(item) for item in value]
+        if isinstance(value, dict):
+            return {key: comparable(item) for key, item in value.items()}
+        return value
+
+    def on_batch(batch_df, batch_id):
+        pass
+
+    def on_row(row):
+        pass
+
+    spark, _ = mock_connect
+    df = spark.range(3)
+    objects = [
+        df.write.bucketBy(2, "id").sortBy("id"),
+        df.write.clusterBy("id"),
+        df.writeTo("t").using("parquet").option("k", "v").tableProperty("p", "q").clusterBy("id"),
+        spark.readStream.format("rate").schema("id LONG"),
+        df.writeStream.partitionBy("id").trigger(processingTime="1 second")
+        .foreachBatch(on_batch),
+        df.writeStream.clusterBy("id").trigger(once=True).foreach(on_row),
+    ]
+    states = [comparable(obj.__reduce__()[1][1:]) for obj in objects]
+    refused = df.write.bucketBy(2**40, "id")
+    builder = SparkSession.Builder().config("k", "v")
+    builder._registerHook(lambda session: None)
+    monkeypatch.delattr(pyspark, "_pyspark")
+    monkeypatch.setitem(sys.modules, "pyspark._pyspark", None)
+    for obj, state in zip(objects, states):
+        rebuilt = cloudpickle.loads(cloudpickle.dumps(obj))
+        assert type(rebuilt) is type(obj)
+        assert comparable(rebuilt.__reduce__()[1][1:]) == state
+    with pytest.raises(ValueError):
+        cloudpickle.loads(cloudpickle.dumps(refused)).save("p")
+    # The builder of a worker is rebuilt by the same calls, which keep its options and hooks.
+    options, _, hooks = cloudpickle.loads(cloudpickle.dumps(builder)).__reduce__()[1]
+    assert options == [("k", "v")] and len(hooks) == 1
+
+
 def test_plain_pickles_name_the_session_creator_as_pyspark(mock_connect):
     # As PySpark's: a plain pickle of an object that holds the session fails at the session's
     # creator, which the message names, and so does a plain pickle of the session itself.
