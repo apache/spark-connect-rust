@@ -1595,7 +1595,7 @@ fn logistic_regression_fits_and_predicts_with_cached_models() {
         "SELECT id, array(CAST(x AS DOUBLE)) AS xs          FROM VALUES (0, -3.5), (1, -1.5), (2, 1.5), (3, 3.5) AS t(id, x)",
     ).unwrap());
     let mut estimator = LogisticRegression::new()
-        .set_feature_col("input")
+        .set_features_col("input")
         .set_label_col("target")
         .set_prediction_col("pred")
         .set_max_iter(30);
@@ -1717,7 +1717,7 @@ fn logistic_regression_model_is_deleted_from_the_server_when_its_last_owner_is_d
         "SELECT id, array(CAST(x AS DOUBLE)) AS xs FROM VALUES (0, -3.5), (1, -1.5), (2, 1.5), (3, 3.5) AS t(id, x)",
     ).unwrap());
     let mut estimator = LogisticRegression::new()
-        .set_feature_col("input")
+        .set_features_col("input")
         .set_label_col("target")
         .set_prediction_col("pred")
         .set_max_iter(30);

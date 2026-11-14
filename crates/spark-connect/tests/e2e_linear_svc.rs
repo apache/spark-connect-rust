@@ -50,7 +50,7 @@ fn linear_svc_fits_separate_models_and_predicts_on_unseen_data() {
         "input",
     );
     let mut estimator = LinearSVC::new()
-        .set_feature_col("input")
+        .set_features_col("input")
         .set_label_col("target")
         .set_prediction_col("pred")
         .set_raw_prediction_col("margin")
@@ -223,7 +223,7 @@ fn linear_svc_model_is_deleted_from_the_server_when_its_last_owner_is_dropped() 
         "input",
     );
     let mut estimator = LinearSVC::new()
-        .set_feature_col("input")
+        .set_features_col("input")
         .set_label_col("target")
         .set_max_iter(10);
     let before = cached_models(&s);

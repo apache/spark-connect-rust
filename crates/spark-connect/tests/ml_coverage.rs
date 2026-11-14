@@ -25,11 +25,11 @@ fn ml_estimators_setters_getters_proto() {
     assert_eq!(ma.output_col(), "s");
 
     let lr = LogisticRegression::new()
-        .set_feature_col("f")
+        .set_features_col("f")
         .set_label_col("l")
         .set_prediction_col("p")
         .set_max_iter(10);
-    assert_eq!(lr.feature_col(), "f");
+    assert_eq!(lr.features_col(), "f");
     assert_eq!(lr.label_col(), "l");
     assert_eq!(lr.prediction_col(), "p");
     assert_eq!(lr.max_iter(), 10);

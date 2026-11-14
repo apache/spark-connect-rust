@@ -995,8 +995,7 @@ fn model_setters_set_the_params_of_the_transform() {
         .set_prediction_col("p")
         .set_probability_col("q")
         .set_raw_prediction_col("r")
-        .set_threshold(0.7)
-        .set_thresholds([0.4, 0.6]);
+        .set_threshold(0.7);
     let params = Transformer::params(&model).to_proto();
     let literal = |name: &str| params.params[name].literal_type.clone();
     assert_eq!(
@@ -1016,10 +1015,18 @@ fn model_setters_set_the_params_of_the_transform() {
         Some(LiteralType::String("r".into()))
     );
     assert_eq!(literal("threshold"), Some(LiteralType::Double(0.7)));
-    let Some(LiteralType::Array(thresholds)) = literal("thresholds") else {
-        panic!("thresholds is not an array");
-    };
-    assert_eq!(thresholds.elements.len(), 2);
+    // The threshold logic of PySpark over Spark Connect, on the model (reference probe): the
+    // setters leave the other param set, so the thresholds that disagree with the threshold
+    // raise the consistency error, and `thresholds` of two classes give the threshold.
+    let model = model.set_thresholds([0.4, 0.6]);
+    assert!(params_of(&model).contains_key("threshold"));
+    let message = "Logistic Regression getThreshold found inconsistent values for threshold (0.7) \
+                   and thresholds (equivalent to 0.6)";
+    assert_eq!(model.threshold().unwrap_err().to_string(), message);
+    assert_eq!(model.thresholds().unwrap_err().to_string(), message);
+    let model = model.set_threshold(0.6);
+    assert_eq!(model.thresholds().unwrap(), vec![1.0 - 0.6, 0.6]);
+    assert!((model.threshold().unwrap() - 0.6).abs() < 1e-12);
 
     let entry = &persistence["LinearSVC.model"];
     server.expect(&entry["load"]);
@@ -1045,4 +1052,16 @@ fn model_setters_set_the_params_of_the_transform() {
         Some(LiteralType::String("r".into()))
     );
     assert_eq!(literal("threshold"), Some(LiteralType::Double(0.7)));
+}
+
+/// The params of a model's transform, as the wire sends them.
+fn params_of(
+    model: &LogisticRegressionModel,
+) -> std::collections::HashMap<String, spark_connect_proto::expression::literal::LiteralType> {
+    Transformer::params(model)
+        .to_proto()
+        .params
+        .into_iter()
+        .filter_map(|(name, literal)| literal.literal_type.map(|t| (name, t)))
+        .collect()
 }
