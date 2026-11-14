@@ -25,6 +25,7 @@ import gc
 import os
 
 import pytest
+from _native_classes import native_class
 from pyspark.loose_version import LooseVersion
 
 # The generated pyspark.sql.connect.proto, of Apache Spark v4.3.0, needs protobuf >= 6.33.5.
@@ -482,20 +483,25 @@ def test_ml_connect_evaluators_take_spark_columns_and_reject_pandas(session):
                 evaluator.evaluate(binary.toPandas())
     auroc = BinaryClassificationEvaluator(rawPredictionCol="prob2").evaluate(binary)
     assert auroc == pytest.approx(2 / 3)
-    with pytest.raises(AttributeError, match="'list' object has no attribute 'select'"):
+    # Another object raises the AttributeError of its sparkSession, which pyspark.ml's
+    # try_remote_evaluate reads first, as PySpark 4.3.0 does.
+    with pytest.raises(AttributeError, match="'list' object has no attribute 'sparkSession'"):
         accuracy.evaluate([(1, 1)])
 
 
 def test_native_ml_accepts_explicitly_converted_pandas(session):
     import pandas as pd
     import pyspark.ml.connect as connect
+    from pyspark.ml.functions import array_to_vector
     from pyspark.sql import DataFrame
 
     # Exercise the native bindings, independently of the deprecated Python ML implementations.
     assert connect.KMeans is __import__("pyspark._pyspark", fromlist=["KMeans"]).KMeans
     pdf = pd.DataFrame({"features": [[0.0, 1.0], [1.0, 0.0], [2.0, 2.0], [3.0, 1.0]],
                         "label": [0.0, 1.0, 1.0, 0.0]})
-    df = session.createDataFrame(pdf)
+    # The estimators take the vectors of pyspark.ml, so the arrays of the converted frame are
+    # converted to vectors explicitly too.
+    df = session.createDataFrame(pdf).withColumn("features", array_to_vector("features"))
     for estimator in [connect.LogisticRegression(maxIter=5), connect.KMeans(k=2, seed=1)]:
         with pytest.raises(TypeError, match="requires a Spark DataFrame"):
             estimator.fit(pdf)
@@ -519,30 +525,77 @@ def test_native_ml_accepts_explicitly_converted_pandas(session):
         evaluator.evaluate(scored)
     assert evaluator.evaluate(session.createDataFrame(scored)) == pytest.approx(0.28867513459481287)
 
-def test_ml_connect_columns_spelled_in_another_case_than_the_schema_as_pyspark(session):
-    # As Spark resolves a column name regardless of case: a native fit, transform and evaluate
-    # whose params spell a column FEATURES, LABEL or PREDICTION, which the schema spells in lower
-    # case, read the column as the schema spells it, as the JVM reads the params it is given.
-    from pyspark.ml.connect import KMeans
-    from pyspark.ml.connect.classification import LogisticRegression
+
+def _vector_rows(session, labels, label_type=None):
+    # The features of the example of the deprecated LogisticRegression of pyspark.ml.connect, as
+    # the vectors that pyspark.ml takes, with the labels `labels`, of the type `label_type` unless
+    # they are doubles.
+    from pyspark.ml.linalg import Vectors, VectorUDT
+    from pyspark.sql import types as T
+
+    features = [[1.0, 2.0], [2.0, -1.0], [-3.0, -2.0], [-1.0, -2.0]]
+    schema = T.StructType([
+        T.StructField("features", VectorUDT()),
+        T.StructField("label", label_type or T.DoubleType()),
+    ])
+    rows = [(Vectors.dense(f), label) for f, label in zip(features, labels)]
+    return session.createDataFrame(rows, schema)
+
+
+def test_ml_connect_column_params_are_read_by_their_exact_names_as_pyspark(session):
+    # As pyspark.ml, which sends the column params as they are given: the JVM reads a column of a
+    # fit by its exact name, so that a featuresCol or a labelCol of another case than the schema
+    # raises its FIELD_NOT_FOUND, as does the transform of a KMeans model, while the transform of
+    # a LogisticRegression model resolves its featuresCol, of the values of PySpark 4.3.0. The
+    # test passes with the reference client too.
+    from pyspark.errors import IllegalArgumentException
+
+    KMeans = native_class("pyspark.ml.connect.clustering", "KMeans", "pyspark.ml.clustering")
+    LogisticRegression = native_class(
+        "pyspark.ml.connect.classification", "LogisticRegression", "pyspark.ml.classification"
+    )
+
+    def field_not_found(run, field, fields):
+        with pytest.raises(IllegalArgumentException) as error:
+            run()
+        assert error.value.getCondition() == "FIELD_NOT_FOUND"
+        assert str(error.value).splitlines()[0] == (
+            f"[FIELD_NOT_FOUND] No such struct field `{field}` in {fields}. SQLSTATE: 42704"
+        )
+
+    train = _vector_rows(session, [1.0, 1.0, 0.0, 0.0])
+    upper = train.withColumnRenamed("features", "Features")
+    field_not_found(
+        lambda: KMeans(k=2, seed=1, featuresCol="FEATURES").fit(train),
+        "FEATURES", "`features`, `label`",
+    )
+    clusters = KMeans(k=2, seed=1).fit(train)
+    field_not_found(lambda: clusters.transform(upper).columns, "features", "`Features`, `label`")
+    field_not_found(
+        lambda: LogisticRegression(maxIter=5, featuresCol="Features").fit(train),
+        "Features", "`features`, `label`",
+    )
+    field_not_found(
+        lambda: LogisticRegression(maxIter=5, labelCol="LABEL").fit(train),
+        "LABEL", "`features`, `label`",
+    )
+    field_not_found(
+        lambda: LogisticRegression(maxIter=5).fit(upper), "features", "`Features`, `label`"
+    )
+    model = LogisticRegression(maxIter=5).fit(train)
+    transformed = model.transform(upper)
+    assert transformed.columns == ["Features", "label", "rawPrediction", "probability", "prediction"]
+    assert [row.prediction for row in transformed.collect()] == [1.0, 1.0, 0.0, 0.0]
+
+
+def test_ml_connect_evaluators_read_columns_by_their_exact_names_as_pyspark(session):
+    # As pyspark.ml's evaluators, which send their column params as they are given: a native
+    # evaluate of the predictionCol PREDICTION, which the schema spells prediction, raises the
+    # JVM's FIELD_NOT_FOUND of PREDICTION, and one of the exact name evaluates. The estimators and
+    # models send their column params as they are given too: see
+    # test_ml_connect_column_params_are_read_by_their_exact_names_as_pyspark.
     from pyspark.ml.connect.evaluation import RegressionEvaluator
 
-    train = session.sql(
-        "select * from values (array(0.0D, 1.0D), 0.0D), (array(1.0D, 0.0D), 1.0D), "
-        "(array(2.0D, 2.0D), 1.0D), (array(3.0D, 1.0D), 0.0D) as t(features, label)"
-    )
-    model = KMeans(k=2, seed=1, featuresCol="FEATURES").fit(train)
-    out = model.transform(train.selectExpr("features AS FEATURES", "label")).toPandas()
-    assert list(out.columns) == ["FEATURES", "label", "prediction"]
-    assert set(out["prediction"]) <= {0, 1}
-
-    fitted = LogisticRegression(featuresCol="FEATURES", labelCol="LABEL", maxIter=5).fit(
-        train.selectExpr("features AS FEATURES", "label AS LABEL")
-    )
-    out = fitted.transform(train.selectExpr("features AS FEATURES", "label")).toPandas()
-    assert list(out.columns) == ["FEATURES", "label", "prediction", "probability"]
-
-    # Standard evaluators require exact schema field names, as official PySpark does.
     scored = session.sql(
         "select label AS LABEL, cast(label AS double) AS prediction "
         "from values (1.0D), (2.0D) as t(label)"
@@ -553,124 +606,191 @@ def test_ml_connect_columns_spelled_in_another_case_than_the_schema_as_pyspark(s
     assert metric == pytest.approx(0.0)
 
 
-def test_ml_connect_estimators_accept_arrays_and_native_scaler_vectors(session):
-    from pyspark.ml.connect.classification import LogisticRegression
-    from pyspark.ml.connect.clustering import KMeans
-    from pyspark.ml.connect.feature import MaxAbsScaler
+def test_ml_connect_estimators_and_scalers_take_vectors_not_arrays_as_pyspark(session):
+    # As pyspark.ml's, the native estimators and scalers read the vectors of their featuresCol or
+    # inputCol: the JVM raises its error of an array column, in a fit and when the transform of a
+    # model fitted on vectors is analyzed, so that arrays are converted with array_to_vector. The
+    # scalers output vectors, the input of the next estimator: StandardScaler, of withMean=False and
+    # withStd=True by default, scales without centering. The values are those of PySpark 4.3.0,
+    # and the test passes with the reference client too.
+    from pyspark.errors import IllegalArgumentException
     from pyspark.ml.functions import array_to_vector
 
-    # LogisticRegression is Spark's JVM estimator here, without the torch params of PySpark's
-    # (learningRate), and the labels are ints, as in PySpark's example, whose columns its model
-    # outputs: a bigint prediction, and then the array<double> of the probabilities.
-    labeled = session.createDataFrame(
-        [([1.0, 2.0], 1), ([2.0, -1.0], 1), ([-3.0, -2.0], 0), ([-1.0, -2.0], 0)],
-        schema=["features", "label"],
+    LogisticRegression = native_class(
+        "pyspark.ml.connect.classification", "LogisticRegression", "pyspark.ml.classification"
     )
-    model = LogisticRegression(maxIter=20).fit(labeled)
-    transformed = model.transform(labeled)
-    assert transformed.schema.simpleString() == (
-        "struct<features:array<double>,label:bigint,prediction:bigint,probability:array<double>>"
+    KMeans = native_class("pyspark.ml.connect.clustering", "KMeans", "pyspark.ml.clustering")
+    MaxAbsScaler = native_class("pyspark.ml.connect.feature", "MaxAbsScaler", "pyspark.ml.feature")
+    StandardScaler = native_class(
+        "pyspark.ml.connect.feature", "StandardScaler", "pyspark.ml.feature"
     )
-    rows = transformed.collect()
-    assert [(row.features, row.prediction) for row in rows] == [
-        ([1.0, 2.0], 1),
-        ([2.0, -1.0], 1),
-        ([-3.0, -2.0], 0),
-        ([-1.0, -2.0], 0),
-    ]
-    assert all(type(row.prediction) is int for row in rows)
-    for row in rows:
-        assert sum(row.probability) == pytest.approx(1.0)
-        assert row.probability.index(max(row.probability)) == row.prediction
-
-    # A native scaler output can feed the next estimator.
-    scaler = MaxAbsScaler(inputCol="features", outputCol="scaled")
-    vectors = labeled.withColumn("features", array_to_vector("features"))
-    scaled = scaler.fit(vectors).transform(vectors)
-    model = LogisticRegression(featuresCol="scaled", maxIter=20).fit(scaled)
-    assert [row.prediction for row in model.transform(scaled).collect()] == [1, 1, 0, 0]
-    clusters = KMeans(featuresCol="scaled", k=2, seed=1).fit(scaled).transform(scaled)
-    assert clusters.schema["scaled"].dataType.simpleString() == "vector"
-    assert len({row.prediction for row in clusters.collect()}) == 2
-
-
-def test_ml_connect_logistic_regression_checks_its_labels_as_pyspark(session):
-    # As PySpark's LogisticRegression._fit, of the distinct labels of its query, which skips a
-    # null label: at least two, each an integer in [0, numClasses). The ValueErrors are those of
-    # PySpark 4.3.0, raised before the fit, which the JVM estimator would otherwise fit or reject.
-    from pyspark.ml.connect.classification import LogisticRegression
 
     features = [[1.0, 2.0], [2.0, -1.0], [-3.0, -2.0], [-1.0, -2.0]]
-
-    def labeled(labels, label_type="double"):
-        rows = [(f, label) for f, label in zip(features, labels)]
-        return session.createDataFrame(rows, f"features array<double>, label {label_type}")
-
-    too_few = "Training dataset distinct labels must >= 2."
-    not_index = "Training labels must be integers in [0, numClasses)."
-    for labels, message in [
-        ([1.0, 1.0, 1.0, 1.0], too_few),
-        ([0.0, 0.0, 0.0, 0.0], too_few),
-        ([0.0, 0.0, 2.0, 2.0], not_index),
-        ([1.0, 1.0, 2.0, 2.0], not_index),
-        ([-1.0, -1.0, 1.0, 1.0], not_index),
-        ([0.5, 0.5, 1.0, 1.0], not_index),
+    arrays = session.createDataFrame(
+        [(f, label) for f, label in zip(features, [1, 1, 0, 0])], schema=["features", "label"]
+    )
+    vectors = arrays.withColumn("features", array_to_vector("features"))
+    vector = (
+        "requirement failed: Column features must be of type class "
+        "org.apache.spark.ml.linalg.VectorUDT:struct<type:tinyint,size:int,indices:array<int>,"
+        "values:array<double>> but was actually class org.apache.spark.sql.types.ArrayType:"
+        "array<double>."
+    )
+    # KMeans also takes an array whose elements cannot be null, which those of createDataFrame can.
+    compatible = (
+        "requirement failed: Column features must be of type equal to one of the following "
+        "types: [struct<type:tinyint,size:int,indices:array<int>,values:array<double>>, "
+        "array<double>, array<float>] but was actually of type array<double>."
+    )
+    max_abs = MaxAbsScaler(inputCol="features", outputCol="scaled")
+    standard = StandardScaler(inputCol="features", outputCol="scaled")
+    for estimator, message in [
+        (LogisticRegression(maxIter=20), vector),
+        (KMeans(k=2, seed=1), compatible),
+        (max_abs, vector),
+        (standard, vector),
     ]:
-        with pytest.raises(ValueError) as error:
-            LogisticRegression(maxIter=5).fit(labeled(labels))
-        assert str(error.value) == message, labels
-    with pytest.raises(ValueError) as error:
-        LogisticRegression(maxIter=5).fit(labeled(["a", "a", "b", "b"], "string"))
-    assert str(error.value) == not_index
-    # The labels of a DataFrame of no rows have no distinct labels.
-    with pytest.raises(ValueError) as error:
-        LogisticRegression(maxIter=5).fit(labeled([], "double"))
-    assert str(error.value) == too_few
+        for run in (
+            lambda: estimator.fit(arrays),
+            lambda: estimator.fit(vectors).transform(arrays).columns,
+        ):
+            with pytest.raises(IllegalArgumentException) as error:
+                run()
+            assert str(error.value).splitlines()[0] == message, estimator
+
+    def scaled(scaler):
+        transformed = scaler.fit(vectors).transform(vectors)
+        assert transformed.schema["scaled"].dataType.simpleString() == "vector"
+        return transformed, [row.scaled.toArray().tolist() for row in transformed.collect()]
+
+    max_abs_scaled, values = scaled(max_abs)
+    for got, want in zip(values, [[1 / 3, 1.0], [2 / 3, -0.5], [-1.0, -1.0], [-1 / 3, -1.0]]):
+        assert got == pytest.approx(want, rel=1e-12)
+    _, values = scaled(standard)
+    std = [(59 / 12) ** 0.5, (43 / 12) ** 0.5]  # The sample standard deviations of the features.
+    for got, row in zip(values, features):
+        assert got == pytest.approx([x / s for x, s in zip(row, std)], rel=1e-12)
+    assert values[0] == pytest.approx([0.4509876168016973, 1.0565410875907486], rel=1e-12)
+
+    model = LogisticRegression(featuresCol="scaled", maxIter=20).fit(max_abs_scaled)
+    predictions = [row.prediction for row in model.transform(max_abs_scaled).collect()]
+    assert predictions == [1.0, 1.0, 0.0, 0.0]
+    clusters = KMeans(featuresCol="scaled", k=2, seed=1).fit(max_abs_scaled)
+    clustered = clusters.transform(max_abs_scaled)
+    assert clustered.schema["scaled"].dataType.simpleString() == "vector"
+    assert len({row.prediction for row in clustered.collect()}) == 2
+
+
+def test_ml_connect_logistic_regression_labels_are_checked_by_the_jvm_as_pyspark(session):
+    # As pyspark.ml, which sends the fit to the JVM, which checks the labels: the client makes none
+    # of the checks of the deprecated _fit of pyspark.ml.connect, and raises none of its
+    # ValueErrors. The JVM fits one class or a gap in the labels (numClasses is the maximum label
+    # and 1), and raises its errors of a negative, a fractional or a null label, a string label
+    # and no rows, of the values of PySpark 4.3.0. The test passes with the reference client too.
+    from pyspark.errors import IllegalArgumentException, SparkRuntimeException
+    from pyspark.errors.exceptions.connect import SparkException
+    from pyspark.sql import types as T
+
+    LogisticRegression = native_class(
+        "pyspark.ml.connect.classification", "LogisticRegression", "pyspark.ml.classification"
+    )
+
+    def fitted(labels):
+        # The predictions of the model of labels, and the sizes of its probability and raw
+        # prediction vectors.
+        df = _vector_rows(session, labels)
+        rows = LogisticRegression(maxIter=5).fit(df).transform(df).collect()
+        return [(r.prediction, len(r.probability), len(r.rawPrediction)) for r in rows]
+
+    assert fitted([1.0, 1.0, 1.0, 1.0]) == [(1.0, 2, 2)] * 4
+    assert fitted([0.0, 0.0, 0.0, 0.0]) == [(0.0, 2, 2)] * 4
+    assert fitted([0.0, 0.0, 2.0, 2.0]) == [(0.0, 3, 3)] * 2 + [(2.0, 3, 3)] * 2
+    assert fitted([1.0, 1.0, 2.0, 2.0]) == [(1.0, 3, 3)] * 2 + [(2.0, 3, 3)] * 2
+    for labels, message in [
+        ([-1.0, -1.0, 1.0, 1.0], "Labels MUST be in [0, 100), but got -1.0"),
+        ([0.5, 0.5, 1.0, 1.0], "Labels MUST be Integers, but got 0.5"),
+        ([0.0, None, 1.0, 1.0], "Labels MUST NOT be Null or NaN"),
+    ]:
+        with pytest.raises(SparkRuntimeException) as error:
+            LogisticRegression(maxIter=5).fit(_vector_rows(session, labels))
+        assert error.value.getCondition() == "USER_RAISED_EXCEPTION", labels
+        assert str(error.value).splitlines()[0] == (
+            f"[USER_RAISED_EXCEPTION] {message} SQLSTATE: P0001"
+        ), labels
+    strings = _vector_rows(session, ["a", "a", "b", "b"], T.StringType())
+    with pytest.raises(IllegalArgumentException) as error:
+        LogisticRegression(maxIter=5).fit(strings)
+    assert str(error.value).splitlines()[0] == "requirement failed"
+    with pytest.raises(SparkException) as error:
+        LogisticRegression(maxIter=5).fit(_vector_rows(session, []))
+    assert str(error.value).splitlines()[0] == "ML algorithm was given empty dataset."
 
 
 def test_ml_connect_logistic_regression_outputs_the_columns_of_pyspark(session):
-    # The schemas of the transforms of PySpark 4.3.0's LogisticRegression and scalers of
-    # pyspark.ml.connect, of their pandas_udf: the columns of their _output_columns, nullable and
-    # of nullable elements, with no metadata, a probability only of a probabilityCol, and no raw
-    # prediction. As PySpark's, a transform raises its ValueError of an output column that the
-    # DataFrame has, of its exact name, while a fit reads only its input columns, so that the
-    # output columns of another transform (a rawPrediction, say) are there.
-    from pyspark.ml.connect.classification import LogisticRegression
+    # As pyspark.ml's, the native LogisticRegression outputs the columns of its JVM model, of the
+    # metadata of the JVM, in this order: a rawPrediction and a probability vector, each unless its
+    # column param is empty, and a double prediction that is not null. The JVM raises its error of
+    # an output column that the DataFrame has, in a fit as in a transform, and replaces a column of
+    # another case. The values are those of PySpark 4.3.0, and the test passes with the reference
+    # client too.
+    from pyspark.errors import IllegalArgumentException
+    from pyspark.ml.linalg import DenseVector
     from pyspark.sql import functions as F
+    from pyspark.sql import types as T
 
-    def field(name, data_type):
-        return {"metadata": {}, "name": name, "nullable": True, "type": data_type}
-
-    doubles = {"containsNull": True, "elementType": "double", "type": "array"}
-    inputs = [field("features", doubles), field("label", "long")]
-    labeled = session.createDataFrame(
-        [([1.0, 2.0], 1), ([2.0, -1.0], 1), ([-3.0, -2.0], 0), ([-1.0, -2.0], 0)],
-        schema=["features", "label"],
+    LogisticRegression = native_class(
+        "pyspark.ml.connect.classification", "LogisticRegression", "pyspark.ml.classification"
     )
-    for estimator, outputs in [
-        (LogisticRegression(maxIter=5), [field("prediction", "long"), field("probability", doubles)]),
-        (LogisticRegression(maxIter=5, predictionCol="p", probabilityCol="q"),
-         [field("p", "long"), field("q", doubles)]),
-        (LogisticRegression(maxIter=5, probabilityCol=""), [field("prediction", "long")]),
-    ]:
-        transformed = estimator.fit(labeled).transform(labeled)
-        assert transformed.schema.jsonValue() == {"fields": inputs + outputs, "type": "struct"}
-        assert len(transformed.collect()) == 4
 
-    message = "Transformers does not allow output column having the same name with existing columns."
+    def fields(df):
+        return [(f.name, f.dataType.simpleString(), f.nullable, f.metadata) for f in df.schema]
+
+    labeled = _vector_rows(session, [1, 1, 0, 0], T.LongType())
+    inputs = [("features", "vector", True, {}), ("label", "bigint", True, {})]
+    vectors = {"ml_attr": {"num_attrs": 2}}
+    nominal = {"ml_attr": {"num_vals": 2, "type": "nominal"}}
+    for params, outputs in [
+        ({}, [
+            ("rawPrediction", "vector", True, vectors),
+            ("probability", "vector", True, vectors),
+            ("prediction", "double", False, nominal),
+        ]),
+        ({"predictionCol": "p", "probabilityCol": "q", "rawPredictionCol": "r"}, [
+            ("r", "vector", True, vectors),
+            ("q", "vector", True, vectors),
+            ("p", "double", False, nominal),
+        ]),
+        ({"probabilityCol": ""}, [
+            ("rawPrediction", "vector", True, vectors),
+            ("prediction", "double", False, nominal),
+        ]),
+        ({"probabilityCol": "", "rawPredictionCol": ""}, [
+            ("prediction", "double", False, nominal),
+        ]),
+    ]:
+        transformed = LogisticRegression(maxIter=5, **params).fit(labeled).transform(labeled)
+        assert fields(transformed) == inputs + outputs, params
+        rows = transformed.collect()
+        assert [row[-1] for row in rows] == [1.0, 1.0, 0.0, 0.0], params
+        assert all(type(row[-1]) is float for row in rows), params
+
     model = LogisticRegression(maxIter=5).fit(labeled)
-    for column in ("prediction", "probability"):
-        with pytest.raises(ValueError) as error:
-            model.transform(labeled.withColumn(column, F.lit(0)))
-        assert str(error.value) == message
+    row = model.transform(labeled).first()
+    assert isinstance(row.rawPrediction, DenseVector) and isinstance(row.probability, DenseVector)
+    assert sum(row.probability) == pytest.approx(1.0)
     for column in ("rawPrediction", "probability", "prediction"):
         extra = labeled.withColumn(column, F.lit(0))
-        if column == "rawPrediction":
-            assert model.transform(extra).columns == [
-                "features", "label", "rawPrediction", "prediction", "probability"
-            ]
-        fitted = LogisticRegression(maxIter=5).fit(extra)
-        assert [row.prediction for row in fitted.transform(labeled).collect()] == [1, 1, 0, 0]
+        for run in (
+            lambda: model.transform(extra).columns,
+            lambda: LogisticRegression(maxIter=5).fit(extra),
+        ):
+            with pytest.raises(IllegalArgumentException) as error:
+                run()
+            message = f"requirement failed: Column {column} already exists."
+            assert str(error.value).splitlines()[0] == message, column
+    assert model.transform(labeled.withColumn("Prediction", F.lit(0))).columns == [
+        "features", "label", "prediction", "rawPrediction", "probability"
+    ]
 
 
 def test_ml_connect_empty_pandas_transforms(session):

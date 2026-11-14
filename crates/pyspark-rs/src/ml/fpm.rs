@@ -107,7 +107,7 @@ impl PyFPGrowth {
         params: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyFPGrowthModel> {
         check_fit_params(params)?;
-        let input = dataset_of(dataset, "fit", "select")?;
+        let input = dataset_of(dataset, "fit")?;
         let mut estimator = snapshot(slf)?;
         let session = input.spark_session();
         let model = interruptible(slf.py(), &session, || {
@@ -173,7 +173,7 @@ impl PyFPGrowthModel {
         params: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
         check_params(params)?;
-        let input = dataset_of(dataset, "transform", "columns")?;
+        let input = dataset_of(dataset, "transform")?;
         let mut model = snapshot(slf)?;
         Ok(PyDataFrame::new(model.transform(&input).to_pyerr()?))
     }
@@ -276,7 +276,7 @@ impl PyPrefixSpan {
         slf: &Bound<'_, Self>,
         dataset: &Bound<'_, PyAny>,
     ) -> PyResult<PyDataFrame> {
-        let input = dataset_of(dataset, "findFrequentSequentialPatterns", "select")?;
+        let input = helper_dataset_of(dataset, "findFrequentSequentialPatterns")?;
         let algorithm = snapshot(slf)?;
         Ok(PyDataFrame::new(
             algorithm

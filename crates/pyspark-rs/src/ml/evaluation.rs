@@ -57,9 +57,10 @@ macro_rules! evaluator {
                 params: Option<&Bound<'_, PyAny>>,
             ) -> PyResult<f64> {
                 check_params(params)?;
-                // Reject pandas before parameter serialization. Spark itself validates column
-                // types and names, just as it does for standard pyspark.ml.evaluation.
-                let dataset = dataset_of(dataset, "evaluate", "select")?;
+                // Reject pandas before parameter serialization, and read `sparkSession` of
+                // another object first, as `try_remote_evaluate` does. Spark itself validates
+                // column types and names, just as it does for standard pyspark.ml.evaluation.
+                let dataset = dataset_of(dataset, "evaluate")?;
                 let evaluator = snapshot(slf)?;
                 interruptible(slf.py(), &dataset.spark_session(), || {
                     evaluator.evaluate(&dataset).map_err(Box::new)

@@ -217,21 +217,30 @@ number or `any` as an SRID, as the DDL parser of Spark does, and no longer takes
 
 The native `spark_connect::ml::LogisticRegression` fits Spark's JVM
 `org.apache.spark.ml.classification.LogisticRegression` through the Connect ML
-protocol. In the Rust API, training features must be ML vectors; convert an array column
-with `array_to_vector` before fitting. The Python class takes an array column of numbers too,
-as the deprecated `pyspark.ml.connect.classification.LogisticRegression` of PySpark does (see
-below), but fits the JVM estimator, where PySpark's trains with PyTorch. Its constructor takes
-the params of PySpark's that the JVM estimator honors, `featuresCol`, `labelCol`,
-`predictionCol`, `probabilityCol`, `maxIter` and `tol`, whose defaults are PySpark's, and it has
-their setters. The params of PySpark's PyTorch training, `numTrainWorkers`, `batchSize`,
-`learningRate`, `momentum` and `seed`, have no counterpart in the L-BFGS of the JVM estimator,
-and raise the `TypeError` of an unexpected keyword argument. Its model outputs the columns of
-PySpark's: a `bigint` prediction, and then the `array<double>` of the probabilities unless
-`probabilityCol` is empty, and no raw prediction: the constructor sends an empty
-`rawPredictionCol`, a param of the JVM estimator that PySpark's does not have. The
-probabilities are the JVM's doubles, where PySpark's are of float32 tensors. As PySpark's, its
-fit reads only the features and the labels, so that a DataFrame with a `prediction`,
-`probability` or `rawPrediction` column is fitted.
+protocol. Its training features must be ML vectors, in the Rust API as in Python; convert an
+array column with `array_to_vector` before fitting. The Python class,
+`pyspark.ml.connect.classification.LogisticRegression`, follows
+`pyspark.ml.classification.LogisticRegression`, PySpark's standard API over Spark Connect, not the
+deprecated PyTorch class of `pyspark.ml.connect`. Its keyword-only constructor takes the 21 params
+of `pyspark.ml`'s, with its defaults and `TypeConverters`: `featuresCol`, `labelCol`,
+`predictionCol`, `maxIter`, `regParam`, `elasticNetParam`, `tol`, `fitIntercept`, `threshold`,
+`thresholds`, `probabilityCol`, `rawPredictionCol`, `standardization`, `weightCol`,
+`aggregationDepth`, `family`, the matrices `lowerBoundsOnCoefficients` and
+`upperBoundsOnCoefficients`, the vectors `lowerBoundsOnIntercepts` and `upperBoundsOnIntercepts`,
+and `maxBlockSizeInMB`. It has a setter of each, and `setParams`. A fit sends a matrix or a vector as PySpark's ML
+serializer sends a `DenseMatrix`, a `SparseMatrix` or a vector; in the Rust API,
+`Params::set_param_matrix` sends an `MlMatrix` so. The params of the PyTorch training of the
+deprecated class (`numTrainWorkers`, `batchSize`, `learningRate`, `momentum` and `seed`) raise the
+`TypeError` of an unexpected keyword argument. As `pyspark.ml`'s, the constructor and
+`setParams` raise PySpark's `ValueError` when the `threshold` and the `thresholds` that are set
+disagree (`setParams` leaves the params that it is given set), and
+`setThreshold` and `setThresholds` leave the other one set, as they do over Spark Connect, where
+the `clear` of `pyspark.ml` does nothing: a fit then sends both, and the JVM raises its error when
+they disagree. Its model outputs the columns of the JVM model, as `pyspark.ml`'s does: a
+`rawPrediction` and a `probability` vector, and a `double` prediction. The JVM checks the labels
+(an integer in `[0, 100)`, not null), the types of the columns, and the output columns that the
+DataFrame has already, and raises its errors, as with `pyspark.ml`: the client makes no checks of
+its own, and sends no query of the labels.
 
 Fitting returns a server-cached model. Prediction uses that model's object
 reference and must use the same Spark session. Models are obtained through
@@ -261,11 +270,10 @@ not given is not sent, so the server's default applies. A list param without ele
 accepted by its constructor and setters, and a fit, transform or evaluate raises PySpark's
 `CANNOT_INFER_ARRAY_ELEMENT_TYPE` for it, as PySpark's serialization does.
 
-A native class has the `setParams` of its `pyspark.ml` class, except `LogisticRegression`, whose
-params are still those of the deprecated `pyspark.ml.connect` class (see Native LogisticRegression),
-which has no `setParams`. It is keyword-only, takes the params of the
-constructor, sets the params that it is given, in order, and returns the object, as PySpark's
-`_set` does. Its signature is PySpark's for every class, the feature stages included, except
+A native class has the `setParams` of its `pyspark.ml` class. It is keyword-only, takes the params
+of the constructor, sets the params that it is given, in order, and returns the object, as
+PySpark's `_set` does. As PySpark's, the `setParams` of `LogisticRegression` then checks its
+`threshold` and `thresholds`, whichever call set them, as its constructor does. Its signature is PySpark's for every class, the feature stages included, except
 `CrossValidator`, which takes `numFolds`, `parallelism` and `seed`, with a default of `None` for
 the first two. The `params` argument of a fit, transform or
 evaluate, which `pyspark.ml` takes as a param map, is accepted: `None` and an empty dict leave the
@@ -286,25 +294,33 @@ Convert local data explicitly with `df = spark.createDataFrame(pdf)` before call
 DataFrames; call `toPandas()` explicitly when a local result is needed. The deprecated
 `pyspark.ml.connect` pandas contract is not the target for these native methods. The feature stages described below use the same Spark DataFrame contract.
 
-Other non-DataFrame objects retain their existing errors: a missing `select` in a fit or
-an evaluate, or `columns` in a transform, raises `AttributeError`; an object with that attribute
-raises `TypeError`. LogisticRegression still selects only its features and labels for fitting.
-An output column that overlaps either input raises the JVM's error during fitting. Its model
-checks for existing output column names before constructing the transform; other native models
-leave output validation to their JVM models.
+Another object than a DataFrame raises the `AttributeError` of `sparkSession`, the attribute
+that `pyspark.ml` reads of the dataset first (`'int' object has no attribute 'sparkSession'` of
+`fit(5)`), before any request; an object that has a `sparkSession` raises a `TypeError`. The
+methods that `pyspark.ml` runs as a helper or attribute call (`PowerIterationClustering.assignClusters`,
+`PrefixSpan.findFrequentSequentialPatterns`, and `ALSModel.recommendForUserSubset` and
+`recommendForItemSubset`) read nothing of their dataset, whose serialization converts another
+object to a literal: one that cannot be a literal raises PySpark's `UNSUPPORTED_DATA_TYPE`, and
+another, which PySpark sends for the server to reject, raises a `TypeError` before any request. As with
+`pyspark.ml`, a fit sends the DataFrame as it is, and the transform of a model is the transform of
+the DataFrame as it is, which sends no request: the JVM estimators and models check the columns,
+and raise their errors of a column of a wrong type, or of an output column that the DataFrame has
+already, in the fit, or when the transformed DataFrame is analyzed or run.
 
-The fit of `LogisticRegression` checks its labels before it fits, as PySpark's `_fit` does, on the
-distinct labels of the server's `collect_set` of the label column (a null label is not one of them):
-there must be at least two, each an integer in `[0, numClasses)`, else PySpark's `ValueError` is
-raised. The other checks of PySpark's fit (the row count, the size of the features) are not made, as
-they do not raise. Evaluators send column names and types unchanged, leaving their
-validation to Spark as standard `pyspark.ml.evaluation` does. Their metric results
-are Spark's double-precision values.
-The native classification, regression and clustering estimators accept Spark DataFrames with
-vector or numeric array feature columns.
-A fit and the transform of its model read the DataFrame schema and send an array `featuresCol`
-as the vector (`array_to_vector`) that the JVM reads; the transform preserves the input array
-column in its output. Standard `pyspark.ml` estimators require a `VectorUDT` feature column.
+The column params of a fit and of a transform are sent as they are given, as `pyspark.ml` sends
+them, and the JVM reads a column by its exact name: `featuresCol="Features"` of a column `features`
+raises the JVM's `FIELD_NOT_FOUND` in a fit, as with `pyspark.ml`, while some JVM models resolve
+such a name. Evaluators send column names and types unchanged too, leaving their validation to
+Spark as standard `pyspark.ml.evaluation` does. Their metric results are Spark's double-precision
+values.
+
+The native estimators take the `VectorUDT` features of `pyspark.ml`: the JVM raises its error of
+an array `featuresCol` (`Column features must be of type class
+org.apache.spark.ml.linalg.VectorUDT:... but was actually class
+org.apache.spark.sql.types.ArrayType:array<double>.`), in the fit and when the transformed
+DataFrame is analyzed. Convert an array column with `pyspark.ml.functions.array_to_vector` first,
+as for `pyspark.ml`. (The JVM `KMeans`, `BisectingKMeans`, `GaussianMixture` and `LDA` also take
+arrays whose elements cannot be null, which the arrays of `createDataFrame` can be.)
 
 The feature stages, including `StandardScaler` and `MaxAbsScaler`, use Spark's JVM
 implementations through Connect. Vector-valued inputs must use `VectorUDT`; convert numeric
@@ -796,8 +812,8 @@ as long as a model clone or transformed DataFrame needs them.
   mini-batch fraction, regularization and seed.
 
 Unset parameters use Spark's defaults. The Python wrappers preserve PySpark's
-keyword-only constructor signatures and type conversion; numeric arrays are
-converted to ML vectors by the existing native fit/transform adapter.
+keyword-only constructor signatures and type conversion, and take ML vector
+features, as `pyspark.ml`'s do.
 
 This support covers construction, configuration, fitting and DataFrame
 transforms. Python returns the common `MLModel`. Specialized model inspection
@@ -823,8 +839,8 @@ Python exposes `LDA` through `pyspark.ml.connect` and `pyspark.ml.connect.cluste
 setters and Rust builder setters/getters, including document/topic concentrations,
 learning settings, checkpoint settings, seed and topic-distribution output column.
 Both optimizers return a vector of topic probabilities per document; empty documents
-produce zero vectors. Python also accepts numeric array feature columns on Spark
-DataFrames and preserves those arrays in the transformed output.
+produce zero vectors. As with `pyspark.ml`, an array feature column is sent as it is, and the JVM
+rejects one whose elements may be null, such as the arrays of `createDataFrame`.
 
 `ml::PowerIterationClustering::assign_clusters` and Python `assignClusters` build
 Spark Connect's `powerIterationClusteringAssignClusters` helper relation. This algorithm
