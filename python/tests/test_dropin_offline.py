@@ -458,7 +458,130 @@ def test_bad_type_strings_raise_their_message_not_a_debug_dump(mock_connect):
     spark, _ = mock_connect
     with pytest.raises(ValueError) as e:
         spark.range(1).to("foo bar")
-    assert str(e.value) == "invalid type string 'foo bar': [INVALID_DATATYPE_FORMAT]"
+    assert str(e.value) == (
+        "invalid type string 'foo bar': [INVALID_DATATYPE_FORMAT] Unknown type: foo bar"
+    )
+
+
+def test_struct_type_fields_raise_pyspark_errors_for_items_without_a_name():
+    # As PySpark's `StructType.__init__`, which reads the name of each item before it asserts that
+    # each item is a StructField: a DDL string, whose characters have no name, is an error of its
+    # own, not a Debug dump of a Rust error, and a field of another kind is an assertion.
+    import pyspark.sql.types as T
+
+    int_type = T.IntegerType()
+    F = namedtuple("F", ["name", "dataType"])
+    cases = [
+        (lambda: T.StructType(["a"]), AttributeError, "'str' object has no attribute 'name'"),
+        (lambda: T.StructType("a int"), AttributeError, "'str' object has no attribute 'name'"),
+        (lambda: T.StructType(["a int"]), AttributeError, "'str' object has no attribute 'name'"),
+        (lambda: T.StructType([("a", int_type)]), AttributeError,
+         "'tuple' object has no attribute 'name'"),
+        (lambda: T.StructType(5), TypeError, "'int' object is not iterable"),
+        (lambda: T.StructType([F("a", int_type)]), AssertionError,
+         "fields should be a list of StructField"),
+    ]
+    for make, error, message in cases:
+        with pytest.raises(error) as e:
+            make()
+        assert str(e.value) == message
+    assert T.StructType([T.StructField("a", int_type)]).names == ["a"]
+
+
+def test_struct_field_asserts_its_data_type_then_its_name_as_pyspark():
+    # As PySpark's `StructField.__init__`: the data type is asserted first, then the name, which
+    # is any str, so a name of another type is an AssertionError, not a TypeError.
+    import pyspark.sql.types as T
+
+    data_type_class = "<class 'pyspark.sql.types.DataType'>"
+    cases = [
+        (lambda: T.StructField(5, T.IntegerType()), "field name 5 should be a string"),
+        (lambda: T.StructField(None, T.IntegerType()), "field name None should be a string"),
+        (lambda: T.StructField(b"g", T.IntegerType()), "field name b'g' should be a string"),
+        (lambda: T.StructField(5, "int"),
+         f"dataType int should be an instance of {data_type_class}"),
+        (lambda: T.StructField(5, 5), f"dataType 5 should be an instance of {data_type_class}"),
+        (lambda: T.StructField(name=5, dataType=None),
+         f"dataType None should be an instance of {data_type_class}"),
+    ]
+    for make, message in cases:
+        with pytest.raises(AssertionError) as e:
+            make()
+        assert str(e.value) == message
+
+
+def test_struct_type_add_asserts_as_struct_field_does():
+    # As PySpark's `StructType.add`, which builds a StructField of its arguments: the data type is
+    # asserted first, and a name is required only when it is a str.
+    import pyspark.sql.types as T
+
+    data_type_class = "<class 'pyspark.sql.types.DataType'>"
+    cases = [
+        (lambda: T.StructType().add("g", 5),
+         f"dataType 5 should be an instance of {data_type_class}"),
+        (lambda: T.StructType().add(5),
+         f"dataType None should be an instance of {data_type_class}"),
+        (lambda: T.StructType().add(None),
+         f"dataType None should be an instance of {data_type_class}"),
+        (lambda: T.StructType().add(5, T.IntegerType()), "field name 5 should be a string"),
+    ]
+    for make, message in cases:
+        with pytest.raises(AssertionError) as e:
+            make()
+        assert str(e.value) == message
+
+
+def test_nullable_flags_are_kept_as_given_as_pyspark_keeps_them():
+    # As PySpark's plain classes, which keep `nullable`, `containsNull` and `valueContainsNull` as
+    # they are given, of any type: the attribute, the repr and the JSON show the value, and it
+    # compares as `__dict__` does (`1` equals `True`, but `"x"` does not).
+    import pyspark.sql.types as T
+
+    field = T.StructField("g", T.IntegerType(), "x")
+    assert field.nullable == "x"
+    assert repr(field) == "StructField('g', IntegerType(), x)"
+    assert field.jsonValue() == {"name": "g", "type": "integer", "nullable": "x", "metadata": {}}
+    assert field.json() == '{"metadata":{},"name":"g","nullable":"x","type":"integer"}'
+    assert T.StructType([field]).json() == (
+        '{"fields":[{"metadata":{},"name":"g","nullable":"x","type":"integer"}],"type":"struct"}'
+    )
+    assert repr(T.StructType([field])) == "StructType([StructField('g', IntegerType(), x)])"
+    assert field == T.StructField("g", T.IntegerType(), "x")
+    assert field != T.StructField("g", T.IntegerType(), True)
+    assert T.StructType([field]) != T.StructType([T.StructField("g", T.IntegerType(), True)])
+
+    array = T.ArrayType(T.IntegerType(), "x")
+    assert array.containsNull == "x"
+    assert repr(array) == "ArrayType(IntegerType(), x)"
+    assert array.json() == '{"containsNull":"x","elementType":"integer","type":"array"}'
+    assert array != T.ArrayType(T.IntegerType(), True)
+
+    the_map = T.MapType(T.IntegerType(), T.IntegerType(), None)
+    assert the_map.valueContainsNull is None
+    assert repr(the_map) == "MapType(IntegerType(), IntegerType(), None)"
+    assert the_map.json() == (
+        '{"keyType":"integer","type":"map","valueContainsNull":null,"valueType":"integer"}'
+    )
+
+    one = T.StructField("g", T.IntegerType(), 1)
+    assert one == T.StructField("g", T.IntegerType(), True)
+    assert one.jsonValue()["nullable"] == 1
+
+    # The flags, and the nested ones, survive pickling, as in PySpark.
+    nested = T.StructType([T.StructField("a", T.ArrayType(T.StructType([field]), 0))])
+    assert pickle.loads(pickle.dumps(nested)).json() == nested.json()
+    assert pickle.loads(pickle.dumps(field)).nullable == "x"
+    assert pickle.loads(pickle.dumps(array)).containsNull == "x"
+
+
+def test_struct_field_nullable_is_kept_when_it_is_set():
+    import pyspark.sql.types as T
+
+    field = T.StructField("g", T.IntegerType())
+    field.nullable = "x"
+    assert field.nullable == "x"
+    assert field.jsonValue()["nullable"] == "x"
+    assert T.StructField("g", T.IntegerType()).nullable is True
 
 
 def test_json_forms_accept_trailing_whitespace_as_pyspark(mock_connect):
@@ -5565,6 +5688,50 @@ def test_udtf_register_sends_the_udtf_as_pyspark(mock_connect):
         spark.udtf.register("echo", scalar)
     assert error.value.getCondition() == "INVALID_UDTF_EVAL_TYPE"
     assert service.execute_calls == calls
+
+
+def test_udf_and_udtf_pickle_as_pyspark_connect_classes():
+    # As PySpark Connect's: a UDF or a UDTF that a function captures is pickled by reference to
+    # pyspark.sql.connect.udf or .udtf, whose classes the Python worker of the server has, with
+    # the instance attributes of those classes. The classic class of PySpark needs a SparkContext.
+    import pickletools
+
+    from pyspark.serializers import CloudPickleSerializer
+    from pyspark.sql import functions as F
+    from pyspark.sql.types import IntegerType
+    from pyspark.sql.udf import UserDefinedFunction
+
+    def class_references(obj):
+        # The strings of the pickle, which name the classes that it refers to by reference.
+        data = CloudPickleSerializer().dumps(obj)
+        return {arg for _, arg, _ in pickletools.genops(data) if isinstance(arg, str)}
+
+    plus_one = F.udf(lambda x: int(x) + 1, IntegerType())
+    udf = plus_one._unwrapped
+    assert type(udf) is UserDefinedFunction
+    assert type(udf).__module__ == "pyspark.sql.connect.udf"
+    assert sorted(vars(udf)) == [
+        "_name", "_returnType", "_returnType_placeholder", "deterministic", "evalType", "func"]
+    refs = class_references(udf)
+    assert {"pyspark.sql.connect.udf", "UserDefinedFunction"} <= refs
+    assert "pyspark.sql.udf" not in refs
+    restored = CloudPickleSerializer().loads(CloudPickleSerializer().dumps(udf))
+    assert restored._name == udf._name and restored.evalType == udf.evalType
+    assert restored.func(1) == 2
+
+    @F.udtf(returnType="x int")
+    class Echo:
+        def eval(self, n):
+            yield (n,)
+
+    assert type(Echo).__module__ == "pyspark.sql.connect.udtf"
+    assert {"_name", "deterministic", "evalType", "func", "returnType"} <= set(vars(Echo))
+    assert "name" not in vars(Echo) and Echo.name == "Echo"
+    refs = class_references(Echo)
+    assert {"pyspark.sql.connect.udtf", "UserDefinedTableFunction"} <= refs
+    assert "pyspark.sql.udtf" not in refs
+    restored = CloudPickleSerializer().loads(CloudPickleSerializer().dumps(Echo))
+    assert restored._name == "Echo" and restored.evalType == 300
 
 
 def test_udtf_call_without_session_raises():

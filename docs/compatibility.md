@@ -63,12 +63,10 @@ an id.
 `BinaryClassificationEvaluator::set_score_col` and `score_col`, and the Python
 `scoreCol=` argument and `setScoreCol` of v4.2.0 are removed, without an alias:
 Spark's evaluator has no `scoreCol` param, so no value of it worked on the server.
-Use `set_raw_prediction_col` and `raw_prediction_col` in Rust, the column of raw prediction
-vectors that the evaluator scores. In Python it is `probabilityCol=`, as in PySpark, and
-`setProbabilityCol`, a setter of this client (PySpark's evaluators have none): the column of
-probabilities, which the server reads as its raw prediction column. A model without a
-probability column, such as the native `LinearSVC`, is scored with
-`probabilityCol="rawPrediction"`.
+Use `set_raw_prediction_col` and `raw_prediction_col` in Rust, and
+`rawPredictionCol=` / `setRawPredictionCol` in Python. They follow standard
+`pyspark.ml.evaluation.BinaryClassificationEvaluator`, whose default input column
+is `rawPrediction` and whose scores may be doubles or vectors.
 
 The native ML classes take a JVM `Int` param as an `i32`: `LogisticRegression::set_max_iter`,
 `LinearSVC::set_max_iter` and `LinearSVC::set_aggregation_depth` take an `i32`, and
@@ -248,14 +246,10 @@ The Rust `transform` of a fitted model rejects a DataFrame of another session. I
 Python, as with PySpark, it returns a DataFrame whose analysis or execution fails
 on the server of that session with `CONNECT_ML.CACHE_INVALID`.
 
-The Python classes of the native estimators, transformers and evaluators of
-`pyspark.ml.connect` take their params as PySpark's do. The constructors are
-keyword-only, raising PySpark's `TypeError`, except `MulticlassClassificationEvaluator`,
-which takes `metricName`, `labelCol` and `predictionCol` by position as well, as
-PySpark's does; its `metricName` is `accuracy` by default, as in PySpark, where the JVM
-evaluator and the Rust API default to `f1`. The `probabilityCol` of
-`BinaryClassificationEvaluator` is `probability` by default, as in PySpark, and is sent as the
-`rawPredictionCol` that the JVM evaluator scores.
+The native estimators, transformers and evaluators of `pyspark.ml.connect` take
+keyword-only constructor parameters. The evaluators follow standard
+`pyspark.ml.evaluation`: multiclass classification defaults to `metricName="f1"`,
+and binary classification uses `rawPredictionCol="rawPrediction"`.
 Each value is converted by the `TypeConverters` of its param in
 PySpark (an integral float for an int param, for example), and a value that the
 converter rejects raises its `TypeError`. A fit, transform or evaluate sends only the
@@ -287,10 +281,9 @@ The fit of `LogisticRegression` checks its labels before it fits, as PySpark's `
 distinct labels of the server's `collect_set` of the label column (a null label is not one of them):
 there must be at least two, each an integer in `[0, numClasses)`, else PySpark's `ValueError` is
 raised. The other checks of PySpark's fit (the row count, the size of the features) are not made, as
-they do not raise. The evaluators cast a prediction or a probability of another numeric type to a
-double, and send an array of probabilities as a vector (`array_to_vector`), whose element 1 is
-scored, as PySpark's evaluator reads the column 1 of an array. The values are the JVM evaluators'
-doubles, where PySpark's are of float32 tensors (`0.6` where PySpark returns `0.6000000238418579`).
+they do not raise. Evaluators send column names and types unchanged, leaving their
+validation to Spark as standard `pyspark.ml.evaluation` does. Their metric results
+are Spark's double-precision values.
 The native classification, regression and clustering estimators accept Spark DataFrames with
 vector or numeric array feature columns.
 A fit and the transform of its model read the DataFrame schema and send an array `featuresCol`
@@ -919,3 +912,32 @@ DataFrames are rejected before conversion or RPC. Model operations must use the
 fit session. Official PySpark 4.3.0 fixtures cover explicit and implicit ratings,
 predictions, cold starts, factors, and all four recommendation methods, with live
 Rust and native Python tests. Model persistence is separate from these APIs.
+
+
+## Native ML evaluators
+
+Rust and the Rust-backed `pyspark.ml.connect.evaluation` exports provide all six
+standard Spark ML evaluators: regression, binary classification, multiclass
+classification, multilabel classification, clustering and ranking. Their
+constructor parameters and named setters follow `pyspark.ml.evaluation` in
+PySpark 4.3.0. Rust also provides typed parameter getters. Metric direction is
+available as `is_larger_better()` / `isLargerBetter()` without contacting Spark.
+
+The three existing Python evaluator wrappers now use standard Spark ML defaults:
+`BinaryClassificationEvaluator` takes `rawPredictionCol="rawPrediction"`, and
+`MulticlassClassificationEvaluator` defaults to `metricName="f1"` and requires
+keyword arguments. Use `rawPredictionCol` / `setRawPredictionCol` instead of the
+deprecated `probabilityCol` / `setProbabilityCol` binary-evaluator argument.
+
+Evaluation sends Spark DataFrames and their column names/types directly to Spark.
+Pandas DataFrames are rejected before serialization or RPC. Prepare double
+prediction columns, vector scores, and arrays of doubles where required
+by the corresponding standard evaluator. Clustering features may be vectors or
+arrays of doubles. Evaluators no longer silently cast
+columns, convert array scores to vectors, or normalize field-name casing.
+
+Official PySpark fixtures and live Rust/Python tests cover every supported metric,
+weights, regression through the origin, binary score bins, multiclass log-loss
+clipping and beta, per-label metrics, both silhouette distances, ranking cutoffs,
+invalid inputs, and metric direction. Generic parameter-map APIs and evaluator
+persistence remain separate work.
