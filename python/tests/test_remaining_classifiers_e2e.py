@@ -25,6 +25,7 @@ import os
 
 import pytest
 from _native_classes import native_class
+from pyspark.errors import AnalysisException
 from pyspark.ml.linalg import Vectors
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
@@ -316,3 +317,44 @@ def test_one_vs_rest_rejects_null_required_parameters(session, parameter):
     frame = _triangles(session)
     with pytest.raises(Exception):
         estimator.fit(frame).transform(frame).collect()
+
+
+@pytest.mark.parametrize("parallelism", [2**31, 2**32, 2**63, 2**100])
+@pytest.mark.parametrize("use_setter", [False, True], ids=["constructor", "setter"])
+def test_one_vs_rest_takes_any_parallelism_of_at_least_one(session, parallelism, use_setter):
+    # PySpark trains in a ThreadPool of min(parallelism, numClasses) processes and never sends
+    # the param, so an int of any size fits.
+    estimator = _classifier("OneVsRest")(classifier=_classifier("LinearSVC")(maxIter=5))
+    if use_setter:
+        estimator.setParallelism(parallelism)
+    else:
+        estimator = _classifier("OneVsRest")(
+            classifier=_classifier("LinearSVC")(maxIter=5), parallelism=parallelism
+        )
+    frame = _triangles(session)
+    assert len(_classes(estimator.fit(frame).transform(frame))) == 9
+
+
+@pytest.mark.parametrize(
+    "parallelism, error, message",
+    [
+        (0, ValueError, "Number of processes must be at least 1"),
+        (-1, ValueError, "Number of processes must be at least 1"),
+        (-(2**100), ValueError, "Number of processes must be at least 1"),
+        (None, TypeError, "'<' not supported between instances of 'int' and 'NoneType'"),
+    ],
+)
+def test_one_vs_rest_reads_the_labels_before_its_parallelism(session, parallelism, error, message):
+    estimator = _classifier("OneVsRest")(classifier=_classifier("LinearSVC")(), parallelism=parallelism)
+    frame = _triangles(session)
+    with pytest.raises(error) as raised:
+        estimator.fit(frame)
+    assert type(raised.value) is error and str(raised.value) == message
+    # PySpark's fit reads the max label first, so the errors of the labels come before these.
+    with pytest.raises(AnalysisException, match="UNRESOLVED_COLUMN"):
+        estimator.fit(frame.select("features"))
+    with pytest.raises(TypeError) as raised:
+        estimator.fit(frame.limit(0))
+    with pytest.raises(TypeError) as expected:
+        int(None)
+    assert type(raised.value) is TypeError and str(raised.value) == str(expected.value)

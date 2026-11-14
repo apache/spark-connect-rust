@@ -122,6 +122,37 @@ fn one_vs_rest_parallel_models_and_ml_relations_keep_submodels_alive() {
     s.stop().unwrap();
 }
 #[test]
+fn one_vs_rest_reads_the_max_label_and_takes_a_parallelism_of_either_int_width() {
+    let Some(s) = live_session() else {
+        return;
+    };
+    let frame = vectors(
+        s.sql("SELECT array(1.0D,2.0D) xs,0.0D label UNION ALL SELECT array(-1.0D,0.5D),1.0D")
+            .unwrap(),
+    );
+    let mut estimator = OneVsRest::new().set_classifier(LinearSVC::new().set_max_iter(5));
+    // The max label, of which the Python client takes the classes before PySpark's checks: None
+    // of no rows, and the server's error of a label column that is not there.
+    assert_eq!(estimator.max_label(&frame).unwrap(), Some(1.0));
+    assert_eq!(estimator.max_label(&frame.limit(0)).unwrap(), None);
+    let missing = estimator
+        .max_label(&frame.select([col("features")]))
+        .err()
+        .unwrap();
+    assert!(
+        missing.error_class.starts_with("UNRESOLVED_COLUMN"),
+        "{missing}"
+    );
+    // A parallelism beyond the classes, as the Python client sends an int beyond 32 bits, fits
+    // one thread of each class rather than wrapping.
+    *estimator.params_mut() = estimator
+        .params()
+        .clone()
+        .set_param_int_narrow("parallelism", 1 << 40);
+    estimator.fit(&frame).unwrap();
+    s.stop().unwrap();
+}
+#[test]
 fn new_classifiers_reject_invalid_parameters_and_missing_one_vs_rest_classifier() {
     let Some(s) = live_session() else {
         return;

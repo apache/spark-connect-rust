@@ -2645,50 +2645,26 @@ impl OneVsRest {
     pub fn parallelism(&self) -> i32 {
         self.params.int_or("parallelism", 1)
     }
-}
 
-impl Default for OneVsRest {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-// Release only the cache created for this fit, including after a failed binary fit.
-struct OneVsRestTrainingCache(Option<DataFrame>);
-impl Drop for OneVsRestTrainingCache {
-    fn drop(&mut self) {
-        if let Some(df) = &self.0 {
-            let _ = df.unpersist(false);
+    /// The `parallelism` that a fit reads, of either int width, unlike [`Self::parallelism`],
+    /// which narrows it: None when it is set to a null.
+    pub fn parallelism_i64(&self) -> Option<i64> {
+        use proto::expression::literal::LiteralType as L;
+        match self.params.literal("parallelism") {
+            Some(L::Null(_)) => None,
+            Some(L::Integer(value)) => Some(i64::from(*value)),
+            Some(L::Long(value)) => Some(*value),
+            _ => Some(1),
         }
     }
-}
 
-fn ml_exact_column(name: &str) -> crate::column::Column {
-    crate::column::col(&format!("`{}`", name.replace('`', "``")))
-}
-
-impl Estimator for OneVsRest {
-    fn operator(&self) -> &MlOperator {
-        &self.operator
-    }
-    fn operator_mut(&mut self) -> &mut MlOperator {
-        &mut self.operator
-    }
-    fn params(&self) -> &Params {
-        &self.params
-    }
-    fn params_mut(&mut self) -> &mut Params {
-        &mut self.params
-    }
-    fn fit_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<Box<dyn Model>> {
-        use crate::column::{lit_double, when};
-        use std::sync::atomic::{AtomicUsize, Ordering};
+    /// The error of a column param of a fit that is set to a null, which a fit raises first.
+    pub fn check_required_params(&self) -> spark_connect_core::error::Result<()> {
         for name in [
             "featuresCol",
             "labelCol",
             "predictionCol",
             "rawPredictionCol",
-            "parallelism",
         ] {
             if matches!(
                 self.params.literal(name),
@@ -2699,31 +2675,36 @@ impl Estimator for OneVsRest {
                 )));
             }
         }
-        let classifier = self
-            .classifier
-            .as_ref()
-            .ok_or_else(|| SparkError::value_msg("OneVsRest requires a native classifier"))?;
-        if self.parallelism() < 1 {
-            return Err(SparkError::value_msg("parallelism must be at least 1"));
-        }
+        Ok(())
+    }
+
+    /// The largest label of `df`, of which a fit takes its number of classes. As PySpark's fit,
+    /// it reads it first, with `dataset.agg({labelCol: "max"})`: None when `df` has no rows or only
+    /// null labels.
+    pub fn max_label(&self, df: &DataFrame) -> spark_connect_core::error::Result<Option<f64>> {
         let rows = df
             .agg([crate::functions::max(
                 ml_exact_column(self.label_col()).cast(DataType::Double),
             )])
             .collect()?;
-        let max = rows
-            .first()
-            .and_then(|r| r.get(0))
-            .and_then(|v| v.as_f64())
-            .ok_or_else(|| {
-                SparkError::value_msg("OneVsRest cannot fit an empty or null-labeled dataset")
-            })?;
-        if !max.is_finite() || max < 0.0 || max >= i32::MAX as f64 {
-            return Err(SparkError::value_msg(
-                "OneVsRest requires a finite nonnegative maximum class label",
-            ));
-        }
-        let count = max as usize + 1;
+        Ok(rows.first().and_then(|r| r.get(0)).and_then(|v| v.as_f64()))
+    }
+
+    /// Fit one binary classifier of each of `num_classes` classes on `df`, `threads` at a time:
+    /// the fit after its checks, with the class count of [`Self::max_label`].
+    pub fn fit_classes(
+        &self,
+        df: &DataFrame,
+        num_classes: usize,
+        threads: usize,
+    ) -> spark_connect_core::error::Result<Box<dyn Model>> {
+        use crate::column::{lit_double, when};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let classifier = self
+            .classifier
+            .as_ref()
+            .ok_or_else(|| SparkError::value_msg("OneVsRest requires a native classifier"))?;
+        let count = num_classes;
         let weight = self
             .weight_col()
             .filter(|name| !name.is_empty() && classifier.supports_weight());
@@ -2749,7 +2730,7 @@ impl Estimator for OneVsRest {
         let next = AtomicUsize::new(0);
         let results = std::thread::scope(|scope| {
             let mut workers = Vec::new();
-            for _ in 0..(self.parallelism() as usize).min(count) {
+            for _ in 0..threads.min(count) {
                 let next = &next;
                 let training = &training;
                 let this = &self;
@@ -2810,6 +2791,68 @@ impl Estimator for OneVsRest {
             models,
             session_id: df.session.session_id().to_string(),
         }))
+    }
+}
+
+impl Default for OneVsRest {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// Release only the cache created for this fit, including after a failed binary fit.
+struct OneVsRestTrainingCache(Option<DataFrame>);
+impl Drop for OneVsRestTrainingCache {
+    fn drop(&mut self) {
+        if let Some(df) = &self.0 {
+            let _ = df.unpersist(false);
+        }
+    }
+}
+
+fn ml_exact_column(name: &str) -> crate::column::Column {
+    crate::column::col(&format!("`{}`", name.replace('`', "``")))
+}
+
+impl Estimator for OneVsRest {
+    fn operator(&self) -> &MlOperator {
+        &self.operator
+    }
+    fn operator_mut(&mut self) -> &mut MlOperator {
+        &mut self.operator
+    }
+    fn params(&self) -> &Params {
+        &self.params
+    }
+    fn params_mut(&mut self) -> &mut Params {
+        &mut self.params
+    }
+    fn fit_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<Box<dyn Model>> {
+        // The params are checked before any request. The Python client, which raises PySpark's
+        // errors in PySpark's order, reads the max label first, with `max_label` and `fit_classes`.
+        self.check_required_params()?;
+        let parallelism = self.parallelism_i64().ok_or_else(|| {
+            SparkError::value_msg("OneVsRest parameter parallelism cannot be null")
+        })?;
+        if self.classifier.is_none() {
+            return Err(SparkError::value_msg(
+                "OneVsRest requires a native classifier",
+            ));
+        }
+        if parallelism < 1 {
+            return Err(SparkError::value_msg("parallelism must be at least 1"));
+        }
+        let max = self.max_label(df)?.ok_or_else(|| {
+            SparkError::value_msg("OneVsRest cannot fit an empty or null-labeled dataset")
+        })?;
+        if !max.is_finite() || max < 0.0 || max >= i32::MAX as f64 {
+            return Err(SparkError::value_msg(
+                "OneVsRest requires a finite nonnegative maximum class label",
+            ));
+        }
+        let count = max as usize + 1;
+        // At most one thread of each class, as PySpark's ThreadPool(min(parallelism, classes)).
+        self.fit_classes(df, count, parallelism.min(count as i64) as usize)
     }
 }
 
@@ -11048,5 +11091,21 @@ mod tests {
             drop(assignments);
             assert!(weak.upgrade().is_none());
         }
+    }
+
+    #[test]
+    fn one_vs_rest_reads_its_parallelism_of_either_int_width() {
+        let ovr = OneVsRest::new();
+        assert_eq!(ovr.parallelism_i64(), Some(1));
+        let mut ovr = ovr.set_parallelism(3);
+        assert_eq!(ovr.parallelism_i64(), Some(3));
+        // The Python client narrows an int beyond 32 bits to a Long, which `parallelism` wraps.
+        *ovr.params_mut() = ovr
+            .params()
+            .clone()
+            .set_param_int_narrow("parallelism", 1 << 40);
+        assert_eq!(ovr.parallelism_i64(), Some(1 << 40));
+        *ovr.params_mut() = ovr.params().clone().set_param_null("parallelism");
+        assert_eq!(ovr.parallelism_i64(), None);
     }
 }

@@ -4047,19 +4047,20 @@ def test_one_vs_rest_defers_base_param_validation_until_fit():
 
 
 @pytest.mark.parametrize("use_setter", [False, True])
-@pytest.mark.parametrize("parallelism", [0, -1])
-def test_one_vs_rest_raises_pysparks_error_for_fewer_than_one_process(parallelism, use_setter):
+@pytest.mark.parametrize("parallelism", [0, -1, None, 2**100, -(2**100)])
+def test_one_vs_rest_reads_the_dataset_before_its_parallelism(parallelism, use_setter):
     from pyspark.ml.connect.classification import LinearSVC, OneVsRest
 
     if use_setter:
         estimator = OneVsRest(classifier=LinearSVC()).setParallelism(parallelism)
     else:
         estimator = OneVsRest(classifier=LinearSVC(), parallelism=parallelism)
-    # PySpark's fit trains the classifiers in a ThreadPool of `parallelism` processes, which
-    # raises a plain ValueError for fewer than one, before anything is sent.
-    with pytest.raises(ValueError, match="^Number of processes must be at least 1$") as raised:
+    # PySpark's fit reads the max label first, by `dataset.agg`, before its ThreadPool of
+    # min(parallelism, numClasses) processes, and never sends the param: an object that is not a
+    # DataFrame raises the AttributeError of `agg` before anything is sent, whatever the
+    # parallelism, and an int of any size is taken. The live tests check the rest of the order.
+    with pytest.raises(AttributeError, match="^'NoneType' object has no attribute 'agg'$"):
         estimator.fit(None)
-    assert type(raised.value) is ValueError
 
 
 @pytest.mark.parametrize("name", ["AFTSurvivalRegression", "IsotonicRegression", "FMRegressor"])
