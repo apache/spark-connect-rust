@@ -39,11 +39,13 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install Rust toolchain (rustfmt + clippy)
         # rustup is preinstalled; avoid third-party toolchain actions (ASF Actions
-        # policy allowlists actions/* only).
+        # policy allowlists actions/* only). This job pins its toolchain, so that a new
+        # release of clippy or rustfmt cannot change its verdict without a code change: bump
+        # it on purpose. The build and test jobs stay on floating stable, which catches a
+        # toolchain release that breaks the build on the day that it ships.
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
-          rustup component add rustfmt clippy
+          rustup toolchain install 1.100.0 --profile minimal --component rustfmt,clippy
+          rustup default 1.100.0
           # `--workspace` reaches `examples/wasm-udfs` (a path dependency of the `examples`
           # member), whose build script compiles its UDFs to WASM.
           rustup target add wasm32-unknown-unknown
@@ -65,10 +67,18 @@ jobs:
         # Any finding fails the job. Lints this codebase triggers by design are allowed once,
         # with a reason, in `[workspace.lints.clippy]` of the root Cargo.toml. The workspace
         # run builds `apache-spark-connect` with `wasm-udf` on (feature unification through
-        # `examples/wasm-udfs`); the second run covers the default feature set.
+        # `examples/wasm-udfs`); the second run covers the default feature set, and the third
+        # the `datafusion` and `polars` integrations. The crates that the workspace excludes,
+        # which the other workflows build and test, are linted through their manifests.
         run: |
           cargo clippy --workspace --all-targets -- -D warnings
           cargo clippy -p apache-spark-connect --all-targets -- -D warnings
+          cargo clippy -p apache-spark-connect --all-targets --features datafusion,polars -- -D warnings
+          # They share the cached target directory of the workspace, which has their dependencies.
+          for crate in examples/wasm-udfs examples/wasm-udf-inline tests/wasm-udf; do
+            CARGO_TARGET_DIR="$PWD/target" \
+              cargo clippy --manifest-path "$crate/Cargo.toml" --all-targets -- -D warnings
+          done
       - name: Tooling unit tests
         run: python3 -m unittest discover -s scripts/tests
       - name: LICENSE-binary and NOTICE-binary are up to date

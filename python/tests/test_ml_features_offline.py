@@ -67,17 +67,54 @@ def test_native_exports_and_official_constructor_signature(name):
         cls(1)
     with pytest.raises(TypeError, match="unexpected keyword"):
         cls(unknown=1)
+    # setParams, as pyspark.ml's: keyword-only, with the params and defaults of the constructor.
+    assert str(inspect.signature(cls.setParams)) == "(self, " + str(inspect.signature(cls))[1:]
+    with pytest.raises(TypeError, match="Method setParams forces keyword arguments."):
+        cls().setParams(1)
+    with pytest.raises(TypeError, match=f"{name}.setParams\\(\\) got an unexpected keyword"):
+        cls().setParams(unknown=1)
 
 
 @pytest.mark.parametrize("case", GOLDEN["params"], ids=lambda c: c["name"])
-@pytest.mark.parametrize("setters", [False, True])
-def test_feature_parameters_match_official_wire_and_filter_fitted_model(ml_mock, case, setters):
+@pytest.mark.parametrize("via", ["constructor", "setters", "setParams"])
+def test_feature_parameters_match_official_wire_and_filter_fitted_model(ml_mock, case, via):
     spark, service = ml_mock
-    stage = configured(getattr(feature, case["name"]), case["values"], setters)
+    stage = configured(
+        getattr(feature, case["name"]),
+        case["values"],
+        setters=via == "setters",
+        set_params=via == "setParams",
+    )
     actual = wire(stage, case["name"], spark, service)
     expected = pb2.MlParams.FromString(base64.b64decode(case["params_b64"]))
     # IEEE NaN is not equal to itself; compare serialized literals.
     assert {k: v.SerializeToString() for k, v in actual.params.items()} == {k: v.SerializeToString() for k, v in expected.params.items()}
+
+
+@pytest.mark.parametrize("name", GOLDEN["api"])
+def test_feature_stages_take_the_params_argument_of_pyspark_ml(ml_mock, name):
+    # As pyspark.ml's fit and transform: None and an empty dict change nothing, and any other
+    # value raises a TypeError before any request (the native stages take no param map).
+    spark, service = ml_mock
+    stage = getattr(feature, name)()
+    estimator = GOLDEN["api"][name]["estimator"]
+    method = stage.fit if estimator else stage.transform
+    frame = spark.range(1)
+    for value in [{"x": 1}, [{}], ("x",), "x"]:
+        sent = _requests_but_deletes(service)
+        with pytest.raises(TypeError):
+            method(frame, value)
+        assert _requests_but_deletes(service) == sent
+    if estimator:
+        service.execute_payload = _operator_info("params-argument-model")
+        for value in [None, {}]:
+            sent = len(service.execute_requests)
+            stage.fit(frame, value)
+            assert len(_commands_but_deletes(service, sent)) == 1
+    else:
+        base = _relation(stage.transform(frame)).ml_relation.transform.params
+        for value in [None, {}]:
+            assert _relation(stage.transform(frame, value)).ml_relation.transform.params == base
 
 
 @pytest.mark.parametrize("name", GOLDEN["api"])

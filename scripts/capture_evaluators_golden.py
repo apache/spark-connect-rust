@@ -179,7 +179,10 @@ def dataset(spark, spec):
     frame = spark.sql(spec["sql"])
     for column in spec["vectors"]:
         frame = frame.withColumn(column, array_to_vector(column))
-    return frame
+    # One partition, as the live tests read it: BinaryClassificationMetrics bins each partition of
+    # its sorted scores, so a binned metric depends on the partitioning, which local[*] takes from
+    # the server's cores.
+    return frame.coalesce(1)
 
 
 def main():

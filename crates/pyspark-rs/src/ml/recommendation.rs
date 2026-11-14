@@ -19,6 +19,26 @@ fn count_literal(value: &Bound<'_, PyAny>) -> PyResult<proto::expression::Litera
     }
 }
 
+const ALS_PARAMS: &[(&str, Kind)] = &[
+    ("rank", Kind::Int),
+    ("maxIter", Kind::Int),
+    ("regParam", Kind::Float),
+    ("numUserBlocks", Kind::Int),
+    ("numItemBlocks", Kind::Int),
+    ("implicitPrefs", Kind::Bool),
+    ("alpha", Kind::Float),
+    ("userCol", Kind::Str),
+    ("itemCol", Kind::Str),
+    ("seed", Kind::Int),
+    ("ratingCol", Kind::Str),
+    ("nonnegative", Kind::Bool),
+    ("checkpointInterval", Kind::Int),
+    ("intermediateStorageLevel", Kind::Str),
+    ("finalStorageLevel", Kind::Str),
+    ("coldStartStrategy", Kind::Str),
+    ("blockSize", Kind::Int),
+];
+
 #[pyclass(name = "ALS", module = "pyspark.ml.connect.recommendation")]
 pub struct PyALS {
     inner: ALS,
@@ -51,33 +71,20 @@ impl PyALS {
             inner: ALS::new(),
             unsendable: Vec::new(),
         };
-        init_params(
-            &mut this,
-            "ALS",
-            &[],
-            &[
-                ("rank", Kind::Int),
-                ("maxIter", Kind::Int),
-                ("regParam", Kind::Float),
-                ("numUserBlocks", Kind::Int),
-                ("numItemBlocks", Kind::Int),
-                ("implicitPrefs", Kind::Bool),
-                ("alpha", Kind::Float),
-                ("userCol", Kind::Str),
-                ("itemCol", Kind::Str),
-                ("seed", Kind::Int),
-                ("ratingCol", Kind::Str),
-                ("nonnegative", Kind::Bool),
-                ("checkpointInterval", Kind::Int),
-                ("intermediateStorageLevel", Kind::Str),
-                ("finalStorageLevel", Kind::Str),
-                ("coldStartStrategy", Kind::Str),
-                ("blockSize", Kind::Int),
-            ],
-            args,
-            kwargs,
-        )?;
+        init_params(&mut this, "ALS", &[], ALS_PARAMS, args, kwargs)?;
         Ok(this)
+    }
+    #[pyo3(
+        name = "setParams",
+        signature = (*args, **kwargs),
+        text_signature = "(self, *, rank=10, maxIter=10, regParam=0.1, numUserBlocks=10, numItemBlocks=10, implicitPrefs=False, alpha=1.0, userCol='user', itemCol='item', seed=None, ratingCol='rating', nonnegative=False, checkpointInterval=10, intermediateStorageLevel='MEMORY_AND_DISK', finalStorageLevel='MEMORY_AND_DISK', coldStartStrategy='nan', blockSize=4096)"
+    )]
+    fn set_params<'py>(
+        slf: Bound<'py, Self>,
+        args: &Bound<'py, PyTuple>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_params_of(slf, "ALS", ALS_PARAMS, args, kwargs)
     }
     #[pyo3(name = "setAlpha")]
     fn set_alpha<'py>(
@@ -219,7 +226,13 @@ impl PyALS {
         }
         Ok(slf)
     }
-    fn fit(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<PyALSModel> {
+    #[pyo3(signature = (dataset, params=None))]
+    fn fit(
+        slf: &Bound<'_, Self>,
+        dataset: &Bound<'_, PyAny>,
+        params: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyALSModel> {
+        check_fit_params(params)?;
         let input = dataset_of(dataset, "fit", "select")?;
         let mut estimator = snapshot(slf)?;
         let session = input.spark_session();
@@ -293,7 +306,13 @@ impl PyALSModel {
     ) -> PyResult<Bound<'py, Self>> {
         set_param(slf, "userCol", Kind::Str, value)
     }
-    fn transform(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+    #[pyo3(signature = (dataset, params=None))]
+    fn transform(
+        slf: &Bound<'_, Self>,
+        dataset: &Bound<'_, PyAny>,
+        params: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        check_params(params)?;
         let input = dataset_of(dataset, "transform", "columns")?;
         let mut model = snapshot(slf)?;
         Ok(PyDataFrame::new(model.transform(&input).to_pyerr()?))
