@@ -26669,3 +26669,143 @@ def copy_module_copy(obj):
     import copy
 
     return copy.copy(obj)
+
+
+def test_worker_reconstructors_rebuild_the_readers_writers_and_streams_as_pyspark(
+        mock_connect, monkeypatch):
+    # As PySpark's worker of a foreachBatch function, which has no drop-in: with pyspark._pyspark
+    # hidden, the reduce of a reader, a writer, a V2 writer and the stream objects rebuilds an
+    # object of the same state through PySpark's calls, which the drop-in's calls are here.
+    import sys
+
+    import cloudpickle
+    import pyspark
+
+    spark, service = mock_connect
+    df = spark.range(3)
+    reader = spark.read.format("json").option("a", "1").schema("id LONG")
+    writer = df.write.format("parquet").mode("overwrite").option("k", "v").partitionBy("id")
+    stream_reader = spark.readStream.format("rate").option("b", "2").name("rate_src")
+    stream_writer = df.writeStream.format("memory").outputMode("append").queryName("q")
+    # Each reduce gives a reconstructor of its state, not the drop-in's `_of_state` by name.
+    for obj in (reader, writer, stream_reader, stream_writer):
+        assert obj.__reduce__()[0].__name__ == "creator"
+    monkeypatch.delattr(pyspark, "_pyspark")
+    monkeypatch.setitem(sys.modules, "pyspark._pyspark", None)
+    rebuilt = cloudpickle.loads(cloudpickle.dumps(reader))
+    assert (rebuilt._format, rebuilt._schema, rebuilt._options) == ("json", "id LONG", {"a": "1"})
+    rebuilt = cloudpickle.loads(cloudpickle.dumps(writer))
+    rebuilt.save("p")
+    # ExecutePlanRequest.plan=3, Plan.command=2, Command.write_operation=2; WriteOperation.source=2,
+    # mode=5 (SAVE_MODE_OVERWRITE=2), options=9, partitioning_cols=7.
+    plan = parse_message(parse_message(service.execute_requests[-1])[3][0])
+    sent = parse_message(parse_message(plan[2][0])[2][0])
+    assert sent[2] == [b"parquet"] and sent[5] == [2]
+    assert [parse_message(entry)[1][0] for entry in sent[9]] == [b"k"]
+    assert sent[7] == [b"id"]
+    rebuilt = cloudpickle.loads(cloudpickle.dumps(stream_reader))
+    assert (rebuilt._format, rebuilt._options) == ("rate", {"b": "2"})
+    rebuilt = cloudpickle.loads(cloudpickle.dumps(stream_writer))
+    assert type(rebuilt).__name__ == "DataStreamWriter"
+
+
+def test_worker_reconstructors_replay_every_setting_as_pyspark(mock_connect, monkeypatch):
+    # As the test above, for the settings that it does not set: with pyspark._pyspark hidden, the
+    # reconstructor of each object replays its buckets, its sorting, its clustering, the table
+    # settings of a V2 writer, the schema of a stream reader, and the partitioning, the trigger
+    # and the function of a stream writer, so that the rebuilt object has the same state. A
+    # bucket count that the proto refuses fails the write of the rebuilt writer, as PySpark's. A
+    # Column of the state, such as a V2 writer's partitioning, is rebuilt by PySpark's own
+    # Column classes, which only a worker has: the e2e tests of foreachBatch cover it.
+    import sys
+
+    import cloudpickle
+    import pyspark
+    from pyspark.sql import Column
+
+    def comparable(value):
+        # The state, without the DataFrame or session that it starts with, and with each Column
+        # and function as its text and name, which a copy keeps.
+        if isinstance(value, Column):
+            return str(value)
+        if callable(value):
+            return value.__name__
+        if isinstance(value, (list, tuple)):
+            return [comparable(item) for item in value]
+        if isinstance(value, dict):
+            return {key: comparable(item) for key, item in value.items()}
+        return value
+
+    def on_batch(batch_df, batch_id):
+        pass
+
+    def on_row(row):
+        pass
+
+    spark, _ = mock_connect
+    df = spark.range(3)
+    objects = [
+        df.write.bucketBy(2, "id").sortBy("id"),
+        df.write.clusterBy("id"),
+        df.writeTo("t").using("parquet").option("k", "v").tableProperty("p", "q").clusterBy("id"),
+        spark.readStream.format("rate").schema("id LONG"),
+        df.writeStream.partitionBy("id").trigger(processingTime="1 second")
+        .foreachBatch(on_batch),
+        df.writeStream.clusterBy("id").trigger(once=True).foreach(on_row),
+    ]
+    states = [comparable(obj.__reduce__()[1][1:]) for obj in objects]
+    refused = df.write.bucketBy(2**40, "id")
+    builder = SparkSession.Builder().config("k", "v")
+    builder._registerHook(lambda session: None)
+    monkeypatch.delattr(pyspark, "_pyspark")
+    monkeypatch.setitem(sys.modules, "pyspark._pyspark", None)
+    for obj, state in zip(objects, states):
+        rebuilt = cloudpickle.loads(cloudpickle.dumps(obj))
+        assert type(rebuilt) is type(obj)
+        assert comparable(rebuilt.__reduce__()[1][1:]) == state
+    with pytest.raises(ValueError):
+        cloudpickle.loads(cloudpickle.dumps(refused)).save("p")
+    # The builder of a worker is rebuilt by the same calls, which keep its options and hooks.
+    options, _, hooks = cloudpickle.loads(cloudpickle.dumps(builder)).__reduce__()[1]
+    assert options == [("k", "v")] and len(hooks) == 1
+
+
+def test_plain_pickles_name_the_session_creator_as_pyspark(mock_connect):
+    # As PySpark's: a plain pickle of an object that holds the session fails at the session's
+    # creator, which the message names, and so does a plain pickle of the session itself.
+    spark, _ = mock_connect
+    message = "Can't pickle local object 'SparkSession.__reduce__.<locals>.creator'"
+    for obj in (spark, spark.read, spark.range(1).groupBy("id")):
+        with pytest.raises(AttributeError, match=re.escape(message)):
+            pickle.dumps(obj)
+
+
+def test_session_builders_copy_and_pickle_as_pyspark(mock_connect):
+    # As PySpark's Builder, whose state is its options: a copy and a pickle of a builder keep
+    # them, and the unpickled builder is a builder of the same class.
+    import copy
+
+    import cloudpickle
+    from pyspark.sql import SparkSession
+
+    builder = SparkSession.builder.remote("sc://localhost:15013").config("k", "v")
+    copied = copy.copy(builder)
+    assert type(copied) is type(builder)
+    rebuilt = cloudpickle.loads(cloudpickle.dumps(builder))
+    assert type(rebuilt) is type(builder)
+    assert pickle.loads(cloudpickle.dumps(copied)) is not None
+    # A plain pickle of a builder succeeds, as of PySpark's, and keeps the options.
+    rebuilt = pickle.loads(pickle.dumps(builder))
+    assert type(rebuilt) is type(builder)
+    assert ("k", "v") in rebuilt.__reduce__()[1][0]
+
+
+def test_pivot_values_are_the_literal_columns_as_pyspark(mock_connect):
+    # As PySpark's GroupedData: _pivot_values are the literal Columns of the pivot values, and
+    # None when the pivot was given none.
+    spark, _ = mock_connect
+    df = spark.range(3)
+    grouped = df.groupBy("id").pivot("id", [1, 2])
+    assert [str(column) for column in grouped._pivot_values] == ["Column<'1'>", "Column<'2'>"]
+    assert df.groupBy("id")._pivot_values is None
+    assert df.groupBy("id").pivot("id")._pivot_values is None

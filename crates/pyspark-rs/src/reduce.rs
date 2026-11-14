@@ -22,14 +22,17 @@ pub(crate) fn getattr_reduce<'py>(
     PyTuple::new(py, [getattr, args.into_any()])
 }
 
-/// The reduce of an object of the class `T`, which pickles by the `_of_state` of `T` called
-/// with `args`, the state of the object.
-pub(crate) fn of_state_reduce<'py, T: pyo3::PyTypeInfo>(
+/// The reduce of an object of its state `args`, through the reconstructor `name` of
+/// `pyspark.sql.connect._state_reduce`: a function of the state, which gives back the function
+/// that rebuilds the object, which cloudpickle pickles by value, and the arguments of it.
+pub(crate) fn state_reduce<'py>(
     py: Python<'py>,
+    name: &str,
     args: Bound<'py, PyTuple>,
-) -> PyResult<Bound<'py, PyTuple>> {
-    let of_state = py.get_type::<T>().getattr("_of_state")?;
-    PyTuple::new(py, [of_state, args.into_any()])
+) -> PyResult<Bound<'py, PyAny>> {
+    py.import("pyspark.sql.connect._state_reduce")?
+        .getattr(name)?
+        .call1(args)
 }
 
 /// The Python list of the columns, each a Column of the wrapper of `Column`.

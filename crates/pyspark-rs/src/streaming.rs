@@ -319,10 +319,11 @@ impl PyDataStreamReader {
 #[pymethods]
 impl PyDataStreamReader {
     /// The shallow copy of a stream reader, as PySpark's `copy.copy`: the copy shares the
-    /// options of this reader, and has its own format, which is kept as it is.
+    /// options of this reader, as its `_options` dict is shared, so an option that either one
+    /// sets or unsets is seen by both, and has its own format, which is kept as it is.
     fn __copy__(&self, py: Python<'_>) -> PyDataStreamReader {
         PyDataStreamReader {
-            inner: self.state(),
+            inner: self.inner.clone(),
             options: Arc::clone(&self.options),
             unsent_format: self
                 .unsent_format
@@ -333,8 +334,8 @@ impl PyDataStreamReader {
 
     /// The reduce of a stream reader, as PySpark's pickle of its session and its state, which
     /// `_of_state` gives back.
-    fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
-        use crate::reduce::{of_state_reduce, optional_object, str_dict};
+    fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        use crate::reduce::{optional_object, state_reduce, str_dict};
 
         let session = crate::session::session_object(py, &self.inner.spark_session())?;
         let args = PyTuple::new(
@@ -348,7 +349,7 @@ impl PyDataStreamReader {
                 optional_object(py, self.unsent_format.as_ref()),
             ],
         )?;
-        of_state_reduce::<PyDataStreamReader>(py, args)
+        state_reduce(py, "stream_reader_reduce", args)
     }
 
     /// A stream reader of its state, as `__reduce__` gives it: of the session `session`, the
@@ -1067,8 +1068,8 @@ impl PyDataStreamWriter {
 
     /// The reduce of a stream writer, as PySpark's pickle of its DataFrame and its state, which
     /// `_of_state` gives back, with the functions that it applied.
-    fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
-        use crate::reduce::{of_state_reduce, str_dict};
+    fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        use crate::reduce::{state_reduce, str_dict};
 
         let writer = self.inner.get();
 
@@ -1119,7 +1120,7 @@ impl PyDataStreamWriter {
                 functions.into_any(),
             ],
         )?;
-        of_state_reduce::<PyDataStreamWriter>(py, args)
+        state_reduce(py, "stream_writer_reduce", args)
     }
 
     /// A stream writer of its state, as `__reduce__` gives it: of the DataFrame `frame`, the
@@ -1605,8 +1606,8 @@ impl PyStreamingQuery {
 
     /// The reduce of a streaming query, as PySpark's pickle of its session and its state, which
     /// `_of_state` gives back.
-    fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
-        use crate::reduce::of_state_reduce;
+    fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        use crate::reduce::state_reduce;
 
         let session = crate::session::session_object(py, &self.inner.spark_session())?;
 
@@ -1619,7 +1620,7 @@ impl PyStreamingQuery {
                 self.inner.name().into_pyobject(py)?.into_any(),
             ],
         )?;
-        of_state_reduce::<PyStreamingQuery>(py, args)
+        state_reduce(py, "streaming_query_reduce", args)
     }
 
     /// A streaming query of its state, as `__reduce__` gives it: of the session `session`, the

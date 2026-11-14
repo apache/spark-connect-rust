@@ -97,4 +97,7 @@ def _reduce_dataframe(
 
         return _pyspark.DataFrame._of_relation(session, relation, levels, support_repr_html)
 
+    # Named as PySpark's creator of a session, which a pickle of a DataFrame fails at, so that the
+    # error of a plain pickle names the same function.
+    creator.__qualname__ = "SparkSession.__reduce__.<locals>.creator"
     return creator, (session, relation, levels, support_repr_html)

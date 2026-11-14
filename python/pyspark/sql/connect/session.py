@@ -46,4 +46,6 @@ def _reduce_session(session_id: str) -> tuple[Callable[[str], "SparkSession"], t
 
         return SparkSession._getActiveSessionIfMatches(old_session_id)
 
+    # Named as PySpark's, so that the error of a plain pickle of a session names the same function.
+    creator.__qualname__ = "SparkSession.__reduce__.<locals>.creator"
     return creator, (session_id,)

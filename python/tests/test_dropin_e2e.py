@@ -5816,3 +5816,106 @@ def test_null_get_item_reads_its_nulls_though_the_server_declares_it_non_nullabl
     # The table is cast to the non-nullable schema, which raises for a null, as PySpark's does.
     with pytest.raises(ValueError, match="Casting field 'v' with null values to non-nullable"):
         df.toArrow()
+
+
+def test_a_shallow_copy_of_a_reader_shares_an_unset_option_as_pyspark(session, tmp_path):
+    # As PySpark's, where a reader's copy shares its options dict: an option that the original
+    # unsets is unset for the copy too, so both load without the header.
+    import copy
+
+    (tmp_path / "input.csv").write_text("a,b\n1,2\n")
+    path = str(tmp_path / "input.csv")
+    reader = session.read.format("csv").option("header", "true")
+    copied = copy.copy(reader)
+    reader.option("header", None)
+    assert copied.load(path).columns == ["_c0", "_c1"]
+    assert reader.load(path).columns == ["_c0", "_c1"]
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "reader",
+        "writer",
+        "writerV2",
+        "groupBy",
+        "pivot",
+        "cogroup",
+        "streamReader",
+        "streamWriter",
+        "streamingQuery",
+    ],
+)
+def test_foreach_batch_captures_the_readers_writers_and_groups_as_pyspark(
+        session, tmp_path, name):
+    # As PySpark's: a foreachBatch function that captures a reader, a writer, a V2 writer, grouped
+    # data, cogrouped ops, a stream reader, a stream writer or a streaming query uses it on the
+    # Python worker of the server, which has PySpark's objects of the state that the drop-in
+    # pickles, so the query runs, and the function's result is the one of PySpark's.
+    (tmp_path / "in").mkdir()
+    (tmp_path / "in" / "input.txt").write_text("a\nc\nb\n")
+    source = str(tmp_path / "in")
+    path = str(tmp_path / "in" / "input.txt")
+    out = str(tmp_path / "out.txt")
+    df = session.createDataFrame([(1, "a"), (2, "b"), (1, "c")], "k int, v string")
+    other = session.readStream.format("rate").option("rowsPerSecond", 1).load()
+    running = other.writeStream.format("memory").queryName("cap_running").start()
+    table = "foreach_batch_captured_writer_v2"
+    session.sql(f"DROP TABLE IF EXISTS {table}").collect()
+
+    def result(value):
+        with open(out, "w") as file:
+            file.write(str(value))
+
+    captured = {
+        "reader": lambda: session.read.format("text"),
+        "writer": lambda: df.write.format("json").mode("overwrite"),
+        "writerV2": lambda: df.writeTo(table).using("parquet"),
+        "groupBy": lambda: df.groupBy("k"),
+        "pivot": lambda: df.groupBy("k").pivot("v", ["a", "b"]),
+        "cogroup": lambda: df.groupBy("k").cogroup(df.groupBy("k")),
+        "streamReader": lambda: session.readStream.format("text"),
+        "streamWriter": lambda: df.writeStream.format("memory").queryName("cap_writer"),
+        "streamingQuery": lambda: running,
+    }[name]()
+
+    def func(batch, batch_id):
+        if name == "reader":
+            result(captured.load(path).count())
+        elif name == "writer":
+            written = str(tmp_path / "written")
+            captured.save(written)
+            result(session.read.json(written).count())
+        elif name == "writerV2":
+            captured.create()
+            result(session.table(table).count())
+        elif name in ("groupBy", "pivot"):
+            result(captured.count().count())
+        elif name == "cogroup":
+            result(type(captured).__name__)
+        elif name == "streamReader":
+            result(captured.load(source).isStreaming)
+        elif name == "streamWriter":
+            result(type(captured).__name__)
+        else:
+            result(captured.id == running.id)
+
+    query = session.readStream.format("text").load(source).writeStream.foreachBatch(func)
+    query = query.trigger(once=True).start()
+    try:
+        query.awaitTermination()
+        expected = {
+            "reader": "3",
+            "writer": "3",
+            "writerV2": "3",
+            "groupBy": "2",
+            "pivot": "2",
+            "cogroup": "PandasCogroupedOps",
+            "streamReader": "True",
+            "streamWriter": "DataStreamWriter",
+            "streamingQuery": "True",
+        }[name]
+        assert open(out).read() == expected
+    finally:
+        running.stop()
+        session.sql(f"DROP TABLE IF EXISTS {table}").collect()

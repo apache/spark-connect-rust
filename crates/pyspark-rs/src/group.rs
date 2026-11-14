@@ -121,6 +121,17 @@ impl PyGroupedData {
         self.frame.clone_ref(py)
     }
 
+    /// The pivot values of the grouped data, as PySpark's `_pivot_values`: the literal Columns of
+    /// the values that `pivot` was given, None if it was given none.
+    #[getter(_pivot_values)]
+    fn pivot_values<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyList>>> {
+        let values = self.grouped_data.pivot_value_columns();
+        if values.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(crate::reduce::column_list(py, &values)?))
+    }
+
     /// The shallow copy of grouped data, as PySpark's `copy.copy`: of the DataFrame that it
     /// groups, which the copy holds too, and of the same grouping.
     fn __copy__(&self, py: Python<'_>) -> PyGroupedData {
@@ -133,8 +144,8 @@ impl PyGroupedData {
     /// The reduce of grouped data, as PySpark's pickle of its state: its DataFrame, the
     /// grouping columns, the type of the grouping, the pivot column and values, and the
     /// grouping sets, which `_of_state` gives back.
-    fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
-        use crate::reduce::{column_list, group_type_name, of_state_reduce};
+    fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        use crate::reduce::{column_list, group_type_name, state_reduce};
 
         let group = &self.grouped_data;
         let pivot_col = match group.pivot_column() {
@@ -159,7 +170,7 @@ impl PyGroupedData {
                 PyList::new(py, sets)?.into_any(),
             ],
         )?;
-        of_state_reduce::<PyGroupedData>(py, args)
+        state_reduce(py, "grouped_reduce", args)
     }
 
     /// Grouped data of its state, as `__reduce__` gives it: of the DataFrame `frame`, the
@@ -640,7 +651,7 @@ impl PyCoGroupedData {
 
     /// The reduce of cogrouped ops, as PySpark's pickle of its two grouped data, which
     /// `_of_state` gives back.
-    fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+    fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let args = PyTuple::new(
             py,
             [
@@ -648,7 +659,7 @@ impl PyCoGroupedData {
                 self.right.clone_ref(py).into_any().into_bound(py),
             ],
         )?;
-        crate::reduce::of_state_reduce::<PyCoGroupedData>(py, args)
+        crate::reduce::state_reduce(py, "cogrouped_reduce", args)
     }
 
     /// The cogrouped ops of two grouped data, as `__reduce__` gives them back.

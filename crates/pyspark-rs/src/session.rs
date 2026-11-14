@@ -1,7 +1,7 @@
 //! PyO3 wrapper for Spark Connect sessions.
 
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::{PyDict, PyList, PyTuple};
 use spark_connect::row::{Row, StructValue, Value};
 use spark_connect::session::SparkSession;
 use spark_connect::types::{DataType, StructField};
@@ -69,6 +69,53 @@ impl PySparkSessionBuilder {
     #[new]
     fn py_new() -> Self {
         PySparkSessionBuilder::new()
+    }
+
+    /// The shallow copy of a builder, as PySpark's `copy.copy`, of its options, its channel
+    /// builder and its hook factories.
+    fn __copy__(&self) -> PySparkSessionBuilder {
+        self.clone()
+    }
+
+    /// The reduce of a builder, as PySpark's pickle of its state: its options, the URL first,
+    /// its channel builder and its hook factories, which `builder_reduce` gives the builder back
+    /// from.
+    fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let mut options = Vec::with_capacity(self.configs.len() + 1);
+        if let Some(url) = &self.remote_url {
+            options.push(("spark.remote".to_string(), Some(url.clone())));
+        }
+        options.extend(self.configs.iter().cloned());
+        let options = PyList::new(
+            py,
+            options
+                .into_iter()
+                .map(|(key, value)| {
+                    PyTuple::new(
+                        py,
+                        [
+                            key.into_pyobject(py)?.into_any(),
+                            value.into_pyobject(py)?.into_any(),
+                        ],
+                    )
+                })
+                .collect::<PyResult<Vec<_>>>()?,
+        )?;
+        let hook_factories = PyList::new(
+            py,
+            self.hook_factories
+                .iter()
+                .map(|factory| factory.clone_ref(py).into_bound(py)),
+        )?;
+        let args = PyTuple::new(
+            py,
+            [
+                options.into_any(),
+                crate::reduce::optional_object(py, self.channel_builder.as_deref()),
+                hook_factories.into_any(),
+            ],
+        )?;
+        crate::reduce::state_reduce(py, "builder_reduce", args)
     }
 
     /// Set the remote Spark Connect server URL. Returns the builder (chainable).

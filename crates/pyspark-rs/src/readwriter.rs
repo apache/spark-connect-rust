@@ -406,10 +406,11 @@ fn apply_optional_schema(
 #[pymethods]
 impl PyDataFrameReader {
     /// The shallow copy of a reader, as PySpark's `copy.copy`: the copy shares the options of
-    /// this reader, and has its own format, which is kept as it is.
+    /// this reader, as its `_options` dict is shared, so an option that either one sets or
+    /// unsets is seen by both, and has its own format, which is kept as it is.
     fn __copy__(&self, py: Python<'_>) -> PyDataFrameReader {
         PyDataFrameReader {
-            inner: self.state(),
+            inner: self.inner.clone(),
             options: std::sync::Arc::clone(&self.options),
             unsent_format: self
                 .unsent_format
@@ -420,8 +421,8 @@ impl PyDataFrameReader {
 
     /// The reduce of a reader, as PySpark's pickle of its session and its state, which
     /// `_of_state` gives back.
-    fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyTuple>> {
-        use crate::reduce::{of_state_reduce, optional_object, str_dict};
+    fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        use crate::reduce::{optional_object, state_reduce, str_dict};
 
         let session = crate::session::session_object(py, &self.inner.spark_session())?;
         let args = pyo3::types::PyTuple::new(
@@ -434,7 +435,7 @@ impl PyDataFrameReader {
                 optional_object(py, self.unsent_format.as_ref()),
             ],
         )?;
-        of_state_reduce::<PyDataFrameReader>(py, args)
+        state_reduce(py, "reader_reduce", args)
     }
 
     /// A reader of its state, as `__reduce__` gives it: of the session `session`, the format,
