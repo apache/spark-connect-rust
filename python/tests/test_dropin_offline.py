@@ -6861,6 +6861,33 @@ def _tuple_row_results(mock_connect, table, schema, method):
 
 
 @pytest.mark.parametrize("method", ["collect", "iterator", "prefetch"])
+def test_collected_rows_preserve_public_tuple_behavior(mock_connect, method):
+    import pyarrow as pa
+    from _mock_connect_server import data_type_proto
+
+    table = pa.table({"first": [1, None], "second": [2, 3]})
+    schema = T.StructType([
+        T.StructField("a", T.LongType()), T.StructField("a", T.LongType()),
+    ])
+    rows = _tuple_row_results(mock_connect, table, data_type_proto(schema.jsonValue()), method)
+    assert [tuple(row) for row in rows] == [(1, 2), (None, 3)]
+    for row in rows:
+        assert type(row) is Row and isinstance(row, tuple)
+        assert row.__fields__ == ["a", "a"]
+        assert row.a == row[0]
+        assert row.asDict() == {"a": row[1]}
+        assert repr(row) == f"Row(a={row[0]!r}, a={row[1]!r})"
+        assert hash(row) == hash(tuple(row))
+        restored = pickle.loads(pickle.dumps(row))
+        assert type(restored) is Row and restored == row
+        assert restored.__fields__ == row.__fields__
+        with pytest.raises(RuntimeError):
+            row.a = 10
+    restored = pickle.loads(pickle.dumps(rows))
+    assert restored[0].__fields__ is restored[1].__fields__
+
+
+@pytest.mark.parametrize("method", ["collect", "iterator", "prefetch"])
 def test_collected_tuple_rows_share_names_by_schema_path(mock_connect, method):
     import pyarrow as pa
     from _mock_connect_server import data_type_proto

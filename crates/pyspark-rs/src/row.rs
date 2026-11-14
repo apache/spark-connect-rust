@@ -11,10 +11,15 @@ use spark_connect::row::{StructValue, Value};
 /// Functions that deserialize user-defined or spatial values in each result field.
 pub(crate) type FieldConverters = Arc<Vec<Option<Py<PyAny>>>>;
 
-static CREATE_ROW: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static ROW_CONSTRUCTOR: PyOnceLock<RowConstructor> = PyOnceLock::new();
 static DATETIME_OBJECTS: PyOnceLock<DateTimeObjects> = PyOnceLock::new();
 static DECIMAL: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 const ROW_SOURCE: &std::ffi::CStr = pyo3::ffi::c_str!(include_str!("row.py"));
+
+struct RowConstructor {
+    row_type: Py<PyAny>,
+    tuple_new: Py<PyAny>,
+}
 
 /// Python classes and immutable epoch values used for every collected date/time value.
 /// Resolving them once avoids repeated imports and module attribute lookups per field.
@@ -196,15 +201,22 @@ pub(crate) fn row_values_to_py(
             }
         })
         .collect::<PyResult<Vec<_>>>()?;
-    let create_row = CREATE_ROW.get_or_try_init(py, || {
-        py.import("pyspark.sql.types")?
-            .getattr("_create_row")
-            .map(Bound::unbind)
+    let constructor = ROW_CONSTRUCTOR.get_or_try_init(py, || -> PyResult<_> {
+        Ok(RowConstructor {
+            row_type: py.import("pyspark.sql.types")?.getattr("Row")?.unbind(),
+            tuple_new: py.get_type::<PyTuple>().getattr("__new__")?.unbind(),
+        })
     })?;
-    Ok(create_row
+    // Values already have their positional order and field names. Avoid running the
+    // Python argument-parsing and attribute-assignment methods for every result row.
+    let row = constructor
+        .tuple_new
         .bind(py)
-        .call1((fields, PyTuple::new(py, values)?))?
-        .unbind())
+        .call1((constructor.row_type.bind(py), PyTuple::new(py, values)?))?;
+    row.getattr("__dict__")?
+        .cast::<PyDict>()?
+        .set_item("__fields__", fields)?;
+    Ok(row.unbind())
 }
 
 /// `datetime.datetime(1970, 1, 1)`, the epoch of Spark's timestamps, without a time zone.
