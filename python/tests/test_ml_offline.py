@@ -4152,6 +4152,16 @@ def _assert_rejects_pandas(method, pdf):
     )
 
 
+def test_stop_words_remover_load_default_stop_words_asserts_an_active_session():
+    # As PySpark's invoke_helper_attr, which asserts the active session of the ML helper call.
+    from pyspark.ml.connect.feature import StopWordsRemover
+
+    assert SparkSession.getActiveSession() is None
+    with pytest.raises(AssertionError) as error:
+        StopWordsRemover.loadDefaultStopWords("english")
+    assert type(error.value) is AssertionError and str(error.value) == ""
+
+
 @pytest.mark.parametrize("name", [*_NATIVE_PARAMS, "OneVsRest", "PowerIterationClustering"])
 def test_native_ml_rejects_pandas_without_active_session(name, pandas_ml_input):
     assert SparkSession.getActiveSession() is None

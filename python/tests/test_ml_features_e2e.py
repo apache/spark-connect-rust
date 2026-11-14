@@ -94,3 +94,20 @@ def test_scaler_transforms_held_out_values_using_fitted_statistics(session):
     held = session.createDataFrame([(Vectors.dense([6., 4.]),)], ["features"])
     model = algorithm("MaxAbsScaler")(inputCol="features", outputCol="out").fit(train)
     assert_values(model.transform(held).select("out").collect(), [[[2., 4.]]])
+
+
+def test_stop_words_remover_loads_the_default_stop_words_of_the_server(session):
+    # As PySpark's StopWordsRemover.loadDefaultStopWords, which calls the ML helper of the active
+    # session, and whose list a remover takes, as with the words added to the default ones.
+    from pyspark.errors import IllegalArgumentException
+
+    remover = algorithm("StopWordsRemover")
+    english = remover.loadDefaultStopWords("english")
+    assert type(english) is list and len(english) == 181
+    assert english[:4] == ["i", "me", "my", "myself"]
+    assert len(remover.loadDefaultStopWords(language="french")) == 156
+    frame = session.createDataFrame([(["I", "like", "spark", "a", "lot"],)], ["words"])
+    stage = remover(inputCol="words", outputCol="out", stopWords=english + ["spark"])
+    assert stage.transform(frame).collect()[0].out == ["like", "lot"]
+    with pytest.raises(IllegalArgumentException, match="klingon is not in the supported language list"):
+        remover.loadDefaultStopWords("klingon")

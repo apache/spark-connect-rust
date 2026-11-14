@@ -201,3 +201,40 @@ def test_elementwise_product_sparse_vector_parameter(ml_mock):
     stage = feature.ElementwiseProduct(scalingVec=vector)
     expected = serialize_param(vector, spark.client)
     assert wire(stage, "ElementwiseProduct", spark, service).params["scalingVec"].SerializeToString() == expected.SerializeToString()
+
+
+def test_stop_words_remover_load_default_stop_words_fetches_the_ml_helper(ml_mock):
+    # As PySpark's StopWordsRemover.loadDefaultStopWords on Spark Connect (invoke_helper_attr):
+    # one MlCommand.Fetch of the ML helper object, of the method and of the literal of the
+    # language, whose result is the list of the strings of its array.
+    from pyspark.errors import PySparkTypeError
+    from test_ml_offline import _ml_result
+
+    spark, service = ml_mock
+    words = [pb2.Expression.Literal(string=word) for word in ["i", "me"]]
+    service.execute_payload = _ml_result(
+        param=pb2.Expression.Literal(array=pb2.Expression.Literal.Array(elements=words))
+    )
+    sent = len(service.execute_requests)
+    assert feature.StopWordsRemover.loadDefaultStopWords("english") == ["i", "me"]
+    (command,) = _commands_but_deletes(service, sent)
+    assert command.ml_command.fetch == pb2.Fetch(
+        obj_ref=pb2.ObjectRef(id="______ML_CONNECT_HELPER______"),
+        methods=[
+            pb2.Fetch.Method(
+                method="stopWordsRemoverLoadDefaultStopWords",
+                args=[pb2.Fetch.Method.Args(param=pb2.Expression.Literal(string="english"))],
+            )
+        ],
+    )
+    assert feature.StopWordsRemover.loadDefaultStopWords(language="english") == ["i", "me"]
+    assert list(inspect.signature(feature.StopWordsRemover.loadDefaultStopWords).parameters) == [
+        "language"
+    ]
+    # A value of no literal raises the UNSUPPORTED_DATA_TYPE of PySpark's serialization before
+    # any request. The server checks the other values.
+    sent = _requests_but_deletes(service)
+    with pytest.raises(PySparkTypeError) as error:
+        feature.StopWordsRemover.loadDefaultStopWords(object())
+    assert error.value.getCondition() == "UNSUPPORTED_DATA_TYPE"
+    assert _requests_but_deletes(service) == sent

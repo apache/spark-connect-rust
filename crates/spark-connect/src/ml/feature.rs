@@ -458,6 +458,27 @@ feature_params! { StopWordsRemover {
     set_output_cols(value: impl IntoIterator<Item = impl Into<String>>) => "outputCols", set_param_string_array; output_cols -> Vec<String> = |this| this.params.string_array("outputCols");
     set_stop_words(value: impl IntoIterator<Item = impl Into<String>>) => "stopWords", set_param_string_array; stop_words -> Vec<String> = |this| this.params.string_array("stopWords");
 } }
+impl StopWordsRemover {
+    /// The default stop words of `language` that the server keeps, as PySpark's
+    /// `StopWordsRemover.loadDefaultStopWords` reads them of Spark Connect's ML helper. The server
+    /// rejects a language that it has none of.
+    pub fn load_default_stop_words(
+        session: &SparkSession,
+        language: &str,
+    ) -> spark_connect_core::error::Result<Vec<String>> {
+        let language = proto::expression::Literal {
+            literal_type: Some(proto::expression::literal::LiteralType::String(
+                language.into(),
+            )),
+            ..Default::default()
+        };
+        ml_string_array(ml_helper_attribute(
+            session,
+            "stopWordsRemoverLoadDefaultStopWords",
+            vec![language],
+        )?)
+    }
+}
 feature_params! { StringIndexer {
     set_handle_invalid(value: &str) => "handleInvalid", set_param_string; handle_invalid -> &str = |this| this.params.string_or("handleInvalid", "error");
     set_input_cols(value: impl IntoIterator<Item = impl Into<String>>) => "inputCols", set_param_string_array; input_cols -> Vec<String> = |this| this.params.string_array("inputCols");
