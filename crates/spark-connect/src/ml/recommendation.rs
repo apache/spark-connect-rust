@@ -47,6 +47,17 @@ impl ALS {
     pub fn set_num_blocks(self, value: i32) -> Self {
         self.set_num_user_blocks(value).set_num_item_blocks(value)
     }
+
+    /// Load an `ALS` saved to `path`, as PySpark's `ALS.load(path)`: its uid and params.
+    pub fn load(session: &SparkSession, path: &str) -> spark_connect_core::error::Result<Self> {
+        let (operator, params) = read_operator(
+            session,
+            "org.apache.spark.ml.recommendation.ALS",
+            OperatorType::Estimator,
+            path,
+        )?;
+        Ok(Self { operator, params })
+    }
 }
 impl Default for ALS {
     fn default() -> Self {
@@ -80,9 +91,27 @@ pub struct ALSModel {
     rank: i32,
 }
 impl ALSModel {
-    /// The rank used by the successful fit.
+    /// The rank of the model's factors: of its estimator, as fitted, or as the server reads it of a
+    /// loaded model (`rank` of PySpark's `ALSModel`).
     pub fn rank(&self) -> i32 {
         self.rank
+    }
+
+    /// Load an `ALSModel` saved to `path`, as PySpark's `ALSModel.load(path)`: the server caches
+    /// it, as a fitted model, and gives its rank.
+    pub fn load(session: &SparkSession, path: &str) -> spark_connect_core::error::Result<Self> {
+        let (cached, operator, params) =
+            read_model(session, "org.apache.spark.ml.recommendation.ALSModel", path)?;
+        let rank = fetch(&MlTarget::object(&cached), "rank", vec![])?.into_value()?;
+        let rank = rank.as_i64().ok_or_else(|| {
+            SparkError::value_msg(format!("rank of ALSModel is not an int: {rank:?}"))
+        })? as i32;
+        Ok(Self {
+            operator,
+            params,
+            cached,
+            rank,
+        })
     }
     fn fetch(
         &self,

@@ -978,8 +978,9 @@ return sequence/frequency DataFrames and have no fit/transform model.
 These APIs accept Spark DataFrames and reject pandas frames before requests. Lazy
 model tables retain their cached model; PrefixSpan retains its input plan, including
 any upstream fitted models. Fitted-model transforms require the fitting session.
-Persistence is outside this native addition. The vendored `pyspark.ml.fpm` module is
-unchanged.
+In Rust, `FPGrowth` and `FPGrowthModel` save with `write()` and load with
+`load(session, path)`, as PySpark's `save` and `load`; the Python classes gain persistence
+with the native model classes. The vendored `pyspark.ml.fpm` module is unchanged.
 
 Spark 4.3.0's Connect helper currently rejects `Long` argument literals: PrefixSpan's
 `maxLocalProjDBSize` works within the signed 32-bit range, including its default
@@ -1010,7 +1011,9 @@ Fit, transform and subset recommendation inputs must be Spark DataFrames; pandas
 DataFrames are rejected before conversion or RPC. Model operations must use the
 fit session. Official PySpark 4.3.0 fixtures cover explicit and implicit ratings,
 predictions, cold starts, factors, and all four recommendation methods, with live
-Rust and native Python tests. Model persistence is separate from these APIs.
+Rust and native Python tests. In Rust, `ALS` and `ALSModel` save with `write()` and load
+with `load(session, path)`, and a loaded model reads its rank of the server, as PySpark's does;
+the Python classes gain persistence with the native model classes.
 
 
 ## Native ML evaluators
@@ -1038,8 +1041,13 @@ columns, convert array scores to vectors, or normalize field-name casing.
 Official PySpark fixtures and live Rust/Python tests cover every supported metric,
 weights, regression through the origin, binary score bins, multiclass log-loss
 clipping and beta, per-label metrics, both silhouette distances, ranking cutoffs,
-invalid inputs, and metric direction. Generic parameter-map APIs and evaluator
+invalid inputs, and metric direction. In Rust, each evaluator saves with `write()` and
+loads with `load(session, path)`, as PySpark's. Generic parameter-map APIs and the Python
 persistence remain separate work.
+
+`scripts/capture_fpm_recommendation_evaluation_golden.py` captures the members of the FPGrowth
+and ALS models and of the evaluators, and their save and load, of the configurations of these
+fixtures, which `e2e_fpm_recommendation_evaluation.rs` compares.
 
 
 ## Native ML statistics

@@ -34,6 +34,18 @@ impl Default for FPGrowth {
         Self::new()
     }
 }
+impl FPGrowth {
+    /// Load an `FPGrowth` saved to `path`, as PySpark's `FPGrowth.load(path)`: its uid and params.
+    pub fn load(session: &SparkSession, path: &str) -> spark_connect_core::error::Result<Self> {
+        let (operator, params) = read_operator(
+            session,
+            "org.apache.spark.ml.fpm.FPGrowth",
+            OperatorType::Estimator,
+            path,
+        )?;
+        Ok(Self { operator, params })
+    }
+}
 impl Estimator for FPGrowth {
     fn operator(&self) -> &MlOperator {
         &self.operator
@@ -89,6 +101,18 @@ impl FPGrowthModel {
     /// Association rules computed by the fitted server model.
     pub fn association_rules(&self) -> spark_connect_core::error::Result<DataFrame> {
         self.attribute("associationRules")
+    }
+
+    /// Load an `FPGrowthModel` saved to `path`, as PySpark's `FPGrowthModel.load(path)`: the
+    /// server caches it, as a fitted model.
+    pub fn load(session: &SparkSession, path: &str) -> spark_connect_core::error::Result<Self> {
+        let (cached, operator, params) =
+            read_model(session, "org.apache.spark.ml.fpm.FPGrowthModel", path)?;
+        Ok(Self {
+            operator,
+            params,
+            cached,
+        })
     }
 }
 impl Transformer for FPGrowthModel {
