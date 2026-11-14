@@ -1575,7 +1575,7 @@ fn logistic_regression_fits_and_predicts_with_cached_models() {
         return;
     }
     use spark_connect::expression::Expression;
-    use spark_connect::ml::{Estimator, LogisticRegression};
+    use spark_connect::ml::{LogisticRegression, Model, Transformer};
     use spark_connect::{Column, DataFrame};
 
     let s = session();
@@ -1697,7 +1697,7 @@ fn logistic_regression_model_is_deleted_from_the_server_when_its_last_owner_is_d
         return;
     }
     use spark_connect::expression::Expression;
-    use spark_connect::ml::{Estimator, LogisticRegression};
+    use spark_connect::ml::{LogisticRegression, Model, Transformer};
     use spark_connect::{Column, DataFrame};
 
     let s = session();
@@ -1751,7 +1751,7 @@ fn logistic_regression_fit_propagates_server_errors() {
     if !should_run() {
         return;
     }
-    use spark_connect::ml::{Estimator, LogisticRegression};
+    use spark_connect::ml::LogisticRegression;
     let s = session();
     // Missing training columns must fail during fitting, before prediction is attempted.
     let error = LogisticRegression::new().fit(&s.range(3).unwrap());
@@ -1768,7 +1768,7 @@ fn logistic_regression_default_columns_support_multiclass_training() {
         return;
     }
     use spark_connect::expression::Expression;
-    use spark_connect::ml::{Estimator, LogisticRegression};
+    use spark_connect::ml::{LogisticRegression, Transformer};
     use spark_connect::{Column, DataFrame};
 
     let s = session();

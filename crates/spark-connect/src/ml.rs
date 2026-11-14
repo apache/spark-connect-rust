@@ -1970,6 +1970,8 @@ impl LogisticRegression {
             ),
             params: self.params.clone(),
             cached,
+            summary: None,
+            binary_summary: false,
         })
     }
 }
@@ -1998,8 +2000,7 @@ impl Estimator for LogisticRegression {
     }
 
     fn fit_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<Box<dyn Model>> {
-        let info = fit_via_command(&self.operator, &self.params, df)?;
-        Ok(Box::new(self.model_from_info(info, &df.session)?))
+        Ok(Box::new(self.fit(df)?))
     }
 }
 
@@ -2014,6 +2015,11 @@ pub struct LogisticRegressionModel {
     operator: MlOperator,
     params: Params,
     cached: CachedModel,
+    /// The target of the training summary, which a fit sets (`_summary`); None of a model that the
+    /// server returns without a fit, such as a loaded one.
+    summary: Option<MlTarget>,
+    /// Whether the training summary is the binary one, as `numClasses <= 2` at the fit chose it.
+    binary_summary: bool,
 }
 
 impl LogisticRegressionModel {
@@ -2251,6 +2257,7 @@ impl LinearSVC {
             ),
             params: self.params.clone(),
             cached,
+            summary: None,
         })
     }
 }
@@ -2276,8 +2283,7 @@ impl Estimator for LinearSVC {
     }
 
     fn fit_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<Box<dyn Model>> {
-        let info = fit_via_command(&self.operator, &self.params, df)?;
-        Ok(Box::new(self.model_from_info(info, &df.session)?))
+        Ok(Box::new(self.fit(df)?))
     }
 }
 
@@ -2289,6 +2295,9 @@ pub struct LinearSVCModel {
     operator: MlOperator,
     params: Params,
     cached: CachedModel,
+    /// The target of the training summary, which a fit sets (`_summary`); None of a model that the
+    /// server returns without a fit, such as a loaded one.
+    summary: Option<MlTarget>,
 }
 
 impl Transformer for LinearSVCModel {

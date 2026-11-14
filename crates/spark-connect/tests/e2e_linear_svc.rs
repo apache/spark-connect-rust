@@ -4,7 +4,7 @@ mod common;
 use common::live_session;
 use spark_connect::column::{col, lit};
 use spark_connect::expression::Expression;
-use spark_connect::ml::{Estimator, LinearSVC};
+use spark_connect::ml::{LinearSVC, Model, Transformer};
 use spark_connect::{Column, DataFrame, SparkSession};
 
 fn vectorize(df: DataFrame, name: &str) -> DataFrame {
@@ -79,7 +79,7 @@ fn linear_svc_fits_separate_models_and_predicts_on_unseen_data() {
         };
         r.id
     };
-    assert_ne!(object_id(first.as_ref()), object_id(second.as_ref()));
+    assert_ne!(object_id(&first), object_id(&second));
     let mut cloned = first.clone_box();
     let delayed = first.transform(&held_out).unwrap();
     drop(first);
