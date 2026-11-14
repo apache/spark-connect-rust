@@ -17,8 +17,8 @@ use prost::Message;
 use common::normalize_relation;
 use spark_connect::ml::{
     BinaryClassificationEvaluator, Estimator, Evaluator, LogisticRegression, MaxAbsScaler,
-    MlOperator, OperatorType, Params, Pipeline, PipelineModel, RegressionEvaluator, StringIndexer,
-    Transformer, VectorAssembler,
+    OperatorType, Pipeline, PipelineModel, RegressionEvaluator, StringIndexer, Transformer,
+    VectorAssembler,
 };
 use spark_connect_proto as proto;
 
@@ -153,13 +153,10 @@ fn test_pipeline_operator_name() {
 
 #[test]
 fn test_pipeline_model_operator_type() {
-    let model = PipelineModel {
-        operator: MlOperator::new("org.apache.spark.ml.Pipeline", OperatorType::Model),
-        params: Params::new(),
-        stages: vec!["stage1".to_string()],
-    };
+    let model = PipelineModel::of_stages(vec![]);
     let op = model.operator();
     assert_eq!(op.op_type, OperatorType::Model);
+    assert_eq!(op.name, "org.apache.spark.ml.PipelineModel");
 }
 
 #[test]

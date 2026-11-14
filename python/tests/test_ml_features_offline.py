@@ -36,13 +36,33 @@ def ml_mock(_feature_mock_server):
     service.forget_session(spark.session_id)
     spark.stop()
 
+def _splits_payloads(service):
+    # The splits that the fit of a QuantileDiscretizer reads of its model, as a Bucketizer of
+    # them: one fetch of the splits of an inputCol, and one of the splits of the inputCols.
+    from test_ml_offline import _ml_result
+
+    doubles = [pb2.Expression.Literal(double=v) for v in [0.0, 0.5, 1.0]]
+    splits = pb2.Expression.Literal(array=pb2.Expression.Literal.Array(elements=doubles))
+    arrays = pb2.Expression.Literal(array=pb2.Expression.Literal.Array(elements=[splits, splits]))
+    # The longer name first: a request of getSplitsArray contains getSplits too.
+    service.payload_for_request = {
+        b"getSplitsArray": _ml_result(param=arrays),
+        b"getSplits": _ml_result(param=splits),
+    }
+
+
 def wire(stage, name, spark, service):
     frame = spark.range(1)
     if GOLDEN["api"][name]["estimator"]:
         service.execute_payload = _operator_info("feature-model")
+        if name == "QuantileDiscretizer":
+            _splits_payloads(service)
         sent = len(service.execute_requests)
         model = stage.fit(frame)
         params = _commands_but_deletes(service, sent)[0].ml_command.fit.params
+        if name == "QuantileDiscretizer":
+            # Its model is a Bucketizer of the splits, which a transform of it is not checked by.
+            return params
         transform = _relation(model.transform(frame)).ml_relation.transform
         assert transform.obj_ref.id == "feature-model"
         accepted = GOLDEN["api"][name]["model_params"]
@@ -110,10 +130,14 @@ def test_feature_stages_take_the_params_argument_of_pyspark_ml(ml_mock, name):
         assert _requests_but_deletes(service) == sent
     if estimator:
         service.execute_payload = _operator_info("params-argument-model")
+        # A QuantileDiscretizer's fit fetches the splits of its Bucketizer as well.
+        per_fit = 2 if name == "QuantileDiscretizer" else 1
+        if name == "QuantileDiscretizer":
+            _splits_payloads(service)
         for value in [None, {}]:
             sent = len(service.execute_requests)
             stage.fit(frame, value)
-            assert len(_commands_but_deletes(service, sent)) == 1
+            assert len(_commands_but_deletes(service, sent)) == per_fit
         for value in [[], ()]:
             sent = _requests_but_deletes(service)
             assert stage.fit(frame, value) == []
@@ -121,7 +145,7 @@ def test_feature_stages_take_the_params_argument_of_pyspark_ml(ml_mock, name):
         sent = len(service.execute_requests)
         models = stage.fit(frame, [{}, {}])
         assert len(models) == 2
-        assert len(_commands_but_deletes(service, sent)) == 2
+        assert len(_commands_but_deletes(service, sent)) == 2 * per_fit
     else:
         base = _relation(stage.transform(frame)).ml_relation.transform.params
         for value in [None, {}]:
@@ -142,6 +166,8 @@ def test_feature_stages_and_fitted_models_reject_pandas_before_requests(ml_mock,
         assert _requests_but_deletes(service) == sent
     if estimator:
         service.execute_payload = _operator_info("pandas-rejection-model")
+        if name == "QuantileDiscretizer":
+            _splits_payloads(service)
         model = stage.fit(spark.range(1))
         sent = _requests_but_deletes(service)
         with pytest.raises(TypeError, match="requires a Spark DataFrame"):

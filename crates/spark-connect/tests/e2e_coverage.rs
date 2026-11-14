@@ -1299,14 +1299,13 @@ fn ml_estimators_and_transformers() {
         .set_metric_name("areaUnderROC");
     assert_eq!(bin_eval.evaluate(&bin_df).unwrap(), 0.75);
 
-    // Pipeline.fit is not implemented: the stages are names that the server cannot fit.
-    use spark_connect::SparkErrorKind;
-    let mut pipeline = Pipeline::new().set_stages(vec!["scaler", "lr"]);
-    let error = pipeline
-        .fit(&df)
-        .err()
-        .expect("Pipeline.fit raises an error");
-    assert_eq!(error.kind, SparkErrorKind::NotImplementedError);
+    // A pipeline of no stages fits a model of no stages, which transforms to its input.
+    let mut pipeline = Pipeline::new();
+    let mut model = pipeline.fit(&df).expect("Pipeline.fit");
+    assert_eq!(
+        model.transform(&df).unwrap().count().unwrap(),
+        df.count().unwrap()
+    );
 }
 
 #[test]

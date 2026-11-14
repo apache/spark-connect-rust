@@ -1007,16 +1007,23 @@
 },
 {
 "converter": "toString",
+"default": "",
 "doc": "Param for the column name of user specified fold number. Once this is specified, :py:class:`CrossValidator` won't do random k-fold split. Note that this column should be integer type with range [0, numFolds) and Spark will throw exception on out-of-range fold numbers.",
 "name": "foldCol"
 },
 {
 "converter": "toInt",
+"default": {
+"int": 3
+},
 "doc": "number of folds for cross validation",
 "name": "numFolds"
 },
 {
 "converter": "toInt",
+"default": {
+"class_name_hash": true
+},
 "doc": "random seed.",
 "name": "seed"
 }
@@ -5334,21 +5341,25 @@
 },
 {
 "converter": "toString",
+"default": "features",
 "doc": "features column name.",
 "name": "featuresCol"
 },
 {
 "converter": "toString",
+"default": "label",
 "doc": "label column name.",
 "name": "labelCol"
 },
 {
 "converter": "toString",
+"default": "prediction",
 "doc": "prediction column name.",
 "name": "predictionCol"
 },
 {
 "converter": "toString",
+"default": "rawPrediction",
 "doc": "raw prediction (a.k.a. confidence) column name.",
 "name": "rawPredictionCol"
 },
@@ -6483,6 +6494,7 @@
 "StopWordsRemover": [
 {
 "converter": "toBoolean",
+"default": false,
 "doc": "whether to do a case sensitive comparison over the stop words",
 "name": "caseSensitive"
 },
@@ -6498,11 +6510,19 @@
 },
 {
 "converter": "toString",
+"default": {
+"server_default": [
+"stopWordsRemoverGetDefaultOrUS"
+]
+},
 "doc": "locale of the input. ignored when case sensitive is true",
 "name": "locale"
 },
 {
 "converter": "toString",
+"default": {
+"uid_suffix": "__output"
+},
 "doc": "output column name.",
 "name": "outputCol"
 },
@@ -6513,6 +6533,12 @@
 },
 {
 "converter": "toListString",
+"default": {
+"server_default": [
+"stopWordsRemoverLoadDefaultStopWords",
+"english"
+]
+},
 "doc": "The words to be filtered out",
 "name": "stopWords"
 }
@@ -6773,11 +6799,17 @@
 },
 {
 "converter": "toInt",
+"default": {
+"class_name_hash": true
+},
 "doc": "random seed.",
 "name": "seed"
 },
 {
 "converter": "toFloat",
+"default": {
+"float": "0.75"
+},
 "doc": "Param for ratio between train and     validation data. Must be between 0 and 1.",
 "name": "trainRatio"
 }

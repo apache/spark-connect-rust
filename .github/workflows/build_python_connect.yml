@@ -234,6 +234,8 @@ jobs:
             tests/test_ml_e2e.py \
             tests/test_ml_api_e2e.py \
             tests/test_logistic_api_e2e.py \
+            tests/test_misc_api_e2e.py \
+            tests/test_regression_api_e2e.py \
             tests/test_gbt_classifier_e2e.py \
             tests/test_gbt_regressor_e2e.py \
             tests/test_naive_bayes_e2e.py \
@@ -248,6 +250,8 @@ jobs:
             tests/test_feature_api_e2e.py \
             tests/test_frequent_patterns_e2e.py \
             tests/test_als_e2e.py \
+            tests/test_fpm_recommendation_api_e2e.py \
+            tests/test_evaluation_api_e2e.py \
             tests/test_evaluators_e2e.py \
             tests/test_statistics_e2e.py
 

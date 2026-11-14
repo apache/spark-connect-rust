@@ -49,7 +49,12 @@ from pyspark.ml.connect.evaluation import (
 )
 from pyspark.ml.connect.recommendation import ALS, ALSModel
 from pyspark.ml.connect.pipeline import Pipeline, PipelineModel
-from pyspark.ml.connect.tuning import CrossValidator, CrossValidatorModel
+from pyspark.ml.connect.tuning import (
+    CrossValidator,
+    CrossValidatorModel,
+    TrainValidationSplit,
+    TrainValidationSplitModel,
+)
 from pyspark.ml.connect.fpm import FPGrowth, FPGrowthModel, PrefixSpan
 from pyspark._pyspark import MLModel
 
@@ -114,6 +119,8 @@ __all__ = [
     "MulticlassClassificationEvaluator",
     "CrossValidator",
     "CrossValidatorModel",
+    "TrainValidationSplit",
+    "TrainValidationSplitModel",
     "MLModel",
     "FPGrowth",
     "FPGrowthModel",
@@ -132,6 +139,7 @@ def _register_native_classes() -> None:
     from pyspark.ml.base import Model as _Model
     from pyspark.ml.base import Transformer as _Transformer
     from pyspark.ml.evaluation import Evaluator as _Evaluator
+    from pyspark.ml.param import Params as _Params
 
     for name in dir(_native):
         cls = getattr(_native, name)
@@ -143,6 +151,25 @@ def _register_native_classes() -> None:
             _Evaluator.register(cls)
         elif hasattr(cls, "transform"):
             (_Model if name.endswith("Model") else _Transformer).register(cls)
+        elif hasattr(cls, "params"):
+            # A class of Params that neither fits nor transforms (PrefixSpan).
+            _Params.register(cls)
+
+    # The meta-algorithms are PySpark's classes of them too, so that `MetaAlgorithmReadWrite`
+    # reads the nested stages of a native Pipeline (`getUidMap` of a validator's estimator) and
+    # refuses a nested validator, as of PySpark's.
+    from pyspark.ml import pipeline as _pipeline
+    from pyspark.ml import tuning as _tuning
+
+    for native, vendored in [
+        (_native.Pipeline, _pipeline.Pipeline),
+        (_native.PipelineModel, _pipeline.PipelineModel),
+        (_native.CrossValidator, _tuning.CrossValidator),
+        (_native.CrossValidatorModel, _tuning.CrossValidatorModel),
+        (_native.TrainValidationSplit, _tuning.TrainValidationSplit),
+        (_native.TrainValidationSplitModel, _tuning.TrainValidationSplitModel),
+    ]:
+        vendored.register(native)
 
 
 _register_native_classes()
