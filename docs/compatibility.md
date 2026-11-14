@@ -306,6 +306,10 @@ native classes follow as they are completed. A class that follows it has:
 `tests/golden/ml_api.json` holds the API of every public class of `pyspark.ml`, and
 `python/tests/test_ml_api_offline.py` compares each class that follows it with it: the members, the
 kinds of the members, and the parameters of each method and keyword-only constructor.
+`tests/golden/misc_api_cases.json` holds the same for NaiveBayes, MultilayerPerceptronClassifier,
+FMClassifier and OneVsRest, from `python/tests/_misc_api_cases.py` and
+`scripts/capture_misc_api_cases_golden.py`, and `test_misc_api_offline.py` and
+`test_misc_api_e2e.py` compare them.
 `tests/golden/ml_api_cases.json` holds the results of PySpark 4.3.0 of the cases of
 `python/tests/_ml_api_cases.py` (the Params API, the models, summaries, transforms and persistence),
 which `test_ml_api_offline.py` and `test_ml_api_e2e.py` compare with.
@@ -988,8 +992,13 @@ The Rust `NaiveBayesModel` has PySpark 4.3.0's model members: `pi`, `theta` and 
 `predict`, `predictRaw` and `predictProbability` of one vector, and `NaiveBayesModel::load`. The
 estimator's `fit` returns this typed model. PySpark 4.3.0 gives the model no training summary. The
 Rust param accessors are generated from PySpark's param table: `features_col` and
-`set_features_col` replace the former `feature_col` and `set_feature_col`. The Python binding
-is unchanged in this change and still returns the shared `MLModel`.
+`set_features_col` replace the former `feature_col` and `set_feature_col`.
+
+In Python, `NaiveBayes` and its `NaiveBayesModel` follow the full API of `pyspark.ml`
+(see "Native ML classes of the full pyspark.ml API"): the Params API, `pi`, `theta`, `sigma`,
+`numClasses`, `numFeatures`, `predict`, `predictRaw` and `predictProbability` of a vector,
+and save and load. A NaiveBayes model has no training summary, as in PySpark. The vendored
+`pyspark.ml.classification` API continues to use its existing implementation.
 
 ## Native BisectingKMeans
 
@@ -1082,8 +1091,13 @@ The Rust `FMClassificationModel` has `factors`, `linear`, `intercept`, `predict`
 and `predictProbability` of one vector, `numClasses`, `numFeatures`, and `load`. Its `summary()`
 is the binary training summary of a fitted model, and `has_summary()` says whether one exists;
 `summary()` fails for a loaded model, as PySpark does. `evaluate(&df)` returns the binary summary
-of a DataFrame, with the ROC, PR and threshold DataFrames. The Python binding is unchanged in
-this change.
+of a DataFrame, with the ROC, PR and threshold DataFrames.
+
+In Python, `FMClassifier`, its `FMClassificationModel` and their summaries follow the full
+API of `pyspark.ml` (see "Native ML classes of the full pyspark.ml API"): the Params API,
+`factors`, `linear`, `intercept`, `numClasses`, `numFeatures`, `predict`, `predictRaw` and
+`predictProbability` of a vector, `summary()` (the training summary: `objectiveHistory`,
+`totalIterations`, `roc`, `pr` and the other curves), `evaluate`, and save and load.
 
 ## Native MultilayerPerceptronClassifier
 
@@ -1105,6 +1119,12 @@ The Rust `MultilayerPerceptronClassificationModel` has `weights`, `predict`, `pr
 the multiclass training summary of a fitted model, and `has_summary()` says whether one exists.
 `summary()` fails for a loaded model, as PySpark does. `evaluate(&df)` returns the summary of
 a DataFrame. The param accessors are generated from PySpark's param table.
+
+In Python, `MultilayerPerceptronClassifier`, its `MultilayerPerceptronClassificationModel`
+and their summaries follow the full API of `pyspark.ml` (see "Native ML classes of the full
+pyspark.ml API"): the Params API, `weights`, `numClasses`, `numFeatures`, `predict`,
+`predictRaw` and `predictProbability` of a vector, `summary()` (the training summary:
+`objectiveHistory` and `totalIterations`), `evaluate`, and save and load.
 
 ## Native OneVsRest
 
@@ -1137,6 +1157,24 @@ gives the classifier. Single-vector prediction is on the submodels. Persistence 
 available for `OneVsRest` and `OneVsRestModel`: their save and load remain pending with the
 persistence of the meta-estimators, whose writers PySpark runs on the client.
 
+In Python, the `OneVsRest` estimator has the Params API of `pyspark.ml` (its `classifier` param
+included), `setClassifier`, `fitMultiple` and `clear`, and its `fit` returns the typed
+`OneVsRestModel`, which has `classifier`, the other params, `transform`, and a `uid` of its own,
+as PySpark's. Its `models` are the typed submodels, each with the uid of the classifier, the
+binary label of its class as `labelCol`, the classifier's params, and its training summary. They
+are made from the fitted submodels without a request. The submodels of a classifier that has no
+typed Python class yet are generic models. A LogisticRegression submodel is a typed
+`LogisticRegressionModel`, with its training summary. The per-class fits send the requests of
+PySpark's, and PySpark's client also reads `numClasses` of each LogisticRegression submodel
+after its fit: this client makes the same reads, but after all the class fits rather than
+between them, so their order differs. The remaining differences from PySpark are these:
+
+- Saving and loading a `OneVsRest` or a `OneVsRestModel` is not available yet. `write` and `save`
+  of `OneVsRest` raise `CONNECT_ML.UNSUPPORTED_EXCEPTION`, and `read` and `load` of it raise
+  the same kind of error, because PySpark writes these classes on the client. `write` of
+  `OneVsRestModel` raises `ValueError`, since the model has no server-side object to save.
+- `setClassifier` and the `classifier` keyword raise `TypeError` for an object that is not a
+  native binary classifier, when they are set; PySpark accepts any object and fails at `fit`.
 
 ## Native AFTSurvivalRegression, IsotonicRegression and FMRegressor
 
