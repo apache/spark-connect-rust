@@ -112,12 +112,13 @@ impl PySummaryBuilder {
         featuresCol: &Bound<'_, PyAny>,
         weightCol: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyColumn> {
-        // As in the remote SummaryBuilder, metric literals are converted at summary(),
-        // and non-Column arguments fail the _invoke_function assertion.
+        // As in the remote SummaryBuilder, the metrics are converted at summary(), each with
+        // `lit` (`F.array([F.lit(m) for m in self._metrics])`), so that a list is the array of
+        // `lit`, and non-Column arguments fail the _invoke_function assertion.
         let metrics = self
             .metrics
             .iter()
-            .map(|v| crate::functions::to_value_column(v.bind(py)))
+            .map(|v| crate::functions::to_column(v.bind(py)))
             .collect::<PyResult<Vec<_>>>()?;
         let features = featuresCol
             .extract::<PyRef<'_, PyColumn>>()

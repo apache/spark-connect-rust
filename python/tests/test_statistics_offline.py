@@ -175,6 +175,25 @@ def test_builder_requires_columns(features, weight):
         api().Summarizer.metrics("mean").summary(features, weight)
 
 
+def test_builder_converts_metrics_with_lit_as_pyspark():
+    # As pyspark.ml.stat's SummaryBuilder.summary, which converts each metric with F.lit: a list or
+    # a NumPy array is the array of lit, not a typed literal, so that an empty list is an empty
+    # array. The expressions are those of official pyspark-client 4.3.0.
+    import numpy as np
+
+    expected = {
+        "list": ([["mean"]], "GkkKEWFnZ3JlZ2F0ZV9tZXRyaWNzEh4aHAoFYXJyYXkSExoRCgVhcnJheRIICgZqBG1lYW4SBxIFCgFmGAASCwoJWQAAAAAAAPA/"),
+        "ndarray": ([np.array(["mean"])], "GmUKEWFnZ3JlZ2F0ZV9tZXRyaWNzEjoaOAoFYXJyYXkSLzotChMaEQoFYXJyYXkSCAoGagRtZWFuEhaiARMKD1oNEgtVVEY4X0JJTkFSWRABEgcSBQoBZhgAEgsKCVkAAAAAAADwPw=="),
+        "nested_list": ([[1, 2]], "GksKEWFnZ3JlZ2F0ZV9tZXRyaWNzEiAaHgoFYXJyYXkSFRoTCgVhcnJheRIECgIwARIECgIwAhIHEgUKAWYYABILCglZAAAAAAAA8D8="),
+        "empty_list": ([[]], "Gj8KEWFnZ3JlZ2F0ZV9tZXRyaWNzEhQaEgoFYXJyYXkSCRoHCgVhcnJheRIHEgUKAWYYABILCglZAAAAAAAA8D8="),
+        "column": ([F.lit("mean")], "Gj4KEWFnZ3JlZ2F0ZV9tZXRyaWNzEhMaEQoFYXJyYXkSCAoGagRtZWFuEgcSBQoBZhgAEgsKCVkAAAAAAADwPw=="),
+    }
+    for name, (metrics, encoded) in expected.items():
+        actual = api().Summarizer.metrics(*metrics).summary(F.col("f"))._expr.to_plan(None)
+        reference = pb2.Expression.FromString(base64.b64decode(encoded))
+        assert clean(actual) == clean(reference), name
+
+
 def test_builder_defers_metric_validation_to_spark():
     for metrics in [[], ["invalid"], ["mean", "mean"], [1], [None]]:
         expression = (
