@@ -1147,6 +1147,7 @@ impl EngineSession for JvmSession {
             ))),
             proto::plan::OpType::Command(command) => match command.command_type {
                 Some(proto::command::CommandType::SqlCommand(sql)) => {
+                    // Inspect legacy argument fields to reject unsupported encodings.
                     #[allow(deprecated)]
                     if !sql.args.is_empty()
                         || !sql.pos_args.is_empty()
@@ -1155,6 +1156,7 @@ impl EngineSession for JvmSession {
                     {
                         return Err(Status::unimplemented("Spark engine SQL command arguments"));
                     }
+                    // Accept the legacy SQL string when the relation input is absent.
                     #[allow(deprecated)]
                     let relation = match sql.input {
                         Some(r) => r,

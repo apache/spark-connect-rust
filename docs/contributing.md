@@ -227,7 +227,8 @@ markers such as `TODO`, `FIXME`, `todo!()` or "for now" in `crates/*/src`
 and add or update golden tests when you change plan or expression building.
 
 Workspace builds, tests and Clippy include the experimental JNI crate. It needs
-macOS or Linux and JDK 21 with `JAVA_HOME` set to its installation directory.
+macOS or Linux, a C compiler and `JAVA_HOME` set to a JDK with JNI headers.
+JDK 21 is the validated adapter and CI baseline.
 On Windows, or to build/test/lint the other crates without a JDK, exclude it:
 
 ```bash

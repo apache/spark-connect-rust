@@ -46,9 +46,10 @@ exclude = [
 # the target is installed locally.
 # The experimental Rust server and JNI host are also opt-in. Build them with
 # `cargo build -p spark-connect-server` or `cargo build -p spark-connect-jni`;
-# workspace builds/tests/lint include the JNI host and need macOS/Linux with
-# JAVA_HOME pointing to a JDK 21 installation. On Windows or without a JDK,
-# use `--workspace --exclude spark-connect-jni`.
+# workspace builds/tests/lint include the JNI host and need macOS/Linux, a C
+# compiler and JAVA_HOME pointing to a JDK with JNI headers. JDK 21 is the
+# validated adapter and CI baseline. On Windows or without a JDK, use
+# `--workspace --exclude spark-connect-jni`.
 default-members = [
     "crates/spark-connect-proto",
     "crates/spark-connect-core",

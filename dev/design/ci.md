@@ -18,12 +18,13 @@ The CI consists of these main workflows:
    floors
 
 The other workflows are `lint.yml` (rustfmt, clippy, ruff), `generated-drift.yml`,
-`vendor-drift.yml`, `docs.yml`, `pandas-parity.yml`, `pipelines-parity.yml` and `release.yml`.
+`vendor-drift.yml`, `docs.yml`, `native-server.yml`, `pandas-parity.yml`,
+`pipelines-parity.yml` and `release.yml`.
 
 Most workflows run on pushes and pull requests targeting `master` and `branch-*`. Several also
-accept manual dispatch. `docs.yml` and `wheel-build-checks.yml` run only when files matching their
-path filters change. The release wheel build checks cover changes to packaged Python sources,
-protocol definitions, dependencies and build configuration. `release.yml` runs on a schedule and on
+accept manual dispatch. `docs.yml`, `native-server.yml` and `wheel-build-checks.yml` run only when
+files matching their path filters change. The release wheel build checks cover changes to packaged
+Python sources, protocol definitions, dependencies and build configuration. `release.yml` runs on a schedule and on
 manual dispatch.
 
 ## Rust CI (`rust.yml`)

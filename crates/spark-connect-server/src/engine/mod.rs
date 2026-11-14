@@ -82,6 +82,7 @@ pub enum PreparedOperation {
 }
 
 /// Query execution starts after the frontend validates and sends its schema.
+// async_trait repeats Future's must_use annotation on generated trait methods.
 #[allow(clippy::double_must_use)]
 #[tonic::async_trait]
 pub trait PreparedQuery: Send {
