@@ -14,11 +14,10 @@
 //! and the repr() and str() of the Python objects. The `skipped` lists of the golden are its
 //! client-side params and setters, which send no command and are not golden entries.
 //!
-//! Left out, each with the finding that keeps it out (see [`LEFT_OUT`], [`LOAD_LEFT_OUT`] and
-//! [`CLASS_LEFT_OUT`]): the Imputer of a NaN `missingValue`, the load of the StopWordsRemover
-//! stages, and the class methods that build from a helper fetch whose uid argument is random.
-//! The Delete that PySpark sends for the temporary model of a QuantileDiscretizer's fit is not
-//! compared (see [`without_deletes`]).
+//! Left out, with the finding that keeps it out (see [`LOAD_LEFT_OUT`]): the load of the
+//! StopWordsRemover stages. [`LEFT_OUT`] and [`CLASS_LEFT_OUT`] list the entries and class methods
+//! left out whole, of which there are none now. The Delete that PySpark sends for the temporary
+//! model of a QuantileDiscretizer's fit is not compared (see [`without_deletes`]).
 #[path = "common/feature_cases.rs"]
 #[macro_use]
 mod feature_cases;
@@ -45,12 +44,8 @@ const PERSISTENCE: &str = include_str!("../../../tests/golden/feature_models_per
 /// normalize it to `<path>`.
 const PATH: &str = "/unused/path";
 
-/// The findings that keep a golden entry out of the replay, by the golden key of the entry.
-const LEFT_OUT: &[(&str, &str)] = &[
-    ("Imputer", NAN),
-    ("Imputer.estimator", NAN),
-    ("Imputer.model", NAN),
-];
+/// The findings that keep a golden entry out of the replay, by the golden key of the entry: none.
+const LEFT_OUT: &[(&str, &str)] = &[];
 
 /// The golden entries whose load is left out of the replay, with their finding. Their saves are
 /// replayed.
@@ -59,38 +54,14 @@ const LOAD_LEFT_OUT: &[(&str, &str)] = &[
     ("StopWordsRemover-multi", STOP_WORDS),
 ];
 
-/// The class methods that are left out of the replay, with their finding. Each builds its model
-/// from a helper fetch whose string argument is the uid of the new model.
-const CLASS_LEFT_OUT: &[(&str, &str)] = &[
-    (
-        "CountVectorizerModel.from_vocabulary.min-tf-binary",
-        UID_ARGUMENT,
-    ),
-    ("CountVectorizerModel.from_vocabulary.plain", UID_ARGUMENT),
-    (
-        "StringIndexerModel.from_arrays_of_labels.plain",
-        UID_ARGUMENT,
-    ),
-    ("StringIndexerModel.from_labels.keep-unseen", UID_ARGUMENT),
-    ("StringIndexerModel.from_labels.plain", UID_ARGUMENT),
-];
-
-/// Finding: the replay compares the decoded ML commands with `==` (`answer` and `assert_commands`
-/// in tests/common/ml_golden.rs), and a NaN param never equals itself, so a command with a NaN is
-/// never matched. The Imputer with a NaN `missingValue` sends such commands: its fit, and the
-/// saves of its estimator and its model. Its fit and its records are left out whole.
-const NAN: &str = "a NaN param (missingValue) in the command; the replay never matches it";
+/// The class methods that are left out of the replay, with their finding: none.
+const CLASS_LEFT_OUT: &[(&str, &str)] = &[];
 
 /// Finding: PySpark's StopWordsRemover.load fetches the default stop words after its read
 /// (stopWordsRemoverGetDefaultOrUS and stopWordsRemoverLoadDefaultStopWords), which the Rust
 /// load does not send. The save is replayed.
 const STOP_WORDS: &str =
     "PySpark's load also fetches the default stop words; the Rust load does not";
-
-/// Finding: the Rust client names a new model with a random uid (MlOperator::new), which the
-/// golden's normalization writes as <uid0> in the string argument of the helper fetch. The replay
-/// normalizes the uids of the command fields, not that argument, so the command never matches.
-const UID_ARGUMENT: &str = "the uid argument of the helper fetch is random in the Rust client";
 
 /// The finding that keeps the golden entry `key` out of the replay, if any.
 fn left_out(key: &str) -> Option<&'static str> {
@@ -608,8 +579,8 @@ fn transformer_and_estimator_persistence_matches_official_pyspark() {
     );
 }
 
-/// The class methods that build a model client-side. Only the case that raises before any request
-/// is replayed here: the others are in [`CLASS_LEFT_OUT`] (see [`UID_ARGUMENT`]).
+/// The class methods that build a model client-side: the helper fetch of each, of the uid of the
+/// new model, which the replay normalizes as the golden does, or the error before any request.
 #[test]
 fn feature_model_class_methods_match_official_pyspark() {
     let golden = fixture(MODELS);
@@ -631,10 +602,67 @@ fn feature_model_class_methods_match_official_pyspark() {
             )
             .map(Into::into)
             .map_err(Into::into),
+            "CountVectorizerModel.from_vocabulary.plain" => CountVectorizerModel::from_vocabulary(
+                &session,
+                ["alpha", "beta", "zeta"],
+                "words",
+                Some("out"),
+                None,
+                None,
+            )
+            .map(Into::into)
+            .map_err(Into::into),
+            "CountVectorizerModel.from_vocabulary.min-tf-binary" => {
+                CountVectorizerModel::from_vocabulary(
+                    &session,
+                    ["alpha", "beta", "zeta"],
+                    "words",
+                    Some("out"),
+                    Some(2.0),
+                    Some(true),
+                )
+                .map(Into::into)
+                .map_err(Into::into)
+            }
+            "StringIndexerModel.from_labels.plain" => StringIndexerModel::from_labels(
+                &session,
+                ["c", "a", "b"],
+                "category",
+                Some("out"),
+                None,
+            )
+            .map(Into::into)
+            .map_err(Into::into),
+            "StringIndexerModel.from_labels.keep-unseen" => StringIndexerModel::from_labels(
+                &session,
+                ["c", "a"],
+                "category",
+                Some("out"),
+                Some("keep"),
+            )
+            .map(Into::into)
+            .map_err(Into::into),
+            "StringIndexerModel.from_arrays_of_labels.plain" => {
+                StringIndexerModel::from_arrays_of_labels(
+                    &session,
+                    [vec!["c", "a", "b"], vec!["alpha", "alpha beta"]],
+                    ["category", "text"],
+                    Some(vec!["out".to_string(), "other".to_string()]),
+                    Some("keep"),
+                )
+                .map(Into::into)
+                .map_err(Into::into)
+            }
             _ => panic!("uncovered class method {key}"),
         };
+        // The transform of a built model is a DataFrame, whose rows the replay does not serve: the
+        // construction, a helper fetch of the uid of the new model, is what is compared.
         match built {
-            Ok(model) => panic!("{key}: built a {} with no error", model.class()),
+            Ok(model) => assert!(
+                construct.get("error").is_none(),
+                "{key}: built a {} where official PySpark raised",
+                model.class()
+            ),
             Err(error) => {
                 assert!(official["transform"].is_null(), "{key}");
                 assert_error(&error.to_string(), &construct["error"], key);
