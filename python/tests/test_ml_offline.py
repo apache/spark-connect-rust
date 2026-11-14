@@ -4261,3 +4261,40 @@ def test_pic_parameter_converters_and_deferred_overflow(ml_mock):
             PowerIterationClustering(**{name: 2**100}).assignClusters(spark.range(1))
         assert error.value.getCondition() == "VALUE_NOT_BETWEEN"
     assert _requests_but_deletes(service) == 0
+
+
+def test_native_class_falls_back_only_when_the_native_module_is_absent(monkeypatch):
+    # As the live tests' helper: the reference class is run only when pyspark._pyspark is absent.
+    # A native module that is present but fails to load, or one of its imports that is missing,
+    # raises its own error, which is not the reference.
+    import builtins
+    import importlib
+
+    from _native_classes import native_class
+
+    reference = importlib.import_module("pyspark.ml.clustering").KMeans
+    real_import = builtins.__import__
+
+    def failing_import(error):
+        def _import(name, *args, **kwargs):
+            if name == "pyspark._pyspark":
+                raise error
+            return real_import(name, *args, **kwargs)
+
+        return _import
+
+    with monkeypatch.context() as patch:
+        patch.setitem(sys.modules, "pyspark._pyspark", None)
+        found = native_class("pyspark.ml.connect.clustering", "KMeans", "pyspark.ml.clustering")
+        assert found is reference
+    with monkeypatch.context() as patch:
+        patch.setattr(builtins, "__import__", failing_import(ImportError("undefined symbol: boom")))
+        with pytest.raises(ImportError, match="^undefined symbol: boom$") as error:
+            native_class("pyspark.ml.connect.clustering", "KMeans", "pyspark.ml.clustering")
+        assert type(error.value) is ImportError
+    with monkeypatch.context() as patch:
+        missing = ModuleNotFoundError("No module named 'numpy'", name="numpy")
+        patch.setattr(builtins, "__import__", failing_import(missing))
+        with pytest.raises(ModuleNotFoundError, match="numpy") as error:
+            native_class("pyspark.ml.connect.clustering", "KMeans", "pyspark.ml.clustering")
+        assert error.value is missing

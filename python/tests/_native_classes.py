@@ -26,7 +26,12 @@ def native_class(module, name, reference_module):
     reference."""
     try:
         import pyspark._pyspark  # noqa: F401
-    except ImportError:
+    except ModuleNotFoundError as error:
+        # Only the absence of the native module is the reference. A native module that is present
+        # but fails to load, such as one with a missing symbol, raises an ImportError that is not
+        # ours to hide, and so does a module that the native module imports and lacks.
+        if error.name != "pyspark._pyspark":
+            raise
         return getattr(importlib.import_module(reference_module), name)
     native = getattr(importlib.import_module(module), name)
     assert native.__module__.startswith("pyspark.ml.connect"), native

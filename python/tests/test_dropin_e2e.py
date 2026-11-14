@@ -5464,11 +5464,7 @@ def test_random_forest_rejects_invalid_parameters_and_training_data(session):
 
 
 def _random_forest_regressor():
-    try:
-        from pyspark.ml.connect.regression import RandomForestRegressor
-    except ImportError:
-        from pyspark.ml.regression import RandomForestRegressor
-    return RandomForestRegressor
+    return _native_ml("RandomForestRegressor", "pyspark.ml.regression")
 
 
 @pytest.mark.parametrize("use_setters", [False, True], ids=["constructor", "setters"])
@@ -5557,11 +5553,7 @@ def test_random_forest_regressor_rejects_invalid_parameters_and_data(session):
 
 
 def _decision_tree_classifier():
-    try:
-        from pyspark.ml.connect.classification import DecisionTreeClassifier
-    except ImportError:
-        from pyspark.ml.classification import DecisionTreeClassifier
-    return DecisionTreeClassifier
+    return _native_ml("DecisionTreeClassifier", "pyspark.ml.classification")
 
 @pytest.mark.parametrize("use_setters", [False, True], ids=["constructor", "setters"])
 def test_decision_tree_classifier_learns_nonlinear_labels_and_preserves_lazy_predictions(session, use_setters):
@@ -5683,11 +5675,7 @@ def test_decision_tree_classifier_rejects_invalid_parameters_and_training_data(s
 
 
 def _decision_tree_regressor():
-    try:
-        from pyspark.ml.connect.regression import DecisionTreeRegressor
-    except ImportError:
-        from pyspark.ml.regression import DecisionTreeRegressor
-    return DecisionTreeRegressor
+    return _native_ml("DecisionTreeRegressor", "pyspark.ml.regression")
 
 
 @pytest.mark.parametrize("use_setters", [False, True], ids=["constructor", "setters"])
