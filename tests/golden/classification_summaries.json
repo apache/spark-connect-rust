@@ -1,0 +1,8237 @@
+{
+ "datasets": {
+  "binary_eval": {
+   "columns": [
+    [
+     "label",
+     "double"
+    ],
+    [
+     "weight",
+     "double"
+    ],
+    [
+     "features",
+     "vector"
+    ]
+   ],
+   "rows": [
+    [
+     1.0,
+     1.0,
+     [
+      0.2,
+      1.0
+     ]
+    ],
+    [
+     0.0,
+     1.0,
+     [
+      2.2,
+      0.6
+     ]
+    ],
+    [
+     1.0,
+     2.0,
+     [
+      0.8,
+      2.2
+     ]
+    ],
+    [
+     0.0,
+     1.0,
+     [
+      2.9,
+      2.1
+     ]
+    ]
+   ]
+  },
+  "binary_train": {
+   "columns": [
+    [
+     "label",
+     "double"
+    ],
+    [
+     "weight",
+     "double"
+    ],
+    [
+     "features",
+     "vector"
+    ]
+   ],
+   "rows": [
+    [
+     1.0,
+     1.0,
+     [
+      0.0,
+      1.1
+     ]
+    ],
+    [
+     0.0,
+     2.0,
+     [
+      2.0,
+      1.0
+     ]
+    ],
+    [
+     1.0,
+     3.0,
+     [
+      0.5,
+      2.5
+     ]
+    ],
+    [
+     0.0,
+     1.0,
+     [
+      3.0,
+      0.2
+     ]
+    ],
+    [
+     1.0,
+     1.5,
+     [
+      1.0,
+      1.9
+     ]
+    ],
+    [
+     0.0,
+     0.5,
+     [
+      2.5,
+      3.0
+     ]
+    ],
+    [
+     1.0,
+     2.0,
+     [
+      0.1,
+      0.9
+     ]
+    ],
+    [
+     0.0,
+     1.0,
+     [
+      1.8,
+      0.4
+     ]
+    ]
+   ]
+  },
+  "multi_eval": {
+   "columns": [
+    [
+     "label",
+     "double"
+    ],
+    [
+     "weight",
+     "double"
+    ],
+    [
+     "features",
+     "vector"
+    ]
+   ],
+   "rows": [
+    [
+     0.0,
+     1.0,
+     [
+      0.1,
+      0.6
+     ]
+    ],
+    [
+     1.0,
+     1.0,
+     [
+      1.2,
+      0.1
+     ]
+    ],
+    [
+     2.0,
+     1.0,
+     [
+      2.1,
+      1.8
+     ]
+    ],
+    [
+     1.0,
+     2.0,
+     [
+      0.6,
+      0.6
+     ]
+    ]
+   ]
+  },
+  "multi_train": {
+   "columns": [
+    [
+     "label",
+     "double"
+    ],
+    [
+     "weight",
+     "double"
+    ],
+    [
+     "features",
+     "vector"
+    ]
+   ],
+   "rows": [
+    [
+     0.0,
+     1.0,
+     [
+      0.0,
+      0.5
+     ]
+    ],
+    [
+     1.0,
+     2.0,
+     [
+      1.0,
+      0.0
+     ]
+    ],
+    [
+     2.0,
+     1.0,
+     [
+      2.0,
+      1.5
+     ]
+    ],
+    [
+     0.0,
+     1.0,
+     [
+      0.2,
+      0.9
+     ]
+    ],
+    [
+     1.0,
+     1.0,
+     [
+      1.1,
+      0.4
+     ]
+    ],
+    [
+     2.0,
+     2.0,
+     [
+      2.4,
+      2.0
+     ]
+    ],
+    [
+     0.0,
+     0.5,
+     [
+      0.5,
+      0.1
+     ]
+    ],
+    [
+     1.0,
+     1.5,
+     [
+      0.9,
+      0.7
+     ]
+    ],
+    [
+     2.0,
+     1.0,
+     [
+      1.7,
+      2.2
+     ]
+    ]
+   ]
+  },
+  "nb_binary": {
+   "columns": [
+    [
+     "label",
+     "double"
+    ],
+    [
+     "weight",
+     "double"
+    ],
+    [
+     "features",
+     "vector"
+    ]
+   ],
+   "rows": [
+    [
+     0.0,
+     1.0,
+     [
+      1.0,
+      0.0
+     ]
+    ],
+    [
+     1.0,
+     1.0,
+     [
+      0.0,
+      1.0
+     ]
+    ],
+    [
+     0.0,
+     1.0,
+     [
+      1.0,
+      1.0
+     ]
+    ],
+    [
+     1.0,
+     2.0,
+     [
+      0.0,
+      0.0
+     ]
+    ],
+    [
+     0.0,
+     1.0,
+     [
+      1.0,
+      0.0
+     ]
+    ],
+    [
+     1.0,
+     1.0,
+     [
+      0.0,
+      1.0
+     ]
+    ]
+   ]
+  },
+  "nb_binary_eval": {
+   "columns": [
+    [
+     "label",
+     "double"
+    ],
+    [
+     "weight",
+     "double"
+    ],
+    [
+     "features",
+     "vector"
+    ]
+   ],
+   "rows": [
+    [
+     0.0,
+     1.0,
+     [
+      1.0,
+      1.0
+     ]
+    ],
+    [
+     1.0,
+     1.0,
+     [
+      0.0,
+      0.0
+     ]
+    ],
+    [
+     1.0,
+     1.0,
+     [
+      0.0,
+      1.0
+     ]
+    ]
+   ]
+  },
+  "nb_counts": {
+   "columns": [
+    [
+     "label",
+     "double"
+    ],
+    [
+     "weight",
+     "double"
+    ],
+    [
+     "features",
+     "vector"
+    ]
+   ],
+   "rows": [
+    [
+     0.0,
+     1.0,
+     [
+      2.0,
+      0.0
+     ]
+    ],
+    [
+     1.0,
+     1.0,
+     [
+      0.0,
+      3.0
+     ]
+    ],
+    [
+     2.0,
+     1.0,
+     [
+      1.0,
+      4.0
+     ]
+    ],
+    [
+     0.0,
+     1.0,
+     [
+      3.0,
+      1.0
+     ]
+    ],
+    [
+     1.0,
+     2.0,
+     [
+      0.0,
+      2.0
+     ]
+    ],
+    [
+     2.0,
+     1.0,
+     [
+      2.0,
+      2.0
+     ]
+    ]
+   ]
+  },
+  "nb_counts_eval": {
+   "columns": [
+    [
+     "label",
+     "double"
+    ],
+    [
+     "weight",
+     "double"
+    ],
+    [
+     "features",
+     "vector"
+    ]
+   ],
+   "rows": [
+    [
+     0.0,
+     1.0,
+     [
+      1.0,
+      0.0
+     ]
+    ],
+    [
+     1.0,
+     1.0,
+     [
+      0.0,
+      2.0
+     ]
+    ],
+    [
+     2.0,
+     1.0,
+     [
+      1.0,
+      3.0
+     ]
+    ]
+   ]
+  }
+ },
+ "encoding": "Floats are JSON numbers (Python repr); NaN and infinities are strings. Vectors and matrices as in scripts/ml_golden_common.py. DataFrames: schema and rows sorted by canonical JSON. Model and summary objects: {type, ref} with ref a placeholder: <idN> for an object id (<idN>.summary for a summary), numbered in order of first appearance. Errors: {class, condition, message}. commands: base64 of the MlCommand or MlRelation sent, results: base64 of the MlCommandResult received, both SerializeToString(deterministic=True) after normalization (object ids and uids -> placeholders, plan_id, origin and LocalRelation data cleared, paths -> <path>).",
+ "source": "apache/spark v4.3.0 pyspark.ml (official pyspark-client 4.3.0, Spark 4.3.0 Connect)",
+ "summaries": {
+  "FMClassifier.evaluate": {
+   "class": "FMClassificationSummary",
+   "members": {
+    "accuracy": {
+     "call": "summary.accuracy",
+     "commands": [
+      "EhUKBwoFPGlkMD4SCgoIYWNjdXJhY3k="
+     ],
+     "results": [
+      "CglZAAAAAAAA8D8="
+     ],
+     "value": 1.0
+    },
+    "areaUnderROC": {
+     "call": "summary.areaUnderROC",
+     "commands": [
+      "EhkKBwoFPGlkMD4SDgoMYXJlYVVuZGVyUk9D"
+     ],
+     "results": [
+      "CglZAAAAAAAA8D8="
+     ],
+     "value": 1.0
+    },
+    "fMeasureByLabel-0.5": {
+     "call": "summary.fMeasureByLabel(0.5)",
+     "commands": [
+      "EikKBwoFPGlkMD4SHgoPZk1lYXN1cmVCeUxhYmVsEgsKCVkAAAAAAADgPw=="
+     ],
+     "results": [
+      "Ch2yARoKAkoAEglZAAAAAAAA8D8SCVkAAAAAAADwPw=="
+     ],
+     "value": [
+      1.0,
+      1.0
+     ]
+    },
+    "fMeasureByLabel-1.0": {
+     "call": "summary.fMeasureByLabel(1.0)",
+     "commands": [
+      "EikKBwoFPGlkMD4SHgoPZk1lYXN1cmVCeUxhYmVsEgsKCVkAAAAAAADwPw=="
+     ],
+     "results": [
+      "Ch2yARoKAkoAEglZAAAAAAAA8D8SCVkAAAAAAADwPw=="
+     ],
+     "value": [
+      1.0,
+      1.0
+     ]
+    },
+    "fMeasureByThreshold": {
+     "call": "summary.fMeasureByThreshold",
+     "commands": [
+      "EiAKBwoFPGlkMD4SFQoTZk1lYXN1cmVCeVRocmVzaG9sZA=="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0.002914983728918654,
+        0.6666666666666666
+       ],
+       [
+        0.09285527770615915,
+        0.8
+       ],
+       [
+        0.8539634242825208,
+        1.0
+       ],
+       [
+        0.9066556100710738,
+        0.6666666666666666
+       ]
+      ],
+      "schema": "struct<threshold:double,F-Measure:double>"
+     }
+    },
+    "falsePositiveRateByLabel": {
+     "call": "summary.falsePositiveRateByLabel",
+     "commands": [
+      "EiUKBwoFPGlkMD4SGgoYZmFsc2VQb3NpdGl2ZVJhdGVCeUxhYmVs"
+     ],
+     "results": [
+      "Ch2yARoKAkoAEglZAAAAAAAAAAASCVkAAAAAAAAAAA=="
+     ],
+     "value": [
+      0.0,
+      0.0
+     ]
+    },
+    "labelCol": {
+     "call": "summary.labelCol",
+     "commands": [
+      "EhUKBwoFPGlkMD4SCgoIbGFiZWxDb2w="
+     ],
+     "results": [
+      "CgdqBWxhYmVs"
+     ],
+     "value": "label"
+    },
+    "labels": {
+     "call": "summary.labels",
+     "commands": [
+      "EhMKBwoFPGlkMD4SCAoGbGFiZWxz"
+     ],
+     "results": [
+      "Ch2yARoKAkoAEglZAAAAAAAAAAASCVkAAAAAAADwPw=="
+     ],
+     "value": [
+      0.0,
+      1.0
+     ]
+    },
+    "pr": {
+     "call": "summary.pr",
+     "commands": [
+      "Eg8KBwoFPGlkMD4SBAoCcHI="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0.0,
+        1.0
+       ],
+       [
+        0.5,
+        1.0
+       ],
+       [
+        1.0,
+        0.5
+       ],
+       [
+        1.0,
+        0.6666666666666666
+       ],
+       [
+        1.0,
+        1.0
+       ]
+      ],
+      "schema": "struct<recall:double,precision:double>"
+     }
+    },
+    "precisionByLabel": {
+     "call": "summary.precisionByLabel",
+     "commands": [
+      "Eh0KBwoFPGlkMD4SEgoQcHJlY2lzaW9uQnlMYWJlbA=="
+     ],
+     "results": [
+      "Ch2yARoKAkoAEglZAAAAAAAA8D8SCVkAAAAAAADwPw=="
+     ],
+     "value": [
+      1.0,
+      1.0
+     ]
+    },
+    "precisionByThreshold": {
+     "call": "summary.precisionByThreshold",
+     "commands": [
+      "EiEKBwoFPGlkMD4SFgoUcHJlY2lzaW9uQnlUaHJlc2hvbGQ="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0.002914983728918654,
+        0.5
+       ],
+       [
+        0.09285527770615915,
+        0.6666666666666666
+       ],
+       [
+        0.8539634242825208,
+        1.0
+       ],
+       [
+        0.9066556100710738,
+        1.0
+       ]
+      ],
+      "schema": "struct<threshold:double,precision:double>"
+     }
+    },
+    "predictionCol": {
+     "call": "summary.predictionCol",
+     "commands": [
+      "EhoKBwoFPGlkMD4SDwoNcHJlZGljdGlvbkNvbA=="
+     ],
+     "results": [
+      "CgxqCnByZWRpY3Rpb24="
+     ],
+     "value": "prediction"
+    },
+    "predictions": {
+     "call": "summary.predictions",
+     "commands": [
+      "EhgKBwoFPGlkMD4SDQoLcHJlZGljdGlvbnM="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0.0,
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          2.2,
+          0.6
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          2.2792598715099857,
+          -2.2792598715099857
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.9071447222938409,
+          0.09285527770615915
+         ]
+        },
+        0.0
+       ],
+       [
+        0.0,
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          2.9,
+          2.1
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          5.8349718004729345,
+          -5.8349718004729345
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.9970850162710814,
+          0.002914983728918654
+         ]
+        },
+        0.0
+       ],
+       [
+        1.0,
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.2,
+          1.0
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          -2.273466904763926,
+          2.273466904763926
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.09334438992892624,
+          0.9066556100710738
+         ]
+        },
+        1.0
+       ],
+       [
+        1.0,
+        2.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.8,
+          2.2
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          -1.7660312552157431,
+          1.7660312552157431
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.1460365757174792,
+          0.8539634242825208
+         ]
+        },
+        1.0
+       ]
+      ],
+      "schema": "struct<label:double,weight:double,features:vector,rawPrediction:vector,probability:vector,prediction:double>"
+     }
+    },
+    "recallByLabel": {
+     "call": "summary.recallByLabel",
+     "commands": [
+      "EhoKBwoFPGlkMD4SDwoNcmVjYWxsQnlMYWJlbA=="
+     ],
+     "results": [
+      "Ch2yARoKAkoAEglZAAAAAAAA8D8SCVkAAAAAAADwPw=="
+     ],
+     "value": [
+      1.0,
+      1.0
+     ]
+    },
+    "recallByThreshold": {
+     "call": "summary.recallByThreshold",
+     "commands": [
+      "Eh4KBwoFPGlkMD4SEwoRcmVjYWxsQnlUaHJlc2hvbGQ="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0.002914983728918654,
+        1.0
+       ],
+       [
+        0.09285527770615915,
+        1.0
+       ],
+       [
+        0.8539634242825208,
+        1.0
+       ],
+       [
+        0.9066556100710738,
+        0.5
+       ]
+      ],
+      "schema": "struct<threshold:double,recall:double>"
+     }
+    },
+    "repr()": {
+     "call": "repr(summary)",
+     "commands": [],
+     "results": [],
+     "value": "<pyspark.ml.classification.FMClassificationSummary object at 0x<addr>>"
+    },
+    "roc": {
+     "call": "summary.roc",
+     "commands": [
+      "EhAKBwoFPGlkMD4SBQoDcm9j"
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0.0,
+        0.0
+       ],
+       [
+        0.0,
+        0.5
+       ],
+       [
+        0.0,
+        1.0
+       ],
+       [
+        0.5,
+        1.0
+       ],
+       [
+        1.0,
+        1.0
+       ],
+       [
+        1.0,
+        1.0
+       ]
+      ],
+      "schema": "struct<FPR:double,TPR:double>"
+     }
+    },
+    "scoreCol": {
+     "call": "summary.scoreCol",
+     "commands": [
+      "EhUKBwoFPGlkMD4SCgoIc2NvcmVDb2w="
+     ],
+     "results": [
+      "Cg1qC3Byb2JhYmlsaXR5"
+     ],
+     "value": "probability"
+    },
+    "str()": {
+     "call": "str(summary)",
+     "commands": [],
+     "results": [],
+     "value": "<pyspark.ml.classification.FMClassificationSummary object at 0x<addr>>"
+    },
+    "truePositiveRateByLabel": {
+     "call": "summary.truePositiveRateByLabel",
+     "commands": [
+      "EiQKBwoFPGlkMD4SGQoXdHJ1ZVBvc2l0aXZlUmF0ZUJ5TGFiZWw="
+     ],
+     "results": [
+      "Ch2yARoKAkoAEglZAAAAAAAA8D8SCVkAAAAAAADwPw=="
+     ],
+     "value": [
+      1.0,
+      1.0
+     ]
+    },
+    "weightCol": {
+     "call": "summary.weightCol",
+     "commands": [
+      "EhYKBwoFPGlkMD4SCwoJd2VpZ2h0Q29s"
+     ],
+     "results": [
+      "CgtqCXdlaWdodENvbA=="
+     ],
+     "value": "weightCol"
+    },
+    "weightedFMeasure-0.5": {
+     "call": "summary.weightedFMeasure(0.5)",
+     "commands": [
+      "EioKBwoFPGlkMD4SHwoQd2VpZ2h0ZWRGTWVhc3VyZRILCglZAAAAAAAA4D8="
+     ],
+     "results": [
+      "CglZAAAAAAAA8D8="
+     ],
+     "value": 1.0
+    },
+    "weightedFMeasure-1.0": {
+     "call": "summary.weightedFMeasure(1.0)",
+     "commands": [
+      "EioKBwoFPGlkMD4SHwoQd2VpZ2h0ZWRGTWVhc3VyZRILCglZAAAAAAAA8D8="
+     ],
+     "results": [
+      "CglZAAAAAAAA8D8="
+     ],
+     "value": 1.0
+    },
+    "weightedFalsePositiveRate": {
+     "call": "summary.weightedFalsePositiveRate",
+     "commands": [
+      "EiYKBwoFPGlkMD4SGwoZd2VpZ2h0ZWRGYWxzZVBvc2l0aXZlUmF0ZQ=="
+     ],
+     "results": [
+      "CglZAAAAAAAAAAA="
+     ],
+     "value": 0.0
+    },
+    "weightedPrecision": {
+     "call": "summary.weightedPrecision",
+     "commands": [
+      "Eh4KBwoFPGlkMD4SEwoRd2VpZ2h0ZWRQcmVjaXNpb24="
+     ],
+     "results": [
+      "CglZAAAAAAAA8D8="
+     ],
+     "value": 1.0
+    },
+    "weightedRecall": {
+     "call": "summary.weightedRecall",
+     "commands": [
+      "EhsKBwoFPGlkMD4SEAoOd2VpZ2h0ZWRSZWNhbGw="
+     ],
+     "results": [
+      "CglZAAAAAAAA8D8="
+     ],
+     "value": 1.0
+    },
+    "weightedTruePositiveRate": {
+     "call": "summary.weightedTruePositiveRate",
+     "commands": [
+      "EiUKBwoFPGlkMD4SGgoYd2VpZ2h0ZWRUcnVlUG9zaXRpdmVSYXRl"
+     ],
+     "results": [
+      "CglZAAAAAAAA8D8="
+     ],
+     "value": 1.0
+    }
+   },
+   "skipped": {},
+   "via": {
+    "call": "model.evaluate(binary_eval)",
+    "commands": [
+     "EroDCgcKBTxpZDA+Eq4DCghldmFsdWF0ZRKhAxKeAwoAigGYAwqRAwoAGowDCtUCCgC6Ac8CCpgCCgBakwISkAJ7ImZpZWxkcyI6W3sibWV0YWRhdGEiOnt9LCJuYW1lIjoibGFiZWwiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoid2VpZ2h0IiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImZlYXR1cmVzIiwibnVsbGFibGUiOnRydWUsInR5cGUiOnsiY29udGFpbnNOdWxsIjp0cnVlLCJlbGVtZW50VHlwZSI6ImRvdWJsZSIsInR5cGUiOiJhcnJheSJ9fV0sInR5cGUiOiJzdHJ1Y3QifRIyCiYaJAoPYXJyYXlfdG9fdmVjdG9yEhESDAoIZmVhdHVyZXMYAJIBABIIZmVhdHVyZXMaDhIJCgVsYWJlbBgAkgEAGg8SCgoGd2VpZ2h0GACSAQAaERIMCghmZWF0dXJlcxgAkgEAEAEYAA=="
+    ],
+    "results": [
+     "EgU8aWQxPg=="
+    ],
+    "value": {
+     "ref": "<id1>",
+     "type": "FMClassificationSummary"
+    }
+   }
+  },
+  "FMClassifier.training": {
+   "class": "FMClassificationTrainingSummary",
+   "members": {
+    "accuracy": {
+     "call": "summary.accuracy",
+     "commands": [
+      "EiAKBwoFPGlkMD4SCQoHc3VtbWFyeRIKCghhY2N1cmFjeQ=="
+     ],
+     "results": [
+      "CglZAAAAAAAA8D8="
+     ],
+     "value": 1.0
+    },
+    "areaUnderROC": {
+     "call": "summary.areaUnderROC",
+     "commands": [
+      "EiQKBwoFPGlkMD4SCQoHc3VtbWFyeRIOCgxhcmVhVW5kZXJST0M="
+     ],
+     "results": [
+      "CglZAAAAAAAA8D8="
+     ],
+     "value": 1.0
+    },
+    "fMeasureByLabel-0.5": {
+     "call": "summary.fMeasureByLabel(0.5)",
+     "commands": [
+      "EjQKBwoFPGlkMD4SCQoHc3VtbWFyeRIeCg9mTWVhc3VyZUJ5TGFiZWwSCwoJWQAAAAAAAOA/"
+     ],
+     "results": [
+      "Ch2yARoKAkoAEglZAAAAAAAA8D8SCVkAAAAAAADwPw=="
+     ],
+     "value": [
+      1.0,
+      1.0
+     ]
+    },
+    "fMeasureByLabel-1.0": {
+     "call": "summary.fMeasureByLabel(1.0)",
+     "commands": [
+      "EjQKBwoFPGlkMD4SCQoHc3VtbWFyeRIeCg9mTWVhc3VyZUJ5TGFiZWwSCwoJWQAAAAAAAPA/"
+     ],
+     "results": [
+      "Ch2yARoKAkoAEglZAAAAAAAA8D8SCVkAAAAAAADwPw=="
+     ],
+     "value": [
+      1.0,
+      1.0
+     ]
+    },
+    "fMeasureByThreshold": {
+     "call": "summary.fMeasureByThreshold",
+     "commands": [
+      "EisKBwoFPGlkMD4SCQoHc3VtbWFyeRIVChNmTWVhc3VyZUJ5VGhyZXNob2xkGp4DCgCKAZgDCpEDCgAajAMK1QIKALoBzwIKmAIKAFqTAhKQAnsiZmllbGRzIjpbeyJtZXRhZGF0YSI6e30sIm5hbWUiOiJsYWJlbCIsIm51bGxhYmxlIjp0cnVlLCJ0eXBlIjoiZG91YmxlIn0seyJtZXRhZGF0YSI6e30sIm5hbWUiOiJ3ZWlnaHQiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoiZmVhdHVyZXMiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6eyJjb250YWluc051bGwiOnRydWUsImVsZW1lbnRUeXBlIjoiZG91YmxlIiwidHlwZSI6ImFycmF5In19XSwidHlwZSI6InN0cnVjdCJ9EjIKJhokCg9hcnJheV90b192ZWN0b3ISERIMCghmZWF0dXJlcxgAkgEAEghmZWF0dXJlcxoOEgkKBWxhYmVsGACSAQAaDxIKCgZ3ZWlnaHQYAJIBABoREgwKCGZlYXR1cmVzGACSAQAQARgA"
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0.004882270614080677,
+        0.6666666666666666
+       ],
+       [
+        0.037175167626116765,
+        0.7272727272727273
+       ],
+       [
+        0.11149511067651367,
+        0.8
+       ],
+       [
+        0.19349643735124566,
+        0.888888888888889
+       ],
+       [
+        0.7019173109281879,
+        1.0
+       ],
+       [
+        0.9139115799190541,
+        0.8571428571428571
+       ],
+       [
+        0.9488269153732973,
+        0.6666666666666666
+       ],
+       [
+        0.9609632490177794,
+        0.4
+       ]
+      ],
+      "schema": "struct<threshold:double,F-Measure:double>"
+     }
+    },
+    "falsePositiveRateByLabel": {
+     "call": "summary.falsePositiveRateByLabel",
+     "commands": [
+      "EjAKBwoFPGlkMD4SCQoHc3VtbWFyeRIaChhmYWxzZVBvc2l0aXZlUmF0ZUJ5TGFiZWw="
+     ],
+     "results": [
+      "Ch2yARoKAkoAEglZAAAAAAAAAAASCVkAAAAAAAAAAA=="
+     ],
+     "value": [
+      0.0,
+      0.0
+     ]
+    },
+    "labelCol": {
+     "call": "summary.labelCol",
+     "commands": [
+      "EiAKBwoFPGlkMD4SCQoHc3VtbWFyeRIKCghsYWJlbENvbA=="
+     ],
+     "results": [
+      "CgdqBWxhYmVs"
+     ],
+     "value": "label"
+    },
+    "labels": {
+     "call": "summary.labels",
+     "commands": [
+      "Eh4KBwoFPGlkMD4SCQoHc3VtbWFyeRIICgZsYWJlbHM="
+     ],
+     "results": [
+      "Ch2yARoKAkoAEglZAAAAAAAAAAASCVkAAAAAAADwPw=="
+     ],
+     "value": [
+      0.0,
+      1.0
+     ]
+    },
+    "objectiveHistory": {
+     "call": "summary.objectiveHistory",
+     "commands": [
+      "EigKBwoFPGlkMD4SCQoHc3VtbWFyeRISChBvYmplY3RpdmVIaXN0b3J5"
+     ],
+     "results": [
+      "Cu8BsgHrAQoCSgASCVmrvc6xdi3mPxIJWcXaMWAiCOQ/EglZhXRCmMnO4T8SCVnk/eq3VznfPxIJWaT3cvY/W9s/EglZTrbUmhd92D8SCVlq99E6nm3WPxIJWW8/LrMwi9Q/EglZ5tm282ma0j8SCVnvwmnxscrQPxIJWeWyoJ9FrM4/EglZyRxfrumYzD8SCVnOtSUMkhPLPxIJWSHor5Ujssk/EglZa0J+nHtKyD8SCVnCDd/1b/rGPxIJWRTU9PaW6sU/EglZcHtOiEglxT8SCVmL//7XgpbEPxIJWfwz0luOHsQ/EglZNLezBXalwz8="
+     ],
+     "value": [
+      0.6930497620395973,
+      0.625992954140053,
+      0.5564926122493864,
+      0.48787491760955803,
+      0.4274444491128355,
+      0.38263502235608804,
+      0.3504405569473109,
+      0.3209954976855362,
+      0.29067467498989996,
+      0.2623715264844994,
+      0.2396323232109331,
+      0.22341652883753785,
+      0.21153474419717927,
+      0.2007488709348886,
+      0.18977303639669016,
+      0.17951774125513792,
+      0.17122160967269962,
+      0.16520029693216598,
+      0.16084323450740742,
+      0.1571824978204005,
+      0.15348696974199927
+     ]
+    },
+    "pr": {
+     "call": "summary.pr",
+     "commands": [
+      "EhoKBwoFPGlkMD4SCQoHc3VtbWFyeRIECgJwchqeAwoAigGYAwqRAwoAGowDCtUCCgC6Ac8CCpgCCgBakwISkAJ7ImZpZWxkcyI6W3sibWV0YWRhdGEiOnt9LCJuYW1lIjoibGFiZWwiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoid2VpZ2h0IiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImZlYXR1cmVzIiwibnVsbGFibGUiOnRydWUsInR5cGUiOnsiY29udGFpbnNOdWxsIjp0cnVlLCJlbGVtZW50VHlwZSI6ImRvdWJsZSIsInR5cGUiOiJhcnJheSJ9fV0sInR5cGUiOiJzdHJ1Y3QifRIyCiYaJAoPYXJyYXlfdG9fdmVjdG9yEhESDAoIZmVhdHVyZXMYAJIBABIIZmVhdHVyZXMaDhIJCgVsYWJlbBgAkgEAGg8SCgoGd2VpZ2h0GACSAQAaERIMCghmZWF0dXJlcxgAkgEAEAEYAA=="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0.0,
+        1.0
+       ],
+       [
+        0.25,
+        1.0
+       ],
+       [
+        0.5,
+        1.0
+       ],
+       [
+        0.75,
+        1.0
+       ],
+       [
+        1.0,
+        0.5714285714285714
+       ],
+       [
+        1.0,
+        0.5
+       ],
+       [
+        1.0,
+        0.6666666666666666
+       ],
+       [
+        1.0,
+        0.8
+       ],
+       [
+        1.0,
+        1.0
+       ]
+      ],
+      "schema": "struct<recall:double,precision:double>"
+     }
+    },
+    "precisionByLabel": {
+     "call": "summary.precisionByLabel",
+     "commands": [
+      "EigKBwoFPGlkMD4SCQoHc3VtbWFyeRISChBwcmVjaXNpb25CeUxhYmVs"
+     ],
+     "results": [
+      "Ch2yARoKAkoAEglZAAAAAAAA8D8SCVkAAAAAAADwPw=="
+     ],
+     "value": [
+      1.0,
+      1.0
+     ]
+    },
+    "precisionByThreshold": {
+     "call": "summary.precisionByThreshold",
+     "commands": [
+      "EiwKBwoFPGlkMD4SCQoHc3VtbWFyeRIWChRwcmVjaXNpb25CeVRocmVzaG9sZBqeAwoAigGYAwqRAwoAGowDCtUCCgC6Ac8CCpgCCgBakwISkAJ7ImZpZWxkcyI6W3sibWV0YWRhdGEiOnt9LCJuYW1lIjoibGFiZWwiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoid2VpZ2h0IiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImZlYXR1cmVzIiwibnVsbGFibGUiOnRydWUsInR5cGUiOnsiY29udGFpbnNOdWxsIjp0cnVlLCJlbGVtZW50VHlwZSI6ImRvdWJsZSIsInR5cGUiOiJhcnJheSJ9fV0sInR5cGUiOiJzdHJ1Y3QifRIyCiYaJAoPYXJyYXlfdG9fdmVjdG9yEhESDAoIZmVhdHVyZXMYAJIBABIIZmVhdHVyZXMaDhIJCgVsYWJlbBgAkgEAGg8SCgoGd2VpZ2h0GACSAQAaERIMCghmZWF0dXJlcxgAkgEAEAEYAA=="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0.004882270614080677,
+        0.5
+       ],
+       [
+        0.037175167626116765,
+        0.5714285714285714
+       ],
+       [
+        0.11149511067651367,
+        0.6666666666666666
+       ],
+       [
+        0.19349643735124566,
+        0.8
+       ],
+       [
+        0.7019173109281879,
+        1.0
+       ],
+       [
+        0.9139115799190541,
+        1.0
+       ],
+       [
+        0.9488269153732973,
+        1.0
+       ],
+       [
+        0.9609632490177794,
+        1.0
+       ]
+      ],
+      "schema": "struct<threshold:double,precision:double>"
+     }
+    },
+    "predictionCol": {
+     "call": "summary.predictionCol",
+     "commands": [
+      "EiUKBwoFPGlkMD4SCQoHc3VtbWFyeRIPCg1wcmVkaWN0aW9uQ29s"
+     ],
+     "results": [
+      "CgxqCnByZWRpY3Rpb24="
+     ],
+     "value": "prediction"
+    },
+    "predictions": {
+     "call": "summary.predictions",
+     "commands": [
+      "EiMKBwoFPGlkMD4SCQoHc3VtbWFyeRINCgtwcmVkaWN0aW9ucxqeAwoAigGYAwqRAwoAGowDCtUCCgC6Ac8CCpgCCgBakwISkAJ7ImZpZWxkcyI6W3sibWV0YWRhdGEiOnt9LCJuYW1lIjoibGFiZWwiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoid2VpZ2h0IiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImZlYXR1cmVzIiwibnVsbGFibGUiOnRydWUsInR5cGUiOnsiY29udGFpbnNOdWxsIjp0cnVlLCJlbGVtZW50VHlwZSI6ImRvdWJsZSIsInR5cGUiOiJhcnJheSJ9fV0sInR5cGUiOiJzdHJ1Y3QifRIyCiYaJAoPYXJyYXlfdG9fdmVjdG9yEhESDAoIZmVhdHVyZXMYAJIBABIIZmVhdHVyZXMaDhIJCgVsYWJlbBgAkgEAGg8SCgoGd2VpZ2h0GACSAQAaERIMCghmZWF0dXJlcxgAkgEAEAEYAA=="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0.0,
+        0.5,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          2.5,
+          3.0
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          5.317250649728123,
+          -5.317250649728123
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.9951177293859194,
+          0.004882270614080677
+         ]
+        },
+        0.0
+       ],
+       [
+        0.0,
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.8,
+          0.4
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.427449214296046,
+          -1.427449214296046
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.8065035626487543,
+          0.19349643735124566
+         ]
+        },
+        0.0
+       ],
+       [
+        0.0,
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          3.0,
+          0.2
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          3.2542304959614956,
+          -3.2542304959614956
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.9628248323738833,
+          0.037175167626116765
+         ]
+        },
+        0.0
+       ],
+       [
+        0.0,
+        2.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          2.0,
+          1.0
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          2.0755594109721445,
+          -2.0755594109721445
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.8885048893234864,
+          0.11149511067651367
+         ]
+        },
+        0.0
+       ],
+       [
+        1.0,
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.0,
+          1.1
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          -2.920012692709159,
+          2.920012692709159
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.05117308462670267,
+          0.9488269153732973
+         ]
+        },
+        1.0
+       ],
+       [
+        1.0,
+        1.5,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.0,
+          1.9
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          -0.8564446782656829,
+          0.8564446782656829
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.2980826890718121,
+          0.7019173109281879
+         ]
+        },
+        1.0
+       ],
+       [
+        1.0,
+        2.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.1,
+          0.9
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          -2.3623589185246785,
+          2.3623589185246785
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.08608842008094586,
+          0.9139115799190541
+         ]
+        },
+        1.0
+       ],
+       [
+        1.0,
+        3.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.5,
+          2.5
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          -3.203432630511557,
+          3.203432630511557
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.03903675098222059,
+          0.9609632490177794
+         ]
+        },
+        1.0
+       ]
+      ],
+      "schema": "struct<label:double,weight:double,features:vector,rawPrediction:vector,probability:vector,prediction:double>"
+     }
+    },
+    "recallByLabel": {
+     "call": "summary.recallByLabel",
+     "commands": [
+      "EiUKBwoFPGlkMD4SCQoHc3VtbWFyeRIPCg1yZWNhbGxCeUxhYmVs"
+     ],
+     "results": [
+      "Ch2yARoKAkoAEglZAAAAAAAA8D8SCVkAAAAAAADwPw=="
+     ],
+     "value": [
+      1.0,
+      1.0
+     ]
+    },
+    "recallByThreshold": {
+     "call": "summary.recallByThreshold",
+     "commands": [
+      "EikKBwoFPGlkMD4SCQoHc3VtbWFyeRITChFyZWNhbGxCeVRocmVzaG9sZBqeAwoAigGYAwqRAwoAGowDCtUCCgC6Ac8CCpgCCgBakwISkAJ7ImZpZWxkcyI6W3sibWV0YWRhdGEiOnt9LCJuYW1lIjoibGFiZWwiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoid2VpZ2h0IiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImZlYXR1cmVzIiwibnVsbGFibGUiOnRydWUsInR5cGUiOnsiY29udGFpbnNOdWxsIjp0cnVlLCJlbGVtZW50VHlwZSI6ImRvdWJsZSIsInR5cGUiOiJhcnJheSJ9fV0sInR5cGUiOiJzdHJ1Y3QifRIyCiYaJAoPYXJyYXlfdG9fdmVjdG9yEhESDAoIZmVhdHVyZXMYAJIBABIIZmVhdHVyZXMaDhIJCgVsYWJlbBgAkgEAGg8SCgoGd2VpZ2h0GACSAQAaERIMCghmZWF0dXJlcxgAkgEAEAEYAA=="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0.004882270614080677,
+        1.0
+       ],
+       [
+        0.037175167626116765,
+        1.0
+       ],
+       [
+        0.11149511067651367,
+        1.0
+       ],
+       [
+        0.19349643735124566,
+        1.0
+       ],
+       [
+        0.7019173109281879,
+        1.0
+       ],
+       [
+        0.9139115799190541,
+        0.75
+       ],
+       [
+        0.9488269153732973,
+        0.5
+       ],
+       [
+        0.9609632490177794,
+        0.25
+       ]
+      ],
+      "schema": "struct<threshold:double,recall:double>"
+     }
+    },
+    "repr()": {
+     "call": "repr(summary)",
+     "commands": [],
+     "results": [],
+     "value": "<pyspark.ml.classification.FMClassificationTrainingSummary object at 0x<addr>>"
+    },
+    "roc": {
+     "call": "summary.roc",
+     "commands": [
+      "EhsKBwoFPGlkMD4SCQoHc3VtbWFyeRIFCgNyb2MangMKAIoBmAMKkQMKABqMAwrVAgoAugHPAgqYAgoAWpMCEpACeyJmaWVsZHMiOlt7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImxhYmVsIiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6IndlaWdodCIsIm51bGxhYmxlIjp0cnVlLCJ0eXBlIjoiZG91YmxlIn0seyJtZXRhZGF0YSI6e30sIm5hbWUiOiJmZWF0dXJlcyIsIm51bGxhYmxlIjp0cnVlLCJ0eXBlIjp7ImNvbnRhaW5zTnVsbCI6dHJ1ZSwiZWxlbWVudFR5cGUiOiJkb3VibGUiLCJ0eXBlIjoiYXJyYXkifX1dLCJ0eXBlIjoic3RydWN0In0SMgomGiQKD2FycmF5X3RvX3ZlY3RvchIREgwKCGZlYXR1cmVzGACSAQASCGZlYXR1cmVzGg4SCQoFbGFiZWwYAJIBABoPEgoKBndlaWdodBgAkgEAGhESDAoIZmVhdHVyZXMYAJIBABABGAA="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0.0,
+        0.0
+       ],
+       [
+        0.0,
+        0.25
+       ],
+       [
+        0.0,
+        0.5
+       ],
+       [
+        0.0,
+        0.75
+       ],
+       [
+        0.0,
+        1.0
+       ],
+       [
+        0.25,
+        1.0
+       ],
+       [
+        0.5,
+        1.0
+       ],
+       [
+        0.75,
+        1.0
+       ],
+       [
+        1.0,
+        1.0
+       ],
+       [
+        1.0,
+        1.0
+       ]
+      ],
+      "schema": "struct<FPR:double,TPR:double>"
+     }
+    },
+    "scoreCol": {
+     "call": "summary.scoreCol",
+     "commands": [
+      "EiAKBwoFPGlkMD4SCQoHc3VtbWFyeRIKCghzY29yZUNvbA=="
+     ],
+     "results": [
+      "Cg1qC3Byb2JhYmlsaXR5"
+     ],
+     "value": "probability"
+    },
+    "str()": {
+     "call": "str(summary)",
+     "commands": [],
+     "results": [],
+     "value": "<pyspark.ml.classification.FMClassificationTrainingSummary object at 0x<addr>>"
+    },
+    "totalIterations": {
+     "call": "summary.totalIterations",
+     "commands": [
+      "EicKBwoFPGlkMD4SCQoHc3VtbWFyeRIRCg90b3RhbEl0ZXJhdGlvbnM="
+     ],
+     "results": [
+      "CgIwFA=="
+     ],
+     "value": 20
+    },
+    "truePositiveRateByLabel": {
+     "call": "summary.truePositiveRateByLabel",
+     "commands": [
+      "Ei8KBwoFPGlkMD4SCQoHc3VtbWFyeRIZChd0cnVlUG9zaXRpdmVSYXRlQnlMYWJlbA=="
+     ],
+     "results": [
+      "Ch2yARoKAkoAEglZAAAAAAAA8D8SCVkAAAAAAADwPw=="
+     ],
+     "value": [
+      1.0,
+      1.0
+     ]
+    },
+    "weightCol": {
+     "call": "summary.weightCol",
+     "commands": [
+      "EiEKBwoFPGlkMD4SCQoHc3VtbWFyeRILCgl3ZWlnaHRDb2w="
+     ],
+     "results": [
+      "CgtqCXdlaWdodENvbA=="
+     ],
+     "value": "weightCol"
+    },
+    "weightedFMeasure-0.5": {
+     "call": "summary.weightedFMeasure(0.5)",
+     "commands": [
+      "EjUKBwoFPGlkMD4SCQoHc3VtbWFyeRIfChB3ZWlnaHRlZEZNZWFzdXJlEgsKCVkAAAAAAADgPw=="
+     ],
+     "results": [
+      "CglZAAAAAAAA8D8="
+     ],
+     "value": 1.0
+    },
+    "weightedFMeasure-1.0": {
+     "call": "summary.weightedFMeasure(1.0)",
+     "commands": [
+      "EjUKBwoFPGlkMD4SCQoHc3VtbWFyeRIfChB3ZWlnaHRlZEZNZWFzdXJlEgsKCVkAAAAAAADwPw=="
+     ],
+     "results": [
+      "CglZAAAAAAAA8D8="
+     ],
+     "value": 1.0
+    },
+    "weightedFalsePositiveRate": {
+     "call": "summary.weightedFalsePositiveRate",
+     "commands": [
+      "EjEKBwoFPGlkMD4SCQoHc3VtbWFyeRIbChl3ZWlnaHRlZEZhbHNlUG9zaXRpdmVSYXRl"
+     ],
+     "results": [
+      "CglZAAAAAAAAAAA="
+     ],
+     "value": 0.0
+    },
+    "weightedPrecision": {
+     "call": "summary.weightedPrecision",
+     "commands": [
+      "EikKBwoFPGlkMD4SCQoHc3VtbWFyeRITChF3ZWlnaHRlZFByZWNpc2lvbg=="
+     ],
+     "results": [
+      "CglZAAAAAAAA8D8="
+     ],
+     "value": 1.0
+    },
+    "weightedRecall": {
+     "call": "summary.weightedRecall",
+     "commands": [
+      "EiYKBwoFPGlkMD4SCQoHc3VtbWFyeRIQCg53ZWlnaHRlZFJlY2FsbA=="
+     ],
+     "results": [
+      "CglZAAAAAAAA8D8="
+     ],
+     "value": 1.0
+    },
+    "weightedTruePositiveRate": {
+     "call": "summary.weightedTruePositiveRate",
+     "commands": [
+      "EjAKBwoFPGlkMD4SCQoHc3VtbWFyeRIaChh3ZWlnaHRlZFRydWVQb3NpdGl2ZVJhdGU="
+     ],
+     "results": [
+      "CglZAAAAAAAA8D8="
+     ],
+     "value": 1.0
+    }
+   },
+   "skipped": {},
+   "via": {
+    "call": "model.summary()",
+    "commands": [],
+    "results": [],
+    "value": {
+     "ref": "<id0>.summary",
+     "type": "FMClassificationTrainingSummary"
+    }
+   }
+  },
+  "LinearSVC.evaluate": {
+   "class": "LinearSVCSummary",
+   "members": {
+    "accuracy": {
+     "call": "summary.accuracy",
+     "commands": [
+      "EhUKBwoFPGlkMD4SCgoIYWNjdXJhY3k="
+     ],
+     "results": [
+      "CglZAAAAAAAA8D8="
+     ],
+     "value": 1.0
+    },
+    "areaUnderROC": {
+     "call": "summary.areaUnderROC",
+     "commands": [
+      "EhkKBwoFPGlkMD4SDgoMYXJlYVVuZGVyUk9D"
+     ],
+     "results": [
+      "CglZAAAAAAAA8D8="
+     ],
+     "value": 1.0
+    },
+    "fMeasureByLabel-0.5": {
+     "call": "summary.fMeasureByLabel(0.5)",
+     "commands": [
+      "EikKBwoFPGlkMD4SHgoPZk1lYXN1cmVCeUxhYmVsEgsKCVkAAAAAAADgPw=="
+     ],
+     "results": [
+      "Ch2yARoKAkoAEglZAAAAAAAA8D8SCVkAAAAAAADwPw=="
+     ],
+     "value": [
+      1.0,
+      1.0
+     ]
+    },
+    "fMeasureByLabel-1.0": {
+     "call": "summary.fMeasureByLabel(1.0)",
+     "commands": [
+      "EikKBwoFPGlkMD4SHgoPZk1lYXN1cmVCeUxhYmVsEgsKCVkAAAAAAADwPw=="
+     ],
+     "results": [
+      "Ch2yARoKAkoAEglZAAAAAAAA8D8SCVkAAAAAAADwPw=="
+     ],
+     "value": [
+      1.0,
+      1.0
+     ]
+    },
+    "fMeasureByThreshold": {
+     "call": "summary.fMeasureByThreshold",
+     "commands": [
+      "EiAKBwoFPGlkMD4SFQoTZk1lYXN1cmVCeVRocmVzaG9sZA=="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        -1.5788625673094596,
+        0.8571428571428571
+       ],
+       [
+        -2.0693637391135757,
+        0.7499999999999999
+       ],
+       [
+        1.4671763449955382,
+        1.0
+       ],
+       [
+        1.9260848631014902,
+        0.5
+       ]
+      ],
+      "schema": "struct<threshold:double,F-Measure:double>"
+     }
+    },
+    "falsePositiveRateByLabel": {
+     "call": "summary.falsePositiveRateByLabel",
+     "commands": [
+      "EiUKBwoFPGlkMD4SGgoYZmFsc2VQb3NpdGl2ZVJhdGVCeUxhYmVs"
+     ],
+     "results": [
+      "Ch2yARoKAkoAEglZAAAAAAAAAAASCVkAAAAAAAAAAA=="
+     ],
+     "value": [
+      0.0,
+      0.0
+     ]
+    },
+    "labelCol": {
+     "call": "summary.labelCol",
+     "commands": [
+      "EhUKBwoFPGlkMD4SCgoIbGFiZWxDb2w="
+     ],
+     "results": [
+      "CgdqBWxhYmVs"
+     ],
+     "value": "label"
+    },
+    "labels": {
+     "call": "summary.labels",
+     "commands": [
+      "EhMKBwoFPGlkMD4SCAoGbGFiZWxz"
+     ],
+     "results": [
+      "Ch2yARoKAkoAEglZAAAAAAAAAAASCVkAAAAAAADwPw=="
+     ],
+     "value": [
+      0.0,
+      1.0
+     ]
+    },
+    "pr": {
+     "call": "summary.pr",
+     "commands": [
+      "Eg8KBwoFPGlkMD4SBAoCcHI="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0.0,
+        1.0
+       ],
+       [
+        0.3333333333333333,
+        1.0
+       ],
+       [
+        1.0,
+        0.6
+       ],
+       [
+        1.0,
+        0.75
+       ],
+       [
+        1.0,
+        1.0
+       ]
+      ],
+      "schema": "struct<recall:double,precision:double>"
+     }
+    },
+    "precisionByLabel": {
+     "call": "summary.precisionByLabel",
+     "commands": [
+      "Eh0KBwoFPGlkMD4SEgoQcHJlY2lzaW9uQnlMYWJlbA=="
+     ],
+     "results": [
+      "Ch2yARoKAkoAEglZAAAAAAAA8D8SCVkAAAAAAADwPw=="
+     ],
+     "value": [
+      1.0,
+      1.0
+     ]
+    },
+    "precisionByThreshold": {
+     "call": "summary.precisionByThreshold",
+     "commands": [
+      "EiEKBwoFPGlkMD4SFgoUcHJlY2lzaW9uQnlUaHJlc2hvbGQ="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        -1.5788625673094596,
+        0.75
+       ],
+       [
+        -2.0693637391135757,
+        0.6
+       ],
+       [
+        1.4671763449955382,
+        1.0
+       ],
+       [
+        1.9260848631014902,
+        1.0
+       ]
+      ],
+      "schema": "struct<threshold:double,precision:double>"
+     }
+    },
+    "predictionCol": {
+     "call": "summary.predictionCol",
+     "commands": [
+      "EhoKBwoFPGlkMD4SDwoNcHJlZGljdGlvbkNvbA=="
+     ],
+     "results": [
+      "CgxqCnByZWRpY3Rpb24="
+     ],
+     "value": "prediction"
+    },
+    "predictions": {
+     "call": "summary.predictions",
+     "commands": [
+      "EhgKBwoFPGlkMD4SDQoLcHJlZGljdGlvbnM="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0.0,
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          2.2,
+          0.6
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.5788625673094596,
+          -1.5788625673094596
+         ]
+        },
+        0.0
+       ],
+       [
+        0.0,
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          2.9,
+          2.1
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          2.0693637391135757,
+          -2.0693637391135757
+         ]
+        },
+        0.0
+       ],
+       [
+        1.0,
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.2,
+          1.0
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          -1.9260848631014902,
+          1.9260848631014902
+         ]
+        },
+        1.0
+       ],
+       [
+        1.0,
+        2.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.8,
+          2.2
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          -1.4671763449955382,
+          1.4671763449955382
+         ]
+        },
+        1.0
+       ]
+      ],
+      "schema": "struct<label:double,weight:double,features:vector,rawPrediction:vector,prediction:double>"
+     }
+    },
+    "recallByLabel": {
+     "call": "summary.recallByLabel",
+     "commands": [
+      "EhoKBwoFPGlkMD4SDwoNcmVjYWxsQnlMYWJlbA=="
+     ],
+     "results": [
+      "Ch2yARoKAkoAEglZAAAAAAAA8D8SCVkAAAAAAADwPw=="
+     ],
+     "value": [
+      1.0,
+      1.0
+     ]
+    },
+    "recallByThreshold": {
+     "call": "summary.recallByThreshold",
+     "commands": [
+      "Eh4KBwoFPGlkMD4SEwoRcmVjYWxsQnlUaHJlc2hvbGQ="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        -1.5788625673094596,
+        1.0
+       ],
+       [
+        -2.0693637391135757,
+        1.0
+       ],
+       [
+        1.4671763449955382,
+        1.0
+       ],
+       [
+        1.9260848631014902,
+        0.3333333333333333
+       ]
+      ],
+      "schema": "struct<threshold:double,recall:double>"
+     }
+    },
+    "repr()": {
+     "call": "repr(summary)",
+     "commands": [],
+     "results": [],
+     "value": "<pyspark.ml.classification.LinearSVCSummary object at 0x<addr>>"
+    },
+    "roc": {
+     "call": "summary.roc",
+     "commands": [
+      "EhAKBwoFPGlkMD4SBQoDcm9j"
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0.0,
+        0.0
+       ],
+       [
+        0.0,
+        0.3333333333333333
+       ],
+       [
+        0.0,
+        1.0
+       ],
+       [
+        0.5,
+        1.0
+       ],
+       [
+        1.0,
+        1.0
+       ],
+       [
+        1.0,
+        1.0
+       ]
+      ],
+      "schema": "struct<FPR:double,TPR:double>"
+     }
+    },
+    "scoreCol": {
+     "call": "summary.scoreCol",
+     "commands": [
+      "EhUKBwoFPGlkMD4SCgoIc2NvcmVDb2w="
+     ],
+     "results": [
+      "Cg9qDXJhd1ByZWRpY3Rpb24="
+     ],
+     "value": "rawPrediction"
+    },
+    "str()": {
+     "call": "str(summary)",
+     "commands": [],
+     "results": [],
+     "value": "<pyspark.ml.classification.LinearSVCSummary object at 0x<addr>>"
+    },
+    "truePositiveRateByLabel": {
+     "call": "summary.truePositiveRateByLabel",
+     "commands": [
+      "EiQKBwoFPGlkMD4SGQoXdHJ1ZVBvc2l0aXZlUmF0ZUJ5TGFiZWw="
+     ],
+     "results": [
+      "Ch2yARoKAkoAEglZAAAAAAAA8D8SCVkAAAAAAADwPw=="
+     ],
+     "value": [
+      1.0,
+      1.0
+     ]
+    },
+    "weightCol": {
+     "call": "summary.weightCol",
+     "commands": [
+      "EhYKBwoFPGlkMD4SCwoJd2VpZ2h0Q29s"
+     ],
+     "results": [
+      "CghqBndlaWdodA=="
+     ],
+     "value": "weight"
+    },
+    "weightedFMeasure-0.5": {
+     "call": "summary.weightedFMeasure(0.5)",
+     "commands": [
+      "EioKBwoFPGlkMD4SHwoQd2VpZ2h0ZWRGTWVhc3VyZRILCglZAAAAAAAA4D8="
+     ],
+     "results": [
+      "CglZAAAAAAAA8D8="
+     ],
+     "value": 1.0
+    },
+    "weightedFMeasure-1.0": {
+     "call": "summary.weightedFMeasure(1.0)",
+     "commands": [
+      "EioKBwoFPGlkMD4SHwoQd2VpZ2h0ZWRGTWVhc3VyZRILCglZAAAAAAAA8D8="
+     ],
+     "results": [
+      "CglZAAAAAAAA8D8="
+     ],
+     "value": 1.0
+    },
+    "weightedFalsePositiveRate": {
+     "call": "summary.weightedFalsePositiveRate",
+     "commands": [
+      "EiYKBwoFPGlkMD4SGwoZd2VpZ2h0ZWRGYWxzZVBvc2l0aXZlUmF0ZQ=="
+     ],
+     "results": [
+      "CglZAAAAAAAAAAA="
+     ],
+     "value": 0.0
+    },
+    "weightedPrecision": {
+     "call": "summary.weightedPrecision",
+     "commands": [
+      "Eh4KBwoFPGlkMD4SEwoRd2VpZ2h0ZWRQcmVjaXNpb24="
+     ],
+     "results": [
+      "CglZAAAAAAAA8D8="
+     ],
+     "value": 1.0
+    },
+    "weightedRecall": {
+     "call": "summary.weightedRecall",
+     "commands": [
+      "EhsKBwoFPGlkMD4SEAoOd2VpZ2h0ZWRSZWNhbGw="
+     ],
+     "results": [
+      "CglZAAAAAAAA8D8="
+     ],
+     "value": 1.0
+    },
+    "weightedTruePositiveRate": {
+     "call": "summary.weightedTruePositiveRate",
+     "commands": [
+      "EiUKBwoFPGlkMD4SGgoYd2VpZ2h0ZWRUcnVlUG9zaXRpdmVSYXRl"
+     ],
+     "results": [
+      "CglZAAAAAAAA8D8="
+     ],
+     "value": 1.0
+    }
+   },
+   "skipped": {},
+   "via": {
+    "call": "model.evaluate(binary_eval)",
+    "commands": [
+     "EroDCgcKBTxpZDA+Eq4DCghldmFsdWF0ZRKhAxKeAwoAigGYAwqRAwoAGowDCtUCCgC6Ac8CCpgCCgBakwISkAJ7ImZpZWxkcyI6W3sibWV0YWRhdGEiOnt9LCJuYW1lIjoibGFiZWwiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoid2VpZ2h0IiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImZlYXR1cmVzIiwibnVsbGFibGUiOnRydWUsInR5cGUiOnsiY29udGFpbnNOdWxsIjp0cnVlLCJlbGVtZW50VHlwZSI6ImRvdWJsZSIsInR5cGUiOiJhcnJheSJ9fV0sInR5cGUiOiJzdHJ1Y3QifRIyCiYaJAoPYXJyYXlfdG9fdmVjdG9yEhESDAoIZmVhdHVyZXMYAJIBABIIZmVhdHVyZXMaDhIJCgVsYWJlbBgAkgEAGg8SCgoGd2VpZ2h0GACSAQAaERIMCghmZWF0dXJlcxgAkgEAEAEYAA=="
+    ],
+    "results": [
+     "EgU8aWQxPg=="
+    ],
+    "value": {
+     "ref": "<id1>",
+     "type": "LinearSVCSummary"
+    }
+   }
+  },
+  "LinearSVC.training": {
+   "class": "LinearSVCTrainingSummary",
+   "members": {
+    "accuracy": {
+     "call": "summary.accuracy",
+     "commands": [
+      "EiAKBwoFPGlkMD4SCQoHc3VtbWFyeRIKCghhY2N1cmFjeQ=="
+     ],
+     "results": [
+      "CglZAAAAAAAA8D8="
+     ],
+     "value": 1.0
+    },
+    "areaUnderROC": {
+     "call": "summary.areaUnderROC",
+     "commands": [
+      "EiQKBwoFPGlkMD4SCQoHc3VtbWFyeRIOCgxhcmVhVW5kZXJST0M="
+     ],
+     "results": [
+      "CglZAAAAAAAA8D8="
+     ],
+     "value": 1.0
+    },
+    "fMeasureByLabel-0.5": {
+     "call": "summary.fMeasureByLabel(0.5)",
+     "commands": [
+      "EjQKBwoFPGlkMD4SCQoHc3VtbWFyeRIeCg9mTWVhc3VyZUJ5TGFiZWwSCwoJWQAAAAAAAOA/"
+     ],
+     "results": [
+      "Ch2yARoKAkoAEglZAAAAAAAA8D8SCVkAAAAAAADwPw=="
+     ],
+     "value": [
+      1.0,
+      1.0
+     ]
+    },
+    "fMeasureByLabel-1.0": {
+     "call": "summary.fMeasureByLabel(1.0)",
+     "commands": [
+      "EjQKBwoFPGlkMD4SCQoHc3VtbWFyeRIeCg9mTWVhc3VyZUJ5TGFiZWwSCwoJWQAAAAAAAPA/"
+     ],
+     "results": [
+      "Ch2yARoKAkoAEglZAAAAAAAA8D8SCVkAAAAAAADwPw=="
+     ],
+     "value": [
+      1.0,
+      1.0
+     ]
+    },
+    "fMeasureByThreshold": {
+     "call": "summary.fMeasureByThreshold",
+     "commands": [
+      "EisKBwoFPGlkMD4SCQoHc3VtbWFyeRIVChNmTWVhc3VyZUJ5VGhyZXNob2xkGp4DCgCKAZgDCpEDCgAajAMK1QIKALoBzwIKmAIKAFqTAhKQAnsiZmllbGRzIjpbeyJtZXRhZGF0YSI6e30sIm5hbWUiOiJsYWJlbCIsIm51bGxhYmxlIjp0cnVlLCJ0eXBlIjoiZG91YmxlIn0seyJtZXRhZGF0YSI6e30sIm5hbWUiOiJ3ZWlnaHQiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoiZmVhdHVyZXMiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6eyJjb250YWluc051bGwiOnRydWUsImVsZW1lbnRUeXBlIjoiZG91YmxlIiwidHlwZSI6ImFycmF5In19XSwidHlwZSI6InN0cnVjdCJ9EjIKJhokCg9hcnJheV90b192ZWN0b3ISERIMCghmZWF0dXJlcxgAkgEAEghmZWF0dXJlcxoOEgkKBWxhYmVsGACSAQAaDxIKCgZ3ZWlnaHQYAJIBABoREgwKCGZlYXR1cmVzGACSAQAQARgA"
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        -1.0002590386115269,
+        0.967741935483871
+       ],
+       [
+        -1.0035709593218554,
+        0.9090909090909091
+       ],
+       [
+        -1.0667562667181827,
+        0.8108108108108109
+       ],
+       [
+        -3.0885825778406275,
+        0.7692307692307693
+       ],
+       [
+        0.9999621437237564,
+        1.0
+       ],
+       [
+        2.0474617154386436,
+        0.888888888888889
+       ],
+       [
+        2.100659497923968,
+        0.6956521739130436
+       ],
+       [
+        2.3035148657342823,
+        0.23529411764705882
+       ]
+      ],
+      "schema": "struct<threshold:double,F-Measure:double>"
+     }
+    },
+    "falsePositiveRateByLabel": {
+     "call": "summary.falsePositiveRateByLabel",
+     "commands": [
+      "EjAKBwoFPGlkMD4SCQoHc3VtbWFyeRIaChhmYWxzZVBvc2l0aXZlUmF0ZUJ5TGFiZWw="
+     ],
+     "results": [
+      "Ch2yARoKAkoAEglZAAAAAAAAAAASCVkAAAAAAAAAAA=="
+     ],
+     "value": [
+      0.0,
+      0.0
+     ]
+    },
+    "labelCol": {
+     "call": "summary.labelCol",
+     "commands": [
+      "EiAKBwoFPGlkMD4SCQoHc3VtbWFyeRIKCghsYWJlbENvbA=="
+     ],
+     "results": [
+      "CgdqBWxhYmVs"
+     ],
+     "value": "label"
+    },
+    "labels": {
+     "call": "summary.labels",
+     "commands": [
+      "Eh4KBwoFPGlkMD4SCQoHc3VtbWFyeRIICgZsYWJlbHM="
+     ],
+     "results": [
+      "Ch2yARoKAkoAEglZAAAAAAAAAAASCVkAAAAAAADwPw=="
+     ],
+     "value": [
+      0.0,
+      1.0
+     ]
+    },
+    "objectiveHistory": {
+     "call": "summary.objectiveHistory",
+     "commands": [
+      "EigKBwoFPGlkMD4SCQoHc3VtbWFyeRISChBvYmplY3RpdmVIaXN0b3J5"
+     ],
+     "results": [
+      "Cu8BsgHrAQoCSgASCVkAAAAAAADwPxIJWeog4eyjeco/EglZZEtIQXMCqT8SCVkUtaihIRyfPxIJWSodFbC615k/EglZd5+ByJLBlj8SCVlw1ebcT06WPxIJWVPCqmuPGZI/EglZWGaTZIHgkT8SCVk6qFwf2tSRPxIJWanrUtHMQpE/EglZP/e5nGwpkT8SCVl7LhoPoGyQPxIJWQQhvHNTcpA/EglZvZ23LRBYkD8SCVlEBqMqTUyQPxIJWVOMgJJdSpA/EglZw2HtEnNKkD8SCVmqaNBO5UaQPxIJWWVXvN7kQ5A/EglZ5BuFt0BEkD8="
+     ],
+     "value": [
+      1.0,
+      0.20683716837289207,
+      0.048846818656008734,
+      0.03038075017154991,
+      0.0252370042774405,
+      0.022222798812804947,
+      0.02178311143662398,
+      0.017675629564737182,
+      0.017457982791574927,
+      0.01741352859895804,
+      0.016856384540669875,
+      0.01675958353597839,
+      0.016039372369546428,
+      0.01606111902131692,
+      0.015960934439048325,
+      0.01591606686338866,
+      0.015908681933194235,
+      0.01590900233290583,
+      0.015895445762091377,
+      0.015883995146473668,
+      0.015885363770646324
+     ]
+    },
+    "pr": {
+     "call": "summary.pr",
+     "commands": [
+      "EhoKBwoFPGlkMD4SCQoHc3VtbWFyeRIECgJwchqeAwoAigGYAwqRAwoAGowDCtUCCgC6Ac8CCpgCCgBakwISkAJ7ImZpZWxkcyI6W3sibWV0YWRhdGEiOnt9LCJuYW1lIjoibGFiZWwiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoid2VpZ2h0IiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImZlYXR1cmVzIiwibnVsbGFibGUiOnRydWUsInR5cGUiOnsiY29udGFpbnNOdWxsIjp0cnVlLCJlbGVtZW50VHlwZSI6ImRvdWJsZSIsInR5cGUiOiJhcnJheSJ9fV0sInR5cGUiOiJzdHJ1Y3QifRIyCiYaJAoPYXJyYXlfdG9fdmVjdG9yEhESDAoIZmVhdHVyZXMYAJIBABIIZmVhdHVyZXMaDhIJCgVsYWJlbBgAkgEAGg8SCgoGd2VpZ2h0GACSAQAaERIMCghmZWF0dXJlcxgAkgEAEAEYAA=="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0.0,
+        1.0
+       ],
+       [
+        0.13333333333333333,
+        1.0
+       ],
+       [
+        0.5333333333333333,
+        1.0
+       ],
+       [
+        0.8,
+        1.0
+       ],
+       [
+        1.0,
+        0.625
+       ],
+       [
+        1.0,
+        0.6818181818181818
+       ],
+       [
+        1.0,
+        0.8333333333333334
+       ],
+       [
+        1.0,
+        0.9375
+       ],
+       [
+        1.0,
+        1.0
+       ]
+      ],
+      "schema": "struct<recall:double,precision:double>"
+     }
+    },
+    "precisionByLabel": {
+     "call": "summary.precisionByLabel",
+     "commands": [
+      "EigKBwoFPGlkMD4SCQoHc3VtbWFyeRISChBwcmVjaXNpb25CeUxhYmVs"
+     ],
+     "results": [
+      "Ch2yARoKAkoAEglZAAAAAAAA8D8SCVkAAAAAAADwPw=="
+     ],
+     "value": [
+      1.0,
+      1.0
+     ]
+    },
+    "precisionByThreshold": {
+     "call": "summary.precisionByThreshold",
+     "commands": [
+      "EiwKBwoFPGlkMD4SCQoHc3VtbWFyeRIWChRwcmVjaXNpb25CeVRocmVzaG9sZBqeAwoAigGYAwqRAwoAGowDCtUCCgC6Ac8CCpgCCgBakwISkAJ7ImZpZWxkcyI6W3sibWV0YWRhdGEiOnt9LCJuYW1lIjoibGFiZWwiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoid2VpZ2h0IiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImZlYXR1cmVzIiwibnVsbGFibGUiOnRydWUsInR5cGUiOnsiY29udGFpbnNOdWxsIjp0cnVlLCJlbGVtZW50VHlwZSI6ImRvdWJsZSIsInR5cGUiOiJhcnJheSJ9fV0sInR5cGUiOiJzdHJ1Y3QifRIyCiYaJAoPYXJyYXlfdG9fdmVjdG9yEhESDAoIZmVhdHVyZXMYAJIBABIIZmVhdHVyZXMaDhIJCgVsYWJlbBgAkgEAGg8SCgoGd2VpZ2h0GACSAQAaERIMCghmZWF0dXJlcxgAkgEAEAEYAA=="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        -1.0002590386115269,
+        0.9375
+       ],
+       [
+        -1.0035709593218554,
+        0.8333333333333334
+       ],
+       [
+        -1.0667562667181827,
+        0.6818181818181818
+       ],
+       [
+        -3.0885825778406275,
+        0.625
+       ],
+       [
+        0.9999621437237564,
+        1.0
+       ],
+       [
+        2.0474617154386436,
+        1.0
+       ],
+       [
+        2.100659497923968,
+        1.0
+       ],
+       [
+        2.3035148657342823,
+        1.0
+       ]
+      ],
+      "schema": "struct<threshold:double,precision:double>"
+     }
+    },
+    "predictionCol": {
+     "call": "summary.predictionCol",
+     "commands": [
+      "EiUKBwoFPGlkMD4SCQoHc3VtbWFyeRIPCg1wcmVkaWN0aW9uQ29s"
+     ],
+     "results": [
+      "CgxqCnByZWRpY3Rpb24="
+     ],
+     "value": "prediction"
+    },
+    "predictions": {
+     "call": "summary.predictions",
+     "commands": [
+      "EiMKBwoFPGlkMD4SCQoHc3VtbWFyeRINCgtwcmVkaWN0aW9ucxqeAwoAigGYAwqRAwoAGowDCtUCCgC6Ac8CCpgCCgBakwISkAJ7ImZpZWxkcyI6W3sibWV0YWRhdGEiOnt9LCJuYW1lIjoibGFiZWwiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoid2VpZ2h0IiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImZlYXR1cmVzIiwibnVsbGFibGUiOnRydWUsInR5cGUiOnsiY29udGFpbnNOdWxsIjp0cnVlLCJlbGVtZW50VHlwZSI6ImRvdWJsZSIsInR5cGUiOiJhcnJheSJ9fV0sInR5cGUiOiJzdHJ1Y3QifRIyCiYaJAoPYXJyYXlfdG9fdmVjdG9yEhESDAoIZmVhdHVyZXMYAJIBABIIZmVhdHVyZXMaDhIJCgVsYWJlbBgAkgEAGg8SCgoGd2VpZ2h0GACSAQAaERIMCghmZWF0dXJlcxgAkgEAEAEYAA=="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0.0,
+        0.5,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          2.5,
+          3.0
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.0002590386115269,
+          -1.0002590386115269
+         ]
+        },
+        0.0
+       ],
+       [
+        0.0,
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.8,
+          0.4
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.0035709593218554,
+          -1.0035709593218554
+         ]
+        },
+        0.0
+       ],
+       [
+        0.0,
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          3.0,
+          0.2
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          3.0885825778406275,
+          -3.0885825778406275
+         ]
+        },
+        0.0
+       ],
+       [
+        0.0,
+        2.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          2.0,
+          1.0
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.0667562667181827,
+          -1.0667562667181827
+         ]
+        },
+        0.0
+       ],
+       [
+        1.0,
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.0,
+          1.1
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          -2.3035148657342823,
+          2.3035148657342823
+         ]
+        },
+        1.0
+       ],
+       [
+        1.0,
+        1.5,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.0,
+          1.9
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          -0.9999621437237564,
+          0.9999621437237564
+         ]
+        },
+        1.0
+       ],
+       [
+        1.0,
+        2.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.1,
+          0.9
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          -2.0474617154386436,
+          2.0474617154386436
+         ]
+        },
+        1.0
+       ],
+       [
+        1.0,
+        3.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.5,
+          2.5
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          -2.100659497923968,
+          2.100659497923968
+         ]
+        },
+        1.0
+       ]
+      ],
+      "schema": "struct<label:double,weight:double,features:vector,rawPrediction:vector,prediction:double>"
+     }
+    },
+    "recallByLabel": {
+     "call": "summary.recallByLabel",
+     "commands": [
+      "EiUKBwoFPGlkMD4SCQoHc3VtbWFyeRIPCg1yZWNhbGxCeUxhYmVs"
+     ],
+     "results": [
+      "Ch2yARoKAkoAEglZAAAAAAAA8D8SCVkAAAAAAADwPw=="
+     ],
+     "value": [
+      1.0,
+      1.0
+     ]
+    },
+    "recallByThreshold": {
+     "call": "summary.recallByThreshold",
+     "commands": [
+      "EikKBwoFPGlkMD4SCQoHc3VtbWFyeRITChFyZWNhbGxCeVRocmVzaG9sZBqeAwoAigGYAwqRAwoAGowDCtUCCgC6Ac8CCpgCCgBakwISkAJ7ImZpZWxkcyI6W3sibWV0YWRhdGEiOnt9LCJuYW1lIjoibGFiZWwiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoid2VpZ2h0IiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImZlYXR1cmVzIiwibnVsbGFibGUiOnRydWUsInR5cGUiOnsiY29udGFpbnNOdWxsIjp0cnVlLCJlbGVtZW50VHlwZSI6ImRvdWJsZSIsInR5cGUiOiJhcnJheSJ9fV0sInR5cGUiOiJzdHJ1Y3QifRIyCiYaJAoPYXJyYXlfdG9fdmVjdG9yEhESDAoIZmVhdHVyZXMYAJIBABIIZmVhdHVyZXMaDhIJCgVsYWJlbBgAkgEAGg8SCgoGd2VpZ2h0GACSAQAaERIMCghmZWF0dXJlcxgAkgEAEAEYAA=="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        -1.0002590386115269,
+        1.0
+       ],
+       [
+        -1.0035709593218554,
+        1.0
+       ],
+       [
+        -1.0667562667181827,
+        1.0
+       ],
+       [
+        -3.0885825778406275,
+        1.0
+       ],
+       [
+        0.9999621437237564,
+        1.0
+       ],
+       [
+        2.0474617154386436,
+        0.8
+       ],
+       [
+        2.100659497923968,
+        0.5333333333333333
+       ],
+       [
+        2.3035148657342823,
+        0.13333333333333333
+       ]
+      ],
+      "schema": "struct<threshold:double,recall:double>"
+     }
+    },
+    "repr()": {
+     "call": "repr(summary)",
+     "commands": [],
+     "results": [],
+     "value": "<pyspark.ml.classification.LinearSVCTrainingSummary object at 0x<addr>>"
+    },
+    "roc": {
+     "call": "summary.roc",
+     "commands": [
+      "EhsKBwoFPGlkMD4SCQoHc3VtbWFyeRIFCgNyb2MangMKAIoBmAMKkQMKABqMAwrVAgoAugHPAgqYAgoAWpMCEpACeyJmaWVsZHMiOlt7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImxhYmVsIiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6IndlaWdodCIsIm51bGxhYmxlIjp0cnVlLCJ0eXBlIjoiZG91YmxlIn0seyJtZXRhZGF0YSI6e30sIm5hbWUiOiJmZWF0dXJlcyIsIm51bGxhYmxlIjp0cnVlLCJ0eXBlIjp7ImNvbnRhaW5zTnVsbCI6dHJ1ZSwiZWxlbWVudFR5cGUiOiJkb3VibGUiLCJ0eXBlIjoiYXJyYXkifX1dLCJ0eXBlIjoic3RydWN0In0SMgomGiQKD2FycmF5X3RvX3ZlY3RvchIREgwKCGZlYXR1cmVzGACSAQASCGZlYXR1cmVzGg4SCQoFbGFiZWwYAJIBABoPEgoKBndlaWdodBgAkgEAGhESDAoIZmVhdHVyZXMYAJIBABABGAA="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0.0,
+        0.0
+       ],
+       [
+        0.0,
+        0.13333333333333333
+       ],
+       [
+        0.0,
+        0.5333333333333333
+       ],
+       [
+        0.0,
+        0.8
+       ],
+       [
+        0.0,
+        1.0
+       ],
+       [
+        0.1111111111111111,
+        1.0
+       ],
+       [
+        0.3333333333333333,
+        1.0
+       ],
+       [
+        0.7777777777777778,
+        1.0
+       ],
+       [
+        1.0,
+        1.0
+       ],
+       [
+        1.0,
+        1.0
+       ]
+      ],
+      "schema": "struct<FPR:double,TPR:double>"
+     }
+    },
+    "scoreCol": {
+     "call": "summary.scoreCol",
+     "commands": [
+      "EiAKBwoFPGlkMD4SCQoHc3VtbWFyeRIKCghzY29yZUNvbA=="
+     ],
+     "results": [
+      "Cg9qDXJhd1ByZWRpY3Rpb24="
+     ],
+     "value": "rawPrediction"
+    },
+    "str()": {
+     "call": "str(summary)",
+     "commands": [],
+     "results": [],
+     "value": "<pyspark.ml.classification.LinearSVCTrainingSummary object at 0x<addr>>"
+    },
+    "totalIterations": {
+     "call": "summary.totalIterations",
+     "commands": [
+      "EicKBwoFPGlkMD4SCQoHc3VtbWFyeRIRCg90b3RhbEl0ZXJhdGlvbnM="
+     ],
+     "results": [
+      "CgIwFA=="
+     ],
+     "value": 20
+    },
+    "truePositiveRateByLabel": {
+     "call": "summary.truePositiveRateByLabel",
+     "commands": [
+      "Ei8KBwoFPGlkMD4SCQoHc3VtbWFyeRIZChd0cnVlUG9zaXRpdmVSYXRlQnlMYWJlbA=="
+     ],
+     "results": [
+      "Ch2yARoKAkoAEglZAAAAAAAA8D8SCVkAAAAAAADwPw=="
+     ],
+     "value": [
+      1.0,
+      1.0
+     ]
+    },
+    "weightCol": {
+     "call": "summary.weightCol",
+     "commands": [
+      "EiEKBwoFPGlkMD4SCQoHc3VtbWFyeRILCgl3ZWlnaHRDb2w="
+     ],
+     "results": [
+      "CghqBndlaWdodA=="
+     ],
+     "value": "weight"
+    },
+    "weightedFMeasure-0.5": {
+     "call": "summary.weightedFMeasure(0.5)",
+     "commands": [
+      "EjUKBwoFPGlkMD4SCQoHc3VtbWFyeRIfChB3ZWlnaHRlZEZNZWFzdXJlEgsKCVkAAAAAAADgPw=="
+     ],
+     "results": [
+      "CglZAAAAAAAA8D8="
+     ],
+     "value": 1.0
+    },
+    "weightedFMeasure-1.0": {
+     "call": "summary.weightedFMeasure(1.0)",
+     "commands": [
+      "EjUKBwoFPGlkMD4SCQoHc3VtbWFyeRIfChB3ZWlnaHRlZEZNZWFzdXJlEgsKCVkAAAAAAADwPw=="
+     ],
+     "results": [
+      "CglZAAAAAAAA8D8="
+     ],
+     "value": 1.0
+    },
+    "weightedFalsePositiveRate": {
+     "call": "summary.weightedFalsePositiveRate",
+     "commands": [
+      "EjEKBwoFPGlkMD4SCQoHc3VtbWFyeRIbChl3ZWlnaHRlZEZhbHNlUG9zaXRpdmVSYXRl"
+     ],
+     "results": [
+      "CglZAAAAAAAAAAA="
+     ],
+     "value": 0.0
+    },
+    "weightedPrecision": {
+     "call": "summary.weightedPrecision",
+     "commands": [
+      "EikKBwoFPGlkMD4SCQoHc3VtbWFyeRITChF3ZWlnaHRlZFByZWNpc2lvbg=="
+     ],
+     "results": [
+      "CglZAAAAAAAA8D8="
+     ],
+     "value": 1.0
+    },
+    "weightedRecall": {
+     "call": "summary.weightedRecall",
+     "commands": [
+      "EiYKBwoFPGlkMD4SCQoHc3VtbWFyeRIQCg53ZWlnaHRlZFJlY2FsbA=="
+     ],
+     "results": [
+      "CglZAAAAAAAA8D8="
+     ],
+     "value": 1.0
+    },
+    "weightedTruePositiveRate": {
+     "call": "summary.weightedTruePositiveRate",
+     "commands": [
+      "EjAKBwoFPGlkMD4SCQoHc3VtbWFyeRIaChh3ZWlnaHRlZFRydWVQb3NpdGl2ZVJhdGU="
+     ],
+     "results": [
+      "CglZAAAAAAAA8D8="
+     ],
+     "value": 1.0
+    }
+   },
+   "skipped": {},
+   "via": {
+    "call": "model.summary()",
+    "commands": [],
+    "results": [],
+    "value": {
+     "ref": "<id0>.summary",
+     "type": "LinearSVCTrainingSummary"
+    }
+   }
+  },
+  "LogisticRegression.binomial.evaluate": {
+   "class": "BinaryLogisticRegressionSummary",
+   "members": {
+    "accuracy": {
+     "call": "summary.accuracy",
+     "commands": [
+      "EhUKBwoFPGlkMD4SCgoIYWNjdXJhY3k="
+     ],
+     "results": [
+      "CglZAAAAAAAA8D8="
+     ],
+     "value": 1.0
+    },
+    "areaUnderROC": {
+     "call": "summary.areaUnderROC",
+     "commands": [
+      "EhkKBwoFPGlkMD4SDgoMYXJlYVVuZGVyUk9D"
+     ],
+     "results": [
+      "CglZAAAAAAAA8D8="
+     ],
+     "value": 1.0
+    },
+    "fMeasureByLabel-0.5": {
+     "call": "summary.fMeasureByLabel(0.5)",
+     "commands": [
+      "EikKBwoFPGlkMD4SHgoPZk1lYXN1cmVCeUxhYmVsEgsKCVkAAAAAAADgPw=="
+     ],
+     "results": [
+      "Ch2yARoKAkoAEglZAAAAAAAA8D8SCVkAAAAAAADwPw=="
+     ],
+     "value": [
+      1.0,
+      1.0
+     ]
+    },
+    "fMeasureByLabel-1.0": {
+     "call": "summary.fMeasureByLabel(1.0)",
+     "commands": [
+      "EikKBwoFPGlkMD4SHgoPZk1lYXN1cmVCeUxhYmVsEgsKCVkAAAAAAADwPw=="
+     ],
+     "results": [
+      "Ch2yARoKAkoAEglZAAAAAAAA8D8SCVkAAAAAAADwPw=="
+     ],
+     "value": [
+      1.0,
+      1.0
+     ]
+    },
+    "fMeasureByThreshold": {
+     "call": "summary.fMeasureByThreshold",
+     "commands": [
+      "EiAKBwoFPGlkMD4SFQoTZk1lYXN1cmVCeVRocmVzaG9sZA=="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0.017145207695395293,
+        0.7499999999999999
+       ],
+       [
+        0.02662810673780136,
+        0.8571428571428571
+       ],
+       [
+        0.9474689608247884,
+        1.0
+       ],
+       [
+        0.9671449140841154,
+        0.5
+       ]
+      ],
+      "schema": "struct<threshold:double,F-Measure:double>"
+     }
+    },
+    "falsePositiveRateByLabel": {
+     "call": "summary.falsePositiveRateByLabel",
+     "commands": [
+      "EiUKBwoFPGlkMD4SGgoYZmFsc2VQb3NpdGl2ZVJhdGVCeUxhYmVs"
+     ],
+     "results": [
+      "Ch2yARoKAkoAEglZAAAAAAAAAAASCVkAAAAAAAAAAA=="
+     ],
+     "value": [
+      0.0,
+      0.0
+     ]
+    },
+    "featuresCol": {
+     "call": "summary.featuresCol",
+     "commands": [
+      "EhgKBwoFPGlkMD4SDQoLZmVhdHVyZXNDb2w="
+     ],
+     "results": [
+      "CgpqCGZlYXR1cmVz"
+     ],
+     "value": "features"
+    },
+    "labelCol": {
+     "call": "summary.labelCol",
+     "commands": [
+      "EhUKBwoFPGlkMD4SCgoIbGFiZWxDb2w="
+     ],
+     "results": [
+      "CgdqBWxhYmVs"
+     ],
+     "value": "label"
+    },
+    "labels": {
+     "call": "summary.labels",
+     "commands": [
+      "EhMKBwoFPGlkMD4SCAoGbGFiZWxz"
+     ],
+     "results": [
+      "Ch2yARoKAkoAEglZAAAAAAAAAAASCVkAAAAAAADwPw=="
+     ],
+     "value": [
+      0.0,
+      1.0
+     ]
+    },
+    "pr": {
+     "call": "summary.pr",
+     "commands": [
+      "Eg8KBwoFPGlkMD4SBAoCcHI="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0.0,
+        1.0
+       ],
+       [
+        0.3333333333333333,
+        1.0
+       ],
+       [
+        1.0,
+        0.6
+       ],
+       [
+        1.0,
+        0.75
+       ],
+       [
+        1.0,
+        1.0
+       ]
+      ],
+      "schema": "struct<recall:double,precision:double>"
+     }
+    },
+    "precisionByLabel": {
+     "call": "summary.precisionByLabel",
+     "commands": [
+      "Eh0KBwoFPGlkMD4SEgoQcHJlY2lzaW9uQnlMYWJlbA=="
+     ],
+     "results": [
+      "Ch2yARoKAkoAEglZAAAAAAAA8D8SCVkAAAAAAADwPw=="
+     ],
+     "value": [
+      1.0,
+      1.0
+     ]
+    },
+    "precisionByThreshold": {
+     "call": "summary.precisionByThreshold",
+     "commands": [
+      "EiEKBwoFPGlkMD4SFgoUcHJlY2lzaW9uQnlUaHJlc2hvbGQ="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0.017145207695395293,
+        0.6
+       ],
+       [
+        0.02662810673780136,
+        0.75
+       ],
+       [
+        0.9474689608247884,
+        1.0
+       ],
+       [
+        0.9671449140841154,
+        1.0
+       ]
+      ],
+      "schema": "struct<threshold:double,precision:double>"
+     }
+    },
+    "predictionCol": {
+     "call": "summary.predictionCol",
+     "commands": [
+      "EhoKBwoFPGlkMD4SDwoNcHJlZGljdGlvbkNvbA=="
+     ],
+     "results": [
+      "CgxqCnByZWRpY3Rpb24="
+     ],
+     "value": "prediction"
+    },
+    "predictions": {
+     "call": "summary.predictions",
+     "commands": [
+      "EhgKBwoFPGlkMD4SDQoLcHJlZGljdGlvbnM="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0.0,
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          2.2,
+          0.6
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          3.598798919964509,
+          -3.598798919964509
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.9733718932621986,
+          0.02662810673780136
+         ]
+        },
+        0.0
+       ],
+       [
+        0.0,
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          2.9,
+          2.1
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          4.0487426904266925,
+          -4.0487426904266925
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.9828547923046047,
+          0.017145207695395293
+         ]
+        },
+        0.0
+       ],
+       [
+        1.0,
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.2,
+          1.0
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          -3.3822417883230904,
+          3.3822417883230904
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.03285508591588462,
+          0.9671449140841154
+         ]
+        },
+        1.0
+       ],
+       [
+        1.0,
+        2.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.8,
+          2.2
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          -2.8923899601165597,
+          2.8923899601165597
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.052531039175211645,
+          0.9474689608247884
+         ]
+        },
+        1.0
+       ]
+      ],
+      "schema": "struct<label:double,weight:double,features:vector,rawPrediction:vector,probability:vector,prediction:double>"
+     }
+    },
+    "probabilityCol": {
+     "call": "summary.probabilityCol",
+     "commands": [
+      "EhsKBwoFPGlkMD4SEAoOcHJvYmFiaWxpdHlDb2w="
+     ],
+     "results": [
+      "Cg1qC3Byb2JhYmlsaXR5"
+     ],
+     "value": "probability"
+    },
+    "recallByLabel": {
+     "call": "summary.recallByLabel",
+     "commands": [
+      "EhoKBwoFPGlkMD4SDwoNcmVjYWxsQnlMYWJlbA=="
+     ],
+     "results": [
+      "Ch2yARoKAkoAEglZAAAAAAAA8D8SCVkAAAAAAADwPw=="
+     ],
+     "value": [
+      1.0,
+      1.0
+     ]
+    },
+    "recallByThreshold": {
+     "call": "summary.recallByThreshold",
+     "commands": [
+      "Eh4KBwoFPGlkMD4SEwoRcmVjYWxsQnlUaHJlc2hvbGQ="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0.017145207695395293,
+        1.0
+       ],
+       [
+        0.02662810673780136,
+        1.0
+       ],
+       [
+        0.9474689608247884,
+        1.0
+       ],
+       [
+        0.9671449140841154,
+        0.3333333333333333
+       ]
+      ],
+      "schema": "struct<threshold:double,recall:double>"
+     }
+    },
+    "repr()": {
+     "call": "repr(summary)",
+     "commands": [],
+     "results": [],
+     "value": "<pyspark.ml.classification.BinaryLogisticRegressionSummary object at 0x<addr>>"
+    },
+    "roc": {
+     "call": "summary.roc",
+     "commands": [
+      "EhAKBwoFPGlkMD4SBQoDcm9j"
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0.0,
+        0.0
+       ],
+       [
+        0.0,
+        0.3333333333333333
+       ],
+       [
+        0.0,
+        1.0
+       ],
+       [
+        0.5,
+        1.0
+       ],
+       [
+        1.0,
+        1.0
+       ],
+       [
+        1.0,
+        1.0
+       ]
+      ],
+      "schema": "struct<FPR:double,TPR:double>"
+     }
+    },
+    "scoreCol": {
+     "call": "summary.scoreCol",
+     "commands": [
+      "EhUKBwoFPGlkMD4SCgoIc2NvcmVDb2w="
+     ],
+     "results": [
+      "Cg1qC3Byb2JhYmlsaXR5"
+     ],
+     "value": "probability"
+    },
+    "str()": {
+     "call": "str(summary)",
+     "commands": [],
+     "results": [],
+     "value": "<pyspark.ml.classification.BinaryLogisticRegressionSummary object at 0x<addr>>"
+    },
+    "truePositiveRateByLabel": {
+     "call": "summary.truePositiveRateByLabel",
+     "commands": [
+      "EiQKBwoFPGlkMD4SGQoXdHJ1ZVBvc2l0aXZlUmF0ZUJ5TGFiZWw="
+     ],
+     "results": [
+      "Ch2yARoKAkoAEglZAAAAAAAA8D8SCVkAAAAAAADwPw=="
+     ],
+     "value": [
+      1.0,
+      1.0
+     ]
+    },
+    "weightCol": {
+     "call": "summary.weightCol",
+     "commands": [
+      "EhYKBwoFPGlkMD4SCwoJd2VpZ2h0Q29s"
+     ],
+     "results": [
+      "CghqBndlaWdodA=="
+     ],
+     "value": "weight"
+    },
+    "weightedFMeasure-0.5": {
+     "call": "summary.weightedFMeasure(0.5)",
+     "commands": [
+      "EioKBwoFPGlkMD4SHwoQd2VpZ2h0ZWRGTWVhc3VyZRILCglZAAAAAAAA4D8="
+     ],
+     "results": [
+      "CglZAAAAAAAA8D8="
+     ],
+     "value": 1.0
+    },
+    "weightedFMeasure-1.0": {
+     "call": "summary.weightedFMeasure(1.0)",
+     "commands": [
+      "EioKBwoFPGlkMD4SHwoQd2VpZ2h0ZWRGTWVhc3VyZRILCglZAAAAAAAA8D8="
+     ],
+     "results": [
+      "CglZAAAAAAAA8D8="
+     ],
+     "value": 1.0
+    },
+    "weightedFalsePositiveRate": {
+     "call": "summary.weightedFalsePositiveRate",
+     "commands": [
+      "EiYKBwoFPGlkMD4SGwoZd2VpZ2h0ZWRGYWxzZVBvc2l0aXZlUmF0ZQ=="
+     ],
+     "results": [
+      "CglZAAAAAAAAAAA="
+     ],
+     "value": 0.0
+    },
+    "weightedPrecision": {
+     "call": "summary.weightedPrecision",
+     "commands": [
+      "Eh4KBwoFPGlkMD4SEwoRd2VpZ2h0ZWRQcmVjaXNpb24="
+     ],
+     "results": [
+      "CglZAAAAAAAA8D8="
+     ],
+     "value": 1.0
+    },
+    "weightedRecall": {
+     "call": "summary.weightedRecall",
+     "commands": [
+      "EhsKBwoFPGlkMD4SEAoOd2VpZ2h0ZWRSZWNhbGw="
+     ],
+     "results": [
+      "CglZAAAAAAAA8D8="
+     ],
+     "value": 1.0
+    },
+    "weightedTruePositiveRate": {
+     "call": "summary.weightedTruePositiveRate",
+     "commands": [
+      "EiUKBwoFPGlkMD4SGgoYd2VpZ2h0ZWRUcnVlUG9zaXRpdmVSYXRl"
+     ],
+     "results": [
+      "CglZAAAAAAAA8D8="
+     ],
+     "value": 1.0
+    }
+   },
+   "skipped": {},
+   "via": {
+    "call": "model.evaluate(binary_eval)",
+    "commands": [
+     "EroDCgcKBTxpZDA+Eq4DCghldmFsdWF0ZRKhAxKeAwoAigGYAwqRAwoAGowDCtUCCgC6Ac8CCpgCCgBakwISkAJ7ImZpZWxkcyI6W3sibWV0YWRhdGEiOnt9LCJuYW1lIjoibGFiZWwiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoid2VpZ2h0IiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImZlYXR1cmVzIiwibnVsbGFibGUiOnRydWUsInR5cGUiOnsiY29udGFpbnNOdWxsIjp0cnVlLCJlbGVtZW50VHlwZSI6ImRvdWJsZSIsInR5cGUiOiJhcnJheSJ9fV0sInR5cGUiOiJzdHJ1Y3QifRIyCiYaJAoPYXJyYXlfdG9fdmVjdG9yEhESDAoIZmVhdHVyZXMYAJIBABIIZmVhdHVyZXMaDhIJCgVsYWJlbBgAkgEAGg8SCgoGd2VpZ2h0GACSAQAaERIMCghmZWF0dXJlcxgAkgEAEAEYAA==",
+     "EhcKBwoFPGlkMD4SDAoKbnVtQ2xhc3Nlcw=="
+    ],
+    "results": [
+     "EgU8aWQxPg==",
+     "CgIwAg=="
+    ],
+    "value": {
+     "ref": "<id1>",
+     "type": "BinaryLogisticRegressionSummary"
+    }
+   }
+  },
+  "LogisticRegression.binomial.training": {
+   "class": "BinaryLogisticRegressionTrainingSummary",
+   "members": {
+    "accuracy": {
+     "call": "summary.accuracy",
+     "commands": [
+      "EiAKBwoFPGlkMD4SCQoHc3VtbWFyeRIKCghhY2N1cmFjeQ=="
+     ],
+     "results": [
+      "CglZAAAAAAAA8D8="
+     ],
+     "value": 1.0
+    },
+    "areaUnderROC": {
+     "call": "summary.areaUnderROC",
+     "commands": [
+      "EiQKBwoFPGlkMD4SCQoHc3VtbWFyeRIOCgxhcmVhVW5kZXJST0M="
+     ],
+     "results": [
+      "CglZAAAAAAAA8D8="
+     ],
+     "value": 1.0
+    },
+    "fMeasureByLabel-0.5": {
+     "call": "summary.fMeasureByLabel(0.5)",
+     "commands": [
+      "EjQKBwoFPGlkMD4SCQoHc3VtbWFyeRIeCg9mTWVhc3VyZUJ5TGFiZWwSCwoJWQAAAAAAAOA/"
+     ],
+     "results": [
+      "Ch2yARoKAkoAEglZAAAAAAAA8D8SCVkAAAAAAADwPw=="
+     ],
+     "value": [
+      1.0,
+      1.0
+     ]
+    },
+    "fMeasureByLabel-1.0": {
+     "call": "summary.fMeasureByLabel(1.0)",
+     "commands": [
+      "EjQKBwoFPGlkMD4SCQoHc3VtbWFyeRIeCg9mTWVhc3VyZUJ5TGFiZWwSCwoJWQAAAAAAAPA/"
+     ],
+     "results": [
+      "Ch2yARoKAkoAEglZAAAAAAAA8D8SCVkAAAAAAADwPw=="
+     ],
+     "value": [
+      1.0,
+      1.0
+     ]
+    },
+    "fMeasureByThreshold": {
+     "call": "summary.fMeasureByThreshold",
+     "commands": [
+      "EisKBwoFPGlkMD4SCQoHc3VtbWFyeRIVChNmTWVhc3VyZUJ5VGhyZXNob2xkGp4DCgCKAZgDCpEDCgAajAMK1QIKALoBzwIKmAIKAFqTAhKQAnsiZmllbGRzIjpbeyJtZXRhZGF0YSI6e30sIm5hbWUiOiJsYWJlbCIsIm51bGxhYmxlIjp0cnVlLCJ0eXBlIjoiZG91YmxlIn0seyJtZXRhZGF0YSI6e30sIm5hbWUiOiJ3ZWlnaHQiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoiZmVhdHVyZXMiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6eyJjb250YWluc051bGwiOnRydWUsImVsZW1lbnRUeXBlIjoiZG91YmxlIiwidHlwZSI6ImFycmF5In19XSwidHlwZSI6InN0cnVjdCJ9EjIKJhokCg9hcnJheV90b192ZWN0b3ISERIMCghmZWF0dXJlcxgAkgEAEghmZWF0dXJlcxoOEgkKBWxhYmVsGACSAQAaDxIKCgZ3ZWlnaHQYAJIBABoREgwKCGZlYXR1cmVzGACSAQAQARgA"
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0.0012505315384985227,
+        0.7692307692307693
+       ],
+       [
+        0.07290283430502509,
+        0.8108108108108109
+       ],
+       [
+        0.07848476759993372,
+        0.8571428571428571
+       ],
+       [
+        0.1603233303207251,
+        0.967741935483871
+       ],
+       [
+        0.8674106571285319,
+        1.0
+       ],
+       [
+        0.9730232813847866,
+        0.888888888888889
+       ],
+       [
+        0.9845302158365564,
+        0.6956521739130436
+       ],
+       [
+        0.9856742334608594,
+        0.5714285714285715
+       ]
+      ],
+      "schema": "struct<threshold:double,F-Measure:double>"
+     }
+    },
+    "falsePositiveRateByLabel": {
+     "call": "summary.falsePositiveRateByLabel",
+     "commands": [
+      "EjAKBwoFPGlkMD4SCQoHc3VtbWFyeRIaChhmYWxzZVBvc2l0aXZlUmF0ZUJ5TGFiZWw="
+     ],
+     "results": [
+      "Ch2yARoKAkoAEglZAAAAAAAAAAASCVkAAAAAAAAAAA=="
+     ],
+     "value": [
+      0.0,
+      0.0
+     ]
+    },
+    "featuresCol": {
+     "call": "summary.featuresCol",
+     "commands": [
+      "EiMKBwoFPGlkMD4SCQoHc3VtbWFyeRINCgtmZWF0dXJlc0NvbA=="
+     ],
+     "results": [
+      "CgpqCGZlYXR1cmVz"
+     ],
+     "value": "features"
+    },
+    "labelCol": {
+     "call": "summary.labelCol",
+     "commands": [
+      "EiAKBwoFPGlkMD4SCQoHc3VtbWFyeRIKCghsYWJlbENvbA=="
+     ],
+     "results": [
+      "CgdqBWxhYmVs"
+     ],
+     "value": "label"
+    },
+    "labels": {
+     "call": "summary.labels",
+     "commands": [
+      "Eh4KBwoFPGlkMD4SCQoHc3VtbWFyeRIICgZsYWJlbHM="
+     ],
+     "results": [
+      "Ch2yARoKAkoAEglZAAAAAAAAAAASCVkAAAAAAADwPw=="
+     ],
+     "value": [
+      0.0,
+      1.0
+     ]
+    },
+    "objectiveHistory": {
+     "call": "summary.objectiveHistory",
+     "commands": [
+      "EigKBwoFPGlkMD4SCQoHc3VtbWFyeRISChBvYmplY3RpdmVIaXN0b3J5"
+     ],
+     "results": [
+      "CoABsgF9CgJKABIJWQb7A6uGK+U/EglZ+SL0FUIP1T8SCVmpbJdgbGjHPxIJWY6/VZs9R8E/EglZBPjo1Cncvj8SCVmZRkdVUUi+PxIJWTBNm6ZiP74/EglZUhtt60g/vj8SCVkxHuLJQT++PxIJWe4ZfMlBP74/EglZvARpyUE/vj8="
+     ],
+     "value": [
+      0.6615632381579821,
+      0.3290562834159086,
+      0.18287424770719454,
+      0.1349865921470123,
+      0.12054692695616614,
+      0.11829098064415645,
+      0.11815468375725824,
+      0.11815315005979457,
+      0.11815272501746034,
+      0.11815272492467674,
+      0.11815272490732104
+     ]
+    },
+    "pr": {
+     "call": "summary.pr",
+     "commands": [
+      "EhoKBwoFPGlkMD4SCQoHc3VtbWFyeRIECgJwchqeAwoAigGYAwqRAwoAGowDCtUCCgC6Ac8CCpgCCgBakwISkAJ7ImZpZWxkcyI6W3sibWV0YWRhdGEiOnt9LCJuYW1lIjoibGFiZWwiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoid2VpZ2h0IiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImZlYXR1cmVzIiwibnVsbGFibGUiOnRydWUsInR5cGUiOnsiY29udGFpbnNOdWxsIjp0cnVlLCJlbGVtZW50VHlwZSI6ImRvdWJsZSIsInR5cGUiOiJhcnJheSJ9fV0sInR5cGUiOiJzdHJ1Y3QifRIyCiYaJAoPYXJyYXlfdG9fdmVjdG9yEhESDAoIZmVhdHVyZXMYAJIBABIIZmVhdHVyZXMaDhIJCgVsYWJlbBgAkgEAGg8SCgoGd2VpZ2h0GACSAQAaERIMCghmZWF0dXJlcxgAkgEAEAEYAA=="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0.0,
+        1.0
+       ],
+       [
+        0.4,
+        1.0
+       ],
+       [
+        0.5333333333333333,
+        1.0
+       ],
+       [
+        0.8,
+        1.0
+       ],
+       [
+        1.0,
+        0.625
+       ],
+       [
+        1.0,
+        0.6818181818181818
+       ],
+       [
+        1.0,
+        0.75
+       ],
+       [
+        1.0,
+        0.9375
+       ],
+       [
+        1.0,
+        1.0
+       ]
+      ],
+      "schema": "struct<recall:double,precision:double>"
+     }
+    },
+    "precisionByLabel": {
+     "call": "summary.precisionByLabel",
+     "commands": [
+      "EigKBwoFPGlkMD4SCQoHc3VtbWFyeRISChBwcmVjaXNpb25CeUxhYmVs"
+     ],
+     "results": [
+      "Ch2yARoKAkoAEglZAAAAAAAA8D8SCVkAAAAAAADwPw=="
+     ],
+     "value": [
+      1.0,
+      1.0
+     ]
+    },
+    "precisionByThreshold": {
+     "call": "summary.precisionByThreshold",
+     "commands": [
+      "EiwKBwoFPGlkMD4SCQoHc3VtbWFyeRIWChRwcmVjaXNpb25CeVRocmVzaG9sZBqeAwoAigGYAwqRAwoAGowDCtUCCgC6Ac8CCpgCCgBakwISkAJ7ImZpZWxkcyI6W3sibWV0YWRhdGEiOnt9LCJuYW1lIjoibGFiZWwiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoid2VpZ2h0IiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImZlYXR1cmVzIiwibnVsbGFibGUiOnRydWUsInR5cGUiOnsiY29udGFpbnNOdWxsIjp0cnVlLCJlbGVtZW50VHlwZSI6ImRvdWJsZSIsInR5cGUiOiJhcnJheSJ9fV0sInR5cGUiOiJzdHJ1Y3QifRIyCiYaJAoPYXJyYXlfdG9fdmVjdG9yEhESDAoIZmVhdHVyZXMYAJIBABIIZmVhdHVyZXMaDhIJCgVsYWJlbBgAkgEAGg8SCgoGd2VpZ2h0GACSAQAaERIMCghmZWF0dXJlcxgAkgEAEAEYAA=="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0.0012505315384985227,
+        0.625
+       ],
+       [
+        0.07290283430502509,
+        0.6818181818181818
+       ],
+       [
+        0.07848476759993372,
+        0.75
+       ],
+       [
+        0.1603233303207251,
+        0.9375
+       ],
+       [
+        0.8674106571285319,
+        1.0
+       ],
+       [
+        0.9730232813847866,
+        1.0
+       ],
+       [
+        0.9845302158365564,
+        1.0
+       ],
+       [
+        0.9856742334608594,
+        1.0
+       ]
+      ],
+      "schema": "struct<threshold:double,precision:double>"
+     }
+    },
+    "predictionCol": {
+     "call": "summary.predictionCol",
+     "commands": [
+      "EiUKBwoFPGlkMD4SCQoHc3VtbWFyeRIPCg1wcmVkaWN0aW9uQ29s"
+     ],
+     "results": [
+      "CgxqCnByZWRpY3Rpb24="
+     ],
+     "value": "prediction"
+    },
+    "predictions": {
+     "call": "summary.predictions",
+     "commands": [
+      "EiMKBwoFPGlkMD4SCQoHc3VtbWFyeRINCgtwcmVkaWN0aW9ucxqeAwoAigGYAwqRAwoAGowDCtUCCgC6Ac8CCpgCCgBakwISkAJ7ImZpZWxkcyI6W3sibWV0YWRhdGEiOnt9LCJuYW1lIjoibGFiZWwiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoid2VpZ2h0IiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImZlYXR1cmVzIiwibnVsbGFibGUiOnRydWUsInR5cGUiOnsiY29udGFpbnNOdWxsIjp0cnVlLCJlbGVtZW50VHlwZSI6ImRvdWJsZSIsInR5cGUiOiJhcnJheSJ9fV0sInR5cGUiOiJzdHJ1Y3QifRIyCiYaJAoPYXJyYXlfdG9fdmVjdG9yEhESDAoIZmVhdHVyZXMYAJIBABIIZmVhdHVyZXMaDhIJCgVsYWJlbBgAkgEAGg8SCgoGd2VpZ2h0GACSAQAaERIMCghmZWF0dXJlcxgAkgEAEAEYAA=="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0.0,
+        0.5,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          2.5,
+          3.0
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.6558243100499346,
+          -1.6558243100499346
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.8396766696792749,
+          0.1603233303207251
+         ]
+        },
+        0.0
+       ],
+       [
+        0.0,
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.8,
+          0.4
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          2.5429308598208746,
+          -2.5429308598208746
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.9270971656949749,
+          0.07290283430502509
+         ]
+        },
+        0.0
+       ],
+       [
+        0.0,
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          3.0,
+          0.2
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          6.682935273148594,
+          -6.682935273148594
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.9987494684615015,
+          0.0012505315384985227
+         ]
+        },
+        0.0
+       ],
+       [
+        0.0,
+        2.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          2.0,
+          1.0
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          2.4631147443321804,
+          -2.4631147443321804
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.9215152324000663,
+          0.07848476759993372
+         ]
+        },
+        0.0
+       ],
+       [
+        1.0,
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.0,
+          1.1
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          -4.153275876619112,
+          4.153275876619112
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.01546978416344358,
+          0.9845302158365564
+         ]
+        },
+        1.0
+       ],
+       [
+        1.0,
+        1.5,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.0,
+          1.9
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          -1.878255813596334,
+          1.878255813596334
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.1325893428714681,
+          0.8674106571285319
+         ]
+        },
+        1.0
+       ],
+       [
+        1.0,
+        2.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.1,
+          0.9
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          -3.585433788802948,
+          3.585433788802948
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.02697671861521345,
+          0.9730232813847866
+         ]
+        },
+        1.0
+       ],
+       [
+        1.0,
+        3.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.5,
+          2.5
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          -4.2312661362287445,
+          4.2312661362287445
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.0143257665391406,
+          0.9856742334608594
+         ]
+        },
+        1.0
+       ]
+      ],
+      "schema": "struct<label:double,weight:double,features:vector,rawPrediction:vector,probability:vector,prediction:double>"
+     }
+    },
+    "probabilityCol": {
+     "call": "summary.probabilityCol",
+     "commands": [
+      "EiYKBwoFPGlkMD4SCQoHc3VtbWFyeRIQCg5wcm9iYWJpbGl0eUNvbA=="
+     ],
+     "results": [
+      "Cg1qC3Byb2JhYmlsaXR5"
+     ],
+     "value": "probability"
+    },
+    "recallByLabel": {
+     "call": "summary.recallByLabel",
+     "commands": [
+      "EiUKBwoFPGlkMD4SCQoHc3VtbWFyeRIPCg1yZWNhbGxCeUxhYmVs"
+     ],
+     "results": [
+      "Ch2yARoKAkoAEglZAAAAAAAA8D8SCVkAAAAAAADwPw=="
+     ],
+     "value": [
+      1.0,
+      1.0
+     ]
+    },
+    "recallByThreshold": {
+     "call": "summary.recallByThreshold",
+     "commands": [
+      "EikKBwoFPGlkMD4SCQoHc3VtbWFyeRITChFyZWNhbGxCeVRocmVzaG9sZBqeAwoAigGYAwqRAwoAGowDCtUCCgC6Ac8CCpgCCgBakwISkAJ7ImZpZWxkcyI6W3sibWV0YWRhdGEiOnt9LCJuYW1lIjoibGFiZWwiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoid2VpZ2h0IiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImZlYXR1cmVzIiwibnVsbGFibGUiOnRydWUsInR5cGUiOnsiY29udGFpbnNOdWxsIjp0cnVlLCJlbGVtZW50VHlwZSI6ImRvdWJsZSIsInR5cGUiOiJhcnJheSJ9fV0sInR5cGUiOiJzdHJ1Y3QifRIyCiYaJAoPYXJyYXlfdG9fdmVjdG9yEhESDAoIZmVhdHVyZXMYAJIBABIIZmVhdHVyZXMaDhIJCgVsYWJlbBgAkgEAGg8SCgoGd2VpZ2h0GACSAQAaERIMCghmZWF0dXJlcxgAkgEAEAEYAA=="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0.0012505315384985227,
+        1.0
+       ],
+       [
+        0.07290283430502509,
+        1.0
+       ],
+       [
+        0.07848476759993372,
+        1.0
+       ],
+       [
+        0.1603233303207251,
+        1.0
+       ],
+       [
+        0.8674106571285319,
+        1.0
+       ],
+       [
+        0.9730232813847866,
+        0.8
+       ],
+       [
+        0.9845302158365564,
+        0.5333333333333333
+       ],
+       [
+        0.9856742334608594,
+        0.4
+       ]
+      ],
+      "schema": "struct<threshold:double,recall:double>"
+     }
+    },
+    "repr()": {
+     "call": "repr(summary)",
+     "commands": [],
+     "results": [],
+     "value": "<pyspark.ml.classification.BinaryLogisticRegressionTrainingSummary object at 0x<addr>>"
+    },
+    "roc": {
+     "call": "summary.roc",
+     "commands": [
+      "EhsKBwoFPGlkMD4SCQoHc3VtbWFyeRIFCgNyb2MangMKAIoBmAMKkQMKABqMAwrVAgoAugHPAgqYAgoAWpMCEpACeyJmaWVsZHMiOlt7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImxhYmVsIiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6IndlaWdodCIsIm51bGxhYmxlIjp0cnVlLCJ0eXBlIjoiZG91YmxlIn0seyJtZXRhZGF0YSI6e30sIm5hbWUiOiJmZWF0dXJlcyIsIm51bGxhYmxlIjp0cnVlLCJ0eXBlIjp7ImNvbnRhaW5zTnVsbCI6dHJ1ZSwiZWxlbWVudFR5cGUiOiJkb3VibGUiLCJ0eXBlIjoiYXJyYXkifX1dLCJ0eXBlIjoic3RydWN0In0SMgomGiQKD2FycmF5X3RvX3ZlY3RvchIREgwKCGZlYXR1cmVzGACSAQASCGZlYXR1cmVzGg4SCQoFbGFiZWwYAJIBABoPEgoKBndlaWdodBgAkgEAGhESDAoIZmVhdHVyZXMYAJIBABABGAA="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0.0,
+        0.0
+       ],
+       [
+        0.0,
+        0.4
+       ],
+       [
+        0.0,
+        0.5333333333333333
+       ],
+       [
+        0.0,
+        0.8
+       ],
+       [
+        0.0,
+        1.0
+       ],
+       [
+        0.1111111111111111,
+        1.0
+       ],
+       [
+        0.5555555555555556,
+        1.0
+       ],
+       [
+        0.7777777777777778,
+        1.0
+       ],
+       [
+        1.0,
+        1.0
+       ],
+       [
+        1.0,
+        1.0
+       ]
+      ],
+      "schema": "struct<FPR:double,TPR:double>"
+     }
+    },
+    "scoreCol": {
+     "call": "summary.scoreCol",
+     "commands": [
+      "EiAKBwoFPGlkMD4SCQoHc3VtbWFyeRIKCghzY29yZUNvbA=="
+     ],
+     "results": [
+      "Cg1qC3Byb2JhYmlsaXR5"
+     ],
+     "value": "probability"
+    },
+    "str()": {
+     "call": "str(summary)",
+     "commands": [],
+     "results": [],
+     "value": "<pyspark.ml.classification.BinaryLogisticRegressionTrainingSummary object at 0x<addr>>"
+    },
+    "totalIterations": {
+     "call": "summary.totalIterations",
+     "commands": [
+      "EicKBwoFPGlkMD4SCQoHc3VtbWFyeRIRCg90b3RhbEl0ZXJhdGlvbnM="
+     ],
+     "results": [
+      "CgIwCg=="
+     ],
+     "value": 10
+    },
+    "truePositiveRateByLabel": {
+     "call": "summary.truePositiveRateByLabel",
+     "commands": [
+      "Ei8KBwoFPGlkMD4SCQoHc3VtbWFyeRIZChd0cnVlUG9zaXRpdmVSYXRlQnlMYWJlbA=="
+     ],
+     "results": [
+      "Ch2yARoKAkoAEglZAAAAAAAA8D8SCVkAAAAAAADwPw=="
+     ],
+     "value": [
+      1.0,
+      1.0
+     ]
+    },
+    "weightCol": {
+     "call": "summary.weightCol",
+     "commands": [
+      "EiEKBwoFPGlkMD4SCQoHc3VtbWFyeRILCgl3ZWlnaHRDb2w="
+     ],
+     "results": [
+      "CghqBndlaWdodA=="
+     ],
+     "value": "weight"
+    },
+    "weightedFMeasure-0.5": {
+     "call": "summary.weightedFMeasure(0.5)",
+     "commands": [
+      "EjUKBwoFPGlkMD4SCQoHc3VtbWFyeRIfChB3ZWlnaHRlZEZNZWFzdXJlEgsKCVkAAAAAAADgPw=="
+     ],
+     "results": [
+      "CglZAAAAAAAA8D8="
+     ],
+     "value": 1.0
+    },
+    "weightedFMeasure-1.0": {
+     "call": "summary.weightedFMeasure(1.0)",
+     "commands": [
+      "EjUKBwoFPGlkMD4SCQoHc3VtbWFyeRIfChB3ZWlnaHRlZEZNZWFzdXJlEgsKCVkAAAAAAADwPw=="
+     ],
+     "results": [
+      "CglZAAAAAAAA8D8="
+     ],
+     "value": 1.0
+    },
+    "weightedFalsePositiveRate": {
+     "call": "summary.weightedFalsePositiveRate",
+     "commands": [
+      "EjEKBwoFPGlkMD4SCQoHc3VtbWFyeRIbChl3ZWlnaHRlZEZhbHNlUG9zaXRpdmVSYXRl"
+     ],
+     "results": [
+      "CglZAAAAAAAAAAA="
+     ],
+     "value": 0.0
+    },
+    "weightedPrecision": {
+     "call": "summary.weightedPrecision",
+     "commands": [
+      "EikKBwoFPGlkMD4SCQoHc3VtbWFyeRITChF3ZWlnaHRlZFByZWNpc2lvbg=="
+     ],
+     "results": [
+      "CglZAAAAAAAA8D8="
+     ],
+     "value": 1.0
+    },
+    "weightedRecall": {
+     "call": "summary.weightedRecall",
+     "commands": [
+      "EiYKBwoFPGlkMD4SCQoHc3VtbWFyeRIQCg53ZWlnaHRlZFJlY2FsbA=="
+     ],
+     "results": [
+      "CglZAAAAAAAA8D8="
+     ],
+     "value": 1.0
+    },
+    "weightedTruePositiveRate": {
+     "call": "summary.weightedTruePositiveRate",
+     "commands": [
+      "EjAKBwoFPGlkMD4SCQoHc3VtbWFyeRIaChh3ZWlnaHRlZFRydWVQb3NpdGl2ZVJhdGU="
+     ],
+     "results": [
+      "CglZAAAAAAAA8D8="
+     ],
+     "value": 1.0
+    }
+   },
+   "skipped": {},
+   "via": {
+    "call": "model.summary",
+    "commands": [],
+    "results": [],
+    "value": {
+     "ref": "<id0>.summary",
+     "type": "BinaryLogisticRegressionTrainingSummary"
+    }
+   }
+  },
+  "LogisticRegression.multinomial.evaluate": {
+   "class": "LogisticRegressionSummary",
+   "members": {
+    "accuracy": {
+     "call": "summary.accuracy",
+     "commands": [
+      "EhUKBwoFPGlkMD4SCgoIYWNjdXJhY3k="
+     ],
+     "results": [
+      "CglZAAAAAAAA8D8="
+     ],
+     "value": 1.0
+    },
+    "fMeasureByLabel-0.5": {
+     "call": "summary.fMeasureByLabel(0.5)",
+     "commands": [
+      "EikKBwoFPGlkMD4SHgoPZk1lYXN1cmVCeUxhYmVsEgsKCVkAAAAAAADgPw=="
+     ],
+     "results": [
+      "CiiyASUKAkoAEglZAAAAAAAA8D8SCVkAAAAAAADwPxIJWQAAAAAAAPA/"
+     ],
+     "value": [
+      1.0,
+      1.0,
+      1.0
+     ]
+    },
+    "fMeasureByLabel-1.0": {
+     "call": "summary.fMeasureByLabel(1.0)",
+     "commands": [
+      "EikKBwoFPGlkMD4SHgoPZk1lYXN1cmVCeUxhYmVsEgsKCVkAAAAAAADwPw=="
+     ],
+     "results": [
+      "CiiyASUKAkoAEglZAAAAAAAA8D8SCVkAAAAAAADwPxIJWQAAAAAAAPA/"
+     ],
+     "value": [
+      1.0,
+      1.0,
+      1.0
+     ]
+    },
+    "falsePositiveRateByLabel": {
+     "call": "summary.falsePositiveRateByLabel",
+     "commands": [
+      "EiUKBwoFPGlkMD4SGgoYZmFsc2VQb3NpdGl2ZVJhdGVCeUxhYmVs"
+     ],
+     "results": [
+      "CiiyASUKAkoAEglZAAAAAAAAAAASCVkAAAAAAAAAABIJWQAAAAAAAAAA"
+     ],
+     "value": [
+      0.0,
+      0.0,
+      0.0
+     ]
+    },
+    "featuresCol": {
+     "call": "summary.featuresCol",
+     "commands": [
+      "EhgKBwoFPGlkMD4SDQoLZmVhdHVyZXNDb2w="
+     ],
+     "results": [
+      "CgpqCGZlYXR1cmVz"
+     ],
+     "value": "features"
+    },
+    "labelCol": {
+     "call": "summary.labelCol",
+     "commands": [
+      "EhUKBwoFPGlkMD4SCgoIbGFiZWxDb2w="
+     ],
+     "results": [
+      "CgdqBWxhYmVs"
+     ],
+     "value": "label"
+    },
+    "labels": {
+     "call": "summary.labels",
+     "commands": [
+      "EhMKBwoFPGlkMD4SCAoGbGFiZWxz"
+     ],
+     "results": [
+      "CiiyASUKAkoAEglZAAAAAAAAAAASCVkAAAAAAADwPxIJWQAAAAAAAABA"
+     ],
+     "value": [
+      0.0,
+      1.0,
+      2.0
+     ]
+    },
+    "precisionByLabel": {
+     "call": "summary.precisionByLabel",
+     "commands": [
+      "Eh0KBwoFPGlkMD4SEgoQcHJlY2lzaW9uQnlMYWJlbA=="
+     ],
+     "results": [
+      "CiiyASUKAkoAEglZAAAAAAAA8D8SCVkAAAAAAADwPxIJWQAAAAAAAPA/"
+     ],
+     "value": [
+      1.0,
+      1.0,
+      1.0
+     ]
+    },
+    "predictionCol": {
+     "call": "summary.predictionCol",
+     "commands": [
+      "EhoKBwoFPGlkMD4SDwoNcHJlZGljdGlvbkNvbA=="
+     ],
+     "results": [
+      "CgxqCnByZWRpY3Rpb24="
+     ],
+     "value": "prediction"
+    },
+    "predictions": {
+     "call": "summary.predictions",
+     "commands": [
+      "EhgKBwoFPGlkMD4SDQoLcHJlZGljdGlvbnM="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0.0,
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.1,
+          0.6
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          2.763002113614642,
+          0.4877419079688764,
+          -3.250744021583519
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          0.9048012663477052,
+          0.0929865741491092,
+          0.0022121595031855098
+         ]
+        },
+        0.0
+       ],
+       [
+        1.0,
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.2,
+          0.1
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          -0.9082098544386459,
+          2.608232127789514,
+          -1.7000222733508679
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          0.028475864024332716,
+          0.9586239151018701,
+          0.012900220873797134
+         ]
+        },
+        1.0
+       ],
+       [
+        1.0,
+        2.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.6,
+          0.6
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          0.964271713504044,
+          1.0852769514028984,
+          -2.0495486649069425
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          0.45919278838978816,
+          0.5182591351379618,
+          0.02254807647225004
+         ]
+        },
+        1.0
+       ],
+       [
+        2.0,
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          2.1,
+          1.8
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          -5.118307276083815,
+          0.9436905834670688,
+          4.174616692616747
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          8.856512033176027e-05,
+          0.03801499491644405,
+          0.9618964399632242
+         ]
+        },
+        2.0
+       ]
+      ],
+      "schema": "struct<label:double,weight:double,features:vector,rawPrediction:vector,probability:vector,prediction:double>"
+     }
+    },
+    "probabilityCol": {
+     "call": "summary.probabilityCol",
+     "commands": [
+      "EhsKBwoFPGlkMD4SEAoOcHJvYmFiaWxpdHlDb2w="
+     ],
+     "results": [
+      "Cg1qC3Byb2JhYmlsaXR5"
+     ],
+     "value": "probability"
+    },
+    "recallByLabel": {
+     "call": "summary.recallByLabel",
+     "commands": [
+      "EhoKBwoFPGlkMD4SDwoNcmVjYWxsQnlMYWJlbA=="
+     ],
+     "results": [
+      "CiiyASUKAkoAEglZAAAAAAAA8D8SCVkAAAAAAADwPxIJWQAAAAAAAPA/"
+     ],
+     "value": [
+      1.0,
+      1.0,
+      1.0
+     ]
+    },
+    "repr()": {
+     "call": "repr(summary)",
+     "commands": [],
+     "results": [],
+     "value": "<pyspark.ml.classification.LogisticRegressionSummary object at 0x<addr>>"
+    },
+    "str()": {
+     "call": "str(summary)",
+     "commands": [],
+     "results": [],
+     "value": "<pyspark.ml.classification.LogisticRegressionSummary object at 0x<addr>>"
+    },
+    "truePositiveRateByLabel": {
+     "call": "summary.truePositiveRateByLabel",
+     "commands": [
+      "EiQKBwoFPGlkMD4SGQoXdHJ1ZVBvc2l0aXZlUmF0ZUJ5TGFiZWw="
+     ],
+     "results": [
+      "CiiyASUKAkoAEglZAAAAAAAA8D8SCVkAAAAAAADwPxIJWQAAAAAAAPA/"
+     ],
+     "value": [
+      1.0,
+      1.0,
+      1.0
+     ]
+    },
+    "weightCol": {
+     "call": "summary.weightCol",
+     "commands": [
+      "EhYKBwoFPGlkMD4SCwoJd2VpZ2h0Q29s"
+     ],
+     "results": [
+      "CghqBndlaWdodA=="
+     ],
+     "value": "weight"
+    },
+    "weightedFMeasure-0.5": {
+     "call": "summary.weightedFMeasure(0.5)",
+     "commands": [
+      "EioKBwoFPGlkMD4SHwoQd2VpZ2h0ZWRGTWVhc3VyZRILCglZAAAAAAAA4D8="
+     ],
+     "results": [
+      "CglZAAAAAAAA8D8="
+     ],
+     "value": 1.0
+    },
+    "weightedFMeasure-1.0": {
+     "call": "summary.weightedFMeasure(1.0)",
+     "commands": [
+      "EioKBwoFPGlkMD4SHwoQd2VpZ2h0ZWRGTWVhc3VyZRILCglZAAAAAAAA8D8="
+     ],
+     "results": [
+      "CglZAAAAAAAA8D8="
+     ],
+     "value": 1.0
+    },
+    "weightedFalsePositiveRate": {
+     "call": "summary.weightedFalsePositiveRate",
+     "commands": [
+      "EiYKBwoFPGlkMD4SGwoZd2VpZ2h0ZWRGYWxzZVBvc2l0aXZlUmF0ZQ=="
+     ],
+     "results": [
+      "CglZAAAAAAAAAAA="
+     ],
+     "value": 0.0
+    },
+    "weightedPrecision": {
+     "call": "summary.weightedPrecision",
+     "commands": [
+      "Eh4KBwoFPGlkMD4SEwoRd2VpZ2h0ZWRQcmVjaXNpb24="
+     ],
+     "results": [
+      "CglZAAAAAAAA8D8="
+     ],
+     "value": 1.0
+    },
+    "weightedRecall": {
+     "call": "summary.weightedRecall",
+     "commands": [
+      "EhsKBwoFPGlkMD4SEAoOd2VpZ2h0ZWRSZWNhbGw="
+     ],
+     "results": [
+      "CglZAAAAAAAA8D8="
+     ],
+     "value": 1.0
+    },
+    "weightedTruePositiveRate": {
+     "call": "summary.weightedTruePositiveRate",
+     "commands": [
+      "EiUKBwoFPGlkMD4SGgoYd2VpZ2h0ZWRUcnVlUG9zaXRpdmVSYXRl"
+     ],
+     "results": [
+      "CglZAAAAAAAA8D8="
+     ],
+     "value": 1.0
+    }
+   },
+   "skipped": {},
+   "via": {
+    "call": "model.evaluate(multi_eval)",
+    "commands": [
+     "EroDCgcKBTxpZDA+Eq4DCghldmFsdWF0ZRKhAxKeAwoAigGYAwqRAwoAGowDCtUCCgC6Ac8CCpgCCgBakwISkAJ7ImZpZWxkcyI6W3sibWV0YWRhdGEiOnt9LCJuYW1lIjoibGFiZWwiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoid2VpZ2h0IiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImZlYXR1cmVzIiwibnVsbGFibGUiOnRydWUsInR5cGUiOnsiY29udGFpbnNOdWxsIjp0cnVlLCJlbGVtZW50VHlwZSI6ImRvdWJsZSIsInR5cGUiOiJhcnJheSJ9fV0sInR5cGUiOiJzdHJ1Y3QifRIyCiYaJAoPYXJyYXlfdG9fdmVjdG9yEhESDAoIZmVhdHVyZXMYAJIBABIIZmVhdHVyZXMaDhIJCgVsYWJlbBgAkgEAGg8SCgoGd2VpZ2h0GACSAQAaERIMCghmZWF0dXJlcxgAkgEAEAEYAA==",
+     "EhcKBwoFPGlkMD4SDAoKbnVtQ2xhc3Nlcw=="
+    ],
+    "results": [
+     "EgU8aWQxPg==",
+     "CgIwAw=="
+    ],
+    "value": {
+     "ref": "<id1>",
+     "type": "LogisticRegressionSummary"
+    }
+   }
+  },
+  "LogisticRegression.multinomial.training": {
+   "class": "LogisticRegressionTrainingSummary",
+   "members": {
+    "accuracy": {
+     "call": "summary.accuracy",
+     "commands": [
+      "EiAKBwoFPGlkMD4SCQoHc3VtbWFyeRIKCghhY2N1cmFjeQ=="
+     ],
+     "results": [
+      "CglZjC666KKL7j8="
+     ],
+     "value": 0.9545454545454546
+    },
+    "fMeasureByLabel-0.5": {
+     "call": "summary.fMeasureByLabel(0.5)",
+     "commands": [
+      "EjQKBwoFPGlkMD4SCQoHc3VtbWFyeRIeCg9mTWVhc3VyZUJ5TGFiZWwSCwoJWQAAAAAAAOA/"
+     ],
+     "results": [
+      "CiiyASUKAkoAEglZnud5nud57j8SCVlYHxrrQ2PtPxIJWQAAAAAAAPA/"
+     ],
+     "value": [
+      0.9523809523809523,
+      0.9183673469387754,
+      1.0
+     ]
+    },
+    "fMeasureByLabel-1.0": {
+     "call": "summary.fMeasureByLabel(1.0)",
+     "commands": [
+      "EjQKBwoFPGlkMD4SCQoHc3VtbWFyeRIeCg9mTWVhc3VyZUJ5TGFiZWwSCwoJWQAAAAAAAPA/"
+     ],
+     "results": [
+      "CiiyASUKAkoAEglZHcdxHMdx7D8SCVkO5TWU11DuPxIJWQAAAAAAAPA/"
+     ],
+     "value": [
+      0.888888888888889,
+      0.9473684210526316,
+      1.0
+     ]
+    },
+    "falsePositiveRateByLabel": {
+     "call": "summary.falsePositiveRateByLabel",
+     "commands": [
+      "EjAKBwoFPGlkMD4SCQoHc3VtbWFyeRIaChhmYWxzZVBvc2l0aXZlUmF0ZUJ5TGFiZWw="
+     ],
+     "results": [
+      "CiiyASUKAkoAEglZAAAAAAAAAAASCVkUO7ETO7GzPxIJWQAAAAAAAAAA"
+     ],
+     "value": [
+      0.0,
+      0.07692307692307693,
+      0.0
+     ]
+    },
+    "featuresCol": {
+     "call": "summary.featuresCol",
+     "commands": [
+      "EiMKBwoFPGlkMD4SCQoHc3VtbWFyeRINCgtmZWF0dXJlc0NvbA=="
+     ],
+     "results": [
+      "CgpqCGZlYXR1cmVz"
+     ],
+     "value": "features"
+    },
+    "labelCol": {
+     "call": "summary.labelCol",
+     "commands": [
+      "EiAKBwoFPGlkMD4SCQoHc3VtbWFyeRIKCghsYWJlbENvbA=="
+     ],
+     "results": [
+      "CgdqBWxhYmVs"
+     ],
+     "value": "label"
+    },
+    "labels": {
+     "call": "summary.labels",
+     "commands": [
+      "Eh4KBwoFPGlkMD4SCQoHc3VtbWFyeRIICgZsYWJlbHM="
+     ],
+     "results": [
+      "CiiyASUKAkoAEglZAAAAAAAAAAASCVkAAAAAAADwPxIJWQAAAAAAAABA"
+     ],
+     "value": [
+      0.0,
+      1.0,
+      2.0
+     ]
+    },
+    "objectiveHistory": {
+     "call": "summary.objectiveHistory",
+     "commands": [
+      "EigKBwoFPGlkMD4SCQoHc3VtbWFyeRISChBvYmplY3RpdmVIaXN0b3J5"
+     ],
+     "results": [
+      "CtkBsgHVAQoCSgASCVm3cUzbpSXxPxIJWdpYWrs5zuI/EglZDPRICV8F2j8SCVmvdDEUgCPSPxIJWXYmMlTGj9A/EglZJmSIqA+Wzj8SCVkgaZJZ7SjOPxIJWfTU8/tm580/EglZQJhwFbxxzT8SCVm2n3WxJA7NPxIJWe6zI0EkB80/EglZElg98w8HzT8SCVnql3LBCgfNPxIJWWACYa4IB80/EglZ6mfveAcHzT8SCVn84dJBBwfNPxIJWY7S0z4HB80/EglZGyXRPgcHzT8SCVmuyM8+BwfNPw=="
+     ],
+     "value": [
+      1.071691376338192,
+      0.587674013065022,
+      0.4065778341935704,
+      0.2834167668532456,
+      0.2587753126359539,
+      0.23895450333728369,
+      0.23562399743679752,
+      0.23362433721891984,
+      0.2300334076582562,
+      0.22699412026417826,
+      0.2267804449142256,
+      0.2267780244534952,
+      0.22677740522084316,
+      0.22677715792271425,
+      0.22677701382673315,
+      0.22677698816347902,
+      0.2267769867682045,
+      0.2267769867633341,
+      0.2267769867608584
+     ]
+    },
+    "precisionByLabel": {
+     "call": "summary.precisionByLabel",
+     "commands": [
+      "EigKBwoFPGlkMD4SCQoHc3VtbWFyeRISChBwcmVjaXNpb25CeUxhYmVs"
+     ],
+     "results": [
+      "CiiyASUKAkoAEglZAAAAAAAA8D8SCVnNzMzMzMzsPxIJWQAAAAAAAPA/"
+     ],
+     "value": [
+      1.0,
+      0.9,
+      1.0
+     ]
+    },
+    "predictionCol": {
+     "call": "summary.predictionCol",
+     "commands": [
+      "EiUKBwoFPGlkMD4SCQoHc3VtbWFyeRIPCg1wcmVkaWN0aW9uQ29s"
+     ],
+     "results": [
+      "CgxqCnByZWRpY3Rpb24="
+     ],
+     "value": "prediction"
+    },
+    "predictions": {
+     "call": "summary.predictions",
+     "commands": [
+      "EiMKBwoFPGlkMD4SCQoHc3VtbWFyeRINCgtwcmVkaWN0aW9ucxqeAwoAigGYAwqRAwoAGowDCtUCCgC6Ac8CCpgCCgBakwISkAJ7ImZpZWxkcyI6W3sibWV0YWRhdGEiOnt9LCJuYW1lIjoibGFiZWwiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoid2VpZ2h0IiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImZlYXR1cmVzIiwibnVsbGFibGUiOnRydWUsInR5cGUiOnsiY29udGFpbnNOdWxsIjp0cnVlLCJlbGVtZW50VHlwZSI6ImRvdWJsZSIsInR5cGUiOiJhcnJheSJ9fV0sInR5cGUiOiJzdHJ1Y3QifRIyCiYaJAoPYXJyYXlfdG9fdmVjdG9yEhESDAoIZmVhdHVyZXMYAJIBABIIZmVhdHVyZXMaDhIJCgVsYWJlbBgAkgEAGg8SCgoGd2VpZ2h0GACSAQAaERIMCghmZWF0dXJlcxgAkgEAEAEYAA=="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0.0,
+        0.5,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.5,
+          0.1
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          1.6100127057161908,
+          1.7716830669818837,
+          -3.381695772698075
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          0.45823912366041925,
+          0.5386475781557678,
+          0.0031132981838129436
+         ]
+        },
+        1.0
+       ],
+       [
+        0.0,
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.0,
+          0.5
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          3.179947176074767,
+          0.5294175241352299,
+          -3.7093647002099974
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          0.9331557950129844,
+          0.0658936789329392,
+          0.0009505260540763733
+         ]
+        },
+        0.0
+       ],
+       [
+        0.0,
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.2,
+          0.9
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          2.2316590862785057,
+          0.1237010420962068,
+          -2.355360128374713
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          0.8836506479487155,
+          0.10735098992104136,
+          0.008998362130243083
+         ]
+        },
+        0.0
+       ],
+       [
+        1.0,
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.1,
+          0.4
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          -0.7200607217305435,
+          2.005177244543236,
+          -1.285116522812693
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          0.05942345002531411,
+          0.906804513766206,
+          0.033772036208480065
+         ]
+        },
+        1.0
+       ],
+       [
+        1.0,
+        1.5,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.9,
+          0.7
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          -0.17216550900032024,
+          1.2826153526101536,
+          -1.1104498436098336
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          0.17621632039165439,
+          0.7548304806259782,
+          0.06895319898236738
+         ]
+        },
+        1.0
+       ],
+       [
+        1.0,
+        2.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.0,
+          0.0
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          -0.13151871195640163,
+          2.5304007352690636,
+          -2.398882023312662
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          0.064819982673698,
+          0.9284656432084384,
+          0.0067143741178636645
+         ]
+        },
+        1.0
+       ],
+       [
+        2.0,
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.7,
+          2.2
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          -3.9081188857473586,
+          -0.1790679506927806,
+          4.08718683644014
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          0.00033226599460581106,
+          0.013835413389632885,
+          0.9858323206157612
+         ]
+        },
+        2.0
+       ],
+       [
+        2.0,
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          2.0,
+          1.5
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          -4.5869642487476785,
+          1.3077314493397385,
+          3.279232799407942
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          0.00033650360766495475,
+          0.12218658837430359,
+          0.8774769080180316
+         ]
+        },
+        2.0
+       ],
+       [
+        2.0,
+        2.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          2.4,
+          2.0
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          -6.311943481026184,
+          0.9798463598211662,
+          5.332097121205021
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          8.65957560273857e-06,
+          0.01271395585849642,
+          0.987277384565901
+         ]
+        },
+        2.0
+       ]
+      ],
+      "schema": "struct<label:double,weight:double,features:vector,rawPrediction:vector,probability:vector,prediction:double>"
+     }
+    },
+    "probabilityCol": {
+     "call": "summary.probabilityCol",
+     "commands": [
+      "EiYKBwoFPGlkMD4SCQoHc3VtbWFyeRIQCg5wcm9iYWJpbGl0eUNvbA=="
+     ],
+     "results": [
+      "Cg1qC3Byb2JhYmlsaXR5"
+     ],
+     "value": "probability"
+    },
+    "recallByLabel": {
+     "call": "summary.recallByLabel",
+     "commands": [
+      "EiUKBwoFPGlkMD4SCQoHc3VtbWFyeRIPCg1yZWNhbGxCeUxhYmVs"
+     ],
+     "results": [
+      "CiiyASUKAkoAEglZmpmZmZmZ6T8SCVkAAAAAAADwPxIJWQAAAAAAAPA/"
+     ],
+     "value": [
+      0.8,
+      1.0,
+      1.0
+     ]
+    },
+    "repr()": {
+     "call": "repr(summary)",
+     "commands": [],
+     "results": [],
+     "value": "<pyspark.ml.classification.LogisticRegressionTrainingSummary object at 0x<addr>>"
+    },
+    "roc-on-multiclass": {
+     "call": "model.summary.roc",
+     "commands": [],
+     "error": {
+      "class": "AttributeError",
+      "condition": null,
+      "message": "'LogisticRegressionTrainingSummary' object has no attribute 'roc'"
+     },
+     "results": []
+    },
+    "str()": {
+     "call": "str(summary)",
+     "commands": [],
+     "results": [],
+     "value": "<pyspark.ml.classification.LogisticRegressionTrainingSummary object at 0x<addr>>"
+    },
+    "totalIterations": {
+     "call": "summary.totalIterations",
+     "commands": [
+      "EicKBwoFPGlkMD4SCQoHc3VtbWFyeRIRCg90b3RhbEl0ZXJhdGlvbnM="
+     ],
+     "results": [
+      "CgIwEg=="
+     ],
+     "value": 18
+    },
+    "truePositiveRateByLabel": {
+     "call": "summary.truePositiveRateByLabel",
+     "commands": [
+      "Ei8KBwoFPGlkMD4SCQoHc3VtbWFyeRIZChd0cnVlUG9zaXRpdmVSYXRlQnlMYWJlbA=="
+     ],
+     "results": [
+      "CiiyASUKAkoAEglZmpmZmZmZ6T8SCVkAAAAAAADwPxIJWQAAAAAAAPA/"
+     ],
+     "value": [
+      0.8,
+      1.0,
+      1.0
+     ]
+    },
+    "weightCol": {
+     "call": "summary.weightCol",
+     "commands": [
+      "EiEKBwoFPGlkMD4SCQoHc3VtbWFyeRILCgl3ZWlnaHRDb2w="
+     ],
+     "results": [
+      "CghqBndlaWdodA=="
+     ],
+     "value": "weight"
+    },
+    "weightedFMeasure-0.5": {
+     "call": "summary.weightedFMeasure(0.5)",
+     "commands": [
+      "EjUKBwoFPGlkMD4SCQoHc3VtbWFyeRIfChB3ZWlnaHRlZEZNZWFzdXJlEgsKCVkAAAAAAADgPw=="
+     ],
+     "results": [
+      "CglZpXsDysSV7j8="
+     ],
+     "value": 0.95578231292517
+    },
+    "weightedFMeasure-1.0": {
+     "call": "summary.weightedFMeasure(1.0)",
+     "commands": [
+      "EjUKBwoFPGlkMD4SCQoHc3VtbWFyeRIfChB3ZWlnaHRlZEZNZWFzdXJlEgsKCVkAAAAAAADwPw=="
+     ],
+     "results": [
+      "CglZDOgvoL+A7j8="
+     ],
+     "value": 0.9532163742690059
+    },
+    "weightedFalsePositiveRate": {
+     "call": "summary.weightedFalsePositiveRate",
+     "commands": [
+      "EjEKBwoFPGlkMD4SCQoHc3VtbWFyeRIbChl3ZWlnaHRlZEZhbHNlUG9zaXRpdmVSYXRl"
+     ],
+     "results": [
+      "CglZ4V4Fs6QcoD8="
+     ],
+     "value": 0.031468531468531465
+    },
+    "weightedPrecision": {
+     "call": "summary.weightedPrecision",
+     "commands": [
+      "EikKBwoFPGlkMD4SCQoHc3VtbWFyeRITChF3ZWlnaHRlZFByZWNpc2lvbg=="
+     ],
+     "results": [
+      "CglZsfYNa9+w7j8="
+     ],
+     "value": 0.9590909090909091
+    },
+    "weightedRecall": {
+     "call": "summary.weightedRecall",
+     "commands": [
+      "EiYKBwoFPGlkMD4SCQoHc3VtbWFyeRIQCg53ZWlnaHRlZFJlY2FsbA=="
+     ],
+     "results": [
+      "CglZjC666KKL7j8="
+     ],
+     "value": 0.9545454545454546
+    },
+    "weightedTruePositiveRate": {
+     "call": "summary.weightedTruePositiveRate",
+     "commands": [
+      "EjAKBwoFPGlkMD4SCQoHc3VtbWFyeRIaChh3ZWlnaHRlZFRydWVQb3NpdGl2ZVJhdGU="
+     ],
+     "results": [
+      "CglZjC666KKL7j8="
+     ],
+     "value": 0.9545454545454546
+    }
+   },
+   "skipped": {},
+   "via": {
+    "call": "model.summary",
+    "commands": [],
+    "results": [],
+    "value": {
+     "ref": "<id0>.summary",
+     "type": "LogisticRegressionTrainingSummary"
+    }
+   }
+  },
+  "MultilayerPerceptronClassifier.evaluate": {
+   "class": "MultilayerPerceptronClassificationSummary",
+   "members": {
+    "accuracy": {
+     "call": "summary.accuracy",
+     "commands": [
+      "EhUKBwoFPGlkMD4SCgoIYWNjdXJhY3k="
+     ],
+     "results": [
+      "CglZAAAAAAAA6D8="
+     ],
+     "value": 0.75
+    },
+    "fMeasureByLabel-0.5": {
+     "call": "summary.fMeasureByLabel(0.5)",
+     "commands": [
+      "EikKBwoFPGlkMD4SHgoPZk1lYXN1cmVCeUxhYmVsEgsKCVkAAAAAAADgPw=="
+     ],
+     "results": [
+      "CiiyASUKAkoAEglZchzHcRzH4T8SCVmrqqqqqqrqPxIJWQAAAAAAAPA/"
+     ],
+     "value": [
+      0.5555555555555556,
+      0.8333333333333334,
+      1.0
+     ]
+    },
+    "fMeasureByLabel-1.0": {
+     "call": "summary.fMeasureByLabel(1.0)",
+     "commands": [
+      "EikKBwoFPGlkMD4SHgoPZk1lYXN1cmVCeUxhYmVsEgsKCVkAAAAAAADwPw=="
+     ],
+     "results": [
+      "CiiyASUKAkoAEglZVVVVVVVV5T8SCVlVVVVVVVXlPxIJWQAAAAAAAPA/"
+     ],
+     "value": [
+      0.6666666666666666,
+      0.6666666666666666,
+      1.0
+     ]
+    },
+    "falsePositiveRateByLabel": {
+     "call": "summary.falsePositiveRateByLabel",
+     "commands": [
+      "EiUKBwoFPGlkMD4SGgoYZmFsc2VQb3NpdGl2ZVJhdGVCeUxhYmVs"
+     ],
+     "results": [
+      "CiiyASUKAkoAEglZVVVVVVVV1T8SCVkAAAAAAAAAABIJWQAAAAAAAAAA"
+     ],
+     "value": [
+      0.3333333333333333,
+      0.0,
+      0.0
+     ]
+    },
+    "labelCol": {
+     "call": "summary.labelCol",
+     "commands": [
+      "EhUKBwoFPGlkMD4SCgoIbGFiZWxDb2w="
+     ],
+     "results": [
+      "CgdqBWxhYmVs"
+     ],
+     "value": "label"
+    },
+    "labels": {
+     "call": "summary.labels",
+     "commands": [
+      "EhMKBwoFPGlkMD4SCAoGbGFiZWxz"
+     ],
+     "results": [
+      "CiiyASUKAkoAEglZAAAAAAAAAAASCVkAAAAAAADwPxIJWQAAAAAAAABA"
+     ],
+     "value": [
+      0.0,
+      1.0,
+      2.0
+     ]
+    },
+    "precisionByLabel": {
+     "call": "summary.precisionByLabel",
+     "commands": [
+      "Eh0KBwoFPGlkMD4SEgoQcHJlY2lzaW9uQnlMYWJlbA=="
+     ],
+     "results": [
+      "CiiyASUKAkoAEglZAAAAAAAA4D8SCVkAAAAAAADwPxIJWQAAAAAAAPA/"
+     ],
+     "value": [
+      0.5,
+      1.0,
+      1.0
+     ]
+    },
+    "predictionCol": {
+     "call": "summary.predictionCol",
+     "commands": [
+      "EhoKBwoFPGlkMD4SDwoNcHJlZGljdGlvbkNvbA=="
+     ],
+     "results": [
+      "CgxqCnByZWRpY3Rpb24="
+     ],
+     "value": "prediction"
+    },
+    "predictions": {
+     "call": "summary.predictions",
+     "commands": [
+      "EhgKBwoFPGlkMD4SDQoLcHJlZGljdGlvbnM="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0.0,
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.1,
+          0.6
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          35.39867272089518,
+          11.534908635582743,
+          -46.20621412007594
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          0.9999999999567388,
+          4.3261237688379044e-11,
+          3.626168230136823e-36
+         ]
+        },
+        0.0
+       ],
+       [
+        1.0,
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.2,
+          0.1
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          -7.901171519496765,
+          14.383858624256403,
+          -5.522889172341569
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          2.0976565304264794e-10,
+          0.9999999975276264,
+          2.2626077909729528e-09
+         ]
+        },
+        1.0
+       ],
+       [
+        1.0,
+        2.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.6,
+          0.6
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          28.409115480951517,
+          15.660284865250592,
+          -42.85049719758432
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          0.9999970942921214,
+          2.905707878581101e-06,
+          1.128085895384777e-31
+         ]
+        },
+        0.0
+       ],
+       [
+        2.0,
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          2.1,
+          1.8
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          -21.89497248193971,
+          0.6151888021563945,
+          21.132046916524683
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          2.0587466332949314e-19,
+          1.2292542950548893e-09,
+          0.9999999987707457
+         ]
+        },
+        2.0
+       ]
+      ],
+      "schema": "struct<label:double,weight:double,features:vector,rawPrediction:vector,probability:vector,prediction:double>"
+     }
+    },
+    "recallByLabel": {
+     "call": "summary.recallByLabel",
+     "commands": [
+      "EhoKBwoFPGlkMD4SDwoNcmVjYWxsQnlMYWJlbA=="
+     ],
+     "results": [
+      "CiiyASUKAkoAEglZAAAAAAAA8D8SCVkAAAAAAADgPxIJWQAAAAAAAPA/"
+     ],
+     "value": [
+      1.0,
+      0.5,
+      1.0
+     ]
+    },
+    "repr()": {
+     "call": "repr(summary)",
+     "commands": [],
+     "results": [],
+     "value": "<pyspark.ml.classification.MultilayerPerceptronClassificationSummary object at 0x<addr>>"
+    },
+    "str()": {
+     "call": "str(summary)",
+     "commands": [],
+     "results": [],
+     "value": "<pyspark.ml.classification.MultilayerPerceptronClassificationSummary object at 0x<addr>>"
+    },
+    "truePositiveRateByLabel": {
+     "call": "summary.truePositiveRateByLabel",
+     "commands": [
+      "EiQKBwoFPGlkMD4SGQoXdHJ1ZVBvc2l0aXZlUmF0ZUJ5TGFiZWw="
+     ],
+     "results": [
+      "CiiyASUKAkoAEglZAAAAAAAA8D8SCVkAAAAAAADgPxIJWQAAAAAAAPA/"
+     ],
+     "value": [
+      1.0,
+      0.5,
+      1.0
+     ]
+    },
+    "weightCol": {
+     "call": "summary.weightCol",
+     "commands": [
+      "EhYKBwoFPGlkMD4SCwoJd2VpZ2h0Q29s"
+     ],
+     "results": [
+      "CgJqAA=="
+     ],
+     "value": ""
+    },
+    "weightedFMeasure-0.5": {
+     "call": "summary.weightedFMeasure(0.5)",
+     "commands": [
+      "EioKBwoFPGlkMD4SHwoQd2VpZ2h0ZWRGTWVhc3VyZRILCglZAAAAAAAA4D8="
+     ],
+     "results": [
+      "CglZchzHcRzH6T8="
+     ],
+     "value": 0.8055555555555556
+    },
+    "weightedFMeasure-1.0": {
+     "call": "summary.weightedFMeasure(1.0)",
+     "commands": [
+      "EioKBwoFPGlkMD4SHwoQd2VpZ2h0ZWRGTWVhc3VyZRILCglZAAAAAAAA8D8="
+     ],
+     "results": [
+      "CglZAAAAAAAA6D8="
+     ],
+     "value": 0.75
+    },
+    "weightedFalsePositiveRate": {
+     "call": "summary.weightedFalsePositiveRate",
+     "commands": [
+      "EiYKBwoFPGlkMD4SGwoZd2VpZ2h0ZWRGYWxzZVBvc2l0aXZlUmF0ZQ=="
+     ],
+     "results": [
+      "CglZVVVVVVVVtT8="
+     ],
+     "value": 0.08333333333333333
+    },
+    "weightedPrecision": {
+     "call": "summary.weightedPrecision",
+     "commands": [
+      "Eh4KBwoFPGlkMD4SEwoRd2VpZ2h0ZWRQcmVjaXNpb24="
+     ],
+     "results": [
+      "CglZAAAAAAAA7D8="
+     ],
+     "value": 0.875
+    },
+    "weightedRecall": {
+     "call": "summary.weightedRecall",
+     "commands": [
+      "EhsKBwoFPGlkMD4SEAoOd2VpZ2h0ZWRSZWNhbGw="
+     ],
+     "results": [
+      "CglZAAAAAAAA6D8="
+     ],
+     "value": 0.75
+    },
+    "weightedTruePositiveRate": {
+     "call": "summary.weightedTruePositiveRate",
+     "commands": [
+      "EiUKBwoFPGlkMD4SGgoYd2VpZ2h0ZWRUcnVlUG9zaXRpdmVSYXRl"
+     ],
+     "results": [
+      "CglZAAAAAAAA6D8="
+     ],
+     "value": 0.75
+    }
+   },
+   "skipped": {},
+   "via": {
+    "call": "model.evaluate(multi_eval)",
+    "commands": [
+     "EroDCgcKBTxpZDA+Eq4DCghldmFsdWF0ZRKhAxKeAwoAigGYAwqRAwoAGowDCtUCCgC6Ac8CCpgCCgBakwISkAJ7ImZpZWxkcyI6W3sibWV0YWRhdGEiOnt9LCJuYW1lIjoibGFiZWwiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoid2VpZ2h0IiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImZlYXR1cmVzIiwibnVsbGFibGUiOnRydWUsInR5cGUiOnsiY29udGFpbnNOdWxsIjp0cnVlLCJlbGVtZW50VHlwZSI6ImRvdWJsZSIsInR5cGUiOiJhcnJheSJ9fV0sInR5cGUiOiJzdHJ1Y3QifRIyCiYaJAoPYXJyYXlfdG9fdmVjdG9yEhESDAoIZmVhdHVyZXMYAJIBABIIZmVhdHVyZXMaDhIJCgVsYWJlbBgAkgEAGg8SCgoGd2VpZ2h0GACSAQAaERIMCghmZWF0dXJlcxgAkgEAEAEYAA=="
+    ],
+    "results": [
+     "EgU8aWQxPg=="
+    ],
+    "value": {
+     "ref": "<id1>",
+     "type": "MultilayerPerceptronClassificationSummary"
+    }
+   }
+  },
+  "MultilayerPerceptronClassifier.training": {
+   "class": "MultilayerPerceptronClassificationTrainingSummary",
+   "members": {
+    "accuracy": {
+     "call": "summary.accuracy",
+     "commands": [
+      "EiAKBwoFPGlkMD4SCQoHc3VtbWFyeRIKCghhY2N1cmFjeQ=="
+     ],
+     "results": [
+      "CglZAAAAAAAA8D8="
+     ],
+     "value": 1.0
+    },
+    "fMeasureByLabel-0.5": {
+     "call": "summary.fMeasureByLabel(0.5)",
+     "commands": [
+      "EjQKBwoFPGlkMD4SCQoHc3VtbWFyeRIeCg9mTWVhc3VyZUJ5TGFiZWwSCwoJWQAAAAAAAOA/"
+     ],
+     "results": [
+      "CiiyASUKAkoAEglZAAAAAAAA8D8SCVkAAAAAAADwPxIJWQAAAAAAAPA/"
+     ],
+     "value": [
+      1.0,
+      1.0,
+      1.0
+     ]
+    },
+    "fMeasureByLabel-1.0": {
+     "call": "summary.fMeasureByLabel(1.0)",
+     "commands": [
+      "EjQKBwoFPGlkMD4SCQoHc3VtbWFyeRIeCg9mTWVhc3VyZUJ5TGFiZWwSCwoJWQAAAAAAAPA/"
+     ],
+     "results": [
+      "CiiyASUKAkoAEglZAAAAAAAA8D8SCVkAAAAAAADwPxIJWQAAAAAAAPA/"
+     ],
+     "value": [
+      1.0,
+      1.0,
+      1.0
+     ]
+    },
+    "falsePositiveRateByLabel": {
+     "call": "summary.falsePositiveRateByLabel",
+     "commands": [
+      "EjAKBwoFPGlkMD4SCQoHc3VtbWFyeRIaChhmYWxzZVBvc2l0aXZlUmF0ZUJ5TGFiZWw="
+     ],
+     "results": [
+      "CiiyASUKAkoAEglZAAAAAAAAAAASCVkAAAAAAAAAABIJWQAAAAAAAAAA"
+     ],
+     "value": [
+      0.0,
+      0.0,
+      0.0
+     ]
+    },
+    "labelCol": {
+     "call": "summary.labelCol",
+     "commands": [
+      "EiAKBwoFPGlkMD4SCQoHc3VtbWFyeRIKCghsYWJlbENvbA=="
+     ],
+     "results": [
+      "CgdqBWxhYmVs"
+     ],
+     "value": "label"
+    },
+    "labels": {
+     "call": "summary.labels",
+     "commands": [
+      "Eh4KBwoFPGlkMD4SCQoHc3VtbWFyeRIICgZsYWJlbHM="
+     ],
+     "results": [
+      "CiiyASUKAkoAEglZAAAAAAAAAAASCVkAAAAAAADwPxIJWQAAAAAAAABA"
+     ],
+     "value": [
+      0.0,
+      1.0,
+      2.0
+     ]
+    },
+    "objectiveHistory": {
+     "call": "summary.objectiveHistory",
+     "commands": [
+      "EigKBwoFPGlkMD4SCQoHc3VtbWFyeRISChBvYmplY3RpdmVIaXN0b3J5"
+     ],
+     "results": [
+      "Ct0CsgHZAgoCSgASCVkolQLI5qLxPxIJWTPWouS4XPA/EglZvfxFinNV7z8SCVn3KIdF8PPiPxIJWVWGUu/fxdQ/EglZVTlBWc2azD8SCVnRYW83GBLAPxIJWQ1XqOxWjbA/EglZ/AAcjLUwlj8SCVmZn4aJkr6CPxIJWZ9s8cfNXnE/EglZ//6Axl0tYT8SCVm56wmvBsxQPxIJWa8uIQv0cUA/EglZCcgbvde5Lz8SCVkY8Wy0sNkkPxIJWa7b1OkSqRA/EglZ4ex8bub2Az8SCVkzNgMahOzyPhIJWZe3qc07fOM+EglZZTjI3FE63D4SCVkV4sNXpmTLPhIJWaA4dSeBRrw+EglZ4MbnlIktrD4SCVnsycF4plWcPhIJWSC7OcOYeIw+EglZzdNw9vkLeD4SCVkrOh3+EE1tPhIJWQHRUgBmn1o+EglZG4kKUU9CTT4SCVlzf2Kza2w8Pg=="
+     ],
+     "value": [
+      1.1022708714384155,
+      1.0226372653099929,
+      0.9791810703899483,
+      0.5922776563614026,
+      0.3245773160107082,
+      0.22347418649810416,
+      0.12555220324317287,
+      0.06465667035839946,
+      0.02167018573436595,
+      0.00915255052753121,
+      0.004240802604807885,
+      0.0020968276549239158,
+      0.0010252061148594406,
+      0.0005018655413179996,
+      0.0002420497754012654,
+      0.00015907556572781405,
+      6.355455339677907e-05,
+      3.807917329231594e-05,
+      1.804722853720169e-05,
+      9.291309131156072e-06,
+      6.730034737957318e-06,
+      3.2655195224518855e-06,
+      1.6853456637658414e-06,
+      8.397662812338395e-07,
+      4.2221801588925286e-07,
+      2.1212608346555208e-07,
+      8.958124696272925e-08,
+      5.4577441023680875e-08,
+      2.4794275095468923e-08,
+      1.3624794210663609e-08,
+      6.617866079927054e-09
+     ]
+    },
+    "precisionByLabel": {
+     "call": "summary.precisionByLabel",
+     "commands": [
+      "EigKBwoFPGlkMD4SCQoHc3VtbWFyeRISChBwcmVjaXNpb25CeUxhYmVs"
+     ],
+     "results": [
+      "CiiyASUKAkoAEglZAAAAAAAA8D8SCVkAAAAAAADwPxIJWQAAAAAAAPA/"
+     ],
+     "value": [
+      1.0,
+      1.0,
+      1.0
+     ]
+    },
+    "predictionCol": {
+     "call": "summary.predictionCol",
+     "commands": [
+      "EiUKBwoFPGlkMD4SCQoHc3VtbWFyeRIPCg1wcmVkaWN0aW9uQ29s"
+     ],
+     "results": [
+      "CgxqCnByZWRpY3Rpb24="
+     ],
+     "value": "prediction"
+    },
+    "predictions": {
+     "call": "summary.predictions",
+     "commands": [
+      "EiMKBwoFPGlkMD4SCQoHc3VtbWFyeRINCgtwcmVkaWN0aW9ucxqeAwoAigGYAwqRAwoAGowDCtUCCgC6Ac8CCpgCCgBakwISkAJ7ImZpZWxkcyI6W3sibWV0YWRhdGEiOnt9LCJuYW1lIjoibGFiZWwiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoid2VpZ2h0IiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImZlYXR1cmVzIiwibnVsbGFibGUiOnRydWUsInR5cGUiOnsiY29udGFpbnNOdWxsIjp0cnVlLCJlbGVtZW50VHlwZSI6ImRvdWJsZSIsInR5cGUiOiJhcnJheSJ9fV0sInR5cGUiOiJzdHJ1Y3QifRIyCiYaJAoPYXJyYXlfdG9fdmVjdG9yEhESDAoIZmVhdHVyZXMYAJIBABIIZmVhdHVyZXMaDhIJCgVsYWJlbBgAkgEAGg8SCgoGd2VpZ2h0GACSAQAaERIMCghmZWF0dXJlcxgAkgEAEAEYAA=="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0.0,
+        0.5,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.5,
+          0.1
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          33.20025381749978,
+          16.155611865675528,
+          -48.2894741807351
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          0.999999960408128,
+          3.959187203413961e-08,
+          4.0687478963922875e-36
+         ]
+        },
+        0.0
+       ],
+       [
+        0.0,
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.0,
+          0.5
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          35.41982500596575,
+          13.225694126046024,
+          -47.84525767581313
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          0.9999999997702733,
+          2.297266757103476e-10,
+          6.8934091452444255e-37
+         ]
+        },
+        0.0
+       ],
+       [
+        0.0,
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.2,
+          0.9
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          35.004043384154,
+          9.276133135321812,
+          -43.63531178503099
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          0.9999999999932934,
+          6.7067257561895175e-12,
+          7.036585832773691e-35
+         ]
+        },
+        0.0
+       ],
+       [
+        1.0,
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.1,
+          0.4
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          -8.049010751528025,
+          14.24197975892518,
+          -5.258211503648975
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          2.0851909126541863e-10,
+          0.9999999963938628,
+          3.397617907944657e-09
+         ]
+        },
+        1.0
+       ],
+       [
+        1.0,
+        1.5,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.9,
+          0.7
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          -3.213380024013185,
+          15.357668343071149,
+          -11.09609068119278
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          8.603916110113484e-09,
+          0.9999999913928385,
+          3.245476183200067e-12
+         ]
+        },
+        1.0
+       ],
+       [
+        1.0,
+        2.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.0,
+          0.0
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          0.08472332874741184,
+          17.882960932114262,
+          -16.68900477158354
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          1.863475182097581e-08,
+          0.9999999813652473,
+          9.673553953475422e-16
+         ]
+        },
+        1.0
+       ],
+       [
+        2.0,
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.7,
+          2.2
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          -21.85985173029793,
+          0.6288985027212977,
+          21.084970042604603
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          2.2351201671393075e-19,
+          1.306294229101262e-09,
+          0.9999999986937058
+         ]
+        },
+        2.0
+       ],
+       [
+        2.0,
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          2.0,
+          1.5
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          -21.897419922605508,
+          0.9409648559316472,
+          20.82508125848397
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          2.7916018852299054e-19,
+          2.3143975870075923e-09,
+          0.9999999976856024
+         ]
+        },
+        2.0
+       ],
+       [
+        2.0,
+        2.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          2.4,
+          2.0
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          -21.905231120207812,
+          0.6072728020051681,
+          21.149500520127276
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          2.0024774227266333e-19,
+          1.1984608609052414e-09,
+          0.9999999988015391
+         ]
+        },
+        2.0
+       ]
+      ],
+      "schema": "struct<label:double,weight:double,features:vector,rawPrediction:vector,probability:vector,prediction:double>"
+     }
+    },
+    "recallByLabel": {
+     "call": "summary.recallByLabel",
+     "commands": [
+      "EiUKBwoFPGlkMD4SCQoHc3VtbWFyeRIPCg1yZWNhbGxCeUxhYmVs"
+     ],
+     "results": [
+      "CiiyASUKAkoAEglZAAAAAAAA8D8SCVkAAAAAAADwPxIJWQAAAAAAAPA/"
+     ],
+     "value": [
+      1.0,
+      1.0,
+      1.0
+     ]
+    },
+    "repr()": {
+     "call": "repr(summary)",
+     "commands": [],
+     "results": [],
+     "value": "<pyspark.ml.classification.MultilayerPerceptronClassificationTrainingSummary object at 0x<addr>>"
+    },
+    "str()": {
+     "call": "str(summary)",
+     "commands": [],
+     "results": [],
+     "value": "<pyspark.ml.classification.MultilayerPerceptronClassificationTrainingSummary object at 0x<addr>>"
+    },
+    "totalIterations": {
+     "call": "summary.totalIterations",
+     "commands": [
+      "EicKBwoFPGlkMD4SCQoHc3VtbWFyeRIRCg90b3RhbEl0ZXJhdGlvbnM="
+     ],
+     "results": [
+      "CgIwHg=="
+     ],
+     "value": 30
+    },
+    "truePositiveRateByLabel": {
+     "call": "summary.truePositiveRateByLabel",
+     "commands": [
+      "Ei8KBwoFPGlkMD4SCQoHc3VtbWFyeRIZChd0cnVlUG9zaXRpdmVSYXRlQnlMYWJlbA=="
+     ],
+     "results": [
+      "CiiyASUKAkoAEglZAAAAAAAA8D8SCVkAAAAAAADwPxIJWQAAAAAAAPA/"
+     ],
+     "value": [
+      1.0,
+      1.0,
+      1.0
+     ]
+    },
+    "weightCol": {
+     "call": "summary.weightCol",
+     "commands": [
+      "EiEKBwoFPGlkMD4SCQoHc3VtbWFyeRILCgl3ZWlnaHRDb2w="
+     ],
+     "results": [
+      "CgJqAA=="
+     ],
+     "value": ""
+    },
+    "weightedFMeasure-0.5": {
+     "call": "summary.weightedFMeasure(0.5)",
+     "commands": [
+      "EjUKBwoFPGlkMD4SCQoHc3VtbWFyeRIfChB3ZWlnaHRlZEZNZWFzdXJlEgsKCVkAAAAAAADgPw=="
+     ],
+     "results": [
+      "CglZAAAAAAAA8D8="
+     ],
+     "value": 1.0
+    },
+    "weightedFMeasure-1.0": {
+     "call": "summary.weightedFMeasure(1.0)",
+     "commands": [
+      "EjUKBwoFPGlkMD4SCQoHc3VtbWFyeRIfChB3ZWlnaHRlZEZNZWFzdXJlEgsKCVkAAAAAAADwPw=="
+     ],
+     "results": [
+      "CglZAAAAAAAA8D8="
+     ],
+     "value": 1.0
+    },
+    "weightedFalsePositiveRate": {
+     "call": "summary.weightedFalsePositiveRate",
+     "commands": [
+      "EjEKBwoFPGlkMD4SCQoHc3VtbWFyeRIbChl3ZWlnaHRlZEZhbHNlUG9zaXRpdmVSYXRl"
+     ],
+     "results": [
+      "CglZAAAAAAAAAAA="
+     ],
+     "value": 0.0
+    },
+    "weightedPrecision": {
+     "call": "summary.weightedPrecision",
+     "commands": [
+      "EikKBwoFPGlkMD4SCQoHc3VtbWFyeRITChF3ZWlnaHRlZFByZWNpc2lvbg=="
+     ],
+     "results": [
+      "CglZAAAAAAAA8D8="
+     ],
+     "value": 1.0
+    },
+    "weightedRecall": {
+     "call": "summary.weightedRecall",
+     "commands": [
+      "EiYKBwoFPGlkMD4SCQoHc3VtbWFyeRIQCg53ZWlnaHRlZFJlY2FsbA=="
+     ],
+     "results": [
+      "CglZAAAAAAAA8D8="
+     ],
+     "value": 1.0
+    },
+    "weightedTruePositiveRate": {
+     "call": "summary.weightedTruePositiveRate",
+     "commands": [
+      "EjAKBwoFPGlkMD4SCQoHc3VtbWFyeRIaChh3ZWlnaHRlZFRydWVQb3NpdGl2ZVJhdGU="
+     ],
+     "results": [
+      "CglZAAAAAAAA8D8="
+     ],
+     "value": 1.0
+    }
+   },
+   "skipped": {},
+   "via": {
+    "call": "model.summary()",
+    "commands": [],
+    "results": [],
+    "value": {
+     "ref": "<id0>.summary",
+     "type": "MultilayerPerceptronClassificationTrainingSummary"
+    }
+   }
+  },
+  "RandomForestClassifier.binary.evaluate": {
+   "class": "BinaryRandomForestClassificationSummary",
+   "members": {
+    "accuracy": {
+     "call": "summary.accuracy",
+     "commands": [
+      "EhUKBwoFPGlkMD4SCgoIYWNjdXJhY3k="
+     ],
+     "results": [
+      "CglZMzMzMzMz4z8="
+     ],
+     "value": 0.6
+    },
+    "areaUnderROC": {
+     "call": "summary.areaUnderROC",
+     "commands": [
+      "EhkKBwoFPGlkMD4SDgoMYXJlYVVuZGVyUk9D"
+     ],
+     "results": [
+      "CglZAAAAAAAA8D8="
+     ],
+     "value": 1.0
+    },
+    "fMeasureByLabel-0.5": {
+     "call": "summary.fMeasureByLabel(0.5)",
+     "commands": [
+      "EikKBwoFPGlkMD4SHgoPZk1lYXN1cmVCeUxhYmVsEgsKCVkAAAAAAADgPw=="
+     ],
+     "results": [
+      "Ch2yARoKAkoAEglZchzHcRzH4T8SCVm3bdu2bdvmPw=="
+     ],
+     "value": [
+      0.5555555555555556,
+      0.7142857142857143
+     ]
+    },
+    "fMeasureByLabel-1.0": {
+     "call": "summary.fMeasureByLabel(1.0)",
+     "commands": [
+      "EikKBwoFPGlkMD4SHgoPZk1lYXN1cmVCeUxhYmVsEgsKCVkAAAAAAADwPw=="
+     ],
+     "results": [
+      "Ch2yARoKAkoAEglZVVVVVVVV5T8SCVkAAAAAAADgPw=="
+     ],
+     "value": [
+      0.6666666666666666,
+      0.5
+     ]
+    },
+    "fMeasureByThreshold": {
+     "call": "summary.fMeasureByThreshold",
+     "commands": [
+      "EiAKBwoFPGlkMD4SFQoTZk1lYXN1cmVCeVRocmVzaG9sZA=="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0.0,
+        0.7499999999999999
+       ],
+       [
+        0.3333333333333333,
+        1.0
+       ],
+       [
+        1.0,
+        0.5
+       ]
+      ],
+      "schema": "struct<threshold:double,F-Measure:double>"
+     }
+    },
+    "falsePositiveRateByLabel": {
+     "call": "summary.falsePositiveRateByLabel",
+     "commands": [
+      "EiUKBwoFPGlkMD4SGgoYZmFsc2VQb3NpdGl2ZVJhdGVCeUxhYmVs"
+     ],
+     "results": [
+      "Ch2yARoKAkoAEglZVVVVVVVV5T8SCVkAAAAAAAAAAA=="
+     ],
+     "value": [
+      0.6666666666666666,
+      0.0
+     ]
+    },
+    "labelCol": {
+     "call": "summary.labelCol",
+     "commands": [
+      "EhUKBwoFPGlkMD4SCgoIbGFiZWxDb2w="
+     ],
+     "results": [
+      "CgdqBWxhYmVs"
+     ],
+     "value": "label"
+    },
+    "labels": {
+     "call": "summary.labels",
+     "commands": [
+      "EhMKBwoFPGlkMD4SCAoGbGFiZWxz"
+     ],
+     "results": [
+      "Ch2yARoKAkoAEglZAAAAAAAAAAASCVkAAAAAAADwPw=="
+     ],
+     "value": [
+      0.0,
+      1.0
+     ]
+    },
+    "pr": {
+     "call": "summary.pr",
+     "commands": [
+      "Eg8KBwoFPGlkMD4SBAoCcHI="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0.0,
+        1.0
+       ],
+       [
+        0.3333333333333333,
+        1.0
+       ],
+       [
+        1.0,
+        0.6
+       ],
+       [
+        1.0,
+        1.0
+       ]
+      ],
+      "schema": "struct<recall:double,precision:double>"
+     }
+    },
+    "precisionByLabel": {
+     "call": "summary.precisionByLabel",
+     "commands": [
+      "Eh0KBwoFPGlkMD4SEgoQcHJlY2lzaW9uQnlMYWJlbA=="
+     ],
+     "results": [
+      "Ch2yARoKAkoAEglZAAAAAAAA4D8SCVkAAAAAAADwPw=="
+     ],
+     "value": [
+      0.5,
+      1.0
+     ]
+    },
+    "precisionByThreshold": {
+     "call": "summary.precisionByThreshold",
+     "commands": [
+      "EiEKBwoFPGlkMD4SFgoUcHJlY2lzaW9uQnlUaHJlc2hvbGQ="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0.0,
+        0.6
+       ],
+       [
+        0.3333333333333333,
+        1.0
+       ],
+       [
+        1.0,
+        1.0
+       ]
+      ],
+      "schema": "struct<threshold:double,precision:double>"
+     }
+    },
+    "predictionCol": {
+     "call": "summary.predictionCol",
+     "commands": [
+      "EhoKBwoFPGlkMD4SDwoNcHJlZGljdGlvbkNvbA=="
+     ],
+     "results": [
+      "CgxqCnByZWRpY3Rpb24="
+     ],
+     "value": "prediction"
+    },
+    "predictions": {
+     "call": "summary.predictions",
+     "commands": [
+      "EhgKBwoFPGlkMD4SDQoLcHJlZGljdGlvbnM="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0.0,
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          2.2,
+          0.6
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          3.0,
+          0.0
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.0,
+          0.0
+         ]
+        },
+        0.0
+       ],
+       [
+        0.0,
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          2.9,
+          2.1
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          3.0,
+          0.0
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.0,
+          0.0
+         ]
+        },
+        0.0
+       ],
+       [
+        1.0,
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.2,
+          1.0
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.0,
+          3.0
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.0,
+          1.0
+         ]
+        },
+        1.0
+       ],
+       [
+        1.0,
+        2.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.8,
+          2.2
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          2.0,
+          1.0
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.6666666666666666,
+          0.3333333333333333
+         ]
+        },
+        0.0
+       ]
+      ],
+      "schema": "struct<label:double,weight:double,features:vector,rawPrediction:vector,probability:vector,prediction:double>"
+     }
+    },
+    "recallByLabel": {
+     "call": "summary.recallByLabel",
+     "commands": [
+      "EhoKBwoFPGlkMD4SDwoNcmVjYWxsQnlMYWJlbA=="
+     ],
+     "results": [
+      "Ch2yARoKAkoAEglZAAAAAAAA8D8SCVlVVVVVVVXVPw=="
+     ],
+     "value": [
+      1.0,
+      0.3333333333333333
+     ]
+    },
+    "recallByThreshold": {
+     "call": "summary.recallByThreshold",
+     "commands": [
+      "Eh4KBwoFPGlkMD4SEwoRcmVjYWxsQnlUaHJlc2hvbGQ="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0.0,
+        1.0
+       ],
+       [
+        0.3333333333333333,
+        1.0
+       ],
+       [
+        1.0,
+        0.3333333333333333
+       ]
+      ],
+      "schema": "struct<threshold:double,recall:double>"
+     }
+    },
+    "repr()": {
+     "call": "repr(summary)",
+     "commands": [],
+     "results": [],
+     "value": "<pyspark.ml.classification.BinaryRandomForestClassificationSummary object at 0x<addr>>"
+    },
+    "roc": {
+     "call": "summary.roc",
+     "commands": [
+      "EhAKBwoFPGlkMD4SBQoDcm9j"
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0.0,
+        0.0
+       ],
+       [
+        0.0,
+        0.3333333333333333
+       ],
+       [
+        0.0,
+        1.0
+       ],
+       [
+        1.0,
+        1.0
+       ],
+       [
+        1.0,
+        1.0
+       ]
+      ],
+      "schema": "struct<FPR:double,TPR:double>"
+     }
+    },
+    "scoreCol": {
+     "call": "summary.scoreCol",
+     "commands": [
+      "EhUKBwoFPGlkMD4SCgoIc2NvcmVDb2w="
+     ],
+     "results": [
+      "Cg1qC3Byb2JhYmlsaXR5"
+     ],
+     "value": "probability"
+    },
+    "str()": {
+     "call": "str(summary)",
+     "commands": [],
+     "results": [],
+     "value": "<pyspark.ml.classification.BinaryRandomForestClassificationSummary object at 0x<addr>>"
+    },
+    "truePositiveRateByLabel": {
+     "call": "summary.truePositiveRateByLabel",
+     "commands": [
+      "EiQKBwoFPGlkMD4SGQoXdHJ1ZVBvc2l0aXZlUmF0ZUJ5TGFiZWw="
+     ],
+     "results": [
+      "Ch2yARoKAkoAEglZAAAAAAAA8D8SCVlVVVVVVVXVPw=="
+     ],
+     "value": [
+      1.0,
+      0.3333333333333333
+     ]
+    },
+    "weightCol": {
+     "call": "summary.weightCol",
+     "commands": [
+      "EhYKBwoFPGlkMD4SCwoJd2VpZ2h0Q29s"
+     ],
+     "results": [
+      "CghqBndlaWdodA=="
+     ],
+     "value": "weight"
+    },
+    "weightedFMeasure-0.5": {
+     "call": "summary.weightedFMeasure(0.5)",
+     "commands": [
+      "EioKBwoFPGlkMD4SHwoQd2VpZ2h0ZWRGTWVhc3VyZRILCglZAAAAAAAA4D8="
+     ],
+     "results": [
+      "CglZNU3TNE3T5D8="
+     ],
+     "value": 0.6507936507936508
+    },
+    "weightedFMeasure-1.0": {
+     "call": "summary.weightedFMeasure(1.0)",
+     "commands": [
+      "EioKBwoFPGlkMD4SHwoQd2VpZ2h0ZWRGTWVhc3VyZRILCglZAAAAAAAA8D8="
+     ],
+     "results": [
+      "CglZIiIiIiIi4j8="
+     ],
+     "value": 0.5666666666666667
+    },
+    "weightedFalsePositiveRate": {
+     "call": "summary.weightedFalsePositiveRate",
+     "commands": [
+      "EiYKBwoFPGlkMD4SGwoZd2VpZ2h0ZWRGYWxzZVBvc2l0aXZlUmF0ZQ=="
+     ],
+     "results": [
+      "CglZERERERER0T8="
+     ],
+     "value": 0.26666666666666666
+    },
+    "weightedPrecision": {
+     "call": "summary.weightedPrecision",
+     "commands": [
+      "Eh4KBwoFPGlkMD4SEwoRd2VpZ2h0ZWRQcmVjaXNpb24="
+     ],
+     "results": [
+      "CglZmpmZmZmZ6T8="
+     ],
+     "value": 0.8
+    },
+    "weightedRecall": {
+     "call": "summary.weightedRecall",
+     "commands": [
+      "EhsKBwoFPGlkMD4SEAoOd2VpZ2h0ZWRSZWNhbGw="
+     ],
+     "results": [
+      "CglZNDMzMzMz4z8="
+     ],
+     "value": 0.6000000000000001
+    },
+    "weightedTruePositiveRate": {
+     "call": "summary.weightedTruePositiveRate",
+     "commands": [
+      "EiUKBwoFPGlkMD4SGgoYd2VpZ2h0ZWRUcnVlUG9zaXRpdmVSYXRl"
+     ],
+     "results": [
+      "CglZNDMzMzMz4z8="
+     ],
+     "value": 0.6000000000000001
+    }
+   },
+   "skipped": {},
+   "via": {
+    "call": "model.evaluate(binary_eval)",
+    "commands": [
+     "EroDCgcKBTxpZDA+Eq4DCghldmFsdWF0ZRKhAxKeAwoAigGYAwqRAwoAGowDCtUCCgC6Ac8CCpgCCgBakwISkAJ7ImZpZWxkcyI6W3sibWV0YWRhdGEiOnt9LCJuYW1lIjoibGFiZWwiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoid2VpZ2h0IiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImZlYXR1cmVzIiwibnVsbGFibGUiOnRydWUsInR5cGUiOnsiY29udGFpbnNOdWxsIjp0cnVlLCJlbGVtZW50VHlwZSI6ImRvdWJsZSIsInR5cGUiOiJhcnJheSJ9fV0sInR5cGUiOiJzdHJ1Y3QifRIyCiYaJAoPYXJyYXlfdG9fdmVjdG9yEhESDAoIZmVhdHVyZXMYAJIBABIIZmVhdHVyZXMaDhIJCgVsYWJlbBgAkgEAGg8SCgoGd2VpZ2h0GACSAQAaERIMCghmZWF0dXJlcxgAkgEAEAEYAA==",
+     "EhcKBwoFPGlkMD4SDAoKbnVtQ2xhc3Nlcw=="
+    ],
+    "results": [
+     "EgU8aWQxPg==",
+     "CgIwAg=="
+    ],
+    "value": {
+     "ref": "<id1>",
+     "type": "BinaryRandomForestClassificationSummary"
+    }
+   }
+  },
+  "RandomForestClassifier.binary.training": {
+   "class": "BinaryRandomForestClassificationTrainingSummary",
+   "members": {
+    "accuracy": {
+     "call": "summary.accuracy",
+     "commands": [
+      "EiAKBwoFPGlkMD4SCQoHc3VtbWFyeRIKCghhY2N1cmFjeQ=="
+     ],
+     "results": [
+      "CglZAAAAAAAA7D8="
+     ],
+     "value": 0.875
+    },
+    "areaUnderROC": {
+     "call": "summary.areaUnderROC",
+     "commands": [
+      "EiQKBwoFPGlkMD4SCQoHc3VtbWFyeRIOCgxhcmVhVW5kZXJST0M="
+     ],
+     "results": [
+      "CglZAAAAAAAA8D8="
+     ],
+     "value": 1.0
+    },
+    "fMeasureByLabel-0.5": {
+     "call": "summary.fMeasureByLabel(0.5)",
+     "commands": [
+      "EjQKBwoFPGlkMD4SCQoHc3VtbWFyeRIeCg9mTWVhc3VyZUJ5TGFiZWwSCwoJWQAAAAAAAOA/"
+     ],
+     "results": [
+      "Ch2yARoKAkoAEglZNpTXUF5D6T8SCVme53me53nuPw=="
+     ],
+     "value": [
+      0.7894736842105263,
+      0.9523809523809523
+     ]
+    },
+    "fMeasureByLabel-1.0": {
+     "call": "summary.fMeasureByLabel(1.0)",
+     "commands": [
+      "EjQKBwoFPGlkMD4SCQoHc3VtbWFyeRIeCg9mTWVhc3VyZUJ5TGFiZWwSCwoJWQAAAAAAAPA/"
+     ],
+     "results": [
+      "Ch2yARoKAkoAEglZ27Zt27Zt6z8SCVkdx3Ecx3HsPw=="
+     ],
+     "value": [
+      0.8571428571428571,
+      0.888888888888889
+     ]
+    },
+    "fMeasureByThreshold": {
+     "call": "summary.fMeasureByThreshold",
+     "commands": [
+      "EisKBwoFPGlkMD4SCQoHc3VtbWFyeRIVChNmTWVhc3VyZUJ5VGhyZXNob2xkGp4DCgCKAZgDCpEDCgAajAMK1QIKALoBzwIKmAIKAFqTAhKQAnsiZmllbGRzIjpbeyJtZXRhZGF0YSI6e30sIm5hbWUiOiJsYWJlbCIsIm51bGxhYmxlIjp0cnVlLCJ0eXBlIjoiZG91YmxlIn0seyJtZXRhZGF0YSI6e30sIm5hbWUiOiJ3ZWlnaHQiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoiZmVhdHVyZXMiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6eyJjb250YWluc051bGwiOnRydWUsImVsZW1lbnRUeXBlIjoiZG91YmxlIiwidHlwZSI6ImFycmF5In19XSwidHlwZSI6InN0cnVjdCJ9EjIKJhokCg9hcnJheV90b192ZWN0b3ISERIMCghmZWF0dXJlcxgAkgEAEghmZWF0dXJlcxoOEgkKBWxhYmVsGACSAQAaDxIKCgZ3ZWlnaHQYAJIBABoREgwKCGZlYXR1cmVzGACSAQAQARgA"
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0.0,
+        0.7692307692307693
+       ],
+       [
+        0.3333333333333333,
+        1.0
+       ],
+       [
+        0.6666666666666666,
+        0.888888888888889
+       ],
+       [
+        1.0,
+        0.5714285714285715
+       ]
+      ],
+      "schema": "struct<threshold:double,F-Measure:double>"
+     }
+    },
+    "falsePositiveRateByLabel": {
+     "call": "summary.falsePositiveRateByLabel",
+     "commands": [
+      "EjAKBwoFPGlkMD4SCQoHc3VtbWFyeRIaChhmYWxzZVBvc2l0aXZlUmF0ZUJ5TGFiZWw="
+     ],
+     "results": [
+      "Ch2yARoKAkoAEglZmpmZmZmZyT8SCVkAAAAAAAAAAA=="
+     ],
+     "value": [
+      0.2,
+      0.0
+     ]
+    },
+    "labelCol": {
+     "call": "summary.labelCol",
+     "commands": [
+      "EiAKBwoFPGlkMD4SCQoHc3VtbWFyeRIKCghsYWJlbENvbA=="
+     ],
+     "results": [
+      "CgdqBWxhYmVs"
+     ],
+     "value": "label"
+    },
+    "labels": {
+     "call": "summary.labels",
+     "commands": [
+      "Eh4KBwoFPGlkMD4SCQoHc3VtbWFyeRIICgZsYWJlbHM="
+     ],
+     "results": [
+      "Ch2yARoKAkoAEglZAAAAAAAAAAASCVkAAAAAAADwPw=="
+     ],
+     "value": [
+      0.0,
+      1.0
+     ]
+    },
+    "objectiveHistory": {
+     "call": "summary.objectiveHistory",
+     "commands": [
+      "EigKBwoFPGlkMD4SCQoHc3VtbWFyeRISChBvYmplY3RpdmVIaXN0b3J5"
+     ],
+     "results": [
+      "ChKyAQ8KAkoAEglZAAAAAAAAAAA="
+     ],
+     "value": [
+      0.0
+     ]
+    },
+    "pr": {
+     "call": "summary.pr",
+     "commands": [
+      "EhoKBwoFPGlkMD4SCQoHc3VtbWFyeRIECgJwchqeAwoAigGYAwqRAwoAGowDCtUCCgC6Ac8CCpgCCgBakwISkAJ7ImZpZWxkcyI6W3sibWV0YWRhdGEiOnt9LCJuYW1lIjoibGFiZWwiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoid2VpZ2h0IiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImZlYXR1cmVzIiwibnVsbGFibGUiOnRydWUsInR5cGUiOnsiY29udGFpbnNOdWxsIjp0cnVlLCJlbGVtZW50VHlwZSI6ImRvdWJsZSIsInR5cGUiOiJhcnJheSJ9fV0sInR5cGUiOiJzdHJ1Y3QifRIyCiYaJAoPYXJyYXlfdG9fdmVjdG9yEhESDAoIZmVhdHVyZXMYAJIBABIIZmVhdHVyZXMaDhIJCgVsYWJlbBgAkgEAGg8SCgoGd2VpZ2h0GACSAQAaERIMCghmZWF0dXJlcxgAkgEAEAEYAA=="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0.0,
+        1.0
+       ],
+       [
+        0.4,
+        1.0
+       ],
+       [
+        0.8,
+        1.0
+       ],
+       [
+        1.0,
+        0.625
+       ],
+       [
+        1.0,
+        1.0
+       ]
+      ],
+      "schema": "struct<recall:double,precision:double>"
+     }
+    },
+    "precisionByLabel": {
+     "call": "summary.precisionByLabel",
+     "commands": [
+      "EigKBwoFPGlkMD4SCQoHc3VtbWFyeRISChBwcmVjaXNpb25CeUxhYmVs"
+     ],
+     "results": [
+      "Ch2yARoKAkoAEglZAAAAAAAA6D8SCVkAAAAAAADwPw=="
+     ],
+     "value": [
+      0.75,
+      1.0
+     ]
+    },
+    "precisionByThreshold": {
+     "call": "summary.precisionByThreshold",
+     "commands": [
+      "EiwKBwoFPGlkMD4SCQoHc3VtbWFyeRIWChRwcmVjaXNpb25CeVRocmVzaG9sZBqeAwoAigGYAwqRAwoAGowDCtUCCgC6Ac8CCpgCCgBakwISkAJ7ImZpZWxkcyI6W3sibWV0YWRhdGEiOnt9LCJuYW1lIjoibGFiZWwiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoid2VpZ2h0IiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImZlYXR1cmVzIiwibnVsbGFibGUiOnRydWUsInR5cGUiOnsiY29udGFpbnNOdWxsIjp0cnVlLCJlbGVtZW50VHlwZSI6ImRvdWJsZSIsInR5cGUiOiJhcnJheSJ9fV0sInR5cGUiOiJzdHJ1Y3QifRIyCiYaJAoPYXJyYXlfdG9fdmVjdG9yEhESDAoIZmVhdHVyZXMYAJIBABIIZmVhdHVyZXMaDhIJCgVsYWJlbBgAkgEAGg8SCgoGd2VpZ2h0GACSAQAaERIMCghmZWF0dXJlcxgAkgEAEAEYAA=="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0.0,
+        0.625
+       ],
+       [
+        0.3333333333333333,
+        1.0
+       ],
+       [
+        0.6666666666666666,
+        1.0
+       ],
+       [
+        1.0,
+        1.0
+       ]
+      ],
+      "schema": "struct<threshold:double,precision:double>"
+     }
+    },
+    "predictionCol": {
+     "call": "summary.predictionCol",
+     "commands": [
+      "EiUKBwoFPGlkMD4SCQoHc3VtbWFyeRIPCg1wcmVkaWN0aW9uQ29s"
+     ],
+     "results": [
+      "CgxqCnByZWRpY3Rpb24="
+     ],
+     "value": "prediction"
+    },
+    "predictions": {
+     "call": "summary.predictions",
+     "commands": [
+      "EiMKBwoFPGlkMD4SCQoHc3VtbWFyeRINCgtwcmVkaWN0aW9ucxqeAwoAigGYAwqRAwoAGowDCtUCCgC6Ac8CCpgCCgBakwISkAJ7ImZpZWxkcyI6W3sibWV0YWRhdGEiOnt9LCJuYW1lIjoibGFiZWwiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoid2VpZ2h0IiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImZlYXR1cmVzIiwibnVsbGFibGUiOnRydWUsInR5cGUiOnsiY29udGFpbnNOdWxsIjp0cnVlLCJlbGVtZW50VHlwZSI6ImRvdWJsZSIsInR5cGUiOiJhcnJheSJ9fV0sInR5cGUiOiJzdHJ1Y3QifRIyCiYaJAoPYXJyYXlfdG9fdmVjdG9yEhESDAoIZmVhdHVyZXMYAJIBABIIZmVhdHVyZXMaDhIJCgVsYWJlbBgAkgEAGg8SCgoGd2VpZ2h0GACSAQAaERIMCghmZWF0dXJlcxgAkgEAEAEYAA=="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0.0,
+        0.5,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          2.5,
+          3.0
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          3.0,
+          0.0
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.0,
+          0.0
+         ]
+        },
+        0.0
+       ],
+       [
+        0.0,
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.8,
+          0.4
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          3.0,
+          0.0
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.0,
+          0.0
+         ]
+        },
+        0.0
+       ],
+       [
+        0.0,
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          3.0,
+          0.2
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          3.0,
+          0.0
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.0,
+          0.0
+         ]
+        },
+        0.0
+       ],
+       [
+        0.0,
+        2.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          2.0,
+          1.0
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          3.0,
+          0.0
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.0,
+          0.0
+         ]
+        },
+        0.0
+       ],
+       [
+        1.0,
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.0,
+          1.1
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.0,
+          3.0
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.0,
+          1.0
+         ]
+        },
+        1.0
+       ],
+       [
+        1.0,
+        1.5,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.0,
+          1.9
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          2.0,
+          1.0
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.6666666666666666,
+          0.3333333333333333
+         ]
+        },
+        0.0
+       ],
+       [
+        1.0,
+        2.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.1,
+          0.9
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.0,
+          3.0
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.0,
+          1.0
+         ]
+        },
+        1.0
+       ],
+       [
+        1.0,
+        3.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.5,
+          2.5
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.0,
+          2.0
+         ]
+        },
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.3333333333333333,
+          0.6666666666666666
+         ]
+        },
+        1.0
+       ]
+      ],
+      "schema": "struct<label:double,weight:double,features:vector,rawPrediction:vector,probability:vector,prediction:double>"
+     }
+    },
+    "recallByLabel": {
+     "call": "summary.recallByLabel",
+     "commands": [
+      "EiUKBwoFPGlkMD4SCQoHc3VtbWFyeRIPCg1yZWNhbGxCeUxhYmVs"
+     ],
+     "results": [
+      "Ch2yARoKAkoAEglZAAAAAAAA8D8SCVmamZmZmZnpPw=="
+     ],
+     "value": [
+      1.0,
+      0.8
+     ]
+    },
+    "recallByThreshold": {
+     "call": "summary.recallByThreshold",
+     "commands": [
+      "EikKBwoFPGlkMD4SCQoHc3VtbWFyeRITChFyZWNhbGxCeVRocmVzaG9sZBqeAwoAigGYAwqRAwoAGowDCtUCCgC6Ac8CCpgCCgBakwISkAJ7ImZpZWxkcyI6W3sibWV0YWRhdGEiOnt9LCJuYW1lIjoibGFiZWwiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoid2VpZ2h0IiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImZlYXR1cmVzIiwibnVsbGFibGUiOnRydWUsInR5cGUiOnsiY29udGFpbnNOdWxsIjp0cnVlLCJlbGVtZW50VHlwZSI6ImRvdWJsZSIsInR5cGUiOiJhcnJheSJ9fV0sInR5cGUiOiJzdHJ1Y3QifRIyCiYaJAoPYXJyYXlfdG9fdmVjdG9yEhESDAoIZmVhdHVyZXMYAJIBABIIZmVhdHVyZXMaDhIJCgVsYWJlbBgAkgEAGg8SCgoGd2VpZ2h0GACSAQAaERIMCghmZWF0dXJlcxgAkgEAEAEYAA=="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0.0,
+        1.0
+       ],
+       [
+        0.3333333333333333,
+        1.0
+       ],
+       [
+        0.6666666666666666,
+        0.8
+       ],
+       [
+        1.0,
+        0.4
+       ]
+      ],
+      "schema": "struct<threshold:double,recall:double>"
+     }
+    },
+    "repr()": {
+     "call": "repr(summary)",
+     "commands": [],
+     "results": [],
+     "value": "<pyspark.ml.classification.BinaryRandomForestClassificationTrainingSummary object at 0x<addr>>"
+    },
+    "roc": {
+     "call": "summary.roc",
+     "commands": [
+      "EhsKBwoFPGlkMD4SCQoHc3VtbWFyeRIFCgNyb2MangMKAIoBmAMKkQMKABqMAwrVAgoAugHPAgqYAgoAWpMCEpACeyJmaWVsZHMiOlt7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImxhYmVsIiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6IndlaWdodCIsIm51bGxhYmxlIjp0cnVlLCJ0eXBlIjoiZG91YmxlIn0seyJtZXRhZGF0YSI6e30sIm5hbWUiOiJmZWF0dXJlcyIsIm51bGxhYmxlIjp0cnVlLCJ0eXBlIjp7ImNvbnRhaW5zTnVsbCI6dHJ1ZSwiZWxlbWVudFR5cGUiOiJkb3VibGUiLCJ0eXBlIjoiYXJyYXkifX1dLCJ0eXBlIjoic3RydWN0In0SMgomGiQKD2FycmF5X3RvX3ZlY3RvchIREgwKCGZlYXR1cmVzGACSAQASCGZlYXR1cmVzGg4SCQoFbGFiZWwYAJIBABoPEgoKBndlaWdodBgAkgEAGhESDAoIZmVhdHVyZXMYAJIBABABGAA="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0.0,
+        0.0
+       ],
+       [
+        0.0,
+        0.4
+       ],
+       [
+        0.0,
+        0.8
+       ],
+       [
+        0.0,
+        1.0
+       ],
+       [
+        1.0,
+        1.0
+       ],
+       [
+        1.0,
+        1.0
+       ]
+      ],
+      "schema": "struct<FPR:double,TPR:double>"
+     }
+    },
+    "scoreCol": {
+     "call": "summary.scoreCol",
+     "commands": [
+      "EiAKBwoFPGlkMD4SCQoHc3VtbWFyeRIKCghzY29yZUNvbA=="
+     ],
+     "results": [
+      "Cg1qC3Byb2JhYmlsaXR5"
+     ],
+     "value": "probability"
+    },
+    "str()": {
+     "call": "str(summary)",
+     "commands": [],
+     "results": [],
+     "value": "<pyspark.ml.classification.BinaryRandomForestClassificationTrainingSummary object at 0x<addr>>"
+    },
+    "totalIterations": {
+     "call": "summary.totalIterations",
+     "commands": [
+      "EicKBwoFPGlkMD4SCQoHc3VtbWFyeRIRCg90b3RhbEl0ZXJhdGlvbnM="
+     ],
+     "results": [
+      "CgIwAA=="
+     ],
+     "value": 0
+    },
+    "truePositiveRateByLabel": {
+     "call": "summary.truePositiveRateByLabel",
+     "commands": [
+      "Ei8KBwoFPGlkMD4SCQoHc3VtbWFyeRIZChd0cnVlUG9zaXRpdmVSYXRlQnlMYWJlbA=="
+     ],
+     "results": [
+      "Ch2yARoKAkoAEglZAAAAAAAA8D8SCVmamZmZmZnpPw=="
+     ],
+     "value": [
+      1.0,
+      0.8
+     ]
+    },
+    "weightCol": {
+     "call": "summary.weightCol",
+     "commands": [
+      "EiEKBwoFPGlkMD4SCQoHc3VtbWFyeRILCgl3ZWlnaHRDb2w="
+     ],
+     "results": [
+      "CghqBndlaWdodA=="
+     ],
+     "value": "weight"
+    },
+    "weightedFMeasure-0.5": {
+     "call": "summary.weightedFMeasure(0.5)",
+     "commands": [
+      "EjUKBwoFPGlkMD4SCQoHc3VtbWFyeRIfChB3ZWlnaHRlZEZNZWFzdXJlEgsKCVkAAAAAAADgPw=="
+     ],
+     "results": [
+      "CglZWAhdIXSF7D8="
+     ],
+     "value": 0.8912907268170427
+    },
+    "weightedFMeasure-1.0": {
+     "call": "summary.weightedFMeasure(1.0)",
+     "commands": [
+      "EjUKBwoFPGlkMD4SCQoHc3VtbWFyeRIfChB3ZWlnaHRlZEZNZWFzdXJlEgsKCVkAAAAAAADwPw=="
+     ],
+     "results": [
+      "CglZBEEQBEEQ7D8="
+     ],
+     "value": 0.876984126984127
+    },
+    "weightedFalsePositiveRate": {
+     "call": "summary.weightedFalsePositiveRate",
+     "commands": [
+      "EjEKBwoFPGlkMD4SCQoHc3VtbWFyeRIbChl3ZWlnaHRlZEZhbHNlUG9zaXRpdmVSYXRl"
+     ],
+     "results": [
+      "CglZMzMzMzMzsz8="
+     ],
+     "value": 0.075
+    },
+    "weightedPrecision": {
+     "call": "summary.weightedPrecision",
+     "commands": [
+      "EikKBwoFPGlkMD4SCQoHc3VtbWFyeRITChF3ZWlnaHRlZFByZWNpc2lvbg=="
+     ],
+     "results": [
+      "CglZAAAAAAAA7T8="
+     ],
+     "value": 0.90625
+    },
+    "weightedRecall": {
+     "call": "summary.weightedRecall",
+     "commands": [
+      "EiYKBwoFPGlkMD4SCQoHc3VtbWFyeRIQCg53ZWlnaHRlZFJlY2FsbA=="
+     ],
+     "results": [
+      "CglZAAAAAAAA7D8="
+     ],
+     "value": 0.875
+    },
+    "weightedTruePositiveRate": {
+     "call": "summary.weightedTruePositiveRate",
+     "commands": [
+      "EjAKBwoFPGlkMD4SCQoHc3VtbWFyeRIaChh3ZWlnaHRlZFRydWVQb3NpdGl2ZVJhdGU="
+     ],
+     "results": [
+      "CglZAAAAAAAA7D8="
+     ],
+     "value": 0.875
+    }
+   },
+   "skipped": {},
+   "via": {
+    "call": "model.summary",
+    "commands": [],
+    "results": [],
+    "value": {
+     "ref": "<id0>.summary",
+     "type": "BinaryRandomForestClassificationTrainingSummary"
+    }
+   }
+  },
+  "RandomForestClassifier.multiclass.evaluate": {
+   "class": "RandomForestClassificationSummary",
+   "members": {
+    "accuracy": {
+     "call": "summary.accuracy",
+     "commands": [
+      "EhUKBwoFPGlkMD4SCgoIYWNjdXJhY3k="
+     ],
+     "results": [
+      "CglZmpmZmZmZ2T8="
+     ],
+     "value": 0.4
+    },
+    "fMeasureByLabel-0.5": {
+     "call": "summary.fMeasureByLabel(0.5)",
+     "commands": [
+      "EikKBwoFPGlkMD4SHgoPZk1lYXN1cmVCeUxhYmVsEgsKCVkAAAAAAADgPw=="
+     ],
+     "results": [
+      "CiiyASUKAkoAEglZ2Imd2Imd2D8SCVkAAAAAAAAAABIJWXIcx3Ecx+E/"
+     ],
+     "value": [
+      0.3846153846153846,
+      0.0,
+      0.5555555555555556
+     ]
+    },
+    "fMeasureByLabel-1.0": {
+     "call": "summary.fMeasureByLabel(1.0)",
+     "commands": [
+      "EikKBwoFPGlkMD4SHgoPZk1lYXN1cmVCeUxhYmVsEgsKCVkAAAAAAADwPw=="
+     ],
+     "results": [
+      "CiiyASUKAkoAEglZAAAAAAAA4D8SCVkAAAAAAAAAABIJWVVVVVVVVeU/"
+     ],
+     "value": [
+      0.5,
+      0.0,
+      0.6666666666666666
+     ]
+    },
+    "falsePositiveRateByLabel": {
+     "call": "summary.falsePositiveRateByLabel",
+     "commands": [
+      "EiUKBwoFPGlkMD4SGgoYZmFsc2VQb3NpdGl2ZVJhdGVCeUxhYmVs"
+     ],
+     "results": [
+      "CiiyASUKAkoAEglZAAAAAAAA4D8SCVkAAAAAAAAAABIJWQAAAAAAANA/"
+     ],
+     "value": [
+      0.5,
+      0.0,
+      0.25
+     ]
+    },
+    "labelCol": {
+     "call": "summary.labelCol",
+     "commands": [
+      "EhUKBwoFPGlkMD4SCgoIbGFiZWxDb2w="
+     ],
+     "results": [
+      "CgdqBWxhYmVs"
+     ],
+     "value": "label"
+    },
+    "labels": {
+     "call": "summary.labels",
+     "commands": [
+      "EhMKBwoFPGlkMD4SCAoGbGFiZWxz"
+     ],
+     "results": [
+      "CiiyASUKAkoAEglZAAAAAAAAAAASCVkAAAAAAADwPxIJWQAAAAAAAABA"
+     ],
+     "value": [
+      0.0,
+      1.0,
+      2.0
+     ]
+    },
+    "precisionByLabel": {
+     "call": "summary.precisionByLabel",
+     "commands": [
+      "Eh0KBwoFPGlkMD4SEgoQcHJlY2lzaW9uQnlMYWJlbA=="
+     ],
+     "results": [
+      "CiiyASUKAkoAEglZVVVVVVVV1T8SCVkAAAAAAAAAABIJWQAAAAAAAOA/"
+     ],
+     "value": [
+      0.3333333333333333,
+      0.0,
+      0.5
+     ]
+    },
+    "predictionCol": {
+     "call": "summary.predictionCol",
+     "commands": [
+      "EhoKBwoFPGlkMD4SDwoNcHJlZGljdGlvbkNvbA=="
+     ],
+     "results": [
+      "CgxqCnByZWRpY3Rpb24="
+     ],
+     "value": "prediction"
+    },
+    "predictions": {
+     "call": "summary.predictions",
+     "commands": [
+      "EhgKBwoFPGlkMD4SDQoLcHJlZGljdGlvbnM="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0.0,
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.1,
+          0.6
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          3.0,
+          0.0,
+          0.0
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          1.0,
+          0.0,
+          0.0
+         ]
+        },
+        0.0
+       ],
+       [
+        1.0,
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.2,
+          0.1
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          0.0,
+          1.0,
+          2.0
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          0.0,
+          0.3333333333333333,
+          0.6666666666666666
+         ]
+        },
+        2.0
+       ],
+       [
+        1.0,
+        2.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.6,
+          0.6
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          3.0,
+          0.0,
+          0.0
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          1.0,
+          0.0,
+          0.0
+         ]
+        },
+        0.0
+       ],
+       [
+        2.0,
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          2.1,
+          1.8
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          0.0,
+          0.0,
+          3.0
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          0.0,
+          0.0,
+          1.0
+         ]
+        },
+        2.0
+       ]
+      ],
+      "schema": "struct<label:double,weight:double,features:vector,rawPrediction:vector,probability:vector,prediction:double>"
+     }
+    },
+    "recallByLabel": {
+     "call": "summary.recallByLabel",
+     "commands": [
+      "EhoKBwoFPGlkMD4SDwoNcmVjYWxsQnlMYWJlbA=="
+     ],
+     "results": [
+      "CiiyASUKAkoAEglZAAAAAAAA8D8SCVkAAAAAAAAAABIJWQAAAAAAAPA/"
+     ],
+     "value": [
+      1.0,
+      0.0,
+      1.0
+     ]
+    },
+    "repr()": {
+     "call": "repr(summary)",
+     "commands": [],
+     "results": [],
+     "value": "<pyspark.ml.classification.RandomForestClassificationSummary object at 0x<addr>>"
+    },
+    "str()": {
+     "call": "str(summary)",
+     "commands": [],
+     "results": [],
+     "value": "<pyspark.ml.classification.RandomForestClassificationSummary object at 0x<addr>>"
+    },
+    "truePositiveRateByLabel": {
+     "call": "summary.truePositiveRateByLabel",
+     "commands": [
+      "EiQKBwoFPGlkMD4SGQoXdHJ1ZVBvc2l0aXZlUmF0ZUJ5TGFiZWw="
+     ],
+     "results": [
+      "CiiyASUKAkoAEglZAAAAAAAA8D8SCVkAAAAAAAAAABIJWQAAAAAAAPA/"
+     ],
+     "value": [
+      1.0,
+      0.0,
+      1.0
+     ]
+    },
+    "weightCol": {
+     "call": "summary.weightCol",
+     "commands": [
+      "EhYKBwoFPGlkMD4SCwoJd2VpZ2h0Q29s"
+     ],
+     "results": [
+      "CghqBndlaWdodA=="
+     ],
+     "value": "weight"
+    },
+    "weightedFMeasure-0.5": {
+     "call": "summary.weightedFMeasure(0.5)",
+     "commands": [
+      "EioKBwoFPGlkMD4SHwoQd2VpZ2h0ZWRGTWVhc3VyZRILCglZAAAAAAAA4D8="
+     ],
+     "results": [
+      "CglZGIERGIERyD8="
+     ],
+     "value": 0.18803418803418803
+    },
+    "weightedFMeasure-1.0": {
+     "call": "summary.weightedFMeasure(1.0)",
+     "commands": [
+      "EioKBwoFPGlkMD4SHwoQd2VpZ2h0ZWRGTWVhc3VyZRILCglZAAAAAAAA8D8="
+     ],
+     "results": [
+      "CglZ3t3d3d3dzT8="
+     ],
+     "value": 0.23333333333333334
+    },
+    "weightedFalsePositiveRate": {
+     "call": "summary.weightedFalsePositiveRate",
+     "commands": [
+      "EiYKBwoFPGlkMD4SGwoZd2VpZ2h0ZWRGYWxzZVBvc2l0aXZlUmF0ZQ=="
+     ],
+     "results": [
+      "CglZNDMzMzMzwz8="
+     ],
+     "value": 0.15000000000000002
+    },
+    "weightedPrecision": {
+     "call": "summary.weightedPrecision",
+     "commands": [
+      "Eh4KBwoFPGlkMD4SEwoRd2VpZ2h0ZWRQcmVjaXNpb24="
+     ],
+     "results": [
+      "CglZVlVVVVVVxT8="
+     ],
+     "value": 0.16666666666666669
+    },
+    "weightedRecall": {
+     "call": "summary.weightedRecall",
+     "commands": [
+      "EhsKBwoFPGlkMD4SEAoOd2VpZ2h0ZWRSZWNhbGw="
+     ],
+     "results": [
+      "CglZmpmZmZmZ2T8="
+     ],
+     "value": 0.4
+    },
+    "weightedTruePositiveRate": {
+     "call": "summary.weightedTruePositiveRate",
+     "commands": [
+      "EiUKBwoFPGlkMD4SGgoYd2VpZ2h0ZWRUcnVlUG9zaXRpdmVSYXRl"
+     ],
+     "results": [
+      "CglZmpmZmZmZ2T8="
+     ],
+     "value": 0.4
+    }
+   },
+   "skipped": {},
+   "via": {
+    "call": "model.evaluate(multi_eval)",
+    "commands": [
+     "EroDCgcKBTxpZDA+Eq4DCghldmFsdWF0ZRKhAxKeAwoAigGYAwqRAwoAGowDCtUCCgC6Ac8CCpgCCgBakwISkAJ7ImZpZWxkcyI6W3sibWV0YWRhdGEiOnt9LCJuYW1lIjoibGFiZWwiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoid2VpZ2h0IiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImZlYXR1cmVzIiwibnVsbGFibGUiOnRydWUsInR5cGUiOnsiY29udGFpbnNOdWxsIjp0cnVlLCJlbGVtZW50VHlwZSI6ImRvdWJsZSIsInR5cGUiOiJhcnJheSJ9fV0sInR5cGUiOiJzdHJ1Y3QifRIyCiYaJAoPYXJyYXlfdG9fdmVjdG9yEhESDAoIZmVhdHVyZXMYAJIBABIIZmVhdHVyZXMaDhIJCgVsYWJlbBgAkgEAGg8SCgoGd2VpZ2h0GACSAQAaERIMCghmZWF0dXJlcxgAkgEAEAEYAA==",
+     "EhcKBwoFPGlkMD4SDAoKbnVtQ2xhc3Nlcw=="
+    ],
+    "results": [
+     "EgU8aWQxPg==",
+     "CgIwAw=="
+    ],
+    "value": {
+     "ref": "<id1>",
+     "type": "RandomForestClassificationSummary"
+    }
+   }
+  },
+  "RandomForestClassifier.multiclass.training": {
+   "class": "RandomForestClassificationTrainingSummary",
+   "members": {
+    "accuracy": {
+     "call": "summary.accuracy",
+     "commands": [
+      "EiAKBwoFPGlkMD4SCQoHc3VtbWFyeRIKCghhY2N1cmFjeQ=="
+     ],
+     "results": [
+      "CglZF1100UUX7T8="
+     ],
+     "value": 0.9090909090909091
+    },
+    "fMeasureByLabel-0.5": {
+     "call": "summary.fMeasureByLabel(0.5)",
+     "commands": [
+      "EjQKBwoFPGlkMD4SCQoHc3VtbWFyeRIeCg9mTWVhc3VyZUJ5TGFiZWwSCwoJWQAAAAAAAOA/"
+     ],
+     "results": [
+      "CiiyASUKAkoAEglZAAAAAAAA8D8SCVlU5LNuMEXuPxIJWauqqqqqquo/"
+     ],
+     "value": [
+      1.0,
+      0.945945945945946,
+      0.8333333333333334
+     ]
+    },
+    "fMeasureByLabel-1.0": {
+     "call": "summary.fMeasureByLabel(1.0)",
+     "commands": [
+      "EjQKBwoFPGlkMD4SCQoHc3VtbWFyeRIeCg9mTWVhc3VyZUJ5TGFiZWwSCwoJWQAAAAAAAPA/"
+     ],
+     "results": [
+      "CiiyASUKAkoAEglZAAAAAAAA8D8SCVkBAAAAAADsPxIJWR3HcRzHcew/"
+     ],
+     "value": [
+      1.0,
+      0.8750000000000001,
+      0.888888888888889
+     ]
+    },
+    "falsePositiveRateByLabel": {
+     "call": "summary.falsePositiveRateByLabel",
+     "commands": [
+      "EjAKBwoFPGlkMD4SCQoHc3VtbWFyeRIaChhmYWxzZVBvc2l0aXZlUmF0ZUJ5TGFiZWw="
+     ],
+     "results": [
+      "CiiyASUKAkoAEglZAAAAAAAAAAASCVkAAAAAAAAAABIJWZIkSZIkScI/"
+     ],
+     "value": [
+      0.0,
+      0.0,
+      0.14285714285714285
+     ]
+    },
+    "labelCol": {
+     "call": "summary.labelCol",
+     "commands": [
+      "EiAKBwoFPGlkMD4SCQoHc3VtbWFyeRIKCghsYWJlbENvbA=="
+     ],
+     "results": [
+      "CgdqBWxhYmVs"
+     ],
+     "value": "label"
+    },
+    "labels": {
+     "call": "summary.labels",
+     "commands": [
+      "Eh4KBwoFPGlkMD4SCQoHc3VtbWFyeRIICgZsYWJlbHM="
+     ],
+     "results": [
+      "CiiyASUKAkoAEglZAAAAAAAAAAASCVkAAAAAAADwPxIJWQAAAAAAAABA"
+     ],
+     "value": [
+      0.0,
+      1.0,
+      2.0
+     ]
+    },
+    "objectiveHistory": {
+     "call": "summary.objectiveHistory",
+     "commands": [
+      "EigKBwoFPGlkMD4SCQoHc3VtbWFyeRISChBvYmplY3RpdmVIaXN0b3J5"
+     ],
+     "results": [
+      "ChKyAQ8KAkoAEglZAAAAAAAAAAA="
+     ],
+     "value": [
+      0.0
+     ]
+    },
+    "precisionByLabel": {
+     "call": "summary.precisionByLabel",
+     "commands": [
+      "EigKBwoFPGlkMD4SCQoHc3VtbWFyeRISChBwcmVjaXNpb25CeUxhYmVs"
+     ],
+     "results": [
+      "CiiyASUKAkoAEglZAAAAAAAA8D8SCVkAAAAAAADwPxIJWZqZmZmZmek/"
+     ],
+     "value": [
+      1.0,
+      1.0,
+      0.8
+     ]
+    },
+    "predictionCol": {
+     "call": "summary.predictionCol",
+     "commands": [
+      "EiUKBwoFPGlkMD4SCQoHc3VtbWFyeRIPCg1wcmVkaWN0aW9uQ29s"
+     ],
+     "results": [
+      "CgxqCnByZWRpY3Rpb24="
+     ],
+     "value": "prediction"
+    },
+    "predictions": {
+     "call": "summary.predictions",
+     "commands": [
+      "EiMKBwoFPGlkMD4SCQoHc3VtbWFyeRINCgtwcmVkaWN0aW9ucxqeAwoAigGYAwqRAwoAGowDCtUCCgC6Ac8CCpgCCgBakwISkAJ7ImZpZWxkcyI6W3sibWV0YWRhdGEiOnt9LCJuYW1lIjoibGFiZWwiLCJudWxsYWJsZSI6dHJ1ZSwidHlwZSI6ImRvdWJsZSJ9LHsibWV0YWRhdGEiOnt9LCJuYW1lIjoid2VpZ2h0IiwibnVsbGFibGUiOnRydWUsInR5cGUiOiJkb3VibGUifSx7Im1ldGFkYXRhIjp7fSwibmFtZSI6ImZlYXR1cmVzIiwibnVsbGFibGUiOnRydWUsInR5cGUiOnsiY29udGFpbnNOdWxsIjp0cnVlLCJlbGVtZW50VHlwZSI6ImRvdWJsZSIsInR5cGUiOiJhcnJheSJ9fV0sInR5cGUiOiJzdHJ1Y3QifRIyCiYaJAoPYXJyYXlfdG9fdmVjdG9yEhESDAoIZmVhdHVyZXMYAJIBABIIZmVhdHVyZXMaDhIJCgVsYWJlbBgAkgEAGg8SCgoGd2VpZ2h0GACSAQAaERIMCghmZWF0dXJlcxgAkgEAEAEYAA=="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0.0,
+        0.5,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.5,
+          0.1
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          3.0,
+          0.0,
+          0.0
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          1.0,
+          0.0,
+          0.0
+         ]
+        },
+        0.0
+       ],
+       [
+        0.0,
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.0,
+          0.5
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          3.0,
+          0.0,
+          0.0
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          1.0,
+          0.0,
+          0.0
+         ]
+        },
+        0.0
+       ],
+       [
+        0.0,
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.2,
+          0.9
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          3.0,
+          0.0,
+          0.0
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          1.0,
+          0.0,
+          0.0
+         ]
+        },
+        0.0
+       ],
+       [
+        1.0,
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.1,
+          0.4
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          0.0,
+          1.0,
+          2.0
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          0.0,
+          0.3333333333333333,
+          0.6666666666666666
+         ]
+        },
+        2.0
+       ],
+       [
+        1.0,
+        1.5,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          0.9,
+          0.7
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          0.0,
+          3.0,
+          0.0
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          0.0,
+          1.0,
+          0.0
+         ]
+        },
+        1.0
+       ],
+       [
+        1.0,
+        2.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.0,
+          0.0
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          0.0,
+          2.0,
+          1.0
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          0.0,
+          0.6666666666666666,
+          0.3333333333333333
+         ]
+        },
+        1.0
+       ],
+       [
+        2.0,
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          1.7,
+          2.2
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          0.0,
+          0.0,
+          3.0
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          0.0,
+          0.0,
+          1.0
+         ]
+        },
+        2.0
+       ],
+       [
+        2.0,
+        1.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          2.0,
+          1.5
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          0.0,
+          0.0,
+          3.0
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          0.0,
+          0.0,
+          1.0
+         ]
+        },
+        2.0
+       ],
+       [
+        2.0,
+        2.0,
+        {
+         "size": 2,
+         "type": "dense",
+         "values": [
+          2.4,
+          2.0
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          0.0,
+          0.0,
+          3.0
+         ]
+        },
+        {
+         "size": 3,
+         "type": "dense",
+         "values": [
+          0.0,
+          0.0,
+          1.0
+         ]
+        },
+        2.0
+       ]
+      ],
+      "schema": "struct<label:double,weight:double,features:vector,rawPrediction:vector,probability:vector,prediction:double>"
+     }
+    },
+    "recallByLabel": {
+     "call": "summary.recallByLabel",
+     "commands": [
+      "EiUKBwoFPGlkMD4SCQoHc3VtbWFyeRIPCg1yZWNhbGxCeUxhYmVs"
+     ],
+     "results": [
+      "CiiyASUKAkoAEglZAAAAAAAA8D8SCVk5juM4juPoPxIJWQAAAAAAAPA/"
+     ],
+     "value": [
+      1.0,
+      0.7777777777777778,
+      1.0
+     ]
+    },
+    "repr()": {
+     "call": "repr(summary)",
+     "commands": [],
+     "results": [],
+     "value": "<pyspark.ml.classification.RandomForestClassificationTrainingSummary object at 0x<addr>>"
+    },
+    "str()": {
+     "call": "str(summary)",
+     "commands": [],
+     "results": [],
+     "value": "<pyspark.ml.classification.RandomForestClassificationTrainingSummary object at 0x<addr>>"
+    },
+    "totalIterations": {
+     "call": "summary.totalIterations",
+     "commands": [
+      "EicKBwoFPGlkMD4SCQoHc3VtbWFyeRIRCg90b3RhbEl0ZXJhdGlvbnM="
+     ],
+     "results": [
+      "CgIwAA=="
+     ],
+     "value": 0
+    },
+    "truePositiveRateByLabel": {
+     "call": "summary.truePositiveRateByLabel",
+     "commands": [
+      "Ei8KBwoFPGlkMD4SCQoHc3VtbWFyeRIZChd0cnVlUG9zaXRpdmVSYXRlQnlMYWJlbA=="
+     ],
+     "results": [
+      "CiiyASUKAkoAEglZAAAAAAAA8D8SCVk5juM4juPoPxIJWQAAAAAAAPA/"
+     ],
+     "value": [
+      1.0,
+      0.7777777777777778,
+      1.0
+     ]
+    },
+    "weightCol": {
+     "call": "summary.weightCol",
+     "commands": [
+      "EiEKBwoFPGlkMD4SCQoHc3VtbWFyeRILCgl3ZWlnaHRDb2w="
+     ],
+     "results": [
+      "CghqBndlaWdodA=="
+     ],
+     "value": "weight"
+    },
+    "weightedFMeasure-0.5": {
+     "call": "summary.weightedFMeasure(0.5)",
+     "commands": [
+      "EjUKBwoFPGlkMD4SCQoHc3VtbWFyeRIfChB3ZWlnaHRlZEZNZWFzdXJlEgsKCVkAAAAAAADgPw=="
+     ],
+     "results": [
+      "CglZ7Oyegl1a7T8="
+     ],
+     "value": 0.9172809172809173
+    },
+    "weightedFMeasure-1.0": {
+     "call": "summary.weightedFMeasure(1.0)",
+     "commands": [
+      "EjUKBwoFPGlkMD4SCQoHc3VtbWFyeRIfChB3ZWlnaHRlZEZNZWFzdXJlEgsKCVkAAAAAAADwPw=="
+     ],
+     "results": [
+      "CglZaEjM2xkS7T8="
+     ],
+     "value": 0.908459595959596
+    },
+    "weightedFalsePositiveRate": {
+     "call": "summary.weightedFalsePositiveRate",
+     "commands": [
+      "EjEKBwoFPGlkMD4SCQoHc3VtbWFyeRIbChl3ZWlnaHRlZEZhbHNlUG9zaXRpdmVSYXRl"
+     ],
+     "results": [
+      "CglZvWNqYO+Yqj8="
+     ],
+     "value": 0.051948051948051945
+    },
+    "weightedPrecision": {
+     "call": "summary.weightedPrecision",
+     "commands": [
+      "EikKBwoFPGlkMD4SCQoHc3VtbWFyeRITChF3ZWlnaHRlZFByZWNpc2lvbg=="
+     ],
+     "results": [
+      "CglZrH3D2jes7T8="
+     ],
+     "value": 0.9272727272727272
+    },
+    "weightedRecall": {
+     "call": "summary.weightedRecall",
+     "commands": [
+      "EiYKBwoFPGlkMD4SCQoHc3VtbWFyeRIQCg53ZWlnaHRlZFJlY2FsbA=="
+     ],
+     "results": [
+      "CglZF1100UUX7T8="
+     ],
+     "value": 0.9090909090909091
+    },
+    "weightedTruePositiveRate": {
+     "call": "summary.weightedTruePositiveRate",
+     "commands": [
+      "EjAKBwoFPGlkMD4SCQoHc3VtbWFyeRIaChh3ZWlnaHRlZFRydWVQb3NpdGl2ZVJhdGU="
+     ],
+     "results": [
+      "CglZF1100UUX7T8="
+     ],
+     "value": 0.9090909090909091
+    }
+   },
+   "skipped": {},
+   "via": {
+    "call": "model.summary",
+    "commands": [],
+    "results": [],
+    "value": {
+     "ref": "<id0>.summary",
+     "type": "RandomForestClassificationTrainingSummary"
+    }
+   }
+  }
+ }
+}
