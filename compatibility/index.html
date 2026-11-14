@@ -1,0 +1,2964 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="A Rust rewrite of the PySpark Spark Connect client - a drop-in `pyspark` package backed by a native Rust core.">
+      
+      
+      
+        <link rel="canonical" href="https://apache.github.io/spark-connect-rust/compatibility/">
+      
+      
+        <link rel="prev" href="../examples/">
+      
+      
+        <link rel="next" href="../troubleshooting/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.1">
+    
+    
+      
+        <title>Compatibility - Spark Connect Rust Client</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.57a0d79d.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.fb2fffe2.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Inter:300,300i,400,400i,700,700i%7CJetBrains+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Inter";--md-code-font:"JetBrains Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="custom" data-md-color-accent="custom">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#compatibility" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow md-header--lifted" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="Spark Connect Rust Client" class="md-header__button md-logo" aria-label="Spark Connect Rust Client" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m21.9 11.7-.9-.5V11l.7-.7c.1-.1.1-.3 0-.4l-.1-.1-.9-.3c0-.1 0-.2-.1-.2l.6-.8c.1-.1.1-.3-.1-.4 0 0-.1 0-.1-.1l-1-.2c0-.1-.1-.1-.1-.2l.4-.9v-.3c-.1-.1-.2-.1-.3-.1h-1s0-.1-.1-.1l.2-1c0-.2-.1-.3-.2-.3h-.1l-1 .2c0-.1-.1-.1-.2-.2v-1q0-.3-.3-.3h-.1l-.9.4h-.1L16 3c0-.2-.2-.3-.3-.2h-.1l-.8.6c-.1 0-.2 0-.2-.1l-.3-.9c-.1-.1-.2-.2-.4-.2 0 0-.1 0-.1.1L13 3h-.2l-.5-.8c-.1-.2-.3-.2-.5-.2l-.1.1-.5.9H11l-.7-.7c-.1-.1-.3-.1-.4 0l-.1.1-.3.9c-.1 0-.2 0-.2.1l-.8-.6c-.2-.1-.4-.1-.5.1V3l-.2 1s-.1 0-.2.1l-.9-.4c-.1-.1-.3 0-.4.1v1.1c0 .1-.1.1-.1.2l-1-.2c-.2-.1-.3 0-.3.2v.1l.2 1c-.1 0-.1.1-.2.1h-1q-.3 0-.3.3v.1l.4.9v.2L3 8c-.2 0-.3.2-.3.3v.1l.6.8c0 .1 0 .2-.1.2l-.8.4c-.1.1-.2.2-.2.4 0 0 0 .1.1.1l.7.7v.2l-.8.5c-.2.1-.2.3-.2.4l.1.1.9.6v.2l-.7.7c-.1.1-.1.3 0 .4l.1.1.9.3c0 .1 0 .2.1.2l-.6.8c-.1.1-.1.3.1.4 0 0 .1 0 .1.1l1 .2c0 .1.1.1.1.2l-.4.9c-.1.1 0 .3.1.4h1.1c.1 0 .1.1.2.1l-.2 1c0 .2.1.3.2.3h.1l1-.2c0 .1.1.1.2.2v1q0 .3.3.3h.1l.9-.4h.1l.2 1c0 .2.2.3.3.2h.1l.8-.6c.1 0 .2 0 .2.1l.3.9c.1.1.2.2.4.2 0 0 .1 0 .1-.1l.8-.7h.2l.5.8c.1.1.3.2.4.1l.1-.1.5-.8h.2l.7.7c.1.1.3.1.4 0l.1-.1.3-.9c.1 0 .2 0 .2-.1l.8.6c.1.1.3.1.4-.1 0 0 0-.1.1-.1l.2-1c.1 0 .1-.1.2-.1l.9.4c.1.1.3 0 .4-.1v-1.1l.2-.2 1 .2c.2 0 .3-.1.3-.2v-.1l-.2-1 .2-.2h1q.3 0 .3-.3v-.1l-.4-.9c0-.1.1-.1.1-.2l1-.2c.2 0 .3-.2.2-.3v-.1l-.6-.8.1-.2.9-.3c.1-.1.2-.2.2-.4 0 0 0-.1-.1-.1L21 13v-.2l.8-.5c.2-.1.2-.3.1-.6q0 .15 0 0m-5.7 7c-.3-.1-.5-.4-.5-.7.1-.3.4-.5.7-.5.3.1.5.4.5.7 0 .4-.3.6-.7.5m-.2-1.9c-.3-.1-.6.1-.6.4l-.4 1.4q-1.35.6-3 .6c-1.1 0-2.1-.2-3.1-.7l-.3-1.4c-.1-.3-.3-.5-.6-.4l-1.2.3c-.2-.2-.4-.5-.6-.7h6c.1 0 .1 0 .1-.1v-2.1c0-.1 0-.1-.1-.1h-1.7v-1.3h1.9c.2 0 .9 0 1.2 1 .1.3.2 1.3.4 1.6.1.3.6 1 1.1 1h3.1c-.2.3-.4.5-.7.8zm-8.3 1.9c-.3.1-.6-.1-.7-.5-.1-.3.1-.6.5-.7s.6.1.7.5c0 .3-.2.6-.5.7M5.4 9.5c.1.3 0 .7-.3.8s-.7 0-.8-.3 0-.7.3-.8c.4-.1.7 0 .8.3m-.7 1.6 1.3-.5c.3-.1.4-.4.3-.7L6 9.3h1V14H5c-.3-1-.4-1.9-.3-2.9m5.6-.4V9.3h2.5c.1 0 .9.1.9.7 0 .5-.6.7-1.1.7zm9 1.2v.5h-.8c-.1 0-.1 0-.1.1v.3c0 .8-.5 1-.9 1s-.8-.2-.9-.4c-.2-1.3-.6-1.5-1.2-2 .7-.5 1.5-1.2 1.5-2.1 0-1-.7-1.6-1.1-1.9-.7-.4-1.4-.5-1.6-.5H6.6c1.1-1.2 2.5-2 4.1-2.3l.9 1c.2.2.5.2.8 0l1-1c2.1.4 3.9 1.7 5 3.6l-.7 1.6c-.1.3 0 .6.3.7l1.3.6zm-7.7-8c.2-.2.6-.2.8 0s.2.6 0 .8q-.45.45-.9 0c-.2-.2-.1-.5.1-.8m6.9 5.6c.1-.3.5-.4.8-.3s.4.5.3.8-.5.4-.8.3-.4-.5-.3-.8"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            Spark Connect Rust Client
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Compatibility
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="custom" data-md-color-accent="custom"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m17.75 4.09-2.53 1.94.91 3.06-2.63-1.81-2.63 1.81.91-3.06-2.53-1.94L12.44 4l1.06-3 1.06 3zm3.5 6.91-1.64 1.25.59 1.98-1.7-1.17-1.7 1.17.59-1.98L15.75 11l2.06-.05L18.5 9l.69 1.95zm-2.28 4.95c.83-.08 1.72 1.1 1.19 1.85-.32.45-.66.87-1.08 1.27C15.17 23 8.84 23 4.94 19.07c-3.91-3.9-3.91-10.24 0-14.14.4-.4.82-.76 1.27-1.08.75-.53 1.93.36 1.85 1.19-.27 2.86.69 5.83 2.89 8.02a9.96 9.96 0 0 0 8.02 2.89m-1.64 2.02a12.08 12.08 0 0 1-7.8-3.47c-2.17-2.19-3.33-5-3.49-7.82-2.81 3.14-2.7 7.96.31 10.98 3.02 3.01 7.84 3.12 10.98.31"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="custom" data-md-color-accent="custom"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 7a5 5 0 0 1 5 5 5 5 0 0 1-5 5 5 5 0 0 1-5-5 5 5 0 0 1 5-5m0 2a3 3 0 0 0-3 3 3 3 0 0 0 3 3 3 3 0 0 0 3-3 3 3 0 0 0-3-3m0-7 2.39 3.42C13.65 5.15 12.84 5 12 5s-1.65.15-2.39.42zM3.34 7l4.16-.35A7.2 7.2 0 0 0 5.94 8.5c-.44.74-.69 1.5-.83 2.29zm.02 10 1.76-3.77a7.131 7.131 0 0 0 2.38 4.14zM20.65 7l-1.77 3.79a7.02 7.02 0 0 0-2.38-4.15zm-.01 10-4.14.36c.59-.51 1.12-1.14 1.54-1.86.42-.73.69-1.5.83-2.29zM12 22l-2.41-3.44c.74.27 1.55.44 2.41.44.82 0 1.63-.17 2.37-.44z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/apache/spark-connect-rust" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    apache/spark-connect-rust
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+    
+      
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href=".." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../installation/" class="md-tabs__link">
+          
+  
+  
+  Get started
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../dataframes/" class="md-tabs__link">
+          
+  
+  
+  Guides
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../architecture/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Architecture
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../examples/" class="md-tabs__link">
+          
+  
+  
+  Reference
+
+        </a>
+      </li>
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+    
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="Spark Connect Rust Client" class="md-nav__button md-logo" aria-label="Spark Connect Rust Client" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m21.9 11.7-.9-.5V11l.7-.7c.1-.1.1-.3 0-.4l-.1-.1-.9-.3c0-.1 0-.2-.1-.2l.6-.8c.1-.1.1-.3-.1-.4 0 0-.1 0-.1-.1l-1-.2c0-.1-.1-.1-.1-.2l.4-.9v-.3c-.1-.1-.2-.1-.3-.1h-1s0-.1-.1-.1l.2-1c0-.2-.1-.3-.2-.3h-.1l-1 .2c0-.1-.1-.1-.2-.2v-1q0-.3-.3-.3h-.1l-.9.4h-.1L16 3c0-.2-.2-.3-.3-.2h-.1l-.8.6c-.1 0-.2 0-.2-.1l-.3-.9c-.1-.1-.2-.2-.4-.2 0 0-.1 0-.1.1L13 3h-.2l-.5-.8c-.1-.2-.3-.2-.5-.2l-.1.1-.5.9H11l-.7-.7c-.1-.1-.3-.1-.4 0l-.1.1-.3.9c-.1 0-.2 0-.2.1l-.8-.6c-.2-.1-.4-.1-.5.1V3l-.2 1s-.1 0-.2.1l-.9-.4c-.1-.1-.3 0-.4.1v1.1c0 .1-.1.1-.1.2l-1-.2c-.2-.1-.3 0-.3.2v.1l.2 1c-.1 0-.1.1-.2.1h-1q-.3 0-.3.3v.1l.4.9v.2L3 8c-.2 0-.3.2-.3.3v.1l.6.8c0 .1 0 .2-.1.2l-.8.4c-.1.1-.2.2-.2.4 0 0 0 .1.1.1l.7.7v.2l-.8.5c-.2.1-.2.3-.2.4l.1.1.9.6v.2l-.7.7c-.1.1-.1.3 0 .4l.1.1.9.3c0 .1 0 .2.1.2l-.6.8c-.1.1-.1.3.1.4 0 0 .1 0 .1.1l1 .2c0 .1.1.1.1.2l-.4.9c-.1.1 0 .3.1.4h1.1c.1 0 .1.1.2.1l-.2 1c0 .2.1.3.2.3h.1l1-.2c0 .1.1.1.2.2v1q0 .3.3.3h.1l.9-.4h.1l.2 1c0 .2.2.3.3.2h.1l.8-.6c.1 0 .2 0 .2.1l.3.9c.1.1.2.2.4.2 0 0 .1 0 .1-.1l.8-.7h.2l.5.8c.1.1.3.2.4.1l.1-.1.5-.8h.2l.7.7c.1.1.3.1.4 0l.1-.1.3-.9c.1 0 .2 0 .2-.1l.8.6c.1.1.3.1.4-.1 0 0 0-.1.1-.1l.2-1c.1 0 .1-.1.2-.1l.9.4c.1.1.3 0 .4-.1v-1.1l.2-.2 1 .2c.2 0 .3-.1.3-.2v-.1l-.2-1 .2-.2h1q.3 0 .3-.3v-.1l-.4-.9c0-.1.1-.1.1-.2l1-.2c.2 0 .3-.2.2-.3v-.1l-.6-.8.1-.2.9-.3c.1-.1.2-.2.2-.4 0 0 0-.1-.1-.1L21 13v-.2l.8-.5c.2-.1.2-.3.1-.6q0 .15 0 0m-5.7 7c-.3-.1-.5-.4-.5-.7.1-.3.4-.5.7-.5.3.1.5.4.5.7 0 .4-.3.6-.7.5m-.2-1.9c-.3-.1-.6.1-.6.4l-.4 1.4q-1.35.6-3 .6c-1.1 0-2.1-.2-3.1-.7l-.3-1.4c-.1-.3-.3-.5-.6-.4l-1.2.3c-.2-.2-.4-.5-.6-.7h6c.1 0 .1 0 .1-.1v-2.1c0-.1 0-.1-.1-.1h-1.7v-1.3h1.9c.2 0 .9 0 1.2 1 .1.3.2 1.3.4 1.6.1.3.6 1 1.1 1h3.1c-.2.3-.4.5-.7.8zm-8.3 1.9c-.3.1-.6-.1-.7-.5-.1-.3.1-.6.5-.7s.6.1.7.5c0 .3-.2.6-.5.7M5.4 9.5c.1.3 0 .7-.3.8s-.7 0-.8-.3 0-.7.3-.8c.4-.1.7 0 .8.3m-.7 1.6 1.3-.5c.3-.1.4-.4.3-.7L6 9.3h1V14H5c-.3-1-.4-1.9-.3-2.9m5.6-.4V9.3h2.5c.1 0 .9.1.9.7 0 .5-.6.7-1.1.7zm9 1.2v.5h-.8c-.1 0-.1 0-.1.1v.3c0 .8-.5 1-.9 1s-.8-.2-.9-.4c-.2-1.3-.6-1.5-1.2-2 .7-.5 1.5-1.2 1.5-2.1 0-1-.7-1.6-1.1-1.9-.7-.4-1.4-.5-1.6-.5H6.6c1.1-1.2 2.5-2 4.1-2.3l.9 1c.2.2.5.2.8 0l1-1c2.1.4 3.9 1.7 5 3.6l-.7 1.6c-.1.3 0 .6.3.7l1.3.6zm-7.7-8c.2-.2.6-.2.8 0s.2.6 0 .8q-.45.45-.9 0c-.2-.2-.1-.5.1-.8m6.9 5.6c.1-.3.5-.4.8-.3s.4.5.3.8-.5.4-.8.3-.4-.5-.3-.8"/></svg>
+
+    </a>
+    Spark Connect Rust Client
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/apache/spark-connect-rust" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    apache/spark-connect-rust
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Get started
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Get started
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../which-client/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Which client am I using?
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quickstart
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../configuration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Configuration and Connection
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Guides
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Guides
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../dataframes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    DataFrames
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../columns-and-functions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Columns and Functions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sql/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SQL
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../data-sources/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reading and Writing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../streaming/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Structured Streaming
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../catalog/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Catalog
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../types/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Types and Schemas
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../udfs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Rust UDFs via WebAssembly
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../examples/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Examples
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Compatibility
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Compatibility
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#supported-spark" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Supported Spark
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#rust-migration-for-the-43-line" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Rust migration for the 4.3 line
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#native-ml-objects-fetch-summaries-save-and-load-rust-api" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Native ML objects: fetch, summaries, save and load (Rust API)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#native-logisticregression" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Native LogisticRegression
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#native-randomforestregressor" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Native RandomForestRegressor
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#native-gbtregressor" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Native GBTRegressor
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#native-gbtclassifier" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Native GBTClassifier
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#native-decisiontreeregressor" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Native DecisionTreeRegressor
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#native-decisiontreeclassifier" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Native DecisionTreeClassifier
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#native-randomforestclassifier" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Native RandomForestClassifier
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#native-kmeans" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Native KMeans
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#native-linearregression" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Native LinearRegression
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#native-linearsvc" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Native LinearSVC
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#native-pipeline-and-crossvalidator-fit-is-not-implemented" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Native Pipeline and CrossValidator: fit is not implemented
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#pysparkml" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        pyspark.ml
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#spark-declarative-pipelines-cli" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Spark Declarative Pipelines CLI
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#how-parity-is-verified" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        How parity is verified
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-parity-ledger" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The parity ledger
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-drop-in-means" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What "drop-in" means
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#native-naivebayes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Native NaiveBayes
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#native-bisectingkmeans" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Native BisectingKMeans
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#native-generalizedlinearregression" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Native GeneralizedLinearRegression
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#native-gaussianmixture" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Native GaussianMixture
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#native-fmclassifier" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Native FMClassifier
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#native-multilayerperceptronclassifier" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Native MultilayerPerceptronClassifier
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#native-onevsrest" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Native OneVsRest
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#native-aftsurvivalregression-isotonicregression-and-fmregressor" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Native AFTSurvivalRegression, IsotonicRegression and FMRegressor
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#native-lda-and-poweriterationclustering" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Native LDA and PowerIterationClustering
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#native-feature-stages" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Native feature stages
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#native-fpgrowth-and-prefixspan" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Native FPGrowth and PrefixSpan
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#native-als-recommendation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Native ALS recommendation
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#native-ml-evaluators" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Native ML evaluators
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#native-ml-statistics" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Native ML statistics
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Troubleshooting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../contributing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contributing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#supported-spark" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Supported Spark
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#rust-migration-for-the-43-line" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Rust migration for the 4.3 line
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#native-ml-objects-fetch-summaries-save-and-load-rust-api" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Native ML objects: fetch, summaries, save and load (Rust API)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#native-logisticregression" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Native LogisticRegression
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#native-randomforestregressor" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Native RandomForestRegressor
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#native-gbtregressor" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Native GBTRegressor
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#native-gbtclassifier" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Native GBTClassifier
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#native-decisiontreeregressor" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Native DecisionTreeRegressor
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#native-decisiontreeclassifier" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Native DecisionTreeClassifier
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#native-randomforestclassifier" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Native RandomForestClassifier
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#native-kmeans" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Native KMeans
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#native-linearregression" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Native LinearRegression
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#native-linearsvc" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Native LinearSVC
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#native-pipeline-and-crossvalidator-fit-is-not-implemented" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Native Pipeline and CrossValidator: fit is not implemented
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#pysparkml" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        pyspark.ml
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#spark-declarative-pipelines-cli" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Spark Declarative Pipelines CLI
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#how-parity-is-verified" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        How parity is verified
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-parity-ledger" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The parity ledger
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-drop-in-means" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What "drop-in" means
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#native-naivebayes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Native NaiveBayes
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#native-bisectingkmeans" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Native BisectingKMeans
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#native-generalizedlinearregression" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Native GeneralizedLinearRegression
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#native-gaussianmixture" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Native GaussianMixture
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#native-fmclassifier" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Native FMClassifier
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#native-multilayerperceptronclassifier" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Native MultilayerPerceptronClassifier
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#native-onevsrest" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Native OneVsRest
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#native-aftsurvivalregression-isotonicregression-and-fmregressor" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Native AFTSurvivalRegression, IsotonicRegression and FMRegressor
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#native-lda-and-poweriterationclustering" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Native LDA and PowerIterationClustering
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#native-feature-stages" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Native feature stages
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#native-fpgrowth-and-prefixspan" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Native FPGrowth and PrefixSpan
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#native-als-recommendation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Native ALS recommendation
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#native-ml-evaluators" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Native ML evaluators
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#native-ml-statistics" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Native ML statistics
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="compatibility">Compatibility<a class="headerlink" href="#compatibility" title="Permanent link">&para;</a></h1>
+<p>This client aims for <strong>full API parity</strong> with the reference PySpark Spark Connect
+client (<code>pyspark.sql.connect.*</code>) and the shared modules it depends on. The goal is
+that existing Spark Connect code runs unchanged and gets byte-for-byte identical
+results. For how this client relates to the <code>pyspark</code> and <code>pyspark-client</code> packages
+on PyPI - and how to tell which one you have installed - see
+<a href="../which-client/">Which client am I using?</a>.</p>
+<h2 id="supported-spark">Supported Spark<a class="headerlink" href="#supported-spark" title="Permanent link">&para;</a></h2>
+<p>Apache Spark <strong>4.3.0 and later</strong>. The crate and wheel version tracks the Spark
+release it targets (starting at <code>4.3.0</code>), so the version number tells you which
+Spark it speaks.</p>
+<h2 id="rust-migration-for-the-43-line">Rust migration for the 4.3 line<a class="headerlink" href="#rust-migration-for-the-43-line" title="Permanent link">&para;</a></h2>
+<p><code>Value</code> and <code>LiteralExpression</code> add a <code>DayTimeInterval(i64)</code> variant for signed
+microseconds. Downstream exhaustive matches on these public enums must handle
+the new variant. Rust interval map keys are stringified as raw microseconds;
+Python <code>timedelta</code> map keys are not yet supported.</p>
+<p><code>DataFrame::sort</code>, <code>order_by</code>, <code>sort_within_partitions</code>, <code>agg</code>, <code>observe</code>, <code>observe_with</code>,
+<code>hint_expressions</code>, <code>repartition_by_range</code>, <code>repartition_by_range_opt</code>,
+<code>repartition_by_expressions</code>, <code>GroupedData::agg</code>, the <code>partition_by</code> and <code>order_by</code> of <code>Window</code>
+and <code>WindowSpec</code>, and <code>TableValuedFunction::udtf</code> take
+<code>impl IntoIterator&lt;Item = impl Into&lt;Column&gt;&gt;</code>, as <code>select</code> and <code>group_by</code> do: Columns, column
+names or expressions, such as <code>df.sort([col("x").desc()])</code> and
+<code>.agg([sum(col("id")).alias("total")])</code>, without <code>.expression().clone()</code>. So does the first list
+of <code>drop_columns</code>, of column references: a name in it is <code>col(name)</code>, as in PySpark's
+<code>drop(F.col(name))</code>, so a name of several columns is <code>AMBIGUOUS_REFERENCE</code>, and a dotted name such
+as <code>a.b</code> refers to the field <code>b</code> of a column <code>a</code>, which drops nothing (<code>"`a.b`"</code> refers to a
+column named <code>a.b</code>). Its second list is of plain names, as that of <code>drop</code>: a name drops every
+column of that name, and <code>a.b</code> the column named <code>a.b</code>. <code>grouping_sets</code> takes any iterable of
+grouping sets, each any iterable of Columns, such as <code>[[col("a")], [col("a"), col("b")]]</code>, and
+<code>grouping_sets_with_columns</code> takes such sets and any iterable of the grouping Columns. The names
+of <code>drop</code>, <code>describe</code>, <code>to_df</code>, <code>to_schema</code>, <code>melt</code>, the numeric aggregates of <code>GroupedData</code>
+(<code>sum</code>, <code>avg</code>, <code>min</code>, <code>max</code>, <code>mean</code>, <code>numeric_agg</code>), the <code>freq_items</code> and <code>approx_quantile</code> of
+<code>StatFunctions</code>, <code>Column::drop_fields</code> and the <code>partition_by</code> and <code>cluster_by</code> of
+<code>DataStreamWriter</code> take any iterable of names, as do the SQL expressions of <code>select_expr</code>, the
+statistics of <code>summary</code> and the paths of <code>DataFrameReader::load_paths</code>. The <code>(name, Column)</code>
+pairs of <code>with_columns</code> and the <code>(old, new)</code> pairs of <code>with_columns_renamed</code> take any iterable of
+pairs, and so do the <code>(String, Value)</code> pairs of <code>fillna_map</code>, such as a <code>BTreeMap&lt;String, Value&gt;</code>
+(its names stay <code>String</code>s, so that <code>vec![]</code> and <code>("id".into(), value)</code> still infer their type).
+<code>functions::count_distinct_columns</code> and <code>UserDefinedFunction::to_expression</code> (wasm) take any
+Columns. A <code>Vec</code> or an array of them compiles as before. The <code>Vec&lt;Expression&gt;</code> that the sort and
+aggregate methods took still compiles, by the new <code>From&lt;Expression&gt; for Column</code>, and so does the
+<code>Vec&lt;SortOrder&gt;</code> of the <code>order_by</code> of a window, by <code>From&lt;SortOrder&gt; for Column</code>; there a Column
+that is not a sort order is sorted ascending, nulls first, as PySpark's <code>WindowSpec.orderBy</code> sorts
+it. An empty <code>vec![]</code> or <code>[]</code> has no item type to infer: pass <code>Vec::&lt;Column&gt;::new()</code> or
+<code>Vec::&lt;&amp;str&gt;::new()</code> instead. This breaks a caller of v4.2.0 that passes an empty literal to
+<code>select_expr</code> or <code>summary</code>, which took a <code>Vec&lt;&amp;str&gt;</code> there: <code>df.summary(vec![])</code>, for the default
+statistics, becomes <code>df.summary(Vec::&lt;&amp;str&gt;::new())</code>. <code>load_paths</code> is new in this release: v4.2.0
+had only <code>load</code>, so no v4.2.0 caller breaks on it, and a new caller passes an empty literal as
+<code>load_paths(Vec::&lt;&amp;str&gt;::new())</code>. The optional
+<code>subset</code> arguments of the null functions, the optional <code>value_vars</code> of <code>melt</code> and the optional
+<code>column_names</code> of <code>drop_duplicates</code> and <code>drop_duplicates_within_watermark</code> stay
+<code>Option&lt;Vec&lt;&amp;str&gt;&gt;</code>, as in v4.2.0, so that <code>None</code> still infers its type. The optional <code>values</code> of
+<code>unpivot</code> takes any iterable, as in v4.2.0, so its <code>None</code> has no item type to infer, unlike that
+of <code>melt</code>: pass <code>None::&lt;Vec&lt;Column&gt;&gt;</code> or <code>None::&lt;[&amp;str; 0]&gt;</code> to unpivot every column that is not
+an id.</p>
+<p><code>BinaryClassificationEvaluator::set_score_col</code> and <code>score_col</code>, and the Python
+<code>scoreCol=</code> argument and <code>setScoreCol</code> of v4.2.0 are removed, without an alias:
+Spark's evaluator has no <code>scoreCol</code> param, so no value of it worked on the server.
+Use <code>set_raw_prediction_col</code> and <code>raw_prediction_col</code> in Rust, and
+<code>rawPredictionCol=</code> / <code>setRawPredictionCol</code> in Python. They follow standard
+<code>pyspark.ml.evaluation.BinaryClassificationEvaluator</code>, whose default input column
+is <code>rawPrediction</code> and whose scores may be doubles or vectors.</p>
+<p>The native ML classes take a JVM <code>Int</code> param as an <code>i32</code>: <code>LogisticRegression::set_max_iter</code>,
+<code>LinearSVC::set_max_iter</code> and <code>LinearSVC::set_aggregation_depth</code> take an <code>i32</code>, and
+<code>LogisticRegression::max_iter</code> returns one. Every native estimator has a getter of each
+of its params (<code>KMeans::k</code>, <code>RandomForestClassifier::num_trees</code>, ...), which reads its
+<code>Params</code>: the value that is set, else Spark's default (<code>None</code> for <code>seed</code>, <code>weight_col</code> and
+<code>thresholds</code>). The fields of <code>LogisticRegressionModel</code>, <code>StringIndexerModel</code> and
+<code>MaxAbsScalerModel</code> are private, as those of the other fitted models but <code>PipelineModel</code>: use
+<code>Transformer::operator</code> and <code>Transformer::params</code>, and <code>LogisticRegressionModel::feature_col</code>,
+<code>label_col</code> and <code>prediction_col</code>. <code>VectorAssembler::input_cols</code> and <code>Pipeline::stages</code>
+return a <code>Vec&lt;String&gt;</code>, and <code>VectorAssembler::set_input_cols</code> and <code>Pipeline::set_stages</code> take
+<code>impl IntoIterator&lt;Item = impl Into&lt;String&gt;&gt;</code>. The <code>input_col</code> of <code>StandardScaler</code>,
+<code>MaxAbsScaler</code> and <code>StringIndexer</code> returns an <code>Option&lt;&amp;str&gt;</code>, which is <code>None</code> unless set: as in
+Spark, it has no default. Their <code>output_col</code>, and that of <code>VectorAssembler</code>, return a <code>String</code>,
+Spark's <code>&lt;uid&gt;__output</code> unless set, the column that the server writes. Before, they gave names
+that the server never wrote, such as <code>scaled_features</code>.</p>
+<p><code>Params::set_param_int32</code>, <code>set_param_int_narrow</code>, <code>set_param_string_array</code> and
+<code>set_param_double_array</code> are public, with the new <code>Params::clear_param</code>, and the evaluators
+have a <code>params_mut</code>, as estimators and transformers do. Seeds, <code>CrossValidator::set_seed</code>'s
+included, are sent as the narrowest integer literal that holds them, as PySpark sends a Python
+int. <code>MlOperator::new</code> makes a uid of the simple class name and 12 hex digits
+(<code>KMeans_1a2b3c4d5e6f</code>), as PySpark and Spark do, instead of a bare UUID.</p>
+<p><code>DataFrame::fillna_value</code> and <code>DataFrame::fillna_map</code> return a <code>Result</code>, as
+<code>dropna</code> does. As PySpark's <code>fillna</code>, they take a bool, an integer, a float or a
+string (an integer is sent as a long, a float as a double), and reject other values
+with <code>NOT_EXPECTED_TYPE</code> and an empty map with <code>CANNOT_BE_EMPTY</code>. Before, such a
+value filled string columns with its debug text. A <code>Value::Map</code> given to
+<code>fillna_value</code> fills the columns of its keys, as PySpark's <code>fillna</code> of a dict, instead
+of being rejected. <code>fillna</code>, <code>fillna_double</code>, <code>fillna_string</code> and <code>fillna_bool</code> are
+unchanged.</p>
+<p>A transport failure has the gRPC code that grpc-python gives it, which PySpark's errors and
+retries see. <code>SparkError::grpc_code</code> is <code>UNAVAILABLE</code> (14) for a connection that closes or is reset
+under a call, where it was <code>UNKNOWN</code> (2); for a call that its connection closes before sending it,
+where it was <code>CANCELLED</code> (1); and for a connection that the server ends with a GOAWAY, where it was
+the code of the reason of the GOAWAY, such as <code>INTERNAL</code> (13) for <code>NO_ERROR</code> and
+<code>RESOURCE_EXHAUSTED</code> (8) for <code>ENHANCE_YOUR_CALM</code>. It is <code>INTERNAL</code> (13) for a stream that the
+server resets with a reason that tonic leaves unmapped, such as <code>STREAM_CLOSED</code>, which is no
+longer retried.</p>
+<p>The 4.3 line changes the public Rust representation of expressions and logical
+plans to share immutable nodes. This is a breaking change for code that directly
+constructs or matches these representations. The <code>Column</code> and <code>DataFrame</code> APIs,
+Python APIs, and Spark Connect protocol are unchanged by this representation change.</p>
+<p><code>Expression</code> is now a shared handle; its previous enum variants live in
+<code>ExpressionNode</code>. Construct an <code>ExpressionNode</code> and convert it with <code>.into()</code> (or
+pass it to <code>Expression::new</code>). Match on <code>expression.node()</code>, which borrows an
+<code>&amp;ExpressionNode</code>. Cloning an <code>Expression</code> shares its immutable node instead of
+recursively copying its children. To change an expression, construct a new node.
+Common nodes also have <code>Expression::literal</code>, <code>Expression::column</code>, and
+<code>Expression::function</code> constructors.</p>
+<p>For example, replace direct <code>Expression::Literal(...)</code> construction and matching
+with:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="k">use</span><span class="w"> </span><span class="n">spark_connect</span><span class="p">::</span><span class="n">expression</span><span class="p">::{</span><span class="n">Expression</span><span class="p">,</span><span class="w"> </span><span class="n">ExpressionNode</span><span class="p">,</span><span class="w"> </span><span class="n">LiteralExpression</span><span class="p">};</span>
+<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>
+<a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="kd">let</span><span class="w"> </span><span class="n">expression</span><span class="p">:</span><span class="w"> </span><span class="nc">Expression</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ExpressionNode</span><span class="p">::</span><span class="n">Literal</span><span class="p">(</span><span class="n">LiteralExpression</span><span class="p">::</span><span class="n">Long</span><span class="p">(</span><span class="mi">1</span><span class="p">)).</span><span class="n">into</span><span class="p">();</span>
+<a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="kd">let</span><span class="w"> </span><span class="n">shared</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">expression</span><span class="p">.</span><span class="n">clone</span><span class="p">();</span>
+<a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a><span class="k">match</span><span class="w"> </span><span class="n">shared</span><span class="p">.</span><span class="n">node</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a><span class="w">    </span><span class="n">ExpressionNode</span><span class="p">::</span><span class="n">Literal</span><span class="p">(</span><span class="n">LiteralExpression</span><span class="p">::</span><span class="n">Long</span><span class="p">(</span><span class="n">value</span><span class="p">))</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="fm">assert_eq!</span><span class="p">(</span><span class="o">*</span><span class="n">value</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="p">),</span>
+<a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a><span class="w">    </span><span class="n">_</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="fm">panic!</span><span class="p">(</span><span class="s">"expected a long literal"</span><span class="p">),</span>
+<a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a><span class="p">}</span>
+</code></pre></div>
+<p>Child expressions are handles too: <code>ExpressionNode::DirectShufflePartitionId</code>
+takes an <code>Expression</code>, and <code>CaseWhen::else_expr</code> is <code>Option&lt;Expression&gt;</code>, without
+the previous extra <code>Box</code>.</p>
+<p>Logical-plan child fields now use <code>Arc&lt;LogicalPlan&gt;</code> instead of <code>Box&lt;LogicalPlan&gt;</code>.
+When constructing variants directly, replace <code>Box::new(child)</code> with
+<code>Arc::new(child)</code>, or clone an existing <code>Arc</code> to share that child. Plan-building
+helpers accept <code>impl Into&lt;Arc&lt;LogicalPlan&gt;&gt;</code>, so they accept either an owned
+<code>LogicalPlan</code> or an existing <code>Arc&lt;LogicalPlan&gt;</code>. Serialization still produces the
+same protobuf tree; sharing does not deduplicate repeated relations on the wire.</p>
+<p><code>LogicalPlan</code> implements <code>Drop</code>, so that a plan of many levels is dropped without
+recursing. A field can therefore not be moved out of an owned <code>LogicalPlan</code>:
+destructuring one by value is a compile error (E0509). Match on a reference instead
+(<code>match &amp;plan</code>, or <code>match plan.as_ref()</code> of an <code>Arc&lt;LogicalPlan&gt;</code>) and clone the
+fields you need; the inputs are <code>Arc</code>s, so cloning them shares them.</p>
+<p><code>LogicalPlan::Raw</code> adds a <code>depth</code> field: the levels of its relation as a plan, with
+those of the DataFrames that it holds, as <code>pyspark.ml</code> builds a relation over its
+input. They count for <code>MAX_PLAN_DEPTH</code>, as PySpark's serializer counts the plan of the
+input within its own. Code that constructs the variant directly sets it to 1 for a
+relation without nested plans. <code>LogicalPlan::try_to_proto</code> serializes a plan as a
+request does: a plan deeper than <code>MAX_PLAN_DEPTH</code>, or with an expression deeper than
+<code>MAX_EXPRESSION_DEPTH</code>, is a <code>RecursionError</code>. <code>to_proto</code> still serializes a plan of
+any depth, but prost encodes and drops a protobuf by recursing, so the proto of a plan
+of many thousands of levels can overflow a small stack.</p>
+<p><code>Value</code> and <code>LiteralExpression</code> add a <code>YearMonthInterval(i32)</code> variant for signed
+months. Collect gives it for a year-month interval, where it gave the text of the
+interval (<code>Value::String("1-0")</code>), so that a pivot on collected values names its
+columns as the pivot without values does (<code>INTERVAL '1-0' YEAR TO MONTH</code>), and
+<code>create_dataframe</code> takes it for an <code>INTERVAL YEAR TO MONTH</code> column (not for <code>INTERVAL YEAR</code>
+or <code>INTERVAL MONTH</code>, which the server cannot narrow the Arrow interval to). Downstream exhaustive
+matches on these enums must handle the new variant. The Python client still raises
+<code>NOT_IMPLEMENTED</code> when it collects a year-month interval, as PySpark does.</p>
+<p><code>DataFrame::repartition_by_range</code> and <code>repartition_by_range_opt</code> return a <code>Result</code>.
+As PySpark's <code>repartitionByRange</code>, a partition count that is not positive is
+<code>VALUE_NOT_POSITIVE</code> and an empty column list <code>CANNOT_BE_EMPTY</code>. Before, the server
+split the rows round-robin for an empty column list. <code>StatFunctions::sample_by</code>
+returns a <code>Result</code> too: a stratum that is not a literal of a bool, an integer, a float
+or a string (a null, a decimal, binary, a date, a timestamp, an interval or an array)
+is <code>DISALLOWED_TYPE_FOR_CONTAINER</code>, as PySpark rejects a key that is not a float, an
+int or a str. Before, it was sent as an empty literal, which failed only when the
+DataFrame ran, or as its own literal, which sampled no rows. Without a seed,
+<code>sample_by</code> sends one that the client draws, as <code>sample</code> and <code>random_split</code> do.</p>
+<p>A panic of a native <code>StreamingQueryListener</code> on an event of the listener bus is
+isolated, as on the started event and as PySpark isolates the exception of a listener:
+it is reported, the other listeners still get the event, and the subscription goes on.
+Before, it ended the subscription and removed every listener. An error that
+<code>try_on_event</code> returns still ends it.</p>
+<p>The random functions <code>rand</code>, <code>randn</code>, <code>uuid</code>, <code>shuffle</code>, <code>uniform</code>, <code>randstr</code> and
+<code>count_min_sketch</code> draw a new seed for each call, as PySpark and the Scala client do.
+Before, each sent the same fixed seed, so two <code>uuid()</code> columns, or the <code>uuid()</code> of
+two runs, were equal. For reproducible values, use the <code>_with_seed</code> variants
+(<code>rand_with_seed(42)</code>, <code>uuid_with_seed(lit(42))</code>, ...). <code>random</code> and
+<code>random_with_seed</code> are added as the aliases of <code>rand</code> that PySpark has.</p>
+<p><code>DataFrameWriter::clear_bucket_by</code> is added: it unsets the bucketing of a writer, so that
+its write sends none, as PySpark's <code>bucketBy</code> of a count that is not positive, the last
+<code>bucketBy</code> winning. <code>bucket_by</code> is unchanged and sends the count it is given.</p>
+<p><code>DataFrame::persist</code> takes <code>impl Into&lt;Option&lt;StorageLevel&gt;&gt;</code>, so a <code>StorageLevel</code> is passed
+as before. <code>None</code> sends no storage level, as PySpark's <code>persist(None)</code>, and the server then
+caches at its <code>spark.sql.defaultCacheStorageLevel</code>. <code>cache</code> is unchanged and persists at
+<code>MEMORY_AND_DISK_DESER</code>.</p>
+<p><code>DataType::from_json</code> reads the spatial types as the JSON reader of Spark does: a bare
+<code>geometry</code> or <code>geography</code> is of SRID 4326, <code>geography(&lt;algorithm&gt;)</code> is of the CRS <code>OGC:CRS84</code>, a
+CRS is of the form <code>&lt;authority&gt;:&lt;code&gt;</code>, and an algorithm other than <code>SPHERICAL</code> is
+<code>ST_INVALID_ALGORITHM_VALUE</code>. It no longer takes <code>geometry(&lt;srid&gt;)</code>, <code>geometry(any)</code> and their
+<code>geography</code> forms, which are of the DDL, not of the JSON, of Spark. <code>DataType::from_ddl</code> takes a
+number or <code>any</code> as an SRID, as the DDL parser of Spark does, and no longer takes such forms as
+<code>geometry(+5)</code>, <code>geometry(SRID:ANY)</code> or <code>geography(4326, SPHERICAL)</code>.</p>
+<h2 id="native-ml-objects-fetch-summaries-save-and-load-rust-api">Native ML objects: fetch, summaries, save and load (Rust API)<a class="headerlink" href="#native-ml-objects-fetch-summaries-save-and-load-rust-api" title="Permanent link">&para;</a></h2>
+<p><code>spark_connect::ml</code> reads and writes the server-side objects of Spark Connect ML as PySpark 4.3.0
+does over Spark Connect, for the typed model accessors, summaries and persistence of the native
+classes to build on:</p>
+<ul>
+<li><code>MlRef</code> is a server-side object: a fitted model (<code>Model::ml_ref</code>), or another object that a
+  fetch returns, such as a tree of an ensemble. Its clones and the DataFrames whose plans read it
+  share it, and the last owner to drop deletes it on the server, as PySpark's <code>RemoteModelRef</code>.</li>
+<li><code>fetch(&amp;MlTarget, method, args)</code> runs a method of an object, as <code>_call_java</code> of <code>pyspark.ml</code>
+  does over Spark Connect (a <code>Fetch</code> command). <code>MlTarget::object(&amp;model_ref).child("summary")</code>
+  reaches the object of a method chain (<code>"&lt;id&gt;.summary"</code>), and <code>MlTarget::helper(&amp;session)</code> the
+  ML helper (<code>invoke_helper_attr</code>). Its result is a value (<code>MlValue</code>), new objects (an id list
+  that names the trees of an ensemble is one object per tree), or a string. When the server has
+  lost a summary with its offloaded model, the fetch recreates the summary of the target's summary
+  dataset (<code>CreateSummary</code>) and runs once more, as PySpark does.</li>
+<li><code>MlValue</code> is a value as <code>deserialize_param</code> reads it and <code>serialize_param</code> sends it: ML vectors
+  and matrices, scalars, strings and arrays, byte for byte as PySpark's literals
+  (<code>tests/golden/ml_values.json</code>). An empty array, or one whose first element is null, has no type
+  to infer: send it as <code>FetchArg::Typed</code>, as PySpark sends a <code>(value, DataType)</code> pair.</li>
+<li><code>attribute_relation(&amp;MlTarget, method, args)</code> is the DataFrame of a method, as
+  <code>invoke_remote_attribute_relation</code> reads it, of the summary dataset of a summary target. It keeps
+  the object and the plans of its DataFrame arguments alive.</li>
+<li><code>write_operator</code> and <code>write_object</code> save an estimator, transformer or evaluator, or a fitted
+  model (<code>Write</code>), and <code>read</code> loads one of its JVM class (<code>Read</code>), as <code>RemoteMLWriter</code> and
+  <code>RemoteMLReader</code> of <code>pyspark.ml.connect.readwrite</code>. A loaded model is a new <code>MlRef</code>.</li>
+<li><code>Model::write()</code>, <code>Estimator::write()</code> and <code>Evaluator::write()</code> return an <code>MlWriter</code>, as
+  PySpark's <code>write()</code> returns an <code>MLWriter</code>: <code>.overwrite()</code>, <code>.option(key, value)</code> and
+  <code>.save(path)</code>. A model saves of the session that holds it. An estimator or an evaluator, which
+  holds no session, saves of the one that <code>.session(&amp;spark)</code> sets (as <code>MLWriter.session</code>), since
+  the Rust client has no active session.</li>
+<li>The fit of the <code>Estimator</code> trait returns a <code>Box&lt;dyn Model&gt;</code>; <code>model.downcast_ref::&lt;M&gt;()</code> gives
+  its concrete model type. <code>Model::describe()</code> is the server's description of a model (PySpark's
+  <code>__repr__</code> of a model, its <code>toString</code>). <code>PredictionModel</code> gives <code>num_features()</code> and
+  <code>predict(&amp;vector)</code>, the members of every prediction model of <code>pyspark.ml</code>.</li>
+</ul>
+<h2 id="native-logisticregression">Native LogisticRegression<a class="headerlink" href="#native-logisticregression" title="Permanent link">&para;</a></h2>
+<p>The native <code>spark_connect::ml::LogisticRegression</code> fits Spark's JVM
+<code>org.apache.spark.ml.classification.LogisticRegression</code> through the Connect ML
+protocol. Its training features must be ML vectors, in the Rust API as in Python; convert an
+array column with <code>array_to_vector</code> before fitting. The Python class,
+<code>pyspark.ml.connect.classification.LogisticRegression</code>, follows
+<code>pyspark.ml.classification.LogisticRegression</code>, PySpark's standard API over Spark Connect, not the
+deprecated PyTorch class of <code>pyspark.ml.connect</code>. Its keyword-only constructor takes the 21 params
+of <code>pyspark.ml</code>'s, with its defaults and <code>TypeConverters</code>: <code>featuresCol</code>, <code>labelCol</code>,
+<code>predictionCol</code>, <code>maxIter</code>, <code>regParam</code>, <code>elasticNetParam</code>, <code>tol</code>, <code>fitIntercept</code>, <code>threshold</code>,
+<code>thresholds</code>, <code>probabilityCol</code>, <code>rawPredictionCol</code>, <code>standardization</code>, <code>weightCol</code>,
+<code>aggregationDepth</code>, <code>family</code>, the matrices <code>lowerBoundsOnCoefficients</code> and
+<code>upperBoundsOnCoefficients</code>, the vectors <code>lowerBoundsOnIntercepts</code> and <code>upperBoundsOnIntercepts</code>,
+and <code>maxBlockSizeInMB</code>. It has a setter of each, and <code>setParams</code>. A fit sends a matrix or a vector as PySpark's ML
+serializer sends a <code>DenseMatrix</code>, a <code>SparseMatrix</code> or a vector; in the Rust API,
+<code>Params::set_param_matrix</code> sends an <code>MlMatrix</code> so. The params of the PyTorch training of the
+deprecated class (<code>numTrainWorkers</code>, <code>batchSize</code>, <code>learningRate</code>, <code>momentum</code> and <code>seed</code>) raise the
+<code>TypeError</code> of an unexpected keyword argument. As <code>pyspark.ml</code>'s, the constructor and
+<code>setParams</code> raise PySpark's <code>ValueError</code> when the <code>threshold</code> and the <code>thresholds</code> that are set
+disagree (<code>setParams</code> leaves the params that it is given set), and
+<code>setThreshold</code> and <code>setThresholds</code> leave the other one set, as they do over Spark Connect, where
+the <code>clear</code> of <code>pyspark.ml</code> does nothing: a fit then sends both, and the JVM raises its error when
+they disagree. Its model outputs the columns of the JVM model, as <code>pyspark.ml</code>'s does: a
+<code>rawPrediction</code> and a <code>probability</code> vector, and a <code>double</code> prediction. The JVM checks the labels
+(an integer in <code>[0, 100)</code>, not null), the types of the columns, and the output columns that the
+DataFrame has already, and raises its errors, as with <code>pyspark.ml</code>: the client makes no checks of
+its own, and sends no query of the labels.</p>
+<p>Fitting returns a server-cached model. Prediction uses that model's object
+reference and must use the same Spark session. Models are obtained through
+<code>Estimator::fit</code>; direct struct construction of <code>LogisticRegressionModel</code> is no
+longer supported. The cached model stays available while the model, a clone of
+it, or a DataFrame that it transformed is alive, including when such a DataFrame is
+executed later. When the last of them is dropped, the cached model is deleted on the
+server, as <code>pyspark.ml</code> does, without waiting for the server; a fit that is dropped
+at once leaves nothing cached.</p>
+<p>The Rust <code>transform</code> of a fitted model rejects a DataFrame of another session. In
+Python, as with PySpark, it returns a DataFrame whose analysis or execution fails
+on the server of that session with <code>CONNECT_ML.CACHE_INVALID</code>.</p>
+<p>The native estimators, transformers and evaluators of <code>pyspark.ml.connect</code> take
+keyword-only constructor parameters. The evaluators follow standard
+<code>pyspark.ml.evaluation</code>: multiclass classification defaults to <code>metricName="f1"</code>,
+and binary classification uses <code>rawPredictionCol="rawPrediction"</code>.
+Each value is converted by the <code>TypeConverters</code> of its param in
+PySpark (an integral float for an int param, for example), and a value that the
+converter rejects raises its <code>TypeError</code>. A fit, transform or evaluate sends only the
+params that the constructor or a setter set, so the server applies its defaults to
+the others, as with PySpark. An int beyond a long raises PySpark's
+<code>VALUE_NOT_BETWEEN</code> at the next fit. <code>None</code> is sent as a null literal, as PySpark sends
+it: the server reads a null <code>bootstrap</code> as false and rejects the other nulls. A param that is
+not given is not sent, so the server's default applies. A list param without elements is
+accepted by its constructor and setters, and a fit, transform or evaluate raises PySpark's
+<code>CANNOT_INFER_ARRAY_ELEMENT_TYPE</code> for it, as PySpark's serialization does.</p>
+<p>A native class has the <code>setParams</code> of its <code>pyspark.ml</code> class. It is keyword-only, takes the params
+of the constructor, sets the params that it is given, in order, and returns the object, as
+PySpark's <code>_set</code> does. As PySpark's, the <code>setParams</code> of <code>LogisticRegression</code> then checks its
+<code>threshold</code> and <code>thresholds</code>, whichever call set them, as its constructor does. Its signature is PySpark's for every class, the feature stages included, except
+<code>CrossValidator</code>, which takes <code>numFolds</code>, <code>parallelism</code> and <code>seed</code>, with a default of <code>None</code> for
+the first two. The <code>params</code> argument of a fit, transform or
+evaluate, which <code>pyspark.ml</code> takes as a param map, is accepted: <code>None</code> and an empty dict leave the
+params as they are. The native classes have no Param objects to key a map by, so a non-empty
+map raises a <code>TypeError</code> that says the native classes take no param map. A list or tuple of maps to
+a fit is fitted as <code>pyspark.ml</code> fits it: one model per map, in order, returned as a list,
+so that <code>[]</code> fits nothing and does not read the dataset. Any other value raises the <code>TypeError</code> that
+<code>pyspark.ml</code> raises for it. The <code>params</code> argument is checked first, before the dataset, as
+<code>pyspark.ml</code> checks it.</p>
+<p>Native <code>fit</code>, <code>transform</code> and <code>evaluate</code> require a Spark DataFrame, matching the dataset
+contract of standard <code>pyspark.ml</code> over Spark Connect. Passing a pandas DataFrame raises
+<code>TypeError</code> before the params of the class are validated, the schema is read or any request is
+sent (the helper calls below raise PySpark's error of its serialization); only a <code>params</code> argument that is not a param map is checked before it (see above). This
+also applies to empty pandas DataFrames and to the native Pipeline and CrossValidator
+placeholders.
+Convert local data explicitly with <code>df = spark.createDataFrame(pdf)</code> before calling
+<code>estimator.fit(df)</code>, <code>model.transform(df)</code> or <code>evaluator.evaluate(df)</code>. Transforms return Spark
+DataFrames; call <code>toPandas()</code> explicitly when a local result is needed. The deprecated
+<code>pyspark.ml.connect</code> pandas contract is not the target for these native methods. The feature stages described below use the same Spark DataFrame contract.</p>
+<p>Another object than a DataFrame raises the <code>AttributeError</code> of <code>sparkSession</code>, the attribute
+that <code>pyspark.ml</code> reads of the dataset first (<code>'int' object has no attribute 'sparkSession'</code> of
+<code>fit(5)</code>), before any request; an object that has a <code>sparkSession</code> raises a <code>TypeError</code>. The
+methods that <code>pyspark.ml</code> runs as a helper or attribute call (<code>PowerIterationClustering.assignClusters</code>,
+<code>PrefixSpan.findFrequentSequentialPatterns</code>, and <code>ALSModel.recommendForUserSubset</code> and
+<code>recommendForItemSubset</code>) read nothing of their dataset. PySpark's serialization
+(<code>pyspark.ml.connect.serialize</code>) converts any other object to a literal, as
+<code>LiteralExpression._from_value</code> does:
+- One that cannot be a literal raises PySpark's error of the conversion. That includes a pandas
+  DataFrame, which raises <code>UNSUPPORTED_DATA_TYPE</code> here rather than the <code>TypeError</code> above, as with
+  <code>pyspark.ml</code>, and an empty list, which raises <code>CANNOT_INFER_ARRAY_ELEMENT_TYPE</code>.
+- PySpark sends the others for the server to reject. These include an ML vector or matrix and a
+  <code>(value, DataType)</code> pair, which it sends as they are. Here they raise a <code>TypeError</code> before any
+  request.</p>
+<p>As with
+<code>pyspark.ml</code>, a fit sends the DataFrame as it is, and the transform of a model is the transform of
+the DataFrame as it is, which sends no request: the JVM estimators and models check the columns,
+and raise their errors of a column of a wrong type, or of an output column that the DataFrame has
+already, in the fit, or when the transformed DataFrame is analyzed or run.</p>
+<p>The column params of a fit and of a transform are sent as they are given, as <code>pyspark.ml</code> sends
+them, and the JVM reads a column by its exact name: <code>featuresCol="Features"</code> of a column <code>features</code>
+raises the JVM's <code>FIELD_NOT_FOUND</code> in a fit, as with <code>pyspark.ml</code>, while some JVM models resolve
+such a name. Evaluators send column names and types unchanged too, leaving their validation to
+Spark as standard <code>pyspark.ml.evaluation</code> does. Their metric results are Spark's double-precision
+values.</p>
+<p>The native estimators take the <code>VectorUDT</code> features of <code>pyspark.ml</code>: the JVM raises its error of
+an array <code>featuresCol</code> (<code>Column features must be of type class
+org.apache.spark.ml.linalg.VectorUDT:... but was actually class
+org.apache.spark.sql.types.ArrayType:array&lt;double&gt;.</code>), in the fit and when the transformed
+DataFrame is analyzed. Convert an array column with <code>pyspark.ml.functions.array_to_vector</code> first,
+as for <code>pyspark.ml</code>. (The JVM <code>KMeans</code>, <code>BisectingKMeans</code>, <code>GaussianMixture</code> and <code>LDA</code> also take
+arrays whose elements cannot be null, which the arrays of <code>createDataFrame</code> can be.)</p>
+<p>The feature stages, including <code>StandardScaler</code> and <code>MaxAbsScaler</code>, use Spark's JVM
+implementations through Connect. Vector-valued inputs must use <code>VectorUDT</code>; convert numeric
+arrays explicitly with <code>pyspark.ml.functions.array_to_vector</code>. <code>StandardScaler</code> defaults to
+<code>withMean=False, withStd=True</code>, matching standard <code>pyspark.ml</code>.</p>
+<h2 id="native-randomforestregressor">Native RandomForestRegressor<a class="headerlink" href="#native-randomforestregressor" title="Permanent link">&para;</a></h2>
+<p><code>spark_connect::ml::RandomForestRegressor</code> fits Spark's JVM random forest regressor
+through Connect using ML vector features and numeric labels. Rust builder setters
+and getters cover all 19 PySpark constructor parameters, including instance weights,
+bootstrap sampling, feature sampling and optional per-tree leaf indices. Unset
+parameters use Spark's defaults; a seed can select another reproducible sample.</p>
+<p>The native Python estimator is available from
+<code>pyspark.ml.connect.regression.RandomForestRegressor</code> and
+<code>pyspark.ml.connect.RandomForestRegressor</code>. It uses PySpark's keyword-only constructor
+names, defaults and parameter conversions, with mutating setters. Fitted models
+expose DataFrame <code>transform</code> for the fitting session. Models, clones and lazy
+transformed DataFrames retain the cached server model until their last owner drops.
+Tree inspection, feature importances, single-vector prediction and persistence are
+not exposed by this native addition.</p>
+<h2 id="native-gbtregressor">Native GBTRegressor<a class="headerlink" href="#native-gbtregressor" title="Permanent link">&para;</a></h2>
+<p><code>spark_connect::ml::GBTRegressor</code> fits Spark's JVM gradient-boosted regressor
+through Connect with ML vector features and continuous numeric labels. Rust
+setters/getters cover all 22 PySpark constructor parameters. It supports squared
+and absolute loss, instance weights, row/feature sampling, learning rate,
+iteration limits and validation-set early stopping.</p>
+<p>The Python binding is available as <code>pyspark.ml.connect.regression.GBTRegressor</code>
+and <code>pyspark.ml.connect.GBTRegressor</code>. Its keyword-only signature and 21 named
+setters match PySpark. <code>validationTol</code> has no Python setter. The reference's
+signature advertises <code>validationTol=0.1</code>, but omitting it leaves the parameter
+unset and uses Spark's <code>0.01</code> default. This binding preserves that behavior;
+<code>GBTRegressor(validationTol=0.1)</code> explicitly sends <code>0.1</code>. The Rust getter returns
+<code>0.01</code> when unset.</p>
+<p><code>maxIter</code> limits boosting iterations, and <code>stepSize</code> scales each tree after the
+first. With <code>validationIndicatorCol</code>, false rows train and true rows validate;
+early stopping can fit fewer trees. DataFrame transforms expose predictions and
+an optional vector of leaf IDs, one per fitted tree. Models, clones and lazy
+transformed DataFrames retain the cached model in its fitting session until the
+last owner is dropped. Tree inspection, per-iteration evaluation, single-vector
+prediction and persistence are outside this native addition.</p>
+<h2 id="native-gbtclassifier">Native GBTClassifier<a class="headerlink" href="#native-gbtclassifier" title="Permanent link">&para;</a></h2>
+<p><code>spark_connect::ml::GBTClassifier</code> fits Spark's JVM gradient-boosted binary
+classifier through Connect with ML vector features and labels 0 or 1. Rust builder
+setters/getters cover all 22 PySpark constructor parameters, plus probability/raw
+prediction column names and class thresholds. Unset parameters use Spark's defaults.
+A seed controls split-candidate row sampling, subsampling and feature sampling.</p>
+<p>The Python binding is available as <code>pyspark.ml.connect.classification.GBTClassifier</code>
+and <code>pyspark.ml.connect.GBTClassifier</code>. Its keyword-only constructor mirrors PySpark.
+Probability/raw prediction column names and thresholds are set through
+<code>setProbabilityCol</code>, <code>setRawPredictionCol</code> and <code>setThresholds</code>. <code>validationTol</code> is a
+constructor argument; PySpark does not provide a Python setter for it.</p>
+<p><code>maxIter</code> limits boosting iterations, and <code>stepSize</code> scales each tree after the
+first. With <code>validationIndicatorCol</code>, false rows train the trees and true rows
+validate early stopping; the resulting ensemble can contain fewer than <code>maxIter</code>
+trees. DataFrame transforms expose predictions, probabilities, raw margins and an
+optional vector of leaf IDs, one per fitted tree. Instance weights are supported.
+Models, clones and lazy transformed DataFrames retain the cached model in its
+fitting session until the last owner is dropped. Multiclass training, model
+inspection, per-iteration evaluation, single-vector prediction and persistence
+are outside this native addition.</p>
+<h2 id="native-decisiontreeregressor">Native DecisionTreeRegressor<a class="headerlink" href="#native-decisiontreeregressor" title="Permanent link">&para;</a></h2>
+<p><code>spark_connect::ml::DecisionTreeRegressor</code> fits Spark's JVM decision tree
+regressor through Connect with ML vector features and continuous numeric labels.
+Rust builder setters/getters cover all 16 PySpark constructor parameters,
+including <code>set_variance_col</code>, <code>set_weight_col</code> and <code>set_leaf_col</code>. Unset
+parameters use Spark's defaults.</p>
+<p>The native Python binding is available as
+<code>pyspark.ml.connect.regression.DecisionTreeRegressor</code> and
+<code>pyspark.ml.connect.DecisionTreeRegressor</code>. Its keyword-only constructor mirrors
+PySpark's parameter names and defaults. Mutating <code>setFeaturesCol</code>, <code>setMaxDepth</code>,
+<code>setVarianceCol</code>, etc. methods return the estimator.</p>
+<p>Fitted models expose DataFrame <code>transform</code>, including predictions, optional
+weighted label variance in the predicted leaf and optional scalar double leaf
+indices. Variance is computed within the predicted leaf; it is not a confidence
+interval for the prediction. Models, clones and lazy transformed DataFrames keep
+the cached server model alive in its fitting session until the last owner is
+dropped. Tree inspection, feature importances, single-vector prediction and
+persistence are outside this addition.</p>
+<h2 id="native-decisiontreeclassifier">Native DecisionTreeClassifier<a class="headerlink" href="#native-decisiontreeclassifier" title="Permanent link">&para;</a></h2>
+<p><code>spark_connect::ml::DecisionTreeClassifier</code> trains Spark's JVM decision tree
+classifier through Connect with ML vector features and non-negative integer class
+labels below numClasses. Rust builder setters cover all 18 PySpark constructor
+parameters, including <code>pruneTree</code> (Spark 4.3.0), plus class thresholds. Unset
+parameters use Spark's defaults.</p>
+<p>The Python binding is available as
+<code>pyspark.ml.connect.classification.DecisionTreeClassifier</code> and
+<code>pyspark.ml.connect.DecisionTreeClassifier</code>. Its keyword-only constructor matches
+PySpark's parameter names and defaults; mutating <code>setFeaturesCol</code>, <code>setMaxDepth</code>,
+etc. methods and <code>setThresholds</code> return the estimator.</p>
+<p>Fitted models expose DataFrame <code>transform</code>, including prediction, probability,
+raw per-leaf weighted class counts and an optional scalar double leaf index.
+Models, clones and lazy transformed DataFrames retain the cached model in its
+fitting session until the last owner is dropped. Tree inspection, feature
+importances, single-vector prediction and persistence are outside this addition.</p>
+<h2 id="native-randomforestclassifier">Native RandomForestClassifier<a class="headerlink" href="#native-randomforestclassifier" title="Permanent link">&para;</a></h2>
+<p><code>spark_connect::ml::RandomForestClassifier</code> trains Spark's JVM random forest
+classifier through Connect with ML vector features and non-negative integer class
+labels below numClasses. Rust builder setters cover all 22 PySpark constructor
+parameters, including <code>pruneTree</code> (Spark 4.3.0), plus class thresholds. Unset
+parameters use Spark's defaults. Without a seed, the sampling uses Spark's default
+seed (the hash of the class name), as with PySpark, so fits are reproducible either
+way.</p>
+<p>The native Python binding is available as
+<code>pyspark.ml.connect.classification.RandomForestClassifier</code> and
+<code>pyspark.ml.connect.RandomForestClassifier</code>. Its keyword-only constructor matches
+PySpark's parameter names and defaults, with mutating <code>setFeaturesCol</code>,
+<code>setNumTrees</code>, etc. methods and <code>setThresholds</code>.</p>
+<p>Fitted models expose DataFrame <code>transform</code>, including prediction, probability,
+raw prediction and optional per-tree leaf index columns. Models, clones and lazy
+transformed DataFrames retain the cached model in its fitting session until the
+last owner is dropped. Tree inspection, feature importances, training summaries,
+single-vector prediction and persistence are not exposed by this native addition.</p>
+<h2 id="native-kmeans">Native KMeans<a class="headerlink" href="#native-kmeans" title="Permanent link">&para;</a></h2>
+<p><code>spark_connect::ml::KMeans</code> fits Spark's JVM K-means estimator with ML vector
+features through the Connect ML protocol. Rust builder setters cover all 12
+constructor parameters, including <code>set_k</code>, <code>set_seed</code>, <code>set_weight_col</code>,
+<code>set_distance_measure</code> and <code>set_solver</code>. Unset parameters use Spark's defaults.
+Without a seed, the initialization uses Spark's default seed (the hash of the class
+name), as with PySpark, so fits are reproducible either way. Cluster numbers are
+arbitrary: compare membership rather than relying on particular numeric labels.</p>
+<p>The native Python binding is available as <code>pyspark.ml.connect.clustering.KMeans</code>
+and <code>pyspark.ml.connect.KMeans</code>, with the upstream keyword-only constructor and
+mutating parameter setters. Fitted models expose DataFrame <code>transform</code> in the
+fitting session. Models, clones and transformed DataFrames keep the cached server
+model alive until the last owner is dropped. Cluster-center access, training
+summaries, single-vector prediction and persistence are not exposed by this native
+addition. The vendored <code>pyspark.ml.clustering</code> API is unchanged.</p>
+<h2 id="native-linearregression">Native LinearRegression<a class="headerlink" href="#native-linearregression" title="Permanent link">&para;</a></h2>
+<p><code>spark_connect::ml::LinearRegression</code> fits Spark's JVM linear regression estimator
+through the Connect ML protocol, with ML vector features and numeric labels.
+Rust builder setters cover all 15 constructor parameters, including regularization,
+instance weights, solver selection and squared-error or Huber loss. Unset parameters
+use Spark's defaults.</p>
+<p>The native Python binding is available as
+<code>pyspark.ml.connect.regression.LinearRegression</code> and <code>pyspark.ml.connect.LinearRegression</code>.
+Its keyword-only constructor matches the JVM PySpark estimator's parameter names
+and defaults, with mutating <code>setFeaturesCol</code>, <code>setRegParam</code>, etc. methods.
+Fitted models expose <code>transform</code> on DataFrames from the fitting session. The model,
+its clones and transformed DataFrames keep the cached server model alive until
+the last owner is dropped. Model inspection (coefficients, intercept and summaries),
+single-vector prediction and persistence are not exposed by this native addition.</p>
+<h2 id="native-linearsvc">Native LinearSVC<a class="headerlink" href="#native-linearsvc" title="Permanent link">&para;</a></h2>
+<p><code>spark_connect::ml::LinearSVC</code> trains Spark's JVM binary linear support vector
+classifier through the Connect ML protocol. Use vector features and labels 0 or 1.
+Rust builder setters cover all 13 constructor parameters, including <code>set_reg_param</code>,
+<code>set_tol</code>, <code>set_weight_col</code> and <code>set_threshold</code>. Unset parameters use Spark's defaults.
+The Python binding is available as <code>pyspark.ml.connect.classification.LinearSVC</code>
+and <code>pyspark.ml.connect.LinearSVC</code>, with the upstream keyword-only constructor
+parameters and mutating <code>setFeaturesCol</code>, <code>setRegParam</code>, etc. methods.</p>
+<p><code>fit</code> returns a server-cached model; <code>transform</code> must use the fitting session.
+Clones and lazy prediction DataFrames keep the cached model usable while they are
+alive. When the last of the model, its clones and the DataFrames it transformed is
+dropped, the server deletes the cached model, as <code>pyspark.ml</code> does.
+The Python model uses the existing <code>MLModel.transform</code> interface. Model inspection
+(coefficients, intercept and summaries), single-vector prediction and model
+persistence are not exposed by this addition.</p>
+<h2 id="native-pipeline-and-crossvalidator-fit-is-not-implemented">Native Pipeline and CrossValidator: fit is not implemented<a class="headerlink" href="#native-pipeline-and-crossvalidator-fit-is-not-implemented" title="Permanent link">&para;</a></h2>
+<p><code>spark_connect::ml::Pipeline</code> and <code>spark_connect::ml::CrossValidator</code>, and their Python
+classes <code>pyspark.ml.connect.Pipeline</code> and <code>pyspark.ml.connect.CrossValidator</code>, do not fit.
+Their <code>fit</code> raises <code>NOT_IMPLEMENTED</code> (<code>PySparkNotImplementedError</code> in Python), naming
+<code>Pipeline.fit</code> or <code>CrossValidator.fit</code>, before any request is sent, and returns no model.
+The Connect ML protocol cannot run either one: the native Pipeline holds stage names, which
+the server cannot fit, and it has no pipeline model to transform; the native CrossValidator
+holds its numeric params only, without the estimator, evaluator or param grid. Their
+constructors and setters still set the params, as before.</p>
+<p>To fit a pipeline or to tune a model from Python, use the vendored <code>pyspark.ml.Pipeline</code> and
+<code>pyspark.ml.tuning.CrossValidator</code>, which take the estimator and transformer objects, as
+PySpark does. The Rust API has no way to fit a pipeline or to tune a model.</p>
+<h2 id="pysparkml">pyspark.ml<a class="headerlink" href="#pysparkml" title="Permanent link">&para;</a></h2>
+<p>The DataFrame-based <code>pyspark.ml</code> API (<code>pyspark.ml.classification</code>, <code>feature</code>,
+<code>regression</code>, <code>clustering</code>, <code>evaluation</code>, <code>tuning</code>, <code>stat</code>, <code>Pipeline</code>, ...) is
+Apache Spark's own, vendored from v4.3.0: estimators fit, models transform, and
+pipelines save and load on the server as with PySpark Connect, over the Rust
+transport. These modules build their own <code>spark.connect</code> messages with the
+generated <code>pyspark.sql.connect.proto</code>, which needs the <code>protobuf</code> package
+(<code>pip install "protobuf&gt;=6.33.5"</code>). The package is not a dependency of
+<code>pyspark-client-rust</code>: without it, <code>pyspark.ml</code> imports, but a fit or a transform
+raises an <code>AttributeError</code> that names <code>protobuf</code>.</p>
+<p>A DataFrame of a plan of <code>pyspark.ml</code> (<code>DataFrame(plan, session)</code>) takes the plan ID
+of this client rather than the one of the plan, which its columns refer to.</p>
+<h2 id="spark-declarative-pipelines-cli">Spark Declarative Pipelines CLI<a class="headerlink" href="#spark-declarative-pipelines-cli" title="Permanent link">&para;</a></h2>
+<p>The CLI of Spark Declarative Pipelines (<code>python -m pyspark.pipelines.cli init</code>, <code>run</code> and
+<code>dry-run</code>) and its modules are Apache Spark's own, vendored from v4.3.0, and Apache Spark's
+tests of them pass with this client. The CLI needs <code>pyyaml</code> and <code>protobuf</code>, which, as for
+<code>pyspark.ml</code>, are not dependencies of <code>pyspark-client-rust</code>. The user context extensions of a
+client (<code>spark.client.add_threadlocal_user_context_extension</code> and
+<code>add_global_user_context_extension</code>), which the CLI adds for the analyses of a pipeline, are
+sent with the requests of executions, analyses, configurations, error details and interrupts,
+as PySpark sends them.</p>
+<h2 id="how-parity-is-verified">How parity is verified<a class="headerlink" href="#how-parity-is-verified" title="Permanent link">&para;</a></h2>
+<p>Two independent gates in CI cover the two halves of a Spark Connect client - plan
+building and the transport/result path:</p>
+<ul>
+<li><strong>Golden-proto tests</strong> assert that the <code>spark.connect</code> protobuf plans this
+  client builds (plans, expressions, and every SQL function) match the reference
+  client <strong>byte-for-byte</strong>. This guards plan-building correctness.</li>
+<li><strong>The official Apache Spark Connect test suite</strong> runs the standard PySpark tests
+  against this client, exercising the <strong>transport and Arrow result paths</strong>
+  end-to-end against a real server. See the official-test-suite notes
+  and the CI notes under <code>dev/design/</code>.</li>
+</ul>
+<p>Together the two gates cover what the client sends and what it does with what
+comes back.</p>
+<h2 id="the-parity-ledger">The parity ledger<a class="headerlink" href="#the-parity-ledger" title="Permanent link">&para;</a></h2>
+<p>Coverage is tracked mechanically. <code>scripts/gen_parity_ledger.py</code> AST-parses the
+reference PySpark source and emits one row per public <strong>class</strong>, <strong>function</strong>, and
+<strong>method</strong> into a ledger (<code>dev/parity/inventory.csv</code>), so nothing is silently
+dropped. The current inventory covers roughly:</p>
+<table>
+<thead>
+<tr>
+<th>Kind</th>
+<th>Count</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Methods</td>
+<td>~1340</td>
+</tr>
+<tr>
+<td>Functions</td>
+<td>~620</td>
+</tr>
+<tr>
+<td>Classes</td>
+<td>~300</td>
+</tr>
+</tbody>
+</table>
+<p>Each row carries a status:</p>
+<ul>
+<li><strong>done</strong> / <strong>verified</strong> - mirrored by the client (and, where applicable,
+  confirmed against the reference).</li>
+<li><strong>n/a</strong> - <em>architecture-satisfied</em>: the equivalent wire behavior is provided by
+  the Rust core (<code>spark-connect</code> / <code>-core</code> / <code>-proto</code>), so a reference-private or
+  generated symbol is not mirrored one-to-one.</li>
+</ul>
+<p>The ledger is a development tracking tool (kept under <code>dev/parity/</code>); the official
+test suite is the authoritative gate.</p>
+<h2 id="what-drop-in-means">What "drop-in" means<a class="headerlink" href="#what-drop-in-means" title="Permanent link">&para;</a></h2>
+<p>From Python, <code>pyspark-client-rust</code> replaces the <code>pyspark-client</code> package: same
+<code>import pyspark</code>, same public API, same server - see <a href="../installation/">Installation</a>.
+Use it exactly like <a href="https://spark.apache.org/docs/latest/api/python/">PySpark</a>.
+The native <a href="../dataframes/">Rust API</a> mirrors the same surface.</p>
+<p>The drop-in parses the protobufs that a pickled Column or DataFrame carries, and the requests
+that session hooks see, at any depth that PySpark's serializer reaches, where the parsers of
+protobuf and prost stop at 100 nested messages. Its Rust client enables prost's
+<code>no-recursion-limit</code> feature, which applies to every message the drop-in decodes. So it also
+decodes server responses deeper than 100 nested messages, such as the schema of a struct nested
+34 levels deep, which PySpark's client rejects with "Exception deserializing response!". The
+server is trusted, as SECURITY.md sets out, so this is not a bound on the responses.</p>
+<p>An <code>Observation</code> that PySpark pickled at protocol 0 or 1 raises a <code>TypeError</code> when the drop-in
+unpickles it, as CPython's <code>copyreg._reconstructor</code> cannot create the drop-in's <code>Observation</code>, a
+class with a native base; protocols 2 and up, pickle's default, load in both clients, and PySpark
+loads the drop-in's at every protocol.</p>
+<p>The <code>TypeError</code> for too many positional arguments counts them without <code>self</code>: where CPython says
+"takes from 2 to 4 positional arguments but 5 were given", the drop-in says "takes from 1 to 3
+positional arguments but 4 were given". A method that takes no arguments gets "takes no arguments
+(1 given)", where CPython says "takes 1 positional argument but 2 were given" for
+<code>DataFrame.distinct(1)</code>. A method that takes one argument gets the plural "positional arguments"
+even for a count of one: the drop-in says "takes 1 positional arguments but 3 were given" for
+<code>DataFrame.limit(1, 2, 3)</code>, where CPython says "takes 2 positional arguments but 4 were given".
+A warning that the Rust core raises, such as the
+<code>FutureWarning</code> of <code>registerTempTable</code>, is attributed to the caller's frame and module, so a
+<code>warnings.filterwarnings(..., module="pyspark")</code> does not match it, as it matches PySpark's.</p>
+<p>The <code>TypeError</code> for a bad keyword argument of a method that takes no <code>**options</code> is PyO3's, which
+CPython words differently in two cases. For a key that is not a str, as <code>df.limit(1, **{1: 2})</code>,
+CPython says "keywords must be strings", where the drop-in says "DataFrame.limit() got an
+unexpected keyword argument '1'". For a method that takes no arguments, as <code>df.count(foo=1)</code>,
+CPython says "DataFrame.count() got an unexpected keyword argument 'foo'", where the drop-in says
+"DataFrame.count() takes no keyword arguments". The methods that take <code>**options</code>, and the
+readers', writers' and <code>SparkSession.builder.config</code>'s that take named options, word both as
+CPython does.</p>
+<h2 id="native-naivebayes">Native NaiveBayes<a class="headerlink" href="#native-naivebayes" title="Permanent link">&para;</a></h2>
+<p>The Rust <code>ml::NaiveBayes</code> and <code>ml::NaiveBayesModel</code> train and predict through Spark
+Connect's cached-model protocol. The Rust-backed Python API exports <code>NaiveBayes</code>
+from <code>pyspark.ml.connect</code> and <code>pyspark.ml.connect.classification</code>; <code>fit</code> returns the
+shared native <code>MLModel</code>, whose <code>transform</code> produces DataFrame predictions.</p>
+<p>All nine PySpark constructor parameters and named setters are supported:
+<code>featuresCol</code>, <code>labelCol</code>, <code>predictionCol</code>, <code>probabilityCol</code>, <code>rawPredictionCol</code>,
+<code>smoothing</code>, <code>modelType</code>, <code>thresholds</code> and <code>weightCol</code>. Rust exposes corresponding
+builder setters and getters. Unset parameters are omitted so the server uses its
+defaults. The Python constructor is keyword-only and converts values with
+PySpark's parameter converters.</p>
+<p>All four model types are covered by live tests: <code>multinomial</code>, <code>bernoulli</code>,
+<code>complement</code> and <code>gaussian</code>. Multinomial/complement inputs must be nonnegative;
+Bernoulli inputs must be binary; Gaussian inputs may contain continuous negative
+values. Tests also cover multiclass dense/sparse inputs, probability/raw score
+columns, smoothing and instance weights, threshold decisions, suppressed vector
+outputs, independent fits, session isolation and lazy model lifetime. A golden
+fixture captures all nine parameters for each model type from official PySpark.</p>
+<p>This native surface covers construction, parameter setters, fit and DataFrame
+transform. Model coefficient/statistic inspection, single-vector prediction and
+persistence are outside this surface. The vendored <code>pyspark.ml.classification</code>
+API continues to use its existing implementation.</p>
+<h2 id="native-bisectingkmeans">Native BisectingKMeans<a class="headerlink" href="#native-bisectingkmeans" title="Permanent link">&para;</a></h2>
+<p>The Rust <code>ml::BisectingKMeans</code> and <code>ml::BisectingKMeansModel</code> support training and
+DataFrame cluster assignment through Spark Connect's cached-model protocol. Python
+exports the native estimator from <code>pyspark.ml.connect</code> and
+<code>pyspark.ml.connect.clustering</code>; <code>fit</code> returns the shared native <code>MLModel</code>.</p>
+<p>All eight constructor parameters and named setters are supported: <code>featuresCol</code>,
+<code>predictionCol</code>, <code>maxIter</code>, <code>seed</code>, <code>k</code>, <code>minDivisibleClusterSize</code>, <code>distanceMeasure</code>
+and <code>weightCol</code>. Rust also provides parameter getters. The keyword-only Python
+constructor matches official PySpark's order/defaults and parameter conversions.
+Unset parameters are omitted so the server uses its defaults, including <code>k=4</code>.</p>
+<p>Live tests cover hierarchical splitting, absolute/fractional minimum divisible
+cluster sizes (which may produce fewer than <code>k</code> leaves), instance weights,
+Euclidean/cosine distance, sparse/dense inputs, seeded reproducibility, independent
+fits, session isolation and lazy model lifetime. Golden fixtures compare all eight
+parameters at six signed seed/integer-width boundaries with official PySpark.</p>
+<p>This native API covers construction, setters, fit and DataFrame transform.
+Cluster-center/summary/cost inspection, single-vector prediction and persistence
+are outside this surface. The vendored <code>pyspark.ml.clustering</code> API retains its
+existing implementation.</p>
+<h2 id="native-generalizedlinearregression">Native GeneralizedLinearRegression<a class="headerlink" href="#native-generalizedlinearregression" title="Permanent link">&para;</a></h2>
+<p><code>spark_connect::ml::GeneralizedLinearRegression</code> fits Spark's JVM estimator and
+returns a cached <code>GeneralizedLinearRegressionModel</code>. Python exposes it from
+<code>pyspark.ml.connect</code> and <code>pyspark.ml.connect.regression</code>; <code>fit</code> returns the shared
+native <code>MLModel</code>.</p>
+<p>All 16 PySpark constructor parameters and named setters are available:
+<code>labelCol</code>, <code>featuresCol</code>, <code>predictionCol</code>, <code>family</code>, <code>link</code>, <code>fitIntercept</code>,
+<code>maxIter</code>, <code>tol</code>, <code>regParam</code>, <code>weightCol</code>, <code>solver</code>, <code>linkPredictionCol</code>,
+<code>variancePower</code>, <code>linkPower</code>, <code>offsetCol</code> and <code>aggregationDepth</code>. Rust provides
+builder setters and getters for each parameter. Unset optional parameters stay
+unset: Spark chooses the family default link, or the Tweedie link power from
+<code>variancePower</code>.</p>
+<p>Fitting accepts ML vector features and numeric labels. Transform produces
+predictions and, when requested, the linear predictor in <code>linkPredictionCol</code>.
+Instance weights, offsets and L2 regularization are handled by Spark. The same
+numerical tests run against official PySpark and the native Python client,
+covering all five families (Gaussian, binomial, Poisson, Gamma and Tweedie),
+default and explicit links, dense/sparse features, weights, offsets, independent
+fitted models, lazy model ownership and rejected inputs. Official PySpark golden
+fixtures verify the parameter encoding, and live Rust tests exercise fitting
+and prediction directly.</p>
+<p>This native API covers construction, setters, fitting and DataFrame transforms.
+Coefficient/intercept access, model summaries, evaluation, persistence and
+single-vector prediction are not exposed by this addition.</p>
+<h2 id="native-gaussianmixture">Native GaussianMixture<a class="headerlink" href="#native-gaussianmixture" title="Permanent link">&para;</a></h2>
+<p>Rust <code>ml::GaussianMixture</code> and <code>ml::GaussianMixtureModel</code> train Gaussian mixture
+models and produce cluster assignments and component probabilities through Spark
+Connect's cached-model protocol. Python exports the native estimator from
+<code>pyspark.ml.connect</code> and <code>pyspark.ml.connect.clustering</code>; <code>fit</code> returns the shared
+native <code>MLModel</code>.</p>
+<p>All nine constructor parameters and named setters are supported: <code>featuresCol</code>,
+<code>predictionCol</code>, <code>k</code>, <code>probabilityCol</code>, <code>tol</code>, <code>maxIter</code>, <code>seed</code>, <code>aggregationDepth</code>
+and <code>weightCol</code>. Rust also provides corresponding getters. The keyword-only
+Python constructor matches official PySpark's order/defaults and conversions.
+Unset values are omitted so the server uses its defaults.</p>
+<p>Live tests cover one- and two-dimensional mixtures, two/three components,
+normalized probabilities and assignments, dense/sparse vectors, weights, seeded
+reproducibility, independent fits, disabled probability output, server validation,
+session isolation and lazy model lifetime. Golden fixtures compare all nine
+parameters at six signed seed/integer-width boundaries with official PySpark.</p>
+<p>The native surface covers construction, parameter setters, fit and DataFrame
+transform. Component/weight/covariance inspection, training summaries,
+single-vector prediction and persistence are outside this surface. The vendored
+<code>pyspark.ml.clustering</code> API retains its existing implementation.</p>
+<h2 id="native-fmclassifier">Native FMClassifier<a class="headerlink" href="#native-fmclassifier" title="Permanent link">&para;</a></h2>
+<p><code>spark_connect::ml::FMClassifier</code> and
+<code>pyspark.ml.connect.classification.FMClassifier</code> fit Spark's binary factorization
+machine classifier. All 17 PySpark constructor parameters have Rust builder
+setters/getters and named Python setters. Fitted models produce prediction,
+probability and raw-prediction columns, with configurable thresholds. Both the
+<code>gd</code> and <code>adamW</code> solvers run on the Spark server.</p>
+<h2 id="native-multilayerperceptronclassifier">Native MultilayerPerceptronClassifier<a class="headerlink" href="#native-multilayerperceptronclassifier" title="Permanent link">&para;</a></h2>
+<p><code>spark_connect::ml::MultilayerPerceptronClassifier</code> and its native Python binding
+support all 13 PySpark constructor parameters plus <code>setThresholds</code>. Configure
+<code>layers</code> before fitting; input and output sizes must match the feature dimension
+and number of classes. <code>initialWeights</code> accepts dense or sparse ML vectors:
+Rust uses <code>MlVector</code> (a <code>Vec&lt;f64&gt;</code> or array also converts to a dense vector), and
+Python accepts the values supported by PySpark's <code>TypeConverters.toVector</code>.
+Layer arrays and vector parameters are encoded in Rust and checked against
+fixtures captured with official PySpark.</p>
+<p>The fitted model produces multiclass prediction, probability and raw-prediction
+columns. Both <code>l-bfgs</code> and <code>gd</code> are supported. As in PySpark, fitting an empty
+DataFrame can return a model; the native client preserves that server behavior.</p>
+<h2 id="native-onevsrest">Native OneVsRest<a class="headerlink" href="#native-onevsrest" title="Permanent link">&para;</a></h2>
+<p><code>spark_connect::ml::OneVsRest</code> and <code>pyspark.ml.connect.classification.OneVsRest</code>
+implement the multiclass reduction in Rust. Supply a native binary classifier,
+for example <code>OneVsRest::new().set_classifier(LinearSVC::new())</code> in Rust or
+<code>OneVsRest(classifier=LinearSVC())</code> in Python. The <code>Classifier</code> enum accepts all
+eight native binary classifiers: LogisticRegression, LinearSVC,
+DecisionTreeClassifier, RandomForestClassifier, GBTClassifier, NaiveBayes,
+FMClassifier and MultilayerPerceptronClassifier. Perceptron base classifiers need
+a two-unit output layer.</p>
+<p>All seven PySpark constructor parameters have named setters. Rust exposes scalar
+parameter getters and the configured classifier. Fits clone the base classifier
+for each class and run at most <code>parallelism</code> fits at once. Python observes
+mutations to the supplied classifier made before <code>fit</code>, while fitting leaves that
+classifier unchanged. Class indices run from zero through the maximum label, as
+in PySpark. Instance weights are forwarded when the base classifier supports
+them; Python warns when they are ignored for FMClassifier or the perceptron.</p>
+<p>The model aggregates positive-class raw scores into <code>rawPrediction</code> and chooses
+the first highest score for <code>prediction</code>, ignoring NaN/null scores as PySpark
+does. It produces no probability column. Temporary columns and fit-created
+caches are cleaned up, and transformed DataFrames retain the binary models for
+lazy evaluation. Models must transform data in their fitting session.</p>
+<p>These additions cover native estimator construction, parameters, fitting and
+DataFrame transforms. Model coefficient/weight inspection, training summaries,
+persistence and single-vector prediction remain separate API work.</p>
+<h2 id="native-aftsurvivalregression-isotonicregression-and-fmregressor">Native AFTSurvivalRegression, IsotonicRegression and FMRegressor<a class="headerlink" href="#native-aftsurvivalregression-isotonicregression-and-fmregressor" title="Permanent link">&para;</a></h2>
+<p>All eight regression estimators in PySpark 4.3.0 now have native Rust fit/transform
+implementations. The three additions are available under <code>spark_connect::ml</code> and
+<code>pyspark.ml.connect.regression</code>, and are re-exported from <code>pyspark.ml.connect</code>.
+They fit Spark's JVM estimators and retain the returned server-cached models for
+as long as a model clone or transformed DataFrame needs them.</p>
+<ul>
+<li><strong>AFTSurvivalRegression</strong> fits a Weibull accelerated failure time model. It
+  accepts positive survival times and a censor column (1 for observed events, 0
+  for censored observations), and can produce a vector of requested quantiles.
+  All 11 constructor parameters have Rust and Python setters, including
+  <code>quantileProbabilities</code>, <code>quantilesCol</code>, and the aggregation/block-size settings.</li>
+<li><strong>IsotonicRegression</strong> fits increasing or decreasing univariate regression.
+  It supports scalar features or a selected vector component (<code>featureIndex</code>),
+  instance weights, interpolation between fitted boundaries, and clamping beyond
+  the training range. All six constructor parameters have setters.</li>
+<li><strong>FMRegressor</strong> fits factorization machines with pairwise interactions and
+  optional intercept and linear terms, using either <code>adamW</code> or <code>gd</code>. All 14
+  constructor parameters have setters, including factor size, initialization,
+  mini-batch fraction, regularization and seed.</li>
+</ul>
+<p>Unset parameters use Spark's defaults. The Python wrappers preserve PySpark's
+keyword-only constructor signatures and type conversion, and take ML vector
+features, as <code>pyspark.ml</code>'s do.</p>
+<p>This support covers construction, configuration, fitting and DataFrame
+transforms. Python returns the common <code>MLModel</code>. Specialized model inspection
+(e.g. AFT coefficients/scale, isotonic boundaries/predictions, FM factors),
+single-instance prediction and model persistence are not exposed by these
+native wrappers.</p>
+<p>Parameter goldens come from official PySpark 4.3.0. Native Rust and Python tests
+exercise censoring and quantiles, weighted isotonic interpolation, both FM
+solvers, validation errors and cached-model lifetimes. The Python behavior tests
+also run unchanged against the official client.</p>
+<h2 id="native-lda-and-poweriterationclustering">Native LDA and PowerIterationClustering<a class="headerlink" href="#native-lda-and-poweriterationclustering" title="Permanent link">&para;</a></h2>
+<p>The native Rust and Python APIs now implement all five clustering algorithms in
+PySpark 4.3.0: KMeans, BisectingKMeans, GaussianMixture, LDA and PowerIterationClustering.
+This describes algorithm execution, not complete model-inspection or persistence parity.</p>
+<p>Rust <code>ml::LDA</code> supports online and EM training and cached-model DataFrame transforms.
+Python exposes <code>LDA</code> through <code>pyspark.ml.connect</code> and <code>pyspark.ml.connect.clustering</code>;
+<code>fit</code> returns the shared native <code>MLModel</code>. All 14 constructor parameters have Python
+setters and Rust builder setters/getters, including document/topic concentrations,
+learning settings, checkpoint settings, seed and topic-distribution output column.
+Both optimizers return a vector of topic probabilities per document; empty documents
+produce zero vectors. As with <code>pyspark.ml</code>, an array feature column is sent as it is, and the JVM
+rejects one whose elements may be null, such as the arrays of <code>createDataFrame</code>.</p>
+<p><code>ml::PowerIterationClustering::assign_clusters</code> and Python <code>assignClusters</code> build
+Spark Connect's <code>powerIterationClusteringAssignClusters</code> helper relation. This algorithm
+has no fit/transform API or fitted model. It accepts source/destination vertex columns
+and optional nonnegative edge weights, with <code>k</code>, <code>maxIter</code> and <code>initMode</code> settings, and
+returns a Spark DataFrame with <code>id: bigint</code> and <code>cluster: int</code>. Parameter values are
+captured when the relation is built. Omitting <code>weightCol</code> uses unweighted edges; an
+explicit null remains distinct from an omitted parameter and is validated by Spark.
+The lazy relation retains any cached models used by its input DataFrame.</p>
+<p>Both APIs require Spark DataFrames and reject pandas inputs. Reference-derived golden
+fixtures and live tests cover both LDA optimizers, dense/sparse inputs, graph initialization
+modes, weighted/unweighted graphs, custom columns, setters, validation and model lifetime.
+LDA topic matrices, likelihood/perplexity methods, topic descriptions, distributed-model
+inspection/conversion and persistence are outside this native surface. The vendored
+<code>pyspark.ml.clustering</code> API retains its existing implementation.</p>
+<h2 id="native-feature-stages">Native feature stages<a class="headerlink" href="#native-feature-stages" title="Permanent link">&para;</a></h2>
+<p>All 38 standard <code>pyspark.ml.feature</code> estimators and transformers have native Rust execution
+and Python bindings. Rust exposes them as <code>spark_connect::ml::&lt;Name&gt;</code>, with typed builder
+setters/getters. Python exports them from <code>pyspark.ml.connect</code> and
+<code>pyspark.ml.connect.feature</code>, with standard <code>pyspark.ml.feature</code> keyword-only constructor
+signatures and named mutating setters. The vendored <code>pyspark.ml.feature</code> module is unchanged.</p>
+<table>
+<thead>
+<tr>
+<th>Area</th>
+<th>Stages</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Text and categorical features</td>
+<td>CountVectorizer, HashingTF, IDF, Word2Vec, Tokenizer, RegexTokenizer, NGram, StopWordsRemover, StringIndexer, IndexToString, OneHotEncoder, TargetEncoder, FeatureHasher</td>
+</tr>
+<tr>
+<td>Scaling and numeric transforms</td>
+<td>StandardScaler, MaxAbsScaler, MinMaxScaler, RobustScaler, Normalizer, Binarizer, Bucketizer, QuantileDiscretizer, Imputer, DCT, PolynomialExpansion, ElementwiseProduct</td>
+</tr>
+<tr>
+<td>Assembly and selection</td>
+<td>VectorAssembler, VectorIndexer, VectorSizeHint, VectorSlicer, Interaction, PCA, ChiSqSelector, UnivariateFeatureSelector, VarianceThresholdSelector, RFormula, SQLTransformer</td>
+</tr>
+<tr>
+<td>Locality-sensitive hashing</td>
+<td>BucketedRandomProjectionLSH, MinHashLSH</td>
+</tr>
+</tbody>
+</table>
+<p>The 20 estimators fit through Spark Connect's ML command and return session-scoped cached
+models; Python returns the shared native <code>MLModel</code>. The 18 transformers build lazy ML
+relations. Transformed DataFrames retain their fitted models and upstream input plans.
+<code>QuantileDiscretizer</code> returns a cached JVM <code>Bucketizer</code>; its Rust model wrapper is named
+<code>QuantileDiscretizerModel</code>. Training-only parameters are omitted from model transforms.
+Multi-column parameters, nested Bucketizer splits, vector-valued ElementwiseProduct weights,
+NaN imputation values, and UnivariateFeatureSelector's setter-only parameters are supported.</p>
+<p><code>StandardScaler</code> and <code>MaxAbsScaler</code> exports now refer to the native implementations. This
+changes the previous deprecated <code>pyspark.ml.connect</code> scaler behavior: pandas frames and
+array-valued feature columns are rejected; transforms return Spark DataFrames containing
+vectors. Mean centering is opt-in through <code>withMean=True</code>. Convert pandas data with
+<code>spark.createDataFrame</code> and array columns with <code>array_to_vector</code> before fitting.</p>
+<p>This covers constructor parameters, named setters, fit and DataFrame transform, and
+<code>StopWordsRemover.loadDefaultStopWords</code>, which reads the server's default stop words through
+Spark Connect's ML helper, as PySpark does (Rust <code>StopWordsRemover::load_default_stop_words</code>).</p>
+<p>In Rust, each fitted model also has the members of its PySpark model class, which it reads of
+the server-side model as PySpark does: for example <code>CountVectorizerModel::vocabulary</code>,
+<code>PCAModel::pc</code>, the scaler statistics, <code>VectorIndexerModel::category_maps</code>, the LSH models'
+<code>approx_nearest_neighbors</code> and <code>approx_similarity_join</code>, and <code>Word2VecModel::get_vectors</code> and
+<code>find_synonyms</code>. <code>CountVectorizerModel::from_vocabulary</code> and <code>StringIndexerModel::from_labels</code>
+and <code>from_arrays_of_labels</code> build a model of given values, and
+<code>QuantileDiscretizer::fit_bucketizer</code> gives the <code>Bucketizer</code> of the fitted splits, as PySpark's
+fit does. Every stage and model saves with <code>write()</code> and loads with <code>load(session, path)</code>, as
+PySpark's <code>save</code> and <code>load</code>. The Python classes gain these members with the native model
+classes. Pipeline/tuning execution is separate from this native surface. Existing vendored
+helper classes remain available.</p>
+<p>Tests compare all 38 stages with official PySpark 4.3.0 parameter literals and Spark results,
+including 10 multi-column/parameter variants, both constructor and setter configuration,
+model lifetime, invalid inputs and pandas rejection. Schema checks compare class identifiers,
+nullability and ML metadata; Connect omits the backing SQL schema of JVM UDTs on the wire.
+Run <code>scripts/capture_ml_features_golden.py</code> with the official client to regenerate the fixture.
+<code>scripts/capture_feature_models_golden.py</code> captures the members of every fitted model, the class
+methods, and the save and load of every stage, which <code>e2e_feature_models.rs</code> compares.
+Native live tests run in CI; set <code>FEATURE_REFERENCE=1</code> explicitly to run their reference mode.</p>
+<h2 id="native-fpgrowth-and-prefixspan">Native FPGrowth and PrefixSpan<a class="headerlink" href="#native-fpgrowth-and-prefixspan" title="Permanent link">&para;</a></h2>
+<p>Rust <code>ml::FPGrowth</code> fits Spark's frequent-itemset model and returns a typed
+<code>FPGrowthModel</code>. The model exposes lazy <code>freq_itemsets()</code> and <code>association_rules()</code>
+DataFrames and <code>transform()</code> predictions. The Python classes are exported from
+<code>pyspark.ml.connect</code> and <code>pyspark.ml.connect.fpm</code>; fitted models expose
+<code>freqItemsets</code> and <code>associationRules</code> as properties. All five estimator constructor
+parameters have named setters; model setters cover the item column, prediction
+column and minimum confidence. Parameters for prediction are captured when its lazy
+plan is built. The itemset/rule properties fetch the fitted server model, matching
+standard PySpark's Connect attribute relations.</p>
+<p>Rust <code>ml::PrefixSpan::find_frequent_sequential_patterns</code> and Python
+<code>PrefixSpan.findFrequentSequentialPatterns</code> mine arrays of itemsets directly through
+the Connect helper, with all four constructor parameters and named setters. They
+return sequence/frequency DataFrames and have no fit/transform model.</p>
+<p>These APIs accept Spark DataFrames and reject pandas frames before requests. Lazy
+model tables retain their cached model; PrefixSpan retains its input plan, including
+any upstream fitted models. Fitted-model transforms require the fitting session.
+Persistence is outside this native addition. The vendored <code>pyspark.ml.fpm</code> module is
+unchanged.</p>
+<p>Spark 4.3.0's Connect helper currently rejects <code>Long</code> argument literals: PrefixSpan's
+<code>maxLocalProjDBSize</code> works within the signed 32-bit range, including its default
+32,000,000; larger values raise the same <code>LONG not supported</code> server error as official
+PySpark. The client preserves PySpark's integer widths and explicit null parameters.
+Tests cover this limitation, typed string/integer itemsets, association rules, held-out
+predictions, model setters, sequence-length limits, invalid data, and model lifetime.</p>
+<h2 id="native-als-recommendation">Native ALS recommendation<a class="headerlink" href="#native-als-recommendation" title="Permanent link">&para;</a></h2>
+<p><code>ml::ALS</code> / <code>ml::ALSModel</code> in Rust and <code>pyspark.ml.connect.recommendation.ALS</code> /
+<code>ALSModel</code> in the Rust-backed Python package run Spark's standard ALS over Connect.
+The estimator exposes all 18 parameters, including explicit/implicit feedback,
+nonnegative factors, regularization, block counts, storage levels and seed.
+Python mirrors the 17 official constructor keywords; use <code>setPredictionCol</code> for
+an alternate prediction column, and <code>setNumBlocks</code> to set both block counts.</p>
+<p>The fitted model supports transform, rank, user/item factor tables, recommendations
+for all users/items, and recommendations for a subset of users/items. Rust uses
+<code>user_factors</code>, <code>item_factors</code>, and <code>recommend_for_*</code>; Python exposes <code>userFactors</code>,
+<code>itemFactors</code>, and <code>recommendFor*</code>. Model setters control transform parameters,
+including <code>coldStartStrategy="drop"</code> to remove predictions for unknown IDs.
+Factor and recommendation relations access the fitted server model, matching
+PySpark Connect. Lazy results retain their cached model and any models referenced
+by the subset DataFrame until evaluation completes.</p>
+<p>Fit, transform and subset recommendation inputs must be Spark DataFrames; pandas
+DataFrames are rejected before conversion or RPC. Model operations must use the
+fit session. Official PySpark 4.3.0 fixtures cover explicit and implicit ratings,
+predictions, cold starts, factors, and all four recommendation methods, with live
+Rust and native Python tests. Model persistence is separate from these APIs.</p>
+<h2 id="native-ml-evaluators">Native ML evaluators<a class="headerlink" href="#native-ml-evaluators" title="Permanent link">&para;</a></h2>
+<p>Rust and the Rust-backed <code>pyspark.ml.connect.evaluation</code> exports provide all six
+standard Spark ML evaluators: regression, binary classification, multiclass
+classification, multilabel classification, clustering and ranking. Their
+constructor parameters and named setters follow <code>pyspark.ml.evaluation</code> in
+PySpark 4.3.0. Rust also provides typed parameter getters. Metric direction is
+available as <code>is_larger_better()</code> / <code>isLargerBetter()</code> without contacting Spark.</p>
+<p>The three existing Python evaluator wrappers now use standard Spark ML defaults:
+<code>BinaryClassificationEvaluator</code> takes <code>rawPredictionCol="rawPrediction"</code>, and
+<code>MulticlassClassificationEvaluator</code> defaults to <code>metricName="f1"</code> and requires
+keyword arguments. Use <code>rawPredictionCol</code> / <code>setRawPredictionCol</code> instead of the
+deprecated <code>probabilityCol</code> / <code>setProbabilityCol</code> binary-evaluator argument.</p>
+<p>Evaluation sends Spark DataFrames and their column names/types directly to Spark.
+Pandas DataFrames are rejected before serialization or RPC. Prepare double
+prediction columns, vector scores, and arrays of doubles where required
+by the corresponding standard evaluator. Clustering features may be vectors or
+arrays of doubles. Evaluators no longer silently cast
+columns, convert array scores to vectors, or normalize field-name casing.</p>
+<p>Official PySpark fixtures and live Rust/Python tests cover every supported metric,
+weights, regression through the origin, binary score bins, multiclass log-loss
+clipping and beta, per-label metrics, both silhouette distances, ranking cutoffs,
+invalid inputs, and metric direction. Generic parameter-map APIs and evaluator
+persistence remain separate work.</p>
+<h2 id="native-ml-statistics">Native ML statistics<a class="headerlink" href="#native-ml-statistics" title="Permanent link">&para;</a></h2>
+<p>Rust's <code>ml::{ChiSquareTest, Correlation, KolmogorovSmirnovTest, Summarizer,
+SummaryBuilder, MultivariateGaussian}</code> and the native Python classes in
+<code>pyspark.ml.stat</code> cover the standard ML statistics APIs from PySpark 4.3.0.
+The Python module is a Rust-backed shim, replacing its vendored implementation,
+except <code>MultivariateGaussian</code>, which stays PySpark's plain Python class.
+The deprecated <code>pyspark.ml.connect</code> public API is excluded from statistics parity
+work; statistics have no new export under that namespace.</p>
+<p>The statistical tests return lazy Spark DataFrames. Chi-square supports both the
+vector result and one row per feature (<code>flatten=True</code>); correlation supports
+Pearson and Spearman; the KS test supports Spark's normal distribution, with
+optional mean and standard deviation. Spark validates column types and
+statistical arguments. As with <code>pyspark.ml.stat</code>, the dataset and the other
+arguments are serialized as the arguments of a helper call, in that order, before
+any RPC (see the native ML helper calls above): a pandas DataFrame raises PySpark's
+<code>UNSUPPORTED_DATA_TYPE</code>, an argument that cannot be a literal raises the error of its
+conversion, and a literal of another type than PySpark sends for the server to reject
+raises a <code>TypeError</code>. The KS test converts its parameters with <code>float()</code> first, as
+PySpark does. Results retain any fitted models used by their input plans.</p>
+<p><code>Summarizer.metrics(...).summary(features, weight)</code> builds a SQL aggregate that
+works in <code>select</code> and grouped aggregations. All ten metrics are supported:
+<code>mean</code>, <code>sum</code>, <code>variance</code>, <code>std</code>, <code>count</code>, <code>numNonZeros</code>, <code>max</code>, <code>min</code>, <code>normL1</code>,
+and <code>normL2</code>. Each also has a static convenience method; Rust uses snake_case
+(<code>num_non_zeros</code>, <code>norm_l1</code>, <code>norm_l2</code>). Omitted weights default to 1.0. Inputs
+are ML vector Columns, including sparse vectors. Metric names are case sensitive;
+<code>numNonZeros</code> uses a capital Z. An empty metric selection returns an empty struct.</p>
+<p><code>MultivariateGaussian</code> is a mutable mean/covariance holder, with no computation
+or extra validation. Rust uses <code>MlVector</code> and <code>MlMatrix</code> (dense or sparse storage,
+the matrix type of the native ML params). Python keeps PySpark's plain class, whose
+instances hold the original vector and matrix objects and pickle as PySpark's. Python
+results materialize vectors and matrices through the existing ML UDT conversion.</p>
+<p>Reference protobuf fixtures and live Rust/Python tests cover every metric with
+and without weights, grouped summaries, chi-square flattening, both correlation
+methods, KS parameters, constant-feature NaNs, invalid inputs, and lazy model
+ownership. Python tests additionally compare sparse and dense inputs. Native
+classes are asserted explicitly; the tests also run separately with official
+PySpark as the reference.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+  <script>var tabs=__md_get("__tabs");if(Array.isArray(tabs))e:for(var set of document.querySelectorAll(".tabbed-set")){var labels=set.querySelector(".tabbed-labels");for(var tab of tabs)for(var label of labels.getElementsByTagName("label"))if(label.innerText.trim()===tab){var input=document.getElementById(label.htmlFor);input.checked=!0;continue e}}</script>
+
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer" >
+        
+          
+          <a href="../examples/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Examples">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                Examples
+              </div>
+            </div>
+          </a>
+        
+        
+          
+          <a href="../troubleshooting/" class="md-footer__link md-footer__link--next" aria-label="Next: Troubleshooting">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                Troubleshooting
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 11v2h12l-5.5 5.5 1.42 1.42L19.84 12l-7.92-7.92L10.5 5.5 16 11z"/></svg>
+            </div>
+          </a>
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright © The Apache Software Foundation. Apache Spark, Spark, and the Spark logo are trademarks of the Apache Software Foundation.
+    </div>
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+    <a href="https://github.com/apache/spark-connect-rust" target="_blank" rel="noopener" title="Source on GitHub" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+    </a>
+  
+    
+    
+    
+    
+    <a href="https://pypi.org/project/pyspark-client-rust/" target="_blank" rel="noopener" title="pyspark-client-rust on PyPI" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.8 200.5c-7.7-30.9-22.3-54.2-53.4-54.2h-40.1v47.4c0 36.8-31.2 67.8-66.8 67.8H172.7c-29.2 0-53.4 25-53.4 54.3v101.8c0 29 25.2 46 53.4 54.3 33.8 9.9 66.3 11.7 106.8 0 26.9-7.8 53.4-23.5 53.4-54.3v-40.7H226.2v-13.6h160.2c31.1 0 42.6-21.7 53.4-54.2 11.2-33.5 10.7-65.7 0-108.6M286.2 444.7a20.4 20.4 0 1 1 0-40.7 20.4 20.4 0 1 1 0 40.7M167.8 248.1h106.8c29.7 0 53.4-24.5 53.4-54.3V91.9c0-29-24.4-50.7-53.4-55.6-35.8-5.9-74.7-5.6-106.8.1-45.2 8-53.4 24.7-53.4 55.6v40.7h106.9v13.6h-147c-31.1 0-58.3 18.7-66.8 54.2-9.8 40.7-10.2 66.1 0 108.6 7.6 31.6 25.7 54.2 56.8 54.2H101v-48.8c0-35.3 30.5-66.4 66.8-66.4m-6.6-183.4a20.4 20.4 0 1 1 0 40.8 20.4 20.4 0 1 1 0-40.8"/></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+      <div class="md-progress" data-md-component="progress" role="progressbar"></div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.tabs", "navigation.tabs.sticky", "navigation.sections", "navigation.top", "navigation.instant", "navigation.instant.progress", "navigation.footer", "toc.follow", "content.code.copy", "content.code.annotate", "content.tabs.link", "search.highlight", "search.suggest"], "search": "../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.a5f9d56c.min.js"></script>
+      
+    
+  </body>
+</html>
