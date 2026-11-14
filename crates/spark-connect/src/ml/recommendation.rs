@@ -38,7 +38,6 @@ impl ALS {
                 info.uid.as_deref().unwrap_or(&self.operator.uid),
                 OperatorType::Model,
             ),
-            rank: self.rank(),
             params,
             cached: CachedModel::from_info(&info, &df.session, "ALS")?,
         })
@@ -88,29 +87,27 @@ pub struct ALSModel {
     operator: MlOperator,
     params: Params,
     cached: CachedModel,
-    rank: i32,
 }
 impl ALSModel {
-    /// The rank of the model's factors: of its estimator, as fitted, or as the server reads it of a
-    /// loaded model (`rank` of PySpark's `ALSModel`).
-    pub fn rank(&self) -> i32 {
-        self.rank
-    }
-
-    /// Load an `ALSModel` saved to `path`, as PySpark's `ALSModel.load(path)`: the server caches
-    /// it, as a fitted model, and gives its rank.
-    pub fn load(session: &SparkSession, path: &str) -> spark_connect_core::error::Result<Self> {
-        let (cached, operator, params) =
-            read_model(session, "org.apache.spark.ml.recommendation.ALSModel", path)?;
-        let rank = fetch(&MlTarget::object(&cached), "rank", vec![])?.into_value()?;
+    /// The rank of the model's factors, as `ALSModel.rank` of PySpark: the server's `rank` of the
+    /// model, fetched on each call.
+    pub fn rank(&self) -> spark_connect_core::error::Result<i32> {
+        let rank = fetch(&MlTarget::object(&self.cached), "rank", vec![])?.into_value()?;
         let rank = rank.as_i64().ok_or_else(|| {
             SparkError::value_msg(format!("rank of ALSModel is not an int: {rank:?}"))
         })? as i32;
+        Ok(rank)
+    }
+
+    /// Load an `ALSModel` saved to `path`, as PySpark's `ALSModel.load(path)`: the server caches
+    /// it, as a fitted model.
+    pub fn load(session: &SparkSession, path: &str) -> spark_connect_core::error::Result<Self> {
+        let (cached, operator, params) =
+            read_model(session, "org.apache.spark.ml.recommendation.ALSModel", path)?;
         Ok(Self {
             operator,
             params,
             cached,
-            rank,
         })
     }
     fn fetch(

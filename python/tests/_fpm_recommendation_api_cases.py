@@ -282,6 +282,25 @@ def live_cases(name, spark, base):
             "findFrequentSequentialPatterns_setters",
             lambda: est.setMinSupport(0.25).setSequenceCol("sequence").getMinSupport(),
         )
+        # A dataset that is not a DataFrame is sent as a literal, for the server to reject when the
+        # result is analyzed; a pandas DataFrame and an object raise PySpark's errors of the
+        # serialization before any request.
+        rec(
+            "findFrequentSequentialPatterns_int_columns",
+            lambda: _condition(lambda: est.findFrequentSequentialPatterns(5).columns),
+        )
+        rec(
+            "findFrequentSequentialPatterns_int_count",
+            lambda: _condition(lambda: est.findFrequentSequentialPatterns(5).count()),
+        )
+        rec(
+            "findFrequentSequentialPatterns_pandas",
+            lambda: est.findFrequentSequentialPatterns(_pandas_frame()),
+        )
+        rec(
+            "findFrequentSequentialPatterns_object",
+            lambda: est.findFrequentSequentialPatterns(object()),
+        )
     else:
         estimator, model_class = classes(name)
         df = _als_frame(spark)
@@ -304,6 +323,18 @@ def live_cases(name, spark, base):
         rec("recommendForAllUsers_column", lambda: model.recommendForAllUsers(_lit(spark, 2)))
         rec("recommendForAllUsers_list", lambda: model.recommendForAllUsers([]))
         rec("recommendForUserSubset_object", lambda: model.recommendForUserSubset(object(), 2))
+        # A dataset that is not a DataFrame is sent as a literal, for the server to reject when the
+        # result is analyzed; a pandas DataFrame raises PySpark's error of the serialization.
+        rec(
+            "recommendForUserSubset_int_columns",
+            lambda: _condition(lambda: model.recommendForUserSubset(5, 2).columns),
+        )
+        rec(
+            "recommendForItemSubset_int_columns",
+            lambda: _condition(lambda: model.recommendForItemSubset(5, 2).columns),
+        )
+        rec("recommendForUserSubset_pandas", lambda: model.recommendForUserSubset(_pandas_frame(), 2))
+        rec("recommendForItemSubset_pandas", lambda: model.recommendForItemSubset(_pandas_frame(), 2))
         _model_setters(
             rec,
             model,
@@ -349,6 +380,12 @@ def _condition(run):
         if condition is None:
             raise
         return "condition " + condition
+
+
+def _pandas_frame():
+    import pandas as pd
+
+    return pd.DataFrame({"sequence": [[1]]})
 
 
 def _lit(spark, value):

@@ -617,8 +617,7 @@ def test_native_ml_other_invalid_inputs(ml_mock):
     # of a fit, transform or evaluate), and a (value, DataType) pair whose value is not of the type
     # raises the bare AssertionError of LiteralExpression(value, dataType). PySpark sends the others
     # for the server to reject (a vector and a matrix as they are, and a (value, DataType) pair as a
-    # literal of that type), and so does assignClusters, in a lazy DataFrame. The other helper calls
-    # raise a TypeError of them before any request.
+    # literal of that type), and so do these helper calls, in a lazy DataFrame.
     import numpy as np
     import pandas as pd
     from pyspark.errors import PySparkTypeError, PySparkValueError
@@ -665,12 +664,12 @@ def test_native_ml_other_invalid_inputs(ml_mock):
             (method,) = _relation(helper(pair)).ml_relation.fetch.methods
             assert method.args[0].param == pb2.Expression.Literal(integer=1)
             continue
-        for other in sendable + [pair]:
-            with pytest.raises(TypeError) as error:
-                helper(other)
-            assert str(error.value) == (
-                f"{name}() takes a Spark DataFrame, not '{type(other).__name__}'"
-            ), (name, other)
+        # PrefixSpan's and the subsets' datasets are sent for the server to reject, lazily, as
+        # PySpark sends them: a (value, DataType) pair as a literal of its type.
+        for other in sendable:
+            helper(other)
+        (method,) = _relation(helper(pair)).ml_relation.fetch.methods
+        assert method.args[0].param == pb2.Expression.Literal(integer=1), name
     assert len(_session_requests(service, spark)) == sent
 
 

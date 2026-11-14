@@ -12,6 +12,7 @@ from pyspark.sql import SparkSession
 from pyspark.sql.connect import proto as pb2
 from test_ml_offline import (
     _commands_but_deletes,
+    _ml_result,
     _operator_info,
     _relation,
     _requests_but_deletes,
@@ -27,10 +28,27 @@ def _feature_mock_server():
         yield pair
 
 
+def _stop_words_payloads(service):
+    # The helper calls of the constructor of StopWordsRemover, which fetches its defaults of the
+    # active session: its locale, then its stop words (a short list, which the tests of the stage
+    # do not check).
+    stop_words = pb2.Expression.Literal(
+        array=pb2.Expression.Literal.Array(
+            element_type=pb2.DataType(string=pb2.DataType.String()),
+            elements=[pb2.Expression.Literal(string=word) for word in ["the", "a"]],
+        )
+    )
+    service.payload_for_request = {
+        b"stopWordsRemoverGetDefaultOrUS": _ml_result(param=pb2.Expression.Literal(string="en_US")),
+        b"stopWordsRemoverLoadDefaultStopWords": _ml_result(param=stop_words),
+    }
+
+
 @pytest.fixture
 def ml_mock(_feature_mock_server):
     _, service = _feature_mock_server
     service.reset()
+    _stop_words_payloads(service)
     spark = SparkSession.builder.remote(service.remote).getOrCreate()
     yield spark, service
     service.forget_session(spark.session_id)
@@ -73,7 +91,9 @@ def wire(stage, name, spark, service):
 
 
 @pytest.mark.parametrize("name", GOLDEN["api"])
-def test_native_exports_and_official_constructor_signature(name):
+def test_native_exports_and_official_constructor_signature(name, ml_mock):
+    # The constructors fetch the defaults of the active session first (StopWordsRemover's), so the
+    # checks of the keyword arguments run with one, as they do of PySpark's constructors.
     import pyspark.ml.connect as connect
     cls = getattr(feature, name)
     assert cls is getattr(_pyspark, name) is getattr(connect, name)
@@ -211,7 +231,8 @@ def test_regex_identity_is_deferred_and_retains_python_value(ml_mock):
 
 
 @pytest.mark.parametrize("name,param", [(name, param) for name, api in GOLDEN["api"].items() for param, converter in api["params"].items() if converter != "identity"])
-def test_feature_setters_reject_invalid_types_without_mutating(name, param):
+def test_feature_setters_reject_invalid_types_without_mutating(name, param, ml_mock):
+    # The constructor fetches the defaults of the active session, as PySpark's does.
     stage = getattr(feature, name)()
     setter = getattr(stage, "set" + param[0].upper() + param[1:])
     with pytest.raises(TypeError, match="Invalid param value"):
@@ -237,6 +258,8 @@ def test_stop_words_remover_load_default_stop_words_fetches_the_ml_helper(ml_moc
     from test_ml_offline import _ml_result
 
     spark, service = ml_mock
+    # The helper's answer of this test, not the defaults that the fixture answers the constructor with.
+    service.payload_for_request = {}
     words = [pb2.Expression.Literal(string=word) for word in ["i", "me"]]
     service.execute_payload = _ml_result(
         param=pb2.Expression.Literal(array=pb2.Expression.Literal.Array(elements=words))

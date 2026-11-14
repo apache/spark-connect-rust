@@ -129,8 +129,12 @@ macro_rules! feature_transformer {
             params: [$($row)*];
             #[new]
             #[pyo3(signature = (*args, **kwargs))]
-            fn new(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
-                let mut this = Self { inner: core::$core::new(), unsendable: Vec::new(), raw: Vec::new(), own_defaults: Vec::new() };
+            // As PySpark's constructor: the keyword-only check, then the defaults that the active session
+            // fetches (`server_defaults`), then the keyword arguments.
+            fn new(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
+                bind_params("__init__", $name, &[], &[$(($param, Kind::$kind)),*], args, None)?;
+                let own_defaults = params_api::server_defaults(py, $name)?;
+                let mut this = Self { inner: core::$core::new(), unsendable: Vec::new(), raw: Vec::new(), own_defaults };
                 init_params(&mut this, $name, &[], &[$(($param, Kind::$kind)),*], args, kwargs)?;
                 Ok(this)
             }
@@ -265,8 +269,12 @@ macro_rules! feature_estimator {
             params: [$($row)*];
             #[new]
             #[pyo3(signature = (*args, **kwargs))]
-            fn new(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
-                let mut this = Self { inner: core::$core::new(), unsendable: Vec::new(), raw: Vec::new(), own_defaults: Vec::new() };
+            // As PySpark's constructor: the keyword-only check, then the defaults that the active session
+            // fetches (`server_defaults`), then the keyword arguments.
+            fn new(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
+                bind_params("__init__", $name, &[], &[$(($param, Kind::$kind)),*], args, None)?;
+                let own_defaults = params_api::server_defaults(py, $name)?;
+                let mut this = Self { inner: core::$core::new(), unsendable: Vec::new(), raw: Vec::new(), own_defaults };
                 init_params(&mut this, $name, &[], &[$(($param, Kind::$kind)),*], args, kwargs)?;
                 Ok(this)
             }

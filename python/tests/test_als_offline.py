@@ -11,7 +11,13 @@ from pyspark import _pyspark
 from pyspark.ml.connect import recommendation
 from pyspark.sql import SparkSession
 from pyspark.sql.connect import proto as pb2
-from test_ml_offline import _commands_but_deletes, _operator_info, _relation, _requests_but_deletes
+from test_ml_offline import (
+    _commands_but_deletes,
+    _ml_result,
+    _operator_info,
+    _relation,
+    _requests_but_deletes,
+)
 
 MODEL_PARAMS = {"blockSize", "coldStartStrategy", "itemCol", "predictionCol", "userCol"}
 
@@ -101,12 +107,27 @@ def test_recommendation_count_literals_match_reference(session, case):
     assert _requests_but_deletes(service) == sent
 
 
-def test_factor_properties_rank_and_recommendation_methods_are_lazy(session):
+def test_rank_is_fetched_on_each_access_as_pyspark_does(session):
+    # PySpark's `rank` is `_call_java("rank")`: a fetch of the server on each access.
+    spark, service = session
+    model = fitted(spark, service)
+    for rank in [2, 3]:
+        service.execute_payload = _ml_result(param=pb2.Expression.Literal(integer=rank))
+        sent = _requests_but_deletes(service)
+        assert model.rank == rank
+        commands = _commands_but_deletes(service, sent)
+        assert len(commands) == 1
+        fetch = commands[0].ml_command.fetch
+        assert fetch.obj_ref.id == "als-model"
+        assert [method.method for method in fetch.methods] == ["rank"]
+    service.execute_payload = _operator_info("als-model")
+
+
+def test_factor_properties_and_recommendation_methods_are_lazy(session):
     spark, service = session
     model = fitted(spark, service)
     frame = spark.range(1)
     sent = _requests_but_deletes(service)
-    assert model.rank == 2
     for attribute in ["userFactors", "itemFactors"]:
         fetch = _relation(getattr(model, attribute)).ml_relation.fetch
         assert fetch.obj_ref.id == "als-model"
@@ -135,6 +156,21 @@ def test_als_setters_validate_types(param):
     stage = recommendation.ALS()
     with pytest.raises(TypeError, match="Invalid param value"):
         getattr(stage, "set" + param[0].upper() + param[1:])(object())
+
+
+@pytest.mark.parametrize("name", ["recommendForUserSubset", "recommendForItemSubset"])
+def test_subsets_send_a_non_dataframe_dataset_for_the_server_to_reject(session, name):
+    # As PySpark's attribute call, which serializes the dataset as a literal: the server rejects it
+    # when the result is analyzed, and nothing is sent before.
+    spark, service = session
+    model = fitted(spark, service)
+    sent = _requests_but_deletes(service)
+    fetch = _relation(getattr(model, name)(5, 2)).ml_relation.fetch
+    assert fetch.obj_ref.id == "als-model"
+    assert fetch.methods[0].method == name
+    assert fetch.methods[0].args[0].param == pb2.Expression.Literal(integer=5)
+    assert fetch.methods[0].args[1].param == pb2.Expression.Literal(integer=2)
+    assert _requests_but_deletes(service) == sent
 
 
 def test_pandas_is_rejected_before_requests_in_fit_transform_and_subsets(session):

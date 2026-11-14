@@ -8,12 +8,12 @@
 //! (or an error carrying the golden message). The estimators are configured as the cases of
 //! frequent_patterns.json, als.json and evaluators.json, which the golden was captured from.
 //!
-//! Replayed: the fit of every FPGrowth and ALS case, the evaluate and isLargerBetter of each
-//! evaluator, the save and load of every FPGrowth and ALS estimator, the save of every ALS model,
-//! and the save and load of every evaluator. Skipped, by [`skip_reason`]: the DataFrame-valued
-//! members (their rows are Arrow, which the replay does not serve), the repr() and str() of the
-//! Python objects, and the rank members (see [`ALS_RANK`]). Left out with their findings: the
-//! fetches of rank in the ALS fits, and the loads of the ALS models (see [`ALS_RANK`]).
+//! Replayed: the fit of every FPGrowth and ALS case, the rank of each ALS model, the evaluate and
+//! isLargerBetter of each evaluator, the save and load of every FPGrowth and ALS estimator and of
+//! every ALS model, and the save and load of every evaluator. Skipped, by [`skip_reason`]: the
+//! DataFrame-valued members (their rows are Arrow, which the replay does not serve), and the repr()
+//! and str() of the Python objects. Left out with its finding: the fetches of rank after the ALS
+//! fits (see [`without_rank_fetches`]).
 #[path = "common/als.rs"]
 mod als;
 #[path = "common/evaluators.rs"]
@@ -39,14 +39,6 @@ const MODELS: &str = include_str!("../../../tests/golden/fpm_recommendation_eval
 const PERSISTENCE: &str =
     include_str!("../../../tests/golden/fpm_recommendation_evaluation_persistence.json");
 const FREQUENT_PATTERNS: &str = include_str!("../../../tests/golden/frequent_patterns.json");
-
-/// Finding: PySpark reads the rank of an ALS model from the server: its fit fetches `rank` twice
-/// after the Fit, and each read of `rank` fetches it. The Rust `rank()` is a field (of the
-/// estimator, or of the read of a load), with no command; and the Rust `ALSModel.load` fetches
-/// `rank` after its read, which PySpark's load does not. The replay leaves the fetches out of the
-/// golden fit and the `rank` members, checks the Fit command, and leaves the loads of the ALS
-/// models out.
-const ALS_RANK: &str = "PySpark fetches rank from the server; the Rust rank() sends no command";
 
 /// The path of every save and load. The replay server does not read it: the golden commands
 /// normalize it to `<path>`.
@@ -113,8 +105,9 @@ fn without(entry: &Json, drop: impl Fn(&proto::MlCommand) -> bool) -> Json {
     entry
 }
 
-/// The golden fit without the fetches of `rank` that PySpark sends after its Fit (see
-/// [`ALS_RANK`]).
+/// The golden fit without the fetches of `rank` that PySpark sends after its Fit. Finding:
+/// PySpark's ALS fit fetches `rank` twice after the Fit, and the Rust fit sends the Fit alone;
+/// each read of `rank` fetches it, on both clients, and a load sends its Read alone.
 fn without_rank_fetches(fit: &Json) -> Json {
     without(fit, |command| match &command.command {
         Some(proto::ml_command::Command::Fetch(fetch)) => {
@@ -140,9 +133,6 @@ fn outcome<T, E: Display>(
 fn skip_reason(label: &str, entry: &Json) -> Option<&'static str> {
     if label == "repr()" || label == "str()" {
         return Some("the repr() and str() of the Python object");
-    }
-    if label == "rank" {
-        return Some(ALS_RANK);
     }
     if entry["value"]["rows"].is_array() {
         return Some("a DataFrame: its rows are Arrow, which the replay does not serve");
@@ -181,6 +171,14 @@ fn check_members(
             Err(message) => assert_error(&message, &entry["error"], &at),
         }
         assert_commands(server, entry, &at);
+    }
+}
+
+/// The member of an ALS model that the replay checks: its rank, which it fetches as PySpark does.
+fn als_member(model: &ALSModel, label: &str) -> Option<Outcome> {
+    match label {
+        "rank" => Some(outcome(model.rank(), |rank| json!(rank))),
+        _ => None,
     }
 }
 
@@ -309,8 +307,9 @@ fn fpgrowth_models_and_estimators_match_official_pyspark() {
     assert_eq!(seen, official, "the FPGrowth records of the golden");
 }
 
-/// Every ALS case: its fit, its model's save, and its estimator's save and load. The rank of the
-/// model and the load of the model are left out (see [`ALS_RANK`]).
+/// Every ALS case: its fit, the rank of its model, the save and load of the model with the rank of
+/// the loaded copy, and the save and load of its estimator. The fetches of rank after the fit are
+/// left out (see [`without_rank_fetches`]).
 #[test]
 fn als_models_and_estimators_match_official_pyspark() {
     let golden = fixture(MODELS);
@@ -342,17 +341,21 @@ fn als_models_and_estimators_match_official_pyspark() {
         let mut estimator = als::configured(&case["values"]);
         let fitted = estimator.fit(&input).unwrap();
         assert_commands(&server, &fit_entry, &key);
-        check_members(&server, &golden["models"][&key]["members"], &|_| None, &key);
+        check_members(
+            &server,
+            &golden["models"][&key]["members"],
+            &|label| als_member(&fitted, label),
+            &key,
+        );
 
-        // Finding: PySpark's ALSModel.load sends the read alone, and the Rust load also fetches
-        // the rank of the loaded model. The replay refuses that fetch, so the loads of the ALS
-        // models are left out here; their saves are replayed.
         fitted.write().unwrap().overwrite().save(PATH).unwrap();
         assert_commands(&server, &model_record["save"], &model_key);
+        let loaded_model = ALSModel::load(&session, PATH).unwrap();
+        assert_commands(&server, &model_record["load"], &model_key);
         check_members(
             &server,
             &model_record["members"]["members"],
-            &|_| None,
+            &|label| als_member(&loaded_model, label),
             &model_key,
         );
         seen.insert(model_key);

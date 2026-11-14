@@ -15,21 +15,7 @@ import pytest
 from _feature_api_cases import ESTIMATORS, MODELS, TRANSFORMERS, live_cases
 from pyspark.sql import SparkSession
 
-# StopWordsRemover's defaults (caseSensitive, locale, outputCol and stopWords) are missing from
-# ml_params.json, a base file, so its cases fail on ours until that base change lands. Official
-# PySpark's offline cases need a session too, as its constructor loads the default stop words.
-NAMES = [
-    pytest.param(
-        name,
-        marks=pytest.mark.xfail(
-            reason="StopWordsRemover defaults are missing from ml_params.json (a base change)",
-            strict=False,
-        )
-        if name == "StopWordsRemover"
-        else (),
-    )
-    for name in TRANSFORMERS + ESTIMATORS + MODELS
-]
+NAMES = TRANSFORMERS + ESTIMATORS + MODELS
 
 CASES = json.loads(
     (Path(__file__).resolve().parents[2] / "tests/golden/feature_api_cases.json").read_text()
