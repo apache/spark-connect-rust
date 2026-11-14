@@ -3,9 +3,28 @@
 use super::*;
 use crate::column::PyColumn;
 use pyo3::exceptions::PyAssertionError;
+use pyo3::types::PyString;
 use spark_connect::ml::{
     ChiSquareTest, Correlation, KolmogorovSmirnovTest, Summarizer, SummaryBuilder,
 };
+
+/// The str argument `name` of the helper call of `method`, which `serialize` of
+/// `pyspark.ml.connect.serialize` sends as a literal after the dataset (see
+/// [`helper_dataset_of`]). Another value raises PySpark's error of its conversion when it cannot be
+/// a literal, and otherwise a TypeError before any request, where PySpark sends it for the server
+/// to reject.
+fn helper_str(value: &Bound<'_, PyAny>, method: &str, name: &str) -> PyResult<String> {
+    if value.is_instance_of::<PyString>() {
+        return value.extract();
+    }
+    if !serialized_as_is(value)? {
+        crate::functions::to_value_column(value)?;
+    }
+    Err(PyTypeError::new_err(format!(
+        "{method}() takes a str {name}, not '{}'",
+        value.get_type().name()?
+    )))
+}
 
 #[pyclass(name = "ChiSquareTest", module = "pyspark.ml.stat")]
 pub struct PyChiSquareTest;
@@ -20,15 +39,12 @@ impl PyChiSquareTest {
         labelCol: &Bound<'_, PyAny>,
         flatten: bool,
     ) -> PyResult<PyDataFrame> {
-        let df = dataset_of(dataset, "test", "_plan")?;
+        // In the order of PySpark's serialization of the arguments of the helper call.
+        let df = helper_dataset_of(dataset, "test")?;
+        let features = helper_str(featuresCol, "test", "featuresCol")?;
+        let label = helper_str(labelCol, "test", "labelCol")?;
         Ok(PyDataFrame::new(
-            ChiSquareTest::test(
-                &df,
-                &featuresCol.extract::<String>()?,
-                &labelCol.extract::<String>()?,
-                flatten,
-            )
-            .to_pyerr()?,
+            ChiSquareTest::test(&df, &features, &label, flatten).to_pyerr()?,
         ))
     }
 }
@@ -44,9 +60,10 @@ impl PyCorrelation {
         column: &Bound<'_, PyAny>,
         method: &str,
     ) -> PyResult<PyDataFrame> {
-        let df = dataset_of(dataset, "corr", "_plan")?;
+        let df = helper_dataset_of(dataset, "corr")?;
+        let column = helper_str(column, "corr", "column")?;
         Ok(PyDataFrame::new(
-            Correlation::corr(&df, &column.extract::<String>()?, method).to_pyerr()?,
+            Correlation::corr(&df, &column, method).to_pyerr()?,
         ))
     }
 }
@@ -64,21 +81,19 @@ impl PyKolmogorovSmirnovTest {
         distName: &Bound<'_, PyAny>,
         params: &Bound<'_, PyTuple>,
     ) -> PyResult<PyDataFrame> {
-        let df = dataset_of(dataset, "test", "_plan")?;
-        // PySpark deliberately uses float(), accepting numeric strings as well as numbers.
+        // PySpark deliberately uses float(), accepting numeric strings as well as numbers, and
+        // converts the params first: its list of them is an argument of the helper call, whose
+        // serialization then raises its errors of the dataset and the other arguments.
         let float = params.py().import("builtins")?.getattr("float")?;
         let values = params
             .iter()
             .map(|v| float.call1((v,))?.extract::<f64>())
             .collect::<PyResult<Vec<_>>>()?;
+        let df = helper_dataset_of(dataset, "test")?;
+        let sample = helper_str(sampleCol, "test", "sampleCol")?;
+        let dist = helper_str(distName, "test", "distName")?;
         Ok(PyDataFrame::new(
-            KolmogorovSmirnovTest::test(
-                &df,
-                &sampleCol.extract::<String>()?,
-                &distName.extract::<String>()?,
-                values,
-            )
-            .to_pyerr()?,
+            KolmogorovSmirnovTest::test(&df, &sample, &dist, values).to_pyerr()?,
         ))
     }
 }
@@ -173,28 +188,11 @@ metrics!(
     (norm_l2, "normL2")
 );
 
-// PySpark's holder keeps the original Python objects, with no type/shape validation.
-#[pyclass(name = "MultivariateGaussian", module = "pyspark.ml.stat", dict)]
-pub struct PyMultivariateGaussian {
-    #[pyo3(get, set)]
-    mean: Py<PyAny>,
-    #[pyo3(get, set)]
-    cov: Py<PyAny>,
-}
-#[pymethods]
-impl PyMultivariateGaussian {
-    #[new]
-    fn new(mean: Py<PyAny>, cov: Py<PyAny>) -> Self {
-        Self { mean, cov }
-    }
-}
-
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyChiSquareTest>()?;
     m.add_class::<PyCorrelation>()?;
     m.add_class::<PyKolmogorovSmirnovTest>()?;
     m.add_class::<PySummarizer>()?;
     m.add_class::<PySummaryBuilder>()?;
-    m.add_class::<PyMultivariateGaussian>()?;
     Ok(())
 }

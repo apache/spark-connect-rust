@@ -989,7 +989,8 @@ persistence remain separate work.
 Rust's `ml::{ChiSquareTest, Correlation, KolmogorovSmirnovTest, Summarizer,
 SummaryBuilder, MultivariateGaussian}` and the native Python classes in
 `pyspark.ml.stat` cover the standard ML statistics APIs from PySpark 4.3.0.
-The Python module is a Rust-backed shim, replacing its vendored implementation.
+The Python module is a Rust-backed shim, replacing its vendored implementation,
+except `MultivariateGaussian`, which stays PySpark's plain Python class.
 The deprecated `pyspark.ml.connect` public API is excluded from statistics parity
 work; statistics have no new export under that namespace.
 
@@ -997,8 +998,13 @@ The statistical tests return lazy Spark DataFrames. Chi-square supports both the
 vector result and one row per feature (`flatten=True`); correlation supports
 Pearson and Spearman; the KS test supports Spark's normal distribution, with
 optional mean and standard deviation. Spark validates column types and
-statistical arguments. Pandas DataFrames are rejected before serialization or RPC.
-Results retain any fitted models used by their input plans.
+statistical arguments. As with `pyspark.ml.stat`, the dataset and the other
+arguments are serialized as the arguments of a helper call, in that order, before
+any RPC (see the native ML helper calls above): a pandas DataFrame raises PySpark's
+`UNSUPPORTED_DATA_TYPE`, an argument that cannot be a literal raises the error of its
+conversion, and a literal of another type than PySpark sends for the server to reject
+raises a `TypeError`. The KS test converts its parameters with `float()` first, as
+PySpark does. Results retain any fitted models used by their input plans.
 
 `Summarizer.metrics(...).summary(features, weight)` builds a SQL aggregate that
 works in `select` and grouped aggregations. All ten metrics are supported:
@@ -1009,8 +1015,9 @@ are ML vector Columns, including sparse vectors. Metric names are case sensitive
 `numNonZeros` uses a capital Z. An empty metric selection returns an empty struct.
 
 `MultivariateGaussian` is a mutable mean/covariance holder, with no computation
-or extra validation. Rust uses `MlVector` and `MlMatrix` (dense or sparse storage);
-the Python holder preserves the original vector and matrix objects. Python
+or extra validation. Rust uses `MlVector` and `MlMatrix` (dense or sparse storage,
+the matrix type of the native ML params). Python keeps PySpark's plain class, whose
+instances hold the original vector and matrix objects and pickle as PySpark's. Python
 results materialize vectors and matrices through the existing ML UDT conversion.
 
 Reference protobuf fixtures and live Rust/Python tests cover every metric with

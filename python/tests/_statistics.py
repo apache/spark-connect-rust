@@ -21,8 +21,12 @@ def api():
         from pyspark import _pyspark
 
         for name in stat.__all__:
-            assert getattr(stat, name) is getattr(_pyspark, name)
             assert getattr(stat, name).__module__ == "pyspark.ml.stat"
+            if name == "MultivariateGaussian":
+                # PySpark's plain holder, kept in Python as PySpark's.
+                assert not hasattr(_pyspark, name)
+                continue
+            assert getattr(stat, name) is getattr(_pyspark, name)
     return stat
 
 

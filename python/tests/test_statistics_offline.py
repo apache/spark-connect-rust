@@ -48,7 +48,9 @@ def test_native_exports_and_reference_signatures():
 
     stat = api()
     for name in stat.__all__:
-        assert getattr(stat, name) is getattr(public, name) is getattr(_pyspark, name)
+        assert getattr(stat, name) is getattr(public, name)
+        if name != "MultivariateGaussian":
+            assert getattr(stat, name) is getattr(_pyspark, name)
     for key, expected in FIXTURE["signatures"].items():
         cls, method = key.split(".")
         target = getattr(stat, cls) if method == "__init__" else getattr(getattr(stat, cls), method)
@@ -89,7 +91,12 @@ def test_all_summary_expressions_match_reference(case):
 
 
 def test_pandas_rejected_before_argument_conversion_or_rpc(session):
+    # As pyspark.ml.stat's, whose helper call serializes the dataset first, as a literal unless it
+    # is a DataFrame: a pandas DataFrame raises the UNSUPPORTED_DATA_TYPE of that conversion,
+    # before the other arguments, except the params of KolmogorovSmirnovTest, which PySpark
+    # converts with float() before the call.
     import pandas as pd
+    from pyspark.errors import PySparkTypeError
 
     _, service = session
     stat = api()
@@ -97,12 +104,56 @@ def test_pandas_rejected_before_argument_conversion_or_rpc(session):
         for operation in [
             lambda: stat.ChiSquareTest.test(frame, object(), object()),
             lambda: stat.Correlation.corr(frame, object()),
-            lambda: stat.KolmogorovSmirnovTest.test(frame, object(), object(), object()),
+            lambda: stat.KolmogorovSmirnovTest.test(frame, object(), object(), 1.0),
         ]:
             sent = _requests_but_deletes(service)
-            with pytest.raises(TypeError, match="requires a Spark DataFrame"):
+            with pytest.raises(PySparkTypeError) as error:
                 operation()
+            assert error.value.getCondition() == "UNSUPPORTED_DATA_TYPE"
+            assert error.value.getMessageParameters() == {"data_type": "DataFrame"}
             assert _requests_but_deletes(service) == sent
+        with pytest.raises(TypeError) as error:
+            stat.KolmogorovSmirnovTest.test(frame, object(), object(), object())
+        assert str(error.value) == "float() argument must be a string or a real number, not 'object'"
+        assert _requests_but_deletes(service) == sent
+
+
+def test_helper_arguments_are_serialized_as_pyspark(session):
+    # As PySpark's serialization of the arguments of the helper calls, in their order: an argument
+    # that cannot be a literal raises the error of its conversion, and a literal of another type
+    # than PySpark's, which PySpark sends for the server to reject, raises a TypeError here, before
+    # any request, as of official pyspark-client 4.3.0.
+    from pyspark.errors import PySparkTypeError
+
+    spark, service = session
+    stat = api()
+    df = spark.range(1)
+    sent = _requests_but_deletes(service)
+    unconvertible = [
+        (lambda: stat.ChiSquareTest.test(df, object(), "label"), "UNSUPPORTED_DATA_TYPE"),
+        (lambda: stat.ChiSquareTest.test(df, "features", object()), "UNSUPPORTED_DATA_TYPE"),
+        (lambda: stat.Correlation.corr(df, object()), "UNSUPPORTED_DATA_TYPE"),
+        (lambda: stat.KolmogorovSmirnovTest.test(df, object(), "norm"), "UNSUPPORTED_DATA_TYPE"),
+        (lambda: stat.KolmogorovSmirnovTest.test(df, "id", {"a": 1}), "UNSUPPORTED_DATA_TYPE"),
+        (lambda: stat.ChiSquareTest.test([], "features", "label"),
+         "CANNOT_INFER_ARRAY_ELEMENT_TYPE"),
+    ]
+    for operation, condition in unconvertible:
+        with pytest.raises(PySparkTypeError) as error:
+            operation()
+        assert error.value.getCondition() == condition
+    refused = [
+        (lambda: stat.ChiSquareTest.test(df, 1, "label"), "test() takes a str featuresCol, not 'int'"),
+        (lambda: stat.Correlation.corr(df, None), "corr() takes a str column, not 'NoneType'"),
+        (lambda: stat.KolmogorovSmirnovTest.test(df, "id", 1), "test() takes a str distName, not 'int'"),
+        (lambda: stat.ChiSquareTest.test(5, "features", "label"),
+         "test() takes a Spark DataFrame, not 'int'"),
+    ]
+    for operation, message in refused:
+        with pytest.raises(TypeError) as error:
+            operation()
+        assert str(error.value) == message
+    assert _requests_but_deletes(service) == sent
 
 
 @pytest.mark.parametrize("metric", FIXTURE["metrics"])
@@ -153,3 +204,19 @@ def test_gaussian_is_a_mutable_holder_preserving_object_identity(sparse):
     assert value.mean is replacement and value.cov is None
     value.note = "mutable"
     assert value.note == "mutable"
+
+
+def test_gaussian_is_pysparks_plain_class_and_pickles_as_it():
+    # PySpark's holder is a plain class of pyspark.ml.stat, whose instances pickle by its module
+    # path, as into the Python workers of a server.
+    import pickle
+
+    from pyspark.ml.linalg import DenseMatrix, Vectors
+
+    cls = api().MultivariateGaussian
+    assert (cls.__module__, cls.__qualname__) == ("pyspark.ml.stat", "MultivariateGaussian")
+    value = cls(Vectors.dense([1.0]), DenseMatrix(1, 1, [2.0]))
+    assert sorted(vars(value)) == ["cov", "mean"]
+    copy = pickle.loads(pickle.dumps(value))
+    assert type(copy) is cls
+    assert (copy.mean, copy.cov) == (value.mean, value.cov)

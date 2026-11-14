@@ -191,27 +191,6 @@ metrics!(
     (norm_l2, "normL2")
 );
 
-/// Dense or sparse ML matrix storage, with the same layout as Spark's Matrix types.
-#[derive(Debug, Clone, PartialEq)]
-pub enum MlMatrix {
-    /// Column-major values unless `is_transposed` is true.
-    Dense {
-        num_rows: i32,
-        num_cols: i32,
-        values: Vec<f64>,
-        is_transposed: bool,
-    },
-    /// Compressed sparse columns (compressed rows when `is_transposed` is true).
-    Sparse {
-        num_rows: i32,
-        num_cols: i32,
-        col_ptrs: Vec<i32>,
-        row_indices: Vec<i32>,
-        values: Vec<f64>,
-        is_transposed: bool,
-    },
-}
-
 /// A mutable mean/covariance pair, matching PySpark's data holder without additional validation.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MultivariateGaussian {
