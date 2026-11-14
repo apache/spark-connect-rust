@@ -5567,6 +5567,50 @@ def test_udtf_register_sends_the_udtf_as_pyspark(mock_connect):
     assert service.execute_calls == calls
 
 
+def test_udf_and_udtf_pickle_as_pyspark_connect_classes():
+    # As PySpark Connect's: a UDF or a UDTF that a function captures is pickled by reference to
+    # pyspark.sql.connect.udf or .udtf, whose classes the Python worker of the server has, with
+    # the instance attributes of those classes. The classic class of PySpark needs a SparkContext.
+    import pickletools
+
+    from pyspark.serializers import CloudPickleSerializer
+    from pyspark.sql import functions as F
+    from pyspark.sql.types import IntegerType
+    from pyspark.sql.udf import UserDefinedFunction
+
+    def class_references(obj):
+        # The strings of the pickle, which name the classes that it refers to by reference.
+        data = CloudPickleSerializer().dumps(obj)
+        return {arg for _, arg, _ in pickletools.genops(data) if isinstance(arg, str)}
+
+    plus_one = F.udf(lambda x: int(x) + 1, IntegerType())
+    udf = plus_one._unwrapped
+    assert type(udf) is UserDefinedFunction
+    assert type(udf).__module__ == "pyspark.sql.connect.udf"
+    assert sorted(vars(udf)) == [
+        "_name", "_returnType", "_returnType_placeholder", "deterministic", "evalType", "func"]
+    refs = class_references(udf)
+    assert {"pyspark.sql.connect.udf", "UserDefinedFunction"} <= refs
+    assert "pyspark.sql.udf" not in refs
+    restored = CloudPickleSerializer().loads(CloudPickleSerializer().dumps(udf))
+    assert restored._name == udf._name and restored.evalType == udf.evalType
+    assert restored.func(1) == 2
+
+    @F.udtf(returnType="x int")
+    class Echo:
+        def eval(self, n):
+            yield (n,)
+
+    assert type(Echo).__module__ == "pyspark.sql.connect.udtf"
+    assert {"_name", "deterministic", "evalType", "func", "returnType"} <= set(vars(Echo))
+    assert "name" not in vars(Echo) and Echo.name == "Echo"
+    refs = class_references(Echo)
+    assert {"pyspark.sql.connect.udtf", "UserDefinedTableFunction"} <= refs
+    assert "pyspark.sql.udtf" not in refs
+    restored = CloudPickleSerializer().loads(CloudPickleSerializer().dumps(Echo))
+    assert restored._name == "Echo" and restored.evalType == 300
+
+
 def test_udtf_call_without_session_raises():
     # As PySpark's, udtf() without a session is not Arrow-optimized, and the call raises the
     # error of SparkSession.active(). In a new interpreter, which has no active session.
