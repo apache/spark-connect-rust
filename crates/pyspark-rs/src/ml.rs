@@ -16,17 +16,21 @@ use pyo3::pyclass::boolean_struct::False;
 use pyo3::types::{PyDict, PyList, PyTuple, PyType};
 use pyo3::PyClass;
 use spark_connect::ml::{
-    AFTSurvivalRegression, BinaryClassificationEvaluator, BisectingKMeans, Classifier,
-    CrossValidator, DecisionTreeClassifier, DecisionTreeRegressor, Estimator, Evaluator,
-    FMClassifier, FMRegressor, GBTClassifier, GBTRegressor, GaussianMixture,
-    GeneralizedLinearRegression, IsotonicRegression, KMeans, LinearRegression, LinearSVC,
-    LogisticRegression, MlOperator, MlVector, Model, MulticlassClassificationEvaluator,
+    AFTSurvivalRegression, BisectingKMeans, Classifier, CrossValidator, DecisionTreeClassifier,
+    DecisionTreeRegressor, Estimator, Evaluator, FMClassifier, FMRegressor, GBTClassifier,
+    GBTRegressor, GaussianMixture, GeneralizedLinearRegression, IsotonicRegression, KMeans,
+    LinearRegression, LinearSVC, LogisticRegression, MlOperator, MlVector, Model,
     MultilayerPerceptronClassifier, NaiveBayes, OneVsRest, Params, Pipeline,
-    PowerIterationClustering, RandomForestClassifier, RandomForestRegressor, RegressionEvaluator,
-    Transformer, LDA,
+    PowerIterationClustering, RandomForestClassifier, RandomForestRegressor, Transformer, LDA,
 };
 use spark_connect::types::StructField;
 use spark_connect::DataFrame;
+
+pub(crate) mod evaluation;
+pub use evaluation::{
+    PyBinaryClassificationEvaluator, PyClusteringEvaluator, PyMulticlassClassificationEvaluator,
+    PyMultilabelClassificationEvaluator, PyRankingEvaluator, PyRegressionEvaluator,
+};
 
 pub(crate) mod feature;
 pub(crate) mod fpm;
@@ -832,83 +836,6 @@ fn vector_array(name: &str) -> spark_connect::Column {
             contains_null: true,
         }),
     )
-}
-
-/// The input columns of an evaluator, as the JVM evaluator reads them: `doubles`, a prediction
-/// that it reads as a double only, and `score`, a probability that it reads as a double or a
-/// vector, where PySpark's evaluators read any numeric column, and an array, as a tensor.
-struct EvaluatorInputs {
-    doubles: Vec<String>,
-    score: Option<String>,
-}
-
-/// Evaluate `dataset` with the JVM evaluator of `slf`, whose input columns `inputs` gives, as
-/// PySpark's evaluators evaluate it (see [`evaluator_input`]). The
-/// JVM evaluator reads its columns by the spelling of the schema of the dataset.
-fn evaluate_native<T>(
-    slf: &Bound<'_, T>,
-    dataset: &Bound<'_, PyAny>,
-    inputs: impl FnOnce(&T::Core) -> EvaluatorInputs,
-) -> PyResult<f64>
-where
-    T: Native + PyClass,
-    T::Core: Evaluator,
-{
-    let py = slf.py();
-    let df = dataset_of(dataset, "evaluate", "select")?;
-    let mut evaluator = snapshot(slf)?;
-    let inputs = inputs(&evaluator);
-    let fields = schema_fields(py, &df)?;
-    // An evaluator that exposes no params is sent as it is (see `Evaluator::params_mut`).
-    if let Some(evaluator_params) = evaluator.params_mut() {
-        let mut params = std::mem::take(evaluator_params);
-        params = spell_param(params, &fields, "labelCol", Some("label"));
-        if !inputs.doubles.is_empty() {
-            params = spell_param(params, &fields, "predictionCol", Some("prediction"));
-        }
-        if inputs.score.is_some() {
-            params = spell_param(params, &fields, "rawPredictionCol", Some("rawPrediction"));
-        }
-        *evaluator_params = params;
-    }
-    let df = evaluator_input(df, &fields, inputs);
-    interruptible(py, &df.spark_session(), || {
-        evaluator.evaluate(&df).map_err(Box::new)
-    })
-}
-
-/// `df` as the JVM evaluator reads it, whose schema has the fields `fields`, with its columns of
-/// `inputs` converted: a prediction (`inputs.doubles`) of another numeric type is cast to a
-/// double, and a score (`inputs.score`) of another numeric type too, while an array score is sent
-/// as a vector by `array_to_vector`, which the JVM evaluator reads at its element 1, as PySpark's
-/// reads the column 1 of an array. The columns are found in `fields` regardless of case, as Spark
-/// resolves them; another type is sent as it is, which the JVM evaluator checks.
-fn evaluator_input(
-    mut df: DataFrame,
-    fields: &[StructField],
-    inputs: EvaluatorInputs,
-) -> DataFrame {
-    use spark_connect::types::DataType;
-
-    for field in fields {
-        let named = |name: &String| name.eq_ignore_ascii_case(&field.name);
-        let score = inputs.score.as_ref().is_some_and(named);
-        if !score && !inputs.doubles.iter().any(named) {
-            continue;
-        }
-        let converted = match &field.data_type {
-            DataType::Byte
-            | DataType::Short
-            | DataType::Integer
-            | DataType::Long
-            | DataType::Float
-            | DataType::Decimal { .. } => exact_column(&field.name).cast(DataType::Double),
-            DataType::Array { .. } if score => array_to_vector(exact_column(&field.name)),
-            _ => continue,
-        };
-        df = df.with_column(&field.name, converted);
-    }
-    df
 }
 
 /// The model of a class of PySpark's `pyspark.ml.connect`, LogisticRegression, whose transform
@@ -4614,180 +4541,6 @@ impl PyKMeans {
     }
 }
 
-/// RegressionEvaluator.
-#[pyclass(name = "RegressionEvaluator", module = "pyspark.ml.connect.evaluation")]
-pub struct PyRegressionEvaluator {
-    inner: RegressionEvaluator,
-    unsendable: Vec<&'static str>,
-}
-
-#[pymethods]
-impl PyRegressionEvaluator {
-    #[new]
-    #[pyo3(
-        signature = (*args, **kwargs),
-        text_signature = "(*, metricName='rmse', labelCol='label', predictionCol='prediction')"
-    )]
-    fn new(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
-        let mut this = Self {
-            inner: RegressionEvaluator::new(),
-            unsendable: Vec::new(),
-        };
-        let params = &[
-            ("labelCol", Kind::Str),
-            ("predictionCol", Kind::Str),
-            ("metricName", Kind::Str),
-        ];
-        init_params(&mut this, "RegressionEvaluator", &[], params, args, kwargs)?;
-        Ok(this)
-    }
-    #[pyo3(name = "setLabelCol")]
-    fn set_label_col<'py>(
-        slf: Bound<'py, Self>,
-        value: &Bound<'py, PyAny>,
-    ) -> PyResult<Bound<'py, Self>> {
-        set_param(slf, "labelCol", Kind::Str, value)
-    }
-    #[pyo3(name = "setPredictionCol")]
-    fn set_prediction_col<'py>(
-        slf: Bound<'py, Self>,
-        value: &Bound<'py, PyAny>,
-    ) -> PyResult<Bound<'py, Self>> {
-        set_param(slf, "predictionCol", Kind::Str, value)
-    }
-    #[pyo3(name = "setMetricName")]
-    fn set_metric_name<'py>(
-        slf: Bound<'py, Self>,
-        value: &Bound<'py, PyAny>,
-    ) -> PyResult<Bound<'py, Self>> {
-        set_param(slf, "metricName", Kind::Str, value)
-    }
-    /// Evaluate `dataset`, a DataFrame or a pandas DataFrame, as PySpark's evaluator, which reads a
-    /// prediction of any numeric type.
-    #[pyo3(signature = (dataset, params=None))]
-    fn evaluate(
-        slf: &Bound<'_, Self>,
-        dataset: &Bound<'_, PyAny>,
-        params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<f64> {
-        check_params(params)?;
-        evaluate_native(slf, dataset, |evaluator| EvaluatorInputs {
-            doubles: vec![evaluator.prediction_col().to_string()],
-            score: None,
-        })
-    }
-}
-
-/// BinaryClassificationEvaluator.
-#[pyclass(
-    name = "BinaryClassificationEvaluator",
-    module = "pyspark.ml.connect.evaluation"
-)]
-pub struct PyBinaryClassificationEvaluator {
-    inner: BinaryClassificationEvaluator,
-    unsendable: Vec<&'static str>,
-}
-
-/// The JVM evaluator scores its rawPredictionCol, so the probability column of PySpark's
-/// evaluator is sent as that param: a probability vector is read at its element 1, as the
-/// positive class of PySpark's evaluator.
-impl Native for PyBinaryClassificationEvaluator {
-    type Core = BinaryClassificationEvaluator;
-    fn inner(&self) -> &BinaryClassificationEvaluator {
-        &self.inner
-    }
-    fn params_mut(&mut self) -> &mut Params {
-        self.inner.params_mut()
-    }
-    fn params(&self) -> &Params {
-        self.inner.params()
-    }
-    fn unsendable(&self) -> &[&'static str] {
-        &self.unsendable
-    }
-    fn unsendable_mut(&mut self) -> &mut Vec<&'static str> {
-        &mut self.unsendable
-    }
-    fn jvm_name(name: &'static str) -> &'static str {
-        if name == "probabilityCol" {
-            "rawPredictionCol"
-        } else {
-            name
-        }
-    }
-}
-
-#[pymethods]
-impl PyBinaryClassificationEvaluator {
-    #[new]
-    #[pyo3(
-        signature = (*args, **kwargs),
-        text_signature = "(*, metricName='areaUnderROC', labelCol='label', probabilityCol='probability')"
-    )]
-    fn new(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
-        let mut this = Self {
-            inner: BinaryClassificationEvaluator::new(),
-            unsendable: Vec::new(),
-        };
-        // As PySpark's, whose constructor sets the probability column "probability" by default,
-        // where the JVM evaluator's default is "rawPrediction".
-        apply(
-            &mut this,
-            "probabilityCol",
-            Converted::Str("probability".to_string()),
-        );
-        let params = &[
-            ("labelCol", Kind::Str),
-            ("probabilityCol", Kind::Str),
-            ("metricName", Kind::Str),
-        ];
-        init_params(
-            &mut this,
-            "BinaryClassificationEvaluator",
-            &[],
-            params,
-            args,
-            kwargs,
-        )?;
-        Ok(this)
-    }
-    #[pyo3(name = "setLabelCol")]
-    fn set_label_col<'py>(
-        slf: Bound<'py, Self>,
-        value: &Bound<'py, PyAny>,
-    ) -> PyResult<Bound<'py, Self>> {
-        set_param(slf, "labelCol", Kind::Str, value)
-    }
-    #[pyo3(name = "setProbabilityCol")]
-    fn set_probability_col<'py>(
-        slf: Bound<'py, Self>,
-        value: &Bound<'py, PyAny>,
-    ) -> PyResult<Bound<'py, Self>> {
-        set_param(slf, "probabilityCol", Kind::Str, value)
-    }
-    #[pyo3(name = "setMetricName")]
-    fn set_metric_name<'py>(
-        slf: Bound<'py, Self>,
-        value: &Bound<'py, PyAny>,
-    ) -> PyResult<Bound<'py, Self>> {
-        set_param(slf, "metricName", Kind::Str, value)
-    }
-    /// Evaluate `dataset`, a DataFrame or a pandas DataFrame, as PySpark's evaluator, which reads a
-    /// probability of any numeric type, or an array of the probabilities of the classes.
-    #[pyo3(signature = (dataset, params=None))]
-    fn evaluate(
-        slf: &Bound<'_, Self>,
-        dataset: &Bound<'_, PyAny>,
-        params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<f64> {
-        check_params(params)?;
-        evaluate_native(slf, dataset, |evaluator| EvaluatorInputs {
-            doubles: Vec::new(),
-            score: Some(evaluator.raw_prediction_col().to_string()),
-        })
-    }
-}
-
 /// Native LDA backed by Spark Connect's JVM ML API.
 #[pyclass(name = "LDA", module = "pyspark.ml.connect.clustering")]
 pub struct PyLDA {
@@ -5385,90 +5138,6 @@ impl PyPipeline {
     }
 }
 
-/// MulticlassClassificationEvaluator.
-#[pyclass(
-    name = "MulticlassClassificationEvaluator",
-    module = "pyspark.ml.connect.evaluation"
-)]
-pub struct PyMulticlassClassificationEvaluator {
-    inner: MulticlassClassificationEvaluator,
-    unsendable: Vec<&'static str>,
-}
-
-/// The params of MulticlassClassificationEvaluator, in the order of PySpark's constructor,
-/// which takes them by position too (it is not `@keyword_only`).
-const MULTICLASS_PARAMS: &[(&str, Kind)] = &[
-    ("metricName", Kind::Str),
-    ("labelCol", Kind::Str),
-    ("predictionCol", Kind::Str),
-];
-
-#[pymethods]
-impl PyMulticlassClassificationEvaluator {
-    #[new]
-    #[pyo3(
-        signature = (*args, **kwargs),
-        text_signature = "(metricName='accuracy', labelCol='label', predictionCol='prediction')"
-    )]
-    fn new(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
-        let mut this = Self {
-            inner: MulticlassClassificationEvaluator::new(),
-            unsendable: Vec::new(),
-        };
-        // As PySpark's, whose constructor sets the metric "accuracy" by default, where the JVM
-        // evaluator's default (that of the Rust API) is "f1".
-        apply(
-            &mut this,
-            "metricName",
-            Converted::Str("accuracy".to_string()),
-        );
-        init_params(
-            &mut this,
-            "MulticlassClassificationEvaluator",
-            &["metricName", "labelCol", "predictionCol"],
-            MULTICLASS_PARAMS,
-            args,
-            kwargs,
-        )?;
-        Ok(this)
-    }
-    #[pyo3(name = "setLabelCol")]
-    fn set_label_col<'py>(
-        slf: Bound<'py, Self>,
-        value: &Bound<'py, PyAny>,
-    ) -> PyResult<Bound<'py, Self>> {
-        set_param(slf, "labelCol", Kind::Str, value)
-    }
-    #[pyo3(name = "setPredictionCol")]
-    fn set_prediction_col<'py>(
-        slf: Bound<'py, Self>,
-        value: &Bound<'py, PyAny>,
-    ) -> PyResult<Bound<'py, Self>> {
-        set_param(slf, "predictionCol", Kind::Str, value)
-    }
-    #[pyo3(name = "setMetricName")]
-    fn set_metric_name<'py>(
-        slf: Bound<'py, Self>,
-        value: &Bound<'py, PyAny>,
-    ) -> PyResult<Bound<'py, Self>> {
-        set_param(slf, "metricName", Kind::Str, value)
-    }
-    /// Evaluate `dataset`, a DataFrame or a pandas DataFrame, as PySpark's evaluator, which reads a
-    /// prediction of any numeric type.
-    #[pyo3(signature = (dataset, params=None))]
-    fn evaluate(
-        slf: &Bound<'_, Self>,
-        dataset: &Bound<'_, PyAny>,
-        params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<f64> {
-        check_params(params)?;
-        evaluate_native(slf, dataset, |evaluator| EvaluatorInputs {
-            doubles: vec![evaluator.prediction_col().to_string()],
-            score: None,
-        })
-    }
-}
-
 /// CrossValidator (k-fold tuning).
 const CROSS_VALIDATOR_PARAMS: &[(&str, Kind)] = &[
     ("numFolds", Kind::Int),
@@ -5571,8 +5240,6 @@ native!(
     PyGaussianMixture => GaussianMixture,
     PyKMeans => KMeans,
     PyBisectingKMeans => BisectingKMeans,
-    PyRegressionEvaluator => RegressionEvaluator,
-    PyMulticlassClassificationEvaluator => MulticlassClassificationEvaluator,
     PyPipeline => Pipeline,
     PyCrossValidator => CrossValidator,
 );

@@ -175,7 +175,10 @@ The parity job discovers every `test_*.py` under `<spark>/python` whose path con
 `--exclude`. The drop-in job discovers the Connect suites of `pyspark/sql`, `pyspark/ml`,
 `pyspark/errors` and `pyspark/logger`, minus the same three files, which
 `scripts/run_official_tests.py` names in `DROPIN_LOCAL_CLUSTER_ONLY`. The local-cluster phase
-names its four modules in `--only`. No other module is named by hand. See
+names its four modules in `--only`. Outside the official-suite selection, the hand-named lists
+are `FLAKY_FILES` (the files that get retries) and `SLOW_FILE_TIMEOUTS` (per-file timeouts) in
+`scripts/run_official_tests.py`, and the e2e files that the `connect-dropin` and `connect-e2e` jobs
+of `build_python_connect.yml` run by name. See
 [official-tests.md](official-tests.md) for the selection, skip and retry rules.
 
 ### Handling test failures
