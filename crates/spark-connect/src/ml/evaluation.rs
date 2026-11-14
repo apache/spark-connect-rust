@@ -30,6 +30,12 @@ macro_rules! evaluator {
                 ($larger)(self.metric_name())
             }
 
+            /// Set the uid of the operator, as `_resetUid` of a load does: a loaded evaluator of a
+            /// default instance keeps the uid that it was saved with.
+            pub fn set_uid(&mut self, uid: &str) {
+                self.operator.uid = uid.to_string();
+            }
+
             #[doc = concat!("Load a `", stringify!($name), "` saved to `path`, as PySpark's `", stringify!($name), ".load(path)`: its uid and params.")]
             pub fn load(session: &SparkSession, path: &str) -> spark_connect_core::error::Result<Self> {
                 let (operator, params) = read_operator(
