@@ -437,8 +437,25 @@ fn normalize_arguments(arguments: Vec<Expression>) -> SmallVec<[Expression; 2]> 
     }
 }
 
+#[inline]
+fn collect_inputs(inputs: impl IntoIterator<Item = Expression>) -> SmallVec<[Expression; 2]> {
+    let inputs = inputs.into_iter();
+    let lower_bound = inputs.size_hint().0;
+    let mut children = SmallVec::new();
+    if lower_bound > children.inline_size() {
+        // Fill wide buffers through Vec's optimized iterator extension, then
+        // transfer the allocation into SmallVec without copying the inputs.
+        let mut buffer = Vec::with_capacity(lower_bound);
+        buffer.extend(inputs);
+        return SmallVec::from_vec(buffer);
+    }
+    children.extend(inputs);
+    children
+}
+
 impl Expression {
     /// Construct an expression with checked structural input layout and current origin.
+    /// The origin is read after collecting `children`.
     ///
     /// # Errors
     /// Returns [`InvalidExpressionInputs`] for invalid arity or overflowing segment metadata.
@@ -446,17 +463,9 @@ impl Expression {
         kind: ExpressionKind,
         children: impl IntoIterator<Item = Expression>,
     ) -> std::result::Result<Self, InvalidExpressionInputs> {
-        Self::new_with_origin(kind, children, crate::origin::current())
-    }
-
-    fn new_with_origin(
-        kind: ExpressionKind,
-        children: impl IntoIterator<Item = Expression>,
-        origin: Option<Arc<crate::origin::Origin>>,
-    ) -> std::result::Result<Self, InvalidExpressionInputs> {
-        let children: SmallVec<[Expression; 2]> = children.into_iter().collect();
+        let children = collect_inputs(children);
         kind.validate_inputs(children.len())?;
-        Ok(Self::from_parts(kind, children, origin))
+        Ok(Self::from_parts(kind, children, crate::origin::current()))
     }
 
     // Convenience leaf construction avoids routing common scalar literals and references
@@ -465,6 +474,40 @@ impl Expression {
     pub(super) fn new_leaf(kind: ExpressionKind) -> Self {
         debug_assert!(kind.validate_inputs(0).is_ok());
         Self::from_parts(kind, SmallVec::new(), crate::origin::current())
+    }
+
+    /// Create a non-distinct unresolved function call from an owned argument vector.
+    /// Wide argument lists retain their buffer; up to two arguments stay inline.
+    #[inline]
+    pub fn function(name: impl Into<String>, args: Vec<Expression>) -> Self {
+        let name = name.into();
+        Self::new_function(name, normalize_arguments(args))
+    }
+
+    /// Create a non-distinct unresolved function call from ordered inputs.
+    /// Arrays avoid a temporary argument vector for unary and binary calls.
+    /// Pass an owned vector to [`Expression::function`] to reuse a wide argument buffer.
+    #[inline]
+    pub fn function_with_inputs(
+        name: impl Into<String>,
+        args: impl IntoIterator<Item = Expression>,
+    ) -> Self {
+        let name = name.into();
+        Self::new_function(name, collect_inputs(args))
+    }
+
+    #[inline]
+    fn new_function(name: String, children: SmallVec<[Expression; 2]>) -> Self {
+        // Unresolved functions accept every input count. The generic construction
+        // and rebuilding APIs still validate operator-specific input layouts.
+        Self::from_parts(
+            ExpressionKind::UnresolvedFunction {
+                name,
+                is_distinct: false,
+            },
+            children,
+            crate::origin::current(),
+        )
     }
 
     #[inline]
@@ -520,7 +563,13 @@ impl Expression {
         &self,
         children: impl IntoIterator<Item = Expression>,
     ) -> std::result::Result<Self, InvalidExpressionInputs> {
-        let children: SmallVec<[Expression; 2]> = children.into_iter().collect();
+        self.rebuild_collected(collect_inputs(children))
+    }
+
+    fn rebuild_collected(
+        &self,
+        children: SmallVec<[Expression; 2]>,
+    ) -> std::result::Result<Self, InvalidExpressionInputs> {
         // Reject malformed layouts before cloning recursive or expensive payloads.
         self.kind().validate_inputs(children.len())?;
         Ok(Self::allocate(
@@ -594,20 +643,19 @@ impl Expression {
                         .map(|child| (child, false)),
                 );
             } else {
-                let children: SmallVec<[Expression; 2]> = expression
-                    .children()
-                    .iter()
-                    .map(|child| results[&Arc::as_ptr(&child.node)].clone())
-                    .collect();
                 let unchanged = expression
                     .children()
                     .iter()
-                    .zip(&children)
-                    .all(|(a, b)| a.ptr_eq(b));
+                    .all(|child| child.ptr_eq(&results[&Arc::as_ptr(&child.node)]));
                 let candidate = if unchanged {
                     expression.clone()
                 } else {
-                    expression.with_children(children)?
+                    expression.rebuild_collected(collect_inputs(
+                        expression
+                            .children()
+                            .iter()
+                            .map(|child| results[&Arc::as_ptr(&child.node)].clone()),
+                    ))?
                 };
                 results.insert(key, rewrite(&candidate)?);
             }
@@ -677,6 +725,7 @@ impl Expression {
             S::CaseWhen(case) => {
                 let branch_count = case.branches.len();
                 let has_else = case.else_expr.is_some();
+                children.reserve_exact(branch_count * 2 + usize::from(has_else));
                 for (condition, branch_value) in case.branches {
                     children.push(condition);
                     children.push(branch_value);
@@ -708,8 +757,10 @@ impl Expression {
                 }
             }
             S::WindowExpression(value) => {
-                children.push(value.window_function);
                 let partition_count = value.partition_spec.len();
+                let order_count = value.order_spec.len();
+                children.reserve_exact(1 + partition_count + order_count);
+                children.push(value.window_function);
                 children.extend(value.partition_spec);
                 let order_spec = value
                     .order_spec
@@ -750,6 +801,7 @@ impl Expression {
                 let partition_count = value.partition_spec.len();
                 let order_count = value.order_spec.len();
                 let in_value_count = value.in_subquery_values.len();
+                children.reserve_exact(partition_count + order_count + in_value_count);
                 children.extend(value.partition_spec);
                 children.extend(value.order_spec);
                 children.extend(value.in_subquery_values);

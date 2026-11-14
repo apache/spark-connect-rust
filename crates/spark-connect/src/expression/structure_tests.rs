@@ -20,21 +20,28 @@ const _: () = {
 
 #[test]
 fn variadic_arguments_normalize_storage_by_length_and_preserve_handles() {
-    let constructors: [fn(Vec<Expression>) -> ExpressionSpec; 3] = [
-        |arguments| ExpressionSpec::UnresolvedFunction(UnresolvedFunction::new("f", arguments)),
+    let constructors: [fn(Vec<Expression>) -> Expression; 4] = [
         |arguments| {
-            ExpressionSpec::CallFunction(Box::new(CallFunctionWrapper::new("f", arguments)))
+            Expression::new(ExpressionSpec::UnresolvedFunction(UnresolvedFunction::new(
+                "f", arguments,
+            )))
         },
         |arguments| {
-            ExpressionSpec::CommonInlineUserDefinedFunction(Box::new(
+            Expression::new(ExpressionSpec::CallFunction(Box::new(
+                CallFunctionWrapper::new("f", arguments),
+            )))
+        },
+        |arguments| {
+            Expression::new(ExpressionSpec::CommonInlineUserDefinedFunction(Box::new(
                 CommonInlineUserDefinedFunctionExpression::new(
                     "f".into(),
                     false,
                     arguments,
                     PythonUDFPayload::new(DataType::Long, 100, vec![], "3.11".into()),
                 ),
-            ))
+            )))
         },
+        |arguments| Expression::function("f", arguments),
     ];
 
     for (constructor_index, constructor) in constructors.into_iter().enumerate() {
@@ -45,7 +52,7 @@ fn variadic_arguments_normalize_storage_by_length_and_preserve_handles() {
             let mut arguments = Vec::with_capacity(8);
             arguments.extend(expected.iter().cloned());
             let original_buffer = arguments.as_ptr();
-            let expression = Expression::new(constructor(arguments));
+            let expression = constructor(arguments);
             let children = &expression.node.children;
 
             assert_eq!(children.len(), count);
@@ -61,6 +68,166 @@ fn variadic_arguments_normalize_storage_by_length_and_preserve_handles() {
                 assert_eq!(children.as_ptr(), original_buffer);
             }
         }
+    }
+}
+
+#[test]
+fn direct_function_constructors_preserve_builder_behavior_and_shared_inputs() {
+    for count in [0, 1, 2, 3, 4] {
+        let inputs: Vec<_> = (0..count)
+            .map(|index| Expression::column(format!("argument_{index}")))
+            .collect();
+        let origin = crate::origin::Origin {
+            fragment: "direct function".into(),
+            call_site: "construct.py:12".into(),
+        };
+        let _origin = crate::origin::set_current(origin.clone());
+        let expected = Expression::new(ExpressionSpec::UnresolvedFunction(
+            UnresolvedFunction::new("f", inputs.clone()),
+        ));
+        let direct = Expression::function("f", inputs.clone());
+        let iterated = Expression::function_with_inputs("f", inputs.iter().cloned());
+
+        for actual in [direct, iterated] {
+            assert_input_order(&actual, &inputs);
+            assert_eq!(actual.to_proto(), expected.to_proto());
+            assert_eq!(actual.render(), expected.render());
+            assert_eq!(actual.ty(), &ExpressionType::Unresolved);
+            assert_eq!(actual.origin(), Some(&origin));
+        }
+    }
+
+    let first = Expression::column("first");
+    let second = Expression::column("second");
+    let array = Expression::function_with_inputs("f", [first.clone(), second.clone()]);
+    assert_input_order(&array, &[first, second]);
+}
+
+#[test]
+fn direct_function_constructors_capture_origin_after_converting_inputs() {
+    let mut iterator_origin = None;
+    let inputs = std::iter::once(Expression::column("input")).inspect(|_| {
+        iterator_origin = Some(crate::origin::set_current(crate::origin::Origin {
+            fragment: "iterator".into(),
+            call_site: "construct.py:20".into(),
+        }));
+    });
+    let iterated = Expression::function_with_inputs("f", inputs);
+    assert_eq!(iterated.origin().unwrap().fragment, "iterator");
+    drop(iterator_origin);
+
+    let mut generic_origin = None;
+    let inputs = std::iter::once(Expression::column("input")).inspect(|_| {
+        generic_origin = Some(crate::origin::set_current(crate::origin::Origin {
+            fragment: "generic iterator".into(),
+            call_site: "construct.py:22".into(),
+        }));
+    });
+    let generic = Expression::try_new(
+        ExpressionKind::UnresolvedFunction {
+            name: "f".into(),
+            is_distinct: false,
+        },
+        inputs,
+    )
+    .unwrap();
+    assert_eq!(generic.origin().unwrap().fragment, "generic iterator");
+    drop(generic_origin);
+
+    struct NameWithOrigin<'a>(&'a mut Option<crate::origin::OriginGuard>);
+    impl From<NameWithOrigin<'_>> for String {
+        fn from(name: NameWithOrigin<'_>) -> Self {
+            *name.0 = Some(crate::origin::set_current(crate::origin::Origin {
+                fragment: "name conversion".into(),
+                call_site: "construct.py:21".into(),
+            }));
+            "f".into()
+        }
+    }
+
+    let mut name_origin = None;
+    let named = Expression::function(NameWithOrigin(&mut name_origin), vec![]);
+    assert_eq!(named.origin().unwrap().fragment, "name conversion");
+}
+
+#[test]
+fn iterator_function_inputs_use_inline_storage_at_the_boundary() {
+    let inputs = [
+        Expression::column("first"),
+        Expression::column("second"),
+        Expression::column("third"),
+    ];
+    let inline = Expression::function_with_inputs("f", [inputs[0].clone(), inputs[1].clone()]);
+    assert!(!inline.node.children.spilled());
+    assert_input_order(&inline, &inputs[..2]);
+
+    let spilled = Expression::function_with_inputs("f", inputs.clone());
+    assert!(spilled.node.children.spilled());
+    assert_eq!(spilled.node.children.capacity(), inputs.len());
+    assert_input_order(&spilled, &inputs);
+}
+
+#[test]
+fn wide_input_collection_reserves_exact_capacity() {
+    let shared = Expression::column("shared");
+    let expression =
+        Expression::function_with_inputs("f", std::iter::repeat_n(shared.clone(), 10_001));
+    let generic = Expression::try_new(
+        expression.kind().clone(),
+        std::iter::repeat_n(shared.clone(), 10_001),
+    )
+    .unwrap();
+    let rebuilt = expression
+        .with_children(std::iter::repeat_n(shared.clone(), 10_001))
+        .unwrap();
+    for node in [&expression, &generic, &rebuilt] {
+        assert_eq!(node.children().len(), 10_001);
+        assert_eq!(node.node.children.capacity(), 10_001);
+        assert!(node.children().iter().all(|input| input.ptr_eq(&shared)));
+    }
+
+    let replacement = Expression::column("replacement");
+    let transformed = expression
+        .try_transform_up::<InvalidExpressionInputs>(|node| {
+            Ok(if node.ptr_eq(&shared) {
+                replacement.clone()
+            } else {
+                node.clone()
+            })
+        })
+        .unwrap();
+    assert_eq!(transformed.node.children.capacity(), 10_001);
+    assert!(transformed
+        .children()
+        .iter()
+        .all(|input| input.ptr_eq(&replacement)));
+}
+
+#[test]
+fn composite_typed_builders_reserve_exact_input_capacity() {
+    let shared = Expression::column("shared");
+    let case = CaseWhen::new(vec![(shared.clone(), shared.clone()); 5]).with_else(shared.clone());
+    let window = WindowExpressionWrapper::new(
+        shared.clone(),
+        vec![shared.clone(); 2],
+        vec![SortOrder::desc_nulls_last(shared.clone()); 2],
+        None,
+    );
+    let mut subquery = SubqueryExpression::new(Arc::new(plan::range(0, 1, 1)), 5, SubqueryType::In);
+    subquery.in_subquery_values = vec![shared.clone(); 3];
+    for (spec, count) in [
+        (ExpressionSpec::CaseWhen(Box::new(case)), 11),
+        (ExpressionSpec::WindowExpression(Box::new(window)), 5),
+        (ExpressionSpec::Subquery(Box::new(subquery)), 3),
+    ] {
+        let expression = Expression::new(spec.clone());
+        assert_eq!(expression.children().len(), count);
+        assert_eq!(expression.node.children.capacity(), count);
+        assert!(expression
+            .children()
+            .iter()
+            .all(|input| input.ptr_eq(&shared)));
+        assert_eq!(expression.to_spec(), spec);
     }
 }
 

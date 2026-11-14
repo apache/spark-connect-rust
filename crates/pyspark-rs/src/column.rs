@@ -15,9 +15,9 @@ use crate::functions::{enum_to_value, to_column, to_value_column};
 fn binary_function(name: &str, column: &Column, other: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
     let other = operand_column(other)?;
     Ok(PyColumn::new(Column::new(
-        spark_connect::expression::Expression::function(
+        spark_connect::expression::Expression::function_with_inputs(
             name,
-            vec![column.expression().clone(), other.expression().clone()],
+            [column.expression().clone(), other.expression().clone()],
         ),
     )))
 }

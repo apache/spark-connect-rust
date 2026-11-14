@@ -110,30 +110,30 @@ impl Column {
     /// Mirrors `pyspark.sql.column.Column.isNull`.
     pub fn is_null(self) -> Column {
         Column {
-            expr: Expression::function("isNull", vec![self.expr]),
+            expr: Expression::function_with_inputs("isNull", [self.expr]),
         }
     }
 
     /// Mirrors `pyspark.sql.column.Column.isNotNull`.
     pub fn is_not_null(self) -> Column {
         Column {
-            expr: Expression::function("isNotNull", vec![self.expr]),
+            expr: Expression::function_with_inputs("isNotNull", [self.expr]),
         }
     }
 
     /// Mirrors `pyspark.sql.column.Column.substr`.
     pub fn substr(self, start: Column, length: Column) -> Column {
         Column {
-            expr: Expression::function("substr", vec![self.expr, start.expr, length.expr]),
+            expr: Expression::function_with_inputs("substr", [self.expr, start.expr, length.expr]),
         }
     }
 
     /// Mirrors `pyspark.sql.column.Column.like`.
     pub fn like(self, pattern: &str) -> Column {
         Column {
-            expr: Expression::function(
+            expr: Expression::function_with_inputs(
                 "like",
-                vec![
+                [
                     self.expr,
                     Expression::literal(LiteralExpression::string(pattern)),
                 ],
@@ -144,9 +144,9 @@ impl Column {
     /// Mirrors `pyspark.sql.column.Column.rlike`.
     pub fn rlike(self, pattern: &str) -> Column {
         Column {
-            expr: Expression::function(
+            expr: Expression::function_with_inputs(
                 "rlike",
-                vec![
+                [
                     self.expr,
                     Expression::literal(LiteralExpression::string(pattern)),
                 ],
@@ -157,16 +157,16 @@ impl Column {
     /// Mirrors `pyspark.sql.column.Column.contains`.
     pub fn contains(self, other: Column) -> Column {
         Column {
-            expr: Expression::function("contains", vec![self.expr, other.expr]),
+            expr: Expression::function_with_inputs("contains", [self.expr, other.expr]),
         }
     }
 
     /// Mirrors `pyspark.sql.column.Column.ilike` (case-insensitive `like`).
     pub fn ilike(self, pattern: &str) -> Column {
         Column {
-            expr: Expression::function(
+            expr: Expression::function_with_inputs(
                 "ilike",
-                vec![
+                [
                     self.expr,
                     Expression::literal(LiteralExpression::string(pattern)),
                 ],
@@ -177,57 +177,60 @@ impl Column {
     /// Mirrors `pyspark.sql.column.Column.isNaN`.
     pub fn is_nan(self) -> Column {
         Column {
-            expr: Expression::function("isNaN", vec![self.expr]),
+            expr: Expression::function_with_inputs("isNaN", [self.expr]),
         }
     }
 
     /// Mirrors `pyspark.sql.column.Column.eqNullSafe` (null-safe equality `<=>`).
     pub fn eq_null_safe(self, other: Column) -> Column {
         Column {
-            expr: Expression::function("<=>", vec![self.expr, other.expr]),
+            expr: Expression::function_with_inputs("<=>", [self.expr, other.expr]),
         }
     }
 
     /// Mirrors `pyspark.sql.column.Column.bitwiseAND`.
     pub fn bitwise_and(self, other: Column) -> Column {
         Column {
-            expr: Expression::function("&", vec![self.expr, other.expr]),
+            expr: Expression::function_with_inputs("&", [self.expr, other.expr]),
         }
     }
 
     /// Mirrors `pyspark.sql.column.Column.bitwiseOR`.
     pub fn bitwise_or(self, other: Column) -> Column {
         Column {
-            expr: Expression::function("|", vec![self.expr, other.expr]),
+            expr: Expression::function_with_inputs("|", [self.expr, other.expr]),
         }
     }
 
     /// Mirrors `pyspark.sql.column.Column.bitwiseXOR`.
     pub fn bitwise_xor(self, other: Column) -> Column {
         Column {
-            expr: Expression::function("^", vec![self.expr, other.expr]),
+            expr: Expression::function_with_inputs("^", [self.expr, other.expr]),
         }
     }
 
     /// Mirrors `pyspark.sql.column.Column.between`:
     /// `(self >= lower) & (self <= upper)`.
     pub fn between(self, lower: Column, upper: Column) -> Column {
-        let lo = Expression::function(">=", vec![self.expr.clone(), lower.expr]);
-        let hi = Expression::function("<=", vec![self.expr, upper.expr]);
+        let lo = Expression::function_with_inputs(">=", [self.expr.clone(), lower.expr]);
+        let hi = Expression::function_with_inputs("<=", [self.expr, upper.expr]);
         Column {
-            expr: Expression::function("and", vec![lo, hi]),
+            expr: Expression::function_with_inputs("and", [lo, hi]),
         }
     }
 
     /// Mirrors `pyspark.sql.column.Column.isin`: membership test against the
     /// given values (pass literals via `lit(..)` or other columns).
     pub fn isin<C: Into<Column>>(self, values: impl IntoIterator<Item = C>) -> Column {
-        let values: Vec<Column> = values.into_iter().map(Into::into).collect();
-        let mut args = Vec::with_capacity(values.len() + 1);
-        args.push(self.expr);
-        args.extend(values.into_iter().map(|c| c.expr));
         Column {
-            expr: Expression::function("in", args),
+            expr: Expression::function_with_inputs(
+                "in",
+                std::iter::once(self.expr).chain(
+                    values
+                        .into_iter()
+                        .map(|value| Into::<Column>::into(value).expr),
+                ),
+            ),
         }
     }
 
@@ -275,14 +278,14 @@ impl Column {
     /// Mirrors `pyspark.sql.column.Column.startswith`.
     pub fn startswith(self, other: Column) -> Column {
         Column {
-            expr: Expression::function("startsWith", vec![self.expr, other.expr]),
+            expr: Expression::function_with_inputs("startsWith", [self.expr, other.expr]),
         }
     }
 
     /// Mirrors `pyspark.sql.column.Column.endswith`.
     pub fn endswith(self, other: Column) -> Column {
         Column {
-            expr: Expression::function("endsWith", vec![self.expr, other.expr]),
+            expr: Expression::function_with_inputs("endsWith", [self.expr, other.expr]),
         }
     }
 
@@ -459,16 +462,19 @@ impl Column {
     /// Mirrors `pyspark.sql.column.Column.__eq__`.
     pub fn eq(self, other: Column) -> Column {
         Column {
-            expr: Expression::function("==", vec![self.expr, other.expr]),
+            expr: Expression::function_with_inputs("==", [self.expr, other.expr]),
         }
     }
 
     /// Mirrors `pyspark.sql.column.Column.__ne__`.
     pub fn ne(self, other: Column) -> Column {
         Column {
-            expr: Expression::function(
+            expr: Expression::function_with_inputs(
                 "not",
-                vec![Expression::function("==", vec![self.expr, other.expr])],
+                [Expression::function_with_inputs(
+                    "==",
+                    [self.expr, other.expr],
+                )],
             ),
         }
     }
@@ -476,28 +482,28 @@ impl Column {
     /// Mirrors `pyspark.sql.column.Column.__gt__`.
     pub fn gt(self, other: Column) -> Column {
         Column {
-            expr: Expression::function(">", vec![self.expr, other.expr]),
+            expr: Expression::function_with_inputs(">", [self.expr, other.expr]),
         }
     }
 
     /// Mirrors `pyspark.sql.column.Column.__lt__`.
     pub fn lt(self, other: Column) -> Column {
         Column {
-            expr: Expression::function("<", vec![self.expr, other.expr]),
+            expr: Expression::function_with_inputs("<", [self.expr, other.expr]),
         }
     }
 
     /// Mirrors `pyspark.sql.column.Column.__ge__`.
     pub fn ge(self, other: Column) -> Column {
         Column {
-            expr: Expression::function(">=", vec![self.expr, other.expr]),
+            expr: Expression::function_with_inputs(">=", [self.expr, other.expr]),
         }
     }
 
     /// Mirrors `pyspark.sql.column.Column.__le__`.
     pub fn le(self, other: Column) -> Column {
         Column {
-            expr: Expression::function("<=", vec![self.expr, other.expr]),
+            expr: Expression::function_with_inputs("<=", [self.expr, other.expr]),
         }
     }
 
@@ -506,35 +512,35 @@ impl Column {
     /// Mirrors `pyspark.sql.column.Column.__add__`.
     pub fn add(self, other: Column) -> Column {
         Column {
-            expr: Expression::function("+", vec![self.expr, other.expr]),
+            expr: Expression::function_with_inputs("+", [self.expr, other.expr]),
         }
     }
 
     /// Mirrors `pyspark.sql.column.Column.__sub__`.
     pub fn sub(self, other: Column) -> Column {
         Column {
-            expr: Expression::function("-", vec![self.expr, other.expr]),
+            expr: Expression::function_with_inputs("-", [self.expr, other.expr]),
         }
     }
 
     /// Mirrors `pyspark.sql.column.Column.__mul__`.
     pub fn mul(self, other: Column) -> Column {
         Column {
-            expr: Expression::function("*", vec![self.expr, other.expr]),
+            expr: Expression::function_with_inputs("*", [self.expr, other.expr]),
         }
     }
 
     /// Mirrors `pyspark.sql.column.Column.__truediv__`.
     pub fn div(self, other: Column) -> Column {
         Column {
-            expr: Expression::function("/", vec![self.expr, other.expr]),
+            expr: Expression::function_with_inputs("/", [self.expr, other.expr]),
         }
     }
 
     /// Mirrors `pyspark.sql.column.Column.__mod__`.
     pub fn modulo(self, other: Column) -> Column {
         Column {
-            expr: Expression::function("%", vec![self.expr, other.expr]),
+            expr: Expression::function_with_inputs("%", [self.expr, other.expr]),
         }
     }
 
@@ -543,28 +549,28 @@ impl Column {
     /// Mirrors `pyspark.sql.column.Column.__and__`.
     pub fn and(self, other: Column) -> Column {
         Column {
-            expr: Expression::function("and", vec![self.expr, other.expr]),
+            expr: Expression::function_with_inputs("and", [self.expr, other.expr]),
         }
     }
 
     /// Mirrors `pyspark.sql.column.Column.__or__`.
     pub fn or(self, other: Column) -> Column {
         Column {
-            expr: Expression::function("or", vec![self.expr, other.expr]),
+            expr: Expression::function_with_inputs("or", [self.expr, other.expr]),
         }
     }
 
     /// Mirrors `pyspark.sql.column.Column.__invert__`.
     pub fn not(self) -> Column {
         Column {
-            expr: Expression::function("not", vec![self.expr]),
+            expr: Expression::function_with_inputs("not", [self.expr]),
         }
     }
 
     /// Mirrors `pyspark.sql.column.Column.__neg__`.
     pub fn neg(self) -> Column {
         Column {
-            expr: Expression::function("negative", vec![self.expr]),
+            expr: Expression::function_with_inputs("negative", [self.expr]),
         }
     }
 }
@@ -623,7 +629,7 @@ impl Not for Column {
     type Output = Column;
     fn not(self) -> Column {
         Column {
-            expr: Expression::function("not", vec![self.expr]),
+            expr: Expression::function_with_inputs("not", [self.expr]),
         }
     }
 }
@@ -738,6 +744,42 @@ pub fn when(condition: Column, value: Column) -> Column {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn isin_preserves_order_shared_inputs_and_wire_for_columns_and_expressions() {
+        let left = col("a");
+        let values = [col("b"), col("c"), col("d")];
+        let inputs: Vec<_> = std::iter::once(left.expression().clone())
+            .chain(values.iter().map(|column| column.expression().clone()))
+            .collect();
+        let expected = Expression::new(ExpressionSpec::UnresolvedFunction(
+            crate::expression::UnresolvedFunction::new("in", inputs.clone()),
+        ));
+        for actual in [
+            left.clone().isin(values.clone()),
+            left.clone().isin(values.map(|column| column.expr)),
+        ] {
+            let ExpressionKind::UnresolvedFunction { name, is_distinct } = actual.expr.kind()
+            else {
+                panic!("expected an unresolved IN function");
+            };
+            assert_eq!(name, "in");
+            assert!(!is_distinct);
+            assert_eq!(actual.expr.children().len(), inputs.len());
+            for (child, input) in actual.expr.children().iter().zip(&inputs) {
+                assert!(child.ptr_eq(input));
+            }
+            assert_eq!(actual.to_proto(), expected.to_proto());
+        }
+
+        let empty = left.clone().isin(Vec::<Column>::new());
+        assert_eq!(empty.expr.children().len(), 1);
+        assert!(empty.expr.children()[0].ptr_eq(left.expression()));
+        let expected = Expression::new(ExpressionSpec::UnresolvedFunction(
+            crate::expression::UnresolvedFunction::new("in", vec![left.expr]),
+        ));
+        assert_eq!(empty.to_proto(), expected.to_proto());
+    }
 
     #[test]
     fn aliases_name_every_column_of_a_generator() {

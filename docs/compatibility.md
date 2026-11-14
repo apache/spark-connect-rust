@@ -104,7 +104,9 @@ it to `Expression::new` or convert it with `.into()`. Match stored payloads on
 `expression.kind()` (`&ExpressionKind`) and read their ordered inputs through
 `expression.children()`. `expression.node()` now borrows the enclosing struct,
 so existing enum matches on that method must change. The `literal`, `column`
-and `function` convenience constructors remain.
+and `function` convenience constructors remain. The additive
+`Expression::function_with_inputs(name, inputs)` constructor accepts iterators
+and arrays, avoiding temporary argument vectors for unary and binary calls.
 
 `LiteralExpression::Null` and `CastTarget::Type` now hold an `Arc<DataType>`.
 Direct enum construction must wrap the type in an `Arc`; the convenience

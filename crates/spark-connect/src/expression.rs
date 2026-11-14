@@ -498,13 +498,6 @@ impl Expression {
         Self::new_leaf(ExpressionKind::ColumnReference(ColumnReference::new(name)))
     }
 
-    /// Create a non-distinct unresolved function call.
-    pub fn function(name: impl Into<String>, args: Vec<Expression>) -> Self {
-        Self::new(ExpressionSpec::UnresolvedFunction(UnresolvedFunction::new(
-            name, args,
-        )))
-    }
-
     /// Borrow this expression's node without exposing mutable shared state.
     pub fn node(&self) -> &ExpressionNode {
         self.node.as_ref()

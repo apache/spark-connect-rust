@@ -36,6 +36,11 @@ inclusive range; an error's `expected_max: None` means an unbounded count.
 Pass a specification to `Expression::new`, or convert it with `.into()`; it is
 normalized into the canonical payload and inputs rather than stored alongside
 them. The `literal`, `column` and `function` convenience constructors remain.
+`function(name, Vec<Expression>)` builds the shared node directly and retains a
+wide argument vector's buffer. `function_with_inputs(name, inputs)` accepts an
+iterator or array; unary and binary arrays avoid a temporary argument vector.
+The function constructors and `try_new` capture the current origin after
+collecting inputs; the function constructors convert their name first.
 `to_spec()` reconstructs an owned builder specification, sharing its expression
 inputs and cloning payloads. Prefer borrowed inspection when no builder is
 needed.
@@ -44,6 +49,11 @@ needed.
 payload and original construction origin. Its new root has its own allocation,
 even when every supplied child is unchanged. Clone the existing handle to
 preserve its root identity. New construction captures the current origin.
+
+Input collection in `try_new`, `function_with_inputs`, `with_children` and
+changed-node transforms reserves the iterator's lower size bound without
+rounding it up. Unchanged transforms retain the original node without
+collecting its inputs again.
 
 `ExpressionType::Known` records an explicitly declared type: a typed null's
 type, `CastTarget::Type`, or a Python UDF's output type. Other expressions use
