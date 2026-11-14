@@ -12,6 +12,84 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
 
+/// Declares the ML params of one class: the typed builders and getters of its parameters, and
+/// `PARAM_NAMES`. Usage: `ml_params! { Class { <rows> } }`, once per class, with one row per
+/// parameter in the order of PySpark's `params`. A row is one of two kinds:
+///
+/// * A setter row, `set_x(value: T) => "wireName", put_fn; x -> Ret = |this| body;`, emits the
+///   builder `set_x(value)`, which stores `put_fn("wireName", value)`, and the getter `x(&self)
+///   -> Ret`, whose body `body` reads the parameter, or returns its pyspark.ml default.
+/// * A getter-only row, `x -> Ret = |this| body => "wireName";`, is for a parameter with no
+///   pyspark.ml setter (a model's parameter, which the server sets): it emits only the getter.
+///
+/// The `PARAM_NAMES` constant lists the wire name of every row, in row order. A second
+/// invocation for the same class fails to compile on the duplicate constant.
+///
+/// This macro is defined before the area modules, so that all of them see it.
+macro_rules! ml_params {
+    ($name:ident { $($rows:tt)* }) => {
+        ml_params! { @munch $name [] [] $($rows)* }
+    };
+    // A setter row and the getter of its parameter.
+    (@munch $name:ident [$($items:tt)*] [$($wires:literal,)*]
+        $set:ident($arg:ident: $ty:ty) => $wire:literal, $put:ident;
+        $get:ident -> $ret:ty = |$this:ident| $body:expr; $($rest:tt)*
+    ) => {
+        ml_params! { @munch $name
+            [$($items)*
+                #[doc = concat!("Set `", $wire, "`.")]
+                pub fn $set(mut self, $arg: $ty) -> Self {
+                    self.params = self.params.$put($wire, $arg);
+                    self
+                }
+                #[doc = "Get the parameter, or its pyspark.ml default when it is not set."]
+                pub fn $get(&self) -> $ret {
+                    let $this = self;
+                    $body
+                }
+            ]
+            [$($wires,)* $wire,]
+            $($rest)*
+        }
+    };
+    // A getter-only row.
+    (@munch $name:ident [$($items:tt)*] [$($wires:literal,)*]
+        $get:ident -> $ret:ty = |$this:ident| $body:expr => $wire:literal; $($rest:tt)*
+    ) => {
+        ml_params! { @munch $name
+            [$($items)*
+                #[doc = "Get the parameter, or its pyspark.ml default when it is not set."]
+                pub fn $get(&self) -> $ret {
+                    let $this = self;
+                    $body
+                }
+            ]
+            [$($wires,)* $wire,]
+            $($rest)*
+        }
+    };
+    // All rows are read: the impl block with the names of the rows, in row order.
+    (@munch $name:ident [$($items:tt)*] [$($wires:literal,)*]) => {
+        impl $name {
+            /// The wire names of the parameters of this class, in row order.
+            pub const PARAM_NAMES: &'static [&'static str] = &[$($wires),*];
+            $($items)*
+        }
+    };
+}
+
+/// The default `seed` of a class when the client sends none: Java's `String.hashCode` of the JVM
+/// class name, which the server takes as `getClass.getName.hashCode`, sign-extended to `Long`.
+// Read by the seed getters of the rows that scripts/gen_rust_params_table.py prints.
+#[allow(dead_code)]
+fn java_string_hash(class_name: &str) -> i64 {
+    let mut hash: i32 = 0;
+    for unit in class_name.encode_utf16() {
+        hash = hash.wrapping_mul(31).wrapping_add(i32::from(unit));
+    }
+    i64::from(hash)
+}
+
 mod recommendation;
 pub use recommendation::*;
 
@@ -340,6 +418,11 @@ impl Params {
         self
     }
 
+    /// Set a parameter to an array of 32-bit integers, as PySpark sends a list of ints.
+    pub fn set_param_int32_array(self, name: &str, values: impl IntoIterator<Item = i32>) -> Self {
+        self.set_param_int_array(name, values.into_iter().map(i64::from))
+    }
+
     /// Set a parameter whose JVM type is `Array[Double]` (such as `thresholds`), as PySpark
     /// sends a list of floats: an array literal of `double` elements.
     pub fn set_param_double_array(
@@ -654,7 +737,99 @@ impl Params {
                 .collect(),
         )
     }
+}
 
+// The optional getters below are read by the rows that scripts/gen_rust_params_table.py prints
+// for each converted class. The attribute goes once the first of those rows is converted.
+#[allow(dead_code)]
+impl Params {
+    /// The integer parameter `name`, if it is set, as the server reads it into a JVM `Int`.
+    fn int_opt(&self, name: &str) -> Option<i32> {
+        use proto::expression::literal::LiteralType as L;
+        match self.literal(name)? {
+            L::Integer(value) => Some(*value),
+            L::Long(value) => Some(*value as i32),
+            L::Double(value) => Some(*value as i32),
+            _ => None,
+        }
+    }
+
+    /// The floating-point parameter `name`, if it is set.
+    fn double_opt(&self, name: &str) -> Option<f64> {
+        use proto::expression::literal::LiteralType as L;
+        match self.literal(name)? {
+            L::Double(value) => Some(*value),
+            L::Integer(value) => Some(f64::from(*value)),
+            L::Long(value) => Some(*value as f64),
+            _ => None,
+        }
+    }
+
+    /// The boolean parameter `name`, if it is set.
+    fn bool_opt(&self, name: &str) -> Option<bool> {
+        match self.literal(name)? {
+            proto::expression::literal::LiteralType::Boolean(value) => Some(*value),
+            _ => None,
+        }
+    }
+
+    /// The string array parameter `name`, if it is set.
+    fn string_array_opt(&self, name: &str) -> Option<Vec<String>> {
+        let elements = self.array_opt(name)?;
+        Some(
+            elements
+                .iter()
+                .filter_map(|element| match &element.literal_type {
+                    Some(proto::expression::literal::LiteralType::String(value)) => {
+                        Some(value.clone())
+                    }
+                    _ => None,
+                })
+                .collect(),
+        )
+    }
+
+    /// The integer array parameter `name`, if it is set, as the server reads it into `Int`s.
+    fn int_array_opt(&self, name: &str) -> Option<Vec<i32>> {
+        let elements = self.array_opt(name)?;
+        Some(
+            elements
+                .iter()
+                .filter_map(|element| match element.literal_type {
+                    Some(proto::expression::literal::LiteralType::Integer(value)) => Some(value),
+                    Some(proto::expression::literal::LiteralType::Long(value)) => {
+                        Some(value as i32)
+                    }
+                    _ => None,
+                })
+                .collect(),
+        )
+    }
+
+    /// The nested floating-point array parameter `name`, if it is set.
+    fn double_arrays_opt(&self, name: &str) -> Option<Vec<Vec<f64>>> {
+        use proto::expression::literal::LiteralType as L;
+        let outer = self.array_opt(name)?;
+        Some(
+            outer
+                .iter()
+                .map(|element| match &element.literal_type {
+                    Some(L::Array(inner)) => inner
+                        .elements
+                        .iter()
+                        .filter_map(|value| match value.literal_type {
+                            Some(L::Double(value)) => Some(value),
+                            _ => None,
+                        })
+                        .collect(),
+                    _ => Vec::new(),
+                })
+                .collect(),
+        )
+    }
+}
+
+impl Params {
     /// Convert to proto MlParams for transmission. MlParams stores `Literal`
     /// values, so we unwrap the literal from each stored Expression.
     pub fn to_proto(&self) -> proto::MlParams {
@@ -8079,6 +8254,18 @@ impl Model for CrossValidatorModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn java_string_hash_matches_java_hash_code() {
+        // Values of `String.hashCode` in the JVM, including a negative one.
+        assert_eq!(
+            java_string_hash("org.apache.spark.ml.classification.RandomForestClassifier"),
+            207_336_481
+        );
+        assert_eq!(java_string_hash("hello"), 99_162_322);
+        assert_eq!(java_string_hash("polygenelubricants"), i64::from(i32::MIN));
+    }
+
     // Used only by the tests below (the non-test build does not reference it).
     use crate::session::SparkSession;
 
