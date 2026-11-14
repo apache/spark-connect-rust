@@ -96,20 +96,21 @@ def test_als_retains_model_used_by_a_recommendation_subset(session):
     assert_frame(result, GOLDEN["cases"][0]["user_subset"])
 
 
-def test_native_als_rejects_other_sessions(session):
-    if REFERENCE:
-        pytest.skip("Native fitted-session ownership contract")
+def test_als_other_session_fails_transform_at_collect_and_recommends_as_pyspark(session):
+    # As PySpark: the transform of a DataFrame of another session fails at collect, with
+    # CONNECT_ML.CACHE_INVALID, and the subsets of another session's DataFrames recommend.
+    from pyspark.errors.exceptions.connect import SparkException
+
     model = configured(algorithm("ALS"), GOLDEN["cases"][0]["values"]).fit(
         session.sql(GOLDEN["train"]).coalesce(1)
     )
     other = session.newSession()
     try:
-        for operation in [
-            lambda: model.transform(other.sql(GOLDEN["held"])),
-            lambda: model.recommendForUserSubset(other.sql(GOLDEN["users"]), 2),
-            lambda: model.recommendForItemSubset(other.sql(GOLDEN["items"]), 2),
-        ]:
-            with pytest.raises(ValueError, match="fitting session"):
-                operation()
+        transformed = model.transform(other.sql(GOLDEN["held"]))
+        with pytest.raises(SparkException) as error:
+            transformed.collect()
+        assert error.value.getCondition() == "CONNECT_ML.CACHE_INVALID"
+        assert model.recommendForUserSubset(other.sql(GOLDEN["users"]), 2).count() > 0
+        assert model.recommendForItemSubset(other.sql(GOLDEN["items"]), 2).count() > 0
     finally:
         other.stop()

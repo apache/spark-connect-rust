@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Native ALS fitting, prediction, factors and recommendations.
 use super::*;
-use spark_connect::ml::{ALSModel, ALS};
+use pyo3::IntoPyObjectExt;
+use spark_connect::ml::ALS;
 use spark_connect_proto as proto;
 
 /// The literal of a recommendation count, as PySpark's serialization of the argument,
@@ -46,6 +47,7 @@ const ALS_PARAMS: &[(&str, Kind)] = &[
     ("blockSize", Kind::Int),
 ];
 
+/// ALS, as PySpark's `ALS` over Spark Connect: an estimator of its params.
 #[pyclass(name = "ALS", module = "pyspark.ml.connect.recommendation")]
 pub struct PyALS {
     inner: ALS,
@@ -69,8 +71,46 @@ impl Native for PyALS {
         &mut self.unsendable
     }
 }
-#[pymethods]
-impl PyALS {
+
+native_pymethods! {
+    PyALS;
+    jvm: "org.apache.spark.ml.recommendation.ALS", op: Estimator;
+    params: [
+        "alpha" => ("getAlpha", get_alpha, param_alpha),
+        "blockSize" => ("getBlockSize", get_block_size, param_block_size),
+        "checkpointInterval" => (
+            "getCheckpointInterval",
+            get_checkpoint_interval,
+            param_checkpoint_interval
+        ),
+        "coldStartStrategy" => (
+            "getColdStartStrategy",
+            get_cold_start_strategy,
+            param_cold_start_strategy
+        ),
+        "finalStorageLevel" => (
+            "getFinalStorageLevel",
+            get_final_storage_level,
+            param_final_storage_level
+        ),
+        "implicitPrefs" => ("getImplicitPrefs", get_implicit_prefs, param_implicit_prefs),
+        "intermediateStorageLevel" => (
+            "getIntermediateStorageLevel",
+            get_intermediate_storage_level,
+            param_intermediate_storage_level
+        ),
+        "itemCol" => ("getItemCol", get_item_col, param_item_col),
+        "maxIter" => ("getMaxIter", get_max_iter, param_max_iter),
+        "nonnegative" => ("getNonnegative", get_nonnegative, param_nonnegative),
+        "numItemBlocks" => ("getNumItemBlocks", get_num_item_blocks, param_num_item_blocks),
+        "numUserBlocks" => ("getNumUserBlocks", get_num_user_blocks, param_num_user_blocks),
+        "predictionCol" => ("getPredictionCol", get_prediction_col, param_prediction_col),
+        "rank" => ("getRank", get_rank, param_rank),
+        "ratingCol" => ("getRatingCol", get_rating_col, param_rating_col),
+        "regParam" => ("getRegParam", get_reg_param, param_reg_param),
+        "seed" => ("getSeed", get_seed, param_seed),
+        "userCol" => ("getUserCol", get_user_col, param_user_col),
+    ];
     #[new]
     #[pyo3(signature=(*args,**kwargs),text_signature="(*, rank=10, maxIter=10, regParam=0.1, numUserBlocks=10, numItemBlocks=10, implicitPrefs=False, alpha=1.0, userCol='user', itemCol='item', seed=None, ratingCol='rating', nonnegative=False, checkpointInterval=10, intermediateStorageLevel='MEMORY_AND_DISK', finalStorageLevel='MEMORY_AND_DISK', coldStartStrategy='nan', blockSize=4096)")]
     fn new(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
@@ -219,6 +259,7 @@ impl PyALS {
     ) -> PyResult<Bound<'py, Self>> {
         set_param(slf, "userCol", Kind::Str, value)
     }
+    /// Set both the user and the item block counts, as `ALS.setNumBlocks`.
     #[pyo3(name = "setNumBlocks")]
     fn set_num_blocks<'py>(
         slf: Bound<'py, Self>,
@@ -239,163 +280,164 @@ impl PyALS {
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Fitted<PyALSModel>> {
-        fit_with(slf, dataset, params, || -> PyResult<PyALSModel> {
-            let input = dataset_of(dataset, "fit")?;
+        fit_with(slf, dataset, params, || {
+            let py = slf.py();
+            let df = dataset_of(dataset, "fit")?;
             let mut estimator = snapshot(slf)?;
-            let session = input.spark_session();
-            let inner = interruptible(slf.py(), &session, || {
-                estimator.fit(&input).map_err(Box::new)
-            })?;
-            Ok(PyALSModel {
-                inner,
-                unsendable: Vec::new(),
-            })
+            // As `fit_native_model`, which the core model's rank does not fit: the fitted core
+            // model is kept concrete here, for its rank.
+            let defaults = params_api::fit_defaults(slf)?;
+            let session = df.spark_session();
+            let fitted = interruptible(py, &session, || estimator.fit(&df).map_err(Box::new))?;
+            let rank = fitted.rank();
+            let mut model = PyALSModel::fitted(py, Box::new(fitted), &df, object::SummaryDataset::None)?;
+            // The rank of the fit, kept on the model for its `rank` (see `PyALSModel::rank`).
+            model.core.cached(py, "rank", || rank.into_py_any(py))?;
+            params_api::copy_defaults(py, defaults, &mut model)?;
+            Ok(model)
         })
+    }
+
+    /// The fits of a copy of the estimator, one per param map, as `Estimator.fitMultiple`, of
+    /// PySpark's keywords.
+    #[pyo3(name = "fitMultiple")]
+    #[allow(non_snake_case)]
+    fn fit_multiple<'py>(
+        slf: &Bound<'py, Self>,
+        dataset: &Bound<'py, PyAny>,
+        paramMaps: &Bound<'py, PyAny>,
+    ) -> PyResult<params_api::PyFitMultipleIterator> {
+        params_api::fit_multiple(slf.as_any(), dataset, paramMaps)
     }
 }
 
-#[pyclass(name = "ALSModel", module = "pyspark.ml.connect.recommendation")]
-pub struct PyALSModel {
-    inner: ALSModel,
-    unsendable: Vec<&'static str>,
-}
-impl Native for PyALSModel {
-    type Core = ALSModel;
-    fn inner(&self) -> &Self::Core {
-        &self.inner
+impl params_api::NativeInstance for PyALS {
+    fn duplicate(&self, py: Python<'_>) -> PyResult<Py<Self>> {
+        Py::new(
+            py,
+            Self {
+                inner: self.inner.clone(),
+                unsendable: self.unsendable.clone(),
+            },
+        )
     }
-    fn params(&self) -> &Params {
-        self.inner.params()
+
+    fn uid(&self) -> String {
+        Estimator::operator(&self.inner).uid.clone()
     }
-    fn params_mut(&mut self) -> &mut Params {
-        self.inner.params_mut()
-    }
-    fn unsendable(&self) -> &[&'static str] {
-        &self.unsendable
-    }
-    fn unsendable_mut(&mut self) -> &mut Vec<&'static str> {
-        &mut self.unsendable
+
+    fn set_uid(&mut self, uid: &str) {
+        Estimator::operator_mut(&mut self.inner).uid = uid.to_string();
     }
 }
-#[pymethods]
-impl PyALSModel {
-    #[pyo3(name = "setBlockSize")]
-    fn set_block_size<'py>(
-        slf: Bound<'py, Self>,
-        value: &Bound<'py, PyAny>,
-    ) -> PyResult<Bound<'py, Self>> {
-        set_param(slf, "blockSize", Kind::Int, value)
-    }
-    #[pyo3(name = "setColdStartStrategy")]
-    fn set_cold_start_strategy<'py>(
-        slf: Bound<'py, Self>,
-        value: &Bound<'py, PyAny>,
-    ) -> PyResult<Bound<'py, Self>> {
-        set_param(slf, "coldStartStrategy", Kind::Str, value)
-    }
-    #[pyo3(name = "setItemCol")]
-    fn set_item_col<'py>(
-        slf: Bound<'py, Self>,
-        value: &Bound<'py, PyAny>,
-    ) -> PyResult<Bound<'py, Self>> {
-        set_param(slf, "itemCol", Kind::Str, value)
-    }
-    #[pyo3(name = "setPredictionCol")]
-    fn set_prediction_col<'py>(
-        slf: Bound<'py, Self>,
-        value: &Bound<'py, PyAny>,
-    ) -> PyResult<Bound<'py, Self>> {
-        set_param(slf, "predictionCol", Kind::Str, value)
-    }
-    #[pyo3(name = "setUserCol")]
-    fn set_user_col<'py>(
-        slf: Bound<'py, Self>,
-        value: &Bound<'py, PyAny>,
-    ) -> PyResult<Bound<'py, Self>> {
-        set_param(slf, "userCol", Kind::Str, value)
-    }
-    #[pyo3(signature = (dataset, params=None))]
-    fn transform(
-        slf: &Bound<'_, Self>,
-        dataset: &Bound<'_, PyAny>,
-        params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<PyDataFrame> {
-        check_params(params)?;
-        let input = dataset_of(dataset, "transform")?;
-        let mut model = snapshot(slf)?;
-        Ok(PyDataFrame::new(model.transform(&input).to_pyerr()?))
-    }
+
+native_model! {
+    PyALSModel = "ALSModel" in "pyspark.ml.connect.recommendation",
+        jvm: "org.apache.spark.ml.recommendation.ALSModel";
+    params: [
+        "blockSize" => ("getBlockSize", get_block_size, param_block_size),
+        "coldStartStrategy" => (
+            "getColdStartStrategy",
+            get_cold_start_strategy,
+            param_cold_start_strategy
+        ),
+        "itemCol" => ("getItemCol", get_item_col, param_item_col),
+        "predictionCol" => ("getPredictionCol", get_prediction_col, param_prediction_col),
+        "userCol" => ("getUserCol", get_user_col, param_user_col),
+    ];
+    setters: [
+        "setBlockSize" => (set_block_size, "blockSize"),
+        "setColdStartStrategy" => (set_cold_start_strategy, "coldStartStrategy"),
+        "setItemCol" => (set_item_col, "itemCol"),
+        "setPredictionCol" => (set_prediction_col, "predictionCol"),
+        "setUserCol" => (set_user_col, "userCol"),
+    ];
+    properties: [];
+    methods: [];
+    relations: [
+        "itemFactors" => (item_factors, "itemFactors"),
+        "userFactors" => (user_factors, "userFactors"),
+    ];
+    relation_methods: [];
+    summary: None;
+    cached: [];
+
+    /// The rank of the factors, as `ALSModel.rank`: of the fit, which the fit keeps in the cache of
+    /// the model (no request), or, of a loaded model, of the server's `rank`, read once.
     #[getter]
-    fn rank(&self) -> i32 {
-        self.inner.rank()
+    fn rank(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        let py = slf.py();
+        let this = slf.try_borrow()?;
+        this.core.cached(py, "rank", || {
+            let target = this.core.target()?;
+            let out = object::fetch_py(py, &target, "rank", &[])?;
+            object::fetch_output_to_py(py, out)
+        })
     }
-    #[getter]
-    #[pyo3(name = "userFactors")]
-    fn user_factors(&self) -> PyResult<PyDataFrame> {
-        Ok(PyDataFrame::new(self.inner.user_factors().to_pyerr()?))
-    }
-    #[getter]
-    #[pyo3(name = "itemFactors")]
-    fn item_factors(&self) -> PyResult<PyDataFrame> {
-        Ok(PyDataFrame::new(self.inner.item_factors().to_pyerr()?))
-    }
+
+    /// The top `numItems` items of every user, as `ALSModel.recommendForAllUsers`. The count
+    /// is sent as PySpark's serialization sends it, a literal (see [`count_literal`]).
     #[allow(non_snake_case)]
-    #[pyo3(name="recommendForAllUsers",signature=(numItems))]
+    #[pyo3(name = "recommendForAllUsers", signature = (numItems))]
     fn recommend_for_all_users(
         slf: &Bound<'_, Self>,
         numItems: &Bound<'_, PyAny>,
     ) -> PyResult<PyDataFrame> {
-        let count = count_literal(numItems)?;
-        let model = slf.try_borrow()?.inner.clone();
-        Ok(PyDataFrame::new(
-            model.recommend_with_literal(true, None, count).to_pyerr()?,
-        ))
+        count_literal(numItems)?;
+        let target = slf.try_borrow()?.core.target()?;
+        let count = numItems.clone();
+        object::attribute_relation_py(&target, "recommendForAllUsers", &[count])
     }
+
+    /// The top `numUsers` users of every item, as `ALSModel.recommendForAllItems`.
     #[allow(non_snake_case)]
-    #[pyo3(name="recommendForAllItems",signature=(numUsers))]
+    #[pyo3(name = "recommendForAllItems", signature = (numUsers))]
     fn recommend_for_all_items(
         slf: &Bound<'_, Self>,
         numUsers: &Bound<'_, PyAny>,
     ) -> PyResult<PyDataFrame> {
-        let count = count_literal(numUsers)?;
-        let model = slf.try_borrow()?.inner.clone();
-        Ok(PyDataFrame::new(
-            model
-                .recommend_with_literal(false, None, count)
-                .to_pyerr()?,
-        ))
+        count_literal(numUsers)?;
+        let target = slf.try_borrow()?.core.target()?;
+        let count = numUsers.clone();
+        object::attribute_relation_py(&target, "recommendForAllItems", &[count])
     }
+
+    /// The top `numItems` items of each user of `dataset`, as
+    /// `ALSModel.recommendForUserSubset`, of the dataset as PySpark sends it.
     #[allow(non_snake_case)]
-    #[pyo3(name="recommendForUserSubset",signature=(dataset, numItems))]
+    #[pyo3(name = "recommendForUserSubset", signature = (dataset, numItems))]
     fn recommend_for_user_subset(
         slf: &Bound<'_, Self>,
         dataset: &Bound<'_, PyAny>,
         numItems: &Bound<'_, PyAny>,
     ) -> PyResult<PyDataFrame> {
-        let input = helper_dataset_of(dataset, "recommendForUserSubset")?;
-        let count = count_literal(numItems)?;
-        let model = slf.try_borrow()?.inner.clone();
-        Ok(PyDataFrame::new(
-            model
-                .recommend_with_literal(true, Some(&input), count)
-                .to_pyerr()?,
-        ))
+        helper_dataset_of(dataset, "recommendForUserSubset")?;
+        count_literal(numItems)?;
+        let target = slf.try_borrow()?.core.target()?;
+        object::attribute_relation_py(
+            &target,
+            "recommendForUserSubset",
+            &[dataset.clone(), numItems.clone()],
+        )
     }
+
+    /// The top `numUsers` users of each item of `dataset`, as
+    /// `ALSModel.recommendForItemSubset`, of the dataset as PySpark sends it.
     #[allow(non_snake_case)]
-    #[pyo3(name="recommendForItemSubset",signature=(dataset, numUsers))]
+    #[pyo3(name = "recommendForItemSubset", signature = (dataset, numUsers))]
     fn recommend_for_item_subset(
         slf: &Bound<'_, Self>,
         dataset: &Bound<'_, PyAny>,
         numUsers: &Bound<'_, PyAny>,
     ) -> PyResult<PyDataFrame> {
-        let input = helper_dataset_of(dataset, "recommendForItemSubset")?;
-        let count = count_literal(numUsers)?;
-        let model = slf.try_borrow()?.inner.clone();
-        Ok(PyDataFrame::new(
-            model
-                .recommend_with_literal(false, Some(&input), count)
-                .to_pyerr()?,
-        ))
+        helper_dataset_of(dataset, "recommendForItemSubset")?;
+        count_literal(numUsers)?;
+        let target = slf.try_borrow()?.core.target()?;
+        object::attribute_relation_py(
+            &target,
+            "recommendForItemSubset",
+            &[dataset.clone(), numUsers.clone()],
+        )
     }
 }
 

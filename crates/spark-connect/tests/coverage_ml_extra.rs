@@ -8,10 +8,10 @@
 //! these run in the default (server-less) `cargo test` pass.
 
 use spark_connect::ml::{
-    BinaryClassificationEvaluator, CrossValidator, Estimator, Evaluator, LogisticRegression,
-    MaxAbsScaler, MlOperator, Model, MulticlassClassificationEvaluator, OperatorType, Params,
-    Pipeline, PipelineModel, RegressionEvaluator, StandardScaler, StringIndexer, Transformer,
-    VectorAssembler,
+    BinaryClassificationEvaluator, CrossValidator, Estimator, Evaluator, LinearSVC,
+    LogisticRegression, MaxAbsScaler, MlOperator, Model, MulticlassClassificationEvaluator,
+    OperatorType, Params, Pipeline, PipelineModel, PipelineStage, RegressionEvaluator,
+    StandardScaler, StringIndexer, Transformer, VectorAssembler,
 };
 
 #[test]
@@ -97,7 +97,10 @@ fn estimator_builders_and_accessors() {
     let _ = LogisticRegression::default();
 
     // Pipeline
-    let mut e = Pipeline::new().set_stages(vec!["a", "b"]);
+    let mut e = Pipeline::new().set_stages(vec![
+        PipelineStage::estimator(LogisticRegression::new()),
+        PipelineStage::estimator(LinearSVC::new()),
+    ]);
     assert_eq!(e.stages().len(), 2);
     let _ = e.operator();
     let _ = e.operator_mut();
@@ -135,11 +138,7 @@ fn transformer_and_model_accessors() {
 
     // Models with public fields: construct directly and exercise Transformer + Model methods.
 
-    let mut m = PipelineModel {
-        operator: MlOperator::new("pl", OperatorType::Model),
-        params: Params::new(),
-        stages: vec!["a".to_string()],
-    };
+    let mut m = PipelineModel::of_stages(vec![PipelineStage::transformer(VectorAssembler::new())]);
     let _ = m.operator();
     let _ = m.operator_mut();
     let _ = m.params();

@@ -6,7 +6,16 @@ import inspect
 
 import pytest
 from _mock_connect_server import mock_connect_session
-from _statistics_cases import FIXTURE, REFERENCE, api, helper, summary
+from _statistics_cases import (
+    ARGUMENTS,
+    FIXTURE,
+    api,
+    argument_case_id,
+    call_with_arguments,
+    first_line,
+    helper,
+    summary,
+)
 from pyspark import _pyspark
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
@@ -118,45 +127,55 @@ def test_pandas_rejected_before_argument_conversion_or_rpc(session):
         assert _requests_but_deletes(service) == sent
 
 
-def test_helper_arguments_are_serialized_as_pyspark(session):
-    # As PySpark's serialization of the arguments of the helper calls, in their order: an argument
-    # that cannot be a literal raises the error of its conversion, and a literal of another type
-    # than PySpark's, which PySpark sends for the server to reject, raises a TypeError here, before
-    # any request, as of official pyspark-client 4.3.0.
+@pytest.mark.parametrize("case", ARGUMENTS["cases"], ids=argument_case_id)
+def test_helper_arguments_are_serialized_as_pyspark(session, case):
+    # As official PySpark serializes the arguments of the helper calls, in their order: an argument
+    # that cannot be a literal raises the error of its conversion, before any request, and a
+    # literal of another type than the helper takes is sent as PySpark sends it, in a lazy
+    # DataFrame, for the server to reject when it is collected (test_statistics_e2e.py).
+    spark, service = session
+    frame = spark.range(1)
+    sent = _requests_but_deletes(service)
+    if "error" in case:
+        with pytest.raises(Exception) as error:
+            call_with_arguments(case, frame)
+        assert type(error.value).__name__ == case["error"]["class"]
+        assert first_line(error.value) == case["error"]["message"]
+    else:
+        fetch = _relation(call_with_arguments(case, frame)).ml_relation.fetch
+        assert fetch.obj_ref.id == "______ML_CONNECT_HELPER______"
+        (method,) = fetch.methods
+        assert method.method == case["method"]
+        assert len(method.args) == len(case["sent"])
+        for arg, expected in zip(method.args, case["sent"]):
+            if expected == {"input": True}:
+                assert arg.input == _relation(frame)
+            else:
+                literal = base64.b64decode(expected["literal"])
+                assert arg.param == pb2.Expression.Literal.FromString(literal)
+    assert _requests_but_deletes(service) == sent
+
+
+def test_a_typed_pair_argument_raises_its_conversion_error(session):
+    # PySpark's serialize sends a (value, DataType) pair as a literal of that type, which the
+    # native classes do not convert: a pair raises the UNSUPPORTED_DATA_TYPE of a tuple, before any
+    # request (see docs/compatibility.md).
     from pyspark.errors import PySparkTypeError
+    from pyspark.sql.types import IntegerType, StringType
 
     spark, service = session
     stat = api()
-    df = spark.range(1)
+    frame = spark.range(1)
     sent = _requests_but_deletes(service)
-    unconvertible = [
-        (lambda: stat.ChiSquareTest.test(df, object(), "label"), "UNSUPPORTED_DATA_TYPE"),
-        (lambda: stat.ChiSquareTest.test(df, "features", object()), "UNSUPPORTED_DATA_TYPE"),
-        (lambda: stat.Correlation.corr(df, object()), "UNSUPPORTED_DATA_TYPE"),
-        (lambda: stat.KolmogorovSmirnovTest.test(df, object(), "norm"), "UNSUPPORTED_DATA_TYPE"),
-        (lambda: stat.KolmogorovSmirnovTest.test(df, "id", {"a": 1}), "UNSUPPORTED_DATA_TYPE"),
-        (lambda: stat.ChiSquareTest.test([], "features", "label"),
-         "CANNOT_INFER_ARRAY_ELEMENT_TYPE"),
-    ]
-    for operation, condition in unconvertible:
+    for operation in [
+        lambda: stat.ChiSquareTest.test((1, IntegerType()), "features", "label"),
+        lambda: stat.ChiSquareTest.test(frame, ("features", StringType()), "label"),
+        lambda: stat.Correlation.corr(frame, "features", ("pearson", StringType())),
+    ]:
         with pytest.raises(PySparkTypeError) as error:
             operation()
-        assert error.value.getCondition() == condition
-    assert _requests_but_deletes(service) == sent
-    if REFERENCE:
-        # PySpark sends these, for the server to reject when the result is analyzed.
-        return
-    refused = [
-        (lambda: stat.ChiSquareTest.test(df, 1, "label"), "test() takes a str featuresCol, not 'int'"),
-        (lambda: stat.Correlation.corr(df, None), "corr() takes a str column, not 'NoneType'"),
-        (lambda: stat.KolmogorovSmirnovTest.test(df, "id", 1), "test() takes a str distName, not 'int'"),
-        (lambda: stat.ChiSquareTest.test(5, "features", "label"),
-         "test() takes a Spark DataFrame, not 'int'"),
-    ]
-    for operation, message in refused:
-        with pytest.raises(TypeError) as error:
-            operation()
-        assert str(error.value) == message
+        assert error.value.getCondition() == "UNSUPPORTED_DATA_TYPE"
+        assert error.value.getMessageParameters() == {"data_type": "tuple"}
     assert _requests_but_deletes(service) == sent
 
 
