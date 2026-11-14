@@ -50,6 +50,36 @@ fn simple_string_matches_pyspark() {
 }
 
 #[test]
+fn simple_string_of_the_ml_udts_matches_pyspark() {
+    // PySpark's VectorUDT and MatrixUDT name their simple strings, as a schema of ML features
+    // prints them. Another UDT keeps "udt".
+    use spark_connect::types::StructField;
+    let udt = |python_class: Option<&str>| DataType::Udt {
+        type_str: "udt".to_string(),
+        jvm_class: None,
+        python_class: python_class.map(str::to_string),
+        serialized_python_class: None,
+        sql_type: Some(Box::new(DataType::Integer)),
+    };
+    assert_eq!(s(&udt(Some("pyspark.ml.linalg.VectorUDT"))), "vector");
+    assert_eq!(s(&udt(Some("pyspark.ml.linalg.MatrixUDT"))), "matrix");
+    assert_eq!(
+        s(&udt(Some("pyspark.testing.sqlutils.ExamplePointUDT"))),
+        "udt"
+    );
+    assert_eq!(s(&udt(None)), "udt");
+    let schema = DataType::Struct {
+        fields: vec![StructField {
+            name: "features".to_string(),
+            data_type: udt(Some("pyspark.ml.linalg.VectorUDT")),
+            nullable: true,
+            metadata: Default::default(),
+        }],
+    };
+    assert_eq!(s(&schema), "struct<features:vector>");
+}
+
+#[test]
 fn type_name_matches_pyspark() {
     assert_eq!(DataType::Integer.type_name(), "integer");
     assert_eq!(DataType::Long.type_name(), "long");

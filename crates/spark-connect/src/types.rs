@@ -389,7 +389,13 @@ impl DataType {
                     format!("geography({})", srid)
                 }
             }
-            DataType::Udt { .. } => "udt".to_string(),
+            // pyspark.ml.linalg's UDTs name their simple strings, as PySpark's VectorUDT and
+            // MatrixUDT do.
+            DataType::Udt { python_class, .. } => match python_class.as_deref() {
+                Some("pyspark.ml.linalg.VectorUDT") => "vector".to_string(),
+                Some("pyspark.ml.linalg.MatrixUDT") => "matrix".to_string(),
+                _ => "udt".to_string(),
+            },
             DataType::Unparsed { data_type_string } => {
                 // Round-trips with the `unparsed(...)` branch in `from_json`.
                 format!("unparsed({})", data_type_string)
