@@ -431,6 +431,9 @@ pub struct MlTarget {
     root: TargetRoot,
     chain: Vec<String>,
     summary_dataset: Option<DataFrame>,
+    /// A target that this one keeps alive, as PySpark's summary of an `evaluate` keeps its model
+    /// (`__source_transformer__`).
+    keep_alive: Option<Box<MlTarget>>,
 }
 
 #[derive(Clone)]
@@ -458,6 +461,7 @@ impl MlTarget {
             root: TargetRoot::Object(object.clone()),
             chain: Vec::new(),
             summary_dataset: None,
+            keep_alive: None,
         }
     }
 
@@ -468,6 +472,7 @@ impl MlTarget {
             root: TargetRoot::Unowned(session.clone(), id.to_string()),
             chain: Vec::new(),
             summary_dataset: None,
+            keep_alive: None,
         }
     }
 
@@ -477,6 +482,7 @@ impl MlTarget {
             root: TargetRoot::Helper(session.clone()),
             chain: Vec::new(),
             summary_dataset: None,
+            keep_alive: None,
         }
     }
 
@@ -491,6 +497,13 @@ impl MlTarget {
     /// The target, whose summary the server recreates of `dataset`, the summary dataset of the fit
     /// (PySpark's `_summary_dataset`, see [`training_summary`]), when it has lost it, and which the
     /// DataFrames of the summary read.
+    /// The target, which keeps `other` alive (its object, which the server keeps while a target
+    /// holds it), as PySpark's summary of an `evaluate` keeps its model.
+    pub fn keeping(mut self, other: &MlTarget) -> Self {
+        self.keep_alive = Some(Box::new(other.clone()));
+        self
+    }
+
     pub fn with_summary_dataset(mut self, dataset: &DataFrame) -> Self {
         self.summary_dataset = Some(dataset.clone());
         self
@@ -1081,13 +1094,15 @@ pub fn summary_transform(
     object.transform(dataset, &Params::new())
 }
 
-/// The target of the summary of an `evaluate`, of the id of the `summary` result that the server
-/// returns, which this client does not release, as PySpark does not.
+/// The target of the summary of an `evaluate` of the model `model`, of the id of the `summary`
+/// result that the server returns, which this client does not release, as PySpark does not, and
+/// which keeps the model alive, as PySpark's summary keeps its `__source_transformer__`.
 pub fn evaluated_summary(
-    session: &SparkSession,
+    model: &MlTarget,
     output: FetchOutput,
 ) -> spark_connect_core::error::Result<MlTarget> {
-    Ok(MlTarget::unowned(session, &output.into_string()?))
+    let summary = MlTarget::unowned(model.session(), &output.into_string()?);
+    Ok(summary.keeping(model))
 }
 
 /// The estimator, transformer or evaluator of the JVM class `jvm_class` that `read` loads from
@@ -1244,10 +1259,16 @@ mod tests {
         assert!(transform.params.expect("params").params.contains_key("k"));
 
         // The summary of an evaluate is the server's id; any other result is an error.
+        let held = std::sync::Arc::strong_count(&object.0);
+        let model_target = MlTarget::object(&object);
         let evaluated =
-            evaluated_summary(&session, FetchOutput::Summary("evaluated".into())).unwrap();
+            evaluated_summary(&model_target, FetchOutput::Summary("evaluated".into())).unwrap();
         assert_eq!(evaluated.id(), "evaluated");
-        assert!(evaluated_summary(&session, FetchOutput::Value(MlValue::Int(1))).is_err());
+        assert!(evaluated_summary(&model_target, FetchOutput::Value(MlValue::Int(1))).is_err());
+        // The summary keeps the model's object alive.
+        drop(model_target);
+        assert_eq!(std::sync::Arc::strong_count(&object.0), held + 1);
+        std::mem::forget(evaluated);
         std::mem::forget((model, object));
     }
 }

@@ -227,7 +227,7 @@ pub(super) enum WriteTarget {
 /// PySpark's `MLWriter` of a native class (`RemoteMLWriter` over Spark Connect): `overwrite()`,
 /// `option(key, value)` (of its lowercase key and string value), `session(spark)` and
 /// `save(path)`, which sends the `Write`.
-#[pyclass(name = "MLWriter", module = "pyspark.ml.util")]
+#[pyclass(name = "RemoteMLWriter", module = "pyspark.ml.connect.readwrite")]
 pub struct PyMLWriter {
     target: WriteTarget,
     /// Whether `save` overwrites, as the attribute of `MLWriter`.
@@ -267,6 +267,11 @@ impl PyMLWriter {
 
 #[pymethods]
 impl PyMLWriter {
+    /// The AttributeError of an attribute that it does not have, as CPython's of PySpark's class.
+    fn __getattr__(slf: &Bound<'_, Self>, name: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        Err(params_api::no_attribute(slf.as_any(), name))
+    }
+
     /// Save to `path`, as `RemoteMLWriter.save`: of the active session (not the one that `session`
     /// sets, which `RemoteMLWriter.save` does not read) of an operator, and of the session that
     /// holds a model's object.
@@ -360,7 +365,7 @@ pub(super) type FromRead =
 
 /// PySpark's `MLReader` of a native class (`RemoteMLReader` over Spark Connect): `load(path)`
 /// sends the `Read` of the JVM class, and `session(spark)` sets the session to load with.
-#[pyclass(name = "MLReader", module = "pyspark.ml.util")]
+#[pyclass(name = "RemoteMLReader", module = "pyspark.ml.connect.readwrite")]
 pub struct PyMLReader {
     jvm_class: &'static str,
     op_type: OperatorType,
@@ -381,6 +386,11 @@ impl PyMLReader {
 
 #[pymethods]
 impl PyMLReader {
+    /// The AttributeError of an attribute that it does not have, as CPython's of PySpark's class.
+    fn __getattr__(slf: &Bound<'_, Self>, name: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        Err(params_api::no_attribute(slf.as_any(), name))
+    }
+
     /// Load from `path`, as `RemoteMLReader.load`, of the active session (not the one that
     /// `session` sets, which `RemoteMLReader.load` does not read).
     fn load(&self, py: Python<'_>, path: &str) -> PyResult<Py<PyAny>> {

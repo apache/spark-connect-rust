@@ -60,6 +60,27 @@ fn params_of(slf: &Bound<'_, PyAny>) -> PyResult<&'static [ParamMeta]> {
     params_of_type(slf.get_type().as_any())
 }
 
+/// The AttributeError of the attribute `name` that `obj` does not have, as CPython raises it of
+/// an object of a Python class: of the name of the class (CPython names a native type by its
+/// module path too, its `tp_name`), and of the name and the object, of which a traceback suggests a
+/// close name.
+pub(crate) fn no_attribute(obj: &Bound<'_, PyAny>, name: &Bound<'_, PyAny>) -> PyErr {
+    let py = obj.py();
+    let make = || -> PyResult<PyErr> {
+        let class = obj.get_type().name()?;
+        let message = format!("'{class}' object has no attribute '{}'", name.str()?);
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("name", name)?;
+        kwargs.set_item("obj", obj)?;
+        let error = py
+            .import("builtins")?
+            .getattr("AttributeError")?
+            .call((message,), Some(&kwargs))?;
+        Ok(PyErr::from_value(error))
+    };
+    make().unwrap_or_else(|e| e)
+}
+
 /// The params of the class `cls`, as [`params_of`] of its instances.
 fn params_of_type(cls: &Bound<'_, PyAny>) -> PyResult<&'static [ParamMeta]> {
     for class in cls.getattr("__mro__")?.try_iter()? {
@@ -167,6 +188,14 @@ pub(super) trait ParamsHolder: PyClass<Frozen = False> {
     fn put_own_default(&mut self, name: &'static str, value: Py<PyAny>) -> bool {
         let _ = (name, value);
         false
+    }
+
+    /// Unset the param `name`, as `Params.clear` of a Python class of PySpark does (the classes
+    /// of the server's objects do not, as `JavaParams.clear` over Spark Connect).
+    #[allow(dead_code)] // The Python classes of PySpark (a Pipeline, the validators) unset.
+    fn unset(&mut self, name: &'static str) -> PyResult<()> {
+        let _ = name;
+        Ok(())
     }
 }
 
@@ -583,6 +612,17 @@ pub(super) fn has_default<T: ParamsHolder>(
             .try_borrow()?
             .own_default(slf.py(), &meta.name)
             .is_some())
+}
+
+/// `clear(param)`, as `Params.clear` of a Python class of PySpark: the param of `param` (a Param
+/// of `slf` or its name), if set, is unset.
+#[allow(dead_code)] // The Python classes of PySpark (a Pipeline, the validators) clear.
+pub(super) fn clear<T: ParamsHolder>(slf: &Bound<'_, T>, param: &Bound<'_, PyAny>) -> PyResult<()> {
+    let meta = resolve(slf.as_any(), param)?;
+    if set_value_of(slf, &meta.name)?.is_some() {
+        slf.try_borrow_mut()?.unset(meta.name.as_str())?;
+    }
+    Ok(())
 }
 
 /// `isDefined(param)`.

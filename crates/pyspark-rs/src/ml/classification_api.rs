@@ -85,7 +85,7 @@ native_model! {
         }
         let target = slf.try_borrow()?.core.target()?;
         let output = object::fetch_py(py, &target, "evaluate", std::slice::from_ref(dataset))?;
-        let summary = spark_connect::ml::evaluated_summary(target.session(), output).to_pyerr()?;
+        let summary = spark_connect::ml::evaluated_summary(&target, output).to_pyerr()?;
         Py::new(py, PyLinearSVCSummary::from(summary))
     }
 }

@@ -279,7 +279,7 @@ fn ml_summaries_of_a_transform_and_of_an_evaluate_and_models_of_loaded_objects_a
     let svc = LinearSVC::new().set_max_iter(5).fit(&train).unwrap();
     let target = MlTarget::object(svc.ml_ref().unwrap());
     let output = fetch(&target, "evaluate", vec![FetchArg::Input(train.clone())]).unwrap();
-    let evaluation = evaluated_summary(&s, output).unwrap();
+    let evaluation = evaluated_summary(&target, output).unwrap();
     let accuracy = fetch(&evaluation, "accuracy", vec![]).unwrap().into_value();
     assert_eq!(accuracy.unwrap(), MlValue::Double(1.0));
 

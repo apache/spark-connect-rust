@@ -107,6 +107,11 @@ def params_api_common_cases(rec, est, other):
         ],
     )
     rec("copy_class_param", lambda: est.copy({cls.maxIter: 3}).getMaxIter())
+    # The messages of CPython name the classes as PySpark's.
+    rec("no_attribute", lambda: est.fooBarBaz)
+    rec("writer_class", lambda: (type(est.write()).__name__, type(est.write()).__module__))
+    rec("reader_class", lambda: (type(cls.read()).__name__, type(cls.read()).__module__))
+    rec("writer_no_attribute", lambda: est.write().fooBarBaz)
     writer = est.write()
     rec(
         "writer_should_overwrite",
@@ -293,6 +298,8 @@ def model_cases(rec, est, model):
 
     rec("model_uid_is_estimator_uid", lambda: model.uid == est.uid)
     rec("isinstance_model", lambda: (isinstance(model, Model), isinstance(model, Transformer)))
+    rec("model_no_attribute", lambda: model.fooBarBaz)
+    rec("model_class", lambda: (type(model).__name__, type(model).__module__.split(".")[-1]))
     rec("fit_class_param", lambda: est.fit(model_cases.df, {type(est).maxIter: 3}).getMaxIter())
     rec("model_explainParams", lambda: model.explainParams())
     rec(

@@ -272,6 +272,14 @@ full; the other native classes follow as they are completed. A class that follow
   `pyspark.ml.param.Param`, of the docs, converters and defaults of the official class
   (`crates/pyspark-rs/src/ml/ml_params.json`, captured from pyspark-client 4.3.0 by
   `scripts/capture_ml_api_golden.py`), and a getter per param (`getMaxIter`).
+- **PySpark's types and class Params**: the classes are virtual subclasses of PySpark's base
+  classes (`pyspark.ml.base.Estimator`, `Transformer` and `Model`, and
+  `pyspark.ml.evaluation.Evaluator`), so `isinstance(LinearSVC(), Params)` holds, and a Pipeline
+  of `pyspark.ml` fits native stages. The Param of a class (`LinearSVC.maxIter`) is PySpark's, of
+  the parent `undefined`, so `ParamGridBuilder().addGrid(LinearSVC.maxIter, ...)` builds.
+  `MLWriter`s and `MLReader`s are `RemoteMLWriter` and `RemoteMLReader`, as over Spark Connect, of
+  the attributes `shouldOverwrite` and `optionMap`, and the AttributeError of a missing attribute
+  names the class as PySpark's does.
 - **PySpark's defaults of each instance**: the default `seed` is the `hash` of the name of the
   class, and the default `outputCol` the uid of the instance and `__output`; a fitted model has the
   defaults of its estimator, which PySpark's `_copyValues` copies to it (a seed of the name of the

@@ -122,6 +122,10 @@
     "ok",
     "True"
    ],
+   "model_class": [
+    "ok",
+    "('KMeansModel', 'clustering')"
+   ],
    "model_copy_seed": [
     "ok",
     "True"
@@ -166,6 +170,10 @@
    "model_isSet_seed": [
     "ok",
     "False"
+   ],
+   "model_no_attribute": [
+    "AttributeError",
+    "'KMeansModel' object has no attribute 'fooBarBaz'"
    ],
    "model_save": [
     "ok",
@@ -509,6 +517,10 @@
     "ok",
     "True"
    ],
+   "no_attribute": [
+    "AttributeError",
+    "'KMeans' object has no attribute 'fooBarBaz'"
+   ],
    "orig_maxIter": [
     "ok",
     "5"
@@ -553,6 +565,10 @@
     "ok",
     "True"
    ],
+   "reader_class": [
+    "ok",
+    "('RemoteMLReader', 'pyspark.ml.connect.readwrite')"
+   ],
    "repr_is_uid": [
     "ok",
     "True"
@@ -584,6 +600,14 @@
    "set_str_param": [
     "AttributeError",
     "'str' object has no attribute 'parent'"
+   ],
+   "writer_class": [
+    "ok",
+    "('RemoteMLWriter', 'pyspark.ml.connect.readwrite')"
+   ],
+   "writer_no_attribute": [
+    "AttributeError",
+    "'RemoteMLWriter' object has no attribute 'fooBarBaz'"
    ],
    "writer_option_map": [
     "ok",
@@ -749,6 +773,10 @@
     "ok",
     "True"
    ],
+   "model_class": [
+    "ok",
+    "('LinearSVCModel', 'classification')"
+   ],
    "model_explainParams": [
     "ok",
     "'aggregationDepth: suggested depth for treeAggregate (>= 2). (default: 2)\\nfeaturesCol: features column name. (default: features)\\nfitIntercept: whether to fit an intercept term. (default: True)\\nlabelCol: label column name. (default: label)\\nmaxBlockSizeInMB: maximum memory in MB for stacking input data into blocks. Data is stacked within partitions. If more than remaining data size in a partition then it is adjusted to the data size. Default 0.0 represents choosing optimal value, depends on specific algorithm. Must be >= 0. (default: 0.0)\\nmaxIter: max number of iterations (>= 0). (default: 100, current: 5)\\npredictionCol: prediction column name. (default: prediction)\\nrawPredictionCol: raw prediction (a.k.a. confidence) column name. (default: rawPrediction)\\nregParam: regularization parameter (>= 0). (default: 0.0, current: 0.01)\\nstandardization: whether to standardize the training features before fitting the model. (default: True)\\nthreshold: The threshold in binary classification applied to the linear model prediction.  This threshold can be any real number, where Inf will make all predictions 0.0 and -Inf will make all predictions 1.0. (default: 0.0)\\ntol: the convergence tolerance for iterative algorithms (>= 0). (default: 1e-06)\\nweightCol: weight column name. If this is not set or empty, we treat all instance weights as 1.0. (undefined)'"
@@ -781,6 +809,10 @@
    "model_isSet_tol": [
     "ok",
     "False"
+   ],
+   "model_no_attribute": [
+    "AttributeError",
+    "'LinearSVCModel' object has no attribute 'fooBarBaz'"
    ],
    "model_save": [
     "ok",
@@ -1318,6 +1350,10 @@
     "ok",
     "True"
    ],
+   "no_attribute": [
+    "AttributeError",
+    "'LinearSVC' object has no attribute 'fooBarBaz'"
+   ],
    "orig_maxIter": [
     "ok",
     "5"
@@ -1362,6 +1398,10 @@
     "ok",
     "True"
    ],
+   "reader_class": [
+    "ok",
+    "('RemoteMLReader', 'pyspark.ml.connect.readwrite')"
+   ],
    "repr_is_uid": [
     "ok",
     "True"
@@ -1381,6 +1421,14 @@
    "set_str_param": [
     "AttributeError",
     "'str' object has no attribute 'parent'"
+   ],
+   "writer_class": [
+    "ok",
+    "('RemoteMLWriter', 'pyspark.ml.connect.readwrite')"
+   ],
+   "writer_no_attribute": [
+    "AttributeError",
+    "'RemoteMLWriter' object has no attribute 'fooBarBaz'"
    ],
    "writer_option_map": [
     "ok",

@@ -36,6 +36,12 @@ macro_rules! params_api_block {
                 $crate::ml::params_api::params(slf.as_any())
             }
 
+            /// The AttributeError of an attribute that the object does not have, as CPython's of
+            /// PySpark's class (see `params_api::no_attribute`).
+            fn __getattr__(slf: &Bound<'_, Self>, name: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+                Err($crate::ml::params_api::no_attribute(slf.as_any(), name))
+            }
+
             /// `getParam(paramName)`, of PySpark's keyword.
             #[pyo3(name = "getParam")]
             #[allow(non_snake_case)]
@@ -115,12 +121,6 @@ macro_rules! params_api_block {
                 $crate::ml::params_api::set(slf, param, value)
             }
 
-            /// As `JavaParams.clear` over Spark Connect, which does nothing
-            /// (`try_remote_intercept`).
-            #[pyo3(name = "clear")]
-            fn __params_clear(&self, param: &Bound<'_, PyAny>) {
-                let _ = param;
-            }
 
             $(
                 /// The Param attribute of a param of no getter of the class (as `numTrees` of
@@ -184,6 +184,13 @@ macro_rules! native_pymethods {
                 /// The uid, as `Identifiable.__repr__`.
                 fn __repr__(slf: &Bound<'_, Self>) -> PyResult<String> {
                     slf.getattr("uid")?.extract()
+                }
+
+                /// As `JavaParams.clear` over Spark Connect, which does nothing
+                /// (`try_remote_intercept`).
+                #[pyo3(name = "clear")]
+                fn __params_clear(&self, param: &Bound<'_, PyAny>) {
+                    let _ = param;
                 }
 
                 /// A copy of the same uid and params, with `extra`, as `Params.copy`.
@@ -265,6 +272,13 @@ macro_rules! native_pymethods {
                 /// The uid, as `Identifiable.__repr__`.
                 fn __repr__(slf: &Bound<'_, Self>) -> PyResult<String> {
                     slf.getattr("uid")?.extract()
+                }
+
+                /// As `Params.clear` of a Python class of PySpark (a Pipeline, a validator): the
+                /// param, if set, is unset.
+                #[pyo3(name = "clear")]
+                fn __params_clear(slf: &Bound<'_, Self>, param: &Bound<'_, PyAny>) -> PyResult<()> {
+                    $crate::ml::params_api::clear(slf, param)
                 }
             }
         }
@@ -447,6 +461,13 @@ macro_rules! native_model {
                     Ok(Py::new(slf.py(), PyDataFrame::new(df))?.into_any())
                 }
 
+                /// As `JavaParams.clear` over Spark Connect, which does nothing
+                /// (`try_remote_intercept`).
+                #[pyo3(name = "clear")]
+                fn __params_clear(&self, param: &Bound<'_, PyAny>) {
+                    let _ = param;
+                }
+
                 #[pyo3(name = "copy", signature = (extra=None))]
                 fn __params_copy<'py>(
                     slf: &Bound<'py, Self>,
@@ -622,6 +643,12 @@ macro_rules! native_summary {
         #[pymethods]
         impl $ty {
             $($body)*
+
+            /// The AttributeError of an attribute that the summary does not have, as CPython's of
+            /// PySpark's class (see `params_api::no_attribute`).
+            fn __getattr__(slf: &Bound<'_, Self>, name: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+                Err($crate::ml::params_api::no_attribute(slf.as_any(), name))
+            }
 
             $(
                 #[getter]

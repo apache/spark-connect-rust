@@ -25,6 +25,14 @@ ROOT = Path(__file__).resolve().parents[2]
 API = json.loads((ROOT / "tests/golden/ml_api.json").read_text())
 CASES = json.loads((ROOT / "tests/golden/ml_api_cases.json").read_text())
 
+# The attributes of the instances of PySpark's classes, of their constructors, by class.
+INSTANCE_ATTRIBUTES = {
+    "CrossValidatorModel": {"avgMetrics", "bestModel", "stdMetrics", "subModels"},
+    "OneVsRestModel": {"models"},
+    "PipelineModel": {"stages"},
+    "TrainValidationSplitModel": {"bestModel", "subModels", "validationMetrics"},
+}
+
 # The classes that follow pyspark.ml in full, by the module of pyspark.ml that has them: one per
 # line, so that the classes of each module are added where they sort.
 FULL = [
@@ -77,9 +85,11 @@ def test_members_are_pyspark_mls(spec):
     cls = native_class(*spec)
     golden = API[spec[1]]
     expected = set(golden["members"]) | {p["name"] for p in golden["params"]}
-    # The uid of PySpark's `Identifiable` is an attribute of each instance, which the class of a
-    # native object has as a property (the cases of the Params API read it of the instances).
+    # The attributes that PySpark sets of each instance (the uid of `Identifiable`, those of the
+    # constructors of the models of the meta-algorithms), which the class of a native object has
+    # as properties (the cases read them of the instances).
     actual = {name for name in dir(cls) if not name.startswith("_")} - {"uid"}
+    actual -= INSTANCE_ATTRIBUTES.get(spec[1], set())
     assert actual == expected
 
 
