@@ -195,131 +195,45 @@ impl PrefixSpan {
     }
 }
 
-impl FPGrowth {
-    /// Set `itemsCol`. Spark validates the value when the operation runs.
-    pub fn set_items_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("itemsCol", value);
-        self
-    }
-    /// Get `itemsCol`, using Spark's default when defined.
-    pub fn items_col(&self) -> &str {
-        self.params.string_or("itemsCol", "items")
-    }
-    /// Set `minConfidence`. Spark validates the value when the operation runs.
-    pub fn set_min_confidence(mut self, value: f64) -> Self {
-        self.params = self.params.set_param_double("minConfidence", value);
-        self
-    }
-    /// Get `minConfidence`, using Spark's default when defined.
-    pub fn min_confidence(&self) -> f64 {
-        self.params.double_or("minConfidence", 0.8)
-    }
-    /// Set `minSupport`. Spark validates the value when the operation runs.
-    pub fn set_min_support(mut self, value: f64) -> Self {
-        self.params = self.params.set_param_double("minSupport", value);
-        self
-    }
-    /// Get `minSupport`, using Spark's default when defined.
-    pub fn min_support(&self) -> f64 {
-        self.params.double_or("minSupport", 0.3)
-    }
-    /// Set `numPartitions`. Spark validates the value when the operation runs.
-    pub fn set_num_partitions(mut self, value: i32) -> Self {
-        self.params = self.params.set_param_int32("numPartitions", value);
-        self
-    }
-    /// Get `numPartitions`, using Spark's default when defined.
-    pub fn num_partitions(&self) -> Option<i32> {
-        self.params.long_opt("numPartitions").map(|v| v as i32)
-    }
-    /// Set `predictionCol`. Spark validates the value when the operation runs.
-    pub fn set_prediction_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("predictionCol", value);
-        self
-    }
-    /// Get `predictionCol`, using Spark's default when defined.
-    pub fn prediction_col(&self) -> &str {
-        self.params.string_or("predictionCol", "prediction")
+ml_params! {
+    FPGrowth {
+        set_items_col(value: &str) => "itemsCol", set_param_string;
+        items_col -> &str = |this| this.params.string_or("itemsCol", "items");
+        set_min_confidence(value: f64) => "minConfidence", set_param_double;
+        min_confidence -> f64 = |this| this.params.double_or("minConfidence", 0.8);
+        set_min_support(value: f64) => "minSupport", set_param_double;
+        min_support -> f64 = |this| this.params.double_or("minSupport", 0.3);
+        set_num_partitions(value: i32) => "numPartitions", set_param_int32;
+        num_partitions -> Option<i32> = |this| this.params.int_opt("numPartitions");
+        set_prediction_col(value: &str) => "predictionCol", set_param_string;
+        prediction_col -> &str = |this| this.params.string_or("predictionCol", "prediction");
     }
 }
 
-impl FPGrowthModel {
-    /// Set `itemsCol`. Spark validates the value when the operation runs.
-    pub fn set_items_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("itemsCol", value);
-        self
-    }
-    /// Get `itemsCol`, using Spark's default when defined.
-    pub fn items_col(&self) -> &str {
-        self.params.string_or("itemsCol", "items")
-    }
-    /// Set `minConfidence`. Spark validates the value when the operation runs.
-    pub fn set_min_confidence(mut self, value: f64) -> Self {
-        self.params = self.params.set_param_double("minConfidence", value);
-        self
-    }
-    /// Get `minConfidence`, using Spark's default when defined.
-    pub fn min_confidence(&self) -> f64 {
-        self.params.double_or("minConfidence", 0.8)
-    }
-    /// Get `minSupport`, using Spark's default when defined.
-    pub fn min_support(&self) -> f64 {
-        self.params.double_or("minSupport", 0.3)
-    }
-    /// Get `numPartitions`, using Spark's default when defined.
-    pub fn num_partitions(&self) -> Option<i32> {
-        self.params.long_opt("numPartitions").map(|v| v as i32)
-    }
-    /// Set `predictionCol`. Spark validates the value when the operation runs.
-    pub fn set_prediction_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("predictionCol", value);
-        self
-    }
-    /// Get `predictionCol`, using Spark's default when defined.
-    pub fn prediction_col(&self) -> &str {
-        self.params.string_or("predictionCol", "prediction")
+ml_params! {
+    FPGrowthModel {
+        set_items_col(value: &str) => "itemsCol", set_param_string;
+        items_col -> &str = |this| this.params.string_or("itemsCol", "items");
+        set_min_confidence(value: f64) => "minConfidence", set_param_double;
+        min_confidence -> f64 = |this| this.params.double_or("minConfidence", 0.8);
+        min_support -> f64 = |this| this.params.double_or("minSupport", 0.3) => "minSupport";
+        num_partitions -> Option<i32> =
+            |this| this.params.int_opt("numPartitions") => "numPartitions";
+        set_prediction_col(value: &str) => "predictionCol", set_param_string;
+        prediction_col -> &str = |this| this.params.string_or("predictionCol", "prediction");
     }
 }
 
-impl PrefixSpan {
-    /// Set `maxLocalProjDBSize`. Spark validates the value when the operation runs.
-    pub fn set_max_local_proj_db_size(mut self, value: i64) -> Self {
-        self.params = self
-            .params
-            .set_param_int_narrow("maxLocalProjDBSize", value);
-        self
-    }
-    /// Get `maxLocalProjDBSize`, using Spark's default when defined.
-    pub fn max_local_proj_db_size(&self) -> i64 {
-        self.params
-            .long_opt("maxLocalProjDBSize")
-            .unwrap_or(32000000)
-    }
-    /// Set `maxPatternLength`. Spark validates the value when the operation runs.
-    pub fn set_max_pattern_length(mut self, value: i32) -> Self {
-        self.params = self.params.set_param_int32("maxPatternLength", value);
-        self
-    }
-    /// Get `maxPatternLength`, using Spark's default when defined.
-    pub fn max_pattern_length(&self) -> i32 {
-        self.params.int_or("maxPatternLength", 10)
-    }
-    /// Set `minSupport`. Spark validates the value when the operation runs.
-    pub fn set_min_support(mut self, value: f64) -> Self {
-        self.params = self.params.set_param_double("minSupport", value);
-        self
-    }
-    /// Get `minSupport`, using Spark's default when defined.
-    pub fn min_support(&self) -> f64 {
-        self.params.double_or("minSupport", 0.1)
-    }
-    /// Set `sequenceCol`. Spark validates the value when the operation runs.
-    pub fn set_sequence_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("sequenceCol", value);
-        self
-    }
-    /// Get `sequenceCol`, using Spark's default when defined.
-    pub fn sequence_col(&self) -> &str {
-        self.params.string_or("sequenceCol", "sequence")
+ml_params! {
+    PrefixSpan {
+        set_max_local_proj_db_size(value: i64) => "maxLocalProjDBSize", set_param_int_narrow;
+        max_local_proj_db_size -> i64 =
+            |this| this.params.long_opt("maxLocalProjDBSize").unwrap_or(32000000);
+        set_max_pattern_length(value: i32) => "maxPatternLength", set_param_int32;
+        max_pattern_length -> i32 = |this| this.params.int_or("maxPatternLength", 10);
+        set_min_support(value: f64) => "minSupport", set_param_double;
+        min_support -> f64 = |this| this.params.double_or("minSupport", 0.1);
+        set_sequence_col(value: &str) => "sequenceCol", set_param_string;
+        sequence_col -> &str = |this| this.params.string_or("sequenceCol", "sequence");
     }
 }

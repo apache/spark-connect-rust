@@ -80,8 +80,6 @@ macro_rules! ml_params {
 
 /// The default `seed` of a class when the client sends none: Java's `String.hashCode` of the JVM
 /// class name, which the server takes as `getClass.getName.hashCode`, sign-extended to `Long`.
-// Read by the seed getters of the rows that scripts/gen_rust_params_table.py prints.
-#[allow(dead_code)]
 fn java_string_hash(class_name: &str) -> i64 {
     let mut hash: i32 = 0;
     for unit in class_name.encode_utf16() {
@@ -1280,39 +1278,6 @@ impl StandardScaler {
         }
     }
 
-    /// Set the input column name.
-    pub fn set_input_col(mut self, col: &str) -> Self {
-        self.params = self.params.set_param_string("inputCol", col);
-        self
-    }
-
-    /// The input column, if set: as in Spark, it has no default.
-    pub fn input_col(&self) -> Option<&str> {
-        self.params.string_opt("inputCol")
-    }
-
-    /// Set the output column name.
-    pub fn set_output_col(mut self, col: &str) -> Self {
-        self.params = self.params.set_param_string("outputCol", col);
-        self
-    }
-
-    /// The output column: as in Spark, `<uid>__output` unless set.
-    pub fn output_col(&self) -> String {
-        self.params.output_col_or_default(&self.operator.uid)
-    }
-
-    /// Whether to center the features to mean 0 before scaling (default: false, as in Spark).
-    pub fn set_with_mean(mut self, value: bool) -> Self {
-        self.params = self.params.set_param_bool("withMean", value);
-        self
-    }
-
-    /// Whether the features are centered to mean 0 before scaling (default: false).
-    pub fn with_mean(&self) -> bool {
-        self.params.bool_or("withMean", false)
-    }
-
     fn model_from_info(
         &self,
         info: proto::ml_command_result::MlOperatorInfo,
@@ -1328,6 +1293,19 @@ impl StandardScaler {
             params: self.params.clone(),
             cached,
         })
+    }
+}
+
+ml_params! {
+    StandardScaler {
+        set_input_col(value: &str) => "inputCol", set_param_string;
+        input_col -> Option<&str> = |this| this.params.string_opt("inputCol");
+        set_output_col(value: &str) => "outputCol", set_param_string;
+        output_col -> String = |this| this.params.output_col_or_default(&this.operator.uid);
+        set_with_mean(value: bool) => "withMean", set_param_bool;
+        with_mean -> bool = |this| this.params.bool_or("withMean", false);
+        set_with_std(value: bool) => "withStd", set_param_bool;
+        with_std -> bool = |this| this.params.bool_or("withStd", true);
     }
 }
 
@@ -1409,6 +1387,17 @@ impl Model for StandardScalerModel {
     }
 }
 
+ml_params! {
+    StandardScalerModel {
+        set_input_col(value: &str) => "inputCol", set_param_string;
+        input_col -> Option<&str> = |this| this.params.string_opt("inputCol");
+        set_output_col(value: &str) => "outputCol", set_param_string;
+        output_col -> String = |this| this.params.output_col_or_default(&this.operator.uid);
+        with_mean -> bool = |this| this.params.bool_or("withMean", false) => "withMean";
+        with_std -> bool = |this| this.params.bool_or("withStd", true) => "withStd";
+    }
+}
+
 /// VectorAssembler Transformer: combines multiple columns into a single vector column.
 #[derive(Debug, Clone)]
 pub struct VectorAssembler {
@@ -1426,25 +1415,17 @@ impl VectorAssembler {
             params: Params::new(),
         }
     }
+}
 
-    pub fn set_input_cols(mut self, cols: impl IntoIterator<Item = impl Into<String>>) -> Self {
-        self.params = self.params.set_param_string_array("inputCols", cols);
-        self
-    }
-
-    /// The input columns (default: none).
-    pub fn input_cols(&self) -> Vec<String> {
-        self.params.string_array("inputCols")
-    }
-
-    pub fn set_output_col(mut self, col: &str) -> Self {
-        self.params = self.params.set_param_string("outputCol", col);
-        self
-    }
-
-    /// The output column: as in Spark, `<uid>__output` unless set.
-    pub fn output_col(&self) -> String {
-        self.params.output_col_or_default(&self.operator.uid)
+ml_params! {
+    VectorAssembler {
+        set_handle_invalid(value: &str) => "handleInvalid", set_param_string;
+        handle_invalid -> &str = |this| this.params.string_or("handleInvalid", "error");
+        set_input_cols(value: impl IntoIterator<Item = impl Into<String>>) =>
+            "inputCols", set_param_string_array;
+        input_cols -> Vec<String> = |this| this.params.string_array("inputCols");
+        set_output_col(value: &str) => "outputCol", set_param_string;
+        output_col -> String = |this| this.params.output_col_or_default(&this.operator.uid);
     }
 }
 
@@ -1503,26 +1484,6 @@ impl StringIndexer {
         }
     }
 
-    pub fn set_input_col(mut self, col: &str) -> Self {
-        self.params = self.params.set_param_string("inputCol", col);
-        self
-    }
-
-    /// The input column, if set: as in Spark, it has no default.
-    pub fn input_col(&self) -> Option<&str> {
-        self.params.string_opt("inputCol")
-    }
-
-    pub fn set_output_col(mut self, col: &str) -> Self {
-        self.params = self.params.set_param_string("outputCol", col);
-        self
-    }
-
-    /// The output column: as in Spark, `<uid>__output` unless set.
-    pub fn output_col(&self) -> String {
-        self.params.output_col_or_default(&self.operator.uid)
-    }
-
     fn model_from_info(
         &self,
         info: proto::ml_command_result::MlOperatorInfo,
@@ -1538,6 +1499,26 @@ impl StringIndexer {
             params: self.params.clone(),
             cached,
         })
+    }
+}
+
+ml_params! {
+    StringIndexer {
+        set_handle_invalid(value: &str) => "handleInvalid", set_param_string;
+        handle_invalid -> &str = |this| this.params.string_or("handleInvalid", "error");
+        set_input_col(value: &str) => "inputCol", set_param_string;
+        input_col -> Option<&str> = |this| this.params.string_opt("inputCol");
+        set_input_cols(value: impl IntoIterator<Item = impl Into<String>>) =>
+            "inputCols", set_param_string_array;
+        input_cols -> Vec<String> = |this| this.params.string_array("inputCols");
+        set_output_col(value: &str) => "outputCol", set_param_string;
+        output_col -> String = |this| this.params.output_col_or_default(&this.operator.uid);
+        set_output_cols(value: impl IntoIterator<Item = impl Into<String>>) =>
+            "outputCols", set_param_string_array;
+        output_cols -> Vec<String> = |this| this.params.string_array("outputCols");
+        set_string_order_type(value: &str) => "stringOrderType", set_param_string;
+        string_order_type -> &str =
+            |this| this.params.string_or("stringOrderType", "frequencyDesc");
     }
 }
 
@@ -1619,6 +1600,25 @@ impl Model for StringIndexerModel {
     }
 }
 
+ml_params! {
+    StringIndexerModel {
+        set_handle_invalid(value: &str) => "handleInvalid", set_param_string;
+        handle_invalid -> &str = |this| this.params.string_or("handleInvalid", "error");
+        set_input_col(value: &str) => "inputCol", set_param_string;
+        input_col -> Option<&str> = |this| this.params.string_opt("inputCol");
+        set_input_cols(value: impl IntoIterator<Item = impl Into<String>>) =>
+            "inputCols", set_param_string_array;
+        input_cols -> Option<Vec<String>> = |this| this.params.string_array_opt("inputCols");
+        set_output_col(value: &str) => "outputCol", set_param_string;
+        output_col -> String = |this| this.params.output_col_or_default(&this.operator.uid);
+        set_output_cols(value: impl IntoIterator<Item = impl Into<String>>) =>
+            "outputCols", set_param_string_array;
+        output_cols -> Option<Vec<String>> = |this| this.params.string_array_opt("outputCols");
+        string_order_type -> &str =
+            |this| this.params.string_or("stringOrderType", "frequencyDesc") => "stringOrderType";
+    }
+}
+
 /// MaxAbsScaler Estimator: rescales each feature to range [-1, 1].
 #[derive(Debug, Clone)]
 pub struct MaxAbsScaler {
@@ -1637,26 +1637,6 @@ impl MaxAbsScaler {
         }
     }
 
-    pub fn set_input_col(mut self, col: &str) -> Self {
-        self.params = self.params.set_param_string("inputCol", col);
-        self
-    }
-
-    /// The input column, if set: as in Spark, it has no default.
-    pub fn input_col(&self) -> Option<&str> {
-        self.params.string_opt("inputCol")
-    }
-
-    pub fn set_output_col(mut self, col: &str) -> Self {
-        self.params = self.params.set_param_string("outputCol", col);
-        self
-    }
-
-    /// The output column: as in Spark, `<uid>__output` unless set.
-    pub fn output_col(&self) -> String {
-        self.params.output_col_or_default(&self.operator.uid)
-    }
-
     fn model_from_info(
         &self,
         info: proto::ml_command_result::MlOperatorInfo,
@@ -1672,6 +1652,15 @@ impl MaxAbsScaler {
             params: self.params.clone(),
             cached,
         })
+    }
+}
+
+ml_params! {
+    MaxAbsScaler {
+        set_input_col(value: &str) => "inputCol", set_param_string;
+        input_col -> Option<&str> = |this| this.params.string_opt("inputCol");
+        set_output_col(value: &str) => "outputCol", set_param_string;
+        output_col -> String = |this| this.params.output_col_or_default(&this.operator.uid);
     }
 }
 
@@ -1750,6 +1739,15 @@ impl Model for MaxAbsScalerModel {
 
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
+    }
+}
+
+ml_params! {
+    MaxAbsScalerModel {
+        set_input_col(value: &str) => "inputCol", set_param_string;
+        input_col -> Option<&str> = |this| this.params.string_opt("inputCol");
+        set_output_col(value: &str) => "outputCol", set_param_string;
+        output_col -> String = |this| this.params.output_col_or_default(&this.operator.uid);
     }
 }
 

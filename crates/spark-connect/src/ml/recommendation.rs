@@ -235,219 +235,62 @@ impl Model for ALSModel {
     }
 }
 
-impl ALS {
-    /// Set `alpha`; Spark validates its value.
-    pub fn set_alpha(mut self, value: f64) -> Self {
-        self.params = self.params.set_param_double("alpha", value);
-        self
-    }
-    /// Read `alpha`, with Spark's default when defined.
-    pub fn alpha(&self) -> f64 {
-        self.params.double_or("alpha", 1.0)
-    }
-    /// Set `blockSize`; Spark validates its value.
-    pub fn set_block_size(mut self, value: i32) -> Self {
-        self.params = self.params.set_param_int32("blockSize", value);
-        self
-    }
-    /// Read `blockSize`, with Spark's default when defined.
-    pub fn block_size(&self) -> i32 {
-        self.params.int_or("blockSize", 4096)
-    }
-    /// Set `checkpointInterval`; Spark validates its value.
-    pub fn set_checkpoint_interval(mut self, value: i32) -> Self {
-        self.params = self.params.set_param_int32("checkpointInterval", value);
-        self
-    }
-    /// Read `checkpointInterval`, with Spark's default when defined.
-    pub fn checkpoint_interval(&self) -> i32 {
-        self.params.int_or("checkpointInterval", 10)
-    }
-    /// Set `coldStartStrategy`; Spark validates its value.
-    pub fn set_cold_start_strategy(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("coldStartStrategy", value);
-        self
-    }
-    /// Read `coldStartStrategy`, with Spark's default when defined.
-    pub fn cold_start_strategy(&self) -> &str {
-        self.params.string_or("coldStartStrategy", "nan")
-    }
-    /// Set `finalStorageLevel`; Spark validates its value.
-    pub fn set_final_storage_level(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("finalStorageLevel", value);
-        self
-    }
-    /// Read `finalStorageLevel`, with Spark's default when defined.
-    pub fn final_storage_level(&self) -> &str {
-        self.params
-            .string_or("finalStorageLevel", "MEMORY_AND_DISK")
-    }
-    /// Set `implicitPrefs`; Spark validates its value.
-    pub fn set_implicit_prefs(mut self, value: bool) -> Self {
-        self.params = self.params.set_param_bool("implicitPrefs", value);
-        self
-    }
-    /// Read `implicitPrefs`, with Spark's default when defined.
-    pub fn implicit_prefs(&self) -> bool {
-        self.params.bool_or("implicitPrefs", false)
-    }
-    /// Set `intermediateStorageLevel`; Spark validates its value.
-    pub fn set_intermediate_storage_level(mut self, value: &str) -> Self {
-        self.params = self
-            .params
-            .set_param_string("intermediateStorageLevel", value);
-        self
-    }
-    /// Read `intermediateStorageLevel`, with Spark's default when defined.
-    pub fn intermediate_storage_level(&self) -> &str {
-        self.params
-            .string_or("intermediateStorageLevel", "MEMORY_AND_DISK")
-    }
-    /// Set `itemCol`; Spark validates its value.
-    pub fn set_item_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("itemCol", value);
-        self
-    }
-    /// Read `itemCol`, with Spark's default when defined.
-    pub fn item_col(&self) -> &str {
-        self.params.string_or("itemCol", "item")
-    }
-    /// Set `maxIter`; Spark validates its value.
-    pub fn set_max_iter(mut self, value: i32) -> Self {
-        self.params = self.params.set_param_int32("maxIter", value);
-        self
-    }
-    /// Read `maxIter`, with Spark's default when defined.
-    pub fn max_iter(&self) -> i32 {
-        self.params.int_or("maxIter", 10)
-    }
-    /// Set `nonnegative`; Spark validates its value.
-    pub fn set_nonnegative(mut self, value: bool) -> Self {
-        self.params = self.params.set_param_bool("nonnegative", value);
-        self
-    }
-    /// Read `nonnegative`, with Spark's default when defined.
-    pub fn nonnegative(&self) -> bool {
-        self.params.bool_or("nonnegative", false)
-    }
-    /// Set `numItemBlocks`; Spark validates its value.
-    pub fn set_num_item_blocks(mut self, value: i32) -> Self {
-        self.params = self.params.set_param_int32("numItemBlocks", value);
-        self
-    }
-    /// Read `numItemBlocks`, with Spark's default when defined.
-    pub fn num_item_blocks(&self) -> i32 {
-        self.params.int_or("numItemBlocks", 10)
-    }
-    /// Set `numUserBlocks`; Spark validates its value.
-    pub fn set_num_user_blocks(mut self, value: i32) -> Self {
-        self.params = self.params.set_param_int32("numUserBlocks", value);
-        self
-    }
-    /// Read `numUserBlocks`, with Spark's default when defined.
-    pub fn num_user_blocks(&self) -> i32 {
-        self.params.int_or("numUserBlocks", 10)
-    }
-    /// Set `predictionCol`; Spark validates its value.
-    pub fn set_prediction_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("predictionCol", value);
-        self
-    }
-    /// Read `predictionCol`, with Spark's default when defined.
-    pub fn prediction_col(&self) -> &str {
-        self.params.string_or("predictionCol", "prediction")
-    }
-    /// Set `rank`; Spark validates its value.
-    pub fn set_rank(mut self, value: i32) -> Self {
-        self.params = self.params.set_param_int32("rank", value);
-        self
-    }
-    /// Read `rank`, with Spark's default when defined.
-    pub fn rank(&self) -> i32 {
-        self.params.int_or("rank", 10)
-    }
-    /// Set `ratingCol`; Spark validates its value.
-    pub fn set_rating_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("ratingCol", value);
-        self
-    }
-    /// Read `ratingCol`, with Spark's default when defined.
-    pub fn rating_col(&self) -> &str {
-        self.params.string_or("ratingCol", "rating")
-    }
-    /// Set `regParam`; Spark validates its value.
-    pub fn set_reg_param(mut self, value: f64) -> Self {
-        self.params = self.params.set_param_double("regParam", value);
-        self
-    }
-    /// Read `regParam`, with Spark's default when defined.
-    pub fn reg_param(&self) -> f64 {
-        self.params.double_or("regParam", 0.1)
-    }
-    /// Set `seed`; Spark validates its value.
-    pub fn set_seed(mut self, value: i64) -> Self {
-        self.params = self.params.set_param_int_narrow("seed", value);
-        self
-    }
-    /// Read `seed`, with Spark's default when defined.
-    pub fn seed(&self) -> Option<i64> {
-        self.params.long_opt("seed")
-    }
-    /// Set `userCol`; Spark validates its value.
-    pub fn set_user_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("userCol", value);
-        self
-    }
-    /// Read `userCol`, with Spark's default when defined.
-    pub fn user_col(&self) -> &str {
-        self.params.string_or("userCol", "user")
+ml_params! {
+    ALS {
+        set_alpha(value: f64) => "alpha", set_param_double;
+        alpha -> f64 = |this| this.params.double_or("alpha", 1.0);
+        set_block_size(value: i32) => "blockSize", set_param_int32;
+        block_size -> i32 = |this| this.params.int_or("blockSize", 4096);
+        set_checkpoint_interval(value: i32) => "checkpointInterval", set_param_int32;
+        checkpoint_interval -> i32 = |this| this.params.int_or("checkpointInterval", 10);
+        set_cold_start_strategy(value: &str) => "coldStartStrategy", set_param_string;
+        cold_start_strategy -> &str = |this| this.params.string_or("coldStartStrategy", "nan");
+        set_final_storage_level(value: &str) => "finalStorageLevel", set_param_string;
+        final_storage_level -> &str =
+            |this| this.params.string_or("finalStorageLevel", "MEMORY_AND_DISK");
+        set_implicit_prefs(value: bool) => "implicitPrefs", set_param_bool;
+        implicit_prefs -> bool = |this| this.params.bool_or("implicitPrefs", false);
+        set_intermediate_storage_level(value: &str) => "intermediateStorageLevel", set_param_string;
+        intermediate_storage_level -> &str =
+            |this| this.params.string_or("intermediateStorageLevel", "MEMORY_AND_DISK");
+        set_item_col(value: &str) => "itemCol", set_param_string;
+        item_col -> &str = |this| this.params.string_or("itemCol", "item");
+        set_max_iter(value: i32) => "maxIter", set_param_int32;
+        max_iter -> i32 = |this| this.params.int_or("maxIter", 10);
+        set_nonnegative(value: bool) => "nonnegative", set_param_bool;
+        nonnegative -> bool = |this| this.params.bool_or("nonnegative", false);
+        set_num_item_blocks(value: i32) => "numItemBlocks", set_param_int32;
+        num_item_blocks -> i32 = |this| this.params.int_or("numItemBlocks", 10);
+        set_num_user_blocks(value: i32) => "numUserBlocks", set_param_int32;
+        num_user_blocks -> i32 = |this| this.params.int_or("numUserBlocks", 10);
+        set_prediction_col(value: &str) => "predictionCol", set_param_string;
+        prediction_col -> &str = |this| this.params.string_or("predictionCol", "prediction");
+        set_rank(value: i32) => "rank", set_param_int32;
+        rank -> i32 = |this| this.params.int_or("rank", 10);
+        set_rating_col(value: &str) => "ratingCol", set_param_string;
+        rating_col -> &str = |this| this.params.string_or("ratingCol", "rating");
+        set_reg_param(value: f64) => "regParam", set_param_double;
+        reg_param -> f64 = |this| this.params.double_or("regParam", 0.1);
+        set_seed(value: i64) => "seed", set_param_int_narrow;
+        seed -> i64 =
+            |this| this.params.long_opt(
+                "seed").unwrap_or(java_string_hash("org.apache.spark.ml.recommendation.ALS"));
+        set_user_col(value: &str) => "userCol", set_param_string;
+        user_col -> &str = |this| this.params.string_or("userCol", "user");
     }
 }
 
-impl ALSModel {
-    /// Set `blockSize`; Spark validates its value.
-    pub fn set_block_size(mut self, value: i32) -> Self {
-        self.params = self.params.set_param_int32("blockSize", value);
-        self
-    }
-    /// Read `blockSize`, with Spark's default when defined.
-    pub fn block_size(&self) -> i32 {
-        self.params.int_or("blockSize", 4096)
-    }
-    /// Set `coldStartStrategy`; Spark validates its value.
-    pub fn set_cold_start_strategy(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("coldStartStrategy", value);
-        self
-    }
-    /// Read `coldStartStrategy`, with Spark's default when defined.
-    pub fn cold_start_strategy(&self) -> &str {
-        self.params.string_or("coldStartStrategy", "nan")
-    }
-    /// Set `itemCol`; Spark validates its value.
-    pub fn set_item_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("itemCol", value);
-        self
-    }
-    /// Read `itemCol`, with Spark's default when defined.
-    pub fn item_col(&self) -> &str {
-        self.params.string_or("itemCol", "item")
-    }
-    /// Set `predictionCol`; Spark validates its value.
-    pub fn set_prediction_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("predictionCol", value);
-        self
-    }
-    /// Read `predictionCol`, with Spark's default when defined.
-    pub fn prediction_col(&self) -> &str {
-        self.params.string_or("predictionCol", "prediction")
-    }
-    /// Set `userCol`; Spark validates its value.
-    pub fn set_user_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("userCol", value);
-        self
-    }
-    /// Read `userCol`, with Spark's default when defined.
-    pub fn user_col(&self) -> &str {
-        self.params.string_or("userCol", "user")
+ml_params! {
+    ALSModel {
+        set_block_size(value: i32) => "blockSize", set_param_int32;
+        block_size -> i32 = |this| this.params.int_or("blockSize", 4096);
+        set_cold_start_strategy(value: &str) => "coldStartStrategy", set_param_string;
+        cold_start_strategy -> &str = |this| this.params.string_or("coldStartStrategy", "nan");
+        set_item_col(value: &str) => "itemCol", set_param_string;
+        item_col -> &str = |this| this.params.string_or("itemCol", "item");
+        set_prediction_col(value: &str) => "predictionCol", set_param_string;
+        prediction_col -> &str = |this| this.params.string_or("predictionCol", "prediction");
+        set_user_col(value: &str) => "userCol", set_param_string;
+        user_col -> &str = |this| this.params.string_or("userCol", "user");
     }
 }

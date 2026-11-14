@@ -55,7 +55,8 @@ fn als_defaults_and_shared_block_setter() {
         defaults["coldStartStrategy"].as_str().unwrap()
     );
     assert_eq!(estimator.prediction_col(), "prediction");
-    assert_eq!(estimator.seed(), None);
+    // The default seed is the Java hash of the JVM class name, as PySpark's `class_name_hash`.
+    assert_eq!(estimator.seed(), 1_994_790_107);
     let estimator = estimator.set_num_blocks(3);
     assert_eq!(estimator.num_user_blocks(), 3);
     assert_eq!(estimator.num_item_blocks(), 3);
