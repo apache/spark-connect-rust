@@ -57,8 +57,13 @@ fn all_params() -> &'static HashMap<String, Vec<ParamMeta>> {
 /// The params of the class of `slf`: of the first class of its MRO that is an official one, so
 /// that a Python subclass of a native class has the params of it.
 fn params_of(slf: &Bound<'_, PyAny>) -> PyResult<&'static [ParamMeta]> {
-    for class in slf.get_type().mro().iter() {
-        let name = class.getattr("__name__")?.extract::<String>()?;
+    params_of_type(slf.get_type().as_any())
+}
+
+/// The params of the class `cls`, as [`params_of`] of its instances.
+fn params_of_type(cls: &Bound<'_, PyAny>) -> PyResult<&'static [ParamMeta]> {
+    for class in cls.getattr("__mro__")?.try_iter()? {
+        let name = class?.getattr("__name__")?.extract::<String>()?;
         if let Some(params) = all_params().get(&name) {
             return Ok(params.as_slice());
         }
@@ -282,20 +287,68 @@ fn class_param_name(name: &str) -> Option<&'static str> {
 /// makes it of a parent of the uid of `slf`. (`Param` takes an `Identifiable` parent, of which it
 /// keeps only the uid: it is made of PySpark's dummy parent, and given the uid of `slf`.)
 fn param_object<'py>(slf: &Bound<'py, PyAny>, meta: &ParamMeta) -> PyResult<Bound<'py, PyAny>> {
-    let py = slf.py();
+    let param = class_param_object(slf.py(), meta)?;
+    param.setattr("parent", slf.getattr("uid")?)?;
+    Ok(param)
+}
+
+/// The Param of `meta` of a class, as PySpark's class attribute is:
+/// `Param(Params._dummy(), name, doc, typeConverter)`, of the parent "undefined".
+fn class_param_object<'py>(py: Python<'py>, meta: &ParamMeta) -> PyResult<Bound<'py, PyAny>> {
     let module = py.import("pyspark.ml.param")?;
     let converter = module
         .getattr("TypeConverters")?
         .getattr(meta.converter.as_str())?;
     let dummy = module.getattr("Params")?.call_method0("_dummy")?;
-    let param = module.getattr("Param")?.call1((
-        dummy,
-        meta.name.as_str(),
-        meta.doc.as_str(),
-        converter,
-    ))?;
-    param.setattr("parent", slf.getattr("uid")?)?;
-    Ok(param)
+    module
+        .getattr("Param")?
+        .call1((dummy, meta.name.as_str(), meta.doc.as_str(), converter))
+}
+
+/// The Param attribute of a native class, as the attribute of PySpark's class is: of the class
+/// (`LinearSVC.maxIter`), the Param of the parent "undefined" of the class's params, the same
+/// object on every access; of an instance, the Param of its uid (see [`param`]).
+#[pyclass(name = "_ParamAttribute", module = "pyspark.ml.connect", frozen)]
+pub struct PyParamAttribute {
+    name: &'static str,
+    class_param: OnceLock<Py<PyAny>>,
+}
+
+impl PyParamAttribute {
+    pub(super) fn new(name: &'static str) -> Self {
+        Self {
+            name,
+            class_param: OnceLock::new(),
+        }
+    }
+}
+
+#[pymethods]
+impl PyParamAttribute {
+    fn __get__(
+        &self,
+        py: Python<'_>,
+        obj: Option<&Bound<'_, PyAny>>,
+        owner: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        if let Some(obj) = obj.filter(|obj| !obj.is_none()) {
+            return Ok(param(obj, self.name)?.unbind());
+        }
+        if let Some(param) = self.class_param.get() {
+            return Ok(param.clone_ref(py));
+        }
+        let owner = owner.ok_or_else(|| {
+            PyTypeError::new_err("the Param attribute of a class is read of the class")
+        })?;
+        let meta = params_of_type(owner)?
+            .iter()
+            .find(|p| p.name == self.name)
+            .ok_or_else(|| {
+                PyValueError::new_err(format!("Cannot find param with name {}.", self.name))
+            })?;
+        let param = class_param_object(py, meta)?.unbind();
+        Ok(self.class_param.get_or_init(|| param).clone_ref(py))
+    }
 }
 
 /// The meta of the param `param` of `slf`, as PySpark's `_resolveParam`: of a Param of `slf`

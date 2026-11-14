@@ -81,6 +81,43 @@ class Recorder:
 
 def params_api_common_cases(rec, est, other):
     """The cases of PySpark's `Params` API of an estimator `est` of maxIter, tol and weightCol."""
+    from pyspark.ml.base import Estimator
+    from pyspark.ml.param import Params
+    from pyspark.ml.tuning import ParamGridBuilder
+
+    cls = type(est)
+    rec("isinstance_estimator", lambda: isinstance(est, Estimator))
+    rec("isinstance_params", lambda: isinstance(est, Params))
+    # The Param of the class: of the parent "undefined", the same object on every access.
+    rec(
+        "class_param",
+        lambda: (
+            type(cls.maxIter).__name__,
+            cls.maxIter.parent,
+            cls.maxIter.name,
+            cls.maxIter is cls.maxIter,
+            cls.maxIter == est.maxIter,
+        ),
+    )
+    rec(
+        "grid_of_class_param",
+        lambda: [
+            sorted((p.parent, p.name, v) for p, v in m.items())
+            for m in ParamGridBuilder().addGrid(cls.maxIter, [1, 2]).build()
+        ],
+    )
+    rec("copy_class_param", lambda: est.copy({cls.maxIter: 3}).getMaxIter())
+    writer = est.write()
+    rec(
+        "writer_should_overwrite",
+        lambda: (writer.shouldOverwrite, setattr(writer, "shouldOverwrite", True))
+        and writer.shouldOverwrite,
+    )
+    rec(
+        "writer_option_map",
+        lambda: (writer.option("Key", 1), writer.optionMap.__setitem__("x", "y"))
+        and sorted(writer.optionMap.items()),
+    )
     rec("param_names", lambda: [p.name for p in est.params])
     rec("param_docs", lambda: [p.doc for p in est.params])
     rec("param_parents_are_uid", lambda: all(p.parent == est.uid for p in est.params))
@@ -252,7 +289,11 @@ def _kmeans_live(rec, model, df):
 def model_cases(rec, est, model):
     """The cases of any fitted model `model` of the estimator `est`: its uid, its params and its
     description."""
+    from pyspark.ml.base import Model, Transformer
+
     rec("model_uid_is_estimator_uid", lambda: model.uid == est.uid)
+    rec("isinstance_model", lambda: (isinstance(model, Model), isinstance(model, Transformer)))
+    rec("fit_class_param", lambda: est.fit(model_cases.df, {type(est).maxIter: 3}).getMaxIter())
     rec("model_explainParams", lambda: model.explainParams())
     rec(
         "model_extract",
@@ -311,6 +352,7 @@ def live_cases(name, spark, base):
         df = _kmeans_frame(spark)
         est = estimator(k=2, maxIter=10)
     model = est.fit(df)
+    model_cases.df = df
     model_cases(rec, est, model)
     if name == "LinearSVC":
         _linear_svc_live(rec, model, df)

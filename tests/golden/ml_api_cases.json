@@ -58,6 +58,10 @@
      "(1, 3)"
     ]
    ],
+   "fit_class_param": [
+    "ok",
+    "10"
+   ],
    "fit_list": [
     "ok",
     [
@@ -72,6 +76,10 @@
    "hasSummary": [
     "ok",
     "True"
+   ],
+   "isinstance_model": [
+    "ok",
+    "(True, True)"
    ],
    "loaded_explainParams": [
     "ok",
@@ -280,6 +288,10 @@
     "ok",
     "'maxIter: max number of iterations (>= 0). (default: 20, current: 1180591620717411303424)'"
    ],
+   "class_param": [
+    "ok",
+    "('Param', 'undefined', 'maxIter', True, False)"
+   ],
    "clear": [
     "ok",
     "(None, 7, True)"
@@ -287,6 +299,10 @@
    "copy_bad_extra": [
     "TypeError",
     "Expecting a valid instance of Param, but received: maxIter"
+   ],
+   "copy_class_param": [
+    "ok",
+    "5"
    ],
    "copy_explainParams": [
     "ok",
@@ -426,6 +442,17 @@
     "KeyError",
     "Param(parent='KMeans_<uid>', name='weightCol', doc='weight column name. If this is not set or empty, we treat all instance weights as 1.0.')"
    ],
+   "grid_of_class_param": [
+    "ok",
+    [
+     [
+      "('undefined', 'maxIter', 1)"
+     ],
+     [
+      "('undefined', 'maxIter', 2)"
+     ]
+    ]
+   ],
    "hasDefault_seed": [
     "ok",
     "True"
@@ -473,6 +500,14 @@
    "isSet_tol": [
     "ok",
     "False"
+   ],
+   "isinstance_estimator": [
+    "ok",
+    "True"
+   ],
+   "isinstance_params": [
+    "ok",
+    "True"
    ],
    "orig_maxIter": [
     "ok",
@@ -549,6 +584,17 @@
    "set_str_param": [
     "AttributeError",
     "'str' object has no attribute 'parent'"
+   ],
+   "writer_option_map": [
+    "ok",
+    [
+     "('key', '1')",
+     "('x', 'y')"
+    ]
+   ],
+   "writer_should_overwrite": [
+    "ok",
+    "True"
    ]
   }
  },
@@ -631,6 +677,10 @@
      "(1, 3)"
     ]
    ],
+   "fit_class_param": [
+    "ok",
+    "5"
+   ],
    "fit_list": [
     "ok",
     [
@@ -649,6 +699,10 @@
    "intercept": [
     "ok",
     0.0
+   ],
+   "isinstance_model": [
+    "ok",
+    "(True, True)"
    ],
    "loaded_explainParams": [
     "ok",
@@ -1059,6 +1113,10 @@
     "ok",
     "'maxIter: max number of iterations (>= 0). (default: 100, current: 1180591620717411303424)'"
    ],
+   "class_param": [
+    "ok",
+    "('Param', 'undefined', 'maxIter', True, False)"
+   ],
    "clear": [
     "ok",
     "(None, 7, True)"
@@ -1066,6 +1124,10 @@
    "copy_bad_extra": [
     "TypeError",
     "Expecting a valid instance of Param, but received: maxIter"
+   ],
+   "copy_class_param": [
+    "ok",
+    "5"
    ],
    "copy_explainParams": [
     "ok",
@@ -1197,6 +1259,17 @@
     "KeyError",
     "Param(parent='LinearSVC_<uid>', name='weightCol', doc='weight column name. If this is not set or empty, we treat all instance weights as 1.0.')"
    ],
+   "grid_of_class_param": [
+    "ok",
+    [
+     [
+      "('undefined', 'maxIter', 1)"
+     ],
+     [
+      "('undefined', 'maxIter', 2)"
+     ]
+    ]
+   ],
    "hasDefault_tol": [
     "ok",
     "True"
@@ -1236,6 +1309,14 @@
    "isSet_tol": [
     "ok",
     "False"
+   ],
+   "isinstance_estimator": [
+    "ok",
+    "True"
+   ],
+   "isinstance_params": [
+    "ok",
+    "True"
    ],
    "orig_maxIter": [
     "ok",
@@ -1300,6 +1381,17 @@
    "set_str_param": [
     "AttributeError",
     "'str' object has no attribute 'parent'"
+   ],
+   "writer_option_map": [
+    "ok",
+    [
+     "('key', '1')",
+     "('x', 'y')"
+    ]
+   ],
+   "writer_should_overwrite": [
+    "ok",
+    "True"
    ]
   }
  }

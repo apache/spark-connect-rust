@@ -12,6 +12,9 @@ Official PySpark runs these tests too, as the reference of the goldens (see `_na
 
 import inspect
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -38,9 +41,16 @@ FULL = [
 ]
 
 
+# The kinds of the golden that a native class has as another: a `functools.cached_property` is a
+# property, and a method of `functools.cache` a method (the cases test that they cache).
+_SAME_KINDS = {"cached_property": "property", "_lru_cache_wrapper": "method"}
+
+
 def _kind(cls, name):
-    """The kind of the member `name` of `cls`, as the capture script names it."""
+    """The kind of the member `name` of `cls`, as the capture script names it (of `_SAME_KINDS`)."""
     raw = inspect.getattr_static(cls, name)
+    if type(raw).__name__ in _SAME_KINDS:
+        return _SAME_KINDS[type(raw).__name__]
     if isinstance(raw, (property, type(int.real))) or type(raw).__name__ == "getset_descriptor":
         return "property"
     if isinstance(raw, staticmethod):
@@ -77,7 +87,7 @@ def test_members_are_pyspark_mls(spec):
 def test_member_kinds_and_parameters_are_pyspark_mls(spec):
     cls = native_class(*spec)
     for name, member in API[spec[1]]["members"].items():
-        kind = member["kind"]
+        kind = _SAME_KINDS.get(member["kind"], member["kind"])
         assert _kind(cls, name) == kind, name
         if "parameters" in member:
             # A method of the class has `self` (a classmethod of the class is bound to it).
@@ -98,24 +108,21 @@ def test_constructors_are_pyspark_mls(spec):
 
 @pytest.mark.parametrize("spec", FULL, ids=lambda spec: spec[1])
 def test_params_are_pyspark_mls(spec):
+    # The Params of the class (`LinearSVC.maxIter`), which a native class has as PySpark's: of the
+    # parent "undefined", of the name, doc and converter of PySpark's class, in its order. Read of
+    # the class, as a params walk of an instance would read its cached members, of a session.
+    from pyspark.ml.param import Param
+
     cls = native_class(*spec)
-    params = API[spec[1]]["params"]
-    if not params:
-        return
-    if not API[spec[1]]["default_instance"]:
-        pytest.skip("no default instance")
-    try:
-        instance = cls()
-    except TypeError:
-        # A model of a fit or a load (the cases of test_ml_api_e2e.py have its params).
-        return
-    for param, golden in zip(instance.params, params):
-        assert (param.name, param.doc, param.typeConverter.__name__) == (
-            golden["name"],
-            golden["doc"],
-            golden["converter"],
-        )
-    assert len(instance.params) == len(params)
+    params = [
+        getattr(cls, name)
+        for name in sorted(dir(cls))
+        if isinstance(getattr(cls, name, None), Param)
+    ]
+    golden = API[spec[1]]["params"]
+    assert [(p.parent, p.name, p.doc, p.typeConverter.__name__) for p in params] == [
+        ("undefined", g["name"], g["doc"], g["converter"]) for g in golden
+    ]
 
 
 @pytest.mark.parametrize("name", list(CLASSES))
@@ -125,3 +132,25 @@ def test_params_api_cases_are_pyspark_mls(name):
     assert sorted(ours) == sorted(golden)
     differ = {tag: (ours[tag], golden[tag]) for tag in golden if ours[tag] != golden[tag]}
     assert not differ, json.dumps(differ, indent=1)
+
+
+def test_native_classes_are_of_pyspark_mls_bases_on_a_fresh_import():
+    # The registration runs at the import of any module of pyspark.ml.connect, before any check of
+    # the user's.
+    code = """
+import importlib
+try:
+    import pyspark._pyspark  # noqa: F401
+    module = importlib.import_module("pyspark.ml.connect.classification")
+except ImportError:
+    module = importlib.import_module("pyspark.ml.classification")
+from pyspark.ml.base import Estimator, Model
+from pyspark.ml.param import Params
+print(isinstance(module.LinearSVC(), Estimator), isinstance(module.LinearSVC(), Params),
+      issubclass(module.LinearSVCModel, Model))
+"""
+    out = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, env=dict(os.environ)
+    )
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.split() == ["True", "True", "True"]

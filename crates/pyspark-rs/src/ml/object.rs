@@ -230,10 +230,14 @@ pub(super) enum WriteTarget {
 #[pyclass(name = "MLWriter", module = "pyspark.ml.util")]
 pub struct PyMLWriter {
     target: WriteTarget,
-    #[pyo3(get)]
+    /// Whether `save` overwrites, as the attribute of `MLWriter`.
+    #[pyo3(get, set)]
     #[allow(non_snake_case)]
     shouldOverwrite: bool,
-    options: HashMap<String, String>,
+    /// The options, as the dict attribute of `MLWriter` that `option` sets.
+    #[pyo3(get, set)]
+    #[allow(non_snake_case)]
+    optionMap: Py<PyDict>,
     session: Option<Py<PyAny>>,
     /// The error of PySpark's serialization of the params, which `save` raises.
     error: Option<PyErr>,
@@ -244,10 +248,15 @@ impl PyMLWriter {
         Self {
             target,
             shouldOverwrite: false,
-            options: HashMap::new(),
+            optionMap: Python::attach(|py| PyDict::new(py).unbind()),
             session: None,
             error: None,
         }
+    }
+
+    /// The options of `optionMap`, as the `Write` sends them (a map of strings).
+    fn options(&self, py: Python<'_>) -> PyResult<HashMap<String, String>> {
+        self.optionMap.bind(py).extract()
     }
 
     pub(super) fn with_error(mut self, error: Option<PyErr>) -> Self {
@@ -258,12 +267,14 @@ impl PyMLWriter {
 
 #[pymethods]
 impl PyMLWriter {
-    /// Save to `path`, as `RemoteMLWriter.save`: of the active session of an operator, and of the
-    /// session that holds a model's object.
+    /// Save to `path`, as `RemoteMLWriter.save`: of the active session (not the one that `session`
+    /// sets, which `RemoteMLWriter.save` does not read) of an operator, and of the session that
+    /// holds a model's object.
     fn save(&self, py: Python<'_>, path: &str) -> PyResult<()> {
         if let Some(error) = &self.error {
             return Err(error.clone_ref(py));
         }
+        let options = self.options(py)?;
         match &self.target {
             WriteTarget::Object(object, params) => {
                 let session = object.session().clone();
@@ -273,13 +284,13 @@ impl PyMLWriter {
                         params,
                         path,
                         self.shouldOverwrite,
-                        &self.options,
+                        &options,
                     )
                     .map_err(Box::new)
                 })
             }
             WriteTarget::Operator(operator, params) => {
-                let session = session_of(py, self.session.as_ref())?;
+                let session = session_of(py, None)?;
                 interruptible(py, &session, || {
                     spark_connect::ml::write_operator(
                         &session,
@@ -287,7 +298,7 @@ impl PyMLWriter {
                         params,
                         path,
                         self.shouldOverwrite,
-                        &self.options,
+                        &options,
                     )
                     .map_err(Box::new)
                 })
@@ -301,26 +312,15 @@ impl PyMLWriter {
         slf
     }
 
-    /// An option of the writer, as `MLWriter.option`, of its lowercase key and string value.
+    /// An option of the writer, as `MLWriter.option`: `optionMap[key.lower()] = str(value)`.
     fn option<'py>(
-        mut slf: PyRefMut<'py, Self>,
-        key: &str,
+        slf: PyRefMut<'py, Self>,
+        key: &Bound<'py, PyAny>,
         value: &Bound<'py, PyAny>,
     ) -> PyResult<PyRefMut<'py, Self>> {
-        let value = value.str()?.to_string();
-        slf.options.insert(key.to_lowercase(), value);
+        let key = key.call_method0("lower")?;
+        slf.optionMap.bind(slf.py()).set_item(key, value.str()?)?;
         Ok(slf)
-    }
-
-    /// The options, as `MLWriter.optionMap`.
-    #[getter]
-    #[allow(non_snake_case)]
-    fn optionMap<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-        let dict = PyDict::new(py);
-        for (k, v) in &self.options {
-            dict.set_item(k, v)?;
-        }
-        Ok(dict)
     }
 
     /// The session to save with, as `BaseReadWrite.session`.
@@ -381,9 +381,10 @@ impl PyMLReader {
 
 #[pymethods]
 impl PyMLReader {
-    /// Load from `path`, as `RemoteMLReader.load`, of the active session.
+    /// Load from `path`, as `RemoteMLReader.load`, of the active session (not the one that
+    /// `session` sets, which `RemoteMLReader.load` does not read).
     fn load(&self, py: Python<'_>, path: &str) -> PyResult<Py<PyAny>> {
-        let session = session_of(py, self.session.as_ref())?;
+        let session = session_of(py, None)?;
         let read = interruptible(py, &session, || {
             spark_connect::ml::read(&session, self.jvm_class, self.op_type, path).map_err(Box::new)
         })?;
@@ -452,6 +453,9 @@ pub(super) struct ModelCore {
     pub(super) own_defaults: params_api::OwnDefaults,
     /// The values of the `functools.cached_property` members, by name (see [`ModelCore::cached`]).
     cache: std::sync::Mutex<Vec<(&'static str, Py<PyAny>)>>,
+    /// The values of the methods of `functools.cache`, by name, of this object only (see
+    /// [`ModelCore::cached_method`]).
+    method_cache: std::sync::Mutex<Vec<(&'static str, Py<PyAny>)>>,
 }
 
 /// The maker of the training summary object of a model, of the model and of the target of its
@@ -504,6 +508,7 @@ impl ModelCore {
             summary_object: std::sync::OnceLock::new(),
             own_defaults: Vec::new(),
             cache: Default::default(),
+            method_cache: Default::default(),
         };
         // The summary object, of the fit, as `try_remote_fit` sets `_summary` right after it.
         if let (Some(make), Some(target)) = (make_summary, core.summary.clone()) {
@@ -537,6 +542,7 @@ impl ModelCore {
             summary_object: std::sync::OnceLock::new(),
             own_defaults: Vec::new(),
             cache: Default::default(),
+            method_cache: Default::default(),
         })
     }
 
@@ -566,6 +572,7 @@ impl ModelCore {
             summary_object: std::sync::OnceLock::new(),
             own_defaults: params_api::uid_defaults(py, class)?,
             cache: Default::default(),
+            method_cache: Default::default(),
         })
     }
 
@@ -587,7 +594,20 @@ impl ModelCore {
                 py,
                 &self.cache.lock().expect("the cache is not poisoned"),
             )),
+            // A copy is another object of `functools.cache`.
+            method_cache: Default::default(),
         }
+    }
+
+    /// The value of the method `key` of `functools.cache`, made by `make` once for this object.
+    #[allow(dead_code)] // DistributedLDAModel's `toLocal` uses it.
+    pub(super) fn cached_method(
+        &self,
+        py: Python<'_>,
+        key: &'static str,
+        make: impl FnOnce() -> PyResult<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        Self::cached_in(py, &self.method_cache, key, make)
     }
 
     /// The value of the cached member `key`, as a `functools.cached_property`: made by `make`
@@ -599,7 +619,17 @@ impl ModelCore {
         key: &'static str,
         make: impl FnOnce() -> PyResult<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
-        let lock = || self.cache.lock().expect("the cache is not poisoned");
+        Self::cached_in(py, &self.cache, key, make)
+    }
+
+    /// The value of `key` of `cache`, made by `make` once.
+    fn cached_in(
+        py: Python<'_>,
+        cache: &std::sync::Mutex<Vec<(&'static str, Py<PyAny>)>>,
+        key: &'static str,
+        make: impl FnOnce() -> PyResult<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let lock = || cache.lock().expect("the cache is not poisoned");
         if let Some(value) = params_api::own_default_of(py, &lock(), key) {
             return Ok(value);
         }

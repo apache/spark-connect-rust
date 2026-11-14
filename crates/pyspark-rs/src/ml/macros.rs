@@ -23,6 +23,7 @@ macro_rules! params_api_block {
         params: [
             $( $param:literal => ($getter_py:literal, $getter:ident, $attr:ident) ),* $(,)?
         ];
+        params_only: [ $( $po:literal => $po_attr:ident ),* $(,)? ];
         { $($methods:tt)* }
     ) => {
         #[pymethods]
@@ -122,15 +123,27 @@ macro_rules! params_api_block {
             }
 
             $(
+                /// The Param attribute of a param of no getter of the class (as `numTrees` of
+                /// a tree ensemble model, whose `getNumTrees` is a property).
+                #[classattr]
+                #[pyo3(name = $po)]
+                fn $po_attr() -> $crate::ml::params_api::PyParamAttribute {
+                    $crate::ml::params_api::PyParamAttribute::new($po)
+                }
+            )*
+
+            $(
                 #[pyo3(name = $getter_py)]
                 fn $getter(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
                     $crate::ml::params_api::getter(slf, $param)
                 }
 
-                #[getter]
+                /// The Param attribute, of the class's Param and of the instance's (see
+                /// `PyParamAttribute`).
+                #[classattr]
                 #[pyo3(name = $param)]
-                fn $attr<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
-                    $crate::ml::params_api::param(slf.as_any(), $param)
+                fn $attr() -> $crate::ml::params_api::PyParamAttribute {
+                    $crate::ml::params_api::PyParamAttribute::new($param)
                 }
             )*
         }
@@ -152,11 +165,13 @@ macro_rules! native_pymethods {
         params: [
             $( $param:literal => ($getter_py:literal, $getter:ident, $attr:ident) ),* $(,)?
         ];
+        $( params_only: [ $( $po:literal => $po_attr:ident ),* $(,)? ]; )?
         $($body:tt)*
     ) => {
         params_api_block! {
             $ty;
             params: [ $( $param => ($getter_py, $getter, $attr) ),* ];
+            params_only: [ $( $( $po => $po_attr ),* )? ];
             {
                 $($body)*
 
@@ -231,11 +246,13 @@ macro_rules! native_pymethods {
         params: [
             $( $param:literal => ($getter_py:literal, $getter:ident, $attr:ident) ),* $(,)?
         ];
+        $( params_only: [ $( $po:literal => $po_attr:ident ),* $(,)? ]; )?
         $($body:tt)*
     ) => {
         params_api_block! {
             $ty;
             params: [ $( $param => ($getter_py, $getter, $attr) ),* ];
+            params_only: [ $( $( $po => $po_attr ),* )? ];
             {
                 $($body)*
 
@@ -268,7 +285,9 @@ macro_rules! native_pymethods {
 ///   `ModelCore::summary_object`;
 /// - the `functools.cached_property` members of `$cached` (`"trees" => (trees, make)`, of a
 ///   [`CachedMaker`](super::object::CachedMaker)), which PySpark's `params` walk of `_resetUid`
-///   reads at a fit (after the summary) and at a load, and which a copy shares;
+///   reads at a fit (after the summary) and at a load, and which a copy shares, and the methods of
+///   `functools.cache` of the optional `cached_methods` (`"toLocal" => (to_local, make)`), which a
+///   copy does not share;
 /// - `transform`, `copy`, `__repr__` (the server's `toString`, as `JavaModel.__repr__`), `write`,
 ///   `save`, `read` and `load`, `fitted` (of a fit), `of_object` (of an object that a fetch
 ///   returns), and the class's own methods `$body`.
@@ -278,6 +297,7 @@ macro_rules! native_model {
         params: [
             $( $param:literal => ($getter_py:literal, $getter:ident, $attr:ident) ),* $(,)?
         ];
+        $( params_only: [ $( $po:literal => $po_attr:ident ),* $(,)? ]; )?
         setters: [ $( $setter_py:literal => ($setter:ident, $set_param:literal) ),* $(,)? ];
         properties: [ $( $prop_py:literal => ($prop:ident, $prop_method:literal) ),* $(,)? ];
         methods: [
@@ -299,6 +319,7 @@ macro_rules! native_model {
         ];
         summary: $summary:expr;
         cached: [ $( $c_py:literal => ($c:ident, $c_make:expr) ),* $(,)? ];
+        $( cached_methods: [ $( $cm_py:literal => ($cm:ident, $cm_make:expr) ),* $(,)? ]; )?
         $($body:tt)*
     ) => {
         #[pyclass(name = $name, module = $module)]
@@ -398,6 +419,7 @@ macro_rules! native_model {
         params_api_block! {
             $ty;
             params: [ $( $param => ($getter_py, $getter, $attr) ),* ];
+            params_only: [ $( $( $po => $po_attr ),* )? ];
             {
                 $($body)*
 
@@ -540,6 +562,18 @@ macro_rules! native_model {
                         this.core.cached(py, $c_py, || ($c_make)(py, &this.core))
                     }
                 )*
+
+                $( $(
+                    /// A method of no arguments of `functools.cache` (`toLocal`): its value, made
+                    /// once per object, which a copy does not share, as the cache of
+                    /// `functools.cache` is of each object.
+                    #[pyo3(name = $cm_py)]
+                    fn $cm(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+                        let py = slf.py();
+                        let this = slf.try_borrow()?;
+                        this.core.cached_method(py, $cm_py, || ($cm_make)(py, &this.core))
+                    }
+                )* )?
             }
         }
     };
