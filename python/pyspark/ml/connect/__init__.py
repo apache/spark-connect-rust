@@ -139,6 +139,7 @@ def _register_native_classes() -> None:
     from pyspark.ml.base import Model as _Model
     from pyspark.ml.base import Transformer as _Transformer
     from pyspark.ml.evaluation import Evaluator as _Evaluator
+    from pyspark.ml.param import Params as _Params
 
     for name in dir(_native):
         cls = getattr(_native, name)
@@ -150,6 +151,9 @@ def _register_native_classes() -> None:
             _Evaluator.register(cls)
         elif hasattr(cls, "transform"):
             (_Model if name.endswith("Model") else _Transformer).register(cls)
+        elif hasattr(cls, "params"):
+            # A class of Params that neither fits nor transforms (PrefixSpan).
+            _Params.register(cls)
 
     # The meta-algorithms are PySpark's classes of them too, so that `MetaAlgorithmReadWrite`
     # reads the nested stages of a native Pipeline (`getUidMap` of a validator's estimator) and

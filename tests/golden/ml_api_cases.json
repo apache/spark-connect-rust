@@ -1524,6 +1524,10 @@
     "ok",
     "DenseVector([-3.0779, 3.0779])"
    ],
+   "predict_column": [
+    "PySparkTypeError",
+    "[UNSUPPORTED_DATA_TYPE] Unsupported DataType `Column`."
+   ],
    "repr_prefix": [
     "ok",
     "'LinearSVCModel'"

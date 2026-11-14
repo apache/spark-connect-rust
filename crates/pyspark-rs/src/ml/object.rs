@@ -141,6 +141,16 @@ pub(super) fn fetch_arg_of(value: &Bound<'_, PyAny>) -> PyResult<FetchArg> {
             }
         }
     }
+    // A Column is no literal of PySpark's `LiteralExpression._from_value`, even of a literal
+    // (`F.lit(3)`).
+    if value.is_instance_of::<crate::column::PyColumn>() {
+        return Err(crate::column::raise_pyspark(
+            py,
+            "PySparkTypeError",
+            "UNSUPPORTED_DATA_TYPE",
+            &[("data_type", &value.get_type().name()?.to_string())],
+        ));
+    }
     let column = crate::functions::to_value_column(value)?;
     match column.expression().node() {
         spark_connect::expression::ExpressionNode::Literal(literal) => {
@@ -216,7 +226,7 @@ fn active_spark(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
     Ok(spark)
 }
 
-fn session_of(py: Python<'_>, session: Option<&Py<PyAny>>) -> PyResult<SparkSession> {
+pub(super) fn session_of(py: Python<'_>, session: Option<&Py<PyAny>>) -> PyResult<SparkSession> {
     if let Some(session) = session {
         return Ok(session
             .bind(py)

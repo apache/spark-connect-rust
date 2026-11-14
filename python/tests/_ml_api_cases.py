@@ -447,9 +447,13 @@ def _linear_svc_live(rec, model, df):
 
     for a in ["coefficients", "intercept", "numClasses", "numFeatures", "hasSummary"]:
         rec(a, lambda a=a: getattr(model, a))
+    from pyspark.sql import functions as F
+
     v = Vectors.dense([3.0, 1.0])
     rec("predict", lambda: model.predict(v))
     rec("predictRaw", lambda: model.predictRaw(v))
+    # A Column is no value of an argument of PySpark's `serialize`, even of a literal.
+    rec("predict_column", lambda: model.predict(F.lit(1.0)))
     rec("model_getMaxIter", lambda: model.getMaxIter())
     rec("model_isSet_maxIter", lambda: model.isSet("maxIter"))
     rec("model_isSet_tol", lambda: model.isSet("tol"))
