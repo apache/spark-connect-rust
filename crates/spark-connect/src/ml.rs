@@ -40,6 +40,10 @@ pub use regression_api::*;
 mod clustering_api;
 #[allow(unused_imports)] // Until the area adds its first public item.
 pub use clustering_api::*;
+// The members of the tree models, which the classification and regression trees share.
+mod tree_api;
+#[allow(unused_imports)] // Until the area adds its first public item.
+pub use tree_api::*;
 
 use crate::dataframe::DataFrame;
 use crate::expression::LiteralExpression;
