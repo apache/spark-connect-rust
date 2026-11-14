@@ -14,9 +14,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""Capture, on official PySpark, the cases of the native feature transformers
-(python/tests/_feature_api_cases.py) for tests/golden/feature_api_cases.json, which
-test_feature_api_offline.py and test_feature_api_e2e.py compare the native classes with.
+"""Capture, on official PySpark, the cases of the native feature classes (transformers,
+estimators and models; python/tests/_feature_api_cases.py) for tests/golden/feature_api_cases.json,
+which test_feature_api_offline.py and test_feature_api_e2e.py compare the native classes with.
 
     python scripts/capture_feature_api_cases_golden.py --remote sc://localhost:15013 \\
         > tests/golden/feature_api_cases.json
@@ -33,7 +33,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python" / "tests"))
 
-from _feature_api_cases import TRANSFORMERS, live_cases, offline_cases  # noqa: E402
+from _feature_api_cases import (  # noqa: E402
+    ESTIMATORS,
+    MODELS,
+    TRANSFORMERS,
+    live_cases,
+    offline_cases,
+)
 from pyspark.sql import SparkSession  # noqa: E402
 
 
@@ -43,9 +49,12 @@ def main():
     args = parser.parse_args()
     spark = SparkSession.builder.remote(args.remote).getOrCreate()
     out = {}
-    for name in TRANSFORMERS:
+    for name in TRANSFORMERS + ESTIMATORS:
         base = tempfile.mkdtemp(prefix="feature-api-cases-")
         out[name] = {"offline": offline_cases(name), "live": live_cases(name, spark, base)}
+    for name in MODELS:
+        base = tempfile.mkdtemp(prefix="feature-api-cases-")
+        out[name] = {"live": live_cases(name, spark, base)}
     spark.stop()
     print(json.dumps(out, indent=1, sort_keys=True))
 

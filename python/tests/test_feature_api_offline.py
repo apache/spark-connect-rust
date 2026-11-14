@@ -1,5 +1,5 @@
-"""The Params API, the getters and the members of the native feature transformers, without a
-server: their cases (`_feature_api_cases.offline_cases`) against tests/golden/feature_api_cases.json,
+"""The Params API, the getters and the members of the native feature transformers and estimators,
+without a server: their cases (`_feature_api_cases.offline_cases`) against tests/golden/feature_api_cases.json,
 from official PySpark (see scripts/capture_feature_api_cases_golden.py). Official PySpark runs them
 too, as the reference (see `_native_classes`).
 """
@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 
 import pytest
-from _feature_api_cases import TRANSFORMERS, offline_cases
+from _feature_api_cases import ESTIMATORS, TRANSFORMERS, offline_cases
 
 # StopWordsRemover's defaults (caseSensitive, locale, outputCol and stopWords) are missing from
 # ml_params.json, a base file, so its cases fail on ours until that base change lands. Official
@@ -23,7 +23,7 @@ NAMES = [
         if name == "StopWordsRemover"
         else (),
     )
-    for name in TRANSFORMERS
+    for name in TRANSFORMERS + ESTIMATORS
 ]
 
 CASES = json.loads(

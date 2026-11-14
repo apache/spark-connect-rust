@@ -331,6 +331,9 @@ def serve(connection):
             self.execute_payload = b""
             self.execute_payloads = None
             self.execute_payload_queue = None
+            # The payloads of the requests whose bytes contain a key (a method name of a fetch, as
+            # a fit's splits), which take precedence over the payloads above.
+            self.payload_for_request = {}
             self.query_payload = None
             self.execute_failure = None
             self.execute_error = None
@@ -758,8 +761,13 @@ def serve(connection):
             payloads = (
                 [self.execute_payload] if self.execute_payloads is None else self.execute_payloads
             )
-            if self.execute_payload_queue:
-                payloads = [self.execute_payload_queue.pop(0)]
+            for text, payload in self.payload_for_request.items():
+                if text in request:
+                    payloads = [payload]
+                    break
+            else:
+                if self.execute_payload_queue:
+                    payloads = [self.execute_payload_queue.pop(0)]
             # ExecutePlanRequest.plan=3, of which Plan.command=2 is set for a command only.
             plan = parse_message(parse_message(request).get(3, [b""])[0])
             if self.query_payload is not None and 2 not in plan:
