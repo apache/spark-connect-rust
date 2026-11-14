@@ -81,3 +81,31 @@ let spark = SparkSessionBuilder::default()
     .remote("sc://spark.example.com:15002/;use_ssl=true")
     .get_or_create()?;
 ```
+
+## HTTP Proxies
+
+As PySpark's client (through grpcio), the client reaches the server through the HTTP proxy of the
+environment, with an HTTP/1.1 `CONNECT` tunnel. TLS is negotiated with the Spark server inside the
+tunnel and checked against the server's name, so the proxy sees neither the token nor the data.
+
+```bash
+export https_proxy=http://user:password@proxy.example.com:3128
+export no_proxy=.internal.example.com,10.0.0.0/8
+```
+
+The proxy is the first of `grpc_proxy`, `https_proxy` and `http_proxy` that is set, and the hosts
+that are not proxied are those of `no_grpc_proxy`, or else of `no_proxy`. These are the rules of
+grpcio:
+
+- Only the lowercase names are read; `HTTPS_PROXY` and `NO_PROXY` are not.
+- Only an `http://` proxy is supported. Another scheme (`https://`, `socks5://`), a value
+  without a scheme or an empty one connects directly, with a warning for an invalid value.
+- The user and password of the proxy URI, percent-decoded, are sent as
+  `Proxy-Authorization: Basic`. A proxy without a port is on port 443.
+- A `no_proxy` entry matches the host itself or its subdomains (`example.com` and
+  `.example.com` both match `spark.example.com`, not `notexample.com`), and an IP host in a CIDR
+  range such as `10.0.0.0/8`. There is no `*` wildcard, and an entry with a port does not match.
+
+Unlike grpcio, a loopback host (`localhost`, `127.0.0.0/8`, `[::1]`) is never proxied, as a
+token is sent to `localhost` without TLS. A proxy address with an invalid host or port is an
+error when the session is created.

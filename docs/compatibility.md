@@ -605,6 +605,12 @@ A warning that the Rust core raises, such as the
 `FutureWarning` of `registerTempTable`, is attributed to the caller's frame and module, so a
 `warnings.filterwarnings(..., module="pyspark")` does not match it, as it matches PySpark's.
 
+The client honors the HTTP proxy of the environment (`grpc_proxy`, `https_proxy`, `http_proxy`,
+`no_grpc_proxy`, `no_proxy`) with grpcio's rules, see [HTTP Proxies](configuration.md#http-proxies),
+with two differences: a loopback host is never proxied, where grpcio proxies `localhost` unless
+`no_proxy` lists it, and a proxy address with an invalid host or port is an error, where grpcio
+cannot connect (and takes a port past 65535 modulo 65536).
+
 ## Native NaiveBayes
 
 The Rust `ml::NaiveBayes` and `ml::NaiveBayesModel` train and predict through Spark
