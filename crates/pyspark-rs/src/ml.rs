@@ -505,20 +505,45 @@ fn dataset_of(dataset: &Bound<'_, PyAny>, method: &str) -> PyResult<DataFrame> {
 
 /// The dataset of `method`, a call of `pyspark.ml` that reads nothing of it, but sends it as an
 /// argument of a helper or attribute call (`invoke_helper_relation`, `try_remote_attribute_relation`),
-/// whose serialization converts a value that is not a DataFrame to a literal: such a value raises
-/// the `UNSUPPORTED_DATA_TYPE` of that conversion, and the server rejects another, which this client
-/// does not send but refuses with a TypeError. A pandas DataFrame raises the TypeError of
-/// [`reject_pandas`] first.
+/// as `serialize` of `pyspark.ml.connect.serialize` sends an argument that is not a DataFrame: a
+/// `(value, DataType)` pair as a literal of that type, an ML vector or matrix as itself, and
+/// another value as the literal of `LiteralExpression._from_value`, which raises PySpark's error of
+/// a value that cannot be one (`UNSUPPORTED_DATA_TYPE`, also of a pandas DataFrame, where a fit,
+/// transform or evaluate raises the TypeError of [`reject_pandas`]). The server rejects a value that
+/// PySpark sends, which this client does not send but refuses with a TypeError.
 pub(crate) fn helper_dataset_of(dataset: &Bound<'_, PyAny>, method: &str) -> PyResult<DataFrame> {
     if let Ok(df) = dataset.extract::<PyRef<'_, PyDataFrame>>() {
         return Ok(df.dataframe.clone());
     }
-    reject_pandas(dataset, method)?;
-    crate::functions::to_column(dataset)?;
+    if !serialized_as_is(dataset)? {
+        crate::functions::to_value_column(dataset)?;
+    }
     Err(PyTypeError::new_err(format!(
         "{method}() takes a Spark DataFrame, not '{}'",
         dataset.get_type().name()?
     )))
+}
+
+/// Whether `serialize` of `pyspark.ml.connect.serialize` sends `value` without
+/// `LiteralExpression._from_value`: a `(value, DataType)` pair, and an ML vector or matrix of the
+/// classes that `serialize_param` takes.
+fn serialized_as_is(value: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let py = value.py();
+    if let Ok(pair) = value.cast::<PyTuple>() {
+        if pair.len() == 2 {
+            let data_type = py.import("pyspark.sql.types")?.getattr("DataType")?;
+            if pair.get_item(1)?.is_instance(&data_type)? {
+                return Ok(true);
+            }
+        }
+    }
+    let linalg = py.import("pyspark.ml.linalg")?;
+    for class in ["SparseVector", "DenseVector", "SparseMatrix", "DenseMatrix"] {
+        if value.is_instance(&linalg.getattr(class)?)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Fit a native estimator on `dataset`, a Spark DataFrame, as `try_remote_fit` of `pyspark.ml`

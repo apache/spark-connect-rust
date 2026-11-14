@@ -571,31 +571,63 @@ def test_native_ml_other_invalid_inputs(ml_mock):
         assert str(error.value) == f"{name}() takes a Spark DataFrame, not 'Session'"
     assert len(_session_requests(service, spark)) == sent
     assert len(_session_analyses(service, spark)) == analyzed
-    # PowerIterationClustering's assignClusters reads nothing of its dataset, as PySpark's helper
-    # call sends it as a literal: a value that cannot be one raises the UNSUPPORTED_DATA_TYPE of the
-    # conversion, and another a TypeError, before any request.
-    from pyspark.errors import PySparkTypeError
+    # The helper calls of pyspark.ml read nothing of their dataset, but send it as an argument,
+    # which pyspark.ml.connect.serialize sends as a literal unless it is a DataFrame:
+    # PowerIterationClustering.assignClusters, PrefixSpan.findFrequentSequentialPatterns and
+    # ALSModel.recommendForUserSubset and recommendForItemSubset. A value that cannot be a literal
+    # raises the error of LiteralExpression._from_value, a pandas DataFrame too (not the TypeError
+    # of a fit, transform or evaluate), and a value that PySpark sends for the server to reject
+    # (a vector, a matrix and a (value, DataType) pair as they are) raises a TypeError, before any
+    # request, as of official pyspark-client 4.3.0.
+    import numpy as np
+    import pandas as pd
+    from pyspark.errors import PySparkTypeError, PySparkValueError
+    from pyspark.ml.linalg import Matrices, Vectors
+    from pyspark.sql.types import IntegerType
 
-    assign = connect.PowerIterationClustering().assignClusters
-    with pytest.raises(PySparkTypeError) as error:
-        assign(Columns())
-    assert error.value.getCondition() == "UNSUPPORTED_DATA_TYPE"
-    for other in (5, None, [1], "x"):
-        with pytest.raises(TypeError) as error:
-            assign(other)
-        assert str(error.value) == (
-            f"assignClusters() takes a Spark DataFrame, not '{type(other).__name__}'"
-        )
+    _session_fit(service, spark, connect.ALS(), spark.range(1), models)
+    als = models[-1]
+    helpers = [
+        ("assignClusters", connect.PowerIterationClustering().assignClusters),
+        ("findFrequentSequentialPatterns", connect.PrefixSpan().findFrequentSequentialPatterns),
+        ("recommendForUserSubset", lambda dataset: als.recommendForUserSubset(dataset, 1)),
+        ("recommendForItemSubset", lambda dataset: als.recommendForItemSubset(dataset, 1)),
+    ]
+    unconvertible = [
+        (Columns(), PySparkTypeError, "UNSUPPORTED_DATA_TYPE", {"data_type": "Columns"}),
+        (pd.DataFrame({"a": [1]}), PySparkTypeError, "UNSUPPORTED_DATA_TYPE",
+         {"data_type": "DataFrame"}),
+        (pd.Series([1]), PySparkTypeError, "UNSUPPORTED_DATA_TYPE", {"data_type": "Series"}),
+        (np.array([1.0]), PySparkTypeError, "UNSUPPORTED_DATA_TYPE", {"data_type": "ndarray"}),
+        ({"a": 1}, PySparkTypeError, "UNSUPPORTED_DATA_TYPE", {"data_type": "dict"}),
+        ((1, 2), PySparkTypeError, "UNSUPPORTED_DATA_TYPE", {"data_type": "tuple"}),
+        ([], PySparkTypeError, "CANNOT_INFER_ARRAY_ELEMENT_TYPE", None),
+        (2**70, PySparkValueError, "VALUE_NOT_BETWEEN", None),
+    ]
+    sendable = [5, None, [1], "x", Vectors.dense([1.0]), Matrices.dense(1, 1, [1.0]),
+                (1, IntegerType())]
+    sent = len(_session_requests(service, spark))
+    for name, helper in helpers:
+        for other, error_class, condition, parameters in unconvertible:
+            with pytest.raises(error_class) as error:
+                helper(other)
+            assert error.value.getCondition() == condition, (name, other)
+            if parameters is not None:
+                assert error.value.getMessageParameters() == parameters, (name, other)
+        for other in sendable:
+            with pytest.raises(TypeError) as error:
+                helper(other)
+            assert str(error.value) == (
+                f"{name}() takes a Spark DataFrame, not '{type(other).__name__}'"
+            ), (name, other)
     assert len(_session_requests(service, spark)) == sent
-
 
 
 def test_ml_connect_native_column_params_are_sent_as_given_as_pyspark(ml_mock):
     # As pyspark.ml, which sends the column params as they are given: a fit or a transform of a
     # column param of another case than the schema sends it as it is, and the JVM, which reads a
     # column by its exact name, raises its error of it or resolves it, as with pyspark.ml (see the
-    # e2e test). The fit reads no schema to respell it. (The evaluators of the deprecated API still
-    # send the spelling of the schema of the dataset.)
+    # e2e test). The fit reads no schema to respell it.
     import pyspark.ml.connect as connect
     from _mock_connect_server import ddl_data_type
 
@@ -4012,16 +4044,31 @@ def _native_ml_method(name):
     return getattr(instance, method)
 
 
-@pytest.mark.parametrize("name", [*_NATIVE_PARAMS, "OneVsRest", "PowerIterationClustering"])
-def test_native_ml_rejects_pandas_without_active_session(name, pandas_ml_input):
-    assert SparkSession.getActiveSession() is None
-    method = _native_ml_method(name)
+def _assert_rejects_pandas(method, pdf):
+    # A fit, transform or evaluate raises the TypeError of a pandas DataFrame. The helper call of
+    # PowerIterationClustering.assignClusters, whose dataset pyspark.ml's serialization sends as a
+    # literal, raises the UNSUPPORTED_DATA_TYPE of that conversion, as pyspark.ml's does (see
+    # test_native_ml_other_invalid_inputs).
+    from pyspark.errors import PySparkTypeError
+
+    if method.__name__ == "assignClusters":
+        with pytest.raises(PySparkTypeError) as error:
+            method(dataset=pdf)
+        assert error.value.getCondition() == "UNSUPPORTED_DATA_TYPE"
+        assert error.value.getMessageParameters() == {"data_type": type(pdf).__name__}
+        return
     with pytest.raises(TypeError) as error:
-        method(dataset=pandas_ml_input)
+        method(dataset=pdf)
     assert str(error.value) == (
         f"{method.__name__}() requires a Spark DataFrame; pandas DataFrames are not supported. "
         "Convert the input with spark.createDataFrame(...) first."
     )
+
+
+@pytest.mark.parametrize("name", [*_NATIVE_PARAMS, "OneVsRest", "PowerIterationClustering"])
+def test_native_ml_rejects_pandas_without_active_session(name, pandas_ml_input):
+    assert SparkSession.getActiveSession() is None
+    _assert_rejects_pandas(_native_ml_method(name), pandas_ml_input)
     assert SparkSession.getActiveSession() is None
 
 
@@ -4043,8 +4090,7 @@ def test_native_ml_rejects_pandas_before_any_requests(ml_mock, pandas_ml_input, 
                 connect.LogisticRegression(maxIter=2**100).fit,
                 connect.VectorAssembler(inputCols=[]).transform]
     for method in methods:
-        with pytest.raises(TypeError, match="requires a Spark DataFrame"):
-            method(pandas_ml_input)
+        _assert_rejects_pandas(method, pandas_ml_input)
         assert requests() == sent
 
 

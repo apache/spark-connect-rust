@@ -286,7 +286,7 @@ that `pyspark.ml` raises for it. The `params` argument is checked first, before 
 Native `fit`, `transform` and `evaluate` require a Spark DataFrame, matching the dataset
 contract of standard `pyspark.ml` over Spark Connect. Passing a pandas DataFrame raises
 `TypeError` before the params of the class are validated, the schema is read or any request is
-sent; only a `params` argument that is not a param map is checked before it (see above). This
+sent (the helper calls below raise PySpark's error of its serialization); only a `params` argument that is not a param map is checked before it (see above). This
 also applies to empty pandas DataFrames and to the native Pipeline and CrossValidator
 placeholders.
 Convert local data explicitly with `df = spark.createDataFrame(pdf)` before calling
@@ -299,9 +299,17 @@ that `pyspark.ml` reads of the dataset first (`'int' object has no attribute 'sp
 `fit(5)`), before any request; an object that has a `sparkSession` raises a `TypeError`. The
 methods that `pyspark.ml` runs as a helper or attribute call (`PowerIterationClustering.assignClusters`,
 `PrefixSpan.findFrequentSequentialPatterns`, and `ALSModel.recommendForUserSubset` and
-`recommendForItemSubset`) read nothing of their dataset, whose serialization converts another
-object to a literal: one that cannot be a literal raises PySpark's `UNSUPPORTED_DATA_TYPE`, and
-another, which PySpark sends for the server to reject, raises a `TypeError` before any request. As with
+`recommendForItemSubset`) read nothing of their dataset. PySpark's serialization
+(`pyspark.ml.connect.serialize`) converts any other object to a literal, as
+`LiteralExpression._from_value` does:
+- One that cannot be a literal raises PySpark's error of the conversion. That includes a pandas
+  DataFrame, which raises `UNSUPPORTED_DATA_TYPE` here rather than the `TypeError` above, as with
+  `pyspark.ml`, and an empty list, which raises `CANNOT_INFER_ARRAY_ELEMENT_TYPE`.
+- PySpark sends the others for the server to reject. These include an ML vector or matrix and a
+  `(value, DataType)` pair, which it sends as they are. Here they raise a `TypeError` before any
+  request.
+
+As with
 `pyspark.ml`, a fit sends the DataFrame as it is, and the transform of a model is the transform of
 the DataFrame as it is, which sends no request: the JVM estimators and models check the columns,
 and raise their errors of a column of a wrong type, or of an output column that the DataFrame has
