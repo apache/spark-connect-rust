@@ -261,10 +261,26 @@ not given is not sent, so the server's default applies. A list param without ele
 accepted by its constructor and setters, and a fit, transform or evaluate raises PySpark's
 `CANNOT_INFER_ARRAY_ELEMENT_TYPE` for it, as PySpark's serialization does.
 
+A native class has the `setParams` of its `pyspark.ml` class, except `LogisticRegression`, whose
+params are still those of the deprecated `pyspark.ml.connect` class (see Native LogisticRegression),
+which has no `setParams`. It is keyword-only, takes the params of the
+constructor, sets the params that it is given, in order, and returns the object, as PySpark's
+`_set` does. Its signature is PySpark's for every class, the feature stages included, except
+`CrossValidator`, which takes `numFolds`, `parallelism` and `seed`, with a default of `None` for
+the first two. The `params` argument of a fit, transform or
+evaluate, which `pyspark.ml` takes as a param map, is accepted: `None` and an empty dict leave the
+params as they are. The native classes have no Param objects to key a map by, so a non-empty map,
+and a list or tuple of maps to a fit (which `pyspark.ml` fits as one model per map), raise a
+`TypeError` that says the native classes take no param map. Any other value raises the `TypeError`
+that `pyspark.ml` raises for it. The `params` argument is checked first, before the dataset, as
+`pyspark.ml` checks it.
+
 Native `fit`, `transform` and `evaluate` require a Spark DataFrame, matching the dataset
 contract of standard `pyspark.ml` over Spark Connect. Passing a pandas DataFrame raises
-`TypeError` before parameter validation, schema access or any server request. This also applies
-to empty pandas DataFrames and to the native Pipeline and CrossValidator placeholders.
+`TypeError` before the params of the class are validated, the schema is read or any request is
+sent; only a `params` argument that is not a param map is checked before it (see above). This
+also applies to empty pandas DataFrames and to the native Pipeline and CrossValidator
+placeholders.
 Convert local data explicitly with `df = spark.createDataFrame(pdf)` before calling
 `estimator.fit(df)`, `model.transform(df)` or `evaluator.evaluate(df)`. Transforms return Spark
 DataFrames; call `toPandas()` explicitly when a local result is needed. The deprecated
