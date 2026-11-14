@@ -1,0 +1,2200 @@
+{
+ "datasets": {
+  "als_held": {
+   "sql": "SELECT * FROM VALUES (0,0,3),(1,1,2),(2,2,1),(3,3,0),(4,99,0),(5,0,99),(6,99,99) AS t(id,u,i)",
+   "vectors": []
+  },
+  "als_items": {
+   "sql": "SELECT * FROM VALUES (1),(3),(3),(99) AS t(i)",
+   "vectors": []
+  },
+  "als_train": {
+   "sql": "SELECT * FROM VALUES (0,0,5.0D),(0,1,1.0D),(0,2,2.0D),(1,0,1.0D),(1,1,5.0D),(1,3,3.0D),(2,0,3.0D),(2,2,5.0D),(2,3,1.0D),(3,1,2.0D),(3,2,1.0D),(3,3,5.0D) AS t(u,i,r)",
+   "vectors": []
+  },
+  "als_users": {
+   "sql": "SELECT * FROM VALUES (0),(0),(2),(99) AS t(u)",
+   "vectors": []
+  },
+  "evaluate_binary": {
+   "coalesce": 1,
+   "sql": "SELECT *, array(1.0D-score, score) AS scoreVec FROM VALUES (0, 0.0D, 0.1D, 1.0D), (1, 0.0D, 0.4D, 2.0D), (2, 1.0D, 0.35D, 1.0D), (3, 1.0D, 0.8D, 3.0D), (4, 1.0D, 0.4D, 0.5D), (5, 0.0D, 0.9D, 0.0D) AS t(id, target, score, w)",
+   "vectors": [
+    "scoreVec"
+   ]
+  },
+  "evaluate_clustering": {
+   "coalesce": 1,
+   "sql": "SELECT * FROM VALUES (0,0.0D,array(1.0D,0.0D),1.0D), (1,0.0D,array(0.8D,0.2D),2.0D), (2,1.0D,array(0.0D,1.0D),1.0D), (3,1.0D,array(0.1D,0.9D),3.0D) AS t(id,guess,xs,w)",
+   "vectors": [
+    "xs"
+   ]
+  },
+  "evaluate_multiclass": {
+   "coalesce": 1,
+   "sql": "SELECT * FROM VALUES (0, 0.0D, 0.0D, array(0.8D,0.1D,0.1D),1.0D), (1,1.0D,0.0D,array(0.6D,0.3D,0.1D),2.0D), (2,2.0D,2.0D,array(0.0D,0.2D,0.8D),1.0D), (3,2.0D,1.0D,array(0.0D,1.0D,0.0D),0.5D), (4,1.0D,1.0D,array(0.1D,0.8D,0.1D),3.0D), (5,0.0D,2.0D,array(0.1D,0.1D,0.8D),1.0D) AS t(id,target,guess,p,w)",
+   "vectors": [
+    "p"
+   ]
+  },
+  "evaluate_multilabel": {
+   "coalesce": 1,
+   "sql": "SELECT * FROM VALUES (0,array(0.0D,2.0D),array(0.0D,1.0D)), (1,array(1.0D),array(1.0D,2.0D)), (2,array(0.0D,1.0D,2.0D),array(0.0D,1.0D)), (3,array(2.0D),CAST(array() AS ARRAY<DOUBLE>)), (4,array(0.0D),array(0.0D)) AS t(id,target,guess)",
+   "vectors": []
+  },
+  "evaluate_ranking": {
+   "coalesce": 1,
+   "sql": "SELECT * FROM VALUES (0,array(1.0D,2.0D,3.0D),array(1.0D,6.0D,2.0D,7.0D,3.0D)), (1,array(2.0D,4.0D),array(4.0D,1.0D,2.0D)), (2,array(3.0D),array(1.0D,2.0D)), (3,CAST(array() AS ARRAY<DOUBLE>),array(1.0D,2.0D)), (4,array(1.0D),CAST(array() AS ARRAY<DOUBLE>)) AS t(id,target,guess)",
+   "vectors": []
+  },
+  "evaluate_regression": {
+   "coalesce": 1,
+   "sql": "SELECT * FROM VALUES (0, 1.0D, 0.5D, 1.0D), (1, 2.0D, 2.5D, 2.0D), (2, 4.0D, 3.0D, 0.5D), (3, 3.0D, 4.0D, 3.0D), (4, 1.0D, 8.0D, 0.0D) AS t(id, target, guess, w)",
+   "vectors": []
+  },
+  "fpm_high_confidence": {
+   "sql": "SELECT * FROM VALUES (0,array('a','b')), (1,array('b','c')), (2,array('a','b','c')), (3,array('a','c')), (4,array('a','b')), (5,array('b')) AS t(id,basket)",
+   "vectors": []
+  },
+  "fpm_high_confidence_held": {
+   "sql": "SELECT * FROM VALUES (10,array('a')), (11,array('b')), (12,array('a','b')), (13,array('z')), (14,CAST(array() AS ARRAY<STRING>)) AS t(id,basket)",
+   "vectors": []
+  },
+  "fpm_integers": {
+   "sql": "SELECT * FROM VALUES (0,array(1,2)), (1,array(2,3)), (2,array(1,2,3)), (3,array(1,3)), (4,array(1,2)), (5,array(2)) AS t(id,basket)",
+   "vectors": []
+  },
+  "fpm_integers_held": {
+   "sql": "SELECT * FROM VALUES (0,array(1,2)), (1,array(2,3)), (2,array(1,2,3)), (3,array(1,3)), (4,array(1,2)), (5,array(2)) AS t(id,basket)",
+   "vectors": []
+  },
+  "fpm_strings": {
+   "sql": "SELECT * FROM VALUES (0,array('a','b')), (1,array('b','c')), (2,array('a','b','c')), (3,array('a','c')), (4,array('a','b')), (5,array('b')) AS t(id,basket)",
+   "vectors": []
+  },
+  "fpm_strings_held": {
+   "sql": "SELECT * FROM VALUES (10,array('a')), (11,array('b')), (12,array('a','b')), (13,array('z')), (14,CAST(array() AS ARRAY<STRING>)) AS t(id,basket)",
+   "vectors": []
+  }
+ },
+ "encoding": "Floats are JSON numbers (Python repr); NaN and infinities are strings. Vectors and matrices as in scripts/ml_golden_common.py. DataFrames: schema and rows sorted by canonical JSON. Model and summary objects: {type, ref} with ref a placeholder: <idN> for an object id (<idN>.summary for a summary), numbered in order of first appearance. Errors: {class, condition, message}. commands: base64 of the MlCommand or MlRelation sent, results: base64 of the MlCommandResult received, both SerializeToString(deterministic=True) after normalization (object ids and uids -> placeholders, plan_id, origin and LocalRelation data cleared, paths -> <path>).",
+ "fits": {
+  "ALS.explicit": {
+   "dataset": "als_train",
+   "estimator": "ALS",
+   "fit": {
+    "call": "ALS.fit(als_train)",
+    "commands": [
+     "Cv0ECjIKJm9yZy5hcGFjaGUuc3BhcmsubWwucmVjb21tZW5kYXRpb24uQUxTEgY8dWlkMD4YARKXAwoSCgVhbHBoYRIJWQAAAAAAAPA/Cg8KCWJsb2NrU2l6ZRICMAIKIQoSY2hlY2twb2ludEludGVydmFsEgsw////////////AQoaChFjb2xkU3RhcnRTdHJhdGVneRIFagNuYW4KJgoRZmluYWxTdG9yYWdlTGV2ZWwSEWoPTUVNT1JZX0FORF9ESVNLChMKDWltcGxpY2l0UHJlZnMSAhgACi0KGGludGVybWVkaWF0ZVN0b3JhZ2VMZXZlbBIRag9NRU1PUllfQU5EX0RJU0sKDgoHaXRlbUNvbBIDagFpCg0KB21heEl0ZXISAjAIChEKC25vbm5lZ2F0aXZlEgIYAAoTCg1udW1JdGVtQmxvY2tzEgIwAQoTCg1udW1Vc2VyQmxvY2tzEgIwAQoYCg1wcmVkaWN0aW9uQ29sEgdqBXNjb3JlCgoKBHJhbmsSAjACChAKCXJhdGluZ0NvbBIDagFyChUKCHJlZ1BhcmFtEglZmpmZmZmZuT8KCgoEc2VlZBICMCoKDgoHdXNlckNvbBIDagF1GqwBCgBSpwEKpAFTRUxFQ1QgKiBGUk9NIFZBTFVFUyAoMCwwLDUuMEQpLCgwLDEsMS4wRCksKDAsMiwyLjBEKSwoMSwwLDEuMEQpLCgxLDEsNS4wRCksKDEsMywzLjBEKSwoMiwwLDMuMEQpLCgyLDIsNS4wRCksKDIsMywxLjBEKSwoMywxLDIuMEQpLCgzLDIsMS4wRCksKDMsMyw1LjBEKSBBUyB0KHUsaSxyKQ==",
+     "EhEKBwoFPGlkMD4SBgoEcmFuaw==",
+     "EhEKBwoFPGlkMD4SBgoEcmFuaw=="
+    ],
+    "results": [
+     "GgkKBwoFPGlkMD4=",
+     "CgIwAg==",
+     "CgIwAg=="
+    ],
+    "value": {
+     "ref": "<id0>",
+     "type": "ALSModel"
+    }
+   },
+   "model_uid": "als_explicit",
+   "params": {
+    "alpha": 1.0,
+    "blockSize": 2,
+    "checkpointInterval": -1,
+    "coldStartStrategy": "nan",
+    "finalStorageLevel": "MEMORY_AND_DISK",
+    "implicitPrefs": false,
+    "intermediateStorageLevel": "MEMORY_AND_DISK",
+    "itemCol": "i",
+    "maxIter": 8,
+    "nonnegative": false,
+    "numItemBlocks": 1,
+    "numUserBlocks": 1,
+    "predictionCol": "score",
+    "rank": 2,
+    "ratingCol": "r",
+    "regParam": 0.1,
+    "seed": 42,
+    "userCol": "u"
+   },
+   "uid": "als_explicit",
+   "uid_same": true
+  },
+  "ALS.implicit-nonnegative": {
+   "dataset": "als_train",
+   "estimator": "ALS",
+   "fit": {
+    "call": "ALS.fit(als_train)",
+    "commands": [
+     "Cv0ECjIKJm9yZy5hcGFjaGUuc3BhcmsubWwucmVjb21tZW5kYXRpb24uQUxTEgY8dWlkMD4YARKXAwoSCgVhbHBoYRIJWQAAAAAAAABACg8KCWJsb2NrU2l6ZRICMAIKIQoSY2hlY2twb2ludEludGVydmFsEgsw////////////AQoaChFjb2xkU3RhcnRTdHJhdGVneRIFagNuYW4KJgoRZmluYWxTdG9yYWdlTGV2ZWwSEWoPTUVNT1JZX0FORF9ESVNLChMKDWltcGxpY2l0UHJlZnMSAhgBCi0KGGludGVybWVkaWF0ZVN0b3JhZ2VMZXZlbBIRag9NRU1PUllfQU5EX0RJU0sKDgoHaXRlbUNvbBIDagFpCg0KB21heEl0ZXISAjAIChEKC25vbm5lZ2F0aXZlEgIYAQoTCg1udW1JdGVtQmxvY2tzEgIwAQoTCg1udW1Vc2VyQmxvY2tzEgIwAQoYCg1wcmVkaWN0aW9uQ29sEgdqBXNjb3JlCgoKBHJhbmsSAjACChAKCXJhdGluZ0NvbBIDagFyChUKCHJlZ1BhcmFtEglZmpmZmZmZuT8KCgoEc2VlZBICMCoKDgoHdXNlckNvbBIDagF1GqwBCgBSpwEKpAFTRUxFQ1QgKiBGUk9NIFZBTFVFUyAoMCwwLDUuMEQpLCgwLDEsMS4wRCksKDAsMiwyLjBEKSwoMSwwLDEuMEQpLCgxLDEsNS4wRCksKDEsMywzLjBEKSwoMiwwLDMuMEQpLCgyLDIsNS4wRCksKDIsMywxLjBEKSwoMywxLDIuMEQpLCgzLDIsMS4wRCksKDMsMyw1LjBEKSBBUyB0KHUsaSxyKQ==",
+     "EhEKBwoFPGlkMD4SBgoEcmFuaw==",
+     "EhEKBwoFPGlkMD4SBgoEcmFuaw=="
+    ],
+    "results": [
+     "GgkKBwoFPGlkMD4=",
+     "CgIwAg==",
+     "CgIwAg=="
+    ],
+    "value": {
+     "ref": "<id0>",
+     "type": "ALSModel"
+    }
+   },
+   "model_uid": "als_implicit_nonnegative",
+   "params": {
+    "alpha": 2.0,
+    "blockSize": 2,
+    "checkpointInterval": -1,
+    "coldStartStrategy": "nan",
+    "finalStorageLevel": "MEMORY_AND_DISK",
+    "implicitPrefs": true,
+    "intermediateStorageLevel": "MEMORY_AND_DISK",
+    "itemCol": "i",
+    "maxIter": 8,
+    "nonnegative": true,
+    "numItemBlocks": 1,
+    "numUserBlocks": 1,
+    "predictionCol": "score",
+    "rank": 2,
+    "ratingCol": "r",
+    "regParam": 0.1,
+    "seed": 42,
+    "userCol": "u"
+   },
+   "uid": "als_implicit_nonnegative",
+   "uid_same": true
+  },
+  "FPGrowth.high-confidence": {
+   "dataset": "fpm_high_confidence",
+   "estimator": "FPGrowth",
+   "fit": {
+    "call": "FPGrowth.fit(fpm_high_confidence)",
+    "commands": [
+     "CtQCCiwKIG9yZy5hcGFjaGUuc3BhcmsubWwuZnBtLkZQR3Jvd3RoEgY8dWlkMD4YARJ+ChQKCGl0ZW1zQ29sEghqBmJhc2tldAoaCg1taW5Db25maWRlbmNlEglZzczMzMzM7D8KFwoKbWluU3VwcG9ydBIJWQAAAAAAAOA/ChMKDW51bVBhcnRpdGlvbnMSAjABChwKDXByZWRpY3Rpb25Db2wSC2oJc3VnZ2VzdGVkGqMBCgBSngEKmwFTRUxFQ1QgKiBGUk9NIFZBTFVFUyAoMCxhcnJheSgnYScsJ2InKSksICgxLGFycmF5KCdiJywnYycpKSwgKDIsYXJyYXkoJ2EnLCdiJywnYycpKSwgKDMsYXJyYXkoJ2EnLCdjJykpLCAoNCxhcnJheSgnYScsJ2InKSksICg1LGFycmF5KCdiJykpIEFTIHQoaWQsYmFza2V0KQ=="
+    ],
+    "results": [
+     "GgkKBwoFPGlkMD4="
+    ],
+    "value": {
+     "ref": "<id0>",
+     "type": "FPGrowthModel"
+    }
+   },
+   "model_uid": "fpm_high_confidence",
+   "params": {
+    "itemsCol": "basket",
+    "minConfidence": 0.9,
+    "minSupport": 0.5,
+    "numPartitions": 1,
+    "predictionCol": "suggested"
+   },
+   "uid": "fpm_high_confidence",
+   "uid_same": true
+  },
+  "FPGrowth.integers": {
+   "dataset": "fpm_integers",
+   "estimator": "FPGrowth",
+   "fit": {
+    "call": "FPGrowth.fit(fpm_integers)",
+    "commands": [
+     "CrwCCiwKIG9yZy5hcGFjaGUuc3BhcmsubWwuZnBtLkZQR3Jvd3RoEgY8dWlkMD4YARJ+ChQKCGl0ZW1zQ29sEghqBmJhc2tldAoaCg1taW5Db25maWRlbmNlEglZMzMzMzMz4z8KFwoKbWluU3VwcG9ydBIJWTMzMzMzM9M/ChMKDW51bVBhcnRpdGlvbnMSAjACChwKDXByZWRpY3Rpb25Db2wSC2oJc3VnZ2VzdGVkGosBCgBShgEKgwFTRUxFQ1QgKiBGUk9NIFZBTFVFUyAoMCxhcnJheSgxLDIpKSwgKDEsYXJyYXkoMiwzKSksICgyLGFycmF5KDEsMiwzKSksICgzLGFycmF5KDEsMykpLCAoNCxhcnJheSgxLDIpKSwgKDUsYXJyYXkoMikpIEFTIHQoaWQsYmFza2V0KQ=="
+    ],
+    "results": [
+     "GgkKBwoFPGlkMD4="
+    ],
+    "value": {
+     "ref": "<id0>",
+     "type": "FPGrowthModel"
+    }
+   },
+   "model_uid": "fpm_integers",
+   "params": {
+    "itemsCol": "basket",
+    "minConfidence": 0.6,
+    "minSupport": 0.3,
+    "numPartitions": 2,
+    "predictionCol": "suggested"
+   },
+   "uid": "fpm_integers",
+   "uid_same": true
+  },
+  "FPGrowth.strings": {
+   "dataset": "fpm_strings",
+   "estimator": "FPGrowth",
+   "fit": {
+    "call": "FPGrowth.fit(fpm_strings)",
+    "commands": [
+     "CtQCCiwKIG9yZy5hcGFjaGUuc3BhcmsubWwuZnBtLkZQR3Jvd3RoEgY8dWlkMD4YARJ+ChQKCGl0ZW1zQ29sEghqBmJhc2tldAoaCg1taW5Db25maWRlbmNlEglZAAAAAAAA4D8KFwoKbWluU3VwcG9ydBIJWTMzMzMzM9M/ChMKDW51bVBhcnRpdGlvbnMSAjACChwKDXByZWRpY3Rpb25Db2wSC2oJc3VnZ2VzdGVkGqMBCgBSngEKmwFTRUxFQ1QgKiBGUk9NIFZBTFVFUyAoMCxhcnJheSgnYScsJ2InKSksICgxLGFycmF5KCdiJywnYycpKSwgKDIsYXJyYXkoJ2EnLCdiJywnYycpKSwgKDMsYXJyYXkoJ2EnLCdjJykpLCAoNCxhcnJheSgnYScsJ2InKSksICg1LGFycmF5KCdiJykpIEFTIHQoaWQsYmFza2V0KQ=="
+    ],
+    "results": [
+     "GgkKBwoFPGlkMD4="
+    ],
+    "value": {
+     "ref": "<id0>",
+     "type": "FPGrowthModel"
+    }
+   },
+   "model_uid": "fpm_strings",
+   "params": {
+    "itemsCol": "basket",
+    "minConfidence": 0.5,
+    "minSupport": 0.3,
+    "numPartitions": 2,
+    "predictionCol": "suggested"
+   },
+   "uid": "fpm_strings",
+   "uid_same": true
+  }
+ },
+ "models": {
+  "ALS.explicit": {
+   "class": "ALSModel",
+   "members": {
+    "itemFactors": {
+     "call": "model.itemFactors",
+     "commands": [
+      "EhgKBwoFPGlkMD4SDQoLaXRlbUZhY3RvcnM="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0,
+        [
+         -1.105053186416626,
+         -3.191343307495117
+        ]
+       ],
+       [
+        1,
+        [
+         1.5673274993896484,
+         0.05745118483901024
+        ]
+       ],
+       [
+        2,
+        [
+         -3.190537214279175,
+         0.7069698572158813
+        ]
+       ],
+       [
+        3,
+        [
+         1.0637704133987427,
+         1.209306240081787
+        ]
+       ]
+      ],
+      "schema": "struct<id:int,features:array<float>>"
+     }
+    },
+    "rank": {
+     "call": "model.rank",
+     "commands": [
+      "EhEKBwoFPGlkMD4SBgoEcmFuaw=="
+     ],
+     "results": [
+      "CgIwAg=="
+     ],
+     "value": 2
+    },
+    "recommendForAllItems-2": {
+     "call": "model.recommendForAllItems(2)",
+     "commands": [
+      "EicKBwoFPGlkMD4SHAoUcmVjb21tZW5kRm9yQWxsSXRlbXMSBAoCMAI="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0,
+        [
+         [
+          0,
+          4.6407270431518555
+         ],
+         [
+          2,
+          1.8667891025543213
+         ]
+        ]
+       ],
+       [
+        1,
+        [
+         [
+          1,
+          4.800755977630615
+         ],
+         [
+          3,
+          1.0923227071762085
+         ]
+        ]
+       ],
+       [
+        2,
+        [
+         [
+          2,
+          4.390946388244629
+         ],
+         [
+          0,
+          1.070380449295044
+         ]
+        ]
+       ],
+       [
+        3,
+        [
+         [
+          3,
+          4.551723480224609
+         ],
+         [
+          1,
+          1.8371139764785767
+         ]
+        ]
+       ]
+      ],
+      "schema": "struct<i:int,recommendations:array<struct<u:int,rating:float>>>"
+     }
+    },
+    "recommendForAllUsers-2": {
+     "call": "model.recommendForAllUsers(2)",
+     "commands": [
+      "EicKBwoFPGlkMD4SHAoUcmVjb21tZW5kRm9yQWxsVXNlcnMSBAoCMAI="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0,
+        [
+         [
+          0,
+          4.6407270431518555
+         ],
+         [
+          2,
+          1.070380449295044
+         ]
+        ]
+       ],
+       [
+        1,
+        [
+         [
+          1,
+          4.800755977630615
+         ],
+         [
+          3,
+          1.8371139764785767
+         ]
+        ]
+       ],
+       [
+        2,
+        [
+         [
+          2,
+          4.390946388244629
+         ],
+         [
+          0,
+          1.8667891025543213
+         ]
+        ]
+       ],
+       [
+        3,
+        [
+         [
+          3,
+          4.551723480224609
+         ],
+         [
+          1,
+          1.0923227071762085
+         ]
+        ]
+       ]
+      ],
+      "schema": "struct<u:int,recommendations:array<struct<i:int,rating:float>>>"
+     }
+    },
+    "recommendForItemSubset-2": {
+     "call": "model.recommendForItemSubset(als_items, 2)",
+     "commands": [
+      "EmAKBwoFPGlkMD4SVQoWcmVjb21tZW5kRm9ySXRlbVN1YnNldBI1EjMKAFIvCi1TRUxFQ1QgKiBGUk9NIFZBTFVFUyAoMSksKDMpLCgzKSwoOTkpIEFTIHQoaSkSBAoCMAI="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        1,
+        [
+         [
+          1,
+          4.800755977630615
+         ],
+         [
+          3,
+          1.0923227071762085
+         ]
+        ]
+       ],
+       [
+        3,
+        [
+         [
+          3,
+          4.551723480224609
+         ],
+         [
+          1,
+          1.8371139764785767
+         ]
+        ]
+       ]
+      ],
+      "schema": "struct<i:int,recommendations:array<struct<u:int,rating:float>>>"
+     }
+    },
+    "recommendForUserSubset-2": {
+     "call": "model.recommendForUserSubset(als_users, 2)",
+     "commands": [
+      "EmAKBwoFPGlkMD4SVQoWcmVjb21tZW5kRm9yVXNlclN1YnNldBI1EjMKAFIvCi1TRUxFQ1QgKiBGUk9NIFZBTFVFUyAoMCksKDApLCgyKSwoOTkpIEFTIHQodSkSBAoCMAI="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0,
+        [
+         [
+          0,
+          4.6407270431518555
+         ],
+         [
+          2,
+          1.070380449295044
+         ]
+        ]
+       ],
+       [
+        2,
+        [
+         [
+          2,
+          4.390946388244629
+         ],
+         [
+          0,
+          1.8667891025543213
+         ]
+        ]
+       ]
+      ],
+      "schema": "struct<u:int,recommendations:array<struct<i:int,rating:float>>>"
+     }
+    },
+    "repr()": {
+     "call": "repr(model)",
+     "commands": [
+      "EhUKBwoFPGlkMD4SCgoIdG9TdHJpbmc="
+     ],
+     "results": [
+      "CiRqIkFMU01vZGVsOiB1aWQ9YWxzX2V4cGxpY2l0LCByYW5rPTI="
+     ],
+     "value": "ALSModel: uid=als_explicit, rank=2"
+    },
+    "str()": {
+     "call": "str(model)",
+     "commands": [
+      "EhUKBwoFPGlkMD4SCgoIdG9TdHJpbmc="
+     ],
+     "results": [
+      "CiRqIkFMU01vZGVsOiB1aWQ9YWxzX2V4cGxpY2l0LCByYW5rPTI="
+     ],
+     "value": "ALSModel: uid=als_explicit, rank=2"
+    },
+    "transform": {
+     "call": "model.transform(als_held)",
+     "commands": [
+      "CtcBCgcKBTxpZDA+GmMKAFJfCl1TRUxFQ1QgKiBGUk9NIFZBTFVFUyAoMCwwLDMpLCgxLDEsMiksKDIsMiwxKSwoMywzLDApLCg0LDk5LDApLCg1LDAsOTkpLCg2LDk5LDk5KSBBUyB0KGlkLHUsaSkiZwoPCglibG9ja1NpemUSAjACChoKEWNvbGRTdGFydFN0cmF0ZWd5EgVqA25hbgoOCgdpdGVtQ29sEgNqAWkKGAoNcHJlZGljdGlvbkNvbBIHagVzY29yZQoOCgd1c2VyQ29sEgNqAXU="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0,
+        0,
+        3,
+        -2.1525332927703857
+       ],
+       [
+        1,
+        1,
+        2,
+        -10.77325439453125
+       ],
+       [
+        2,
+        2,
+        1,
+        -2.197770833969116
+       ],
+       [
+        3,
+        3,
+        0,
+        -11.028754234313965
+       ],
+       [
+        4,
+        99,
+        0,
+        "NaN"
+       ],
+       [
+        5,
+        0,
+        99,
+        "NaN"
+       ],
+       [
+        6,
+        99,
+        99,
+        "NaN"
+       ]
+      ],
+      "schema": "struct<id:int,u:int,i:int,score:float>"
+     }
+    },
+    "userFactors": {
+     "call": "model.userFactors",
+     "commands": [
+      "EhgKBwoFPGlkMD4SDQoLdXNlckZhY3RvcnM="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0,
+        [
+         -0.6108363270759583,
+         -1.2426493167877197
+        ]
+       ],
+       [
+        1,
+        [
+         3.107534885406494,
+         -1.2144067287445068
+        ]
+       ],
+       [
+        2,
+        [
+         -1.398550271987915,
+         -0.10068383067846298
+        ]
+       ],
+       [
+        3,
+        [
+         0.5775889754295349,
+         3.2558350563049316
+        ]
+       ]
+      ],
+      "schema": "struct<id:int,features:array<float>>"
+     }
+    }
+   },
+   "skipped": {
+    "Param attribute (client side)": [
+     "blockSize",
+     "coldStartStrategy",
+     "itemCol",
+     "predictionCol",
+     "userCol"
+    ],
+    "Params API (client side)": [
+     "clear",
+     "copy",
+     "explainParam",
+     "explainParams",
+     "extractParamMap",
+     "getOrDefault",
+     "getParam",
+     "hasDefault",
+     "hasParam",
+     "isDefined",
+     "isSet",
+     "params",
+     "set",
+     "uid"
+    ],
+    "Params getter or setter (client side)": [
+     "getBlockSize",
+     "getColdStartStrategy",
+     "getItemCol",
+     "getPredictionCol",
+     "getUserCol",
+     "setBlockSize",
+     "setColdStartStrategy",
+     "setItemCol",
+     "setPredictionCol",
+     "setUserCol"
+    ],
+    "persistence (captured by Golden.persist)": [
+     "load",
+     "read",
+     "save",
+     "write"
+    ]
+   }
+  },
+  "ALS.implicit-nonnegative": {
+   "class": "ALSModel",
+   "members": {
+    "itemFactors": {
+     "call": "model.itemFactors",
+     "commands": [
+      "EhgKBwoFPGlkMD4SDQoLaXRlbUZhY3RvcnM="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0,
+        [
+         0.771631121635437,
+         0.34210288524627686
+        ]
+       ],
+       [
+        1,
+        [
+         0.5928772687911987,
+         0.5077161192893982
+        ]
+       ],
+       [
+        2,
+        [
+         0.7440821528434753,
+         0.38169240951538086
+        ]
+       ],
+       [
+        3,
+        [
+         0.013430822640657425,
+         0.7544052004814148
+        ]
+       ]
+      ],
+      "schema": "struct<id:int,features:array<float>>"
+     }
+    },
+    "rank": {
+     "call": "model.rank",
+     "commands": [
+      "EhEKBwoFPGlkMD4SBgoEcmFuaw=="
+     ],
+     "results": [
+      "CgIwAg=="
+     ],
+     "value": 2
+    },
+    "recommendForAllItems-2": {
+     "call": "model.recommendForAllItems(2)",
+     "commands": [
+      "EicKBwoFPGlkMD4SHAoUcmVjb21tZW5kRm9yQWxsSXRlbXMSBAoCMAI="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0,
+        [
+         [
+          0,
+          1.0001450777053833
+         ],
+         [
+          2,
+          0.9288363456726074
+         ]
+        ]
+       ],
+       [
+        1,
+        [
+         [
+          2,
+          0.9728904962539673
+         ],
+         [
+          1,
+          0.9421648383140564
+         ]
+        ]
+       ],
+       [
+        2,
+        [
+         [
+          0,
+          0.9802085757255554
+         ],
+         [
+          2,
+          0.9505165815353394
+         ]
+        ]
+       ],
+       [
+        3,
+        [
+         [
+          3,
+          0.9777078032493591
+         ],
+         [
+          1,
+          0.9615949988365173
+         ]
+        ]
+       ]
+      ],
+      "schema": "struct<i:int,recommendations:array<struct<u:int,rating:float>>>"
+     }
+    },
+    "recommendForAllUsers-2": {
+     "call": "model.recommendForAllUsers(2)",
+     "commands": [
+      "EicKBwoFPGlkMD4SHAoUcmVjb21tZW5kRm9yQWxsVXNlcnMSBAoCMAI="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0,
+        [
+         [
+          0,
+          1.0001450777053833
+         ],
+         [
+          2,
+          0.9802085757255554
+         ]
+        ]
+       ],
+       [
+        1,
+        [
+         [
+          3,
+          0.9615949988365173
+         ],
+         [
+          1,
+          0.9421648383140564
+         ]
+        ]
+       ],
+       [
+        2,
+        [
+         [
+          1,
+          0.9728904962539673
+         ],
+         [
+          2,
+          0.9505165815353394
+         ]
+        ]
+       ],
+       [
+        3,
+        [
+         [
+          3,
+          0.9777078032493591
+         ],
+         [
+          1,
+          0.9046854972839355
+         ]
+        ]
+       ]
+      ],
+      "schema": "struct<u:int,recommendations:array<struct<i:int,rating:float>>>"
+     }
+    },
+    "recommendForItemSubset-2": {
+     "call": "model.recommendForItemSubset(als_items, 2)",
+     "commands": [
+      "EmAKBwoFPGlkMD4SVQoWcmVjb21tZW5kRm9ySXRlbVN1YnNldBI1EjMKAFIvCi1TRUxFQ1QgKiBGUk9NIFZBTFVFUyAoMSksKDMpLCgzKSwoOTkpIEFTIHQoaSkSBAoCMAI="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        1,
+        [
+         [
+          2,
+          0.9728904962539673
+         ],
+         [
+          1,
+          0.9421648383140564
+         ]
+        ]
+       ],
+       [
+        3,
+        [
+         [
+          3,
+          0.9777078032493591
+         ],
+         [
+          1,
+          0.9615949988365173
+         ]
+        ]
+       ]
+      ],
+      "schema": "struct<i:int,recommendations:array<struct<u:int,rating:float>>>"
+     }
+    },
+    "recommendForUserSubset-2": {
+     "call": "model.recommendForUserSubset(als_users, 2)",
+     "commands": [
+      "EmAKBwoFPGlkMD4SVQoWcmVjb21tZW5kRm9yVXNlclN1YnNldBI1EjMKAFIvCi1TRUxFQ1QgKiBGUk9NIFZBTFVFUyAoMCksKDApLCgyKSwoOTkpIEFTIHQodSkSBAoCMAI="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0,
+        [
+         [
+          0,
+          1.0001450777053833
+         ],
+         [
+          2,
+          0.9802085757255554
+         ]
+        ]
+       ],
+       [
+        2,
+        [
+         [
+          1,
+          0.9728904962539673
+         ],
+         [
+          2,
+          0.9505165815353394
+         ]
+        ]
+       ]
+      ],
+      "schema": "struct<u:int,recommendations:array<struct<i:int,rating:float>>>"
+     }
+    },
+    "repr()": {
+     "call": "repr(model)",
+     "commands": [
+      "EhUKBwoFPGlkMD4SCgoIdG9TdHJpbmc="
+     ],
+     "results": [
+      "CjBqLkFMU01vZGVsOiB1aWQ9YWxzX2ltcGxpY2l0X25vbm5lZ2F0aXZlLCByYW5rPTI="
+     ],
+     "value": "ALSModel: uid=als_implicit_nonnegative, rank=2"
+    },
+    "str()": {
+     "call": "str(model)",
+     "commands": [
+      "EhUKBwoFPGlkMD4SCgoIdG9TdHJpbmc="
+     ],
+     "results": [
+      "CjBqLkFMU01vZGVsOiB1aWQ9YWxzX2ltcGxpY2l0X25vbm5lZ2F0aXZlLCByYW5rPTI="
+     ],
+     "value": "ALSModel: uid=als_implicit_nonnegative, rank=2"
+    },
+    "transform": {
+     "call": "model.transform(als_held)",
+     "commands": [
+      "CtcBCgcKBTxpZDA+GmMKAFJfCl1TRUxFQ1QgKiBGUk9NIFZBTFVFUyAoMCwwLDMpLCgxLDEsMiksKDIsMiwxKSwoMywzLDApLCg0LDk5LDApLCg1LDAsOTkpLCg2LDk5LDk5KSBBUyB0KGlkLHUsaSkiZwoPCglibG9ja1NpemUSAjACChoKEWNvbGRTdGFydFN0cmF0ZWd5EgVqA25hbgoOCgdpdGVtQ29sEgNqAWkKGAoNcHJlZGljdGlvbkNvbBIHagVzY29yZQoOCgd1c2VyQ29sEgNqAXU="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0,
+        0,
+        3,
+        0.24526406824588776
+       ],
+       [
+        1,
+        1,
+        2,
+        0.8590664863586426
+       ],
+       [
+        2,
+        2,
+        1,
+        0.9728904962539673
+       ],
+       [
+        3,
+        3,
+        0,
+        0.7668248414993286
+       ],
+       [
+        4,
+        99,
+        0,
+        "NaN"
+       ],
+       [
+        5,
+        0,
+        99,
+        "NaN"
+       ],
+       [
+        6,
+        99,
+        99,
+        "NaN"
+       ]
+      ],
+      "schema": "struct<id:int,u:int,i:int,score:float>"
+     }
+    },
+    "userFactors": {
+     "call": "model.userFactors",
+     "commands": [
+      "EhgKBwoFPGlkMD4SDQoLdXNlckZhY3RvcnM="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0,
+        [
+         1.1611720323562622,
+         0.3044366240501404
+        ]
+       ],
+       [
+        1,
+        [
+         0.5052933692932129,
+         1.2656440734863281
+        ]
+       ],
+       [
+        2,
+        [
+         0.7343770265579224,
+         1.0586527585983276
+        ]
+       ],
+       [
+        3,
+        [
+         0.42252498865127563,
+         1.2884759902954102
+        ]
+       ]
+      ],
+      "schema": "struct<id:int,features:array<float>>"
+     }
+    }
+   },
+   "skipped": {
+    "Param attribute (client side)": [
+     "blockSize",
+     "coldStartStrategy",
+     "itemCol",
+     "predictionCol",
+     "userCol"
+    ],
+    "Params API (client side)": [
+     "clear",
+     "copy",
+     "explainParam",
+     "explainParams",
+     "extractParamMap",
+     "getOrDefault",
+     "getParam",
+     "hasDefault",
+     "hasParam",
+     "isDefined",
+     "isSet",
+     "params",
+     "set",
+     "uid"
+    ],
+    "Params getter or setter (client side)": [
+     "getBlockSize",
+     "getColdStartStrategy",
+     "getItemCol",
+     "getPredictionCol",
+     "getUserCol",
+     "setBlockSize",
+     "setColdStartStrategy",
+     "setItemCol",
+     "setPredictionCol",
+     "setUserCol"
+    ],
+    "persistence (captured by Golden.persist)": [
+     "load",
+     "read",
+     "save",
+     "write"
+    ]
+   }
+  },
+  "BinaryClassificationEvaluator-0-areaUnderROC": {
+   "class": "BinaryClassificationEvaluator",
+   "members": {
+    "evaluate": {
+     "call": "evaluator.evaluate(evaluate_binary)",
+     "commands": [
+      "MvIDCkgKPG9yZy5hcGFjaGUuc3BhcmsubWwuZXZhbHVhdGlvbi5CaW5hcnlDbGFzc2lmaWNhdGlvbkV2YWx1YXRvchIGPHVpZDA+GAMScgoUCghsYWJlbENvbBIIagZ0YXJnZXQKHAoKbWV0cmljTmFtZRIOagxhcmVhVW5kZXJST0MKDQoHbnVtQmlucxICMAAKGwoQcmF3UHJlZGljdGlvbkNvbBIHagVzY29yZQoQCgl3ZWlnaHRDb2wSA2oBdxqxAgoAigGrAgqkAgoAugGeAgrnAQoAUuIBCt8BU0VMRUNUICosIGFycmF5KDEuMEQtc2NvcmUsIHNjb3JlKSBBUyBzY29yZVZlYyBGUk9NIFZBTFVFUyAoMCwgMC4wRCwgMC4xRCwgMS4wRCksICgxLCAwLjBELCAwLjRELCAyLjBEKSwgKDIsIDEuMEQsIDAuMzVELCAxLjBEKSwgKDMsIDEuMEQsIDAuOEQsIDMuMEQpLCAoNCwgMS4wRCwgMC40RCwgMC41RCksICg1LCAwLjBELCAwLjlELCAwLjBEKSBBUyB0KGlkLCB0YXJnZXQsIHNjb3JlLCB3KRIyCiYaJAoPYXJyYXlfdG9fdmVjdG9yEhESDAoIc2NvcmVWZWMYAJIBABIIc2NvcmVWZWMQARgA"
+     ],
+     "results": [
+      "CglZMKG9hPYS6j8="
+     ],
+     "value": 0.8148148148148149
+    },
+    "isLargerBetter()": {
+     "call": "evaluator.isLargerBetter()",
+     "commands": [],
+     "results": [],
+     "value": true
+    },
+    "repr()": {
+     "call": "repr(evaluator)",
+     "commands": [],
+     "results": [],
+     "value": "<uid0>"
+    },
+    "str()": {
+     "call": "str(evaluator)",
+     "commands": [],
+     "results": [],
+     "value": "<uid0>"
+    }
+   },
+   "skipped": {
+    "Param attribute (client side)": [
+     "labelCol",
+     "metricName",
+     "numBins",
+     "rawPredictionCol",
+     "weightCol"
+    ],
+    "Params API (client side)": [
+     "clear",
+     "copy",
+     "explainParam",
+     "explainParams",
+     "extractParamMap",
+     "getOrDefault",
+     "getParam",
+     "hasDefault",
+     "hasParam",
+     "isDefined",
+     "isSet",
+     "params",
+     "set",
+     "uid"
+    ],
+    "Params getter or setter (client side)": [
+     "getLabelCol",
+     "getMetricName",
+     "getNumBins",
+     "getRawPredictionCol",
+     "getWeightCol",
+     "setLabelCol",
+     "setMetricName",
+     "setNumBins",
+     "setRawPredictionCol",
+     "setWeightCol"
+    ],
+    "Params setter (client side)": [
+     "setParams"
+    ],
+    "persistence (captured by Golden.persist)": [
+     "load",
+     "read",
+     "save",
+     "write"
+    ]
+   }
+  },
+  "ClusteringEvaluator-0-silhouette": {
+   "class": "ClusteringEvaluator",
+   "members": {
+    "evaluate": {
+     "call": "evaluator.evaluate(evaluate_clustering)",
+     "commands": [
+      "MrcDCj4KMm9yZy5hcGFjaGUuc3BhcmsubWwuZXZhbHVhdGlvbi5DbHVzdGVyaW5nRXZhbHVhdG9yEgY8dWlkMD4YAxKEAQolCg9kaXN0YW5jZU1lYXN1cmUSEmoQc3F1YXJlZEV1Y2xpZGVhbgoTCgtmZWF0dXJlc0NvbBIEagJ4cwoaCgptZXRyaWNOYW1lEgxqCnNpbGhvdWV0dGUKGAoNcHJlZGljdGlvbkNvbBIHagVndWVzcwoQCgl3ZWlnaHRDb2wSA2oBdxrtAQoAigHnAQrgAQoAugHaAQqvAQoAUqoBCqcBU0VMRUNUICogRlJPTSBWQUxVRVMgKDAsMC4wRCxhcnJheSgxLjBELDAuMEQpLDEuMEQpLCAoMSwwLjBELGFycmF5KDAuOEQsMC4yRCksMi4wRCksICgyLDEuMEQsYXJyYXkoMC4wRCwxLjBEKSwxLjBEKSwgKDMsMS4wRCxhcnJheSgwLjFELDAuOUQpLDMuMEQpIEFTIHQoaWQsZ3Vlc3MseHMsdykSJgogGh4KD2FycmF5X3RvX3ZlY3RvchILEgYKAnhzGACSAQASAnhzEAEYAA=="
+     ],
+     "results": [
+      "CglZfoN+hq/N7j8="
+     ],
+     "value": 0.9626081110801434
+    },
+    "isLargerBetter()": {
+     "call": "evaluator.isLargerBetter()",
+     "commands": [],
+     "results": [],
+     "value": true
+    },
+    "repr()": {
+     "call": "repr(evaluator)",
+     "commands": [],
+     "results": [],
+     "value": "<uid0>"
+    },
+    "str()": {
+     "call": "str(evaluator)",
+     "commands": [],
+     "results": [],
+     "value": "<uid0>"
+    }
+   },
+   "skipped": {
+    "Param attribute (client side)": [
+     "distanceMeasure",
+     "featuresCol",
+     "metricName",
+     "predictionCol",
+     "weightCol"
+    ],
+    "Params API (client side)": [
+     "clear",
+     "copy",
+     "explainParam",
+     "explainParams",
+     "extractParamMap",
+     "getOrDefault",
+     "getParam",
+     "hasDefault",
+     "hasParam",
+     "isDefined",
+     "isSet",
+     "params",
+     "set",
+     "uid"
+    ],
+    "Params getter or setter (client side)": [
+     "getDistanceMeasure",
+     "getFeaturesCol",
+     "getMetricName",
+     "getPredictionCol",
+     "getWeightCol",
+     "setDistanceMeasure",
+     "setFeaturesCol",
+     "setMetricName",
+     "setPredictionCol",
+     "setWeightCol"
+    ],
+    "Params setter (client side)": [
+     "setParams"
+    ],
+    "persistence (captured by Golden.persist)": [
+     "load",
+     "read",
+     "save",
+     "write"
+    ]
+   }
+  },
+  "FPGrowth.high-confidence": {
+   "class": "FPGrowthModel",
+   "members": {
+    "associationRules": {
+     "call": "model.associationRules",
+     "commands": [
+      "Eh0KBwoFPGlkMD4SEgoQYXNzb2NpYXRpb25SdWxlcw=="
+     ],
+     "results": [],
+     "value": {
+      "rows": [],
+      "schema": "struct<antecedent:array<string>,consequent:array<string>,confidence:double,lift:double,support:double>"
+     }
+    },
+    "freqItemsets": {
+     "call": "model.freqItemsets",
+     "commands": [
+      "EhkKBwoFPGlkMD4SDgoMZnJlcUl0ZW1zZXRz"
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        [
+         "a",
+         "b"
+        ],
+        3
+       ],
+       [
+        [
+         "a"
+        ],
+        4
+       ],
+       [
+        [
+         "b"
+        ],
+        5
+       ],
+       [
+        [
+         "c"
+        ],
+        3
+       ]
+      ],
+      "schema": "struct<items:array<string>,freq:bigint>"
+     }
+    },
+    "repr()": {
+     "call": "repr(model)",
+     "commands": [
+      "EhUKBwoFPGlkMD4SCgoIdG9TdHJpbmc="
+     ],
+     "results": [
+      "Cj5qPEZQR3Jvd3RoTW9kZWw6IHVpZD1mcG1faGlnaF9jb25maWRlbmNlLCBudW1UcmFpbmluZ1JlY29yZHM9Ng=="
+     ],
+     "value": "FPGrowthModel: uid=fpm_high_confidence, numTrainingRecords=6"
+    },
+    "str()": {
+     "call": "str(model)",
+     "commands": [
+      "EhUKBwoFPGlkMD4SCgoIdG9TdHJpbmc="
+     ],
+     "results": [
+      "Cj5qPEZQR3Jvd3RoTW9kZWw6IHVpZD1mcG1faGlnaF9jb25maWRlbmNlLCBudW1UcmFpbmluZ1JlY29yZHM9Ng=="
+     ],
+     "value": "FPGrowthModel: uid=fpm_high_confidence, numTrainingRecords=6"
+    },
+    "transform": {
+     "call": "model.transform(fpm_high_confidence_held)",
+     "commands": [
+      "CqQCCgcKBTxpZDA+GpgBCgBSkwEKkAFTRUxFQ1QgKiBGUk9NIFZBTFVFUyAoMTAsYXJyYXkoJ2EnKSksICgxMSxhcnJheSgnYicpKSwgKDEyLGFycmF5KCdhJywnYicpKSwgKDEzLGFycmF5KCd6JykpLCAoMTQsQ0FTVChhcnJheSgpIEFTIEFSUkFZPFNUUklORz4pKSBBUyB0KGlkLGJhc2tldCkifgoUCghpdGVtc0NvbBIIagZiYXNrZXQKGgoNbWluQ29uZmlkZW5jZRIJWc3MzMzMzOw/ChcKCm1pblN1cHBvcnQSCVkAAAAAAADgPwoTCg1udW1QYXJ0aXRpb25zEgIwAQocCg1wcmVkaWN0aW9uQ29sEgtqCXN1Z2dlc3RlZA=="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        10,
+        [
+         "a"
+        ],
+        []
+       ],
+       [
+        11,
+        [
+         "b"
+        ],
+        []
+       ],
+       [
+        12,
+        [
+         "a",
+         "b"
+        ],
+        []
+       ],
+       [
+        13,
+        [
+         "z"
+        ],
+        []
+       ],
+       [
+        14,
+        [],
+        []
+       ]
+      ],
+      "schema": "struct<id:int,basket:array<string>,suggested:array<string>>"
+     }
+    }
+   },
+   "skipped": {
+    "Param attribute (client side)": [
+     "itemsCol",
+     "minConfidence",
+     "minSupport",
+     "numPartitions",
+     "predictionCol"
+    ],
+    "Params API (client side)": [
+     "clear",
+     "copy",
+     "explainParam",
+     "explainParams",
+     "extractParamMap",
+     "getOrDefault",
+     "getParam",
+     "hasDefault",
+     "hasParam",
+     "isDefined",
+     "isSet",
+     "params",
+     "set",
+     "uid"
+    ],
+    "Params getter or setter (client side)": [
+     "getItemsCol",
+     "getMinConfidence",
+     "getMinSupport",
+     "getNumPartitions",
+     "getPredictionCol",
+     "setItemsCol",
+     "setMinConfidence",
+     "setPredictionCol"
+    ],
+    "persistence (captured by Golden.persist)": [
+     "load",
+     "read",
+     "save",
+     "write"
+    ]
+   }
+  },
+  "FPGrowth.integers": {
+   "class": "FPGrowthModel",
+   "members": {
+    "associationRules": {
+     "call": "model.associationRules",
+     "commands": [
+      "Eh0KBwoFPGlkMD4SEgoQYXNzb2NpYXRpb25SdWxlcw=="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        [
+         1
+        ],
+        [
+         2
+        ],
+        0.75,
+        0.8999999999999999,
+        0.5
+       ],
+       [
+        [
+         2
+        ],
+        [
+         1
+        ],
+        0.6,
+        0.9,
+        0.5
+       ],
+       [
+        [
+         3
+        ],
+        [
+         1
+        ],
+        0.6666666666666666,
+        1.0,
+        0.3333333333333333
+       ],
+       [
+        [
+         3
+        ],
+        [
+         2
+        ],
+        0.6666666666666666,
+        0.7999999999999999,
+        0.3333333333333333
+       ]
+      ],
+      "schema": "struct<antecedent:array<int>,consequent:array<int>,confidence:double,lift:double,support:double>"
+     }
+    },
+    "freqItemsets": {
+     "call": "model.freqItemsets",
+     "commands": [
+      "EhkKBwoFPGlkMD4SDgoMZnJlcUl0ZW1zZXRz"
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        [
+         1,
+         2
+        ],
+        3
+       ],
+       [
+        [
+         1
+        ],
+        4
+       ],
+       [
+        [
+         2
+        ],
+        5
+       ],
+       [
+        [
+         3,
+         1
+        ],
+        2
+       ],
+       [
+        [
+         3,
+         2
+        ],
+        2
+       ],
+       [
+        [
+         3
+        ],
+        3
+       ]
+      ],
+      "schema": "struct<items:array<int>,freq:bigint>"
+     }
+    },
+    "repr()": {
+     "call": "repr(model)",
+     "commands": [
+      "EhUKBwoFPGlkMD4SCgoIdG9TdHJpbmc="
+     ],
+     "results": [
+      "CjdqNUZQR3Jvd3RoTW9kZWw6IHVpZD1mcG1faW50ZWdlcnMsIG51bVRyYWluaW5nUmVjb3Jkcz02"
+     ],
+     "value": "FPGrowthModel: uid=fpm_integers, numTrainingRecords=6"
+    },
+    "str()": {
+     "call": "str(model)",
+     "commands": [
+      "EhUKBwoFPGlkMD4SCgoIdG9TdHJpbmc="
+     ],
+     "results": [
+      "CjdqNUZQR3Jvd3RoTW9kZWw6IHVpZD1mcG1faW50ZWdlcnMsIG51bVRyYWluaW5nUmVjb3Jkcz02"
+     ],
+     "value": "FPGrowthModel: uid=fpm_integers, numTrainingRecords=6"
+    },
+    "transform": {
+     "call": "model.transform(fpm_integers_held)",
+     "commands": [
+      "CpcCCgcKBTxpZDA+GosBCgBShgEKgwFTRUxFQ1QgKiBGUk9NIFZBTFVFUyAoMCxhcnJheSgxLDIpKSwgKDEsYXJyYXkoMiwzKSksICgyLGFycmF5KDEsMiwzKSksICgzLGFycmF5KDEsMykpLCAoNCxhcnJheSgxLDIpKSwgKDUsYXJyYXkoMikpIEFTIHQoaWQsYmFza2V0KSJ+ChQKCGl0ZW1zQ29sEghqBmJhc2tldAoaCg1taW5Db25maWRlbmNlEglZMzMzMzMz4z8KFwoKbWluU3VwcG9ydBIJWTMzMzMzM9M/ChMKDW51bVBhcnRpdGlvbnMSAjACChwKDXByZWRpY3Rpb25Db2wSC2oJc3VnZ2VzdGVk"
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        0,
+        [
+         1,
+         2
+        ],
+        []
+       ],
+       [
+        1,
+        [
+         2,
+         3
+        ],
+        [
+         1
+        ]
+       ],
+       [
+        2,
+        [
+         1,
+         2,
+         3
+        ],
+        []
+       ],
+       [
+        3,
+        [
+         1,
+         3
+        ],
+        [
+         2
+        ]
+       ],
+       [
+        4,
+        [
+         1,
+         2
+        ],
+        []
+       ],
+       [
+        5,
+        [
+         2
+        ],
+        [
+         1
+        ]
+       ]
+      ],
+      "schema": "struct<id:int,basket:array<int>,suggested:array<int>>"
+     }
+    }
+   },
+   "skipped": {
+    "Param attribute (client side)": [
+     "itemsCol",
+     "minConfidence",
+     "minSupport",
+     "numPartitions",
+     "predictionCol"
+    ],
+    "Params API (client side)": [
+     "clear",
+     "copy",
+     "explainParam",
+     "explainParams",
+     "extractParamMap",
+     "getOrDefault",
+     "getParam",
+     "hasDefault",
+     "hasParam",
+     "isDefined",
+     "isSet",
+     "params",
+     "set",
+     "uid"
+    ],
+    "Params getter or setter (client side)": [
+     "getItemsCol",
+     "getMinConfidence",
+     "getMinSupport",
+     "getNumPartitions",
+     "getPredictionCol",
+     "setItemsCol",
+     "setMinConfidence",
+     "setPredictionCol"
+    ],
+    "persistence (captured by Golden.persist)": [
+     "load",
+     "read",
+     "save",
+     "write"
+    ]
+   }
+  },
+  "FPGrowth.strings": {
+   "class": "FPGrowthModel",
+   "members": {
+    "associationRules": {
+     "call": "model.associationRules",
+     "commands": [
+      "Eh0KBwoFPGlkMD4SEgoQYXNzb2NpYXRpb25SdWxlcw=="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        [
+         "a"
+        ],
+        [
+         "b"
+        ],
+        0.75,
+        0.8999999999999999,
+        0.5
+       ],
+       [
+        [
+         "a"
+        ],
+        [
+         "c"
+        ],
+        0.5,
+        1.0,
+        0.3333333333333333
+       ],
+       [
+        [
+         "b"
+        ],
+        [
+         "a"
+        ],
+        0.6,
+        0.9,
+        0.5
+       ],
+       [
+        [
+         "c"
+        ],
+        [
+         "a"
+        ],
+        0.6666666666666666,
+        1.0,
+        0.3333333333333333
+       ],
+       [
+        [
+         "c"
+        ],
+        [
+         "b"
+        ],
+        0.6666666666666666,
+        0.7999999999999999,
+        0.3333333333333333
+       ]
+      ],
+      "schema": "struct<antecedent:array<string>,consequent:array<string>,confidence:double,lift:double,support:double>"
+     }
+    },
+    "freqItemsets": {
+     "call": "model.freqItemsets",
+     "commands": [
+      "EhkKBwoFPGlkMD4SDgoMZnJlcUl0ZW1zZXRz"
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        [
+         "a",
+         "b"
+        ],
+        3
+       ],
+       [
+        [
+         "a"
+        ],
+        4
+       ],
+       [
+        [
+         "b"
+        ],
+        5
+       ],
+       [
+        [
+         "c",
+         "a"
+        ],
+        2
+       ],
+       [
+        [
+         "c",
+         "b"
+        ],
+        2
+       ],
+       [
+        [
+         "c"
+        ],
+        3
+       ]
+      ],
+      "schema": "struct<items:array<string>,freq:bigint>"
+     }
+    },
+    "repr()": {
+     "call": "repr(model)",
+     "commands": [
+      "EhUKBwoFPGlkMD4SCgoIdG9TdHJpbmc="
+     ],
+     "results": [
+      "CjZqNEZQR3Jvd3RoTW9kZWw6IHVpZD1mcG1fc3RyaW5ncywgbnVtVHJhaW5pbmdSZWNvcmRzPTY="
+     ],
+     "value": "FPGrowthModel: uid=fpm_strings, numTrainingRecords=6"
+    },
+    "str()": {
+     "call": "str(model)",
+     "commands": [
+      "EhUKBwoFPGlkMD4SCgoIdG9TdHJpbmc="
+     ],
+     "results": [
+      "CjZqNEZQR3Jvd3RoTW9kZWw6IHVpZD1mcG1fc3RyaW5ncywgbnVtVHJhaW5pbmdSZWNvcmRzPTY="
+     ],
+     "value": "FPGrowthModel: uid=fpm_strings, numTrainingRecords=6"
+    },
+    "transform": {
+     "call": "model.transform(fpm_strings_held)",
+     "commands": [
+      "CqQCCgcKBTxpZDA+GpgBCgBSkwEKkAFTRUxFQ1QgKiBGUk9NIFZBTFVFUyAoMTAsYXJyYXkoJ2EnKSksICgxMSxhcnJheSgnYicpKSwgKDEyLGFycmF5KCdhJywnYicpKSwgKDEzLGFycmF5KCd6JykpLCAoMTQsQ0FTVChhcnJheSgpIEFTIEFSUkFZPFNUUklORz4pKSBBUyB0KGlkLGJhc2tldCkifgoUCghpdGVtc0NvbBIIagZiYXNrZXQKGgoNbWluQ29uZmlkZW5jZRIJWQAAAAAAAOA/ChcKCm1pblN1cHBvcnQSCVkzMzMzMzPTPwoTCg1udW1QYXJ0aXRpb25zEgIwAgocCg1wcmVkaWN0aW9uQ29sEgtqCXN1Z2dlc3RlZA=="
+     ],
+     "results": [],
+     "value": {
+      "rows": [
+       [
+        10,
+        [
+         "a"
+        ],
+        [
+         "c",
+         "b"
+        ]
+       ],
+       [
+        11,
+        [
+         "b"
+        ],
+        [
+         "a"
+        ]
+       ],
+       [
+        12,
+        [
+         "a",
+         "b"
+        ],
+        [
+         "c"
+        ]
+       ],
+       [
+        13,
+        [
+         "z"
+        ],
+        []
+       ],
+       [
+        14,
+        [],
+        []
+       ]
+      ],
+      "schema": "struct<id:int,basket:array<string>,suggested:array<string>>"
+     }
+    }
+   },
+   "skipped": {
+    "Param attribute (client side)": [
+     "itemsCol",
+     "minConfidence",
+     "minSupport",
+     "numPartitions",
+     "predictionCol"
+    ],
+    "Params API (client side)": [
+     "clear",
+     "copy",
+     "explainParam",
+     "explainParams",
+     "extractParamMap",
+     "getOrDefault",
+     "getParam",
+     "hasDefault",
+     "hasParam",
+     "isDefined",
+     "isSet",
+     "params",
+     "set",
+     "uid"
+    ],
+    "Params getter or setter (client side)": [
+     "getItemsCol",
+     "getMinConfidence",
+     "getMinSupport",
+     "getNumPartitions",
+     "getPredictionCol",
+     "setItemsCol",
+     "setMinConfidence",
+     "setPredictionCol"
+    ],
+    "persistence (captured by Golden.persist)": [
+     "load",
+     "read",
+     "save",
+     "write"
+    ]
+   }
+  },
+  "MulticlassClassificationEvaluator-0-f1": {
+   "class": "MulticlassClassificationEvaluator",
+   "members": {
+    "evaluate": {
+     "call": "evaluator.evaluate(evaluate_multiclass)",
+     "commands": [
+      "MvAECkwKQG9yZy5hcGFjaGUuc3BhcmsubWwuZXZhbHVhdGlvbi5NdWx0aWNsYXNzQ2xhc3NpZmljYXRpb25FdmFsdWF0b3ISBjx1aWQwPhgDEqwBChEKBGJldGESCVkAAAAAAAAAQAoQCgNlcHMSCVmamZmZmZmpPwoUCghsYWJlbENvbBIIagZ0YXJnZXQKGAoLbWV0cmljTGFiZWwSCVkAAAAAAADwPwoSCgptZXRyaWNOYW1lEgRqAmYxChgKDXByZWRpY3Rpb25Db2wSB2oFZ3Vlc3MKFQoOcHJvYmFiaWxpdHlDb2wSA2oBcAoQCgl3ZWlnaHRDb2wSA2oBdxrwAgoAigHqAgrjAgoAugHdAgq0AgoAUq8CCqwCU0VMRUNUICogRlJPTSBWQUxVRVMgKDAsIDAuMEQsIDAuMEQsIGFycmF5KDAuOEQsMC4xRCwwLjFEKSwxLjBEKSwgKDEsMS4wRCwwLjBELGFycmF5KDAuNkQsMC4zRCwwLjFEKSwyLjBEKSwgKDIsMi4wRCwyLjBELGFycmF5KDAuMEQsMC4yRCwwLjhEKSwxLjBEKSwgKDMsMi4wRCwxLjBELGFycmF5KDAuMEQsMS4wRCwwLjBEKSwwLjVEKSwgKDQsMS4wRCwxLjBELGFycmF5KDAuMUQsMC44RCwwLjFEKSwzLjBEKSwgKDUsMC4wRCwyLjBELGFycmF5KDAuMUQsMC4xRCwwLjhEKSwxLjBEKSBBUyB0KGlkLHRhcmdldCxndWVzcyxwLHcpEiQKHxodCg9hcnJheV90b192ZWN0b3ISChIFCgFwGACSAQASAXAQARgA"
+     ],
+     "results": [
+      "CglZ/VI7SJ6G4z8="
+     ],
+     "value": 0.610182896688087
+    },
+    "isLargerBetter()": {
+     "call": "evaluator.isLargerBetter()",
+     "commands": [],
+     "results": [],
+     "value": true
+    },
+    "repr()": {
+     "call": "repr(evaluator)",
+     "commands": [],
+     "results": [],
+     "value": "<uid0>"
+    },
+    "str()": {
+     "call": "str(evaluator)",
+     "commands": [],
+     "results": [],
+     "value": "<uid0>"
+    }
+   },
+   "skipped": {
+    "Param attribute (client side)": [
+     "beta",
+     "eps",
+     "labelCol",
+     "metricLabel",
+     "metricName",
+     "predictionCol",
+     "probabilityCol",
+     "weightCol"
+    ],
+    "Params API (client side)": [
+     "clear",
+     "copy",
+     "explainParam",
+     "explainParams",
+     "extractParamMap",
+     "getOrDefault",
+     "getParam",
+     "hasDefault",
+     "hasParam",
+     "isDefined",
+     "isSet",
+     "params",
+     "set",
+     "uid"
+    ],
+    "Params getter or setter (client side)": [
+     "getBeta",
+     "getEps",
+     "getLabelCol",
+     "getMetricLabel",
+     "getMetricName",
+     "getPredictionCol",
+     "getProbabilityCol",
+     "getWeightCol",
+     "setBeta",
+     "setEps",
+     "setLabelCol",
+     "setMetricLabel",
+     "setMetricName",
+     "setPredictionCol",
+     "setProbabilityCol",
+     "setWeightCol"
+    ],
+    "Params setter (client side)": [
+     "setParams"
+    ],
+    "persistence (captured by Golden.persist)": [
+     "load",
+     "read",
+     "save",
+     "write"
+    ]
+   }
+  },
+  "MultilabelClassificationEvaluator-0-subsetAccuracy": {
+   "class": "MultilabelClassificationEvaluator",
+   "members": {
+    "evaluate": {
+     "call": "evaluator.evaluate(evaluate_multilabel)",
+     "commands": [
+      "Mr0DCkwKQG9yZy5hcGFjaGUuc3BhcmsubWwuZXZhbHVhdGlvbi5NdWx0aWxhYmVsQ2xhc3NpZmljYXRpb25FdmFsdWF0b3ISBjx1aWQwPhgDEmoKFAoIbGFiZWxDb2wSCGoGdGFyZ2V0ChgKC21ldHJpY0xhYmVsEglZAAAAAAAA8D8KHgoKbWV0cmljTmFtZRIQag5zdWJzZXRBY2N1cmFjeQoYCg1wcmVkaWN0aW9uQ29sEgdqBWd1ZXNzGoACCgCKAfoBCvMBCgBS7gEK6wFTRUxFQ1QgKiBGUk9NIFZBTFVFUyAoMCxhcnJheSgwLjBELDIuMEQpLGFycmF5KDAuMEQsMS4wRCkpLCAoMSxhcnJheSgxLjBEKSxhcnJheSgxLjBELDIuMEQpKSwgKDIsYXJyYXkoMC4wRCwxLjBELDIuMEQpLGFycmF5KDAuMEQsMS4wRCkpLCAoMyxhcnJheSgyLjBEKSxDQVNUKGFycmF5KCkgQVMgQVJSQVk8RE9VQkxFPikpLCAoNCxhcnJheSgwLjBEKSxhcnJheSgwLjBEKSkgQVMgdChpZCx0YXJnZXQsZ3Vlc3MpEAEYAA=="
+     ],
+     "results": [
+      "CglZmpmZmZmZyT8="
+     ],
+     "value": 0.2
+    },
+    "isLargerBetter()": {
+     "call": "evaluator.isLargerBetter()",
+     "commands": [],
+     "results": [],
+     "value": true
+    },
+    "repr()": {
+     "call": "repr(evaluator)",
+     "commands": [],
+     "results": [],
+     "value": "<uid0>"
+    },
+    "str()": {
+     "call": "str(evaluator)",
+     "commands": [],
+     "results": [],
+     "value": "<uid0>"
+    }
+   },
+   "skipped": {
+    "Param attribute (client side)": [
+     "labelCol",
+     "metricLabel",
+     "metricName",
+     "predictionCol"
+    ],
+    "Params API (client side)": [
+     "clear",
+     "copy",
+     "explainParam",
+     "explainParams",
+     "extractParamMap",
+     "getOrDefault",
+     "getParam",
+     "hasDefault",
+     "hasParam",
+     "isDefined",
+     "isSet",
+     "params",
+     "set",
+     "uid"
+    ],
+    "Params getter or setter (client side)": [
+     "getLabelCol",
+     "getMetricLabel",
+     "getMetricName",
+     "getPredictionCol",
+     "setLabelCol",
+     "setMetricLabel",
+     "setMetricName",
+     "setPredictionCol"
+    ],
+    "Params setter (client side)": [
+     "setParams"
+    ],
+    "persistence (captured by Golden.persist)": [
+     "load",
+     "read",
+     "save",
+     "write"
+    ]
+   }
+  },
+  "RankingEvaluator-0-meanAveragePrecision": {
+   "class": "RankingEvaluator",
+   "members": {
+    "evaluate": {
+     "call": "evaluator.evaluate(evaluate_ranking)",
+     "commands": [
+      "Ms0DCjsKL29yZy5hcGFjaGUuc3BhcmsubWwuZXZhbHVhdGlvbi5SYW5raW5nRXZhbHVhdG9yEgY8dWlkMD4YAxJfCgcKAWsSAjACChQKCGxhYmVsQ29sEghqBnRhcmdldAokCgptZXRyaWNOYW1lEhZqFG1lYW5BdmVyYWdlUHJlY2lzaW9uChgKDXByZWRpY3Rpb25Db2wSB2oFZ3Vlc3MarAIKAIoBpgIKnwIKAFKaAgqXAlNFTEVDVCAqIEZST00gVkFMVUVTICgwLGFycmF5KDEuMEQsMi4wRCwzLjBEKSxhcnJheSgxLjBELDYuMEQsMi4wRCw3LjBELDMuMEQpKSwgKDEsYXJyYXkoMi4wRCw0LjBEKSxhcnJheSg0LjBELDEuMEQsMi4wRCkpLCAoMixhcnJheSgzLjBEKSxhcnJheSgxLjBELDIuMEQpKSwgKDMsQ0FTVChhcnJheSgpIEFTIEFSUkFZPERPVUJMRT4pLGFycmF5KDEuMEQsMi4wRCkpLCAoNCxhcnJheSgxLjBEKSxDQVNUKGFycmF5KCkgQVMgQVJSQVk8RE9VQkxFPikpIEFTIHQoaWQsdGFyZ2V0LGd1ZXNzKRABGAA="
+     ],
+     "results": [
+      "CglZAt+8mnhW1D8="
+     ],
+     "value": 0.3177777777777778
+    },
+    "isLargerBetter()": {
+     "call": "evaluator.isLargerBetter()",
+     "commands": [],
+     "results": [],
+     "value": true
+    },
+    "repr()": {
+     "call": "repr(evaluator)",
+     "commands": [],
+     "results": [],
+     "value": "<uid0>"
+    },
+    "str()": {
+     "call": "str(evaluator)",
+     "commands": [],
+     "results": [],
+     "value": "<uid0>"
+    }
+   },
+   "skipped": {
+    "Param attribute (client side)": [
+     "k",
+     "labelCol",
+     "metricName",
+     "predictionCol"
+    ],
+    "Params API (client side)": [
+     "clear",
+     "copy",
+     "explainParam",
+     "explainParams",
+     "extractParamMap",
+     "getOrDefault",
+     "getParam",
+     "hasDefault",
+     "hasParam",
+     "isDefined",
+     "isSet",
+     "params",
+     "set",
+     "uid"
+    ],
+    "Params getter or setter (client side)": [
+     "getK",
+     "getLabelCol",
+     "getMetricName",
+     "getPredictionCol",
+     "setK",
+     "setLabelCol",
+     "setMetricName",
+     "setPredictionCol"
+    ],
+    "Params setter (client side)": [
+     "setParams"
+    ],
+    "persistence (captured by Golden.persist)": [
+     "load",
+     "read",
+     "save",
+     "write"
+    ]
+   }
+  },
+  "RegressionEvaluator-0-rmse": {
+   "class": "RegressionEvaluator",
+   "members": {
+    "evaluate": {
+     "call": "evaluator.evaluate(evaluate_regression)",
+     "commands": [
+      "MugCCj4KMm9yZy5hcGFjaGUuc3BhcmsubWwuZXZhbHVhdGlvbi5SZWdyZXNzaW9uRXZhbHVhdG9yEgY8dWlkMD4YAxJtChQKCGxhYmVsQ29sEghqBnRhcmdldAoUCgptZXRyaWNOYW1lEgZqBHJtc2UKGAoNcHJlZGljdGlvbkNvbBIHagVndWVzcwoTCg10aHJvdWdoT3JpZ2luEgIYAAoQCgl3ZWlnaHRDb2wSA2oBdxq2AQoAigGwAQqpAQoAUqQBCqEBU0VMRUNUICogRlJPTSBWQUxVRVMgKDAsIDEuMEQsIDAuNUQsIDEuMEQpLCAoMSwgMi4wRCwgMi41RCwgMi4wRCksICgyLCA0LjBELCAzLjBELCAwLjVEKSwgKDMsIDMuMEQsIDQuMEQsIDMuMEQpLCAoNCwgMS4wRCwgOC4wRCwgMC4wRCkgQVMgdChpZCwgdGFyZ2V0LCBndWVzcywgdykQARgA"
+     ],
+     "results": [
+      "CglZDcd76xzg6T8="
+     ],
+     "value": 0.8086075400626399
+    },
+    "isLargerBetter()": {
+     "call": "evaluator.isLargerBetter()",
+     "commands": [],
+     "results": [],
+     "value": false
+    },
+    "repr()": {
+     "call": "repr(evaluator)",
+     "commands": [],
+     "results": [],
+     "value": "<uid0>"
+    },
+    "str()": {
+     "call": "str(evaluator)",
+     "commands": [],
+     "results": [],
+     "value": "<uid0>"
+    }
+   },
+   "skipped": {
+    "Param attribute (client side)": [
+     "labelCol",
+     "metricName",
+     "predictionCol",
+     "throughOrigin",
+     "weightCol"
+    ],
+    "Params API (client side)": [
+     "clear",
+     "copy",
+     "explainParam",
+     "explainParams",
+     "extractParamMap",
+     "getOrDefault",
+     "getParam",
+     "hasDefault",
+     "hasParam",
+     "isDefined",
+     "isSet",
+     "params",
+     "set",
+     "uid"
+    ],
+    "Params getter or setter (client side)": [
+     "getLabelCol",
+     "getMetricName",
+     "getPredictionCol",
+     "getThroughOrigin",
+     "getWeightCol",
+     "setLabelCol",
+     "setMetricName",
+     "setPredictionCol",
+     "setThroughOrigin",
+     "setWeightCol"
+    ],
+    "Params setter (client side)": [
+     "setParams"
+    ],
+    "persistence (captured by Golden.persist)": [
+     "load",
+     "read",
+     "save",
+     "write"
+    ]
+   }
+  }
+ },
+ "source": "apache/spark v4.3.0 pyspark.ml (official pyspark-client 4.3.0, Spark 4.3.0 Connect)"
+}

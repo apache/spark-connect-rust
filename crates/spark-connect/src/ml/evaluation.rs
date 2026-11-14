@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Standard Spark ML evaluators backed by the Connect Evaluate command.
-use super::{evaluate_via_command, Evaluator, MlOperator, OperatorType, Params};
-use crate::DataFrame;
+use super::{evaluate_via_command, read_operator, Evaluator, MlOperator, OperatorType, Params};
+use crate::{DataFrame, SparkSession};
 
 macro_rules! evaluator {
     ($name:ident, $larger:expr) => {
@@ -28,6 +28,17 @@ macro_rules! evaluator {
             /// Whether this evaluator's current metric should be maximized.
             pub fn is_larger_better(&self) -> bool {
                 ($larger)(self.metric_name())
+            }
+
+            #[doc = concat!("Load a `", stringify!($name), "` saved to `path`, as PySpark's `", stringify!($name), ".load(path)`: its uid and params.")]
+            pub fn load(session: &SparkSession, path: &str) -> spark_connect_core::error::Result<Self> {
+                let (operator, params) = read_operator(
+                    session,
+                    concat!("org.apache.spark.ml.evaluation.", stringify!($name)),
+                    OperatorType::Evaluator,
+                    path,
+                )?;
+                Ok(Self { operator, params })
             }
         }
         impl Default for $name {
