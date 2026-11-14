@@ -281,6 +281,32 @@ The values are the server's, and the members are those that the server allows of
 (`MLUtils` of Spark 4.3.0). The native Python classes do not have these members yet: their fit
 still returns the common `MLModel`.
 
+## Native clustering models (Rust API)
+
+Each clustering estimator of `spark_connect::ml` fits its typed model, as the regression ones do
+(see "Native regression models (Rust API)"): `KMeans::fit` returns a `KMeansModel`.
+
+- `KMeansModel` and `BisectingKMeansModel`: `cluster_centers()` (the rows of the server's
+  `clusterCenterMatrix`, as PySpark reads them), `num_features`, `predict` of a cluster index,
+  `compute_cost(&dataset)` of a bisecting model, and the training summary of a fit.
+- `GaussianMixtureModel`: `weights`, `gaussians_df()`, `gaussians()` (a `MultivariateGaussian` of
+  each collected row of `gaussiansDF`, as PySpark builds them client-side), `predict`,
+  `predict_probability` and the training summary of a fit.
+- The training summaries implement `ClusteringSummary`: `KMeansSummary` and
+  `BisectingKMeansSummary` (`training_cost`), and `GaussianMixtureSummary` (`probability_col`,
+  `probability`, `log_likelihood`).
+- `LDAModel`, `LocalLDAModel` and `DistributedLDAModel` implement `LDAModelApi`
+  (`describe_topics`, `topics_matrix`, `log_likelihood`, `log_perplexity`, ...). As PySpark's
+  `LDA._create_model`, a fit is local or distributed by its optimizer, and
+  `LDAModel::into_local()` or `into_distributed()` gives the model of its class. A distributed
+  model has `to_local()`, `training_log_likelihood`, `log_prior` and `get_checkpoint_files`.
+- Every estimator and model has `load(&session, path)`. `PowerIterationClustering` has the uid of
+  the algorithm, and `write()` and `load` save and load it as PySpark does: the params of the
+  server's `PowerIterationClusteringWrapper`.
+
+The native Python classes do not have these members yet: their fit still returns the common
+`MLModel`.
+
 ## Native LogisticRegression
 
 The native `spark_connect::ml::LogisticRegression` fits Spark's JVM
@@ -547,9 +573,9 @@ The native Python binding is available as `pyspark.ml.connect.clustering.KMeans`
 and `pyspark.ml.connect.KMeans`, with the upstream keyword-only constructor and
 mutating parameter setters. Fitted models expose DataFrame `transform` in the
 fitting session. Models, clones and transformed DataFrames keep the cached server
-model alive until the last owner is dropped. Cluster-center access, training
-summaries, single-vector prediction and persistence are not exposed by this native
-addition. The vendored `pyspark.ml.clustering` API is unchanged.
+model alive until the last owner is dropped. The Rust model's members, summaries and
+persistence are in "Native clustering models (Rust API)"; the native Python model does
+not have them yet. The vendored `pyspark.ml.clustering` API is unchanged.
 
 ## Native LinearRegression
 
@@ -754,9 +780,9 @@ fits, session isolation and lazy model lifetime. Golden fixtures compare all eig
 parameters at six signed seed/integer-width boundaries with official PySpark.
 
 This native API covers construction, setters, fit and DataFrame transform.
-Cluster-center/summary/cost inspection, single-vector prediction and persistence
-are outside this surface. The vendored `pyspark.ml.clustering` API retains its
-existing implementation.
+The Rust model's members, summaries and persistence are in "Native clustering
+models (Rust API)"; the native Python model does not have them yet. The vendored
+`pyspark.ml.clustering` API retains its existing implementation.
 
 ## Native GeneralizedLinearRegression
 
@@ -808,9 +834,9 @@ session isolation and lazy model lifetime. Golden fixtures compare all nine
 parameters at six signed seed/integer-width boundaries with official PySpark.
 
 The native surface covers construction, parameter setters, fit and DataFrame
-transform. Component/weight/covariance inspection, training summaries,
-single-vector prediction and persistence are outside this surface. The vendored
-`pyspark.ml.clustering` API retains its existing implementation.
+transform. The Rust model's members, summaries and persistence are in "Native
+clustering models (Rust API)"; the native Python model does not have them yet. The
+vendored `pyspark.ml.clustering` API retains its existing implementation.
 
 ## Native FMClassifier
 
@@ -906,7 +932,7 @@ also run unchanged against the official client.
 
 The native Rust and Python APIs now implement all five clustering algorithms in
 PySpark 4.3.0: KMeans, BisectingKMeans, GaussianMixture, LDA and PowerIterationClustering.
-This describes algorithm execution, not complete model-inspection or persistence parity.
+The Rust models' members and persistence are in "Native clustering models (Rust API)".
 
 Rust `ml::LDA` supports online and EM training and cached-model DataFrame transforms.
 Python exposes `LDA` through `pyspark.ml.connect` and `pyspark.ml.connect.clustering`;
@@ -929,8 +955,8 @@ The lazy relation retains any cached models used by its input DataFrame.
 Both APIs require Spark DataFrames and reject pandas inputs. Reference-derived golden
 fixtures and live tests cover both LDA optimizers, dense/sparse inputs, graph initialization
 modes, weighted/unweighted graphs, custom columns, setters, validation and model lifetime.
-LDA topic matrices, likelihood/perplexity methods, topic descriptions, distributed-model
-inspection/conversion and persistence are outside this native surface. The vendored
+The Rust model's members, summaries and persistence are in "Native clustering
+models (Rust API)"; the native Python model does not have them yet. The vendored
 `pyspark.ml.clustering` API retains its existing implementation.
 
 ## Native feature stages

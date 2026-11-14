@@ -18,7 +18,7 @@ fn lda(values: &Value) -> LDA {
         return LDA::new();
     }
     LDA::new()
-        .set_feature_col("input")
+        .set_features_col("input")
         .set_max_iter(10)
         .set_seed(values["seed"].as_i64().unwrap())
         .set_checkpoint_interval(-1)
@@ -64,7 +64,7 @@ fn pic(values: &Value) -> PowerIterationClustering {
 
 fn lda_getters(estimator: &LDA) -> Value {
     json!({
-        "featuresCol": estimator.feature_col(), "maxIter": estimator.max_iter(),
+        "featuresCol": estimator.features_col(), "maxIter": estimator.max_iter(),
         "seed": estimator.seed(), "checkpointInterval": estimator.checkpoint_interval(),
         "k": estimator.k(), "optimizer": estimator.optimizer(),
         "learningOffset": estimator.learning_offset(), "learningDecay": estimator.learning_decay(),
@@ -80,7 +80,11 @@ fn lda_getters(estimator: &LDA) -> Value {
 #[test]
 fn clustering_parameters_and_defaults_match_official_pyspark() {
     let golden = fixture();
-    assert_eq!(lda_getters(&LDA::default()), golden["defaults"]["LDA"]);
+    // PySpark's constructor takes seed=None, which leaves the seed to Spark's default: the
+    // String.hashCode of the JVM class name, which the getter returns.
+    let mut defaults = golden["defaults"]["LDA"].clone();
+    defaults["seed"] = json!(1435876747);
+    assert_eq!(lda_getters(&LDA::default()), defaults);
     for case in golden["params"].as_array().unwrap() {
         let bytes = STANDARD
             .decode(case["params_b64"].as_str().unwrap())
@@ -89,7 +93,7 @@ fn clustering_parameters_and_defaults_match_official_pyspark() {
         if case["class"] == "LDA" {
             let estimator = lda(&case["values"]);
             assert_eq!(estimator.params().to_proto(), expected);
-            let mut getters = golden["defaults"]["LDA"].clone();
+            let mut getters = defaults.clone();
             getters
                 .as_object_mut()
                 .unwrap()

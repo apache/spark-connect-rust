@@ -14,7 +14,7 @@ fn gaussian_mixture_parameters_match_official_pyspark() {
             .unwrap();
         let expected = spark_connect_proto::MlParams::decode(bytes.as_slice()).unwrap();
         let estimator = GaussianMixture::new()
-            .set_feature_col("input")
+            .set_features_col("input")
             .set_prediction_col("cluster")
             .set_k(3)
             .set_max_iter(50)

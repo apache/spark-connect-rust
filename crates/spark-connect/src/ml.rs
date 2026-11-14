@@ -6155,138 +6155,6 @@ impl KMeans {
         }
     }
 
-    /// Feature vector column.
-    pub fn set_feature_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("featuresCol", value);
-        self
-    }
-
-    /// Cluster assignment output column.
-    pub fn set_prediction_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("predictionCol", value);
-        self
-    }
-
-    /// Number of clusters; must be greater than 1.
-    pub fn set_k(mut self, value: i32) -> Self {
-        self.params = self.params.set_param_int32("k", value);
-        self
-    }
-
-    /// Initialization mode: random or k-means||.
-    pub fn set_init_mode(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("initMode", value);
-        self
-    }
-
-    /// Number of steps in k-means|| initialization.
-    pub fn set_init_steps(mut self, value: i32) -> Self {
-        self.params = self.params.set_param_int32("initSteps", value);
-        self
-    }
-
-    /// Convergence tolerance.
-    pub fn set_tol(mut self, value: f64) -> Self {
-        self.params = self.params.set_param_double("tol", value);
-        self
-    }
-
-    /// Maximum number of clustering iterations.
-    pub fn set_max_iter(mut self, value: i32) -> Self {
-        self.params = self.params.set_param_int32("maxIter", value);
-        self
-    }
-
-    /// Random seed for initialization.
-    pub fn set_seed(mut self, value: i64) -> Self {
-        self.params = self.params.set_param_int_narrow("seed", value);
-        self
-    }
-
-    /// Distance measure: euclidean or cosine.
-    pub fn set_distance_measure(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("distanceMeasure", value);
-        self
-    }
-
-    /// Optional instance weight column.
-    pub fn set_weight_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("weightCol", value);
-        self
-    }
-
-    /// Solver: auto, row or block.
-    pub fn set_solver(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("solver", value);
-        self
-    }
-
-    /// Maximum size in MB of stacked input blocks.
-    pub fn set_max_block_size_in_mb(mut self, value: f64) -> Self {
-        self.params = self.params.set_param_double("maxBlockSizeInMB", value);
-        self
-    }
-
-    /// The feature vector column (default: "features").
-    pub fn feature_col(&self) -> &str {
-        self.params.string_or("featuresCol", "features")
-    }
-
-    /// The cluster assignment output column (default: "prediction").
-    pub fn prediction_col(&self) -> &str {
-        self.params.string_or("predictionCol", "prediction")
-    }
-
-    /// The number of clusters (default: 2).
-    pub fn k(&self) -> i32 {
-        self.params.int_or("k", 2)
-    }
-
-    /// The initialization mode (default: "k-means||").
-    pub fn init_mode(&self) -> &str {
-        self.params.string_or("initMode", "k-means||")
-    }
-
-    /// The number of steps in k-means|| initialization (default: 2).
-    pub fn init_steps(&self) -> i32 {
-        self.params.int_or("initSteps", 2)
-    }
-
-    /// The convergence tolerance (default: 1e-4).
-    pub fn tol(&self) -> f64 {
-        self.params.double_or("tol", 1e-4)
-    }
-
-    /// The maximum number of clustering iterations (default: 20).
-    pub fn max_iter(&self) -> i32 {
-        self.params.int_or("maxIter", 20)
-    }
-
-    /// The random seed, if one is set; else Spark's default seed applies.
-    pub fn seed(&self) -> Option<i64> {
-        self.params.long_opt("seed")
-    }
-
-    /// The distance measure (default: "euclidean").
-    pub fn distance_measure(&self) -> &str {
-        self.params.string_or("distanceMeasure", "euclidean")
-    }
-
-    /// The instance weight column, if one is set.
-    pub fn weight_col(&self) -> Option<&str> {
-        self.params.string_opt("weightCol")
-    }
-
-    /// The solver (default: "auto").
-    pub fn solver(&self) -> &str {
-        self.params.string_or("solver", "auto")
-    }
-
-    /// The maximum size in MB of stacked input blocks (default: 0, chosen by Spark).
-    pub fn max_block_size_in_mb(&self) -> f64 {
-        self.params.double_or("maxBlockSizeInMB", 0.0)
-    }
-
     fn model_from_info(
         &self,
         info: proto::ml_command_result::MlOperatorInfo,
@@ -6301,7 +6169,41 @@ impl KMeans {
             ),
             params: self.params.clone(),
             cached,
+            training_summary: None,
         })
+    }
+}
+
+ml_params! {
+    KMeans {
+        set_distance_measure(value: &str) => "distanceMeasure", set_param_string;
+        distance_measure -> &str = |this| this.params.string_or("distanceMeasure", "euclidean");
+        set_features_col(value: &str) => "featuresCol", set_param_string;
+        features_col -> &str = |this| this.params.string_or("featuresCol", "features");
+        set_init_mode(value: &str) => "initMode", set_param_string;
+        init_mode -> &str = |this| this.params.string_or("initMode", "k-means||");
+        set_init_steps(value: i32) => "initSteps", set_param_int32;
+        init_steps -> i32 = |this| this.params.int_or("initSteps", 2);
+        set_intermediate_storage_level(value: &str) => "intermediateStorageLevel", set_param_string;
+        intermediate_storage_level -> &str = |this| this.params.string_or(
+            "intermediateStorageLevel", "MEMORY_AND_DISK");
+        set_k(value: i32) => "k", set_param_int32;
+        k -> i32 = |this| this.params.int_or("k", 2);
+        set_max_block_size_in_mb(value: f64) => "maxBlockSizeInMB", set_param_double;
+        max_block_size_in_mb -> f64 = |this| this.params.double_or("maxBlockSizeInMB", 0.0);
+        set_max_iter(value: i32) => "maxIter", set_param_int32;
+        max_iter -> i32 = |this| this.params.int_or("maxIter", 20);
+        set_prediction_col(value: &str) => "predictionCol", set_param_string;
+        prediction_col -> &str = |this| this.params.string_or("predictionCol", "prediction");
+        set_seed(value: i64) => "seed", set_param_int_narrow;
+        seed -> i64 = |this| this.params.long_opt("seed").unwrap_or(java_string_hash(
+            "org.apache.spark.ml.clustering.KMeans"));
+        set_solver(value: &str) => "solver", set_param_string;
+        solver -> &str = |this| this.params.string_or("solver", "auto");
+        set_tol(value: f64) => "tol", set_param_double;
+        tol -> f64 = |this| this.params.double_or("tol", 0.0001);
+        set_weight_col(value: &str) => "weightCol", set_param_string;
+        weight_col -> Option<&str> = |this| this.params.string_opt("weightCol");
     }
 }
 
@@ -6326,8 +6228,7 @@ impl Estimator for KMeans {
     }
 
     fn fit_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<Box<dyn Model>> {
-        let info = fit_via_command(&self.operator, &self.params, df)?;
-        Ok(Box::new(self.model_from_info(info, &df.session)?))
+        Ok(Box::new(KMeans::fit(self, df)?))
     }
 }
 
@@ -6340,6 +6241,32 @@ pub struct KMeansModel {
     operator: MlOperator,
     params: Params,
     cached: CachedModel,
+    /// The summary of the model of its training dataset, of a model that this client fitted.
+    training_summary: Option<MlTarget>,
+}
+
+ml_params! {
+    KMeansModel {
+        distance_measure -> &str = |this| this.params.string_or("distanceMeasure", "euclidean") =>
+            "distanceMeasure";
+        set_features_col(value: &str) => "featuresCol", set_param_string;
+        features_col -> &str = |this| this.params.string_or("featuresCol", "features");
+        init_mode -> &str = |this| this.params.string_or("initMode", "k-means||") => "initMode";
+        init_steps -> i32 = |this| this.params.int_or("initSteps", 2) => "initSteps";
+        intermediate_storage_level -> &str = |this| this.params.string_or(
+            "intermediateStorageLevel", "MEMORY_AND_DISK") => "intermediateStorageLevel";
+        k -> i32 = |this| this.params.int_or("k", 2) => "k";
+        max_block_size_in_mb -> f64 = |this| this.params.double_or("maxBlockSizeInMB", 0.0) =>
+            "maxBlockSizeInMB";
+        max_iter -> i32 = |this| this.params.int_or("maxIter", 20) => "maxIter";
+        set_prediction_col(value: &str) => "predictionCol", set_param_string;
+        prediction_col -> &str = |this| this.params.string_or("predictionCol", "prediction");
+        seed -> i64 = |this| this.params.long_opt("seed").unwrap_or(java_string_hash(
+            "org.apache.spark.ml.clustering.KMeansModel")) => "seed";
+        solver -> &str = |this| this.params.string_or("solver", "auto") => "solver";
+        tol -> f64 = |this| this.params.double_or("tol", 0.0001) => "tol";
+        weight_col -> Option<&str> = |this| this.params.string_opt("weightCol") => "weightCol";
+    }
 }
 
 impl Transformer for KMeansModel {
@@ -6400,97 +6327,6 @@ impl BisectingKMeans {
         }
     }
 
-    /// Feature vector column.
-    pub fn set_feature_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("featuresCol", value);
-        self
-    }
-
-    /// Cluster assignment output column.
-    pub fn set_prediction_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("predictionCol", value);
-        self
-    }
-
-    /// Number of clusters; must be greater than 1.
-    pub fn set_k(mut self, value: i32) -> Self {
-        self.params = self.params.set_param_int32("k", value);
-        self
-    }
-
-    /// Minimum cluster size eligible for splitting: an absolute count when at least 1,
-    /// or a fraction of the total number of points when less than 1. Must be positive.
-    pub fn set_min_divisible_cluster_size(mut self, value: f64) -> Self {
-        self.params = self
-            .params
-            .set_param_double("minDivisibleClusterSize", value);
-        self
-    }
-
-    /// Maximum number of clustering iterations.
-    pub fn set_max_iter(mut self, value: i32) -> Self {
-        self.params = self.params.set_param_int32("maxIter", value);
-        self
-    }
-
-    /// Random seed for initialization.
-    pub fn set_seed(mut self, value: i64) -> Self {
-        self.params = self.params.set_param_int_narrow("seed", value);
-        self
-    }
-
-    /// Distance measure: euclidean or cosine.
-    pub fn set_distance_measure(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("distanceMeasure", value);
-        self
-    }
-
-    /// Optional instance weight column.
-    pub fn set_weight_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("weightCol", value);
-        self
-    }
-
-    /// The feature vector column (default: "features").
-    pub fn feature_col(&self) -> &str {
-        self.params.string_or("featuresCol", "features")
-    }
-
-    /// The cluster assignment output column (default: "prediction").
-    pub fn prediction_col(&self) -> &str {
-        self.params.string_or("predictionCol", "prediction")
-    }
-
-    /// The desired number of leaf clusters (default: 4).
-    pub fn k(&self) -> i32 {
-        self.params.int_or("k", 4)
-    }
-
-    /// The minimum divisible cluster size (default: 1.0).
-    pub fn min_divisible_cluster_size(&self) -> f64 {
-        self.params.double_or("minDivisibleClusterSize", 1.0)
-    }
-
-    /// The maximum number of clustering iterations (default: 20).
-    pub fn max_iter(&self) -> i32 {
-        self.params.int_or("maxIter", 20)
-    }
-
-    /// The random seed, if one is set; else Spark's default seed applies.
-    pub fn seed(&self) -> Option<i64> {
-        self.params.long_opt("seed")
-    }
-
-    /// The distance measure (default: "euclidean").
-    pub fn distance_measure(&self) -> &str {
-        self.params.string_or("distanceMeasure", "euclidean")
-    }
-
-    /// The instance weight column, if one is set.
-    pub fn weight_col(&self) -> Option<&str> {
-        self.params.string_opt("weightCol")
-    }
-
     fn model_from_info(
         &self,
         info: proto::ml_command_result::MlOperatorInfo,
@@ -6505,7 +6341,31 @@ impl BisectingKMeans {
             ),
             params: self.params.clone(),
             cached,
+            training_summary: None,
         })
+    }
+}
+
+ml_params! {
+    BisectingKMeans {
+        set_distance_measure(value: &str) => "distanceMeasure", set_param_string;
+        distance_measure -> &str = |this| this.params.string_or("distanceMeasure", "euclidean");
+        set_features_col(value: &str) => "featuresCol", set_param_string;
+        features_col -> &str = |this| this.params.string_or("featuresCol", "features");
+        set_k(value: i32) => "k", set_param_int32;
+        k -> i32 = |this| this.params.int_or("k", 4);
+        set_max_iter(value: i32) => "maxIter", set_param_int32;
+        max_iter -> i32 = |this| this.params.int_or("maxIter", 20);
+        set_min_divisible_cluster_size(value: f64) => "minDivisibleClusterSize", set_param_double;
+        min_divisible_cluster_size -> f64 = |this| this.params.double_or("minDivisibleClusterSize",
+            1.0);
+        set_prediction_col(value: &str) => "predictionCol", set_param_string;
+        prediction_col -> &str = |this| this.params.string_or("predictionCol", "prediction");
+        set_seed(value: i64) => "seed", set_param_int_narrow;
+        seed -> i64 = |this| this.params.long_opt("seed").unwrap_or(java_string_hash(
+            "org.apache.spark.ml.clustering.BisectingKMeans"));
+        set_weight_col(value: &str) => "weightCol", set_param_string;
+        weight_col -> Option<&str> = |this| this.params.string_opt("weightCol");
     }
 }
 
@@ -6530,8 +6390,7 @@ impl Estimator for BisectingKMeans {
     }
 
     fn fit_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<Box<dyn Model>> {
-        let info = fit_via_command(&self.operator, &self.params, df)?;
-        Ok(Box::new(self.model_from_info(info, &df.session)?))
+        Ok(Box::new(BisectingKMeans::fit(self, df)?))
     }
 }
 
@@ -6544,6 +6403,26 @@ pub struct BisectingKMeansModel {
     operator: MlOperator,
     params: Params,
     cached: CachedModel,
+    /// The summary of the model of its training dataset, of a model that this client fitted.
+    training_summary: Option<MlTarget>,
+}
+
+ml_params! {
+    BisectingKMeansModel {
+        distance_measure -> &str = |this| this.params.string_or("distanceMeasure", "euclidean") =>
+            "distanceMeasure";
+        set_features_col(value: &str) => "featuresCol", set_param_string;
+        features_col -> &str = |this| this.params.string_or("featuresCol", "features");
+        k -> i32 = |this| this.params.int_or("k", 4) => "k";
+        max_iter -> i32 = |this| this.params.int_or("maxIter", 20) => "maxIter";
+        min_divisible_cluster_size -> f64 = |this| this.params.double_or("minDivisibleClusterSize",
+            1.0) => "minDivisibleClusterSize";
+        set_prediction_col(value: &str) => "predictionCol", set_param_string;
+        prediction_col -> &str = |this| this.params.string_or("predictionCol", "prediction");
+        seed -> i64 = |this| this.params.long_opt("seed").unwrap_or(java_string_hash(
+            "org.apache.spark.ml.clustering.BisectingKMeansModel")) => "seed";
+        weight_col -> Option<&str> = |this| this.params.string_opt("weightCol") => "weightCol";
+    }
 }
 
 impl Transformer for BisectingKMeansModel {
@@ -6603,105 +6482,6 @@ impl GaussianMixture {
         }
     }
 
-    /// Feature vector column.
-    pub fn set_feature_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("featuresCol", value);
-        self
-    }
-
-    /// Cluster assignment output column.
-    pub fn set_prediction_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("predictionCol", value);
-        self
-    }
-
-    /// Number of Gaussian components; must be greater than 1.
-    pub fn set_k(mut self, value: i32) -> Self {
-        self.params = self.params.set_param_int32("k", value);
-        self
-    }
-
-    /// Component probability output column; empty disables it.
-    pub fn set_probability_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("probabilityCol", value);
-        self
-    }
-
-    /// Convergence tolerance for the change in log likelihood; must be nonnegative.
-    pub fn set_tol(mut self, value: f64) -> Self {
-        self.params = self.params.set_param_double("tol", value);
-        self
-    }
-
-    /// Maximum number of expectation maximization iterations.
-    pub fn set_max_iter(mut self, value: i32) -> Self {
-        self.params = self.params.set_param_int32("maxIter", value);
-        self
-    }
-
-    /// Random seed for initialization.
-    pub fn set_seed(mut self, value: i64) -> Self {
-        self.params = self.params.set_param_int_narrow("seed", value);
-        self
-    }
-
-    /// Depth of the aggregation tree; must be at least 2.
-    pub fn set_aggregation_depth(mut self, value: i32) -> Self {
-        self.params = self.params.set_param_int32("aggregationDepth", value);
-        self
-    }
-
-    /// Optional instance weight column.
-    pub fn set_weight_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("weightCol", value);
-        self
-    }
-
-    /// The featuresCol value (default: "features").
-    pub fn feature_col(&self) -> &str {
-        self.params.string_or("featuresCol", "features")
-    }
-
-    /// The predictionCol value (default: "prediction").
-    pub fn prediction_col(&self) -> &str {
-        self.params.string_or("predictionCol", "prediction")
-    }
-
-    /// The k value (default: 2).
-    pub fn k(&self) -> i32 {
-        self.params.int_or("k", 2)
-    }
-
-    /// The probabilityCol value (default: "probability").
-    pub fn probability_col(&self) -> &str {
-        self.params.string_or("probabilityCol", "probability")
-    }
-
-    /// The tol value (default: 0.01).
-    pub fn tol(&self) -> f64 {
-        self.params.double_or("tol", 0.01)
-    }
-
-    /// The maxIter value (default: 100).
-    pub fn max_iter(&self) -> i32 {
-        self.params.int_or("maxIter", 100)
-    }
-
-    /// The seed value, if set.
-    pub fn seed(&self) -> Option<i64> {
-        self.params.long_opt("seed")
-    }
-
-    /// The aggregationDepth value (default: 2).
-    pub fn aggregation_depth(&self) -> i32 {
-        self.params.int_or("aggregationDepth", 2)
-    }
-
-    /// The weightCol value, if set.
-    pub fn weight_col(&self) -> Option<&str> {
-        self.params.string_opt("weightCol")
-    }
-
     fn model_from_info(
         &self,
         info: proto::ml_command_result::MlOperatorInfo,
@@ -6716,7 +6496,32 @@ impl GaussianMixture {
             ),
             params: self.params.clone(),
             cached,
+            training_summary: None,
         })
+    }
+}
+
+ml_params! {
+    GaussianMixture {
+        set_aggregation_depth(value: i32) => "aggregationDepth", set_param_int32;
+        aggregation_depth -> i32 = |this| this.params.int_or("aggregationDepth", 2);
+        set_features_col(value: &str) => "featuresCol", set_param_string;
+        features_col -> &str = |this| this.params.string_or("featuresCol", "features");
+        set_k(value: i32) => "k", set_param_int32;
+        k -> i32 = |this| this.params.int_or("k", 2);
+        set_max_iter(value: i32) => "maxIter", set_param_int32;
+        max_iter -> i32 = |this| this.params.int_or("maxIter", 100);
+        set_prediction_col(value: &str) => "predictionCol", set_param_string;
+        prediction_col -> &str = |this| this.params.string_or("predictionCol", "prediction");
+        set_probability_col(value: &str) => "probabilityCol", set_param_string;
+        probability_col -> &str = |this| this.params.string_or("probabilityCol", "probability");
+        set_seed(value: i64) => "seed", set_param_int_narrow;
+        seed -> i64 = |this| this.params.long_opt("seed").unwrap_or(java_string_hash(
+            "org.apache.spark.ml.clustering.GaussianMixture"));
+        set_tol(value: f64) => "tol", set_param_double;
+        tol -> f64 = |this| this.params.double_or("tol", 0.01);
+        set_weight_col(value: &str) => "weightCol", set_param_string;
+        weight_col -> Option<&str> = |this| this.params.string_opt("weightCol");
     }
 }
 
@@ -6741,8 +6546,7 @@ impl Estimator for GaussianMixture {
     }
 
     fn fit_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<Box<dyn Model>> {
-        let info = fit_via_command(&self.operator, &self.params, df)?;
-        Ok(Box::new(self.model_from_info(info, &df.session)?))
+        Ok(Box::new(GaussianMixture::fit(self, df)?))
     }
 }
 
@@ -6755,6 +6559,27 @@ pub struct GaussianMixtureModel {
     operator: MlOperator,
     params: Params,
     cached: CachedModel,
+    /// The summary of the model of its training dataset, of a model that this client fitted.
+    training_summary: Option<MlTarget>,
+}
+
+ml_params! {
+    GaussianMixtureModel {
+        aggregation_depth -> i32 = |this| this.params.int_or("aggregationDepth", 2) =>
+            "aggregationDepth";
+        set_features_col(value: &str) => "featuresCol", set_param_string;
+        features_col -> &str = |this| this.params.string_or("featuresCol", "features");
+        k -> i32 = |this| this.params.int_or("k", 2) => "k";
+        max_iter -> i32 = |this| this.params.int_or("maxIter", 100) => "maxIter";
+        set_prediction_col(value: &str) => "predictionCol", set_param_string;
+        prediction_col -> &str = |this| this.params.string_or("predictionCol", "prediction");
+        set_probability_col(value: &str) => "probabilityCol", set_param_string;
+        probability_col -> &str = |this| this.params.string_or("probabilityCol", "probability");
+        seed -> i64 = |this| this.params.long_opt("seed").unwrap_or(java_string_hash(
+            "org.apache.spark.ml.clustering.GaussianMixtureModel")) => "seed";
+        tol -> f64 = |this| this.params.double_or("tol", 0.01) => "tol";
+        weight_col -> Option<&str> = |this| this.params.string_opt("weightCol") => "weightCol";
+    }
 }
 
 impl Transformer for GaussianMixtureModel {
@@ -6811,171 +6636,6 @@ impl LDA {
         }
     }
 
-    /// Set `featuresCol`; Spark validates its value when the algorithm runs.
-    pub fn set_feature_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("featuresCol", value);
-        self
-    }
-
-    /// Read `featuresCol` from the current parameters; unset values use Spark defaults.
-    pub fn feature_col(&self) -> &str {
-        self.params.string_or("featuresCol", "features")
-    }
-
-    /// Set `maxIter`; Spark validates its value when the algorithm runs.
-    pub fn set_max_iter(mut self, value: i32) -> Self {
-        self.params = self.params.set_param_int32("maxIter", value);
-        self
-    }
-
-    /// Read `maxIter` from the current parameters; unset values use Spark defaults.
-    pub fn max_iter(&self) -> i32 {
-        self.params.int_or("maxIter", 20)
-    }
-
-    /// Set `seed`; Spark validates its value when the algorithm runs.
-    pub fn set_seed(mut self, value: i64) -> Self {
-        self.params = self.params.set_param_int_narrow("seed", value);
-        self
-    }
-
-    /// Read `seed` from the current parameters, if explicitly set.
-    pub fn seed(&self) -> Option<i64> {
-        self.params.long_opt("seed")
-    }
-
-    /// Set `checkpointInterval`; Spark validates its value when the algorithm runs.
-    pub fn set_checkpoint_interval(mut self, value: i32) -> Self {
-        self.params = self.params.set_param_int32("checkpointInterval", value);
-        self
-    }
-
-    /// Read `checkpointInterval` from the current parameters; unset values use Spark defaults.
-    pub fn checkpoint_interval(&self) -> i32 {
-        self.params.int_or("checkpointInterval", 10)
-    }
-
-    /// Set `k`; Spark validates its value when the algorithm runs.
-    pub fn set_k(mut self, value: i32) -> Self {
-        self.params = self.params.set_param_int32("k", value);
-        self
-    }
-
-    /// Read `k` from the current parameters; unset values use Spark defaults.
-    pub fn k(&self) -> i32 {
-        self.params.int_or("k", 10)
-    }
-
-    /// Set `optimizer`; Spark validates its value when the algorithm runs.
-    pub fn set_optimizer(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("optimizer", value);
-        self
-    }
-
-    /// Read `optimizer` from the current parameters; unset values use Spark defaults.
-    pub fn optimizer(&self) -> &str {
-        self.params.string_or("optimizer", "online")
-    }
-
-    /// Set `learningOffset`; Spark validates its value when the algorithm runs.
-    pub fn set_learning_offset(mut self, value: f64) -> Self {
-        self.params = self.params.set_param_double("learningOffset", value);
-        self
-    }
-
-    /// Read `learningOffset` from the current parameters; unset values use Spark defaults.
-    pub fn learning_offset(&self) -> f64 {
-        self.params.double_or("learningOffset", 1024.0)
-    }
-
-    /// Set `learningDecay`; Spark validates its value when the algorithm runs.
-    pub fn set_learning_decay(mut self, value: f64) -> Self {
-        self.params = self.params.set_param_double("learningDecay", value);
-        self
-    }
-
-    /// Read `learningDecay` from the current parameters; unset values use Spark defaults.
-    pub fn learning_decay(&self) -> f64 {
-        self.params.double_or("learningDecay", 0.51)
-    }
-
-    /// Set `subsamplingRate`; Spark validates its value when the algorithm runs.
-    pub fn set_subsampling_rate(mut self, value: f64) -> Self {
-        self.params = self.params.set_param_double("subsamplingRate", value);
-        self
-    }
-
-    /// Read `subsamplingRate` from the current parameters; unset values use Spark defaults.
-    pub fn subsampling_rate(&self) -> f64 {
-        self.params.double_or("subsamplingRate", 0.05)
-    }
-
-    /// Set `optimizeDocConcentration`; Spark validates its value when the algorithm runs.
-    pub fn set_optimize_doc_concentration(mut self, value: bool) -> Self {
-        self.params = self
-            .params
-            .set_param_bool("optimizeDocConcentration", value);
-        self
-    }
-
-    /// Read `optimizeDocConcentration` from the current parameters; unset values use Spark defaults.
-    pub fn optimize_doc_concentration(&self) -> bool {
-        self.params.bool_or("optimizeDocConcentration", true)
-    }
-
-    /// Set `docConcentration`; Spark validates its value when the algorithm runs.
-    pub fn set_doc_concentration(mut self, value: impl IntoIterator<Item = f64>) -> Self {
-        self.params = self
-            .params
-            .set_param_double_array("docConcentration", value);
-        self
-    }
-
-    /// Read `docConcentration` from the current parameters, if explicitly set.
-    pub fn doc_concentration(&self) -> Option<Vec<f64>> {
-        self.params.double_array_opt("docConcentration")
-    }
-
-    /// Set `topicConcentration`; Spark validates its value when the algorithm runs.
-    pub fn set_topic_concentration(mut self, value: f64) -> Self {
-        self.params = self.params.set_param_double("topicConcentration", value);
-        self
-    }
-
-    /// Read `topicConcentration` from the current parameters, if explicitly set.
-    pub fn topic_concentration(&self) -> Option<f64> {
-        use proto::expression::literal::LiteralType as L;
-        match self.params.literal("topicConcentration") {
-            Some(L::Double(value)) => Some(*value),
-            Some(L::Integer(value)) => Some(f64::from(*value)),
-            Some(L::Long(value)) => Some(*value as f64),
-            _ => None,
-        }
-    }
-
-    /// Set `topicDistributionCol`; Spark validates its value when the algorithm runs.
-    pub fn set_topic_distribution_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("topicDistributionCol", value);
-        self
-    }
-
-    /// Read `topicDistributionCol` from the current parameters; unset values use Spark defaults.
-    pub fn topic_distribution_col(&self) -> &str {
-        self.params
-            .string_or("topicDistributionCol", "topicDistribution")
-    }
-
-    /// Set `keepLastCheckpoint`; Spark validates its value when the algorithm runs.
-    pub fn set_keep_last_checkpoint(mut self, value: bool) -> Self {
-        self.params = self.params.set_param_bool("keepLastCheckpoint", value);
-        self
-    }
-
-    /// Read `keepLastCheckpoint` from the current parameters; unset values use Spark defaults.
-    pub fn keep_last_checkpoint(&self) -> bool {
-        self.params.bool_or("keepLastCheckpoint", true)
-    }
-
     fn model_from_info(
         &self,
         info: proto::ml_command_result::MlOperatorInfo,
@@ -6996,6 +6656,44 @@ impl LDA {
             params: self.params.clone(),
             cached,
         })
+    }
+}
+
+ml_params! {
+    LDA {
+        set_checkpoint_interval(value: i32) => "checkpointInterval", set_param_int32;
+        checkpoint_interval -> i32 = |this| this.params.int_or("checkpointInterval", 10);
+        set_doc_concentration(value: impl IntoIterator<Item = f64>) => "docConcentration",
+            set_param_double_array;
+        doc_concentration -> Option<Vec<f64>> = |this| this.params.double_array_opt(
+            "docConcentration");
+        set_features_col(value: &str) => "featuresCol", set_param_string;
+        features_col -> &str = |this| this.params.string_or("featuresCol", "features");
+        set_k(value: i32) => "k", set_param_int32;
+        k -> i32 = |this| this.params.int_or("k", 10);
+        set_keep_last_checkpoint(value: bool) => "keepLastCheckpoint", set_param_bool;
+        keep_last_checkpoint -> bool = |this| this.params.bool_or("keepLastCheckpoint", true);
+        set_learning_decay(value: f64) => "learningDecay", set_param_double;
+        learning_decay -> f64 = |this| this.params.double_or("learningDecay", 0.51);
+        set_learning_offset(value: f64) => "learningOffset", set_param_double;
+        learning_offset -> f64 = |this| this.params.double_or("learningOffset", 1024.0);
+        set_max_iter(value: i32) => "maxIter", set_param_int32;
+        max_iter -> i32 = |this| this.params.int_or("maxIter", 20);
+        set_optimize_doc_concentration(value: bool) => "optimizeDocConcentration", set_param_bool;
+        optimize_doc_concentration -> bool = |this| this.params.bool_or("optimizeDocConcentration",
+            true);
+        set_optimizer(value: &str) => "optimizer", set_param_string;
+        optimizer -> &str = |this| this.params.string_or("optimizer", "online");
+        set_seed(value: i64) => "seed", set_param_int_narrow;
+        seed -> i64 = |this| this.params.long_opt("seed").unwrap_or(java_string_hash(
+            "org.apache.spark.ml.clustering.LDA"));
+        set_subsampling_rate(value: f64) => "subsamplingRate", set_param_double;
+        subsampling_rate -> f64 = |this| this.params.double_or("subsamplingRate", 0.05);
+        set_topic_concentration(value: f64) => "topicConcentration", set_param_double;
+        topic_concentration -> Option<f64> = |this| this.params.double_opt("topicConcentration");
+        set_topic_distribution_col(value: &str) => "topicDistributionCol", set_param_string;
+        topic_distribution_col -> &str = |this| this.params.string_or("topicDistributionCol",
+            "topicDistribution");
     }
 }
 
@@ -7020,8 +6718,7 @@ impl Estimator for LDA {
     }
 
     fn fit_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<Box<dyn Model>> {
-        let info = fit_via_command(&self.operator, &self.params, df)?;
-        Ok(Box::new(self.model_from_info(info, &df.session)?))
+        Ok(Box::new(LDA::fit(self, df)?))
     }
 }
 
@@ -7034,6 +6731,38 @@ pub struct LDAModel {
     operator: MlOperator,
     params: Params,
     cached: CachedModel,
+}
+
+ml_params! {
+    LDAModel {
+        checkpoint_interval -> i32 = |this| this.params.int_or("checkpointInterval", 10) =>
+            "checkpointInterval";
+        doc_concentration -> Option<Vec<f64>> = |this| this.params.double_array_opt(
+            "docConcentration") => "docConcentration";
+        set_features_col(value: &str) => "featuresCol", set_param_string;
+        features_col -> &str = |this| this.params.string_or("featuresCol", "features");
+        k -> i32 = |this| this.params.int_or("k", 10) => "k";
+        keep_last_checkpoint -> bool = |this| this.params.bool_or("keepLastCheckpoint", true) =>
+            "keepLastCheckpoint";
+        learning_decay -> f64 = |this| this.params.double_or("learningDecay", 0.51) =>
+            "learningDecay";
+        learning_offset -> f64 = |this| this.params.double_or("learningOffset", 1024.0) =>
+            "learningOffset";
+        max_iter -> i32 = |this| this.params.int_or("maxIter", 20) => "maxIter";
+        optimize_doc_concentration -> bool = |this| this.params.bool_or("optimizeDocConcentration",
+            true) => "optimizeDocConcentration";
+        optimizer -> &str = |this| this.params.string_or("optimizer", "online") => "optimizer";
+        set_seed(value: i64) => "seed", set_param_int_narrow;
+        seed -> i64 = |this| this.params.long_opt("seed").unwrap_or(java_string_hash(
+            &this.operator.name));
+        subsampling_rate -> f64 = |this| this.params.double_or("subsamplingRate", 0.05) =>
+            "subsamplingRate";
+        topic_concentration -> Option<f64> = |this| this.params.double_opt("topicConcentration") =>
+            "topicConcentration";
+        set_topic_distribution_col(value: &str) => "topicDistributionCol", set_param_string;
+        topic_distribution_col -> &str = |this| this.params.string_or("topicDistributionCol",
+            "topicDistribution");
+    }
 }
 
 impl Transformer for LDAModel {
@@ -7076,9 +6805,30 @@ impl Model for LDAModel {
 ///
 /// Like PySpark's class, this is not an estimator or transformer. Use
 /// [`PowerIterationClustering::assign_clusters`] to obtain `(id, cluster)` assignments.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct PowerIterationClustering {
+    /// The operator that saves the algorithm: the server's `PowerIterationClusteringWrapper`, of
+    /// the uid of the algorithm, as PySpark writes it.
+    operator: MlOperator,
     params: Params,
+}
+
+impl Default for PowerIterationClustering {
+    fn default() -> Self {
+        let uid = MlOperator::new(
+            "org.apache.spark.ml.clustering.PowerIterationClustering",
+            OperatorType::Transformer,
+        )
+        .uid;
+        Self {
+            operator: MlOperator::with_uid(
+                "org.apache.spark.ml.clustering.PowerIterationClusteringWrapper",
+                &uid,
+                OperatorType::Transformer,
+            ),
+            params: Params::new(),
+        }
+    }
 }
 
 impl PowerIterationClustering {
@@ -7092,72 +6842,6 @@ impl PowerIterationClustering {
 
     pub fn params_mut(&mut self) -> &mut Params {
         &mut self.params
-    }
-
-    /// Set `k`; Spark validates its value when the algorithm runs.
-    pub fn set_k(mut self, value: i32) -> Self {
-        self.params = self.params.set_param_int32("k", value);
-        self
-    }
-
-    /// Read `k` from the current parameters; unset values use Spark defaults.
-    pub fn k(&self) -> i32 {
-        self.params.int_or("k", 2)
-    }
-
-    /// Set `maxIter`; Spark validates its value when the algorithm runs.
-    pub fn set_max_iter(mut self, value: i32) -> Self {
-        self.params = self.params.set_param_int32("maxIter", value);
-        self
-    }
-
-    /// Read `maxIter` from the current parameters; unset values use Spark defaults.
-    pub fn max_iter(&self) -> i32 {
-        self.params.int_or("maxIter", 20)
-    }
-
-    /// Set `initMode`; Spark validates its value when the algorithm runs.
-    pub fn set_init_mode(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("initMode", value);
-        self
-    }
-
-    /// Read `initMode` from the current parameters; unset values use Spark defaults.
-    pub fn init_mode(&self) -> &str {
-        self.params.string_or("initMode", "random")
-    }
-
-    /// Set `srcCol`; Spark validates its value when the algorithm runs.
-    pub fn set_src_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("srcCol", value);
-        self
-    }
-
-    /// Read `srcCol` from the current parameters; unset values use Spark defaults.
-    pub fn src_col(&self) -> &str {
-        self.params.string_or("srcCol", "src")
-    }
-
-    /// Set `dstCol`; Spark validates its value when the algorithm runs.
-    pub fn set_dst_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("dstCol", value);
-        self
-    }
-
-    /// Read `dstCol` from the current parameters; unset values use Spark defaults.
-    pub fn dst_col(&self) -> &str {
-        self.params.string_or("dstCol", "dst")
-    }
-
-    /// Set `weightCol`; Spark validates its value when the algorithm runs.
-    pub fn set_weight_col(mut self, value: &str) -> Self {
-        self.params = self.params.set_param_string("weightCol", value);
-        self
-    }
-
-    /// Read `weightCol` from the current parameters, if explicitly set.
-    pub fn weight_col(&self) -> Option<&str> {
-        self.params.string_opt("weightCol")
     }
 
     /// Build the lazy assignment relation using Spark Connect's ML helper. The input plan
@@ -7218,6 +6902,23 @@ impl PowerIterationClustering {
                 owner: None,
             },
         ))
+    }
+}
+
+ml_params! {
+    PowerIterationClustering {
+        set_dst_col(value: &str) => "dstCol", set_param_string;
+        dst_col -> &str = |this| this.params.string_or("dstCol", "dst");
+        set_init_mode(value: &str) => "initMode", set_param_string;
+        init_mode -> &str = |this| this.params.string_or("initMode", "random");
+        set_k(value: i32) => "k", set_param_int32;
+        k -> i32 = |this| this.params.int_or("k", 2);
+        set_max_iter(value: i32) => "maxIter", set_param_int32;
+        max_iter -> i32 = |this| this.params.int_or("maxIter", 20);
+        set_src_col(value: &str) => "srcCol", set_param_string;
+        src_col -> &str = |this| this.params.string_or("srcCol", "src");
+        set_weight_col(value: &str) => "weightCol", set_param_string;
+        weight_col -> Option<&str> = |this| this.params.string_opt("weightCol");
     }
 }
 
@@ -8755,16 +8456,19 @@ mod tests {
     #[test]
     fn bisecting_kmeans_getters_follow_defaults_builders_and_mutable_params() {
         let mut estimator = BisectingKMeans::default();
-        assert_eq!(estimator.feature_col(), "features");
+        assert_eq!(estimator.features_col(), "features");
         assert_eq!(estimator.prediction_col(), "prediction");
         assert_eq!(estimator.max_iter(), 20);
-        assert_eq!(estimator.seed(), None);
+        assert_eq!(
+            estimator.seed(),
+            java_string_hash("org.apache.spark.ml.clustering.BisectingKMeans")
+        );
         assert_eq!(estimator.k(), 4);
         assert_eq!(estimator.min_divisible_cluster_size(), 1.0);
         assert_eq!(estimator.distance_measure(), "euclidean");
         assert_eq!(estimator.weight_col(), None);
         let built = BisectingKMeans::new()
-            .set_feature_col("input")
+            .set_features_col("input")
             .set_prediction_col("cluster")
             .set_max_iter(30)
             .set_seed(1_i64 << 33)
@@ -8776,8 +8480,8 @@ mod tests {
             .params()
             .clone()
             .set_param_string("featuresCol", "input");
-        assert_eq!(estimator.feature_col(), "input");
-        assert_eq!(built.feature_col(), estimator.feature_col());
+        assert_eq!(estimator.features_col(), "input");
+        assert_eq!(built.features_col(), estimator.features_col());
         *estimator.params_mut() = estimator
             .params()
             .clone()
@@ -8791,7 +8495,7 @@ mod tests {
             .params()
             .clone()
             .set_param_int_narrow("seed", 1_i64 << 33);
-        assert_eq!(estimator.seed(), Some(1_i64 << 33));
+        assert_eq!(estimator.seed(), 1_i64 << 33);
         assert_eq!(built.seed(), estimator.seed());
         *estimator.params_mut() = estimator.params().clone().set_param_int32("k", 3);
         assert_eq!(estimator.k(), 3);
@@ -8824,17 +8528,20 @@ mod tests {
     #[test]
     fn gaussian_mixture_getters_follow_defaults_builders_and_mutable_params() {
         let mut estimator = GaussianMixture::default();
-        assert_eq!(estimator.feature_col(), "features");
+        assert_eq!(estimator.features_col(), "features");
         assert_eq!(estimator.prediction_col(), "prediction");
         assert_eq!(estimator.k(), 2);
         assert_eq!(estimator.probability_col(), "probability");
         assert_eq!(estimator.tol(), 0.01);
         assert_eq!(estimator.max_iter(), 100);
-        assert_eq!(estimator.seed(), None);
+        assert_eq!(
+            estimator.seed(),
+            java_string_hash("org.apache.spark.ml.clustering.GaussianMixture")
+        );
         assert_eq!(estimator.aggregation_depth(), 2);
         assert_eq!(estimator.weight_col(), None);
         let built = GaussianMixture::new()
-            .set_feature_col("input")
+            .set_features_col("input")
             .set_prediction_col("cluster")
             .set_k(3)
             .set_probability_col("probs")
@@ -8847,8 +8554,8 @@ mod tests {
             .params()
             .clone()
             .set_param_string("featuresCol", "input");
-        assert_eq!(estimator.feature_col(), "input");
-        assert_eq!(built.feature_col(), estimator.feature_col());
+        assert_eq!(estimator.features_col(), "input");
+        assert_eq!(built.features_col(), estimator.features_col());
         *estimator.params_mut() = estimator
             .params()
             .clone()
@@ -8874,7 +8581,7 @@ mod tests {
             .params()
             .clone()
             .set_param_int_narrow("seed", 1_i64 << 33);
-        assert_eq!(estimator.seed(), Some(1_i64 << 33));
+        assert_eq!(estimator.seed(), 1_i64 << 33);
         assert_eq!(built.seed(), estimator.seed());
         *estimator.params_mut() = estimator
             .params()
@@ -10407,7 +10114,7 @@ mod tests {
                 let km: &KMeans = &$km;
                 (
                     (
-                        km.feature_col(),
+                        km.features_col(),
                         km.prediction_col(),
                         km.k(),
                         km.init_mode(),
@@ -10422,13 +10129,18 @@ mod tests {
             all!(km),
             (
                 ("features", "prediction", 2, "k-means||"),
-                (2, 1e-4, 20, None),
+                (
+                    2,
+                    1e-4,
+                    20,
+                    java_string_hash("org.apache.spark.ml.clustering.KMeans")
+                ),
                 ("euclidean", None, "auto"),
                 0.0
             )
         );
         let km = km
-            .set_feature_col("f")
+            .set_features_col("f")
             .set_prediction_col("p")
             .set_k(3)
             .set_init_mode("random")
@@ -10444,7 +10156,7 @@ mod tests {
             all!(km),
             (
                 ("f", "p", 3, "random"),
-                (4, 0.5, 7, Some(1 << 40)),
+                (4, 0.5, 7, 1 << 40),
                 ("cosine", Some("w"), "row"),
                 1.5
             )
