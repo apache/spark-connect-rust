@@ -1258,15 +1258,23 @@ signatures and named mutating setters. The vendored `pyspark.ml.feature` module 
 | Assembly and selection | VectorAssembler, VectorIndexer, VectorSizeHint, VectorSlicer, Interaction, PCA, ChiSqSelector, UnivariateFeatureSelector, VarianceThresholdSelector, RFormula, SQLTransformer |
 | Locality-sensitive hashing | BucketedRandomProjectionLSH, MinHashLSH |
 
-The 20 estimators fit through Spark Connect's ML command and return session-scoped cached
-models; Python returns the shared native `MLModel`. The 18 transformers build lazy ML
-relations, and in Python each is a typed class with PySpark's Params API (`params`, `getParam`,
-the getters and setters, `copy`, `extractParamMap`), `write`/`save`/`read`/`load` and
-`transform`, which applies a non-empty param map to a copy as PySpark does. `HashingTF.indexOf`
-fails at PySpark's JVM import, as the official one does over Spark Connect. Their outputCol
-default keeps the uid that a loaded stage was made of. The estimators and their typed models
-are still pending. Transformed DataFrames retain their fitted models and upstream input plans.
-`QuantileDiscretizer` returns a cached JVM `Bucketizer`; its Rust model wrapper is named
+The 18 transformers build lazy ML relations, and the 20 estimators fit through Spark Connect's ML
+command. In Python each is a typed class with PySpark's Params API (`params`, `getParam`, the
+getters and setters, `copy`, `extractParamMap`), `write`/`save`/`read`/`load`; the estimators also have `fitMultiple`.
+A transformer's `transform`, and an estimator's `fit`, apply a non-empty param map to a copy as
+PySpark does. `HashingTF.indexOf` fails at PySpark's JVM import, as the official one does over
+Spark Connect. Their outputCol default keeps the uid that a loaded stage was made of. A fit returns
+one of 19 typed model classes, with PySpark's members: getters and setters, attributes such as
+`mean`, `vocabulary`, `pc` and `categoryMaps`, DataFrames such as `surrogateDF`,
+`approxNearestNeighbors`, `approxSimilarityJoin`, `getVectors` and `findSynonyms`, and the class
+methods `CountVectorizerModel.from_vocabulary` and `StringIndexerModel.from_labels` and
+`from_arrays_of_labels`. Over Spark Connect, PySpark's relation decorator
+(`try_remote_attribute_relation`) drops every keyword argument of `approxNearestNeighbors`,
+`approxSimilarityJoin` and `findSynonyms`, and ours does too, as PySpark's behavior over Spark
+Connect: a `distCol` given by keyword is ignored (the column stays `distCol`), and a call whose
+positional arguments are not all given fails at the server, as official's does. `QuantileDiscretizer`'s fit returns a `Bucketizer` of a new uid, with its splits and
+its input and output columns, as PySpark's `_create_model` does. Transformed DataFrames retain
+their fitted models and upstream input plans. The Rust wrapper of the discretizer's splits is named
 `QuantileDiscretizerModel`. Training-only parameters are omitted from model transforms.
 Multi-column parameters, nested Bucketizer splits, vector-valued ElementwiseProduct weights,
 NaN imputation values, and UnivariateFeatureSelector's setter-only parameters are supported.
