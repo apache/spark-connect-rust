@@ -80,18 +80,22 @@ pub(crate) fn check_keyword_keys(options: Option<&Bound<'_, PyDict>>) -> PyResul
 
 /// The keywords of a method that has a catch-all `**unexpected` for the keywords it does not take,
 /// which keeps them out of its signature: the keys are checked as [`check_keyword_keys`] does, then
-/// the first key raises the `TypeError` of an unexpected keyword argument, worded as PyO3 words it
-/// for a method without the catch-all, with `method` as its `Class.method` name.
+/// the first key raises CPython's `TypeError` of an unexpected keyword argument, with `method` as
+/// the qualified name of the method. The message joins the key in Python, as CPython formats it:
+/// a str key need not have UTF-8, such as one with a lone surrogate.
 pub(crate) fn check_unexpected_keywords(
     method: &str,
     unexpected: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<()> {
     check_keyword_keys(unexpected)?;
     if let Some(key) = unexpected.and_then(|dict| dict.keys().iter().next()) {
-        let key: String = key.extract()?;
-        return Err(pyo3::exceptions::PyTypeError::new_err(format!(
-            "{method}() got an unexpected keyword argument '{key}'"
-        )));
+        let message = PyString::new(
+            key.py(),
+            &format!("{method}() got an unexpected keyword argument '"),
+        )
+        .add(&key)?
+        .add("'")?;
+        return Err(pyo3::exceptions::PyTypeError::new_err(message.unbind()));
     }
     Ok(())
 }

@@ -284,6 +284,12 @@ pub enum SparkErrorKind {
     /// ``ValueError``, a Python builtin: a connection-string value that `int()` or `urllib`
     /// rejects, which the reference client raises unwrapped rather than as a `PySparkValueError`.
     BuiltinValueError,
+    /// ``TypeError``, a Python builtin: an argument that a protobuf field does not take, which the
+    /// reference client raises when it builds the plan of a request, unwrapped.
+    BuiltinTypeError,
+    /// ``OverflowError``, a Python builtin: an int that a protobuf field does not take, as
+    /// [`SparkErrorKind::BuiltinTypeError`] is raised.
+    BuiltinOverflowError,
     /// ``pyspark.errors.exceptions.base.SparkRuntimeException``
     SparkRuntime,
     /// ``pyspark.errors.exceptions.base.SparkUpgradeException``

@@ -45,10 +45,19 @@ def assert_values(actual, expected):
         assert actual == expected
 
 
-def configured(cls, values, setters=False):
+def configured(cls, values, setters=False, set_params=False):
+    # The stage of the values, given to its constructor, to its setters (setters), or to its
+    # setParams (set_params); the values that the constructor does not take go to the setters.
     values = decode(values)
     defaults = GOLDEN["api"][cls.__name__]["defaults"]
-    stage = cls() if setters else cls(**{k: v for k, v in values.items() if k in defaults})
+    given = {k: v for k, v in values.items() if k in defaults}
+    if setters:
+        stage = cls()
+    elif set_params:
+        stage = cls()
+        assert stage.setParams(**given) is stage
+    else:
+        stage = cls(**given)
     for key, value in values.items():
         if setters or key not in defaults:
             assert getattr(stage, "set" + key[0].upper() + key[1:])(value) is stage

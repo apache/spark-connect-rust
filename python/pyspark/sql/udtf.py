@@ -199,6 +199,15 @@ def _validate_arrow_udtf_handler(cls: Any, returnType: Optional[Any]) -> None:
         )
 
 
+class _UDTFName:
+    """The ``name`` of a UDTF, its ``_name``, which PySpark Connect's UDTF does not have. It has
+    no setter, so that ``udtf.name = ...`` sets an attribute of the object, as it does on
+    PySpark's, which ``name`` then gives, and leaves ``_name``, the name that the plan sends."""
+
+    def __get__(self, obj: Any, objtype: Any = None) -> Any:
+        return self if obj is None else obj._name
+
+
 class UserDefinedTableFunction:
     """A user-defined table function: a Python handler class that yields rows.
 
@@ -206,6 +215,11 @@ class UserDefinedTableFunction:
     ``CommonInlineUserDefinedTableFunction`` relation. Mirrors
     ``pyspark.sql.connect.udtf.UserDefinedTableFunction``.
     """
+
+    # As PySpark Connect's: the class is that of pyspark.sql.connect.udtf. A UDTF that a function
+    # captures is pickled by reference to that name, which the Python worker of the server has
+    # as the Connect class, not as the classic class of PySpark, which needs a SparkContext.
+    __module__ = "pyspark.sql.connect.udtf"
 
     def __init__(
         self,
@@ -215,6 +229,9 @@ class UserDefinedTableFunction:
         evalType: int = SQL_TABLE_UDF,
         deterministic: bool = False,
     ):
+        # cloudpickle pickles this class by reference only when its module is imported.
+        import pyspark.sql.connect.udtf  # noqa: F401
+
         # As PySpark's UserDefinedTableFunction, for udtf(), arrow_udtf() and register().
         _validate_udtf_handler(func, returnType)
         self.func = func
@@ -225,11 +242,13 @@ class UserDefinedTableFunction:
             returnType = UnparsedDataType(returnType)
         self.returnType = returnType
         self.evalType = evalType
-        self.name = name or (
+        self._name = name or (
             func.__name__ if hasattr(func, "__name__") else "udtf"
         )
         self.deterministic = deterministic
         self.python_ver = f"{sys.version_info.major}.{sys.version_info.minor}"
+
+    name = _UDTFName()
 
     @property
     def command(self) -> bytes:
@@ -243,7 +262,7 @@ class UserDefinedTableFunction:
             raise PySparkPicklingError(
                 errorClass="UDTF_SERIALIZATION_ERROR",
                 messageParameters={
-                    "name": self.name,
+                    "name": self._name,
                     "message": "Please check the stack trace and "
                     "make sure the function is serializable.",
                 },
@@ -260,7 +279,7 @@ class UserDefinedTableFunction:
         named = list(kwargs.items())
         return _pyspark.functions.pyfunc_make_udtf(
             SparkSession.active(),
-            self.name,
+            self._name,
             self.returnType,
             self.evalType,
             self.command,

@@ -3,8 +3,9 @@
 # the Python glue only, excluding vendored third-party code (cloudpickle), the
 # test-support utilities, pandas-on-spark, generated wrappers, and the compiled
 # extension itself.
-# The embedded crates/pyspark-rs/src/row.py runs as pyspark/_row.py, and values.py as
-# pyspark/_values.py. Those paths have no file and are explicitly omitted. The Row and
+# The embedded crates/pyspark-rs/src/row.py runs as pyspark/_row.py, values.py as
+# pyspark/_values.py, and the setParams factory of the feature stages (ml/feature.rs) as
+# pyspark/_ml_set_params.py. Those paths have no file and are explicitly omitted. The Row and
 # value tests exercise their behavior; Ruff checks the embedded sources.
 [run]
 source = pyspark
@@ -79,6 +80,7 @@ omit =
     */pyspark/_pyspark*
     */pyspark/_row.py
     */pyspark/_values.py
+    */pyspark/_ml_set_params.py
     # Test helpers.
     */tests/*
 

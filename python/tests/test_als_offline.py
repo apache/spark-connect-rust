@@ -172,6 +172,32 @@ def test_unsendable_recommendation_counts_fail_before_requests(session):
         assert _requests_but_deletes(service) == sent
 
 
+def test_a_column_count_fails_before_requests_as_pyspark(session):
+    # As PySpark's serialization of a recommendation count, LiteralExpression._from_value, which
+    # takes no Column, not even a Column of a literal: each recommendation method raises its
+    # UNSUPPORTED_DATA_TYPE of `Column` before any request.
+    from pyspark.errors import PySparkTypeError
+    from pyspark.sql import functions as F
+
+    spark, service = session
+    model = fitted(spark, service)
+    subset = spark.range(1)
+    calls = [
+        lambda count: model.recommendForAllUsers(count),
+        lambda count: model.recommendForAllItems(count),
+        lambda count: model.recommendForUserSubset(subset, count),
+        lambda count: model.recommendForItemSubset(subset, count),
+    ]
+    for call in calls:
+        for count in (F.lit(1), F.col("user")):
+            sent = _requests_but_deletes(service)
+            with pytest.raises(PySparkTypeError) as e:
+                call(count)
+            assert e.value.getCondition() == "UNSUPPORTED_DATA_TYPE"
+            assert e.value.getMessageParameters() == {"data_type": "Column"}
+            assert _requests_but_deletes(service) == sent
+
+
 def test_model_setters_snapshot_transform_parameters(session):
     spark, service = session
     model = fitted(spark, service)

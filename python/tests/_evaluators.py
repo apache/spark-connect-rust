@@ -15,4 +15,6 @@ def dataset(spark, spec):
     frame = spark.sql(spec["sql"])
     for column in spec["vectors"]:
         frame = frame.withColumn(column, array_to_vector(column))
-    return frame
+    # One partition, as scripts/capture_evaluators_golden.py captures it: a binned metric of
+    # BinaryClassificationMetrics depends on the partitioning, which local[*] takes from the cores.
+    return frame.coalesce(1)

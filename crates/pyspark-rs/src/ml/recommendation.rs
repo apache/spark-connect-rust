@@ -4,10 +4,17 @@ use super::*;
 use spark_connect::ml::{ALSModel, ALS};
 use spark_connect_proto as proto;
 
+/// The literal of a recommendation count, as PySpark's serialization of the argument,
+/// `LiteralExpression._from_value`, makes it: a Column is not a value it takes, not even a Column
+/// of a literal, so it raises the `UNSUPPORTED_DATA_TYPE` of `Column`, as another value that is
+/// not a literal does.
 fn count_literal(value: &Bound<'_, PyAny>) -> PyResult<proto::expression::Literal> {
-    let column = crate::functions::to_value_column(value)?;
-    match column.expression().node() {
-        spark_connect::expression::ExpressionNode::Literal(literal) => {
+    let column = match value.is_instance_of::<crate::column::PyColumn>() {
+        true => None,
+        false => Some(crate::functions::to_value_column(value)?),
+    };
+    match column.as_ref().map(|column| column.expression().node()) {
+        Some(spark_connect::expression::ExpressionNode::Literal(literal)) => {
             Ok(literal.to_literal_proto())
         }
         _ => Err(crate::column::raise_pyspark(
@@ -18,6 +25,26 @@ fn count_literal(value: &Bound<'_, PyAny>) -> PyResult<proto::expression::Litera
         )),
     }
 }
+
+const ALS_PARAMS: &[(&str, Kind)] = &[
+    ("rank", Kind::Int),
+    ("maxIter", Kind::Int),
+    ("regParam", Kind::Float),
+    ("numUserBlocks", Kind::Int),
+    ("numItemBlocks", Kind::Int),
+    ("implicitPrefs", Kind::Bool),
+    ("alpha", Kind::Float),
+    ("userCol", Kind::Str),
+    ("itemCol", Kind::Str),
+    ("seed", Kind::Int),
+    ("ratingCol", Kind::Str),
+    ("nonnegative", Kind::Bool),
+    ("checkpointInterval", Kind::Int),
+    ("intermediateStorageLevel", Kind::Str),
+    ("finalStorageLevel", Kind::Str),
+    ("coldStartStrategy", Kind::Str),
+    ("blockSize", Kind::Int),
+];
 
 #[pyclass(name = "ALS", module = "pyspark.ml.connect.recommendation")]
 pub struct PyALS {
@@ -51,33 +78,20 @@ impl PyALS {
             inner: ALS::new(),
             unsendable: Vec::new(),
         };
-        init_params(
-            &mut this,
-            "ALS",
-            &[],
-            &[
-                ("rank", Kind::Int),
-                ("maxIter", Kind::Int),
-                ("regParam", Kind::Float),
-                ("numUserBlocks", Kind::Int),
-                ("numItemBlocks", Kind::Int),
-                ("implicitPrefs", Kind::Bool),
-                ("alpha", Kind::Float),
-                ("userCol", Kind::Str),
-                ("itemCol", Kind::Str),
-                ("seed", Kind::Int),
-                ("ratingCol", Kind::Str),
-                ("nonnegative", Kind::Bool),
-                ("checkpointInterval", Kind::Int),
-                ("intermediateStorageLevel", Kind::Str),
-                ("finalStorageLevel", Kind::Str),
-                ("coldStartStrategy", Kind::Str),
-                ("blockSize", Kind::Int),
-            ],
-            args,
-            kwargs,
-        )?;
+        init_params(&mut this, "ALS", &[], ALS_PARAMS, args, kwargs)?;
         Ok(this)
+    }
+    #[pyo3(
+        name = "setParams",
+        signature = (*args, **kwargs),
+        text_signature = "(self, *, rank=10, maxIter=10, regParam=0.1, numUserBlocks=10, numItemBlocks=10, implicitPrefs=False, alpha=1.0, userCol='user', itemCol='item', seed=None, ratingCol='rating', nonnegative=False, checkpointInterval=10, intermediateStorageLevel='MEMORY_AND_DISK', finalStorageLevel='MEMORY_AND_DISK', coldStartStrategy='nan', blockSize=4096)"
+    )]
+    fn set_params<'py>(
+        slf: Bound<'py, Self>,
+        args: &Bound<'py, PyTuple>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_params_of(slf, "ALS", ALS_PARAMS, args, kwargs)
     }
     #[pyo3(name = "setAlpha")]
     fn set_alpha<'py>(
@@ -219,8 +233,14 @@ impl PyALS {
         }
         Ok(slf)
     }
-    fn fit(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<PyALSModel> {
-        let input = dataset_of(dataset, "fit", "select")?;
+    #[pyo3(signature = (dataset, params=None))]
+    fn fit(
+        slf: &Bound<'_, Self>,
+        dataset: &Bound<'_, PyAny>,
+        params: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyALSModel> {
+        check_fit_params(params)?;
+        let input = dataset_of(dataset, "fit")?;
         let mut estimator = snapshot(slf)?;
         let session = input.spark_session();
         let inner = interruptible(slf.py(), &session, || {
@@ -293,8 +313,14 @@ impl PyALSModel {
     ) -> PyResult<Bound<'py, Self>> {
         set_param(slf, "userCol", Kind::Str, value)
     }
-    fn transform(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        let input = dataset_of(dataset, "transform", "columns")?;
+    #[pyo3(signature = (dataset, params=None))]
+    fn transform(
+        slf: &Bound<'_, Self>,
+        dataset: &Bound<'_, PyAny>,
+        params: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        check_params(params)?;
+        let input = dataset_of(dataset, "transform")?;
         let mut model = snapshot(slf)?;
         Ok(PyDataFrame::new(model.transform(&input).to_pyerr()?))
     }
@@ -345,7 +371,7 @@ impl PyALSModel {
         dataset: &Bound<'_, PyAny>,
         numItems: &Bound<'_, PyAny>,
     ) -> PyResult<PyDataFrame> {
-        let input = dataset_of(dataset, "recommendForUserSubset", "select")?;
+        let input = helper_dataset_of(dataset, "recommendForUserSubset")?;
         let count = count_literal(numItems)?;
         let model = slf.try_borrow()?.inner.clone();
         Ok(PyDataFrame::new(
@@ -361,7 +387,7 @@ impl PyALSModel {
         dataset: &Bound<'_, PyAny>,
         numUsers: &Bound<'_, PyAny>,
     ) -> PyResult<PyDataFrame> {
-        let input = dataset_of(dataset, "recommendForItemSubset", "select")?;
+        let input = helper_dataset_of(dataset, "recommendForItemSubset")?;
         let count = count_literal(numUsers)?;
         let model = slf.try_borrow()?.inner.clone();
         Ok(PyDataFrame::new(

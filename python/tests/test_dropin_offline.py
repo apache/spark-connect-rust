@@ -452,13 +452,158 @@ def test_nested_types_assert_a_data_type_not_a_type_string_as_pyspark():
     assert T.StructType().add("g", T.LongType()).fields[0].dataType == T.LongType()
 
 
-def test_bad_type_strings_raise_their_message_not_a_debug_dump(mock_connect):
-    # A type string that does not parse, as the schema of `to`, raises a ValueError with the message
-    # of its error, not the Debug output of the error.
-    spark, _ = mock_connect
-    with pytest.raises(ValueError) as e:
-        spark.range(1).to("foo bar")
-    assert str(e.value) == "invalid type string 'foo bar': [INVALID_DATATYPE_FORMAT]"
+def test_to_keeps_a_type_string_unparsed_and_fails_at_the_action_as_pyspark(mock_connect):
+    # As PySpark's `DataFrame.to`, which keeps a str as the schema and does not parse it: `to`
+    # does not raise, the str is the schema, and each action fails when it builds the plan, with
+    # the UNSUPPORTED_OPERATION error of the str, before any request is sent.
+    from pyspark.errors import PySparkValueError
+
+    spark, service = mock_connect
+    df = spark.range(1)
+    sent = len(service.execute_requests)
+    for text in ["foo bar", "a bigint"]:
+        to_text = df.to(text)
+        assert to_text.schema == text
+        for read in (lambda: to_text.collect(), lambda: to_text.count()):
+            with pytest.raises(PySparkValueError) as e:
+                read()
+            assert e.value.getCondition() == "UNSUPPORTED_OPERATION"
+            assert e.value.getMessageParameters() == {"operation": f"data type {text}"}
+            assert str(e.value) == f"[UNSUPPORTED_OPERATION] data type {text} is not supported."
+    assert len(service.execute_requests) == sent
+    # The schema of a union of two equal ones is the same str, and of different ones is not.
+    same = df.to("a bigint").union(df.to("a bigint"))
+    assert same.schema == "a bigint"
+    with pytest.raises(PySparkValueError):
+        df.to("a bigint").union(df.to("a int")).schema
+    # None is an AssertionError at the call, and another object fails at the action as a str does.
+    with pytest.raises(AssertionError):
+        df.to(None)
+    assert df.to(5).schema == 5
+    with pytest.raises(PySparkValueError) as e:
+        df.to(5).collect()
+    assert str(e.value) == "[UNSUPPORTED_OPERATION] data type 5 is not supported."
+
+
+def test_struct_type_fields_raise_pyspark_errors_for_items_without_a_name():
+    # As PySpark's `StructType.__init__`, which reads the name of each item before it asserts that
+    # each item is a StructField: a DDL string, whose characters have no name, is an error of its
+    # own, not a Debug dump of a Rust error, and a field of another kind is an assertion.
+    import pyspark.sql.types as T
+
+    int_type = T.IntegerType()
+    F = namedtuple("F", ["name", "dataType"])
+    cases = [
+        (lambda: T.StructType(["a"]), AttributeError, "'str' object has no attribute 'name'"),
+        (lambda: T.StructType("a int"), AttributeError, "'str' object has no attribute 'name'"),
+        (lambda: T.StructType(["a int"]), AttributeError, "'str' object has no attribute 'name'"),
+        (lambda: T.StructType([("a", int_type)]), AttributeError,
+         "'tuple' object has no attribute 'name'"),
+        (lambda: T.StructType(5), TypeError, "'int' object is not iterable"),
+        (lambda: T.StructType([F("a", int_type)]), AssertionError,
+         "fields should be a list of StructField"),
+    ]
+    for make, error, message in cases:
+        with pytest.raises(error) as e:
+            make()
+        assert str(e.value) == message
+    assert T.StructType([T.StructField("a", int_type)]).names == ["a"]
+
+
+def test_struct_field_asserts_its_data_type_then_its_name_as_pyspark():
+    # As PySpark's `StructField.__init__`: the data type is asserted first, then the name, which
+    # is any str, so a name of another type is an AssertionError, not a TypeError.
+    import pyspark.sql.types as T
+
+    data_type_class = "<class 'pyspark.sql.types.DataType'>"
+    cases = [
+        (lambda: T.StructField(5, T.IntegerType()), "field name 5 should be a string"),
+        (lambda: T.StructField(None, T.IntegerType()), "field name None should be a string"),
+        (lambda: T.StructField(b"g", T.IntegerType()), "field name b'g' should be a string"),
+        (lambda: T.StructField(5, "int"),
+         f"dataType int should be an instance of {data_type_class}"),
+        (lambda: T.StructField(5, 5), f"dataType 5 should be an instance of {data_type_class}"),
+        (lambda: T.StructField(name=5, dataType=None),
+         f"dataType None should be an instance of {data_type_class}"),
+    ]
+    for make, message in cases:
+        with pytest.raises(AssertionError) as e:
+            make()
+        assert str(e.value) == message
+
+
+def test_struct_type_add_asserts_as_struct_field_does():
+    # As PySpark's `StructType.add`, which builds a StructField of its arguments: the data type is
+    # asserted first, and a name is required only when it is a str.
+    import pyspark.sql.types as T
+
+    data_type_class = "<class 'pyspark.sql.types.DataType'>"
+    cases = [
+        (lambda: T.StructType().add("g", 5),
+         f"dataType 5 should be an instance of {data_type_class}"),
+        (lambda: T.StructType().add(5),
+         f"dataType None should be an instance of {data_type_class}"),
+        (lambda: T.StructType().add(None),
+         f"dataType None should be an instance of {data_type_class}"),
+        (lambda: T.StructType().add(5, T.IntegerType()), "field name 5 should be a string"),
+    ]
+    for make, message in cases:
+        with pytest.raises(AssertionError) as e:
+            make()
+        assert str(e.value) == message
+
+
+def test_nullable_flags_are_kept_as_given_as_pyspark_keeps_them():
+    # As PySpark's plain classes, which keep `nullable`, `containsNull` and `valueContainsNull` as
+    # they are given, of any type: the attribute, the repr and the JSON show the value, and it
+    # compares as `__dict__` does (`1` equals `True`, but `"x"` does not).
+    import pyspark.sql.types as T
+
+    field = T.StructField("g", T.IntegerType(), "x")
+    assert field.nullable == "x"
+    assert repr(field) == "StructField('g', IntegerType(), x)"
+    assert field.jsonValue() == {"name": "g", "type": "integer", "nullable": "x", "metadata": {}}
+    assert field.json() == '{"metadata":{},"name":"g","nullable":"x","type":"integer"}'
+    assert T.StructType([field]).json() == (
+        '{"fields":[{"metadata":{},"name":"g","nullable":"x","type":"integer"}],"type":"struct"}'
+    )
+    assert repr(T.StructType([field])) == "StructType([StructField('g', IntegerType(), x)])"
+    assert field == T.StructField("g", T.IntegerType(), "x")
+    assert field != T.StructField("g", T.IntegerType(), True)
+    assert T.StructType([field]) != T.StructType([T.StructField("g", T.IntegerType(), True)])
+
+    array = T.ArrayType(T.IntegerType(), "x")
+    assert array.containsNull == "x"
+    assert repr(array) == "ArrayType(IntegerType(), x)"
+    assert array.json() == '{"containsNull":"x","elementType":"integer","type":"array"}'
+    assert array != T.ArrayType(T.IntegerType(), True)
+
+    the_map = T.MapType(T.IntegerType(), T.IntegerType(), None)
+    assert the_map.valueContainsNull is None
+    assert repr(the_map) == "MapType(IntegerType(), IntegerType(), None)"
+    assert the_map.json() == (
+        '{"keyType":"integer","type":"map","valueContainsNull":null,"valueType":"integer"}'
+    )
+
+    one = T.StructField("g", T.IntegerType(), 1)
+    assert one == T.StructField("g", T.IntegerType(), True)
+    assert one.jsonValue()["nullable"] == 1
+
+    # The flags, and the nested ones, survive pickling, as in PySpark.
+    nested = T.StructType([T.StructField("a", T.ArrayType(T.StructType([field]), 0))])
+    assert pickle.loads(pickle.dumps(nested)).json() == nested.json()
+    assert pickle.loads(pickle.dumps(field)).nullable == "x"
+    assert pickle.loads(pickle.dumps(array)).containsNull == "x"
+
+
+def test_struct_field_nullable_is_kept_when_it_is_set():
+    import pyspark.sql.types as T
+
+    field = T.StructField("g", T.IntegerType())
+    field.nullable = "x"
+    assert field.nullable == "x"
+    assert field.jsonValue()["nullable"] == "x"
+    assert T.StructField("g", T.IntegerType()).nullable is True
 
 
 def test_json_forms_accept_trailing_whitespace_as_pyspark(mock_connect):
@@ -1122,17 +1267,47 @@ def test_bool_arguments_of_checkpoints_and_union_convert_as_protobuf_does(mock_c
     # None is unset for the checkpoint command, which the constructor takes, as false.
     assert checkpoint_eager(lambda: df.checkpoint(eager=None)) == []
     assert checkpoint_eager(lambda: df.localCheckpoint(eager=None)) == []
-    with pytest.raises(TypeError) as e:
-        df.unionByName(other, None)
-    assert str(e.value) == "'NoneType' object cannot be interpreted as an integer"
     for value, message in [("x", "'str' object cannot be interpreted as an integer"),
                            (1.5, "'float' object cannot be interpreted as an integer")]:
         for make in (lambda: df.checkpoint(eager=value),
-                     lambda: df.localCheckpoint(eager=value),
-                     lambda: df.unionByName(other, value)):
+                     lambda: df.localCheckpoint(eager=value)):
             with pytest.raises(TypeError) as e:
                 make()
             assert str(e.value) == message
+    # A set operation takes its flag when a request sends its plan, so the call does not raise.
+    for value, message in [(None, "'NoneType' object cannot be interpreted as an integer"),
+                           ("x", "'str' object cannot be interpreted as an integer"),
+                           (1.5, "'float' object cannot be interpreted as an integer")]:
+        assert df.unionByName(other, value) is not None
+        with pytest.raises(TypeError) as e:
+            df.unionByName(other, value).collect()
+        assert str(e.value) == message
+
+
+def test_union_by_name_flag_that_protobuf_does_not_take_fails_at_each_action(mock_connect):
+    # As PySpark's `unionByName`, whose set operation sets the flag when the plan is built: the
+    # call does not raise, each action raises the builtin error of protobuf, and no request is
+    # sent. An int too big for a C long is an OverflowError, and an omitted flag is false.
+    spark, service = mock_connect
+    spark.range(1).unionByName(spark.range(1)).collect()
+    df = spark.range(1)
+    other = spark.range(1)
+    sent = len(service.execute_requests)
+    cases = [
+        (None, TypeError, "'NoneType' object cannot be interpreted as an integer"),
+        ("x", TypeError, "'str' object cannot be interpreted as an integer"),
+        ([1], TypeError, "'list' object cannot be interpreted as an integer"),
+        (2**70, OverflowError, "Python int too large to convert to C long"),
+    ]
+    for value, error, message in cases:
+        union = df.unionByName(other, allowMissingColumns=value)
+        assert len(service.execute_requests) == sent
+        for read in (lambda: union.collect(), lambda: union.count()):
+            with pytest.raises(error) as e:
+                read()
+            assert type(e.value) is error
+            assert str(e.value) == message
+        assert len(service.execute_requests) == sent
 
 
 def test_checkpoints_send_their_eager_and_storage_level_as_pyspark(mock_connect):
@@ -5565,6 +5740,54 @@ def test_udtf_register_sends_the_udtf_as_pyspark(mock_connect):
         spark.udtf.register("echo", scalar)
     assert error.value.getCondition() == "INVALID_UDTF_EVAL_TYPE"
     assert service.execute_calls == calls
+
+
+def test_udf_and_udtf_pickle_as_pyspark_connect_classes():
+    # As PySpark Connect's: a UDF or a UDTF that a function captures is pickled by reference to
+    # pyspark.sql.connect.udf or .udtf, whose classes the Python worker of the server has, with
+    # the instance attributes of those classes. The classic class of PySpark needs a SparkContext.
+    import pickletools
+
+    from pyspark.serializers import CloudPickleSerializer
+    from pyspark.sql import functions as F
+    from pyspark.sql.types import IntegerType
+    from pyspark.sql.udf import UserDefinedFunction
+
+    def class_references(obj):
+        # The strings of the pickle, which name the classes that it refers to by reference.
+        data = CloudPickleSerializer().dumps(obj)
+        return {arg for _, arg, _ in pickletools.genops(data) if isinstance(arg, str)}
+
+    plus_one = F.udf(lambda x: int(x) + 1, IntegerType())
+    udf = plus_one._unwrapped
+    assert type(udf) is UserDefinedFunction
+    assert type(udf).__module__ == "pyspark.sql.connect.udf"
+    assert sorted(vars(udf)) == [
+        "_name", "_returnType", "_returnType_placeholder", "deterministic", "evalType", "func"]
+    refs = class_references(udf)
+    assert {"pyspark.sql.connect.udf", "UserDefinedFunction"} <= refs
+    assert "pyspark.sql.udf" not in refs
+    restored = CloudPickleSerializer().loads(CloudPickleSerializer().dumps(udf))
+    assert restored._name == udf._name and restored.evalType == udf.evalType
+    assert restored.func(1) == 2
+
+    @F.udtf(returnType="x int")
+    class Echo:
+        def eval(self, n):
+            yield (n,)
+
+    assert type(Echo).__module__ == "pyspark.sql.connect.udtf"
+    assert {"_name", "deterministic", "evalType", "func", "returnType"} <= set(vars(Echo))
+    assert "name" not in vars(Echo) and Echo.name == "Echo"
+    refs = class_references(Echo)
+    assert {"pyspark.sql.connect.udtf", "UserDefinedTableFunction"} <= refs
+    assert "pyspark.sql.udtf" not in refs
+    restored = CloudPickleSerializer().loads(CloudPickleSerializer().dumps(Echo))
+    assert restored._name == "Echo" and restored.evalType == 300
+    # As PySpark's, a name can be set on a UDTF: it is an attribute of the object, and `_name`,
+    # the name that the plan sends, stays.
+    Echo.name = "renamed"
+    assert (Echo.name, Echo._name, vars(Echo)["name"]) == ("renamed", "Echo", "renamed")
 
 
 def test_udtf_call_without_session_raises():
@@ -24799,8 +25022,8 @@ UNEXPECTED_KEYWORD_CALLS = [
     ("DataFrameWriter.orc", lambda s, kw: s.range(1).write.orc("p", **kw)),
     ("DataFrameWriter.text", lambda s, kw: s.range(1).write.text("p", **kw)),
     ("DataFrameWriter.xml", lambda s, kw: s.range(1).write.xml("p", **kw)),
-    # PyO3 words the class of the builder as `Builder`, as it did before the catch-all.
-    ("Builder.config", lambda s, kw: s.builder.config(**kw)),
+    # CPython names a method by its qualified name, which is that of the builder's class in PySpark.
+    ("SparkSession.Builder.config", lambda s, kw: s.builder.config(**kw)),
 ]
 
 
@@ -24819,6 +25042,11 @@ def test_unexpected_keywords_are_keywords_as_pyspark(offline_spark, method, call
     with pytest.raises(TypeError) as error:
         call(offline_spark, {"foo": 1})
     assert str(error.value) == f"{method}() got an unexpected keyword argument 'foo'"
+    # A str key need not have UTF-8, such as one with a lone surrogate, which CPython's message
+    # keeps as it is.
+    with pytest.raises(TypeError) as error:
+        call(offline_spark, {"\ud800": 1})
+    assert str(error.value) == f"{method}() got an unexpected keyword argument '\ud800'"
 
 
 def test_known_keywords_still_bind_with_the_unexpected_catch_all(offline_spark):
@@ -26497,3 +26725,143 @@ def copy_module_copy(obj):
     import copy
 
     return copy.copy(obj)
+
+
+def test_worker_reconstructors_rebuild_the_readers_writers_and_streams_as_pyspark(
+        mock_connect, monkeypatch):
+    # As PySpark's worker of a foreachBatch function, which has no drop-in: with pyspark._pyspark
+    # hidden, the reduce of a reader, a writer, a V2 writer and the stream objects rebuilds an
+    # object of the same state through PySpark's calls, which the drop-in's calls are here.
+    import sys
+
+    import cloudpickle
+    import pyspark
+
+    spark, service = mock_connect
+    df = spark.range(3)
+    reader = spark.read.format("json").option("a", "1").schema("id LONG")
+    writer = df.write.format("parquet").mode("overwrite").option("k", "v").partitionBy("id")
+    stream_reader = spark.readStream.format("rate").option("b", "2").name("rate_src")
+    stream_writer = df.writeStream.format("memory").outputMode("append").queryName("q")
+    # Each reduce gives a reconstructor of its state, not the drop-in's `_of_state` by name.
+    for obj in (reader, writer, stream_reader, stream_writer):
+        assert obj.__reduce__()[0].__name__ == "creator"
+    monkeypatch.delattr(pyspark, "_pyspark")
+    monkeypatch.setitem(sys.modules, "pyspark._pyspark", None)
+    rebuilt = cloudpickle.loads(cloudpickle.dumps(reader))
+    assert (rebuilt._format, rebuilt._schema, rebuilt._options) == ("json", "id LONG", {"a": "1"})
+    rebuilt = cloudpickle.loads(cloudpickle.dumps(writer))
+    rebuilt.save("p")
+    # ExecutePlanRequest.plan=3, Plan.command=2, Command.write_operation=2; WriteOperation.source=2,
+    # mode=5 (SAVE_MODE_OVERWRITE=2), options=9, partitioning_cols=7.
+    plan = parse_message(parse_message(service.execute_requests[-1])[3][0])
+    sent = parse_message(parse_message(plan[2][0])[2][0])
+    assert sent[2] == [b"parquet"] and sent[5] == [2]
+    assert [parse_message(entry)[1][0] for entry in sent[9]] == [b"k"]
+    assert sent[7] == [b"id"]
+    rebuilt = cloudpickle.loads(cloudpickle.dumps(stream_reader))
+    assert (rebuilt._format, rebuilt._options) == ("rate", {"b": "2"})
+    rebuilt = cloudpickle.loads(cloudpickle.dumps(stream_writer))
+    assert type(rebuilt).__name__ == "DataStreamWriter"
+
+
+def test_worker_reconstructors_replay_every_setting_as_pyspark(mock_connect, monkeypatch):
+    # As the test above, for the settings that it does not set: with pyspark._pyspark hidden, the
+    # reconstructor of each object replays its buckets, its sorting, its clustering, the table
+    # settings of a V2 writer, the schema of a stream reader, and the partitioning, the trigger
+    # and the function of a stream writer, so that the rebuilt object has the same state. A
+    # bucket count that the proto refuses fails the write of the rebuilt writer, as PySpark's. A
+    # Column of the state, such as a V2 writer's partitioning, is rebuilt by PySpark's own
+    # Column classes, which only a worker has: the e2e tests of foreachBatch cover it.
+    import sys
+
+    import cloudpickle
+    import pyspark
+    from pyspark.sql import Column
+
+    def comparable(value):
+        # The state, without the DataFrame or session that it starts with, and with each Column
+        # and function as its text and name, which a copy keeps.
+        if isinstance(value, Column):
+            return str(value)
+        if callable(value):
+            return value.__name__
+        if isinstance(value, (list, tuple)):
+            return [comparable(item) for item in value]
+        if isinstance(value, dict):
+            return {key: comparable(item) for key, item in value.items()}
+        return value
+
+    def on_batch(batch_df, batch_id):
+        pass
+
+    def on_row(row):
+        pass
+
+    spark, _ = mock_connect
+    df = spark.range(3)
+    objects = [
+        df.write.bucketBy(2, "id").sortBy("id"),
+        df.write.clusterBy("id"),
+        df.writeTo("t").using("parquet").option("k", "v").tableProperty("p", "q").clusterBy("id"),
+        spark.readStream.format("rate").schema("id LONG"),
+        df.writeStream.partitionBy("id").trigger(processingTime="1 second")
+        .foreachBatch(on_batch),
+        df.writeStream.clusterBy("id").trigger(once=True).foreach(on_row),
+    ]
+    states = [comparable(obj.__reduce__()[1][1:]) for obj in objects]
+    refused = df.write.bucketBy(2**40, "id")
+    builder = SparkSession.Builder().config("k", "v")
+    builder._registerHook(lambda session: None)
+    monkeypatch.delattr(pyspark, "_pyspark")
+    monkeypatch.setitem(sys.modules, "pyspark._pyspark", None)
+    for obj, state in zip(objects, states):
+        rebuilt = cloudpickle.loads(cloudpickle.dumps(obj))
+        assert type(rebuilt) is type(obj)
+        assert comparable(rebuilt.__reduce__()[1][1:]) == state
+    with pytest.raises(ValueError):
+        cloudpickle.loads(cloudpickle.dumps(refused)).save("p")
+    # The builder of a worker is rebuilt by the same calls, which keep its options and hooks.
+    options, _, hooks = cloudpickle.loads(cloudpickle.dumps(builder)).__reduce__()[1]
+    assert options == [("k", "v")] and len(hooks) == 1
+
+
+def test_plain_pickles_name_the_session_creator_as_pyspark(mock_connect):
+    # As PySpark's: a plain pickle of an object that holds the session fails at the session's
+    # creator, which the message names, and so does a plain pickle of the session itself.
+    spark, _ = mock_connect
+    message = "Can't pickle local object 'SparkSession.__reduce__.<locals>.creator'"
+    for obj in (spark, spark.read, spark.range(1).groupBy("id")):
+        with pytest.raises(AttributeError, match=re.escape(message)):
+            pickle.dumps(obj)
+
+
+def test_session_builders_copy_and_pickle_as_pyspark(mock_connect):
+    # As PySpark's Builder, whose state is its options: a copy and a pickle of a builder keep
+    # them, and the unpickled builder is a builder of the same class.
+    import copy
+
+    import cloudpickle
+    from pyspark.sql import SparkSession
+
+    builder = SparkSession.builder.remote("sc://localhost:15013").config("k", "v")
+    copied = copy.copy(builder)
+    assert type(copied) is type(builder)
+    rebuilt = cloudpickle.loads(cloudpickle.dumps(builder))
+    assert type(rebuilt) is type(builder)
+    assert pickle.loads(cloudpickle.dumps(copied)) is not None
+    # A plain pickle of a builder succeeds, as of PySpark's, and keeps the options.
+    rebuilt = pickle.loads(pickle.dumps(builder))
+    assert type(rebuilt) is type(builder)
+    assert ("k", "v") in rebuilt.__reduce__()[1][0]
+
+
+def test_pivot_values_are_the_literal_columns_as_pyspark(mock_connect):
+    # As PySpark's GroupedData: _pivot_values are the literal Columns of the pivot values, and
+    # None when the pivot was given none.
+    spark, _ = mock_connect
+    df = spark.range(3)
+    grouped = df.groupBy("id").pivot("id", [1, 2])
+    assert [str(column) for column in grouped._pivot_values] == ["Column<'1'>", "Column<'2'>"]
+    assert df.groupBy("id")._pivot_values is None
+    assert df.groupBy("id").pivot("id")._pivot_values is None

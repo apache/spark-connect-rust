@@ -1,14 +1,22 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Native bindings for standard pyspark.ml.feature stages.
 use super::*;
+use pyo3::sync::PyOnceLock;
 use spark_connect::ml as core;
 
-fn transform_native<T>(slf: &Bound<'_, T>, dataset: &Bound<'_, PyAny>) -> PyResult<PyDataFrame>
+/// The transform of a feature stage, after the check of its `params` argument (see
+/// [`check_params`]).
+fn transform_native<T>(
+    slf: &Bound<'_, T>,
+    dataset: &Bound<'_, PyAny>,
+    params: Option<&Bound<'_, PyAny>>,
+) -> PyResult<PyDataFrame>
 where
     T: Native + PyClass,
     T::Core: Transformer,
 {
-    let input = dataset_of(dataset, "transform", "columns")?;
+    check_params(params)?;
+    let input = dataset_of(dataset, "transform")?;
     let mut transformer = snapshot(slf)?;
     let output = slf
         .py()
@@ -16,20 +24,32 @@ where
         .to_pyerr()?;
     Ok(PyDataFrame::new(output))
 }
-fn fit_feature<T>(slf: &Bound<'_, T>, dataset: &Bound<'_, PyAny>) -> PyResult<PyMLModel>
+/// The fit of a feature stage, after the check of its `params` argument (see
+/// [`check_fit_params`]).
+fn fit_feature<T>(
+    slf: &Bound<'_, T>,
+    dataset: &Bound<'_, PyAny>,
+    params: Option<&Bound<'_, PyAny>>,
+) -> PyResult<PyMLModel>
 where
     T: Native + PyClass,
     T::Core: Estimator,
 {
+    check_fit_params(params)?;
     fit_native(slf, dataset, None)
 }
 
-// inspect cannot parse a textual NaN default; construct a Signature with the real float.
-fn signature(py: Python<'_>, defaults: &str) -> PyResult<Py<PyAny>> {
+// inspect cannot parse a textual NaN default; construct a Signature with the real float. A method's
+// signature (`with_self`) starts with `self`.
+fn signature(py: Python<'_>, defaults: &str, with_self: bool) -> PyResult<Py<PyAny>> {
     let inspect = py.import("inspect")?;
     let parameter = inspect.getattr("Parameter")?;
     let values = py.import("json")?.call_method1("loads", (defaults,))?;
     let parameters = PyList::empty(py);
+    if with_self {
+        parameters
+            .append(parameter.call1(("self", parameter.getattr("POSITIONAL_OR_KEYWORD")?))?)?;
+    }
     for (key, value) in values.cast::<PyDict>()?.iter() {
         let kw = PyDict::new(py);
         kw.set_item(
@@ -46,6 +66,36 @@ fn signature(py: Python<'_>, defaults: &str) -> PyResult<Py<PyAny>> {
     }
     Ok(inspect.getattr("Signature")?.call1((parameters,))?.unbind())
 }
+
+/// The `setParams` of a feature stage, a Python function that calls its native `_setParams`, so
+/// that `inspect.signature` gives the keyword-only params of PySpark's `setParams` with their real
+/// defaults, as the constructor's `__signature__` does: a text signature cannot hold a NaN default.
+fn set_params_function(py: Python<'_>, class: &str, defaults: &str) -> PyResult<Py<PyAny>> {
+    static FACTORY: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+    let factory = FACTORY.get_or_try_init(py, || -> PyResult<Py<PyAny>> {
+        let module = PyModule::from_code(
+            py,
+            SET_PARAMS_SOURCE,
+            c"pyspark/_ml_set_params.py",
+            c"pyspark._ml_set_params",
+        )?;
+        Ok(module.getattr("make_set_params")?.unbind())
+    })?;
+    Ok(factory
+        .bind(py)
+        .call1((class, signature(py, defaults, true)?))?
+        .unbind())
+}
+
+const SET_PARAMS_SOURCE: &std::ffi::CStr = c"def make_set_params(class_name, signature):
+    def setParams(self, *args, **kwargs):
+        return self._setParams(*args, **kwargs)
+
+    setParams.__qualname__ = class_name + '.setParams'
+    setParams.__module__ = 'pyspark.ml.connect.feature'
+    setParams.__signature__ = signature
+    return setParams
+";
 
 macro_rules! feature_wrapper {
     ($wrapper:ident, $core:ident, $name:literal, $defaults:literal, $op:ident, $run:ident, $result:ty,
@@ -83,12 +133,35 @@ macro_rules! feature_wrapper {
                 Ok(this)
             }
             #[classattr]
-            fn __signature__(py: Python<'_>) -> PyResult<Py<PyAny>> { signature(py, $defaults) }
+            fn __signature__(py: Python<'_>) -> PyResult<Py<PyAny>> {
+                signature(py, $defaults, false)
+            }
+            // PySpark's setParams, keyword-only, which sets the params that it is given and
+            // returns the object (see set_params_function and set_params_of).
+            #[classattr]
+            fn setParams(py: Python<'_>) -> PyResult<Py<PyAny>> {
+                set_params_function(py, $name, $defaults)
+            }
+            #[pyo3(name = "_setParams", signature = (*args, **kwargs))]
+            fn set_params_native<'py>(
+                slf: Bound<'py, Self>,
+                args: &Bound<'py, PyTuple>,
+                kwargs: Option<&Bound<'py, PyDict>>,
+            ) -> PyResult<Bound<'py, Self>> {
+                set_params_of(slf, $name, &[$(($param, Kind::$kind)),*], args, kwargs)
+            }
             $(
                 #[pyo3(name = $pysetter)]
                 fn $setter<'py>(slf: Bound<'py, Self>, value: &Bound<'py, PyAny>) -> PyResult<Bound<'py, Self>> { set_param(slf, $wire, Kind::$setter_kind, value) }
             )*
-            fn $op(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<$result> { $run(slf, dataset) }
+            #[pyo3(signature = (dataset, params=None))]
+            fn $op(
+                slf: &Bound<'_, Self>,
+                dataset: &Bound<'_, PyAny>,
+                params: Option<&Bound<'_, PyAny>>,
+            ) -> PyResult<$result> {
+                $run(slf, dataset, params)
+            }
         }
     };
 }

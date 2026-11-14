@@ -7,7 +7,7 @@ use spark_connect::ml::{
 };
 
 macro_rules! evaluator {
-    ($wrapper:ident, $core:ident, $name:literal, $signature:literal,
+    ($wrapper:ident, $core:ident, $name:literal, $signature:literal, $set_params_signature:literal,
      $(($method:ident, $setter:literal, $param:literal, $kind:ident)),* $(,)?) => {
         #[pyclass(name = $name, module = "pyspark.ml.connect.evaluation")]
         pub struct $wrapper { inner: $core, unsendable: Vec<&'static str> }
@@ -28,6 +28,20 @@ macro_rules! evaluator {
                 init_params(&mut this, $name, &[], &[$(($param, Kind::$kind)),*], args, kwargs)?;
                 Ok(this)
             }
+            // PySpark's setParams, keyword-only, which sets the params that it is given and
+            // returns the object (see set_params_of).
+            #[pyo3(
+                name = "setParams",
+                signature = (*args, **kwargs),
+                text_signature = $set_params_signature
+            )]
+            fn set_params<'py>(
+                slf: Bound<'py, Self>,
+                args: &Bound<'py, PyTuple>,
+                kwargs: Option<&Bound<'py, PyDict>>,
+            ) -> PyResult<Bound<'py, Self>> {
+                set_params_of(slf, $name, &[$(($param, Kind::$kind)),*], args, kwargs)
+            }
             #[getter]
             fn uid(&self) -> &str { &self.inner.operator().uid }
             $(#[pyo3(name = $setter)]
@@ -36,10 +50,17 @@ macro_rules! evaluator {
             })*
             #[pyo3(name = "isLargerBetter")]
             fn is_larger_better(&self) -> bool { self.inner.is_larger_better() }
-            fn evaluate(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<f64> {
-                // Reject pandas before parameter serialization. Spark itself validates column
-                // types and names, just as it does for standard pyspark.ml.evaluation.
-                let dataset = dataset_of(dataset, "evaluate", "select")?;
+            #[pyo3(signature = (dataset, params=None))]
+            fn evaluate(
+                slf: &Bound<'_, Self>,
+                dataset: &Bound<'_, PyAny>,
+                params: Option<&Bound<'_, PyAny>>,
+            ) -> PyResult<f64> {
+                check_params(params)?;
+                // Reject pandas before parameter serialization, and read `sparkSession` of
+                // another object first, as `try_remote_evaluate` does. Spark itself validates
+                // column types and names, just as it does for standard pyspark.ml.evaluation.
+                let dataset = dataset_of(dataset, "evaluate")?;
                 let evaluator = snapshot(slf)?;
                 interruptible(slf.py(), &dataset.spark_session(), || {
                     evaluator.evaluate(&dataset).map_err(Box::new)
@@ -50,6 +71,7 @@ macro_rules! evaluator {
 }
 
 evaluator!(PyBinaryClassificationEvaluator, BinaryClassificationEvaluator, "BinaryClassificationEvaluator", "(*, rawPredictionCol='rawPrediction', labelCol='label', metricName='areaUnderROC', weightCol=None, numBins=1000)",
+    "(self, *, rawPredictionCol='rawPrediction', labelCol='label', metricName='areaUnderROC', weightCol=None, numBins=1000)",
     (set_raw_prediction_col, "setRawPredictionCol", "rawPredictionCol", Str),
     (set_label_col, "setLabelCol", "labelCol", Str),
     (set_metric_name, "setMetricName", "metricName", Str),
@@ -58,6 +80,7 @@ evaluator!(PyBinaryClassificationEvaluator, BinaryClassificationEvaluator, "Bina
 );
 
 evaluator!(PyRegressionEvaluator, RegressionEvaluator, "RegressionEvaluator", "(*, predictionCol='prediction', labelCol='label', metricName='rmse', weightCol=None, throughOrigin=False)",
+    "(self, *, predictionCol='prediction', labelCol='label', metricName='rmse', weightCol=None, throughOrigin=False)",
     (set_prediction_col, "setPredictionCol", "predictionCol", Str),
     (set_label_col, "setLabelCol", "labelCol", Str),
     (set_metric_name, "setMetricName", "metricName", Str),
@@ -66,6 +89,7 @@ evaluator!(PyRegressionEvaluator, RegressionEvaluator, "RegressionEvaluator", "(
 );
 
 evaluator!(PyMulticlassClassificationEvaluator, MulticlassClassificationEvaluator, "MulticlassClassificationEvaluator", "(*, predictionCol='prediction', labelCol='label', metricName='f1', weightCol=None, metricLabel=0.0, beta=1.0, probabilityCol='probability', eps=1e-15)",
+    "(self, *, predictionCol='prediction', labelCol='label', metricName='f1', weightCol=None, metricLabel=0.0, beta=1.0, probabilityCol='probability', eps=1e-15)",
     (set_prediction_col, "setPredictionCol", "predictionCol", Str),
     (set_label_col, "setLabelCol", "labelCol", Str),
     (set_metric_name, "setMetricName", "metricName", Str),
@@ -81,6 +105,7 @@ evaluator!(
     MultilabelClassificationEvaluator,
     "MultilabelClassificationEvaluator",
     "(*, predictionCol='prediction', labelCol='label', metricName='f1Measure', metricLabel=0.0)",
+    "(self, *, predictionCol='prediction', labelCol='label', metricName='f1Measure', metricLabel=0.0)",
     (set_prediction_col, "setPredictionCol", "predictionCol", Str),
     (set_label_col, "setLabelCol", "labelCol", Str),
     (set_metric_name, "setMetricName", "metricName", Str),
@@ -88,6 +113,7 @@ evaluator!(
 );
 
 evaluator!(PyClusteringEvaluator, ClusteringEvaluator, "ClusteringEvaluator", "(*, predictionCol='prediction', featuresCol='features', metricName='silhouette', distanceMeasure='squaredEuclidean', weightCol=None)",
+    "(self, *, predictionCol='prediction', featuresCol='features', metricName='silhouette', distanceMeasure='squaredEuclidean', weightCol=None)",
     (set_prediction_col, "setPredictionCol", "predictionCol", Str),
     (set_features_col, "setFeaturesCol", "featuresCol", Str),
     (set_metric_name, "setMetricName", "metricName", Str),
@@ -100,6 +126,7 @@ evaluator!(
     RankingEvaluator,
     "RankingEvaluator",
     "(*, predictionCol='prediction', labelCol='label', metricName='meanAveragePrecision', k=10)",
+    "(self, *, predictionCol='prediction', labelCol='label', metricName='meanAveragePrecision', k=10)",
     (set_prediction_col, "setPredictionCol", "predictionCol", Str),
     (set_label_col, "setLabelCol", "labelCol", Str),
     (set_metric_name, "setMetricName", "metricName", Str),

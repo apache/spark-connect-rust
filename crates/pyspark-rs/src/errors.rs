@@ -53,6 +53,8 @@ pub(crate) fn not_expected_type(value: &Bound<'_, PyAny>, name: &str, expected: 
 fn kind_to_pyspark_class_name(kind: SparkErrorKind) -> &'static str {
     match kind {
         // PySpark builtin-like errors (these also subclass the Python builtins)
+        SparkErrorKind::BuiltinTypeError => "TypeError",
+        SparkErrorKind::BuiltinOverflowError => "OverflowError",
         SparkErrorKind::ValueError => "PySparkValueError",
         SparkErrorKind::BuiltinValueError => "ValueError",
         SparkErrorKind::TypeError => "PySparkTypeError",
@@ -318,6 +320,14 @@ pub fn spark_error_to_py_exception(err: SparkError) -> PyErr {
     if err.kind == SparkErrorKind::BuiltinValueError {
         // A builtin, as the `int()` or `urllib` of the connection string raises it.
         return exceptions::PyValueError::new_err(err.message());
+    }
+    if err.kind == SparkErrorKind::BuiltinTypeError {
+        // A builtin, as the protobuf of a plan's argument raises it.
+        return exceptions::PyTypeError::new_err(err.message());
+    }
+    if err.kind == SparkErrorKind::BuiltinOverflowError {
+        // A builtin, as the protobuf of a plan's int argument raises it.
+        return exceptions::PyOverflowError::new_err(err.message());
     }
     if let Some(value) = err.invalid_utf8_value() {
         return unicode_decode_error(&value, &err);

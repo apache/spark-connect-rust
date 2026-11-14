@@ -3,6 +3,21 @@
 use super::*;
 use spark_connect::ml::{FPGrowth, FPGrowthModel, PrefixSpan};
 
+const FPGROWTH_PARAMS: &[(&str, Kind)] = &[
+    ("itemsCol", Kind::Str),
+    ("minConfidence", Kind::Float),
+    ("minSupport", Kind::Float),
+    ("numPartitions", Kind::Int),
+    ("predictionCol", Kind::Str),
+];
+
+const PREFIX_SPAN_PARAMS: &[(&str, Kind)] = &[
+    ("maxLocalProjDBSize", Kind::Int),
+    ("maxPatternLength", Kind::Int),
+    ("minSupport", Kind::Float),
+    ("sequenceCol", Kind::Str),
+];
+
 #[pyclass(name = "FPGrowth", module = "pyspark.ml.connect.fpm")]
 pub struct PyFPGrowth {
     inner: FPGrowth,
@@ -35,21 +50,20 @@ impl PyFPGrowth {
             inner: FPGrowth::new(),
             unsendable: Vec::new(),
         };
-        init_params(
-            &mut this,
-            "FPGrowth",
-            &[],
-            &[
-                ("itemsCol", Kind::Str),
-                ("minConfidence", Kind::Float),
-                ("minSupport", Kind::Float),
-                ("numPartitions", Kind::Int),
-                ("predictionCol", Kind::Str),
-            ],
-            args,
-            kwargs,
-        )?;
+        init_params(&mut this, "FPGrowth", &[], FPGROWTH_PARAMS, args, kwargs)?;
         Ok(this)
+    }
+    #[pyo3(
+        name = "setParams",
+        signature = (*args, **kwargs),
+        text_signature = "(self, *, minSupport=0.3, minConfidence=0.8, itemsCol='items', predictionCol='prediction', numPartitions=None)"
+    )]
+    fn set_params<'py>(
+        slf: Bound<'py, Self>,
+        args: &Bound<'py, PyTuple>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_params_of(slf, "FPGrowth", FPGROWTH_PARAMS, args, kwargs)
     }
     #[pyo3(name = "setItemsCol")]
     fn set_items_col<'py>(
@@ -86,8 +100,14 @@ impl PyFPGrowth {
     ) -> PyResult<Bound<'py, Self>> {
         set_param(slf, "predictionCol", Kind::Str, value)
     }
-    fn fit(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<PyFPGrowthModel> {
-        let input = dataset_of(dataset, "fit", "select")?;
+    #[pyo3(signature = (dataset, params=None))]
+    fn fit(
+        slf: &Bound<'_, Self>,
+        dataset: &Bound<'_, PyAny>,
+        params: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyFPGrowthModel> {
+        check_fit_params(params)?;
+        let input = dataset_of(dataset, "fit")?;
         let mut estimator = snapshot(slf)?;
         let session = input.spark_session();
         let model = interruptible(slf.py(), &session, || {
@@ -146,8 +166,14 @@ impl PyFPGrowthModel {
     ) -> PyResult<Bound<'py, Self>> {
         set_param(slf, "predictionCol", Kind::Str, value)
     }
-    fn transform(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        let input = dataset_of(dataset, "transform", "columns")?;
+    #[pyo3(signature = (dataset, params=None))]
+    fn transform(
+        slf: &Bound<'_, Self>,
+        dataset: &Bound<'_, PyAny>,
+        params: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        check_params(params)?;
+        let input = dataset_of(dataset, "transform")?;
         let mut model = snapshot(slf)?;
         Ok(PyDataFrame::new(model.transform(&input).to_pyerr()?))
     }
@@ -199,16 +225,23 @@ impl PyPrefixSpan {
             &mut this,
             "PrefixSpan",
             &[],
-            &[
-                ("maxLocalProjDBSize", Kind::Int),
-                ("maxPatternLength", Kind::Int),
-                ("minSupport", Kind::Float),
-                ("sequenceCol", Kind::Str),
-            ],
+            PREFIX_SPAN_PARAMS,
             args,
             kwargs,
         )?;
         Ok(this)
+    }
+    #[pyo3(
+        name = "setParams",
+        signature = (*args, **kwargs),
+        text_signature = "(self, *, minSupport=0.1, maxPatternLength=10, maxLocalProjDBSize=32000000, sequenceCol='sequence')"
+    )]
+    fn set_params<'py>(
+        slf: Bound<'py, Self>,
+        args: &Bound<'py, PyTuple>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_params_of(slf, "PrefixSpan", PREFIX_SPAN_PARAMS, args, kwargs)
     }
     #[pyo3(name = "setMaxLocalProjDBSize")]
     fn set_max_local_proj_db_size<'py>(
@@ -243,7 +276,7 @@ impl PyPrefixSpan {
         slf: &Bound<'_, Self>,
         dataset: &Bound<'_, PyAny>,
     ) -> PyResult<PyDataFrame> {
-        let input = dataset_of(dataset, "findFrequentSequentialPatterns", "select")?;
+        let input = helper_dataset_of(dataset, "findFrequentSequentialPatterns")?;
         let algorithm = snapshot(slf)?;
         Ok(PyDataFrame::new(
             algorithm

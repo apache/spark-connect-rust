@@ -19,11 +19,10 @@ use spark_connect::ml::{
     AFTSurvivalRegression, BisectingKMeans, Classifier, CrossValidator, DecisionTreeClassifier,
     DecisionTreeRegressor, Estimator, Evaluator, FMClassifier, FMRegressor, GBTClassifier,
     GBTRegressor, GaussianMixture, GeneralizedLinearRegression, IsotonicRegression, KMeans,
-    LinearRegression, LinearSVC, LogisticRegression, MlOperator, MlVector, Model,
+    LinearRegression, LinearSVC, LogisticRegression, MlMatrix, MlVector, Model,
     MultilayerPerceptronClassifier, NaiveBayes, OneVsRest, Params, Pipeline,
     PowerIterationClustering, RandomForestClassifier, RandomForestRegressor, Transformer, LDA,
 };
-use spark_connect::types::StructField;
 use spark_connect::DataFrame;
 
 pub(crate) mod stat;
@@ -63,6 +62,9 @@ enum Kind {
     FloatListList,
     Identity,
     Vector,
+    /// `toMatrix`: the MatrixUDT struct literal of a `DenseMatrix` or a `SparseMatrix`, as the
+    /// `serialize_param` of `pyspark.ml.connect.serialize` sends it (see [`MlMatrix`]).
+    Matrix,
 }
 
 impl Kind {
@@ -78,6 +80,7 @@ impl Kind {
             Kind::Vector => "toVector",
             Kind::FloatListList => "toListListFloat",
             Kind::Identity => "identity",
+            Kind::Matrix => "toMatrix",
         }
     }
 }
@@ -102,6 +105,7 @@ enum Converted {
     Vector(MlVector),
     FloatListList(Vec<Vec<f64>>),
     Raw(Py<PyAny>),
+    Matrix(MlMatrix),
 }
 
 /// Convert `value` of the param `name` with its `TypeConverters` method, raising PySpark's
@@ -155,6 +159,36 @@ fn convert(name: &str, kind: Kind, value: &Bound<'_, PyAny>) -> PyResult<Convert
                 })
             } else {
                 Converted::Vector(MlVector::Dense(values))
+            }
+        }
+        Kind::Matrix => {
+            let linalg = py.import("pyspark.ml.linalg")?;
+            let num_rows = converted.getattr("numRows")?.extract()?;
+            let num_cols = converted.getattr("numCols")?.extract()?;
+            let values = converted
+                .getattr("values")?
+                .call_method0("tolist")?
+                .extract()?;
+            let is_transposed = converted.getattr("isTransposed")?.extract()?;
+            let array = |name| -> PyResult<Vec<i32>> {
+                converted.getattr(name)?.call_method0("tolist")?.extract()
+            };
+            if converted.is_instance(&linalg.getattr("SparseMatrix")?)? {
+                Converted::Matrix(MlMatrix::Sparse {
+                    num_rows,
+                    num_cols,
+                    col_ptrs: array("colPtrs")?,
+                    row_indices: array("rowIndices")?,
+                    values,
+                    is_transposed,
+                })
+            } else {
+                Converted::Matrix(MlMatrix::Dense {
+                    num_rows,
+                    num_cols,
+                    values,
+                    is_transposed,
+                })
             }
         }
     })
@@ -235,6 +269,7 @@ fn apply<T: Native>(target: &mut T, name: &'static str, value: Converted) {
                 .push((name, value));
             params.clear_param(jvm)
         }
+        Converted::Matrix(value) => params.set_param_matrix(jvm, value),
     };
     *target.params_mut() = params;
 }
@@ -255,10 +290,65 @@ where
     Ok(slf)
 }
 
+/// Bind the arguments of a call of `method` (`__init__` or `setParams`) of `class` to the params
+/// that it takes, as Python binds them: `positional` names the params taken by position, which
+/// are none for a keyword-only method, so that a positional argument raises the TypeError of
+/// PySpark's `@keyword_only`. `params` are the params that it takes. The values are returned
+/// with their kinds, unconverted, in the order that they are set.
+fn bind_params<'py>(
+    method: &str,
+    class: &str,
+    positional: &[&'static str],
+    params: &[(&'static str, Kind)],
+    args: &Bound<'py, PyTuple>,
+    kwargs: Option<&Bound<'py, PyDict>>,
+) -> PyResult<Vec<(&'static str, Kind, Bound<'py, PyAny>)>> {
+    if positional.is_empty() && !args.is_empty() {
+        return Err(PyTypeError::new_err(format!(
+            "Method {method} forces keyword arguments."
+        )));
+    }
+    if args.len() > positional.len() {
+        return Err(PyTypeError::new_err(format!(
+            "{class}.{method}() takes from 1 to {} positional arguments but {} were given",
+            positional.len() + 1,
+            args.len() + 1
+        )));
+    }
+    let mut given: Vec<(&'static str, Bound<'py, PyAny>)> =
+        positional.iter().copied().zip(args.iter()).collect();
+    if let Some(kwargs) = kwargs {
+        for (key, value) in kwargs.iter() {
+            let key = key.extract::<String>()?;
+            let Some(&(name, _)) = params.iter().find(|(name, _)| *name == key) else {
+                return Err(PyTypeError::new_err(format!(
+                    "{class}.{method}() got an unexpected keyword argument '{key}'"
+                )));
+            };
+            if given.iter().any(|(set, _)| *set == name) {
+                return Err(PyTypeError::new_err(format!(
+                    "{class}.{method}() got multiple values for argument '{name}'"
+                )));
+            }
+            given.push((name, value));
+        }
+    }
+    Ok(given
+        .into_iter()
+        .map(|(name, value)| {
+            let kind = params
+                .iter()
+                .find(|(param, _)| *param == name)
+                .map(|(_, kind)| *kind)
+                .expect("a bound param is a param");
+            (name, kind, value)
+        })
+        .collect())
+}
+
 /// Set the params that a constructor of `class` is given, as PySpark's `__init__` binds and
-/// `_set`s them. `positional` names the params taken by position: none for a keyword-only
-/// constructor, which raises the TypeError of PySpark's `@keyword_only` for a positional
-/// argument. `params` are the params that it takes.
+/// `_set`s them (see [`bind_params`]). `positional` names the params taken by position, and
+/// `params` are the params that it takes.
 fn init_params<T: Native>(
     target: &mut T,
     class: &str,
@@ -267,46 +357,88 @@ fn init_params<T: Native>(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<()> {
-    if positional.is_empty() && !args.is_empty() {
-        return Err(PyTypeError::new_err(
-            "Method __init__ forces keyword arguments.",
-        ));
-    }
-    if args.len() > positional.len() {
-        return Err(PyTypeError::new_err(format!(
-            "{class}.__init__() takes from 1 to {} positional arguments but {} were given",
-            positional.len() + 1,
-            args.len() + 1
-        )));
-    }
-    let mut given: Vec<(&'static str, Bound<'_, PyAny>)> =
-        positional.iter().copied().zip(args.iter()).collect();
-    if let Some(kwargs) = kwargs {
-        for (key, value) in kwargs.iter() {
-            let key = key.extract::<String>()?;
-            let Some(&(name, _)) = params.iter().find(|(name, _)| *name == key) else {
-                return Err(PyTypeError::new_err(format!(
-                    "{class}.__init__() got an unexpected keyword argument '{key}'"
-                )));
-            };
-            if given.iter().any(|(set, _)| *set == name) {
-                return Err(PyTypeError::new_err(format!(
-                    "{class}.__init__() got multiple values for argument '{name}'"
-                )));
-            }
-            given.push((name, value));
-        }
-    }
-    for (name, value) in given {
-        let kind = params
-            .iter()
-            .find(|(param, _)| *param == name)
-            .map(|(_, kind)| *kind)
-            .expect("a positional param is a param");
+    for (name, kind, value) in bind_params("__init__", class, positional, params, args, kwargs)? {
         let converted = convert(name, kind, &value)?;
         apply(target, name, converted);
     }
     Ok(())
+}
+
+/// `setParams` of `class`: as PySpark's `@keyword_only` binds it to `_set` (see [`bind_params`]),
+/// it sets the params that it is given, in order, and returns `slf`. As `_set`, a value that its
+/// converter rejects raises the TypeError after the params before it are set.
+fn set_params_of<'py, T>(
+    slf: Bound<'py, T>,
+    class: &str,
+    params: &[(&'static str, Kind)],
+    args: &Bound<'py, PyTuple>,
+    kwargs: Option<&Bound<'py, PyDict>>,
+) -> PyResult<Bound<'py, T>>
+where
+    T: Native + PyClass<Frozen = False>,
+{
+    for (name, kind, value) in bind_params("setParams", class, &[], params, args, kwargs)? {
+        // Converted before the borrow: the conversion runs Python code.
+        let converted = convert(name, kind, &value)?;
+        apply(&mut *slf.try_borrow_mut()?, name, converted);
+    }
+    Ok(slf)
+}
+
+/// The message of the TypeError of a fit, transform or evaluate whose `params` is a param map that
+/// the native classes cannot take. PySpark applies a non-empty map by copying the object with it,
+/// keyed by its Param objects, and the native classes have none; a list or tuple of maps is fitted
+/// as one model per map, which they do not do either.
+const NO_PARAM_MAP: &str = "The native ML classes take no param map: set their params with \
+     the constructor or setParams instead.";
+
+/// Whether the `params` of a fit, transform or evaluate overrides no param, as PySpark's
+/// `params is None` and `not params` of a dict do: None and an empty dict do. A non-empty dict
+/// raises the TypeError of [`NO_PARAM_MAP`].
+fn overrides_nothing(params: &Bound<'_, PyAny>) -> PyResult<bool> {
+    if params.is_none() {
+        return Ok(true);
+    }
+    match params.cast::<PyDict>() {
+        Ok(dict) if dict.is_empty() => Ok(true),
+        Ok(_) => Err(PyTypeError::new_err(NO_PARAM_MAP)),
+        Err(_) => Ok(false),
+    }
+}
+
+/// Check the `params` of a fit, as the `Estimator.fit` of `pyspark.ml` checks it, before the fit.
+/// It also takes a list or tuple of param maps, which it fits one model per map of: the native
+/// classes cannot, so it raises [`NO_PARAM_MAP`]. Any other value raises PySpark's TypeError.
+fn check_fit_params(params: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
+    let Some(params) = params else {
+        return Ok(());
+    };
+    if overrides_nothing(params)? {
+        return Ok(());
+    }
+    if params.is_instance_of::<PyList>() || params.is_instance_of::<PyTuple>() {
+        return Err(PyTypeError::new_err(NO_PARAM_MAP));
+    }
+    Err(PyTypeError::new_err(format!(
+        "Params must be either a param map or a list/tuple of param maps, but got {}.",
+        params.get_type()
+    )))
+}
+
+/// Check the `params` of a transform or an evaluate, as the `Transformer.transform` and
+/// `Evaluator.evaluate` of `pyspark.ml` check them, before the call: any value that is not a param
+/// map raises PySpark's TypeError.
+fn check_params(params: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
+    let Some(params) = params else {
+        return Ok(());
+    };
+    if overrides_nothing(params)? {
+        return Ok(());
+    }
+    Err(PyTypeError::new_err(format!(
+        "Params must be a param map but got {}.",
+        params.get_type()
+    )))
 }
 
 /// The core object of `slf`, cloned under a short borrow, so that a setter that another
@@ -355,154 +487,61 @@ fn reject_pandas(dataset: &Bound<'_, PyAny>, method: &str) -> PyResult<()> {
     Ok(())
 }
 
-/// The dataset of `method`, `dataset`. Another object raises the `AttributeError` of `attribute`,
-/// the attribute that PySpark reads of it first: `select` in a fit (by `select` of the columns
-/// that it reads) and an evaluate (by `aggregate_dataframe`), `columns` in a transform (by
-/// `Transformer._transform`). An object that has it raises a TypeError.
-fn dataset_of(dataset: &Bound<'_, PyAny>, method: &str, attribute: &str) -> PyResult<DataFrame> {
+/// The dataset of `method`, a Spark DataFrame. A pandas DataFrame raises the TypeError of
+/// [`reject_pandas`]. Another object raises the `AttributeError` of `sparkSession`, the attribute
+/// that `pyspark.ml` reads of the dataset first (`try_remote_fit`, `try_remote_transform_relation`
+/// and `try_remote_evaluate` of `pyspark.ml.util`), and an object that has it raises a TypeError.
+fn dataset_of(dataset: &Bound<'_, PyAny>, method: &str) -> PyResult<DataFrame> {
     if let Ok(df) = dataset.extract::<PyRef<'_, PyDataFrame>>() {
         return Ok(df.dataframe.clone());
     }
     reject_pandas(dataset, method)?;
-    dataset.getattr(attribute)?;
+    dataset.getattr("sparkSession")?;
     Err(PyTypeError::new_err(format!(
         "{method}() takes a Spark DataFrame, not '{}'",
         dataset.get_type().name()?
     )))
 }
 
-/// The columns that the fit of a class of PySpark's `pyspark.ml.connect` reads, as the params
-/// that name them, of their defaults: LogisticRegression's selects its features and its labels.
-type Reads = &'static [(&'static str, Option<&'static str>)];
-
-const LOGISTIC_REGRESSION_READS: Reads = &[
-    ("featuresCol", Some("features")),
-    ("labelCol", Some("label")),
-];
-
-/// The string param `name` of `params` if it is set, else `default`. None when it is set to
-/// another value (a null), or is not set and has no default, which the server rejects.
-fn string_or(params: &Params, name: &str, default: Option<&str>) -> Option<String> {
-    match params.get_param(name) {
-        Some(_) => string_param(params, name),
-        None => default.map(str::to_string),
+/// The dataset of `method`, a call of `pyspark.ml` that reads nothing of it, but sends it as an
+/// argument of a helper or attribute call (`invoke_helper_relation`, `try_remote_attribute_relation`),
+/// whose serialization converts a value that is not a DataFrame to a literal: such a value raises
+/// the `UNSUPPORTED_DATA_TYPE` of that conversion, and the server rejects another, which this client
+/// does not send but refuses with a TypeError. A pandas DataFrame raises the TypeError of
+/// [`reject_pandas`] first.
+pub(crate) fn helper_dataset_of(dataset: &Bound<'_, PyAny>, method: &str) -> PyResult<DataFrame> {
+    if let Ok(df) = dataset.extract::<PyRef<'_, PyDataFrame>>() {
+        return Ok(df.dataframe.clone());
     }
+    reject_pandas(dataset, method)?;
+    crate::functions::to_column(dataset)?;
+    Err(PyTypeError::new_err(format!(
+        "{method}() takes a Spark DataFrame, not '{}'",
+        dataset.get_type().name()?
+    )))
 }
 
-/// The names of the columns `reads` of `params` (see [`string_or`]), or None when one of them has
-/// none.
-fn read_columns(params: &Params, reads: Reads) -> Option<Vec<String>> {
-    reads
-        .iter()
-        .map(|&(name, default)| string_or(params, name, default))
-        .collect()
-}
-
-/// Fit a native estimator on a Spark DataFrame. Numeric array features are converted to ML
-/// vectors for the JVM estimator (see [`Vectors`]). When `reads` is provided, only those input
-/// columns are selected; otherwise the estimator receives the whole DataFrame.
+/// Fit a native estimator on `dataset`, a Spark DataFrame, as `try_remote_fit` of `pyspark.ml`
+/// fits it: the fit sends the params as they are given, and the JVM estimator reads its columns
+/// by those names exactly, and raises its own errors of their types (a featuresCol of a type that
+/// it does not take) and values (a label that is not a class index). `select` names the columns of
+/// the dataset that the fit sends; with None, the whole dataset is sent, as `pyspark.ml` sends it.
 fn fit_native<T>(
     slf: &Bound<'_, T>,
     dataset: &Bound<'_, PyAny>,
-    reads: Option<Reads>,
+    select: Option<&[&str]>,
 ) -> PyResult<PyMLModel>
 where
     T: Native + PyClass,
     T::Core: Estimator,
 {
-    fit_native_checked(slf, dataset, reads, |_, _, _| Ok(()))
-}
-
-/// [`fit_native`], which first runs `check` on the DataFrame that the fit sends, of the estimator
-/// `estimator`: the checks that PySpark's `_fit` makes of its dataset before it fits.
-fn fit_native_checked<T>(
-    slf: &Bound<'_, T>,
-    dataset: &Bound<'_, PyAny>,
-    reads: Option<Reads>,
-    check: impl FnOnce(Python<'_>, &T::Core, &DataFrame) -> PyResult<()>,
-) -> PyResult<PyMLModel>
-where
-    T: Native + PyClass,
-    T::Core: Estimator,
-{
-    let py = slf.py();
-    let df = dataset_of(dataset, "fit", "select")?;
-    let mut estimator = snapshot(slf)?;
-    let select = reads.and_then(|reads| read_columns(estimator.params(), reads));
-    let vectors = Vectors::of(estimator.operator(), estimator.params());
-    // Found in the schema of the whole DataFrame, which is read once for a fit and a transform
-    // of it: the selection keeps the columns as they are. The JVM estimator reads its columns by
-    // the spelling of the schema (see [`spell_param`]).
-    let labelled = estimator.params().get_param("labelCol").is_some();
-    let fields = if vectors.input.is_some() || labelled {
-        schema_fields(py, &df)?
-    } else {
-        Vec::new()
-    };
-    let array = vectors.input_field(&fields).filter(is_number_array);
-    let params = vectors.spell_features(std::mem::take(estimator.params_mut()), &fields);
-    *estimator.params_mut() = spell_param(params, &fields, "labelCol", None);
+    let df = dataset_of(dataset, "fit")?;
+    let estimator = snapshot(slf)?;
     let df = match select {
-        Some(columns) => df.select(
-            columns
-                .iter()
-                .map(|name| exact_column(spelling(&fields, name))),
-        ),
+        Some(columns) => df.select(columns.iter().map(|name| exact_column(name))),
         None => df,
     };
-    check(py, &estimator, &df)?;
-    let df = match array {
-        Some(field) => df.with_column(&field.name, vector_of(&field)),
-        None => df,
-    };
-    fit_core(py, estimator, &df)
-}
-
-/// The checks of the labels of a LogisticRegression fit, as PySpark's `_fit` makes them of the
-/// labels that its query collects: `collect_set` of the label column, which has the distinct
-/// labels and no null. There must be at least two, each an integer in `[0, numClasses)`, with
-/// PySpark's ValueErrors. PySpark's query also counts the rows and reads the size of the features,
-/// which these checks do not read, and array_size raises on the vector features that the native
-/// LogisticRegression takes, so that query is not sent.
-fn check_labels(py: Python<'_>, df: &DataFrame, label: &str) -> PyResult<()> {
-    use spark_connect::functions::{col, collect_set};
-    use spark_connect::row::Value;
-
-    let rows = interruptible(py, &df.spark_session(), || {
-        df.agg(vec![collect_set(col(label)).expression().clone()])
-            .collect()
-            .map_err(Box::new)
-    })?;
-    let classes = match rows.first().and_then(|row| row.get(0)) {
-        Some(Value::List(classes)) => classes.as_slice(),
-        _ => &[],
-    };
-    if classes.len() < 2 {
-        return Err(PyValueError::new_err(
-            "Training dataset distinct labels must >= 2.",
-        ));
-    }
-    // A label is in `range(0, numClasses)` as PySpark's `in` finds it: an integer, or a number
-    // that equals one (a bool is 0 or 1).
-    let integer = |value: i64| value >= 0 && value.unsigned_abs() < classes.len() as u64;
-    let number = |value: f64| value.fract() == 0.0 && value >= 0.0 && value < classes.len() as f64;
-    let in_range = classes.iter().all(|class| match class {
-        Value::Byte(v) => integer(i64::from(*v)),
-        Value::Short(v) => integer(i64::from(*v)),
-        Value::Integer(v) => integer(i64::from(*v)),
-        Value::Long(v) => integer(*v),
-        Value::Float(v) => number(f64::from(*v)),
-        Value::Double(v) => number(*v),
-        Value::Decimal { value, .. } => value.parse::<f64>().is_ok_and(number),
-        Value::Bool(v) => integer(i64::from(*v)),
-        _ => false,
-    });
-    if !in_range {
-        return Err(PyValueError::new_err(
-            "Training labels must be integers in [0, numClasses).",
-        ));
-    }
-    Ok(())
+    fit_core(slf.py(), estimator, &df)
 }
 
 /// The fit of a native estimator whose core cannot fit it, as Pipeline and CrossValidator.
@@ -540,270 +579,9 @@ fn fit_core<C: Estimator>(py: Python<'_>, mut estimator: C, df: &DataFrame) -> P
     })
 }
 
-/// The columns of a native estimator, and of the model of its fit, that the JVM reads as ML
-/// vectors, as their fit and transform send them, so that they take the columns of PySpark's
-/// `pyspark.ml.connect` classes, which compute with numpy and torch on arrays: an array of numbers
-/// of the `input` column is sent as a vector by `array_to_vector`, and a vector as it is.
-#[derive(Default)]
-struct Vectors {
-    input: Option<String>,
-}
-
-impl Vectors {
-    /// The vector column of the JVM estimator or model `operator`, of the params `params`, as
-    /// Spark's ML classes read it: those of the classification, regression and clustering packages
-    /// read the vector of their `featuresCol` (`features` unless set). Of the feature package, the
-    /// StringIndexer and the VectorAssembler read no vector.
-    fn of(operator: &spark_connect::ml::MlOperator, params: &Params) -> Self {
-        let class = operator
-            .name
-            .strip_suffix("Model")
-            .unwrap_or(&operator.name);
-        match class.strip_prefix("org.apache.spark.ml.feature.") {
-            Some(_) => Self::default(),
-            None => Self {
-                input: Some(
-                    string_param(params, "featuresCol").unwrap_or_else(|| "features".to_string()),
-                ),
-            },
-        }
-    }
-
-    /// The field of the `input` column in `fields`, the schema of a DataFrame, found regardless of
-    /// case as Spark resolves it, of any type. None when there is no `input`, or no such column.
-    fn input_field(&self, fields: &[StructField]) -> Option<StructField> {
-        let input = self.input.as_ref()?;
-        fields
-            .iter()
-            .find(|field| field.name.eq_ignore_ascii_case(input))
-            .cloned()
-    }
-
-    /// `params`, with the featuresCol spelled as the input column of `fields` is (see
-    /// [`spell_param`]), where the JVM estimator or model reads a vector of its featuresCol.
-    fn spell_features(&self, params: Params, fields: &[StructField]) -> Params {
-        match self.input {
-            Some(_) => spell_param(params, fields, "featuresCol", Some("features")),
-            None => params,
-        }
-    }
-}
-
-/// Whether `field` is an array of numbers, which an input column sends as its ML vector.
-fn is_number_array(field: &StructField) -> bool {
-    use spark_connect::types::DataType;
-
-    match &field.data_type {
-        DataType::Array { element_type, .. } => matches!(
-            **element_type,
-            DataType::Byte
-                | DataType::Short
-                | DataType::Integer
-                | DataType::Long
-                | DataType::Float
-                | DataType::Double
-                | DataType::Decimal { .. }
-        ),
-        _ => false,
-    }
-}
-
-/// `params`, whose string param `name` is spelled as the field of `fields` that it names. Spark
-/// resolves a column name regardless of case, but the JVM reads the param as it is given, so the
-/// param takes the spelling of the schema where the two differ. An unset param names `default`,
-/// and is set only where that differs too. Without a `default`, an unset param is left as it is.
-fn spell_param(
-    params: Params,
-    fields: &[StructField],
-    name: &str,
-    default: Option<&str>,
-) -> Params {
-    let Some(given) = string_or(&params, name, default) else {
-        return params;
-    };
-    let spelled = spelling(fields, &given);
-    if spelled == given {
-        params
-    } else {
-        params.set_param_string(name, spelled)
-    }
-}
-
-/// The spelling in `fields`, the schema of a DataFrame, of the column `name`, which Spark resolves
-/// regardless of case; `name` itself when `fields` has no such column.
-fn spelling<'a>(fields: &'a [StructField], name: &'a str) -> &'a str {
-    fields
-        .iter()
-        .find(|field| field.name.eq_ignore_ascii_case(name))
-        .map_or(name, |field| field.name.as_str())
-}
-
-/// The fields of the schema of `df`, read lazily, as a transform is, which is lazy as the
-/// transforms of PySpark's JVM models are: a schema that the server does not give (of a DataFrame
-/// too deep for it, say) is empty, and leaves the columns as they are, as the server raises its
-/// error when the transformed DataFrame is analyzed or run, as without the read. A signal raises.
-fn lazy_schema_fields(py: Python<'_>, df: &DataFrame) -> PyResult<Vec<StructField>> {
-    use spark_connect::types::DataType;
-
-    let session = df.spark_session();
-    match crate::interrupt::interruptible_outcome(py, &session, || df.schema().map_err(Box::new))? {
-        Ok(DataType::Struct { fields }) => Ok(fields),
-        _ => Ok(Vec::new()),
-    }
-}
-
-/// The ML vector of `field`, an array column of numbers: `array_to_vector` of it, which takes
-/// the arrays of the numbers that Spark casts up to doubles. An array of decimals, which it does
-/// not take, is cast to an `array<double>` first, as PySpark's MaxAbsScaler computes on decimals.
-fn vector_of(field: &spark_connect::types::StructField) -> spark_connect::Column {
-    use spark_connect::types::DataType;
-
-    let column = exact_column(&field.name);
-    array_to_vector(match &field.data_type {
-        DataType::Array { element_type, .. }
-            if matches!(**element_type, DataType::Decimal { .. }) =>
-        {
-            column.cast(DataType::Array {
-                element_type: Box::new(DataType::Double),
-                contains_null: true,
-            })
-        }
-        _ => column,
-    })
-}
-
-/// The string param `name` of `params`, if it is set to a string, as the core reads it (a null is
-/// not a string).
-fn string_param(params: &Params, name: &str) -> Option<String> {
-    use spark_connect_proto::expression::{literal::LiteralType, ExprType};
-
-    match params.get_param(name)?.expr_type.as_ref()? {
-        ExprType::Literal(literal) => match literal.literal_type.as_ref()? {
-            LiteralType::String(value) => Some(value.clone()),
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
-/// The fields of the schema of `df`, which is read from the server once (and then cached).
-fn schema_fields(
-    py: Python<'_>,
-    df: &DataFrame,
-) -> PyResult<Vec<spark_connect::types::StructField>> {
-    use spark_connect::types::DataType;
-
-    let schema = interruptible(py, &df.spark_session(), || df.schema().map_err(Box::new))?;
-    Ok(match schema {
-        DataType::Struct { fields } => fields,
-        _ => Vec::new(),
-    })
-}
-
 /// The column of the name `name` exactly, a name with a dot too.
 fn exact_column(name: &str) -> spark_connect::Column {
     spark_connect::column::col(&format!("`{}`", name.replace('`', "``")))
-}
-
-/// `array_to_vector` of `column`, the ML vector of an array of numbers.
-fn array_to_vector(column: spark_connect::Column) -> spark_connect::Column {
-    spark_connect::Column::new(spark_connect::expression::Expression::function(
-        "array_to_vector",
-        vec![column.expression().clone()],
-    ))
-}
-
-/// `vector_to_array` of the column `name`, of PySpark's default dtype `float64`: the
-/// `array<double>` of an ML vector.
-fn vector_to_array(name: &str) -> spark_connect::Column {
-    spark_connect::Column::new(spark_connect::expression::Expression::function(
-        "vector_to_array",
-        vec![
-            exact_column(name).expression().clone(),
-            spark_connect::column::lit_string("float64")
-                .expression()
-                .clone(),
-        ],
-    ))
-}
-
-/// The `array<double>` of the ML vector column `name`, of the values of `vector_to_array`, as a
-/// `pandas_udf` of PySpark's `transform_dataframe_column` outputs it: a nullable column of
-/// nullable elements (`containsNull`), where `vector_to_array` is of neither. Its elements are
-/// cast to nullable doubles, and it is the array where the vector is not null, else null.
-fn vector_array(name: &str) -> spark_connect::Column {
-    use spark_connect::types::DataType;
-
-    spark_connect::column::when(
-        exact_column(name).is_not_null(),
-        vector_to_array(name).cast(DataType::Array {
-            element_type: Box::new(DataType::Double),
-            contains_null: true,
-        }),
-    )
-}
-
-/// The model of a class of PySpark's `pyspark.ml.connect`, LogisticRegression, whose transform
-/// outputs what PySpark's `Transformer._transform` outputs: the columns of its `_output_columns`,
-/// of their types and in their order, appended to the dataset, which may not have any of them
-/// already. The other native models, of the classes that PySpark's `pyspark.ml.connect` does not
-/// have, output what their JVM models output, which check it.
-enum PySparkModel {
-    /// LogisticRegressionModel: of its `featuresCol`, and its `bigint` prediction, and its
-    /// `array<double>` probability unless its `probabilityCol` is empty (PySpark's `if prob_col`),
-    /// of which the JVM model, whose rawPredictionCol is empty (see [`PyLogisticRegression`]),
-    /// outputs no raw prediction. (A null column param, which the server rejects, fits no model.)
-    LogisticRegression {
-        prediction: Option<String>,
-        probability: Option<String>,
-    },
-}
-
-impl PySparkModel {
-    fn of(operator: &MlOperator, params: &Params) -> Option<Self> {
-        match operator.name.as_str() {
-            "org.apache.spark.ml.classification.LogisticRegressionModel" => {
-                // An empty output column is not output, as by PySpark's `if prob_col`.
-                let output = |name, default| {
-                    string_or(params, name, Some(default)).filter(|name| !name.is_empty())
-                };
-                Some(Self::LogisticRegression {
-                    prediction: output("predictionCol", "prediction"),
-                    probability: output("probabilityCol", "probability"),
-                })
-            }
-            _ => None,
-        }
-    }
-
-    /// The columns that PySpark's transform appends, in their order (`_output_columns`).
-    fn outputs(&self) -> Vec<String> {
-        match self {
-            Self::LogisticRegression {
-                prediction,
-                probability,
-                ..
-            } => prediction.iter().chain(probability).cloned().collect(),
-        }
-    }
-
-    /// PySpark's ValueError of `Transformer._transform` of an output column that `dataset` has
-    /// already: one of `list(dataset.columns)`, of their exact names, before any transform.
-    fn check_outputs(&self, dataset: &Bound<'_, PyAny>) -> PyResult<()> {
-        let existing = dataset
-            .py()
-            .get_type::<PyList>()
-            .call1((dataset.getattr("columns")?,))?;
-        for output in self.outputs() {
-            if existing.contains(output)? {
-                return Err(PyValueError::new_err(
-                    "Transformers does not allow output column having the same name with \
-                     existing columns.",
-                ));
-            }
-        }
-        Ok(())
-    }
 }
 
 /// A fitted ML model (result of `Estimator.fit`), wrapping a boxed core `Model`.
@@ -816,75 +594,29 @@ pub struct PyMLModel {
 
 #[pymethods]
 impl PyMLModel {
-    /// Apply the model to a Spark DataFrame. LogisticRegression checks for existing output
-    /// columns before constructing the transform (see [`PySparkModel`]).
-    fn transform(&self, py: Python<'_>, dataset: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        let input = dataset_of(dataset, "transform", "columns")?;
-        let pyspark = PySparkModel::of(self.model.operator(), self.model.params());
-        if let Some(model) = &pyspark {
-            model.check_outputs(dataset)?;
-        }
-        Ok(PyDataFrame::new(self.transform_dataframe(
-            py,
-            &input,
-            pyspark.as_ref(),
-        )?))
+    /// Apply the model to `dataset`, a Spark DataFrame, as `try_remote_transform_relation` of
+    /// `pyspark.ml` sends it, with the output columns of the JVM model: it raises its own error
+    /// of an input column that it cannot read, or of an output column that the dataset has
+    /// already, when the transformed DataFrame is analyzed or run.
+    #[pyo3(signature = (dataset, params=None))]
+    fn transform(
+        &self,
+        py: Python<'_>,
+        dataset: &Bound<'_, PyAny>,
+        params: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDataFrame> {
+        check_params(params)?;
+        let input = dataset_of(dataset, "transform")?;
+        Ok(PyDataFrame::new(self.transform_dataframe(py, &input)?))
     }
 }
 
 impl PyMLModel {
-    /// The transform of the DataFrame `df`. As PySpark's models of `pyspark.ml.connect`, it takes
-    /// an array of numbers where the JVM model reads a vector, and keeps that column as it is in
-    /// its output (see [`Vectors`]). A LogisticRegression model outputs PySpark's `bigint`
-    /// prediction, and then its `array<double>` probability, of the vector that the JVM model
-    /// outputs in a column of its own, before its prediction.
-    fn transform_dataframe(
-        &self,
-        py: Python<'_>,
-        df: &DataFrame,
-        pyspark: Option<&PySparkModel>,
-    ) -> PyResult<DataFrame> {
-        use spark_connect::types::DataType;
-
+    /// The transform of the DataFrame `df` by the JVM model, of `df` as it is.
+    fn transform_dataframe(&self, py: Python<'_>, df: &DataFrame) -> PyResult<DataFrame> {
         let mut model = self.model.clone_box();
         let session = df.spark_session();
-        let vectors = Vectors::of(model.operator(), model.params());
-        // The JVM model reads its featuresCol by the spelling of the schema of the input.
-        let fields = if vectors.input.is_some() {
-            lazy_schema_fields(py, df)?
-        } else {
-            Vec::new()
-        };
-        let params = std::mem::take(model.params_mut());
-        *model.params_mut() = vectors.spell_features(params, &fields);
-        // The JVM model appends its probability vector before its prediction: it is output in a
-        // column of its own, whose array is appended after the prediction, as PySpark's is.
-        let probability = match pyspark {
-            Some(PySparkModel::LogisticRegression {
-                probability: Some(probability),
-                ..
-            }) => {
-                let vector = format!("{}__probability", model.operator().uid);
-                let params = std::mem::take(model.params_mut());
-                *model.params_mut() = params.set_param_string("probabilityCol", &vector);
-                Some((probability.clone(), vector))
-            }
-            _ => None,
-        };
-        // An array input is sent as its vector, which the JVM model reads, and kept as it is in a
-        // column of its own, which takes its place again in the output.
-        let array = vectors
-            .input_field(&fields)
-            .filter(is_number_array)
-            .map(|field| (format!("{}__input", model.operator().uid), field));
-        let input = match &array {
-            Some((kept, field)) => df.with_columns(vec![
-                (kept.clone(), exact_column(&field.name)),
-                (field.name.clone(), vector_of(field)),
-            ]),
-            None => df.clone(),
-        };
-        let out = if session.session_id() != self.session_id {
+        if session.session_id() != self.session_id {
             // As PySpark, the transform of a DataFrame of another session refers to the model
             // on the server of that session, which raises CONNECT_ML.CACHE_INVALID when the
             // DataFrame is analyzed or run, as it caches no such model. (The Rust API rejects
@@ -892,55 +624,22 @@ impl PyMLModel {
             // plans of `pyspark.ml`: the core resolves it, counting its levels for the depth
             // bound, where an input put in whole would count as one level.
             let placeholder =
-                DataFrame::from_sent_relation(session.clone(), input.placeholder_relation());
+                DataFrame::from_sent_relation(session.clone(), df.placeholder_relation());
             let relation = spark_connect_proto::Relation {
                 rel_type: Some(spark_connect_proto::relation::RelType::MlRelation(
                     Box::new(model.build_ml_relation(&placeholder).to_pyerr()?),
                 )),
                 ..Default::default()
             };
-            DataFrame::from_relation(session, relation, None).to_pyerr()?
+            DataFrame::from_relation(session, relation, None).to_pyerr()
         } else {
-            py.detach(|| model.transform(&input).map_err(Box::new))
-                .to_pyerr()?
-        };
-        // The JVM model appends its output columns, and keeps the columns of its input, in place.
-        // The columns that take the place of others keep it, and the others are appended in
-        // their order, as by PySpark's `withColumns` of its outputs.
-        let mut columns = Vec::new();
-        let mut dropped = Vec::new();
-        if let Some((kept, field)) = &array {
-            columns.push((field.name.clone(), exact_column(kept)));
-            dropped.push(kept.as_str());
+            py.detach(|| model.transform(df).map_err(Box::new))
+                .to_pyerr()
         }
-        if let Some(PySparkModel::LogisticRegression {
-            prediction: Some(prediction),
-            ..
-        }) = pyspark
-        {
-            columns.push((
-                prediction.clone(),
-                exact_column(prediction).cast(DataType::Long),
-            ));
-        }
-        if let Some((probability, vector)) = &probability {
-            columns.push((probability.clone(), vector_array(vector)));
-            dropped.push(vector.as_str());
-        }
-        let out = if columns.is_empty() {
-            out
-        } else {
-            out.with_columns(columns)
-        };
-        Ok(if dropped.is_empty() {
-            out
-        } else {
-            out.drop(dropped)
-        })
     }
 }
 
-/// LogisticRegression estimator.
+/// LogisticRegression estimator, of the params of `pyspark.ml.classification.LogisticRegression`.
 #[pyclass(
     name = "LogisticRegression",
     module = "pyspark.ml.connect.classification"
@@ -950,35 +649,127 @@ pub struct PyLogisticRegression {
     unsendable: Vec<&'static str>,
 }
 
-/// The params of LogisticRegression, in the order of PySpark's constructor, which also takes the
-/// params of its PyTorch training, `numTrainWorkers`, `batchSize`, `learningRate`, `momentum` and
-/// `seed`. The L-BFGS of the JVM estimator has none of them, so the constructor raises the TypeError
-/// of an unexpected keyword argument for them, rather than take a value that no fit would use.
+/// The params of `pyspark.ml.classification.LogisticRegression`, in the order of its constructor,
+/// with the `TypeConverters` of each: its bounds on the coefficients are matrices, and its bounds on
+/// the intercepts vectors.
 const LOGISTIC_REGRESSION_PARAMS: &[(&str, Kind)] = &[
     ("featuresCol", Kind::Str),
     ("labelCol", Kind::Str),
     ("predictionCol", Kind::Str),
-    ("probabilityCol", Kind::Str),
     ("maxIter", Kind::Int),
+    ("regParam", Kind::Float),
+    ("elasticNetParam", Kind::Float),
     ("tol", Kind::Float),
+    ("fitIntercept", Kind::Bool),
+    ("threshold", Kind::Float),
+    ("thresholds", Kind::FloatList),
+    ("probabilityCol", Kind::Str),
+    ("rawPredictionCol", Kind::Str),
+    ("standardization", Kind::Bool),
+    ("weightCol", Kind::Str),
+    ("aggregationDepth", Kind::Int),
+    ("family", Kind::Str),
+    ("lowerBoundsOnCoefficients", Kind::Matrix),
+    ("upperBoundsOnCoefficients", Kind::Matrix),
+    ("lowerBoundsOnIntercepts", Kind::Vector),
+    ("upperBoundsOnIntercepts", Kind::Vector),
+    ("maxBlockSizeInMB", Kind::Float),
 ];
+
+/// The value of the param `name` of `params` that is set, as PySpark's `getOrDefault` reads a set
+/// param: None when it is not set, `Some(None)` when it is set to None (a null).
+fn set_literal<'a>(
+    params: &'a Params,
+    name: &str,
+) -> Option<Option<&'a spark_connect_proto::expression::literal::LiteralType>> {
+    use spark_connect_proto::expression::{literal::LiteralType, ExprType};
+
+    match params.get_param(name)?.expr_type.as_ref() {
+        Some(ExprType::Literal(literal)) => match literal.literal_type.as_ref() {
+            Some(LiteralType::Null(_)) | None => Some(None),
+            value => Some(value),
+        },
+        _ => Some(None),
+    }
+}
+
+/// `_checkThresholdConsistency` of PySpark's LogisticRegression, which its constructor and its
+/// `setParams` make once they have set the params that they are given, of the params of `params`:
+/// when both `threshold` and `thresholds` are set, `thresholds` must have two values, whose
+/// equivalent threshold, `1 / (1 + thresholds[0] / thresholds[1])`, is `threshold` within 1e-5,
+/// else PySpark's ValueError, which leaves them set, as PySpark's `_set` does. A None of either,
+/// and a division by zero, raise the TypeError and the ZeroDivisionError of PySpark's arithmetic.
+/// (Its setters make no check, as PySpark's, whose `clear` of the other is a no-op over Connect.)
+fn check_threshold_consistency(py: Python<'_>, params: &Params) -> PyResult<()> {
+    use pyo3::exceptions::PyZeroDivisionError;
+    use spark_connect_proto::expression::literal::LiteralType;
+
+    let (Some(threshold), Some(thresholds)) = (
+        set_literal(params, "threshold"),
+        set_literal(params, "thresholds"),
+    ) else {
+        return Ok(());
+    };
+    let Some(LiteralType::Array(thresholds)) = thresholds else {
+        return Err(PyTypeError::new_err(
+            "object of type 'NoneType' has no len()",
+        ));
+    };
+    let ts: Vec<f64> = thresholds
+        .elements
+        .iter()
+        .filter_map(|element| match element.literal_type {
+            Some(LiteralType::Double(value)) => Some(value),
+            _ => None,
+        })
+        .collect();
+    if ts.len() != 2 {
+        return Err(PyValueError::new_err(format!(
+            "Logistic Regression getThreshold only applies to binary classification, but \
+             thresholds has length != 2. thresholds: {}",
+            PyList::new(py, &ts)?.str()?
+        )));
+    }
+    let division = || PyZeroDivisionError::new_err("float division by zero");
+    if ts[1] == 0.0 {
+        return Err(division());
+    }
+    let denominator = 1.0 + ts[0] / ts[1];
+    if denominator == 0.0 {
+        return Err(division());
+    }
+    let t = 1.0 / denominator;
+    let Some(&LiteralType::Double(t2)) = threshold else {
+        return Err(PyTypeError::new_err(
+            "unsupported operand type(s) for -: 'NoneType' and 'float'",
+        ));
+    };
+    if (t2 - t).abs() >= 1e-5 {
+        // Of PySpark's `%g`s.
+        let message = pyo3::types::PyString::new(
+            py,
+            "Logistic Regression getThreshold found inconsistent values for threshold (%g) and \
+             thresholds (equivalent to %g)",
+        )
+        .call_method1("__mod__", ((t2, t),))?
+        .extract::<String>()?;
+        return Err(PyValueError::new_err(message));
+    }
+    Ok(())
+}
 
 #[pymethods]
 impl PyLogisticRegression {
     #[new]
     #[pyo3(
         signature = (*args, **kwargs),
-        text_signature = "(*, featuresCol='features', labelCol='label', predictionCol='prediction', probabilityCol='probability', maxIter=100, tol=1e-06)"
+        text_signature = "(*, featuresCol='features', labelCol='label', predictionCol='prediction', maxIter=100, regParam=0.0, elasticNetParam=0.0, tol=1e-06, fitIntercept=True, threshold=0.5, thresholds=None, probabilityCol='probability', rawPredictionCol='rawPrediction', standardization=True, weightCol=None, aggregationDepth=2, family='auto', lowerBoundsOnCoefficients=None, upperBoundsOnCoefficients=None, lowerBoundsOnIntercepts=None, upperBoundsOnIntercepts=None, maxBlockSizeInMB=0.0)"
     )]
     fn new(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
         let mut this = Self {
             inner: LogisticRegression::new(),
             unsendable: Vec::new(),
         };
-        // As PySpark's, whose model outputs no raw prediction: the JVM model outputs none of an
-        // empty rawPredictionCol, a param that PySpark's LogisticRegression does not have, so that
-        // a dataset with a `rawPrediction` column is fitted and transformed, as with PySpark.
-        apply(&mut this, "rawPredictionCol", Converted::Str(String::new()));
         init_params(
             &mut this,
             "LogisticRegression",
@@ -987,7 +778,31 @@ impl PyLogisticRegression {
             args,
             kwargs,
         )?;
+        check_threshold_consistency(args.py(), this.inner.params())?;
         Ok(this)
+    }
+    /// `setParams` of PySpark's LogisticRegression: as its constructor, it sets the params that it
+    /// is given (see [`set_params_of`]), then checks `threshold` and `thresholds`, whichever call
+    /// set them (see [`check_threshold_consistency`]).
+    #[pyo3(
+        name = "setParams",
+        signature = (*args, **kwargs),
+        text_signature = "(self, *, featuresCol='features', labelCol='label', predictionCol='prediction', maxIter=100, regParam=0.0, elasticNetParam=0.0, tol=1e-06, fitIntercept=True, threshold=0.5, thresholds=None, probabilityCol='probability', rawPredictionCol='rawPrediction', standardization=True, weightCol=None, aggregationDepth=2, family='auto', lowerBoundsOnCoefficients=None, upperBoundsOnCoefficients=None, lowerBoundsOnIntercepts=None, upperBoundsOnIntercepts=None, maxBlockSizeInMB=0.0)"
+    )]
+    fn set_params<'py>(
+        slf: Bound<'py, Self>,
+        args: &Bound<'py, PyTuple>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Bound<'py, Self>> {
+        let slf = set_params_of(
+            slf,
+            "LogisticRegression",
+            LOGISTIC_REGRESSION_PARAMS,
+            args,
+            kwargs,
+        )?;
+        check_threshold_consistency(slf.py(), slf.try_borrow()?.inner.params())?;
+        Ok(slf)
     }
     #[pyo3(name = "setFeaturesCol")]
     fn set_features_col<'py>(
@@ -1024,6 +839,116 @@ impl PyLogisticRegression {
     ) -> PyResult<Bound<'py, Self>> {
         set_param(slf, "maxIter", Kind::Int, value)
     }
+    #[pyo3(name = "setRegParam")]
+    fn set_reg_param<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "regParam", Kind::Float, value)
+    }
+    #[pyo3(name = "setElasticNetParam")]
+    fn set_elastic_net_param<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "elasticNetParam", Kind::Float, value)
+    }
+    #[pyo3(name = "setFitIntercept")]
+    fn set_fit_intercept<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "fitIntercept", Kind::Bool, value)
+    }
+    /// Set `threshold`, and leave `thresholds` as it is, as PySpark's does over Spark Connect,
+    /// where the `clear` of `JavaParams` does nothing: a fit sends both, which the JVM checks.
+    #[pyo3(name = "setThreshold")]
+    fn set_threshold<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "threshold", Kind::Float, value)
+    }
+    /// Set `thresholds`, and leave `threshold` as it is, as `setThresholds` of PySpark's
+    /// `ProbabilisticClassifier`, which LogisticRegression's is: a fit sends both, which the JVM
+    /// checks.
+    #[pyo3(name = "setThresholds")]
+    fn set_thresholds<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "thresholds", Kind::FloatList, value)
+    }
+    #[pyo3(name = "setRawPredictionCol")]
+    fn set_raw_prediction_col<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "rawPredictionCol", Kind::Str, value)
+    }
+    #[pyo3(name = "setStandardization")]
+    fn set_standardization<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "standardization", Kind::Bool, value)
+    }
+    #[pyo3(name = "setWeightCol")]
+    fn set_weight_col<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "weightCol", Kind::Str, value)
+    }
+    #[pyo3(name = "setAggregationDepth")]
+    fn set_aggregation_depth<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "aggregationDepth", Kind::Int, value)
+    }
+    #[pyo3(name = "setFamily")]
+    fn set_family<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "family", Kind::Str, value)
+    }
+    #[pyo3(name = "setLowerBoundsOnCoefficients")]
+    fn set_lower_bounds_on_coefficients<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "lowerBoundsOnCoefficients", Kind::Matrix, value)
+    }
+    #[pyo3(name = "setUpperBoundsOnCoefficients")]
+    fn set_upper_bounds_on_coefficients<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "upperBoundsOnCoefficients", Kind::Matrix, value)
+    }
+    #[pyo3(name = "setLowerBoundsOnIntercepts")]
+    fn set_lower_bounds_on_intercepts<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "lowerBoundsOnIntercepts", Kind::Vector, value)
+    }
+    #[pyo3(name = "setUpperBoundsOnIntercepts")]
+    fn set_upper_bounds_on_intercepts<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "upperBoundsOnIntercepts", Kind::Vector, value)
+    }
+    #[pyo3(name = "setMaxBlockSizeInMB")]
+    fn set_max_block_size_in_mb<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "maxBlockSizeInMB", Kind::Float, value)
+    }
     #[pyo3(name = "setTol")]
     fn set_tol<'py>(
         slf: Bound<'py, Self>,
@@ -1031,15 +956,17 @@ impl PyLogisticRegression {
     ) -> PyResult<Bound<'py, Self>> {
         set_param(slf, "tol", Kind::Float, value)
     }
-    /// Fit `dataset`, of which the fit reads the features and the labels, as PySpark's (see
-    /// [`fit_native`]).
-    fn fit(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<PyMLModel> {
-        fit_native_checked(
-            slf,
-            dataset,
-            Some(LOGISTIC_REGRESSION_READS),
-            |py, estimator, df| check_labels(py, df, estimator.label_col()),
-        )
+    /// Fit `dataset`, a Spark DataFrame, as PySpark's `pyspark.ml` fits it (see [`fit_native`]):
+    /// its model outputs the JVM model's `rawPrediction` and `probability` vectors and `double`
+    /// prediction.
+    #[pyo3(signature = (dataset, params=None))]
+    fn fit(
+        slf: &Bound<'_, Self>,
+        dataset: &Bound<'_, PyAny>,
+        params: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyMLModel> {
+        check_fit_params(params)?;
+        fit_native(slf, dataset, None)
     }
 }
 
@@ -1077,6 +1004,18 @@ impl PyLinearSVC {
         };
         init_params(&mut this, "LinearSVC", &[], LINEAR_SVC_PARAMS, args, kwargs)?;
         Ok(this)
+    }
+    #[pyo3(
+        name = "setParams",
+        signature = (*args, **kwargs),
+        text_signature = "(self, *, featuresCol='features', labelCol='label', predictionCol='prediction', maxIter=100, regParam=0.0, tol=1e-06, rawPredictionCol='rawPrediction', fitIntercept=True, standardization=True, threshold=0.0, weightCol=None, aggregationDepth=2, maxBlockSizeInMB=0.0)"
+    )]
+    fn set_params<'py>(
+        slf: Bound<'py, Self>,
+        args: &Bound<'py, PyTuple>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_params_of(slf, "LinearSVC", LINEAR_SVC_PARAMS, args, kwargs)
     }
 
     #[pyo3(name = "setFeaturesCol")]
@@ -1183,7 +1122,13 @@ impl PyLinearSVC {
         set_param(slf, "maxBlockSizeInMB", Kind::Float, value)
     }
 
-    fn fit(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<PyMLModel> {
+    #[pyo3(signature = (dataset, params=None))]
+    fn fit(
+        slf: &Bound<'_, Self>,
+        dataset: &Bound<'_, PyAny>,
+        params: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyMLModel> {
+        check_fit_params(params)?;
         fit_native(slf, dataset, None)
     }
 }
@@ -1233,6 +1178,18 @@ impl PyFMClassifier {
             kwargs,
         )?;
         Ok(this)
+    }
+    #[pyo3(
+        name = "setParams",
+        signature = (*args, **kwargs),
+        text_signature = "(self, *, featuresCol='features', labelCol='label', predictionCol='prediction', probabilityCol='probability', rawPredictionCol='rawPrediction', factorSize=8, fitIntercept=True, fitLinear=True, regParam=0.0, miniBatchFraction=1.0, initStd=0.01, maxIter=100, stepSize=1.0, tol=1e-06, solver='adamW', thresholds=None, seed=None)"
+    )]
+    fn set_params<'py>(
+        slf: Bound<'py, Self>,
+        args: &Bound<'py, PyTuple>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_params_of(slf, "FMClassifier", FMCLASSIFIER_PARAMS, args, kwargs)
     }
 
     #[pyo3(name = "setFeaturesCol")]
@@ -1371,7 +1328,13 @@ impl PyFMClassifier {
         set_param(slf, "seed", Kind::Int, value)
     }
 
-    fn fit(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<PyMLModel> {
+    #[pyo3(signature = (dataset, params=None))]
+    fn fit(
+        slf: &Bound<'_, Self>,
+        dataset: &Bound<'_, PyAny>,
+        params: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyMLModel> {
+        check_fit_params(params)?;
         fit_native(slf, dataset, None)
     }
 }
@@ -1420,6 +1383,24 @@ impl PyMultilayerPerceptronClassifier {
             kwargs,
         )?;
         Ok(this)
+    }
+    #[pyo3(
+        name = "setParams",
+        signature = (*args, **kwargs),
+        text_signature = "(self, *, featuresCol='features', labelCol='label', predictionCol='prediction', maxIter=100, tol=1e-06, seed=None, layers=None, blockSize=128, stepSize=0.03, solver='l-bfgs', initialWeights=None, probabilityCol='probability', rawPredictionCol='rawPrediction')"
+    )]
+    fn set_params<'py>(
+        slf: Bound<'py, Self>,
+        args: &Bound<'py, PyTuple>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_params_of(
+            slf,
+            "MultilayerPerceptronClassifier",
+            MULTILAYER_PERCEPTRON_CLASSIFIER_PARAMS,
+            args,
+            kwargs,
+        )
     }
 
     #[pyo3(name = "setFeaturesCol")]
@@ -1534,7 +1515,13 @@ impl PyMultilayerPerceptronClassifier {
         set_param(slf, "thresholds", Kind::FloatList, value)
     }
 
-    fn fit(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<PyMLModel> {
+    #[pyo3(signature = (dataset, params=None))]
+    fn fit(
+        slf: &Bound<'_, Self>,
+        dataset: &Bound<'_, PyAny>,
+        params: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyMLModel> {
+        check_fit_params(params)?;
         fit_native(slf, dataset, None)
     }
 }
@@ -1585,6 +1572,33 @@ impl PyOneVsRest {
             remaining.as_ref(),
         )?;
         Ok(this)
+    }
+
+    #[pyo3(
+        name = "setParams",
+        signature = (*args, **kwargs),
+        text_signature = "(self, *, featuresCol='features', labelCol='label', predictionCol='prediction', rawPredictionCol='rawPrediction', classifier=None, weightCol=None, parallelism=1)"
+    )]
+    fn set_params<'py>(
+        slf: Bound<'py, Self>,
+        args: &Bound<'py, PyTuple>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Bound<'py, Self>> {
+        // The classifier is no param, and as in the constructor, it is set by setClassifier.
+        let remaining = kwargs.map(|kw| kw.copy()).transpose()?;
+        if let Some(kw) = &remaining {
+            if let Some(classifier) = kw.get_item("classifier")? {
+                Self::set_classifier(slf.clone(), &classifier)?;
+                kw.del_item("classifier")?;
+            }
+        }
+        set_params_of(
+            slf,
+            "OneVsRest",
+            ONE_VS_REST_PARAMS,
+            args,
+            remaining.as_ref(),
+        )
     }
 
     #[pyo3(name = "setFeaturesCol")]
@@ -1649,7 +1663,13 @@ impl PyOneVsRest {
         Ok(slf)
     }
 
-    fn fit(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<PyMLModel> {
+    #[pyo3(signature = (dataset, params=None))]
+    fn fit(
+        slf: &Bound<'_, Self>,
+        dataset: &Bound<'_, PyAny>,
+        params: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyMLModel> {
+        check_fit_params(params)?;
         reject_pandas(dataset, "fit")?;
         let classifier = slf
             .try_borrow()?
@@ -1795,6 +1815,24 @@ impl PyLinearRegression {
         )?;
         Ok(this)
     }
+    #[pyo3(
+        name = "setParams",
+        signature = (*args, **kwargs),
+        text_signature = "(self, *, featuresCol='features', labelCol='label', predictionCol='prediction', maxIter=100, regParam=0.0, elasticNetParam=0.0, tol=1e-06, fitIntercept=True, standardization=True, solver='auto', weightCol=None, aggregationDepth=2, loss='squaredError', epsilon=1.35, maxBlockSizeInMB=0.0)"
+    )]
+    fn set_params<'py>(
+        slf: Bound<'py, Self>,
+        args: &Bound<'py, PyTuple>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_params_of(
+            slf,
+            "LinearRegression",
+            LINEAR_REGRESSION_PARAMS,
+            args,
+            kwargs,
+        )
+    }
 
     #[pyo3(name = "setFeaturesCol")]
     fn set_feature_col<'py>(
@@ -1916,7 +1954,13 @@ impl PyLinearRegression {
         set_param(slf, "maxBlockSizeInMB", Kind::Float, value)
     }
 
-    fn fit(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<PyMLModel> {
+    #[pyo3(signature = (dataset, params=None))]
+    fn fit(
+        slf: &Bound<'_, Self>,
+        dataset: &Bound<'_, PyAny>,
+        params: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyMLModel> {
+        check_fit_params(params)?;
         fit_native(slf, dataset, None)
     }
 }
@@ -1968,6 +2012,24 @@ impl PyGeneralizedLinearRegression {
             kwargs,
         )?;
         Ok(this)
+    }
+    #[pyo3(
+        name = "setParams",
+        signature = (*args, **kwargs),
+        text_signature = "(self, *, labelCol='label', featuresCol='features', predictionCol='prediction', family='gaussian', link=None, fitIntercept=True, maxIter=25, tol=1e-06, regParam=0.0, weightCol=None, solver='irls', linkPredictionCol=None, variancePower=0.0, linkPower=None, offsetCol=None, aggregationDepth=2)"
+    )]
+    fn set_params<'py>(
+        slf: Bound<'py, Self>,
+        args: &Bound<'py, PyTuple>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_params_of(
+            slf,
+            "GeneralizedLinearRegression",
+            GENERALIZED_LINEAR_REGRESSION_PARAMS,
+            args,
+            kwargs,
+        )
     }
 
     #[pyo3(name = "setLabelCol")]
@@ -2098,7 +2160,13 @@ impl PyGeneralizedLinearRegression {
         set_param(slf, "aggregationDepth", Kind::Int, value)
     }
 
-    fn fit(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<PyMLModel> {
+    #[pyo3(signature = (dataset, params=None))]
+    fn fit(
+        slf: &Bound<'_, Self>,
+        dataset: &Bound<'_, PyAny>,
+        params: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyMLModel> {
+        check_fit_params(params)?;
         fit_native(slf, dataset, None)
     }
 }
@@ -2145,6 +2213,25 @@ impl PyAFTSurvivalRegression {
             kwargs,
         )?;
         Ok(this)
+    }
+
+    #[pyo3(
+        name = "setParams",
+        signature = (*args, **kwargs),
+        text_signature = "(self, *, featuresCol='features', labelCol='label', predictionCol='prediction', fitIntercept=True, maxIter=100, tol=1e-06, censorCol='censor', quantileProbabilities=[0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99], quantilesCol=None, aggregationDepth=2, maxBlockSizeInMB=0.0)"
+    )]
+    fn set_params<'py>(
+        slf: Bound<'py, Self>,
+        args: &Bound<'py, PyTuple>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_params_of(
+            slf,
+            "AFTSurvivalRegression",
+            AFTSURVIVAL_REGRESSION_PARAMS,
+            args,
+            kwargs,
+        )
     }
 
     #[pyo3(name = "setFeaturesCol")]
@@ -2235,7 +2322,13 @@ impl PyAFTSurvivalRegression {
         set_param(slf, "maxBlockSizeInMB", Kind::Float, value)
     }
 
-    fn fit(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<PyMLModel> {
+    #[pyo3(signature = (dataset, params=None))]
+    fn fit(
+        slf: &Bound<'_, Self>,
+        dataset: &Bound<'_, PyAny>,
+        params: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyMLModel> {
+        check_fit_params(params)?;
         fit_native(slf, dataset, None)
     }
 }
@@ -2274,6 +2367,25 @@ impl PyIsotonicRegression {
             kwargs,
         )?;
         Ok(this)
+    }
+
+    #[pyo3(
+        name = "setParams",
+        signature = (*args, **kwargs),
+        text_signature = "(self, *, featuresCol='features', labelCol='label', predictionCol='prediction', weightCol=None, isotonic=True, featureIndex=0)"
+    )]
+    fn set_params<'py>(
+        slf: Bound<'py, Self>,
+        args: &Bound<'py, PyTuple>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_params_of(
+            slf,
+            "IsotonicRegression",
+            ISOTONIC_REGRESSION_PARAMS,
+            args,
+            kwargs,
+        )
     }
 
     #[pyo3(name = "setFeaturesCol")]
@@ -2324,7 +2436,13 @@ impl PyIsotonicRegression {
         set_param(slf, "featureIndex", Kind::Int, value)
     }
 
-    fn fit(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<PyMLModel> {
+    #[pyo3(signature = (dataset, params=None))]
+    fn fit(
+        slf: &Bound<'_, Self>,
+        dataset: &Bound<'_, PyAny>,
+        params: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyMLModel> {
+        check_fit_params(params)?;
         fit_native(slf, dataset, None)
     }
 }
@@ -2371,6 +2489,19 @@ impl PyFMRegressor {
             kwargs,
         )?;
         Ok(this)
+    }
+
+    #[pyo3(
+        name = "setParams",
+        signature = (*args, **kwargs),
+        text_signature = "(self, *, featuresCol='features', labelCol='label', predictionCol='prediction', factorSize=8, fitIntercept=True, fitLinear=True, regParam=0.0, miniBatchFraction=1.0, initStd=0.01, maxIter=100, stepSize=1.0, tol=1e-06, solver='adamW', seed=None)"
+    )]
+    fn set_params<'py>(
+        slf: Bound<'py, Self>,
+        args: &Bound<'py, PyTuple>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_params_of(slf, "FMRegressor", FMREGRESSOR_PARAMS, args, kwargs)
     }
 
     #[pyo3(name = "setFeaturesCol")]
@@ -2485,7 +2616,13 @@ impl PyFMRegressor {
         set_param(slf, "seed", Kind::Int, value)
     }
 
-    fn fit(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<PyMLModel> {
+    #[pyo3(signature = (dataset, params=None))]
+    fn fit(
+        slf: &Bound<'_, Self>,
+        dataset: &Bound<'_, PyAny>,
+        params: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyMLModel> {
+        check_fit_params(params)?;
         fit_native(slf, dataset, None)
     }
 }
@@ -2539,6 +2676,24 @@ impl PyDecisionTreeClassifier {
             kwargs,
         )?;
         Ok(this)
+    }
+    #[pyo3(
+        name = "setParams",
+        signature = (*args, **kwargs),
+        text_signature = "(self, *, featuresCol='features', labelCol='label', predictionCol='prediction', probabilityCol='probability', rawPredictionCol='rawPrediction', maxDepth=5, maxBins=32, minInstancesPerNode=1, minInfoGain=0.0, pruneTree=True, maxMemoryInMB=256, cacheNodeIds=False, checkpointInterval=10, impurity='gini', seed=None, weightCol=None, leafCol='', minWeightFractionPerNode=0.0)"
+    )]
+    fn set_params<'py>(
+        slf: Bound<'py, Self>,
+        args: &Bound<'py, PyTuple>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_params_of(
+            slf,
+            "DecisionTreeClassifier",
+            DECISION_TREE_CLASSIFIER_PARAMS,
+            args,
+            kwargs,
+        )
     }
 
     #[pyo3(name = "setFeaturesCol")]
@@ -2693,7 +2848,13 @@ impl PyDecisionTreeClassifier {
         set_param(slf, "thresholds", Kind::FloatList, value)
     }
 
-    fn fit(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<PyMLModel> {
+    #[pyo3(signature = (dataset, params=None))]
+    fn fit(
+        slf: &Bound<'_, Self>,
+        dataset: &Bound<'_, PyAny>,
+        params: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyMLModel> {
+        check_fit_params(params)?;
         fit_native(slf, dataset, None)
     }
 }
@@ -2735,6 +2896,18 @@ impl PyNaiveBayes {
             kwargs,
         )?;
         Ok(this)
+    }
+    #[pyo3(
+        name = "setParams",
+        signature = (*args, **kwargs),
+        text_signature = "(self, *, featuresCol='features', labelCol='label', predictionCol='prediction', probabilityCol='probability', rawPredictionCol='rawPrediction', smoothing=1.0, modelType='multinomial', thresholds=None, weightCol=None)"
+    )]
+    fn set_params<'py>(
+        slf: Bound<'py, Self>,
+        args: &Bound<'py, PyTuple>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_params_of(slf, "NaiveBayes", NAIVE_BAYES_PARAMS, args, kwargs)
     }
 
     #[pyo3(name = "setFeaturesCol")]
@@ -2809,7 +2982,13 @@ impl PyNaiveBayes {
         set_param(slf, "weightCol", Kind::Str, value)
     }
 
-    fn fit(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<PyMLModel> {
+    #[pyo3(signature = (dataset, params=None))]
+    fn fit(
+        slf: &Bound<'_, Self>,
+        dataset: &Bound<'_, PyAny>,
+        params: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyMLModel> {
+        check_fit_params(params)?;
         fit_native(slf, dataset, None)
     }
 }
@@ -2864,6 +3043,18 @@ impl PyGBTClassifier {
             kwargs,
         )?;
         Ok(this)
+    }
+    #[pyo3(
+        name = "setParams",
+        signature = (*args, **kwargs),
+        text_signature = "(self, *, featuresCol='features', labelCol='label', predictionCol='prediction', maxDepth=5, maxBins=32, minInstancesPerNode=1, minInfoGain=0.0, maxMemoryInMB=256, cacheNodeIds=False, checkpointInterval=10, lossType='logistic', maxIter=20, stepSize=0.1, seed=None, subsamplingRate=1.0, impurity='variance', featureSubsetStrategy='all', validationTol=0.01, validationIndicatorCol=None, leafCol='', minWeightFractionPerNode=0.0, weightCol=None)"
+    )]
+    fn set_params<'py>(
+        slf: Bound<'py, Self>,
+        args: &Bound<'py, PyTuple>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_params_of(slf, "GBTClassifier", GBT_CLASSIFIER_PARAMS, args, kwargs)
     }
 
     #[pyo3(name = "setFeaturesCol")]
@@ -3058,7 +3249,13 @@ impl PyGBTClassifier {
         set_param(slf, "validationIndicatorCol", Kind::Str, value)
     }
 
-    fn fit(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<PyMLModel> {
+    #[pyo3(signature = (dataset, params=None))]
+    fn fit(
+        slf: &Bound<'_, Self>,
+        dataset: &Bound<'_, PyAny>,
+        params: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyMLModel> {
+        check_fit_params(params)?;
         fit_native(slf, dataset, None)
     }
 }
@@ -3116,6 +3313,24 @@ impl PyRandomForestClassifier {
             kwargs,
         )?;
         Ok(this)
+    }
+    #[pyo3(
+        name = "setParams",
+        signature = (*args, **kwargs),
+        text_signature = "(self, *, featuresCol='features', labelCol='label', predictionCol='prediction', probabilityCol='probability', rawPredictionCol='rawPrediction', maxDepth=5, maxBins=32, minInstancesPerNode=1, minInfoGain=0.0, pruneTree=True, maxMemoryInMB=256, cacheNodeIds=False, checkpointInterval=10, impurity='gini', numTrees=20, featureSubsetStrategy='auto', seed=None, subsamplingRate=1.0, leafCol='', minWeightFractionPerNode=0.0, weightCol=None, bootstrap=True)"
+    )]
+    fn set_params<'py>(
+        slf: Bound<'py, Self>,
+        args: &Bound<'py, PyTuple>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_params_of(
+            slf,
+            "RandomForestClassifier",
+            RANDOM_FOREST_PARAMS,
+            args,
+            kwargs,
+        )
     }
 
     #[pyo3(name = "setFeaturesCol")]
@@ -3302,7 +3517,13 @@ impl PyRandomForestClassifier {
         set_param(slf, "thresholds", Kind::FloatList, value)
     }
 
-    fn fit(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<PyMLModel> {
+    #[pyo3(signature = (dataset, params=None))]
+    fn fit(
+        slf: &Bound<'_, Self>,
+        dataset: &Bound<'_, PyAny>,
+        params: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyMLModel> {
+        check_fit_params(params)?;
         fit_native(slf, dataset, None)
     }
 }
@@ -3357,6 +3578,18 @@ impl PyGBTRegressor {
             kwargs,
         )?;
         Ok(this)
+    }
+    #[pyo3(
+        name = "setParams",
+        signature = (*args, **kwargs),
+        text_signature = "(self, *, featuresCol='features', labelCol='label', predictionCol='prediction', maxDepth=5, maxBins=32, minInstancesPerNode=1, minInfoGain=0.0, maxMemoryInMB=256, cacheNodeIds=False, subsamplingRate=1.0, checkpointInterval=10, lossType='squared', maxIter=20, stepSize=0.1, seed=None, impurity='variance', featureSubsetStrategy='all', validationTol=0.1, validationIndicatorCol=None, leafCol='', minWeightFractionPerNode=0.0, weightCol=None)"
+    )]
+    fn set_params<'py>(
+        slf: Bound<'py, Self>,
+        args: &Bound<'py, PyTuple>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_params_of(slf, "GBTRegressor", GBT_REGRESSOR_PARAMS, args, kwargs)
     }
 
     #[pyo3(name = "setFeaturesCol")]
@@ -3527,7 +3760,13 @@ impl PyGBTRegressor {
         set_param(slf, "validationIndicatorCol", Kind::Str, value)
     }
 
-    fn fit(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<PyMLModel> {
+    #[pyo3(signature = (dataset, params=None))]
+    fn fit(
+        slf: &Bound<'_, Self>,
+        dataset: &Bound<'_, PyAny>,
+        params: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyMLModel> {
+        check_fit_params(params)?;
         fit_native(slf, dataset, None)
     }
 }
@@ -3579,6 +3818,24 @@ impl PyDecisionTreeRegressor {
             kwargs,
         )?;
         Ok(this)
+    }
+    #[pyo3(
+        name = "setParams",
+        signature = (*args, **kwargs),
+        text_signature = "(self, *, featuresCol='features', labelCol='label', predictionCol='prediction', maxDepth=5, maxBins=32, minInstancesPerNode=1, minInfoGain=0.0, maxMemoryInMB=256, cacheNodeIds=False, checkpointInterval=10, impurity='variance', seed=None, varianceCol=None, weightCol=None, leafCol='', minWeightFractionPerNode=0.0)"
+    )]
+    fn set_params<'py>(
+        slf: Bound<'py, Self>,
+        args: &Bound<'py, PyTuple>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_params_of(
+            slf,
+            "DecisionTreeRegressor",
+            DECISION_TREE_REGRESSOR_PARAMS,
+            args,
+            kwargs,
+        )
     }
 
     #[pyo3(name = "setFeaturesCol")]
@@ -3709,7 +3966,13 @@ impl PyDecisionTreeRegressor {
         set_param(slf, "varianceCol", Kind::Str, value)
     }
 
-    fn fit(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<PyMLModel> {
+    #[pyo3(signature = (dataset, params=None))]
+    fn fit(
+        slf: &Bound<'_, Self>,
+        dataset: &Bound<'_, PyAny>,
+        params: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyMLModel> {
+        check_fit_params(params)?;
         fit_native(slf, dataset, None)
     }
 }
@@ -3763,6 +4026,24 @@ impl PyRandomForestRegressor {
             kwargs,
         )?;
         Ok(this)
+    }
+    #[pyo3(
+        name = "setParams",
+        signature = (*args, **kwargs),
+        text_signature = "(self, *, featuresCol='features', labelCol='label', predictionCol='prediction', maxDepth=5, maxBins=32, minInstancesPerNode=1, minInfoGain=0.0, maxMemoryInMB=256, cacheNodeIds=False, checkpointInterval=10, impurity='variance', subsamplingRate=1.0, seed=None, numTrees=20, featureSubsetStrategy='auto', leafCol='', minWeightFractionPerNode=0.0, weightCol=None, bootstrap=True)"
+    )]
+    fn set_params<'py>(
+        slf: Bound<'py, Self>,
+        args: &Bound<'py, PyTuple>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_params_of(
+            slf,
+            "RandomForestRegressor",
+            RANDOM_FOREST_REGRESSOR_PARAMS,
+            args,
+            kwargs,
+        )
     }
 
     #[pyo3(name = "setFeaturesCol")]
@@ -3917,7 +4198,13 @@ impl PyRandomForestRegressor {
         set_param(slf, "bootstrap", Kind::Bool, value)
     }
 
-    fn fit(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<PyMLModel> {
+    #[pyo3(signature = (dataset, params=None))]
+    fn fit(
+        slf: &Bound<'_, Self>,
+        dataset: &Bound<'_, PyAny>,
+        params: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyMLModel> {
+        check_fit_params(params)?;
         fit_native(slf, dataset, None)
     }
 }
@@ -3955,6 +4242,18 @@ impl PyKMeans {
         };
         init_params(&mut this, "KMeans", &[], KMEANS_PARAMS, args, kwargs)?;
         Ok(this)
+    }
+    #[pyo3(
+        name = "setParams",
+        signature = (*args, **kwargs),
+        text_signature = "(self, *, featuresCol='features', predictionCol='prediction', k=2, initMode='k-means||', initSteps=2, tol=0.0001, maxIter=20, seed=None, distanceMeasure='euclidean', weightCol=None, solver='auto', maxBlockSizeInMB=0.0)"
+    )]
+    fn set_params<'py>(
+        slf: Bound<'py, Self>,
+        args: &Bound<'py, PyTuple>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_params_of(slf, "KMeans", KMEANS_PARAMS, args, kwargs)
     }
 
     #[pyo3(name = "setFeaturesCol")]
@@ -4050,7 +4349,13 @@ impl PyKMeans {
         set_param(slf, "maxBlockSizeInMB", Kind::Float, value)
     }
 
-    fn fit(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<PyMLModel> {
+    #[pyo3(signature = (dataset, params=None))]
+    fn fit(
+        slf: &Bound<'_, Self>,
+        dataset: &Bound<'_, PyAny>,
+        params: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyMLModel> {
+        check_fit_params(params)?;
         fit_native(slf, dataset, None)
     }
 }
@@ -4090,6 +4395,19 @@ impl PyLDA {
         };
         init_params(&mut this, "LDA", &[], LDA_PARAMS, args, kwargs)?;
         Ok(this)
+    }
+
+    #[pyo3(
+        name = "setParams",
+        signature = (*args, **kwargs),
+        text_signature = "(self, *, featuresCol='features', maxIter=20, seed=None, checkpointInterval=10, k=10, optimizer='online', learningOffset=1024.0, learningDecay=0.51, subsamplingRate=0.05, optimizeDocConcentration=True, docConcentration=None, topicConcentration=None, topicDistributionCol='topicDistribution', keepLastCheckpoint=True)"
+    )]
+    fn set_params<'py>(
+        slf: Bound<'py, Self>,
+        args: &Bound<'py, PyTuple>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_params_of(slf, "LDA", LDA_PARAMS, args, kwargs)
     }
 
     #[pyo3(name = "setFeaturesCol")]
@@ -4201,7 +4519,13 @@ impl PyLDA {
         set_param(slf, "keepLastCheckpoint", Kind::Bool, value)
     }
 
-    fn fit(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<PyMLModel> {
+    #[pyo3(signature = (dataset, params=None))]
+    fn fit(
+        slf: &Bound<'_, Self>,
+        dataset: &Bound<'_, PyAny>,
+        params: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyMLModel> {
+        check_fit_params(params)?;
         fit_native(slf, dataset, None)
     }
 }
@@ -4243,6 +4567,25 @@ impl PyPowerIterationClustering {
             kwargs,
         )?;
         Ok(this)
+    }
+
+    #[pyo3(
+        name = "setParams",
+        signature = (*args, **kwargs),
+        text_signature = "(self, *, k=2, maxIter=20, initMode='random', srcCol='src', dstCol='dst', weightCol=None)"
+    )]
+    fn set_params<'py>(
+        slf: Bound<'py, Self>,
+        args: &Bound<'py, PyTuple>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_params_of(
+            slf,
+            "PowerIterationClustering",
+            POWER_ITERATION_CLUSTERING_PARAMS,
+            args,
+            kwargs,
+        )
     }
 
     #[pyo3(name = "setK")]
@@ -4292,7 +4635,7 @@ impl PyPowerIterationClustering {
 
     #[pyo3(name = "assignClusters")]
     fn assign_clusters(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        let df = dataset_of(dataset, "assignClusters", "select")?;
+        let df = helper_dataset_of(dataset, "assignClusters")?;
         let algorithm = snapshot(slf)?;
         Ok(PyDataFrame::new(algorithm.assign_clusters(&df).to_pyerr()?))
     }
@@ -4335,6 +4678,24 @@ impl PyGaussianMixture {
             kwargs,
         )?;
         Ok(this)
+    }
+    #[pyo3(
+        name = "setParams",
+        signature = (*args, **kwargs),
+        text_signature = "(self, *, featuresCol='features', predictionCol='prediction', k=2, probabilityCol='probability', tol=0.01, maxIter=100, seed=None, aggregationDepth=2, weightCol=None)"
+    )]
+    fn set_params<'py>(
+        slf: Bound<'py, Self>,
+        args: &Bound<'py, PyTuple>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_params_of(
+            slf,
+            "GaussianMixture",
+            GAUSSIAN_MIXTURE_PARAMS,
+            args,
+            kwargs,
+        )
     }
 
     #[pyo3(name = "setFeaturesCol")]
@@ -4406,7 +4767,13 @@ impl PyGaussianMixture {
         set_param(slf, "weightCol", Kind::Str, value)
     }
 
-    fn fit(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<PyMLModel> {
+    #[pyo3(signature = (dataset, params=None))]
+    fn fit(
+        slf: &Bound<'_, Self>,
+        dataset: &Bound<'_, PyAny>,
+        params: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyMLModel> {
+        check_fit_params(params)?;
         fit_native(slf, dataset, None)
     }
 }
@@ -4447,6 +4814,24 @@ impl PyBisectingKMeans {
             kwargs,
         )?;
         Ok(this)
+    }
+    #[pyo3(
+        name = "setParams",
+        signature = (*args, **kwargs),
+        text_signature = "(self, *, featuresCol='features', predictionCol='prediction', maxIter=20, seed=None, k=4, minDivisibleClusterSize=1.0, distanceMeasure='euclidean', weightCol=None)"
+    )]
+    fn set_params<'py>(
+        slf: Bound<'py, Self>,
+        args: &Bound<'py, PyTuple>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_params_of(
+            slf,
+            "BisectingKMeans",
+            BISECTING_KMEANS_PARAMS,
+            args,
+            kwargs,
+        )
     }
 
     #[pyo3(name = "setFeaturesCol")]
@@ -4510,12 +4895,20 @@ impl PyBisectingKMeans {
         set_param(slf, "minDivisibleClusterSize", Kind::Float, value)
     }
 
-    fn fit(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<PyMLModel> {
+    #[pyo3(signature = (dataset, params=None))]
+    fn fit(
+        slf: &Bound<'_, Self>,
+        dataset: &Bound<'_, PyAny>,
+        params: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyMLModel> {
+        check_fit_params(params)?;
         fit_native(slf, dataset, None)
     }
 }
 
 /// Pipeline estimator (chains stages by name).
+const PIPELINE_PARAMS: &[(&str, Kind)] = &[("stages", Kind::StrList)];
+
 #[pyclass(name = "Pipeline", module = "pyspark.ml.connect.pipeline")]
 pub struct PyPipeline {
     inner: Pipeline,
@@ -4531,9 +4924,20 @@ impl PyPipeline {
             inner: Pipeline::new(),
             unsendable: Vec::new(),
         };
-        let params = &[("stages", Kind::StrList)];
-        init_params(&mut this, "Pipeline", &[], params, args, kwargs)?;
+        init_params(&mut this, "Pipeline", &[], PIPELINE_PARAMS, args, kwargs)?;
         Ok(this)
+    }
+    #[pyo3(
+        name = "setParams",
+        signature = (*args, **kwargs),
+        text_signature = "(self, *, stages=None)"
+    )]
+    fn set_params<'py>(
+        slf: Bound<'py, Self>,
+        args: &Bound<'py, PyTuple>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_params_of(slf, "Pipeline", PIPELINE_PARAMS, args, kwargs)
     }
     #[pyo3(name = "setStages")]
     fn set_stages<'py>(
@@ -4542,12 +4946,24 @@ impl PyPipeline {
     ) -> PyResult<Bound<'py, Self>> {
         set_param(slf, "stages", Kind::StrList, value)
     }
-    fn fit(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<PyMLModel> {
+    #[pyo3(signature = (dataset, params=None))]
+    fn fit(
+        slf: &Bound<'_, Self>,
+        dataset: &Bound<'_, PyAny>,
+        params: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyMLModel> {
+        check_fit_params(params)?;
         fit_unimplemented(slf, dataset, "Pipeline.fit")
     }
 }
 
 /// CrossValidator (k-fold tuning).
+const CROSS_VALIDATOR_PARAMS: &[(&str, Kind)] = &[
+    ("numFolds", Kind::Int),
+    ("parallelism", Kind::Int),
+    ("seed", Kind::Int),
+];
+
 #[pyclass(name = "CrossValidator", module = "pyspark.ml.connect.tuning")]
 pub struct PyCrossValidator {
     inner: CrossValidator,
@@ -4566,13 +4982,27 @@ impl PyCrossValidator {
             inner: CrossValidator::new(),
             unsendable: Vec::new(),
         };
-        let params = &[
-            ("numFolds", Kind::Int),
-            ("parallelism", Kind::Int),
-            ("seed", Kind::Int),
-        ];
-        init_params(&mut this, "CrossValidator", &[], params, args, kwargs)?;
+        init_params(
+            &mut this,
+            "CrossValidator",
+            &[],
+            CROSS_VALIDATOR_PARAMS,
+            args,
+            kwargs,
+        )?;
         Ok(this)
+    }
+    #[pyo3(
+        name = "setParams",
+        signature = (*args, **kwargs),
+        text_signature = "(self, *, numFolds=None, parallelism=None, seed=None)"
+    )]
+    fn set_params<'py>(
+        slf: Bound<'py, Self>,
+        args: &Bound<'py, PyTuple>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_params_of(slf, "CrossValidator", CROSS_VALIDATOR_PARAMS, args, kwargs)
     }
     #[pyo3(name = "setNumFolds")]
     fn set_num_folds<'py>(
@@ -4595,7 +5025,13 @@ impl PyCrossValidator {
     ) -> PyResult<Bound<'py, Self>> {
         set_param(slf, "seed", Kind::Int, value)
     }
-    fn fit(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<PyMLModel> {
+    #[pyo3(signature = (dataset, params=None))]
+    fn fit(
+        slf: &Bound<'_, Self>,
+        dataset: &Bound<'_, PyAny>,
+        params: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyMLModel> {
+        check_fit_params(params)?;
         fit_unimplemented(slf, dataset, "CrossValidator.fit")
     }
 }
