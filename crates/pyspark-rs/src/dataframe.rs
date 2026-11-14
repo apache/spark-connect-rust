@@ -2085,12 +2085,22 @@ impl PyDataFrame {
             // As PySpark's `assert schema is not None`.
             return Err(pyo3::exceptions::PyAssertionError::new_err(()));
         }
+        // The type that PySpark's conversion of the plan fails at, at each action: the schema
+        // when it is not a DataType, such as a str, or the first StructField that is a type in
+        // it, which that conversion (`pyspark_types_to_proto_types`) does not take either.
+        let mut unsendable = None;
         if !schema.is_instance_of::<pyo3::types::PyString>() {
             if let Ok(dt) = crate::types::py_to_data_type(schema) {
-                return Ok(PyDataFrame::new(self.dataframe.to(dt)));
+                match crate::types::unsendable_field_repr(schema, &dt)? {
+                    None => return Ok(PyDataFrame::new(self.dataframe.to(dt))),
+                    Some(field) => unsendable = Some(field),
+                }
             }
         }
-        let text = schema.str()?.to_string();
+        let text = match unsendable {
+            Some(field) => field,
+            None => schema.str()?.to_string(),
+        };
         let error = spark_connect_core::error::SparkError::classed(
             spark_connect_core::error::SparkErrorKind::ValueError,
             "UNSUPPORTED_OPERATION",

@@ -5919,3 +5919,15 @@ def test_foreach_batch_captures_the_readers_writers_and_groups_as_pyspark(
     finally:
         running.stop()
         session.sql(f"DROP TABLE IF EXISTS {table}").collect()
+
+
+def test_empty_data_with_a_struct_field_as_a_type_is_rejected_by_the_server(session):
+    # As PySpark, which sends the schema of empty data as its JSON string, so that the server
+    # parses it when the DataFrame is evaluated: the client has no error of its own for it.
+    from pyspark.errors import ParseException
+
+    schema = StructType([StructField("a", StructField("b", IntegerType()))])
+    df = session.createDataFrame([], schema)
+    with pytest.raises(ParseException) as e:
+        df.collect()
+    assert "PARSE_SYNTAX_ERROR" in str(e.value)

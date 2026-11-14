@@ -1723,7 +1723,7 @@ pub(crate) fn arrow_schema_error(
 
 /// Whether PySpark's `LocalDataToArrowConversion._need_converter` gives a value of `dt` a
 /// converter, for a value of `nullable`: the values that PyArrow takes as they are do not.
-fn needs_converter(dt: &DataType, nullable: bool) -> bool {
+pub(crate) fn needs_converter(dt: &DataType, nullable: bool) -> bool {
     if !nullable {
         return true;
     }

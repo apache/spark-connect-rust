@@ -965,6 +965,7 @@ impl PySparkSession {
         py: Python<'_>,
         data: &Bound<'_, PyAny>,
         spec: Spec,
+        checks: LocalChecks<'_>,
     ) -> PyResult<PyDataFrame> {
         use crate::infer;
 
@@ -1065,6 +1066,19 @@ impl PySparkSession {
             } else {
                 infer::row_values(item, &fields)?
             });
+        }
+        // As PySpark's converters, which assert the nullable flags of the schema, and have no
+        // Arrow type for a StructField as a type, after the rows are taken apart.
+        if checks.non_bool_nullable {
+            return Err(pyo3::exceptions::PyAssertionError::new_err(()));
+        }
+        if let Some(field) = checks.nested {
+            return Err(crate::column::raise_pyspark(
+                py,
+                "PySparkTypeError",
+                "UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION",
+                &[("data_type", &field.repr()?.to_cow()?)],
+            ));
         }
         let mut values: Vec<Vec<Value>> = (0..parts.len())
             .map(|_| Vec::with_capacity(fields.len()))
@@ -1312,7 +1326,12 @@ impl PySparkSession {
             ));
         }
         if data.len()? == 0 {
-            return self.create_from_local(py, PyList::empty(py).as_any(), spec);
+            return self.create_from_local(
+                py,
+                PyList::empty(py).as_any(),
+                spec,
+                LocalChecks::default(),
+            );
         }
         let width: usize = if ndim == 1 {
             1
@@ -1970,6 +1989,15 @@ enum Spec {
     Atomic(DataType),
 }
 
+/// The checks of a schema that PySpark's conversion of non-empty local rows makes after the rows
+/// are taken apart: that each nullable flag is a bool, and that no field is a `StructField` as a
+/// type, the first of which is named. The default makes none.
+#[derive(Default)]
+struct LocalChecks<'py> {
+    non_bool_nullable: bool,
+    nested: Option<Bound<'py, PyAny>>,
+}
+
 /// The schema argument of `createDataFrame`: None, a list or tuple of names, or a struct or
 /// atomic type, given as a type or a DDL string. Other types raise `NOT_EXPECTED_TYPE`.
 fn schema_spec(
@@ -2004,8 +2032,9 @@ fn schema_spec(
         }
         return Ok(Spec::Names(names));
     }
-    if !schema.is_instance_of::<pyo3::types::PyString>()
-        && !schema.is_instance_of::<crate::types::PyDataType>()
+    if schema.is_instance_of::<crate::types::PyStructField>()
+        || (!schema.is_instance_of::<pyo3::types::PyString>()
+            && !schema.is_instance_of::<crate::types::PyDataType>())
     {
         return Err(not_expected(&crate::infer::type_name(schema)?));
     }
@@ -2383,7 +2412,24 @@ impl PySparkSession {
                 }
             }
         }
-        self.create_from_local(py, data, spec)
+        // The checks of the schema that PySpark's conversion of non-empty local rows makes.
+        let checks = match schema.filter(|s| s.is_instance_of::<crate::types::PyStructType>()) {
+            Some(schema) if data.len().is_ok_and(|n| n > 0) => LocalChecks {
+                non_bool_nullable: crate::types::has_non_bool_converter_flag(py, schema)?,
+                nested: match &spec {
+                    Spec::Struct(fields) => crate::types::nested_field_in(
+                        py,
+                        &DataType::Struct {
+                            fields: fields.clone(),
+                        },
+                        i32::MAX,
+                    )?,
+                    _ => None,
+                },
+            },
+            _ => LocalChecks::default(),
+        };
+        self.create_from_local(py, data, spec, checks)
     }
 
     /// Get the catalog API (`spark.catalog`).
@@ -2655,7 +2701,7 @@ impl PySparkSession {
         python_ver: String,
         deterministic: bool,
     ) -> PyResult<()> {
-        let return_data_type = crate::types::py_to_data_type(return_type)?;
+        let return_data_type = crate::types::py_to_proto_data_type(return_type)?;
         let payload = PythonUDFPayload::new(return_data_type, eval_type, command, python_ver);
         let udf_expr = CommonInlineUserDefinedFunctionExpression::new(
             name.to_string(),
