@@ -500,6 +500,11 @@ fn class_default(slf: &Bound<'_, PyAny>, default: &serde_json::Value) -> PyResul
             .into_any()
             .unbind());
     }
+    if let Some(fetch) = default.get("server_default") {
+        // A default of the server that the object does not hold (its constructor fetches it, see
+        // `server_defaults`): fetched now.
+        return server_default(py, fetch);
+    }
     if default.get("class_name_hash").is_some() {
         let name = slf.get_type().getattr("__name__")?;
         return Ok(py
@@ -509,6 +514,65 @@ fn class_default(slf: &Bound<'_, PyAny>, default: &serde_json::Value) -> PyResul
             .unbind());
     }
     default_to_py(py, default)
+}
+
+/// The value of the ML helper's attribute of `fetch` (`[attr, args...]` of a
+/// `{"server_default": ...}` of ml_params.json), of the active session, as PySpark's
+/// `invoke_helper_attr` reads it: its `assert` of an active session raises an AssertionError
+/// without one.
+fn server_default(py: Python<'_>, fetch: &serde_json::Value) -> PyResult<Py<PyAny>> {
+    let parts = fetch.as_array().map(Vec::as_slice).unwrap_or_default();
+    let Some((attr, args)) = parts
+        .split_first()
+        .and_then(|(attr, args)| Some((attr.as_str()?, args)))
+    else {
+        return Err(PyValueError::new_err(format!(
+            "unsupported server default of ml_params.json: {fetch}"
+        )));
+    };
+    let session = super::object::session_of(py, None)?;
+    let args = args
+        .iter()
+        .map(|arg| {
+            arg.as_str()
+                .map(|arg| {
+                    spark_connect::ml::FetchArg::Value(spark_connect::ml::MlValue::String(
+                        arg.to_string(),
+                    ))
+                })
+                .ok_or_else(|| {
+                    PyValueError::new_err(format!(
+                        "unsupported server default of ml_params.json: {fetch}"
+                    ))
+                })
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+    let target = spark_connect::ml::MlTarget::helper(&session);
+    let output = interruptible(py, &session, || {
+        spark_connect::ml::fetch(&target, attr, args).map_err(Box::new)
+    })?;
+    super::object::fetch_output_to_py(py, output)
+}
+
+/// The defaults of the class `class` that PySpark's constructor fetches of the server (the
+/// `{"server_default": [attr, args...]}` defaults of ml_params.json: the default stop words and
+/// the locale of StopWordsRemover), each the value of the ML helper's attribute `attr` of `args`,
+/// of the active session. A constructor holds them as its own (`put_own_default_in`), as
+/// PySpark's `_setDefault` of them, so that the construction of no active session raises the
+/// AssertionError of PySpark's.
+#[allow(dead_code)] // The constructor of StopWordsRemover holds them.
+pub(super) fn server_defaults(py: Python<'_>, class: &str) -> PyResult<OwnDefaults> {
+    let mut defaults = Vec::new();
+    for meta in all_params()
+        .get(class)
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+    {
+        if let Some(fetch) = meta.default.as_ref().and_then(|d| d.get("server_default")) {
+            defaults.push((meta.name.as_str(), server_default(py, fetch)?));
+        }
+    }
+    Ok(defaults)
 }
 
 /// The default of the param `meta` of `slf`, as `_defaultParamMap` holds it: the one that `slf`

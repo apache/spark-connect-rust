@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Capture the API of official pyspark.ml 4.3.0 for tests/golden/ml_api.json.
 
-Run with official pyspark-client 4.3.0, which needs no server for this:
-    python scripts/capture_ml_api_golden.py > tests/golden/ml_api.json
+Run with official pyspark-client 4.3.0, of a Spark 4.3.0 Connect server for the classes whose
+constructor reads the server (StopWordsRemover):
+    SPARK_REMOTE=sc://localhost:15002 python scripts/capture_ml_api_golden.py \
+        > tests/golden/ml_api.json
 It also writes the params alone to crates/pyspark-rs/src/ml/ml_params.json, which the extension
 embeds.
 
@@ -11,8 +13,10 @@ recommendation, evaluation, stat, tuning} and Pipeline/PipelineModel, it records
 - `params`: each Param in PySpark's `params` order (by name), with its doc, the name of its
   TypeConverters method, and its default, if any, of a default instance, as `_setDefault` sets it.
   A default that PySpark derives from the instance is recorded as it derives it, so the golden is
-  the same on every run: `{"uid_suffix": "__output"}`, the uid of the instance and the suffix, and
-  `{"class_name_hash": true}`, the `hash` of the name of its class in the Python process;
+  the same on every run: `{"uid_suffix": "__output"}`, the uid of the instance and the suffix,
+  `{"class_name_hash": true}`, the `hash` of the name of its class in the Python process, and
+  `{"server_default": [attr, args...]}`, the value of the ML helper's attribute that the
+  constructor fetches (`SERVER_DEFAULTS`);
 - `members`: each public member that is not a Param, with its kind (property, method,
   staticmethod, classmethod) and, of a method, its signature and its `parameters`, each as
   [name, kind, repr of its default or None], without `self` (or `cls`);
@@ -64,10 +68,25 @@ def render(value):
     return {"repr": repr(value)}
 
 
+# The defaults that PySpark's constructor fetches of the server, by class and param: the ML
+# helper's attribute and its arguments, of `invoke_helper_attr`. They depend on the server (the
+# locale of its JVM), so the golden records the fetch, which the native class makes too.
+SERVER_DEFAULTS = {
+    "StopWordsRemover": {
+        "stopWords": ["stopWordsRemoverLoadDefaultStopWords", "english"],
+        "locale": ["stopWordsRemoverGetDefaultOrUS"],
+    },
+}
+
+
 def default_of(instance, name, value):
     """The default of a Param, in the form that PySpark derives it from its instance where it does:
-    `outputCol` as the uid of the instance and "__output" (HasOutputCol), and `seed` as the hash of
-    the name of its class, which differs between Python processes (HasSeed)."""
+    `outputCol` as the uid of the instance and "__output" (HasOutputCol), `seed` as the hash of the
+    name of its class, which differs between Python processes (HasSeed), and a default that the
+    constructor fetches of the server as the fetch (`SERVER_DEFAULTS`)."""
+    fetch = SERVER_DEFAULTS.get(type(instance).__name__, {}).get(name)
+    if fetch is not None:
+        return {"server_default": fetch}
     if name == "seed" and value == hash(type(instance).__name__):
         return {"class_name_hash": True}
     if isinstance(value, str) and value.startswith(instance.uid):
@@ -167,6 +186,13 @@ def capture(cls):
 
 
 def main():
+    # A session, of which the constructors that fetch defaults of the server construct
+    # (StopWordsRemover); without one, they record no defaults.
+    spark = None
+    if os.environ.get("SPARK_REMOTE"):
+        from pyspark.sql import SparkSession
+
+        spark = SparkSession.builder.remote(os.environ["SPARK_REMOTE"]).getOrCreate()
     out = {}
     for module_name in MODULES:
         module = importlib.import_module("pyspark.ml." + module_name)
@@ -178,6 +204,8 @@ def main():
 
     for name in ["Pipeline", "PipelineModel"]:
         out[name] = capture(getattr(ml, name))
+    if spark is not None:
+        spark.stop()
     print(json.dumps(out, indent=1, sort_keys=True))
     # The params alone, which the extension embeds, as the source of its Param objects, their docs,
     # converters and defaults (a file of its crate, which its packages include).
