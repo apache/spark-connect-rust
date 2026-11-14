@@ -213,6 +213,33 @@ CRS is of the form `<authority>:<code>`, and an algorithm other than `SPHERICAL`
 number or `any` as an SRID, as the DDL parser of Spark does, and no longer takes such forms as
 `geometry(+5)`, `geometry(SRID:ANY)` or `geography(4326, SPHERICAL)`.
 
+## Native ML objects: fetch, summaries, save and load (Rust API)
+
+`spark_connect::ml` reads and writes the server-side objects of Spark Connect ML as PySpark 4.3.0
+does over Spark Connect, for the typed model accessors, summaries and persistence of the native
+classes to build on:
+
+- `MlRef` is a server-side object: a fitted model (`Model::ml_ref`), or another object that a
+  fetch returns, such as a tree of an ensemble. Its clones and the DataFrames whose plans read it
+  share it, and the last owner to drop deletes it on the server, as PySpark's `RemoteModelRef`.
+- `fetch(&MlTarget, method, args)` runs a method of an object, as `_call_java` of `pyspark.ml`
+  does over Spark Connect (a `Fetch` command). `MlTarget::object(&model_ref).child("summary")`
+  reaches the object of a method chain (`"<id>.summary"`), and `MlTarget::helper(&session)` the
+  ML helper (`invoke_helper_attr`). Its result is a value (`MlValue`), new objects (an id list
+  that names the trees of an ensemble is one object per tree), or a string. When the server has
+  lost a summary with its offloaded model, the fetch recreates the summary of the target's summary
+  dataset (`CreateSummary`) and runs once more, as PySpark does.
+- `MlValue` is a value as `deserialize_param` reads it and `serialize_param` sends it: ML vectors
+  and matrices, scalars, strings and arrays, byte for byte as PySpark's literals
+  (`tests/golden/ml_values.json`). An empty array, or one whose first element is null, has no type
+  to infer: send it as `FetchArg::Typed`, as PySpark sends a `(value, DataType)` pair.
+- `attribute_relation(&MlTarget, method, args)` is the DataFrame of a method, as
+  `invoke_remote_attribute_relation` reads it, of the summary dataset of a summary target. It keeps
+  the object and the plans of its DataFrame arguments alive.
+- `write_operator` and `write_object` save an estimator, transformer or evaluator, or a fitted
+  model (`Write`), and `read` loads one of its JVM class (`Read`), as `RemoteMLWriter` and
+  `RemoteMLReader` of `pyspark.ml.connect.readwrite`. A loaded model is a new `MlRef`.
+
 ## Native LogisticRegression
 
 The native `spark_connect::ml::LogisticRegression` fits Spark's JVM

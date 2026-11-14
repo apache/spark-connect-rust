@@ -26,6 +26,21 @@ pub use feature::*;
 mod fpm;
 pub use fpm::*;
 
+mod object;
+pub use object::*;
+
+// The typed accessors, summaries and persistence of the models of each family, in the files of the
+// areas that complete them (see `object` for their server-side objects).
+mod classification_api;
+#[allow(unused_imports)] // Until the area adds its first public item.
+pub use classification_api::*;
+mod regression_api;
+#[allow(unused_imports)] // Until the area adds its first public item.
+pub use regression_api::*;
+mod clustering_api;
+#[allow(unused_imports)] // Until the area adds its first public item.
+pub use clustering_api::*;
+
 use crate::dataframe::DataFrame;
 use crate::expression::LiteralExpression;
 use crate::plan::{LogicalPlan, RelationOwner};
@@ -843,6 +858,13 @@ pub trait Transformer: Send + Sync {
 pub trait Model: Transformer {
     /// Clone this model into a boxed trait object.
     fn clone_box(&self) -> Box<dyn Model>;
+
+    /// The server-side object of the model, whose methods [`fetch`] reads (see
+    /// [`MlTarget::object`]), of a model that the server holds. None of a model that holds no
+    /// single object, such as a pipeline model.
+    fn ml_ref(&self) -> Option<&MlRef> {
+        None
+    }
 }
 
 /// Base trait for ML Evaluators that measure model quality.
@@ -1112,6 +1134,10 @@ impl Transformer for StandardScalerModel {
 }
 
 impl Model for StandardScalerModel {
+    fn ml_ref(&self) -> Option<&MlRef> {
+        Some(&self.cached)
+    }
+
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }
@@ -1318,6 +1344,10 @@ impl Transformer for StringIndexerModel {
 }
 
 impl Model for StringIndexerModel {
+    fn ml_ref(&self) -> Option<&MlRef> {
+        Some(&self.cached)
+    }
+
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }
@@ -1448,6 +1478,10 @@ impl Transformer for MaxAbsScalerModel {
 }
 
 impl Model for MaxAbsScalerModel {
+    fn ml_ref(&self) -> Option<&MlRef> {
+        Some(&self.cached)
+    }
+
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }
@@ -1497,11 +1531,15 @@ fn fit_via_command(
     )))
 }
 
-/// The server's cached model, shared by a model, its clones and every DataFrame that it
-/// transforms (through the [`RelationOwner`] of their plans). The last owner to drop deletes
-/// the cached object on the server, as PySpark's `RemoteModelRef` does.
+/// A server-side ML object: a fitted model, or another object that a fetch returns (a submodel, a
+/// tree of an ensemble), shared by its clones and by every DataFrame whose plan reads it (through
+/// the [`RelationOwner`] of their plans). The last owner to drop deletes the cached object on the
+/// server, as PySpark's `RemoteModelRef` does.
 #[derive(Debug, Clone)]
-struct CachedModel(Arc<CachedModelRef>);
+pub struct MlRef(Arc<CachedModelRef>);
+
+/// The name of [`MlRef`] in the code of the models, which caches them.
+type CachedModel = MlRef;
 
 struct CachedModelRef {
     model_ref: proto::ObjectRef,
@@ -1759,6 +1797,10 @@ impl Transformer for LogisticRegressionModel {
 }
 
 impl Model for LogisticRegressionModel {
+    fn ml_ref(&self) -> Option<&MlRef> {
+        Some(&self.cached)
+    }
+
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }
@@ -2010,6 +2052,10 @@ impl Transformer for LinearSVCModel {
 }
 
 impl Model for LinearSVCModel {
+    fn ml_ref(&self) -> Option<&MlRef> {
+        Some(&self.cached)
+    }
+
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }
@@ -2303,6 +2349,10 @@ impl Transformer for FMClassificationModel {
 }
 
 impl Model for FMClassificationModel {
+    fn ml_ref(&self) -> Option<&MlRef> {
+        Some(&self.cached)
+    }
+
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }
@@ -2573,6 +2623,10 @@ impl Transformer for MultilayerPerceptronClassificationModel {
 }
 
 impl Model for MultilayerPerceptronClassificationModel {
+    fn ml_ref(&self) -> Option<&MlRef> {
+        Some(&self.cached)
+    }
+
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }
@@ -3369,6 +3423,10 @@ impl Transformer for LinearRegressionModel {
 }
 
 impl Model for LinearRegressionModel {
+    fn ml_ref(&self) -> Option<&MlRef> {
+        Some(&self.cached)
+    }
+
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }
@@ -3659,6 +3717,10 @@ impl Transformer for GeneralizedLinearRegressionModel {
 }
 
 impl Model for GeneralizedLinearRegressionModel {
+    fn ml_ref(&self) -> Option<&MlRef> {
+        Some(&self.cached)
+    }
+
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }
@@ -3891,6 +3953,10 @@ impl Transformer for AFTSurvivalRegressionModel {
 }
 
 impl Model for AFTSurvivalRegressionModel {
+    fn ml_ref(&self) -> Option<&MlRef> {
+        Some(&self.cached)
+    }
+
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }
@@ -4064,6 +4130,10 @@ impl Transformer for IsotonicRegressionModel {
 }
 
 impl Model for IsotonicRegressionModel {
+    fn ml_ref(&self) -> Option<&MlRef> {
+        Some(&self.cached)
+    }
+
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }
@@ -4325,6 +4395,10 @@ impl Transformer for FMRegressionModel {
 }
 
 impl Model for FMRegressionModel {
+    fn ml_ref(&self) -> Option<&MlRef> {
+        Some(&self.cached)
+    }
+
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }
@@ -4649,6 +4723,10 @@ impl Transformer for DecisionTreeClassificationModel {
 }
 
 impl Model for DecisionTreeClassificationModel {
+    fn ml_ref(&self) -> Option<&MlRef> {
+        Some(&self.cached)
+    }
+
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }
@@ -4857,6 +4935,10 @@ impl Transformer for NaiveBayesModel {
 }
 
 impl Model for NaiveBayesModel {
+    fn ml_ref(&self) -> Option<&MlRef> {
+        Some(&self.cached)
+    }
+
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }
@@ -5245,6 +5327,10 @@ impl Transformer for GBTClassificationModel {
 }
 
 impl Model for GBTClassificationModel {
+    fn ml_ref(&self) -> Option<&MlRef> {
+        Some(&self.cached)
+    }
+
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }
@@ -5611,6 +5697,10 @@ impl Transformer for RandomForestClassificationModel {
 }
 
 impl Model for RandomForestClassificationModel {
+    fn ml_ref(&self) -> Option<&MlRef> {
+        Some(&self.cached)
+    }
+
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }
@@ -5965,6 +6055,10 @@ impl Transformer for GBTRegressionModel {
 }
 
 impl Model for GBTRegressionModel {
+    fn ml_ref(&self) -> Option<&MlRef> {
+        Some(&self.cached)
+    }
+
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }
@@ -6254,6 +6348,10 @@ impl Transformer for DecisionTreeRegressionModel {
 }
 
 impl Model for DecisionTreeRegressionModel {
+    fn ml_ref(&self) -> Option<&MlRef> {
+        Some(&self.cached)
+    }
+
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }
@@ -6573,6 +6671,10 @@ impl Transformer for RandomForestRegressionModel {
 }
 
 impl Model for RandomForestRegressionModel {
+    fn ml_ref(&self) -> Option<&MlRef> {
+        Some(&self.cached)
+    }
+
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }
@@ -6814,6 +6916,10 @@ impl Transformer for KMeansModel {
 }
 
 impl Model for KMeansModel {
+    fn ml_ref(&self) -> Option<&MlRef> {
+        Some(&self.cached)
+    }
+
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }
@@ -7014,6 +7120,10 @@ impl Transformer for BisectingKMeansModel {
 }
 
 impl Model for BisectingKMeansModel {
+    fn ml_ref(&self) -> Option<&MlRef> {
+        Some(&self.cached)
+    }
+
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }
@@ -7221,6 +7331,10 @@ impl Transformer for GaussianMixtureModel {
 }
 
 impl Model for GaussianMixtureModel {
+    fn ml_ref(&self) -> Option<&MlRef> {
+        Some(&self.cached)
+    }
+
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }
@@ -7496,6 +7610,10 @@ impl Transformer for LDAModel {
 }
 
 impl Model for LDAModel {
+    fn ml_ref(&self) -> Option<&MlRef> {
+        Some(&self.cached)
+    }
+
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }

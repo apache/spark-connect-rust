@@ -1,0 +1,194 @@
+{
+ "bool": {
+  "literal_b64": "GAE=",
+  "value": {
+   "bool": true
+  }
+ },
+ "dense_matrix": {
+  "literal_b64": "wgFlCi66ASsKA3VkdBIkb3JnLmFwYWNoZS5zcGFyay5tbC5saW5hbGcuTWF0cml4VURUEgIgARICMAESAjACEgQKAgoAEgQKAgoAEhfKARQqEgoQAAAAAAAAAAAAAAAAAADwvxICGAA=",
+  "value": {
+   "dense_matrix": [
+    1,
+    2,
+    [
+     0.0,
+     -1.0
+    ],
+    false
+   ]
+  }
+ },
+ "dense_matrix_transposed": {
+  "literal_b64": "wgFlCi66ASsKA3VkdBIkb3JnLmFwYWNoZS5zcGFyay5tbC5saW5hbGcuTWF0cml4VURUEgIgARICMAISAjABEgQKAgoAEgQKAgoAEhfKARQqEgoQAAAAAAAACEAAAAAAAAAQQBICGAE=",
+  "value": {
+   "dense_matrix": [
+    2,
+    1,
+    [
+     3.0,
+     4.0
+    ],
+    true
+   ]
+  }
+ },
+ "dense_vector": {
+  "literal_b64": "wgFZCi66ASsKA3VkdBIkb3JnLmFwYWNoZS5zcGFyay5tbC5saW5hbGcuVmVjdG9yVURUEgIgARIECgIKABIECgIKABIXygEUKhIKEAAAAAAAAPA/AAAAAAAAAEA=",
+  "value": {
+   "dense_vector": [
+    1.0,
+    2.0
+   ]
+  }
+ },
+ "double": {
+  "literal_b64": "WQAAAAAAAPg/",
+  "value": {
+   "double": 1.5
+  }
+ },
+ "double_array": {
+  "literal_b64": "sgEaCgJKABIJWQAAAAAAAPA/EglZAAAAAAAABEA=",
+  "value": {
+   "array": [
+    {
+     "double": 1.0
+    },
+    {
+     "double": 2.5
+    }
+   ]
+  }
+ },
+ "int": {
+  "literal_b64": "MAc=",
+  "value": {
+   "int": 7
+  }
+ },
+ "int_array": {
+  "literal_b64": "sgEMCgIyABICMAESAjAC",
+  "value": {
+   "array": [
+    {
+     "int": 1
+    },
+    {
+     "int": 2
+    }
+   ]
+  }
+ },
+ "long": {
+  "literal_b64": "OICAgICAIA==",
+  "value": {
+   "int": 1099511627776
+  }
+ },
+ "nested_double_array": {
+  "literal_b64": "sgE+CgmiAQYKAkoAEAESErIBDwoCSgASCVkAAAAAAADwPxIdsgEaCgJKABIJWQAAAAAAAABAEglZAAAAAAAACEA=",
+  "value": {
+   "array": [
+    {
+     "array": [
+      {
+       "double": 1.0
+      }
+     ]
+    },
+    {
+     "array": [
+      {
+       "double": 2.0
+      },
+      {
+       "double": 3.0
+      }
+     ]
+    }
+   ]
+  }
+ },
+ "null": {
+  "literal_b64": "CgIKAA==",
+  "value": {
+   "null": null
+  }
+ },
+ "sparse_matrix": {
+  "literal_b64": "wgFwCi66ASsKA3VkdBIkb3JnLmFwYWNoZS5zcGFyay5tbC5saW5hbGcuTWF0cml4VURUEgIgABICMAISAjACEgrKAQcSBQoDAAECEgnKAQYSBAoCAAESF8oBFCoSChAAAAAAAADwPwAAAAAAAABAEgIYAA==",
+  "value": {
+   "sparse_matrix": [
+    2,
+    2,
+    [
+     0,
+     1,
+     2
+    ],
+    [
+     0,
+     1
+    ],
+    [
+     1.0,
+     2.0
+    ],
+    false
+   ]
+  }
+ },
+ "sparse_vector": {
+  "literal_b64": "wgFTCi66ASsKA3VkdBIkb3JnLmFwYWNoZS5zcGFyay5tbC5saW5hbGcuVmVjdG9yVURUEgIgABICMAMSCMoBBRIDCgEBEg/KAQwqCgoIAAAAAAAAAEA=",
+  "value": {
+   "sparse_vector": [
+    3,
+    [
+     1
+    ],
+    [
+     2.0
+    ]
+   ]
+  }
+ },
+ "string": {
+  "literal_b64": "agFz",
+  "value": {
+   "string": "s"
+  }
+ },
+ "string_array": {
+  "literal_b64": "sgEbCg9aDRILVVRGOF9CSU5BUlkSA2oBYRIDagFi",
+  "value": {
+   "array": [
+    {
+     "string": "a"
+    },
+    {
+     "string": "b"
+    }
+   ]
+  }
+ },
+ "typed_double_array": {
+  "literal_b64": "sgEaCgJKABIJWQAAAAAAAPA/EglZAAAAAAAAAEA=",
+  "value": {
+   "array": [
+    {
+     "double": 1.0
+    },
+    {
+     "double": 2.0
+    }
+   ]
+  }
+ },
+ "typed_empty_string_array": {
+  "literal_b64": "sgERCg9aDRILVVRGOF9CSU5BUlk=",
+  "value": {
+   "array": []
+  }
+ }
+}

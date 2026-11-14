@@ -226,6 +226,10 @@ impl Transformer for ALSModel {
     }
 }
 impl Model for ALSModel {
+    fn ml_ref(&self) -> Option<&MlRef> {
+        Some(&self.cached)
+    }
+
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }
