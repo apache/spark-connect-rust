@@ -231,13 +231,46 @@ fn submodel(
             Ok(Py::new(py, typed)?.into_any())
         }
         SubModel::DecisionTreeClassification(model) => {
-            generic_submodel(py, with_label(Box::new(model)), &binary)
+            let mut typed = PyDecisionTreeClassificationModel::fitted(
+                py,
+                with_label(Box::new(model)),
+                &binary,
+                object::SummaryDataset::None,
+            )?;
+            params_api::copy_defaults(
+                py,
+                params_api::clone_own_defaults(py, defaults),
+                &mut typed,
+            )?;
+            Ok(Py::new(py, typed)?.into_any())
         }
         SubModel::RandomForestClassification(model) => {
-            generic_submodel(py, with_label(Box::new(model)), &binary)
+            let mut typed = PyRandomForestClassificationModel::fitted(
+                py,
+                with_label(Box::new(model)),
+                &binary,
+                object::SummaryDataset::Train,
+            )?;
+            params_api::copy_defaults(
+                py,
+                params_api::clone_own_defaults(py, defaults),
+                &mut typed,
+            )?;
+            Ok(Py::new(py, typed)?.into_any())
         }
         SubModel::GBTClassification(model) => {
-            generic_submodel(py, with_label(Box::new(model)), &binary)
+            let mut typed = PyGBTClassificationModel::fitted(
+                py,
+                with_label(Box::new(model)),
+                &binary,
+                object::SummaryDataset::None,
+            )?;
+            params_api::copy_defaults(
+                py,
+                params_api::clone_own_defaults(py, defaults),
+                &mut typed,
+            )?;
+            Ok(Py::new(py, typed)?.into_any())
         }
         SubModel::Other(model) => generic_submodel(py, with_label(model), &binary),
     }

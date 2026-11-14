@@ -642,30 +642,7 @@ fn serialized_as_is(value: &Bound<'_, PyAny>) -> PyResult<bool> {
     Ok(false)
 }
 
-/// Fit a native estimator on `dataset`, a Spark DataFrame, as `try_remote_fit` of `pyspark.ml`
-/// fits it: the fit sends the params as they are given, and the JVM estimator reads its columns
-/// by those names exactly, and raises its own errors of their types (a featuresCol of a type that
-/// it does not take) and values (a label that is not a class index). `select` names the columns of
-/// the dataset that the fit sends; with None, the whole dataset is sent, as `pyspark.ml` sends it.
-fn fit_native<T>(
-    slf: &Bound<'_, T>,
-    dataset: &Bound<'_, PyAny>,
-    select: Option<&[&str]>,
-) -> PyResult<PyMLModel>
-where
-    T: Native + PyClass,
-    T::Core: Estimator,
-{
-    let df = dataset_of(dataset, "fit")?;
-    let estimator = snapshot(slf)?;
-    let df = match select {
-        Some(columns) => df.select(columns.iter().map(|name| exact_column(name))),
-        None => df,
-    };
-    fit_core(slf.py(), estimator, &df)
-}
-
-/// Fit a native estimator on `dataset`, as [`fit_native`], and make its typed model of the core
+/// Fit a native estimator on `dataset`, as `try_remote_fit` does, and make its typed model of the core
 /// model and the training DataFrame with `model` (`PyLinearSVCModel::fitted`), which has the
 /// defaults of the estimator, as `_copyValues` copies them to the model of a fit.
 fn fit_native_model<T, M>(
@@ -688,20 +665,6 @@ where
     let mut model = model(py, fitted, &df)?;
     params_api::copy_defaults(py, defaults, &mut model)?;
     Ok(model)
-}
-
-fn fit_core<C: Estimator>(py: Python<'_>, mut estimator: C, df: &DataFrame) -> PyResult<PyMLModel> {
-    let session = df.spark_session();
-    let model = interruptible(py, &session, || estimator.fit(df).map_err(Box::new))?;
-    Ok(PyMLModel {
-        model,
-        session_id: session.session_id().to_string(),
-    })
-}
-
-/// The column of the name `name` exactly, a name with a dot too.
-fn exact_column(name: &str) -> spark_connect::Column {
-    spark_connect::column::col(&format!("`{}`", name.replace('`', "``")))
 }
 
 /// A fitted ML model (result of `Estimator.fit`), wrapping a boxed core `Model`.
@@ -1075,7 +1038,7 @@ native_pymethods! {
         params_api::PyParamAttribute::new("thresholds")
     }
 
-    /// Fit `dataset`, a Spark DataFrame, as PySpark's `pyspark.ml` fits it (see [`fit_native`]):
+    /// Fit `dataset`, a Spark DataFrame, as PySpark's `pyspark.ml` fits it:
     /// its model outputs the JVM model's `rawPrediction` and `probability` vectors and `double`
     /// prediction, and its training summary is of the training dataset.
     #[pyo3(signature = (dataset, params=None))]
