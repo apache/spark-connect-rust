@@ -746,7 +746,7 @@ def test_ml_connect_setters_set_the_params_of_their_receiver_as_pyspark(ml_mock)
             dict(
                 featuresCol="f", predictionCol="p", k=3, initMode="random", initSteps=3,
                 tol=0.5, maxIter=7, seed=5, distanceMeasure="cosine", weightCol="w",
-                solver="row", maxBlockSizeInMB=1.5,
+                solver="row", maxBlockSizeInMB=1.5, intermediateStorageLevel="MEMORY_ONLY",
             ),
         ),
         (
@@ -772,7 +772,7 @@ def test_ml_connect_setters_set_the_params_of_their_receiver_as_pyspark(ml_mock)
         setters = {"set" + name[0].upper() + name[1:]: name for name in values}
         # Every setter of the class is checked, and its setParams, which has a test of its own.
         assert sorted(
-            n for n in dir(cls) if n.startswith("set") and n != "setParams"
+            n for n in dir(cls) if n.startswith("set") and n not in ("set", "setParams")
         ) == sorted(setters)
         receiver = cls()
         for setter, name in setters.items():
@@ -782,7 +782,12 @@ def test_ml_connect_setters_set_the_params_of_their_receiver_as_pyspark(ml_mock)
         params = sent_params(receiver)
         sent_values = {_sent_name(cls.__name__, name): value for name, value in values.items()}
         assert {name: params.get(name) for name in sent_values} == sent_values, cls
-        assert params == sent_params(cls(**values)), cls
+        # A param that PySpark's class has a setter of but its constructor does not take.
+        only_set = {"intermediateStorageLevel"} if cls is KMeans else set()
+        constructed = cls(**{name: v for name, v in values.items() if name not in only_set})
+        for name in only_set:
+            params.pop(_sent_name(cls.__name__, name))
+        assert params == sent_params(constructed), cls
 
 
 _ONE_VS_REST_PARAMS = dict(
@@ -793,6 +798,15 @@ _NO_PARAM_MAP = (
     "The native ML classes take no param map: set their params with the constructor or "
     "setParams instead."
 )
+
+
+def _no_param_map(estimator, key):
+    """The error of a fit of a param map of the key `key`, which is not a Param: a class of
+    PySpark's Params API applies a param map as `Estimator.fit` does (a `copy` of it), whose
+    `_copyValues` raises PySpark's error; the other native classes take no param map."""
+    if hasattr(estimator, "copy"):
+        return f"Expecting a valid instance of Param, but received: {key}"
+    return _NO_PARAM_MAP
 
 
 def _renamed_by_fit(name, param):
@@ -1013,8 +1027,9 @@ def test_ml_connect_params_argument_of_fit_transform_and_evaluate_as_pyspark(ml_
         base = fitted(estimator)
         assert fitted(estimator, None) == base, type(estimator)
         assert fitted(estimator, {}) == base, type(estimator)
-        refused(lambda: estimator.fit(df, {"smoothing": 2.0}), _NO_PARAM_MAP)
-        refused(lambda: estimator.fit(df, [{"smoothing": 2.0}]), _NO_PARAM_MAP)
+        no_map = _no_param_map(estimator, "smoothing")
+        refused(lambda: estimator.fit(df, {"smoothing": 2.0}), no_map)
+        refused(lambda: estimator.fit(df, [{"smoothing": 2.0}]), no_map)
         for value in ["x", 3]:
             refused(
                 lambda: estimator.fit(df, value),
@@ -1131,7 +1146,7 @@ def test_ml_connect_fit_of_a_list_of_param_maps_as_pyspark(ml_mock):
         assert len(models) == 2 and params == single * 2, type(estimator)
         assert all(isinstance(model, list) and len(model) == 1 for model in models)
 
-        refused(lambda: estimator.fit(df, [{"x": 1}]), _NO_PARAM_MAP)
+        refused(lambda: estimator.fit(df, [{"x": 1}]), _no_param_map(estimator, "x"))
         refused(lambda: estimator.fit(df, [1]), fit_message.format(int))
         refused(lambda: estimator.fit(df, [[1]]), fit_message.format(int))
         # The fit of the first map is sent before the second element raises.

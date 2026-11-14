@@ -227,7 +227,26 @@ jobs:
         env:
           SPARK_REMOTE: sc://localhost:15002
           PYTHONPATH: ${{ github.workspace }}/python
-        run: python -m pytest tests/test_arrow_e2e.py tests/test_dropin_e2e.py tests/test_ml_e2e.py tests/test_gbt_classifier_e2e.py tests/test_gbt_regressor_e2e.py tests/test_naive_bayes_e2e.py tests/test_bisecting_kmeans_e2e.py tests/test_gaussian_mixture_e2e.py tests/test_generalized_linear_regression_e2e.py tests/test_remaining_classifiers_e2e.py tests/test_remaining_regressors_e2e.py tests/test_remaining_clustering_e2e.py tests/test_ml_features_e2e.py tests/test_frequent_patterns_e2e.py tests/test_als_e2e.py tests/test_evaluators_e2e.py tests/test_statistics_e2e.py -q
+        run: |
+          python -m pytest -q \
+            tests/test_arrow_e2e.py \
+            tests/test_dropin_e2e.py \
+            tests/test_ml_e2e.py \
+            tests/test_ml_api_e2e.py \
+            tests/test_gbt_classifier_e2e.py \
+            tests/test_gbt_regressor_e2e.py \
+            tests/test_naive_bayes_e2e.py \
+            tests/test_bisecting_kmeans_e2e.py \
+            tests/test_gaussian_mixture_e2e.py \
+            tests/test_generalized_linear_regression_e2e.py \
+            tests/test_remaining_classifiers_e2e.py \
+            tests/test_remaining_regressors_e2e.py \
+            tests/test_remaining_clustering_e2e.py \
+            tests/test_ml_features_e2e.py \
+            tests/test_frequent_patterns_e2e.py \
+            tests/test_als_e2e.py \
+            tests/test_evaluators_e2e.py \
+            tests/test_statistics_e2e.py
 
       - name: Restart Connect server in local-cluster mode
         # Resource profiles and artifact distribution across executors can only be

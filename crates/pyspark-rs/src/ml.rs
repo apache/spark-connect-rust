@@ -27,6 +27,16 @@ use spark_connect::DataFrame;
 
 pub(crate) mod stat;
 
+#[macro_use]
+pub(crate) mod macros;
+pub(crate) mod object;
+pub(crate) mod params_api;
+
+// The typed models and summaries of each family, in the files of the areas that complete them.
+pub(crate) mod classification_api;
+pub(crate) mod clustering_api;
+pub(crate) mod regression_api;
+
 pub(crate) mod evaluation;
 pub use evaluation::{
     PyBinaryClassificationEvaluator, PyClusteringEvaluator, PyMulticlassClassificationEvaluator,
@@ -98,8 +108,9 @@ enum Converted {
     /// NullPointerException), and reads a null bootstrap as false.
     Null,
     Int(i64),
-    /// An int beyond a long, which PySpark's `LiteralExpression` cannot send.
-    Unsendable,
+    /// An int beyond a long (or a list of ints with one), which PySpark's `LiteralExpression`
+    /// cannot send, of the `repr` of the converted value, which its getter returns.
+    Unsendable(String),
     Float(f64),
     Str(String),
     Bool(bool),
@@ -133,9 +144,10 @@ fn convert(name: &str, kind: Kind, value: &Bound<'_, PyAny>) -> PyResult<Convert
             }
         })?;
     Ok(match kind {
-        Kind::Int => converted
-            .extract::<i64>()
-            .map_or(Converted::Unsendable, Converted::Int),
+        Kind::Int => match converted.extract::<i64>() {
+            Ok(value) => Converted::Int(value),
+            Err(_) => Converted::Unsendable(converted.repr()?.to_string()),
+        },
         Kind::ClampedInt => Converted::Int(match converted.extract::<i64>() {
             Ok(value) => value,
             Err(_) if converted.gt(0)? => i64::MAX,
@@ -146,9 +158,10 @@ fn convert(name: &str, kind: Kind, value: &Bound<'_, PyAny>) -> PyResult<Convert
         Kind::Bool => Converted::Bool(converted.extract()?),
         Kind::StrList => Converted::StrList(converted.extract()?),
         Kind::FloatList => Converted::FloatList(converted.extract()?),
-        Kind::IntList => converted
-            .extract::<Vec<i64>>()
-            .map_or(Converted::Unsendable, Converted::IntList),
+        Kind::IntList => match converted.extract::<Vec<i64>>() {
+            Ok(value) => Converted::IntList(value),
+            Err(_) => Converted::Unsendable(converted.repr()?.to_string()),
+        },
         Kind::FloatListList => Converted::FloatListList(converted.extract()?),
         Kind::Identity => Converted::Raw(converted.unbind()),
         Kind::Vector => {
@@ -213,6 +226,10 @@ trait Native {
     fn raw_params_mut(&mut self) -> Option<&mut Vec<(&'static str, Py<PyAny>)>> {
         None
     }
+    /// The Python values of the params of the converter `identity`, which are kept as they are.
+    fn raw_params(&self) -> Option<&[(&'static str, Py<PyAny>)]> {
+        None
+    }
     fn params_mut(&mut self) -> &mut Params;
     /// The params whose value PySpark cannot send: a fit, transform or evaluate raises PySpark's
     /// error of its serialization of the params, before any request.
@@ -222,6 +239,15 @@ trait Native {
     /// The name of the param `name` in the JVM class, where it is not the name of PySpark's.
     fn jvm_name(name: &'static str) -> &'static str {
         name
+    }
+    /// The defaults that the object holds itself (see [`params_api::OwnDefaults`]), of a class
+    /// whose objects hold them: of one with a default of its uid (`outputCol`), which a load
+    /// keeps of the uid that the object was made of.
+    fn own_defaults(&self) -> Option<&params_api::OwnDefaults> {
+        None
+    }
+    fn own_defaults_mut(&mut self) -> Option<&mut params_api::OwnDefaults> {
+        None
     }
 }
 
@@ -255,12 +281,16 @@ fn apply<T: Native>(target: &mut T, name: &'static str, value: Converted) {
         raw.retain(|(key, _)| *key != name);
     }
     let jvm = T::jvm_name(name);
-    let params = std::mem::take(target.params_mut());
+    let params = std::mem::take(target.params_mut()).clear_param(&params_api::unsendable_key(jvm));
     let params = match value {
         Converted::Null => params.set_param_null(jvm),
-        Converted::Unsendable => {
+        Converted::Unsendable(text) => {
             target.unsendable_mut().push(name);
-            params.clear_param(jvm)
+            // Kept under a reserved key, which no request sends: a fit, transform or evaluate
+            // raises PySpark's error of the value first (see `snapshot`).
+            params
+                .clear_param(jvm)
+                .set_param_string(&params_api::unsendable_key(jvm), &text)
         }
         Converted::Int(value) => params.set_param_int_narrow(jvm, value),
         Converted::Float(value) => params.set_param_double(jvm, value),
@@ -436,6 +466,8 @@ fn check_fit_params(params: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
 pub(crate) enum Fitted<M> {
     One(M),
     Many(Py<PyList>),
+    /// The model of the fit of a copy of the estimator, of a param map.
+    Object(Py<PyAny>),
 }
 
 impl<'py, M: IntoPyObject<'py>> IntoPyObject<'py> for Fitted<M> {
@@ -447,6 +479,7 @@ impl<'py, M: IntoPyObject<'py>> IntoPyObject<'py> for Fitted<M> {
         match self {
             Fitted::One(model) => model.into_bound_py_any(py),
             Fitted::Many(models) => Ok(models.into_bound(py).into_any()),
+            Fitted::Object(model) => Ok(model.into_bound(py)),
         }
     }
 }
@@ -470,6 +503,16 @@ pub(crate) fn fit_with<'py, T: PyClass, M>(
             models.append(slf.as_any().call_method1("fit", (dataset, map?))?)?;
         }
         return Ok(Fitted::Many(models.unbind()));
+    }
+    // A param map of the Params API applies, as `Estimator.fit` applies it: the fit of a copy of
+    // the estimator with it (`self.copy(params)._fit(dataset)`).
+    if let Some(map) = params.filter(|p| p.cast::<PyDict>().is_ok_and(|d| !d.is_empty())) {
+        if slf.as_any().hasattr("copy")? {
+            let copy = slf.as_any().call_method1("copy", (map,))?;
+            return Ok(Fitted::Object(
+                copy.call_method1("fit", (dataset,))?.unbind(),
+            ));
+        }
     }
     check_fit_params(params)?;
     fit().map(Fitted::One)
@@ -617,6 +660,31 @@ where
         None => df,
     };
     fit_core(slf.py(), estimator, &df)
+}
+
+/// Fit a native estimator on `dataset`, as [`fit_native`], and make its typed model of the core
+/// model and the training DataFrame with `model` (`PyLinearSVCModel::fitted`), which has the
+/// defaults of the estimator, as `_copyValues` copies them to the model of a fit.
+fn fit_native_model<T, M>(
+    slf: &Bound<'_, T>,
+    dataset: &Bound<'_, PyAny>,
+    model: impl FnOnce(Python<'_>, Box<dyn Model>, &DataFrame) -> PyResult<M>,
+) -> PyResult<M>
+where
+    T: Native + PyClass<Frozen = False>,
+    T::Core: Estimator,
+    M: params_api::ParamsHolder + pyo3::PyTypeInfo,
+{
+    let py = slf.py();
+    let df = dataset_of(dataset, "fit")?;
+    let mut estimator = snapshot(slf)?;
+    // The defaults of the estimator, which `_copyValues` gives the model of the fit.
+    let defaults = params_api::fit_defaults(slf)?;
+    let session = df.spark_session();
+    let fitted = interruptible(py, &session, || estimator.fit(&df).map_err(Box::new))?;
+    let mut model = model(py, fitted, &df)?;
+    params_api::copy_defaults(py, defaults, &mut model)?;
+    Ok(model)
 }
 
 /// The fit of a native estimator whose core cannot fit it, as Pipeline and CrossValidator.
@@ -1067,8 +1135,24 @@ const LINEAR_SVC_PARAMS: &[(&str, Kind)] = &[
     ("maxBlockSizeInMB", Kind::Float),
 ];
 
-#[pymethods]
-impl PyLinearSVC {
+native_pymethods! {
+    PyLinearSVC;
+    jvm: "org.apache.spark.ml.classification.LinearSVC", op: Estimator;
+    params: [
+        "aggregationDepth" => ("getAggregationDepth", get_aggregation_depth, param_aggregation_depth),
+        "featuresCol" => ("getFeaturesCol", get_features_col, param_features_col),
+        "fitIntercept" => ("getFitIntercept", get_fit_intercept, param_fit_intercept),
+        "labelCol" => ("getLabelCol", get_label_col, param_label_col),
+        "maxBlockSizeInMB" => ("getMaxBlockSizeInMB", get_max_block_size_in_mb, param_max_block_size_in_mb),
+        "maxIter" => ("getMaxIter", get_max_iter, param_max_iter),
+        "predictionCol" => ("getPredictionCol", get_prediction_col, param_prediction_col),
+        "rawPredictionCol" => ("getRawPredictionCol", get_raw_prediction_col, param_raw_prediction_col),
+        "regParam" => ("getRegParam", get_reg_param, param_reg_param),
+        "standardization" => ("getStandardization", get_standardization, param_standardization),
+        "threshold" => ("getThreshold", get_threshold, param_threshold),
+        "tol" => ("getTol", get_tol, param_tol),
+        "weightCol" => ("getWeightCol", get_weight_col, param_weight_col),
+    ];
     #[new]
     #[pyo3(signature = (*args, **kwargs), text_signature = "(*, featuresCol='features', labelCol='label', predictionCol='prediction', maxIter=100, regParam=0.0, tol=1e-06, rawPredictionCol='rawPrediction', fitIntercept=True, standardization=True, threshold=0.0, weightCol=None, aggregationDepth=2, maxBlockSizeInMB=0.0)")]
     fn new(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
@@ -1201,8 +1285,49 @@ impl PyLinearSVC {
         slf: &Bound<'_, Self>,
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Fitted<PyMLModel>> {
-        fit_with(slf, dataset, params, || fit_native(slf, dataset, None))
+    ) -> PyResult<Fitted<classification_api::PyLinearSVCModel>> {
+        fit_with(slf, dataset, params, || {
+            fit_native_model(slf, dataset, |py, model, df| {
+                classification_api::PyLinearSVCModel::fitted(
+                    py,
+                    model,
+                    df,
+                    object::SummaryDataset::Train,
+                )
+            })
+        })
+    }
+
+    /// The fits of a copy of the estimator, one per param map, as `Estimator.fitMultiple`, of
+    /// PySpark's keywords.
+    #[pyo3(name = "fitMultiple")]
+    #[allow(non_snake_case)]
+    fn fit_multiple<'py>(
+        slf: &Bound<'py, Self>,
+        dataset: &Bound<'py, PyAny>,
+        paramMaps: &Bound<'py, PyAny>,
+    ) -> PyResult<params_api::PyFitMultipleIterator> {
+        params_api::fit_multiple(slf.as_any(), dataset, paramMaps)
+    }
+}
+
+impl params_api::NativeInstance for PyLinearSVC {
+    fn duplicate(&self, py: Python<'_>) -> PyResult<Py<Self>> {
+        Py::new(
+            py,
+            Self {
+                inner: self.inner.clone(),
+                unsendable: self.unsendable.clone(),
+            },
+        )
+    }
+
+    fn uid(&self) -> String {
+        Estimator::operator(&self.inner).uid.clone()
+    }
+
+    fn set_uid(&mut self, uid: &str) {
+        Estimator::operator_mut(&mut self.inner).uid = uid.to_string();
     }
 }
 
@@ -4332,8 +4457,24 @@ const KMEANS_PARAMS: &[(&str, Kind)] = &[
     ("maxBlockSizeInMB", Kind::Float),
 ];
 
-#[pymethods]
-impl PyKMeans {
+native_pymethods! {
+    PyKMeans;
+    jvm: "org.apache.spark.ml.clustering.KMeans", op: Estimator;
+    params: [
+        "distanceMeasure" => ("getDistanceMeasure", get_distance_measure, param_distance_measure),
+        "featuresCol" => ("getFeaturesCol", get_features_col, param_features_col),
+        "initMode" => ("getInitMode", get_init_mode, param_init_mode),
+        "initSteps" => ("getInitSteps", get_init_steps, param_init_steps),
+        "intermediateStorageLevel" => ("getIntermediateStorageLevel", get_intermediate_storage_level, param_intermediate_storage_level),
+        "k" => ("getK", get_k, param_k),
+        "maxBlockSizeInMB" => ("getMaxBlockSizeInMB", get_max_block_size_in_mb, param_max_block_size_in_mb),
+        "maxIter" => ("getMaxIter", get_max_iter, param_max_iter),
+        "predictionCol" => ("getPredictionCol", get_prediction_col, param_prediction_col),
+        "seed" => ("getSeed", get_seed, param_seed),
+        "solver" => ("getSolver", get_solver, param_solver),
+        "tol" => ("getTol", get_tol, param_tol),
+        "weightCol" => ("getWeightCol", get_weight_col, param_weight_col),
+    ];
     #[new]
     #[pyo3(signature = (*args, **kwargs), text_signature = "(*, featuresCol='features', predictionCol='prediction', k=2, initMode='k-means||', initSteps=2, tol=0.0001, maxIter=20, seed=None, distanceMeasure='euclidean', weightCol=None, solver='auto', maxBlockSizeInMB=0.0)")]
     fn new(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
@@ -4450,13 +4591,62 @@ impl PyKMeans {
         set_param(slf, "maxBlockSizeInMB", Kind::Float, value)
     }
 
+    #[pyo3(name = "setIntermediateStorageLevel")]
+    fn set_intermediate_storage_level<'py>(
+        slf: Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        set_param(slf, "intermediateStorageLevel", Kind::Str, value)
+    }
+
     #[pyo3(signature = (dataset, params=None))]
     fn fit(
         slf: &Bound<'_, Self>,
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Fitted<PyMLModel>> {
-        fit_with(slf, dataset, params, || fit_native(slf, dataset, None))
+    ) -> PyResult<Fitted<clustering_api::PyKMeansModel>> {
+        fit_with(slf, dataset, params, || {
+            fit_native_model(slf, dataset, |py, model, df| {
+                clustering_api::PyKMeansModel::fitted(
+                    py,
+                    model,
+                    df,
+                    object::SummaryDataset::Transformed,
+                )
+            })
+        })
+    }
+
+    /// The fits of a copy of the estimator, one per param map, as `Estimator.fitMultiple`, of
+    /// PySpark's keywords.
+    #[pyo3(name = "fitMultiple")]
+    #[allow(non_snake_case)]
+    fn fit_multiple<'py>(
+        slf: &Bound<'py, Self>,
+        dataset: &Bound<'py, PyAny>,
+        paramMaps: &Bound<'py, PyAny>,
+    ) -> PyResult<params_api::PyFitMultipleIterator> {
+        params_api::fit_multiple(slf.as_any(), dataset, paramMaps)
+    }
+}
+
+impl params_api::NativeInstance for PyKMeans {
+    fn duplicate(&self, py: Python<'_>) -> PyResult<Py<Self>> {
+        Py::new(
+            py,
+            Self {
+                inner: self.inner.clone(),
+                unsendable: self.unsendable.clone(),
+            },
+        )
+    }
+
+    fn uid(&self) -> String {
+        Estimator::operator(&self.inner).uid.clone()
+    }
+
+    fn set_uid(&mut self, uid: &str) {
+        Estimator::operator_mut(&mut self.inner).uid = uid.to_string();
     }
 }
 

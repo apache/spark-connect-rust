@@ -487,8 +487,9 @@ impl MlTarget {
         child
     }
 
-    /// The target, whose summary the server recreates of `dataset` (the transform of the training
-    /// dataset by the model, as PySpark's `_summary_dataset`) when it has lost it.
+    /// The target, whose summary the server recreates of `dataset`, the summary dataset of the fit
+    /// (PySpark's `_summary_dataset`, see [`training_summary`]), when it has lost it, and which the
+    /// DataFrames of the summary read.
     pub fn with_summary_dataset(mut self, dataset: &DataFrame) -> Self {
         self.summary_dataset = Some(dataset.clone());
         self
@@ -996,6 +997,103 @@ pub fn read(
     })
 }
 
+/// A model of a server-side object, of its operator and params, which transforms as every cached
+/// model does: the model of an object that `read_model` loads, or that a fetch returns (a tree of an
+/// ensemble), whose class this client does not otherwise model.
+#[derive(Debug, Clone)]
+pub struct ObjectModel {
+    operator: MlOperator,
+    params: Params,
+    object: MlRef,
+}
+
+impl ObjectModel {
+    /// The model of `object`, of the operator `operator` (of the model's JVM class and uid) and
+    /// the params `params`.
+    pub fn new(object: MlRef, operator: MlOperator, params: Params) -> Self {
+        Self {
+            operator,
+            params,
+            object,
+        }
+    }
+}
+
+impl Transformer for ObjectModel {
+    fn operator(&self) -> &MlOperator {
+        &self.operator
+    }
+
+    fn operator_mut(&mut self) -> &mut MlOperator {
+        &mut self.operator
+    }
+
+    fn params(&self) -> &Params {
+        &self.params
+    }
+
+    fn params_mut(&mut self) -> &mut Params {
+        &mut self.params
+    }
+
+    fn transform_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<DataFrame> {
+        self.object.transform(df, &self.params)
+    }
+
+    fn build_ml_relation(
+        &self,
+        input: &DataFrame,
+    ) -> spark_connect_core::error::Result<proto::MlRelation> {
+        self.object.build_ml_relation(input, &self.params)
+    }
+}
+
+impl Model for ObjectModel {
+    fn clone_box(&self) -> Box<dyn Model> {
+        Box::new(self.clone())
+    }
+
+    fn ml_ref(&self) -> Option<&MlRef> {
+        Some(&self.object)
+    }
+}
+
+/// The target of the training summary of the fitted model `object` (`"<id>.summary"`), of the
+/// summary dataset `dataset`, as PySpark's `try_remote_fit` makes it: `dataset` is the training
+/// dataset itself for the models whose `_summary_dataset` returns it (the classification models,
+/// LinearRegression and GeneralizedLinearRegression), and [`summary_transform`] of it for the others
+/// (the clustering models, of the default `_summary_dataset`).
+pub fn training_summary(object: &MlRef, dataset: &DataFrame) -> MlTarget {
+    MlTarget::object(object)
+        .child("summary")
+        .with_summary_dataset(dataset)
+}
+
+/// The transform of `dataset` by the fitted model `object` of the JVM class `jvm_class`, of no
+/// params, as PySpark's default `_summary_dataset` (`self.transform(train_dataset)`) transforms the
+/// training dataset before the fit copies the estimator's params to the model.
+pub fn summary_transform(
+    object: &MlRef,
+    jvm_class: &str,
+    dataset: &DataFrame,
+) -> spark_connect_core::error::Result<DataFrame> {
+    let mut model = ObjectModel::new(
+        object.clone(),
+        MlOperator::with_uid(jvm_class, "", OperatorType::Model),
+        Params::new(),
+    );
+    model.transform(dataset)
+}
+
+/// The target of the summary of an `evaluate`, of the id of the `summary` result that the server
+/// returns, which this client does not release, as PySpark does not.
+pub fn evaluated_summary(
+    session: &SparkSession,
+    output: FetchOutput,
+) -> spark_connect_core::error::Result<MlTarget> {
+    Ok(MlTarget::unowned(session, &output.into_string()?))
+}
+
 /// The estimator, transformer or evaluator of the JVM class `jvm_class` that `read` loads from
 /// `path`: its operator, of the uid that it was saved with, and its params.
 pub fn read_operator(
@@ -1109,5 +1207,51 @@ mod tests {
         assert_eq!(names, ["summary", "accuracy"]);
         assert_eq!(MlTarget::helper(&session).id(), ML_CONNECT_HELPER_ID);
         std::mem::forget(model);
+    }
+
+    #[test]
+    fn training_summaries_object_models_and_evaluated_summaries_are_of_their_objects() {
+        let session = crate::session::SparkSession::builder()
+            .remote("sc://localhost:15002")
+            .get_or_create()
+            .expect("session");
+        let object = MlRef::from_id(&session, "fitted");
+        let train = session.range(3).expect("range");
+
+        // The training summary is the summary of the object, of the summary dataset.
+        let summary = training_summary(&object, &train);
+        assert_eq!(summary.id(), "fitted.summary");
+        assert!(summary.summary_dataset().is_some());
+
+        // A model of the object transforms of its params, as a cached model does.
+        let operator = MlOperator::with_uid(
+            "org.apache.spark.ml.clustering.KMeansModel",
+            "KMeans_0123456789ab",
+            OperatorType::Model,
+        );
+        let model = ObjectModel::new(
+            object.clone(),
+            operator,
+            Params::new().set_param_int("k", 2),
+        );
+        assert_eq!(model.ml_ref().map(MlRef::id), Some("fitted"));
+        assert_eq!(model.clone_box().operator().uid, "KMeans_0123456789ab");
+        let relation = model.build_ml_relation(&train).expect("relation");
+        let Some(proto::ml_relation::MlType::Transform(transform)) = relation.ml_type else {
+            panic!("a transform: {relation:?}");
+        };
+        let Some(proto::ml_relation::transform::Operator::ObjRef(obj_ref)) = transform.operator
+        else {
+            panic!("of the object");
+        };
+        assert_eq!(obj_ref.id, "fitted");
+        assert!(transform.params.expect("params").params.contains_key("k"));
+
+        // The summary of an evaluate is the server's id; any other result is an error.
+        let evaluated =
+            evaluated_summary(&session, FetchOutput::Summary("evaluated".into())).unwrap();
+        assert_eq!(evaluated.id(), "evaluated");
+        assert!(evaluated_summary(&session, FetchOutput::Value(MlValue::Int(1))).is_err());
+        std::mem::forget((model, object));
     }
 }

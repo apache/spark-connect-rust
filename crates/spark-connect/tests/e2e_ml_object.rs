@@ -9,9 +9,10 @@ use common::live_session;
 use spark_connect::column::col;
 use spark_connect::expression::Expression;
 use spark_connect::ml::{
-    attribute_relation, fetch, read, read_model, read_operator, write_object, write_operator,
-    Estimator, FetchArg, LinearSVC, LinearSVCModel, MlTarget, MlValue, MlVector, OperatorType,
-    RandomForestClassifier,
+    attribute_relation, evaluated_summary, fetch, read, read_model, read_operator,
+    summary_transform, training_summary, write_object, write_operator, Estimator, FetchArg, KMeans,
+    LinearSVC, LinearSVCModel, MlTarget, MlValue, MlVector, ObjectModel, OperatorType,
+    RandomForestClassifier, Transformer,
 };
 use spark_connect::{Column, DataFrame, SparkSession};
 
@@ -248,5 +249,56 @@ fn ml_models_and_estimators_save_and_load_as_pyspark() {
             .get_param("maxIter")
             .map(|e| format!("{e:?}"))
     );
+    s.stop().unwrap();
+}
+
+#[test]
+fn ml_summaries_of_a_transform_and_of_an_evaluate_and_models_of_loaded_objects_as_pyspark() {
+    let Some(s) = live_session() else {
+        return;
+    };
+    let train = training(&s);
+    // The training summary of a clustering model is of the transform of the training dataset by
+    // the model, of no params, as PySpark's default `_summary_dataset`.
+    let model = KMeans::new().set_k(2).fit(&train).unwrap();
+    let object = model
+        .ml_ref()
+        .expect("a KMeans model is a server-side object");
+    let dataset =
+        summary_transform(object, "org.apache.spark.ml.clustering.KMeansModel", &train).unwrap();
+    assert!(dataset
+        .columns()
+        .unwrap()
+        .contains(&"prediction".to_string()));
+    let summary = training_summary(object, &dataset);
+    let k = fetch(&summary, "k", vec![]).unwrap().into_value().unwrap();
+    assert_eq!(k, MlValue::Int(2));
+    let predictions = attribute_relation(&summary, "predictions", vec![]).unwrap();
+    assert_eq!(predictions.count().unwrap(), 8);
+
+    // The summary of an evaluate, of the id that the server returns.
+    let svc = LinearSVC::new().set_max_iter(5).fit(&train).unwrap();
+    let target = MlTarget::object(svc.ml_ref().unwrap());
+    let output = fetch(&target, "evaluate", vec![FetchArg::Input(train.clone())]).unwrap();
+    let evaluation = evaluated_summary(&s, output).unwrap();
+    let accuracy = fetch(&evaluation, "accuracy", vec![]).unwrap().into_value();
+    assert_eq!(accuracy.unwrap(), MlValue::Double(1.0));
+
+    // A model of a loaded object transforms as the model that was saved.
+    let path = scratch_path("object-model");
+    svc.write().unwrap().overwrite().save(&path).unwrap();
+    let (object, operator, params) = read_model(
+        &s,
+        "org.apache.spark.ml.classification.LinearSVCModel",
+        &path,
+    )
+    .unwrap();
+    let mut loaded = ObjectModel::new(object, operator, params);
+    let transformed = loaded.transform(&train).unwrap();
+    assert!(transformed
+        .columns()
+        .unwrap()
+        .contains(&"prediction".to_string()));
+    assert_eq!(transformed.count().unwrap(), 8);
     s.stop().unwrap();
 }
