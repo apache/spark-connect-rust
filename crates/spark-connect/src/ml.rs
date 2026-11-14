@@ -26,6 +26,25 @@ pub use feature::*;
 mod fpm;
 pub use fpm::*;
 
+mod object;
+pub use object::*;
+
+// The typed accessors, summaries and persistence of the models of each family, in the files of the
+// areas that complete them (see `object` for their server-side objects).
+mod classification_api;
+#[allow(unused_imports)] // Until the area adds its first public item.
+pub use classification_api::*;
+mod regression_api;
+#[allow(unused_imports)] // Until the area adds its first public item.
+pub use regression_api::*;
+mod clustering_api;
+#[allow(unused_imports)] // Until the area adds its first public item.
+pub use clustering_api::*;
+// The members of the tree models, which the classification and regression trees share.
+mod tree_api;
+#[allow(unused_imports)] // Until the area adds its first public item.
+pub use tree_api::*;
+
 use crate::dataframe::DataFrame;
 use crate::expression::LiteralExpression;
 use crate::plan::{LogicalPlan, RelationOwner};
@@ -784,6 +803,12 @@ pub trait Estimator: Send + Sync {
         self.ensure_operator();
         self.fit_impl(df)
     }
+
+    /// A writer that saves the estimator, which is not fitted, of a session that
+    /// [`MlWriter::session`] sets (see [`MlWriter`]), as `estimator.write()` of PySpark.
+    fn write(&self) -> MlWriter {
+        MlWriter::operator(self.operator(), self.params())
+    }
 }
 
 /// Base trait for ML Transformers that apply transformations to data.
@@ -840,9 +865,91 @@ pub trait Transformer: Send + Sync {
 /// Base trait for ML Models (result of fitting an Estimator).
 ///
 /// Mirrors `pyspark.ml.connect.base.Model`.
-pub trait Model: Transformer {
+pub trait Model: Transformer + AsAny {
     /// Clone this model into a boxed trait object.
     fn clone_box(&self) -> Box<dyn Model>;
+
+    /// The server-side object of the model, whose methods [`fetch`] reads (see
+    /// [`MlTarget::object`]), of a model that the server holds. None of a model that holds no
+    /// single object, such as a pipeline model.
+    fn ml_ref(&self) -> Option<&MlRef> {
+        None
+    }
+
+    /// The target of the methods of the model's server-side object, or an error of a model that
+    /// the server does not hold.
+    fn model_target(&self) -> spark_connect_core::error::Result<MlTarget> {
+        self.ml_ref().map(MlTarget::object).ok_or_else(|| {
+            SparkError::value_msg(format!(
+                "{} is not a server-side model",
+                self.operator().name
+            ))
+        })
+    }
+
+    /// The server's description of the model, as PySpark's `JavaModel.__repr__` reads it (its
+    /// `toString`).
+    fn describe(&self) -> spark_connect_core::error::Result<String> {
+        fetch(&self.model_target()?, "toString", vec![])?.into_string()
+    }
+
+    /// A writer that saves the model (see [`MlWriter`]), of the session that holds it, as
+    /// `model.write()` of PySpark.
+    fn write(&self) -> spark_connect_core::error::Result<MlWriter> {
+        let object = self.ml_ref().ok_or_else(|| {
+            SparkError::value_msg(format!(
+                "{} is not a server-side model to save",
+                self.operator().name
+            ))
+        })?;
+        Ok(MlWriter::object(object, self.params()))
+    }
+}
+
+/// The concrete type of a boxed model, as `Model` is a supertrait of it: `model.downcast_ref`
+/// of a `Box<dyn Model>` that a fit returns.
+pub trait AsAny: std::any::Any {
+    fn as_any(&self) -> &dyn std::any::Any;
+}
+
+impl<T: std::any::Any> AsAny for T {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+impl dyn Model {
+    /// The model as its concrete type `M`, if it is one (a `LinearRegressionModel` of the
+    /// `Box<dyn Model>` of `LinearRegression::fit` of the trait).
+    pub fn downcast_ref<M: Model>(&self) -> Option<&M> {
+        self.as_any().downcast_ref::<M>()
+    }
+}
+
+/// The members of every prediction model of `pyspark.ml` (`JavaPredictionModel`): the number of
+/// the features, and the prediction of a single vector, of the model's server-side object.
+pub trait PredictionModel: Model {
+    /// The number of features that the model was trained on (`numFeatures`), or -1 if unknown.
+    fn num_features(&self) -> spark_connect_core::error::Result<i32> {
+        let value = fetch(&self.model_target()?, "numFeatures", vec![])?.into_value()?;
+        value
+            .as_i64()
+            .map(|v| v as i32)
+            .ok_or_else(|| SparkError::value_msg(format!("numFeatures is not an int: {value:?}")))
+    }
+
+    /// The prediction of a single vector of features (`predict`).
+    fn predict(&self, features: &MlVector) -> spark_connect_core::error::Result<f64> {
+        let value = fetch(
+            &self.model_target()?,
+            "predict",
+            vec![FetchArg::Value(MlValue::Vector(features.clone()))],
+        )?
+        .into_value()?;
+        value
+            .as_f64()
+            .ok_or_else(|| SparkError::value_msg(format!("predict is not a double: {value:?}")))
+    }
 }
 
 /// Base trait for ML Evaluators that measure model quality.
@@ -868,6 +975,12 @@ pub trait Evaluator: Send + Sync {
 
     /// Evaluate a DataFrame and return a metric value.
     fn evaluate(&self, _df: &DataFrame) -> spark_connect_core::error::Result<f64>;
+
+    /// A writer that saves the evaluator, of a session that [`MlWriter::session`] sets (see
+    /// [`MlWriter`]), as `evaluator.write()` of PySpark.
+    fn write(&self) -> MlWriter {
+        MlWriter::operator(self.operator(), self.params())
+    }
 }
 
 /// The value of the method `method` of Spark Connect's ML helper, called with `args`, as PySpark's
@@ -1112,6 +1225,10 @@ impl Transformer for StandardScalerModel {
 }
 
 impl Model for StandardScalerModel {
+    fn ml_ref(&self) -> Option<&MlRef> {
+        Some(&self.cached)
+    }
+
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }
@@ -1318,6 +1435,10 @@ impl Transformer for StringIndexerModel {
 }
 
 impl Model for StringIndexerModel {
+    fn ml_ref(&self) -> Option<&MlRef> {
+        Some(&self.cached)
+    }
+
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }
@@ -1448,6 +1569,10 @@ impl Transformer for MaxAbsScalerModel {
 }
 
 impl Model for MaxAbsScalerModel {
+    fn ml_ref(&self) -> Option<&MlRef> {
+        Some(&self.cached)
+    }
+
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }
@@ -1497,11 +1622,15 @@ fn fit_via_command(
     )))
 }
 
-/// The server's cached model, shared by a model, its clones and every DataFrame that it
-/// transforms (through the [`RelationOwner`] of their plans). The last owner to drop deletes
-/// the cached object on the server, as PySpark's `RemoteModelRef` does.
+/// A server-side ML object: a fitted model, or another object that a fetch returns (a submodel, a
+/// tree of an ensemble), shared by its clones and by every DataFrame whose plan reads it (through
+/// the [`RelationOwner`] of their plans). The last owner to drop deletes the cached object on the
+/// server, as PySpark's `RemoteModelRef` does.
 #[derive(Debug, Clone)]
-struct CachedModel(Arc<CachedModelRef>);
+pub struct MlRef(Arc<CachedModelRef>);
+
+/// The name of [`MlRef`] in the code of the models, which caches them.
+type CachedModel = MlRef;
 
 struct CachedModelRef {
     model_ref: proto::ObjectRef,
@@ -1759,6 +1888,10 @@ impl Transformer for LogisticRegressionModel {
 }
 
 impl Model for LogisticRegressionModel {
+    fn ml_ref(&self) -> Option<&MlRef> {
+        Some(&self.cached)
+    }
+
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }
@@ -2010,6 +2143,10 @@ impl Transformer for LinearSVCModel {
 }
 
 impl Model for LinearSVCModel {
+    fn ml_ref(&self) -> Option<&MlRef> {
+        Some(&self.cached)
+    }
+
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }
@@ -2303,6 +2440,10 @@ impl Transformer for FMClassificationModel {
 }
 
 impl Model for FMClassificationModel {
+    fn ml_ref(&self) -> Option<&MlRef> {
+        Some(&self.cached)
+    }
+
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }
@@ -2573,6 +2714,10 @@ impl Transformer for MultilayerPerceptronClassificationModel {
 }
 
 impl Model for MultilayerPerceptronClassificationModel {
+    fn ml_ref(&self) -> Option<&MlRef> {
+        Some(&self.cached)
+    }
+
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }
@@ -3369,6 +3514,10 @@ impl Transformer for LinearRegressionModel {
 }
 
 impl Model for LinearRegressionModel {
+    fn ml_ref(&self) -> Option<&MlRef> {
+        Some(&self.cached)
+    }
+
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }
@@ -3659,6 +3808,10 @@ impl Transformer for GeneralizedLinearRegressionModel {
 }
 
 impl Model for GeneralizedLinearRegressionModel {
+    fn ml_ref(&self) -> Option<&MlRef> {
+        Some(&self.cached)
+    }
+
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }
@@ -3891,6 +4044,10 @@ impl Transformer for AFTSurvivalRegressionModel {
 }
 
 impl Model for AFTSurvivalRegressionModel {
+    fn ml_ref(&self) -> Option<&MlRef> {
+        Some(&self.cached)
+    }
+
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }
@@ -4064,6 +4221,10 @@ impl Transformer for IsotonicRegressionModel {
 }
 
 impl Model for IsotonicRegressionModel {
+    fn ml_ref(&self) -> Option<&MlRef> {
+        Some(&self.cached)
+    }
+
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }
@@ -4325,6 +4486,10 @@ impl Transformer for FMRegressionModel {
 }
 
 impl Model for FMRegressionModel {
+    fn ml_ref(&self) -> Option<&MlRef> {
+        Some(&self.cached)
+    }
+
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }
@@ -4649,6 +4814,10 @@ impl Transformer for DecisionTreeClassificationModel {
 }
 
 impl Model for DecisionTreeClassificationModel {
+    fn ml_ref(&self) -> Option<&MlRef> {
+        Some(&self.cached)
+    }
+
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }
@@ -4857,6 +5026,10 @@ impl Transformer for NaiveBayesModel {
 }
 
 impl Model for NaiveBayesModel {
+    fn ml_ref(&self) -> Option<&MlRef> {
+        Some(&self.cached)
+    }
+
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }
@@ -5245,6 +5418,10 @@ impl Transformer for GBTClassificationModel {
 }
 
 impl Model for GBTClassificationModel {
+    fn ml_ref(&self) -> Option<&MlRef> {
+        Some(&self.cached)
+    }
+
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }
@@ -5611,6 +5788,10 @@ impl Transformer for RandomForestClassificationModel {
 }
 
 impl Model for RandomForestClassificationModel {
+    fn ml_ref(&self) -> Option<&MlRef> {
+        Some(&self.cached)
+    }
+
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }
@@ -5965,6 +6146,10 @@ impl Transformer for GBTRegressionModel {
 }
 
 impl Model for GBTRegressionModel {
+    fn ml_ref(&self) -> Option<&MlRef> {
+        Some(&self.cached)
+    }
+
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }
@@ -6254,6 +6439,10 @@ impl Transformer for DecisionTreeRegressionModel {
 }
 
 impl Model for DecisionTreeRegressionModel {
+    fn ml_ref(&self) -> Option<&MlRef> {
+        Some(&self.cached)
+    }
+
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }
@@ -6573,6 +6762,10 @@ impl Transformer for RandomForestRegressionModel {
 }
 
 impl Model for RandomForestRegressionModel {
+    fn ml_ref(&self) -> Option<&MlRef> {
+        Some(&self.cached)
+    }
+
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }
@@ -6814,6 +7007,10 @@ impl Transformer for KMeansModel {
 }
 
 impl Model for KMeansModel {
+    fn ml_ref(&self) -> Option<&MlRef> {
+        Some(&self.cached)
+    }
+
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }
@@ -7014,6 +7211,10 @@ impl Transformer for BisectingKMeansModel {
 }
 
 impl Model for BisectingKMeansModel {
+    fn ml_ref(&self) -> Option<&MlRef> {
+        Some(&self.cached)
+    }
+
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }
@@ -7221,6 +7422,10 @@ impl Transformer for GaussianMixtureModel {
 }
 
 impl Model for GaussianMixtureModel {
+    fn ml_ref(&self) -> Option<&MlRef> {
+        Some(&self.cached)
+    }
+
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }
@@ -7496,6 +7701,10 @@ impl Transformer for LDAModel {
 }
 
 impl Model for LDAModel {
+    fn ml_ref(&self) -> Option<&MlRef> {
+        Some(&self.cached)
+    }
+
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }

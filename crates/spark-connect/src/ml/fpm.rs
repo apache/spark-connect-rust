@@ -115,6 +115,10 @@ impl Transformer for FPGrowthModel {
     }
 }
 impl Model for FPGrowthModel {
+    fn ml_ref(&self) -> Option<&MlRef> {
+        Some(&self.cached)
+    }
+
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
     }
