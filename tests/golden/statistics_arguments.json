@@ -1,0 +1,776 @@
+{
+  "cases": [
+    {
+      "args": [
+        null,
+        "features",
+        "label"
+      ],
+      "collect_error": {
+        "class": "SparkException",
+        "message": "[CONNECT_ML.UNSUPPORTED_EXCEPTION] Generic Spark Connect ML error. NULL not supported SQLSTATE: XX000"
+      },
+      "method": "chiSquareTest",
+      "op": "chi",
+      "sent": [
+        {
+          "literal": "CgIKAA=="
+        },
+        {
+          "literal": "aghmZWF0dXJlcw=="
+        },
+        {
+          "literal": "agVsYWJlbA=="
+        },
+        {
+          "literal": "GAA="
+        }
+      ]
+    },
+    {
+      "args": [
+        5,
+        "features",
+        "label"
+      ],
+      "collect_error": {
+        "class": "UnknownException",
+        "message": "(java.lang.NoSuchMethodException) No method: org.apache.spark.ml.util.ConnectHelper.chiSquareTest(int, java.lang.String, java.lang.String, boolean)"
+      },
+      "method": "chiSquareTest",
+      "op": "chi",
+      "sent": [
+        {
+          "literal": "MAU="
+        },
+        {
+          "literal": "aghmZWF0dXJlcw=="
+        },
+        {
+          "literal": "agVsYWJlbA=="
+        },
+        {
+          "literal": "GAA="
+        }
+      ]
+    },
+    {
+      "args": [
+        "table",
+        "features",
+        "label"
+      ],
+      "collect_error": {
+        "class": "UnknownException",
+        "message": "(java.lang.NoSuchMethodException) No method: org.apache.spark.ml.util.ConnectHelper.chiSquareTest(java.lang.String, java.lang.String, java.lang.String, boolean)"
+      },
+      "method": "chiSquareTest",
+      "op": "chi",
+      "sent": [
+        {
+          "literal": "agV0YWJsZQ=="
+        },
+        {
+          "literal": "aghmZWF0dXJlcw=="
+        },
+        {
+          "literal": "agVsYWJlbA=="
+        },
+        {
+          "literal": "GAA="
+        }
+      ]
+    },
+    {
+      "args": [
+        [
+          1,
+          2
+        ],
+        "features",
+        "label"
+      ],
+      "collect_error": {
+        "class": "SparkException",
+        "message": "[CONNECT_ML.UNSUPPORTED_EXCEPTION] Generic Spark Connect ML error. Unsupported array array {"
+      },
+      "method": "chiSquareTest",
+      "op": "chi",
+      "sent": [
+        {
+          "literal": "sgEMCgIyABICMAESAjAC"
+        },
+        {
+          "literal": "aghmZWF0dXJlcw=="
+        },
+        {
+          "literal": "agVsYWJlbA=="
+        },
+        {
+          "literal": "GAA="
+        }
+      ]
+    },
+    {
+      "args": [
+        [],
+        "features",
+        "label"
+      ],
+      "error": {
+        "class": "PySparkTypeError",
+        "message": "[CANNOT_INFER_ARRAY_ELEMENT_TYPE] Can not infer the element data type, a non-empty list starting with a non-None value is required."
+      },
+      "method": "chiSquareTest",
+      "op": "chi"
+    },
+    {
+      "args": [
+        "$pandas",
+        "features",
+        "label"
+      ],
+      "error": {
+        "class": "PySparkTypeError",
+        "message": "[UNSUPPORTED_DATA_TYPE] Unsupported DataType `DataFrame`."
+      },
+      "method": "chiSquareTest",
+      "op": "chi"
+    },
+    {
+      "args": [
+        "$object",
+        "features",
+        "label"
+      ],
+      "error": {
+        "class": "PySparkTypeError",
+        "message": "[UNSUPPORTED_DATA_TYPE] Unsupported DataType `object`."
+      },
+      "method": "chiSquareTest",
+      "op": "chi"
+    },
+    {
+      "args": [
+        "$frame",
+        1,
+        "label"
+      ],
+      "collect_error": {
+        "class": "UnknownException",
+        "message": "(java.lang.NoSuchMethodException) No method: org.apache.spark.ml.util.ConnectHelper.chiSquareTest(org.apache.spark.sql.Dataset, int, java.lang.String, boolean)"
+      },
+      "method": "chiSquareTest",
+      "op": "chi",
+      "sent": [
+        {
+          "input": true
+        },
+        {
+          "literal": "MAE="
+        },
+        {
+          "literal": "agVsYWJlbA=="
+        },
+        {
+          "literal": "GAA="
+        }
+      ]
+    },
+    {
+      "args": [
+        "$frame",
+        null,
+        "label"
+      ],
+      "collect_error": {
+        "class": "SparkException",
+        "message": "[CONNECT_ML.UNSUPPORTED_EXCEPTION] Generic Spark Connect ML error. NULL not supported SQLSTATE: XX000"
+      },
+      "method": "chiSquareTest",
+      "op": "chi",
+      "sent": [
+        {
+          "input": true
+        },
+        {
+          "literal": "CgIKAA=="
+        },
+        {
+          "literal": "agVsYWJlbA=="
+        },
+        {
+          "literal": "GAA="
+        }
+      ]
+    },
+    {
+      "args": [
+        "$frame",
+        [
+          "features"
+        ],
+        "label"
+      ],
+      "collect_error": {
+        "class": "UnknownException",
+        "message": "(java.lang.NoSuchMethodException) No method: org.apache.spark.ml.util.ConnectHelper.chiSquareTest(org.apache.spark.sql.Dataset, [Ljava.lang.String;, java.lang.String, boolean)"
+      },
+      "method": "chiSquareTest",
+      "op": "chi",
+      "sent": [
+        {
+          "input": true
+        },
+        {
+          "literal": "sgEdCg9aDRILVVRGOF9CSU5BUlkSCmoIZmVhdHVyZXM="
+        },
+        {
+          "literal": "agVsYWJlbA=="
+        },
+        {
+          "literal": "GAA="
+        }
+      ]
+    },
+    {
+      "args": [
+        "$frame",
+        "$object",
+        "label"
+      ],
+      "error": {
+        "class": "PySparkTypeError",
+        "message": "[UNSUPPORTED_DATA_TYPE] Unsupported DataType `object`."
+      },
+      "method": "chiSquareTest",
+      "op": "chi"
+    },
+    {
+      "args": [
+        "$frame",
+        "features",
+        1
+      ],
+      "collect_error": {
+        "class": "UnknownException",
+        "message": "(java.lang.NoSuchMethodException) No method: org.apache.spark.ml.util.ConnectHelper.chiSquareTest(org.apache.spark.sql.Dataset, java.lang.String, int, boolean)"
+      },
+      "method": "chiSquareTest",
+      "op": "chi",
+      "sent": [
+        {
+          "input": true
+        },
+        {
+          "literal": "aghmZWF0dXJlcw=="
+        },
+        {
+          "literal": "MAE="
+        },
+        {
+          "literal": "GAA="
+        }
+      ]
+    },
+    {
+      "args": [
+        "$frame",
+        "features",
+        1.5
+      ],
+      "collect_error": {
+        "class": "UnknownException",
+        "message": "(java.lang.NoSuchMethodException) No method: org.apache.spark.ml.util.ConnectHelper.chiSquareTest(org.apache.spark.sql.Dataset, java.lang.String, double, boolean)"
+      },
+      "method": "chiSquareTest",
+      "op": "chi",
+      "sent": [
+        {
+          "input": true
+        },
+        {
+          "literal": "aghmZWF0dXJlcw=="
+        },
+        {
+          "literal": "WQAAAAAAAPg/"
+        },
+        {
+          "literal": "GAA="
+        }
+      ]
+    },
+    {
+      "args": [
+        "$frame",
+        "features",
+        null
+      ],
+      "collect_error": {
+        "class": "SparkException",
+        "message": "[CONNECT_ML.UNSUPPORTED_EXCEPTION] Generic Spark Connect ML error. NULL not supported SQLSTATE: XX000"
+      },
+      "method": "chiSquareTest",
+      "op": "chi",
+      "sent": [
+        {
+          "input": true
+        },
+        {
+          "literal": "aghmZWF0dXJlcw=="
+        },
+        {
+          "literal": "CgIKAA=="
+        },
+        {
+          "literal": "GAA="
+        }
+      ]
+    },
+    {
+      "args": [
+        "$frame",
+        "features",
+        "label",
+        1
+      ],
+      "collect_error": {
+        "class": "UnknownException",
+        "message": "(java.lang.NoSuchMethodException) No method: org.apache.spark.ml.util.ConnectHelper.chiSquareTest(org.apache.spark.sql.Dataset, java.lang.String, java.lang.String, int)"
+      },
+      "method": "chiSquareTest",
+      "op": "chi",
+      "sent": [
+        {
+          "input": true
+        },
+        {
+          "literal": "aghmZWF0dXJlcw=="
+        },
+        {
+          "literal": "agVsYWJlbA=="
+        },
+        {
+          "literal": "MAE="
+        }
+      ]
+    },
+    {
+      "args": [
+        "$frame",
+        "features",
+        "label",
+        "yes"
+      ],
+      "collect_error": {
+        "class": "UnknownException",
+        "message": "(java.lang.NoSuchMethodException) No method: org.apache.spark.ml.util.ConnectHelper.chiSquareTest(org.apache.spark.sql.Dataset, java.lang.String, java.lang.String, java.lang.String)"
+      },
+      "method": "chiSquareTest",
+      "op": "chi",
+      "sent": [
+        {
+          "input": true
+        },
+        {
+          "literal": "aghmZWF0dXJlcw=="
+        },
+        {
+          "literal": "agVsYWJlbA=="
+        },
+        {
+          "literal": "agN5ZXM="
+        }
+      ]
+    },
+    {
+      "args": [
+        "$frame",
+        "features",
+        "label",
+        null
+      ],
+      "collect_error": {
+        "class": "SparkException",
+        "message": "[CONNECT_ML.UNSUPPORTED_EXCEPTION] Generic Spark Connect ML error. NULL not supported SQLSTATE: XX000"
+      },
+      "method": "chiSquareTest",
+      "op": "chi",
+      "sent": [
+        {
+          "input": true
+        },
+        {
+          "literal": "aghmZWF0dXJlcw=="
+        },
+        {
+          "literal": "agVsYWJlbA=="
+        },
+        {
+          "literal": "CgIKAA=="
+        }
+      ]
+    },
+    {
+      "args": [
+        "$frame",
+        "features",
+        "label",
+        "$object"
+      ],
+      "error": {
+        "class": "PySparkTypeError",
+        "message": "[UNSUPPORTED_DATA_TYPE] Unsupported DataType `object`."
+      },
+      "method": "chiSquareTest",
+      "op": "chi"
+    },
+    {
+      "args": [
+        null,
+        "features"
+      ],
+      "collect_error": {
+        "class": "SparkException",
+        "message": "[CONNECT_ML.UNSUPPORTED_EXCEPTION] Generic Spark Connect ML error. NULL not supported SQLSTATE: XX000"
+      },
+      "method": "correlation",
+      "op": "corr",
+      "sent": [
+        {
+          "literal": "CgIKAA=="
+        },
+        {
+          "literal": "aghmZWF0dXJlcw=="
+        },
+        {
+          "literal": "agdwZWFyc29u"
+        }
+      ]
+    },
+    {
+      "args": [
+        "$pandas",
+        "features"
+      ],
+      "error": {
+        "class": "PySparkTypeError",
+        "message": "[UNSUPPORTED_DATA_TYPE] Unsupported DataType `DataFrame`."
+      },
+      "method": "correlation",
+      "op": "corr"
+    },
+    {
+      "args": [
+        "$frame",
+        1
+      ],
+      "collect_error": {
+        "class": "UnknownException",
+        "message": "(java.lang.NoSuchMethodException) No method: org.apache.spark.ml.util.ConnectHelper.correlation(org.apache.spark.sql.Dataset, int, java.lang.String)"
+      },
+      "method": "correlation",
+      "op": "corr",
+      "sent": [
+        {
+          "input": true
+        },
+        {
+          "literal": "MAE="
+        },
+        {
+          "literal": "agdwZWFyc29u"
+        }
+      ]
+    },
+    {
+      "args": [
+        "$frame",
+        null
+      ],
+      "collect_error": {
+        "class": "SparkException",
+        "message": "[CONNECT_ML.UNSUPPORTED_EXCEPTION] Generic Spark Connect ML error. NULL not supported SQLSTATE: XX000"
+      },
+      "method": "correlation",
+      "op": "corr",
+      "sent": [
+        {
+          "input": true
+        },
+        {
+          "literal": "CgIKAA=="
+        },
+        {
+          "literal": "agdwZWFyc29u"
+        }
+      ]
+    },
+    {
+      "args": [
+        "$frame",
+        "features",
+        1
+      ],
+      "collect_error": {
+        "class": "UnknownException",
+        "message": "(java.lang.NoSuchMethodException) No method: org.apache.spark.ml.util.ConnectHelper.correlation(org.apache.spark.sql.Dataset, java.lang.String, int)"
+      },
+      "method": "correlation",
+      "op": "corr",
+      "sent": [
+        {
+          "input": true
+        },
+        {
+          "literal": "aghmZWF0dXJlcw=="
+        },
+        {
+          "literal": "MAE="
+        }
+      ]
+    },
+    {
+      "args": [
+        "$frame",
+        "features",
+        null
+      ],
+      "collect_error": {
+        "class": "SparkException",
+        "message": "[CONNECT_ML.UNSUPPORTED_EXCEPTION] Generic Spark Connect ML error. NULL not supported SQLSTATE: XX000"
+      },
+      "method": "correlation",
+      "op": "corr",
+      "sent": [
+        {
+          "input": true
+        },
+        {
+          "literal": "aghmZWF0dXJlcw=="
+        },
+        {
+          "literal": "CgIKAA=="
+        }
+      ]
+    },
+    {
+      "args": [
+        "$frame",
+        "features",
+        "$object"
+      ],
+      "error": {
+        "class": "PySparkTypeError",
+        "message": "[UNSUPPORTED_DATA_TYPE] Unsupported DataType `object`."
+      },
+      "method": "correlation",
+      "op": "corr"
+    },
+    {
+      "args": [
+        null,
+        "sample",
+        "norm"
+      ],
+      "collect_error": {
+        "class": "SparkException",
+        "message": "[CONNECT_ML.UNSUPPORTED_EXCEPTION] Generic Spark Connect ML error. NULL not supported SQLSTATE: XX000"
+      },
+      "method": "kolmogorovSmirnovTest",
+      "op": "ks",
+      "sent": [
+        {
+          "literal": "CgIKAA=="
+        },
+        {
+          "literal": "agZzYW1wbGU="
+        },
+        {
+          "literal": "agRub3Jt"
+        },
+        {
+          "literal": "sgEECgJKAA=="
+        }
+      ]
+    },
+    {
+      "args": [
+        "$pandas",
+        "sample",
+        "norm"
+      ],
+      "error": {
+        "class": "PySparkTypeError",
+        "message": "[UNSUPPORTED_DATA_TYPE] Unsupported DataType `DataFrame`."
+      },
+      "method": "kolmogorovSmirnovTest",
+      "op": "ks"
+    },
+    {
+      "args": [
+        "$frame",
+        1,
+        "norm"
+      ],
+      "collect_error": {
+        "class": "UnknownException",
+        "message": "(java.lang.NoSuchMethodException) No method: org.apache.spark.ml.util.ConnectHelper.kolmogorovSmirnovTest(org.apache.spark.sql.Dataset, int, java.lang.String, [D)"
+      },
+      "method": "kolmogorovSmirnovTest",
+      "op": "ks",
+      "sent": [
+        {
+          "input": true
+        },
+        {
+          "literal": "MAE="
+        },
+        {
+          "literal": "agRub3Jt"
+        },
+        {
+          "literal": "sgEECgJKAA=="
+        }
+      ]
+    },
+    {
+      "args": [
+        "$frame",
+        null,
+        "norm"
+      ],
+      "collect_error": {
+        "class": "SparkException",
+        "message": "[CONNECT_ML.UNSUPPORTED_EXCEPTION] Generic Spark Connect ML error. NULL not supported SQLSTATE: XX000"
+      },
+      "method": "kolmogorovSmirnovTest",
+      "op": "ks",
+      "sent": [
+        {
+          "input": true
+        },
+        {
+          "literal": "CgIKAA=="
+        },
+        {
+          "literal": "agRub3Jt"
+        },
+        {
+          "literal": "sgEECgJKAA=="
+        }
+      ]
+    },
+    {
+      "args": [
+        "$frame",
+        "sample",
+        1
+      ],
+      "collect_error": {
+        "class": "UnknownException",
+        "message": "(java.lang.NoSuchMethodException) No method: org.apache.spark.ml.util.ConnectHelper.kolmogorovSmirnovTest(org.apache.spark.sql.Dataset, java.lang.String, int, [D)"
+      },
+      "method": "kolmogorovSmirnovTest",
+      "op": "ks",
+      "sent": [
+        {
+          "input": true
+        },
+        {
+          "literal": "agZzYW1wbGU="
+        },
+        {
+          "literal": "MAE="
+        },
+        {
+          "literal": "sgEECgJKAA=="
+        }
+      ]
+    },
+    {
+      "args": [
+        "$frame",
+        "sample",
+        null
+      ],
+      "collect_error": {
+        "class": "SparkException",
+        "message": "[CONNECT_ML.UNSUPPORTED_EXCEPTION] Generic Spark Connect ML error. NULL not supported SQLSTATE: XX000"
+      },
+      "method": "kolmogorovSmirnovTest",
+      "op": "ks",
+      "sent": [
+        {
+          "input": true
+        },
+        {
+          "literal": "agZzYW1wbGU="
+        },
+        {
+          "literal": "CgIKAA=="
+        },
+        {
+          "literal": "sgEECgJKAA=="
+        }
+      ]
+    },
+    {
+      "args": [
+        "$frame",
+        "sample",
+        "$object"
+      ],
+      "error": {
+        "class": "PySparkTypeError",
+        "message": "[UNSUPPORTED_DATA_TYPE] Unsupported DataType `object`."
+      },
+      "method": "kolmogorovSmirnovTest",
+      "op": "ks"
+    },
+    {
+      "args": [
+        "$frame",
+        "sample",
+        {
+          "a": 1
+        }
+      ],
+      "error": {
+        "class": "PySparkTypeError",
+        "message": "[UNSUPPORTED_DATA_TYPE] Unsupported DataType `dict`."
+      },
+      "method": "kolmogorovSmirnovTest",
+      "op": "ks"
+    },
+    {
+      "args": [
+        "$frame",
+        "sample",
+        "norm",
+        "x"
+      ],
+      "error": {
+        "class": "ValueError",
+        "message": "could not convert string to float: 'x'"
+      },
+      "method": "kolmogorovSmirnovTest",
+      "op": "ks"
+    },
+    {
+      "args": [
+        "$frame",
+        "sample",
+        "norm",
+        null
+      ],
+      "error": {
+        "class": "TypeError",
+        "message": "float() argument must be a string or a real number, not 'NoneType'"
+      },
+      "method": "kolmogorovSmirnovTest",
+      "op": "ks"
+    }
+  ],
+  "source": "official pyspark-client 4.3.0, Spark 4.3.0"
+}

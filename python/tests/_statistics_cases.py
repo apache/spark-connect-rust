@@ -12,6 +12,11 @@ FIXTURE = json.loads(
     (Path(__file__).resolve().parents[2] / "tests/golden/statistics.json").read_text()
 )
 REFERENCE = os.environ.get("STATISTICS_REFERENCE") == "1"
+# The arguments of the helper calls of other types than they take, as official PySpark serializes
+# them (scripts/capture_statistics_arguments_golden.py).
+ARGUMENTS = json.loads(
+    (Path(__file__).resolve().parents[2] / "tests/golden/statistics_arguments.json").read_text()
+)
 
 
 def api():
@@ -43,6 +48,38 @@ def helper(case, frame):
         "corr": stat.Correlation.corr,
         "ks": stat.KolmogorovSmirnovTest.test,
     }[case["op"]](frame, *case["params"])
+
+
+def argument(spec, frame):
+    # The argument of a spec of ARGUMENTS: the DataFrame `frame`, an object() or a pandas DataFrame
+    # of a "$" marker, else the spec itself.
+    if spec == "$frame":
+        return frame
+    if spec == "$object":
+        return object()
+    if spec == "$pandas":
+        import pandas as pd
+
+        return pd.DataFrame({"features": [1.0]})
+    return spec
+
+
+def call_with_arguments(case, frame):
+    stat = api()
+    return {
+        "chi": stat.ChiSquareTest.test,
+        "corr": stat.Correlation.corr,
+        "ks": stat.KolmogorovSmirnovTest.test,
+    }[case["op"]](*(argument(spec, frame) for spec in case["args"]))
+
+
+def argument_case_id(case):
+    return f"{case['op']}({', '.join(map(repr, case['args']))})"
+
+
+def first_line(error):
+    lines = str(error).strip().splitlines()
+    return lines[0] if lines else ""
 
 
 def summary(case):

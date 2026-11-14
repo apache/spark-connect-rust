@@ -1436,13 +1436,15 @@ The statistical tests return lazy Spark DataFrames. Chi-square supports both the
 vector result and one row per feature (`flatten=True`); correlation supports
 Pearson and Spearman; the KS test supports Spark's normal distribution, with
 optional mean and standard deviation. Spark validates column types and
-statistical arguments. As with `pyspark.ml.stat`, the dataset and the other
-arguments are serialized as the arguments of a helper call, in that order, before
-any RPC (see the native ML helper calls above): a pandas DataFrame raises PySpark's
-`UNSUPPORTED_DATA_TYPE`, an argument that cannot be a literal raises the error of its
-conversion, and a literal of another type than PySpark sends for the server to reject
-raises a `TypeError`. The KS test converts its parameters with `float()` first, as
-PySpark does. Results retain any fitted models used by their input plans.
+statistical arguments. As with `pyspark.ml.stat`, the dataset and the other arguments are serialized
+as the arguments of a helper call, in that order, before any RPC: a pandas DataFrame raises
+PySpark's `UNSUPPORTED_DATA_TYPE`, and another argument that cannot be a literal raises the error of
+its conversion. A literal of another type than the helper takes, such as a dataset that is not a
+DataFrame or a column name that is not a str, is sent as PySpark sends it, and the server rejects it
+when the result is analyzed or collected (`tests/golden/statistics_arguments.json` records these
+cases of official PySpark). A `(value, DataType)` pair, which PySpark sends as a literal of that
+type, raises the `UNSUPPORTED_DATA_TYPE` of a tuple here. The KS test converts its parameters with
+`float()` first, as PySpark does. Results retain any fitted models used by their input plans.
 
 `Summarizer.metrics(...).summary(features, weight)` builds a SQL aggregate that
 works in `select` and grouped aggregations. All ten metrics are supported:

@@ -1,29 +1,45 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Native bindings for standard pyspark.ml.stat over Spark Connect.
+use super::object::fetch_arg_of;
 use super::*;
 use crate::column::PyColumn;
 use pyo3::exceptions::PyAssertionError;
-use pyo3::types::PyString;
-use spark_connect::ml::{
-    ChiSquareTest, Correlation, KolmogorovSmirnovTest, Summarizer, SummaryBuilder,
-};
+use spark_connect::ml::{attribute_relation, FetchArg, MlTarget, Summarizer, SummaryBuilder};
+use spark_connect_proto as proto;
 
-/// The str argument `name` of the helper call of `method`, which `serialize` of
-/// `pyspark.ml.connect.serialize` sends as a literal after the dataset (see
-/// [`helper_dataset_of`]). Another value raises PySpark's error of its conversion when it cannot be
-/// a literal, and otherwise a TypeError before any request, where PySpark sends it for the server
-/// to reject.
-fn helper_str(value: &Bound<'_, PyAny>, method: &str, name: &str) -> PyResult<String> {
-    if value.is_instance_of::<PyString>() {
-        return value.extract();
-    }
-    if !serialized_as_is(value)? {
-        crate::functions::to_value_column(value)?;
-    }
-    Err(PyTypeError::new_err(format!(
-        "{method}() takes a str {name}, not '{}'",
-        value.get_type().name()?
-    )))
+use crate::options::DefaultedOption;
+
+/// The DataFrame of the helper call `method` of `pyspark.ml.stat`, of the arguments `args` (the
+/// dataset first) and `typed`, as `invoke_helper_relation` of `pyspark.ml.util` builds it: of the
+/// active session of the thread (`SparkSession.getActiveSession()`, whose absence is the
+/// AssertionError of its `assert`, before the arguments), also when the dataset is a DataFrame of
+/// another session, and of each argument as `serialize` of `pyspark.ml.connect.serialize` sends
+/// it, in their order: a DataFrame as its relation, and another value as the literal of
+/// `LiteralExpression._from_value`, which raises PySpark's error of a value that cannot be one
+/// (`UNSUPPORTED_DATA_TYPE`, also of a pandas DataFrame, before any request). As PySpark does, a
+/// literal of another type than the helper takes, such as a dataset that is not a DataFrame or a
+/// column name that is not a str, is sent for the server to reject when the result is analyzed or
+/// collected. `typed` is the literal of the argument that PySpark sends as a `(value, DataType)`
+/// pair.
+fn helper_relation(
+    method: &str,
+    args: &[&Bound<'_, PyAny>],
+    typed: Option<proto::expression::Literal>,
+) -> PyResult<PyDataFrame> {
+    let py = args[0].py();
+    let session = crate::session::active_session(py)
+        .ok_or_else(|| PyAssertionError::new_err(()))?
+        .borrow(py)
+        .session
+        .clone();
+    let mut args = args
+        .iter()
+        .map(|arg| fetch_arg_of(arg))
+        .collect::<PyResult<Vec<_>>>()?;
+    args.extend(typed.map(FetchArg::Literal));
+    Ok(PyDataFrame::new(
+        attribute_relation(&MlTarget::helper(&session), method, args).to_pyerr()?,
+    ))
 }
 
 #[pyclass(name = "ChiSquareTest", module = "pyspark.ml.stat")]
@@ -31,21 +47,24 @@ pub struct PyChiSquareTest;
 #[pymethods]
 impl PyChiSquareTest {
     #[staticmethod]
-    #[pyo3(signature = (dataset, featuresCol, labelCol, flatten=false))]
+    #[pyo3(
+        signature = (dataset, featuresCol, labelCol, flatten=DefaultedOption::Omitted),
+        text_signature = "(dataset, featuresCol, labelCol, flatten=False)"
+    )]
     #[allow(non_snake_case)]
     fn test(
+        py: Python<'_>,
         dataset: &Bound<'_, PyAny>,
         featuresCol: &Bound<'_, PyAny>,
         labelCol: &Bound<'_, PyAny>,
-        flatten: bool,
+        flatten: DefaultedOption,
     ) -> PyResult<PyDataFrame> {
-        // In the order of PySpark's serialization of the arguments of the helper call.
-        let df = helper_dataset_of(dataset, "test")?;
-        let features = helper_str(featuresCol, "test", "featuresCol")?;
-        let label = helper_str(labelCol, "test", "labelCol")?;
-        Ok(PyDataFrame::new(
-            ChiSquareTest::test(&df, &features, &label, flatten).to_pyerr()?,
-        ))
+        let flatten = flatten.or_bool(py, false);
+        helper_relation(
+            "chiSquareTest",
+            &[dataset, featuresCol, labelCol, &flatten],
+            None,
+        )
     }
 }
 
@@ -54,17 +73,21 @@ pub struct PyCorrelation;
 #[pymethods]
 impl PyCorrelation {
     #[staticmethod]
-    #[pyo3(signature = (dataset, column, method="pearson"))]
+    #[pyo3(
+        signature = (dataset, column, method=DefaultedOption::Omitted),
+        text_signature = "(dataset, column, method='pearson')"
+    )]
     fn corr(
+        py: Python<'_>,
         dataset: &Bound<'_, PyAny>,
         column: &Bound<'_, PyAny>,
-        method: &str,
+        method: DefaultedOption,
     ) -> PyResult<PyDataFrame> {
-        let df = helper_dataset_of(dataset, "corr")?;
-        let column = helper_str(column, "corr", "column")?;
-        Ok(PyDataFrame::new(
-            Correlation::corr(&df, &column, method).to_pyerr()?,
-        ))
+        let method = match method {
+            DefaultedOption::Omitted => pyo3::types::PyString::new(py, "pearson").into_any(),
+            DefaultedOption::Given(method) => method.into_bound(py),
+        };
+        helper_relation("correlation", &[dataset, column, &method], None)
     }
 }
 
@@ -81,20 +104,36 @@ impl PyKolmogorovSmirnovTest {
         distName: &Bound<'_, PyAny>,
         params: &Bound<'_, PyTuple>,
     ) -> PyResult<PyDataFrame> {
+        use proto::expression::literal::{Array, LiteralType};
         // PySpark deliberately uses float(), accepting numeric strings as well as numbers, and
         // converts the params first: its list of them is an argument of the helper call, whose
-        // serialization then raises its errors of the dataset and the other arguments.
+        // serialization then raises its errors of the dataset and the other arguments. The list
+        // is sent as an array<double>, also when it is empty, as PySpark's
+        // `([float(p) for p in params], ArrayType(DoubleType()))`.
         let float = params.py().import("builtins")?.getattr("float")?;
         let values = params
             .iter()
             .map(|v| float.call1((v,))?.extract::<f64>())
             .collect::<PyResult<Vec<_>>>()?;
-        let df = helper_dataset_of(dataset, "test")?;
-        let sample = helper_str(sampleCol, "test", "sampleCol")?;
-        let dist = helper_str(distName, "test", "distName")?;
-        Ok(PyDataFrame::new(
-            KolmogorovSmirnovTest::test(&df, &sample, &dist, values).to_pyerr()?,
-        ))
+        #[allow(deprecated)] // PySpark's array literal of an explicit type.
+        let params = proto::expression::Literal {
+            literal_type: Some(LiteralType::Array(Array {
+                element_type: Some(spark_connect::types::DataType::Double.to_proto()),
+                elements: values
+                    .into_iter()
+                    .map(|v| proto::expression::Literal {
+                        literal_type: Some(LiteralType::Double(v)),
+                        ..Default::default()
+                    })
+                    .collect(),
+            })),
+            ..Default::default()
+        };
+        helper_relation(
+            "kolmogorovSmirnovTest",
+            &[dataset, sampleCol, distName],
+            Some(params),
+        )
     }
 }
 
