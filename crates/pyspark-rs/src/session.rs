@@ -826,6 +826,36 @@ pub fn _close_sessions_at_exit(py: Python<'_>) {
     });
 }
 
+/// Refuse the releases of executions for the rest of the process, as the thread pool that
+/// PySpark's client sends its releases through refuses new work once the interpreter has begun
+/// to shut down. From then on, each execution raises that pool's `RuntimeError` after its first
+/// response and sends no ReleaseExecute, including the clean_cache of the exit hooks. It runs at
+/// that point of the exit (see [`register_release_refusal`]). Not a stable API.
+#[doc(hidden)]
+#[pyfunction]
+pub fn _refuse_releases() {
+    spark_connect_core::client::refuse_releases();
+}
+
+/// Register `_refuse_releases` of the module `m` to run when the interpreter begins to shut
+/// down, before the `atexit` hooks, as `concurrent.futures` registers the shutdown of its thread
+/// pools with `threading._register_atexit`. A module imported once the shutdown has begun, when
+/// that registration raises its RuntimeError, refuses the releases at once.
+pub(crate) fn register_release_refusal(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    let py = m.py();
+    let registered = py
+        .import("threading")?
+        .call_method1("_register_atexit", (m.getattr("_refuse_releases")?,));
+    match registered {
+        Ok(_) => Ok(()),
+        Err(error) if error.is_instance_of::<pyo3::exceptions::PyRuntimeError>(py) => {
+            spark_connect_core::client::refuse_releases();
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
+}
+
 /// Register the exit hook of `session`, once for it, as PySpark's SparkConnectClient registers
 /// its `_on_exit` when it is made. The variable SPARK_CONNECT_RELEASE_SESSION_ON_EXIT is read
 /// now, as PySpark reads it: "true" or "1", in any case, release the session at exit.

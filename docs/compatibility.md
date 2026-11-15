@@ -1063,6 +1063,14 @@ long as those retries. A stopped session sends nothing at exit.
 when it is `true` or `1`, the session is then also released and closed at exit, after the
 cleanup.
 
+PySpark's client sends the `ReleaseExecute` requests of an execution through a
+`ThreadPoolExecutor`, which refuses new work once the interpreter has begun to shut down. The
+drop-in refuses them from the same point. An execution after it, such as a `collect()` in an
+`atexit` handler, raises `RuntimeError: cannot schedule new futures after interpreter shutdown`
+after its first response and sends no `ReleaseExecute`, as in PySpark. The exit's `clean_cache`
+ends the same way, and its error is ignored. Requests that are not executions, such as the
+`AnalyzePlan` of a schema, still work then.
+
 The `TypeError` for too many positional arguments counts them without `self`: where CPython says
 "takes from 2 to 4 positional arguments but 5 were given", the drop-in says "takes from 1 to 3
 positional arguments but 4 were given". A method that takes no arguments gets "takes no arguments

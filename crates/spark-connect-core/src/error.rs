@@ -293,6 +293,9 @@ pub enum SparkErrorKind {
     /// ``OverflowError``, a Python builtin: an int that a protobuf field does not take, as
     /// [`SparkErrorKind::BuiltinTypeError`] is raised.
     BuiltinOverflowError,
+    /// ``RuntimeError``, a Python builtin: the release of an execution once the interpreter has
+    /// begun to shut down, which the thread pool of the reference client's releases refuses.
+    BuiltinRuntimeError,
     /// ``pyspark.errors.exceptions.base.SparkRuntimeException``
     SparkRuntime,
     /// ``pyspark.errors.exceptions.base.SparkUpgradeException``
@@ -380,6 +383,15 @@ impl SparkError {
     pub fn builtin_value_msg(message: impl Into<String>) -> Self {
         let mut error = Self::value_msg(message);
         error.kind = SparkErrorKind::BuiltinValueError;
+        error
+    }
+
+    /// Create a `BuiltinRuntimeError`-kind error with a plain message: a `RuntimeError` of the
+    /// Python builtin, which is what `ThreadPoolExecutor.submit` raises once the interpreter has
+    /// begun to shut down, as the reference client lets it.
+    pub fn builtin_runtime_msg(message: impl Into<String>) -> Self {
+        let mut error = Self::value_msg(message);
+        error.kind = SparkErrorKind::BuiltinRuntimeError;
         error
     }
 
