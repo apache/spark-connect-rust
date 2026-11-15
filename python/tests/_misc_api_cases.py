@@ -453,6 +453,9 @@ def _one_vs_rest_live(rec, spark, base):
             {"maxIter": 5, "layers": [2, 4, 2], "seed": 1},
         ),
         ("ovr_lr_", "LogisticRegression", {"maxIter": 5, "regParam": 0.01}),
+        ("ovr_dt_", "DecisionTreeClassifier", {"maxDepth": 3, "seed": 1}),
+        ("ovr_rf_", "RandomForestClassifier", {"numTrees": 3, "maxDepth": 3, "seed": 1}),
+        ("ovr_gbt_", "GBTClassifier", {"maxIter": 3, "maxDepth": 2, "seed": 1}),
     ]:
         classifier = _native(name)(**kwargs)
         fitted = _native("OneVsRest")(classifier=classifier).fit(df)
