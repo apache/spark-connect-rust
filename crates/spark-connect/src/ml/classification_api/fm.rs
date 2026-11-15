@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-//! The typed accessors, summaries and persistence of FMClassificationModel and its summaries.
+//! The load of FMClassifier, and the typed accessors, summaries and persistence of
+//! FMClassificationModel and its summaries.
 //!
 //! The model has a training summary when a fit made it (`hasSummary`, client side, as PySpark's
 //! `HasTrainingSummary`). Both summaries are binary classification summaries, as PySpark's.
@@ -10,7 +11,7 @@ use super::{
     ProbabilisticClassificationModel, TrainingSummary,
 };
 use crate::dataframe::DataFrame;
-use crate::ml::object::{fetch, read_model, FetchArg, MlTarget};
+use crate::ml::object::{fetch, read_model, read_operator, FetchArg, MlTarget};
 use crate::ml::tree_api::{as_f64, as_vector, fetch_value};
 use crate::ml::{
     java_string_hash, FMClassificationModel, FMClassifier, MlMatrix, MlOperator, MlRef, MlVector,
@@ -18,6 +19,20 @@ use crate::ml::{
 };
 use crate::session::SparkSession;
 use spark_connect_core::error::{Result, SparkError};
+
+impl FMClassifier {
+    /// The estimator that `write().save(path)` saved, as `FMClassifier.load` of PySpark reads it:
+    /// one ML Read of the estimator.
+    pub fn load(session: &SparkSession, path: &str) -> Result<Self> {
+        let (operator, params) = read_operator(
+            session,
+            "org.apache.spark.ml.classification.FMClassifier",
+            OperatorType::Estimator,
+            path,
+        )?;
+        Ok(Self { operator, params })
+    }
+}
 
 impl FMClassificationModel {
     /// The factor matrix of the model, one row per feature (`factors`).

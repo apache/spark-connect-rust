@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
-//! The typed accessors, persistence and classification members of NaiveBayesModel. PySpark 4.3.0
-//! gives the model no training summary, so its own members are the class parameters `pi`,
-//! `theta` and `sigma`, and the prediction members of the classification models.
+//! The load of NaiveBayes, and the typed accessors, persistence and classification members of
+//! NaiveBayesModel. PySpark 4.3.0 gives the model no training summary, so its own members are the
+//! class parameters `pi`, `theta` and `sigma`, and the prediction members of the classification
+//! models.
 
 use super::{ClassificationModel, ProbabilisticClassificationModel};
-use crate::ml::object::{read_model, MlValue};
+use crate::ml::object::{read_model, read_operator, MlValue};
 use crate::ml::tree_api::{as_vector, fetch_value};
 use crate::ml::{
     MlMatrix, MlOperator, MlRef, MlVector, Model, NaiveBayes, NaiveBayesModel, OperatorType,
@@ -12,6 +13,20 @@ use crate::ml::{
 use crate::ml::{Params, PredictionModel};
 use crate::session::SparkSession;
 use spark_connect_core::error::{Result, SparkError};
+
+impl NaiveBayes {
+    /// The estimator that `write().save(path)` saved, as `NaiveBayes.load` of PySpark reads it:
+    /// one ML Read of the estimator.
+    pub fn load(session: &SparkSession, path: &str) -> Result<Self> {
+        let (operator, params) = read_operator(
+            session,
+            "org.apache.spark.ml.classification.NaiveBayes",
+            OperatorType::Estimator,
+            path,
+        )?;
+        Ok(Self { operator, params })
+    }
+}
 
 impl NaiveBayesModel {
     /// The log of the class priors (`pi`), one value per class.

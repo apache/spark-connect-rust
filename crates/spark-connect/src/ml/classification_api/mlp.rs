@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-//! The typed accessors, summaries and persistence of MultilayerPerceptronClassificationModel and
-//! its summaries.
+//! The load of MultilayerPerceptronClassifier, and the typed accessors, summaries and persistence
+//! of MultilayerPerceptronClassificationModel and its summaries.
 //!
 //! The model has a training summary when a fit made it (`hasSummary`, client side, as PySpark's
 //! `HasTrainingSummary`). Its evaluation summary is the summary that `evaluate` returns.
@@ -10,7 +10,7 @@ use super::{
     TrainingSummary,
 };
 use crate::dataframe::DataFrame;
-use crate::ml::object::{fetch, read_model, FetchArg, MlTarget};
+use crate::ml::object::{fetch, read_model, read_operator, FetchArg, MlTarget};
 use crate::ml::tree_api::{as_vector, fetch_value};
 use crate::ml::{
     java_string_hash, MlOperator, MlRef, MlVector, Model, MultilayerPerceptronClassificationModel,
@@ -18,6 +18,20 @@ use crate::ml::{
 };
 use crate::session::SparkSession;
 use spark_connect_core::error::{Result, SparkError};
+
+impl MultilayerPerceptronClassifier {
+    /// The estimator that `write().save(path)` saved, as `MultilayerPerceptronClassifier.load` of
+    /// PySpark reads it: one ML Read of the estimator.
+    pub fn load(session: &SparkSession, path: &str) -> Result<Self> {
+        let (operator, params) = read_operator(
+            session,
+            "org.apache.spark.ml.classification.MultilayerPerceptronClassifier",
+            OperatorType::Estimator,
+            path,
+        )?;
+        Ok(Self { operator, params })
+    }
+}
 
 impl MultilayerPerceptronClassificationModel {
     /// The weights of the layers, as one vector (`weights`).
