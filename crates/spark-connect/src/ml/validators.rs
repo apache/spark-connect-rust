@@ -11,7 +11,7 @@ use super::meta::{
 use super::*;
 use spark_connect_core::error::Result;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 impl Clone for Box<dyn EstimatorStage> {
     fn clone(&self) -> Self {
@@ -29,6 +29,19 @@ impl Clone for Box<dyn EvaluatorStage> {
 fn random_seed() -> i64 {
     let hex = uuid::Uuid::new_v4().simple().to_string();
     i64::from_str_radix(&hex[..15], 16).unwrap_or_default()
+}
+
+// The default seed of each class of validators and of its model, drawn once per process: PySpark's
+// default seed is `hash(type(self).__name__)`, which is the same for every instance of a class
+// within a process (and differs between processes, as Python randomizes the hash of a string).
+static CROSS_VALIDATOR_SEED: OnceLock<i64> = OnceLock::new();
+static CROSS_VALIDATOR_MODEL_SEED: OnceLock<i64> = OnceLock::new();
+static TRAIN_VALIDATION_SPLIT_SEED: OnceLock<i64> = OnceLock::new();
+static TRAIN_VALIDATION_SPLIT_MODEL_SEED: OnceLock<i64> = OnceLock::new();
+
+/// The default seed of the class whose cell is `cell`, the same in each call of the process.
+fn process_seed(cell: &'static OnceLock<i64>) -> i64 {
+    *cell.get_or_init(random_seed)
 }
 
 /// The value of the param `name` of the validator of the JVM class `class` and the uid `uid` in
@@ -58,8 +71,8 @@ fn own_as<T>(
 }
 
 /// The params of a validator, of PySpark's `_ValidatorParams` and `HasParallelism` and
-/// `HasCollectSubModels`: its estimator, param maps and evaluator, its seed (a random one per
-/// class), its parallelism and whether it keeps the sub-models.
+/// `HasCollectSubModels`: its estimator, param maps and evaluator, its seed (the default of its
+/// class's seed, see [`process_seed`]), its parallelism and whether it keeps the sub-models.
 #[derive(Clone)]
 struct Common {
     estimator: Option<Box<dyn EstimatorStage>>,
@@ -72,13 +85,21 @@ struct Common {
 }
 
 impl Common {
-    fn new() -> Self {
+    /// The common params of the model of a validator: the validator's explicit seed (PySpark's
+    /// `_copyValues` copies a set param), and the default seed of the model's class.
+    fn model_common(&self, default_seed: i64) -> Self {
+        let mut model = self.clone();
+        model.default_seed = default_seed;
+        model
+    }
+
+    fn new(default_seed: i64) -> Self {
         Self {
             estimator: None,
             param_maps: Vec::new(),
             evaluator: None,
             seed: None,
-            default_seed: random_seed(),
+            default_seed,
             parallelism: 1,
             collect_sub_models: false,
         }
@@ -325,7 +346,7 @@ impl CrossValidator {
                 OperatorType::Estimator,
             ),
             params: Params::new(),
-            common: Common::new(),
+            common: Common::new(process_seed(&CROSS_VALIDATOR_SEED)),
             num_folds: 3,
             fold_col: String::new(),
         }
@@ -475,7 +496,9 @@ impl CrossValidator {
             avg_metrics,
             std_metrics,
             sub_models,
-            common: self.common.clone(),
+            common: self
+                .common
+                .model_common(process_seed(&CROSS_VALIDATOR_MODEL_SEED)),
             num_folds: self.num_folds,
             fold_col: self.fold_col.clone(),
         })
@@ -483,7 +506,7 @@ impl CrossValidator {
 
     /// Load the validator saved at `path` of PySpark's Python format, as `CrossValidatorReader`.
     pub fn load(session: &SparkSession, path: &str) -> Result<Self> {
-        let loaded = load_common(session, path)?;
+        let loaded = load_common(session, path, process_seed(&CROSS_VALIDATOR_SEED))?;
         let mut cv = Self::new();
         cv.operator = MlOperator::with_uid(
             "org.apache.spark.ml.tuning.CrossValidator",
@@ -632,7 +655,7 @@ impl CrossValidatorModel {
     /// of the sub-models, where they were saved, of one list repeated for each fold, as PySpark's
     /// reader makes them.
     pub fn load(session: &SparkSession, path: &str) -> Result<Self> {
-        let loaded = load_common(session, path)?;
+        let loaded = load_common(session, path, process_seed(&CROSS_VALIDATOR_MODEL_SEED))?;
         let num_folds = loaded.ints.get("numFolds").copied().unwrap_or(3);
         let best_model = load_model(session, &join_path(path, "bestModel"))?;
         let avg_metrics = floats(metadata_item(&loaded.metadata, "avgMetrics")?)?;
@@ -770,7 +793,7 @@ impl TrainValidationSplit {
                 OperatorType::Estimator,
             ),
             params: Params::new(),
-            common: Common::new(),
+            common: Common::new(process_seed(&TRAIN_VALIDATION_SPLIT_SEED)),
             train_ratio: 0.75,
         }
     }
@@ -887,7 +910,9 @@ impl TrainValidationSplit {
             best_model,
             validation_metrics,
             sub_models: self.common.collect_sub_models.then_some(models),
-            common: self.common.clone(),
+            common: self
+                .common
+                .model_common(process_seed(&TRAIN_VALIDATION_SPLIT_MODEL_SEED)),
             train_ratio: self.train_ratio,
         })
     }
@@ -895,7 +920,7 @@ impl TrainValidationSplit {
     /// Load the validator saved at `path` of PySpark's Python format, as
     /// `TrainValidationSplitReader`.
     pub fn load(session: &SparkSession, path: &str) -> Result<Self> {
-        let loaded = load_common(session, path)?;
+        let loaded = load_common(session, path, process_seed(&TRAIN_VALIDATION_SPLIT_SEED))?;
         let mut tvs = Self::new();
         tvs.operator = MlOperator::with_uid(
             "org.apache.spark.ml.tuning.TrainValidationSplit",
@@ -1019,7 +1044,11 @@ impl TrainValidationSplitModel {
     /// Load the model saved at `path` of PySpark's Python format, as
     /// `TrainValidationSplitModelReader`.
     pub fn load(session: &SparkSession, path: &str) -> Result<Self> {
-        let loaded = load_common(session, path)?;
+        let loaded = load_common(
+            session,
+            path,
+            process_seed(&TRAIN_VALIDATION_SPLIT_MODEL_SEED),
+        )?;
         let best_model = load_model(session, &join_path(path, "bestModel"))?;
         let validation_metrics = floats(metadata_item(&loaded.metadata, "validationMetrics")?)?;
         let sub_models = if persisted_sub_models(&loaded.metadata) {
@@ -1421,7 +1450,7 @@ struct Loaded {
 /// The validator or model saved at `path`, as `_ValidatorSharedReadWrite.load` and
 /// `getAndSetParams`: its estimator, evaluator and param maps (of a metadata of PySpark's Python
 /// writer, or of its JVM writer, which has the JSON of each field), and its params.
-fn load_common(session: &SparkSession, path: &str) -> Result<Loaded> {
+fn load_common(session: &SparkSession, path: &str, default_seed: i64) -> Result<Loaded> {
     let metadata = load_python_metadata(session, path)?;
     let class = metadata_str(&metadata, "class")?;
     let python_writer = class.starts_with("pyspark.ml.");
@@ -1486,7 +1515,7 @@ fn load_common(session: &SparkSession, path: &str) -> Result<Loaded> {
         }
         maps.push(map);
     }
-    let mut common = Common::new();
+    let mut common = Common::new(default_seed);
     common.estimator = Some(estimator);
     common.evaluator = Some(evaluator);
     common.param_maps = maps;
@@ -1815,5 +1844,16 @@ mod tests {
                 .contains("Boolean Param requires value of type bool. Found <class 'int'>."),
             "{error}"
         );
+    }
+
+    #[test]
+    fn the_default_seed_of_a_class_of_validators_is_constant_in_a_process() {
+        // PySpark's default seed is `hash(type(self).__name__)`: the same for each instance.
+        assert_eq!(CrossValidator::new().seed(), CrossValidator::new().seed());
+        assert_eq!(
+            TrainValidationSplit::new().seed(),
+            TrainValidationSplit::new().seed()
+        );
+        assert_eq!(CrossValidator::new().set_seed(3).seed(), 3);
     }
 }
