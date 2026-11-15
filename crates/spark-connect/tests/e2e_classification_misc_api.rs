@@ -4,6 +4,8 @@
 //! live server, on the golden's datasets: each value is compared with official PySpark 4.3.0's
 //! within 1e-9 relative. Set SPARK_REMOTE to run them.
 mod common;
+#[path = "common/ml_golden.rs"]
+mod ml_golden;
 
 use common::live_session;
 use serde_json::Value;
@@ -199,7 +201,7 @@ fn naive_bayes_fits_match_official_pyspark_for_each_model_type() {
         ("NaiveBayes.gaussian", "gaussian", "binary_train"),
     ] {
         let frame = dataset(&s, &root, data);
-        let model: NaiveBayesModel = NaiveBayes::new()
+        let mut model: NaiveBayesModel = NaiveBayes::new()
             .set_model_type(model_type)
             .set_weight_col("weight")
             .fit(&frame)
@@ -229,6 +231,17 @@ fn naive_bayes_fits_match_official_pyspark_for_each_model_type() {
         let (_, _, sigma) = matrix_values(&model.sigma().unwrap());
         close_all(&sigma, &member(&root, "models", key, "sigma")["values"]);
         check_predictions(&model, &root, "models", key, &nb_vectors());
+        // The transform of the golden's evaluation dataset: its schema and rows, as PySpark's.
+        let transform = &root["models"][key]["members"]["transform"];
+        // The helper's dataset keeps its raw `xs` column, which the golden's does not have.
+        let eval = dataset(&s, &root, ml_golden::call_dataset(&transform["call"])).drop(["xs"]);
+        let output = model.transform(&eval).unwrap();
+        let actual = ml_golden::frame(&output).unwrap();
+        ml_golden::assert_matches(
+            &ml_golden::normalized(actual),
+            &ml_golden::normalized(transform["value"].clone()),
+            &format!("{key}: transform"),
+        );
     }
 }
 
