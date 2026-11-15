@@ -82,6 +82,7 @@ FULL = [
         ("clustering", "KMeansModel"),
         ("clustering", "KMeansSummary"),
         ("clustering", "LDA"),
+        ("clustering", "LDAModel"),
         ("clustering", "LocalLDAModel"),
         ("clustering", "PowerIterationClustering"),
         ("evaluation", "BinaryClassificationEvaluator"),

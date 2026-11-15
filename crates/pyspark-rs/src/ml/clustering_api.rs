@@ -291,19 +291,9 @@ native_summary! {
     relation_methods: [];
 }
 
-/// The members that PySpark's `LDAModel` has, which its two subclasses have too: the model's
-/// params, the server's methods, and `describeTopics` (an attribute relation of the topics).
-macro_rules! lda_model {
-    ($ty:ident = $name:literal, jvm: $jvm:literal, cached_methods: [ $($cm:tt)* ]; $($body:tt)*) => {
-        lda_model! { @emit $ty = $name, jvm: $jvm; cached_methods: [ $($cm)* ]; $($body)* }
-    };
-    ($ty:ident = $name:literal, jvm: $jvm:literal; $($body:tt)*) => {
-        lda_model! { @emit $ty = $name, jvm: $jvm; cached_methods: []; $($body)* }
-    };
-    (@emit $ty:ident = $name:literal, jvm: $jvm:literal; cached_methods: [ $($cm:tt)* ]; $($body:tt)*) => {
-        native_model! {
-            $ty = $name in "pyspark.ml.connect.clustering", jvm: $jvm;
-            params: [
+native_model! {
+    PyLDAModel = "LDAModel" in "pyspark.ml.connect.clustering", base;
+    params: [
         "checkpointInterval" => (
             "getCheckpointInterval",
             get_checkpoint_interval,
@@ -342,37 +332,119 @@ macro_rules! lda_model {
             get_topic_distribution_col,
             param_topic_distribution_col
         ),
-            ];
-            setters: [
-                "setFeaturesCol" => (set_features_col, "featuresCol"),
-                "setSeed" => (set_seed, "seed"),
-                "setTopicDistributionCol" => (set_topic_distribution_col, "topicDistributionCol"),
-            ];
-            properties: [];
-            methods: [
-                "estimatedDocConcentration" => (
-                    estimated_doc_concentration,
-                    "estimatedDocConcentration",
-                    ()
-                ),
-                "isDistributed" => (is_distributed, "isDistributed", ()),
-                "logLikelihood" => (log_likelihood, "logLikelihood", (dataset)),
-                "logPerplexity" => (log_perplexity, "logPerplexity", (dataset)),
-                "topicsMatrix" => (topics_matrix, "topicsMatrix", ()),
-                "vocabSize" => (vocab_size, "vocabSize", ()),
-            ];
-            relations: [];
-            relation_methods: [
-                "describeTopics" => (
-                    describe_topics,
-                    "describeTopics",
-                    (maxTermsPerTopic = 10),
-                    "($self, maxTermsPerTopic=10)"
-                ),
-            ];
-            summary: None;
-            cached_methods: [ $($cm)* ];
-            cached: [];
+    ];
+    setters: [
+        "setFeaturesCol" => (set_features_col, "featuresCol"),
+        "setSeed" => (set_seed, "seed"),
+        "setTopicDistributionCol" => (set_topic_distribution_col, "topicDistributionCol"),
+    ];
+    properties: [];
+    methods: [
+        "estimatedDocConcentration" => (
+            estimated_doc_concentration,
+            "estimatedDocConcentration",
+            ()
+        ),
+        "isDistributed" => (is_distributed, "isDistributed", ()),
+        "logLikelihood" => (log_likelihood, "logLikelihood", (dataset)),
+        "logPerplexity" => (log_perplexity, "logPerplexity", (dataset)),
+        "topicsMatrix" => (topics_matrix, "topicsMatrix", ()),
+        "vocabSize" => (vocab_size, "vocabSize", ()),
+    ];
+    relations: [];
+    relation_methods: [
+        "describeTopics" => (
+            describe_topics,
+            "describeTopics",
+            (maxTermsPerTopic = 10),
+            "($self, maxTermsPerTopic=10)"
+        ),
+    ];
+    summary: None;
+    cached: [];
+}
+
+impl PyLDAModel {
+    /// The object of the model, of its class (a subclass), as a copy makes it.
+    pub(crate) fn into_object(self, py: Python<'_>) -> PyResult<Py<PyLDAModel>> {
+        let make = self.make;
+        make(py, self.core)
+    }
+}
+
+/// A subclass `$ty` of PySpark's `LDAModel` (`LocalLDAModel`, `DistributedLDAModel`) and of the
+/// JVM class `$jvm`, of the members of the base class [`PyLDAModel`], which holds the model, and
+/// of PySpark's persistence of a model (`write`, `save`, `read`, `load`), which the base class
+/// does not have, and of its own members `$body`. Its objects are made of the base's of a fit,
+/// of a server-side object or of a read, whose copies are of the subclass.
+macro_rules! lda_model {
+    ($ty:ident = $name:literal, jvm: $jvm:literal; $($body:tt)*) => {
+        #[pyclass(extends = PyLDAModel, name = $name, module = "pyspark.ml.connect.clustering")]
+        pub struct $ty;
+
+        impl $ty {
+            /// The model of a fit (as `native_model!`'s `fitted`), of the base class, which
+            /// [`PyLDAModel::into_object`] makes an object of this class of.
+            pub(crate) fn fitted(
+                py: Python<'_>,
+                model: Box<dyn Model>,
+                df: &DataFrame,
+                summary: object::SummaryDataset,
+            ) -> PyResult<PyLDAModel> {
+                PyLDAModel::__fitted_with(py, model, df, summary, Self::__make)
+            }
+
+            /// The model of the server-side object `object` that a fetch returns (as
+            /// `native_model!`'s `of_object`), of the base class.
+            #[allow(dead_code)]
+            pub(crate) fn of_object(
+                py: Python<'_>,
+                object: spark_connect::ml::MlRef,
+            ) -> PyResult<PyLDAModel> {
+                PyLDAModel::__of_object_with(py, $jvm, $name, object, Self::__make)
+            }
+
+            fn __from_read(
+                py: Python<'_>,
+                read: spark_connect::ml::ReadResult,
+            ) -> PyResult<Py<PyAny>> {
+                let base = PyLDAModel::__loaded_with(py, $jvm, $name, read, Self::__make)?;
+                Ok(base.into_object(py)?.into_any())
+            }
+
+            /// The object of this class of the core `core`, as a copy makes it.
+            fn __make(py: Python<'_>, core: object::ModelCore) -> PyResult<Py<PyLDAModel>> {
+                let base = PyLDAModel { core, make: Self::__make };
+                let this = Py::new(py, PyClassInitializer::from(base).add_subclass(Self))?;
+                Ok(this.into_bound(py).into_super().unbind())
+            }
+        }
+
+        #[pymethods]
+        impl $ty {
+            fn write(slf: &Bound<'_, Self>) -> PyResult<object::PyMLWriter> {
+                slf.as_super().try_borrow()?.core.writer(slf.py())
+            }
+
+            fn save(slf: &Bound<'_, Self>, path: &str) -> PyResult<()> {
+                slf.call_method0("write")?.call_method1("save", (path,))?;
+                Ok(())
+            }
+
+            #[classmethod]
+            fn read(cls: &Bound<'_, pyo3::types::PyType>) -> object::PyMLReader {
+                let _ = cls;
+                object::PyMLReader::new(
+                    $jvm,
+                    spark_connect::ml::OperatorType::Model,
+                    <$ty>::__from_read,
+                )
+            }
+
+            #[classmethod]
+            fn load(cls: &Bound<'_, pyo3::types::PyType>, path: &str) -> PyResult<Py<PyAny>> {
+                Ok(cls.call_method0("read")?.call_method1("load", (path,))?.unbind())
+            }
 
             $($body)*
         }
@@ -387,7 +459,9 @@ fn local_model_of_distributed(py: Python<'_>, model: &object::ModelCore) -> PyRe
     let object = object::fetch_py(py, &target, "toLocal", &[])?
         .into_object()
         .to_pyerr()?;
-    Ok(Py::new(py, PyLocalLDAModel::of_object(py, object)?)?.into_any())
+    Ok(PyLocalLDAModel::of_object(py, object)?
+        .into_object(py)?
+        .into_any())
 }
 
 lda_model! {
@@ -396,14 +470,23 @@ lda_model! {
 
 lda_model! {
     PyDistributedLDAModel = "DistributedLDAModel",
-        jvm: "org.apache.spark.ml.clustering.DistributedLDAModel",
-        cached_methods: ["toLocal" => (to_local, local_model_of_distributed)];
+        jvm: "org.apache.spark.ml.clustering.DistributedLDAModel";
+
+    /// The LocalLDAModel of the model, as `DistributedLDAModel.toLocal`, a method of
+    /// `functools.cache`: made once per object, which a copy does not share.
+    #[pyo3(name = "toLocal")]
+    fn to_local(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        let py = slf.py();
+        let base = slf.as_super().try_borrow()?;
+        base.core
+            .cached_method(py, "toLocal", || local_model_of_distributed(py, &base.core))
+    }
 
     /// The log likelihood of the training set, as `DistributedLDAModel.trainingLogLikelihood`.
     #[pyo3(name = "trainingLogLikelihood")]
     fn training_log_likelihood(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
         let py = slf.py();
-        let target = slf.try_borrow()?.core.target()?;
+        let target = slf.as_super().try_borrow()?.core.target()?;
         let out = object::fetch_py(py, &target, "trainingLogLikelihood", &[])?;
         object::fetch_output_to_py(py, out)
     }
@@ -412,7 +495,7 @@ lda_model! {
     #[pyo3(name = "logPrior")]
     fn log_prior(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
         let py = slf.py();
-        let target = slf.try_borrow()?.core.target()?;
+        let target = slf.as_super().try_borrow()?.core.target()?;
         let out = object::fetch_py(py, &target, "logPrior", &[])?;
         object::fetch_output_to_py(py, out)
     }
@@ -421,7 +504,7 @@ lda_model! {
     #[pyo3(name = "getCheckpointFiles")]
     fn get_checkpoint_files(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
         let py = slf.py();
-        let target = slf.try_borrow()?.core.target()?;
+        let target = slf.as_super().try_borrow()?.core.target()?;
         let out = object::fetch_py(py, &target, "getCheckpointFiles", &[])?;
         object::fetch_output_to_py(py, out)
     }
@@ -435,6 +518,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyBisectingKMeansSummary>()?;
     m.add_class::<PyGaussianMixtureModel>()?;
     m.add_class::<PyGaussianMixtureSummary>()?;
+    m.add_class::<PyLDAModel>()?;
     m.add_class::<PyLocalLDAModel>()?;
     m.add_class::<PyDistributedLDAModel>()?;
     Ok(())
