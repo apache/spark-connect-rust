@@ -822,7 +822,7 @@ impl ModelCore {
     }
 
     /// Whether the model is of no server-side object (see [`ModelCore::unbound`]).
-    fn is_unbound(&self) -> bool {
+    pub(super) fn is_unbound(&self) -> bool {
         // The model, of its concrete type: `as_any` of the box would be of the box's own.
         self.model.as_ref().as_any().is::<UnboundModel>()
     }

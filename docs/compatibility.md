@@ -313,6 +313,36 @@ PySpark class has them:
   `optionMap`, `session` and `save`), `save(path)`, `read()` (an `MLReader`) and `load(path)`, as
   `RemoteMLWriter` and `RemoteMLReader` save and load them, so that this client and PySpark load
   what each other saves.
+- **Subclasses**: a Python subclass of a class behaves as a subclass of PySpark's class.
+  - Its `__init__` passes its keywords to `super().__init__(...)`, which sets them as PySpark's
+    `keyword_only` `__init__` does (by `setParams`, recording `_input_kwargs`), of any arguments of
+    its own. A call that does not bind raises PySpark's message (`LogisticRegression.__init__() got
+    an unexpected keyword argument 'foo'`, `JavaModel.__init__() takes from 1 to 2 positional
+    arguments but 3 were given`).
+  - An object of a subclass of an estimator, transformer or evaluator has a uid of the subclass's
+    name (`Identifiable._randomUID`), and the defaults of that uid and name (`outputCol`, `seed`).
+    A subclass of a model class keeps the uid of the model class's name.
+  - `fit`, `fitMultiple`, `transform`, `evaluate`, `save` and `load` are PySpark's own (of
+    `Estimator`, `Transformer`, `Evaluator`, `MLWritable` and `MLReadable`), with PySpark's
+    signatures and docstrings. They run the object's `_fit`, `_transform`, `_evaluate`, `copy`,
+    `write` and `read`, so a subclass's `_fit` runs, also in the copies that a Pipeline or a
+    CrossValidator fits.
+  - A `copy` is of the class of the object, of its attributes, as PySpark's `Params.copy` makes it
+    of `copy.copy`.
+  - `uid` is assignable. An assignment re-parents the object's Params, where PySpark's keeps the
+    Params of the old uid, which then do not belong to the object (until its `_resetUid`).
+- **`copy.copy`, `copy.deepcopy` and `pickle`** take an object as PySpark's do:
+  - An estimator, a transformer, an evaluator, a Pipeline or a validator, and a model of no
+    server-side object, copy, copy deep and pickle of their uid, params and attributes. A shallow
+    copy shares the values (a Pipeline's stages), and a deep copy and a pickle copy them.
+  - A PipelineModel, a OneVsRestModel and a validator's model are made again of their
+    constructor's objects (`stages`, `models`, `bestModel`, ...).
+  - A model of a server-side object, and its summary, copy, sharing the object, and are not
+    copied deep nor pickled: PySpark's raise the TypeError of the lock of its `RemoteModelRef`, and
+    the pickle of a summary the AttributeError of its DataFrames' session.
+  - A shallow copy of a model keeps the server-side object while either object lives. PySpark's
+    shares its `RemoteModelRef` without a reference of its own, so the garbage collection of the
+    copy releases the object of the original (`CONNECT_ML.CACHE_INVALID` at its next use).
 - **A model of no server-side object**: a model class constructs as PySpark's
   `JavaModel(java_model=None)` (`KMeansModel()`, `LDAModel()`), a model of a new uid of its class
   and of its params, none set, whose Params API, `copy` and `write()` work, and whose members of

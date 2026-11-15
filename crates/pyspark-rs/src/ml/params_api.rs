@@ -918,6 +918,106 @@ pub(super) trait NativeInstance: PyClass + Sized {
     fn duplicate(&self, py: Python<'_>) -> PyResult<Py<Self>>;
     fn uid(&self) -> String;
     fn set_uid(&mut self, uid: &str);
+
+    /// Whether `copy.deepcopy` and `pickle` take the object's state: the error of an object of a
+    /// server-side object (a fitted or loaded model), whose `RemoteModelRef` PySpark's cannot copy.
+    fn check_picklable(&self) -> PyResult<()> {
+        Ok(())
+    }
+}
+
+/// The TypeError of `copy.deepcopy` and `pickle` of PySpark's object of a server-side object, of
+/// the lock of its `RemoteModelRef`.
+pub(super) fn lock_error() -> PyErr {
+    PyTypeError::new_err("cannot pickle '_thread.lock' object")
+}
+
+/// Give `that`, a copy of `this`, the class of `this` (a Python subclass of the public class), if
+/// their layouts allow it, and the attributes of `this`, shared, as `copy.copy` copies them.
+pub(super) fn copy_class_and_attributes(
+    this: &Bound<'_, PyAny>,
+    that: &Bound<'_, PyAny>,
+) -> PyResult<()> {
+    let class = this.get_type();
+    if !that.get_type().is(&class) {
+        // A subclass of `__slots__`, of another layout, keeps the class of the copy.
+        let _ = that.setattr("__class__", &class);
+    }
+    if let (Ok(from), Ok(to)) = (this.getattr("__dict__"), that.getattr("__dict__")) {
+        to.call_method1("update", (from,))?;
+    }
+    Ok(())
+}
+
+/// `copy.copy` of `slf`, as of PySpark's object: of the same uid, params and defaults (and of a
+/// model, of the same server-side object, summary and cached values, see `ModelCore::duplicate`),
+/// of the class of `slf` and of its attributes, shared.
+pub(super) fn shallow_copy<'py, T: NativeInstance>(
+    slf: &Bound<'py, T>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let py = slf.py();
+    let that = slf.try_borrow()?.duplicate(py)?.into_bound(py).into_any();
+    copy_class_and_attributes(slf.as_any(), &that)?;
+    Ok(that)
+}
+
+/// The state of `slf` that `copy.deepcopy` and `pickle` take (`__getstate__`): its uid, its set
+/// params and the defaults that it holds itself, by name, and its attributes.
+pub(super) fn get_state<'py, T: ParamsHolder + NativeInstance>(
+    slf: &Bound<'py, T>,
+) -> PyResult<Bound<'py, PyDict>> {
+    let py = slf.py();
+    slf.try_borrow()?.check_picklable()?;
+    let (params, defaults) = (PyDict::new(py), PyDict::new(py));
+    {
+        let this = slf.try_borrow()?;
+        for meta in params_of(slf.as_any())? {
+            if let Some(value) = this.set_value(py, &meta.name)? {
+                params.set_item(&meta.name, value)?;
+            }
+            if let Some(value) = this.own_default(py, &meta.name) {
+                defaults.set_item(&meta.name, value)?;
+            }
+        }
+    }
+    let state = PyDict::new(py);
+    state.set_item("uid", slf.try_borrow()?.uid())?;
+    state.set_item("params", params)?;
+    state.set_item("defaults", defaults)?;
+    if let Ok(attributes) = slf.as_any().getattr("__dict__") {
+        state.set_item("__dict__", attributes.call_method0("copy")?)?;
+    }
+    Ok(state)
+}
+
+/// `__setstate__(state)` of `slf`, of a state of [`get_state`]: of an object of the class's
+/// constructor of no arguments, as `copyreg.__newobj__` makes it.
+pub(super) fn set_state<T: ParamsHolder + NativeInstance>(
+    slf: &Bound<'_, T>,
+    state: &Bound<'_, PyAny>,
+) -> PyResult<()> {
+    let state = state.cast::<PyDict>()?;
+    if let Some(uid) = state.get_item("uid")? {
+        slf.try_borrow_mut()?.set_uid(&uid.extract::<String>()?);
+    }
+    if let Some(params) = state.get_item("params")? {
+        for (name, value) in params.cast::<PyDict>()?.iter() {
+            set_by_name(slf, &name.extract::<String>()?, &value)?;
+        }
+    }
+    if let Some(defaults) = state.get_item("defaults")? {
+        for (name, value) in defaults.cast::<PyDict>()?.iter() {
+            let meta = get_param_meta(slf.as_any(), &name.extract::<String>()?)?;
+            slf.try_borrow_mut()?
+                .put_own_default(meta.name.as_str(), value.unbind());
+        }
+    }
+    if let Some(attributes) = state.get_item("__dict__")? {
+        slf.as_any()
+            .getattr("__dict__")?
+            .call_method1("update", (attributes,))?;
+    }
+    Ok(())
 }
 
 /// `copy(extra=None)`, as PySpark's `Params.copy` and `_copyValues`: a new object of the same uid,
@@ -927,12 +1027,13 @@ pub(super) fn copy<'py, T: ParamsHolder + NativeInstance>(
     extra: Option<&Bound<'py, PyAny>>,
 ) -> PyResult<Bound<'py, T>> {
     let py = slf.py();
-    // The `params` walk of `_copyValues`.
-    slf.try_borrow()?.walk(py)?;
+    // `_copyValues` checks `extra` before its `params` walk, which raises the AssertionError of a
+    // model of no server-side object of `functools.cached_property` members (`trees`).
     let values = match extra {
         Some(extra) if !extra.is_none() => extra_values(slf.as_any(), extra)?,
         _ => Vec::new(),
     };
+    slf.try_borrow()?.walk(py)?;
     let that = slf.try_borrow()?.duplicate(py)?.into_bound(py);
     for (name, value) in values {
         set_by_name(&that, name, &value)?;
