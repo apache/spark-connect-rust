@@ -1983,7 +1983,7 @@ native_pymethods! {
         slf: &Bound<'_, Self>,
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Fitted<Py<classification_api::PyOneVsRestModel>>> {
+    ) -> PyResult<Fitted<Py<PyAny>>> {
         // A list of param maps fits once per map (`fit_with`), each in PySpark's order below.
         fit_with(slf, dataset, params, || -> PyResult<_> {
             let py = slf.py();
@@ -1991,6 +1991,18 @@ native_pymethods! {
             // PySpark's `_fit` reads the classifier of the param, which raises its KeyError when
             // it is unset.
             let classifier = slf.call_method0("getClassifier")?.unbind();
+            // A classifier that is not a native one, such as PySpark's own classes or a Python
+            // subclass of them, is fit by PySpark's own `OneVsRest._fit` over this object's
+            // params, as PySpark fits any classifier: its model is PySpark's `OneVsRestModel` of
+            // the classifier's models.
+            if !classifier.bind(py).is_none() && !is_native_classifier(classifier.bind(py)) {
+                return Ok(py
+                    .import("pyspark.ml.classification")?
+                    .getattr("OneVsRest")?
+                    .getattr("_fit")?
+                    .call1((slf, dataset))?
+                    .unbind());
+            }
             // PySpark's `_fit` reads the max label first, by `dataset.agg`: another object raises the
             // AttributeError of `agg`.
             let df = match dataset.extract::<PyRef<'_, PyDataFrame>>() {
@@ -2073,7 +2085,7 @@ native_pymethods! {
                 classifier,
             )?;
             params_api::copy_defaults(py, defaults, &mut fitted)?;
-            object::new_py(py, fitted)
+            Ok(object::new_py(py, fitted)?.into_any())
         })
     }
 
@@ -2221,6 +2233,19 @@ fn check_classifier_kwarg(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<()> {
         }
     }
     Ok(())
+}
+
+/// Whether `value` is of one of the native classification estimators that
+/// [`native_classifier`] takes, or of a subclass of one.
+fn is_native_classifier(value: &Bound<'_, PyAny>) -> bool {
+    value.is_instance_of::<PyLogisticRegression>()
+        || value.is_instance_of::<PyLinearSVC>()
+        || value.is_instance_of::<PyDecisionTreeClassifier>()
+        || value.is_instance_of::<PyRandomForestClassifier>()
+        || value.is_instance_of::<PyGBTClassifier>()
+        || value.is_instance_of::<PyNaiveBayes>()
+        || value.is_instance_of::<PyFMClassifier>()
+        || value.is_instance_of::<PyMultilayerPerceptronClassifier>()
 }
 
 // Snapshot at fit time, retaining PySpark's reference semantics for a classifier
