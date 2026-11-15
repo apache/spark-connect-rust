@@ -109,3 +109,35 @@ fn params_builders_send_the_literals_of_pyspark_from_outside_the_crate() {
         [Some(L::Double(0.25)), Some(L::Double(0.75))]
     );
 }
+
+#[test]
+fn evaluators_set_their_uid() {
+    // As PySpark's `_resetUid`: the uid of the operator, which a save writes.
+    fn uid_of(evaluator: &impl Evaluator) -> String {
+        evaluator.operator().uid.clone()
+    }
+    let mut regression = RegressionEvaluator::new();
+    regression.set_uid("RegressionEvaluator_0123456789ab");
+    assert_eq!(uid_of(&regression), "RegressionEvaluator_0123456789ab");
+    let mut binary = BinaryClassificationEvaluator::new();
+    binary.set_uid("BinaryClassificationEvaluator_0123456789ab");
+    assert_eq!(
+        uid_of(&binary),
+        "BinaryClassificationEvaluator_0123456789ab"
+    );
+    let mut multiclass = MulticlassClassificationEvaluator::new();
+    multiclass.set_uid("a uid of the user's");
+    assert_eq!(uid_of(&multiclass), "a uid of the user's");
+    let mut multilabel = MultilabelClassificationEvaluator::new();
+    multilabel.set_uid("MultilabelClassificationEvaluator_0123456789ab");
+    assert_eq!(
+        uid_of(&multilabel),
+        "MultilabelClassificationEvaluator_0123456789ab"
+    );
+    let mut clustering = ClusteringEvaluator::new();
+    clustering.set_uid("ClusteringEvaluator_0123456789ab");
+    assert_eq!(uid_of(&clustering), "ClusteringEvaluator_0123456789ab");
+    let mut ranking = RankingEvaluator::new();
+    ranking.set_uid("RankingEvaluator_0123456789ab");
+    assert_eq!(uid_of(&ranking), "RankingEvaluator_0123456789ab");
+}

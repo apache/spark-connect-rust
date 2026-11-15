@@ -30,8 +30,9 @@ macro_rules! evaluator {
                 ($larger)(self.metric_name())
             }
 
-            /// Set the uid of the operator, as `_resetUid` of a load does: a loaded evaluator of a
-            /// default instance keeps the uid that it was saved with.
+            /// Set the uid of the evaluator, as PySpark's `_resetUid` does: its save writes it, and
+            /// the server's objects of it are of it. The uid is the client's, as PySpark's is: it
+            /// is not validated.
             pub fn set_uid(&mut self, uid: &str) {
                 self.operator.uid = uid.to_string();
             }

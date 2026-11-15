@@ -293,6 +293,7 @@ fn round_trip<T: Persisted>(
         "{key}"
     );
     assert_params(loaded.stage_params(), stage.stage_params(), key);
+    assert_golden_params(loaded.stage_params(), &record["params_after"], key);
 }
 
 macro_rules! cases {
@@ -492,6 +493,7 @@ fn feature_models_match_official_pyspark() {
         assert_eq!(loaded.operator().name, model.operator().name, "{model_key}");
         assert_eq!(loaded.operator().uid, model.operator().uid, "{model_key}");
         assert_params(loaded.params(), model.params(), &model_key);
+        assert_golden_params(loaded.params(), &record["params_after"], &model_key);
         assert_members(
             &mut loaded,
             &record["members"]["members"],

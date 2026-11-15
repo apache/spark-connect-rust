@@ -464,6 +464,37 @@ pub fn assert_params(loaded: &Params, saved: &Params, at: &str) {
     }
 }
 
+/// The JSON of an ML value, as the goldens record PySpark's values of the params: a float of
+/// `num`, a vector of `vector`, a matrix of `matrix`, and arrays of their elements.
+pub fn ml_value(value: &MlValue) -> Json {
+    match value {
+        MlValue::Null => Json::Null,
+        MlValue::Bool(b) => json!(b),
+        MlValue::Byte(i) | MlValue::Short(i) | MlValue::Int(i) => json!(i),
+        MlValue::Long(i) => json!(i),
+        MlValue::Float(f) => num(f64::from(*f)),
+        MlValue::Double(f) => num(*f),
+        MlValue::String(s) => json!(s),
+        MlValue::Vector(v) => vector(v),
+        MlValue::Matrix(m) => matrix(m),
+        MlValue::Array(items) => Json::Array(items.iter().map(ml_value).collect()),
+        other => json!(format!("{other:?}")),
+    }
+}
+
+/// The params that `loaded` sets have the values of the golden's `params_after`, official
+/// PySpark's values of the params of its loaded object (its defaults too), so that a load is
+/// compared with PySpark's and not only with this client's save.
+pub fn assert_golden_params(loaded: &Params, params_after: &Json, at: &str) {
+    for (name, literal) in loaded.to_proto().params {
+        let Some(expected) = params_after.get(&name) else {
+            panic!("{at}: official PySpark's loaded object has no param {name}");
+        };
+        let actual = ml_value(&MlValue::from_literal(&literal).unwrap());
+        assert_matches(&actual, expected, &format!("{at}: param {name}"));
+    }
+}
+
 // The offline replay of the goldens.
 
 /// The name of the Spark Connect service in the paths of its RPCs.
