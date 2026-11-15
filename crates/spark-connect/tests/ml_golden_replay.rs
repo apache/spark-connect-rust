@@ -155,6 +155,27 @@ fn a_classification_transform_is_a_relation_entry_not_a_command() {
 }
 
 #[test]
+fn a_golden_with_a_random_uid_is_refused() {
+    // A golden holds the placeholders of its uids. One with a random uid would match any uid of a
+    // run, so it is refused rather than renumbered.
+    let command = proto::MlCommand {
+        command: Some(proto::ml_command::Command::Fit(proto::ml_command::Fit {
+            estimator: Some(proto::MlOperator {
+                uid: "LinearSVC_0123456789ab".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })),
+    };
+    let entry = serde_json::json!({
+        "commands": [STANDARD.encode(command.encode_to_vec())],
+    });
+    let refused = catch_unwind(AssertUnwindSafe(|| golden_commands(&entry)));
+    let message = panic_message(refused.err().expect("a random uid in a golden is refused"));
+    assert!(message.contains("random uid"), "{message}");
+}
+
+#[test]
 fn a_nan_param_of_a_fit_matches_its_golden() {
     // The Imputer's fit sets `missingValue` to NaN, which is not equal to itself: both sides of
     // the comparison hold the NaN marker.

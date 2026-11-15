@@ -414,6 +414,13 @@ pub fn golden_commands(entry: &Json) -> Vec<proto::MlCommand> {
 /// `<path>`. A NaN value becomes [`NAN_MARKER`]. The datasets of fits, evaluations and summaries,
 /// and the inputs of fetches, are cleared: the replay checks the operators, the methods and the
 /// params, not the data.
+///
+/// What a placeholder checks: a golden holds no random uid (see [`decode_command`]), so a run's
+/// uid matches a golden `<uidN>` when it is the N-th distinct uid of the run's commands. The
+/// golden does not hold a uid's value, so a run's uid is not compared by value: a run's uid that
+/// is the same string as an earlier uid of the run matches the same placeholder, and a different
+/// one does not. A run's uid in text that comes before any uid field of the run is numbered by
+/// its place, not by its value, which the golden cannot record.
 pub fn normalize_commands(commands: &mut [proto::MlCommand]) {
     let mut names = Placeholders::default();
     for command in commands {
@@ -725,8 +732,19 @@ fn decode_bytes(b64: &Json) -> Vec<u8> {
         .expect("the base64 of a golden message")
 }
 
+/// A golden command as sent. The golden holds placeholders for its uids and ids (see
+/// [`normalize_commands`]), never a random uid: one would be renumbered on the golden side as
+/// on the run's side, and match any uid of the run. So a random uid in a golden is refused.
 fn decode_command(b64: &Json) -> proto::MlCommand {
-    proto::MlCommand::decode(decode_bytes(b64).as_slice()).expect("a golden ML command")
+    let command =
+        proto::MlCommand::decode(decode_bytes(b64).as_slice()).expect("a golden ML command");
+    let text = format!("{command:?}");
+    assert_eq!(
+        scrub_random_uids(&text, &mut HashMap::new()),
+        text,
+        "a golden command with a random uid: the golden must hold the <uidN> placeholders"
+    );
+    command
 }
 
 /// Whether a golden entry is a relation entry: the entry of a DataFrame member, whose command is
