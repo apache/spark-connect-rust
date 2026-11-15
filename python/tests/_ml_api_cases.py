@@ -111,12 +111,12 @@ def _value(v, rounded=False):
 
 
 class Recorder:
-    """The results of the cases, by tag: of a case's value (see `_value`), or of its error. With
-    `rounded`, the floats of a DataFrame's rows and of an ML vector or matrix are rounded as a bare
-    float is (see `_rounded`), for the cases whose server computations differ in their last bits
-    between platforms."""
+    """The results of the cases, by tag: of a case's value (see `_value`), or of its error. By
+    default (`rounded`), the floats of a DataFrame's rows and of an ML vector or matrix are rounded
+    as a bare float is (see `_rounded`), as the server computations of the cases differ in their
+    last bits between platforms; `rounded=False` records them as they are."""
 
-    def __init__(self, base=None, rounded=False):
+    def __init__(self, base=None, rounded=True):
         self.out = {}
         self.base = base
         self.rounded = rounded
@@ -765,7 +765,7 @@ def _validator_live_cases(rec, spark, base, name):
     rec("fit_class", lambda: (type(model).__name__, model.uid.split("_")[0], model.uid != v.uid))
     rec("metrics", lambda: _metrics(model, name))
     if name == "CrossValidator":
-        rec("std_metrics", lambda: [round(m, 9) for m in model.stdMetrics])
+        rec("std_metrics", lambda: model.stdMetrics)
     rec("sub_models_none", lambda: model.subModels is None)
     rec(
         "best_model",
