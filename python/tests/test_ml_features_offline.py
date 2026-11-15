@@ -108,7 +108,10 @@ def test_native_exports_and_official_constructor_signature(name, ml_mock):
     with pytest.raises(TypeError, match="unexpected keyword"):
         cls(unknown=1)
     # setParams, as pyspark.ml's: keyword-only, with the params and defaults of the constructor.
-    assert str(inspect.signature(cls.setParams)) == "(self, " + str(inspect.signature(cls))[1:]
+    def parameters(signature):
+        return [(p.name, p.kind, repr(p.default)) for p in signature.parameters.values()]
+
+    assert parameters(inspect.signature(cls.setParams))[1:] == parameters(inspect.signature(cls))
     with pytest.raises(TypeError, match="Method setParams forces keyword arguments."):
         cls().setParams(1)
     with pytest.raises(TypeError, match=f"{name}.setParams\\(\\) got an unexpected keyword"):

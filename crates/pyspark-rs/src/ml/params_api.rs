@@ -197,6 +197,13 @@ pub(super) trait ParamsHolder: PyClass<Frozen = False> {
         let _ = name;
         Ok(())
     }
+    /// The kind of the param `name` that the class's setters convert its values of, where it is not
+    /// the kind of its converter (OneVsRest's `parallelism`, which PySpark compares but never
+    /// sends); None for the others.
+    fn param_kind(&self, name: &str) -> Option<Kind> {
+        let _ = name;
+        None
+    }
 
     /// The `params` walk of PySpark's `Params.params`, which `explainParams` and `copy` run too:
     /// it reads every attribute of the object but its properties, so the members of
@@ -309,6 +316,20 @@ impl<T: Native + PyClass<Frozen = False>> ParamsHolder for T {
             }
             None => false,
         }
+    }
+
+    /// Unset the param `name`, as `del self._paramMap[param]` of PySpark's `_clear` does.
+    fn unset(&mut self, name: &'static str) -> PyResult<()> {
+        self.unsendable_mut().retain(|unsent| *unsent != name);
+        if let Some(raw) = self.raw_params_mut() {
+            raw.retain(|(key, _)| *key != name);
+        }
+        let jvm = T::jvm_name(name);
+        let params = std::mem::take(self.params_mut())
+            .clear_param(&unsendable_key(jvm))
+            .clear_param(jvm);
+        *self.params_mut() = params;
+        Ok(())
     }
 }
 
@@ -858,7 +879,11 @@ pub(super) fn set<T: ParamsHolder>(
                 error
             }
         })?;
-    let kind = kind_of_converter(&meta.converter).unwrap_or(Kind::Identity);
+    let kind = slf
+        .try_borrow()?
+        .param_kind(&meta.name)
+        .or_else(|| kind_of_converter(&meta.converter))
+        .unwrap_or(Kind::Identity);
     // Of a value that the converter has converted already, so that it does not fail again.
     let converted = convert(&meta.name, kind, &converted)?;
     slf.try_borrow_mut()?.put(py, meta.name.as_str(), converted)
@@ -872,7 +897,11 @@ pub(super) fn set_by_name<T: ParamsHolder>(
     value: &Bound<'_, PyAny>,
 ) -> PyResult<()> {
     let meta = get_param_meta(slf.as_any(), name)?;
-    let kind = kind_of_converter(&meta.converter).unwrap_or(Kind::Identity);
+    let kind = slf
+        .try_borrow()?
+        .param_kind(&meta.name)
+        .or_else(|| kind_of_converter(&meta.converter))
+        .unwrap_or(Kind::Identity);
     let converted = convert(&meta.name, kind, value)?;
     slf.try_borrow_mut()?
         .put(slf.py(), meta.name.as_str(), converted)
@@ -965,6 +994,46 @@ pub(super) fn shallow_copy<'py, T: NativeInstance>(
     let that = slf.try_borrow()?.duplicate(py)?.into_bound(py).into_any();
     copy_class_and_attributes(slf.as_any(), &that)?;
     Ok(that)
+}
+
+/// The values of the params of `slf` by name, in the order of the class's params: its set values,
+/// and its defaults (its own, else the class's), of which the public class makes PySpark's
+/// `_paramMap` and `_defaultParamMap` of an object that this client makes (a fit, a load).
+pub(super) fn native_params<'py, T: ParamsHolder>(
+    slf: &Bound<'py, T>,
+) -> PyResult<(Bound<'py, PyDict>, Bound<'py, PyDict>)> {
+    let py = slf.py();
+    let (set, defaults) = (PyDict::new(py), PyDict::new(py));
+    for meta in params_of(slf.as_any())? {
+        if let Some(value) = set_value_of(slf, &meta.name)? {
+            set.set_item(&meta.name, value)?;
+        }
+        if let Some(value) = default_value(slf, meta)? {
+            defaults.set_item(&meta.name, value)?;
+        }
+    }
+    Ok((set, defaults))
+}
+
+/// Make the params of `slf` those of PySpark's `_paramMap` and `_defaultParamMap` of it, of the
+/// values `set` and `defaults` by name, before a request that sends them: the values of `set`, the
+/// others unset, and the defaults of `defaults` that the object holds of its own.
+pub(super) fn sync_params<T: ParamsHolder>(
+    slf: &Bound<'_, T>,
+    set: &Bound<'_, PyDict>,
+    defaults: &Bound<'_, PyDict>,
+) -> PyResult<()> {
+    for meta in params_of(slf.as_any())? {
+        match set.get_item(&meta.name)? {
+            Some(value) => set_by_name(slf, &meta.name, &value)?,
+            None => slf.try_borrow_mut()?.unset(meta.name.as_str())?,
+        }
+        if let Some(value) = defaults.get_item(&meta.name)? {
+            slf.try_borrow_mut()?
+                .put_own_default(meta.name.as_str(), value.unbind());
+        }
+    }
+    Ok(())
 }
 
 /// The state of `slf` that `copy.deepcopy` and `pickle` take (`__getstate__`): its uid, its set
@@ -1096,6 +1165,30 @@ pub(super) fn from_read<T: ParamsHolder + NativeInstance>(
     // Of the public class of `T`, as a constructor of the class that `load` is called of.
     let class = super::object::public_class::<T>(py).unwrap_or_else(|| py.get_type::<T>());
     let instance = class.call0()?.cast_into::<T>()?;
+    let proto = read.params.to_proto();
+    let mut names: Vec<&String> = proto.params.keys().collect();
+    names.sort();
+    if instance.as_any().hasattr("_resetUid")? {
+        // As `RemoteMLReader.loadInstance` of PySpark's param maps of the object: its
+        // `_resetUid(uid)`, which keeps the defaults of the uid that it was made of, and its
+        // `_set(**params)` of the params that the server read.
+        instance
+            .as_any()
+            .call_method1("_resetUid", (read.uid.as_str(),))?;
+        let params = PyDict::new(py);
+        for name in names {
+            if params_of(instance.as_any())?
+                .iter()
+                .any(|p| &p.name == name)
+            {
+                let value =
+                    spark_connect::ml::MlValue::from_literal(&proto.params[name]).to_pyerr()?;
+                params.set_item(name, super::object::ml_value_to_py(py, &value)?)?;
+            }
+        }
+        instance.as_any().call_method("_set", (), Some(&params))?;
+        return Ok(instance.into_any().unbind());
+    }
     // The defaults of the uid that the instance was made of, which `_resetUid` keeps.
     for meta in params_of(instance.as_any())? {
         if meta
@@ -1111,9 +1204,6 @@ pub(super) fn from_read<T: ParamsHolder + NativeInstance>(
         }
     }
     instance.try_borrow_mut()?.set_uid(&read.uid);
-    let proto = read.params.to_proto();
-    let mut names: Vec<&String> = proto.params.keys().collect();
-    names.sort();
     for name in names {
         let value = spark_connect::ml::MlValue::from_literal(&proto.params[name]).to_pyerr()?;
         let value = super::object::ml_value_to_py(py, &value)?;

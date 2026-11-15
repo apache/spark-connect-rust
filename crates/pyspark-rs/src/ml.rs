@@ -1834,6 +1834,13 @@ const ONE_VS_REST_PARAMS: &[(&str, Kind)] = &[
 ];
 
 impl params_api::ParamsHolder for PyOneVsRest {
+    fn param_kind(&self, name: &str) -> Option<Kind> {
+        ONE_VS_REST_PARAMS
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, kind)| *kind)
+    }
+
     fn set_value(&self, py: Python<'_>, name: &str) -> PyResult<Option<Py<PyAny>>> {
         if let Some((_, value)) = self.raw.iter().find(|(n, _)| *n == name) {
             return Ok(Some(value.clone_ref(py)));

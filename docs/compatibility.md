@@ -266,16 +266,28 @@ evaluation, feature, fpm, recommendation, regression and tuning modules, and for
 `PipelineModel` (`Evaluator` and `ParamGridBuilder` are PySpark's own). Each class has, where its
 PySpark class has them:
 
-- **The Params API of `pyspark.ml.param.Params`**: `params`, `getParam`, `hasParam`, `isSet`,
-  `isDefined`, `hasDefault`, `getOrDefault`, `explainParam(s)`, `extractParamMap`, `set`, `clear`
-  (which does nothing over Spark Connect, as PySpark's `JavaParams.clear`) and `copy`, with
-  PySpark's errors and keywords (`getParam(paramName=...)`). The Param objects are PySpark's own
-  `pyspark.ml.param.Param`, of the docs, converters and defaults of the official class
-  (`crates/pyspark-rs/src/ml/ml_params.json`, captured from pyspark-client 4.3.0 by
-  `scripts/capture_ml_api_golden.py`), and a getter per param (`getMaxIter`). `extractParamMap()`
-  has PySpark's params and values, in the order of the names of the params, where PySpark's is in
-  the order that they were set (the defaults of a new object in the order that its constructors
-  set them).
+- **The Params API of `pyspark.ml.param.Params`, as PySpark's own code**: `params`, `getParam`,
+  `hasParam`, `isSet`, `isDefined`, `hasDefault`, `getOrDefault`, `explainParam(s)`,
+  `extractParamMap`, `set` and `copy`, the getters and setters, `setParams` and the `keyword_only`
+  constructors are PySpark's own functions, over PySpark's param maps (`_paramMap` and
+  `_defaultParamMap`) in the object's attributes. So their errors, messages and keywords are
+  PySpark's, `_set`, `_setDefault`, `_copyValues`, `_resetUid` and `_input_kwargs` behave as
+  PySpark's, values are converted by PySpark's `TypeConverters` (a NumPy string stays as given, an
+  `np.float32` raises PySpark's TypeError of `toFloat`), `extractParamMap()` is in PySpark's order
+  (the order that the params were set; the defaults of a new object in the order that its
+  constructors set them), and an assignment of `uid` keeps the Params of the old uid, as PySpark's
+  does. `clear` does nothing over Spark Connect, as PySpark's `JavaParams.clear`. The native
+  object's params are made those of the maps before each native member reads them (a fit, a
+  transform, an evaluation, a writer, a model's members), and so are those of the objects that it
+  holds (an OneVsRest's classifier, a Pipeline's stages, a validator's estimator, evaluator and the
+  values of its grids, a PipelineModel's stages, an OneVsRestModel's models, a validator model's
+  best and sub-models). A writer takes them at `write()`, where PySpark's reads them at its `save`.
+  The maps of an object that this client makes (of a fit, a load, a native copy) are made of the
+  native object's values at their first read. The native members have PySpark's docstrings and
+  signatures. The Param objects are PySpark's own `pyspark.ml.param.Param`, of the docs,
+  converters and defaults of the official class (`crates/pyspark-rs/src/ml/ml_params.json`,
+  captured from pyspark-client 4.3.0 by `scripts/capture_ml_api_golden.py`), and a getter per
+  param (`getMaxIter`).
 - **PySpark's types and class Params**: the class of `pyspark.ml.connect.<module>` is a subclass
   of its native class and of PySpark's class of the same name of `pyspark.ml.<module>`
   (`python/pyspark/ml/_native_classes.py`), so its objects are instances of every class of the MRO
