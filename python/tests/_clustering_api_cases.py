@@ -66,7 +66,7 @@ def _bisecting_kmeans_cases(rec, spark, base, found):
     model_cases(rec, est, model, df)
     rec("clusterCenters", lambda: sorted([round(x, 9) for x in c] for c in model.clusterCenters()))
     rec("clusterCenters_type", lambda: type(model.clusterCenters()[0]).__name__)
-    rec("computeCost", lambda: round(model.computeCost(df), 9))
+    rec("computeCost", lambda: model.computeCost(df))
     rec("numFeatures", lambda: model.numFeatures)
     rec("hasSummary", lambda: model.hasSummary)
     s = model.summary
@@ -86,23 +86,23 @@ def _gaussian_mixture_cases(rec, spark, base, found):
     est = estimator(k=2, seed=7, maxIter=5)
     model = est.fit(df)
     model_cases(rec, est, model, df)
-    rec("weights", lambda: [round(w, 9) for w in model.weights])
+    rec("weights", lambda: model.weights)
     rec("gaussians_type", lambda: [type(g).__name__ for g in model.gaussians])
-    rec("gaussians_mean", lambda: [[round(x, 9) for x in g.mean] for g in model.gaussians])
+    rec("gaussians_mean", lambda: [list(g.mean) for g in model.gaussians])
     rec(
         "gaussians_cov",
-        lambda: [[[round(x, 9) for x in r] for r in g.cov.toArray()] for g in model.gaussians],
+        lambda: [[list(r) for r in g.cov.toArray()] for g in model.gaussians],
     )
     rec("gaussiansDF_columns", lambda: model.gaussiansDF.columns)
     probe = Vectors.dense([6.1, 6.2])
-    rec("predictProbability", lambda: [round(x, 9) for x in model.predictProbability(probe)])
+    rec("predictProbability", lambda: list(model.predictProbability(probe)))
     rec("numFeatures", lambda: model.numFeatures)
     rec("hasSummary", lambda: model.hasSummary)
     s = model.summary
     rec("summary_is_summary", lambda: model.summary is s)
     for a in ["k", "clusterSizes", "numIter", "featuresCol", "predictionCol", "probabilityCol"]:
         rec("summary_" + a, lambda a=a: getattr(s, a))
-    rec("summary_logLikelihood", lambda: round(s.logLikelihood, 9))
+    rec("summary_logLikelihood", lambda: s.logLikelihood)
     rec("summary_df_probability", lambda: s.probability.columns)
     rec("summary_df_cluster_count", lambda: s.cluster.count())
     persistence_cases(rec, est, model, model_class, df, base)

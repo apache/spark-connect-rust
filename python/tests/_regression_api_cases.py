@@ -24,12 +24,7 @@ _QUALIFIED = re.compile(r"'pyspark\.ml\.connect\.\w+\.(\w+)'")
 
 
 class RegressionRecorder(Recorder):
-    """The `Recorder` of the cases, which normalizes the module of a native class in an error, and
-    rounds the floats of DataFrames (`rounded`): the predictions and residuals of these models
-    differ in their last bits between the servers of platforms."""
-
-    def __init__(self, base=None):
-        super().__init__(base, rounded=True)
+    """The `Recorder` of the cases, which normalizes the module of a native class in an error."""
 
     def __call__(self, tag, f):
         super().__call__(tag, f)

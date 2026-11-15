@@ -13,26 +13,6 @@ the cases of `threshold_cases`, for the estimator and the model alike.
 from _ml_api_cases import Recorder, model_cases, params_api_common_cases, persistence_cases
 from _native_classes import native_class
 
-
-class _Rounded:
-    """The rows of a DataFrame of a summary, with each float (and each value of a vector) rounded
-    to 9 digits, as the Recorder rounds a float: the thresholds and probabilities of a curve differ
-    in their last bits between platforms. The Recorder records it as it records a DataFrame."""
-
-    def __init__(self, frame):
-        def cell(x):
-            if isinstance(x, float):
-                return round(x, 9)
-            if type(x).__name__ == "DenseVector":
-                return type(x)([round(float(v), 9) for v in x])
-            return x
-
-        self.columns = frame.columns
-        self._rows = [tuple(cell(x) for x in row) for row in frame.collect()]
-
-    def collect(self):
-        return self._rows
-
 # The estimator and model classes of the case set: (module of the native class, name, module of
 # PySpark's).
 CLASSES = {
@@ -193,12 +173,12 @@ def _binary_live(rec, model, df):
         "precisionByThreshold",
         "recallByThreshold",
     ]:
-        rec("summary_df_" + a, lambda a=a: _Rounded(getattr(s, a)))
+        rec("summary_df_" + a, lambda a=a: getattr(s, a))
     e = model.evaluate(df)
     rec("evaluate_class", lambda: type(e).__name__)
     rec("evaluate_accuracy", lambda: e.accuracy)
     rec("evaluate_areaUnderROC", lambda: e.areaUnderROC)
-    rec("evaluate_roc", lambda: _Rounded(e.roc))
+    rec("evaluate_roc", lambda: e.roc)
     rec("evaluate_bad", lambda: model.evaluate(5))
     rec("transform_map", lambda: model.transform(df, {model.threshold: 0.9}).select("prediction"))
     rec("copy_threshold", lambda: model.copy({model.threshold: 0.9}).getThreshold())

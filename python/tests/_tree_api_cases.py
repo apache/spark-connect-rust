@@ -15,34 +15,6 @@ error, as `_ml_api_cases.Recorder` does.
 from _ml_api_cases import Recorder
 from _native_classes import native_class
 
-
-class _Rounded:
-    """The rows of a DataFrame of a summary, with each float (and each value of a vector) rounded
-    to 9 digits, as the Recorder rounds a float: the thresholds and probabilities of a curve differ
-    in their last bits between platforms. The Recorder records it as it records a DataFrame."""
-
-    def __init__(self, frame):
-        def cell(x):
-            if isinstance(x, float):
-                return round(x, 9)
-            if type(x).__name__ == "DenseVector":
-                return type(x)([round(float(v), 9) for v in x])
-            return x
-
-        self.columns = frame.columns
-        self._rows = [tuple(cell(x) for x in row) for row in frame.collect()]
-
-    def collect(self):
-        return self._rows
-
-
-def _rounded_vector(vector):
-    """A vector with each value rounded to 9 digits, as the Recorder records a vector of a value
-    that differs in its last bits between platforms."""
-    if type(vector).__name__ == "DenseVector":
-        return type(vector)([round(float(v), 9) for v in vector])
-    return vector
-
 # The classes of each case set: (module of the native class, name, module of PySpark's).
 _PYSPARK_ML = "pyspark.ml.classification"
 CLASSES = {
@@ -163,13 +135,13 @@ def _model_cases(rec, est, model, df):
     rec("model_isSet_maxDepth", lambda: model.isSet("maxDepth"))
     rec("numClasses", lambda: model.numClasses)
     rec("numFeatures", lambda: model.numFeatures)
-    rec("featureImportances", lambda: _rounded_vector(model.featureImportances))
+    rec("featureImportances", lambda: model.featureImportances)
     rec("toDebugString", lambda: model.toDebugString)
     rec("predict", lambda: model.predict(v))
-    rec("predictRaw", lambda: _rounded_vector(model.predictRaw(v)))
-    rec("predictProbability", lambda: _rounded_vector(model.predictProbability(v)))
-    rec("predictLeaf", lambda: _rounded_vector(model.predictLeaf(v)))
-    rec("transform", lambda: _Rounded(model.transform(df).select("prediction")))
+    rec("predictRaw", lambda: model.predictRaw(v))
+    rec("predictProbability", lambda: model.predictProbability(v))
+    rec("predictLeaf", lambda: model.predictLeaf(v))
+    rec("transform", lambda: model.transform(df).select("prediction"))
     rec("transform_map", lambda: model.transform(df, {model.predictionCol: "q"}).columns)
     rec("transform_bad_params", lambda: model.transform(df, 5))
     rec("model_setPredictionCol", lambda: model.copy().setPredictionCol("p").getPredictionCol())
@@ -220,19 +192,19 @@ def _summary_cases(rec, model, summary, df, binary, tag=""):
     rec(tag + "summary_weightedFMeasure", lambda: summary.weightedFMeasure())
     rec(tag + "summary_is_summary", lambda: model.summary is summary)
     rec(tag + "copy_summary_is_summary", lambda: model.copy().summary is summary)
-    rec(tag + "summary_df_predictions", lambda: _Rounded(summary.predictions.select("prediction")))
+    rec(tag + "summary_df_predictions", lambda: summary.predictions.select("prediction"))
     if binary:
         for a in ["roc", "pr", "fMeasureByThreshold", "precisionByThreshold"]:
-            rec(tag + "summary_df_" + a, lambda a=a: _Rounded(getattr(summary, a)))
-        rec(tag + "summary_df_recallByThreshold", lambda: _Rounded(summary.recallByThreshold))
+            rec(tag + "summary_df_" + a, lambda a=a: getattr(summary, a))
+        rec(tag + "summary_df_recallByThreshold", lambda: summary.recallByThreshold)
     e = model.evaluate(df)
     rec(tag + "evaluate_type", lambda: type(e).__name__)
     rec(tag + "evaluate_accuracy", lambda: e.accuracy)
     rec(tag + "evaluate_labels", lambda: e.labels)
-    rec(tag + "evaluate_predictions", lambda: _Rounded(e.predictions.select("prediction")))
+    rec(tag + "evaluate_predictions", lambda: e.predictions.select("prediction"))
     if binary:
         rec(tag + "evaluate_areaUnderROC", lambda: e.areaUnderROC)
-        rec(tag + "evaluate_roc", lambda: _Rounded(e.roc))
+        rec(tag + "evaluate_roc", lambda: e.roc)
     rec(tag + "evaluate_bad", lambda: model.evaluate(5))
 
 
@@ -296,7 +268,7 @@ def _persistence_cases(rec, est, model, model_class, df, base, name):
     """The cases of the save and load of the estimator and the model, and the fits of param maps."""
     import shutil
 
-    rec("transform_saved", lambda: _Rounded(model.transform(df).select("prediction")))
+    rec("transform_saved", lambda: model.transform(df).select("prediction"))
     shutil.rmtree(base, ignore_errors=True)
     rec("model_save", lambda: model.write().overwrite().save(base + "/model"))
     rec("model_save_again", lambda: model.save(base + "/model"))
@@ -305,7 +277,7 @@ def _persistence_cases(rec, est, model, model_class, df, base, name):
     rec("loaded_getMaxDepth", lambda: loaded.getMaxDepth())
     rec("loaded_isSet_maxDepth", lambda: loaded.isSet("maxDepth"))
     rec("loaded_explainParams", lambda: loaded.explainParams())
-    rec("loaded_transform", lambda: _Rounded(loaded.transform(df).select("prediction")))
+    rec("loaded_transform", lambda: loaded.transform(df).select("prediction"))
     rec("loaded_predict", lambda: loaded.predict(_probe()))
     if name == "RandomForest":
         rec("loaded_hasSummary", lambda: loaded.hasSummary)
