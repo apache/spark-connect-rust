@@ -77,6 +77,12 @@ fn values_compare_as_the_goldens_record_them() {
     );
     let differ = std::panic::catch_unwind(|| assert_matches(&json!([1.0]), &json!([1.1]), "far"));
     assert!(differ.is_err());
+    // An integer of the golden matches exactly, not within the tolerance of the floats.
+    assert_matches(&json!([5000, 5000.0]), &json!([5000, 5000]), "integers");
+    let differ = std::panic::catch_unwind(|| assert_matches(&json!(5001), &json!(5000), "count"));
+    assert!(differ.is_err());
+    let differ = std::panic::catch_unwind(|| assert_matches(&json!(5000.5), &json!(5000), "size"));
+    assert!(differ.is_err());
 
     // An unclassified JVM exception reaches PySpark as "(<class>) <message>".
     assert_error(
@@ -89,6 +95,11 @@ fn values_compare_as_the_goldens_record_them() {
         &json!({"class": "IllegalArgumentException", "message": "requirement failed: no"}),
         "classified",
     );
+    // A golden error of no message matches no error.
+    let empty = std::panic::catch_unwind(|| {
+        assert_error("any error", &json!({"class": "X", "message": ""}), "empty")
+    });
+    assert!(empty.is_err());
 
     // Params compare by their values: an integer of any width, and a NaN.
     let saved = Params::new()

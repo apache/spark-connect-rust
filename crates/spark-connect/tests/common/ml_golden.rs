@@ -194,13 +194,21 @@ pub fn normalized(mut v: Json) -> Json {
     v
 }
 
-/// Whether `actual` matches the golden's `expected`: numbers within a tolerance, arrays elementwise
-/// and objects by their keys. The server computes some values in single precision (the factors of
-/// ALS, the vectors and similarities of Word2Vec), whose last bits differ between the platforms of
-/// the capture and of the test, and which iterations accumulate: the tolerance is that of
-/// `e2e_als.rs`, which compares ALS of official PySpark across platforms.
+/// Whether `actual` matches the golden's `expected`: an integer of the golden exactly (a count, a
+/// size, an index), a float within a tolerance, arrays elementwise and objects by their keys. The
+/// server computes some values in single precision (the factors of ALS, the vectors and
+/// similarities of Word2Vec), whose last bits differ between the platforms of the capture and of
+/// the test, and which iterations accumulate: the tolerance is that of `e2e_als.rs`, which compares
+/// ALS of official PySpark across platforms.
 pub fn assert_matches(actual: &Json, expected: &Json, at: &str) {
     match (actual, expected) {
+        (Json::Number(a), Json::Number(e)) if e.is_i64() || e.is_u64() => {
+            let exact = match (a.as_i64(), e.as_i64()) {
+                (Some(a), Some(e)) => a == e,
+                _ => a.as_f64() == e.as_f64(),
+            };
+            assert!(exact, "{at}: {a} != {e}");
+        }
         (Json::Number(a), Json::Number(e)) => {
             let (a, e) = (a.as_f64().unwrap(), e.as_f64().unwrap());
             assert!((a - e).abs() <= 2e-5 + 2e-4 * e.abs(), "{at}: {a} != {e}");
@@ -227,6 +235,8 @@ pub fn assert_matches(actual: &Json, expected: &Json, at: &str) {
 /// does not classify reaches PySpark as an `UnknownException` of "(<class>) <message>".
 pub fn assert_error(actual: &str, expected: &Json, at: &str) {
     let message = expected["message"].as_str().unwrap();
+    // An empty message would be in any error.
+    assert!(!message.is_empty(), "{at}: the golden error has no message");
     let message = match message.split_once(") ") {
         Some((class, rest)) if class.starts_with("(java.") => rest,
         _ => message,
