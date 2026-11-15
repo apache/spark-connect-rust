@@ -73,17 +73,27 @@ def _normalize(text, base=None):
     return text
 
 
-_ML_VALUES = ("DenseVector", "SparseVector", "DenseMatrix")
-
-
 def _rounded(x):
-    """A value with each float in it (and each value of an ML vector, a dense matrix or a list)
-    rounded to 9 decimals, as `_value` rounds a bare float, and -0.0 as 0.0: the last bits of a
-    float of a server's computation differ between platforms."""
+    """A value with each float in it rounded to 9 decimals, and -0.0 as 0.0: the last bits of a
+    float of a server's computation differ between platforms. The rounding is absolute, not
+    relative, so a float of a magnitude below 5e-10 is 0.0 and the noise near 0 is rounded away.
+
+    It recurses into a list, a tuple, a Row (which keeps its fields), a dict, and an ML vector or
+    matrix (which keeps its class and layout), so that each value keeps its type and the shape of
+    its repr."""
     if isinstance(x, float):
         return round(x, 9) + 0.0
     if isinstance(x, list):
         return [_rounded(v) for v in x]
+    if isinstance(x, tuple):
+        if type(x).__name__ == "Row":
+            values = [_rounded(v) for v in x]
+            if hasattr(x, "__fields__"):
+                return type(x)(*x.__fields__)(*values)
+            return type(x)(*values)
+        return tuple(_rounded(v) for v in x)
+    if isinstance(x, dict):
+        return {k: _rounded(v) for k, v in x.items()}
     name = type(x).__name__
     if name == "DenseVector":
         return type(x)([_rounded(float(v)) for v in x])
@@ -92,29 +102,43 @@ def _rounded(x):
     if name == "DenseMatrix":
         values = [_rounded(float(v)) for v in x.values]
         return type(x)(x.numRows, x.numCols, values, x.isTransposed)
+    if name == "SparseMatrix":
+        values = [_rounded(float(v)) for v in x.values]
+        return type(x)(
+            x.numRows,
+            x.numCols,
+            x.colPtrs.tolist(),
+            x.rowIndices.tolist(),
+            values,
+            x.isTransposed,
+        )
     return x
 
 
 def _value(v, rounded=False):
+    """The record of a value: a DataFrame as its columns and sorted rows, a list element by
+    element, a float as itself, and any other value as its repr. With `rounded`, the floats are
+    rounded as `_rounded` does; without it, they are recorded exactly."""
     if hasattr(v, "collect") and hasattr(v, "columns"):
         rows = [tuple(r) for r in v.collect()]
         if rounded:
-            rows = [tuple(_rounded(x) for x in r) for r in rows]
+            rows = [_rounded(r) for r in rows]
         return {"columns": v.columns, "rows": sorted(repr(r) for r in rows)}
     if isinstance(v, list):
         return [_value(x, rounded) for x in v]
     if isinstance(v, float):
-        return _rounded(v) if rounded else round(v, 9)
-    if rounded and type(v).__name__ in _ML_VALUES:
-        return repr(_rounded(v))
-    return repr(v)
+        return _rounded(v) if rounded else v
+    return repr(_rounded(v) if rounded else v)
 
 
 class Recorder:
     """The results of the cases, by tag: of a case's value (see `_value`), or of its error. By
-    default (`rounded`), the floats of a DataFrame's rows and of an ML vector or matrix are rounded
-    as a bare float is (see `_rounded`), as the server computations of the cases differ in their
-    last bits between platforms; `rounded=False` records them as they are."""
+    default (`rounded`), each float of a case's value, wherever it is (in a DataFrame's rows, a
+    list, a tuple, a dict, a Row or an ML vector or matrix), is rounded to 9 decimals in absolute
+    terms (see `_rounded`), as the server computations of the cases differ in their last bits
+    between platforms: a float is recorded to the nearest 1e-9, so a difference below 5e-10 is
+    seen only when it straddles a rounding boundary, and 1e-10 is recorded as 0.0.
+    `rounded=False` records every float exactly, as its repr."""
 
     def __init__(self, base=None, rounded=True):
         self.out = {}
@@ -553,7 +577,7 @@ def _kmeans_live(rec, model, df):
     rec("model_copy_seed", lambda: model.copy().getSeed() == hash("KMeans"))
     rec("model_getK", lambda: model.getK())
     rec("model_isSet_k", lambda: model.isSet("k"))
-    rec("clusterCenters", lambda: sorted(c.round(9).tolist() for c in model.clusterCenters()))
+    rec("clusterCenters", lambda: sorted(c.tolist() for c in model.clusterCenters()))
     rec("clusterCenters_type", lambda: type(model.clusterCenters()[0]).__name__)
     for a in ["numFeatures", "hasSummary"]:
         rec(a, lambda a=a: getattr(model, a))
@@ -769,7 +793,7 @@ def _tuning_frame(spark):
 def _metrics(model, name):
     """The metrics of a validator's model, and the type of each."""
     metrics = model.avgMetrics if name == "CrossValidator" else model.validationMetrics
-    return [round(m, 9) for m in metrics], sorted({type(m).__name__ for m in metrics})
+    return list(metrics), sorted({type(m).__name__ for m in metrics})
 
 
 def _validator_live_cases(rec, spark, base, name):
