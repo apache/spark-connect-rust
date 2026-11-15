@@ -1,0 +1,3315 @@
+{
+ "models": {
+  "AFTSurvivalRegressionModel": {
+   "copy": [
+    "ok",
+    "'AFTSurvivalRegressionModel'"
+   ],
+   "explainParams": "ok",
+   "extractParamMap": [
+    "ok",
+    "10"
+   ],
+   "params": {
+    "aggregationDepth": [
+     false,
+     true,
+     "2"
+    ],
+    "censorCol": [
+     false,
+     true,
+     "'censor'"
+    ],
+    "featuresCol": [
+     false,
+     true,
+     "'features'"
+    ],
+    "fitIntercept": [
+     false,
+     true,
+     "True"
+    ],
+    "labelCol": [
+     false,
+     true,
+     "'label'"
+    ],
+    "maxBlockSizeInMB": [
+     false,
+     true,
+     "0.0"
+    ],
+    "maxIter": [
+     false,
+     true,
+     "100"
+    ],
+    "predictionCol": [
+     false,
+     true,
+     "'prediction'"
+    ],
+    "quantileProbabilities": [
+     false,
+     true,
+     "[0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99]"
+    ],
+    "quantilesCol": [
+     false,
+     false,
+     null
+    ],
+    "tol": [
+     false,
+     true,
+     "1e-06"
+    ]
+   },
+   "params_walk": "ok",
+   "repr": [
+    "AssertionError",
+    ""
+   ],
+   "save": "AssertionError",
+   "transform": "AssertionError",
+   "uid": [
+    true,
+    13
+   ],
+   "write": "ok"
+  },
+  "ALSModel": {
+   "copy": [
+    "ok",
+    "'ALSModel'"
+   ],
+   "explainParams": "ok",
+   "extractParamMap": [
+    "ok",
+    "2"
+   ],
+   "params": {
+    "blockSize": [
+     false,
+     true,
+     "4096"
+    ],
+    "coldStartStrategy": [
+     false,
+     false,
+     null
+    ],
+    "itemCol": [
+     false,
+     false,
+     null
+    ],
+    "predictionCol": [
+     false,
+     true,
+     "'prediction'"
+    ],
+    "userCol": [
+     false,
+     false,
+     null
+    ]
+   },
+   "params_walk": "ok",
+   "repr": [
+    "AssertionError",
+    ""
+   ],
+   "save": "AssertionError",
+   "transform": "AssertionError",
+   "uid": [
+    true,
+    13
+   ],
+   "write": "ok"
+  },
+  "BisectingKMeansModel": {
+   "copy": [
+    "ok",
+    "'BisectingKMeansModel'"
+   ],
+   "explainParams": "ok",
+   "extractParamMap": [
+    "ok",
+    "7"
+   ],
+   "params": {
+    "distanceMeasure": [
+     false,
+     true,
+     "'euclidean'"
+    ],
+    "featuresCol": [
+     false,
+     true,
+     "'features'"
+    ],
+    "k": [
+     false,
+     true,
+     "4"
+    ],
+    "maxIter": [
+     false,
+     true,
+     "20"
+    ],
+    "minDivisibleClusterSize": [
+     false,
+     true,
+     "1.0"
+    ],
+    "predictionCol": [
+     false,
+     true,
+     "'prediction'"
+    ],
+    "seed": [
+     false,
+     true,
+     "hash"
+    ],
+    "weightCol": [
+     false,
+     false,
+     null
+    ]
+   },
+   "params_walk": "ok",
+   "repr": [
+    "AssertionError",
+    ""
+   ],
+   "save": "AssertionError",
+   "transform": "AssertionError",
+   "uid": [
+    true,
+    13
+   ],
+   "write": "ok"
+  },
+  "BucketedRandomProjectionLSHModel": {
+   "copy": [
+    "ok",
+    "'BucketedRandomProjectionLSHModel'"
+   ],
+   "explainParams": "ok",
+   "extractParamMap": [
+    "ok",
+    "2"
+   ],
+   "params": {
+    "bucketLength": [
+     false,
+     false,
+     null
+    ],
+    "inputCol": [
+     false,
+     false,
+     null
+    ],
+    "numHashTables": [
+     false,
+     true,
+     "1"
+    ],
+    "outputCol": [
+     false,
+     true,
+     "'uid__output'"
+    ]
+   },
+   "params_walk": "ok",
+   "repr": [
+    "AssertionError",
+    ""
+   ],
+   "save": "AssertionError",
+   "transform": "AssertionError",
+   "uid": [
+    true,
+    13
+   ],
+   "write": "ok"
+  },
+  "ChiSqSelectorModel": {
+   "copy": [
+    "ok",
+    "'ChiSqSelectorModel'"
+   ],
+   "explainParams": "ok",
+   "extractParamMap": [
+    "ok",
+    "9"
+   ],
+   "params": {
+    "fdr": [
+     false,
+     true,
+     "0.05"
+    ],
+    "featuresCol": [
+     false,
+     true,
+     "'features'"
+    ],
+    "fpr": [
+     false,
+     true,
+     "0.05"
+    ],
+    "fwe": [
+     false,
+     true,
+     "0.05"
+    ],
+    "labelCol": [
+     false,
+     true,
+     "'label'"
+    ],
+    "numTopFeatures": [
+     false,
+     true,
+     "50"
+    ],
+    "outputCol": [
+     false,
+     true,
+     "'uid__output'"
+    ],
+    "percentile": [
+     false,
+     true,
+     "0.1"
+    ],
+    "selectorType": [
+     false,
+     true,
+     "'numTopFeatures'"
+    ]
+   },
+   "params_walk": "ok",
+   "repr": [
+    "AssertionError",
+    ""
+   ],
+   "save": "AssertionError",
+   "transform": "AssertionError",
+   "uid": [
+    true,
+    13
+   ],
+   "write": "ok"
+  },
+  "CountVectorizerModel": {
+   "copy": [
+    "ok",
+    "'CountVectorizerModel'"
+   ],
+   "explainParams": "ok",
+   "extractParamMap": [
+    "ok",
+    "6"
+   ],
+   "params": {
+    "binary": [
+     false,
+     true,
+     "False"
+    ],
+    "inputCol": [
+     false,
+     false,
+     null
+    ],
+    "maxDF": [
+     false,
+     true,
+     "9.223372036854776e+18"
+    ],
+    "minDF": [
+     false,
+     true,
+     "1.0"
+    ],
+    "minTF": [
+     false,
+     true,
+     "1.0"
+    ],
+    "outputCol": [
+     false,
+     true,
+     "'uid__output'"
+    ],
+    "vocabSize": [
+     false,
+     true,
+     "262144"
+    ]
+   },
+   "params_walk": "ok",
+   "repr": [
+    "AssertionError",
+    ""
+   ],
+   "save": "AssertionError",
+   "transform": "AssertionError",
+   "uid": [
+    true,
+    13
+   ],
+   "write": "ok"
+  },
+  "DecisionTreeClassificationModel": {
+   "copy": [
+    "ok",
+    "'DecisionTreeClassificationModel'"
+   ],
+   "explainParams": "ok",
+   "extractParamMap": [
+    "ok",
+    "17"
+   ],
+   "params": {
+    "cacheNodeIds": [
+     false,
+     true,
+     "False"
+    ],
+    "checkpointInterval": [
+     false,
+     true,
+     "10"
+    ],
+    "featuresCol": [
+     false,
+     true,
+     "'features'"
+    ],
+    "impurity": [
+     false,
+     true,
+     "'gini'"
+    ],
+    "labelCol": [
+     false,
+     true,
+     "'label'"
+    ],
+    "leafCol": [
+     false,
+     true,
+     "''"
+    ],
+    "maxBins": [
+     false,
+     true,
+     "32"
+    ],
+    "maxDepth": [
+     false,
+     true,
+     "5"
+    ],
+    "maxMemoryInMB": [
+     false,
+     true,
+     "256"
+    ],
+    "minInfoGain": [
+     false,
+     true,
+     "0.0"
+    ],
+    "minInstancesPerNode": [
+     false,
+     true,
+     "1"
+    ],
+    "minWeightFractionPerNode": [
+     false,
+     true,
+     "0.0"
+    ],
+    "predictionCol": [
+     false,
+     true,
+     "'prediction'"
+    ],
+    "probabilityCol": [
+     false,
+     true,
+     "'probability'"
+    ],
+    "pruneTree": [
+     false,
+     true,
+     "True"
+    ],
+    "rawPredictionCol": [
+     false,
+     true,
+     "'rawPrediction'"
+    ],
+    "seed": [
+     false,
+     true,
+     "hash"
+    ],
+    "thresholds": [
+     false,
+     false,
+     null
+    ],
+    "weightCol": [
+     false,
+     false,
+     null
+    ]
+   },
+   "params_walk": "ok",
+   "repr": [
+    "AssertionError",
+    ""
+   ],
+   "save": "AssertionError",
+   "transform": "AssertionError",
+   "uid": [
+    true,
+    13
+   ],
+   "write": "ok"
+  },
+  "DecisionTreeRegressionModel": {
+   "copy": [
+    "ok",
+    "'DecisionTreeRegressionModel'"
+   ],
+   "explainParams": "ok",
+   "extractParamMap": [
+    "ok",
+    "14"
+   ],
+   "params": {
+    "cacheNodeIds": [
+     false,
+     true,
+     "False"
+    ],
+    "checkpointInterval": [
+     false,
+     true,
+     "10"
+    ],
+    "featuresCol": [
+     false,
+     true,
+     "'features'"
+    ],
+    "impurity": [
+     false,
+     true,
+     "'variance'"
+    ],
+    "labelCol": [
+     false,
+     true,
+     "'label'"
+    ],
+    "leafCol": [
+     false,
+     true,
+     "''"
+    ],
+    "maxBins": [
+     false,
+     true,
+     "32"
+    ],
+    "maxDepth": [
+     false,
+     true,
+     "5"
+    ],
+    "maxMemoryInMB": [
+     false,
+     true,
+     "256"
+    ],
+    "minInfoGain": [
+     false,
+     true,
+     "0.0"
+    ],
+    "minInstancesPerNode": [
+     false,
+     true,
+     "1"
+    ],
+    "minWeightFractionPerNode": [
+     false,
+     true,
+     "0.0"
+    ],
+    "predictionCol": [
+     false,
+     true,
+     "'prediction'"
+    ],
+    "seed": [
+     false,
+     true,
+     "hash"
+    ],
+    "varianceCol": [
+     false,
+     false,
+     null
+    ],
+    "weightCol": [
+     false,
+     false,
+     null
+    ]
+   },
+   "params_walk": "ok",
+   "repr": [
+    "AssertionError",
+    ""
+   ],
+   "save": "AssertionError",
+   "transform": "AssertionError",
+   "uid": [
+    true,
+    13
+   ],
+   "write": "ok"
+  },
+  "DistributedLDAModel": {
+   "copy": [
+    "ok",
+    "'DistributedLDAModel'"
+   ],
+   "explainParams": "ok",
+   "extractParamMap": [
+    "ok",
+    "12"
+   ],
+   "params": {
+    "checkpointInterval": [
+     false,
+     true,
+     "10"
+    ],
+    "docConcentration": [
+     false,
+     false,
+     null
+    ],
+    "featuresCol": [
+     false,
+     true,
+     "'features'"
+    ],
+    "k": [
+     false,
+     true,
+     "10"
+    ],
+    "keepLastCheckpoint": [
+     false,
+     true,
+     "True"
+    ],
+    "learningDecay": [
+     false,
+     true,
+     "0.51"
+    ],
+    "learningOffset": [
+     false,
+     true,
+     "1024.0"
+    ],
+    "maxIter": [
+     false,
+     true,
+     "20"
+    ],
+    "optimizeDocConcentration": [
+     false,
+     true,
+     "True"
+    ],
+    "optimizer": [
+     false,
+     true,
+     "'online'"
+    ],
+    "seed": [
+     false,
+     true,
+     "hash"
+    ],
+    "subsamplingRate": [
+     false,
+     true,
+     "0.05"
+    ],
+    "topicConcentration": [
+     false,
+     false,
+     null
+    ],
+    "topicDistributionCol": [
+     false,
+     true,
+     "'topicDistribution'"
+    ]
+   },
+   "params_walk": "ok",
+   "repr": [
+    "AssertionError",
+    ""
+   ],
+   "save": "AssertionError",
+   "transform": "AssertionError",
+   "uid": [
+    true,
+    13
+   ],
+   "write": "ok"
+  },
+  "FMClassificationModel": {
+   "copy": [
+    "ok",
+    "'FMClassificationModel'"
+   ],
+   "explainParams": "ok",
+   "extractParamMap": [
+    "ok",
+    "16"
+   ],
+   "params": {
+    "factorSize": [
+     false,
+     true,
+     "8"
+    ],
+    "featuresCol": [
+     false,
+     true,
+     "'features'"
+    ],
+    "fitIntercept": [
+     false,
+     true,
+     "True"
+    ],
+    "fitLinear": [
+     false,
+     true,
+     "True"
+    ],
+    "initStd": [
+     false,
+     true,
+     "0.01"
+    ],
+    "labelCol": [
+     false,
+     true,
+     "'label'"
+    ],
+    "maxIter": [
+     false,
+     true,
+     "100"
+    ],
+    "miniBatchFraction": [
+     false,
+     true,
+     "1.0"
+    ],
+    "predictionCol": [
+     false,
+     true,
+     "'prediction'"
+    ],
+    "probabilityCol": [
+     false,
+     true,
+     "'probability'"
+    ],
+    "rawPredictionCol": [
+     false,
+     true,
+     "'rawPrediction'"
+    ],
+    "regParam": [
+     false,
+     true,
+     "0.0"
+    ],
+    "seed": [
+     false,
+     true,
+     "hash"
+    ],
+    "solver": [
+     false,
+     true,
+     "'adamW'"
+    ],
+    "stepSize": [
+     false,
+     true,
+     "1.0"
+    ],
+    "thresholds": [
+     false,
+     false,
+     null
+    ],
+    "tol": [
+     false,
+     true,
+     "1e-06"
+    ],
+    "weightCol": [
+     false,
+     false,
+     null
+    ]
+   },
+   "params_walk": "ok",
+   "repr": [
+    "AssertionError",
+    ""
+   ],
+   "save": "AssertionError",
+   "transform": "AssertionError",
+   "uid": [
+    true,
+    13
+   ],
+   "write": "ok"
+  },
+  "FMRegressionModel": {
+   "copy": [
+    "ok",
+    "'FMRegressionModel'"
+   ],
+   "explainParams": "ok",
+   "extractParamMap": [
+    "ok",
+    "14"
+   ],
+   "params": {
+    "factorSize": [
+     false,
+     true,
+     "8"
+    ],
+    "featuresCol": [
+     false,
+     true,
+     "'features'"
+    ],
+    "fitIntercept": [
+     false,
+     true,
+     "True"
+    ],
+    "fitLinear": [
+     false,
+     true,
+     "True"
+    ],
+    "initStd": [
+     false,
+     true,
+     "0.01"
+    ],
+    "labelCol": [
+     false,
+     true,
+     "'label'"
+    ],
+    "maxIter": [
+     false,
+     true,
+     "100"
+    ],
+    "miniBatchFraction": [
+     false,
+     true,
+     "1.0"
+    ],
+    "predictionCol": [
+     false,
+     true,
+     "'prediction'"
+    ],
+    "regParam": [
+     false,
+     true,
+     "0.0"
+    ],
+    "seed": [
+     false,
+     true,
+     "hash"
+    ],
+    "solver": [
+     false,
+     true,
+     "'adamW'"
+    ],
+    "stepSize": [
+     false,
+     true,
+     "1.0"
+    ],
+    "tol": [
+     false,
+     true,
+     "1e-06"
+    ],
+    "weightCol": [
+     false,
+     false,
+     null
+    ]
+   },
+   "params_walk": "ok",
+   "repr": [
+    "AssertionError",
+    ""
+   ],
+   "save": "AssertionError",
+   "transform": "AssertionError",
+   "uid": [
+    true,
+    13
+   ],
+   "write": "ok"
+  },
+  "FPGrowthModel": {
+   "copy": [
+    "ok",
+    "'FPGrowthModel'"
+   ],
+   "explainParams": "ok",
+   "extractParamMap": [
+    "ok",
+    "4"
+   ],
+   "params": {
+    "itemsCol": [
+     false,
+     true,
+     "'items'"
+    ],
+    "minConfidence": [
+     false,
+     true,
+     "0.8"
+    ],
+    "minSupport": [
+     false,
+     true,
+     "0.3"
+    ],
+    "numPartitions": [
+     false,
+     false,
+     null
+    ],
+    "predictionCol": [
+     false,
+     true,
+     "'prediction'"
+    ]
+   },
+   "params_walk": "ok",
+   "repr": [
+    "AssertionError",
+    ""
+   ],
+   "save": "AssertionError",
+   "transform": "AssertionError",
+   "uid": [
+    true,
+    13
+   ],
+   "write": "ok"
+  },
+  "GBTClassificationModel": {
+   "copy": [
+    "AssertionError",
+    ""
+   ],
+   "explainParams": "AssertionError",
+   "extractParamMap": [
+    "ok",
+    "22"
+   ],
+   "params": {
+    "cacheNodeIds": [
+     false,
+     true,
+     "False"
+    ],
+    "checkpointInterval": [
+     false,
+     true,
+     "10"
+    ],
+    "featureSubsetStrategy": [
+     false,
+     true,
+     "'all'"
+    ],
+    "featuresCol": [
+     false,
+     true,
+     "'features'"
+    ],
+    "impurity": [
+     false,
+     true,
+     "'variance'"
+    ],
+    "labelCol": [
+     false,
+     true,
+     "'label'"
+    ],
+    "leafCol": [
+     false,
+     true,
+     "''"
+    ],
+    "lossType": [
+     false,
+     true,
+     "'logistic'"
+    ],
+    "maxBins": [
+     false,
+     true,
+     "32"
+    ],
+    "maxDepth": [
+     false,
+     true,
+     "5"
+    ],
+    "maxIter": [
+     false,
+     true,
+     "20"
+    ],
+    "maxMemoryInMB": [
+     false,
+     true,
+     "256"
+    ],
+    "minInfoGain": [
+     false,
+     true,
+     "0.0"
+    ],
+    "minInstancesPerNode": [
+     false,
+     true,
+     "1"
+    ],
+    "minWeightFractionPerNode": [
+     false,
+     true,
+     "0.0"
+    ],
+    "predictionCol": [
+     false,
+     true,
+     "'prediction'"
+    ],
+    "probabilityCol": [
+     false,
+     true,
+     "'probability'"
+    ],
+    "rawPredictionCol": [
+     false,
+     true,
+     "'rawPrediction'"
+    ],
+    "seed": [
+     false,
+     true,
+     "hash"
+    ],
+    "stepSize": [
+     false,
+     true,
+     "0.1"
+    ],
+    "subsamplingRate": [
+     false,
+     true,
+     "1.0"
+    ],
+    "thresholds": [
+     false,
+     false,
+     null
+    ],
+    "validationIndicatorCol": [
+     false,
+     false,
+     null
+    ],
+    "validationTol": [
+     false,
+     true,
+     "0.01"
+    ],
+    "weightCol": [
+     false,
+     false,
+     null
+    ]
+   },
+   "params_walk": "AssertionError",
+   "repr": [
+    "AssertionError",
+    ""
+   ],
+   "save": "AssertionError",
+   "transform": "AssertionError",
+   "uid": [
+    true,
+    13
+   ],
+   "write": "ok"
+  },
+  "GBTRegressionModel": {
+   "copy": [
+    "AssertionError",
+    ""
+   ],
+   "explainParams": "AssertionError",
+   "extractParamMap": [
+    "ok",
+    "20"
+   ],
+   "params": {
+    "cacheNodeIds": [
+     false,
+     true,
+     "False"
+    ],
+    "checkpointInterval": [
+     false,
+     true,
+     "10"
+    ],
+    "featureSubsetStrategy": [
+     false,
+     true,
+     "'all'"
+    ],
+    "featuresCol": [
+     false,
+     true,
+     "'features'"
+    ],
+    "impurity": [
+     false,
+     true,
+     "'variance'"
+    ],
+    "labelCol": [
+     false,
+     true,
+     "'label'"
+    ],
+    "leafCol": [
+     false,
+     true,
+     "''"
+    ],
+    "lossType": [
+     false,
+     true,
+     "'squared'"
+    ],
+    "maxBins": [
+     false,
+     true,
+     "32"
+    ],
+    "maxDepth": [
+     false,
+     true,
+     "5"
+    ],
+    "maxIter": [
+     false,
+     true,
+     "20"
+    ],
+    "maxMemoryInMB": [
+     false,
+     true,
+     "256"
+    ],
+    "minInfoGain": [
+     false,
+     true,
+     "0.0"
+    ],
+    "minInstancesPerNode": [
+     false,
+     true,
+     "1"
+    ],
+    "minWeightFractionPerNode": [
+     false,
+     true,
+     "0.0"
+    ],
+    "predictionCol": [
+     false,
+     true,
+     "'prediction'"
+    ],
+    "seed": [
+     false,
+     true,
+     "hash"
+    ],
+    "stepSize": [
+     false,
+     true,
+     "0.1"
+    ],
+    "subsamplingRate": [
+     false,
+     true,
+     "1.0"
+    ],
+    "validationIndicatorCol": [
+     false,
+     false,
+     null
+    ],
+    "validationTol": [
+     false,
+     true,
+     "0.01"
+    ],
+    "weightCol": [
+     false,
+     false,
+     null
+    ]
+   },
+   "params_walk": "AssertionError",
+   "repr": [
+    "AssertionError",
+    ""
+   ],
+   "save": "AssertionError",
+   "transform": "AssertionError",
+   "uid": [
+    true,
+    13
+   ],
+   "write": "ok"
+  },
+  "GaussianMixtureModel": {
+   "copy": [
+    "ok",
+    "'GaussianMixtureModel'"
+   ],
+   "explainParams": "ok",
+   "extractParamMap": [
+    "ok",
+    "8"
+   ],
+   "params": {
+    "aggregationDepth": [
+     false,
+     true,
+     "2"
+    ],
+    "featuresCol": [
+     false,
+     true,
+     "'features'"
+    ],
+    "k": [
+     false,
+     true,
+     "2"
+    ],
+    "maxIter": [
+     false,
+     true,
+     "100"
+    ],
+    "predictionCol": [
+     false,
+     true,
+     "'prediction'"
+    ],
+    "probabilityCol": [
+     false,
+     true,
+     "'probability'"
+    ],
+    "seed": [
+     false,
+     true,
+     "hash"
+    ],
+    "tol": [
+     false,
+     true,
+     "0.01"
+    ],
+    "weightCol": [
+     false,
+     false,
+     null
+    ]
+   },
+   "params_walk": "ok",
+   "repr": [
+    "AssertionError",
+    ""
+   ],
+   "save": "AssertionError",
+   "transform": "AssertionError",
+   "uid": [
+    true,
+    13
+   ],
+   "write": "ok"
+  },
+  "GeneralizedLinearRegressionModel": {
+   "copy": [
+    "ok",
+    "'GeneralizedLinearRegressionModel'"
+   ],
+   "explainParams": "ok",
+   "extractParamMap": [
+    "ok",
+    "11"
+   ],
+   "params": {
+    "aggregationDepth": [
+     false,
+     true,
+     "2"
+    ],
+    "family": [
+     false,
+     true,
+     "'gaussian'"
+    ],
+    "featuresCol": [
+     false,
+     true,
+     "'features'"
+    ],
+    "fitIntercept": [
+     false,
+     true,
+     "True"
+    ],
+    "labelCol": [
+     false,
+     true,
+     "'label'"
+    ],
+    "link": [
+     false,
+     false,
+     null
+    ],
+    "linkPower": [
+     false,
+     false,
+     null
+    ],
+    "linkPredictionCol": [
+     false,
+     false,
+     null
+    ],
+    "maxIter": [
+     false,
+     true,
+     "25"
+    ],
+    "offsetCol": [
+     false,
+     false,
+     null
+    ],
+    "predictionCol": [
+     false,
+     true,
+     "'prediction'"
+    ],
+    "regParam": [
+     false,
+     true,
+     "0.0"
+    ],
+    "solver": [
+     false,
+     true,
+     "'irls'"
+    ],
+    "tol": [
+     false,
+     true,
+     "1e-06"
+    ],
+    "variancePower": [
+     false,
+     true,
+     "0.0"
+    ],
+    "weightCol": [
+     false,
+     false,
+     null
+    ]
+   },
+   "params_walk": "ok",
+   "repr": [
+    "AssertionError",
+    ""
+   ],
+   "save": "AssertionError",
+   "transform": "AssertionError",
+   "uid": [
+    true,
+    13
+   ],
+   "write": "ok"
+  },
+  "IDFModel": {
+   "copy": [
+    "ok",
+    "'IDFModel'"
+   ],
+   "explainParams": "ok",
+   "extractParamMap": [
+    "ok",
+    "2"
+   ],
+   "params": {
+    "inputCol": [
+     false,
+     false,
+     null
+    ],
+    "minDocFreq": [
+     false,
+     true,
+     "0"
+    ],
+    "outputCol": [
+     false,
+     true,
+     "'uid__output'"
+    ]
+   },
+   "params_walk": "ok",
+   "repr": [
+    "AssertionError",
+    ""
+   ],
+   "save": "AssertionError",
+   "transform": "AssertionError",
+   "uid": [
+    true,
+    13
+   ],
+   "write": "ok"
+  },
+  "ImputerModel": {
+   "copy": [
+    "ok",
+    "'ImputerModel'"
+   ],
+   "explainParams": "ok",
+   "extractParamMap": [
+    "ok",
+    "4"
+   ],
+   "params": {
+    "inputCol": [
+     false,
+     false,
+     null
+    ],
+    "inputCols": [
+     false,
+     false,
+     null
+    ],
+    "missingValue": [
+     false,
+     true,
+     "nan"
+    ],
+    "outputCol": [
+     false,
+     true,
+     "'uid__output'"
+    ],
+    "outputCols": [
+     false,
+     false,
+     null
+    ],
+    "relativeError": [
+     false,
+     true,
+     "0.001"
+    ],
+    "strategy": [
+     false,
+     true,
+     "'mean'"
+    ]
+   },
+   "params_walk": "ok",
+   "repr": [
+    "AssertionError",
+    ""
+   ],
+   "save": "AssertionError",
+   "transform": "AssertionError",
+   "uid": [
+    true,
+    13
+   ],
+   "write": "ok"
+  },
+  "IsotonicRegressionModel": {
+   "copy": [
+    "ok",
+    "'IsotonicRegressionModel'"
+   ],
+   "explainParams": "ok",
+   "extractParamMap": [
+    "ok",
+    "5"
+   ],
+   "params": {
+    "featureIndex": [
+     false,
+     true,
+     "0"
+    ],
+    "featuresCol": [
+     false,
+     true,
+     "'features'"
+    ],
+    "isotonic": [
+     false,
+     true,
+     "True"
+    ],
+    "labelCol": [
+     false,
+     true,
+     "'label'"
+    ],
+    "predictionCol": [
+     false,
+     true,
+     "'prediction'"
+    ],
+    "weightCol": [
+     false,
+     false,
+     null
+    ]
+   },
+   "params_walk": "ok",
+   "repr": [
+    "AssertionError",
+    ""
+   ],
+   "save": "AssertionError",
+   "transform": "AssertionError",
+   "uid": [
+    true,
+    13
+   ],
+   "write": "ok"
+  },
+  "KMeansModel": {
+   "copy": [
+    "ok",
+    "'KMeansModel'"
+   ],
+   "explainParams": "ok",
+   "extractParamMap": [
+    "ok",
+    "12"
+   ],
+   "params": {
+    "distanceMeasure": [
+     false,
+     true,
+     "'euclidean'"
+    ],
+    "featuresCol": [
+     false,
+     true,
+     "'features'"
+    ],
+    "initMode": [
+     false,
+     true,
+     "'k-means||'"
+    ],
+    "initSteps": [
+     false,
+     true,
+     "2"
+    ],
+    "intermediateStorageLevel": [
+     false,
+     true,
+     "'MEMORY_AND_DISK'"
+    ],
+    "k": [
+     false,
+     true,
+     "2"
+    ],
+    "maxBlockSizeInMB": [
+     false,
+     true,
+     "0.0"
+    ],
+    "maxIter": [
+     false,
+     true,
+     "20"
+    ],
+    "predictionCol": [
+     false,
+     true,
+     "'prediction'"
+    ],
+    "seed": [
+     false,
+     true,
+     "hash"
+    ],
+    "solver": [
+     false,
+     true,
+     "'auto'"
+    ],
+    "tol": [
+     false,
+     true,
+     "0.0001"
+    ],
+    "weightCol": [
+     false,
+     false,
+     null
+    ]
+   },
+   "params_walk": "ok",
+   "repr": [
+    "AssertionError",
+    ""
+   ],
+   "save": "AssertionError",
+   "transform": "AssertionError",
+   "uid": [
+    true,
+    13
+   ],
+   "write": "ok"
+  },
+  "LDAModel": {
+   "copy": [
+    "ok",
+    "'LDAModel'"
+   ],
+   "explainParams": "ok",
+   "extractParamMap": [
+    "ok",
+    "12"
+   ],
+   "params": {
+    "checkpointInterval": [
+     false,
+     true,
+     "10"
+    ],
+    "docConcentration": [
+     false,
+     false,
+     null
+    ],
+    "featuresCol": [
+     false,
+     true,
+     "'features'"
+    ],
+    "k": [
+     false,
+     true,
+     "10"
+    ],
+    "keepLastCheckpoint": [
+     false,
+     true,
+     "True"
+    ],
+    "learningDecay": [
+     false,
+     true,
+     "0.51"
+    ],
+    "learningOffset": [
+     false,
+     true,
+     "1024.0"
+    ],
+    "maxIter": [
+     false,
+     true,
+     "20"
+    ],
+    "optimizeDocConcentration": [
+     false,
+     true,
+     "True"
+    ],
+    "optimizer": [
+     false,
+     true,
+     "'online'"
+    ],
+    "seed": [
+     false,
+     true,
+     "hash"
+    ],
+    "subsamplingRate": [
+     false,
+     true,
+     "0.05"
+    ],
+    "topicConcentration": [
+     false,
+     false,
+     null
+    ],
+    "topicDistributionCol": [
+     false,
+     true,
+     "'topicDistribution'"
+    ]
+   },
+   "params_walk": "ok",
+   "repr": [
+    "AssertionError",
+    ""
+   ],
+   "save": null,
+   "transform": "AssertionError",
+   "uid": [
+    true,
+    13
+   ],
+   "write": null
+  },
+  "LinearRegressionModel": {
+   "copy": [
+    "ok",
+    "'LinearRegressionModel'"
+   ],
+   "explainParams": "ok",
+   "extractParamMap": [
+    "ok",
+    "14"
+   ],
+   "params": {
+    "aggregationDepth": [
+     false,
+     true,
+     "2"
+    ],
+    "elasticNetParam": [
+     false,
+     true,
+     "0.0"
+    ],
+    "epsilon": [
+     false,
+     true,
+     "1.35"
+    ],
+    "featuresCol": [
+     false,
+     true,
+     "'features'"
+    ],
+    "fitIntercept": [
+     false,
+     true,
+     "True"
+    ],
+    "labelCol": [
+     false,
+     true,
+     "'label'"
+    ],
+    "loss": [
+     false,
+     true,
+     "'squaredError'"
+    ],
+    "maxBlockSizeInMB": [
+     false,
+     true,
+     "0.0"
+    ],
+    "maxIter": [
+     false,
+     true,
+     "100"
+    ],
+    "predictionCol": [
+     false,
+     true,
+     "'prediction'"
+    ],
+    "regParam": [
+     false,
+     true,
+     "0.0"
+    ],
+    "solver": [
+     false,
+     true,
+     "'auto'"
+    ],
+    "standardization": [
+     false,
+     true,
+     "True"
+    ],
+    "tol": [
+     false,
+     true,
+     "1e-06"
+    ],
+    "weightCol": [
+     false,
+     false,
+     null
+    ]
+   },
+   "params_walk": "ok",
+   "repr": [
+    "AssertionError",
+    ""
+   ],
+   "save": "AssertionError",
+   "transform": "AssertionError",
+   "uid": [
+    true,
+    13
+   ],
+   "write": "ok"
+  },
+  "LinearSVCModel": {
+   "copy": [
+    "ok",
+    "'LinearSVCModel'"
+   ],
+   "explainParams": "ok",
+   "extractParamMap": [
+    "ok",
+    "12"
+   ],
+   "params": {
+    "aggregationDepth": [
+     false,
+     true,
+     "2"
+    ],
+    "featuresCol": [
+     false,
+     true,
+     "'features'"
+    ],
+    "fitIntercept": [
+     false,
+     true,
+     "True"
+    ],
+    "labelCol": [
+     false,
+     true,
+     "'label'"
+    ],
+    "maxBlockSizeInMB": [
+     false,
+     true,
+     "0.0"
+    ],
+    "maxIter": [
+     false,
+     true,
+     "100"
+    ],
+    "predictionCol": [
+     false,
+     true,
+     "'prediction'"
+    ],
+    "rawPredictionCol": [
+     false,
+     true,
+     "'rawPrediction'"
+    ],
+    "regParam": [
+     false,
+     true,
+     "0.0"
+    ],
+    "standardization": [
+     false,
+     true,
+     "True"
+    ],
+    "threshold": [
+     false,
+     true,
+     "0.0"
+    ],
+    "tol": [
+     false,
+     true,
+     "1e-06"
+    ],
+    "weightCol": [
+     false,
+     false,
+     null
+    ]
+   },
+   "params_walk": "ok",
+   "repr": [
+    "AssertionError",
+    ""
+   ],
+   "save": "AssertionError",
+   "transform": "AssertionError",
+   "uid": [
+    true,
+    13
+   ],
+   "write": "ok"
+  },
+  "LocalLDAModel": {
+   "copy": [
+    "ok",
+    "'LocalLDAModel'"
+   ],
+   "explainParams": "ok",
+   "extractParamMap": [
+    "ok",
+    "12"
+   ],
+   "params": {
+    "checkpointInterval": [
+     false,
+     true,
+     "10"
+    ],
+    "docConcentration": [
+     false,
+     false,
+     null
+    ],
+    "featuresCol": [
+     false,
+     true,
+     "'features'"
+    ],
+    "k": [
+     false,
+     true,
+     "10"
+    ],
+    "keepLastCheckpoint": [
+     false,
+     true,
+     "True"
+    ],
+    "learningDecay": [
+     false,
+     true,
+     "0.51"
+    ],
+    "learningOffset": [
+     false,
+     true,
+     "1024.0"
+    ],
+    "maxIter": [
+     false,
+     true,
+     "20"
+    ],
+    "optimizeDocConcentration": [
+     false,
+     true,
+     "True"
+    ],
+    "optimizer": [
+     false,
+     true,
+     "'online'"
+    ],
+    "seed": [
+     false,
+     true,
+     "hash"
+    ],
+    "subsamplingRate": [
+     false,
+     true,
+     "0.05"
+    ],
+    "topicConcentration": [
+     false,
+     false,
+     null
+    ],
+    "topicDistributionCol": [
+     false,
+     true,
+     "'topicDistribution'"
+    ]
+   },
+   "params_walk": "ok",
+   "repr": [
+    "AssertionError",
+    ""
+   ],
+   "save": "AssertionError",
+   "transform": "AssertionError",
+   "uid": [
+    true,
+    13
+   ],
+   "write": "ok"
+  },
+  "LogisticRegressionModel": {
+   "copy": [
+    "ok",
+    "'LogisticRegressionModel'"
+   ],
+   "explainParams": "ok",
+   "extractParamMap": [
+    "ok",
+    "15"
+   ],
+   "params": {
+    "aggregationDepth": [
+     false,
+     true,
+     "2"
+    ],
+    "elasticNetParam": [
+     false,
+     true,
+     "0.0"
+    ],
+    "family": [
+     false,
+     true,
+     "'auto'"
+    ],
+    "featuresCol": [
+     false,
+     true,
+     "'features'"
+    ],
+    "fitIntercept": [
+     false,
+     true,
+     "True"
+    ],
+    "labelCol": [
+     false,
+     true,
+     "'label'"
+    ],
+    "lowerBoundsOnCoefficients": [
+     false,
+     false,
+     null
+    ],
+    "lowerBoundsOnIntercepts": [
+     false,
+     false,
+     null
+    ],
+    "maxBlockSizeInMB": [
+     false,
+     true,
+     "0.0"
+    ],
+    "maxIter": [
+     false,
+     true,
+     "100"
+    ],
+    "predictionCol": [
+     false,
+     true,
+     "'prediction'"
+    ],
+    "probabilityCol": [
+     false,
+     true,
+     "'probability'"
+    ],
+    "rawPredictionCol": [
+     false,
+     true,
+     "'rawPrediction'"
+    ],
+    "regParam": [
+     false,
+     true,
+     "0.0"
+    ],
+    "standardization": [
+     false,
+     true,
+     "True"
+    ],
+    "threshold": [
+     false,
+     true,
+     "0.5"
+    ],
+    "thresholds": [
+     false,
+     false,
+     null
+    ],
+    "tol": [
+     false,
+     true,
+     "1e-06"
+    ],
+    "upperBoundsOnCoefficients": [
+     false,
+     false,
+     null
+    ],
+    "upperBoundsOnIntercepts": [
+     false,
+     false,
+     null
+    ],
+    "weightCol": [
+     false,
+     false,
+     null
+    ]
+   },
+   "params_walk": "ok",
+   "repr": [
+    "AssertionError",
+    ""
+   ],
+   "save": "AssertionError",
+   "transform": "AssertionError",
+   "uid": [
+    true,
+    13
+   ],
+   "write": "ok"
+  },
+  "MaxAbsScalerModel": {
+   "copy": [
+    "ok",
+    "'MaxAbsScalerModel'"
+   ],
+   "explainParams": "ok",
+   "extractParamMap": [
+    "ok",
+    "1"
+   ],
+   "params": {
+    "inputCol": [
+     false,
+     false,
+     null
+    ],
+    "outputCol": [
+     false,
+     true,
+     "'uid__output'"
+    ]
+   },
+   "params_walk": "ok",
+   "repr": [
+    "AssertionError",
+    ""
+   ],
+   "save": "AssertionError",
+   "transform": "AssertionError",
+   "uid": [
+    true,
+    13
+   ],
+   "write": "ok"
+  },
+  "MinHashLSHModel": {
+   "copy": [
+    "ok",
+    "'MinHashLSHModel'"
+   ],
+   "explainParams": "ok",
+   "extractParamMap": [
+    "ok",
+    "2"
+   ],
+   "params": {
+    "inputCol": [
+     false,
+     false,
+     null
+    ],
+    "numHashTables": [
+     false,
+     true,
+     "1"
+    ],
+    "outputCol": [
+     false,
+     true,
+     "'uid__output'"
+    ]
+   },
+   "params_walk": "ok",
+   "repr": [
+    "AssertionError",
+    ""
+   ],
+   "save": "AssertionError",
+   "transform": "AssertionError",
+   "uid": [
+    true,
+    13
+   ],
+   "write": "ok"
+  },
+  "MinMaxScalerModel": {
+   "copy": [
+    "ok",
+    "'MinMaxScalerModel'"
+   ],
+   "explainParams": "ok",
+   "extractParamMap": [
+    "ok",
+    "3"
+   ],
+   "params": {
+    "inputCol": [
+     false,
+     false,
+     null
+    ],
+    "max": [
+     false,
+     true,
+     "1.0"
+    ],
+    "min": [
+     false,
+     true,
+     "0.0"
+    ],
+    "outputCol": [
+     false,
+     true,
+     "'uid__output'"
+    ]
+   },
+   "params_walk": "ok",
+   "repr": [
+    "AssertionError",
+    ""
+   ],
+   "save": "AssertionError",
+   "transform": "AssertionError",
+   "uid": [
+    true,
+    13
+   ],
+   "write": "ok"
+  },
+  "MultilayerPerceptronClassificationModel": {
+   "copy": [
+    "ok",
+    "'MultilayerPerceptronClassificationModel'"
+   ],
+   "explainParams": "ok",
+   "extractParamMap": [
+    "ok",
+    "11"
+   ],
+   "params": {
+    "blockSize": [
+     false,
+     true,
+     "128"
+    ],
+    "featuresCol": [
+     false,
+     true,
+     "'features'"
+    ],
+    "initialWeights": [
+     false,
+     false,
+     null
+    ],
+    "labelCol": [
+     false,
+     true,
+     "'label'"
+    ],
+    "layers": [
+     false,
+     false,
+     null
+    ],
+    "maxIter": [
+     false,
+     true,
+     "100"
+    ],
+    "predictionCol": [
+     false,
+     true,
+     "'prediction'"
+    ],
+    "probabilityCol": [
+     false,
+     true,
+     "'probability'"
+    ],
+    "rawPredictionCol": [
+     false,
+     true,
+     "'rawPrediction'"
+    ],
+    "seed": [
+     false,
+     true,
+     "hash"
+    ],
+    "solver": [
+     false,
+     true,
+     "'l-bfgs'"
+    ],
+    "stepSize": [
+     false,
+     true,
+     "0.03"
+    ],
+    "thresholds": [
+     false,
+     false,
+     null
+    ],
+    "tol": [
+     false,
+     true,
+     "1e-06"
+    ]
+   },
+   "params_walk": "ok",
+   "repr": [
+    "AssertionError",
+    ""
+   ],
+   "save": "AssertionError",
+   "transform": "AssertionError",
+   "uid": [
+    true,
+    13
+   ],
+   "write": "ok"
+  },
+  "NaiveBayesModel": {
+   "copy": [
+    "ok",
+    "'NaiveBayesModel'"
+   ],
+   "explainParams": "ok",
+   "extractParamMap": [
+    "ok",
+    "7"
+   ],
+   "params": {
+    "featuresCol": [
+     false,
+     true,
+     "'features'"
+    ],
+    "labelCol": [
+     false,
+     true,
+     "'label'"
+    ],
+    "modelType": [
+     false,
+     true,
+     "'multinomial'"
+    ],
+    "predictionCol": [
+     false,
+     true,
+     "'prediction'"
+    ],
+    "probabilityCol": [
+     false,
+     true,
+     "'probability'"
+    ],
+    "rawPredictionCol": [
+     false,
+     true,
+     "'rawPrediction'"
+    ],
+    "smoothing": [
+     false,
+     true,
+     "1.0"
+    ],
+    "thresholds": [
+     false,
+     false,
+     null
+    ],
+    "weightCol": [
+     false,
+     false,
+     null
+    ]
+   },
+   "params_walk": "ok",
+   "repr": [
+    "AssertionError",
+    ""
+   ],
+   "save": "AssertionError",
+   "transform": "AssertionError",
+   "uid": [
+    true,
+    13
+   ],
+   "write": "ok"
+  },
+  "OneHotEncoderModel": {
+   "copy": [
+    "ok",
+    "'OneHotEncoderModel'"
+   ],
+   "explainParams": "ok",
+   "extractParamMap": [
+    "ok",
+    "3"
+   ],
+   "params": {
+    "dropLast": [
+     false,
+     true,
+     "True"
+    ],
+    "handleInvalid": [
+     false,
+     true,
+     "'error'"
+    ],
+    "inputCol": [
+     false,
+     false,
+     null
+    ],
+    "inputCols": [
+     false,
+     false,
+     null
+    ],
+    "outputCol": [
+     false,
+     true,
+     "'uid__output'"
+    ],
+    "outputCols": [
+     false,
+     false,
+     null
+    ]
+   },
+   "params_walk": "ok",
+   "repr": [
+    "AssertionError",
+    ""
+   ],
+   "save": "AssertionError",
+   "transform": "AssertionError",
+   "uid": [
+    true,
+    13
+   ],
+   "write": "ok"
+  },
+  "PCAModel": {
+   "copy": [
+    "ok",
+    "'PCAModel'"
+   ],
+   "explainParams": "ok",
+   "extractParamMap": [
+    "ok",
+    "1"
+   ],
+   "params": {
+    "inputCol": [
+     false,
+     false,
+     null
+    ],
+    "k": [
+     false,
+     false,
+     null
+    ],
+    "outputCol": [
+     false,
+     true,
+     "'uid__output'"
+    ]
+   },
+   "params_walk": "ok",
+   "repr": [
+    "AssertionError",
+    ""
+   ],
+   "save": "AssertionError",
+   "transform": "AssertionError",
+   "uid": [
+    true,
+    13
+   ],
+   "write": "ok"
+  },
+  "RFormulaModel": {
+   "copy": [
+    "ok",
+    "'RFormulaModel'"
+   ],
+   "explainParams": "ok",
+   "extractParamMap": [
+    "ok",
+    "5"
+   ],
+   "params": {
+    "featuresCol": [
+     false,
+     true,
+     "'features'"
+    ],
+    "forceIndexLabel": [
+     false,
+     true,
+     "False"
+    ],
+    "formula": [
+     false,
+     false,
+     null
+    ],
+    "handleInvalid": [
+     false,
+     true,
+     "'error'"
+    ],
+    "labelCol": [
+     false,
+     true,
+     "'label'"
+    ],
+    "stringIndexerOrderType": [
+     false,
+     true,
+     "'frequencyDesc'"
+    ]
+   },
+   "params_walk": "ok",
+   "repr": [
+    "AssertionError",
+    ""
+   ],
+   "save": "AssertionError",
+   "transform": "AssertionError",
+   "uid": [
+    true,
+    13
+   ],
+   "write": "ok"
+  },
+  "RandomForestClassificationModel": {
+   "copy": [
+    "AssertionError",
+    ""
+   ],
+   "explainParams": "AssertionError",
+   "extractParamMap": [
+    "ok",
+    "21"
+   ],
+   "params": {
+    "bootstrap": [
+     false,
+     true,
+     "True"
+    ],
+    "cacheNodeIds": [
+     false,
+     true,
+     "False"
+    ],
+    "checkpointInterval": [
+     false,
+     true,
+     "10"
+    ],
+    "featureSubsetStrategy": [
+     false,
+     true,
+     "'auto'"
+    ],
+    "featuresCol": [
+     false,
+     true,
+     "'features'"
+    ],
+    "impurity": [
+     false,
+     true,
+     "'gini'"
+    ],
+    "labelCol": [
+     false,
+     true,
+     "'label'"
+    ],
+    "leafCol": [
+     false,
+     true,
+     "''"
+    ],
+    "maxBins": [
+     false,
+     true,
+     "32"
+    ],
+    "maxDepth": [
+     false,
+     true,
+     "5"
+    ],
+    "maxMemoryInMB": [
+     false,
+     true,
+     "256"
+    ],
+    "minInfoGain": [
+     false,
+     true,
+     "0.0"
+    ],
+    "minInstancesPerNode": [
+     false,
+     true,
+     "1"
+    ],
+    "minWeightFractionPerNode": [
+     false,
+     true,
+     "0.0"
+    ],
+    "numTrees": [
+     false,
+     true,
+     "20"
+    ],
+    "predictionCol": [
+     false,
+     true,
+     "'prediction'"
+    ],
+    "probabilityCol": [
+     false,
+     true,
+     "'probability'"
+    ],
+    "pruneTree": [
+     false,
+     true,
+     "True"
+    ],
+    "rawPredictionCol": [
+     false,
+     true,
+     "'rawPrediction'"
+    ],
+    "seed": [
+     false,
+     true,
+     "hash"
+    ],
+    "subsamplingRate": [
+     false,
+     true,
+     "1.0"
+    ],
+    "thresholds": [
+     false,
+     false,
+     null
+    ],
+    "weightCol": [
+     false,
+     false,
+     null
+    ]
+   },
+   "params_walk": "AssertionError",
+   "repr": [
+    "AssertionError",
+    ""
+   ],
+   "save": "AssertionError",
+   "transform": "AssertionError",
+   "uid": [
+    true,
+    13
+   ],
+   "write": "ok"
+  },
+  "RandomForestRegressionModel": {
+   "copy": [
+    "AssertionError",
+    ""
+   ],
+   "explainParams": "AssertionError",
+   "extractParamMap": [
+    "ok",
+    "18"
+   ],
+   "params": {
+    "bootstrap": [
+     false,
+     true,
+     "True"
+    ],
+    "cacheNodeIds": [
+     false,
+     true,
+     "False"
+    ],
+    "checkpointInterval": [
+     false,
+     true,
+     "10"
+    ],
+    "featureSubsetStrategy": [
+     false,
+     true,
+     "'auto'"
+    ],
+    "featuresCol": [
+     false,
+     true,
+     "'features'"
+    ],
+    "impurity": [
+     false,
+     true,
+     "'variance'"
+    ],
+    "labelCol": [
+     false,
+     true,
+     "'label'"
+    ],
+    "leafCol": [
+     false,
+     true,
+     "''"
+    ],
+    "maxBins": [
+     false,
+     true,
+     "32"
+    ],
+    "maxDepth": [
+     false,
+     true,
+     "5"
+    ],
+    "maxMemoryInMB": [
+     false,
+     true,
+     "256"
+    ],
+    "minInfoGain": [
+     false,
+     true,
+     "0.0"
+    ],
+    "minInstancesPerNode": [
+     false,
+     true,
+     "1"
+    ],
+    "minWeightFractionPerNode": [
+     false,
+     true,
+     "0.0"
+    ],
+    "numTrees": [
+     false,
+     true,
+     "20"
+    ],
+    "predictionCol": [
+     false,
+     true,
+     "'prediction'"
+    ],
+    "seed": [
+     false,
+     true,
+     "hash"
+    ],
+    "subsamplingRate": [
+     false,
+     true,
+     "1.0"
+    ],
+    "weightCol": [
+     false,
+     false,
+     null
+    ]
+   },
+   "params_walk": "AssertionError",
+   "repr": [
+    "AssertionError",
+    ""
+   ],
+   "save": "AssertionError",
+   "transform": "AssertionError",
+   "uid": [
+    true,
+    13
+   ],
+   "write": "ok"
+  },
+  "RobustScalerModel": {
+   "copy": [
+    "ok",
+    "'RobustScalerModel'"
+   ],
+   "explainParams": "ok",
+   "extractParamMap": [
+    "ok",
+    "6"
+   ],
+   "params": {
+    "inputCol": [
+     false,
+     false,
+     null
+    ],
+    "lower": [
+     false,
+     true,
+     "0.25"
+    ],
+    "outputCol": [
+     false,
+     true,
+     "'uid__output'"
+    ],
+    "relativeError": [
+     false,
+     true,
+     "0.001"
+    ],
+    "upper": [
+     false,
+     true,
+     "0.75"
+    ],
+    "withCentering": [
+     false,
+     true,
+     "False"
+    ],
+    "withScaling": [
+     false,
+     true,
+     "True"
+    ]
+   },
+   "params_walk": "ok",
+   "repr": [
+    "AssertionError",
+    ""
+   ],
+   "save": "AssertionError",
+   "transform": "AssertionError",
+   "uid": [
+    true,
+    13
+   ],
+   "write": "ok"
+  },
+  "StandardScalerModel": {
+   "copy": [
+    "ok",
+    "'StandardScalerModel'"
+   ],
+   "explainParams": "ok",
+   "extractParamMap": [
+    "ok",
+    "3"
+   ],
+   "params": {
+    "inputCol": [
+     false,
+     false,
+     null
+    ],
+    "outputCol": [
+     false,
+     true,
+     "'uid__output'"
+    ],
+    "withMean": [
+     false,
+     true,
+     "False"
+    ],
+    "withStd": [
+     false,
+     true,
+     "True"
+    ]
+   },
+   "params_walk": "ok",
+   "repr": [
+    "AssertionError",
+    ""
+   ],
+   "save": "AssertionError",
+   "transform": "AssertionError",
+   "uid": [
+    true,
+    13
+   ],
+   "write": "ok"
+  },
+  "StringIndexerModel": {
+   "copy": [
+    "ok",
+    "'StringIndexerModel'"
+   ],
+   "explainParams": "ok",
+   "extractParamMap": [
+    "ok",
+    "3"
+   ],
+   "params": {
+    "handleInvalid": [
+     false,
+     true,
+     "'error'"
+    ],
+    "inputCol": [
+     false,
+     false,
+     null
+    ],
+    "inputCols": [
+     false,
+     false,
+     null
+    ],
+    "outputCol": [
+     false,
+     true,
+     "'uid__output'"
+    ],
+    "outputCols": [
+     false,
+     false,
+     null
+    ],
+    "stringOrderType": [
+     false,
+     true,
+     "'frequencyDesc'"
+    ]
+   },
+   "params_walk": "ok",
+   "repr": [
+    "AssertionError",
+    ""
+   ],
+   "save": "AssertionError",
+   "transform": "AssertionError",
+   "uid": [
+    true,
+    13
+   ],
+   "write": "ok"
+  },
+  "TargetEncoderModel": {
+   "copy": [
+    "ok",
+    "'TargetEncoderModel'"
+   ],
+   "explainParams": "ok",
+   "extractParamMap": [
+    "ok",
+    "5"
+   ],
+   "params": {
+    "handleInvalid": [
+     false,
+     true,
+     "'error'"
+    ],
+    "inputCol": [
+     false,
+     false,
+     null
+    ],
+    "inputCols": [
+     false,
+     false,
+     null
+    ],
+    "labelCol": [
+     false,
+     true,
+     "'label'"
+    ],
+    "outputCol": [
+     false,
+     true,
+     "'uid__output'"
+    ],
+    "outputCols": [
+     false,
+     false,
+     null
+    ],
+    "smoothing": [
+     false,
+     true,
+     "0.0"
+    ],
+    "targetType": [
+     false,
+     true,
+     "'binary'"
+    ]
+   },
+   "params_walk": "ok",
+   "repr": [
+    "AssertionError",
+    ""
+   ],
+   "save": "AssertionError",
+   "transform": "AssertionError",
+   "uid": [
+    true,
+    13
+   ],
+   "write": "ok"
+  },
+  "UnivariateFeatureSelectorModel": {
+   "copy": [
+    "ok",
+    "'UnivariateFeatureSelectorModel'"
+   ],
+   "explainParams": "ok",
+   "extractParamMap": [
+    "ok",
+    "4"
+   ],
+   "params": {
+    "featureType": [
+     false,
+     false,
+     null
+    ],
+    "featuresCol": [
+     false,
+     true,
+     "'features'"
+    ],
+    "labelCol": [
+     false,
+     true,
+     "'label'"
+    ],
+    "labelType": [
+     false,
+     false,
+     null
+    ],
+    "outputCol": [
+     false,
+     true,
+     "'uid__output'"
+    ],
+    "selectionMode": [
+     false,
+     true,
+     "'numTopFeatures'"
+    ],
+    "selectionThreshold": [
+     false,
+     false,
+     null
+    ]
+   },
+   "params_walk": "ok",
+   "repr": [
+    "AssertionError",
+    ""
+   ],
+   "save": "AssertionError",
+   "transform": "AssertionError",
+   "uid": [
+    true,
+    13
+   ],
+   "write": "ok"
+  },
+  "VarianceThresholdSelectorModel": {
+   "copy": [
+    "ok",
+    "'VarianceThresholdSelectorModel'"
+   ],
+   "explainParams": "ok",
+   "extractParamMap": [
+    "ok",
+    "2"
+   ],
+   "params": {
+    "featuresCol": [
+     false,
+     true,
+     "'features'"
+    ],
+    "outputCol": [
+     false,
+     true,
+     "'uid__output'"
+    ],
+    "varianceThreshold": [
+     false,
+     false,
+     null
+    ]
+   },
+   "params_walk": "ok",
+   "repr": [
+    "AssertionError",
+    ""
+   ],
+   "save": "AssertionError",
+   "transform": "AssertionError",
+   "uid": [
+    true,
+    13
+   ],
+   "write": "ok"
+  },
+  "VectorIndexerModel": {
+   "copy": [
+    "ok",
+    "'VectorIndexerModel'"
+   ],
+   "explainParams": "ok",
+   "extractParamMap": [
+    "ok",
+    "3"
+   ],
+   "params": {
+    "handleInvalid": [
+     false,
+     true,
+     "'error'"
+    ],
+    "inputCol": [
+     false,
+     false,
+     null
+    ],
+    "maxCategories": [
+     false,
+     true,
+     "20"
+    ],
+    "outputCol": [
+     false,
+     true,
+     "'uid__output'"
+    ]
+   },
+   "params_walk": "ok",
+   "repr": [
+    "AssertionError",
+    ""
+   ],
+   "save": "AssertionError",
+   "transform": "AssertionError",
+   "uid": [
+    true,
+    13
+   ],
+   "write": "ok"
+  },
+  "Word2VecModel": {
+   "copy": [
+    "ok",
+    "'Word2VecModel'"
+   ],
+   "explainParams": "ok",
+   "extractParamMap": [
+    "ok",
+    "9"
+   ],
+   "params": {
+    "inputCol": [
+     false,
+     false,
+     null
+    ],
+    "maxIter": [
+     false,
+     true,
+     "1"
+    ],
+    "maxSentenceLength": [
+     false,
+     true,
+     "1000"
+    ],
+    "minCount": [
+     false,
+     true,
+     "5"
+    ],
+    "numPartitions": [
+     false,
+     true,
+     "1"
+    ],
+    "outputCol": [
+     false,
+     true,
+     "'uid__output'"
+    ],
+    "seed": [
+     false,
+     true,
+     "hash"
+    ],
+    "stepSize": [
+     false,
+     true,
+     "0.025"
+    ],
+    "vectorSize": [
+     false,
+     true,
+     "100"
+    ],
+    "windowSize": [
+     false,
+     true,
+     "5"
+    ]
+   },
+   "params_walk": "ok",
+   "repr": [
+    "AssertionError",
+    ""
+   ],
+   "save": "AssertionError",
+   "transform": "AssertionError",
+   "uid": [
+    true,
+    13
+   ],
+   "write": "ok"
+  }
+ },
+ "source": "official pyspark-client 4.3.0, Spark 4.3.0"
+}

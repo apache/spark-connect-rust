@@ -566,6 +566,52 @@ pub(crate) fn py_default(text: &str) -> Py<PyAny> {
     })
 }
 
+/// The model of no server-side object, of PySpark's `JavaModel()` of no `java_model`: its operator
+/// (of a fresh uid) and its params, which the Params API reads and sets, and no object, of which
+/// the members of the server, a transform and a save raise the AssertionError of PySpark's
+/// (see [`ModelCore::unbound`]).
+#[derive(Clone)]
+struct UnboundModel {
+    operator: MlOperator,
+    params: Params,
+}
+
+impl Transformer for UnboundModel {
+    fn operator(&self) -> &MlOperator {
+        &self.operator
+    }
+
+    fn operator_mut(&mut self) -> &mut MlOperator {
+        &mut self.operator
+    }
+
+    fn params(&self) -> &Params {
+        &self.params
+    }
+
+    fn params_mut(&mut self) -> &mut Params {
+        &mut self.params
+    }
+
+    fn transform_impl(&mut self, _df: &DataFrame) -> spark_connect_core::error::Result<DataFrame> {
+        Err(spark_connect_core::error::SparkError::value_msg(
+            "the model has no server-side object",
+        ))
+    }
+}
+
+impl Model for UnboundModel {
+    fn clone_box(&self) -> Box<dyn Model> {
+        Box::new(self.clone())
+    }
+}
+
+/// The AssertionError of PySpark's `_call_java`, transform and save of a model of no server-side
+/// object (`assert self._java_obj` ...), bare.
+fn unbound_error() -> PyErr {
+    pyo3::exceptions::PyAssertionError::new_err(())
+}
+
 impl ModelCore {
     /// The model of a fit of `df`, whose training summary, if the class has one, is of the summary
     /// dataset of `summary`, as PySpark's `try_remote_fit` sets `_summary` (see
@@ -663,6 +709,34 @@ impl ModelCore {
             cache: Default::default(),
             method_cache: Default::default(),
         })
+    }
+
+    /// The model of no server-side object, as PySpark's `JavaModel(java_model=None)` makes one:
+    /// of the model's JVM class `jvm_class` and a new uid of the class `class`, of no set params,
+    /// and of the defaults that it derives from that uid (`outputCol`, see
+    /// [`params_api::uid_defaults_of`]). Its Params API, copy and write work, and the members of
+    /// the server, a transform and a save raise PySpark's bare AssertionError.
+    pub(super) fn unbound(py: Python<'_>, jvm_class: &str, class: &str) -> PyResult<Self> {
+        let uid = params_api::random_uid(py, class)?;
+        let operator = MlOperator::with_uid(jvm_class, &uid, OperatorType::Model);
+        Ok(Self {
+            model: Box::new(UnboundModel {
+                operator,
+                params: Params::new(),
+            }),
+            session_id: String::new(),
+            summary: None,
+            summary_object: std::sync::OnceLock::new(),
+            own_defaults: params_api::uid_defaults_of(py, class, &uid)?,
+            cache: Default::default(),
+            method_cache: Default::default(),
+        })
+    }
+
+    /// Whether the model is of no server-side object (see [`ModelCore::unbound`]).
+    fn is_unbound(&self) -> bool {
+        // The model, of its concrete type: `as_any` of the box would be of the box's own.
+        self.model.as_ref().as_any().is::<UnboundModel>()
     }
 
     pub(super) fn duplicate(&self, py: Python<'_>) -> Self {
@@ -764,6 +838,9 @@ impl ModelCore {
 
     /// The target of the methods of the model's object.
     pub(super) fn target(&self) -> PyResult<MlTarget> {
+        if self.is_unbound() {
+            return Err(unbound_error());
+        }
         self.model.model_target().to_pyerr()
     }
 
@@ -786,6 +863,11 @@ impl ModelCore {
     /// The transform of `df` by the model, of `df` as it is, as `try_remote_transform_relation` of
     /// `pyspark.ml` sends it (see `PyMLModel::transform_dataframe`).
     pub(super) fn transform(&self, py: Python<'_>, df: &DataFrame) -> PyResult<DataFrame> {
+        // As `try_remote_transform_relation`, which asserts the model's object before it
+        // serializes the params.
+        if self.is_unbound() {
+            return Err(unbound_error());
+        }
         if let Some(error) = self.serialization_error(py) {
             return Err(error);
         }
@@ -809,6 +891,13 @@ impl ModelCore {
 
     /// The writer of the model's object, of its params, as `RemoteMLWriter` writes a model.
     pub(super) fn writer(&self, py: Python<'_>) -> PyResult<PyMLWriter> {
+        // The writer of a model of no object, as PySpark's `RemoteMLWriter` of one, whose save
+        // raises the AssertionError.
+        if self.is_unbound() {
+            let operator = self.model.operator().clone();
+            let target = WriteTarget::Operator(operator, self.model.params().clone());
+            return Ok(PyMLWriter::new(target).with_error(Some(unbound_error())));
+        }
         let object = self
             .model
             .ml_ref()

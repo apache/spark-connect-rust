@@ -197,6 +197,15 @@ pub(super) trait ParamsHolder: PyClass<Frozen = False> {
         let _ = name;
         Ok(())
     }
+
+    /// The `params` walk of PySpark's `Params.params`, which `explainParams` and `copy` run too:
+    /// it reads every attribute of the object but its properties, so the members of
+    /// `functools.cached_property` of a model (`trees`), which a model of no server-side object
+    /// raises its AssertionError of.
+    fn walk(&self, py: Python<'_>) -> PyResult<()> {
+        let _ = py;
+        Ok(())
+    }
 }
 
 /// The defaults that an object holds itself, by param, where PySpark's `_defaultParamMap` has one
@@ -650,6 +659,18 @@ pub(super) fn random_uid(py: Python<'_>, class: &str) -> PyResult<String> {
 /// The defaults that an object of the class `class` derives from the uid that it is made of, as a
 /// loaded one keeps them after `_resetUid`: of a uid of [`random_uid`].
 pub(super) fn uid_defaults(py: Python<'_>, class: &str) -> PyResult<OwnDefaults> {
+    uid_defaults_with(py, class, None)
+}
+
+/// The defaults that an object of the class `class` of the uid `uid` derives from it, as PySpark's
+/// constructor sets them (`outputCol` of `HasOutputCol.__init__`, the uid and `__output`): of a
+/// model of no server-side object, whose uid is the one that it is made of.
+pub(super) fn uid_defaults_of(py: Python<'_>, class: &str, uid: &str) -> PyResult<OwnDefaults> {
+    uid_defaults_with(py, class, Some(uid))
+}
+
+/// The defaults of [`uid_defaults`] of a uid of [`random_uid`] for each, else of [`uid_defaults_of`].
+fn uid_defaults_with(py: Python<'_>, class: &str, uid: Option<&str>) -> PyResult<OwnDefaults> {
     let Some(params) = all_params().get(class) else {
         return Ok(Vec::new());
     };
@@ -663,7 +684,10 @@ pub(super) fn uid_defaults(py: Python<'_>, class: &str) -> PyResult<OwnDefaults>
         else {
             continue;
         };
-        let uid = random_uid(py, class)?;
+        let uid = match uid {
+            Some(uid) => uid.to_string(),
+            None => random_uid(py, class)?,
+        };
         defaults.push((
             meta.name.as_str(),
             PyString::new(py, &format!("{uid}{suffix}"))
@@ -771,6 +795,7 @@ fn explain<T: ParamsHolder>(slf: &Bound<'_, T>, meta: &ParamMeta) -> PyResult<St
 
 /// `explainParams()`: the explanation of each param, by line.
 pub(super) fn explain_params<T: ParamsHolder>(slf: &Bound<'_, T>) -> PyResult<String> {
+    slf.try_borrow()?.walk(slf.py())?;
     Ok(params_of(slf.as_any())?
         .iter()
         .map(|meta| explain(slf, meta))
@@ -902,6 +927,8 @@ pub(super) fn copy<'py, T: ParamsHolder + NativeInstance>(
     extra: Option<&Bound<'py, PyAny>>,
 ) -> PyResult<Bound<'py, T>> {
     let py = slf.py();
+    // The `params` walk of `_copyValues`.
+    slf.try_borrow()?.walk(py)?;
     let values = match extra {
         Some(extra) if !extra.is_none() => extra_values(slf.as_any(), extra)?,
         _ => Vec::new(),

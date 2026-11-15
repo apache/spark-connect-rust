@@ -30,9 +30,10 @@ macro_rules! params_api_block {
         impl $ty {
             $($methods)*
 
-            /// The Param objects, as `Params.params`.
+            /// The Param objects, as `Params.params`, of its walk (`ParamsHolder::walk`).
             #[getter]
             fn params<'py>(slf: &Bound<'py, Self>) -> PyResult<Vec<Bound<'py, PyAny>>> {
+                $crate::ml::params_api::ParamsHolder::walk(&*slf.try_borrow()?, slf.py())?;
                 $crate::ml::params_api::params(slf.as_any())
             }
 
@@ -341,7 +342,10 @@ macro_rules! native_pymethods {
 ///   `save`, `read` and `load`, `fitted` (of a fit), `of_object` (of an object that a fetch
 ///   returns), and the class's own methods `$body`.
 ///
-/// Of `base` in place of `jvm: $jvm`, it is the base class of model classes of PySpark's base
+/// A model class constructs as PySpark's of no `java_model`: a model of no server-side object (see
+/// `ModelCore::unbound`).
+///
+/// Of `base` before `jvm: $jvm`, it is the base class of model classes of PySpark's base
 /// class `$name` (`LDAModel`, of `LocalLDAModel` and `DistributedLDAModel`): a
 /// `#[pyclass(subclass)]` of all these members but the persistence, which PySpark's base class
 /// does not have. A subclass (`#[pyclass(extends = $ty)]`, of no fields) has the persistence and
@@ -354,7 +358,7 @@ macro_rules! native_model {
         $($rest:tt)*
     ) => {
         native_model! {
-            @emit $ty = $name in $module;
+            @emit $ty = $name in $module, jvm: $jvm;
             pyclass: [];
             persistence: {
                 fn write(slf: &Bound<'_, Self>) -> PyResult<$crate::ml::object::PyMLWriter> {
@@ -416,26 +420,21 @@ macro_rules! native_model {
                 let this = Self::__loaded_with(py, $jvm, $name, read, Self::__make)?;
                 Ok(Py::new(py, this)?.into_any())
             }
-
-            /// The object of the class of the core `core`, as a copy makes it.
-            fn __make(py: Python<'_>, core: $crate::ml::object::ModelCore) -> PyResult<Py<Self>> {
-                Py::new(py, Self { core, make: Self::__make })
-            }
         }
     };
     (
-        $ty:ident = $name:literal in $module:literal, base;
+        $ty:ident = $name:literal in $module:literal, base, jvm: $jvm:literal;
         $($rest:tt)*
     ) => {
         native_model! {
-            @emit $ty = $name in $module;
+            @emit $ty = $name in $module, jvm: $jvm;
             pyclass: [subclass];
             persistence: {};
             $($rest)*
         }
     };
     (
-        @emit $ty:ident = $name:literal in $module:literal;
+        @emit $ty:ident = $name:literal in $module:literal, jvm: $jvm:literal;
         pyclass: [ $($flag:ident)? ];
         persistence: { $($persistence:tt)* };
         params: [
@@ -500,6 +499,11 @@ macro_rules! native_model {
                 let defaults = &mut self.core.own_defaults;
                 $crate::ml::params_api::put_own_default_in(defaults, name, value);
                 true
+            }
+
+            /// The walk reads the cached members, made once (see `__prime`).
+            fn walk(&self, py: Python<'_>) -> PyResult<()> {
+                self.__prime(py)
             }
         }
 
@@ -569,6 +573,11 @@ macro_rules! native_model {
                 $( self.core.cached(py, $c_py, || ($c_make)(py, &self.core))?; )*
                 Ok(())
             }
+
+            /// The object of this class of the core `core`, as a copy makes it.
+            fn __make(py: Python<'_>, core: $crate::ml::object::ModelCore) -> PyResult<Py<Self>> {
+                Py::new(py, Self { core, make: Self::__make })
+            }
         }
 
         params_api_block! {
@@ -577,6 +586,19 @@ macro_rules! native_model {
             params_only: [ $( $( $po => $po_attr ),* )? ];
             {
                 $($body)*
+
+                /// A model of no server-side object, as PySpark's `JavaModel(java_model=None)`
+                /// (see `ModelCore::unbound`). Another `java_model` is the AssertionError of
+                /// PySpark's over Spark Connect, which takes a `RemoteModelRef` only.
+                #[new]
+                #[pyo3(signature = (java_model=None))]
+                fn __new__(py: Python<'_>, java_model: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
+                    if java_model.is_some() {
+                        return Err(pyo3::exceptions::PyAssertionError::new_err(()));
+                    }
+                    let core = $crate::ml::object::ModelCore::unbound(py, $jvm, $name)?;
+                    Ok(Self { core, make: Self::__make })
+                }
 
                 #[getter]
                 fn uid(&self) -> String {

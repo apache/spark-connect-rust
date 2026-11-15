@@ -304,6 +304,13 @@ PySpark class has them:
   `optionMap`, `session` and `save`), `save(path)`, `read()` (an `MLReader`) and `load(path)`, as
   `RemoteMLWriter` and `RemoteMLReader` save and load them, so that this client and PySpark load
   what each other saves.
+- **A model of no server-side object**: a model class constructs as PySpark's
+  `JavaModel(java_model=None)` (`KMeansModel()`, `LDAModel()`), a model of a new uid of its class
+  and of its params, none set, whose Params API, `copy` and `write()` work, and whose members of
+  the server, `__repr__`, a transform and a save raise PySpark's bare `AssertionError`, as does the
+  `params` walk of a model of `functools.cached_property` members (`trees`), and so its
+  `explainParams` and `copy`. Another `java_model` is the `AssertionError` of PySpark's over Spark
+  Connect, which takes its `RemoteModelRef` only.
 
 `tests/golden/ml_api.json` holds the API of every public class of `pyspark.ml`, and
 `python/tests/test_ml_api_offline.py` compares each native class with it: the members, the kinds of
@@ -315,6 +322,9 @@ FMClassifier and OneVsRest, from `python/tests/_misc_api_cases.py` and
 `tests/golden/ml_api_cases.json` holds the results of PySpark 4.3.0 of the cases of
 `python/tests/_ml_api_cases.py` (the Params API, the models, summaries, transforms and persistence),
 which `test_ml_api_offline.py` and `test_ml_api_e2e.py` compare with.
+`tests/golden/ml_unbound_models.json` holds the models of no server-side object of every model class
+of PySpark 4.3.0 of `JavaModel(java_model=None)` (`python/tests/_ml_unbound_cases.py`,
+`scripts/capture_ml_unbound_models_golden.py`), which `test_ml_api_e2e.py` compares with.
 
 The tree classes have their own cases, `python/tests/_tree_api_cases.py` and
 `tests/golden/tree_api_cases.json`, with `test_tree_api_offline.py` and
