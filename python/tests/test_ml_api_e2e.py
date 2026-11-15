@@ -115,3 +115,25 @@ def test_objects_of_this_client_are_of_the_classes_of_pyspark_mls_modules(sessio
     ours = PySparkPipeline(stages=[cls("classification", "LogisticRegression")(maxIter=2)]).fit(df)
     ours.write().overwrite().save(path + "/pyspark-pipeline")
     assert PySparkPipelineModel.load(path + "/pyspark-pipeline").transform(df).count() == 12
+
+
+def test_a_subclass_reads_the_jvm_class_of_its_python_name(session):
+    # PySpark's RemoteMLReader names the JVM class of a load of the Python class (its module, of
+    # org.apache.spark for pyspark, and its name), so a subclass of the user's reads a class that
+    # the server does not have, and raises its UNSUPPORTED_EXCEPTION; the class's own load, and a
+    # Pipeline's (of its Python format, which loads a Pipeline), read their own.
+    def cls(module, name):
+        return native_class(f"pyspark.ml.connect.{module}", name, f"pyspark.ml.{module}")
+
+    LR = cls("classification", "LogisticRegression")
+    Pipeline = cls("pipeline", "Pipeline")
+    Binarizer = cls("feature", "Binarizer")
+    MyLR = type("MyLR", (LR,), {})
+    MyPipeline = type("MyPipeline", (Pipeline,), {})
+    path = tempfile.mkdtemp(prefix="ml-subclass-load-")
+    LR(maxIter=3).save(path + "/lr")
+    Pipeline(stages=[Binarizer(threshold=0.5, inputCol="a", outputCol="b")]).save(path + "/pipeline")
+    with pytest.raises(Exception, match=r"UNSUPPORTED_EXCEPTION.*Unsupported read for .*\.MyLR"):
+        MyLR.load(path + "/lr")
+    assert type(LR.load(path + "/lr")) is LR and LR.load(path + "/lr").getMaxIter() == 3
+    assert type(MyPipeline.load(path + "/pipeline")) is Pipeline

@@ -436,23 +436,27 @@ macro_rules! lda_model {
                 object::new_py(slf.py(), writer)
             }
 
-            fn save(slf: &Bound<'_, Self>, path: &str) -> PyResult<()> {
+            fn save(slf: &Bound<'_, Self>, path: &Bound<'_, PyAny>) -> PyResult<()> {
                 slf.call_method0("write")?.call_method1("save", (path,))?;
                 Ok(())
             }
 
             #[classmethod]
             fn read(cls: &Bound<'_, pyo3::types::PyType>) -> PyResult<Py<object::PyMLReader>> {
-                let reader = object::PyMLReader::new(
+                let reader = object::PyMLReader::of_class::<$ty>(
+                    cls,
                     $jvm,
                     spark_connect::ml::OperatorType::Model,
                     <$ty>::__from_read,
-                );
+                )?;
                 object::new_py(cls.py(), reader)
             }
 
             #[classmethod]
-            fn load(cls: &Bound<'_, pyo3::types::PyType>, path: &str) -> PyResult<Py<PyAny>> {
+            fn load(
+        cls: &Bound<'_, pyo3::types::PyType>,
+        path: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyAny>> {
                 Ok(cls.call_method0("read")?.call_method1("load", (path,))?.unbind())
             }
 

@@ -466,7 +466,13 @@ pub(super) fn get_param<'py>(
     slf: &Bound<'py, PyAny>,
     name: &Bound<'py, PyAny>,
 ) -> PyResult<Bound<'py, PyAny>> {
-    // As `getattr(self, paramName)`, of a name only.
+    // As `getattr(self, paramName)`, of a name only, and of its TypeError of another object.
+    if !name.is_instance_of::<pyo3::types::PyString>() {
+        return Err(PyTypeError::new_err(format!(
+            "attribute name must be string, not '{}'",
+            name.get_type().name()?
+        )));
+    }
     let name: String = name.extract()?;
     param_object(slf, get_param_meta(slf, &name)?)
 }

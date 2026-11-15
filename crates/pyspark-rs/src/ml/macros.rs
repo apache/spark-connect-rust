@@ -217,7 +217,7 @@ macro_rules! native_pymethods {
                 }
 
                 /// Save to `path`, as `MLWritable.save`: `self.write().save(path)`.
-                fn save(slf: &Bound<'_, Self>, path: &str) -> PyResult<()> {
+                fn save(slf: &Bound<'_, Self>, path: &Bound<'_, PyAny>) -> PyResult<()> {
                     slf.call_method0("write")?.call_method1("save", (path,))?;
                     Ok(())
                 }
@@ -227,17 +227,21 @@ macro_rules! native_pymethods {
                 fn read(
                     cls: &Bound<'_, pyo3::types::PyType>,
                 ) -> PyResult<Py<$crate::ml::object::PyMLReader>> {
-                    let reader = $crate::ml::object::PyMLReader::new(
+                    let reader = $crate::ml::object::PyMLReader::of_class::<$ty>(
+                        cls,
                         $jvm,
                         spark_connect::ml::OperatorType::$op,
                         <$ty>::__from_read,
-                    );
+                    )?;
                     $crate::ml::object::new_py(cls.py(), reader)
                 }
 
                 /// Load from `path`, as `MLReadable.load`: `cls.read().load(path)`.
                 #[classmethod]
-                fn load(cls: &Bound<'_, pyo3::types::PyType>, path: &str) -> PyResult<Py<PyAny>> {
+                fn load(
+        cls: &Bound<'_, pyo3::types::PyType>,
+        path: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyAny>> {
                     Ok(cls.call_method0("read")?.call_method1("load", (path,))?.unbind())
                 }
             }
@@ -369,7 +373,7 @@ macro_rules! native_model {
                     $crate::ml::object::new_py(slf.py(), writer)
                 }
 
-                fn save(slf: &Bound<'_, Self>, path: &str) -> PyResult<()> {
+                fn save(slf: &Bound<'_, Self>, path: &Bound<'_, PyAny>) -> PyResult<()> {
                     slf.call_method0("write")?.call_method1("save", (path,))?;
                     Ok(())
                 }
@@ -378,16 +382,20 @@ macro_rules! native_model {
                 fn read(
                     cls: &Bound<'_, pyo3::types::PyType>,
                 ) -> PyResult<Py<$crate::ml::object::PyMLReader>> {
-                    let reader = $crate::ml::object::PyMLReader::new(
+                    let reader = $crate::ml::object::PyMLReader::of_class::<$ty>(
+                        cls,
                         $jvm,
                         spark_connect::ml::OperatorType::Model,
                         <$ty>::__from_read,
-                    );
+                    )?;
                     $crate::ml::object::new_py(cls.py(), reader)
                 }
 
                 #[classmethod]
-                fn load(cls: &Bound<'_, pyo3::types::PyType>, path: &str) -> PyResult<Py<PyAny>> {
+                fn load(
+        cls: &Bound<'_, pyo3::types::PyType>,
+        path: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyAny>> {
                     Ok(cls.call_method0("read")?.call_method1("load", (path,))?.unbind())
                 }
             };
