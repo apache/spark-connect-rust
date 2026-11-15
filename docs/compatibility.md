@@ -1356,6 +1356,10 @@ This covers constructor parameters, named setters, fit and DataFrame transform, 
 Spark Connect's ML helper, as PySpark does (Rust `StopWordsRemover::load_default_stop_words`).
 As PySpark's constructor does, `StopWordsRemover()` fetches its default locale and English stop
 words of the active session first, so without one it raises PySpark's bare `AssertionError`.
+The Rust `StopWordsRemover::load` sends its `Read` alone, where PySpark's load also fetches these
+two defaults, in the constructor of the loaded stage: only the requests differ, since a Rust stage,
+new or loaded, reads an unset `locale` or `stop_words` as `None` or empty and the server applies
+its defaults.
 
 In Rust, each fitted model also has the members of its PySpark model class, which it reads of
 the server-side model as PySpark does: for example `CountVectorizerModel::vocabulary`,
@@ -1365,9 +1369,8 @@ the server-side model as PySpark does: for example `CountVectorizerModel::vocabu
 and `from_arrays_of_labels` build a model of given values, and
 `QuantileDiscretizer::fit_bucketizer` gives the `Bucketizer` of the fitted splits, as PySpark's
 fit does. Every stage and model saves with `write()` and loads with `load(session, path)`, as
-PySpark's `save` and `load`. The Python classes gain these members with the native model
-classes. Pipeline/tuning execution is separate from this native surface. Existing vendored
-helper classes remain available.
+PySpark's `save` and `load`. Pipeline/tuning execution is separate from this native surface.
+Existing vendored helper classes remain available.
 
 Tests compare all 38 stages with official PySpark 4.3.0 parameter literals and Spark results,
 including 10 multi-column/parameter variants, both constructor and setter configuration,
@@ -1408,8 +1411,8 @@ model tables retain their cached model; PrefixSpan retains its input plan, inclu
 any upstream fitted models. A fitted model's transform of a DataFrame of another session is lazy
 and fails with `CONNECT_ML.CACHE_INVALID` when the result is analyzed or collected, as PySpark's does.
 In Rust, `FPGrowth` and `FPGrowthModel` save with `write()` and load with
-`load(session, path)`, as PySpark's `save` and `load`; the Python classes gain persistence
-with the native model classes. The vendored `pyspark.ml.fpm` module is unchanged.
+`load(session, path)`, as PySpark's `save` and `load`. The vendored `pyspark.ml.fpm` module is
+unchanged.
 
 Spark 4.3.0's Connect helper currently rejects `Long` argument literals: PrefixSpan's
 `maxLocalProjDBSize` works within the signed 32-bit range, including its default
@@ -1440,7 +1443,10 @@ The Python `ALS` and `ALSModel` follow `pyspark.ml.recommendation` in full: the 
 getters and setters, `setParams`, `setNumBlocks`, `fitMultiple`, `copy`, and `write`, `save`,
 `read` and `load`. A model's `coldStartStrategy`, `userCol`, `itemCol` and `blockSize` come from
 its estimator, as `_copyValues` gives them. The `rank` of a model is read from the server on each
-access, as PySpark's `_call_java("rank")` does, so a fit and a load send no request for it.
+access, as PySpark's `_call_java("rank")` does, so a load sends no request for it. PySpark's fit
+also fetches it once, or twice when `rank` is set, as its `_copyValues` probes `hasParam("rank")`
+of the new model and so reads that property; the Python and Rust fits do not, so only the
+requests differ.
 
 Fit, transform and subset recommendation inputs must be Spark DataFrames; pandas
 DataFrames are rejected before conversion or RPC, and a subset's other values are sent for the
@@ -1451,8 +1457,7 @@ session's DataFrame and run, as PySpark's do.
 Official PySpark 4.3.0 fixtures cover explicit and implicit ratings, predictions, cold starts,
 factors, and all four recommendation methods, with live
 Rust and native Python tests. In Rust, `ALS` and `ALSModel` save with `write()` and load
-with `load(session, path)`, and a loaded model reads its rank of the server, as PySpark's does;
-the Python classes gain persistence with the native model classes.
+with `load(session, path)`, and a loaded model reads its rank of the server, as PySpark's does.
 
 
 ## Native ML evaluators
