@@ -11,6 +11,8 @@ of OneVsRest is not in it: the server has no OneVsRest writer, which official Py
 need, so its cases are the params, the fits and the transforms only.
 """
 
+import json
+import os
 import shutil
 
 from _ml_api_cases import Recorder
@@ -480,6 +482,121 @@ def _one_vs_rest_live(rec, spark, base):
     )
     rec("fit_list", lambda: [m.transform(df).count() for m in est.fit(df, [{}, {}])])
     rec("fit_without_classifier", lambda: _unset_one_vs_rest().fit(df))
+    _one_vs_rest_persistence(rec, est, model, df, base)
+
+
+def _metadata(path):
+    """The metadata of the save at `path`, without its timestamp, and with the class name of its
+    uid (the uid itself is random)."""
+    import glob
+
+    text = open(glob.glob(path + "/metadata/part-*")[0]).read()
+    metadata = json.loads(text)
+    metadata.pop("timestamp")
+    metadata["uid"] = metadata["uid"].split("_")[0]
+    return metadata
+
+
+def _params_of(obj):
+    """The params of `obj` and their values, without the classifier (whose repr has a uid)."""
+    return sorted(
+        (p.name, repr(v)) for p, v in obj.extractParamMap().items() if p.name != "classifier"
+    )
+
+
+def _one_vs_rest_persistence(rec, est, model, df, base):
+    """The cases of the save and load of the OneVsRest `est` and of its fitted `model`, of their
+    metadata (as PySpark writes it), of the classifier and the models that they save, and of the
+    copies and validators of the classifier's params."""
+    shutil.rmtree(base, ignore_errors=True)
+    rec("est_save", lambda: est.write().overwrite().save(base + "/ovr"))
+    rec("est_dir", lambda: sorted(os.listdir(base + "/ovr")))
+    rec("est_metadata", lambda: _metadata(base + "/ovr"))
+    rec("est_classifier_metadata", lambda: _metadata(base + "/ovr/classifier")["class"])
+    loaded = type(est).load(base + "/ovr")
+    rec("est_loaded_uid", lambda: loaded.uid == est.uid)
+    rec("est_loaded_classifier", lambda: type(loaded.getClassifier()).__name__)
+    rec("est_loaded_classifier_uid", lambda: loaded.getClassifier().uid == est.getClassifier().uid)
+    rec("est_loaded_params", lambda: _params_of(loaded))
+    rec("est_loaded_isSet_weightCol", lambda: loaded.isSet("weightCol"))
+    rec("est_model_save", lambda: model.write().overwrite().save(base + "/ovrm"))
+    rec("model_dir", lambda: sorted(os.listdir(base + "/ovrm")))
+    rec("model_metadata", lambda: _metadata(base + "/ovrm"))
+    loaded_model = type(model).load(base + "/ovrm")
+    rec("model_loaded_uid", lambda: loaded_model.uid == model.uid)
+    rec("model_loaded_len", lambda: len(loaded_model.models))
+    rec(
+        "model_loaded_models_types",
+        lambda: [
+            (type(s).__name__, type(s).__module__.split(".")[-1]) for s in loaded_model.models
+        ],
+    )
+    rec("model_loaded_models_uids", lambda: [s.uid for s in loaded_model.models])
+    rec("model_loaded_classifier", lambda: type(loaded_model.getClassifier()).__name__)
+    rec("model_loaded_params", lambda: _params_of(loaded_model))
+    rec("model_loaded_transform", lambda: _Rounded(loaded_model.transform(df)))
+    rec("model_loaded_resave", lambda: loaded_model.write().overwrite().save(base + "/ovrm2"))
+    rec("model_loaded_resave_metadata", lambda: _metadata(base + "/ovrm2")["numClasses"])
+    # The classifier's params, which a copy of the estimator, and so a fit of a param map, sets.
+    classifier = est.getClassifier()
+    rec(
+        "copy_classifier_param",
+        lambda: est.copy({classifier.maxIter: 7}).getClassifier().getMaxIter(),
+    )
+    rec("copy_keeps_classifier", lambda: est.copy().getClassifier().getMaxIter())
+    rec(
+        "save_without_classifier",
+        lambda: _native("OneVsRest")().write().overwrite().save(base + "/none"),
+    )
+    shutil.rmtree(base, ignore_errors=True)
+    _one_vs_rest_validator(rec, df, base)
+
+
+def _one_vs_rest_validator(rec, df, base):
+    """The cases of a validator over a OneVsRest of a LogisticRegression, whose grid sets the
+    classifier's param: its save, load and fit, as PySpark's validator over the same."""
+    lr = _native("LogisticRegression")(maxIter=5)
+    ovr = _native("OneVsRest")(classifier=lr)
+    evaluation = native_class(
+        "pyspark.ml.connect.evaluation",
+        "MulticlassClassificationEvaluator",
+        "pyspark.ml.evaluation",
+    )
+    tuning = native_class("pyspark.ml.connect.tuning", "CrossValidator", "pyspark.ml.tuning")
+    from pyspark.ml.tuning import ParamGridBuilder
+
+    grid = ParamGridBuilder().addGrid(lr.regParam, [0.0, 0.5]).build()
+    cv = tuning(
+        estimator=ovr,
+        estimatorParamMaps=grid,
+        evaluator=evaluation(metricName="accuracy"),
+        numFolds=2,
+        seed=7,
+    )
+    rec("cv_save", lambda: cv.write().overwrite().save(base + "/cv"))
+    rec(
+        "cv_metadata_parents",
+        lambda: [
+            m[0]["parent"] == lr.uid
+            for m in _metadata(base + "/cv")["paramMap"]["estimatorParamMaps"]
+        ],
+    )
+    loaded = type(cv).load(base + "/cv")
+    rec(
+        "cv_loaded_grid",
+        lambda: [
+            sorted((p.name, repr(v)) for p, v in m.items())
+            for m in loaded.getEstimatorParamMaps()
+        ],
+    )
+    rec("cv_loaded_estimator", lambda: type(loaded.getEstimator()).__name__)
+    model = cv.fit(df)
+    rec("cv_avgMetrics", lambda: [round(x, 9) for x in model.avgMetrics])
+    rec("cv_model_save", lambda: model.write().overwrite().save(base + "/cvm"))
+    loaded_model = type(model).load(base + "/cvm")
+    rec("cv_model_loaded_avgMetrics", lambda: [round(x, 9) for x in loaded_model.avgMetrics])
+    rec("cv_model_loaded_transform", lambda: _Rounded(loaded_model.transform(df)))
+    shutil.rmtree(base, ignore_errors=True)
 
 
 def live_cases(name, spark, base):

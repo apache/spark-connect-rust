@@ -2,8 +2,14 @@
 //! The typed model of OneVsRest: OneVsRestModel, a container of the models of the classes of a fit,
 //! with its classifier and its other params as Python values (as PySpark's `PipelineModel`).
 use super::*;
+use crate::errors::ResultExt;
+use crate::interrupt::interruptible;
+use crate::ml::pipeline_api::{load_metadata_dict, load_params_instance, metadata_str, writable};
 use spark_connect::column::{lit_double, when};
-use spark_connect::ml::{OneVsRestModel as CoreOneVsRestModel, OperatorType, ReadResult, SubModel};
+use spark_connect::ml::{
+    join_path, save_metadata, Metadata, OneVsRestModel as CoreOneVsRestModel, SubModel,
+};
+use spark_connect::SparkSession;
 use std::sync::OnceLock;
 
 /// The fit of a OneVsRest, of what its model's submodels are made of: the training DataFrame, the
@@ -54,25 +60,6 @@ impl PyOneVsRestModel {
         let models = build_submodels(py, &this)?;
         let _ = this.models.set(models);
         Ok(this)
-    }
-
-    fn __from_read<'py>(py: Python<'py>, read: ReadResult) -> PyResult<Py<PyAny>> {
-        let core = object::ModelCore::loaded(
-            py,
-            "org.apache.spark.ml.classification.OneVsRestModel",
-            "OneVsRestModel",
-            read,
-        )?;
-        Ok(Py::new(
-            py,
-            Self {
-                core,
-                raw: Vec::new(),
-                fit: None,
-                models: OnceLock::new(),
-            },
-        )?
-        .into_any())
     }
 
     /// The classifier, if the param is set.
@@ -428,9 +415,13 @@ native_pymethods! {
         params_api::copy(slf, extra)
     }
 
-    /// The writer of the model, as `JavaMLWritable.write` (`RemoteMLWriter`).
-    fn write(slf: &Bound<'_, Self>) -> PyResult<object::PyMLWriter> {
-        slf.try_borrow()?.core.writer(slf.py())
+    /// The writer of the model, as `OneVsRestModel.write` over Spark Connect (`RemoteMLWriter`,
+    /// which saves it as `OneVsRestModelWriter` does).
+    fn write(slf: &Bound<'_, Self>) -> object::PyMLWriter {
+        object::PyMLWriter::new(object::WriteTarget::Python(
+            slf.clone().into_any().unbind(),
+            save_one_vs_rest_model,
+        ))
     }
 
     /// Save to `path`, as `MLWritable.save`: `self.write().save(path)`.
@@ -439,15 +430,12 @@ native_pymethods! {
         Ok(())
     }
 
-    /// The reader of the class, as `JavaMLReadable.read` (`RemoteMLReader`).
+    /// The reader of the class, as `OneVsRestModel.read` over Spark Connect (`RemoteMLReader`,
+    /// which loads it as `OneVsRestModelReader` does).
     #[classmethod]
     fn read(cls: &Bound<'_, pyo3::types::PyType>) -> object::PyMLReader {
         let _ = cls;
-        object::PyMLReader::new(
-            "org.apache.spark.ml.classification.OneVsRestModel",
-            OperatorType::Model,
-            PyOneVsRestModel::__from_read,
-        )
+        object::PyMLReader::python(load_one_vs_rest_model)
     }
 
     /// Load from `path`, as `MLReadable.load`: `cls.read().load(path)`.
@@ -488,4 +476,291 @@ native_pymethods! {
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyOneVsRestModel>()?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------------------------
+// Persistence, as `OneVsRestWriter`, `OneVsRestModelWriter` and their readers of PySpark (the
+// Python format of `_OneVsRestSharedReadWrite`, which the core writes and reads too).
+// ---------------------------------------------------------------------------------------------
+
+/// The classes of the metadata, PySpark's, of which PySpark loads what this saves.
+const ONE_VS_REST_CLASS: &str = "pyspark.ml.classification.OneVsRest";
+const ONE_VS_REST_MODEL_CLASS: &str = "pyspark.ml.classification.OneVsRestModel";
+
+/// The params of a OneVsRest that its metadata has of their defaults, in the order of PySpark's
+/// `_defaultParamMap` of the estimator (see the core's `ESTIMATOR_DEFAULTS`).
+const ESTIMATOR_DEFAULTS: &[&str] = &[
+    "parallelism",
+    "predictionCol",
+    "featuresCol",
+    "labelCol",
+    "rawPredictionCol",
+];
+
+/// The params of a OneVsRestModel that its metadata has of their defaults, in the order of
+/// PySpark's `_defaultParamMap` of the model (see the core's `MODEL_DEFAULTS`).
+const MODEL_DEFAULTS: &[&str] = &[
+    "predictionCol",
+    "featuresCol",
+    "labelCol",
+    "rawPredictionCol",
+];
+
+/// The `paramMap` and the `defaultParamMap` of a OneVsRest or its model `slf`, as
+/// `DefaultParamsWriter` makes them: of each of `defaults` in its order, the set value or the
+/// default (`extractParamMap`), and then the set `weightCol`, which has no default. The classifier
+/// is no param of these, which its own writer saves.
+fn param_maps<'py, T: params_api::ParamsHolder>(
+    slf: &Bound<'py, T>,
+    defaults: &[&str],
+) -> PyResult<(Bound<'py, PyDict>, Bound<'py, PyDict>)> {
+    let py = slf.py();
+    let param_map = PyDict::new(py);
+    let default_map = PyDict::new(py);
+    for &name in defaults {
+        let Some(default) = params_api::default_of(slf, name)? else {
+            continue;
+        };
+        let set = params_api::ParamsHolder::set_value(&*slf.try_borrow()?, py, name)?;
+        default_map.set_item(name, &default)?;
+        param_map.set_item(name, set.unwrap_or(default))?;
+    }
+    let weight = params_api::ParamsHolder::set_value(&*slf.try_borrow()?, py, "weightCol")?;
+    if let Some(weight) = weight {
+        param_map.set_item("weightCol", weight)?;
+    }
+    Ok((param_map, default_map))
+}
+
+/// `json.dumps(value, separators=(",", ":"))`, as `DefaultParamsWriter` writes the metadata.
+fn dumps_compact(value: &Bound<'_, PyAny>) -> PyResult<String> {
+    let py = value.py();
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("separators", (",", ":"))?;
+    py.import("json")?
+        .getattr("dumps")?
+        .call((value,), Some(&kwargs))?
+        .extract()
+}
+
+/// The check of the elements of a OneVsRest that its write saves, as `validateParams`: its
+/// classifier, and of a model its models, must write.
+fn validate_one_vs_rest(instance: &Bound<'_, PyAny>, models: bool) -> PyResult<()> {
+    let mut elems = vec![instance.call_method0("getClassifier")?];
+    if models {
+        for model in instance.getattr("models")?.try_iter()? {
+            elems.push(model?);
+        }
+    }
+    for elem in elems {
+        if !writable(&elem)? {
+            return Err(PyValueError::new_err(format!(
+                "OneVsRest write will fail because it contains {} which is not writable.",
+                elem.getattr("uid")?.str()?
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// `obj.write().session(spark).save(path)`, as `MLWritable.save` of the session `spark`.
+fn save_at(obj: &Bound<'_, PyAny>, spark: &Bound<'_, PyAny>, path: String) -> PyResult<()> {
+    obj.call_method0("write")?
+        .call_method1("session", (spark,))?
+        .call_method1("save", (path,))?;
+    Ok(())
+}
+
+/// Save the metadata `metadata` to `path`, as `saveMetadata` does.
+fn save_metadata_at(
+    py: Python<'_>,
+    session: &SparkSession,
+    path: &str,
+    class: &str,
+    uid: &str,
+    param_map: String,
+    default_map: String,
+    num_classes: Option<usize>,
+) -> PyResult<()> {
+    interruptible(py, session, || {
+        let version = session.version()?;
+        let mut metadata = Metadata::new(class, uid, &version, param_map, default_map);
+        if let Some(num_classes) = num_classes {
+            metadata
+                .extra
+                .push(("numClasses".to_string(), num_classes.to_string()));
+        }
+        save_metadata(session, path, &metadata.to_json()).map_err(Box::new)
+    })
+}
+
+/// Save the OneVsRest `instance` to `path`, as `OneVsRestWriter.saveImpl`: its metadata, and its
+/// classifier at `classifier`.
+pub(crate) fn save_one_vs_rest(
+    instance: &Bound<'_, PyAny>,
+    spark: &Bound<'_, PyAny>,
+    session: &SparkSession,
+    path: &str,
+    _options: &std::collections::HashMap<String, String>,
+) -> PyResult<()> {
+    validate_one_vs_rest(instance, false)?;
+    let (param_map, default_map) = param_maps(instance.cast::<PyOneVsRest>()?, ESTIMATOR_DEFAULTS)?;
+    let uid: String = instance.getattr("uid")?.extract()?;
+    save_metadata_at(
+        instance.py(),
+        session,
+        path,
+        ONE_VS_REST_CLASS,
+        &uid,
+        dumps_compact(param_map.as_any())?,
+        dumps_compact(default_map.as_any())?,
+        None,
+    )?;
+    save_at(
+        &instance.call_method0("getClassifier")?,
+        spark,
+        join_path(path, "classifier"),
+    )
+}
+
+/// Save the OneVsRestModel `instance` to `path`, as `OneVsRestModelWriter.saveImpl`: its metadata
+/// with `numClasses`, its classifier at `classifier` and each model at `model_<index>`.
+fn save_one_vs_rest_model(
+    instance: &Bound<'_, PyAny>,
+    spark: &Bound<'_, PyAny>,
+    session: &SparkSession,
+    path: &str,
+    _options: &std::collections::HashMap<String, String>,
+) -> PyResult<()> {
+    validate_one_vs_rest(instance, true)?;
+    let (param_map, default_map) =
+        param_maps(instance.cast::<PyOneVsRestModel>()?, MODEL_DEFAULTS)?;
+    let uid: String = instance.getattr("uid")?.extract()?;
+    let models = instance.getattr("models")?;
+    save_metadata_at(
+        instance.py(),
+        session,
+        path,
+        ONE_VS_REST_MODEL_CLASS,
+        &uid,
+        dumps_compact(param_map.as_any())?,
+        dumps_compact(default_map.as_any())?,
+        Some(models.len()?),
+    )?;
+    save_at(
+        &instance.call_method0("getClassifier")?,
+        spark,
+        join_path(path, "classifier"),
+    )?;
+    for (index, model) in models.try_iter()?.enumerate() {
+        save_at(&model?, spark, join_path(path, &format!("model_{index}")))?;
+    }
+    Ok(())
+}
+
+/// The static name of the param `name` of a OneVsRest, as the table of its params has it.
+fn static_param_name(name: &str) -> PyResult<&'static str> {
+    ONE_VS_REST_PARAMS
+        .iter()
+        .find(|(param, _)| *param == name)
+        .map(|(param, _)| *param)
+        .ok_or_else(|| PyValueError::new_err(format!("Cannot find param with name {name}.")))
+}
+
+/// Set the params of the `paramMap` of the metadata `metadata` in `target`, as
+/// `DefaultParamsReader.getAndSetParams` does, without the classifier. A null of a param is set as
+/// it is.
+fn set_metadata_params<T: params_api::ParamsHolder>(
+    target: &Bound<'_, T>,
+    metadata: &Bound<'_, PyAny>,
+) -> PyResult<()> {
+    let py = target.py();
+    let param_map = metadata.get_item("paramMap")?;
+    for item in param_map.call_method0("items")?.try_iter()? {
+        let item = item?;
+        let name = item.get_item(0)?;
+        let name_text: String = name.extract()?;
+        if name_text == "classifier" {
+            continue;
+        }
+        let value = item.get_item(1)?;
+        if value.is_none() {
+            let name = static_param_name(&name_text)?;
+            params_api::ParamsHolder::put(
+                &mut *target.try_borrow_mut()?,
+                py,
+                name,
+                Converted::Null,
+            )?;
+        } else {
+            params_api::set_by_name(target, &name_text, &value)?;
+        }
+    }
+    Ok(())
+}
+
+/// Load the OneVsRest at `path`, as `OneVsRestReader.load`: its classifier, its uid and params.
+pub(crate) fn load_one_vs_rest(
+    py: Python<'_>,
+    spark: &Bound<'_, PyAny>,
+    session: &SparkSession,
+    path: &str,
+) -> PyResult<Py<PyAny>> {
+    let metadata = load_metadata_dict(py, session, path)?;
+    let classifier = load_params_instance(py, spark, session, &join_path(path, "classifier"))?;
+    let estimator = Bound::new(
+        py,
+        PyOneVsRest {
+            inner: OneVsRest::new(),
+            raw: Vec::new(),
+        },
+    )?;
+    params_api::ParamsHolder::put(
+        &mut *estimator.try_borrow_mut()?,
+        py,
+        "classifier",
+        Converted::Raw(classifier.unbind()),
+    )?;
+    set_metadata_params(&estimator, &metadata)?;
+    let uid = metadata_str(&metadata.get_item("uid")?)?;
+    params_api::NativeInstance::set_uid(&mut *estimator.try_borrow_mut()?, &uid);
+    Ok(estimator.into_any().unbind())
+}
+
+/// Load the OneVsRestModel at `path`, as `OneVsRestModelReader.load`: its classifier, its models
+/// (`numClasses` of them, each loaded of its own format), and its uid and params.
+fn load_one_vs_rest_model(
+    py: Python<'_>,
+    spark: &Bound<'_, PyAny>,
+    session: &SparkSession,
+    path: &str,
+) -> PyResult<Py<PyAny>> {
+    let metadata = load_metadata_dict(py, session, path)?;
+    let classifier = load_params_instance(py, spark, session, &join_path(path, "classifier"))?;
+    let num_classes: usize = metadata.get_item("numClasses")?.extract()?;
+    let models = PyList::empty(py);
+    for index in 0..num_classes {
+        let model_path = join_path(path, &format!("model_{index}"));
+        models.append(load_params_instance(py, spark, session, &model_path)?)?;
+    }
+    // The composite of the classes, which the core transforms with, of the same save.
+    let composite = CoreOneVsRestModel::load(session, path).to_pyerr()?;
+    let df = session.range(1).to_pyerr()?;
+    let core = object::ModelCore::fitted(
+        py,
+        Box::new(composite),
+        &df,
+        object::SummaryDataset::None,
+        None,
+    )?;
+    let model = PyOneVsRestModel {
+        core,
+        raw: vec![("classifier", classifier.unbind())],
+        fit: None,
+        models: OnceLock::new(),
+    };
+    let _ = model.models.set(models.unbind());
+    let model = Bound::new(py, model)?;
+    set_metadata_params(&model, &metadata)?;
+    Ok(model.into_any().unbind())
 }
