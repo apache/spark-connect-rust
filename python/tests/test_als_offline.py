@@ -100,7 +100,8 @@ def test_recommendation_count_literals_match_reference(session, case):
     spark, service = session
     model = fitted(spark, service)
     sent = _requests_but_deletes(service)
-    fetch = _relation(model.recommendForAllUsers(numItems=case["count"])).ml_relation.fetch
+    # Positionally, as the golden's capture calls it: PySpark drops keyword arguments.
+    fetch = _relation(model.recommendForAllUsers(case["count"])).ml_relation.fetch
     assert fetch.obj_ref.id == "als-model"
     assert fetch.methods[0].method == case["method"]
     assert fetch.methods[0].args[0].param.SerializeToString() == base64.b64decode(case["arg_b64"])
@@ -139,15 +140,19 @@ def test_factor_properties_and_recommendation_methods_are_lazy(session):
         ("recommendForUserSubset", "numItems", True),
         ("recommendForItemSubset", "numUsers", True),
     ]:
-        kwargs = {kwarg: 2}
-        if subset:
-            kwargs["dataset"] = frame
-        fetch = _relation(getattr(model, name)(**kwargs)).ml_relation.fetch
+        args = (frame, 2) if subset else (2,)
+        fetch = _relation(getattr(model, name)(*args)).ml_relation.fetch
         assert fetch.methods[0].method == name
         assert fetch.obj_ref.id == "als-model"
         assert fetch.methods[0].args[-1].param == pb2.Expression.Literal(integer=2)
         if subset:
             assert fetch.methods[0].args[0].input == _relation(frame)
+        # PySpark's `try_remote_attribute_relation` sends the positional arguments only, so
+        # a call of keyword arguments sends none.
+        kwargs = {kwarg: 2, **({"dataset": frame} if subset else {})}
+        fetch = _relation(getattr(model, name)(**kwargs)).ml_relation.fetch
+        assert fetch.methods[0].method == name
+        assert not fetch.methods[0].args
     assert _requests_but_deletes(service) == sent
 
 

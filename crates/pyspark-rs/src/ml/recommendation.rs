@@ -326,21 +326,81 @@ native_model! {
         "itemFactors" => (item_factors, "itemFactors"),
         "userFactors" => (user_factors, "userFactors"),
     ];
-    // The recommendations, as `ALSModel.recommendForAllUsers` and its others: the arguments are
-    // sent as PySpark's `serialize` sends them (see `object::fetch_arg_of`), so a dataset that is
-    // not a DataFrame is sent for the server to reject when the result is analyzed.
-    relation_methods: [
-        "recommendForAllUsers" => (recommend_for_all_users, "recommendForAllUsers", (numItems)),
-        "recommendForAllItems" => (recommend_for_all_items, "recommendForAllItems", (numUsers)),
-        "recommendForUserSubset" => (
-            recommend_for_user_subset, "recommendForUserSubset", (dataset, numItems)
-        ),
-        "recommendForItemSubset" => (
-            recommend_for_item_subset, "recommendForItemSubset", (dataset, numUsers)
-        ),
-    ];
+    relation_methods: [];
     summary: None;
     cached: [];
+
+    /// `recommendForAllUsers`, as PySpark's (see `recommend`).
+    #[pyo3(
+        name = "recommendForAllUsers",
+        signature = (*args, **_kwargs),
+        text_signature = "($self, numItems)"
+    )]
+    fn recommend_for_all_users(
+        slf: &Bound<'_, Self>,
+        args: &Bound<'_, PyTuple>,
+        _kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PyDataFrame> {
+        recommend(slf, "recommendForAllUsers", args)
+    }
+
+    /// `recommendForAllItems`, as PySpark's (see `recommend`).
+    #[pyo3(
+        name = "recommendForAllItems",
+        signature = (*args, **_kwargs),
+        text_signature = "($self, numUsers)"
+    )]
+    fn recommend_for_all_items(
+        slf: &Bound<'_, Self>,
+        args: &Bound<'_, PyTuple>,
+        _kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PyDataFrame> {
+        recommend(slf, "recommendForAllItems", args)
+    }
+
+    /// `recommendForUserSubset`, as PySpark's (see `recommend`).
+    #[pyo3(
+        name = "recommendForUserSubset",
+        signature = (*args, **_kwargs),
+        text_signature = "($self, dataset, numItems)"
+    )]
+    fn recommend_for_user_subset(
+        slf: &Bound<'_, Self>,
+        args: &Bound<'_, PyTuple>,
+        _kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PyDataFrame> {
+        recommend(slf, "recommendForUserSubset", args)
+    }
+
+    /// `recommendForItemSubset`, as PySpark's (see `recommend`).
+    #[pyo3(
+        name = "recommendForItemSubset",
+        signature = (*args, **_kwargs),
+        text_signature = "($self, dataset, numUsers)"
+    )]
+    fn recommend_for_item_subset(
+        slf: &Bound<'_, Self>,
+        args: &Bound<'_, PyTuple>,
+        _kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PyDataFrame> {
+        recommend(slf, "recommendForItemSubset", args)
+    }
+}
+
+/// The recommendations of `method` of the model `slf`, as PySpark's ALSModel methods, which
+/// `try_remote_attribute_relation` sends over Spark Connect: the server's `method` of the
+/// positional arguments only, sent as PySpark's `serialize` sends them (see
+/// `object::fetch_arg_of`). So keyword arguments are dropped, no arity is checked (a wrong one,
+/// like a dataset that is not a DataFrame, fails on the server when the result is analyzed),
+/// and a model of no server-side object raises PySpark's AssertionError.
+fn recommend(
+    slf: &Bound<'_, PyALSModel>,
+    method: &str,
+    args: &Bound<'_, PyTuple>,
+) -> PyResult<PyDataFrame> {
+    let target = slf.try_borrow()?.core.target()?;
+    let args: Vec<Bound<'_, PyAny>> = args.iter().collect();
+    crate::ml::object::attribute_relation_py(&target, method, &args)
 }
 
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
