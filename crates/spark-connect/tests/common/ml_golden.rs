@@ -381,7 +381,7 @@ pub fn golden_commands(entry: &Json) -> Vec<proto::MlCommand> {
     let commands = entry["commands"]
         .as_array()
         .unwrap_or_else(|| panic!("a golden entry without commands: {entry}"));
-    if commands.iter().any(is_relation) {
+    if is_relation_entry(entry) {
         panic!(
             "a golden entry whose command is an MlRelation (the entry of a DataFrame member): \
              relation entries are not replayed, so its commands cannot be checked"
@@ -683,7 +683,7 @@ fn register(replay: &mut Replay, entry: &Json) {
         }
         return;
     };
-    if commands.iter().any(is_relation) {
+    if is_relation_entry(entry) {
         return;
     }
     let results = object.get("results").and_then(Json::as_array);
@@ -713,10 +713,30 @@ fn decode_command(b64: &Json) -> proto::MlCommand {
     proto::MlCommand::decode(decode_bytes(b64).as_slice()).expect("a golden ML command")
 }
 
-/// Whether a golden command is an MlRelation, the plan of a DataFrame that a member returns, rather
-/// than an ML command: no MlCommand decodes from it.
-fn is_relation(b64: &Json) -> bool {
-    proto::MlCommand::decode(decode_bytes(b64).as_slice()).is_err()
+/// Whether a golden entry is a relation entry: the entry of a DataFrame member, whose command is
+/// an MlRelation rather than an MlCommand. Such an entry records its value as the DataFrame
+/// (`schema` and `rows`), and no ML command's value is a DataFrame: decoding cannot tell them
+/// apart, since an MlRelation's transform (field 1) decodes as an MlCommand's Fit (field 1). The
+/// relation entries of the goldens are exactly the entries with a DataFrame value.
+pub fn is_relation_entry(entry: &Json) -> bool {
+    let value = &entry["value"];
+    value.get("schema").is_some() && value.get("rows").is_some()
+}
+
+/// The MlRelations of a relation entry, decoded as sent. Each has its operator set.
+pub fn golden_relations(entry: &Json) -> Vec<proto::MlRelation> {
+    assert!(is_relation_entry(entry), "not a relation entry: {entry}");
+    entry["commands"]
+        .as_array()
+        .expect("a golden entry with commands")
+        .iter()
+        .map(|b64| {
+            let relation = proto::MlRelation::decode(decode_bytes(b64).as_slice())
+                .expect("a golden MlRelation");
+            assert!(relation.ml_type.is_some(), "an MlRelation with no type");
+            relation
+        })
+        .collect()
 }
 
 fn decode_result(b64: &Json) -> proto::MlCommandResult {

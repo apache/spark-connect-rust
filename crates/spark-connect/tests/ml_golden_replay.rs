@@ -14,6 +14,7 @@ use prost::Message;
 use serde_json::Value as Json;
 use spark_connect::ml::{fetch, CountVectorizerModel, Imputer, MlTarget, StringIndexerModel};
 use spark_connect_proto as proto;
+use spark_connect_proto::ml_relation::MlType;
 
 const MODELS: &str = include_str!("../../../tests/golden/classification_models.json");
 const SUMMARIES: &str = include_str!("../../../tests/golden/classification_summaries.json");
@@ -93,11 +94,29 @@ fn a_request_that_differs_from_its_golden_fails_the_check() {
 
 #[test]
 fn every_golden_command_of_the_classification_goldens_is_an_ml_command() {
-    fn walk(entry: &Json, commands: &mut usize) {
+    // A relation entry (a DataFrame member, whose command is an MlRelation) is recognized by its
+    // value, not by decoding: it must be a transform or a fetch relation, and its `transform`
+    // member must be one. Every other entry's commands must be ML commands.
+    fn walk(entry: &Json, key: &str, commands: &mut usize, relations: &mut usize) {
         let Some(object) = entry.as_object() else {
             return;
         };
         if object.contains_key("commands") {
+            if is_relation_entry(entry) {
+                for relation in golden_relations(entry) {
+                    let kind = relation.ml_type.as_ref().expect("an operator");
+                    assert!(
+                        matches!(kind, MlType::Transform(_) | MlType::Fetch(_)),
+                        "{key}: a relation that is neither a transform nor a fetch"
+                    );
+                    *relations += 1;
+                }
+                return;
+            }
+            assert!(
+                key != "transform",
+                "a transform entry that is not a relation"
+            );
             for command in golden_commands(entry) {
                 assert!(
                     command.command.is_some(),
@@ -107,15 +126,31 @@ fn every_golden_command_of_the_classification_goldens_is_an_ml_command() {
             }
             return;
         }
-        for child in object.values() {
-            walk(child, commands);
+        for (child_key, child) in object {
+            walk(child, child_key, commands, relations);
         }
     }
     let mut commands = 0;
+    let mut relations = 0;
     for text in [MODELS, SUMMARIES] {
-        walk(&fixture(text), &mut commands);
+        walk(&fixture(text), "", &mut commands, &mut relations);
     }
     assert!(commands > 0, "no golden commands were found");
+    assert!(relations > 0, "no golden relations were found");
+}
+
+#[test]
+fn a_classification_transform_is_a_relation_entry_not_a_command() {
+    // The transform of a DecisionTreeClassifier model is an MlRelation: it decodes as an MlCommand
+    // Fit too, so only its entry tells them apart.
+    let models = fixture(MODELS);
+    let transform = &models["models"]["DecisionTreeClassifier"]["members"]["transform"];
+    assert!(is_relation_entry(transform));
+    let checked = catch_unwind(AssertUnwindSafe(|| golden_commands(transform)));
+    let message = panic_message(checked.err().expect("a relation entry is checked"));
+    assert!(message.contains("MlRelation"), "{message}");
+    let relations = golden_relations(transform);
+    assert!(matches!(relations[0].ml_type, Some(MlType::Transform(_))));
 }
 
 #[test]
