@@ -11,8 +11,13 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use ml_golden::*;
 use prost::Message;
-use serde_json::Value as Json;
-use spark_connect::ml::{fetch, CountVectorizerModel, Imputer, MlTarget, StringIndexerModel};
+use serde_json::{json, Value as Json};
+use spark_connect::ml::{
+    fetch, ClassificationModel, CountVectorizerModel, DecisionTreeClassifier, Estimator,
+    GBTClassifier, Imputer, LogisticRegression, MlTarget, Params, RandomForestClassifier,
+    StringIndexerModel, TreeEnsembleModel,
+};
+use spark_connect::DataFrame;
 use spark_connect_proto as proto;
 use spark_connect_proto::ml_command_result::ml_operator_info::Type;
 use spark_connect_proto::ml_relation::MlType;
@@ -237,6 +242,97 @@ fn a_dropped_model_sends_a_delete_that_the_replay_records() {
         server.pending_requests().is_empty(),
         "a delete is a command"
     );
+}
+
+/// The params that the golden fit of a family sent, as its estimator is built with them.
+fn golden_fit_params(fit: &Json) -> proto::MlParams {
+    let command = proto::MlCommand::decode(
+        STANDARD
+            .decode(fit["commands"][0].as_str().unwrap())
+            .unwrap()
+            .as_slice(),
+    )
+    .unwrap();
+    let Some(proto::ml_command::Command::Fit(sent)) = command.command else {
+        panic!("the golden fit is not a Fit");
+    };
+    sent.params.expect("the golden fit's params")
+}
+
+/// The fit entry of a tree family, replayed: an estimator with the params of the golden fit,
+/// fitted on a dataset and then read as PySpark's fit reads its model, sends the golden fit's
+/// commands. The golden's dataset is not compared (see `normalize_commands`).
+fn check_tree_fit<E: Estimator>(
+    models: &Json,
+    family: &str,
+    mut estimator: E,
+    fit_and_read: impl FnOnce(&mut E, &DataFrame),
+) {
+    let fit = &models["fits"][family]["fit"];
+    let (server, session) = ReplayServer::start(&[fit]);
+    *estimator.params_mut() = Params::from_proto(&golden_fit_params(fit));
+    let train = session.range(1).unwrap();
+    fit_and_read(&mut estimator, &train);
+    assert_commands(&server, fit, family);
+}
+
+#[test]
+fn tree_classifier_fits_send_the_golden_fit_commands() {
+    let models = fixture(MODELS);
+    // A decision tree's fit sends the Fit alone.
+    check_tree_fit(
+        &models,
+        "DecisionTreeClassifier",
+        DecisionTreeClassifier::new(),
+        |estimator, train| {
+            estimator.fit(train).unwrap();
+        },
+    );
+    // A boosted ensemble's fit is read for its trees, and a forest's also for its classes.
+    check_tree_fit(
+        &models,
+        "GBTClassifier",
+        GBTClassifier::new(),
+        |estimator, train| {
+            estimator.fit(train).unwrap().trees().unwrap();
+        },
+    );
+    for family in [
+        "RandomForestClassifier.binary",
+        "RandomForestClassifier.multiclass",
+    ] {
+        check_tree_fit(
+            &models,
+            family,
+            RandomForestClassifier::new(),
+            |estimator, train| {
+                let model = estimator.fit(train).unwrap();
+                model.num_classes().unwrap();
+                model.trees().unwrap();
+            },
+        );
+    }
+}
+
+#[test]
+fn one_vs_rest_class_fit_sends_the_golden_fit_command() {
+    // A OneVsRest fit fits its classifier once per class: the golden's first command is the
+    // first such Fit, with the classifier's params, and then its class count is read. The
+    // golden's commands do not record the fit's own DataFrame query of the largest label, which
+    // PySpark runs as a DataFrame aggregate too, and the replay does not answer DataFrame plans:
+    // so the replay checks the class fit, the golden's first command, and no more.
+    let models = fixture(MODELS);
+    let fit = &models["fits"]["OneVsRest"]["fit"];
+    let class_fit = json!({
+        "commands": [fit["commands"][0]],
+        "results": [fit["results"][0]],
+    });
+    let (server, session) = ReplayServer::start(&[&class_fit]);
+    let mut classifier = LogisticRegression::new();
+    *classifier.params_mut() = Params::from_proto(&golden_fit_params(&class_fit));
+    let train = session.range(1).unwrap();
+    classifier.fit(&train).unwrap();
+    assert_commands(&server, &class_fit, "OneVsRest class fit");
 }
 
 #[test]
