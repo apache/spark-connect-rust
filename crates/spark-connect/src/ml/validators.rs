@@ -1575,6 +1575,20 @@ mod tests {
     }
 
     #[test]
+    fn the_stages_of_a_pipeline_model_stage_are_nested_stages() {
+        // A model stage is a `Box<dyn Model>`, whose stages are found through `dyn Model`: the
+        // stages of a PipelineModel stage are nested stages, as `getAllNestedStages` of PySpark
+        // finds them (the `Any` of the box itself is not the model's).
+        let inner = PipelineModel::of_stages(Vec::new());
+        let inner_uid = inner.uid().to_string();
+        let outer = PipelineModel::of_stages(vec![PipelineStage::Model(Box::new(inner))]);
+        let outer_uid = outer.uid().to_string();
+        let mut uids = Vec::new();
+        nested_uids(&PipelineStage::Model(Box::new(outer)), &mut uids).unwrap();
+        assert_eq!(uids, vec![outer_uid, inner_uid]);
+    }
+
+    #[test]
     fn the_nested_stages_of_a_one_vs_rest_are_its_classifier_and_its_models() {
         // As `getAllNestedStages` of PySpark's OneVsRest: its classifier, and of a model its
         // classifier and each of its models.
