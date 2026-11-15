@@ -269,10 +269,12 @@ fn check_tree_fit<E: Estimator>(
     fit_and_read: impl FnOnce(&mut E, &DataFrame),
 ) {
     let fit = &models["fits"][family]["fit"];
+    let dataset = models["fits"][family]["dataset"].as_str().unwrap();
     let (server, session) = ReplayServer::start(&[fit]);
     *estimator.params_mut() = Params::from_proto(&golden_fit_params(fit));
-    let train = session.range(1).unwrap();
+    let train = golden_dataset(&session, &models["datasets"], dataset);
     fit_and_read(&mut estimator, &train);
+    assert_fit_dataset(&server, &models["datasets"], dataset);
     assert_commands(&server, fit, family);
 }
 
@@ -330,7 +332,9 @@ fn one_vs_rest_class_fit_sends_the_golden_fit_command() {
     let (server, session) = ReplayServer::start(&[&class_fit]);
     let mut classifier = LogisticRegression::new();
     *classifier.params_mut() = Params::from_proto(&golden_fit_params(&class_fit));
-    let train = session.range(1).unwrap();
+    // The class fit trains on the golden rows with a binary label of its own (a transform of the
+    // dataset), so the dataset itself is not checked here.
+    let train = golden_dataset(&session, &models["datasets"], "multi_train");
     classifier.fit(&train).unwrap();
     assert_commands(&server, &class_fit, "OneVsRest class fit");
 }

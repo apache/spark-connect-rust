@@ -13,7 +13,7 @@ mod ml_golden;
 
 use std::collections::BTreeSet;
 
-use ml_golden::{assert_commands, ReplayServer};
+use ml_golden::{assert_commands, assert_fit_dataset, golden_dataset, ReplayServer};
 use serde_json::{json, Value};
 use spark_connect::ml::{load_stage, Estimator, Params, PipelineStage};
 use spark_connect::ml::{
@@ -347,8 +347,13 @@ const SUMMARY_SKIPPED: [&str; 8] = [
     "str()",
 ];
 
-fn fit_naive_bayes(session: &SparkSession, estimator: &mut NaiveBayes) -> Result<NaiveBayesModel> {
-    estimator.fit(&session.range(3)?)
+fn fit_naive_bayes(
+    session: &SparkSession,
+    datasets: &Value,
+    dataset: &str,
+    estimator: &mut NaiveBayes,
+) -> Result<NaiveBayesModel> {
+    estimator.fit(&golden_dataset(session, datasets, dataset))
 }
 
 #[test]
@@ -363,13 +368,16 @@ fn naive_bayes_members_match_official_pyspark() {
         let entry = &models["models"][key];
         let errors = models["models"].get(format!("{key}.errors"));
         let fit = &models["fits"][key]["fit"];
+        let dataset = models["fits"][key]["dataset"].as_str().unwrap();
         let mut entries = vec![fit, entry];
         entries.extend(errors);
         let (server, session) = ReplayServer::start(&entries);
         let mut estimator = NaiveBayes::new()
             .set_model_type(model_type)
             .set_weight_col("weight");
-        let model = fit_naive_bayes(&session, &mut estimator).unwrap();
+        let model =
+            fit_naive_bayes(&session, &models["datasets"], dataset, &mut estimator).unwrap();
+        assert_fit_dataset(&server, &models["datasets"], dataset);
         assert_commands(&server, fit, "fit");
 
         let mut checker = Checker::new(&server, &entry["members"]);
@@ -409,11 +417,14 @@ fn naive_bayes_load_and_save_match_official_pyspark() {
 
         // Save: a write of the fitted model, with the params that its estimator sets.
         let fit = &models["fits"][key]["fit"];
+        let dataset = models["fits"][key]["dataset"].as_str().unwrap();
         let (server, session) = ReplayServer::start(&[fit, &models["models"][key], saved]);
         let mut estimator = NaiveBayes::new()
             .set_model_type(model_type)
             .set_weight_col("weight");
-        let model = fit_naive_bayes(&session, &mut estimator).unwrap();
+        let model =
+            fit_naive_bayes(&session, &models["datasets"], dataset, &mut estimator).unwrap();
+        assert_fit_dataset(&server, &models["datasets"], dataset);
         assert_commands(&server, fit, "fit");
         model.write().unwrap().overwrite().save("<path>").unwrap();
         assert_commands(&server, &saved["save"], &format!("{key}: save"));
@@ -429,6 +440,7 @@ fn multilayer_perceptron_members_and_summaries_match_official_pyspark() {
     let training = &summaries["summaries"][format!("{key}.training")];
     let evaluate = &summaries["summaries"][format!("{key}.evaluate")];
     let fit = &models["fits"][key]["fit"];
+    let dataset = models["fits"][key]["dataset"].as_str().unwrap();
     let (server, session) = ReplayServer::start(&[fit, entry, training, evaluate]);
     let mut estimator = MultilayerPerceptronClassifier::new()
         .set_layers([2, 4, 3])
@@ -436,7 +448,10 @@ fn multilayer_perceptron_members_and_summaries_match_official_pyspark() {
         .set_seed(42)
         .set_block_size(4)
         .set_step_size(0.1);
-    let model = estimator.fit(&session.range(3).unwrap()).unwrap();
+    let model = estimator
+        .fit(&golden_dataset(&session, &models["datasets"], dataset))
+        .unwrap();
+    assert_fit_dataset(&server, &models["datasets"], dataset);
     assert_commands(&server, fit, "fit");
 
     let mut checker = Checker::new(&server, &entry["members"]);
@@ -493,6 +508,8 @@ fn multilayer_perceptron_load_and_save_match_official_pyspark() {
     assert!(loaded.summary().is_err());
 
     let fit = &models["fits"][key]["fit"];
+
+    let dataset = models["fits"][key]["dataset"].as_str().unwrap();
     let (server, session) = ReplayServer::start(&[fit, &models["models"][key], saved]);
     let model = MultilayerPerceptronClassifier::new()
         .set_layers([2, 4, 3])
@@ -500,8 +517,9 @@ fn multilayer_perceptron_load_and_save_match_official_pyspark() {
         .set_seed(42)
         .set_block_size(4)
         .set_step_size(0.1)
-        .fit(&session.range(3).unwrap())
+        .fit(&golden_dataset(&session, &models["datasets"], dataset))
         .unwrap();
+    assert_fit_dataset(&server, &models["datasets"], dataset);
     assert_commands(&server, fit, "fit");
     model.write().unwrap().overwrite().save("<path>").unwrap();
     assert_commands(&server, &saved["save"], &format!("{key}: save"));
@@ -516,6 +534,7 @@ fn fm_members_and_summaries_match_official_pyspark() {
     let training = &summaries["summaries"][format!("{key}.training")];
     let evaluate = &summaries["summaries"][format!("{key}.evaluate")];
     let fit = &models["fits"][key]["fit"];
+    let dataset = models["fits"][key]["dataset"].as_str().unwrap();
     let (server, session) = ReplayServer::start(&[fit, entry, training, evaluate]);
     let model: FMClassificationModel = FMClassifier::new()
         .set_factor_size(2)
@@ -523,8 +542,9 @@ fn fm_members_and_summaries_match_official_pyspark() {
         .set_seed(42)
         .set_reg_param(0.01)
         .set_step_size(0.1)
-        .fit(&session.range(3).unwrap())
+        .fit(&golden_dataset(&session, &models["datasets"], dataset))
         .unwrap();
+    assert_fit_dataset(&server, &models["datasets"], dataset);
     assert_commands(&server, fit, "fit");
 
     let mut checker = Checker::new(&server, &entry["members"]);
@@ -578,6 +598,8 @@ fn fm_load_and_save_match_official_pyspark() {
     assert!(loaded.summary().is_err());
 
     let fit = &models["fits"][key]["fit"];
+
+    let dataset = models["fits"][key]["dataset"].as_str().unwrap();
     let (server, session) = ReplayServer::start(&[fit, &models["models"][key], saved]);
     let model = FMClassifier::new()
         .set_factor_size(2)
@@ -585,8 +607,9 @@ fn fm_load_and_save_match_official_pyspark() {
         .set_seed(42)
         .set_reg_param(0.01)
         .set_step_size(0.1)
-        .fit(&session.range(3).unwrap())
+        .fit(&golden_dataset(&session, &models["datasets"], dataset))
         .unwrap();
+    assert_fit_dataset(&server, &models["datasets"], dataset);
     assert_commands(&server, fit, "fit");
     model.write().unwrap().overwrite().save("<path>").unwrap();
     assert_commands(&server, &saved["save"], &format!("{key}: save"));
