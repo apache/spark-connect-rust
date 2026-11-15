@@ -488,6 +488,7 @@ def _one_vs_rest_live(rec, spark, base):
     )
     rec("fit_list", lambda: [m.transform(df).count() for m in est.fit(df, [{}, {}])])
     rec("fit_without_classifier", lambda: _unset_one_vs_rest().fit(df))
+    _one_vs_rest_parity_cases(rec, est, model, df)
     _one_vs_rest_persistence(rec, est, model, df, base)
 
 
@@ -507,6 +508,121 @@ def _params_of(obj):
     """The params of `obj` and their values, without the classifier (whose repr has a uid)."""
     return sorted(
         (p.name, repr(v)) for p, v in obj.extractParamMap().items() if p.name != "classifier"
+    )
+
+
+def _weight_warnings(fit):
+    """The categories and messages of the warnings about a weightCol that `fit` raises."""
+    import warnings
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        fit()
+    return [
+        (w.category.__name__, str(w.message)) for w in caught if "weightCol" in str(w.message)
+    ]
+
+
+def _assigned_copy(model, count):
+    """A copy of `model` whose `models` are assigned the first `count` of its models."""
+    copied = model.copy()
+    copied.models = copied.models[:count]
+    return copied
+
+
+def _assigned_copy_leaves_original(model):
+    """The length of the models of `model` after an assignment of the models of its copy."""
+    _assigned_copy(model, 2)
+    return len(model.models)
+
+
+def _one_vs_rest_parity_cases(rec, est, model, df):
+    """The cases of the OneVsRestModel as PySpark's: its transform, which composes the transforms
+    of its models, not its own columns; its constructor, of models; its `models` attribute, which
+    is assigned; and the weightCol of the classes, which a classifier that is a HasWeightCol takes
+    (FMClassifier does, the MultilayerPerceptronClassifier does not, and warns of it)."""
+    from pyspark.sql import functions as F
+
+    classifier = est.getClassifier()
+    # The transform reads the featuresCol and the rawPredictionCol of the models, never the model's.
+    rec(
+        "copy_setFeaturesCol_transform_columns",
+        lambda: model.copy().setFeaturesCol("f2").transform(df).columns,
+    )
+    rec("copy_setFeaturesCol_transform", lambda: model.copy().setFeaturesCol("f2").transform(df))
+    rec(
+        "copy_setRawPredictionCol_rq_transform_columns",
+        lambda: model.copy().setRawPredictionCol("rq").transform(df).columns,
+    )
+    rec(
+        "map_rawPredictionCol_rq_transform_columns",
+        lambda: model.transform(df, {model.rawPredictionCol: "rq"}).columns,
+    )
+    rec(
+        "copy_setRawPredictionCol_empty_transform_columns",
+        lambda: model.copy().setRawPredictionCol("").transform(df).columns,
+    )
+    raw_fit = _native("OneVsRest")(classifier=classifier, rawPredictionCol="rp").fit(df)
+    rec("estimator_rawPredictionCol_rp_model_raw", lambda: raw_fit.getRawPredictionCol())
+    rec(
+        "estimator_rawPredictionCol_rp_transform_columns",
+        lambda: raw_fit.transform(df).columns,
+    )
+    # The constructor of the models, as PySpark's: a new uid, the defaults, no set params, and no
+    # classifier, by a keyword or a positional argument.
+    cls = _native("OneVsRestModel")
+    rec("ctor_keyword_uid_prefix", lambda: cls(models=model.models).uid.split("_")[0])
+    rec(
+        "ctor_keyword_uid_suffix_length",
+        lambda: len(cls(models=model.models).uid.split("_")[1]),
+    )
+    rec(
+        "ctor_keyword_isSet",
+        lambda: [
+            cls(models=model.models).isSet(name)
+            for name in ["featuresCol", "labelCol", "predictionCol", "rawPredictionCol"]
+        ],
+    )
+    rec("ctor_keyword_params", lambda: _params_of(cls(models=model.models)))
+    rec(
+        "ctor_keyword_isSet_classifier",
+        lambda: cls(models=model.models).isSet("classifier"),
+    )
+    rec(
+        "ctor_keyword_transform_columns",
+        lambda: cls(models=model.models).transform(df).columns,
+    )
+    rec("ctor_keyword_transform", lambda: cls(models=model.models).transform(df))
+    rec("ctor_positional_uid_prefix", lambda: cls(model.models).uid.split("_")[0])
+    rec("ctor_positional_models_len", lambda: len(cls(model.models).models))
+    rec(
+        "ctor_positional_transform_columns",
+        lambda: cls(model.models).transform(df).columns,
+    )
+    rec("ctor_positional_transform", lambda: cls(model.models).transform(df))
+    # The `models` attribute is assigned, as PySpark's plain attribute; an assignment to the models
+    # of a copy leaves the original's models as they were.
+    rec("models_assign_type", lambda: type(_assigned_copy(model, 2).models).__name__)
+    rec("models_assign_len", lambda: len(_assigned_copy(model, 2).models))
+    rec("models_assign_transform_columns", lambda: _assigned_copy(model, 2).transform(df).columns)
+    rec("models_assign_transform", lambda: _assigned_copy(model, 2).transform(df))
+    rec("models_assign_copy_leaves_original", lambda: _assigned_copy_leaves_original(model))
+    # The weightCol of the classes: a HasWeightCol takes it, and the others warn of it by their str.
+    weighted = df.withColumn("w", F.lit(1.0))
+
+    def weighted_fit(classifier):
+        return _native("OneVsRest")(classifier=classifier, weightCol="w").fit(weighted)
+
+    mlp = _native("MultilayerPerceptronClassifier")(layers=[2, 4, 2], maxIter=2, seed=1)
+    rec("mlp_weight_warnings", lambda: _weight_warnings(lambda: weighted_fit(mlp)))
+    fm = _native("FMClassifier")(maxIter=2, seed=1, factorSize=2)
+    rec("fm_weight_warnings", lambda: _weight_warnings(lambda: weighted_fit(fm)))
+    rec(
+        "fm_weight_submodel_weightCols",
+        lambda: [
+            s.getWeightCol() if s.isDefined(s.weightCol) else None
+            for s in weighted_fit(fm).models
+        ],
     )
 
 

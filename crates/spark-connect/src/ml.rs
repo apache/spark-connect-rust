@@ -2472,12 +2472,10 @@ impl Classifier {
         }
     }
 
-    /// Whether this classifier accepts instance weights.
+    /// Whether this classifier accepts instance weights, that is whether it is a `HasWeightCol` of
+    /// PySpark: every classifier but the multilayer perceptron, FM included.
     pub fn supports_weight(&self) -> bool {
-        !matches!(
-            self,
-            Self::FMClassifier(_) | Self::MultilayerPerceptronClassifier(_)
-        )
+        !matches!(self, Self::MultilayerPerceptronClassifier(_))
     }
 }
 

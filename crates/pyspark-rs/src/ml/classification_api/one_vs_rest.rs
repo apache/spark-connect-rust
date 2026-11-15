@@ -10,7 +10,7 @@ use spark_connect::ml::{
     join_path, save_metadata, Metadata, OneVsRestModel as CoreOneVsRestModel, SubModel,
 };
 use spark_connect::SparkSession;
-use std::sync::OnceLock;
+use std::sync::{Mutex, PoisonError};
 
 /// The fit of a OneVsRest, of what its model's submodels are made of: the training DataFrame, the
 /// prefix of the names of the binary labels that the core fits them with, and the columns of
@@ -25,8 +25,10 @@ pub(crate) struct OneVsRestFit {
 }
 
 /// OneVsRestModel: the models of the classes of a fit, with the classifier and the other params
-/// that PySpark's OneVsRestModel holds. Its transform is the composite model's of the core, and its
-/// `models` are the typed submodels of the composite, as PySpark's `OneVsRest._fit` makes them.
+/// that PySpark's OneVsRestModel holds. Its `transform` is PySpark's, which composes the transforms
+/// of its `models` (`OneVsRestModel._transform`), and its `models` are the typed submodels of the
+/// fit, as PySpark's `OneVsRest._fit` makes them, or the list that a constructor or an assignment
+/// gives.
 #[pyclass(
     subclass,
     name = "OneVsRestModel",
@@ -36,10 +38,11 @@ pub struct PyOneVsRestModel {
     core: object::ModelCore,
     /// The Python values of the identity params: the classifier.
     raw: Vec<(&'static str, Py<PyAny>)>,
-    /// The fit that the submodels are made of; None of a loaded model.
+    /// The fit that the submodels are made of; None of a loaded or constructed model.
     fit: Option<OneVsRestFit>,
-    /// The `models`, set by the fit, the load or the copy that makes the model, then the same list.
-    models: OnceLock<Py<PyList>>,
+    /// The `models` attribute, which PySpark keeps as a plain attribute: the object that the fit,
+    /// the load, the copy, the constructor or an assignment gives.
+    models: Mutex<Option<Py<PyAny>>>,
 }
 
 impl PyOneVsRestModel {
@@ -58,11 +61,11 @@ impl PyOneVsRestModel {
             core,
             raw: vec![("classifier", classifier)],
             fit: Some(fit),
-            models: OnceLock::new(),
+            models: Mutex::new(None),
         };
         // As PySpark's classifier fits make their models, with their summaries, during the fit.
         let models = build_submodels(py, &this)?;
-        let _ = this.models.set(models);
+        this.hold_models(models.into_any());
         Ok(this)
     }
 
@@ -72,6 +75,20 @@ impl PyOneVsRestModel {
             .iter()
             .find(|(name, _)| *name == "classifier")
             .map(|(_, value)| value.clone_ref(py))
+    }
+
+    /// The `models` attribute, if one is held.
+    fn models_value(&self, py: Python<'_>) -> Option<Py<PyAny>> {
+        self.models
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .map(|models| models.clone_ref(py))
+    }
+
+    /// Hold `models` as the `models` attribute.
+    fn hold_models(&self, models: Py<PyAny>) {
+        *self.models.lock().unwrap_or_else(PoisonError::into_inner) = Some(models);
     }
 }
 
@@ -292,13 +309,14 @@ fn build_submodels(py: Python<'_>, this: &PyOneVsRestModel) -> PyResult<Py<PyLis
     Ok(list.unbind())
 }
 
-/// The `models` of `slf`: the typed submodels that the fit made.
-fn submodels(slf: &Bound<'_, PyOneVsRestModel>) -> PyResult<Py<PyList>> {
+/// The `models` of `slf`, the object that the fit, the load, the copy, the constructor or an
+/// assignment gave it.
+fn submodels(slf: &Bound<'_, PyOneVsRestModel>) -> PyResult<Py<PyAny>> {
     let this = slf.try_borrow()?;
-    match this.models.get() {
-        Some(list) => Ok(list.clone_ref(slf.py())),
+    match this.models_value(slf.py()) {
+        Some(models) => Ok(models),
         None => Err(PyValueError::new_err(
-            "the models of a loaded OneVsRestModel are not held",
+            "the models of a OneVsRestModel are not held",
         )),
     }
 }
@@ -354,7 +372,7 @@ impl params_api::NativeInstance for PyOneVsRestModel {
                 core: self.core.duplicate(py),
                 raw,
                 fit: self.fit.clone(),
-                models: OnceLock::new(),
+                models: Mutex::new(self.models_value(py)),
             },
         )
     }
@@ -384,30 +402,34 @@ native_pymethods! {
         "weightCol" => ("getWeightCol", get_weight_col, param_weight_col),
     ];
 
-    /// The models of the classes, as PySpark's `models` attribute: the typed models of the
-    /// classifier, each of the uid of the classifier.
+    /// The `models` attribute, as PySpark's: the typed models of the classifier, each of the uid of
+    /// the classifier, or the object that was assigned to it.
     #[getter]
-    fn models(slf: &Bound<'_, Self>) -> PyResult<Py<PyList>> {
+    fn models(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
         submodels(slf)
     }
 
-    /// The transform of `dataset`, as `Transformer.transform`: of a copy of the model of a
-    /// non-empty param map `params`.
-    #[pyo3(signature = (dataset, params=None))]
-    fn transform<'py>(
-        slf: &Bound<'py, Self>,
-        dataset: &Bound<'py, PyAny>,
-        params: Option<&Bound<'py, PyAny>>,
-    ) -> PyResult<Py<PyAny>> {
-        let map = params.filter(|p| p.cast::<PyDict>().is_ok_and(|d| !d.is_empty()));
-        if let Some(map) = map {
-            let copy = params_api::copy(slf, Some(map))?;
-            return Ok(copy.call_method1("transform", (dataset,))?.unbind());
-        }
-        crate::ml::check_params(params)?;
-        let input = crate::ml::dataset_of(dataset, "transform")?;
-        let df = slf.try_borrow()?.core.transform(slf.py(), &input)?;
-        Ok(Py::new(slf.py(), PyDataFrame::new(df))?.into_any())
+    #[setter]
+    fn set_models(slf: &Bound<'_, Self>, value: Py<PyAny>) -> PyResult<()> {
+        slf.try_borrow()?.hold_models(value);
+        Ok(())
+    }
+
+    /// A model of the given `models`, as PySpark's `OneVsRestModel(models)`: of a new uid and no
+    /// set params, with the defaults of the class, and of no classifier.
+    #[new]
+    fn new(py: Python<'_>, models: Py<PyAny>) -> PyResult<Self> {
+        let core = object::ModelCore::unbound(
+            py,
+            "org.apache.spark.ml.classification.OneVsRestModel",
+            "OneVsRestModel",
+        )?;
+        Ok(Self {
+            core,
+            raw: Vec::new(),
+            fit: None,
+            models: Mutex::new(Some(models)),
+        })
     }
 
     /// A copy of the same uid and params, with `extra`, as `OneVsRestModel.copy`: `Params.copy`,
@@ -422,10 +444,10 @@ native_pymethods! {
         let extra = crate::ml::pipeline_api::extra_or_empty(py, extra);
         let that = params_api::copy(slf, Some(&extra))?;
         let models = PyList::empty(py);
-        for model in submodels(slf)?.bind(py).iter() {
-            models.append(model.call_method1("copy", (&extra,))?)?;
+        for model in submodels(slf)?.bind(py).try_iter()? {
+            models.append(model?.call_method1("copy", (&extra,))?)?;
         }
-        let _ = that.try_borrow()?.models.set(models.unbind());
+        that.try_borrow()?.hold_models(models.into_any().unbind());
         Ok(that)
     }
 
@@ -772,9 +794,8 @@ fn load_one_vs_rest_model(
         core,
         raw: vec![("classifier", classifier.unbind())],
         fit: None,
-        models: OnceLock::new(),
+        models: Mutex::new(Some(models.into_any().unbind())),
     };
-    let _ = model.models.set(models.unbind());
     let model = crate::ml::object::new_object(py, model)?;
     set_metadata_params(&model, &metadata)?;
     Ok(model.into_any().unbind())
