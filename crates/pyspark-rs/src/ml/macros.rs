@@ -43,6 +43,21 @@ macro_rules! params_api_block {
                 Err($crate::ml::params_api::no_attribute(slf.as_any(), name))
             }
 
+            /// `copy.copy`, as of PySpark's object (see `params_api::shallow_copy`).
+            fn __copy__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+                $crate::ml::params_api::shallow_copy(slf)
+            }
+
+            /// The state that `copy.deepcopy` and `pickle` take (see `params_api::get_state`).
+            fn __getstate__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyDict>> {
+                $crate::ml::params_api::get_state(slf)
+            }
+
+            /// The object of a state of `__getstate__`.
+            fn __setstate__(slf: &Bound<'_, Self>, state: &Bound<'_, PyAny>) -> PyResult<()> {
+                $crate::ml::params_api::set_state(slf, state)
+            }
+
             /// `getParam(paramName)`, of PySpark's keyword.
             #[pyo3(name = "getParam")]
             #[allow(non_snake_case)]
@@ -185,6 +200,13 @@ macro_rules! native_pymethods {
                     $crate::ml::params_api::NativeInstance::uid(self)
                 }
 
+                /// Set the uid, as an assignment of PySpark's `uid` of the instance does (and its
+                /// `_resetUid`).
+                #[setter(uid)]
+                fn __set_uid(&mut self, uid: String) {
+                    $crate::ml::params_api::NativeInstance::set_uid(self, &uid)
+                }
+
                 /// The uid, as `Identifiable.__repr__`.
                 fn __repr__(slf: &Bound<'_, Self>) -> PyResult<String> {
                     slf.getattr("uid")?.extract()
@@ -290,6 +312,13 @@ macro_rules! native_pymethods {
                 #[getter]
                 fn uid(&self) -> String {
                     $crate::ml::params_api::NativeInstance::uid(self)
+                }
+
+                /// Set the uid, as an assignment of PySpark's `uid` of the instance does (and its
+                /// `_resetUid`).
+                #[setter(uid)]
+                fn __set_uid(&mut self, uid: String) {
+                    $crate::ml::params_api::NativeInstance::set_uid(self, &uid)
                 }
 
                 /// The uid, as `Identifiable.__repr__`.
@@ -525,6 +554,16 @@ macro_rules! native_model {
             fn set_uid(&mut self, uid: &str) {
                 self.core.model.operator_mut().uid = uid.to_string();
             }
+
+            /// A model of a server-side object is not copied deep nor pickled, as PySpark's of a
+            /// `RemoteModelRef`; one of no server-side object is.
+            fn check_picklable(&self) -> PyResult<()> {
+                if self.core.is_unbound() {
+                    Ok(())
+                } else {
+                    Err($crate::ml::params_api::lock_error())
+                }
+            }
         }
 
         impl $ty {
@@ -619,6 +658,13 @@ macro_rules! native_model {
                 #[getter]
                 fn uid(&self) -> String {
                     self.core.uid()
+                }
+
+                /// Set the uid, as an assignment of PySpark's `uid` of the instance does (and its
+                /// `_resetUid`).
+                #[setter(uid)]
+                fn __set_uid(&mut self, uid: String) {
+                    $crate::ml::params_api::NativeInstance::set_uid(self, &uid)
                 }
 
                 /// The transform of `dataset`, as `Transformer.transform`: of a copy of the model
@@ -805,6 +851,33 @@ macro_rules! native_summary {
             /// PySpark's class (see `params_api::no_attribute`).
             fn __getattr__(slf: &Bound<'_, Self>, name: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
                 Err($crate::ml::params_api::no_attribute(slf.as_any(), name))
+            }
+
+            /// `copy.copy`, as of PySpark's summary: of the same server-side object, of the class
+            /// and the attributes of the summary.
+            fn __copy__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+                let target = slf.try_borrow()?.target.clone();
+                let that = $crate::ml::object::new_py(slf.py(), Self { target })?
+                    .into_bound(slf.py())
+                    .into_any();
+                $crate::ml::params_api::copy_class_and_attributes(slf.as_any(), &that)?;
+                Ok(that)
+            }
+
+            /// `copy.deepcopy` of PySpark's summary raises the TypeError of the lock of its
+            /// model's `RemoteModelRef`.
+            fn __deepcopy__(&self, memo: &Bound<'_, PyAny>) -> PyResult<()> {
+                let _ = memo;
+                Err($crate::ml::params_api::lock_error())
+            }
+
+            /// `pickle` of PySpark's summary raises the error of the local function of the
+            /// `SparkSession.__reduce__` of its DataFrames' session.
+            fn __reduce_ex__(&self, protocol: &Bound<'_, PyAny>) -> PyResult<()> {
+                let _ = protocol;
+                Err(pyo3::exceptions::PyAttributeError::new_err(
+                    "Can't pickle local object 'SparkSession.__reduce__.<locals>.creator'",
+                ))
             }
 
             $(

@@ -85,6 +85,14 @@ def parse_message(data):
     return fields
 
 
+def _is_ml_delete(request):
+    """Whether the ExecutePlanRequest `request` is of an ML Delete command (plan=3, Plan.command=2,
+    Command.ml_command=17, MlCommand.delete=3)."""
+    plan = parse_message(parse_message(request).get(3, [b""])[0])
+    command = parse_message(plan.get(2, [b""])[0])
+    return 3 in parse_message(command.get(17, [b""])[0])
+
+
 # The JSON names of the atomic types of DDL names, and the DataType kinds (types.proto) of the
 # JSON names.
 _ATOMIC_JSON = {
@@ -767,8 +775,11 @@ def serve(connection):
                     break
             else:
                 # A request of a forgotten session, such as the late Delete of a model that an
-                # earlier test released, takes no queued response of the test that runs.
-                if recorded and self.execute_payload_queue:
+                # earlier test released, takes no queued response of the test that runs, and
+                # neither does the Delete of a model that the test itself released: a model that
+                # an exception's traceback holds is released when the garbage collector frees it,
+                # at any request of a later fit.
+                if recorded and self.execute_payload_queue and not _is_ml_delete(request):
                     payloads = [self.execute_payload_queue.pop(0)]
             # ExecutePlanRequest.plan=3, of which Plan.command=2 is set for a command only.
             plan = parse_message(parse_message(request).get(3, [b""])[0])
