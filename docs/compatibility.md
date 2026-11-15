@@ -1041,9 +1041,10 @@ fixture captures all nine parameters for each model type from official PySpark.
 
 The Rust `NaiveBayesModel` has PySpark 4.3.0's model members: `pi`, `theta` and `sigma` (a
 0 by 0 matrix for multinomial, complement and Bernoulli models), `numClasses`, `numFeatures`,
-`predict`, `predictRaw` and `predictProbability` of one vector, and `NaiveBayesModel::load`. The
-estimator's `fit` returns this typed model. PySpark 4.3.0 gives the model no training summary. The
-Rust param accessors are generated from PySpark's param table: `features_col` and
+`predict`, `predictRaw` and `predictProbability` of one vector, and `NaiveBayesModel::load`.
+`NaiveBayes::load` reads a saved estimator with one ML Read, as PySpark's `NaiveBayes.load`
+does. The estimator's `fit` returns this typed model. PySpark 4.3.0 gives the model no training
+summary. The Rust param accessors are generated from PySpark's param table: `features_col` and
 `set_features_col` replace the former `feature_col` and `set_feature_col`.
 
 In Python, `NaiveBayes` and its `NaiveBayesModel` follow the full API of `pyspark.ml`
@@ -1151,8 +1152,10 @@ probability and raw-prediction columns, with configurable thresholds. Both the
 `gd` and `adamW` solvers run on the Spark server.
 
 The Rust `FMClassificationModel` has `factors`, `linear`, `intercept`, `predict`, `predictRaw`
-and `predictProbability` of one vector, `numClasses`, `numFeatures`, and `load`. Its `summary()`
-is the binary training summary of a fitted model, and `has_summary()` says whether one exists;
+and `predictProbability` of one vector, `numClasses`, `numFeatures`, and `load`.
+`FMClassifier::load` reads a saved estimator with one ML Read, as PySpark's `FMClassifier.load`
+does. Its `summary()` is the binary training summary of a fitted model, and `has_summary()` says
+whether one exists;
 `summary()` fails for a loaded model, as PySpark does. `evaluate(&df)` returns the binary summary
 of a DataFrame, with the ROC, PR and threshold DataFrames.
 
@@ -1178,8 +1181,10 @@ columns. Both `l-bfgs` and `gd` are supported. As in PySpark, fitting an empty
 DataFrame can return a model; the native client preserves that server behavior.
 
 The Rust `MultilayerPerceptronClassificationModel` has `weights`, `predict`, `predictRaw` and
-`predictProbability` of one vector, `numClasses`, `numFeatures`, and `load`. Its `summary()` is
-the multiclass training summary of a fitted model, and `has_summary()` says whether one exists.
+`predictProbability` of one vector, `numClasses`, `numFeatures`, and `load`.
+`MultilayerPerceptronClassifier::load` reads a saved estimator with one ML Read, as PySpark's
+`MultilayerPerceptronClassifier.load` does. Its `summary()` is the multiclass training summary of
+a fitted model, and `has_summary()` says whether one exists.
 `summary()` fails for a loaded model, as PySpark does. `evaluate(&df)` returns the summary of
 a DataFrame. The param accessors are generated from PySpark's param table.
 
