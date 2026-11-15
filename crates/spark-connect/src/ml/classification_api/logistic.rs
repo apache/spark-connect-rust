@@ -187,7 +187,20 @@ fn binary_equivalent(params: &Params) -> Result<f64> {
             "{BINARY_ONLY}  thresholds: {thresholds:?}"
         )));
     }
-    Ok(1.0 / (1.0 + thresholds[0] / thresholds[1]))
+    equivalent_of(&thresholds)
+}
+
+/// `1.0 / (1.0 + ts[0] / ts[1])` of two thresholds `ts`, as PySpark computes it in Python: the
+/// error of Python's ZeroDivisionError when a divisor is zero (a zero `ts[1]`, or a ratio of -1).
+fn equivalent_of(thresholds: &[f64]) -> Result<f64> {
+    let divide = |a: f64, b: f64| {
+        if b == 0.0 {
+            Err(SparkError::value_msg("float division by zero"))
+        } else {
+            Ok(a / b)
+        }
+    };
+    divide(1.0, 1.0 + divide(thresholds[0], thresholds[1])?)
 }
 
 /// `_checkThresholdConsistency` of PySpark: when both the threshold and the thresholds are set,
@@ -202,7 +215,7 @@ fn check_threshold_consistency(params: &Params) -> Result<()> {
             "{BINARY_ONLY} thresholds: {thresholds:?}"
         )));
     }
-    let equivalent = 1.0 / (1.0 + thresholds[0] / thresholds[1]);
+    let equivalent = equivalent_of(&thresholds)?;
     let threshold = params.double_or("threshold", 0.5);
     if (threshold - equivalent).abs() >= 1e-5 {
         return Err(SparkError::value_msg(format!(

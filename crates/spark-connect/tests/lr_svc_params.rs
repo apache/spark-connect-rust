@@ -76,6 +76,37 @@ fn thresholds_of_more_than_two_classes_are_not_a_binary_threshold() {
 }
 
 #[test]
+fn a_zero_divisor_of_the_thresholds_is_pythons_zero_division() {
+    // Reference: PySpark computes 1 / (1 + t0 / t1) in Python, so a zero t1 (also -0.0), and a
+    // ratio t0 / t1 of -1, raise ZeroDivisionError "float division by zero" from getThreshold,
+    // and from the consistency check of a set threshold (getThreshold and getThresholds).
+    // getThresholds alone returns them.
+    for thresholds in [[0.5, 0.0], [0.0, 0.0], [1.0, -0.0], [-1.0, 1.0]] {
+        let lr = LogisticRegression::new().set_thresholds(thresholds);
+        assert_eq!(
+            error_of(lr.threshold()),
+            "float division by zero",
+            "{thresholds:?}"
+        );
+        assert_eq!(lr.thresholds().unwrap(), thresholds.to_vec());
+        let lr = lr.set_threshold(0.5);
+        assert_eq!(
+            error_of(lr.threshold()),
+            "float division by zero",
+            "{thresholds:?}"
+        );
+        assert_eq!(
+            error_of(lr.thresholds()),
+            "float division by zero",
+            "{thresholds:?}"
+        );
+    }
+    // Reference: a zero t0 is no zero divisor: the equivalent threshold is 1.
+    let lr = LogisticRegression::new().set_thresholds([0.0, 0.5]);
+    assert_eq!(lr.threshold().unwrap(), 1.0);
+}
+
+#[test]
 fn constructor_params_are_checked_for_agreement() {
     // Reference: threshold=0.7 with thresholds=[0.3, 0.7] agrees, so getThreshold is 0.7.
     let mut lr = LogisticRegression::new();
