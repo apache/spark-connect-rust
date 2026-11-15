@@ -15,11 +15,13 @@ use std::collections::BTreeSet;
 
 use ml_golden::{assert_commands, ReplayServer};
 use serde_json::{json, Value};
+use spark_connect::ml::{load_stage, Estimator, Params, PipelineStage};
 use spark_connect::ml::{
     BinaryClassificationSummary, ClassificationSummary, FMClassificationModel, FMClassifier,
     MlMatrix, MlSummary, MlTarget, MlVector, Model, MultilayerPerceptronClassificationModel,
-    MultilayerPerceptronClassifier, NaiveBayes, NaiveBayesModel, PredictionModel,
-    ProbabilisticClassificationModel, TrainingSummary,
+    MultilayerPerceptronClassifier, NaiveBayes, NaiveBayesModel, OneVsRest, OneVsRestModel,
+    PredictionModel, ProbabilisticClassificationModel, RandomForestClassificationModel,
+    RandomForestClassifier, TrainingSummary,
 };
 use spark_connect::SparkSession;
 use spark_connect_core::error::Result;
@@ -588,4 +590,134 @@ fn fm_load_and_save_match_official_pyspark() {
     assert_commands(&server, fit, "fit");
     model.write().unwrap().overwrite().save("<path>").unwrap();
     assert_commands(&server, &saved["save"], &format!("{key}: save"));
+}
+
+/// The `MlOperatorInfo` that a golden load read: its uid and its params.
+fn operator_info(load: &Value) -> spark_connect_proto::ml_command_result::MlOperatorInfo {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    use prost::Message;
+    let result = spark_connect_proto::MlCommandResult::decode(
+        STANDARD
+            .decode(load["results"][0].as_str().unwrap())
+            .unwrap()
+            .as_slice(),
+    )
+    .unwrap();
+    match result.result_type {
+        Some(spark_connect_proto::ml_command_result::ResultType::OperatorInfo(info)) => info,
+        other => panic!("not an operator info: {other:?}"),
+    }
+}
+
+/// The estimator that PySpark's loader reads at a path by its class name, as the stage of that
+/// class: a Naive Bayes, MLP or FM estimator, which has no typed load of its own.
+fn load_estimator_stage(session: &SparkSession, path: &str) -> Result<Box<dyn Estimator>> {
+    match load_stage(session, path)? {
+        PipelineStage::Estimator(stage) => Ok(stage),
+        _ => panic!("{path}: not an estimator"),
+    }
+}
+
+/// An estimator's persistence entry, which no other test replays: its load reads the uid and the
+/// params that the golden load read, and its save of the loaded estimator sends the golden save.
+fn check_estimator_entry(
+    persistence: &Value,
+    key: &str,
+    load: impl FnOnce(&SparkSession) -> Result<Box<dyn Estimator>>,
+) {
+    let entry = &persistence["persistence"][key];
+    let (server, session) = ReplayServer::start(&[entry]);
+    let estimator = load(&session).unwrap_or_else(|e| panic!("{key}: {e}"));
+    assert_commands(&server, &entry["load"], &format!("{key}: load"));
+    let info = operator_info(&entry["load"]);
+    assert_eq!(estimator.operator().uid, info.uid.unwrap(), "{key}: uid");
+    // As the LR tests: each golden param is the loaded one, an integer of any width.
+    ml_golden::assert_params(
+        estimator.params(),
+        &Params::from_proto(&info.params.unwrap()),
+        key,
+    );
+    estimator
+        .write()
+        .session(&session)
+        .overwrite()
+        .save("/unused/path")
+        .unwrap();
+    assert_commands(&server, &entry["save"], &format!("{key}: save"));
+}
+
+/// A model's persistence entry, which no other test replays: its load reads the uid that the
+/// golden load read, and its save sends the golden save. Its members are not replayed here.
+fn check_model_entry<M: Model>(
+    persistence: &Value,
+    key: &str,
+    load: impl FnOnce(&SparkSession) -> Result<M>,
+) {
+    let entry = &persistence["persistence"][key];
+    let (server, session) = ReplayServer::start(&[entry]);
+    let model = load(&session).unwrap_or_else(|e| panic!("{key}: {e}"));
+    assert_commands(&server, &entry["load"], &format!("{key}: load"));
+    assert_eq!(
+        model.operator().uid,
+        operator_info(&entry["load"]).uid.unwrap(),
+        "{key}: uid"
+    );
+    model
+        .write()
+        .unwrap()
+        .overwrite()
+        .save("/unused/path")
+        .unwrap();
+    assert_commands(&server, &entry["save"], &format!("{key}: save"));
+}
+
+/// The persistence entry of the multiclass random forest's estimator, which no other test loads.
+/// Its model, and the entries of Naive Bayes, MLP, FM and OneVsRest, are in the known-failure test
+/// below.
+#[test]
+fn unused_persistence_entries_match_official_pyspark() {
+    let persistence: Value = serde_json::from_str(PERSISTENCE).unwrap();
+    check_estimator_entry(
+        &persistence,
+        "RandomForestClassifier.multiclass.estimator",
+        |s| Ok(Box::new(RandomForestClassifier::load(s, "/unused/path")?)),
+    );
+}
+
+/// KNOWN FAILURE: loads that PySpark makes with ML Read commands, which the golden records, but the
+/// Rust client makes differently. The Naive Bayes, MLP and FM estimators have no typed load: the
+/// generic stage loader reads the metadata with a DataFrame query and has no branch for their
+/// classes. The OneVsRest estimator and model read their metadata with a DataFrame query too. The
+/// multiclass forest's model load is a Read followed by a Fetch of its trees, which PySpark's
+/// golden records, and the Rust load sends only the Read (the trees are read when they are asked
+/// for). The binary forest's model load has the same two golden commands; the offline tree test
+/// checks only the first, since its hook fails the first request. Left failing on purpose (run with
+/// `--ignored`); the product code is not changed here.
+#[test]
+#[ignore = "known gap: NB/MLP/FM/OneVsRest loads and the forest model load differ from PySpark"]
+fn naive_bayes_mlp_fm_and_one_vs_rest_loads_as_official_pyspark() {
+    let persistence: Value = serde_json::from_str(PERSISTENCE).unwrap();
+    for key in [
+        "NaiveBayes.multinomial.estimator",
+        "NaiveBayes.complement.estimator",
+        "NaiveBayes.bernoulli.estimator",
+        "NaiveBayes.gaussian.estimator",
+        "MultilayerPerceptronClassifier.estimator",
+        "FMClassifier.estimator",
+    ] {
+        check_estimator_entry(&persistence, key, |session| {
+            load_estimator_stage(session, "/unused/path")
+        });
+    }
+    check_estimator_entry(&persistence, "OneVsRest.estimator", |s| {
+        Ok(Box::new(OneVsRest::load(s, "/unused/path")?))
+    });
+    check_model_entry(&persistence, "OneVsRest.model", |s| {
+        OneVsRestModel::load(s, "/unused/path")
+    });
+    check_model_entry(
+        &persistence,
+        "RandomForestClassifier.multiclass.model",
+        |s| RandomForestClassificationModel::load(s, "/unused/path"),
+    );
 }
