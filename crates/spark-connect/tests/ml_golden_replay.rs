@@ -153,7 +153,7 @@ fn a_classification_transform_is_a_relation_entry_not_a_command() {
     let transform = &models["models"]["DecisionTreeClassifier"]["members"]["transform"];
     assert!(is_relation_entry(transform));
     let checked = catch_unwind(AssertUnwindSafe(|| golden_commands(transform)));
-    let message = panic_message(checked.err().expect("a relation entry is checked"));
+    let message = panic_message(checked.expect_err("a relation entry is checked"));
     assert!(message.contains("MlRelation"), "{message}");
     let relations = golden_relations(transform);
     assert!(matches!(relations[0].ml_type, Some(MlType::Transform(_))));
@@ -176,7 +176,7 @@ fn a_golden_with_a_random_uid_is_refused() {
         "commands": [STANDARD.encode(command.encode_to_vec())],
     });
     let refused = catch_unwind(AssertUnwindSafe(|| golden_commands(&entry)));
-    let message = panic_message(refused.err().expect("a random uid in a golden is refused"));
+    let message = panic_message(refused.expect_err("a random uid in a golden is refused"));
     assert!(message.contains("random uid"), "{message}");
 }
 
