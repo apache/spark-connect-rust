@@ -119,6 +119,31 @@ def _multiclass_frame(spark):
     return spark.createDataFrame(rows, ["label", "features"]).coalesce(1)
 
 
+def _weighted_frame(spark):
+    """The binary frame with a weight column `w`. Two of its rows are of the other class than their
+    side of 0, so that the leaves are mixed, and the weights change the probabilities."""
+    from pyspark.ml.linalg import Vectors
+
+    rows = []
+    for x in (-4, -3, -2, -1, 1, 2, 3, 4):
+        flipped = x in (1, -1)
+        label = float((x > 0) != flipped)
+        rows.append((label, Vectors.dense([float(x), 1.0]), 1.0 + x % 3))
+    return spark.createDataFrame(rows, ["label", "features", "w"]).coalesce(1)
+
+
+def _validation_frame(spark):
+    """The binary frame with a boolean column `isv` of the rows of the validation of a GBT fit."""
+    from pyspark.ml.linalg import Vectors
+
+    rows = [
+        (float(x > 0), Vectors.dense([float(x), 1.0]), x in (-8, -6, 6, 8))
+        for x in range(-8, 9)
+        if x != 0
+    ]
+    return spark.createDataFrame(rows, ["label", "features", "isv"]).coalesce(1)
+
+
 def _model_cases(rec, est, model, df):
     """The cases of any fitted tree model: its uid, params, members, predictions and transforms."""
     from pyspark.ml.linalg import Vectors
@@ -224,6 +249,7 @@ def live_cases(name, spark, base):
     rec = Recorder(base)
     df = _binary_frame(spark)
     multi_df = _multiclass_frame(spark)
+    weighted_df = _weighted_frame(spark)
     if name == "DecisionTree":
         est = estimator(maxDepth=3, seed=42)
     elif name == "RandomForest":
@@ -260,6 +286,50 @@ def live_cases(name, spark, base):
         rec("evaluateEachIteration", lambda: model.evaluateEachIteration(df))
         rec("predictLeaf_gbt", lambda: model.predictLeaf(v))
         rec("supportedLossTypes", lambda: model.supportedLossTypes)
+    # A fit with a validation column stops early once the validation error stops improving by more
+    # than validationTol: this one stops after 5 of its 20 trees.
+    if name == "GBT":
+        vdf = _validation_frame(spark)
+        early = estimator(
+            maxIter=20, maxDepth=2, seed=42, validationIndicatorCol="isv", validationTol=0.07
+        ).fit(vdf)
+        rec("early_getNumTrees", lambda: early.getNumTrees)
+        rec("early_treeWeights", lambda: early.treeWeights)
+        rec("early_evaluateEachIteration", lambda: early.evaluateEachIteration(vdf))
+        rec("early_trees_count", lambda: len(early.trees))
+    # The fit with a weight column of each classifier: its predictions, and the weights of the
+    # training summary of a forest.
+    weighted = est.copy({est.weightCol: "w"}).fit(weighted_df)
+    rec("weighted_predict", lambda: weighted.predict(v))
+    rec("weighted_predictProbability", lambda: weighted.predictProbability(v))
+    rec("weighted_transform", lambda: weighted.transform(weighted_df).select("prediction"))
+    if name == "RandomForest":
+        rec("weighted_summary_weightCol", lambda: weighted.summary.weightCol)
+        rec("weighted_summary_accuracy", lambda: weighted.summary.accuracy)
+    if name in ("DecisionTree", "RandomForest"):
+        # The leaf column, which the transform appends after the prediction.
+        with_leaf = est.copy({est.leafCol: "leaf"}).fit(df).transform(df)
+        rec("leafCol_columns", lambda: with_leaf.columns)
+        rec("leafCol_leaves", lambda: with_leaf.select("leaf"))
+        # The thresholds of a stump of the weighted frame, whose leaves hold both classes, so that
+        # they change its transform. Official PySpark's predict(features) ignores them, while its
+        # transform applies them.
+        stump = est.copy({est.weightCol: "w", est.maxDepth: 1}).fit(weighted_df)
+        thresholded = stump.copy().setThresholds([0.1, 0.9])
+        rec("thresholds_predict", lambda: thresholded.predict(v))
+        rec("thresholds_predictProbability", lambda: thresholded.predictProbability(v))
+        rec("thresholds_transform", lambda: thresholded.transform(weighted_df).select("prediction"))
+        rec("unthresholded_transform", lambda: stump.transform(weighted_df).select("prediction"))
+    # The fits that the server rejects: the error's class and first line.
+    if name == "RandomForest":
+        rec("fit_numTrees_0", lambda: estimator(numTrees=0).fit(df))
+    if name == "GBT":
+        rec("fit_stepSize_0", lambda: estimator(maxIter=2, stepSize=0).fit(df))
+        rec(
+            "fit_unknown_validationIndicatorCol",
+            lambda: estimator(maxIter=2, validationIndicatorCol="nope").fit(df),
+        )
+        rec("fit_multiclass", lambda: estimator(maxIter=2).fit(multi_df))
     _persistence_cases(rec, est, model, model_class, df, base, name)
     return rec.out
 
