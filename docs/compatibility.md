@@ -261,8 +261,10 @@ classes to build on:
 ## Native ML classes of the full pyspark.ml API (Python)
 
 The native Python classes of `pyspark.ml.connect` follow the API of `pyspark.ml` 4.3.0 over Spark
-Connect, class by class: the section of each class says when it follows it in full, and the other
-native classes follow as they are completed. A class that follows it has:
+Connect in full, one for each class of the `__all__` of its classification, clustering,
+evaluation, feature, fpm, recommendation, regression and tuning modules, and for `Pipeline` and
+`PipelineModel` (`Evaluator` and `ParamGridBuilder` are PySpark's own). Each class has, where its
+PySpark class has them:
 
 - **The Params API of `pyspark.ml.param.Params`**: `params`, `getParam`, `hasParam`, `isSet`,
   `isDefined`, `hasDefault`, `getOrDefault`, `explainParam(s)`, `extractParamMap`, `set`, `clear`
@@ -304,8 +306,8 @@ native classes follow as they are completed. A class that follows it has:
   what each other saves.
 
 `tests/golden/ml_api.json` holds the API of every public class of `pyspark.ml`, and
-`python/tests/test_ml_api_offline.py` compares each class that follows it with it: the members, the
-kinds of the members, and the parameters of each method and keyword-only constructor.
+`python/tests/test_ml_api_offline.py` compares each native class with it: the members, the kinds of
+the members, and the parameters of each method and keyword-only constructor.
 `tests/golden/misc_api_cases.json` holds the same for NaiveBayes, MultilayerPerceptronClassifier,
 FMClassifier and OneVsRest, from `python/tests/_misc_api_cases.py` and
 `scripts/capture_misc_api_cases_golden.py`, and `test_misc_api_offline.py` and
@@ -448,11 +450,9 @@ PySpark's `_set` does. As PySpark's, the `setParams` of `LogisticRegression` the
 `CrossValidator`, which takes `numFolds`, `parallelism` and `seed`, with a default of `None` for
 the first two. The `params` argument of a fit, transform or
 evaluate, which `pyspark.ml` takes as a param map, is accepted: `None` and an empty dict leave the
-params as they are. A non-empty map of a class that has the Params API's `copy` (see above) is
-copied with the map, as `Estimator.fit` and `Transformer.transform` copy it, so a key that is not a
-Param raises PySpark's `TypeError` of that copy. The other native classes have no Param objects to
-key a map by, so a non-empty map raises a `TypeError` that says the native classes take no param
-map. A list or tuple of maps to
+params as they are. A non-empty map is copied with the map, as `Estimator.fit` and
+`Transformer.transform` copy it, so a key that is not a Param raises PySpark's `TypeError` of that
+copy. A list or tuple of maps to
 a fit is fitted as `pyspark.ml` fits it: one model per map, in order, returned as a list,
 so that `[]` fits nothing and does not read the dataset. Any other value raises the `TypeError` that
 `pyspark.ml` raises for it. The `params` argument is checked first, before the dataset, as
@@ -462,8 +462,9 @@ Native `fit`, `transform` and `evaluate` require a Spark DataFrame, matching the
 contract of standard `pyspark.ml` over Spark Connect. Passing a pandas DataFrame raises
 `TypeError` before the params of the class are validated, the schema is read or any request is
 sent (the helper calls below raise PySpark's error of its serialization); only a `params` argument that is not a param map is checked before it (see above). This
-also applies to empty pandas DataFrames and to the native Pipeline and CrossValidator
-placeholders.
+also applies to empty pandas DataFrames. The native Pipeline and validators raise the errors of
+PySpark's: a Pipeline that of its first stage, and a validator the `AttributeError` of the
+`select` of its split.
 Convert local data explicitly with `df = spark.createDataFrame(pdf)` before calling
 `estimator.fit(df)`, `model.transform(df)` or `evaluator.evaluate(df)`. Transforms return Spark
 DataFrames; call `toPandas()` explicitly when a local result is needed. The deprecated
@@ -473,10 +474,10 @@ Another object than a DataFrame raises the `AttributeError` of `sparkSession`, t
 that `pyspark.ml` reads of the dataset first (`'int' object has no attribute 'sparkSession'` of
 `fit(5)`), before any request; an object that has a `sparkSession` raises a `TypeError`. The
 methods that `pyspark.ml` runs as a helper or attribute call read nothing of their dataset.
-`PrefixSpan.findFrequentSequentialPatterns`, and `ALSModel.recommendForUserSubset` and
-`recommendForItemSubset`, send a dataset that is not a DataFrame as PySpark does, and the server
-rejects it when the result is analyzed or collected. `PowerIterationClustering.assignClusters`
-still raises a `TypeError` for such a dataset. PySpark's serialization (`pyspark.ml.connect.serialize`)
+`PowerIterationClustering.assignClusters`, `PrefixSpan.findFrequentSequentialPatterns`, and
+`ALSModel.recommendForUserSubset` and `recommendForItemSubset`, send a dataset that is not a
+DataFrame as PySpark does, and the server rejects it when the result is analyzed or collected.
+PySpark's serialization (`pyspark.ml.connect.serialize`)
 converts any other value to a literal, as `LiteralExpression._from_value` does:
 - One that cannot be a literal raises PySpark's error of the conversion. That includes a pandas
   DataFrame, which raises `UNSUPPORTED_DATA_TYPE` here rather than the `TypeError` above, as with
@@ -1001,7 +1002,7 @@ CPython does.
 The Rust `ml::NaiveBayes` and `ml::NaiveBayesModel` train and predict through Spark
 Connect's cached-model protocol. The Rust-backed Python API exports `NaiveBayes`
 from `pyspark.ml.connect` and `pyspark.ml.connect.classification`; `fit` returns the
-shared native `MLModel`, whose `transform` produces DataFrame predictions.
+typed `NaiveBayesModel`, whose `transform` produces DataFrame predictions.
 
 All nine PySpark constructor parameters and named setters are supported:
 `featuresCol`, `labelCol`, `predictionCol`, `probabilityCol`, `rawPredictionCol`,
@@ -1212,8 +1213,8 @@ included), `setClassifier`, `fitMultiple` and `clear`, and its `fit` returns the
 `OneVsRestModel`, which has `classifier`, the other params, `transform`, and a `uid` of its own,
 as PySpark's. Its `models` are the typed submodels, each with the uid of the classifier, the
 binary label of its class as `labelCol`, the classifier's params, and its training summary. They
-are made from the fitted submodels without a request. The submodels of a classifier that has no
-typed Python class yet are generic models. A LogisticRegression submodel is a typed
+are made from the fitted submodels without a request, each of the typed model class of its
+classifier. A LogisticRegression submodel is a typed
 `LogisticRegressionModel`, with its training summary; a DecisionTreeClassification submodel is a
 typed `DecisionTreeClassificationModel`; a RandomForestClassification submodel is a typed
 `RandomForestClassificationModel` with its training summary (binary, as its class's fit is); and a
@@ -1468,8 +1469,14 @@ classification, multilabel classification, clustering and ranking. Their
 constructor parameters and named setters follow `pyspark.ml.evaluation` in
 PySpark 4.3.0. Rust also provides typed parameter getters. Metric direction is
 available as `is_larger_better()` / `isLargerBetter()` without contacting Spark.
+`pyspark.ml.connect.evaluation` also exports PySpark's own `pyspark.ml.evaluation.Evaluator`, the
+base class of the six, so that it has the names of `pyspark.ml.evaluation` (as
+`pyspark.ml.connect.tuning` exports PySpark's `ParamGridBuilder`), while the `Evaluator`,
+`Estimator`, `Transformer` and `Model` of the `pyspark.ml.connect` package stay the deprecated
+classes of `pyspark.ml.connect.base`, as in PySpark's deprecated package.
 
-The three existing Python evaluator wrappers now use standard Spark ML defaults:
+The three evaluators of the deprecated `pyspark.ml.connect.evaluation` (regression, binary and
+multiclass classification) now use standard Spark ML defaults:
 `BinaryClassificationEvaluator` takes `rawPredictionCol="rawPrediction"`, and
 `MulticlassClassificationEvaluator` defaults to `metricName="f1"` and requires
 keyword arguments. Use `rawPredictionCol` / `setRawPredictionCol` instead of the
@@ -1504,8 +1511,8 @@ SummaryBuilder, MultivariateGaussian}` and the native Python classes in
 `pyspark.ml.stat` cover the standard ML statistics APIs from PySpark 4.3.0.
 The Python module is a Rust-backed shim, replacing its vendored implementation,
 except `MultivariateGaussian`, which stays PySpark's plain Python class.
-The deprecated `pyspark.ml.connect` public API is excluded from statistics parity
-work; statistics have no new export under that namespace.
+`pyspark.ml.connect` adds no statistics module; its `summarizer` is the one of PySpark's
+deprecated package, unchanged.
 
 The statistical tests return lazy Spark DataFrames. Chi-square supports both the
 vector result and one row per feature (`flatten=True`); correlation supports

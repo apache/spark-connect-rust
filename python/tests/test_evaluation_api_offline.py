@@ -7,6 +7,7 @@
 - The `evaluate` of a param map: it evaluates a copy of the evaluator, as PySpark's
   `Evaluator.evaluate` does, so that the request sends the params of the copy and the evaluator
   keeps its own.
+- The names of the module: those of pyspark.ml.evaluation, its `Evaluator` PySpark's own.
 """
 
 import json
@@ -33,6 +34,24 @@ ml_mock = _ml_fixture
 
 ROOT = Path(__file__).resolve().parents[2]
 CASES = json.loads((ROOT / "tests/golden/evaluation_api_cases.json").read_text())
+
+
+def test_evaluator_is_pysparks():
+    # The Evaluator of the module is PySpark's own abstract base class of the native evaluators, so
+    # that the module has the names of pyspark.ml.evaluation, as pyspark.ml.connect.tuning has
+    # PySpark's ParamGridBuilder.
+    import importlib
+
+    from pyspark.ml import evaluation
+
+    module = importlib.import_module(MODULE)
+    assert module.Evaluator is evaluation.Evaluator
+    assert module.__all__ == evaluation.__all__
+    assert sorted(name for name in module.__all__ if name != "Evaluator") == sorted(EVALUATORS)
+    for name in EVALUATORS:
+        cls = native_class(MODULE, name, REFERENCE)
+        assert issubclass(cls, module.Evaluator), name
+        assert isinstance(cls(), module.Evaluator), name
 
 
 @pytest.mark.parametrize("name", list(EVALUATORS))
