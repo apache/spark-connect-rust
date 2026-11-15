@@ -2085,29 +2085,37 @@ native_pymethods! {
         params_api::fit_multiple(slf.as_any(), dataset, paramMaps)
     }
 
-    /// As `Params.copy`, which copies the classifier too (see `duplicate`).
+    /// As `OneVsRest.copy`: a copy of the same uid and params, with `extra`, and of the classifier
+    /// too, a copy of it with `extra` (`self.getClassifier().copy(extra)`).
     #[pyo3(name = "copy", signature = (extra=None))]
     fn __params_copy<'py>(
         slf: &Bound<'py, Self>,
         extra: Option<&Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, Self>> {
-        params_api::copy(slf, extra)
+        let py = slf.py();
+        let that = params_api::copy(slf, extra)?;
+        let classifier =
+            params_api::ParamsHolder::set_value(&*slf.try_borrow()?, py, "classifier")?;
+        if let Some(classifier) = classifier.filter(|c| !c.bind(py).is_none()) {
+            let extra = pipeline_api::extra_or_empty(py, extra);
+            let copy = classifier.bind(py).call_method1("copy", (extra,))?;
+            params_api::ParamsHolder::put(
+                &mut *that.try_borrow_mut()?,
+                py,
+                "classifier",
+                Converted::Raw(copy.unbind()),
+            )?;
+        }
+        Ok(that)
     }
 
-    /// The writer of the estimator, as `JavaMLWritable.write` (`RemoteMLWriter`), of the server's
-    /// OneVsRest, which the server does not write (see the compatibility notes).
-    fn write(slf: &Bound<'_, Self>) -> PyResult<object::PyMLWriter> {
-        let uid: String = slf.getattr("uid")?.extract()?;
-        let this = slf.try_borrow()?;
-        let operator = spark_connect::ml::MlOperator::with_uid(
-            "org.apache.spark.ml.classification.OneVsRest",
-            &uid,
-            spark_connect::ml::OperatorType::Estimator,
-        );
-        Ok(object::PyMLWriter::new(object::WriteTarget::Operator(
-            operator,
-            this.inner.params().clone(),
-        )))
+    /// The writer of the estimator, as `OneVsRest.write` over Spark Connect (`RemoteMLWriter`,
+    /// which saves it as `OneVsRestWriter` does).
+    fn write(slf: &Bound<'_, Self>) -> object::PyMLWriter {
+        object::PyMLWriter::new(object::WriteTarget::Python(
+            slf.clone().into_any().unbind(),
+            classification_api::save_one_vs_rest,
+        ))
     }
 
     /// Save to `path`, as `MLWritable.save`: `self.write().save(path)`.
@@ -2116,31 +2124,18 @@ native_pymethods! {
         Ok(())
     }
 
-    /// The reader of the class, as `JavaMLReadable.read` (`RemoteMLReader`).
+    /// The reader of the class, as `OneVsRest.read` over Spark Connect (`RemoteMLReader`, which
+    /// loads it as `OneVsRestReader` does).
     #[classmethod]
     fn read(cls: &Bound<'_, pyo3::types::PyType>) -> object::PyMLReader {
         let _ = cls;
-        object::PyMLReader::new(
-            "org.apache.spark.ml.classification.OneVsRest",
-            spark_connect::ml::OperatorType::Estimator,
-            <PyOneVsRest>::__from_read,
-        )
+        object::PyMLReader::python(classification_api::load_one_vs_rest)
     }
 
     /// Load from `path`, as `MLReadable.load`: `cls.read().load(path)`.
     #[classmethod]
     fn load(cls: &Bound<'_, pyo3::types::PyType>, path: &str) -> PyResult<Py<PyAny>> {
         Ok(cls.call_method0("read")?.call_method1("load", (path,))?.unbind())
-    }
-}
-
-impl PyOneVsRest {
-    /// The instance of what a `Read` returns, as `RemoteMLReader.loadInstance`.
-    fn __from_read<'py>(
-        py: Python<'py>,
-        read: spark_connect::ml::ReadResult,
-    ) -> PyResult<Py<PyAny>> {
-        params_api::from_read::<PyOneVsRest>(py, read)
     }
 }
 

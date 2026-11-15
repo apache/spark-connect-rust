@@ -1250,7 +1250,7 @@ fn nested_uids(stage: &PipelineStage, uids: &mut Vec<String>) -> Result<()> {
     let any = match stage {
         PipelineStage::Estimator(e) => e.as_any_stage(),
         PipelineStage::Transformer(_) => None,
-        PipelineStage::Model(m) => Some(m.as_any()),
+        PipelineStage::Model(m) => Some(m.as_ref().as_any()),
     };
     if let Some(any) = any {
         if any.is::<CrossValidator>()
@@ -1271,6 +1271,21 @@ fn nested_uids(stage: &PipelineStage, uids: &mut Vec<String>) -> Result<()> {
             });
         for nested in stages.unwrap_or_default() {
             nested_uids(nested, uids)?;
+        }
+        // The classifier of a OneVsRest, and of its model the models too, as
+        // `getAllNestedStages` of PySpark: each is a stage of no stage of its own.
+        if let Some(ovr) = any.downcast_ref::<OneVsRest>() {
+            uids.extend(
+                ovr.classifier()
+                    .map(|c| c.estimator().operator().uid.clone()),
+            );
+        }
+        if let Some(ovr) = any.downcast_ref::<OneVsRestModel>() {
+            uids.extend(
+                ovr.classifier()
+                    .map(|c| c.estimator().operator().uid.clone()),
+            );
+            uids.extend(ovr.stage_models().iter().map(|m| m.operator().uid.clone()));
         }
     }
     Ok(())
@@ -1557,5 +1572,42 @@ mod tests {
             "{original:?}"
         );
         assert_eq!(TrainValidationSplit::default().train_ratio(), 0.75);
+    }
+
+    #[test]
+    fn the_nested_stages_of_a_one_vs_rest_are_its_classifier_and_its_models() {
+        // As `getAllNestedStages` of PySpark's OneVsRest: its classifier, and of a model its
+        // classifier and each of its models.
+        let classifier = LinearSVC::new();
+        let classifier_uid = classifier.operator().uid.clone();
+        let estimator = OneVsRest::new().set_classifier(classifier.clone());
+        let ovr_uid = estimator.operator().uid.clone();
+        let mut uids = Vec::new();
+        nested_uids(&PipelineStage::estimator(estimator), &mut uids).unwrap();
+        assert_eq!(uids, vec![ovr_uid.clone(), classifier_uid.clone()]);
+        // A model of one class, whose model is a stand-in with no stages of its own.
+        let class_model = PipelineModel::of_stages(Vec::new());
+        let class_uid = class_model.uid().to_string();
+        let model = OneVsRestModel {
+            operator: MlOperator::with_uid(
+                "org.apache.spark.ml.classification.OneVsRestModel",
+                "OneVsRestModel_0123456789ab",
+                OperatorType::Model,
+            ),
+            params: Params::new(),
+            models: vec![Box::new(class_model)],
+            session_id: String::new(),
+            classifier: Some(classifier.into()),
+        };
+        let mut uids = Vec::new();
+        nested_uids(&PipelineStage::Model(Box::new(model)), &mut uids).unwrap();
+        assert_eq!(
+            uids,
+            vec![
+                "OneVsRestModel_0123456789ab".to_string(),
+                classifier_uid,
+                class_uid
+            ]
+        );
     }
 }

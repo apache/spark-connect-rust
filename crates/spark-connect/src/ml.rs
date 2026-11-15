@@ -2458,6 +2458,20 @@ impl Classifier {
         }
     }
 
+    /// The classifier as its estimator, of which its writer and its uid are read.
+    pub(crate) fn estimator(&self) -> &dyn Estimator {
+        match self {
+            Self::LogisticRegression(x) => x,
+            Self::LinearSVC(x) => x,
+            Self::DecisionTreeClassifier(x) => x,
+            Self::RandomForestClassifier(x) => x,
+            Self::GBTClassifier(x) => x,
+            Self::NaiveBayes(x) => x,
+            Self::FMClassifier(x) => x,
+            Self::MultilayerPerceptronClassifier(x) => x,
+        }
+    }
+
     /// Whether this classifier accepts instance weights.
     pub fn supports_weight(&self) -> bool {
         !matches!(
@@ -2681,6 +2695,23 @@ impl Estimator for OneVsRest {
     fn fit_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<Box<dyn Model>> {
         Ok(Box::new(self.fit(df)?))
     }
+
+    /// The values of `map` of its own params, and of its classifier's (a copy of it with `map`,
+    /// as `OneVsRest.copy` does).
+    fn apply_param_map(&mut self, map: &ParamMap) -> spark_connect_core::error::Result<()> {
+        self.ensure_operator();
+        let uid = self.operator().uid.clone();
+        meta::apply_pairs(self.params_mut(), &uid, map)?;
+        if let Some(classifier) = self.classifier.as_mut() {
+            classifier.estimator_mut().apply_param_map(map)?;
+        }
+        Ok(())
+    }
+
+    /// The writer of PySpark's Python format, as `OneVsRestWriter` (see [`OneVsRest::writer`]).
+    fn write(&self) -> MlWriter {
+        self.writer()
+    }
 }
 
 impl OneVsRest {
@@ -2899,6 +2930,12 @@ impl Transformer for OneVsRestModel {
 impl Model for OneVsRestModel {
     fn clone_box(&self) -> Box<dyn Model> {
         Box::new(self.clone())
+    }
+
+    /// The writer of PySpark's Python format, as `OneVsRestModelWriter` (see
+    /// [`OneVsRestModel::writer`]).
+    fn write(&self) -> spark_connect_core::error::Result<MlWriter> {
+        Ok(self.writer())
     }
 }
 

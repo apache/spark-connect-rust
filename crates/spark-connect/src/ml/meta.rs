@@ -594,6 +594,10 @@ pub fn load_stage(session: &SparkSession, path: &str) -> Result<PipelineStage> {
     Ok(match class {
         PIPELINE_CLASS => PipelineStage::estimator(Pipeline::load(session, path)?),
         PIPELINE_MODEL_CLASS => PipelineStage::Model(Box::new(PipelineModel::load(session, path)?)),
+        ONE_VS_REST_CLASS => PipelineStage::estimator(OneVsRest::load(session, path)?),
+        ONE_VS_REST_MODEL_CLASS => {
+            PipelineStage::Model(Box::new(OneVsRestModel::load(session, path)?))
+        }
         CROSS_VALIDATOR_CLASS => PipelineStage::estimator(CrossValidator::load(session, path)?),
         CROSS_VALIDATOR_MODEL_CLASS => {
             PipelineStage::Model(Box::new(CrossValidatorModel::load(session, path)?))
@@ -671,6 +675,8 @@ pub(super) const PIPELINE_MODEL_CLASS: &str = "pyspark.ml.pipeline.PipelineModel
 pub(super) const CROSS_VALIDATOR_CLASS: &str = "pyspark.ml.tuning.CrossValidator";
 pub(super) const CROSS_VALIDATOR_MODEL_CLASS: &str = "pyspark.ml.tuning.CrossValidatorModel";
 pub(super) const TRAIN_VALIDATION_SPLIT_CLASS: &str = "pyspark.ml.tuning.TrainValidationSplit";
+pub(super) const ONE_VS_REST_CLASS: &str = "pyspark.ml.classification.OneVsRest";
+pub(super) const ONE_VS_REST_MODEL_CLASS: &str = "pyspark.ml.classification.OneVsRestModel";
 pub(super) const TRAIN_VALIDATION_SPLIT_MODEL_CLASS: &str =
     "pyspark.ml.tuning.TrainValidationSplitModel";
 

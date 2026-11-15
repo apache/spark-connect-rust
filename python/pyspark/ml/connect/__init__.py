@@ -160,7 +160,10 @@ def _register_native_classes() -> None:
     # refuses a nested validator, as of PySpark's.
     from pyspark.ml import pipeline as _pipeline
     from pyspark.ml import tuning as _tuning
+    from pyspark.ml import classification as _classification
 
+    # The OneVsRest is one of them too, so that its classifier and its models are the nested
+    # stages of a validator, as of PySpark's OneVsRest.
     for native, vendored in [
         (_native.Pipeline, _pipeline.Pipeline),
         (_native.PipelineModel, _pipeline.PipelineModel),
@@ -168,6 +171,8 @@ def _register_native_classes() -> None:
         (_native.CrossValidatorModel, _tuning.CrossValidatorModel),
         (_native.TrainValidationSplit, _tuning.TrainValidationSplit),
         (_native.TrainValidationSplitModel, _tuning.TrainValidationSplitModel),
+        (_native.OneVsRest, _classification.OneVsRest),
+        (_native.OneVsRestModel, _classification.OneVsRestModel),
     ]:
         vendored.register(native)
 
