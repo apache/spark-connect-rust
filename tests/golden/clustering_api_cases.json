@@ -25,6 +25,12 @@
    "ok",
    1.454166667
   ],
+  "computeCost_future_warnings": [
+   "ok",
+   [
+    "'Deprecated in 3.0.0. It will be removed in future versions. Use ClusteringEvaluator instead. You can also get the cost on the training dataset in the summary.'"
+   ]
+  ],
   "est_loaded_isSet_maxIter": [
    "ok",
    "False"

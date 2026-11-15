@@ -58,6 +58,16 @@ def _vectors(spark, rows, columns):
     return spark.createDataFrame(data, columns).coalesce(1)
 
 
+def _future_warnings(call):
+    """The messages of the FutureWarnings that `call` raises, as the deprecated members warn."""
+    import warnings
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        call()
+    return [str(w.message) for w in caught if issubclass(w.category, FutureWarning)]
+
+
 def _bisecting_kmeans_cases(rec, spark, base, found):
     estimator, model_class = found
     df = _vectors(spark, [(p,) for p in POINTS], ["features"])
@@ -67,6 +77,7 @@ def _bisecting_kmeans_cases(rec, spark, base, found):
     rec("clusterCenters", lambda: sorted([round(x, 9) for x in c] for c in model.clusterCenters()))
     rec("clusterCenters_type", lambda: type(model.clusterCenters()[0]).__name__)
     rec("computeCost", lambda: model.computeCost(df))
+    rec("computeCost_future_warnings", lambda: _future_warnings(lambda: model.computeCost(df)))
     rec("numFeatures", lambda: model.numFeatures)
     rec("hasSummary", lambda: model.hasSummary)
     s = model.summary
