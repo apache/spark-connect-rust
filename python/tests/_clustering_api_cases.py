@@ -26,6 +26,7 @@ CLASSES = {
         ("pyspark.ml.connect.clustering", "LDA", "pyspark.ml.clustering"),
         ("pyspark.ml.connect.clustering", "LocalLDAModel", "pyspark.ml.clustering"),
         ("pyspark.ml.connect.clustering", "DistributedLDAModel", "pyspark.ml.clustering"),
+        ("pyspark.ml.connect.clustering", "LDAModel", "pyspark.ml.clustering"),
     ],
     "PowerIterationClustering": [
         ("pyspark.ml.connect.clustering", "PowerIterationClustering", "pyspark.ml.clustering"),
@@ -108,7 +109,7 @@ def _gaussian_mixture_cases(rec, spark, base, found):
 
 
 def _lda_cases(rec, spark, base, found):
-    estimator, local_class, distributed_class = found
+    estimator, local_class, distributed_class, base_class = found
     docs = _vectors(spark, [(i, d) for i, d in enumerate(DOCUMENTS)], ["id", "features"])
 
     def lda(optimizer):
@@ -146,6 +147,19 @@ def _lda_cases(rec, spark, base, found):
     rec("toLocal_isSet_k", lambda: local.isSet("k"))
     rec("toLocal_getK", lambda: local.getK())
     rec("toLocal_vocabSize", lambda: local.vocabSize())
+    # The models are of PySpark's base class of both, LDAModel, which has no persistence of its
+    # own, and a copy of one is of its class.
+    models = (online, em, local)
+    rec("models_are_LDAModels", lambda: [isinstance(m, base_class) for m in models])
+    rec(
+        "model_classes_are_LDAModels",
+        lambda: [issubclass(c, base_class) for c in (local_class, distributed_class)],
+    )
+    rec(
+        "LDAModel_persistence",
+        lambda: [hasattr(base_class, a) for a in ("load", "read", "save", "write")],
+    )
+    rec("copies_are_of_their_classes", lambda: [type(m.copy()).__name__ for m in models])
     rec("em_transform_columns", lambda: em.transform(docs).columns)
     rec(
         "em_fitMultiple",

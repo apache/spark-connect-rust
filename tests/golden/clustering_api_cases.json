@@ -533,6 +533,23 @@
   ]
  },
  "LDA": {
+  "LDAModel_persistence": [
+   "ok",
+   [
+    "False",
+    "False",
+    "False",
+    "False"
+   ]
+  ],
+  "copies_are_of_their_classes": [
+   "ok",
+   [
+    "'LocalLDAModel'",
+    "'DistributedLDAModel'",
+    "'LocalLDAModel'"
+   ]
+  ],
   "em_describeTopics_count": [
    "ok",
    "2"
@@ -670,6 +687,13 @@
    "ok",
    "True"
   ],
+  "model_classes_are_LDAModels": [
+   "ok",
+   [
+    "True",
+    "True"
+   ]
+  ],
   "model_save": [
    "ok",
    "None"
@@ -677,6 +701,14 @@
   "model_save_again": [
    "UnknownException",
    "(java.io.IOException) Path <path>/model already exists. To overwrite it, please use write.overwrite().save(path) for Scala and use write().overwrite().save(path) for Java and Python."
+  ],
+  "models_are_LDAModels": [
+   "ok",
+   [
+    "True",
+    "True",
+    "True"
+   ]
   ],
   "online_describeTopics": [
    "ok",

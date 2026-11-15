@@ -12,6 +12,7 @@ from pyspark._pyspark import (
     KMeans,
     KMeansModel,
     KMeansSummary,
+    LDAModel,
     LocalLDAModel,
     PowerIterationClustering,
 )
@@ -28,6 +29,7 @@ __all__ = [
     "KMeansModel",
     "KMeansSummary",
     "LDA",
+    "LDAModel",
     "LocalLDAModel",
     "PowerIterationClustering",
 ]

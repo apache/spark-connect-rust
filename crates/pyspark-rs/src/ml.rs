@@ -6082,12 +6082,12 @@ native_pymethods! {
                         object::SummaryDataset::None,
                     )
                 })?;
-                return Ok(Py::new(py, model)?.into_any());
+                return Ok(model.into_object(py)?.into_any());
             }
             let model = fit_native_model(slf, dataset, |py, model, df| {
                 clustering_api::PyLocalLDAModel::fitted(py, model, df, object::SummaryDataset::None)
             })?;
-            Ok(Py::new(py, model)?.into_any())
+            Ok(model.into_object(py)?.into_any())
         })
     }
 

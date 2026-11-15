@@ -374,8 +374,8 @@ Each clustering estimator of `spark_connect::ml` fits its typed model, as the re
   server's `PowerIterationClusteringWrapper`.
 
 The native Python classes of `pyspark.ml.connect.clustering` have them too, with PySpark's names:
-their fit returns the typed model. `LDAModel`, the base class of PySpark's two LDA models, is not a
-native class yet.
+their fit returns the typed model, and `LDAModel` is the base class of the two LDA models, as
+PySpark's.
 
 ## Native LogisticRegression
 
@@ -1291,15 +1291,16 @@ Both APIs require Spark DataFrames and reject pandas inputs. Reference-derived g
 fixtures and live tests cover both LDA optimizers, dense/sparse inputs, graph initialization
 modes, weighted/unweighted graphs, custom columns, setters, validation and model lifetime.
 The Rust models' members and persistence are in "Native clustering models (Rust API)". In Python,
-`LDA`, `LocalLDAModel` and `DistributedLDAModel` follow the full API of `pyspark.ml` (see "Native ML
-classes of the full pyspark.ml API"): the Params API, the members of an LDA model (`describeTopics`,
-`topicsMatrix`, `logLikelihood`, `logPerplexity`, `vocabSize`, `isDistributed` and
+`LDA`, `LDAModel`, `LocalLDAModel` and `DistributedLDAModel` follow the full API of `pyspark.ml`
+(see "Native ML classes of the full pyspark.ml API"): the Params API, the members of an LDA model
+(`describeTopics`, `topicsMatrix`, `logLikelihood`, `logPerplexity`, `vocabSize`, `isDistributed` and
 `estimatedDocConcentration`), `toLocal` (the same `LocalLDAModel` on every call, as PySpark's),
 `trainingLogLikelihood`, `logPrior` and `getCheckpointFiles` of a distributed model, and save and
 load. `PowerIterationClustering` has its uid and the Params API, and saves and loads as PySpark's
-does: as the params of the server's `PowerIterationClusteringWrapper`. `LDAModel`, the base class of
-the two LDA models, is not a native class yet. The vendored `pyspark.ml.clustering` API is
-unchanged.
+does: as the params of the server's `PowerIterationClusteringWrapper`. `LDAModel` is the base class
+of the two LDA models, as PySpark's, with the members of an LDA model but no persistence of its own:
+an LDA model is an instance of it, `LDAModel.load` is an AttributeError, and a copy or a load of a
+model is of the model's class. The vendored `pyspark.ml.clustering` API is unchanged.
 
 ## Native feature stages
 

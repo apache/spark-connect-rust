@@ -340,9 +340,104 @@ macro_rules! native_pymethods {
 /// - `transform`, `copy`, `__repr__` (the server's `toString`, as `JavaModel.__repr__`), `write`,
 ///   `save`, `read` and `load`, `fitted` (of a fit), `of_object` (of an object that a fetch
 ///   returns), and the class's own methods `$body`.
+///
+/// Of `base` in place of `jvm: $jvm`, it is the base class of model classes of PySpark's base
+/// class `$name` (`LDAModel`, of `LocalLDAModel` and `DistributedLDAModel`): a
+/// `#[pyclass(subclass)]` of all these members but the persistence, which PySpark's base class
+/// does not have. A subclass (`#[pyclass(extends = $ty)]`, of no fields) has the persistence and
+/// its own members, and makes its objects of the base's `__fitted_with`, `__of_object_with` and
+/// `__loaded_with`, of a `make` that makes an object of the subclass of a core, of which a copy is
+/// of the same class (see `NativeInstance::duplicate`).
 macro_rules! native_model {
     (
         $ty:ident = $name:literal in $module:literal, jvm: $jvm:literal;
+        $($rest:tt)*
+    ) => {
+        native_model! {
+            @emit $ty = $name in $module;
+            pyclass: [];
+            persistence: {
+                fn write(slf: &Bound<'_, Self>) -> PyResult<$crate::ml::object::PyMLWriter> {
+                    slf.try_borrow()?.core.writer(slf.py())
+                }
+
+                fn save(slf: &Bound<'_, Self>, path: &str) -> PyResult<()> {
+                    slf.call_method0("write")?.call_method1("save", (path,))?;
+                    Ok(())
+                }
+
+                #[classmethod]
+                fn read(cls: &Bound<'_, pyo3::types::PyType>) -> $crate::ml::object::PyMLReader {
+                    let _ = cls;
+                    $crate::ml::object::PyMLReader::new(
+                        $jvm,
+                        spark_connect::ml::OperatorType::Model,
+                        <$ty>::__from_read,
+                    )
+                }
+
+                #[classmethod]
+                fn load(cls: &Bound<'_, pyo3::types::PyType>, path: &str) -> PyResult<Py<PyAny>> {
+                    Ok(cls.call_method0("read")?.call_method1("load", (path,))?.unbind())
+                }
+            };
+            $($rest)*
+        }
+
+        impl $ty {
+            /// The model of a fit, of the training summary of the summary dataset `summary` (see
+            /// `ModelCore::fitted`), with the summary object and the cached members that PySpark
+            /// makes at the fit, in its order.
+            #[allow(dead_code)]
+            pub(crate) fn fitted(
+                py: Python<'_>,
+                model: Box<dyn Model>,
+                df: &DataFrame,
+                summary: $crate::ml::object::SummaryDataset,
+            ) -> PyResult<Self> {
+                Self::__fitted_with(py, model, df, summary, Self::__make)
+            }
+
+            /// The model of the server-side object `object` that a fetch returns (a tree of an
+            /// ensemble, a model of a OneVsRestModel), as PySpark makes one of a bare object: of a
+            /// new uid, without set params, a training summary or cached members.
+            #[allow(dead_code)]
+            pub(crate) fn of_object(
+                py: Python<'_>,
+                object: spark_connect::ml::MlRef,
+            ) -> PyResult<Self> {
+                Self::__of_object_with(py, $jvm, $name, object, Self::__make)
+            }
+
+            fn __from_read<'py>(
+                py: Python<'py>,
+                read: spark_connect::ml::ReadResult,
+            ) -> PyResult<Py<PyAny>> {
+                let this = Self::__loaded_with(py, $jvm, $name, read, Self::__make)?;
+                Ok(Py::new(py, this)?.into_any())
+            }
+
+            /// The object of the class of the core `core`, as a copy makes it.
+            fn __make(py: Python<'_>, core: $crate::ml::object::ModelCore) -> PyResult<Py<Self>> {
+                Py::new(py, Self { core, make: Self::__make })
+            }
+        }
+    };
+    (
+        $ty:ident = $name:literal in $module:literal, base;
+        $($rest:tt)*
+    ) => {
+        native_model! {
+            @emit $ty = $name in $module;
+            pyclass: [subclass];
+            persistence: {};
+            $($rest)*
+        }
+    };
+    (
+        @emit $ty:ident = $name:literal in $module:literal;
+        pyclass: [ $($flag:ident)? ];
+        persistence: { $($persistence:tt)* };
         params: [
             $( $param:literal => ($getter_py:literal, $getter:ident, $attr:ident) ),* $(,)?
         ];
@@ -372,9 +467,12 @@ macro_rules! native_model {
         cached: [ $( $c_py:literal => ($c:ident, $c_make:expr) ),* $(,)? ];
         $($body:tt)*
     ) => {
-        #[pyclass(name = $name, module = $module)]
+        #[pyclass($($flag,)? name = $name, module = $module)]
         pub struct $ty {
             core: $crate::ml::object::ModelCore,
+            /// The object of the class of a core, of the class of this one (a subclass of a base
+            /// class), as a copy makes it.
+            make: fn(Python<'_>, $crate::ml::object::ModelCore) -> PyResult<Py<$ty>>,
         }
 
         impl $crate::ml::params_api::ParamsHolder for $ty {
@@ -407,7 +505,7 @@ macro_rules! native_model {
 
         impl $crate::ml::params_api::NativeInstance for $ty {
             fn duplicate(&self, py: Python<'_>) -> PyResult<Py<Self>> {
-                Py::new(py, Self { core: self.core.duplicate(py) })
+                (self.make)(py, self.core.duplicate(py))
             }
 
             fn uid(&self) -> String {
@@ -420,32 +518,49 @@ macro_rules! native_model {
         }
 
         impl $ty {
-            /// The model of a fit, of the training summary of the summary dataset `summary` (see
-            /// `ModelCore::fitted`), with the summary object and the cached members that PySpark
-            /// makes at the fit, in its order.
+            /// The model of a fit (see `fitted`), whose copies `make` makes.
             #[allow(dead_code)]
-            pub(crate) fn fitted(
+            fn __fitted_with(
                 py: Python<'_>,
                 model: Box<dyn Model>,
                 df: &DataFrame,
                 summary: $crate::ml::object::SummaryDataset,
+                make: fn(Python<'_>, $crate::ml::object::ModelCore) -> PyResult<Py<$ty>>,
             ) -> PyResult<Self> {
                 let core = $crate::ml::object::ModelCore::fitted(py, model, df, summary, $summary)?;
-                let this = Self { core };
+                let this = Self { core, make };
                 this.__prime(py)?;
                 Ok(this)
             }
 
-            /// The model of the server-side object `object` that a fetch returns (a tree of an
-            /// ensemble, a model of a OneVsRestModel), as PySpark makes one of a bare object: of a
-            /// new uid, without set params, a training summary or cached members.
+            /// The model of a server-side object of the JVM class `jvm` and of PySpark's class
+            /// `name` (see `of_object`), whose copies `make` makes.
             #[allow(dead_code)]
-            pub(crate) fn of_object(
+            fn __of_object_with(
                 py: Python<'_>,
+                jvm: &str,
+                name: &str,
                 object: spark_connect::ml::MlRef,
+                make: fn(Python<'_>, $crate::ml::object::ModelCore) -> PyResult<Py<$ty>>,
             ) -> PyResult<Self> {
-                let core = $crate::ml::object::ModelCore::of_object(py, $jvm, $name, object)?;
-                Ok(Self { core })
+                let core = $crate::ml::object::ModelCore::of_object(py, jvm, name, object)?;
+                Ok(Self { core, make })
+            }
+
+            /// The model of what a `Read` of the JVM class `jvm` returns, of PySpark's class
+            /// `name`, with its cached members, whose copies `make` makes.
+            #[allow(dead_code)]
+            fn __loaded_with(
+                py: Python<'_>,
+                jvm: &str,
+                name: &str,
+                read: spark_connect::ml::ReadResult,
+                make: fn(Python<'_>, $crate::ml::object::ModelCore) -> PyResult<Py<$ty>>,
+            ) -> PyResult<Self> {
+                let core = $crate::ml::object::ModelCore::loaded(py, jvm, name, read)?;
+                let this = Self { core, make };
+                this.__prime(py)?;
+                Ok(this)
             }
 
             /// Read the cached members, as the `params` walk of PySpark's `_resetUid` does.
@@ -453,16 +568,6 @@ macro_rules! native_model {
             fn __prime(&self, py: Python<'_>) -> PyResult<()> {
                 $( self.core.cached(py, $c_py, || ($c_make)(py, &self.core))?; )*
                 Ok(())
-            }
-
-            fn __from_read<'py>(
-                py: Python<'py>,
-                read: spark_connect::ml::ReadResult,
-            ) -> PyResult<Py<PyAny>> {
-                let core = $crate::ml::object::ModelCore::loaded(py, $jvm, $name, read)?;
-                let this = Self { core };
-                this.__prime(py)?;
-                Ok(Py::new(py, this)?.into_any())
             }
         }
 
@@ -519,29 +624,7 @@ macro_rules! native_model {
                     $crate::ml::object::fetch_output_to_py(slf.py(), out)
                 }
 
-                fn write(slf: &Bound<'_, Self>) -> PyResult<$crate::ml::object::PyMLWriter> {
-                    slf.try_borrow()?.core.writer(slf.py())
-                }
-
-                fn save(slf: &Bound<'_, Self>, path: &str) -> PyResult<()> {
-                    slf.call_method0("write")?.call_method1("save", (path,))?;
-                    Ok(())
-                }
-
-                #[classmethod]
-                fn read(cls: &Bound<'_, pyo3::types::PyType>) -> $crate::ml::object::PyMLReader {
-                    let _ = cls;
-                    $crate::ml::object::PyMLReader::new(
-                        $jvm,
-                        spark_connect::ml::OperatorType::Model,
-                        <$ty>::__from_read,
-                    )
-                }
-
-                #[classmethod]
-                fn load(cls: &Bound<'_, pyo3::types::PyType>, path: &str) -> PyResult<Py<PyAny>> {
-                    Ok(cls.call_method0("read")?.call_method1("load", (path,))?.unbind())
-                }
+                $($persistence)*
 
                 $(
                     #[pyo3(name = $setter_py)]
