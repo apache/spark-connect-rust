@@ -559,6 +559,19 @@ impl Params {
         self
     }
 
+    /// A copy of the params whose names `keep` keeps: the params that a stage's class has, of a
+    /// fitted model (PySpark's `_copyValues` copies only those).
+    pub fn retain_names(&self, keep: impl Fn(&str) -> bool) -> Self {
+        Params {
+            params: self
+                .params
+                .iter()
+                .filter(|(name, _)| keep(name))
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect(),
+        }
+    }
+
     /// Remove a parameter, so that it is not sent and the server uses its default, as
     /// PySpark's `Params.clear` does.
     pub fn clear_param(mut self, name: &str) -> Self {

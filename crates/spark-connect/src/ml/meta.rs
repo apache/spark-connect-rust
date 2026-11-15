@@ -13,7 +13,7 @@
 //! - **Persistence** is of PySpark's Python format, so that PySpark loads what this API saves and
 //!   this API loads what PySpark saves: the metadata of `DefaultParamsWriter` and each stage by its
 //!   own writer ([`Pipeline::load`], [`load_stage`]).
-use super::param_specs::{ParamConverter, PARAM_CONVERTERS};
+use super::param_specs::{ParamConverter, MODEL_CLASSES, PARAM_CONVERTERS};
 use super::stage_kinds::STAGE_KINDS;
 use super::*;
 use spark_connect_core::error::Result;
@@ -211,6 +211,29 @@ pub(super) fn converted(class: &str, name: &str, value: &MlValue) -> Result<MlVa
         Some(converter) => convert_param(converter, value),
         None => Ok(value.clone()),
     }
+}
+
+/// The JVM class of the model that an estimator of the JVM class `estimator` fits (PySpark's
+/// `_create_model`): the class of the estimator's name with `Model` appended, unless the table
+/// names another (the models of the tree, ensemble, FM and perceptron classifiers and regressors,
+/// and QuantileDiscretizer's `Bucketizer`).
+pub(super) fn model_class(estimator: &str) -> String {
+    match MODEL_CLASSES
+        .iter()
+        .find(|(simple, _)| *simple == simple_name(estimator))
+    {
+        Some((_, model)) => model.to_string(),
+        None => format!("{estimator}Model"),
+    }
+}
+
+/// The params of `params` that the JVM class `class` has, as PySpark's `_copyValues` copies them
+/// to an object of the class. A class that the table does not have keeps all of them.
+pub(super) fn params_of_class(params: &Params, class: &str) -> Params {
+    if !class_known(class) {
+        return params.clone();
+    }
+    params.retain_names(|name| param_converter(class, name).is_some())
 }
 
 /// The value of `value` as PySpark's type converter of `converter` converts it, or PySpark's
@@ -538,18 +561,17 @@ impl Estimator for OperatorEstimator {
     fn fit_impl(&mut self, df: &DataFrame) -> Result<Box<dyn Model>> {
         let info = fit_via_command(&self.operator, &self.params, df)?;
         let object = CachedModel::from_info(&info, &df.session, &self.operator.name)?;
-        // The model of the uid of the estimator, as the server makes it, of the class of the
-        // estimator's name of a model ("<class>Model").
+        // The model of the uid of the estimator, as the server makes it, of the JVM class that
+        // PySpark's `_create_model` names, with the params of that class only: PySpark's model
+        // copies the params of the estimator that the model has.
+        let class = model_class(&self.operator.name);
         let operator = MlOperator::with_uid(
-            &format!("{}Model", self.operator.name),
+            &class,
             info.uid.as_deref().unwrap_or(&self.operator.uid),
             OperatorType::Model,
         );
-        Ok(Box::new(ObjectModel::new(
-            object,
-            operator,
-            self.params.clone(),
-        )))
+        let params = params_of_class(&self.params, &class);
+        Ok(Box::new(ObjectModel::new(object, operator, params)))
     }
 }
 
@@ -1387,6 +1409,22 @@ mod tests {
             )
             .unwrap(),
             MlValue::Array(vec![MlValue::String("a".into())])
+        );
+    }
+
+    #[test]
+    fn a_fitted_model_is_of_the_jvm_class_that_pyspark_creates() {
+        assert_eq!(
+            model_class("org.apache.spark.ml.classification.DecisionTreeClassifier"),
+            "org.apache.spark.ml.classification.DecisionTreeClassificationModel"
+        );
+        assert_eq!(
+            model_class("org.apache.spark.ml.feature.QuantileDiscretizer"),
+            "org.apache.spark.ml.feature.Bucketizer"
+        );
+        assert_eq!(
+            model_class("org.apache.spark.ml.recommendation.ALS"),
+            "org.apache.spark.ml.recommendation.ALSModel"
         );
     }
 }
