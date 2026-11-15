@@ -231,8 +231,10 @@ def test_members_are_pyspark_mls(spec):
 
 # The members of PySpark's classes that a class of this client runs as they are, of its MRO:
 # PySpark's Python code that reads only the class's own members (RFormula's `__str__`, of
-# `getFormula`, `isDefined` and `uid`).
-_PYSPARKS_OWN_CODE = {("RFormula", "__str__")}
+# `getFormula`, `isDefined` and `uid`; OneVsRestModel's `transform`, PySpark's
+# `Transformer.transform` of its `copy` and of `OneVsRestModel._transform`, which composes the
+# transforms of its `models`).
+_PYSPARKS_OWN_CODE = {("RFormula", "__str__"), ("OneVsRestModel", "transform")}
 
 
 @pytest.mark.parametrize("spec", FULL, ids=lambda spec: spec[1])

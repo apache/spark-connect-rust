@@ -1736,6 +1736,136 @@
     "ok",
     "1"
    ],
+   "copy_setFeaturesCol_transform": [
+    "ok",
+    {
+     "columns": [
+      "label",
+      "features",
+      "rawPrediction",
+      "prediction"
+     ],
+     "rows": [
+      "(0.0, DenseVector([0.0, 0.0]), DenseVector([1.8621, -1.7576, -1.4334]), 0.0)",
+      "(0.0, DenseVector([0.1, 0.2]), DenseVector([1.1655, -1.0392, -1.605]), 0.0)",
+      "(1.0, DenseVector([1.0, 1.0]), DenseVector([-2.3795, 1.8431, -1.4948]), 1.0)",
+      "(1.0, DenseVector([1.2, 0.9]), DenseVector([-2.4105, 1.4884, -1.0106]), 1.0)",
+      "(2.0, DenseVector([2.0, 0.0]), DenseVector([-1.1728, -1.722, 1.7533]), 2.0)",
+      "(2.0, DenseVector([2.1, 0.2]), DenseVector([-1.8694, -1.0036, 1.5817]), 2.0)"
+     ]
+    }
+   ],
+   "copy_setFeaturesCol_transform_columns": [
+    "ok",
+    [
+     "'label'",
+     "'features'",
+     "'rawPrediction'",
+     "'prediction'"
+    ]
+   ],
+   "copy_setRawPredictionCol_empty_transform_columns": [
+    "AnalysisException",
+    "[UNRESOLVED_COLUMN.WITH_SUGGESTION] A column, variable, or function parameter with name `` cannot be resolved. Did you mean one of the following? [`label`, `features`, `prediction`, `rawPrediction`, `"
+   ],
+   "copy_setRawPredictionCol_rq_transform_columns": [
+    "AnalysisException",
+    "[UNRESOLVED_COLUMN.WITH_SUGGESTION] A column, variable, or function parameter with name `rq` cannot be resolved. Did you mean one of the following? [`label`, `features`, `prediction`, `rawPrediction`,"
+   ],
+   "ctor_keyword_isSet": [
+    "ok",
+    [
+     "False",
+     "False",
+     "False",
+     "False"
+    ]
+   ],
+   "ctor_keyword_isSet_classifier": [
+    "ok",
+    "False"
+   ],
+   "ctor_keyword_params": [
+    "ok",
+    [
+     "('featuresCol', \"'features'\")",
+     "('labelCol', \"'label'\")",
+     "('predictionCol', \"'prediction'\")",
+     "('rawPredictionCol', \"'rawPrediction'\")"
+    ]
+   ],
+   "ctor_keyword_transform": [
+    "ok",
+    {
+     "columns": [
+      "label",
+      "features",
+      "rawPrediction",
+      "prediction"
+     ],
+     "rows": [
+      "(0.0, DenseVector([0.0, 0.0]), DenseVector([1.8621, -1.7576, -1.4334]), 0.0)",
+      "(0.0, DenseVector([0.1, 0.2]), DenseVector([1.1655, -1.0392, -1.605]), 0.0)",
+      "(1.0, DenseVector([1.0, 1.0]), DenseVector([-2.3795, 1.8431, -1.4948]), 1.0)",
+      "(1.0, DenseVector([1.2, 0.9]), DenseVector([-2.4105, 1.4884, -1.0106]), 1.0)",
+      "(2.0, DenseVector([2.0, 0.0]), DenseVector([-1.1728, -1.722, 1.7533]), 2.0)",
+      "(2.0, DenseVector([2.1, 0.2]), DenseVector([-1.8694, -1.0036, 1.5817]), 2.0)"
+     ]
+    }
+   ],
+   "ctor_keyword_transform_columns": [
+    "ok",
+    [
+     "'label'",
+     "'features'",
+     "'rawPrediction'",
+     "'prediction'"
+    ]
+   ],
+   "ctor_keyword_uid_prefix": [
+    "ok",
+    "'OneVsRestModel'"
+   ],
+   "ctor_keyword_uid_suffix_length": [
+    "ok",
+    "12"
+   ],
+   "ctor_positional_models_len": [
+    "ok",
+    "3"
+   ],
+   "ctor_positional_transform": [
+    "ok",
+    {
+     "columns": [
+      "label",
+      "features",
+      "rawPrediction",
+      "prediction"
+     ],
+     "rows": [
+      "(0.0, DenseVector([0.0, 0.0]), DenseVector([1.8621, -1.7576, -1.4334]), 0.0)",
+      "(0.0, DenseVector([0.1, 0.2]), DenseVector([1.1655, -1.0392, -1.605]), 0.0)",
+      "(1.0, DenseVector([1.0, 1.0]), DenseVector([-2.3795, 1.8431, -1.4948]), 1.0)",
+      "(1.0, DenseVector([1.2, 0.9]), DenseVector([-2.4105, 1.4884, -1.0106]), 1.0)",
+      "(2.0, DenseVector([2.0, 0.0]), DenseVector([-1.1728, -1.722, 1.7533]), 2.0)",
+      "(2.0, DenseVector([2.1, 0.2]), DenseVector([-1.8694, -1.0036, 1.5817]), 2.0)"
+     ]
+    }
+   ],
+   "ctor_positional_transform_columns": [
+    "ok",
+    [
+     "'label'",
+     "'features'",
+     "'rawPrediction'",
+     "'prediction'"
+    ]
+   ],
+   "ctor_positional_uid_prefix": [
+    "ok",
+    "'OneVsRestModel'"
+   ],
    "cv_avgMetrics": [
     "ok",
     [
@@ -1848,6 +1978,14 @@
     "ok",
     "None"
    ],
+   "estimator_rawPredictionCol_rp_model_raw": [
+    "ok",
+    "'rp'"
+   ],
+   "estimator_rawPredictionCol_rp_transform_columns": [
+    "AnalysisException",
+    "[UNRESOLVED_COLUMN.WITH_SUGGESTION] A column, variable, or function parameter with name `rp` cannot be resolved. Did you mean one of the following? [`label`, `features`, `prediction`, `rawPrediction`,"
+   ],
    "fitMultiple": [
     "ok",
     [
@@ -1885,6 +2023,18 @@
     "KeyError",
     "Param(parent='OneVsRest_<uid>', name='classifier', doc='base binary classifier')"
    ],
+   "fm_weight_submodel_weightCols": [
+    "ok",
+    [
+     "'w'",
+     "'w'",
+     "'w'"
+    ]
+   ],
+   "fm_weight_warnings": [
+    "ok",
+    []
+   ],
    "getClassifier_maxIter": [
     "ok",
     "5"
@@ -1900,6 +2050,16 @@
    "isinstance_model": [
     "ok",
     "(True, True)"
+   ],
+   "map_rawPredictionCol_rq_transform_columns": [
+    "AnalysisException",
+    "[UNRESOLVED_COLUMN.WITH_SUGGESTION] A column, variable, or function parameter with name `rq` cannot be resolved. Did you mean one of the following? [`label`, `features`, `prediction`, `rawPrediction`,"
+   ],
+   "mlp_weight_warnings": [
+    "ok",
+    [
+     "('UserWarning', 'weightCol is ignored, as it is not supported by MultilayerPerceptronClassifier_<uid> now.')"
+    ]
    ],
    "model_class": [
     "ok",
@@ -2073,6 +2233,46 @@
    "model_uid_is_estimator_uid": [
     "ok",
     "False"
+   ],
+   "models_assign_copy_leaves_original": [
+    "ok",
+    "3"
+   ],
+   "models_assign_len": [
+    "ok",
+    "2"
+   ],
+   "models_assign_transform": [
+    "ok",
+    {
+     "columns": [
+      "label",
+      "features",
+      "rawPrediction",
+      "prediction"
+     ],
+     "rows": [
+      "(0.0, DenseVector([0.0, 0.0]), DenseVector([1.8621, -1.7576]), 0.0)",
+      "(0.0, DenseVector([0.1, 0.2]), DenseVector([1.1655, -1.0392]), 0.0)",
+      "(1.0, DenseVector([1.0, 1.0]), DenseVector([-2.3795, 1.8431]), 1.0)",
+      "(1.0, DenseVector([1.2, 0.9]), DenseVector([-2.4105, 1.4884]), 1.0)",
+      "(2.0, DenseVector([2.0, 0.0]), DenseVector([-1.1728, -1.722]), 0.0)",
+      "(2.0, DenseVector([2.1, 0.2]), DenseVector([-1.8694, -1.0036]), 1.0)"
+     ]
+    }
+   ],
+   "models_assign_transform_columns": [
+    "ok",
+    [
+     "'label'",
+     "'features'",
+     "'rawPrediction'",
+     "'prediction'"
+    ]
+   ],
+   "models_assign_type": [
+    "ok",
+    "'list'"
    ],
    "ovr_dt_models_hasSummary": [
     "ok",

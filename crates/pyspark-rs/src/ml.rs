@@ -2010,12 +2010,15 @@ native_pymethods! {
             if classifier.bind(py).is_none() {
                 let _ = classifier.bind(py).getattr("labelCol")?;
             }
+            // PySpark passes the weight to the classifiers that are a `HasWeightCol`, and warns of
+            // the others by the classifier's `str` (its uid), as `"...{}...".format(classifier)`.
             let supports_weight = native_classifier(classifier.bind(py), false)?.supports_weight();
             if !supports_weight && core.weight_col().is_some_and(|s| !s.is_empty()) {
-                py.import("warnings")?.call_method1(
-                    "warn",
-                    ("weightCol is ignored, as it is not supported by this classifier",),
-                )?;
+                let text = format!(
+                    "weightCol is ignored, as it is not supported by {} now.",
+                    classifier.bind(py).str()?
+                );
+                py.import("warnings")?.call_method1("warn", (text,))?;
             }
             // `ThreadPool(processes=min(parallelism, numClasses))`, which raises this ValueError for
             // fewer than one process.

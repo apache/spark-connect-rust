@@ -1249,14 +1249,20 @@ parameter getters and the configured classifier. Fits clone the base classifier
 for each class and run at most `parallelism` fits at once. Python observes
 mutations to the supplied classifier made before `fit`, while fitting leaves that
 classifier unchanged. Class indices run from zero through the maximum label, as
-in PySpark. Instance weights are forwarded when the base classifier supports
-them; Python warns when they are ignored for FMClassifier or the perceptron.
+in PySpark. Instance weights are forwarded to each class's fit when the base
+classifier is a `HasWeightCol` of PySpark, which every native classifier is but the
+perceptron (FMClassifier included). For the perceptron, Python warns
+`weightCol is ignored, as it is not supported by <uid> now.`, with the classifier's
+uid, as PySpark does, and fits without the weights.
 
 The model aggregates positive-class raw scores into `rawPrediction` and chooses
 the first highest score for `prediction`, ignoring NaN/null scores as PySpark
-does. It produces no probability column. Temporary columns and fit-created
-caches are cleaned up, and transformed DataFrames retain the binary models for
-lazy evaluation. Models must transform data in their fitting session.
+does. It produces no probability column. In Python, `transform` is PySpark's
+`OneVsRestModel._transform`: it composes the transforms of the `models` with their
+own params, so the model's `featuresCol` is not read, and a `rawPredictionCol` that
+the submodels do not produce fails as PySpark's does. Temporary columns and
+fit-created caches are cleaned up, and transformed DataFrames retain the binary
+models for lazy evaluation. Models must transform data in their fitting session.
 
 Rust `OneVsRest::fit` returns the typed `OneVsRestModel`. Its `models()` gives each binary
 submodel as its typed model, one `SubModel` variant per native classifier, and `classifier()`
@@ -1275,7 +1281,10 @@ sets the params of the classifier, as PySpark's `copy` does.
 In Python, the `OneVsRest` estimator has the Params API of `pyspark.ml` (its `classifier` param
 included), `setClassifier`, `fitMultiple` and `clear`, and its `fit` returns the typed
 `OneVsRestModel`, which has `classifier`, the other params, `transform`, and a `uid` of its own,
-as PySpark's. Its `models` are the typed submodels, each with the uid of the classifier, the
+as PySpark's. `OneVsRestModel(models)` constructs a model of the given models, of a new uid and
+the defaults of the class, with no set params and no classifier, as PySpark's constructor does,
+and its `models` attribute can be assigned. Its `models` are the typed submodels, each with the
+uid of the classifier, the
 binary label of its class as `labelCol`, the classifier's params, and its training summary. They
 are made from the fitted submodels without a request, each of the typed model class of its
 classifier. A LogisticRegression submodel is a typed
