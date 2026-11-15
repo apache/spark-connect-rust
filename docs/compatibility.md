@@ -885,7 +885,12 @@ client:
   name of its param, as PySpark's `Param.parent` and `Param.name`. `ParamGridBuilder` builds
   PySpark's grids (`add_grid`, `base_on`, `build`, the last param varying fastest), and
   `apply_param_map` of an estimator, a transformer or an evaluator sets the values of its params,
-  as a copy of a param map of PySpark does. A pipeline applies them to its stages.
+  as a copy of a param map of PySpark does: each value is converted by the type converter of its
+  param (`Param.typeConverter`, so an integer grid value of a double param is a double), and a
+  param that the stage's class does not have is not set. A pipeline applies them to its stages.
+  The grid keeps the values as they were given, and a validator converts them when it applies or
+  saves them, not when the grid is built as PySpark does, so a value that PySpark refuses at build
+  (a `TypeError`) is refused at the fit or the save of the validator.
 - **`Pipeline` and `PipelineModel`**: `fit` (or `fit_pipeline`, of the typed model) is
   `Pipeline._fit`; `PipelineModel` transforms by each stage in order. `copy` keeps the pipeline's
   uid, and a pipeline model's copy has a new one.
@@ -896,8 +901,17 @@ client:
   are numpy's (the mean and the standard deviation of the population over the folds), and the
   best is numpy's `argmax` or `argmin`, of the first NaN of any. The best param map is fitted on
   the whole dataset. Their models have `best_model`, the metrics and `sub_models`
-  (`collect_sub_models`), and transform by the best model. A validator of no seed has a random
-  one, as PySpark's default seed differs between processes.
+  (`collect_sub_models`), and transform by the best model. A validator's `apply_param_map` sets
+  its own params (`numFolds`, `foldCol`, `trainRatio`, `seed`, `parallelism` and
+  `collectSubModels`) first, then its estimator's and evaluator's, as PySpark's `copy(extra)`
+  does, so a validator nested in a grid takes the values of its own params from it. A fit of no
+  fold (a `numFolds` of no fold with a fold column, or a negative one) is PySpark's `TypeError`.
+  A validator of no seed has the default seed of its class: PySpark's default is
+  `hash(type(self).__name__)`, which is the same for each validator of a class in a process. This
+  client draws one random seed per class and per process, so its value differs from PySpark's (as
+  PySpark's differs between processes), and the validators of a class in a process split the same
+  way. A model of a validator has the default seed of its own class, and the validator's seed
+  when it is set.
 - **Persistence**: `write()` and `load` are of PySpark's Python format, so that PySpark loads what
   the Rust API saves and the Rust API loads what PySpark saves:
   - the metadata of `pyspark.ml.pipeline.Pipeline` (and the others) in PySpark's order of its
@@ -910,6 +924,11 @@ client:
   transformer or model of the server's class (`OperatorEstimator`, `OperatorTransformer`,
   `ObjectModel`). The evaluator of a loaded validator is the evaluator of its class. A param map
   of a value that is a saved stage, which PySpark writes of a stage-valued param, does not load.
+  A fitted model of an estimator has the JVM class that PySpark's `_create_model` names (the
+  classes of the decision trees, random forests, gradient-boosted trees, factorization machines
+  and perceptrons are their `...ClassificationModel` and `...RegressionModel`, and
+  QuantileDiscretizer's model is a `Bucketizer`), and the params of the estimator that that class
+  has, as PySpark's model copies them.
 
 ## pyspark.ml
 
