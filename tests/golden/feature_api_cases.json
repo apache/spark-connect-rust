@@ -10779,7 +10779,7 @@
      ],
      [
       "'locale'",
-      "\"'en_US'\""
+      "'<server default locale>'"
      ],
      [
       "'outputCol'",

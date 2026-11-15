@@ -1,31 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Native ALS fitting, prediction, factors and recommendations.
 use super::*;
-use pyo3::IntoPyObjectExt;
 use spark_connect::ml::ALS;
-use spark_connect_proto as proto;
-
-/// The literal of a recommendation count, as PySpark's serialization of the argument,
-/// `LiteralExpression._from_value`, makes it: a Column is not a value it takes, not even a Column
-/// of a literal, so it raises the `UNSUPPORTED_DATA_TYPE` of `Column`, as another value that is
-/// not a literal does.
-fn count_literal(value: &Bound<'_, PyAny>) -> PyResult<proto::expression::Literal> {
-    let column = match value.is_instance_of::<crate::column::PyColumn>() {
-        true => None,
-        false => Some(crate::functions::to_value_column(value)?),
-    };
-    match column.as_ref().map(|column| column.expression().node()) {
-        Some(spark_connect::expression::ExpressionNode::Literal(literal)) => {
-            Ok(literal.to_literal_proto())
-        }
-        _ => Err(crate::column::raise_pyspark(
-            value.py(),
-            "PySparkTypeError",
-            "UNSUPPORTED_DATA_TYPE",
-            &[("data_type", &value.get_type().name()?.to_string())],
-        )),
-    }
-}
 
 const ALS_PARAMS: &[(&str, Kind)] = &[
     ("rank", Kind::Int),
@@ -281,20 +257,9 @@ native_pymethods! {
         params: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Fitted<PyALSModel>> {
         fit_with(slf, dataset, params, || {
-            let py = slf.py();
-            let df = dataset_of(dataset, "fit")?;
-            let mut estimator = snapshot(slf)?;
-            // As `fit_native_model`, which the core model's rank does not fit: the fitted core
-            // model is kept concrete here, for its rank.
-            let defaults = params_api::fit_defaults(slf)?;
-            let session = df.spark_session();
-            let fitted = interruptible(py, &session, || estimator.fit(&df).map_err(Box::new))?;
-            let rank = fitted.rank();
-            let mut model = PyALSModel::fitted(py, Box::new(fitted), &df, object::SummaryDataset::None)?;
-            // The rank of the fit, kept on the model for its `rank` (see `PyALSModel::rank`).
-            model.core.cached(py, "rank", || rank.into_py_any(py))?;
-            params_api::copy_defaults(py, defaults, &mut model)?;
-            Ok(model)
+            fit_native_model(slf, dataset, |py, model, df| {
+                PyALSModel::fitted(py, model, df, object::SummaryDataset::None)
+            })
         })
     }
 
@@ -352,93 +317,30 @@ native_model! {
         "setPredictionCol" => (set_prediction_col, "predictionCol"),
         "setUserCol" => (set_user_col, "userCol"),
     ];
-    properties: [];
+    // The rank of the factors, which PySpark's `rank` reads of the server on each access.
+    properties: [
+        "rank" => (rank, "rank"),
+    ];
     methods: [];
     relations: [
         "itemFactors" => (item_factors, "itemFactors"),
         "userFactors" => (user_factors, "userFactors"),
     ];
-    relation_methods: [];
+    // The recommendations, as `ALSModel.recommendForAllUsers` and its others: the arguments are
+    // sent as PySpark's `serialize` sends them (see `object::fetch_arg_of`), so a dataset that is
+    // not a DataFrame is sent for the server to reject when the result is analyzed.
+    relation_methods: [
+        "recommendForAllUsers" => (recommend_for_all_users, "recommendForAllUsers", (numItems)),
+        "recommendForAllItems" => (recommend_for_all_items, "recommendForAllItems", (numUsers)),
+        "recommendForUserSubset" => (
+            recommend_for_user_subset, "recommendForUserSubset", (dataset, numItems)
+        ),
+        "recommendForItemSubset" => (
+            recommend_for_item_subset, "recommendForItemSubset", (dataset, numUsers)
+        ),
+    ];
     summary: None;
     cached: [];
-
-    /// The rank of the factors, as `ALSModel.rank`: of the fit, which the fit keeps in the cache of
-    /// the model (no request), or, of a loaded model, of the server's `rank`, read once.
-    #[getter]
-    fn rank(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
-        let py = slf.py();
-        let this = slf.try_borrow()?;
-        this.core.cached(py, "rank", || {
-            let target = this.core.target()?;
-            let out = object::fetch_py(py, &target, "rank", &[])?;
-            object::fetch_output_to_py(py, out)
-        })
-    }
-
-    /// The top `numItems` items of every user, as `ALSModel.recommendForAllUsers`. The count
-    /// is sent as PySpark's serialization sends it, a literal (see [`count_literal`]).
-    #[allow(non_snake_case)]
-    #[pyo3(name = "recommendForAllUsers", signature = (numItems))]
-    fn recommend_for_all_users(
-        slf: &Bound<'_, Self>,
-        numItems: &Bound<'_, PyAny>,
-    ) -> PyResult<PyDataFrame> {
-        count_literal(numItems)?;
-        let target = slf.try_borrow()?.core.target()?;
-        let count = numItems.clone();
-        object::attribute_relation_py(&target, "recommendForAllUsers", &[count])
-    }
-
-    /// The top `numUsers` users of every item, as `ALSModel.recommendForAllItems`.
-    #[allow(non_snake_case)]
-    #[pyo3(name = "recommendForAllItems", signature = (numUsers))]
-    fn recommend_for_all_items(
-        slf: &Bound<'_, Self>,
-        numUsers: &Bound<'_, PyAny>,
-    ) -> PyResult<PyDataFrame> {
-        count_literal(numUsers)?;
-        let target = slf.try_borrow()?.core.target()?;
-        let count = numUsers.clone();
-        object::attribute_relation_py(&target, "recommendForAllItems", &[count])
-    }
-
-    /// The top `numItems` items of each user of `dataset`, as
-    /// `ALSModel.recommendForUserSubset`, of the dataset as PySpark sends it.
-    #[allow(non_snake_case)]
-    #[pyo3(name = "recommendForUserSubset", signature = (dataset, numItems))]
-    fn recommend_for_user_subset(
-        slf: &Bound<'_, Self>,
-        dataset: &Bound<'_, PyAny>,
-        numItems: &Bound<'_, PyAny>,
-    ) -> PyResult<PyDataFrame> {
-        helper_dataset_of(dataset, "recommendForUserSubset")?;
-        count_literal(numItems)?;
-        let target = slf.try_borrow()?.core.target()?;
-        object::attribute_relation_py(
-            &target,
-            "recommendForUserSubset",
-            &[dataset.clone(), numItems.clone()],
-        )
-    }
-
-    /// The top `numUsers` users of each item of `dataset`, as
-    /// `ALSModel.recommendForItemSubset`, of the dataset as PySpark sends it.
-    #[allow(non_snake_case)]
-    #[pyo3(name = "recommendForItemSubset", signature = (dataset, numUsers))]
-    fn recommend_for_item_subset(
-        slf: &Bound<'_, Self>,
-        dataset: &Bound<'_, PyAny>,
-        numUsers: &Bound<'_, PyAny>,
-    ) -> PyResult<PyDataFrame> {
-        helper_dataset_of(dataset, "recommendForItemSubset")?;
-        count_literal(numUsers)?;
-        let target = slf.try_borrow()?.core.target()?;
-        object::attribute_relation_py(
-            &target,
-            "recommendForItemSubset",
-            &[dataset.clone(), numUsers.clone()],
-        )
-    }
 }
 
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {

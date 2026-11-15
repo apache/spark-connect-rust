@@ -91,7 +91,7 @@ fn als_explicit_and_implicit_results_match_official_and_keep_models_alive() {
     let items = spark.sql(fixture["items"].as_str().unwrap()).unwrap();
     for case in fixture["cases"].as_array().unwrap() {
         let mut model = als::configured(&case["values"]).fit(&training).unwrap();
-        assert_eq!(model.rank(), case["rank"].as_i64().unwrap() as i32);
+        assert_eq!(model.rank().unwrap(), case["rank"].as_i64().unwrap() as i32);
         let mut params: Vec<_> = model.params().to_proto().params.into_keys().collect();
         params.sort();
         assert_eq!(

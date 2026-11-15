@@ -81,7 +81,7 @@ fn member(stage: &mut Stage, label: &str, frames: &Frames) -> Result<Json> {
         (Stage::FPGrowth(m), "freqItemsets") => frame(&m.freq_itemsets()?)?,
         (Stage::FPGrowth(m), "associationRules") => frame(&m.association_rules()?)?,
         (Stage::FPGrowth(m), "transform") => frame(&m.transform(held())?)?,
-        (Stage::Als(m), "rank") => json!(m.rank()),
+        (Stage::Als(m), "rank") => json!(m.rank()?),
         (Stage::Als(m), "userFactors") => frame(&m.user_factors()?)?,
         (Stage::Als(m), "itemFactors") => frame(&m.item_factors()?)?,
         (Stage::Als(m), "transform") => frame(&m.transform(held())?)?,

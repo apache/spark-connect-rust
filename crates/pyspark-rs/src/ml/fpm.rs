@@ -320,17 +320,44 @@ native_pymethods! {
     ) -> PyResult<Bound<'py, Self>> {
         params_api::copy(slf, extra)
     }
+    /// The patterns of `dataset`, as PySpark's `findFrequentSequentialPatterns`: the helper relation
+    /// of `prefixSpanFindFrequentSequentialPatterns` of the dataset and the params `getMinSupport`,
+    /// `getMaxPatternLength`, `getMaxLocalProjDBSize` and `getSequenceCol`, as `invoke_helper_relation`
+    /// sends them. Of the active session first (the AssertionError of its assert, without one), and
+    /// each argument as `serialize` sends it (see `object::fetch_arg_of`): a dataset that is not a
+    /// DataFrame is sent for the server to reject when the result is analyzed.
     #[pyo3(name = "findFrequentSequentialPatterns")]
     fn find_frequent_sequential_patterns(
         slf: &Bound<'_, Self>,
         dataset: &Bound<'_, PyAny>,
     ) -> PyResult<PyDataFrame> {
-        let input = helper_dataset_of(dataset, "findFrequentSequentialPatterns")?;
-        let algorithm = snapshot(slf)?;
+        let py = slf.py();
+        let getters = [
+            "getMinSupport",
+            "getMaxPatternLength",
+            "getMaxLocalProjDBSize",
+            "getSequenceCol",
+        ];
+        let params = getters
+            .iter()
+            .map(|getter| slf.call_method0(*getter))
+            .collect::<PyResult<Vec<_>>>()?;
+        let session = crate::session::active_session(py)
+            .ok_or_else(|| pyo3::exceptions::PyAssertionError::new_err(()))?
+            .borrow(py)
+            .session
+            .clone();
+        let mut args = vec![object::fetch_arg_of(dataset)?];
+        for value in &params {
+            args.push(object::fetch_arg_of(value)?);
+        }
         Ok(PyDataFrame::new(
-            algorithm
-                .find_frequent_sequential_patterns(&input)
-                .to_pyerr()?,
+            spark_connect::ml::attribute_relation(
+                &spark_connect::ml::MlTarget::helper(&session),
+                "prefixSpanFindFrequentSequentialPatterns",
+                args,
+            )
+            .to_pyerr()?,
         ))
     }
 }

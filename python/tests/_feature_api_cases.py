@@ -271,6 +271,22 @@ def _params(stage):
     return sorted((p.name, _s(repr(v))) for p, v in stage.extractParamMap().items())
 
 
+def _live_params(stage):
+    """The params of a stage against a server. StopWordsRemover's locale defaults to the server
+    JVM's default locale, as PySpark reads it (`stopWordsRemoverGetDefaultOrUS`), which differs
+    between servers (en_US, en): that default is recorded as a placeholder, on both clients."""
+    rows = _params(stage)
+    if not stage.hasParam("locale"):
+        return rows
+    from pyspark.ml.util import invoke_helper_attr
+
+    server = _s(repr(invoke_helper_attr("stopWordsRemoverGetDefaultOrUS")))
+    return [
+        (name, "<server default locale>" if name == "locale" and value == server else value)
+        for name, value in rows
+    ]
+
+
 def _has_output_col(stage):
     return stage.hasParam("outputCol")
 
@@ -346,7 +362,7 @@ def _transformer_live(name, spark, base):
     rec("save_again", lambda: stage.save(base + "/stage"))
     loaded = cls.load(base + "/stage")
     rec("loaded_uid", lambda: loaded.uid == stage.uid)
-    rec("loaded_params", lambda: _params(loaded))
+    rec("loaded_params", lambda: _live_params(loaded))
     rec("loaded_transform", lambda: loaded.transform(df))
     if _has_output_col(stage):
         # The output of a load keeps the default of the uid that the stage was made of.

@@ -294,6 +294,14 @@
      ]
     }
    ],
+   "recommendForItemSubset_int_columns": [
+    "UnknownException",
+    "(java.lang.NoSuchMethodException) No method: org.apache.spark.ml.recommendation.ALSModel.recommendForItemSubset(int, int)"
+   ],
+   "recommendForItemSubset_pandas": [
+    "PySparkTypeError",
+    "[UNSUPPORTED_DATA_TYPE] Unsupported DataType `DataFrame`."
+   ],
    "recommendForUserSubset": [
     "ok",
     {
@@ -307,9 +315,17 @@
      ]
     }
    ],
+   "recommendForUserSubset_int_columns": [
+    "UnknownException",
+    "(java.lang.NoSuchMethodException) No method: org.apache.spark.ml.recommendation.ALSModel.recommendForUserSubset(int, int)"
+   ],
    "recommendForUserSubset_object": [
     "PySparkTypeError",
     "[UNSUPPORTED_DATA_TYPE] Unsupported DataType `object`."
+   ],
+   "recommendForUserSubset_pandas": [
+    "PySparkTypeError",
+    "[UNSUPPORTED_DATA_TYPE] Unsupported DataType `DataFrame`."
    ],
    "repr_prefix": [
     "ok",
@@ -1225,6 +1241,22 @@
    "findFrequentSequentialPatterns_count": [
     "ok",
     "5"
+   ],
+   "findFrequentSequentialPatterns_int_columns": [
+    "UnknownException",
+    "(java.lang.NoSuchMethodException) No method: org.apache.spark.ml.util.ConnectHelper.prefixSpanFindFrequentSequentialPatterns(int, double, int, int, java.lang.String)"
+   ],
+   "findFrequentSequentialPatterns_int_count": [
+    "UnknownException",
+    "(java.lang.NoSuchMethodException) No method: org.apache.spark.ml.util.ConnectHelper.prefixSpanFindFrequentSequentialPatterns(int, double, int, int, java.lang.String)"
+   ],
+   "findFrequentSequentialPatterns_object": [
+    "PySparkTypeError",
+    "[UNSUPPORTED_DATA_TYPE] Unsupported DataType `object`."
+   ],
+   "findFrequentSequentialPatterns_pandas": [
+    "PySparkTypeError",
+    "[UNSUPPORTED_DATA_TYPE] Unsupported DataType `DataFrame`."
    ],
    "findFrequentSequentialPatterns_setters": [
     "ok",

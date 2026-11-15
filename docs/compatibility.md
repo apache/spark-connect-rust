@@ -472,11 +472,12 @@ DataFrames; call `toPandas()` explicitly when a local result is needed. The depr
 Another object than a DataFrame raises the `AttributeError` of `sparkSession`, the attribute
 that `pyspark.ml` reads of the dataset first (`'int' object has no attribute 'sparkSession'` of
 `fit(5)`), before any request; an object that has a `sparkSession` raises a `TypeError`. The
-methods that `pyspark.ml` runs as a helper or attribute call (`PowerIterationClustering.assignClusters`,
+methods that `pyspark.ml` runs as a helper or attribute call read nothing of their dataset.
 `PrefixSpan.findFrequentSequentialPatterns`, and `ALSModel.recommendForUserSubset` and
-`recommendForItemSubset`) read nothing of their dataset. PySpark's serialization
-(`pyspark.ml.connect.serialize`) converts any other object to a literal, as
-`LiteralExpression._from_value` does:
+`recommendForItemSubset`, send a dataset that is not a DataFrame as PySpark does, and the server
+rejects it when the result is analyzed or collected. `PowerIterationClustering.assignClusters`
+still raises a `TypeError` for such a dataset. PySpark's serialization (`pyspark.ml.connect.serialize`)
+converts any other value to a literal, as `LiteralExpression._from_value` does:
 - One that cannot be a literal raises PySpark's error of the conversion. That includes a pandas
   DataFrame, which raises `UNSUPPORTED_DATA_TYPE` here rather than the `TypeError` above, as with
   `pyspark.ml`, and an empty list, which raises `CANNOT_INFER_ARRAY_ELEMENT_TYPE`.
@@ -486,9 +487,10 @@ methods that `pyspark.ml` runs as a helper or attribute call (`PowerIterationClu
   `CharType`, `VarcharType`, `YearMonthIntervalType` or UDT), also with a None value, as with
   `pyspark.ml` (`tests/golden/ml_fetch_pairs.json` records the pairs of official PySpark).
 - PySpark sends the others for the server to reject: an ML vector or matrix as they are, and a
-  `(value, DataType)` pair as a literal of that type. `assignClusters` sends them too, in a lazy
-  DataFrame that the server rejects when it is analyzed or collected. The other helper calls raise a
-  `TypeError` of them before any request.
+  `(value, DataType)` pair as a literal of that type. `assignClusters`, PrefixSpan's
+  `findFrequentSequentialPatterns` and ALSModel's `recommendForUserSubset` and
+  `recommendForItemSubset` send them too, in a lazy DataFrame that the server rejects when it is
+  analyzed or collected.
 
 As with
 `pyspark.ml`, a fit sends the DataFrame as it is, and the transform of a model is the transform of
@@ -1344,6 +1346,8 @@ vectors. Mean centering is opt-in through `withMean=True`. Convert pandas data w
 This covers constructor parameters, named setters, fit and DataFrame transform, and
 `StopWordsRemover.loadDefaultStopWords`, which reads the server's default stop words through
 Spark Connect's ML helper, as PySpark does (Rust `StopWordsRemover::load_default_stop_words`).
+As PySpark's constructor does, `StopWordsRemover()` fetches its default locale and English stop
+words of the active session first, so without one it raises PySpark's bare `AssertionError`.
 
 In Rust, each fitted model also has the members of its PySpark model class, which it reads of
 the server-side model as PySpark does: for example `CountVectorizerModel::vocabulary`,
@@ -1390,7 +1394,8 @@ Rust `ml::PrefixSpan::find_frequent_sequential_patterns` and Python
 the Connect helper, with all four constructor parameters and named setters. They
 return sequence/frequency DataFrames and have no fit/transform model.
 
-These APIs accept Spark DataFrames and reject pandas frames before requests. Lazy
+These APIs accept Spark DataFrames and reject pandas frames before requests; a dataset that is
+not a DataFrame is sent as PySpark sends it (see the argument rules above). Lazy
 model tables retain their cached model; PrefixSpan retains its input plan, including
 any upstream fitted models. A fitted model's transform of a DataFrame of another session is lazy
 and fails with `CONNECT_ML.CACHE_INVALID` when the result is analyzed or collected, as PySpark's does.
@@ -1426,11 +1431,12 @@ by the subset DataFrame until evaluation completes.
 The Python `ALS` and `ALSModel` follow `pyspark.ml.recommendation` in full: the Params API,
 getters and setters, `setParams`, `setNumBlocks`, `fitMultiple`, `copy`, and `write`, `save`,
 `read` and `load`. A model's `coldStartStrategy`, `userCol`, `itemCol` and `blockSize` come from
-its estimator, as `_copyValues` gives them. The `rank` of a fitted model is that of its fit, with
-no request; a loaded model reads its rank from the server when accessed, as PySpark does.
+its estimator, as `_copyValues` gives them. The `rank` of a model is read from the server on each
+access, as PySpark's `_call_java("rank")` does, so a fit and a load send no request for it.
 
 Fit, transform and subset recommendation inputs must be Spark DataFrames; pandas
-DataFrames are rejected before conversion or RPC. Model operations must use the
+DataFrames are rejected before conversion or RPC, and a subset's other values are sent for the
+server to reject, as PySpark sends them. Model operations must use the
 fit session for transforms: another session's DataFrame fails with `CONNECT_ML.CACHE_INVALID` when
 the transform is analyzed or collected, as PySpark's does. The subset recommendations accept another
 session's DataFrame and run, as PySpark's do.

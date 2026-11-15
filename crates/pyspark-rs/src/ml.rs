@@ -599,25 +599,6 @@ fn dataset_of(dataset: &Bound<'_, PyAny>, method: &str) -> PyResult<DataFrame> {
     )))
 }
 
-/// The dataset of `method`, a call of `pyspark.ml` that reads nothing of it, but sends it as an
-/// argument of a helper or attribute call (`invoke_helper_relation`, `try_remote_attribute_relation`),
-/// as `serialize` of `pyspark.ml.connect.serialize` sends an argument ([`object::fetch_arg_of`]),
-/// which raises PySpark's errors of a value that it cannot send: `UNSUPPORTED_DATA_TYPE` of a value
-/// that cannot be a literal (also of a pandas DataFrame, where a fit, transform or evaluate raises
-/// the TypeError of [`reject_pandas`]), and the bare AssertionError of a `(value, DataType)` pair
-/// whose value is not of its type. The server rejects a value that PySpark sends, which this client
-/// does not send but refuses with a TypeError.
-pub(crate) fn helper_dataset_of(dataset: &Bound<'_, PyAny>, method: &str) -> PyResult<DataFrame> {
-    if let Ok(df) = dataset.extract::<PyRef<'_, PyDataFrame>>() {
-        return Ok(df.dataframe.clone());
-    }
-    object::fetch_arg_of(dataset)?;
-    Err(PyTypeError::new_err(format!(
-        "{method}() takes a Spark DataFrame, not '{}'",
-        dataset.get_type().name()?
-    )))
-}
-
 /// Fit a native estimator on `dataset`, as `try_remote_fit` does, and make its typed model of the core
 /// model and the training DataFrame with `model` (`PyLinearSVCModel::fitted`), which has the
 /// defaults of the estimator, as `_copyValues` copies them to the model of a fit.
