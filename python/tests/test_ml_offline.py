@@ -1726,9 +1726,9 @@ def test_the_deletes_of_the_models_of_an_ended_test_are_not_recorded_in_a_later_
         deadline = time.time() + 5
         # Counted by kind: a late ReleaseExecute of the session can be counted too, so only the
         # ExecutePlan of the Delete is waited for and checked.
-        while service.forgotten_requests["execute"] == 0 and time.time() < deadline:
+        while service.forgotten_count(ended.session_id, "execute") == 0 and time.time() < deadline:
             time.sleep(0.05)
-        assert service.forgotten_requests["execute"] == 1
+        assert service.forgotten_count(ended.session_id, "execute") == 1
         assert service.execute_requests == []
         # The requests of a session that is not forgotten are still recorded.
         service.execute_payload = _operator_info("a")
@@ -1760,11 +1760,11 @@ def test_the_requests_of_an_ended_test_are_answered_but_not_recorded_in_a_later_
         ended.range(1).collect()
         assert ended.range(1).schema.names == ["id"]
         deadline = time.time() + 5
-        while service.forgotten_requests["release_execute"] == 0 and time.time() < deadline:
+        while service.forgotten_count(ended.session_id, "release_execute") == 0 and time.time() < deadline:
             time.sleep(0.05)
-        assert service.forgotten_requests["release_execute"] > 0
-        assert service.forgotten_requests["execute"] == 1
-        assert service.forgotten_requests["analyze"] == 1
+        assert service.forgotten_count(ended.session_id, "release_execute") > 0
+        assert service.forgotten_count(ended.session_id, "execute") == 1
+        assert service.forgotten_count(ended.session_id, "analyze") == 1
         assert service.execute_requests == []
         assert service.release_execute_requests == []
         assert service.analyze_requests == []
@@ -1798,9 +1798,9 @@ def test_the_late_deletes_of_an_ended_test_take_no_queued_response_of_a_later_te
         del model
         gc.collect()
         deadline = time.time() + 5
-        while service.forgotten_requests["execute"] == 0 and time.time() < deadline:
+        while service.forgotten_count(ended.session_id, "execute") == 0 and time.time() < deadline:
             time.sleep(0.05)
-        assert service.forgotten_requests["execute"] == 1
+        assert service.forgotten_count(ended.session_id, "execute") == 1
         later = KMeans(k=2).fit(spark.range(1))
         assert later is not None
         assert service.execute_payload_queue == []
@@ -1838,7 +1838,7 @@ def test_the_listener_requests_of_a_forgotten_session_are_answered_but_not_count
         listener = Plain()
         ended.streams.addListener(listener)
         ended.streams.removeListener(listener)
-        assert service.forgotten_requests["execute"] == 2
+        assert service.forgotten_count(ended.session_id, "execute") == 2
         # The server ends the listener stream within a poll of 0.1 s of the removal.
         time.sleep(0.5)
         assert service.listener_subscriptions == 0

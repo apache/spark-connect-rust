@@ -305,6 +305,7 @@ def serve(connection):
                 if session_id not in self.forgotten_sessions:
                     return True
                 self.forgotten_requests[kind] += 1
+                self.forgotten_requests_of_sessions[(session_id, kind)] += 1
                 return False
 
         def reset(self):
@@ -327,6 +328,10 @@ def serve(connection):
             # "config", "release_session", "release_execute", "reattach", "interrupt", "clone",
             # "fetch_error_details".
             self.forgotten_requests = Counter()
+            # The same, by session and kind, so that a test counts only its own session's: a late
+            # request of a session that an earlier test forgot is counted in `forgotten_requests`
+            # too (see RemoteService.forgotten_count).
+            self.forgotten_requests_of_sessions = Counter()
             self.release_execute_requests = []
             self.execute_payload = b""
             self.execute_payloads = None
@@ -1070,6 +1075,12 @@ class RemoteService:
         self.connection.send(("forget_session", session_id))
         assert self.connection.poll(10), "Mock server did not respond"
         self.connection.recv()
+
+    def forgotten_count(self, session_id, kind):
+        # The requests of the forgotten session `session_id` of the kind `kind` that the server
+        # answered: of that session only, as a late request of a session that an earlier test
+        # forgot can reach the server while a test counts its own.
+        return self.forgotten_requests_of_sessions[(session_id, kind)]
 
     def listener_event(self, session_id, event_type, event_json):
         self.listener_event_json(session_id, event_type, json.dumps(event_json))
