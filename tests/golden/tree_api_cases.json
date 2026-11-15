@@ -97,6 +97,35 @@
     "ok",
     "True"
    ],
+   "leafCol_columns": [
+    "ok",
+    [
+     "'label'",
+     "'features'",
+     "'rawPrediction'",
+     "'probability'",
+     "'prediction'",
+     "'leaf'"
+    ]
+   ],
+   "leafCol_leaves": [
+    "ok",
+    {
+     "columns": [
+      "leaf"
+     ],
+     "rows": [
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)"
+     ]
+    }
+   ],
    "loaded_explainParams": [
     "ok",
     "\"cacheNodeIds: If false, the algorithm will pass trees to executors to match instances with nodes. If true, the algorithm will cache node IDs for each instance. Caching can speed up training of deeper trees. Users can set how often should the cache be checkpointed or disable it by setting checkpointInterval. (default: False)\\ncheckpointInterval: set checkpoint interval (>= 1) or disable checkpoint (-1). E.g. 10 means that the cache will get checkpointed every 10 iterations. Note: this setting will be ignored if the checkpoint directory is not set in the SparkContext. (default: 10)\\nfeaturesCol: features column name. (default: features, current: features)\\nimpurity: Criterion used for information gain calculation (case-insensitive). Supported options: entropy, gini (default: gini)\\nlabelCol: label column name. (default: label)\\nleafCol: Leaf indices column name. Predicted leaf index of each instance in each tree by preorder. (default: )\\nmaxBins: Max number of bins for discretizing continuous features.  Must be >=2 and >= number of categories for any categorical feature. (default: 32)\\nmaxDepth: Maximum depth of the tree. (>= 0) E.g., depth 0 means 1 leaf node; depth 1 means 1 internal node + 2 leaf nodes. Must be in range [0, 30]. (default: 5, current: 3)\\nmaxMemoryInMB: Maximum memory in MB allocated to histogram aggregation. If too small, then 1 node will be split per iteration, and its aggregates may exceed this size. (default: 256)\\nminInfoGain: Minimum information gain for a split to be considered at a tree node. (default: 0.0)\\nminInstancesPerNode: Minimum number of instances each child must have after split. If a split causes the left or right child to have fewer than minInstancesPerNode, the split will be discarded as invalid. Should be >= 1. (default: 1)\\nminWeightFractionPerNode: Minimum fraction of the weighted sample count that each child must have after split. If a split causes the fraction of the total weight in the left or right child to be less than minWeightFractionPerNode, the split will be discarded as invalid. Should be in interval [0.0, 0.5). (default: 0.0)\\npredictionCol: prediction column name. (default: prediction)\\nprobabilityCol: Column name for predicted class conditional probabilities. Note: Not all models output well-calibrated probability estimates! These probabilities should be treated as confidences, not precise probabilities. (default: probability)\\npruneTree: If true, the trained tree will undergo a pruning process after training, in which sibling leaf nodes with the same prediction are merged into their parent. The resulting tree will be smaller and have faster predictions. Class probabilities remain available after pruning. If false, no pruning is applied after training. (default: True)\\nrawPredictionCol: raw prediction (a.k.a. confidence) column name. (default: rawPrediction)\\nseed: random seed. (default: <hash DecisionTreeClassificationModel>, current: 42)\\nthresholds: Thresholds in multi-class classification to adjust the probability of predicting each class. Array must have length equal to the number of classes, with values > 0, excepting that at most one value may be 0. The class with largest value p/t is predicted, where p is the original probability of that class and t is the class's threshold. (undefined)\\nweightCol: weight column name. If this is not set or empty, we treat all instance weights as 1.0. (undefined)\""
@@ -243,6 +272,32 @@
      "'gini'"
     ]
    ],
+   "thresholds_predict": [
+    "ok",
+    1.0
+   ],
+   "thresholds_predictProbability": [
+    "ok",
+    "DenseVector([0.1818, 0.8182])"
+   ],
+   "thresholds_transform": [
+    "ok",
+    {
+     "columns": [
+      "prediction"
+     ],
+     "rows": [
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)"
+     ]
+    }
+   ],
    "toDebugString": [
     "ok",
     "'DecisionTreeClassificationModel: uid=DecisionTreeClassifier_<uid>, depth=1, numNodes=3, numClasses=2, numFeatures=2\\n  If (feature 0 <= 0.0)\\n   Predict: 0.0\\n  Else (feature 0 > 0.0)\\n   Predict: 1.0\\n'"
@@ -280,6 +335,50 @@
     ]
    ],
    "transform_saved": [
+    "ok",
+    {
+     "columns": [
+      "prediction"
+     ],
+     "rows": [
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)"
+     ]
+    }
+   ],
+   "unthresholded_transform": [
+    "ok",
+    {
+     "columns": [
+      "prediction"
+     ],
+     "rows": [
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)"
+     ]
+    }
+   ],
+   "weighted_predict": [
+    "ok",
+    1.0
+   ],
+   "weighted_predictProbability": [
+    "ok",
+    "DenseVector([0.0, 1.0])"
+   ],
+   "weighted_transform": [
     "ok",
     {
      "columns": [
@@ -603,6 +702,34 @@
     "ok",
     "True"
    ],
+   "early_evaluateEachIteration": [
+    "ok",
+    [
+     0.253856022,
+     0.232053048,
+     0.213584013,
+     0.19775434,
+     0.184046809
+    ]
+   ],
+   "early_getNumTrees": [
+    "ok",
+    "5"
+   ],
+   "early_treeWeights": [
+    "ok",
+    [
+     1.0,
+     0.1,
+     0.1,
+     0.1,
+     0.1
+    ]
+   ],
+   "early_trees_count": [
+    "ok",
+    "5"
+   ],
    "est_loaded_isSet_maxDepth": [
     "ok",
     "True"
@@ -679,6 +806,18 @@
    "fit_map": [
     "ok",
     "2"
+   ],
+   "fit_multiclass": [
+    "SparkRuntimeException",
+    "[USER_RAISED_EXCEPTION] Labels MUST be in {0, 1}, but got 2.0 SQLSTATE: P0001"
+   ],
+   "fit_stepSize_0": [
+    "IllegalArgumentException",
+    "GBTClassifier_<uid> parameter stepSize given invalid value 0.0."
+   ],
+   "fit_unknown_validationIndicatorCol": [
+    "AnalysisException",
+    "[UNRESOLVED_COLUMN.WITH_SUGGESTION] A column, variable, or function parameter with name `nope` cannot be resolved. Did you mean one of the following? [`label`, `features`]. SQLSTATE: 42703;"
    ],
    "getNumTrees": [
     "ok",
@@ -987,6 +1126,32 @@
      "'DecisionTreeRegressionModel'",
      "'DecisionTreeRegressionModel'"
     ]
+   ],
+   "weighted_predict": [
+    "ok",
+    1.0
+   ],
+   "weighted_predictProbability": [
+    "ok",
+    "DenseVector([0.1139, 0.8861])"
+   ],
+   "weighted_transform": [
+    "ok",
+    {
+     "columns": [
+      "prediction"
+     ],
+     "rows": [
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)"
+     ]
+    }
    ]
   },
   "params_api": {
@@ -1469,6 +1634,10 @@
     "ok",
     "2"
    ],
+   "fit_numTrees_0": [
+    "IllegalArgumentException",
+    "RandomForestClassifier_<uid> parameter numTrees given invalid value 0."
+   ],
    "getNumTrees": [
     "ok",
     "3"
@@ -1500,6 +1669,35 @@
    "isinstance_transformer": [
     "ok",
     "True"
+   ],
+   "leafCol_columns": [
+    "ok",
+    [
+     "'label'",
+     "'features'",
+     "'rawPrediction'",
+     "'probability'",
+     "'prediction'",
+     "'leaf'"
+    ]
+   ],
+   "leafCol_leaves": [
+    "ok",
+    {
+     "columns": [
+      "leaf"
+     ],
+     "rows": [
+      "(DenseVector([0.0, 0.0, 0.0]),)",
+      "(DenseVector([0.0, 0.0, 0.0]),)",
+      "(DenseVector([0.0, 0.0, 0.0]),)",
+      "(DenseVector([0.0, 0.0, 1.0]),)",
+      "(DenseVector([1.0, 1.0, 1.0]),)",
+      "(DenseVector([1.0, 1.0, 1.0]),)",
+      "(DenseVector([1.0, 1.0, 1.0]),)",
+      "(DenseVector([1.0, 1.0, 1.0]),)"
+     ]
+    }
    ],
    "loaded_explainParams": [
     "ok",
@@ -2075,6 +2273,32 @@
      "'gini'"
     ]
    ],
+   "thresholds_predict": [
+    "ok",
+    1.0
+   ],
+   "thresholds_predictProbability": [
+    "ok",
+    "DenseVector([0.0, 1.0])"
+   ],
+   "thresholds_transform": [
+    "ok",
+    {
+     "columns": [
+      "prediction"
+     ],
+     "rows": [
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)"
+     ]
+    }
+   ],
    "toDebugString": [
     "ok",
     "'RandomForestClassificationModel: uid=RandomForestClassifier_<uid>, numTrees=3, numClasses=2, numFeatures=2\\n  Tree 0 (weight 1.0):\\n    If (feature 0 <= 0.0)\\n     Predict: 0.0\\n    Else (feature 0 > 0.0)\\n     Predict: 1.0\\n  Tree 1 (weight 1.0):\\n    If (feature 0 <= 0.0)\\n     Predict: 0.0\\n    Else (feature 0 > 0.0)\\n     Predict: 1.0\\n  Tree 2 (weight 1.0):\\n    If (feature 0 <= -1.5)\\n     Predict: 0.0\\n    Else (feature 0 > -1.5)\\n     Predict: 1.0\\n'"
@@ -2180,6 +2404,58 @@
      "'DecisionTreeClassificationModel'",
      "'DecisionTreeClassificationModel'"
     ]
+   ],
+   "unthresholded_transform": [
+    "ok",
+    {
+     "columns": [
+      "prediction"
+     ],
+     "rows": [
+      "(0.0,)",
+      "(0.0,)",
+      "(0.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)"
+     ]
+    }
+   ],
+   "weighted_predict": [
+    "ok",
+    1.0
+   ],
+   "weighted_predictProbability": [
+    "ok",
+    "DenseVector([0.0, 1.0])"
+   ],
+   "weighted_summary_accuracy": [
+    "ok",
+    0.764705882
+   ],
+   "weighted_summary_weightCol": [
+    "ok",
+    "'w'"
+   ],
+   "weighted_transform": [
+    "ok",
+    {
+     "columns": [
+      "prediction"
+     ],
+     "rows": [
+      "(0.0,)",
+      "(0.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)",
+      "(1.0,)"
+     ]
+    }
    ]
   },
   "params_api": {
