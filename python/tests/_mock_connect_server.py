@@ -766,7 +766,9 @@ def serve(connection):
                     payloads = [payload]
                     break
             else:
-                if self.execute_payload_queue:
+                # A request of a forgotten session, such as the late Delete of a model that an
+                # earlier test released, takes no queued response of the test that runs.
+                if recorded and self.execute_payload_queue:
                     payloads = [self.execute_payload_queue.pop(0)]
             # ExecutePlanRequest.plan=3, of which Plan.command=2 is set for a command only.
             plan = parse_message(parse_message(request).get(3, [b""])[0])
