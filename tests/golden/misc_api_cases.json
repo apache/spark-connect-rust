@@ -1905,6 +1905,42 @@
     "ok",
     "('OneVsRestModel', 'classification')"
    ],
+   "model_copy_classifier_param": [
+    "ok",
+    [
+     "'x'",
+     "'x'",
+     "'x'"
+    ]
+   ],
+   "model_copy_classifier_param_own": [
+    "ok",
+    "'prediction'"
+   ],
+   "model_copy_models": [
+    "ok",
+    [
+     "('LinearSVCModel', False, True)",
+     "('LinearSVCModel', False, True)",
+     "('LinearSVCModel', False, True)"
+    ]
+   ],
+   "model_copy_models_same_list": [
+    "ok",
+    "True"
+   ],
+   "model_copy_own_param": [
+    "ok",
+    [
+     "'prediction'",
+     "'prediction'",
+     "'prediction'"
+    ]
+   ],
+   "model_copy_own_param_own": [
+    "ok",
+    "'y'"
+   ],
    "model_dir": [
     "ok",
     [
@@ -1944,6 +1980,14 @@
    "model_loaded_classifier": [
     "ok",
     "'LinearSVC'"
+   ],
+   "model_loaded_copy_models": [
+    "ok",
+    [
+     "('LinearSVCModel', 'LinearSVC_<uid>')",
+     "('LinearSVCModel', 'LinearSVC_<uid>')",
+     "('LinearSVCModel', 'LinearSVC_<uid>')"
+    ]
    ],
    "model_loaded_len": [
     "ok",
