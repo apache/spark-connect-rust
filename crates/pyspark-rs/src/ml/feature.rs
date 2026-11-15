@@ -129,10 +129,11 @@ macro_rules! feature_transformer {
             params: [$($row)*];
             #[new]
             #[pyo3(signature = (*args, **kwargs))]
-            // As PySpark's constructor: the keyword-only check, then the defaults that the active session
-            // fetches (`server_defaults`), then the keyword arguments.
+            // As PySpark's constructor: Python's binding of its keyword-only signature (a positional
+            // argument, an unexpected keyword), then the defaults that the active session fetches
+            // (`server_defaults`), then the keyword arguments, which their converters convert.
             fn new(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
-                bind_params("__init__", $name, &[], &[$(($param, Kind::$kind)),*], args, None)?;
+                bind_params("__init__", $name, &[], &[$(($param, Kind::$kind)),*], args, kwargs)?;
                 let own_defaults = params_api::server_defaults(py, $name)?;
                 let mut this = Self { inner: core::$core::new(), unsendable: Vec::new(), raw: Vec::new(), own_defaults };
                 init_params(&mut this, $name, &[], &[$(($param, Kind::$kind)),*], args, kwargs)?;
@@ -269,10 +270,11 @@ macro_rules! feature_estimator {
             params: [$($row)*];
             #[new]
             #[pyo3(signature = (*args, **kwargs))]
-            // As PySpark's constructor: the keyword-only check, then the defaults that the active session
-            // fetches (`server_defaults`), then the keyword arguments.
+            // As PySpark's constructor: Python's binding of its keyword-only signature (a positional
+            // argument, an unexpected keyword), then the defaults that the active session fetches
+            // (`server_defaults`), then the keyword arguments, which their converters convert.
             fn new(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
-                bind_params("__init__", $name, &[], &[$(($param, Kind::$kind)),*], args, None)?;
+                bind_params("__init__", $name, &[], &[$(($param, Kind::$kind)),*], args, kwargs)?;
                 let own_defaults = params_api::server_defaults(py, $name)?;
                 let mut this = Self { inner: core::$core::new(), unsendable: Vec::new(), raw: Vec::new(), own_defaults };
                 init_params(&mut this, $name, &[], &[$(($param, Kind::$kind)),*], args, kwargs)?;

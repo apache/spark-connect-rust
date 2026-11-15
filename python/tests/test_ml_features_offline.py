@@ -92,8 +92,8 @@ def wire(stage, name, spark, service):
 
 @pytest.mark.parametrize("name", GOLDEN["api"])
 def test_native_exports_and_official_constructor_signature(name, ml_mock):
-    # The constructors fetch the defaults of the active session first (StopWordsRemover's), so the
-    # checks of the keyword arguments run with one, as they do of PySpark's constructors.
+    # The checks of the arguments of a constructor, with a session (without one, see
+    # test_constructor_arguments_are_bound_before_the_defaults_of_the_session).
     import pyspark.ml.connect as connect
     cls = getattr(feature, name)
     assert cls is getattr(connect, name) and issubclass(cls, getattr(_pyspark, name))
@@ -113,6 +113,25 @@ def test_native_exports_and_official_constructor_signature(name, ml_mock):
         cls().setParams(1)
     with pytest.raises(TypeError, match=f"{name}.setParams\\(\\) got an unexpected keyword"):
         cls().setParams(unknown=1)
+
+
+@pytest.mark.parametrize("name", GOLDEN["api"])
+def test_constructor_arguments_are_bound_before_the_defaults_of_the_session(name):
+    # As PySpark's keyword-only constructor, whose signature Python binds before its body fetches
+    # the defaults of the active session (StopWordsRemover's): without a session, a positional
+    # argument and an unexpected keyword raise their TypeError. A value of a wrong type is
+    # converted after the fetch, so StopWordsRemover raises the AssertionError of the fetch first.
+    assert SparkSession.getActiveSession() is None
+    cls = getattr(feature, name)
+    with pytest.raises(TypeError) as error:
+        cls(1)
+    assert str(error.value) == "Method __init__ forces keyword arguments."
+    with pytest.raises(TypeError) as error:
+        cls(unknown=1)
+    assert str(error.value) == f"{name}.__init__() got an unexpected keyword argument 'unknown'"
+    if name == "StopWordsRemover":
+        with pytest.raises(AssertionError):
+            cls(caseSensitive="not a bool")
 
 
 @pytest.mark.parametrize("case", GOLDEN["params"], ids=lambda c: c["name"])
