@@ -11,9 +11,16 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use ml_golden::*;
 use prost::Message;
-use serde_json::Value as Json;
-use spark_connect::ml::{fetch, CountVectorizerModel, Imputer, MlTarget, StringIndexerModel};
+use serde_json::{json, Value as Json};
+use spark_connect::ml::{
+    fetch, ClassificationModel, CountVectorizerModel, DecisionTreeClassifier, Estimator,
+    GBTClassifier, Imputer, LogisticRegression, MlTarget, Params, RandomForestClassifier,
+    StringIndexerModel, TreeEnsembleModel,
+};
+use spark_connect::DataFrame;
 use spark_connect_proto as proto;
+use spark_connect_proto::ml_command_result::ml_operator_info::Type;
+use spark_connect_proto::ml_relation::MlType;
 
 const MODELS: &str = include_str!("../../../tests/golden/classification_models.json");
 const SUMMARIES: &str = include_str!("../../../tests/golden/classification_summaries.json");
@@ -93,11 +100,29 @@ fn a_request_that_differs_from_its_golden_fails_the_check() {
 
 #[test]
 fn every_golden_command_of_the_classification_goldens_is_an_ml_command() {
-    fn walk(entry: &Json, commands: &mut usize) {
+    // A relation entry (a DataFrame member, whose command is an MlRelation) is recognized by its
+    // value, not by decoding: it must be a transform or a fetch relation, and its `transform`
+    // member must be one. Every other entry's commands must be ML commands.
+    fn walk(entry: &Json, key: &str, commands: &mut usize, relations: &mut usize) {
         let Some(object) = entry.as_object() else {
             return;
         };
         if object.contains_key("commands") {
+            if is_relation_entry(entry) {
+                for relation in golden_relations(entry) {
+                    let kind = relation.ml_type.as_ref().expect("an operator");
+                    assert!(
+                        matches!(kind, MlType::Transform(_) | MlType::Fetch(_)),
+                        "{key}: a relation that is neither a transform nor a fetch"
+                    );
+                    *relations += 1;
+                }
+                return;
+            }
+            assert!(
+                key != "transform",
+                "a transform entry that is not a relation"
+            );
             for command in golden_commands(entry) {
                 assert!(
                     command.command.is_some(),
@@ -107,15 +132,52 @@ fn every_golden_command_of_the_classification_goldens_is_an_ml_command() {
             }
             return;
         }
-        for child in object.values() {
-            walk(child, commands);
+        for (child_key, child) in object {
+            walk(child, child_key, commands, relations);
         }
     }
     let mut commands = 0;
+    let mut relations = 0;
     for text in [MODELS, SUMMARIES] {
-        walk(&fixture(text), &mut commands);
+        walk(&fixture(text), "", &mut commands, &mut relations);
     }
     assert!(commands > 0, "no golden commands were found");
+    assert!(relations > 0, "no golden relations were found");
+}
+
+#[test]
+fn a_classification_transform_is_a_relation_entry_not_a_command() {
+    // The transform of a DecisionTreeClassifier model is an MlRelation: it decodes as an MlCommand
+    // Fit too, so only its entry tells them apart.
+    let models = fixture(MODELS);
+    let transform = &models["models"]["DecisionTreeClassifier"]["members"]["transform"];
+    assert!(is_relation_entry(transform));
+    let checked = catch_unwind(AssertUnwindSafe(|| golden_commands(transform)));
+    let message = panic_message(checked.expect_err("a relation entry is checked"));
+    assert!(message.contains("MlRelation"), "{message}");
+    let relations = golden_relations(transform);
+    assert!(matches!(relations[0].ml_type, Some(MlType::Transform(_))));
+}
+
+#[test]
+fn a_golden_with_a_random_uid_is_refused() {
+    // A golden holds the placeholders of its uids. One with a random uid would match any uid of a
+    // run, so it is refused rather than renumbered.
+    let command = proto::MlCommand {
+        command: Some(proto::ml_command::Command::Fit(proto::ml_command::Fit {
+            estimator: Some(proto::MlOperator {
+                uid: "LinearSVC_0123456789ab".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })),
+    };
+    let entry = serde_json::json!({
+        "commands": [STANDARD.encode(command.encode_to_vec())],
+    });
+    let refused = catch_unwind(AssertUnwindSafe(|| golden_commands(&entry)));
+    let message = panic_message(refused.expect_err("a random uid in a golden is refused"));
+    assert!(message.contains("random uid"), "{message}");
 }
 
 #[test]
@@ -133,6 +195,148 @@ fn a_nan_param_of_a_fit_matches_its_golden() {
         .set_missing_value(f64::NAN);
     imputer.fit(&df).unwrap();
     assert_commands(&server, fit, "Imputer fit");
+}
+
+#[test]
+fn a_dropped_model_sends_a_delete_that_the_replay_records() {
+    // The client releases a fitted model in the background when the model is dropped. The delete
+    // is no golden command: the replay records it apart, with the id of the model's golden
+    // result, and it is not among the commands that the checks take.
+    let features = fixture(FEATURE_MODELS);
+    let fit = &features["fits"]["Imputer"]["fit"];
+    let result = proto::MlCommandResult::decode(
+        STANDARD
+            .decode(fit["results"][0].as_str().unwrap())
+            .unwrap()
+            .as_slice(),
+    )
+    .unwrap();
+    let Some(proto::ml_command_result::ResultType::OperatorInfo(info)) = result.result_type else {
+        panic!("the golden fit result is not an operator info");
+    };
+    let Some(Type::ObjRef(reference)) = info.r#type else {
+        panic!("the golden fit result is not a reference");
+    };
+    let (server, session) = ReplayServer::start(&[fit]);
+    let df = session.range(1).unwrap();
+    let model = Imputer::new()
+        .set_input_col("missing")
+        .set_output_col("out")
+        .set_missing_value(f64::NAN)
+        .fit(&df)
+        .unwrap();
+    assert_commands(&server, fit, "Imputer fit");
+    assert!(server.take_deletes().is_empty(), "a delete before the drop");
+
+    drop(model);
+    let started = std::time::Instant::now();
+    let mut deletes = server.take_deletes();
+    while deletes.is_empty() && started.elapsed() < std::time::Duration::from_secs(10) {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        deletes = server.take_deletes();
+    }
+    assert_eq!(deletes.len(), 1, "the deletes of the dropped model");
+    let ids: Vec<&str> = deletes[0].obj_refs.iter().map(|r| r.id.as_str()).collect();
+    assert_eq!(ids, [reference.id.as_str()]);
+    assert!(
+        server.pending_requests().is_empty(),
+        "a delete is a command"
+    );
+}
+
+/// The params that the golden fit of a family sent, as its estimator is built with them.
+fn golden_fit_params(fit: &Json) -> proto::MlParams {
+    let command = proto::MlCommand::decode(
+        STANDARD
+            .decode(fit["commands"][0].as_str().unwrap())
+            .unwrap()
+            .as_slice(),
+    )
+    .unwrap();
+    let Some(proto::ml_command::Command::Fit(sent)) = command.command else {
+        panic!("the golden fit is not a Fit");
+    };
+    sent.params.expect("the golden fit's params")
+}
+
+/// The fit entry of a tree family, replayed: an estimator with the params of the golden fit,
+/// fitted on a dataset and then read as PySpark's fit reads its model, sends the golden fit's
+/// commands. The golden's dataset is not compared (see `normalize_commands`).
+fn check_tree_fit<E: Estimator>(
+    models: &Json,
+    family: &str,
+    mut estimator: E,
+    fit_and_read: impl FnOnce(&mut E, &DataFrame),
+) {
+    let fit = &models["fits"][family]["fit"];
+    let dataset = models["fits"][family]["dataset"].as_str().unwrap();
+    let (server, session) = ReplayServer::start(&[fit]);
+    *estimator.params_mut() = Params::from_proto(&golden_fit_params(fit));
+    let train = golden_dataset(&session, &models["datasets"], dataset);
+    fit_and_read(&mut estimator, &train);
+    assert_fit_dataset(&server, &models["datasets"], dataset);
+    assert_commands(&server, fit, family);
+}
+
+#[test]
+fn tree_classifier_fits_send_the_golden_fit_commands() {
+    let models = fixture(MODELS);
+    // A decision tree's fit sends the Fit alone.
+    check_tree_fit(
+        &models,
+        "DecisionTreeClassifier",
+        DecisionTreeClassifier::new(),
+        |estimator, train| {
+            estimator.fit(train).unwrap();
+        },
+    );
+    // A boosted ensemble's fit is read for its trees, and a forest's also for its classes.
+    check_tree_fit(
+        &models,
+        "GBTClassifier",
+        GBTClassifier::new(),
+        |estimator, train| {
+            estimator.fit(train).unwrap().trees().unwrap();
+        },
+    );
+    for family in [
+        "RandomForestClassifier.binary",
+        "RandomForestClassifier.multiclass",
+    ] {
+        check_tree_fit(
+            &models,
+            family,
+            RandomForestClassifier::new(),
+            |estimator, train| {
+                let model = estimator.fit(train).unwrap();
+                model.num_classes().unwrap();
+                model.trees().unwrap();
+            },
+        );
+    }
+}
+
+#[test]
+fn one_vs_rest_class_fit_sends_the_golden_fit_command() {
+    // A OneVsRest fit fits its classifier once per class: the golden's first command is the
+    // first such Fit, with the classifier's params, and then its class count is read. The
+    // golden's commands do not record the fit's own DataFrame query of the largest label, which
+    // PySpark runs as a DataFrame aggregate too, and the replay does not answer DataFrame plans:
+    // so the replay checks the class fit, the golden's first command, and no more.
+    let models = fixture(MODELS);
+    let fit = &models["fits"]["OneVsRest"]["fit"];
+    let class_fit = json!({
+        "commands": [fit["commands"][0]],
+        "results": [fit["results"][0]],
+    });
+    let (server, session) = ReplayServer::start(&[&class_fit]);
+    let mut classifier = LogisticRegression::new();
+    *classifier.params_mut() = Params::from_proto(&golden_fit_params(&class_fit));
+    // The class fit trains on the golden rows with a binary label of its own (a transform of the
+    // dataset), so the dataset itself is not checked here.
+    let train = golden_dataset(&session, &models["datasets"], "multi_train");
+    classifier.fit(&train).unwrap();
+    assert_commands(&server, &class_fit, "OneVsRest class fit");
 }
 
 #[test]

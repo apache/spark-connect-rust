@@ -29,7 +29,8 @@ use serde_json::{json, Value as Json};
 use spark_connect::column::col;
 use spark_connect::expression::Expression;
 use spark_connect::ml::{MlMatrix, MlValue, MlVector, Params};
-use spark_connect::row::Value;
+use spark_connect::row::{Row, Value};
+use spark_connect::types::{DataType, StructField};
 use spark_connect::{Column, DataFrame, SparkSession};
 use spark_connect_core::bytes_codec::BytesCodec;
 use spark_connect_proto as proto;
@@ -74,6 +75,194 @@ pub fn dataset(session: &SparkSession, spec: &Json) -> DataFrame {
         Some(partitions) => frame.coalesce(partitions as i32),
         None => frame,
     }
+}
+
+/// The golden dataset `name` (`label`, `weight` and `features`) as a DataFrame of its rows, as
+/// PySpark's createDataFrame builds it: a LocalRelation of the rows, whose features are a vector
+/// column, in one partition. It is built offline: no request is sent.
+pub fn golden_dataset(session: &SparkSession, datasets: &Json, name: &str) -> DataFrame {
+    let rows: Vec<Row> = datasets[name]["rows"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no golden dataset {name}"))
+        .iter()
+        .map(|row| {
+            let features = row[2]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|x| Value::Double(x.as_f64().unwrap()))
+                .collect();
+            Row::new(
+                ["label", "weight", "features"].map(String::from).to_vec(),
+                vec![
+                    Value::Double(row[0].as_f64().unwrap()),
+                    Value::Double(row[1].as_f64().unwrap()),
+                    Value::List(features),
+                ],
+            )
+        })
+        .collect();
+    let field = |name: &str, data_type: DataType| StructField {
+        name: name.into(),
+        data_type,
+        nullable: true,
+        metadata: Default::default(),
+    };
+    let schema = DataType::Struct {
+        fields: vec![
+            field("label", DataType::Double),
+            field("weight", DataType::Double),
+            field(
+                "features",
+                DataType::Array {
+                    element_type: Box::new(DataType::Double),
+                    contains_null: true,
+                },
+            ),
+        ],
+    };
+    let frame = session.create_dataframe(rows, schema).unwrap();
+    let vector = Column::new(Expression::function(
+        "array_to_vector",
+        vec![col("features").expression().clone()],
+    ));
+    frame.with_column("features", vector).coalesce(1)
+}
+
+/// The rows of the LocalRelation that a fit's dataset plan reads: the plan is the golden
+/// dataset's, with its features converted, in one partition (see [`golden_dataset`]).
+fn local_relation_of(relation: &proto::Relation) -> &proto::LocalRelation {
+    use proto::relation::RelType;
+    match relation.rel_type.as_ref().expect("a relation of a type") {
+        RelType::LocalRelation(local) => local,
+        RelType::Repartition(plan) => local_relation_of(plan.input.as_deref().unwrap()),
+        RelType::WithColumns(plan) => local_relation_of(plan.input.as_ref().unwrap()),
+        other => panic!("a fit's dataset whose plan the check does not read: {other:?}"),
+    }
+}
+
+/// The rows of an Arrow IPC stream of a LocalRelation: each as its label, weight and features.
+fn local_rows(data: &[u8]) -> Vec<(f64, f64, Vec<f64>)> {
+    use arrow::array::{Array, Float64Array, ListArray};
+    use arrow::ipc::reader::StreamReader;
+    let mut rows = Vec::new();
+    for batch in StreamReader::try_new(std::io::Cursor::new(data.to_vec()), None).unwrap() {
+        let batch = batch.unwrap();
+        let column = |i: usize| {
+            batch
+                .column(i)
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap()
+                .clone()
+        };
+        let (label, weight) = (column(0), column(1));
+        let features = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap();
+        for i in 0..batch.num_rows() {
+            let values = features.value(i);
+            let values = values.as_any().downcast_ref::<Float64Array>().unwrap();
+            rows.push((
+                label.value(i),
+                weight.value(i),
+                values.iter().map(|x| x.unwrap()).collect(),
+            ));
+        }
+    }
+    rows
+}
+
+/// Asserts that the fit commands the server has pending (not yet taken) fit the golden dataset
+/// `name`: the rows that each fit's LocalRelation holds are the golden's rows, in order. The
+/// normalization clears the datasets of the fits (their LocalRelation data is Arrow bytes that
+/// the golden does not keep), so this is the check of the datasets.
+pub fn assert_fit_dataset(server: &ReplayServer, datasets: &Json, name: &str) {
+    use proto::ml_command::Command;
+    let expected: Vec<(f64, f64, Vec<f64>)> = datasets[name]["rows"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no golden dataset {name}"))
+        .iter()
+        .map(|row| {
+            (
+                row[0].as_f64().unwrap(),
+                row[1].as_f64().unwrap(),
+                row[2]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|x| x.as_f64().unwrap())
+                    .collect(),
+            )
+        })
+        .collect();
+    let fits: Vec<proto::Relation> = server
+        .pending_requests()
+        .into_iter()
+        .filter_map(|command| match command.command {
+            Some(Command::Fit(fit)) => fit.dataset,
+            _ => None,
+        })
+        .collect();
+    assert!(
+        !fits.is_empty(),
+        "no fit is pending to check against {name}"
+    );
+    for dataset in fits {
+        let local = local_relation_of(&dataset);
+        let data = local.data.as_deref().expect("the data of a local relation");
+        assert_eq!(
+            local_rows(data),
+            expected,
+            "a fit that is not on the golden dataset {name}"
+        );
+    }
+}
+
+/// The dataset of a golden call, as the name in its parentheses: `loaded.transform(nb_counts_eval)`
+/// names `nb_counts_eval`.
+pub fn call_dataset(call: &Json) -> &str {
+    let call = call.as_str().expect("a golden call");
+    let open = call.find('(').expect("a call with an argument");
+    call[open + 1..]
+        .strip_suffix(')')
+        .expect("a call that ends with its argument")
+}
+
+/// Asserts that `output`, the DataFrame that a model's transform returned, has the golden
+/// transform's MlRelation in its operator (the model's reference) and its params. The input of
+/// the transform, the dataset of the call, is not compared: its relation is the client's own plan
+/// of the dataset, and its rows are not in the golden's relation (see [`assert_fit_dataset`]).
+pub fn assert_transform_relation(output: &DataFrame, entry: &Json, at: &str) {
+    use proto::ml_relation::{transform::Operator, MlType};
+    use proto::relation::RelType;
+    let relation = output.to_relation().unwrap();
+    let Some(RelType::MlRelation(sent)) = relation.rel_type else {
+        panic!("{at}: the transform does not send an MlRelation");
+    };
+    let expected = golden_relations(entry);
+    assert_eq!(expected.len(), 1, "{at}: one golden transform");
+    let (Some(MlType::Transform(sent)), Some(MlType::Transform(expected))) =
+        (sent.ml_type, expected[0].ml_type.clone())
+    else {
+        panic!("{at}: a golden relation that is not a transform");
+    };
+    let reference = |operator: &Option<Operator>| match operator {
+        Some(Operator::ObjRef(object)) => object.id.clone(),
+        other => panic!("{at}: a transform of no object reference: {other:?}"),
+    };
+    assert_eq!(
+        reference(&sent.operator),
+        reference(&expected.operator),
+        "{at}: the model"
+    );
+    assert_params(
+        &Params::from_proto(&sent.params.unwrap_or_default()),
+        &Params::from_proto(&expected.params.unwrap_or_default()),
+        at,
+    );
 }
 
 // The values as scripts/ml_golden_common.py renders those of official PySpark.
@@ -305,6 +494,9 @@ struct Replay {
     exchanges: Vec<Exchange>,
     /// The ML commands sent since they were last taken, as they were sent.
     received: Vec<proto::MlCommand>,
+    /// The deletes sent since they were last taken. A delete is not a golden command: the client
+    /// sends it when a released model is dropped, and it is answered with no result.
+    deleted: Vec<proto::ml_command::Delete>,
 }
 
 type Shared = Arc<Mutex<Replay>>;
@@ -351,9 +543,22 @@ impl ReplayServer {
     }
 
     /// The ML commands that the client sent since they were last taken, in order, as they were
-    /// sent. Taking them clears them. A delete of a released object is not recorded.
+    /// sent. Taking them clears them. The deletes are not among them: see
+    /// [`ReplayServer::take_deletes`].
     pub fn take_requests(&self) -> Vec<proto::MlCommand> {
         std::mem::take(&mut self.0.lock().unwrap().received)
+    }
+
+    /// The ML commands sent since they were last taken, as [`ReplayServer::take_requests`] takes
+    /// them, but left in place: a check can see the commands before it takes them.
+    pub fn pending_requests(&self) -> Vec<proto::MlCommand> {
+        self.0.lock().unwrap().received.clone()
+    }
+
+    /// The deletes sent since they were last taken, in order. The client sends a delete when a
+    /// model that it holds is dropped, in the background: a test that drops a model waits for it.
+    pub fn take_deletes(&self) -> Vec<proto::ml_command::Delete> {
+        std::mem::take(&mut self.0.lock().unwrap().deleted)
     }
 }
 
@@ -381,7 +586,7 @@ pub fn golden_commands(entry: &Json) -> Vec<proto::MlCommand> {
     let commands = entry["commands"]
         .as_array()
         .unwrap_or_else(|| panic!("a golden entry without commands: {entry}"));
-    if commands.iter().any(is_relation) {
+    if is_relation_entry(entry) {
         panic!(
             "a golden entry whose command is an MlRelation (the entry of a DataFrame member): \
              relation entries are not replayed, so its commands cannot be checked"
@@ -398,6 +603,13 @@ pub fn golden_commands(entry: &Json) -> Vec<proto::MlCommand> {
 /// `<path>`. A NaN value becomes [`NAN_MARKER`]. The datasets of fits, evaluations and summaries,
 /// and the inputs of fetches, are cleared: the replay checks the operators, the methods and the
 /// params, not the data.
+///
+/// What a placeholder checks: a golden holds no random uid (see [`decode_command`]), so a run's
+/// uid matches a golden `<uidN>` when it is the N-th distinct uid of the run's commands. The
+/// golden does not hold a uid's value, so a run's uid is not compared by value: a run's uid that
+/// is the same string as an earlier uid of the run matches the same placeholder, and a different
+/// one does not. A run's uid in text that comes before any uid field of the run is numbered by
+/// its place, not by its value, which the golden cannot record.
 pub fn normalize_commands(commands: &mut [proto::MlCommand]) {
     let mut names = Placeholders::default();
     for command in commands {
@@ -683,7 +895,7 @@ fn register(replay: &mut Replay, entry: &Json) {
         }
         return;
     };
-    if commands.iter().any(is_relation) {
+    if is_relation_entry(entry) {
         return;
     }
     let results = object.get("results").and_then(Json::as_array);
@@ -709,14 +921,45 @@ fn decode_bytes(b64: &Json) -> Vec<u8> {
         .expect("the base64 of a golden message")
 }
 
+/// A golden command as sent. The golden holds placeholders for its uids and ids (see
+/// [`normalize_commands`]), never a random uid: one would be renumbered on the golden side as
+/// on the run's side, and match any uid of the run. So a random uid in a golden is refused.
 fn decode_command(b64: &Json) -> proto::MlCommand {
-    proto::MlCommand::decode(decode_bytes(b64).as_slice()).expect("a golden ML command")
+    let command =
+        proto::MlCommand::decode(decode_bytes(b64).as_slice()).expect("a golden ML command");
+    let text = format!("{command:?}");
+    assert_eq!(
+        scrub_random_uids(&text, &mut HashMap::new()),
+        text,
+        "a golden command with a random uid: the golden must hold the <uidN> placeholders"
+    );
+    command
 }
 
-/// Whether a golden command is an MlRelation, the plan of a DataFrame that a member returns, rather
-/// than an ML command: no MlCommand decodes from it.
-fn is_relation(b64: &Json) -> bool {
-    proto::MlCommand::decode(decode_bytes(b64).as_slice()).is_err()
+/// Whether a golden entry is a relation entry: the entry of a DataFrame member, whose command is
+/// an MlRelation rather than an MlCommand. Such an entry records its value as the DataFrame
+/// (`schema` and `rows`), and no ML command's value is a DataFrame: decoding cannot tell them
+/// apart, since an MlRelation's transform (field 1) decodes as an MlCommand's Fit (field 1). The
+/// relation entries of the goldens are exactly the entries with a DataFrame value.
+pub fn is_relation_entry(entry: &Json) -> bool {
+    let value = &entry["value"];
+    value.get("schema").is_some() && value.get("rows").is_some()
+}
+
+/// The MlRelations of a relation entry, decoded as sent. Each has its operator set.
+pub fn golden_relations(entry: &Json) -> Vec<proto::MlRelation> {
+    assert!(is_relation_entry(entry), "not a relation entry: {entry}");
+    entry["commands"]
+        .as_array()
+        .expect("a golden entry with commands")
+        .iter()
+        .map(|b64| {
+            let relation = proto::MlRelation::decode(decode_bytes(b64).as_slice())
+                .expect("a golden MlRelation");
+            assert!(relation.ml_type.is_some(), "an MlRelation with no type");
+            relation
+        })
+        .collect()
 }
 
 fn decode_result(b64: &Json) -> proto::MlCommandResult {
@@ -724,14 +967,16 @@ fn decode_result(b64: &Json) -> proto::MlCommandResult {
 }
 
 /// Answers an ML command from the golden: the first unused exchange whose normalized command
-/// equals the command's, normalized on its own, or else the first that equals it. A delete of a
-/// released object is not part of the golden: it completes with no result, and is not recorded.
+/// equals the command's, normalized on its own, or else the first that equals it. A delete is not
+/// part of the golden: it is recorded apart (see [`ReplayServer::take_deletes`]) and completes
+/// with no result.
 fn answer(
     shared: &Shared,
     command: proto::MlCommand,
 ) -> std::result::Result<Option<proto::MlCommandResult>, Status> {
     let mut replay = shared.lock().unwrap();
-    if matches!(command.command, Some(proto::ml_command::Command::Delete(_))) {
+    if let Some(proto::ml_command::Command::Delete(delete)) = command.command {
+        replay.deleted.push(delete);
         return Ok(None);
     }
     replay.received.push(command.clone());

@@ -10,7 +10,10 @@
 mod ml_golden;
 
 use base64::{engine::general_purpose::STANDARD, Engine};
-use ml_golden::{assert_commands, ReplayServer};
+use ml_golden::{
+    assert_commands, assert_fit_dataset, assert_transform_relation, call_dataset, golden_dataset,
+    ReplayServer,
+};
 use prost::Message;
 use serde_json::{json, Value};
 use spark_connect::ml::{
@@ -307,6 +310,7 @@ fn linear_svc_model_member(model: &LinearSVCModel, key: &str) -> Option<Member> 
 fn fit_logistic(
     server: &ReplayServer,
     session: &SparkSession,
+    datasets: &Value,
     fit: &Value,
 ) -> LogisticRegressionModel {
     let fit_entry = &fit["fit"];
@@ -322,8 +326,9 @@ fn fit_logistic(
     };
     let mut estimator = LogisticRegression::new();
     *estimator.params_mut() = Params::from_proto(&sent.params.unwrap());
-    let train = session.range(1).unwrap();
+    let train = golden_dataset(session, datasets, fit["dataset"].as_str().unwrap());
     let model = estimator.fit(&train).unwrap();
+    assert_fit_dataset(server, datasets, fit["dataset"].as_str().unwrap());
     // PySpark's fit fetches numClasses for the class of its training summary, which the Rust
     // model fetches when `summary()` is called: the fit and its first summary send the commands
     // of the golden fit.
@@ -332,7 +337,12 @@ fn fit_logistic(
     model
 }
 
-fn fit_linear_svc(server: &ReplayServer, session: &SparkSession, fit: &Value) -> LinearSVCModel {
+fn fit_linear_svc(
+    server: &ReplayServer,
+    session: &SparkSession,
+    datasets: &Value,
+    fit: &Value,
+) -> LinearSVCModel {
     let fit_entry = &fit["fit"];
     let command = proto::MlCommand::decode(
         STANDARD
@@ -346,8 +356,9 @@ fn fit_linear_svc(server: &ReplayServer, session: &SparkSession, fit: &Value) ->
     };
     let mut estimator = LinearSVC::new();
     *estimator.params_mut() = Params::from_proto(&sent.params.unwrap());
-    let train = session.range(1).unwrap();
+    let train = golden_dataset(session, datasets, fit["dataset"].as_str().unwrap());
     let model = estimator.fit(&train).unwrap();
+    assert_fit_dataset(server, datasets, fit["dataset"].as_str().unwrap());
     assert_commands(server, fit_entry, "fit");
     model
 }
@@ -361,7 +372,12 @@ fn check_logistic_model(
     family: &str,
 ) {
     let entry = &models["models"][family];
-    let model = fit_logistic(server, session, &models["fits"][family]);
+    let model = fit_logistic(
+        server,
+        session,
+        &models["datasets"],
+        &models["fits"][family],
+    );
     check_model_members(
         server,
         &entry["members"],
@@ -509,7 +525,12 @@ fn linear_svc_model_matches_official_pyspark() {
     let family = "LinearSVC";
     let (server, session) = ReplayServer::start(&model_entries(&models, &summaries, family));
     let entry = &models["models"][family];
-    let model = fit_linear_svc(&server, &session, &models["fits"][family]);
+    let model = fit_linear_svc(
+        &server,
+        &session,
+        &models["datasets"],
+        &models["fits"][family],
+    );
     check_model_members(
         &server,
         &entry["members"],
@@ -572,7 +593,7 @@ fn logistic_regression_persistence_matches_official_pyspark() {
             .unwrap();
         assert_commands(&server, &estimator_entry["save"], family);
 
-        let model = LogisticRegressionModel::load(&session, "/unused/path").unwrap();
+        let mut model = LogisticRegressionModel::load(&session, "/unused/path").unwrap();
         assert_commands(&server, &model_entry["load"], family);
         assert_eq!(model.operator().uid, result_uid(&model_entry["load"]));
         assert!(!model.has_summary());
@@ -582,6 +603,11 @@ fn logistic_regression_persistence_matches_official_pyspark() {
             &|key| logistic_model_member(&model, key),
             family,
         );
+        let transform = &model_entry["members"]["members"]["transform"];
+        let datasets = golden(PERSISTENCE)["datasets"].clone();
+        let input = golden_dataset(&session, &datasets, call_dataset(&transform["call"]));
+        let output = model.transform(&input).unwrap();
+        assert_transform_relation(&output, transform, &format!("{family}: transform"));
         model
             .write()
             .unwrap()
@@ -613,7 +639,7 @@ fn linear_svc_persistence_matches_official_pyspark() {
         .unwrap();
     assert_commands(&server, &estimator_entry["save"], family);
 
-    let model = LinearSVCModel::load(&session, "/unused/path").unwrap();
+    let mut model = LinearSVCModel::load(&session, "/unused/path").unwrap();
     assert_commands(&server, &model_entry["load"], family);
     assert_eq!(model.operator().uid, result_uid(&model_entry["load"]));
     check_model_members(
@@ -622,6 +648,11 @@ fn linear_svc_persistence_matches_official_pyspark() {
         &|key| linear_svc_model_member(&model, key),
         family,
     );
+    let transform = &model_entry["members"]["members"]["transform"];
+    let datasets = golden(PERSISTENCE)["datasets"].clone();
+    let input = golden_dataset(&session, &datasets, call_dataset(&transform["call"]));
+    let output = model.transform(&input).unwrap();
+    assert_transform_relation(&output, transform, &format!("{family}: transform"));
     model
         .write()
         .unwrap()

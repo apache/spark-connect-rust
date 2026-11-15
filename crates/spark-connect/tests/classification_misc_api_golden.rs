@@ -13,13 +13,18 @@ mod ml_golden;
 
 use std::collections::BTreeSet;
 
-use ml_golden::{assert_commands, ReplayServer};
+use ml_golden::{
+    assert_commands, assert_fit_dataset, assert_transform_relation, call_dataset, golden_dataset,
+    ReplayServer,
+};
 use serde_json::{json, Value};
+use spark_connect::ml::{load_stage, Estimator, Params, PipelineStage, Transformer};
 use spark_connect::ml::{
     BinaryClassificationSummary, ClassificationSummary, FMClassificationModel, FMClassifier,
     MlMatrix, MlSummary, MlTarget, MlVector, Model, MultilayerPerceptronClassificationModel,
-    MultilayerPerceptronClassifier, NaiveBayes, NaiveBayesModel, PredictionModel,
-    ProbabilisticClassificationModel, TrainingSummary,
+    MultilayerPerceptronClassifier, NaiveBayes, NaiveBayesModel, OneVsRest, OneVsRestModel,
+    PredictionModel, ProbabilisticClassificationModel, RandomForestClassificationModel,
+    RandomForestClassifier, TrainingSummary,
 };
 use spark_connect::SparkSession;
 use spark_connect_core::error::Result;
@@ -176,10 +181,14 @@ struct Checker<'a> {
 }
 
 impl<'a> Checker<'a> {
-    /// A check of `members`. The commands received so far, of the setup of the test's objects, are
-    /// discarded.
+    /// A check of `members`. Each check takes the commands of its own call, so a command that is
+    /// still pending when a check starts was sent by a call that no check has looked at.
     fn new(server: &'a ReplayServer, members: &Value) -> Self {
-        server.take_requests();
+        let pending = server.pending_requests();
+        assert!(
+            pending.is_empty(),
+            "the commands of an earlier call are not checked: {pending:?}"
+        );
         Self {
             server,
             members: members.clone(),
@@ -220,7 +229,7 @@ impl<'a> Checker<'a> {
             Ok(_) => panic!("{label}: the call succeeded"),
             Err(error) => error.to_string(),
         };
-        self.server.take_requests();
+        assert_commands(self.server, &entry, label);
         assert!(
             error.contains(&expected),
             "{label}: {error:?} does not carry {expected:?}"
@@ -341,8 +350,13 @@ const SUMMARY_SKIPPED: [&str; 8] = [
     "str()",
 ];
 
-fn fit_naive_bayes(session: &SparkSession, estimator: &mut NaiveBayes) -> Result<NaiveBayesModel> {
-    estimator.fit(&session.range(3)?)
+fn fit_naive_bayes(
+    session: &SparkSession,
+    datasets: &Value,
+    dataset: &str,
+    estimator: &mut NaiveBayes,
+) -> Result<NaiveBayesModel> {
+    estimator.fit(&golden_dataset(session, datasets, dataset))
 }
 
 #[test]
@@ -357,13 +371,16 @@ fn naive_bayes_members_match_official_pyspark() {
         let entry = &models["models"][key];
         let errors = models["models"].get(format!("{key}.errors"));
         let fit = &models["fits"][key]["fit"];
+        let dataset = models["fits"][key]["dataset"].as_str().unwrap();
         let mut entries = vec![fit, entry];
         entries.extend(errors);
         let (server, session) = ReplayServer::start(&entries);
         let mut estimator = NaiveBayes::new()
             .set_model_type(model_type)
             .set_weight_col("weight");
-        let model = fit_naive_bayes(&session, &mut estimator).unwrap();
+        let model =
+            fit_naive_bayes(&session, &models["datasets"], dataset, &mut estimator).unwrap();
+        assert_fit_dataset(&server, &models["datasets"], dataset);
         assert_commands(&server, fit, "fit");
 
         let mut checker = Checker::new(&server, &entry["members"]);
@@ -395,18 +412,30 @@ fn naive_bayes_load_and_save_match_official_pyspark() {
 
         // Load: a read of the saved model, whose members are the loaded model's.
         let (server, session) = ReplayServer::start(&[saved]);
-        let loaded = NaiveBayesModel::load(&session, "<path>").unwrap();
+        let mut loaded = NaiveBayesModel::load(&session, "<path>").unwrap();
+        assert_commands(&server, &saved["load"], &format!("{key}: load"));
         let mut checker = Checker::new(&server, &saved["members"]["members"]);
         checker.value("predict-dense", || loaded.predict(&dense(&[1.0, 0.0])));
         checker.finish(&["repr()", "str()", "transform"]);
+        let transform = &saved["members"]["members"]["transform"];
+        let input = golden_dataset(
+            &session,
+            &models["datasets"],
+            call_dataset(&transform["call"]),
+        );
+        let output = loaded.transform(&input).unwrap();
+        assert_transform_relation(&output, transform, &format!("{key}: transform"));
 
         // Save: a write of the fitted model, with the params that its estimator sets.
         let fit = &models["fits"][key]["fit"];
+        let dataset = models["fits"][key]["dataset"].as_str().unwrap();
         let (server, session) = ReplayServer::start(&[fit, &models["models"][key], saved]);
         let mut estimator = NaiveBayes::new()
             .set_model_type(model_type)
             .set_weight_col("weight");
-        let model = fit_naive_bayes(&session, &mut estimator).unwrap();
+        let model =
+            fit_naive_bayes(&session, &models["datasets"], dataset, &mut estimator).unwrap();
+        assert_fit_dataset(&server, &models["datasets"], dataset);
         assert_commands(&server, fit, "fit");
         model.write().unwrap().overwrite().save("<path>").unwrap();
         assert_commands(&server, &saved["save"], &format!("{key}: save"));
@@ -422,6 +451,7 @@ fn multilayer_perceptron_members_and_summaries_match_official_pyspark() {
     let training = &summaries["summaries"][format!("{key}.training")];
     let evaluate = &summaries["summaries"][format!("{key}.evaluate")];
     let fit = &models["fits"][key]["fit"];
+    let dataset = models["fits"][key]["dataset"].as_str().unwrap();
     let (server, session) = ReplayServer::start(&[fit, entry, training, evaluate]);
     let mut estimator = MultilayerPerceptronClassifier::new()
         .set_layers([2, 4, 3])
@@ -429,7 +459,10 @@ fn multilayer_perceptron_members_and_summaries_match_official_pyspark() {
         .set_seed(42)
         .set_block_size(4)
         .set_step_size(0.1);
-    let model = estimator.fit(&session.range(3).unwrap()).unwrap();
+    let model = estimator
+        .fit(&golden_dataset(&session, &models["datasets"], dataset))
+        .unwrap();
+    assert_fit_dataset(&server, &models["datasets"], dataset);
     assert_commands(&server, fit, "fit");
 
     let mut checker = Checker::new(&server, &entry["members"]);
@@ -462,6 +495,7 @@ fn multilayer_perceptron_members_and_summaries_match_official_pyspark() {
     checker.finish(&SUMMARY_SKIPPED);
 
     let summary = model.evaluate(&session.range(3).unwrap()).unwrap();
+    assert_commands(&server, &entry["members"]["evaluate"], "evaluate");
     let mut checker = Checker::new(&server, &evaluate["members"]);
     classification_summary_members(&mut checker, &summary);
     checker.finish(&SUMMARY_SKIPPED);
@@ -475,15 +509,26 @@ fn multilayer_perceptron_load_and_save_match_official_pyspark() {
     let saved = &persistence["persistence"][format!("{key}.model")];
 
     let (server, session) = ReplayServer::start(&[saved]);
-    let loaded = MultilayerPerceptronClassificationModel::load(&session, "<path>").unwrap();
+    let mut loaded = MultilayerPerceptronClassificationModel::load(&session, "<path>").unwrap();
+    assert_commands(&server, &saved["load"], &format!("{key}: load"));
     let mut checker = Checker::new(&server, &saved["members"]["members"]);
     checker.value("predict-dense", || loaded.predict(&dense(&[0.5, 1.5])));
     checker.finish(&["repr()", "str()", "transform"]);
+    let transform = &saved["members"]["members"]["transform"];
+    let input = golden_dataset(
+        &session,
+        &models["datasets"],
+        call_dataset(&transform["call"]),
+    );
+    let output = loaded.transform(&input).unwrap();
+    assert_transform_relation(&output, transform, &format!("{key}: transform"));
     // A loaded model has no training summary, as PySpark's.
     assert!(!loaded.has_summary());
     assert!(loaded.summary().is_err());
 
     let fit = &models["fits"][key]["fit"];
+
+    let dataset = models["fits"][key]["dataset"].as_str().unwrap();
     let (server, session) = ReplayServer::start(&[fit, &models["models"][key], saved]);
     let model = MultilayerPerceptronClassifier::new()
         .set_layers([2, 4, 3])
@@ -491,8 +536,9 @@ fn multilayer_perceptron_load_and_save_match_official_pyspark() {
         .set_seed(42)
         .set_block_size(4)
         .set_step_size(0.1)
-        .fit(&session.range(3).unwrap())
+        .fit(&golden_dataset(&session, &models["datasets"], dataset))
         .unwrap();
+    assert_fit_dataset(&server, &models["datasets"], dataset);
     assert_commands(&server, fit, "fit");
     model.write().unwrap().overwrite().save("<path>").unwrap();
     assert_commands(&server, &saved["save"], &format!("{key}: save"));
@@ -507,6 +553,7 @@ fn fm_members_and_summaries_match_official_pyspark() {
     let training = &summaries["summaries"][format!("{key}.training")];
     let evaluate = &summaries["summaries"][format!("{key}.evaluate")];
     let fit = &models["fits"][key]["fit"];
+    let dataset = models["fits"][key]["dataset"].as_str().unwrap();
     let (server, session) = ReplayServer::start(&[fit, entry, training, evaluate]);
     let model: FMClassificationModel = FMClassifier::new()
         .set_factor_size(2)
@@ -514,8 +561,9 @@ fn fm_members_and_summaries_match_official_pyspark() {
         .set_seed(42)
         .set_reg_param(0.01)
         .set_step_size(0.1)
-        .fit(&session.range(3).unwrap())
+        .fit(&golden_dataset(&session, &models["datasets"], dataset))
         .unwrap();
+    assert_fit_dataset(&server, &models["datasets"], dataset);
     assert_commands(&server, fit, "fit");
 
     let mut checker = Checker::new(&server, &entry["members"]);
@@ -545,6 +593,7 @@ fn fm_members_and_summaries_match_official_pyspark() {
     checker.finish(&SUMMARY_SKIPPED);
 
     let summary = model.evaluate(&session.range(3).unwrap()).unwrap();
+    assert_commands(&server, &entry["members"]["evaluate"], "evaluate");
     let mut checker = Checker::new(&server, &evaluate["members"]);
     classification_summary_members(&mut checker, &summary);
     binary_summary_members(&mut checker, &summary);
@@ -559,14 +608,25 @@ fn fm_load_and_save_match_official_pyspark() {
     let saved = &persistence["persistence"][format!("{key}.model")];
 
     let (server, session) = ReplayServer::start(&[saved]);
-    let loaded = FMClassificationModel::load(&session, "<path>").unwrap();
+    let mut loaded = FMClassificationModel::load(&session, "<path>").unwrap();
+    assert_commands(&server, &saved["load"], &format!("{key}: load"));
     let mut checker = Checker::new(&server, &saved["members"]["members"]);
     checker.value("predict-dense", || loaded.predict(&dense(&[0.5, 1.5])));
     checker.finish(&["repr()", "str()", "transform"]);
+    let transform = &saved["members"]["members"]["transform"];
+    let input = golden_dataset(
+        &session,
+        &models["datasets"],
+        call_dataset(&transform["call"]),
+    );
+    let output = loaded.transform(&input).unwrap();
+    assert_transform_relation(&output, transform, &format!("{key}: transform"));
     assert!(!loaded.has_summary());
     assert!(loaded.summary().is_err());
 
     let fit = &models["fits"][key]["fit"];
+
+    let dataset = models["fits"][key]["dataset"].as_str().unwrap();
     let (server, session) = ReplayServer::start(&[fit, &models["models"][key], saved]);
     let model = FMClassifier::new()
         .set_factor_size(2)
@@ -574,9 +634,145 @@ fn fm_load_and_save_match_official_pyspark() {
         .set_seed(42)
         .set_reg_param(0.01)
         .set_step_size(0.1)
-        .fit(&session.range(3).unwrap())
+        .fit(&golden_dataset(&session, &models["datasets"], dataset))
         .unwrap();
+    assert_fit_dataset(&server, &models["datasets"], dataset);
     assert_commands(&server, fit, "fit");
     model.write().unwrap().overwrite().save("<path>").unwrap();
     assert_commands(&server, &saved["save"], &format!("{key}: save"));
+}
+
+/// The `MlOperatorInfo` that a golden load read: its uid and its params.
+fn operator_info(load: &Value) -> spark_connect_proto::ml_command_result::MlOperatorInfo {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    use prost::Message;
+    let result = spark_connect_proto::MlCommandResult::decode(
+        STANDARD
+            .decode(load["results"][0].as_str().unwrap())
+            .unwrap()
+            .as_slice(),
+    )
+    .unwrap();
+    match result.result_type {
+        Some(spark_connect_proto::ml_command_result::ResultType::OperatorInfo(info)) => info,
+        other => panic!("not an operator info: {other:?}"),
+    }
+}
+
+/// The estimator that PySpark's loader reads at a path by its class name, as the stage of that
+/// class: a Naive Bayes, MLP or FM estimator, which has no typed load of its own.
+fn load_estimator_stage(session: &SparkSession, path: &str) -> Result<Box<dyn Estimator>> {
+    match load_stage(session, path)? {
+        PipelineStage::Estimator(stage) => Ok(stage),
+        _ => panic!("{path}: not an estimator"),
+    }
+}
+
+/// An estimator's persistence entry, which no other test replays: its load reads the uid and the
+/// params that the golden load read, and its save of the loaded estimator sends the golden save.
+fn check_estimator_entry(
+    persistence: &Value,
+    key: &str,
+    load: impl FnOnce(&SparkSession) -> Result<Box<dyn Estimator>>,
+) {
+    let entry = &persistence["persistence"][key];
+    let (server, session) = ReplayServer::start(&[entry]);
+    let estimator = load(&session).unwrap_or_else(|e| panic!("{key}: {e}"));
+    assert_commands(&server, &entry["load"], &format!("{key}: load"));
+    let info = operator_info(&entry["load"]);
+    assert_eq!(estimator.operator().uid, info.uid.unwrap(), "{key}: uid");
+    // As the LR tests: each golden param is the loaded one, an integer of any width.
+    ml_golden::assert_params(
+        estimator.params(),
+        &Params::from_proto(&info.params.unwrap()),
+        key,
+    );
+    estimator
+        .write()
+        .session(&session)
+        .overwrite()
+        .save("/unused/path")
+        .unwrap();
+    assert_commands(&server, &entry["save"], &format!("{key}: save"));
+}
+
+/// A model's persistence entry, which no other test replays: its load reads the uid that the
+/// golden load read, and its save sends the golden save. Its members are not replayed here.
+fn check_model_entry<M: Model>(
+    persistence: &Value,
+    key: &str,
+    load: impl FnOnce(&SparkSession) -> Result<M>,
+) {
+    let entry = &persistence["persistence"][key];
+    let (server, session) = ReplayServer::start(&[entry]);
+    let model = load(&session).unwrap_or_else(|e| panic!("{key}: {e}"));
+    assert_commands(&server, &entry["load"], &format!("{key}: load"));
+    assert_eq!(
+        model.operator().uid,
+        operator_info(&entry["load"]).uid.unwrap(),
+        "{key}: uid"
+    );
+    model
+        .write()
+        .unwrap()
+        .overwrite()
+        .save("/unused/path")
+        .unwrap();
+    assert_commands(&server, &entry["save"], &format!("{key}: save"));
+}
+
+/// The persistence entry of the multiclass random forest's estimator, which no other test loads.
+/// Its model, and the entries of Naive Bayes, MLP, FM and OneVsRest, are in the known-failure test
+/// below.
+#[test]
+fn unused_persistence_entries_match_official_pyspark() {
+    let persistence: Value = serde_json::from_str(PERSISTENCE).unwrap();
+    check_estimator_entry(
+        &persistence,
+        "RandomForestClassifier.multiclass.estimator",
+        |s| Ok(Box::new(RandomForestClassifier::load(s, "/unused/path")?)),
+    );
+}
+
+/// KNOWN FAILURE, of three causes, none of them a difference in the files or the values:
+/// - The NaiveBayes, MultilayerPerceptronClassifier and FMClassifier estimators have no typed load
+///   in the Rust API: the generic stage loader reads their metadata with a DataFrame query, where
+///   PySpark's `load` sends one ML Read. A gap of the Rust API.
+/// - The OneVsRest estimator and model read their metadata with a DataFrame query, as PySpark's
+///   `DefaultParamsReader.loadMetadata` does (`spark.read.text`), which the golden does not record
+///   and the replay does not answer. A limit of the replay.
+/// - The multiclass forest's model load is a Read followed by a Fetch of its trees in PySpark's
+///   golden (its `_resetUid` walk reads `trees`), and the Rust load sends only the Read: it reads
+///   the trees when they are asked for, as the Rust API's fetches are lazy. The binary forest's
+///   model load has the same two golden commands; the offline tree test checks only the first,
+///   since its hook fails the first request.
+///
+/// Left failing on purpose (run with `--ignored`); the product code is not changed here.
+#[test]
+#[ignore = "known gaps, of the causes that the doc comment gives"]
+fn naive_bayes_mlp_fm_and_one_vs_rest_loads_as_official_pyspark() {
+    let persistence: Value = serde_json::from_str(PERSISTENCE).unwrap();
+    for key in [
+        "NaiveBayes.multinomial.estimator",
+        "NaiveBayes.complement.estimator",
+        "NaiveBayes.bernoulli.estimator",
+        "NaiveBayes.gaussian.estimator",
+        "MultilayerPerceptronClassifier.estimator",
+        "FMClassifier.estimator",
+    ] {
+        check_estimator_entry(&persistence, key, |session| {
+            load_estimator_stage(session, "/unused/path")
+        });
+    }
+    check_estimator_entry(&persistence, "OneVsRest.estimator", |s| {
+        Ok(Box::new(OneVsRest::load(s, "/unused/path")?))
+    });
+    check_model_entry(&persistence, "OneVsRest.model", |s| {
+        OneVsRestModel::load(s, "/unused/path")
+    });
+    check_model_entry(
+        &persistence,
+        "RandomForestClassifier.multiclass.model",
+        |s| RandomForestClassificationModel::load(s, "/unused/path"),
+    );
 }
