@@ -2,6 +2,7 @@
 //! The typed models and summaries of the native clustering estimators, as PySpark's
 //! `pyspark.ml.clustering` has them over Spark Connect (see [`super::object`]).
 use super::*;
+use crate::ml::object::ModelObject;
 
 native_model! {
     PyKMeansModel = "KMeansModel" in "pyspark.ml.connect.clustering",
@@ -98,7 +99,7 @@ fn kmeans_summary(
     _model: &object::ModelCore,
     target: spark_connect::ml::MlTarget,
 ) -> PyResult<Py<PyAny>> {
-    Ok(Py::new(py, PyKMeansSummary::from(target))?.into_any())
+    Ok(crate::ml::object::new_py(py, PyKMeansSummary::from(target))?.into_any())
 }
 
 native_model! {
@@ -170,7 +171,7 @@ fn bisecting_kmeans_summary(
     _model: &object::ModelCore,
     target: spark_connect::ml::MlTarget,
 ) -> PyResult<Py<PyAny>> {
-    Ok(Py::new(py, PyBisectingKMeansSummary::from(target))?.into_any())
+    Ok(crate::ml::object::new_py(py, PyBisectingKMeansSummary::from(target))?.into_any())
 }
 
 native_summary! {
@@ -268,7 +269,7 @@ fn gaussian_mixture_summary(
     _model: &object::ModelCore,
     target: spark_connect::ml::MlTarget,
 ) -> PyResult<Py<PyAny>> {
-    Ok(Py::new(py, PyGaussianMixtureSummary::from(target))?.into_any())
+    Ok(crate::ml::object::new_py(py, PyGaussianMixtureSummary::from(target))?.into_any())
 }
 
 native_summary! {
@@ -365,14 +366,6 @@ native_model! {
     cached: [];
 }
 
-impl PyLDAModel {
-    /// The object of the model, of its class (a subclass), as a copy makes it.
-    pub(crate) fn into_object(self, py: Python<'_>) -> PyResult<Py<PyLDAModel>> {
-        let make = self.make;
-        make(py, self.core)
-    }
-}
-
 /// A subclass `$ty` of PySpark's `LDAModel` (`LocalLDAModel`, `DistributedLDAModel`) and of the
 /// JVM class `$jvm`, of the members of the base class [`PyLDAModel`], which holds the model, and
 /// of PySpark's persistence of a model (`write`, `save`, `read`, `load`), which the base class
@@ -380,7 +373,7 @@ impl PyLDAModel {
 /// of a server-side object or of a read, whose copies are of the subclass.
 macro_rules! lda_model {
     ($ty:ident = $name:literal, jvm: $jvm:literal; $($body:tt)*) => {
-        #[pyclass(extends = PyLDAModel, name = $name, module = "pyspark.ml.connect.clustering")]
+        #[pyclass(subclass, extends = PyLDAModel, name = $name, module = "pyspark.ml.connect.clustering")]
         pub struct $ty;
 
         impl $ty {
@@ -416,7 +409,7 @@ macro_rules! lda_model {
             /// The object of this class of the core `core`, as a copy makes it.
             fn __make(py: Python<'_>, core: object::ModelCore) -> PyResult<Py<PyLDAModel>> {
                 let base = PyLDAModel { core, make: Self::__make };
-                let this = Py::new(py, PyClassInitializer::from(base).add_subclass(Self))?;
+                let this = crate::ml::object::new_py(py, PyClassInitializer::from(base).add_subclass(Self))?;
                 Ok(this.into_bound(py).into_super().unbind())
             }
         }
@@ -438,8 +431,9 @@ macro_rules! lda_model {
                 Ok(PyClassInitializer::from(base).add_subclass(Self))
             }
 
-            fn write(slf: &Bound<'_, Self>) -> PyResult<object::PyMLWriter> {
-                slf.as_super().try_borrow()?.core.writer(slf.py())
+            fn write(slf: &Bound<'_, Self>) -> PyResult<Py<object::PyMLWriter>> {
+                let writer = slf.as_super().try_borrow()?.core.writer(slf.py())?;
+                object::new_py(slf.py(), writer)
             }
 
             fn save(slf: &Bound<'_, Self>, path: &str) -> PyResult<()> {
@@ -448,13 +442,13 @@ macro_rules! lda_model {
             }
 
             #[classmethod]
-            fn read(cls: &Bound<'_, pyo3::types::PyType>) -> object::PyMLReader {
-                let _ = cls;
-                object::PyMLReader::new(
+            fn read(cls: &Bound<'_, pyo3::types::PyType>) -> PyResult<Py<object::PyMLReader>> {
+                let reader = object::PyMLReader::new(
                     $jvm,
                     spark_connect::ml::OperatorType::Model,
                     <$ty>::__from_read,
-                )
+                );
+                object::new_py(cls.py(), reader)
             }
 
             #[classmethod]

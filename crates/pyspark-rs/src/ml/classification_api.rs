@@ -96,7 +96,7 @@ native_model! {
         let target = slf.try_borrow()?.core.target()?;
         let output = object::fetch_py(py, &target, "evaluate", std::slice::from_ref(dataset))?;
         let summary = spark_connect::ml::evaluated_summary(&target, output).to_pyerr()?;
-        Py::new(py, PyLinearSVCSummary::from(summary))
+        crate::ml::object::new_py(py, PyLinearSVCSummary::from(summary))
     }
 }
 
@@ -184,7 +184,7 @@ fn linear_svc_training_summary(
     _model: &object::ModelCore,
     target: spark_connect::ml::MlTarget,
 ) -> PyResult<Py<PyAny>> {
-    Ok(Py::new(py, PyLinearSVCTrainingSummary::from(target))?.into_any())
+    Ok(crate::ml::object::new_py(py, PyLinearSVCTrainingSummary::from(target))?.into_any())
 }
 
 /// Register the typed classification models and summaries.

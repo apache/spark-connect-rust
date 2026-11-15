@@ -107,9 +107,15 @@ fn logistic_training_summary(
     target: spark_connect::ml::MlTarget,
 ) -> PyResult<Py<PyAny>> {
     if fetch_num_classes(py, &model.target()?)? <= 2 {
-        Ok(Py::new(py, PyBinaryLogisticRegressionTrainingSummary::from(target))?.into_any())
+        Ok(
+            crate::ml::object::new_py(py, PyBinaryLogisticRegressionTrainingSummary::from(target))?
+                .into_any(),
+        )
     } else {
-        Ok(Py::new(py, PyLogisticRegressionTrainingSummary::from(target))?.into_any())
+        Ok(
+            crate::ml::object::new_py(py, PyLogisticRegressionTrainingSummary::from(target))?
+                .into_any(),
+        )
     }
 }
 
@@ -122,9 +128,12 @@ fn evaluated_summary_of(
     summary: spark_connect::ml::MlTarget,
 ) -> PyResult<Py<PyAny>> {
     if fetch_num_classes(py, model)? <= 2 {
-        Ok(Py::new(py, PyBinaryLogisticRegressionSummary::from(summary))?.into_any())
+        Ok(
+            crate::ml::object::new_py(py, PyBinaryLogisticRegressionSummary::from(summary))?
+                .into_any(),
+        )
     } else {
-        Ok(Py::new(py, PyLogisticRegressionSummary::from(summary))?.into_any())
+        Ok(crate::ml::object::new_py(py, PyLogisticRegressionSummary::from(summary))?.into_any())
     }
 }
 

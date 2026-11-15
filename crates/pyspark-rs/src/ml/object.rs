@@ -118,6 +118,86 @@ pub(super) fn ml_value_to_py(py: Python<'_>, value: &MlValue) -> PyResult<Py<PyA
     })
 }
 
+/// The public classes of the native ML classes, by the type object of the native class: the
+/// subclass of `pyspark.ml.connect.<module>` of the native class and of the bases of PySpark's class
+/// (see `pyspark/ml/connect/_classes.py`), of which [`new_object`] makes the objects.
+fn public_classes() -> &'static std::sync::Mutex<HashMap<usize, Py<pyo3::types::PyType>>> {
+    static CLASSES: std::sync::OnceLock<std::sync::Mutex<HashMap<usize, Py<pyo3::types::PyType>>>> =
+        std::sync::OnceLock::new();
+    CLASSES.get_or_init(Default::default)
+}
+
+/// Make `public`, a subclass of the native class `native`, the class of the objects of `native`
+/// that this client makes (see [`new_object`]).
+#[pyfunction]
+#[pyo3(name = "_register_public_class")]
+pub(crate) fn register_public_class(
+    native: &Bound<'_, pyo3::types::PyType>,
+    public: &Bound<'_, pyo3::types::PyType>,
+) -> PyResult<()> {
+    if !public.is_subclass(native)? {
+        return Err(PyTypeError::new_err(format!(
+            "{} is not a subclass of {}",
+            public.name()?,
+            native.name()?
+        )));
+    }
+    public_classes()
+        .lock()
+        .expect("the public classes are not poisoned")
+        .insert(native.as_type_ptr() as usize, public.clone().unbind());
+    Ok(())
+}
+
+/// The public class of the native class `T` (see [`register_public_class`]), if it has one.
+pub(crate) fn public_class<T: pyo3::PyTypeInfo>(
+    py: Python<'_>,
+) -> Option<Bound<'_, pyo3::types::PyType>> {
+    let native = T::type_object_raw(py) as usize;
+    let classes = public_classes()
+        .lock()
+        .expect("the public classes are not poisoned");
+    classes.get(&native).map(|class| class.bind(py).clone())
+}
+
+/// The object of `init`, of the public class of `T` if it has one (as PySpark's objects are of the
+/// class of `pyspark.ml`, of its bases), else of `T`: every object of a native ML class that this
+/// client makes. It is made as PyO3's `tp_new` of the public class makes one, of `init`.
+pub(crate) fn new_object<T: PyClass>(
+    py: Python<'_>,
+    init: impl Into<PyClassInitializer<T>>,
+) -> PyResult<Bound<'_, T>> {
+    let init = init.into();
+    // The lock is released before the allocation, which may run Python code.
+    let Some(public) = public_class::<T>(py) else {
+        return Bound::new(py, init);
+    };
+    // SAFETY: `public` is a subclass of `T` (see `register_public_class`), of which PyO3's
+    // `tp_new_impl`, the `tp_new` of a `#[new]`, makes an object of an initializer of `T`.
+    unsafe {
+        let ptr = pyo3::impl_::pymethods::tp_new_impl::<PyClassInitializer<T>, T>(
+            py,
+            init,
+            public.as_type_ptr(),
+        )?;
+        Ok(Bound::from_owned_ptr(py, ptr).cast_into_unchecked())
+    }
+}
+
+/// A model of a fit, which is made an object of its class: the public class of its native class,
+/// or a subclass of a base class (LDA's), as `Fitted` returns it.
+pub(crate) trait ModelObject: PyClass + Sized {
+    fn into_object(self, py: Python<'_>) -> PyResult<Py<Self>>;
+}
+
+/// The object of `init` as [`new_object`] makes it, unbound.
+pub(crate) fn new_py<T: PyClass>(
+    py: Python<'_>,
+    init: impl Into<PyClassInitializer<T>>,
+) -> PyResult<Py<T>> {
+    new_object(py, init).map(Bound::unbind)
+}
+
 /// The argument `value` of a fetch, as `serialize` of `pyspark.ml.connect.serialize` sends it: a
 /// DataFrame as its relation, a `(value, DataType)` pair as the literal of that type
 /// (`LiteralExpression(value, dataType)`, whose asserts raise PySpark's bare AssertionError of a
@@ -276,7 +356,11 @@ pub(super) type PythonLoad =
 /// PySpark's `MLWriter` of a native class (`RemoteMLWriter` over Spark Connect): `overwrite()`,
 /// `option(key, value)` (of its lowercase key and string value), `session(spark)` and
 /// `save(path)`, which sends the `Write`.
-#[pyclass(name = "RemoteMLWriter", module = "pyspark.ml.connect.readwrite")]
+#[pyclass(
+    subclass,
+    name = "RemoteMLWriter",
+    module = "pyspark.ml.connect.readwrite"
+)]
 pub struct PyMLWriter {
     target: WriteTarget,
     /// Whether `save` overwrites, as the attribute of `MLWriter`.
@@ -426,7 +510,11 @@ pub(super) type FromRead =
 
 /// PySpark's `MLReader` of a native class (`RemoteMLReader` over Spark Connect): `load(path)`
 /// sends the `Read` of the JVM class, and `session(spark)` sets the session to load with.
-#[pyclass(name = "RemoteMLReader", module = "pyspark.ml.connect.readwrite")]
+#[pyclass(
+    subclass,
+    name = "RemoteMLReader",
+    module = "pyspark.ml.connect.readwrite"
+)]
 pub struct PyMLReader {
     kind: ReaderKind,
     session: Option<Py<PyAny>>,

@@ -510,7 +510,7 @@ def test_native_ml_accepts_explicitly_converted_pandas(session):
     from pyspark.sql import DataFrame
 
     # Exercise the native bindings, independently of the deprecated Python ML implementations.
-    assert connect.KMeans is __import__("pyspark._pyspark", fromlist=["KMeans"]).KMeans
+    assert issubclass(connect.KMeans, __import__("pyspark._pyspark", fromlist=["KMeans"]).KMeans)
     pdf = pd.DataFrame({"features": [[0.0, 1.0], [1.0, 0.0], [2.0, 2.0], [3.0, 1.0]],
                         "label": [0.0, 1.0, 1.0, 0.0]})
     # The estimators take the vectors of pyspark.ml, so the arrays of the converted frame are

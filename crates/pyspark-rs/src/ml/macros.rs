@@ -207,12 +207,13 @@ macro_rules! native_pymethods {
                 }
 
                 /// The writer of the operator, as `JavaMLWritable.write` (`RemoteMLWriter`).
-                fn write(slf: &Bound<'_, Self>) -> PyResult<$crate::ml::object::PyMLWriter> {
-                    $crate::ml::params_api::operator_writer(
+                fn write(slf: &Bound<'_, Self>) -> PyResult<Py<$crate::ml::object::PyMLWriter>> {
+                    let writer = $crate::ml::params_api::operator_writer(
                         slf,
                         $jvm,
                         spark_connect::ml::OperatorType::$op,
-                    )
+                    )?;
+                    $crate::ml::object::new_py(slf.py(), writer)
                 }
 
                 /// Save to `path`, as `MLWritable.save`: `self.write().save(path)`.
@@ -223,13 +224,15 @@ macro_rules! native_pymethods {
 
                 /// The reader of the class, as `JavaMLReadable.read` (`RemoteMLReader`).
                 #[classmethod]
-                fn read(cls: &Bound<'_, pyo3::types::PyType>) -> $crate::ml::object::PyMLReader {
-                    let _ = cls;
-                    $crate::ml::object::PyMLReader::new(
+                fn read(
+                    cls: &Bound<'_, pyo3::types::PyType>,
+                ) -> PyResult<Py<$crate::ml::object::PyMLReader>> {
+                    let reader = $crate::ml::object::PyMLReader::new(
                         $jvm,
                         spark_connect::ml::OperatorType::$op,
                         <$ty>::__from_read,
-                    )
+                    );
+                    $crate::ml::object::new_py(cls.py(), reader)
                 }
 
                 /// Load from `path`, as `MLReadable.load`: `cls.read().load(path)`.
@@ -359,10 +362,11 @@ macro_rules! native_model {
     ) => {
         native_model! {
             @emit $ty = $name in $module, jvm: $jvm;
-            pyclass: [];
+            pyclass: [subclass];
             persistence: {
-                fn write(slf: &Bound<'_, Self>) -> PyResult<$crate::ml::object::PyMLWriter> {
-                    slf.try_borrow()?.core.writer(slf.py())
+                fn write(slf: &Bound<'_, Self>) -> PyResult<Py<$crate::ml::object::PyMLWriter>> {
+                    let writer = slf.try_borrow()?.core.writer(slf.py())?;
+                    $crate::ml::object::new_py(slf.py(), writer)
                 }
 
                 fn save(slf: &Bound<'_, Self>, path: &str) -> PyResult<()> {
@@ -371,13 +375,15 @@ macro_rules! native_model {
                 }
 
                 #[classmethod]
-                fn read(cls: &Bound<'_, pyo3::types::PyType>) -> $crate::ml::object::PyMLReader {
-                    let _ = cls;
-                    $crate::ml::object::PyMLReader::new(
+                fn read(
+                    cls: &Bound<'_, pyo3::types::PyType>,
+                ) -> PyResult<Py<$crate::ml::object::PyMLReader>> {
+                    let reader = $crate::ml::object::PyMLReader::new(
                         $jvm,
                         spark_connect::ml::OperatorType::Model,
                         <$ty>::__from_read,
-                    )
+                    );
+                    $crate::ml::object::new_py(cls.py(), reader)
                 }
 
                 #[classmethod]
@@ -418,7 +424,7 @@ macro_rules! native_model {
                 read: spark_connect::ml::ReadResult,
             ) -> PyResult<Py<PyAny>> {
                 let this = Self::__loaded_with(py, $jvm, $name, read, Self::__make)?;
-                Ok(Py::new(py, this)?.into_any())
+                Ok($crate::ml::object::new_object(py, this)?.into_any().unbind())
             }
         }
     };
@@ -576,7 +582,17 @@ macro_rules! native_model {
 
             /// The object of this class of the core `core`, as a copy makes it.
             fn __make(py: Python<'_>, core: $crate::ml::object::ModelCore) -> PyResult<Py<Self>> {
-                Py::new(py, Self { core, make: Self::__make })
+                let this = Self { core, make: Self::__make };
+                Ok($crate::ml::object::new_object(py, this)?.unbind())
+            }
+        }
+
+        impl $crate::ml::object::ModelObject for $ty {
+            /// The object of the model, of its class (the public class of its native class, or of
+            /// a subclass of a base class), as a copy makes it.
+            fn into_object(self, py: Python<'_>) -> PyResult<Py<Self>> {
+                let make = self.make;
+                make(py, self.core)
             }
         }
 
@@ -770,7 +786,7 @@ macro_rules! native_summary {
         ];
         $($body:tt)*
     ) => {
-        #[pyclass(name = $name, module = $module)]
+        #[pyclass(subclass, name = $name, module = $module)]
         pub struct $ty {
             target: spark_connect::ml::MlTarget,
         }

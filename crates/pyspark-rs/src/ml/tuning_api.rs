@@ -203,7 +203,7 @@ macro_rules! validator {
 
         impl params_api::NativeInstance for $ty {
             fn duplicate(&self, py: Python<'_>) -> PyResult<Py<Self>> {
-                Py::new(
+                crate::ml::object::new_py(
                     py,
                     Self {
                         uid: self.uid.clone(),
@@ -238,7 +238,11 @@ macro_rules! validator {
 }
 
 /// PySpark's `CrossValidator`: k-fold cross validation of an estimator over its param maps.
-#[pyclass(name = "CrossValidator", module = "pyspark.ml.connect.tuning")]
+#[pyclass(
+    subclass,
+    name = "CrossValidator",
+    module = "pyspark.ml.connect.tuning"
+)]
 pub struct PyCrossValidator {
     uid: String,
     values: ParamValues,
@@ -260,7 +264,11 @@ validator!(
 /// PySpark's `CrossValidatorModel`: the best model of a cross validation, the average and the
 /// standard deviation of the metrics of each param map over the folds, and the sub-models of each
 /// fold and param map, as PySpark's attributes of the instance.
-#[pyclass(name = "CrossValidatorModel", module = "pyspark.ml.connect.tuning")]
+#[pyclass(
+    subclass,
+    name = "CrossValidatorModel",
+    module = "pyspark.ml.connect.tuning"
+)]
 pub struct PyCrossValidatorModel {
     uid: String,
     values: ParamValues,
@@ -283,7 +291,11 @@ validator!(
 
 /// PySpark's `TrainValidationSplit`: the validation of an estimator over its param maps on one
 /// random split of the dataset.
-#[pyclass(name = "TrainValidationSplit", module = "pyspark.ml.connect.tuning")]
+#[pyclass(
+    subclass,
+    name = "TrainValidationSplit",
+    module = "pyspark.ml.connect.tuning"
+)]
 pub struct PyTrainValidationSplit {
     uid: String,
     values: ParamValues,
@@ -300,6 +312,7 @@ validator!(
 /// of each param map, and the sub-models of each param map, as PySpark's attributes of the
 /// instance.
 #[pyclass(
+    subclass,
     name = "TrainValidationSplitModel",
     module = "pyspark.ml.connect.tuning"
 )]
@@ -764,7 +777,7 @@ fn cross_validator_fit(
         sub_models,
         Some(&std_metrics),
     )?;
-    let model = Bound::new(py, model)?;
+    let model = crate::ml::object::new_object(py, model)?;
     copy_values(slf, &model, None)?;
     Ok(model.into_any().unbind())
 }
@@ -828,7 +841,7 @@ fn train_validation_split_fit(
         Some(metrics.as_any()),
         sub_models,
     )?;
-    let model = Bound::new(py, model)?;
+    let model = crate::ml::object::new_object(py, model)?;
     copy_values(slf, &model, None)?;
     Ok(model.into_any().unbind())
 }
@@ -982,7 +995,7 @@ native_pymethods! {
         slf: &Bound<'py, Self>,
         dataset: &Bound<'py, PyAny>,
         paramMaps: &Bound<'py, PyAny>,
-    ) -> PyResult<params_api::PyFitMultipleIterator> {
+    ) -> PyResult<Py<params_api::PyFitMultipleIterator>> {
         params_api::fit_multiple(slf.as_any(), dataset, paramMaps)
     }
 
@@ -994,11 +1007,12 @@ native_pymethods! {
 
     /// The writer, as `CrossValidator.write` over Spark Connect (`RemoteMLWriter`, which saves
     /// as `CrossValidatorWriter`).
-    fn write(slf: &Bound<'_, Self>) -> object::PyMLWriter {
-        object::PyMLWriter::new(object::WriteTarget::Python(
+    fn write(slf: &Bound<'_, Self>) -> PyResult<Py<object::PyMLWriter>> {
+        let writer = object::PyMLWriter::new(object::WriteTarget::Python(
             slf.clone().into_any().unbind(),
             save_cross_validator,
-        ))
+        ));
+        object::new_py(slf.py(), writer)
     }
 
     /// Save to `path`, as `MLWritable.save`: `self.write().save(path)`.
@@ -1009,9 +1023,9 @@ native_pymethods! {
 
     /// The reader, as `CrossValidator.read` over Spark Connect (`CrossValidatorReader`).
     #[classmethod]
-    fn read(cls: &Bound<'_, pyo3::types::PyType>) -> object::PyMLReader {
-        let _ = cls;
-        object::PyMLReader::python(load_cross_validator)
+    fn read(cls: &Bound<'_, pyo3::types::PyType>) -> PyResult<Py<object::PyMLReader>> {
+        let reader = object::PyMLReader::python(load_cross_validator);
+        object::new_py(cls.py(), reader)
     }
 
     /// Load from `path`, as `MLReadable.load`: `cls.read().load(path)`.
@@ -1094,18 +1108,19 @@ native_pymethods! {
             folds.into_any().unbind(),
             Some(&std_metrics),
         )?;
-        let model = Bound::new(py, model)?;
+        let model = crate::ml::object::new_object(py, model)?;
         copy_values(slf, &model, Some(&extra))?;
         Ok(model.unbind())
     }
 
     /// The writer, as `CrossValidatorModel.write` over Spark Connect (`RemoteMLWriter`, which saves
     /// as `CrossValidatorModelWriter`, of its option `persistSubModels`).
-    fn write(slf: &Bound<'_, Self>) -> object::PyMLWriter {
-        object::PyMLWriter::new(object::WriteTarget::Python(
+    fn write(slf: &Bound<'_, Self>) -> PyResult<Py<object::PyMLWriter>> {
+        let writer = object::PyMLWriter::new(object::WriteTarget::Python(
             slf.clone().into_any().unbind(),
             save_cross_validator_model,
-        ))
+        ));
+        object::new_py(slf.py(), writer)
     }
 
     fn save(slf: &Bound<'_, Self>, path: &str) -> PyResult<()> {
@@ -1114,9 +1129,9 @@ native_pymethods! {
     }
 
     #[classmethod]
-    fn read(cls: &Bound<'_, pyo3::types::PyType>) -> object::PyMLReader {
-        let _ = cls;
-        object::PyMLReader::python(load_cross_validator_model)
+    fn read(cls: &Bound<'_, pyo3::types::PyType>) -> PyResult<Py<object::PyMLReader>> {
+        let reader = object::PyMLReader::python(load_cross_validator_model);
+        object::new_py(cls.py(), reader)
     }
 
     #[classmethod]
@@ -1238,7 +1253,7 @@ native_pymethods! {
         slf: &Bound<'py, Self>,
         dataset: &Bound<'py, PyAny>,
         paramMaps: &Bound<'py, PyAny>,
-    ) -> PyResult<params_api::PyFitMultipleIterator> {
+    ) -> PyResult<Py<params_api::PyFitMultipleIterator>> {
         params_api::fit_multiple(slf.as_any(), dataset, paramMaps)
     }
 
@@ -1250,11 +1265,12 @@ native_pymethods! {
 
     /// The writer, as `TrainValidationSplit.write` over Spark Connect (`RemoteMLWriter`, which
     /// saves as `TrainValidationSplitWriter`).
-    fn write(slf: &Bound<'_, Self>) -> object::PyMLWriter {
-        object::PyMLWriter::new(object::WriteTarget::Python(
+    fn write(slf: &Bound<'_, Self>) -> PyResult<Py<object::PyMLWriter>> {
+        let writer = object::PyMLWriter::new(object::WriteTarget::Python(
             slf.clone().into_any().unbind(),
             save_train_validation_split,
-        ))
+        ));
+        object::new_py(slf.py(), writer)
     }
 
     fn save(slf: &Bound<'_, Self>, path: &str) -> PyResult<()> {
@@ -1263,9 +1279,9 @@ native_pymethods! {
     }
 
     #[classmethod]
-    fn read(cls: &Bound<'_, pyo3::types::PyType>) -> object::PyMLReader {
-        let _ = cls;
-        object::PyMLReader::python(load_train_validation_split)
+    fn read(cls: &Bound<'_, pyo3::types::PyType>) -> PyResult<Py<object::PyMLReader>> {
+        let reader = object::PyMLReader::python(load_train_validation_split);
+        object::new_py(cls.py(), reader)
     }
 
     #[classmethod]
@@ -1339,18 +1355,19 @@ native_pymethods! {
             Some(&validation_metrics),
             sub_models.into_any().unbind(),
         )?;
-        let model = Bound::new(py, model)?;
+        let model = crate::ml::object::new_object(py, model)?;
         copy_values(slf, &model, Some(&extra))?;
         Ok(model.unbind())
     }
 
     /// The writer, as `TrainValidationSplitModel.write` over Spark Connect (`RemoteMLWriter`,
     /// which saves as `TrainValidationSplitModelWriter`, of its option `persistSubModels`).
-    fn write(slf: &Bound<'_, Self>) -> object::PyMLWriter {
-        object::PyMLWriter::new(object::WriteTarget::Python(
+    fn write(slf: &Bound<'_, Self>) -> PyResult<Py<object::PyMLWriter>> {
+        let writer = object::PyMLWriter::new(object::WriteTarget::Python(
             slf.clone().into_any().unbind(),
             save_train_validation_split_model,
-        ))
+        ));
+        object::new_py(slf.py(), writer)
     }
 
     fn save(slf: &Bound<'_, Self>, path: &str) -> PyResult<()> {
@@ -1359,9 +1376,9 @@ native_pymethods! {
     }
 
     #[classmethod]
-    fn read(cls: &Bound<'_, pyo3::types::PyType>) -> object::PyMLReader {
-        let _ = cls;
-        object::PyMLReader::python(load_train_validation_split_model)
+    fn read(cls: &Bound<'_, pyo3::types::PyType>) -> PyResult<Py<object::PyMLReader>> {
+        let reader = object::PyMLReader::python(load_train_validation_split_model);
+        object::new_py(cls.py(), reader)
     }
 
     #[classmethod]
@@ -1901,7 +1918,7 @@ fn load_cross_validator(
         params_api::random_uid(py, "CrossValidator")?,
         ParamValues::new(),
     );
-    let cv = Bound::new(py, PyCrossValidator { uid, values })?;
+    let cv = crate::ml::object::new_object(py, PyCrossValidator { uid, values })?;
     set_shared(&cv, &estimator, &param_maps, &evaluator)?;
     reset_uid(&cv, &metadata.get_item("uid")?)?;
     get_and_set_params(&cv, &metadata, &["estimatorParamMaps"])?;
@@ -1921,7 +1938,7 @@ fn load_train_validation_split(
         params_api::random_uid(py, "TrainValidationSplit")?,
         ParamValues::new(),
     );
-    let tvs = Bound::new(py, PyTrainValidationSplit { uid, values })?;
+    let tvs = crate::ml::object::new_object(py, PyTrainValidationSplit { uid, values })?;
     set_shared(&tvs, &estimator, &param_maps, &evaluator)?;
     reset_uid(&tvs, &metadata.get_item("uid")?)?;
     get_and_set_params(&tvs, &metadata, &["estimatorParamMaps"])?;
@@ -1974,7 +1991,7 @@ fn load_cross_validator_model(
         sub_models,
         std_metrics.as_ref(),
     )?;
-    let model = Bound::new(py, model)?;
+    let model = crate::ml::object::new_object(py, model)?;
     reset_uid(&model, &metadata.get_item("uid")?)?;
     set_shared(&model, &estimator, &param_maps, &evaluator)?;
     get_and_set_params(&model, &metadata, &["estimatorParamMaps"])?;
@@ -2014,7 +2031,7 @@ fn load_train_validation_split_model(
         Some(&validation_metrics),
         sub_models,
     )?;
-    let model = Bound::new(py, model)?;
+    let model = crate::ml::object::new_object(py, model)?;
     reset_uid(&model, &metadata.get_item("uid")?)?;
     set_shared(&model, &estimator, &param_maps, &evaluator)?;
     get_and_set_params(&model, &metadata, &["estimatorParamMaps"])?;

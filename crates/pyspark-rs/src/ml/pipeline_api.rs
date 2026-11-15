@@ -18,7 +18,7 @@ const PIPELINE_MODEL_CLASS: &str = "pyspark.ml.pipeline.PipelineModel";
 
 /// PySpark's `Pipeline`: its `stages` (a param of the converter `identity`, the object as it was
 /// set), and its uid.
-#[pyclass(name = "Pipeline", module = "pyspark.ml.connect.pipeline")]
+#[pyclass(subclass, name = "Pipeline", module = "pyspark.ml.connect.pipeline")]
 pub struct PyPipeline {
     uid: String,
     stages: Option<Py<PyAny>>,
@@ -59,7 +59,7 @@ impl params_api::ParamsHolder for PyPipeline {
 
 impl params_api::NativeInstance for PyPipeline {
     fn duplicate(&self, py: Python<'_>) -> PyResult<Py<Self>> {
-        Py::new(
+        crate::ml::object::new_py(
             py,
             Self {
                 uid: self.uid.clone(),
@@ -145,7 +145,7 @@ native_pymethods! {
         slf: &Bound<'py, Self>,
         dataset: &Bound<'py, PyAny>,
         paramMaps: &Bound<'py, PyAny>,
-    ) -> PyResult<params_api::PyFitMultipleIterator> {
+    ) -> PyResult<Py<params_api::PyFitMultipleIterator>> {
         params_api::fit_multiple(slf.as_any(), dataset, paramMaps)
     }
 
@@ -162,11 +162,12 @@ native_pymethods! {
 
     /// The writer of the pipeline, as `Pipeline.write` over Spark Connect (`RemoteMLWriter`,
     /// which saves it as `PipelineWriter` does).
-    fn write(slf: &Bound<'_, Self>) -> object::PyMLWriter {
-        object::PyMLWriter::new(object::WriteTarget::Python(
+    fn write(slf: &Bound<'_, Self>) -> PyResult<Py<object::PyMLWriter>> {
+        let writer = object::PyMLWriter::new(object::WriteTarget::Python(
             slf.clone().into_any().unbind(),
             save_pipeline,
-        ))
+        ));
+        object::new_py(slf.py(), writer)
     }
 
     /// Save to `path`, as `MLWritable.save`: `self.write().save(path)`.
@@ -177,9 +178,9 @@ native_pymethods! {
 
     /// The reader of the class, as `Pipeline.read` over Spark Connect (`PipelineReader`).
     #[classmethod]
-    fn read(cls: &Bound<'_, pyo3::types::PyType>) -> object::PyMLReader {
-        let _ = cls;
-        object::PyMLReader::python(load_pipeline)
+    fn read(cls: &Bound<'_, pyo3::types::PyType>) -> PyResult<Py<object::PyMLReader>> {
+        let reader = object::PyMLReader::python(load_pipeline);
+        object::new_py(cls.py(), reader)
     }
 
     /// Load from `path`, as `MLReadable.load`: `cls.read().load(path)`.
@@ -192,7 +193,11 @@ native_pymethods! {
 /// PySpark's `PipelineModel`: its `stages` (an attribute of the instance, as PySpark's
 /// constructor sets it), of the transformers and the models of a fit, and its uid. It has no
 /// params.
-#[pyclass(name = "PipelineModel", module = "pyspark.ml.connect.pipeline")]
+#[pyclass(
+    subclass,
+    name = "PipelineModel",
+    module = "pyspark.ml.connect.pipeline"
+)]
 pub struct PyPipelineModel {
     uid: String,
     #[pyo3(get, set)]
@@ -223,7 +228,7 @@ impl params_api::ParamsHolder for PyPipelineModel {
 
 impl params_api::NativeInstance for PyPipelineModel {
     fn duplicate(&self, py: Python<'_>) -> PyResult<Py<Self>> {
-        Py::new(
+        crate::ml::object::new_py(
             py,
             Self {
                 uid: self.uid.clone(),
@@ -280,16 +285,17 @@ native_pymethods! {
         let extra = extra_or_empty(py, extra);
         let stages = slf.try_borrow()?.stages.clone_ref(py).into_bound(py);
         let stages = copied_stages(&stages, &extra)?;
-        Py::new(py, Self::of_stages(py, stages.into_any().unbind())?)
+        crate::ml::object::new_py(py, Self::of_stages(py, stages.into_any().unbind())?)
     }
 
     /// The writer of the model, as `PipelineModel.write` over Spark Connect (`RemoteMLWriter`,
     /// which saves it as `PipelineModelWriter` does).
-    fn write(slf: &Bound<'_, Self>) -> object::PyMLWriter {
-        object::PyMLWriter::new(object::WriteTarget::Python(
+    fn write(slf: &Bound<'_, Self>) -> PyResult<Py<object::PyMLWriter>> {
+        let writer = object::PyMLWriter::new(object::WriteTarget::Python(
             slf.clone().into_any().unbind(),
             save_pipeline_model,
-        ))
+        ));
+        object::new_py(slf.py(), writer)
     }
 
     fn save(slf: &Bound<'_, Self>, path: &str) -> PyResult<()> {
@@ -298,9 +304,9 @@ native_pymethods! {
     }
 
     #[classmethod]
-    fn read(cls: &Bound<'_, pyo3::types::PyType>) -> object::PyMLReader {
-        let _ = cls;
-        object::PyMLReader::python(load_pipeline_model)
+    fn read(cls: &Bound<'_, pyo3::types::PyType>) -> PyResult<Py<object::PyMLReader>> {
+        let reader = object::PyMLReader::python(load_pipeline_model);
+        object::new_py(cls.py(), reader)
     }
 
     #[classmethod]
@@ -378,7 +384,7 @@ fn pipeline_fit(slf: &Bound<'_, PyPipeline>, dataset: &Bound<'_, PyAny>) -> PyRe
         }
     }
     let model = PyPipelineModel::of_stages(py, transformers.into_any().unbind())?;
-    Ok(Py::new(py, model)?.into_any())
+    Ok(crate::ml::object::new_py(py, model)?.into_any())
 }
 
 /// Save the pipeline `instance`, as `PipelineWriter.saveImpl`: of its stages.
@@ -498,7 +504,7 @@ fn load_pipeline(
         uid,
         stages: Some(stages.into_any().unbind()),
     };
-    Ok(Py::new(py, pipeline)?.into_any())
+    Ok(crate::ml::object::new_py(py, pipeline)?.into_any())
 }
 
 /// Load the model at `path`, as `PipelineModelReader.load`:
@@ -514,7 +520,7 @@ fn load_pipeline_model(
         uid,
         stages: stages.into_any().unbind(),
     };
-    Ok(Py::new(py, model)?.into_any())
+    Ok(crate::ml::object::new_py(py, model)?.into_any())
 }
 
 /// The uid and the stages of the object saved at `path`, as `DefaultParamsReader.loadMetadata`

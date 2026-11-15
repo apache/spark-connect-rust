@@ -178,3 +178,41 @@ def _register_native_classes() -> None:
 
 
 _register_native_classes()
+
+
+def _publish_native_classes() -> None:
+    """Make the public classes of every native ML class (see `_classes`), so that every object that
+    the native module makes is of its public class, also of a module that the user has not
+    imported (the trees of a GBT classifier are regression models)."""
+    import importlib
+
+    from pyspark.ml._native_classes import publish
+
+    # The native stages of the vendored feature module, installed above.
+    for name, public in publish(
+        {name: getattr(_native, name) for name in _native._ml_feature_names}, "pyspark.ml.feature"
+    ).items():
+        globals()[name] = public
+        setattr(feature, name, public)
+    for module in [
+        "classification",
+        "clustering",
+        "evaluation",
+        "feature",
+        "fpm",
+        "pipeline",
+        "recommendation",
+        "regression",
+        "tuning",
+    ]:
+        importlib.import_module("pyspark.ml.connect." + module)
+    importlib.import_module("pyspark.ml.stat")
+    # The writers, readers and the iterator of `fitMultiple`, of no module of their own.
+    publish(
+        {"RemoteMLWriter": _native.RemoteMLWriter, "RemoteMLReader": _native.RemoteMLReader},
+        "pyspark.ml.connect.readwrite",
+    )
+    publish({"_FitMultipleIterator": _native._FitMultipleIterator}, "pyspark.ml.base")
+
+
+_publish_native_classes()

@@ -265,8 +265,8 @@ def test_ml_connect_feature_exports_preserve_array_assembler():
     from pyspark import _pyspark
     from pyspark.ml.connect import ArrayAssembler, MaxAbsScaler, StandardScaler, feature
 
-    assert StandardScaler is feature.StandardScaler is _pyspark.StandardScaler
-    assert MaxAbsScaler is feature.MaxAbsScaler is _pyspark.MaxAbsScaler
+    assert StandardScaler is feature.StandardScaler and issubclass(feature.StandardScaler, _pyspark.StandardScaler)
+    assert MaxAbsScaler is feature.MaxAbsScaler and issubclass(feature.MaxAbsScaler, _pyspark.MaxAbsScaler)
     assert ArrayAssembler is feature.ArrayAssembler
 
 
@@ -3575,7 +3575,7 @@ def test_decision_tree_classifier_native_parameters_match_official_fixture(ml_mo
     from pyspark.ml.connect import DecisionTreeClassifier as exported
     from pyspark.ml.connect.classification import DecisionTreeClassifier
 
-    assert exported is DecisionTreeClassifier is native.DecisionTreeClassifier
+    assert exported is DecisionTreeClassifier and issubclass(DecisionTreeClassifier, native.DecisionTreeClassifier)
     with pytest.raises(TypeError, match="unexpected keyword argument 'thresholds'"):
         DecisionTreeClassifier(thresholds=[0.25, 0.75])
     defaults = dict(featuresCol="features", labelCol="label", predictionCol="prediction",
@@ -3622,7 +3622,7 @@ def test_decision_tree_regressor_native_parameters_match_official_fixture(ml_moc
     from pyspark.ml.connect import DecisionTreeRegressor as exported
     from pyspark.ml.connect.regression import DecisionTreeRegressor
 
-    assert exported is DecisionTreeRegressor is native.DecisionTreeRegressor
+    assert exported is DecisionTreeRegressor and issubclass(DecisionTreeRegressor, native.DecisionTreeRegressor)
     defaults = dict(featuresCol="features", labelCol="label", predictionCol="prediction",
                     maxDepth=5, maxBins=32, minInstancesPerNode=1, minInfoGain=0.0,
                     maxMemoryInMB=256, cacheNodeIds=False, checkpointInterval=10,
@@ -3664,7 +3664,7 @@ def test_gaussian_mixture_native_parameters_match_official_fixture(ml_mock, use_
     from pyspark.ml.connect import GaussianMixture as exported
     from pyspark.ml.connect.clustering import GaussianMixture
 
-    assert exported is GaussianMixture is native.GaussianMixture
+    assert exported is GaussianMixture and issubclass(GaussianMixture, native.GaussianMixture)
     defaults = dict(
         featuresCol="features",
         predictionCol="prediction",
@@ -3722,7 +3722,7 @@ def test_bisecting_kmeans_native_parameters_match_official_fixture(ml_mock, use_
     from pyspark.ml.connect import BisectingKMeans as exported
     from pyspark.ml.connect.clustering import BisectingKMeans
 
-    assert exported is BisectingKMeans is native.BisectingKMeans
+    assert exported is BisectingKMeans and issubclass(BisectingKMeans, native.BisectingKMeans)
     defaults = dict(
         featuresCol="features",
         predictionCol="prediction",
@@ -3778,7 +3778,7 @@ def test_naive_bayes_native_parameters_match_official_fixture(ml_mock, use_sette
     from pyspark.ml.connect import NaiveBayes as exported
     from pyspark.ml.connect.classification import NaiveBayes
 
-    assert exported is NaiveBayes is native.NaiveBayes
+    assert exported is NaiveBayes and issubclass(NaiveBayes, native.NaiveBayes)
     defaults = dict(
         featuresCol="features",
         labelCol="label",
@@ -3836,7 +3836,7 @@ def test_gbt_regressor_native_parameters_match_official_fixture(ml_mock, use_set
     from pyspark.ml.connect import GBTRegressor as exported
     from pyspark.ml.connect.regression import GBTRegressor
 
-    assert exported is GBTRegressor is native.GBTRegressor
+    assert exported is GBTRegressor and issubclass(GBTRegressor, native.GBTRegressor)
     defaults = dict(
         featuresCol="features",
         labelCol="label",
@@ -3929,7 +3929,7 @@ def test_gbt_classifier_native_parameters_match_official_fixture(ml_mock, use_se
     from pyspark.ml.connect import GBTClassifier as exported
     from pyspark.ml.connect.classification import GBTClassifier
 
-    assert exported is GBTClassifier is native.GBTClassifier
+    assert exported is GBTClassifier and issubclass(GBTClassifier, native.GBTClassifier)
     defaults = dict(featuresCol="features", labelCol="label", predictionCol="prediction",
                     maxDepth=5, maxBins=32, minInstancesPerNode=1, minInfoGain=0.0,
                     maxMemoryInMB=256, cacheNodeIds=False, checkpointInterval=10, lossType="logistic",
@@ -4004,7 +4004,7 @@ def test_generalized_linear_regression_native_parameters_match_official_fixture(
     from pyspark.ml.connect import GeneralizedLinearRegression as exported
     from pyspark.ml.connect.regression import GeneralizedLinearRegression
 
-    assert exported is GeneralizedLinearRegression is native.GeneralizedLinearRegression
+    assert exported is GeneralizedLinearRegression and issubclass(GeneralizedLinearRegression, native.GeneralizedLinearRegression)
     defaults = {'labelCol': 'label', 'featuresCol': 'features', 'predictionCol': 'prediction', 'family': 'gaussian', 'link': None, 'fitIntercept': True, 'maxIter': 25, 'tol': 1e-06, 'regParam': 0.0, 'weightCol': None, 'solver': 'irls', 'linkPredictionCol': None, 'variancePower': 0.0, 'linkPower': None, 'offsetCol': None, 'aggregationDepth': 2}
     signature = inspect.signature(GeneralizedLinearRegression)
     assert list(signature.parameters) == list(defaults)
@@ -4039,7 +4039,7 @@ def test_remaining_classifier_native_parameters_match_official_fixture(ml_mock, 
     from pyspark.ml.linalg import Vectors
 
     cls = getattr(classification, name)
-    assert cls is getattr(native, name)
+    assert issubclass(cls, getattr(native, name))
     defaults = {'FMClassifier': {'featuresCol': 'features', 'labelCol': 'label', 'predictionCol': 'prediction', 'probabilityCol': 'probability', 'rawPredictionCol': 'rawPrediction', 'factorSize': 8, 'fitIntercept': True, 'fitLinear': True, 'regParam': 0.0, 'miniBatchFraction': 1.0, 'initStd': 0.01, 'maxIter': 100, 'stepSize': 1.0, 'tol': 1e-06, 'solver': 'adamW', 'thresholds': None, 'seed': None}, 'MultilayerPerceptronClassifier': {'featuresCol': 'features', 'labelCol': 'label', 'predictionCol': 'prediction', 'maxIter': 100, 'tol': 1e-06, 'seed': None, 'layers': None, 'blockSize': 128, 'stepSize': 0.03, 'solver': 'l-bfgs', 'initialWeights': None, 'probabilityCol': 'probability', 'rawPredictionCol': 'rawPrediction'}, 'OneVsRest': {'featuresCol': 'features', 'labelCol': 'label', 'predictionCol': 'prediction', 'rawPredictionCol': 'rawPrediction', 'classifier': None, 'weightCol': None, 'parallelism': 1}}[name]
     signature = inspect.signature(cls)
     assert list(signature.parameters) == list(defaults)
@@ -4077,7 +4077,7 @@ def test_one_vs_rest_signature_and_native_classifier_validation():
     from pyspark.ml.connect import OneVsRest as exported
     from pyspark.ml.connect.classification import LinearSVC, OneVsRest
 
-    assert OneVsRest is exported is native.OneVsRest
+    assert OneVsRest is exported and issubclass(exported, native.OneVsRest)
     defaults = {'FMClassifier': {'featuresCol': 'features', 'labelCol': 'label', 'predictionCol': 'prediction', 'probabilityCol': 'probability', 'rawPredictionCol': 'rawPrediction', 'factorSize': 8, 'fitIntercept': True, 'fitLinear': True, 'regParam': 0.0, 'miniBatchFraction': 1.0, 'initStd': 0.01, 'maxIter': 100, 'stepSize': 1.0, 'tol': 1e-06, 'solver': 'adamW', 'thresholds': None, 'seed': None}, 'MultilayerPerceptronClassifier': {'featuresCol': 'features', 'labelCol': 'label', 'predictionCol': 'prediction', 'maxIter': 100, 'tol': 1e-06, 'seed': None, 'layers': None, 'blockSize': 128, 'stepSize': 0.03, 'solver': 'l-bfgs', 'initialWeights': None, 'probabilityCol': 'probability', 'rawPredictionCol': 'rawPrediction'}, 'OneVsRest': {'featuresCol': 'features', 'labelCol': 'label', 'predictionCol': 'prediction', 'rawPredictionCol': 'rawPrediction', 'classifier': None, 'weightCol': None, 'parallelism': 1}}["OneVsRest"]
     signature = inspect.signature(OneVsRest)
     assert list(signature.parameters) == list(defaults)
@@ -4149,7 +4149,7 @@ def test_remaining_regressor_native_parameters_match_official_fixture(ml_mock, n
     from pyspark.ml.connect import regression
 
     cls = getattr(regression, name)
-    assert cls is getattr(native, name) is getattr(connect, name)
+    assert cls is getattr(connect, name) and issubclass(cls, getattr(native, name))
     fixture = json.loads((Path(__file__).resolve().parents[2] / "tests/golden/remaining_regressors.json").read_text())
     defaults = fixture["defaults"][name]
     signature = inspect.signature(cls)
@@ -4287,7 +4287,7 @@ def test_remaining_clustering_signatures_and_native_exports(name):
     from pyspark.ml.connect import clustering
 
     cls = getattr(clustering, name)
-    assert cls is getattr(_pyspark, name) is getattr(connect, name)
+    assert cls is getattr(connect, name) and issubclass(cls, getattr(_pyspark, name))
     fixture = json.loads((Path(__file__).parents[2] / "tests/golden/remaining_clustering.json").read_text())
     parameters = inspect.signature(cls).parameters
     assert list(parameters) == list(fixture["defaults"][name])

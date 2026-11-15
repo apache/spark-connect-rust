@@ -27,7 +27,11 @@ pub(crate) struct OneVsRestFit {
 /// OneVsRestModel: the models of the classes of a fit, with the classifier and the other params
 /// that PySpark's OneVsRestModel holds. Its transform is the composite model's of the core, and its
 /// `models` are the typed submodels of the composite, as PySpark's `OneVsRest._fit` makes them.
-#[pyclass(name = "OneVsRestModel", module = "pyspark.ml.connect.classification")]
+#[pyclass(
+    subclass,
+    name = "OneVsRestModel",
+    module = "pyspark.ml.connect.classification"
+)]
 pub struct PyOneVsRestModel {
     core: object::ModelCore,
     /// The Python values of the identity params: the classifier.
@@ -125,7 +129,7 @@ fn generic_submodel(
         model,
         session_id: binary.spark_session().session_id().to_string(),
     };
-    Ok(Py::new(py, model)?.into_any())
+    Ok(crate::ml::object::new_py(py, model)?.into_any())
 }
 
 /// The typed submodel of the class `index`, as PySpark's `OneVsRest._fit` has it: the model of the
@@ -159,7 +163,7 @@ fn submodel(
                 params_api::clone_own_defaults(py, defaults),
                 &mut typed,
             )?;
-            Ok(Py::new(py, typed)?.into_any())
+            Ok(crate::ml::object::new_py(py, typed)?.into_any())
         }
         SubModel::NaiveBayes(model) => {
             let mut typed = PyNaiveBayesModel::fitted(
@@ -173,7 +177,7 @@ fn submodel(
                 params_api::clone_own_defaults(py, defaults),
                 &mut typed,
             )?;
-            Ok(Py::new(py, typed)?.into_any())
+            Ok(crate::ml::object::new_py(py, typed)?.into_any())
         }
         SubModel::FMClassification(model) => {
             let mut typed = PyFMClassificationModel::fitted(
@@ -187,7 +191,7 @@ fn submodel(
                 params_api::clone_own_defaults(py, defaults),
                 &mut typed,
             )?;
-            Ok(Py::new(py, typed)?.into_any())
+            Ok(crate::ml::object::new_py(py, typed)?.into_any())
         }
         SubModel::MultilayerPerceptronClassification(model) => {
             let mut typed = PyMultilayerPerceptronClassificationModel::fitted(
@@ -201,7 +205,7 @@ fn submodel(
                 params_api::clone_own_defaults(py, defaults),
                 &mut typed,
             )?;
-            Ok(Py::new(py, typed)?.into_any())
+            Ok(crate::ml::object::new_py(py, typed)?.into_any())
         }
         SubModel::LogisticRegression(model) => {
             let mut typed = PyLogisticRegressionModel::fitted(
@@ -215,7 +219,7 @@ fn submodel(
                 params_api::clone_own_defaults(py, defaults),
                 &mut typed,
             )?;
-            Ok(Py::new(py, typed)?.into_any())
+            Ok(crate::ml::object::new_py(py, typed)?.into_any())
         }
         SubModel::DecisionTreeClassification(model) => {
             let mut typed = PyDecisionTreeClassificationModel::fitted(
@@ -229,7 +233,7 @@ fn submodel(
                 params_api::clone_own_defaults(py, defaults),
                 &mut typed,
             )?;
-            Ok(Py::new(py, typed)?.into_any())
+            Ok(crate::ml::object::new_py(py, typed)?.into_any())
         }
         SubModel::RandomForestClassification(model) => {
             let mut typed = PyRandomForestClassificationModel::fitted(
@@ -243,7 +247,7 @@ fn submodel(
                 params_api::clone_own_defaults(py, defaults),
                 &mut typed,
             )?;
-            Ok(Py::new(py, typed)?.into_any())
+            Ok(crate::ml::object::new_py(py, typed)?.into_any())
         }
         SubModel::GBTClassification(model) => {
             let mut typed = PyGBTClassificationModel::fitted(
@@ -257,7 +261,7 @@ fn submodel(
                 params_api::clone_own_defaults(py, defaults),
                 &mut typed,
             )?;
-            Ok(Py::new(py, typed)?.into_any())
+            Ok(crate::ml::object::new_py(py, typed)?.into_any())
         }
         SubModel::Other(model) => generic_submodel(py, with_label(model), &binary),
     }
@@ -344,7 +348,7 @@ impl params_api::NativeInstance for PyOneVsRestModel {
             .iter()
             .map(|(name, value)| (*name, value.clone_ref(py)))
             .collect();
-        Py::new(
+        crate::ml::object::new_py(
             py,
             Self {
                 core: self.core.duplicate(py),
@@ -417,11 +421,12 @@ native_pymethods! {
 
     /// The writer of the model, as `OneVsRestModel.write` over Spark Connect (`RemoteMLWriter`,
     /// which saves it as `OneVsRestModelWriter` does).
-    fn write(slf: &Bound<'_, Self>) -> object::PyMLWriter {
-        object::PyMLWriter::new(object::WriteTarget::Python(
+    fn write(slf: &Bound<'_, Self>) -> PyResult<Py<object::PyMLWriter>> {
+        let writer = object::PyMLWriter::new(object::WriteTarget::Python(
             slf.clone().into_any().unbind(),
             save_one_vs_rest_model,
-        ))
+        ));
+        object::new_py(slf.py(), writer)
     }
 
     /// Save to `path`, as `MLWritable.save`: `self.write().save(path)`.
@@ -433,9 +438,9 @@ native_pymethods! {
     /// The reader of the class, as `OneVsRestModel.read` over Spark Connect (`RemoteMLReader`,
     /// which loads it as `OneVsRestModelReader` does).
     #[classmethod]
-    fn read(cls: &Bound<'_, pyo3::types::PyType>) -> object::PyMLReader {
-        let _ = cls;
-        object::PyMLReader::python(load_one_vs_rest_model)
+    fn read(cls: &Bound<'_, pyo3::types::PyType>) -> PyResult<Py<object::PyMLReader>> {
+        let reader = object::PyMLReader::python(load_one_vs_rest_model);
+        object::new_py(cls.py(), reader)
     }
 
     /// Load from `path`, as `MLReadable.load`: `cls.read().load(path)`.
@@ -708,7 +713,7 @@ pub(crate) fn load_one_vs_rest(
 ) -> PyResult<Py<PyAny>> {
     let metadata = load_metadata_dict(py, session, path)?;
     let classifier = load_params_instance(py, spark, session, &join_path(path, "classifier"))?;
-    let estimator = Bound::new(
+    let estimator = crate::ml::object::new_object(
         py,
         PyOneVsRest {
             inner: OneVsRest::new(),
@@ -760,7 +765,7 @@ fn load_one_vs_rest_model(
         models: OnceLock::new(),
     };
     let _ = model.models.set(models.unbind());
-    let model = Bound::new(py, model)?;
+    let model = crate::ml::object::new_object(py, model)?;
     set_metadata_params(&model, &metadata)?;
     Ok(model.into_any().unbind())
 }

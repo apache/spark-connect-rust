@@ -243,6 +243,7 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<observation::PyObservation>()?;
 
     // Register ML classes (pyspark.ml.connect)
+    m.add_function(wrap_pyfunction!(ml::object::register_public_class, m)?)?;
     m.add_class::<ml::PyMLModel>()?;
     m.add_class::<ml::object::PyMLWriter>()?;
     m.add_class::<ml::object::PyMLReader>()?;

@@ -19,7 +19,7 @@ fn random_forest_trees(py: Python<'_>, model: &object::ModelCore) -> PyResult<Py
     let trees = objects
         .into_iter()
         .map(|object| {
-            Py::new(
+            crate::ml::object::new_py(
                 py,
                 PyDecisionTreeClassificationModel::of_object(py, object)?,
             )
@@ -38,7 +38,7 @@ fn gbt_trees(py: Python<'_>, model: &object::ModelCore) -> PyResult<Py<PyAny>> {
     let trees = objects
         .into_iter()
         .map(|object| {
-            Py::new(
+            crate::ml::object::new_py(
                 py,
                 crate::ml::regression_api::PyDecisionTreeRegressionModel::of_object(py, object)?,
             )
@@ -55,13 +55,13 @@ fn random_forest_training_summary(
     target: spark_connect::ml::MlTarget,
 ) -> PyResult<Py<PyAny>> {
     if fetch_num_classes(py, &model.target()?)? <= 2 {
-        Ok(Py::new(
+        Ok(crate::ml::object::new_py(
             py,
             PyBinaryRandomForestClassificationTrainingSummary::from(target),
         )?
         .into_any())
     } else {
-        Ok(Py::new(
+        Ok(crate::ml::object::new_py(
             py,
             PyRandomForestClassificationTrainingSummary::from(target),
         )?
@@ -267,9 +267,9 @@ native_model! {
         let output = object::fetch_py(py, &target, "evaluate", std::slice::from_ref(dataset))?;
         let summary = spark_connect::ml::evaluated_summary(&target, output).to_pyerr()?;
         if fetch_num_classes(py, &target)? <= 2 {
-            Ok(Py::new(py, PyBinaryRandomForestClassificationSummary::from(summary))?.into_any())
+            Ok(crate::ml::object::new_py(py, PyBinaryRandomForestClassificationSummary::from(summary))?.into_any())
         } else {
-            Ok(Py::new(py, PyRandomForestClassificationSummary::from(summary))?.into_any())
+            Ok(crate::ml::object::new_py(py, PyRandomForestClassificationSummary::from(summary))?.into_any())
         }
     }
 }

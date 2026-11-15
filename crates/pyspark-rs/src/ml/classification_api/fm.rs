@@ -89,7 +89,7 @@ native_model! {
         let target = slf.try_borrow()?.core.target()?;
         let output = object::fetch_py(py, &target, "evaluate", std::slice::from_ref(dataset))?;
         let summary = spark_connect::ml::evaluated_summary(&target, output).to_pyerr()?;
-        Py::new(py, PyFMClassificationSummary::from(summary))
+        crate::ml::object::new_py(py, PyFMClassificationSummary::from(summary))
     }
 }
 
@@ -178,7 +178,7 @@ fn fm_training_summary(
     _model: &object::ModelCore,
     target: spark_connect::ml::MlTarget,
 ) -> PyResult<Py<PyAny>> {
-    Ok(Py::new(py, PyFMClassificationTrainingSummary::from(target))?.into_any())
+    Ok(crate::ml::object::new_py(py, PyFMClassificationTrainingSummary::from(target))?.into_any())
 }
 
 /// Register the typed classes of the family.

@@ -93,7 +93,7 @@ macro_rules! feature_transformer {
      [$(($param:literal, $kind:ident)),* $(,)?],
      [$(($setter:ident, $pysetter:literal, $wire:literal, $setter_kind:ident)),* $(,)?]
      $(, { $($extra:tt)* })?) => {
-        #[pyclass(name = $name, module = "pyspark.ml.connect.feature")]
+        #[pyclass(subclass, name = $name, module = "pyspark.ml.connect.feature")]
         pub struct $wrapper {
             inner: core::$core,
             unsendable: Vec<&'static str>,
@@ -173,14 +173,14 @@ macro_rules! feature_transformer {
                     let copy = params_api::copy(slf, Some(map))?;
                     return Ok(copy.as_any().call_method1("transform", (dataset,))?.unbind());
                 }
-                Ok(Py::new(slf.py(), transform_native(slf, dataset, params)?)?.into_any())
+                Ok(crate::ml::object::new_py(slf.py(), transform_native(slf, dataset, params)?)?.into_any())
             }
             $($($extra)*)?
         }
 
         impl params_api::NativeInstance for $wrapper {
             fn duplicate(&self, py: Python<'_>) -> PyResult<Py<Self>> {
-                Py::new(py, Self {
+                crate::ml::object::new_py(py, Self {
                     inner: self.inner.clone(),
                     unsendable: self.unsendable.clone(),
                     raw: self.raw.iter().map(|(name, value)| (*name, value.clone_ref(py))).collect(),
@@ -219,7 +219,7 @@ macro_rules! feature_estimator {
                 slf: &Bound<'_, Self>,
                 dataset: &Bound<'_, PyAny>,
                 params: Option<&Bound<'_, PyAny>>,
-            ) -> PyResult<Fitted<feature_api::$model>> {
+            ) -> PyResult<Fitted<Py<feature_api::$model>>> {
                 fit_with(slf, dataset, params, || {
                     fit_native_model(slf, dataset, |py, model, df| {
                         feature_api::$model::fitted(py, model, df, object::SummaryDataset::None)
@@ -233,7 +233,7 @@ macro_rules! feature_estimator {
      [$(($param:literal, $kind:ident)),* $(,)?],
      [$(($setter:ident, $pysetter:literal, $wire:literal, $setter_kind:ident)),* $(,)?],
      { $($fit:tt)* }) => {
-        #[pyclass(name = $name, module = "pyspark.ml.connect.feature")]
+        #[pyclass(subclass, name = $name, module = "pyspark.ml.connect.feature")]
         pub struct $wrapper {
             inner: core::$core,
             unsendable: Vec<&'static str>,
@@ -309,14 +309,14 @@ macro_rules! feature_estimator {
                 slf: &Bound<'py, Self>,
                 dataset: &Bound<'py, PyAny>,
                 paramMaps: &Bound<'py, PyAny>,
-            ) -> PyResult<params_api::PyFitMultipleIterator> {
+            ) -> PyResult<Py<params_api::PyFitMultipleIterator>> {
                 params_api::fit_multiple(slf.as_any(), dataset, paramMaps)
             }
         }
 
         impl params_api::NativeInstance for $wrapper {
             fn duplicate(&self, py: Python<'_>) -> PyResult<Py<Self>> {
-                Py::new(py, Self {
+                crate::ml::object::new_py(py, Self {
                     inner: self.inner.clone(),
                     unsendable: self.unsendable.clone(),
                     raw: self.raw.iter().map(|(name, value)| (*name, value.clone_ref(py))).collect(),
@@ -760,7 +760,7 @@ feature_estimator!(PyQuantileDiscretizer, QuantileDiscretizer, "QuantileDiscreti
         slf: &Bound<'_, Self>,
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Fitted<PyBucketizer>> {
+    ) -> PyResult<Fitted<Py<PyBucketizer>>> {
         fit_with(slf, dataset, params, || {
             let py = slf.py();
             let df = dataset_of(dataset, "fit")?;
@@ -769,12 +769,15 @@ feature_estimator!(PyQuantileDiscretizer, QuantileDiscretizer, "QuantileDiscreti
             let bucketizer = interruptible(py, &session, || {
                 estimator.fit_bucketizer(&df).map_err(Box::new)
             })?;
-            Ok(PyBucketizer {
-                inner: bucketizer,
-                unsendable: Vec::new(),
-                raw: Vec::new(),
-                own_defaults: Vec::new(),
-            })
+            crate::ml::object::new_py(
+                py,
+                PyBucketizer {
+                    inner: bucketizer,
+                    unsendable: Vec::new(),
+                    raw: Vec::new(),
+                    own_defaults: Vec::new(),
+                },
+            )
         })
     }
 });

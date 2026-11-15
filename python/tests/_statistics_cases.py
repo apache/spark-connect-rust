@@ -31,7 +31,7 @@ def api():
                 # PySpark's plain holder, kept in Python as PySpark's.
                 assert not hasattr(_pyspark, name)
                 continue
-            assert getattr(stat, name) is getattr(_pyspark, name)
+            assert issubclass(getattr(stat, name), getattr(_pyspark, name))
     return stat
 
 

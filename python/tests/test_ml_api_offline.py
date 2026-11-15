@@ -10,6 +10,7 @@
 Official PySpark runs these tests too, as the reference of the goldens (see `_native_classes`).
 """
 
+import importlib
 import inspect
 import json
 import os
@@ -307,6 +308,22 @@ def test_models_construct_of_no_server_object_as_pyspark_mls(spec):
         assert type(model) is cls
         assert model.uid.startswith(spec[1] + "_") and len(model.uid) == len(spec[1]) + 13
         assert not any(model.isSet(p) for p in model.extractParamMap())
+
+
+@pytest.mark.parametrize("spec", FULL, ids=lambda spec: spec[1])
+def test_classes_are_of_every_base_of_pyspark_mls(spec):
+    # The class is a subclass of every class of the MRO of PySpark's class, as its objects are
+    # instances of them: the plain mixins (`MLWritable`, `MLReadable`, `Identifiable`,
+    # `HasTrainingSummary`, the summary bases), the Java wrappers, the param mixins and PySpark's
+    # class itself. It is also a subclass of this client's class of each base of PySpark's module
+    # that is a class of the full API (a training summary of its summary), as PySpark's is.
+    cls = native_class(*spec)
+    official = getattr(importlib.import_module(spec[2]), spec[1])
+    assert [base for base in official.__mro__ if not issubclass(cls, base)] == []
+    full = {name for _, name, _ in FULL}
+    for base in official.__mro__[1:]:
+        if base.__module__ == spec[2] and base.__name__ in full:
+            assert issubclass(cls, native_class(spec[0], base.__name__, spec[2])), base
 
 
 def test_native_classes_are_of_pyspark_mls_bases_on_a_fresh_import():

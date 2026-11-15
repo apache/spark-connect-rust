@@ -606,11 +606,11 @@ fn fit_native_model<T, M>(
     slf: &Bound<'_, T>,
     dataset: &Bound<'_, PyAny>,
     model: impl FnOnce(Python<'_>, Box<dyn Model>, &DataFrame) -> PyResult<M>,
-) -> PyResult<M>
+) -> PyResult<Py<M>>
 where
     T: Native + PyClass<Frozen = False>,
     T::Core: Estimator,
-    M: params_api::ParamsHolder + pyo3::PyTypeInfo,
+    M: params_api::ParamsHolder + pyo3::PyTypeInfo + object::ModelObject,
 {
     let py = slf.py();
     let df = dataset_of(dataset, "fit")?;
@@ -621,11 +621,12 @@ where
     let fitted = interruptible(py, &session, || estimator.fit(&df).map_err(Box::new))?;
     let mut model = model(py, fitted, &df)?;
     params_api::copy_defaults(py, defaults, &mut model)?;
-    Ok(model)
+    // The object of the model's class, as `Fitted` returns it.
+    object::ModelObject::into_object(model, py)
 }
 
 /// A fitted ML model (result of `Estimator.fit`), wrapping a boxed core `Model`.
-#[pyclass(name = "MLModel", module = "pyspark.ml.connect")]
+#[pyclass(subclass, name = "MLModel", module = "pyspark.ml.connect")]
 pub struct PyMLModel {
     model: Box<dyn Model>,
     /// The session of the DataFrame that the model was fitted on.
@@ -681,6 +682,7 @@ impl PyMLModel {
 
 /// LogisticRegression estimator, of the params of `pyspark.ml.classification.LogisticRegression`.
 #[pyclass(
+    subclass,
     name = "LogisticRegression",
     module = "pyspark.ml.connect.classification"
 )]
@@ -1003,7 +1005,7 @@ native_pymethods! {
         slf: &Bound<'_, Self>,
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Fitted<classification_api::PyLogisticRegressionModel>> {
+    ) -> PyResult<Fitted<Py<classification_api::PyLogisticRegressionModel>>> {
         fit_with(slf, dataset, params, || {
             fit_native_model(slf, dataset, |py, model, df| {
                 classification_api::PyLogisticRegressionModel::fitted(
@@ -1024,14 +1026,14 @@ native_pymethods! {
         slf: &Bound<'py, Self>,
         dataset: &Bound<'py, PyAny>,
         paramMaps: &Bound<'py, PyAny>,
-    ) -> PyResult<params_api::PyFitMultipleIterator> {
+    ) -> PyResult<Py<params_api::PyFitMultipleIterator>> {
         params_api::fit_multiple(slf.as_any(), dataset, paramMaps)
     }
 }
 
 impl params_api::NativeInstance for PyLogisticRegression {
     fn duplicate(&self, py: Python<'_>) -> PyResult<Py<Self>> {
-        Py::new(
+        object::new_py(
             py,
             Self {
                 inner: self.inner.clone(),
@@ -1050,7 +1052,11 @@ impl params_api::NativeInstance for PyLogisticRegression {
 }
 
 /// Linear support vector classifier backed by Spark Connect's JVM ML API.
-#[pyclass(name = "LinearSVC", module = "pyspark.ml.connect.classification")]
+#[pyclass(
+    subclass,
+    name = "LinearSVC",
+    module = "pyspark.ml.connect.classification"
+)]
 pub struct PyLinearSVC {
     inner: LinearSVC,
     unsendable: Vec<&'static str>,
@@ -1234,7 +1240,7 @@ native_pymethods! {
         slf: &Bound<'_, Self>,
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Fitted<classification_api::PyLinearSVCModel>> {
+    ) -> PyResult<Fitted<Py<classification_api::PyLinearSVCModel>>> {
         fit_with(slf, dataset, params, || {
             fit_native_model(slf, dataset, |py, model, df| {
                 classification_api::PyLinearSVCModel::fitted(
@@ -1255,14 +1261,14 @@ native_pymethods! {
         slf: &Bound<'py, Self>,
         dataset: &Bound<'py, PyAny>,
         paramMaps: &Bound<'py, PyAny>,
-    ) -> PyResult<params_api::PyFitMultipleIterator> {
+    ) -> PyResult<Py<params_api::PyFitMultipleIterator>> {
         params_api::fit_multiple(slf.as_any(), dataset, paramMaps)
     }
 }
 
 impl params_api::NativeInstance for PyLinearSVC {
     fn duplicate(&self, py: Python<'_>) -> PyResult<Py<Self>> {
-        Py::new(
+        object::new_py(
             py,
             Self {
                 inner: self.inner.clone(),
@@ -1281,7 +1287,11 @@ impl params_api::NativeInstance for PyLinearSVC {
 }
 
 /// Native FMClassifier.
-#[pyclass(name = "FMClassifier", module = "pyspark.ml.connect.classification")]
+#[pyclass(
+    subclass,
+    name = "FMClassifier",
+    module = "pyspark.ml.connect.classification"
+)]
 pub struct PyFMClassifier {
     inner: FMClassifier,
     unsendable: Vec<&'static str>,
@@ -1503,7 +1513,7 @@ native_pymethods! {
         slf: &Bound<'_, Self>,
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Fitted<classification_api::PyFMClassificationModel>> {
+    ) -> PyResult<Fitted<Py<classification_api::PyFMClassificationModel>>> {
         fit_with(slf, dataset, params, || {
             fit_native_model(slf, dataset, |py, model, df| {
                 classification_api::PyFMClassificationModel::fitted(
@@ -1524,7 +1534,7 @@ native_pymethods! {
         slf: &Bound<'py, Self>,
         dataset: &Bound<'py, PyAny>,
         paramMaps: &Bound<'py, PyAny>,
-    ) -> PyResult<params_api::PyFitMultipleIterator> {
+    ) -> PyResult<Py<params_api::PyFitMultipleIterator>> {
         params_api::fit_multiple(slf.as_any(), dataset, paramMaps)
     }
 
@@ -1532,7 +1542,7 @@ native_pymethods! {
 
 impl params_api::NativeInstance for PyFMClassifier {
     fn duplicate(&self, py: Python<'_>) -> PyResult<Py<Self>> {
-        Py::new(
+        object::new_py(
             py,
             Self {
                 inner: self.inner.clone(),
@@ -1552,6 +1562,7 @@ impl params_api::NativeInstance for PyFMClassifier {
 
 /// Native MultilayerPerceptronClassifier.
 #[pyclass(
+    subclass,
     name = "MultilayerPerceptronClassifier",
     module = "pyspark.ml.connect.classification"
 )]
@@ -1753,7 +1764,7 @@ native_pymethods! {
         slf: &Bound<'_, Self>,
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Fitted<classification_api::PyMultilayerPerceptronClassificationModel>> {
+    ) -> PyResult<Fitted<Py<classification_api::PyMultilayerPerceptronClassificationModel>>> {
         fit_with(slf, dataset, params, || {
             fit_native_model(slf, dataset, |py, model, df| {
                 classification_api::PyMultilayerPerceptronClassificationModel::fitted(
@@ -1774,7 +1785,7 @@ native_pymethods! {
         slf: &Bound<'py, Self>,
         dataset: &Bound<'py, PyAny>,
         paramMaps: &Bound<'py, PyAny>,
-    ) -> PyResult<params_api::PyFitMultipleIterator> {
+    ) -> PyResult<Py<params_api::PyFitMultipleIterator>> {
         params_api::fit_multiple(slf.as_any(), dataset, paramMaps)
     }
 
@@ -1782,7 +1793,7 @@ native_pymethods! {
 
 impl params_api::NativeInstance for PyMultilayerPerceptronClassifier {
     fn duplicate(&self, py: Python<'_>) -> PyResult<Py<Self>> {
-        Py::new(
+        object::new_py(
             py,
             Self {
                 inner: self.inner.clone(),
@@ -1801,7 +1812,11 @@ impl params_api::NativeInstance for PyMultilayerPerceptronClassifier {
 }
 
 /// Native OneVsRest.
-#[pyclass(name = "OneVsRest", module = "pyspark.ml.connect.classification")]
+#[pyclass(
+    subclass,
+    name = "OneVsRest",
+    module = "pyspark.ml.connect.classification"
+)]
 pub struct PyOneVsRest {
     inner: OneVsRest,
     /// The Python values of the identity params, which the core does not hold: the classifier.
@@ -1961,7 +1976,7 @@ native_pymethods! {
         slf: &Bound<'_, Self>,
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Fitted<classification_api::PyOneVsRestModel>> {
+    ) -> PyResult<Fitted<Py<classification_api::PyOneVsRestModel>>> {
         // A list of param maps fits once per map (`fit_with`), each in PySpark's order below.
         fit_with(slf, dataset, params, || -> PyResult<_> {
             let py = slf.py();
@@ -2050,7 +2065,7 @@ native_pymethods! {
                 classifier,
             )?;
             params_api::copy_defaults(py, defaults, &mut fitted)?;
-            Ok(fitted)
+            object::new_py(py, fitted)
         })
     }
 
@@ -2062,7 +2077,7 @@ native_pymethods! {
         slf: &Bound<'py, Self>,
         dataset: &Bound<'py, PyAny>,
         paramMaps: &Bound<'py, PyAny>,
-    ) -> PyResult<params_api::PyFitMultipleIterator> {
+    ) -> PyResult<Py<params_api::PyFitMultipleIterator>> {
         params_api::fit_multiple(slf.as_any(), dataset, paramMaps)
     }
 
@@ -2092,11 +2107,12 @@ native_pymethods! {
 
     /// The writer of the estimator, as `OneVsRest.write` over Spark Connect (`RemoteMLWriter`,
     /// which saves it as `OneVsRestWriter` does).
-    fn write(slf: &Bound<'_, Self>) -> object::PyMLWriter {
-        object::PyMLWriter::new(object::WriteTarget::Python(
+    fn write(slf: &Bound<'_, Self>) -> PyResult<Py<object::PyMLWriter>> {
+        let writer = object::PyMLWriter::new(object::WriteTarget::Python(
             slf.clone().into_any().unbind(),
             classification_api::save_one_vs_rest,
-        ))
+        ));
+        object::new_py(slf.py(), writer)
     }
 
     /// Save to `path`, as `MLWritable.save`: `self.write().save(path)`.
@@ -2108,9 +2124,9 @@ native_pymethods! {
     /// The reader of the class, as `OneVsRest.read` over Spark Connect (`RemoteMLReader`, which
     /// loads it as `OneVsRestReader` does).
     #[classmethod]
-    fn read(cls: &Bound<'_, pyo3::types::PyType>) -> object::PyMLReader {
-        let _ = cls;
-        object::PyMLReader::python(classification_api::load_one_vs_rest)
+    fn read(cls: &Bound<'_, pyo3::types::PyType>) -> PyResult<Py<object::PyMLReader>> {
+        let reader = object::PyMLReader::python(classification_api::load_one_vs_rest);
+        object::new_py(cls.py(), reader)
     }
 
     /// Load from `path`, as `MLReadable.load`: `cls.read().load(path)`.
@@ -2167,7 +2183,7 @@ impl params_api::NativeInstance for PyOneVsRest {
                 Ok((*name, value))
             })
             .collect::<PyResult<Vec<_>>>()?;
-        Py::new(
+        object::new_py(
             py,
             Self {
                 inner: self.inner.clone(),
@@ -2267,7 +2283,11 @@ fn native_classifier(value: &Bound<'_, PyAny>, validate_params: bool) -> PyResul
 }
 
 /// Linear regression backed by Spark Connect's JVM ML API.
-#[pyclass(name = "LinearRegression", module = "pyspark.ml.connect.regression")]
+#[pyclass(
+    subclass,
+    name = "LinearRegression",
+    module = "pyspark.ml.connect.regression"
+)]
 pub struct PyLinearRegression {
     inner: LinearRegression,
     unsendable: Vec<&'static str>,
@@ -2476,7 +2496,7 @@ native_pymethods! {
         slf: &Bound<'_, Self>,
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Fitted<regression_api::PyLinearRegressionModel>> {
+    ) -> PyResult<Fitted<Py<regression_api::PyLinearRegressionModel>>> {
         fit_with(slf, dataset, params, || {
             fit_native_model(slf, dataset, |py, model, df| {
                 regression_api::PyLinearRegressionModel::fitted(
@@ -2497,14 +2517,14 @@ native_pymethods! {
         slf: &Bound<'py, Self>,
         dataset: &Bound<'py, PyAny>,
         paramMaps: &Bound<'py, PyAny>,
-    ) -> PyResult<params_api::PyFitMultipleIterator> {
+    ) -> PyResult<Py<params_api::PyFitMultipleIterator>> {
         params_api::fit_multiple(slf.as_any(), dataset, paramMaps)
     }
 }
 
 impl params_api::NativeInstance for PyLinearRegression {
     fn duplicate(&self, py: Python<'_>) -> PyResult<Py<Self>> {
-        Py::new(
+        object::new_py(
             py,
             Self {
                 inner: self.inner.clone(),
@@ -2524,6 +2544,7 @@ impl params_api::NativeInstance for PyLinearRegression {
 
 /// Generalized linear regression fitted and cached by Spark Connect.
 #[pyclass(
+    subclass,
     name = "GeneralizedLinearRegression",
     module = "pyspark.ml.connect.regression"
 )]
@@ -2745,7 +2766,7 @@ native_pymethods! {
         slf: &Bound<'_, Self>,
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Fitted<regression_api::PyGeneralizedLinearRegressionModel>> {
+    ) -> PyResult<Fitted<Py<regression_api::PyGeneralizedLinearRegressionModel>>> {
         fit_with(slf, dataset, params, || {
             fit_native_model(slf, dataset, |py, model, df| {
                 regression_api::PyGeneralizedLinearRegressionModel::fitted(
@@ -2766,14 +2787,14 @@ native_pymethods! {
         slf: &Bound<'py, Self>,
         dataset: &Bound<'py, PyAny>,
         paramMaps: &Bound<'py, PyAny>,
-    ) -> PyResult<params_api::PyFitMultipleIterator> {
+    ) -> PyResult<Py<params_api::PyFitMultipleIterator>> {
         params_api::fit_multiple(slf.as_any(), dataset, paramMaps)
     }
 }
 
 impl params_api::NativeInstance for PyGeneralizedLinearRegression {
     fn duplicate(&self, py: Python<'_>) -> PyResult<Py<Self>> {
-        Py::new(
+        object::new_py(
             py,
             Self {
                 inner: self.inner.clone(),
@@ -2793,6 +2814,7 @@ impl params_api::NativeInstance for PyGeneralizedLinearRegression {
 
 /// Weibull accelerated failure time regression using Spark's JVM implementation.
 #[pyclass(
+    subclass,
     name = "AFTSurvivalRegression",
     module = "pyspark.ml.connect.regression"
 )]
@@ -2969,7 +2991,7 @@ native_pymethods! {
         slf: &Bound<'_, Self>,
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Fitted<regression_api::PyAFTSurvivalRegressionModel>> {
+    ) -> PyResult<Fitted<Py<regression_api::PyAFTSurvivalRegressionModel>>> {
         fit_with(slf, dataset, params, || {
             fit_native_model(slf, dataset, |py, model, df| {
                 regression_api::PyAFTSurvivalRegressionModel::fitted(
@@ -2990,14 +3012,14 @@ native_pymethods! {
         slf: &Bound<'py, Self>,
         dataset: &Bound<'py, PyAny>,
         paramMaps: &Bound<'py, PyAny>,
-    ) -> PyResult<params_api::PyFitMultipleIterator> {
+    ) -> PyResult<Py<params_api::PyFitMultipleIterator>> {
         params_api::fit_multiple(slf.as_any(), dataset, paramMaps)
     }
 }
 
 impl params_api::NativeInstance for PyAFTSurvivalRegression {
     fn duplicate(&self, py: Python<'_>) -> PyResult<Py<Self>> {
-        Py::new(
+        object::new_py(
             py,
             Self {
                 inner: self.inner.clone(),
@@ -3016,7 +3038,11 @@ impl params_api::NativeInstance for PyAFTSurvivalRegression {
 }
 
 /// Univariate isotonic or antitonic regression using Spark's JVM implementation.
-#[pyclass(name = "IsotonicRegression", module = "pyspark.ml.connect.regression")]
+#[pyclass(
+    subclass,
+    name = "IsotonicRegression",
+    module = "pyspark.ml.connect.regression"
+)]
 pub struct PyIsotonicRegression {
     inner: IsotonicRegression,
     unsendable: Vec<&'static str>,
@@ -3132,7 +3158,7 @@ native_pymethods! {
         slf: &Bound<'_, Self>,
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Fitted<regression_api::PyIsotonicRegressionModel>> {
+    ) -> PyResult<Fitted<Py<regression_api::PyIsotonicRegressionModel>>> {
         fit_with(slf, dataset, params, || {
             fit_native_model(slf, dataset, |py, model, df| {
                 regression_api::PyIsotonicRegressionModel::fitted(
@@ -3153,14 +3179,14 @@ native_pymethods! {
         slf: &Bound<'py, Self>,
         dataset: &Bound<'py, PyAny>,
         paramMaps: &Bound<'py, PyAny>,
-    ) -> PyResult<params_api::PyFitMultipleIterator> {
+    ) -> PyResult<Py<params_api::PyFitMultipleIterator>> {
         params_api::fit_multiple(slf.as_any(), dataset, paramMaps)
     }
 }
 
 impl params_api::NativeInstance for PyIsotonicRegression {
     fn duplicate(&self, py: Python<'_>) -> PyResult<Py<Self>> {
-        Py::new(
+        object::new_py(
             py,
             Self {
                 inner: self.inner.clone(),
@@ -3179,7 +3205,11 @@ impl params_api::NativeInstance for PyIsotonicRegression {
 }
 
 /// Factorization machines regression using Spark's JVM implementation.
-#[pyclass(name = "FMRegressor", module = "pyspark.ml.connect.regression")]
+#[pyclass(
+    subclass,
+    name = "FMRegressor",
+    module = "pyspark.ml.connect.regression"
+)]
 pub struct PyFMRegressor {
     inner: FMRegressor,
     unsendable: Vec<&'static str>,
@@ -3374,7 +3404,7 @@ native_pymethods! {
         slf: &Bound<'_, Self>,
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Fitted<regression_api::PyFMRegressionModel>> {
+    ) -> PyResult<Fitted<Py<regression_api::PyFMRegressionModel>>> {
         fit_with(slf, dataset, params, || {
             fit_native_model(slf, dataset, |py, model, df| {
                 regression_api::PyFMRegressionModel::fitted(
@@ -3395,14 +3425,14 @@ native_pymethods! {
         slf: &Bound<'py, Self>,
         dataset: &Bound<'py, PyAny>,
         paramMaps: &Bound<'py, PyAny>,
-    ) -> PyResult<params_api::PyFitMultipleIterator> {
+    ) -> PyResult<Py<params_api::PyFitMultipleIterator>> {
         params_api::fit_multiple(slf.as_any(), dataset, paramMaps)
     }
 }
 
 impl params_api::NativeInstance for PyFMRegressor {
     fn duplicate(&self, py: Python<'_>) -> PyResult<Py<Self>> {
-        Py::new(
+        object::new_py(
             py,
             Self {
                 inner: self.inner.clone(),
@@ -3422,6 +3452,7 @@ impl params_api::NativeInstance for PyFMRegressor {
 
 /// Decision tree classifier fitted and cached by Spark Connect.
 #[pyclass(
+    subclass,
     name = "DecisionTreeClassifier",
     module = "pyspark.ml.connect.classification"
 )]
@@ -3684,7 +3715,7 @@ native_pymethods! {
         slf: &Bound<'_, Self>,
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Fitted<classification_api::PyDecisionTreeClassificationModel>> {
+    ) -> PyResult<Fitted<Py<classification_api::PyDecisionTreeClassificationModel>>> {
         fit_with(slf, dataset, params, || {
             fit_native_model(slf, dataset, |py, model, df| {
                 classification_api::PyDecisionTreeClassificationModel::fitted(
@@ -3705,7 +3736,7 @@ native_pymethods! {
         slf: &Bound<'py, Self>,
         dataset: &Bound<'py, PyAny>,
         paramMaps: &Bound<'py, PyAny>,
-    ) -> PyResult<params_api::PyFitMultipleIterator> {
+    ) -> PyResult<Py<params_api::PyFitMultipleIterator>> {
         params_api::fit_multiple(slf.as_any(), dataset, paramMaps)
     }
 
@@ -3719,7 +3750,7 @@ native_pymethods! {
 
 impl params_api::NativeInstance for PyDecisionTreeClassifier {
     fn duplicate(&self, py: Python<'_>) -> PyResult<Py<Self>> {
-        Py::new(
+        object::new_py(
             py,
             Self {
                 inner: self.inner.clone(),
@@ -3738,7 +3769,11 @@ impl params_api::NativeInstance for PyDecisionTreeClassifier {
 }
 
 /// Naive Bayes classifier fitted and cached by Spark Connect.
-#[pyclass(name = "NaiveBayes", module = "pyspark.ml.connect.classification")]
+#[pyclass(
+    subclass,
+    name = "NaiveBayes",
+    module = "pyspark.ml.connect.classification"
+)]
 pub struct PyNaiveBayes {
     inner: NaiveBayes,
     unsendable: Vec<&'static str>,
@@ -3881,7 +3916,7 @@ native_pymethods! {
         slf: &Bound<'_, Self>,
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Fitted<classification_api::PyNaiveBayesModel>> {
+    ) -> PyResult<Fitted<Py<classification_api::PyNaiveBayesModel>>> {
         fit_with(slf, dataset, params, || {
             fit_native_model(slf, dataset, |py, model, df| {
                 classification_api::PyNaiveBayesModel::fitted(
@@ -3902,14 +3937,14 @@ native_pymethods! {
         slf: &Bound<'py, Self>,
         dataset: &Bound<'py, PyAny>,
         paramMaps: &Bound<'py, PyAny>,
-    ) -> PyResult<params_api::PyFitMultipleIterator> {
+    ) -> PyResult<Py<params_api::PyFitMultipleIterator>> {
         params_api::fit_multiple(slf.as_any(), dataset, paramMaps)
     }
 }
 
 impl params_api::NativeInstance for PyNaiveBayes {
     fn duplicate(&self, py: Python<'_>) -> PyResult<Py<Self>> {
-        Py::new(
+        object::new_py(
             py,
             Self {
                 inner: self.inner.clone(),
@@ -3928,7 +3963,11 @@ impl params_api::NativeInstance for PyNaiveBayes {
 }
 
 /// Gradient-boosted binary classifier fitted and cached by Spark Connect.
-#[pyclass(name = "GBTClassifier", module = "pyspark.ml.connect.classification")]
+#[pyclass(
+    subclass,
+    name = "GBTClassifier",
+    module = "pyspark.ml.connect.classification"
+)]
 pub struct PyGBTClassifier {
     inner: GBTClassifier,
     unsendable: Vec<&'static str>,
@@ -4240,7 +4279,7 @@ native_pymethods! {
         slf: &Bound<'_, Self>,
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Fitted<classification_api::PyGBTClassificationModel>> {
+    ) -> PyResult<Fitted<Py<classification_api::PyGBTClassificationModel>>> {
         fit_with(slf, dataset, params, || {
             fit_native_model(slf, dataset, |py, model, df| {
                 classification_api::PyGBTClassificationModel::fitted(
@@ -4261,7 +4300,7 @@ native_pymethods! {
         slf: &Bound<'py, Self>,
         dataset: &Bound<'py, PyAny>,
         paramMaps: &Bound<'py, PyAny>,
-    ) -> PyResult<params_api::PyFitMultipleIterator> {
+    ) -> PyResult<Py<params_api::PyFitMultipleIterator>> {
         params_api::fit_multiple(slf.as_any(), dataset, paramMaps)
     }
 
@@ -4289,7 +4328,7 @@ native_pymethods! {
 
 impl params_api::NativeInstance for PyGBTClassifier {
     fn duplicate(&self, py: Python<'_>) -> PyResult<Py<Self>> {
-        Py::new(
+        object::new_py(
             py,
             Self {
                 inner: self.inner.clone(),
@@ -4309,6 +4348,7 @@ impl params_api::NativeInstance for PyGBTClassifier {
 
 /// Random forest classifier fitted and cached by Spark Connect.
 #[pyclass(
+    subclass,
     name = "RandomForestClassifier",
     module = "pyspark.ml.connect.classification"
 )]
@@ -4615,7 +4655,7 @@ native_pymethods! {
         slf: &Bound<'_, Self>,
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Fitted<classification_api::PyRandomForestClassificationModel>> {
+    ) -> PyResult<Fitted<Py<classification_api::PyRandomForestClassificationModel>>> {
         fit_with(slf, dataset, params, || {
             fit_native_model(slf, dataset, |py, model, df| {
                 classification_api::PyRandomForestClassificationModel::fitted(
@@ -4636,7 +4676,7 @@ native_pymethods! {
         slf: &Bound<'py, Self>,
         dataset: &Bound<'py, PyAny>,
         paramMaps: &Bound<'py, PyAny>,
-    ) -> PyResult<params_api::PyFitMultipleIterator> {
+    ) -> PyResult<Py<params_api::PyFitMultipleIterator>> {
         params_api::fit_multiple(slf.as_any(), dataset, paramMaps)
     }
 
@@ -4657,7 +4697,7 @@ native_pymethods! {
 
 impl params_api::NativeInstance for PyRandomForestClassifier {
     fn duplicate(&self, py: Python<'_>) -> PyResult<Py<Self>> {
-        Py::new(
+        object::new_py(
             py,
             Self {
                 inner: self.inner.clone(),
@@ -4676,7 +4716,11 @@ impl params_api::NativeInstance for PyRandomForestClassifier {
 }
 
 /// Gradient-boosted regressor fitted and cached by Spark Connect.
-#[pyclass(name = "GBTRegressor", module = "pyspark.ml.connect.regression")]
+#[pyclass(
+    subclass,
+    name = "GBTRegressor",
+    module = "pyspark.ml.connect.regression"
+)]
 pub struct PyGBTRegressor {
     inner: GBTRegressor,
     unsendable: Vec<&'static str>,
@@ -4979,7 +5023,7 @@ native_pymethods! {
         slf: &Bound<'_, Self>,
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Fitted<regression_api::PyGBTRegressionModel>> {
+    ) -> PyResult<Fitted<Py<regression_api::PyGBTRegressionModel>>> {
         fit_with(slf, dataset, params, || {
             fit_native_model(slf, dataset, |py, model, df| {
                 regression_api::PyGBTRegressionModel::fitted(
@@ -5000,14 +5044,14 @@ native_pymethods! {
         slf: &Bound<'py, Self>,
         dataset: &Bound<'py, PyAny>,
         paramMaps: &Bound<'py, PyAny>,
-    ) -> PyResult<params_api::PyFitMultipleIterator> {
+    ) -> PyResult<Py<params_api::PyFitMultipleIterator>> {
         params_api::fit_multiple(slf.as_any(), dataset, paramMaps)
     }
 }
 
 impl params_api::NativeInstance for PyGBTRegressor {
     fn duplicate(&self, py: Python<'_>) -> PyResult<Py<Self>> {
-        Py::new(
+        object::new_py(
             py,
             Self {
                 inner: self.inner.clone(),
@@ -5027,6 +5071,7 @@ impl params_api::NativeInstance for PyGBTRegressor {
 
 /// Decision tree regressor fitted and cached by Spark Connect.
 #[pyclass(
+    subclass,
     name = "DecisionTreeRegressor",
     module = "pyspark.ml.connect.regression"
 )]
@@ -5264,7 +5309,7 @@ native_pymethods! {
         slf: &Bound<'_, Self>,
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Fitted<regression_api::PyDecisionTreeRegressionModel>> {
+    ) -> PyResult<Fitted<Py<regression_api::PyDecisionTreeRegressionModel>>> {
         fit_with(slf, dataset, params, || {
             fit_native_model(slf, dataset, |py, model, df| {
                 regression_api::PyDecisionTreeRegressionModel::fitted(
@@ -5285,14 +5330,14 @@ native_pymethods! {
         slf: &Bound<'py, Self>,
         dataset: &Bound<'py, PyAny>,
         paramMaps: &Bound<'py, PyAny>,
-    ) -> PyResult<params_api::PyFitMultipleIterator> {
+    ) -> PyResult<Py<params_api::PyFitMultipleIterator>> {
         params_api::fit_multiple(slf.as_any(), dataset, paramMaps)
     }
 }
 
 impl params_api::NativeInstance for PyDecisionTreeRegressor {
     fn duplicate(&self, py: Python<'_>) -> PyResult<Py<Self>> {
-        Py::new(
+        object::new_py(
             py,
             Self {
                 inner: self.inner.clone(),
@@ -5311,6 +5356,7 @@ impl params_api::NativeInstance for PyDecisionTreeRegressor {
 }
 /// Random forest regressor fitted and cached by Spark Connect.
 #[pyclass(
+    subclass,
     name = "RandomForestRegressor",
     module = "pyspark.ml.connect.regression"
 )]
@@ -5589,7 +5635,7 @@ native_pymethods! {
         slf: &Bound<'_, Self>,
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Fitted<regression_api::PyRandomForestRegressionModel>> {
+    ) -> PyResult<Fitted<Py<regression_api::PyRandomForestRegressionModel>>> {
         fit_with(slf, dataset, params, || {
             fit_native_model(slf, dataset, |py, model, df| {
                 regression_api::PyRandomForestRegressionModel::fitted(
@@ -5610,14 +5656,14 @@ native_pymethods! {
         slf: &Bound<'py, Self>,
         dataset: &Bound<'py, PyAny>,
         paramMaps: &Bound<'py, PyAny>,
-    ) -> PyResult<params_api::PyFitMultipleIterator> {
+    ) -> PyResult<Py<params_api::PyFitMultipleIterator>> {
         params_api::fit_multiple(slf.as_any(), dataset, paramMaps)
     }
 }
 
 impl params_api::NativeInstance for PyRandomForestRegressor {
     fn duplicate(&self, py: Python<'_>) -> PyResult<Py<Self>> {
-        Py::new(
+        object::new_py(
             py,
             Self {
                 inner: self.inner.clone(),
@@ -5636,7 +5682,7 @@ impl params_api::NativeInstance for PyRandomForestRegressor {
 }
 
 /// K-means clustering backed by Spark Connect's JVM ML API.
-#[pyclass(name = "KMeans", module = "pyspark.ml.connect.clustering")]
+#[pyclass(subclass, name = "KMeans", module = "pyspark.ml.connect.clustering")]
 pub struct PyKMeans {
     inner: KMeans,
     unsendable: Vec<&'static str>,
@@ -5812,7 +5858,7 @@ native_pymethods! {
         slf: &Bound<'_, Self>,
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Fitted<clustering_api::PyKMeansModel>> {
+    ) -> PyResult<Fitted<Py<clustering_api::PyKMeansModel>>> {
         fit_with(slf, dataset, params, || {
             fit_native_model(slf, dataset, |py, model, df| {
                 clustering_api::PyKMeansModel::fitted(
@@ -5833,14 +5879,14 @@ native_pymethods! {
         slf: &Bound<'py, Self>,
         dataset: &Bound<'py, PyAny>,
         paramMaps: &Bound<'py, PyAny>,
-    ) -> PyResult<params_api::PyFitMultipleIterator> {
+    ) -> PyResult<Py<params_api::PyFitMultipleIterator>> {
         params_api::fit_multiple(slf.as_any(), dataset, paramMaps)
     }
 }
 
 impl params_api::NativeInstance for PyKMeans {
     fn duplicate(&self, py: Python<'_>) -> PyResult<Py<Self>> {
-        Py::new(
+        object::new_py(
             py,
             Self {
                 inner: self.inner.clone(),
@@ -5859,7 +5905,7 @@ impl params_api::NativeInstance for PyKMeans {
 }
 
 /// Native LDA backed by Spark Connect's JVM ML API.
-#[pyclass(name = "LDA", module = "pyspark.ml.connect.clustering")]
+#[pyclass(subclass, name = "LDA", module = "pyspark.ml.connect.clustering")]
 pub struct PyLDA {
     inner: LDA,
     unsendable: Vec<&'static str>,
@@ -6065,24 +6111,23 @@ native_pymethods! {
         slf: &Bound<'_, Self>,
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Fitted<Py<PyAny>>> {
+    ) -> PyResult<Fitted<Py<clustering_api::PyLDAModel>>> {
+        // The model of the base class, of the `make` of the subclass, of which `Fitted` makes the
+        // object of the subclass.
         fit_with(slf, dataset, params, || {
-            let py = slf.py();
             if slf.try_borrow()?.inner.optimizer() == "em" {
-                let model = fit_native_model(slf, dataset, |py, model, df| {
+                return fit_native_model(slf, dataset, |py, model, df| {
                     clustering_api::PyDistributedLDAModel::fitted(
                         py,
                         model,
                         df,
                         object::SummaryDataset::None,
                     )
-                })?;
-                return Ok(model.into_object(py)?.into_any());
+                });
             }
-            let model = fit_native_model(slf, dataset, |py, model, df| {
+            fit_native_model(slf, dataset, |py, model, df| {
                 clustering_api::PyLocalLDAModel::fitted(py, model, df, object::SummaryDataset::None)
-            })?;
-            Ok(model.into_object(py)?.into_any())
+            })
         })
     }
 
@@ -6094,14 +6139,14 @@ native_pymethods! {
         slf: &Bound<'py, Self>,
         dataset: &Bound<'py, PyAny>,
         paramMaps: &Bound<'py, PyAny>,
-    ) -> PyResult<params_api::PyFitMultipleIterator> {
+    ) -> PyResult<Py<params_api::PyFitMultipleIterator>> {
         params_api::fit_multiple(slf.as_any(), dataset, paramMaps)
     }
 }
 
 impl params_api::NativeInstance for PyLDA {
     fn duplicate(&self, py: Python<'_>) -> PyResult<Py<Self>> {
-        Py::new(
+        object::new_py(
             py,
             Self {
                 inner: self.inner.clone(),
@@ -6123,6 +6168,7 @@ impl params_api::NativeInstance for PyLDA {
 /// `assignClusters` runs the algorithm, and it saves as PySpark's
 /// `PowerIterationClusteringWrapper` transformer, of its uid.
 #[pyclass(
+    subclass,
     name = "PowerIterationClustering",
     module = "pyspark.ml.connect.clustering"
 )]
@@ -6274,7 +6320,7 @@ native_pymethods! {
 
 impl params_api::NativeInstance for PyPowerIterationClustering {
     fn duplicate(&self, py: Python<'_>) -> PyResult<Py<Self>> {
-        Py::new(
+        object::new_py(
             py,
             Self {
                 inner: self.inner.clone(),
@@ -6294,7 +6340,11 @@ impl params_api::NativeInstance for PyPowerIterationClustering {
 }
 
 /// Gaussian mixture estimator fitted and cached by Spark Connect.
-#[pyclass(name = "GaussianMixture", module = "pyspark.ml.connect.clustering")]
+#[pyclass(
+    subclass,
+    name = "GaussianMixture",
+    module = "pyspark.ml.connect.clustering"
+)]
 pub struct PyGaussianMixture {
     inner: GaussianMixture,
     unsendable: Vec<&'static str>,
@@ -6440,7 +6490,7 @@ native_pymethods! {
         slf: &Bound<'_, Self>,
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Fitted<clustering_api::PyGaussianMixtureModel>> {
+    ) -> PyResult<Fitted<Py<clustering_api::PyGaussianMixtureModel>>> {
         fit_with(slf, dataset, params, || {
             fit_native_model(slf, dataset, |py, model, df| {
                 clustering_api::PyGaussianMixtureModel::fitted(
@@ -6461,14 +6511,14 @@ native_pymethods! {
         slf: &Bound<'py, Self>,
         dataset: &Bound<'py, PyAny>,
         paramMaps: &Bound<'py, PyAny>,
-    ) -> PyResult<params_api::PyFitMultipleIterator> {
+    ) -> PyResult<Py<params_api::PyFitMultipleIterator>> {
         params_api::fit_multiple(slf.as_any(), dataset, paramMaps)
     }
 }
 
 impl params_api::NativeInstance for PyGaussianMixture {
     fn duplicate(&self, py: Python<'_>) -> PyResult<Py<Self>> {
-        Py::new(
+        object::new_py(
             py,
             Self {
                 inner: self.inner.clone(),
@@ -6487,7 +6537,11 @@ impl params_api::NativeInstance for PyGaussianMixture {
 }
 
 /// Bisecting K-means fitted and cached by Spark Connect.
-#[pyclass(name = "BisectingKMeans", module = "pyspark.ml.connect.clustering")]
+#[pyclass(
+    subclass,
+    name = "BisectingKMeans",
+    module = "pyspark.ml.connect.clustering"
+)]
 pub struct PyBisectingKMeans {
     inner: BisectingKMeans,
     unsendable: Vec<&'static str>,
@@ -6623,7 +6677,7 @@ native_pymethods! {
         slf: &Bound<'_, Self>,
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Fitted<clustering_api::PyBisectingKMeansModel>> {
+    ) -> PyResult<Fitted<Py<clustering_api::PyBisectingKMeansModel>>> {
         fit_with(slf, dataset, params, || {
             fit_native_model(slf, dataset, |py, model, df| {
                 clustering_api::PyBisectingKMeansModel::fitted(
@@ -6644,14 +6698,14 @@ native_pymethods! {
         slf: &Bound<'py, Self>,
         dataset: &Bound<'py, PyAny>,
         paramMaps: &Bound<'py, PyAny>,
-    ) -> PyResult<params_api::PyFitMultipleIterator> {
+    ) -> PyResult<Py<params_api::PyFitMultipleIterator>> {
         params_api::fit_multiple(slf.as_any(), dataset, paramMaps)
     }
 }
 
 impl params_api::NativeInstance for PyBisectingKMeans {
     fn duplicate(&self, py: Python<'_>) -> PyResult<Py<Self>> {
-        Py::new(
+        object::new_py(
             py,
             Self {
                 inner: self.inner.clone(),

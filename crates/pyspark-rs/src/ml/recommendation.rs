@@ -24,7 +24,7 @@ const ALS_PARAMS: &[(&str, Kind)] = &[
 ];
 
 /// ALS, as PySpark's `ALS` over Spark Connect: an estimator of its params.
-#[pyclass(name = "ALS", module = "pyspark.ml.connect.recommendation")]
+#[pyclass(subclass, name = "ALS", module = "pyspark.ml.connect.recommendation")]
 pub struct PyALS {
     inner: ALS,
     unsendable: Vec<&'static str>,
@@ -255,7 +255,7 @@ native_pymethods! {
         slf: &Bound<'_, Self>,
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Fitted<PyALSModel>> {
+    ) -> PyResult<Fitted<Py<PyALSModel>>> {
         fit_with(slf, dataset, params, || {
             fit_native_model(slf, dataset, |py, model, df| {
                 PyALSModel::fitted(py, model, df, object::SummaryDataset::None)
@@ -271,14 +271,14 @@ native_pymethods! {
         slf: &Bound<'py, Self>,
         dataset: &Bound<'py, PyAny>,
         paramMaps: &Bound<'py, PyAny>,
-    ) -> PyResult<params_api::PyFitMultipleIterator> {
+    ) -> PyResult<Py<params_api::PyFitMultipleIterator>> {
         params_api::fit_multiple(slf.as_any(), dataset, paramMaps)
     }
 }
 
 impl params_api::NativeInstance for PyALS {
     fn duplicate(&self, py: Python<'_>) -> PyResult<Py<Self>> {
-        Py::new(
+        crate::ml::object::new_py(
             py,
             Self {
                 inner: self.inner.clone(),
