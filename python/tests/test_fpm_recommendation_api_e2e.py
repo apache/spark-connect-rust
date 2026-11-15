@@ -115,19 +115,24 @@ def _of_its_class(obj):
 
 def test_objects_of_this_client_are_of_the_classes_of_pyspark_mls(session):
     # Every FPGrowth, PrefixSpan and ALS object that this client makes is of the class of its
-    # module, as PySpark's: an estimator, its copy and its load, its fit (of a param map, of a list
-    # of them and of fitMultiple), and the copy and the load of its model.
+    # module, as PySpark's: an estimator, its copy (of extra params too) and its load (of its class
+    # and of read()), its fit (of a param map, of a list of them and of fitMultiple), and the copy
+    # and the load of its model.
     base = tempfile.mkdtemp(prefix="fpm-recommendation-api-classes-")
     try:
-        _of_its_class(_of_its_class(_class_of("PrefixSpan")(minSupport=0.5)).copy())
+        prefix_span = _of_its_class(_class_of("PrefixSpan")(minSupport=0.5))
+        _of_its_class(prefix_span.copy())
+        _of_its_class(prefix_span.copy({prefix_span.minSupport: 0.4}))
         for name, df, kwargs in (
             ("FPGrowth", _fpgrowth_frame(session), {"minSupport": 0.4}),
             ("ALS", _als_frame(session), {"rank": 2, "maxIter": 2, "seed": 1}),
         ):
             estimator = _of_its_class(_class_of(name)(**kwargs))
             _of_its_class(estimator.copy())
+            _of_its_class(estimator.copy({estimator.predictionCol: "mapped"}))
             estimator.write().overwrite().save(base + "/estimator")
             _of_its_class(_class_of(name).load(base + "/estimator"))
+            _of_its_class(_class_of(name).read().load(base + "/estimator"))
             model = _of_its_class(estimator.fit(df))
             _of_its_class(estimator.fit(df, {estimator.predictionCol: "mapped"}))
             for fitted in estimator.fit(df, [{}]):
@@ -135,8 +140,10 @@ def test_objects_of_this_client_are_of_the_classes_of_pyspark_mls(session):
             for _, fitted in estimator.fitMultiple(df, [{}]):
                 _of_its_class(fitted)
             _of_its_class(model.copy())
+            _of_its_class(model.copy({model.predictionCol: "mapped"}))
             model.write().overwrite().save(base + "/model")
             _of_its_class(type(model).load(base + "/model"))
+            _of_its_class(type(model).read().load(base + "/model"))
     finally:
         shutil.rmtree(base, ignore_errors=True)
 

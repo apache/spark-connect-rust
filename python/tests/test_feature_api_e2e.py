@@ -88,18 +88,26 @@ def _of_its_class(obj):
     return obj
 
 
+def _extra(stage):
+    # A param map of a param of the stage of a value that it has, for a copy with extra params.
+    param = next(p for p in stage.params if stage.isDefined(p))
+    return {param: stage.getOrDefault(param)}
+
+
 @pytest.mark.parametrize("name", TRANSFORMERS + ESTIMATORS)
 def test_objects_of_this_client_are_of_the_classes_of_pyspark_mls(name, session):
     # Every object of a feature class that this client makes is of the class of its module, as
-    # PySpark's: a stage, its copy and its load, and of an estimator, its fit (of a param map, of a
-    # list of them and of fitMultiple), the copy and the load of its model, and the Bucketizer of a
-    # QuantileDiscretizer.
+    # PySpark's: a stage, its copy (of extra params too) and its load (of its class and of read()),
+    # and of an estimator, its fit (of a param map, of a list of them and of fitMultiple), the copy
+    # and the load of its model, and the Bucketizer of a QuantileDiscretizer.
     base = tempfile.mkdtemp(prefix="feature-api-classes-")
     try:
         stage = _of_its_class(_make(name))
         _of_its_class(stage.copy())
+        _of_its_class(stage.copy(_extra(stage)))
         stage.write().overwrite().save(base + "/stage")
         _of_its_class(classes(name).load(base + "/stage"))
+        _of_its_class(classes(name).read().load(base + "/stage"))
         if name not in ESTIMATORS:
             return
         df = fit_frame(session)
@@ -110,8 +118,10 @@ def test_objects_of_this_client_are_of_the_classes_of_pyspark_mls(name, session)
         for _, fitted in stage.fitMultiple(df, [{}]):
             _of_its_class(fitted)
         _of_its_class(model.copy())
+        _of_its_class(model.copy(_extra(model)))
         model.write().overwrite().save(base + "/model")
         _of_its_class(type(model).load(base + "/model"))
+        _of_its_class(type(model).read().load(base + "/model"))
     finally:
         shutil.rmtree(base, ignore_errors=True)
 

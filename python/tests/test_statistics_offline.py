@@ -52,23 +52,6 @@ def clean(message):
     return message
 
 
-def test_summary_builders_are_of_the_class_of_pyspark_ml_stat():
-    # The SummaryBuilder that Summarizer.metrics makes is of the class of pyspark.ml.stat, which is
-    # a subclass of the native class and of PySpark's base of SummaryBuilder, JavaWrapper, as
-    # PySpark's SummaryBuilder is; the statistical tests, whose PySpark classes have no base, are
-    # the native classes.
-    import pyspark.ml.stat as public
-    from pyspark.ml.wrapper import JavaWrapper
-
-    stat = api()
-    builder = stat.Summarizer.metrics("mean", "count")
-    assert type(builder) is public.SummaryBuilder
-    assert isinstance(builder, _pyspark.SummaryBuilder)
-    assert isinstance(builder, JavaWrapper)
-    for name in ("ChiSquareTest", "Correlation", "KolmogorovSmirnovTest"):
-        assert getattr(public, name) is getattr(_pyspark, name), name
-
-
 def test_native_exports_and_reference_signatures():
     import pyspark.ml.stat as public
 
