@@ -8111,28 +8111,11 @@ def test_strings_that_utf8_cannot_encode_raise_value_error_as_options_and_fills_
     # that UTF-8 cannot encode (a lone surrogate), in protobuf's default (upb) backend: an option
     # is not sent as another text (another path), and a fill value raises the error of its
     # encoding rather than a TypeError of its type.
-    from pyspark.sql import SparkSession
-
     spark, service = mock_connect
     bad = "a\ud800b"
     message = re.escape(
         "'utf-8' codec can't encode character '\\ud800' in position 1: surrogates not allowed")
     df = spark.range(1)
-    for call in [
-        lambda: spark.read.option("path", bad),
-        lambda: spark.read.options(k=bad),
-        lambda: spark.read.options(**{bad: "v"}),
-        lambda: df.write.option("path", bad),
-        lambda: df.write.options(**{bad: "v"}),
-        lambda: spark.readStream.options(**{bad: "v"}),
-        lambda: spark.readStream.option("lineSep", bad),
-        lambda: spark.readStream.text("/t", lineSep=bad),
-        lambda: spark.readStream.format("text").option("path", bad),
-        lambda: SparkSession.builder.config(map={bad: "v"}),
-        lambda: SparkSession.builder.config(bad, "v"),
-    ]:
-        with pytest.raises(UnicodeEncodeError, match=message):
-            call()
     # The fill of a value, of a dict's key and of a subset column is sent in a string field too.
     for call in [
         lambda: df.fillna(bad),
@@ -8153,19 +8136,13 @@ def test_strings_that_utf8_cannot_encode_raise_value_error_in_option_keys_conf_a
     bad = "a\ud800b"
     message = re.escape(
         "'utf-8' codec can't encode character '\\ud800' in position 1: surrogates not allowed")
-    df = spark.range(1)
     for call in [
-        lambda: spark.read.option(bad, "v"),
-        lambda: df.write.option(bad, "v"),
-        lambda: df.writeTo("t").option(bad, "v"),
-        lambda: spark.readStream.option(bad, "v"),
         lambda: spark.readStream.format("rate").load().writeStream.option(bad, "v"),
         lambda: spark.conf.set(bad, "v"),
         lambda: spark.conf.set("spark.k", bad),
         lambda: spark.conf.get(bad),
         lambda: spark.conf.unset(bad),
         lambda: spark.conf.isModifiable(bad),
-        lambda: spark.table(bad),
     ]:
         with pytest.raises(UnicodeEncodeError, match=message):
             call()
@@ -8713,6 +8690,204 @@ def test_reader_strings_that_utf8_cannot_encode_fail_the_plan_as_pyspark(mock_co
     # A format that is not a str still fails the assertion at load, as before.
     with pytest.raises(AssertionError):
         spark.read.format(5).load(bad)
+
+
+def test_reader_options_schemas_and_table_names_that_utf8_cannot_encode_fail_the_plan_as_pyspark(
+    mock_connect,
+):
+    # As PySpark's Read and DataSource plans, which keep a str of a table name, an option or a
+    # schema as it is, and whose protobuf string fields raise the UnicodeEncodeError of a str that
+    # UTF-8 cannot encode when the plan is built: the call returns, and the DataFrame fails at its
+    # first request, with no request sent. The plan has the format, the schema, the options and
+    # the paths, in that order, and the error is the first of them. A later call that unsets or
+    # replaces the str leaves no error.
+    spark, service = mock_connect
+    bad = "a\ud800b"
+    message = re.escape(
+        "'utf-8' codec can't encode character '\\ud800' in position 1: surrogates not allowed")
+    path = "/p"
+    for build in [
+        lambda: spark.read.table(bad),
+        lambda: spark.table(bad),
+        lambda: spark.read.option(bad, "v").json(path),
+        lambda: spark.read.option("path", bad).json(path),
+        lambda: spark.read.options(k=bad).json(path),
+        lambda: spark.read.options(**{bad: "v"}).parquet(path),
+        lambda: spark.read.json(path, primitivesAsString=bad),
+        lambda: spark.read.schema(bad + " INT").json(path),
+        lambda: spark.read.json(path, schema=bad + " INT"),
+        lambda: spark.read.csv(path, schema=bad + " INT"),
+        lambda: spark.read.format("noop").load(path, schema=bad),
+        lambda: spark.read.format("noop").load(path, **{"k": bad}),
+        lambda: spark.read.load(path, format="noop", schema=bad),
+        lambda: spark.read.option("k", "v").schema(bad).load(path),
+    ]:
+        df = build()
+        with pytest.raises(UnicodeEncodeError, match=message) as error:
+            df.schema
+        assert type(error.value) is UnicodeEncodeError
+        with pytest.raises(UnicodeEncodeError, match=message):
+            df.count()
+    assert service.analyze_requests == [] and service.execute_requests == []
+    # The format precedes the schema, and the schema the options.
+    with pytest.raises(UnicodeEncodeError) as error:
+        spark.read.format(bad).schema("x\udfff INT").option(bad, "v").load(path).schema
+    assert str(error.value).startswith(
+        "'utf-8' codec can't encode character '\\ud800' in position 1")
+    with pytest.raises(UnicodeEncodeError) as error:
+        spark.read.option(bad, "v").schema("x\udfff INT").json(path).schema
+    assert str(error.value).startswith(
+        "'utf-8' codec can't encode character '\\udfff' in position 1")
+    # A str that a later call unsets, or replaces, is no longer in the plan.
+    assert spark.read.option(bad, "v").option(bad, None).json(path).schema is not None
+    assert spark.read.option("k", bad).option("k", "v").json(path).schema is not None
+    assert spark.read.options(**{bad: None}).json(path).schema is not None
+    assert spark.read.schema(bad).schema("a INT").json(path).schema is not None
+    # Another option leaves the str of an option that is still set.
+    with pytest.raises(UnicodeEncodeError, match=message):
+        spark.read.option(bad, "v").option("k", "v").json(path).schema
+    # A copy of the reader keeps the str of the reader that set it.
+    import copy
+
+    reader = spark.read.option("k", bad)
+    with pytest.raises(UnicodeEncodeError, match=message):
+        copy.copy(reader).json(path).schema
+    # A schema that is not a str fails at the call, as before.
+    from pyspark.errors import PySparkTypeError
+
+    with pytest.raises(PySparkTypeError) as error:
+        spark.read.schema(5)
+    assert error.value.getCondition() == "NOT_EXPECTED_TYPE"
+    # A table read keeps a key that is not a str, and its plan fails with the TypeError of protobuf
+    # for an object, which the bytes of UTF-8 avoid, as their text.
+    with pytest.raises(TypeError, match="^bad argument type for built-in operation$"):
+        spark.read.option(1, "v").table("t").schema
+    with pytest.raises(TypeError, match="^bad argument type for built-in operation$"):
+        spark.readStream.option(None, "v").table("t").isStreaming
+
+
+def test_writer_options_and_builder_configs_fail_the_write_or_getOrCreate_as_pyspark(mock_connect):
+    # As PySpark's writers, which keep an option, a table property, a partitioning or a sorting
+    # column in a dict or a list, and build the command at the write, which fails with the error of
+    # the first one that does not encode, or is not a str: the setter returns, and the write
+    # raises, with no request sent. The builder keeps each config, and getOrCreate sends them in one
+    # request after the session is created, which fails with the same error.
+    from pyspark.sql import SparkSession
+
+    spark, service = mock_connect
+    bad = "a\ud800b"
+    message = re.escape(
+        "'utf-8' codec can't encode character '\\ud800' in position 1: surrogates not allowed")
+    df = spark.range(1)
+    bad_type = "^bad argument type for built-in operation$"
+    cases = [
+        (lambda: df.write.option(bad, "v"), lambda w: w.parquet("/p"), UnicodeEncodeError, message),
+        (lambda: df.write.option("k", bad), lambda w: w.parquet("/p"), UnicodeEncodeError, message),
+        (lambda: df.write.options(**{bad: "v"}), lambda w: w.save("/p"), UnicodeEncodeError,
+         message),
+        (lambda: df.write.option(bad, "v").option(bad, None), lambda w: w.csv("/p"),
+         UnicodeEncodeError, message),
+        (lambda: df.write.bucketBy(2, bad), lambda w: w.saveAsTable("t"), UnicodeEncodeError,
+         message),
+        (lambda: df.write.sortBy(bad), lambda w: w.parquet("/p"), UnicodeEncodeError, message),
+        (lambda: df.write.option(1, "v"), lambda w: w.parquet("/p"), TypeError, bad_type),
+        (lambda: df.writeTo("t").option(bad, "v"), lambda w: w.create(), UnicodeEncodeError,
+         message),
+        (lambda: df.writeTo("t").option("k", bad), lambda w: w.append(), UnicodeEncodeError,
+         message),
+        (lambda: df.writeTo("t").options(**{bad: "v"}), lambda w: w.createOrReplace(),
+         UnicodeEncodeError, message),
+        (lambda: df.writeTo("t").tableProperty(bad, "v"), lambda w: w.create(),
+         UnicodeEncodeError, message),
+        (lambda: df.writeTo("t").tableProperty("k", bad), lambda w: w.create(),
+         UnicodeEncodeError, message),
+        (lambda: df.writeTo("t").partitionedBy(bad), lambda w: w.create(),
+         UnicodeEncodeError, message),
+        (lambda: df.writeTo("t").option(1, "v"), lambda w: w.create(), TypeError, bad_type),
+    ]
+    for setup, action, error_type, error_message in cases:
+        writer = setup()
+        with pytest.raises(error_type, match=error_message):
+            action(writer)
+    assert service.analyze_requests == [] and service.execute_requests == []
+    # A builder keeps its configs, and getOrCreate fails with the first of them.
+    builder = SparkSession.builder.config(bad, "v").config("spark.k", "v")
+    with pytest.raises(UnicodeEncodeError, match=message):
+        builder.getOrCreate()
+    with pytest.raises(TypeError, match="^bad argument type for built-in operation$"):
+        SparkSession.builder.config(1, "v").getOrCreate()
+
+
+def test_table_property_values_that_are_not_str_fail_the_write_as_pyspark(mock_connect):
+    # As PySpark's tableProperty, which keeps a value as it is in its dict, and whose command sends
+    # the map at the write: a value or a key that is not a str or bytes fails the write with the
+    # TypeError of protobuf, and bytes that are not UTF-8 with its UnicodeDecodeError, while bytes
+    # that are UTF-8 are sent as their text. The setter returns, with no request sent.
+    spark, service = mock_connect
+    df = spark.range(1)
+    bad_type = "^bad argument type for built-in operation$"
+    for value in [5, 5.5, True, [1], ("a",), bytearray(b"x")]:
+        with pytest.raises(TypeError, match=bad_type):
+            df.writeTo("t").tableProperty("k", value).create()
+    with pytest.raises(TypeError, match=bad_type):
+        df.writeTo("t").tableProperty(5, "v").create()
+    with pytest.raises(TypeError, match=bad_type):
+        df.writeTo("t").tableProperty(None, "v").create()
+    with pytest.raises(UnicodeDecodeError, match="^'utf-8' codec can't decode byte 0xff"):
+        df.writeTo("t").tableProperty("k", b"\xff").create()
+    assert service.analyze_requests == [] and service.execute_requests == []
+    # A value that is replaced, or unset, by a later call is no longer in the map.
+    writer = df.writeTo("t").tableProperty("k", 5).tableProperty("k", "ok")
+    writer.append()
+    writer = df.writeTo("t").tableProperty("k", 5).tableProperty("k", None)
+    writer.append()
+    # Bytes that are UTF-8 are sent as their text, WriteOperationV2.table_properties=6.
+    df.writeTo("t").tableProperty("k", b"x").append()
+    plan = parse_message(parse_message(service.execute_requests[-1])[3][0])
+    sent = parse_message(parse_message(plan[2][0])[4][0])
+    assert [parse_message(entry)[2] for entry in sent.get(6, [])] == [[b"x"]]
+
+
+def test_stream_reader_strings_that_utf8_cannot_encode_fail_the_plan_as_pyspark(mock_connect):
+    # As PySpark's DataStreamReader, whose DataSource and Read plans keep a str of a format, a
+    # schema, an option, a path or a table name, and fail when isStreaming builds the plan: the
+    # call returns, with no request sent.
+    spark, service = mock_connect
+    bad = "a\ud800b"
+    message = re.escape(
+        "'utf-8' codec can't encode character '\\ud800' in position 1: surrogates not allowed")
+    path = "/p"
+    for build in [
+        lambda: spark.readStream.format(bad).load(),
+        lambda: spark.readStream.format(bad).load(path),
+        lambda: spark.readStream.format("json").load(bad),
+        lambda: spark.readStream.table(bad),
+        lambda: spark.readStream.parquet(bad),
+        lambda: spark.readStream.schema("a INT").parquet(bad),
+        lambda: spark.readStream.json(bad),
+        lambda: spark.readStream.csv(bad),
+        lambda: spark.readStream.orc(bad),
+        lambda: spark.readStream.text(bad),
+        lambda: spark.readStream.option(bad, "v").json(path),
+        lambda: spark.readStream.option("k", bad).json(path),
+        lambda: spark.readStream.options(k=bad).json(path),
+        lambda: spark.readStream.options(**{bad: "v"}).json(path),
+        lambda: spark.readStream.schema(bad + " INT").json(path),
+        lambda: spark.readStream.format("json").load(path, schema=bad),
+        lambda: spark.readStream.format("json").load(path, **{"k": bad}),
+        lambda: spark.readStream.format("json").option("k", bad).load(path),
+    ]:
+        df = build()
+        with pytest.raises(UnicodeEncodeError, match=message) as error:
+            df.isStreaming
+        assert type(error.value) is UnicodeEncodeError
+    assert service.analyze_requests == [] and service.execute_requests == []
+    # A format that a later call replaces is no longer in the plan. An option of None leaves the
+    # str of an option that is set, as PySpark's stream reader does, and a replaced one is gone.
+    assert spark.readStream.format(bad).format("json").load(path).isStreaming is not None
+    with pytest.raises(UnicodeEncodeError, match=message):
+        spark.readStream.option(bad, "v").option(bad, None).json(path).isStreaming
+    assert spark.readStream.option("k", bad).option("k", "v").json(path).isStreaming is not None
 
 
 def test_stream_reader_formats_are_kept_until_load_as_pyspark(mock_connect):
@@ -9413,8 +9588,6 @@ def test_protobuf_string_fields_take_bytes_and_refuse_other_objects_as_pyspark(m
         lambda: spark.conf.set("spark.k", 1.5),
         lambda: spark.conf.unset(None),
         lambda: spark.conf.isModifiable(1),
-        lambda: SparkSession.builder.config(1, "v"),
-        lambda: SparkSession.builder.config(map={1: "v"}),
         lambda: spark.sql(None),
         lambda: spark.sql(1),
         lambda: df._joinAsOf(spark.range(1), "id", "id", on=["id", 1]),
@@ -9474,21 +9647,22 @@ def test_option_keys_are_checked_as_the_dicts_and_the_plans_of_pyspark(mock_conn
         with pytest.raises(TypeError, match="^unhashable type: "):
             call()
     for call in [
-        lambda: df.write.option(1, "v"),
-        lambda: df.writeTo("t").option(None, "v"),
         lambda: stream.option(bytearray(b"k"), "v"),
         lambda: stream.option(1, "v"),
     ]:
         with pytest.raises(TypeError, match="^bad argument type for built-in operation$"):
             call()
-    for call in [
-        lambda: spark.read.option(1, "v"),
-        lambda: spark.read.option(b"k", "v"),
-        lambda: spark.readStream.option(b"k", "v"),
-        lambda: spark.readStream.option(None, "v"),
-    ]:
+    # As PySpark's, a key that is not a str is kept by option, and the DataSource of a format read
+    # asserts it, at the call of the read; a table read fails at its plan instead (see below).
+    for key in [1, b"k"]:
+        reader = spark.read.option(key, "v")
         with pytest.raises(AssertionError) as error:
-            call()
+            reader.json("/p")
+        assert type(error.value) is AssertionError and str(error.value) == ""
+    for key in [b"k", None]:
+        stream_reader = spark.readStream.option(key, "v")
+        with pytest.raises(AssertionError) as error:
+            stream_reader.json("/p")
         assert type(error.value) is AssertionError and str(error.value) == ""
     # A bytes key of a writer is sent decoded: Command.write_operation=2, WriteOperation.options=9.
     df.write.format("noop").option(b"k", "v").save()
@@ -26836,6 +27010,62 @@ def test_unpickled_writers_and_readers_keep_their_settings_as_pyspark(mock_conne
     assert copied._format == "json"
     assert copied._options == {"a": "1"}
     assert copied._schema == reader._schema
+
+
+def test_pickled_writers_keep_the_entries_that_fail_their_write_as_pyspark(mock_connect):
+    # As PySpark's pickle of a writer, which keeps each option, partitioning, bucketing, sorting,
+    # clustering and table property that UTF-8 cannot encode, or that is not a str, and fails its
+    # write with the error of the first of them. A pickled writer of each kind, with each entry,
+    # raises at its write, as the writer it was pickled from, with no request sent.
+    import cloudpickle
+    from pyspark.errors import PySparkValueError
+
+    spark, service = mock_connect
+    bad = "a\ud800b"
+    message = re.escape(
+        "'utf-8' codec can't encode character '\\ud800' in position 1: surrogates not allowed")
+    bad_type = "^bad argument type for built-in operation$"
+    df = spark.range(1)
+    cases = [
+        (lambda: df.write.option(bad, "v"), lambda w: w.parquet("/p"), UnicodeEncodeError, message),
+        (lambda: df.write.option("k", bad), lambda w: w.parquet("/p"), UnicodeEncodeError, message),
+        (lambda: df.write.option(5, "v"), lambda w: w.parquet("/p"), TypeError, bad_type),
+        (lambda: df.write.options(**{bad: "v"}), lambda w: w.save("/p"), UnicodeEncodeError,
+         message),
+        (lambda: df.write.format(bad), lambda w: w.save("/p"), UnicodeEncodeError, message),
+        (lambda: df.write.mode(bad), lambda w: w.parquet("/p"), PySparkValueError,
+         "UNSUPPORTED_OPERATION"),
+        (lambda: df.write.partitionBy(bad), lambda w: w.parquet("/p"), UnicodeEncodeError,
+         message),
+        (lambda: df.write.bucketBy(2, bad), lambda w: w.saveAsTable("t"), UnicodeEncodeError,
+         message),
+        (lambda: df.write.bucketBy(2, "x").sortBy(bad), lambda w: w.parquet("/p"),
+         UnicodeEncodeError, message),
+        (lambda: df.writeTo("t").option(bad, "v"), lambda w: w.create(), UnicodeEncodeError,
+         message),
+        (lambda: df.writeTo("t").option(5, "v"), lambda w: w.create(), TypeError, bad_type),
+        (lambda: df.writeTo("t").using(bad), lambda w: w.create(), UnicodeEncodeError, message),
+        (lambda: df.writeTo("t").tableProperty(bad, "v"), lambda w: w.create(),
+         UnicodeEncodeError, message),
+        (lambda: df.writeTo("t").tableProperty("k", bad), lambda w: w.create(),
+         UnicodeEncodeError, message),
+        (lambda: df.writeTo("t").tableProperty("k", 5), lambda w: w.create(), TypeError, bad_type),
+        (lambda: df.writeTo("t").partitionedBy(bad), lambda w: w.create(), UnicodeEncodeError,
+         message),
+        (lambda: df.writeTo("t").clusterBy(bad), lambda w: w.create(), UnicodeEncodeError,
+         message),
+    ]
+    for setup, action, error_type, error_message in cases:
+        original = setup()
+        copied = cloudpickle.loads(cloudpickle.dumps(original))
+        for writer in (original, copied):
+            with pytest.raises(error_type, match=error_message):
+                action(writer)
+    assert service.analyze_requests == [] and service.execute_requests == []
+    # A bucketing with a count that is not positive sends no bucketing column, so none fails.
+    copied = cloudpickle.loads(cloudpickle.dumps(df.write.bucketBy(0, bad).format("noop")))
+    copied.save("/p")
+    assert len(service.execute_requests) == 1
 
 
 def test_a_shallow_copy_of_a_merge_builder_keeps_its_schema_evolution_as_pyspark(mock_connect):

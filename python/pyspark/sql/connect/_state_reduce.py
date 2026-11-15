@@ -71,10 +71,12 @@ def _worker_reader(
     schema: str,
     options: dict[str, str],
     unsent: Any,
+    unencodable: Any,
 ) -> Any:
     """PySpark's DataFrameReader of ``session`` with the format, the schema and the options, as
     the drop-in's reader of that state. A format that is kept (``unsent``) is given to PySpark
-    as it is, which fails it at the load, as the drop-in's reader does."""
+    as it is, which fails it at the load, as the drop-in's reader does. The schema and the options
+    that UTF-8 cannot encode (``unencodable``) are set after the others, and fail the plan."""
     reader = session.read
     source = format if unsent is None else unsent
     if source is not None:
@@ -83,6 +85,11 @@ def _worker_reader(
         reader = reader.schema(schema)
     if options:
         reader = reader.options(**options)
+    unencodable_schema, unencodable_options = unencodable
+    if unencodable_schema is not None:
+        reader = reader.schema(unencodable_schema)
+    for key, value in unencodable_options:
+        reader = reader.option(key, value)
     return reader
 
 
@@ -92,12 +99,13 @@ def reader_reduce(
     schema: str,
     options: dict[str, str],
     unsent: Any,
+    unencodable: Any,
 ) -> tuple[Callable[..., Any], tuple[Any, ...]]:
     """The reduce of a DataFrameReader of ``session``, of the state that ``_of_state`` takes."""
     return _state_reduce(
         "DataFrameReader",
         _worker_reader,
-        (session, format, schema, options, unsent),
+        (session, format, schema, options, unsent, unencodable),
     )
 
 
@@ -116,28 +124,35 @@ def _worker_writer(
     kept_partition: Any,
     kept_clustering: Any,
     kept_mode: Any,
+    kept_sort: Any,
+    kept_bucket: Any,
+    kept_options: list[tuple[Any, Any]],
 ) -> Any:
     """PySpark's DataFrameWriter of the DataFrame ``frame``, which replays the calls of the
     drop-in's writer of that state: the format, the save mode, the options, the partitioning,
     the buckets, the sorting and the clustering. A bucket count that the proto refuses is
     replayed as it was given, which PySpark fails at each write. The kept arguments are given to
     PySpark as the user gave them, so that PySpark converts them, or fails, at the write: a kept
-    partitioning or clustering column comes after the others, and fails the write in the same
-    way."""
+    partitioning, bucketing, sorting or clustering column comes after the others, and fails the
+    write in the same way, as a kept option does after the other options."""
     writer = frame.write
     source = format if kept_format is None else kept_format
     if source is not None:
         writer = writer.format(source)
     writer = writer.mode(mode if kept_mode is None else kept_mode).options(**options)
+    for key, value in kept_options:
+        writer = writer.option(key, value)
     if partition_cols or kept_partition is not None:
         cols = [*partition_cols, *([] if kept_partition is None else [kept_partition])]
         writer = writer.partitionBy(*cols)
+    kept_bucket_cols = [] if kept_bucket is None else [kept_bucket]
     if num_buckets is not None:
-        writer = writer.bucketBy(num_buckets, *bucket_cols)
+        writer = writer.bucketBy(num_buckets, *bucket_cols, *kept_bucket_cols)
     elif refused is not None:
-        writer = writer.bucketBy(refused, *bucket_cols)
-    if sort_cols:
-        writer = writer.sortBy(*sort_cols)
+        writer = writer.bucketBy(refused, *bucket_cols, *kept_bucket_cols)
+    sort = [*sort_cols, *([] if kept_sort is None else [kept_sort])]
+    if sort:
+        writer = writer.sortBy(*sort)
     if cluster_cols or kept_clustering is not None:
         cols = [*cluster_cols, *([] if kept_clustering is None else [kept_clustering])]
         writer = writer.clusterBy(*cols)
@@ -159,6 +174,9 @@ def writer_reduce(
     kept_partition: Any,
     kept_clustering: Any,
     kept_mode: Any,
+    kept_sort: Any,
+    kept_bucket: Any,
+    kept_options: list[tuple[Any, Any]],
 ) -> tuple[Callable[..., Any], tuple[Any, ...]]:
     """The reduce of a DataFrameWriter of ``frame``, of the state that ``_of_state`` takes."""
     return _state_reduce(
@@ -179,6 +197,9 @@ def writer_reduce(
             kept_partition,
             kept_clustering,
             kept_mode,
+            kept_sort,
+            kept_bucket,
+            kept_options,
         ),
     )
 
@@ -194,20 +215,28 @@ def _worker_writer_v2(
     unsent_table: Any,
     kept_provider: Any,
     kept_clustering: Any,
+    kept_partition: Any,
+    kept_options: list[tuple[Any, Any]],
+    kept_properties: list[tuple[Any, Any]],
 ) -> Any:
     """PySpark's DataFrameWriterV2 of the DataFrame ``frame`` and the table ``table``, with the
     provider, the options, the table properties, the partitioning and the clustering. The kept
-    table, provider and clustering column are given to PySpark as the user gave them, as the
-    writer's kept format is."""
+    table, provider, partitioning and clustering column, and the kept options and table
+    properties, are given to PySpark as the user gave them, as the writer's kept format is."""
     writer = frame.writeTo(table if unsent_table is None else unsent_table)
     provider = provider if kept_provider is None else kept_provider
     if provider is not None:
         writer = writer.using(provider)
     writer = writer.options(**options)
+    for key, value in kept_options:
+        writer = writer.option(key, value)
     for name, value in table_properties.items():
         writer = writer.tableProperty(name, value)
-    if partition_cols:
-        writer = writer.partitionedBy(*partition_cols)
+    for name, value in kept_properties:
+        writer = writer.tableProperty(name, value)
+    partition = [*partition_cols, *([] if kept_partition is None else [kept_partition])]
+    if partition:
+        writer = writer.partitionedBy(*partition)
     if cluster_cols or kept_clustering is not None:
         cols = [*cluster_cols, *([] if kept_clustering is None else [kept_clustering])]
         writer = writer.clusterBy(*cols)
@@ -225,6 +254,9 @@ def writer_v2_reduce(
     unsent_table: Any,
     kept_provider: Any,
     kept_clustering: Any,
+    kept_partition: Any,
+    kept_options: list[tuple[Any, Any]],
+    kept_properties: list[tuple[Any, Any]],
 ) -> tuple[Callable[..., Any], tuple[Any, ...]]:
     """The reduce of a DataFrameWriterV2 of ``frame``, of the state that ``_of_state`` takes."""
     return _state_reduce(
@@ -241,6 +273,9 @@ def writer_v2_reduce(
             unsent_table,
             kept_provider,
             kept_clustering,
+            kept_partition,
+            kept_options,
+            kept_properties,
         ),
     )
 
@@ -304,10 +339,12 @@ def _worker_stream_reader(
     options: dict[str, str],
     source_name: Optional[str],
     unsent: Any,
+    unencodable: Any,
 ) -> Any:
     """PySpark's DataStreamReader of ``session`` with the format, the schema, the options and the
     source name, as the drop-in's reader of that state. A format that is kept (``unsent``) is
-    given to PySpark as it is."""
+    given to PySpark as it is. The schema and the options that UTF-8 cannot encode
+    (``unencodable``) are set after the others, and fail the plan."""
     reader = session.readStream
     source = format if unsent is None else unsent
     if source is not None:
@@ -318,6 +355,11 @@ def _worker_stream_reader(
         reader = reader.options(**options)
     if source_name is not None:
         reader = reader.name(source_name)
+    unencodable_schema, unencodable_options = unencodable
+    if unencodable_schema is not None:
+        reader = reader.schema(unencodable_schema)
+    for key, value in unencodable_options:
+        reader = reader.option(key, value)
     return reader
 
 
@@ -328,12 +370,13 @@ def stream_reader_reduce(
     options: dict[str, str],
     source_name: Optional[str],
     unsent: Any,
+    unencodable: Any,
 ) -> tuple[Callable[..., Any], tuple[Any, ...]]:
     """The reduce of a DataStreamReader of ``session``, of the state that ``_of_state`` takes."""
     return _state_reduce(
         "DataStreamReader",
         _worker_stream_reader,
-        (session, format, schema, options, source_name, unsent),
+        (session, format, schema, options, source_name, unsent, unencodable),
     )
 
 

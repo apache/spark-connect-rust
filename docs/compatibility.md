@@ -1017,6 +1017,24 @@ CPython says "DataFrame.count() got an unexpected keyword argument 'foo'", where
 readers', writers' and `SparkSession.builder.config`'s that take named options, word both as
 CPython does.
 
+A str that UTF-8 cannot encode, such as one with a lone surrogate, fails where PySpark builds the
+request that carries it, which is not always the call that takes it. The error is PySpark's
+`UnicodeEncodeError` with the same message, and no request is sent:
+- a reader's format, schema, option key or value, path or table name fails the DataFrame when its
+  plan is built, at its first request, such as `df.schema`;
+- a `DataFrameWriter`'s or a `DataFrameWriterV2`'s format or provider, option, table property,
+  partitioning, bucketing, sorting or clustering column, path or table name fails the write, such
+  as `save`, `saveAsTable` or `create`;
+- a key or a value of `SparkSession.builder.config`, or an `appName`, fails `getOrCreate`;
+- a `DataStreamWriter`'s fails the call that takes it, as PySpark sets that writer's request as it
+  goes.
+
+A str that a later call unsets or replaces is no longer in the request, in the same cases as in
+PySpark. A stream reader's option of None leaves its option as it was, as PySpark's does. An option
+key, a table property or a config key that is not a str fails at the same call as PySpark's, with
+the same error: an `AssertionError` at a reader's load of a path, and protobuf's `TypeError` where
+the request is built otherwise.
+
 ## Native NaiveBayes
 
 The Rust `ml::NaiveBayes` and `ml::NaiveBayesModel` train and predict through Spark

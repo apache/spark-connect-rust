@@ -32,6 +32,10 @@ pub struct PySparkSessionBuilder {
     /// The channel builder of `channelBuilder`, which the session connects with, instead of
     /// `remote()`: PySpark's `_channel_builder`, which is not an option.
     channel_builder: Option<std::sync::Arc<Py<PyAny>>>,
+    /// The configs that the session does not take, as PySpark's options dict keeps them: a key
+    /// that is not a str or a str that UTF-8 cannot encode, or a value that cannot be encoded.
+    /// `getOrCreate` fails with the first of them, as PySpark's `_set_all` does.
+    unencodable: crate::options::UnencodableOptions,
 }
 
 impl PySparkSessionBuilder {
@@ -41,6 +45,7 @@ impl PySparkSessionBuilder {
             configs: Vec::new(),
             hook_factories: Vec::new(),
             channel_builder: None,
+            unencodable: Default::default(),
         }
     }
 }
@@ -159,22 +164,22 @@ impl PySparkSessionBuilder {
         // PySpark keeps the options in a dict, and sends each in a `KeyValue` of the key as it
         // is, whose constructor leaves a key of None unset, the empty key.
         if let Some(k) = key {
-            let k = crate::options::option_dict_key(k)?;
+            let k = crate::options::option_key(k)?;
             let v = match value {
-                Some(v) => crate::coerce_option_value(v)?,
+                Some(v) => crate::options::reader_option_text(v)?,
                 None => None,
             };
-            slf.set_option_value(py, &k, v)?;
+            slf.put_config(py, k, v)?;
         }
         if let Some(m) = map {
             for (k, v) in m.iter() {
                 let ks = if k.is_none() {
-                    String::new()
+                    crate::options::OptionKey::Text(crate::options::OptionText::literal(""))
                 } else {
-                    crate::str_argument(&k)?
+                    crate::options::option_key(&k)?
                 };
-                let vs = crate::coerce_option_value(&v)?;
-                slf.set_option_value(py, &ks, vs)?;
+                let vs = crate::options::reader_option_text(&v)?;
+                slf.put_config(py, ks, vs)?;
             }
         }
         if let Some(c) = conf {
@@ -192,9 +197,15 @@ impl PySparkSessionBuilder {
     /// `appName` - the option `spark.app.name`, as PySpark's builder sets. Like any option,
     /// it is set on the session silently, so it has no effect on a running server.
     #[pyo3(name = "appName")]
-    fn app_name<'py>(mut slf: PyRefMut<'py, Self>, name: &str) -> PyResult<PyRefMut<'py, Self>> {
+    fn app_name<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        name: &Bound<'_, PyAny>,
+    ) -> PyResult<PyRefMut<'py, Self>> {
         let py = slf.py();
-        slf.set_option(py, "spark.app.name", name.to_string())?;
+        let key =
+            crate::options::OptionKey::Text(crate::options::OptionText::literal("spark.app.name"));
+        let value = crate::options::reader_option_text(name)?;
+        slf.put_config(py, key, value)?;
         Ok(slf)
     }
 
@@ -323,6 +334,33 @@ impl PySparkSessionBuilder {
         self.set_option_value(py, key, Some(value))
     }
 
+    /// Set the config `key` to `value`, or to None, as PySpark's `config` keeps it in its options:
+    /// a key and a value that the session takes are set, and the others are kept until
+    /// `getOrCreate` fails with them ([`PySparkSessionBuilder::unencodable`]).
+    fn put_config(
+        &mut self,
+        py: Python<'_>,
+        key: crate::options::OptionKey,
+        value: Option<crate::options::OptionText>,
+    ) -> PyResult<()> {
+        let name = key.core_text().and_then(|name| name.text.clone());
+        let text = match &value {
+            None => Some(None),
+            Some(value) => value.text.clone().map(Some),
+        };
+        match (name, text) {
+            (Some(name), Some(text)) => {
+                self.unencodable.remove(&key);
+                self.set_option_value(py, &name, text)
+            }
+            _ => {
+                self.unencodable
+                    .set(&key, value.map(crate::options::OptionKey::Text));
+                Ok(())
+            }
+        }
+    }
+
     /// Set an option whose value may be None, which PySpark keeps in its options: such a key is
     /// not set on the session, as `_set_all` sends it without a value.
     fn set_option_value(
@@ -399,6 +437,11 @@ impl PySparkSessionBuilder {
     // SparkError is large, as the core crate allows for its API.
     #[allow(clippy::result_large_err)]
     fn apply_options(&self, py: Python<'_>, session: &SparkSession) -> PyResult<()> {
+        // PySpark builds the request of every option first, so the first option that does not
+        // encode fails it before any option is set.
+        if let Some(error) = self.unencodable.error() {
+            return Err(crate::errors::spark_error_to_py_exception(error));
+        }
         // A later value of a key replaces an earlier one, as the options of PySpark's builder do.
         let mut options: Vec<(String, Option<String>)> = Vec::new();
         for (key, value) in self.configs.iter().filter(|(key, _)| key != "spark.master") {
@@ -3148,7 +3191,7 @@ impl PySparkSession {
     }
 
     /// The DataFrame of a table, as PySpark Connect's: `NOT_EXPECTED_TYPE` for a name that is not
-    /// a str.
+    /// a str. A name that UTF-8 cannot encode fails the plan, as PySpark's `Read` plan does.
     fn table(&self, tableName: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
         let Ok(name) = tableName.cast::<pyo3::types::PyString>() else {
             return Err(crate::stat_arguments::not_expected_type(
@@ -3157,11 +3200,11 @@ impl PySparkSession {
                 "str",
             ));
         };
-        Ok(PyDataFrame::new(
-            self.session
-                .table(&crate::str_argument(name.as_any())?)
-                .to_pyerr()?,
-        ))
+        let (name, error) = crate::readwriter::table_name_of(name.as_any())?;
+        let df = self.session.table(&name).to_pyerr()?;
+        Ok(PyDataFrame::new(crate::readwriter::with_plan_error(
+            df, error,
+        )))
     }
 
     // Reference: emptyDataFrame(schema) -> createDataFrame([], schema). We accept an

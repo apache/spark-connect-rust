@@ -15,7 +15,13 @@ use std::sync::Arc;
 use crate::dataframe::{PyDataFrame, WriterState};
 use crate::errors::spark_error_to_py_exception;
 use crate::interrupt::{interruptible, interruptible_caught};
-use crate::options::{set_stream_option_skip_none, set_stream_options_skip_none, DefaultedOption};
+use crate::options::{
+    option_key, put_option_skip_none, put_shared_option, reader_option_text, skip_none_shared,
+    stream_option_text, utf32le_of, DefaultedOption, OptionKey, OptionText, UnencodableOptions,
+};
+use crate::readwriter::{
+    reader_plan_error, reader_schema, table_name_of, with_plan_error, UnsentFormat,
+};
 
 /// Adapts Python listeners to the native bus: deserialize one typed event for the whole
 /// snapshot, then dispatch it through Python's callback-exception isolation helper. Decode
@@ -180,19 +186,19 @@ fn post_started_event(
     .map_err(|error| *error)
 }
 
-/// Apply a `schema` argument (a StructType or a DDL string) to a streaming reader, as the
-/// batch reader does.
-fn apply_stream_schema(r: DataStreamReader, v: &Bound<'_, PyAny>) -> PyResult<DataStreamReader> {
-    Ok(r.schema(crate::readwriter::reader_schema(v)?))
-}
-
 /// The path of `DataStreamReader.load`, as PySpark checks it: a non-empty str, else
-/// `VALUE_NOT_NON_EMPTY_STR` of its `str()`.
-fn load_path(path: &Bound<'_, PyAny>) -> PyResult<String> {
+/// `VALUE_NOT_NON_EMPTY_STR` of its `str()`. A str that UTF-8 cannot encode is not empty, and
+/// is kept with the error of the plan that PySpark builds from it, which is returned with an empty
+/// path.
+fn load_path(path: &Bound<'_, PyAny>) -> PyResult<(String, Option<SparkError>)> {
     if let Ok(text) = path.cast::<pyo3::types::PyString>() {
-        let text = text.to_cow()?;
-        if !text.trim().is_empty() {
-            return Ok(text.into_owned());
+        match text.extract::<String>() {
+            Ok(text) if !text.trim().is_empty() => return Ok((text, None)),
+            Ok(_) => {}
+            Err(_) => {
+                let error = SparkError::unencodable_str(&utf32le_of(path)?);
+                return Ok((String::new(), Some(error)));
+            }
         }
     }
     let shown = path.str()?.to_cow()?.into_owned();
@@ -249,9 +255,15 @@ pub struct PyDataStreamReader {
     /// The options of the reader, which a shallow copy of it shares, as PySpark's `_options` dict
     /// is shared by the copies of a reader. The core reader holds none of them (see `state`).
     options: Arc<WriterState<HashMap<String, String>>>,
-    /// The format of `format` when it is not a str, which PySpark keeps as it is and whose
-    /// `DataSource` asserts at `load`, after the path ([`stream_reader_format`]).
-    unsent_format: Option<Py<PyAny>>,
+    /// The format of `format` when it is not a format of the core reader, which PySpark keeps as it
+    /// is, and whose `DataSource` asserts at `load`, after the path ([`stream_reader_format`]).
+    unsent_format: Option<UnsentFormat>,
+    /// The options that UTF-8 cannot encode, which the copies of this reader share, as they share
+    /// `options` ([`UnencodableOptions`]).
+    unencodable_options: Arc<WriterState<UnencodableOptions>>,
+    /// The UTF-32LE bytes of the schema, when it is a str that UTF-8 cannot encode, which the core
+    /// reader leaves unset.
+    unencodable_schema: Option<Vec<u8>>,
 }
 
 /// The stream reader with the format `source` of PySpark's `format`, and the unsent format that it
@@ -260,12 +272,12 @@ pub struct PyDataStreamReader {
 fn stream_reader_format(
     reader: DataStreamReader,
     source: Option<&Bound<'_, PyAny>>,
-) -> (DataStreamReader, Option<Py<PyAny>>) {
+) -> (DataStreamReader, Option<UnsentFormat>) {
     match source {
         None => (reader.clear_format(), None),
         Some(source) => match source.extract::<String>() {
             Ok(text) => (reader.format(&text), None),
-            Err(_) => (reader.clear_format(), Some(source.clone().unbind())),
+            Err(_) => (reader.clear_format(), Some(UnsentFormat::of(source))),
         },
     }
 }
@@ -277,6 +289,8 @@ impl PyDataStreamReader {
             inner: without_options(reader, &options),
             options: Arc::new(WriterState::new(options)),
             unsent_format: None,
+            unencodable_options: Arc::new(WriterState::new(UnencodableOptions::default())),
+            unencodable_schema: None,
         }
     }
 
@@ -297,13 +311,14 @@ impl PyDataStreamReader {
     /// it leaves on this reader, which takes `reader`, with the options of the call. A path that
     /// is not a str is `NOT_EXPECTED_TYPE`, and the format of the reader stays as it was. Else
     /// the reader takes `format`, and the path is checked as `load`, which PySpark's format
-    /// readers call with their format, checks it after setting the format.
+    /// readers call with their format, checks it after setting the format. The path is returned
+    /// with the error of its plan, when UTF-8 cannot encode it.
     fn format_path(
         &mut self,
         reader: &DataStreamReader,
         format: &str,
         path: &Bound<'_, PyAny>,
-    ) -> PyResult<String> {
+    ) -> PyResult<(String, Option<SparkError>)> {
         self.set_state(reader.clone());
         if !path.is_instance_of::<pyo3::types::PyString>() {
             return Err(crate::stat_arguments::not_expected_type(
@@ -312,7 +327,107 @@ impl PyDataStreamReader {
         }
         self.set_state(reader.clone().format(format));
         self.unsent_format = None;
-        load_path(path)
+        let checked = load_path(path)?;
+        self.check_data_source()?;
+        Ok(checked)
+    }
+}
+
+impl PyDataStreamReader {
+    /// `r` with the option `key` set to `value`, or unset when None, as this reader's `option`.
+    fn put_option(
+        &self,
+        r: DataStreamReader,
+        key: &OptionKey,
+        value: Option<&OptionText>,
+    ) -> DataStreamReader {
+        put_shared_option(r, &self.unencodable_options, key, value)
+    }
+
+    /// `r` with the options of `options` set, **skipping** those that are None, as the format
+    /// methods set their keyword arguments, with the values converted as `str()`.
+    fn skip_none_options(
+        &self,
+        r: DataStreamReader,
+        options: &[(&str, Option<&Bound<'_, PyAny>>)],
+    ) -> PyResult<DataStreamReader> {
+        skip_none_shared(r, &self.unencodable_options, options, stream_option_text)
+    }
+
+    /// `r` with the `**options` of a call set, **skipping** those that are None, as `options` and
+    /// `load` do, with the values converted as [`reader_option_text`] converts them.
+    fn skip_none_kwargs(
+        &self,
+        mut r: DataStreamReader,
+        options: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<DataStreamReader> {
+        crate::options::check_keyword_keys(options)?;
+        let mut unencodable = self.unencodable_options.get();
+        for (key, value) in options.into_iter().flat_map(|options| options.iter()) {
+            let key = option_key(&key)?;
+            r = put_option_skip_none(r, &mut unencodable, &key, Some(&value), reader_option_text)?;
+        }
+        self.unencodable_options.set(unencodable);
+        Ok(r)
+    }
+
+    /// `r` with the schema `schema` of `Option`, if there is one, as [`Self::set_schema`] sets it.
+    fn apply_optional_schema(
+        &mut self,
+        r: DataStreamReader,
+        schema: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<DataStreamReader> {
+        match schema {
+            Some(schema) => self.set_schema(r, schema),
+            None => Ok(r),
+        }
+    }
+
+    /// `r` with the schema `schema`, which this reader keeps: a str that UTF-8 cannot encode is
+    /// kept as its bytes, and fails the plan, as PySpark keeps it until the plan is built.
+    fn set_schema(
+        &mut self,
+        r: DataStreamReader,
+        schema: &Bound<'_, PyAny>,
+    ) -> PyResult<DataStreamReader> {
+        match reader_schema(schema)? {
+            Ok(text) => {
+                self.unencodable_schema = None;
+                Ok(r.schema(text))
+            }
+            Err(utf32le) => {
+                self.unencodable_schema = Some(utf32le);
+                Ok(r.schema(String::new()))
+            }
+        }
+    }
+
+    /// Fail a `DataSource` of this reader, which PySpark builds at its call and asserts that each
+    /// key of its options is a str, with the bare `AssertionError` of that assertion.
+    fn check_data_source(&self) -> PyResult<()> {
+        if self.unencodable_options.get().has_object_key() {
+            return Err(pyo3::exceptions::PyAssertionError::new_err(()));
+        }
+        Ok(())
+    }
+
+    /// The reader `r` with the options of the bytes keys that are UTF-8, which PySpark's `Read`
+    /// plan sends as their text.
+    fn with_decodable_keys(&self, r: DataStreamReader) -> DataStreamReader {
+        self.unencodable_options
+            .get()
+            .decodable_pairs()
+            .into_iter()
+            .fold(r, |r, (key, value)| r.option(&key, &value))
+    }
+
+    /// The error of the plan of this reader, as [`reader_plan_error`] gives it.
+    fn plan_error(&self) -> Option<SparkError> {
+        reader_plan_error(
+            self.unsent_format.as_ref(),
+            self.unencodable_schema.as_deref(),
+            &self.unencodable_options.get(),
+        )
     }
 }
 
@@ -329,6 +444,8 @@ impl PyDataStreamReader {
                 .unsent_format
                 .as_ref()
                 .map(|format| format.clone_ref(py)),
+            unencodable_options: Arc::clone(&self.unencodable_options),
+            unencodable_schema: self.unencodable_schema.clone(),
         }
     }
 
@@ -346,14 +463,20 @@ impl PyDataStreamReader {
                 self.inner.get_schema().into_pyobject(py)?.into_any(),
                 str_dict(py, &self.options.get())?.into_any(),
                 self.inner.get_source_name().into_pyobject(py)?.into_any(),
-                optional_object(py, self.unsent_format.as_ref()),
+                optional_object(py, self.unsent_format.as_ref().map(|f| &f.object)),
+                crate::readwriter::unencodable_state(
+                    py,
+                    self.unencodable_schema.as_deref(),
+                    &self.unencodable_options.get(),
+                )?,
             ],
         )?;
         state_reduce(py, "stream_reader_reduce", args)
     }
 
     /// A stream reader of its state, as `__reduce__` gives it: of the session `session`, the
-    /// format, the schema, the options, the source name and the format that is kept (`unsent`).
+    /// format, the schema, the options, the source name, the format that is kept (`unsent`), and
+    /// the schema and the options that UTF-8 cannot encode (`unencodable`).
     #[staticmethod]
     fn _of_state(
         py: Python<'_>,
@@ -363,6 +486,7 @@ impl PyDataStreamReader {
         options: HashMap<String, String>,
         source_name: Option<String>,
         unsent: Option<Py<PyAny>>,
+        unencodable: Py<PyAny>,
     ) -> PyResult<PyDataStreamReader> {
         let mut reader = session.borrow(py).session.read_stream();
         if let Some(format) = format {
@@ -375,10 +499,22 @@ impl PyDataStreamReader {
         if let Some(source_name) = source_name {
             reader = reader.name(&source_name);
         }
-        Ok(PyDataStreamReader {
-            unsent_format: unsent,
+        let mut result = PyDataStreamReader {
+            unsent_format: unsent.map(|object| UnsentFormat::of(object.bind(py))),
             ..PyDataStreamReader::new(reader)
-        })
+        };
+        let (schema, entries) = crate::readwriter::unencodable_entries(unencodable.bind(py))?;
+        if let Some(schema) = schema {
+            let state = result.set_schema(result.state(), &schema)?;
+            result.set_state(state);
+        }
+        for (key, value) in entries {
+            let key = option_key(&key)?;
+            let value = stream_option_text(&value)?;
+            let state = result.put_option(result.state(), &key, value.as_ref());
+            result.set_state(state);
+        }
+        Ok(result)
     }
 
     /// Set the schema, if any, and the options of `options` that are not None, through its own
@@ -409,8 +545,8 @@ impl PyDataStreamReader {
         mut slf: PyRefMut<'py, Self>,
         schema: &Bound<'_, PyAny>,
     ) -> PyResult<PyRefMut<'py, Self>> {
-        let schema = crate::readwriter::reader_schema(schema)?;
-        let state = slf.state().schema(&schema);
+        let state = slf.state();
+        let state = slf.set_schema(state, schema)?;
         slf.set_state(state);
         Ok(slf)
     }
@@ -426,15 +562,11 @@ impl PyDataStreamReader {
         if value.is_none() {
             return Ok(slf);
         }
-        let key = crate::options::reader_option_key(key)?;
-        match crate::options::stream_option_value(value)? {
-            Some(v) => {
-                let state = slf.state().option(&key, &v);
-                slf.set_state(state);
-                Ok(slf)
-            }
-            None => Ok(slf),
-        }
+        let key = option_key(key)?;
+        let value = stream_option_text(value)?;
+        let state = slf.put_option(slf.state(), &key, value.as_ref());
+        slf.set_state(state);
+        Ok(slf)
     }
 
     // Mirrors reference `DataStreamReader.options(**options)`: keyword args; None values
@@ -444,15 +576,14 @@ impl PyDataStreamReader {
         mut slf: PyRefMut<'py, Self>,
         options: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyRefMut<'py, Self>> {
-        let opts = crate::options::kwargs_skip_none(options)?;
-        let state = slf.state().options(opts);
+        let state = slf.skip_none_kwargs(slf.state(), options)?;
         slf.set_state(state);
         Ok(slf)
     }
 
     fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
         if let Some(format) = &self.unsent_format {
-            visit.call(format)?;
+            visit.call(&format.object)?;
         }
         Ok(())
     }
@@ -498,20 +629,34 @@ impl PyDataStreamReader {
         }
         self.set_state(r.clone());
         if let Some(v) = schema {
-            r = apply_stream_schema(r, v)?;
+            r = self.set_schema(r, v)?;
         }
         self.set_state(r.clone());
-        if options.is_some() {
-            let opts = crate::options::kwargs_skip_none(options)?;
-            r = r.options(opts);
-        }
+        r = self.skip_none_kwargs(r, options)?;
         // Then the path is checked, and the `DataSource` of PySpark asserts the format after that.
         self.set_state(r.clone());
-        let path = path.map(load_path).transpose()?;
-        if self.unsent_format.is_some() {
+        let (path, path_error) = match path {
+            Some(path) => {
+                let (text, error) = load_path(path)?;
+                (Some(text), error)
+            }
+            None => (None, None),
+        };
+        // A format that is not a str fails the assertion, and a str that UTF-8 cannot encode fails
+        // the plan, which precedes the path in the plan of PySpark's `DataSource`.
+        if self
+            .unsent_format
+            .as_ref()
+            .is_some_and(|format| format.unencodable.is_none())
+        {
             return Err(pyo3::exceptions::PyAssertionError::new_err(()));
         }
-        Ok(PyDataFrame::new(r.load(path.as_deref())))
+        self.check_data_source()?;
+        let error = self.plan_error().or(path_error);
+        Ok(PyDataFrame::new(with_plan_error(
+            r.load(path.as_deref()),
+            error,
+        )))
     }
 
     /// Set the source name (for checkpoint stability). Mirrors `DataStreamReader.name`,
@@ -547,11 +692,13 @@ impl PyDataStreamReader {
     /// which raises an `AnalysisException` of `_LEGACY_ERROR_TEMP_1189` for a reader of a
     /// schema, before it sets the name in its string field, as `table` does.
     fn changes(&self, py: Python<'_>, tableName: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        if !self.inner.get_schema().is_empty() {
+        if !self.inner.get_schema().is_empty() || self.unencodable_schema.is_some() {
             return Err(crate::readwriter::changes_of_schema_error(py));
         }
-        let tableName = crate::str_argument(tableName)?;
-        Ok(PyDataFrame::new(self.state().changes(&tableName)))
+        let (name, error) = table_name_of(tableName)?;
+        let error = error.or_else(|| self.unencodable_options.get().error());
+        let r = self.with_decodable_keys(self.state());
+        Ok(PyDataFrame::new(with_plan_error(r.changes(&name), error)))
     }
 
     /// Load an XML streaming source. Mirrors `DataStreamReader.xml(...)`: set each named
@@ -584,11 +731,9 @@ impl PyDataStreamReader {
     ) -> PyResult<PyDataFrame> {
         crate::options::check_unexpected_keywords("DataStreamReader.xml", unexpected)?;
         let mut r = self.state();
-        r = set_stream_option_skip_none(r, "rowTag", rowTag)?;
-        if let Some(v) = schema {
-            r = apply_stream_schema(r, v)?;
-        }
-        r = set_stream_options_skip_none(
+        r = self.skip_none_options(r, &[("rowTag", rowTag)])?;
+        r = self.apply_optional_schema(r, schema)?;
+        r = self.skip_none_options(
             r,
             &[
                 ("excludeAttribute", excludeAttribute),
@@ -611,15 +756,21 @@ impl PyDataStreamReader {
             ],
         )?;
         // Like PySpark, the options stay on the reader, and the format of a str path.
-        let path = self.format_path(&r, "xml", path)?;
-        Ok(PyDataFrame::new(r.format("xml").load(Some(&path))))
+        let (path, path_error) = self.format_path(&r, "xml", path)?;
+        let error = self.plan_error().or(path_error);
+        Ok(PyDataFrame::new(with_plan_error(
+            r.format("xml").load(Some(&path)),
+            error,
+        )))
     }
 
     /// Read a table by name, which PySpark's `Read` plan sets in its string field as it is, as
     /// [`crate::str_argument`] converts it.
     fn table(&self, tableName: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        let df = self.state().table(&crate::str_argument(tableName)?);
-        Ok(PyDataFrame::new(df))
+        let (name, error) = table_name_of(tableName)?;
+        let error = error.or_else(|| self.unencodable_options.get().error());
+        let r = self.with_decodable_keys(self.state());
+        Ok(PyDataFrame::new(with_plan_error(r.table(&name), error)))
     }
 
     #[pyo3(signature = (path, schema=None, primitivesAsString=None, prefersDecimal=None, allowComments=None, allowUnquotedFieldNames=None, allowSingleQuotes=None, allowNumericLeadingZero=None, allowBackslashEscapingAnyCharacter=None, mode=None, columnNameOfCorruptRecord=None, dateFormat=None, timestampFormat=None, multiLine=None, allowUnquotedControlChars=None, lineSep=None, locale=None, dropFieldIfAllNull=None, encoding=None, pathGlobFilter=None, recursiveFileLookup=None, allowNonNumericNumbers=None, useUnsafeRow=None, **unexpected), text_signature = "($self, path, schema=None, primitivesAsString=None, prefersDecimal=None, allowComments=None, allowUnquotedFieldNames=None, allowSingleQuotes=None, allowNumericLeadingZero=None, allowBackslashEscapingAnyCharacter=None, mode=None, columnNameOfCorruptRecord=None, dateFormat=None, timestampFormat=None, multiLine=None, allowUnquotedControlChars=None, lineSep=None, locale=None, dropFieldIfAllNull=None, encoding=None, pathGlobFilter=None, recursiveFileLookup=None, allowNonNumericNumbers=None, useUnsafeRow=None)")]
@@ -653,10 +804,8 @@ impl PyDataStreamReader {
     ) -> PyResult<PyDataFrame> {
         crate::options::check_unexpected_keywords("DataStreamReader.json", unexpected)?;
         let mut r = self.state();
-        if let Some(v) = schema {
-            r = apply_stream_schema(r, v)?;
-        }
-        r = set_stream_options_skip_none(
+        r = self.apply_optional_schema(r, schema)?;
+        r = self.skip_none_options(
             r,
             &[
                 ("primitivesAsString", primitivesAsString),
@@ -686,8 +835,9 @@ impl PyDataStreamReader {
             ],
         )?;
         // Like PySpark, the options stay on the reader, and the format of a str path.
-        let path = self.format_path(&r, "json", path)?;
-        Ok(PyDataFrame::new(r.json(&path)))
+        let (path, path_error) = self.format_path(&r, "json", path)?;
+        let error = self.plan_error().or(path_error);
+        Ok(PyDataFrame::new(with_plan_error(r.json(&path), error)))
     }
 
     #[pyo3(signature = (path, mergeSchema=None, pathGlobFilter=None, recursiveFileLookup=None, datetimeRebaseMode=None, int96RebaseMode=None, **unexpected), text_signature = "($self, path, mergeSchema=None, pathGlobFilter=None, recursiveFileLookup=None, datetimeRebaseMode=None, int96RebaseMode=None)")]
@@ -704,7 +854,7 @@ impl PyDataStreamReader {
     ) -> PyResult<PyDataFrame> {
         crate::options::check_unexpected_keywords("DataStreamReader.parquet", unexpected)?;
         let mut r = self.state();
-        r = set_stream_options_skip_none(
+        r = self.skip_none_options(
             r,
             &[
                 ("mergeSchema", mergeSchema),
@@ -715,8 +865,9 @@ impl PyDataStreamReader {
             ],
         )?;
         // Like PySpark, the options stay on the reader, and the format of a str path.
-        let path = self.format_path(&r, "parquet", path)?;
-        Ok(PyDataFrame::new(r.parquet(&path)))
+        let (path, path_error) = self.format_path(&r, "parquet", path)?;
+        let error = self.plan_error().or(path_error);
+        Ok(PyDataFrame::new(with_plan_error(r.parquet(&path), error)))
     }
 
     #[pyo3(signature = (path, schema=None, sep=None, encoding=None, quote=None, escape=None, comment=None, header=None, inferSchema=None, ignoreLeadingWhiteSpace=None, ignoreTrailingWhiteSpace=None, nullValue=None, nanValue=None, positiveInf=None, negativeInf=None, dateFormat=None, timestampFormat=None, maxColumns=None, maxCharsPerColumn=None, maxMalformedLogPerPartition=None, mode=None, columnNameOfCorruptRecord=None, multiLine=None, charToEscapeQuoteEscaping=None, enforceSchema=None, emptyValue=None, locale=None, lineSep=None, pathGlobFilter=None, recursiveFileLookup=None, unescapedQuoteHandling=None, **unexpected), text_signature = "($self, path, schema=None, sep=None, encoding=None, quote=None, escape=None, comment=None, header=None, inferSchema=None, ignoreLeadingWhiteSpace=None, ignoreTrailingWhiteSpace=None, nullValue=None, nanValue=None, positiveInf=None, negativeInf=None, dateFormat=None, timestampFormat=None, maxColumns=None, maxCharsPerColumn=None, maxMalformedLogPerPartition=None, mode=None, columnNameOfCorruptRecord=None, multiLine=None, charToEscapeQuoteEscaping=None, enforceSchema=None, emptyValue=None, locale=None, lineSep=None, pathGlobFilter=None, recursiveFileLookup=None, unescapedQuoteHandling=None)")]
@@ -758,10 +909,8 @@ impl PyDataStreamReader {
     ) -> PyResult<PyDataFrame> {
         crate::options::check_unexpected_keywords("DataStreamReader.csv", unexpected)?;
         let mut r = self.state();
-        if let Some(v) = schema {
-            r = apply_stream_schema(r, v)?;
-        }
-        r = set_stream_options_skip_none(
+        r = self.apply_optional_schema(r, schema)?;
+        r = self.skip_none_options(
             r,
             &[
                 ("sep", sep),
@@ -796,8 +945,9 @@ impl PyDataStreamReader {
             ],
         )?;
         // Like PySpark, the options stay on the reader, and the format of a str path.
-        let path = self.format_path(&r, "csv", path)?;
-        Ok(PyDataFrame::new(r.csv(&path)))
+        let (path, path_error) = self.format_path(&r, "csv", path)?;
+        let error = self.plan_error().or(path_error);
+        Ok(PyDataFrame::new(with_plan_error(r.csv(&path), error)))
     }
 
     #[pyo3(signature = (path, mergeSchema=None, pathGlobFilter=None, recursiveFileLookup=None, **unexpected), text_signature = "($self, path, mergeSchema=None, pathGlobFilter=None, recursiveFileLookup=None)")]
@@ -812,7 +962,7 @@ impl PyDataStreamReader {
     ) -> PyResult<PyDataFrame> {
         crate::options::check_unexpected_keywords("DataStreamReader.orc", unexpected)?;
         let mut r = self.state();
-        r = set_stream_options_skip_none(
+        r = self.skip_none_options(
             r,
             &[
                 ("mergeSchema", mergeSchema),
@@ -821,8 +971,9 @@ impl PyDataStreamReader {
             ],
         )?;
         // Like PySpark, the options stay on the reader, and the format of a str path.
-        let path = self.format_path(&r, "orc", path)?;
-        Ok(PyDataFrame::new(r.orc(&path)))
+        let (path, path_error) = self.format_path(&r, "orc", path)?;
+        let error = self.plan_error().or(path_error);
+        Ok(PyDataFrame::new(with_plan_error(r.orc(&path), error)))
     }
 
     /// As PySpark's `wholetext=False`, an omitted `wholetext` sets `False`, also over an earlier
@@ -845,7 +996,7 @@ impl PyDataStreamReader {
         crate::options::check_unexpected_keywords("DataStreamReader.text", unexpected)?;
         let wholetext = wholetext.or_bool(py, false);
         let mut r = self.state();
-        r = set_stream_options_skip_none(
+        r = self.skip_none_options(
             r,
             &[
                 ("wholetext", Some(&wholetext)),
@@ -855,8 +1006,9 @@ impl PyDataStreamReader {
             ],
         )?;
         // Like PySpark, the options stay on the reader, and the format of a str path.
-        let path = self.format_path(&r, "text", path)?;
-        Ok(PyDataFrame::new(r.text(&path)))
+        let (path, path_error) = self.format_path(&r, "text", path)?;
+        let error = self.plan_error().or(path_error);
+        Ok(PyDataFrame::new(with_plan_error(r.text(&path), error)))
     }
 }
 
