@@ -282,6 +282,9 @@ def _live_glr(rec, est, model, df):
         rec("summary_residuals_" + kind, lambda kind=kind: s.residuals(kind))
     rec("summary_residuals_default", lambda: s.residuals())
     rec("summary_residuals_bad", lambda: s.residuals("nope"))
+    # The server's description of the summary, PySpark's `__repr__` of it (its `toString`).
+    rec("summary_repr", lambda: repr(s))
+    rec("summary_str", lambda: str(s))
     e = model.evaluate(df)
     rec("evaluate_type", lambda: type(e).__name__)
     rec("evaluate_deviance", lambda: e.deviance)

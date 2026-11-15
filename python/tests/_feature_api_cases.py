@@ -308,6 +308,8 @@ def _stage_cases(rec, stage, cls, name):
     rec("param_parents", lambda: [_s(p.parent) for p in stage.params])
     rec("explainParams", lambda: _s(stage.explainParams()))
     rec("repr", lambda: _s(repr(stage)))
+    # PySpark's `__str__` of the stage (RFormula's names its formula), else its `__repr__`.
+    rec("str", lambda: _s(str(stage)))
     rec("extract", lambda: _params(stage))
     rec("copy_extract", lambda: _params(stage.copy()))
     rec("copy_same_uid", lambda: stage.copy().uid == stage.uid)
@@ -508,6 +510,10 @@ def _model_live(name, spark, base):
     rec("model_no_attribute", lambda: model.fooBarBaz)
     rec("model_params", lambda: _params(model))
     rec("model_explainParams", lambda: _s(model.explainParams()))
+    # The server's description of the model (`JavaModel.__repr__`), and PySpark's `__str__` of
+    # the model (RFormulaModel's names its resolved formula), else its `__repr__`.
+    rec("model_repr", lambda: repr(model))
+    rec("model_str", lambda: str(model))
     _getters(model, rec)
     rec("transform", lambda: model.transform(df))
     if model.hasParam("outputCol"):
@@ -522,6 +528,7 @@ def _model_live(name, spark, base):
     rec("loaded_params", lambda: _params(loaded))
     rec("loaded_transform", lambda: loaded.transform(df))
     rec("loaded_model_class", lambda: type(loaded).__name__)
+    rec("loaded_str", lambda: str(loaded))
     _model_probes(name, cls, loaded, df, rec)
     shutil.rmtree(base, ignore_errors=True)
     return rec.out

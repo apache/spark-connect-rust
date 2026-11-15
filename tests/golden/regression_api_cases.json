@@ -2789,6 +2789,10 @@
     "ok",
     "3"
    ],
+   "summary_repr": [
+    "ok",
+    "'Coefficients:\\n    Feature Estimate Std Error  T Value P Value\\n(Intercept)   4.9550    0.1322  37.4779  0.0000\\n features_0   2.0019    0.0050 398.3440  0.0000\\n features_1   1.0088    0.0706  14.2808  0.0000\\n\\n(Dispersion parameter for gaussian family taken to be 0.1346)\\nNull deviance: 21418.4750 on 37 degrees of freedom\\nResidual deviance: 4.9791 on 37 degrees of freedom\\nAIC: 38.1702'"
+   ],
    "summary_residualDegreeOfFreedom": [
     "ok",
     "37"
@@ -3054,6 +3058,10 @@
    "summary_solver": [
     "ok",
     "'irls'"
+   ],
+   "summary_str": [
+    "ok",
+    "'Coefficients:\\n    Feature Estimate Std Error  T Value P Value\\n(Intercept)   4.9550    0.1322  37.4779  0.0000\\n features_0   2.0019    0.0050 398.3440  0.0000\\n features_1   1.0088    0.0706  14.2808  0.0000\\n\\n(Dispersion parameter for gaussian family taken to be 0.1346)\\nNull deviance: 21418.4750 on 37 degrees of freedom\\nResidual deviance: 4.9791 on 37 degrees of freedom\\nAIC: 38.1702'"
    ],
    "summary_tValues": [
     "ok",
