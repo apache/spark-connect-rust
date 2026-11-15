@@ -517,13 +517,21 @@ fn split_dataframe(dataset: &Bound<'_, PyAny>) -> PyResult<DataFrame> {
     )))
 }
 
-/// The seed of a split, `F.rand(seed)`: the int of the param, or a random seed of None.
+/// The seed of a split, `F.rand(seed)`: the int of the param, or a random seed of None. PySpark's
+/// `F.rand` sends the seed as a literal, so an int beyond a long (which the param takes) raises the
+/// `VALUE_NOT_BETWEEN` of its literal at the fit, before any request.
 fn split_seed<T: Validator>(slf: &Bound<'_, T>) -> PyResult<Option<i64>> {
     let seed = slf.as_any().call_method1("getOrDefault", ("seed",))?;
     if seed.is_none() {
         return Ok(None);
     }
-    Ok(Some(seed.extract()?))
+    match seed.extract::<i64>() {
+        Ok(seed) => Ok(Some(seed)),
+        Err(_) if seed.is_instance_of::<pyo3::types::PyInt>() => {
+            Err(crate::functions::value_not_between(slf.py()))
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// The Python DataFrame of `df`.
