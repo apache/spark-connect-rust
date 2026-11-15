@@ -14,6 +14,7 @@ use prost::Message;
 use serde_json::Value as Json;
 use spark_connect::ml::{fetch, CountVectorizerModel, Imputer, MlTarget, StringIndexerModel};
 use spark_connect_proto as proto;
+use spark_connect_proto::ml_command_result::ml_operator_info::Type;
 use spark_connect_proto::ml_relation::MlType;
 
 const MODELS: &str = include_str!("../../../tests/golden/classification_models.json");
@@ -168,6 +169,53 @@ fn a_nan_param_of_a_fit_matches_its_golden() {
         .set_missing_value(f64::NAN);
     imputer.fit(&df).unwrap();
     assert_commands(&server, fit, "Imputer fit");
+}
+
+#[test]
+fn a_dropped_model_sends_a_delete_that_the_replay_records() {
+    // The client releases a fitted model in the background when the model is dropped. The delete
+    // is no golden command: the replay records it apart, with the id of the model's golden
+    // result, and it is not among the commands that the checks take.
+    let features = fixture(FEATURE_MODELS);
+    let fit = &features["fits"]["Imputer"]["fit"];
+    let result = proto::MlCommandResult::decode(
+        STANDARD
+            .decode(fit["results"][0].as_str().unwrap())
+            .unwrap()
+            .as_slice(),
+    )
+    .unwrap();
+    let Some(proto::ml_command_result::ResultType::OperatorInfo(info)) = result.result_type else {
+        panic!("the golden fit result is not an operator info");
+    };
+    let Some(Type::ObjRef(reference)) = info.r#type else {
+        panic!("the golden fit result is not a reference");
+    };
+    let (server, session) = ReplayServer::start(&[fit]);
+    let df = session.range(1).unwrap();
+    let model = Imputer::new()
+        .set_input_col("missing")
+        .set_output_col("out")
+        .set_missing_value(f64::NAN)
+        .fit(&df)
+        .unwrap();
+    assert_commands(&server, fit, "Imputer fit");
+    assert!(server.take_deletes().is_empty(), "a delete before the drop");
+
+    drop(model);
+    let started = std::time::Instant::now();
+    let mut deletes = server.take_deletes();
+    while deletes.is_empty() && started.elapsed() < std::time::Duration::from_secs(10) {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        deletes = server.take_deletes();
+    }
+    assert_eq!(deletes.len(), 1, "the deletes of the dropped model");
+    let ids: Vec<&str> = deletes[0].obj_refs.iter().map(|r| r.id.as_str()).collect();
+    assert_eq!(ids, [reference.id.as_str()]);
+    assert!(
+        server.pending_requests().is_empty(),
+        "a delete is a command"
+    );
 }
 
 #[test]

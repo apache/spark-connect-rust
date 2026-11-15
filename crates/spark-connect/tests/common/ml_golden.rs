@@ -305,6 +305,9 @@ struct Replay {
     exchanges: Vec<Exchange>,
     /// The ML commands sent since they were last taken, as they were sent.
     received: Vec<proto::MlCommand>,
+    /// The deletes sent since they were last taken. A delete is not a golden command: the client
+    /// sends it when a released model is dropped, and it is answered with no result.
+    deleted: Vec<proto::ml_command::Delete>,
 }
 
 type Shared = Arc<Mutex<Replay>>;
@@ -351,9 +354,22 @@ impl ReplayServer {
     }
 
     /// The ML commands that the client sent since they were last taken, in order, as they were
-    /// sent. Taking them clears them. A delete of a released object is not recorded.
+    /// sent. Taking them clears them. The deletes are not among them: see
+    /// [`ReplayServer::take_deletes`].
     pub fn take_requests(&self) -> Vec<proto::MlCommand> {
         std::mem::take(&mut self.0.lock().unwrap().received)
+    }
+
+    /// The ML commands sent since they were last taken, as [`ReplayServer::take_requests`] takes
+    /// them, but left in place: a check can see the commands before it takes them.
+    pub fn pending_requests(&self) -> Vec<proto::MlCommand> {
+        self.0.lock().unwrap().received.clone()
+    }
+
+    /// The deletes sent since they were last taken, in order. The client sends a delete when a
+    /// model that it holds is dropped, in the background: a test that drops a model waits for it.
+    pub fn take_deletes(&self) -> Vec<proto::ml_command::Delete> {
+        std::mem::take(&mut self.0.lock().unwrap().deleted)
     }
 }
 
@@ -744,14 +760,16 @@ fn decode_result(b64: &Json) -> proto::MlCommandResult {
 }
 
 /// Answers an ML command from the golden: the first unused exchange whose normalized command
-/// equals the command's, normalized on its own, or else the first that equals it. A delete of a
-/// released object is not part of the golden: it completes with no result, and is not recorded.
+/// equals the command's, normalized on its own, or else the first that equals it. A delete is not
+/// part of the golden: it is recorded apart (see [`ReplayServer::take_deletes`]) and completes
+/// with no result.
 fn answer(
     shared: &Shared,
     command: proto::MlCommand,
 ) -> std::result::Result<Option<proto::MlCommandResult>, Status> {
     let mut replay = shared.lock().unwrap();
-    if matches!(command.command, Some(proto::ml_command::Command::Delete(_))) {
+    if let Some(proto::ml_command::Command::Delete(delete)) = command.command {
+        replay.deleted.push(delete);
         return Ok(None);
     }
     replay.received.push(command.clone());

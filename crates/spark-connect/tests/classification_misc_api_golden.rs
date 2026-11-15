@@ -176,10 +176,14 @@ struct Checker<'a> {
 }
 
 impl<'a> Checker<'a> {
-    /// A check of `members`. The commands received so far, of the setup of the test's objects, are
-    /// discarded.
+    /// A check of `members`. Each check takes the commands of its own call, so a command that is
+    /// still pending when a check starts was sent by a call that no check has looked at.
     fn new(server: &'a ReplayServer, members: &Value) -> Self {
-        server.take_requests();
+        let pending = server.pending_requests();
+        assert!(
+            pending.is_empty(),
+            "the commands of an earlier call are not checked: {pending:?}"
+        );
         Self {
             server,
             members: members.clone(),
@@ -220,7 +224,7 @@ impl<'a> Checker<'a> {
             Ok(_) => panic!("{label}: the call succeeded"),
             Err(error) => error.to_string(),
         };
-        self.server.take_requests();
+        assert_commands(self.server, &entry, label);
         assert!(
             error.contains(&expected),
             "{label}: {error:?} does not carry {expected:?}"
@@ -396,6 +400,7 @@ fn naive_bayes_load_and_save_match_official_pyspark() {
         // Load: a read of the saved model, whose members are the loaded model's.
         let (server, session) = ReplayServer::start(&[saved]);
         let loaded = NaiveBayesModel::load(&session, "<path>").unwrap();
+        assert_commands(&server, &saved["load"], &format!("{key}: load"));
         let mut checker = Checker::new(&server, &saved["members"]["members"]);
         checker.value("predict-dense", || loaded.predict(&dense(&[1.0, 0.0])));
         checker.finish(&["repr()", "str()", "transform"]);
@@ -462,6 +467,7 @@ fn multilayer_perceptron_members_and_summaries_match_official_pyspark() {
     checker.finish(&SUMMARY_SKIPPED);
 
     let summary = model.evaluate(&session.range(3).unwrap()).unwrap();
+    assert_commands(&server, &entry["members"]["evaluate"], "evaluate");
     let mut checker = Checker::new(&server, &evaluate["members"]);
     classification_summary_members(&mut checker, &summary);
     checker.finish(&SUMMARY_SKIPPED);
@@ -476,6 +482,7 @@ fn multilayer_perceptron_load_and_save_match_official_pyspark() {
 
     let (server, session) = ReplayServer::start(&[saved]);
     let loaded = MultilayerPerceptronClassificationModel::load(&session, "<path>").unwrap();
+    assert_commands(&server, &saved["load"], &format!("{key}: load"));
     let mut checker = Checker::new(&server, &saved["members"]["members"]);
     checker.value("predict-dense", || loaded.predict(&dense(&[0.5, 1.5])));
     checker.finish(&["repr()", "str()", "transform"]);
@@ -545,6 +552,7 @@ fn fm_members_and_summaries_match_official_pyspark() {
     checker.finish(&SUMMARY_SKIPPED);
 
     let summary = model.evaluate(&session.range(3).unwrap()).unwrap();
+    assert_commands(&server, &entry["members"]["evaluate"], "evaluate");
     let mut checker = Checker::new(&server, &evaluate["members"]);
     classification_summary_members(&mut checker, &summary);
     binary_summary_members(&mut checker, &summary);
@@ -560,6 +568,7 @@ fn fm_load_and_save_match_official_pyspark() {
 
     let (server, session) = ReplayServer::start(&[saved]);
     let loaded = FMClassificationModel::load(&session, "<path>").unwrap();
+    assert_commands(&server, &saved["load"], &format!("{key}: load"));
     let mut checker = Checker::new(&server, &saved["members"]["members"]);
     checker.value("predict-dense", || loaded.predict(&dense(&[0.5, 1.5])));
     checker.finish(&["repr()", "str()", "transform"]);
