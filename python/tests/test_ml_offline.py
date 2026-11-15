@@ -1596,6 +1596,40 @@ def test_ml_connect_unsendable_ints_none_and_uids_as_pyspark(ml_mock):
         assert re.fullmatch(name + "_[0-9a-f]{12}", operator.uid), operator.uid
 
 
+def test_ml_connect_validators_of_a_seed_beyond_a_long_raise_value_not_between_as_pyspark(
+    ml_mock,
+):
+    # As PySpark: the seed param takes an int beyond a long, and the fit raises the
+    # VALUE_NOT_BETWEEN of `F.rand(seed)`'s literal (CrossValidator's `_kFold`, and
+    # TrainValidationSplit's `_fit`), before any request.
+    from pyspark.ml.connect.classification import LogisticRegression
+    from pyspark.ml.connect.evaluation import BinaryClassificationEvaluator
+    from pyspark.ml.connect.tuning import CrossValidator, TrainValidationSplit
+    from pyspark.ml.tuning import ParamGridBuilder
+
+    spark, service = ml_mock
+    for seed in (2**63, -(2**63) - 1, 2**64):
+        for cls, kwargs in [(CrossValidator, {"numFolds": 2}), (TrainValidationSplit, {})]:
+            lr = LogisticRegression(maxIter=1)
+            validator = cls(
+                estimator=lr,
+                estimatorParamMaps=ParamGridBuilder().addGrid(lr.regParam, [0.1]).build(),
+                evaluator=BinaryClassificationEvaluator(),
+                seed=seed,
+                **kwargs,
+            )
+            assert validator.getSeed() == seed
+            sent = _requests_but_deletes(service)
+            with pytest.raises(PySparkValueError) as error:
+                validator.fit(spark.range(1))
+            assert error.value.getCondition() == "VALUE_NOT_BETWEEN", (cls, seed)
+            assert str(error.value) == (
+                "[VALUE_NOT_BETWEEN] Value for `value` must be between -9223372036854775808 and "
+                "32767."
+            )
+            assert _requests_but_deletes(service) == sent, (cls, seed)
+
+
 def test_ml_connect_setters_run_while_a_fit_or_an_evaluate_waits_as_pyspark(ml_mock):
     # As PySpark, whose fit and evaluate hold no lock of the estimator or the evaluator: a
     # setter that another thread calls while a fit or an evaluate of the same native object
