@@ -11,8 +11,9 @@ use spark_connect_core::error::SparkError;
 use crate::dataframe::PyDataFrame;
 use crate::errors::{not_expected_type, ResultExt};
 use crate::options::{
-    check_keyword_keys, coerce_option_value, set_option_skip_none, set_options_skip_none,
-    set_reader_kwargs_unset_none, set_reader_option_unset_none, DefaultedOption,
+    check_keyword_keys, option_key, put_option_skip_none, put_shared_option, reader_option_text,
+    skip_none_shared, utf32le_of, utf32le_text, DefaultedOption, OptionKey, OptionText,
+    UnencodableOptions,
 };
 
 /// Python wrapper for the batch DataFrameReader.
@@ -35,6 +36,12 @@ pub struct PyDataFrameReader {
     /// The format of `format` when it is not a format of the core reader, which PySpark keeps as it
     /// is ([`UnsentFormat`]). Any other format replaces it.
     unsent_format: Option<UnsentFormat>,
+    /// The options that UTF-8 cannot encode, which the copies of this reader share, as they share
+    /// `options` ([`UnencodableOptions`]).
+    unencodable_options: std::sync::Arc<crate::dataframe::WriterState<UnencodableOptions>>,
+    /// The UTF-32LE bytes of the schema, when it is a str that UTF-8 cannot encode, which the core
+    /// reader leaves unset.
+    unencodable_schema: Option<Vec<u8>>,
 }
 
 impl PyDataFrameReader {
@@ -44,6 +51,10 @@ impl PyDataFrameReader {
             inner: without_options(reader, &options),
             options: std::sync::Arc::new(crate::dataframe::WriterState::new(options)),
             unsent_format: None,
+            unencodable_options: std::sync::Arc::new(crate::dataframe::WriterState::new(
+                UnencodableOptions::default(),
+            )),
+            unencodable_schema: None,
         }
     }
 
@@ -68,6 +79,130 @@ impl PyDataFrameReader {
         self.unsent_format = None;
     }
 
+    /// Set the option `key` to `value`, or unset it when None, on `r`, as PySpark's `option`:
+    /// the entries that UTF-8 cannot encode are kept on this reader, and `r` takes the others.
+    fn put_option(
+        &self,
+        r: DataFrameReader,
+        key: &OptionKey,
+        value: Option<&OptionText>,
+    ) -> DataFrameReader {
+        put_shared_option(r, &self.unencodable_options, key, value)
+    }
+
+    /// `r` with the options of `options` set, **skipping** those that are None, as
+    /// [`crate::options::set_options_skip_none`] does, and keeping the entries that UTF-8 cannot
+    /// encode on this reader.
+    fn skip_none_options(
+        &self,
+        r: DataFrameReader,
+        options: &[(&str, Option<&Bound<'_, PyAny>>)],
+    ) -> PyResult<DataFrameReader> {
+        skip_none_shared(r, &self.unencodable_options, options, reader_option_text)
+    }
+
+    /// `r` with the option `key` set to `value`, **skipping** a value that is None, as
+    /// [`Self::skip_none_options`] does for a key that is not a literal.
+    fn skip_none_entry(
+        &self,
+        r: DataFrameReader,
+        key: &OptionKey,
+        value: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<DataFrameReader> {
+        let mut unencodable = self.unencodable_options.get();
+        let r = put_option_skip_none(r, &mut unencodable, key, value, reader_option_text)?;
+        self.unencodable_options.set(unencodable);
+        Ok(r)
+    }
+
+    /// `r` with the option `name` unset when `value` is None, and set otherwise, as PySpark's
+    /// `options(name=value)` does.
+    fn unset_option_value(
+        &self,
+        r: DataFrameReader,
+        name: &str,
+        value: &Bound<'_, PyAny>,
+    ) -> PyResult<DataFrameReader> {
+        let value = reader_option_text(value)?;
+        let key = OptionKey::Text(OptionText::literal(name));
+        Ok(self.put_option(r, &key, value.as_ref()))
+    }
+
+    /// `r` with the `**options` of a call set, **unsetting** those that are None, as PySpark's
+    /// `options` and `load` do.
+    fn unset_kwargs(
+        &self,
+        mut r: DataFrameReader,
+        options: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<DataFrameReader> {
+        check_keyword_keys(options)?;
+        for (key, value) in options.into_iter().flat_map(|options| options.iter()) {
+            let key = option_key(&key)?;
+            let value = reader_option_text(&value)?;
+            r = self.put_option(r, &key, value.as_ref());
+        }
+        Ok(r)
+    }
+
+    /// `r` with the schema `schema`, as [`Self::set_schema`] sets it on this reader.
+    fn apply_optional_schema(
+        &mut self,
+        r: DataFrameReader,
+        schema: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<DataFrameReader> {
+        match schema {
+            Some(schema) => self.set_schema(r, schema),
+            None => Ok(r),
+        }
+    }
+
+    /// `r` with the schema `schema`, which this reader keeps: a str that UTF-8 cannot encode is
+    /// kept as its bytes, and fails the plan, as PySpark keeps it until the plan is built.
+    fn set_schema(
+        &mut self,
+        r: DataFrameReader,
+        schema: &Bound<'_, PyAny>,
+    ) -> PyResult<DataFrameReader> {
+        match reader_schema(schema)? {
+            Ok(text) => {
+                self.unencodable_schema = None;
+                Ok(r.schema(text))
+            }
+            Err(utf32le) => {
+                self.unencodable_schema = Some(utf32le);
+                Ok(r.schema(String::new()))
+            }
+        }
+    }
+
+    /// Fail a `DataSource` of this reader, which PySpark builds at its call and asserts that each
+    /// key of its options is a str, with the bare `AssertionError` of that assertion.
+    fn check_data_source(&self) -> PyResult<()> {
+        if self.unencodable_options.get().has_object_key() {
+            return Err(pyo3::exceptions::PyAssertionError::new_err(()));
+        }
+        Ok(())
+    }
+
+    /// The reader `r` with the options of the bytes keys that are UTF-8, which PySpark's `Read`
+    /// plan sends as their text.
+    fn with_decodable_keys(&self, r: DataFrameReader) -> DataFrameReader {
+        self.unencodable_options
+            .get()
+            .decodable_pairs()
+            .into_iter()
+            .fold(r, |r, (key, value)| r.option(&key, &value))
+    }
+
+    /// The error of the plan of this reader, as [`reader_plan_error`] gives it.
+    fn plan_error(&self) -> Option<SparkError> {
+        reader_plan_error(
+            self.unsent_format.as_ref(),
+            self.unencodable_schema.as_deref(),
+            &self.unencodable_options.get(),
+        )
+    }
+
     /// The DataFrame of `r`, this reader with the options of a call of `json`, `csv` or `xml`
     /// of `path`, as PySpark's: a DataFrame of strings, which it parses as `parse_format`,
     /// keeping the schema and the options on this reader but not the format, or else a path
@@ -85,23 +220,22 @@ impl PyDataFrameReader {
         // As PySpark's, this sets the format of the reader, which replaces an unsent one.
         self.unsent_format = None;
         if let Ok(df) = path.extract::<PyRef<'_, PyDataFrame>>() {
-            let r = apply_optional_schema(r, schema)?;
-            let parsed = r
-                .clone()
-                .parse(parse_format, &df.dataframe)
-                .map(PyDataFrame::new)
-                .to_pyerr()?;
+            let r = self.apply_optional_schema(r, schema)?;
+            let parsed = r.clone().parse(parse_format, &df.dataframe).to_pyerr()?;
+            let parsed = with_plan_error(parsed, self.plan_error());
             self.set_state(r);
-            return Ok(parsed);
+            return Ok(PyDataFrame::new(parsed));
         }
         if path.is_instance_of::<PyString>()
             || path.is_instance_of::<PyList>()
             || parse_format == spark_connect::plan::ParseFormat::Csv
         {
-            let r = apply_optional_schema(r, schema)?;
+            let r = self.apply_optional_schema(r, schema)?;
             self.commit(&r, format);
+            self.check_data_source()?;
             let (paths, error) = paths_of(path)?;
             let df = r.format(format).load_paths(paths);
+            let error = self.plan_error().or(error);
             return Ok(PyDataFrame::new(with_plan_error(df, error)));
         }
         // PySpark's options are set before the path is checked, so they stay on this reader.
@@ -114,21 +248,21 @@ impl PyDataFrameReader {
 /// keeps the object as it is. Another object fails the assertion of its `DataSource` at `load`.
 /// A str that UTF-8 cannot encode, such as one with a lone surrogate, fails the plan that `load`
 /// builds, with the error of its encoding, when PySpark sends the plan.
-struct UnsentFormat {
-    object: Py<PyAny>,
+pub(crate) struct UnsentFormat {
+    pub(crate) object: Py<PyAny>,
     /// The error of the plan, for a str that UTF-8 cannot encode, and None for any other object.
-    unencodable: Option<SparkError>,
+    pub(crate) unencodable: Option<SparkError>,
 }
 
 impl UnsentFormat {
-    fn of(source: &Bound<'_, PyAny>) -> Self {
+    pub(crate) fn of(source: &Bound<'_, PyAny>) -> Self {
         UnsentFormat {
             object: source.clone().unbind(),
             unencodable: unencodable_str(source),
         }
     }
 
-    fn clone_ref(&self, py: Python<'_>) -> Self {
+    pub(crate) fn clone_ref(&self, py: Python<'_>) -> Self {
         UnsentFormat {
             object: self.object.clone_ref(py),
             unencodable: self.unencodable.clone(),
@@ -152,11 +286,72 @@ fn unencodable_str(text: &Bound<'_, PyAny>) -> Option<SparkError> {
 
 /// The DataFrame `df`, which fails each request with `error` when it is one: the error of the plan
 /// that PySpark raises when it sends the plan of a read, whose arguments it converts there.
-fn with_plan_error(df: DataFrame, error: Option<SparkError>) -> DataFrame {
+pub(crate) fn with_plan_error(df: DataFrame, error: Option<SparkError>) -> DataFrame {
     match error {
         Some(error) => df.unbuildable(error),
         None => df,
     }
+}
+
+/// The schema and the options that a reader keeps for UTF-8 cannot encode, as its reduce gives
+/// them back: the schema as a str, or None, and the entries of the options as pairs of strs. A
+/// reader of them is set with its public `schema` and `option`, which keep them the same way.
+pub(crate) fn unencodable_state<'py>(
+    py: Python<'py>,
+    schema: Option<&[u8]>,
+    options: &UnencodableOptions,
+) -> PyResult<Bound<'py, PyAny>> {
+    let schema = match schema {
+        Some(utf32le) => utf32le_text(py, utf32le)?,
+        None => py.None().into_bound(py),
+    };
+    let entries = PyList::empty(py);
+    for entry in options.to_objects(py)? {
+        entries.append(entry)?;
+    }
+    Ok(pyo3::types::PyTuple::new(py, [schema, entries.into_any()])?.into_any())
+}
+
+/// The schema and the entries of the options that a reader keeps for UTF-8 cannot encode, as
+/// Python objects: the schema, or None, and the pairs of the key and the value of each entry.
+pub(crate) type UnencodableState<'py> = (
+    Option<Bound<'py, PyAny>>,
+    Vec<(Bound<'py, PyAny>, Bound<'py, PyAny>)>,
+);
+
+/// The schema and the entries of the options of an `unencodable_state`, as their Python objects.
+pub(crate) fn unencodable_entries<'py>(
+    state: &Bound<'py, PyAny>,
+) -> PyResult<UnencodableState<'py>> {
+    state.extract()
+}
+
+/// The error of the plan of a reader, which PySpark's `DataSource` builds from its format, its
+/// schema and its options, in that order: the first of them that UTF-8 cannot encode. `unsent` is
+/// the format that the reader keeps, `schema` the UTF-32LE bytes of the schema, if it is one.
+pub(crate) fn reader_plan_error(
+    unsent: Option<&UnsentFormat>,
+    schema: Option<&[u8]>,
+    options: &UnencodableOptions,
+) -> Option<SparkError> {
+    unsent
+        .and_then(|format| format.unencodable.clone())
+        .or_else(|| schema.map(SparkError::unencodable_str))
+        .or_else(|| options.error())
+}
+
+/// The name of a table, as PySpark's `Read` plan sets it in its string field: a str that UTF-8
+/// cannot encode is kept with the error of that plan, and the name is empty. Another object is
+/// converted as [`crate::str_argument`] converts it.
+pub(crate) fn table_name_of(name: &Bound<'_, PyAny>) -> PyResult<(String, Option<SparkError>)> {
+    if name.is_instance_of::<PyString>() {
+        if let Ok(text) = name.extract::<String>() {
+            return Ok((text, None));
+        }
+        let error = SparkError::unencodable_str(&utf32le_of(name)?);
+        return Ok((String::new(), Some(error)));
+    }
+    Ok((crate::str_argument(name)?, None))
 }
 
 /// The reader without the options of `options`, which the reader keeps apart from its core state.
@@ -218,21 +413,28 @@ fn path_list(paths: &[Bound<'_, PyAny>]) -> PyResult<(Vec<String>, Option<SparkE
 }
 
 /// The `predicates` of `jdbc`, which PySpark's `DataSource` plan asserts to be a list, and each of
-/// its items a str: a bare `AssertionError` for a tuple, a str, or an item that is not a str.
-fn jdbc_predicates(predicates: &Bound<'_, PyAny>) -> PyResult<Vec<String>> {
-    let Ok(predicates) = predicates.cast::<pyo3::types::PyList>() else {
+/// its items a str: a bare `AssertionError` for a tuple, a str, or an item that is not a str. The
+/// error of the plan is that of the first str that UTF-8 cannot encode, which is kept as an empty
+/// predicate.
+fn jdbc_predicates(predicates: &Bound<'_, PyAny>) -> PyResult<(Vec<String>, Option<SparkError>)> {
+    let Ok(predicates) = predicates.cast::<PyList>() else {
         return Err(pyo3::exceptions::PyAssertionError::new_err(()));
     };
-    predicates
-        .iter()
-        .map(|predicate| {
-            if predicate.is_instance_of::<pyo3::types::PyString>() {
-                crate::str_argument(&predicate)
-            } else {
-                Err(pyo3::exceptions::PyAssertionError::new_err(()))
+    let mut texts = Vec::new();
+    let mut error = None;
+    for predicate in predicates.iter() {
+        if !predicate.is_instance_of::<PyString>() {
+            return Err(pyo3::exceptions::PyAssertionError::new_err(()));
+        }
+        match predicate.extract::<String>() {
+            Ok(text) => texts.push(text),
+            Err(_) => {
+                texts.push(String::new());
+                error = error.or_else(|| unencodable_str(&predicate));
             }
-        })
-        .collect()
+        }
+    }
+    Ok((texts, error))
 }
 
 /// The path of a writer, as PySpark sets it in its protobuf string field, which the default
@@ -316,12 +518,21 @@ pub(crate) fn unsent_save_mode(mode: &Bound<'_, PyAny>) -> PyResult<String> {
     Err(PyErr::from_value(error))
 }
 
-/// The columns of `df.write.bucketBy(numBuckets, col, *cols)` and `sortBy(col, *cols)`, as
-/// PySpark's: column names, or a list or tuple of them alone.
-pub(crate) fn writer_columns(
+/// The column names of a bucketing or sorting argument, which keeps the first column that does not
+/// convert, as [`writer_columns_kept`] does.
+pub(crate) fn writer_columns_kept_of(
     col: &Bound<'_, PyAny>,
     cols: &[Bound<'_, PyAny>],
-) -> PyResult<Vec<String>> {
+) -> PyResult<(Vec<String>, Option<Py<PyAny>>)> {
+    Ok(writer_columns_kept(&writer_columns_items(col, cols)?))
+}
+
+/// The items of a bucketing or sorting argument: `col` and each of `cols` are checked to be strs,
+/// and a list or a tuple of `col` takes the others.
+fn writer_columns_items<'py>(
+    col: &Bound<'py, PyAny>,
+    cols: &[Bound<'py, PyAny>],
+) -> PyResult<Vec<Bound<'py, PyAny>>> {
     let sequence =
         col.is_instance_of::<pyo3::types::PyList>() || col.is_instance_of::<pyo3::types::PyTuple>();
     let (col, cols) = if sequence {
@@ -350,10 +561,7 @@ pub(crate) fn writer_columns(
     if !col.is_instance_of::<pyo3::types::PyString>() {
         return Err(not_expected_type(&col, "col", "list[str]"));
     }
-    std::iter::once(&col)
-        .chain(cols.iter())
-        .map(|c| c.extract())
-        .collect()
+    Ok(std::iter::once(col).chain(cols).collect())
 }
 
 /// The int32 field of the number of buckets, which PySpark sets at the write.
@@ -398,16 +606,20 @@ pub(crate) fn check_refused_bucket_count(num_buckets: &Bound<'_, PyAny>) -> PyRe
 
 /// A reader `schema` as pyspark's `DataFrameReader.schema` and `DataStreamReader.schema`
 /// send it: a StructType as its JSON, which keeps field metadata, and a string as is, for
-/// the server to parse. Anything else raises `NOT_EXPECTED_TYPE`.
-pub(crate) fn reader_schema(schema: &Bound<'_, PyAny>) -> PyResult<String> {
-    if let Ok(schema) = schema.extract::<String>() {
-        return Ok(schema);
+/// the server to parse. A str that UTF-8 cannot encode is the `Err` of its UTF-32LE bytes, whose
+/// plan fails. Anything else raises `NOT_EXPECTED_TYPE`.
+pub(crate) fn reader_schema(schema: &Bound<'_, PyAny>) -> PyResult<Result<String, Vec<u8>>> {
+    if schema.is_instance_of::<PyString>() {
+        return Ok(match schema.extract::<String>() {
+            Ok(text) => Ok(text),
+            Err(_) => Err(utf32le_of(schema)?),
+        });
     }
     if let Ok(st) = schema.extract::<PyRef<crate::types::PyStructType>>() {
-        return Ok(spark_connect::types::DataType::Struct {
+        return Ok(Ok(spark_connect::types::DataType::Struct {
             fields: st.current_fields(schema.py())?,
         }
-        .json());
+        .json()));
     }
     let arg_type = schema.get_type().name()?.to_string();
     Err(crate::column::raise_pyspark(
@@ -445,22 +657,6 @@ pub(crate) fn changes_of_schema_error(py: Python<'_>) -> PyErr {
     }
 }
 
-/// Apply the `schema` argument of a format method, as pyspark does through `schema()`.
-fn apply_reader_schema(r: DataFrameReader, v: &Bound<'_, PyAny>) -> PyResult<DataFrameReader> {
-    Ok(r.schema(reader_schema(v)?))
-}
-
-/// Apply the `schema` argument of a format method, if there is one.
-fn apply_optional_schema(
-    r: DataFrameReader,
-    schema: Option<&Bound<'_, PyAny>>,
-) -> PyResult<DataFrameReader> {
-    match schema {
-        Some(v) => apply_reader_schema(r, v),
-        None => Ok(r),
-    }
-}
-
 #[pymethods]
 impl PyDataFrameReader {
     /// The shallow copy of a reader, as PySpark's `copy.copy`: the copy shares the options of
@@ -474,6 +670,8 @@ impl PyDataFrameReader {
                 .unsent_format
                 .as_ref()
                 .map(|format| format.clone_ref(py)),
+            unencodable_options: std::sync::Arc::clone(&self.unencodable_options),
+            unencodable_schema: self.unencodable_schema.clone(),
         }
     }
 
@@ -483,6 +681,11 @@ impl PyDataFrameReader {
         use crate::reduce::{optional_object, state_reduce, str_dict};
 
         let session = crate::session::session_object(py, &self.inner.spark_session())?;
+        let unencodable = unencodable_state(
+            py,
+            self.unencodable_schema.as_deref(),
+            &self.unencodable_options.get(),
+        )?;
         let args = pyo3::types::PyTuple::new(
             py,
             [
@@ -491,13 +694,15 @@ impl PyDataFrameReader {
                 self.inner.get_schema().into_pyobject(py)?.into_any(),
                 str_dict(py, &self.options.get())?.into_any(),
                 optional_object(py, self.unsent_format.as_ref().map(|f| &f.object)),
+                unencodable,
             ],
         )?;
         state_reduce(py, "reader_reduce", args)
     }
 
     /// A reader of its state, as `__reduce__` gives it: of the session `session`, the format,
-    /// the schema, the options and the format that is kept (`unsent`).
+    /// the schema, the options, the format that is kept (`unsent`), and the schema and the options
+    /// that UTF-8 cannot encode (`unencodable`, as [`unencodable_state`] gives them).
     #[staticmethod]
     fn _of_state(
         py: Python<'_>,
@@ -506,7 +711,8 @@ impl PyDataFrameReader {
         schema: String,
         options: HashMap<String, String>,
         unsent: Option<Py<PyAny>>,
-    ) -> PyDataFrameReader {
+        unencodable: Py<PyAny>,
+    ) -> PyResult<PyDataFrameReader> {
         let mut reader = session.borrow(py).session.read();
         if let Some(format) = format {
             reader = reader.format(&format);
@@ -514,10 +720,22 @@ impl PyDataFrameReader {
         if !schema.is_empty() {
             reader = reader.schema(schema);
         }
-        PyDataFrameReader {
+        let mut result = PyDataFrameReader {
             unsent_format: unsent.map(|object| UnsentFormat::of(object.bind(py))),
             ..PyDataFrameReader::new(reader.options(options))
+        };
+        let (schema, entries) = unencodable_entries(unencodable.bind(py))?;
+        if let Some(schema) = schema {
+            let state = result.set_schema(result.state(), &schema)?;
+            result.set_state(state);
         }
+        for (key, value) in entries {
+            let key = option_key(&key)?;
+            let value = reader_option_text(&value)?;
+            let state = result.put_option(result.state(), &key, value.as_ref());
+            result.set_state(state);
+        }
+        Ok(result)
     }
 
     /// Set the schema, if any, and the options of `options` that are not None, through its own
@@ -549,8 +767,8 @@ impl PyDataFrameReader {
         mut slf: PyRefMut<'py, Self>,
         schema: &Bound<'_, PyAny>,
     ) -> PyResult<PyRefMut<'py, Self>> {
-        let schema = reader_schema(schema)?;
-        let state = slf.state().schema(schema);
+        let state = slf.state();
+        let state = slf.set_schema(state, schema)?;
         slf.set_state(state);
         Ok(slf)
     }
@@ -565,16 +783,16 @@ impl PyDataFrameReader {
         value: &Bound<'_, PyAny>,
     ) -> PyResult<PyRefMut<'py, Self>> {
         if value.is_none() {
-            key.hash()?;
-            // Only a str that UTF-8 encodes is the key of an option that is set.
-            if let Ok(key) = key.extract::<String>() {
-                let state = slf.state().unset_option(&key);
-                slf.set_state(state);
-            }
+            // As PySpark's dict: an option of None is kept as None, which the plan leaves out, so
+            // an entry of this key is unset.
+            let key = option_key(key)?;
+            let state = slf.put_option(slf.state(), &key, None);
+            slf.set_state(state);
             return Ok(slf);
         }
-        let key = crate::options::reader_option_key(key)?;
-        let state = set_reader_option_unset_none(slf.state(), &key, value)?;
+        let key = option_key(key)?;
+        let value = reader_option_text(value)?;
+        let state = slf.put_option(slf.state(), &key, value.as_ref());
         slf.set_state(state);
         Ok(slf)
     }
@@ -586,7 +804,7 @@ impl PyDataFrameReader {
         mut slf: PyRefMut<'py, Self>,
         options: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyRefMut<'py, Self>> {
-        let state = set_reader_kwargs_unset_none(slf.state(), options)?;
+        let state = slf.unset_kwargs(slf.state(), options)?;
         slf.set_state(state);
         Ok(slf)
     }
@@ -655,46 +873,51 @@ impl PyDataFrameReader {
         }
         self.set_state(r.clone());
         if let Some(s) = schema {
-            r = apply_reader_schema(r, s)?;
+            r = self.set_schema(r, s)?;
         }
         self.set_state(r.clone());
-        r = set_reader_kwargs_unset_none(r, options)?;
+        r = self.unset_kwargs(r, options)?;
         // Then its `DataSource` asserts the format, which precedes the check of the paths.
         self.set_state(r.clone());
-        // A format that is not a str fails the assertion, and a str that UTF-8 cannot encode fails
-        // the plan, which precedes the paths in the plan of PySpark's `DataSource`.
-        let format_error = match &self.unsent_format {
-            None => None,
-            Some(UnsentFormat {
-                unencodable: Some(error),
-                ..
-            }) => Some(error.clone()),
-            Some(_) => return Err(pyo3::exceptions::PyAssertionError::new_err(())),
-        };
+        // A format that is not a str fails the assertion. A str that UTF-8 cannot encode fails the
+        // plan, which precedes the paths in the plan of PySpark's `DataSource`.
+        if self
+            .unsent_format
+            .as_ref()
+            .is_some_and(|format| format.unencodable.is_none())
+        {
+            return Err(pyo3::exceptions::PyAssertionError::new_err(()));
+        }
+        self.check_data_source()?;
         let (paths, path_error) = path.map(paths_of).transpose()?.unwrap_or_default();
         let df = r.load_paths(paths);
         Ok(PyDataFrame::new(with_plan_error(
             df,
-            format_error.or(path_error),
+            self.plan_error().or(path_error),
         )))
     }
 
     /// Read a table by name, which PySpark's `Read` plan sets in its string field as it is, as
-    /// [`crate::str_argument`] converts it, as `changes` and those of the stream reader do.
+    /// [`crate::str_argument`] converts it, as `changes` and those of the stream reader do. A
+    /// name or an option that UTF-8 cannot encode fails the plan.
     fn table(&self, tableName: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        let tableName = crate::str_argument(tableName)?;
-        Ok(PyDataFrame::new(self.state().table(&tableName)))
+        let (name, error) = table_name_of(tableName)?;
+        let error = error.or_else(|| self.unencodable_options.get().error());
+        let r = self.with_decodable_keys(self.state());
+        Ok(PyDataFrame::new(with_plan_error(r.table(&name), error)))
     }
 
     /// Read the CDC changes of a named table. Mirrors `DataFrameReader.changes`, which raises an
     /// `AnalysisException` of `_LEGACY_ERROR_TEMP_1189` for a reader of a schema.
     #[allow(non_snake_case)]
     fn changes(&self, py: Python<'_>, tableName: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        if !self.inner.get_schema().is_empty() {
+        if !self.inner.get_schema().is_empty() || self.unencodable_schema.is_some() {
             return Err(changes_of_schema_error(py));
         }
-        let tableName = crate::str_argument(tableName)?;
-        Ok(PyDataFrame::new(self.state().changes(&tableName)))
+        let (name, error) = table_name_of(tableName)?;
+        let error = error.or_else(|| self.unencodable_options.get().error());
+        let r = self.with_decodable_keys(self.state());
+        Ok(PyDataFrame::new(with_plan_error(r.changes(&name), error)))
     }
 
     /// Read JSON file(s) - full pyspark signature; each named option is
@@ -733,7 +956,7 @@ impl PyDataFrameReader {
     ) -> PyResult<PyDataFrame> {
         crate::options::check_unexpected_keywords("DataFrameReader.json", unexpected)?;
         let mut r = self.state();
-        r = set_options_skip_none(
+        r = self.skip_none_options(
             r,
             &[
                 ("primitivesAsString", primitivesAsString),
@@ -796,11 +1019,13 @@ impl PyDataFrameReader {
             "int96RebaseMode",
         ] {
             let value = options.map(|o| o.get_item(name)).transpose()?.flatten();
-            r = set_option_skip_none(r, name, value.as_ref())?;
+            r = self.skip_none_options(r, &[(name, value.as_ref())])?;
         }
         self.commit(&r, "parquet");
+        self.check_data_source()?;
         let (paths, error) = path_list(&paths)?;
         let df = r.format("parquet").load_paths(paths);
+        let error = self.plan_error().or(error);
         Ok(PyDataFrame::new(with_plan_error(df, error)))
     }
 
@@ -848,7 +1073,7 @@ impl PyDataFrameReader {
     ) -> PyResult<PyDataFrame> {
         crate::options::check_unexpected_keywords("DataFrameReader.csv", unexpected)?;
         let mut r = self.state();
-        r = set_options_skip_none(
+        r = self.skip_none_options(
             r,
             &[
                 ("sep", sep),
@@ -910,7 +1135,7 @@ impl PyDataFrameReader {
     ) -> PyResult<PyDataFrame> {
         crate::options::check_unexpected_keywords("DataFrameReader.orc", unexpected)?;
         let mut r = self.state();
-        r = set_options_skip_none(
+        r = self.skip_none_options(
             r,
             &[
                 ("mergeSchema", mergeSchema),
@@ -921,8 +1146,10 @@ impl PyDataFrameReader {
             ],
         )?;
         self.commit(&r, "orc");
+        self.check_data_source()?;
         let (paths, error) = paths_of(path)?;
         let df = r.format("orc").load_paths(paths);
+        let error = self.plan_error().or(error);
         Ok(PyDataFrame::new(with_plan_error(df, error)))
     }
 
@@ -949,7 +1176,7 @@ impl PyDataFrameReader {
         crate::options::check_unexpected_keywords("DataFrameReader.text", unexpected)?;
         let wholetext = wholetext.or_bool(py, false);
         let mut r = self.state();
-        r = set_options_skip_none(
+        r = self.skip_none_options(
             r,
             &[
                 ("wholetext", Some(&wholetext)),
@@ -961,8 +1188,10 @@ impl PyDataFrameReader {
             ],
         )?;
         self.commit(&r, "text");
+        self.check_data_source()?;
         let (paths, error) = paths_of(paths)?;
         let df = r.format("text").load_paths(paths);
+        let error = self.plan_error().or(error);
         Ok(PyDataFrame::new(with_plan_error(df, error)))
     }
 
@@ -996,11 +1225,9 @@ impl PyDataFrameReader {
     ) -> PyResult<PyDataFrame> {
         crate::options::check_unexpected_keywords("DataFrameReader.xml", unexpected)?;
         let mut r = self.state();
-        r = set_option_skip_none(r, "rowTag", rowTag)?;
-        if let Some(v) = schema {
-            r = apply_reader_schema(r, v)?;
-        }
-        r = set_options_skip_none(
+        r = self.skip_none_options(r, &[("rowTag", rowTag)])?;
+        r = self.apply_optional_schema(r, schema)?;
+        r = self.skip_none_options(
             r,
             &[
                 ("excludeAttribute", excludeAttribute),
@@ -1063,7 +1290,7 @@ impl PyDataFrameReader {
                         )));
                     }
                 }
-                r = set_options_skip_none(
+                r = self.skip_none_options(
                     r,
                     &[
                         ("partitionColumn", Some(column)),
@@ -1085,18 +1312,26 @@ impl PyDataFrameReader {
                 return Err(err);
             }
             for (key, value) in properties.iter() {
-                r = set_option_skip_none(r, &crate::str_argument(&key)?, Some(&value))?;
+                let key = option_key(&key)?;
+                r = self.skip_none_entry(r, &key, Some(&value))?;
             }
         }
         // PySpark's jdbc also sets url and dbtable as options, `options(url=url, dbtable=table)`,
         // which leaves an option of None unset, before it asserts the predicates.
-        r = set_reader_option_unset_none(r, "url", url)?;
-        r = set_reader_option_unset_none(r, "dbtable", table)?;
+        r = self.unset_option_value(r, "url", url)?;
+        r = self.unset_option_value(r, "dbtable", table)?;
         self.set_state(r.clone());
-        let predicates = predicates.map(jdbc_predicates).transpose()?;
-        let url = coerce_option_value(url)?;
-        let table = coerce_option_value(table)?;
-        Ok(PyDataFrame::new(match (url, table, predicates) {
+        let (predicates, predicate_error) = match predicates {
+            Some(predicates) => {
+                let (texts, error) = jdbc_predicates(predicates)?;
+                (Some(texts), error)
+            }
+            None => (None, None),
+        };
+        // A url or a dbtable that UTF-8 cannot encode is an option of the plan, which fails it.
+        let url = reader_option_text(url)?.and_then(OptionText::into_text);
+        let table = reader_option_text(table)?.and_then(OptionText::into_text);
+        let df = match (url, table, predicates) {
             (Some(url), Some(table), predicates) => r.jdbc(&url, &table, predicates),
             // Without predicates, the read is that of the options alone, which leave a None url or
             // dbtable unset, as the core's `jdbc` needs both as strs.
@@ -1107,6 +1342,8 @@ impl PyDataFrameReader {
                 &table.unwrap_or_default(),
                 predicates,
             ),
-        }))
+        };
+        let error = self.plan_error().or(predicate_error);
+        Ok(PyDataFrame::new(with_plan_error(df, error)))
     }
 }
