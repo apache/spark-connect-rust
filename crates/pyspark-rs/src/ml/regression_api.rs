@@ -682,6 +682,13 @@ native_summary! {
             "($self, residualsType='deviance')"
         ),
     ];
+
+    /// The server's description of the summary (its coefficients table and deviances), as
+    /// PySpark's `__repr__` (its `toString`).
+    fn __repr__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let out = crate::ml::object::fetch_py(py, &self.target, "toString", &[])?;
+        crate::ml::object::fetch_output_to_py(py, out)
+    }
 }
 
 /// Register the typed regression models and summaries.

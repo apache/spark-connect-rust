@@ -289,11 +289,8 @@ PySpark class has them:
   the parent `undefined`, so `ParamGridBuilder().addGrid(LinearSVC.maxIter, ...)` builds.
   `MLWriter`s and `MLReader`s are `RemoteMLWriter` and `RemoteMLReader`, as over Spark Connect, of
   the attributes `shouldOverwrite` and `optionMap`, and the AttributeError of a missing attribute
-  names the class as PySpark's does. A missing attribute of the class itself
-  (`DecisionTreeRegressor.maxIter`) raises CPython's message of the type's full name, cut at 50
-  characters (`type object 'pyspark.ml.connect.regression.DecisionTreeRegresso' has no attribute
-  'maxIter'`, where PySpark's names `DecisionTreeRegressor`): the error of a missing class attribute
-  comes from the metaclass, which a PyO3 class cannot replace.
+  names the class as PySpark's does, of an object as of the class itself
+  (`type object 'DecisionTreeRegressor' has no attribute 'maxIter'`).
 - **PySpark's defaults of each instance**: the default `seed` is the `hash` of the name of the
   class, and the default `outputCol` the uid of the instance and `__output`; a fitted model has the
   defaults of its estimator, which PySpark's `_copyValues` copies to it (a seed of the name of the
@@ -301,11 +298,14 @@ PySpark class has them:
   PySpark's `_resetUid` keeps them.
 - **The members of the model**: its properties and methods (`coefficients`, `numFeatures`,
   `predict(vector)`, `clusterCenters()`, ...), which read the server's model object as PySpark's
-  `_call_java` does, its setters, and `__repr__`, the server's description of the model.
+  `_call_java` does, its setters, and `__repr__`, the server's description of the model. The
+  `__str__` of an RFormulaModel names its resolved formula, of the server, as PySpark's does
+  (`RFormulaModel(ResolvedRFormula(label=y, terms=[x], hasIntercept=true)) (uid=...)`).
 - **Summaries**: the training summary of a fit (`summary`, `hasSummary`), the same object on every
   call as PySpark's `_summary`, and the summary of `evaluate`; a loaded model has none, and raises
   PySpark's `RuntimeError`. Their DataFrames (`predictions`, `roc`, `cluster`, ...) are of the
-  summary dataset of the fit.
+  summary dataset of the fit. The `__repr__` of a GeneralizedLinearRegressionTrainingSummary is the
+  server's description of it (its table of coefficients and its deviances), as PySpark's is.
 - **Fits of param maps**: `fit(dataset, paramMap)` fits a copy of the estimator with the map, a
   list or tuple of maps fits once per map, and `fitMultiple(dataset, paramMaps)` returns PySpark's
   `_FitMultipleIterator`. `transform(dataset, paramMap)` transforms of a copy of the model.
@@ -1350,7 +1350,9 @@ command. In Python each is a typed class with PySpark's Params API (`params`, `g
 getters and setters, `copy`, `extractParamMap`), `write`/`save`/`read`/`load`; the estimators also have `fitMultiple`.
 A transformer's `transform`, and an estimator's `fit`, apply a non-empty param map to a copy as
 PySpark does. `HashingTF.indexOf` fails at PySpark's JVM import, as the official one does over
-Spark Connect. Their outputCol default keeps the uid that a loaded stage was made of. A fit returns
+Spark Connect. The `outputCol` default of a loaded stage is the one of the object that its load
+makes (`<a new uid>__output`), not of the saved uid, as PySpark's load keeps the defaults of that
+object when it takes the saved uid (`_resetUid`). A fit returns
 one of 19 typed model classes, with PySpark's members: getters and setters, attributes such as
 `mean`, `vocabulary`, `pc` and `categoryMaps`, DataFrames such as `surrogateDF`,
 `approxNearestNeighbors`, `approxSimilarityJoin`, `getVectors` and `findSynonyms`, and the class

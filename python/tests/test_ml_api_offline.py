@@ -10,6 +10,7 @@
 Official PySpark runs these tests too, as the reference of the goldens (see `_native_classes`).
 """
 
+import functools
 import importlib
 import inspect
 import json
@@ -226,6 +227,41 @@ def test_members_are_pyspark_mls(spec):
     actual = {name for name in dir(cls) if not name.startswith("_")} - {"uid"}
     actual -= INSTANCE_ATTRIBUTES.get(spec[1], set())
     assert actual == expected
+
+
+# The members of PySpark's classes that a class of this client runs as they are, of its MRO:
+# PySpark's Python code that reads only the class's own members (RFormula's `__str__`, of
+# `getFormula`, `isDefined` and `uid`).
+_PYSPARKS_OWN_CODE = {("RFormula", "__str__")}
+
+
+@pytest.mark.parametrize("spec", FULL, ids=lambda spec: spec[1])
+def test_public_members_and_dunders_are_the_native_classes(spec):
+    # A public member or dunder of PySpark's class that the native class lacks would run PySpark's
+    # code on a native object, whose `_call_java` reads PySpark's server-side object, which a
+    # native object does not have (`_java_obj` is None): the `__repr__` of a
+    # GeneralizedLinearRegressionTrainingSummary and the `__str__` of an RFormulaModel did, and
+    # raised. Each such member is the native class's own, or PySpark's code of its own members.
+    cls = native_class(*spec)
+    if cls.__module__ == spec[2]:
+        pytest.skip("of this client's native classes")
+    pysparks = {
+        k
+        for k in cls.__mro__
+        if k.__module__.startswith("pyspark.ml.")
+        and not k.__module__.startswith("pyspark.ml.connect")
+    }
+    descriptors = (property, classmethod, staticmethod, functools.cached_property)
+    of_pyspark = []
+    for name in dir(cls):
+        if name.startswith("_") and not (name.startswith("__") and name.endswith("__")):
+            continue
+        owner = next(k for k in cls.__mro__ if name in vars(k))
+        member = vars(owner)[name]
+        is_code = callable(member) or isinstance(member, descriptors)
+        if owner in pysparks and is_code and (spec[1], name) not in _PYSPARKS_OWN_CODE:
+            of_pyspark.append(f"{name} of {owner.__module__}.{owner.__qualname__}")
+    assert of_pyspark == []
 
 
 @pytest.mark.parametrize("spec", FULL, ids=lambda spec: spec[1])

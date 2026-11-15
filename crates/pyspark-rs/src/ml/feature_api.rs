@@ -431,6 +431,20 @@ native_model! {
     ];
     summary: None;
     cached: [];
+
+    /// `RFormulaModel(<the server's resolved formula>) (uid=<uid>)`, as PySpark's `__str__` (of
+    /// its `resolvedFormulaString`).
+    fn __str__(slf: &Bound<'_, Self>) -> PyResult<String> {
+        let py = slf.py();
+        let target = slf.try_borrow()?.core.target()?;
+        let out = crate::ml::object::fetch_py(py, &target, "resolvedFormulaString", &[])?;
+        let formula = crate::ml::object::fetch_output_to_py(py, out)?;
+        Ok(format!(
+            "RFormulaModel({}) (uid={})",
+            formula.bind(py).str()?,
+            slf.getattr("uid")?.str()?
+        ))
+    }
 }
 
 native_model! {

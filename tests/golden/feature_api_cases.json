@@ -320,6 +320,10 @@
     "AttributeError",
     "'str' object has no attribute 'parent'"
    ],
+   "str": [
+    "ok",
+    "'Binarizer_<uid>'"
+   ],
    "uid_class": [
     "ok",
     "'Binarizer'"
@@ -672,6 +676,10 @@
     "AttributeError",
     "'str' object has no attribute 'parent'"
    ],
+   "str": [
+    "ok",
+    "'BucketedRandomProjectionLSH_<uid>'"
+   ],
    "uid_class": [
     "ok",
     "'BucketedRandomProjectionLSH'"
@@ -772,6 +780,10 @@
      ]
     ]
    ],
+   "loaded_str": [
+    "ok",
+    "'BucketedRandomProjectionLSHModel: uid=BucketedRandomProjectionLSH_<uid>, numHashTables=2'"
+   ],
    "loaded_transform": [
     "ok",
     "{'columns': ['x', 'a', 's', 'tokens', 'v', 'label', 'idx', 'features', 'h'], 'rows': [\"(1.0, 2.0, 'a', ['a', 'b', 'c'], {'array': [1.0, 0.0, 2.0]}, 0.0, 0.0, {'array': [1.0, 0.0, 2.0]}, [{'array': [-1.0]}, {'array': [-1.0]}])\", \"(2.0, 1.0, 'b', ['b', 'c'], {'array': [0.0, 3.0, 1.0]}, 1.0, 1.0, {'array': [0.0, 3.0, 1.0]}, [{'array': [-1.0]}, {'array': [-2.0]}])\", \"(3.0, 4.0, 'a', ['a', 'a', 'd'], {'array': [2.0, 1.0, 0.5]}, 0.0, 2.0, {'array': [2.0, 1.0, 0.5]}, [{'array': [0.0]}, {'array': [-1.0]}])\", \"(4.0, 3.0, 'c', ['c', 'd'], {'array': [1.5, 2.5, 3.0]}, 1.0, 0.0, {'array': [1.5, 2.5, 3.0]}, [{'array': [-1.0]}, {'array': [-3.0]}])\", \"(5.0, 6.0, 'b', ['b', 'a'], {'array': [4.0, 0.5, 1.0]}, 0.0, 1.0, {'array': [4.0, 0.5, 1.0]}, [{'array': [1.0]}, {'array': [-2.0]}])\", \"(6.0, 5.0, 'a', ['a', 'b', 'd'], {'array': [0.5, 1.0, 4.0]}, 1.0, 2.0, {'array': [0.5, 1.0, 4.0]}, [{'array': [-2.0]}, {'array': [-2.0]}])\"]}"
@@ -815,6 +827,14 @@
       "\"'h'\""
      ]
     ]
+   ],
+   "model_repr": [
+    "ok",
+    "'BucketedRandomProjectionLSHModel: uid=BucketedRandomProjectionLSH_<uid>, numHashTables=2'"
+   ],
+   "model_str": [
+    "ok",
+    "'BucketedRandomProjectionLSHModel: uid=BucketedRandomProjectionLSH_<uid>, numHashTables=2'"
    ],
    "model_uid_is_estimator_uid": [
     "ok",
@@ -1211,6 +1231,10 @@
    "set_bad_name": [
     "AttributeError",
     "'str' object has no attribute 'parent'"
+   ],
+   "str": [
+    "ok",
+    "'Bucketizer_<uid>'"
    ],
    "uid_class": [
     "ok",
@@ -1704,6 +1728,10 @@
     "AttributeError",
     "'str' object has no attribute 'parent'"
    ],
+   "str": [
+    "ok",
+    "'ChiSqSelector_<uid>'"
+   ],
    "uid_class": [
     "ok",
     "'ChiSqSelector'"
@@ -1812,6 +1840,10 @@
      ]
     ]
    ],
+   "loaded_str": [
+    "ok",
+    "'ChiSqSelectorModel: uid=ChiSqSelector_<uid>, numSelectedFeatures=2'"
+   ],
    "loaded_transform": [
     "ok",
     "{'columns': ['x', 'a', 's', 'tokens', 'v', 'label', 'idx', 'features', 'sel'], 'rows': [\"(1.0, 2.0, 'a', ['a', 'b', 'c'], {'array': [1.0, 0.0, 2.0]}, 0.0, 0.0, {'array': [1.0, 0.0, 2.0]}, {'array': [1.0, 0.0]})\", \"(2.0, 1.0, 'b', ['b', 'c'], {'array': [0.0, 3.0, 1.0]}, 1.0, 1.0, {'array': [0.0, 3.0, 1.0]}, {'array': [0.0, 3.0]})\", \"(3.0, 4.0, 'a', ['a', 'a', 'd'], {'array': [2.0, 1.0, 0.5]}, 0.0, 2.0, {'array': [2.0, 1.0, 0.5]}, {'array': [2.0, 1.0]})\", \"(4.0, 3.0, 'c', ['c', 'd'], {'array': [1.5, 2.5, 3.0]}, 1.0, 0.0, {'array': [1.5, 2.5, 3.0]}, {'array': [1.5, 2.5]})\", \"(5.0, 6.0, 'b', ['b', 'a'], {'array': [4.0, 0.5, 1.0]}, 0.0, 1.0, {'array': [4.0, 0.5, 1.0]}, {'array': [4.0, 0.5]})\", \"(6.0, 5.0, 'a', ['a', 'b', 'd'], {'array': [0.5, 1.0, 4.0]}, 1.0, 2.0, {'array': [0.5, 1.0, 4.0]}, {'array': [0.5, 1.0]})\"]}"
@@ -1875,6 +1907,14 @@
       "\"'numTopFeatures'\""
      ]
     ]
+   ],
+   "model_repr": [
+    "ok",
+    "'ChiSqSelectorModel: uid=ChiSqSelector_<uid>, numSelectedFeatures=2'"
+   ],
+   "model_str": [
+    "ok",
+    "'ChiSqSelectorModel: uid=ChiSqSelector_<uid>, numSelectedFeatures=2'"
    ],
    "model_uid_is_estimator_uid": [
     "ok",
@@ -2327,6 +2367,10 @@
     "AttributeError",
     "'str' object has no attribute 'parent'"
    ],
+   "str": [
+    "ok",
+    "'CountVectorizer_<uid>'"
+   ],
    "uid_class": [
     "ok",
     "'CountVectorizer'"
@@ -2470,6 +2514,10 @@
      ]
     ]
    ],
+   "loaded_str": [
+    "ok",
+    "'CountVectorizerModel: uid=CountVectorizer_<uid>, vocabularySize=4'"
+   ],
    "loaded_transform": [
     "ok",
     "{'columns': ['x', 'a', 's', 'tokens', 'v', 'label', 'idx', 'features', 'cv'], 'rows': [\"(1.0, 2.0, 'a', ['a', 'b', 'c'], {'array': [1.0, 0.0, 2.0]}, 0.0, 0.0, {'array': [1.0, 0.0, 2.0]}, {'array': [1.0, 1.0, 1.0, 0.0]})\", \"(2.0, 1.0, 'b', ['b', 'c'], {'array': [0.0, 3.0, 1.0]}, 1.0, 1.0, {'array': [0.0, 3.0, 1.0]}, {'array': [0.0, 1.0, 1.0, 0.0]})\", \"(3.0, 4.0, 'a', ['a', 'a', 'd'], {'array': [2.0, 1.0, 0.5]}, 0.0, 2.0, {'array': [2.0, 1.0, 0.5]}, {'array': [2.0, 0.0, 0.0, 1.0]})\", \"(4.0, 3.0, 'c', ['c', 'd'], {'array': [1.5, 2.5, 3.0]}, 1.0, 0.0, {'array': [1.5, 2.5, 3.0]}, {'array': [0.0, 0.0, 1.0, 1.0]})\", \"(5.0, 6.0, 'b', ['b', 'a'], {'array': [4.0, 0.5, 1.0]}, 0.0, 1.0, {'array': [4.0, 0.5, 1.0]}, {'array': [1.0, 1.0, 0.0, 0.0]})\", \"(6.0, 5.0, 'a', ['a', 'b', 'd'], {'array': [0.5, 1.0, 4.0]}, 1.0, 2.0, {'array': [0.5, 1.0, 4.0]}, {'array': [1.0, 1.0, 0.0, 1.0]})\"]}"
@@ -2525,6 +2573,14 @@
       "'5'"
      ]
     ]
+   ],
+   "model_repr": [
+    "ok",
+    "'CountVectorizerModel: uid=CountVectorizer_<uid>, vocabularySize=4'"
+   ],
+   "model_str": [
+    "ok",
+    "'CountVectorizerModel: uid=CountVectorizer_<uid>, vocabularySize=4'"
    ],
    "model_uid_is_estimator_uid": [
     "ok",
@@ -2823,6 +2879,10 @@
     "AttributeError",
     "'str' object has no attribute 'parent'"
    ],
+   "str": [
+    "ok",
+    "'DCT_<uid>'"
+   ],
    "uid_class": [
     "ok",
     "'DCT'"
@@ -3088,6 +3148,10 @@
    "set_bad_name": [
     "AttributeError",
     "'str' object has no attribute 'parent'"
+   ],
+   "str": [
+    "ok",
+    "'ElementwiseProduct_<uid>'"
    ],
    "uid_class": [
     "ok",
@@ -3380,6 +3444,10 @@
    "set_bad_name": [
     "AttributeError",
     "'str' object has no attribute 'parent'"
+   ],
+   "str": [
+    "ok",
+    "'FeatureHasher_<uid>'"
    ],
    "uid_class": [
     "ok",
@@ -3682,6 +3750,10 @@
     "AttributeError",
     "'str' object has no attribute 'parent'"
    ],
+   "str": [
+    "ok",
+    "'HashingTF_<uid>'"
+   ],
    "uid_class": [
     "ok",
     "'HashingTF'"
@@ -3964,6 +4036,10 @@
     "AttributeError",
     "'str' object has no attribute 'parent'"
    ],
+   "str": [
+    "ok",
+    "'IDF_<uid>'"
+   ],
    "uid_class": [
     "ok",
     "'IDF'"
@@ -4036,6 +4112,10 @@
      ]
     ]
    ],
+   "loaded_str": [
+    "ok",
+    "'IDFModel: uid=IDF_<uid>, numDocs=6, numFeatures=3'"
+   ],
    "loaded_transform": [
     "ok",
     "{'columns': ['x', 'a', 's', 'tokens', 'v', 'label', 'idx', 'features', 'idf'], 'rows': [\"(1.0, 2.0, 'a', ['a', 'b', 'c'], {'array': [1.0, 0.0, 2.0]}, 0.0, 0.0, {'array': [1.0, 0.0, 2.0]}, {'array': [0.154151, 0.0, 0.0]})\", \"(2.0, 1.0, 'b', ['b', 'c'], {'array': [0.0, 3.0, 1.0]}, 1.0, 1.0, {'array': [0.0, 3.0, 1.0]}, {'array': [0.0, 0.462452, 0.0]})\", \"(3.0, 4.0, 'a', ['a', 'a', 'd'], {'array': [2.0, 1.0, 0.5]}, 0.0, 2.0, {'array': [2.0, 1.0, 0.5]}, {'array': [0.308301, 0.154151, 0.0]})\", \"(4.0, 3.0, 'c', ['c', 'd'], {'array': [1.5, 2.5, 3.0]}, 1.0, 0.0, {'array': [1.5, 2.5, 3.0]}, {'array': [0.231226, 0.385377, 0.0]})\", \"(5.0, 6.0, 'b', ['b', 'a'], {'array': [4.0, 0.5, 1.0]}, 0.0, 1.0, {'array': [4.0, 0.5, 1.0]}, {'array': [0.616603, 0.077075, 0.0]})\", \"(6.0, 5.0, 'a', ['a', 'b', 'd'], {'array': [0.5, 1.0, 4.0]}, 1.0, 2.0, {'array': [0.5, 1.0, 4.0]}, {'array': [0.077075, 0.154151, 0.0]})\"]}"
@@ -4075,6 +4155,14 @@
       "\"'idf'\""
      ]
     ]
+   ],
+   "model_repr": [
+    "ok",
+    "'IDFModel: uid=IDF_<uid>, numDocs=6, numFeatures=3'"
+   ],
+   "model_str": [
+    "ok",
+    "'IDFModel: uid=IDF_<uid>, numDocs=6, numFeatures=3'"
    ],
    "model_uid_is_estimator_uid": [
     "ok",
@@ -4519,6 +4607,10 @@
     "AttributeError",
     "'str' object has no attribute 'parent'"
    ],
+   "str": [
+    "ok",
+    "'Imputer_<uid>'"
+   ],
    "uid_class": [
     "ok",
     "'Imputer'"
@@ -4613,6 +4705,10 @@
      ]
     ]
    ],
+   "loaded_str": [
+    "ok",
+    "'ImputerModel: uid=Imputer_<uid>, strategy=mean, missingValue=NaN, numInputCols=2, numOutputCols=2'"
+   ],
    "loaded_transform": [
     "ok",
     "{'columns': ['x', 'a', 's', 'tokens', 'v', 'label', 'idx', 'features', 'x2', 'a2'], 'rows': [\"(1.0, 2.0, 'a', ['a', 'b', 'c'], {'array': [1.0, 0.0, 2.0]}, 0.0, 0.0, {'array': [1.0, 0.0, 2.0]}, 1.0, 2.0)\", \"(2.0, 1.0, 'b', ['b', 'c'], {'array': [0.0, 3.0, 1.0]}, 1.0, 1.0, {'array': [0.0, 3.0, 1.0]}, 2.0, 1.0)\", \"(3.0, 4.0, 'a', ['a', 'a', 'd'], {'array': [2.0, 1.0, 0.5]}, 0.0, 2.0, {'array': [2.0, 1.0, 0.5]}, 3.0, 4.0)\", \"(4.0, 3.0, 'c', ['c', 'd'], {'array': [1.5, 2.5, 3.0]}, 1.0, 0.0, {'array': [1.5, 2.5, 3.0]}, 4.0, 3.0)\", \"(5.0, 6.0, 'b', ['b', 'a'], {'array': [4.0, 0.5, 1.0]}, 0.0, 1.0, {'array': [4.0, 0.5, 1.0]}, 5.0, 6.0)\", \"(6.0, 5.0, 'a', ['a', 'b', 'd'], {'array': [0.5, 1.0, 4.0]}, 1.0, 2.0, {'array': [0.5, 1.0, 4.0]}, 6.0, 5.0)\"]}"
@@ -4664,6 +4760,14 @@
       "\"'mean'\""
      ]
     ]
+   ],
+   "model_repr": [
+    "ok",
+    "'ImputerModel: uid=Imputer_<uid>, strategy=mean, missingValue=NaN, numInputCols=2, numOutputCols=2'"
+   ],
+   "model_str": [
+    "ok",
+    "'ImputerModel: uid=Imputer_<uid>, strategy=mean, missingValue=NaN, numInputCols=2, numOutputCols=2'"
    ],
    "model_uid_is_estimator_uid": [
     "ok",
@@ -4961,6 +5065,10 @@
     "AttributeError",
     "'str' object has no attribute 'parent'"
    ],
+   "str": [
+    "ok",
+    "'IndexToString_<uid>'"
+   ],
    "uid_class": [
     "ok",
     "'IndexToString'"
@@ -5176,6 +5284,10 @@
    "set_bad_name": [
     "AttributeError",
     "'str' object has no attribute 'parent'"
+   ],
+   "str": [
+    "ok",
+    "'Interaction_<uid>'"
    ],
    "uid_class": [
     "ok",
@@ -5424,6 +5536,10 @@
     "AttributeError",
     "'str' object has no attribute 'parent'"
    ],
+   "str": [
+    "ok",
+    "'MaxAbsScaler_<uid>'"
+   ],
    "uid_class": [
     "ok",
     "'MaxAbsScaler'"
@@ -5476,6 +5592,10 @@
      ]
     ]
    ],
+   "loaded_str": [
+    "ok",
+    "'MaxAbsScalerModel: uid=MaxAbsScaler_<uid>, numFeatures=3'"
+   ],
    "loaded_transform": [
     "ok",
     "{'columns': ['x', 'a', 's', 'tokens', 'v', 'label', 'idx', 'features', 'ma'], 'rows': [\"(1.0, 2.0, 'a', ['a', 'b', 'c'], {'array': [1.0, 0.0, 2.0]}, 0.0, 0.0, {'array': [1.0, 0.0, 2.0]}, {'array': [0.25, 0.0, 0.5]})\", \"(2.0, 1.0, 'b', ['b', 'c'], {'array': [0.0, 3.0, 1.0]}, 1.0, 1.0, {'array': [0.0, 3.0, 1.0]}, {'array': [0.0, 1.0, 0.25]})\", \"(3.0, 4.0, 'a', ['a', 'a', 'd'], {'array': [2.0, 1.0, 0.5]}, 0.0, 2.0, {'array': [2.0, 1.0, 0.5]}, {'array': [0.5, 0.333333, 0.125]})\", \"(4.0, 3.0, 'c', ['c', 'd'], {'array': [1.5, 2.5, 3.0]}, 1.0, 0.0, {'array': [1.5, 2.5, 3.0]}, {'array': [0.375, 0.833333, 0.75]})\", \"(5.0, 6.0, 'b', ['b', 'a'], {'array': [4.0, 0.5, 1.0]}, 0.0, 1.0, {'array': [4.0, 0.5, 1.0]}, {'array': [1.0, 0.166667, 0.25]})\", \"(6.0, 5.0, 'a', ['a', 'b', 'd'], {'array': [0.5, 1.0, 4.0]}, 1.0, 2.0, {'array': [0.5, 1.0, 4.0]}, {'array': [0.125, 0.333333, 1.0]})\"]}"
@@ -5515,6 +5635,14 @@
       "\"'ma'\""
      ]
     ]
+   ],
+   "model_repr": [
+    "ok",
+    "'MaxAbsScalerModel: uid=MaxAbsScaler_<uid>, numFeatures=3'"
+   ],
+   "model_str": [
+    "ok",
+    "'MaxAbsScalerModel: uid=MaxAbsScaler_<uid>, numFeatures=3'"
    ],
    "model_uid_is_estimator_uid": [
     "ok",
@@ -5855,6 +5983,10 @@
     "AttributeError",
     "'str' object has no attribute 'parent'"
    ],
+   "str": [
+    "ok",
+    "'MinHashLSH_<uid>'"
+   ],
    "uid_class": [
     "ok",
     "'MinHashLSH'"
@@ -5947,6 +6079,10 @@
      ]
     ]
    ],
+   "loaded_str": [
+    "ok",
+    "'MinHashLSHModel: uid=MinHashLSH_<uid>, numHashTables=2'"
+   ],
    "loaded_transform": [
     "ok",
     "{'columns': ['x', 'a', 's', 'tokens', 'v', 'label', 'idx', 'features', 'mh'], 'rows': [\"(1.0, 2.0, 'a', ['a', 'b', 'c'], {'array': [1.0, 0.0, 2.0]}, 0.0, 0.0, {'array': [1.0, 0.0, 2.0]}, [{'array': [848262060.0]}, {'array': [1478821114.0]}])\", \"(2.0, 1.0, 'b', ['b', 'c'], {'array': [0.0, 3.0, 1.0]}, 1.0, 1.0, {'array': [0.0, 3.0, 1.0]}, [{'array': [848262060.0]}, {'array': [598179266.0]}])\", \"(3.0, 4.0, 'a', ['a', 'a', 'd'], {'array': [2.0, 1.0, 0.5]}, 0.0, 2.0, {'array': [2.0, 1.0, 0.5]}, [{'array': [848262060.0]}, {'array': [598179266.0]}])\", \"(4.0, 3.0, 'c', ['c', 'd'], {'array': [1.5, 2.5, 3.0]}, 1.0, 0.0, {'array': [1.5, 2.5, 3.0]}, [{'array': [848262060.0]}, {'array': [598179266.0]}])\", \"(5.0, 6.0, 'b', ['b', 'a'], {'array': [4.0, 0.5, 1.0]}, 0.0, 1.0, {'array': [4.0, 0.5, 1.0]}, [{'array': [848262060.0]}, {'array': [598179266.0]}])\", \"(6.0, 5.0, 'a', ['a', 'b', 'd'], {'array': [0.5, 1.0, 4.0]}, 1.0, 2.0, {'array': [0.5, 1.0, 4.0]}, [{'array': [848262060.0]}, {'array': [598179266.0]}])\"]}"
@@ -5986,6 +6122,14 @@
       "\"'mh'\""
      ]
     ]
+   ],
+   "model_repr": [
+    "ok",
+    "'MinHashLSHModel: uid=MinHashLSH_<uid>, numHashTables=2'"
+   ],
+   "model_str": [
+    "ok",
+    "'MinHashLSHModel: uid=MinHashLSH_<uid>, numHashTables=2'"
    ],
    "model_uid_is_estimator_uid": [
     "ok",
@@ -6326,6 +6470,10 @@
     "AttributeError",
     "'str' object has no attribute 'parent'"
    ],
+   "str": [
+    "ok",
+    "'MinMaxScaler_<uid>'"
+   ],
    "uid_class": [
     "ok",
     "'MinMaxScaler'"
@@ -6394,6 +6542,10 @@
      ]
     ]
    ],
+   "loaded_str": [
+    "ok",
+    "'MinMaxScalerModel: uid=MinMaxScaler_<uid>, numFeatures=3, min=0.0, max=2.0'"
+   ],
    "loaded_transform": [
     "ok",
     "{'columns': ['x', 'a', 's', 'tokens', 'v', 'label', 'idx', 'features', 'mm'], 'rows': [\"(1.0, 2.0, 'a', ['a', 'b', 'c'], {'array': [1.0, 0.0, 2.0]}, 0.0, 0.0, {'array': [1.0, 0.0, 2.0]}, {'array': [0.5, 0.0, 0.857143]})\", \"(2.0, 1.0, 'b', ['b', 'c'], {'array': [0.0, 3.0, 1.0]}, 1.0, 1.0, {'array': [0.0, 3.0, 1.0]}, {'array': [0.0, 2.0, 0.285714]})\", \"(3.0, 4.0, 'a', ['a', 'a', 'd'], {'array': [2.0, 1.0, 0.5]}, 0.0, 2.0, {'array': [2.0, 1.0, 0.5]}, {'array': [1.0, 0.666667, 0.0]})\", \"(4.0, 3.0, 'c', ['c', 'd'], {'array': [1.5, 2.5, 3.0]}, 1.0, 0.0, {'array': [1.5, 2.5, 3.0]}, {'array': [0.75, 1.666667, 1.428571]})\", \"(5.0, 6.0, 'b', ['b', 'a'], {'array': [4.0, 0.5, 1.0]}, 0.0, 1.0, {'array': [4.0, 0.5, 1.0]}, {'array': [2.0, 0.333333, 0.285714]})\", \"(6.0, 5.0, 'a', ['a', 'b', 'd'], {'array': [0.5, 1.0, 4.0]}, 1.0, 2.0, {'array': [0.5, 1.0, 4.0]}, {'array': [0.25, 0.666667, 2.0]})\"]}"
@@ -6437,6 +6589,14 @@
       "\"'mm'\""
      ]
     ]
+   ],
+   "model_repr": [
+    "ok",
+    "'MinMaxScalerModel: uid=MinMaxScaler_<uid>, numFeatures=3, min=0.0, max=2.0'"
+   ],
+   "model_str": [
+    "ok",
+    "'MinMaxScalerModel: uid=MinMaxScaler_<uid>, numFeatures=3, min=0.0, max=2.0'"
    ],
    "model_uid_is_estimator_uid": [
     "ok",
@@ -6734,6 +6894,10 @@
     "AttributeError",
     "'str' object has no attribute 'parent'"
    ],
+   "str": [
+    "ok",
+    "'NGram_<uid>'"
+   ],
    "uid_class": [
     "ok",
     "'NGram'"
@@ -6999,6 +7163,10 @@
    "set_bad_name": [
     "AttributeError",
     "'str' object has no attribute 'parent'"
+   ],
+   "str": [
+    "ok",
+    "'Normalizer_<uid>'"
    ],
    "uid_class": [
     "ok",
@@ -7363,6 +7531,10 @@
     "AttributeError",
     "'str' object has no attribute 'parent'"
    ],
+   "str": [
+    "ok",
+    "'OneHotEncoder_<uid>'"
+   ],
    "uid_class": [
     "ok",
     "'OneHotEncoder'"
@@ -7445,6 +7617,10 @@
      ]
     ]
    ],
+   "loaded_str": [
+    "ok",
+    "'OneHotEncoderModel: uid=OneHotEncoder_<uid>, dropLast=true, handleInvalid=error'"
+   ],
    "loaded_transform": [
     "ok",
     "{'columns': ['x', 'a', 's', 'tokens', 'v', 'label', 'idx', 'features', 'ohe'], 'rows': [\"(1.0, 2.0, 'a', ['a', 'b', 'c'], {'array': [1.0, 0.0, 2.0]}, 0.0, 0.0, {'array': [1.0, 0.0, 2.0]}, {'array': [1.0, 0.0]})\", \"(2.0, 1.0, 'b', ['b', 'c'], {'array': [0.0, 3.0, 1.0]}, 1.0, 1.0, {'array': [0.0, 3.0, 1.0]}, {'array': [0.0, 1.0]})\", \"(3.0, 4.0, 'a', ['a', 'a', 'd'], {'array': [2.0, 1.0, 0.5]}, 0.0, 2.0, {'array': [2.0, 1.0, 0.5]}, {'array': [0.0, 0.0]})\", \"(4.0, 3.0, 'c', ['c', 'd'], {'array': [1.5, 2.5, 3.0]}, 1.0, 0.0, {'array': [1.5, 2.5, 3.0]}, {'array': [1.0, 0.0]})\", \"(5.0, 6.0, 'b', ['b', 'a'], {'array': [4.0, 0.5, 1.0]}, 0.0, 1.0, {'array': [4.0, 0.5, 1.0]}, {'array': [0.0, 1.0]})\", \"(6.0, 5.0, 'a', ['a', 'b', 'd'], {'array': [0.5, 1.0, 4.0]}, 1.0, 2.0, {'array': [0.5, 1.0, 4.0]}, {'array': [0.0, 0.0]})\"]}"
@@ -7488,6 +7664,14 @@
       "\"'ohe'\""
      ]
     ]
+   ],
+   "model_repr": [
+    "ok",
+    "'OneHotEncoderModel: uid=OneHotEncoder_<uid>, dropLast=true, handleInvalid=error'"
+   ],
+   "model_str": [
+    "ok",
+    "'OneHotEncoderModel: uid=OneHotEncoder_<uid>, dropLast=true, handleInvalid=error'"
    ],
    "model_uid_is_estimator_uid": [
     "ok",
@@ -7793,6 +7977,10 @@
     "AttributeError",
     "'str' object has no attribute 'parent'"
    ],
+   "str": [
+    "ok",
+    "'PCA_<uid>'"
+   ],
    "uid_class": [
     "ok",
     "'PCA'"
@@ -7857,6 +8045,10 @@
      ]
     ]
    ],
+   "loaded_str": [
+    "ok",
+    "'PCAModel: uid=PCA_<uid>, k=2'"
+   ],
    "loaded_transform": [
     "ok",
     "{'columns': ['x', 'a', 's', 'tokens', 'v', 'label', 'idx', 'features', 'pca'], 'rows': [\"(1.0, 2.0, 'a', ['a', 'b', 'c'], {'array': [1.0, 0.0, 2.0]}, 0.0, 0.0, {'array': [1.0, 0.0, 2.0]}, {'array': [0.325323, 1.715567]})\", \"(2.0, 1.0, 'b', ['b', 'c'], {'array': [0.0, 3.0, 1.0]}, 1.0, 1.0, {'array': [0.0, 3.0, 1.0]}, {'array': [1.67023, -1.133019]})\", \"(3.0, 4.0, 'a', ['a', 'a', 'd'], {'array': [2.0, 1.0, 0.5]}, 0.0, 2.0, {'array': [2.0, 1.0, 0.5]}, {'array': [-0.859546, 0.189289]})\", \"(4.0, 3.0, 'c', ['c', 'd'], {'array': [1.5, 2.5, 3.0]}, 1.0, 0.0, {'array': [1.5, 2.5, 3.0]}, {'array': [1.43051, 1.006522]})\", \"(5.0, 6.0, 'b', ['b', 'a'], {'array': [4.0, 0.5, 1.0]}, 0.0, 1.0, {'array': [4.0, 0.5, 1.0]}, {'array': [-2.284606, 1.318676]})\", \"(6.0, 5.0, 'a', ['a', 'b', 'd'], {'array': [0.5, 1.0, 4.0]}, 1.0, 2.0, {'array': [0.5, 1.0, 4.0]}, {'array': [2.157273, 2.472578]})\"]}"
@@ -7896,6 +8088,14 @@
       "\"'pca'\""
      ]
     ]
+   ],
+   "model_repr": [
+    "ok",
+    "'PCAModel: uid=PCA_<uid>, k=2'"
+   ],
+   "model_str": [
+    "ok",
+    "'PCAModel: uid=PCA_<uid>, k=2'"
    ],
    "model_uid_is_estimator_uid": [
     "ok",
@@ -8188,6 +8388,10 @@
    "set_bad_name": [
     "AttributeError",
     "'str' object has no attribute 'parent'"
+   ],
+   "str": [
+    "ok",
+    "'PolynomialExpansion_<uid>'"
    ],
    "uid_class": [
     "ok",
@@ -8606,6 +8810,10 @@
     "AttributeError",
     "'str' object has no attribute 'parent'"
    ],
+   "str": [
+    "ok",
+    "'QuantileDiscretizer_<uid>'"
+   ],
    "uid_class": [
     "ok",
     "'QuantileDiscretizer'"
@@ -8993,6 +9201,10 @@
     "AttributeError",
     "'str' object has no attribute 'parent'"
    ],
+   "str": [
+    "ok",
+    "'RFormula(label ~ x + a) (uid=RFormula_<uid>)'"
+   ],
    "uid_class": [
     "ok",
     "'RFormula'"
@@ -9077,6 +9289,10 @@
      ]
     ]
    ],
+   "loaded_str": [
+    "ok",
+    "'RFormulaModel(ResolvedRFormula(label=label, terms=[x,a], hasIntercept=true)) (uid=RFormula_<uid>)'"
+   ],
    "loaded_transform": [
     "ok",
     "{'columns': ['x', 'a', 's', 'tokens', 'v', 'label', 'idx', 'features', 'rf'], 'rows': [\"(1.0, 2.0, 'a', ['a', 'b', 'c'], {'array': [1.0, 0.0, 2.0]}, 0.0, 0.0, {'array': [1.0, 0.0, 2.0]}, {'array': [1.0, 2.0]})\", \"(2.0, 1.0, 'b', ['b', 'c'], {'array': [0.0, 3.0, 1.0]}, 1.0, 1.0, {'array': [0.0, 3.0, 1.0]}, {'array': [2.0, 1.0]})\", \"(3.0, 4.0, 'a', ['a', 'a', 'd'], {'array': [2.0, 1.0, 0.5]}, 0.0, 2.0, {'array': [2.0, 1.0, 0.5]}, {'array': [3.0, 4.0]})\", \"(4.0, 3.0, 'c', ['c', 'd'], {'array': [1.5, 2.5, 3.0]}, 1.0, 0.0, {'array': [1.5, 2.5, 3.0]}, {'array': [4.0, 3.0]})\", \"(5.0, 6.0, 'b', ['b', 'a'], {'array': [4.0, 0.5, 1.0]}, 0.0, 1.0, {'array': [4.0, 0.5, 1.0]}, {'array': [5.0, 6.0]})\", \"(6.0, 5.0, 'a', ['a', 'b', 'd'], {'array': [0.5, 1.0, 4.0]}, 1.0, 2.0, {'array': [0.5, 1.0, 4.0]}, {'array': [6.0, 5.0]})\"]}"
@@ -9128,6 +9344,14 @@
       "\"'frequencyDesc'\""
      ]
     ]
+   ],
+   "model_repr": [
+    "ok",
+    "'RFormulaModel: uid=RFormula_<uid>, resolvedFormula=ResolvedRFormula(label=label, terms=[x,a], hasIntercept=true)'"
+   ],
+   "model_str": [
+    "ok",
+    "'RFormulaModel(ResolvedRFormula(label=label, terms=[x,a], hasIntercept=true)) (uid=RFormula_<uid>)'"
    ],
    "model_uid_is_estimator_uid": [
     "ok",
@@ -9503,6 +9727,10 @@
    "set_bad_name": [
     "AttributeError",
     "'str' object has no attribute 'parent'"
+   ],
+   "str": [
+    "ok",
+    "'RegexTokenizer_<uid>'"
    ],
    "uid_class": [
     "ok",
@@ -9926,6 +10154,10 @@
     "AttributeError",
     "'str' object has no attribute 'parent'"
    ],
+   "str": [
+    "ok",
+    "'RobustScaler_<uid>'"
+   ],
    "uid_class": [
     "ok",
     "'RobustScaler'"
@@ -10018,6 +10250,10 @@
      ]
     ]
    ],
+   "loaded_str": [
+    "ok",
+    "'RobustScalerModel: uid=RobustScaler_<uid>, numFeatures=3, withCentering=false, withScaling=true'"
+   ],
    "loaded_transform": [
     "ok",
     "{'columns': ['x', 'a', 's', 'tokens', 'v', 'label', 'idx', 'features', 'rs'], 'rows': [\"(1.0, 2.0, 'a', ['a', 'b', 'c'], {'array': [1.0, 0.0, 2.0]}, 0.0, 0.0, {'array': [1.0, 0.0, 2.0]}, {'array': [0.666667, 0.0, 1.0]})\", \"(2.0, 1.0, 'b', ['b', 'c'], {'array': [0.0, 3.0, 1.0]}, 1.0, 1.0, {'array': [0.0, 3.0, 1.0]}, {'array': [0.0, 1.5, 0.5]})\", \"(3.0, 4.0, 'a', ['a', 'a', 'd'], {'array': [2.0, 1.0, 0.5]}, 0.0, 2.0, {'array': [2.0, 1.0, 0.5]}, {'array': [1.333333, 0.5, 0.25]})\", \"(4.0, 3.0, 'c', ['c', 'd'], {'array': [1.5, 2.5, 3.0]}, 1.0, 0.0, {'array': [1.5, 2.5, 3.0]}, {'array': [1.0, 1.25, 1.5]})\", \"(5.0, 6.0, 'b', ['b', 'a'], {'array': [4.0, 0.5, 1.0]}, 0.0, 1.0, {'array': [4.0, 0.5, 1.0]}, {'array': [2.666667, 0.25, 0.5]})\", \"(6.0, 5.0, 'a', ['a', 'b', 'd'], {'array': [0.5, 1.0, 4.0]}, 1.0, 2.0, {'array': [0.5, 1.0, 4.0]}, {'array': [0.333333, 0.5, 2.0]})\"]}"
@@ -10077,6 +10313,14 @@
       "'True'"
      ]
     ]
+   ],
+   "model_repr": [
+    "ok",
+    "'RobustScalerModel: uid=RobustScaler_<uid>, numFeatures=3, withCentering=false, withScaling=true'"
+   ],
+   "model_str": [
+    "ok",
+    "'RobustScalerModel: uid=RobustScaler_<uid>, numFeatures=3, withCentering=false, withScaling=true'"
    ],
    "model_uid_is_estimator_uid": [
     "ok",
@@ -10274,6 +10518,10 @@
    "set_bad_name": [
     "AttributeError",
     "'str' object has no attribute 'parent'"
+   ],
+   "str": [
+    "ok",
+    "'SQLTransformer_<uid>'"
    ],
    "uid_class": [
     "ok",
@@ -10592,6 +10840,10 @@
     "AttributeError",
     "'str' object has no attribute 'parent'"
    ],
+   "str": [
+    "ok",
+    "'StandardScaler_<uid>'"
+   ],
    "uid_class": [
     "ok",
     "'StandardScaler'"
@@ -10660,6 +10912,10 @@
      ]
     ]
    ],
+   "loaded_str": [
+    "ok",
+    "'StandardScalerModel: uid=StandardScaler_<uid>, numFeatures=3, withMean=true, withStd=true'"
+   ],
    "loaded_transform": [
     "ok",
     "{'columns': ['x', 'a', 's', 'tokens', 'v', 'label', 'idx', 'features', 'ss'], 'rows': [\"(1.0, 2.0, 'a', ['a', 'b', 'c'], {'array': [1.0, 0.0, 2.0]}, 0.0, 0.0, {'array': [1.0, 0.0, 2.0]}, {'array': [-0.353553, -1.140532, 0.061406]})\", \"(2.0, 1.0, 'b', ['b', 'c'], {'array': [0.0, 3.0, 1.0]}, 1.0, 1.0, {'array': [0.0, 3.0, 1.0]}, {'array': [-1.06066, 1.425665, -0.67547]})\", \"(3.0, 4.0, 'a', ['a', 'a', 'd'], {'array': [2.0, 1.0, 0.5]}, 0.0, 2.0, {'array': [2.0, 1.0, 0.5]}, {'array': [0.353553, -0.285133, -1.043908]})\", \"(4.0, 3.0, 'c', ['c', 'd'], {'array': [1.5, 2.5, 3.0]}, 1.0, 0.0, {'array': [1.5, 2.5, 3.0]}, {'array': [0.0, 0.997965, 0.798282]})\", \"(5.0, 6.0, 'b', ['b', 'a'], {'array': [4.0, 0.5, 1.0]}, 0.0, 1.0, {'array': [4.0, 0.5, 1.0]}, {'array': [1.767767, -0.712832, -0.67547]})\", \"(6.0, 5.0, 'a', ['a', 'b', 'd'], {'array': [0.5, 1.0, 4.0]}, 1.0, 2.0, {'array': [0.5, 1.0, 4.0]}, {'array': [-0.707107, -0.285133, 1.535159]})\"]}"
@@ -10707,6 +10963,14 @@
       "'True'"
      ]
     ]
+   ],
+   "model_repr": [
+    "ok",
+    "'StandardScalerModel: uid=StandardScaler_<uid>, numFeatures=3, withMean=true, withStd=true'"
+   ],
+   "model_str": [
+    "ok",
+    "'StandardScalerModel: uid=StandardScaler_<uid>, numFeatures=3, withMean=true, withStd=true'"
    ],
    "model_uid_is_estimator_uid": [
     "ok",
@@ -11118,6 +11382,10 @@
     "AttributeError",
     "'str' object has no attribute 'parent'"
    ],
+   "str": [
+    "ok",
+    "'StopWordsRemover_<uid>'"
+   ],
    "uid_class": [
     "ok",
     "'StopWordsRemover'"
@@ -11481,6 +11749,10 @@
     "AttributeError",
     "'str' object has no attribute 'parent'"
    ],
+   "str": [
+    "ok",
+    "'StringIndexer_<uid>'"
+   ],
    "uid_class": [
     "ok",
     "'StringIndexer'"
@@ -11605,6 +11877,10 @@
      ]
     ]
    ],
+   "loaded_str": [
+    "ok",
+    "'StringIndexerModel: uid=StringIndexer_<uid>, handleInvalid=error'"
+   ],
    "loaded_transform": [
     "ok",
     "{'columns': ['x', 'a', 's', 'tokens', 'v', 'label', 'idx', 'features', 'si'], 'rows': [\"(1.0, 2.0, 'a', ['a', 'b', 'c'], {'array': [1.0, 0.0, 2.0]}, 0.0, 0.0, {'array': [1.0, 0.0, 2.0]}, 0.0)\", \"(2.0, 1.0, 'b', ['b', 'c'], {'array': [0.0, 3.0, 1.0]}, 1.0, 1.0, {'array': [0.0, 3.0, 1.0]}, 1.0)\", \"(3.0, 4.0, 'a', ['a', 'a', 'd'], {'array': [2.0, 1.0, 0.5]}, 0.0, 2.0, {'array': [2.0, 1.0, 0.5]}, 0.0)\", \"(4.0, 3.0, 'c', ['c', 'd'], {'array': [1.5, 2.5, 3.0]}, 1.0, 0.0, {'array': [1.5, 2.5, 3.0]}, 2.0)\", \"(5.0, 6.0, 'b', ['b', 'a'], {'array': [4.0, 0.5, 1.0]}, 0.0, 1.0, {'array': [4.0, 0.5, 1.0]}, 1.0)\", \"(6.0, 5.0, 'a', ['a', 'b', 'd'], {'array': [0.5, 1.0, 4.0]}, 1.0, 2.0, {'array': [0.5, 1.0, 4.0]}, 0.0)\"]}"
@@ -11648,6 +11924,14 @@
       "\"'frequencyDesc'\""
      ]
     ]
+   ],
+   "model_repr": [
+    "ok",
+    "'StringIndexerModel: uid=StringIndexer_<uid>, handleInvalid=error'"
+   ],
+   "model_str": [
+    "ok",
+    "'StringIndexerModel: uid=StringIndexer_<uid>, handleInvalid=error'"
    ],
    "model_uid_is_estimator_uid": [
     "ok",
@@ -12120,6 +12404,10 @@
     "AttributeError",
     "'str' object has no attribute 'parent'"
    ],
+   "str": [
+    "ok",
+    "'TargetEncoder_<uid>'"
+   ],
    "uid_class": [
     "ok",
     "'TargetEncoder'"
@@ -12220,6 +12508,10 @@
      ]
     ]
    ],
+   "loaded_str": [
+    "ok",
+    "'TargetEncoderModel: uid=TargetEncoder_<uid>, handleInvalid=error, targetType=binary, numInputCols=1, numOutputCols=1, smoothing=0.0'"
+   ],
    "loaded_transform": [
     "ok",
     "{'columns': ['x', 'a', 's', 'tokens', 'v', 'label', 'idx', 'features', 'idx_te'], 'rows': [\"(1.0, 2.0, 'a', ['a', 'b', 'c'], {'array': [1.0, 0.0, 2.0]}, 0.0, 0.0, {'array': [1.0, 0.0, 2.0]}, 0.5)\", \"(2.0, 1.0, 'b', ['b', 'c'], {'array': [0.0, 3.0, 1.0]}, 1.0, 1.0, {'array': [0.0, 3.0, 1.0]}, 0.5)\", \"(3.0, 4.0, 'a', ['a', 'a', 'd'], {'array': [2.0, 1.0, 0.5]}, 0.0, 2.0, {'array': [2.0, 1.0, 0.5]}, 0.5)\", \"(4.0, 3.0, 'c', ['c', 'd'], {'array': [1.5, 2.5, 3.0]}, 1.0, 0.0, {'array': [1.5, 2.5, 3.0]}, 0.5)\", \"(5.0, 6.0, 'b', ['b', 'a'], {'array': [4.0, 0.5, 1.0]}, 0.0, 1.0, {'array': [4.0, 0.5, 1.0]}, 0.5)\", \"(6.0, 5.0, 'a', ['a', 'b', 'd'], {'array': [0.5, 1.0, 4.0]}, 1.0, 2.0, {'array': [0.5, 1.0, 4.0]}, 0.5)\"]}"
@@ -12275,6 +12567,14 @@
       "\"'binary'\""
      ]
     ]
+   ],
+   "model_repr": [
+    "ok",
+    "'TargetEncoderModel: uid=TargetEncoder_<uid>, handleInvalid=error, targetType=binary, numInputCols=1, numOutputCols=1, smoothing=0.0'"
+   ],
+   "model_str": [
+    "ok",
+    "'TargetEncoderModel: uid=TargetEncoder_<uid>, handleInvalid=error, targetType=binary, numInputCols=1, numOutputCols=1, smoothing=0.0'"
    ],
    "model_uid_is_estimator_uid": [
     "ok",
@@ -12528,6 +12828,10 @@
    "set_bad_name": [
     "AttributeError",
     "'str' object has no attribute 'parent'"
+   ],
+   "str": [
+    "ok",
+    "'Tokenizer_<uid>'"
    ],
    "uid_class": [
     "ok",
@@ -12939,6 +13243,10 @@
     "AttributeError",
     "'str' object has no attribute 'parent'"
    ],
+   "str": [
+    "ok",
+    "'UnivariateFeatureSelector_<uid>'"
+   ],
    "uid_class": [
     "ok",
     "'UnivariateFeatureSelector'"
@@ -13027,6 +13335,10 @@
      ]
     ]
    ],
+   "loaded_str": [
+    "ok",
+    "'UnivariateFeatureSelectorModel: uid=UnivariateFeatureSelector_<uid>, numSelectedFeatures=3'"
+   ],
    "loaded_transform": [
     "ok",
     "{'columns': ['x', 'a', 's', 'tokens', 'v', 'label', 'idx', 'features', 'uf'], 'rows': [\"(1.0, 2.0, 'a', ['a', 'b', 'c'], {'array': [1.0, 0.0, 2.0]}, 0.0, 0.0, {'array': [1.0, 0.0, 2.0]}, {'array': [1.0, 0.0, 2.0]})\", \"(2.0, 1.0, 'b', ['b', 'c'], {'array': [0.0, 3.0, 1.0]}, 1.0, 1.0, {'array': [0.0, 3.0, 1.0]}, {'array': [0.0, 3.0, 1.0]})\", \"(3.0, 4.0, 'a', ['a', 'a', 'd'], {'array': [2.0, 1.0, 0.5]}, 0.0, 2.0, {'array': [2.0, 1.0, 0.5]}, {'array': [2.0, 1.0, 0.5]})\", \"(4.0, 3.0, 'c', ['c', 'd'], {'array': [1.5, 2.5, 3.0]}, 1.0, 0.0, {'array': [1.5, 2.5, 3.0]}, {'array': [1.5, 2.5, 3.0]})\", \"(5.0, 6.0, 'b', ['b', 'a'], {'array': [4.0, 0.5, 1.0]}, 0.0, 1.0, {'array': [4.0, 0.5, 1.0]}, {'array': [4.0, 0.5, 1.0]})\", \"(6.0, 5.0, 'a', ['a', 'b', 'd'], {'array': [0.5, 1.0, 4.0]}, 1.0, 2.0, {'array': [0.5, 1.0, 4.0]}, {'array': [0.5, 1.0, 4.0]})\"]}"
@@ -13078,6 +13390,14 @@
       "\"'numTopFeatures'\""
      ]
     ]
+   ],
+   "model_repr": [
+    "ok",
+    "'UnivariateFeatureSelectorModel: uid=UnivariateFeatureSelector_<uid>, numSelectedFeatures=3'"
+   ],
+   "model_str": [
+    "ok",
+    "'UnivariateFeatureSelectorModel: uid=UnivariateFeatureSelector_<uid>, numSelectedFeatures=3'"
    ],
    "model_uid_is_estimator_uid": [
     "ok",
@@ -13391,6 +13711,10 @@
     "AttributeError",
     "'str' object has no attribute 'parent'"
    ],
+   "str": [
+    "ok",
+    "'VarianceThresholdSelector_<uid>'"
+   ],
    "uid_class": [
     "ok",
     "'VarianceThresholdSelector'"
@@ -13451,6 +13775,10 @@
      ]
     ]
    ],
+   "loaded_str": [
+    "ok",
+    "'VarianceThresholdSelectorModel: uid=VarianceThresholdSelector_<uid>, numSelectedFeatures=3'"
+   ],
    "loaded_transform": [
     "ok",
     "{'columns': ['x', 'a', 's', 'tokens', 'v', 'label', 'idx', 'features', 'vt'], 'rows': [\"(1.0, 2.0, 'a', ['a', 'b', 'c'], {'array': [1.0, 0.0, 2.0]}, 0.0, 0.0, {'array': [1.0, 0.0, 2.0]}, {'array': [1.0, 0.0, 2.0]})\", \"(2.0, 1.0, 'b', ['b', 'c'], {'array': [0.0, 3.0, 1.0]}, 1.0, 1.0, {'array': [0.0, 3.0, 1.0]}, {'array': [0.0, 3.0, 1.0]})\", \"(3.0, 4.0, 'a', ['a', 'a', 'd'], {'array': [2.0, 1.0, 0.5]}, 0.0, 2.0, {'array': [2.0, 1.0, 0.5]}, {'array': [2.0, 1.0, 0.5]})\", \"(4.0, 3.0, 'c', ['c', 'd'], {'array': [1.5, 2.5, 3.0]}, 1.0, 0.0, {'array': [1.5, 2.5, 3.0]}, {'array': [1.5, 2.5, 3.0]})\", \"(5.0, 6.0, 'b', ['b', 'a'], {'array': [4.0, 0.5, 1.0]}, 0.0, 1.0, {'array': [4.0, 0.5, 1.0]}, {'array': [4.0, 0.5, 1.0]})\", \"(6.0, 5.0, 'a', ['a', 'b', 'd'], {'array': [0.5, 1.0, 4.0]}, 1.0, 2.0, {'array': [0.5, 1.0, 4.0]}, {'array': [0.5, 1.0, 4.0]})\"]}"
@@ -13490,6 +13818,14 @@
       "'0.1'"
      ]
     ]
+   ],
+   "model_repr": [
+    "ok",
+    "'VarianceThresholdSelectorModel: uid=VarianceThresholdSelector_<uid>, numSelectedFeatures=3'"
+   ],
+   "model_str": [
+    "ok",
+    "'VarianceThresholdSelectorModel: uid=VarianceThresholdSelector_<uid>, numSelectedFeatures=3'"
    ],
    "model_uid_is_estimator_uid": [
     "ok",
@@ -13789,6 +14125,10 @@
    "set_bad_name": [
     "AttributeError",
     "'str' object has no attribute 'parent'"
+   ],
+   "str": [
+    "ok",
+    "'VectorAssembler_<uid>'"
    ],
    "uid_class": [
     "ok",
@@ -14107,6 +14447,10 @@
     "AttributeError",
     "'str' object has no attribute 'parent'"
    ],
+   "str": [
+    "ok",
+    "'VectorIndexer_<uid>'"
+   ],
    "uid_class": [
     "ok",
     "'VectorIndexer'"
@@ -14179,6 +14523,10 @@
      ]
     ]
    ],
+   "loaded_str": [
+    "ok",
+    "'VectorIndexerModel: uid=VectorIndexer_<uid>, numFeatures=3, handleInvalid=error'"
+   ],
    "loaded_transform": [
     "ok",
     "{'columns': ['x', 'a', 's', 'tokens', 'v', 'label', 'idx', 'features', 'vi'], 'rows': [\"(1.0, 2.0, 'a', ['a', 'b', 'c'], {'array': [1.0, 0.0, 2.0]}, 0.0, 0.0, {'array': [1.0, 0.0, 2.0]}, {'array': [1.0, 0.0, 2.0]})\", \"(2.0, 1.0, 'b', ['b', 'c'], {'array': [0.0, 3.0, 1.0]}, 1.0, 1.0, {'array': [0.0, 3.0, 1.0]}, {'array': [0.0, 3.0, 1.0]})\", \"(3.0, 4.0, 'a', ['a', 'a', 'd'], {'array': [2.0, 1.0, 0.5]}, 0.0, 2.0, {'array': [2.0, 1.0, 0.5]}, {'array': [2.0, 1.0, 0.5]})\", \"(4.0, 3.0, 'c', ['c', 'd'], {'array': [1.5, 2.5, 3.0]}, 1.0, 0.0, {'array': [1.5, 2.5, 3.0]}, {'array': [1.5, 2.5, 3.0]})\", \"(5.0, 6.0, 'b', ['b', 'a'], {'array': [4.0, 0.5, 1.0]}, 0.0, 1.0, {'array': [4.0, 0.5, 1.0]}, {'array': [4.0, 0.5, 1.0]})\", \"(6.0, 5.0, 'a', ['a', 'b', 'd'], {'array': [0.5, 1.0, 4.0]}, 1.0, 2.0, {'array': [0.5, 1.0, 4.0]}, {'array': [0.5, 1.0, 4.0]})\"]}"
@@ -14222,6 +14570,14 @@
       "\"'vi'\""
      ]
     ]
+   ],
+   "model_repr": [
+    "ok",
+    "'VectorIndexerModel: uid=VectorIndexer_<uid>, numFeatures=3, handleInvalid=error'"
+   ],
+   "model_str": [
+    "ok",
+    "'VectorIndexerModel: uid=VectorIndexer_<uid>, numFeatures=3, handleInvalid=error'"
    ],
    "model_uid_is_estimator_uid": [
     "ok",
@@ -14488,6 +14844,10 @@
    "set_bad_name": [
     "AttributeError",
     "'str' object has no attribute 'parent'"
+   ],
+   "str": [
+    "ok",
+    "'VectorSizeHint_<uid>'"
    ],
    "uid_class": [
     "ok",
@@ -14791,6 +15151,10 @@
    "set_bad_name": [
     "AttributeError",
     "'str' object has no attribute 'parent'"
+   ],
+   "str": [
+    "ok",
+    "'VectorSlicer_<uid>'"
    ],
    "uid_class": [
     "ok",
@@ -15319,6 +15683,10 @@
     "AttributeError",
     "'str' object has no attribute 'parent'"
    ],
+   "str": [
+    "ok",
+    "'Word2Vec_<uid>'"
+   ],
    "uid_class": [
     "ok",
     "'Word2Vec'"
@@ -15485,6 +15853,10 @@
      ]
     ]
    ],
+   "loaded_str": [
+    "ok",
+    "'Word2VecModel: uid=Word2Vec_<uid>, numWords=4, vectorSize=2'"
+   ],
    "loaded_transform": [
     "ok",
     "{'columns': ['x', 'a', 's', 'tokens', 'v', 'label', 'idx', 'features', 'w2v'], 'rows': [\"(1.0, 2.0, 'a', ['a', 'b', 'c'], {'array': [1.0, 0.0, 2.0]}, 0.0, 0.0, {'array': [1.0, 0.0, 2.0]}, {'array': [-0.155214, 0.118522]})\", \"(2.0, 1.0, 'b', ['b', 'c'], {'array': [0.0, 3.0, 1.0]}, 1.0, 1.0, {'array': [0.0, 3.0, 1.0]}, {'array': [-0.227091, 0.078687]})\", \"(3.0, 4.0, 'a', ['a', 'a', 'd'], {'array': [2.0, 1.0, 0.5]}, 0.0, 2.0, {'array': [2.0, 1.0, 0.5]}, {'array': [-0.036115, 0.061345]})\", \"(4.0, 3.0, 'c', ['c', 'd'], {'array': [1.5, 2.5, 3.0]}, 1.0, 0.0, {'array': [1.5, 2.5, 3.0]}, {'array': [-0.154473, 0.010077]})\", \"(5.0, 6.0, 'b', ['b', 'a'], {'array': [4.0, 0.5, 1.0]}, 0.0, 1.0, {'array': [4.0, 0.5, 1.0]}, {'array': [-0.121061, 0.061532]})\", \"(6.0, 5.0, 'a', ['a', 'b', 'd'], {'array': [0.5, 1.0, 4.0]}, 1.0, 2.0, {'array': [0.5, 1.0, 4.0]}, {'array': [-0.109183, -0.029761]})\"]}"
@@ -15552,6 +15924,14 @@
       "'5'"
      ]
     ]
+   ],
+   "model_repr": [
+    "ok",
+    "'Word2VecModel: uid=Word2Vec_<uid>, numWords=4, vectorSize=2'"
+   ],
+   "model_str": [
+    "ok",
+    "'Word2VecModel: uid=Word2Vec_<uid>, numWords=4, vectorSize=2'"
    ],
    "model_uid_is_estimator_uid": [
     "ok",
