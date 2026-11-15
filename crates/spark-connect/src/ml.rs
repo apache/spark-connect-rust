@@ -2620,7 +2620,9 @@ impl OneVsRest {
                         if index >= count {
                             break;
                         }
-                        let binary_label = format!("{}_label_{}", this.operator.uid, index);
+                        // PySpark's `OneVsRest._fit` names the binary label of the class
+                        // "mc2b$" + str(index).
+                        let binary_label = format!("mc2b${index}");
                         let binary = training.with_column(
                             &binary_label,
                             when(
