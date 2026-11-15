@@ -103,7 +103,12 @@ def test_objects_of_this_client_are_of_the_classes_of_pyspark_mls_modules(sessio
     check(lda.toLocal(), "clustering")
     evaluator = cls("evaluation", "BinaryClassificationEvaluator")()
     grid = ParamGridBuilder().addGrid(lr.maxIter, [2]).build()
-    validator = cls("tuning", "CrossValidator")(estimator=lr, estimatorParamMaps=grid, evaluator=evaluator, numFolds=2)
+    # A seed of folds of both labels: of a random seed (PySpark's of no seed differs between
+    # processes), a fold of 12 rows of one label fits a model of one class, whose rawPrediction the
+    # binary evaluator refuses (seed 2 does).
+    validator = cls("tuning", "CrossValidator")(
+        estimator=lr, estimatorParamMaps=grid, evaluator=evaluator, numFolds=2, seed=1
+    )
     check(check(validator.fit(df), "tuning").bestModel, "classification")
     scaler = cls("feature", "StandardScaler")(inputCol="features", outputCol="scaled")
     stages = [scaler, cls("classification", "LogisticRegression")(maxIter=2)]
