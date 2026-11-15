@@ -1507,8 +1507,9 @@ base class of the six, so that it has the names of `pyspark.ml.evaluation` (as
 `Estimator`, `Transformer` and `Model` of the `pyspark.ml.connect` package stay the deprecated
 classes of `pyspark.ml.connect.base`, as in PySpark's deprecated package.
 
-The three evaluators of the deprecated `pyspark.ml.connect.evaluation` (regression, binary and
-multiclass classification) now use standard Spark ML defaults:
+The three evaluators of upstream's deprecated `pyspark.ml.connect.evaluation` (regression, binary
+and multiclass classification), which the native classes of this module replace, use standard
+Spark ML defaults:
 `BinaryClassificationEvaluator` takes `rawPredictionCol="rawPrediction"`, and
 `MulticlassClassificationEvaluator` defaults to `metricName="f1"` and requires
 keyword arguments. Use `rawPredictionCol` / `setRawPredictionCol` instead of the
@@ -1525,7 +1526,8 @@ Official PySpark fixtures and live Rust/Python tests cover every supported metri
 weights, regression through the origin, binary score bins, multiclass log-loss
 clipping and beta, per-label metrics, both silhouette distances, ranking cutoffs,
 invalid inputs, and metric direction. In Rust, each evaluator saves with `write()` and
-loads with `load(session, path)`, as PySpark's. In Python, each evaluator has PySpark's Params
+loads with `load(session, path)`, as PySpark's, and `set_uid` sets its uid, as PySpark's
+`_resetUid` does. In Python, each evaluator has PySpark's Params
 API, its getters and setters, `setParams`, and `write`/`save`/`read`/`load`, which keep its uid
 and params. `evaluate(dataset, params)` with a non-empty param map evaluates a copy of the
 evaluator, as PySpark's `Evaluator.evaluate` does, and leaves the evaluator as it was.

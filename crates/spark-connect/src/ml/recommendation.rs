@@ -95,8 +95,12 @@ impl ALSModel {
         let rank = fetch(&MlTarget::object(&self.cached), "rank", vec![])?.into_value()?;
         let rank = rank.as_i64().ok_or_else(|| {
             SparkError::value_msg(format!("rank of ALSModel is not an int: {rank:?}"))
-        })? as i32;
-        Ok(rank)
+        })?;
+        i32::try_from(rank).map_err(|_| {
+            SparkError::value_msg(format!(
+                "rank of ALSModel is out of the range of an int: {rank}"
+            ))
+        })
     }
 
     /// Load an `ALSModel` saved to `path`, as PySpark's `ALSModel.load(path)`: the server caches

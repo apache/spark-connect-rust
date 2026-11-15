@@ -137,6 +137,7 @@ fn assert_loaded(
     assert_eq!(loaded.0.name, saved.0.name, "{key}");
     assert_eq!(loaded.0.uid, saved.0.uid, "{key}");
     assert_params(loaded.1, saved.1, key);
+    assert_golden_params(loaded.1, &record["params_after"], key);
 }
 
 #[test]
