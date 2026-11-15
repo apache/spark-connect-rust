@@ -1395,6 +1395,9 @@ Run `scripts/capture_ml_features_golden.py` with the official client to regenera
 `scripts/capture_feature_models_golden.py` captures the members of every fitted model, the class
 methods, and the save and load of every stage, which `e2e_feature_models.rs` compares.
 Native live tests run in CI; set `FEATURE_REFERENCE=1` explicitly to run their reference mode.
+They also check that every feature object that this client makes (a stage, its copy and load, a
+fit and the copy and load of its model, the models of the class methods) is of the class of its
+module, and that the `Pipeline` of `pyspark.ml` fits, saves and loads the stages.
 
 
 ## Native FPGrowth and PrefixSpan
@@ -1473,6 +1476,8 @@ Official PySpark 4.3.0 fixtures cover explicit and implicit ratings, predictions
 factors, and all four recommendation methods, with live
 Rust and native Python tests. In Rust, `ALS` and `ALSModel` save with `write()` and load
 with `load(session, path)`, and a loaded model reads its rank of the server, as PySpark's does.
+Live tests also check that the `CrossValidator` and `TrainValidationSplit` of `pyspark.ml` fit,
+save and load an `ALS` with a native `RegressionEvaluator`.
 
 
 ## Native ML evaluators
