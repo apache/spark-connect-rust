@@ -457,6 +457,9 @@ def params_api_cases(name):
         rec("setSeed", lambda: estimator().setSeed(42).getSeed())
         rec("seed_kwarg", lambda: estimator(seed=7).explainParam("seed"))
     params_api_common_cases(rec, est, estimator())
+    # `getParam` reads `getattr(self, paramName)`, of its TypeError of a name that is not a str.
+    rec("getParam_int", lambda: est.getParam(3))
+    rec("getParam_none", lambda: est.getParam(None))
     return rec.out
 
 
@@ -625,6 +628,31 @@ def persistence_cases(rec, est, model, model_class, df, base, summary_property=T
     )
     rec("fit_map", lambda: est.fit(df, {est.maxIter: 2}).getMaxIter())
     rec("fit_list", lambda: [m.getMaxIter() for m in est.fit(df, [{est.maxIter: 2}, {}])])
+    shutil.rmtree(base, ignore_errors=True)
+
+
+def path_cases(rec, obj, cls, base, prefix):
+    """The saves and loads of `obj` (of the class `cls`) of a path that is not a str: an
+    estimator's or a model's, of the protobuf field of PySpark's `Write` and `Read` (bytes of
+    their UTF-8, None as the empty path, upb's TypeError of anything else), and a Pipeline's, of
+    the `os.path.join` of PySpark's Python format (a `pathlib.Path`, the TypeError of anything
+    else). `base` is a scratch directory of the server's file system."""
+    import pathlib
+
+    shutil.rmtree(base, ignore_errors=True)
+    rec(prefix + "_save_int", lambda: obj.save(5))
+    rec(prefix + "_write_save_float", lambda: obj.write().save(1.5))
+    rec(prefix + "_save_none", lambda: obj.save(None))
+    rec(prefix + "_save_bad_utf8", lambda: obj.save(b"\xff"))
+    rec(prefix + "_save_bytes", lambda: obj.save((base + "/bytes").encode()))
+    rec(prefix + "_save_pathlib", lambda: obj.save(pathlib.Path(base) / "pathlib"))
+    rec(prefix + "_overwrite_int", lambda: obj.write().overwrite().save(5))
+    rec(prefix + "_load_int", lambda: cls.load(5))
+    rec(prefix + "_read_load_float", lambda: cls.read().load(1.5))
+    rec(prefix + "_load_none", lambda: cls.load(None))
+    rec(prefix + "_load_bad_utf8", lambda: cls.load(b"\xff"))
+    rec(prefix + "_load_bytes", lambda: type(cls.load((base + "/bytes").encode())).__name__)
+    rec(prefix + "_load_pathlib", lambda: type(cls.load(pathlib.Path(base) / "pathlib")).__name__)
     shutil.rmtree(base, ignore_errors=True)
 
 
@@ -920,6 +948,8 @@ def live_cases(name, spark, base):
     if name == "Pipeline":
         rec = Recorder(base)
         _pipeline_live_cases(rec, spark, base)
+        pipeline = classes(name)[0](stages=list(_stages()))
+        path_cases(rec, pipeline, type(pipeline), base, "pipeline")
         return rec.out
     if name in _VALIDATOR_OWN:
         rec = Recorder(base)
@@ -940,4 +970,6 @@ def live_cases(name, spark, base):
     else:
         _kmeans_live(rec, model, df)
     persistence_cases(rec, est, model, model_class, df, base, name != "LinearSVC")
+    path_cases(rec, est, estimator, base, "est")
+    path_cases(rec, model, model_class, base, "model")
     return rec.out

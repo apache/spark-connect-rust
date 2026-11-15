@@ -291,6 +291,15 @@ PySpark class has them:
   the attributes `shouldOverwrite` and `optionMap`, and the AttributeError of a missing attribute
   names the class as PySpark's does, of an object as of the class itself
   (`type object 'DecisionTreeRegressor' has no attribute 'maxIter'`).
+  - Their `save` and `load` (and the object's) take a path as PySpark's do. A path of an
+    estimator, a model or an evaluator is the protobuf field of its `Write` or `Read`: bytes of
+    their UTF-8, None the empty path (which the server refuses), and anything else (a
+    `pathlib.Path` too) upb's `TypeError: bad argument type for built-in operation`. A path of the
+    Python format of a Pipeline or a validator is that of its `os.path.join(path, "metadata")`: an
+    `os.PathLike` (a `pathlib.Path`), and the TypeError of anything else.
+  - A Python subclass's `load` reads the JVM class of its own name, as PySpark's `RemoteMLReader`
+    names it (the module, of `org.apache.spark` for `pyspark`, and the name), which the server
+    refuses (`CONNECT_ML.UNSUPPORTED_EXCEPTION`); a Pipeline's or a validator's loads its class.
 - **PySpark's defaults of each instance**: the default `seed` is the `hash` of the name of the
   class, and the default `outputCol` the uid of the instance and `__output`; a fitted model has the
   defaults of its estimator, which PySpark's `_copyValues` copies to it (a seed of the name of the

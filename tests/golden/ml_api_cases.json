@@ -700,6 +700,26 @@
     "ok",
     "True"
    ],
+   "est_load_bad_utf8": [
+    "UnicodeDecodeError",
+    "'utf-8' codec can't decode byte 0xff in position 0: invalid start byte"
+   ],
+   "est_load_bytes": [
+    "ok",
+    "'KMeans'"
+   ],
+   "est_load_int": [
+    "TypeError",
+    "bad argument type for built-in operation"
+   ],
+   "est_load_none": [
+    "IllegalArgumentException",
+    "Can not create a Path from an empty string"
+   ],
+   "est_load_pathlib": [
+    "TypeError",
+    "bad argument type for built-in operation"
+   ],
    "est_loaded_isSet_maxIter": [
     "ok",
     "True"
@@ -725,9 +745,41 @@
     "ok",
     "True"
    ],
+   "est_overwrite_int": [
+    "TypeError",
+    "bad argument type for built-in operation"
+   ],
+   "est_read_load_float": [
+    "TypeError",
+    "bad argument type for built-in operation"
+   ],
    "est_save": [
     "ok",
     "None"
+   ],
+   "est_save_bad_utf8": [
+    "UnicodeDecodeError",
+    "'utf-8' codec can't decode byte 0xff in position 0: invalid start byte"
+   ],
+   "est_save_bytes": [
+    "ok",
+    "None"
+   ],
+   "est_save_int": [
+    "TypeError",
+    "bad argument type for built-in operation"
+   ],
+   "est_save_none": [
+    "IllegalArgumentException",
+    "Can not create a Path from an empty string"
+   ],
+   "est_save_pathlib": [
+    "TypeError",
+    "bad argument type for built-in operation"
+   ],
+   "est_write_save_float": [
+    "TypeError",
+    "bad argument type for built-in operation"
    ],
    "fitMultiple": [
     "ok",
@@ -849,9 +901,37 @@
     "ok",
     "False"
    ],
+   "model_load_bad_utf8": [
+    "UnicodeDecodeError",
+    "'utf-8' codec can't decode byte 0xff in position 0: invalid start byte"
+   ],
+   "model_load_bytes": [
+    "ok",
+    "'KMeansModel'"
+   ],
+   "model_load_int": [
+    "TypeError",
+    "bad argument type for built-in operation"
+   ],
+   "model_load_none": [
+    "IllegalArgumentException",
+    "Can not create a Path from an empty string"
+   ],
+   "model_load_pathlib": [
+    "TypeError",
+    "bad argument type for built-in operation"
+   ],
    "model_no_attribute": [
     "AttributeError",
     "'KMeansModel' object has no attribute 'fooBarBaz'"
+   ],
+   "model_overwrite_int": [
+    "TypeError",
+    "bad argument type for built-in operation"
+   ],
+   "model_read_load_float": [
+    "TypeError",
+    "bad argument type for built-in operation"
    ],
    "model_save": [
     "ok",
@@ -860,6 +940,26 @@
    "model_save_again": [
     "UnknownException",
     "(java.io.IOException) Path <path>/model already exists. To overwrite it, please use write.overwrite().save(path) for Scala and use write().overwrite().save(path) for Java and Python."
+   ],
+   "model_save_bad_utf8": [
+    "UnicodeDecodeError",
+    "'utf-8' codec can't decode byte 0xff in position 0: invalid start byte"
+   ],
+   "model_save_bytes": [
+    "ok",
+    "None"
+   ],
+   "model_save_int": [
+    "TypeError",
+    "bad argument type for built-in operation"
+   ],
+   "model_save_none": [
+    "IllegalArgumentException",
+    "Can not create a Path from an empty string"
+   ],
+   "model_save_pathlib": [
+    "TypeError",
+    "bad argument type for built-in operation"
    ],
    "model_seed_is_estimator_hash": [
     "ok",
@@ -872,6 +972,10 @@
    "model_uid_is_estimator_uid": [
     "ok",
     "True"
+   ],
+   "model_write_save_float": [
+    "TypeError",
+    "bad argument type for built-in operation"
    ],
    "numFeatures": [
     "ok",
@@ -1100,9 +1204,17 @@
     "KeyError",
     "Param(parent='KMeans_<uid>', name='weightCol', doc='weight column name. If this is not set or empty, we treat all instance weights as 1.0.')"
    ],
+   "getParam_int": [
+    "TypeError",
+    "attribute name must be string, not 'int'"
+   ],
    "getParam_method": [
     "ValueError",
     "Cannot find param with name fit."
+   ],
+   "getParam_none": [
+    "TypeError",
+    "attribute name must be string, not 'NoneType'"
    ],
    "getParam_nope": [
     "AttributeError",
@@ -1310,6 +1422,26 @@
     "ok",
     100.0
    ],
+   "est_load_bad_utf8": [
+    "UnicodeDecodeError",
+    "'utf-8' codec can't decode byte 0xff in position 0: invalid start byte"
+   ],
+   "est_load_bytes": [
+    "ok",
+    "'LinearSVC'"
+   ],
+   "est_load_int": [
+    "TypeError",
+    "bad argument type for built-in operation"
+   ],
+   "est_load_none": [
+    "IllegalArgumentException",
+    "Can not create a Path from an empty string"
+   ],
+   "est_load_pathlib": [
+    "TypeError",
+    "bad argument type for built-in operation"
+   ],
    "est_loaded_isSet_maxIter": [
     "ok",
     "True"
@@ -1335,9 +1467,41 @@
     "ok",
     "True"
    ],
+   "est_overwrite_int": [
+    "TypeError",
+    "bad argument type for built-in operation"
+   ],
+   "est_read_load_float": [
+    "TypeError",
+    "bad argument type for built-in operation"
+   ],
    "est_save": [
     "ok",
     "None"
+   ],
+   "est_save_bad_utf8": [
+    "UnicodeDecodeError",
+    "'utf-8' codec can't decode byte 0xff in position 0: invalid start byte"
+   ],
+   "est_save_bytes": [
+    "ok",
+    "None"
+   ],
+   "est_save_int": [
+    "TypeError",
+    "bad argument type for built-in operation"
+   ],
+   "est_save_none": [
+    "IllegalArgumentException",
+    "Can not create a Path from an empty string"
+   ],
+   "est_save_pathlib": [
+    "TypeError",
+    "bad argument type for built-in operation"
+   ],
+   "est_write_save_float": [
+    "TypeError",
+    "bad argument type for built-in operation"
    ],
    "evaluate_accuracy": [
     "ok",
@@ -1488,9 +1652,37 @@
     "ok",
     "False"
    ],
+   "model_load_bad_utf8": [
+    "UnicodeDecodeError",
+    "'utf-8' codec can't decode byte 0xff in position 0: invalid start byte"
+   ],
+   "model_load_bytes": [
+    "ok",
+    "'LinearSVCModel'"
+   ],
+   "model_load_int": [
+    "TypeError",
+    "bad argument type for built-in operation"
+   ],
+   "model_load_none": [
+    "IllegalArgumentException",
+    "Can not create a Path from an empty string"
+   ],
+   "model_load_pathlib": [
+    "TypeError",
+    "bad argument type for built-in operation"
+   ],
    "model_no_attribute": [
     "AttributeError",
     "'LinearSVCModel' object has no attribute 'fooBarBaz'"
+   ],
+   "model_overwrite_int": [
+    "TypeError",
+    "bad argument type for built-in operation"
+   ],
+   "model_read_load_float": [
+    "TypeError",
+    "bad argument type for built-in operation"
    ],
    "model_save": [
     "ok",
@@ -1500,6 +1692,26 @@
     "UnknownException",
     "(java.io.IOException) Path <path>/model already exists. To overwrite it, please use write.overwrite().save(path) for Scala and use write().overwrite().save(path) for Java and Python."
    ],
+   "model_save_bad_utf8": [
+    "UnicodeDecodeError",
+    "'utf-8' codec can't decode byte 0xff in position 0: invalid start byte"
+   ],
+   "model_save_bytes": [
+    "ok",
+    "None"
+   ],
+   "model_save_int": [
+    "TypeError",
+    "bad argument type for built-in operation"
+   ],
+   "model_save_none": [
+    "IllegalArgumentException",
+    "Can not create a Path from an empty string"
+   ],
+   "model_save_pathlib": [
+    "TypeError",
+    "bad argument type for built-in operation"
+   ],
    "model_setThreshold": [
     "ok",
     0.5
@@ -1507,6 +1719,10 @@
    "model_uid_is_estimator_uid": [
     "ok",
     "True"
+   ],
+   "model_write_save_float": [
+    "TypeError",
+    "bad argument type for built-in operation"
    ],
    "numClasses": [
     "ok",
@@ -1937,9 +2153,17 @@
     "KeyError",
     "Param(parent='LinearSVC_<uid>', name='weightCol', doc='weight column name. If this is not set or empty, we treat all instance weights as 1.0.')"
    ],
+   "getParam_int": [
+    "TypeError",
+    "attribute name must be string, not 'int'"
+   ],
    "getParam_method": [
     "ValueError",
     "Cannot find param with name fit."
+   ],
+   "getParam_none": [
+    "TypeError",
+    "attribute name must be string, not 'NoneType'"
    ],
    "getParam_nope": [
     "AttributeError",
@@ -2210,6 +2434,58 @@
    "model_save": [
     "ok",
     "None"
+   ],
+   "pipeline_load_bad_utf8": [
+    "TypeError",
+    "Can't mix strings and bytes in path components"
+   ],
+   "pipeline_load_bytes": [
+    "TypeError",
+    "Can't mix strings and bytes in path components"
+   ],
+   "pipeline_load_int": [
+    "TypeError",
+    "expected str, bytes or os.PathLike object, not int"
+   ],
+   "pipeline_load_none": [
+    "TypeError",
+    "expected str, bytes or os.PathLike object, not NoneType"
+   ],
+   "pipeline_load_pathlib": [
+    "ok",
+    "'Pipeline'"
+   ],
+   "pipeline_overwrite_int": [
+    "UnknownException",
+    "(java.lang.NoSuchMethodException) No method: org.apache.spark.ml.util.ConnectHelper.handleOverwrite(int, boolean)"
+   ],
+   "pipeline_read_load_float": [
+    "TypeError",
+    "expected str, bytes or os.PathLike object, not float"
+   ],
+   "pipeline_save_bad_utf8": [
+    "TypeError",
+    "Can't mix strings and bytes in path components"
+   ],
+   "pipeline_save_bytes": [
+    "TypeError",
+    "Can't mix strings and bytes in path components"
+   ],
+   "pipeline_save_int": [
+    "TypeError",
+    "expected str, bytes or os.PathLike object, not int"
+   ],
+   "pipeline_save_none": [
+    "TypeError",
+    "expected str, bytes or os.PathLike object, not NoneType"
+   ],
+   "pipeline_save_pathlib": [
+    "ok",
+    "None"
+   ],
+   "pipeline_write_save_float": [
+    "TypeError",
+    "expected str, bytes or os.PathLike object, not float"
    ],
    "save": [
     "ok",
