@@ -13,9 +13,12 @@ mod ml_golden;
 
 use std::collections::BTreeSet;
 
-use ml_golden::{assert_commands, assert_fit_dataset, golden_dataset, ReplayServer};
+use ml_golden::{
+    assert_commands, assert_fit_dataset, assert_transform_relation, call_dataset, golden_dataset,
+    ReplayServer,
+};
 use serde_json::{json, Value};
-use spark_connect::ml::{load_stage, Estimator, Params, PipelineStage};
+use spark_connect::ml::{load_stage, Estimator, Params, PipelineStage, Transformer};
 use spark_connect::ml::{
     BinaryClassificationSummary, ClassificationSummary, FMClassificationModel, FMClassifier,
     MlMatrix, MlSummary, MlTarget, MlVector, Model, MultilayerPerceptronClassificationModel,
@@ -409,11 +412,19 @@ fn naive_bayes_load_and_save_match_official_pyspark() {
 
         // Load: a read of the saved model, whose members are the loaded model's.
         let (server, session) = ReplayServer::start(&[saved]);
-        let loaded = NaiveBayesModel::load(&session, "<path>").unwrap();
+        let mut loaded = NaiveBayesModel::load(&session, "<path>").unwrap();
         assert_commands(&server, &saved["load"], &format!("{key}: load"));
         let mut checker = Checker::new(&server, &saved["members"]["members"]);
         checker.value("predict-dense", || loaded.predict(&dense(&[1.0, 0.0])));
         checker.finish(&["repr()", "str()", "transform"]);
+        let transform = &saved["members"]["members"]["transform"];
+        let input = golden_dataset(
+            &session,
+            &models["datasets"],
+            call_dataset(&transform["call"]),
+        );
+        let output = loaded.transform(&input).unwrap();
+        assert_transform_relation(&output, transform, &format!("{key}: transform"));
 
         // Save: a write of the fitted model, with the params that its estimator sets.
         let fit = &models["fits"][key]["fit"];
@@ -498,11 +509,19 @@ fn multilayer_perceptron_load_and_save_match_official_pyspark() {
     let saved = &persistence["persistence"][format!("{key}.model")];
 
     let (server, session) = ReplayServer::start(&[saved]);
-    let loaded = MultilayerPerceptronClassificationModel::load(&session, "<path>").unwrap();
+    let mut loaded = MultilayerPerceptronClassificationModel::load(&session, "<path>").unwrap();
     assert_commands(&server, &saved["load"], &format!("{key}: load"));
     let mut checker = Checker::new(&server, &saved["members"]["members"]);
     checker.value("predict-dense", || loaded.predict(&dense(&[0.5, 1.5])));
     checker.finish(&["repr()", "str()", "transform"]);
+    let transform = &saved["members"]["members"]["transform"];
+    let input = golden_dataset(
+        &session,
+        &models["datasets"],
+        call_dataset(&transform["call"]),
+    );
+    let output = loaded.transform(&input).unwrap();
+    assert_transform_relation(&output, transform, &format!("{key}: transform"));
     // A loaded model has no training summary, as PySpark's.
     assert!(!loaded.has_summary());
     assert!(loaded.summary().is_err());
@@ -589,11 +608,19 @@ fn fm_load_and_save_match_official_pyspark() {
     let saved = &persistence["persistence"][format!("{key}.model")];
 
     let (server, session) = ReplayServer::start(&[saved]);
-    let loaded = FMClassificationModel::load(&session, "<path>").unwrap();
+    let mut loaded = FMClassificationModel::load(&session, "<path>").unwrap();
     assert_commands(&server, &saved["load"], &format!("{key}: load"));
     let mut checker = Checker::new(&server, &saved["members"]["members"]);
     checker.value("predict-dense", || loaded.predict(&dense(&[0.5, 1.5])));
     checker.finish(&["repr()", "str()", "transform"]);
+    let transform = &saved["members"]["members"]["transform"];
+    let input = golden_dataset(
+        &session,
+        &models["datasets"],
+        call_dataset(&transform["call"]),
+    );
+    let output = loaded.transform(&input).unwrap();
+    assert_transform_relation(&output, transform, &format!("{key}: transform"));
     assert!(!loaded.has_summary());
     assert!(loaded.summary().is_err());
 

@@ -221,6 +221,50 @@ pub fn assert_fit_dataset(server: &ReplayServer, datasets: &Json, name: &str) {
     }
 }
 
+/// The dataset of a golden call, as the name in its parentheses: `loaded.transform(nb_counts_eval)`
+/// names `nb_counts_eval`.
+pub fn call_dataset(call: &Json) -> &str {
+    let call = call.as_str().expect("a golden call");
+    let open = call.find('(').expect("a call with an argument");
+    call[open + 1..]
+        .strip_suffix(')')
+        .expect("a call that ends with its argument")
+}
+
+/// Asserts that `output`, the DataFrame that a model's transform returned, has the golden
+/// transform's MlRelation in its operator (the model's reference) and its params. The input of
+/// the transform, the dataset of the call, is not compared: its relation is the client's own plan
+/// of the dataset, and its rows are not in the golden's relation (see [`assert_fit_dataset`]).
+pub fn assert_transform_relation(output: &DataFrame, entry: &Json, at: &str) {
+    use proto::ml_relation::{transform::Operator, MlType};
+    use proto::relation::RelType;
+    let relation = output.to_relation().unwrap();
+    let Some(RelType::MlRelation(sent)) = relation.rel_type else {
+        panic!("{at}: the transform does not send an MlRelation");
+    };
+    let expected = golden_relations(entry);
+    assert_eq!(expected.len(), 1, "{at}: one golden transform");
+    let (Some(MlType::Transform(sent)), Some(MlType::Transform(expected))) =
+        (sent.ml_type, expected[0].ml_type.clone())
+    else {
+        panic!("{at}: a golden relation that is not a transform");
+    };
+    let reference = |operator: &Option<Operator>| match operator {
+        Some(Operator::ObjRef(object)) => object.id.clone(),
+        other => panic!("{at}: a transform of no object reference: {other:?}"),
+    };
+    assert_eq!(
+        reference(&sent.operator),
+        reference(&expected.operator),
+        "{at}: the model"
+    );
+    assert_params(
+        &Params::from_proto(&sent.params.unwrap_or_default()),
+        &Params::from_proto(&expected.params.unwrap_or_default()),
+        at,
+    );
+}
+
 // The values as scripts/ml_golden_common.py renders those of official PySpark.
 
 pub fn num(x: f64) -> Json {

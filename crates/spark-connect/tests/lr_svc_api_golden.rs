@@ -10,7 +10,10 @@
 mod ml_golden;
 
 use base64::{engine::general_purpose::STANDARD, Engine};
-use ml_golden::{assert_commands, assert_fit_dataset, golden_dataset, ReplayServer};
+use ml_golden::{
+    assert_commands, assert_fit_dataset, assert_transform_relation, call_dataset, golden_dataset,
+    ReplayServer,
+};
 use prost::Message;
 use serde_json::{json, Value};
 use spark_connect::ml::{
@@ -590,7 +593,7 @@ fn logistic_regression_persistence_matches_official_pyspark() {
             .unwrap();
         assert_commands(&server, &estimator_entry["save"], family);
 
-        let model = LogisticRegressionModel::load(&session, "/unused/path").unwrap();
+        let mut model = LogisticRegressionModel::load(&session, "/unused/path").unwrap();
         assert_commands(&server, &model_entry["load"], family);
         assert_eq!(model.operator().uid, result_uid(&model_entry["load"]));
         assert!(!model.has_summary());
@@ -600,6 +603,11 @@ fn logistic_regression_persistence_matches_official_pyspark() {
             &|key| logistic_model_member(&model, key),
             family,
         );
+        let transform = &model_entry["members"]["members"]["transform"];
+        let datasets = golden(PERSISTENCE)["datasets"].clone();
+        let input = golden_dataset(&session, &datasets, call_dataset(&transform["call"]));
+        let output = model.transform(&input).unwrap();
+        assert_transform_relation(&output, transform, &format!("{family}: transform"));
         model
             .write()
             .unwrap()
@@ -631,7 +639,7 @@ fn linear_svc_persistence_matches_official_pyspark() {
         .unwrap();
     assert_commands(&server, &estimator_entry["save"], family);
 
-    let model = LinearSVCModel::load(&session, "/unused/path").unwrap();
+    let mut model = LinearSVCModel::load(&session, "/unused/path").unwrap();
     assert_commands(&server, &model_entry["load"], family);
     assert_eq!(model.operator().uid, result_uid(&model_entry["load"]));
     check_model_members(
@@ -640,6 +648,11 @@ fn linear_svc_persistence_matches_official_pyspark() {
         &|key| linear_svc_model_member(&model, key),
         family,
     );
+    let transform = &model_entry["members"]["members"]["transform"];
+    let datasets = golden(PERSISTENCE)["datasets"].clone();
+    let input = golden_dataset(&session, &datasets, call_dataset(&transform["call"]));
+    let output = model.transform(&input).unwrap();
+    assert_transform_relation(&output, transform, &format!("{family}: transform"));
     model
         .write()
         .unwrap()
