@@ -292,7 +292,8 @@ native_summary! {
 }
 
 native_model! {
-    PyLDAModel = "LDAModel" in "pyspark.ml.connect.clustering", base;
+    PyLDAModel = "LDAModel" in "pyspark.ml.connect.clustering", base,
+        jvm: "org.apache.spark.ml.clustering.LDAModel";
     params: [
         "checkpointInterval" => (
             "getCheckpointInterval",
@@ -422,6 +423,21 @@ macro_rules! lda_model {
 
         #[pymethods]
         impl $ty {
+            /// A model of no server-side object, as the base class's constructor.
+            #[new]
+            #[pyo3(signature = (java_model=None))]
+            fn __new__(
+                py: Python<'_>,
+                java_model: Option<&Bound<'_, PyAny>>,
+            ) -> PyResult<PyClassInitializer<Self>> {
+                if java_model.is_some() {
+                    return Err(pyo3::exceptions::PyAssertionError::new_err(()));
+                }
+                let core = object::ModelCore::unbound(py, $jvm, $name)?;
+                let base = PyLDAModel { core, make: Self::__make };
+                Ok(PyClassInitializer::from(base).add_subclass(Self))
+            }
+
             fn write(slf: &Bound<'_, Self>) -> PyResult<object::PyMLWriter> {
                 slf.as_super().try_borrow()?.core.writer(slf.py())
             }

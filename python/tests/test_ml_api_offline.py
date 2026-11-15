@@ -291,6 +291,24 @@ def test_params_api_cases_are_pyspark_mls(name):
     assert not differ, json.dumps(differ, indent=1)
 
 
+_JAVA_MODEL_INIT = [["java_model", "POSITIONAL_OR_KEYWORD", "None"]]
+
+
+@pytest.mark.parametrize(
+    "spec", [s for s in FULL if API[s[1]]["init"] == _JAVA_MODEL_INIT], ids=lambda spec: spec[1]
+)
+def test_models_construct_of_no_server_object_as_pyspark_mls(spec):
+    # As PySpark's `JavaModel(java_model=None)`: a model of its params, none of them set, of a new
+    # uid of its class and of no server-side object, whose members of the server raise
+    # (test_ml_api_e2e.py).
+    cls = native_class(*spec)
+    assert API[spec[1]]["default_instance"]
+    for model in (cls(), cls(None), cls(java_model=None)):
+        assert type(model) is cls
+        assert model.uid.startswith(spec[1] + "_") and len(model.uid) == len(spec[1]) + 13
+        assert not any(model.isSet(p) for p in model.extractParamMap())
+
+
 def test_native_classes_are_of_pyspark_mls_bases_on_a_fresh_import():
     # The registration runs at the import of any module of pyspark.ml.connect, before any check of
     # the user's.

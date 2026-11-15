@@ -10,6 +10,7 @@ import os
 import tempfile
 from pathlib import Path
 
+import _ml_unbound_cases
 import pytest
 from _ml_api_cases import CLASSES, live_cases
 from pyspark.sql import SparkSession
@@ -38,3 +39,15 @@ def test_live_cases_are_pyspark_mls(name, session):
     assert sorted(ours) == sorted(golden)
     differ = {tag: (ours[tag], golden[tag]) for tag in golden if ours[tag] != golden[tag]}
     assert not differ, json.dumps(differ, indent=1)
+
+
+UNBOUND = json.loads(_ml_unbound_cases.GOLDEN.read_text())
+
+
+@pytest.mark.parametrize("name", _ml_unbound_cases.MODELS)
+def test_models_of_no_server_object_are_pyspark_mls(name, session):
+    # A model of no server-side object, as PySpark's `JavaModel(java_model=None)` makes one: of its
+    # params and their defaults, and of the AssertionError of its members of the server, a
+    # transform, a save and the `params` walk of a model of cached members
+    # (tests/golden/ml_unbound_models.json).
+    assert _ml_unbound_cases.outcomes(session, name) == UNBOUND["models"][name]
