@@ -273,10 +273,12 @@ fn a_cross_validator_over_a_loaded_als_estimator_evaluates_as_pyspark_does() {
         .set_num_folds(2)
         .set_seed(3);
     let model = cv.fit_validator(&ratings(&s)).unwrap();
+    // ALS computes in floats, so the metrics of two servers (a local one and CI's Linux one)
+    // differ in their eighth digit: 0.6690446412218276 locally, 0.6690446591958767 on CI.
     assert_all_close(
         model.avg_metrics(),
         &[0.6690446412218276, 0.8557945260815127],
-        1e-9,
+        1e-6,
     );
 }
 
