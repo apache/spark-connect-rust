@@ -448,6 +448,33 @@ def _one_vs_rest_live(rec, spark, base):
     )
     rec("model_getFeaturesCol", lambda: model.getFeaturesCol())
     rec("model_isSet_parallelism", lambda: model.isSet("parallelism"))
+    # A copy of the model has copies of its models, each a copy with the extra params
+    # (`model.copy(extra)`), of which those of the classifier's uid, the models' own, set theirs.
+    classifier = est.getClassifier()
+    rec(
+        "model_copy_models",
+        lambda: [
+            (type(s).__name__, s is t, s.uid == t.uid)
+            for s, t in zip(model.copy().models, model.models)
+        ],
+    )
+    rec("model_copy_models_same_list", lambda: (lambda c: c.models is c.models)(model.copy()))
+    rec(
+        "model_copy_classifier_param",
+        lambda: [s.getPredictionCol() for s in model.copy({classifier.predictionCol: "x"}).models],
+    )
+    rec(
+        "model_copy_classifier_param_own",
+        lambda: model.copy({classifier.predictionCol: "x"}).getPredictionCol(),
+    )
+    rec(
+        "model_copy_own_param",
+        lambda: [s.getPredictionCol() for s in model.copy({model.predictionCol: "y"}).models],
+    )
+    rec(
+        "model_copy_own_param_own",
+        lambda: model.copy({model.predictionCol: "y"}).getPredictionCol(),
+    )
     rec("model_transform_map", lambda: model.transform(df, {model.predictionCol: "q"}).columns)
     rec("transform_columns", lambda: model.transform(df).columns)
     rec("transform", lambda: model.transform(df))
@@ -511,6 +538,10 @@ def _one_vs_rest_persistence(rec, est, model, df, base):
         ],
     )
     rec("model_loaded_models_uids", lambda: [s.uid for s in loaded_model.models])
+    rec(
+        "model_loaded_copy_models",
+        lambda: [(type(s).__name__, s.uid) for s in loaded_model.copy().models],
+    )
     rec("model_loaded_classifier", lambda: type(loaded_model.getClassifier()).__name__)
     rec("model_loaded_params", lambda: _params_of(loaded_model))
     rec("model_loaded_transform", lambda: loaded_model.transform(df))

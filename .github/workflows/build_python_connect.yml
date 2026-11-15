@@ -245,6 +245,7 @@ jobs:
             tests/test_gaussian_mixture_e2e.py \
             tests/test_generalized_linear_regression_e2e.py \
             tests/test_remaining_classifiers_e2e.py \
+            tests/test_ml_classification_classes_e2e.py \
             tests/test_remaining_regressors_e2e.py \
             tests/test_remaining_clustering_e2e.py \
             tests/test_ml_features_e2e.py \

@@ -38,7 +38,7 @@ pub struct PyOneVsRestModel {
     raw: Vec<(&'static str, Py<PyAny>)>,
     /// The fit that the submodels are made of; None of a loaded model.
     fit: Option<OneVsRestFit>,
-    /// The `models`, made at the first access, then the same list.
+    /// The `models`, set by the fit, the load or the copy that makes the model, then the same list.
     models: OnceLock<Py<PyList>>,
 }
 
@@ -410,13 +410,23 @@ native_pymethods! {
         Ok(Py::new(slf.py(), PyDataFrame::new(df))?.into_any())
     }
 
-    /// A copy of the same uid and params, with `extra`, as `Params.copy`.
+    /// A copy of the same uid and params, with `extra`, as `OneVsRestModel.copy`: `Params.copy`,
+    /// whose `models` are copies of the models, each with `extra`
+    /// (`[model.copy(extra) for model in self.models]`).
     #[pyo3(name = "copy", signature = (extra=None))]
     fn __params_copy<'py>(
         slf: &Bound<'py, Self>,
         extra: Option<&Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, Self>> {
-        params_api::copy(slf, extra)
+        let py = slf.py();
+        let extra = crate::ml::pipeline_api::extra_or_empty(py, extra);
+        let that = params_api::copy(slf, Some(&extra))?;
+        let models = PyList::empty(py);
+        for model in submodels(slf)?.bind(py).iter() {
+            models.append(model.call_method1("copy", (&extra,))?)?;
+        }
+        let _ = that.try_borrow()?.models.set(models.unbind());
+        Ok(that)
     }
 
     /// The writer of the model, as `OneVsRestModel.write` over Spark Connect (`RemoteMLWriter`,
