@@ -48,8 +48,8 @@ def fitted(spark, service, values=None):
 def test_native_exports_and_constructor_signature():
     import pyspark.ml.connect as connect
 
-    assert recommendation.ALS is connect.ALS is _pyspark.ALS
-    assert recommendation.ALSModel is connect.ALSModel is _pyspark.ALSModel
+    assert recommendation.ALS is connect.ALS and issubclass(connect.ALS, _pyspark.ALS)
+    assert recommendation.ALSModel is connect.ALSModel and issubclass(connect.ALSModel, _pyspark.ALSModel)
     params = inspect.signature(recommendation.ALS).parameters
     assert list(params) == list(GOLDEN["defaults"])
     for key, value in GOLDEN["defaults"].items():

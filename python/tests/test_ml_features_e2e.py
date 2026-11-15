@@ -17,7 +17,7 @@ def algorithm(name):
     else:
         from pyspark import _pyspark
         from pyspark.ml.connect import feature
-        assert getattr(feature, name) is getattr(_pyspark, name)
+        assert issubclass(getattr(feature, name), getattr(_pyspark, name))
     return getattr(feature, name)
 
 

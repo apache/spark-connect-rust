@@ -19,7 +19,7 @@ def algorithm(name):
         from pyspark import _pyspark
         from pyspark.ml.connect import recommendation
 
-        assert getattr(recommendation, name) is getattr(_pyspark, name)
+        assert issubclass(getattr(recommendation, name), getattr(_pyspark, name))
     return getattr(recommendation, name)
 
 

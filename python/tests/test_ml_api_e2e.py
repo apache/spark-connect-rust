@@ -13,6 +13,7 @@ from pathlib import Path
 import _ml_unbound_cases
 import pytest
 from _ml_api_cases import CLASSES, live_cases
+from _native_classes import native_class
 from pyspark.sql import SparkSession
 
 CASES = json.loads(
@@ -51,3 +52,66 @@ def test_models_of_no_server_object_are_pyspark_mls(name, session):
     # transform, a save and the `params` walk of a model of cached members
     # (tests/golden/ml_unbound_models.json).
     assert _ml_unbound_cases.outcomes(session, name) == UNBOUND["models"][name]
+
+
+def test_objects_of_this_client_are_of_the_classes_of_pyspark_mls_modules(session):
+    # Every object that this client makes, as PySpark's do, is of the class of its module, of every
+    # base of PySpark's class (test_ml_api_offline.py): of a fit (of a param map, of fitMultiple),
+    # a copy, a load, a summary, the trees of an ensemble (regression models of a classifier), the
+    # models of a OneVsRest, the best model of a validator, toLocal and the stages of a pipeline.
+    # A Pipeline of pyspark.ml saves native stages, which are its MLWritable stages.
+    from pyspark.ml import Pipeline as PySparkPipeline
+    from pyspark.ml import PipelineModel as PySparkPipelineModel
+    from pyspark.ml.linalg import Vectors
+    from pyspark.ml.tuning import ParamGridBuilder
+
+    def cls(module, name):
+        return native_class(f"pyspark.ml.connect.{module}", name, f"pyspark.ml.{module}")
+
+    def check(obj, module):
+        assert type(obj) is cls(module, type(obj).__name__), (type(obj), module)
+        return obj
+
+    rows = [(float(i % 2), Vectors.dense([float(i), float(i % 3)])) for i in range(12)]
+    df = session.createDataFrame(rows, ["label", "features"]).coalesce(1)
+    path = tempfile.mkdtemp(prefix="ml-public-classes-")
+    lr = cls("classification", "LogisticRegression")(maxIter=3)
+    model = check(lr.fit(df), "classification")
+    check(model.summary, "classification")
+    check(model.evaluate(df), "classification")
+    check(model.copy(), "classification")
+    check(lr.fit(df, {lr.maxIter: 2}), "classification")
+    for _, fitted in lr.fitMultiple(df, [{lr.maxIter: 2}]):
+        check(fitted, "classification")
+    model.write().overwrite().save(path + "/lr")
+    check(cls("classification", "LogisticRegressionModel").load(path + "/lr"), "classification")
+    lr.write().overwrite().save(path + "/lr-estimator")
+    check(cls("classification", "LogisticRegression").load(path + "/lr-estimator"), "classification")
+    gbt = check(cls("classification", "GBTClassifier")(maxIter=2).fit(df), "classification")
+    for tree in gbt.trees:
+        check(tree, "regression")
+    forest = check(cls("classification", "RandomForestClassifier")(numTrees=2).fit(df), "classification")
+    for tree in forest.trees:
+        check(tree, "classification")
+    check(forest.summary, "classification")
+    ovr = cls("classification", "OneVsRest")(classifier=cls("classification", "LogisticRegression")(maxIter=2))
+    for submodel in check(ovr.fit(df), "classification").models:
+        check(submodel, "classification")
+    check(check(cls("regression", "LinearRegression")(maxIter=2).fit(df), "regression").summary, "regression")
+    check(check(cls("clustering", "KMeans")(k=2, maxIter=2).fit(df), "clustering").summary, "clustering")
+    lda = check(cls("clustering", "LDA")(k=2, maxIter=2, optimizer="em").fit(df), "clustering")
+    check(lda.toLocal(), "clustering")
+    evaluator = cls("evaluation", "BinaryClassificationEvaluator")()
+    grid = ParamGridBuilder().addGrid(lr.maxIter, [2]).build()
+    validator = cls("tuning", "CrossValidator")(estimator=lr, estimatorParamMaps=grid, evaluator=evaluator, numFolds=2)
+    check(check(validator.fit(df), "tuning").bestModel, "classification")
+    scaler = cls("feature", "StandardScaler")(inputCol="features", outputCol="scaled")
+    stages = [scaler, cls("classification", "LogisticRegression")(maxIter=2)]
+    pipeline = check(cls("pipeline", "Pipeline")(stages=stages).fit(df), "pipeline")
+    pipeline.write().overwrite().save(path + "/pipeline")
+    loaded = check(cls("pipeline", "PipelineModel").load(path + "/pipeline"), "pipeline")
+    for stage, module in zip(loaded.stages, ["feature", "classification"]):
+        check(stage, module)
+    ours = PySparkPipeline(stages=[cls("classification", "LogisticRegression")(maxIter=2)]).fit(df)
+    ours.write().overwrite().save(path + "/pyspark-pipeline")
+    assert PySparkPipelineModel.load(path + "/pyspark-pipeline").transform(df).count() == 12

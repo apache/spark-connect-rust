@@ -35,7 +35,7 @@ def test_native_exports_and_constructor_signatures(name):
     import pyspark.ml.connect as connect
 
     cls = getattr(fpm, name)
-    assert cls is getattr(_pyspark, name) is getattr(connect, name)
+    assert cls is getattr(connect, name) and issubclass(cls, getattr(_pyspark, name))
     parameters = inspect.signature(cls).parameters
     assert list(parameters) == list(GOLDEN["defaults"][name])
     for key, value in GOLDEN["defaults"][name].items():

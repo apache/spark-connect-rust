@@ -42,7 +42,7 @@ fn helper_relation(
     ))
 }
 
-#[pyclass(name = "ChiSquareTest", module = "pyspark.ml.stat")]
+#[pyclass(subclass, name = "ChiSquareTest", module = "pyspark.ml.stat")]
 pub struct PyChiSquareTest;
 #[pymethods]
 impl PyChiSquareTest {
@@ -68,7 +68,7 @@ impl PyChiSquareTest {
     }
 }
 
-#[pyclass(name = "Correlation", module = "pyspark.ml.stat")]
+#[pyclass(subclass, name = "Correlation", module = "pyspark.ml.stat")]
 pub struct PyCorrelation;
 #[pymethods]
 impl PyCorrelation {
@@ -91,7 +91,7 @@ impl PyCorrelation {
     }
 }
 
-#[pyclass(name = "KolmogorovSmirnovTest", module = "pyspark.ml.stat")]
+#[pyclass(subclass, name = "KolmogorovSmirnovTest", module = "pyspark.ml.stat")]
 pub struct PyKolmogorovSmirnovTest;
 #[pymethods]
 impl PyKolmogorovSmirnovTest {
@@ -137,7 +137,7 @@ impl PyKolmogorovSmirnovTest {
     }
 }
 
-#[pyclass(name = "SummaryBuilder", module = "pyspark.ml.stat")]
+#[pyclass(subclass, name = "SummaryBuilder", module = "pyspark.ml.stat")]
 pub struct PySummaryBuilder {
     metrics: Vec<Py<PyAny>>,
 }
@@ -177,7 +177,7 @@ impl PySummaryBuilder {
     }
 }
 
-#[pyclass(name = "Summarizer", module = "pyspark.ml.stat")]
+#[pyclass(subclass, name = "Summarizer", module = "pyspark.ml.stat")]
 pub struct PySummarizer;
 fn columns(
     col: &Bound<'_, PyAny>,
@@ -202,8 +202,9 @@ macro_rules! metrics {
     ($(($name:ident, $python:literal)),* $(,)?) => { #[pymethods] impl PySummarizer {
         #[staticmethod]
         #[pyo3(signature = (*metrics))]
-        fn metrics(metrics: &Bound<'_, PyTuple>) -> PySummaryBuilder {
-            PySummaryBuilder { metrics: metrics.iter().map(Bound::unbind).collect() }
+        fn metrics(metrics: &Bound<'_, PyTuple>) -> PyResult<Py<PySummaryBuilder>> {
+            let builder = PySummaryBuilder { metrics: metrics.iter().map(Bound::unbind).collect() };
+            crate::ml::object::new_py(metrics.py(), builder)
         }
         $(
         #[staticmethod]

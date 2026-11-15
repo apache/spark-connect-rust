@@ -986,7 +986,9 @@ pub(super) fn from_read<T: ParamsHolder + NativeInstance>(
     py: Python<'_>,
     read: spark_connect::ml::ReadResult,
 ) -> PyResult<Py<PyAny>> {
-    let instance = py.get_type::<T>().call0()?.cast_into::<T>()?;
+    // Of the public class of `T`, as a constructor of the class that `load` is called of.
+    let class = super::object::public_class::<T>(py).unwrap_or_else(|| py.get_type::<T>());
+    let instance = class.call0()?.cast_into::<T>()?;
     // The defaults of the uid that the instance was made of, which `_resetUid` keeps.
     for meta in params_of(instance.as_any())? {
         if meta
@@ -1021,7 +1023,7 @@ pub(super) fn from_read<T: ParamsHolder + NativeInstance>(
 /// PySpark's `_FitMultipleIterator` of `fitMultiple(dataset, paramMaps)`: each `next` fits the
 /// copy of the estimator of the next param map, and returns its index and model, until none are
 /// left (`StopIteration("No models remaining.")`). It may be shared by threads, as PySpark's.
-#[pyclass(name = "_FitMultipleIterator", module = "pyspark.ml.base")]
+#[pyclass(subclass, name = "_FitMultipleIterator", module = "pyspark.ml.base")]
 pub struct PyFitMultipleIterator {
     fit: Py<PyAny>,
     dataset: Py<PyAny>,
@@ -1064,16 +1066,19 @@ pub(super) fn fit_multiple<'py>(
     slf: &Bound<'py, PyAny>,
     dataset: &Bound<'py, PyAny>,
     param_maps: &Bound<'py, PyAny>,
-) -> PyResult<PyFitMultipleIterator> {
+) -> PyResult<Py<PyFitMultipleIterator>> {
     let estimator = slf.call_method0("copy")?;
     let maps = param_maps
         .try_iter()?
         .map(|m| m.map(Bound::unbind))
         .collect::<PyResult<Vec<_>>>()?;
-    Ok(PyFitMultipleIterator {
-        fit: estimator.getattr("fit")?.unbind(),
-        dataset: dataset.clone().unbind(),
-        maps,
-        counter: std::sync::Mutex::new(0),
-    })
+    super::object::new_py(
+        slf.py(),
+        PyFitMultipleIterator {
+            fit: estimator.getattr("fit")?.unbind(),
+            dataset: dataset.clone().unbind(),
+            maps,
+            counter: std::sync::Mutex::new(0),
+        },
+    )
 }

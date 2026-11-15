@@ -96,7 +96,7 @@ def test_native_exports_and_official_constructor_signature(name, ml_mock):
     # checks of the keyword arguments run with one, as they do of PySpark's constructors.
     import pyspark.ml.connect as connect
     cls = getattr(feature, name)
-    assert cls is getattr(_pyspark, name) is getattr(connect, name)
+    assert cls is getattr(connect, name) and issubclass(cls, getattr(_pyspark, name))
     expected = GOLDEN["api"][name]["defaults"]
     parameters = inspect.signature(cls).parameters
     assert list(parameters) == list(expected)

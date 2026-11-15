@@ -12,7 +12,10 @@ fn make_trees(py: Python<'_>, model: &object::ModelCore) -> PyResult<Py<PyAny>> 
         .to_pyerr()?;
     let trees = objects
         .into_iter()
-        .map(|tree| PyDecisionTreeRegressionModel::of_object(py, tree).and_then(|m| Py::new(py, m)))
+        .map(|tree| {
+            PyDecisionTreeRegressionModel::of_object(py, tree)
+                .and_then(|m| crate::ml::object::new_py(py, m))
+        })
         .collect::<PyResult<Vec<_>>>()?;
     Ok(PyList::new(py, trees)?.into_any().unbind())
 }
@@ -23,7 +26,7 @@ fn linear_regression_summary(
     _model: &object::ModelCore,
     target: spark_connect::ml::MlTarget,
 ) -> PyResult<Py<PyAny>> {
-    Ok(Py::new(py, PyLinearRegressionTrainingSummary::from(target))?.into_any())
+    Ok(crate::ml::object::new_py(py, PyLinearRegressionTrainingSummary::from(target))?.into_any())
 }
 
 /// The training summary object of a GeneralizedLinearRegressionModel, as `_summaryCls` makes it.
@@ -32,7 +35,7 @@ fn glr_summary(
     _model: &object::ModelCore,
     target: spark_connect::ml::MlTarget,
 ) -> PyResult<Py<PyAny>> {
-    Ok(Py::new(
+    Ok(crate::ml::object::new_py(
         py,
         PyGeneralizedLinearRegressionTrainingSummary::from(target),
     )?
@@ -349,7 +352,7 @@ native_model! {
         let target = slf.try_borrow()?.core.target()?;
         let output = object::fetch_py(py, &target, "evaluate", std::slice::from_ref(dataset))?;
         let summary = spark_connect::ml::evaluated_summary(&target, output).to_pyerr()?;
-        Py::new(py, PyLinearRegressionSummary::from(summary))
+        crate::ml::object::new_py(py, PyLinearRegressionSummary::from(summary))
     }
 
 }
@@ -429,7 +432,7 @@ native_model! {
         let target = slf.try_borrow()?.core.target()?;
         let output = object::fetch_py(py, &target, "evaluate", std::slice::from_ref(dataset))?;
         let summary = spark_connect::ml::evaluated_summary(&target, output).to_pyerr()?;
-        Py::new(py, PyGeneralizedLinearRegressionSummary::from(summary))
+        crate::ml::object::new_py(py, PyGeneralizedLinearRegressionSummary::from(summary))
     }
 
 }

@@ -52,7 +52,7 @@ def _algorithm(name):
     from pyspark import _pyspark
     from pyspark.ml.connect import clustering
     cls = getattr(clustering, name)
-    assert cls is getattr(_pyspark, name), "The native tests must exercise the Rust bindings"
+    assert issubclass(cls, getattr(_pyspark, name)), "The native tests must exercise the Rust bindings"
     return cls
 
 

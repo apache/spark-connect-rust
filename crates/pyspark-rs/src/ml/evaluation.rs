@@ -12,7 +12,7 @@ use spark_connect::ml::{
 /// `$name`, with the wrapper's [`Native`] and [`params_api::NativeInstance`] (its copy and uid).
 macro_rules! evaluator_struct {
     ($ty:ident, $core:ident, $name:literal) => {
-        #[pyclass(name = $name, module = "pyspark.ml.connect.evaluation")]
+        #[pyclass(subclass, name = $name, module = "pyspark.ml.connect.evaluation")]
         pub struct $ty {
             inner: $core,
             unsendable: Vec<&'static str>,
@@ -39,7 +39,7 @@ macro_rules! evaluator_struct {
 
         impl params_api::NativeInstance for $ty {
             fn duplicate(&self, py: Python<'_>) -> PyResult<Py<Self>> {
-                Py::new(
+                crate::ml::object::new_py(
                     py,
                     Self {
                         inner: self.inner.clone(),

@@ -61,7 +61,7 @@ def test_evaluator_exports_signature_and_pandas_guard(ml_mock, name):
     import pyspark.ml.connect as root
 
     cls = getattr(evaluation, name)
-    assert cls is getattr(native, name) is getattr(root, name)
+    assert cls is getattr(root, name) and issubclass(cls, getattr(native, name))
     assert str(inspect.signature(cls)) == FIXTURE["classes"][name]["signature"]
     _, service = ml_mock
     before = _requests_but_deletes(service)

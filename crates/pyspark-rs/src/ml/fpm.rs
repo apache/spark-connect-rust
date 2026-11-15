@@ -20,7 +20,7 @@ const PREFIX_SPAN_PARAMS: &[(&str, Kind)] = &[
 ];
 
 /// FPGrowth, as PySpark's `FPGrowth` over Spark Connect: an estimator of its params.
-#[pyclass(name = "FPGrowth", module = "pyspark.ml.connect.fpm")]
+#[pyclass(subclass, name = "FPGrowth", module = "pyspark.ml.connect.fpm")]
 pub struct PyFPGrowth {
     inner: FPGrowth,
     unsendable: Vec<&'static str>,
@@ -116,7 +116,7 @@ native_pymethods! {
         slf: &Bound<'_, Self>,
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Fitted<PyFPGrowthModel>> {
+    ) -> PyResult<Fitted<Py<PyFPGrowthModel>>> {
         fit_with(slf, dataset, params, || {
             fit_native_model(slf, dataset, |py, model, df| {
                 PyFPGrowthModel::fitted(py, model, df, object::SummaryDataset::None)
@@ -132,14 +132,14 @@ native_pymethods! {
         slf: &Bound<'py, Self>,
         dataset: &Bound<'py, PyAny>,
         paramMaps: &Bound<'py, PyAny>,
-    ) -> PyResult<params_api::PyFitMultipleIterator> {
+    ) -> PyResult<Py<params_api::PyFitMultipleIterator>> {
         params_api::fit_multiple(slf.as_any(), dataset, paramMaps)
     }
 }
 
 impl params_api::NativeInstance for PyFPGrowth {
     fn duplicate(&self, py: Python<'_>) -> PyResult<Py<Self>> {
-        Py::new(
+        crate::ml::object::new_py(
             py,
             Self {
                 inner: self.inner.clone(),
@@ -185,7 +185,7 @@ native_model! {
 
 /// Native PrefixSpan: it mines sequential patterns directly, with no model, and has no persistence
 /// in Spark.
-#[pyclass(name = "PrefixSpan", module = "pyspark.ml.connect.fpm")]
+#[pyclass(subclass, name = "PrefixSpan", module = "pyspark.ml.connect.fpm")]
 pub struct PyPrefixSpan {
     inner: PrefixSpan,
     unsendable: Vec<&'static str>,
@@ -214,7 +214,7 @@ impl Native for PyPrefixSpan {
 
 impl params_api::NativeInstance for PyPrefixSpan {
     fn duplicate(&self, py: Python<'_>) -> PyResult<Py<Self>> {
-        Py::new(
+        crate::ml::object::new_py(
             py,
             Self {
                 inner: self.inner.clone(),

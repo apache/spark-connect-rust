@@ -273,10 +273,16 @@ PySpark class has them:
   `pyspark.ml.param.Param`, of the docs, converters and defaults of the official class
   (`crates/pyspark-rs/src/ml/ml_params.json`, captured from pyspark-client 4.3.0 by
   `scripts/capture_ml_api_golden.py`), and a getter per param (`getMaxIter`).
-- **PySpark's types and class Params**: the classes are virtual subclasses of PySpark's base
-  classes (`pyspark.ml.base.Estimator`, `Transformer` and `Model`, and
-  `pyspark.ml.evaluation.Evaluator`), so `isinstance(LinearSVC(), Params)` holds, and a Pipeline
-  of `pyspark.ml` fits native stages. The Param of a class (`LinearSVC.maxIter`) is PySpark's, of
+- **PySpark's types and class Params**: the class of `pyspark.ml.connect.<module>` is a subclass
+  of its native class and of PySpark's class of the same name of `pyspark.ml.<module>`
+  (`python/pyspark/ml/_native_classes.py`), so its objects are instances of every class of the MRO
+  of PySpark's class: `MLWritable`, `MLReadable` and `Identifiable`, `HasTrainingSummary` and the
+  summary bases, the param mixins (`HasMaxIter`), `PredictionModel` and `ClassificationModel`,
+  PySpark's Java wrappers, and PySpark's class itself. Every object that this client makes (of a
+  fit, a load, a copy, a summary) is of that class, and a class of the same module that is a base
+  of PySpark's class (`LinearSVCSummary` of `LinearSVCTrainingSummary`) has it as a virtual
+  subclass. So `isinstance(LinearSVCModel(), MLWritable)` holds, and a Pipeline of `pyspark.ml`
+  fits and saves native stages. The Param of a class (`LinearSVC.maxIter`) is PySpark's, of
   the parent `undefined`, so `ParamGridBuilder().addGrid(LinearSVC.maxIter, ...)` builds.
   `MLWriter`s and `MLReader`s are `RemoteMLWriter` and `RemoteMLReader`, as over Spark Connect, of
   the attributes `shouldOverwrite` and `optionMap`, and the AttributeError of a missing attribute
@@ -806,12 +812,10 @@ Spark Connect:
   as the native class of `pyspark.ml.connect` of its name where one loads, else as PySpark's
   class. An overwrite deletes the path by the ML helper first, as `RemoteMLWriter` does.
 
-To save native stages, use the native `Pipeline` (or the native validators). The vendored
-`pyspark.ml.Pipeline` fits and transforms them, but its save raises the `ValueError` of a stage
-that is not `MLWritable`: the native classes are not subclasses of `pyspark.ml.util.MLWritable`, a
-plain class (not an ABC) that they cannot be registered with. The native meta-algorithms take an
-object of a native class as writable, and any other object only if it is an `MLWritable`, as
-PySpark does.
+The vendored `pyspark.ml.Pipeline` fits, transforms and saves native stages, which are
+`MLWritable` (see "PySpark's types and class Params"), and loads them as PySpark's classes of
+`pyspark.ml`, as it loads PySpark's stages. The native meta-algorithms take an object of a native
+class as writable, and any other object only if it is an `MLWritable`, as PySpark does.
 
 ## Native validators
 
@@ -857,8 +861,8 @@ class.
   the estimator nests, and its evaluator write, and each param of its param maps is a param of one
   of them. A nested validator is refused.
 
-The native Pipeline, PipelineModel and validators are registered as virtual subclasses of
-PySpark's classes of them (`pyspark.ml.Pipeline`, `pyspark.ml.tuning.CrossValidator`, ...). So
+The native Pipeline, PipelineModel and validators are subclasses of PySpark's classes of them
+(`pyspark.ml.Pipeline`, `pyspark.ml.tuning.CrossValidator`, ...), as every native class is. So
 `isinstance` checks of PySpark's classes hold of them, and PySpark's `MetaAlgorithmReadWrite`
 reads the nested stages of a native Pipeline.
 

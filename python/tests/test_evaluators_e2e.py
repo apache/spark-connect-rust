@@ -33,7 +33,7 @@ def evaluator_class(name):
         import pyspark._pyspark as native
         from pyspark.ml.connect import evaluation
 
-        assert getattr(evaluation, name) is getattr(native, name)
+        assert issubclass(getattr(evaluation, name), getattr(native, name))
     return getattr(evaluation, name)
 
 

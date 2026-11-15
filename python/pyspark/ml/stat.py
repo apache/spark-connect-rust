@@ -40,3 +40,11 @@ class MultivariateGaussian:
     def __init__(self, mean: Vector, cov: Matrix):
         self.mean = mean
         self.cov = cov
+
+
+# The public classes of the native classes (see pyspark.ml._native_classes): of PySpark's bases of
+# them, of which only SummaryBuilder has one, as this module is not vendored.
+from pyspark.ml._native_classes import publish as _publish  # noqa: E402
+from pyspark.ml.wrapper import JavaWrapper as _JavaWrapper  # noqa: E402
+
+_publish(globals(), None, bases={"SummaryBuilder": _JavaWrapper})

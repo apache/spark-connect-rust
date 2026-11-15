@@ -20,7 +20,7 @@ def algorithm(name):
         from pyspark import _pyspark
         from pyspark.ml.connect import fpm
 
-        assert getattr(fpm, name) is getattr(_pyspark, name)
+        assert issubclass(getattr(fpm, name), getattr(_pyspark, name))
     return getattr(fpm, name)
 
 

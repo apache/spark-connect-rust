@@ -59,7 +59,7 @@ def test_native_exports_and_reference_signatures():
     for name in stat.__all__:
         assert getattr(stat, name) is getattr(public, name)
         if name != "MultivariateGaussian":
-            assert getattr(stat, name) is getattr(_pyspark, name)
+            assert issubclass(getattr(stat, name), getattr(_pyspark, name))
     for key, expected in FIXTURE["signatures"].items():
         cls, method = key.split(".")
         target = getattr(stat, cls) if method == "__init__" else getattr(getattr(stat, cls), method)
