@@ -8428,14 +8428,22 @@ def test_tables_of_the_writers_readers_and_views_take_bytes_as_pyspark(mock_conn
             lambda: df.createTempView(name),
             lambda: df.createOrReplaceGlobalTempView(name),
             lambda: df.registerTempTable(name),
-            lambda: spark.read.table(name),
-            lambda: spark.readStream.table(name),
-            lambda: spark.read.changes(name),
-            lambda: spark.readStream.changes(name),
         ]:
             with pytest.raises(error) as e:
                 call()
             assert type(e.value) is error
+    # The table of a read, and of changes, is converted when its plan is built, not at the call,
+    # as PySpark's is: the DataFrame is given, and its plan raises the error.
+    for name, error in [(b"\xff", UnicodeDecodeError), (1, TypeError)]:
+        for read in [spark.read.table, spark.read.changes]:
+            with pytest.raises(error) as e:
+                read(name).collect()
+            assert type(e.value) is error
+        for read in [spark.readStream.table, spark.readStream.changes]:
+            with pytest.raises(error) as e:
+                read(name).isStreaming
+            assert type(e.value) is error
+    assert (len(service.analyze_requests), len(service.execute_requests)) == requests
     # The write sets the table after the bucket count and before it checks the save mode.
     with pytest.raises(UnicodeDecodeError):
         df.write.mode("bogus").insertInto(b"\xff")
@@ -27302,6 +27310,78 @@ def test_pickled_writers_keep_the_entries_that_fail_their_write_as_pyspark(mock_
     copied = cloudpickle.loads(cloudpickle.dumps(df.write.bucketBy(0, bad).format("noop")))
     copied.save("/p")
     assert len(service.execute_requests) == 1
+
+
+def test_a_table_name_that_is_not_a_str_fails_the_read_plan_as_pyspark(mock_connect):
+    # As PySpark's `Read` plan, which converts the table name when the plan is built: a name that
+    # is neither a str nor bytes gives a DataFrame, and its plan raises the TypeError of protobuf's
+    # string field, while bytes that are not UTF-8 raise their decode error. No request is sent.
+    spark, service = mock_connect
+    sent = (len(service.analyze_requests), len(service.execute_requests))
+    bad_type = "^bad argument type for built-in operation$"
+    bad_bytes = "can't decode byte 0xff in position 0"
+    for name in [3, None, 1.5, ["t"]]:
+        df = spark.read.table(name)
+        assert type(df).__name__ == "DataFrame"
+        with pytest.raises(TypeError, match=bad_type):
+            df.collect()
+        stream = spark.readStream.table(name)
+        with pytest.raises(TypeError, match=bad_type):
+            stream.isStreaming
+    with pytest.raises(UnicodeDecodeError, match=bad_bytes):
+        spark.read.table(b"\xff").collect()
+    with pytest.raises(UnicodeDecodeError, match=bad_bytes):
+        spark.readStream.table(b"\xff").isStreaming
+    assert (len(service.analyze_requests), len(service.execute_requests)) == sent
+
+
+def test_a_reader_format_that_is_not_a_str_is_kept_as_pyspark_keeps_it(mock_connect):
+    # As PySpark's `_format`, which keeps the object that `format` was given. A copy and a pickle
+    # of the reader keep it too, and a str that UTF-8 cannot encode is kept as it is.
+    import copy
+
+    import cloudpickle
+
+    spark, _ = mock_connect
+    assert spark.read.format("text")._format == "text"
+    assert spark.read.format(None)._format is None
+    for source in [b"text", 1, "\ud800"]:
+        reader = spark.read.format(source)
+        assert reader._format == source
+        assert copy.copy(reader)._format == source
+        assert copy.deepcopy(reader)._format == source
+        assert cloudpickle.loads(cloudpickle.dumps(reader))._format == source
+        stream = spark.readStream.format(source)
+        assert stream._format == source
+        assert copy.copy(stream)._format == source
+        assert cloudpickle.loads(cloudpickle.dumps(stream))._format == source
+    assert spark.readStream.format("rate")._format == "rate"
+
+
+def test_reader_and_stream_writer_attributes_survive_copy_and_pickle(mock_connect):
+    # As PySpark's plain objects, which a copy and a pickle keep with their instance attributes.
+    import copy
+
+    import cloudpickle
+
+    spark, _ = mock_connect
+    for obj in [spark.read, spark.readStream, spark.range(1).writeStream]:
+        obj.foo = [1, 2]
+        assert copy.copy(obj).foo == [1, 2]
+        assert copy.deepcopy(obj).foo == [1, 2]
+        assert cloudpickle.loads(cloudpickle.dumps(obj)).foo == [1, 2]
+
+
+def test_a_builder_remote_that_is_not_a_str_fails_create_as_pyspark(mock_connect):
+    # As PySpark's `remote`, which keeps the value as it is, and `create` takes its `str()`, which
+    # is not a Spark Connect URL: bytes, an int and a bool all raise INVALID_CONNECT_URL there.
+    from pyspark.errors import PySparkValueError
+    from pyspark.sql import SparkSession
+
+    for url in [b"sc://localhost:15013", 3, True]:
+        builder = SparkSession.builder.remote(url)
+        with pytest.raises(PySparkValueError, match="INVALID_CONNECT_URL"):
+            builder.create()
 
 
 def test_a_shallow_copy_of_a_merge_builder_keeps_its_schema_evolution_as_pyspark(mock_connect):

@@ -1184,6 +1184,13 @@ session fails the copy with `SparkConnectException`, as PySpark's does. One diff
 PySpark's `DataFrame.__getattr__` answers `getattr(df, "__deepcopy__")` by reading the columns, which
 the drop-in does not, since it defines `__deepcopy__` itself.
 
+A table name that is neither a str nor bytes, and bytes that are not UTF-8, give a DataFrame of
+`read.table`, `readStream.table` and `changes`, whose plan raises protobuf's `TypeError` or the
+decode error when it is built, as PySpark's do. A reader's format that is not a str is kept as the
+object it is, which `_format` gives back, and a copy or a pickle of the reader keeps it.
+`SparkSession.builder.remote` keeps a value that is not a str as PySpark does, and `create` rejects
+it as an invalid Spark Connect URL, as PySpark's `create` does for its `str()`.
+
 ## Native NaiveBayes
 
 The Rust `ml::NaiveBayes` and `ml::NaiveBayesModel` train and predict through Spark

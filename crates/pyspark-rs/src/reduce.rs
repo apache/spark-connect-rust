@@ -35,6 +35,36 @@ pub(crate) fn state_reduce<'py>(
         .call1(args)
 }
 
+/// The shallow copy `copy` of `object`, with the instance attributes of `object` in its `__dict__`,
+/// as the copy of a plain Python object has them: the attributes are shared by their values.
+pub(crate) fn copy_instance_dict(
+    object: &Bound<'_, PyAny>,
+    copy: &Bound<'_, PyAny>,
+) -> PyResult<()> {
+    let attributes = object.getattr("__dict__")?;
+    if attributes.len()? > 0 {
+        copy.getattr("__dict__")?
+            .call_method1("update", (attributes,))?;
+    }
+    Ok(())
+}
+
+/// The reduce `reduced`, the `(function, args)` pair of `state_reduce`, of `object`, with the
+/// instance attributes of `object` as the state of its pickle when there are some, as the reduce
+/// of a plain Python object gives them. Without attributes, `reduced` is returned as it is.
+pub(crate) fn reduce_with_instance_dict<'py>(
+    object: &Bound<'py, PyAny>,
+    reduced: Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let attributes = object.getattr("__dict__")?;
+    if attributes.len()? == 0 {
+        return Ok(reduced);
+    }
+    let reduced = reduced.cast::<PyTuple>()?;
+    let state = [reduced.get_item(0)?, reduced.get_item(1)?, attributes];
+    Ok(PyTuple::new(object.py(), state)?.into_any())
+}
+
 /// The Python list of the columns, each a Column of the wrapper of `Column`.
 pub(crate) fn column_list<'py>(
     py: Python<'py>,

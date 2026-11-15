@@ -126,11 +126,15 @@ impl PySparkSessionBuilder {
     /// Set the remote Spark Connect server URL. Returns the builder (chainable).
     /// Mirrors `SparkSession.Builder.remote(url)`, and the Connect session builder's
     /// `remote(location="sc://localhost")`: the URL is `url` or the keyword `location`.
+    ///
+    /// As PySpark's `config("spark.remote", location)`, the URL is kept as an option of any
+    /// value: a value that is not a str (such as bytes) is `str()` of it, which `create` and
+    /// `getOrCreate` reject as an invalid URL, and a str that UTF-8 cannot encode fails there too.
     #[pyo3(signature = (url=None, *, location=None))]
     fn remote<'py>(
         mut slf: PyRefMut<'py, Self>,
-        url: Option<&str>,
-        location: Option<&str>,
+        url: Option<&Bound<'_, PyAny>>,
+        location: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyRefMut<'py, Self>> {
         let url = match (url, location) {
             (Some(_), Some(_)) => {
@@ -138,11 +142,17 @@ impl PySparkSessionBuilder {
                     "remote() got multiple values for the URL: give url or location",
                 ))
             }
-            (Some(url), None) | (None, Some(url)) => url,
-            (None, None) => "sc://localhost",
+            (Some(url), None) | (None, Some(url)) => Some(url),
+            (None, None) => None,
         };
         let py = slf.py();
-        slf.set_option(py, "spark.remote", url.to_string())?;
+        let key =
+            crate::options::OptionKey::Text(crate::options::OptionText::literal("spark.remote"));
+        let value = match url {
+            Some(url) => crate::options::reader_option_text(url)?,
+            None => Some(crate::options::OptionText::literal("sc://localhost")),
+        };
+        slf.put_config(py, key, value)?;
         Ok(slf)
     }
 
