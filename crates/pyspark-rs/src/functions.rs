@@ -459,21 +459,103 @@ fn typed_array_literal(list: &Bound<'_, pyo3::types::PyList>) -> PyResult<Litera
     })
 }
 
+/// The classes of `pyspark.sql.types` that the first assert of PySpark's
+/// `LiteralExpression(value, dataType)` takes of `dataType`, in its order. No `MapType`,
+/// `StructType`, `YearMonthIntervalType`, `CharType`, `VarcharType` or UDT is among them.
+const LITERAL_TYPE_CLASSES: [&str; 17] = [
+    "NullType",
+    "BinaryType",
+    "BooleanType",
+    "ByteType",
+    "ShortType",
+    "IntegerType",
+    "LongType",
+    "FloatType",
+    "DoubleType",
+    "DecimalType",
+    "StringType",
+    "DateType",
+    "TimeType",
+    "TimestampType",
+    "TimestampNTZType",
+    "DayTimeIntervalType",
+    "ArrayType",
+];
+
+/// Whether `data_type` is of one of [`LITERAL_TYPE_CLASSES`], as the core types them.
+fn is_literal_type(data_type: &spark_connect::types::DataType) -> bool {
+    use spark_connect::types::DataType;
+    matches!(
+        data_type,
+        DataType::Null
+            | DataType::Binary
+            | DataType::Boolean
+            | DataType::Byte
+            | DataType::Short
+            | DataType::Integer
+            | DataType::Long
+            | DataType::Float
+            | DataType::Double
+            | DataType::Decimal { .. }
+            | DataType::String { .. }
+            | DataType::Date
+            | DataType::Time { .. }
+            | DataType::Timestamp
+            | DataType::TimestampNtz
+            | DataType::DayTimeInterval { .. }
+            | DataType::Array { .. }
+    )
+}
+
+/// The literal of a `(value, DataType)` pair, which `serialize` of
+/// `pyspark.ml.connect.serialize` sends as `LiteralExpression(value, dataType)`, or None if `obj`
+/// is no such pair: a tuple of two whose second item is a `DataType`. As that constructor, it
+/// asserts first that the type is of one of [`LITERAL_TYPE_CLASSES`], a bare AssertionError
+/// otherwise, also for a None value, then that the value is one of the type ([`literal_as`]).
+pub(crate) fn typed_pair_literal(obj: &Bound<'_, PyAny>) -> PyResult<Option<LiteralExpression>> {
+    let Ok(pair) = obj.cast::<pyo3::types::PyTuple>() else {
+        return Ok(None);
+    };
+    if pair.len() != 2 {
+        return Ok(None);
+    }
+    let types = obj.py().import("pyspark.sql.types")?;
+    let data_type = pair.get_item(1)?;
+    if !data_type.is_instance(&types.getattr("DataType")?)? {
+        return Ok(None);
+    }
+    let classes = LITERAL_TYPE_CLASSES
+        .iter()
+        .map(|name| types.getattr(*name))
+        .collect::<PyResult<Vec<_>>>()?;
+    if !data_type.is_instance(pyo3::types::PyTuple::new(obj.py(), classes)?.as_any())? {
+        return Err(pyo3::exceptions::PyAssertionError::new_err(()));
+    }
+    // As `to_plan`, which converts the type as `pyspark_types_to_proto_types` does.
+    let data_type = crate::types::py_to_proto_data_type(&data_type)?;
+    literal_as(&pair.get_item(0)?, &data_type).map(Some)
+}
+
 /// The literal of `obj` as a value of `data_type`, as PySpark's `LiteralExpression(obj, type)`:
 /// None is a null, a list is an array of the element type, and another value must be accepted
 /// for the type, by the Python or NumPy classes that PySpark's asserts take, else it is a bare
 /// AssertionError. So an int is a byte, a short, an integer or a long only within its range,
-/// and a bool is an int, but a float is none of them.
+/// and a bool is an int, but a float is none of them. The type must be one that a literal takes
+/// ([`is_literal_type`]), as for each element of a list, which `to_plan` constructs as
+/// `LiteralExpression(element, elementType)`.
 fn literal_as(
     obj: &Bound<'_, PyAny>,
     data_type: &spark_connect::types::DataType,
 ) -> PyResult<LiteralExpression> {
     use spark_connect::types::DataType;
+    let assertion = || pyo3::exceptions::PyAssertionError::new_err(());
+    if !is_literal_type(data_type) {
+        return Err(assertion());
+    }
     let obj = &enum_to_value(obj)?;
     if obj.is_none() {
         return Ok(LiteralExpression::Null(data_type.clone()));
     }
-    let assertion = || pyo3::exceptions::PyAssertionError::new_err(());
     let literal = match data_type {
         DataType::Array { element_type, .. } => {
             let list = obj.cast::<pyo3::types::PyList>().map_err(|_| assertion())?;
