@@ -46,7 +46,9 @@ impl BisectingKMeansModel {
     }
 
     /// The sum of the squared distances of the points of `dataset` to their nearest center
-    /// (`computeCost`).
+    /// (`computeCost`). PySpark deprecates `computeCost` since 3.0.0, with a FutureWarning: it
+    /// will be removed in future versions, in favor of `ClusteringEvaluator`, and the cost on
+    /// the training dataset is also in the training summary (its `training_cost`).
     pub fn compute_cost(&self, dataset: &DataFrame) -> Result<f64> {
         let args = vec![FetchArg::Input(dataset.clone())];
         as_f64(
