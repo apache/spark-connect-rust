@@ -1779,6 +1779,35 @@ def test_the_requests_of_an_ended_test_are_answered_but_not_recorded_in_a_later_
         ended.stop()
 
 
+def test_the_late_deletes_of_an_ended_test_take_no_queued_response_of_a_later_test(ml_mock):
+    # The Delete of a model of a forgotten session that reaches the server while a later test runs
+    # is answered, but not with a response that the later test queued (`_answer_fit`), which the
+    # request of the later test would then miss.
+    import time
+
+    from pyspark.ml.connect import KMeans
+
+    spark, service = ml_mock
+    ended = SparkSession.builder.remote(service.remote).create()
+    try:
+        service.execute_payload = _operator_info("model-of-an-ended-test")
+        model = KMeans(k=2).fit(ended.range(1))
+        service.forget_session(ended.session_id)
+        service.reset()
+        service.execute_payload_queue = [_operator_info("model-of-the-later-test")]
+        del model
+        gc.collect()
+        deadline = time.time() + 5
+        while service.forgotten_requests["execute"] == 0 and time.time() < deadline:
+            time.sleep(0.05)
+        assert service.forgotten_requests["execute"] == 1
+        later = KMeans(k=2).fit(spark.range(1))
+        assert later is not None
+        assert service.execute_payload_queue == []
+    finally:
+        ended.stop()
+
+
 def test_the_listener_requests_of_a_forgotten_session_are_answered_but_not_counted(ml_mock):
     # The listener counters, which the tests of the listener bus wait on, count the listener
     # requests of the sessions that are not forgotten only: a registration, a removal and the end
