@@ -734,17 +734,21 @@ fn unused_persistence_entries_match_official_pyspark() {
     );
 }
 
-/// KNOWN FAILURE: loads that PySpark makes with ML Read commands, which the golden records, but the
-/// Rust client makes differently. The Naive Bayes, MLP and FM estimators have no typed load: the
-/// generic stage loader reads the metadata with a DataFrame query and has no branch for their
-/// classes. The OneVsRest estimator and model read their metadata with a DataFrame query too. The
-/// multiclass forest's model load is a Read followed by a Fetch of its trees, which PySpark's
-/// golden records, and the Rust load sends only the Read (the trees are read when they are asked
-/// for). The binary forest's model load has the same two golden commands; the offline tree test
-/// checks only the first, since its hook fails the first request. Left failing on purpose (run with
-/// `--ignored`); the product code is not changed here.
+/// KNOWN FAILURE, of three causes, none of them a difference in the files or the values:
+/// - The NaiveBayes, MultilayerPerceptronClassifier and FMClassifier estimators have no typed load
+///   in the Rust API: the generic stage loader reads their metadata with a DataFrame query, where
+///   PySpark's `load` sends one ML Read. A gap of the Rust API.
+/// - The OneVsRest estimator and model read their metadata with a DataFrame query, as PySpark's
+///   `DefaultParamsReader.loadMetadata` does (`spark.read.text`), which the golden does not record
+///   and the replay does not answer. A limit of the replay.
+/// - The multiclass forest's model load is a Read followed by a Fetch of its trees in PySpark's
+///   golden (its `_resetUid` walk reads `trees`), and the Rust load sends only the Read: it reads
+///   the trees when they are asked for, as the Rust API's fetches are lazy. The binary forest's
+///   model load has the same two golden commands; the offline tree test checks only the first,
+///   since its hook fails the first request.
+/// Left failing on purpose (run with `--ignored`); the product code is not changed here.
 #[test]
-#[ignore = "known gap: NB/MLP/FM/OneVsRest loads and the forest model load differ from PySpark"]
+#[ignore = "known gaps, of the causes that the doc comment gives"]
 fn naive_bayes_mlp_fm_and_one_vs_rest_loads_as_official_pyspark() {
     let persistence: Value = serde_json::from_str(PERSISTENCE).unwrap();
     for key in [
