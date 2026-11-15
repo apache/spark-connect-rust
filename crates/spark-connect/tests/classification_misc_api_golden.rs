@@ -746,6 +746,7 @@ fn unused_persistence_entries_match_official_pyspark() {
 ///   the trees when they are asked for, as the Rust API's fetches are lazy. The binary forest's
 ///   model load has the same two golden commands; the offline tree test checks only the first,
 ///   since its hook fails the first request.
+///
 /// Left failing on purpose (run with `--ignored`); the product code is not changed here.
 #[test]
 #[ignore = "known gaps, of the causes that the doc comment gives"]
