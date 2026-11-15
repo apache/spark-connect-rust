@@ -272,7 +272,10 @@ PySpark class has them:
   PySpark's errors and keywords (`getParam(paramName=...)`). The Param objects are PySpark's own
   `pyspark.ml.param.Param`, of the docs, converters and defaults of the official class
   (`crates/pyspark-rs/src/ml/ml_params.json`, captured from pyspark-client 4.3.0 by
-  `scripts/capture_ml_api_golden.py`), and a getter per param (`getMaxIter`).
+  `scripts/capture_ml_api_golden.py`), and a getter per param (`getMaxIter`). `extractParamMap()`
+  has PySpark's params and values, in the order of the names of the params, where PySpark's is in
+  the order that they were set (the defaults of a new object in the order that its constructors
+  set them).
 - **PySpark's types and class Params**: the class of `pyspark.ml.connect.<module>` is a subclass
   of its native class and of PySpark's class of the same name of `pyspark.ml.<module>`
   (`python/pyspark/ml/_native_classes.py`), so its objects are instances of every class of the MRO
@@ -812,10 +815,13 @@ Spark Connect:
   as the native class of `pyspark.ml.connect` of its name where one loads, else as PySpark's
   class. An overwrite deletes the path by the ML helper first, as `RemoteMLWriter` does.
 
-The vendored `pyspark.ml.Pipeline` fits, transforms and saves native stages, which are
-`MLWritable` (see "PySpark's types and class Params"), and loads them as PySpark's classes of
-`pyspark.ml`, as it loads PySpark's stages. The native meta-algorithms take an object of a native
-class as writable, and any other object only if it is an `MLWritable`, as PySpark does.
+The vendored `pyspark.ml.Pipeline` and the validators of `pyspark.ml.tuning` fit, transform and
+save native stages, which are `MLWritable` (see "PySpark's types and class Params"). Their loads
+(`pyspark.ml.PipelineModel.load`, `pyspark.ml.tuning.CrossValidatorModel.load`) give PySpark's
+classes of `pyspark.ml`, as they give of PySpark's own stages: `DefaultParamsReader` resolves each
+stage of its JVM class. The loads of `pyspark.ml.connect` give the native classes. The native
+meta-algorithms take an object of a native class as writable, and any other object only if it is
+an `MLWritable`, as PySpark does.
 
 ## Native validators
 
