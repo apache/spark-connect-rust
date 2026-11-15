@@ -1720,13 +1720,133 @@
  },
  "OneVsRest": {
   "live": {
+   "copy_classifier_param": [
+    "ok",
+    "7"
+   ],
    "copy_classifier_type": [
     "ok",
     "'LinearSVC'"
    ],
+   "copy_keeps_classifier": [
+    "ok",
+    "5"
+   ],
    "copy_parallelism": [
     "ok",
     "1"
+   ],
+   "cv_avgMetrics": [
+    "ok",
+    [
+     0.0,
+     0.0
+    ]
+   ],
+   "cv_loaded_estimator": [
+    "ok",
+    "'OneVsRest'"
+   ],
+   "cv_loaded_grid": [
+    "ok",
+    [
+     [
+      "('regParam', '0.0')"
+     ],
+     [
+      "('regParam', '0.5')"
+     ]
+    ]
+   ],
+   "cv_metadata_parents": [
+    "ok",
+    [
+     "True",
+     "True"
+    ]
+   ],
+   "cv_model_loaded_avgMetrics": [
+    "ok",
+    [
+     0.0,
+     0.0
+    ]
+   ],
+   "cv_model_loaded_transform": [
+    "ok",
+    {
+     "columns": [
+      "label",
+      "features",
+      "rawPrediction",
+      "prediction"
+     ],
+     "rows": [
+      "(0.0, DenseVector([0.0, 0.0]), DenseVector([4.9944, -5.908, -4.3661]), 0.0)",
+      "(0.0, DenseVector([0.1, 0.2]), DenseVector([3.6018, -3.7992, -5.0061]), 0.0)",
+      "(1.0, DenseVector([1.0, 1.0]), DenseVector([-4.2369, 4.6428, -5.3494]), 1.0)",
+      "(1.0, DenseVector([1.2, 0.9]), DenseVector([-4.6748, 3.5918, -3.9211]), 1.0)",
+      "(2.0, DenseVector([2.0, 0.0]), DenseVector([-4.0793, -5.8811, 4.5006]), 2.0)",
+      "(2.0, DenseVector([2.1, 0.2]), DenseVector([-5.4719, -3.7722, 3.8606]), 2.0)"
+     ]
+    }
+   ],
+   "cv_model_save": [
+    "ok",
+    "None"
+   ],
+   "cv_save": [
+    "ok",
+    "None"
+   ],
+   "est_classifier_metadata": [
+    "ok",
+    "'org.apache.spark.ml.classification.LinearSVC'"
+   ],
+   "est_dir": [
+    "ok",
+    [
+     "'classifier'",
+     "'metadata'"
+    ]
+   ],
+   "est_loaded_classifier": [
+    "ok",
+    "'LinearSVC'"
+   ],
+   "est_loaded_classifier_uid": [
+    "ok",
+    "True"
+   ],
+   "est_loaded_isSet_weightCol": [
+    "ok",
+    "False"
+   ],
+   "est_loaded_params": [
+    "ok",
+    [
+     "('featuresCol', \"'features'\")",
+     "('labelCol', \"'label'\")",
+     "('parallelism', '1')",
+     "('predictionCol', \"'prediction'\")",
+     "('rawPredictionCol', \"'rawPrediction'\")"
+    ]
+   ],
+   "est_loaded_uid": [
+    "ok",
+    "True"
+   ],
+   "est_metadata": [
+    "ok",
+    "{'class': 'pyspark.ml.classification.OneVsRest', 'sparkVersion': '4.3.0', 'uid': 'OneVsRest', 'paramMap': {'parallelism': 1, 'predictionCol': 'prediction', 'featuresCol': 'features', 'labelCol': 'label', 'rawPredictionCol': 'rawPrediction'}, 'defaultParamMap': {'parallelism': 1, 'predictionCol': 'prediction', 'featuresCol': 'features', 'labelCol': 'label', 'rawPredictionCol': 'rawPrediction'}}"
+   ],
+   "est_model_save": [
+    "ok",
+    "None"
+   ],
+   "est_save": [
+    "ok",
+    "None"
    ],
    "fitMultiple": [
     "ok",
@@ -1785,6 +1905,16 @@
     "ok",
     "('OneVsRestModel', 'classification')"
    ],
+   "model_dir": [
+    "ok",
+    [
+     "'classifier'",
+     "'metadata'",
+     "'model_0'",
+     "'model_1'",
+     "'model_2'"
+    ]
+   ],
    "model_explainParams": [
     "ok",
     "'classifier: base binary classifier (current: LinearSVC_<uid>)\\nfeaturesCol: features column name. (default: features)\\nlabelCol: label column name. (default: label)\\npredictionCol: prediction column name. (default: prediction)\\nrawPredictionCol: raw prediction (a.k.a. confidence) column name. (default: rawPrediction)\\nweightCol: weight column name. If this is not set or empty, we treat all instance weights as 1.0. (undefined)'"
@@ -1810,6 +1940,74 @@
    "model_isSet_parallelism": [
     "AttributeError",
     "'OneVsRestModel' object has no attribute 'parallelism'"
+   ],
+   "model_loaded_classifier": [
+    "ok",
+    "'LinearSVC'"
+   ],
+   "model_loaded_len": [
+    "ok",
+    "3"
+   ],
+   "model_loaded_models_types": [
+    "ok",
+    [
+     "('LinearSVCModel', 'classification')",
+     "('LinearSVCModel', 'classification')",
+     "('LinearSVCModel', 'classification')"
+    ]
+   ],
+   "model_loaded_models_uids": [
+    "ok",
+    [
+     "'LinearSVC_<uid>'",
+     "'LinearSVC_<uid>'",
+     "'LinearSVC_<uid>'"
+    ]
+   ],
+   "model_loaded_params": [
+    "ok",
+    [
+     "('featuresCol', \"'features'\")",
+     "('labelCol', \"'label'\")",
+     "('predictionCol', \"'prediction'\")",
+     "('rawPredictionCol', \"'rawPrediction'\")"
+    ]
+   ],
+   "model_loaded_resave": [
+    "ok",
+    "None"
+   ],
+   "model_loaded_resave_metadata": [
+    "ok",
+    "3"
+   ],
+   "model_loaded_transform": [
+    "ok",
+    {
+     "columns": [
+      "label",
+      "features",
+      "rawPrediction",
+      "prediction"
+     ],
+     "rows": [
+      "(0.0, DenseVector([0.0, 0.0]), DenseVector([1.8621, -1.7576, -1.4334]), 0.0)",
+      "(0.0, DenseVector([0.1, 0.2]), DenseVector([1.1655, -1.0392, -1.605]), 0.0)",
+      "(1.0, DenseVector([1.0, 1.0]), DenseVector([-2.3795, 1.8431, -1.4948]), 1.0)",
+      "(1.0, DenseVector([1.2, 0.9]), DenseVector([-2.4105, 1.4884, -1.0106]), 1.0)",
+      "(2.0, DenseVector([2.0, 0.0]), DenseVector([-1.1728, -1.722, 1.7533]), 2.0)",
+      "(2.0, DenseVector([2.1, 0.2]), DenseVector([-1.8694, -1.0036, 1.5817]), 2.0)"
+     ]
+    }
+   ],
+   "model_loaded_uid": [
+    "ok",
+    "True"
+   ],
+   "model_metadata": [
+    "ok",
+    "{'class': 'pyspark.ml.classification.OneVsRestModel', 'sparkVersion': '4.3.0', 'uid': 'OneVsRestModel', 'paramMap': {'predictionCol': 'prediction', 'featuresCol': 'features', 'labelCol': 'label', 'rawPredictionCol': 'rawPrediction'}, 'defaultParamMap': {'predictionCol': 'prediction', 'featuresCol': 'features', 'labelCol': 'label', 'rawPredictionCol': 'rawPrediction'}, 'numClasses': 3}"
    ],
    "model_no_attribute": [
     "AttributeError",
@@ -2725,6 +2923,10 @@
    "repr_prefix": [
     "ok",
     "'OneVsRestModel_<uid>'"
+   ],
+   "save_without_classifier": [
+    "KeyError",
+    "Param(parent='OneVsRest_<uid>', name='classifier', doc='base binary classifier')"
    ],
    "transform": [
     "ok",

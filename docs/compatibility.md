@@ -1193,9 +1193,17 @@ lazy evaluation. Models must transform data in their fitting session.
 
 Rust `OneVsRest::fit` returns the typed `OneVsRestModel`. Its `models()` gives each binary
 submodel as its typed model, one `SubModel` variant per native classifier, and `classifier()`
-gives the classifier. Single-vector prediction is on the submodels. Persistence is not yet
-available for `OneVsRest` and `OneVsRestModel`: their save and load remain pending with the
-persistence of the meta-estimators, whose writers PySpark runs on the client.
+gives the classifier. Single-vector prediction is on the submodels.
+
+Persistence is of PySpark's Python format, in Rust and in Python, as PySpark's `OneVsRestWriter`,
+`OneVsRestModelWriter` and their readers write it: `OneVsRest::write().save(path)` and
+`OneVsRest::load(session, path)`, and the same for `OneVsRestModel`. The metadata of the estimator
+has its params without the classifier, which is saved at `classifier`; the metadata of the model
+also has `numClasses`, and each submodel is saved at `model_<index>` by its own writer. What each
+of PySpark and this client saves, the other loads, with the same uids, params and predictions, and
+the metadata files equal PySpark's apart from their timestamps and uids. A `CrossValidator` or a
+`TrainValidationSplit` over a OneVsRest saves and loads with it, and a param map of the validator
+sets the params of the classifier, as PySpark's `copy` does.
 
 In Python, the `OneVsRest` estimator has the Params API of `pyspark.ml` (its `classifier` param
 included), `setClassifier`, `fitMultiple` and `clear`, and its `fit` returns the typed
@@ -1214,10 +1222,9 @@ RandomForestClassification one, and `trees` of a GBTClassification one. This cli
 reads, but after all the class fits rather than between them, so their order differs. The remaining
 differences from PySpark are these:
 
-- Saving and loading a `OneVsRest` or a `OneVsRestModel` is not available yet. `write` and `save`
-  of `OneVsRest` raise `CONNECT_ML.UNSUPPORTED_EXCEPTION`, and `read` and `load` of it raise
-  the same kind of error, because PySpark writes these classes on the client. `write` of
-  `OneVsRestModel` raises `ValueError`, since the model has no server-side object to save.
+- A `OneVsRest` or a `OneVsRestModel` whose classifier or submodel is not writable raises
+  `ValueError` on `write`, as PySpark's `validateParams` does. A `OneVsRest` of no classifier
+  raises the `KeyError` of its unset param on `write`, as PySpark's does.
 - `setClassifier` and the `classifier` keyword raise `TypeError` for an object that is not a
   native binary classifier, when they are set; PySpark accepts any object and fails at `fit`.
 

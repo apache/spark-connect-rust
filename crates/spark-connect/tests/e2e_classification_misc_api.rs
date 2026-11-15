@@ -10,11 +10,13 @@ use serde_json::Value;
 use spark_connect::column::col;
 use spark_connect::expression::Expression;
 use spark_connect::ml::{
-    fetch, BinaryClassificationSummary, ClassificationModel, ClassificationSummary,
-    FMClassificationModel, FMClassifier, FetchArg, LogisticRegression, MlMatrix, MlTarget, MlValue,
-    MlVector, Model, MultilayerPerceptronClassificationModel, MultilayerPerceptronClassifier,
-    NaiveBayes, NaiveBayesModel, OneVsRest, PredictionModel, ProbabilisticClassificationModel,
-    SubModel, TrainingSummary, Transformer,
+    fetch, load_metadata, BinaryClassificationEvaluator, BinaryClassificationSummary,
+    ClassificationModel, ClassificationSummary, Classifier, CrossValidator, CrossValidatorModel,
+    Estimator, FMClassificationModel, FMClassifier, FetchArg, LogisticRegression, MlMatrix,
+    MlTarget, MlValue, MlVector, Model, MultilayerPerceptronClassificationModel,
+    MultilayerPerceptronClassifier, NaiveBayes, NaiveBayesModel, OneVsRest, OneVsRestModel,
+    ParamGridBuilder, PredictionModel, ProbabilisticClassificationModel, SubModel, TrainingSummary,
+    Transformer,
 };
 use spark_connect::{Column, DataFrame, SparkSession};
 
@@ -542,4 +544,148 @@ fn fitted_summaries_keep_their_dataframes_and_columns() {
     assert_eq!(summary.score_col().unwrap(), "probability");
     let predictions = summary.predictions().unwrap();
     assert_eq!(predictions.count().unwrap(), 8);
+}
+
+/// The predictions of `df` in its row order, as its `prediction` column.
+fn predictions(df: &DataFrame) -> Vec<f64> {
+    let index = df
+        .columns()
+        .unwrap()
+        .iter()
+        .position(|name| name == "prediction")
+        .expect("a prediction column");
+    df.collect()
+        .unwrap()
+        .iter()
+        .map(|row| row.get(index).and_then(|value| value.as_f64()).unwrap())
+        .collect()
+}
+
+#[test]
+fn one_vs_rest_saves_and_loads_as_pyspark() {
+    let Some(s) = live_session() else {
+        return;
+    };
+    let root = golden();
+    let frame = dataset(&s, &root, "multi_train");
+    let mut estimator = OneVsRest::new()
+        .set_classifier(LogisticRegression::new().set_max_iter(20))
+        .set_weight_col("weight");
+    let uid = estimator.operator().uid.clone();
+    let path = scratch_path("ovr");
+    estimator
+        .write()
+        .session(&s)
+        .overwrite()
+        .save(&path)
+        .unwrap();
+    // The metadata of PySpark's OneVsRestWriter: the params without the classifier, which its own
+    // writer saves at `classifier`.
+    let metadata = load_metadata(&s, &path, Some("pyspark.ml.classification.OneVsRest")).unwrap();
+    assert_eq!(metadata["uid"], uid.as_str());
+    assert_eq!(metadata["paramMap"]["weightCol"], "weight");
+    assert_eq!(metadata["paramMap"]["parallelism"], 1);
+    assert!(metadata["paramMap"].get("classifier").is_none());
+    assert_eq!(metadata["defaultParamMap"]["featuresCol"], "features");
+    assert!(std::path::Path::new(&format!("{path}/classifier/metadata")).exists());
+    let loaded = OneVsRest::load(&s, &path).unwrap();
+    assert_eq!(loaded.operator().uid, uid);
+    assert_eq!(loaded.weight_col(), Some("weight"));
+    assert_eq!(loaded.parallelism(), 1);
+    assert!(matches!(
+        loaded.classifier(),
+        Some(Classifier::LogisticRegression(_))
+    ));
+
+    // The model: its metadata with `numClasses`, its classifier, and one model per class.
+    let mut model = estimator.fit(&frame).unwrap();
+    let model_path = scratch_path("ovr-model");
+    model
+        .write()
+        .unwrap()
+        .session(&s)
+        .overwrite()
+        .save(&model_path)
+        .unwrap();
+    let metadata = load_metadata(
+        &s,
+        &model_path,
+        Some("pyspark.ml.classification.OneVsRestModel"),
+    )
+    .unwrap();
+    assert_eq!(metadata["numClasses"], 3);
+    assert!(metadata["paramMap"].get("parallelism").is_none());
+    for index in 0..3 {
+        assert!(std::path::Path::new(&format!("{model_path}/model_{index}/metadata")).exists());
+    }
+    let mut loaded_model = OneVsRestModel::load(&s, &model_path).unwrap();
+    assert_eq!(loaded_model.num_classes(), 3);
+    assert_eq!(
+        Transformer::operator(&loaded_model).uid,
+        Transformer::operator(&model).uid
+    );
+    assert_eq!(
+        predictions(&loaded_model.transform(&frame).unwrap()),
+        predictions(&model.transform(&frame).unwrap())
+    );
+    // A model that holds its classifier and its models saves them again, as PySpark's does.
+    let resaved = scratch_path("ovr-model-again");
+    loaded_model
+        .write()
+        .unwrap()
+        .session(&s)
+        .overwrite()
+        .save(&resaved)
+        .unwrap();
+    assert_eq!(load_metadata(&s, &resaved, None).unwrap()["numClasses"], 3);
+}
+
+#[test]
+fn cross_validator_over_one_vs_rest_saves_and_loads_as_pyspark() {
+    let Some(s) = live_session() else {
+        return;
+    };
+    let root = golden();
+    let frame = dataset(&s, &root, "multi_train");
+    let classifier = LogisticRegression::new().set_max_iter(5);
+    let classifier_uid = classifier.operator().uid.clone();
+    let grid = ParamGridBuilder::new()
+        .add_grid(
+            &classifier_uid,
+            "regParam",
+            [MlValue::Double(0.0), MlValue::Double(0.5)],
+        )
+        .build();
+    let mut cv = CrossValidator::new()
+        .set_estimator(OneVsRest::new().set_classifier(classifier))
+        .set_estimator_param_maps(grid.clone())
+        .set_evaluator(BinaryClassificationEvaluator::new())
+        .set_num_folds(2)
+        .set_seed(7);
+    // The save of the validator checks that each param of its maps is of a nested stage of its
+    // estimator, the classifier of the OneVsRest, which PySpark's `getAllNestedStages` finds.
+    let path = scratch_path("cv-ovr");
+    cv.write().session(&s).overwrite().save(&path).unwrap();
+    let metadata = load_metadata(&s, &path, Some("pyspark.ml.tuning.CrossValidator")).unwrap();
+    assert_eq!(
+        metadata["paramMap"]["estimatorParamMaps"][1][0]["parent"],
+        classifier_uid.as_str()
+    );
+    let loaded = CrossValidator::load(&s, &path).unwrap();
+    assert_eq!(loaded.estimator_param_maps(), grid.as_slice());
+    let mut model: CrossValidatorModel = cv.fit_validator(&frame).unwrap();
+    let model_path = scratch_path("cv-ovr-model");
+    model
+        .write()
+        .unwrap()
+        .session(&s)
+        .overwrite()
+        .save(&model_path)
+        .unwrap();
+    let mut loaded_model = CrossValidatorModel::load(&s, &model_path).unwrap();
+    assert_eq!(loaded_model.avg_metrics(), model.avg_metrics());
+    assert_eq!(
+        predictions(&loaded_model.transform(&frame).unwrap()),
+        predictions(&model.transform(&frame).unwrap())
+    );
 }
