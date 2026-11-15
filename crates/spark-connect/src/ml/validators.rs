@@ -435,6 +435,12 @@ impl CrossValidator {
             Some(self.common.seed()),
             &self.operator.uid,
         )?;
+        if folds.is_empty() {
+            // As PySpark's mean and deviation of no fold, a scalar of which `list` fails.
+            return Err(SparkError::value_msg(
+                "'numpy.float64' object is not iterable",
+            ));
+        }
         let mut metrics_all = Vec::with_capacity(folds.len());
         let mut sub_models = self.common.collect_sub_models.then(Vec::new);
         for (train, validation) in &folds {
@@ -1700,6 +1706,14 @@ mod tests {
         );
     }
 
+    fn offline_session() -> SparkSession {
+        // gRPC connects lazily, so the splits and the checks below build plans only.
+        SparkSession::builder()
+            .remote("sc://localhost:15002")
+            .get_or_create()
+            .expect("session")
+    }
+
     #[test]
     fn a_validator_in_a_grid_sets_its_own_params_of_a_param_map() {
         // As `copy(extra)` of PySpark's validators: their own params, then their estimator's.
@@ -1749,6 +1763,32 @@ mod tests {
             ),
             (0.3, 2, true)
         );
+    }
+
+    #[test]
+    fn a_validator_of_no_folds_fails_as_pyspark_does() {
+        // PySpark's `np.mean` and `np.std` of no fold are a scalar, which `list` fails on.
+        let df = offline_session().range(10).expect("a range");
+        let svc = LinearSVC::new();
+        let uid = svc.operator().uid.clone();
+        let grid = ParamGridBuilder::new()
+            .add_grid(&uid, "regParam", [MlValue::Double(0.1)])
+            .build();
+        for (num_folds, fold_col) in [(-1, ""), (0, "fold"), (-2, "fold")] {
+            let mut cv = CrossValidator::new()
+                .set_estimator(svc.clone())
+                .set_evaluator(BinaryClassificationEvaluator::new())
+                .set_estimator_param_maps(grid.clone())
+                .set_num_folds(num_folds)
+                .set_fold_col(fold_col);
+            let error = cv.fit_validator(&df).expect_err("a validator of no folds");
+            assert!(
+                error
+                    .to_string()
+                    .contains("'numpy.float64' object is not iterable"),
+                "{num_folds} {fold_col}: {error}"
+            );
+        }
     }
 
     #[test]
