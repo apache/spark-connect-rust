@@ -112,6 +112,7 @@ mod meta;
 pub use meta::*;
 mod validators;
 pub use validators::*;
+mod param_specs;
 mod stage_kinds;
 
 // The typed accessors, summaries and persistence of the models of each family, in the files of the
@@ -558,6 +559,19 @@ impl Params {
         self
     }
 
+    /// A copy of the params whose names `keep` keeps: the params that a stage's class has, of a
+    /// fitted model (PySpark's `_copyValues` copies only those).
+    pub fn retain_names(&self, keep: impl Fn(&str) -> bool) -> Self {
+        Params {
+            params: self
+                .params
+                .iter()
+                .filter(|(name, _)| keep(name))
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect(),
+        }
+    }
+
     /// Remove a parameter, so that it is not sent and the server uses its default, as
     /// PySpark's `Params.clear` does.
     pub fn clear_param(mut self, name: &str) -> Self {
@@ -996,8 +1010,9 @@ pub trait Estimator: Send + Sync {
     /// `copy(extra)` of a param map sets them; a meta-algorithm sets them in its stages.
     fn apply_param_map(&mut self, map: &ParamMap) -> spark_connect_core::error::Result<()> {
         self.ensure_operator();
+        let class = self.operator().name.clone();
         let uid = self.operator().uid.clone();
-        meta::apply_pairs(self.params_mut(), &uid, map)
+        meta::apply_pairs(self.params_mut(), &class, &uid, map)
     }
 }
 
@@ -1038,8 +1053,9 @@ pub trait Transformer: Send + Sync {
     /// `copy(extra)` of a param map sets them; a pipeline model sets them in its stages.
     fn apply_param_map(&mut self, map: &ParamMap) -> spark_connect_core::error::Result<()> {
         self.ensure_operator();
+        let class = self.operator().name.clone();
         let uid = self.operator().uid.clone();
-        meta::apply_pairs(self.params_mut(), &uid, map)
+        meta::apply_pairs(self.params_mut(), &class, &uid, map)
     }
 
     /// Build the MlRelation for this transformation.
@@ -1177,9 +1193,10 @@ pub trait Evaluator: Send + Sync {
     /// Set the values of `map` of the params of this evaluator (of its uid), as PySpark's
     /// `copy(extra)` of a param map sets them, of an evaluator whose params are mutable.
     fn apply_param_map(&mut self, map: &ParamMap) -> spark_connect_core::error::Result<()> {
+        let class = self.operator().name.clone();
         let uid = self.operator().uid.clone();
         match self.params_mut() {
-            Some(params) => meta::apply_pairs(params, &uid, map),
+            Some(params) => meta::apply_pairs(params, &class, &uid, map),
             None => Ok(()),
         }
     }
@@ -2698,8 +2715,9 @@ impl Estimator for OneVsRest {
     /// as `OneVsRest.copy` does).
     fn apply_param_map(&mut self, map: &ParamMap) -> spark_connect_core::error::Result<()> {
         self.ensure_operator();
+        let class = self.operator().name.clone();
         let uid = self.operator().uid.clone();
-        meta::apply_pairs(self.params_mut(), &uid, map)?;
+        meta::apply_pairs(self.params_mut(), &class, &uid, map)?;
         if let Some(classifier) = self.classifier.as_mut() {
             classifier.estimator_mut().apply_param_map(map)?;
         }

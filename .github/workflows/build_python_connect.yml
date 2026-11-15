@@ -610,6 +610,7 @@ jobs:
             --test e2e_classification_misc_api \
             --test e2e_reattach_drop \
             --test e2e_lr_svc_api \
+            --test e2e_ml_meta \
             -- --test-threads=1
 
       - name: Rust WASM UDF e2e test (against the live server)

@@ -47,12 +47,21 @@ fn lit_long(v: i64) -> Expression {
     Expression::literal(LiteralExpression::long(v))
 }
 
+/// The literal of a seed of a random function, as PySpark's `lit(seed)` of a Python int: an
+/// integer when the seed fits in 32 bits, else a long.
+fn seed_literal(seed: i64) -> Expression {
+    match i32::try_from(seed) {
+        Ok(value) => Expression::literal(LiteralExpression::int(value)),
+        Err(_) => lit_long(seed),
+    }
+}
+
 /// The seed of a random function called without one: a new one for each call, as PySpark's
 /// `random.randint(0, sys.maxsize)` and the Scala client's `random.nextLong` draw it, so that
 /// two calls give different values and a call differs from one run to the next. Within a
 /// plan, the expression keeps its seed, so every execution of the plan gives the same values.
 fn random_seed_literal() -> Expression {
-    lit_long(crate::dataframe::random_seed())
+    seed_literal(crate::dataframe::random_seed())
 }
 
 /// A boolean-literal argument expression.
@@ -416,7 +425,7 @@ pub fn rand() -> Column {
 
 /// Mirrors `pyspark.sql.functions.rand(seed)`.
 pub fn rand_with_seed(seed: i64) -> Column {
-    func("rand", vec![lit_long(seed)])
+    func("rand", vec![seed_literal(seed)])
 }
 
 /// Mirrors `pyspark.sql.functions.random`, an alias of `rand`: a new random seed for each call.
@@ -436,7 +445,7 @@ pub fn randn() -> Column {
 
 /// Mirrors `pyspark.sql.functions.randn(seed)`.
 pub fn randn_with_seed(seed: i64) -> Column {
-    func("randn", vec![lit_long(seed)])
+    func("randn", vec![seed_literal(seed)])
 }
 
 /// Mirrors `pyspark.sql.functions.rank`.
@@ -4606,6 +4615,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn rand_takes_its_seed_as_pyspark_lit_takes_it() {
+        // As `F.rand(seed)` of PySpark, which sends `lit(seed)`: an integer when the seed fits in
+        // 32 bits, else a long.
+        let small = format!("{:?}", rand_with_seed(7).expression());
+        assert!(small.contains("Integer(7)"), "{small}");
+        let large = format!("{:?}", rand_with_seed(1 << 40).expression());
+        assert!(large.contains("Long(1099511627776)"), "{large}");
+    }
+
+    #[test]
     fn test_zero_arg_functions() {
         let _cume = cume_dist();
         let _curdate = curdate();
@@ -4659,14 +4678,15 @@ mod tests {
         }
     }
 
-    /// The long literal of a seed argument.
+    /// The value of an integer or a long literal seed argument.
     fn long_seed(column: Column) -> i64 {
         use spark_connect_proto::expression::literal::LiteralType;
         use spark_connect_proto::expression::ExprType;
         match seed_argument(column).expr_type {
             Some(ExprType::Literal(literal)) => match literal.literal_type {
+                Some(LiteralType::Integer(seed)) => i64::from(seed),
                 Some(LiteralType::Long(seed)) => seed,
-                other => panic!("expected a long seed, got {other:?}"),
+                other => panic!("expected an integer or a long seed, got {other:?}"),
             },
             other => panic!("expected a literal seed, got {other:?}"),
         }
@@ -4708,6 +4728,12 @@ mod tests {
     /// As PySpark's `rand(seed)` and the others with a seed: the seed is sent as given.
     #[test]
     fn random_functions_with_a_seed_send_it_as_pyspark() {
+        // As PySpark's `lit(seed)`: an integer when the seed fits in 32 bits, else a long.
+        let literal = |column: Column| format!("{:?}", seed_argument(column).expr_type);
+        assert!(literal(rand_with_seed(42)).contains("Integer(42)"));
+        assert!(literal(random_with_seed(-7)).contains("Integer(-7)"));
+        assert!(literal(randn_with_seed(3)).contains("Integer(3)"));
+        assert!(literal(rand_with_seed(1 << 40)).contains(&format!("Long({})", 1i64 << 40)));
         assert_eq!(long_seed(rand_with_seed(42)), 42);
         assert_eq!(long_seed(random_with_seed(-7)), -7);
         assert_eq!(long_seed(randn_with_seed(3)), 3);

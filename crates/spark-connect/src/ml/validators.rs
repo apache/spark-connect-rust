@@ -4,14 +4,14 @@
 //! of any estimator and evaluator, and their persistence of PySpark's Python format
 //! (`_ValidatorSharedReadWrite`), which PySpark loads, and which they load of PySpark.
 use super::meta::{
-    json_to_ml_value, load_evaluator, load_python_metadata, load_stage, metadata_item,
+    converted, json_to_ml_value, load_evaluator, load_python_metadata, load_stage, metadata_item,
     metadata_str, ml_value_json, python_float, python_float_json, CROSS_VALIDATOR_CLASS,
     CROSS_VALIDATOR_MODEL_CLASS, TRAIN_VALIDATION_SPLIT_CLASS, TRAIN_VALIDATION_SPLIT_MODEL_CLASS,
 };
 use super::*;
 use spark_connect_core::error::Result;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 impl Clone for Box<dyn EstimatorStage> {
     fn clone(&self) -> Self {
@@ -25,17 +25,54 @@ impl Clone for Box<dyn EvaluatorStage> {
     }
 }
 
-/// A random seed of a validator of no seed, as PySpark's default seed (the `hash` of the name of
-/// the class) differs between processes.
+/// A random seed, drawn for the default seed of a class of validators.
 fn random_seed() -> i64 {
     let hex = uuid::Uuid::new_v4().simple().to_string();
     i64::from_str_radix(&hex[..15], 16).unwrap_or_default()
 }
 
+// The default seed of each class of validators and of its model, drawn once per process: PySpark's
+// default seed is `hash(type(self).__name__)`, which is the same for every instance of a class
+// within a process (and differs between processes, as Python randomizes the hash of a string).
+static CROSS_VALIDATOR_SEED: OnceLock<i64> = OnceLock::new();
+static CROSS_VALIDATOR_MODEL_SEED: OnceLock<i64> = OnceLock::new();
+static TRAIN_VALIDATION_SPLIT_SEED: OnceLock<i64> = OnceLock::new();
+static TRAIN_VALIDATION_SPLIT_MODEL_SEED: OnceLock<i64> = OnceLock::new();
+
+/// The default seed of the class whose cell is `cell`, the same in each call of the process.
+fn process_seed(cell: &'static OnceLock<i64>) -> i64 {
+    *cell.get_or_init(random_seed)
+}
+
+/// The value of the param `name` of the validator of the JVM class `class` and the uid `uid` in
+/// `map`, converted as its param's type converter converts it, if the map sets it.
+fn own_value(class: &str, uid: &str, map: &ParamMap, name: &str) -> Result<Option<MlValue>> {
+    map.get(uid, name)
+        .map(|value| converted(class, name, value))
+        .transpose()
+}
+
+/// The value of an own param of [`own_value`], as `read` makes of it, or PySpark's `TypeError`.
+fn own_as<T>(
+    class: &str,
+    uid: &str,
+    map: &ParamMap,
+    name: &str,
+    read: impl Fn(&MlValue) -> Option<T>,
+) -> Result<Option<T>> {
+    match own_value(class, uid, map, name)? {
+        None => Ok(None),
+        Some(value) => read(&value).map(Some).ok_or_else(|| {
+            SparkError::value_msg(format!(
+                "the param {name} of {uid} has no value of its type"
+            ))
+        }),
+    }
+}
+
 /// The params of a validator, of PySpark's `_ValidatorParams` and `HasParallelism` and
-/// `HasCollectSubModels`: its estimator, param maps and evaluator, its seed (the default of a
-/// random seed, as PySpark's of the hash of the class name), its parallelism and whether it keeps
-/// the sub-models.
+/// `HasCollectSubModels`: its estimator, param maps and evaluator, its seed (the default of its
+/// class's seed, see [`process_seed`]), its parallelism and whether it keeps the sub-models.
 #[derive(Clone)]
 struct Common {
     estimator: Option<Box<dyn EstimatorStage>>,
@@ -48,16 +85,52 @@ struct Common {
 }
 
 impl Common {
-    fn new() -> Self {
+    /// The common params of the model of a validator: the validator's explicit seed (PySpark's
+    /// `_copyValues` copies a set param), and the default seed of the model's class.
+    fn model_common(&self, default_seed: i64) -> Self {
+        let mut model = self.clone();
+        model.default_seed = default_seed;
+        model
+    }
+
+    fn new(default_seed: i64) -> Self {
         Self {
             estimator: None,
             param_maps: Vec::new(),
             evaluator: None,
             seed: None,
-            default_seed: random_seed(),
+            default_seed,
             parallelism: 1,
             collect_sub_models: false,
         }
+    }
+
+    /// Set the values of `map` of the validator's own params (its seed, parallelism and
+    /// `collectSubModels`), of the validator of the class `class` and the uid `uid`, as PySpark's
+    /// `Params.copy(extra)` of a validator sets them.
+    fn apply_own(&mut self, class: &str, uid: &str, map: &ParamMap) -> Result<()> {
+        if let Some(seed) = own_as(class, uid, map, "seed", MlValue::as_i64)? {
+            self.seed = Some(seed);
+        }
+        if let Some(parallelism) = own_as(class, uid, map, "parallelism", MlValue::as_i64)? {
+            self.parallelism = parallelism;
+        }
+        if let Some(collect) = own_as(class, uid, map, "collectSubModels", MlValue::as_bool)? {
+            self.collect_sub_models = collect;
+        }
+        Ok(())
+    }
+
+    /// Set the values of `map` of the params of the validator's estimator and evaluator, as the
+    /// validators' `copy(extra)` copies them (after the validator's own params).
+    fn apply_stages(&mut self, map: &ParamMap) -> Result<()> {
+        if let Some(estimator) = &mut self.estimator {
+            estimator.apply_param_map(map)?;
+        }
+        if let Some(evaluator) = &mut self.evaluator {
+            evaluator.apply_param_map(map)?;
+        }
+        Ok(())
     }
 
     fn estimator(&self) -> Result<&dyn EstimatorStage> {
@@ -273,7 +346,7 @@ impl CrossValidator {
                 OperatorType::Estimator,
             ),
             params: Params::new(),
-            common: Common::new(),
+            common: Common::new(process_seed(&CROSS_VALIDATOR_SEED)),
             num_folds: 3,
             fold_col: String::new(),
         }
@@ -383,6 +456,12 @@ impl CrossValidator {
             Some(self.common.seed()),
             &self.operator.uid,
         )?;
+        if folds.is_empty() {
+            // As PySpark's mean and deviation of no fold, a scalar of which `list` fails.
+            return Err(SparkError::value_msg(
+                "'numpy.float64' object is not iterable",
+            ));
+        }
         let mut metrics_all = Vec::with_capacity(folds.len());
         let mut sub_models = self.common.collect_sub_models.then(Vec::new);
         for (train, validation) in &folds {
@@ -417,7 +496,9 @@ impl CrossValidator {
             avg_metrics,
             std_metrics,
             sub_models,
-            common: self.common.clone(),
+            common: self
+                .common
+                .model_common(process_seed(&CROSS_VALIDATOR_MODEL_SEED)),
             num_folds: self.num_folds,
             fold_col: self.fold_col.clone(),
         })
@@ -425,7 +506,7 @@ impl CrossValidator {
 
     /// Load the validator saved at `path` of PySpark's Python format, as `CrossValidatorReader`.
     pub fn load(session: &SparkSession, path: &str) -> Result<Self> {
-        let loaded = load_common(session, path)?;
+        let loaded = load_common(session, path, process_seed(&CROSS_VALIDATOR_SEED))?;
         let mut cv = Self::new();
         cv.operator = MlOperator::with_uid(
             "org.apache.spark.ml.tuning.CrossValidator",
@@ -471,7 +552,18 @@ impl Estimator for CrossValidator {
     }
 
     fn apply_param_map(&mut self, map: &ParamMap) -> Result<()> {
-        apply_common(&mut self.common, map)
+        let class = self.operator.name.clone();
+        let uid = self.operator.uid.clone();
+        if let Some(num_folds) = own_as(&class, &uid, map, "numFolds", MlValue::as_i64)? {
+            self.num_folds = num_folds;
+        }
+        if let Some(fold_col) = own_as(&class, &uid, map, "foldCol", |v| {
+            v.as_str().map(String::from)
+        })? {
+            self.fold_col = fold_col;
+        }
+        self.common.apply_own(&class, &uid, map)?;
+        self.common.apply_stages(map)
     }
 
     fn write(&self) -> MlWriter {
@@ -563,7 +655,7 @@ impl CrossValidatorModel {
     /// of the sub-models, where they were saved, of one list repeated for each fold, as PySpark's
     /// reader makes them.
     pub fn load(session: &SparkSession, path: &str) -> Result<Self> {
-        let loaded = load_common(session, path)?;
+        let loaded = load_common(session, path, process_seed(&CROSS_VALIDATOR_MODEL_SEED))?;
         let num_folds = loaded.ints.get("numFolds").copied().unwrap_or(3);
         let best_model = load_model(session, &join_path(path, "bestModel"))?;
         let avg_metrics = floats(metadata_item(&loaded.metadata, "avgMetrics")?)?;
@@ -701,7 +793,7 @@ impl TrainValidationSplit {
                 OperatorType::Estimator,
             ),
             params: Params::new(),
-            common: Common::new(),
+            common: Common::new(process_seed(&TRAIN_VALIDATION_SPLIT_SEED)),
             train_ratio: 0.75,
         }
     }
@@ -818,7 +910,9 @@ impl TrainValidationSplit {
             best_model,
             validation_metrics,
             sub_models: self.common.collect_sub_models.then_some(models),
-            common: self.common.clone(),
+            common: self
+                .common
+                .model_common(process_seed(&TRAIN_VALIDATION_SPLIT_MODEL_SEED)),
             train_ratio: self.train_ratio,
         })
     }
@@ -826,7 +920,7 @@ impl TrainValidationSplit {
     /// Load the validator saved at `path` of PySpark's Python format, as
     /// `TrainValidationSplitReader`.
     pub fn load(session: &SparkSession, path: &str) -> Result<Self> {
-        let loaded = load_common(session, path)?;
+        let loaded = load_common(session, path, process_seed(&TRAIN_VALIDATION_SPLIT_SEED))?;
         let mut tvs = Self::new();
         tvs.operator = MlOperator::with_uid(
             "org.apache.spark.ml.tuning.TrainValidationSplit",
@@ -869,7 +963,13 @@ impl Estimator for TrainValidationSplit {
     }
 
     fn apply_param_map(&mut self, map: &ParamMap) -> Result<()> {
-        apply_common(&mut self.common, map)
+        let class = self.operator.name.clone();
+        let uid = self.operator.uid.clone();
+        if let Some(train_ratio) = own_as(&class, &uid, map, "trainRatio", MlValue::as_f64)? {
+            self.train_ratio = train_ratio;
+        }
+        self.common.apply_own(&class, &uid, map)?;
+        self.common.apply_stages(map)
     }
 
     fn write(&self) -> MlWriter {
@@ -944,7 +1044,11 @@ impl TrainValidationSplitModel {
     /// Load the model saved at `path` of PySpark's Python format, as
     /// `TrainValidationSplitModelReader`.
     pub fn load(session: &SparkSession, path: &str) -> Result<Self> {
-        let loaded = load_common(session, path)?;
+        let loaded = load_common(
+            session,
+            path,
+            process_seed(&TRAIN_VALIDATION_SPLIT_MODEL_SEED),
+        )?;
         let best_model = load_model(session, &join_path(path, "bestModel"))?;
         let validation_metrics = floats(metadata_item(&loaded.metadata, "validationMetrics")?)?;
         let sub_models = if persisted_sub_models(&loaded.metadata) {
@@ -1026,18 +1130,6 @@ impl Model for TrainValidationSplitModel {
 // ---------------------------------------------------------------------------------------------
 // Persistence.
 // ---------------------------------------------------------------------------------------------
-
-/// Set the values of `map` of the params of a validator's estimator and evaluator, as the
-/// validators' `copy(extra)` copies them.
-fn apply_common(common: &mut Common, map: &ParamMap) -> Result<()> {
-    if let Some(estimator) = &mut common.estimator {
-        estimator.apply_param_map(map)?;
-    }
-    if let Some(evaluator) = &mut common.evaluator {
-        evaluator.apply_param_map(map)?;
-    }
-    Ok(())
-}
 
 /// The JSON of a list of floats, as Python's `json.dumps` writes it (of `NaN`).
 fn floats_json(values: &[f64]) -> String {
@@ -1122,8 +1214,7 @@ impl MetaSave for ValidatorSave {
     ) -> Result<()> {
         let estimator = self.common.estimator()?;
         let evaluator = self.common.evaluator()?;
-        let uids = validate_params(estimator, &self.common.param_maps)?;
-        let _ = uids;
+        let stages = validate_params(estimator, &self.common.param_maps)?;
         let persist = match &self.model {
             Some(model) => Some(persist_sub_models(model, options)?),
             None => None,
@@ -1149,7 +1240,7 @@ impl MetaSave for ValidatorSave {
         }
         params.push((
             "estimatorParamMaps",
-            param_maps_json(&self.common.param_maps)?,
+            param_maps_json(&self.common.param_maps, &stages)?,
         ));
         let mut metadata = Metadata::new(
             self.class,
@@ -1242,11 +1333,16 @@ fn persist_sub_models(model: &ModelPart, options: &HashMap<String, String>) -> R
     }
 }
 
-/// The uids of the stages of `estimator`, as `MetaAlgorithmReadWrite.getUidMap` of
-/// `getAllNestedStages`: the estimator and, of a pipeline, its nested stages; a nested validator
-/// is an error, as PySpark raises it.
-fn nested_uids(stage: &PipelineStage, uids: &mut Vec<String>) -> Result<()> {
-    uids.push(stage.uid().to_string());
+/// The uid and the JVM class of a stage's operator.
+fn stage_of(operator: &MlOperator) -> (String, String) {
+    (operator.uid.clone(), operator.name.clone())
+}
+
+/// The stages of `stage` and of its nested stages, as `MetaAlgorithmReadWrite.getUidMap` of
+/// `getAllNestedStages` of PySpark, each as its uid and its JVM class: a nested validator is an
+/// error, as PySpark raises it.
+fn nested_stages(stage: &PipelineStage, out: &mut Vec<(String, String)>) -> Result<()> {
+    out.push(stage_of(stage.operator()));
     let any = match stage {
         PipelineStage::Estimator(e) => e.as_any_stage(),
         PipelineStage::Transformer(_) => None,
@@ -1270,38 +1366,36 @@ fn nested_uids(stage: &PipelineStage, uids: &mut Vec<String>) -> Result<()> {
                     .map(PipelineModel::stages)
             });
         for nested in stages.unwrap_or_default() {
-            nested_uids(nested, uids)?;
+            nested_stages(nested, out)?;
         }
         // The classifier of a OneVsRest, and of its model the models too, as
         // `getAllNestedStages` of PySpark: each is a stage of no stage of its own.
         if let Some(ovr) = any.downcast_ref::<OneVsRest>() {
-            uids.extend(
-                ovr.classifier()
-                    .map(|c| c.estimator().operator().uid.clone()),
-            );
+            out.extend(ovr.classifier().map(|c| stage_of(c.estimator().operator())));
         }
         if let Some(ovr) = any.downcast_ref::<OneVsRestModel>() {
-            uids.extend(
-                ovr.classifier()
-                    .map(|c| c.estimator().operator().uid.clone()),
-            );
-            uids.extend(ovr.stage_models().iter().map(|m| m.operator().uid.clone()));
+            out.extend(ovr.classifier().map(|c| stage_of(c.estimator().operator())));
+            out.extend(ovr.stage_models().iter().map(|m| stage_of(m.operator())));
         }
     }
     Ok(())
 }
 
 /// Check that the validator saves, as `_ValidatorSharedReadWrite.validateParams`: each param of its
-/// param maps is of its estimator or of a stage that the estimator nests; the uids of those.
-fn validate_params(estimator: &dyn EstimatorStage, maps: &[ParamMap]) -> Result<Vec<String>> {
-    let mut uids = Vec::new();
-    nested_uids(
+/// param maps is of its estimator or of a stage that the estimator nests. The stages of the
+/// estimator, each as its uid and JVM class, are returned.
+fn validate_params(
+    estimator: &dyn EstimatorStage,
+    maps: &[ParamMap],
+) -> Result<Vec<(String, String)>> {
+    let mut stages = Vec::new();
+    nested_stages(
         &PipelineStage::Estimator(estimator.clone_stage()),
-        &mut uids,
+        &mut stages,
     )?;
     for map in maps {
         for pair in map.pairs() {
-            if !uids.contains(&pair.parent) {
+            if !stages.iter().any(|(uid, _)| *uid == pair.parent) {
                 return Err(SparkError::value_msg(format!(
                     "Validator save requires all Params in estimatorParamMaps to apply to its \
                      Estimator, An extraneous Param was found: {}__{}",
@@ -1310,22 +1404,29 @@ fn validate_params(estimator: &dyn EstimatorStage, maps: &[ParamMap]) -> Result<
             }
         }
     }
-    Ok(uids)
+    Ok(stages)
 }
 
 /// The param maps of a validator, as `_ValidatorSharedReadWrite.saveImpl` writes them: each value
-/// as the JSON of its `json.dumps`, a string.
-fn param_maps_json(maps: &[ParamMap]) -> Result<String> {
+/// converted by the type converter of its param (of its stage, in `stages`), as PySpark converts
+/// the values of its grid when it builds them, and written as the JSON of its `json.dumps`, a
+/// string.
+fn param_maps_json(maps: &[ParamMap], stages: &[(String, String)]) -> Result<String> {
     let mut out = Vec::with_capacity(maps.len());
     for map in maps {
         let mut pairs = Vec::with_capacity(map.len());
         for pair in map.pairs() {
+            let class = stages
+                .iter()
+                .find(|(uid, _)| *uid == pair.parent)
+                .map_or("", |(_, class)| class.as_str());
+            let value = converted(class, &pair.name, &pair.value)?;
             pairs.push(json_object(&[
                 ("parent", serde_json::json!(pair.parent).to_string()),
                 ("name", serde_json::json!(pair.name).to_string()),
                 (
                     "value",
-                    serde_json::json!(ml_value_json(&pair.value)?).to_string(),
+                    serde_json::json!(ml_value_json(&value)?).to_string(),
                 ),
                 ("isJson", "true".to_string()),
             ]));
@@ -1349,7 +1450,7 @@ struct Loaded {
 /// The validator or model saved at `path`, as `_ValidatorSharedReadWrite.load` and
 /// `getAndSetParams`: its estimator, evaluator and param maps (of a metadata of PySpark's Python
 /// writer, or of its JVM writer, which has the JSON of each field), and its params.
-fn load_common(session: &SparkSession, path: &str) -> Result<Loaded> {
+fn load_common(session: &SparkSession, path: &str, default_seed: i64) -> Result<Loaded> {
     let metadata = load_python_metadata(session, path)?;
     let class = metadata_str(&metadata, "class")?;
     let python_writer = class.starts_with("pyspark.ml.");
@@ -1362,12 +1463,12 @@ fn load_common(session: &SparkSession, path: &str) -> Result<Loaded> {
             )))
         }
     };
-    let mut uids = Vec::new();
-    nested_uids(
+    let mut stages = Vec::new();
+    nested_stages(
         &PipelineStage::Estimator(estimator.clone_stage()),
-        &mut uids,
+        &mut stages,
     )?;
-    uids.push(evaluator.operator().uid.clone());
+    stages.push(stage_of(evaluator.operator()));
     let param_map = metadata_item(&metadata, "paramMap")?;
     let mut maps = Vec::new();
     let json_maps = metadata_item(param_map, "estimatorParamMaps")?
@@ -1380,7 +1481,7 @@ fn load_common(session: &SparkSession, path: &str) -> Result<Loaded> {
             .ok_or_else(|| SparkError::value_msg("a param map of the metadata is no list"))?;
         for pair in pairs {
             let parent = metadata_str(pair, "parent")?;
-            if !uids.iter().any(|uid| uid == parent) {
+            if !stages.iter().any(|(uid, _)| uid == parent) {
                 return Err(SparkError::value_msg(format!(
                     "the param map of the metadata is of the stage {parent}, which the validator \
                      has not"
@@ -1414,7 +1515,7 @@ fn load_common(session: &SparkSession, path: &str) -> Result<Loaded> {
         }
         maps.push(map);
     }
-    let mut common = Common::new();
+    let mut common = Common::new(default_seed);
     common.estimator = Some(estimator);
     common.evaluator = Some(evaluator);
     common.param_maps = maps;
@@ -1505,13 +1606,15 @@ mod tests {
         let maps = ParamGridBuilder::new()
             .add_grid(&uid, "regParam", [MlValue::Double(0.1)])
             .build();
+        let class = svc.operator().name.clone();
+        let stages = vec![(uid.clone(), class.clone())];
         assert_eq!(
-            param_maps_json(&maps).unwrap(),
+            param_maps_json(&maps, &stages).unwrap(),
             format!(
                 "[[{{\"parent\":\"{uid}\",\"name\":\"regParam\",\"value\":\"0.1\",\"isJson\":true}}]]"
             )
         );
-        assert_eq!(validate_params(&svc, &maps).unwrap(), vec![uid.clone()]);
+        assert_eq!(validate_params(&svc, &maps).unwrap(), stages);
         let foreign = vec![ParamMap::new().put("Other_1", "maxIter", MlValue::Int(1))];
         assert!(validate_params(&svc, &foreign)
             .unwrap_err()
@@ -1525,7 +1628,11 @@ mod tests {
         // A pipeline's nested stages are of its uid map.
         let pipeline = Pipeline::new().set_stages(vec![PipelineStage::estimator(svc)]);
         assert_eq!(
-            validate_params(&pipeline, &maps).unwrap(),
+            validate_params(&pipeline, &maps)
+                .unwrap()
+                .iter()
+                .map(|(uid, _)| uid.clone())
+                .collect::<Vec<_>>(),
             vec![pipeline.uid().to_string(), uid]
         );
     }
@@ -1584,7 +1691,8 @@ mod tests {
         let outer = PipelineModel::of_stages(vec![PipelineStage::Model(Box::new(inner))]);
         let outer_uid = outer.uid().to_string();
         let mut uids = Vec::new();
-        nested_uids(&PipelineStage::Model(Box::new(outer)), &mut uids).unwrap();
+        nested_stages(&PipelineStage::Model(Box::new(outer)), &mut uids).unwrap();
+        let uids: Vec<String> = uids.into_iter().map(|(uid, _)| uid).collect();
         assert_eq!(uids, vec![outer_uid, inner_uid]);
     }
 
@@ -1597,7 +1705,8 @@ mod tests {
         let estimator = OneVsRest::new().set_classifier(classifier.clone());
         let ovr_uid = estimator.operator().uid.clone();
         let mut uids = Vec::new();
-        nested_uids(&PipelineStage::estimator(estimator), &mut uids).unwrap();
+        nested_stages(&PipelineStage::estimator(estimator), &mut uids).unwrap();
+        let uids: Vec<String> = uids.into_iter().map(|(uid, _)| uid).collect();
         assert_eq!(uids, vec![ovr_uid.clone(), classifier_uid.clone()]);
         // A model of one class, whose model is a stand-in with no stages of its own.
         let class_model = PipelineModel::of_stages(Vec::new());
@@ -1614,7 +1723,8 @@ mod tests {
             classifier: Some(classifier.into()),
         };
         let mut uids = Vec::new();
-        nested_uids(&PipelineStage::Model(Box::new(model)), &mut uids).unwrap();
+        nested_stages(&PipelineStage::Model(Box::new(model)), &mut uids).unwrap();
+        let uids: Vec<String> = uids.into_iter().map(|(uid, _)| uid).collect();
         assert_eq!(
             uids,
             vec![
@@ -1623,5 +1733,127 @@ mod tests {
                 class_uid
             ]
         );
+    }
+
+    fn offline_session() -> SparkSession {
+        // gRPC connects lazily, so the splits and the checks below build plans only.
+        SparkSession::builder()
+            .remote("sc://localhost:15002")
+            .get_or_create()
+            .expect("session")
+    }
+
+    #[test]
+    fn a_validator_in_a_grid_sets_its_own_params_of_a_param_map() {
+        // As `copy(extra)` of PySpark's validators: their own params, then their estimator's.
+        let inner = CrossValidator::new()
+            .set_estimator(LinearSVC::new())
+            .set_num_folds(3)
+            .set_seed(7);
+        let uid = inner.uid().to_string();
+        let map = ParamMap::new().put(&uid, "numFolds", MlValue::Int(2)).put(
+            &uid,
+            "seed",
+            MlValue::Int(9),
+        );
+        let mut alone = inner.clone();
+        alone.apply_param_map(&map).unwrap();
+        assert_eq!((alone.num_folds(), alone.seed()), (2, 9));
+        // And nested in a pipeline, as a stage of the estimator of an outer validator.
+        let mut pipeline = Pipeline::new().set_stages(vec![PipelineStage::estimator(inner)]);
+        pipeline.apply_param_map(&map).unwrap();
+        let PipelineStage::Estimator(stage) = &pipeline.stages()[0] else {
+            panic!("an estimator stage");
+        };
+        let nested = stage
+            .as_any_stage()
+            .and_then(|any| any.downcast_ref::<CrossValidator>())
+            .expect("a cross validator");
+        assert_eq!((nested.num_folds(), nested.seed()), (2, 9));
+    }
+
+    #[test]
+    fn a_train_validation_split_in_a_grid_sets_its_own_params_of_a_param_map() {
+        let tvs = TrainValidationSplit::new()
+            .set_estimator(LinearSVC::new())
+            .set_train_ratio(0.75);
+        let uid = tvs.uid().to_string();
+        let map = ParamMap::new()
+            .put(&uid, "trainRatio", MlValue::Double(0.3))
+            .put(&uid, "parallelism", MlValue::Int(2))
+            .put(&uid, "collectSubModels", MlValue::Bool(true));
+        let mut copy = tvs.clone();
+        copy.apply_param_map(&map).unwrap();
+        assert_eq!(
+            (
+                copy.train_ratio(),
+                copy.parallelism(),
+                copy.collect_sub_models()
+            ),
+            (0.3, 2, true)
+        );
+    }
+
+    #[test]
+    fn a_validator_of_no_folds_fails_as_pyspark_does() {
+        // PySpark's `np.mean` and `np.std` of no fold are a scalar, which `list` fails on.
+        let df = offline_session().range(10).expect("a range");
+        let svc = LinearSVC::new();
+        let uid = svc.operator().uid.clone();
+        let grid = ParamGridBuilder::new()
+            .add_grid(&uid, "regParam", [MlValue::Double(0.1)])
+            .build();
+        for (num_folds, fold_col) in [(-1, ""), (0, "fold"), (-2, "fold")] {
+            let mut cv = CrossValidator::new()
+                .set_estimator(svc.clone())
+                .set_evaluator(BinaryClassificationEvaluator::new())
+                .set_estimator_param_maps(grid.clone())
+                .set_num_folds(num_folds)
+                .set_fold_col(fold_col);
+            let error = cv.fit_validator(&df).expect_err("a validator of no folds");
+            assert!(
+                error
+                    .to_string()
+                    .contains("'numpy.float64' object is not iterable"),
+                "{num_folds} {fold_col}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn grid_values_are_converted_to_their_params_types_when_they_are_applied_and_saved() {
+        let svc = LinearSVC::new();
+        let uid = svc.operator().uid.clone();
+        let maps = ParamGridBuilder::new()
+            .add_grid(&uid, "regParam", [MlValue::Int(0), MlValue::Int(1)])
+            .build();
+        let mut copy = svc.clone();
+        copy.apply_param_map(&maps[0]).unwrap();
+        let literal = format!("{:?}", copy.params().get_param("regParam"));
+        assert!(literal.contains("Double(0.0)"), "{literal}");
+        // The saved grid holds the converted value, as the JSON of `0.0`.
+        let stages = vec![(uid.clone(), svc.operator().name.clone())];
+        let json = param_maps_json(&maps, &stages).unwrap();
+        assert!(json.contains(r#""value":"0.0""#), "{json}");
+        // A Boolean param refuses an int, as PySpark's `toBoolean` does.
+        let map = ParamMap::new().put(&uid, "fitIntercept", MlValue::Int(0));
+        let error = svc.clone().apply_param_map(&map).expect_err("an int");
+        assert!(
+            error
+                .to_string()
+                .contains("Boolean Param requires value of type bool. Found <class 'int'>."),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn the_default_seed_of_a_class_of_validators_is_constant_in_a_process() {
+        // PySpark's default seed is `hash(type(self).__name__)`: the same for each instance.
+        assert_eq!(CrossValidator::new().seed(), CrossValidator::new().seed());
+        assert_eq!(
+            TrainValidationSplit::new().seed(),
+            TrainValidationSplit::new().seed()
+        );
+        assert_eq!(CrossValidator::new().set_seed(3).seed(), 3);
     }
 }

@@ -13,6 +13,7 @@
 //! - **Persistence** is of PySpark's Python format, so that PySpark loads what this API saves and
 //!   this API loads what PySpark saves: the metadata of `DefaultParamsWriter` and each stage by its
 //!   own writer ([`Pipeline::load`], [`load_stage`]).
+use super::param_specs::{ParamConverter, MODEL_CLASSES, PARAM_CONVERTERS};
 use super::stage_kinds::STAGE_KINDS;
 use super::*;
 use spark_connect_core::error::Result;
@@ -159,14 +160,212 @@ impl ParamGridBuilder {
     }
 }
 
-/// Set the values of `map` of the params of the stage of the uid `uid` in `params`.
-pub(super) fn apply_pairs(params: &mut Params, uid: &str, map: &ParamMap) -> Result<()> {
+/// Set the values of `map` of the params of the stage of the uid `uid` and the JVM class `class`
+/// in `params`, as PySpark's `copy(extra)` does: each value converted as its param's type
+/// converter converts it, and none of the params that the class does not have (PySpark's
+/// `_copyValues` sets only the params of the copied object).
+pub(super) fn apply_pairs(
+    params: &mut Params,
+    class: &str,
+    uid: &str,
+    map: &ParamMap,
+) -> Result<()> {
     for pair in map.of_stage(uid) {
-        let literal = pair.value.to_literal()?;
+        if class_known(class) && param_converter(class, &pair.name).is_none() {
+            continue;
+        }
+        let literal = converted(class, &pair.name, &pair.value)?.to_literal()?;
         let taken = std::mem::replace(params, Params::new());
         *params = taken.set_param_literal(&pair.name, literal);
     }
     Ok(())
+}
+
+/// The simple name of a JVM class (of its package stripped), which the generated table names.
+fn simple_name(class: &str) -> &str {
+    class.rsplit('.').next().unwrap_or(class)
+}
+
+/// Whether the generated table of the params of pyspark.ml has the class `class`.
+fn class_known(class: &str) -> bool {
+    PARAM_CONVERTERS
+        .iter()
+        .any(|(name, _)| *name == simple_name(class))
+}
+
+/// The type converter of the param `name` of the class `class`, if the table has the param.
+pub(super) fn param_converter(class: &str, name: &str) -> Option<ParamConverter> {
+    let (_, params) = PARAM_CONVERTERS
+        .iter()
+        .find(|(simple, _)| *simple == simple_name(class))?;
+    params
+        .iter()
+        .find(|(param, _)| *param == name)
+        .map(|(_, converter)| *converter)
+}
+
+/// The value `value` of the param `name` of the class `class`, converted as PySpark's
+/// `Param.typeConverter` converts it, or as it is for a param that the table does not have.
+pub(super) fn converted(class: &str, name: &str, value: &MlValue) -> Result<MlValue> {
+    match param_converter(class, name) {
+        Some(converter) => convert_param(converter, value),
+        None => Ok(value.clone()),
+    }
+}
+
+/// The JVM class of the model that an estimator of the JVM class `estimator` fits (PySpark's
+/// `_create_model`): the class of the estimator's name with `Model` appended, unless the table
+/// names another (the models of the tree, ensemble, FM and perceptron classifiers and regressors,
+/// and QuantileDiscretizer's `Bucketizer`).
+pub(super) fn model_class(estimator: &str) -> String {
+    match MODEL_CLASSES
+        .iter()
+        .find(|(simple, _)| *simple == simple_name(estimator))
+    {
+        Some((_, model)) => model.to_string(),
+        None => format!("{estimator}Model"),
+    }
+}
+
+/// The params of `params` that the JVM class `class` has, as PySpark's `_copyValues` copies them
+/// to an object of the class. A class that the table does not have keeps all of them.
+pub(super) fn params_of_class(params: &Params, class: &str) -> Params {
+    if !class_known(class) {
+        return params.clone();
+    }
+    params.retain_names(|name| param_converter(class, name).is_some())
+}
+
+/// The value of `value` as PySpark's type converter of `converter` converts it, or PySpark's
+/// `TypeError` (of its message) when it cannot.
+pub(super) fn convert_param(converter: ParamConverter, value: &MlValue) -> Result<MlValue> {
+    let could_not = |target: &str| {
+        SparkError::value_msg(format!("Could not convert {} to {target}", py_str(value)))
+    };
+    match converter {
+        ParamConverter::Identity => Ok(value.clone()),
+        ParamConverter::Boolean => match value {
+            MlValue::Bool(b) => Ok(MlValue::Bool(*b)),
+            other => Err(SparkError::value_msg(format!(
+                "Boolean Param requires value of type bool. Found {}.",
+                py_type(other)
+            ))),
+        },
+        ParamConverter::Float => to_float(value)
+            .map(MlValue::Double)
+            .ok_or_else(|| could_not("float")),
+        ParamConverter::Int => to_int(value).ok_or_else(|| could_not("int")),
+        ParamConverter::String => match value {
+            MlValue::String(s) => Ok(MlValue::String(s.clone())),
+            other => Err(SparkError::value_msg(format!(
+                "Could not convert {} to string type",
+                py_type(other)
+            ))),
+        },
+        ParamConverter::ListFloat => list_of(value, "list of floats", |v| {
+            to_float(v).map(MlValue::Double)
+        }),
+        ParamConverter::ListInt => list_of(value, "list of ints", to_int),
+        ParamConverter::ListString => list_of(value, "list of strings", |v| match v {
+            MlValue::String(s) => Some(MlValue::String(s.clone())),
+            _ => None,
+        }),
+        ParamConverter::ListListFloat => match value {
+            MlValue::Array(items) => Ok(MlValue::Array(
+                items
+                    .iter()
+                    .map(|item| convert_param(ParamConverter::ListFloat, item))
+                    .collect::<Result<Vec<_>>>()?,
+            )),
+            _ => Err(could_not("list of list of floats")),
+        },
+    }
+}
+
+/// The list of the converted items of `value`, as PySpark's list converters convert it, or
+/// PySpark's `TypeError` of a value that is no list of such items.
+fn list_of(
+    value: &MlValue,
+    target: &str,
+    item: impl Fn(&MlValue) -> Option<MlValue>,
+) -> Result<MlValue> {
+    let fail = || SparkError::value_msg(format!("Could not convert {} to {target}", py_str(value)));
+    match value {
+        MlValue::Array(items) => items
+            .iter()
+            .map(|v| item(v).ok_or_else(fail))
+            .collect::<Result<Vec<_>>>()
+            .map(MlValue::Array),
+        _ => Err(fail()),
+    }
+}
+
+/// The float of a numeric value (a Python `int` or `float`, not a `bool`), as `TypeConverters`.
+fn to_float(value: &MlValue) -> Option<f64> {
+    match value {
+        MlValue::Byte(v) | MlValue::Short(v) | MlValue::Int(v) => Some(f64::from(*v)),
+        MlValue::Long(v) => Some(*v as f64),
+        MlValue::Float(v) => Some(f64::from(*v)),
+        MlValue::Double(v) => Some(*v),
+        _ => None,
+    }
+}
+
+/// The int of a numeric value that is integral, as `TypeConverters.toInt`: an `Int` when it fits,
+/// else a `Long`.
+fn to_int(value: &MlValue) -> Option<MlValue> {
+    let whole = match value {
+        MlValue::Byte(v) | MlValue::Short(v) | MlValue::Int(v) => i64::from(*v),
+        MlValue::Long(v) => *v,
+        MlValue::Float(v) if f64::from(*v).fract() == 0.0 => f64::from(*v) as i64,
+        MlValue::Double(v) if v.is_finite() && v.fract() == 0.0 => *v as i64,
+        _ => return None,
+    };
+    Some(match i32::try_from(whole) {
+        Ok(v) => MlValue::Int(v),
+        Err(_) => MlValue::Long(whole),
+    })
+}
+
+/// The Python type of a value, as PySpark's messages name `type(value)`.
+fn py_type(value: &MlValue) -> &'static str {
+    match value {
+        MlValue::Null => "<class 'NoneType'>",
+        MlValue::Bool(_) => "<class 'bool'>",
+        MlValue::Byte(_) | MlValue::Short(_) | MlValue::Int(_) | MlValue::Long(_) => {
+            "<class 'int'>"
+        }
+        MlValue::Float(_) | MlValue::Double(_) => "<class 'float'>",
+        MlValue::String(_) => "<class 'str'>",
+        MlValue::Array(_) => "<class 'list'>",
+        _ => "<class 'object'>",
+    }
+}
+
+/// The Python `str` of a value, as PySpark's messages show it (a list as its `repr`).
+fn py_str(value: &MlValue) -> String {
+    match value {
+        MlValue::Null => "None".to_string(),
+        MlValue::Bool(true) => "True".to_string(),
+        MlValue::Bool(false) => "False".to_string(),
+        MlValue::Byte(v) | MlValue::Short(v) | MlValue::Int(v) => v.to_string(),
+        MlValue::Long(v) => v.to_string(),
+        MlValue::Float(v) => format!("{v:?}"),
+        MlValue::Double(v) => format!("{v:?}"),
+        MlValue::String(s) => s.clone(),
+        MlValue::Array(items) => format!(
+            "[{}]",
+            items
+                .iter()
+                .map(|item| match item {
+                    MlValue::String(s) => format!("'{s}'"),
+                    other => py_str(other),
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        other => format!("{other:?}"),
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -362,18 +561,17 @@ impl Estimator for OperatorEstimator {
     fn fit_impl(&mut self, df: &DataFrame) -> Result<Box<dyn Model>> {
         let info = fit_via_command(&self.operator, &self.params, df)?;
         let object = CachedModel::from_info(&info, &df.session, &self.operator.name)?;
-        // The model of the uid of the estimator, as the server makes it, of the class of the
-        // estimator's name of a model ("<class>Model").
+        // The model of the uid of the estimator, as the server makes it, of the JVM class that
+        // PySpark's `_create_model` names, with the params of that class only: PySpark's model
+        // copies the params of the estimator that the model has.
+        let class = model_class(&self.operator.name);
         let operator = MlOperator::with_uid(
-            &format!("{}Model", self.operator.name),
+            &class,
             info.uid.as_deref().unwrap_or(&self.operator.uid),
             OperatorType::Model,
         );
-        Ok(Box::new(ObjectModel::new(
-            object,
-            operator,
-            self.params.clone(),
-        )))
+        let params = params_of_class(&self.params, &class);
+        Ok(Box::new(ObjectModel::new(object, operator, params)))
     }
 }
 
@@ -1152,5 +1350,81 @@ mod tests {
             Some(OperatorType::Evaluator)
         );
         assert_eq!(stage_kind("org.apache.spark.ml.Pipeline"), None);
+    }
+
+    #[test]
+    fn param_maps_set_only_the_params_that_the_stage_class_has() {
+        // As PySpark's `_copyValues`: a param of another class is not set (not sent).
+        let mut svc = LinearSVC::new().set_max_iter(5);
+        let uid = svc.operator().uid.clone();
+        let map = ParamMap::new().put(&uid, "rank", MlValue::Int(2)).put(
+            &uid,
+            "maxIter",
+            MlValue::Int(7),
+        );
+        svc.apply_param_map(&map).unwrap();
+        assert!(svc.params().get_param("rank").is_none());
+        assert_eq!(svc.max_iter(), 7);
+    }
+
+    #[test]
+    fn values_convert_as_pyspark_type_converters_convert_them() {
+        let svc = "org.apache.spark.ml.classification.LinearSVC";
+        assert_eq!(
+            converted(svc, "regParam", &MlValue::Int(0)).unwrap(),
+            MlValue::Double(0.0)
+        );
+        assert_eq!(
+            converted(svc, "maxIter", &MlValue::Double(5.0)).unwrap(),
+            MlValue::Int(5)
+        );
+        assert_eq!(
+            converted(svc, "maxIter", &MlValue::Long(1 << 40)).unwrap(),
+            MlValue::Long(1 << 40)
+        );
+        let error = converted(svc, "maxIter", &MlValue::Double(5.5)).unwrap_err();
+        assert!(
+            error.to_string().contains("Could not convert 5.5 to int"),
+            "{error}"
+        );
+        let error = converted(svc, "featuresCol", &MlValue::Int(1)).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Could not convert <class 'int'> to string type"),
+            "{error}"
+        );
+        let error = converted(svc, "fitIntercept", &MlValue::Int(1)).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Boolean Param requires value of type bool. Found <class 'int'>."),
+            "{error}"
+        );
+        assert_eq!(
+            converted(
+                "org.apache.spark.ml.feature.QuantileDiscretizer",
+                "inputCols",
+                &MlValue::Array(vec![MlValue::String("a".into())])
+            )
+            .unwrap(),
+            MlValue::Array(vec![MlValue::String("a".into())])
+        );
+    }
+
+    #[test]
+    fn a_fitted_model_is_of_the_jvm_class_that_pyspark_creates() {
+        assert_eq!(
+            model_class("org.apache.spark.ml.classification.DecisionTreeClassifier"),
+            "org.apache.spark.ml.classification.DecisionTreeClassificationModel"
+        );
+        assert_eq!(
+            model_class("org.apache.spark.ml.feature.QuantileDiscretizer"),
+            "org.apache.spark.ml.feature.Bucketizer"
+        );
+        assert_eq!(
+            model_class("org.apache.spark.ml.recommendation.ALS"),
+            "org.apache.spark.ml.recommendation.ALSModel"
+        );
     }
 }
