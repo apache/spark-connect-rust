@@ -48,6 +48,7 @@ omit =
     */pyspark/sql/profiler.py
     */pyspark/sql/metrics.py
     */pyspark/sql/interchange.py
+    */pyspark/sql/session.py
     */pyspark/serializers.py
     */pyspark/loose_version.py
     */pyspark/_globals.py
