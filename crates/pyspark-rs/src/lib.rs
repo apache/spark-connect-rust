@@ -121,6 +121,11 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyWhenMatched>()?;
     m.add_class::<PyWhenNotMatched>()?;
     m.add_class::<PyWhenNotMatchedBySource>()?;
+    // As PySpark Connect's classes nested in MergeIntoWriter, of which they are attributes.
+    for name in ["WhenMatched", "WhenNotMatched", "WhenNotMatchedBySource"] {
+        m.getattr(name)?
+            .setattr("__qualname__", format!("MergeIntoWriter.{name}"))?;
+    }
     m.add_class::<PyColumn>()?;
     row::register(m)?;
     m.add_class::<PyGroupedData>()?;

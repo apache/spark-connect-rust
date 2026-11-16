@@ -185,7 +185,12 @@ fn named_tuples<T: NamedTuple>(py: Python<'_>, results: Vec<T>) -> PyResult<Vec<
 }
 
 /// Python wrapper for Spark Catalog.
-#[pyclass(name = "Catalog", module = "pyspark.sql.catalog", weakref, dict)]
+#[pyclass(
+    name = "Catalog",
+    module = "pyspark.sql.connect.catalog",
+    weakref,
+    dict
+)]
 pub struct PyCatalog {
     pub(crate) catalog: Catalog,
 }

@@ -10,7 +10,7 @@ use crate::errors::ResultExt;
 /// Python wrapper for the table-valued-function namespace (`spark.tvf`).
 #[pyclass(
     name = "TableValuedFunction",
-    module = "pyspark.sql.tvf",
+    module = "pyspark.sql.connect.tvf",
     weakref,
     dict
 )]

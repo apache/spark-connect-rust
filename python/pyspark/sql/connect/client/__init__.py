@@ -415,6 +415,9 @@ class SparkConnectClient:
     messages are those of the generated ``pyspark.sql.connect.proto``. The Rust transport is the
     rest of the client, of the DataFrame API."""
 
+    # As PySpark Connect's, of pyspark.sql.connect.client.core, whose name this class has too.
+    __module__ = "pyspark.sql.connect.client.core"
+
     def __init__(self, session: Any) -> None:
         import threading
 

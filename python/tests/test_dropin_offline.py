@@ -5376,7 +5376,7 @@ def test_udf_udtf_determinism_and_extras(mock_connect):
 def test_catalog_result_classes():
     # As PySpark's: the catalog metadata result classes are the NamedTuples of
     # pyspark.sql.catalog, and the Table `database` property derives from a single-element
-    # namespace.
+    # namespace. The Catalog of a session is PySpark Connect's, of pyspark.sql.connect.catalog.
     from pyspark.sql.catalog import (
         Catalog,
         CatalogMetadata,
@@ -5386,7 +5386,7 @@ def test_catalog_result_classes():
         Table,
         TablePartition,
     )
-    assert Catalog.__module__ == "pyspark.sql.catalog"
+    assert Catalog.__module__ == "pyspark.sql.connect.catalog"
     for cls in (CatalogMetadata, Database, Table, Column, Function, TablePartition):
         assert cls.__module__ == "pyspark.sql.catalog", f"{cls.__name__} module = {cls.__module__}"
         assert issubclass(cls, tuple)
@@ -13062,8 +13062,9 @@ def test_pandas_udf_eval_type_inferred_from_type_hints(mock_connect):
 # class itself unpicklable: pickle serializes a class BY REFERENCE, writing
 # __module__ + __qualname__ and re-importing on load, so "builtins.IntegerType" fails
 # the lookup. Every #[pyclass] therefore carries an explicit `module = "..."`.
-# The public DataFrame base reports pyspark.sql.dataframe, as in PySpark. Native
-# DataFrame/Column classes report the connect modules, which contain the concrete
+# The public DataFrame base reports pyspark.sql.dataframe, as in PySpark. The native classes of
+# the objects of a session (SparkSession, DataFrame, Column and the rest, of
+# test_dropin_class_modules_offline.py) report the connect modules, which contain the concrete
 # classes returned by Connect sessions.
 
 
@@ -13073,7 +13074,7 @@ def test_pandas_udf_eval_type_inferred_from_type_hints(mock_connect):
         (_DF, "pyspark.sql.dataframe"),
         (_ConnectDF, "pyspark.sql.connect.dataframe"),
         (_Col, "pyspark.sql.connect.column"),
-        (_SS, "pyspark.sql.session"),
+        (_SS, "pyspark.sql.connect.session"),
         (T.DataType, "pyspark.sql.types"),
         (T.IntegerType, "pyspark.sql.types"),
         (T.StructType, "pyspark.sql.types"),

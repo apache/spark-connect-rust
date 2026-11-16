@@ -260,6 +260,7 @@ jobs:
             tests/test_dropin_window_tablearg_offline.py \
             tests/test_dropin_udf_args_offline.py \
             tests/test_dropin_types_columns_offline.py \
+            tests/test_dropin_class_modules_offline.py \
             tests/test_arrow_handoff.py \
             tests/test_ml_offline.py \
             tests/test_ml_api_offline.py \

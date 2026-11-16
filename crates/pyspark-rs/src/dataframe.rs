@@ -3242,7 +3242,7 @@ impl PyDataFrame {
 /// Python wrapper for `DataFrameNaFunctions` (`df.na`).
 #[pyclass(
     name = "DataFrameNaFunctions",
-    module = "pyspark.sql.dataframe",
+    module = "pyspark.sql.connect.dataframe",
     weakref,
     dict
 )]
@@ -3557,7 +3557,12 @@ fn check_written_table(py: Python<'_>, unsent_table: &Option<Py<PyAny>>) -> PyRe
 /// (`whenMatched().updateAll()`, ...) change this object and return it, and `merge`
 /// leaves it usable. The core writer is a consuming builder, so the wrapped value is
 /// replaced in place and `merge` runs on a clone.
-#[pyclass(name = "MergeIntoWriter", module = "pyspark.sql.merge", weakref, dict)]
+#[pyclass(
+    name = "MergeIntoWriter",
+    module = "pyspark.sql.connect.merge",
+    weakref,
+    dict
+)]
 pub struct PyMergeIntoWriter {
     inner: std::sync::Arc<WriterState<spark_connect::MergeIntoWriter>>,
     /// Whether `withSchemaEvolution` was called on this builder, as PySpark's
@@ -3716,7 +3721,7 @@ fn assignments_to_map(
 
 /// `whenMatched(...)` clause builder. Holds its parent writer, like PySpark's
 /// `MergeIntoWriter.WhenMatched`; each action may be called more than once.
-#[pyclass(name = "WhenMatched", module = "pyspark.sql.merge")]
+#[pyclass(name = "WhenMatched", module = "pyspark.sql.connect.merge")]
 pub struct PyWhenMatched {
     writer: Py<PyMergeIntoWriter>,
     condition: Option<spark_connect::column::Column>,
@@ -3768,7 +3773,7 @@ impl PyWhenMatched {
 
 /// `whenNotMatched(...)` clause builder. Holds its parent writer, like PySpark's
 /// `MergeIntoWriter.WhenNotMatched`.
-#[pyclass(name = "WhenNotMatched", module = "pyspark.sql.merge")]
+#[pyclass(name = "WhenNotMatched", module = "pyspark.sql.connect.merge")]
 pub struct PyWhenNotMatched {
     writer: Py<PyMergeIntoWriter>,
     condition: Option<spark_connect::column::Column>,
@@ -3814,7 +3819,7 @@ impl PyWhenNotMatched {
 
 /// `whenNotMatchedBySource(...)` clause builder. Holds its parent writer, like
 /// PySpark's `MergeIntoWriter.WhenNotMatchedBySource`.
-#[pyclass(name = "WhenNotMatchedBySource", module = "pyspark.sql.merge")]
+#[pyclass(name = "WhenNotMatchedBySource", module = "pyspark.sql.connect.merge")]
 pub struct PyWhenNotMatchedBySource {
     writer: Py<PyMergeIntoWriter>,
     condition: Option<spark_connect::column::Column>,
@@ -3873,7 +3878,7 @@ impl PyWhenNotMatchedBySource {
 /// Python wrapper for the V1 `DataFrameWriter` (`df.write`).
 #[pyclass(
     name = "DataFrameWriter",
-    module = "pyspark.sql.readwriter",
+    module = "pyspark.sql.connect.readwriter",
     weakref,
     dict
 )]
@@ -4845,7 +4850,7 @@ impl PyDataFrameWriter {
 /// Python wrapper for the V2 `DataFrameWriter` (`df.writeTo`).
 #[pyclass(
     name = "DataFrameWriterV2",
-    module = "pyspark.sql.readwriter",
+    module = "pyspark.sql.connect.readwriter",
     weakref,
     dict
 )]

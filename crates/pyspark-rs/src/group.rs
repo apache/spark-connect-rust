@@ -71,7 +71,12 @@ pub(crate) fn reduce_with_state<'py>(
 }
 
 /// Python wrapper for Spark GroupedData.
-#[pyclass(name = "GroupedData", module = "pyspark.sql.group", weakref, dict)]
+#[pyclass(
+    name = "GroupedData",
+    module = "pyspark.sql.connect.group",
+    weakref,
+    dict
+)]
 pub struct PyGroupedData {
     pub(crate) grouped_data: RustGroupedData,
     /// The DataFrame that is grouped, as the Python object that `groupBy` was called on, as

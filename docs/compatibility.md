@@ -1119,6 +1119,16 @@ and `pyspark.sql.connect.udtf`, which the classic names `pyspark.sql.udf.UserDef
 is True against either name, where PySpark 4.3.0 gives False for the classic name, whose class
 needs a SparkContext.
 
+So it is for the objects of a session: each is of PySpark Connect's class, of its module of
+`pyspark.sql.connect`, as `repr`, `type(x).__module__` and pickle show it, and the classic name
+names the same class. These are the SparkSession, its `catalog`, `read`, `readStream`, `streams`,
+`udf`, `udtf`, `tvf` and `client`, and a DataFrame's `write`, `writeTo`, `writeStream`,
+`mergeInto` and its clauses, `na`, `stat`, `groupBy`, `asTable` and the WindowSpec of its
+windows. So `pyspark.sql.SparkSession.__module__` is `pyspark.sql.connect.session`, where
+PySpark's is `pyspark.sql.session`. `spark.dataSource` and `GroupedData.cogroup` still give the
+classic classes, `pyspark.sql.datasource.DataSourceRegistration` and
+`pyspark.sql.pandas.group_ops.PandasCogroupedOps`.
+
 ## Native NaiveBayes
 
 The Rust `ml::NaiveBayes` and `ml::NaiveBayesModel` train and predict through Spark
