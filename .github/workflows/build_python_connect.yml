@@ -145,12 +145,7 @@ jobs:
         run: |
           PKG="spark-${SPARK_VERSION}-bin-hadoop3-connect"
           if [ ! -d "${HOME}/spark-dist/spark-4.3.0-bin-hadoop3"* ]; then
-            URL="https://archive.apache.org/dist/spark/spark-${SPARK_VERSION}/${PKG}.tgz"
-            mkdir -p "${HOME}/spark-dist"
-            echo "Downloading ${URL}"
-            wget -q -O "${HOME}/spark-dist/${PKG}.tgz" "${URL}"
-            tar -xzf "${HOME}/spark-dist/${PKG}.tgz" -C "${HOME}/spark-dist"
-            rm -f "${HOME}/spark-dist/${PKG}.tgz"
+            scripts/download_spark_dist.sh "${SPARK_VERSION}" "${PKG}" "${HOME}/spark-dist"
           else
             echo "Using cached Spark distribution."
           fi
@@ -238,8 +233,9 @@ jobs:
       - name: Drop-in live-server tests (native Arrow handoff and API behaviors), without protobuf
         # The parity gate above runs the reference pyspark over our transport, so the
         # drop-in's own Rust-backed classes are only exercised against a server here. They run
-        # in an environment of only the drop-in's dependencies (pandas, pyarrow, numpy) and
-        # pytest, without protobuf, where pyspark.sql.connect.proto is the Rust protobuf runtime.
+        # in an environment of only the drop-in's dependencies (pandas, pyarrow, numpy, pyyaml)
+        # and pytest, without protobuf, where pyspark.sql.connect.proto is the Rust protobuf
+        # runtime.
         # The server's Python workers keep the job's environment, as those of foreachBatch and
         # the listeners run PySpark's own client.
         working-directory: python
@@ -248,7 +244,7 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}/python
         run: |
           python -m venv /tmp/client
-          /tmp/client/bin/python -m pip install pytest 'pandas>=2.2,<3.0' pyarrow numpy
+          /tmp/client/bin/python -m pip install pytest 'pandas>=2.2,<3.0' pyarrow numpy pyyaml
           if /tmp/client/bin/python -c "import google.protobuf" 2>/dev/null; then
             echo "protobuf is installed in the client environment"; exit 1
           fi
@@ -426,12 +422,7 @@ jobs:
         run: |
           PKG="spark-${SPARK_VERSION}-bin-hadoop3-connect"
           if [ ! -d "${HOME}/spark-dist/spark-4.3.0-bin-hadoop3"* ]; then
-            URL="https://archive.apache.org/dist/spark/spark-${SPARK_VERSION}/${PKG}.tgz"
-            mkdir -p "${HOME}/spark-dist"
-            echo "Downloading ${URL}"
-            wget -q -O "${HOME}/spark-dist/${PKG}.tgz" "${URL}"
-            tar -xzf "${HOME}/spark-dist/${PKG}.tgz" -C "${HOME}/spark-dist"
-            rm -f "${HOME}/spark-dist/${PKG}.tgz"
+            scripts/download_spark_dist.sh "${SPARK_VERSION}" "${PKG}" "${HOME}/spark-dist"
           else
             echo "Using cached Spark distribution."
           fi
@@ -588,12 +579,7 @@ jobs:
         run: |
           PKG="spark-${SPARK_VERSION}-bin-hadoop3-connect"
           if [ ! -d "${HOME}/spark-dist/spark-4.3.0-bin-hadoop3"* ]; then
-            URL="https://archive.apache.org/dist/spark/spark-${SPARK_VERSION}/${PKG}.tgz"
-            mkdir -p "${HOME}/spark-dist"
-            echo "Downloading ${URL}"
-            wget -q -O "${HOME}/spark-dist/${PKG}.tgz" "${URL}"
-            tar -xzf "${HOME}/spark-dist/${PKG}.tgz" -C "${HOME}/spark-dist"
-            rm -f "${HOME}/spark-dist/${PKG}.tgz"
+            scripts/download_spark_dist.sh "${SPARK_VERSION}" "${PKG}" "${HOME}/spark-dist"
           else
             echo "Using cached Spark distribution."
           fi
@@ -710,10 +696,7 @@ jobs:
         run: |
           PKG="spark-${SPARK_VERSION}-bin-hadoop3-connect"
           if [ ! -d "${HOME}/spark-dist/spark-4.3.0-bin-hadoop3"* ]; then
-            mkdir -p "${HOME}/spark-dist"
-            wget -q -O "/tmp/${PKG}.tgz" "https://archive.apache.org/dist/spark/spark-${SPARK_VERSION}/${PKG}.tgz"
-            tar -xzf "/tmp/${PKG}.tgz" -C "${HOME}/spark-dist"
-            rm -f "/tmp/${PKG}.tgz"
+            scripts/download_spark_dist.sh "${SPARK_VERSION}" "${PKG}" "${HOME}/spark-dist"
           fi
           if [ ! -d "${HOME}/spark-source/python" ]; then
             git clone --depth 1 --branch "v${SPARK_VERSION}" https://github.com/apache/spark.git "${HOME}/spark-source"

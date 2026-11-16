@@ -26,16 +26,24 @@ classifiers = [
 ]
 
 dependencies = [
-    "pandas>=1.0.0",
-    "pyarrow>=10.0.0",
-    "numpy>=1.16.0",
+    "pandas>=2.2.0",
+    "pyarrow>=18.0.0",
+    "numpy>=1.23.2",
+    "pyyaml>=3.11",
 ]
+# The dependencies and minimum versions of pyspark-client 4.3.0
+# (python/packaging/client/setup.py of Apache Spark v4.3.0), except its gRPC ones. The vendored
+# PySpark code checks the minimum pandas and PyArrow at runtime
+# (pyspark/sql/pandas/utils.py), and the vendored Spark Declarative Pipelines CLI
+# (pyspark/pipelines/cli.py) imports yaml.
+#
 # cloudpickle is vendored at pyspark/cloudpickle (matching Apache Spark's own
 # bundling), so it is intentionally NOT an external dependency.
 #
 # No optional-dependencies: unlike upstream PySpark's `connect` extra, this
 # package has no pure-Python gRPC client — the Rust extension (pyspark._pyspark)
-# speaks gRPC via tonic, so grpcio is never imported at runtime.
+# speaks gRPC via tonic, so grpcio, grpcio-status, googleapis-common-protos and
+# zstandard (which pyspark-client requires) are never imported at runtime.
 
 [project.urls]
 Homepage = "https://spark.apache.org/"

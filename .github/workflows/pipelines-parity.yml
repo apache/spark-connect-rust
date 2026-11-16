@@ -122,12 +122,7 @@ jobs:
         run: |
           PKG="spark-${SPARK_VERSION}-bin-hadoop3-connect"
           if [ ! -d "${HOME}/spark-dist/spark-4.3.0-bin-hadoop3"* ]; then
-            URL="https://archive.apache.org/dist/spark/spark-${SPARK_VERSION}/${PKG}.tgz"
-            mkdir -p "${HOME}/spark-dist"
-            echo "Downloading ${URL}"
-            wget -q -O "${HOME}/spark-dist/${PKG}.tgz" "${URL}"
-            tar -xzf "${HOME}/spark-dist/${PKG}.tgz" -C "${HOME}/spark-dist"
-            rm -f "${HOME}/spark-dist/${PKG}.tgz"
+            scripts/download_spark_dist.sh "${SPARK_VERSION}" "${PKG}" "${HOME}/spark-dist"
           else
             echo "Using cached Spark distribution."
           fi

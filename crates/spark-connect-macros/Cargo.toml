@@ -21,6 +21,9 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
 description = "Procedural macros for the Rust Spark Connect client (e.g. #[spark_wasm_udf])"
 
 [lints]
