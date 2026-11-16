@@ -5,7 +5,7 @@ import base64
 import inspect
 
 import pytest
-from _evaluators import FIXTURE
+from _evaluators import FIXTURE, signature_text
 from pyspark.ml.connect import evaluation
 from pyspark.sql.connect import proto as pb2
 from test_ml_offline import (
@@ -62,7 +62,7 @@ def test_evaluator_exports_signature_and_pandas_guard(ml_mock, name):
 
     cls = getattr(evaluation, name)
     assert cls is getattr(root, name) and issubclass(cls, getattr(native, name))
-    assert str(inspect.signature(cls)) == FIXTURE["classes"][name]["signature"]
+    assert signature_text(inspect.signature(cls)) == FIXTURE["classes"][name]["signature"]
     _, service = ml_mock
     before = _requests_but_deletes(service)
     with pytest.raises(TypeError, match="requires a Spark DataFrame"):

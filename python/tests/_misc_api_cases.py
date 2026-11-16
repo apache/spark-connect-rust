@@ -490,6 +490,7 @@ def _one_vs_rest_live(rec, spark, base):
     rec("fit_without_classifier", lambda: _unset_one_vs_rest().fit(df))
     _one_vs_rest_parity_cases(rec, est, model, df)
     _one_vs_rest_persistence(rec, est, model, df, base)
+    _one_vs_rest_plain_classifier_cases(rec, df, base)
 
 
 def _metadata(path):
@@ -676,6 +677,68 @@ def _one_vs_rest_persistence(rec, est, model, df, base):
     )
     shutil.rmtree(base, ignore_errors=True)
     _one_vs_rest_validator(rec, df, base)
+
+
+def _one_vs_rest_plain_classifier_cases(rec, df, base):
+    """The cases of a OneVsRest of a classifier that is not a native one, which PySpark fits as any
+    classifier: PySpark's own LogisticRegression and MultilayerPerceptronClassifier of
+    pyspark.ml.classification, a Python subclass of that LogisticRegression, and objects that are
+    no classifier. The model is PySpark's OneVsRestModel of the classifier's own models."""
+    import pyspark.ml.classification as classification
+    from pyspark.sql import functions as F
+
+    class LogisticRegressionSubclass(classification.LogisticRegression):
+        pass
+
+    lr = classification.LogisticRegression(maxIter=5, regParam=0.01)
+    est = _native("OneVsRest")(classifier=lr)
+    rec("plain_getClassifier_is_classifier", lambda: est.getClassifier() is lr)
+    model = est.fit(df)
+    rec("plain_model_class", lambda: (type(model).__name__, type(model).__module__))
+    _submodel_cases(rec, "plain_lr_", model, lr)
+    rec("plain_model_prefix", lambda: model.uid.split("_")[0])
+    rec("plain_model_uid_is_estimator", lambda: model.uid == est.uid)
+    rec("plain_model_params", lambda: _params_of(model))
+    rec("plain_model_classifier_is_classifier", lambda: model.getClassifier() is lr)
+    rec("plain_transform_columns", lambda: model.transform(df).columns)
+    rec("plain_transform", lambda: model.transform(df))
+    rec("plain_fit_map", lambda: est.fit(df, {est.predictionCol: "q"}).transform(df).columns)
+    rec("plain_fit_list", lambda: [m.transform(df).count() for m in est.fit(df, [{}, {}])])
+    rec(
+        "plain_fit_classifier_map",
+        lambda: [s.getMaxIter() for s in est.fit(df, {lr.maxIter: 3}).models],
+    )
+    subclassed = _native("OneVsRest")(classifier=LogisticRegressionSubclass(maxIter=5)).fit(df)
+    rec("plain_subclass_models_types", lambda: [type(s).__name__ for s in subclassed.models])
+    rec("plain_subclass_transform", lambda: subclassed.transform(df))
+    # The weightCol, which PySpark's LogisticRegression takes, and its perceptron warns of.
+    weighted = df.withColumn("w", F.lit(1.0))
+
+    def weighted_fit(classifier):
+        return _native("OneVsRest")(classifier=classifier, weightCol="w").fit(weighted)
+
+    mlp = classification.MultilayerPerceptronClassifier(layers=[2, 4, 2], maxIter=2, seed=1)
+    rec("plain_mlp_weight_warnings", lambda: _weight_warnings(lambda: weighted_fit(mlp)))
+    rec(
+        "plain_lr_weight_submodel_weightCols",
+        lambda: [s.getWeightCol() for s in weighted_fit(lr).models],
+    )
+    rec("plain_object_fit", lambda: _native("OneVsRest")(classifier=object()).fit(df))
+    rec("plain_none_fit", lambda: _native("OneVsRest")(classifier=None).fit(df))
+    # The save of the estimator saves the classifier, and that of the model its models.
+    shutil.rmtree(base, ignore_errors=True)
+    rec("plain_est_save", lambda: est.write().overwrite().save(base + "/plain"))
+    rec("plain_est_classifier_metadata", lambda: _metadata(base + "/plain/classifier")["class"])
+    rec(
+        "plain_est_loaded_classifier",
+        lambda: type(type(est).load(base + "/plain").getClassifier()).__name__,
+    )
+    rec("plain_model_save", lambda: model.write().overwrite().save(base + "/plainm"))
+    rec(
+        "plain_model_loaded_models_types",
+        lambda: [type(s).__name__ for s in type(model).load(base + "/plainm").models],
+    )
+    shutil.rmtree(base, ignore_errors=True)
 
 
 def _one_vs_rest_validator(rec, df, base):

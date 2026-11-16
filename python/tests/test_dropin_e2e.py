@@ -5193,9 +5193,9 @@ def test_linear_regression_learns_the_data_and_predicts_unseen_rows(session, use
     estimator = LinearRegression() if use_setters else LinearRegression(**kwargs)
     if use_setters:
         for name, value in kwargs.items():
-            if name == "loss" and type(estimator).__module__ == "pyspark.ml.regression":
-                # Upstream 4.3.0 setLoss uses the nonexistent lossType parameter.
-                # Compare the intended loss setting through its working setParams API.
+            if name == "loss":
+                # PySpark 4.3.0's setLoss sets the nonexistent lossType param, and so does this
+                # client's, which is PySpark's own setter: set the loss of its setParams.
                 assert estimator.setParams(loss=value) is estimator
             else:
                 assert getattr(estimator, "set" + name[0].upper() + name[1:])(value) is estimator

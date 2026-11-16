@@ -3164,6 +3164,272 @@
      "True"
     ]
    ],
+   "plain_est_classifier_metadata": [
+    "ok",
+    "'org.apache.spark.ml.classification.LogisticRegression'"
+   ],
+   "plain_est_loaded_classifier": [
+    "ok",
+    "'LogisticRegression'"
+   ],
+   "plain_est_save": [
+    "ok",
+    "None"
+   ],
+   "plain_fit_classifier_map": [
+    "ok",
+    [
+     "3",
+     "3",
+     "3"
+    ]
+   ],
+   "plain_fit_list": [
+    "ok",
+    [
+     "6",
+     "6"
+    ]
+   ],
+   "plain_fit_map": [
+    "ok",
+    [
+     "'label'",
+     "'features'",
+     "'rawPrediction'",
+     "'q'"
+    ]
+   ],
+   "plain_getClassifier_is_classifier": [
+    "ok",
+    "True"
+   ],
+   "plain_lr_models_hasSummary": [
+    "ok",
+    [
+     "True",
+     "True",
+     "True"
+    ]
+   ],
+   "plain_lr_models_isSet_labelCol": [
+    "ok",
+    [
+     "True",
+     "True",
+     "True"
+    ]
+   ],
+   "plain_lr_models_labelCols": [
+    "ok",
+    [
+     "'mc2b$0'",
+     "'mc2b$1'",
+     "'mc2b$2'"
+    ]
+   ],
+   "plain_lr_models_len": [
+    "ok",
+    "3"
+   ],
+   "plain_lr_models_params": [
+    "ok",
+    [
+     [
+      "('aggregationDepth', '2')",
+      "('elasticNetParam', '0.0')",
+      "('family', \"'auto'\")",
+      "('featuresCol', \"'features'\")",
+      "('fitIntercept', 'True')",
+      "('labelCol', \"'mc2b$0'\")",
+      "('maxBlockSizeInMB', '0.0')",
+      "('maxIter', '5')",
+      "('predictionCol', \"'prediction'\")",
+      "('probabilityCol', \"'probability'\")",
+      "('rawPredictionCol', \"'rawPrediction'\")",
+      "('regParam', '0.01')",
+      "('standardization', 'True')",
+      "('threshold', '0.5')",
+      "('tol', '1e-06')"
+     ],
+     [
+      "('aggregationDepth', '2')",
+      "('elasticNetParam', '0.0')",
+      "('family', \"'auto'\")",
+      "('featuresCol', \"'features'\")",
+      "('fitIntercept', 'True')",
+      "('labelCol', \"'mc2b$1'\")",
+      "('maxBlockSizeInMB', '0.0')",
+      "('maxIter', '5')",
+      "('predictionCol', \"'prediction'\")",
+      "('probabilityCol', \"'probability'\")",
+      "('rawPredictionCol', \"'rawPrediction'\")",
+      "('regParam', '0.01')",
+      "('standardization', 'True')",
+      "('threshold', '0.5')",
+      "('tol', '1e-06')"
+     ],
+     [
+      "('aggregationDepth', '2')",
+      "('elasticNetParam', '0.0')",
+      "('family', \"'auto'\")",
+      "('featuresCol', \"'features'\")",
+      "('fitIntercept', 'True')",
+      "('labelCol', \"'mc2b$2'\")",
+      "('maxBlockSizeInMB', '0.0')",
+      "('maxIter', '5')",
+      "('predictionCol', \"'prediction'\")",
+      "('probabilityCol', \"'probability'\")",
+      "('rawPredictionCol', \"'rawPrediction'\")",
+      "('regParam', '0.01')",
+      "('standardization', 'True')",
+      "('threshold', '0.5')",
+      "('tol', '1e-06')"
+     ]
+    ]
+   ],
+   "plain_lr_models_same_list": [
+    "ok",
+    "True"
+   ],
+   "plain_lr_models_summary_accuracy": [
+    "ok",
+    [
+     1.0,
+     1.0,
+     1.0
+    ]
+   ],
+   "plain_lr_models_types": [
+    "ok",
+    [
+     "('LogisticRegressionModel', 'classification')",
+     "('LogisticRegressionModel', 'classification')",
+     "('LogisticRegressionModel', 'classification')"
+    ]
+   ],
+   "plain_lr_models_uids_are_classifier": [
+    "ok",
+    [
+     "True",
+     "True",
+     "True"
+    ]
+   ],
+   "plain_lr_weight_submodel_weightCols": [
+    "ok",
+    [
+     "'w'",
+     "'w'",
+     "'w'"
+    ]
+   ],
+   "plain_mlp_weight_warnings": [
+    "ok",
+    [
+     "('UserWarning', 'weightCol is ignored, as it is not supported by MultilayerPerceptronClassifier_<uid> now.')"
+    ]
+   ],
+   "plain_model_class": [
+    "ok",
+    "('OneVsRestModel', 'pyspark.ml.classification')"
+   ],
+   "plain_model_classifier_is_classifier": [
+    "ok",
+    "True"
+   ],
+   "plain_model_loaded_models_types": [
+    "ok",
+    [
+     "'LogisticRegressionModel'",
+     "'LogisticRegressionModel'",
+     "'LogisticRegressionModel'"
+    ]
+   ],
+   "plain_model_params": [
+    "ok",
+    [
+     "('featuresCol', \"'features'\")",
+     "('labelCol', \"'label'\")",
+     "('predictionCol', \"'prediction'\")",
+     "('rawPredictionCol', \"'rawPrediction'\")"
+    ]
+   ],
+   "plain_model_prefix": [
+    "ok",
+    "'OneVsRestModel'"
+   ],
+   "plain_model_save": [
+    "ok",
+    "None"
+   ],
+   "plain_model_uid_is_estimator": [
+    "ok",
+    "False"
+   ],
+   "plain_none_fit": [
+    "AttributeError",
+    "'NoneType' object has no attribute 'labelCol'"
+   ],
+   "plain_object_fit": [
+    "AttributeError",
+    "'object' object has no attribute 'labelCol'"
+   ],
+   "plain_subclass_models_types": [
+    "ok",
+    [
+     "'LogisticRegressionModel'",
+     "'LogisticRegressionModel'",
+     "'LogisticRegressionModel'"
+    ]
+   ],
+   "plain_subclass_transform": [
+    "ok",
+    {
+     "columns": [
+      "label",
+      "features",
+      "rawPrediction",
+      "prediction"
+     ],
+     "rows": [
+      "(0.0, DenseVector([0.0, 0.0]), DenseVector([4.9944, -5.908, -4.3661]), 0.0)",
+      "(0.0, DenseVector([0.1, 0.2]), DenseVector([3.6018, -3.7992, -5.0061]), 0.0)",
+      "(1.0, DenseVector([1.0, 1.0]), DenseVector([-4.2369, 4.6428, -5.3494]), 1.0)",
+      "(1.0, DenseVector([1.2, 0.9]), DenseVector([-4.6748, 3.5918, -3.9211]), 1.0)",
+      "(2.0, DenseVector([2.0, 0.0]), DenseVector([-4.0793, -5.8811, 4.5006]), 2.0)",
+      "(2.0, DenseVector([2.1, 0.2]), DenseVector([-5.4719, -3.7722, 3.8606]), 2.0)"
+     ]
+    }
+   ],
+   "plain_transform": [
+    "ok",
+    {
+     "columns": [
+      "label",
+      "features",
+      "rawPrediction",
+      "prediction"
+     ],
+     "rows": [
+      "(0.0, DenseVector([0.0, 0.0]), DenseVector([3.4404, -4.4359, -3.377]), 0.0)",
+      "(0.0, DenseVector([0.1, 0.2]), DenseVector([2.4222, -2.92, -3.8278]), 0.0)",
+      "(1.0, DenseVector([1.0, 1.0]), DenseVector([-3.2957, 3.1597, -4.0217]), 1.0)",
+      "(1.0, DenseVector([1.2, 0.9]), DenseVector([-3.609, 2.4098, -2.9916]), 1.0)",
+      "(2.0, DenseVector([2.0, 0.0]), DenseVector([-3.1391, -4.3718, 3.0605]), 2.0)",
+      "(2.0, DenseVector([2.1, 0.2]), DenseVector([-4.1573, -2.8558, 2.6097]), 2.0)"
+     ]
+    }
+   ],
+   "plain_transform_columns": [
+    "ok",
+    [
+     "'label'",
+     "'features'",
+     "'rawPrediction'",
+     "'prediction'"
+    ]
+   ],
    "repr_prefix": [
     "ok",
     "'OneVsRestModel_<uid>'"

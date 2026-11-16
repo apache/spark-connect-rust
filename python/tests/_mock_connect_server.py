@@ -296,6 +296,9 @@ def serve(connection):
 
         # Each AnalyzePlanRequest, recorded.
         analyze_requests = []
+        # Each recorded request, in the order the server received it: its kind, as is_recorded
+        # names it, and its bytes. The tests that check the order of two kinds read it.
+        recorded_order = []
 
         def __init__(self):
             self.listener_condition = Condition()
@@ -311,6 +314,7 @@ def serve(connection):
             session_id = parse_message(request).get(1, [b""])[0].decode()
             with self.listener_condition:
                 if session_id not in self.forgotten_sessions:
+                    self.recorded_order.append((kind, bytes(request)))
                     return True
                 self.forgotten_requests[kind] += 1
                 self.forgotten_requests_of_sessions[(session_id, kind)] += 1
@@ -327,6 +331,7 @@ def serve(connection):
             self.block_result_complete = False
             self.result_complete_operations = []
             self.analyze_requests = []
+            self.recorded_order = []
             self.block_add_artifacts = False
             # The isLocal answer of a test, or None for the answer of the plan, and a failure.
             self.local = None
