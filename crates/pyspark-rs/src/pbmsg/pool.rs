@@ -1,5 +1,5 @@
-//! The descriptors of the messages and enums of Spark Connect, of the descriptor set that the
-//! proto crate embeds ([`spark_connect_proto::FILE_DESCRIPTOR_SET`]), as the runtime of
+//! The descriptors of the messages, enums and services of Spark Connect, of the descriptor set
+//! that the proto crate embeds ([`spark_connect_proto::FILE_DESCRIPTOR_SET`]), as the runtime of
 //! [`super`] reads them: the fields of each message, in the order of their declaration and by
 //! number, its oneofs, and its map fields.
 
@@ -7,7 +7,10 @@ use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
 use prost::Message as _;
-use prost_types::{DescriptorProto, EnumDescriptorProto, FileDescriptorSet};
+use prost_types::{
+    DescriptorProto, EnumDescriptorProto, FileDescriptorProto, FileDescriptorSet,
+    ServiceDescriptorProto,
+};
 
 /// The type of a field, as `google.protobuf.FieldDescriptorProto.Type` numbers it. Groups, which
 /// no Spark Connect proto has, are not supported.
@@ -170,6 +173,7 @@ pub(crate) struct OneofDesc {
     pub(crate) fields: Vec<usize>,
     /// Whether it is the synthetic oneof of a proto3 `optional` field.
     pub(crate) synthetic: bool,
+    pub(crate) has_options: bool,
 }
 
 /// A message type.
@@ -205,6 +209,37 @@ pub(crate) struct EnumDesc {
     pub(crate) containing: Option<String>,
     /// The values, in the order of their declaration.
     pub(crate) values: Vec<(String, i32)>,
+    /// Whether each value has options, in the order of the values.
+    pub(crate) value_has_options: Vec<bool>,
+    pub(crate) has_options: bool,
+    /// Whether the enum is closed, as an enum of a proto2 file is: a parsed value that it does not
+    /// declare goes to the unknown fields.
+    pub(crate) closed: bool,
+}
+
+/// A method of a service.
+#[derive(Debug)]
+pub(crate) struct MethodDesc {
+    pub(crate) name: String,
+    pub(crate) full_name: String,
+    /// The full names, without the leading dot, of its request and response messages.
+    pub(crate) input_type: String,
+    pub(crate) output_type: String,
+    pub(crate) client_streaming: bool,
+    pub(crate) server_streaming: bool,
+    pub(crate) has_options: bool,
+}
+
+/// A service, such as `spark.connect.SparkConnectService`.
+#[derive(Debug)]
+pub(crate) struct ServiceDesc {
+    pub(crate) name: String,
+    pub(crate) full_name: String,
+    pub(crate) file: String,
+    /// Its index among the services of its file.
+    pub(crate) index: usize,
+    /// The methods, in the order of their declaration.
+    pub(crate) methods: Vec<MethodDesc>,
     pub(crate) has_options: bool,
 }
 
@@ -226,13 +261,14 @@ impl EnumDesc {
     }
 }
 
-/// A file of the descriptor set: its top-level messages and enums.
+/// A file of the descriptor set: its top-level messages, enums and services.
 #[derive(Debug)]
 pub(crate) struct FileDesc {
     pub(crate) name: String,
     pub(crate) package: String,
     pub(crate) messages: Vec<String>,
     pub(crate) enums: Vec<String>,
+    pub(crate) services: Vec<String>,
     /// The names of the files that it imports, and of those that it imports publicly.
     pub(crate) dependencies: Vec<String>,
     pub(crate) public_dependencies: Vec<String>,
@@ -241,11 +277,12 @@ pub(crate) struct FileDesc {
     pub(crate) has_options: bool,
 }
 
-/// Every message and enum of the descriptor set, by full name.
+/// Every message, enum and service of the descriptor set, by full name.
 #[derive(Debug)]
 pub(crate) struct Pool {
     pub(crate) messages: HashMap<String, Arc<MessageDesc>>,
     pub(crate) enums: HashMap<String, Arc<EnumDesc>>,
+    pub(crate) services: HashMap<String, Arc<ServiceDesc>>,
     pub(crate) files: Vec<FileDesc>,
 }
 
@@ -263,6 +300,7 @@ impl Pool {
         let set = FileDescriptorSet::decode(bytes).map_err(|e| e.to_string())?;
         let mut messages: Vec<MessageDesc> = Vec::new();
         let mut enums: Vec<EnumDesc> = Vec::new();
+        let mut services: Vec<ServiceDesc> = Vec::new();
         let mut files = Vec::new();
         for file in &set.file {
             let name = file.name().to_string();
@@ -272,23 +310,28 @@ impl Pool {
             } else {
                 format!("{package}.")
             };
+            // The enums of a proto2 file (whose syntax protoc leaves unset) are closed; those of
+            // proto3 and of editions (of their default features) are open.
+            let scope = FileScope {
+                name: &name,
+                package: &package,
+                closed_enums: matches!(file.syntax(), "" | "proto2"),
+            };
             let mut top_messages = Vec::new();
             let mut top_enums = Vec::new();
             for message in &file.message_type {
                 top_messages.push(format!("{prefix}{}", message.name()));
-                add_message(
-                    &mut messages,
-                    &mut enums,
-                    &name,
-                    &package,
-                    &prefix,
-                    None,
-                    message,
-                )?;
+                add_message(&mut messages, &mut enums, &scope, &prefix, None, message)?;
             }
             for enumeration in &file.enum_type {
                 top_enums.push(format!("{prefix}{}", enumeration.name()));
-                add_enum(&mut enums, &name, &prefix, None, enumeration);
+                add_enum(&mut enums, &scope, &prefix, None, enumeration);
+            }
+            let mut top_services = Vec::new();
+            for (index, service) in file.service.iter().enumerate() {
+                let full_name = format!("{prefix}{}", service.name());
+                top_services.push(full_name.clone());
+                services.push(service_desc(&name, &full_name, index, service));
             }
             let public_dependencies = file
                 .public_dependency
@@ -305,6 +348,7 @@ impl Pool {
                 package,
                 messages: top_messages,
                 enums: top_enums,
+                services: top_services,
                 dependencies: file.dependency.clone(),
                 public_dependencies,
                 serialized: file.encode_to_vec(),
@@ -345,6 +389,10 @@ impl Pool {
                 .into_iter()
                 .map(|e| (e.full_name.clone(), Arc::new(e)))
                 .collect(),
+            services: services
+                .into_iter()
+                .map(|s| (s.full_name.clone(), Arc::new(s)))
+                .collect(),
             files,
         })
     }
@@ -357,17 +405,104 @@ impl Pool {
         self.enums.get(full_name)
     }
 
+    pub(crate) fn service(&self, full_name: &str) -> Option<&Arc<ServiceDesc>> {
+        self.services.get(full_name)
+    }
+
     /// The file `name`, such as `spark/connect/base.proto`.
     pub(crate) fn file(&self, name: &str) -> Option<&FileDesc> {
         self.files.iter().find(|f| f.name == name)
+    }
+
+    /// The `FileDescriptorProto` of the file `name`, as the descriptor set holds it.
+    pub(crate) fn file_proto(&self, name: &str) -> Option<FileDescriptorProto> {
+        FileDescriptorProto::decode(self.file(name)?.serialized.as_slice()).ok()
+    }
+
+    /// The `DescriptorProto` of the message type `desc`, as its file declares it.
+    pub(crate) fn message_proto(&self, desc: &MessageDesc) -> Option<DescriptorProto> {
+        let file = self.file_proto(&desc.file)?;
+        let mut path = scope_path(&desc.full_name, &desc.package).into_iter();
+        let first = path.next()?;
+        let mut message = file.message_type.into_iter().find(|m| m.name() == first)?;
+        for name in path {
+            message = message.nested_type.into_iter().find(|m| m.name() == name)?;
+        }
+        Some(message)
+    }
+
+    /// The `EnumDescriptorProto` of the enum type `desc`, as its file declares it.
+    pub(crate) fn enum_proto(&self, desc: &EnumDesc) -> Option<EnumDescriptorProto> {
+        let enums = match &desc.containing {
+            Some(containing) => self.message_proto(self.message(containing)?)?.enum_type,
+            None => self.file_proto(&desc.file)?.enum_type,
+        };
+        enums.into_iter().find(|e| e.name() == desc.name)
+    }
+
+    /// The `ServiceDescriptorProto` of the service `desc`, as its file declares it.
+    pub(crate) fn service_proto(&self, desc: &ServiceDesc) -> Option<ServiceDescriptorProto> {
+        self.file_proto(&desc.file)?
+            .service
+            .into_iter()
+            .nth(desc.index)
+    }
+}
+
+/// The names of the scopes of `full_name` below its package: `["A", "B"]` of `spark.connect.A.B`
+/// of the package `spark.connect`.
+fn scope_path<'a>(full_name: &'a str, package: &str) -> Vec<&'a str> {
+    let relative = if package.is_empty() {
+        full_name
+    } else {
+        full_name
+            .strip_prefix(package)
+            .and_then(|rest| rest.strip_prefix('.'))
+            .unwrap_or(full_name)
+    };
+    relative.split('.').collect()
+}
+
+/// The file of the messages and enums that [`add_message`] and [`add_enum`] add.
+struct FileScope<'a> {
+    name: &'a str,
+    package: &'a str,
+    closed_enums: bool,
+}
+
+fn service_desc(
+    file: &str,
+    full_name: &str,
+    index: usize,
+    proto: &ServiceDescriptorProto,
+) -> ServiceDesc {
+    let methods = proto
+        .method
+        .iter()
+        .map(|m| MethodDesc {
+            name: m.name().to_string(),
+            full_name: format!("{full_name}.{}", m.name()),
+            input_type: m.input_type().trim_start_matches('.').to_string(),
+            output_type: m.output_type().trim_start_matches('.').to_string(),
+            client_streaming: m.client_streaming(),
+            server_streaming: m.server_streaming(),
+            has_options: m.options.is_some(),
+        })
+        .collect();
+    ServiceDesc {
+        name: proto.name().to_string(),
+        full_name: full_name.to_string(),
+        file: file.to_string(),
+        index,
+        methods,
+        has_options: proto.options.is_some(),
     }
 }
 
 fn add_message(
     messages: &mut Vec<MessageDesc>,
     enums: &mut Vec<EnumDesc>,
-    file: &str,
-    package: &str,
+    scope: &FileScope<'_>,
     prefix: &str,
     containing: Option<&str>,
     proto: &DescriptorProto,
@@ -383,6 +518,7 @@ fn add_message(
             full_name: format!("{full_name}.{}", o.name()),
             fields: Vec::new(),
             synthetic: false,
+            has_options: o.options.is_some(),
         })
         .collect();
 
@@ -452,8 +588,8 @@ fn add_message(
     messages.push(MessageDesc {
         name: proto.name().to_string(),
         full_name: full_name.clone(),
-        file: file.to_string(),
-        package: package.to_string(),
+        file: scope.name.to_string(),
+        package: scope.package.to_string(),
         containing: containing.map(str::to_string),
         by_name: fields
             .iter()
@@ -487,22 +623,21 @@ fn add_message(
         add_message(
             messages,
             enums,
-            file,
-            package,
+            scope,
             &nested_prefix,
             Some(&full_name),
             nested,
         )?;
     }
     for enumeration in &proto.enum_type {
-        add_enum(enums, file, &nested_prefix, Some(&full_name), enumeration);
+        add_enum(enums, scope, &nested_prefix, Some(&full_name), enumeration);
     }
     Ok(())
 }
 
 fn add_enum(
     enums: &mut Vec<EnumDesc>,
-    file: &str,
+    scope: &FileScope<'_>,
     prefix: &str,
     containing: Option<&str>,
     proto: &EnumDescriptorProto,
@@ -510,14 +645,16 @@ fn add_enum(
     enums.push(EnumDesc {
         name: proto.name().to_string(),
         full_name: format!("{prefix}{}", proto.name()),
-        file: file.to_string(),
+        file: scope.name.to_string(),
         containing: containing.map(str::to_string),
         values: proto
             .value
             .iter()
             .map(|v| (v.name().to_string(), v.number()))
             .collect(),
+        value_has_options: proto.value.iter().map(|v| v.options.is_some()).collect(),
         has_options: proto.options.is_some(),
+        closed: scope.closed_enums,
     });
 }
 
@@ -551,5 +688,44 @@ mod tests {
             found,
             "the Spark Connect protos have proto3 optional fields"
         );
+    }
+
+    #[test]
+    fn reads_the_services_and_the_protos_of_the_declarations() {
+        let pool = pool();
+        let service = pool
+            .service("spark.connect.SparkConnectService")
+            .expect("SparkConnectService");
+        let execute = &service.methods[0];
+        assert_eq!(
+            (execute.full_name.as_str(), execute.input_type.as_str()),
+            (
+                "spark.connect.SparkConnectService.ExecutePlan",
+                "spark.connect.ExecutePlanRequest"
+            )
+        );
+        assert!(execute.server_streaming && !execute.client_streaming);
+        let base = pool.file("spark/connect/base.proto").expect("base.proto");
+        assert_eq!(base.services, ["spark.connect.SparkConnectService"]);
+        let proto = pool.service_proto(service).expect("its proto");
+        assert_eq!(proto.method.len(), service.methods.len());
+
+        let nested = pool
+            .message("spark.connect.Read.DataSource")
+            .expect("Read.DataSource");
+        assert_eq!(
+            pool.message_proto(nested).expect("its proto").name(),
+            "DataSource"
+        );
+        let join_type = pool
+            .enumeration("spark.connect.Join.JoinType")
+            .expect("Join.JoinType");
+        let proto = pool.enum_proto(join_type).expect("its proto");
+        assert_eq!(proto.value.len(), join_type.values.len());
+        // The enums of the proto3 files of Spark Connect are open.
+        assert!(pool.enums.values().all(|e| !e.closed));
+        assert!(pool
+            .message("spark.connect.ExamplePluginRelation")
+            .is_some());
     }
 }

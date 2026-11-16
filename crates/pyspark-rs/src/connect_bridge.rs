@@ -17,7 +17,7 @@
 
 //! The protobuf messages that the modules of PySpark that build their own, such as `pyspark.ml`,
 //! exchange with the client: the `spark.connect.DataType` of a type, as bytes, which the Python
-//! side parses with the generated `pyspark.sql.connect.proto`, for
+//! side parses with `pyspark.sql.connect.proto`, for
 //! `pyspark.sql.connect.types.pyspark_types_to_proto_types` and
 //! `proto_schema_to_pyspark_data_type`.
 

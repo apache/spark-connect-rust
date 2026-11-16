@@ -25,8 +25,7 @@ Columns of PySpark Connect's DataFrame, which the core builds. ``_DataFramePlan`
 DataFrame of the core, its ``DataFrame._plan``. ``Read``, ``Range``, ``SQL``, ``SubqueryAlias``,
 ``CachedRemoteRelation`` and ``RemoveRemoteCachedRelation`` are PySpark Connect's, which
 ``pyspark.testing.connectutils`` and ``pyspark.sql.connect.conversion`` build DataFrames of. The
-messages are those of the generated ``pyspark.sql.connect.proto``, which needs the ``protobuf``
-package.
+messages are those of ``pyspark.sql.connect.proto``.
 """
 
 from collections.abc import Sequence

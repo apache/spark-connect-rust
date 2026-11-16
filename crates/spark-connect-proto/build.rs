@@ -9,11 +9,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let connect_dir = proto_root.join("spark").join("connect");
 
     // The vendored Spark Connect .proto files. Keep in sync with proto/PROTO_VERSION.txt.
+    // example_plugins.proto holds the messages of Spark's example plugin, which PySpark's
+    // `pyspark.sql.connect.proto.example_plugins_pb2` has, as Spark's own proto library does.
     let protos = [
         "base",
         "catalog",
         "commands",
         "common",
+        "example_plugins",
         "expressions",
         "ml",
         "ml_common",

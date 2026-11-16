@@ -21,8 +21,7 @@ The Rust core builds the expressions of the DataFrame API: the expression of a C
 from Apache Spark v4.3.0, for the modules of PySpark that build their own messages, such as the
 params of ``pyspark.ml`` (``pyspark.ml.connect.serialize``). The base has no ``alias``: the
 ``ColumnAlias`` it makes is an expression of PySpark Connect's Column, which this client does not
-have. The messages are those of the generated ``pyspark.sql.connect.proto``, which needs the
-``protobuf`` package.
+have. The messages are those of ``pyspark.sql.connect.proto``.
 """
 
 from typing import (

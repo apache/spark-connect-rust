@@ -16,43 +16,21 @@
 #
 """The protobuf messages of Spark Connect, as PySpark's ``pyspark.sql.connect.proto``.
 
-The generated modules (``*_pb2.py``) are vendored from Apache Spark v4.3.0. As PySpark's
-``__init__``, this package exports their messages, except the gRPC stubs of ``base_pb2_grpc``:
-the Rust transport speaks gRPC, so ``grpcio`` is never imported. The modules of PySpark that
-build their own messages, such as ``pyspark.ml``, use them.
+PySpark's package exports the messages of the modules that protoc generates of the protos of
+Spark Connect (``base_pb2`` and the others), which need the ``protobuf`` package. This one exports
+the same classes of the drop-in's protobuf runtime in Rust (``pyspark.sql.connect.proto._rust``),
+with the API, bytes, text and errors of protobuf's messages, and makes each of those modules
+(``pyspark.sql.connect.proto.base_pb2``, ...) the one of the runtime, so that ``protobuf`` is not
+needed. The modules of PySpark that build their own messages, such as ``pyspark.ml``, use them.
+The gRPC stubs of ``base_pb2_grpc`` are not exported: the Rust transport speaks gRPC.
 
-The generated modules need the ``protobuf`` package. Without it, or of a version older than they
-need, this package exports the messages of the drop-in's Rust protobuf runtime instead
-(``pyspark.sql.connect.proto._rust``): the same classes, with the API of protobuf's messages, which
-the Rust client encodes. ``PYSPARK_CONNECT_PROTO_IMPLEMENTATION=rust`` asks for them even when
-``protobuf`` is installed, and ``_implementation`` names the one in use.
+Where ``protobuf`` is installed, the files of the protos are added to its default descriptor
+pool too, as the generated modules add them, so that the modules that protoc generates of other
+protos that import them (those of a plugin, such as Delta Lake's) build. Their messages are
+protobuf's: a message field of theirs takes a message of this package through its bytes
+(``ParseFromString(message.SerializeToString())``) or a dict, not as it is.
 """
-import os as _os
+from pyspark.sql.connect.proto import _rust
 
-_implementation = "protobuf"
-if _os.environ.get("PYSPARK_CONNECT_PROTO_IMPLEMENTATION", "").lower() == "rust":
-    _implementation = "rust"
-else:
-    try:
-        from pyspark.sql.connect.proto.base_pb2 import *  # noqa: F401,F403
-        from pyspark.sql.connect.proto.types_pb2 import *  # noqa: F401,F403
-        from pyspark.sql.connect.proto.commands_pb2 import *  # noqa: F401,F403
-        from pyspark.sql.connect.proto.expressions_pb2 import *  # noqa: F401,F403
-        from pyspark.sql.connect.proto.relations_pb2 import *  # noqa: F401,F403
-        from pyspark.sql.connect.proto.catalog_pb2 import *  # noqa: F401,F403
-        from pyspark.sql.connect.proto.common_pb2 import *  # noqa: F401,F403
-        from pyspark.sql.connect.proto.ml_pb2 import *  # noqa: F401,F403
-        from pyspark.sql.connect.proto.ml_common_pb2 import *  # noqa: F401,F403
-        from pyspark.sql.connect.proto.pipelines_pb2 import *  # noqa: F401,F403
-    except ImportError:
-        # No protobuf package, or one older than the generated modules need
-        # (google.protobuf.runtime_version.VersionError is an ImportError).
-        _implementation = "rust"
-
-if _implementation == "rust":
-    from pyspark.sql.connect.proto import _rust
-
-    _rust.install(globals())
-    del _rust
-
-del _os
+_rust.install(globals())
+del _rust

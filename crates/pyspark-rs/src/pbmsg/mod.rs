@@ -1,13 +1,13 @@
-//! A protobuf runtime for the messages of Spark Connect, which `pyspark.sql.connect.proto` uses
-//! in place of the `protobuf` package when that is not installed (or is too old for the
-//! generated `*_pb2` modules, or `PYSPARK_CONNECT_PROTO_IMPLEMENTATION=rust` asks for it).
+//! A protobuf runtime for the messages of Spark Connect, the messages of
+//! `pyspark.sql.connect.proto` in place of those of the modules that protoc generates for the
+//! `protobuf` package, which the drop-in does not need.
 //!
 //! The vendored modules of PySpark that build their own Spark Connect messages, such as
 //! `pyspark.ml`, the client's `execute_command` and plan logging, the request hooks of a session,
-//! `Column._expr` and the pipelines, then run unchanged without `protobuf`: the messages hold
-//! their fields in Rust ([`message`]), read the descriptors of the protos that the proto crate
-//! compiles ([`pool`]), and encode and decode the wire format here ([`codec`]), with the Python
-//! API of protobuf's messages, containers and descriptors.
+//! `Column._expr` and the pipelines, run unchanged on it: the messages hold their fields in Rust
+//! ([`message`]), read the descriptors of the protos that the proto crate compiles ([`pool`]),
+//! and encode and decode the wire format here ([`codec`]), with the Python API of protobuf's
+//! messages, containers, descriptors and descriptor pool.
 
 mod codec;
 mod containers;
@@ -126,6 +126,18 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add(
         "ProtoFileDescriptor",
         py.get_type::<descriptors::PyFileDescriptor>(),
+    )?;
+    m.add(
+        "ProtoServiceDescriptor",
+        py.get_type::<descriptors::PyServiceDescriptor>(),
+    )?;
+    m.add(
+        "ProtoMethodDescriptor",
+        py.get_type::<descriptors::PyMethodDescriptor>(),
+    )?;
+    m.add(
+        "ProtoDescriptorPool",
+        py.get_type::<descriptors::PyDescriptorPool>(),
     )?;
     m.add("ProtoDecodeError", py.get_type::<DecodeError>())?;
     m.add_function(wrap_pyfunction!(_proto_files, m)?)?;

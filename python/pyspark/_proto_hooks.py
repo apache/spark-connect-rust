@@ -16,9 +16,11 @@
 #
 """The import hook of the vendored module that needs ``protobuf`` itself.
 
-The vendored ``pyspark.pipelines.add_pipeline_analysis_context`` packs its message into
-protobuf's own ``google.protobuf.any_pb2.Any``. When ``pyspark.sql.connect.proto`` uses the Rust
-protobuf runtime (without ``protobuf``), this hook gives that module, as it is imported, the same
+The vendored ``pyspark.pipelines.add_pipeline_analysis_context`` packs its message, of
+``pyspark.sql.connect.proto``, into protobuf's own ``google.protobuf.any_pb2.Any``, which takes a
+message of the Rust protobuf runtime as it takes one of protobuf's. Where ``protobuf`` is installed,
+the vendored function runs as it is, as PySpark's does (Apache Spark's tests of it patch that
+``Any``). Where it cannot be imported, this hook gives that module, as it is imported, the same
 context manager of the runtime's ``Any`` (``pyspark.sql.connect.proto._rust``). The vendored file
 itself stays as it is, and nothing stands in for the ``google.protobuf`` package.
 """
@@ -31,8 +33,8 @@ _ANALYSIS_CONTEXT = "pyspark.pipelines.add_pipeline_analysis_context"
 
 
 class _Loader(importlib.abc.Loader):
-    """The loader of the module, which runs it and then gives it the runtime's context manager
-    when the runtime is in use."""
+    """The loader of the module, which runs it and then, without ``protobuf``, gives it the
+    runtime's context manager."""
 
     def __init__(self, loader: Any) -> None:
         self._loader = loader
@@ -45,14 +47,27 @@ class _Loader(importlib.abc.Loader):
 
     def exec_module(self, module: Any) -> None:
         self._loader.exec_module(module)
-        from pyspark.sql.connect import proto
+        if not _protobuf_any_imports():
+            _give_runtime_context(module)
 
-        if proto._implementation == "rust":
-            from pyspark.sql.connect.proto._rust import add_pipeline_analysis_context
 
-            # Named as the vendored function, so that it reports and pickles as that one.
-            add_pipeline_analysis_context.__module__ = module.__name__
-            module.add_pipeline_analysis_context = add_pipeline_analysis_context
+def _protobuf_any_imports() -> bool:
+    """Whether protobuf's ``google.protobuf.any_pb2``, which the vendored function packs into,
+    can be imported."""
+    try:
+        from google.protobuf import any_pb2  # noqa: F401
+    except Exception:  # noqa: BLE001 - no protobuf, or one that does not import
+        return False
+    return True
+
+
+def _give_runtime_context(module: Any) -> None:
+    """Give ``module``, the vendored one, the context manager of the runtime's ``Any``, named as
+    the vendored function, so that it reports and pickles as that one."""
+    from pyspark.sql.connect.proto._rust import add_pipeline_analysis_context
+
+    add_pipeline_analysis_context.__module__ = module.__name__
+    module.add_pipeline_analysis_context = add_pipeline_analysis_context
 
 
 class _Finder(importlib.abc.MetaPathFinder):
