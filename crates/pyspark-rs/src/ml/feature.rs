@@ -916,18 +916,23 @@ StopWordsRemover,
         let session = crate::session::active_session(py)
             .ok_or_else(|| pyo3::exceptions::PyAssertionError::new_err(()))?;
         let session = session.borrow(py).session.clone();
-        let column = crate::functions::to_value_column(language)?;
-        let spark_connect::expression::ExpressionNode::Literal(literal) =
-            column.expression().node()
-        else {
-            return Err(crate::column::raise_pyspark(
-                py,
-                "PySparkTypeError",
-                "UNSUPPORTED_DATA_TYPE",
-                &[("data_type", &language.get_type().name()?.to_string())],
-            ));
+        // A `(value, DataType)` pair is the literal of its type, as `serialize` sends it.
+        let literal = if let Some(literal) = crate::functions::typed_pair_literal(language)? {
+            literal.to_literal_proto()
+        } else {
+            let column = crate::functions::to_value_column(language)?;
+            let spark_connect::expression::ExpressionNode::Literal(literal) =
+                column.expression().node()
+            else {
+                return Err(crate::column::raise_pyspark(
+                    py,
+                    "PySparkTypeError",
+                    "UNSUPPORTED_DATA_TYPE",
+                    &[("data_type", &language.get_type().name()?.to_string())],
+                ));
+            };
+            literal.to_literal_proto()
         };
-        let literal = literal.to_literal_proto();
         interruptible(py, &session, || {
             core::ml_helper_attribute(
                 &session,
