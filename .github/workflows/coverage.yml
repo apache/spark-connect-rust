@@ -279,34 +279,6 @@ jobs:
             tests/test_evaluation_api_offline.py \
             tests/test_evaluators_offline.py \
             tests/test_statistics_offline.py \
-            tests/test_exit_cleanup_offline.py
-          # The same suite again with the drop-in's Rust protobuf runtime in place of the generated
-          # modules (pyspark.sql.connect.proto), which a client without protobuf has: the suite's
-          # mock servers need grpcio and protobuf, so the runtime is asked for instead.
-          PYSPARK_CONNECT_PROTO_IMPLEMENTATION=rust PYTHONPATH=$(pwd) python -m coverage run --append --rcfile=.coveragerc -m pytest -rs \
-            tests/test_dropin_offline.py \
-            tests/test_proto_rust_offline.py \
-            tests/test_dropin_window_tablearg_offline.py \
-            tests/test_dropin_udf_args_offline.py \
-            tests/test_dropin_types_columns_offline.py \
-            tests/test_dropin_class_modules_offline.py \
-            tests/test_dropin_classic_session_offline.py \
-            tests/test_arrow_handoff.py \
-            tests/test_ml_offline.py \
-            tests/test_ml_api_offline.py \
-            tests/test_ml_subclasses_offline.py \
-            tests/test_logistic_api_offline.py \
-            tests/test_misc_api_offline.py \
-            tests/test_regression_api_offline.py \
-            tests/test_tree_api_offline.py \
-            tests/test_ml_features_offline.py \
-            tests/test_feature_api_offline.py \
-            tests/test_frequent_patterns_offline.py \
-            tests/test_als_offline.py \
-            tests/test_fpm_recommendation_api_offline.py \
-            tests/test_evaluation_api_offline.py \
-            tests/test_evaluators_offline.py \
-            tests/test_statistics_offline.py \
             tests/test_exit_cleanup_offline.py \
             tests/test_create_dataframe_configs_offline.py
           PYTHONPATH=$(pwd) python -m coverage json --rcfile=.coveragerc -o coverage-python.json

@@ -25,11 +25,11 @@ from pyspark.serializers import MarshalSerializer, CPickleSerializer
 from pyspark.taskcontext import TaskContext, BarrierTaskContext, BarrierTaskInfo
 from pyspark.profiler import Profiler, BasicProfiler
 from pyspark._globals import _NoValue  # noqa: F401
-from pyspark import _proto_fallback
+from pyspark import _proto_hooks
 
 # Lets the vendored module that packs protobuf's own Any run without protobuf (see the module).
-_proto_fallback.install()
-del _proto_fallback
+_proto_hooks.install()
+del _proto_hooks
 
 _F = TypeVar("_F", bound=Callable)
 

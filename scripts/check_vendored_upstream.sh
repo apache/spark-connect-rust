@@ -168,29 +168,20 @@ VENDORED_FILES=(
   "ml/connect/io_utils.py"
   "ml/connect/summarizer.py"
   "ml/connect/util.py"
-  # The generated Spark Connect protobuf messages, which pyspark.ml builds (not base_pb2_grpc:
-  # the Rust transport speaks gRPC; sql/connect/proto/__init__.py is the client's own).
-  "sql/connect/proto/base_pb2.py"
+  # The type stubs of the generated Spark Connect protobuf modules, whose messages pyspark.ml
+  # builds. The modules themselves are the Rust protobuf runtime's (sql/connect/proto/__init__.py
+  # and _rust.py are the client's own), and base_pb2_grpc is not vendored: the Rust transport
+  # speaks gRPC.
   "sql/connect/proto/base_pb2.pyi"
-  "sql/connect/proto/types_pb2.py"
   "sql/connect/proto/types_pb2.pyi"
-  "sql/connect/proto/commands_pb2.py"
   "sql/connect/proto/commands_pb2.pyi"
-  "sql/connect/proto/expressions_pb2.py"
   "sql/connect/proto/expressions_pb2.pyi"
-  "sql/connect/proto/relations_pb2.py"
   "sql/connect/proto/relations_pb2.pyi"
-  "sql/connect/proto/catalog_pb2.py"
   "sql/connect/proto/catalog_pb2.pyi"
-  "sql/connect/proto/common_pb2.py"
   "sql/connect/proto/common_pb2.pyi"
-  "sql/connect/proto/ml_pb2.py"
   "sql/connect/proto/ml_pb2.pyi"
-  "sql/connect/proto/ml_common_pb2.py"
   "sql/connect/proto/ml_common_pb2.pyi"
-  "sql/connect/proto/pipelines_pb2.py"
   "sql/connect/proto/pipelines_pb2.pyi"
-  "sql/connect/proto/example_plugins_pb2.py"
   "sql/connect/proto/example_plugins_pb2.pyi"
   # ML connect base ABCs (Estimator/Transformer/Evaluator/Model) - pure upstream.
   "ml/connect/base.py"

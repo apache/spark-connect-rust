@@ -17,7 +17,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use pyo3::basic::CompareOp;
-use pyo3::exceptions::{PyAttributeError, PyNotImplementedError, PyTypeError, PyValueError};
+use pyo3::exceptions::{
+    PyAttributeError, PyKeyError, PyNotImplementedError, PyTypeError, PyValueError,
+};
 use pyo3::prelude::*;
 use pyo3::types::{
     PyByteArray, PyBytes, PyDict, PyMemoryView, PyString, PyTuple, PyType, PyWeakrefMethods,
@@ -237,6 +239,32 @@ pub(crate) fn message_from_value<'py>(
         }
     }
     Err(not_initializing(py, full_name, value))
+}
+
+/// A new message of the type `full_name` of `value`, as a message field of a constructor takes
+/// it: as [`message_from_value`] does, and, as upb's, through the `_internal_assign` of a new
+/// message of a well-known type whose class assigns values (a `Timestamp`, of a `datetime`), of a
+/// value that is neither a mapping nor a message of the type.
+fn message_for_field<'py>(
+    py: Python<'py>,
+    full_name: &str,
+    value: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyMessage>> {
+    let is_mapping = value.cast::<PyDict>().is_ok() || value.hasattr("keys").unwrap_or(false);
+    let is_of_type = match value.cast::<PyMessage>() {
+        Ok(m) => m.borrow().desc.full_name == full_name,
+        Err(_) => value
+            .getattr("DESCRIPTOR")
+            .and_then(|d| d.getattr("full_name"))
+            .and_then(|n| n.extract::<String>())
+            .is_ok_and(|n| n == full_name),
+    };
+    if !is_mapping && !is_of_type && assigns_values(py, full_name) {
+        let child = new_instance(py, full_name)?;
+        child.call_method1("_internal_assign", (value,))?;
+        return Ok(child);
+    }
+    message_from_value(py, full_name, value)
 }
 
 /// upb's error of a value of a message field of a constructor that is neither a dict nor a
@@ -708,7 +736,7 @@ impl PyMessage {
             } else if field.repeated && field.kind == Kind::Message {
                 let mut items = Vec::new();
                 for element in value.try_iter().map_err(|_| not_iterable())? {
-                    items.push(message_from_value(py, &field.type_name, &element?)?.unbind());
+                    items.push(message_for_field(py, &field.type_name, &element?)?.unbind());
                 }
                 let container = self.composite(py, index, None)?;
                 container.bind(py).borrow_mut().items.extend(items);
@@ -725,7 +753,7 @@ impl PyMessage {
                 let container = self.repeated_scalar(py, index, None)?;
                 container.bind(py).borrow_mut().items.extend(items);
             } else if field.kind == Kind::Message {
-                let child = message_from_value(py, &field.type_name, &value)?;
+                let child = message_for_field(py, &field.type_name, &value)?;
                 self.set_message(py, index, child.unbind());
             } else {
                 let scalar =
@@ -762,30 +790,37 @@ impl PyMessage {
         })
     }
 
-    fn any_field(&self, name: &str) -> PyResult<usize> {
-        if self.desc.full_name != "google.protobuf.Any" {
-            return Err(PyAttributeError::new_err(format!(
-                "'{}' object has no attribute '{name}'",
-                self.desc.name
-            )));
+    /// upb's `KeyError` of `HasExtension` and `ClearExtension` of `field`, of a message that
+    /// declares no extension ranges: of an object that is not a field descriptor, of a field that
+    /// is not an extension, and of an extension, which extends another message.
+    fn not_an_extension(&self, field: &Bound<'_, PyAny>) -> PyErr {
+        let full_name = field
+            .getattr("full_name")
+            .and_then(|n| n.extract::<String>());
+        let is_extension = field.getattr("is_extension").and_then(|e| e.is_truthy());
+        match (full_name, is_extension) {
+            (Ok(name), Ok(false)) => {
+                PyKeyError::new_err(format!("Field {name} is not an extension\n"))
+            }
+            (Ok(name), Ok(true)) => PyKeyError::new_err(format!(
+                "Extension doesn't match ({} vs {name})",
+                self.desc.full_name
+            )),
+            _ => PyKeyError::new_err(format!(
+                "Object {} is not a field descriptor\n",
+                field.repr().map(|r| r.to_string()).unwrap_or_default()
+            )),
         }
-        self.field_index(name)
     }
+}
 
-    fn any_value(&self, name: &str) -> PyResult<Scalar> {
-        let index = self.any_field(name)?;
-        Ok(match &self.slots[index] {
-            Some(Slot::Scalar(v)) => v.clone(),
-            _ => Scalar::default_of(self.desc.fields[index].kind),
-        })
-    }
-
-    fn any_type_name(&self) -> PyResult<String> {
-        let Scalar::Str(url) = self.any_value("type_url")? else {
-            return Ok(String::new());
-        };
-        Ok(url.rsplit('/').next().unwrap_or_default().to_string())
-    }
+/// Whether the message type `full_name` is a well-known type whose class assigns a value of
+/// another type, as protobuf's classes of the well-known types do (`Timestamp` takes a
+/// `datetime`): the class has `_internal_assign`.
+fn assigns_values(py: Python<'_>, full_name: &str) -> bool {
+    full_name.starts_with("google.protobuf.")
+        && registered_class(py, full_name)
+            .is_some_and(|class| class.bind(py).hasattr("_internal_assign").unwrap_or(false))
 }
 
 fn copy_slot(py: Python<'_>, slot: &Slot) -> PyResult<Slot> {
@@ -846,6 +881,11 @@ impl PyMessage {
         let py = slf.py();
         let desc = slf.borrow().desc.clone();
         let Some(&index) = desc.by_name.get(name) else {
+            // As upb's: the `AttributeError` of the `Extensions` of a message that declares no
+            // extension ranges has no message.
+            if name == "Extensions" {
+                return Err(PyAttributeError::new_err(()));
+            }
             return Err(PyAttributeError::new_err(name.to_string()));
         };
         let field = &desc.fields[index];
@@ -907,6 +947,13 @@ impl PyMessage {
         // fails still sets it.
         mark_present(slf)?;
         if field.kind == Kind::Message {
+            // As upb's: a field of a well-known type whose class assigns values (a Timestamp, of
+            // a datetime) takes the value through the `_internal_assign` of its message.
+            if assigns_values(py, &field.type_name) {
+                let child = Self::__getattr__(slf, name)?;
+                child.bind(py).call_method1("_internal_assign", (value,))?;
+                return Ok(());
+            }
             return Err(PyAttributeError::new_err(format!(
                 "Assignment not allowed to message field \"{name}\" in protocol message object."
             )));
@@ -1175,67 +1222,24 @@ impl PyMessage {
         mark_present(slf)
     }
 
-    /// `google.protobuf.Any.Pack`: hold `msg`, of the type URL of its full name.
-    #[pyo3(name = "Pack", signature = (msg, type_url_prefix="type.googleapis.com/", deterministic=None))]
-    fn pack(
-        slf: &Bound<'_, Self>,
-        msg: &Bound<'_, PyAny>,
-        type_url_prefix: &str,
-        deterministic: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<()> {
-        let _ = deterministic;
-        let py = slf.py();
-        let (type_url, value) = {
-            let me = slf.borrow();
-            (me.any_field("type_url")?, me.any_field("value")?)
-        };
-        let (name, bytes) = name_and_bytes(msg)?;
-        let url = if type_url_prefix.ends_with('/') {
-            format!("{type_url_prefix}{name}")
-        } else {
-            format!("{type_url_prefix}/{name}")
-        };
-        {
-            let mut me = slf.borrow_mut();
-            me.set_scalar(py, type_url, Scalar::Str(url));
-            me.set_scalar(py, value, Scalar::Bytes(bytes));
-        }
-        mark_present(slf)
+    /// As upb's of a message that declares no extension ranges, as no message of Spark Connect
+    /// does: the field is not one of its extensions.
+    #[pyo3(name = "HasExtension")]
+    fn has_extension(&self, field_descriptor: &Bound<'_, PyAny>) -> PyResult<bool> {
+        Err(self.not_an_extension(field_descriptor))
     }
 
-    /// `google.protobuf.Any.Unpack`: parse the held message into `msg`, if it is of its type.
-    #[pyo3(name = "Unpack")]
-    fn unpack(slf: &Bound<'_, Self>, msg: &Bound<'_, PyAny>) -> PyResult<bool> {
-        let py = slf.py();
-        let (type_name, value) = {
-            let me = slf.borrow();
-            (me.any_type_name()?, me.any_value("value")?)
-        };
-        let full_name = msg
-            .getattr("DESCRIPTOR")?
-            .getattr("full_name")?
-            .extract::<String>()?;
-        if type_name != full_name {
-            return Ok(false);
-        }
-        let Scalar::Bytes(bytes) = value else {
-            return Ok(false);
-        };
-        msg.call_method1("ParseFromString", (PyBytes::new(py, &bytes),))?;
-        Ok(true)
+    /// As `HasExtension`: the field is not one of its extensions.
+    #[pyo3(name = "ClearExtension")]
+    fn clear_extension(&self, field_descriptor: &Bound<'_, PyAny>) -> PyResult<()> {
+        Err(self.not_an_extension(field_descriptor))
     }
 
-    /// `google.protobuf.Any.Is`: whether the held message is of the type of `descriptor`.
-    #[pyo3(name = "Is")]
-    fn is(&self, descriptor: &Bound<'_, PyAny>) -> PyResult<bool> {
-        let full_name = descriptor.getattr("full_name")?.extract::<String>()?;
-        Ok(self.any_type_name()? == full_name)
-    }
-
-    /// `google.protobuf.Any.TypeName`: the full name of the type of the held message.
-    #[pyo3(name = "TypeName")]
-    fn type_name(&self) -> PyResult<String> {
-        self.any_type_name()
+    /// The extensions of the message: as upb's of a message that declares no extension ranges,
+    /// an `AttributeError` of no message (see `__getattr__`).
+    #[getter(Extensions)]
+    fn extensions(&self) -> PyResult<Py<PyAny>> {
+        Err(PyAttributeError::new_err(()))
     }
 
     fn __richcmp__(

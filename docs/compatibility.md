@@ -1016,19 +1016,37 @@ The DataFrame-based `pyspark.ml` API (`pyspark.ml.classification`, `feature`,
 Apache Spark's own, vendored from v4.3.0: estimators fit, models transform, and
 pipelines save and load on the server as with PySpark Connect, over the Rust
 transport. These modules build their own `spark.connect` messages with
-`pyspark.sql.connect.proto`. That is the generated modules of Apache Spark when `protobuf`
-(>= 6.33.5) is installed, and otherwise the drop-in's own protobuf runtime in Rust
-(`pyspark.sql.connect.proto._rust`, also chosen by `PYSPARK_CONNECT_PROTO_IMPLEMENTATION=rust`),
-so `protobuf` is not a dependency of `pyspark-client-rust`. The runtime has the classes,
-containers and descriptors of upb, the implementation of a `protobuf` install, with their bytes,
-text, errors and presence. The differences:
+`pyspark.sql.connect.proto`, which is the drop-in's own protobuf runtime in Rust
+(`pyspark.sql.connect.proto._rust`) in place of the generated modules of Apache Spark, whether or
+not `protobuf` is installed, so `protobuf` is not a dependency of `pyspark-client-rust`. The
+runtime has the classes, containers, descriptors and descriptor pool of upb, the implementation
+of a `protobuf` install, with their bytes, text, errors and presence (of protobuf 7, where
+protobuf 6's differ), the methods of protobuf's `Any` and `Timestamp` (a Timestamp field takes a
+`datetime`), and the modules of the protos with the names of the generated modules
+(`pyspark.sql.connect.proto.base_pb2`, ..., and `example_plugins_pb2`, of Spark's example plugin).
+`protobuf`'s `json_format` and `text_format` print and parse its messages. The differences:
 
 - its types and its `DecodeError` are of `pyspark.sql.connect.proto`, not `google.protobuf`, and
   it has one map container type where upb has a scalar one and a message one;
 - it parses and prints messages of any depth, where upb refuses more than 100 nested messages
   and `text_format` exceeds Python's recursion limit;
 - the iteration order of a map is the order of insertion, where upb's is that of its hash table.
-  Serialization and the text format write the entries in upb's order of the keys.
+  Serialization and the text format write the entries in upb's order of the keys;
+- `GetOptions()` of a descriptor gives `protobuf`'s `descriptor_pb2` options, as upb's does, so
+  it needs `protobuf`.
+
+Where `protobuf` is installed, the files of the protos of Spark Connect are added to its default
+descriptor pool, as the generated modules add them. The modules that protoc generates of other
+protos that import them (those of a plugin, such as Delta Lake's Connect client) then build, and
+`json_format` finds the types of an `Any`. The messages of such a module are `protobuf`'s, which
+take messages of their own classes only: their `CopyFrom`, `MergeFrom` and constructors raise
+`TypeError` for a message of `pyspark.sql.connect.proto`, which a field of theirs takes through its
+bytes (`plugin.input.ParseFromString(relation.SerializeToString())`) or a dict instead. PySpark's
+messages are of `protobuf`'s classes, so its plugins pass them as they are: Delta Lake 4.0's
+`DeltaTable.delete`, `update` and `merge` build their plans with `CopyFrom` of PySpark's
+messages, and raise that `TypeError` here. The other way, the messages of
+`pyspark.sql.connect.proto` take `protobuf`'s messages of their types as they are, and an `Any` of
+either packs and unpacks a message of either.
 
 A DataFrame of a plan of `pyspark.ml` (`DataFrame(plan, session)`) takes the plan ID
 of this client rather than the one of the plan, which its columns refer to.

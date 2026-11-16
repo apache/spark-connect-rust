@@ -17,10 +17,11 @@
 """The import hook of the vendored module that needs ``protobuf`` itself.
 
 The vendored ``pyspark.pipelines.add_pipeline_analysis_context`` packs its message into
-protobuf's own ``google.protobuf.any_pb2.Any``. When ``pyspark.sql.connect.proto`` uses the Rust
-protobuf runtime (without ``protobuf``), this hook gives that module, as it is imported, the same
-context manager of the runtime's ``Any`` (``pyspark.sql.connect.proto._rust``). The vendored file
-itself stays as it is, and nothing stands in for the ``google.protobuf`` package.
+protobuf's own ``google.protobuf.any_pb2.Any``. This hook gives that module, as it is imported,
+the same context manager of the ``Any`` of the Rust protobuf runtime of
+``pyspark.sql.connect.proto`` (``pyspark.sql.connect.proto._rust``), so that it needs no
+``protobuf``. The vendored file itself stays as it is, and nothing stands in for the
+``google.protobuf`` package.
 """
 import importlib.abc
 import sys
@@ -31,8 +32,8 @@ _ANALYSIS_CONTEXT = "pyspark.pipelines.add_pipeline_analysis_context"
 
 
 class _Loader(importlib.abc.Loader):
-    """The loader of the module, which runs it and then gives it the runtime's context manager
-    when the runtime is in use."""
+    """The loader of the module, which runs it and then gives it the runtime's context
+    manager."""
 
     def __init__(self, loader: Any) -> None:
         self._loader = loader
@@ -45,14 +46,11 @@ class _Loader(importlib.abc.Loader):
 
     def exec_module(self, module: Any) -> None:
         self._loader.exec_module(module)
-        from pyspark.sql.connect import proto
+        from pyspark.sql.connect.proto._rust import add_pipeline_analysis_context
 
-        if proto._implementation == "rust":
-            from pyspark.sql.connect.proto._rust import add_pipeline_analysis_context
-
-            # Named as the vendored function, so that it reports and pickles as that one.
-            add_pipeline_analysis_context.__module__ = module.__name__
-            module.add_pipeline_analysis_context = add_pipeline_analysis_context
+        # Named as the vendored function, so that it reports and pickles as that one.
+        add_pipeline_analysis_context.__module__ = module.__name__
+        module.add_pipeline_analysis_context = add_pipeline_analysis_context
 
 
 class _Finder(importlib.abc.MetaPathFinder):

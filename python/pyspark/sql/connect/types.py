@@ -18,9 +18,9 @@
 PySpark Connect's: ``UnparsedDataType``, a DDL string of a type that the server parses. The
 conversions between the types and their ``spark.connect.DataType`` messages,
 ``pyspark_types_to_proto_types`` and ``proto_schema_to_pyspark_data_type``, are those of the Rust
-transport, of the messages of the generated ``pyspark.sql.connect.proto``, which needs the
-``protobuf`` package. ``parse_attr_name``, ``verify_col_name`` and ``verify_numeric_col_name`` are
-PySpark Connect's, from Apache Spark v4.3.0."""
+transport, of the messages of ``pyspark.sql.connect.proto``. ``parse_attr_name``,
+``verify_col_name`` and ``verify_numeric_col_name`` are PySpark Connect's, from Apache Spark
+v4.3.0."""
 
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 

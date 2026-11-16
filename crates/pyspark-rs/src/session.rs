@@ -588,7 +588,7 @@ thread_local! {
 
 /// The request that `hooks` return of `request`, as PySpark's client calls its session hooks:
 /// each `on_execute_plan` with the request of the one before, as a `pb2.ExecutePlanRequest`
-/// of the generated `pyspark.sql.connect.proto`, of the operation ID of `request`. The hooks get
+/// of `pyspark.sql.connect.proto`, of the operation ID of `request`. The hooks get
 /// the request as `parse_deep` parses it, which takes a request of any nesting, where
 /// `FromString` stops at protobuf's limit of 100 nested messages. Its messages are encoded,
 /// decoded and dropped on a grown stack, as the caller's thread may be a small one, while the

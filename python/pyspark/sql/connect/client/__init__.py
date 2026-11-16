@@ -413,8 +413,8 @@ class SparkConnectClient:
     """The client of ``SparkSession.client``: of PySpark Connect's ``SparkConnectClient``, what
     the modules of PySpark that build their own messages, such as ``pyspark.ml``, use: their
     commands and the ML cache, over the Rust transport of the session, and the session ID. The
-    messages are those of the generated ``pyspark.sql.connect.proto``. The Rust transport is the
-    rest of the client, of the DataFrame API."""
+    messages are those of ``pyspark.sql.connect.proto``. The Rust transport is the rest of the
+    client, of the DataFrame API."""
 
     # As PySpark Connect's, of pyspark.sql.connect.client.core, whose name this class has too.
     __module__ = "pyspark.sql.connect.client.core"
@@ -710,25 +710,12 @@ class SparkConnectClient:
         return properties["ml_command_result"].param.long
 
 
-def _any_class() -> Any:
-    """The ``google.protobuf.Any`` of the messages of ``pyspark.sql.connect.proto``: protobuf's,
-    or that of the Rust protobuf runtime when it is the one in use."""
-    from pyspark.sql.connect import proto
-
-    if proto._implementation == "rust":
-        from pyspark.sql.connect.proto._rust import Any as RustAny
-
-        return RustAny
-    from google.protobuf import any_pb2
-
-    return any_pb2.Any
-
-
 def _extensions_of(extensions: Any) -> list[Any]:
     # The user context extensions of the Rust transport, as SparkConnectClient keeps them: the
-    # ID and the google.protobuf.Any of each.
-    any_class = _any_class()
-    return [(extension_id, any_class.FromString(data)) for extension_id, data in extensions]
+    # ID and the google.protobuf.Any of each, of the Any of pyspark.sql.connect.proto's runtime.
+    from pyspark.sql.connect.proto._rust import Any as ProtoAny
+
+    return [(extension_id, ProtoAny.FromString(data)) for extension_id, data in extensions]
 
 
 class _ThreadLocalOfClient:

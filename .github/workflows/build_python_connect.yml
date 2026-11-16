@@ -253,7 +253,7 @@ jobs:
             echo "protobuf is installed in the client environment"; exit 1
           fi
           /tmp/client/bin/python -c \
-            "import pyspark.sql.connect.proto as p; assert p._implementation == 'rust', p._implementation"
+            "import pyspark._pyspark as r, pyspark.sql.connect.proto as p; assert issubclass(p.Relation, r.ProtoMessage)"
           /tmp/client/bin/python -m pytest -q \
             tests/test_proto_rust_offline.py \
             tests/test_arrow_e2e.py \

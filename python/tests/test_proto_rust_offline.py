@@ -14,17 +14,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""The Rust protobuf runtime of the drop-in (``pyspark.sql.connect.proto._rust``) against upb,
-the implementation of a ``protobuf`` install: the same operations on a message of each agree in
-their bytes, text, fields, containers, presence, errors and descriptors. The last test runs the
-runtime where ``protobuf`` cannot be imported, as the drop-in runs without it.
+"""The Rust protobuf runtime of the drop-in (``pyspark.sql.connect.proto._rust``), the messages of
+``pyspark.sql.connect.proto``, against upb, the implementation of a ``protobuf`` install: the
+same operations on a message of each agree in their bytes, text, fields, containers, presence,
+errors, descriptors, options, well-known types and the modules of the protos, and protobuf's own
+modules (``json_format``, ``text_format``, the default descriptor pool and the modules that protoc
+generates of protos that import Spark Connect's) take the messages. Two tests run the runtime
+where ``protobuf`` cannot be imported, as the drop-in runs without it.
 
-The comparisons need the generated modules of upb in use (protobuf installed, and the runtime not
-asked for), and are skipped otherwise.
+The comparisons need protobuf of upb installed, and are skipped otherwise. upb's messages are of
+the files of the protos that ``pyspark.sql.connect.proto`` adds to protobuf's default pool, which
+are the bytes of the files that Apache Spark's generated modules add. The runtime follows the
+errors of protobuf 7, which a few of protobuf 6 differ from.
 """
 
 import collections.abc as abc
 import copy
+import datetime
+import importlib
 import json
 import pathlib
 import random
@@ -37,18 +44,62 @@ from pyspark import _pyspark
 from pyspark.sql.connect import proto
 from pyspark.sql.connect.proto import _rust
 
+# The classes of upb, by full name, that _upb_classes makes.
+_UPB_CLASSES = {}
+
+
+def _upb_classes():
+    """The class of a message of upb by full name, as the modules that protoc generates of the
+    protos make it (of its module and qualified names, as Apache Spark's do), or None without
+    protobuf of upb. The classes are of a pool of their own, of the files of the protos and of
+    protobuf's own of the well-known types, so that no class that protobuf made before of the
+    default pool, of another name, stands in for one."""
+    try:
+        from google.protobuf import any_pb2, descriptor_pool, timestamp_pb2
+        from google.protobuf.internal import api_implementation, builder
+    except ImportError:
+        return None
+    if api_implementation.Type() != "upb":
+        return None
+    if not _UPB_CLASSES:
+        pool = descriptor_pool.DescriptorPool()
+        files = [(m.DESCRIPTOR.serialized_pb, m.__name__) for m in (any_pb2, timestamp_pb2)]
+        files += [
+            (_pyspark._proto_file_descriptor(name).serialized_pb, _rust._module_name(name, package))
+            for name, package, _, _ in _pyspark._proto_files()
+            if package == "spark.connect"
+        ]
+
+        def add(cls):
+            _UPB_CLASSES[cls.DESCRIPTOR.full_name] = cls
+            for nested in cls.DESCRIPTOR.nested_types:
+                add(getattr(cls, nested.name))
+
+        for serialized, module_name in files:
+            file = pool.AddSerializedFile(serialized)
+            namespace = {}
+            builder.BuildMessageAndEnumDescriptors(file, namespace)
+            builder.BuildTopDescriptorsAndMessages(file, module_name, namespace)
+            for name in file.message_types_by_name:
+                add(namespace[name])
+    return _UPB_CLASSES.__getitem__
+
 
 @pytest.fixture(scope="module")
 def upb():
     """The class of a message of upb, by full name."""
-    if proto._implementation != "protobuf":
-        pytest.skip("the generated modules of protobuf are not in use")
-    from google.protobuf import symbol_database
-    from google.protobuf.internal import api_implementation
-
-    if api_implementation.Type() != "upb":
+    classes = _upb_classes()
+    if classes is None:
         pytest.skip("the runtime follows upb, the implementation of a protobuf install")
-    return symbol_database.Default().GetSymbol
+    return classes
+
+
+def _protobuf_7():
+    """Whether protobuf is of 7 or later, whose errors the runtime gives where those of protobuf 6
+    differ."""
+    import google.protobuf
+
+    return int(google.protobuf.__version__.split(".")[0]) >= 7
 
 
 def ours(full_name):
@@ -734,10 +785,12 @@ def test_text_of_messages_as_upbs_and_text_formats(upb):
 def test_messages_work_without_protobuf():
     # Where protobuf cannot be imported, pyspark.sql.connect.proto is of the runtime: messages
     # build, encode, parse, print, copy and pickle, and their containers are sequences and
-    # mappings, as protobuf's are. With upb installed, the bytes and the text are upb's.
+    # mappings, as protobuf's are; the example plugin's take the package's, the pool of the files
+    # finds their descriptors and a Timestamp converts. With upb installed, the bytes and the text
+    # are upb's.
     script = textwrap.dedent(
         """
-        import collections.abc, copy, importlib.abc, json, pickle, sys
+        import collections.abc, copy, datetime, importlib.abc, json, pickle, sys
 
         class Block(importlib.abc.MetaPathFinder):
             def find_spec(self, name, path, target=None):
@@ -747,11 +800,19 @@ def test_messages_work_without_protobuf():
         sys.meta_path.insert(0, Block())
         import numpy as np
         import pyspark.sql.connect.proto as proto
-        from pyspark.sql.connect.proto import expressions_pb2
+        from pyspark import _pyspark
+        from pyspark.sql.connect.proto import example_plugins_pb2, expressions_pb2
         from tests.test_proto_rust_offline import _text_cases
 
-        assert proto._implementation == "rust"
+        assert issubclass(proto.Relation, _pyspark.ProtoMessage)
         assert expressions_pb2.Expression is proto.Expression
+        assert "google.protobuf" not in sys.modules
+        plugin = example_plugins_pb2.ExamplePluginRelation(input=proto.Relation(range={"end": 3}))
+        assert plugin.input.range.end == 3
+        pool = proto.Relation.DESCRIPTOR.file.pool
+        assert pool.FindMessageTypeByName("spark.connect.Relation") is proto.Relation.DESCRIPTOR
+        event = proto.PipelineEvent(timestamp=datetime.datetime(2020, 1, 2, 3, 4, 5, 678000))
+        assert event.timestamp.ToJsonString() == "2020-01-02T03:04:05.678Z"
         from pyspark.sql.connect.proto import _rust
 
         relation, context = _text_cases(lambda name: _rust._CLASSES[name])
@@ -791,20 +852,15 @@ def test_messages_work_without_protobuf():
     assert out["decode error"] == (
         "Error parsing message with type 'spark.connect.Plan': Wire format was corrupt"
     )
-    if proto._implementation == "protobuf":
-        from google.protobuf import symbol_database
-        from google.protobuf.internal import api_implementation
-
-        if api_implementation.Type() == "upb":
-            relation, context = _text_cases(symbol_database.Default().GetSymbol)
-            relation.sql.pos_arguments.add().literal.specialized_array.doubles.values.extend(
-                [1.5, 2.5]
-            )
-            assert out["bytes"] == [
-                relation.SerializeToString(deterministic=True).hex(),
-                context.SerializeToString(deterministic=True).hex(),
-            ]
-            assert out["str"] == [str(relation), str(context)]
+    upb = _upb_classes()
+    if upb is not None:
+        relation, context = _text_cases(upb)
+        relation.sql.pos_arguments.add().literal.specialized_array.doubles.values.extend([1.5, 2.5])
+        assert out["bytes"] == [
+            relation.SerializeToString(deterministic=True).hex(),
+            context.SerializeToString(deterministic=True).hex(),
+        ]
+        assert out["str"] == [str(relation), str(context)]
 
 
 def test_enums_of_the_classes_and_modules_are_upbs(upb):
@@ -838,7 +894,10 @@ def test_enums_of_the_classes_and_modules_are_upbs(upb):
 
 def test_install_exports_the_messages_and_modules_of_the_runtime(upb):
     # install(): the package's names and its generated modules become the runtime's, as the
-    # package's star imports of the generated modules give protobuf's.
+    # package's star imports of the generated modules give protobuf's: the public names of the
+    # generated modules of the ten protos that it imports, and the modules.
+    from google.protobuf import descriptor_pool
+
     names = {}
     saved = {k: v for k, v in sys.modules.items() if k.startswith("pyspark.sql.connect.proto.")}
     try:
@@ -848,17 +907,31 @@ def test_install_exports_the_messages_and_modules_of_the_runtime(upb):
         sys.modules.update(saved)
     assert names["Relation"] is ours("spark.connect.Relation")
     assert names["relations_pb2"].Relation is names["Relation"]
-    real_names = {n for n in dir(proto) if not n.startswith("_") and n[0].isupper()}
-    assert real_names <= set(names), sorted(real_names - set(names))[:5]
-    assert not any(n.startswith("_rust") for n in names)
+    pool = descriptor_pool.Default()
+    exported = set()
+    for stem in _rust._EXPORTED:
+        generated = _generated_names(pool.FindFileByName(f"spark/connect/{stem}.proto"))
+        exported |= {n for n in generated if not n.startswith("_")}
+    modules = {name.rpartition(".")[2] for name in _rust._MODULES if _rust._is_exported(name)}
+    assert set(names) == exported | modules, sorted(set(names) ^ (exported | modules))[:5]
+    assert "example_plugins_pb2" in modules and "ExamplePluginRelation" not in names
 
 
 def test_pipeline_analysis_context_of_the_runtime_is_the_vendored_ones(upb):
     # The context manager of the runtime adds the user context extension that the vendored one
-    # adds with protobuf's Any, and removes it, also when its body raises.
-    from pyspark.pipelines.add_pipeline_analysis_context import (
-        add_pipeline_analysis_context as vendored,
-    )
+    # adds with protobuf's Any, and removes it, also when its body raises. The vendored module,
+    # as it is imported, has the runtime's (see pyspark._proto_hooks), so its file is run here.
+    import importlib.util
+
+    import pyspark.pipelines.add_pipeline_analysis_context as module
+
+    assert module.add_pipeline_analysis_context is _rust.add_pipeline_analysis_context
+    assert _rust.add_pipeline_analysis_context.__module__ == module.__name__
+    spec = importlib.util.spec_from_file_location("_vendored_analysis_context", module.__file__)
+    vendored_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(vendored_module)
+    vendored = vendored_module.add_pipeline_analysis_context
+    assert vendored is not _rust.add_pipeline_analysis_context
 
     class Client:
         def __init__(self):
@@ -887,3 +960,561 @@ def test_pipeline_analysis_context_of_the_runtime_is_the_vendored_ones(upb):
         with _rust.add_pipeline_analysis_context(failing, "graph", "flow"):
             raise KeyError("body")
     assert failing.client.removed == ["id1"]
+
+
+def _module_alias(file_name):
+    """protoc's name of the module of the file ``file_name`` in a generated module that imports
+    it: ``spark_dot_connect_dot_relations__pb2``."""
+    module = file_name[: -len(".proto")].replace("/", ".") + "_pb2"
+    return module.replace("_", "__").replace(".", "_dot_")
+
+
+def _generated_names(file_descriptor):
+    """The names of the module that protoc generates of the file of ``file_descriptor`` (one of
+    upb's), as protobuf's builder binds them, but those of protobuf itself (``_globals``,
+    ``_sym_db``, ...): its messages, enums, top-level enum values and services and their
+    descriptors, its ``DESCRIPTOR`` and the modules of the files that it imports."""
+    names = {"DESCRIPTOR"} | {_module_alias(d.name) for d in file_descriptor.dependencies}
+
+    def nested(descriptor, prefix):
+        for name, message in descriptor.nested_types_by_name.items():
+            names.add(prefix + name.upper())
+            nested(message, prefix + name.upper() + "_")
+        for enum in descriptor.enum_types:
+            names.add(prefix + enum.name.upper())
+
+    for name, message in file_descriptor.message_types_by_name.items():
+        names |= {name, "_" + name.upper()}
+        nested(message, "_" + name.upper() + "_")
+    for name, enum in file_descriptor.enum_types_by_name.items():
+        names |= {name, "_" + name.upper()} | {v.name for v in enum.values}
+    names |= {"_" + name.upper() for name in file_descriptor.services_by_name}
+    return names
+
+
+def test_modules_of_the_protos_are_the_generated_modules(upb):
+    # Each module of a proto of Spark Connect has the names of the module that protoc generates of
+    # it, and imports, reloads and is found as a module.
+    from google.protobuf import descriptor_pool
+
+    pool = descriptor_pool.Default()
+    for module_name, module in _rust._MODULES.items():
+        if not _rust._is_exported(module_name):
+            continue
+        names = {n for n in vars(module) if not (n.startswith("__") and n.endswith("__"))}
+        assert names == _generated_names(pool.FindFileByName(module.DESCRIPTOR.name)), module_name
+        assert sys.modules[module_name] is module
+        assert importlib.util.find_spec(module_name) is module.__spec__
+        assert getattr(proto, module_name.rpartition(".")[2]) is module
+    relations = proto.relations_pb2
+    assert relations._RELATION is proto.Relation.DESCRIPTOR
+    assert relations._JOIN_JOINTYPE is proto.Join.DESCRIPTOR.enum_types_by_name["JoinType"]
+    assert relations.spark_dot_connect_dot_expressions__pb2 is proto.expressions_pb2
+    assert proto.base_pb2._SPARKCONNECTSERVICE.full_name == "spark.connect.SparkConnectService"
+    # A module that is no longer in sys.modules imports again as it is, and reloads as it is.
+    name = "pyspark.sql.connect.proto.relations_pb2"
+    del sys.modules[name]
+    try:
+        assert importlib.import_module(name) is relations
+    finally:
+        sys.modules[name] = relations
+    assert importlib.reload(relations) is relations and relations.Relation is proto.Relation
+
+
+def test_options_and_protos_of_the_descriptors_are_upbs(upb):
+    # GetOptions() gives the options of protobuf's descriptor_pb2, the same object each time, of
+    # which has_options tells whether there are any, and CopyToProto merges the proto of the
+    # descriptor into a message of its type, as upb's of the messages, fields, oneofs, enums,
+    # enum values, files, services and methods of the protos of Spark Connect.
+    from google.protobuf import descriptor_pb2, descriptor_pool
+
+    def options(descriptor):
+        found = descriptor.GetOptions()
+        assert descriptor.GetOptions() is found
+        return (type(found).__name__, found.SerializeToString(), descriptor.has_options)
+
+    def copied(descriptor, proto_class):
+        copy = proto_class()
+        copy.MergeFromString(b"")
+        return (_outcome(lambda: descriptor.CopyToProto(copy)), copy)
+
+    def check_enum(real, mine):
+        assert options(mine) == options(real), mine.full_name
+        assert mine.is_closed is real.is_closed is False
+        assert copied(mine, descriptor_pb2.EnumDescriptorProto) == copied(
+            real, descriptor_pb2.EnumDescriptorProto
+        )
+        for real_value, value in zip(real.values, mine.values):
+            assert options(value) == options(real_value), value.name
+
+    pool = descriptor_pool.Default()
+    files = set()
+    for full_name, cls in _rust._CLASSES.items():
+        if not full_name.startswith("spark.connect."):
+            continue
+        real, mine = upb(full_name).DESCRIPTOR, cls.DESCRIPTOR
+        assert options(mine) == options(real), full_name
+        assert copied(mine, descriptor_pb2.DescriptorProto) == copied(
+            real, descriptor_pb2.DescriptorProto
+        )
+        for real_field, field in zip(real.fields, mine.fields):
+            assert options(field) == options(real_field), field.full_name
+        for real_oneof, oneof in zip(real.oneofs, mine.oneofs):
+            assert options(oneof) == options(real_oneof), oneof.full_name
+        for real_enum, enum in zip(real.enum_types, mine.enum_types):
+            check_enum(real_enum, enum)
+        files.add(mine.file.name)
+    # A map entry's options are its map_entry, of which json_format and text_format tell a map.
+    entry = proto.SQL.DESCRIPTOR.nested_types_by_name["NamedArgumentsEntry"]
+    assert entry.GetOptions().map_entry and entry.has_options
+    deprecated = proto.SQL.DESCRIPTOR.fields_by_name["args"]
+    assert deprecated.GetOptions().deprecated and deprecated.has_options
+
+    for name in sorted(files):
+        real, mine = pool.FindFileByName(name), proto.Relation.DESCRIPTOR.file.pool.FindFileByName(name)
+        assert options(mine) == options(real), name
+        assert copied(mine, descriptor_pb2.FileDescriptorProto) == copied(
+            real, descriptor_pb2.FileDescriptorProto
+        )
+        for enum_name in real.enum_types_by_name:
+            check_enum(real.enum_types_by_name[enum_name], mine.enum_types_by_name[enum_name])
+        assert list(mine.services_by_name) == list(real.services_by_name)
+        for service_name, real_service in real.services_by_name.items():
+            service = mine.services_by_name[service_name]
+            attributes = ("name", "full_name", "index", "has_options")
+            assert [getattr(service, a) for a in attributes] == [
+                getattr(real_service, a) for a in attributes
+            ]
+            assert service.file is mine and options(service) == options(real_service)
+            assert copied(service, descriptor_pb2.ServiceDescriptorProto) == copied(
+                real_service, descriptor_pb2.ServiceDescriptorProto
+            )
+            assert list(service.methods_by_name) == list(real_service.methods_by_name)
+            for real_method, method in zip(real_service.methods, service.methods):
+                assert service.FindMethodByName(method.name) is method
+                assert method.containing_service is service
+                attributes = (
+                    "name",
+                    "full_name",
+                    "index",
+                    "client_streaming",
+                    "server_streaming",
+                    "has_options",
+                )
+                assert [getattr(method, a) for a in attributes] == [
+                    getattr(real_method, a) for a in attributes
+                ]
+                assert (method.input_type.full_name, method.output_type.full_name) == (
+                    real_method.input_type.full_name,
+                    real_method.output_type.full_name,
+                )
+                assert method.input_type is ours(method.input_type.full_name).DESCRIPTOR
+                assert options(method) == options(real_method)
+                assert copied(method, descriptor_pb2.MethodDescriptorProto) == copied(
+                    real_method, descriptor_pb2.MethodDescriptorProto
+                )
+            assert _outcome(lambda: service.FindMethodByName("nope")) == _outcome(
+                lambda: real_service.FindMethodByName("nope")
+            )
+
+    # The errors of CopyToProto of a message of another type and of an object that is no message.
+    real, mine = upb("spark.connect.Relation").DESCRIPTOR, proto.Relation.DESCRIPTOR
+    wrong = descriptor_pb2.FileDescriptorProto
+    assert _outcome(lambda: mine.CopyToProto(wrong())) == _outcome(lambda: real.CopyToProto(wrong()))
+    outcome, expected = _outcome(lambda: mine.CopyToProto(1)), _outcome(lambda: real.CopyToProto(1))
+    assert outcome == expected
+
+
+def test_pool_of_the_files_finds_their_descriptors_as_upbs(upb):
+    # The pool of a file of the runtime finds the descriptors of the runtime by name, as upb's
+    # default pool finds its own, and fails on the names that it does not have as upb's does.
+    from google.protobuf import descriptor_pool
+
+    real_pool, pool = descriptor_pool.Default(), proto.Relation.DESCRIPTOR.file.pool
+    assert proto.Plan.DESCRIPTOR.file.pool is pool
+
+    def file_of(pool, symbol):
+        return pool.FindFileContainingSymbol(symbol).name
+
+    def check_enum(enum, scope):
+        assert pool.FindEnumTypeByName(enum.full_name) is enum
+        for value in enum.values:
+            symbol = f"{scope}.{value.name}"
+            assert file_of(pool, symbol) == file_of(real_pool, symbol), symbol
+
+    files = {}
+    for full_name, cls in _rust._CLASSES.items():
+        descriptor = cls.DESCRIPTOR
+        assert pool.FindMessageTypeByName(full_name) is descriptor
+        assert pool.FindFileContainingSymbol(full_name) is descriptor.file
+        files[descriptor.file.name] = descriptor.file
+        for field in descriptor.fields:
+            assert pool.FindFieldByName(field.full_name) is field
+            assert file_of(pool, field.full_name) == file_of(real_pool, field.full_name)
+        for oneof in descriptor.oneofs:
+            assert pool.FindOneofByName(oneof.full_name) is oneof
+            assert file_of(pool, oneof.full_name) == file_of(real_pool, oneof.full_name)
+        for enum in descriptor.enum_types:
+            check_enum(enum, full_name)
+    for name, file in files.items():
+        assert pool.FindFileByName(name) is file
+        for enum in file.enum_types_by_name.values():
+            check_enum(enum, file.package)
+        for service in file.services_by_name.values():
+            assert pool.FindServiceByName(service.full_name) is service
+            assert pool.FindFileContainingSymbol(service.full_name) is file
+            for method in service.methods:
+                assert pool.FindMethodByName(method.full_name) is method
+                # Neither finds the file of a method.
+                assert _outcome(lambda: file_of(pool, method.full_name)) == _outcome(
+                    lambda: file_of(real_pool, method.full_name)
+                )
+
+    real_relation = upb("spark.connect.Relation").DESCRIPTOR
+    for method, args, real_args in [
+        ("FindMessageTypeByName", ("nope.X",), None),
+        ("FindMessageTypeByName", ("spark.connect.Relation.sql",), None),
+        ("FindFileByName", ("nope.proto",), None),
+        ("FindEnumTypeByName", ("nope.E",), None),
+        ("FindEnumTypeByName", ("spark.connect.Relation",), None),
+        ("FindFieldByName", ("spark.connect.Relation.nope",), None),
+        ("FindFieldByName", ("nope",), None),
+        ("FindOneofByName", ("spark.connect.Relation.nope",), None),
+        ("FindExtensionByName", ("spark.connect.nope",), None),
+        ("FindServiceByName", ("spark.connect.Nope",), None),
+        ("FindMethodByName", ("spark.connect.SparkConnectService.Nope",), None),
+        ("FindMethodByName", ("Nope",), None),
+        ("FindFileContainingSymbol", ("spark.connect.Nope",), None),
+        ("FindFileContainingSymbol", ("spark.connect.Relation.nope",), None),
+        ("FindExtensionByNumber", (proto.Relation.DESCRIPTOR, 5), (real_relation, 5)),
+        ("FindAllExtensions", (proto.Relation.DESCRIPTOR,), (real_relation,)),
+    ]:
+        outcome = _outcome(lambda: getattr(pool, method)(*args))
+        expected = _outcome(lambda: getattr(real_pool, method)(*(real_args or args)))
+        if method == "FindFieldByName" and not _protobuf_7():
+            # protobuf 6 names the field a message in its error.
+            outcome, expected = outcome[:2], expected[:2]
+        assert outcome == expected, (method, args)
+
+
+def _result(fn):
+    """The value of `fn`, or the type and message of what it raises, as it is (a datetime too)."""
+    try:
+        return ("ok", fn())
+    except Exception as e:  # noqa: BLE001
+        return ("raise", type(e).__name__, str(e))
+
+
+def _same_results(mine, expected, exact=True):
+    """Whether two results agree: in full, or (``exact`` false, of an error message that
+    protobuf 6 words otherwise) in whether they raise."""
+    return mine == expected if exact else mine[0] == expected[0]
+
+
+def test_well_known_types_have_the_methods_of_protobufs(upb):
+    # The classes of google.protobuf.Any and google.protobuf.Timestamp have the methods of
+    # protobuf's, of their results and errors, and the other classes none of those.
+    from google.protobuf import duration_pb2
+
+    methods = {"Pack", "Unpack", "Is", "TypeName", "ToJsonString", "FromDatetime", "ToDatetime"}
+    for full_name, cls in _rust._CLASSES.items():
+        real = upb(full_name)
+        assert {m for m in methods if hasattr(cls, m)} == {m for m in methods if hasattr(real, m)}
+
+    # Any: a message of either runtime packs into the Any of either, of each type URL prefix.
+    def pack(any_of, message_of, prefix):
+        packed = any_of("google.protobuf.Any")()
+        packed.Pack(message_of("spark.connect.Range")(start=1, end=3), prefix)
+        return (packed.type_url, packed.value)
+
+    for prefix in ("type.googleapis.com/", "", "x", "x/", "a/b/"):
+        expected = pack(upb, upb, prefix)
+        assert pack(ours, ours, prefix) == pack(ours, upb, prefix) == expected
+    for type_url in (
+        "",
+        "spark.connect.Range",
+        "x/spark.connect.Range",
+        "a/b/spark.connect.Range",
+        "x/spark.connect.Relation",
+        "x/",
+    ):
+
+        def unpack(of):
+            packed = of("google.protobuf.Any")(type_url=type_url, value=b"\x08\x01\x10\x03")
+            target = of("spark.connect.Range")()
+            return (
+                _outcome(lambda: packed.Unpack(target)),
+                target.SerializeToString(),
+                packed.TypeName(),
+                packed.Is(target.DESCRIPTOR),
+            )
+
+        assert unpack(ours) == unpack(upb), type_url
+
+    # Timestamp: its text, conversions and arithmetic, in its range and out of it.
+    stamps = [(0, 0), (1, 5000), (-1, 999_999_999), (1_600_000_000, 123_000_000)]
+    stamps += [(1_600_000_000, 123_456_000), (1_600_000_000, 123_456_789), (-62135596800, 0)]
+    stamps += [(253402300799, 999_999_999), (253402300800, 0), (-62135596801, 0)]
+    stamps += [(0, -1), (0, 1_000_000_000)]
+    eastern = datetime.timezone(datetime.timedelta(hours=-5))
+    readers = [
+        lambda t: t.ToJsonString(),
+        lambda t: t.ToNanoseconds(),
+        lambda t: t.ToMicroseconds(),
+        lambda t: t.ToMilliseconds(),
+        lambda t: t.ToSeconds(),
+        lambda t: t.ToDatetime(),
+        lambda t: t.ToDatetime(datetime.timezone.utc),
+        lambda t: t.ToDatetime(eastern),
+        lambda t: t + datetime.timedelta(days=1, microseconds=7),
+        lambda t: datetime.timedelta(seconds=-3) + t,
+        lambda t: t - datetime.timedelta(hours=2),
+        lambda t: t - datetime.datetime(2000, 1, 1),
+        lambda t: datetime.datetime(2000, 1, 1) - t,
+        lambda t: t + duration_pb2.Duration(seconds=5, nanos=1000),
+        lambda t: t - duration_pb2.Duration(seconds=5),
+        lambda t: t - type(t)(seconds=10, nanos=500_000),
+        lambda t: t - upb("google.protobuf.Timestamp")(seconds=10),
+    ]
+    real_class, mine_class = upb("google.protobuf.Timestamp"), ours("google.protobuf.Timestamp")
+    for seconds, nanos in stamps:
+        for read in readers:
+            expected = _result(lambda: read(real_class(seconds=seconds, nanos=nanos)))
+            assert _result(lambda: read(mine_class(seconds=seconds, nanos=nanos))) == expected, (
+                seconds,
+                nanos,
+            )
+
+    def set_by(cls, setter):
+        stamp = cls()
+        return _result(lambda: (setter(stamp), (stamp.seconds, stamp.nanos))[1])
+
+    texts = [
+        "1970-01-01T00:00:00Z",
+        "2020-01-02T03:04:05.678Z",
+        "2020-01-02T03:04:05.123456789Z",
+        "2020-01-02T03:04:05.1234567891Z",
+        "2020-01-02T03:04:05.5+09:30",
+        "2020-01-02T03:04:05-05:00",
+        "0001-01-01T00:00:00Z",
+        "9999-12-31T23:59:59.999999999Z",
+        "2020-01-02T03:04:05",
+        "2020-01-02t03:04:05Z",
+        "2020-01-02T03:04:05Zx",
+        "2020-01-02T03:04:05+0900",
+        "2020-01-02T03:04:05.x1Z",
+        "2020-01-02",
+        "",
+        "Z",
+        5,
+    ]
+    for text in texts:
+        expected = set_by(real_class, lambda t: t.FromJsonString(text))
+        assert set_by(mine_class, lambda t: t.FromJsonString(text)) == expected, text
+    for value in (0, 1, -1, 1_500, -1_500, 1_234_567_891, -(10**20), 10**20):
+        for name in ("FromNanoseconds", "FromMicroseconds", "FromMilliseconds", "FromSeconds"):
+            expected = set_by(real_class, lambda t: getattr(t, name)(value))
+            assert set_by(mine_class, lambda t: getattr(t, name)(value)) == expected, (name, value)
+    for value, exact in [
+        (datetime.datetime(2020, 1, 2, 3, 4, 5, 678901), True),
+        (datetime.datetime(2020, 1, 2, 3, 4, 5, tzinfo=eastern), True),
+        (datetime.datetime(1, 1, 1), True),
+        (datetime.datetime(9999, 12, 31, 23, 59, 59, 999999), True),
+        (datetime.date(2020, 1, 2), _protobuf_7()),
+        ("2020-01-02", _protobuf_7()),
+        (None, _protobuf_7()),
+        (0, _protobuf_7()),
+        # An object of a class named datetime that is not one, as protobuf takes it.
+        (type("datetime", (), {})(), True),
+    ]:
+        expected = set_by(real_class, lambda t: t.FromDatetime(value))
+        assert _same_results(set_by(mine_class, lambda t: t.FromDatetime(value)), expected, exact)
+    now = mine_class()
+    now.GetCurrentTime()
+    assert abs(now.ToDatetime() - datetime.datetime.utcnow()) < datetime.timedelta(minutes=1)
+
+
+def test_timestamp_fields_take_datetimes_as_upbs(upb):
+    # A Timestamp field takes a datetime, through its message's _internal_assign, in the
+    # constructor and as an assignment, as upb's does, and fails on other values as upb's.
+    dt = datetime.datetime(2020, 1, 2, 3, 4, 5, 678901)
+    aware = dt.replace(tzinfo=datetime.timezone(datetime.timedelta(hours=9)))
+
+    def construct(cls, value):
+        event = cls("spark.connect.PipelineEvent")(timestamp=value, message="m")
+        return (event.HasField("timestamp"), event.SerializeToString())
+
+    def assign(cls, value):
+        event = cls("spark.connect.PipelineEvent")()
+        outcome = _result(lambda: setattr(event, "timestamp", value))
+        return (outcome, event.HasField("timestamp"), event.SerializeToString())
+
+    values = [(dt, True), (aware, True), ({"seconds": 5}, True), (None, True)]
+    values += [(1, _protobuf_7()), ("x", _protobuf_7()), (datetime.date(2020, 1, 2), _protobuf_7())]
+    for value, exact in values:
+        expected = _result(lambda: construct(upb, value))
+        assert _same_results(_result(lambda: construct(ours, value)), expected, exact), value
+        expected = assign(upb, value)
+        mine = assign(ours, value)
+        assert mine[1:] == expected[1:] and _same_results(mine[0], expected[0], exact), value
+    stamp = upb("google.protobuf.Timestamp")(seconds=7)
+    assert construct(ours, ours("google.protobuf.Timestamp")(seconds=7)) == construct(upb, stamp)
+    # A field of a message type of Spark Connect is not assigned, as upb's.
+    relation = proto.Relation()
+    real = upb("spark.connect.Relation")()
+    assert _result(lambda: setattr(relation, "sql", proto.SQL())) == _result(
+        lambda: setattr(real, "sql", real.sql)
+    )
+
+
+def test_extensions_of_the_messages_are_upbs(upb):
+    # The messages declare no extension ranges: HasExtension and ClearExtension fail on any
+    # field, and Extensions is an AttributeError, as upb's.
+    real, mine = upb("spark.connect.Relation")(), proto.Relation()
+    real_field = real.DESCRIPTOR.fields_by_name["sql"]
+    field = mine.DESCRIPTOR.fields_by_name["sql"]
+    for method in ("HasExtension", "ClearExtension"):
+        assert _outcome(lambda: getattr(mine, method)(field)) == _outcome(
+            lambda: getattr(real, method)(real_field)
+        )
+        for other in ("x", 1, None):
+            assert _outcome(lambda: getattr(mine, method)(other)) == _outcome(
+                lambda: getattr(real, method)(other)
+            )
+    assert _outcome(lambda: mine.Extensions) == _outcome(lambda: real.Extensions)
+    assert hasattr(mine, "Extensions") is hasattr(real, "Extensions") is False
+    assert ("Extensions" in dir(type(mine))) is ("Extensions" in dir(type(real))) is True
+
+
+def _protobuf_cases(cls):
+    """Messages of the maps, Anys of a type of the protos and Timestamps that protobuf's
+    json_format and text_format print and parse."""
+    relation = cls("spark.connect.Relation")()
+    relation.sql.query = "select :a, :b"
+    relation.sql.named_arguments["a"].literal.integer = 1
+    relation.sql.named_arguments["b"].unresolved_attribute.unparsed_identifier = "x"
+    relation.sql.args["c"].string = "y"
+    extension = cls("spark.connect.Relation")()
+    extension.extension.Pack(cls("spark.connect.Range")(start=1, end=3))
+    context = cls("spark.connect.UserContext")(user_id="u")
+    context.extensions.add().Pack(cls("spark.connect.SQL")(query="q"))
+    event = cls("spark.connect.PipelineEvent")(message="m")
+    event.timestamp.FromJsonString("2020-01-02T03:04:05.678Z")
+    return [relation, extension, context, event]
+
+
+def test_json_and_text_formats_of_protobuf_take_the_messages(upb):
+    # protobuf's json_format and text_format print and parse the messages as upb's: of maps,
+    # whose map entries' options they read, of an Any of a type of the protos, which they find in
+    # protobuf's default pool, and of a Timestamp, as its RFC 3339 text.
+    from google.protobuf import json_format, text_format
+
+    for real, mine in zip(_protobuf_cases(upb), _protobuf_cases(ours)):
+        # json_format writes the entries of a map in the order that the map iterates them, the
+        # order of insertion of the runtime's and that of upb's hash table (see
+        # docs/compatibility.md), so the objects compare, not their texts.
+        assert json.loads(json_format.MessageToJson(mine)) == json.loads(
+            json_format.MessageToJson(real)
+        )
+        assert json_format.MessageToDict(mine) == json_format.MessageToDict(real)
+        assert text_format.MessageToString(mine) == text_format.MessageToString(real)
+        one_line = text_format.MessageToString(real, as_one_line=True)
+        assert text_format.MessageToString(mine, as_one_line=True) == one_line
+        bytes_of = real.SerializeToString(deterministic=True)
+        parsed = json_format.Parse(json_format.MessageToJson(real), type(mine)())
+        assert parsed.SerializeToString() == bytes_of
+        parsed = json_format.ParseDict(json_format.MessageToDict(real), type(mine)())
+        assert parsed.SerializeToString() == bytes_of
+        parsed = text_format.Parse(text_format.MessageToString(real), type(mine)())
+        assert parsed.SerializeToString() == bytes_of
+
+
+def test_modules_that_protoc_generates_of_protos_importing_spark_connects_build(upb):
+    # The files of the protos are in protobuf's default pool, as the generated modules add them,
+    # so that a file of a plugin that imports them builds, as the module that protoc generates of
+    # it adds it (Delta Lake's do). Its messages are protobuf's, which take a message of
+    # pyspark.sql.connect.proto through its bytes or a dict (not as it is, which protobuf's
+    # messages take of their own classes only), and which an Any of the package packs and unpacks.
+    from google.protobuf import descriptor_pb2, descriptor_pool, message_factory
+
+    pool = descriptor_pool.Default()
+    for name, _, _, _ in _pyspark._proto_files():
+        found = pool.FindFileByName(name)
+        if name.startswith("spark/connect/"):
+            assert found.serialized_pb == _pyspark._proto_file_descriptor(name).serialized_pb
+            # As a generated module of Apache Spark's would add it again: the pool takes it.
+            pool.AddSerializedFile(found.serialized_pb)
+
+    file = descriptor_pb2.FileDescriptorProto(
+        name="tests/plugin_of_test_proto_rust_offline.proto",
+        package="tests.plugin",
+        syntax="proto3",
+        dependency=["spark/connect/relations.proto"],
+    )
+    message = file.message_type.add(name="PluginRelation")
+    message.field.add(
+        name="input",
+        number=1,
+        type=descriptor_pb2.FieldDescriptorProto.TYPE_MESSAGE,
+        label=descriptor_pb2.FieldDescriptorProto.LABEL_OPTIONAL,
+        type_name=".spark.connect.Relation",
+        json_name="input",
+    )
+    message.field.add(
+        name="custom",
+        number=2,
+        type=descriptor_pb2.FieldDescriptorProto.TYPE_STRING,
+        label=descriptor_pb2.FieldDescriptorProto.LABEL_OPTIONAL,
+        json_name="custom",
+    )
+    try:
+        pool.FindFileByName(file.name)
+    except KeyError:
+        pool.AddSerializedFile(file.SerializeToString())
+    plugin_class = message_factory.GetMessageClass(
+        pool.FindMessageTypeByName("tests.plugin.PluginRelation")
+    )
+
+    relation = proto.Relation(sql=proto.SQL(query="select 1"))
+    plugin = plugin_class(custom="c")
+    plugin.input.ParseFromString(relation.SerializeToString())
+    assert plugin == plugin_class(input={"sql": {"query": "select 1"}}, custom="c")
+    with pytest.raises(TypeError):
+        plugin_class(input=relation)
+    with pytest.raises(TypeError):
+        plugin.input.CopyFrom(relation)
+    wrapped = proto.Relation()
+    wrapped.extension.Pack(plugin)
+    assert wrapped.extension.TypeName() == "tests.plugin.PluginRelation"
+    unpacked = plugin_class()
+    assert wrapped.extension.Unpack(unpacked) and unpacked == plugin
+    back = proto.Relation()
+    back.CopyFrom(unpacked.input)
+    assert back == relation and back.SerializeToString() == plugin.input.SerializeToString()
+
+
+def test_example_plugins_are_messages_of_the_runtime(upb):
+    # pyspark.sql.connect.proto.example_plugins_pb2, of the messages of Spark's example plugin, is
+    # of the runtime: its messages take those of the package as they are, and are upb's.
+    from pyspark.sql.connect.proto import example_plugins_pb2 as plugins
+
+    assert sys.modules["pyspark.sql.connect.proto.example_plugins_pb2"] is plugins
+    relation = proto.Relation(sql=proto.SQL(query="select 1"))
+    plugin = plugins.ExamplePluginRelation(input=relation, custom_field="c")
+    assert plugin.input == relation and isinstance(plugin, _pyspark.ProtoMessage)
+    child = proto.Expression(literal=proto.Expression.Literal(integer=1))
+    expression = plugins.ExamplePluginExpression(child=child, custom_field="e")
+    wrapped = proto.Relation()
+    wrapped.extension.Pack(plugin)
+    assert wrapped.extension.TypeName() == "spark.connect.ExamplePluginRelation"
+    # As PySpark's package, which does not import the module: its messages are not exported.
+    assert not hasattr(proto, "ExamplePluginRelation")
+    real_plugin = upb("spark.connect.ExamplePluginRelation")(
+        input={"sql": {"query": "select 1"}}, custom_field="c"
+    )
+    real_expression = upb("spark.connect.ExamplePluginExpression")(
+        child={"literal": {"integer": 1}}, custom_field="e"
+    )
+    assert plugin.SerializeToString() == real_plugin.SerializeToString()
+    assert expression.SerializeToString() == real_expression.SerializeToString()
+    assert str(plugin) == str(real_plugin)

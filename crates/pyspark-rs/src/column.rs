@@ -136,9 +136,9 @@ impl PyColumnExpression {
         self.__repr__()
     }
 
-    /// The `spark.connect.Expression` of this expression, of the generated
-    /// `pyspark.sql.connect.proto`. One too deep to be sent is the `RecursionError` that
-    /// PySpark's `to_plan`, which recurses, raises.
+    /// The `spark.connect.Expression` of this expression, of `pyspark.sql.connect.proto`. One
+    /// too deep to be sent is the `RecursionError` that PySpark's `to_plan`, which recurses,
+    /// raises.
     fn to_plan(&self, py: Python<'_>, session: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         use prost::Message;
         let _ = session;
@@ -771,7 +771,7 @@ impl PyColumn {
     }
 
     /// The `spark.connect.Expression` of this column, as PySpark Connect's `Column.to_plan`: that
-    /// of its expression, of the generated `pyspark.sql.connect.proto`.
+    /// of its expression, of `pyspark.sql.connect.proto`.
     fn to_plan(&self, py: Python<'_>, session: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         self._expr().to_plan(py, session)
     }

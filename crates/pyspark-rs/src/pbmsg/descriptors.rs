@@ -1,41 +1,52 @@
-//! The descriptors of the runtime's messages, fields, oneofs and enums, as protobuf's Python
-//! descriptors (of upb 7, which have no `label`) give them to code that reads a message
-//! generically: `ListFields()` gives field descriptors with `name`, `type`, `is_repeated` and the
-//! `TYPE_*` and `LABEL_*` constants, and a
+//! The descriptors of the runtime's messages, fields, oneofs, enums, files, services and methods,
+//! and the pool that finds them, as protobuf's Python descriptors (of upb 7, which have no
+//! `label`) give them to code that reads a message generically: `ListFields()` gives field
+//! descriptors with `name`, `type`, `is_repeated` and the `TYPE_*` and `LABEL_*` constants, and a
 //! message class has the `DESCRIPTOR` of its message. One object stands for each descriptor, so
 //! descriptors compare by identity as protobuf's do.
+//!
+//! `GetOptions()` gives the options of a descriptor as upb's does, as a message of protobuf's
+//! `google.protobuf.descriptor_pb2` (which `json_format` and `text_format` read the `map_entry` of
+//! a map field of), made once for each descriptor; `CopyToProto(proto)` merges the descriptor's
+//! proto, as its file declares it, into `proto`, a message of that type.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use pyo3::exceptions::{PyKeyError, PyValueError};
+use prost::Message as _;
+use pyo3::exceptions::{PyKeyError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
+use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyBytes, PyDict, PyList};
 
 use super::message::registered_class;
-use super::pool::{pool, EnumDesc, Kind, MessageDesc};
+use super::pool::{pool, EnumDesc, Kind, MessageDesc, ServiceDesc};
 use super::scalar::Scalar;
 
 #[pyclass(frozen, module = "pyspark.sql.connect.proto", name = "Descriptor")]
 pub struct PyDescriptor {
     pub(crate) desc: Arc<MessageDesc>,
+    options: PyOnceLock<Py<PyAny>>,
 }
 
 #[pyclass(frozen, module = "pyspark.sql.connect.proto", name = "FieldDescriptor")]
 pub struct PyFieldDescriptor {
     message: Arc<MessageDesc>,
     index: usize,
+    options: PyOnceLock<Py<PyAny>>,
 }
 
 #[pyclass(frozen, module = "pyspark.sql.connect.proto", name = "OneofDescriptor")]
 pub struct PyOneofDescriptor {
     message: Arc<MessageDesc>,
     index: usize,
+    options: PyOnceLock<Py<PyAny>>,
 }
 
 #[pyclass(frozen, module = "pyspark.sql.connect.proto", name = "EnumDescriptor")]
 pub struct PyEnumDescriptor {
     desc: Arc<EnumDesc>,
+    options: PyOnceLock<Py<PyAny>>,
 }
 
 #[pyclass(
@@ -46,12 +57,40 @@ pub struct PyEnumDescriptor {
 pub struct PyEnumValueDescriptor {
     desc: Arc<EnumDesc>,
     index: usize,
+    options: PyOnceLock<Py<PyAny>>,
 }
 
 #[pyclass(frozen, module = "pyspark.sql.connect.proto", name = "FileDescriptor")]
 pub struct PyFileDescriptor {
     name: String,
+    options: PyOnceLock<Py<PyAny>>,
 }
+
+#[pyclass(
+    frozen,
+    module = "pyspark.sql.connect.proto",
+    name = "ServiceDescriptor"
+)]
+pub struct PyServiceDescriptor {
+    desc: Arc<ServiceDesc>,
+    options: PyOnceLock<Py<PyAny>>,
+}
+
+#[pyclass(
+    frozen,
+    module = "pyspark.sql.connect.proto",
+    name = "MethodDescriptor"
+)]
+pub struct PyMethodDescriptor {
+    service: Arc<ServiceDesc>,
+    index: usize,
+    options: PyOnceLock<Py<PyAny>>,
+}
+
+/// The pool of the descriptors of the runtime, as protobuf's `DescriptorPool` finds them: the
+/// `pool` of a `FileDescriptor`.
+#[pyclass(frozen, module = "pyspark.sql.connect.proto", name = "DescriptorPool")]
+pub struct PyDescriptorPool;
 
 type Cache<K, V> = OnceLock<Mutex<HashMap<K, Py<V>>>>;
 
@@ -78,7 +117,13 @@ pub(crate) fn descriptor_object(py: Python<'_>, full_name: &str) -> PyResult<Py<
             .message(full_name)
             .ok_or_else(|| PyKeyError::new_err(full_name.to_string()))?
             .clone();
-        Py::new(py, PyDescriptor { desc })
+        Py::new(
+            py,
+            PyDescriptor {
+                desc,
+                options: PyOnceLock::new(),
+            },
+        )
     })
 }
 
@@ -95,6 +140,7 @@ pub(crate) fn field_descriptor_object(
             PyFieldDescriptor {
                 message: message.clone(),
                 index,
+                options: PyOnceLock::new(),
             },
         )
     })?;
@@ -113,6 +159,7 @@ fn oneof_descriptor_object(
             PyOneofDescriptor {
                 message: message.clone(),
                 index,
+                options: PyOnceLock::new(),
             },
         )
     })
@@ -129,7 +176,13 @@ pub(crate) fn enum_descriptor_object(
             .enumeration(full_name)
             .ok_or_else(|| PyKeyError::new_err(full_name.to_string()))?
             .clone();
-        Py::new(py, PyEnumDescriptor { desc })
+        Py::new(
+            py,
+            PyEnumDescriptor {
+                desc,
+                options: PyOnceLock::new(),
+            },
+        )
     })
 }
 
@@ -144,9 +197,56 @@ pub(crate) fn file_descriptor_object(py: Python<'_>, name: &str) -> PyResult<Py<
             py,
             PyFileDescriptor {
                 name: name.to_string(),
+                options: PyOnceLock::new(),
             },
         )
     })
+}
+
+/// The descriptor of the service `full_name`, such as `spark.connect.SparkConnectService`.
+pub(crate) fn service_descriptor_object(
+    py: Python<'_>,
+    full_name: &str,
+) -> PyResult<Py<PyServiceDescriptor>> {
+    static CACHE: Cache<String, PyServiceDescriptor> = OnceLock::new();
+    cached(py, &CACHE, full_name.to_string(), || {
+        let desc = pool()
+            .service(full_name)
+            .ok_or_else(|| PyKeyError::new_err(full_name.to_string()))?
+            .clone();
+        Py::new(
+            py,
+            PyServiceDescriptor {
+                desc,
+                options: PyOnceLock::new(),
+            },
+        )
+    })
+}
+
+fn method_descriptor_object(
+    py: Python<'_>,
+    service: &Arc<ServiceDesc>,
+    index: usize,
+) -> PyResult<Py<PyMethodDescriptor>> {
+    static CACHE: Cache<(String, usize), PyMethodDescriptor> = OnceLock::new();
+    cached(py, &CACHE, (service.full_name.clone(), index), || {
+        Py::new(
+            py,
+            PyMethodDescriptor {
+                service: service.clone(),
+                index,
+                options: PyOnceLock::new(),
+            },
+        )
+    })
+}
+
+/// The pool of the runtime, one object, as a `FileDescriptor` gives it.
+fn pool_object(py: Python<'_>) -> PyResult<Py<PyDescriptorPool>> {
+    static POOL: PyOnceLock<Py<PyDescriptorPool>> = PyOnceLock::new();
+    POOL.get_or_try_init(py, || Py::new(py, PyDescriptorPool))
+        .map(|p| p.clone_ref(py))
 }
 
 fn empty_dict(py: Python<'_>) -> Bound<'_, PyDict> {
@@ -165,9 +265,67 @@ fn enum_value_object(
             PyEnumValueDescriptor {
                 desc: desc.clone(),
                 index,
+                options: PyOnceLock::new(),
             },
         )
     })
+}
+
+/// The options of a descriptor, as upb's `GetOptions()` gives them: the message of the class
+/// `class` of protobuf's `descriptor_pb2` (such as `MessageOptions`) of the encoded options that
+/// `encoded` gives, made once, in `cell`, so that every call gives the same object.
+fn options_of(
+    py: Python<'_>,
+    cell: &PyOnceLock<Py<PyAny>>,
+    class: &str,
+    encoded: impl FnOnce() -> Vec<u8>,
+) -> PyResult<Py<PyAny>> {
+    cell.get_or_try_init(py, || {
+        let options = py
+            .import("google.protobuf.descriptor_pb2")?
+            .getattr(class)?
+            .call_method1("FromString", (PyBytes::new(py, &encoded()),))?;
+        Ok::<_, PyErr>(options.unbind())
+    })
+    .map(|options| options.clone_ref(py))
+}
+
+/// The encoded `options` of a descriptor's proto, or none when it has none.
+fn encoded<M: prost::Message>(options: Option<M>) -> Vec<u8> {
+    options.map(|o| o.encode_to_vec()).unwrap_or_default()
+}
+
+/// `CopyToProto(proto)`, as upb's: merge `bytes`, the encoded proto of a descriptor, which is of
+/// the type `expected` (such as `google.protobuf.DescriptorProto`), into `proto`, a message of
+/// that type, of upb's errors of an object that is not a message and of a message of another
+/// type. The result is that of the message's `MergeFromString`.
+fn copy_to_proto(
+    py: Python<'_>,
+    proto: &Bound<'_, PyAny>,
+    expected: &str,
+    bytes: Option<Vec<u8>>,
+) -> PyResult<Py<PyAny>> {
+    let full_name = proto
+        .getattr("DESCRIPTOR")
+        .and_then(|d| d.getattr("full_name"))
+        .and_then(|n| n.extract::<String>());
+    let Ok(full_name) = full_name else {
+        return Err(PyTypeError::new_err(format!(
+            "Expected a message object, but got {}.",
+            proto.repr()?
+        )));
+    };
+    if full_name != expected {
+        return Err(PyTypeError::new_err(format!(
+            "CopyToProto: message is of incorrect type '{full_name}' (expected '{expected}'"
+        )));
+    }
+    let bytes = bytes.ok_or_else(|| {
+        PyValueError::new_err(format!("the proto of a {expected} is not in its file"))
+    })?;
+    Ok(proto
+        .call_method1("MergeFromString", (PyBytes::new(py, &bytes),))?
+        .unbind())
 }
 
 #[pymethods]
@@ -277,23 +435,29 @@ impl PyDescriptor {
     }
 
     #[getter]
-    fn file_name(&self) -> &str {
-        &self.desc.file
-    }
-
-    #[getter]
     fn file(&self, py: Python<'_>) -> PyResult<Py<PyFileDescriptor>> {
         file_descriptor_object(py, &self.desc.file)
     }
 
     #[getter]
-    fn package(&self) -> &str {
-        &self.desc.package
-    }
-
-    #[getter]
     fn has_options(&self) -> bool {
         self.desc.has_options
+    }
+
+    /// The `google.protobuf.MessageOptions` of the message, such as the `map_entry` of a map
+    /// entry.
+    #[pyo3(name = "GetOptions")]
+    fn get_options(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        options_of(py, &self.options, "MessageOptions", || {
+            encoded(pool().message_proto(&self.desc).and_then(|p| p.options))
+        })
+    }
+
+    /// Merge the `google.protobuf.DescriptorProto` of the message into `proto`.
+    #[pyo3(name = "CopyToProto")]
+    fn copy_to_proto(&self, py: Python<'_>, proto: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let bytes = pool().message_proto(&self.desc).map(|p| p.encode_to_vec());
+        copy_to_proto(py, proto, "google.protobuf.DescriptorProto", bytes)
     }
 
     #[getter]
@@ -427,6 +591,9 @@ impl PyFieldDescriptor {
     const CPPTYPE_ENUM: i32 = 8;
     #[classattr]
     const CPPTYPE_STRING: i32 = 9;
+    /// As upb's: the C++ type of a bytes field is that of a string.
+    #[classattr]
+    const CPPTYPE_BYTES: i32 = 9;
     #[classattr]
     const CPPTYPE_MESSAGE: i32 = 10;
     #[classattr]
@@ -545,6 +712,19 @@ impl PyFieldDescriptor {
         self.message.fields[self.index].has_options
     }
 
+    /// The `google.protobuf.FieldOptions` of the field, such as its `deprecated`.
+    #[pyo3(name = "GetOptions")]
+    fn get_options(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        options_of(py, &self.options, "FieldOptions", || {
+            encoded(
+                pool()
+                    .message_proto(&self.message)
+                    .and_then(|p| p.field.into_iter().nth(self.index))
+                    .and_then(|f| f.options),
+            )
+        })
+    }
+
     #[getter]
     fn is_packed(&self) -> bool {
         self.message.fields[self.index].packed
@@ -610,6 +790,24 @@ impl PyOneofDescriptor {
         descriptor_object(py, &self.message.full_name)
     }
 
+    #[getter]
+    fn has_options(&self) -> bool {
+        self.message.oneofs[self.index].has_options
+    }
+
+    /// The `google.protobuf.OneofOptions` of the oneof.
+    #[pyo3(name = "GetOptions")]
+    fn get_options(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        options_of(py, &self.options, "OneofOptions", || {
+            encoded(
+                pool()
+                    .message_proto(&self.message)
+                    .and_then(|p| p.oneof_decl.into_iter().nth(self.index))
+                    .and_then(|o| o.options),
+            )
+        })
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "<OneofDescriptor {}>",
@@ -668,11 +866,6 @@ impl PyEnumDescriptor {
     }
 
     #[getter]
-    fn file_name(&self) -> &str {
-        &self.desc.file
-    }
-
-    #[getter]
     fn file(&self, py: Python<'_>) -> PyResult<Py<PyFileDescriptor>> {
         file_descriptor_object(py, &self.desc.file)
     }
@@ -680,6 +873,28 @@ impl PyEnumDescriptor {
     #[getter]
     fn has_options(&self) -> bool {
         self.desc.has_options
+    }
+
+    /// Whether the enum is closed, as an enum of a proto2 file is; those of Spark Connect, of
+    /// proto3, are open.
+    #[getter]
+    fn is_closed(&self) -> bool {
+        self.desc.closed
+    }
+
+    /// The `google.protobuf.EnumOptions` of the enum.
+    #[pyo3(name = "GetOptions")]
+    fn get_options(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        options_of(py, &self.options, "EnumOptions", || {
+            encoded(pool().enum_proto(&self.desc).and_then(|p| p.options))
+        })
+    }
+
+    /// Merge the `google.protobuf.EnumDescriptorProto` of the enum into `proto`.
+    #[pyo3(name = "CopyToProto")]
+    fn copy_to_proto(&self, py: Python<'_>, proto: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let bytes = pool().enum_proto(&self.desc).map(|p| p.encode_to_vec());
+        copy_to_proto(py, proto, "google.protobuf.EnumDescriptorProto", bytes)
     }
 
     fn __repr__(&self) -> String {
@@ -709,6 +924,24 @@ impl PyEnumValueDescriptor {
         enum_descriptor_object(py, &self.desc.full_name)
     }
 
+    #[getter]
+    fn has_options(&self) -> bool {
+        self.desc.value_has_options[self.index]
+    }
+
+    /// The `google.protobuf.EnumValueOptions` of the value.
+    #[pyo3(name = "GetOptions")]
+    fn get_options(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        options_of(py, &self.options, "EnumValueOptions", || {
+            encoded(
+                pool()
+                    .enum_proto(&self.desc)
+                    .and_then(|p| p.value.into_iter().nth(self.index))
+                    .and_then(|v| v.options),
+            )
+        })
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "<EnumValueDescriptor {}.{}>",
@@ -727,6 +960,12 @@ impl PyFileDescriptor {
     #[getter]
     fn package(&self) -> PyResult<&'static str> {
         Ok(&self.file()?.package)
+    }
+
+    /// The pool of the file: that of the runtime, which finds its descriptors.
+    #[getter]
+    fn pool(&self, py: Python<'_>) -> PyResult<Py<PyDescriptorPool>> {
+        pool_object(py)
     }
 
     /// The `FileDescriptorProto` of the file, serialized without its source info, as protobuf's
@@ -784,13 +1023,33 @@ impl PyFileDescriptor {
     }
 
     #[getter]
-    fn services_by_name<'py>(&self, py: Python<'py>) -> Bound<'py, PyDict> {
-        empty_dict(py)
+    fn services_by_name<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let dict = PyDict::new(py);
+        for name in &self.file()?.services {
+            let short = name.rsplit('.').next().unwrap_or(name);
+            dict.set_item(short, service_descriptor_object(py, name)?)?;
+        }
+        Ok(dict)
     }
 
     #[getter]
     fn has_options(&self) -> PyResult<bool> {
         Ok(self.file()?.has_options)
+    }
+
+    /// The `google.protobuf.FileOptions` of the file, such as its `java_package`.
+    #[pyo3(name = "GetOptions")]
+    fn get_options(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        options_of(py, &self.options, "FileOptions", || {
+            encoded(pool().file_proto(&self.name).and_then(|p| p.options))
+        })
+    }
+
+    /// Merge the `google.protobuf.FileDescriptorProto` of the file into `proto`.
+    #[pyo3(name = "CopyToProto")]
+    fn copy_to_proto(&self, py: Python<'_>, proto: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let bytes = Some(self.file()?.serialized.clone());
+        copy_to_proto(py, proto, "google.protobuf.FileDescriptorProto", bytes)
     }
 
     fn __repr__(&self) -> String {
@@ -803,5 +1062,336 @@ impl PyFileDescriptor {
         pool()
             .file(&self.name)
             .ok_or_else(|| PyValueError::new_err(format!("no file {}", self.name)))
+    }
+}
+
+#[pymethods]
+impl PyServiceDescriptor {
+    #[getter]
+    fn name(&self) -> &str {
+        &self.desc.name
+    }
+
+    #[getter]
+    fn full_name(&self) -> &str {
+        &self.desc.full_name
+    }
+
+    #[getter]
+    fn index(&self) -> usize {
+        self.desc.index
+    }
+
+    #[getter]
+    fn file(&self, py: Python<'_>) -> PyResult<Py<PyFileDescriptor>> {
+        file_descriptor_object(py, &self.desc.file)
+    }
+
+    #[getter]
+    fn methods<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        let methods = (0..self.desc.methods.len())
+            .map(|i| method_descriptor_object(py, &self.desc, i))
+            .collect::<PyResult<Vec<_>>>()?;
+        PyList::new(py, methods)
+    }
+
+    #[getter]
+    fn methods_by_name<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let dict = PyDict::new(py);
+        for (i, method) in self.desc.methods.iter().enumerate() {
+            dict.set_item(&method.name, method_descriptor_object(py, &self.desc, i)?)?;
+        }
+        Ok(dict)
+    }
+
+    /// The method `name` of the service, as upb's `FindMethodByName`.
+    #[pyo3(name = "FindMethodByName")]
+    fn find_method_by_name(&self, py: Python<'_>, name: &str) -> PyResult<Py<PyMethodDescriptor>> {
+        let index = self
+            .desc
+            .methods
+            .iter()
+            .position(|m| m.name == name)
+            .ok_or_else(|| PyKeyError::new_err(format!("Couldn't find method {name}")))?;
+        method_descriptor_object(py, &self.desc, index)
+    }
+
+    #[getter]
+    fn has_options(&self) -> bool {
+        self.desc.has_options
+    }
+
+    /// The `google.protobuf.ServiceOptions` of the service.
+    #[pyo3(name = "GetOptions")]
+    fn get_options(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        options_of(py, &self.options, "ServiceOptions", || {
+            encoded(pool().service_proto(&self.desc).and_then(|p| p.options))
+        })
+    }
+
+    /// Merge the `google.protobuf.ServiceDescriptorProto` of the service into `proto`.
+    #[pyo3(name = "CopyToProto")]
+    fn copy_to_proto(&self, py: Python<'_>, proto: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let bytes = pool().service_proto(&self.desc).map(|p| p.encode_to_vec());
+        copy_to_proto(py, proto, "google.protobuf.ServiceDescriptorProto", bytes)
+    }
+
+    fn __repr__(&self) -> String {
+        format!("<ServiceDescriptor {}>", self.desc.full_name)
+    }
+}
+
+#[pymethods]
+impl PyMethodDescriptor {
+    #[getter]
+    fn name(&self) -> &str {
+        &self.service.methods[self.index].name
+    }
+
+    #[getter]
+    fn full_name(&self) -> &str {
+        &self.service.methods[self.index].full_name
+    }
+
+    #[getter]
+    fn index(&self) -> usize {
+        self.index
+    }
+
+    #[getter]
+    fn containing_service(&self, py: Python<'_>) -> PyResult<Py<PyServiceDescriptor>> {
+        service_descriptor_object(py, &self.service.full_name)
+    }
+
+    #[getter]
+    fn input_type(&self, py: Python<'_>) -> PyResult<Py<PyDescriptor>> {
+        descriptor_object(py, &self.service.methods[self.index].input_type)
+    }
+
+    #[getter]
+    fn output_type(&self, py: Python<'_>) -> PyResult<Py<PyDescriptor>> {
+        descriptor_object(py, &self.service.methods[self.index].output_type)
+    }
+
+    #[getter]
+    fn client_streaming(&self) -> bool {
+        self.service.methods[self.index].client_streaming
+    }
+
+    #[getter]
+    fn server_streaming(&self) -> bool {
+        self.service.methods[self.index].server_streaming
+    }
+
+    #[getter]
+    fn has_options(&self) -> bool {
+        self.service.methods[self.index].has_options
+    }
+
+    /// The `google.protobuf.MethodOptions` of the method.
+    #[pyo3(name = "GetOptions")]
+    fn get_options(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        options_of(py, &self.options, "MethodOptions", || {
+            encoded(
+                pool()
+                    .service_proto(&self.service)
+                    .and_then(|p| p.method.into_iter().nth(self.index))
+                    .and_then(|m| m.options),
+            )
+        })
+    }
+
+    /// Merge the `google.protobuf.MethodDescriptorProto` of the method into `proto`.
+    #[pyo3(name = "CopyToProto")]
+    fn copy_to_proto(&self, py: Python<'_>, proto: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let bytes = pool()
+            .service_proto(&self.service)
+            .and_then(|p| p.method.into_iter().nth(self.index))
+            .map(|m| m.encode_to_vec());
+        copy_to_proto(py, proto, "google.protobuf.MethodDescriptorProto", bytes)
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "<MethodDescriptor {}>",
+            self.service.methods[self.index].full_name
+        )
+    }
+}
+
+/// The file of `symbol`, as upb's `FindFileContainingSymbol` finds it: of a message, an enum, a
+/// service, a field or oneof of a message, or a value of an enum (in the scope that declares the
+/// enum), but not of a method of a service, which upb's does not find either.
+fn file_of_symbol(symbol: &str) -> Option<&'static str> {
+    let pool = pool();
+    if let Some(m) = pool.message(symbol) {
+        return Some(&m.file);
+    }
+    if let Some(e) = pool.enumeration(symbol) {
+        return Some(&e.file);
+    }
+    if let Some(s) = pool.service(symbol) {
+        return Some(&s.file);
+    }
+    let (scope, name) = symbol.rsplit_once('.')?;
+    let has_value = |enums: &[String]| {
+        enums.iter().any(|e| {
+            pool.enumeration(e)
+                .is_some_and(|e| e.number_of(name).is_some())
+        })
+    };
+    if let Some(m) = pool.message(scope) {
+        let member = m.by_name.contains_key(name) || m.oneof_by_name.contains_key(name);
+        return (member || has_value(&m.nested_enums)).then_some(m.file.as_str());
+    }
+    pool.files
+        .iter()
+        .find(|f| f.package == scope && has_value(&f.enums))
+        .map(|f| f.name.as_str())
+}
+
+/// The message type of `full_name` and the index of its member `name` that `index_of` finds.
+fn member_of(
+    full_name: &str,
+    index_of: impl Fn(&MessageDesc, &str) -> Option<usize>,
+) -> Option<(Arc<MessageDesc>, usize)> {
+    let (scope, name) = full_name.rsplit_once('.')?;
+    let message = pool().message(scope)?;
+    Some((message.clone(), index_of(message, name)?))
+}
+
+#[pymethods]
+impl PyDescriptorPool {
+    #[pyo3(name = "FindFileByName")]
+    fn find_file_by_name(&self, py: Python<'_>, file_name: &str) -> PyResult<Py<PyFileDescriptor>> {
+        if pool().file(file_name).is_none() {
+            return Err(PyKeyError::new_err(format!(
+                "Couldn't find file {file_name}"
+            )));
+        }
+        file_descriptor_object(py, file_name)
+    }
+
+    #[pyo3(name = "FindMessageTypeByName")]
+    fn find_message_type_by_name(
+        &self,
+        py: Python<'_>,
+        full_name: &str,
+    ) -> PyResult<Py<PyDescriptor>> {
+        if pool().message(full_name).is_none() {
+            return Err(PyKeyError::new_err(format!(
+                "Couldn't find message {full_name}"
+            )));
+        }
+        descriptor_object(py, full_name)
+    }
+
+    #[pyo3(name = "FindEnumTypeByName")]
+    fn find_enum_type_by_name(
+        &self,
+        py: Python<'_>,
+        full_name: &str,
+    ) -> PyResult<Py<PyEnumDescriptor>> {
+        if pool().enumeration(full_name).is_none() {
+            return Err(PyKeyError::new_err(format!(
+                "Couldn't find enum {full_name}"
+            )));
+        }
+        enum_descriptor_object(py, full_name)
+    }
+
+    #[pyo3(name = "FindFieldByName")]
+    fn find_field_by_name(&self, py: Python<'_>, full_name: &str) -> PyResult<Py<PyAny>> {
+        let (message, index) = member_of(full_name, |m, name| m.by_name.get(name).copied())
+            .ok_or_else(|| PyKeyError::new_err(format!("Couldn't find field {full_name}")))?;
+        field_descriptor_object(py, &message, index)
+    }
+
+    #[pyo3(name = "FindOneofByName")]
+    fn find_oneof_by_name(
+        &self,
+        py: Python<'_>,
+        full_name: &str,
+    ) -> PyResult<Py<PyOneofDescriptor>> {
+        let (message, index) =
+            member_of(full_name, |m, name| m.oneof_by_name.get(name).copied())
+                .ok_or_else(|| PyKeyError::new_err(format!("Couldn't find oneof {full_name}")))?;
+        oneof_descriptor_object(py, &message, index)
+    }
+
+    #[pyo3(name = "FindServiceByName")]
+    fn find_service_by_name(
+        &self,
+        py: Python<'_>,
+        full_name: &str,
+    ) -> PyResult<Py<PyServiceDescriptor>> {
+        if pool().service(full_name).is_none() {
+            return Err(PyKeyError::new_err(format!(
+                "Couldn't find service {full_name}"
+            )));
+        }
+        service_descriptor_object(py, full_name)
+    }
+
+    #[pyo3(name = "FindMethodByName")]
+    fn find_method_by_name(
+        &self,
+        py: Python<'_>,
+        full_name: &str,
+    ) -> PyResult<Py<PyMethodDescriptor>> {
+        let not_found = || PyKeyError::new_err(format!("Couldn't find method {full_name}"));
+        let (scope, name) = full_name.rsplit_once('.').ok_or_else(not_found)?;
+        let service = pool().service(scope).ok_or_else(not_found)?;
+        let index = service
+            .methods
+            .iter()
+            .position(|m| m.name == name)
+            .ok_or_else(not_found)?;
+        method_descriptor_object(py, service, index)
+    }
+
+    /// As upb's: the protos of Spark Connect declare no extensions.
+    #[pyo3(name = "FindExtensionByName")]
+    fn find_extension_by_name(&self, full_name: &str) -> PyResult<Py<PyAny>> {
+        Err(PyKeyError::new_err(format!(
+            "Couldn't find extension {full_name}"
+        )))
+    }
+
+    #[pyo3(name = "FindExtensionByNumber")]
+    fn find_extension_by_number(
+        &self,
+        message_descriptor: &Bound<'_, PyAny>,
+        number: i64,
+    ) -> PyResult<Py<PyAny>> {
+        let _ = message_descriptor;
+        Err(PyKeyError::new_err(format!(
+            "Couldn't find Extension {number}"
+        )))
+    }
+
+    #[pyo3(name = "FindAllExtensions")]
+    fn find_all_extensions<'py>(
+        &self,
+        py: Python<'py>,
+        message_descriptor: &Bound<'_, PyAny>,
+    ) -> Bound<'py, PyList> {
+        let _ = message_descriptor;
+        PyList::empty(py)
+    }
+
+    #[pyo3(name = "FindFileContainingSymbol")]
+    fn find_file_containing_symbol(
+        &self,
+        py: Python<'_>,
+        symbol: &str,
+    ) -> PyResult<Py<PyFileDescriptor>> {
+        let file = file_of_symbol(symbol)
+            .ok_or_else(|| PyKeyError::new_err(format!("Couldn't find symbol {symbol}")))?;
+        file_descriptor_object(py, file)
+    }
+
+    fn __repr__(&self) -> &'static str {
+        "<DescriptorPool of pyspark.sql.connect.proto>"
     }
 }

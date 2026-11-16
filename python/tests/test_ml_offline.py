@@ -2302,14 +2302,14 @@ def test_user_context_extensions_are_sent_as_pyspark(ml_mock):
     # executions and the analyses of a thread carry, the global ones first.
     import threading
 
-    from pyspark.sql.connect.client import _any_class
+    from pyspark.sql.connect.proto._rust import Any
 
     spark, service = ml_mock
     client = spark.client
 
     def packed(graph_id):
-        # The Any of the messages in use, of protobuf or of the Rust protobuf runtime.
-        extension = _any_class()()
+        # The Any of the Rust protobuf runtime of pyspark.sql.connect.proto.
+        extension = Any()
         extension.Pack(pb2.PipelineAnalysisContext(dataflow_graph_id=graph_id))
         return extension
 
@@ -3472,7 +3472,8 @@ def test_ml_modules_import_without_protobuf():
         from pyspark.ml.classification import LogisticRegression
         import pyspark.sql.connect.expressions, pyspark.sql.connect.plan
         import pyspark.sql.connect.proto as proto
-        assert proto._implementation == "rust", proto._implementation
+        from pyspark import _pyspark
+        assert issubclass(proto.Relation, _pyspark.ProtoMessage), proto.Relation.__mro__
         assert LogisticRegression(maxIter=3).getMaxIter() == 3
         relation = proto.Relation(range=proto.Range(start=1, end=3))
         assert proto.Relation.FromString(relation.SerializeToString()) == relation

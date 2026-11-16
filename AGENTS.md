@@ -134,10 +134,12 @@ diff until it shows none.
 `SparkSession.client` is not the gRPC `SparkConnectClient`: it is the client that the
 vendored `pyspark.ml` (and any module that builds its own `spark.connect` messages) uses
 over the Rust transport - `execute_command(pb2.Command)` and the ML cache RPCs - with the
-`pyspark.sql.connect.proto`: the vendored `*_pb2.py` when `protobuf` is installed, else the
-Rust protobuf runtime (`crates/pyspark-rs/src/pbmsg`, exported by
-`pyspark/sql/connect/proto/_rust.py`), which `python/tests/test_proto_rust_offline.py` compares
-with upb.
+`pyspark.sql.connect.proto`: always the Rust protobuf runtime (`crates/pyspark-rs/src/pbmsg`,
+exported by `pyspark/sql/connect/proto/_rust.py`; the generated `*_pb2.py` are not vendored, only
+their `.pyi` stubs), which `python/tests/test_proto_rust_offline.py` compares with upb. Where
+`protobuf` is installed, the runtime also adds the files of the protos to protobuf's default pool,
+so that a plugin's generated modules that import them build; protobuf's messages of those take
+ours only through bytes or dicts (see `docs/compatibility.md`).
 `DataFrame(plan, session)`, `DataFrame._plan` and `Column._expr` are the other half of
 that bridge: a `LogicalPlan` of Python sends its `plan(session)` relation as it is.
 
