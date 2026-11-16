@@ -74,3 +74,13 @@ __all__ = [
 from pyspark.ml._native_classes import publish as _publish  # noqa: E402
 
 _publish(globals(), "pyspark.ml.classification")
+
+# PySpark's own readers and writers of the Python format of the module, which its `__all__` does
+# not name: over the param maps of the public classes, they save and load their objects too.
+import pyspark.ml.classification as _pysparks  # noqa: E402
+
+OneVsRestReader = _pysparks.OneVsRestReader
+OneVsRestWriter = _pysparks.OneVsRestWriter
+OneVsRestModelReader = _pysparks.OneVsRestModelReader
+OneVsRestModelWriter = _pysparks.OneVsRestModelWriter
+del _pysparks

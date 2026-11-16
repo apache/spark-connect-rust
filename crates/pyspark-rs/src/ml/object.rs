@@ -360,6 +360,50 @@ pub(super) fn session_of(py: Python<'_>, session: Option<&Py<PyAny>>) -> PyResul
     Ok(session)
 }
 
+/// The server-side object of a summary: the target of this client's fit, load or evaluation; or
+/// the `java_obj` of PySpark's constructor (`JavaWrapper.__init__(java_obj=None)`), which the
+/// members read as PySpark's `_extract_id_methods` does (see [`SummaryObject::target`]).
+pub(crate) enum SummaryObject {
+    Target(spark_connect::ml::MlTarget),
+    Given(Py<PyAny>),
+}
+
+impl SummaryObject {
+    /// A copy of the object, of the same server-side object.
+    pub(crate) fn clone_ref(&self, py: Python<'_>) -> Self {
+        match self {
+            Self::Target(target) => Self::Target(target.clone()),
+            Self::Given(object) => Self::Given(object.clone_ref(py)),
+        }
+    }
+
+    /// The target of the members of the summary. Of a given object, as PySpark's `try_remote_call`:
+    /// it asserts an active session first, then `_extract_id_methods` splits the object, the id of
+    /// an object of the ML cache and the methods of its chain (`"<id>.summary"`), over the active
+    /// session; another value than a string (None) raises the AttributeError of its `split`.
+    pub(crate) fn target(&self, py: Python<'_>) -> PyResult<spark_connect::ml::MlTarget> {
+        let object = match self {
+            Self::Target(target) => return Ok(target.clone()),
+            Self::Given(object) => object.bind(py),
+        };
+        let session = session_of(py, None)?;
+        let Ok(text) = object.cast::<PyString>() else {
+            return Err(pyo3::exceptions::PyAttributeError::new_err(format!(
+                "'{}' object has no attribute 'split'",
+                object.get_type().name()?
+            )));
+        };
+        let text: String = text.extract()?;
+        let mut chain = text.split('.');
+        let id = chain.next().unwrap_or_default();
+        let mut target = spark_connect::ml::MlTarget::unowned(&session, id);
+        for method in chain {
+            target = target.child(method);
+        }
+        Ok(target)
+    }
+}
+
 /// What a writer saves: an operator that is not fitted (an estimator, a transformer or an
 /// evaluator), of its params, a fitted model's object, of its params, or an object of PySpark's
 /// Python format.
@@ -407,6 +451,9 @@ pub struct PyMLWriter {
     session: Option<Py<PyAny>>,
     /// The error of PySpark's serialization of the params, which `save` raises.
     error: Option<PyErr>,
+    /// The object of the writer, as PySpark's `RemoteMLWriter._instance`, whose params `save`
+    /// reads at the save.
+    instance: Option<Py<PyAny>>,
 }
 
 impl PyMLWriter {
@@ -417,6 +464,7 @@ impl PyMLWriter {
             optionMap: Python::attach(|py| PyDict::new(py).unbind()),
             session: None,
             error: None,
+            instance: None,
         }
     }
 
@@ -427,6 +475,12 @@ impl PyMLWriter {
 
     pub(super) fn with_error(mut self, error: Option<PyErr>) -> Self {
         self.error = error;
+        self
+    }
+
+    /// The writer of the object `instance`, whose params `save` reads at the save.
+    pub(super) fn with_instance(mut self, instance: &Bound<'_, PyAny>) -> Self {
+        self.instance = Some(instance.clone().unbind());
         self
     }
 }
@@ -442,11 +496,26 @@ impl PyMLWriter {
     /// sets, which `RemoteMLWriter.save` does not read) of an operator, and of the session that
     /// holds a model's object.
     fn save(&self, py: Python<'_>, path: &Bound<'_, PyAny>) -> PyResult<()> {
-        if let Some(error) = &self.error {
+        // PySpark's `RemoteMLWriter.save` reads the params of its instance at the save: the target
+        // of the object's params as of now, of its native class's writer.
+        let fresh = match &self.instance {
+            Some(instance) => Some(
+                py.import("pyspark.ml._native_classes")?
+                    .call_method1("_native_writer", (instance,))?
+                    .cast_into::<Self>()?,
+            ),
+            None => None,
+        };
+        let fresh = fresh.as_ref().map(|f| f.try_borrow()).transpose()?;
+        let (target, error) = match &fresh {
+            Some(f) => (&f.target, &f.error),
+            None => (&self.target, &self.error),
+        };
+        if let Some(error) = error {
             return Err(error.clone_ref(py));
         }
         let options = self.options(py)?;
-        match &self.target {
+        match target {
             WriteTarget::Object(object, params) => {
                 let session = object.session().clone();
                 let path = proto_path(path)?;
@@ -497,9 +566,23 @@ impl PyMLWriter {
                         .map_err(Box::new)
                     })?;
                 }
+                // Of the params of the object (and of the objects that it holds) as of the save.
+                py.import("pyspark.ml._native_classes")?
+                    .call_method1("_sync", (instance,))?;
                 let path = python_path(path)?;
                 save(instance.bind(py), &spark, &session, &path, &options)
             }
+        }
+    }
+
+    /// The object of the writer, as PySpark's `RemoteMLWriter._instance`.
+    #[getter(_instance)]
+    fn instance_of(&self, py: Python<'_>) -> Py<PyAny> {
+        match (&self.instance, &self.target) {
+            (Some(instance), _) | (None, WriteTarget::Python(instance, _)) => {
+                instance.clone_ref(py)
+            }
+            _ => py.None(),
         }
     }
 

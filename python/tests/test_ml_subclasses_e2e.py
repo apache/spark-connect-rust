@@ -76,6 +76,21 @@ def test_transform_and_evaluate_run_the_primitives_of_a_subclass(frame):
     assert evaluations == [evaluator.uid] * 2
 
 
+def test_pysparks_readers_and_writers_save_and_load_native_objects(frame):
+    # PySpark's own writer and reader of a Pipeline, over the param maps of the native objects.
+    import tempfile
+
+    import pyspark.ml.connect.pipeline as pipeline
+
+    Binarizer = _cls("feature", "Binarizer")
+    stage = Binarizer(threshold=4.5, inputCol="x", outputCol="b")
+    path = tempfile.mkdtemp(prefix="ml-pyspark-writers-") + "/pipeline"
+    pipeline.PipelineWriter(pipeline.Pipeline(stages=[stage])).save(path)
+    loaded = pipeline.PipelineReader(pipeline.Pipeline).load(path)
+    assert [s.getThreshold() for s in loaded.getStages()] == [4.5]
+    assert loaded.getStages()[0].uid == stage.uid
+
+
 def test_the_copies_of_a_pipeline_and_a_validator_fit_the_subclass(frame):
     LR = _cls("classification", "LogisticRegression")
     Pipeline = _cls("pipeline", "Pipeline")
@@ -126,3 +141,19 @@ def test_copy_deepcopy_and_pickle_of_a_model_and_its_summary(frame):
     for copied in (copy.copy(fitted), copy.deepcopy(fitted), pickle.loads(pickle.dumps(fitted))):
         assert len(copied.stages) == 1 and copied.uid == fitted.uid
         assert copied.transform(frame).columns[-1] == "b"
+
+
+def test_a_summary_of_no_server_side_object_raises_pysparks_errors(session):
+    # As PySpark's `_extract_id_methods` of the `java_obj` of the summary: the AttributeError of its
+    # `split` of a value that is not a string, and the server's error of an id that it does not hold.
+    Summary = _cls("classification", "LinearSVCTrainingSummary")
+    for call in (lambda: Summary().accuracy, lambda: Summary().predictions, lambda: Summary().fMeasureByLabel()):
+        with pytest.raises(AttributeError, match="^'NoneType' object has no attribute 'split'$"):
+            call()
+    with pytest.raises(AttributeError, match="^'int' object has no attribute 'split'$"):
+        Summary(123).accuracy
+    with pytest.raises(Exception, match="The MLCache key abc is invalid"):
+        Summary("abc").accuracy
+    KMeansSummary = _cls("clustering", "KMeansSummary")
+    with pytest.raises(AttributeError, match="^'NoneType' object has no attribute 'split'$"):
+        KMeansSummary().k

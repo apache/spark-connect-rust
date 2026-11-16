@@ -68,6 +68,18 @@ _CHILD = textwrap.dedent("""
         from pyspark._pyspark import _close_sessions_at_exit
 
         _close_sessions_at_exit()
+    if mode == "atexit_execute":
+        import atexit
+
+        # Registered after the session, so it runs before the session's exit hook.
+        def execute_at_exit():
+            try:
+                spark.range(3).collect()
+                print("returned", flush=True)
+            except BaseException as error:
+                print(type(error).__module__, type(error).__name__, error, flush=True)
+
+        atexit.register(execute_at_exit)
 """)
 
 
@@ -93,8 +105,9 @@ def _child_env(variable=None):
     return env
 
 
-def _run_child(remote, mode, variable=None, timeout=120):
-    # Runs the child to its exit. Returns its exit status and the IDs of its sessions.
+def _run_child_lines(remote, mode, variable=None, timeout=120):
+    # Runs the child to its exit. Returns the IDs of its sessions and the lines it printed after
+    # them.
     result = subprocess.run(
         [sys.executable, "-c", _CHILD, remote, mode],
         capture_output=True,
@@ -103,13 +116,21 @@ def _run_child(remote, mode, variable=None, timeout=120):
         timeout=timeout,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    return result.returncode, result.stdout.split()
+    first, *rest = result.stdout.splitlines()
+    return first.split(), rest
+
+
+def _run_child(remote, mode, variable=None, timeout=120):
+    # Runs the child to its exit. Returns its exit status and the IDs of its sessions.
+    session_ids, _ = _run_child_lines(remote, mode, variable, timeout)
+    return 0, session_ids
 
 
 def _exit_requests(service, session_id):
     # The requests of the session that the server received, in order, of the kinds that the exit
-    # sends: "clean_cache" for the ML cache, "release_session" for ReleaseSession, and "execute"
-    # for any other ExecutePlan.
+    # sends: "clean_cache" for the ML cache, "release_session" for ReleaseSession, "execute" for
+    # any other ExecutePlan, and "release_execute" for a ReleaseExecute, which the exit sends
+    # none of, as PySpark's does not.
     requests = []
     for kind, data in service.recorded_order:
         if parse_message(data).get(1, [b""])[0].decode() != session_id:
@@ -120,8 +141,8 @@ def _exit_requests(service, session_id):
                 requests.append("clean_cache")
             else:
                 requests.append("execute")
-        elif kind == "release_session":
-            requests.append("release_session")
+        elif kind in ("release_session", "release_execute"):
+            requests.append(kind)
     return requests
 
 
@@ -178,6 +199,20 @@ def test_e_two_live_sessions_send_one_clean_cache_each(exit_service):
     assert len(session_ids) == 2 and session_ids[0] != session_ids[1]
     for session_id in session_ids:
         assert _exit_requests(exit_service, session_id) == ["clean_cache"]
+
+
+def test_h_an_execution_once_the_interpreter_shuts_down_raises_pysparks_runtime_error(
+    exit_service,
+):
+    # (h) PySpark's client sends its releases through a ThreadPoolExecutor, which refuses new work
+    # once the interpreter has begun to shut down: an execution in an atexit handler raises its
+    # RuntimeError after the first response, and sends no ReleaseExecute. So does the
+    # clean_cache of the exit hook, which runs after the handler.
+    (session_id,), lines = _run_child_lines(exit_service.remote, "atexit_execute")
+    assert lines == [
+        "builtins RuntimeError cannot schedule new futures after interpreter shutdown"
+    ]
+    assert _exit_requests(exit_service, session_id) == ["execute", "clean_cache"]
 
 
 @pytest.mark.parametrize("variable", [None, "true"])

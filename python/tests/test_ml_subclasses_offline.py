@@ -151,6 +151,43 @@ class _PicklableSubclass(_cls("classification", "LogisticRegression")):
     """A subclass that `pickle` finds by its module and name."""
 
 
+def test_the_modules_have_pysparks_readers_and_writers_of_the_python_format():
+    # PySpark's own classes, which its modules have and their `__all__` does not name.
+    import importlib
+
+    helpers = {
+        "pipeline": [
+            "PipelineReader",
+            "PipelineWriter",
+            "PipelineModelReader",
+            "PipelineModelWriter",
+            "PipelineSharedReadWrite",
+        ],
+        "tuning": [
+            "CrossValidatorReader",
+            "CrossValidatorWriter",
+            "CrossValidatorModelReader",
+            "CrossValidatorModelWriter",
+            "TrainValidationSplitReader",
+            "TrainValidationSplitWriter",
+            "TrainValidationSplitModelReader",
+            "TrainValidationSplitModelWriter",
+        ],
+        "classification": [
+            "OneVsRestReader",
+            "OneVsRestWriter",
+            "OneVsRestModelReader",
+            "OneVsRestModelWriter",
+        ],
+    }
+    for module, names in helpers.items():
+        ours = importlib.import_module(f"pyspark.ml.connect.{module}")
+        pysparks = importlib.import_module(f"pyspark.ml.{module}")
+        for name in names:
+            assert getattr(ours, name) is getattr(pysparks, name), (module, name)
+            assert name not in getattr(ours, "__all__", []), (module, name)
+
+
 def test_copy_deepcopy_and_pickle_of_an_estimator_an_evaluator_and_a_pipeline():
     # PySpark's objects copy, copy deep and pickle of their attributes: `copy.copy` shares them
     # (and a Pipeline's stages), `copy.deepcopy` and `pickle` copy them.
@@ -343,3 +380,65 @@ def test_the_summaries_of_the_models_are_the_native_ones():
     for name in ["LinearSVCModel", "MultilayerPerceptronClassificationModel", "FMClassificationModel"]:
         public = _cls("classification", name)
         assert public.summary is not getattr(reference, name).summary, name
+
+
+_SUMMARY_MODULES = {
+    "classification": [
+        "BinaryLogisticRegressionSummary",
+        "BinaryLogisticRegressionTrainingSummary",
+        "BinaryRandomForestClassificationSummary",
+        "BinaryRandomForestClassificationTrainingSummary",
+        "FMClassificationSummary",
+        "FMClassificationTrainingSummary",
+        "LinearSVCSummary",
+        "LinearSVCTrainingSummary",
+        "LogisticRegressionSummary",
+        "LogisticRegressionTrainingSummary",
+        "MultilayerPerceptronClassificationSummary",
+        "MultilayerPerceptronClassificationTrainingSummary",
+        "RandomForestClassificationSummary",
+        "RandomForestClassificationTrainingSummary",
+    ],
+    "regression": [
+        "GeneralizedLinearRegressionSummary",
+        "GeneralizedLinearRegressionTrainingSummary",
+        "LinearRegressionSummary",
+        "LinearRegressionTrainingSummary",
+    ],
+    "clustering": ["BisectingKMeansSummary", "GaussianMixtureSummary", "KMeansSummary"],
+}
+
+
+def test_the_summaries_are_subclasses_of_the_summaries_of_pysparks_bases_of_their_module():
+    # Of PySpark's metaclass (`type`), and a subclass of the public class of each summary of the
+    # module that PySpark's class is a subclass of, as a class of its MRO, not a virtual one: a
+    # training summary of its summary, and the BinaryLogisticRegressionTrainingSummary of both the
+    # BinaryLogisticRegressionSummary and the LogisticRegressionTrainingSummary.
+    import importlib
+
+    for module, names in _SUMMARY_MODULES.items():
+        reference = importlib.import_module(f"pyspark.ml.{module}")
+        for name in names:
+            public, pysparks = _cls(module, name), getattr(reference, name)
+            assert type(public) is type(pysparks) is type, name
+            for base in pysparks.__mro__[1:]:
+                if base.__module__ == reference.__name__ and base.__name__ in names:
+                    assert _cls(module, base.__name__) in public.__mro__, (name, base.__name__)
+
+
+def test_a_summary_constructs_as_pysparks_java_wrapper():
+    # PySpark's `JavaWrapper.__init__(java_obj=None)`, and its errors of a call that does not bind;
+    # of no active session, a member raises PySpark's AssertionError of `try_remote_call`.
+    import re
+
+    Summary = _cls("classification", "LinearSVCTrainingSummary")
+    assert type(Summary()) is Summary and type(Summary(java_obj=None)) is Summary
+    message = "JavaWrapper.__init__() takes from 1 to 2 positional arguments but 3 were given"
+    with pytest.raises(TypeError, match=f"^{re.escape(message)}$"):
+        Summary(None, 1)
+    with pytest.raises(TypeError, match=re.escape(_unexpected("JavaWrapper.__init__", "x"))):
+        Summary(x=1)
+    with pytest.raises(AssertionError):
+        Summary().accuracy
+    with pytest.raises(AttributeError, match="^'LinearSVCTrainingSummary' object has no attribute 'foo'$"):
+        Summary().foo

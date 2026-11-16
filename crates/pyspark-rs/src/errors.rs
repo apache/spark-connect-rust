@@ -55,6 +55,7 @@ fn kind_to_pyspark_class_name(kind: SparkErrorKind) -> &'static str {
         // PySpark builtin-like errors (these also subclass the Python builtins)
         SparkErrorKind::BuiltinTypeError => "TypeError",
         SparkErrorKind::BuiltinOverflowError => "OverflowError",
+        SparkErrorKind::BuiltinRuntimeError => "RuntimeError",
         SparkErrorKind::ValueError => "PySparkValueError",
         SparkErrorKind::BuiltinValueError => "ValueError",
         SparkErrorKind::TypeError => "PySparkTypeError",
@@ -342,6 +343,10 @@ pub fn spark_error_to_py_exception(err: SparkError) -> PyErr {
     if err.kind == SparkErrorKind::BuiltinOverflowError {
         // A builtin, as the protobuf of a plan's int argument raises it.
         return exceptions::PyOverflowError::new_err(err.message());
+    }
+    if err.kind == SparkErrorKind::BuiltinRuntimeError {
+        // A builtin, as the thread pool of PySpark's releases raises it at interpreter shutdown.
+        return exceptions::PyRuntimeError::new_err(err.message());
     }
     if let Some(value) = err.invalid_utf8_value() {
         return unicode_decode_error(&value, &err);

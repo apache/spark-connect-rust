@@ -432,7 +432,7 @@ macro_rules! lda_model {
             }
 
             fn write(slf: &Bound<'_, Self>) -> PyResult<Py<object::PyMLWriter>> {
-                let writer = slf.as_super().try_borrow()?.core.writer(slf.py())?;
+                let writer = slf.as_super().try_borrow()?.core.writer(slf.py())?.with_instance(slf.as_any());
                 object::new_py(slf.py(), writer)
             }
 

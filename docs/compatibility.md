@@ -281,7 +281,8 @@ PySpark class has them:
   transform, an evaluation, a writer, a model's members), and so are those of the objects that it
   holds (an OneVsRest's classifier, a Pipeline's stages, a validator's estimator, evaluator and the
   values of its grids, a PipelineModel's stages, an OneVsRestModel's models, a validator model's
-  best and sub-models). A writer takes them at `write()`, where PySpark's reads them at its `save`.
+  best and sub-models). A writer reads them at its `save`, as PySpark's `RemoteMLWriter` reads
+  those of its `_instance`.
   The maps of an object that this client makes (of a fit, a load, a native copy) are made of the
   native object's values at their first read. The native members have PySpark's docstrings and
   signatures. The Param objects are PySpark's own `pyspark.ml.param.Param`, of the docs,
@@ -294,10 +295,16 @@ PySpark class has them:
   of PySpark's class: `MLWritable`, `MLReadable` and `Identifiable`, `HasTrainingSummary` and the
   summary bases, the param mixins (`HasMaxIter`), `PredictionModel` and `ClassificationModel`,
   PySpark's Java wrappers, and PySpark's class itself. Every object that this client makes (of a
-  fit, a load, a copy, a summary) is of that class, and a class of the same module that is a base
-  of PySpark's class (`LinearSVCSummary` of `LinearSVCTrainingSummary`) has it as a virtual
-  subclass. So `isinstance(LinearSVCModel(), MLWritable)` holds, and a Pipeline of `pyspark.ml`
-  fits and saves native stages. The Param of a class (`LinearSVC.maxIter`) is PySpark's, of
+  fit, a load, a copy, a summary) is of that class, which is a subclass of the class of the same
+  module of each base of PySpark's class of the module (`LinearSVCSummary` of
+  `LinearSVCTrainingSummary`, and both `BinaryLogisticRegressionSummary` and
+  `LogisticRegressionTrainingSummary` of `BinaryLogisticRegressionTrainingSummary`), of PySpark's
+  metaclass (`type` of the summaries). So `isinstance(LinearSVCModel(), MLWritable)` holds, and a
+  Pipeline of `pyspark.ml` fits and saves native stages. A summary constructs as PySpark's
+  `JavaWrapper.__init__(java_obj=None)`, with its errors of a call that does not bind, and its
+  members read the `java_obj` as PySpark's `_extract_id_methods`: the id of an object of the ML
+  cache and its methods (`"<id>.summary"`) of a string, over the active session, and PySpark's
+  `AttributeError: 'NoneType' object has no attribute 'split'` of a summary of no object. The Param of a class (`LinearSVC.maxIter`) is PySpark's, of
   the parent `undefined`, so `ParamGridBuilder().addGrid(LinearSVC.maxIter, ...)` builds.
   `MLWriter`s and `MLReader`s are `RemoteMLWriter` and `RemoteMLReader`, as over Spark Connect, of
   the attributes `shouldOverwrite` and `optionMap`, and the AttributeError of a missing attribute
@@ -1103,6 +1110,14 @@ long as those retries. A stopped session sends nothing at exit.
 `SPARK_CONNECT_RELEASE_SESSION_ON_EXIT` is read when a session is made, as PySpark reads it:
 when it is `true` or `1`, the session is then also released and closed at exit, after the
 cleanup.
+
+PySpark's client sends the `ReleaseExecute` requests of an execution through a
+`ThreadPoolExecutor`, which refuses new work once the interpreter has begun to shut down. The
+drop-in refuses them from the same point. An execution after it, such as a `collect()` in an
+`atexit` handler, raises `RuntimeError: cannot schedule new futures after interpreter shutdown`
+after its first response and sends no `ReleaseExecute`, as in PySpark. The exit's `clean_cache`
+ends the same way, and its error is ignored. Requests that are not executions, such as the
+`AnalyzePlan` of a schema, still work then.
 
 The `TypeError` for too many positional arguments counts them without `self`: where CPython says
 "takes from 2 to 4 positional arguments but 5 were given", the drop-in says "takes from 1 to 3

@@ -120,35 +120,14 @@ native_summary! {
 native_summary! {
     PyMultilayerPerceptronClassificationTrainingSummary =
         "MultilayerPerceptronClassificationTrainingSummary"
-        in "pyspark.ml.connect.classification";
+        in "pyspark.ml.connect.classification"
+        extends PyMultilayerPerceptronClassificationSummary;
     properties: [
-        "accuracy" => (accuracy, "accuracy"),
-        "falsePositiveRateByLabel" => (false_positive_rate_by_label, "falsePositiveRateByLabel"),
-        "labelCol" => (label_col, "labelCol"),
-        "labels" => (labels, "labels"),
         "objectiveHistory" => (objective_history, "objectiveHistory"),
-        "precisionByLabel" => (precision_by_label, "precisionByLabel"),
-        "predictionCol" => (prediction_col, "predictionCol"),
-        "recallByLabel" => (recall_by_label, "recallByLabel"),
         "totalIterations" => (total_iterations, "totalIterations"),
-        "truePositiveRateByLabel" => (true_positive_rate_by_label, "truePositiveRateByLabel"),
-        "weightCol" => (weight_col, "weightCol"),
-        "weightedFalsePositiveRate" => (weighted_false_positive_rate, "weightedFalsePositiveRate"),
-        "weightedPrecision" => (weighted_precision, "weightedPrecision"),
-        "weightedRecall" => (weighted_recall, "weightedRecall"),
-        "weightedTruePositiveRate" => (weighted_true_positive_rate, "weightedTruePositiveRate"),
     ];
-    methods: [
-        "fMeasureByLabel" => (
-            f_measure_by_label, "fMeasureByLabel", (beta = 1.0), "($self, beta=1.0)"
-        ),
-        "weightedFMeasure" => (
-            weighted_f_measure, "weightedFMeasure", (beta = 1.0), "($self, beta=1.0)"
-        ),
-    ];
-    relations: [
-        "predictions" => (predictions, "predictions"),
-    ];
+    methods: [];
+    relations: [];
     relation_methods: [];
 }
 
