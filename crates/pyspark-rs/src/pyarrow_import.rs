@@ -37,11 +37,15 @@ pub(crate) fn table_batches(table: &Bound<'_, PyAny>) -> PyResult<Vec<RecordBatc
     Ok(batches)
 }
 
+/// A DataFrame of the pyarrow Table `table`. `options` are the settings that the caller's
+/// createDataFrame read already, as PySpark reads them once before it converts any data; without
+/// them, a table that is not empty reads them here.
 pub(crate) fn create_dataframe(
     py: Python<'_>,
     session: &SparkSession,
     table: &Bound<'_, PyAny>,
     schema: Option<&Bound<'_, PyAny>>,
+    options: Option<&spark_connect::ArrowInputOptions>,
 ) -> PyResult<PyDataFrame> {
     let helper = py.import("pyspark.sql._arrow_input")?;
     // Resolve DDL with the same converter as the existing local-data path.
@@ -56,12 +60,12 @@ pub(crate) fn create_dataframe(
     let schema = schema.unwrap_or_else(|| py.None());
     // Empty input needs only the explicit schema, and no server configuration.
     let empty: bool = table.call_method0("__len__")?.extract::<usize>()? == 0;
-    let options = if empty {
-        None
-    } else {
-        Some(crate::interrupt::interruptible(py, session, || {
+    let options = match (empty, options) {
+        (true, _) => None,
+        (false, Some(options)) => Some(options.clone()),
+        (false, None) => Some(crate::interrupt::interruptible(py, session, || {
             session.arrow_input_options()
-        })?)
+        })?),
     };
     let result = helper.getattr("prepare_table")?.call1((
         table,

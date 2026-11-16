@@ -544,6 +544,10 @@ def serve(connection):
             "spark.sql.session.localRelationChunkSizeRows": "10000",
             "spark.sql.session.localRelationChunkSizeBytes": "16777216",
             "spark.sql.session.localRelationBatchOfChunksSizeBytes": "1073741824",
+            # And those of the inference of local data, which createDataFrame reads with them.
+            "spark.sql.pyspark.inferNestedDictAsStruct.enabled": "false",
+            "spark.sql.pyspark.legacy.inferArrayTypeFromFirstElement.enabled": "false",
+            "spark.sql.pyspark.legacy.inferMapTypeFromFirstPair.enabled": "false",
         }
         read_confs = []
         config_requests = []

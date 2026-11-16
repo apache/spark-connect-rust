@@ -17002,7 +17002,8 @@ with session() as (spark, payload):
 
 def test_decimal_public_pure_python_alias_native_pandas_uses_float():
     # Type caches are process-local: set the public alias before the extension is loaded,
-    # while leaving the C accelerator available. Inspect the inline IPC without an RPC.
+    # while leaving the C accelerator available. Inspect the inline IPC without an execution;
+    # the mock server answers the settings that createDataFrame reads first, as PySpark's.
     # This pins "Decimal class rebinding" in dev/parity/known-differences.md; update the
     # expected lossy values if pure-Python alias values become recognized as Decimals.
     import subprocess
@@ -17033,7 +17034,7 @@ class RowPathFrame(pd.DataFrame):
 
 values = [_pydecimal.Decimal("1.0000000000000000000001"), None,
           _pydecimal.Decimal("9007199254740993")]
-spark = SparkSession.builder.remote("sc://localhost:1").create()
+spark = SparkSession.builder.remote(sys.argv[2]).create()
 for schema in (None, ["v"]):
     frame = RowPathFrame({"v": values}, dtype=object)
     relation = parse_message(spark.createDataFrame(frame, schema)._relation_bytes())
@@ -17045,15 +17046,16 @@ for schema in (None, ["v"]):
     actual.validate(full=True)
     assert actual.schema == expected.schema
     assert actual.equals(expected)
-# The session is closed without its release: no server listens at its port to release it on.
-spark.release_session_on_close = False
 spark.stop()
 '''
+    pytest.importorskip("grpc")
     try:
-        result = subprocess.run(
-            [sys.executable, "-c", script, str(Path(__file__).resolve().parent)],
-            capture_output=True, text=True, timeout=60,
-        )
+        with mock_connect_session() as (_, service):
+            result = subprocess.run(
+                [sys.executable, "-c", script, str(Path(__file__).resolve().parent),
+                 service.remote],
+                capture_output=True, text=True, timeout=60,
+            )
     except subprocess.TimeoutExpired as error:
         output = []
         for name, value in (("stdout", error.stdout), ("stderr", error.stderr)):

@@ -990,7 +990,7 @@ def test_arrow_input_schema_handoff(protocol, cached, explicit):
         assert frame.toArrow().column(0).to_pylist() == [2]
         assert state["result"] == (2, 1, 2)
         assert state["arrow_schemas"] == [table.schema]
-        assert state["config_requests"] == [("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS)]
+        assert state["config_requests"] == [("get", _CREATE_DATAFRAME_KEYS)]
         relation = state["relations"][0]
         if cached:
             local = relation.chunked_cached_local_relation
@@ -1181,6 +1181,19 @@ _UPLOAD_KEYS = [
     "spark.sql.session.localRelationChunkSizeBytes",
     "spark.sql.session.localRelationBatchOfChunksSizeBytes",
 ]
+# The settings that PySpark 4.3.0's createDataFrame reads, in one Config get, in its order: those
+# above and those of its other conversions, before it converts any data that is not empty.
+_CREATE_DATAFRAME_KEYS = [
+    "spark.sql.timestampType",
+    "spark.sql.session.timeZone",
+    *_UPLOAD_KEYS,
+    "spark.sql.execution.pandas.convertToArrowArraySafely",
+    "spark.sql.execution.pandas.inferPandasDictAsMap",
+    "spark.sql.pyspark.inferNestedDictAsStruct.enabled",
+    "spark.sql.pyspark.legacy.inferArrayTypeFromFirstElement.enabled",
+    "spark.sql.pyspark.legacy.inferMapTypeFromFirstPair.enabled",
+    "spark.sql.execution.arrow.useLargeVarTypes",
+]
 _BINARY_RESULT_CONFIG = ("get_with_default", ["spark.sql.execution.pyspark.binaryAsBytes"])
 
 
@@ -1196,10 +1209,10 @@ def test_arrow_input_batched_normalization_configs(protocol, timestamp_type, zon
         _NORMALIZATION_KEYS, [timestamp_type, zone, large]
     ))) as (spark, state):
         frame = spark.createDataFrame(table)
-        assert state["config_requests"] == [("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS)]
+        assert state["config_requests"] == [("get", _CREATE_DATAFRAME_KEYS)]
         frame.collect()
         assert state["config_requests"] == [
-            ("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS), _BINARY_RESULT_CONFIG]
+            ("get", _CREATE_DATAFRAME_KEYS), _BINARY_RESULT_CONFIG]
         expected_time = (value if timestamp_type == "TIMESTAMP_NTZ" else
                          value.replace(tzinfo=ZoneInfo(zone)).astimezone(timezone.utc))
         expected = pa.table({
@@ -1228,7 +1241,7 @@ def test_arrow_input_missing_config(protocol, missing, present_null):
         # The current Arrow settings snapshot requires every server setting.
         with pytest.raises(Exception, match="SQL_CONF_NOT_FOUND"):
             spark.createDataFrame(pa.table({"x": [1, None], "s": ["hello", None]}))
-        assert state["config_requests"] == [("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS)]
+        assert state["config_requests"] == [("get", _CREATE_DATAFRAME_KEYS)]
         pairs = {pair.key: pair for pair in state["config_responses"][0].pairs}
         if present_null:
             assert missing in pairs
@@ -1245,12 +1258,12 @@ def test_arrow_input_normalization_config_failure_then_fresh_read(protocol):
         table = pa.table({"x": [1]})
         with pytest.raises(Exception, match="configuration read failed"):
             spark.createDataFrame(table)
-        assert state["config_requests"] == [("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS)]
+        assert state["config_requests"] == [("get", _CREATE_DATAFRAME_KEYS)]
         assert state["uploads"] == 0
         spark.createDataFrame(table).collect()
         assert state["config_requests"] == [
-            ("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS),
-            ("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS), _BINARY_RESULT_CONFIG]
+            ("get", _CREATE_DATAFRAME_KEYS),
+            ("get", _CREATE_DATAFRAME_KEYS), _BINARY_RESULT_CONFIG]
         assert state["input_tables"][0].to_pydict() == {"x": [1]}
 
 
@@ -1259,8 +1272,8 @@ def test_arrow_input_normalization_config_transient_retry(protocol):
         state["config_error"] = grpc.StatusCode.UNAVAILABLE
         spark.createDataFrame(pa.table({"x": [1]})).collect()
         assert state["config_requests"] == [
-            ("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS),
-            ("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS), _BINARY_RESULT_CONFIG]
+            ("get", _CREATE_DATAFRAME_KEYS),
+            ("get", _CREATE_DATAFRAME_KEYS), _BINARY_RESULT_CONFIG]
         assert state["input_tables"][0].to_pydict() == {"x": [1]}
 
 
@@ -1276,7 +1289,7 @@ def test_arrow_input_normalization_configs_are_fresh(protocol):
             "TIMESTAMP_LTZ", "America/Los_Angeles", "false"])))
         spark.createDataFrame(table).collect()
         assert state["config_requests"] == [
-            ("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS), _BINARY_RESULT_CONFIG] * 3
+            ("get", _CREATE_DATAFRAME_KEYS), _BINARY_RESULT_CONFIG] * 3
         tables = state["input_tables"]
         assert [t.column("t")[0].as_py() for t in tables] == [
             value.replace(tzinfo=timezone.utc), value,
@@ -1318,7 +1331,8 @@ def test_non_arrow_input_does_not_import_pyarrow(protocol, monkeypatch, data):
         monkeypatch.setattr(builtins, "__import__", import_module)
         spark.createDataFrame(data)
         assert imported == []
-        assert state["config_requests"] == []
+        # The settings are read, as PySpark's createDataFrame reads them, without pyarrow.
+        assert state["config_requests"] == [("get", _CREATE_DATAFRAME_KEYS)]
 
 
 def test_add_artifacts_names_each_artifact_as_pyspark(protocol, tmp_path, monkeypatch):
@@ -1831,7 +1845,7 @@ def test_non_nullable_schema_is_preserved(protocol, verify, config_error):
             with pytest.raises(ValueError) as error:
                 spark.createDataFrame(frame, schema, verifySchema=verify)
             assert str(error.value) == "Casting field 'a' with null values to non-nullable"
-        assert state["config_requests"][0] == ("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS)
+        assert state["config_requests"][0] == ("get", _CREATE_DATAFRAME_KEYS)
         assert not state["relations"]
         assert not state["uploads"]
 
@@ -1901,7 +1915,7 @@ def test_integer_explicit_renamed_schema_preserves_all_ipc_cells(protocol, monke
                 from_arrow_schema(table.schema).json(), schema.json(), table.schema)
             assert state["config_requests"]
         else:
-            assert state["config_requests"][:1] == [("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS)]
+            assert state["config_requests"][:1] == [("get", _CREATE_DATAFRAME_KEYS)]
 
 
 def test_integer_dataframe_and_name_subclasses_keep_fallback(monkeypatch):
@@ -2537,7 +2551,7 @@ def test_timestamp_nonnullable_nat_reads_config_before_cast_error(protocol, conf
                 spark.createDataFrame(frame, schema, verifySchema=verify)
             assert str(error.value) == (
                 "Casting field 'renamed' with null values to non-nullable")
-        assert state["config_requests"][0] == ("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS)
+        assert state["config_requests"][0] == ("get", _CREATE_DATAFRAME_KEYS)
         assert state["relations"] == []
         assert state["uploads"] == 0
 
@@ -3155,7 +3169,7 @@ def test_float64_columns_preserve_every_ipc_cell(protocol, monkeypatch, cached, 
         _assert_float64_ipc(state["input_tables"][0], columns, schema)
         # The relation is 2.4 MB of Arrow data: the settings are read, and it is uploaded at the
         # threshold of 1 byte, or sent inline below the default threshold.
-        assert state["config_requests"] == [("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS)]
+        assert state["config_requests"] == [("get", _CREATE_DATAFRAME_KEYS)]
         assert bool(state["uploads"]) == cached
 
 
@@ -3184,7 +3198,7 @@ def test_float64_columnar_ipc_matches_existing_row_conversion(protocol, monkeypa
         # The Arrow conversion of the second call carries the field metadata in its table
         # and reads the configuration first, as official; the values and types are the same.
         assert state["input_tables"][0].equals(state["input_tables"][1], check_metadata=False)
-        assert state["config_requests"][:1] == [("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS)]
+        assert state["config_requests"][:1] == [("get", _CREATE_DATAFRAME_KEYS)]
         assert state["uploads"] == 0
         assert [json.loads(relation.local_relation.schema) for relation in state["relations"]] == [
             json.loads(schema.json()), json.loads(schema.json())
@@ -3210,7 +3224,7 @@ def test_float64_pandas_infinity_missing_option_keeps_row_semantics(protocol, nu
                     spark.createDataFrame(frame, schema)
                 assert str(error.value) == "Casting field 'x' with null values to non-nullable"
                 assert state["config_requests"][:1] == [
-                    ("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS)]
+                    ("get", _CREATE_DATAFRAME_KEYS)]
                 assert state["uploads"] == 0
                 return
             spark.createDataFrame(frame, schema).toArrow()
@@ -3335,7 +3349,7 @@ def test_float64_public_fallback_preserves_every_ipc_cell(protocol, reason):
         spark.createDataFrame(frame, schema).toArrow()
         # The 800 KB of Arrow data are at least 64 KiB, so the settings are read first, as
         # the Arrow importer reads them, whichever path converts the frame.
-        assert state["config_requests"][:1] == [("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS)]
+        assert state["config_requests"][:1] == [("get", _CREATE_DATAFRAME_KEYS)]
         _assert_float64_ipc(state["input_tables"][0], columns, expected_schema)
 
 
@@ -3349,7 +3363,7 @@ def test_float64_nonnullable_nan_reads_config_before_cast_error(protocol, verify
         # Official reads the configuration first, so its error precedes the cast.
         with pytest.raises(Exception, match="configuration read failed"):
             spark.createDataFrame(frame, schema, verifySchema=verify)
-        assert state["config_requests"][0] == ("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS)
+        assert state["config_requests"][0] == ("get", _CREATE_DATAFRAME_KEYS)
         assert state["relations"] == []
         assert state["uploads"] == 0
         # Then the cast fails as official does, with a ValueError.
@@ -3629,7 +3643,7 @@ def test_float64_instance_conversion_hooks_keep_row_fallback(protocol, method):
     with _arrow_input_service(protocol) as (spark, state):
         spark.createDataFrame(frame, schema).toArrow()
         assert calls == [method]
-        assert state["config_requests"] == [("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS)]
+        assert state["config_requests"] == [("get", _CREATE_DATAFRAME_KEYS)]
         _assert_float64_ipc(state["input_tables"][0], [expected], schema, missing=[missing])
 
 
@@ -3686,7 +3700,7 @@ def test_float64_class_conversion_hooks_keep_row_fallback(
     with _arrow_input_service(protocol) as (spark, state):
         spark.createDataFrame(frame, schema).toArrow()
         assert calls == [method]
-        assert state["config_requests"] == [("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS)]
+        assert state["config_requests"] == [("get", _CREATE_DATAFRAME_KEYS)]
         _assert_float64_ipc(state["input_tables"][0], [expected], schema, missing=[missing])
 
 
@@ -3806,7 +3820,7 @@ def test_float64_public_threshold_reads_config_below_100k(protocol, rows):
             # relation of at least 64 KiB, and sends the relation inline below the threshold.
             spark.createDataFrame(frame, schema).toArrow()
             _assert_float64_ipc(state["input_tables"][0], [values], schema)
-            assert state["config_requests"] == [("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS)]
+            assert state["config_requests"] == [("get", _CREATE_DATAFRAME_KEYS)]
             assert state["uploads"] == 0
             return
         state["config_error"] = grpc.StatusCode.INVALID_ARGUMENT
@@ -3817,7 +3831,7 @@ def test_float64_public_threshold_reads_config_below_100k(protocol, rows):
         _assert_float64_ipc(state["input_tables"][0], [values], schema)
         assert json.loads(state["relations"][0].local_relation.schema) == json.loads(schema.json())
         assert state["uploads"] == 0
-        assert state["config_requests"][0] == ("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS)
+        assert state["config_requests"][0] == ("get", _CREATE_DATAFRAME_KEYS)
 
 
 
@@ -3850,7 +3864,7 @@ def _assert_float64_columns_guard_payload(state, schema, values):
     _assert_float64_ipc(state["input_tables"][0], values, schema)
     assert json.loads(state["relations"][0].local_relation.schema) == json.loads(schema.json())
     # The relation is at least 64 KiB, so the settings are read, and it is sent inline.
-    assert state["config_requests"] == [("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS)]
+    assert state["config_requests"] == [("get", _CREATE_DATAFRAME_KEYS)]
     assert state["uploads"] == 0
 
 
@@ -4067,7 +4081,7 @@ def test_float64_rebound_index_data_keeps_native_read_order(protocol, monkeypatc
         assert calls.count("_data") <= allowed_reads
         import json
 
-        assert state["config_requests"] == [("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS)] * 2
+        assert state["config_requests"] == [("get", _CREATE_DATAFRAME_KEYS)] * 2
         assert state["uploads"] == 0
         assert len(state["input_tables"]) == 2
         assert len(state["relations"]) == 2
@@ -4226,7 +4240,7 @@ def test_string_columns_iterator_hooks_keep_native_order(
             assert table.schema.equals(pa.schema([pa.field("renamed", pa.string())]),
                                        check_metadata=True)
             assert json.loads(state["relations"][0].local_relation.schema) == json.loads(schema.json())
-            assert state["config_requests"] == [("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS)]
+            assert state["config_requests"] == [("get", _CREATE_DATAFRAME_KEYS)]
             assert state["uploads"] == 0
             assert calls == ["columns iterator", "notna", "astype"]
 
@@ -4328,7 +4342,7 @@ def test_string_rebound_index_data_keeps_native_read_order(protocol, monkeypatch
         # row conversion of the same frame can read them fewer times than the first.
         assert "notna" in calls
         assert calls.count("_data") <= allowed_reads
-        assert state["config_requests"] == [("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS)] * 2
+        assert state["config_requests"] == [("get", _CREATE_DATAFRAME_KEYS)] * 2
         assert state["uploads"] == 0
         assert len(state["input_tables"]) == 2
         assert len(state["relations"]) == 2
@@ -4455,7 +4469,7 @@ def test_string_columns_preserve_every_ipc_cell(protocol, monkeypatch, cached, v
             assert spark_field["metadata"] == field.metadata
         # The relation is at least 64 KiB, so the settings are read. It is uploaded at the
         # threshold of 1 byte, and sent inline below the default threshold.
-        assert state["config_requests"] == [("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS)]
+        assert state["config_requests"] == [("get", _CREATE_DATAFRAME_KEYS)]
         assert bool(state["uploads"]) == cached
         assert state["relations"][0].HasField("chunked_cached_local_relation") == cached
 
@@ -4814,7 +4828,7 @@ def test_arrow_string_custom_arrow_hook_keeps_native_row_values(
                 tables.append(state["input_tables"][0])
                 # The converted rows are at least 64 KiB of Arrow data, so the native row
                 # path reads the local relation settings once, after the conversion.
-                assert state["config_requests"] == [("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS)]
+                assert state["config_requests"] == [("get", _CREATE_DATAFRAME_KEYS)]
                 assert state["uploads"] == 0
     assert calls == []
     assert tables[0].to_pydict() == {"first": texts, "v": texts}
@@ -4932,7 +4946,7 @@ def test_arrow_string_numpy_semantics_accessor_keeps_native_outcomes(
                 if row_control or dynamic_accessor:
                     # The native rows are at least 64 KiB of Arrow data, so the settings are
                     # read once, after the conversion.
-                    assert state["config_requests"] == [("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS)]
+                    assert state["config_requests"] == [("get", _CREATE_DATAFRAME_KEYS)]
                     assert state["uploads"] == 0
                 else:
                     assert state["config_requests"]
@@ -5239,7 +5253,8 @@ def _check_arrow_string_custom_row_hook(
                 outcomes.append((outcome, tuple(calls)))
                 # A hook that raises does so before the settings read; rows that convert are at
                 # least 64 KiB of Arrow data, so they read the settings once.
-                assert state["config_requests"] == ([] if outcome else [("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS)])
+                assert state["config_requests"] == (
+                    [] if outcome else [("get", _CREATE_DATAFRAME_KEYS)])
                 assert state["uploads"] == 0
     assert outcomes[0] == outcomes[1]
     if tables:
@@ -5504,7 +5519,7 @@ def test_arrow_string_custom_label_astype_keeps_native_row_values(protocol, monk
                 tables.append(state["input_tables"][0])
                 # The converted rows are at least 64 KiB of Arrow data, so the settings are read
                 # once, after the conversion.
-                assert state["config_requests"] == [("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS)]
+                assert state["config_requests"] == [("get", _CREATE_DATAFRAME_KEYS)]
                 assert state["uploads"] == 0
     assert calls == []
     assert tables[0].column(0).to_pylist() == texts
@@ -5570,7 +5585,8 @@ def test_arrow_string_null_labels_decline_without_getitem_callback(protocol, mon
                 # Whether the hook runs depends on the pandas version. A hook that raises does
                 # so before the settings read; rows that convert are at least 64 KiB of Arrow
                 # data, so they read the settings once.
-                assert state["config_requests"] == ([] if outcome else [("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS)])
+                assert state["config_requests"] == (
+                    [] if outcome else [("get", _CREATE_DATAFRAME_KEYS)])
                 assert state["uploads"] == 0
     assert outcomes[0] == outcomes[1]
     if tables:
@@ -5656,7 +5672,8 @@ def test_arrow_string_super_row_hooks_keep_native_errors(
                 # Whether the hook runs depends on the pandas version. A hook that raises does
                 # so before the settings read; rows that convert are at least 64 KiB of Arrow
                 # data, so they read the settings once.
-                assert state["config_requests"] == ([] if outcome else [("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS)])
+                assert state["config_requests"] == (
+                    [] if outcome else [("get", _CREATE_DATAFRAME_KEYS)])
                 assert state["uploads"] == 0
     assert outcomes[0] == outcomes[1]
     if tables:
@@ -5725,7 +5742,7 @@ def test_string_public_fallback_keeps_row_semantics(protocol, monkeypatch, reaso
         if reason in ("nan", "pd_na", "nat"):
             expected[-1] = None
         assert table.column(0).to_pylist() == expected
-        assert state["config_requests"] == [("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS)]
+        assert state["config_requests"] == [("get", _CREATE_DATAFRAME_KEYS)]
 
 
 @pytest.mark.parametrize("surrogate", ["\ud800", "\udfff"])
@@ -5945,7 +5962,7 @@ def test_string_custom_extension_dtype_cannot_impersonate_numpy_object(protocol,
         else:
             spark.createDataFrame(frame, schema).toArrow()
             assert state["input_tables"][0].column(0).to_pylist() == ["plain"] * 10000
-            assert state["config_requests"] == [("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS)]
+            assert state["config_requests"] == [("get", _CREATE_DATAFRAME_KEYS)]
     assert arrow_calls == []
 
 
@@ -5977,7 +5994,7 @@ def test_string_instance_conversion_hooks_keep_row_fallback(protocol, method):
     with _arrow_input_service(protocol) as (spark, state):
         spark.createDataFrame(frame, schema).toArrow()
         assert calls == [method]
-        assert state["config_requests"] == [("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS)]
+        assert state["config_requests"] == [("get", _CREATE_DATAFRAME_KEYS)]
         assert state["uploads"] == 0
         assert state["input_tables"][0].column(0).to_pylist() == expected
 
@@ -6013,7 +6030,7 @@ def test_string_class_conversion_hooks_keep_row_fallback(
     with _arrow_input_service(protocol) as (spark, state):
         spark.createDataFrame(frame, schema).toArrow()
         assert calls == [method]
-        assert state["config_requests"] == [("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS)]
+        assert state["config_requests"] == [("get", _CREATE_DATAFRAME_KEYS)]
         assert state["uploads"] == 0
         assert state["input_tables"][0].column(0).to_pylist() == expected
 
@@ -6032,7 +6049,7 @@ def test_string_instance_where_override_keeps_existing_row_behavior(protocol):
     assert prepare_string_input(frame, schema) is None
     with _arrow_input_service(protocol) as (spark, state):
         spark.createDataFrame(frame, schema).toArrow()
-        assert state["config_requests"] == [("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS)]
+        assert state["config_requests"] == [("get", _CREATE_DATAFRAME_KEYS)]
         assert state["input_tables"][0].column(0).to_pylist() == ["plain"] * 10000
 
 
@@ -6047,7 +6064,7 @@ def test_string_native_backing_does_not_add_series_conversion_hooks(protocol, mo
     monkeypatch.setattr(pd.Series, "to_numpy", customized)
     with _arrow_input_service(protocol) as (spark, state):
         spark.createDataFrame(frame, schema).toArrow()
-        assert state["config_requests"] == [("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS)]
+        assert state["config_requests"] == [("get", _CREATE_DATAFRAME_KEYS)]
         assert state["input_tables"][0].column(0).to_pylist() == ["plain"] * 10000
 
 
@@ -6068,7 +6085,7 @@ def test_string_large_inline_input_keeps_row_transport_and_schema(protocol):
         result.toArrow()
         assert state["column_names"] == schema.names
         # The relation is 2 MB of Arrow data, so the settings are read; it is sent inline.
-        assert state["config_requests"] == [("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS)]
+        assert state["config_requests"] == [("get", _CREATE_DATAFRAME_KEYS)]
         assert state["uploads"] == 0
         table = state["input_tables"][0]
         assert table.schema.names == ["renamed"]
@@ -6943,7 +6960,7 @@ def _assert_date_columns_guard_payload(state, schema, expected, *, row_path):
     }
     # The 120 KB of Arrow data are at least 64 KiB, so both paths read the settings, and the
     # relation is sent inline below the default threshold.
-    assert state["config_requests"] == [("get", _NORMALIZATION_KEYS + _UPLOAD_KEYS)]
+    assert state["config_requests"] == [("get", _CREATE_DATAFRAME_KEYS)]
 
 
 @pytest.mark.parametrize("native_rows", [False, True])

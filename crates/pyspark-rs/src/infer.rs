@@ -4,7 +4,6 @@
 //! which Spark Connect converts local data. The checks run in PySpark's order and raise its
 //! errors, so that the same data gives the same schema, values and errors.
 
-use std::cell::OnceCell;
 use std::collections::{HashMap, HashSet};
 
 use pyo3::exceptions::{
@@ -18,7 +17,6 @@ use pyo3::types::{
     PyMemoryView, PySet, PyString, PyTuple, PyType,
 };
 use spark_connect::row::{StructValue, Value};
-use spark_connect::session::SparkSession;
 use spark_connect::types::{DataType, GeographyType, GeometryType, StructField};
 
 use crate::column::raise_pyspark;
@@ -233,43 +231,26 @@ struct Confs {
     prefer_timestamp_ntz: bool,
 }
 
-/// The configurations, read from the server, in one request, the first time that inference
-/// needs one. Only dicts, lists of more than one element and naive datetimes depend on them,
-/// so other data is inferred without a request, as without a server.
-pub(crate) struct LazyConfs {
-    session: SparkSession,
-    confs: OnceCell<Confs>,
+/// The configurations of inference, of the settings that PySpark's `createDataFrame` reads with
+/// the others of its conversions, in one request, before it converts any data.
+pub(crate) struct InferenceConfs {
+    confs: Confs,
 }
 
-impl LazyConfs {
-    pub(crate) fn new(session: SparkSession) -> Self {
-        LazyConfs {
-            session,
-            confs: OnceCell::new(),
+impl InferenceConfs {
+    pub(crate) fn of_options(options: &spark_connect::ArrowInputOptions) -> Self {
+        InferenceConfs {
+            confs: Confs {
+                dict_as_struct: options.infer_dict_as_struct(),
+                array_from_first_element: options.infer_array_from_first_element(),
+                map_from_first_pair: options.infer_map_from_first_pair(),
+                prefer_timestamp_ntz: options.timestamp_type() == Some("TIMESTAMP_NTZ"),
+            },
         }
     }
 
-    fn get(&self, py: Python<'_>) -> PyResult<&Confs> {
-        if let Some(confs) = self.confs.get() {
-            return Ok(confs);
-        }
-        let keys = [
-            "spark.sql.pyspark.inferNestedDictAsStruct.enabled",
-            "spark.sql.pyspark.legacy.inferArrayTypeFromFirstElement.enabled",
-            "spark.sql.pyspark.legacy.inferMapTypeFromFirstPair.enabled",
-            "spark.sql.timestampType",
-        ];
-        let session = self.session.clone();
-        let values =
-            crate::interrupt::interruptible(py, &session, || session.conf().get_many(&keys))?;
-        let is =
-            |i: usize, expected: &str| values.get(i).and_then(|v| v.as_deref()) == Some(expected);
-        Ok(self.confs.get_or_init(|| Confs {
-            dict_as_struct: is(0, "true"),
-            array_from_first_element: is(1, "true"),
-            map_from_first_pair: is(2, "true"),
-            prefer_timestamp_ntz: is(3, "TIMESTAMP_NTZ"),
-        }))
+    fn get(&self, _py: Python<'_>) -> PyResult<&Confs> {
+        Ok(&self.confs)
     }
 }
 
@@ -289,13 +270,13 @@ enum Source {
 /// shift where PySpark passes them on.
 #[derive(Clone, Copy)]
 pub(crate) struct Options<'c> {
-    confs: &'c LazyConfs,
+    confs: &'c InferenceConfs,
     map_from_first_pair: Source,
     prefer_timestamp_ntz: Source,
 }
 
 impl<'c> Options<'c> {
-    pub(crate) fn new(confs: &'c LazyConfs) -> Self {
+    pub(crate) fn new(confs: &'c InferenceConfs) -> Self {
         Options {
             confs,
             map_from_first_pair: Source::MapFromFirstPair,
