@@ -11,7 +11,12 @@ use crate::window::window_columns;
 /// A table argument for a table-valued function, mirroring
 /// `pyspark.sql.connect.table_arg.TableArg`. Built via `df.asTable()`, then optionally
 /// `partitionBy`/`orderBy`/`withSinglePartition` (each returns a new TableArg).
-#[pyclass(name = "TableArg", module = "pyspark.sql.table_arg", weakref, dict)]
+#[pyclass(
+    name = "TableArg",
+    module = "pyspark.sql.connect.table_arg",
+    weakref,
+    dict
+)]
 pub struct PyTableArg {
     pub(crate) inner: TableArg,
 }

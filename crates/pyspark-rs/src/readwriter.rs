@@ -24,7 +24,7 @@ use crate::options::{
 /// the same Python object, and the terminal reads build their DataFrame from a clone.
 #[pyclass(
     name = "DataFrameReader",
-    module = "pyspark.sql.readwriter",
+    module = "pyspark.sql.connect.readwriter",
     weakref,
     dict
 )]

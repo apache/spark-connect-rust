@@ -516,6 +516,9 @@ class UDFRegistration:
     Wrapper for user-defined function registration (spark.udf.register).
     """
 
+    # As PySpark Connect's `spark.udf`, of pyspark.sql.connect.udf, whose name this class has too.
+    __module__ = "pyspark.sql.connect.udf"
+
     def __init__(self, sparkSession: Any):
         self.sparkSession = sparkSession
 

@@ -1178,6 +1178,16 @@ and `pyspark.sql.connect.udtf`, which the classic names `pyspark.sql.udf.UserDef
 is True against either name, where PySpark 4.3.0 gives False for the classic name, whose class
 needs a SparkContext.
 
+So it is for the objects of a session: each is of PySpark Connect's class, of its module of
+`pyspark.sql.connect`, as `repr`, `type(x).__module__` and pickle show it, and the classic name
+names the same class. These are the SparkSession, its `catalog`, `read`, `readStream`, `streams`,
+`udf`, `udtf`, `tvf` and `client`, and a DataFrame's `write`, `writeTo`, `writeStream`,
+`mergeInto` and its clauses, `na`, `stat`, `groupBy`, `asTable` and the WindowSpec of its
+windows. So `pyspark.sql.SparkSession.__module__` is `pyspark.sql.connect.session`, where
+PySpark's is `pyspark.sql.session`. `spark.dataSource` and `GroupedData.cogroup` still give the
+classic classes, `pyspark.sql.datasource.DataSourceRegistration` and
+`pyspark.sql.pandas.group_ops.PandasCogroupedOps`.
+
 A `copy.copy` or `copy.deepcopy` of a DataFrame requests its schema as PySpark's does, one request
 for the copy, and one more for the DataFrame in a deep copy when it has no schema yet, so a stopped
 session fails the copy with `SparkConnectException`, as PySpark's does. One difference remains:

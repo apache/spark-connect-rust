@@ -236,7 +236,7 @@ impl PyFrameBound {
 /// Python wrapper for a WindowSpec.
 #[pyclass(
     name = "WindowSpec",
-    module = "pyspark.sql.window",
+    module = "pyspark.sql.connect.window",
     from_py_object,
     weakref,
     dict

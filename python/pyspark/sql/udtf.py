@@ -374,6 +374,9 @@ class UDTFRegistration:
     .. versionadded:: 3.5.0
     """
 
+    # As PySpark Connect's `spark.udtf`, of pyspark.sql.connect.udtf, whose name this class has too.
+    __module__ = "pyspark.sql.connect.udtf"
+
     def __init__(self, sparkSession: Any):
         self.sparkSession = sparkSession
 

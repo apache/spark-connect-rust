@@ -246,7 +246,7 @@ fn query_name_of(name: &Bound<'_, PyAny>) -> PyResult<String> {
 /// the setters replace the wrapped value in place and the reads work on a clone.
 #[pyclass(
     name = "DataStreamReader",
-    module = "pyspark.sql.streaming.readwriter",
+    module = "pyspark.sql.connect.streaming.readwriter",
     weakref,
     dict
 )]
@@ -1112,7 +1112,7 @@ fn trigger_of(kind: &str, value: Option<String>) -> PyResult<Trigger> {
 /// Python wrapper for DataStreamWriter.
 #[pyclass(
     name = "DataStreamWriter",
-    module = "pyspark.sql.streaming.readwriter",
+    module = "pyspark.sql.connect.streaming.readwriter",
     weakref,
     dict
 )]
@@ -1762,7 +1762,7 @@ fn streaming_function_command(
 /// Python wrapper for StreamingQuery.
 #[pyclass(
     name = "StreamingQuery",
-    module = "pyspark.sql.streaming.query",
+    module = "pyspark.sql.connect.streaming.query",
     weakref,
     dict
 )]
@@ -1939,7 +1939,7 @@ impl PyStreamingQuery {
 /// Python wrapper for StreamingQueryManager, of the listener bus of its session.
 #[pyclass(
     name = "StreamingQueryManager",
-    module = "pyspark.sql.streaming.query",
+    module = "pyspark.sql.connect.streaming.query",
     weakref,
     dict
 )]
