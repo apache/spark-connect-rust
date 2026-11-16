@@ -123,7 +123,8 @@ pub enum MlValue {
     Matrix(MlMatrix),
     Array(Vec<MlValue>),
     Map(Vec<(MlValue, MlValue)>),
-    /// A struct of its field names and values, which PySpark reads as a `Row`.
+    /// A struct of its field names and values: a struct literal that is neither a vector nor a
+    /// matrix, for which PySpark's `deserialize_param` raises `ValueError("Unknown UDT ...")`.
     Struct(Vec<(String, MlValue)>),
 }
 
