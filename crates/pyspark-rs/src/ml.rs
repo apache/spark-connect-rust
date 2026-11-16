@@ -558,40 +558,14 @@ fn snapshot<T: Native + PyClass>(slf: &Bound<'_, T>) -> PyResult<T::Core> {
     this.snapshot_core(slf.py())
 }
 
-/// Whether `dataset` is a pandas DataFrame, of an imported pandas.
-fn is_pandas(dataset: &Bound<'_, PyAny>) -> PyResult<bool> {
-    let pandas = dataset
-        .py()
-        .import("sys")?
-        .getattr("modules")?
-        .get_item("pandas")
-        .ok();
-    match pandas {
-        Some(pandas) => dataset.is_instance(&pandas.getattr("DataFrame")?),
-        None => Ok(false),
-    }
-}
-
-/// Native ML runs on Spark DataFrames. Pandas input must be converted explicitly by the caller.
-fn reject_pandas(dataset: &Bound<'_, PyAny>, method: &str) -> PyResult<()> {
-    if is_pandas(dataset)? {
-        return Err(PyTypeError::new_err(format!(
-            "{method}() requires a Spark DataFrame; pandas DataFrames are not supported. \
-             Convert the input with spark.createDataFrame(...) first."
-        )));
-    }
-    Ok(())
-}
-
-/// The dataset of `method`, a Spark DataFrame. A pandas DataFrame raises the TypeError of
-/// [`reject_pandas`]. Another object raises the `AttributeError` of `sparkSession`, the attribute
-/// that `pyspark.ml` reads of the dataset first (`try_remote_fit`, `try_remote_transform_relation`
-/// and `try_remote_evaluate` of `pyspark.ml.util`), and an object that has it raises a TypeError.
+/// The dataset of `method`, a Spark DataFrame. Another object raises the `AttributeError` of
+/// `sparkSession`, the attribute that `pyspark.ml` reads of the dataset first (`try_remote_fit`,
+/// `try_remote_transform_relation` and `try_remote_evaluate` of `pyspark.ml.util`), so a pandas
+/// DataFrame raises pandas' own AttributeError too, and an object that has it raises a TypeError.
 fn dataset_of(dataset: &Bound<'_, PyAny>, method: &str) -> PyResult<DataFrame> {
     if let Ok(df) = dataset.extract::<PyRef<'_, PyDataFrame>>() {
         return Ok(df.dataframe.clone());
     }
-    reject_pandas(dataset, method)?;
     dataset.getattr("sparkSession")?;
     Err(PyTypeError::new_err(format!(
         "{method}() takes a Spark DataFrame, not '{}'",

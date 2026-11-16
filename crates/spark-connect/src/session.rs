@@ -982,7 +982,8 @@ impl SparkSession {
                 command: Some(proto::ml_command::Command::Delete(
                     proto::ml_command::Delete {
                         obj_refs: refs,
-                        evict_only: None,
+                        // As PySpark's `_delete_ml_cache`, whose `evict_only` is False.
+                        evict_only: Some(false),
                     },
                 )),
             })),

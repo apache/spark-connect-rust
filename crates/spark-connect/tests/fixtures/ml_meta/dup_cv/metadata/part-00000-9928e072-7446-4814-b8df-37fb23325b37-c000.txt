@@ -1,0 +1,1 @@
+{"class":"pyspark.ml.tuning.CrossValidator","timestamp":1794787211769,"sparkVersion":"4.3.0","uid":"CrossValidator_d6662ee31e42","paramMap":{"collectSubModels":false,"parallelism":1,"seed":-4692315694289460503,"numFolds":3,"foldCol":"","estimatorParamMaps":[[]]},"defaultParamMap":{"collectSubModels":false,"parallelism":1,"seed":-4692315694289460503,"numFolds":3,"foldCol":""}}

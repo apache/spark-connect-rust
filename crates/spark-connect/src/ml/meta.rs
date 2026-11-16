@@ -13,7 +13,7 @@
 //! - **Persistence** is of PySpark's Python format, so that PySpark loads what this API saves and
 //!   this API loads what PySpark saves: the metadata of `DefaultParamsWriter` and each stage by its
 //!   own writer ([`Pipeline::load`], [`load_stage`]).
-use super::param_specs::{ParamConverter, MODEL_CLASSES, PARAM_CONVERTERS};
+use super::param_specs::{ParamConverter, MODEL_CLASSES, PARAM_CONVERTERS, PARAM_DOCS};
 use super::stage_kinds::STAGE_KINDS;
 use super::*;
 use spark_connect_core::error::Result;
@@ -193,6 +193,16 @@ fn class_known(class: &str) -> bool {
         .any(|(name, _)| *name == simple_name(class))
 }
 
+/// The doc of the param `name` of the class of the simple name `class`, as PySpark's `Param.doc`
+/// of the class, if the table has the param.
+pub(super) fn param_doc(class: &str, name: &str) -> Option<&'static str> {
+    let (_, params) = PARAM_DOCS.iter().find(|(simple, _)| *simple == class)?;
+    params
+        .iter()
+        .find(|(param, _)| *param == name)
+        .map(|(_, doc)| *doc)
+}
+
 /// The type converter of the param `name` of the class `class`, if the table has the param.
 pub(super) fn param_converter(class: &str, name: &str) -> Option<ParamConverter> {
     let (_, params) = PARAM_CONVERTERS
@@ -342,6 +352,36 @@ fn py_type(value: &MlValue) -> &'static str {
     }
 }
 
+/// The Python `repr` of the str `text`: in single quotes, or in double quotes when it has a single
+/// quote and no double one, with the backslashes, the quote and the control characters escaped.
+pub(super) fn python_str_repr(text: &str) -> String {
+    let quote = if text.contains('\'') && !text.contains('"') {
+        '"'
+    } else {
+        '\''
+    };
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push(quote);
+    for c in text.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c == quote => {
+                out.push('\\');
+                out.push(c);
+            }
+            c if (c as u32) < 0x20 || c as u32 == 0x7f => {
+                out.push_str(&format!("\\x{:02x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push(quote);
+    out
+}
+
 /// The Python `str` of a value, as PySpark's messages show it (a list as its `repr`).
 fn py_str(value: &MlValue) -> String {
     match value {
@@ -350,15 +390,15 @@ fn py_str(value: &MlValue) -> String {
         MlValue::Bool(false) => "False".to_string(),
         MlValue::Byte(v) | MlValue::Short(v) | MlValue::Int(v) => v.to_string(),
         MlValue::Long(v) => v.to_string(),
-        MlValue::Float(v) => format!("{v:?}"),
-        MlValue::Double(v) => format!("{v:?}"),
+        MlValue::Float(v) => python_float_repr(f64::from(*v)),
+        MlValue::Double(v) => python_float_repr(*v),
         MlValue::String(s) => s.clone(),
         MlValue::Array(items) => format!(
             "[{}]",
             items
                 .iter()
                 .map(|item| match item {
-                    MlValue::String(s) => format!("'{s}'"),
+                    MlValue::String(s) => python_str_repr(s),
                     other => py_str(other),
                 })
                 .collect::<Vec<_>>()
@@ -464,7 +504,9 @@ impl PipelineStage {
         Self::Estimator(Box::new(estimator))
     }
 
-    /// The stage of the transformer `transformer`, which is no model.
+    /// The stage of the transformer `transformer`, which is no model: a fitted model is a stage of
+    /// [`Self::model`], which a save writes by the model's server-side object. A fitted model given
+    /// here fails at the save, as the stage has no object to write it by.
     pub fn transformer(transformer: impl TransformerStage + 'static) -> Self {
         Self::Transformer(Box::new(transformer))
     }
@@ -519,7 +561,10 @@ impl PipelineStage {
     pub fn write(&self) -> Result<MlWriter> {
         match self {
             Self::Estimator(e) => Ok(e.write()),
-            Self::Transformer(t) => Ok(MlWriter::operator(t.operator(), t.params())),
+            Self::Transformer(t) => {
+                check_not_model(t.operator())?;
+                Ok(MlWriter::operator(t.operator(), t.params()))
+            }
             Self::Model(m) => m.write(),
         }
     }
@@ -625,6 +670,20 @@ impl Transformer for OperatorTransformer {
     }
 }
 
+/// The error of a fitted model that is held as a transformer stage (see
+/// [`PipelineStage::transformer`]): a meta-algorithm saves a model by its server-side object, which
+/// a [`PipelineStage::Model`] holds and a transformer does not.
+pub(super) fn check_not_model(operator: &MlOperator) -> Result<()> {
+    if operator.op_type == OperatorType::Model {
+        return Err(SparkError::value_msg(format!(
+            "{} is a fitted model, which a transformer stage cannot save: give it to \
+             PipelineStage::model",
+            operator.uid
+        )));
+    }
+    Ok(())
+}
+
 /// The JVM class kind of the class `class` of a stage of pyspark.ml (see `stage_kinds`).
 fn stage_kind(class: &str) -> Option<OperatorType> {
     STAGE_KINDS
@@ -703,9 +762,32 @@ pub(super) fn python_float_json(value: f64) -> String {
     } else if value == f64::NEG_INFINITY {
         "-Infinity".to_string()
     } else {
-        // As Python's `repr` of a float, the shortest that reads back the same.
-        let text = format!("{value:?}");
-        text
+        python_float_repr(value)
+    }
+}
+
+/// The text of the finite or non-finite float `value` as Python's `repr` (and `str`) writes it:
+/// the shortest digits that read back the same, in the decimal form for a decimal exponent from -4
+/// to 15, else in the exponent form with a sign and at least two digits (`1e-06`, `1e+16`).
+pub(super) fn python_float_repr(value: f64) -> String {
+    if value.is_nan() {
+        return "nan".to_string();
+    }
+    if value.is_infinite() {
+        return if value > 0.0 { "inf" } else { "-inf" }.to_string();
+    }
+    // Rust's `Debug` of a float has the same shortest digits and the same thresholds of the
+    // exponent form, but writes the exponent without its sign and its padding.
+    let text = format!("{value:?}");
+    match text.split_once('e') {
+        None => text,
+        Some((mantissa, exponent)) => {
+            let (sign, digits) = match exponent.strip_prefix('-') {
+                Some(digits) => ('-', digits),
+                None => ('+', exponent),
+            };
+            format!("{mantissa}e{sign}{digits:0>2}")
+        }
     }
 }
 
@@ -765,7 +847,7 @@ pub(super) fn ml_value_json(value: &MlValue) -> Result<String> {
         MlValue::Long(i) => i.to_string(),
         MlValue::Float(f) => python_float_json(f64::from(*f)),
         MlValue::Double(f) => python_float_json(*f),
-        MlValue::String(s) => serde_json::json!(s).to_string(),
+        MlValue::String(s) => json_string(s),
         MlValue::Array(items) => format!(
             "[{}]",
             items
@@ -782,14 +864,29 @@ pub(super) fn ml_value_json(value: &MlValue) -> Result<String> {
     })
 }
 
+/// The Python class of the class `class` of a stage's metadata, as `DefaultParamsReader` names it:
+/// a class of PySpark's Python format as it is, else the JVM class with `pyspark` for
+/// `org.apache.spark`. The pipelines of the JVM writer are `pyspark.ml.Pipeline` and
+/// `pyspark.ml.PipelineModel` there, which are the classes of `pyspark.ml.pipeline`.
+pub(super) fn python_class_of(class: &str) -> String {
+    if class.starts_with("pyspark.ml.") {
+        return class.to_string();
+    }
+    match class.replace("org.apache.spark", "pyspark").as_str() {
+        "pyspark.ml.Pipeline" => PIPELINE_CLASS.to_string(),
+        "pyspark.ml.PipelineModel" => PIPELINE_MODEL_CLASS.to_string(),
+        python => python.to_string(),
+    }
+}
+
 /// The stage saved at `path`, as `DefaultParamsReader.loadParamsInstance` reads it of the class of
-/// its metadata: a meta-algorithm of PySpark's Python format, or an estimator, a transformer or a
-/// model of the server's class (an [`OperatorEstimator`], an [`OperatorTransformer`] or an
-/// [`ObjectModel`]).
+/// its metadata: a meta-algorithm of PySpark's Python format (of the JVM writer's class names too,
+/// see [`python_class_of`]), or an estimator, a transformer or a model of the server's class (an
+/// [`OperatorEstimator`], an [`OperatorTransformer`] or an [`ObjectModel`]).
 pub fn load_stage(session: &SparkSession, path: &str) -> Result<PipelineStage> {
     let metadata = load_python_metadata(session, path)?;
     let class = metadata_str(&metadata, "class")?;
-    Ok(match class {
+    Ok(match python_class_of(class).as_str() {
         PIPELINE_CLASS => PipelineStage::estimator(Pipeline::load(session, path)?),
         PIPELINE_MODEL_CLASS => PipelineStage::Model(Box::new(PipelineModel::load(session, path)?)),
         ONE_VS_REST_CLASS => PipelineStage::estimator(OneVsRest::load(session, path)?),
@@ -806,24 +903,28 @@ pub fn load_stage(session: &SparkSession, path: &str) -> Result<PipelineStage> {
         TRAIN_VALIDATION_SPLIT_MODEL_CLASS => {
             PipelineStage::Model(Box::new(TrainValidationSplitModel::load(session, path)?))
         }
-        jvm => match stage_kind(jvm) {
+        // The typed discretizer, not an `OperatorEstimator`, so that its fit gives the Bucketizer.
+        QUANTILE_DISCRETIZER_CLASS => {
+            PipelineStage::estimator(QuantileDiscretizer::load(session, path)?)
+        }
+        _ => match stage_kind(class) {
             Some(OperatorType::Model) => {
-                let (object, operator, params) = read_model(session, jvm, path)?;
+                let (object, operator, params) = read_model(session, class, path)?;
                 PipelineStage::Model(Box::new(ObjectModel::new(object, operator, params)))
             }
             Some(OperatorType::Estimator) => {
                 let (operator, params) =
-                    read_operator(session, jvm, OperatorType::Estimator, path)?;
+                    read_operator(session, class, OperatorType::Estimator, path)?;
                 PipelineStage::estimator(OperatorEstimator::new(operator, params))
             }
             Some(OperatorType::Transformer) => {
                 let (operator, params) =
-                    read_operator(session, jvm, OperatorType::Transformer, path)?;
+                    read_operator(session, class, OperatorType::Transformer, path)?;
                 PipelineStage::transformer(OperatorTransformer::new(operator, params))
             }
             _ => {
                 return Err(SparkError::value_msg(format!(
-                    "the stage at {path} is of the class {jvm}, which is no stage that this \
+                    "the stage at {path} is of the class {class}, which is no stage that this \
                      client loads"
                 )))
             }
@@ -877,6 +978,7 @@ pub(super) const ONE_VS_REST_CLASS: &str = "pyspark.ml.classification.OneVsRest"
 pub(super) const ONE_VS_REST_MODEL_CLASS: &str = "pyspark.ml.classification.OneVsRestModel";
 pub(super) const TRAIN_VALIDATION_SPLIT_MODEL_CLASS: &str =
     "pyspark.ml.tuning.TrainValidationSplitModel";
+pub(super) const QUANTILE_DISCRETIZER_CLASS: &str = "pyspark.ml.feature.QuantileDiscretizer";
 
 /// PySpark's `Pipeline`: a sequence of stages, of estimators and transformers, which a fit fits in
 /// order (`Pipeline._fit`) into a [`PipelineModel`].
@@ -946,11 +1048,11 @@ impl Pipeline {
         for (i, stage) in self.stages.iter_mut().enumerate() {
             match (last_estimator, stage) {
                 (Some(last), PipelineStage::Estimator(estimator)) if i <= last => {
-                    let mut model = estimator.fit(&dataset)?;
+                    let mut fitted = fit_stage(estimator.as_mut(), &dataset)?;
                     if i < last {
-                        dataset = model.transform(&dataset)?;
+                        dataset = fitted.transform(&dataset)?;
                     }
-                    transformers.push(PipelineStage::Model(model));
+                    transformers.push(fitted);
                 }
                 (Some(last), stage) if i <= last => {
                     dataset = stage.transform(&dataset)?;
@@ -960,6 +1062,20 @@ impl Pipeline {
             }
         }
         Ok(PipelineModel::of_stages(transformers))
+    }
+}
+
+/// The stage that a pipeline's fit gives for the estimator `estimator`, as PySpark's `fit` does: a
+/// QuantileDiscretizer gives a Bucketizer of its own new uid (see
+/// [`QuantileDiscretizer::fit_bucketizer`]), and any other estimator its model.
+fn fit_stage(estimator: &mut dyn EstimatorStage, df: &DataFrame) -> Result<PipelineStage> {
+    let discretizer = estimator
+        .as_any_stage()
+        .and_then(|any| any.downcast_ref::<QuantileDiscretizer>())
+        .cloned();
+    match discretizer {
+        Some(mut discretizer) => Ok(PipelineStage::transformer(discretizer.fit_bucketizer(df)?)),
+        None => Ok(PipelineStage::Model(estimator.fit(df)?)),
     }
 }
 
@@ -1137,9 +1253,10 @@ impl MetaSave for StagesSave {
             .map(PipelineStage::write)
             .collect::<Result<Vec<_>>>()?;
         let uids: Vec<&str> = self.stages.iter().map(PipelineStage::uid).collect();
+        let stage_uids: Vec<String> = uids.iter().map(|uid| json_string(uid)).collect();
         let param_map = json_object(&[
-            ("stageUids", serde_json::json!(uids).to_string()),
-            ("language", serde_json::json!("Python").to_string()),
+            ("stageUids", format!("[{}]", stage_uids.join(","))),
+            ("language", json_string("Python")),
         ]);
         let metadata = Metadata::new(
             self.class,
@@ -1329,6 +1446,153 @@ mod tests {
             json_to_ml_value(&serde_json::json!(1i64 << 40)),
             MlValue::Long(1 << 40)
         );
+    }
+
+    #[test]
+    fn python_floats_are_pythons_repr_and_json_dumps() {
+        // The expected texts are Python 3.11's `repr` and `json.dumps` of the same floats.
+        let cases: [(f64, &str, &str); 11] = [
+            (1e20, "1e+20", "1e+20"),
+            (1e-6, "1e-06", "1e-06"),
+            (1e16, "1e+16", "1e+16"),
+            (1e-5, "1e-05", "1e-05"),
+            (0.1, "0.1", "0.1"),
+            (1e22, "1e+22", "1e+22"),
+            (5e-324, "5e-324", "5e-324"),
+            (
+                123456789012345678.0,
+                "1.2345678901234568e+17",
+                "1.2345678901234568e+17",
+            ),
+            (f64::NAN, "nan", "NaN"),
+            (f64::INFINITY, "inf", "Infinity"),
+            (f64::NEG_INFINITY, "-inf", "-Infinity"),
+        ];
+        for (value, repr, json) in cases {
+            assert_eq!(python_float_repr(value), repr, "repr of {value:?}");
+            assert_eq!(python_float_json(value), json, "json of {value:?}");
+        }
+        // The decimal form holds from 1e-4 up to 1e16 exclusive, and the digits are the shortest.
+        for (value, text) in [
+            (0.0001, "0.0001"),
+            (1e15, "1000000000000000.0"),
+            (9999999999999998.0, "9999999999999998.0"),
+            (1.5e16, "1.5e+16"),
+            (-0.0, "-0.0"),
+            (1.2345678e-6, "1.2345678e-06"),
+            (f64::MAX, "1.7976931348623157e+308"),
+        ] {
+            assert_eq!(python_float_repr(value), text);
+        }
+        // A value of `str` is its repr, and a value of a list is the repr of each item.
+        assert_eq!(py_str(&MlValue::Double(1e-6)), "1e-06");
+        assert_eq!(py_str(&MlValue::Double(f64::NAN)), "nan");
+        assert_eq!(py_str(&MlValue::Double(f64::NEG_INFINITY)), "-inf");
+        assert_eq!(
+            py_str(&MlValue::Array(vec![
+                MlValue::String("it's".into()),
+                MlValue::Double(1e20),
+            ])),
+            "[\"it's\", 1e+20]"
+        );
+    }
+
+    #[test]
+    fn python_strs_are_reprs_as_python_writes_them() {
+        assert_eq!(
+            python_str_repr("regularization parameter (>= 0)."),
+            "'regularization parameter (>= 0).'"
+        );
+        assert_eq!(python_str_repr("it's"), "\"it's\"");
+        assert_eq!(python_str_repr("say \"hi\""), "'say \"hi\"'");
+        assert_eq!(python_str_repr("a\nb\\c\u{1}"), "'a\\nb\\\\c\\x01'");
+    }
+
+    #[test]
+    fn string_values_are_json_with_ascii_escapes() {
+        // As `json.dumps` of the same strings, of its default `ensure_ascii`.
+        assert_eq!(
+            ml_value_json(&MlValue::String("\u{e9}\u{7f}\n".into())).unwrap(),
+            "\"\\u00e9\\u007f\\n\""
+        );
+    }
+
+    #[test]
+    fn a_jvm_class_of_a_meta_algorithm_is_read_as_its_python_class() {
+        // As `DefaultParamsReader.loadParamsInstance`: `org.apache.spark` is `pyspark`, and the
+        // pipelines of the JVM writer are of `pyspark.ml`, which exports them.
+        for (jvm, python) in [
+            ("org.apache.spark.ml.Pipeline", PIPELINE_CLASS),
+            ("org.apache.spark.ml.PipelineModel", PIPELINE_MODEL_CLASS),
+            (
+                "org.apache.spark.ml.classification.OneVsRest",
+                ONE_VS_REST_CLASS,
+            ),
+            (
+                "org.apache.spark.ml.classification.OneVsRestModel",
+                ONE_VS_REST_MODEL_CLASS,
+            ),
+            (
+                "org.apache.spark.ml.tuning.CrossValidator",
+                CROSS_VALIDATOR_CLASS,
+            ),
+            (
+                "org.apache.spark.ml.tuning.CrossValidatorModel",
+                CROSS_VALIDATOR_MODEL_CLASS,
+            ),
+            (
+                "org.apache.spark.ml.tuning.TrainValidationSplit",
+                TRAIN_VALIDATION_SPLIT_CLASS,
+            ),
+            (
+                "org.apache.spark.ml.tuning.TrainValidationSplitModel",
+                TRAIN_VALIDATION_SPLIT_MODEL_CLASS,
+            ),
+            (
+                "org.apache.spark.ml.feature.QuantileDiscretizer",
+                QUANTILE_DISCRETIZER_CLASS,
+            ),
+        ] {
+            assert_eq!(python_class_of(jvm), python, "{jvm}");
+            assert_eq!(python_class_of(python), python, "{python} is its own class");
+        }
+        // A stage of no meta-algorithm keeps its Python name, which no load reads.
+        assert_eq!(
+            python_class_of("org.apache.spark.ml.feature.VectorAssembler"),
+            "pyspark.ml.feature.VectorAssembler"
+        );
+        assert_eq!(
+            stage_kind("org.apache.spark.ml.Pipeline"),
+            None,
+            "the pipelines are read by their own readers"
+        );
+    }
+
+    #[test]
+    fn a_fitted_model_is_no_transformer_stage() {
+        // A model given as a transformer has no server-side object to save by (see
+        // `PipelineStage::model`), so a save of it fails, and so does a validator's of a pipeline
+        // that holds it.
+        let session = SparkSession::builder()
+            .remote("sc://localhost:15002")
+            .get_or_create()
+            .expect("session");
+        let model = ObjectModel::new(
+            MlRef::from_id(&session, "fitted"),
+            MlOperator::new(
+                "org.apache.spark.ml.classification.LinearSVCModel",
+                OperatorType::Model,
+            ),
+            Params::new(),
+        );
+        let stage = PipelineStage::transformer(model.clone());
+        let error = stage.write().expect_err("a model as a transformer");
+        assert!(error.to_string().contains("is a fitted model"), "{error}");
+        let as_model = PipelineStage::model(Box::new(model));
+        assert!(as_model.write().is_ok());
+        assert!(PipelineStage::transformer(VectorAssembler::new())
+            .write()
+            .is_ok());
     }
 
     #[test]

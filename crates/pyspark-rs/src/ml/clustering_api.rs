@@ -127,13 +127,32 @@ native_model! {
         "numFeatures" => (num_features, "numFeatures"),
     ];
     methods: [
-        "computeCost" => (compute_cost, "computeCost", (dataset)),
         "predict" => (predict, "predict", (value)),
     ];
     relations: [];
     relation_methods: [];
     summary: Some(bisecting_kmeans_summary);
     cached: [];
+
+    /// The sum of the squared distances of the points of `dataset` to their cluster centers, as
+    /// `BisectingKMeansModel.computeCost`: deprecated since 3.0.0, so it raises PySpark's
+    /// FutureWarning first, and then fetches the cost from the server.
+    #[pyo3(name = "computeCost")]
+    fn compute_cost(slf: &Bound<'_, Self>, dataset: Py<PyAny>) -> PyResult<Py<PyAny>> {
+        let py = slf.py();
+        py.import("warnings")?.call_method1(
+            "warn",
+            (
+                "Deprecated in 3.0.0. It will be removed in future versions. Use \
+                 ClusteringEvaluator instead. You can also get the cost on the training \
+                 dataset in the summary.",
+                py.get_type::<pyo3::exceptions::PyFutureWarning>(),
+            ),
+        )?;
+        let target = slf.try_borrow()?.core.target()?;
+        let out = object::fetch_py(py, &target, "computeCost", &[dataset.into_bound(py)])?;
+        object::fetch_output_to_py(py, out)
+    }
 
     /// The cluster centers, as `BisectingKMeansModel.clusterCenters`: the rows of the server's
     /// `clusterCenterMatrix`, as NumPy arrays.

@@ -166,6 +166,7 @@ fn a_loaded_als_pipeline_fits_and_transforms_as_pyspark_does() {
 
 /// A pipeline of QuantileDiscretizer that PySpark saved: its fitted model is a Bucketizer, which
 /// has none of the discretizer's params (numBuckets), and its transform gives PySpark's buckets.
+/// The Bucketizer is a stage of a new uid, as PySpark's fit gives it, not the discretizer's.
 #[test]
 fn a_loaded_quantile_discretizer_pipeline_fits_as_pyspark_does() {
     let Some(s) = live_session() else {
@@ -176,9 +177,75 @@ fn a_loaded_quantile_discretizer_pipeline_fits_as_pyspark_does() {
         .unwrap()
         .coalesce(1);
     let mut pipeline = Pipeline::load(&s, &fixture("qd")).unwrap();
+    let discretizer_uid = pipeline.stages()[0].uid().to_string();
     let mut model = pipeline.fit(&data).unwrap();
+    let pipeline_model = (*model)
+        .as_any()
+        .downcast_ref::<PipelineModel>()
+        .expect("a pipeline model");
+    let PipelineStage::Transformer(bucketizer) = &pipeline_model.stages()[0] else {
+        panic!("a Bucketizer is a transformer stage");
+    };
+    assert_eq!(
+        bucketizer.operator().name,
+        "org.apache.spark.ml.feature.Bucketizer"
+    );
+    assert_ne!(bucketizer.operator().uid, discretizer_uid);
     let rows = model.transform(&data).unwrap().collect().unwrap();
     assert_all_close(&column(&rows, "qx"), &EXPECTED_BUCKETS, 0.0);
+}
+
+/// A cross validator that the JVM writer saved (its class names are the JVM's, as classic PySpark
+/// or Scala write them) over a pipeline of LinearSVC: it loads, as PySpark loads it, and fits to
+/// PySpark's metrics.
+#[test]
+fn a_validator_saved_by_the_jvm_writer_with_a_pipeline_loads_as_pyspark_does() {
+    let Some(s) = live_session() else {
+        return;
+    };
+    let cv = CrossValidator::load(&s, &fixture("jvm_cv")).unwrap();
+    let pipeline = cv
+        .estimator()
+        .and_then(|e| e.as_any_stage())
+        .and_then(|any| any.downcast_ref::<Pipeline>())
+        .expect("a pipeline");
+    assert_eq!(pipeline.operator().name, "org.apache.spark.ml.Pipeline");
+    let svc_uid = pipeline.stages()[0].uid().to_string();
+    let regs: Vec<Option<&MlValue>> = cv
+        .estimator_param_maps()
+        .iter()
+        .map(|map| map.get(&svc_uid, "regParam"))
+        .collect();
+    assert_eq!(
+        regs,
+        vec![Some(&MlValue::Double(1e-5)), Some(&MlValue::Double(0.1))]
+    );
+    let mut cv = cv;
+    let model = cv.fit_validator(&training(&s)).unwrap();
+    assert_all_close(
+        model.avg_metrics(),
+        &[0.43465909090909094, 0.43465909090909094],
+        1e-12,
+    );
+}
+
+/// A cross validator whose pipeline holds one stage uid twice, as a load of PySpark's save with a
+/// duplicate uid: PySpark refuses it, with its `getUidMap` message of the pipeline's class.
+#[test]
+fn a_validator_whose_pipeline_repeats_a_uid_fails_to_load_as_pyspark_does() {
+    let Some(s) = live_session() else {
+        return;
+    };
+    let error = CrossValidator::load(&s, &fixture("dup_cv"))
+        .expect_err("a duplicate uid")
+        .to_string();
+    assert!(
+        error.contains(
+            "pyspark.ml.pipeline.Pipeline.load found a compound estimator with stages with \
+             duplicate UIDs. List of UIDs: ['Pipeline_d2597241192d', 'LinearSVC_ce605c8a54d3']."
+        ),
+        "{error}"
+    );
 }
 
 /// A pipeline of MinHashLSH that PySpark saved: its seed and number of hash tables are params of

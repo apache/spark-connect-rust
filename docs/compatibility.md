@@ -545,12 +545,17 @@ so that `[]` fits nothing and does not read the dataset. Any other value raises 
 `pyspark.ml` checks it.
 
 Native `fit`, `transform` and `evaluate` require a Spark DataFrame, matching the dataset
-contract of standard `pyspark.ml` over Spark Connect. Passing a pandas DataFrame raises
-`TypeError` before the params of the class are validated, the schema is read or any request is
-sent (the helper calls below raise PySpark's error of its serialization); only a `params` argument that is not a param map is checked before it (see above). This
-also applies to empty pandas DataFrames. The native Pipeline and validators raise the errors of
-PySpark's: a Pipeline that of its first stage, and a validator the `AttributeError` of the
-`select` of its split.
+contract of standard `pyspark.ml` over Spark Connect. Passing a pandas DataFrame raises the
+`AttributeError` of its own `sparkSession` (`'DataFrame' object has no attribute 'sparkSession'`),
+as `pyspark.ml` does, before the params of the class are validated, the schema is read or any
+request is sent (the helper calls below raise PySpark's error of their serialization). Only a
+`params` argument that is not a param map is checked before it (see above). This also applies to
+empty pandas DataFrames. The `evaluate` of a model's summary (`LogisticRegressionModel.evaluate`
+and its peers) raises the `TypeError` that `pyspark.ml` raises for a dataset that is not a
+DataFrame. The native Pipeline and validators raise the errors of PySpark's: a Pipeline that of
+its first stage, and a validator the `AttributeError` of the `select` of its split. A
+OneVsRest fits a dataset that is not a Spark DataFrame by PySpark's own `OneVsRest._fit`, so a
+pandas DataFrame raises the `KeyError` that it raises (see Native OneVsRest).
 Convert local data explicitly with `df = spark.createDataFrame(pdf)` before calling
 `estimator.fit(df)`, `model.transform(df)` or `evaluator.evaluate(df)`. Transforms return Spark
 DataFrames; call `toPandas()` explicitly when a local result is needed. The deprecated
@@ -566,8 +571,8 @@ DataFrame as PySpark does, and the server rejects it when the result is analyzed
 PySpark's serialization (`pyspark.ml.connect.serialize`)
 converts any other value to a literal, as `LiteralExpression._from_value` does:
 - One that cannot be a literal raises PySpark's error of the conversion. That includes a pandas
-  DataFrame, which raises `UNSUPPORTED_DATA_TYPE` here rather than the `TypeError` above, as with
-  `pyspark.ml`, and an empty list, which raises `CANNOT_INFER_ARRAY_ELEMENT_TYPE`.
+  DataFrame, which raises `UNSUPPORTED_DATA_TYPE` here rather than the `AttributeError` above, as
+  with `pyspark.ml`, and an empty list, which raises `CANNOT_INFER_ARRAY_ELEMENT_TYPE`.
 - A `(value, DataType)` pair is the literal of that type, as `LiteralExpression(value, dataType)`
   makes it, whose asserts raise a bare `AssertionError` of a value that is not of the type
   (`("x", IntegerType())`) and of a type that no literal has (a `MapType`, `StructType`,
@@ -878,12 +883,17 @@ Spark Connect:
   - the metadata of `pyspark.ml.pipeline.Pipeline` (or `PipelineModel`), of the `stageUids`;
   - each stage, saved by its own writer at `stages/<index>_<uid>`.
 
-  PySpark loads what this client saves, and this client loads what PySpark saves. A stage loads
-  as the native class of `pyspark.ml.connect` of its name where one loads, else as PySpark's
-  class. An overwrite deletes the path by the ML helper first, as `RemoteMLWriter` does.
+  PySpark loads what this client saves, and this client loads what PySpark saves, and a pipeline
+  or a validator that the JVM writer saved (of the `org.apache.spark.ml` class names, as Scala
+  writes them). A stage loads as the native class of `pyspark.ml.connect` of its name where one
+  loads, else as PySpark's class. An overwrite deletes the path by the ML helper first, as
+  `RemoteMLWriter` does.
 
 The vendored `pyspark.ml.Pipeline` and the validators of `pyspark.ml.tuning` fit, transform and
-save native stages, which are `MLWritable` (see "PySpark's types and class Params"). Their loads
+save native stages, which are `MLWritable` (see "PySpark's types and class Params"). A fitted model
+is a stage of `PipelineStage::model`, which a save writes by the model's server-side object: a
+`PipelineStage::transformer` of a model fails at the save, as a transformer holds no such object.
+Their loads
 (`pyspark.ml.PipelineModel.load`, `pyspark.ml.tuning.CrossValidatorModel.load`) give PySpark's
 classes of `pyspark.ml`, as they give of PySpark's own stages: `DefaultParamsReader` resolves each
 stage of its JVM class. The loads of `pyspark.ml.connect` give the native classes. The native
@@ -947,7 +957,9 @@ client:
 
 - **Stages**: a `PipelineStage` is an estimator, a transformer or a fitted model
   (`PipelineStage::estimator(LinearSVC::new())`), of any type that clones (`EstimatorStage`,
-  `TransformerStage`, `EvaluatorStage`).
+  `TransformerStage`, `EvaluatorStage`). A fitted model is given to `PipelineStage::model`, and
+  a fitted model given to `PipelineStage::transformer` fails at the save (see "Native Pipeline
+  and PipelineModel").
 - **Param maps**: a `ParamMap` holds values of params of stages, by the uid of a stage and the
   name of its param, as PySpark's `Param.parent` and `Param.name`. `ParamGridBuilder` builds
   PySpark's grids (`add_grid`, `base_on`, `build`, the last param varying fastest), and
@@ -1147,6 +1159,9 @@ request that carries it, which is not always the call that takes it. The error i
 - a `DataFrameWriter`'s or a `DataFrameWriterV2`'s format or provider, option, table property,
   partitioning, bucketing, sorting or clustering column, path or table name fails the write, such
   as `save`, `saveAsTable` or `create`;
+- a `withColumns` name, or an as-of join's `how` or `direction`, fails the DataFrame when its plan
+  is built, at its first request, such as `collect` or `columns`. A `direction` of bytes that are
+  not UTF-8 fails there with PySpark's `UnicodeDecodeError`, as protobuf's string field gives it;
 - a key or a value of `SparkSession.builder.config`, or an `appName`, fails `getOrCreate`;
 - a `DataStreamWriter`'s fails the call that takes it, as PySpark sets that writer's request as it
   goes.
@@ -1162,6 +1177,24 @@ and `pyspark.sql.connect.udtf`, which the classic names `pyspark.sql.udf.UserDef
 `pyspark.sql.udtf.UserDefinedTableFunction` also name, so `isinstance` of a UDF or UDTF it builds
 is True against either name, where PySpark 4.3.0 gives False for the classic name, whose class
 needs a SparkContext.
+
+A `copy.copy` or `copy.deepcopy` of a DataFrame requests its schema as PySpark's does, one request
+for the copy, and one more for the DataFrame in a deep copy when it has no schema yet, so a stopped
+session fails the copy with `SparkConnectException`, as PySpark's does. One difference remains:
+PySpark's `DataFrame.__getattr__` answers `getattr(df, "__deepcopy__")` by reading the columns, which
+the drop-in does not, since it defines `__deepcopy__` itself.
+
+A table name that is neither a str nor bytes, and bytes that are not UTF-8, give a DataFrame of
+`read.table`, `readStream.table` and `changes`, whose plan raises protobuf's `TypeError` or the
+decode error when it is built, as PySpark's do. A reader's format that is not a str is kept as the
+object it is, which `_format` gives back, and a copy or a pickle of the reader keeps it.
+`SparkSession.builder.remote` keeps a value that is not a str as PySpark does, and `create` rejects
+it as an invalid Spark Connect URL, as PySpark's `create` does for its `str()`. An explicit `None`,
+given as `remote(None)`, `remote(url=None)`, `remote(location=None)` or
+`config("spark.remote", None)`, is kept as None: `create` and `getOrCreate` fail PySpark's
+assertion whatever `SPARK_REMOTE` is,
+unless a session exists, which `getOrCreate` returns. A later `remote` replaces it. A `remote()`
+without an argument is `sc://localhost`, as in PySpark's Connect builder.
 
 ## Native NaiveBayes
 
@@ -1683,7 +1716,9 @@ keyword arguments. Use `rawPredictionCol` / `setRawPredictionCol` instead of the
 deprecated `probabilityCol` / `setProbabilityCol` binary-evaluator argument.
 
 Evaluation sends Spark DataFrames and their column names/types directly to Spark.
-Pandas DataFrames are rejected before serialization or RPC. Prepare double
+A pandas DataFrame raises the `AttributeError` of its own `sparkSession`, as `pyspark.ml`
+does, before serialization or RPC; a model's summary `evaluate` raises the `TypeError` of
+`pyspark.ml` instead. Prepare double
 prediction columns, vector scores, and arrays of doubles where required
 by the corresponding standard evaluator. Clustering features may be vectors or
 arrays of doubles. Evaluators no longer silently cast

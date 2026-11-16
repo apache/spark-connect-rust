@@ -238,6 +238,8 @@ fn a_dropped_model_sends_a_delete_that_the_replay_records() {
     assert_eq!(deletes.len(), 1, "the deletes of the dropped model");
     let ids: Vec<&str> = deletes[0].obj_refs.iter().map(|r| r.id.as_str()).collect();
     assert_eq!(ids, [reference.id.as_str()]);
+    // PySpark's `_delete_ml_cache` sets `evict_only`, to False for a released model.
+    assert_eq!(deletes[0].evict_only, Some(false));
     assert!(
         server.pending_requests().is_empty(),
         "a delete is a command"

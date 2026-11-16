@@ -321,6 +321,50 @@ def test_param_grid_builder_is_pysparks():
     assert native.ParamGridBuilder is tuning.ParamGridBuilder
 
 
+# PySpark's abstract base classes that the native modules have, as PySpark's modules have them
+# outside their __all__ (`from pyspark.ml.classification import Classifier`), by module, each with
+# a native class that is a subclass of it.
+_PYSPARKS_BASES = {
+    "classification": {
+        "ClassificationModel": "LogisticRegressionModel",
+        "Classifier": "LogisticRegression",
+        "ProbabilisticClassificationModel": "LogisticRegressionModel",
+        "ProbabilisticClassifier": "LogisticRegression",
+    },
+    "clustering": {"ClusteringSummary": "KMeansSummary"},
+    "evaluation": {"JavaEvaluator": "RegressionEvaluator"},
+    "regression": {"RegressionModel": "LinearRegressionModel", "Regressor": "LinearRegression"},
+}
+
+
+@pytest.mark.parametrize(
+    "module",
+    [
+        "classification",
+        "clustering",
+        "evaluation",
+        "feature",
+        "fpm",
+        "recommendation",
+        "regression",
+        "tuning",
+    ],
+)
+def test_modules_have_the_names_of_pyspark_mls_modules(module):
+    # The __all__ of a native module is PySpark's, in its order, and its abstract base classes are
+    # PySpark's own, of which the native classes are subclasses.
+    try:
+        import pyspark._pyspark  # noqa: F401
+    except ImportError:
+        pytest.skip("of this client's native classes")
+    official = importlib.import_module("pyspark.ml." + module)
+    native = importlib.import_module("pyspark.ml.connect." + module)
+    assert native.__all__ == official.__all__
+    for base, subclass in _PYSPARKS_BASES.get(module, {}).items():
+        assert getattr(native, base) is getattr(official, base)
+        assert issubclass(getattr(native, subclass), getattr(native, base)), base
+
+
 @pytest.mark.parametrize("name", list(CLASSES))
 def test_params_api_cases_are_pyspark_mls(name):
     ours = params_api_cases(name)

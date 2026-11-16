@@ -10,6 +10,7 @@ from pyspark import _pyspark
 from pyspark.ml.connect import feature
 from pyspark.sql import SparkSession
 from pyspark.sql.connect import proto as pb2
+from pyspark.sql.types import StringType
 from test_ml_offline import (
     _commands_but_deletes,
     _ml_result,
@@ -203,7 +204,7 @@ def test_feature_stages_and_fitted_models_reject_pandas_before_requests(ml_mock,
     method = stage.fit if estimator else stage.transform
     for pdf in [pd.DataFrame(), pd.DataFrame({"features": [[1., 2.]]})]:
         sent = _requests_but_deletes(service)
-        with pytest.raises(TypeError, match="requires a Spark DataFrame"):
+        with pytest.raises(AttributeError, match="object has no attribute 'sparkSession'"):
             method(pdf)
         assert _requests_but_deletes(service) == sent
     if estimator:
@@ -212,7 +213,7 @@ def test_feature_stages_and_fitted_models_reject_pandas_before_requests(ml_mock,
             _splits_payloads(service)
         model = stage.fit(spark.range(1))
         sent = _requests_but_deletes(service)
-        with pytest.raises(TypeError, match="requires a Spark DataFrame"):
+        with pytest.raises(AttributeError, match="object has no attribute 'sparkSession'"):
             model.transform(pd.DataFrame())
         assert _requests_but_deletes(service) == sent
 
@@ -299,6 +300,13 @@ def test_stop_words_remover_load_default_stop_words_fetches_the_ml_helper(ml_moc
         ],
     )
     assert feature.StopWordsRemover.loadDefaultStopWords(language="english") == ["i", "me"]
+    # A (language, StringType()) pair is the literal of its type, as PySpark's serialize sends it.
+    sent = len(service.execute_requests)
+    assert feature.StopWordsRemover.loadDefaultStopWords(("french", StringType())) == ["i", "me"]
+    (command,) = _commands_but_deletes(service, sent)
+    assert command.ml_command.fetch.methods[0].args == [
+        pb2.Fetch.Method.Args(param=pb2.Expression.Literal(string="french"))
+    ]
     assert list(inspect.signature(feature.StopWordsRemover.loadDefaultStopWords).parameters) == [
         "language"
     ]

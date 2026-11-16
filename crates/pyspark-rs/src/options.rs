@@ -248,7 +248,7 @@ pub(crate) fn option_object(object: &Bound<'_, PyAny>) -> PyResult<OptionKey> {
 }
 
 /// The error that PySpark's plan raises for a key that is not a str, which protobuf rejects.
-fn builtin_type_error() -> SparkError {
+pub(crate) fn builtin_type_error() -> SparkError {
     SparkError {
         kind: spark_connect_core::error::SparkErrorKind::BuiltinTypeError,
         ..SparkError::value_msg("bad argument type for built-in operation")

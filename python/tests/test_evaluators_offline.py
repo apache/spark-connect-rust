@@ -65,7 +65,7 @@ def test_evaluator_exports_signature_and_pandas_guard(ml_mock, name):
     assert signature_text(inspect.signature(cls)) == FIXTURE["classes"][name]["signature"]
     _, service = ml_mock
     before = _requests_but_deletes(service)
-    with pytest.raises(TypeError, match="requires a Spark DataFrame"):
+    with pytest.raises(AttributeError, match="object has no attribute 'sparkSession'"):
         cls().evaluate(pd.DataFrame({"label": [1.0], "prediction": [1.0]}))
     assert _requests_but_deletes(service) == before
     with pytest.raises(TypeError, match="forces keyword arguments"):
@@ -83,6 +83,6 @@ def test_pandas_rejection_precedes_unsendable_integer_validation(ml_mock, name, 
     _, service = ml_mock
     before = _requests_but_deletes(service)
     obj = getattr(evaluation, name)(**{param: 2**80})
-    with pytest.raises(TypeError, match="requires a Spark DataFrame"):
+    with pytest.raises(AttributeError, match="object has no attribute 'sparkSession'"):
         obj.evaluate(pd.DataFrame())
     assert _requests_but_deletes(service) == before
