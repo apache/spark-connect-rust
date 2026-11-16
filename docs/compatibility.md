@@ -266,16 +266,28 @@ evaluation, feature, fpm, recommendation, regression and tuning modules, and for
 `PipelineModel` (`Evaluator` and `ParamGridBuilder` are PySpark's own). Each class has, where its
 PySpark class has them:
 
-- **The Params API of `pyspark.ml.param.Params`**: `params`, `getParam`, `hasParam`, `isSet`,
-  `isDefined`, `hasDefault`, `getOrDefault`, `explainParam(s)`, `extractParamMap`, `set`, `clear`
-  (which does nothing over Spark Connect, as PySpark's `JavaParams.clear`) and `copy`, with
-  PySpark's errors and keywords (`getParam(paramName=...)`). The Param objects are PySpark's own
-  `pyspark.ml.param.Param`, of the docs, converters and defaults of the official class
-  (`crates/pyspark-rs/src/ml/ml_params.json`, captured from pyspark-client 4.3.0 by
-  `scripts/capture_ml_api_golden.py`), and a getter per param (`getMaxIter`). `extractParamMap()`
-  has PySpark's params and values, in the order of the names of the params, where PySpark's is in
-  the order that they were set (the defaults of a new object in the order that its constructors
-  set them).
+- **The Params API of `pyspark.ml.param.Params`, as PySpark's own code**: `params`, `getParam`,
+  `hasParam`, `isSet`, `isDefined`, `hasDefault`, `getOrDefault`, `explainParam(s)`,
+  `extractParamMap`, `set` and `copy`, the getters and setters, `setParams` and the `keyword_only`
+  constructors are PySpark's own functions, over PySpark's param maps (`_paramMap` and
+  `_defaultParamMap`) in the object's attributes. So their errors, messages and keywords are
+  PySpark's, `_set`, `_setDefault`, `_copyValues`, `_resetUid` and `_input_kwargs` behave as
+  PySpark's, values are converted by PySpark's `TypeConverters` (a NumPy string stays as given, an
+  `np.float32` raises PySpark's TypeError of `toFloat`), `extractParamMap()` is in PySpark's order
+  (the order that the params were set; the defaults of a new object in the order that its
+  constructors set them), and an assignment of `uid` keeps the Params of the old uid, as PySpark's
+  does. `clear` does nothing over Spark Connect, as PySpark's `JavaParams.clear`. The native
+  object's params are made those of the maps before each native member reads them (a fit, a
+  transform, an evaluation, a writer, a model's members), and so are those of the objects that it
+  holds (an OneVsRest's classifier, a Pipeline's stages, a validator's estimator, evaluator and the
+  values of its grids, a PipelineModel's stages, an OneVsRestModel's models, a validator model's
+  best and sub-models). A writer takes them at `write()`, where PySpark's reads them at its `save`.
+  The maps of an object that this client makes (of a fit, a load, a native copy) are made of the
+  native object's values at their first read. The native members have PySpark's docstrings and
+  signatures. The Param objects are PySpark's own `pyspark.ml.param.Param`, of the docs,
+  converters and defaults of the official class (`crates/pyspark-rs/src/ml/ml_params.json`,
+  captured from pyspark-client 4.3.0 by `scripts/capture_ml_api_golden.py`), and a getter per
+  param (`getMaxIter`).
 - **PySpark's types and class Params**: the class of `pyspark.ml.connect.<module>` is a subclass
   of its native class and of PySpark's class of the same name of `pyspark.ml.<module>`
   (`python/pyspark/ml/_native_classes.py`), so its objects are instances of every class of the MRO
@@ -478,6 +490,15 @@ at once leaves nothing cached.
 The Rust `transform` of a fitted model rejects a DataFrame of another session. In
 Python, as with PySpark, it returns a DataFrame whose analysis or execution fails
 on the server of that session with `CONNECT_ML.CACHE_INVALID`.
+
+In Python, a fit, its training summary and the members of its model (`predict`, the summary's
+DataFrames) are sent over the session of the dataset and of the model, so ML works on a session
+that is not the active one (a second session of `SparkSession.builder.remote(...).create()`).
+This is a deliberate difference from PySpark: it sends the summary of a fit and the members of a
+model (`_call_java`) over `SparkSession.getActiveSession()`, so on such a session its fits of a
+model with a summary and its models' members fail with `CONNECT_ML.CACHE_INVALID` (`Cannot
+retrieve Summary object ... from the ML cache`). A model used from a session other than its own
+fails on both.
 
 The native estimators, transformers and evaluators of `pyspark.ml.connect` take
 keyword-only constructor parameters. The evaluators follow standard
@@ -1297,6 +1318,13 @@ DecisionTreeClassifier, RandomForestClassifier, GBTClassifier, NaiveBayes,
 FMClassifier and MultilayerPerceptronClassifier. Perceptron base classifiers need
 a two-unit output layer.
 
+In Python, the classifier can be any other object, as in PySpark. A classifier that is not a
+native one, such as PySpark's own classes of `pyspark.ml.classification` or a Python subclass of
+them, is fit by PySpark's own `OneVsRest._fit` over the estimator's params. Its model is PySpark's
+`OneVsRestModel` of the classifier's own models. A None classifier is fit there too, and fails at
+its first use. So is a dataset that is not a Spark DataFrame: a pandas DataFrame raises the
+`KeyError` of PySpark's pandas aggregate of its max label.
+
 All seven PySpark constructor parameters have named setters. Rust exposes scalar
 parameter getters and the configured classifier. Fits clone the base classifier
 for each class and run at most `parallelism` fits at once. Python observes
@@ -1308,14 +1336,21 @@ perceptron (FMClassifier included). For the perceptron, Python warns
 `weightCol is ignored, as it is not supported by <uid> now.`, with the classifier's
 uid, as PySpark does, and fits without the weights.
 
-The model aggregates positive-class raw scores into `rawPrediction` and chooses
-the first highest score for `prediction`, ignoring NaN/null scores as PySpark
-does. It produces no probability column. In Python, `transform` is PySpark's
-`OneVsRestModel._transform`: it composes the transforms of the `models` with their
-own params, so the model's `featuresCol` is not read, and a `rawPredictionCol` that
-the submodels do not produce fails as PySpark's does. Temporary columns and
-fit-created caches are cleaned up, and transformed DataFrames retain the binary
-models for lazy evaluation. Models must transform data in their fitting session.
+The model aggregates the positive-class raw scores of its submodels into `rawPrediction` and
+chooses the first highest score for `prediction`, ignoring NaN/null scores as PySpark does; it
+produces no probability column. In Python, `transform` is PySpark's own
+`OneVsRestModel._transform`, and the Rust transform is a port of it, with the same DataFrame
+operations and so the same requests. Each submodel transforms the data with its own `featuresCol`
+and `rawPredictionCol`, not the model's, so a model whose `featuresCol` names no column still
+transforms, and a model `rawPredictionCol` that the submodels do not produce fails with
+`UNRESOLVED_COLUMN` when the transform is evaluated, as PySpark's does. The scores are accumulated
+in a `mbc$acc<uuid>` column. When the input is not persisted, the transform persists it at
+`MEMORY_AND_DISK` while it builds the composition and unpersists it then, as PySpark's
+`_cache_spark_dataset` does. With `SPARKML_TEMP_DFS_PATH` set, a copy of the input is written there
+and read back, and the copy is deleted before the transform returns: as in PySpark, the returned
+DataFrame then fails with `PATH_NOT_FOUND` when it is evaluated. Temporary columns and fit-created
+caches are cleaned up, and transformed DataFrames retain the binary models for lazy evaluation.
+Models must transform data in their fitting session.
 
 Rust `OneVsRest::fit` returns the typed `OneVsRestModel`. Its `models()` gives each binary
 submodel as its typed model, one `SubModel` variant per native classifier, and `classifier()`
@@ -1354,8 +1389,6 @@ differences from PySpark are these:
 - A `OneVsRest` or a `OneVsRestModel` whose classifier or submodel is not writable raises
   `ValueError` on `write`, as PySpark's `validateParams` does. A `OneVsRest` of no classifier
   raises the `KeyError` of its unset param on `write`, as PySpark's does.
-- `setClassifier` and the `classifier` keyword raise `TypeError` for an object that is not a
-  native binary classifier, when they are set; PySpark accepts any object and fails at `fit`.
 
 ## Native AFTSurvivalRegression, IsotonicRegression and FMRegressor
 

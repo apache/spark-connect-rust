@@ -1834,6 +1834,13 @@ const ONE_VS_REST_PARAMS: &[(&str, Kind)] = &[
 ];
 
 impl params_api::ParamsHolder for PyOneVsRest {
+    fn param_kind(&self, name: &str) -> Option<Kind> {
+        ONE_VS_REST_PARAMS
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, kind)| *kind)
+    }
+
     fn set_value(&self, py: Python<'_>, name: &str) -> PyResult<Option<Py<PyAny>>> {
         if let Some((_, value)) = self.raw.iter().find(|(n, _)| *n == name) {
             return Ok(Some(value.clone_ref(py)));
@@ -1976,24 +1983,32 @@ native_pymethods! {
         slf: &Bound<'_, Self>,
         dataset: &Bound<'_, PyAny>,
         params: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<Fitted<Py<classification_api::PyOneVsRestModel>>> {
+    ) -> PyResult<Fitted<Py<PyAny>>> {
         // A list of param maps fits once per map (`fit_with`), each in PySpark's order below.
         fit_with(slf, dataset, params, || -> PyResult<_> {
             let py = slf.py();
-            reject_pandas(dataset, "fit")?;
             // PySpark's `_fit` reads the classifier of the param, which raises its KeyError when
             // it is unset.
             let classifier = slf.call_method0("getClassifier")?.unbind();
-            // PySpark's `_fit` reads the max label first, by `dataset.agg`: another object raises the
-            // AttributeError of `agg`.
-            let df = match dataset.extract::<PyRef<'_, PyDataFrame>>() {
-                Ok(df) => df.dataframe.clone(),
-                Err(_) => {
-                    dataset.getattr("agg")?;
-                    return Err(PyTypeError::new_err(format!(
-                        "fit() takes a Spark DataFrame, not '{}'",
-                        dataset.get_type().name()?
-                    )));
+            // The native fit is that of a native classifier on a Spark DataFrame. PySpark's own
+            // `OneVsRest._fit` fits any other over this object's params, as PySpark does: a
+            // classifier that is not a native one (PySpark's own classes, or a Python subclass of
+            // them), whose model is PySpark's `OneVsRestModel` of the classifier's models; a None
+            // classifier, which fails at its first use there; and a dataset that is not a Spark
+            // DataFrame, such as a pandas DataFrame, which fails at the read of its max label.
+            let spark_df = dataset
+                .extract::<PyRef<'_, PyDataFrame>>()
+                .ok()
+                .map(|df| df.dataframe.clone());
+            let df = match spark_df {
+                Some(df) if is_native_classifier(classifier.bind(py)) => df,
+                _ => {
+                    return Ok(py
+                        .import("pyspark.ml.classification")?
+                        .getattr("OneVsRest")?
+                        .getattr("_fit")?
+                        .call1((slf, dataset))?
+                        .unbind());
                 }
             };
             let defaults = params_api::fit_defaults(slf)?;
@@ -2005,11 +2020,6 @@ native_pymethods! {
             // or infinite max, and a null parallelism, raise their errors of this Python.
             let builtins = py.import("builtins")?;
             let num_classes = builtins.getattr("int")?.call1((max,))?.add(1)?;
-            // A None classifier fails at its first use by the fits, as PySpark's
-            // `classifier.labelCol` does.
-            if classifier.bind(py).is_none() {
-                let _ = classifier.bind(py).getattr("labelCol")?;
-            }
             // PySpark passes the weight to the classifiers that are a `HasWeightCol`, and warns of
             // the others by the classifier's `str` (its uid), as `"...{}...".format(classifier)`.
             let supports_weight = native_classifier(classifier.bind(py), false)?.supports_weight();
@@ -2044,11 +2054,9 @@ native_pymethods! {
             // The classifier's params are serialized by its fits, which run in that pool.
             core = core.set_classifier(native_classifier(classifier.bind(py), true)?);
             core.ensure_operator();
-            // The names of the binary labels of the classes, and of the columns of the fit, which
-            // the submodels of the model are made of.
+            // The columns of the fit, which the submodels of the model are made of.
             let fit = classification_api::OneVsRestFit {
                 train: df.clone(),
-                label_prefix: Estimator::operator(&core).uid.clone(),
                 label: core.label_col().to_string(),
                 features: core.features_col().to_string(),
                 weight: core
@@ -2068,7 +2076,7 @@ native_pymethods! {
                 classifier,
             )?;
             params_api::copy_defaults(py, defaults, &mut fitted)?;
-            object::new_py(py, fitted)
+            Ok(object::new_py(py, fitted)?.into_any())
         })
     }
 
@@ -2216,6 +2224,19 @@ fn check_classifier_kwarg(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<()> {
         }
     }
     Ok(())
+}
+
+/// Whether `value` is of one of the native classification estimators that
+/// [`native_classifier`] takes, or of a subclass of one.
+fn is_native_classifier(value: &Bound<'_, PyAny>) -> bool {
+    value.is_instance_of::<PyLogisticRegression>()
+        || value.is_instance_of::<PyLinearSVC>()
+        || value.is_instance_of::<PyDecisionTreeClassifier>()
+        || value.is_instance_of::<PyRandomForestClassifier>()
+        || value.is_instance_of::<PyGBTClassifier>()
+        || value.is_instance_of::<PyNaiveBayes>()
+        || value.is_instance_of::<PyFMClassifier>()
+        || value.is_instance_of::<PyMultilayerPerceptronClassifier>()
 }
 
 // Snapshot at fit time, retaining PySpark's reference semantics for a classifier

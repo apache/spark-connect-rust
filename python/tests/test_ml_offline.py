@@ -842,6 +842,12 @@ def test_ml_connect_setters_set_the_params_of_their_receiver_as_pyspark(ml_mock)
         ) == sorted(setters)
         receiver = cls()
         for setter, name in setters.items():
+            if (cls.__name__, name) in _PYSPARKS_BROKEN_SETTERS:
+                # PySpark's setter sets a param of another name, which the class does not have.
+                with pytest.raises(AttributeError, match=f"has no attribute '{_PYSPARKS_BROKEN_SETTERS[(cls.__name__, name)]}'"):
+                    getattr(receiver, setter)(value=values[name])
+                receiver._set(**{name: values[name]})
+                continue
             # By the name of the argument of PySpark's setters, value. The evaluators' setters are
             # of this client, as PySpark's evaluators have none, with the same argument.
             assert getattr(receiver, setter)(value=values[name]) is receiver, (cls, setter)
@@ -864,6 +870,18 @@ _NO_PARAM_MAP = (
     "The native ML classes take no param map: set their params with the constructor or "
     "setParams instead."
 )
+
+
+# The setters of PySpark 4.3.0 that set a param of another name, which the class does not have
+# (`LinearRegression.setLoss` sets `lossType`), and so raise the AttributeError of its `_set`:
+# the public classes run PySpark's setters, of the same error. By the class and param, the name
+# that the setter sets.
+_PYSPARKS_BROKEN_SETTERS = {("LinearRegression", "loss"): "lossType"}
+
+
+def _parameters_of(signature):
+    """The names, kinds and defaults of the parameters of `signature`, of its annotations."""
+    return [(p.name, p.kind, repr(p.default)) for p in signature.parameters.values()]
 
 
 def _no_param_map(estimator, key):
@@ -901,8 +919,9 @@ def test_ml_connect_fpm_and_als_set_params_and_params_argument_as_pyspark(ml_moc
 
     spark, service = ml_mock
     for cls in [FPGrowth, PrefixSpan, ALS]:
-        assert str(inspect.signature(cls.setParams)) == (
-            "(self, " + str(inspect.signature(cls))[1:]
+        # Of the parameters of the constructor (PySpark's signatures, of their annotations).
+        assert _parameters_of(inspect.signature(cls.setParams))[1:] == _parameters_of(
+            inspect.signature(cls)
         ), cls
         obj = cls()
         name, value = ("maxIter", 5) if cls is ALS else ("minSupport", 0.5)
@@ -951,8 +970,8 @@ def test_ml_connect_set_params_as_pyspark(ml_mock):
                 return cls(classifier=connect.LinearSVC(), **given)
             return cls(**given)
 
-        assert str(inspect.signature(cls.setParams)) == (
-            "(self, " + str(inspect.signature(cls))[1:]
+        assert _parameters_of(inspect.signature(cls.setParams))[1:] == _parameters_of(
+            inspect.signature(cls)
         ), name
         with pytest.raises(TypeError) as error:
             make().setParams(bogus=1)
@@ -1236,8 +1255,9 @@ def test_ml_connect_fit_of_a_list_of_param_maps_as_pyspark(ml_mock):
         assert estimator.fit(pdf, []) == []
         assert estimator.fit(pdf, ()) == []
         assert _requests_but_deletes(service) == sent
-        # A map reads the dataset, which must be a Spark DataFrame, as fit(pdf) reads it.
-        with pytest.raises(TypeError):
+        # A map reads the dataset, which must be a Spark DataFrame, as fit(pdf) reads it. PySpark's
+        # own OneVsRest._fit, which fits it, raises the KeyError of its pandas aggregate instead.
+        with pytest.raises(KeyError if isinstance(estimator, connect.OneVsRest) else TypeError):
             estimator.fit(pdf, [{}])
 
 
@@ -1465,6 +1485,8 @@ def test_ml_connect_params_convert_with_the_type_converters_of_pyspark(ml_mock):
         cls = getattr(connect, name)
         for param, kind in params.items():
             setter = "set" + param[0].upper() + param[1:]
+            if (name, param) in _PYSPARKS_BROKEN_SETTERS:
+                continue
             for value, expected in _NATIVE_CONVERTED[kind]:
                 made = [getattr(cls(), setter)(value)]
                 if param != "thresholds":
@@ -1512,12 +1534,12 @@ def test_ml_connect_evaluators_take_the_signatures_and_defaults_of_pyspark(ml_mo
     import inspect
 
     import pyspark.ml.connect as connect
-    from _evaluators import FIXTURE
+    from _evaluators import FIXTURE, signature_text
 
     spark, service = ml_mock
     for name, info in FIXTURE["classes"].items():
         cls = getattr(connect, name)
-        assert str(inspect.signature(cls)) == info["signature"]
+        assert signature_text(inspect.signature(cls)) == info["signature"]
         assert _native_sent(spark, service, cls(), []) == {}
 
 
@@ -1577,6 +1599,8 @@ def test_ml_connect_unsendable_ints_none_and_uids_as_pyspark(ml_mock):
         cls = getattr(connect, name)
         for param, kind in params.items():
             setter = "set" + param[0].upper() + param[1:]
+            if (name, param) in _PYSPARKS_BROKEN_SETTERS:
+                continue
             value = _NATIVE_CONVERTED[kind][0][0]
             obj = cls()
             assert getattr(obj, setter)(value) is obj
@@ -1594,6 +1618,40 @@ def test_ml_connect_unsendable_ints_none_and_uids_as_pyspark(ml_mock):
                     assert sent[sent_name][0] == "null", (name, param)
         operator, _ = _native_request(spark, service, cls(), models)
         assert re.fullmatch(name + "_[0-9a-f]{12}", operator.uid), operator.uid
+
+
+def test_ml_connect_validators_of_a_seed_beyond_a_long_raise_value_not_between_as_pyspark(
+    ml_mock,
+):
+    # As PySpark: the seed param takes an int beyond a long, and the fit raises the
+    # VALUE_NOT_BETWEEN of `F.rand(seed)`'s literal (CrossValidator's `_kFold`, and
+    # TrainValidationSplit's `_fit`), before any request.
+    from pyspark.ml.connect.classification import LogisticRegression
+    from pyspark.ml.connect.evaluation import BinaryClassificationEvaluator
+    from pyspark.ml.connect.tuning import CrossValidator, TrainValidationSplit
+    from pyspark.ml.tuning import ParamGridBuilder
+
+    spark, service = ml_mock
+    for seed in (2**63, -(2**63) - 1, 2**64):
+        for cls, kwargs in [(CrossValidator, {"numFolds": 2}), (TrainValidationSplit, {})]:
+            lr = LogisticRegression(maxIter=1)
+            validator = cls(
+                estimator=lr,
+                estimatorParamMaps=ParamGridBuilder().addGrid(lr.regParam, [0.1]).build(),
+                evaluator=BinaryClassificationEvaluator(),
+                seed=seed,
+                **kwargs,
+            )
+            assert validator.getSeed() == seed
+            sent = _requests_but_deletes(service)
+            with pytest.raises(PySparkValueError) as error:
+                validator.fit(spark.range(1))
+            assert error.value.getCondition() == "VALUE_NOT_BETWEEN", (cls, seed)
+            assert str(error.value) == (
+                "[VALUE_NOT_BETWEEN] Value for `value` must be between -9223372036854775808 and "
+                "32767."
+            )
+            assert _requests_but_deletes(service) == sent, (cls, seed)
 
 
 def test_ml_connect_setters_run_while_a_fit_or_an_evaluate_waits_as_pyspark(ml_mock):
@@ -4088,8 +4146,8 @@ def test_one_vs_rest_signature_and_native_classifier_validation():
     assert estimator.setClassifier(LinearSVC()) is estimator
     for key, value in dict(featuresCol="x", labelCol="y", predictionCol="p", rawPredictionCol="r", weightCol="w", parallelism=2).items():
         assert getattr(estimator, "set" + key[0].upper() + key[1:])(value) is estimator
-    with pytest.raises(TypeError):
-        estimator.setClassifier(object())
+    # PySpark's classifier param takes any object (`TypeConverters.identity`).
+    assert type(OneVsRest().setClassifier(object()).getClassifier()) is object
     with pytest.raises(TypeError):
         OneVsRest(LinearSVC())
     with pytest.raises(TypeError):
@@ -4217,12 +4275,35 @@ def _assert_rejects_pandas(method, pdf):
         assert error.value.getCondition() == "UNSUPPORTED_DATA_TYPE"
         assert error.value.getMessageParameters() == {"data_type": type(pdf).__name__}
         return
+    if type(method.__self__).__name__ == "OneVsRest":
+        # The fit of a OneVsRest of no classifier is PySpark's own OneVsRest._fit's, as for any
+        # dataset that is not a Spark DataFrame: it reads the classifier first, and raises the
+        # KeyError of that unset param (test_native_one_vs_rest_fit_of_pandas_is_pysparks has
+        # a classifier).
+        with pytest.raises(KeyError) as error:
+            method(dataset=pdf)
+        assert error.value.args[0].name == "classifier"
+        return
     with pytest.raises(TypeError) as error:
         method(dataset=pdf)
     assert str(error.value) == (
         f"{method.__name__}() requires a Spark DataFrame; pandas DataFrames are not supported. "
         "Convert the input with spark.createDataFrame(...) first."
     )
+
+
+def test_native_one_vs_rest_fit_of_pandas_is_pysparks(pandas_ml_input):
+    # The native OneVsRest fits a dataset that is not a Spark DataFrame by PySpark's own
+    # OneVsRest._fit, which reads its max label by the dataset's own agg: a pandas DataFrame
+    # raises the error of that expression of PySpark's, before any request.
+    import pyspark.ml.connect as connect
+
+    with pytest.raises(Exception) as expected:
+        int(pandas_ml_input.agg({"label": "max"}).head()["max(label)"]) + 1
+    estimator = connect.OneVsRest(classifier=connect.LinearSVC())
+    with pytest.raises(type(expected.value)) as error:
+        estimator.fit(pandas_ml_input)
+    assert error.value.args == expected.value.args
 
 
 def test_stop_words_remover_load_default_stop_words_asserts_an_active_session():

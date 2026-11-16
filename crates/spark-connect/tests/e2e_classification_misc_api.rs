@@ -514,6 +514,157 @@ fn one_vs_rest_models_are_the_binary_submodels_as_pyspark() {
     }
 }
 
+/// The golden's `OneVsRest.transform` of `multi_eval`, as (label, weight, rawPrediction,
+/// prediction) rows: PySpark's own values.
+fn one_vs_rest_golden_transform(root: &Value) -> Vec<(f64, f64, Vec<f64>, f64)> {
+    member(root, "models", "OneVsRest", "transform")["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| {
+            let raw = row[3]["values"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|x| x.as_f64().unwrap())
+                .collect();
+            (
+                row[0].as_f64().unwrap(),
+                row[1].as_f64().unwrap(),
+                raw,
+                row[4].as_f64().unwrap(),
+            )
+        })
+        .collect()
+}
+
+/// The rows of the transform `df` as (label, weight, rawPrediction, prediction), of its three
+/// raw scores and its prediction.
+fn one_vs_rest_rows(df: &DataFrame) -> Vec<(f64, f64, Vec<f64>, f64)> {
+    use spark_connect::column::lit;
+    use spark_connect::functions::get;
+    let scores = Column::new(Expression::function(
+        "vector_to_array",
+        vec![
+            col("rawPrediction").expression().clone(),
+            spark_connect::column::lit_string("float64")
+                .expression()
+                .clone(),
+        ],
+    ));
+    let raw = |index: i64, name: &str| get(scores.clone(), lit(index)).alias(name);
+    let rows = df
+        .select([
+            col("label"),
+            col("weight"),
+            raw(0, "raw0"),
+            raw(1, "raw1"),
+            raw(2, "raw2"),
+            col("prediction"),
+        ])
+        .collect()
+        .unwrap();
+    rows.iter()
+        .map(|row| {
+            let value = |index: usize| row.get(index).and_then(|v| v.as_f64()).unwrap();
+            (
+                value(0),
+                value(1),
+                vec![value(2), value(3), value(4)],
+                value(5),
+            )
+        })
+        .collect()
+}
+
+/// Asserts that the rows of `actual` are PySpark's golden rows, within 1e-9 relative, matched by
+/// their label and weight.
+fn assert_one_vs_rest_golden(
+    actual: &[(f64, f64, Vec<f64>, f64)],
+    golden: &[(f64, f64, Vec<f64>, f64)],
+) {
+    assert_eq!(actual.len(), golden.len());
+    for (label, weight, raw, prediction) in golden {
+        let row = actual
+            .iter()
+            .find(|row| row.0 == *label && row.1 == *weight)
+            .unwrap_or_else(|| panic!("no row of label {label} and weight {weight}"));
+        assert_eq!(row.2.len(), raw.len());
+        for (actual, expected) in row.2.iter().zip(raw) {
+            assert!(
+                (actual - expected).abs() <= 1e-9 * expected.abs().max(1.0),
+                "{actual} is not the golden {expected}"
+            );
+        }
+        assert!(
+            (row.3 - prediction).abs() <= 1e-9 * prediction.abs().max(1.0),
+            "{} is not the golden {prediction}",
+            row.3
+        );
+    }
+}
+
+/// The OneVsRest model of the golden's fit, as `OneVsRest.fit(multi_train)` of PySpark.
+fn one_vs_rest_golden_model(s: &SparkSession, root: &Value) -> OneVsRestModel {
+    let frame = dataset(s, root, "multi_train");
+    OneVsRest::new()
+        .set_classifier(
+            LogisticRegression::new()
+                .set_max_iter(20)
+                .set_reg_param(0.01),
+        )
+        .set_weight_col("weight")
+        .fit(&frame)
+        .unwrap()
+}
+
+#[test]
+fn one_vs_rest_transform_matches_pyspark_on_the_golden_eval_rows() {
+    let Some(s) = live_session() else {
+        return;
+    };
+    let root = golden();
+    let mut model = one_vs_rest_golden_model(&s, &root);
+    let eval = dataset(&s, &root, "multi_eval");
+    let actual = one_vs_rest_rows(&model.transform(&eval).unwrap());
+    assert_one_vs_rest_golden(&actual, &one_vs_rest_golden_transform(&root));
+}
+
+#[test]
+fn one_vs_rest_transform_reads_the_features_of_its_submodels_as_pyspark() {
+    // PySpark's OneVsRestModel.setFeaturesCol("missing") transforms with the features col of each
+    // submodel, which exists, as the model's own featuresCol does not.
+    let Some(s) = live_session() else {
+        return;
+    };
+    let root = golden();
+    let mut model = one_vs_rest_golden_model(&s, &root);
+    let params = std::mem::take(model.params_mut()).set_param_string("featuresCol", "missing");
+    *model.params_mut() = params;
+    let eval = dataset(&s, &root, "multi_eval");
+    let actual = one_vs_rest_rows(&model.transform(&eval).unwrap());
+    assert_one_vs_rest_golden(&actual, &one_vs_rest_golden_transform(&root));
+}
+
+#[test]
+fn one_vs_rest_transform_of_another_raw_prediction_col_fails_as_pyspark() {
+    // The submodels write rawPrediction, which the model's rawPredictionCol "scores" does not
+    // name: PySpark's select of it fails to resolve the column, when the transform is evaluated.
+    let Some(s) = live_session() else {
+        return;
+    };
+    let root = golden();
+    let mut model = one_vs_rest_golden_model(&s, &root);
+    let params = std::mem::take(model.params_mut()).set_param_string("rawPredictionCol", "scores");
+    *model.params_mut() = params;
+    let eval = dataset(&s, &root, "multi_eval");
+    let error = match model.transform(&eval).and_then(|df| df.collect()) {
+        Err(error) => error,
+        Ok(_) => panic!("the transform of an unresolved rawPredictionCol succeeded"),
+    };
+    assert_eq!(error.error_class, "UNRESOLVED_COLUMN.WITH_SUGGESTION");
+}
+
 #[test]
 fn naive_bayes_bernoulli_rejects_features_outside_zero_one_as_pyspark() {
     let Some(s) = live_session() else {

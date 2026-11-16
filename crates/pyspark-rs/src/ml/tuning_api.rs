@@ -482,28 +482,6 @@ fn copy_values<F: Validator, T: Validator>(
     Ok(())
 }
 
-/// The names of the params of the validators, of which their own defaults are held.
-const VALIDATOR_PARAM_NAMES: &[&str] = &[
-    "collectSubModels",
-    "estimator",
-    "estimatorParamMaps",
-    "evaluator",
-    "foldCol",
-    "numFolds",
-    "parallelism",
-    "seed",
-    "trainRatio",
-];
-
-/// The `&'static str` of the name of a param of a validator.
-fn static_name(name: &str) -> PyResult<&'static str> {
-    VALIDATOR_PARAM_NAMES
-        .iter()
-        .copied()
-        .find(|n| *n == name)
-        .ok_or_else(|| PyValueError::new_err(format!("Cannot find param with name {name}.")))
-}
-
 /// The DataFrame of `dataset`, of which a validator's split reads `select`: an object without it
 /// raises its AttributeError, as the split of PySpark does (of a pandas DataFrame).
 fn split_dataframe(dataset: &Bound<'_, PyAny>) -> PyResult<DataFrame> {
@@ -517,13 +495,21 @@ fn split_dataframe(dataset: &Bound<'_, PyAny>) -> PyResult<DataFrame> {
     )))
 }
 
-/// The seed of a split, `F.rand(seed)`: the int of the param, or a random seed of None.
+/// The seed of a split, `F.rand(seed)`: the int of the param, or a random seed of None. PySpark's
+/// `F.rand` sends the seed as a literal, so an int beyond a long (which the param takes) raises the
+/// `VALUE_NOT_BETWEEN` of its literal at the fit, before any request.
 fn split_seed<T: Validator>(slf: &Bound<'_, T>) -> PyResult<Option<i64>> {
     let seed = slf.as_any().call_method1("getOrDefault", ("seed",))?;
     if seed.is_none() {
         return Ok(None);
     }
-    Ok(Some(seed.extract()?))
+    match seed.extract::<i64>() {
+        Ok(seed) => Ok(Some(seed)),
+        Err(_) if seed.is_instance_of::<pyo3::types::PyInt>() => {
+            Err(crate::functions::value_not_between(slf.py()))
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// The Python DataFrame of `df`.
@@ -1866,28 +1852,15 @@ fn get_and_set_params<T: Validator>(
         let defaults = metadata.get_item("defaultParamMap")?;
         for name in defaults.try_iter()? {
             let name = name?;
-            let param = instance.as_any().call_method1("getParam", (&name,))?;
-            let mut value = defaults.get_item(&name)?;
-            if !value.is_none() {
-                value = param
-                    .getattr("typeConverter")?
-                    .call1((&value,))
-                    .map_err(|error| {
-                        if error.is_instance_of::<PyTypeError>(py) {
-                            PyTypeError::new_err(format!(
-                                "Invalid default param value given for param \"{}\". {}",
-                                name,
-                                error.value(py)
-                            ))
-                        } else {
-                            error
-                        }
-                    })?;
-            }
-            let key = static_name(&name.extract::<String>()?)?;
+            // `getParam` first, which raises of a param that the class does not have, then
+            // PySpark's `_setDefault`, of the param's converter and its TypeError, in PySpark's
+            // `_defaultParamMap` of the object.
+            instance.as_any().call_method1("getParam", (&name,))?;
+            let value = PyDict::new(py);
+            value.set_item(&name, defaults.get_item(&name)?)?;
             instance
-                .try_borrow_mut()?
-                .put_own_default(key, value.unbind());
+                .as_any()
+                .call_method("_setDefault", (), Some(&value))?;
         }
     }
     Ok(())
