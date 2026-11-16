@@ -98,3 +98,44 @@ def test_the_streaming_query_class_is_pysparks():
     )
     assert ClassicName is StreamingQuery
     assert pickle.loads(pickle.dumps(StreamingQuery)) is StreamingQuery
+
+
+def test_the_repr_of_a_table_argument_is_pysparks(objects):
+    # Of no `__repr__` of its own, as PySpark's TableArg.
+    assert repr(objects["asTable"]).startswith(
+        "<pyspark.sql.connect.table_arg.TableArg object at 0x"
+    )
+
+
+def test_cpythons_messages_name_a_class_by_its_bare_name_as_pysparks():
+    # The C name of a class, which these messages give, is its `__name__`, as of PySpark's
+    # Python classes, not the dotted path of its module.
+    from pyspark.sql.types import IntegerType
+
+    with pytest.raises(TypeError) as raised:
+        True ^ F.col("a")
+    assert str(raised.value) == "unsupported operand type(s) for ^: 'bool' and 'Column'"
+    with pytest.raises(AttributeError) as raised:
+        IntegerType().foo
+    assert str(raised.value) == "'IntegerType' object has no attribute 'foo'"
+    # The module and the qualified name stay those of PySpark Connect, in the repr and the pickle.
+    cls = type(F.col("a"))
+    assert repr(cls) == "<class 'pyspark.sql.connect.column.Column'>"
+    assert pickle.loads(pickle.dumps(cls)) is cls
+
+
+def test_every_native_class_has_its_bare_name_as_its_c_name():
+    # `object.__new__(cls)` refuses a native class, in a message of its C name. It makes an
+    # object of a Python class of the module, such as VariantVal, whose C name is its name.
+    import pyspark._pyspark as native
+
+    checked = 0
+    for cls in vars(native).values():
+        if not isinstance(cls, type) or issubclass(cls, BaseException):
+            continue
+        try:
+            object.__new__(cls)
+        except TypeError as error:
+            assert f"{cls.__module__}.{cls.__name__}" not in str(error), str(error)
+            checked += 1
+    assert checked > 50

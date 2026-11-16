@@ -85,8 +85,4 @@ impl PyTableArg {
         }
         Ok(copy)
     }
-
-    fn __repr__(&self) -> String {
-        "TableArg(...)".to_string()
-    }
 }
