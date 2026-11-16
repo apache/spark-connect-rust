@@ -171,6 +171,18 @@ def _sync_values(value, synced):
         _sync(value, synced)
 
 
+def _native_writer(obj):
+    """The writer of the native class of `obj`, of the params of its maps (and of the objects that
+    it holds) as of now: a native writer's `save` reads them of it at the save, as PySpark's
+    `RemoteMLWriter.save` reads those of its instance."""
+    _sync(obj)
+    for cls in type(obj).__mro__:
+        member = vars(cls).get("write")
+        if type(member).__name__ == "method_descriptor":
+            return member(obj)
+    raise TypeError(f"{type(obj).__name__} has no native writer")
+
+
 def _of_pysparks(function, member, name, official):
     """`function`, the member `name` of the public class of PySpark's class `official` over the
     native member `member`, of PySpark's qualified name, and of the docstring and signature of
