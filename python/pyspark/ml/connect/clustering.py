@@ -17,20 +17,26 @@ from pyspark._pyspark import (
     PowerIterationClustering,
 )
 
+# PySpark's own abstract base classes of the native classes, so that the module has the
+# names of pyspark.ml.clustering.
+from pyspark.ml.clustering import (
+    ClusteringSummary,  # noqa: F401
+)
+
 __all__ = [
     "BisectingKMeans",
     "BisectingKMeansModel",
     "BisectingKMeansSummary",
-    "DistributedLDAModel",
-    "GaussianMixture",
-    "GaussianMixtureModel",
-    "GaussianMixtureSummary",
     "KMeans",
     "KMeansModel",
     "KMeansSummary",
+    "GaussianMixture",
+    "GaussianMixtureModel",
+    "GaussianMixtureSummary",
     "LDA",
     "LDAModel",
     "LocalLDAModel",
+    "DistributedLDAModel",
     "PowerIterationClustering",
 ]
 

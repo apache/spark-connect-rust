@@ -23,15 +23,20 @@ from pyspark._pyspark import (
     RandomForestRegressor,
 )
 
+# PySpark's own abstract base classes of the native classes, so that the module has the
+# names of pyspark.ml.regression.
+from pyspark.ml.regression import (
+    RegressionModel,  # noqa: F401
+    Regressor,  # noqa: F401
+)
+
 __all__ = [
     "AFTSurvivalRegression",
     "AFTSurvivalRegressionModel",
-    "DecisionTreeRegressionModel",
     "DecisionTreeRegressor",
-    "FMRegressionModel",
-    "FMRegressor",
-    "GBTRegressionModel",
+    "DecisionTreeRegressionModel",
     "GBTRegressor",
+    "GBTRegressionModel",
     "GeneralizedLinearRegression",
     "GeneralizedLinearRegressionModel",
     "GeneralizedLinearRegressionSummary",
@@ -42,8 +47,10 @@ __all__ = [
     "LinearRegressionModel",
     "LinearRegressionSummary",
     "LinearRegressionTrainingSummary",
-    "RandomForestRegressionModel",
     "RandomForestRegressor",
+    "RandomForestRegressionModel",
+    "FMRegressor",
+    "FMRegressionModel",
 ]
 
 # The public classes of the native classes (see pyspark.ml._native_classes).

@@ -35,23 +35,16 @@ from pyspark._pyspark import (
     RandomForestClassifier,
 )
 
+# PySpark's own abstract base classes of the native classes, so that the module has the
+# names of pyspark.ml.classification.
+from pyspark.ml.classification import (
+    ClassificationModel,  # noqa: F401
+    Classifier,  # noqa: F401
+    ProbabilisticClassificationModel,  # noqa: F401
+    ProbabilisticClassifier,  # noqa: F401
+)
+
 __all__ = [
-    "FMClassificationModel",
-    "FMClassificationSummary",
-    "FMClassificationTrainingSummary",
-    "FMClassifier",
-    "MultilayerPerceptronClassificationModel",
-    "MultilayerPerceptronClassificationSummary",
-    "MultilayerPerceptronClassificationTrainingSummary",
-    "MultilayerPerceptronClassifier",
-    "OneVsRest",
-    "OneVsRestModel",
-    "NaiveBayes",
-    "NaiveBayesModel",
-    "GBTClassifier",
-    "GBTClassificationModel",
-    "DecisionTreeClassifier",
-    "DecisionTreeClassificationModel",
     "LinearSVC",
     "LinearSVCModel",
     "LinearSVCSummary",
@@ -62,12 +55,28 @@ __all__ = [
     "LogisticRegressionTrainingSummary",
     "BinaryLogisticRegressionSummary",
     "BinaryLogisticRegressionTrainingSummary",
+    "DecisionTreeClassifier",
+    "DecisionTreeClassificationModel",
+    "GBTClassifier",
+    "GBTClassificationModel",
     "RandomForestClassifier",
     "RandomForestClassificationModel",
     "RandomForestClassificationSummary",
     "RandomForestClassificationTrainingSummary",
     "BinaryRandomForestClassificationSummary",
     "BinaryRandomForestClassificationTrainingSummary",
+    "NaiveBayes",
+    "NaiveBayesModel",
+    "MultilayerPerceptronClassifier",
+    "MultilayerPerceptronClassificationModel",
+    "MultilayerPerceptronClassificationSummary",
+    "MultilayerPerceptronClassificationTrainingSummary",
+    "OneVsRest",
+    "OneVsRestModel",
+    "FMClassifier",
+    "FMClassificationModel",
+    "FMClassificationSummary",
+    "FMClassificationTrainingSummary",
 ]
 
 # The public classes of the native classes (see pyspark.ml._native_classes).
