@@ -2,10 +2,12 @@
 //!
 //! Mirrors `pyspark.sql.connect.client.core.SparkConnectClient`.
 
+use hyper_util::rt::TokioIo;
 use std::collections::BTreeMap;
 use std::time::Duration;
+use tokio::net::TcpStream;
 use tonic::metadata::{AsciiMetadataKey, AsciiMetadataValue, MetadataMap};
-use tonic::transport::{Channel, ClientTlsConfig};
+use tonic::transport::{Certificate, Channel, ClientTlsConfig};
 use tonic::{Request, Response, Streaming};
 use uuid::Uuid;
 
@@ -27,6 +29,7 @@ use crate::artifact::{
 };
 use crate::channel::{is_secret_param, ChannelBuilder, GRPC_MAX_MESSAGE_LENGTH_DEFAULT};
 use crate::error::{Result, SparkError, SparkErrorKind};
+use crate::proxy::{HttpProxy, ProxyEnv};
 use crate::reattach::ExecutePlanResponseReattachableIterator;
 use crate::retries::{retrying, unknown_operation, Backoff, RetryError, RetryPolicy, Retrying};
 use crate::thread_entries::forget_when_thread_ends;
@@ -51,6 +54,126 @@ fn with_keepalive(
             .keep_alive_timeout(keepalive.timeout)
             .keep_alive_while_idle(keepalive.without_calls),
         None => endpoint,
+    }
+}
+
+/// Names a PEM file of root certificates to trust instead of the default ones, as in grpcio.
+const SSL_ROOTS_FILE_VAR: &str = "GRPC_DEFAULT_SSL_ROOTS_FILE_PATH";
+
+/// The PEM roots that `path`, the value of [`SSL_ROOTS_FILE_VAR`], names, as grpcio reads them:
+/// `None` (the system's roots) without a value, or with a warning for a file that cannot be read
+/// or is empty.
+fn ssl_roots_pem(path: Option<std::ffi::OsString>) -> Option<Vec<u8>> {
+    let path = path.filter(|path| !path.is_empty())?;
+    let path = std::path::Path::new(&path);
+    let reason = match std::fs::read(path) {
+        Ok(pem) if !pem.is_empty() => return Some(pem),
+        Ok(_) => "is empty".to_owned(),
+        Err(error) => format!("cannot be read ({error})"),
+    };
+    tracing::warn!(
+        "{SSL_ROOTS_FILE_VAR} names {}, which {reason}; using the system's roots",
+        path.display()
+    );
+    None
+}
+
+/// How long a connection through a proxy may take as a whole: the TCP connection to the
+/// proxy, the tunnel, and the TLS handshake inside it, as grpcio's 20 s connect deadline. It is
+/// longer than [`READY_TIMEOUT`], which bounds the tunnel alone, so that a proxy that does not
+/// answer is reported as that.
+const PROXY_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// A lazy channel to `endpoint` through an HTTP CONNECT tunnel of `proxy`. tonic negotiates
+/// TLS (for an `https` endpoint) inside the tunnel, with the endpoint's own server name.
+///
+/// Two bounds apply, and either is `UNAVAILABLE` and retried, as in grpcio. The connector
+/// bounds the TCP connection to the proxy and the tunnel by [`READY_TIMEOUT`]. tonic bounds
+/// the whole connection, the TLS handshake included, by [`PROXY_CONNECT_TIMEOUT`] from outside
+/// the connector, which [`crate::retries::grpc_python_code`] reports as `UNAVAILABLE`.
+fn connect_through_proxy(endpoint: tonic::transport::Endpoint, proxy: HttpProxy) -> Channel {
+    endpoint
+        .connect_timeout(PROXY_CONNECT_TIMEOUT)
+        .connect_with_connector_lazy(ProxyConnector(std::sync::Arc::new(proxy)))
+}
+
+/// The longest response to a CONNECT that the client reads, as hyper-util's tunnel.
+const MAX_PROXY_RESPONSE: usize = 8192;
+
+/// Connects to the server of a URI through a CONNECT tunnel of the proxy.
+#[derive(Clone)]
+struct ProxyConnector(std::sync::Arc<HttpProxy>);
+
+impl tonic::codegen::Service<tonic::codegen::http::Uri> for ProxyConnector {
+    type Response = TokioIo<TcpStream>;
+    type Error = Box<dyn std::error::Error + Send + Sync>;
+    type Future = tonic::codegen::BoxFuture<Self::Response, Self::Error>;
+
+    fn poll_ready(
+        &mut self,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::result::Result<(), Self::Error>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, uri: tonic::codegen::http::Uri) -> Self::Future {
+        let proxy = self.0.clone();
+        Box::pin(async move {
+            let host = uri.host().ok_or("the endpoint has no host")?;
+            let default_port = if uri.scheme_str() == Some("https") {
+                443
+            } else {
+                80
+            };
+            let port = uri.port_u16().unwrap_or(default_port);
+            match tokio::time::timeout(READY_TIMEOUT, open_tunnel(&proxy, host, port)).await {
+                Ok(stream) => Ok(TokioIo::new(stream?)),
+                Err(_) => Err("the proxy did not open the tunnel in time".into()),
+            }
+        })
+    }
+}
+
+/// A TCP stream to `host:port` through a CONNECT tunnel of `proxy` (RFC 9110, section 9.3.6).
+async fn open_tunnel(proxy: &HttpProxy, host: &str, port: u16) -> std::io::Result<TcpStream> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut stream = TcpStream::connect(proxy.authority.as_str()).await?;
+    // With a custom connector, tonic ignores the endpoint's TCP options: set any of them here.
+    // This is tonic's default, which the direct channel has.
+    stream.set_nodelay(true)?;
+    let mut request = format!("CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n");
+    if let Some(authorization) = &proxy.authorization {
+        request.push_str(&format!("Proxy-Authorization: {authorization}\r\n"));
+    }
+    request.push_str("\r\n");
+    stream.write_all(request.as_bytes()).await?;
+    // One byte at a time: the bytes after the response are the server's (a plaintext HTTP/2
+    // server sends its SETTINGS at once), so they must stay in the stream.
+    let mut response = Vec::new();
+    while !response.ends_with(b"\r\n\r\n") {
+        if response.len() == MAX_PROXY_RESPONSE {
+            return Err(std::io::Error::other(
+                "the response of the proxy is too long",
+            ));
+        }
+        response.push(stream.read_u8().await?);
+    }
+    // As grpcio, any 2xx opens the tunnel.
+    let status_line = response.split(|&b| b == b'\r').next().unwrap_or_default();
+    let mut parts = status_line.splitn(3, |&b| b == b' ');
+    let version = parts.next().unwrap_or_default();
+    let status = parts
+        .next()
+        .and_then(|s| std::str::from_utf8(s).ok()?.parse::<u16>().ok());
+    match status {
+        Some(200..=299) if version.starts_with(b"HTTP/1.") => Ok(stream),
+        Some(407) => Err(std::io::Error::other(
+            "the proxy requires authentication (407)",
+        )),
+        Some(status) => Err(std::io::Error::other(format!(
+            "the proxy refused the tunnel ({status})"
+        ))),
+        None => Err(std::io::Error::other("the proxy did not answer in HTTP")),
     }
 }
 
@@ -602,33 +725,33 @@ impl SparkConnectClient {
         // client can be constructed without a live server (e.g. in unit tests that only
         // build request protos).
         let endpoint = builder.endpoint();
-        let channel = if builder.secure() {
-            // TLS connection with native root certificates
-            // `with_native_roots()` is required: tonic >=0.11 does NOT load a trust store
-            // from the `tls-native-roots` feature alone, so without this the TLS handshake
-            // has no CA anchors, fails, and the retry policy masks it as a hang.
+        let scheme = if builder.secure() { "https" } else { "http" };
+        let mut tonic_endpoint = Channel::from_shared(format!("{scheme}://{endpoint}"))
+            .map_err(|e| SparkError::connect_msg(format!("Invalid endpoint: {}", e)))?;
+        if builder.secure() {
+            // TLS with the roots that grpcio would trust. Roots must be given explicitly:
+            // tonic >=0.11 does NOT load a trust store from the `tls-native-roots` feature
+            // alone, so without them the TLS handshake has no CA anchors, fails, and the retry
+            // policy masks it as a hang.
             // The server name of an IPv6 host is its address without the brackets of the URL.
             let domain = builder.host().trim_start_matches('[').trim_end_matches(']');
-            let tls_config = ClientTlsConfig::new()
-                .domain_name(domain)
-                .with_native_roots();
-
-            let tls_endpoint =
-                tonic::transport::Channel::from_shared(format!("https://{endpoint}"))
-                    .map_err(|e| SparkError::connect_msg(format!("Invalid endpoint: {}", e)))?
-                    .tls_config(tls_config)
-                    .map_err(|e| {
-                        SparkError::connect_msg(format!("Failed to configure TLS: {}", e))
-                    })?
-                    .connect_timeout(READY_TIMEOUT);
-            with_keepalive(tls_endpoint, builder).connect_lazy()
-        } else {
-            // Plaintext connection (for localhost development)
-            let plain_endpoint =
-                tonic::transport::Channel::from_shared(format!("http://{endpoint}"))
-                    .map_err(|e| SparkError::connect_msg(format!("Invalid endpoint: {}", e)))?
-                    .connect_timeout(READY_TIMEOUT);
-            with_keepalive(plain_endpoint, builder).connect_lazy()
+            let config = ClientTlsConfig::new().domain_name(domain);
+            let tls_config = match ssl_roots_pem(std::env::var_os(SSL_ROOTS_FILE_VAR)) {
+                Some(pem) => config.ca_certificate(Certificate::from_pem(pem)),
+                None => config.with_native_roots(),
+            };
+            tonic_endpoint = tonic_endpoint
+                .tls_config(tls_config)
+                .map_err(|e| SparkError::connect_msg(format!("Failed to configure TLS: {}", e)))?;
+        }
+        let tonic_endpoint = with_keepalive(tonic_endpoint, builder);
+        // Through the proxy of the environment, as grpcio's channel of PySpark is.
+        let proxy = ProxyEnv::from_process()
+            .proxy_for(builder.host())
+            .map_err(SparkError::connect_msg)?;
+        let channel = match proxy {
+            None => tonic_endpoint.connect_timeout(READY_TIMEOUT).connect_lazy(),
+            Some(proxy) => connect_through_proxy(tonic_endpoint, proxy),
         };
 
         // Raise the message-size cap from tonic's 4 MiB default (too small for real Arrow
@@ -2779,6 +2902,30 @@ impl Drop for ReattachableResponseStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ssl_roots_follow_grpc_default_ssl_roots_file_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let pem = dir.path().join("roots.pem");
+        std::fs::write(&pem, b"-----BEGIN CERTIFICATE-----\n...").unwrap();
+        let empty = dir.path().join("empty.pem");
+        std::fs::write(&empty, b"").unwrap();
+        // As grpcio: a readable file replaces the default roots.
+        assert_eq!(
+            ssl_roots_pem(Some(pem.clone().into_os_string())),
+            Some(std::fs::read(&pem).unwrap())
+        );
+        // No variable, an empty one, an empty file or one that cannot be read: the defaults.
+        for path in [
+            None,
+            Some(std::ffi::OsString::new()),
+            Some(empty.into_os_string()),
+            Some(dir.path().join("missing.pem").into_os_string()),
+            Some(dir.path().as_os_str().to_owned()),
+        ] {
+            assert_eq!(ssl_roots_pem(path), None);
+        }
+    }
 
     fn hash_with_busy_blocking_pool(blobs: Vec<Vec<u8>>) -> (bool, Vec<String>) {
         let runtime = tokio::runtime::Builder::new_current_thread()

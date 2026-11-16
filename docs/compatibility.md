@@ -1253,6 +1253,15 @@ kept as None: `create` and `getOrCreate` fail PySpark's assertion, unless a sess
 `getOrCreate` returns. A later `remote` replaces it. A `remote()` without an argument is
 `sc://localhost`, as in PySpark's Connect builder.
 
+The client honors the HTTP proxy of the environment (`grpc_proxy`, `https_proxy`, `http_proxy`,
+`no_grpc_proxy`, `no_proxy`) with grpcio's rules, see [HTTP Proxies](configuration.md#http-proxies),
+with two differences: a loopback host is never proxied, where grpcio proxies `localhost` unless
+`no_proxy` lists it, and a proxy address with an invalid host or port is an error, where grpcio
+cannot connect (and takes a port past 65535 modulo 65536).
+
+For TLS roots, including `GRPC_DEFAULT_SSL_ROOTS_FILE_PATH`, see
+[TLS Root Certificates](configuration.md#tls-root-certificates).
+
 ## Native NaiveBayes
 
 The Rust `ml::NaiveBayes` and `ml::NaiveBayesModel` train and predict through Spark
