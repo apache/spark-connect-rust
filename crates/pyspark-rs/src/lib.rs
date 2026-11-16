@@ -113,7 +113,7 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     session::register_release_refusal(m)?;
     m.add_class::<PyHook>()?;
     m.add_class::<PySparkSessionBuilder>()?;
-    // As PySpark's nested class: `<pyspark.sql.session.SparkSession.Builder object at ...>`.
+    // As PySpark Connect's nested class: `<pyspark.sql.connect.session.SparkSession.Builder ...>`.
     m.getattr("Builder")?
         .setattr("__qualname__", "SparkSession.Builder")?;
     m.add_class::<PyDataFrame>()?;

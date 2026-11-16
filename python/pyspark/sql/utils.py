@@ -17,9 +17,12 @@
 """Small subset of pyspark.sql.utils needed by the drop-in and vendored modules, and the
 exceptions that PySpark's re-exports from ``pyspark.errors``, of their import path before it."""
 
+import functools
+import inspect
+import os
 from collections.abc import Sequence
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Union
+from typing import TYPE_CHECKING, Any, Callable, Optional, TypeVar, Union, cast, overload
 
 # Re-exported, as PySpark's pyspark.sql.utils does: `from pyspark.sql.utils import
 # AnalysisException` is their import path before pyspark.errors.
@@ -40,6 +43,22 @@ from pyspark.errors.exceptions.captured import CapturedException  # noqa: F401
 
 if TYPE_CHECKING:
     from pyspark.pandas._typing import IndexOpsLike, SeriesOrIndex
+
+
+FuncT = TypeVar("FuncT", bound=Callable[..., Any])
+
+
+def to_str(value: Any) -> Optional[str]:
+    """
+    A wrapper over str(), but converts bool values to lower case strings.
+    If None is given, just returns None, instead of converting it to string "None".
+    """
+    if isinstance(value, bool):
+        return str(value).lower()
+    elif value is None:
+        return value
+    else:
+        return str(value)
 
 
 def enum_to_value(value: Any) -> Any:
@@ -134,3 +153,44 @@ class NumpyHelper:
             return [float(start)]
         step = (float(stop) - float(start)) / (num - 1)
         return [start + step * i for i in range(num)]
+
+
+def try_remote_session_classmethod(f: FuncT) -> FuncT:
+    """Mark API supported from Spark Connect, as PySpark's: a classmethod of the classic
+    ``pyspark.sql.SparkSession`` runs that of ``pyspark.sql.connect.session.SparkSession``."""
+
+    @functools.wraps(f)
+    def wrapped(*args: Any, **kwargs: Any) -> Any:
+        if is_remote() and "PYSPARK_NO_NAMESPACE_SHARE" not in os.environ:
+            from pyspark.sql.connect.session import SparkSession
+
+            assert inspect.isclass(args[0])
+            return getattr(SparkSession, f.__name__)(*args[1:], **kwargs)
+        else:
+            return f(*args, **kwargs)
+
+    return cast(FuncT, wrapped)
+
+
+@overload
+def remote_only(func: property) -> property: ...
+
+
+@overload
+def remote_only(func: FuncT) -> FuncT: ...
+
+
+def remote_only(func: Union[FuncT, property]) -> Union[FuncT, property]:
+    """
+    Decorator to mark a function or method as only available in Spark Connect.
+
+    This decorator allows for easy identification of Spark Connect-specific APIs.
+    """
+    if isinstance(func, property):
+        # If it's a property, we need to set the attribute on the getter function
+        getter_func = func.fget
+        getter_func._remote_only = True  # type: ignore[union-attr]
+        return property(getter_func)
+    else:
+        func._remote_only = True  # type: ignore[attr-defined]
+        return func

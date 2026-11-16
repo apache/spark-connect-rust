@@ -149,7 +149,7 @@ def inheritable_thread_target(f: Union[Callable, "SparkSession"]) -> Callable:
     # threads of the function inherit, with the session as their active one. As PySpark's, which
     # gives each thread the one copy of the `thread_local` of the client, the threads share that
     # copy of the tags and of the extensions.
-    from pyspark.sql import SparkSession
+    from pyspark.sql.connect.session import SparkSession
 
     session = f
 

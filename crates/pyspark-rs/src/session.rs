@@ -18,9 +18,15 @@ use crate::streaming::{PyDataStreamReader, PyStreamingQueryManager};
 
 /// Python wrapper for a Spark session builder.
 ///
-/// Mirrors `pyspark.sql.SparkSession.Builder`: each method sets its option on the builder and
-/// returns it, and `SparkSession.builder` is a new builder of each access.
-#[pyclass(name = "Builder", module = "pyspark.sql.session", from_py_object)]
+/// Mirrors PySpark Connect's `pyspark.sql.connect.session.SparkSession.Builder`: each method sets
+/// its option on the builder and returns it, and `SparkSession.builder` is a new builder of each
+/// access. `pyspark.sql.SparkSession.builder` is PySpark's classic builder, which makes the
+/// session with this one.
+#[pyclass(
+    name = "Builder",
+    module = "pyspark.sql.connect.session",
+    from_py_object
+)]
 #[derive(Clone)]
 pub struct PySparkSessionBuilder {
     /// The URL of `remote()` or of `config("spark.remote")`: None when it is not set, and
@@ -126,9 +132,10 @@ impl PySparkSessionBuilder {
     }
 
     /// Set the remote Spark Connect server URL. Returns the builder (chainable).
-    /// Mirrors `SparkSession.Builder.remote(url)` and the Connect session builder's
-    /// `remote(location="sc://localhost")`: the URL is the positional argument, or the keyword
-    /// `url` or `location`, and `sc://localhost` when there is none.
+    /// Mirrors PySpark Connect's `SparkSession.Builder.remote(location="sc://localhost")`: the
+    /// URL is the positional argument or the keyword `location`, and `sc://localhost` when there
+    /// is none. (`pyspark.sql.SparkSession.builder` is PySpark's classic builder, whose
+    /// `remote(url)` gives its URL to this builder in its options.)
     /// An explicit None is kept as None, as PySpark's `config("spark.remote", None)` keeps it:
     /// `create` and `getOrCreate` fail its assertion, unless a session exists already, and a later
     /// `remote` replaces it.
@@ -138,7 +145,7 @@ impl PySparkSessionBuilder {
     /// `getOrCreate` reject as an invalid URL, and a str that UTF-8 cannot encode fails there too.
     #[pyo3(
         signature = (*args, **kwargs),
-        text_signature = "($self, url=None, *, location=None)"
+        text_signature = "($self, location='sc://localhost')"
     )]
     fn remote<'py>(
         mut slf: PyRefMut<'py, Self>,
@@ -157,8 +164,7 @@ impl PySparkSessionBuilder {
             )));
         }
         for (key, value) in kwargs.into_iter().flat_map(|kwargs| kwargs.iter()) {
-            let name = key.extract::<String>().ok();
-            if !matches!(name.as_deref(), Some("url" | "location")) {
+            if key.extract::<String>().ok().as_deref() != Some("location") {
                 return Err(pyo3::exceptions::PyTypeError::new_err(format!(
                     "SparkSession.Builder.remote() got an unexpected keyword argument '{}'",
                     key.str()?.to_cow()?
@@ -166,19 +172,18 @@ impl PySparkSessionBuilder {
             }
             if !given.is_empty() {
                 return Err(pyo3::exceptions::PyTypeError::new_err(
-                    "remote() got multiple values for the URL: give url or location",
+                    "SparkSession.Builder.remote() got multiple values for argument 'location'",
                 ));
             }
             given.push(value);
         }
-        let py = slf.py();
         let key =
             crate::options::OptionKey::Text(crate::options::OptionText::literal("spark.remote"));
         let value = match given.first() {
             Some(location) => crate::options::reader_option_text(location)?,
             None => Some(crate::options::OptionText::literal("sc://localhost")),
         };
-        slf.put_config(py, key, value)?;
+        slf.put_config(key, value);
         Ok(slf)
     }
 
@@ -196,7 +201,6 @@ impl PySparkSessionBuilder {
         unexpected: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyRefMut<'py, Self>> {
         crate::options::check_unexpected_keywords("SparkSession.Builder.config", unexpected)?;
-        let py = slf.py();
         // PySpark keeps the options in a dict, and sends each in a `KeyValue` of the key as it
         // is, whose constructor leaves a key of None unset, the empty key.
         if let Some(k) = key {
@@ -205,7 +209,7 @@ impl PySparkSessionBuilder {
                 Some(v) => crate::options::reader_option_text(v)?,
                 None => None,
             };
-            slf.put_config(py, k, v)?;
+            slf.put_config(k, v);
         }
         if let Some(m) = map {
             for (k, v) in m.iter() {
@@ -215,7 +219,7 @@ impl PySparkSessionBuilder {
                     crate::options::option_key(&k)?
                 };
                 let vs = crate::options::reader_option_text(&v)?;
-                slf.put_config(py, ks, vs)?;
+                slf.put_config(ks, vs);
             }
         }
         if let Some(c) = conf {
@@ -224,7 +228,7 @@ impl PySparkSessionBuilder {
                 let pair = pair?;
                 let k: String = crate::str_text(&pair.get_item(0)?)?;
                 let v: String = crate::str_text(&pair.get_item(1)?)?;
-                slf.set_option(py, &k, v)?;
+                slf.set_option(&k, v);
             }
         }
         Ok(slf)
@@ -237,20 +241,17 @@ impl PySparkSessionBuilder {
         mut slf: PyRefMut<'py, Self>,
         name: &Bound<'_, PyAny>,
     ) -> PyResult<PyRefMut<'py, Self>> {
-        let py = slf.py();
         let key =
             crate::options::OptionKey::Text(crate::options::OptionText::literal("spark.app.name"));
         let value = crate::options::reader_option_text(name)?;
-        slf.put_config(py, key, value)?;
+        slf.put_config(key, value);
         Ok(slf)
     }
 
-    /// `master` - the option `spark.master`, as PySpark's builder sets: a session of Spark
-    /// Connect does not take it, and with a remote it raises
-    /// `CANNOT_CONFIGURE_SPARK_CONNECT_MASTER`.
+    /// `master` - the option `spark.master`, as PySpark Connect's builder sets: a session of
+    /// Spark Connect does not take it.
     fn master<'py>(mut slf: PyRefMut<'py, Self>, master: &str) -> PyResult<PyRefMut<'py, Self>> {
-        let py = slf.py();
-        slf.set_option(py, "spark.master", master.to_string())?;
+        slf.set_option("spark.master", master.to_string());
         Ok(slf)
     }
 
@@ -293,9 +294,8 @@ impl PySparkSessionBuilder {
     }
 
     /// Get the active session of this thread, or else the default session, or create one
-    /// (`getOrCreate`), and set the options of the builder on it. Mirrors PySpark's: the URL
-    /// is that of `remote()` or else of `SPARK_REMOTE`, and an existing session is returned
-    /// whatever its URL.
+    /// (`getOrCreate`), and set the options of the builder on it. Mirrors PySpark Connect's: the
+    /// URL is that of `remote()`, and an existing session is returned whatever its URL.
     #[pyo3(name = "getOrCreate")]
     fn get_or_create(&self, py: Python<'_>) -> PyResult<Py<PySparkSession>> {
         let (session, created) = {
@@ -349,8 +349,8 @@ impl PySparkSessionBuilder {
     }
 
     /// The connection URL of the session that the builder creates: that of the channel builder
-    /// of `channelBuilder`, or else of `remote()` or `SPARK_REMOTE`. As PySpark's `create`, it
-    /// is an error to give both a channel builder and a URL.
+    /// of `channelBuilder`, or else of `remote()`. As PySpark Connect's `create`, it is an error
+    /// to give both a channel builder and a URL, or neither.
     fn connection_url(&self, py: Python<'_>) -> PyResult<String> {
         match &self.channel_builder {
             Some(_) if self.remote_url.is_some() => Err(crate::column::raise_pyspark(
@@ -364,10 +364,11 @@ impl PySparkSessionBuilder {
         }
     }
 
-    /// Set an option, capturing `spark.remote` as the endpoint, and validate the startup URLs
-    /// after it, as PySpark's `config`.
-    fn set_option(&mut self, py: Python<'_>, key: &str, value: String) -> PyResult<()> {
-        self.set_option_value(py, key, Some(value))
+    /// Set an option, capturing `spark.remote` as the endpoint, as PySpark Connect's `config`
+    /// (the builder of `pyspark.sql.SparkSession`, PySpark's classic one, validates the startup
+    /// URLs).
+    fn set_option(&mut self, key: &str, value: String) {
+        self.set_option_value(key, Some(value))
     }
 
     /// Set the config `key` to `value`, or to None, as PySpark's `config` keeps it in its options:
@@ -375,10 +376,9 @@ impl PySparkSessionBuilder {
     /// `getOrCreate` fails with them ([`PySparkSessionBuilder::unencodable`]).
     fn put_config(
         &mut self,
-        py: Python<'_>,
         key: crate::options::OptionKey,
         value: Option<crate::options::OptionText>,
-    ) -> PyResult<()> {
+    ) {
         let name = key.core_text().and_then(|name| name.text.clone());
         let text = match &value {
             None => Some(None),
@@ -387,85 +387,39 @@ impl PySparkSessionBuilder {
         match (name, text) {
             (Some(name), Some(text)) => {
                 self.unencodable.remove(&key);
-                self.set_option_value(py, &name, text)
+                self.set_option_value(&name, text);
             }
             _ => {
                 self.unencodable
                     .set(&key, value.map(crate::options::OptionKey::Text));
-                Ok(())
             }
         }
     }
 
     /// Set an option whose value may be None, which PySpark keeps in its options: such a key is
     /// not set on the session, as `_set_all` sends it without a value.
-    fn set_option_value(
-        &mut self,
-        py: Python<'_>,
-        key: &str,
-        value: Option<String>,
-    ) -> PyResult<()> {
+    fn set_option_value(&mut self, key: &str, value: Option<String>) {
         if key == "spark.remote" {
             self.remote_url = Some(value);
         } else {
             self.configs.push((key.to_string(), value));
         }
-        self.validate_startup_urls(py)
     }
 
-    /// As PySpark's `_validate_startup_urls`: a master (`spark.master`, or else `MASTER`) with a
-    /// remote (`spark.remote`, or else `SPARK_REMOTE`) raises
-    /// `CANNOT_CONFIGURE_SPARK_CONNECT_MASTER`, and a remote other than `SPARK_REMOTE`, with
-    /// `SPARK_LOCAL_REMOTE`, raises `CANNOT_CONFIGURE_SPARK_CONNECT` unless it is a local one.
-    fn validate_startup_urls(&self, py: Python<'_>) -> PyResult<()> {
-        let master = self
-            .configs
-            .iter()
-            .rev()
-            .find(|(key, _)| key == "spark.master")
-            .and_then(|(_, value)| value.clone())
-            .or_else(|| std::env::var("MASTER").ok());
-        let remote = self
-            .remote_url
-            .clone()
-            .flatten()
-            .or_else(|| std::env::var("SPARK_REMOTE").ok());
-        if let (Some(master), Some(remote)) = (&master, &remote) {
-            return Err(crate::column::raise_pyspark(
-                py,
-                "PySparkRuntimeError",
-                "CANNOT_CONFIGURE_SPARK_CONNECT_MASTER",
-                &[("master_url", master), ("connect_url", remote)],
-            ));
-        }
-        if let (Some(remote), Ok(existing), Ok(_)) = (
-            self.remote_url.as_ref().and_then(|url| url.as_ref()),
-            std::env::var("SPARK_REMOTE"),
-            std::env::var("SPARK_LOCAL_REMOTE"),
-        ) {
-            if &existing != remote && !remote.starts_with("local") {
-                return Err(crate::column::raise_pyspark(
-                    py,
-                    "PySparkRuntimeError",
-                    "CANNOT_CONFIGURE_SPARK_CONNECT",
-                    &[("existing_url", &existing), ("new_url", remote)],
-                ));
-            }
-        }
-        Ok(())
-    }
-
-    /// The URL of the session: that of `remote()`, or else of `SPARK_REMOTE`, as PySpark's
-    /// builder of a Connect-only client, which raises `CONNECT_URL_NOT_SET` without either. A URL
-    /// that is set to None fails the assertion of PySpark's `create`, whatever `SPARK_REMOTE` is.
+    /// The URL of the session: that of `remote()`, as PySpark Connect's builder, which raises
+    /// `SESSION_NEED_CONN_STR_OR_BUILDER` without one. `SPARK_REMOTE` is read by the builder of
+    /// `pyspark.sql.SparkSession`, PySpark's classic one, which gives its URL to this builder.
+    /// A URL that is set to None fails the assertion of PySpark Connect's `create`.
     fn url(&self, py: Python<'_>) -> PyResult<String> {
         match &self.remote_url {
             Some(None) => Err(pyo3::exceptions::PyAssertionError::new_err(())),
             Some(Some(url)) => Ok(url.clone()),
-            None => match std::env::var("SPARK_REMOTE") {
-                Ok(url) => Ok(url),
-                Err(_) => Err(connect_url_not_set(py)),
-            },
+            None => Err(crate::column::raise_pyspark(
+                py,
+                "PySparkValueError",
+                "SESSION_NEED_CONN_STR_OR_BUILDER",
+                &[],
+            )),
         }
     }
 
@@ -575,18 +529,6 @@ fn with_user_id(url: &str, user: &str) -> PyResult<String> {
     } else {
         format!("{base}/;{param}")
     })
-}
-
-/// The `CONNECT_URL_NOT_SET` error of a builder without a URL: see `_ConnectUrlNotSetError`.
-fn connect_url_not_set(py: Python<'_>) -> PyErr {
-    let error = py
-        .import("pyspark.sql.connect.session")
-        .and_then(|module| module.getattr("_connect_url_not_set_error"))
-        .and_then(|make| make.call0());
-    match error {
-        Ok(error) => PyErr::from_value(error),
-        Err(error) => error,
-    }
 }
 
 /// Install on `session` the hooks that `factories` make of it, each called with the session, as
@@ -811,7 +753,7 @@ fn exit_hooked_sessions() -> &'static std::sync::Mutex<Vec<SparkSession>> {
 /// The exit hook of a session, as PySpark's SparkConnectClient keeps for its exit: it holds the
 /// core session, not the Python session object, so that the object is freed when it is dropped
 /// while the hook still sends at exit.
-#[pyclass(name = "_ExitHook", module = "pyspark.sql.session", frozen)]
+#[pyclass(name = "_ExitHook", module = "pyspark.sql.connect.session", frozen)]
 pub struct PyExitHook {
     session: SparkSession,
     release_session_on_exit: bool,
@@ -966,7 +908,11 @@ fn log_client_banner(py: Python<'_>) {
 
 /// The active session of the current thread, as PySpark's `SparkSession._active_session`, a
 /// thread-local whose `session` attribute is the session: the `ACTIVE_SESSION` of this thread.
-#[pyclass(name = "_ActiveSession", module = "pyspark.sql.session", frozen)]
+#[pyclass(
+    name = "_ActiveSession",
+    module = "pyspark.sql.connect.session",
+    frozen
+)]
 pub struct PyActiveSession;
 
 #[pymethods]
@@ -1020,7 +966,7 @@ impl PyHook {
 /// Python wrapper for a Spark session.
 /// A copy of the tags of a thread, which the threads that `_share_thread_tags` gives it share,
 /// for `pyspark.util.inheritable_thread_target`.
-#[pyclass(name = "_SharedTags", module = "pyspark.sql.session", frozen)]
+#[pyclass(name = "_SharedTags", module = "pyspark.sql.connect.session", frozen)]
 pub struct PySharedTags(spark_connect::session::SharedTags);
 
 /// A copy of the user context extensions of a thread, which the threads that
@@ -1028,7 +974,7 @@ pub struct PySharedTags(spark_connect::session::SharedTags);
 /// `pyspark.util.inheritable_thread_target`.
 #[pyclass(
     name = "_SharedUserContextExtensions",
-    module = "pyspark.sql.session",
+    module = "pyspark.sql.connect.session",
     frozen
 )]
 pub struct PySharedUserContextExtensions(spark_connect_core::client::SharedUserContextExtensions);

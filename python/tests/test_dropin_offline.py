@@ -2265,7 +2265,7 @@ def test_session_id_of_any_uuid_version_and_the_user_id_of_the_requests(monkeypa
 def test_channel_builder_uses_endpoint():
     # channelBuilder reconstructs an sc:// URL from the builder's host/port (+ params)
     # for the native transport, returning a configured Builder (no longer raises).
-    from pyspark.sql import SparkSession
+    from pyspark.sql.connect.session import SparkSession
 
     class CB:
         host = "localhost"
@@ -2654,8 +2654,8 @@ def test_session_hooks_see_deep_plans_as_pyspark(mock_connect, levels):
     # 245 levels, as PySpark's serializer does with that backend; the upb backend does not.
     pytest.importorskip("google.protobuf")
     from google.protobuf.internal import api_implementation
-    from pyspark.sql import SparkSession
     from pyspark.sql import functions as F
+    from pyspark.sql.connect.session import SparkSession
 
     _, service = mock_connect
     seen = []
@@ -2691,8 +2691,8 @@ def test_session_hooks_see_deep_plans_as_pyspark(mock_connect, levels):
 def test_a_session_hook_that_replaces_a_deep_plan_sends_the_replacement(mock_connect):
     # As PySpark's: a hook that puts in the plan of another DataFrame, which is deep, sends that
     # plan, and the request of the replaced plan is not sent.
-    from pyspark.sql import SparkSession
     from pyspark.sql import functions as F
+    from pyspark.sql.connect.session import SparkSession
 
     _, service = mock_connect
     spark_plain = SparkSession.builder.remote(service.remote).getOrCreate()
@@ -3702,6 +3702,7 @@ def test_channel_builder_parses_the_connection_string_and_the_session_honors_it_
     # endpoint and the parameters of a sc:// URL, which channelBuilder hands to the transport.
     from pyspark.errors import PySparkValueError
     from pyspark.sql.connect.client import ChannelBuilder, DefaultChannelBuilder
+    from pyspark.sql.connect.session import SparkSession
 
     builder = DefaultChannelBuilder("sc://Other:114/;token=abc;user_id=bob")
     assert isinstance(builder, ChannelBuilder)
@@ -3801,14 +3802,26 @@ def test_connect_builder_errors_as_pyspark_connect(monkeypatch):
     with pytest.raises(PySparkValueError):
         builder = ConnectSession.builder.remote("sc://b")
         builder.channelBuilder(DefaultChannelBuilder("sc://a")).create()
-    # Neither is: a ValueError as PySpark Connect's builder, and CONNECT_URL_NOT_SET as the
-    # RuntimeError of the builder of pyspark.sql, which is the same class here.
-    with pytest.raises(ValueError) as error:
-        ConnectSession.builder.create()
-    assert isinstance(error.value, RuntimeError)
+    # Neither is: PySpark Connect's ValueError, also with SPARK_REMOTE, which this builder does
+    # not read. The classic builder of pyspark.sql reads it, and raises PySpark's RuntimeError
+    # CONNECT_URL_NOT_SET without a URL.
+    for create in (ConnectSession.builder.create, ConnectSession.builder.getOrCreate):
+        with pytest.raises(PySparkValueError) as error:
+            create()
+        assert not isinstance(error.value, RuntimeError)
+        assert error.value.getCondition() == "SESSION_NEED_CONN_STR_OR_BUILDER"
+    from pyspark.errors import PySparkRuntimeError
+    from pyspark.sql import SparkSession
+
+    with pytest.raises(PySparkRuntimeError) as error:
+        SparkSession.builder.getOrCreate()
+    assert type(error.value) is PySparkRuntimeError
     assert error.value.getCondition() == "CONNECT_URL_NOT_SET"
-    # A session of a channel builder, not the URL of SPARK_REMOTE, is what PySpark connects.
     monkeypatch.setenv("SPARK_REMOTE", "sc://elsewhere:1")
+    with pytest.raises(PySparkValueError) as error:
+        ConnectSession.builder.getOrCreate()
+    assert error.value.getCondition() == "SESSION_NEED_CONN_STR_OR_BUILDER"
+    # A session of a channel builder, not the URL of SPARK_REMOTE, is what PySpark connects.
     builder = ConnectSession.builder.channelBuilder(DefaultChannelBuilder("sc://other:114"))
     session = builder.create()
     try:
@@ -4974,7 +4987,7 @@ def test_the_plan_of_a_dataframe_that_a_hook_puts_in_is_compressed_as_pyspark(mo
     # As PySpark's hook, which would put in the plan of `to_proto`, which compresses it: the plan
     # of a DataFrame that an on_execute_plan hook puts in is sent compressed over the threshold.
     pytest.importorskip("google.protobuf")
-    from pyspark.sql import SparkSession
+    from pyspark.sql.connect.session import SparkSession
 
     _, service = mock_connect
     service.confs = _plan_confs("1024")
@@ -8967,7 +8980,7 @@ def test_writer_options_and_builder_configs_fail_the_write_or_getOrCreate_as_pys
     # the first one that does not encode, or is not a str: the setter returns, and the write
     # raises, with no request sent. The builder keeps each config, and getOrCreate sends them in one
     # request after the session is created, which fails with the same error.
-    from pyspark.sql import SparkSession
+    from pyspark.sql.connect.session import SparkSession
 
     spark, service = mock_connect
     bad = "a\ud800b"
@@ -11007,11 +11020,18 @@ def test_session_builder_remote_takes_the_url_as_pyspark():
     import sys
 
     from pyspark.sql import SparkSession
+    from pyspark.sql.connect.session import SparkSession as ConnectSession
 
-    # PySpark's SparkSession.Builder.remote(url), and the Connect builder's location.
-    assert list(inspect.signature(SparkSession.builder.remote).parameters) == ["url", "location"]
-    with pytest.raises(TypeError):
-        SparkSession.builder.remote("sc://a:1", location="sc://b:2")
+    # PySpark's SparkSession.Builder.remote(url), and the Connect builder's remote(location).
+    assert list(inspect.signature(SparkSession.builder.remote).parameters) == ["url"]
+    assert list(inspect.signature(ConnectSession.builder.remote).parameters) == ["location"]
+    for remote in (
+        lambda: ConnectSession.builder.remote("sc://a:1", location="sc://b:2"),
+        lambda: ConnectSession.builder.remote(url="sc://a:1"),
+        lambda: SparkSession.builder.remote(location="sc://a:1"),
+    ):
+        with pytest.raises(TypeError):
+            remote()
     # Each keyword's URL is the server the session uses, in a new interpreter, as the
     # session becomes the active one.
     tests = os.path.dirname(os.path.abspath(__file__))
@@ -11021,6 +11041,7 @@ def test_session_builder_remote_takes_the_url_as_pyspark():
 import multiprocessing
 from _mock_connect_server import RemoteService, serve
 from pyspark.sql import SparkSession
+from pyspark.sql.connect.session import SparkSession as ConnectSession
 
 parent, child = multiprocessing.get_context("spawn").Pipe()
 process = multiprocessing.get_context("spawn").Process(target=serve, args=(child,))
@@ -11028,10 +11049,14 @@ process.start()
 try:
     assert parent.poll(20), "Mock server did not start"
     url = f"sc://127.0.0.1:{parent.recv()}"
-    for calls, keyword in enumerate(["url", "location"], start=1):
-        spark = SparkSession.builder.remote(**{keyword: url}).getOrCreate()
+    builders = [
+        lambda: SparkSession.builder.remote(url=url),
+        lambda: ConnectSession.builder.remote(location=url),
+    ]
+    for calls, builder in enumerate(builders, start=1):
+        spark = builder().getOrCreate()
         assert spark.range(3).columns == ["id"]
-        assert RemoteService(parent).calls == calls, keyword
+        assert RemoteService(parent).calls == calls, calls
         spark.stop()
 finally:
     parent.send(("stop",))
@@ -11556,6 +11581,7 @@ def test_sessions_and_dataframes_pickle_of_the_active_session_as_pyspark(mock_co
 
     from pyspark.errors import PySparkAssertionError, PySparkRuntimeError
     from pyspark.serializers import CloudPickleSerializer
+    from pyspark.sql.connect.session import SparkSession
 
     spark, _ = mock_connect
     serializer = CloudPickleSerializer()
@@ -11868,8 +11894,11 @@ def test_connect_import_path_modules_as_pyspark(mock_connect):
     assert importlib.import_module("pyspark.sql.connect.functions").partitioning is (
         connect_partitioning
     )
+    # Of the modules of PySpark Connect, not the functions of pyspark.sql.functions, as PySpark's.
     for name in ["years", "months", "days", "hours", "bucket"]:
-        assert getattr(connect_partitioning, name) is getattr(partitioning, name)
+        function = getattr(connect_partitioning, name)
+        assert function is not getattr(partitioning, name)
+        assert function.__module__ == "pyspark.sql.connect.functions.partitioning"
     connect_avro = importlib.import_module("pyspark.sql.connect.avro.functions")
     assert connect_avro.from_avro is avro.from_avro and connect_avro.to_avro is avro.to_avro
     connect_protobuf = importlib.import_module("pyspark.sql.connect.protobuf.functions")
@@ -11901,7 +11930,8 @@ def test_connect_import_path_modules_as_pyspark(mock_connect):
         "uuid",
     ]:
         assert getattr(F.builtin, name) is getattr(F, name), name
-        assert getattr(connect_builtin, name) is getattr(F, name), name
+        assert getattr(connect_builtin, name) is not getattr(F, name), name
+        assert getattr(connect_builtin, name).__module__ == connect_builtin.__name__, name
 
     # The registration of a data source registers it with the session.
     from pyspark.sql.connect.datasource import DataSourceRegistration
@@ -12143,8 +12173,8 @@ import inspect  # noqa: E402
 import pyspark  # noqa: E402
 from pyspark.sql import Column as _Col
 from pyspark.sql import DataFrame as _DF
-from pyspark.sql import SparkSession as _SS  # noqa: E402
 from pyspark.sql.connect.dataframe import DataFrame as _ConnectDF  # noqa: E402
+from pyspark.sql.connect.session import SparkSession as _SS  # noqa: E402
 
 
 def test_dropin_version_is_spark_version():
@@ -27389,7 +27419,7 @@ def test_a_builder_remote_set_to_none_fails_create_as_pyspark(mock_connect, monk
     # As PySpark's Connect builder: `remote(None)`, and a config of spark.remote of None, keep the
     # URL as None, which `create` asserts whatever SPARK_REMOTE is. `getOrCreate` returns the
     # session that exists, as PySpark's does, and a later `remote` replaces the None.
-    from pyspark.sql import SparkSession
+    from pyspark.sql.connect.session import SparkSession
 
     spark, service = mock_connect
     monkeypatch.setenv("SPARK_REMOTE", service.remote)
@@ -27407,10 +27437,7 @@ def test_a_builder_remote_set_to_none_fails_create_as_pyspark(mock_connect, monk
         assert replaced is not spark
     finally:
         replaced.stop()
-    # The keyword `url` is the positional URL, so None by it fails the same way, and a remote
-    # without an argument is the default URL.
-    with pytest.raises(AssertionError):
-        SparkSession.builder.remote(url=None).create()
+    # A remote without an argument is the default URL.
     assert "sc://localhost" in repr(SparkSession.builder.remote().__reduce__())
 
 
@@ -27665,6 +27692,7 @@ def test_worker_reconstructors_replay_every_setting_as_pyspark(mock_connect, mon
     import cloudpickle
     import pyspark
     from pyspark.sql import Column
+    from pyspark.sql.connect.session import SparkSession
 
     def comparable(value):
         # The state, without the DataFrame or session that it starts with, and with each Column
@@ -27729,8 +27757,13 @@ def test_session_builders_copy_and_pickle_as_pyspark(mock_connect):
     import copy
 
     import cloudpickle
-    from pyspark.sql import SparkSession
+    from pyspark.sql import SparkSession as ClassicSession
+    from pyspark.sql.connect.session import SparkSession
 
+    classic = ClassicSession.builder.remote("sc://localhost:15013").config("k", "v")
+    for copied in (copy.copy(classic), pickle.loads(pickle.dumps(classic))):
+        assert type(copied) is type(classic)
+        assert copied._options == {"spark.remote": "sc://localhost:15013", "k": "v"}
     builder = SparkSession.builder.remote("sc://localhost:15013").config("k", "v")
     copied = copy.copy(builder)
     assert type(copied) is type(builder)
