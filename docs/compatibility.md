@@ -1064,6 +1064,14 @@ unpickles it, as CPython's `copyreg._reconstructor` cannot create the drop-in's 
 class with a native base; protocols 2 and up, pickle's default, load in both clients, and PySpark
 loads the drop-in's at every protocol.
 
+At interpreter exit, a session that is not stopped has its ML cache cleaned by one
+`clean_cache` request, as PySpark's client does. Its errors are ignored, but when the server
+is gone the exit waits on that request's retries, as PySpark's does, so the exit can take as
+long as those retries. A stopped session sends nothing at exit.
+`SPARK_CONNECT_RELEASE_SESSION_ON_EXIT` is read when a session is made, as PySpark reads it:
+when it is `true` or `1`, the session is then also released and closed at exit, after the
+cleanup.
+
 The `TypeError` for too many positional arguments counts them without `self`: where CPython says
 "takes from 2 to 4 positional arguments but 5 were given", the drop-in says "takes from 1 to 3
 positional arguments but 4 were given". A method that takes no arguments gets "takes no arguments

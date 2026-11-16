@@ -10,3 +10,14 @@ import signal
 # signal that a handler catches.
 if signal.getsignal(signal.SIGINT) == signal.SIG_IGN:
     signal.signal(signal.SIGINT, signal.default_int_handler)
+
+
+def pytest_sessionfinish(session, exitstatus):
+    # The exit of this process sends the ML cache clean of each session that is not stopped, and
+    # waits on its retries when the server is gone, as PySpark's exit does. The tests leave
+    # sessions open to servers that are stopped or never listened, some of them freed. Closing
+    # them here, without a release, makes their exit hooks return at once, as PySpark's skip of a
+    # closed client does; the product's exit is unchanged for a live session.
+    from pyspark._pyspark import _close_sessions_at_exit
+
+    _close_sessions_at_exit()
