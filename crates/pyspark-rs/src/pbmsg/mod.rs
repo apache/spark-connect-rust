@@ -71,7 +71,10 @@ fn _proto_enum_descriptor(
 /// The descriptor of the file `name`, such as `spark/connect/base.proto`, the `DESCRIPTOR` of its
 /// module.
 #[pyfunction]
-fn _proto_file_descriptor(py: Python<'_>, name: &str) -> PyResult<Py<descriptors::PyFileDescriptor>> {
+fn _proto_file_descriptor(
+    py: Python<'_>,
+    name: &str,
+) -> PyResult<Py<descriptors::PyFileDescriptor>> {
     descriptors::file_descriptor_object(py, name)
 }
 
