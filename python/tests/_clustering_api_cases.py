@@ -74,7 +74,7 @@ def _bisecting_kmeans_cases(rec, spark, base, found):
     est = estimator(k=3, seed=5)
     model = est.fit(df)
     model_cases(rec, est, model, df)
-    rec("clusterCenters", lambda: sorted([round(x, 9) for x in c] for c in model.clusterCenters()))
+    rec("clusterCenters", lambda: sorted(c.tolist() for c in model.clusterCenters()))
     rec("clusterCenters_type", lambda: type(model.clusterCenters()[0]).__name__)
     rec("computeCost", lambda: model.computeCost(df))
     rec("computeCost_future_warnings", lambda: _future_warnings(lambda: model.computeCost(df)))
