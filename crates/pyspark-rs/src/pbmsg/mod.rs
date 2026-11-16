@@ -68,6 +68,13 @@ fn _proto_enum_descriptor(
     descriptors::enum_descriptor_object(py, full_name)
 }
 
+/// The descriptor of the file `name`, such as `spark/connect/base.proto`, the `DESCRIPTOR` of its
+/// module.
+#[pyfunction]
+fn _proto_file_descriptor(py: Python<'_>, name: &str) -> PyResult<Py<descriptors::PyFileDescriptor>> {
+    descriptors::file_descriptor_object(py, name)
+}
+
 /// The text format of `message`, as protobuf's `text_format.MessageToString` writes it.
 #[pyfunction]
 #[pyo3(signature = (message, as_one_line=false))]
@@ -121,6 +128,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(_proto_files, m)?)?;
     m.add_function(wrap_pyfunction!(_proto_message_descriptor, m)?)?;
     m.add_function(wrap_pyfunction!(_proto_enum_descriptor, m)?)?;
+    m.add_function(wrap_pyfunction!(_proto_file_descriptor, m)?)?;
     m.add_function(wrap_pyfunction!(message::_proto_register_classes, m)?)?;
     m.add_function(wrap_pyfunction!(_proto_message_to_string, m)?)?;
     Ok(())

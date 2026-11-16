@@ -26,7 +26,7 @@ its nested messages and its enums, with their values, as the generated modules g
 import collections.abc
 import sys
 import types
-from collections.abc import Generator, Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from typing import Any as _Any
 from typing import Optional
@@ -49,11 +49,16 @@ __all__ = ["Message", "DecodeError", "EnumTypeWrapper", "install", "add_pipeline
 
 class EnumTypeWrapper:
     """An enum of a proto, as protobuf's ``EnumTypeWrapper``: ``Name`` and ``Value`` of its values,
-    and each value as an attribute."""
+    their ``keys``, ``values`` and ``items``, and each value as an attribute, with protobuf's
+    errors."""
 
-    def __init__(self, descriptor: _Any) -> None:
-        self.DESCRIPTOR = descriptor
-        self._values: list[tuple[str, int]] = [(v.name, v.number) for v in descriptor.values]
+    DESCRIPTOR = None
+    ValueType = int
+
+    def __init__(self, enum_type: _Any) -> None:
+        self._enum_type = enum_type
+        self.DESCRIPTOR = enum_type
+        self._values: list[tuple[str, int]] = [(v.name, v.number) for v in enum_type.values]
         self._by_name = dict(self._values)
         self._by_number: dict[int, str] = {}
         for name, number in self._values:
@@ -63,17 +68,20 @@ class EnumTypeWrapper:
         try:
             return self._by_number[number]
         except KeyError:
-            raise ValueError(
-                f"Enum {self.DESCRIPTOR.name} has no name defined for value {number!r}"
-            ) from None
+            pass
+        if not isinstance(number, int):
+            raise TypeError(
+                f"Enum value for {self._enum_type.name} must be an int, but got "
+                f"{type(number)} {number!r}."
+            )
+        raise ValueError(f"Enum {self._enum_type.name} has no name defined for value {number!r}")
 
     def Value(self, name: str) -> int:
         try:
             return self._by_name[name]
         except KeyError:
-            raise ValueError(
-                f"Enum {self.DESCRIPTOR.name} has no value defined for name {name!r}"
-            ) from None
+            pass
+        raise ValueError(f"Enum {self._enum_type.name} has no value defined for name {name!r}")
 
     def keys(self) -> list[str]:
         return [name for name, _ in self._values]
@@ -84,19 +92,17 @@ class EnumTypeWrapper:
     def items(self) -> list[tuple[str, int]]:
         return list(self._values)
 
-    def __iter__(self) -> Iterator[str]:
-        return iter(self.keys())
-
     def __getattr__(self, name: str) -> int:
         try:
             return self.__dict__["_by_name"][name]
         except KeyError:
-            raise AttributeError(
-                f"Enum {self.DESCRIPTOR.name} has no value named {name!r}"
-            ) from None
+            pass
+        raise AttributeError(
+            f"Enum {self.__dict__['_enum_type'].name} has no value defined for name {name!r}"
+        )
 
-    def __repr__(self) -> str:
-        return f"<EnumTypeWrapper {self.DESCRIPTOR.full_name}>"
+    def __or__(self, other: _Any) -> _Any:
+        return type(self) | other
 
 
 # The class of each message, by the full name of the message.
@@ -144,6 +150,7 @@ def _build() -> dict[str, types.ModuleType]:
         module_name = _module_name(file_name, package)
         module = types.ModuleType(module_name)
         module.__doc__ = f"The messages of {file_name}, of the drop-in's Rust protobuf runtime."
+        module.DESCRIPTOR = _pyspark._proto_file_descriptor(file_name)
         for full_name in messages:
             name = full_name.rsplit(".", 1)[-1]
             setattr(module, name, _make_class(full_name, name, module_name))
@@ -164,18 +171,23 @@ Any = _CLASSES["google.protobuf.Any"]
 Timestamp = _CLASSES["google.protobuf.Timestamp"]
 
 
+# The generated modules that ``pyspark.sql.connect.proto`` star-imports, in its order.
+_EXPORTED = ("base", "types", "commands", "expressions", "relations", "catalog", "common", "ml",
+             "ml_common", "pipelines")  # fmt: skip
+
+
 def install(package: dict[str, _Any]) -> None:
     """Export the messages of Spark Connect into ``package``, the globals of
-    ``pyspark.sql.connect.proto``, as its ``from ..._pb2 import *`` does, and make each generated
-    module (``pyspark.sql.connect.proto.base_pb2``, ...) the one of this runtime."""
+    ``pyspark.sql.connect.proto``, as its ``from ..._pb2 import *`` of the generated modules does
+    (so its ``DESCRIPTOR`` is that of the last, ``pipelines_pb2``), and make each generated module
+    (``pyspark.sql.connect.proto.base_pb2``, ...) the one of this runtime."""
+    prefix = "pyspark.sql.connect.proto."
     for module_name, module in _MODULES.items():
-        if not module_name.startswith("pyspark.sql.connect.proto.") or module_name.startswith(
-            __name__ + "."
-        ):
-            continue
-        sys.modules[module_name] = module
-        package[module_name.rsplit(".", 1)[-1]] = module
-        for name, value in vars(module).items():
+        if module_name.startswith(prefix) and not module_name.startswith(__name__ + "."):
+            sys.modules[module_name] = module
+            package[module_name[len(prefix) :]] = module
+    for stem in _EXPORTED:
+        for name, value in vars(_MODULES[f"{prefix}{stem}_pb2"]).items():
             if not name.startswith("_"):
                 package[name] = value
 

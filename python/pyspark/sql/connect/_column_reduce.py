@@ -33,8 +33,10 @@ def parse_deep(message_class: Any, data: bytes) -> Any:
     filled field by field, from a work list in place of recursion: each message field is parsed
     on its own, and one that the parser refuses is filled in turn, so that the parser never
     nests past its limit. Where ``FromString`` succeeds, this gives the same message."""
-    # Only a Python worker of the server, whose PySpark has protobuf, parses here; the client
-    # of the drop-in rebuilds a Column or DataFrame in Rust, so it needs no protobuf.
+    if _is_of_the_rust_runtime(message_class):
+        # The Rust protobuf runtime of the drop-in parses a message of any depth, and needs no
+        # protobuf.
+        return message_class.FromString(data)
     from google.protobuf.descriptor import FieldDescriptor
     from google.protobuf.message import DecodeError
 
@@ -115,6 +117,17 @@ def _varint(data: bytes, pos: int) -> tuple[int, int]:
         if not byte & 0x80:
             return result, pos
         shift += 7
+
+
+def _is_of_the_rust_runtime(message_class: Any) -> bool:
+    """Whether ``message_class`` is a message of the drop-in's Rust protobuf runtime, which a
+    Python worker of the server (of PySpark's own package, which has no ``pyspark._pyspark``)
+    never has."""
+    try:
+        from pyspark import _pyspark
+    except ImportError:
+        return False
+    return isinstance(message_class, type) and issubclass(message_class, _pyspark.ProtoMessage)
 
 
 def _is_repeated(field: Any) -> bool:

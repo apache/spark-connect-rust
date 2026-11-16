@@ -805,3 +805,85 @@ def test_messages_work_without_protobuf():
                 context.SerializeToString(deterministic=True).hex(),
             ]
             assert out["str"] == [str(relation), str(context)]
+
+
+def test_enums_of_the_classes_and_modules_are_upbs(upb):
+    # The enum wrappers of the classes, as protobuf's EnumTypeWrapper, of their errors too.
+    real_operator, mine_operator = upb("spark.connect.MlOperator"), ours("spark.connect.MlOperator")
+    for real, mine in [
+        (real_operator.OperatorType, mine_operator.OperatorType),
+        (upb("spark.connect.Join").JoinType, ours("spark.connect.Join").JoinType),
+    ]:
+        assert mine.keys() == real.keys() and mine.values() == real.values()
+        assert mine.items() == real.items() and mine.ValueType is real.ValueType
+        name = real.keys()[1]
+        assert mine.Name(real.Value(name)) == name and mine.Value(name) == real.Value(name)
+        assert getattr(mine, name) == getattr(real, name)
+        assert mine.DESCRIPTOR.full_name == real.DESCRIPTOR.full_name
+        for fn in (
+            lambda e: e.Name(12345),
+            lambda e: e.Name("x"),
+            lambda e: e.Name([]),
+            lambda e: e.Value("NOPE"),
+            lambda e: e.NOPE,
+            list,
+            lambda e: e | None,
+        ):
+            outcome, expected = _outcome(lambda: fn(mine)), _outcome(lambda: fn(real))
+            assert outcome[:2] == expected[:2]
+            if outcome[0] == "raise" and expected[1] != "TypeError":
+                assert outcome[2] == expected[2]
+    assert mine_operator.OPERATOR_TYPE_MODEL == real_operator.OPERATOR_TYPE_MODEL
+
+
+def test_install_exports_the_messages_and_modules_of_the_runtime(upb):
+    # install(): the package's names and its generated modules become the runtime's, as the
+    # package's star imports of the generated modules give protobuf's.
+    names = {}
+    saved = {k: v for k, v in sys.modules.items() if k.startswith("pyspark.sql.connect.proto.")}
+    try:
+        _rust.install(names)
+        assert sys.modules["pyspark.sql.connect.proto.base_pb2"].Plan is ours("spark.connect.Plan")
+    finally:
+        sys.modules.update(saved)
+    assert names["Relation"] is ours("spark.connect.Relation")
+    assert names["relations_pb2"].Relation is names["Relation"]
+    real_names = {n for n in dir(proto) if not n.startswith("_") and n[0].isupper()}
+    assert real_names <= set(names), sorted(real_names - set(names))[:5]
+    assert not any(n.startswith("_rust") for n in names)
+
+
+def test_pipeline_analysis_context_of_the_runtime_is_the_vendored_ones(upb):
+    # The context manager of the runtime adds the user context extension that the vendored one
+    # adds with protobuf's Any, and removes it, also when its body raises.
+    from pyspark.pipelines.add_pipeline_analysis_context import (
+        add_pipeline_analysis_context as vendored,
+    )
+
+    class Client:
+        def __init__(self):
+            self.added, self.removed = [], []
+
+        def add_threadlocal_user_context_extension(self, extension):
+            self.added.append(extension.SerializeToString())
+            return f"id{len(self.added)}"
+
+        def remove_user_context_extension(self, extension_id):
+            self.removed.append(extension_id)
+
+    class Spark:
+        def __init__(self):
+            self.client = Client()
+
+    for flow_name in ("flow", None):
+        mine, real = Spark(), Spark()
+        with _rust.add_pipeline_analysis_context(mine, "graph", flow_name):
+            pass
+        with vendored(real, "graph", flow_name):
+            pass
+        assert (mine.client.added, mine.client.removed) == (real.client.added, real.client.removed)
+    failing = Spark()
+    with pytest.raises(KeyError):
+        with _rust.add_pipeline_analysis_context(failing, "graph", "flow"):
+            raise KeyError("body")
+    assert failing.client.removed == ["id1"]
